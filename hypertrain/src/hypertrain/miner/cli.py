@@ -15,7 +15,8 @@ import numpy.typing as npt
 
 from hypertrain.data.shards import ShardSamples, ShardSetManifest, verify_shards
 from hypertrain.datasets.shards16 import ShardSet16Manifest, U16ShardSamples, verify_shards16
-from hypertrain.miner.core import Miner, MinerConfig, MinerError, canonical
+from hypertrain.miner.core import Miner, MinerConfig, MinerError, NetworkMiner, canonical
+from hypertrain.miner.dispute_watch import add_watch_args, run_follow
 from hypertrain.protocol.messages import RunManifest
 from hypertrain.trainer.loop import SampleFn
 
@@ -89,10 +90,58 @@ def main(argv: list[str] | None = None) -> int:
         if name == "run":
             s.add_argument("--rounds", type=int, default=1)
             s.add_argument("--start", type=int)
+    for name in ("join-v2", "status-v2", "probe-v2", "proof-v2", "run-v2", "watch"):
+        s = sub.add_parser(name)
+        s.add_argument("--config", type=Path)
+        if name == "join-v2":
+            s.add_argument("--coldkey", type=Path, required=True)
+            s.add_argument("--request-id", required=True)
+            s.add_argument("--expiry", type=int, required=True)
+        if name in ("probe-v2", "run-v2", "watch"):
+            s.add_argument("--job", type=Path, required=name == "probe-v2")
+        if name == "run-v2":
+            s.add_argument("--round", type=int)
+        if name == "probe-v2":
+            s.add_argument("--challenge", type=Path, required=True)
+        if name == "proof-v2":
+            s.add_argument("--proof", type=Path, required=True)
+        if name == "watch":
+            s.add_argument("--timeout", type=float, default=30)
+        if name in ("watch", "run-v2"):
+            add_watch_args(s)
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         cfg = MinerConfig.load(args.config)
+        if getattr(args, "follow", False) or getattr(args, "watch", False):
+            return run_follow(cfg, args)
+        if args.command not in ("join", "run"):
+            with httpx.Client(timeout=120, follow_redirects=False) as client:
+                network = NetworkMiner(cfg, client)
+                match args.command:
+                    case "join-v2":
+                        result = network.join(args.coldkey, args.request_id, args.expiry)
+                    case "status-v2":
+                        result = network.status()
+                    case "probe-v2":
+                        result = network.probe(args.job, args.challenge)
+                    case "proof-v2":
+                        result = network.proof(args.proof)
+                    case "run-v2":
+                        if args.job is not None:
+                            result = network.launch(args.job)
+                        elif args.round is not None:
+                            result = {"status": network.run_round(args.round)}
+                        else:
+                            raise MinerError("run-v2 requires --round or --job")
+                    case "watch":
+                        if args.job is None:
+                            raise MinerError("watch requires --job unless --follow")
+                        result = {"processed": network.watch(args.job, args.timeout)}
+                    case _:
+                        raise MinerError("unknown v2 command")
+                print(json.dumps(result, sort_keys=True))
+                return 0
         miner = _miner(cfg)
         if args.command == "join":
             # ponytail: admission is the operator's PUT /roster (no public join route in

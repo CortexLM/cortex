@@ -61,7 +61,9 @@ class Master:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/metagraph/latest"
-        return httpx.Response(200, json={"hotkeys": {k: i for i, k in enumerate(self.registered)}})
+        assert request.url.params["netuid"] == "100"
+        hotkeys = {k: i for i, k in enumerate(self.registered)}
+        return httpx.Response(200, json={"netuid": 100, "hotkeys": hotkeys})
 
 
 @pytest.fixture

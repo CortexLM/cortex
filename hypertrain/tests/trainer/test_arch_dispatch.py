@@ -47,8 +47,15 @@ class Stub:
     def init_params(self, cfg: Any) -> Any:
         return self._rec("init_params", cfg)
 
-    def forward(self, cfg: Any, p: Any, tokens: Any, moe: Any = None) -> Any:
-        return self._rec("forward", cfg, p, tokens, moe=moe)
+    def forward(
+        self,
+        cfg: tm.ModelConfig,
+        p: tm.Params,
+        tokens: torch.Tensor,
+        moe: tm.MoeFn | None = None,
+        hook: tm.ForwardHook | None = None,
+    ) -> str:
+        return self._rec("forward", cfg, p, tokens, moe=moe, hook=hook)
 
 
 @pytest.fixture
@@ -75,10 +82,30 @@ def test_dispatch_routes_to_arch_impl(od_cfg: TrainConfig, monkeypatch: pytest.M
     assert param_shapes(cfg) == "param_shapes"
     assert stage_of("tok.weight", cfg, 1) == "stage_of"
     assert init_params(cfg) == "init_params"
-    sentinel = object()
-    assert forward(cfg, {}, torch.zeros(1, 2, dtype=torch.long), moe=sentinel) == "forward"  # type: ignore[arg-type]
+
+    def sentinel(
+        cfg: tm.ModelConfig, p: tm.Params, pre: str, x: torch.Tensor, dt: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        raise AssertionError("dispatch must forward, not invoke, the MoE callable")
+
+    def hook(layer: int, op: str, x: torch.Tensor) -> torch.Tensor:
+        return x + 1
+
+    tokens = torch.zeros(1, 2, dtype=torch.long)
+    assert forward(cfg, {}, tokens, moe=sentinel) == "forward"
     assert [c[0] for c in stub.calls] == ["param_shapes", "stage_of", "init_params", "forward"]
     assert stub.calls[-1][2]["moe"] is sentinel
+    assert stub.calls[-1][2]["hook"] is None
+    assert forward(cfg, {}, tokens, moe=sentinel, hook=hook) == "forward"
+    assert [c[0] for c in stub.calls] == [
+        "param_shapes",
+        "stage_of",
+        "init_params",
+        "forward",
+        "forward",
+    ]
+    assert stub.calls[-1][2]["moe"] is sentinel
+    assert stub.calls[-1][2]["hook"] is hook
 
 
 def test_decoder_never_touches_arch_impl(monkeypatch: pytest.MonkeyPatch) -> None:

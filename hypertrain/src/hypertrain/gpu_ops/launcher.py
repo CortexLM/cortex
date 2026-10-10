@@ -7,6 +7,7 @@ Provider writes are refused unless base_url is loopback (mock) or --live is pass
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import io
 import json
 import os
@@ -18,6 +19,7 @@ import tarfile
 import time
 import urllib.parse
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -65,6 +67,11 @@ class Orchestrator:
         return self.j.last("admitted")
 
     def deadline(self) -> float:
+        if self.cfg.get("cleanup_contract") == "network-v2":
+            intents = self.j.all("create_intent")
+            if intents:
+                first = min(float(r["unix"]) for r in intents)
+                return first + 3600
         rec = self.admitted()
         assert rec is not None
         return float(rec["deadline_unix"])
@@ -76,7 +83,43 @@ class Orchestrator:
         return self.j.last("supervisor_cleanup_started") is not None
 
     def sleep(self, seconds: float) -> None:
+        cutoff = self.cfg.get("cleanup_deadline_unix")
+        if cutoff is not None:
+            seconds = min(seconds, max(0.0, cutoff - time.time()))
+        if seconds <= 0:
+            return
         self.p.sleep(seconds)
+
+    def cleanup_call(
+        self, method: str, path: str, tag: str, body: Any = None, timeout: float = 30
+    ) -> Response:
+        """Budget provider pacing plus request against the same immutable cutoff."""
+        cutoff = self.cfg.get("cleanup_deadline_unix")
+        if cutoff is None:
+            return self.p.call(method, path, tag, body=body, timeout=timeout)
+        endpoint = self.p.endpoint(method, path)
+        interval = self.p.pace.get(endpoint)
+        gap = max(
+            0.0,
+            self.p.pace.get(endpoint, self.p.pace.get("*", 0.0))
+            - (self.p.monotonic() - self.p.last.get(endpoint, -1e18)),
+        )
+        if cutoff - time.time() <= gap:
+            return Response(None, None, None, "", "cleanup_deadline_exhausted")
+        if gap:
+            self.j.append("pace_wait", endpoint=endpoint, seconds=gap)
+            self.sleep(gap)
+        timeout = min(timeout, cutoff - time.time())
+        if timeout <= 0:
+            return Response(None, None, None, "", "cleanup_deadline_exhausted")
+        self.p.pace[endpoint] = 0.0
+        try:
+            return self.p.call(method, path, tag, body=body, timeout=timeout)
+        finally:
+            if interval is None:
+                del self.p.pace[endpoint]
+            else:
+                self.p.pace[endpoint] = interval
 
     def offer(self, role: str, tag: str) -> dict[str, Any]:
         h = self.host[role]
@@ -114,7 +157,7 @@ class Orchestrator:
         q = urllib.parse.urlencode(
             {"limit": 25, "select_cols": json.dumps(["id", "label", "machine_id"])}
         )
-        return list_rows(self.p.call("GET", "/api/v1/instances/?" + q, tag))
+        return list_rows(self.cleanup_call("GET", "/api/v1/instances/?" + q, tag))
 
     def admit(self) -> None:
         cfg = self.cfg
@@ -207,8 +250,10 @@ class Orchestrator:
                 "select_filters": json.dumps({"label": {"eq": intent["label"]}}),
             }
         )
+        if self.cfg.get("cleanup_deadline_unix") is not None:
+            attempts = 1
         for _ in range(attempts):
-            r = self.p.call("GET", "/api/v1/instances/?" + q, "recover-" + intent["role"])
+            r = self.cleanup_call("GET", "/api/v1/instances/?" + q, "recover-" + intent["role"])
             rows = list_rows(r)
             if rows is not None:
                 hits = [
@@ -220,7 +265,8 @@ class Orchestrator:
                     raise Reject("ownership_ambiguous:" + intent["role"])
                 return ("found", hits[0]) if hits else ("absent", None)
             self.j.append("recover_unknown", role=intent["role"], http_status=r.status)
-            self.sleep(r.retry_after if r.retry_after is not None else self.poll)
+            if self.cfg.get("cleanup_deadline_unix") is None:
+                self.sleep(r.retry_after if r.retry_after is not None else self.poll)
         return ("unknown", None)
 
     def create(self, role: str) -> Record:
@@ -292,7 +338,10 @@ class Orchestrator:
             raise Reject(f"create_failed_no_retry:{role}:HTTP{r.status}:{state}")
 
     def show(self, iid: int, tag: str) -> tuple[Response, Any]:
-        r = self.p.call("GET", f"/api/v0/instances/{iid}/?owner=me", tag)
+        timeout = 30.0
+        if self.cfg.get("cleanup_deadline_unix") is not None:
+            timeout = min(timeout, self.cfg["cleanup_deadline_unix"] - time.time())
+        r = self.cleanup_call("GET", f"/api/v0/instances/{iid}/?owner=me", tag, timeout=timeout)
         return r, (r.parsed.get("instances", ...) if r.ok() else ...)
 
     def boot(self, role: str) -> Record:
@@ -511,8 +560,18 @@ class Orchestrator:
         rec = self.receipt(role)
         assert rec is not None
         for attempt in range(int(self.cfg.get("delete_attempts", 6))):
-            r = self.p.call(
-                "DELETE", f"/api/v0/instances/{rec['instance_id']}/", "delete-" + role, body={}
+            timeout = 30.0
+            if self.cfg.get("cleanup_deadline_unix") is not None:
+                left = self.cfg["cleanup_deadline_unix"] - time.time()
+                if left <= 0:
+                    return False
+                timeout = min(timeout, left)
+            r = self.cleanup_call(
+                "DELETE",
+                f"/api/v0/instances/{rec['instance_id']}/",
+                "delete-" + role,
+                body={},
+                timeout=timeout,
             )
             ok = r.ok() and r.parsed.get("success") is True
             self.j.append(
@@ -525,12 +584,24 @@ class Orchestrator:
             )
             if ok:
                 return True
+            if self.cfg.get("cleanup_deadline_unix") is not None:
+                return False
             self.sleep(r.retry_after if r.retry_after is not None else self.poll)
         return False
 
     def absent_once(self, iid: int, tag: str) -> str:
         q = urllib.parse.urlencode({"limit": 25, "select_cols": json.dumps(["id", "label"])})
-        rows = list_rows(self.p.call("GET", "/api/v1/instances/?" + q, "absence-list-" + tag))
+        timeout = 30.0
+        if self.cfg.get("cleanup_deadline_unix") is not None:
+            left = self.cfg["cleanup_deadline_unix"] - time.time()
+            if left <= 0:
+                return "unknown"
+            timeout = min(timeout, left)
+        rows = list_rows(
+            self.cleanup_call(
+                "GET", "/api/v1/instances/?" + q, "absence-list-" + tag, timeout=timeout
+            )
+        )
         if rows is None:
             return "unknown"
         listed = any(i["id"] == iid for i in rows)
@@ -550,6 +621,8 @@ class Orchestrator:
             if state == "absent":
                 self.j.append("absence_confirmed", role=role, instance_id=rec["instance_id"])
                 return True
+            if self.cfg.get("cleanup_deadline_unix") is not None:
+                return False
             self.sleep(self.poll)
         return False
 
@@ -578,35 +651,98 @@ class Orchestrator:
 
     def cleanup(self, force: bool) -> dict[str, Any]:
         with flock(self.dir / "cleanup.lock"):
-            if self.actor == "supervisor":
+            if self.actor == "supervisor" or self.cfg.get("cleanup_contract") == "network-v2":
                 with flock(self.dir / "create.lock"):
-                    self.j.append("supervisor_cleanup_started")
+                    if not self.cleanup_started():
+                        self.j.append("supervisor_cleanup_started")
+            if self.cfg.get("cleanup_contract") == "network-v2":
+                start = self.j.last("supervisor_cleanup_started")
+                assert start is not None
+                self.cfg["cleanup_deadline_unix"] = min(
+                    self.deadline(),
+                    start["unix"] + 420,
+                    self.cfg.get("cleanup_deadline_unix", float("inf")),
+                )
             owned, unresolved = self.owned()
             live = [r for r in owned if not self.j.last("absence_confirmed", role=r)]
-            rescue = {r: self.rescue(r) for r in live}
+            network = self.cfg.get("cleanup_contract") == "network-v2"
+            if network:
+                module_path = (
+                    Path(__file__).resolve().parents[3]
+                    / "experiments/gpu_network_v2/orchestrate.py"
+                )
+                spec = importlib.util.spec_from_file_location(
+                    "network_cleanup_runtime", module_path
+                )
+                if spec is None or spec.loader is None:
+                    raise Reject("network_cleanup_runtime_missing")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                profile = json.loads(Path(self.cfg["network_profile_file"]).read_bytes())
+                runtime = module.NetworkRuntime(self, profile)
+
+                def custody(role: str) -> str:
+                    try:
+                        runtime.rescue(role, fresh=True)
+                        self.j.append(
+                            "rescued", role=role, status="verified", contract="network-v2"
+                        )
+                        return "verified"
+                    except Exception as e:
+                        self.j.append("network_rescue_failed", role=role, error=repr(e))
+                        return "failed"
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    statuses = list(pool.map(custody, live))
+                rescue = dict(zip(live, statuses, strict=True))
+            else:
+                rescue = {r: self.rescue(r) for r in live}
             ok_rescue = all(
                 s == "verified" or s.startswith("not_applicable") for s in rescue.values()
             )
+            if network:
+                ok_rescue = ok_rescue and all(
+                    self.j.last("network_rescued", role=r) is not None for r in owned
+                )
+                for role in owned:
+                    if role not in live and self.j.last("network_rescued", role=role) is not None:
+                        try:
+                            runtime.rescue(role)
+                        except Exception as e:
+                            self.j.append("network_rescue_failed", role=role, error=repr(e))
+                            ok_rescue = False
             if not ok_rescue and not force:
                 self.j.append("delete_withheld_rescue_pending", rescue=rescue)
                 return {"all_absent": False, "rescue": rescue, "unresolved": unresolved}
             if not ok_rescue:
                 self.j.append("rescue_incomplete_forced_delete", rescue=rescue)
             for r in live:
+                if network and self.cfg.get("cleanup_deadline_unix") is not None:
+                    self.cfg["delete_attempts"] = 1
                 if not any(a.get("success") for a in self.j.all("delete_ack", role=r)):
                     self.delete(r)
-            absent = all(self.confirm_absence(r) for r in owned)
+            absent_results = [self.confirm_absence(r) for r in owned]
+            absent = all(absent_results)
             ok = absent and not unresolved
+            custody_ok = ok and ok_rescue
+            if network and not custody_ok:
+                self.j.append("network_cleanup_censored", all_absent=ok, rescue=rescue)
             if not ok:
                 self.j.append("liability_open", owned=owned, unresolved=unresolved)
-            return {"all_absent": ok, "rescue": rescue, "unresolved": unresolved}
+            return {
+                "all_absent": ok,
+                "rescue": rescue,
+                "unresolved": unresolved,
+                "custody_complete": custody_ok,
+                "censored": network and not custody_ok,
+            }
 
     def close(self, code: int, outcome: str) -> Record:
         with flock(self.dir / "close.lock"):
             done = self.j.last("transaction_closed")
             if done:
                 return done
-            acct = self.p.call("GET", "/api/v0/users/current/", "final-account")
+            acct = self.cleanup_call("GET", "/api/v0/users/current/", "final-account")
             credit = acct.parsed.get("credit") if acct.ok() else None
             rows = self.inventory("final-inventory")
             ours = {r["instance_id"] for r in self.j.all("receipt")}
@@ -632,6 +768,20 @@ class Orchestrator:
             )
 
     def evidence(self, outcome: str, credit: Any, inv: dict[str, Any]) -> dict[str, Any]:
+        if self.cfg.get("cleanup_contract") == "network-v2":
+            return {
+                "schema_version": 1,
+                "contract": "network-v2",
+                "outcome": outcome,
+                "verdict": "CENSORED",
+                "reason": "lifecycle_cleanup_not_cuda_d2_verdict",
+                "inventory": inv,
+                "credit": credit,
+                "network_rescued": self.j.all("network_rescued"),
+                "network_rescue_failed": self.j.all("network_rescue_failed"),
+                "execution_intents": self.j.all("network_execution_intent"),
+                "deadline_unix": self.deadline(),
+            }
         snap = json.loads(Path(self.cfg["budget_snapshot"]).read_text())
         runs = []
         for role, name, _neg in self.jobs():

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import math
 import struct
+from collections.abc import Mapping
 
 import numpy as np
 import torch
@@ -176,7 +177,14 @@ def compress(cfg: CompressConfig, delta: Params, ef_in: Params) -> tuple[bytes, 
     return b"".join(out), ef_out
 
 
-def decompress(payload: bytes) -> tuple[str, Params]:
+def _payload_metadata(
+    payload: bytes,
+    expected_shapes: Mapping[str, tuple[int, ...]] | None,
+    max_payload_bytes: int | None,
+) -> tuple[str, dict[str, tuple[tuple[int, ...], int, int]]]:
+    """Parse all framing and validate bodies before any tensor allocation."""
+    if max_payload_bytes is not None and len(payload) > max_payload_bytes:
+        raise ValueError("delta payload exceeds byte limit")
     codec = next((c for c, m in MAGIC.items() if payload.startswith(m)), None)
     if codec is None:
         raise ValueError("unknown delta payload magic")
@@ -184,28 +192,93 @@ def decompress(payload: bytes) -> tuple[str, Params]:
     try:
         (count,) = struct.unpack_from("<I", payload, off)
         off += 4
-        out: Params = {}
+        if count > (len(payload) - off) // 20:
+            raise ValueError("tensor count exceeds payload framing")
+        if expected_shapes is not None and count != len(expected_shapes):
+            raise ValueError("tensor count differs from expected shapes")
+        out: dict[str, tuple[tuple[int, ...], int, int]] = {}
         for _ in range(count):
             (ln,) = struct.unpack_from("<Q", payload, off)
-            name = payload[off + 8 : off + 8 + ln].decode("utf-8")
+            if ln > len(payload) - off - 8:
+                raise ValueError("truncated tensor name")
+            raw_name = payload[off + 8 : off + 8 + ln]
+            name = raw_name.decode("utf-8")
+            if not name or (out and raw_name <= next(reversed(out)).encode("utf-8")):
+                raise ValueError("tensor names must be unique and UTF-8 sorted")
+            if expected_shapes is not None and name not in expected_shapes:
+                raise ValueError("unexpected tensor name")
             off += 8 + ln
             (ndim,) = struct.unpack_from("<I", payload, off)
+            if ndim > (len(payload) - off - 4) // 8:
+                raise ValueError("tensor rank exceeds payload framing")
+            if expected_shapes is not None and ndim != len(expected_shapes[name]):
+                raise ValueError("tensor rank differs from expected shape")
             shape = struct.unpack_from(f"<{ndim}Q", payload, off + 4)
+            if expected_shapes is not None and shape != expected_shapes[name]:
+                raise ValueError("tensor dimensions differ from expected shape")
             off += 4 + 8 * ndim
             (blen,) = struct.unpack_from("<Q", payload, off)
-            body = payload[off + 8 : off + 8 + blen]
-            if len(body) != blen:
+            if blen > len(payload) - off - 8:
                 raise ValueError("truncated tensor body")
+            start = off + 8
             off += 8 + blen
-            if name in out:
-                raise ValueError("duplicate tensor in payload")
-            dec = _int8_decode if codec == "dense-int8" else _sparse_decode
-            out[name] = dec(body, tuple(shape))
+            body = memoryview(payload)[start:off]
+            n = math.prod(shape)
+            if codec == "dense-int8":
+                blocks = (n + BLOCK - 1) // BLOCK
+                if blen != 4 + 4 * blocks + n or struct.unpack_from("<I", body)[0] != BLOCK:
+                    raise ValueError("malformed int8 tensor body")
+                if any(
+                    not math.isfinite(s) or s <= 0
+                    for (s,) in struct.iter_unpack("<f", body[4 : 4 + 4 * blocks])
+                ):
+                    raise ValueError("invalid int8 scales")
+                if 128 in body[4 + 4 * blocks :]:
+                    raise ValueError("invalid int8 value")
+            else:
+                if blen < 16:
+                    raise ValueError("malformed sparse tensor body")
+                k, lo, hi = struct.unpack_from("<Qff", body)
+                if not 1 <= k <= n or blen != 16 + 4 * k + (k + 3) // 4:
+                    raise ValueError("malformed sparse tensor body")
+                if not (math.isfinite(lo) and math.isfinite(hi) and 0 <= lo <= hi):
+                    raise ValueError("invalid sparse levels")
+                previous = -1
+                for (index,) in struct.iter_unpack("<I", body[16 : 16 + 4 * k]):
+                    if not previous < index < n:
+                        raise ValueError("sparse indices must be strictly ascending and in range")
+                    previous = index
+                if k % 4 and body[-1] >> (2 * (k % 4)):
+                    raise ValueError("nonzero sparse padding bits")
+            out[name] = (tuple(shape), start, off)
     except struct.error as exc:
         raise ValueError("truncated delta payload") from exc
     if off != len(payload):
         raise ValueError("trailing bytes in delta payload")
     return codec, out
+
+
+def validate_payload(
+    payload: bytes,
+    expected_shapes: Mapping[str, tuple[int, ...]],
+    *,
+    max_payload_bytes: int = 65536,
+) -> str:
+    """Bound raw bytes and validate manifest geometry without decoding tensors."""
+    codec, _ = _payload_metadata(payload, expected_shapes, max_payload_bytes)
+    return codec
+
+
+def decompress(
+    payload: bytes,
+    *,
+    expected_shapes: Mapping[str, tuple[int, ...]] | None = None,
+    max_payload_bytes: int | None = None,
+) -> tuple[str, Params]:
+    """Decode only after every tensor passes framing and optional manifest bounds."""
+    codec, metadata = _payload_metadata(payload, expected_shapes, max_payload_bytes)
+    dec = _int8_decode if codec == "dense-int8" else _sparse_decode
+    return codec, {n: dec(payload[start:end], shape) for n, (shape, start, end) in metadata.items()}
 
 
 def payload_hash(payload: bytes) -> str:

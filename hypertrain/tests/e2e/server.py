@@ -40,7 +40,9 @@ def main() -> None:
 
     def metagraph(request: httpx.Request) -> httpx.Response:
         hotkeys = json.loads(registry.read_text())
-        return httpx.Response(200, json={"hotkeys": {k: i for i, k in enumerate(hotkeys)}})
+        return httpx.Response(
+            200, json={"netuid": 100, "hotkeys": {k: i for i, k in enumerate(hotkeys)}}
+        )
 
     config = Config(
         common.SLUG,

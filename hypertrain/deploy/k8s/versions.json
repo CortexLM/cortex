@@ -1,0 +1,19 @@
+{
+  "server_image": "ghcr.io/cortexlm/hypertrain@sha256:ebdb8bc97122488682c63200f55fae92a980e5a75b50cbe4d0ce3bde0fbf7fdb",
+  "server_source_sha": "f92a3a9c1bcedbf968318c2845bb66c71f19e100",
+  "server_build_job": "https://github.com/CortexLM/hypertrain/actions/runs/37815568607/job/113454067723",
+  "kind_version": "v0.31.0",
+  "kubernetes_version": "v1.35.0",
+  "node_image": "kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f",
+  "calico_version": "v3.31.2",
+  "calico_manifest_url": "https://raw.githubusercontent.com/projectcalico/calico/dd5575465ed825f86a3bc10f17bb5f7dc106d0f0/manifests/calico.yaml",
+  "calico_manifest_sha256": "c74c5a073af478dc841c909de708bd93242d685a6543616638c8f81b5d8daa71",
+  "calico_images": {
+    "docker.io/calico/node:v3.31.2": "docker.io/calico/node@sha256:5255c2844abb4eea023cd15ceda5380d5bab3d5cf714fd113774597d2265f876",
+    "docker.io/calico/cni:v3.31.2": "docker.io/calico/cni@sha256:62f50ed3070fd5da4df907fc2d618faf53f2d69d2c64232f7f464a646806cb5b",
+    "docker.io/calico/kube-controllers:v3.31.2": "docker.io/calico/kube-controllers@sha256:7308b279c79816c9386a593644814a7f0f5caaf3b753982cbf226953782524ee"
+  },
+  "harness": "kind-calico",
+  "max_node_cpus": 4,
+  "max_node_memory_bytes": 4294967296
+}

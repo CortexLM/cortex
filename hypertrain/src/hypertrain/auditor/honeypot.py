@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -19,8 +19,82 @@ import torch
 import hypertrain.trainer  # noqa: F401
 from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.protocol.jcs import canonicalize
+from hypertrain.protocol.keys import Keypair
+from hypertrain.protocol.messages_v2 import RunManifestV2
 from hypertrain.trainer.config import TrainConfig
+from hypertrain.trainer.island import CancelHook, Comm, TraceHook, train_island
 from hypertrain.trainer.loop import Assignment, Params, RoundResult, SampleFn, train_round
+from hypertrain.trainer.optim import OptState
+
+
+def honeypot_island(
+    pot: Honeypot,
+    wrapper: RunManifestV2,
+    comm: Comm,
+    theta: Params,
+    a: Assignment,
+    get: SampleFn,
+    *,
+    carry: OptState | None = None,
+    ef: Params | None = None,
+    v0: Params | None = None,
+    hook: TraceHook | None = None,
+    cancel: CancelHook | None = None,
+) -> RoundResult:
+    """Ordinary island path, private mode only; no pot metadata in job/trace artifacts."""
+    cfg = TrainConfig.from_manifest_v2(wrapper)
+    lay = wrapper.training.reference_spec.layout
+    start = {n: x * 1.01 for n, x in theta.items()} if pot.mode == "fabricate" else theta
+
+    def fault(t: int, local: Params) -> None:
+        with torch.no_grad():
+            match pot.mode:
+                case "last_step":
+                    if t == cfg.inner.H:
+                        local[sorted(local)[0]].view(-1)[0] += 1e-3
+                case "noise":
+                    if t == max(1, cfg.inner.H // 2):
+                        for x in local.values():
+                            x.add_(1e-6)
+                case "honest" | "fabricate":
+                    return
+
+    return train_island(
+        cfg,
+        lay,
+        comm,
+        start,
+        a,
+        get,
+        carry=carry,
+        ef_in=ef,
+        v0=v0,
+        hook=hook,
+        cancel=cancel,
+        after_step=fault,
+    )
+
+
+def fresh_honeypots(
+    previous: Sequence[Honeypot],
+    modes: Sequence[Mode],
+    retain_key: Callable[[Keypair], None] | None = None,
+) -> list[Honeypot]:
+    """Never reuse revealed hotkeys. Caller retains private keys outside public job metadata."""
+    import os
+
+    from hypertrain.protocol.keys import Keypair
+
+    old = {p.hotkey for p in previous}
+    keys = [Keypair(os.urandom(32)) for _ in modes]
+    result = [Honeypot(key.ss58, mode) for key, mode in zip(keys, modes, strict=True)]
+    if retain_key is not None:
+        for key in keys:
+            retain_key(key)
+    if len({p.hotkey for p in result}) != len(result) or any(p.hotkey in old for p in result):
+        raise RuntimeError("honeypot identity collision")
+    return result
+
 
 Mode = Literal["honest", "fabricate", "last_step", "noise"]
 FAULT_RESULTS = {"MISMATCH", "WITHHELD", "BAD_PROOF", "ASSIGNMENT_VIOLATION"}

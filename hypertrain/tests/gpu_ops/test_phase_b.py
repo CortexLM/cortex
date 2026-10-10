@@ -207,11 +207,73 @@ def test_phase_b_oom_log_watch_kills_fast(mock_factory: Any, tmp_path: Path) -> 
     assert len([r for r in rows if r["kind"] == "absence_confirmed"]) == 2
 
 
-def test_phase_b_boot_timeout_rescues_and_deletes_pair(mock_factory: Any, tmp_path: Path) -> None:
+def test_phase_b_boot_timeout_rescues_and_deletes_pair(
+    mock_factory: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+    from types import FunctionType, SimpleNamespace
+
+    from hypertrain.gpu_ops import launcher, supervisor
+
     m = mock_factory(offers=[offer8(i) for i in range(2)], never_running=True)
     rd = tmp_path / "run"
-    proc = run_b(phase_b_cfg(tmp_path, m.base, boot_timeout_seconds=900), rd)
-    assert proc.returncode == 3, proc.stdout + proc.stderr
+    cfg = phase_b_cfg(tmp_path, m.base, boot_timeout_seconds=900)
+    phase = _load("orchestrate")
+    loading = threading.Event()  # Registered before the real provider request.
+    clock = SimpleNamespace(now=0.0, advanced=False)
+    original_boot = launcher.Orchestrator.boot
+
+    class BootClockFixture(phase.PhaseBOrchestrator):
+        def show(self, iid, tag):
+            response, state = super().show(iid, tag)
+            receipt = self.receipt("h0")
+            if (
+                tag == "show-h0"
+                and response.ok()
+                and isinstance(state, dict)
+                and state.get("id") == receipt["instance_id"]
+                and state.get("label") == receipt["label"]
+                and state.get("actual_status") == "loading"
+            ):
+                loading.set()
+            return response, state
+
+        def boot(self, role):
+            clock.now = time.time()
+            start = clock.now
+            sleeper = self.p.sleep
+
+            def advance(seconds):
+                assert loading.is_set()
+                assert not clock.advanced and clock.now == start
+                assert seconds == self.poll
+                clock.now += self.cfg["boot_timeout_seconds"]
+                clock.advanced = True
+
+            bounded = FunctionType(
+                original_boot.__code__,
+                {**original_boot.__globals__, "time": SimpleNamespace(time=lambda: clock.now)},
+                original_boot.__name__,
+                original_boot.__defaults__,
+                original_boot.__closure__,
+            )
+            self.p.sleep = advance
+            try:
+                return bounded(self, role)
+            finally:
+                self.p.sleep = sleeper
+
+    # Only this node's boot function sees the virtual clock. Supervisor and
+    # production admission/cleanup deadlines retain their real wall clock.
+    monkeypatch.setattr(phase, "PhaseBOrchestrator", BootClockFixture)
+    monkeypatch.setattr(launcher, "Orchestrator", launcher.Orchestrator)
+    monkeypatch.setattr(supervisor, "Orchestrator", supervisor.Orchestrator)
+    monkeypatch.setenv("HT_GPU_VIRTUAL_TIME", "1")
+    code = phase.main(
+        [str(B / "orchestrate.py"), "run", "--config", str(cfg), "--run-dir", str(rd)]
+    )
+    assert code == 3
+    assert loading.is_set() and clock.advanced
     rows = journal(rd)
     closed = [r for r in rows if r["kind"] == "transaction_closed"]
     assert closed and closed[0]["outcome"] == "failed:boot_timeout:h0"

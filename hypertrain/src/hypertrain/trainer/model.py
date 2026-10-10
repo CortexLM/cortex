@@ -226,28 +226,49 @@ def _moe(
 
 
 MoeFn = Callable[[ModelConfig, Params, str, Tensor, torch.dtype], tuple[Tensor, Tensor]]
+ForwardHook = Callable[[int, str, Tensor], Tensor]
 
 
 def forward(
-    cfg: ModelConfig, p: Params, tokens: Tensor, moe: MoeFn | None = None
+    cfg: ModelConfig,
+    p: Params,
+    tokens: Tensor,
+    moe: MoeFn | None = None,
+    hook: ForwardHook | None = None,
 ) -> tuple[Tensor, Tensor]:
     """tokens int64 [B, T+1] -> (mean CE loss fp32, aux loss fp32); ``moe`` swaps the MoE block."""
     if cfg.arch != "decoder":
-        return _arch_impl(cfg).forward(cfg, p, tokens, moe=moe)
+        return _arch_impl(cfg).forward(cfg, p, tokens, moe=moe, hook=hook)
+
+    def emit(layer: int, op: str, x: Tensor) -> Tensor:
+        return x if hook is None else hook(layer, op, x)
+
     moe_fn = moe or _moe
     dt = compute_dtype(cfg)
     inp, tgt = tokens[:, :-1], tokens[:, 1:]
-    x = embed(p["emb.weight"], inp).to(dt)
+    emit(-1, "input", tokens)
+    x = emit(0, "embed", embed(p["emb.weight"], inp).to(dt))
     aux = torch.zeros((), dtype=torch.float32, device=tokens.device)
     for i in range(cfg.n_layers):
         pre = f"layers.{i:03d}."
-        x = x + _attn(cfg, p, pre, _rms(x, p[pre + "attn_norm"]), dt)
-        h = _rms(x, p[pre + "mlp_norm"])
+        h = emit(i, "attn_norm", _rms(x, p[pre + "attn_norm"]))
+        attn = emit(i, "attn", _attn(cfg, p, pre, h, dt))
+        x = emit(i, "attn_residual", x + attn)
+        h = emit(i, "mlp_norm", _rms(x, p[pre + "mlp_norm"]))
         if cfg.is_moe:
             m, a = moe_fn(cfg, p, pre, h, dt)
-            x, aux = x + m, aux + a
+            m = emit(i, "mlp", m)
+            x, aux = emit(i, "mlp_residual", x + m), aux + a
         else:
-            x = x + _swiglu(h, p[pre + "w1"].to(dt), p[pre + "w3"].to(dt), p[pre + "w2"].to(dt))
-    logits = (_rms(x, p["norm.weight"]) @ p["head.weight"].to(dt)).float()
-    loss = F.cross_entropy(logits.reshape(-1, cfg.vocab), tgt.reshape(-1))
+            m = emit(
+                i,
+                "mlp",
+                _swiglu(h, p[pre + "w1"].to(dt), p[pre + "w3"].to(dt), p[pre + "w2"].to(dt)),
+            )
+            x = emit(i, "mlp_residual", x + m)
+    norm = emit(cfg.n_layers, "final_norm", _rms(x, p["norm.weight"]))
+    logits = emit(cfg.n_layers, "head", (norm @ p["head.weight"].to(dt)).float())
+    loss = emit(
+        cfg.n_layers, "loss", F.cross_entropy(logits.reshape(-1, cfg.vocab), tgt.reshape(-1))
+    )
     return loss, aux

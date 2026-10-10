@@ -16,12 +16,14 @@ import hashlib
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from pathlib import Path
+from typing import Any, Literal, Protocol
 
 import httpx
 
 import hypertrain.trainer  # noqa: F401
 from hypertrain.auditor.replay import (
+    AnchorCache,
     AuditInputError,
     AuditInputs,
     NotReady,
@@ -34,6 +36,8 @@ from hypertrain.auditor.replay import (
     select_segments,
     unpack_state,
 )
+from hypertrain.gpu_ops.work_screen import IslandLaunch
+from hypertrain.miner.island_launch import IslandArtifacts, confined, launch_island
 from hypertrain.protocol.envelope import seal
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import (
@@ -44,8 +48,179 @@ from hypertrain.protocol.messages import (
     RunManifest,
     StateServe,
 )
+from hypertrain.protocol.messages_v2 import AuditJobV2, CommitV2, IslandJobV1
 from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.loop import Assignment, Params, SampleFn
+
+
+class LeaseGuard:
+    """L0 verified-beacon subscriber calls advance/revoke; trainer checks every boundary.
+
+    A local hard timer also cancels torchrun while blocked inside a collective. No renewals.
+    """
+
+    def __init__(self, lease_expires: int, absolute_deadline: int, deadline_unix: float) -> None:
+        self.expires = min(lease_expires, absolute_deadline)
+        self.cancelled = threading.Event()
+        import time
+
+        self.timer = threading.Timer(max(0.0, deadline_unix - time.time()), self.cancelled.set)
+        self.timer.daemon = True
+
+    def __enter__(self) -> LeaseGuard:
+        self.timer.start()
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.timer.cancel()
+
+    def advance(self, verified_beacon: int) -> None:
+        if verified_beacon >= self.expires:
+            self.cancelled.set()
+
+    def revoke(self) -> None:
+        self.cancelled.set()
+
+    def check(self) -> None:
+        if self.cancelled.is_set():
+            raise AuditInputError("audit lease expired or revoked")
+
+
+def execute_island_audit(
+    job: AuditJobV2,
+    directory: Path,
+    cache: AnchorCache,
+    guard: LeaseGuard,
+    *,
+    now_round: int,
+    deadline_unix: int,
+    backend: Literal["cpu", "cuda"] = "cuda",
+    publication_job: IslandJobV1 | None = None,
+    publication_directory: Path | None = None,
+    launch: IslandLaunch | None = None,
+) -> tuple[Outcome, IslandArtifacts]:
+    """Actual torchrun audit runtime; L0 stages authenticated objects and sample proofs.
+
+    Subscribe guard.advance to verified beacon events before invoking; no heartbeat renewal.
+    directory contains start_state, ef_in, v0, samples, sample_proofs. No HTTP route invented.
+    """
+    import json
+
+    from hypertrain.auditor.replay import VerifiedAnchor, optimizer_hash, pack_state
+    from hypertrain.gpu_ops.journal import durable_write
+    from hypertrain.protocol.hashing import sha256_hex
+    from hypertrain.trainer.compress import state_hash
+
+    job.validate_embedded(now_round)
+    guard.check()
+    start = job.start_state
+    prior = cache.prior(job.manifest, start)
+    if prior.backend not in ("genesis", backend):
+        raise AuditInputError("CPU anchor cannot serve as CUDA replay oracle")
+    theta_blob = confined(directory, "start_state").read_bytes()
+    ef_blob = confined(directory, "ef_in").read_bytes()
+    v0_blob = confined(directory, "v0").read_bytes()
+    theta, st = unpack_state(theta_blob)
+    ef, _ = unpack_state(ef_blob)
+    if (
+        sha256_hex(theta_blob) != start.state_object_sha256
+        or st is None
+        or optimizer_hash(st) != optimizer_hash(prior.state)
+        or state_hash(theta) != start.theta_hash
+        or (job.manifest.training.inner.state_policy == "carry" and st.step != start.global_step0)
+        or sha256_hex(ef_blob) != job.ef_in.sha256
+        or len(ef_blob) != job.ef_in.size
+        or sha256_hex(ef_blob) != start.ef_object_sha256
+        or state_hash(ef) != start.ef_hash
+        or sha256_hex(v0_blob) != job.v0.sha256
+        or len(v0_blob) != job.v0.size
+    ):
+        raise AuditInputError("untrusted audit start/state/EF")
+    start_path = "start_state"
+    start_hash = start.state_object_sha256
+    if job.manifest.training.inner.state_policy != "carry":
+        # The authenticated anchor still includes m/v; reset/derived kernels take theta only.
+        start_path = "audit-theta.safetensors"
+        packed = pack_state(theta)
+        start_hash = sha256_hex(packed)
+        path = directory / start_path
+        if path.exists():
+            if confined(directory, start_path).read_bytes() != packed:
+                raise AuditInputError("conflicting prepared audit theta")
+        else:
+            durable_write(path, packed)
+    local = IslandJobV1(
+        job_version=1,
+        run_id=job.run_id,
+        w=start.w,
+        manifest=job.manifest,
+        sample_ids=job.sample_ids,
+        global_step0=start.global_step0,
+        start_state_sha256=start_hash,
+        ef_in_sha256=job.ef_in.sha256,
+        v0_sha256=job.v0.sha256,
+        deadline=deadline_unix,
+        object_paths={
+            "start_state": start_path,
+            **{k: k for k in ("ef_in", "v0", "samples", "sample_proofs")},
+        },
+    )
+    if publication_job is not None:
+        if publication_directory is None or publication_job != local.model_copy(
+            update={"object_paths": publication_job.object_paths}
+        ):
+            raise AuditInputError("accepted audit publication job differs from independent replay")
+        for name, relative in publication_job.object_paths.items():
+            expected = (
+                pack_state(theta)
+                if name == "start_state" and start_path != "start_state"
+                else confined(directory, name).read_bytes()
+            )
+            if confined(publication_directory, relative).read_bytes() != expected:
+                raise AuditInputError("accepted audit publication input differs")
+        local, directory = publication_job, publication_directory
+    elif publication_directory is not None:
+        raise AuditInputError("publication directory lacks accepted descriptor")
+    artifacts = (launch or launch_island)(
+        local, directory, backend=backend, cancel=guard.cancelled, trace=True
+    )
+    if launch is not None:
+        from hypertrain.miner.island_launch import validate_artifacts
+
+        artifacts = validate_artifacts(local, artifacts.directory)
+    from hypertrain.auditor.island_bisect import IslandParty
+
+    IslandParty.published(start.hotkey, local, artifacts.directory)
+    guard.check()
+    commit = CommitV2.model_validate(job.commit_envelope["body"])
+    summary = json.loads((artifacts.directory / "rank-0/summary.json").read_bytes())["commitments"]
+    leaves = [LeafPreimage.model_validate(x) for x in json.loads(artifacts.leaves.read_bytes())]
+    first = next(
+        (i for i, (a, b) in enumerate(zip(job.preimages, leaves, strict=True)) if a != b), None
+    )
+    matches = (
+        first is None
+        and summary["leaves_root"] == commit.leaves_root
+        and summary["delta_hash"] == commit.delta_hash
+        and summary["final_theta_hash"] == commit.final_theta_hash
+        and summary["ef_out_hash"] == commit.ef_out_hash
+        and state_hash(ef) == commit.ef_in_hash
+    )
+    outcome = Outcome("MATCH" if matches else "MISMATCH", first, summary["leaves_root"])
+    if matches:
+        theta, st = unpack_state(artifacts.state.read_bytes())
+        ef, _ = unpack_state(artifacts.ef.read_bytes())
+        assert st is not None
+        proof = sha256_hex(
+            bytes.fromhex(job.job_id + summary["leaves_root"] + summary["delta_hash"])
+        )
+        anchor_hash = sha256_hex(bytes.fromhex(start.digest() + proof))
+        layout = cache.layout_hash(job.manifest)
+        cache.entries[(job.run_id, commit.hotkey, commit.w, layout)] = VerifiedAnchor(
+            job.run_id, commit.hotkey, commit.w, layout, st, ef, proof, anchor_hash, theta, backend
+        )
+    return outcome, artifacts
+
 
 HEARTBEAT_SECONDS = 300.0
 VERDICT_TTL_ROUNDS = 1200

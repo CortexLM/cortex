@@ -31,6 +31,7 @@ from torch import Tensor
 
 from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.protocol.messages import Layout, RunManifest
+from hypertrain.protocol.messages_v2 import RunManifestV2
 from hypertrain.trainer.compress import compress, payload_hash, state_hash
 from hypertrain.trainer.config import ModelConfig, TrainConfig
 from hypertrain.trainer.determinism import require_threads
@@ -64,8 +65,56 @@ class ForbiddenCollective(RuntimeError):
     """A non-fixed-order reduction was attempted on verified tensors."""
 
 
+@dataclass(frozen=True, slots=True)
+class TraceContext:
+    rank: int
+    step: int
+    microbatch: int
+    layer: int
+    op: str
+
+
+TraceHook = Callable[[TraceContext, Tensor], Tensor]
+CancelHook = Callable[[], None]
+
+
+class HookComm:
+    """Actual collective boundary hooks; identity hooks leave operation order unchanged."""
+
+    def __init__(self, comm: Comm, hook: TraceHook | None, cancel: CancelHook | None) -> None:
+        self.comm, self.hook, self.cancel = comm, hook, cancel
+        self.rank, self.world = comm.rank, comm.world
+        self.step = 0
+
+    def emit(self, op: str, x: Tensor) -> Tensor:
+        if self.cancel is not None:
+            self.cancel()
+        return (
+            x if self.hook is None else self.hook(TraceContext(self.rank, self.step, -1, -1, op), x)
+        )
+
+    def all_gather(self, t: Tensor) -> list[Tensor]:
+        got = self.comm.all_gather(self.emit("all_gather.input", t))
+        return [self.emit(f"all_gather.rank.{r}", x) for r, x in enumerate(got)]
+
+    def all_to_all(self, x: Tensor, send: list[int], recv: list[int]) -> Tensor:
+        return self.emit(
+            "all_to_all.output", self.comm.all_to_all(self.emit("all_to_all.input", x), send, recv)
+        )
+
+    def all_reduce_sum(self, t: Tensor) -> Tensor:
+        return self.comm.all_reduce_sum(t)
+
+
 def island_from_manifest(body: Mapping[str, Any]) -> tuple[TrainConfig, Layout, str]:
     """Validate ``body`` as a protocol RunManifest; return (train config, layout, run_id)."""
+    if body.get("manifest_version") == 2:
+        wrapper = RunManifestV2.model_validate(body)
+        return (
+            TrainConfig.from_manifest_v2(wrapper),
+            wrapper.training.reference_spec.layout,
+            wrapper.run_id(),
+        )
     m = RunManifest.model_validate(body)
     lay = m.reference_spec.layout
     cfg = TrainConfig.from_manifest(body)
@@ -293,12 +342,13 @@ def gather_pieces(
     values: Mapping[str, Tensor],
     which: Sequence[Piece],
     src: Callable[[Piece], int],
+    device: torch.device,
 ) -> dict[Piece, Tensor]:
     """Deterministic gather: rank src(p) publishes values[p.name]; one padded all_gather per
     tensor name (bounds the transient buffer to world x one tensor)."""
     out: dict[Piece, Tensor] = {}
     for name in sorted({p[0] for p in which}):
-        out |= _gather_group(comm, geo, values, [p for p in which if p[0] == name], src)
+        out |= _gather_group(comm, geo, values, [p for p in which if p[0] == name], src, device)
     return out
 
 
@@ -308,12 +358,12 @@ def _gather_group(
     values: Mapping[str, Tensor],
     which: Sequence[Piece],
     src: Callable[[Piece], int],
+    device: torch.device,
 ) -> dict[Piece, Tensor]:
     by_rank = [[p for p in which if src(p) == r] for r in range(comm.world)]
     sizes = [sum(math.prod(geo.piece_shape(p)) for p in ps) for ps in by_rank]
     mine = [values[p[0]].reshape(-1) for p in by_rank[comm.rank]]
-    dev = next(iter(values.values())).device
-    pad = torch.zeros(max(sizes) - sizes[comm.rank], dtype=torch.float32, device=dev)
+    pad = torch.zeros(max(sizes) - sizes[comm.rank], dtype=torch.float32, device=device)
     got = comm.all_gather(torch.cat([*mine, pad]))
     out: dict[Piece, Tensor] = {}
     for r, ps in enumerate(by_rank):
@@ -385,12 +435,21 @@ def ep_dispatch(comm: Comm, geo: Geometry, rows: Tensor, counts: Tensor) -> tupl
         torch.tensor(perm, dtype=torch.int64, device=rows.device),
         [sum(c[i] for c in rc) for i in range(eq)],
     )
-    return permute_rows(all_to_all(rows, comm, send, recv), plan.perm), plan
+    if isinstance(comm, HookComm):
+        plan = EPPlan(
+            plan.send, plan.recv, comm.emit("ep.dispatch.permutation", plan.perm), plan.per_expert
+        )
+    dispatched = permute_rows(all_to_all(rows, comm, send, recv), plan.perm)
+    if isinstance(comm, HookComm):
+        dispatched = comm.emit("ep.dispatch.rows", dispatched)
+    return dispatched, plan
 
 
 def ep_combine(comm: Comm, plan: EPPlan, outs: Tensor) -> Tensor:
     """Inverse of ep_dispatch: [expert][src] rows back to the sender, sorted by global expert."""
     back = permute_rows(outs, torch.argsort(plan.perm, stable=True))
+    if isinstance(comm, HookComm):
+        back = comm.emit("ep.combine.rows", back)
     return all_to_all(back, comm, plan.recv, plan.send)
 
 
@@ -430,7 +489,14 @@ def _moe_ep(comm: Comm, geo: Geometry) -> Callable[..., tuple[Tensor, Tensor]]:
 
 
 def _rank_grads(
-    cfg: TrainConfig, comm: Comm, geo: Geometry, theta: Params, ids: Sequence[int], get: SampleFn
+    cfg: TrainConfig,
+    comm: Comm,
+    geo: Geometry,
+    theta: Params,
+    ids: Sequence[int],
+    get: SampleFn,
+    t: int = 0,
+    hook: TraceHook | None = None,
 ) -> tuple[Params, float]:
     """Mirror of loop._train_step on this rank's samples (no optimizer step)."""
     names = sorted(theta)
@@ -441,7 +507,11 @@ def _rank_grads(
     for j in range(ga):
         params = {n: theta[n].detach().requires_grad_(True) for n in names}
         tokens = _load_batch(cfg, ids[j * mb : (j + 1) * mb], get, theta[names[0]].device)
-        ce, aux = forward(cfg.model, params, tokens, moe=moe)
+
+        def emit(layer: int, op: str, x: Tensor, microbatch: int = j) -> Tensor:
+            return x if hook is None else hook(TraceContext(comm.rank, t, microbatch, layer, op), x)
+
+        ce, aux = forward(cfg.model, params, tokens, moe=moe, hook=emit if hook else None)
         total = (ce + cfg.model.aux_loss_coef * aux) / ga
         gs = torch.autograd.grad(total, [params[n] for n in names], allow_unused=True)
         for n, g in zip(names, gs, strict=True):
@@ -476,7 +546,11 @@ def _reduce(comm: Comm, geo: Geometry, grads: Params, reduction: str) -> Params:
 def _grad_norm(comm: Comm, geo: Geometry, red: Params) -> float:
     """optim.global_grad_norm over the full (all-shard) gradient, summed in fixed order."""
     names = sorted(red)
-    parts = torch.tensor([float(red[n].double().pow(2).sum()) for n in names], dtype=torch.float64)
+    parts = torch.tensor(
+        [float(red[n].double().pow(2).sum()) for n in names],
+        dtype=torch.float64,
+        device=red[names[0]].device,
+    )
     got = comm.all_gather(parts)
     total = 0.0
     for i, n in enumerate(names):
@@ -488,8 +562,8 @@ def _grad_norm(comm: Comm, geo: Geometry, red: Params) -> float:
     return math.sqrt(total)
 
 
-def _mean_loss(comm: Comm, loss: float) -> float:
-    got = comm.all_gather(torch.tensor([loss], dtype=torch.float64))
+def _mean_loss(comm: Comm, loss: float, device: torch.device) -> float:
+    got = comm.all_gather(torch.tensor([loss], dtype=torch.float64, device=device))
     acc = float(got[0][0])
     for x in got[1:]:
         acc += float(x[0])
@@ -507,6 +581,10 @@ def train_island(
     carry: OptState | None = None,
     v0: Params | None = None,
     reduction: str = "all_gather",
+    hook: TraceHook | None = None,
+    cancel: CancelHook | None = None,
+    after_step: Callable[[int, Params], None] | None = None,
+    checkpoint: Callable[[int, Params, OptState], None] | None = None,
 ) -> RoundResult:
     """One H-step round on this rank; every rank returns the same full RoundResult.
 
@@ -515,7 +593,20 @@ def train_island(
     guard = forbid_reductions() if isinstance(comm, DistComm) else nullcontext()
     with guard:
         return _train_island(
-            cfg, lay, comm, theta_start, a, get_sample, ef_in, carry, v0, reduction
+            cfg,
+            lay,
+            comm,
+            theta_start,
+            a,
+            get_sample,
+            ef_in,
+            carry,
+            v0,
+            reduction,
+            hook,
+            cancel,
+            after_step,
+            checkpoint,
         )
 
 
@@ -530,13 +621,33 @@ def _train_island(
     carry: OptState | None = None,
     v0: Params | None = None,
     reduction: str = "all_gather",
+    hook: TraceHook | None = None,
+    cancel: CancelHook | None = None,
+    after_step: Callable[[int, Params], None] | None = None,
+    checkpoint: Callable[[int, Params, OptState], None] | None = None,
 ) -> RoundResult:
     require_threads(cfg.cpu_threads)
     check_launch(lay, comm.world)
+    traced = HookComm(comm, hook, cancel)
+    comm = traced
     if sorted(theta_start) != sorted(param_shapes(cfg.model)):
         raise ValueError("theta_start does not match the model parameter set")
     if any(x.dtype != torch.float32 for x in theta_start.values()):
         raise ValueError("theta_start must be fp32 master weights")
+    if any(tuple(theta_start[n].shape) != s for n, s in param_shapes(cfg.model).items()):
+        raise ValueError("theta_start shapes differ from model")
+    if carry is not None:
+        adam_names = {n for n in theta_start if not uses_muon(cfg.inner, n)}
+        if set(carry.m) != set(theta_start) or set(carry.v) != adam_names:
+            raise ValueError("carried full state does not match the model")
+        if carry.step != a.global_step0:
+            raise ValueError("carried optimizer step differs from assignment")
+        if any(
+            x.dtype != torch.float32 or x.shape != theta_start[n].shape
+            for values in (carry.m, carry.v)
+            for n, x in values.items()
+        ):
+            raise ValueError("carried full state shape/dtype mismatch")
     if (
         cfg.model.is_moe
         and cfg.model.n_experts % lay.ep_size
@@ -565,34 +676,64 @@ def _train_island(
     adam = [p for p in pieces if not uses_muon(cfg.inner, p[0])]
 
     def full() -> tuple[Params, OptState]:
-        th = _assemble(geo, gather_pieces(comm, geo, theta, pieces, geo.owner), names)
-        m = _assemble(geo, gather_pieces(comm, geo, st.m, pieces, geo.owner), names)
+        device = theta[names[0]].device
+        th = _assemble(geo, gather_pieces(comm, geo, theta, pieces, geo.owner, device), names)
+        m = _assemble(geo, gather_pieces(comm, geo, st.m, pieces, geo.owner, device), names)
         adam_names = sorted({p[0] for p in adam})
-        v = _assemble(geo, gather_pieces(comm, geo, st.v, adam, geo.owner), adam_names)
+        v = _assemble(geo, gather_pieces(comm, geo, st.v, adam, geo.owner, device), adam_names)
         return th, OptState(m, v, st.step)
 
     th_full, st_full = full()
     leaves = [_make_leaf(cfg, ia, 0, th_full, st_full, 0.0, 0.0)]
+    if checkpoint is not None:
+        checkpoint(0, th_full, st_full)
     window_start = th_full
     del th_full, st_full  # memory: only window_start (theta) is needed between leaves
     per = mb * ga
     for t in range(1, H + 1):
+        traced.step = t
+        if cancel is not None:
+            cancel()
         ids = ia.batch_ids(cfg, t)[comm.rank * per : (comm.rank + 1) * per]
-        grads, loss_local = _rank_grads(cfg, comm, geo, theta, ids, get_sample)
+        grads, loss_local = _rank_grads(cfg, comm, geo, theta, ids, get_sample, t, hook)
         red = _reduce(comm, geo, grads, reduction)
+        if hook is not None:
+            red = {
+                n: hook(TraceContext(comm.rank, t, -1, cfg.model.n_layers + 1, f"gradient.{n}"), x)
+                for n, x in red.items()
+            }
         del grads
         norm = _grad_norm(comm, geo, red)
         lr = lr_at(cfg.inner, a.global_step0 + t - 1, t - 1)
         step(cfg.inner, {n: theta[n] for n in owned}, red, st, lr, norm=norm)
+        if after_step is not None:
+            after_step(t, theta)
+        if hook is not None:
+            for n in owned:
+                theta[n] = hook(
+                    TraceContext(comm.rank, t, -1, cfg.model.n_layers + 1, f"optimizer.theta.{n}"),
+                    theta[n],
+                )
+                st.m[n] = hook(
+                    TraceContext(comm.rank, t, -1, cfg.model.n_layers + 1, f"optimizer.m.{n}"),
+                    st.m[n],
+                )
+                if n in st.v:
+                    st.v[n] = hook(
+                        TraceContext(comm.rank, t, -1, cfg.model.n_layers + 1, f"optimizer.v.{n}"),
+                        st.v[n],
+                    )
         del red
         if lay.zero1 and lay.n_gpus > 1:
-            synced = gather_pieces(comm, geo, theta, pieces, geo.owner)
+            synced = gather_pieces(comm, geo, theta, pieces, geo.owner, theta[names[0]].device)
             for n in names:
                 theta[n].copy_(synced[geo.my_piece(n)])
             del synced
-        loss = _mean_loss(comm, loss_local)
+        loss = _mean_loss(comm, loss_local, theta[names[0]].device)
         if t % J == 0:
             th_full, st_full = full()
+            if checkpoint is not None:
+                checkpoint(t, th_full, st_full)
             leaves.append(
                 _make_leaf(cfg, ia, t, th_full, st_full, loss, _norm(th_full, window_start))
             )

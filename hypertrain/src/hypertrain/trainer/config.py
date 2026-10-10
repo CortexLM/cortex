@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from hypertrain.protocol.messages import ODSpec, RunManifest, f32val
+from hypertrain.protocol.messages_v2 import RunManifestV2, TrainingManifestV2
 
 DTYPES = ("fp32", "bf16")
 STATE_POLICIES = ("reset", "derived", "carry")
@@ -135,6 +136,16 @@ class TrainConfig:
     def from_manifest(cls, body: Mapping[str, Any]) -> TrainConfig:
         """Validate ``body`` as a protocol RunManifest (strict, f32-hex reals) and convert."""
         m = RunManifest.model_validate(body)
+        return cls._convert(m)
+
+    @classmethod
+    def from_manifest_v2(cls, wrapper: RunManifestV2) -> TrainConfig:
+        """Consume the strict wrapper; embedded training never supplies the run ID."""
+        wrapper = RunManifestV2.model_validate(wrapper.body())
+        return cls._convert(wrapper.training)
+
+    @classmethod
+    def _convert(cls, m: RunManifest | TrainingManifestV2) -> TrainConfig:
         ms, inn, out, ref = m.model, m.inner, m.outer, m.reference_spec
         model = ModelConfig(
             n_layers=ms.n_layers,

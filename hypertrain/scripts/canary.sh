@@ -29,8 +29,6 @@ trap cleanup EXIT
 
 pass() { echo "PASS: $*"; }
 die() { echo "FAIL: $*" >&2; exit 1; }
-code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
-
 # podman rejects the uid= tmpfs option; a world-writable /data is equivalent for the uid-65532 check.
 if [ "$engine" = docker ]; then data_opt=/data:uid=65532,gid=65532; else data_opt=/data:mode=1777; fi
 
@@ -39,6 +37,7 @@ start() { # extra run args...
   "$engine" run -d --name "$name" --read-only --user 65532:65532 --cap-drop ALL \
     --security-opt no-new-privileges --tmpfs /tmp --tmpfs "$data_opt" \
     -p "127.0.0.1:$port:8000" "$@" "$image" >/dev/null
+  code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
   for _ in $(seq 120); do
     [ "$(code "$base/version")" = 200 ] && return 0
     sleep 1

@@ -23,7 +23,120 @@ jobs:
           version: "0.12.17"
           python-version: "3.12"
       - run: uv sync --locked --all-extras --group dev
-      - run: bash scripts/check.sh --ignore=tests/sim --ignore=tests/e2e
+      - name: Native systemd regression (isolated root environment)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(ps -p 1 -o comm= | xargs)" = systemd
+          sudo -n systemctl show --property=Version
+          test -f /sys/fs/cgroup/cgroup.controllers
+          native="$(sudo -n mktemp -d /tmp/htn.XXXXXX)"
+          test "$(sudo -n stat -c '%a:%u' "$native")" = 700:0
+          cleanup() {
+            status=$?
+            sudo -n python3 - "$native" "$status" <<'PY'
+          import json
+          import pathlib
+          import re
+          import shutil
+          import subprocess
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          if sys.argv[2] != "0":
+              for name in ("capacity-stdout.log", "capacity-stderr.log"):
+                  for log in (root / "tmp").rglob(name):
+                      print(str(log), log.read_text(errors="replace"), flush=True)
+          units = set()
+          for record in (root / "tmp").rglob("capacity-attempt.json"):
+              body = json.loads(record.read_text())
+              for field in ("unit", "timer", "timer_service"):
+                  unit = body[field]
+                  if not re.fullmatch(r"ht-cap-[0-9a-f]{32}(?:-deadline)?\.(?:service|timer)", unit):
+                      raise ValueError("unexpected native unit name")
+                  units.add(unit)
+          for unit in sorted(units):
+              observed = subprocess.run(
+                  ["systemctl", "show", unit, "-p", "LoadState"],
+                  check=True, capture_output=True, text=True, timeout=10,
+              ).stdout
+              if observed.strip() == "LoadState=not-found":
+                  continue
+              subprocess.run(["systemctl", "stop", unit], check=True, timeout=30)
+              observed = subprocess.run(
+                  ["systemctl", "show", unit, "-p", "ActiveState", "-p", "MainPID", "-p", "ControlPID"],
+                  check=True, capture_output=True, text=True, timeout=10,
+              ).stdout
+              fields = dict(line.split("=", 1) for line in observed.splitlines())
+              if fields["ActiveState"] not in ("inactive", "failed") or any(
+                  int(fields.get(field, "0")) for field in ("MainPID", "ControlPID")
+              ):
+                  raise RuntimeError("native child still active; retaining isolated environment")
+          shutil.rmtree(root)
+          PY
+          }
+          trap cleanup EXIT
+          sudo -n install -m 755 "$(command -v uv)" "$native/uv"
+          sudo -n mkdir -m 700 "$native/source" "$native/tmp"
+          git ls-files -z -- . ':!**/.git/**' ':!**/.venv/**' ':!**/*cache*/**' \
+            ':!**/__pycache__/**' ':!**/secrets/**' ':!**/.env' ':!**/.env.*' | \
+            tar --null -T - -cf - | sudo -n tar --no-same-owner -xf - -C "$native/source"
+          for file in uv.lock tests/challenge/test_capacity_outer_v2.py tests/challenge/test_service_capacity_v2.py tests/miner/test_capacity_runtime_v2.py tests/miner/test_island_launch_v2.py tests/relay/test_transport_v2.py; do
+            expected="$(sha256sum "$file" | cut -d ' ' -f 1)"
+            actual="$(sudo -n sha256sum "$native/source/$file" | cut -d ' ' -f 1)"
+            test "$expected" = "$actual"
+            printf 'native source %s %s\n' "$file" "$actual"
+          done
+          sudo -n env UV_CACHE_DIR="$native/cache" UV_PYTHON_INSTALL_DIR="$native/python" \
+            UV_PYTHON_PREFERENCE=only-managed UV_PROJECT_ENVIRONMENT="$native/venv" \
+            "$native/uv" sync --project "$native/source" --locked --all-extras --group dev --python 3.12
+          sudo -n env -u PYTHONPATH HOME="$native" TMPDIR="$native/tmp" \
+            PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+            bash -c '
+              set -euo pipefail
+              cd "$1/source"
+              "$1/venv/bin/python" -c "import os, hypertrain; print(\"native affinity\", sorted(os.sched_getaffinity(0))); assert os.geteuid() == 0; assert hypertrain.__file__.startswith(os.getcwd() + \"/src/\")"
+              test -x "$1/venv/bin/hypertrain"
+              "$1/venv/bin/hypertrain" --help >/dev/null
+              /usr/bin/timeout --signal=TERM --kill-after=10s 299s \
+                "$1/venv/bin/python" -m pytest -q -x --tb=short -p no:cacheprovider \
+                --basetemp="$1/tmp" \
+                tests/challenge/test_capacity_outer_v2.py::test_actual_bounded_outer_child_matches_original_signed_replay \
+                tests/challenge/test_service_capacity_v2.py::test_real_capacity_launch_failure_keeps_debit_and_prevents_restart_rerun \
+                "tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[success]" \
+                "tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[oom]" \
+                "tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[cancel]" \
+                "tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[deadline]" \
+                tests/miner/test_capacity_runtime_v2.py::test_real_runner_parent_death_retains_absolute_manager_timer \
+                tests/miner/test_island_launch_v2.py::test_capacity_branch_uses_real_bounded_failure_before_publication \
+                tests/challenge/test_capacity_outer_v2.py::test_actual_bounded_genesis_preparation_and_duplicate_debit \
+                tests/relay/test_transport_v2.py::test_launch_safety_independent_systemd_units
+            ' bash "$native" 2>&1 | tee "$RUNNER_TEMP/hypertrain-native-stdout.log"
+      - name: Install pinned kind v0.31.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$(mktemp -d "$RUNNER_TEMP/kind.XXXXXX")"
+          curl --fail --silent --show-error --location \
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.31.0/kind-linux-amd64 \
+            --output "$tools/kind"
+          printf '%s  %s\n' eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa "$tools/kind" | sha256sum --check --strict
+          chmod 755 "$tools/kind"
+          test "$("$tools/kind" version -q)" = 0.31.0
+          printf '%s\n' "$tools" >> "$GITHUB_PATH"
+      - name: Remaining quality gate (normal runner user)
+        run: >-
+          bash scripts/check.sh --ignore=tests/sim --ignore=tests/e2e
+          --deselect=tests/challenge/test_capacity_outer_v2.py::test_actual_bounded_outer_child_matches_original_signed_replay
+          --deselect=tests/challenge/test_service_capacity_v2.py::test_real_capacity_launch_failure_keeps_debit_and_prevents_restart_rerun
+          "--deselect=tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[success]"
+          "--deselect=tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[oom]"
+          "--deselect=tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[cancel]"
+          "--deselect=tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[deadline]"
+          --deselect=tests/miner/test_capacity_runtime_v2.py::test_real_runner_parent_death_retains_absolute_manager_timer
+          --deselect=tests/miner/test_island_launch_v2.py::test_capacity_branch_uses_real_bounded_failure_before_publication
+          --deselect=tests/challenge/test_capacity_outer_v2.py::test_actual_bounded_genesis_preparation_and_duplicate_debit
+          --deselect=tests/relay/test_transport_v2.py::test_launch_safety_independent_systemd_units
 
   # The slow subprocess tests, in parallel with test. Together the two jobs run the whole suite.
   test-slow:

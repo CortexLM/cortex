@@ -66,7 +66,7 @@ def points(a: int, b: int, n: int) -> list[int]:
 
 
 def tensor_digest(x: Tensor) -> bytes:
-    y = x.detach().contiguous()
+    y = x.detach().cpu().contiguous()
     h = hashlib.sha256(f"{y.dtype}|{tuple(y.shape)}|".encode())
     h.update(y.reshape(-1).view(torch.uint8).numpy().tobytes())
     return h.digest()

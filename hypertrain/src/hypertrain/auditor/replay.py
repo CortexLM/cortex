@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import hashlib
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Literal
 
 import torch
@@ -42,11 +43,21 @@ from hypertrain.protocol.messages import (
     StateServe,
     f32val,
 )
+from hypertrain.protocol.messages_v2 import AuditJobV2, CommitV2, RunManifestV2, StartStateV2
 from hypertrain.trainer.compress import compress, payload_hash, state_hash
 from hypertrain.trainer.config import TrainConfig
+from hypertrain.trainer.island import (
+    CancelHook,
+    Comm,
+    IslandAssignment,
+    TraceContext,
+    TraceHook,
+    train_island,
+)
 from hypertrain.trainer.loop import (
     Assignment,
     Params,
+    RoundResult,
     SampleFn,
     StepHook,
     batch_hash,
@@ -54,7 +65,8 @@ from hypertrain.trainer.loop import (
     stage_states,
     train_round,
 )
-from hypertrain.trainer.optim import OptState
+from hypertrain.trainer.model import init_params
+from hypertrain.trainer.optim import OptState, init_state
 from hypertrain.trainer.rng import rng_ctr
 
 Result = Literal["MATCH", "MISMATCH", "WITHHELD", "BAD_PROOF", "ASSIGNMENT_VIOLATION"]
@@ -101,11 +113,11 @@ def challenge_hash(ch: AuditChallenge) -> str:
 
 
 def pack_state(theta: Params, st: OptState | None = None) -> bytes:
-    out = {f"theta/{n}": x.contiguous() for n, x in theta.items()}
+    out = {f"theta/{n}": x.detach().cpu().contiguous() for n, x in theta.items()}
     if st is not None:
-        out |= {f"m/{n}": x.contiguous() for n, x in st.m.items()}
-        out |= {f"v/{n}": x.contiguous() for n, x in st.v.items()}
-        out["step"] = torch.tensor(st.step, dtype=torch.int64)
+        out |= {f"m/{n}": x.detach().cpu().contiguous() for n, x in st.m.items()}
+        out |= {f"v/{n}": x.detach().cpu().contiguous() for n, x in st.v.items()}
+        out["step"] = torch.tensor(st.step, dtype=torch.int64, device="cpu")
     return bytes(st_save(out))
 
 
@@ -133,6 +145,464 @@ def tensor_root(theta: Params, st: OptState) -> str:
         bytes.fromhex(state_hash(theta) + state_hash(st.m) + state_hash(st.v))
         + struct.pack("<Q", st.step)
     )
+
+
+def optimizer_hash(st: OptState) -> str:
+    return sha256_hex(
+        bytes.fromhex(state_hash(st.m) + state_hash(st.v)) + struct.pack("<Q", st.step)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedAnchor:
+    run_id: str
+    hotkey: str
+    w: int
+    layout_hash: str
+    state: OptState
+    ef: Params
+    proof_hash: str
+    anchor_hash: str
+    theta: Params
+    backend: str
+
+
+class AnchorCache:
+    """Only deterministic genesis and successful independent full replay enter this cache.
+
+    L0 persists/pins entries and supplies its authenticated public theta at the next round.
+    A supplied miner state or a Merkle-bound prefix is never a cache insertion API.
+    """
+
+    def __init__(self) -> None:
+        self.entries: dict[tuple[str, str, int, str], VerifiedAnchor] = {}
+
+    @staticmethod
+    def layout_hash(wrapper: RunManifestV2) -> str:
+        from hypertrain.protocol.jcs import canonicalize
+
+        return sha256_hex(canonicalize(wrapper.training.reference_spec.layout.model_dump()))
+
+    def genesis(self, wrapper: RunManifestV2, hotkey: str, theta: Params) -> VerifiedAnchor:
+        cfg = TrainConfig.from_manifest_v2(wrapper)
+        if cfg.model.od is not None and cfg.model.od.warm_start:
+            raise AuditInputError("warm start requires independently verified checkpoint lineage")
+        if state_hash(theta) != state_hash(init_params(cfg.model)):
+            raise AuditInputError("genesis theta differs from deterministic initialization")
+        reset = replace(cfg.inner, state_policy="reset")
+        st = init_state(reset, theta)
+        ef = {n: torch.zeros_like(x) for n, x in theta.items()}
+        proof = sha256_hex(bytes.fromhex(wrapper.run_id() + optimizer_hash(st) + state_hash(ef)))
+        entry = VerifiedAnchor(
+            wrapper.run_id(),
+            hotkey,
+            -1,
+            self.layout_hash(wrapper),
+            st,
+            ef,
+            proof,
+            proof,
+            {n: x.clone() for n, x in theta.items()},
+            "genesis",
+        )
+        self.entries[(entry.run_id, hotkey, -1, entry.layout_hash)] = entry
+        return entry
+
+    def warm_start(
+        self,
+        wrapper: RunManifestV2,
+        hotkey: str,
+        theta: Params,
+        source: VerifiedAnchor,
+    ) -> VerifiedAnchor:
+        """New OD run from a cached independently replayed checkpoint; heads only may extend."""
+        from hypertrain.models.opendecision import extend_params
+
+        cfg = TrainConfig.from_manifest_v2(wrapper)
+        key = (source.run_id, source.hotkey, source.w, source.layout_hash)
+        if self.entries.get(key) is not source or source.w < 0:
+            raise AuditInputError("warm-start source is not independently replayed")
+        if cfg.model.od is None or not cfg.model.od.warm_start:
+            raise AuditInputError("manifest does not permit OD warm start")
+        if state_hash(theta) != state_hash(extend_params(source.theta, cfg.model)):
+            raise AuditInputError("warm-start checkpoint tensor mismatch")
+        st = init_state(replace(cfg.inner, state_policy="reset"), theta)
+        ef = {n: torch.zeros_like(x) for n, x in theta.items()}
+        proof = sha256_hex(bytes.fromhex(wrapper.run_id() + source.proof_hash + state_hash(theta)))
+        entry = VerifiedAnchor(
+            wrapper.run_id(),
+            hotkey,
+            -1,
+            self.layout_hash(wrapper),
+            st,
+            ef,
+            proof,
+            proof,
+            {n: x.clone() for n, x in theta.items()},
+            source.backend,
+        )
+        self.entries[(entry.run_id, hotkey, -1, entry.layout_hash)] = entry
+        return entry
+
+    def persist(self, directory: Path, entry: VerifiedAnchor) -> Path:
+        """Durable cache file, atomically published after MATCH; caller owns dispute pins."""
+        import json
+        import os
+        import tempfile
+
+        from hypertrain.gpu_ops.journal import durable_write
+
+        key = (entry.run_id, entry.hotkey, entry.w, entry.layout_hash)
+        if self.entries.get(key) is not entry:
+            raise AuditInputError("cannot persist unverified anchor")
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / entry.anchor_hash
+        if target.exists():
+            return target
+        with tempfile.TemporaryDirectory(dir=directory, prefix="anchor-") as tmp:
+            path = Path(tmp)
+            state = pack_state(entry.theta, entry.state)
+            ef = pack_state(entry.ef)
+            durable_write(path / "state", state)
+            durable_write(path / "ef", ef)
+            durable_write(
+                path / "metadata",
+                json.dumps(
+                    {
+                        "run_id": entry.run_id,
+                        "hotkey": entry.hotkey,
+                        "w": entry.w,
+                        "layout_hash": entry.layout_hash,
+                        "proof_hash": entry.proof_hash,
+                        "anchor_hash": entry.anchor_hash,
+                        "backend": entry.backend,
+                        "state_sha256": sha256_hex(state),
+                        "ef_sha256": sha256_hex(ef),
+                    },
+                    sort_keys=True,
+                ).encode(),
+            )
+            os.rename(path, target)
+        return target
+
+    def restore(
+        self,
+        path: Path,
+        wrapper: RunManifestV2,
+        expected_anchor: str,
+        expected_proof: str,
+        expected_state_root: str,
+        expected_ef_hash: str,
+        *,
+        expected_hotkey: str,
+        expected_round: int,
+        expected_backend: str,
+    ) -> VerifiedAnchor:
+        """L0 supplies roots AND identity/round/backend from its authorized replay journal.
+
+        Metadata beside the tensors is never authority for execution provenance.
+        """
+        import json
+
+        key = (wrapper.run_id(), expected_hotkey, expected_round, self.layout_hash(wrapper))
+        # An unsuccessful reload must not leave a previously inserted anchor usable.
+        self.entries.pop(key, None)
+        data = json.loads((path / "metadata").read_bytes())
+        state_blob, ef_blob = (path / "state").read_bytes(), (path / "ef").read_bytes()
+        if (
+            data["run_id"] != wrapper.run_id()
+            or data["layout_hash"] != self.layout_hash(wrapper)
+            or data["anchor_hash"] != expected_anchor
+            or data["proof_hash"] != expected_proof
+            or data["hotkey"] != expected_hotkey
+            or type(data["w"]) is not int
+            or data["w"] != expected_round
+            or data["backend"] != expected_backend
+            or sha256_hex(state_blob) != data["state_sha256"]
+            or sha256_hex(ef_blob) != data["ef_sha256"]
+        ):
+            raise AuditInputError("cached anchor authentication mismatch")
+        theta, st = unpack_state(state_blob)
+        ef, _ = unpack_state(ef_blob)
+        if st is None:
+            raise AuditInputError("cached anchor has no optimizer")
+        if tensor_root(theta, st) != expected_state_root or state_hash(ef) != expected_ef_hash:
+            raise AuditInputError("cached anchor does not match authenticated replay roots")
+        entry = VerifiedAnchor(
+            data["run_id"],
+            data["hotkey"],
+            data["w"],
+            data["layout_hash"],
+            st,
+            ef,
+            data["proof_hash"],
+            data["anchor_hash"],
+            theta,
+            data["backend"],
+        )
+        self.entries[(entry.run_id, entry.hotkey, entry.w, entry.layout_hash)] = entry
+        return entry
+
+    def prior(self, wrapper: RunManifestV2, start: StartStateV2) -> VerifiedAnchor:
+        key = (wrapper.run_id(), start.hotkey, start.w - 1, self.layout_hash(wrapper))
+        try:
+            entry = self.entries[key]
+        except KeyError as e:
+            raise AuditInputError(
+                "ANCHOR_BUDGET_EXCEEDED: no independently verified predecessor"
+            ) from e
+        if (
+            start.parent_anchor_hash != entry.anchor_hash
+            or start.anchor_verdict_hash != entry.proof_hash
+            or start.opt_state_hash != optimizer_hash(entry.state)
+            or start.ef_hash != state_hash(entry.ef)
+        ):
+            raise AuditInputError("carried anchor lineage mismatch")
+        return entry
+
+
+def audit_island(
+    job: AuditJobV2,
+    comm: Comm,
+    get_sample: SampleFn,
+    theta_blob: bytes,
+    ef_blob: bytes,
+    v0_blob: bytes,
+    cache: AnchorCache,
+    *,
+    now_round: int,
+    cancel: CancelHook | None = None,
+    hook: TraceHook | None = None,
+    device: torch.device | str = "cpu",
+    beacon_now: Callable[[], int] | None = None,
+) -> tuple[Outcome, RoundResult]:
+    """Full exact-layout replay from an independently checked carry lineage, never served prefix.
+
+    L0 authenticates job issuer/roles/reservation before calling. Live lease rechecked here.
+    If one predecessor is missing L0 first executes it under the same reserved 2H budget;
+    ordinary worker never silently performs an unreserved historical rebuild.
+    """
+    job.validate_embedded(now_round)
+
+    def live() -> None:
+        if beacon_now is not None:
+            job.validate_embedded(beacon_now())
+        if cancel is not None:
+            cancel()
+
+    cfg = TrainConfig.from_manifest_v2(job.manifest)
+    if job.anchor_age > 1 or not cfg.inner.H <= job.replay_step_budget <= 2 * cfg.inner.H:
+        raise AuditInputError("ANCHOR_BUDGET_EXCEEDED")
+    start = job.start_state
+    if sha256_hex(theta_blob) != start.state_object_sha256:
+        raise AuditInputError("start object hash mismatch")
+    if sha256_hex(ef_blob) != job.ef_in.sha256 or len(ef_blob) != job.ef_in.size:
+        raise AuditInputError("EF object hash/size mismatch")
+    if sha256_hex(v0_blob) != job.v0.sha256 or len(v0_blob) != job.v0.size:
+        raise AuditInputError("v0 object hash/size mismatch")
+    theta, supplied = unpack_state(theta_blob)
+    ef, _ = unpack_state(ef_blob)
+    v0, _ = unpack_state(v0_blob)
+    if (
+        state_hash(theta) != start.theta_hash
+        or state_hash(ef) != start.ef_hash
+        or start.ef_object_sha256 != job.ef_in.sha256
+    ):
+        raise AuditInputError("start theta/EF binding mismatch")
+    entry = cache.prior(job.manifest, start)
+    backend = torch.device(device).type
+    if entry.backend not in ("genesis", backend):
+        raise AuditInputError("CPU anchor cannot serve as CUDA replay oracle")
+    if supplied is None or optimizer_hash(supplied) != optimizer_hash(entry.state):
+        raise AuditInputError("fabricated carried prefix")
+    if cfg.inner.state_policy == "carry" and start.global_step0 != entry.state.step:
+        raise AuditInputError("global optimizer step mismatch")
+    theta = {n: x.to(device) for n, x in theta.items()}
+    ef = {n: x.to(device) for n, x in ef.items()}
+    v0 = {n: x.to(device) for n, x in v0.items()}
+    carry = OptState(
+        {n: x.to(device) for n, x in entry.state.m.items()},
+        {n: x.to(device) for n, x in entry.state.v.items()},
+        entry.state.step,
+    )
+    commit = CommitV2.model_validate(job.commit_envelope["body"])
+    a = IslandAssignment(
+        job.run_id,
+        commit.w,
+        tuple(job.sample_ids),
+        start.global_step0,
+        job.manifest.training.reference_spec.layout.n_gpus,
+    )
+    if any(
+        p.batch_ids_sha256 != _expected_batch_hash(cfg, a, i * cfg.inner.J)
+        for i, p in enumerate(job.preimages)
+    ):
+        raise AuditInputError("ASSIGNMENT_VIOLATION")
+    result = train_island(
+        cfg,
+        job.manifest.training.reference_spec.layout,
+        comm,
+        theta,
+        a,
+        get_sample,
+        ef_in=ef,
+        carry=carry if cfg.inner.state_policy == "carry" else None,
+        v0=v0 if cfg.inner.state_policy == "derived" else None,
+        cancel=live,
+        hook=hook,
+    )
+    live()
+    first = next(
+        (
+            i
+            for i, (p, r) in enumerate(zip(job.preimages, result.leaves, strict=True))
+            if p.digest() != r.preimage.digest()
+        ),
+        None,
+    )
+    match = (
+        first is None
+        and result.leaves_root == commit.leaves_root
+        and result.delta_hash == commit.delta_hash
+        and result.final_theta_hash == commit.final_theta_hash
+        and result.ef_in_hash == commit.ef_in_hash
+        and result.ef_out_hash == commit.ef_out_hash
+    )
+    out = Outcome("MATCH" if match else "MISMATCH", first, result.leaves_root)
+    if match:
+        proof = sha256_hex(bytes.fromhex(job.job_id + result.leaves_root + result.delta_hash))
+        anchor_hash = sha256_hex(bytes.fromhex(start.digest() + proof))
+        layout = cache.layout_hash(job.manifest)
+        cache.entries[(job.run_id, commit.hotkey, commit.w, layout)] = VerifiedAnchor(
+            job.run_id,
+            commit.hotkey,
+            commit.w,
+            layout,
+            result.final_state.clone(),
+            {n: x.clone() for n, x in result.ef_out.items()},
+            proof,
+            anchor_hash,
+            {n: x.clone() for n, x in result.final_theta.items()},
+            backend,
+        )
+    return out, result
+
+
+def audit_island_chain(
+    current: AuditJobV2,
+    predecessor: AuditJobV2 | None,
+    comm: Comm,
+    get: SampleFn,
+    current_blobs: tuple[bytes, bytes, bytes],
+    predecessor_blobs: tuple[bytes, bytes, bytes] | None,
+    cache: AnchorCache,
+    *,
+    now_round: int,
+    cancel: CancelHook | None = None,
+    device: torch.device | str = "cpu",
+    beacon_now: Callable[[], int] | None = None,
+) -> tuple[Outcome, RoundResult]:
+    """At most one missing predecessor; both accepted jobs consume current reserved 2H.
+
+    L0 supplies authenticated live predecessor job/reservation, never an unsigned prefix.
+    """
+    current.validate_embedded(beacon_now() if beacon_now is not None else now_round)
+
+    def live() -> None:
+        current.validate_embedded(beacon_now() if beacon_now is not None else now_round)
+        if cancel is not None:
+            cancel()
+
+    h = current.manifest.training.inner.H
+    if predecessor is not None:
+        if (
+            current.anchor_age != 1
+            or current.replay_step_budget < 2 * h
+            or predecessor.start_state.w + 1 != current.start_state.w
+            or predecessor.run_id != current.run_id
+            or predecessor.start_state.hotkey != current.start_state.hotkey
+            or predecessor_blobs is None
+        ):
+            raise AuditInputError("ANCHOR_BUDGET_EXCEEDED: predecessor reservation mismatch")
+        out, _ = audit_island(
+            predecessor,
+            comm,
+            get,
+            *predecessor_blobs,
+            cache,
+            now_round=now_round,
+            cancel=live,
+            device=device,
+            beacon_now=beacon_now,
+        )
+        if out.result != "MATCH":
+            raise AuditInputError("predecessor replay did not MATCH")
+    return audit_island(
+        current,
+        comm,
+        get,
+        *current_blobs,
+        cache,
+        now_round=now_round,
+        cancel=live,
+        device=device,
+        beacon_now=beacon_now,
+    )
+
+
+def replay_island_windows(
+    cfg: TrainConfig,
+    wrapper: RunManifestV2,
+    comm: Comm,
+    theta: Params,
+    st: OptState,
+    a: Assignment,
+    start_leaf: int,
+    end_leaf: int,
+    get_sample: SampleFn,
+    *,
+    cancel: CancelHook | None = None,
+    hook: TraceHook | None = None,
+) -> tuple[list[LeafPreimage], Params, OptState]:
+    """Same-layout windows for L5 AFTER anchored prefix verification; no independent verdict."""
+    if cfg.inner.state_policy != "carry" or cfg.inner.rewarmup_steps:
+        raise AuditInputError("island windows require carry without rewarmup")
+    if not 0 <= start_leaf < end_leaf <= cfg.inner.H // cfg.inner.J:
+        raise AuditInputError("invalid island window")
+    per = (
+        cfg.inner.micro_batch * cfg.inner.grad_accum * wrapper.training.reference_spec.layout.n_gpus
+    )
+    wcfg = replace(cfg, inner=replace(cfg.inner, H=cfg.inner.J))
+    pres = []
+    for i in range(start_leaf, end_leaf):
+        s = i * cfg.inner.J
+        wa = Assignment(
+            a.run_id, a.w, a.sample_ids[s * per : (s + cfg.inner.J) * per], a.global_step0 + s
+        )
+
+        def window_hook(ctx: TraceContext, x: torch.Tensor, offset: int = s) -> torch.Tensor:
+            assert hook is not None
+            return hook(replace(ctx, step=ctx.step + offset), x)
+
+        result = train_island(
+            wcfg,
+            wrapper.training.reference_spec.layout,
+            comm,
+            theta,
+            wa,
+            get_sample,
+            carry=st,
+            cancel=cancel,
+            hook=window_hook if hook is not None else None,
+        )
+        t = s + cfg.inner.J
+        pres.append(
+            result.leaves[-1].preimage.model_copy(
+                update={"t": t, "rng_ctr": rng_ctr(a.run_id, a.w, t, -1)}
+            )
+        )
+        theta, st = result.final_theta, result.final_state
+    return pres, theta, st
 
 
 def _uniform(seed: bytes, n: int, ctr: list[int]) -> int:

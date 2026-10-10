@@ -147,7 +147,7 @@ class OuterState:
         flat: dict[str, Arr] = {}
         for part in _PARTS:
             for n, a in getattr(self, part).items():
-                flat[f"{part}/{n}"] = np.ascontiguousarray(a, dtype="<f4")
+                flat[f"{part}/{n}"] = np.ascontiguousarray(a, dtype="<f4").reshape(a.shape)
         return st_save(flat)
 
     @classmethod

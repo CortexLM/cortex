@@ -1,0 +1,18 @@
+# patterns (grep -E on repo-relative paths) excluded from the published tree
+(^|/)\.venv/
+(^|/)__pycache__/
+(^|/)\.(mypy|ruff|pytest)_cache/
+^\.git/
+^\.transport-admission\.json$
+^data/
+^experiments/results/.*(\.log|smoke|parity_state).*
+^experiments/gpu_phase_[ab]/live-config\.json$
+\.env$
+known_hosts
+id_(ed25519|rsa)
+\.(pem|key)$
+# Local authority, custody and recovery material; public nested data stays publishable.
+^\.(omo|herdr-web-ui)/
+(^|/)(private|secrets|roles|private-roles|role-keys|private-keys|authority|authority-state|portable-authority|portable-bundle|portable-bundles|snapshots|preserved-snapshots|evidence|service-export|integration-root|rescue)/
+\.(seed|priv|p12|pfx|pkcs8)$
+(^|/)(private[-_]key|admin\.token|drain\.token|challenge\.db(-wal|-shm)?|bundle\.json)$

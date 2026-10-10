@@ -17,9 +17,11 @@ concurrency:
 
 jobs:
   ci:
+    if: github.ref == 'refs/heads/main'
     uses: ./.github/workflows/ci.yml
 
   publish:
+    if: github.ref == 'refs/heads/main'
     needs: ci
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -77,4 +79,164 @@ jobs:
         with:
           subject-name: ${{ matrix.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  candidate-gpu:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/hypertrain-cuda-qualification'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      CANDIDATE_IMAGE: ghcr.io/cortexlm/hypertrain-gpu:candidate-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Free disk for the CUDA base image
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Freeze candidate source and build backend pins
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import tomllib
+          import os
+
+          root = pathlib.Path.cwd()
+          output = pathlib.Path(os.environ['GITHUB_OUTPUT'])
+          temporary = pathlib.Path(os.environ['RUNNER_TEMP'])
+          files = sorted(p for p in (root / 'src/hypertrain').rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix != '.pyc')
+          assert files and all(not p.is_symlink() for p in files)
+          assert all(p.suffix == '.py' or p.name == 'py.typed' or p.relative_to(root).as_posix() == 'src/hypertrain/datasets/registry.json' for p in files)
+          source = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
+          copied = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in files + [root / p for p in ('pyproject.toml', 'uv.lock', 'README.md', 'LICENSE')]}
+          lock = tomllib.loads((root / 'uv.lock').read_text())
+          versions = {p['name']: p['version'] for p in lock['package'] if p['name'] in {'hatchling', 'packaging', 'pathspec', 'pluggy', 'trove-classifiers'}}
+          versions.update(hatchling='1.27.0', **{'trove-classifiers': '2026.6.1.19'})
+          pins = {
+              'hatchling': ('1.27.0', 'd3a2f3567c4f926ea39849cdf924c7e99e6686c9c8e288ae1037c8fa2a5d937b'),
+              'pathspec': ('1.1.1', 'a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189'),
+              'pluggy': ('1.6.0', 'e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746'),
+              'trove-classifiers': ('2026.6.1.19', 'ab4c4ec93cc4a4e7815fa759906e05e6bb3f2fbd92ea0f897288c6a43efd15b3'),
+          }
+          assert all(versions[name] == version for name, (version, _) in pins.items())
+          manifest = {'source_files': source, 'copy_files': copied, 'backend_versions': versions}
+          raw = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()
+          (temporary / 'candidate-source.json').write_bytes(raw)
+          requirements = '\n'.join(f'{name}=={version} --hash=sha256:{digest}' for name, (version, digest) in pins.items()) + '\n'
+          backend = "RUN printf '%b' " + repr(requirements) + " > /tmp/candidate-build-requirements.txt && VIRTUAL_ENV=/opt/hypertrain/venv uv-pinned pip install --require-hashes --no-deps -r /tmp/candidate-build-requirements.txt && rm /tmp/candidate-build-requirements.txt\n"
+          # Only the candidate recipe persists the reviewed pinned backend packages.
+          (temporary / 'Dockerfile.candidate').write_text((root / 'docker/Dockerfile.gpu').read_text() + '\n' + backend)
+          with output.open('a') as stream:
+              print('source_hash=' + hashlib.sha256(raw).hexdigest(), file=stream)
+              print('version=' + tomllib.loads((root / 'pyproject.toml').read_text())['project']['version'], file=stream)
+          PY
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build candidate locally before publication
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ runner.temp }}/Dockerfile.candidate
+          load: true
+          push: false
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ github.sha }}
+          labels: |
+            io.cortex.challenge.source-manifest=${{ steps.meta.outputs.source_hash }}
+          tags: ${{ env.CANDIDATE_IMAGE }}
+      - name: Verify installed candidate source before registry write
+        run: ENGINE=docker bash scripts/verify_image.sh --cuda-candidate "$CANDIDATE_IMAGE" "$RUNNER_TEMP/candidate-source.json" "$GITHUB_SHA"
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse an existing or unverifiable candidate tag
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_ACTOR: ${{ github.actor }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64
+          import http.client
+          import json
+          import os
+          import re
+          import urllib.parse
+
+          repository = 'cortexlm/hypertrain-gpu'
+          tag = 'candidate-' + os.environ['GITHUB_SHA']
+          assert re.fullmatch(r'candidate-[0-9a-f]{40}', tag)
+          assert os.environ['CANDIDATE_IMAGE'] == 'ghcr.io/' + repository + ':' + tag
+          credentials = base64.b64encode((os.environ['GHCR_ACTOR'] + ':' + os.environ['GHCR_TOKEN']).encode()).decode()
+          query = urllib.parse.urlencode({'service': 'ghcr.io', 'scope': 'repository:' + repository + ':pull'})
+          try:
+              connection = http.client.HTTPSConnection('ghcr.io', timeout=30)
+              connection.request('GET', '/token?' + query, headers={'Authorization': 'Basic ' + credentials, 'Accept': 'application/json'})
+              response = connection.getresponse()
+              assert response.status == 200 and response.getheader('Content-Type', '').split(';')[0] == 'application/json', 'registry authentication refused'
+              payload = response.read(1048577)
+              assert len(payload) <= 1048576, 'invalid registry token response'
+              bearer = json.loads(payload)['token']
+              assert isinstance(bearer, str) and bearer and not any(c.isspace() for c in bearer), 'invalid registry token'
+              connection.close()
+              connection = http.client.HTTPSConnection('ghcr.io', timeout=30)
+              # Validate the granted repository pull scope by exercising it; GHCR tokens are opaque.
+              connection.request('GET', '/v2/' + repository + '/tags/list?n=1', headers={'Authorization': 'Bearer ' + bearer, 'Accept': 'application/json'})
+              response = connection.getresponse()
+              assert response.status == 200 and response.getheader('Docker-Distribution-Api-Version') == 'registry/2.0', 'repository pull scope refused'
+              assert response.getheader('Content-Type', '').split(';')[0] == 'application/json', 'invalid repository response'
+              payload = response.read(1048577)
+              assert len(payload) <= 1048576, 'invalid repository response size'
+              scope = json.loads(payload)
+              assert scope.get('name') == repository and isinstance(scope.get('tags'), list) and all(isinstance(value, str) for value in scope['tags']), 'repository pull scope not verified'
+              connection.close()
+              connection = http.client.HTTPSConnection('ghcr.io', timeout=30)
+              connection.request('GET', '/v2/' + repository + '/manifests/' + tag, headers={'Authorization': 'Bearer ' + bearer, 'Accept': 'application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json'})
+              response = connection.getresponse()
+              assert response.status == 404, 'candidate tag exists or registry lookup refused'
+              assert response.getheader('Docker-Distribution-Api-Version') == 'registry/2.0', 'invalid registry response'
+              assert response.getheader('Content-Type', '').split(';')[0] == 'application/json', 'invalid registry error media type'
+              payload = response.read(1048577)
+              assert len(payload) <= 1048576, 'invalid registry error response'
+              errors = json.loads(payload)['errors']
+              assert isinstance(errors, list) and errors and all(isinstance(error, dict) and error.get('code') == 'MANIFEST_UNKNOWN' for error in errors), 'registry absence not authoritative'
+              connection.close()
+          except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError, AttributeError, AssertionError):
+              raise SystemExit('Candidate tag guard refused publication') from None
+          print('Authenticated exact candidate tag absent; publication may proceed')
+          PY
+      - name: Publish only the verified candidate
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker push "$CANDIDATE_IMAGE"
+          reference="$(docker image inspect "$CANDIDATE_IMAGE" --format '{{index .RepoDigests 0}}')"
+          test "${reference%@*}" = ghcr.io/cortexlm/hypertrain-gpu
+          digest="${reference#*@}"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+      - name: Attest actual candidate digest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/cortexlm/hypertrain-gpu
+          subject-digest: ${{ steps.publish.outputs.digest }}
           push-to-registry: true

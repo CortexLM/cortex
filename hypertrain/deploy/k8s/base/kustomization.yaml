@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: hypertrain-relay
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+  - pdb.yaml
+  - hpa.yaml
+images:
+  - name: ghcr.io/cortexlm/hypertrain
+    digest: sha256:ebdb8bc97122488682c63200f55fae92a980e5a75b50cbe4d0ce3bde0fbf7fdb

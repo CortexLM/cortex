@@ -1,0 +1,90 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-deny-default
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-authorized-flows
+spec:
+  podSelector:
+    matchLabels:
+      app: hypertrain-relay
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              hypertrain.network/role: gateway
+          podSelector:
+            matchLabels:
+              hypertrain.network/role: gateway
+        - namespaceSelector:
+            matchLabels:
+              hypertrain.network/role: control
+          podSelector:
+            matchLabels:
+              hypertrain.network/role: master
+      ports:
+        - {protocol: TCP, port: 8000}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              hypertrain.network/role: gateway
+          podSelector:
+            matchLabels:
+              hypertrain.network/role: gateway
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              hypertrain.network/role: gateway
+          podSelector:
+            matchLabels:
+              hypertrain.network/role: gateway
+        - namespaceSelector:
+            matchLabels:
+              hypertrain.network/role: egress
+          podSelector:
+            matchLabels:
+              hypertrain.network/role: egress
+        - namespaceSelector:
+            matchLabels:
+              hypertrain.network/role: control
+          podSelector:
+            matchLabels:
+              hypertrain.network/role: master
+        - namespaceSelector:
+            matchLabels:
+              hypertrain.network/role: store
+          podSelector:
+            matchLabels:
+              hypertrain.network/role: store
+      ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 8000}
+        - {protocol: TCP, port: 9000}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              hypertrain.network/role: gateway
+          podSelector:
+            matchLabels:
+              hypertrain.network/role: gateway
+      ports:
+        - {protocol: TCP, port: 8443}
+  # External S3/drand/master require operator-pinned CIDRs or an approved egress
+  # gateway; NetworkPolicy cannot enforce hostnames. No 0.0.0.0/0 exemption.

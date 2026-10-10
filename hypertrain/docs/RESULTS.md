@@ -2,6 +2,24 @@
 
 Final results of the hypertrain challenge build, with the budget reconciliation and an honest qualification status. Numbers tagged `value{ev:path#key}` are checked by `scripts/check_doc_numbers.py` against [experiments/results/final_results.json](../experiments/results/final_results.json). Evidence paths below are in the workspace evidence directory `.omo/evidence/hypertrain-challenge/` (not part of the published tree).
 
+## Current network v2 update - 2026-10-10
+
+The original challenge results and budget below are historical, not current network-v2 completion or current account balance. The root network ledger is **20/23; allocation80, CPU verification and final push/CI remain open**. Later scoped evidence resides in workspace `.omo/evidence/hypertrain-network/`, outside the published tree:
+
+| Scope | Actual credit | Independent artifact |
+| --- | --- | --- |
+| FIRST4 CUDA008 | Four CUDA rounds/eight rank workers across two two-GPU hosts, both580.95.05; small61,856-parameter decoder, two-host bitwise PASS, workload_allowed=false | `qualification-usd50-20261009T181257Z/NEXT30-008-RESULT-VERIFY.md`; final authenticated instance/volume closure retained separately |
+| Public miner CLI | In-process public run-v2 CPU interface PASS; not installed-CLI subprocess or CUDA attestation | `MINER-PUBLIC-CLI-VERIFY.md` |
+| Local Kubernetes r2 | Import/source109, TLS/CNI, four authorized10MiB transfers, fixture-master acceptance, replica/regional failover, retention/GC and namespace denial PASS; owned cleanup verified | `K8S-TRANSPORT-R2-RESULT-VERIFY.md`; original outer caller exit1 remains historical failure |
+| Isolated caller phase fix | READY without preownership ID stays pending; two native-event cases passed, malformed terminal fails closed | `K8S-CALLER-READY-PHASE-FIX-VERIFY.md`; no new cluster execution or retroactive caller exit0 |
+| Product relay policy | Gateway namespace AND pod TCP8443 shared-base delta; one passing regression, actual local/EU/US/APAC renders | `K8S-RELAY-PRODUCT-INTEGRATION-VERIFY.md`; APAC render is not APAC runtime |
+| Admission contracts | Operator, consumer, wrapper and antiabuse bounded CPU contracts complete; public CLI multi-rank evidence is in-process CPU, separate from historical FIRST4 CUDA008 | `PUBLIC-ADMISSION-CUSTODY-VERIFY.md`, `ANTIABUSE-TRUST-VERIFY.md`, `MINER-PUBLIC-CLI-VERIFY.md`; production116 unproven |
+| Capacity | Owned accounting, collector and native CPU fallback safeguards previously reviewed; current source requalification pending after type/runtime changes invalidated the old112 pins. Genuine80 H2 execution unrun; CPU verification not PASS | `CAPACITY-CPU-FALLBACK-VERIFY.md` is historical source review; fresh CPU approval absent and root execution admission pending |
+
+Internal runtime-custody or `NOTSTOREACCEPTED` descriptors retain private evidence only. Accepted shadow-execution remains gated by the original validated execution context, actual backend qualification and economic authority; private retention does not grant eligibility or funded production116 acceptance.
+
+APAC runtime, L0 finality, full D3 integration, funded116 continuation and roster/service capacity remain unproven. No quality, profitability, current decoder/production or global network completion claim follows these gates. See [network-v2.md](network-v2.md#current-proof-boundary) for operator boundaries. No publication occurred during this docs-only update.
+
 ## 1. Status
 
 **Equivalence not demonstrated at >=0.5B; GPU proxy ladder gated.** The determinism machinery works on real hardware. Training-quality parity with a centralized run is unproven at every scale that matters.

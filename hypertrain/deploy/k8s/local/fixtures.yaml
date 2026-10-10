@@ -1,0 +1,281 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hypertrain-proof
+  labels:
+    hypertrain.network/role: control
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hypertrain-proof-store
+  labels:
+    hypertrain.network/role: store
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hypertrain-proof-gateway
+  labels:
+    hypertrain.network/role: gateway
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hypertrain-proof-denied
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: hypertrain-proof-store
+  labels:
+    hypertrain.network/proof: hypertrain-v2-proof
+spec:
+  capacity: {storage: 512Mi}
+  accessModes: [ReadWriteOnce]
+  storageClassName: ""
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /var/local/hypertrain-proof-store
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: objects
+  namespace: hypertrain-proof-store
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ""
+  volumeName: hypertrain-proof-store
+  resources:
+    requests: {storage: 512Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: objects
+  namespace: hypertrain-proof-store
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: objects}
+  template:
+    metadata:
+      labels: {app: objects, hypertrain.network/role: store}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: objects
+          image: ghcr.io/cortexlm/hypertrain@sha256:ebdb8bc97122488682c63200f55fae92a980e5a75b50cbe4d0ce3bde0fbf7fdb
+          command: [/opt/venv/bin/python, /fixture/relay_kind_smoke.py, --fixture, store]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 250m, memory: 192Mi}
+          readinessProbe:
+            httpGet: {path: /livez, port: 9000}
+          volumeMounts:
+            - {name: script, mountPath: /fixture, readOnly: true}
+            - {name: secrets, mountPath: /run/proof, readOnly: true}
+            - {name: objects, mountPath: /objects}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: script
+          configMap: {name: proof-script}
+        - name: secrets
+          secret: {secretName: proof-secrets, defaultMode: 0440}
+        - name: objects
+          persistentVolumeClaim: {claimName: objects}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: objects, namespace: hypertrain-proof-store}
+spec:
+  selector: {app: objects}
+  ports: [{port: 9000, targetPort: 9000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: master, namespace: hypertrain-proof}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: master}
+  template:
+    metadata:
+      labels: {app: master, hypertrain.network/role: master}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: master
+          image: ghcr.io/cortexlm/hypertrain@sha256:ebdb8bc97122488682c63200f55fae92a980e5a75b50cbe4d0ce3bde0fbf7fdb
+          command: [/opt/venv/bin/python, /fixture/relay_kind_smoke.py, --fixture, master]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 250m, memory: 192Mi}
+          readinessProbe:
+            httpGet: {path: /livez, port: 8000}
+          volumeMounts:
+            - {name: script, mountPath: /fixture, readOnly: true}
+            - {name: secrets, mountPath: /run/proof, readOnly: true}
+            - {name: master, mountPath: /master}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: script
+          configMap: {name: proof-script}
+        - name: secrets
+          secret: {secretName: proof-secrets, defaultMode: 0440}
+        - name: master
+          persistentVolumeClaim: {claimName: master}
+        - name: tmp
+          emptyDir: {sizeLimit: 96Mi}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: hypertrain-proof-master
+  labels:
+    hypertrain.network/proof: hypertrain-v2-proof
+spec:
+  capacity: {storage: 32Mi}
+  accessModes: [ReadWriteOnce]
+  storageClassName: ""
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /var/local/hypertrain-proof-master
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: master, namespace: hypertrain-proof}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ""
+  volumeName: hypertrain-proof-master
+  resources:
+    requests: {storage: 32Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: master, namespace: hypertrain-proof}
+spec:
+  selector: {app: master}
+  ports: [{port: 8000, targetPort: 8000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: gateway, namespace: hypertrain-proof-gateway}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: gateway}
+  template:
+    metadata:
+      labels: {app: gateway, hypertrain.network/role: gateway}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: gateway
+          image: ghcr.io/cortexlm/hypertrain@sha256:ebdb8bc97122488682c63200f55fae92a980e5a75b50cbe4d0ce3bde0fbf7fdb
+          command: [/opt/venv/bin/python, /fixture/relay_kind_smoke.py, --fixture, gateway]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 250m, memory: 192Mi}
+          readinessProbe:
+            tcpSocket: {port: 8443}
+          volumeMounts:
+            - {name: script, mountPath: /fixture, readOnly: true}
+            - {name: secrets, mountPath: /run/proof, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: script
+          configMap: {name: proof-script}
+        - name: secrets
+          secret: {secretName: proof-secrets, defaultMode: 0440}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: gateway, namespace: hypertrain-proof-gateway}
+spec:
+  selector: {app: gateway}
+  ports: [{port: 443, targetPort: 8443}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: mock-miner, namespace: hypertrain-proof}
+spec:
+  backoffLimit: 0
+  suspend: true
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels: {hypertrain.network/role: master}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: miner
+          image: ghcr.io/cortexlm/hypertrain@sha256:ebdb8bc97122488682c63200f55fae92a980e5a75b50cbe4d0ce3bde0fbf7fdb
+          command: [/opt/venv/bin/python, /fixture/relay_kind_smoke.py, --fixture, miner]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 250m, memory: 192Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: script, mountPath: /fixture, readOnly: true}
+            - {name: secrets, mountPath: /run/proof, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: script
+          configMap: {name: proof-script}
+        - name: secrets
+          secret: {secretName: proof-secrets, defaultMode: 0440}
+        - name: tmp
+          emptyDir: {sizeLimit: 96Mi}

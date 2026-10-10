@@ -15,15 +15,21 @@ import logging
 import os
 import shutil
 import stat
+import threading
 import time
 import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
+
+if TYPE_CHECKING:
+    from hypertrain.gpu_ops.work_screen import IslandLaunch
+    from hypertrain.miner.island_launch import IslandArtifacts
+    from hypertrain.protocol.messages_v2 import IslandJobV1
 
 import hypertrain.trainer  # noqa: F401  (determinism setup before torch)
 from hypertrain.auditor.bisect import Executor
@@ -131,39 +137,80 @@ class MinerConfig:
 
 
 @dataclass(frozen=True)
+class Gpu:
+    index: int
+    name: str
+    sm_count: int
+    uuid: str
+
+
+@dataclass(frozen=True)
 class Hardware:
     device: str
     name: str
     sm_count: int
     driver: str
     n_gpus: int
+    gpus: tuple[Gpu, ...] = ()
+
+
+def detect_gpus() -> tuple[Gpu, ...]:
+    """Every GPU visible to this process (honours CUDA_VISIBLE_DEVICES), in CUDA order."""
+    import torch
+
+    from hypertrain.miner.island_launch import gpu_uuid
+
+    if not torch.cuda.is_available():
+        return ()
+    out = []
+    for i in range(torch.cuda.device_count()):
+        p = torch.cuda.get_device_properties(i)
+        out.append(Gpu(i, p.name, p.multi_processor_count, gpu_uuid(p.uuid)))
+    return tuple(out)
+
+
+def select_gpus(gpus: tuple[Gpu, ...], n_gpus: int, sm_count: int) -> tuple[str, ...]:
+    """UUIDs of the first n_gpus devices; refuse short, mixed-SM or duplicate-identity hosts."""
+    if len(gpus) < n_gpus:
+        raise HardwareMismatch(f"{len(gpus)} visible GPU(s) < manifest layout.n_gpus {n_gpus}")
+    sms = sorted({g.sm_count for g in gpus})
+    if len(sms) != 1:
+        raise HardwareMismatch(f"heterogeneous SM counts {sms} across visible GPUs")
+    if sms[0] != sm_count:
+        raise HardwareMismatch(f"SM count {sms[0]} != reference {sm_count}")
+    if len({g.uuid for g in gpus}) != len(gpus):
+        raise HardwareMismatch("duplicate GPU UUIDs reported")
+    return tuple(g.uuid for g in gpus[:n_gpus])
+
+
+def _driver() -> str:
+    version = Path("/proc/driver/nvidia/version")
+    if not version.is_file():
+        return "unknown"
+    parts = version.read_text().split()
+    return next((p for p in parts if p[:1].isdigit() and "." in p), "unknown")
 
 
 def self_check(device: str, manifest: RunManifest) -> Hardware:
     """Device name, SM count and driver vs reference_spec (sm_count, driver_allowlist)."""
-    import torch
-
     ref = manifest.reference_spec
+    if ref.layout.n_gpus != 1:
+        # v1 Accept/Commit/audit replay one rank (loop.train_round, auditor Executor) over a
+        # single-rank assignment; a multi-rank island commitment is not replayable there.
+        raise HardwareMismatch(
+            f"v1 `hypertrain-miner run` trains single-rank layouts only (manifest "
+            f"layout.n_gpus={ref.layout.n_gpus}); use `hypertrain-miner run-v2` for multi-GPU"
+        )
     if device == "cpu":
         hw = Hardware("cpu", "cpu", 0, "cpu", 1)
     else:
-        if not torch.cuda.is_available():
+        gpus = detect_gpus()
+        if not gpus:
             raise HardwareMismatch("device cuda requested but CUDA is unavailable")
-        props = torch.cuda.get_device_properties(0)
-        version = Path("/proc/driver/nvidia/version")
-        driver = "unknown"
-        if version.is_file():
-            parts = version.read_text().split()
-            driver = next((p for p in parts if p[:1].isdigit() and "." in p), "unknown")
-        hw = Hardware("cuda", props.name, props.multi_processor_count, driver, 1)
-        if hw.sm_count != ref.sm_count:
-            raise HardwareMismatch(f"SM count {hw.sm_count} != reference {ref.sm_count}")
+        select_gpus(gpus, 1, ref.sm_count)
+        hw = Hardware("cuda", gpus[0].name, gpus[0].sm_count, _driver(), 1, gpus)
     if ref.driver_allowlist and hw.driver not in ref.driver_allowlist:
         raise HardwareMismatch(f"driver {hw.driver} not in the manifest allowlist")
-    if ref.layout.n_gpus != 1:
-        # ponytail: single-rank islands only; multi-rank needs torchrun + trainer.island and a
-        # challenge assignment sized x n_gpus. Add when the island launcher lands.
-        raise HardwareMismatch("this client trains single-GPU layouts only")
     return hw
 
 
@@ -627,3 +674,392 @@ class Miner:
 
 def canonical(obj: Any) -> bytes:
     return canonicalize(obj, allow_float=False)
+
+
+class NetworkMiner:
+    """Explicit ht/2 client; shared API, keyfile, launcher, admission and watch primitives."""
+
+    def __init__(self, cfg: MinerConfig, client: httpx.Client) -> None:
+        from hypertrain.protocol import envelope_v2
+        from hypertrain.protocol.messages_v2 import RunManifestV2
+
+        if cfg.run_id is None or cfg.owner_hotkey is None:
+            raise MinerError("v2 requires pinned run_id and owner_hotkey")
+        self.cfg, self.api, self.kp = cfg, Api(client, cfg.api), load_keyfile(cfg.keyfile)
+        self.run_id, self.url = cfg.run_id, f"/v2/runs/{cfg.run_id}"
+        status = self.api.call("GET", self.url)
+        env = envelope_v2.parse_envelope(status["manifest_envelope"])
+        if (
+            env.signer != cfg.owner_hotkey
+            or not envelope_v2.verify_envelope(env.model_dump())
+            or env.type != "RunManifestV2"
+        ):
+            raise MinerError("v2 manifest authority/signature mismatch")
+        self.manifest = RunManifestV2.model_validate(env.body)
+        self.manifest.validate_run_id(self.run_id)
+        self.directory = cfg.workdir / self.run_id / self.kp.ss58
+        self.directory.mkdir(parents=True, exist_ok=True)
+
+    def status(self) -> dict[str, Any]:
+        return self.api.call("GET", self.url + "/admission/" + self.kp.ss58)
+
+    def join(self, coldfile: Path, request_id: str, expiry: int) -> dict[str, Any]:
+        from hypertrain.miner.admission import sign_join
+        from hypertrain.protocol.messages_v2 import HardwareHint
+
+        request = sign_join(
+            self.kp,
+            load_keyfile(coldfile),
+            run_id=self.run_id,
+            request_id=request_id,
+            expires_beacon=expiry,
+            policy_hash=self.manifest.network.admission_policy_hash,
+            hardware_hint=HardwareHint(
+                device_name=self.cfg.device,
+                device_count=self.manifest.training.reference_spec.layout.n_gpus,
+                driver="advisory",
+            ),
+        )
+        return self.api.call("POST", self.url + "/join", content=canonical(request.body()))
+
+    def probe(
+        self,
+        job_path: Path,
+        challenge_path: Path,
+        *,
+        launch: IslandLaunch | None = None,
+        cancel: threading.Event | None = None,
+        trace: bool = False,
+    ) -> dict[str, Any]:
+        from hypertrain.gpu_ops.work_screen import screen_work
+        from hypertrain.protocol import envelope_v2
+        from hypertrain.protocol.messages_v2 import IslandJobV1, JoinChallenge
+
+        job = IslandJobV1.model_validate_json(job_path.read_bytes())
+        if time.time() >= job.deadline or cancel is not None and cancel.is_set():
+            raise MinerError("probe deadline/cancellation")
+        env = envelope_v2.parse_envelope(challenge_path.read_bytes())
+        if (
+            job.run_id != self.run_id
+            or env.signer != self.manifest.training.coord_pubkey
+            or (env.run_id != self.run_id or not envelope_v2.verify_envelope(env.model_dump()))
+        ):
+            raise MinerError("job/challenge authority mismatch")
+        now = self.api.call("GET", self.url)["now_round"]
+        challenge = JoinChallenge.model_validate(env.body)
+        requested_launch = launch
+        if trace:
+            from hypertrain.miner.island_launch import confined, launch_island
+
+            def traced_launch(
+                job: IslandJobV1,
+                directory: Path,
+                *,
+                backend: Literal["cpu", "cuda"],
+                cancel: threading.Event | None = None,
+                trace: bool = False,
+            ) -> IslandArtifacts:
+                artifacts = (launch or launch_island)(
+                    job, directory, backend=backend, cancel=cancel, trace=True
+                )
+                for rank in range(job.manifest.training.reference_spec.layout.n_gpus):
+                    relative = f"rank-{rank}/trace.json"
+                    if not (artifacts.directory / relative).is_file():
+                        raise MinerError("probe required trace absent: " + relative)
+                    confined(artifacts.directory, relative)
+                return artifacts
+
+            requested_launch = traced_launch
+        screen, proof = screen_work(
+            job,
+            job_path.parent,
+            challenge,
+            now_beacon=now,
+            backend="cpu" if self.cfg.device == "cpu" else "cuda",
+            launch=requested_launch,
+            cancel=cancel,
+        )
+        if time.time() >= job.deadline or cancel is not None and cancel.is_set():
+            raise MinerError("probe deadline/cancellation")
+        result = {
+            "proof": envelope_v2.seal(
+                self.kp, "WorkProof", self.run_id, proof, challenge.deadline_beacon
+            ),
+            "screen": envelope_v2.seal(
+                self.kp, "WorkScreenV2", self.run_id, screen, challenge.deadline_beacon
+            ),
+        }
+        for filename in ("state.safetensors", "ef.safetensors", "delta.bin", "leaves.json"):
+            if time.time() >= job.deadline or cancel is not None and cancel.is_set():
+                raise MinerError("probe deadline/cancellation")
+            path = job_path.parent / "published" / "rank-0" / filename
+            response = self.api.c.put(
+                self.api.base + self.url + "/objects/" + sha256_hex(path.read_bytes()),
+                content=path.read_bytes(),
+                headers={
+                    "X-Object-Signature": self.kp.sign(
+                        b"hypertrain/object/2|"
+                        + self.run_id.encode()
+                        + b"|"
+                        + sha256_hex(path.read_bytes()).encode()
+                    ).hex(),
+                    "X-Hotkey": self.kp.ss58,
+                },
+            )
+            response.raise_for_status()
+        return result
+
+    def proof(self, document: Path) -> dict[str, Any]:
+        from hypertrain.protocol.envelope_v2 import load_json
+
+        return self.api.call(
+            "POST", self.url + "/join/proof", json=load_json(document.read_bytes())
+        )
+
+    def launch(self, job_path: Path, trace: bool = True) -> dict[str, str]:
+        from hypertrain.miner.island_launch import launch_island
+        from hypertrain.protocol.messages_v2 import IslandJobV1
+
+        job = IslandJobV1.model_validate_json(job_path.read_bytes())
+        if job.run_id != self.run_id:
+            raise MinerError("cross-run island job")
+        if job.manifest != self.manifest:
+            raise MinerError("island job manifest differs from the signed run manifest")
+        artifacts = launch_island(
+            job,
+            job_path.parent,
+            backend="cpu" if self.cfg.device == "cpu" else "cuda",
+            trace=trace,
+            devices=self._devices(),
+        )
+        return {
+            "state": str(artifacts.state),
+            "delta": str(artifacts.delta),
+            "leaves": str(artifacts.leaves),
+        }
+
+    def _devices(self) -> tuple[str, ...] | None:
+        """CPU: None (gloo ranks). CUDA: the layout.n_gpus GPU UUIDs pinned for torchrun."""
+        if self.cfg.device == "cpu":
+            return None
+        ref = self.manifest.training.reference_spec
+        return select_gpus(detect_gpus(), ref.layout.n_gpus, ref.sm_count)
+
+    def run_round(self, w: int) -> str:
+        import anyio
+
+        from hypertrain.miner.island_launch import launch_island
+        from hypertrain.protocol import envelope_v2, relay_envelope
+        from hypertrain.protocol.messages_v2 import ArtifactRef, IslandJobV1, RoundOpenV2, WorkProof
+        from hypertrain.protocol.relay_messages import RelayRegistryV1
+        from hypertrain.relay.client import RelayClient, chunk_manifest
+
+        view = self.api.call("GET", self.url + f"/rounds/{w}")
+        opening = envelope_v2.parse_envelope(view["round_open"])
+        if opening.signer != self.manifest.training.coord_pubkey or not envelope_v2.verify_envelope(
+            opening.model_dump()
+        ):
+            raise MinerError("round authority mismatch")
+        schedule = RoundOpenV2.model_validate(opening.body)
+        assignment = next((a for a in view["assignment"] if a["hotkey"] == self.kp.ss58), None)
+        if assignment is None:
+            raise MinerError("authenticated assignment not ready")
+        status = self.status()
+        screen_hash = status["work_screen_hash"]
+        driver = "cpu"
+        if self.cfg.device != "cpu":
+            # Parent launch validates exact logical count/SM/runtime; this is observed driver only.
+            version = Path("/proc/driver/nvidia/version")
+            parts = version.read_text().split()
+            driver = next((p for p in parts if p[:1].isdigit() and "." in p), "unknown")
+        if (
+            self.cfg.device != "cpu"
+            and driver not in self.manifest.training.reference_spec.driver_allowlist
+        ):
+            raise HardwareMismatch("observed v2 driver not in manifest allowlist")
+        if self.cfg.device == "cpu":
+            from hypertrain.protocol.messages_v2 import EconomicsPolicyV2
+
+            policy_response = self.api.c.get(
+                self.api.base + self.url + "/objects/" + self.manifest.network.economics_policy_hash
+            )
+            policy_response.raise_for_status()
+            if sha256_hex(
+                policy_response.content
+            ) != self.manifest.network.economics_policy_hash or (
+                EconomicsPolicyV2.model_validate_json(policy_response.content).ledger_mode != "test"
+            ):
+                raise HardwareMismatch(
+                    "CPU client cannot assert production CUDA reference identity"
+                )
+            driver = self.manifest.training.reference_spec.driver_allowlist[0]
+        accept = {
+            "w": w,
+            "hotkey": self.kp.ss58,
+            "assignment_hash": assignment["assignment_hash"],
+            "work_screen_hash": screen_hash,
+            "image_digest": self.manifest.training.reference_spec.image_digest,
+            "driver_version": driver,
+            "n_gpus": self.manifest.training.reference_spec.layout.n_gpus,
+        }
+        self.api.call(
+            "POST",
+            self.url + "/accept",
+            json=envelope_v2.seal(self.kp, "AcceptV2", self.run_id, accept, schedule.d_final),
+        )
+        staged = self.api.call("GET", self.url + f"/rounds/{w}/job/{self.kp.ss58}")
+        job = IslandJobV1.model_validate(staged["job"])
+        directory = self.directory / str(w)
+        directory.mkdir(parents=True, exist_ok=True)
+        for name, digest in staged["objects"].items():
+            response = self.api.c.get(self.api.base + self.url + "/objects/" + digest)
+            response.raise_for_status()
+            if sha256_hex(response.content) != digest:
+                raise MinerError("job input hash mismatch")
+            (directory / name).write_bytes(response.content)
+        artifacts = launch_island(
+            job,
+            directory,
+            backend="cpu" if self.cfg.device == "cpu" else "cuda",
+            trace=True,
+            devices=self._devices(),
+        )
+        preimages = json.loads(artifacts.leaves.read_bytes())
+        summary = json.loads((artifacts.directory / "rank-0/summary.json").read_bytes())[
+            "commitments"
+        ]
+        start = next(s for s in view["starts"] if s["hotkey"] == self.kp.ss58)
+        commit = {
+            "w": w,
+            "hotkey": self.kp.ss58,
+            "leaf_scheme": "ht-leaf-v1",
+            "n_leaves": len(preimages),
+            "metrics_root": MerkleTree(
+                [bytes.fromhex(p["loss_f32"] + p["norm_f32"]) for p in preimages]
+            ).root.hex(),
+            "tokens": len(job.sample_ids) * self.manifest.training.model.seq_len,
+            "delta_bytes": artifacts.delta.stat().st_size,
+            "ef_in_hash": start["ef_hash"],
+            **{
+                k: summary[k]
+                for k in ("leaves_root", "final_theta_hash", "ef_out_hash", "delta_hash")
+            },
+        }
+        self.api.call(
+            "POST",
+            self.url + "/commit",
+            json=envelope_v2.seal(self.kp, "CommitV2", self.run_id, commit, schedule.d_final),
+        )
+        refs = []
+        for path in (artifacts.state, artifacts.ef, artifacts.delta, artifacts.leaves):
+            digest = sha256_hex(path.read_bytes())
+            response = self.api.c.put(
+                self.api.base + self.url + "/objects/" + digest,
+                content=path.read_bytes(),
+                headers={
+                    "X-Hotkey": self.kp.ss58,
+                    "X-Object-Signature": self.kp.sign(
+                        f"hypertrain/object/2|{self.run_id}|{digest}".encode()
+                    ).hex(),
+                },
+            )
+            response.raise_for_status()
+            refs.append(ArtifactRef(sha256=digest, size=path.stat().st_size))
+        descriptor = WorkProof(
+            admission_id=status["record"]["admission_id"],
+            challenge_hash=sha256_hex(canonical(commit)),
+            leaves_root=commit["leaves_root"],
+            delta_hash=commit["delta_hash"],
+            artifact_refs=refs,
+        )
+        self.api.call(
+            "POST",
+            self.url + "/leaves",
+            json=envelope_v2.seal(self.kp, "WorkProof", self.run_id, descriptor, schedule.d_final),
+        )
+        assigned = self.api.call("GET", self.url + f"/rounds/{w}/relay/{self.kp.ss58}")
+        chunks = chunk_manifest(artifacts.delta)
+        grant = self.api.call(
+            "POST",
+            self.url + "/upload-grant?commit_hash=" + sha256_hex(canonical(commit)),
+            json=relay_envelope.seal(
+                self.kp, "UploadChunkManifest", self.run_id, chunks, schedule.d_upload
+            ),
+        )
+        from hypertrain.protocol.relay_envelope import RelayEnvelope
+
+        async def upload() -> RelayEnvelope:
+            async with httpx.AsyncClient(follow_redirects=False, timeout=60) as client:
+                return await RelayClient(
+                    RelayRegistryV1.model_validate(assigned["registry"]), client
+                ).upload(
+                    artifacts.delta,
+                    grant_raw=relay_envelope.parse_envelope(grant),
+                    assignment=relay_envelope.parse_envelope(assigned["assignment"]),
+                    round_open=view["round_open"],
+                )
+
+        receipt = anyio.run(upload)
+        acceptance = self.api.call(
+            "POST", "/v2/relay-receipts", content=canonical(receipt.model_dump(mode="json"))
+        )
+        payload = artifacts.delta.read_bytes()
+        delta = {
+            "w": w,
+            "hotkey": self.kp.ss58,
+            "delta_hash": commit["delta_hash"],
+            "size": len(payload),
+            "uri": "sha256:" + commit["delta_hash"],
+            "format": "ht-sparse-v1"
+            if self.manifest.training.outer.opt == "sparseloco"
+            else "ht-dense-int8-v1",
+            "chunks": [
+                {"off": c.off, "len": c.len, "sha256": c.chunk_sha256} for c in chunks.chunks
+            ],
+            "grant_hash": sha256_hex(canonical(grant["body"])),
+            "master_acceptance_hash": sha256_hex(canonical(acceptance["body"])),
+        }
+        self.api.call(
+            "POST",
+            self.url + "/delta",
+            json=envelope_v2.seal(
+                self.kp, "DeltaManifestV2", self.run_id, delta, schedule.d_upload
+            ),
+        )
+        return "UPLOADED"
+
+    def watch(self, job_path: Path, timeout: float = 30) -> int:
+        from hypertrain.auditor.island_bisect import IslandParty
+        from hypertrain.data.store import LocalFSStore
+        from hypertrain.miner.dispute_watch import (
+            DisputeWatch,
+            HttpDisputeTransport,
+            PublishedStates,
+        )
+        from hypertrain.protocol.messages_v2 import IslandJobV1
+
+        job = IslandJobV1.model_validate_json(job_path.read_bytes())
+        if job.run_id != self.run_id:
+            raise MinerError("cross-run watch job")
+        published = job_path.parent / "published"
+        states = PublishedStates(job, published, LocalFSStore(self.directory / "state-objects"))
+        party = IslandParty.published(self.kp.ss58, job, published)
+        client = self.api.c
+        client.headers["X-Dispute-Signature"] = self.kp.sign(
+            f"hypertrain/watch/2|{self.run_id}|{self.kp.ss58}".encode()
+        ).hex()
+        watcher = DisputeWatch(
+            self.directory / "watch",
+            self.kp,
+            HttpDisputeTransport(client, self.api.base + self.url),
+            run_id=self.run_id,
+            coordinator=self.manifest.training.coord_pubkey,
+            party=lambda _: party,
+            state_serve=states.serve,
+            beacon=lambda: self.api.call("GET", self.url)["now_round"],
+            job=job,
+        )
+        try:
+            return watcher.run_once(timeout=timeout)
+        finally:
+            watcher.close()

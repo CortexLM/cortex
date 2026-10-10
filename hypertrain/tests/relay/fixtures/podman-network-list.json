@@ -1,0 +1,251 @@
+[
+  {
+    "name": "cortex_default",
+    "id": "1ff113a89f6a33ac1816bad08799111532b13ee2fa472359a1048711f087db67",
+    "driver": "bridge",
+    "network_interface": "podman2",
+    "created": "2026-09-30T01:57:13.7083285Z",
+    "subnets": [
+      {
+        "subnet": "10.89.1.0/24",
+        "gateway": "10.89.1.1"
+      }
+    ],
+    "ipv6_enabled": false,
+    "internal": false,
+    "dns_enabled": true,
+    "labels": {
+      "com.docker.compose.project": "cortex",
+      "io.podman.compose.project": "cortex"
+    },
+    "ipam_options": {
+      "driver": "host-local"
+    }
+  },
+  {
+    "name": "kind",
+    "id": "58c6b9ecba025b0d27e3a87e77d24eb64efbaad7de92c7ab8d158ca2edab6de0",
+    "driver": "bridge",
+    "network_interface": "podman1",
+    "created": "2026-09-26T23:02:51.493664027Z",
+    "subnets": [
+      {
+        "subnet": "fc00:f853:ccd:e793::/64",
+        "gateway": "fc00:f853:ccd:e793::1"
+      },
+      {
+        "subnet": "10.89.0.0/24",
+        "gateway": "10.89.0.1"
+      }
+    ],
+    "ipv6_enabled": true,
+    "internal": false,
+    "dns_enabled": true,
+    "ipam_options": {
+      "driver": "host-local"
+    }
+  },
+  {
+    "name": "podman",
+    "id": "2f259bab93aaaaa2542ba43ef33eb990d0999ee1b9924b557b7be53c0b7a1bb9",
+    "driver": "bridge",
+    "network_interface": "podman0",
+    "created": "2026-10-09T02:47:00.741104709Z",
+    "subnets": [
+      {
+        "subnet": "10.88.0.0/16",
+        "gateway": "10.88.0.1"
+      }
+    ],
+    "ipv6_enabled": false,
+    "internal": false,
+    "dns_enabled": false,
+    "ipam_options": {
+      "driver": "host-local"
+    }
+  },
+  {
+    "name": "pr446-7302-st01a106e1_default",
+    "id": "fd95587dbf25d02ca838a4e9be8e52c00dbdbae63a3bf9f94929236ece6715e1",
+    "driver": "bridge",
+    "network_interface": "podman10",
+    "created": "2026-10-04T15:57:14.084749884Z",
+    "subnets": [
+      {
+        "subnet": "10.89.9.0/24",
+        "gateway": "10.89.9.1"
+      }
+    ],
+    "ipv6_enabled": false,
+    "internal": false,
+    "dns_enabled": true,
+    "labels": {
+      "com.docker.compose.project": "pr446-7302-st01a106e1",
+      "io.podman.compose.project": "pr446-7302-st01a106e1"
+    },
+    "ipam_options": {
+      "driver": "host-local"
+    }
+  },
+  {
+    "name": "pr446-final-st01a106e1_default",
+    "id": "706b34207639f082a6b721a393815e2d4827223786dc76ebb801bd6069f6049c",
+    "driver": "bridge",
+    "network_interface": "podman9",
+    "created": "2026-10-04T15:11:23.029601071Z",
+    "subnets": [
+      {
+        "subnet": "10.89.8.0/24",
+        "gateway": "10.89.8.1"
+      }
+    ],
+    "ipv6_enabled": false,
+    "internal": false,
+    "dns_enabled": true,
+    "labels": {
+      "com.docker.compose.project": "pr446-final-st01a106e1",
+      "io.podman.compose.project": "pr446-final-st01a106e1"
+    },
+    "ipam_options": {
+      "driver": "host-local"
+    }
+  },
+  {
+    "name": "pr446-hard-st01a106e1_default",
+    "id": "6114fb5405fced752f56c70c6bb0a09b3a7dadd43bac424e112106c5697dc574",
+    "driver": "bridge",
+    "network_interface": "podman7",
+    "created": "2026-10-04T14:12:54.05607753Z",
+    "subnets": [
+      {
+        "subnet": "10.89.6.0/24",
+        "gateway": "10.89.6.1"
+      }
+    ],
+    "ipv6_enabled": false,
+    "internal": false,
+    "dns_enabled": true,
+    "labels": {
+      "com.docker.compose.project": "pr446-hard-st01a106e1",
+      "io.podman.compose.project": "pr446-hard-st01a106e1"
+    },
+    "ipam_options": {
+      "driver": "host-local"
+    }
+  },
+  {
+    "name": "pr446-hard2-st01a106e1_default",
+    "id": "77ecef72f1325eb5d227e80b859c05eac63438718e4032bf4262130220f7947f",
+    "driver": "bridge",
+    "network_interface": "podman8",
+    "created": "2026-10-04T15:01:50.62069166Z",
+    "subnets": [
+      {
+        "subnet": "10.89.7.0/24",
+        "gateway": "10.89.7.1"
+      }
+    ],
+    "ipv6_enabled": false,
+    "internal": false,
+    "dns_enabled": true,
+    "labels": {
+      "com.docker.compose.project": "pr446-hard2-st01a106e1",
+      "io.podman.compose.project": "pr446-hard2-st01a106e1"
+    },
+    "ipam_options": {
+      "driver": "host-local"
+    }
+  },
+  {
+    "name": "pr446-st01a106e1-3e50_default",
+    "id": "b90d1f5d4c639ae2c9fff03e9a1a1e7741a227771450f473e1e8899d4750205d",
+    "driver": "bridge",
+    "network_interface": "podman6",
+    "created": "2026-10-04T12:46:23.158727481Z",
+    "subnets": [
+      {
+        "subnet": "10.89.5.0/24",
+        "gateway": "10.89.5.1"
+      }
+    ],
+    "ipv6_enabled": false,
+    "internal": false,
+    "dns_enabled": true,
+    "labels": {
+      "com.docker.compose.project": "pr446-st01a106e1-3e50",
+      "io.podman.compose.project": "pr446-st01a106e1-3e50"
+    },
+    "ipam_options": {
+      "driver": "host-local"
+    }
+  },
+  {
+    "name": "pr446-st01a106e1-archive_default",
+    "id": "e7406253d55dc305e846d45fd2293bee72e14a85bba2d8d7cd430d142f734ee8",
+    "driver": "bridge",
+    "network_interface": "podman5",
+    "created": "2026-10-04T12:35:58.995606259Z",
+    "subnets": [
+      {
+        "subnet": "10.89.4.0/24",
+        "gateway": "10.89.4.1"
+      }
+    ],
+    "ipv6_enabled": false,
+    "internal": false,
+    "dns_enabled": true,
+    "labels": {
+      "com.docker.compose.project": "pr446-st01a106e1-archive",
+      "io.podman.compose.project": "pr446-st01a106e1-archive"
+    },
+    "ipam_options": {
+      "driver": "host-local"
+    }
+  },
+  {
+    "name": "pr446-st01a106e1-final_default",
+    "id": "0300b821481bc5b0e023f857253e384c63f8b27c08e4fab130e5fa5918cf911b",
+    "driver": "bridge",
+    "network_interface": "podman4",
+    "created": "2026-10-04T12:32:57.975149655Z",
+    "subnets": [
+      {
+        "subnet": "10.89.3.0/24",
+        "gateway": "10.89.3.1"
+      }
+    ],
+    "ipv6_enabled": false,
+    "internal": false,
+    "dns_enabled": true,
+    "labels": {
+      "com.docker.compose.project": "pr446-st01a106e1-final",
+      "io.podman.compose.project": "pr446-st01a106e1-final"
+    },
+    "ipam_options": {
+      "driver": "host-local"
+    }
+  },
+  {
+    "name": "pr446-st01a106e1_default",
+    "id": "1a6c269841b2b0de14107e6863bfb5b634429eaf5e903f107c9a234c789b851a",
+    "driver": "bridge",
+    "network_interface": "podman3",
+    "created": "2026-10-04T12:30:11.852280791Z",
+    "subnets": [
+      {
+        "subnet": "10.89.2.0/24",
+        "gateway": "10.89.2.1"
+      }
+    ],
+    "ipv6_enabled": false,
+    "internal": false,
+    "dns_enabled": true,
+    "labels": {
+      "com.docker.compose.project": "pr446-st01a106e1",
+      "io.podman.compose.project": "pr446-st01a106e1"
+    },
+    "ipam_options": {
+      "driver": "host-local"
+    }
+  }
+]

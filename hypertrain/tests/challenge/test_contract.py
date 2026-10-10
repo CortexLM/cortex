@@ -161,6 +161,7 @@ def test_get_weights_p99_under_2s_with_65536_hotkeys(
         ledger.verdict(0, k, "UNSAMPLED", 1000, 0, at)
     ledger.finalize(0, at)
     del ledger
+    master.registered.update(keys)  # weights pay only subnet-registered hotkeys
     vested_at = QUICKNET_GENESIS + 11 * PARAMS.epoch_seconds
     with make_client(state, secrets_dir, master, clock) as c:
         samples: list[float] = []

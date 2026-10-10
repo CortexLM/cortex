@@ -11,6 +11,7 @@ import hypertrain.trainer  # noqa: F401  (pins determinism before torch and open
 
 # isort: split
 import math
+import threading
 from collections.abc import Callable, Sequence
 from functools import lru_cache
 from typing import Any
@@ -22,6 +23,7 @@ from torch import Tensor, nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from hypertrain.protocol.messages import ODSpec, RunManifest, f32val
+from hypertrain.protocol.messages_v2 import RunManifestV2
 from hypertrain.trainer.config import ModelConfig, TrainConfig
 from hypertrain.trainer.loop import SampleFn
 from hypertrain.trainer.model import Params, embed, permute_rows
@@ -41,6 +43,7 @@ except ImportError as e:
 Hook = Callable[[int, str, Tensor], Tensor]
 PROFILE_DTYPE = {"od-bf16-det-eager-v1": "bf16", "od-fp32-ref-v1": "fp32"}
 _NORM_WEIGHTS = (".qn.weight", ".kn.weight", ".n1.weight", ".n2.weight", ".n3.weight")
+_SDPA_LOCK = threading.RLock()
 
 
 def _identity(layer: int, op: str, x: Tensor) -> Tensor:
@@ -69,12 +72,18 @@ def od_config(cfg: ModelConfig) -> Any:
     )
 
 
-def check_manifest(m: RunManifest) -> None:
+def check_manifest(m: RunManifest | RunManifestV2) -> None:
     """Adapter-side rules on top of the L2 RunManifest validator (which already ran on ``m``)."""
-    ms, od = m.model, m.model.od
+    match m:
+        case RunManifestV2():
+            cfg = TrainConfig.from_manifest_v2(m).model
+            ms = m.training.model
+        case RunManifest():
+            cfg = TrainConfig.from_manifest(m.body()).model
+            ms = m.model
+    od = ms.od
     if ms.arch != "od-encoder" or od is None:
         raise ValueError("not an OpenDecision manifest")
-    cfg = TrainConfig.from_manifest(m.body()).model
     want = sum(math.prod(s) for s in param_shapes(cfg).values())
     if ms.param_count != want:
         raise ValueError(f"param_count {ms.param_count} != {want} trainable for {od.objective}")
@@ -141,9 +150,9 @@ def take_rows(flat: Tensor, rows: Tensor) -> Tensor:
     backward is ``_Permute`` (index_select), never index_put/scatter_add (review defect 7)."""
     n = flat.shape[0]
     r = rows.detach().to("cpu", torch.int64).reshape(-1)
-    rest = torch.ones(n, dtype=torch.bool)
+    rest = torch.ones(n, dtype=torch.bool, device="cpu")
     rest[r] = False
-    perm = torch.cat([r, torch.arange(n)[rest]])
+    perm = torch.cat([r, torch.arange(n, device="cpu")[rest]])
     if perm.numel() != n:
         raise ValueError("rows must be distinct")
     return permute_rows(flat, perm.to(flat.device))[: r.numel()]
@@ -158,7 +167,8 @@ def _det_gather(h: Tensor, positions: Tensor) -> Tensor:
 
 @lru_cache(maxsize=16)
 def _rope_cpu(n: int, head_dim: int, theta: float) -> tuple[Tensor, Tensor]:
-    cos, sin = rope_table(n, head_dim, theta)
+    with torch.device("cpu"):
+        cos, sin = rope_table(n, head_dim, theta)
     return cos, sin
 
 
@@ -170,7 +180,7 @@ def _blocks(m: ModelConfig, p: Params, x: Tensor, mask: Tensor | None, hook: Hoo
     """Op-for-op copy of opendecision ``Block.forward`` over the pinned names, with op hooks."""
     b, n, d = x.shape
     h, hd = m.n_heads, m.d_model // m.n_heads
-    cos, sin = _rope_cpu(n, hd, float(m.rope_theta))
+    cos, sin = (v.to(x.device) for v in _rope_cpu(n, hd, float(m.rope_theta)))
     am = None if mask is None else mask[:, None, None, :]
     for i in range(m.n_layers):
         pre = f"encoder.blocks.{i}"
@@ -217,10 +227,19 @@ class _Decide(nn.Module):
         return self.m.decide(*args)
 
 
-@lru_cache(maxsize=8)
+_DECIDERS = threading.local()
+
+
 def _decider(cfg: ModelConfig) -> _Decide:
+    # functional_call temporarily swaps module tensors: never share its module across ranks.
+    if not hasattr(_DECIDERS, "models"):
+        _DECIDERS.models = {}
+    if cfg in _DECIDERS.models:
+        return _DECIDERS.models[cfg]
     with torch.device("meta"):
-        return _Decide(OpenDecisionModel(od_config(cfg), embed_fn=embed))
+        module = _Decide(OpenDecisionModel(od_config(cfg), embed_fn=embed))
+    _DECIDERS.models[cfg] = module
+    return module
 
 
 def _decision(m: ModelConfig, od: ODSpec, p: Params, tokens: Tensor, hook: Hook) -> Tensor:
@@ -232,7 +251,10 @@ def _decision(m: ModelConfig, od: ODSpec, p: Params, tokens: Tensor, hook: Hook)
     z = hook(L, "final_norm", _ln(x, p, "encoder.norm"))
     args = (z, d["mask"], d["opt_ids"], d["opt_mask"], d["instr_ids"], d["qtype"])
     cos, sin = _rope_cpu(PRESETS[od.preset].max_len, m.d_model // m.n_heads, float(m.rope_theta))
-    tensors = {f"m.{k}": v for k, v in p.items()} | {"m.rope_cos": cos, "m.rope_sin": sin}
+    tensors = {f"m.{k}": v for k, v in p.items()} | {
+        "m.rope_cos": cos.to(tokens.device),
+        "m.rope_sin": sin.to(tokens.device),
+    }
     logits, ext = torch.func.functional_call(_decider(m), tensors, args)
     logits = hook(L, "head", logits)
     if od.objective == "distill":
@@ -257,6 +279,7 @@ def _run(m: ModelConfig, p: Params, tokens: Tensor, hook: Hook) -> tuple[Tensor,
     # FLASH only on the unmasked stage A path of the bf16 profile; masked B/C and fp32-ref: MATH.
     backend = SDPBackend.FLASH_ATTENTION if mlm and dt == "bf16" else SDPBackend.MATH
     with (
+        _SDPA_LOCK,
         sdpa_kernel([backend]),
         torch.autocast(tokens.device.type, dtype=torch.bfloat16, enabled=dt == "bf16"),
     ):
@@ -265,12 +288,16 @@ def _run(m: ModelConfig, p: Params, tokens: Tensor, hook: Hook) -> tuple[Tensor,
 
 
 def forward(
-    cfg: ModelConfig, params: Params, tokens: Tensor, moe: object | None = None
+    cfg: ModelConfig,
+    params: Params,
+    tokens: Tensor,
+    moe: object | None = None,
+    hook: Hook | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Same signature as ``trainer.model.forward``; OD is dense, so ``moe`` must be None."""
     if moe is not None:
         raise ValueError("OpenDecision is dense: moe must be None")
-    return _run(cfg, params, tokens, _identity)
+    return _run(cfg, params, tokens, hook or _identity)
 
 
 def traced_forward(
