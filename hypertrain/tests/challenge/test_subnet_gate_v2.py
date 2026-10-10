@@ -345,10 +345,20 @@ def test_weights_exclude_deregistered_hotkeys(tmp_path, secrets_dir, clock):
 
 
 def test_weights_fail_closed_on_wrong_netuid(tmp_path, secrets_dir, clock):
+    # Given: a payable entitlement, so the answer must be filtered against the subnet.
     master = SubnetMaster(netuid=7)
-    with make_client(tmp_path / "state", secrets_dir, master, clock) as c:  # type: ignore[arg-type]
-        r = c.get(
-            "/internal/v1/get_weights?epoch=1",
-            headers={**bearer(INTERNAL), "x-platform-challenge-slug": SLUG},
-        )
+    state = tmp_path / "state"
+    ledger = Ledger(state / "ledger", PARAMS)
+    at = QUICKNET_GENESIS + 10
+    ledger.commit(0, miner(1).ss58, at)
+    ledger.verdict(0, miner(1).ss58, "UNSAMPLED", 1000, 0, at)
+    ledger.finalize(0, at)
+    del ledger
+    vested_at = QUICKNET_GENESIS + 11 * PARAMS.epoch_seconds
+    headers = {**bearer(INTERNAL), "x-platform-challenge-slug": SLUG}
+    with make_client(state, secrets_dir, master, clock) as c:  # type: ignore[arg-type]
+        r = c.get(f"/internal/v1/get_weights?epoch=11&epoch_at={vested_at}", headers=headers)
         assert r.status_code == 503
+        # An epoch with nothing payable has nothing to filter: 200 without the metagraph.
+        empty = c.get("/internal/v1/get_weights?epoch=1", headers=headers)
+        assert empty.status_code == 200 and empty.json()["weights"] == {}

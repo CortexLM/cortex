@@ -835,8 +835,12 @@ def create_app(
         _require(config.internal_token_file, authorization)
         if x_platform_challenge_slug != config.slug:
             raise ChallengeError(403, "challenge slug mismatch")
-        hotkeys = await metagraph.hotkeys()  # fail closed before the ledger journals an answer
         text = await run(store.weights, epoch, epoch_at, int(clock()))
+        # Nothing payable means nothing to filter: answer without the metagraph. Otherwise fail
+        # closed (503) before the registered-filtered answer is persisted.
+        hotkeys: Mapping[str, Any] = (
+            await metagraph.hotkeys() if json.loads(text)["weights"] else {}
+        )
         return Response(
             await run(registered_weights, epoch, text, hotkeys), media_type="application/json"
         )

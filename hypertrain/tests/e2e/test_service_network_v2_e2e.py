@@ -154,10 +154,39 @@ def test_od_two_rank_signed_service_reference_and_proof(network):
     assert network.manifest.training.reference_spec.layout.n_gpus == 2
 
 
+@pytest.fixture(scope="module")
+def checkpoint_snapshot(tmp_path_factory, request):
+    """Genuine signed L0 checkpoint, built once per module (or reused when it still verifies).
+
+    HT_NETWORK_CHECKPOINT_SNAPSHOT optionally seeds it from an earlier run; otherwise the real
+    four-identity graduation + live checkpoint flow generates it, so CI needs no env var.
+    """
+    from hypertrain.aggregator.checkpoint import verify_network_checkpoint
+
+    stable = Path(tempfile.gettempdir()) / "hypertrain-l0-checkpoint-proof"
+    source = os.environ.get("HT_NETWORK_CHECKPOINT_SNAPSHOT")
+    if source and Path(source) != stable:
+        shutil.copytree(source, stable, dirs_exist_ok=True)
+    if (stable / "MANIFEST.json").is_file() and not verify_network_checkpoint(
+        stable, fixtures.COORD.ss58
+    ):
+        return stable
+    shutil.rmtree(stable, ignore_errors=True)
+    generator = fixtures.network.__wrapped__(tmp_path_factory.mktemp("checkpoint"), request)
+    built = next(generator)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            test_four_actual_funded_identities_graduate_shadow_only(built, patch)
+        shutil.copytree(built.store.state_dir / "checkpoint", stable)
+    finally:
+        generator.close()
+    return stable
+
+
 @pytest.mark.parametrize(
     "fault", ["round", "included", "run", "type", "opening_round", "predecessor"]
 )
-def test_resigned_checkpoint_finality_subject_rejects(tmp_path, fault):
+def test_resigned_checkpoint_finality_subject_rejects(tmp_path, fault, checkpoint_snapshot):
     from hypertrain.aggregator.checkpoint import (
         CheckpointError,
         verify_network_checkpoint,
@@ -169,11 +198,7 @@ def test_resigned_checkpoint_finality_subject_rejects(tmp_path, fault):
     from hypertrain.protocol.jcs import canonicalize
     from hypertrain.protocol.messages_v2 import RunManifestV2
 
-    source = Path(os.environ["HT_NETWORK_CHECKPOINT_SNAPSHOT"])
-    stable = Path(tempfile.gettempdir()) / "hypertrain-l0-checkpoint-proof"
-    if source != stable:
-        shutil.copytree(source, stable, dirs_exist_ok=True)
-        source = stable
+    source = checkpoint_snapshot
     directory = tmp_path / "bad-checkpoint"
     shutil.copytree(source, directory)
     lineage = json.loads((directory / "lineage.json").read_bytes())

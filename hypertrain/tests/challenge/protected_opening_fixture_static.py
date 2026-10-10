@@ -270,31 +270,46 @@ def preadmission_collector_regression() -> None:
         modules = {
             name: frozen["src/hypertrain/" + name]
             for name in (
-                "aggregator/capacity_worker.py", "aggregator/core.py",
-                "aggregator/rollback_v2.py", "aggregator/tape_v2.py", "auditor/replay.py",
-                "miner/island_launch.py", "trainer/compress.py", "trainer/config.py",
+                "aggregator/capacity_worker.py",
+                "aggregator/core.py",
+                "aggregator/rollback_v2.py",
+                "aggregator/tape_v2.py",
+                "auditor/replay.py",
+                "miner/island_launch.py",
+                "trainer/compress.py",
+                "trainer/config.py",
                 "trainer/model.py",
             )
         }
-        store_tree = ast.parse((fixture.parents[2] / "src/hypertrain/challenge/store.py").read_text())
+        store_tree = ast.parse(
+            (fixture.parents[2] / "src/hypertrain/challenge/store.py").read_text()
+        )
         implementation = next(
-            node for node in ast.walk(store_tree)
+            node
+            for node in ast.walk(store_tree)
             if isinstance(node, ast.FunctionDef) and node.name == "_service_implementation_v2"
         )
         names = next(
-            ast.literal_eval(node.value) for node in implementation.body
+            ast.literal_eval(node.value)
+            for node in implementation.body
             if isinstance(node, ast.Assign)
-            and any(isinstance(target, ast.Name) and target.id == "owned" for target in node.targets)
+            and any(
+                isinstance(target, ast.Name) and target.id == "owned" for target in node.targets
+            )
         )
         actual = {
-            node.name: ast.dump(node, include_attributes=False) for node in ast.walk(store_tree)
+            node.name: ast.dump(node, include_attributes=False)
+            for node in ast.walk(store_tree)
             if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names
         }
         actual.update(modules)
         pins = {
-            "subject": "LOCALTEST_EXACT728_CURRENT_STORE", "backend": "cpu-test",
-            "full_sources": frozen, "owned_slice": slice_name,
-            "owned_parent_baseline_usec": 0, "final_tail_reserve_usec": 2000000,
+            "subject": "LOCALTEST_EXACT728_CURRENT_STORE",
+            "backend": "cpu-test",
+            "full_sources": frozen,
+            "owned_slice": slice_name,
+            "owned_parent_baseline_usec": 0,
+            "final_tail_reserve_usec": 2000000,
             "carry_receipt": str(carry_path),
             "carry_receipt_sha256": hashlib.sha256(carry_path.read_bytes()).hexdigest(),
             "fixture_sha256": frozen["tests/challenge/protected_opening_fixture.py"],
@@ -315,25 +330,71 @@ def preadmission_collector_regression() -> None:
         assert prepared["started"] == started and prepared["carry_cpu_debit"] == 160342917
         try:
             call(["systemctl", "start", slice_name])
-            call(["systemctl", "set-property", "--runtime", slice_name, "CPUQuota=50%",
-                  "CPUQuotaPeriodSec=100ms", "MemoryMax=1073741824", "MemorySwapMax=0"])
+            call(
+                [
+                    "systemctl",
+                    "set-property",
+                    "--runtime",
+                    slice_name,
+                    "CPUQuota=50%",
+                    "CPUQuotaPeriodSec=100ms",
+                    "MemoryMax=1073741824",
+                    "MemorySwapMax=0",
+                ]
+            )
             group = Path("/sys/fs/cgroup") / call(
                 ["systemctl", "show", slice_name, "-p", "ControlGroup", "--value"]
             ).strip().lstrip("/")
-            assert int(dict(line.split() for line in (group / "cpu.stat").read_text().splitlines())["usage_usec"]) == 0
-            hook = sys.executable + " " + str(fixture) + " " + str(root) + " --collect --approved-pins " + str(pins_path)
-            result = subprocess.run([
-                "systemd-run", "--quiet", "--wait", "--pipe", "--unit=" + unit,
-                "--slice=" + slice_name, "--property=Type=exec", "--property=RuntimeMaxSec=10",
-                "--property=TimeoutStopSec=1", "--property=KillMode=control-group",
-                "--property=KillSignal=SIGKILL", "--property=Nice=19",
-                "--property=CPUAffinity=0 1 2 3", "--property=ExecStopPost=" + hook,
-                "--setenv=CAPACITY_CONTROLLER_UNIT=" + unit,
-                "--setenv=OMP_NUM_THREADS=1", "--setenv=MKL_NUM_THREADS=1",
-                "--setenv=OPENBLAS_NUM_THREADS=1", "--setenv=PYTHONDONTWRITEBYTECODE=1",
-                sys.executable, str(fixture), str(root), "--approved-pins", str(pins_path),
-                "--approve", module["APPROVAL"],
-            ], capture_output=True, text=True, timeout=15)
+            assert (
+                int(
+                    dict(line.split() for line in (group / "cpu.stat").read_text().splitlines())[
+                        "usage_usec"
+                    ]
+                )
+                == 0
+            )
+            hook = (
+                sys.executable
+                + " "
+                + str(fixture)
+                + " "
+                + str(root)
+                + " --collect --approved-pins "
+                + str(pins_path)
+            )
+            result = subprocess.run(
+                [
+                    "systemd-run",
+                    "--quiet",
+                    "--wait",
+                    "--pipe",
+                    "--unit=" + unit,
+                    "--slice=" + slice_name,
+                    "--property=Type=exec",
+                    "--property=RuntimeMaxSec=10",
+                    "--property=TimeoutStopSec=1",
+                    "--property=KillMode=control-group",
+                    "--property=KillSignal=SIGKILL",
+                    "--property=Nice=19",
+                    "--property=CPUAffinity=0 1 2 3",
+                    "--property=ExecStopPost=" + hook,
+                    "--setenv=CAPACITY_CONTROLLER_UNIT=" + unit,
+                    "--setenv=OMP_NUM_THREADS=1",
+                    "--setenv=MKL_NUM_THREADS=1",
+                    "--setenv=OPENBLAS_NUM_THREADS=1",
+                    "--setenv=PYTHONDONTWRITEBYTECODE=1",
+                    sys.executable,
+                    str(fixture),
+                    str(root),
+                    "--approved-pins",
+                    str(pins_path),
+                    "--approve",
+                    module["APPROVAL"],
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
             assert result.returncode != 0, result.stdout
             # Outer target owns sharedlock; original supervisor must refuse it
             # BEFORE creating budget/scopes, while real ExecStopPost still seals.
@@ -343,16 +404,34 @@ def preadmission_collector_regression() -> None:
             assert terminal["measured_owned_cpu_usec"] > 0
             assert not (root / "scopes").exists() and not (root / "fixture.json").exists()
             assert (root / "budget.json").read_bytes() == immutable
-            final = int(dict(line.split() for line in (group / "cpu.stat").read_text().splitlines())["usage_usec"])
-            assert final - terminal["measured_owned_cpu_usec"] <= terminal["reserved_write_exit_cpu_usec"]
+            final = int(
+                dict(line.split() for line in (group / "cpu.stat").read_text().splitlines())[
+                    "usage_usec"
+                ]
+            )
+            assert (
+                final - terminal["measured_owned_cpu_usec"]
+                <= terminal["reserved_write_exit_cpu_usec"]
+            )
             assert not any(path.read_text().strip() for path in group.rglob("cgroup.procs"))
-            print("PREADMISSION_COLLECTOR_NATIVE_PASS " + json.dumps({
-                "slice": slice_name, "unit": unit, "kernel_final_cpu_usec": final,
-                "terminal": terminal, "budget": prepared, "model_work": False,
-            }), flush=True)
+            print(
+                "PREADMISSION_COLLECTOR_NATIVE_PASS "
+                + json.dumps(
+                    {
+                        "slice": slice_name,
+                        "unit": unit,
+                        "kernel_final_cpu_usec": final,
+                        "terminal": terminal,
+                        "budget": prepared,
+                        "model_work": False,
+                    }
+                ),
+                flush=True,
+            )
         finally:
             call(["systemctl", "stop", unit, slice_name])
             call(["systemctl", "reset-failed", unit])
+
 
 def setup_accounting_regression() -> None:
     """Exercise original exact setup and pre-fixture accounting expression."""
@@ -369,7 +448,9 @@ def setup_accounting_regression() -> None:
 
     fixture = Path(__file__).with_name("protected_opening_fixture.py")
     tree = ast.parse(fixture.read_text())
-    node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "exact_setup")
+    node = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "exact_setup"
+    )
     spec = importlib.util.spec_from_file_location(
         "capacity_setup_regression", fixture.parents[2] / "tests/ledger/test_escrow_v2.py"
     )
@@ -378,9 +459,15 @@ def setup_accounting_regression() -> None:
     sys.modules[spec.name] = original
     spec.loader.exec_module(original)
     namespace = {
-        "np": np, "original_setup": original.setup, "Setup": original.Setup,
-        "MerkleTree": MerkleTree, "sha256_hex": sha256_hex, "RunManifestV2": RunManifestV2,
-        "state_hash": state_hash, "init_params": init_params, "TrainConfig": TrainConfig,
+        "np": np,
+        "original_setup": original.setup,
+        "Setup": original.Setup,
+        "MerkleTree": MerkleTree,
+        "sha256_hex": sha256_hex,
+        "RunManifestV2": RunManifestV2,
+        "state_hash": state_hash,
+        "init_params": init_params,
+        "TrainConfig": TrainConfig,
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(fixture), "exec"), namespace)
     setup = namespace["exact_setup"]()
@@ -389,22 +476,32 @@ def setup_accounting_regression() -> None:
     assert setup.manifest.training.inner.H == 2
     account = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
     expression = next(
-        n for n in ast.walk(account) if isinstance(n, ast.Assign)
+        n
+        for n in ast.walk(account)
+        if isinstance(n, ast.Assign)
         and any(isinstance(t, ast.Name) and t.id == "manifest_hash" for t in n.targets)
     )
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "fixture.json"
-        values = {"fixture_path": path, "hashlib": hashlib, "json": json,
-                  "load": lambda p: json.loads(p.read_text())}
+        values = {
+            "fixture_path": path,
+            "hashlib": hashlib,
+            "json": json,
+            "load": lambda p: json.loads(p.read_text()),
+        }
         code = compile(ast.Module(body=[expression], type_ignores=[]), str(fixture), "exec")
         exec(code, values)
         assert values["manifest_hash"] is None
         path.write_text(json.dumps({"manifest": setup.manifest.body()}))
         exec(code, values)
-        assert values["manifest_hash"] == hashlib.sha256(
-            json.dumps(setup.manifest.body(), sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        assert (
+            values["manifest_hash"]
+            == hashlib.sha256(
+                json.dumps(setup.manifest.body(), sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+        )
     print("EXACT_SETUP_728_H2_ASSIGN_UNIT_EARLY_ACCOUNTING_PASS", flush=True)
+
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["--preadmission-collector"]:

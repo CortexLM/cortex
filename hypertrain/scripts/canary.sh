@@ -45,7 +45,7 @@ start() { # extra run args...
   die "/version never answered 200"
 }
 
-ENGINE="$engine" scripts/verify_image.sh "$image" && pass "image labels and user"
+ENGINE="$engine" bash scripts/verify_image.sh "$image" && pass "image labels and user"
 
 start
 curl -fsS "$base/version" | jq -e '.slug == "hypertrain" and .contract == 1' >/dev/null \

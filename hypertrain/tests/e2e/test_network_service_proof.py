@@ -680,7 +680,16 @@ def test_decoder_probe_consumer_real_routes_receipt_and_debit_metadata(tmp_path,
 
         with pytest.raises(Reject, match="receipt_changed"):
             factory("reference", job, inputs, {"challenge": signed})
-        assembled = op.model_copy(update={"operation": "reference"})
+        # Reference ops carry the original coordinator-signed challenge bytes as a traced file.
+        remote = "reference-context-" + job.digest() + "/original-join-challenge.json"
+        assembled = op.model_copy(
+            update={
+                "operation": "reference",
+                "trace": True,
+                "challenge": remote,
+                "context_files": {remote: sha256(canonicalize(signed))},
+            }
+        )
         context_body = {
             "role": assembled.role,
             "binding": assembled.binding,
@@ -746,9 +755,19 @@ def test_decoder_probe_consumer_real_routes_receipt_and_debit_metadata(tmp_path,
             sum(r["executions"] for r in journal.all("network_execution_intent", phase="workload"))
             == 2
         )
-        assert not n.store._db.execute(
-            "SELECT 1 FROM admission_trial_results WHERE outcome='MATCH'"
-        ).fetchone()
+        # Permissionless join/proof runs the service's own trusted reference and finalizes the
+        # trial (subnet-gate contract): exactly one MATCH, for this admission, and nothing else.
+        assert (
+            n.store._db.execute(
+                "SELECT COUNT(*) FROM admission_trial_results r JOIN admission_trials t "
+                "ON t.epoch=r.epoch WHERE t.admission_id=? AND r.outcome='MATCH'",
+                (admission_id,),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            n.store._db.execute("SELECT COUNT(*) FROM admission_trial_results").fetchone()[0] == 1
+        )
         escrow, _, _ = n.store._services(job.run_id)
         escrow.verify()
     finally:
