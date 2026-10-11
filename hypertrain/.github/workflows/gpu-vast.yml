@@ -1,0 +1,64 @@
+name: gpu-vast
+
+# ponytail: manual + after green CI on main only; per-PR GPU runs would cost per push.
+on:
+  workflow_dispatch:
+    inputs:
+      max_usd:
+        description: Hard spending ceiling for this run (USD)
+        default: "6"
+      max_minutes:
+        description: Wall-clock deadline for the rental (minutes)
+        default: "90"
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-vast
+  cancel-in-progress: false
+
+jobs:
+  vast:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.17"
+          python-version: "3.12"
+      - run: uv sync --locked --group dev
+      - name: Vast.ai GPU end-to-end
+        env:
+          VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+          MAX_USD: ${{ inputs.max_usd || '6' }}
+          MAX_MINUTES: ${{ inputs.max_minutes || '90' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$VAST_API_KEY" || { echo "secret VAST_API_KEY missing" >&2; exit 1; }
+          key="$RUNNER_TEMP/vast-key"; umask 077; printf '%s' "$VAST_API_KEY" > "$key"
+          uv run --frozen python scripts/vast_e2e.py --key-file "$key" \
+            --max-usd "$MAX_USD" --max-minutes "$MAX_MINUTES" --evidence-dir "$RUNNER_TEMP/vast"
+      - name: Upload GPU evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gpu-vast-evidence
+          path: |
+            ${{ runner.temp }}/vast/harness-result.json
+            ${{ runner.temp }}/vast/journal.jsonl
+            ${{ runner.temp }}/vast/out/
+          if-no-files-found: warn
