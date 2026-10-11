@@ -2,6 +2,7 @@
 (^|/)\.venv/
 (^|/)__pycache__/
 (^|/)\.(mypy|ruff|pytest)_cache/
+(^|/)\.hypothesis/
 ^\.git/
 ^\.transport-admission\.json$
 ^data/

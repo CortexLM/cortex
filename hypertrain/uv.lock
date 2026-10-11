@@ -236,6 +236,7 @@ dependencies = [
     { name = "safetensors" },
     { name = "tokenizers" },
     { name = "uvicorn" },
+    { name = "zstandard" },
 ]
 
 [package.optional-dependencies]
@@ -248,6 +249,7 @@ trainer = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "hypothesis" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
@@ -267,14 +269,33 @@ requires-dist = [
     { name = "tokenizers", specifier = ">=0.23.2" },
     { name = "torch", marker = "extra == 'trainer'", specifier = "==2.14.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "uvicorn", specifier = ">=0.34" },
+    { name = "zstandard", specifier = "==0.25.0" },
 ]
 provides-extras = ["trainer", "od"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "hypothesis", specifier = ">=6.169.0" },
     { name = "mypy", specifier = ">=2,<3" },
     { name = "pytest", specifier = ">=9,<10" },
     { name = "ruff", specifier = ">=0.16,<0.17" },
+]
+
+[[package]]
+name = "hypothesis"
+version = "6.169.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "sortedcontainers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b7/b7/fcddfc235d1ab24b831e99ad3385361e87eb4fed427f527a7f15866214ad/hypothesis-6.169.0.tar.gz", hash = "sha256:b65749d7f7a2fddfb106bb57c9902db4ab25ce8724c821f4af50cc58891a6b7b", size = 510164, upload-time = "2026-10-11T06:30:11.324Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/53/63/1db41f8e3e4aa348b90e28e7059a75fa788f375cb2e06218684767a5df8c/hypothesis-6.169.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:3b9a681b0b1a11faccfc26947bf53c4b00eae7b1f49c435d7e1f76a9ea5ab224", size = 1156021, upload-time = "2026-10-11T06:29:18.175Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/7a/a4d14c21b31e94ecc886ff5fbd68d534598796f848bfaaf3a9e7e13a1d90/hypothesis-6.169.0-cp311-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:96582616bb7de9533f8c5efdba4c5ea1b87457052148f04e53ff6da2e10f8fb8", size = 1322553, upload-time = "2026-10-11T06:29:05.887Z" },
+    { url = "https://files.pythonhosted.org/packages/18/9b/448d00f0fc9c2e4410c6b26d6ccc3da2d3fa653261d34bc801de28d5632b/hypothesis-6.169.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e4cd63db1bb243c3e11f8dc36c3cd89def28f8c493cde3321ff036f443770b97", size = 1155608, upload-time = "2026-10-11T06:27:57.379Z" },
+    { url = "https://files.pythonhosted.org/packages/7e/35/1b9cffc39b727c97666a3ec802b5e72bc0f0ff50c7f8140905ecf8775b4d/hypothesis-6.169.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:3c140f58cfef829be570c87f30e0e24cc9623cb98f3146c741d5922ef263bc9d", size = 1322036, upload-time = "2026-10-11T06:28:28.82Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/c7/ff5a591b32d2e7f3f1da09bcd81eee133bd23fce971dadeb51d3d87af718/hypothesis-6.169.0-cp315-abi3.abi3t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:fa1d423b3d84357331e9cffb3d62c01cfbb08206e102005b858d096695d73210", size = 1153697, upload-time = "2026-10-11T06:28:35.397Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/da/8bcd647d20fc4fa3d79a098d3f9a0672e31253605838278f37341873b896/hypothesis-6.169.0-cp315-abi3.abi3t-musllinux_1_2_x86_64.whl", hash = "sha256:4099543afdbb6c727ba823482b93329b8afff0d2b17d8888151592284c7c3971", size = 1320405, upload-time = "2026-10-11T06:30:06.898Z" },
 ]
 
 [[package]]
@@ -557,6 +578,15 @@ wheels = [
 ]
 
 [[package]]
+name = "sortedcontainers"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e8/c4/ba2f8066cceb6f23394729afe52f3bf7adec04bf9ed2c820b39e19299111/sortedcontainers-2.4.0.tar.gz", hash = "sha256:25caa5a06cc30b6b83d11423433f65d1f9d76c4c6a0c90e3379eaa43b9bfdb88", size = 30594, upload-time = "2021-05-16T22:03:42.897Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/46/9cb0e58b2deb7f82b84065f37f3bffeb12413f947f9388e4cac22c4621ce/sortedcontainers-2.4.0-py2.py3-none-any.whl", hash = "sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0", size = 29575, upload-time = "2021-05-16T22:03:41.177Z" },
+]
+
+[[package]]
 name = "starlette"
 version = "1.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -661,4 +691,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/da/34/30e9280707135d2cfc589dfff3cb796bd07a3aeb1a3e415ba09dd89d7bb4/uvicorn-0.54.0.tar.gz", hash = "sha256:a2e33cbfaa0306f8e6b0c13e0cb89d7d7a2da3e62b90c66e18c33d9807b28620", size = 112283, upload-time = "2026-09-25T06:52:37.601Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/0c/b54a4fdd7f90a3af8b02ebc9ce6712c2c208b7926a2f7bad95c33ebbe943/uvicorn-0.54.0-py3-none-any.whl", hash = "sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf", size = 87427, upload-time = "2026-09-25T06:52:35.829Z" },
+]
+
+[[package]]
+name = "zstandard"
+version = "0.25.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fd/aa/3e0508d5a5dd96529cdc5a97011299056e14c6505b678fd58938792794b1/zstandard-0.25.0.tar.gz", hash = "sha256:7713e1179d162cf5c7906da876ec2ccb9c3a9dcbdffef0cc7f70c3667a205f0b", size = 711513, upload-time = "2025-09-14T22:15:54.002Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/53/60/7be26e610767316c028a2cbedb9a3beabdbe33e2182c373f71a1c0b88f36/zstandard-0.25.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:5a56ba0db2d244117ed744dfa8f6f5b366e14148e00de44723413b2f3938a902", size = 5546993, upload-time = "2025-09-14T22:17:06.781Z" },
+    { url = "https://files.pythonhosted.org/packages/08/b3/206883dd25b8d1591a1caa44b54c2aad84badccf2f1de9e2d60a446f9a25/zstandard-0.25.0-cp312-cp312-musllinux_1_1_x86_64.whl", hash = "sha256:aaf21ba8fb76d102b696781bddaa0954b782536446083ae3fdaa6f16b25a1c4b", size = 5576659, upload-time = "2025-09-14T22:17:10.164Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/5f/75aafd4b9d11b5407b641b8e41a57864097663699f23e9ad4dbb91dc6bfe/zstandard-0.25.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:474d2596a2dbc241a556e965fb76002c1ce655445e4e3bf38e5477d413165ffa", size = 5360237, upload-time = "2025-09-14T22:17:19.954Z" },
 ]

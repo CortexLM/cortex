@@ -20,6 +20,7 @@ dependencies = [
   "py-ecc>=8,<9",
   "pyarrow>=25.0.1",
   "tokenizers>=0.23.2",
+  "zstandard==0.25.0",
 ]
 
 [project.scripts]
@@ -31,7 +32,12 @@ trainer = ["torch==2.14.0"]
 od = ["opendecision @ git+https://github.com/CortexLM/opendecision@e125ff756d57b726fbce44c430e3d2207e7bbda8"]
 
 [dependency-groups]
-dev = ["pytest>=9,<10", "ruff>=0.16,<0.17", "mypy>=2,<3"]
+dev = [
+    "pytest>=9,<10",
+    "ruff>=0.16,<0.17",
+    "mypy>=2,<3",
+    "hypothesis>=6.169.0",
+]
 
 [tool.uv]
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
