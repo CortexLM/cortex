@@ -911,18 +911,23 @@ def reserved_trial(shadow_reservation_work, tmp_path):
 @pytest.fixture(scope="module")
 def runtime_store_work(tmp_path_factory):
     original = fixture.setup
+    base = tmp_path_factory.getbasetemp()
+    # Other modules may already have run actual_reward (different policy, so different run_id)
+    # in this session: use only the miner/reference pair this call creates (pytest also
+    # keeps a "<name>current" symlink to the newest numbered dir; skip it).
+    before = {p for p in base.glob("real-*/published") if not p.parent.is_symlink()}
     try:
         fixture.setup = lambda mode="production": original("test")
         actual = fixture.actual_reward.__wrapped__(tmp_path_factory)
     finally:
         fixture.setup = original
-    base = tmp_path_factory.getbasetemp()
-    return (
-        fixture,
-        actual,
-        next(base.glob("real-reward*/published")),
-        next(base.glob("real-reference*/published")),
-    )
+    (miner,) = {
+        p for p in base.glob("real-reward*/published") if not p.parent.is_symlink()
+    } - before
+    (reference,) = {
+        p for p in base.glob("real-reference*/published") if not p.parent.is_symlink()
+    } - before
+    return fixture, actual, miner, reference
 
 
 @pytest.fixture

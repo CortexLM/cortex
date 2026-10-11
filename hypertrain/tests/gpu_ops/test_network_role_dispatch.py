@@ -46,6 +46,17 @@ OP = module("role_operation", TREE / "scripts/network_gpu_operation.py")
 OWNER = Keypair(bytes(range(32)))
 
 
+@pytest.fixture(autouse=True)
+def _restore_process_env():
+    """OP.execute is the private CLI child: it sets SSL_CERT_FILE and drops HYPERTRAIN_MINER_*
+    for its own process. Run in-process here, so restore the env or later tests inherit a bogus
+    CA file (ssl NO_CERTIFICATE_OR_CRL_FOUND across the rest of the session)."""
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
 @pytest.fixture
 def context(tmp_path, mock_factory):
     run = tmp_path / "run"

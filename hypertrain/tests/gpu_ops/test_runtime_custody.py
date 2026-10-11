@@ -43,10 +43,18 @@ def retained_custody_work(tmp_path_factory):
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    actual = module.actual_reward.__wrapped__(tmp_path_factory)
     base = tmp_path_factory.getbasetemp()
-    miner = next(base.glob("real-reward*/published"))
-    reference = next(base.glob("real-reference*/published"))
+    # Other modules may already have run actual_reward (different policy, so different run_id)
+    # in this session: use only the miner/reference pair this call creates (pytest also
+    # keeps a "<name>current" symlink to the newest numbered dir; skip it).
+    before = {p for p in base.glob("real-*/published") if not p.parent.is_symlink()}
+    actual = module.actual_reward.__wrapped__(tmp_path_factory)
+    (miner,) = {
+        p for p in base.glob("real-reward*/published") if not p.parent.is_symlink()
+    } - before
+    (reference,) = {
+        p for p in base.glob("real-reference*/published") if not p.parent.is_symlink()
+    } - before
     return module, actual, miner, reference
 
 

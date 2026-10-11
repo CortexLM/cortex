@@ -39,9 +39,19 @@ def network_module():
 def test_separate_supervisor_parent_exit_rescues_both_roles_before_delete(
     tmp_path: Path,
     fault: str | None,
+    request: pytest.FixtureRequest,
 ) -> None:
-    ssh_servers = []
+    ssh_servers: list[subprocess.Popen[bytes]] = []
     ports = []
+
+    def stop_servers() -> None:
+        # A setup failure before the main try must not leak sshd daemons into the session.
+        for proc in ssh_servers:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=5)
+
+    request.addfinalizer(stop_servers)
     run = tmp_path / "run"
     run.mkdir()
     journal = Journal(run)
@@ -125,6 +135,15 @@ def test_separate_supervisor_parent_exit_rescues_both_roles_before_delete(
     api = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     api_thread = threading.Thread(target=api.serve_forever)
     api_thread.start()
+
+    def stop_api() -> None:
+        # A non-daemon serve_forever thread left running blocks interpreter exit (CI hang).
+        if api_thread.is_alive():
+            api.shutdown()
+            api.server_close()
+            api_thread.join()
+
+    request.addfinalizer(stop_api)
     key = tmp_path / "key"
     key.write_text("a" * 32)
     key.chmod(0o600)
@@ -150,6 +169,13 @@ def test_separate_supervisor_parent_exit_rescues_both_roles_before_delete(
     parent = subprocess.Popen(
         [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"], stdin=subprocess.PIPE
     )
+
+    def stop_parent() -> None:
+        if parent.poll() is None:
+            parent.terminate()
+            parent.wait(timeout=5)
+
+    request.addfinalizer(stop_parent)
     journal.append("transaction_open", live=False, pid=parent.pid)
     journal.append("admitted", deadline_unix=__import__("time").time() + 3600)
     orch = Orchestrator(cfg, journal, Provider(cfg["base_url"], "a" * 32, run, journal, False), run)
@@ -164,6 +190,8 @@ def test_separate_supervisor_parent_exit_rescues_both_roles_before_delete(
             path.parent.mkdir(parents=True)
             path.write_bytes(f"{role}-{rank}".encode())
         (job / "driver-result.json").write_text(json.dumps({"role": role}))
+        # stage() journals the sha256 of each staged job's job.json (current contract).
+        (job / "job.json").write_text(json.dumps({"role": role, "name": "driver"}))
         runtime.stage(role, TREE, {"driver": job})
     prior_archives = {}
     if fault == "continuation":
@@ -260,15 +288,9 @@ def test_separate_supervisor_parent_exit_rescues_both_roles_before_delete(
         if supervisor.poll() is None:
             os.killpg(supervisor.pid, signal.SIGKILL)
             supervisor.wait(timeout=5)
-        if parent.poll() is None:
-            parent.terminate()
-            parent.wait(timeout=5)
-        api.shutdown()
-        api.server_close()
-        api_thread.join()
-        for proc in ssh_servers:
-            os.killpg(proc.pid, signal.SIGTERM)
-            proc.wait(timeout=5)
+        stop_parent()
+        stop_api()
+        stop_servers()
 
 
 def test_exact_qualification_reservations_and_immutable_deadline(tmp_path: Path) -> None:

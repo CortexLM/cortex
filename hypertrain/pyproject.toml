@@ -55,6 +55,9 @@ exclude = ["/data"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# experiments/ and scripts/ are namespace packages imported by tests (and lazily by src);
+# the `pytest` console script does not put the rootdir on sys.path, `python -m pytest` does.
+pythonpath = ["."]
 addopts = "-ra --strict-markers"
 
 [tool.ruff]

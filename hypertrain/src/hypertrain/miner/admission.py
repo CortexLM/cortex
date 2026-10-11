@@ -157,7 +157,8 @@ def _probe_memory(device: str, target: int) -> int:
                 break
             pattern = len(chunks) % 251 + 1
             chunk.fill_(pattern)
-            if not bool((chunk == pattern).all()):
+            # min/max reductions: an elementwise compare would allocate a chunk-sized temp.
+            if not (int(chunk.min()) == pattern == int(chunk.max())):
                 break
             chunks.append(chunk)
             proven += n
@@ -203,8 +204,15 @@ def compute_selfcheck(device_indices: Sequence[int | str]) -> dict[str, Any]:
             target = int(reported * VRAM_FRACTION)
             proven = _probe_memory(device, target)
             row.update(reported_bytes=reported, target_bytes=target, allocatable_bytes=proven)
+            if device != "cpu":
+                row["driver_free_bytes"] = int(torch.cuda.mem_get_info(device)[0])
             if proven < target:
-                failures.append(f"{device}: allocatable {proven} < target {target} bytes")
+                hint = (
+                    f" (driver reports {row['driver_free_bytes']} free: GPU shared or busy)"
+                    if row.get("driver_free_bytes", target) < target
+                    else " (reported VRAM not allocatable)"
+                )
+                failures.append(f"{device}: allocatable {proven} < target {target} bytes{hint}")
         except (RuntimeError, torch.OutOfMemoryError) as exc:
             row["error"] = f"{type(exc).__name__}: {exc}"
             failures.append(f"{device}: {row['error']}")

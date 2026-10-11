@@ -108,6 +108,7 @@ A round becomes final once its audits and disputes close, and its reward then ve
 | Phase A | 59M-parameter dense model, BF16, 200 steps, 3 RTX 5090 hosts on 3 driver versions | 6 honest runs bitwise identical; the negative control diverges exactly at the predicted leaf |
 | Phase B | 655M-parameter MoE, EP8 + ZeRO-1, two 8x RTX 5090 hosts (Quebec and Taiwan) | Leaves root, update hash, final model and top-k sets identical on both hosts |
 | Network v2 | Four rounds, eight rank workers, two 2x RTX 5090 hosts | Same-driver bitwise qualification passed end to end |
+| Multi-GPU miner e2e | Installed CLI on 2x RTX 5090 (Vast.ai, drivers 595.84 and 580.159.03): subnet-100 join, two chained `run-v2` rounds over NCCL, auditor replay | Auditor replay and a from-scratch repeat of round 0 bitwise identical on every rank; compute self-check identical across GPUs |
 
 Raw evidence and methodology: [docs/RESULTS.md](docs/RESULTS.md).
 
