@@ -276,6 +276,8 @@ class Harness:
         )
         if cost > Decimal(str(self.a.max_usd)):
             raise Refused(f"worst case {cost:.4f} USD > max_usd {self.a.max_usd}")
+        # Later attempts (after a host that never booted) take the next cheapest offers.
+        self.fallbacks = [o for o in sorted(fit, key=self.rank) if o is not best]
         return best
 
     def create(self, offer: dict[str, Any]) -> None:
@@ -316,6 +318,39 @@ class Harness:
                     raise RuntimeError("label ownership ambiguous")
                 return hits[0] if hits else None
         return None
+
+    def boot(self, offer: dict[str, Any]) -> None:
+        """Create + wait for ssh; a host stuck booting is deleted and the next offer tried."""
+        tried: set[int] = set()
+        for attempt in range(1 + int(self.a.boot_retries)):
+            self.create(offer)
+            real, self.deadline = (
+                self.deadline,
+                min(self.deadline, time.time() + float(self.a.boot_timeout)),
+            )
+            try:
+                self.wait_ready()
+                return
+            except RuntimeError:
+                if time.time() >= real or self.cancel.is_set():
+                    raise
+            finally:
+                self.deadline = real
+            tried.add(offer.get("machine_id"))
+            self.api.log("boot_timeout", attempt=attempt, instance_id=self.instance_id)
+            if not (self.delete() and self.confirm_absent()):
+                raise RuntimeError("stuck host not confirmed absent")
+            self.instance_id, self.create_attempted = None, False
+            self.label = f"{self.label_prefix}-{uuid.uuid4().hex[:8]}"
+            self.result["label"] = self.label
+            nxt = [o for o in self.fallbacks if o.get("machine_id") not in tried]
+            if not nxt:
+                break
+            offer = nxt[0]
+            cost = worst_case(offer, float(self.a.max_minutes), self.disk_gb)
+            if cost > Decimal(str(self.a.max_usd)):
+                break
+        raise RuntimeError("no host became ssh-ready")
 
     def wait_ready(self) -> None:
         key = self.identity().with_suffix(".pub").read_text().strip()
@@ -543,8 +578,7 @@ class Harness:
         dog.start()
         rc = 1
         try:
-            self.create(offer)
-            self.wait_ready()
+            self.boot(offer)
             if self.upload() != 0:
                 raise RuntimeError("upload failed")
             rc = self.run_remote()
@@ -579,6 +613,13 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
         help="seconds before the wall deadline at which the watchdog fires",
     )
     p.add_argument("--min-gap", type=float, default=5.0, help="seconds between provider calls")
+    p.add_argument(
+        "--boot-timeout",
+        type=float,
+        default=900.0,
+        help="seconds a host may take to become ssh-ready before it is replaced",
+    )
+    p.add_argument("--boot-retries", type=int, default=2, help="replacement hosts to try")
     p.add_argument("--delete-attempts", type=int, default=6)
     p.add_argument("--absence-attempts", type=int, default=12)
     a = p.parse_args(argv)

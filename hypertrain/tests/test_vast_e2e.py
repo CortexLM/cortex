@@ -32,6 +32,7 @@ class Fake:
         self.deleted = False
         self.linger = 0
         self.throttle: dict[str, int] = {}
+        self.asks: list[str] = []
 
     def offers(self) -> list[dict]:
         base = dict(
@@ -46,7 +47,7 @@ class Fake:
             machine_id=1,
         )
         return [
-            base | {"id": 11, "dph_total": self.dph + 0.3},
+            base | {"id": 11, "dph_total": self.dph + 0.3, "machine_id": 2},
             base | {"id": 12, "dph_total": self.dph},
             base | {"id": 13, "dph_total": 0.01, "num_gpus": 1},
         ]
@@ -67,7 +68,8 @@ class Fake:
         if method == "PUT" and path.startswith("/api/v0/asks/"):
             assert body and body["runtype"] == "ssh" and body["disk"] == 40
             assert body["image"] == vast.IMAGE
-            self.label = body["label"]
+            self.label, self.deleted = body["label"], False
+            self.asks.append(path)
             return 200, {"success": True, "new_contract": IID}
         if key == f"POST /api/v0/instances/{IID}/ssh/":
             return 200, {"success": True}
@@ -257,6 +259,21 @@ def test_absence_requires_parsed_empty_list(fake, tmp_path):
     deleted_at = next(i for i, j in enumerate(journal) if j.get("method") == "DELETE")
     after = [j for j in listings if journal.index(j) > deleted_at]
     assert len(after) == 3
+    assert json.loads((tmp_path / "ev/harness-result.json").read_text())["absent"] is True
+
+
+def test_host_stuck_booting_is_replaced_by_next_offer(fake, tmp_path):
+    class StuckFirst(Scripted):
+        def ssh_probe(self, host, port):
+            return len(fake.asks) > 1  # first host never answers ssh
+
+    rc, journal, _ = run(fake, tmp_path, "--boot-timeout", "0.3", harness=StuckFirst)
+    assert rc == 0
+    assert fake.asks == ["/api/v0/asks/12/", "/api/v0/asks/11/"]
+    ev = events(journal)
+    assert ev.index("boot_timeout") < ev.index("ssh_ready")
+    deletes = [i for i, j in enumerate(journal) if j.get("method") == "DELETE"]
+    assert len(deletes) == 2 and deletes[0] < ev.index("ssh_ready")
     assert json.loads((tmp_path / "ev/harness-result.json").read_text())["absent"] is True
 
 
