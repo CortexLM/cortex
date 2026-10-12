@@ -1,7 +1,9 @@
 {
  "provenance": {
-  "mfu-dense-1b": "plan WS0 0.3 / WS1 target profile (~1.1B dense, seq 2048, vocab 32768, bf16)",
-  "tiny-cpu": "CPU dry-run shape for tests only; never used for MFU claims"
+  "mfu-dense-1b": "plan WS0 0.3 / WS1 target profile (~1.1B dense, seq 2048, vocab 32768, bf16); needs HT_ACT_CKPT=1 to fit 32 GB (est. ~19.5 GiB with ckpt; OOM without)",
+  "tiny-cpu": "CPU dry-run shape for tests only; never used for MFU claims",
+  "mfu-dense-1b-mb2": "0.89B dense, micro_batch 2; est. ~17 GiB with HT_ACT_CKPT=1 (fp32 master+grad+AdamW m,v = 14.2 GiB + bf16 casts + activations); fits 32 GB",
+  "mfu-dense-0.35b": "~0.35B dense reference shape for the 33.59% bf16 sdpa-flash run (no ckpt needed)"
  },
  "profiles": {
   "mfu-dense-1b": {
@@ -53,6 +55,70 @@
     "H": 4,
     "J": 4,
     "micro_batch": 1,
+    "grad_accum": 1,
+    "state_policy": "reset",
+    "rewarmup_steps": 0
+   },
+   "outer": {
+    "opt": "nesterov"
+   },
+   "layout": {
+    "pp": 1,
+    "n_gpus": 1,
+    "dp_size": 1,
+    "ep_size": 1,
+    "zero1": false
+   }
+  },
+  "mfu-dense-1b-mb2": {
+   "model": {
+    "n_layers": 16,
+    "d_model": 2048,
+    "n_heads": 16,
+    "n_kv_heads": 8,
+    "d_ff": 5632,
+    "n_experts": 1,
+    "top_k_experts": 1,
+    "seq_len": 2048,
+    "vocab": 32768,
+    "compute_dtype": "bf16"
+   },
+   "inner": {
+    "H": 60,
+    "J": 60,
+    "micro_batch": 2,
+    "grad_accum": 1,
+    "state_policy": "reset",
+    "rewarmup_steps": 0
+   },
+   "outer": {
+    "opt": "nesterov"
+   },
+   "layout": {
+    "pp": 1,
+    "n_gpus": 1,
+    "dp_size": 1,
+    "ep_size": 1,
+    "zero1": false
+   }
+  },
+  "mfu-dense-0.35b": {
+   "model": {
+    "n_layers": 24,
+    "d_model": 1024,
+    "n_heads": 16,
+    "n_kv_heads": 8,
+    "d_ff": 2816,
+    "n_experts": 1,
+    "top_k_experts": 1,
+    "seq_len": 2048,
+    "vocab": 32768,
+    "compute_dtype": "bf16"
+   },
+   "inner": {
+    "H": 60,
+    "J": 60,
+    "micro_batch": 4,
     "grad_accum": 1,
     "state_policy": "reset",
     "rewarmup_steps": 0

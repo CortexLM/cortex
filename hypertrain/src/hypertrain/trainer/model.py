@@ -17,6 +17,7 @@ from types import ModuleType
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from hypertrain.trainer.attention import attention, select_backend
 from hypertrain.trainer.config import ModelConfig
@@ -299,6 +300,19 @@ MoeFn = Callable[[ModelConfig, Params, str, Tensor, torch.dtype], tuple[Tensor, 
 ForwardHook = Callable[[int, str, Tensor], Tensor]
 
 
+def _block(
+    cfg: ModelConfig, p: Params, pre: str, x: Tensor, dt: torch.dtype, moe_fn: MoeFn
+) -> tuple[Tensor, Tensor]:
+    """One decoder layer without trace hooks (same op order as the hooked path)."""
+    x = x + _attn(cfg, p, pre, _rms(x, p[pre + "attn_norm"]), dt)
+    h = _rms(x, p[pre + "mlp_norm"])
+    if cfg.is_moe:
+        m, a = moe_fn(cfg, p, pre, h, dt)
+        return x + m, a
+    m = _swiglu(h, p[pre + "w1"].to(dt), p[pre + "w3"].to(dt), p[pre + "w2"].to(dt))
+    return x + m, torch.zeros((), dtype=torch.float32, device=x.device)
+
+
 def forward(
     cfg: ModelConfig,
     p: Params,
@@ -321,6 +335,14 @@ def forward(
     aux = torch.zeros((), dtype=torch.float32, device=tokens.device)
     for i in range(cfg.n_layers):
         pre = f"layers.{i:03d}."
+        if hook is None:
+            # HT_ACT_CKPT=1: recompute each layer in backward (same kernels, so bitwise equal).
+            if os.environ.get("HT_ACT_CKPT") == "1" and torch.is_grad_enabled():
+                x, a = checkpoint(_block, cfg, p, pre, x, dt, moe_fn, use_reentrant=False)
+            else:
+                x, a = _block(cfg, p, pre, x, dt, moe_fn)
+            aux = aux + a
+            continue
         h = emit(i, "attn_norm", _rms(x, p[pre + "attn_norm"]))
         attn = emit(i, "attn", _attn(cfg, p, pre, h, dt))
         x = emit(i, "attn_residual", x + attn)
