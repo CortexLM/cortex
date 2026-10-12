@@ -142,6 +142,42 @@ def dot(a: Mapping[str, Arr], b: Mapping[str, Arr]) -> float:
     return _exact_sum((a[n], b[n]) for n in names(a))
 
 
+def _pairwise_f64(x: NDArray[np.float64]) -> float:
+    """ht-norm-v2 tree: zero-pad to 2**k, then x = x[0::2] + x[1::2] until one value is left.
+
+    Only elementwise IEEE float64 adds are used (correctly rounded), never np.sum/np.add.reduce,
+    whose internal blocking depends on the numpy build and SIMD dispatch.
+    """
+    if x.size == 0:
+        return 0.0
+    n = 1 << (x.size - 1).bit_length()
+    y = np.zeros(n, dtype=np.float64)
+    y[: x.size] = x
+    while y.size > 1:
+        y = y[0::2] + y[1::2]
+    return float(y[0])
+
+
+def sqnorm_v2(p: Mapping[str, Arr]) -> float:
+    """ht-norm-v2: per tensor exact float64 squares, fixed pairwise tree; tensors combined with
+    math.fsum in UTF-8 name order."""
+    return math.fsum(
+        _pairwise_f64(np.square(np.asarray(p[n], dtype=np.float64).ravel())) for n in names(p)
+    )
+
+
+def dot_v2(a: Mapping[str, Arr], b: Mapping[str, Arr]) -> float:
+    return math.fsum(
+        _pairwise_f64(
+            np.asarray(a[n], dtype=np.float64).ravel() * np.asarray(b[n], dtype=np.float64).ravel()
+        )
+        for n in names(a)
+    )
+
+
+NORMS = {"ht-norm-v1": sqnorm, "ht-norm-v2": sqnorm_v2}
+
+
 def sqnorm_v1_reference(p: Mapping[str, Arr]) -> float:
     """Original Python-object ht-norm-v1 sum; kept as the bitwise oracle for tests."""
     return math.fsum(
@@ -266,8 +302,10 @@ class OuterParams:
         }
 
 
-def preclip(delta: Mapping[str, Arr], max_norm: float) -> tuple[Params, bool]:
-    r = math.sqrt(sqnorm(delta))
+def preclip(
+    delta: Mapping[str, Arr], max_norm: float, norm: str = "ht-norm-v1"
+) -> tuple[Params, bool]:
+    r = math.sqrt(NORMS[norm](delta))
     if r <= max_norm:
         return {n: delta[n] for n in names(delta)}, False
     s = np.float32(max_norm / r)
@@ -280,6 +318,7 @@ def centered_clip(
     center: Mapping[str, Arr],
     tau: float,
     iters: int,
+    norm: str = "ht-norm-v1",
 ) -> Params:
     """v <- v + sum_i w_i * clip_tau(delta_i - v), iterated; deltas in the caller's fixed order."""
     v = {n: np.array(center[n], dtype=np.float32) for n in names(center)}
@@ -287,7 +326,7 @@ def centered_clip(
         acc = {n: np.zeros_like(a) for n, a in v.items()}
         for d, w in zip(deltas, weights, strict=True):
             diff = {n: d[n] - v[n] for n in v}
-            r = math.sqrt(sqnorm(diff))
+            r = math.sqrt(NORMS[norm](diff))
             s = np.float32(1.0 if r <= tau else tau / r)
             for n in v:
                 acc[n] = acc[n] + w * (diff[n] * s)
