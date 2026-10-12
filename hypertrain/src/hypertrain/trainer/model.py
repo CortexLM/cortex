@@ -9,6 +9,7 @@ so no index_add/scatter_add is used anywhere.
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable
 from types import ModuleType
 
@@ -220,6 +221,75 @@ def _moe(
     return combined.view(b, t, d), aux
 
 
+class _PadGather(torch.autograd.Function):
+    """out = cat(x, 0-row)[idx]; idx is injective on real rows, so backward is the inverse gather
+    cat(grad, 0-row)[inv] (no scatter_add, deterministic)."""
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx, x: Tensor, idx: Tensor, inv: Tensor
+    ) -> Tensor:
+        ctx.save_for_backward(inv)
+        return torch.cat([x, x.new_zeros(1, *x.shape[1:])]).index_select(0, idx)
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx, grad: Tensor
+    ) -> tuple[Tensor, None, None]:
+        (inv,) = ctx.saved_tensors  # type: ignore[attr-defined]
+        return (
+            torch.cat([grad, grad.new_zeros(1, *grad.shape[1:])]).index_select(0, inv),
+            None,
+            None,
+        )
+
+
+def _pad_gather(x: Tensor, idx: Tensor, inv: Tensor) -> Tensor:
+    out = _PadGather.apply(x, idx, inv)
+    assert isinstance(out, Tensor)
+    return out
+
+
+def _moe_grouped(
+    cfg: ModelConfig, p: Params, pre: str, x: Tensor, dt: torch.dtype
+) -> tuple[Tensor, Tensor]:
+    """Opt-in (HT_MOE_GROUPED=1) MoE: kept tokens packed into a static [E, capacity, d] buffer and
+    run as three bmm grouped GEMMs; dropped tokens are never computed. No host sync (static
+    shapes). Same routing, weights and aux as _moe; numerics differ from _moe only by GEMM
+    blocking (repeatable, tolerance-tested), so it is not the replay reference.
+    """
+    b, t, d = x.shape
+    n, k, e = b * t, cfg.top_k_experts, cfg.n_experts
+    flat = x.reshape(n, d)
+    logits = flat.float() @ p[pre + "router"]
+    cap = math.ceil(cfg.capacity_factor * n * k / e)
+    experts, keep = route(logits.detach(), k, cap)
+    onehot = F.one_hot(experts.view(k, n).t(), e).to(logits.dtype)
+    sel = (onehot * logits[:, None, :]).sum(-1).softmax(-1).t().reshape(-1)
+    weight = (sel * keep.to(sel.dtype)).to(dt)
+    seg = torch.sort(experts, stable=True).indices
+    sorted_e = experts.index_select(0, seg)
+    counts = torch.bincount(sorted_e, minlength=e)
+    pos = torch.empty_like(experts)
+    pos[seg] = torch.arange(n * k, device=x.device) - (torch.cumsum(counts, 0) - counts)[sorted_e]
+    m = n * k
+    slot = torch.where(keep, experts * cap + pos, e * cap)  # dropped -> pad slot
+    src = torch.full((e * cap + 1,), m, dtype=torch.int64, device=x.device)
+    src[slot] = torch.arange(m, device=x.device)  # pad slot entry overwritten below
+    src = src[: e * cap]
+    rows = flat.repeat(k, 1)
+    buf = _pad_gather(rows, src, torch.where(keep, slot, e * cap)).view(e, cap, d)
+    w1, w3, w2 = (p[pre + w].to(dt) for w in ("w1", "w3", "w2"))
+    hid = F.silu(torch.bmm(buf, w1)) * torch.bmm(buf, w3)
+    out = torch.bmm(hid, w2).view(e * cap, d)
+    y = _pad_gather(out, torch.where(keep, slot, e * cap), src) * weight[:, None]
+    combined = y.view(k, n, d).sum(0)
+    probs = logits.softmax(-1)
+    frac = torch.bincount(experts[keep], minlength=e).float() / max(1, n * k)
+    aux = e * (frac * probs.mean(0)).sum()
+    return combined.view(b, t, d), aux
+
+
 MoeFn = Callable[[ModelConfig, Params, str, Tensor, torch.dtype], tuple[Tensor, Tensor]]
 ForwardHook = Callable[[int, str, Tensor], Tensor]
 
@@ -238,7 +308,7 @@ def forward(
     def emit(layer: int, op: str, x: Tensor) -> Tensor:
         return x if hook is None else hook(layer, op, x)
 
-    moe_fn = moe or _moe
+    moe_fn = moe or (_moe_grouped if os.environ.get("HT_MOE_GROUPED") == "1" else _moe)
     dt = compute_dtype(cfg)
     inp, tgt = tokens[:, :-1], tokens[:, 1:]
     emit(-1, "input", tokens)
