@@ -13,8 +13,14 @@ Branch `boat/3924dab79a27` on `echobt/hypertrain`. Directive: `../MINER-CLI-UPDA
 
 ruff + mypy (`--package hypertrain`, 117 files) were clean after the keys/update/cli/ledger lanes.
 
+Follow-up fixes, published to CortexLM/hypertrain `main`:
+| Commit | Fix | Evidence |
+|---|---|---|
+| `9c7e1cb` | Per-platform golden leaf roots: dev host plus GitHub runner hashes taken from the CI log. The simulator reads the device loss once. The release key temp-file line is allowlisted. | locally: golden/act_ckpt/engine_flags 24 passed (+1 local inductor g++ failure, pre-existing and runner-only OK); parity 15 passed; publish exclusions 55 passed |
+| `13514f2` | `cli.main` catches only `MinerError`/`UpdateRejected` again. CLI v3 had widened the catch to `OSError`, which swallowed `SSLCertVerificationError`. | `test_network_service_proof` + `test_cli_v3` + `test_miner_flow`: 59 passed |
+
 ## Vast run (manual, outside CI)
-`scripts/vast_e2e.py --profile miner-flow --max-usd 3.5`: offer 52078469 (Denmark, 1x RTX 5090, driver 590.48.01, inet_down 1263.5 Mbps, worst case $0.43), image `vastai/pytorch@sha256:4507...`. `uv sync`, `hypertrain-miner --help`, `scripts/miner_flow_e2e.py` on the host: **PASS, 19/19 checks, replay MATCH**. Harness result: `remote_rc=0, deleted=true, absent=true`. Credit afterwards $8.58 (from $8.78); instances on the account after the run: 1.
+`scripts/vast_e2e.py --profile miner-flow --max-usd 3.5`: offer 52078469 (Denmark, 1x RTX 5090, driver 590.48.01, inet_down 1263.5 Mbps, worst case $0.43), image `vastai/pytorch@sha256:4507...`. `uv sync`, `hypertrain-miner --help`, `scripts/miner_flow_e2e.py` on the host: **PASS, 19/19 checks, replay MATCH**. Harness result: `remote_rc=0, deleted=true, absent=true`. Credit afterwards $8.58 (from $8.78). Instance 55593935 (`hypertrain-e2e-e06a11a8`) is absent from the account listing. The account is shared: other instances visible later carry other labels and belong to other sessions.
 
 ## Trust model
 The coldkey/mnemonic stays on the operator machine. `key create` makes a fresh server hotkey, and the coldkey signs a `mine`-scope grant, valid forever until revoked. Only `{server.key, grant.json}` (0600) is copied to the GPU host. The e2e asserts that no coldkey bytes exist anywhere under the server HOME. `key revoke` is coldkey-signed; afterwards the challenge returns 403 for that hotkey.
@@ -35,6 +41,10 @@ See `docs/incentive-audit.md` (14 mechanisms). Fixed: ledger vesting now uses th
   - **Missing SSH server on this host:** 16 failures and 18 errors in `tests/gpu_ops` (`test_gpu_ops`, `test_network_role_dispatch`, `test_network_lifecycle`, `test_phase_b`, `test_network_admit_cli`) raise `FileNotFoundError: /usr/sbin/sshd`. Unmodified CortexLM/main fails the same way here (10 failed + 18 errors on the same files). GitHub `ubuntu-24.04` runners ship sshd.
   - **Capacity tests time out here:** the 3 capacity tests time out as a normal user on a shared host. CI already deselects them from `check.sh` and runs them in its isolated root systemd job.
   - **Everything else passes:** e2e/datasets 40 passed and challenge 171 passed when run in isolation.
-- **GitHub Actions run not observed:** `miner-flow.yml` was proven by running its script locally. I have no access to GitHub Actions results (no `gh` CLI).
+- **GitHub Actions (CortexLM/hypertrain, read through the REST API):**
+  - `miner-flow`: **success** on `ff33e57` and on `08ce9b7`.
+  - `ci / canary`: success.
+  - `ci / test` and `ci / test-slow` on `08ce9b7`: see the final line below.
+  - The earlier red `ci` came from the golden hashes and the SSL catch, both fixed above.
 - **Simulated release in the e2e:** the e2e uses an injected wheel fetch/install. Real `release.yml` signing needs the `HYPERTRAIN_RELEASE_KEY` secret, and the production release pubkey must be pinned before the first real release.
 - **Exposed token:** the `origin` remote URL embeds a GitHub token. Rotate it.
