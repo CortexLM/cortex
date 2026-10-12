@@ -44,7 +44,7 @@ See `docs/incentive-audit.md` (14 mechanisms). Fixed: ledger vesting now uses th
 - **GitHub Actions (CortexLM/hypertrain, read through the REST API):**
   - `miner-flow`: **success** on `ff33e57` and on `08ce9b7`.
   - `ci / canary`: success.
-  - `ci / test` and `ci / test-slow` on `08ce9b7`: see the final line below.
+  - `ci` on `08ce9b7`: **success**. That covers `test`, which runs `scripts/check.sh` with the ci.yml args, plus `test-slow` and `canary`. It is the authoritative `check.sh` gate. It runs the capacity tests that need sshd and root in their own systemd job.
   - The earlier red `ci` came from the golden hashes and the SSL catch, both fixed above.
 - **Simulated release in the e2e:** the e2e uses an injected wheel fetch/install. Real `release.yml` signing needs the `HYPERTRAIN_RELEASE_KEY` secret, and the production release pubkey must be pinned before the first real release.
 - **Exposed token:** the `origin` remote URL embeds a GitHub token. Rotate it.
