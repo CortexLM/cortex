@@ -3,7 +3,10 @@
   "mfu-dense-1b": "plan WS0 0.3 / WS1 target profile (~1.1B dense, seq 2048, vocab 32768, bf16); needs HT_ACT_CKPT=1 to fit 32 GB (est. ~19.5 GiB with ckpt; OOM without)",
   "tiny-cpu": "CPU dry-run shape for tests only; never used for MFU claims",
   "mfu-dense-1b-mb2": "0.89B dense, micro_batch 2; est. ~17 GiB with HT_ACT_CKPT=1 (fp32 master+grad+AdamW m,v = 14.2 GiB + bf16 casts + activations); fits 32 GB",
-  "mfu-dense-0.35b": "~0.35B dense reference shape for the 33.59% bf16 sdpa-flash run (no ckpt needed)"
+  "mfu-dense-0.35b": "~0.35B dense reference shape for the 33.59% bf16 sdpa-flash run (no ckpt needed)",
+  "mfu-dense-1b-dp2": "mfu-dense-1b model (889M params) on 2 ranks, dp_size 2, zero1 owners; per rank micro_batch 4. ZeRO-2 est. ~14 GiB/rank with HT_ACT_CKPT=1 (fp32 params 3.3 + full fp32 grads transient 3.3 + owned m,v 3.3 + bf16 casts 1.7 + ckpt activations ~2)",
+  "mfu-dense-1b-dp8": "mfu-dense-1b model on 8 ranks, dp_size 8, zero1 owners (per-tensor; largest owner 161.5M params). ZeRO-2 est. ~11 GiB/rank, ZeRO-3 ~8 GiB/rank steady (+3.3 GiB gathered params during fwd/bwd), with HT_ACT_CKPT=1",
+  "tiny-cpu-dp2": "CPU torchrun smoke for run_mfu_dist.py only; never used for MFU claims"
  },
  "profiles": {
   "mfu-dense-1b": {
@@ -132,6 +135,102 @@
     "dp_size": 1,
     "ep_size": 1,
     "zero1": false
+   }
+  },
+  "mfu-dense-1b-dp2": {
+   "model": {
+    "n_layers": 16,
+    "d_model": 2048,
+    "n_heads": 16,
+    "n_kv_heads": 8,
+    "d_ff": 5632,
+    "n_experts": 1,
+    "top_k_experts": 1,
+    "seq_len": 2048,
+    "vocab": 32768,
+    "compute_dtype": "bf16"
+   },
+   "inner": {
+    "H": 60,
+    "J": 60,
+    "micro_batch": 4,
+    "grad_accum": 1,
+    "state_policy": "reset",
+    "rewarmup_steps": 0
+   },
+   "outer": {
+    "opt": "nesterov"
+   },
+   "layout": {
+    "pp": 1,
+    "n_gpus": 2,
+    "dp_size": 2,
+    "ep_size": 1,
+    "zero1": true
+   }
+  },
+  "mfu-dense-1b-dp8": {
+   "model": {
+    "n_layers": 16,
+    "d_model": 2048,
+    "n_heads": 16,
+    "n_kv_heads": 8,
+    "d_ff": 5632,
+    "n_experts": 1,
+    "top_k_experts": 1,
+    "seq_len": 2048,
+    "vocab": 32768,
+    "compute_dtype": "bf16"
+   },
+   "inner": {
+    "H": 60,
+    "J": 60,
+    "micro_batch": 4,
+    "grad_accum": 1,
+    "state_policy": "reset",
+    "rewarmup_steps": 0
+   },
+   "outer": {
+    "opt": "nesterov"
+   },
+   "layout": {
+    "pp": 1,
+    "n_gpus": 8,
+    "dp_size": 8,
+    "ep_size": 1,
+    "zero1": true
+   }
+  },
+  "tiny-cpu-dp2": {
+   "model": {
+    "n_layers": 1,
+    "d_model": 16,
+    "n_heads": 2,
+    "n_kv_heads": 1,
+    "d_ff": 24,
+    "n_experts": 1,
+    "top_k_experts": 1,
+    "seq_len": 8,
+    "vocab": 64,
+    "compute_dtype": "fp32"
+   },
+   "inner": {
+    "H": 4,
+    "J": 4,
+    "micro_batch": 1,
+    "grad_accum": 1,
+    "state_policy": "reset",
+    "rewarmup_steps": 0
+   },
+   "outer": {
+    "opt": "nesterov"
+   },
+   "layout": {
+    "pp": 1,
+    "n_gpus": 2,
+    "dp_size": 2,
+    "ep_size": 1,
+    "zero1": true
    }
   }
  }
