@@ -524,6 +524,8 @@ def _rank_grads(
 def _reduce(comm: Comm, geo: Geometry, grads: Params, reduction: str) -> Params:
     """all_gather + fixed rank-order fp32 sum over each tensor's replicas, / n_gpus."""
     names = sorted(grads)
+    if reduction == "bucketed":
+        return _reduce_bucketed(comm, geo, grads)
     if reduction != "all_gather":  # test-only flag: proves the guard catches all_reduce
         comm.all_reduce_sum(torch.cat([grads[n].reshape(-1) for n in names]))
     out: Params = {}
@@ -541,6 +543,50 @@ def _reduce(comm: Comm, geo: Geometry, grads: Params, reduction: str) -> Params:
         out[n] = acc.div_(geo.lay.n_gpus)
         del got
     return out
+
+
+BUCKET_BYTES = 25 << 20
+
+
+def _reduce_bucketed(
+    comm: Comm, geo: Geometry, grads: Params, bucket_bytes: int | None = None
+) -> Params:
+    """Bitwise-identical alternative to the all_gather reference, with 2x instead of world x
+    traffic: tensors replicated on every rank are flattened (sorted-name order) into buckets; each
+    bucket is reduce-scattered via all_to_all (a permutation, not a reduction op, so
+    forbid_reductions holds), each rank sums its chunk over source ranks in rank order (the
+    reference order), then the reduced chunks are all_gathered. Expert tensors (replicated on a
+    dp subset) keep the reference path."""
+    names = sorted(grads)
+    world = comm.world
+    bucket_bytes = BUCKET_BYTES if bucket_bytes is None else bucket_bytes
+    full = [n for n in names if len(geo.replicas(geo.my_piece(n))) == world > 1]
+    out = _reduce(comm, geo, {n: grads[n] for n in names if n not in full}, "all_gather")
+    buckets: list[list[str]] = [[]]
+    size = 0
+    for n in full:
+        nb = grads[n].numel() * grads[n].element_size()
+        if buckets[-1] and size + nb > bucket_bytes:
+            buckets.append([])
+            size = 0
+        buckets[-1].append(n)
+        size += nb
+    for bucket in (b for b in buckets if b):
+        flat = torch.cat([grads[n].reshape(-1) for n in bucket])
+        chunk = -(-flat.numel() // world)
+        flat = torch.cat([flat, flat.new_zeros(chunk * world - flat.numel())])
+        got = comm.all_to_all(flat, [chunk] * world, [chunk] * world).view(world, chunk)
+        acc = got[0].clone()
+        for r in range(1, world):
+            acc.add_(got[r])
+        acc.div_(geo.lay.n_gpus)
+        red = torch.cat(comm.all_gather(acc))
+        off = 0
+        for n in bucket:
+            k = grads[n].numel()
+            out[n] = red[off : off + k].view_as(grads[n]).clone()
+            off += k
+    return {n: out[n] for n in names}
 
 
 def _grad_norm(comm: Comm, geo: Geometry, red: Params) -> Tensor:
@@ -581,6 +627,9 @@ def train_island(
     checkpoint: Callable[[int, Params, OptState], None] | None = None,
 ) -> RoundResult:
     """One H-step round on this rank; every rank returns the same full RoundResult.
+
+    ``reduction="bucketed"`` swaps the gradient all_gather for the bucketed reduce-scatter
+    (bitwise identical result, see _reduce_bucketed).
 
     With a torch.distributed comm, reductions are blocked for the whole round.
     """
