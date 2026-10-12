@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -122,6 +123,8 @@ def main() -> int:
         "git_sha": sha.stdout.strip(),
         "torch": torch.__version__,
         "determinism": DETERMINISM,
+        "engine_flags": {k: v for k, v in sorted(os.environ.items()) if k.startswith("HT_")},
+        "attention_backend": run["attention_backend"],
         "warmup_steps": a.warmup,
         "peak_vendor_flops": MFU_PEAK_RTX5090_BF16,
         "peak_measured_flops": a.measured_peak,
