@@ -101,7 +101,49 @@ def th(p: Mapping[str, Arr]) -> str:
     )
 
 
+_EXACT_CHUNK = 1 << 24  # 2**24 terms of |half| < 2**27 keep every bin sum < 2**51 (exact)
+_LO = (1 << 26) - 1
+
+
+def _exact_sum(pairs: Iterable[tuple[Arr, Arr]]) -> float:
+    """Correctly rounded sum of float64(x)*float64(y): bitwise equal to math.fsum of the products.
+
+    A float32*float32 product is exact and normal in float64, so it is sign * m * 2**(e - 1075)
+    with m < 2**53 read from its bits. m is split into 26-bit halves summed per exponent e with
+    np.bincount; every bin sum is an integer below 2**53, hence exact in any summation order.
+    The bins are combined into one Python int and divided by 2**1075 once (int true division is
+    correctly rounded), which is what math.fsum returns for the same finite products.
+    """
+    total = 0
+    for x, y in pairs:
+        for i in range(0, x.size, _EXACT_CHUNK):
+            p = x.ravel()[i : i + _EXACT_CHUNK].astype(np.float64)
+            p *= y.ravel()[i : i + _EXACT_CHUNK]
+            if not np.isfinite(p).all():  # v1 semantics (inf/nan or fsum error) for invalid input
+                return math.fsum((x.astype(np.float64) * y.astype(np.float64)).ravel().tolist())
+            bits = p.view(np.int64)
+            e = (bits >> 52) & 0x7FF
+            m = np.where(e > 0, (bits & ((1 << 52) - 1)) | (1 << 52), 0)
+            m = np.where(bits < 0, -m, m)
+            hi = np.bincount(e, weights=(m >> 26).astype(np.float64), minlength=2048)
+            lo = np.bincount(e, weights=(m & _LO).astype(np.float64), minlength=2048)
+            for j in np.flatnonzero(hi.astype(bool) | lo.astype(bool)).tolist():
+                total += ((int(hi[j]) << 26) + int(lo[j])) << j
+    return total / (1 << 1075)
+
+
 def sqnorm(p: Mapping[str, Arr]) -> float:
+    """ht-norm-v1: exactly rounded sum of squares (vectorised; equals math.fsum bit for bit)."""
+    return _exact_sum((a, a) for a in p.values())
+
+
+def dot(a: Mapping[str, Arr], b: Mapping[str, Arr]) -> float:
+    """ht-norm-v1 dot product over a's tensor names (vectorised; equals math.fsum bit for bit)."""
+    return _exact_sum((a[n], b[n]) for n in names(a))
+
+
+def sqnorm_v1_reference(p: Mapping[str, Arr]) -> float:
+    """Original Python-object ht-norm-v1 sum; kept as the bitwise oracle for tests."""
     return math.fsum(
         itertools.chain.from_iterable(
             np.square(a.astype(np.float64)).ravel().tolist() for a in p.values()
@@ -109,7 +151,7 @@ def sqnorm(p: Mapping[str, Arr]) -> float:
     )
 
 
-def dot(a: Mapping[str, Arr], b: Mapping[str, Arr]) -> float:
+def dot_v1_reference(a: Mapping[str, Arr], b: Mapping[str, Arr]) -> float:
     return math.fsum(
         itertools.chain.from_iterable(
             (a[n].astype(np.float64) * b[n].astype(np.float64)).ravel().tolist() for n in names(a)
