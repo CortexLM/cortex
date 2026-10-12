@@ -497,8 +497,11 @@ def _rank_grads(
     get: SampleFn,
     t: int = 0,
     hook: TraceHook | None = None,
+    on_ready: Callable[[str, Params], None] | None = None,
 ) -> tuple[Params, Tensor]:
-    """Mirror of loop._train_step on this rank's samples (no optimizer step)."""
+    """Mirror of loop._train_step on this rank's samples (no optimizer step). ``on_ready(name,
+    grads)`` fires from a grad hook during the last micro-batch's backward, once grads[name] is
+    final (same add, so same bits), to overlap its bucket reduction with the rest of backward."""
     names = sorted(theta)
     ga, mb = cfg.inner.grad_accum, cfg.inner.micro_batch
     moe = _moe_ep(comm, geo) if cfg.model.is_moe else None
@@ -511,11 +514,21 @@ def _rank_grads(
         def emit(layer: int, op: str, x: Tensor, microbatch: int = j) -> Tensor:
             return x if hook is None else hook(TraceContext(comm.rank, t, microbatch, layer, op), x)
 
+        hooked = on_ready is not None and j == ga - 1
+        if hooked:
+            for n in names:
+
+                def ready(g: Tensor, n: str = n) -> None:
+                    grads[n].add_(g)
+                    assert on_ready is not None
+                    on_ready(n, grads)
+
+                params[n].register_hook(ready)
         ce, aux = forward(cfg.model, params, tokens, moe=moe, hook=emit if hook else None)
         total = (ce + cfg.model.aux_loss_coef * aux) / ga
         gs = torch.autograd.grad(total, [params[n] for n in names], allow_unused=True)
         for n, g in zip(names, gs, strict=True):
-            if g is not None:
+            if g is not None and not hooked:
                 grads[n].add_(g)
         loss_sum = loss_sum + ce.detach().double()
     return grads, loss_sum / ga
@@ -564,6 +577,14 @@ def _reduce_bucketed(
     bucket_bytes = BUCKET_BYTES if bucket_bytes is None else bucket_bytes
     full = [n for n in names if len(geo.replicas(geo.my_piece(n))) == world > 1]
     out = _reduce(comm, geo, {n: grads[n] for n in names if n not in full}, "all_gather")
+    for bucket in _buckets(grads, full, bucket_bytes):
+        out |= _reduce_bucket(comm, geo, grads, bucket)
+    return {n: out[n] for n in names}
+
+
+def _buckets(
+    grads: Mapping[str, Tensor], full: Sequence[str], bucket_bytes: int
+) -> list[list[str]]:
     buckets: list[list[str]] = [[]]
     size = 0
     for n in full:
@@ -573,22 +594,29 @@ def _reduce_bucketed(
             size = 0
         buckets[-1].append(n)
         size += nb
-    for bucket in (b for b in buckets if b):
-        flat = torch.cat([grads[n].reshape(-1) for n in bucket])
-        chunk = -(-flat.numel() // world)
-        flat = torch.cat([flat, flat.new_zeros(chunk * world - flat.numel())])
-        got = comm.all_to_all(flat, [chunk] * world, [chunk] * world).view(world, chunk)
-        acc = got[0].clone()
-        for r in range(1, world):
-            acc.add_(got[r])
-        acc.div_(geo.lay.n_gpus)
-        red = torch.cat(comm.all_gather(acc))
-        off = 0
-        for n in bucket:
-            k = grads[n].numel()
-            out[n] = red[off : off + k].view_as(grads[n]).clone()
-            off += k
-    return {n: out[n] for n in names}
+    return [b for b in buckets if b]
+
+
+def _reduce_bucket(
+    comm: Comm, geo: Geometry, grads: Mapping[str, Tensor], bucket: Sequence[str]
+) -> Params:
+    world = comm.world
+    flat = torch.cat([grads[n].reshape(-1) for n in bucket])
+    chunk = -(-flat.numel() // world)
+    flat = torch.cat([flat, flat.new_zeros(chunk * world - flat.numel())])
+    got = comm.all_to_all(flat, [chunk] * world, [chunk] * world).view(world, chunk)
+    acc = got[0].clone()
+    for r in range(1, world):
+        acc.add_(got[r])
+    acc.div_(geo.lay.n_gpus)
+    red = torch.cat(comm.all_gather(acc))
+    out: Params = {}
+    off = 0
+    for n in bucket:
+        k = grads[n].numel()
+        out[n] = red[off : off + k].view_as(grads[n]).clone()
+        off += k
+    return out
 
 
 def _reduce_to_owner(comm: Comm, geo: Geometry, grads: Params) -> Params:
@@ -779,6 +807,26 @@ def _train_island(
     if reduction in ("zero2", "zero3") and not lay.zero1:
         raise ValueError(f"reduction={reduction} needs layout zero1 (it reuses the ZeRO-1 owners)")
     zero3 = reduction == "zero3"
+    # reduction="overlap": the bucketed reduce-scatter, each bucket issued from a grad hook as soon
+    # as its last gradient is final. Every rank runs the same autograd graph, so hooks (and the
+    # collectives they issue) fire in the same order everywhere; bucket contents are those of
+    # _reduce_bucketed, so the result is bitwise identical.
+    plan: list[list[str]] = []
+    if reduction == "overlap":
+        replicated = [n for n in names if len(geo.replicas(geo.my_piece(n))) == comm.world > 1]
+        plan = _buckets(theta_start, replicated, BUCKET_BYTES)
+    in_bucket = {n: i for i, bk in enumerate(plan) for n in bk}
+    pending: list[set[str]] = []
+    done: dict[int, Params] = {}
+
+    def on_ready(n: str, grads: Params) -> None:
+        i = in_bucket.get(n)
+        if i is None:
+            return
+        pending[i].discard(n)
+        if not pending[i]:
+            done[i] = _reduce_bucket(comm, geo, grads, plan[i])
+
     if zero3:
         theta = {n: theta[n] for n in owned}
 
@@ -805,10 +853,26 @@ def _train_island(
             synced = gather_pieces(comm, geo, theta, pieces, geo.owner, device)
             theta = {n: synced[geo.my_piece(n)] for n in names}
             del synced
-        grads, loss_local = _rank_grads(cfg, comm, geo, theta, ids, get_sample, t, hook)
+        if reduction == "overlap":
+            done.clear()
+            pending[:] = [set(bk) for bk in plan]
+        grads, loss_local = _rank_grads(
+            cfg, comm, geo, theta, ids, get_sample, t, hook, on_ready if plan else None
+        )
         if zero3:  # reshard: keep only owned tensors between steps
             theta = {n: theta[n] for n in owned}
-        red = _reduce(comm, geo, grads, reduction)
+        if reduction == "overlap":
+            for i, bk in enumerate(plan):  # buckets holding unused params, in bucket order
+                if i not in done:
+                    done[i] = _reduce_bucket(comm, geo, grads, bk)
+            red = _reduce(
+                comm, geo, {n: grads[n] for n in names if n not in in_bucket}, "all_gather"
+            )
+            for part in done.values():
+                red |= part
+            red = {n: red[n] for n in names}
+        else:
+            red = _reduce(comm, geo, grads, reduction)
         if hook is not None:
             red = {
                 n: hook(TraceContext(comm.rank, t, -1, cfg.model.n_layers + 1, f"gradient.{n}"), x)

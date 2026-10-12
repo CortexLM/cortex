@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 
@@ -127,8 +128,19 @@ def execute(directory: Path, backend: str) -> None:
         out.mkdir()
         (out / "checkpoints").mkdir()
 
+        # Async checkpoint: train_island hands over freshly gathered tensors it never mutates, so
+        # one writer thread serialises them while training continues; drained before outputs.
+        saver = ThreadPoolExecutor(max_workers=1)
+        saves: list[Future[None]] = []
+
         def checkpoint(t: int, theta: dict[str, torch.Tensor], state: OptState) -> None:
-            durable_write(out / "checkpoints" / f"{t}.safetensors", pack_state(theta, state))
+            saves.append(
+                saver.submit(
+                    lambda: durable_write(
+                        out / "checkpoints" / f"{t}.safetensors", pack_state(theta, state)
+                    )
+                )
+            )
 
         traces = []
 
@@ -166,6 +178,9 @@ def execute(directory: Path, backend: str) -> None:
             cancel=deadline,
             checkpoint=checkpoint,
         )
+        for f in saves:
+            f.result()  # re-raises a failed write before any result is published
+        saver.shutdown()
         allocated = reserved = 0
         total = 1
         if backend == "cuda":

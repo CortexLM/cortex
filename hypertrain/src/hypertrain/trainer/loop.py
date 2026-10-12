@@ -111,7 +111,10 @@ def _load_batch(
     get_sample: SampleFn,
     device: torch.device | str = "cpu",
 ) -> Tensor:
-    """Validated u32 samples -> int64 tokens [B, T+1] on ``device`` (the params' device)."""
+    """Validated u32 samples -> int64 tokens [B, T+1] on ``device`` (the params' device).
+
+    CUDA: pinned host buffer + non_blocking H2D, so the copy overlaps queued GPU work; rows keep
+    the ``ids`` order and stream order guarantees the copy lands before the forward reads it."""
     rows = []
     for i in ids:
         s = np.asarray(get_sample(i))
@@ -120,7 +123,10 @@ def _load_batch(
         if int(s.max()) >= cfg.model.vocab:
             raise ValueError(f"sample {i} has token id >= vocab")
         rows.append(s.astype(np.int64))
-    return torch.from_numpy(np.stack(rows)).to(device)
+    host = torch.from_numpy(np.stack(rows))
+    if torch.device(device).type == "cuda":
+        return host.pin_memory().to(device, non_blocking=True)
+    return host.to(device)
 
 
 def _norm(a: Params, b: Params) -> float:

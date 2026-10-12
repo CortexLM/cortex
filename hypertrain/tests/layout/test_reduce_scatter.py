@@ -42,5 +42,8 @@ def test_island_bucketed_same_leaves(name: str, monkeypatch: pytest.MonkeyPatch)
     cfg, lay, a, get = setup(name)
     th = init_params(cfg.model)
     ref = emulate(lay.n_gpus, lambda c: train_island(cfg, lay, c, th, a, get))
-    new = emulate(lay.n_gpus, lambda c: train_island(cfg, lay, c, th, a, get, reduction="bucketed"))
-    assert {r.leaves_root for r in new} == {ref[0].leaves_root}
+    for red in ("bucketed", "overlap"):
+        new = emulate(
+            lay.n_gpus, lambda c, red=red: train_island(cfg, lay, c, th, a, get, reduction=red)
+        )
+        assert {r.leaves_root for r in new} == {ref[0].leaves_root}, red
