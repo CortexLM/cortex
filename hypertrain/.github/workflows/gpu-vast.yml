@@ -1,6 +1,6 @@
 name: gpu-vast
 
-# ponytail: manual + after green CI on main only; per-PR GPU runs would cost per push.
+# Manual only: CI never rents Vast (miner-flow.yml covers the flow on CPU).
 on:
   workflow_dispatch:
     inputs:
@@ -10,10 +10,6 @@ on:
       max_minutes:
         description: Wall-clock deadline for the rental (minutes)
         default: "90"
-  workflow_run:
-    workflows: [ci]
-    types: [completed]
-    branches: [main]
 
 permissions:
   contents: read
@@ -24,17 +20,13 @@ concurrency:
 
 jobs:
   vast:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.12.17"
