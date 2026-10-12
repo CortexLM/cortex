@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from hypertrain.trainer.attention import attention, select_backend
 from hypertrain.trainer.config import ModelConfig
 from hypertrain.trainer.rng import rng_ctr, uniform_f64
 
@@ -168,13 +169,7 @@ def _attn(cfg: ModelConfig, p: Params, pre: str, x: Tensor, dt: torch.dtype) -> 
     v = (x @ p[pre + "wv"].to(dt)).view(b, t, kvh, hd).transpose(1, 2)
     cos, sin = _rope(cfg, t, dt, x.device)
     q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
-    if kvh != h:
-        k = k[:, :, None].expand(b, kvh, h // kvh, t, hd).reshape(b, h, t, hd)
-        v = v[:, :, None].expand(b, kvh, h // kvh, t, hd).reshape(b, h, t, hd)
-    s = (q @ k.transpose(-1, -2)).float() / math.sqrt(hd)
-    mask = torch.ones(t, t, dtype=torch.bool, device=x.device).triu(1)
-    a = s.masked_fill(mask, float("-inf")).softmax(-1).to(dt)
-    o = (a @ v).transpose(1, 2).reshape(b, t, d)
+    o = attention(q, k, v, select_backend(x.device)).transpose(1, 2).reshape(b, t, d)
     return o @ p[pre + "wo"].to(dt)
 
 
