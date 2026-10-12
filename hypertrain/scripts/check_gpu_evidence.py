@@ -206,16 +206,62 @@ def check(ev: dict[str, Any]) -> list[str]:
     return errs
 
 
+MFU_TOL = 0.001  # 0.1 percentage points
+
+
+def check_mfu(ev: dict[str, Any]) -> list[str]:
+    """Recompute MFU from raw step timings (scripts/run_mfu.py output); require replay match."""
+    errs = []
+    if ev.get("kind") != "mfu":
+        errs.append("kind must be mfu")
+    if ev.get("replay_match") is not True or not hex64(ev.get("leaves_root")):
+        errs.append("missing replay leaf-root match")
+    elif ev.get("replay_leaves_root") != ev.get("leaves_root"):
+        errs.append("replay leaves_root differs")
+    steps, w = ev.get("step_seconds"), ev.get("warmup_steps")
+    tps, fpt, n = ev.get("tokens_per_step"), ev.get("flops_per_token"), ev.get("n_gpus")
+    if not (isinstance(steps, list) and all(isinstance(s, (int, float)) and s > 0 for s in steps)):
+        return [*errs, "step_seconds must be a list of positive numbers"]
+    if not all(type(x) is int and x > 0 for x in (tps, fpt, n)) or type(w) is not int or w < 0:
+        return [*errs, "tokens_per_step/flops_per_token/n_gpus/warmup_steps invalid"]
+    assert isinstance(tps, int) and isinstance(fpt, int) and isinstance(n, int)
+    timed = steps[w:]
+    if not timed:
+        return [*errs, "no timed steps after warmup"]
+    for key, peak in (
+        ("vendor", ev.get("peak_vendor_flops")),
+        ("measured", ev.get("peak_measured_flops")),
+    ):
+        if key not in ev:
+            continue
+        if not (isinstance(peak, (int, float)) and peak > 0):
+            errs.append(f"{key} peak invalid")
+            continue
+        mfu = tps * len(timed) / sum(timed) * fpt / (n * peak)
+        got = ev[key].get("mfu") if isinstance(ev[key], dict) else None
+        if not isinstance(got, (int, float)) or abs(got - mfu) > MFU_TOL:
+            errs.append(f"{key} mfu {got} differs from recomputed {mfu:.6f}")
+    if "vendor" not in ev:
+        errs.append("vendor mfu missing")
+    return errs
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: check_gpu_evidence.py EVIDENCE.json", file=sys.stderr)
+    kind = None
+    if len(argv) == 4 and argv[1] == "--kind":
+        kind, argv = argv[2], [argv[0], argv[3]]
+    if len(argv) != 2 or kind not in (None, "mfu"):
+        print("usage: check_gpu_evidence.py [--kind mfu] EVIDENCE.json", file=sys.stderr)
         return 2
     try:
         ev = json.loads(Path(argv[1]).read_text())
     except (OSError, ValueError) as e:
         print(f"INVALID: unreadable: {e}")
         return 1
-    errs = check(ev) if isinstance(ev, dict) else ["top-level not an object"]
+    if not isinstance(ev, dict):
+        errs = ["top-level not an object"]
+    else:
+        errs = check_mfu(ev) if kind == "mfu" else check(ev)
     for err in errs:
         print("INVALID:", err)
     if not errs:

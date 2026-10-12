@@ -1,0 +1,72 @@
+{
+ "provenance": {
+  "mfu-dense-1b": "plan WS0 0.3 / WS1 target profile (~1.1B dense, seq 2048, vocab 32768, bf16)",
+  "tiny-cpu": "CPU dry-run shape for tests only; never used for MFU claims"
+ },
+ "profiles": {
+  "mfu-dense-1b": {
+   "model": {
+    "n_layers": 16,
+    "d_model": 2048,
+    "n_heads": 16,
+    "n_kv_heads": 8,
+    "d_ff": 5632,
+    "n_experts": 1,
+    "top_k_experts": 1,
+    "seq_len": 2048,
+    "vocab": 32768,
+    "compute_dtype": "bf16"
+   },
+   "inner": {
+    "H": 60,
+    "J": 60,
+    "micro_batch": 4,
+    "grad_accum": 1,
+    "state_policy": "reset",
+    "rewarmup_steps": 0
+   },
+   "outer": {
+    "opt": "nesterov"
+   },
+   "layout": {
+    "pp": 1,
+    "n_gpus": 1,
+    "dp_size": 1,
+    "ep_size": 1,
+    "zero1": false
+   }
+  },
+  "tiny-cpu": {
+   "model": {
+    "n_layers": 1,
+    "d_model": 16,
+    "n_heads": 2,
+    "n_kv_heads": 1,
+    "d_ff": 24,
+    "n_experts": 1,
+    "top_k_experts": 1,
+    "seq_len": 8,
+    "vocab": 64,
+    "compute_dtype": "fp32"
+   },
+   "inner": {
+    "H": 4,
+    "J": 4,
+    "micro_batch": 1,
+    "grad_accum": 1,
+    "state_policy": "reset",
+    "rewarmup_steps": 0
+   },
+   "outer": {
+    "opt": "nesterov"
+   },
+   "layout": {
+    "pp": 1,
+    "n_gpus": 1,
+    "dp_size": 1,
+    "ep_size": 1,
+    "zero1": false
+   }
+  }
+ }
+}
