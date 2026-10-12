@@ -174,7 +174,22 @@ def compress(cfg: CompressConfig, delta: Params, ef_in: Params) -> tuple[bytes, 
         shape = struct.pack("<I", d.ndim) + b"".join(struct.pack("<Q", s) for s in d.shape)
         out += [_lp(name.encode("utf-8")), shape, _lp(body)]
         ef_out[name] = (host - deq).to(acc.device)
+    if cfg.codec_version == 2:
+        from hypertrain.trainer.codec_v2 import encode_v2
+
+        return encode_v2(b"".join(out)), ef_out
     return b"".join(out), ef_out
+
+
+def as_v1(payload: bytes, max_payload_bytes: int | None = None) -> bytes:
+    """Codec v2 payloads (plan 2.6) decode to the identical v1 bytes; v1 passes through."""
+    from hypertrain.trainer.codec_v2 import MAGIC_V2, decode_v2
+
+    if any(payload.startswith(m) for m in MAGIC_V2.values()):
+        if max_payload_bytes is not None and len(payload) > max_payload_bytes:
+            raise ValueError("delta payload exceeds byte limit")
+        return decode_v2(payload, max_payload_bytes=max_payload_bytes)
+    return payload
 
 
 def _payload_metadata(
@@ -265,7 +280,9 @@ def validate_payload(
     max_payload_bytes: int = 65536,
 ) -> str:
     """Bound raw bytes and validate manifest geometry without decoding tensors."""
-    codec, _ = _payload_metadata(payload, expected_shapes, max_payload_bytes)
+    codec, _ = _payload_metadata(
+        as_v1(payload, max_payload_bytes), expected_shapes, max_payload_bytes
+    )
     return codec
 
 
@@ -276,6 +293,7 @@ def decompress(
     max_payload_bytes: int | None = None,
 ) -> tuple[str, Params]:
     """Decode only after every tensor passes framing and optional manifest bounds."""
+    payload = as_v1(payload, max_payload_bytes)
     codec, metadata = _payload_metadata(payload, expected_shapes, max_payload_bytes)
     dec = _int8_decode if codec == "dense-int8" else _sparse_decode
     return codec, {n: dec(payload[start:end], shape) for n, (shape, start, end) in metadata.items()}

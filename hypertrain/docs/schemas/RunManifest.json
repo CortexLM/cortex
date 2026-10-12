@@ -522,6 +522,22 @@
           "title": "Param Count",
           "type": "integer"
         },
+        "precision_policy": {
+          "anyOf": [
+            {
+              "enum": [
+                "default",
+                "fp8-rowwise"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Precision Policy"
+        },
         "rope_theta": {
           "maximum": 9007199254740991,
           "minimum": 1,
@@ -757,6 +773,22 @@
           "const": "prev_outer_update",
           "title": "Center",
           "type": "string"
+        },
+        "codec_version": {
+          "anyOf": [
+            {
+              "enum": [
+                1,
+                2
+              ],
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Codec Version"
         },
         "ef_beta": {
           "pattern": "^[0-9a-f]{8}$",

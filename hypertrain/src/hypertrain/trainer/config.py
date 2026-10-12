@@ -11,6 +11,7 @@ from hypertrain.protocol.messages_v2 import RunManifestV2, TrainingManifestV2
 
 DTYPES = ("fp32", "bf16")
 STATE_POLICIES = ("reset", "derived", "carry")
+PRECISION_POLICIES = ("default", "fp8-rowwise")
 INNER_OPTS = ("adamw", "muon")
 CODECS = ("dense-int8", "sparseloco")
 
@@ -35,6 +36,7 @@ class ModelConfig:
     arch: str = "decoder"
     od: ODSpec | None = None
     profile: str = ""
+    precision_policy: str = "default"
 
     @property
     def is_moe(self) -> bool:
@@ -56,6 +58,8 @@ class ModelConfig:
             raise ValueError("capacity_factor, init_std, rope_theta must be > 0")
         if self.compute_dtype not in DTYPES:
             raise ValueError(f"compute_dtype must be one of {DTYPES}")
+        if self.precision_policy not in PRECISION_POLICIES:
+            raise ValueError(f"precision_policy must be one of {PRECISION_POLICIES}")
 
 
 @dataclass(frozen=True)
@@ -106,6 +110,7 @@ class CompressConfig:
     topk_frac: float = 1.0
     bits: int = 8
     ef_beta: float = 1.0
+    codec_version: int = 1
 
     def __post_init__(self) -> None:
         if self.codec not in CODECS:
@@ -116,6 +121,8 @@ class CompressConfig:
             raise ValueError("sparseloco requires bits=2 and 0 < topk_frac <= 1")
         if not 0 <= self.ef_beta <= 1:
             raise ValueError("ef_beta must be in [0, 1]")
+        if self.codec_version not in (1, 2):
+            raise ValueError("codec_version must be 1 or 2")
 
 
 @dataclass(frozen=True)
@@ -166,6 +173,7 @@ class TrainConfig:
             arch=ms.arch,
             od=ms.od,
             profile=ref.profile or "",
+            precision_policy=ms.precision_policy or "default",
         )
         sched = inn.lr_schedule
         inner = InnerConfig(
@@ -193,6 +201,7 @@ class TrainConfig:
             topk_frac=f32val(out.topk_frac),
             bits=out.bits,
             ef_beta=f32val(out.ef_beta),
+            codec_version=out.codec_version or 1,
         )
         return cls(
             model=model,

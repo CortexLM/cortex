@@ -104,6 +104,8 @@ class ModelSpec(_M):
     aux_loss_coef: F32
     init_std: F32
     od: ODSpec | None = Field(None, exclude_if=_omit_none)
+    # D4 / plan S4: omitted = "default" (bf16/fp32 GEMMs), so existing run_ids are unchanged.
+    precision_policy: Literal["default", "fp8-rowwise"] | None = Field(None, exclude_if=_omit_none)
 
     @model_validator(mode="after")
     def _od_iff_encoder(self) -> ModelSpec:
@@ -177,6 +179,8 @@ class OuterSpec(_M):
     cclip_tau: F32
     cclip_iters: Pos
     center: Literal["prev_outer_update"]
+    # D4 / plan 2.6: omitted = v1 payload bytes, so existing run_ids are unchanged.
+    codec_version: Literal[1, 2] | None = Field(None, exclude_if=_omit_none)
 
 
 class Timeouts(_M):
