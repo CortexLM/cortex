@@ -184,7 +184,15 @@ def pick_offers(offers: list[dict]) -> list[dict]:
         and Decimal(str(o["dph_total"])) <= Decimal("1.6")
         and overhead(o) <= Decimal("0.5")
     ]
-    ok.sort(key=lambda o: (-int(o.get("inet_down") or 0), o["id"]))
+    # The rescue-rate gate is measured from the caller (GitHub runners are US-hosted): a
+    # Czech host gave 8.2 MB/s vs the 13.5 MB/s floor, so prefer US hosts, then bandwidth.
+    ok.sort(
+        key=lambda o: (
+            not str(o.get("geolocation") or "").endswith(", US"),
+            -int(o.get("inet_down") or 0),
+            o["id"],
+        )
+    )
     chosen, machines = [], set()
     for o in ok:
         if o["machine_id"] not in machines:
