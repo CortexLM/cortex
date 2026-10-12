@@ -19,6 +19,11 @@ from hypertrain.ledger import (
     vest_rounds_for_q,
 )
 from hypertrain.ledger.journal import GENESIS_HASH, canonical, parse_chain
+from hypertrain.protocol.messages import (
+    f32hex,
+    f32val,
+    vesting_rounds,
+)
 
 EPOCH = 100
 
@@ -181,6 +186,10 @@ def test_epoch_at_round_mapping() -> None:
     for t, (epoch, rnd) in cases.items():
         assert (p.epoch_of(t), p.round_of(t)) == (epoch, rnd)
     assert [vest_rounds_for_q(q) for q in ("0.5", "0.1", "0.05", "0.3", "1")] == [2, 10, 20, 4, 1]
+    # f32(0.04) and f32(0.01) are just below the decimal: E matches the manifest validator
+    assert [vest_rounds_for_q(q) for q in ("0.04", "0.01")] == [26, 101]
+    for q in ("0.04", "0.01", "0.07", "0.1"):
+        assert vest_rounds_for_q(q) == vesting_rounds(f32val(f32hex(float(q))))
 
 
 def test_release_waits_for_epoch_at_round(tmp_path: Path) -> None:

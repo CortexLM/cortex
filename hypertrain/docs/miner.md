@@ -140,6 +140,33 @@ Each round, after you commit a Merkle root of your training leaves, the beacon p
 
 Burned mass is never given to other miners or the operator, so nobody gains from framing you. After a MISMATCH you can submit your own rerun (`POST /v1/runs/{id}/rerun`) before finalize; if you dispute, the dispute is bisected by step and settled by an auditor other than the first. If the auditor was wrong you're restored, and a round already finalized as NO_UPLOAD is credited back. Paid emission can't be taken back; your exposure is your unvested escrow.
 
+## Seedless install and auto-update
+
+The coldkey (mnemonic) stays on the operator's machine. A GPU host only ever holds a server key plus a coldkey-signed grant (scope `mine`: commit, upload, heartbeat).
+
+On the operator machine:
+
+```bash
+hypertrain-miner key create --coldkey ~/cold.key --server vast-1 --api "$API" --out ./bundle-vast-1
+hypertrain-miner key list --coldkey-ss58 "$COLDKEY_SS58" --api "$API"
+hypertrain-miner key revoke KEY_ID --coldkey ~/cold.key --api "$API"
+```
+
+Copy only the bundle (`server.key` + `grant.json`, mode 0600) to the host. On the GPU host:
+
+```bash
+bash scripts/install-miner.sh "$MANIFEST_URL" ./bundle-vast-1   # idempotent, never prompts for a seed
+hypertrain-miner install --bundle ./bundle-vast-1 --config miner.toml  # refuses coldkey/mnemonic files
+hypertrain-miner register --config miner.toml   # posts the grant; no coldkey needed
+hypertrain-miner run --config miner.toml --rounds 100 --auto-update --manifest-url "$MANIFEST_URL"
+hypertrain-miner status --config miner.toml
+hypertrain-miner update --check --manifest-url "$MANIFEST_URL"
+```
+
+`register --coldkey ... --request-id ... --expiry ...` is the legacy `join-v2` path. A revoked key is rejected on every authenticated miner route.
+
+Only sr25519-signed release manifests are accepted; unsigned tags and downgrades are rejected. During the announce window (at least 600 s) `run --auto-update` stages the new wheel while training continues. At the first round boundary at or after `changeover_at`, it swaps `~/.hypertrain/miner/current` atomically and re-executes the new version, which resumes from the round journal. A miner still on the old version 60 s after changeover refuses new rounds. `update --apply` does the stage and swap by hand. `HYPERTRAIN_UPDATE_ROOT` and `HYPERTRAIN_UPDATE_MANIFEST_URL` override the defaults.
+
 ## 7. Troubleshooting
 
 | Symptom | Cause and fix |

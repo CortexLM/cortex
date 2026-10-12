@@ -13,6 +13,7 @@ in-order pass over the journal reproduces every answer (open is O(journal)).
 from __future__ import annotations
 
 import math
+import struct
 from collections import deque
 from dataclasses import asdict, dataclass
 from fractions import Fraction
@@ -38,8 +39,9 @@ class RebuildMismatch(ChainBreak):
 
 
 def vest_rounds_for_q(q: float | str) -> int:
-    """E = ceil(1/q), computed exactly from the decimal text of q."""
-    exact = Fraction(str(q))
+    """E = ceil(1/q), computed exactly on the f32 value of q (same as the manifest's
+    protocol.messages.vesting_rounds, so E_vest_rounds and the ledger never disagree)."""
+    exact = Fraction(struct.unpack("<f", struct.pack("<f", float(Fraction(str(q)))))[0])
     if not 0 < exact <= 1:
         raise LedgerError("q must be in (0, 1]")
     return math.ceil(1 / exact)

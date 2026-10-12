@@ -1,13 +1,21 @@
-"""`hypertrain-miner join|run --config miner.toml` (config file + HYPERTRAIN_MINER_* env only)."""
+"""`hypertrain-miner <command> --config miner.toml` (config file + HYPERTRAIN_MINER_* env only).
+
+Operator machine: `key create|list|revoke` (the coldkey never leaves it).
+GPU host: `install`, `register`, `run`, `status`, `update` (seedless: server key + grant only).
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import os
+import re
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 import httpx
 import numpy as np
@@ -17,6 +25,8 @@ from hypertrain.data.shards import ShardSamples, ShardSetManifest, verify_shards
 from hypertrain.datasets.shards16 import ShardSet16Manifest, U16ShardSamples, verify_shards16
 from hypertrain.miner.core import Miner, MinerConfig, MinerError, NetworkMiner, canonical
 from hypertrain.miner.dispute_watch import add_watch_args, run_follow
+from hypertrain.miner.keys import create_key, list_keys, revoke_key
+from hypertrain.miner.update import Updater, UpdateRejected
 from hypertrain.protocol.messages import RunManifest
 from hypertrain.trainer.loop import SampleFn
 
@@ -81,6 +91,146 @@ def _miner(cfg: MinerConfig) -> Miner:
     return miner
 
 
+UPDATE_ROOT_ENV = "HYPERTRAIN_UPDATE_ROOT"
+MANIFEST_URL_ENV = "HYPERTRAIN_UPDATE_MANIFEST_URL"
+_MNEMONIC = re.compile(r"[a-z]+(\s+[a-z]+){11,23}")
+
+
+def _update_root() -> Path:
+    return Path(os.environ.get(UPDATE_ROOT_ENV) or Path.home() / ".hypertrain" / "miner")
+
+
+def _manifest_url(arg: str | None) -> str:
+    url = arg or os.environ.get(MANIFEST_URL_ENV)
+    if not url:
+        raise MinerError(f"no update manifest URL (--manifest-url or {MANIFEST_URL_ENV})")
+    return url
+
+
+def _refuse_coldkey(path: Path) -> None:
+    """Refuse anything that looks like a coldkey or mnemonic; never echo its content."""
+    if "cold" in path.name.lower() or "mnemonic" in path.name.lower():
+        raise MinerError(f"{path.name}: refusing a coldkey/mnemonic file on a miner host")
+    text = path.read_bytes()[:4096].decode(errors="replace").strip().lower()
+    if _MNEMONIC.fullmatch(text) or "mnemonic" in text or "secretphrase" in text:
+        raise MinerError(f"{path.name}: looks like a coldkey/mnemonic; refusing it")
+
+
+def _install(bundle: Path, out: Path, api: str | None, workdir: Path | None) -> dict[str, Any]:
+    for f in bundle.iterdir():
+        if f.is_file():
+            _refuse_coldkey(f)
+    key, grant = bundle / "server.key", bundle / "grant.json"
+    if not key.is_file() or not grant.is_file():
+        raise MinerError(f"{bundle}: bundle needs server.key and grant.json")
+    key.chmod(0o600)
+    grant_doc = json.loads(grant.read_text())["grant"]
+    if out.exists():
+        raise MinerError(f"{out}: already exists; remove it first")
+    lines = {
+        "api": api or "http://127.0.0.1:8000",
+        "keyfile": str(key.resolve()),
+        "workdir": str((workdir or out.parent / "work").resolve()),
+        "state_source": "state",
+        "image_digest": "sha256:" + "0" * 64,
+    }
+    if grant_doc.get("run_id", "*") != "*":
+        lines["run_id"] = grant_doc["run_id"]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("".join(f"{k} = {json.dumps(v)}\n" for k, v in lines.items()))
+    out.chmod(0o600)
+    return {
+        "config": str(out),
+        "server_pub": grant_doc["server_pub"],
+        "key_id": grant_doc["key_id"],
+    }
+
+
+def _register(cfg: MinerConfig, args: argparse.Namespace) -> dict[str, Any]:
+    if args.coldkey is not None:
+        if args.request_id is None or args.expiry is None:
+            raise MinerError("register --coldkey requires --request-id and --expiry")
+        with httpx.Client(timeout=120, follow_redirects=False) as client:
+            return dict(NetworkMiner(cfg, client).join(args.coldkey, args.request_id, args.expiry))
+    grant = cfg.keyfile.parent / "grant.json"
+    if not grant.is_file():
+        raise MinerError("no grant.json next to the keyfile; pass --coldkey (operator machine)")
+    r = httpx.post(
+        cfg.api.rstrip("/") + "/v2/server-keys", content=grant.read_bytes(), timeout=30
+    )  # idempotent: re-posting an identical grant returns the stored record
+    if r.status_code >= 400:
+        raise MinerError(f"register: {r.status_code} {r.text}")
+    return dict(r.json())
+
+
+def _status(cfg: MinerConfig) -> dict[str, Any]:
+    from hypertrain import __version__
+
+    updater = Updater(_update_root())
+    pending = updater.pending
+    return {
+        "version": __version__,
+        "api": cfg.api,
+        "run_id": cfg.run_id,
+        "keyfile": str(cfg.keyfile),
+        "pending_update": pending.version if pending else None,
+        "changeover_at": pending.changeover_at if pending else None,
+        "staged": updater.staged(),
+    }
+
+
+def _update(args: argparse.Namespace) -> dict[str, Any]:
+    updater = Updater(_update_root())
+    try:
+        manifest = updater.poll(_manifest_url(args.manifest_url))
+    except UpdateRejected as error:
+        if updater.pending is None:
+            return {"update": None, "reason": str(error)}
+        manifest = updater.pending
+    out: dict[str, Any] = {"update": manifest.version, "changeover_at": manifest.changeover_at}
+    if args.apply:
+        updater.stage()
+        out["staged"] = True
+        if updater.due(time.time()):
+            out["current"] = str(updater.swap())
+    return out
+
+
+def _reexec(target: Path, argv: list[str]) -> None:
+    exe = target / "venv" / "bin" / "hypertrain-miner"
+    logging.info("update swapped; re-exec %s", exe)
+    os.execv(exe, [str(exe), *argv])  # noqa: S606
+
+
+def _run_updating(
+    miner: Miner, rounds: int, start: int | None, manifest_url: str | None, argv: list[str]
+) -> list[tuple[int, str]]:
+    """Round-at-a-time: each completed round is journaled by Miner (= the checkpoint)."""
+    updater = Updater(_update_root())
+    out: list[tuple[int, str]] = []
+    w = start
+    for _ in range(rounds):
+        try:
+            updater.poll(manifest_url) if manifest_url else None
+            if updater.pending is not None:
+                updater.stage()
+        except (UpdateRejected, httpx.HTTPError) as error:
+            logging.warning("update check: %s", error)
+        now = time.time()
+        if updater.due(now):
+            target = updater.swap()
+            rest = ["--rounds", str(rounds - len(out))]
+            if w is not None:
+                rest += ["--start", str(w)]
+            _reexec(target, [*argv, *rest])
+        if updater.must_halt(now):
+            raise MinerError("past changeover + grace on an old version; refusing new rounds")
+        done = miner.run(1, w)
+        out += done
+        w = done[-1][0] + 1
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="hypertrain-miner")
     sub = p.add_subparsers(dest="command", required=True)
@@ -90,6 +240,41 @@ def main(argv: list[str] | None = None) -> int:
         if name == "run":
             s.add_argument("--rounds", type=int, default=1)
             s.add_argument("--start", type=int)
+            s.add_argument("--auto-update", action="store_true")
+            s.add_argument("--manifest-url")
+    key = sub.add_parser("key", help="operator machine: server keys").add_subparsers(
+        dest="key_command", required=True
+    )
+    s = key.add_parser("create")
+    s.add_argument("--coldkey", type=Path, required=True)
+    s.add_argument("--server", required=True)
+    s.add_argument("--out", type=Path)
+    s.add_argument("--api", required=True)
+    s.add_argument("--run-id", default="*")
+    s = key.add_parser("list")
+    s.add_argument("--coldkey-ss58", required=True)
+    s.add_argument("--api")
+    s = key.add_parser("revoke")
+    s.add_argument("key_id")
+    s.add_argument("--coldkey", type=Path, required=True)
+    s.add_argument("--api", required=True)
+    s = sub.add_parser("install", help="GPU host: write miner.toml from a key bundle")
+    s.add_argument("--bundle", type=Path, required=True)
+    s.add_argument("--config", type=Path, required=True)
+    s.add_argument("--api")
+    s.add_argument("--workdir", type=Path)
+    s = sub.add_parser("register", help="join-v2; coldkey-free when a grant exists")
+    s.add_argument("--config", type=Path)
+    s.add_argument("--coldkey", type=Path)
+    s.add_argument("--request-id")
+    s.add_argument("--expiry", type=int)
+    s = sub.add_parser("status")
+    s.add_argument("--config", type=Path)
+    s = sub.add_parser("update")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--check", action="store_true")
+    g.add_argument("--apply", action="store_true")
+    s.add_argument("--manifest-url")
     for name in ("join-v2", "status-v2", "probe-v2", "proof-v2", "run-v2", "watch"):
         s = sub.add_parser(name)
         s.add_argument("--config", type=Path)
@@ -112,7 +297,15 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
+        local = _local_command(args)
+        if local is not None:
+            print(json.dumps(local, sort_keys=True))
+            return 0
         cfg = MinerConfig.load(args.config)
+        if args.command in ("register", "status"):
+            result = _register(cfg, args) if args.command == "register" else _status(cfg)
+            print(json.dumps(result, sort_keys=True))
+            return 0
         if getattr(args, "follow", False) or getattr(args, "watch", False):
             return run_follow(cfg, args)
         if args.command not in ("join", "run"):
@@ -150,12 +343,40 @@ def main(argv: list[str] | None = None) -> int:
             sig = miner.kp.sign(b"hypertrain/1|Join|" + canonical(req)).hex()
             print(json.dumps({**req, "sig": sig}, sort_keys=True))
             return 0
-        results = miner.run(args.rounds, args.start)
-    except MinerError as error:
+        if args.auto_update or args.manifest_url:
+            base = ["run", "--auto-update"]
+            base += ["--config", str(args.config)] if args.config else []
+            base += ["--manifest-url", args.manifest_url] if args.manifest_url else []
+            url = args.manifest_url or os.environ.get(MANIFEST_URL_ENV)
+            results = _run_updating(miner, args.rounds, args.start, url, base)
+        else:
+            results = miner.run(args.rounds, args.start)
+    except (MinerError, UpdateRejected, RuntimeError, OSError) as error:
         logging.error("%s: %s", type(error).__name__, error)
         return 2
     print(json.dumps({"rounds": [{"w": w, "status": s} for w, s in results]}))
     return 0 if all(s == "UPLOADED" for _, s in results) else 1
+
+
+def _local_command(args: argparse.Namespace) -> Any:
+    """Commands that need no miner.toml; None means 'not one of them'."""
+    match args.command:
+        case "key":
+            match args.key_command:
+                case "create":
+                    bundle = create_key(
+                        args.coldkey, args.server, args.api, out_dir=args.out, run_id=args.run_id
+                    )
+                    return {"bundle": str(bundle)}
+                case "list":
+                    return list_keys(args.coldkey_ss58, args.api)
+                case _:
+                    return revoke_key(args.coldkey, args.key_id, args.api)
+        case "install":
+            return _install(args.bundle, args.config, args.api, args.workdir)
+        case "update":
+            return _update(args)
+    return None
 
 
 if __name__ == "__main__":
