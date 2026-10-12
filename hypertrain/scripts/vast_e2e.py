@@ -136,15 +136,22 @@ def dec(value: Any) -> Decimal | None:
     return d if d.is_finite() and d >= 0 else None
 
 
+MINER_FLOW_IMAGE = (
+    "docker.io/vastai/pytorch:2.14.0-cu130-cuda-13.2-mini-py312-2026-09-08@sha256:"
+    "450710d89268fcd55632f28fdd80508ee920a53075b3f8e9f828bdc154e3d856"
+)
+NUM_GPUS = 2
+
+
 def offer_query() -> dict[str, Any]:
     return {
         "gpu_name": {"eq": "RTX 5090"},
-        "num_gpus": {"eq": 2},
+        "num_gpus": {"eq": NUM_GPUS},
         "verified": {"eq": True},
         "rentable": {"eq": True},
         "rented": {"eq": False},
         "reliability": {"gt": 0.98},
-        "inet_down": {"gte": 500},
+        "inet_down": {"gte": 1000},
         "type": "on-demand",
         "order": [["dph_total", "asc"]],
         "limit": 64,
@@ -158,14 +165,14 @@ def eligible(o: Any) -> bool:
         and type(o.get("id")) is int
         and o.get("machine_id") not in EXCLUDED_MACHINES
         and o.get("gpu_name") == "RTX 5090"
-        and o.get("num_gpus") == 2
+        and o.get("num_gpus") == NUM_GPUS
         and o.get("verified") is not False
         and o.get("rentable") is not False
         and o.get("rented") is not True
         and (r := dec(o.get("reliability", o.get("reliability2")))) is not None
         and r > Decimal("0.98")
         and (d := dec(o.get("inet_down"))) is not None
-        and d >= 500
+        and d >= 1000
         and dec(o.get("dph_total")) is not None
         and dec(o.get("storage_cost")) is not None
     )
@@ -445,7 +452,8 @@ class Harness:
 
     def run_remote(self) -> int:
         return self.sh(
-            "bash /workspace/ht/scripts/vast_e2e_remote.sh", timeout=self.deadline - time.time()
+            f"bash /workspace/ht/scripts/{self.a.remote_script}",
+            timeout=self.deadline - time.time(),
         )
 
     def rescue(self) -> int:
@@ -560,7 +568,16 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--min-gap", type=float, default=5.0, help="seconds between provider calls")
     p.add_argument("--delete-attempts", type=int, default=6)
     p.add_argument("--absence-attempts", type=int, default=12)
+    p.add_argument(
+        "--profile",
+        choices=("gpu-e2e", "miner-flow"),
+        default="gpu-e2e",
+        help="miner-flow: 1x RTX 5090, vastai/pytorch image, scripts/vast_miner_flow_remote.sh",
+    )
     a = p.parse_args(argv)
+    a.remote_script = (
+        "vast_miner_flow_remote.sh" if a.profile == "miner-flow" else "vast_e2e_remote.sh"
+    )
     if (
         a.max_usd <= 0
         or a.max_minutes <= 0
@@ -582,6 +599,9 @@ def main(
     if not key:
         print("empty key file", file=sys.stderr)
         return 2
+    global IMAGE, NUM_GPUS
+    if a.profile == "miner-flow":
+        IMAGE, NUM_GPUS = MINER_FLOW_IMAGE, 1
     api = Api(a.api_base, key, a.evidence_dir / "journal.jsonl", min_gap=a.min_gap, sleep=sleep)
     api.log(
         "start",

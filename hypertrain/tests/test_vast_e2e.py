@@ -41,7 +41,7 @@ class Fake:
             rentable=True,
             rented=False,
             reliability=0.995,
-            inet_down=900,
+            inet_down=1200,
             storage_cost=0.2,
             machine_id=1,
         )
