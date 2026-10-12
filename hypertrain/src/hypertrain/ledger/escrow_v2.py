@@ -98,6 +98,7 @@ class RewardWork:
     challenge: EnvelopeV2
     owner: str
     sample_ids: tuple[int, ...]
+    extra_verdicts: tuple[EnvelopeV2, ...] = ()  # auditor_quorum runs only (plan 5.1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +185,13 @@ class EscrowV2:
         assignment_of: Callable[[int, str], tuple[int, ...]],
         shadow_assignment_of: Callable[[ShadowReservationV1], tuple[int, ...]] | None = None,
         shadow_settlement: Callable[[str], Settlement] | None = None,
+        auditor_quorum: tuple[int, int] | None = None,
     ) -> None:
+        if auditor_quorum is not None:
+            k, n = auditor_quorum
+            if not (type(k) is int and type(n) is int and 1 <= k <= n <= len(auditors)):
+                raise EscrowError("AUDITOR_QUORUM")
+        self.auditor_quorum = auditor_quorum
         if digest(policy) != manifest.network.economics_policy_hash:
             raise EscrowError("ECONOMICS_POLICY_HASH")
         if policy.round_reward_units != manifest.training.budget.epochs_per_round * 1_000_000:
@@ -387,7 +394,7 @@ class EscrowV2:
         if self.replay_finality(evidence) != final.final_theta_hash_w1:
             raise EscrowError("FINALITY_REPLAY")
         work: dict[str, tuple[str, int]] = {}
-        verdicts = []
+        verdicts: list[str] = []
         for item in evidence.works:
 
             def commit_authority(signer: str, expected: str = item.commit.signer) -> bool:
@@ -396,20 +403,33 @@ class EscrowV2:
             c = Intake(self.run_id, {"CommitV2": commit_authority}).accept(
                 item.commit.model_dump(mode="json"), evidence.finalized_beacon
             )
-            v = Intake(self.run_id, {"ReplayVerdict": lambda s: s in self.auditors}).accept(
-                item.verdict.model_dump(mode="json"), evidence.finalized_beacon
-            )
+            if item.extra_verdicts and self.auditor_quorum is None:
+                raise EscrowError("QUORUM_NOT_ENABLED")
+            envs = (item.verdict, *item.extra_verdicts)
+            vs = [
+                Intake(self.run_id, {"ReplayVerdict": lambda s: s in self.auditors}).accept(
+                    e.model_dump(mode="json"), evidence.finalized_beacon
+                )
+                for e in envs
+            ]
             challenge = Intake(
                 self.run_id, {"AuditChallengeV2": lambda s: s == self.policy.reward_authority}
             ).accept(item.challenge.model_dump(mode="json"), evidence.finalized_beacon)
-            if not isinstance(c, CommitV2) or not isinstance(v, ReplayVerdict):
+            if not isinstance(c, CommitV2) or not all(isinstance(x, ReplayVerdict) for x in vs):
                 raise EscrowError("REWARD_WORK_TYPE")
+            verdict_list = [x for x in vs if isinstance(x, ReplayVerdict)]
             if (
                 not isinstance(challenge, AuditChallengeV2)
                 or (challenge.w, challenge.target) != (c.w, c.hotkey)
-                or v.challenge_hash != digest(challenge)
+                or any(x.challenge_hash != digest(challenge) for x in verdict_list)
             ):
                 raise EscrowError("REWARD_AUDIT_BINDING")
+            if self.auditor_quorum is not None:
+                if any(x.result != "MATCH" for x in verdict_list):
+                    raise EscrowError("QUORUM_DISPUTE")  # caller escalates to a dispute
+                cold = {self.owner_of(e.signer) for e in envs}
+                if len(cold) != len(envs) or len(envs) < self.auditor_quorum[0]:
+                    raise EscrowError("QUORUM_UNMET")
             c.validate_assignment(self.manifest, len(item.sample_ids))
             if (
                 c.w != final.w
@@ -422,12 +442,17 @@ class EscrowV2:
                     else self.assignment_of(final.w, c.hotkey)
                 )
                 or item.owner != self.owner_of(c.hotkey)
-                or item.verdict.signer == c.hotkey
-                or v.result != "MATCH"
-                or v.first_bad_leaf is not None
-                or v.recomputed_leaves_root != c.leaves_root
-                or v.replay_env.image_digest != self.manifest.training.reference_spec.image_digest
-                or v.replay_env.driver not in self.manifest.training.reference_spec.driver_allowlist
+                or any(e.signer == c.hotkey for e in envs)
+                or any(
+                    x.result != "MATCH"
+                    or x.first_bad_leaf is not None
+                    or x.recomputed_leaves_root != c.leaves_root
+                    or x.replay_env.image_digest
+                    != self.manifest.training.reference_spec.image_digest
+                    or x.replay_env.driver
+                    not in self.manifest.training.reference_spec.driver_allowlist
+                    for x in verdict_list
+                )
             ):
                 raise EscrowError("UNVERIFIED_REWARD_WORK")
             work[c.hotkey] = item.owner, c.tokens
@@ -435,7 +460,7 @@ class EscrowV2:
                 digest(c) != reservation.commit_hash or item.owner != reservation.coldkey
             ):
                 raise EscrowError("SHADOW_WORK_BINDING")
-            verdicts.append(digest(v))
+            verdicts.extend(digest(x) for x in verdict_list)
         if (
             not work
             or set(work) != set(final.included)
