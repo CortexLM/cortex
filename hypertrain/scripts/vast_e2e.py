@@ -192,10 +192,26 @@ def list_rows(r: Response) -> list[dict[str, Any]] | None:
 
 
 class Harness:
+    # Profile hooks (subclasses such as scripts/vast_parity.py override these; defaults = e2e).
+    label_prefix = "hypertrain-e2e"
+    offer_desc = "2x RTX 5090"
+    disk_gb = DISK_GB
+    upload_paths: list[str] = UPLOAD
+    rsync_excludes: list[str] = []
+
+    def offer_query(self) -> dict[str, Any]:
+        return offer_query()
+
+    def eligible(self, o: Any) -> bool:
+        return eligible(o)
+
+    def rank(self, o: dict[str, Any]) -> tuple[Any, ...]:
+        return (dec(o["dph_total"]), o["id"])
+
     def __init__(self, args: argparse.Namespace, api: Api) -> None:
         self.a, self.api = args, api
         self.out = Path(args.evidence_dir)
-        self.label = f"hypertrain-e2e-{uuid.uuid4().hex[:8]}"
+        self.label = f"{self.label_prefix}-{uuid.uuid4().hex[:8]}"
         self.instance_id: int | None = None
         self.create_attempted = False
         self.ssh: tuple[str, int] | None = None
@@ -215,16 +231,16 @@ class Harness:
         self.api.log("credit", credit=str(credit), required=str(need))
         if credit < need:
             raise Refused(f"credit {credit} < max_usd + 5 = {need}")
-        q = urllib.parse.urlencode({"q": json.dumps(offer_query())})
+        q = urllib.parse.urlencode({"q": json.dumps(self.offer_query())})
         r = self.api.call("GET", "/api/v0/bundles/?" + q)
         offers = r.body.get("offers") if r.ok() else None
         if not isinstance(offers, list):
             raise Refused(f"offer search failed (HTTP {r.status})")
-        fit = [o for o in offers if eligible(o)]
+        fit = [o for o in offers if self.eligible(o)]
         if not fit:
-            raise Refused(f"no eligible 2x RTX 5090 offer among {len(offers)}")
-        best = min(fit, key=lambda o: (dec(o["dph_total"]), o["id"]))
-        cost = worst_case(best, float(self.a.max_minutes))
+            raise Refused(f"no eligible {self.offer_desc} offer among {len(offers)}")
+        best = min(fit, key=self.rank)
+        cost = worst_case(best, float(self.a.max_minutes), self.disk_gb)
         quote = {
             k: best.get(k)
             for k in (
@@ -239,6 +255,10 @@ class Harness:
                 "geolocation",
                 "gpu_name",
                 "num_gpus",
+                "cpu_name",
+                "cpu_cores_effective",
+                "cpu_ghz",
+                "cpu_ram",
             )
         }
         quote["worst_case_usd"] = str(cost.quantize(Decimal("0.0001")))
@@ -267,7 +287,7 @@ class Harness:
             body={
                 "client_id": "me",
                 "image": IMAGE,
-                "disk": DISK_GB,
+                "disk": self.disk_gb,
                 "runtype": "ssh",
                 "label": self.label,
                 "target_state": "running",
@@ -428,12 +448,13 @@ class Harness:
         ):
             raise RuntimeError("remote rsync unavailable")
         ssh = shlex.join(self.ssh_argv(*self.ssh)[:-1])
-        sources = [str(ROOT / p) for p in UPLOAD if (ROOT / p).exists()]
+        sources = [str(ROOT / p) for p in self.upload_paths if (ROOT / p).exists()]
         argv = [
             "rsync",
             "-az",
             "--delete",
             "--exclude=__pycache__",
+            *(f"--exclude={x}" for x in self.rsync_excludes),
             "-e",
             ssh,
             *sources,

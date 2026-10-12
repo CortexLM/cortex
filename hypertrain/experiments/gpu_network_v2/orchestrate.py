@@ -1631,7 +1631,10 @@ class NetworkRuntime:
         from hypertrain.protocol.hashing import sha256_hex
 
         digest = sha256_hex(buffer.getvalue())
-        staged = self.journal.last("staged", role=role)
+        # qualify_role's driver-staging row carries no job map; only a job stage is resumable.
+        staged = next(
+            (r for r in reversed(self.journal.all("staged", role=role)) if "jobs" in r), None
+        )
         if staged:
             if staged["tar_sha256"] != digest:
                 raise Reject("staged_bundle_changed_on_resume")
@@ -2855,7 +2858,9 @@ def qualify_role(checked: Record, orch: Orchestrator, runtime: NetworkRuntime, r
         orch.dir / "logs",
     ).returncode:
         raise Reject("source_extract_failed")
-    job = checked["driver"].IslandJobV1.model_validate_json(files[inputs["job"]].read_bytes())
+    from hypertrain.protocol.messages_v2 import IslandJobV1
+
+    job = IslandJobV1.model_validate_json(files[inputs["job"]].read_bytes())
     uploads = {
         "job.json": files[inputs["job"]],
         **{job.object_paths[k]: files[v] for k, v in inputs["objects"].items()},

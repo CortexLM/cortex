@@ -667,7 +667,18 @@ def main() -> int:
             k for k in todo if _done(rows, k) or (k in rows and rows[k]["status"] == "ERROR")
         ]:
             del todo[k]
-        order = sorted(todo, key=lambda k: (todo[k]["spec"] or {}).get("stage", "A") != "A")
+        # Scheduling only (each job is deterministic on its own): stage-A cells that some
+        # stage-B cell waits on (eta_ref) first, then stage B, then jobs nothing depends on
+        # (DP controls, M=1/M=16 sweeps); blocked B jobs are skipped, so free slots still fill.
+        refs = {c["eta_ref"] for c in cells.values() if c["eta_ref"] is not None}
+
+        def prio(k: str) -> int:
+            c = todo[k]["spec"]
+            if c is not None and c["stage"] == "A" and c["M"] in refs:
+                return 0
+            return 1 if c is not None and c["stage"] == "B" else 2
+
+        order = sorted(todo, key=prio)
         say(
             f"{mode}: {len(todo)} jobs to run ({len(rows)} rows already on disk), "
             f"workers={args.workers}, deadline in {(deadline - time.time()) / 3600:.2f} h"
