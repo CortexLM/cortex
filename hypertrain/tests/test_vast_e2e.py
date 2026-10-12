@@ -289,6 +289,23 @@ def test_vanished_offer_falls_back_to_next(fake, tmp_path):
     assert json.loads((tmp_path / "ev/harness-result.json").read_text())["absent"] is True
 
 
+def test_key_reattached_after_permission_denied(fake, tmp_path):
+    class Denied(Scripted):
+        probes = 0
+
+        def ssh_probe(self, host, port):
+            Denied.probes += 1
+            ok = Denied.probes > 2
+            self.probe_error = "" if ok else "root@127.0.0.1: Permission denied (publickey)."
+            return ok
+
+    rc, journal, _ = run(fake, tmp_path, harness=Denied)
+    assert rc == 0
+    attaches = [c for c in fake.calls if c == ("POST", f"/api/v0/instances/{IID}/ssh/")]
+    assert len(attaches) == 3
+    assert [j["event"] for j in journal].count("ssh_probe_failed") == 1
+
+
 def test_absence_never_confirmed_alerts(fake, tmp_path):
     fake.linger = 100
     rc, _, _ = run(fake, tmp_path)

@@ -365,7 +365,7 @@ class Harness:
 
     def wait_ready(self) -> None:
         key = self.identity().with_suffix(".pub").read_text().strip()
-        attached = False
+        attached, last_error = False, None
         while time.time() < self.deadline and not self.cancel.is_set():
             rows = self.instances()
             row = next((i for i in rows or [] if i["id"] == self.instance_id), None)
@@ -393,6 +393,12 @@ class Harness:
                             "ssh_ready", host=host, port=port, driver=row.get("driver_version")
                         )
                         return
+                    err = getattr(self, "probe_error", "")
+                    if err != last_error:
+                        self.api.log("ssh_probe_failed", host=host, port=port, stderr=err)
+                        last_error = err
+                    if "Permission denied" in err:
+                        attached = False  # key attached while loading can be lost at start
             self.api.sleep(max(5.0, self.api.min_gap))
         raise RuntimeError("instance not ssh-ready before deadline")
 
@@ -480,6 +486,7 @@ class Harness:
             timeout=60,
             check=False,
         )
+        self.probe_error = "" if p.returncode == 0 else p.stderr.decode(errors="replace")[-300:]
         return p.returncode == 0
 
     def upload(self) -> int:
