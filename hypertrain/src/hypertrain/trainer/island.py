@@ -526,6 +526,8 @@ def _reduce(comm: Comm, geo: Geometry, grads: Params, reduction: str) -> Params:
     names = sorted(grads)
     if reduction == "bucketed":
         return _reduce_bucketed(comm, geo, grads)
+    if reduction in ("zero2", "zero3"):
+        return _reduce_to_owner(comm, geo, grads)
     if reduction != "all_gather":  # test-only flag: proves the guard catches all_reduce
         comm.all_reduce_sum(torch.cat([grads[n].reshape(-1) for n in names]))
     out: Params = {}
@@ -589,15 +591,68 @@ def _reduce_bucketed(
     return {n: out[n] for n in names}
 
 
-def _grad_norm(comm: Comm, geo: Geometry, red: Params) -> Tensor:
+def _reduce_to_owner(comm: Comm, geo: Geometry, grads: Params) -> Params:
+    """ZeRO-2 gradient sharding: one all_to_all sends each tensor's local gradient to the ZeRO-1
+    owner of its piece; the owner sums the replicas in rank order and divides by n_gpus (the
+    reference order, so bitwise equal to _reduce). Non-owners keep no reduced gradient. Sharding is
+    per tensor, not flat: Muon and the per-tensor norm terms need whole tensors."""
+    # ponytail: one all_to_all of all grads (2x grad memory transient); bucket it like
+    # _reduce_bucketed if the transient shows up in peak memory on the 8x run.
+    names, world = sorted(grads), comm.world
+
+    def owner_of(rank: int, n: str) -> int:
+        g = Geometry(geo.model, geo.lay, rank)
+        return g.owner(g.my_piece(n))
+
+    send = [[n for n in names if owner_of(comm.rank, n) == d] for d in range(world)]
+    recv = [[n for n in names if owner_of(s, n) == comm.rank] for s in range(world)]
+    flat = torch.cat([grads[n].reshape(-1) for d in range(world) for n in send[d]])
+    got = comm.all_to_all(
+        flat,
+        [sum(grads[n].numel() for n in ns) for ns in send],
+        [sum(grads[n].numel() for n in ns) for ns in recv],
+    )
+    parts: list[Params] = []
+    off = 0
+    for ns in recv:
+        parts.append({})
+        for n in ns:
+            parts[-1][n] = got[off : off + grads[n].numel()].view_as(grads[n])
+            off += grads[n].numel()
+    out: Params = {}
+    for n in recv[comm.rank]:
+        reps = geo.replicas(geo.my_piece(n))
+        acc = parts[reps[0]][n].clone()
+        for r in reps[1:]:
+            acc.add_(parts[r][n])
+        out[n] = acc.div_(geo.lay.n_gpus)
+    return out
+
+
+def to_dtensor(theta: Params, mesh: Any) -> Params:
+    """FSDP2 layout of full fp32 params: each tensor as a DTensor sharded on dim 0 over ``mesh``
+    (torch.distributed.tensor, the storage fully_shard uses). Layout only: training stays on the
+    explicit zero3 path above, whose collectives are fixed-order; ``.full_tensor()`` round-trips
+    bitwise (all_gather is a copy, not a reduction)."""
+    from torch.distributed.tensor import Shard, distribute_tensor
+
+    return {n: distribute_tensor(x, mesh, [Shard(0)]) for n, x in sorted(theta.items())}
+
+
+def _grad_norm(comm: Comm, geo: Geometry, red: Params, sharded: bool = False) -> Tensor:
     """optim.global_grad_norm over the full (all-shard) gradient, summed in fixed order on device
-    (0-dim float64, no host sync)."""
-    names = sorted(red)
-    parts = torch.stack([red[n].double().pow(2).sum() for n in names])
+    (0-dim float64, no host sync). ``sharded``: ``red`` holds only this rank's owned tensors
+    (ZeRO-2/3); each term is then taken from the owner."""
+    names = sorted(param_shapes(geo.model)) if sharded else sorted(red)
+    zero = torch.zeros((), dtype=torch.float64, device=next(iter(red.values())).device)
+    parts = torch.stack([red[n].double().pow(2).sum() if n in red else zero for n in names])
     got = comm.all_gather(parts)
     terms: list[Tensor] = []
     for i, n in enumerate(names):
-        if geo.is_expert(n):
+        if sharded:
+            qs = range(geo.ep) if geo.is_expert(n) else range(1)
+            terms += [got[geo.owner((n, q))][i] for q in qs]
+        elif geo.is_expert(n):
             terms += [got[geo.replicas((n, q))[0]][i] for q in range(geo.ep)]
         else:
             terms.append(parts[i])
@@ -629,7 +684,10 @@ def train_island(
     """One H-step round on this rank; every rank returns the same full RoundResult.
 
     ``reduction="bucketed"`` swaps the gradient all_gather for the bucketed reduce-scatter
-    (bitwise identical result, see _reduce_bucketed).
+    (bitwise identical result, see _reduce_bucketed). ``"zero2"`` shards gradients onto the
+    ZeRO-1 owners (_reduce_to_owner); ``"zero3"`` additionally keeps only owned parameters between
+    steps and all_gathers them before each forward (FSDP-style, fixed order). Both need
+    ``lay.zero1`` and are bitwise equal to the reference (tests/layout/test_zero23.py).
 
     With a torch.distributed comm, reductions are blocked for the whole round.
     """
@@ -717,9 +775,14 @@ def _train_island(
     st = init_state(cfg.inner, {n: theta[n] for n in owned}, local_carry, local_v0)
     pieces = geo.pieces()
     adam = [p for p in pieces if not uses_muon(cfg.inner, p[0])]
+    device = theta[names[0]].device
+    if reduction in ("zero2", "zero3") and not lay.zero1:
+        raise ValueError(f"reduction={reduction} needs layout zero1 (it reuses the ZeRO-1 owners)")
+    zero3 = reduction == "zero3"
+    if zero3:
+        theta = {n: theta[n] for n in owned}
 
     def full() -> tuple[Params, OptState]:
-        device = theta[names[0]].device
         th = _assemble(geo, gather_pieces(comm, geo, theta, pieces, geo.owner, device), names)
         m = _assemble(geo, gather_pieces(comm, geo, st.m, pieces, geo.owner, device), names)
         adam_names = sorted({p[0] for p in adam})
@@ -738,7 +801,13 @@ def _train_island(
         if cancel is not None:
             cancel()
         ids = ia.batch_ids(cfg, t)[comm.rank * per : (comm.rank + 1) * per]
+        if zero3:  # ZeRO-3: unshard params just for forward/backward
+            synced = gather_pieces(comm, geo, theta, pieces, geo.owner, device)
+            theta = {n: synced[geo.my_piece(n)] for n in names}
+            del synced
         grads, loss_local = _rank_grads(cfg, comm, geo, theta, ids, get_sample, t, hook)
+        if zero3:  # reshard: keep only owned tensors between steps
+            theta = {n: theta[n] for n in owned}
         red = _reduce(comm, geo, grads, reduction)
         if hook is not None:
             red = {
@@ -746,7 +815,7 @@ def _train_island(
                 for n, x in red.items()
             }
         del grads
-        norm = _grad_norm(comm, geo, red)
+        norm = _grad_norm(comm, geo, red, sharded=reduction in ("zero2", "zero3"))
         lr = lr_at(cfg.inner, a.global_step0 + t - 1, t - 1)
         step(cfg.inner, {n: theta[n] for n in owned}, red, st, lr, norm=norm)
         if after_step is not None:
@@ -767,12 +836,12 @@ def _train_island(
                         st.v[n],
                     )
         del red
-        if lay.zero1 and lay.n_gpus > 1:
-            synced = gather_pieces(comm, geo, theta, pieces, geo.owner, theta[names[0]].device)
+        if lay.zero1 and lay.n_gpus > 1 and not zero3:
+            synced = gather_pieces(comm, geo, theta, pieces, geo.owner, device)
             for n in names:
                 theta[n].copy_(synced[geo.my_piece(n)])
             del synced
-        loss = _mean_loss(comm, loss_local, theta[names[0]].device)
+        loss = _mean_loss(comm, loss_local, device)
         if t % J == 0:
             th_full, st_full = full()
             if checkpoint is not None:
