@@ -10,6 +10,7 @@ import argparse
 import importlib.util
 import io
 import json
+import math
 import os
 import select
 import shlex
@@ -34,6 +35,20 @@ EXIT = {"ok": 0, "admission_rejected": 2, "failed_cleaned": 3, "liability_open":
 MIN_PUT_SPACING = 5.0
 PUT_ENDPOINT = "PUT /api/v0/asks/N/"
 REMOTE_SHARD = "data/phase-a/shard.u32"
+
+
+def direct_ssh(st: dict[str, Any]) -> tuple[str, int] | None:
+    """(public ip, host port) mapped to container 22/tcp, if Vast exposes one."""
+    ip = st.get("public_ipaddr")
+    ports = st.get("ports")
+    rows = ports.get("22/tcp") if isinstance(ports, dict) else None
+    if not isinstance(ip, str) or not ip.strip() or not isinstance(rows, list):
+        return None
+    for row in rows:
+        port = row.get("HostPort") if isinstance(row, dict) else None
+        if isinstance(port, str) and port.isdigit() and 0 < int(port) < 65536:
+            return ip.strip(), int(port)
+    return None
 
 
 class Reject(Exception):
@@ -309,7 +324,7 @@ class Orchestrator:
                 body={
                     "image": self.cfg["image"],
                     "disk": int(self.cfg["disk_gb"]),
-                    "runtype": "ssh",
+                    "runtype": "ssh_direc ssh_proxy",
                     "target_state": "running",
                     "cancel_unavail": True,
                     "label": label,
@@ -353,6 +368,7 @@ class Orchestrator:
         limit = min(
             time.time() + float(self.cfg.get("boot_timeout_seconds", 1800)), self.deadline()
         )
+        running_since = math.inf
         while time.time() < limit:
             if self.cleanup_started():
                 raise Reject("supervisor_cleanup_started")
@@ -360,17 +376,28 @@ class Orchestrator:
             if isinstance(st, dict):
                 if st.get("id") != rec["instance_id"] or st.get("label") != rec["label"]:
                     raise Reject("receipt_status_mismatch:" + role)
-                if (
-                    st.get("actual_status") == "running"
-                    and st.get("ssh_host")
-                    and st.get("ssh_port")
+                # Direct ssh measured 68.7 MB/s vs 28.0 via ssh*.vast.ai (same host); the
+                # rescue-rate floor needs it. Fall back to the proxy if no mapping shows up.
+                direct = direct_ssh(st)
+                running = st.get("actual_status") == "running"
+                if running:
+                    running_since = min(running_since, time.time())
+                if running and (
+                    direct
+                    or (
+                        st.get("ssh_host")
+                        and st.get("ssh_port")
+                        and time.time() - running_since > 60
+                    )
                 ):
+                    host, port = direct or (st["ssh_host"], st["ssh_port"])
                     return self.j.append(
                         "instance_ready",
                         role=role,
                         instance_id=rec["instance_id"],
-                        ssh_host=st["ssh_host"],
-                        ssh_port=st["ssh_port"],
+                        ssh_host=host,
+                        ssh_port=port,
+                        ssh_direct=direct is not None,
                         machine_id=st.get("machine_id"),
                         driver_version=st.get("driver_version"),
                     )
