@@ -351,7 +351,7 @@ def main(argv: list[str] | None = None) -> int:
             results = _run_updating(miner, args.rounds, args.start, url, base)
         else:
             results = miner.run(args.rounds, args.start)
-    except (MinerError, UpdateRejected, RuntimeError, OSError) as error:
+    except (MinerError, UpdateRejected) as error:
         logging.error("%s: %s", type(error).__name__, error)
         return 2
     print(json.dumps({"rounds": [{"w": w, "status": s} for w, s in results]}))
