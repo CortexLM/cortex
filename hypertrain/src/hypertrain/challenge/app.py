@@ -28,6 +28,7 @@ from pydantic import (
 from hypertrain.beacon import BeaconRound, parse_round
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import DisputeError, EventAck
+from hypertrain.challenge.server_keys import ServerKeys
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.data.store import Store as ObjectStore
@@ -38,6 +39,7 @@ from hypertrain.protocol.envelope_v2 import load_json
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import KeyError_, Keypair, decode_hotkey
 from hypertrain.protocol.messages import QUICKNET_GENESIS
+from hypertrain.protocol.server_keys import SignedGrant, SignedRevoke
 from hypertrain.public_api import create_public_app
 
 VERSION = "0.1.0"
@@ -318,9 +320,17 @@ def create_app(
     )
     app.state.store = store
     app.state.metagraph = metagraph
+    server_keys = ServerKeys(config.state_dir / "server_keys.db")
+    app.state.server_keys = server_keys
+
+    async def not_revoked(hotkey: str) -> None:
+        if await run(server_keys.is_revoked, hotkey):
+            raise ChallengeError(403, "the server key grant is revoked")
 
     async def subnet_member(hotkey: object) -> None:
         """Permissionless admission: any hotkey currently registered on the subnet."""
+        if isinstance(hotkey, str):
+            await not_revoked(hotkey)
         if not isinstance(hotkey, str) or hotkey not in await metagraph.hotkeys():
             raise ChallengeError(403, "the hotkey is not registered on the subnet")
 
@@ -372,6 +382,18 @@ def create_app(
         ValidationError,
     ):
         app.add_exception_handler(cls, v2_error)
+
+    @app.post("/v2/server-keys", status_code=201)
+    async def grant_server_key(request: Request) -> Any:
+        return await run(server_keys.grant, await read_model(request, SignedGrant))
+
+    @app.get("/v2/server-keys")
+    async def list_server_keys(coldkey: Annotated[str, Query(pattern=SS58)]) -> Any:
+        return await run(server_keys.list, coldkey)
+
+    @app.post("/v2/server-keys/revoke")
+    async def revoke_server_key(request: Request) -> Any:
+        return await run(server_keys.revoke, await read_model(request, SignedRevoke))
 
     @app.post("/v2/admin/runs", status_code=201)
     async def create_v2(request: Request, authorization: Auth = None) -> Any:
@@ -804,6 +826,7 @@ def create_app(
             decode_hotkey(signer)
         except KeyError_:
             raise ChallengeError(400, "signer is not a valid SS58 hotkey") from None
+        await not_revoked(signer)
         if signer not in await metagraph.hotkeys():
             raise ChallengeError(403, "the hotkey is not registered on the subnet")
 
