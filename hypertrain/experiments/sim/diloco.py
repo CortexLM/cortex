@@ -12,6 +12,11 @@ d_r = theta_global - theta_r:
 Inner-state policies per round: carry (keep m, v, step), reset (zeros), reset + re-warmup,
 derived (m = 0, v0 = derive_v0 of the previous global outer gradient; round 0 is reset).
 
+Device: every entry point runs on the device of the params it receives (``theta0``; default CPU).
+Codecs encode on the host and decoded deltas are moved back to that device, so CPU and CUDA run
+the same math; CUDA fp32 kernels differ from CPU in rounding only (equivalence: docs/parity.md
+section 5).
+
 ponytail: robust aggregation (preclip/CClip) is not simulated (honest replicas only); add when
 the experiment must measure the clipping cost.
 """
@@ -24,6 +29,7 @@ import hypertrain.trainer  # noqa: F401  (determinism pin before torch)
 
 import hashlib
 import math
+import os
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -36,15 +42,16 @@ import torch
 from torch import Tensor
 
 from hypertrain.data.assignment import assign_round
-from hypertrain.protocol.messages import f32val
 from hypertrain.trainer.compress import compress, decompress, state_hash
 from hypertrain.trainer.config import CompressConfig, TrainConfig
-from hypertrain.trainer.loop import Assignment, train_round
+from hypertrain.trainer.determinism import require_threads
+from hypertrain.trainer.loop import Assignment, _train_step
 from hypertrain.trainer.model import forward, init_params, param_shapes
 from hypertrain.trainer.optim import OptState, derive_v0, init_state
 
 Params = dict[str, Tensor]
 SampleFn = Callable[[int], npt.NDArray[np.uint32]]
+BATCHED = os.environ.get("HYPERTRAIN_SIM_BATCHED") == "1"  # experiments/sim/batched.py
 
 
 @dataclass(frozen=True)
@@ -146,6 +153,35 @@ def round_ids(spec: SimSpec, cfg: TrainConfig, w: int, n_samples: int) -> list[t
     return [tuple(s) for s in a.slices]
 
 
+@dataclass
+class Inner:
+    final_theta: Params
+    final_state: OptState
+    loss: float  # f32-rounded mean CE of the last step (= leaf loss_f32 of train_round)
+
+
+def train_round(
+    cfg: TrainConfig,
+    theta_start: Params,
+    a: Assignment,
+    get: SampleFn,
+    carry: OptState | None = None,
+    v0: Params | None = None,
+) -> Inner:
+    """trainer.loop.train_round minus its verification artifacts (leaves, delta codec, hashes),
+    which the simulator never reads; same _train_step and init_state, so theta is bitwise equal
+    (tests/parity test_sim_inner_matches_trainer)."""
+    require_threads(cfg.cpu_threads)
+    if len(a.sample_ids) != cfg.inner.H * cfg.inner.micro_batch * cfg.inner.grad_accum:
+        raise ValueError("assignment length must equal H * micro_batch * grad_accum")
+    theta = {n: x.clone() for n, x in theta_start.items()}
+    st = init_state(cfg.inner, theta, carry, v0)
+    loss = 0.0
+    for t in range(1, cfg.inner.H + 1):
+        loss = _train_step(cfg, a, theta, st, t, get)
+    return Inner(theta, st, float(np.float32(loss)))
+
+
 def _mean(states: Sequence[Params]) -> Params:
     if len(states) == 1:
         return {n: x.clone() for n, x in states[0].items()}
@@ -175,7 +211,8 @@ def heldout_loss(cfg: TrainConfig, theta: Params, ids: Sequence[int], get: Sampl
     losses = []
     for k in range(0, len(ids), 16):
         rows = np.stack([get(i).astype(np.int64) for i in ids[k : k + 16]])
-        ce, _ = forward(cfg.model, theta, torch.from_numpy(rows))
+        dev = next(iter(theta.values())).device
+        ce, _ = forward(cfg.model, theta, torch.from_numpy(rows).to(dev))
         losses.append(float(ce))
     return float(np.mean(losses))
 
@@ -228,6 +265,33 @@ def simulate(
         region_theta: list[Params] = [theta] * spec.regions
         for _k in range(spec.K):
             ids = round_ids(spec, cfg, w, n_samples)
+            if BATCHED and arm.state_policy == "carry" and not rew:
+                from batched import train_many
+
+                c = inner_cfg(cfg, spec.H, "carry", 0)
+                many = train_many(
+                    c,
+                    [region_theta[region_of[i]] for i in range(spec.M)],
+                    [
+                        Assignment(spec.run_id, w, ids[i], global_step0=w * spec.H)
+                        for i in range(spec.M)
+                    ],
+                    get,
+                    carry,
+                )
+                for r in range(spec.regions):
+                    members = [i for i in range(spec.M) if region_of[i] == r]
+                    for i in members:
+                        carry[i] = many[i][1]
+                    region_theta[r] = _mean([many[i][0] for i in members])
+                    losses = [many[i][2] for i in members]
+                    trace.append(float(np.mean(losses)))
+                    if not all(math.isfinite(x) and x < diverge_loss for x in losses):
+                        diverged, reason = True, f"train loss {losses} at sub-round {w}"
+                w += 1
+                if diverged:
+                    break
+                continue
             for r in range(spec.regions):
                 members = [i for i in range(spec.M) if region_of[i] == r]
                 finals, losses = [], []
@@ -251,7 +315,7 @@ def simulate(
                     )
                     carry[i] = res.final_state
                     finals.append(res.final_theta)
-                    losses.append(f32val(res.leaves[-1].preimage.loss_f32))
+                    losses.append(res.loss)
                 region_theta[r] = _mean(finals)
                 trace.append(float(np.mean(losses)))
                 if not all(math.isfinite(x) and x < diverge_loss for x in losses):
@@ -275,7 +339,7 @@ def simulate(
                 else:
                     assert spec.sparse is not None, "sparseloco needs a codec config"
                     payload, ef[r] = compress(spec.sparse, d, ef[r])
-                dec.append(decompress(payload)[1])
+                dec.append({n: x.to(theta[n].device) for n, x in decompress(payload)[1].items()})
             # region key = smallest member hotkey; sum in sorted key order (fp32)
             order = sorted(range(spec.regions), key=lambda r: hk[r * nr])
             gsum = {n: torch.zeros_like(x) for n, x in theta.items()}
@@ -347,8 +411,8 @@ def data_parallel(
     ok = _finite(res.final_theta)
     return {
         "theta": res.final_theta,
-        "theta_hash": res.final_theta_hash if ok else "nonfinite",
-        "trace": [f32val(res.leaves[-1].preimage.loss_f32)],
+        "theta_hash": state_hash(res.final_theta) if ok else "nonfinite",
+        "trace": [res.loss],
         "diverged": not ok,
         "reason": "" if ok else "nonfinite",
         "wall_s": time.time() - t0,
@@ -371,6 +435,7 @@ def simulate_streaming(
     overlap: int = 0,
     alpha: float = 0.5,
     deadline: float | None = None,
+    theta0: Params | None = None,
 ) -> dict[str, Any]:
     """Flat streaming DiLoCo (2501.18512 shape): P layer fragments, each synced every H steps
     at staggered offsets of H/P steps (outer Nesterov, dense-int8, inner state carried).
@@ -388,7 +453,7 @@ def simulate_streaming(
     if P < 1 or spec.H % P or not 0 <= overlap < P or spec.arm.state_policy != "carry":
         raise ValueError("need P | H, 0 <= overlap < P and carried inner state")
     c = spec.H // P
-    theta_g = {n: x.clone() for n, x in init_params(cfg.model).items()}
+    theta_g = {n: x.clone() for n, x in (theta0 or init_params(cfg.model)).items()}
     frag = {n: fragment_of(n, cfg.model.n_layers, P) for n in theta_g}
     reps = [{n: x.clone() for n, x in theta_g.items()} for _ in range(spec.M)]
     carry = [_zero_state(cfg, theta_g) for _ in range(spec.M)]
@@ -410,7 +475,7 @@ def simulate_streaming(
         for i in range(spec.M):
             d = {n: theta_g[n] - reps[i][n] for n in names}
             payload, _ = compress(dense, d, {n: torch.zeros_like(x) for n, x in d.items()})
-            dec.append(decompress(payload)[1])
+            dec.append({n: x.to(theta_g[n].device) for n, x in decompress(payload)[1].items()})
         for n in names:
             acc = torch.zeros_like(theta_g[n])
             for i in order:
@@ -426,11 +491,17 @@ def simulate_streaming(
             return {"censored": True, "sub_rounds": j, "wall_s": time.time() - t0}
         ids = round_ids(cspec, cfg, j, n_samples)
         losses = []
-        for i in range(spec.M):
-            a = Assignment(spec.run_id, j, ids[i], global_step0=j * c)
-            res = train_round(ccfg, reps[i], a, get, carry=carry[i])
+        assigns = [Assignment(spec.run_id, j, ids[i], global_step0=j * c) for i in range(spec.M)]
+        if BATCHED:
+            from batched import train_many
+
+            for i, (th, st, loss) in enumerate(train_many(ccfg, reps, assigns, get, carry)):
+                carry[i], reps[i] = st, dict(th)
+                losses.append(loss)
+        for i in range(spec.M) if not BATCHED else ():
+            res = train_round(ccfg, reps[i], assigns[i], get, carry=carry[i])
             carry[i], reps[i] = res.final_state, res.final_theta
-            losses.append(f32val(res.leaves[-1].preimage.loss_f32))
+            losses.append(res.loss)
         trace.append(float(np.mean(losses)))
         if not all(math.isfinite(x) and x < diverge_loss for x in losses):
             diverged, reason = True, f"train loss {losses} at chunk {j}"
@@ -500,7 +571,7 @@ def anneal_single(
     ok = _finite(res.final_theta)
     return sim | {
         "theta": res.final_theta,
-        "theta_hash": res.final_theta_hash if ok else "nonfinite",
+        "theta_hash": state_hash(res.final_theta) if ok else "nonfinite",
         "lawa_theta": None,
         "lawa_k": 0,
         "diverged": bool(sim["diverged"]) or not ok,

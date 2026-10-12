@@ -38,6 +38,8 @@ DATA = Path(os.environ.get("HYPERTRAIN_DATA_DIR", ROOT / "data"))
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 PREREG = HERE / "parity_prereg.json"
+# Execution detail, not part of the design hash: torch device of every job (cpu | cuda | cuda:N).
+DEVICE = os.environ.get("HYPERTRAIN_SIM_DEVICE", "cpu")
 
 SEEDS = (0, 1, 2)
 ETA5 = (0.2, 0.4, 0.6, 0.8, 1.0)
@@ -298,6 +300,11 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
             return row | {"status": "CENSORED", "reason": "cap reached before start"}
         sc, c = job["scale"], job["spec"]
         S, s = sc["steps"], job["seed"]
+        dev = job.get("device", "cpu")
+
+        def init(cfg: Any) -> dict[str, Any]:
+            return {n: x.to(dev) for n, x in init_params(cfg.model).items()}
+
         tr = ChunkedShards(DATA / "train", sc["seq_len"])
         ho = ChunkedShards(DATA / "holdout", sc["seq_len"])
         ho_ids = list(range(0, ho.n, ho.n // sc["n_heldout"]))[: sc["n_heldout"]]
@@ -314,7 +321,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
                 arm=ARMS["A0"],
                 seed=s,
             )
-            res = data_parallel(spec, cfg, tr, tr.n)
+            res = data_parallel(spec, cfg, tr, tr.n, init(cfg))
         else:
             M = c["M"]
             cfg = build_cfg(sc, s, GLOBAL_BATCH // M, c["inner"])
@@ -338,17 +345,24 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
             )
             if c["fragments"] > 1:
                 res = simulate_streaming(
-                    spec, cfg, tr, tr.n, c["fragments"], c["tau"], deadline=job["deadline"]
+                    spec,
+                    cfg,
+                    tr,
+                    tr.n,
+                    c["fragments"],
+                    c["tau"],
+                    deadline=job["deadline"],
+                    theta0=init(cfg),
                 )
             else:
                 lawa = None if c["anneal"] else tuple(sc["lawa"])
-                res = simulate(spec, cfg, tr, tr.n, deadline=job["deadline"], lawa=lawa)
+                res = simulate(spec, cfg, tr, tr.n, init(cfg), deadline=job["deadline"], lawa=lawa)
                 if c["anneal"] and not res.get("censored") and not res["diverged"]:
                     res = anneal_single(spec, cfg, tr, tr.n, res, S)
         if res.get("censored"):
             return row | {"status": "CENSORED", "reason": "cap reached mid-run"}
         loss = heldout_loss(cfg, res["theta"], ho_ids, ho)
-        init_loss = heldout_loss(cfg, init_params(cfg.model), ho_ids, ho)
+        init_loss = heldout_loss(cfg, init(cfg), ho_ids, ho)
         lawa_loss = None
         if res.get("lawa_theta") is not None and res.get("lawa_k", 0) >= sc["lawa"][1]:
             lawa_loss = heldout_loss(cfg, res["lawa_theta"], ho_ids, ho)
@@ -366,6 +380,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
             "theta_hash": res["theta_hash"],
             "wall_s": round(time.time() - t0, 1),
             "pid": os.getpid(),
+            "device": dev,
         }
     except Exception:  # keep the failure verbatim in the results; never drop the row
         return row | {"status": "ERROR", "reason": traceback.format_exc()[-3000:]}
@@ -681,7 +696,8 @@ def main() -> int:
         order = sorted(todo, key=prio)
         say(
             f"{mode}: {len(todo)} jobs to run ({len(rows)} rows already on disk), "
-            f"workers={args.workers}, deadline in {(deadline - time.time()) / 3600:.2f} h"
+            f"workers={args.workers}, device={DEVICE}, "
+            f"deadline in {(deadline - time.time()) / 3600:.2f} h"
         )
         fh = runs_path.open("a")
 
@@ -719,7 +735,7 @@ def main() -> int:
                         j["eta"] = e
                     elif c is not None:
                         j["eta"] = c["eta"]
-                    j |= {"deadline": deadline, "scale": scale, "mu": mu}
+                    j |= {"deadline": deadline, "scale": scale, "mu": mu, "device": DEVICE}
                     running[ex.submit(run_job, j)] = k
                     order.remove(k)
                 if not running:

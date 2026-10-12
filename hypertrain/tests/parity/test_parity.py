@@ -9,6 +9,7 @@ import os
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -225,6 +226,101 @@ def test_streaming_p1_equals_flat_and_variants_run() -> None:
     a = simulate_streaming(sp, cfg, tr, tr.n, fragments=3)
     b = simulate_streaming(sp, cfg, tr, tr.n, fragments=3, overlap=1)
     assert not a["diverged"] and not b["diverged"] and a["theta_hash"] != b["theta_hash"]
+
+
+def test_sim_device_proxy_matches_cpu() -> None:
+    """Device path rehearsal: params on a CUDA-like proxy (.numpy() raises, host mixing raises)
+    give the same bytes as CPU for every simulator entry point the grid uses."""
+    sys.path.insert(0, str(ROOT / "tests" / "trainer"))
+    from diloco import anneal_single, data_parallel, heldout_loss
+    from fake_device import DevTensor, FakeDeviceMode, to_device
+
+    from hypertrain.trainer.config import CompressConfig
+    from hypertrain.trainer.model import init_params
+
+    sc = pg.SCALES["smoke"] | {"steps": 12}
+    cfg = pg.build_cfg(sc, 0, 2)
+    tr = ChunkedShards(Path(os.environ["HYPERTRAIN_DATA_DIR"]) / "train", sc["seq_len"])
+    base = SimSpec(
+        M=2, H=3, steps=12, outer="nesterov", outer_lr=0.6, outer_momentum=0.9,
+        arm=ARMS["A0"], seed=0,
+    )  # fmt: skip
+    sparse = replace(
+        base, outer="sparseloco", outer_lr=1.0, sparse=CompressConfig("sparseloco", 0.05, 2, 0.95)
+    )
+    hier = replace(base, M=4, R=2, K=2, steps=12)
+    ids = [0, 7, 13]
+
+    def run(dev: bool) -> list[Any]:
+        th = (
+            (lambda: {n: to_device(x) for n, x in init_params(cfg.model).items()})
+            if dev
+            else (lambda: init_params(cfg.model))
+        )
+        out = []
+        for spec in (base, sparse, hier):
+            r = simulate(spec, cfg, tr, tr.n, th(), lawa=(3, 2))
+            out += [r["theta_hash"], heldout_loss(cfg, r["theta"], ids, tr)]
+        r = simulate(replace(base, steps=9), cfg, tr, tr.n, th())
+        out.append(anneal_single(replace(base, steps=9), cfg, tr, tr.n, r, 12)["theta_hash"])
+        s = simulate_streaming(replace(base, H=6), cfg, tr, tr.n, 3, 1, theta0=th())
+        out.append(s["theta_hash"])
+        d = data_parallel(base, cfg, tr, tr.n, th())
+        out.append(d["theta_hash"])
+        if dev:
+            assert all(isinstance(t, DevTensor) for t in d["theta"].values())
+            assert all(isinstance(t, DevTensor) for t in s["theta"].values())
+        return out
+
+    ref = run(False)
+    with FakeDeviceMode(default_on_device=True):
+        got = run(True)
+    assert got == ref
+
+
+def test_sim_inner_matches_trainer() -> None:
+    import diloco
+
+    from hypertrain.protocol.messages import f32val
+    from hypertrain.trainer.loop import Assignment
+    from hypertrain.trainer.loop import train_round as full
+    from hypertrain.trainer.model import init_params
+    from hypertrain.trainer.optim import init_state
+
+    sc = pg.SCALES["smoke"] | {"steps": 12}
+    cfg = diloco.inner_cfg(pg.build_cfg(sc, 0, 2), 6, "carry", 0)
+    tr = ChunkedShards(Path(os.environ["HYPERTRAIN_DATA_DIR"]) / "train", sc["seq_len"])
+    th = init_params(cfg.model)
+    carry = init_state(replace(cfg.inner, state_policy="reset"), th)
+    a = Assignment("5e" * 32, 0, tuple(range(12)))
+    ref = full(cfg, th, a, tr, carry=carry)
+    got = diloco.train_round(cfg, th, a, tr, carry=carry)
+    assert diloco.state_hash(got.final_theta) == ref.final_theta_hash
+    assert diloco.state_hash(got.final_state.m) == diloco.state_hash(ref.final_state.m)
+    assert got.loss == f32val(ref.leaves[-1].preimage.loss_f32)
+
+
+def test_batched_replicas_match_per_replica() -> None:
+    import diloco
+
+    sc = pg.SCALES["smoke"] | {"steps": 12}
+    tr = ChunkedShards(Path(os.environ["HYPERTRAIN_DATA_DIR"]) / "train", sc["seq_len"])
+    spec = SimSpec(
+        M=4, H=3, R=2, K=2, steps=12, outer="nesterov", outer_lr=0.6, outer_momentum=0.9,
+        arm=ARMS["A0"], seed=0,
+    )  # fmt: skip
+    for inner in ("adamw", "muon"):
+        cfg = pg.build_cfg(sc, 0, 8, inner)
+        got = []
+        for b in (False, True):
+            diloco.BATCHED = b
+            try:
+                got.append(
+                    diloco.heldout_loss(cfg, simulate(spec, cfg, tr, tr.n)["theta"], [0, 9], tr)
+                )
+            finally:
+                diloco.BATCHED = False
+        assert abs(got[1] - got[0]) / got[0] < 1e-5
 
 
 def test_real_summary_if_present() -> None:
