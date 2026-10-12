@@ -44,6 +44,10 @@ class Refused(Exception):
     """Admission refusal: nothing was created."""
 
 
+class OfferGone(Exception):
+    """CREATE refused (offer taken meanwhile) and a parsed listing shows no instance."""
+
+
 class Response:
     def __init__(self, status: int | None, body: Any, retry_after: float | None, error: str):
         self.status, self.body, self.retry_after, self.error = status, body, retry_after, error
@@ -302,6 +306,8 @@ class Harness:
         else:
             self.instance_id = self.find_by_label()
         if self.instance_id is None:
+            if r.status == 400 and self.instances() == []:
+                raise OfferGone(f"offer {offer['id']} refused (HTTP 400), nothing created")
             raise RuntimeError(f"create unresolved (HTTP {r.status})")
         self.api.log("created", instance_id=self.instance_id)
 
@@ -320,26 +326,30 @@ class Harness:
         return None
 
     def boot(self, offer: dict[str, Any]) -> None:
-        """Create + wait for ssh; a host stuck booting is deleted and the next offer tried."""
+        """Create + wait for ssh; a vanished offer or a stuck host moves to the next offer."""
         tried: set[int] = set()
         for attempt in range(1 + int(self.a.boot_retries)):
-            self.create(offer)
-            real, self.deadline = (
-                self.deadline,
-                min(self.deadline, time.time() + float(self.a.boot_timeout)),
-            )
-            try:
-                self.wait_ready()
-                return
-            except RuntimeError:
-                if time.time() >= real or self.cancel.is_set():
-                    raise
-            finally:
-                self.deadline = real
             tried.add(offer.get("machine_id"))
-            self.api.log("boot_timeout", attempt=attempt, instance_id=self.instance_id)
-            if not (self.delete() and self.confirm_absent()):
-                raise RuntimeError("stuck host not confirmed absent")
+            try:
+                self.create(offer)
+            except OfferGone:
+                self.api.log("offer_gone", attempt=attempt, offer_id=offer["id"])
+            else:
+                real, self.deadline = (
+                    self.deadline,
+                    min(self.deadline, time.time() + float(self.a.boot_timeout)),
+                )
+                try:
+                    self.wait_ready()
+                    return
+                except RuntimeError:
+                    if time.time() >= real or self.cancel.is_set():
+                        raise
+                finally:
+                    self.deadline = real
+                self.api.log("boot_timeout", attempt=attempt, instance_id=self.instance_id)
+                if not (self.delete() and self.confirm_absent()):
+                    raise RuntimeError("stuck host not confirmed absent")
             self.instance_id, self.create_attempted = None, False
             self.label = f"{self.label_prefix}-{uuid.uuid4().hex[:8]}"
             self.result["label"] = self.label

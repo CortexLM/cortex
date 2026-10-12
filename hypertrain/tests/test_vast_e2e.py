@@ -33,6 +33,7 @@ class Fake:
         self.linger = 0
         self.throttle: dict[str, int] = {}
         self.asks: list[str] = []
+        self.gone: set[str] = set()
 
     def offers(self) -> list[dict]:
         base = dict(
@@ -66,6 +67,8 @@ class Fake:
             assert q["num_gpus"] == {"eq": 2} and q["gpu_name"] == {"eq": "RTX 5090"}
             return 200, {"offers": self.offers()}
         if method == "PUT" and path.startswith("/api/v0/asks/"):
+            if path in self.gone:
+                return 400, {"success": False, "error": "no_such_ask"}
             assert body and body["runtype"] == "ssh" and body["disk"] == 40
             assert body["image"] == vast.IMAGE
             self.label, self.deleted = body["label"], False
@@ -274,6 +277,15 @@ def test_host_stuck_booting_is_replaced_by_next_offer(fake, tmp_path):
     assert ev.index("boot_timeout") < ev.index("ssh_ready")
     deletes = [i for i, j in enumerate(journal) if j.get("method") == "DELETE"]
     assert len(deletes) == 2 and deletes[0] < ev.index("ssh_ready")
+    assert json.loads((tmp_path / "ev/harness-result.json").read_text())["absent"] is True
+
+
+def test_vanished_offer_falls_back_to_next(fake, tmp_path):
+    fake.gone = {"/api/v0/asks/12/"}
+    rc, journal, _ = run(fake, tmp_path)
+    assert rc == 0
+    assert fake.asks == ["/api/v0/asks/11/"]
+    assert "offer_gone" in events(journal)
     assert json.loads((tmp_path / "ev/harness-result.json").read_text())["absent"] is True
 
 
