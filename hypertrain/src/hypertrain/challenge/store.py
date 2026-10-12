@@ -255,6 +255,10 @@ class _ServiceCapacityV1(BaseModel):
     max_tape_bytes: StrictInt
 
 
+# Signed-profile roster cap ceiling (plan 4.3); RoundOpenV2.roster max_length is the same bound.
+MAX_ROSTER_CEILING = 1024
+
+
 class ChallengeError(Exception):
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(detail)
@@ -353,7 +357,11 @@ class ChallengeStore:
         _role_launch: (
             Callable[[str, IslandJobV1, Path, Mapping[str, Any]], IslandLaunch] | None
         ) = None,
+        max_roster: int = 32,
     ) -> None:
+        if type(max_roster) is not int or not 32 <= max_roster <= MAX_ROSTER_CEILING:
+            raise ValueError(f"max_roster must be an int in [32, {MAX_ROSTER_CEILING}]")
+        self.max_roster = max_roster
         state_dir.mkdir(parents=True, exist_ok=True)
         self.params = params
         self.coord = coord
@@ -4008,7 +4016,7 @@ class ChallengeStore:
             run_id=run_id,
             backend_binding_hash=sha256_hex(canonicalize(backend)),
             implementation_hash=implementation,
-            max_complete_roster=32,
+            max_complete_roster=self.max_roster,
             memory_reservation_bytes=1 << 30,
             max_outer_work_units=50_000_000,
             max_audit_step_units=512,
@@ -4377,12 +4385,13 @@ class ChallengeStore:
     ) -> dict[str, Any] | None:
         """Complete roster guard before storage, assignment or synchronous arithmetic."""
         if roster is None:
-            assert w is not None
+            if w is None:
+                raise ChallengeError(400, "ROSTER_ROUND_REQUIRED")
             record = self._record_v2(run_id, "round", str(w))
             roster = record["body"]["roster"]
         n = len(roster)
-        if n > 32:
-            raise ChallengeError(409, "ROSTER_LIMIT_32")
+        if n > self.max_roster:
+            raise ChallengeError(409, f"ROSTER_LIMIT_{self.max_roster}")
         admitted = self._db.execute(
             "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission' AND id='run'",
             (run_id,),

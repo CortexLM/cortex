@@ -788,3 +788,37 @@ def test_real_capacity_launch_failure_keeps_debit_and_prevents_restart_rerun(
     finally:
         restored.close_v2_notifications()
         restored._db.close()
+
+
+@pytest.mark.parametrize("cap", [32, 48])
+def test_roster_cap_follows_signed_profile_when_flag_set(tiny, cap):
+    store, manifest = tiny
+    store.max_roster = cap
+    body, raw = signed_profile(store, manifest)
+    assert envelope_v2.load_json(body)["max_complete_roster"] == cap
+    store.bootstrap_service_capacity_v2(manifest.run_id(), body, raw)
+    try:
+        store.require_roster_v2(manifest.run_id(), roster=roster(cap))
+    except ChallengeError as e:
+        assert "ROSTER_LIMIT" not in e.detail
+    with pytest.raises(ChallengeError, match=f"ROSTER_LIMIT_{cap}"):
+        store.require_roster_v2(manifest.run_id(), roster=roster(cap + 1))
+
+
+@pytest.mark.parametrize("cap", [31, 1025, True, 32.0])
+def test_roster_cap_flag_rejects_when_out_of_range(network, tmp_path, cap):
+    with pytest.raises(ValueError, match="max_roster"):
+        ChallengeStore(
+            tmp_path / "s",
+            network.store.params,
+            service.COORD,
+            service.OWNER.ss58,
+            verify_beacon=network.store.verify_beacon,
+            objects=network.store.objects,
+            max_roster=cap,
+        )
+
+
+def test_roster_guard_raises_when_no_round_or_roster(network):
+    with pytest.raises(ChallengeError, match="ROSTER_ROUND_REQUIRED"):
+        network.store.require_roster_v2(network.manifest.run_id())
