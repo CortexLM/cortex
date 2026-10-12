@@ -5,3 +5,11 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 .hypothesis/
+
+# audit/report/plan artifacts (kept out of the product repo)
+experiments/
+plan.md
+plan.json
+docs/RESULTS.md
+docs/incentive-audit.md
+*-RESULT.md
