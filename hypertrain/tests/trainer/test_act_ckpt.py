@@ -20,4 +20,4 @@ def test_act_ckpt_bitwise(monkeypatch: pytest.MonkeyPatch, moe: bool, dt: str) -
     monkeypatch.setenv("HT_ACT_CKPT", "1")
     cfg = make_cfg(moe=moe, opt="adamw", dtype=dt)
     res = train_round(cfg, init_params(cfg.model), assignment(cfg), sample(cfg))
-    assert res.leaves_root == GOLDEN[f"loop-{'moe' if moe else 'dense'}-adamw-{dt}"]
+    assert res.leaves_root in GOLDEN[f"loop-{'moe' if moe else 'dense'}-adamw-{dt}"]

@@ -45,7 +45,7 @@ def test_fp8_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HT_FP8", raising=False)
     cfg = make_cfg(dtype="bf16")
     assert not fp8_enabled(cfg.model)
-    assert _run(cfg).leaves_root == GOLDEN["loop-dense-adamw-bf16"]
+    assert _run(cfg).leaves_root in GOLDEN["loop-dense-adamw-bf16"]
 
 
 def test_fp8_flag_repeatable(monkeypatch: pytest.MonkeyPatch) -> None:

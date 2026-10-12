@@ -211,3 +211,6 @@ tests/storage/test_sigv4.py:5430f9f5087e8aad38fd2caddffc9cc4a47be8c07fce8f48646d
 tests/storage/test_sigv4.py:ced318948a25d32a5a4feedb7eea03995182b6e9618e4a286089c731e40cd1f3  # L32
 tests/storage/test_sigv4.py:929e45fa953c9ced713b981a425849802d055d512f15c732d441e33fabb168a5  # L39
 tests/test_vast_e2e.py:49238c9f34e47fe081a5d3ea76d645ec76b431e5e0e29edf446714ee64e24b64  # L23 synthetic fake provider key (test_vast_e2e asserts it never reaches the journal)
+
+# release.yml: writes the HYPERTRAIN_RELEASE_KEY secret (env reference, no value) to a 0600 temp file
+.github/workflows/release.yml:8bf198a2bc2d8d641723acf3b8f8faafd9499d29d4d1e705c24ce769e308009a  # L51

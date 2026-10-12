@@ -179,7 +179,7 @@ def train_round(
     loss = 0.0
     for t in range(1, cfg.inner.H + 1):
         loss = _train_step(cfg, a, theta, st, t, get)
-    return Inner(theta, st, float(np.float32(loss)))
+    return Inner(theta, st, float(np.float32(float(loss))))
 
 
 def _mean(states: Sequence[Params]) -> Params:
