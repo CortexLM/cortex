@@ -1,0 +1,149 @@
+{
+  "format": "hypertrain-parity-vast-attempts-v1",
+  "date_utc": "2026-10-11/12",
+  "grid": {
+    "jobs_total": 150,
+    "jobs_done": 150,
+    "design_sha256": "c14c4a5e1d9ebc8737cff9e8748d5b2b254806617c49578e82a1b3e04a886635"
+  },
+  "benchmark": "full-scale M=8 replica set, one inner step = (t(6 steps)-t(2 steps))/4, single thread",
+  "local_idle_s_per_step": 1.8552,
+  "rentals": [
+    {
+      "label": "hypertrain-parity-71999a65",
+      "cpu": "AMD EPYC 7763 (128 threads)",
+      "usd_per_h": 0.4289,
+      "s_per_step_under_64_workers": 34.59,
+      "hours": 4.7,
+      "outcome": "stopped: 0/150 jobs after 4.7 h; projected ~29 h per job",
+      "absent": true
+    },
+    {
+      "label": "hypertrain-parity-e174b6c6",
+      "cpu": "AMD EPYC 7Y83 (128 threads)",
+      "usd_per_h": 0.537,
+      "s_per_step_under_64_workers": 17.3862,
+      "outcome": "rejected by load gate (>2.5 s/step)",
+      "absent": true
+    },
+    {
+      "label": "hypertrain-parity-b2b48652",
+      "cpu": "AMD EPYC 9654 (384 threads)",
+      "usd_per_h": 1.0015,
+      "idle_s_per_step": 1.6323,
+      "s_per_step_under_64_workers": 11.6002,
+      "outcome": "rejected by load gate (>2.5 s/step)",
+      "absent": true
+    },
+    {
+      "label": "hypertrain-parity-45fe502a",
+      "cpu": "AMD EPYC 9654 (384 threads)",
+      "usd_per_h": 1.0015,
+      "s_per_step_by_parallel_procs": {
+        "16": 1.81913,
+        "32": 3.38482,
+        "64": 7.73901
+      },
+      "outcome": "throughput flat at ~9 job-steps/s regardless of process count",
+      "absent": true
+    }
+  ],
+  "projection": {
+    "benchmark_steps_total_approx": 450000,
+    "best_host_job_steps_per_s": 9,
+    "host_hours_approx": 14,
+    "usd_approx": 14,
+    "budget_left_usd": 6
+  },
+  "verdict": "full grid completed on CUDA (1x RTX 5090) 2026-10-12: 150/150 jobs; CPU hosts above were too slow",
+  "gpu_rentals": [
+    {
+      "attempt": "r1",
+      "label": "hypertrain-parity-gpu-480d0646",
+      "gpu": "1x RTX 5090",
+      "driver": "580.159.03",
+      "cpu": "AMD EPYC 7K62 48-Core Processor",
+      "machine_id": 140843,
+      "usd_per_h": 0.4496,
+      "rented_h": 0.216,
+      "usd_est": 0.097,
+      "probe_replica_steps_per_s": {
+        "4": 60.252306533609485,
+        "8": 80.09380987481588,
+        "16": 91.92166550567688,
+        "24": 93.05661913670599
+      },
+      "workers": 24,
+      "equivalence_pass": true,
+      "outcome": "rejected by projection gate: 93 replica-steps/s at 24 processes (per-replica path), 18.0 h projected",
+      "deleted": true,
+      "absent": true
+    },
+    {
+      "attempt": "r2",
+      "label": "hypertrain-parity-gpu-2d3bb25f",
+      "gpu": "1x RTX 5090",
+      "driver": "595.91.07",
+      "cpu": "AMD Ryzen 9 9950X3D2 16-Core Processor",
+      "machine_id": 153110,
+      "usd_per_h": 0.4111,
+      "rented_h": 0.223,
+      "usd_est": 0.092,
+      "probe_replica_steps_per_s": {
+        "8": 77.54051188853552,
+        "16": 70.65421386147358,
+        "24": 62.37573583875872
+      },
+      "workers": 8,
+      "equivalence_pass": true,
+      "outcome": "rejected by projection gate: MPS on, per-replica path peaked at 77.5 replica-steps/s, 21.6 h projected",
+      "deleted": true,
+      "absent": true
+    },
+    {
+      "attempt": "r3",
+      "label": "hypertrain-parity-gpu-fbf288ec",
+      "gpu": "1x RTX 5090",
+      "driver": "595.71.05",
+      "cpu": "AMD EPYC 7K62 48-Core Processor",
+      "machine_id": 141821,
+      "usd_per_h": 0.4689,
+      "rented_h": 0.579,
+      "usd_est": 0.271,
+      "probe_replica_steps_per_s": {
+        "8": 1061.1398963730571,
+        "16": 1468.2047640950525
+      },
+      "workers": 16,
+      "equivalence_pass": true,
+      "outcome": "batched replicas: 64/150 jobs DONE; 80 jobs OOM at 16 concurrent processes on 32 GB (M>=16 cells and their dependents), 6 censored as dependents",
+      "deleted": true,
+      "absent": true
+    },
+    {
+      "attempt": "r4",
+      "label": "hypertrain-parity-gpu-2838a21f",
+      "gpu": "1x RTX 5090",
+      "driver": "595.71.05",
+      "cpu": "AMD EPYC 7K62 48-Core Processor",
+      "machine_id": 141821,
+      "usd_per_h": 0.4689,
+      "rented_h": 0.72,
+      "usd_est": 0.338,
+      "probe_replica_steps_per_s": {
+        "8": 1161.2610569290089
+      },
+      "workers": 8,
+      "equivalence_pass": true,
+      "outcome": "resume of the 64 rows with 8 processes: 150/150 DONE, 0 errors, 0 censored",
+      "deleted": true,
+      "absent": true
+    }
+  ],
+  "gpu_spend": {
+    "usd_est_sum": 0.798,
+    "credit_before": 13.736,
+    "credit_after": 12.437,
+    "note": "credit delta covers all account activity in the window (other agents rented concurrently); usd_est_sum = dph_total x time from created to cleanup_done"
+  }
+}

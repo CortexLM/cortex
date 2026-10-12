@@ -1,78 +1,5293 @@
 {
-  "cells": [],
-  "gap": {},
-  "ci90": {},
-  "tost_result": {},
-  "promotion_list": [],
-  "mechanism_ranking": [],
+  "cells": [
+    {
+      "cell": "A_flat_M1_H30_eta0.2",
+      "family": "eta_sweep",
+      "M": 1,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.45469830930233,
+      "eta": 0.2,
+      "gap_vs_dp": 0.03150898065781612,
+      "ci90": [
+        0.027180620892159564,
+        0.035837340423472676
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.02718, +0.03584], mean +0.03151)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.05874839887597877,
+        "ci90": [
+          0.05563389736944917,
+          0.06186290038250837
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M1_H30_eta0.2+lawa",
+      "family": "eta_sweep",
+      "M": 1,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4517493769526482,
+      "eta": 0.2,
+      "gap_vs_dp": 0.029417872865052357,
+      "ci90": [
+        0.024700982779004472,
+        0.03413476295110024
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.0247, +0.03413], mean +0.02942)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.056601477516040444,
+        "ci90": [
+          0.05375317796394873,
+          0.059449777068132155
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M1_H30_eta0.6",
+      "family": "eta_sweep",
+      "M": 1,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.454467635601759,
+      "eta": 0.6,
+      "gap_vs_dp": 0.031366302604468134,
+      "ci90": [
+        0.025243723407281406,
+        0.03748888180165486
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.02524, +0.03749], mean +0.03137)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.05860959027585249,
+        "ci90": [
+          0.04868165454974941,
+          0.06853752600195556
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M1_H30_eta0.6+lawa",
+      "family": "eta_sweep",
+      "M": 1,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4437996832032998,
+      "eta": 0.6,
+      "gap_vs_dp": 0.023802035287702233,
+      "ci90": [
+        0.01771516812478304,
+        0.029888902450621424
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.01772, +0.02989], mean +0.0238)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.05084534787531956,
+        "ci90": [
+          0.04106050489832984,
+          0.06063019085230928
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M1_H30_eta1.0",
+      "family": "eta_sweep",
+      "M": 1,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4986979104578495,
+      "eta": 1.0,
+      "gap_vs_dp": 0.06274707786187217,
+      "ci90": [
+        0.05055287059938278,
+        0.07494128512436156
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.05055, +0.07494], mean +0.06275)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.09081927352294612,
+        "ci90": [
+          0.07600856672175266,
+          0.10562998032413959
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M1_H30_eta1.0+lawa",
+      "family": "eta_sweep",
+      "M": 1,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.486239429563284,
+      "eta": 1.0,
+      "gap_vs_dp": 0.053910826689702075,
+      "ci90": [
+        0.04232498343448379,
+        0.06549666994492036
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04232, +0.0655], mean +0.05391)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.08175035518736398,
+        "ci90": [
+          0.0672602405430581,
+          0.09624046983166987
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M2_H30_eta0.2",
+      "family": "eta_sweep",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4930256369213264,
+      "eta": 0.2,
+      "gap_vs_dp": 0.058676138381546054,
+      "ci90": [
+        0.04683104301351196,
+        0.07052123374958015
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04683, +0.07052], mean +0.05868)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.08662604127259782,
+        "ci90": [
+          0.0780625447687168,
+          0.09518953777647884
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M2_H30_eta0.2+lawa",
+      "family": "eta_sweep",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4928485204776127,
+      "eta": 0.2,
+      "gap_vs_dp": 0.05854987809953077,
+      "ci90": [
+        0.046520252733699294,
+        0.07057950346536225
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04652, +0.07058], mean +0.05855)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.08649638104830824,
+        "ci90": [
+          0.07769950155211422,
+          0.09529326054450227
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M2_H30_eta0.4",
+      "family": "eta_sweep",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4712776715556781,
+      "eta": 0.4,
+      "gap_vs_dp": 0.043263677003053724,
+      "ci90": [
+        0.03737382209173626,
+        0.04915353191437119
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.03737, +0.04915], mean +0.04326)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.07081183825896216,
+        "ci90": [
+          0.06748124493699487,
+          0.07414243158092945
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M2_H30_eta0.4+lawa",
+      "family": "eta_sweep",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4665198897322018,
+      "eta": 0.4,
+      "gap_vs_dp": 0.03988991736928932,
+      "ci90": [
+        0.034098752043433024,
+        0.04568108269514561
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.0341, +0.04568], mean +0.03989)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.06734912568569684,
+        "ci90": [
+          0.06399406312181508,
+          0.07070418824957861
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M2_H30_eta0.6",
+      "family": "eta_sweep",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4736196100711823,
+      "eta": 0.6,
+      "gap_vs_dp": 0.04493948659019617,
+      "ci90": [
+        0.04266703143968008,
+        0.04721194174071226
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04267, +0.04721], mean +0.04494)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.07253605036632915,
+        "ci90": [
+          0.06831243537595243,
+          0.07675966535670588
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M2_H30_eta0.6+lawa",
+      "family": "eta_sweep",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4661688804626465,
+      "eta": 0.6,
+      "gap_vs_dp": 0.03965695581732145,
+      "ci90": [
+        0.036872113929727515,
+        0.04244179770491538
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.03687, +0.04244], mean +0.03966)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.067113638614116,
+        "ci90": [
+          0.06298286513187012,
+          0.07124441209636187
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M2_H30_eta0.8",
+      "family": "eta_sweep",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.491060771048069,
+      "eta": 0.8,
+      "gap_vs_dp": 0.05734225319595965,
+      "ci90": [
+        0.03968528590722151,
+        0.07499922048469779
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.03969, +0.075], mean +0.05734)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.08527705649930443,
+        "ci90": [
+          0.06428239654164457,
+          0.1062717164569643
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M2_H30_eta0.8+lawa",
+      "family": "eta_sweep",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4814552726844947,
+      "eta": 0.8,
+      "gap_vs_dp": 0.0505316609325309,
+      "ci90": [
+        0.0325165203509418,
+        0.06854680151412
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.03252, +0.06855], mean +0.05053)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.07828696789164864,
+        "ci90": [
+          0.05691229102007776,
+          0.09966164476321952
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M2_H30_eta1.0",
+      "family": "eta_sweep",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.505119611819585,
+      "eta": 1.0,
+      "gap_vs_dp": 0.06731414061990844,
+      "ci90": [
+        0.0494570629910025,
+        0.08517121824881438
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04946, +0.08517], mean +0.06731)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.09550325759900964,
+        "ci90": [
+          0.0764252500904448,
+          0.11458126510757448
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M2_H30_eta1.0+lawa",
+      "family": "eta_sweep",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4950314685702324,
+      "eta": 1.0,
+      "gap_vs_dp": 0.06016061574161141,
+      "ci90": [
+        0.042262301724500316,
+        0.0780589297587225
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04226, +0.07806], mean +0.06016)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.08816044602653939,
+        "ci90": [
+          0.06913858557989733,
+          0.10718230647318144
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M4_H30_eta0.2",
+      "family": "eta_sweep",
+      "M": 4,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5591544061899185,
+      "eta": 0.2,
+      "gap_vs_dp": 0.10557861632118541,
+      "ci90": [
+        0.10120021997211938,
+        0.10995701267025144
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1012, +0.11], mean +0.1056)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.13477397179753034,
+        "ci90": [
+          0.1319054864441657,
+          0.137642457150895
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M4_H30_eta0.2+lawa",
+      "family": "eta_sweep",
+      "M": 4,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.561340765406688,
+      "eta": 0.2,
+      "gap_vs_dp": 0.10713034465485427,
+      "ci90": [
+        0.10315724891742671,
+        0.11110344039228183
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1032, +0.1111], mean +0.1071)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.13636678631981644,
+        "ci90": [
+          0.1339821788638688,
+          0.1387513937757641
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M4_H30_eta0.6",
+      "family": "eta_sweep",
+      "M": 4,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5046361051499844,
+      "eta": 0.6,
+      "gap_vs_dp": 0.06693434789520437,
+      "ci90": [
+        0.06447842881681555,
+        0.0693902669735932
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.06448, +0.06939], mean +0.06693)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.09511283620609823,
+        "ci90": [
+          0.08972122885634427,
+          0.10050444355585218
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M4_H30_eta0.6+lawa",
+      "family": "eta_sweep",
+      "M": 4,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5001167555650075,
+      "eta": 0.6,
+      "gap_vs_dp": 0.06373188071660045,
+      "ci90": [
+        0.060395709382424945,
+        0.06706805205077596
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.0604, +0.06707], mean +0.06373)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.09182613717836437,
+        "ci90": [
+          0.08569826258958729,
+          0.09795401176714144
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M4_H30_eta1.0",
+      "family": "eta_sweep",
+      "M": 4,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5186346968015034,
+      "eta": 1.0,
+      "gap_vs_dp": 0.07686654109646465,
+      "ci90": [
+        0.07021517194721778,
+        0.08351791024571152
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07022, +0.08352], mean +0.07687)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.10530384898163359,
+        "ci90": [
+          0.09924741454035257,
+          0.1113602834229146
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M4_H30_eta1.0+lawa",
+      "family": "eta_sweep",
+      "M": 4,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.511395117888848,
+      "eta": 1.0,
+      "gap_vs_dp": 0.07173266656611811,
+      "ci90": [
+        0.06472690658776367,
+        0.07873842654447255
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.06473, +0.07874], mean +0.07173)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.10003376577881988,
+        "ci90": [
+          0.09404280833711325,
+          0.10602472322052651
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M8_H30_eta0.2",
+      "family": "eta_sweep",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.6524685497085254,
+      "eta": 0.2,
+      "gap_vs_dp": 0.17177663669649182,
+      "ci90": [
+        0.16306979089024817,
+        0.18048348250273547
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1631, +0.1805], mean +0.1718)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.20272659531711426,
+        "ci90": [
+          0.1911885394439624,
+          0.2142646511902661
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M8_H30_eta0.2+lawa",
+      "family": "eta_sweep",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.6574322779973347,
+      "eta": 0.2,
+      "gap_vs_dp": 0.1752971396932699,
+      "ci90": [
+        0.16624164562738689,
+        0.18435263375915292
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1662, +0.1844], mean +0.1753)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.2063404690704654,
+        "ci90": [
+          0.19434270385784072,
+          0.2183382342830901
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M8_H30_eta0.4",
+      "family": "eta_sweep",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.572110217064619,
+      "eta": 0.4,
+      "gap_vs_dp": 0.11478165215894369,
+      "ci90": [
+        0.11147642799859235,
+        0.11808687631929503
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1115, +0.1181], mean +0.1148)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.14422499037246253,
+        "ci90": [
+          0.13731545729103353,
+          0.15113452345389153
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M8_H30_eta0.4+lawa",
+      "family": "eta_sweep",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5731672681868076,
+      "eta": 0.4,
+      "gap_vs_dp": 0.11553134804772842,
+      "ci90": [
+        0.112216734171545,
+        0.11884596192391185
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1122, +0.1188], mean +0.1155)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.14499429957226884,
+        "ci90": [
+          0.13821039707659483,
+          0.15177820206794285
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M8_H30_eta0.6",
+      "family": "eta_sweep",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5463966367145379,
+      "eta": 0.6,
+      "gap_vs_dp": 0.09655979768338711,
+      "ci90": [
+        0.08726607209580509,
+        0.10585352327096914
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08727, +0.1059], mean +0.09656)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.1255267826636607,
+        "ci90": [
+          0.11235409683656852,
+          0.1386994684907529
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M8_H30_eta0.6+lawa",
+      "family": "eta_sweep",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5446709655225277,
+      "eta": 0.6,
+      "gap_vs_dp": 0.09533614441020062,
+      "ci90": [
+        0.08590591375021478,
+        0.10476637507018646
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08591, +0.1048], mean +0.09534)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.12427104420125683,
+        "ci90": [
+          0.11091684791106875,
+          0.13762524049144492
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M8_H30_eta0.8",
+      "family": "eta_sweep",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5425900146365166,
+      "eta": 0.8,
+      "gap_vs_dp": 0.0938727714332142,
+      "ci90": [
+        0.08098266786945099,
+        0.1067628749969774
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08098, +0.1068], mean +0.09387)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.12276587461064503,
+        "ci90": [
+          0.1076263004324329,
+          0.13790544878885716
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M8_H30_eta0.8+lawa",
+      "family": "eta_sweep",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5388782719771068,
+      "eta": 0.8,
+      "gap_vs_dp": 0.09124036716888467,
+      "ci90": [
+        0.07853655910331273,
+        0.10394417523445662
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07854, +0.1039], mean +0.09124)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.12006354619493644,
+        "ci90": [
+          0.10522642265808428,
+          0.1349006697317886
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M8_H30_eta1.0",
+      "family": "eta_sweep",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5403155907988548,
+      "eta": 1.0,
+      "gap_vs_dp": 0.09226111785272029,
+      "ci90": [
+        0.07741843355505698,
+        0.10710380215038359
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07742, +0.1071], mean +0.09226)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.1211051654981366,
+        "ci90": [
+          0.10615381874262235,
+          0.13605651225365087
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M8_H30_eta1.0+lawa",
+      "family": "eta_sweep",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5353814996778965,
+      "eta": 1.0,
+      "gap_vs_dp": 0.0887629531591208,
+      "ci90": [
+        0.07349256041212796,
+        0.10403334590611366
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07349, +0.104], mean +0.08876)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.1175142095876655,
+        "ci90": [
+          0.10224388807302219,
+          0.1327845311023088
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M16_H30_eta0.2",
+      "family": "eta_sweep",
+      "M": 16,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.7707821801304817,
+      "eta": 0.2,
+      "gap_vs_dp": 0.25570739347782645,
+      "ci90": [
+        0.23196096505818722,
+        0.2794538218974657
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.232, +0.2795], mean +0.2557)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.28888175884138234,
+        "ci90": [
+          0.26169689486108794,
+          0.31606662282167675
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M16_H30_eta0.2+lawa",
+      "family": "eta_sweep",
+      "M": 16,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.7777285029490788,
+      "eta": 0.2,
+      "gap_vs_dp": 0.2606335445415872,
+      "ci90": [
+        0.23655577175262688,
+        0.28471131733054755
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.2366, +0.2847], mean +0.2606)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.2939384885246778,
+        "ci90": [
+          0.26633923628883055,
+          0.32153774076052505
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M16_H30_eta0.6",
+      "family": "eta_sweep",
+      "M": 16,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.6076052611072857,
+      "eta": 0.6,
+      "gap_vs_dp": 0.1399603745608555,
+      "ci90": [
+        0.13277739549258258,
+        0.14714335362912842
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1328, +0.1471], mean +0.14)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.1700701595044475,
+        "ci90": [
+          0.15974480711028663,
+          0.1803955118986084
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M16_H30_eta0.6+lawa",
+      "family": "eta_sweep",
+      "M": 16,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.609022890528043,
+      "eta": 0.6,
+      "gap_vs_dp": 0.14096502913668033,
+      "ci90": [
+        0.13402418415646833,
+        0.14790587411689232
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.134, +0.1479], mean +0.141)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.1711012414829334,
+        "ci90": [
+          0.16100113870640395,
+          0.18120134425946285
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M16_H30_eta1.0",
+      "family": "eta_sweep",
+      "M": 16,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5760376925269763,
+      "eta": 1.0,
+      "gap_vs_dp": 0.1175835051495256,
+      "ci90": [
+        0.10698659421064616,
+        0.12818041608840505
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.107, +0.1282], mean +0.1176)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.14709864018482458,
+        "ci90": [
+          0.13556685841713978,
+          0.15863042195250937
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M16_H30_eta1.0+lawa",
+      "family": "eta_sweep",
+      "M": 16,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5742500300208728,
+      "eta": 1.0,
+      "gap_vs_dp": 0.11631593249960558,
+      "ci90": [
+        0.1056624768220396,
+        0.12696938817717157
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1057, +0.127], mean +0.1163)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.1457974804436408,
+        "ci90": [
+          0.13425952776493102,
+          0.15733543312235057
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M32_H30_eta0.2",
+      "family": "eta_sweep",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.9065752774477005,
+      "eta": 0.2,
+      "gap_vs_dp": 0.35199110022208496,
+      "ci90": [
+        0.32277221295593045,
+        0.3812099874882395
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.3228, +0.3812], mean +0.352)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.3877219603760433,
+        "ci90": [
+          0.35278477194150487,
+          0.4226591488105817
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M32_H30_eta0.2+lawa",
+      "family": "eta_sweep",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.9141186624765396,
+      "eta": 0.2,
+      "gap_vs_dp": 0.3573400676382746,
+      "ci90": [
+        0.328224781548425,
+        0.3864553537281242
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.3282, +0.3865], mean +0.3573)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.39321206033116834,
+        "ci90": [
+          0.35836966087891403,
+          0.42805445978342266
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M32_H30_eta0.4",
+      "family": "eta_sweep",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.7583454909423988,
+      "eta": 0.4,
+      "gap_vs_dp": 0.24688464984708372,
+      "ci90": [
+        0.2201167009527151,
+        0.27365259874145237
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.2201, +0.2737], mean +0.2469)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.27983532142298456,
+        "ci90": [
+          0.24818620837007332,
+          0.3114844344758958
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M32_H30_eta0.4+lawa",
+      "family": "eta_sweep",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.7642710904280345,
+      "eta": 0.4,
+      "gap_vs_dp": 0.25108640142027056,
+      "ci90": [
+        0.22431210153782524,
+        0.27786070130271584
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.2243, +0.2779], mean +0.2511)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.2841480755419053,
+        "ci90": [
+          0.25247314247094615,
+          0.31582300861286444
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M32_H30_eta0.6",
+      "family": "eta_sweep",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.6795845851302147,
+      "eta": 0.6,
+      "gap_vs_dp": 0.19103025681348754,
+      "ci90": [
+        0.17121668252004024,
+        0.21084383110693483
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1712, +0.2108], mean +0.191)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.22248570383995867,
+        "ci90": [
+          0.2016006520097878,
+          0.24337075567012953
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M32_H30_eta0.6+lawa",
+      "family": "eta_sweep",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.6837584724028904,
+      "eta": 0.6,
+      "gap_vs_dp": 0.19398992279752325,
+      "ci90": [
+        0.1741642640580916,
+        0.2138155815369549
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1742, +0.2138], mean +0.194)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.22552347104619594,
+        "ci90": [
+          0.20463986498437825,
+          0.24640707710801363
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M32_H30_eta0.8",
+      "family": "eta_sweep",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.6494140724341075,
+      "eta": 0.8,
+      "gap_vs_dp": 0.1696137642729413,
+      "ci90": [
+        0.15717564316663227,
+        0.18205188537925035
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1572, +0.1821], mean +0.1696)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.200498957685509,
+        "ci90": [
+          0.18877784974218662,
+          0.21222006562883136
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M32_H30_eta0.8+lawa",
+      "family": "eta_sweep",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.651992205530405,
+      "eta": 0.8,
+      "gap_vs_dp": 0.17144183045903838,
+      "ci90": [
+        0.15842977974473146,
+        0.1844538811733453
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1584, +0.1845], mean +0.1714)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.20237441022920896,
+        "ci90": [
+          0.1903928457811651,
+          0.21435597467725281
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M32_H30_eta1.0",
+      "family": "eta_sweep",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.6305071997145812,
+      "eta": 1.0,
+      "gap_vs_dp": 0.1562262115245839,
+      "ci90": [
+        0.1384871290289897,
+        0.17396529402017813
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1385, +0.174], mean +0.1562)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.18676655485041285,
+        "ci90": [
+          0.16690168291735677,
+          0.20663142678346894
+        ]
+      }
+    },
+    {
+      "cell": "A_flat_M32_H30_eta1.0+lawa",
+      "family": "eta_sweep",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.6310596627493699,
+      "eta": 1.0,
+      "gap_vs_dp": 0.1566178174203344,
+      "ci90": [
+        0.13893366316986439,
+        0.1743019716708044
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1389, +0.1743], mean +0.1566)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.18716829848884212,
+        "ci90": [
+          0.16740725861717107,
+          0.20692933836051317
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x4_Hr1_Hg30",
+      "family": "hierarchy",
+      "M": 8,
+      "R": 2,
+      "H_r": 1,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5150061833361785,
+      "eta": 0.4,
+      "gap_vs_dp": 0.07427904518849351,
+      "ci90": [
+        0.07305896641866805,
+        0.07549912395831898
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07306, +0.0755], mean +0.07428)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.1026503733046941,
+        "ci90": [
+          0.09892797657904202,
+          0.10637277003034619
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x4_Hr1_Hg30+lawa",
+      "family": "hierarchy",
+      "M": 8,
+      "R": 2,
+      "H_r": 1,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.512565303593874,
+      "eta": 0.4,
+      "gap_vs_dp": 0.07254779792585399,
+      "ci90": [
+        0.07113384546282141,
+        0.07396175038888657
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07113, +0.07396], mean +0.07255)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.10087328805169737,
+        "ci90": [
+          0.09723172477237,
+          0.10451485133102474
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x4_Hr5_Hg30",
+      "family": "hierarchy",
+      "M": 8,
+      "R": 2,
+      "H_r": 5,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5331045724451542,
+      "eta": 0.4,
+      "gap_vs_dp": 0.08711636891374112,
+      "ci90": [
+        0.08623030657635437,
+        0.08800243125112787
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08623, +0.088], mean +0.08712)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.1158269215874923,
+        "ci90": [
+          0.11191768132931472,
+          0.11973616184566989
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x4_Hr5_Hg30+lawa",
+      "family": "hierarchy",
+      "M": 8,
+      "R": 2,
+      "H_r": 5,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.531833993891875,
+      "eta": 0.4,
+      "gap_vs_dp": 0.08621580589856294,
+      "ci90": [
+        0.08480998468654777,
+        0.08762162711057811
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08481, +0.08762], mean +0.08622)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.11490213860639131,
+        "ci90": [
+          0.1113859772163538,
+          0.11841829999642883
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x4_Hr10_Hg30",
+      "family": "hierarchy",
+      "M": 8,
+      "R": 2,
+      "H_r": 10,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5451938721040885,
+      "eta": 0.4,
+      "gap_vs_dp": 0.09569922983081351,
+      "ci90": [
+        0.09060842296885695,
+        0.10079003669277008
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.09061, +0.1008], mean +0.0957)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.12463641302495367,
+        "ci90": [
+          0.11818814365477155,
+          0.1310846823951358
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x4_Hr10_Hg30+lawa",
+      "family": "hierarchy",
+      "M": 8,
+      "R": 2,
+      "H_r": 10,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.544613678008318,
+      "eta": 0.4,
+      "gap_vs_dp": 0.09528710140578274,
+      "ci90": [
+        0.09025597543083855,
+        0.10031822738072693
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.09026, +0.1003], mean +0.09529)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.12421286848064615,
+        "ci90": [
+          0.11822779573083672,
+          0.13019794123045558
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R4x4_Hr1_Hg30",
+      "family": "hierarchy",
+      "M": 16,
+      "R": 4,
+      "H_r": 1,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.545669083793958,
+      "eta": 0.6,
+      "gap_vs_dp": 0.09603224043804964,
+      "ci90": [
+        0.09285464834141692,
+        0.09920983253468237
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.09285, +0.09921], mean +0.09603)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.12498012426296508,
+        "ci90": [
+          0.11840277989220838,
+          0.13155746863372178
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R4x4_Hr1_Hg30+lawa",
+      "family": "hierarchy",
+      "M": 16,
+      "R": 4,
+      "H_r": 1,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5438518611093361,
+      "eta": 0.6,
+      "gap_vs_dp": 0.09474405623703226,
+      "ci90": [
+        0.09139046883149689,
+        0.09809764364256764
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.09139, +0.0981], mean +0.09474)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.1236580375858275,
+        "ci90": [
+          0.11690867976362954,
+          0.13040739540802546
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R4x4_Hr5_Hg30",
+      "family": "hierarchy",
+      "M": 16,
+      "R": 4,
+      "H_r": 5,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.564717425654332,
+      "eta": 0.6,
+      "gap_vs_dp": 0.10954435369999067,
+      "ci90": [
+        0.10244290960866632,
+        0.11664579779131502
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1024, +0.1166], mean +0.1095)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.13884449589148948,
+        "ci90": [
+          0.13239664615911947,
+          0.14529234562385948
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R4x4_Hr5_Hg30+lawa",
+      "family": "hierarchy",
+      "M": 16,
+      "R": 4,
+      "H_r": 5,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.563604603211085,
+      "eta": 0.6,
+      "gap_vs_dp": 0.10875534512323586,
+      "ci90": [
+        0.10173251076677563,
+        0.11577817947969608
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1017, +0.1158], mean +0.1088)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.13803480261075307,
+        "ci90": [
+          0.1315625592461142,
+          0.14450704597539193
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R4x4_Hr10_Hg30",
+      "family": "hierarchy",
+      "M": 16,
+      "R": 4,
+      "H_r": 10,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5791894135375817,
+      "eta": 0.6,
+      "gap_vs_dp": 0.11980593812062622,
+      "ci90": [
+        0.11295965766418849,
+        0.12665221857706394
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.113, +0.1267], mean +0.1198)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.14937723264100963,
+        "ci90": [
+          0.14310848810329194,
+          0.15564597717872733
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R4x4_Hr10_Hg30+lawa",
+      "family": "hierarchy",
+      "M": 16,
+      "R": 4,
+      "H_r": 10,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.579082655409972,
+      "eta": 0.6,
+      "gap_vs_dp": 0.11972944825093569,
+      "ci90": [
+        0.11248473496586471,
+        0.12697416153600669
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1125, +0.127], mean +0.1197)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.14929784417628716,
+        "ci90": [
+          0.1432493062599307,
+          0.15534638209264362
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x8_Hr1_Hg30",
+      "family": "hierarchy",
+      "M": 16,
+      "R": 2,
+      "H_r": 1,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.540209813664357,
+      "eta": 0.4,
+      "gap_vs_dp": 0.09215861452308034,
+      "ci90": [
+        0.08939126264946341,
+        0.09492596639669727
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08939, +0.09493], mean +0.09216)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.12100508550618516,
+        "ci90": [
+          0.11400296374516154,
+          0.12800720726720877
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x8_Hr1_Hg30+lawa",
+      "family": "hierarchy",
+      "M": 16,
+      "R": 2,
+      "H_r": 1,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5390880964696407,
+      "eta": 0.4,
+      "gap_vs_dp": 0.09136326468045253,
+      "ci90": [
+        0.08867790752046123,
+        0.09404862184044382
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08868, +0.09405], mean +0.09136)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.12018858864744704,
+        "ci90": [
+          0.11332128198296113,
+          0.12705589531193295
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x8_Hr5_Hg30",
+      "family": "hierarchy",
+      "M": 16,
+      "R": 2,
+      "H_r": 5,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5769819368918736,
+      "eta": 0.4,
+      "gap_vs_dp": 0.11824318409595258,
+      "ci90": [
+        0.1098430038132357,
+        0.12664336437866947
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1098, +0.1266], mean +0.1182)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.1477723677705043,
+        "ci90": [
+          0.14029041681852794,
+          0.15525431872248063
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x8_Hr5_Hg30+lawa",
+      "family": "hierarchy",
+      "M": 16,
+      "R": 2,
+      "H_r": 5,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5776010913153489,
+      "eta": 0.4,
+      "gap_vs_dp": 0.11868179566627506,
+      "ci90": [
+        0.11021865289621591,
+        0.1271449384363342
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1102, +0.1271], mean +0.1187)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.14822227516284578,
+        "ci90": [
+          0.14085514072102667,
+          0.15558940960466489
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x8_Hr10_Hg30",
+      "family": "hierarchy",
+      "M": 16,
+      "R": 2,
+      "H_r": 10,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.6047073317070801,
+      "eta": 0.4,
+      "gap_vs_dp": 0.13792039355792574,
+      "ci90": [
+        0.12234034047249354,
+        0.15350044664335794
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1223, +0.1535], mean +0.1379)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.16796851053406267,
+        "ci90": [
+          0.1528167001769042,
+          0.18312032089122113
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x8_Hr10_Hg30+lawa",
+      "family": "hierarchy",
+      "M": 16,
+      "R": 2,
+      "H_r": 10,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.6064260117709637,
+      "eta": 0.4,
+      "gap_vs_dp": 0.13913987213282417,
+      "ci90": [
+        0.1230104861392326,
+        0.15526925812641573
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.123, +0.1553], mean +0.1391)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.1692197822593233,
+        "ci90": [
+          0.15360739551294258,
+          0.184832169005704
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x4_Hr5_Hg10",
+      "family": "hierarchy_Hg",
+      "M": 8,
+      "R": 2,
+      "H_r": 5,
+      "H_g": 10,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.505682546645403,
+      "eta": 0.4,
+      "gap_vs_dp": 0.06768621037081486,
+      "ci90": [
+        0.06115716662134253,
+        0.07421525412028719
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.06116, +0.07422], mean +0.06769)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.09588655208123857,
+        "ci90": [
+          0.08659227441179226,
+          0.10518082975068488
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x4_Hr5_Hg10+lawa",
+      "family": "hierarchy_Hg",
+      "M": 8,
+      "R": 2,
+      "H_r": 5,
+      "H_g": 10,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4973352688054244,
+      "eta": 0.4,
+      "gap_vs_dp": 0.06176700585908849,
+      "ci90": [
+        0.055326716627728985,
+        0.068207295090448
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.05533, +0.06821], mean +0.06177)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.0898109472765235,
+        "ci90": [
+          0.08063692504298864,
+          0.09898496951005836
+        ]
+      }
+    },
+    {
+      "cell": "B_flat_M8_H10",
+      "family": "H_g",
+      "M": 8,
+      "R": null,
+      "H_r": 10,
+      "H_g": 10,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5451938410600026,
+      "eta": 1.0,
+      "gap_vs_dp": 0.09572441503158835,
+      "ci90": [
+        0.07198540928957083,
+        0.11946342077360587
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07199, +0.1195], mean +0.09572)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.12464924256860499,
+        "ci90": [
+          0.10270200908328919,
+          0.1465964760539208
+        ]
+      }
+    },
+    {
+      "cell": "B_flat_M8_H10+lawa",
+      "family": "H_g",
+      "M": 8,
+      "R": null,
+      "H_r": 10,
+      "H_g": 10,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.533164261529843,
+      "eta": 1.0,
+      "gap_vs_dp": 0.08719216470110326,
+      "ci90": [
+        0.063510307308896,
+        0.11087402209331053
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.06351, +0.1109], mean +0.08719)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.11589087308718478,
+        "ci90": [
+          0.09416157378361488,
+          0.1376201723907547
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x4_Hr5_Hg100",
+      "family": "hierarchy_Hg",
+      "M": 8,
+      "R": 2,
+      "H_r": 5,
+      "H_g": 100,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5480500534176826,
+      "eta": 0.4,
+      "gap_vs_dp": 0.09770522557310606,
+      "ci90": [
+        0.08748889096379309,
+        0.10792156018241902
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08749, +0.1079], mean +0.09771)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.12670436022061943,
+        "ci90": [
+          0.11220016357604932,
+          0.14120855686518952
+        ]
+      }
+    },
+    {
+      "cell": "B_hier_R2x4_Hr5_Hg100+lawa",
+      "family": "hierarchy_Hg",
+      "M": 8,
+      "R": 2,
+      "H_r": 5,
+      "H_g": 100,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5510501650472481,
+      "eta": 0.4,
+      "gap_vs_dp": 0.09983240919545767,
+      "ci90": [
+        0.08945659294014094,
+        0.11020822545077441
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08946, +0.1102], mean +0.09983)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.12888784127389252,
+        "ci90": [
+          0.11421837032347526,
+          0.14355731222430979
+        ]
+      }
+    },
+    {
+      "cell": "B_flat_M8_H100",
+      "family": "H_g",
+      "M": 8,
+      "R": null,
+      "H_r": 100,
+      "H_g": 100,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.6160539860526721,
+      "eta": 1.0,
+      "gap_vs_dp": 0.14595836666712222,
+      "ci90": [
+        0.13573609298731534,
+        0.1561806403469291
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1357, +0.1562], mean +0.146)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.1762281984822217,
+        "ci90": [
+          0.16283919379374145,
+          0.18961720317070196
+        ]
+      }
+    },
+    {
+      "cell": "B_flat_M8_H100+lawa",
+      "family": "H_g",
+      "M": 8,
+      "R": null,
+      "H_r": 100,
+      "H_g": 100,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.6179093482593696,
+      "eta": 1.0,
+      "gap_vs_dp": 0.14727426540201968,
+      "ci90": [
+        0.13697453602500542,
+        0.15757399477903394
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.137, +0.1576], mean +0.1473)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.17757875572427304,
+        "ci90": [
+          0.16415912998518867,
+          0.1909983814633574
+        ]
+      }
+    },
+    {
+      "cell": "B_sparseloco_M2_H30",
+      "family": "sparseloco",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "sparseloco",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.573480598628521,
+      "eta": 1.0,
+      "gap_vs_dp": 0.11577754353026427,
+      "ci90": [
+        0.09312698922826973,
+        0.13842809783225882
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.09313, +0.1384], mean +0.1158)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.14523138909996486,
+        "ci90": [
+          0.12470687985890452,
+          0.1657558983410252
+        ]
+      }
+    },
+    {
+      "cell": "B_sparseloco_M2_H30+lawa",
+      "family": "sparseloco",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "sparseloco",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.5779139200846355,
+      "eta": 1.0,
+      "gap_vs_dp": 0.11892159340171544,
+      "ci90": [
+        0.09591189823581653,
+        0.14193128856761436
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.09591, +0.1419], mean +0.1189)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.14845821279856955,
+        "ci90": [
+          0.1275857936651593,
+          0.1693306319319798
+        ]
+      }
+    },
+    {
+      "cell": "B_muon_M2_H30",
+      "family": "muon",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "muon",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.3993186404307683,
+      "eta": 0.4,
+      "gap_vs_dp": -0.007730924639351512,
+      "ci90": [
+        -0.01620973361062173,
+        0.0007478843319187059
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [-0.01621, +0.0007479], mean -0.007731)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.01847784926455449,
+        "ci90": [
+          0.007754736727375002,
+          0.02920096180173398
+        ]
+      }
+    },
+    {
+      "cell": "B_muon_M2_H30+lawa",
+      "family": "muon",
+      "M": 2,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "muon",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.3919861167669296,
+      "eta": 0.4,
+      "gap_vs_dp": -0.01292997661916129,
+      "ci90": [
+        -0.02156199610926842,
+        -0.004297957129054156
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [-0.02156, -0.004298], mean -0.01293)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.013141415503653997,
+        "ci90": [
+          0.002333119011094174,
+          0.02394971199621382
+        ]
+      }
+    },
+    {
+      "cell": "B_sparseloco_M8_H30",
+      "family": "sparseloco",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "sparseloco",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.7662687972187996,
+      "eta": 1.0,
+      "gap_vs_dp": 0.2524897222689671,
+      "ci90": [
+        0.22797381620140478,
+        0.2770056283365294
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.228, +0.277], mean +0.2525)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.2855548263101099,
+        "ci90": [
+          0.2629915028272054,
+          0.30811814979301444
+        ]
+      }
+    },
+    {
+      "cell": "B_sparseloco_M8_H30+lawa",
+      "family": "sparseloco",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "sparseloco",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.7749622588356335,
+      "eta": 1.0,
+      "gap_vs_dp": 0.25865372845951223,
+      "ci90": [
+        0.23436480700026116,
+        0.28294264991876333
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.2344, +0.2829], mean +0.2587)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.2918817044865654,
+        "ci90": [
+          0.26956902065221255,
+          0.3141943883209183
+        ]
+      }
+    },
+    {
+      "cell": "B_muon_M8_H30",
+      "family": "muon",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "muon",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4165502116084099,
+      "eta": 1.0,
+      "gap_vs_dp": 0.004493212281935516,
+      "ci90": [
+        -0.006720921326020381,
+        0.01570734588989141
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [-0.006721, +0.01571], mean +0.004493)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.03102139778196006,
+        "ci90": [
+          0.01910508669801991,
+          0.042937708865900204
+        ]
+      }
+    },
+    {
+      "cell": "B_muon_M8_H30+lawa",
+      "family": "muon",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "muon",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.404915701597929,
+      "eta": 1.0,
+      "gap_vs_dp": -0.00375761243106381,
+      "ci90": [
+        -0.014454064131966088,
+        0.006938839269838468
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [-0.01445, +0.006939], mean -0.003758)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.022553150899333015,
+        "ci90": [
+          0.01097291775159719,
+          0.03413338404706884
+        ]
+      }
+    },
+    {
+      "cell": "B_sparseloco_M32_H30",
+      "family": "sparseloco",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "sparseloco",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 2.082817075153192,
+      "eta": 1.0,
+      "gap_vs_dp": 0.4769087691243478,
+      "ci90": [
+        0.4735664977075734,
+        0.4802510405411222
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.4736, +0.4803], mean +0.4769)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.515911374560308,
+        "ci90": [
+          0.5129527502377016,
+          0.5188699988829144
+        ]
+      }
+    },
+    {
+      "cell": "B_sparseloco_M32_H30+lawa",
+      "family": "sparseloco",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "sparseloco",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 2.091829553246498,
+      "eta": 1.0,
+      "gap_vs_dp": 0.4832981865071418,
+      "ci90": [
+        0.47957782112493486,
+        0.4870185518893487
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.4796, +0.487], mean +0.4833)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.5224693200043933,
+        "ci90": [
+          0.519490303634221,
+          0.5254483363745656
+        ]
+      }
+    },
+    {
+      "cell": "B_muon_M32_H30",
+      "family": "muon",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "muon",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4548861036698024,
+      "eta": 1.0,
+      "gap_vs_dp": 0.031681508086841254,
+      "ci90": [
+        0.018573503299594667,
+        0.04478951287408784
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.01857, +0.04479], mean +0.03168)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.05892779574456422,
+        "ci90": [
+          0.04508408993717657,
+          0.07277150155195186
+        ]
+      }
+    },
+    {
+      "cell": "B_muon_M32_H30+lawa",
+      "family": "muon",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "muon",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.4492206101616223,
+      "eta": 1.0,
+      "gap_vs_dp": 0.02766534987872003,
+      "ci90": [
+        0.01403796905703173,
+        0.04129273070040833
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.01404, +0.04129], mean +0.02767)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.05480553494641626,
+        "ci90": [
+          0.04045867888495334,
+          0.06915239100787918
+        ]
+      }
+    },
+    {
+      "cell": "B_stream_M8_P3_tau0",
+      "family": "streaming",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 3,
+      "tau": 0,
+      "anneal": false,
+      "mean_loss": 1.596593838185072,
+      "eta": 1.0,
+      "gap_vs_dp": 0.13215328762416376,
+      "ci90": [
+        0.10515343822557655,
+        0.15915313702275097
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1052, +0.1592], mean +0.1322)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.16203134981382514,
+        "ci90": [
+          0.13824652978413832,
+          0.18581616984351196
+        ]
+      }
+    },
+    {
+      "cell": "B_stream_M8_P3_tau1",
+      "family": "streaming",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 3,
+      "tau": 1,
+      "anneal": false,
+      "mean_loss": 1.5217593051493168,
+      "eta": 1.0,
+      "gap_vs_dp": 0.07906461636187467,
+      "ci90": [
+        0.07565438195089555,
+        0.0824748507728538
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07565, +0.08247], mean +0.07906)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.10756488005882403,
+        "ci90": [
+          0.10058649216997372,
+          0.11454326794767435
+        ]
+      }
+    },
+    {
+      "cell": "B_anneal1_M8_H30",
+      "family": "anneal",
+      "M": 8,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": true,
+      "mean_loss": 1.5408069665233295,
+      "eta": 1.0,
+      "gap_vs_dp": 0.092611003175045,
+      "ci90": [
+        0.07655268397505552,
+        0.10866932237503449
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07655, +0.1087], mean +0.09261)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.12146305258721897,
+        "ci90": [
+          0.10561571837193068,
+          0.13731038680250726
+        ]
+      }
+    },
+    {
+      "cell": "B_anneal1_M32_H30",
+      "family": "anneal",
+      "M": 32,
+      "R": null,
+      "H_r": 30,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": true,
+      "mean_loss": 1.6341087246934574,
+      "eta": 1.0,
+      "gap_vs_dp": 0.1587802236430836,
+      "ci90": [
+        0.14092685430056906,
+        0.17663359298559816
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1409, +0.1766], mean +0.1588)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.1893871346529068,
+        "ci90": [
+          0.16963837630780756,
+          0.20913589299800603
+        ]
+      }
+    },
+    {
+      "cell": "B_anneal1_hier_R2x8_Hr5_Hg30",
+      "family": "anneal",
+      "M": 16,
+      "R": 2,
+      "H_r": 5,
+      "H_g": 30,
+      "outer": "nesterov",
+      "inner": "adamw",
+      "fragments": 1,
+      "tau": 0,
+      "anneal": true,
+      "mean_loss": 1.5761281127731006,
+      "eta": 0.4,
+      "gap_vs_dp": 0.11763618435182094,
+      "ci90": [
+        0.10943162918188441,
+        0.12584073952175745
+      ],
+      "tost": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1094, +0.1258], mean +0.1176)",
+      "gap_vs_best_dp": {
+        "inner_lr": 0.001,
+        "mean": 0.14714887057027567,
+        "ci90": [
+          0.14022066820591722,
+          0.15407707293463413
+        ]
+      }
+    }
+  ],
+  "gap": {
+    "A_flat_M1_H30_eta0.2": 0.03150898065781612,
+    "A_flat_M1_H30_eta0.2+lawa": 0.029417872865052357,
+    "A_flat_M1_H30_eta0.6": 0.031366302604468134,
+    "A_flat_M1_H30_eta0.6+lawa": 0.023802035287702233,
+    "A_flat_M1_H30_eta1.0": 0.06274707786187217,
+    "A_flat_M1_H30_eta1.0+lawa": 0.053910826689702075,
+    "A_flat_M2_H30_eta0.2": 0.058676138381546054,
+    "A_flat_M2_H30_eta0.2+lawa": 0.05854987809953077,
+    "A_flat_M2_H30_eta0.4": 0.043263677003053724,
+    "A_flat_M2_H30_eta0.4+lawa": 0.03988991736928932,
+    "A_flat_M2_H30_eta0.6": 0.04493948659019617,
+    "A_flat_M2_H30_eta0.6+lawa": 0.03965695581732145,
+    "A_flat_M2_H30_eta0.8": 0.05734225319595965,
+    "A_flat_M2_H30_eta0.8+lawa": 0.0505316609325309,
+    "A_flat_M2_H30_eta1.0": 0.06731414061990844,
+    "A_flat_M2_H30_eta1.0+lawa": 0.06016061574161141,
+    "A_flat_M4_H30_eta0.2": 0.10557861632118541,
+    "A_flat_M4_H30_eta0.2+lawa": 0.10713034465485427,
+    "A_flat_M4_H30_eta0.6": 0.06693434789520437,
+    "A_flat_M4_H30_eta0.6+lawa": 0.06373188071660045,
+    "A_flat_M4_H30_eta1.0": 0.07686654109646465,
+    "A_flat_M4_H30_eta1.0+lawa": 0.07173266656611811,
+    "A_flat_M8_H30_eta0.2": 0.17177663669649182,
+    "A_flat_M8_H30_eta0.2+lawa": 0.1752971396932699,
+    "A_flat_M8_H30_eta0.4": 0.11478165215894369,
+    "A_flat_M8_H30_eta0.4+lawa": 0.11553134804772842,
+    "A_flat_M8_H30_eta0.6": 0.09655979768338711,
+    "A_flat_M8_H30_eta0.6+lawa": 0.09533614441020062,
+    "A_flat_M8_H30_eta0.8": 0.0938727714332142,
+    "A_flat_M8_H30_eta0.8+lawa": 0.09124036716888467,
+    "A_flat_M8_H30_eta1.0": 0.09226111785272029,
+    "A_flat_M8_H30_eta1.0+lawa": 0.0887629531591208,
+    "A_flat_M16_H30_eta0.2": 0.25570739347782645,
+    "A_flat_M16_H30_eta0.2+lawa": 0.2606335445415872,
+    "A_flat_M16_H30_eta0.6": 0.1399603745608555,
+    "A_flat_M16_H30_eta0.6+lawa": 0.14096502913668033,
+    "A_flat_M16_H30_eta1.0": 0.1175835051495256,
+    "A_flat_M16_H30_eta1.0+lawa": 0.11631593249960558,
+    "A_flat_M32_H30_eta0.2": 0.35199110022208496,
+    "A_flat_M32_H30_eta0.2+lawa": 0.3573400676382746,
+    "A_flat_M32_H30_eta0.4": 0.24688464984708372,
+    "A_flat_M32_H30_eta0.4+lawa": 0.25108640142027056,
+    "A_flat_M32_H30_eta0.6": 0.19103025681348754,
+    "A_flat_M32_H30_eta0.6+lawa": 0.19398992279752325,
+    "A_flat_M32_H30_eta0.8": 0.1696137642729413,
+    "A_flat_M32_H30_eta0.8+lawa": 0.17144183045903838,
+    "A_flat_M32_H30_eta1.0": 0.1562262115245839,
+    "A_flat_M32_H30_eta1.0+lawa": 0.1566178174203344,
+    "B_hier_R2x4_Hr1_Hg30": 0.07427904518849351,
+    "B_hier_R2x4_Hr1_Hg30+lawa": 0.07254779792585399,
+    "B_hier_R2x4_Hr5_Hg30": 0.08711636891374112,
+    "B_hier_R2x4_Hr5_Hg30+lawa": 0.08621580589856294,
+    "B_hier_R2x4_Hr10_Hg30": 0.09569922983081351,
+    "B_hier_R2x4_Hr10_Hg30+lawa": 0.09528710140578274,
+    "B_hier_R4x4_Hr1_Hg30": 0.09603224043804964,
+    "B_hier_R4x4_Hr1_Hg30+lawa": 0.09474405623703226,
+    "B_hier_R4x4_Hr5_Hg30": 0.10954435369999067,
+    "B_hier_R4x4_Hr5_Hg30+lawa": 0.10875534512323586,
+    "B_hier_R4x4_Hr10_Hg30": 0.11980593812062622,
+    "B_hier_R4x4_Hr10_Hg30+lawa": 0.11972944825093569,
+    "B_hier_R2x8_Hr1_Hg30": 0.09215861452308034,
+    "B_hier_R2x8_Hr1_Hg30+lawa": 0.09136326468045253,
+    "B_hier_R2x8_Hr5_Hg30": 0.11824318409595258,
+    "B_hier_R2x8_Hr5_Hg30+lawa": 0.11868179566627506,
+    "B_hier_R2x8_Hr10_Hg30": 0.13792039355792574,
+    "B_hier_R2x8_Hr10_Hg30+lawa": 0.13913987213282417,
+    "B_hier_R2x4_Hr5_Hg10": 0.06768621037081486,
+    "B_hier_R2x4_Hr5_Hg10+lawa": 0.06176700585908849,
+    "B_flat_M8_H10": 0.09572441503158835,
+    "B_flat_M8_H10+lawa": 0.08719216470110326,
+    "B_hier_R2x4_Hr5_Hg100": 0.09770522557310606,
+    "B_hier_R2x4_Hr5_Hg100+lawa": 0.09983240919545767,
+    "B_flat_M8_H100": 0.14595836666712222,
+    "B_flat_M8_H100+lawa": 0.14727426540201968,
+    "B_sparseloco_M2_H30": 0.11577754353026427,
+    "B_sparseloco_M2_H30+lawa": 0.11892159340171544,
+    "B_muon_M2_H30": -0.007730924639351512,
+    "B_muon_M2_H30+lawa": -0.01292997661916129,
+    "B_sparseloco_M8_H30": 0.2524897222689671,
+    "B_sparseloco_M8_H30+lawa": 0.25865372845951223,
+    "B_muon_M8_H30": 0.004493212281935516,
+    "B_muon_M8_H30+lawa": -0.00375761243106381,
+    "B_sparseloco_M32_H30": 0.4769087691243478,
+    "B_sparseloco_M32_H30+lawa": 0.4832981865071418,
+    "B_muon_M32_H30": 0.031681508086841254,
+    "B_muon_M32_H30+lawa": 0.02766534987872003,
+    "B_stream_M8_P3_tau0": 0.13215328762416376,
+    "B_stream_M8_P3_tau1": 0.07906461636187467,
+    "B_anneal1_M8_H30": 0.092611003175045,
+    "B_anneal1_M32_H30": 0.1587802236430836,
+    "B_anneal1_hier_R2x8_Hr5_Hg30": 0.11763618435182094
+  },
+  "ci90": {
+    "A_flat_M1_H30_eta0.2": [
+      0.027180620892159564,
+      0.035837340423472676
+    ],
+    "A_flat_M1_H30_eta0.2+lawa": [
+      0.024700982779004472,
+      0.03413476295110024
+    ],
+    "A_flat_M1_H30_eta0.6": [
+      0.025243723407281406,
+      0.03748888180165486
+    ],
+    "A_flat_M1_H30_eta0.6+lawa": [
+      0.01771516812478304,
+      0.029888902450621424
+    ],
+    "A_flat_M1_H30_eta1.0": [
+      0.05055287059938278,
+      0.07494128512436156
+    ],
+    "A_flat_M1_H30_eta1.0+lawa": [
+      0.04232498343448379,
+      0.06549666994492036
+    ],
+    "A_flat_M2_H30_eta0.2": [
+      0.04683104301351196,
+      0.07052123374958015
+    ],
+    "A_flat_M2_H30_eta0.2+lawa": [
+      0.046520252733699294,
+      0.07057950346536225
+    ],
+    "A_flat_M2_H30_eta0.4": [
+      0.03737382209173626,
+      0.04915353191437119
+    ],
+    "A_flat_M2_H30_eta0.4+lawa": [
+      0.034098752043433024,
+      0.04568108269514561
+    ],
+    "A_flat_M2_H30_eta0.6": [
+      0.04266703143968008,
+      0.04721194174071226
+    ],
+    "A_flat_M2_H30_eta0.6+lawa": [
+      0.036872113929727515,
+      0.04244179770491538
+    ],
+    "A_flat_M2_H30_eta0.8": [
+      0.03968528590722151,
+      0.07499922048469779
+    ],
+    "A_flat_M2_H30_eta0.8+lawa": [
+      0.0325165203509418,
+      0.06854680151412
+    ],
+    "A_flat_M2_H30_eta1.0": [
+      0.0494570629910025,
+      0.08517121824881438
+    ],
+    "A_flat_M2_H30_eta1.0+lawa": [
+      0.042262301724500316,
+      0.0780589297587225
+    ],
+    "A_flat_M4_H30_eta0.2": [
+      0.10120021997211938,
+      0.10995701267025144
+    ],
+    "A_flat_M4_H30_eta0.2+lawa": [
+      0.10315724891742671,
+      0.11110344039228183
+    ],
+    "A_flat_M4_H30_eta0.6": [
+      0.06447842881681555,
+      0.0693902669735932
+    ],
+    "A_flat_M4_H30_eta0.6+lawa": [
+      0.060395709382424945,
+      0.06706805205077596
+    ],
+    "A_flat_M4_H30_eta1.0": [
+      0.07021517194721778,
+      0.08351791024571152
+    ],
+    "A_flat_M4_H30_eta1.0+lawa": [
+      0.06472690658776367,
+      0.07873842654447255
+    ],
+    "A_flat_M8_H30_eta0.2": [
+      0.16306979089024817,
+      0.18048348250273547
+    ],
+    "A_flat_M8_H30_eta0.2+lawa": [
+      0.16624164562738689,
+      0.18435263375915292
+    ],
+    "A_flat_M8_H30_eta0.4": [
+      0.11147642799859235,
+      0.11808687631929503
+    ],
+    "A_flat_M8_H30_eta0.4+lawa": [
+      0.112216734171545,
+      0.11884596192391185
+    ],
+    "A_flat_M8_H30_eta0.6": [
+      0.08726607209580509,
+      0.10585352327096914
+    ],
+    "A_flat_M8_H30_eta0.6+lawa": [
+      0.08590591375021478,
+      0.10476637507018646
+    ],
+    "A_flat_M8_H30_eta0.8": [
+      0.08098266786945099,
+      0.1067628749969774
+    ],
+    "A_flat_M8_H30_eta0.8+lawa": [
+      0.07853655910331273,
+      0.10394417523445662
+    ],
+    "A_flat_M8_H30_eta1.0": [
+      0.07741843355505698,
+      0.10710380215038359
+    ],
+    "A_flat_M8_H30_eta1.0+lawa": [
+      0.07349256041212796,
+      0.10403334590611366
+    ],
+    "A_flat_M16_H30_eta0.2": [
+      0.23196096505818722,
+      0.2794538218974657
+    ],
+    "A_flat_M16_H30_eta0.2+lawa": [
+      0.23655577175262688,
+      0.28471131733054755
+    ],
+    "A_flat_M16_H30_eta0.6": [
+      0.13277739549258258,
+      0.14714335362912842
+    ],
+    "A_flat_M16_H30_eta0.6+lawa": [
+      0.13402418415646833,
+      0.14790587411689232
+    ],
+    "A_flat_M16_H30_eta1.0": [
+      0.10698659421064616,
+      0.12818041608840505
+    ],
+    "A_flat_M16_H30_eta1.0+lawa": [
+      0.1056624768220396,
+      0.12696938817717157
+    ],
+    "A_flat_M32_H30_eta0.2": [
+      0.32277221295593045,
+      0.3812099874882395
+    ],
+    "A_flat_M32_H30_eta0.2+lawa": [
+      0.328224781548425,
+      0.3864553537281242
+    ],
+    "A_flat_M32_H30_eta0.4": [
+      0.2201167009527151,
+      0.27365259874145237
+    ],
+    "A_flat_M32_H30_eta0.4+lawa": [
+      0.22431210153782524,
+      0.27786070130271584
+    ],
+    "A_flat_M32_H30_eta0.6": [
+      0.17121668252004024,
+      0.21084383110693483
+    ],
+    "A_flat_M32_H30_eta0.6+lawa": [
+      0.1741642640580916,
+      0.2138155815369549
+    ],
+    "A_flat_M32_H30_eta0.8": [
+      0.15717564316663227,
+      0.18205188537925035
+    ],
+    "A_flat_M32_H30_eta0.8+lawa": [
+      0.15842977974473146,
+      0.1844538811733453
+    ],
+    "A_flat_M32_H30_eta1.0": [
+      0.1384871290289897,
+      0.17396529402017813
+    ],
+    "A_flat_M32_H30_eta1.0+lawa": [
+      0.13893366316986439,
+      0.1743019716708044
+    ],
+    "B_hier_R2x4_Hr1_Hg30": [
+      0.07305896641866805,
+      0.07549912395831898
+    ],
+    "B_hier_R2x4_Hr1_Hg30+lawa": [
+      0.07113384546282141,
+      0.07396175038888657
+    ],
+    "B_hier_R2x4_Hr5_Hg30": [
+      0.08623030657635437,
+      0.08800243125112787
+    ],
+    "B_hier_R2x4_Hr5_Hg30+lawa": [
+      0.08480998468654777,
+      0.08762162711057811
+    ],
+    "B_hier_R2x4_Hr10_Hg30": [
+      0.09060842296885695,
+      0.10079003669277008
+    ],
+    "B_hier_R2x4_Hr10_Hg30+lawa": [
+      0.09025597543083855,
+      0.10031822738072693
+    ],
+    "B_hier_R4x4_Hr1_Hg30": [
+      0.09285464834141692,
+      0.09920983253468237
+    ],
+    "B_hier_R4x4_Hr1_Hg30+lawa": [
+      0.09139046883149689,
+      0.09809764364256764
+    ],
+    "B_hier_R4x4_Hr5_Hg30": [
+      0.10244290960866632,
+      0.11664579779131502
+    ],
+    "B_hier_R4x4_Hr5_Hg30+lawa": [
+      0.10173251076677563,
+      0.11577817947969608
+    ],
+    "B_hier_R4x4_Hr10_Hg30": [
+      0.11295965766418849,
+      0.12665221857706394
+    ],
+    "B_hier_R4x4_Hr10_Hg30+lawa": [
+      0.11248473496586471,
+      0.12697416153600669
+    ],
+    "B_hier_R2x8_Hr1_Hg30": [
+      0.08939126264946341,
+      0.09492596639669727
+    ],
+    "B_hier_R2x8_Hr1_Hg30+lawa": [
+      0.08867790752046123,
+      0.09404862184044382
+    ],
+    "B_hier_R2x8_Hr5_Hg30": [
+      0.1098430038132357,
+      0.12664336437866947
+    ],
+    "B_hier_R2x8_Hr5_Hg30+lawa": [
+      0.11021865289621591,
+      0.1271449384363342
+    ],
+    "B_hier_R2x8_Hr10_Hg30": [
+      0.12234034047249354,
+      0.15350044664335794
+    ],
+    "B_hier_R2x8_Hr10_Hg30+lawa": [
+      0.1230104861392326,
+      0.15526925812641573
+    ],
+    "B_hier_R2x4_Hr5_Hg10": [
+      0.06115716662134253,
+      0.07421525412028719
+    ],
+    "B_hier_R2x4_Hr5_Hg10+lawa": [
+      0.055326716627728985,
+      0.068207295090448
+    ],
+    "B_flat_M8_H10": [
+      0.07198540928957083,
+      0.11946342077360587
+    ],
+    "B_flat_M8_H10+lawa": [
+      0.063510307308896,
+      0.11087402209331053
+    ],
+    "B_hier_R2x4_Hr5_Hg100": [
+      0.08748889096379309,
+      0.10792156018241902
+    ],
+    "B_hier_R2x4_Hr5_Hg100+lawa": [
+      0.08945659294014094,
+      0.11020822545077441
+    ],
+    "B_flat_M8_H100": [
+      0.13573609298731534,
+      0.1561806403469291
+    ],
+    "B_flat_M8_H100+lawa": [
+      0.13697453602500542,
+      0.15757399477903394
+    ],
+    "B_sparseloco_M2_H30": [
+      0.09312698922826973,
+      0.13842809783225882
+    ],
+    "B_sparseloco_M2_H30+lawa": [
+      0.09591189823581653,
+      0.14193128856761436
+    ],
+    "B_muon_M2_H30": [
+      -0.01620973361062173,
+      0.0007478843319187059
+    ],
+    "B_muon_M2_H30+lawa": [
+      -0.02156199610926842,
+      -0.004297957129054156
+    ],
+    "B_sparseloco_M8_H30": [
+      0.22797381620140478,
+      0.2770056283365294
+    ],
+    "B_sparseloco_M8_H30+lawa": [
+      0.23436480700026116,
+      0.28294264991876333
+    ],
+    "B_muon_M8_H30": [
+      -0.006720921326020381,
+      0.01570734588989141
+    ],
+    "B_muon_M8_H30+lawa": [
+      -0.014454064131966088,
+      0.006938839269838468
+    ],
+    "B_sparseloco_M32_H30": [
+      0.4735664977075734,
+      0.4802510405411222
+    ],
+    "B_sparseloco_M32_H30+lawa": [
+      0.47957782112493486,
+      0.4870185518893487
+    ],
+    "B_muon_M32_H30": [
+      0.018573503299594667,
+      0.04478951287408784
+    ],
+    "B_muon_M32_H30+lawa": [
+      0.01403796905703173,
+      0.04129273070040833
+    ],
+    "B_stream_M8_P3_tau0": [
+      0.10515343822557655,
+      0.15915313702275097
+    ],
+    "B_stream_M8_P3_tau1": [
+      0.07565438195089555,
+      0.0824748507728538
+    ],
+    "B_anneal1_M8_H30": [
+      0.07655268397505552,
+      0.10866932237503449
+    ],
+    "B_anneal1_M32_H30": [
+      0.14092685430056906,
+      0.17663359298559816
+    ],
+    "B_anneal1_hier_R2x8_Hr5_Hg30": [
+      0.10943162918188441,
+      0.12584073952175745
+    ]
+  },
+  "tost_result": {
+    "A_flat_M1_H30_eta0.2": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.03150898065781612,
+      "sd": 0.0025674448724500253,
+      "ci90": [
+        0.027180620892159564,
+        0.035837340423472676
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.02718, +0.03584], mean +0.03151)"
+    },
+    "A_flat_M1_H30_eta0.2+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.029417872865052357,
+      "sd": 0.0027979086584770103,
+      "ci90": [
+        0.024700982779004472,
+        0.03413476295110024
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.0247, +0.03413], mean +0.02942)"
+    },
+    "A_flat_M1_H30_eta0.6": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.031366302604468134,
+      "sd": 0.003631718576332768,
+      "ci90": [
+        0.025243723407281406,
+        0.03748888180165486
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.02524, +0.03749], mean +0.03137)"
+    },
+    "A_flat_M1_H30_eta0.6+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.023802035287702233,
+      "sd": 0.003610535337362557,
+      "ci90": [
+        0.01771516812478304,
+        0.029888902450621424
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.01772, +0.02989], mean +0.0238)"
+    },
+    "A_flat_M1_H30_eta1.0": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.06274707786187217,
+      "sd": 0.007233214567348291,
+      "ci90": [
+        0.05055287059938278,
+        0.07494128512436156
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.05055, +0.07494], mean +0.06275)"
+    },
+    "A_flat_M1_H30_eta1.0+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.053910826689702075,
+      "sd": 0.006872352454303853,
+      "ci90": [
+        0.04232498343448379,
+        0.06549666994492036
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04232, +0.0655], mean +0.05391)"
+    },
+    "A_flat_M2_H30_eta0.2": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.058676138381546054,
+      "sd": 0.007026132533538981,
+      "ci90": [
+        0.04683104301351196,
+        0.07052123374958015
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04683, +0.07052], mean +0.05868)"
+    },
+    "A_flat_M2_H30_eta0.2+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.05854987809953077,
+      "sd": 0.007135589838917625,
+      "ci90": [
+        0.046520252733699294,
+        0.07057950346536225
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04652, +0.07058], mean +0.05855)"
+    },
+    "A_flat_M2_H30_eta0.4": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.043263677003053724,
+      "sd": 0.0034936739574010036,
+      "ci90": [
+        0.03737382209173626,
+        0.04915353191437119
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.03737, +0.04915], mean +0.04326)"
+    },
+    "A_flat_M2_H30_eta0.4+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.03988991736928932,
+      "sd": 0.00343513444500489,
+      "ci90": [
+        0.034098752043433024,
+        0.04568108269514561
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.0341, +0.04568], mean +0.03989)"
+    },
+    "A_flat_M2_H30_eta0.6": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.04493948659019617,
+      "sd": 0.0013479478693888556,
+      "ci90": [
+        0.04266703143968008,
+        0.04721194174071226
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04267, +0.04721], mean +0.04494)"
+    },
+    "A_flat_M2_H30_eta0.6+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.03965695581732145,
+      "sd": 0.0016518793288899665,
+      "ci90": [
+        0.036872113929727515,
+        0.04244179770491538
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.03687, +0.04244], mean +0.03966)"
+    },
+    "A_flat_M2_H30_eta0.8": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.05734225319595965,
+      "sd": 0.010473549469752102,
+      "ci90": [
+        0.03968528590722151,
+        0.07499922048469779
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.03969, +0.075], mean +0.05734)"
+    },
+    "A_flat_M2_H30_eta0.8+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.0505316609325309,
+      "sd": 0.010686006435893241,
+      "ci90": [
+        0.0325165203509418,
+        0.06854680151412
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.03252, +0.06855], mean +0.05053)"
+    },
+    "A_flat_M2_H30_eta1.0": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.06731414061990844,
+      "sd": 0.010592248536974885,
+      "ci90": [
+        0.0494570629910025,
+        0.08517121824881438
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04946, +0.08517], mean +0.06731)"
+    },
+    "A_flat_M2_H30_eta1.0+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.06016061574161141,
+      "sd": 0.010616708646389942,
+      "ci90": [
+        0.042262301724500316,
+        0.0780589297587225
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04226, +0.07806], mean +0.06016)"
+    },
+    "A_flat_M4_H30_eta0.2": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.10557861632118541,
+      "sd": 0.00259712497680015,
+      "ci90": [
+        0.10120021997211938,
+        0.10995701267025144
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1012, +0.11], mean +0.1056)"
+    },
+    "A_flat_M4_H30_eta0.2+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.10713034465485427,
+      "sd": 0.0023567135892328286,
+      "ci90": [
+        0.10315724891742671,
+        0.11110344039228183
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1032, +0.1111], mean +0.1071)"
+    },
+    "A_flat_M4_H30_eta0.6": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.06693434789520437,
+      "sd": 0.0014567728161120493,
+      "ci90": [
+        0.06447842881681555,
+        0.0693902669735932
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.06448, +0.06939], mean +0.06693)"
+    },
+    "A_flat_M4_H30_eta0.6+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.06373188071660045,
+      "sd": 0.001978910360803706,
+      "ci90": [
+        0.060395709382424945,
+        0.06706805205077596
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.0604, +0.06707], mean +0.06373)"
+    },
+    "A_flat_M4_H30_eta1.0": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.07686654109646465,
+      "sd": 0.003945379899449232,
+      "ci90": [
+        0.07021517194721778,
+        0.08351791024571152
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07022, +0.08352], mean +0.07687)"
+    },
+    "A_flat_M4_H30_eta1.0+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.07173266656611811,
+      "sd": 0.004155593228815931,
+      "ci90": [
+        0.06472690658776367,
+        0.07873842654447255
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.06473, +0.07874], mean +0.07173)"
+    },
+    "A_flat_M8_H30_eta0.2": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.17177663669649182,
+      "sd": 0.005164623051397937,
+      "ci90": [
+        0.16306979089024817,
+        0.18048348250273547
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1631, +0.1805], mean +0.1718)"
+    },
+    "A_flat_M8_H30_eta0.2+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.1752971396932699,
+      "sd": 0.005371430071831464,
+      "ci90": [
+        0.16624164562738689,
+        0.18435263375915292
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1662, +0.1844], mean +0.1753)"
+    },
+    "A_flat_M8_H30_eta0.4": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.11478165215894369,
+      "sd": 0.0019605534849769556,
+      "ci90": [
+        0.11147642799859235,
+        0.11808687631929503
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1115, +0.1181], mean +0.1148)"
+    },
+    "A_flat_M8_H30_eta0.4+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.11553134804772842,
+      "sd": 0.0019661231647337325,
+      "ci90": [
+        0.112216734171545,
+        0.11884596192391185
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1122, +0.1188], mean +0.1155)"
+    },
+    "A_flat_M8_H30_eta0.6": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.09655979768338711,
+      "sd": 0.005512741407292802,
+      "ci90": [
+        0.08726607209580509,
+        0.10585352327096914
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08727, +0.1059], mean +0.09656)"
+    },
+    "A_flat_M8_H30_eta0.6+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.09533614441020062,
+      "sd": 0.0055937118596538545,
+      "ci90": [
+        0.08590591375021478,
+        0.10476637507018646
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08591, +0.1048], mean +0.09534)"
+    },
+    "A_flat_M8_H30_eta0.8": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.0938727714332142,
+      "sd": 0.007645998043583058,
+      "ci90": [
+        0.08098266786945099,
+        0.1067628749969774
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08098, +0.1068], mean +0.09387)"
+    },
+    "A_flat_M8_H30_eta0.8+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.09124036716888467,
+      "sd": 0.007535493499717091,
+      "ci90": [
+        0.07853655910331273,
+        0.10394417523445662
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07854, +0.1039], mean +0.09124)"
+    },
+    "A_flat_M8_H30_eta1.0": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.09226111785272029,
+      "sd": 0.00880420661789645,
+      "ci90": [
+        0.07741843355505698,
+        0.10710380215038359
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07742, +0.1071], mean +0.09226)"
+    },
+    "A_flat_M8_H30_eta1.0+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.0887629531591208,
+      "sd": 0.009057909619631129,
+      "ci90": [
+        0.07349256041212796,
+        0.10403334590611366
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07349, +0.104], mean +0.08876)"
+    },
+    "A_flat_M16_H30_eta0.2": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.25570739347782645,
+      "sd": 0.014085623466134473,
+      "ci90": [
+        0.23196096505818722,
+        0.2794538218974657
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.232, +0.2795], mean +0.2557)"
+    },
+    "A_flat_M16_H30_eta0.2+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.2606335445415872,
+      "sd": 0.014282166371088593,
+      "ci90": [
+        0.23655577175262688,
+        0.28471131733054755
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.2366, +0.2847], mean +0.2606)"
+    },
+    "A_flat_M16_H30_eta0.6": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.1399603745608555,
+      "sd": 0.004260713936970025,
+      "ci90": [
+        0.13277739549258258,
+        0.14714335362912842
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1328, +0.1471], mean +0.14)"
+    },
+    "A_flat_M16_H30_eta0.6+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.14096502913668033,
+      "sd": 0.004117087723694029,
+      "ci90": [
+        0.13402418415646833,
+        0.14790587411689232
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.134, +0.1479], mean +0.141)"
+    },
+    "A_flat_M16_H30_eta1.0": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.1175835051495256,
+      "sd": 0.006285749366240277,
+      "ci90": [
+        0.10698659421064616,
+        0.12818041608840505
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.107, +0.1282], mean +0.1176)"
+    },
+    "A_flat_M16_H30_eta1.0+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.11631593249960558,
+      "sd": 0.0063192899005915775,
+      "ci90": [
+        0.1056624768220396,
+        0.12696938817717157
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1057, +0.127], mean +0.1163)"
+    },
+    "A_flat_M32_H30_eta0.2": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.35199110022208496,
+      "sd": 0.017331711399180456,
+      "ci90": [
+        0.32277221295593045,
+        0.3812099874882395
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.3228, +0.3812], mean +0.352)"
+    },
+    "A_flat_M32_H30_eta0.2+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.3573400676382746,
+      "sd": 0.017270258487850312,
+      "ci90": [
+        0.328224781548425,
+        0.3864553537281242
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.3282, +0.3865], mean +0.3573)"
+    },
+    "A_flat_M32_H30_eta0.4": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.24688464984708372,
+      "sd": 0.015877892979264938,
+      "ci90": [
+        0.2201167009527151,
+        0.27365259874145237
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.2201, +0.2737], mean +0.2469)"
+    },
+    "A_flat_M32_H30_eta0.4+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.25108640142027056,
+      "sd": 0.015881660182698865,
+      "ci90": [
+        0.22431210153782524,
+        0.27786070130271584
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.2243, +0.2779], mean +0.2511)"
+    },
+    "A_flat_M32_H30_eta0.6": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.19103025681348754,
+      "sd": 0.011752779916366899,
+      "ci90": [
+        0.17121668252004024,
+        0.21084383110693483
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1712, +0.2108], mean +0.191)"
+    },
+    "A_flat_M32_H30_eta0.6+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.19398992279752325,
+      "sd": 0.011759948024047112,
+      "ci90": [
+        0.1741642640580916,
+        0.2138155815369549
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1742, +0.2138], mean +0.194)"
+    },
+    "A_flat_M32_H30_eta0.8": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.1696137642729413,
+      "sd": 0.0073778964749390595,
+      "ci90": [
+        0.15717564316663227,
+        0.18205188537925035
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1572, +0.1821], mean +0.1696)"
+    },
+    "A_flat_M32_H30_eta0.8+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.17144183045903838,
+      "sd": 0.007718333201315921,
+      "ci90": [
+        0.15842977974473146,
+        0.1844538811733453
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1584, +0.1845], mean +0.1714)"
+    },
+    "A_flat_M32_H30_eta1.0": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.1562262115245839,
+      "sd": 0.01052225758973456,
+      "ci90": [
+        0.1384871290289897,
+        0.17396529402017813
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1385, +0.174], mean +0.1562)"
+    },
+    "A_flat_M32_H30_eta1.0+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.1566178174203344,
+      "sd": 0.010489675907773697,
+      "ci90": [
+        0.13893366316986439,
+        0.1743019716708044
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1389, +0.1743], mean +0.1566)"
+    },
+    "B_hier_R2x4_Hr1_Hg30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.07427904518849351,
+      "sd": 0.0007237117871828187,
+      "ci90": [
+        0.07305896641866805,
+        0.07549912395831898
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07306, +0.0755], mean +0.07428)"
+    },
+    "B_hier_R2x4_Hr1_Hg30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.07254779792585399,
+      "sd": 0.0008387114744724576,
+      "ci90": [
+        0.07113384546282141,
+        0.07396175038888657
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07113, +0.07396], mean +0.07255)"
+    },
+    "B_hier_R2x4_Hr5_Hg30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.08711636891374112,
+      "sd": 0.0005255838996668134,
+      "ci90": [
+        0.08623030657635437,
+        0.08800243125112787
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08623, +0.088], mean +0.08712)"
+    },
+    "B_hier_R2x4_Hr5_Hg30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.08621580589856294,
+      "sd": 0.0008338882758795696,
+      "ci90": [
+        0.08480998468654777,
+        0.08762162711057811
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08481, +0.08762], mean +0.08622)"
+    },
+    "B_hier_R2x4_Hr10_Hg30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.09569922983081351,
+      "sd": 0.0030197041563113213,
+      "ci90": [
+        0.09060842296885695,
+        0.10079003669277008
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.09061, +0.1008], mean +0.0957)"
+    },
+    "B_hier_R2x4_Hr10_Hg30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.09528710140578274,
+      "sd": 0.0029843033588639865,
+      "ci90": [
+        0.09025597543083855,
+        0.10031822738072693
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.09026, +0.1003], mean +0.09529)"
+    },
+    "B_hier_R4x4_Hr1_Hg30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.09603224043804964,
+      "sd": 0.0018848462181839708,
+      "ci90": [
+        0.09285464834141692,
+        0.09920983253468237
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.09285, +0.09921], mean +0.09603)"
+    },
+    "B_hier_R4x4_Hr1_Hg30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.09474405623703226,
+      "sd": 0.0019892410184967012,
+      "ci90": [
+        0.09139046883149689,
+        0.09809764364256764
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.09139, +0.0981], mean +0.09474)"
+    },
+    "B_hier_R4x4_Hr5_Hg30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.10954435369999067,
+      "sd": 0.004212349990850535,
+      "ci90": [
+        0.10244290960866632,
+        0.11664579779131502
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1024, +0.1166], mean +0.1095)"
+    },
+    "B_hier_R4x4_Hr5_Hg30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.10875534512323586,
+      "sd": 0.00416572120497582,
+      "ci90": [
+        0.10173251076677563,
+        0.11577817947969608
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1017, +0.1158], mean +0.1088)"
+    },
+    "B_hier_R4x4_Hr10_Hg30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.11980593812062622,
+      "sd": 0.004060995066238354,
+      "ci90": [
+        0.11295965766418849,
+        0.12665221857706394
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.113, +0.1267], mean +0.1198)"
+    },
+    "B_hier_R4x4_Hr10_Hg30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.11972944825093569,
+      "sd": 0.004297332704113757,
+      "ci90": [
+        0.11248473496586471,
+        0.12697416153600669
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1125, +0.127], mean +0.1197)"
+    },
+    "B_hier_R2x8_Hr1_Hg30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.09215861452308034,
+      "sd": 0.0016415048107963875,
+      "ci90": [
+        0.08939126264946341,
+        0.09492596639669727
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08939, +0.09493], mean +0.09216)"
+    },
+    "B_hier_R2x8_Hr1_Hg30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.09136326468045253,
+      "sd": 0.0015928681635526724,
+      "ci90": [
+        0.08867790752046123,
+        0.09404862184044382
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08868, +0.09405], mean +0.09136)"
+    },
+    "B_hier_R2x8_Hr5_Hg30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.11824318409595258,
+      "sd": 0.004982718850138335,
+      "ci90": [
+        0.1098430038132357,
+        0.12664336437866947
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1098, +0.1266], mean +0.1182)"
+    },
+    "B_hier_R2x8_Hr5_Hg30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.11868179566627506,
+      "sd": 0.005020066188168376,
+      "ci90": [
+        0.11021865289621591,
+        0.1271449384363342
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1102, +0.1271], mean +0.1187)"
+    },
+    "B_hier_R2x8_Hr10_Hg30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.13792039355792574,
+      "sd": 0.00924159024951672,
+      "ci90": [
+        0.12234034047249354,
+        0.15350044664335794
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1223, +0.1535], mean +0.1379)"
+    },
+    "B_hier_R2x8_Hr10_Hg30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.13913987213282417,
+      "sd": 0.00956743699855836,
+      "ci90": [
+        0.1230104861392326,
+        0.15526925812641573
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.123, +0.1553], mean +0.1391)"
+    },
+    "B_hier_R2x4_Hr5_Hg10": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.06768621037081486,
+      "sd": 0.003872820376344549,
+      "ci90": [
+        0.06115716662134253,
+        0.07421525412028719
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.06116, +0.07422], mean +0.06769)"
+    },
+    "B_hier_R2x4_Hr5_Hg10+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.06176700585908849,
+      "sd": 0.0038201740288196476,
+      "ci90": [
+        0.055326716627728985,
+        0.068207295090448
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.05533, +0.06821], mean +0.06177)"
+    },
+    "B_flat_M8_H10": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.09572441503158835,
+      "sd": 0.014081220570665642,
+      "ci90": [
+        0.07198540928957083,
+        0.11946342077360587
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07199, +0.1195], mean +0.09572)"
+    },
+    "B_flat_M8_H10+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.08719216470110326,
+      "sd": 0.014047321993460132,
+      "ci90": [
+        0.063510307308896,
+        0.11087402209331053
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.06351, +0.1109], mean +0.08719)"
+    },
+    "B_hier_R2x4_Hr5_Hg100": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.09770522557310606,
+      "sd": 0.006060003633717258,
+      "ci90": [
+        0.08748889096379309,
+        0.10792156018241902
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08749, +0.1079], mean +0.09771)"
+    },
+    "B_hier_R2x4_Hr5_Hg100+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.09983240919545767,
+      "sd": 0.006154603056235491,
+      "ci90": [
+        0.08945659294014094,
+        0.11020822545077441
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.08946, +0.1102], mean +0.09983)"
+    },
+    "B_flat_M8_H100": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.14595836666712222,
+      "sd": 0.006063526500787526,
+      "ci90": [
+        0.13573609298731534,
+        0.1561806403469291
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1357, +0.1562], mean +0.146)"
+    },
+    "B_flat_M8_H100+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.14727426540201968,
+      "sd": 0.006109470748355631,
+      "ci90": [
+        0.13697453602500542,
+        0.15757399477903394
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.137, +0.1576], mean +0.1473)"
+    },
+    "B_sparseloco_M2_H30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.11577754353026427,
+      "sd": 0.013435585914606972,
+      "ci90": [
+        0.09312698922826973,
+        0.13842809783225882
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.09313, +0.1384], mean +0.1158)"
+    },
+    "B_sparseloco_M2_H30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.11892159340171544,
+      "sd": 0.013648616813016752,
+      "ci90": [
+        0.09591189823581653,
+        0.14193128856761436
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.09591, +0.1419], mean +0.1189)"
+    },
+    "B_muon_M2_H30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": -0.007730924639351512,
+      "sd": 0.005029358878736583,
+      "ci90": [
+        -0.01620973361062173,
+        0.0007478843319187059
+      ],
+      "equivalent": false,
+      "non_inferior": true,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.01621, +0.0007479], mean -0.007731)"
+    },
+    "B_muon_M2_H30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": -0.01292997661916129,
+      "sd": 0.005120238468763818,
+      "ci90": [
+        -0.02156199610926842,
+        -0.004297957129054156
+      ],
+      "equivalent": false,
+      "non_inferior": true,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.02156, -0.004298], mean -0.01293)"
+    },
+    "B_sparseloco_M8_H30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.2524897222689671,
+      "sd": 0.014542053048837005,
+      "ci90": [
+        0.22797381620140478,
+        0.2770056283365294
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.228, +0.277], mean +0.2525)"
+    },
+    "B_sparseloco_M8_H30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.25865372845951223,
+      "sd": 0.014407413023449613,
+      "ci90": [
+        0.23436480700026116,
+        0.28294264991876333
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.2344, +0.2829], mean +0.2587)"
+    },
+    "B_muon_M8_H30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.004493212281935516,
+      "sd": 0.00665186615474154,
+      "ci90": [
+        -0.006720921326020381,
+        0.01570734588989141
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.006721, +0.01571], mean +0.004493)"
+    },
+    "B_muon_M8_H30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": -0.00375761243106381,
+      "sd": 0.006344793769407288,
+      "ci90": [
+        -0.014454064131966088,
+        0.006938839269838468
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.01445, +0.006939], mean -0.003758)"
+    },
+    "B_sparseloco_M32_H30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.4769087691243478,
+      "sd": 0.0019825287351159016,
+      "ci90": [
+        0.4735664977075734,
+        0.4802510405411222
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.4736, +0.4803], mean +0.4769)"
+    },
+    "B_sparseloco_M32_H30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.4832981865071418,
+      "sd": 0.0022068020084598694,
+      "ci90": [
+        0.47957782112493486,
+        0.4870185518893487
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.4796, +0.487], mean +0.4833)"
+    },
+    "B_muon_M32_H30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.031681508086841254,
+      "sd": 0.007775250094988753,
+      "ci90": [
+        0.018573503299594667,
+        0.04478951287408784
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.01857, +0.04479], mean +0.03168)"
+    },
+    "B_muon_M32_H30+lawa": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.02766534987872003,
+      "sd": 0.00808332738262118,
+      "ci90": [
+        0.01403796905703173,
+        0.04129273070040833
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.01404, +0.04129], mean +0.02767)"
+    },
+    "B_stream_M8_P3_tau0": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.13215328762416376,
+      "sd": 0.01601544895721269,
+      "ci90": [
+        0.10515343822557655,
+        0.15915313702275097
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1052, +0.1592], mean +0.1322)"
+    },
+    "B_stream_M8_P3_tau1": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.07906461636187467,
+      "sd": 0.0020228422142245083,
+      "ci90": [
+        0.07565438195089555,
+        0.0824748507728538
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07565, +0.08247], mean +0.07906)"
+    },
+    "B_anneal1_M8_H30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.092611003175045,
+      "sd": 0.009525282444705678,
+      "ci90": [
+        0.07655268397505552,
+        0.10866932237503449
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07655, +0.1087], mean +0.09261)"
+    },
+    "B_anneal1_M32_H30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.1587802236430836,
+      "sd": 0.01059004889983828,
+      "ci90": [
+        0.14092685430056906,
+        0.17663359298559816
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1409, +0.1766], mean +0.1588)"
+    },
+    "B_anneal1_hier_R2x8_Hr5_Hg30": {
+      "metric": "loss_rel",
+      "delta": 0.005,
+      "n": 3,
+      "mean": 0.11763618435182094,
+      "sd": 0.004866680276654782,
+      "ci90": [
+        0.10943162918188441,
+        0.12584073952175745
+      ],
+      "equivalent": false,
+      "non_inferior": false,
+      "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.1094, +0.1258], mean +0.1176)"
+    }
+  },
+  "promotion_list": [
+    {
+      "cell": "B_muon_M32_H30+lawa",
+      "flat_ref": "A_flat_M32_H30_eta1.0",
+      "mean_rel_improvement": 0.11118148344520686,
+      "se": 0.0014356899231930274,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_muon_M32_H30",
+      "flat_ref": "A_flat_M32_H30_eta1.0",
+      "mean_rel_improvement": 0.10770623455528472,
+      "se": 0.0015009936172230565,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_muon_M8_H30+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": 0.0878994668111389,
+      "se": 0.001102574777664779,
+      "beats_flat_2sigma": true
+    }
+  ],
+  "mechanism_ranking": [
+    {
+      "cell": "B_muon_M32_H30+lawa",
+      "flat_ref": "A_flat_M32_H30_eta1.0",
+      "mean_rel_improvement": 0.11118148344520686,
+      "se": 0.0014356899231930274,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_muon_M32_H30",
+      "flat_ref": "A_flat_M32_H30_eta1.0",
+      "mean_rel_improvement": 0.10770623455528472,
+      "se": 0.0015009936172230565,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_muon_M8_H30+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": 0.0878994668111389,
+      "se": 0.001102574777664779,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_muon_M8_H30",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": 0.08034694589479968,
+      "se": 0.000913570345647219,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_muon_M2_H30+lawa",
+      "flat_ref": "A_flat_M2_H30_eta0.4",
+      "mean_rel_improvement": 0.05384786881419976,
+      "se": 0.004392656174008924,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_muon_M2_H30",
+      "flat_ref": "A_flat_M2_H30_eta0.4",
+      "mean_rel_improvement": 0.048864425976144515,
+      "se": 0.004364607776854659,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_hier_R2x4_Hr5_Hg10+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": 0.027891881362033022,
+      "se": 0.003049306212795475,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_hier_R2x8_Hr1_Hg30+lawa",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": 0.02344396657354327,
+      "se": 0.002788695829649663,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_hier_R2x8_Hr1_Hg30",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": 0.022732146658746743,
+      "se": 0.0028219138925672208,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_hier_R2x4_Hr5_Hg10",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": 0.02247256878530099,
+      "se": 0.00306835344141883,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_hier_R4x4_Hr1_Hg30+lawa",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": 0.0204215950043472,
+      "se": 0.0023418182297290026,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_hier_R4x4_Hr1_Hg30",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": 0.019268662543336708,
+      "se": 0.002376050146051481,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_hier_R2x4_Hr1_Hg30+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": 0.018003025131294644,
+      "se": 0.004865074934904203,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_hier_R2x4_Hr1_Hg30",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": 0.01641831110033219,
+      "se": 0.004829773349736261,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_stream_M8_P3_tau1",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": 0.012029667693628072,
+      "se": 0.0056145065784732415,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_hier_R4x4_Hr5_Hg30+lawa",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": 0.007891114861765334,
+      "se": 0.0015441655825703278,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "A_flat_M1_H30_eta0.6+lawa",
+      "flat_ref": "A_flat_M1_H30_eta0.6",
+      "mean_rel_improvement": 0.007334224700909008,
+      "se": 9.114246456791596e-05,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_hier_R4x4_Hr5_Hg30",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": 0.007185130414424576,
+      "se": 0.0015711402623355528,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "B_hier_R2x4_Hr5_Hg30+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": 0.005494827761354573,
+      "se": 0.004290550031389449,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_hier_R2x4_Hr5_Hg30",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": 0.004669227500515609,
+      "se": 0.00440312807190162,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_flat_M8_H10+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": 0.004658996622130388,
+      "se": 0.0039117937440656505,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M2_H30_eta0.6+lawa",
+      "flat_ref": "A_flat_M2_H30_eta0.4",
+      "mean_rel_improvement": 0.0034491005686666867,
+      "se": 0.002267245187821991,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M2_H30_eta0.4+lawa",
+      "flat_ref": "A_flat_M2_H30_eta0.4",
+      "mean_rel_improvement": 0.0032337479775624554,
+      "se": 5.075881932838627e-05,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "A_flat_M8_H30_eta1.0+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": 0.0032040553942206933,
+      "se": 0.00018127122042020308,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "A_flat_M4_H30_eta0.6+lawa",
+      "flat_ref": "A_flat_M4_H30_eta0.6",
+      "mean_rel_improvement": 0.0030020054411030437,
+      "se": 0.0002917809657718881,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "A_flat_M1_H30_eta0.2+lawa",
+      "flat_ref": "A_flat_M1_H30_eta0.6",
+      "mean_rel_improvement": 0.0018745828388602353,
+      "se": 0.003589865723438141,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M16_H30_eta1.0+lawa",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": 0.0011343435325296474,
+      "se": 3.972983820933981e-05,
+      "beats_flat_2sigma": true
+    },
+    {
+      "cell": "A_flat_M8_H30_eta0.8+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": 0.0009244183751914315,
+      "se": 0.002090092566259895,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_anneal1_hier_R2x8_Hr5_Hg30",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": -5.4256325178976204e-05,
+      "se": 0.0016943357946185337,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_anneal1_M8_H30",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.0003169090657478257,
+      "se": 0.0004951113159518371,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M32_H30_eta1.0+lawa",
+      "flat_ref": "A_flat_M32_H30_eta1.0",
+      "mean_rel_improvement": -0.00033888726573577194,
+      "se": 6.314371597089798e-05,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_hier_R2x8_Hr5_Hg30",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": -0.0005963973029771789,
+      "se": 0.0014745693606128293,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_hier_R2x8_Hr5_Hg30+lawa",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": -0.000989042529731165,
+      "se": 0.0015645738054609086,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_hier_R4x4_Hr10_Hg30+lawa",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": -0.001929093263623518,
+      "se": 0.001808207006386102,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_hier_R4x4_Hr10_Hg30",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": -0.0019974413996686493,
+      "se": 0.001628034902485709,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_anneal1_M32_H30",
+      "flat_ref": "A_flat_M32_H30_eta1.0",
+      "mean_rel_improvement": -0.0022087662146340124,
+      "se": 0.00028479762977789806,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_hier_R2x4_Hr10_Hg30+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.002799191131777136,
+      "se": 0.0030956376070225256,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M8_H30_eta0.6+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.0028445925749232114,
+      "se": 0.004035214266596607,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_flat_M8_H10",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.0031513597417546393,
+      "se": 0.0037304118154429817,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_hier_R2x4_Hr10_Hg30",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.003176383224077647,
+      "se": 0.003083712962823569,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M4_H30_eta1.0+lawa",
+      "flat_ref": "A_flat_M4_H30_eta0.6",
+      "mean_rel_improvement": -0.004495937315306878,
+      "se": 0.0017502683240701086,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_hier_R2x4_Hr5_Hg100",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.005048481909292689,
+      "se": 0.0072650356537772645,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M2_H30_eta0.8+lawa",
+      "flat_ref": "A_flat_M2_H30_eta0.4",
+      "mean_rel_improvement": -0.006995484607094237,
+      "se": 0.007766439081930697,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_hier_R2x4_Hr5_Hg100+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.0069964449188973585,
+      "se": 0.007321325749595467,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M32_H30_eta0.8+lawa",
+      "flat_ref": "A_flat_M32_H30_eta1.0",
+      "mean_rel_improvement": -0.013184817947182058,
+      "se": 0.0034354037922229466,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M2_H30_eta0.2+lawa",
+      "flat_ref": "A_flat_M2_H30_eta0.4",
+      "mean_rel_improvement": -0.014644622403058569,
+      "se": 0.001998047881323628,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M2_H30_eta1.0+lawa",
+      "flat_ref": "A_flat_M2_H30_eta0.4",
+      "mean_rel_improvement": -0.01621660873682301,
+      "se": 0.007158396537702723,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_hier_R2x8_Hr10_Hg30",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": -0.018188705899857972,
+      "se": 0.00178918053031794,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_hier_R2x8_Hr10_Hg30+lawa",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": -0.019278988915413787,
+      "se": 0.0019729839998880324,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M16_H30_eta0.6+lawa",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": -0.0209310125307617,
+      "se": 0.0017969514972518913,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M8_H30_eta0.4+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.021341218150483527,
+      "se": 0.003977336032272398,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M1_H30_eta1.0+lawa",
+      "flat_ref": "A_flat_M1_H30_eta0.6",
+      "mean_rel_improvement": -0.02185277952581381,
+      "se": 0.00206387216546329,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M32_H30_eta0.6+lawa",
+      "flat_ref": "A_flat_M32_H30_eta1.0",
+      "mean_rel_improvement": -0.032658292160300195,
+      "se": 0.0014371520626942527,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_stream_M8_P3_tau0",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.03651492616910141,
+      "se": 0.00632658090374845,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M4_H30_eta0.2+lawa",
+      "flat_ref": "A_flat_M4_H30_eta0.6",
+      "mean_rel_improvement": -0.03767689126708083,
+      "se": 0.0019118311688007905,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_flat_M8_H100",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.04918415120866137,
+      "se": 0.0031806206079369515,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_flat_M8_H100+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.05038849332522166,
+      "se": 0.0031338882535334287,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_sparseloco_M2_H30",
+      "flat_ref": "A_flat_M2_H30_eta0.4",
+      "mean_rel_improvement": -0.06951045726930018,
+      "se": 0.0074040933854271716,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_sparseloco_M2_H30+lawa",
+      "flat_ref": "A_flat_M2_H30_eta0.4",
+      "mean_rel_improvement": -0.07252401737326841,
+      "se": 0.007513713663311976,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M8_H30_eta0.2+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.07604686844293913,
+      "se": 0.0030934233635302845,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M32_H30_eta0.4+lawa",
+      "flat_ref": "A_flat_M32_H30_eta1.0",
+      "mean_rel_improvement": -0.08203647425382055,
+      "se": 0.004832271058416357,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M16_H30_eta0.2+lawa",
+      "flat_ref": "A_flat_M16_H30_eta1.0",
+      "mean_rel_improvement": -0.12798263493286816,
+      "se": 0.00471774226584518,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_sparseloco_M8_H30",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.14667842163513325,
+      "se": 0.0034706283569124635,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_sparseloco_M8_H30+lawa",
+      "flat_ref": "A_flat_M8_H30_eta1.0",
+      "mean_rel_improvement": -0.1523226902965125,
+      "se": 0.0034135884357140234,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "A_flat_M32_H30_eta0.2+lawa",
+      "flat_ref": "A_flat_M32_H30_eta1.0",
+      "mean_rel_improvement": -0.1739416697920674,
+      "se": 0.006162528674874801,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_sparseloco_M32_H30",
+      "flat_ref": "A_flat_M32_H30_eta1.0",
+      "mean_rel_improvement": -0.27742898450808334,
+      "se": 0.007300645578158471,
+      "beats_flat_2sigma": false
+    },
+    {
+      "cell": "B_sparseloco_M32_H30+lawa",
+      "flat_ref": "A_flat_M32_H30_eta1.0",
+      "mean_rel_improvement": -0.2829570156317071,
+      "se": 0.007487222697215491,
+      "beats_flat_2sigma": false
+    }
+  ],
   "hierarchy_test": {
     "question": "does hierarchy (R, n_r) behave like flat M=R (TOST, delta 0.5% rel)?",
     "equivalent_cells": [],
-    "not_demonstrated_cells": [],
-    "tests": []
+    "not_demonstrated_cells": [
+      "B_hier_R2x4_Hr1_Hg30",
+      "B_hier_R2x4_Hr5_Hg30",
+      "B_hier_R2x4_Hr10_Hg30",
+      "B_hier_R4x4_Hr1_Hg30",
+      "B_hier_R4x4_Hr5_Hg30",
+      "B_hier_R4x4_Hr10_Hg30",
+      "B_hier_R2x8_Hr1_Hg30",
+      "B_hier_R2x8_Hr5_Hg30",
+      "B_hier_R2x8_Hr10_Hg30"
+    ],
+    "tests": [
+      {
+        "cell": "B_hier_R2x4_Hr1_Hg30",
+        "R": 2,
+        "n_r": 4,
+        "H_r": 1,
+        "H_g": 30,
+        "anneal": false,
+        "vs_flat_M_eq_R": {
+          "ref": "A_flat_M2_H30_eta0.4",
+          "mean": 0.029735404016515893,
+          "ci90": [
+            0.025018253377516276,
+            0.03445255465551551
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.02502, +0.03445], mean +0.02974)"
+        },
+        "vs_flat_M_eq_N": {
+          "ref": "A_flat_M8_H30_eta1.0",
+          "mean": -0.01641831110033219,
+          "ci90": [
+            -0.030521249281562073,
+            -0.002315372919102306
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.03052, -0.002315], mean -0.01642)"
+        }
+      },
+      {
+        "cell": "B_hier_R2x4_Hr5_Hg30",
+        "R": 2,
+        "n_r": 4,
+        "H_r": 5,
+        "H_g": 30,
+        "anneal": false,
+        "vs_flat_M_eq_R": {
+          "ref": "A_flat_M2_H30_eta0.4",
+          "mean": 0.04204173736504502,
+          "ci90": [
+            0.03624576288327405,
+            0.04783771184681598
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.03625, +0.04784], mean +0.04204)"
+        },
+        "vs_flat_M_eq_N": {
+          "ref": "A_flat_M8_H30_eta1.0",
+          "mean": -0.004669227500515609,
+          "ci90": [
+            -0.01752636147046834,
+            0.008187906469437123
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.01753, +0.008188], mean -0.004669)"
+        }
+      },
+      {
+        "cell": "B_hier_R2x4_Hr10_Hg30",
+        "R": 2,
+        "n_r": 4,
+        "H_r": 10,
+        "H_g": 30,
+        "anneal": false,
+        "vs_flat_M_eq_R": {
+          "ref": "A_flat_M2_H30_eta0.4",
+          "mean": 0.05027165280930016,
+          "ci90": [
+            0.04114680491729076,
+            0.059396500701309564
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04115, +0.0594], mean +0.05027)"
+        },
+        "vs_flat_M_eq_N": {
+          "ref": "A_flat_M8_H30_eta1.0",
+          "mean": 0.003176383224077647,
+          "ci90": [
+            -0.005828058627367174,
+            0.012180825075522468
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.005828, +0.01218], mean +0.003176)"
+        }
+      },
+      {
+        "cell": "B_hier_R4x4_Hr1_Hg30",
+        "R": 4,
+        "n_r": 4,
+        "H_r": 1,
+        "H_g": 30,
+        "anneal": false,
+        "vs_flat_M_eq_R": {
+          "ref": "A_flat_M4_H30_eta0.6",
+          "mean": 0.02727215862358551,
+          "ci90": [
+            0.0263226456876241,
+            0.028221671559546923
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.02632, +0.02822], mean +0.02727)"
+        },
+        "vs_flat_M_eq_N": {
+          "ref": "A_flat_M16_H30_eta1.0",
+          "mean": -0.019268662543336708,
+          "ci90": [
+            -0.026206728969807032,
+            -0.012330596116866384
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.02621, -0.01233], mean -0.01927)"
+        }
+      },
+      {
+        "cell": "B_hier_R4x4_Hr5_Hg30",
+        "R": 4,
+        "n_r": 4,
+        "H_r": 5,
+        "H_g": 30,
+        "anneal": false,
+        "vs_flat_M_eq_R": {
+          "ref": "A_flat_M4_H30_eta0.6",
+          "mean": 0.039935319957623484,
+          "ci90": [
+            0.03494326642449022,
+            0.04492737349075675
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.03494, +0.04493], mean +0.03994)"
+        },
+        "vs_flat_M_eq_N": {
+          "ref": "A_flat_M16_H30_eta1.0",
+          "mean": -0.007185130414424576,
+          "ci90": [
+            -0.011772859980444389,
+            -0.002597400848404762
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.01177, -0.002597], mean -0.007185)"
+        }
+      },
+      {
+        "cell": "B_hier_R4x4_Hr10_Hg30",
+        "R": 4,
+        "n_r": 4,
+        "H_r": 10,
+        "H_g": 30,
+        "anneal": false,
+        "vs_flat_M_eq_R": {
+          "ref": "A_flat_M4_H30_eta0.6",
+          "mean": 0.04955324772437195,
+          "ci90": [
+            0.044808740997336595,
+            0.05429775445140731
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.04481, +0.0543], mean +0.04955)"
+        },
+        "vs_flat_M_eq_N": {
+          "ref": "A_flat_M16_H30_eta1.0",
+          "mean": 0.0019974413996686493,
+          "ci90": [
+            -0.002756420515589621,
+            0.00675130331492692
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.002756, +0.006751], mean +0.001997)"
+        }
+      },
+      {
+        "cell": "B_hier_R2x8_Hr1_Hg30",
+        "R": 2,
+        "n_r": 8,
+        "H_r": 1,
+        "H_g": 30,
+        "anneal": false,
+        "vs_flat_M_eq_R": {
+          "ref": "A_flat_M2_H30_eta0.4",
+          "mean": 0.04687863613429827,
+          "ci90": [
+            0.038306894442849314,
+            0.05545037782574722
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.03831, +0.05545], mean +0.04688)"
+        },
+        "vs_flat_M_eq_N": {
+          "ref": "A_flat_M16_H30_eta1.0",
+          "mean": -0.022732146658746743,
+          "ci90": [
+            -0.030972135225043027,
+            -0.014492158092450459
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.03097, -0.01449], mean -0.02273)"
+        }
+      },
+      {
+        "cell": "B_hier_R2x8_Hr5_Hg30",
+        "R": 2,
+        "n_r": 8,
+        "H_r": 5,
+        "H_g": 30,
+        "anneal": false,
+        "vs_flat_M_eq_R": {
+          "ref": "A_flat_M2_H30_eta0.4",
+          "mean": 0.07187860684520253,
+          "ci90": [
+            0.061618525662344645,
+            0.08213868802806042
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.06162, +0.08214], mean +0.07188)"
+        },
+        "vs_flat_M_eq_N": {
+          "ref": "A_flat_M16_H30_eta1.0",
+          "mean": 0.0005963973029771789,
+          "ci90": [
+            -0.0037093452300122833,
+            0.004902139835966641
+          ],
+          "equivalent": true,
+          "verdict": "equivalent at delta=0.005 (90% CI [-0.003709, +0.004902], mean +0.0005964)"
+        }
+      },
+      {
+        "cell": "B_hier_R2x8_Hr10_Hg30",
+        "R": 2,
+        "n_r": 8,
+        "H_r": 10,
+        "H_g": 30,
+        "anneal": false,
+        "vs_flat_M_eq_R": {
+          "ref": "A_flat_M2_H30_eta0.4",
+          "mean": 0.09074417182803125,
+          "ci90": [
+            0.07332596991305461,
+            0.1081623737430079
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.07333, +0.1082], mean +0.09074)"
+        },
+        "vs_flat_M_eq_N": {
+          "ref": "A_flat_M16_H30_eta1.0",
+          "mean": 0.018188705899857972,
+          "ci90": [
+            0.012964298751329588,
+            0.023413113048386357
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.01296, +0.02341], mean +0.01819)"
+        }
+      },
+      {
+        "cell": "B_hier_R2x4_Hr5_Hg10",
+        "R": 2,
+        "n_r": 4,
+        "H_r": 5,
+        "H_g": 10,
+        "anneal": false,
+        "vs_flat_M_eq_R": {
+          "ref": null,
+          "result": "no complete reference cell (not in design at this H_g, or censored/divergent)"
+        },
+        "vs_flat_M_eq_N": {
+          "ref": "B_flat_M8_H10",
+          "mean": -0.025497833145226873,
+          "ci90": [
+            -0.04408456938358207,
+            -0.0069110969068716735
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.04408, -0.006911], mean -0.0255)"
+        }
+      },
+      {
+        "cell": "B_hier_R2x4_Hr5_Hg100",
+        "R": 2,
+        "n_r": 4,
+        "H_r": 5,
+        "H_g": 100,
+        "anneal": false,
+        "vs_flat_M_eq_R": {
+          "ref": null,
+          "result": "no complete reference cell (not in design at this H_g, or censored/divergent)"
+        },
+        "vs_flat_M_eq_N": {
+          "ref": "B_flat_M8_H100",
+          "mean": -0.04208804899446695,
+          "ci90": [
+            -0.05486660994967902,
+            -0.02930948803925488
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.05487, -0.02931], mean -0.04209)"
+        }
+      },
+      {
+        "cell": "B_anneal1_hier_R2x8_Hr5_Hg30",
+        "R": 2,
+        "n_r": 8,
+        "H_r": 5,
+        "H_g": 30,
+        "anneal": true,
+        "vs_flat_M_eq_R": {
+          "ref": "A_flat_M2_H30_eta0.4",
+          "mean": 0.07129589229959778,
+          "ci90": [
+            0.061589725621460145,
+            0.08100205897773541
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [+0.06159, +0.081], mean +0.0713)"
+        },
+        "vs_flat_M_eq_N": {
+          "ref": "A_flat_M16_H30_eta1.0",
+          "mean": 5.4256325178976204e-05,
+          "ci90": [
+            -0.004893204195107141,
+            0.0050017168454650944
+          ],
+          "equivalent": false,
+          "verdict": "equivalence not demonstrated at delta=0.005 (90% CI [-0.004893, +0.005002], mean +5.426e-05)"
+        }
+      }
+    ]
   },
   "eta_trend": {
     "1": {
-      "best_eta": null,
+      "best_eta": 0.6,
       "mean_loss_by_eta": {
-        "0.2": null,
-        "0.6": null,
-        "1.0": null
+        "0.2": 1.45469830930233,
+        "0.6": 1.454467635601759,
+        "1.0": 1.4986979104578495
       }
     },
     "2": {
-      "best_eta": null,
+      "best_eta": 0.4,
       "mean_loss_by_eta": {
-        "0.2": null,
-        "0.4": null,
-        "0.6": null,
-        "0.8": null,
-        "1.0": null
+        "0.2": 1.4930256369213264,
+        "0.4": 1.4712776715556781,
+        "0.6": 1.4736196100711823,
+        "0.8": 1.491060771048069,
+        "1.0": 1.505119611819585
       }
     },
     "4": {
-      "best_eta": null,
+      "best_eta": 0.6,
       "mean_loss_by_eta": {
-        "0.2": null,
-        "0.6": null,
-        "1.0": null
+        "0.2": 1.5591544061899185,
+        "0.6": 1.5046361051499844,
+        "1.0": 1.5186346968015034
       }
     },
     "8": {
-      "best_eta": null,
+      "best_eta": 1.0,
       "mean_loss_by_eta": {
-        "0.2": null,
-        "0.4": null,
-        "0.6": null,
-        "0.8": null,
-        "1.0": null
+        "0.2": 1.6524685497085254,
+        "0.4": 1.572110217064619,
+        "0.6": 1.5463966367145379,
+        "0.8": 1.5425900146365166,
+        "1.0": 1.5403155907988548
       }
     },
     "16": {
-      "best_eta": null,
+      "best_eta": 1.0,
       "mean_loss_by_eta": {
-        "0.2": null,
-        "0.6": null,
-        "1.0": null
+        "0.2": 1.7707821801304817,
+        "0.6": 1.6076052611072857,
+        "1.0": 1.5760376925269763
       }
     },
     "32": {
-      "best_eta": null,
+      "best_eta": 1.0,
       "mean_loss_by_eta": {
-        "0.2": null,
-        "0.4": null,
-        "0.6": null,
-        "0.8": null,
-        "1.0": null
+        "0.2": 1.9065752774477005,
+        "0.4": 1.7583454909423988,
+        "0.6": 1.6795845851302147,
+        "0.8": 1.6494140724341075,
+        "1.0": 1.6305071997145812
       }
     }
   },
   "dp_control": {
-    "0.0003": null,
-    "0.001": null,
-    "best_inner_lr": null
+    "0.0003": {
+      "0": 1.4055366590619087,
+      "1": 1.420323520898819,
+      "2": 1.4048909060657024
+    },
+    "0.001": {
+      "0": 1.3721686489880085,
+      "1": 1.3845645114779472,
+      "2": 1.365182589739561
+    },
+    "best_inner_lr": 0.001
   },
-  "power": null,
+  "power": {
+    "n": 3,
+    "sd_diff": 0.0055937118596538545,
+    "delta": 0.005,
+    "ci90_half_width": 0.009430230659985836,
+    "power_at_zero": 0.0,
+    "n_required": 12,
+    "warning": "underpowered: n=3 paired seeds, sd of differences 0.005594 -> 90% CI half-width 0.00943 vs delta 0.005; power at true difference 0 ~0.00 (< 0.8); need n >= 12"
+  },
   "injected_shift": null,
   "mode": "full",
   "prereg": {
@@ -93,169 +5308,11 @@
       4
     ]
   },
-  "censored": [
-    "A_flat_M16_H30_eta0.2|s0",
-    "A_flat_M16_H30_eta0.2|s1",
-    "A_flat_M16_H30_eta0.2|s2",
-    "A_flat_M16_H30_eta0.6|s0",
-    "A_flat_M16_H30_eta0.6|s1",
-    "A_flat_M16_H30_eta0.6|s2",
-    "A_flat_M16_H30_eta1.0|s0",
-    "A_flat_M16_H30_eta1.0|s1",
-    "A_flat_M16_H30_eta1.0|s2",
-    "A_flat_M1_H30_eta0.2|s0",
-    "A_flat_M1_H30_eta0.2|s1",
-    "A_flat_M1_H30_eta0.2|s2",
-    "A_flat_M1_H30_eta0.6|s0",
-    "A_flat_M1_H30_eta0.6|s1",
-    "A_flat_M1_H30_eta0.6|s2",
-    "A_flat_M1_H30_eta1.0|s0",
-    "A_flat_M1_H30_eta1.0|s1",
-    "A_flat_M1_H30_eta1.0|s2",
-    "A_flat_M2_H30_eta0.2|s0",
-    "A_flat_M2_H30_eta0.2|s1",
-    "A_flat_M2_H30_eta0.2|s2",
-    "A_flat_M2_H30_eta0.4|s0",
-    "A_flat_M2_H30_eta0.4|s1",
-    "A_flat_M2_H30_eta0.4|s2",
-    "A_flat_M2_H30_eta0.6|s0",
-    "A_flat_M2_H30_eta0.6|s1",
-    "A_flat_M2_H30_eta0.6|s2",
-    "A_flat_M2_H30_eta0.8|s0",
-    "A_flat_M2_H30_eta0.8|s1",
-    "A_flat_M2_H30_eta0.8|s2",
-    "A_flat_M2_H30_eta1.0|s0",
-    "A_flat_M2_H30_eta1.0|s1",
-    "A_flat_M2_H30_eta1.0|s2",
-    "A_flat_M32_H30_eta0.2|s0",
-    "A_flat_M32_H30_eta0.2|s1",
-    "A_flat_M32_H30_eta0.2|s2",
-    "A_flat_M32_H30_eta0.4|s0",
-    "A_flat_M32_H30_eta0.4|s1",
-    "A_flat_M32_H30_eta0.4|s2",
-    "A_flat_M32_H30_eta0.6|s0",
-    "A_flat_M32_H30_eta0.6|s1",
-    "A_flat_M32_H30_eta0.6|s2",
-    "A_flat_M32_H30_eta0.8|s0",
-    "A_flat_M32_H30_eta0.8|s1",
-    "A_flat_M32_H30_eta0.8|s2",
-    "A_flat_M32_H30_eta1.0|s0",
-    "A_flat_M32_H30_eta1.0|s1",
-    "A_flat_M32_H30_eta1.0|s2",
-    "A_flat_M4_H30_eta0.2|s0",
-    "A_flat_M4_H30_eta0.2|s1",
-    "A_flat_M4_H30_eta0.2|s2",
-    "A_flat_M4_H30_eta0.6|s0",
-    "A_flat_M4_H30_eta0.6|s1",
-    "A_flat_M4_H30_eta0.6|s2",
-    "A_flat_M4_H30_eta1.0|s0",
-    "A_flat_M4_H30_eta1.0|s1",
-    "A_flat_M4_H30_eta1.0|s2",
-    "A_flat_M8_H30_eta0.2|s0",
-    "A_flat_M8_H30_eta0.2|s1",
-    "A_flat_M8_H30_eta0.2|s2",
-    "A_flat_M8_H30_eta0.4|s0",
-    "A_flat_M8_H30_eta0.4|s1",
-    "A_flat_M8_H30_eta0.4|s2",
-    "A_flat_M8_H30_eta0.6|s0",
-    "A_flat_M8_H30_eta0.6|s1",
-    "A_flat_M8_H30_eta0.6|s2",
-    "A_flat_M8_H30_eta0.8|s0",
-    "A_flat_M8_H30_eta0.8|s1",
-    "A_flat_M8_H30_eta0.8|s2",
-    "A_flat_M8_H30_eta1.0|s0",
-    "A_flat_M8_H30_eta1.0|s1",
-    "A_flat_M8_H30_eta1.0|s2",
-    "B_anneal1_M32_H30|s0",
-    "B_anneal1_M32_H30|s1",
-    "B_anneal1_M32_H30|s2",
-    "B_anneal1_M8_H30|s0",
-    "B_anneal1_M8_H30|s1",
-    "B_anneal1_M8_H30|s2",
-    "B_anneal1_hier_R2x8_Hr5_Hg30|s0",
-    "B_anneal1_hier_R2x8_Hr5_Hg30|s1",
-    "B_anneal1_hier_R2x8_Hr5_Hg30|s2",
-    "B_flat_M8_H100|s0",
-    "B_flat_M8_H100|s1",
-    "B_flat_M8_H100|s2",
-    "B_flat_M8_H10|s0",
-    "B_flat_M8_H10|s1",
-    "B_flat_M8_H10|s2",
-    "B_hier_R2x4_Hr10_Hg30|s0",
-    "B_hier_R2x4_Hr10_Hg30|s1",
-    "B_hier_R2x4_Hr10_Hg30|s2",
-    "B_hier_R2x4_Hr1_Hg30|s0",
-    "B_hier_R2x4_Hr1_Hg30|s1",
-    "B_hier_R2x4_Hr1_Hg30|s2",
-    "B_hier_R2x4_Hr5_Hg100|s0",
-    "B_hier_R2x4_Hr5_Hg100|s1",
-    "B_hier_R2x4_Hr5_Hg100|s2",
-    "B_hier_R2x4_Hr5_Hg10|s0",
-    "B_hier_R2x4_Hr5_Hg10|s1",
-    "B_hier_R2x4_Hr5_Hg10|s2",
-    "B_hier_R2x4_Hr5_Hg30|s0",
-    "B_hier_R2x4_Hr5_Hg30|s1",
-    "B_hier_R2x4_Hr5_Hg30|s2",
-    "B_hier_R2x8_Hr10_Hg30|s0",
-    "B_hier_R2x8_Hr10_Hg30|s1",
-    "B_hier_R2x8_Hr10_Hg30|s2",
-    "B_hier_R2x8_Hr1_Hg30|s0",
-    "B_hier_R2x8_Hr1_Hg30|s1",
-    "B_hier_R2x8_Hr1_Hg30|s2",
-    "B_hier_R2x8_Hr5_Hg30|s0",
-    "B_hier_R2x8_Hr5_Hg30|s1",
-    "B_hier_R2x8_Hr5_Hg30|s2",
-    "B_hier_R4x4_Hr10_Hg30|s0",
-    "B_hier_R4x4_Hr10_Hg30|s1",
-    "B_hier_R4x4_Hr10_Hg30|s2",
-    "B_hier_R4x4_Hr1_Hg30|s0",
-    "B_hier_R4x4_Hr1_Hg30|s1",
-    "B_hier_R4x4_Hr1_Hg30|s2",
-    "B_hier_R4x4_Hr5_Hg30|s0",
-    "B_hier_R4x4_Hr5_Hg30|s1",
-    "B_hier_R4x4_Hr5_Hg30|s2",
-    "B_muon_M2_H30|s0",
-    "B_muon_M2_H30|s1",
-    "B_muon_M2_H30|s2",
-    "B_muon_M32_H30|s0",
-    "B_muon_M32_H30|s1",
-    "B_muon_M32_H30|s2",
-    "B_muon_M8_H30|s0",
-    "B_muon_M8_H30|s1",
-    "B_muon_M8_H30|s2",
-    "B_sparseloco_M2_H30|s0",
-    "B_sparseloco_M2_H30|s1",
-    "B_sparseloco_M2_H30|s2",
-    "B_sparseloco_M32_H30|s0",
-    "B_sparseloco_M32_H30|s1",
-    "B_sparseloco_M32_H30|s2",
-    "B_sparseloco_M8_H30|s0",
-    "B_sparseloco_M8_H30|s1",
-    "B_sparseloco_M8_H30|s2",
-    "B_stream_M8_P3_tau0|s0",
-    "B_stream_M8_P3_tau0|s1",
-    "B_stream_M8_P3_tau0|s2",
-    "B_stream_M8_P3_tau1|s0",
-    "B_stream_M8_P3_tau1|s1",
-    "B_stream_M8_P3_tau1|s2",
-    "DP_lr0.0003|s0",
-    "DP_lr0.0003|s1",
-    "DP_lr0.0003|s2",
-    "DP_lr0.001|s0",
-    "DP_lr0.001|s1",
-    "DP_lr0.001|s2"
-  ],
+  "censored": [],
   "errors": {},
   "divergent": [],
-  "wall_s": 13290.0,
+  "wall_s": 2493.8,
   "caveat": "1.1M-param CPU proxy: ranks/signs only; absolute gaps at >=1B are 4-10x smaller, eta below 335M is unstable, no benchmark/MoE/BF16/network behavior; no 100B parity claim (extrapolation only)",
-  "full_scale_status": {
-    "result": "CENSORED",
-    "reason": "user CPU/energy stop 2026-10-08 ~02:35Z, 0/150 finished",
-    "jobs_censored": 150,
-    "jobs_done": 0,
-    "verdict": "parity at full scale NOT demonstrated: no full-scale cell finished (0/150); no gap, CI, TOST or promotion exists at the pre-registered 1.1M-param scale"
-  },
   "smoke_results": {
     "label": "non-informative scale",
     "path": "experiments/results/summary_smoke.json",
@@ -306,5 +5363,20 @@
     "divergent": [
       "A_flat_M32_H30_eta1.0|s0"
     ]
+  },
+  "execution": {
+    "device": "cuda (1x RTX 5090, Vast)",
+    "jobs_done": 150,
+    "jobs_total": 150,
+    "batched_replicas": true,
+    "equivalence": "experiments/results/parity_gpu_equiv.json",
+    "attempts": "experiments/results/parity_vast_attempts.json"
+  },
+  "full_scale_status": {
+    "result": "DONE",
+    "reason": "ran on 1x RTX 5090 (Vast) 2026-10-12 after CPU stop 2026-10-08",
+    "jobs_censored": 0,
+    "jobs_done": 150,
+    "verdict": "full grid finished; no cell equivalent to data-parallel at delta 0.5%; H1 rejected, H2 weakly supported (top of grid not bracketed), H3 Muon promoted, H4 supported"
   }
 }

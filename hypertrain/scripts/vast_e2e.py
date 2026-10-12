@@ -36,12 +36,17 @@ EVIDENCE = Path(
 ROOT = Path(__file__).resolve().parents[1]
 UPLOAD = ["src", "tests", "pyproject.toml", "uv.lock", "scripts", "README.md", "LICENSE"]
 DISK_GB = 40
-EXCLUDED_MACHINES = (137465, 43459, 142018)  # 142018: GPUs at 100% util by a hidden tenant
+# 142018: GPUs at 100% util by a hidden tenant; 146840/141607: image pull >15 min (2026-10-12)
+EXCLUDED_MACHINES = (137465, 43459, 142018, 146840, 141607)
 HOURS_PER_MONTH = Decimal(720)
 
 
 class Refused(Exception):
     """Admission refusal: nothing was created."""
+
+
+class OfferGone(Exception):
+    """CREATE refused (offer taken meanwhile) and a parsed listing shows no instance."""
 
 
 class Response:
@@ -199,10 +204,26 @@ def list_rows(r: Response) -> list[dict[str, Any]] | None:
 
 
 class Harness:
+    # Profile hooks (subclasses such as scripts/vast_parity.py override these; defaults = e2e).
+    label_prefix = "hypertrain-e2e"
+    offer_desc = "2x RTX 5090"
+    disk_gb = DISK_GB
+    upload_paths: list[str] = UPLOAD
+    rsync_excludes: list[str] = []
+
+    def offer_query(self) -> dict[str, Any]:
+        return offer_query()
+
+    def eligible(self, o: Any) -> bool:
+        return eligible(o)
+
+    def rank(self, o: dict[str, Any]) -> tuple[Any, ...]:
+        return (dec(o["dph_total"]), o["id"])
+
     def __init__(self, args: argparse.Namespace, api: Api) -> None:
         self.a, self.api = args, api
         self.out = Path(args.evidence_dir)
-        self.label = f"hypertrain-e2e-{uuid.uuid4().hex[:8]}"
+        self.label = f"{self.label_prefix}-{uuid.uuid4().hex[:8]}"
         self.instance_id: int | None = None
         self.create_attempted = False
         self.ssh: tuple[str, int] | None = None
@@ -222,16 +243,16 @@ class Harness:
         self.api.log("credit", credit=str(credit), required=str(need))
         if credit < need:
             raise Refused(f"credit {credit} < max_usd + 5 = {need}")
-        q = urllib.parse.urlencode({"q": json.dumps(offer_query())})
+        q = urllib.parse.urlencode({"q": json.dumps(self.offer_query())})
         r = self.api.call("GET", "/api/v0/bundles/?" + q)
         offers = r.body.get("offers") if r.ok() else None
         if not isinstance(offers, list):
             raise Refused(f"offer search failed (HTTP {r.status})")
-        fit = [o for o in offers if eligible(o)]
+        fit = [o for o in offers if self.eligible(o)]
         if not fit:
-            raise Refused(f"no eligible 2x RTX 5090 offer among {len(offers)}")
-        best = min(fit, key=lambda o: (dec(o["dph_total"]), o["id"]))
-        cost = worst_case(best, float(self.a.max_minutes))
+            raise Refused(f"no eligible {self.offer_desc} offer among {len(offers)}")
+        best = min(fit, key=self.rank)
+        cost = worst_case(best, float(self.a.max_minutes), self.disk_gb)
         quote = {
             k: best.get(k)
             for k in (
@@ -246,6 +267,10 @@ class Harness:
                 "geolocation",
                 "gpu_name",
                 "num_gpus",
+                "cpu_name",
+                "cpu_cores_effective",
+                "cpu_ghz",
+                "cpu_ram",
             )
         }
         quote["worst_case_usd"] = str(cost.quantize(Decimal("0.0001")))
@@ -263,6 +288,8 @@ class Harness:
         )
         if cost > Decimal(str(self.a.max_usd)):
             raise Refused(f"worst case {cost:.4f} USD > max_usd {self.a.max_usd}")
+        # Later attempts (after a host that never booted) take the next cheapest offers.
+        self.fallbacks = [o for o in sorted(fit, key=self.rank) if o is not best]
         return best
 
     def create(self, offer: dict[str, Any]) -> None:
@@ -274,7 +301,7 @@ class Harness:
             body={
                 "client_id": "me",
                 "image": IMAGE,
-                "disk": DISK_GB,
+                "disk": self.disk_gb,
                 "runtype": "ssh",
                 "label": self.label,
                 "target_state": "running",
@@ -287,6 +314,8 @@ class Harness:
         else:
             self.instance_id = self.find_by_label()
         if self.instance_id is None:
+            if r.status == 400 and self.instances() == []:
+                raise OfferGone(f"offer {offer['id']} refused (HTTP 400), nothing created")
             raise RuntimeError(f"create unresolved (HTTP {r.status})")
         self.api.log("created", instance_id=self.instance_id)
 
@@ -304,9 +333,46 @@ class Harness:
                 return hits[0] if hits else None
         return None
 
+    def boot(self, offer: dict[str, Any]) -> None:
+        """Create + wait for ssh; a vanished offer or a stuck host moves to the next offer."""
+        tried: set[int] = set()
+        for attempt in range(1 + int(self.a.boot_retries)):
+            tried.add(offer.get("machine_id"))
+            try:
+                self.create(offer)
+            except OfferGone:
+                self.api.log("offer_gone", attempt=attempt, offer_id=offer["id"])
+            else:
+                real, self.deadline = (
+                    self.deadline,
+                    min(self.deadline, time.time() + float(self.a.boot_timeout)),
+                )
+                try:
+                    self.wait_ready()
+                    return
+                except RuntimeError:
+                    if time.time() >= real or self.cancel.is_set():
+                        raise
+                finally:
+                    self.deadline = real
+                self.api.log("boot_timeout", attempt=attempt, instance_id=self.instance_id)
+                if not (self.delete() and self.confirm_absent()):
+                    raise RuntimeError("stuck host not confirmed absent")
+            self.instance_id, self.create_attempted = None, False
+            self.label = f"{self.label_prefix}-{uuid.uuid4().hex[:8]}"
+            self.result["label"] = self.label
+            nxt = [o for o in self.fallbacks if o.get("machine_id") not in tried]
+            if not nxt:
+                break
+            offer = nxt[0]
+            cost = worst_case(offer, float(self.a.max_minutes), self.disk_gb)
+            if cost > Decimal(str(self.a.max_usd)):
+                break
+        raise RuntimeError("no host became ssh-ready")
+
     def wait_ready(self) -> None:
         key = self.identity().with_suffix(".pub").read_text().strip()
-        attached = False
+        attached, last_error = False, None
         while time.time() < self.deadline and not self.cancel.is_set():
             rows = self.instances()
             row = next((i for i in rows or [] if i["id"] == self.instance_id), None)
@@ -334,6 +400,12 @@ class Harness:
                             "ssh_ready", host=host, port=port, driver=row.get("driver_version")
                         )
                         return
+                    err = getattr(self, "probe_error", "")
+                    if err != last_error:
+                        self.api.log("ssh_probe_failed", host=host, port=port, stderr=err)
+                        last_error = err
+                    if "Permission denied" in err:
+                        attached = False  # key attached while loading can be lost at start
             self.api.sleep(max(5.0, self.api.min_gap))
         raise RuntimeError("instance not ssh-ready before deadline")
 
@@ -421,6 +493,7 @@ class Harness:
             timeout=60,
             check=False,
         )
+        self.probe_error = "" if p.returncode == 0 else p.stderr.decode(errors="replace")[-300:]
         return p.returncode == 0
 
     def upload(self) -> int:
@@ -435,12 +508,13 @@ class Harness:
         ):
             raise RuntimeError("remote rsync unavailable")
         ssh = shlex.join(self.ssh_argv(*self.ssh)[:-1])
-        sources = [str(ROOT / p) for p in UPLOAD if (ROOT / p).exists()]
+        sources = [str(ROOT / p) for p in self.upload_paths if (ROOT / p).exists()]
         argv = [
             "rsync",
             "-az",
             "--delete",
             "--exclude=__pycache__",
+            *(f"--exclude={x}" for x in self.rsync_excludes),
             "-e",
             ssh,
             *sources,
@@ -530,8 +604,7 @@ class Harness:
         dog.start()
         rc = 1
         try:
-            self.create(offer)
-            self.wait_ready()
+            self.boot(offer)
             if self.upload() != 0:
                 raise RuntimeError("upload failed")
             rc = self.run_remote()
@@ -566,6 +639,13 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
         help="seconds before the wall deadline at which the watchdog fires",
     )
     p.add_argument("--min-gap", type=float, default=5.0, help="seconds between provider calls")
+    p.add_argument(
+        "--boot-timeout",
+        type=float,
+        default=900.0,
+        help="seconds a host may take to become ssh-ready before it is replaced",
+    )
+    p.add_argument("--boot-retries", type=int, default=2, help="replacement hosts to try")
     p.add_argument("--delete-attempts", type=int, default=6)
     p.add_argument("--absence-attempts", type=int, default=12)
     p.add_argument(

@@ -115,7 +115,7 @@ Raw evidence and methodology: [docs/RESULTS.md](docs/RESULTS.md).
 ### Design experiments
 
 - **Optimizer state across rounds:** `state_policy = carry` with segment audits. It beat reset, re-warmup and derived-state alternatives on a CPU proxy ([mechanism](docs/mechanism.md#8-evidence-from-experiments)).
-- **Quality parity:** a pre-registered TOST protocol for many replicas across regions is specified in [docs/parity.md](docs/parity.md). Large-scale parity runs are on the roadmap.
+- **Quality parity:** a pre-registered TOST protocol for many replicas across regions is specified in [docs/parity.md](docs/parity.md). The full grid ran on one RTX 5090 (150{ev:experiments/results/parity_vast_attempts.json#grid.jobs_done} of 150{ev:experiments/results/parity_vast_attempts.json#grid.jobs_total} jobs, 1.1M-parameter proxy). No DiLoCo cell is equivalent to data-parallel training at the 0.5% margin. The gap of flat DiLoCo grows with the replica count, from +3.14{ev:experiments/results/summary.json#cells.2.gap_vs_dp*100}% at `M = 1` to +15.62{ev:experiments/results/summary.json#cells.46.gap_vs_dp*100}% at `M = 32`. Regional hierarchies do not behave like a flat run with `M = R` (H1 rejected), and Muon as the inner optimizer gives the largest improvement (see section 5).
 
 ## Quickstart
 

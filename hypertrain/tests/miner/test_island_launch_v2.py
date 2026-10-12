@@ -864,6 +864,7 @@ def test_d2_execution_plan_invokes_launcher_and_rescues_every_host_on_fault(
 
     monkeypatch.setattr(lifecycle, "ssh", ssh)
     before = len(journal.all("network_execution_intent"))
+    writes = len(journal.all("provider_call", write=True))
     try:
         with pytest.raises(mod.Reject, match="actual rank failure"):
             runtime.execute_plan(
@@ -879,7 +880,7 @@ def test_d2_execution_plan_invokes_launcher_and_rescues_every_host_on_fault(
         assert len(journal.all("network_execution_intent")) > before
         assert journal.last("network_plan_terminal")["failed"] is True
         assert {row["role"] for row in journal.all("network_rescued")} == {"h0", "h1"}
-        assert not journal.all("provider_call", write=True)
+        assert len(journal.all("provider_call", write=True)) == writes
         assert lifecycle.cfg["cleanup_deadline_unix"] == record["cutoff_unix"]
     finally:
         context.close()

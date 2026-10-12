@@ -287,13 +287,21 @@ def genuine_network(path: Path, destination: Path, *, accepted: bool = True):
             assert envelope_v2.verify_envelope(opening) and opening["signer"] == COORD.ss58
             assert opening == envelope_v2.load_json(files["accepted_round"].read_bytes())
             rows = store._db.execute(
-                "SELECT hotkey,state,clean_count FROM admissions_v2 WHERE run_id=?",
+                "SELECT hotkey,state,clean_count,pending_dispute FROM admissions_v2 WHERE run_id=?",
                 (index.run_id,),
             ).fetchall()
+            # An open dispute (referee case) suspends exactly its contested graduated miner.
+            disputed = {r[0] for r in store._db.execute("SELECT miner FROM disputes_v2")}
             assert {
                 row["hotkey"]
                 for row in rows
-                if row["state"] == "ACTIVE" and row["clean_count"] >= 12
+                if row["clean_count"] >= 12
+                and (
+                    row["state"] == "ACTIVE"
+                    or row["state"] == "SUSPENDED"
+                    and row["pending_dispute"]
+                    and row["hotkey"] in disputed
+                )
             } == {key.ss58 for key in HOT}
             trials = store._db.execute(
                 "SELECT admission_id,COUNT(*) AS n FROM admission_trials "

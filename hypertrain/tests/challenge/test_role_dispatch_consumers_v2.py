@@ -276,8 +276,14 @@ def test_real_adapter_audit_canonical_publication(authority, monkeypatch):
         "Receipt",
         manifest.run_id(),
         Receipt(w=0, commit_hash=lease["nonce"], received_round=1),
-        100,
+        store._now(store._db) + 100,
     )
+    if hasattr(store, "_genuine_index"):  # history already holds signed w=0 receipts
+        raw = json.loads(
+            store._genuine_files[
+                store._genuine_index.cases["audit:live"]["audit_receipt"]
+            ].read_bytes()
+        )
     result = store.execute_audit_v2(manifest.run_id(), lease["id"], canonicalize(raw))
     assert result["verdict"]["result"] == "MISMATCH" and len(calls) == 1
     descriptor = store._record_v2(
@@ -351,8 +357,14 @@ def test_accepted_role_factory_called_before_kernel(authority, monkeypatch, cons
             "Receipt",
             manifest.run_id(),
             Receipt(w=0, commit_hash=lease["nonce"], received_round=1),
-            100,
+            store._now(store._db) + 100,
         )
+        if hasattr(store, "_genuine_index"):  # history already holds signed w=0 receipts
+            receipt = json.loads(
+                store._genuine_files[
+                    store._genuine_index.cases["audit:live"]["audit_receipt"]
+                ].read_bytes()
+            )
         with pytest.raises(ChallengeError, match="trusted launch dispatch sentinel"):
             store.execute_audit_v2(manifest.run_id(), lease["id"], canonicalize(receipt))
     else:
