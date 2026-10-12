@@ -39,6 +39,21 @@ jobs:
           commit=$(git rev-parse "${TAG}^{commit}")
           git merge-base --is-ancestor "$commit" origin/main || { echo "tag is not on main"; exit 1; }
           echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Build wheel and sign update manifest
+        env:
+          COMMIT: ${{ steps.check.outputs.commit }}
+          HYPERTRAIN_RELEASE_KEY: ${{ secrets.HYPERTRAIN_RELEASE_KEY }}
+        run: |
+          [ -n "$HYPERTRAIN_RELEASE_KEY" ] || { echo "HYPERTRAIN_RELEASE_KEY is not set"; exit 1; }
+          uv build --wheel --out-dir dist
+          wheel=$(ls dist/*.whl)
+          key="$RUNNER_TEMP/release.key"
+          (umask 077 && printf '%s' "$HYPERTRAIN_RELEASE_KEY" > "$key")
+          uv run --frozen python scripts/sign_release.py --key-file "$key" --tag "$TAG" \
+            --commit "$COMMIT" --wheel "$wheel" --out dist/manifest.json \
+            --wheel-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/$(basename "$wheel")"
+          rm -f "$key"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -67,4 +82,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$TAG" --verify-tag --repo "$GITHUB_REPOSITORY" \
-            --title "$TAG" --notes-file digests.txt
+            --title "$TAG" --notes-file digests.txt dist/*.whl dist/manifest.json
