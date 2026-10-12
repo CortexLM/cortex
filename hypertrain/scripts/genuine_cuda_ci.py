@@ -195,6 +195,14 @@ def pick_offers(offers: list[dict]) -> list[dict]:
     raise SystemExit("fewer than two eligible distinct 2x RTX 5090 machines")
 
 
+def dec_or_none(v: object) -> Decimal | None:
+    try:
+        d = Decimal(str(v))
+    except (ArithmeticError, ValueError):
+        return None
+    return d if v is not None and d.is_finite() and d >= 0 else None
+
+
 def run(a: argparse.Namespace) -> int:
     from hypertrain.gpu_ops.journal import Journal, durable_write
     from hypertrain.gpu_ops.launcher import Orchestrator
@@ -331,13 +339,16 @@ def run(a: argparse.Namespace) -> int:
     )
     data, observations = snapshot(reader, stage)
     instances = data["instances"].get("instances")
-    foreign = [
-        i for i in instances or [] if str(i.get("label", "")).startswith("hypertrain-parity")
-    ]
-    if len(foreign) != len(instances or []) or data["volumes"] != {"volumes": []}:
-        log("refused_unknown_inventory", instances=[i.get("label") for i in instances or []])
+    # Instances of other runs on the shared account are counted as liabilities (one hour at
+    # their own hourly price, floored at --foreign-liability-usd each), never touched.
+    foreign = list(instances or [])
+    rates = [dec_or_none(i.get("dph_total")) for i in foreign]
+    if instances is None or None in rates or data["volumes"] != {"volumes": []}:
+        log("refused_unknown_inventory", instances=[i.get("label") for i in foreign])
         return 75
-    foreign_liability = a.foreign_liability_usd if foreign else Decimal(0)
+    foreign_liability = sum(
+        (max(r, a.foreign_liability_usd) for r in rates if r is not None), Decimal(0)
+    )
     credit = Decimal(str(data["account"]["credit"]))
     offers = pick_offers(data["offers"]["offers"])
     stamp = observations[-1]
