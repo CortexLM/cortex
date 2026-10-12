@@ -153,14 +153,15 @@ def _make_leaf(
 
 def _train_step(
     cfg: TrainConfig, a: Assignment, theta: Params, st: OptState, t: int, get_sample: SampleFn
-) -> float:
+) -> Tensor:
+    """One inner step; the mean CE is returned as a float64 device tensor (read once per leaf)."""
     names = sorted(theta)
     ga, mb = cfg.inner.grad_accum, cfg.inner.micro_batch
     ids = a.batch_ids(cfg, t)
     if len(ids) != ga * mb:
         raise ValueError(f"assignment too short for step {t}")
     grads = {n: torch.zeros_like(theta[n]) for n in names}
-    loss_sum = 0.0
+    loss_sum = torch.zeros((), dtype=torch.float64, device=theta[names[0]].device)
     for j in range(ga):
         params = {n: theta[n].detach().requires_grad_(True) for n in names}
         tokens = _load_batch(cfg, ids[j * mb : (j + 1) * mb], get_sample, theta[names[0]].device)
@@ -170,7 +171,7 @@ def _train_step(
         for n, g in zip(names, gs, strict=True):
             if g is not None:
                 grads[n].add_(g)
-        loss_sum += float(ce.detach())
+        loss_sum = loss_sum + ce.detach().double()
     lr = lr_at(cfg.inner, a.global_step0 + t - 1, t - 1)
     step(cfg.inner, theta, grads, st, lr)
     return loss_sum / ga
@@ -199,13 +200,12 @@ def train_round(
     st = init_state(cfg.inner, theta, carry, v0)
     leaves = [_make_leaf(cfg, a, 0, theta, st, 0.0, 0.0)]
     window_start = {n: x.clone() for n, x in theta.items()}
-    loss = 0.0
     for t in range(1, H + 1):
         loss = _train_step(cfg, a, theta, st, t, get_sample)
         if after_step is not None:
             after_step(t, theta)
         if t % J == 0:
-            leaves.append(_make_leaf(cfg, a, t, theta, st, loss, _norm(theta, window_start)))
+            leaves.append(_make_leaf(cfg, a, t, theta, st, float(loss), _norm(theta, window_start)))
             window_start = {n: x.clone() for n, x in theta.items()}
     if ef_in is None:
         ef_in = {n: torch.zeros_like(x) for n, x in theta.items()}

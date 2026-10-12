@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 import hypertrain.trainer  # noqa: F401  (determinism before torch)
@@ -25,10 +27,13 @@ SHAPES = {
 }
 
 
+@pytest.mark.parametrize("clip", [1.0, 0.37])
 @pytest.mark.parametrize("opt", ["adamw", "muon"])
 @pytest.mark.parametrize("policy", ["reset", "derived", "carry"])
-def test_fused_equals_reference_50_steps(opt: str, policy: str) -> None:
-    cfg = InnerConfig(lr=3e-3, H=50, J=1, micro_batch=1, opt=opt, state_policy=policy)
+def test_fused_equals_reference_50_steps(opt: str, policy: str, clip: float) -> None:
+    cfg = InnerConfig(
+        lr=3e-3, H=50, J=1, micro_batch=1, opt=opt, state_policy=policy, grad_clip=clip
+    )
     g = torch.Generator().manual_seed(1)
     p0 = {n: torch.randn(s, generator=g) * 0.02 for n, s in SHAPES.items()}
     ref_cfg = InnerConfig(lr=3e-3, H=50, J=1, micro_batch=1, opt=opt)
@@ -47,3 +52,17 @@ def test_fused_equals_reference_50_steps(opt: str, policy: str) -> None:
     for d in ((pa, pb), (sa.m, sb.m), (sa.v, sb.v)):
         assert sorted(d[0]) == sorted(d[1])
         assert all(torch.equal(d[0][n], d[1][n]) for n in d[0])
+
+
+@pytest.mark.skipif("HT_GENUINE_CUDA_INDEX" not in os.environ, reason="needs a real GPU")
+def test_step_has_no_host_sync() -> None:
+    dev = torch.device("cuda", int(os.environ["HT_GENUINE_CUDA_INDEX"]))
+    cfg = InnerConfig(lr=3e-3, H=1, J=1, micro_batch=1, opt="muon", grad_clip=0.37)
+    p = {n: torch.randn(s, device=dev) for n, s in SHAPES.items()}
+    st = init_state(cfg, p)
+    grads = {n: torch.randn(s, device=dev) for n, s in SHAPES.items()}
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        step(cfg, p, grads, st, 3e-3)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")

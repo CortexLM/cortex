@@ -112,11 +112,17 @@ def newton_schulz(g: Tensor, steps: int) -> Tensor:
     return x.transpose(-1, -2) if transposed else x
 
 
-def global_grad_norm(grads: Params) -> float:
-    total = 0.0
-    for name in sorted(grads):
-        total += float(grads[name].double().pow(2).sum())
-    return math.sqrt(total)
+def fixed_sum(xs: list[Tensor]) -> Tensor:
+    """Left-to-right float64 sum on device: same IEEE ops as the former Python ``+=`` loop."""
+    total = xs[0]
+    for x in xs[1:]:
+        total = total + x
+    return total
+
+
+def global_grad_norm(grads: Params) -> Tensor:
+    """0-dim float64 device tensor (no host sync); bitwise equal to the former float path."""
+    return fixed_sum([grads[n].double().pow(2).sum() for n in sorted(grads)]).sqrt()
 
 
 @torch.no_grad()
@@ -126,7 +132,7 @@ def step(
     grads: Params,
     st: OptState,
     lr: float,
-    norm: float | None = None,
+    norm: Tensor | None = None,
     fused: bool = True,
 ) -> None:
     """Update ``params`` in place; ``norm`` overrides the clip norm (sharded island layouts).
@@ -136,7 +142,7 @@ def step(
     """
     if norm is None:
         norm = global_grad_norm(grads)
-    clip = min(1.0, cfg.grad_clip / (norm + 1e-6))
+    clip = (cfg.grad_clip / (norm + 1e-6)).clamp(max=1.0)  # on device: no host sync
     st.step += 1
     bc1 = 1.0 - cfg.beta1**st.step
     bc2 = 1.0 if cfg.state_policy == "derived" else 1.0 - cfg.beta2**st.step
@@ -167,7 +173,7 @@ def _step_fused(
     grads: Params,
     st: OptState,
     lr: float,
-    clip: float,
+    clip: Tensor,
     bc1: float,
     bc2: float,
 ) -> None:

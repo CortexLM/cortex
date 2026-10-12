@@ -44,7 +44,7 @@ from hypertrain.trainer.loop import (
     _norm,
 )
 from hypertrain.trainer.model import _swiglu, forward, param_shapes, permute_rows, route
-from hypertrain.trainer.optim import OptState, init_state, lr_at, step, uses_muon
+from hypertrain.trainer.optim import OptState, fixed_sum, init_state, lr_at, step, uses_muon
 
 Params = dict[str, Tensor]
 Piece = tuple[str, int]  # (tensor name, ep shard index; 0 for dense tensors)
@@ -497,13 +497,13 @@ def _rank_grads(
     get: SampleFn,
     t: int = 0,
     hook: TraceHook | None = None,
-) -> tuple[Params, float]:
+) -> tuple[Params, Tensor]:
     """Mirror of loop._train_step on this rank's samples (no optimizer step)."""
     names = sorted(theta)
     ga, mb = cfg.inner.grad_accum, cfg.inner.micro_batch
     moe = _moe_ep(comm, geo) if cfg.model.is_moe else None
     grads = {n: torch.zeros_like(theta[n]) for n in names}
-    loss_sum = 0.0
+    loss_sum = torch.zeros((), dtype=torch.float64, device=theta[names[0]].device)
     for j in range(ga):
         params = {n: theta[n].detach().requires_grad_(True) for n in names}
         tokens = _load_batch(cfg, ids[j * mb : (j + 1) * mb], get, theta[names[0]].device)
@@ -517,7 +517,7 @@ def _rank_grads(
         for n, g in zip(names, gs, strict=True):
             if g is not None:
                 grads[n].add_(g)
-        loss_sum += float(ce.detach())
+        loss_sum = loss_sum + ce.detach().double()
     return grads, loss_sum / ga
 
 
@@ -543,31 +543,25 @@ def _reduce(comm: Comm, geo: Geometry, grads: Params, reduction: str) -> Params:
     return out
 
 
-def _grad_norm(comm: Comm, geo: Geometry, red: Params) -> float:
-    """optim.global_grad_norm over the full (all-shard) gradient, summed in fixed order."""
+def _grad_norm(comm: Comm, geo: Geometry, red: Params) -> Tensor:
+    """optim.global_grad_norm over the full (all-shard) gradient, summed in fixed order on device
+    (0-dim float64, no host sync)."""
     names = sorted(red)
-    parts = torch.tensor(
-        [float(red[n].double().pow(2).sum()) for n in names],
-        dtype=torch.float64,
-        device=red[names[0]].device,
-    )
+    parts = torch.stack([red[n].double().pow(2).sum() for n in names])
     got = comm.all_gather(parts)
-    total = 0.0
+    terms: list[Tensor] = []
     for i, n in enumerate(names):
         if geo.is_expert(n):
-            for q in range(geo.ep):
-                total += float(got[geo.replicas((n, q))[0]][i])
+            terms += [got[geo.replicas((n, q))[0]][i] for q in range(geo.ep)]
         else:
-            total += float(parts[i])
-    return math.sqrt(total)
+            terms.append(parts[i])
+    return fixed_sum(terms).sqrt()
 
 
-def _mean_loss(comm: Comm, loss: float, device: torch.device) -> float:
-    got = comm.all_gather(torch.tensor([loss], dtype=torch.float64, device=device))
-    acc = float(got[0][0])
-    for x in got[1:]:
-        acc += float(x[0])
-    return acc / len(got)
+def _mean_loss(comm: Comm, loss: Tensor | float, device: torch.device) -> Tensor:
+    """Rank-order float64 mean as a 0-dim device tensor; callers read it once per leaf."""
+    got = comm.all_gather(torch.as_tensor(loss, dtype=torch.float64, device=device).reshape(1))
+    return fixed_sum([x[0] for x in got]) / len(got)
 
 
 def train_island(
@@ -735,7 +729,7 @@ def _train_island(
             if checkpoint is not None:
                 checkpoint(t, th_full, st_full)
             leaves.append(
-                _make_leaf(cfg, ia, t, th_full, st_full, loss, _norm(th_full, window_start))
+                _make_leaf(cfg, ia, t, th_full, st_full, float(loss), _norm(th_full, window_start))
             )
             window_start = th_full
             del th_full, st_full
