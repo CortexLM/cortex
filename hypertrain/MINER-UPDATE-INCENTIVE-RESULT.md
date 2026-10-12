@@ -13,6 +13,9 @@ Branch `boat/3924dab79a27` on `echobt/hypertrain`. Directive: `../MINER-CLI-UPDA
 
 ruff + mypy (`--package hypertrain`, 117 files) were clean after the keys/update/cli/ledger lanes.
 
+## Vast run (manual, outside CI)
+`scripts/vast_e2e.py --profile miner-flow --max-usd 3.5`: offer 52078469 (Denmark, 1x RTX 5090, driver 590.48.01, inet_down 1263.5 Mbps, worst case $0.43), image `vastai/pytorch@sha256:4507...`. `uv sync`, `hypertrain-miner --help`, `scripts/miner_flow_e2e.py` on the host: **PASS, 19/19 checks, replay MATCH**. Harness result: `remote_rc=0, deleted=true, absent=true`. Credit afterwards $8.58 (from $8.78); instances on the account after the run: 1.
+
 ## Trust model
 The coldkey/mnemonic stays on the operator machine. `key create` makes a fresh server hotkey, and the coldkey signs a `mine`-scope grant, valid forever until revoked. Only `{server.key, grant.json}` (0600) is copied to the GPU host. The e2e asserts that no coldkey bytes exist anywhere under the server HOME. `key revoke` is coldkey-signed; afterwards the challenge returns 403 for that hotkey.
 
@@ -29,7 +32,6 @@ See `docs/incentive-audit.md` (14 mechanisms). Fixed: ledger vesting now uses th
 
 ## Honest gaps
 - **Full gate not run after the last commits:** `scripts/check.sh` has not run in full since the last commits. The whole suite is slow (>25 min on this shared host).
-- **Vast run not executed:** the user said Vast is not needed for CI. The harness and remote script are ready (`--profile miner-flow`, max $3.90). No instance was created; the account showed 0 instances.
 - **GitHub Actions run not observed:** `miner-flow.yml` was proven by running its script locally. I have no access to GitHub Actions results (no `gh` CLI).
 - **Simulated release in the e2e:** the e2e uses an injected wheel fetch/install. Real `release.yml` signing needs the `HYPERTRAIN_RELEASE_KEY` secret, and the production release pubkey must be pinned before the first real release.
 - **Exposed token:** the `origin` remote URL embeds a GitHub token. Rotate it.
