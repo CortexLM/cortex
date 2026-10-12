@@ -8,6 +8,7 @@ so no index_add/scatter_add is used anywhere.
 
 from __future__ import annotations
 
+import importlib
 import math
 import os
 from collections.abc import Callable
@@ -24,11 +25,15 @@ from hypertrain.trainer.rng import rng_ctr, uniform_f64
 Params = dict[str, Tensor]
 
 
-def _arch_impl(cfg: ModelConfig) -> ModuleType:
-    """Non-decoder architecture module (patch point for tests)."""
-    import hypertrain.models.opendecision as impl
+# Model registry: arch name -> module exposing param_shapes/stage_of/init_params/forward.
+ARCH_REGISTRY = {"od-encoder": "hypertrain.models.opendecision"}
 
-    return impl
+
+def _arch_impl(cfg: ModelConfig) -> ModuleType:
+    """Non-decoder architecture module from ARCH_REGISTRY (patch point for tests)."""
+    if cfg.arch not in ARCH_REGISTRY:
+        raise ValueError(f"unknown arch {cfg.arch!r}; registered: decoder, {sorted(ARCH_REGISTRY)}")
+    return importlib.import_module(ARCH_REGISTRY[cfg.arch])
 
 
 def compute_dtype(cfg: ModelConfig) -> torch.dtype:
