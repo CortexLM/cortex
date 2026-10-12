@@ -225,6 +225,13 @@ def check_mfu(ev: dict[str, Any]) -> list[str]:
     if not all(type(x) is int and x > 0 for x in (tps, fpt, n)) or type(w) is not int or w < 0:
         return [*errs, "tokens_per_step/flops_per_token/n_gpus/warmup_steps invalid"]
     assert isinstance(tps, int) and isinstance(fpt, int) and isinstance(n, int)
+    if "dp_size" in ev and ev["dp_size"] != n:  # run_mfu_dist.py: one GPU per data-parallel rank
+        errs.append(f"n_gpus {n} != dp_size {ev['dp_size']}")
+    roots = ev.get("rank_leaves_roots")
+    if roots is not None and (
+        not isinstance(roots, list) or len(roots) != n or set(roots) != {ev.get("leaves_root")}
+    ):
+        errs.append("rank_leaves_roots must hold n_gpus copies of leaves_root")
     timed = steps[w:]
     if not timed:
         return [*errs, "no timed steps after warmup"]
