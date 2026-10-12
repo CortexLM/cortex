@@ -36,7 +36,8 @@ EVIDENCE = Path(
 ROOT = Path(__file__).resolve().parents[1]
 UPLOAD = ["src", "tests", "pyproject.toml", "uv.lock", "scripts", "README.md", "LICENSE"]
 DISK_GB = 40
-EXCLUDED_MACHINES = (137465, 43459, 142018)  # 142018: GPUs at 100% util by a hidden tenant
+# 142018: GPUs at 100% util by a hidden tenant; 146840/141607: image pull >15 min (2026-10-12)
+EXCLUDED_MACHINES = (137465, 43459, 142018, 146840, 141607)
 HOURS_PER_MONTH = Decimal(720)
 
 
