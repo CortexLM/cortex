@@ -31,7 +31,10 @@ See `docs/incentive-audit.md` (14 mechanisms). Fixed: ledger vesting now uses th
 - **Stale ponytail comment:** the comment at `store.py:1756` is stale.
 
 ## Honest gaps
-- **Full gate not run after the last commits:** `scripts/check.sh` has not run in full since the last commits. The whole suite is slow (>25 min on this shared host).
+- **Local gate (`check.sh` with the ci.yml ignore/deselect args):** ruff and mypy are clean. pytest shows failures that are environmental and pre-existing; none come from this work:
+  - **Missing SSH server on this host:** 16 failures and 18 errors in `tests/gpu_ops` (`test_gpu_ops`, `test_network_role_dispatch`, `test_network_lifecycle`, `test_phase_b`, `test_network_admit_cli`) raise `FileNotFoundError: /usr/sbin/sshd`. Unmodified CortexLM/main fails the same way here (10 failed + 18 errors on the same files). GitHub `ubuntu-24.04` runners ship sshd.
+  - **Capacity tests time out here:** the 3 capacity tests time out as a normal user on a shared host. CI already deselects them from `check.sh` and runs them in its isolated root systemd job.
+  - **Everything else passes:** e2e/datasets 40 passed and challenge 171 passed when run in isolation.
 - **GitHub Actions run not observed:** `miner-flow.yml` was proven by running its script locally. I have no access to GitHub Actions results (no `gh` CLI).
 - **Simulated release in the e2e:** the e2e uses an injected wheel fetch/install. Real `release.yml` signing needs the `HYPERTRAIN_RELEASE_KEY` secret, and the production release pubkey must be pinned before the first real release.
 - **Exposed token:** the `origin` remote URL embeds a GitHub token. Rotate it.
