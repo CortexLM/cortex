@@ -407,8 +407,15 @@ def test_philox_known_answer_vectors() -> None:
 
 def test_forbidden_constructs_absent() -> None:
     forbidden = re.compile(r"\b(topk|index_add_?|scatter_add_?|compile|allclose|isclose)\(")
+    # S3 relaxation (owner decision recorded in checkpoint.md): exactly one torch.compile call,
+    # in model._compiled_layer, reachable only under HT_COMPILE=1 (flag recorded by run_mfu).
+    gated = "torch.compile(layer, dynamic=False)"
     for path in SRC.glob("*.py"):
-        hits = forbidden.findall(path.read_text())
+        text = path.read_text()
+        if path.name == "model.py":
+            assert text.count(gated) == 1 and 'os.environ.get("HT_COMPILE") == "1"' in text
+            text = text.replace(gated, "")
+        hits = forbidden.findall(text)
         assert not hits, f"{hits} in {path.name}"
 
 

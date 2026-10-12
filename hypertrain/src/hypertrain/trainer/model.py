@@ -167,21 +167,71 @@ def _apply_rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
     return torch.stack((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1).flatten(-2)
 
 
+E4M3_MAX = 448.0
+
+
+def fp8_enabled(cfg: ModelConfig) -> bool:
+    """S4 FP8 linear path: manifest precision_policy fp8-rowwise, or HT_FP8=1 for MFU A/B runs.
+    OFF by default; changes numerics, so it is used for production only after GPU qualification
+    (replay MATCH twice per (GPU, torch)). Falls back to the plain matmul (stub) when this torch
+    has no float8 / _scaled_mm."""
+    want = cfg.precision_policy == "fp8-rowwise" or os.environ.get("HT_FP8") == "1"
+    return want and hasattr(torch, "float8_e4m3fn") and hasattr(torch, "_scaled_mm")
+
+
+def _rowwise_fp8(x: Tensor, dim: int) -> tuple[Tensor, Tensor]:
+    scale = (x.float().abs().amax(dim, keepdim=True) / E4M3_MAX).clamp(min=1e-12)
+    return (x.float() / scale).to(torch.float8_e4m3fn), scale
+
+
+class _Fp8Matmul(torch.autograd.Function):
+    """x[M,K] @ w[K,N] with dynamic rowwise scaling (per x row, per w column) in e4m3 via
+    torch._scaled_mm (the kernel torchao's float8 rowwise recipe dispatches to, so no torchao
+    dependency). Backward in the compute dtype (high-precision grads, like torchao
+    rowwise_with_gw_hp for grad_weight)."""
+
+    @staticmethod
+    def forward(ctx: torch.autograd.function.FunctionCtx, x: Tensor, w: Tensor) -> Tensor:
+        ctx.save_for_backward(x, w)
+        xq, sx = _rowwise_fp8(x, 1)
+        wq, sw = _rowwise_fp8(w, 0)
+        return torch._scaled_mm(
+            xq, wq.t().contiguous().t(), scale_a=sx, scale_b=sw, out_dtype=x.dtype
+        )
+
+    @staticmethod
+    def backward(ctx: torch.autograd.function.FunctionCtx, g: Tensor) -> tuple[Tensor, Tensor]:
+        x, w = ctx.saved_tensors  # type: ignore[attr-defined]
+        return g @ w.t(), x.t() @ g
+
+
+def _mm(cfg: ModelConfig, x: Tensor, w: Tensor) -> Tensor:
+    if not fp8_enabled(cfg):
+        return x @ w
+    out = _Fp8Matmul.apply(x.reshape(-1, x.shape[-1]), w)
+    assert isinstance(out, Tensor)
+    return out.view(*x.shape[:-1], w.shape[-1])
+
+
 def _attn(cfg: ModelConfig, p: Params, pre: str, x: Tensor, dt: torch.dtype) -> Tensor:
     b, t, d = x.shape
     h, kvh = cfg.n_heads, cfg.n_kv_heads
     hd = d // h
-    q = (x @ p[pre + "wq"].to(dt)).view(b, t, h, hd).transpose(1, 2)
-    k = (x @ p[pre + "wk"].to(dt)).view(b, t, kvh, hd).transpose(1, 2)
-    v = (x @ p[pre + "wv"].to(dt)).view(b, t, kvh, hd).transpose(1, 2)
+    q = _mm(cfg, x, p[pre + "wq"].to(dt)).view(b, t, h, hd).transpose(1, 2)
+    k = _mm(cfg, x, p[pre + "wk"].to(dt)).view(b, t, kvh, hd).transpose(1, 2)
+    v = _mm(cfg, x, p[pre + "wv"].to(dt)).view(b, t, kvh, hd).transpose(1, 2)
     cos, sin = _rope(cfg, t, dt, x.device)
     q, k = _apply_rope(q, cos, sin), _apply_rope(k, cos, sin)
     o = attention(q, k, v, select_backend(x.device)).transpose(1, 2).reshape(b, t, d)
-    return o @ p[pre + "wo"].to(dt)
+    return _mm(cfg, o, p[pre + "wo"].to(dt))
 
 
-def _swiglu(x: Tensor, w1: Tensor, w3: Tensor, w2: Tensor) -> Tensor:
-    return (F.silu(x @ w1) * (x @ w3)) @ w2
+def _swiglu(
+    x: Tensor, w1: Tensor, w3: Tensor, w2: Tensor, cfg: ModelConfig | None = None
+) -> Tensor:
+    if cfg is None or not fp8_enabled(cfg):
+        return (F.silu(x @ w1) * (x @ w3)) @ w2
+    return _mm(cfg, F.silu(_mm(cfg, x, w1)) * _mm(cfg, x, w3), w2)
 
 
 def route(logits: Tensor, k: int, capacity: int) -> tuple[Tensor, Tensor]:
@@ -309,8 +359,27 @@ def _block(
     if cfg.is_moe:
         m, a = moe_fn(cfg, p, pre, h, dt)
         return x + m, a
-    m = _swiglu(h, p[pre + "w1"].to(dt), p[pre + "w3"].to(dt), p[pre + "w2"].to(dt))
+    m = _swiglu(h, p[pre + "w1"].to(dt), p[pre + "w3"].to(dt), p[pre + "w2"].to(dt), cfg)
     return x + m, torch.zeros((), dtype=torch.float32, device=x.device)
+
+
+LAYER_KEYS = ("attn_norm", "wq", "wk", "wv", "wo", "mlp_norm", "w1", "w3", "w2")
+_COMPILED: dict[tuple[ModelConfig, torch.dtype], Callable[..., Tensor]] = {}
+
+
+def _compiled_layer(cfg: ModelConfig, dt: torch.dtype) -> Callable[..., Tensor]:
+    """S3 (HT_COMPILE=1, dense only): one Inductor graph per (config, dtype), dynamic=False,
+    taking (x, *layer weights) so all layers share it. Fusion changes rounding, so leaf roots
+    differ from eager: it replays only under the same flag, recorded in run_mfu engine_flags,
+    and is qualified per (GPU, torch) by two runs that MATCH. The single allowed compile site
+    (tests/trainer/test_trainer_core.py::test_forbidden_constructs_absent)."""
+    if (cfg, dt) not in _COMPILED:
+
+        def layer(x: Tensor, *w: Tensor) -> Tensor:
+            return _block(cfg, dict(zip(LAYER_KEYS, w, strict=True)), "", x, dt, _moe)[0]
+
+        _COMPILED[(cfg, dt)] = torch.compile(layer, dynamic=False)
+    return _COMPILED[(cfg, dt)]
 
 
 def forward(
@@ -335,6 +404,14 @@ def forward(
     aux = torch.zeros((), dtype=torch.float32, device=tokens.device)
     for i in range(cfg.n_layers):
         pre = f"layers.{i:03d}."
+        if hook is None and os.environ.get("HT_COMPILE") == "1" and not cfg.is_moe:
+            fn = _compiled_layer(cfg, dt)
+            w = [p[pre + k] for k in LAYER_KEYS]
+            if os.environ.get("HT_ACT_CKPT") == "1" and torch.is_grad_enabled():
+                x = checkpoint(fn, x, *w, use_reentrant=False)
+            else:
+                x = fn(x, *w)
+            continue
         if hook is None:
             # HT_ACT_CKPT=1: recompute each layer in backward (same kernels, so bitwise equal).
             if os.environ.get("HT_ACT_CKPT") == "1" and torch.is_grad_enabled():
@@ -355,7 +432,7 @@ def forward(
             m = emit(
                 i,
                 "mlp",
-                _swiglu(h, p[pre + "w1"].to(dt), p[pre + "w3"].to(dt), p[pre + "w2"].to(dt)),
+                _swiglu(h, p[pre + "w1"].to(dt), p[pre + "w3"].to(dt), p[pre + "w2"].to(dt), cfg),
             )
             x = emit(i, "mlp_residual", x + m)
     norm = emit(cfg.n_layers, "final_norm", _rms(x, p["norm.weight"]))
