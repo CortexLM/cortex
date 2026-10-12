@@ -26,6 +26,7 @@ import numpy as np
 import torch
 
 from hypertrain.protocol.example import example_manifest
+from hypertrain.trainer.attention import select_backend
 from hypertrain.trainer.island import emulate, island_from_manifest, train_island
 from hypertrain.trainer.loop import Assignment
 from hypertrain.trainer.model import init_params, param_shapes
@@ -84,6 +85,7 @@ def one_round(body: dict[str, Any], device: torch.device) -> dict[str, Any]:
         "tokens_per_step": cfg.inner.micro_batch * cfg.inner.grad_accum * cfg.model.seq_len,
         "flops_per_token": flops_per_token(cfg.model),
         "n_gpus": lay.n_gpus,
+        "attention_backend": select_backend(device),
     }
 
 

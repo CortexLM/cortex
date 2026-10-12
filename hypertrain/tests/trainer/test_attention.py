@@ -12,7 +12,7 @@ import hypertrain.trainer  # noqa: F401  (determinism before torch)
 # isort: split
 import torch
 
-from hypertrain.trainer.attention import attention, select_backend
+from hypertrain.trainer.attention import Backend, attention, select_backend
 
 
 def _old(q, k, v):
@@ -42,6 +42,31 @@ def test_math_path_bitwise_equal_to_previous_when_fp32(t: int, h: int, kvh: int)
 
 def test_selector_returns_math_on_cpu() -> None:
     assert select_backend(torch.device("cpu")) == "math"
+
+
+@pytest.mark.parametrize("dt", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("h,kvh", [(4, 4), (8, 2), (8, 1)])
+def test_sdpa_flash_repeatable_and_close_to_math(dt: torch.dtype, h: int, kvh: int) -> None:
+    g = torch.Generator().manual_seed(h * 7 + kvh)
+    q, k, v = (
+        torch.randn(2, n, 33, 16, generator=g).to(dt).requires_grad_() for n in (h, kvh, kvh)
+    )
+    runs = []
+    backends: tuple[Backend, ...] = ("sdpa-flash", "sdpa-flash", "math")
+    for backend in backends:
+        o = attention(q, k, v, backend)
+        runs.append((o.detach(), *torch.autograd.grad(o.float().sum(), (q, k, v))))
+    assert all(torch.equal(a, b) for a, b in zip(runs[0], runs[1], strict=True))
+    tol = 2e-2 if dt == torch.bfloat16 else 1e-5
+    assert (runs[0][0].float() - runs[2][0].float()).abs().max() < tol  # plan rule: forward
+
+
+def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HT_ATTN_BACKEND", "sdpa-flash")
+    assert select_backend(torch.device("cpu")) == "sdpa-flash"
+    monkeypatch.setenv("HT_ATTN_BACKEND", "bogus")
+    with pytest.raises(ValueError):
+        select_backend(torch.device("cpu"))
 
 
 @pytest.mark.skipif("HT_GENUINE_CUDA_INDEX" not in os.environ, reason="needs a real GPU")

@@ -7,11 +7,18 @@ Backends, tried in this order by the GPU spike (scripts/attention_spike.py):
 A backend is used for training only once it is listed in QUALIFIED_BACKENDS for the device and
 torch version; until the spike qualifies one on RTX 5090 the selector returns "math", so
 production numerics are unchanged. The selected name is recorded by callers for replay.
+
+HT_ATTN_BACKEND=<name> forces a backend (MFU A/B runs and the spike); the run then replays only
+under the same override, which run_mfu.py records next to its leaf root.
+The math path keeps the explicit K/V expansion: a broadcast (native-GQA) math path differs from it
+by 1 ulp in dK for some shapes, so it cannot be the bitwise oracle. Native GQA lives in the fused
+backends (enable_gqa / flash-attn MQA), which never materialise expanded K/V.
 """
 
 from __future__ import annotations
 
 import math
+import os
 from typing import Literal
 
 import torch
@@ -34,7 +41,12 @@ def _causal_mask(t: int, device: torch.device) -> Tensor:
 
 
 def select_backend(device: torch.device) -> Backend:
-    """Pure function of (device capability, torch version, qualification table)."""
+    """Pure function of (HT_ATTN_BACKEND, device capability, torch version, qualification)."""
+    forced = os.environ.get("HT_ATTN_BACKEND")
+    if forced:
+        if forced not in BACKENDS:
+            raise ValueError(f"HT_ATTN_BACKEND must be one of {BACKENDS}")
+        return forced
     if device.type != "cuda":
         return "math"
     cap = torch.cuda.get_device_capability(device)
