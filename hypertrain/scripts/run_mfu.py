@@ -1,7 +1,7 @@
 """MFU benchmark harness (plan 0.3 / WS1): one deterministic island round, timed, then replayed.
 
 Drives hypertrain.trainer.island.train_island (production path, determinism ON) on a profile from
-experiments/mfu/profiles.json and writes raw per-step timings, FLOPs/token, MFU vs the vendor peak
+scripts/mfu_profiles.json and writes raw per-step timings, FLOPs/token, MFU vs the vendor peak
 (and vs --measured-peak when given), and the leaf root of both the run and the replay.
 check_gpu_evidence.py --kind mfu recomputes MFU from the raw timings.
 Usage: python scripts/run_mfu.py --profile mfu-dense-1b --device cuda --out OUT.json
@@ -33,7 +33,7 @@ from hypertrain.trainer.loop import Assignment
 from hypertrain.trainer.model import init_params, param_shapes
 from hypertrain.trainer.perf import MFU_PEAK_RTX5090_BF16, flops_per_token
 
-PROFILES = Path(__file__).resolve().parents[1] / "experiments/mfu/profiles.json"
+PROFILES = Path(__file__).resolve().parent / "mfu_profiles.json"
 
 
 def manifest_body(spec: dict[str, Any]) -> dict[str, Any]:

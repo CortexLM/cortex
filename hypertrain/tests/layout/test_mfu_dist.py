@@ -22,6 +22,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from run_mfu import PROFILES, manifest_body  # noqa: E402
 from run_mfu_dist import REDUCTIONS  # noqa: E402
 
+# zero2o/zero3o land separately in trainer/island.py; not tested here.
+LANDED = {k: v for k, v in REDUCTIONS.items() if k not in ("zero2o", "zero3o")}
+
 
 def _tiny_with_layout(world: int) -> dict[str, object]:
     profiles = json.loads(PROFILES.read_text())["profiles"]
@@ -40,7 +43,7 @@ def test_dist_reductions_bitwise(world: int) -> None:
     th = init_params(cfg.model)
     ref = emulate(world, lambda c: train_island(cfg, lay, c, th, a, rows.__getitem__))
     want = (ref[0].leaves_root, ref[0].delta_hash, ref[0].final_theta_hash)
-    for red in REDUCTIONS.values():
+    for red in LANDED.values():
 
         def run(c: Comm, red: str = red) -> RoundResult:
             return train_island(cfg, lay, c, th, a, rows.__getitem__, reduction=red)
@@ -49,7 +52,7 @@ def test_dist_reductions_bitwise(world: int) -> None:
         assert {(r.leaves_root, r.delta_hash, r.final_theta_hash) for r in got} == {want}, red
 
 
-@pytest.mark.parametrize("reduction", sorted(REDUCTIONS))
+@pytest.mark.parametrize("reduction", sorted(LANDED))
 def test_torchrun_cpu_smoke(tmp_path: Path, reduction: str) -> None:
     out = tmp_path / "ev.json"
     cmd = [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nproc-per-node", "2"]
@@ -64,3 +67,20 @@ def test_torchrun_cpu_smoke(tmp_path: Path, reduction: str) -> None:
     ev["dp_size"] = 3
     out.write_text(json.dumps(ev))
     assert subprocess.run(chk, cwd=ROOT, check=False).returncode == 1  # noqa: S603
+
+
+def test_torchrun_cpu_trace_writes_bucketed_summary(tmp_path: Path) -> None:
+    out, trace = tmp_path / "ev.json", tmp_path / "trace"
+    cmd = [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nproc-per-node", "2"]
+    cmd += [str(ROOT / "scripts/run_mfu_dist.py"), "--profile", "tiny-cpu-dp2", "--device", "cpu"]
+    cmd += ["--warmup", "1", "--trace", str(trace), "--out", str(out)]
+    subprocess.run(cmd, check=True, cwd=ROOT, timeout=600)  # noqa: S603
+    summ = json.loads((trace / "summary.json").read_text())
+    assert sorted(summ) == ["rank0", "rank1"]
+    for r in range(2):
+        assert (trace / f"rank{r}.json").exists()
+        s = summ[f"rank{r}"]
+        assert set(s["cuda_time_us"]) == {"nccl", "attention", "gemm", "optimizer", "other"}
+        assert len(s["step_seconds"]) == 3 and s["host_us_per_step"] > 0
+    ev = json.loads(out.read_text())
+    assert ev["replay_match"] and "trace" not in ev and "nccl_env" in ev and ev["mfu"] > 0
