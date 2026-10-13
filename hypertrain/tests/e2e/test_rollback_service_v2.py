@@ -225,7 +225,7 @@ def execute_round(network, w, *, open_only=False):
 
     from hypertrain.aggregator.core import load_state
     from hypertrain.auditor.replay import AnchorCache, optimizer_hash, pack_state
-    from hypertrain.data.store import LocalFSStore
+    from hypertrain.data.store import LocalFSStore, put_large
     from hypertrain.data.stream_store import StreamStore
     from hypertrain.miner.island_launch import launch_island
     from hypertrain.protocol import relay_envelope
@@ -273,9 +273,9 @@ def execute_round(network, w, *, open_only=False):
                 w=w,
                 hotkey=hot.ss58,
                 theta_hash=state_hash(theta),
-                state_object_sha256=sha256_hex(pack_state(theta, anchor.state)),
+                state_object_sha256=put_large(pack_state(theta, anchor.state), sha256_hex),
                 opt_state_hash=optimizer_hash(anchor.state),
-                ef_object_sha256=sha256_hex(pack_state(anchor.ef)),
+                ef_object_sha256=put_large(pack_state(anchor.ef), sha256_hex),
                 ef_hash=state_hash(anchor.ef),
                 parent_anchor_hash=anchor.anchor_hash,
                 global_step0=anchor.state.step,

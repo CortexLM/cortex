@@ -252,7 +252,7 @@ def _live_checkpoint(network):
     from hypertrain.aggregator.checkpoint import verify_network_checkpoint, write_network_checkpoint
     from hypertrain.aggregator.cli import main
     from hypertrain.auditor.replay import AnchorCache, optimizer_hash, pack_state
-    from hypertrain.data.store import LocalFSStore
+    from hypertrain.data.store import LocalFSStore, put_large
     from hypertrain.data.stream_store import StreamStore
     from hypertrain.miner.island_launch import launch_island
     from hypertrain.protocol import relay_envelope
@@ -288,9 +288,9 @@ def _live_checkpoint(network):
                 w=0,
                 hotkey=hot.ss58,
                 theta_hash=state_hash(theta),
-                state_object_sha256=sha256_hex(pack_state(theta, anchor.state)),
+                state_object_sha256=put_large(pack_state(theta, anchor.state), sha256_hex),
                 opt_state_hash=optimizer_hash(anchor.state),
-                ef_object_sha256=sha256_hex(pack_state(anchor.ef)),
+                ef_object_sha256=put_large(pack_state(anchor.ef), sha256_hex),
                 ef_hash=state_hash(anchor.ef),
                 parent_anchor_hash=anchor.anchor_hash,
                 global_step0=0,
@@ -1575,7 +1575,7 @@ def _od_production_rounds(network, *, after_audits=None):
     from hypertrain.aggregator.core import load_state
     from hypertrain.aggregator.tape_v2 import TapeV2, replay_tape
     from hypertrain.auditor.replay import AnchorCache, optimizer_hash, pack_state, unpack_state
-    from hypertrain.data.store import LocalFSStore
+    from hypertrain.data.store import LocalFSStore, put_large
     from hypertrain.data.stream_store import StreamStore
     from hypertrain.protocol import envelope_v2
     from hypertrain.protocol.hashing import sha256_hex
@@ -1633,9 +1633,9 @@ def _od_production_rounds(network, *, after_audits=None):
                     w=w,
                     hotkey=hot.ss58,
                     theta_hash=state_hash(theta),
-                    state_object_sha256=sha256_hex(pack_state(theta, anchor.state)),
+                    state_object_sha256=put_large(pack_state(theta, anchor.state), sha256_hex),
                     opt_state_hash=optimizer_hash(anchor.state),
-                    ef_object_sha256=sha256_hex(pack_state(anchor.ef)),
+                    ef_object_sha256=put_large(pack_state(anchor.ef), sha256_hex),
                     ef_hash=state_hash(anchor.ef),
                     parent_anchor_hash=anchor.anchor_hash,
                     global_step0=anchor.state.step,
