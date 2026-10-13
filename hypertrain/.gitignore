@@ -7,7 +7,7 @@ __pycache__/
 .hypothesis/
 
 # audit/report/plan artifacts (kept out of the product repo)
-experiments/
+experiments/results/
 plan.md
 plan.json
 docs/RESULTS.md

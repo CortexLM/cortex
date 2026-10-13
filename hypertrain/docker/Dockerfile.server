@@ -35,6 +35,13 @@ LABEL org.opencontainers.image.source="https://github.com/CortexLM/hypertrain" \
       io.cortex.challenge.slug="hypertrain" \
       io.cortex.challenge.contract="1"
 RUN install -d -o 65532 -g 65532 -m 0750 /data
+# Role dispatch (HYPERTRAIN_ROLE_DISPATCH) drives owned GPU hosts over ssh; OpenSSH refuses a uid
+# without a passwd entry. No key or known_hosts enters the image: both live in the run directory.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssh-client \
+ && rm -rf /var/lib/apt/lists/* \
+ && echo 'challenge:x:65532:65532::/tmp:/usr/sbin/nologin' >> /etc/passwd \
+ && echo 'challenge:x:65532:' >> /etc/group
 COPY --from=build /opt/venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH \
     HOME=/tmp \

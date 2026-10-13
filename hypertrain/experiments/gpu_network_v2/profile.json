@@ -1,0 +1,80 @@
+{
+  "profile_version": 2,
+  "qualification": "BOUNDED_RENTAL_QUALIFICATION_REQUIRED",
+  "microqualification": {
+    "max_full_rounds_per_host": 2,
+    "staging_seconds": 300,
+    "probe_and_transfer_seconds": 180,
+    "rescue_delete_seconds": 300,
+    "failure_margin_seconds": 120,
+    "qualification_deadline_seconds": 900,
+    "same_instances_only": true,
+    "counts_inside_126_execution_reservation": true,
+    "root_verified_lifecycle_required": true,
+    "image_registry_inspection_required": true,
+    "candidate_image_max_bytes": 20000000000,
+    "candidate_stage_max_bytes": 1000000000,
+    "candidate_transfer_gb_per_host": 30,
+    "claim": "CORRECTNESS_ONLY_NOT_PRODUCTION_SPEED_MEMORY_OR_QUALITY"
+  },
+  "runtime_evidence_sha256": null,
+  "execution_and_transfer_bound_seconds": null,
+  "model": {
+    "arch": "decoder", "n_layers": 2, "d_model": 32, "n_heads": 4,
+    "n_kv_heads": 4, "d_ff": 64, "n_experts": 4, "top_k_experts": 2,
+    "vocab": 64, "seq_len": 16, "capacity_factor": "0000a03f",
+    "aux_loss_coef": "0ad7233c", "compute_dtype": "bf16", "master_dtype": "fp32",
+    "init_seed": 17, "init_std": "0ad7a33c", "param_count": 61856
+  },
+  "layout": {"pp": 1, "n_gpus": 2, "dp_size": 1, "ep_size": 2, "zero1": true},
+  "inner": {
+    "opt": "adamw", "H": 30, "J": 5, "micro_batch": 1, "grad_accum": 1,
+    "betas": ["6666663f", "3333733f"], "eps": "77cc2b32", "wd": "cdcccc3d",
+    "grad_clip": "0000803f", "state_policy": "carry", "rewarmup_steps": 0,
+    "lr_schedule": {"peak_lr": "6f12833a", "warmup": 0, "stable": 100000, "decay": 0}
+  },
+  "outer": {"opt": "sparseloco", "topk_frac": "0ad7233c", "bits": 2, "ef_beta": "0000803f"},
+  "schedule": {
+    "hosts": 2, "logical_identities": 4, "shadow_participations_per_identity": 12,
+    "shadow_executions": 96, "live_executions": 16, "probes": 2,
+    "fault_trace_reserve": 12, "executions_total": 126, "executions_per_host": 63,
+    "staging_seconds": 300, "execution_transfer_seconds": 2520,
+    "beacon_service_seconds": 180, "rescue_delete_seconds": 300,
+    "hard_margin_seconds": 300, "hard_deadline_seconds": 3600
+  },
+  "admission": {
+    "ceiling_usd": "15", "cleanup_reserve_usd": "5", "max_host_hourly_usd": "2",
+    "max_ancillary_usd": "1", "gpu_name": "RTX 5090", "gpus_per_host": 2,
+    "min_cpu_cores": 8, "min_host_ram_gib": 32, "min_disk_gib": 80,
+    "required_torch": "2.14.0+cu130", "sm_count": 170
+  },
+  "artifacts": {
+    "safetensors_header_bytes_per_file": 65536,
+    "trace_bytes_per_event": 512,
+    "logs_bytes_per_execution": 2097152,
+    "metadata_bytes_per_execution": 1048576,
+    "image_and_dependency_bytes": null,
+    "staging_bytes_per_host": null,
+    "rescue_bytes_per_second": null,
+    "rescue_transfer_seconds": 180,
+    "delete_absence_seconds": 120,
+    "disk_bytes": 80000000000,
+    "retain_all_checkpoints": true,
+    "path_preserving_rescue": true
+  },
+  "runtime": {
+    "backend": "cuda",
+    "remote_python": "/opt/hypertrain/venv/bin/python",
+    "torch": "2.14.0+cu130",
+    "cuda": "13.0",
+    "image_digest": null,
+    "driver_allowlist": [],
+    "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+    "CUDA_DISABLE_PTX_JIT": "1",
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "PYTHONHASHSEED": "0",
+    "NVIDIA_TF32_OVERRIDE": "0",
+    "qualified": false
+  }
+}
