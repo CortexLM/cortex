@@ -8,6 +8,7 @@ so no index_add/scatter_add is used anywhere.
 
 from __future__ import annotations
 
+import functools
 import importlib
 import math
 import os
@@ -153,8 +154,10 @@ def _rms(x: Tensor, w: Tensor) -> Tensor:
     return y.to(x.dtype)
 
 
+@functools.lru_cache(maxsize=16)
 def _rope(cfg: ModelConfig, t: int, dt: torch.dtype, device: torch.device) -> tuple[Tensor, Tensor]:
-    """cos/sin tables computed on the host (f64) then moved: identical bytes on every device."""
+    """cos/sin tables computed on the host (f64) then moved: identical bytes on every device.
+    Cached: the pageable host->device copy blocked the host once per layer and recompute."""
     hd = cfg.d_model // cfg.n_heads
     cpu = torch.device("cpu")
     inv = 1.0 / (cfg.rope_theta ** (torch.arange(0, hd, 2, dtype=torch.float64, device=cpu) / hd))

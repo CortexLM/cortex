@@ -146,6 +146,10 @@ MINER_FLOW_IMAGE = (
     "450710d89268fcd55632f28fdd80508ee920a53075b3f8e9f828bdc154e3d856"
 )
 NUM_GPUS = 2
+# mfu profile: dp all_gathers cross PCIe (a pcie_bw ~26 host gave 11% MFU vs 37% at 53.8), and
+# the cuda-13.2 image needs cuda_max_good >= 13.2 (a 13.0 host answered create with HTTP 400).
+MIN_PCIE_BW: Decimal | None = None
+MIN_CUDA = Decimal("13.2")
 
 
 def offer_query() -> dict[str, Any]:
@@ -157,6 +161,7 @@ def offer_query() -> dict[str, Any]:
         "rented": {"eq": False},
         "reliability": {"gt": 0.98},
         "inet_down": {"gte": 1000},
+        **({"pcie_bw": {"gte": float(MIN_PCIE_BW)}} if MIN_PCIE_BW is not None else {}),
         "type": "on-demand",
         "order": [["dph_total", "asc"]],
         "limit": 64,
@@ -178,6 +183,12 @@ def eligible(o: Any) -> bool:
         and r > Decimal("0.98")
         and (d := dec(o.get("inet_down"))) is not None
         and d >= 1000
+        and (
+            MIN_PCIE_BW is None
+            or ((b := dec(o.get("pcie_bw"))) is not None and b >= MIN_PCIE_BW)
+            and (c := dec(o.get("cuda_max_good"))) is not None
+            and c >= MIN_CUDA
+        )
         and dec(o.get("dph_total")) is not None
         and dec(o.get("storage_cost")) is not None
     )
@@ -525,10 +536,9 @@ class Harness:
         return rc
 
     def run_remote(self) -> int:
-        return self.sh(
-            f"bash /workspace/ht/scripts/{self.a.remote_script}",
-            timeout=self.deadline - time.time(),
-        )
+        env = [shlex.quote(kv) for kv in self.a.remote_env]
+        script = shlex.quote(f"/workspace/ht/scripts/{self.a.remote_script}")
+        return self.sh(" ".join(["env", *env, "bash", script]), timeout=self.deadline - time.time())
 
     def rescue(self) -> int:
         dest = self.out / "out"
@@ -650,14 +660,22 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--absence-attempts", type=int, default=12)
     p.add_argument(
         "--profile",
-        choices=("gpu-e2e", "miner-flow"),
+        choices=("gpu-e2e", "miner-flow", "mfu"),
         default="gpu-e2e",
-        help="miner-flow: 1x RTX 5090, vastai/pytorch image, scripts/vast_miner_flow_remote.sh",
+        help="miner-flow: 1x RTX 5090, vastai/pytorch image, scripts/vast_miner_flow_remote.sh; "
+        "mfu: --num-gpus x RTX 5090, vastai/pytorch image, pcie_bw >= --min-pcie-bw, "
+        "scripts/vast_mfu_remote.sh",
     )
+    p.add_argument("--num-gpus", type=int, choices=(1, 2, 4, 8), default=2, help="mfu profile")
+    p.add_argument("--min-pcie-bw", type=float, default=50.0, help="mfu profile, GB/s")
+    p.add_argument("--remote-env", action="append", default=[], metavar="KEY=VAL")
     a = p.parse_args(argv)
-    a.remote_script = (
-        "vast_miner_flow_remote.sh" if a.profile == "miner-flow" else "vast_e2e_remote.sh"
-    )
+    a.remote_script = {
+        "miner-flow": "vast_miner_flow_remote.sh",
+        "mfu": "vast_mfu_remote.sh",
+    }.get(a.profile, "vast_e2e_remote.sh")
+    if any("=" not in kv or not kv.partition("=")[0].isidentifier() for kv in a.remote_env):
+        p.error("--remote-env must be KEY=VAL with an identifier KEY")
     if (
         a.max_usd <= 0
         or a.max_minutes <= 0
@@ -679,9 +697,12 @@ def main(
     if not key:
         print("empty key file", file=sys.stderr)
         return 2
-    global IMAGE, NUM_GPUS
+    global IMAGE, NUM_GPUS, MIN_PCIE_BW
     if a.profile == "miner-flow":
         IMAGE, NUM_GPUS = MINER_FLOW_IMAGE, 1
+    if a.profile == "mfu":
+        IMAGE, NUM_GPUS = MINER_FLOW_IMAGE, a.num_gpus
+        MIN_PCIE_BW = Decimal(str(a.min_pcie_bw))
     api = Api(a.api_base, key, a.evidence_dir / "journal.jsonl", min_gap=a.min_gap, sleep=sleep)
     api.log(
         "start",
