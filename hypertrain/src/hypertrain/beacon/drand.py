@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -43,6 +44,7 @@ def _hex(value: Any, n_bytes: int, field: str) -> bytes:
         raise BeaconVerificationError(f"{field}: not hex") from None
 
 
+@functools.lru_cache(maxsize=64)
 def _pairing_ok(sig: bytes, round: int, pubkey: bytes) -> bool:
     # Unchained G1 scheme: e(sig, g2) == e(H(sha256(be64(round))), pk), checked as one product.
     sig_int = int.from_bytes(sig, "big")

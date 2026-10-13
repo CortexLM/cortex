@@ -35,6 +35,21 @@ def test_recorded_vectors_verify(v: dict) -> None:
     assert (br.round, br.randomness, br.bls_verified) == (v["round"], v["randomness"], True)
 
 
+def test_both_relays_same_round_pay_one_pairing_and_cache_keeps_rejects() -> None:
+    from hypertrain.beacon.drand import _pairing_ok
+
+    _pairing_ok.cache_clear()
+    try:
+        c = DrandQuicknet(("https://a.test", "https://b.test"), client=_mock({"x": V0}))
+        assert c.latest().round == V0["round"]
+        assert (_pairing_ok.cache_info().misses, _pairing_ok.cache_info().hits) == (1, 1)
+        assert verify_quicknet(V0["round"], flip(V0["signature"])) is False
+        assert verify_quicknet(V0["round"] + 1, V0["signature"]) is False
+        assert verify_quicknet(V0["round"], V0["signature"]) is True
+    finally:
+        _pairing_ok.cache_clear()
+
+
 def test_signature_bound_to_round_and_key() -> None:
     assert not verify_quicknet(V0["round"] + 1, V0["signature"])
     other_sig = VECTORS[1]["signature"]
