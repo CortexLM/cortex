@@ -10,8 +10,9 @@ from typing import Any
 
 from hypertrain.protocol.messages import f32val
 
-# Mirror of hypertrain.challenge.store.FAULTS (kept local: this package never imports the store).
-FAULTS = frozenset({"MISMATCH", "WITHHELD", "BAD_PROOF", "ASSIGNMENT_VIOLATION"})
+# Mirror of hypertrain.challenge.store.FAULTS (kept local: this package never imports the store),
+# plus EXCLUDED_V2: a v2 commit left out of its round's signed Finalize.included set.
+FAULTS = frozenset({"MISMATCH", "WITHHELD", "BAD_PROOF", "ASSIGNMENT_VIOLATION", "EXCLUDED_V2"})
 MAX_PARTICIPANTS = 500
 _RANK = {"training": 0, "syncing": 1, "finished": 2, "offline": 3}
 
@@ -45,8 +46,11 @@ class _Run:
     def __init__(self, row: sqlite3.Row) -> None:
         self.id: str = row["run_id"]
         self.status: str = row["status"]
-        self.m: dict[str, Any] = json.loads(row["manifest"])
-        self.cfg: dict[str, Any] = json.loads(row["config"])
+        manifest = json.loads(row["manifest"])
+        # RunManifestV2 wraps the v1 training fields; v2 runs keep state in records_v2.
+        self.v2: bool = manifest.get("manifest_version") == 2
+        self.m: dict[str, Any] = manifest["training"] if self.v2 else manifest
+        self.cfg: dict[str, Any] = json.loads(row["config"] or "{}")
         b = self.m["beacon"]
         self.genesis: int = b["genesis_time"]
         self.period: int = b["period"]
@@ -61,18 +65,33 @@ class _Run:
 
 def _runs(db: sqlite3.Connection) -> list[_Run]:
     out = []
-    for row in db.execute("SELECT * FROM runs WHERE config IS NOT NULL ORDER BY run_id"):
+    for row in db.execute("SELECT * FROM runs ORDER BY run_id"):
         run = _Run(row)
+        if (row["config"] is None and not run.v2) or (run.v2 and not run.is_od):
+            continue  # ponytail: v2 exposure is od-encoder only; widen when v2 decoders go public
         if run.m["outer"]["opt"] != "nesterov":
             continue
-        if db.execute("SELECT 1 FROM rounds WHERE run_id=?", (run.id,)).fetchone() is None:
+        if not _rounds(db, run):
             continue
         out.append(run)
     return out
 
 
+def _records(db: sqlite3.Connection, run: _Run, kind: str) -> dict[str, Any]:
+    rows = db.execute("SELECT id, data FROM records_v2 WHERE run_id=? AND kind=?", (run.id, kind))
+    return {r["id"]: json.loads(r["data"]) for r in rows}
+
+
 def _rounds(db: sqlite3.Connection, run: _Run) -> list[dict[str, Any]]:
     out = []
+    if run.v2:
+        # Final only once the signed Finalize was replayed (never for shadow evidence).
+        fin = _records(db, run, "replayed-finality")
+        for w, env in _records(db, run, "round").items():
+            f = fin.get(w)
+            final_at = run.chain(f["finalized_beacon"]) if f and f["shadow"] is False else None
+            out.append({"w": int(w), "body": env["body"], "final_at": final_at})
+        return sorted(out, key=lambda r: r["w"])
     for r in db.execute(
         "SELECT w, body, final_at FROM rounds WHERE run_id=? ORDER BY w", (run.id,)
     ):
@@ -82,6 +101,32 @@ def _rounds(db: sqlite3.Connection, run: _Run) -> list[dict[str, Any]]:
 
 def _miners(db: sqlite3.Connection, run: _Run) -> list[dict[str, Any]]:
     out = []
+    if run.v2:
+        rows: dict[tuple[int, str], dict[str, Any]] = {}
+        for w, env in _records(db, run, "round").items():
+            for e in env["body"]["roster"]:
+                rows.setdefault((int(w), e["hotkey"]), {})
+        for kind in ("accept", "commit"):
+            for key, env in _records(db, run, kind).items():
+                ws, _, hk = key.partition(":")
+                rows.setdefault((int(ws), hk), {})[kind] = env["body"]
+        included = {
+            int(w): set(env["body"]["included"]) for w, env in _records(db, run, "finalize").items()
+        }
+        for (wi, hk), x in sorted(rows.items()):
+            status = "COMMITTED" if "commit" in x else "ASSIGNED"
+            if wi in included and hk not in included[wi]:
+                status = "EXCLUDED_V2"
+            out.append(
+                {
+                    "w": wi,
+                    "hotkey": hk,
+                    "status": status,
+                    "commit": x.get("commit"),
+                    "accept": x.get("accept"),
+                }
+            )
+        return out
     for r in db.execute(
         "SELECT w, hotkey, status, accept, commit_env FROM miners WHERE run_id=?", (run.id,)
     ):
@@ -208,8 +253,9 @@ def _run_view(
     }
 
 
-def list_runs(db: sqlite3.Connection) -> list[dict[str, Any]]:
-    views = [_run_view(db, r, _rounds(db, r), _miners(db, r)) for r in _runs(db)]
+def list_runs(*dbs: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Runs of the root DB plus any per-run child sub-store DBs passed after it."""
+    views = [_run_view(db, r, _rounds(db, r), _miners(db, r)) for db in dbs for r in _runs(db)]
     views.sort(key=lambda v: v["id"])
     views.sort(key=lambda v: v["startedAt"], reverse=True)
     return prune_none(views)
@@ -226,13 +272,16 @@ def run_snapshot(
 
 
 def default_snapshot(
-    db: sqlite3.Connection, metrics: Sequence[dict[str, Any]]
+    db: sqlite3.Connection, metrics: Sequence[dict[str, Any]], *children: sqlite3.Connection
 ) -> dict[str, Any] | None:
-    runs = list_runs(db)
+    runs = list_runs(db, *children)
     if not runs:
         return None
     pick = next((r for r in runs if r["status"] == "running"), runs[0])
-    return run_snapshot(db, pick["id"], [x for x in metrics if x.get("run_id") == pick["id"]])
+    picked = [x for x in metrics if x.get("run_id") == pick["id"]]
+    return next(
+        s for d in (db, *children) if (s := run_snapshot(d, pick["id"], picked)) is not None
+    )
 
 
 def _snapshot(
@@ -286,6 +335,11 @@ def _snapshot(
             (run.id,),
         )
     ]
+    if run.v2:  # v2 roster is the signed opening; no cluster/region is recorded
+        roster = [
+            {"hotkey": hk, "cluster": None, "region": None}
+            for hk in sorted(e["hotkey"] for e in current["body"]["roster"])
+        ]
 
     def last_good(hk: str) -> dict[str, Any] | None:
         rows = [x for x in mn if x["hotkey"] == hk and _counted(x, finals)]
@@ -404,7 +458,7 @@ def _snapshot(
 def model_description(manifest: Mapping[str, Any]) -> dict[str, Any]:
     """Full architecture description from a signed manifest dict (B3 `/model`)."""
     run = _Run.__new__(_Run)
-    run.m = dict(manifest)
+    run.m = dict(manifest["training"] if manifest.get("manifest_version") == 2 else manifest)
     mod = run.m["model"]
     if not run.is_od:
         return _architecture(run) or {}

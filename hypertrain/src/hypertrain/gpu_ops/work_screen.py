@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
 from pathlib import Path
 from typing import Literal, Protocol
 
+from hypertrain.data.store import Put, put_file
 from hypertrain.data.trial_assignment import trial_assignment_hash
 from hypertrain.miner.island_launch import (
     IslandArtifacts,
@@ -15,7 +17,7 @@ from hypertrain.miner.island_launch import (
     launch_island,
     validate_artifacts,
 )
-from hypertrain.protocol.hashing import MerkleTree, sha256_hex
+from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.protocol.messages import LeafPreimage
 from hypertrain.protocol.messages_v2 import (
     ArtifactRef,
@@ -46,12 +48,26 @@ class IslandLaunch(Protocol):
     ) -> IslandArtifacts: ...
 
 
+def artifact_ref(path: Path, put: Put | None = None) -> ArtifactRef:
+    """put_file key + length of the referenced object (plain bytes or ht-parts-v1 index).
+
+    put=None hashes only (no upload), yielding the same ref the uploader publishes."""
+    last = b""
+
+    def record(data: bytes) -> str:
+        nonlocal last
+        last = data
+        return put(data) if put is not None else hashlib.sha256(data).hexdigest()
+
+    sha = put_file(path, record)
+    return ArtifactRef(sha256=sha, size=len(last))
+
+
 def commitments(artifacts: IslandArtifacts) -> tuple[str, str]:
     leaves = [LeafPreimage.model_validate(v) for v in json.loads(artifacts.leaves.read_bytes())]
-    return (
-        MerkleTree([bytes.fromhex(p.digest()) for p in leaves]).root.hex(),
-        sha256_hex(artifacts.delta.read_bytes()),
-    )
+    with artifacts.delta.open("rb") as f:
+        delta = hashlib.file_digest(f, "sha256").hexdigest()
+    return MerkleTree([bytes.fromhex(p.digest()) for p in leaves]).root.hex(), delta
 
 
 def screen_work(
@@ -102,10 +118,11 @@ def screen_work(
             raise WorkScreenError("CANCELLED")
     refs = []
     for path in (artifacts.state, artifacts.ef, artifacts.delta, artifacts.leaves):
-        size = path.stat().st_size
-        if size > challenge.artifact_limits.max_object_bytes:
+        # Ref = stored object (plain or part index); every stored object is <= 1 MiB.
+        ref = artifact_ref(path)
+        if ref.size > challenge.artifact_limits.max_object_bytes:
             raise WorkScreenError("ARTIFACT_LIMIT")
-        refs.append(ArtifactRef(sha256=sha256_hex(path.read_bytes()), size=size))
+        refs.append(ref)
     root, delta = commitments(artifacts)
     screen = WorkScreenV2(
         evidence_kind="work-proof-v1",

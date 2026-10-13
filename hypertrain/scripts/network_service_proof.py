@@ -37,7 +37,7 @@ from hypertrain.aggregator.checkpoint import (
 from hypertrain.aggregator.core import load_state
 from hypertrain.aggregator.tape_v2 import TapeV2, replay_tape
 from hypertrain.auditor.replay import AnchorCache, optimizer_hash, pack_state
-from hypertrain.data.store import LocalFSStore
+from hypertrain.data.store import LocalFSStore, get_large, put_large
 from hypertrain.gpu_ops.journal import Journal, durable_write, fsha
 from hypertrain.gpu_ops.work_screen import IslandLaunch
 from hypertrain.miner.admission import sign_join
@@ -378,9 +378,9 @@ def proof(settings: Settings, cancel: threading.Event) -> None:
                         w=w,
                         hotkey=hot,
                         theta_hash=state_hash(theta),
-                        state_object_sha256=sha256_hex(pack_state(theta, anchor.state)),
+                        state_object_sha256=put_large(pack_state(theta, anchor.state), sha256_hex),
                         opt_state_hash=optimizer_hash(anchor.state),
-                        ef_object_sha256=sha256_hex(pack_state(anchor.ef)),
+                        ef_object_sha256=put_large(pack_state(anchor.ef), sha256_hex),
                         ef_hash=state_hash(anchor.ef),
                         parent_anchor_hash=anchor.anchor_hash,
                         global_step0=anchor.state.step,
@@ -2010,7 +2010,9 @@ def decoder_continue(
                         )
                     from hypertrain.auditor.replay import unpack_state
 
-                    theta, _ = unpack_state(objects.get(reference.artifact_refs[0].sha256))
+                    theta, _ = unpack_state(
+                        get_large(reference.artifact_refs[0].sha256, objects.get)
+                    )
                     final = envelope_v2.seal(
                         coord,
                         "Finalize",
@@ -2143,9 +2145,11 @@ def decoder_continue(
                                 w=w,
                                 hotkey=identity.hotkey,
                                 theta_hash=state_hash(theta),
-                                state_object_sha256=sha256_hex(pack_state(theta, anchor.state)),
+                                state_object_sha256=put_large(
+                                    pack_state(theta, anchor.state), sha256_hex
+                                ),
                                 opt_state_hash=optimizer_hash(anchor.state),
-                                ef_object_sha256=sha256_hex(pack_state(anchor.ef)),
+                                ef_object_sha256=put_large(pack_state(anchor.ef), sha256_hex),
                                 ef_hash=state_hash(anchor.ef),
                                 parent_anchor_hash=anchor.anchor_hash,
                                 global_step0=anchor.state.step,

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
 import select
+import shlex
 import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
 from typing import Literal
@@ -24,6 +27,7 @@ from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import IslandJobV1, RunManifestV2
 
 TREE = Path(hypertrain.__file__).resolve().parents[2]
+sys.path.insert(0, str(TREE / "scripts"))
 SPEC = importlib.util.spec_from_file_location(
     "network_admit_cli", TREE / "experiments/gpu_network_v2/orchestrate.py"
 )
@@ -1190,6 +1194,45 @@ def test_total50_budget_preserves_prior_liability(contract):
         cli.admission_plan(profile, evidence, authorization, snapshot, offers, qualification=True)
 
 
+def test_fresh_finite_window_priced_and_bounds_supervisor_end(contract, tmp_path):
+    from hypertrain.gpu_ops.launcher import network_hard_end
+
+    record, _, _ = contract
+
+    def load(name):
+        return json.loads(Path(record["files"][name]["path"]).read_bytes())
+
+    profile, evidence, authorization = load("profile"), load("evidence"), load("authorization")
+    snapshot, offers = load("financial"), load("offers")
+    snapshot["available_credit_usd"] = "5.6"
+    with pytest.raises(Reject, match="cost_ceiling"):  # full horizon does not fit
+        cli.admission_plan(profile, evidence, authorization, snapshot, offers, qualification=True)
+    timing = cli.lifecycle_timing(profile)
+    window = timing["qualification"] + profile["schedule"]["hard_margin_seconds"]
+    assert window < timing["horizon"]
+    plan = cli.admission_plan(
+        profile,
+        evidence,
+        authorization,
+        snapshot,
+        offers,
+        qualification=True,
+        priced_seconds=window,
+    )
+    assert plan["admit"] is True
+    j = Journal(tmp_path)
+    cfg = {"cleanup_contract": "network-v2", "hard_deadline_seconds": timing["horizon"]}
+    first = j.append("create_intent", role="h0")["unix"]
+    assert network_hard_end(j, cfg) == first + timing["horizon"]  # no window: full H unchanged
+    j.append("fresh_window", admitted_unix=int(first), cutoff_unix=int(first) + window)
+    assert network_hard_end(j, cfg) == int(first) + window  # supervisor ends at signed cutoff
+    j.append(
+        "fresh_window", admitted_unix=int(first), cutoff_unix=int(first) + timing["horizon"] + 1
+    )
+    with pytest.raises(Reject, match="fresh_window_cutoff_invalid"):  # never extended past H
+        network_hard_end(j, cfg)
+
+
 @pytest.mark.parametrize(
     "fault",
     [
@@ -1560,7 +1603,7 @@ def test_qualification_failure_debits_four_and_cleans_both(contract, tmp_path, m
     record["action"] = "qualification"
     financial = Path(record["files"]["financial"]["path"])
     snapshot = json.loads(financial.read_bytes())
-    snapshot["instances"] = [{"id": 1}, {"id": 2}]
+    snapshot["instances"] = [{"id": 1, "machine_id": 5000}, {"id": 2, "machine_id": 5001}]
     financial.write_text(json.dumps(snapshot))
     record["files"]["financial"]["sha256"] = fsha(financial)
     seal()
@@ -1611,7 +1654,7 @@ def test_continue_dispatches_signed_graph_not_raw_jobs(
     record["action"] = "qualification"
     financial = Path(record["files"]["financial"]["path"])
     snapshot = json.loads(financial.read_bytes())
-    snapshot["instances"] = [{"id": 1}, {"id": 2}]
+    snapshot["instances"] = [{"id": 1, "machine_id": 5000}, {"id": 2, "machine_id": 5001}]
     financial.write_text(json.dumps(snapshot))
     record["files"]["financial"]["sha256"] = fsha(financial)
     seal()
@@ -1667,7 +1710,10 @@ def test_continue_dispatches_signed_graph_not_raw_jobs(
             qualification_result=f"result-{role}",
             qualification_receipt=f"receipt-{role}",
         )
-    checked["financial"]["instances"] = [{"id": 1}, {"id": 2}]
+    checked["financial"]["instances"] = [
+        {"id": 1, "machine_id": 5000},
+        {"id": 2, "machine_id": 5001},
+    ]
 
     graph_path = tmp_path / "graph.json"
     checked["run_id"] = json.loads(checked["files"]["job"].read_bytes())["run_id"]
@@ -2190,7 +2236,7 @@ def test_continue_reviewed_launch_authentic_store_private_identity(
         offer["machine_id"] = i + 10
     put("offers", offers)
     financial = json.loads(Path(files["financial"]["path"]).read_bytes())
-    financial["instances"] = [{"id": 1}, {"id": 2}]
+    financial["instances"] = [{"id": 1, "machine_id": 10}, {"id": 2, "machine_id": 11}]
     put("financial", financial)
     cost = cli.budget.evaluate(
         snapshot0_credit=Decimal("20"),
@@ -2660,3 +2706,458 @@ def test_continue_round_one_late_predecessor(contract, tmp_path, monkeypatch):
     assert built == settled == [0, 1]
     assert replays == ["0" * 64, f"{1:064x}"]
     assert lineage[1]["predecessor_tape_hash"] == lineage[0]["tape_hash"]
+
+
+def test_task8_record_builder_seals_and_preflights(contract, tmp_path):
+    """Real build + owner seal + reviewed_launch on the prepared fixture; no provider calls."""
+    spec = importlib.util.spec_from_file_location(
+        "task8_prepare_record", TREE / "scripts/prepare_record.py"
+    )
+    assert spec and spec.loader
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    record, path, _ = contract
+    files = {k: Path(v["path"]) for k, v in record["files"].items()}
+    cfg = json.loads(files["config"].read_bytes())
+    run_id = json.loads(files["job"].read_bytes())["run_id"]
+    out = tmp_path / "task8"
+    out.mkdir()
+    seed = tmp_path / "owner.seed"
+    seed.write_bytes(bytes(range(32)))
+    financial = tmp_path / "fresh-financial.json"
+    snapshot = json.loads(files["financial"].read_bytes())
+    snapshot["instances"] = [
+        {"id": 1, "machine_id": 5000},
+        {"id": 2, "machine_id": 5001},
+        {"id": 55620228, "machine_id": 146355},  # foreign, preserved in the signed file
+    ]
+    financial.write_text(json.dumps(snapshot))
+
+    def build(name, **change):
+        args = {
+            "base": record,
+            "files": {"financial": financial},
+            "action": "qualification",
+            "parent_pid": os.getppid(),
+            "cutoff_unix": cfg["cleanup_deadline_unix"],
+            "admitted_unix": None,
+            "owner_seed": seed,
+            "run_id": run_id,
+            "beacon": 10,
+            "output": out / (name + ".json"),
+        }
+        return builder.build(**{**args, **change})
+
+    got = build("review")
+    assert got["action"] == "qualification" and got["adoption"] is None
+    assert got["review_sha256"] == fsha(out / "review.json")
+    sealed = json.loads((out / "review.json").read_bytes())["record"]
+    assert sealed["files"]["financial"] == {"path": str(financial), "sha256": fsha(financial)}
+    assert sealed["parent_pid"] == os.getppid()
+    assert sealed["quota"] == cli.execution_quota(json.loads(files["profile"].read_bytes()))
+    # The sealed file is the one the lifecycle CLI accepts, re-checked independently here.
+    assert cli.reviewed_launch(out / "review.json", OWNER.ss58, 10, "qualification")
+    with pytest.raises(Reject, match="reviewed_owner_receipt_invalid"):
+        cli.reviewed_launch(out / "review.json", OWNER.ss58, 10, "adopt")
+
+    changed = tmp_path / "changed-config.json"
+    changed.write_text(json.dumps({**cfg, "disk_gb": 81}))
+    with pytest.raises(Reject, match="reviewed_layout_clock_or_config"):
+        build("bad-config", files={"financial": financial, "config": changed})
+    with pytest.raises(Reject, match="persistent_controller_parent_required"):
+        build("bad-parent", parent_pid=os.getpid())
+    with pytest.raises(SystemExit, match="cutoff"):
+        build("past", cutoff_unix=int(time.time()) - 1)
+    with pytest.raises(SystemExit, match="admitted-unix"):
+        build("admitted", action="continue", admitted_unix=int(time.time()))
+    # Adopted qualification is priced over the SAME signed window as its adopt record.
+    profile = json.loads(files["profile"].read_bytes())
+    window = cli.lifecycle_timing(profile)["qualification"]
+    window += profile["schedule"]["hard_margin_seconds"]
+    admitted = cfg["cleanup_deadline_unix"] - window
+    adopted_qual = build("adopted-qual", admitted_unix=admitted)
+    assert adopted_qual["plan_sha256"] != got["plan_sha256"]
+    checked = cli.reviewed_launch(out / "adopted-qual.json", OWNER.ss58, 10, "qualification")
+    run = tmp_path / "run"
+    run.mkdir()
+    j = Journal(run)
+    j.append("transaction_open", pid=os.getppid(), live=False)
+    j.append(
+        "network_admission_authority",
+        owner=OWNER.ss58,
+        sources_sha256=fsha(checked["files"]["sources"]),
+    )
+    with pytest.raises(Reject, match="adopted_window_mismatch"):  # no adoption: no window
+        cli.launch_action("qualification", checked, run)
+    cutoff = cfg["cleanup_deadline_unix"]
+    for a, c in ((admitted + 1, cutoff), (admitted, cutoff + 1)):
+        j.append("adopted", admitted_unix=a, cutoff_unix=c)
+        with pytest.raises(Reject, match="adopted_window_mismatch"):
+            cli.launch_action("qualification", checked, run)
+    j.append("adopted", admitted_unix=admitted, cutoff_unix=cutoff)
+    plain = cli.reviewed_launch(out / "review.json", OWNER.ss58, 10, "qualification")
+    with pytest.raises(Reject, match="adopted_window_mismatch"):  # adopted run needs its window
+        cli.launch_action("qualification", plain, run)
+    # Fresh rental: no owned rows, signed finite window required and priced.
+    foreign = tmp_path / "foreign-financial.json"
+    foreign.write_text(json.dumps({**snapshot, "instances": snapshot["instances"][2:]}))
+    with pytest.raises(SystemExit, match="admitted-unix"):
+        build("fresh-no-window", action="admit", files={"financial": foreign})
+    with pytest.raises(SystemExit, match="exactly the two owned"):
+        build("fresh-owned", action="admit", admitted_unix=int(time.time()))
+    fresh = build(
+        "fresh", action="admit", files={"financial": foreign}, admitted_unix=int(time.time())
+    )
+    checked = cli.reviewed_launch(out / "fresh.json", OWNER.ss58, 10, "admit")
+    assert checked["record"]["admitted_unix"] == fresh["admitted_unix"]
+    extra = tmp_path / "extra-financial.json"
+    extra.write_text(
+        json.dumps(
+            {**snapshot, "instances": snapshot["instances"] + [{"id": 3, "machine_id": 5000}]}
+        )
+    )
+    with pytest.raises(SystemExit, match="exactly the two owned"):
+        build("extra", files={"financial": extra})
+    with pytest.raises(SystemExit, match="invalid --file"):
+        builder.parse_files(["financial=relative.json"], "qualification")
+    with pytest.raises(SystemExit, match="invalid --file"):
+        builder.parse_files([f"secret={financial}"], "qualification")
+    with pytest.raises(SystemExit, match="adopt requires"):
+        builder.parse_files([f"financial={financial}"], "adopt")
+    with pytest.raises(SystemExit, match="long-lived"):
+        builder.check_parent(os.getpid())
+    with pytest.raises(SystemExit, match="required together"):
+        builder.parse_files([f"join_h0={financial}"], "qualification")
+
+    # Qualification base: no roles and no run-time config fields; both are completed here.
+    base_cfg = {k: v for k, v in cfg.items() if k not in ("key_file", "cleanup_deadline_unix")}
+    base_config = tmp_path / "base-config.json"
+    base_config.write_text(json.dumps(base_cfg))
+    roles = record["roles"]
+    base = {
+        **{k: v for k, v in record.items() if k not in ("roles", "owner")},
+        "files": {
+            **record["files"],
+            "config": {"path": str(base_config), "sha256": fsha(base_config)},
+        },
+        "role_inputs": {"job": roles["h0"]["job"], "objects": roles["h0"]["objects"]},
+    }
+    role_files = {
+        kind + "_" + role: files[roles[role][kind]]
+        for kind in ("join", "seed_context")
+        for role in ("h0", "h1")
+    }
+    with pytest.raises(SystemExit, match="provider-key-file"):
+        build("no-key", base=base, files={"financial": financial, **role_files})
+    got = build(
+        "from-base",
+        base=base,
+        files={"financial": financial, **role_files},
+        provider_key=Path(cfg["key_file"]),
+    )
+    sealed = json.loads((out / "from-base.json").read_bytes())["record"]
+    assert sealed["roles"]["h0"]["join"] == "join_h0" and "role_inputs" not in sealed
+    # The real qualification base carries no owner; the builder binds its signer.
+    assert sealed["owner"] == got["owner"] == record["owner"]
+    completed = json.loads(Path(sealed["files"]["config"]["path"]).read_bytes())
+    assert completed == {
+        **base_cfg,
+        "key_file": cfg["key_file"],
+        "cleanup_deadline_unix": cfg["cleanup_deadline_unix"],
+    }
+
+
+def test_task8_run_dir_warms_genesis_before_fresh_get(contract, tmp_path, monkeypatch):
+    """Measured root cause: genesis ran after the fresh GET (124s against a 30s window)."""
+    from hypertrain.auditor import replay
+
+    spec = importlib.util.spec_from_file_location(
+        "task8_prepare_record", TREE / "scripts/prepare_record.py"
+    )
+    assert spec and spec.loader
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    monkeypatch.setitem(sys.modules, "task8_controller", cli)
+    record, _, _ = contract
+    files = {k: Path(v["path"]) for k, v in record["files"].items()}
+    cfg = json.loads(files["config"].read_bytes())
+    roles = record["roles"]
+    base = {
+        **{k: v for k, v in record.items() if k not in ("roles", "owner")},
+        "role_inputs": {"job": roles["h0"]["job"], "objects": roles["h0"]["objects"]},
+    }
+    base_path = tmp_path / "base.json"
+    base_path.write_text(json.dumps({"record": base}))
+    seed = tmp_path / "owner.seed"
+    seed.write_bytes(bytes(range(32)))
+    calls = []
+    real = replay.AnchorCache.genesis
+
+    def genesis(self, *args):
+        calls.append("genesis")
+        return real(self, *args)
+
+    monkeypatch.setattr(replay.AnchorCache, "genesis", genesis)
+    snapshot = json.loads(files["financial"].read_bytes())
+    snapshot["instances"] = [{"id": 1, "machine_id": 5000}, {"id": 2, "machine_id": 5001}]
+    age = {"seconds": 0}
+
+    class Runtime:
+        @staticmethod
+        def financial(tree, config, key_file, message, destination):
+            calls.append("get")
+            now = int(time.time()) - age["seconds"]
+            stamps = dict.fromkeys(("requested_unix", "received_unix", "verified_unix"), now)
+            destination.mkdir()
+            fresh = destination / "fresh-financial.json"
+            fresh.write_text(json.dumps({**snapshot, **stamps}))
+            return {"files": [f"financial={fresh}"]}
+
+    def launch(action, checked, run_dir, live=False):
+        calls.append("launch")
+        return {"ok": True}
+
+    monkeypatch.setattr(builder, "load_runtime", lambda: Runtime)
+    monkeypatch.setattr(cli, "launch_action", launch)
+
+    def main(name):
+        argv = ["prepare_record.py", "--base", str(base_path), "--action", "qualification"]
+        argv += ["--parent-pid", str(os.getppid())]
+        argv += ["--cutoff-unix", str(cfg["cleanup_deadline_unix"])]
+        argv += ["--owner-seed", str(seed), "--beacon", "10", "--source-message", "test"]
+        argv += ["--run-id", json.loads(files["job"].read_bytes())["run_id"]]
+        argv += ["--output", str(tmp_path / (name + ".json"))]
+        argv += ["--run-dir", str(tmp_path / name), "--provider-key-file", cfg["key_file"]]
+        for kind in ("join", "seed_context"):
+            for role in ("h0", "h1"):
+                argv += ["--file", f"{kind}_{role}={files[roles[role][kind]]}"]
+        monkeypatch.setattr(sys, "argv", argv)
+        builder.main()
+
+    main("first")
+    assert calls == ["genesis", "get", "launch"]  # shared seed once; nothing expensive after GET
+    assert cli._SEED_GENESIS_SCOPE is None  # the approval died with the invocation
+    calls.clear()
+    # The external reviewed path stays fully validating: every role recomputes genesis.
+    owner = Keypair(bytes(range(32))).ss58
+    cli.reviewed_launch(tmp_path / "first.json", owner, 10, "qualification")
+    assert calls == ["genesis", "genesis"]
+    calls.clear()
+    main("second")
+    assert calls == ["genesis", "get", "launch"]  # a new invocation recomputes
+
+    job, profile = files[roles["h0"]["job"]], files["profile"]
+    for target in (job, profile, files[roles["h0"]["objects"]["start_state"]]):
+        original = target.read_bytes()
+        target.write_bytes(original + b" ")
+        calls.clear()
+        with pytest.raises(Reject, match="reviewed_seed_hash"):
+            main("tampered-" + target.stem)
+        target.write_bytes(original)
+        assert calls == []  # rejected from bytes before any genesis and before the GET
+
+    class Other:
+        __file__ = str(tmp_path / "orchestrate.py")
+
+    monkeypatch.setitem(sys.modules, "task8_controller", Other)
+    with pytest.raises(SystemExit, match="not the prepared tree"):
+        main("other-tree")
+    monkeypatch.setitem(sys.modules, "task8_controller", cli)
+
+    objects = roles["h0"]["objects"]
+    pinned = (
+        job,
+        record["files"][roles["h0"]["job"]]["sha256"],
+        profile,
+        record["files"]["profile"]["sha256"],
+    )
+    paths = {k: files[n] for k, n in objects.items()}
+    digests = {k: record["files"][n]["sha256"] for k, n in objects.items()}
+    calls.clear()
+    with cli.seed_genesis_scope():
+        cli.seed_genesis(*pinned, roles["h0"]["hotkey"], paths, digests)
+        # Genesis may or may not depend on the hotkey; either way it must be recomputed.
+        try:
+            cli.seed_genesis(*pinned, Keypair(bytes(range(1, 33))).ss58, paths, digests)
+        except Reject as error:
+            assert str(error) == "reviewed_seed_full_genesis"
+    assert calls == ["genesis", "genesis"]  # a second identity is recomputed, never reused
+
+    age["seconds"] = 31
+    calls.clear()
+    # The builder's own admission_plan applies the unchanged 30s rule first, before sealing.
+    with pytest.raises(Reject, match="inventory_liability_or_quote_unknown"):
+        main("stale")
+    assert calls == ["genesis", "get"]  # the unchanged 30s rule rejects before launch
+
+
+@pytest.mark.parametrize(
+    ("rc", "stdout", "expected"),
+    [
+        (0, "match", True),
+        (0, "other-sha", False),  # different bytes on the host
+        (0, "other-size", False),
+        (1, "", False),  # missing file or read failure is never a match
+        (0, "", False),
+    ],
+)
+def test_qualification_staging_skips_only_exact_staged_copy(tmp_path, rc, stdout, expected):
+    import types
+
+    local = tmp_path / "start_state"
+    local.write_bytes(b"x" * 10)
+    out = {
+        "match": f"10\n{fsha(local)}  /r/start_state\n",
+        "other-sha": f"10\n{'0' * 64}  /r/start_state\n",
+        "other-size": f"11\n{fsha(local)}  /r/start_state\n",
+    }.get(stdout, stdout)
+    ssh = types.SimpleNamespace(
+        run=lambda command, tag, logs: subprocess.CompletedProcess(command, rc, out, "")
+    )
+    assert cli.staged_match(ssh, "/r/start_state", local, tmp_path) is expected
+
+
+@pytest.mark.parametrize(
+    ("profile_gpus", "host_gpus", "attested"),
+    [(8, 8, True), (8, 2, False), (2, 2, True), (2, 8, False)],
+)
+def test_qualification_probe_attests_profile_gpu_count(
+    contract, tmp_path, monkeypatch, profile_gpus, host_gpus, attested
+):
+    """Capture the probe qualify_role really sends, then run it against a fake torch."""
+    import hypertrain.gpu_ops.remote as remote
+
+    record, path, _ = contract
+    checked = cli.reviewed_launch(path, OWNER.ss58, 10, "admit")
+    checked["profile"]["layout"]["n_gpus"] = profile_gpus
+    run = tmp_path / "probe-run"
+    (run / "logs").mkdir(parents=True)
+    j = Journal(run)
+    j.append("create_intent", role="h0", unix=time.time())
+    orch = cli.Orchestrator(
+        checked["config"], j, cli.Provider("http://127.0.0.1:1", "a" * 32, run, j, False), run
+    )
+    for method in ("boot", "attach", "trust"):
+        monkeypatch.setattr(orch, method, lambda role: None)
+    ssh = remote.Ssh(
+        host="127.0.0.1",
+        port=22,
+        user="root",
+        identity=run / "identity",
+        known_hosts=run / "known",
+        journal=j,
+        role="h0",
+        timeout=60,
+    )
+    monkeypatch.setattr(orch, "ssh", lambda role: ssh)
+    puts = []
+    monkeypatch.setattr(
+        remote.Ssh, "put", lambda self, local, remote_path: puts.append(remote_path)
+    )
+    monkeypatch.setattr(
+        remote.Ssh,
+        "remote_sha256",
+        lambda self, remote_path, logs: fsha(Path(local_of[remote_path])),
+    )
+    files = checked["files"]
+    inputs = checked["record"]["roles"]["h0"]
+    from hypertrain.protocol.messages_v2 import IslandJobV1
+
+    job = IslandJobV1.model_validate_json(files[inputs["job"]].read_bytes())
+    root = orch.remote_root("h0")
+    local_of = {
+        root + "/source.tar": files["bundle"],
+        root + "/out/seed/job.json": files[inputs["job"]],
+        root + "/profile.json": files["profile"],
+        root + "/registry.json": files["registry"],
+        **{
+            root + "/out/seed/" + job.object_paths[k]: files[v]
+            for k, v in inputs["objects"].items()
+        },
+    }
+    probes = []
+
+    def run_remote(self, command, tag, logs):
+        if tag == "cli-import":
+            probes.append(shlex.split(command)[-1])
+            return subprocess.CompletedProcess(command, 1, "", "")
+        if tag.startswith("staged-"):
+            target = shlex.split(command)[3]
+            staged = local_of[target]
+            if target.endswith("/" + job.object_paths["start_state"]):  # exact copy staged
+                sized = f"{staged.stat().st_size}\n{fsha(staged)}  {target}\n"
+                return subprocess.CompletedProcess(command, 0, sized, "")
+            if target.endswith("/" + job.object_paths["ef_in"]):  # stale copy: re-upload
+                return subprocess.CompletedProcess(command, 0, f"1\n{'0' * 64}  {target}\n", "")
+            return subprocess.CompletedProcess(command, 1, "", "no such file")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(remote.Ssh, "run", run_remote)
+    with pytest.raises(Reject, match="actual_staged_import_attestation_failed"):
+        cli.qualify_role(checked, orch, cli.NetworkRuntime(orch, checked["profile"]), "h0")
+    [probe] = probes
+    seed_paths = {target for target in local_of if "/out/seed/" in target}
+    start = root + "/out/seed/" + job.object_paths["start_state"]
+    assert seed_paths - set(puts) == {start}  # only the exact staged copy skipped its upload
+    calls = {
+        ast.unparse(node)
+        for node in ast.walk(ast.parse(probe))
+        if isinstance(node, ast.Compare) and "device_count" in ast.unparse(node.left)
+    }
+    ranges = {
+        ast.unparse(node)
+        for node in ast.walk(ast.parse(probe))
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "range"
+    }
+    assert calls == {f"torch.cuda.device_count() == {profile_gpus}"}
+    assert ranges == {f"range({profile_gpus})"}
+    # Execute the exact probe with a fake torch reporting host_gpus devices; nothing trains.
+    remote_root = tmp_path / "remote"
+    with tarfile.open(files["bundle"]) as archive:  # the exact bytes qualify_role uploads
+        archive.extractall(remote_root, filter="data")
+    fake = tmp_path / "fake"
+    (fake / "torch").mkdir(parents=True)
+    venv = tmp_path / "venv/main"
+    venv.mkdir(parents=True)
+    (fake / "torch/__init__.py").write_text(
+        "import pathlib, types\n"
+        "__version__ = '2.14.0+cu130'\n"
+        "version = types.SimpleNamespace(cuda='13.0')\n"
+        f"cuda = types.SimpleNamespace(is_available=lambda: True, device_count=lambda: {host_gpus},"
+        " get_device_properties=lambda i: types.SimpleNamespace(multi_processor_count=170))\n"
+        # Only the determinism hooks `import hypertrain.trainer` sets; no tensor ops exist.
+        "_flags = {}\n"
+        "use_deterministic_algorithms = lambda on, **kw: _flags.update(det=on)\n"
+        "are_deterministic_algorithms_enabled = lambda: _flags.get('det', False)\n"
+        "is_deterministic_algorithms_warn_only_enabled = lambda: False\n"
+        "set_float32_matmul_precision = lambda p: _flags.update(precision=p)\n"
+        "set_num_threads = lambda n: _flags.update(threads=n)\n"
+        "get_num_threads = lambda: _flags.get('threads', 1)\n"
+        "backends = types.SimpleNamespace(cudnn=types.SimpleNamespace(),"
+        " cuda=types.SimpleNamespace(matmul=types.SimpleNamespace()))\n"
+    )
+    script = probe.replace(repr(str(Path(root).resolve())), repr(str(remote_root))).replace(
+        "'/venv/main'", repr(str(fake))
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={"PYTHONPATH": f"{fake}:{remote_root}/src", "PATH": os.environ["PATH"]},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert (result.stdout.strip() == "IMPORT_ATTESTED") is attested, result.stderr[-400:]
+
+
+@pytest.mark.parametrize("gpus", [0, 9, True, "8"])
+def test_qualification_rejects_malformed_gpu_count_before_ssh(contract, tmp_path, gpus):
+    record, path, _ = contract
+    checked = cli.reviewed_launch(path, OWNER.ss58, 10, "admit")
+    checked["profile"]["layout"]["n_gpus"] = gpus
+
+    class NoContact:
+        def __getattr__(self, name):
+            raise AssertionError("host contacted: " + name)
+
+    with pytest.raises(Reject, match="qualification_gpu_count_invalid"):
+        cli.qualify_role(checked, NoContact(), None, "h0")

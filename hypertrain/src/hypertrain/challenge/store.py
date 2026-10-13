@@ -33,12 +33,21 @@ if TYPE_CHECKING:
     from scripts.network_gpu_operation import Operation
 
     from hypertrain.gpu_ops.work_screen import IslandLaunch
+    from hypertrain.protocol.messages import ReplayEnv
 
 from hypertrain.beacon import BeaconError, BeaconRound
 from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.disputes_v2 import Contest, DisputesV2
 from hypertrain.data.assignment import assign_round
-from hypertrain.data.store import ObjectNotFound, StoreError
+from hypertrain.data.store import (
+    ObjectNotFound,
+    StoreError,
+    _stream,
+    get_large,
+    parse_index,
+    put_file,
+    put_large,
+)
 from hypertrain.data.store import Store as ObjectStore
 from hypertrain.data.trial_assignment import trial_assignment_hash
 from hypertrain.ledger import Ledger, LedgerError, Params
@@ -87,6 +96,7 @@ from hypertrain.protocol.messages import (
     f32val,
 )
 from hypertrain.protocol.messages_v2 import (
+    PART_BYTES,
     AdmissionPolicyV2,
     AggregationPolicyV2,
     AuditPolicyV2,
@@ -1216,7 +1226,7 @@ class ChallengeStore:
         """tensor_root = hypertrain.auditor.replay.tensor_root of the uploaded state blob."""
         from hypertrain.auditor.replay import tensor_root, unpack_state
 
-        theta, st = unpack_state(self.get_object(blob_sha))
+        theta, st = unpack_state(get_large(blob_sha, self.get_object))
         return None if st is None else tensor_root(theta, st)
 
     def dispute(self, run_id: str, env: Any) -> dict[str, Any]:
@@ -2301,7 +2311,7 @@ class ChallengeStore:
                 or not Path(result.environment.torch_path).is_relative_to("/venv/main")
             ):
                 raise ChallengeError(403, "reviewed CUDA runtime/reference binding differs")
-        engine.compare(list(results))  # Rehash all rescued rank/round/checkpoint bytes.
+        engine.compare(list(results), manifest)  # Rehash all rescued rank/round/checkpoint bytes.
         summaries = [
             fsha(path.parent / f"round-{round_index}/published/rank-{rank}/summary.json")
             for path in results
@@ -3032,11 +3042,9 @@ class ChallengeStore:
                         }
                 if actual_files != publication:
                     raise ChallengeError(409, "shadow original publication changed")
-                for metadata in publication.values():
+                for relative, metadata in publication.items():
                     assert isinstance(metadata, dict) and isinstance(metadata["sha256"], str)
-                    data = self.objects.get(metadata["sha256"])
-                    if sha256_hex(data) != metadata["sha256"] or len(data) != metadata["bytes"]:
-                        raise ChallengeError(409, "shadow addressed publication changed")
+                    self._addressed_file_v2(confined(directory, relative))
                 artifacts = validate_artifacts(job, directory)
                 if tuple(retained_screen.rank_results) != artifacts.ranks:
                     raise ChallengeError(409, "shadow original rank screen differs")
@@ -3362,6 +3370,19 @@ class ChallengeStore:
         self._shadow_custody_v2(run_id, binding)
         return self._shadow_status_v2(run_id, binding)
 
+    def _addressed_file_v2(self, path: Path) -> None:
+        """The store holds `path` under its deterministic ht-parts-v1 ref, parts verified."""
+        try:
+            ref = put_file(path, sha256_hex)  # hash-only ref derivation, streamed
+            _stream(ref, self.objects.get, lambda _part: None)
+        except StoreError:
+            raise ChallengeError(409, "shadow addressed publication changed") from None
+
+    def _whole_sha_v2(self, ref: str) -> str:
+        """StartState/ArtifactRef keys are stored refs; IslandJob binds whole-file sha256."""
+        index = parse_index(self.objects.get(ref))
+        return ref if index is None else index.sha256
+
     def _shadow_anchor_v2(self, job: IslandJobV1, hotkey: str, directory: Path) -> str:
         """Derive original trial genesis anchor from actual start/optimizer/EF bytes."""
         from hypertrain.auditor.replay import AnchorCache, optimizer_hash, unpack_state
@@ -3369,13 +3390,18 @@ class ChallengeStore:
         from hypertrain.protocol.messages_v2 import StartStateV2
         from hypertrain.trainer.compress import state_hash
 
-        theta, carried = unpack_state(
-            confined(directory, job.object_paths["start_state"]).read_bytes()
-        )
+        start_blob = confined(directory, job.object_paths["start_state"]).read_bytes()
+        ef_blob = confined(directory, job.object_paths["ef_in"]).read_bytes()
+        if (sha256_hex(start_blob), sha256_hex(ef_blob)) != (
+            job.start_state_sha256,
+            job.ef_in_sha256,
+        ):
+            raise ChallengeError(409, "shadow original trial start bytes differ from job")
+        theta, carried = unpack_state(start_blob)
         genesis = AnchorCache().genesis(job.manifest, hotkey, theta)
         if carried is not None and optimizer_hash(carried) != optimizer_hash(genesis.state):
             raise ChallengeError(409, "shadow original trial optimizer differs from genesis")
-        ef, _ = unpack_state(confined(directory, job.object_paths["ef_in"]).read_bytes())
+        ef, _ = unpack_state(ef_blob)
         if job.global_step0 != 0 or state_hash(ef) != state_hash(genesis.ef):
             raise ChallengeError(409, "shadow original trial EF/start differs from genesis")
         return StartStateV2(
@@ -3383,9 +3409,9 @@ class ChallengeStore:
             w=job.w,
             hotkey=hotkey,
             theta_hash=state_hash(theta),
-            state_object_sha256=job.start_state_sha256,
+            state_object_sha256=put_large(start_blob, sha256_hex),  # stored ref, not whole
             opt_state_hash=optimizer_hash(genesis.state),
-            ef_object_sha256=job.ef_in_sha256,
+            ef_object_sha256=put_large(ef_blob, sha256_hex),
             ef_hash=state_hash(ef),
             parent_anchor_hash=genesis.anchor_hash,
             global_step0=0,
@@ -4909,9 +4935,9 @@ class ChallengeStore:
                     w=body.w,
                     hotkey=entry.hotkey,
                     theta_hash=state_hash(theta),
-                    state_object_sha256=self.objects.put(state_blob),
+                    state_object_sha256=put_large(state_blob, self.objects.put),
                     opt_state_hash=optimizer_hash(anchor.state),
-                    ef_object_sha256=self.objects.put(ef_blob),
+                    ef_object_sha256=put_large(ef_blob, self.objects.put),
                     ef_hash=state_hash(anchor.ef),
                     parent_anchor_hash=anchor.anchor_hash,
                     global_step0=anchor.state.step,
@@ -5974,7 +6000,7 @@ class ChallengeStore:
             commit = CommitV2.model_validate(json.loads(found[0]["data"])["body"])
             if (model.leaves_root, model.delta_hash) != (commit.leaves_root, commit.delta_hash):
                 raise ChallengeError(422, "leaf root differs from commit")
-            leaves = json.loads(self.objects.get(model.artifact_refs[-1].sha256))
+            leaves = json.loads(get_large(model.artifact_refs[-1].sha256, self.objects.get))
             assert isinstance(leaves, list)
             parsed = [LeafPreimage.model_validate(p) for p in leaves]
             if (
@@ -6540,12 +6566,12 @@ class ChallengeStore:
             body = self._record_v2(run_id, "round", str(w))["body"]
             directory = self.state_dir / "jobs-v2" / str(w) / hotkey
             directory.mkdir(parents=True, exist_ok=True)
-            state = self.objects.get(start.state_object_sha256)
+            state = get_large(start.state_object_sha256, self.objects.get)
             if manifest.training.inner.state_policy != "carry":
                 state = pack_state(unpack_state(state)[0])
             inputs = {
                 "start_state": state,
-                "ef_in": self.objects.get(start.ef_object_sha256),
+                "ef_in": get_large(start.ef_object_sha256, self.objects.get),
                 "v0": pack_state({}),
             }
             dataset = self._record_v2(run_id, "dataset", "inputs")
@@ -6561,7 +6587,7 @@ class ChallengeStore:
             hashes = {}
             for name, value in inputs.items():
                 durable_write(directory / name, value)
-                hashes[name] = self.objects.put(value)
+                hashes[name] = put_large(value, self.objects.put)  # ht-parts-v1 above 1 MiB
             job = IslandJobV1(
                 job_version=1,
                 run_id=run_id,
@@ -6569,9 +6595,9 @@ class ChallengeStore:
                 manifest=manifest,
                 sample_ids=list(samples),
                 global_step0=start.global_step0,
-                start_state_sha256=hashes["start_state"],
-                ef_in_sha256=hashes["ef_in"],
-                v0_sha256=hashes["v0"],
+                start_state_sha256=sha256_hex(inputs["start_state"]),
+                ef_in_sha256=sha256_hex(inputs["ef_in"]),
+                v0_sha256=sha256_hex(inputs["v0"]),
                 object_paths={k: k for k in inputs},
                 deadline=manifest.training.beacon.genesis_time + (int(body["d_commit"]) - 1) * 3,
             )
@@ -6668,6 +6694,15 @@ class ChallengeStore:
                         raise ChallengeError(422, "SERVICE_AUDIT_OBJECT_HASH")
                     return data
 
+                def read_ref(key: str) -> tuple[bytes, int]:
+                    """(whole bytes, stored length); every stored object (plain/part/index)
+                    is read bounded at PART_BYTES and content-verified."""
+                    try:
+                        stored = len(read_object(key, PART_BYTES))
+                        return get_large(key, lambda k: read_object(k, PART_BYTES)), stored
+                    except StoreError:
+                        raise ChallengeError(422, "SERVICE_AUDIT_OBJECT_HASH") from None
+
                 descriptor_bytes = read_object(str(accepted["descriptor_hash"]), 1 << 20)
                 preflight_descriptor = envelope_v2.load_json(descriptor_bytes, max_bytes=1 << 20)
                 target = self.state_dir / "audit-geometry-v2" / job_id / row["nonce"]
@@ -6687,9 +6722,10 @@ class ChallengeStore:
                     or geometry.run_id != run_id
                     or geometry.w != row["w"]
                     or geometry.sample_ids != job.sample_ids
-                    or geometry.start_state_sha256 != job.start_state.state_object_sha256
-                    or geometry.ef_in_sha256 != job.ef_in.sha256
-                    or geometry.v0_sha256 != job.v0.sha256
+                    or geometry.start_state_sha256
+                    != self._whole_sha_v2(job.start_state.state_object_sha256)
+                    or geometry.ef_in_sha256 != self._whole_sha_v2(job.ef_in.sha256)
+                    or geometry.v0_sha256 != self._whole_sha_v2(job.v0.sha256)
                     or set(geometry.object_paths)
                     != {"start_state", "ef_in", "v0", "samples", "sample_proofs"}
                     or any(
@@ -6725,17 +6761,20 @@ class ChallengeStore:
                     "ef_sha256": job.ef_in.sha256,
                 }:
                     raise ChallengeError(409, "SERVICE_AUDIT_ANCHOR_METADATA")
-                inputs = {
-                    "start_state": read_object(job.start_state.state_object_sha256),
-                    "ef_in": read_object(job.ef_in.sha256),
-                    "v0": read_object(job.v0.sha256),
+                refs = {
+                    "start_state": job.start_state.state_object_sha256,
+                    "ef_in": job.ef_in.sha256,
+                    "v0": job.v0.sha256,
                 }
+                decoded = {name: read_ref(key) for name, key in refs.items()}
+                inputs = {name: data for name, (data, _) in decoded.items()}
+                # Anchor files hold whole bytes; their streamed ht-parts-v1 ref must be the key.
                 if (
-                    bounded_bytes(path / "state", 65536) != inputs["start_state"]
-                    or bounded_bytes(path / "ef", 65536) != inputs["ef_in"]
+                    put_file(path / "state", sha256_hex) != refs["start_state"]
+                    or put_file(path / "ef", sha256_hex) != refs["ef_in"]
                 ):
                     raise ChallengeError(422, "SERVICE_AUDIT_ANCHOR_BYTES")
-                if len(inputs["ef_in"]) != job.ef_in.size or len(inputs["v0"]) != job.v0.size:
+                if (decoded["ef_in"][1], decoded["v0"][1]) != (job.ef_in.size, job.v0.size):
                     raise ChallengeError(422, "SERVICE_AUDIT_REF_SIZE")
                 shapes = param_shapes(TrainConfig.from_manifest_v2(manifest).model)
                 for name, data in inputs.items():
@@ -6744,7 +6783,7 @@ class ChallengeStore:
                     size = struct.unpack_from("<Q", data)[0]
                     if size > len(data) - 8:
                         raise ChallengeError(422, "SERVICE_AUDIT_STATE_HEADER")
-                    header = envelope_v2.load_json(data[8 : 8 + size], max_bytes=65536)
+                    header = envelope_v2.load_json(data[8 : 8 + size], max_bytes=PART_BYTES)
                     expected = {
                         f"{part}/{tensor}": list(shape)
                         for part in (("theta", "m", "v") if name == "start_state" else ("theta",))
@@ -6808,7 +6847,8 @@ class ChallengeStore:
                 )
                 miner = self.state_dir / "jobs-v2" / str(row["w"]) / row["hotkey"]
                 for name, relative in geometry.object_paths.items():
-                    if bounded_bytes(miner / relative, 65536) != inputs[name]:
+                    # Confined (O_NOFOLLOW) bounded read: a symlinked input must not be followed.
+                    if bounded_bytes(miner / relative, len(inputs[name])) != inputs[name]:
                         raise ChallengeError(422, "SERVICE_AUDIT_GEOMETRY_BYTES")
                 self._service_boundary_v2(run_id, row["w"], heavy=True)
             deadline = (
@@ -6823,9 +6863,9 @@ class ChallengeStore:
             directory = self.state_dir / "audit-v2" / job_id / row["nonce"]
             directory.mkdir(parents=True, exist_ok=True)
             inputs = {
-                "start_state": self.objects.get(start.state_object_sha256),
-                "ef_in": self.objects.get(start.ef_object_sha256),
-                "v0": self.objects.get(job.v0.sha256),
+                "start_state": get_large(start.state_object_sha256, self.objects.get),
+                "ef_in": get_large(start.ef_object_sha256, self.objects.get),
+                "v0": get_large(job.v0.sha256, self.objects.get),
             }
             dataset = self._record_v2(run_id, "dataset", "inputs")
             samples_raw = self.objects.get(str(dataset["samples_hash"]))
@@ -6906,6 +6946,7 @@ class ChallengeStore:
                     now_round=now,
                     deadline_unix=deadline,
                     backend=backend,
+                    objects=self.objects.get,  # resolves stored ht-parts-v1 refs
                     publication_job=geometry_job,
                     publication_directory=geometry_directory,
                     launch=(
@@ -6935,6 +6976,11 @@ class ChallengeStore:
                 if artifacts.directory != geometry_directory / "published":
                     raise ChallengeError(409, "independent audit publication directory differs")
                 IslandParty.published(row["hotkey"], geometry_job, artifacts.directory)
+                dispatched = (
+                    self._dispatch_env_v2(manifest, geometry_directory)
+                    if backend == "cuda"
+                    else None
+                )
                 guard.check()
             with self._tx():
                 current = self._db.execute(
@@ -6958,13 +7004,20 @@ class ChallengeStore:
                     result=outcome.result,
                     first_bad_leaf=outcome.first_bad_leaf,
                     recomputed_leaves_root=outcome.recomputed_leaves_root,
-                    replay_env=ReplayEnv(
-                        image_digest=manifest.training.reference_spec.image_digest,
-                        driver=manifest.training.reference_spec.driver_allowlist[0],
-                        gpu_uuid_sha256="0" * 64,
-                        sm_count=max(1, manifest.training.reference_spec.sm_count),
+                    replay_env=(
+                        dispatched[0]
+                        if dispatched is not None
+                        # CPU functional backend only: never a CUDA hardware claim.
+                        else ReplayEnv(
+                            image_digest=manifest.training.reference_spec.image_digest,
+                            driver=manifest.training.reference_spec.driver_allowlist[0],
+                            gpu_uuid_sha256="0" * 64,
+                            sm_count=max(1, manifest.training.reference_spec.sm_count),
+                        )
                     ),
                 )
+                if dispatched is not None:
+                    self._put_record_v2(run_id, "audit-dispatch", job_id, dispatched[1])
                 # Store independently executed evidence. Caller signs this exact verdict separately.
                 identity = f"{job.start_state.w}:{job.start_state.hotkey}"
                 self._put_record_v2(
@@ -6991,6 +7044,47 @@ class ChallengeStore:
                 }
         finally:
             self._lease_guards_v2.pop(job_id, None)
+
+    def _dispatch_env_v2(
+        self, manifest: RunManifestV2, directory: Path
+    ) -> tuple[ReplayEnv, dict[str, JsonValue]]:
+        """Actual remote CUDA hardware bound to the dispatched publication; never a placeholder."""
+        from hypertrain.miner.island_launch import IslandFailure, gpu_uuid
+        from hypertrain.protocol.messages import ReplayEnv
+
+        ref = manifest.training.reference_spec
+        try:
+            raw = envelope_v2.load_json((directory / "role-dispatch.json").read_bytes())
+            env = raw["environment"]
+            if not isinstance(env, dict):
+                raise TypeError("environment")
+            drivers, sms, found = env["drivers"], env["sm_counts"], env["gpu_uuids"]
+            if not (
+                isinstance(drivers, list) and isinstance(sms, list) and isinstance(found, list)
+            ):
+                raise TypeError("environment lists")
+            uuids = [gpu_uuid(u) for u in found]
+        except (OSError, ValueError, KeyError, TypeError, IslandFailure) as error:
+            raise ChallengeError(503, "ROLE_DISPATCH_PROVENANCE_UNAVAILABLE") from error
+        n = ref.layout.n_gpus
+        if (
+            env.get("backend") != "cuda"
+            or env.get("image_digest") != ref.image_digest
+            or len(drivers) != n
+            or len(set(drivers)) != 1
+            or any(d not in ref.driver_allowlist for d in drivers)
+            or sms != [ref.sm_count] * n
+            or len(uuids) != n
+            or len(set(uuids)) != n
+        ):
+            raise ChallengeError(409, "ROLE_DISPATCH_PROVENANCE_MISMATCH")
+        replay = ReplayEnv(
+            image_digest=ref.image_digest,
+            driver=str(drivers[0]),
+            gpu_uuid_sha256=sha256_hex(",".join(uuids).encode()),
+            sm_count=ref.sm_count,
+        )
+        return replay, raw
 
     def complete_audit_v2(self, run_id: str, job_id: str, raw: bytes) -> dict[str, str]:
         from hypertrain.challenge.trust_v2 import ReplayEvidence
@@ -7455,9 +7549,10 @@ class ChallengeStore:
                     or geometry.run_id != run_id
                     or geometry.w != w
                     or geometry.sample_ids != audit_job.sample_ids
-                    or geometry.start_state_sha256 != audit_job.start_state.state_object_sha256
-                    or geometry.ef_in_sha256 != audit_job.ef_in.sha256
-                    or geometry.v0_sha256 != audit_job.v0.sha256
+                    or geometry.start_state_sha256
+                    != self._whole_sha_v2(audit_job.start_state.state_object_sha256)
+                    or geometry.ef_in_sha256 != self._whole_sha_v2(audit_job.ef_in.sha256)
+                    or geometry.v0_sha256 != self._whole_sha_v2(audit_job.v0.sha256)
                 ):
                     raise ChallengeError(409, "SERVICE_INPUT_DESCRIPTOR_BINDING")
                 raw_delta = bounded_bytes(self.objects._path(delta.delta_hash), 65536)
@@ -8257,8 +8352,10 @@ class ChallengeStore:
                     original_start.run_id != run_id
                     or original_start.w != turn.contest.w
                     or original_start.hotkey != turn.contest.miner
-                    or original_start.state_object_sha256 != preflight_job.start_state_sha256
-                    or original_start.ef_object_sha256 != preflight_job.ef_in_sha256
+                    or self._whole_sha_v2(original_start.state_object_sha256)
+                    != preflight_job.start_state_sha256
+                    or self._whole_sha_v2(original_start.ef_object_sha256)
+                    != preflight_job.ef_in_sha256
                     or anchor_record["hotkey"] != turn.contest.miner
                     or anchor_record["w"] != turn.contest.w - 1
                     or anchor_record["anchor_hash"] != original_start.parent_anchor_hash

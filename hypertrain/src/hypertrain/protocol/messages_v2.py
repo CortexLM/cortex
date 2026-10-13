@@ -52,6 +52,10 @@ WEIGHT_QUANTUM = 1 << 24
 MAX_OBJECT_BYTES = 2 << 30
 MAX_BODY_BYTES = 64 << 10
 MAX_MANIFEST_BYTES = 1 << 20
+# ht-parts-v1: objects above PART_BYTES are stored as parts plus a magic-prefixed JSON index.
+INDEX_MAGIC = b"ht-parts-v1\n"
+PART_BYTES = 1 << 20
+MAX_PARTS = 8192
 
 
 class WireModel(BaseModel):
@@ -360,6 +364,23 @@ class AuditChallengeV2(AuditChallenge):
 class ArtifactRef(WireModel):
     sha256: Hex64
     size: Annotated[StrictInt, Field(ge=1, le=MAX_OBJECT_BYTES)]
+
+
+class PartIndexV1(WireModel):
+    """Stored as INDEX_MAGIC + JCS(body); `sha256`/`size` describe the reassembled file."""
+
+    sha256: Hex64
+    size: Annotated[StrictInt, Field(ge=PART_BYTES + 1, le=MAX_PARTS * PART_BYTES)]
+    parts: Annotated[list[Hex64], Field(min_length=2, max_length=MAX_PARTS)]
+
+    @model_validator(mode="after")
+    def _count(self) -> PartIndexV1:
+        if len(self.parts) != -(-self.size // PART_BYTES):
+            raise ValueError("part count must equal ceil(size / PART_BYTES)")
+        return self
+
+    def encode(self) -> bytes:
+        return INDEX_MAGIC + canonicalize(self.body(), allow_float=False)
 
 
 class AuditJobV2(WireModel):

@@ -19,8 +19,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from hypertrain.beacon.core import BeaconRound, FixtureBeacon
 from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.app import Config, create_app
-from hypertrain.data.store import LocalFSStore
+from hypertrain.data.store import LocalFSStore, get_large
 from hypertrain.data.trial_assignment import trial_assignment_hash, trial_samples
+from hypertrain.gpu_ops.work_screen import artifact_ref
 from hypertrain.ledger import Params
 from hypertrain.ledger.escrow_v2 import EscrowV2, FinalityEvidence, authority_message
 from hypertrain.miner.island_launch import validate_artifacts
@@ -413,9 +414,8 @@ def _authority(root: Path) -> Bundle:
                     ref.artifact_refs,
                     strict=True,
                 ):
-                    if (
-                        path.read_bytes() != objects.get(artifact.sha256)
-                        or path.stat().st_size != artifact.size
+                    if artifact_ref(path) != artifact or path.read_bytes() != get_large(
+                        artifact.sha256, objects.get
                     ):
                         raise ValueError("original artifact reference differs")
                 final = envs[3].body

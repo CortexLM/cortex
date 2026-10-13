@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import os
 import subprocess
 import sys
@@ -17,11 +18,13 @@ from hypertrain.gpu_ops.journal import fsha
 from hypertrain.gpu_ops.launcher import Reject
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.messages_v2 import IslandJobV1, RunManifestV2
+from hypertrain.trainer.config import TrainConfig
+from hypertrain.trainer.model import param_shapes
 
 TREE = Path(__file__).parents[2]
 
 
-def results(tmp_path: Path) -> list[Path]:
+def results(tmp_path: Path, ranks: int = 2, H: int = 30, J: int = 5) -> list[Path]:  # noqa: N803
     """Two synthetic CUDA-labelled JSON sets exercise parsing, never execute GPUs."""
     paths = []
     for i in range(2):
@@ -29,20 +32,12 @@ def results(tmp_path: Path) -> list[Path]:
         hashes = []
         for index in range(2):
             root = directory / f"round-{index}/published"
-            root.mkdir(parents=True)
             files = {}
-            for rank in range(2):
-                for rel in [
-                    "state.safetensors",
-                    "ef.safetensors",
-                    "delta.bin",
-                    "leaves.json",
-                    "trace.json",
-                ] + [f"checkpoints/{t}.safetensors" for t in range(0, 31, 5)]:
-                    path = root / f"rank-{rank}" / rel
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(bytes([index]))
-                    files[str(path.relative_to(root))] = fsha(path)
+            for rel in driver.round_files(ranks, H, J):
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(bytes([index]))
+                files[rel] = fsha(path)
             hashes.append(files)
         result = driver.Result(
             status="CUDA_ROUNDS_CAPTURED_NOT_WORKLOAD_PASS",
@@ -55,8 +50,8 @@ def results(tmp_path: Path) -> list[Path]:
                 cuda="13.0",
                 python="/opt/hypertrain/venv/bin/python",
                 torch_path="/venv/torch/__init__.py",
-                drivers=["595.84", "595.84"],
-                sm_counts=[170, 170],
+                drivers=["595.84"] * ranks,
+                sm_counts=[170] * ranks,
                 image_digest="sha256:" + "44" * 32,
             ),
             instance_id=i + 1,
@@ -72,11 +67,40 @@ def results(tmp_path: Path) -> list[Path]:
     return paths
 
 
+def manifest(ranks: int = 2, H: int = 30, J: int = 5) -> RunManifestV2:  # noqa: N803
+    """Caller-validated authority for compare(); results never supply their own shape."""
+    body = example_manifest().body()
+    shapes = param_shapes(TrainConfig.from_manifest(example_manifest()).model)
+    body["model"]["param_count"] = sum(math.prod(s) for s in shapes.values())
+    body["inner"].update(H=H, J=J)
+    body["reference_spec"].update(image_digest="sha256:" + "44" * 32)
+    body["reference_spec"]["layout"].update(n_gpus=ranks, dp_size=ranks, ep_size=1)
+    network = {
+        **{
+            k: "11" * 32
+            for k in (
+                "admission_policy_hash",
+                "economics_policy_hash",
+                "aggregation_policy_hash",
+                "dispute_policy_hash",
+                "audit_policy_hash",
+                "relay_registry_hash",
+            )
+        },
+        "audit_mode": "anchored-full",
+        "full_anchor_version": 1,
+        "capabilities": ["island-replay", "all-level-disputes", "transport-receipts"],
+    }
+    return RunManifestV2.model_validate(
+        {"manifest_version": 2, "training": body, "network": network}
+    )
+
+
 def test_bitwise_comparison_preserves_workload_gate(tmp_path: Path) -> None:
     # Given
     paths = results(tmp_path)
     # When
-    result = driver.compare(paths)
+    result = driver.compare(paths, manifest())
     # Then
     assert result == {"two_host_bitwise_match": True, "workload_allowed": False}
 
@@ -87,7 +111,7 @@ def test_tampered_artifact_rejects_claimed_matching_hashes(tmp_path: Path) -> No
     (paths[1].parent / "round-1/published/rank-0/state.safetensors").write_bytes(b"tampered")
     # When / Then
     with pytest.raises(Reject, match="custody_changed"):
-        driver.compare(paths)
+        driver.compare(paths, manifest())
 
 
 def test_same_machine_rejects_two_host_claim(tmp_path: Path) -> None:
@@ -98,7 +122,7 @@ def test_same_machine_rejects_two_host_claim(tmp_path: Path) -> None:
     paths[1].write_text(json.dumps(data))
     # When / Then
     with pytest.raises(Reject, match="binding_or_bitwise"):
-        driver.compare(paths)
+        driver.compare(paths, manifest())
 
 
 @pytest.mark.parametrize(
@@ -157,12 +181,122 @@ def test_partial_round_coverage_rejects_even_identical_results(tmp_path: Path) -
         path.write_text(json.dumps(data))
     # When / Then
     with pytest.raises(Reject, match="coverage_missing"):
-        driver.compare(paths)
+        driver.compare(paths, manifest())
+
+
+def test_eight_gpu_h4_j2_results_compare_with_full_rank_coverage(tmp_path: Path) -> None:
+    # Given
+    paths = results(tmp_path, ranks=8, H=4, J=2)
+    # When
+    result = driver.compare(paths, manifest(8, 4, 2))
+    # Then: 8 ranks x (5 finals + checkpoints 0,2,4), workload gate unchanged.
+    rounds = json.loads(paths[0].read_bytes())["rounds"]
+    assert result == {"two_host_bitwise_match": True, "workload_allowed": False}
+    assert [len(r) for r in rounds] == [64, 64] and "rank-7/checkpoints/4.safetensors" in rounds[1]
+
+
+@pytest.mark.parametrize("attack", ["missing_rank", "same_host", "tamper", "wrong_image"])
+def test_eight_gpu_results_reject_rank_host_custody_and_shape_attacks(
+    tmp_path: Path, attack: str
+) -> None:
+    # Given
+    paths = results(tmp_path, ranks=8, H=4, J=2)
+    datas = [json.loads(p.read_bytes()) for p in paths]
+    if attack == "missing_rank":  # Both hosts agree on a 7-rank capture.
+        for data in datas:
+            data["rounds"] = [
+                {k: v for k, v in r.items() if not k.startswith("rank-7/")} for r in data["rounds"]
+            ]
+    elif attack == "same_host":
+        datas[1]["machine_id"] = datas[0]["machine_id"]
+    elif attack == "wrong_image":  # Both hosts agree on an image the manifest never named.
+        for data in datas:
+            data["environment"]["image_digest"] = "sha256:" + "55" * 32
+    for path, data in zip(paths, datas, strict=True):
+        path.write_text(json.dumps(data))
+    if attack == "tamper":
+        (paths[1].parent / "round-1/published/rank-7/checkpoints/2.safetensors").write_bytes(b"x")
+    match = {"missing_rank": "coverage_missing", "tamper": "custody_changed"}
+    # When / Then
+    with pytest.raises(Reject, match=match.get(attack, "binding_or_bitwise")):
+        driver.compare(paths, manifest(8, 4, 2))
+
+
+@pytest.mark.parametrize(
+    "attack", ["two_ranks_j4", "eight_ranks_j4", "legacy_j15", "no_checkpoints"]
+)
+def test_coordinated_self_consistent_results_cannot_redefine_layout(
+    tmp_path: Path, attack: str
+) -> None:
+    # Given: both hosts agree bitwise on a shape the 8-GPU H4/J2 seed manifest never named.
+    shape = {"two_ranks_j4": (2, 4, 4), "eight_ranks_j4": (8, 4, 4), "legacy_j15": (8, 30, 15)}
+    paths = results(tmp_path, *shape.get(attack, (8, 4, 2)))
+    if attack == "no_checkpoints":  # What a J=-1 capture listed: finals only.
+        for path in paths:
+            data = json.loads(path.read_bytes())
+            data["rounds"] = [
+                {k: v for k, v in r.items() if "/checkpoints/" not in k} for r in data["rounds"]
+            ]
+            path.write_text(json.dumps(data))
+    # When / Then: the manifest, not the results, defines ranks and checkpoints.
+    with pytest.raises(Reject, match="binding_or_bitwise|coverage_missing"):
+        driver.compare(paths, manifest(8, 4, 2))
+
+
+@pytest.mark.parametrize("shape", [(8, 30, 0), (8, 30, -1), (8, 30, 7), (0, 4, 2)])
+def test_round_files_refuses_non_positive_or_non_dividing_shape(
+    shape: tuple[int, int, int],
+) -> None:
+    # When / Then
+    with pytest.raises(Reject, match="layout_invalid"):
+        driver.round_files(*shape)
+
+
+def test_environment_rejects_driver_count_differing_from_devices(tmp_path: Path) -> None:
+    # Given
+    data = json.loads(results(tmp_path, ranks=8, H=4, J=2)[0].read_bytes())["environment"]
+    data["drivers"] = data["drivers"][:7]
+    # When / Then
+    with pytest.raises(ValidationError, match="driver/device count"):
+        driver.Environment.model_validate(data)
+
+
+def test_eight_gpu_seed_manifest_drives_rank_and_checkpoint_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: exact profile with an 8-GPU dp4 x ep2 layout and H4/J2 inner loop.
+    profile = json.loads((TREE / "experiments/gpu_network_v2/profile.json").read_bytes())
+    profile["layout"].update(n_gpus=8, dp_size=4, ep_size=2)
+    profile["inner"].update(H=4, J=2)
+    profile_path = tmp_path / "profile-8.json"
+    profile_path.write_text(json.dumps(profile))
+    job = driver.check_inputs(seed_config(tmp_path, profile_path))
+    published = tmp_path / "published"
+    for rel in driver.round_files(8, 4, 2):
+        (published / rel).parent.mkdir(parents=True, exist_ok=True)
+        (published / rel).write_bytes(rel.encode())
+    for rank in range(8):
+        (published / f"rank-{rank}/summary.json").write_text('{"backend": "cuda"}')
+    monkeypatch.setattr(driver, "validate_artifacts", lambda job, directory: None)
+    # When
+    captured = driver.capture(published, job)
+    # Then
+    assert len(job.sample_ids) == 32 and set(captured) == set(driver.round_files(8, 4, 2))
+    (published / "rank-7/checkpoints/4.safetensors").unlink()
+    with pytest.raises(FileNotFoundError):
+        driver.capture(published, job)
 
 
 def test_exact_profile_accepts_wire_defaults_without_training(tmp_path: Path) -> None:
     # Given
-    profile_path = TREE / "experiments/gpu_network_v2/profile.json"
+    cfg = seed_config(tmp_path, TREE / "experiments/gpu_network_v2/profile.json")
+    # When
+    accepted = driver.check_inputs(cfg)
+    # Then
+    assert accepted.run_id == json.loads(cfg.seed_job.read_bytes())["run_id"]
+
+
+def seed_config(tmp_path: Path, profile_path: Path) -> driver.Qualification:
     profile = json.loads(profile_path.read_bytes())
     body = example_manifest().body()
     body["model"].update(profile["model"])
@@ -201,7 +335,7 @@ def test_exact_profile_accepts_wire_defaults_without_training(tmp_path: Path) ->
         run_id=wrapper.run_id(),
         w=0,
         manifest=wrapper,
-        sample_ids=list(range(60)),
+        sample_ids=list(range(wrapper.training.batch_samples())),
         global_step0=0,
         start_state_sha256="22" * 32,
         ef_in_sha256="33" * 32,
@@ -234,7 +368,7 @@ def test_exact_profile_accepts_wire_defaults_without_training(tmp_path: Path) ->
             }
         )
     )
-    cfg = driver.Qualification(
+    return driver.Qualification(
         tree=TREE,
         profile=profile_path,
         profile_sha256=fsha(profile_path),
@@ -254,10 +388,6 @@ def test_exact_profile_accepts_wire_defaults_without_training(tmp_path: Path) ->
         lifecycle_receipts=receipts,
         lifecycle_receipts_sha256=fsha(receipts),
     )
-    # When
-    accepted = driver.check_inputs(cfg)
-    # Then
-    assert accepted.run_id == wrapper.run_id()
 
 
 def test_script_reexports_exact_packaged_engine() -> None:

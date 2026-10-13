@@ -9,6 +9,14 @@ on:
 permissions:
   contents: read
 
+# Bound CPU kernel dispatch to AVX2, the dev-host golden baseline.
+# Cross-host bitwise agreement still requires the golden tests to pass.
+# ponytail: CI-only; move into setup_determinism if CPU replay must be portable.
+env:
+  ATEN_CPU_CAPABILITY: avx2
+  MKL_CBWR: AVX2
+  ONEDNN_MAX_CPU_ISA: AVX2
+
 jobs:
   # Format, lint, types and every test except the slow sim/e2e ones (they run in test-slow).
   test:
@@ -124,6 +132,13 @@ jobs:
           chmod 755 "$tools/kind"
           test "$("$tools/kind" version -q)" = 0.31.0
           printf '%s\n' "$tools" >> "$GITHUB_PATH"
+      - name: CPU numeric contract
+        run: >-
+          grep -m1 'model name' /proc/cpuinfo &&
+          uv run --frozen python -c "import hypertrain.trainer, torch;
+          print(torch.backends.cpu.get_cpu_capability(), torch.get_num_threads());
+          assert torch.backends.cpu.get_cpu_capability() == 'AVX2';
+          assert torch.get_num_threads() == 1"
       - name: Remaining quality gate (normal runner user)
         run: >-
           bash scripts/check.sh --ignore=tests/sim --ignore=tests/e2e

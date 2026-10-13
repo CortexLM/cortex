@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import io
 import json
 import math
 import os
 import shlex
+import shutil
+import signal
+import struct
 import subprocess
 import sys
 import tarfile
 import threading
 import time
 import urllib.parse
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
@@ -32,8 +37,10 @@ from hypertrain.gpu_ops.journal import (
     sha256,
 )
 from hypertrain.gpu_ops.launcher import Orchestrator, Reject
+from hypertrain.gpu_ops.network_qualification import LEGACY_TIMING, lifecycle_timing
 from hypertrain.gpu_ops.provider import Provider, list_rows, loopback, read_api_key
 from hypertrain.gpu_ops.remote import Ssh
+from hypertrain.gpu_ops.work_screen import artifact_ref
 
 
 class D2Job(BaseModel):
@@ -94,6 +101,19 @@ class DeadlineSsh(Ssh):
     @timeout.setter
     def timeout(self, value: int) -> None:
         self._limit = value
+
+
+def staged_match(ssh: Any, remote: str, local: Path, logs: Path) -> bool:
+    """True only for an exact size+sha256 read of the remote copy; any failure means upload."""
+    q = shlex.quote(remote)
+    proc = ssh.run(f"stat -c %s {q} && sha256sum {q}", "staged-" + Path(remote).name, logs)
+    out = proc.stdout.split()
+    return (
+        proc.returncode == 0
+        and len(out) >= 2
+        and out[0] == str(local.stat().st_size)
+        and out[1] == fsha(local)
+    )
 
 
 def deadline_ssh(orch: Orchestrator, role: str, cutoff: float) -> DeadlineSsh:
@@ -157,25 +177,50 @@ def refresh_readonly(provider: Provider) -> Record:
 
 def artifact_budget(profile: dict[str, Any]) -> Record:
     """Shape/count bounds from the actual AdamW checkpoint and trace paths; no allocation."""
+    from hypertrain.protocol.messages import ODSpec
+    from hypertrain.trainer.config import ModelConfig
+    from hypertrain.trainer.model import param_shapes
+
     m, inn, lay, a = (profile[k] for k in ("model", "inner", "layout", "artifacts"))
-    d, e, ff, layers, vocab = (m[k] for k in ("d_model", "n_experts", "d_ff", "n_layers", "vocab"))
-    params = 2 * vocab * d + d + layers * (2 * d + 4 * d * d + d * e + 3 * e * d * ff)
+    layers = m["n_layers"]
+    # Exact tensor geometry of the profile's architecture (decoder MoE or od-encoder), not a
+    # per-arch closed form; the declared param_count must agree with it.
+    shapes = param_shapes(
+        ModelConfig(
+            **{k: m[k] for k in ("n_layers", "d_model", "n_heads", "n_kv_heads", "d_ff", "vocab")},
+            seq_len=m["seq_len"],
+            n_experts=m["n_experts"],
+            top_k_experts=m["top_k_experts"],
+            arch=m["arch"],
+            od=ODSpec.model_validate(m["od"]) if m.get("od") is not None else None,
+        )
+    )
+    params = sum(math.prod(s) for s in shapes.values())
     if (
         params != m["param_count"]
         or inn["opt"] != "adamw"
         or inn["H"] % inn["J"]
-        or lay != {"pp": 1, "n_gpus": 2, "dp_size": 1, "ep_size": 2, "zero1": True}
+        or lay["pp"] != 1
+        or lay["n_gpus"] < 1
+        or lay["dp_size"] * lay["ep_size"] != lay["n_gpus"]
         or m["n_heads"] != m["n_kv_heads"]
-        or e != 4
     ):
         raise Reject("unsupported_artifact_geometry")
-    tensors = 3 + 10 * layers
+    tensors = len(shapes)
     leaves = inn["H"] // inn["J"] + 1
     header = a["safetensors_header_bytes_per_file"]
     state = 12 * params + header
     ef = 4 * params + header
-    # SparseLoCo framing plus ceil(.01*n) indices/codes/levels for each tensor.
-    delta = math.ceil(params * 0.01) * 5 + tensors * 256
+    # Exact compress() framing per tensor (name/shape/length prefixes bounded by 256 bytes)
+    # for the codec the outer optimizer selects; dense-int8 for nesterov, sparseloco otherwise.
+    out = profile["outer"]
+    if out["opt"] == "sparseloco":
+        frac = struct.unpack("<f", bytes.fromhex(out["topk_frac"]))[0]
+        sizes = [max(1, math.ceil(frac * math.prod(s))) for s in shapes.values()]
+        delta = sum(16 + 4 * k + (k + 3) // 4 for k in sizes)
+    else:
+        delta = sum(4 + 4 * -(-math.prod(s) // 256) + math.prod(s) for s in shapes.values())
+    delta += tensors * 256 + 20
     forward = inn["grad_accum"] * (5 + 6 * layers + 20 * layers)
     # Conservative: every gradient replicated; every parameter owned for all 3 state hooks.
     step_events = forward + tensors * 3 + tensors + tensors * 3 + 6 + tensors * 3
@@ -188,14 +233,40 @@ def artifact_budget(profile: dict[str, Any]) -> Record:
     outputs = lay["n_gpus"] * ((leaves + 1) * state + ef + delta + trace)
     logs = max(a["logs_bytes_per_execution"], 2 * math.ceil(max(trace, state) / 1024) * 1024)
     execution = inputs + outputs + logs + a["metadata_bytes_per_execution"]
-    retained = execution * profile["schedule"]["executions_per_host"]
+    policy = a.get("remote_retention", "all")
+    if policy == "all":
+        resident = profile["schedule"]["executions_per_host"]
+    elif (
+        policy == "prune_rescued"
+        and a["retain_all_checkpoints"] is True
+        and a["path_preserving_rescue"] is True
+    ):
+        # Both qualification rounds stay remote until promotion; afterwards only the current
+        # workload execution, since every finished one is pruned after verified local custody.
+        resident = 2
+    else:
+        raise Reject("unsupported_remote_retention_policy")
+    retained = execution * resident
     # Tar record rounding + path headers + terminating records for every retained file.
     files_per_execution = lay["n_gpus"] * (leaves + 5) + 14
-    tar_overhead = (
-        files_per_execution * profile["schedule"]["executions_per_host"] * 2048 + 1048576 + 10240
-    )
+    tar_overhead = files_per_execution * resident * 2048 + 1048576 + 10240
     rescue = retained + tar_overhead
+    per_host = profile["schedule"]["executions_per_host"]
+    if policy == "all":
+        remote_peak = retained + rescue  # rescue.tar is written next to the outputs
+        local = profile["schedule"]["hosts"] * (per_host + 1) * (rescue + execution)
+    else:
+        # The archive streams over SSH straight into local custody: no remote copy. Locally the
+        # qualification tar stays, and each workload keeps its tar plus one extraction (the
+        # canonical copy hardlinks the verified extraction; cross-rank dedup is not counted).
+        remote_peak = retained
+        workload_tar = execution + files_per_execution * 2048 + 1048576 + 10240
+        local = profile["schedule"]["hosts"] * (
+            rescue + (per_host - 2) * (workload_tar + execution)
+        )
     return {
+        "remote_retention": policy,
+        "local_custody_bytes_required": local,
         "param_count": params,
         "tensor_count": tensors,
         "state_bytes": state,
@@ -204,7 +275,7 @@ def artifact_budget(profile: dict[str, Any]) -> Record:
         "execution_bytes": execution,
         "retained_bytes_per_host": retained,
         "rescue_tar_bytes_per_host": rescue,
-        "disk_artifacts_peak_bytes": retained + rescue,
+        "disk_artifacts_peak_bytes": remote_peak,
         "artifact_transfer_bytes_per_host": retained + rescue,
         "rescue_min_bytes_per_second": math.ceil(rescue / a["rescue_transfer_seconds"]),
     }
@@ -236,7 +307,15 @@ def readiness_budget(profile: dict[str, Any], evidence: dict[str, Any]) -> Recor
         raise Reject("measured_artifact_transport_or_image_budget_missing")
     if bounds["disk_artifacts_peak_bytes"] + image + 2 * stage > a["disk_bytes"]:
         raise Reject("artifact_disk_budget_exceeded")
-    if a["rescue_transfer_seconds"] + a["delete_absence_seconds"] > 300:
+    if bounds["remote_retention"] == "prune_rescued" and (
+        type(a.get("local_custody_bytes")) is not int
+        or a["local_custody_bytes"] < bounds["local_custody_bytes_required"]
+    ):
+        raise Reject("local_custody_disk_budget_exceeded")
+    if (
+        a["rescue_transfer_seconds"] + a["delete_absence_seconds"]
+        > lifecycle_timing(profile)["teardown"]
+    ):
         raise Reject("rescue_delete_budget_exceeded")
     return {
         **bounds,
@@ -286,15 +365,247 @@ def staged_command(
     )
 
 
+LEGACY_ADMISSION = {
+    "ceiling_usd": "50",
+    "ceiling": Decimal("50"),
+    "reserve": Decimal("5"),
+    "hardware_cap": Decimal("5"),
+    "ancillary": Decimal("1"),
+    "disk_gb": 80,
+    "gpu_name": "RTX 5090",
+    "gpus": 2,
+    "hourly": Decimal("2"),
+    "cpu": 8,
+    "ram_mib": 32768,
+}
+
+
+def admission_limits(profile: dict[str, Any]) -> Record:
+    """Legacy "all" keeps its exact USD50/80GB/2x5090 review. prune_rescued takes every limit from
+    the reviewed profile admission section; the signed authorization must carry the same ceiling.
+    Hardware is a whole-lifecycle total (price x hours + storage + egress), so its cap is the
+    ceiling less the unchanged cleanup reserve."""
+    if profile.get("artifacts", {}).get("remote_retention", "all") == "all":
+        return dict(LEGACY_ADMISSION)
+    a = profile["admission"]
+    ceiling, reserve = budget.dec(a["ceiling_usd"]), budget.dec(a["cleanup_reserve_usd"])
+    hourly, ancillary = budget.dec(a["max_host_hourly_usd"]), budget.dec(a["max_ancillary_usd"])
+    ints = (a["gpus_per_host"], a["min_cpu_cores"], a["min_host_ram_gib"], a["min_disk_gib"])
+    if ceiling is None or reserve is None or hourly is None or ancillary is None:
+        raise Reject("admission_limits_invalid")
+    if (
+        type(a["ceiling_usd"]) is not str
+        or reserve != LEGACY_ADMISSION["reserve"]
+        or not ceiling > reserve
+        or not hourly > 0
+        or any(type(v) is not int or v <= 0 for v in ints)
+        or a["gpus_per_host"] != profile["layout"]["n_gpus"]
+        # Requested minimum disk may not exceed the measured disk the artifact budget used.
+        or a["min_disk_gib"] * 2**30 > profile["artifacts"]["disk_bytes"]
+    ):
+        raise Reject("admission_limits_invalid")
+    return {
+        "ceiling_usd": a["ceiling_usd"],
+        "ceiling": ceiling,
+        "reserve": reserve,
+        "hardware_cap": ceiling - reserve,
+        "ancillary": ancillary,
+        # Provider disk units are GiB: task-4 hosts created with disk 400 report disk_space 400.
+        "disk_gb": a["min_disk_gib"],
+        "gpu_name": a["gpu_name"],
+        "gpus": a["gpus_per_host"],
+        "hourly": hourly,
+        "cpu": a["min_cpu_cores"],
+        "ram_mib": a["min_host_ram_gib"] * 1024,
+    }
+
+
+def owned_instances(snapshot: Record, cfg: Record) -> list[Record]:
+    """Full fresh inventory stays in the signed snapshot; only rows on the signed config's
+    machines are ours. Foreign or protected instances are preserved and never acted on."""
+    rows = snapshot.get("instances") if isinstance(snapshot, dict) else None
+    if not isinstance(rows, list) or not all(isinstance(i, dict) for i in rows):
+        raise Reject("adoption_ownership_mismatch")
+    machines = {h["machine_id"] for h in cfg["hosts"]}
+    return [i for i in rows if i.get("machine_id") in machines]
+
+
+def staging_cap(profile: dict[str, Any]) -> int:
+    """Legacy keeps its exact 1GB declaration cap. prune_rescued declares the exact staged bytes
+    (checked against the real files per role), bounded by the measured host disk."""
+    if lifecycle_timing(profile) == LEGACY_TIMING:
+        return 1_000_000_000
+    return int(profile["artifacts"]["disk_bytes"])
+
+
+def file_bytes(paths: list[Path]) -> int:
+    return sum(p.stat().st_size for p in paths)
+
+
+def registry_layers(registry: Record, platform: Path | None) -> int:
+    """Total image bytes. An OCI index (the digest the profile pins) resolves to its single
+    linux/amd64 manifest: that file's raw sha256 must be the digest the index lists for it."""
+    if "manifests" in registry:
+        rows = [
+            m
+            for m in registry["manifests"]
+            if isinstance(m, dict) and m.get("platform") == {"architecture": "amd64", "os": "linux"}
+        ]
+        if (
+            type(registry.get("schemaVersion")) is not int
+            or registry["schemaVersion"] != 2
+            or platform is None
+            or len(rows) != 1
+            or rows[0].get("digest") != "sha256:" + fsha(platform)
+        ):
+            raise Reject("reviewed_registry_platform")
+        registry = json.loads(platform.read_bytes())
+    layers = registry.get("layers")
+    config = registry.get("config")
+    if (
+        type(registry.get("schemaVersion")) is not int
+        or registry["schemaVersion"] != 2
+        or not isinstance(layers, list)
+        or not layers
+        or not all(
+            isinstance(d, dict) and type(d.get("size")) is int and d["size"] >= 0 for d in layers
+        )
+        or not isinstance(config, dict)
+        or type(config.get("size")) is not int
+        or config["size"] < 0
+    ):
+        raise Reject("reviewed_complete_image_layers_required")
+    total = sum(d["size"] for d in layers) + config["size"]
+    if total > 20_000_000_000:
+        raise Reject("reviewed_complete_image_layers_required")
+    return total
+
+
+def qualification_start(j: Journal) -> float | None:
+    """Adopted hosts qualify from the fresh signed admission; created hosts from first create."""
+    adopted = j.last("adopted")
+    if adopted is not None:
+        return float(adopted["admitted_unix"])
+    intents = j.all("create_intent")
+    return min(float(r["unix"]) for r in intents) if intents else None
+
+
+def adoption_receipt(
+    record: Record,
+    cfg: Record,
+    profile: dict[str, Any],
+    ownership: Record,
+    provider_rows: list[Record],
+    snapshot: Record,
+    now: float,
+) -> Record:
+    """Retained task-4 hosts: import the provider journal's own create times, never a new create.
+    Exact two owned instances, signed fresh admission A, and A + Q inside the original horizon."""
+    timing, limits = lifecycle_timing(profile), admission_limits(profile)
+    if timing == LEGACY_TIMING:
+        raise Reject("adoption_requires_reviewed_finite_profile")
+    api = ownership.get("api_lookup") if isinstance(ownership, dict) else None
+    if (
+        not isinstance(api, dict)
+        or not isinstance(provider_rows, list)
+        or not all(isinstance(r, dict) for r in provider_rows)
+        or not all(isinstance(v, dict) for k, v in api.items() if k != "endpoint")
+    ):
+        raise Reject("adoption_ownership_mismatch")
+    if not isinstance(record, dict) or type(record.get("cutoff_unix")) is not int:
+        raise Reject("adoption_clock_invalid")
+    lookup = {k: v for k, v in api.items() if k != "endpoint"}
+    intents = {r.get("role"): r for r in provider_rows if r.get("event") == "create_intent"}
+    created = {
+        r.get("instance_id")
+        for r in provider_rows
+        if r.get("event") == "create_response" and r.get("success") is True
+    }
+    roles = {h["machine_id"]: h["role"] for h in cfg["hosts"]}
+    live = {i.get("id"): i for i in owned_instances(snapshot, cfg)}
+    adopted: Record = {}
+    for source_role, row in lookup.items():
+        intent = intents.get(source_role)
+        role = roles.get(row.get("machine_id"))
+        current = live.get(row.get("instance_id"))
+        if (
+            intent is None
+            or role is None
+            or role in adopted
+            or type(row.get("instance_id")) is not int
+            or current is None
+            or current.get("machine_id") != row["machine_id"]
+            or current.get("actual_status") != "running"
+            or current.get("num_gpus") != limits["gpus"]
+            or current.get("gpu_name") != limits["gpu_name"]
+            or not current.get("disk_space", 0) >= limits["disk_gb"]
+            or type(intent.get("unix")) is not float
+            or not intent.get("label")
+        ):
+            raise Reject("adoption_ownership_mismatch")
+        adopted[role] = {
+            "instance_id": row["instance_id"],
+            "machine_id": row["machine_id"],
+            "label": intent["label"],
+            "create_unix": intent["unix"],
+        }
+    ids = {r["instance_id"] for r in adopted.values()}
+    if len(adopted) != 2 or set(intents) != set(lookup) or created != ids or set(live) != ids:
+        raise Reject("adoption_ownership_mismatch")
+    first = min(r["create_unix"] for r in adopted.values())
+    end = first + timing["horizon"]
+    admitted = record.get("admitted_unix")
+    if (
+        type(admitted) is not int
+        or not first <= admitted <= now
+        or now - admitted > 300
+        or admitted + timing["qualification"] + profile["schedule"]["hard_margin_seconds"] > end
+        or type(record["cutoff_unix"]) is not int
+        or record["cutoff_unix"] > end
+        or admitted + timing["qualification"] + profile["schedule"]["hard_margin_seconds"]
+        > record["cutoff_unix"]
+        or now + timing["teardown"] >= end
+    ):
+        raise Reject("adoption_clock_invalid")
+    return {
+        "first_billable_unix": first,
+        "admitted_unix": admitted,
+        "horizon_end_unix": end,
+        "cutoff_unix": record["cutoff_unix"],
+        "roles": adopted,
+    }
+
+
+def execution_quota(profile: dict[str, Any]) -> Record:
+    """Execution ceilings from the reviewed profile schedule; disk fit is checked by the budget."""
+    s = profile["schedule"]
+    hosts, per_role, total = s["hosts"], s["executions_per_host"], s["executions_total"]
+    if (
+        any(type(v) is not int for v in (hosts, per_role, total))
+        or hosts < 1
+        or per_role <= 2  # two qualification rounds plus at least one workload execution
+        or total != hosts * per_role
+    ):
+        raise Reject("execution_reservation_mismatch")
+    qualification = 2 * hosts
+    return {
+        "total": total,
+        "per_role": per_role,
+        "qualification": qualification,
+        "remaining": total - qualification,
+    }
+
+
 def runtime_admission(profile: dict[str, Any], evidence: dict[str, Any]) -> int:
     """Exact-profile evidence required before CREATE, not a guessed toy throughput."""
     from hypertrain.protocol.hashing import sha256_hex
     from hypertrain.protocol.jcs import canonicalize
 
     bound = profile["execution_and_transfer_bound_seconds"]
+    timing = lifecycle_timing(profile)
     if (
         type(bound) is not int
-        or not 0 < bound <= 40
+        or not 0 < bound <= timing["execution_cap"]
         or profile["runtime_evidence_sha256"] != sha256_hex(canonicalize(evidence))
     ):
         raise Reject("missing_or_unqualified_exact_profile_runtime")
@@ -322,7 +633,13 @@ def runtime_admission(profile: dict[str, Any], evidence: dict[str, Any]) -> int:
     ):
         raise Reject("real_cuda_staged_reference_evidence_missing")
     s = profile["schedule"]
+    quota = execution_quota(profile)
     if (
+        s["shadow_executions"] + s["live_executions"] + s["probes"] + s["fault_trace_reserve"]
+        > quota["total"]
+    ):
+        raise Reject("execution_reservation_mismatch")
+    if profile["artifacts"].get("remote_retention", "all") == "all" and (
         s["executions_total"] != 126
         or s["executions_per_host"] != 63
         or s["shadow_executions"] != 96
@@ -330,12 +647,18 @@ def runtime_admission(profile: dict[str, Any], evidence: dict[str, Any]) -> int:
         or s["probes"] != 2
         or s["fault_trace_reserve"] != 12
     ):
-        raise Reject("execution_reservation_mismatch")
+        raise Reject("execution_reservation_mismatch")  # legacy decoder schedule stays exact
     total = (
-        s["staging_seconds"] + 63 * bound + s["beacon_service_seconds"] + s["rescue_delete_seconds"]
+        s["staging_seconds"]
+        + quota["per_role"] * bound
+        + s["beacon_service_seconds"]
+        + s["rescue_delete_seconds"]
     )
-    if total > 3300 or total + s["hard_margin_seconds"] > 3600:
-        raise Reject("one_hour_schedule_exceeded")
+    if timing == LEGACY_TIMING:
+        if total > 3300 or total + s["hard_margin_seconds"] > 3600:
+            raise Reject("one_hour_schedule_exceeded")
+    elif total + s["hard_margin_seconds"] > timing["horizon"]:
+        raise Reject("lifecycle_schedule_exceeded")
     return total
 
 
@@ -347,14 +670,19 @@ def admission_plan(
     offers: list[dict[str, Any]],
     *,
     qualification: bool = False,
+    priced_seconds: int | None = None,
 ) -> Record:
-    """Consume authenticated snapshots/quotes recorded by gpu_ops; malformed is never absent."""
+    """Consume authenticated snapshots/quotes recorded by gpu_ops; malformed is never absent.
+
+    priced_seconds (adopt only): signed cutoff - fresh admission of already-owned hosts.
+    """
     if qualification:
         q = profile["microqualification"]
         bounds = artifact_budget(profile)
+        timing = lifecycle_timing(profile)
         if (
             q["max_full_rounds_per_host"] != 2
-            or q["qualification_deadline_seconds"] != 900
+            or q["qualification_deadline_seconds"] != timing["qualification"]
             or sum(
                 q[k]
                 for k in (
@@ -364,7 +692,7 @@ def admission_plan(
                     "failure_margin_seconds",
                 )
             )
-            > 900
+            > timing["qualification"]
             or evidence.get("root_verified_bounded_lifecycle") is not True
             or evidence.get("candidate_image_digest") != profile["runtime"]["image_digest"]
             or not profile["runtime"]["image_digest"]
@@ -380,13 +708,15 @@ def admission_plan(
         transfer_gb = q["candidate_transfer_gb_per_host"]
     else:
         runtime_admission(profile, evidence)
+        timing = lifecycle_timing(profile)
         transfer_gb = readiness_budget(profile, evidence)["priced_transfer_gb_per_host"]
+    limits = admission_limits(profile)
     if (
         authorization.get("experiment") != "hypertrain-network-v2"
         or authorization.get("currency") != "USD"
-        or authorization.get("ceiling_usd") != "50"
+        or authorization.get("ceiling_usd") != limits["ceiling_usd"]
         or authorization.get("max_instances") != 2
-        or authorization.get("max_seconds_per_instance") != 3600
+        or authorization.get("max_seconds_per_instance") != timing["horizon"]
         or not authorization.get("source_message")
         or not authorization.get("date")
     ):
@@ -405,13 +735,13 @@ def admission_plan(
     for o in offers:
         hourly = budget.dec(o.get("dph_total"))
         if (
-            o.get("gpu_name") != "RTX 5090"
-            or o.get("num_gpus") != 2
+            o.get("gpu_name") != limits["gpu_name"]
+            or o.get("num_gpus") != limits["gpus"]
             or hourly is None
-            or hourly > 2
-            or o.get("cpu_cores_effective", 0) < 8
-            or o.get("cpu_ram", 0) < 32768
-            or o.get("disk_space", 0) < 80
+            or hourly > limits["hourly"]
+            or o.get("cpu_cores_effective", 0) < limits["cpu"]
+            or o.get("cpu_ram", 0) < limits["ram_mib"]
+            or o.get("disk_space", 0) < limits["disk_gb"]
             or type(o["verified_unix"]) is not int
             or not 0 <= time.time() - o["verified_unix"] <= 30
         ):
@@ -421,25 +751,42 @@ def admission_plan(
     available = Decimal(snapshot["available_credit_usd"]) - liability
     if min(prior, liability, available) < 0:
         raise Reject("invalid_accounting")
+    seconds = timing["horizon"]
+    if priced_seconds is not None:
+        if (
+            not qualification
+            or type(priced_seconds) is not int
+            or not timing["qualification"] + profile["schedule"]["hard_margin_seconds"]
+            <= priced_seconds
+            <= timing["horizon"]
+        ):
+            raise Reject("adoption_priced_window_invalid")
+        seconds = priced_seconds
     plan = budget.evaluate(
         snapshot0_credit=available + prior,
         current_credit=available,
         offers=offers,
-        hard_deadline_seconds=3600,
-        disk_gb=80,
+        hard_deadline_seconds=seconds,
+        disk_gb=limits["disk_gb"],
         egress_gb=transfer_gb,
-        phase_cap=Decimal("50"),
-        reserve=Decimal("5"),
+        phase_cap=limits["ceiling"],
+        reserve=limits["reserve"],
+        global_cap=limits["ceiling"],
     )
     hardware = Decimal(plan["hardware_worst_case_usd"])
-    hourly_total = sum(Decimal(str(o["dph_total"])) for o in offers)
-    if not plan["admit"] or hardware > 5 or hardware - hourly_total > 1:
+    hours = Decimal(seconds) / Decimal(3600)
+    hourly_total = sum(Decimal(str(o["dph_total"])) for o in offers) * hours
+    if (
+        not plan["admit"]
+        or hardware > limits["hardware_cap"]
+        or hardware - hourly_total > limits["ancillary"]
+    ):
         raise Reject("network_v2_cost_ceiling_exceeded")
     return {
         **plan,
         "admission_mode": "qualification" if qualification else "workload",
-        "rental_deadline_seconds": 3600,
-        "qualification_deadline_seconds": 900,
+        "rental_deadline_seconds": seconds,
+        "qualification_deadline_seconds": timing["qualification"],
         "long_workload_allowed": not qualification,
     }
 
@@ -482,17 +829,21 @@ class NetworkRuntime:
             intents = self.journal.all("network_execution_intent")
             q = sum(r["executions"] for r in intents if r["phase"] == "qualification")
             used_role = sum(r["executions"] for r in intents if r["role"] == role)
+            quota = execution_quota(self.profile)
             if (
-                used_role + executions > 63
-                or sum(r["executions"] for r in intents) + executions > 126
+                used_role + executions > quota["per_role"]
+                or sum(r["executions"] for r in intents) + executions > quota["total"]
             ):
                 raise Reject("execution_reservation_exhausted")
             if phase == "qualification":
-                if q + executions > 4 or any(
+                if q + executions > quota["qualification"] or any(
                     r["role"] == role and r["phase"] == "qualification" for r in intents
                 ):
                     raise Reject("qualification_reservation_exhausted")
-            elif q != 4 or self.journal.last("network_workload_promoted") is None:
+            elif (
+                q != quota["qualification"]
+                or self.journal.last("network_workload_promoted") is None
+            ):
                 raise Reject("workload_not_promoted")
             return self.journal.append(
                 "network_execution_intent",
@@ -510,23 +861,26 @@ class NetworkRuntime:
                 raise Reject("network_cleanup_already_started")
             intents = self.journal.all("network_execution_intent", phase="qualification")
             done = self.journal.all("network_qualification_done")
+            quota = execution_quota(self.profile)
             if (
-                len(intents) != 2
-                or sum(r["executions"] for r in intents) != 4
+                len(intents) != len(self.lifecycle.roles)
+                or sum(r["executions"] for r in intents) != quota["qualification"]
                 or {r["role"] for r in intents} != set(self.lifecycle.roles)
-                or len(done) != 2
+                or len(done) != len(self.lifecycle.roles)
                 or {r["role"] for r in done} != set(self.lifecycle.roles)
                 or evidence.get("root_reviewed_two_host_full_round_transfer") is not True
                 or budget_plan.get("admit") is not True
                 or budget_plan.get("long_workload_allowed") is not True
-                or time.time() + 61 * self.profile["execution_and_transfer_bound_seconds"] + 600
+                or time.time()
+                + (quota["per_role"] - 2) * self.profile["execution_and_transfer_bound_seconds"]
+                + 600
                 > self.lifecycle.deadline()
             ):
                 raise Reject("qualification_promotion_gate_failed")
             return self.journal.append(
                 "network_workload_promoted",
-                remaining_total=122,
-                remaining_per_host=61,
+                remaining_total=quota["remaining"],
+                remaining_per_host=quota["per_role"] - 2,
                 hard_deadline_unix=self.lifecycle.deadline(),
                 budget_plan_sha256=sha256(
                     json.dumps(budget_plan, sort_keys=True, separators=(",", ":")).encode()
@@ -573,7 +927,8 @@ class NetworkRuntime:
         cutoff = min(
             cutoff,
             self.lifecycle.deadline(),
-            self.lifecycle.cfg["cleanup_deadline_unix"] - 300,
+            self.lifecycle.cfg["cleanup_deadline_unix"]
+            - lifecycle_timing(self.profile)["teardown"],
         )
         ssh = deadline_ssh(self.lifecycle, role, cutoff)
         ssh.cancel = cancel
@@ -619,7 +974,8 @@ class NetworkRuntime:
             spec.cutoff,
             job.deadline,
             self.lifecycle.deadline(),
-            self.lifecycle.cfg["cleanup_deadline_unix"] - 300,
+            self.lifecycle.cfg["cleanup_deadline_unix"]
+            - lifecycle_timing(self.profile)["teardown"],
         )
         if (
             spec.cutoff != cutoff
@@ -687,6 +1043,12 @@ class NetworkRuntime:
         assert trusted is not None
         if fsha(ssh.known_hosts) != trusted["known_hosts_sha256"]:
             raise Reject("operation_known_hosts_custody_changed")
+        prune = self.profile["artifacts"].get("remote_retention", "all") == "prune_rescued"
+        if prune:
+            self.prune_rescued(role)
+            bounds = artifact_budget(self.profile)
+            if shutil.disk_usage(self.lifecycle.dir).free < 2 * bounds["execution_bytes"]:
+                raise Reject("local_custody_disk_exhausted")
         self.reserve(role, name, "workload", 1)
         self.journal.append(
             "network_operation_started",
@@ -801,6 +1163,7 @@ class NetworkRuntime:
         destination = directory / name
         if destination.exists():
             raise Reject("operation_result_destination_exists")
+        seen: dict[str, Path] = {}
         with tarfile.open(archive) as source:
             for member in source.getmembers():
                 prefix = "out/" + name + "/"
@@ -811,8 +1174,7 @@ class NetworkRuntime:
                         raise Reject("operation_custody_path")
                     stream = source.extractfile(member)
                     assert stream is not None
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    durable_write(path, stream.read())
+                    place_verified(path, stream.read(), seen, prune)
         result = json.loads((destination / "operation-result.json").read_bytes())
         if (
             result.get("status") != "CAPTURED_NOT_ACCEPTED"
@@ -893,7 +1255,8 @@ class NetworkRuntime:
             spec.cutoff,
             spec.job.deadline,
             self.lifecycle.deadline(),
-            self.lifecycle.cfg["cleanup_deadline_unix"] - 300,
+            self.lifecycle.cfg["cleanup_deadline_unix"]
+            - lifecycle_timing(self.profile)["teardown"],
         )
         if (
             spec.operation not in ("reference", "probe")
@@ -1176,7 +1539,7 @@ class NetworkRuntime:
                 (artifacts.state, artifacts.ef, artifacts.delta, artifacts.leaves),
                 strict=True,
             ):
-                if (ref.sha256, ref.size) != (fsha(path), path.stat().st_size):
+                if ref != artifact_ref(path):
                     raise Reject("completion_original_proof_object_changed")
         elif body["miner_commit"] is not None:
             raise Reject("completion_reference_claims_miner")
@@ -1437,10 +1800,17 @@ class NetworkRuntime:
                 with tempfile.TemporaryDirectory(prefix="canonical-", dir=directory) as temporary:
                     staged = Path(temporary) / "published"
                     staged.mkdir()
+                    link = (
+                        self.profile.get("artifacts", {}).get("remote_retention", "all")
+                        == "prune_rescued"
+                    )
                     for relative, digest in files.items():
                         path = staged / relative
                         path.parent.mkdir(parents=True, exist_ok=True)
-                        durable_write(path, (original / relative).read_bytes())
+                        if link and fsha(original / relative) == digest:
+                            os.link(original / relative, path)
+                        else:
+                            durable_write(path, (original / relative).read_bytes())
                         if fsha(path) != digest:
                             raise Reject("operation_canonical_copy_changed")
                     validate_artifacts(job, staged)
@@ -1530,11 +1900,11 @@ class NetworkRuntime:
             if cutoff is None
             else deadline_ssh(self.lifecycle, role, cutoff)
         )
-        intents = self.journal.all("create_intent")
-        first_billable = min(float(r["unix"]) for r in intents) if intents else None
+        first_billable = qualification_start(self.journal)
         if first_billable is None:
             raise Reject("qualification_first_billable_receipt_missing")
-        ssh.timeout = int(min(30, first_billable + 900 - time.time() - 420))
+        timing = lifecycle_timing(self.profile)
+        ssh.timeout = int(min(30, first_billable + timing["qualification"] - time.time() - 420))
         if ssh.timeout <= 0:
             raise Reject("qualification_deadline_margin")
         config_file = self.lifecycle.dir / f"qualification-config-{role}.json"
@@ -1569,9 +1939,9 @@ class NetworkRuntime:
         )
         ssh.timeout = int(
             min(
-                180,
+                timing["qual_probe"],
                 self.lifecycle.deadline() - time.time() - 420,
-                cfg.admitted_unix + 900 - time.time() - 420,
+                cfg.admitted_unix + timing["qualification"] - time.time() - 420,
             )
         )
         if ssh.timeout <= 0:
@@ -1696,21 +2066,23 @@ class NetworkRuntime:
         ):
             raise Reject("lifecycle_receipts_not_ready")
         used = sum(r["executions"] for r in self.journal.all("network_execution_intent", role=role))
-        if used + trace_equivalents > 63:
+        if used + trace_equivalents > execution_quota(self.profile)["per_role"]:
             raise Reject("execution_reservation_exhausted")
         bound = (
             self.profile["microqualification"]["probe_and_transfer_seconds"] // 2
             if qualification
             else self.profile["execution_and_transfer_bound_seconds"]
         )
-        if type(bound) is not int or bound > (180 if qualification else 40):
+        timing = lifecycle_timing(self.profile)
+        cap = timing["qual_probe"] if qualification else timing["execution_cap"]
+        if type(bound) is not int or bound > cap:
             raise Reject("runtime_unqualified")
         if qualification and (
             trace_equivalents != 1
             or len(self.journal.all("network_qualification_started", role=role)) >= 2
         ):
             raise Reject("microqualification_round_limit")
-        if qualification and time.time() + bound + 420 > admitted["unix"] + 900:
+        if qualification and time.time() + bound + 420 > admitted["unix"] + timing["qualification"]:
             raise Reject("microqualification_deadline_margin")
         remaining = self.lifecycle.deadline() - time.time()
         if remaining < trace_equivalents * bound + 600:
@@ -1900,7 +2272,7 @@ class NetworkRuntime:
             cfg = engine.Qualification.model_validate_json(cfg_path.read_bytes())
             if engine.check_inputs(cfg).manifest != manifest or cfg.sources != data("sources"):
                 raise Reject("signed_d2_qualification_run_differs")
-        engine.compare(list(results))
+        engine.compare(list(results), manifest)
         sources, bundle_bytes = effective_bundle(
             engine, Path(evidence["tree"]), files["source_profile"]
         )
@@ -2058,6 +2430,75 @@ class NetworkRuntime:
                 raise Reject("network_rescue_incomplete:" + ",".join(errors))
         return result
 
+    def prune_rescued(self, role: str) -> list[Record]:
+        """Opt-in: free remote out/<name> only once its exact bytes are in verified local custody.
+
+        Eligible: completed operations (network_operation_done, i.e. extracted, bound and
+        journal-published) and qualification rounds after promotion. Never seed, sources or an
+        operation without a done record; every rank must appear in the hashed rescue manifest.
+        """
+        if self.profile["artifacts"].get("remote_retention", "all") != "prune_rescued":
+            raise Reject("remote_prune_policy_disabled")
+        pruned = {r["name"] for r in self.journal.all("network_remote_pruned", role=role)}
+        names = [r["name"] for r in self.journal.all("network_operation_done", role=role)]
+        if self.journal.last("network_workload_promoted") is not None:
+            names += [r["name"] for r in self.journal.all("network_qualification_done", role=role)]
+        rescued = self.journal.all("network_rescued", role=role)
+        ranks = range(self.profile["layout"]["n_gpus"])
+        out = []
+        for name in dict.fromkeys(names):
+            if name in pruned:
+                continue
+            if name == "seed" or not name.replace("-", "").isalnum():
+                raise Reject("remote_prune_name_rejected")
+            done = self.journal.last("network_operation_done", role=role, name=name)
+            qual = self.journal.last("network_qualification_done", role=role, name=name)
+
+            def bound(r: Record, done: Record | None = done, qual: Record | None = qual) -> bool:
+                if done is not None:
+                    return bool(r["tar_sha256"] == done["tar_sha256"])
+                return bool(
+                    qual is not None
+                    and sha256(json.dumps(r["files"], sort_keys=True).encode())
+                    == qual["result"]["artifact_manifest_sha256"]
+                )
+
+            custody = next(
+                (
+                    r
+                    for r in reversed(rescued)
+                    if bound(r) and any(f.startswith(name + "/") for f in r["files"])
+                ),
+                None,
+            )
+            if custody is None:
+                raise Reject("remote_prune_without_rescued_custody")
+            archive = Path(custody["tar"])
+            if archive.is_symlink() or not archive.is_file():
+                raise Reject("remote_prune_local_custody_missing")
+            if fsha(archive) != custody["tar_sha256"]:
+                raise Reject("remote_prune_local_custody_changed")
+            files = verify_export(
+                archive, artifact_budget(self.profile)["rescue_tar_bytes_per_host"]
+            )
+            mine = [f for f in files if f.startswith(name + "/")]
+            if files != custody["files"] or any(
+                not any(f"rank-{r}" in Path(f).parts for f in mine) for r in ranks
+            ):
+                raise Reject("remote_prune_rank_custody_incomplete")
+            target = self.lifecycle.remote_root(role) + "/out/" + name
+            ssh = self.lifecycle.ssh(role)
+            if ssh.run(
+                f"rm -rf -- {shlex.quote(target)}", "prune-" + name, self.lifecycle.dir / "logs"
+            ).returncode:
+                raise Reject("remote_prune_failed")
+            out.append(
+                self.journal.append(
+                    "network_remote_pruned", role=role, name=name, tar_sha256=custody["tar_sha256"]
+                )
+            )
+        return out
+
     def rescue(self, role: str, fresh: bool = False) -> Record:
         """Complete path-preserving, byte/hash checked custody; failure never becomes PASS."""
         generation = sha256(
@@ -2100,25 +2541,50 @@ class NetworkRuntime:
 
         remaining()
         python = self.lifecycle.cfg.get("remote_python", self.profile["runtime"]["remote_python"])
-        cmd = (
-            f"cd {shlex.quote(root)} && env PYTHONPATH=src {shlex.quote(python)} "
-            "experiments/gpu_network_v2/orchestrate.py export out rescue.tar "
-            "experiments/gpu_network_v2/profile.json"
-        )
-        if ssh.run(cmd, "network-export", self.lifecycle.dir / "logs").returncode:
-            raise Reject("network_export_failed")
-        remaining()
-        expected = ssh.remote_sha256(f"{root}/rescue.tar", self.lifecycle.dir / "logs")
         destination = self.lifecycle.dir / "rescue" / role
         destination.mkdir(parents=True, exist_ok=True)
         archive = destination / f"network-rescue-{generation}-{time.time_ns()}.tar"
-        remaining()
-        actual = ssh.get(f"{root}/rescue.tar", archive)
-        if actual != expected:
-            raise Reject("network_rescue_sha_mismatch")
-        manifest = verify_export(
-            archive, artifact_budget(self.profile)["rescue_tar_bytes_per_host"]
-        )
+        bound = artifact_budget(self.profile)["rescue_tar_bytes_per_host"]
+        if self.profile["artifacts"].get("remote_retention", "all") == "prune_rescued":
+            # Stream the tar over the pinned SSH channel into local custody; no remote archive.
+            cmd = (
+                f"cd {shlex.quote(root)} && env PYTHONPATH=src {shlex.quote(python)} "
+                "experiments/gpu_network_v2/orchestrate.py export out - "
+                "experiments/gpu_network_v2/profile.json"
+            )
+            log = self.lifecycle.dir / "logs" / f"{role}-network-export-stream.log"
+            try:
+                stream_bounded(ssh_argv(ssh, cmd), archive, log, bound, ssh.timeout)
+                remaining()
+                try:
+                    manifest = verify_export(archive, bound)
+                except (tarfile.TarError, KeyError, ValueError) as exc:
+                    raise Reject("network_rescue_archive_invalid") from exc
+                # Remote's own manifest digest (stderr) must equal the verified local manifest.
+                reported = log.read_text().split()
+                if not reported or reported[-1] != sha256(
+                    json.dumps(manifest, sort_keys=True).encode()
+                ):
+                    raise Reject("network_rescue_sha_mismatch")
+            except BaseException:
+                archive.unlink(missing_ok=True)  # a rejected stream never occupies custody disk
+                raise
+            actual = fsha(archive)
+        else:
+            cmd = (
+                f"cd {shlex.quote(root)} && env PYTHONPATH=src {shlex.quote(python)} "
+                "experiments/gpu_network_v2/orchestrate.py export out rescue.tar "
+                "experiments/gpu_network_v2/profile.json"
+            )
+            if ssh.run(cmd, "network-export", self.lifecycle.dir / "logs").returncode:
+                raise Reject("network_export_failed")
+            remaining()
+            expected = ssh.remote_sha256(f"{root}/rescue.tar", self.lifecycle.dir / "logs")
+            remaining()
+            actual = ssh.get(f"{root}/rescue.tar", archive)
+            if actual != expected:
+                raise Reject("network_rescue_sha_mismatch")
+            manifest = verify_export(archive, bound)
         remaining()
         if generation != sha256(
             json.dumps(
@@ -2167,17 +2633,83 @@ def export_artifacts(directory: Path, archive: Path, profile: dict[str, Any]) ->
     if sum(v["bytes"] for v in files.values()) > bounds["retained_bytes_per_host"]:
         raise Reject("actual_artifact_budget_exceeded")
     metadata = json.dumps(files, sort_keys=True).encode()
-    with tarfile.open(archive, "w") as out:
+    streaming = str(archive) == "-"
+    with (
+        tarfile.open(fileobj=sys.stdout.buffer, mode="w|")
+        if streaming
+        else tarfile.open(archive, "w")
+    ) as out:
         for name in files:
             out.add(directory / name, arcname="out/" + name, recursive=False)
         info = tarfile.TarInfo("manifest.json")
         info.size, info.mode, info.mtime = len(metadata), 0o600, 0
         out.addfile(info, io.BytesIO(metadata))
+    if streaming:
+        # Nothing archived remotely; the caller re-reads this digest over a separate channel.
+        sys.stdout.buffer.flush()
+        return {"bytes": None, "manifest_sha256": sha256_hex(metadata)}
     if archive.stat().st_size > bounds["rescue_tar_bytes_per_host"]:
         raise Reject("actual_rescue_archive_budget_exceeded")
     with archive.open("rb") as file:
         os.fsync(file.fileno())
     return {"bytes": archive.stat().st_size, "manifest_sha256": sha256_hex(metadata)}
+
+
+def ssh_argv(ssh: Any, command: str) -> list[str]:
+    """Same pinned options as Ssh.run, for a binary stream that must not be held in memory."""
+    return ["ssh", *ssh._opts(), "-p", str(ssh.port), f"{ssh.user}@{ssh.host}", command]
+
+
+def stream_bounded(argv: list[str], archive: Path, log: Path, bound: int, timeout: float) -> None:
+    """Copy the child's stdout into a new archive, killing its process group past `bound` bytes
+    or `timeout` seconds. stderr goes to a file, so it can never fill a pipe and block."""
+    with archive.open("xb") as sink, log.open("wb") as err:
+        proc = subprocess.Popen(  # noqa: S603  (argv list from the pinned Ssh)
+            argv, stdout=subprocess.PIPE, stderr=err, start_new_session=True
+        )
+
+        def kill() -> None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        timer = threading.Timer(timeout, kill)
+        timer.start()
+        written, oversized, eof = 0, False, False
+        try:
+            assert proc.stdout is not None
+            while block := proc.stdout.read(1 << 20):
+                written += len(block)
+                if written > bound:
+                    oversized = True
+                    break
+                sink.write(block)
+            else:
+                eof = True
+        finally:
+            if not eof:  # oversize or a local error (e.g. ENOSPC): never wait on a live child
+                kill()
+            proc.stdout.close() if proc.stdout else None
+            rc = proc.wait()
+            timer.cancel()  # only after wait, so the deadline covers the whole stream
+        sink.flush()
+        os.fsync(sink.fileno())
+    if oversized:
+        raise Reject("network_rescue_archive_budget_exceeded")
+    if rc:
+        raise Reject("network_export_failed")
+
+
+def place_verified(path: Path, data: bytes, seen: dict[str, Path], dedup: bool) -> None:
+    """Write custody bytes; with dedup, an identical verified file is hardlinked instead."""
+    digest = sha256(data)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if dedup and digest in seen and fsha(seen[digest]) == digest:
+        os.link(seen[digest], path)
+    else:
+        durable_write(path, data)
+        seen[digest] = path
 
 
 def verify_export(archive: Path, maximum_bytes: int) -> Record:
@@ -2212,6 +2744,98 @@ def verify_export(archive: Path, maximum_bytes: int) -> Record:
             if digest.hexdigest() != want["sha256"] or size != want["bytes"]:
                 raise Reject("rescue_content_hash_mismatch")
         return dict(files)
+
+
+SEED_OBJECTS = ("start_state", "ef_in", "v0", "samples", "sample_proofs")
+# Verified seed proofs of ONE launch invocation; None outside it (external CLI never reuses).
+_SEED_GENESIS_SCOPE: set[tuple[str, ...]] | None = None
+
+
+@contextlib.contextmanager
+def seed_genesis_scope() -> Iterator[None]:
+    """One task-8 launch invocation; nothing survives it and nothing is persisted."""
+    global _SEED_GENESIS_SCOPE
+    if _SEED_GENESIS_SCOPE is not None:
+        raise Reject("seed_genesis_scope_nested")
+    _SEED_GENESIS_SCOPE = set()
+    try:
+        yield
+    finally:
+        _SEED_GENESIS_SCOPE = None
+
+
+def seed_genesis_key(
+    job_sha256: str, profile_sha256: str, hotkey: str, digests: dict[str, str]
+) -> tuple[str, ...]:
+    return (job_sha256, profile_sha256, hotkey, *(digests[k] for k in SEED_OBJECTS))
+
+
+def seed_genesis(
+    job_path: Path,
+    job_sha256: str,
+    profile_path: Path,
+    profile_sha256: str,
+    hotkey: str,
+    objects: dict[str, Path],
+    digests: dict[str, str],
+) -> None:
+    """Full carry genesis + public sample membership for one seed identity.
+
+    Every input is rehashed from its bytes here before parsing; inside seed_genesis_scope() the
+    result is remembered only for these exact digests and this hotkey.
+    """
+    job_bytes, profile_bytes = job_path.read_bytes(), profile_path.read_bytes()
+    blobs = {k: objects[k].read_bytes() for k in SEED_OBJECTS}
+    if (
+        sha256(job_bytes) != job_sha256
+        or sha256(profile_bytes) != profile_sha256
+        or any(sha256(blobs[k]) != digests[k] for k in SEED_OBJECTS)
+    ):
+        raise Reject("reviewed_seed_hash")
+    from hypertrain.protocol.messages_v2 import IslandJobV1
+
+    job = IslandJobV1.model_validate_json(job_bytes)
+    seq_len = json.loads(profile_bytes)["model"]["seq_len"]
+    # Reuse complete deterministic carry genesis; never accept theta-only state.
+    from hypertrain.auditor.replay import AnchorCache, pack_state, unpack_state
+
+    theta, state = unpack_state(blobs["start_state"])
+    anchor = AnchorCache().genesis(job.manifest, hotkey, theta)
+    if (
+        state is None
+        or pack_state(theta, state) != pack_state(anchor.theta, anchor.state)
+        or blobs["ef_in"] != pack_state(anchor.ef)
+        or blobs["v0"] != pack_state({})
+    ):
+        raise Reject("reviewed_seed_full_genesis")
+    from hypertrain.protocol.hashing import MerkleTree
+
+    samples = blobs["samples"]
+    proofs = json.loads(blobs["sample_proofs"])
+    dataset = job.manifest.training.dataset
+    sample_bytes = {
+        "u16[seq_len+1] token ids": 2,
+        "u32[seq_len+1] token ids": 4,
+    }.get(dataset.sample_format)
+    width = (sample_bytes or 0) * (seq_len + 1)
+    if (
+        sample_bytes is None
+        or len(samples) != width * len(job.sample_ids)
+        or len(proofs) != len(job.sample_ids)
+        or any(
+            not MerkleTree.verify(
+                samples[index * width : (index + 1) * width],
+                sample,
+                [bytes.fromhex(p) for p in proof],
+                bytes.fromhex(dataset.merkle_root),
+                dataset.n_samples,
+            )
+            for index, (sample, proof) in enumerate(zip(job.sample_ids, proofs, strict=True))
+        )
+    ):
+        raise Reject("reviewed_public_sample_membership")
+    if _SEED_GENESIS_SCOPE is not None:
+        _SEED_GENESIS_SCOPE.add(seed_genesis_key(job_sha256, profile_sha256, hotkey, digests))
 
 
 def reviewed_launch(record_path: Path, owner: str, beacon: int, action: str) -> Record:
@@ -2282,8 +2906,8 @@ def reviewed_launch(record_path: Path, owner: str, beacon: int, action: str) -> 
         or {h["role"] for h in cfg["hosts"]} != set(roles)
         or len(cfg["hosts"]) != 2
         or cfg["cleanup_contract"] != "network-v2"
-        or cfg["disk_gb"] != 80
-        or cfg["hard_deadline_seconds"] != 3600
+        or cfg["disk_gb"] != admission_limits(profile)["disk_gb"]
+        or cfg["hard_deadline_seconds"] != lifecycle_timing(profile)["horizon"]
         or cfg["hard_grace_seconds"] != 0
         or type(cfg["boot_timeout_seconds"]) is not int
         or not 0 < cfg["boot_timeout_seconds"] <= 300
@@ -2298,8 +2922,10 @@ def reviewed_launch(record_path: Path, owner: str, beacon: int, action: str) -> 
         or type(record["parent_pid"]) is not int
         or record["parent_pid"] <= 0
         or type(record["cutoff_unix"]) is not int
-        or not time.time() < record["cutoff_unix"] <= time.time() + 3600
-        or record["quota"] != {"total": 126, "per_role": 63, "qualification": 4, "remaining": 122}
+        or not time.time()
+        < record["cutoff_unix"]
+        <= time.time() + lifecycle_timing(profile)["horizon"]
+        or record["quota"] != execution_quota(profile)
     ):
         raise Reject("reviewed_layout_clock_or_config")
     artifact_budget(profile)
@@ -2307,22 +2933,14 @@ def reviewed_launch(record_path: Path, owner: str, beacon: int, action: str) -> 
         profile["runtime"]["backend"] != "cuda"
         or profile["runtime"]["remote_python"] != "/opt/hypertrain/venv/bin/python"
         or type(record["staging_bytes"]) is not int
-        or not 0 < record["staging_bytes"] <= 1_000_000_000
+        or not 0 < record["staging_bytes"] <= staging_cap(profile)
         or record["public_dataset_reviewed"] is not True
         or record["full_genesis_reviewed"] is not True
     ):
         raise Reject("reviewed_source_seed_authority_missing")
-    registry = data("registry")
     if "sha256:" + fsha(artifacts["registry"]) != profile["runtime"]["image_digest"]:
         raise Reject("reviewed_registry_digest")
-    layers = registry.get("layers")
-    if (
-        registry.get("schemaVersion") != 2
-        or not isinstance(layers, list)
-        or not layers
-        or sum(d["size"] for d in layers) + registry["config"]["size"] > 20_000_000_000
-    ):
-        raise Reject("reviewed_complete_image_layers_required")
+    registry_layers(data("registry"), artifacts.get("registry_platform"))
     tree = Path(record["tree"])
     if not tree.is_absolute():
         raise Reject("reviewed_source_tree")
@@ -2422,47 +3040,28 @@ def reviewed_launch(record_path: Path, owner: str, beacon: int, action: str) -> 
                 or path != artifacts[inputs["objects"][key]]
             ):
                 raise Reject("reviewed_seed_object_custody")
+        # Every committed file was rehashed from its bytes at the top of this call.
+        digests = {k: files[n]["sha256"] for k, n in inputs["objects"].items()}
         for key in ("start_state", "ef_in", "v0"):
-            if fsha(artifacts[inputs["objects"][key]]) != getattr(job, key + "_sha256"):
+            if digests[key] != getattr(job, key + "_sha256"):
                 raise Reject("reviewed_seed_hash")
-        # Reuse complete deterministic carry genesis; never accept theta-only state.
-        from hypertrain.auditor.replay import AnchorCache, pack_state, unpack_state
-
-        theta, state = unpack_state(artifacts[inputs["objects"]["start_state"]].read_bytes())
-        anchor = AnchorCache().genesis(job.manifest, inputs["hotkey"], theta)
-        if (
-            state is None
-            or pack_state(theta, state) != pack_state(anchor.theta, anchor.state)
-            or artifacts[inputs["objects"]["ef_in"]].read_bytes() != pack_state(anchor.ef)
-            or artifacts[inputs["objects"]["v0"]].read_bytes() != pack_state({})
-        ):
-            raise Reject("reviewed_seed_full_genesis")
-        from hypertrain.protocol.hashing import MerkleTree
-
-        samples = artifacts[inputs["objects"]["samples"]].read_bytes()
-        proofs = json.loads(artifacts[inputs["objects"]["sample_proofs"]].read_bytes())
-        dataset = job.manifest.training.dataset
-        sample_bytes = {
-            "u16[seq_len+1] token ids": 2,
-            "u32[seq_len+1] token ids": 4,
-        }.get(dataset.sample_format)
-        width = (sample_bytes or 0) * (profile["model"]["seq_len"] + 1)
-        if (
-            sample_bytes is None
-            or len(samples) != width * len(job.sample_ids)
-            or len(proofs) != len(job.sample_ids)
-            or any(
-                not MerkleTree.verify(
-                    samples[index * width : (index + 1) * width],
-                    sample,
-                    [bytes.fromhex(p) for p in proof],
-                    bytes.fromhex(dataset.merkle_root),
-                    dataset.n_samples,
-                )
-                for index, (sample, proof) in enumerate(zip(job.sample_ids, proofs, strict=True))
+        job_digest, profile_digest = files[inputs["job"]]["sha256"], files["profile"]["sha256"]
+        proof = seed_genesis_key(job_digest, profile_digest, inputs["hotkey"], digests)
+        if _SEED_GENESIS_SCOPE is None or proof not in _SEED_GENESIS_SCOPE:
+            seed_genesis(
+                artifacts[inputs["job"]],
+                job_digest,
+                artifacts["profile"],
+                profile_digest,
+                inputs["hotkey"],
+                {k: artifacts[n] for k, n in inputs["objects"].items()},
+                digests,
             )
+        if staging_cap(profile) != 1_000_000_000 and record["staging_bytes"] != file_bytes(
+            [artifacts["bundle"], artifacts[inputs["job"]]]
+            + [artifacts[name] for name in inputs["objects"].values()]
         ):
-            raise Reject("reviewed_public_sample_membership")
+            raise Reject("reviewed_staging_bytes_not_actual")
     snapshot, offers = data("financial"), data("offers")
     if any(type(snapshot[k]) is not int for k in ("verified_unix", "account_id")) or any(
         type(o[k]) is not int
@@ -2493,9 +3092,9 @@ def reviewed_launch(record_path: Path, owner: str, beacon: int, action: str) -> 
     if (
         authorization.get("experiment") != "hypertrain-network-v2"
         or authorization.get("currency") != "USD"
-        or authorization.get("ceiling_usd") != "50"
+        or authorization.get("ceiling_usd") != admission_limits(profile)["ceiling_usd"]
         or authorization.get("max_instances") != 2
-        or authorization.get("max_seconds_per_instance") != 3600
+        or authorization.get("max_seconds_per_instance") != lifecycle_timing(profile)["horizon"]
         or not authorization.get("source_message")
         or not authorization.get("date")
         or snapshot.get("authenticated") is not True
@@ -2503,7 +3102,11 @@ def reviewed_launch(record_path: Path, owner: str, beacon: int, action: str) -> 
         or snapshot.get("volumes") != []
         or len(offers) != 2
         or len({o["machine_id"] for o in offers}) != 2
-        or any(o["num_gpus"] != 2 or o["gpu_name"] != "RTX 5090" for o in offers)
+        or any(
+            o["num_gpus"] != admission_limits(profile)["gpus"]
+            or o["gpu_name"] != admission_limits(profile)["gpu_name"]
+            for o in offers
+        )
     ):
         raise Reject("reviewed_authorization_or_two_host_financial")
     if action == "continue":
@@ -2514,14 +3117,18 @@ def reviewed_launch(record_path: Path, owner: str, beacon: int, action: str) -> 
             current_credit=Decimal(snapshot["available_credit_usd"])
             - Decimal(snapshot["active_liabilities_usd"]),
             offers=offers,
-            hard_deadline_seconds=3600,
-            disk_gb=80,
+            hard_deadline_seconds=lifecycle_timing(profile)["horizon"],
+            disk_gb=admission_limits(profile)["disk_gb"],
             egress_gb=30,
-            phase_cap=Decimal("50"),
-            reserve=Decimal("5"),
+            phase_cap=admission_limits(profile)["ceiling"],
+            reserve=admission_limits(profile)["reserve"],
+            global_cap=admission_limits(profile)["ceiling"],
         )
         plan = {**cost, "long_workload_allowed": True}
-        if not cost["admit"] or Decimal(cost["hardware_worst_case_usd"]) > 5:
+        if (
+            not cost["admit"]
+            or Decimal(cost["hardware_worst_case_usd"]) > admission_limits(profile)["hardware_cap"]
+        ):
             raise Reject("reviewed_continuation_budget")
         if "graph" not in artifacts or "graph_driver" not in artifacts or "jobs" in artifacts:
             raise Reject("signed_continuation_graph_required")
@@ -2539,12 +3146,24 @@ def reviewed_launch(record_path: Path, owner: str, beacon: int, action: str) -> 
         sys.modules[graph_spec.name] = continuation_driver
         graph_spec.loader.exec_module(continuation_driver)
         continuation_driver.ContinuationGraph.model_validate_json(artifacts["graph"].read_bytes())
-        driver.compare([artifacts[inputs["qualification_result"]] for inputs in roles.values()])
+        # Every role's job hashes to env.run_id above, so any job carries the one manifest.
+        driver.compare(
+            [artifacts[inputs["qualification_result"]] for inputs in roles.values()], job.manifest
+        )
     else:
         planning_snapshot = dict(snapshot)
-        if action == "qualification":
-            if len(snapshot["instances"]) != 2:
+        if action in ("qualification", "adopt"):
+            if len(owned_instances(snapshot, cfg)) != 2:
                 raise Reject("qualification_owned_inventory_required")
+            planning_snapshot["instances"] = []
+        elif action == "admit" and "admitted_unix" in record:
+            # Fresh finite window signed now; foreign rows are priced in active liabilities.
+            if (
+                owned_instances(snapshot, cfg)
+                or type(record["admitted_unix"]) is not int
+                or not 0 <= time.time() - record["admitted_unix"] <= 300
+            ):
+                raise Reject("fresh_window_clock_or_inventory_invalid")
             planning_snapshot["instances"] = []
         plan = admission_plan(
             profile,
@@ -2553,10 +3172,30 @@ def reviewed_launch(record_path: Path, owner: str, beacon: int, action: str) -> 
             planning_snapshot,
             offers,
             qualification=True,
+            priced_seconds=(
+                # Adopted runs are billed only to the adopted cutoff (network_hard_end).
+                record["cutoff_unix"] - record["admitted_unix"]
+                if "admitted_unix" in record
+                else None
+            ),
         )
     if plan != data("plan"):
         raise Reject("reviewed_plan_differs")
+    adoption = None
+    if action == "adopt":
+        if not {"ownership", "provider_journal"} <= set(artifacts):
+            raise Reject("adoption_custody_files_missing")
+        adoption = adoption_receipt(
+            record,
+            cfg,
+            profile,
+            data("ownership"),
+            [json.loads(line) for line in artifacts["provider_journal"].read_bytes().splitlines()],
+            snapshot,
+            time.time(),
+        )
     return {
+        "adoption": adoption,
         "record": record,
         "files": artifacts,
         "config": cfg,
@@ -2590,7 +3229,9 @@ def launch_action(
     if not record["cutoff_unix"] > time.time():
         raise Reject("reviewed_cutoff_expired")
     margin = (
-        61 * checked["profile"]["execution_and_transfer_bound_seconds"] + 600
+        (execution_quota(checked["profile"])["per_role"] - 2)
+        * checked["profile"]["execution_and_transfer_bound_seconds"]
+        + 600
         if action == "continue"
         else 900
         if action == "admit"
@@ -2611,8 +3252,8 @@ def launch_action(
     provider = Provider(cfg["base_url"], read_api_key(cfg["key_file"]), run_dir, j, live)
     orch = Orchestrator(cfg, j, provider, run_dir)
     runtime = NetworkRuntime(orch, checked["profile"])
-    if action == "admit":
-        if j.last("transaction_open") or j.last("create_intent"):
+    if action in ("admit", "adopt"):
+        if j.last("transaction_open") or j.last("create_intent") or j.last("adopted"):
             raise Reject("admission_not_retryable")
         durable_write(run_dir / "config.json", files["config"].read_bytes())
         j.append("transaction_open", pid=record["parent_pid"], live=live)
@@ -2623,6 +3264,28 @@ def launch_action(
             config_sha256=fsha(files["config"]),
             sources_sha256=fsha(files["sources"]),
         )
+        if action == "admit" and "admitted_unix" in record:
+            j.append(
+                "fresh_window",
+                admitted_unix=record["admitted_unix"],
+                cutoff_unix=record["cutoff_unix"],
+            )
+        if action == "adopt":
+            adoption = checked["adoption"]
+            j.append(
+                "adopted",
+                **adoption,
+                ownership_sha256=fsha(files["ownership"]),
+                provider_journal_sha256=fsha(files["provider_journal"]),
+            )
+            for role, row in adoption["roles"].items():
+                j.append(
+                    "receipt",
+                    role=role,
+                    instance_id=row["instance_id"],
+                    source="adopted_task4_ownership",
+                    label=row["label"],
+                )
         quotes = {
             role: next(
                 o for o in checked["offers"] if o["machine_id"] == orch.host[role]["machine_id"]
@@ -2657,6 +3320,11 @@ def launch_action(
                 raise Reject("supervisor_not_alive")
         finally:
             os.close(fd)
+        if action == "adopt":
+            return {
+                "status": "ADOPTED_NOT_QUALIFIED",
+                "receipts": [orch.receipt(r) for r in orch.roles],
+            }
         try:
             for role in orch.roles:
                 if time.time() > checked["financial"]["verified_unix"] + 30:
@@ -2671,6 +3339,15 @@ def launch_action(
             raise
     opened = j.all("transaction_open")
     authority = j.last("network_admission_authority")
+    adopted = j.last("adopted") or j.last("fresh_window")
+    if ("admitted_unix" in record) != (adopted is not None) or (
+        adopted is not None
+        and (
+            adopted["admitted_unix"] != record["admitted_unix"]
+            or adopted["cutoff_unix"] != record["cutoff_unix"]
+        )
+    ):
+        raise Reject("adopted_window_mismatch")
     if (
         authority is None
         or authority["owner"] != record["owner"]
@@ -2681,7 +3358,7 @@ def launch_action(
         not opened
         or opened[0]["pid"] != record["parent_pid"]
         or orch.cleanup_started()
-        or len(j.all("create_intent")) != 2
+        or len(j.all("create_intent")) != (0 if j.last("adopted") else 2)
         or not all(orch.receipt(r) for r in orch.roles)
         or not j.last("supervisor_ready")
         or time.time() >= orch.deadline()
@@ -2712,7 +3389,7 @@ def launch_action(
     ):
         raise Reject("existing_lifecycle_config_changed")
     receipts = [orch.receipt(r) for r in orch.roles]
-    if {row["id"] for row in checked["financial"]["instances"]} != {
+    if {row["id"] for row in owned_instances(checked["financial"], cfg)} != {
         row["instance_id"] for row in receipts if row is not None
     }:
         raise Reject("continuation_owned_inventory_mismatch")
@@ -2832,12 +3509,19 @@ def launch_action(
 def qualify_role(checked: Record, orch: Orchestrator, runtime: NetworkRuntime, role: str) -> Record:
     """Stage exact source/seed bytes, inspect actual import origin, then invoke frozen driver."""
     inputs, files = checked["record"]["roles"][role], checked["files"]
+    gpus = checked["profile"]["layout"]["n_gpus"]
+    if type(gpus) is not int or not 1 <= gpus <= 8:
+        raise Reject("qualification_gpu_count_invalid")
     orch.boot(role)
     orch.attach(role)
     orch.trust(role)
     root = orch.remote_root(role)
-    first = min(r["unix"] for r in orch.j.all("create_intent"))
-    stage_cutoff = min(first + 300, orch.deadline() - 420, checked["record"]["cutoff_unix"] - 420)
+    first = qualification_start(orch.j)
+    assert first is not None
+    timing = lifecycle_timing(runtime.profile)
+    stage_cutoff = min(
+        first + timing["qual_stage"], orch.deadline() - 420, checked["record"]["cutoff_unix"] - 420
+    )
     ssh = deadline_ssh(orch, role, stage_cutoff)
 
     def remaining() -> None:
@@ -2867,8 +3551,11 @@ def qualify_role(checked: Record, orch: Orchestrator, runtime: NetworkRuntime, r
     }
     for rel, path in uploads.items():
         remaining()
-        ssh.put(path, root + "/out/seed/" + rel)
-        if ssh.remote_sha256(root + "/out/seed/" + rel, orch.dir / "logs") != fsha(path):
+        target = root + "/out/seed/" + rel
+        if staged_match(ssh, target, path, orch.dir / "logs"):
+            continue  # exact committed bytes already staged on this host
+        ssh.put(path, target)
+        if ssh.remote_sha256(target, orch.dir / "logs") != fsha(path):
             raise Reject("seed_transport_hash")
     for name in ("profile", "registry"):
         remaining()
@@ -2885,11 +3572,11 @@ def qualify_role(checked: Record, orch: Orchestrator, runtime: NetworkRuntime, r
         "import hypertrain.gpu_ops.launcher,hypertrain.trainer,torch; "
         "assert pathlib.Path(hypertrain.gpu_ops.launcher.__file__).resolve()=="
         "root/'src/hypertrain/gpu_ops/launcher.py'; "
-        "assert torch.cuda.is_available() and torch.cuda.device_count()==2; "
+        f"assert torch.cuda.is_available() and torch.cuda.device_count()=={gpus}; "
         "assert torch.__version__=='2.14.0+cu130' and torch.version.cuda=='13.0'; "
         "assert pathlib.Path(torch.__file__).resolve().is_relative_to('/venv/main'); "
         "assert all(torch.cuda.get_device_properties(i).multi_processor_count==170 "
-        "for i in range(2)); "
+        f"for i in range({gpus})); "
         "print('IMPORT_ATTESTED')"
     )
     image = checked["profile"]["runtime"]["image_digest"]
@@ -2970,7 +3657,11 @@ def qualify_role(checked: Record, orch: Orchestrator, runtime: NetworkRuntime, r
         role,
         inputs["name"],
         "qualification.json",
-        cutoff=min(first + 480, orch.deadline() - 420, checked["record"]["cutoff_unix"] - 420),
+        cutoff=min(
+            first + timing["qual_stage"] + timing["qual_probe"],
+            orch.deadline() - 420,
+            checked["record"]["cutoff_unix"] - 420,
+        ),
     )
     runtime.rescue(role, fresh=True)
     return result
@@ -2980,7 +3671,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Reviewed D2 lifecycle; no implicit live permission"
     )
-    parser.add_argument("action", choices=("plan", "admit", "qualification", "continue", "export"))
+    parser.add_argument(
+        "action", choices=("plan", "admit", "adopt", "qualification", "continue", "export")
+    )
     parser.add_argument("input", type=Path)
     parser.add_argument("extra", nargs="*")
     parser.add_argument("--owner")
@@ -2989,15 +3682,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--live", action="store_true")
     args = parser.parse_args(argv)
     if args.action == "export":
-        print(
-            json.dumps(
-                export_artifacts(
-                    args.input,
-                    Path(args.extra[0]),
-                    json.loads(Path(args.extra[1]).read_bytes()),
-                )
-            )
+        exported = export_artifacts(
+            args.input, Path(args.extra[0]), json.loads(Path(args.extra[1]).read_bytes())
         )
+        if args.extra[0] == "-":
+            print(exported["manifest_sha256"], file=sys.stderr)
+        else:
+            print(json.dumps(exported))
     elif args.action == "plan":
         profile = json.loads(args.input.read_bytes())
         print(json.dumps({"paid_execution": False, "artifact_budget": artifact_budget(profile)}))

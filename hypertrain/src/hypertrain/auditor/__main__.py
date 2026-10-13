@@ -2,6 +2,16 @@
 
 Leases audit jobs for ONE run, replays them on the local verified shards and posts verdicts.
 Jobs of any other run are handed back (retry) so they are never replayed on the wrong data.
+
+`--contract 2 --api URL --run-id HEX --keyfile F`: signed v2 Receipt lease, master-executed
+replay (`/execute`), then the auditor signs exactly that ReplayVerdict (`/complete`). The
+auditor never computes or chooses the verdict; jobs not coordinator-signed for this run and key
+are refused unexecuted (the lease then expires server-side).
+
+Exit 0: settled (--once) or no lease granted (empty queue, or the global running-lease cap).
+Exit 2: refused job, malformed lease, HTTP error/timeout, or the server's 409 "one live lease
+per auditor" after a restart mid-job (that lease is left to expire server-side). The CLI never
+sleeps or polls: the supervisor re-invokes it on its own audit-scheduling or exit events.
 """
 
 from __future__ import annotations
@@ -11,7 +21,10 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +34,11 @@ import hypertrain.trainer  # noqa: F401  (determinism before torch)
 from hypertrain.auditor.worker import Auditor, HttpApi
 from hypertrain.miner.cli import shard_sampler
 from hypertrain.miner.core import load_keyfile
-from hypertrain.protocol.messages import ReplayEnv, RunManifest
+from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.envelope import body_digest
+from hypertrain.protocol.keys import Keypair
+from hypertrain.protocol.messages import Receipt, ReplayEnv, ReplayVerdict, RunManifest
+from hypertrain.protocol.messages_v2 import AuditJobV2, RunManifestV2
 
 
 class RunScopedApi(HttpApi):
@@ -35,6 +52,86 @@ class RunScopedApi(HttpApi):
             self.fail(str(raw["id"]), str(raw["lease"]), "auditor serves another run", True)
             return None
         return raw
+
+
+class RefusedJob(RuntimeError):
+    pass
+
+
+MARGIN_S = 60.0
+
+
+def audit_v2(
+    client: httpx.Client,
+    base: str,
+    run_id: str,
+    key: Keypair,
+    once: bool,
+    clock: Callable[[], float] = time.time,
+) -> int:
+    root = f"{base}/v2/runs/{run_id}"
+
+    def post(path: str, body: dict[str, Any], timeout: float) -> httpx.Response:
+        r = client.post(root + path, json=body, timeout=timeout)
+        r.raise_for_status()
+        return r
+
+    def now() -> int:
+        r = client.get(root, timeout=60)
+        r.raise_for_status()
+        return int(r.json()["now_round"])
+
+    r = client.get(root, timeout=60)
+    r.raise_for_status()
+    manifest = RunManifestV2.model_validate(r.json()["manifest_envelope"]["body"])
+    if r.json()["contract"] != 2 or manifest.run_id() != run_id:
+        raise RefusedJob("served v2 manifest hashes to another run_id")
+    while True:
+        t = now()
+        # Unique Receipt replay ID per lease request; w is not lease-bound server-side.
+        ask = Receipt(w=0, commit_hash=secrets.token_hex(32), received_round=t)
+        r = client.post(
+            root + "/worker/lease",
+            json=envelope_v2.seal(key, "Receipt", run_id, ask, t + 100),
+            timeout=60,
+        )
+        # Empty queue: 204, or 503 from an admitted service run (store.lease_v2).
+        if r.status_code == 204 or (r.status_code == 503 and "no authenticated queued" in r.text):
+            return 0
+        r.raise_for_status()
+        env = envelope_v2.parse_envelope(r.json())
+        if (
+            env.type != "AuditJobV2"
+            or env.run_id != run_id
+            or env.signer != manifest.training.coord_pubkey
+            or not envelope_v2.verify_envelope(r.json())
+        ):
+            raise RefusedJob("lease is not a coordinator-signed job of this run")
+        job = AuditJobV2.model_validate(env.body)
+        if job.run_id != run_id or job.manifest != manifest or job.auditor_id != key.ss58:
+            raise RefusedJob("leased job binds another run, manifest or auditor")
+        w, exp = job.start_state.w, job.lease_expires
+        receipt = Receipt(w=w, commit_hash=job.lease_nonce, received_round=now())
+        # Server LeaseGuard cancels replay at this wall deadline (store.execute_audit_v2).
+        beacon = manifest.training.beacon
+        deadline = beacon.genesis_time + (min(exp, job.absolute_deadline) - 1) * beacon.period
+        r = post(
+            f"/worker/jobs/{job.job_id}/execute",
+            envelope_v2.seal(key, "Receipt", run_id, receipt, exp),
+            max(deadline - clock(), 0.0) + MARGIN_S,
+        )
+        verdict = ReplayVerdict.model_validate(r.json()["verdict"])
+        challenge = envelope_v2.parse_envelope(job.challenge_envelope)
+        if verdict.challenge_hash != body_digest(challenge.body):
+            raise RefusedJob("executed verdict answers another challenge")
+        done = post(
+            f"/worker/jobs/{job.job_id}/complete",
+            envelope_v2.seal(key, "ReplayVerdict", run_id, verdict, exp),
+            MARGIN_S,
+        ).json()
+        print(json.dumps({"job": job.job_id, "result": done["result"]}), flush=True)
+        if once:
+            return 0
 
 
 def replay_env(image_digest: str, device: str) -> ReplayEnv:
@@ -63,14 +160,24 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m hypertrain.auditor")
     p.add_argument("--api", required=True)
     p.add_argument("--run-id", required=True)
-    p.add_argument("--token-file", type=Path, required=True)
+    p.add_argument("--contract", type=int, choices=[1, 2], default=1, help="2: signed v2 routes")
+    p.add_argument("--token-file", type=Path, help="worker bearer token (contract 1)")
     p.add_argument("--keyfile", type=Path, required=True)
-    p.add_argument("--data-dir", type=Path, required=True)
+    p.add_argument("--data-dir", type=Path, help="verified shards (contract 1)")
     p.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     p.add_argument("--image-digest", default=os.environ.get("HYPERTRAIN_IMAGE_DIGEST", ""))
     p.add_argument("--once", action="store_true", help="settle at most one job, then exit")
     a = p.parse_args(argv)
+    if a.contract == 1 and (a.token_file is None or a.data_dir is None):
+        p.error("contract 1 requires --token-file and --data-dir")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    if a.contract == 2:
+        with httpx.Client() as v2:
+            try:
+                return audit_v2(v2, a.api.rstrip("/"), a.run_id, load_keyfile(a.keyfile), a.once)
+            except (RefusedJob, ValueError, httpx.HTTPError) as error:
+                logging.error("%s", error)
+                return 2
     if a.device == "cuda":
         import torch
 

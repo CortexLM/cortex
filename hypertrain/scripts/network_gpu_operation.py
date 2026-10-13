@@ -19,6 +19,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictInt
 
 from hypertrain.gpu_ops.journal import durable_write, fsha
+from hypertrain.gpu_ops.work_screen import artifact_ref
 from hypertrain.miner.island_launch import IslandArtifacts, confined, validate_artifacts
 from hypertrain.protocol.envelope_v2 import load_json, parse_envelope, seal, verify_envelope
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
@@ -190,6 +191,11 @@ def execution_environment(op: Operation) -> dict:
         ):
             raise ValueError("custody CUDA driver differs")
         observed["drivers"] = [d.strip() for d in drivers]
+        from hypertrain.miner.island_launch import gpu_uuid
+
+        observed["gpu_uuids"] = [
+            gpu_uuid(torch.cuda.get_device_properties(i).uuid) for i in range(layout.n_gpus)
+        ]
         observed["sm_counts"] = [
             torch.cuda.get_device_properties(i).multi_processor_count for i in range(layout.n_gpus)
         ]
@@ -313,7 +319,7 @@ def publication_custody(
             (validated.state, validated.ef, validated.delta, validated.leaves),
             strict=True,
         ):
-            if ref.sha256 != fsha(path) or ref.size != path.stat().st_size:
+            if ref != artifact_ref(path):
                 raise ValueError("custody original proof object differs")
         body["miner_proof"] = {"envelope": proof, "sha256": sha256_hex(canonicalize(proof))}
     return {

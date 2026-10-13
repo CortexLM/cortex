@@ -36,7 +36,7 @@ from hypertrain.auditor.replay import (
     optimizer_hash,
     pack_state,
 )
-from hypertrain.data.store import Store
+from hypertrain.data.store import Store, get_large
 from hypertrain.protocol.envelope_v2 import load_json, parse_envelope, tape_signing_message
 from hypertrain.protocol.envelope_v2 import verify_envelope as verify_source
 from hypertrain.protocol.hashing import sha256_hex
@@ -490,9 +490,11 @@ def _replay_history(
                     or parse_envelope(job.challenge_envelope).signer != signer
                 ):
                     raise TapeError("predecessor audit authority/commit differs")
-                theta, supplied = unpack_state(
-                    get_object(store, job.start_state.state_object_sha256)
-                )
+
+                def whole(key: str) -> bytes:  # StartState/ArtifactRef keys may be part indexes
+                    return get_large(key, lambda k: get_object(store, k))
+
+                theta, supplied = unpack_state(whole(job.start_state.state_object_sha256))
                 prior_state = load_state(store, arithmetic.prev_state)
                 if any(
                     not torch.equal(theta[name].detach().cpu(), torch.from_numpy(value.copy()))
@@ -505,19 +507,18 @@ def _replay_history(
                     or job.start_state.theta_hash != opening.body["theta_hash"]
                 ):
                     raise TapeError("predecessor original global theta differs")
-                _finite_state(
-                    comm, theta, supplied, unpack_state(get_object(store, job.ef_in.sha256))[0]
-                )
+                _finite_state(comm, theta, supplied, unpack_state(whole(job.ef_in.sha256))[0])
                 outcome, result = audit_island(
                     job,
                     comm,
                     get_sample,
-                    get_object(store, job.start_state.state_object_sha256),
-                    get_object(store, job.ef_in.sha256),
-                    get_object(store, job.v0.sha256),
+                    whole(job.start_state.state_object_sha256),
+                    whole(job.ef_in.sha256),
+                    whole(job.v0.sha256),
                     cache,
                     device=backend,
                     now_round=job.created_beacon,
+                    objects=lambda k: get_object(store, k),
                 )
                 _finite_state(comm, result.final_theta, result.final_state, result.ef_out)
                 if outcome.result != "MATCH":

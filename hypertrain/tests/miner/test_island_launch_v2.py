@@ -739,6 +739,18 @@ def test_qualification_cost_admits_without_measured_runtime_but_not_long_workloa
     assert plan["admit"] and not plan["long_workload_allowed"]
     assert float(plan["hard_deadline_hours"]) == 1  # failure still priced for whole liability
     assert float(plan["worst_case_total_usd"]) <= 15
+    timing = mod.lifecycle_timing(profile)
+    low = timing["qualification"] + profile["schedule"]["hard_margin_seconds"]
+    short = mod.admission_plan(
+        profile, evidence, auth, snapshot, offers, qualification=True, priced_seconds=low
+    )
+    assert short["rental_deadline_seconds"] == low
+    assert float(short["worst_case_total_usd"]) <= float(plan["worst_case_total_usd"])
+    for bad in (low - 1, timing["horizon"] + 1, True):
+        with pytest.raises(mod.Reject, match="adoption_priced_window_invalid"):
+            mod.admission_plan(
+                profile, evidence, auth, snapshot, offers, qualification=True, priced_seconds=bad
+            )
     with pytest.raises(mod.Reject, match="unqualified"):
         mod.admission_plan(profile, evidence, auth, snapshot, offers)
     with pytest.raises(mod.Reject, match="contract_missing"):

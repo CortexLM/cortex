@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import shutil
 import sys
@@ -362,3 +363,56 @@ def test_weights_fail_closed_on_wrong_netuid(tmp_path, secrets_dir, clock):
         # An epoch with nothing payable has nothing to filter: 200 without the metagraph.
         empty = c.get("/internal/v1/get_weights?epoch=1", headers=headers)
         assert empty.status_code == 200 and empty.json()["weights"] == {}
+
+
+def test_signed_object_route_over_real_http_chunked(gated, subnet_master):
+    """Real uvicorn socket + chunked transfer: signed v2 object PUT boundary and auth."""
+    import socket
+    import threading
+
+    import uvicorn
+
+    n = gated
+    run_id = n.manifest.run_id()
+    subnet_master.registered.add(HOT[0].ss58)
+    assert n.join(0).status_code == 200
+    refresh(n)
+    limit = n.setup.admission_policy.artifact_limits.max_object_bytes
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(16)  # bound before serving: early connections wait in the backlog
+    server = uvicorn.Server(uvicorn.Config(n.client.app, lifespan="off", log_level="warning"))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{sock.getsockname()[1]}{n.url}"
+
+    def put(body: bytes, key=HOT[0], sha=None, signer=None, chunk=65536):
+        sha = sha or hashlib.sha256(body).hexdigest()
+        sig = (signer or key).sign(f"hypertrain/object/2|{run_id}|{sha}".encode()).hex()
+        parts = (body[i : i + chunk] for i in range(0, len(body), chunk))
+        return httpx.put(
+            base + "/objects/" + sha,
+            content=parts,  # generator body: Transfer-Encoding: chunked on the wire
+            headers={"x-hotkey": key.ss58, "x-object-signature": sig},
+            timeout=30,
+        )
+
+    try:
+        exact = bytes(range(256)) * (limit // 256) + b"x" * (limit % 256)
+        response = put(exact)
+        assert response.status_code == 200, response.text
+        assert n.store.objects.get(response.json()["sha256"]) == exact
+        assert put(exact + b"y").status_code == 413
+        assert put(b"tampered", sha=hashlib.sha256(b"other").hexdigest()).status_code == 422
+        assert put(b"forged", signer=HOT[1]).status_code == 403
+        assert put(b"unregistered", key=HOT[1]).status_code == 403
+        subnet_master.registered.add(HOT[1].ss58)
+        refresh(n)
+        assert put(b"not-admitted", key=HOT[1]).status_code == 403
+        sha = hashlib.sha256(b"x").hexdigest()
+        missing = httpx.put(base + "/objects/" + sha, content=b"x", timeout=30)
+        assert missing.status_code == 422  # absent x-hotkey/x-object-signature headers
+    finally:
+        server.should_exit = True
+        thread.join(timeout=30)
+    assert not thread.is_alive()

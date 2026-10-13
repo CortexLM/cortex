@@ -17,7 +17,11 @@ import traceback
 from pathlib import Path
 
 from hypertrain.gpu_ops.journal import Journal
-from hypertrain.gpu_ops.launcher import EXIT, Orchestrator
+from hypertrain.gpu_ops.launcher import (
+    EXIT,
+    Orchestrator,
+    network_hard_end,
+)
 from hypertrain.gpu_ops.provider import Provider, read_api_key
 
 
@@ -26,9 +30,9 @@ def supervise(
 ) -> int:
     tick = float(cfg.get("supervisor_check_seconds", 30))  # type: ignore[arg-type]
     if cfg.get("cleanup_contract") == "network-v2":
-        first = j.all("create_intent")
-        if first:
-            hard = min(float(r["unix"]) for r in first) + 3600
+        end = network_hard_end(j, dict(cfg))
+        if end is not None:
+            hard = end
             deadline = min(deadline, hard - 420)
     parent = j.last("transaction_open")
     if cfg.get("cleanup_contract") == "network-v2":
@@ -47,9 +51,9 @@ def supervise(
                 os.close(parent_fd)
             return 0
         if cfg.get("cleanup_contract") == "network-v2":
-            first = j.all("create_intent")
-            if first:
-                hard = min(float(r["unix"]) for r in first) + 3600
+            end = network_hard_end(j, dict(cfg))
+            if end is not None:
+                hard = end
                 deadline = min(deadline, hard - 420)
         timeout = min(tick, max(0.0, deadline - time.time()))
         if parent_fd is not None:
@@ -108,9 +112,9 @@ def main(run_dir_arg: str) -> int:
     deadline = float(admitted["deadline_unix"])
     hard = deadline + float(cfg.get("hard_grace_seconds", 1800))
     if cfg.get("cleanup_contract") == "network-v2":
-        first = j.all("create_intent")
-        if first:
-            hard = min(float(r["unix"]) for r in first) + 3600
+        end = network_hard_end(j, dict(cfg))
+        if end is not None:
+            hard = end
             deadline = min(deadline, hard - 420)
     j.append("supervisor_ready", supervisor_pid=os.getpid(), deadline_unix=deadline)
     print("READY", flush=True)
