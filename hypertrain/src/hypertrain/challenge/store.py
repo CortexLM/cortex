@@ -6847,9 +6847,8 @@ class ChallengeStore:
                 )
                 miner = self.state_dir / "jobs-v2" / str(row["w"]) / row["hotkey"]
                 for name, relative in geometry.object_paths.items():
-                    if put_file(miner / relative, sha256_hex) != put_large(
-                        inputs[name], sha256_hex
-                    ):
+                    # Confined (O_NOFOLLOW) bounded read: a symlinked input must not be followed.
+                    if bounded_bytes(miner / relative, len(inputs[name])) != inputs[name]:
                         raise ChallengeError(422, "SERVICE_AUDIT_GEOMETRY_BYTES")
                 self._service_boundary_v2(run_id, row["w"], heavy=True)
             deadline = (

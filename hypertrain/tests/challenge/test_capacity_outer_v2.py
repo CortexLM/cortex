@@ -1218,7 +1218,10 @@ def audit_preflight_control(store, manifest, opening, start, signed, attack, mon
         state = struct.pack("<Q", len(encoded)) + encoded + state[8 + size :]
         start = start.model_copy(update={"state_object_sha256": store.objects.put(state)})
     if attack == "audit-size":
-        state = b"x" * 65537
+        from hypertrain.protocol.messages_v2 import PART_BYTES
+
+        # Stored objects are bounded at PART_BYTES (indexed transport); one plain object above it.
+        state = b"x" * (PART_BYTES + 1)
         start = start.model_copy(update={"state_object_sha256": store.objects.put(state)})
     ef = store.objects.get(start.ef_object_sha256)
     v0 = struct.pack("<Q", 8) + b"{}      "

@@ -3970,11 +3970,23 @@ def test_network_miner_upload_grant_sends_accepted_commit_body_subject(
 
     import httpx
 
+    from hypertrain.data.store import put_large
     from hypertrain.miner.core import NetworkMiner
     from hypertrain.protocol.envelope import body_digest
     from hypertrain.protocol.messages_v2 import PolicyHashes, RoundOpenV2
 
     job = fixture.stage(network.setup, tmp_path / "client-job", (0,), 0)
+    blobs: dict[str, bytes] = {}
+
+    def keep(data: bytes) -> str:
+        blobs[sha256_hex(data)] = data
+        return sha256_hex(data)
+
+    # Server contract: every job object name maps to its stored ref (plain or part index).
+    objects = {
+        name: put_large((tmp_path / "client-job" / relative).read_bytes(), keep)
+        for name, relative in job.object_paths.items()
+    }
     directory = tmp_path / "published"
     (directory / "rank-0").mkdir(parents=True)
     commitments = {
@@ -4039,7 +4051,7 @@ def test_network_miner_upload_grant_sends_accepted_commit_body_subject(
                 "starts": [{"hotkey": HOT[0].ss58, "ef_hash": "22" * 32}],
             }
         if path.endswith("/job/" + HOT[0].ss58):
-            return {"job": job.body(), "objects": {}}
+            return {"job": job.body(), "objects": objects}
         if path.endswith("/commit"):
             saved["commit"] = kwargs["json"]
             return {}
@@ -4058,6 +4070,9 @@ def test_network_miner_upload_grant_sends_accepted_commit_body_subject(
     policy = network.store.objects.get(network.manifest.network.economics_policy_hash)
 
     def wire(request):
+        key = request.url.path.rsplit("/", 1)[-1]
+        if request.method == "GET" and key in blobs:
+            return httpx.Response(200, content=blobs[key])
         return httpx.Response(200, content=policy if request.method == "GET" else b"{}")
 
     actor = NetworkMiner.__new__(NetworkMiner)

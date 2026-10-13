@@ -1801,7 +1801,8 @@ class NetworkRuntime:
                     staged = Path(temporary) / "published"
                     staged.mkdir()
                     link = (
-                        self.profile["artifacts"].get("remote_retention", "all") == "prune_rescued"
+                        self.profile.get("artifacts", {}).get("remote_retention", "all")
+                        == "prune_rescued"
                     )
                     for relative, digest in files.items():
                         path = staged / relative

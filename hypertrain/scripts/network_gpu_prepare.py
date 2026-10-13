@@ -365,7 +365,7 @@ def prepare_qualification_base(
         # provider/authority file are added by scripts/prepare_record.py at run time.
         "role_inputs": {
             "job": "job",
-            "objects": {key: "object_" + key for key in objects},
+            "objects": {name: "object_" + name for name in objects},
         },
         "remaining": ["roles", "action", "owner", "parent_pid", "cutoff_unix", "admitted_unix"],
     }
