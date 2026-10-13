@@ -28,7 +28,11 @@ from torch import Tensor
 Backend = Literal["math", "sdpa-flash", "flash-attn"]
 BACKENDS: tuple[Backend, ...] = ("sdpa-flash", "flash-attn", "math")
 # (device capability, torch version) -> qualified backend. Filled only from spike evidence.
-QUALIFIED_BACKENDS: dict[tuple[tuple[int, int], str], Backend] = {}
+QUALIFIED_BACKENDS: dict[tuple[tuple[int, int], str], Backend] = {
+    # RTX 5090: out/dq/dk/dv bitwise equal over 4 processes x 3 repeats, 8 ms vs 56 ms math at
+    # b4 h16 kvh8 T2048 hd128 bf16 (tests/trainer/data/attn_qualify_sm120.json).
+    ((12, 0), "2.14.0+cu130"): "sdpa-flash",
+}
 
 _MASKS: dict[tuple[int, torch.device], Tensor] = {}
 

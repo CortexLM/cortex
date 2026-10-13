@@ -14,12 +14,18 @@ the sorted piece list); the owner steps it and all ranks all_gather the updated 
 the delta are ht-leaf-v1 (todo 6, unchanged) over gathered full tensors, so a single-process
 emulation of the same layout (``emulate`` + ``ThreadComm``) reproduces every leaf bitwise.
 Layout invariance across different GPU counts is out of scope: auditors replay the same layout.
+
+Async collectives: ``Comm.all_gather_async`` / ``all_to_all_async`` return a ``Pending`` whose
+``wait()`` yields the result, so bucket reductions issued from grad hooks run while backward
+computes (reductions "overlap", "zero2_overlap", "zero3_overlap"). Every rank issues and waits in
+the same order (same autograd graph, same bucket plan), so NCCL order and the bits are unchanged.
 """
 
 from __future__ import annotations
 
 import math
 import threading
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -55,6 +61,21 @@ FORBIDDEN_OPS = (
     "reduce_scatter",
     "reduce_scatter_tensor",
 )
+OWNER_REDUCTIONS = ("zero2", "zero3", "zero2_overlap", "zero3_overlap")
+INFLIGHT_BUCKETS = 2  # async collectives kept in flight before the oldest is waited on
+
+
+class Pending[T]:
+    """Handle of an issued collective; ``wait()`` (once) returns its result. Inputs must stay
+    unmodified until then, and every rank must wait in the same order."""
+
+    __slots__ = ("_finish",)
+
+    def __init__(self, finish: Callable[[], T]) -> None:
+        self._finish = finish
+
+    def wait(self) -> T:
+        return self._finish()
 
 
 class LayoutMismatch(ValueError):
@@ -101,6 +122,30 @@ class HookComm:
         return self.emit(
             "all_to_all.output", self.comm.all_to_all(self.emit("all_to_all.input", x), send, recv)
         )
+
+    # ponytail: comms without the async methods (duck-typed test/baseline comms) complete
+    # eagerly via getattr; drop the fallback once every Comm implements them.
+    def all_gather_async(self, t: Tensor) -> Pending[list[Tensor]]:
+        x = self.emit("all_gather.input", t)
+        issue = getattr(self.comm, "all_gather_async", None)
+        if issue is None:
+            got = self.comm.all_gather(x)
+            return Pending(
+                lambda: [self.emit(f"all_gather.rank.{r}", y) for r, y in enumerate(got)]
+            )
+        h: Pending[list[Tensor]] = issue(x)
+        return Pending(
+            lambda: [self.emit(f"all_gather.rank.{r}", y) for r, y in enumerate(h.wait())]
+        )
+
+    def all_to_all_async(self, x: Tensor, send: list[int], recv: list[int]) -> Pending[Tensor]:
+        x = self.emit("all_to_all.input", x)
+        issue = getattr(self.comm, "all_to_all_async", None)
+        if issue is None:
+            got = self.comm.all_to_all(x, send, recv)
+            return Pending(lambda: self.emit("all_to_all.output", got))
+        h: Pending[Tensor] = issue(x, send, recv)
+        return Pending(lambda: self.emit("all_to_all.output", h.wait()))
 
     def all_reduce_sum(self, t: Tensor) -> Tensor:
         return self.comm.all_reduce_sum(t)
@@ -149,6 +194,10 @@ class Comm(Protocol):
 
     def all_to_all(self, x: Tensor, send: list[int], recv: list[int]) -> Tensor: ...
 
+    def all_gather_async(self, t: Tensor) -> Pending[list[Tensor]]: ...
+
+    def all_to_all_async(self, x: Tensor, send: list[int], recv: list[int]) -> Pending[Tensor]: ...
+
     def all_reduce_sum(self, t: Tensor) -> Tensor: ...
 
 
@@ -164,19 +213,40 @@ class DistComm:
         self.ops: set[str] = set()
 
     def all_gather(self, t: Tensor) -> list[Tensor]:
+        return self.all_gather_async(t).wait()
+
+    def all_to_all(self, x: Tensor, send: list[int], recv: list[int]) -> Tensor:
+        return self.all_to_all_async(x, send, recv).wait()
+
+    def all_gather_async(self, t: Tensor) -> Pending[list[Tensor]]:
+        """async_op=True: NCCL runs on its own stream; ``wait()`` makes the current stream wait
+        (no host block), so a handle issued from a grad hook overlaps the rest of backward."""
         self.ops.add("all_gather")
         t = t.contiguous()
         out = [torch.empty_like(t) for _ in range(self.world)]
-        self._dist.all_gather(out, t)
-        return out
+        work = self._dist.all_gather(out, t, async_op=True)
 
-    def all_to_all(self, x: Tensor, send: list[int], recv: list[int]) -> Tensor:
+        def done(_send_buffer: Tensor = t) -> list[Tensor]:  # keeps t alive until the wait
+            work.wait()
+            return out
+
+        return Pending(done)
+
+    def all_to_all_async(self, x: Tensor, send: list[int], recv: list[int]) -> Pending[Tensor]:
         self.ops.add("all_to_all")
         if x.dtype == torch.bfloat16:  # bf16 -> fp32 -> bf16 is exact
-            return self.all_to_all(x.float(), send, recv).to(torch.bfloat16)
+            h = self.all_to_all_async(x.float(), send, recv)
+            return Pending(lambda: h.wait().to(torch.bfloat16))
         out = x.new_empty((sum(recv), *x.shape[1:]))
-        self._dist.all_to_all_single(out, x.contiguous(), recv, send)
-        return out
+        x = x.contiguous()
+        work = self._dist.all_to_all_single(out, x, recv, send, async_op=True)
+        assert work is not None  # async_op=True always returns a Work
+
+        def done(_send_buffer: Tensor = x) -> Tensor:  # keeps x alive until the wait
+            work.wait()
+            return out
+
+        return Pending(done)
 
     def all_reduce_sum(self, t: Tensor) -> Tensor:
         """Test-only forbidden path; raises under ``forbid_reductions``."""
@@ -215,6 +285,14 @@ class ThreadComm:
         if [p.shape[0] for p in mine] != recv:
             raise RuntimeError("all_to_all receive splits disagree with senders")
         return torch.cat(mine)
+
+    # Lazy: the exchange happens at wait(). On CUDA every emulated rank's backward runs on one
+    # autograd device thread, so a rendezvous inside a grad hook would deadlock.
+    def all_gather_async(self, t: Tensor) -> Pending[list[Tensor]]:
+        return Pending(lambda: self.all_gather(t))
+
+    def all_to_all_async(self, x: Tensor, send: list[int], recv: list[int]) -> Pending[Tensor]:
+        return Pending(lambda: self.all_to_all(x, send, recv))
 
     def all_reduce_sum(self, t: Tensor) -> Tensor:
         raise ForbiddenCollective("all_reduce on verified tensors")
@@ -343,12 +421,20 @@ def gather_pieces(
     which: Sequence[Piece],
     src: Callable[[Piece], int],
     device: torch.device,
+    inflight: int = 1,
 ) -> dict[Piece, Tensor]:
     """Deterministic gather: rank src(p) publishes values[p.name]; one padded all_gather per
-    tensor name (bounds the transient buffer to world x one tensor)."""
+    tensor name (bounds the transient buffer to ``inflight`` x world x one tensor). With
+    ``inflight`` > 1 the next gathers are issued before the oldest is waited on."""
     out: dict[Piece, Tensor] = {}
+    flight: deque[Pending[dict[Piece, Tensor]]] = deque()
     for name in sorted({p[0] for p in which}):
-        out |= _gather_group(comm, geo, values, [p for p in which if p[0] == name], src, device)
+        group = [p for p in which if p[0] == name]
+        flight.append(_gather_group(comm, geo, values, group, src, device))
+        while len(flight) >= inflight:
+            out |= flight.popleft().wait()
+    while flight:
+        out |= flight.popleft().wait()
     return out
 
 
@@ -359,21 +445,26 @@ def _gather_group(
     which: Sequence[Piece],
     src: Callable[[Piece], int],
     device: torch.device,
-) -> dict[Piece, Tensor]:
+) -> Pending[dict[Piece, Tensor]]:
     by_rank = [[p for p in which if src(p) == r] for r in range(comm.world)]
     sizes = [sum(math.prod(geo.piece_shape(p)) for p in ps) for ps in by_rank]
     mine = [values[p[0]].reshape(-1) for p in by_rank[comm.rank]]
     pad = torch.zeros(max(sizes) - sizes[comm.rank], dtype=torch.float32, device=device)
-    got = comm.all_gather(torch.cat([*mine, pad]))
-    out: dict[Piece, Tensor] = {}
-    for r, ps in enumerate(by_rank):
-        off = 0
-        for p in ps:
-            shape = geo.piece_shape(p)
-            n = math.prod(shape)
-            out[p] = got[r][off : off + n].reshape(shape).clone()
-            off += n
-    return out
+    h = comm.all_gather_async(torch.cat([*mine, pad]))
+
+    def unpack() -> dict[Piece, Tensor]:
+        got = h.wait()
+        out: dict[Piece, Tensor] = {}
+        for r, ps in enumerate(by_rank):
+            off = 0
+            for p in ps:
+                shape = geo.piece_shape(p)
+                n = math.prod(shape)
+                out[p] = got[r][off : off + n].reshape(shape).clone()
+                off += n
+        return out
+
+    return Pending(unpack)
 
 
 def _assemble(geo: Geometry, pieces: Mapping[Piece, Tensor], names: Sequence[str]) -> Params:
@@ -497,15 +588,19 @@ def _rank_grads(
     get: SampleFn,
     t: int = 0,
     hook: TraceHook | None = None,
-    on_ready: Callable[[str, Params], None] | None = None,
+    on_ready: Callable[[str, Tensor], None] | None = None,
 ) -> tuple[Params, Tensor]:
     """Mirror of loop._train_step on this rank's samples (no optimizer step). ``on_ready(name,
-    grads)`` fires from a grad hook during the last micro-batch's backward, once grads[name] is
-    final (same add, so same bits), to overlap its bucket reduction with the rest of backward."""
+    grad)`` fires from a post-accumulate grad hook during the last micro-batch's backward with the
+    final gradient (same adds, so same bits) and takes ownership of it, so its bucket reduction
+    overlaps the rest of backward. Hooked mode returns only the gradients no hook delivered
+    (unused params, zeros) and, with grad_accum == 1, never builds a full gradient buffer."""
     names = sorted(theta)
     ga, mb = cfg.inner.grad_accum, cfg.inner.micro_batch
     moe = _moe_ep(comm, geo) if cfg.model.is_moe else None
-    grads = {n: torch.zeros_like(theta[n]) for n in names}
+    lazy = on_ready is not None and ga == 1
+    grads = {} if lazy else {n: torch.zeros_like(theta[n]) for n in names}
+    delivered: set[str] = set()
     loss_sum = torch.zeros((), dtype=torch.float64, device=theta[names[0]].device)
     for j in range(ga):
         params = {n: theta[n].detach().requires_grad_(True) for n in names}
@@ -518,19 +613,32 @@ def _rank_grads(
         if hooked:
             for n in names:
 
-                def ready(g: Tensor, n: str = n) -> None:
-                    grads[n].add_(g)
-                    assert on_ready is not None
-                    on_ready(n, grads)
+                def ready(p: Tensor, n: str = n) -> None:
+                    g, p.grad = p.grad, None
+                    assert g is not None and on_ready is not None
+                    # zeros + g == g + 0.0 bit for bit (IEEE add commutes; -0.0 -> +0.0)
+                    g = grads.pop(n).add_(g) if n in grads else g.add_(0.0)
+                    delivered.add(n)
+                    on_ready(n, g)
 
-                params[n].register_hook(ready)
+                params[n].register_post_accumulate_grad_hook(ready)
         ce, aux = forward(cfg.model, params, tokens, moe=moe, hook=emit if hook else None)
         total = (ce + cfg.model.aux_loss_coef * aux) / ga
-        gs = torch.autograd.grad(total, [params[n] for n in names], allow_unused=True)
-        for n, g in zip(names, gs, strict=True):
-            if g is not None and not hooked:
-                grads[n].add_(g)
+        if hooked:
+            torch.autograd.backward(total, inputs=[params[n] for n in names])
+        else:
+            gs = torch.autograd.grad(total, [params[n] for n in names], allow_unused=True)
+            for n, g in zip(names, gs, strict=True):
+                if g is not None:
+                    grads[n].add_(g)
+            del gs
         loss_sum = loss_sum + ce.detach().double()
+    if on_ready is not None:
+        return {
+            n: grads.pop(n) if n in grads else torch.zeros_like(theta[n])
+            for n in names
+            if n not in delivered
+        }, loss_sum / ga
     return grads, loss_sum / ga
 
 
@@ -578,7 +686,7 @@ def _reduce_bucketed(
     full = [n for n in names if len(geo.replicas(geo.my_piece(n))) == world > 1]
     out = _reduce(comm, geo, {n: grads[n] for n in names if n not in full}, "all_gather")
     for bucket in _buckets(grads, full, bucket_bytes):
-        out |= _reduce_bucket(comm, geo, grads, bucket)
+        out |= _bucket_scatter(comm, geo, {n: grads[n] for n in bucket}, bucket).wait().wait()
     return {n: out[n] for n in names}
 
 
@@ -597,64 +705,170 @@ def _buckets(
     return [b for b in buckets if b]
 
 
-def _reduce_bucket(
-    comm: Comm, geo: Geometry, grads: Mapping[str, Tensor], bucket: Sequence[str]
-) -> Params:
+def _bucket_scatter(
+    comm: Comm, geo: Geometry, grads: Params, bucket: Sequence[str]
+) -> Pending[Pending[Params]]:
+    """One _reduce_bucketed bucket, two async stages: the all_to_all is issued now; the first
+    wait sums this rank's chunk in rank order and issues the all_gather; the second unpacks.
+    Pops the bucket's tensors from ``grads`` (local gradients freed once packed)."""
     world = comm.world
-    flat = torch.cat([grads[n].reshape(-1) for n in bucket])
-    chunk = -(-flat.numel() // world)
-    flat = torch.cat([flat, flat.new_zeros(chunk * world - flat.numel())])
-    got = comm.all_to_all(flat, [chunk] * world, [chunk] * world).view(world, chunk)
-    acc = got[0].clone()
-    for r in range(1, world):
-        acc.add_(got[r])
-    acc.div_(geo.lay.n_gpus)
-    red = torch.cat(comm.all_gather(acc))
-    out: Params = {}
-    off = 0
-    for n in bucket:
-        k = grads[n].numel()
-        out[n] = red[off : off + k].view_as(grads[n]).clone()
-        off += k
-    return out
+    shapes = [grads[n].shape for n in bucket]
+    numel = sum(math.prod(s) for s in shapes)
+    chunk = -(-numel // world)
+    first = grads[bucket[0]]
+    pad = first.new_zeros(chunk * world - numel)
+    flat = torch.cat([*(grads.pop(n).reshape(-1) for n in bucket), pad])
+    h = comm.all_to_all_async(flat, [chunk] * world, [chunk] * world)
+    del flat, first
+
+    def reduce() -> Pending[Params]:
+        got = h.wait().view(world, chunk)
+        acc = got[0].clone()
+        for r in range(1, world):
+            acc.add_(got[r])
+        acc.div_(geo.lay.n_gpus)
+        del got
+        g = comm.all_gather_async(acc)
+
+        def unpack() -> Params:
+            red = torch.cat(g.wait())
+            out: Params = {}
+            off = 0
+            for n, s in zip(bucket, shapes, strict=True):
+                k = math.prod(s)
+                out[n] = red[off : off + k].view(s).clone()
+                off += k
+            return out
+
+        return Pending(unpack)
+
+    return Pending(reduce)
+
+
+def _owners(geo: Geometry, names: Sequence[str], world: int) -> list[dict[str, int]]:
+    """owners[rank][name]: ZeRO-1 owner of rank's piece of ``name``."""
+    geos = [Geometry(geo.model, geo.lay, r) for r in range(world)]
+    return [{n: g.owner(g.my_piece(n)) for n in names} for g in geos]
+
+
+def _owner_bucket(
+    comm: Comm,
+    geo: Geometry,
+    grads: Params,
+    bucket: Sequence[str],
+    owners: Sequence[Mapping[str, int]],
+) -> Pending[Pending[Params]]:
+    """ZeRO-2 reduction of one bucket: one all_to_all (issued now) sends each tensor's local
+    gradient to the ZeRO-1 owner of its piece; the wait sums the replicas in rank order and
+    divides by n_gpus (the reference order, so bitwise equal to _reduce). Pops the bucket's
+    tensors from ``grads``; the second stage is a no-op (same shape as _bucket_scatter)."""
+    world, me = comm.world, comm.rank
+    shapes = {n: grads[n].shape for n in bucket}
+    size = {n: math.prod(s) for n, s in shapes.items()}
+    send = [[n for n in bucket if owners[me][n] == d] for d in range(world)]
+    recv = [[n for n in bucket if owners[s][n] == me] for s in range(world)]
+    flat = torch.cat([grads.pop(n).reshape(-1) for ns in send for n in ns])
+    h = comm.all_to_all_async(
+        flat, [sum(size[n] for n in ns) for ns in send], [sum(size[n] for n in ns) for ns in recv]
+    )
+    del flat
+
+    def reduce() -> Pending[Params]:
+        got = h.wait()
+        parts: list[Params] = []
+        off = 0
+        for ns in recv:
+            parts.append({})
+            for n in ns:
+                parts[-1][n] = got[off : off + size[n]].view(shapes[n])
+                off += size[n]
+        out: Params = {}
+        for n in recv[me]:
+            reps = geo.replicas(geo.my_piece(n))
+            acc = parts[reps[0]][n].clone()
+            for r in reps[1:]:
+                acc.add_(parts[r][n])
+            out[n] = acc.div_(geo.lay.n_gpus)
+        return Pending(lambda: out)
+
+    return Pending(reduce)
 
 
 def _reduce_to_owner(comm: Comm, geo: Geometry, grads: Params) -> Params:
-    """ZeRO-2 gradient sharding: one all_to_all sends each tensor's local gradient to the ZeRO-1
-    owner of its piece; the owner sums the replicas in rank order and divides by n_gpus (the
-    reference order, so bitwise equal to _reduce). Non-owners keep no reduced gradient. Sharding is
-    per tensor, not flat: Muon and the per-tensor norm terms need whole tensors."""
-    # ponytail: one all_to_all of all grads (2x grad memory transient); bucket it like
-    # _reduce_bucketed if the transient shows up in peak memory on the 8x run.
-    names, world = sorted(grads), comm.world
+    """ZeRO-2 gradient sharding (reduction "zero2"/"zero3"): _owner_bucket over all tensors at
+    once. Non-owners keep no reduced gradient. Sharding is per tensor, not flat: Muon and the
+    per-tensor norm terms need whole tensors. The "*_overlap" reductions bucket this instead."""
+    names = sorted(grads)
+    owners = _owners(geo, names, comm.world)
+    return _owner_bucket(comm, geo, dict(grads), names, owners).wait().wait()
 
-    def owner_of(rank: int, n: str) -> int:
-        g = Geometry(geo.model, geo.lay, rank)
-        return g.owner(g.my_piece(n))
 
-    send = [[n for n in names if owner_of(comm.rank, n) == d] for d in range(world)]
-    recv = [[n for n in names if owner_of(s, n) == comm.rank] for s in range(world)]
-    flat = torch.cat([grads[n].reshape(-1) for d in range(world) for n in send[d]])
-    got = comm.all_to_all(
-        flat,
-        [sum(grads[n].numel() for n in ns) for ns in send],
-        [sum(grads[n].numel() for n in ns) for ns in recv],
-    )
-    parts: list[Params] = []
-    off = 0
-    for ns in recv:
-        parts.append({})
-        for n in ns:
-            parts[-1][n] = got[off : off + grads[n].numel()].view_as(grads[n])
-            off += grads[n].numel()
-    out: Params = {}
-    for n in recv[comm.rank]:
-        reps = geo.replicas(geo.my_piece(n))
-        acc = parts[reps[0]][n].clone()
-        for r in reps[1:]:
-            acc.add_(parts[r][n])
-        out[n] = acc.div_(geo.lay.n_gpus)
-    return out
+class _Overlap:
+    """Bucketed gradient reduction issued from grad hooks during the last micro-batch's backward
+    (reductions "overlap": _bucket_scatter; "zero2_overlap"/"zero3_overlap": _owner_bucket).
+    Buckets are the _buckets plan over sorted names. A bucket's collective is issued as soon as
+    its last gradient is final, and its local gradients are released once packed. At most
+    INFLIGHT_BUCKETS first stages stay in flight; older ones are drained from the hook (a stream
+    wait under NCCL, not a host block). Issue and wait order depend only on the autograd order
+    and the plan, identical on every rank, so collectives match and the bits equal the eager path.
+    """
+
+    def __init__(
+        self, comm: Comm, geo: Geometry, theta: Params, owner: bool, drain_in_hook: bool
+    ) -> None:
+        names = sorted(theta)
+        self.comm, self.geo, self.drain_in_hook = comm, geo, drain_in_hook
+        self.owners = _owners(geo, names, comm.world) if owner else None
+        members = (
+            names
+            if owner
+            else [n for n in names if len(geo.replicas(geo.my_piece(n))) == comm.world > 1]
+        )
+        self.plan = _buckets(theta, members, BUCKET_BYTES)
+        self.where = {n: i for i, b in enumerate(self.plan) for n in b}
+        self._reset()
+
+    def _reset(self) -> None:
+        self.grads: Params = {}  # delivered, not yet packed (or outside every bucket)
+        self.left = [set(b) for b in self.plan]
+        self.flight: deque[Pending[Pending[Params]]] = deque()
+        self.second: list[Pending[Params]] = []
+
+    def _issue(self, i: int) -> None:
+        b = self.plan[i]
+        if self.owners is None:
+            self.flight.append(_bucket_scatter(self.comm, self.geo, self.grads, b))
+        else:
+            self.flight.append(_owner_bucket(self.comm, self.geo, self.grads, b, self.owners))
+
+    def ready(self, n: str, g: Tensor) -> None:
+        self.grads[n] = g
+        i = self.where.get(n)
+        if i is None:
+            return
+        self.left[i].discard(n)
+        if not self.left[i]:
+            self._issue(i)
+            while self.drain_in_hook and len(self.flight) > INFLIGHT_BUCKETS:
+                self.second.append(self.flight.popleft().wait())
+
+    def finish(self, rest: Params) -> Params:
+        """After backward: ``rest`` holds gradients no hook delivered (unused params). Issues the
+        remaining buckets in plan order, drains, and reduces tensors outside every bucket
+        (ZeRO-1 expert tensors) on the reference path. Returns the reduced grads, sorted."""
+        self.grads |= rest
+        for i, left in enumerate(self.left):
+            if left:
+                left.clear()
+                self._issue(i)
+        while self.flight:
+            self.second.append(self.flight.popleft().wait())
+        out = _reduce(self.comm, self.geo, self.grads, "all_gather") if self.grads else {}
+        self.grads = {}
+        for s in self.second:
+            out |= s.wait()
+        self._reset()
+        return {n: out[n] for n in sorted(out)}
 
 
 def to_dtensor(theta: Params, mesh: Any) -> Params:
@@ -804,29 +1018,15 @@ def _train_island(
     pieces = geo.pieces()
     adam = [p for p in pieces if not uses_muon(cfg.inner, p[0])]
     device = theta[names[0]].device
-    if reduction in ("zero2", "zero3") and not lay.zero1:
+    if reduction in OWNER_REDUCTIONS and not lay.zero1:
         raise ValueError(f"reduction={reduction} needs layout zero1 (it reuses the ZeRO-1 owners)")
-    zero3 = reduction == "zero3"
-    # reduction="overlap": the bucketed reduce-scatter, each bucket issued from a grad hook as soon
-    # as its last gradient is final. Every rank runs the same autograd graph, so hooks (and the
-    # collectives they issue) fire in the same order everywhere; bucket contents are those of
-    # _reduce_bucketed, so the result is bitwise identical.
-    plan: list[list[str]] = []
-    if reduction == "overlap":
-        replicated = [n for n in names if len(geo.replicas(geo.my_piece(n))) == comm.world > 1]
-        plan = _buckets(theta_start, replicated, BUCKET_BYTES)
-    in_bucket = {n: i for i, bk in enumerate(plan) for n in bk}
-    pending: list[set[str]] = []
-    done: dict[int, Params] = {}
-
-    def on_ready(n: str, grads: Params) -> None:
-        i = in_bucket.get(n)
-        if i is None:
-            return
-        pending[i].discard(n)
-        if not pending[i]:
-            done[i] = _reduce_bucket(comm, geo, grads, plan[i])
-
+    zero3 = reduction in ("zero3", "zero3_overlap")
+    overlap = None
+    if reduction in ("overlap", "zero2_overlap", "zero3_overlap"):
+        # ThreadComm handles exchange lazily at wait(); waiting inside a hook would deadlock the
+        # emulated ranks that share one CUDA autograd thread, so it drains after backward.
+        drain = not isinstance(traced.comm, ThreadComm)
+        overlap = _Overlap(comm, geo, theta, reduction != "overlap", drain)
     if zero3:
         theta = {n: theta[n] for n in owned}
 
@@ -850,27 +1050,24 @@ def _train_island(
             cancel()
         ids = ia.batch_ids(cfg, t)[comm.rank * per : (comm.rank + 1) * per]
         if zero3:  # ZeRO-3: unshard params just for forward/backward
-            synced = gather_pieces(comm, geo, theta, pieces, geo.owner, device)
+            synced = gather_pieces(comm, geo, theta, pieces, geo.owner, device, INFLIGHT_BUCKETS)
             theta = {n: synced[geo.my_piece(n)] for n in names}
             del synced
-        if reduction == "overlap":
-            done.clear()
-            pending[:] = [set(bk) for bk in plan]
         grads, loss_local = _rank_grads(
-            cfg, comm, geo, theta, ids, get_sample, t, hook, on_ready if plan else None
+            cfg,
+            comm,
+            geo,
+            theta,
+            ids,
+            get_sample,
+            t,
+            hook,
+            None if overlap is None else overlap.ready,
         )
-        if zero3:  # reshard: keep only owned tensors between steps
+        if zero3:  # reshard right after backward: keep only owned tensors between steps
             theta = {n: theta[n] for n in owned}
-        if reduction == "overlap":
-            for i, bk in enumerate(plan):  # buckets holding unused params, in bucket order
-                if i not in done:
-                    done[i] = _reduce_bucket(comm, geo, grads, bk)
-            red = _reduce(
-                comm, geo, {n: grads[n] for n in names if n not in in_bucket}, "all_gather"
-            )
-            for part in done.values():
-                red |= part
-            red = {n: red[n] for n in names}
+        if overlap is not None:
+            red = overlap.finish(grads)
         else:
             red = _reduce(comm, geo, grads, reduction)
         if hook is not None:
@@ -879,7 +1076,7 @@ def _train_island(
                 for n, x in red.items()
             }
         del grads
-        norm = _grad_norm(comm, geo, red, sharded=reduction in ("zero2", "zero3"))
+        norm = _grad_norm(comm, geo, red, sharded=reduction in OWNER_REDUCTIONS)
         lr = lr_at(cfg.inner, a.global_step0 + t - 1, t - 1)
         step(cfg.inner, {n: theta[n] for n in owned}, red, st, lr, norm=norm)
         if after_step is not None:
@@ -901,7 +1098,9 @@ def _train_island(
                     )
         del red
         if lay.zero1 and lay.n_gpus > 1 and not zero3:
-            synced = gather_pieces(comm, geo, theta, pieces, geo.owner, device)
+            # ponytail: per-tensor gathers pipelined INFLIGHT_BUCKETS deep, all waited here; to
+            # also hide them behind the next forward, defer waits into per-layer pre-hooks.
+            synced = gather_pieces(comm, geo, theta, pieces, geo.owner, device, INFLIGHT_BUCKETS)
             for n in names:
                 theta[n].copy_(synced[geo.my_piece(n)])
             del synced
