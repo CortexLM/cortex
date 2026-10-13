@@ -108,6 +108,7 @@ def real_adapter(monkeypatch, operation, directory):
     spec.loader.exec_module(module)
     runtime = object.__new__(module.NetworkRuntime)
     runtime.lifecycle = SimpleNamespace(cleanup_started=lambda: False)
+    runtime.profile = {"artifacts": {}}
     journal_directory = directory / "runtime-journal"
     journal_directory.mkdir()
     runtime.journal = Journal(journal_directory)
@@ -452,3 +453,84 @@ def test_reference_trusted_forwarding_and_refusal(network, failure):
         network.store._db.execute("SELECT reference_commitment FROM admissions_v2").fetchone()[0]
         is None
     )
+
+
+def _dispatch_manifest(manifest, n_gpus):
+    ref = manifest.training.reference_spec
+    ref = ref.model_copy(
+        update={
+            "layout": ref.layout.model_copy(update={"n_gpus": n_gpus, "dp_size": n_gpus}),
+            "driver_allowlist": ["595.71.05"],
+            "sm_count": 170,
+        }
+    )
+    return manifest.model_copy(
+        update={"training": manifest.training.model_copy(update={"reference_spec": ref})}
+    )
+
+
+def _uuid(i):
+    return f"GPU-{i:08x}-0000-0000-0000-000000000000"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "absent",
+        "malformed-uuid",
+        "zero-uuids",
+        "duplicate-uuid",
+        "trimmed-ranks",
+        "driver",
+        "mixed-driver",
+        "sm",
+        "image",
+        "cpu",
+    ],
+)
+def test_dispatch_replay_env_is_actual_remote_hardware(network, tmp_path, fault):
+    """Eight-rank manifest-derived ReplayEnv; never the zero placeholder or a reported shape."""
+    from hypertrain.protocol.hashing import sha256_hex
+
+    manifest = _dispatch_manifest(network.manifest, 8)
+    ref = manifest.training.reference_spec
+    env = {
+        "backend": "cuda",
+        "image_digest": ref.image_digest,
+        "drivers": ["595.71.05"] * 8,
+        "sm_counts": [170] * 8,
+        "gpu_uuids": [_uuid(i) for i in range(8)],
+    }
+    if fault == "malformed-uuid":
+        env["gpu_uuids"][3] = "0" * 64
+    if fault == "zero-uuids":
+        env["gpu_uuids"] = [_uuid(0)] * 8
+    if fault == "duplicate-uuid":
+        env["gpu_uuids"][7] = _uuid(0)
+    if fault == "trimmed-ranks":
+        env = {k: v[:2] if isinstance(v, list) else v for k, v in env.items()}
+    if fault == "driver":
+        env["drivers"] = ["580.00"] * 8
+    if fault == "mixed-driver":
+        env["drivers"][1] = "595.71.06"
+    if fault == "sm":
+        env["sm_counts"][5] = 128
+    if fault == "image":
+        env["image_digest"] = "sha256:" + "22" * 32
+    if fault == "cpu":
+        env["backend"] = "cpu"
+    record = {"name": "op-x", "environment": env}
+    if fault != "absent":
+        (tmp_path / "role-dispatch.json").write_bytes(canonicalize(record))
+    if fault is None:
+        replay, raw = network.store._dispatch_env_v2(manifest, tmp_path)
+        assert raw == record and replay.driver == "595.71.05" and replay.sm_count == 170
+        assert replay.image_digest == ref.image_digest
+        assert replay.gpu_uuid_sha256 == sha256_hex(",".join(env["gpu_uuids"]).encode())
+        assert replay.gpu_uuid_sha256 != "0" * 64
+        return
+    status = 503 if fault in ("absent", "malformed-uuid") else 409
+    with pytest.raises(ChallengeError) as error:
+        network.store._dispatch_env_v2(manifest, tmp_path)
+    assert error.value.status == status

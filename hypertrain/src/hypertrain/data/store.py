@@ -14,12 +14,24 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping
+import tempfile
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import parse_qsl, quote, urlsplit
 
 import httpx
+from pydantic import ValidationError
+
+from hypertrain.protocol.envelope import EnvelopeError
+from hypertrain.protocol.envelope_v2 import load_json
+from hypertrain.protocol.messages_v2 import (
+    INDEX_MAGIC,
+    MAX_MANIFEST_BYTES,
+    MAX_PARTS,
+    PART_BYTES,
+    PartIndexV1,
+)
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
@@ -260,3 +272,113 @@ class S3Store:
         if method not in ("GET", "PUT"):
             raise ValueError("method must be GET or PUT")
         return sigv4_presign(method, self._url(sha), self._creds, self.region, _now(), expires)
+
+
+# ---- ht-parts-v1: files above PART_BYTES as 1MiB parts + an index object published last ----
+
+Put = Callable[[bytes], str]
+Get = Callable[[str], bytes]
+
+
+def _put(put: Put, data: bytes) -> str:
+    sha = hashlib.sha256(data).hexdigest()
+    if put(data) != sha:
+        raise StoreError("store returned a key that is not the content sha256")
+    return sha
+
+
+def _get(get: Get, sha: str) -> bytes:
+    return _verified(_check_key(sha), get(sha))
+
+
+def parse_index(raw: bytes) -> PartIndexV1 | None:
+    """None if `raw` is a plain object; the index if it carries INDEX_MAGIC; else corrupt."""
+    if not raw.startswith(INDEX_MAGIC):
+        return None
+    if len(raw) > MAX_MANIFEST_BYTES:
+        raise CorruptObjectError("part index exceeds manifest byte bound")
+    try:
+        index = PartIndexV1.model_validate(load_json(raw[len(INDEX_MAGIC) :]))
+    except (EnvelopeError, ValidationError) as e:
+        raise CorruptObjectError(f"malformed part index ({type(e).__name__})") from None
+    if index.encode() != raw:
+        raise CorruptObjectError("part index is not canonical")
+    return index
+
+
+def _publish(chunks: Callable[[], bytes], put: Put) -> str:
+    buf, nxt = chunks(), chunks()
+    if not nxt:
+        if buf.startswith(INDEX_MAGIC):
+            raise StoreError("plain object must not begin with the part-index magic")
+        return _put(put, buf)
+    whole, size, parts = hashlib.sha256(), 0, list[str]()
+    while buf:
+        if len(parts) >= MAX_PARTS:
+            raise StoreError("object exceeds MAX_PARTS * PART_BYTES")
+        if nxt and len(buf) != PART_BYTES:
+            raise StoreError("short read before end of object")
+        whole.update(buf)
+        size += len(buf)
+        parts.append(_put(put, buf))
+        buf, nxt = nxt, (chunks() if nxt else b"")
+    index = PartIndexV1(sha256=whole.hexdigest(), size=size, parts=parts)
+    return _put(put, index.encode())  # last: readers never see an index before its parts
+
+
+def put_file(path: Path, put: Put) -> str:
+    """Store `path`; returns the key of the plain object (<= PART_BYTES) or of its part index.
+    The final put() call's bytes are the referenced object (len <= MAX_MANIFEST_BYTES)."""
+    with Path(path).open("rb") as f:
+        return _publish(lambda: f.read(PART_BYTES), put)
+
+
+def put_large(data: bytes, put: Put) -> str:
+    view, off = memoryview(data), 0
+
+    def chunks() -> bytes:
+        nonlocal off
+        off += PART_BYTES
+        return bytes(view[off - PART_BYTES : off])
+
+    return _publish(chunks, put)
+
+
+def _stream(sha: str, get: Get, sink: Callable[[bytes], object]) -> None:
+    raw = _get(get, sha)
+    index = parse_index(raw)
+    if index is None:
+        sink(raw)
+        return
+    whole, size = hashlib.sha256(), 0
+    for i, part_sha in enumerate(index.parts):
+        part = _get(get, part_sha)
+        want = PART_BYTES if i < len(index.parts) - 1 else index.size - size
+        if len(part) != want:
+            raise CorruptObjectError(f"part {i} has length {len(part)}, expected {want}")
+        whole.update(part)
+        size += len(part)
+        sink(part)
+    if whole.hexdigest() != index.sha256:
+        raise CorruptObjectError("reassembled object does not match index sha256")
+
+
+def get_large(sha: str, get: Get) -> bytes:
+    out = bytearray()
+    _stream(sha, get, out.extend)
+    return bytes(out)
+
+
+def fetch_to(sha: str, get: Get, dest: Path) -> None:
+    """Verified reassembly into `dest` via same-directory temp + atomic replace."""
+    dest = Path(dest)
+    fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".part")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            _stream(sha, get, f.write)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, dest)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise

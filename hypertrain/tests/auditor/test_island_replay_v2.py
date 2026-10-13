@@ -3,10 +3,13 @@ from __future__ import annotations
 import importlib.util
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Literal, NoReturn
 
 import numpy as np
 import pytest
+import torch
 from pydantic import ValidationError
 
 import hypertrain.trainer  # noqa: F401
@@ -20,13 +23,17 @@ from hypertrain.auditor.replay import (
     replay_island_windows,
 )
 from hypertrain.auditor.worker import LeaseGuard
+from hypertrain.data.store import LocalFSStore, put_large
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.keys import Keypair
+from hypertrain.protocol.messages import LeafPreimage, StageState
 from hypertrain.protocol.messages_v2 import (
+    ArtifactRef,
     AuditChallengeV2,
     AuditJobV2,
     CommitV2,
+    IslandJobV1,
     RunManifestV2,
     StartStateV2,
 )
@@ -534,3 +541,181 @@ def test_real_parent_auditor_runtime(tmp_path: Path, state_policy: str) -> None:
         )
     assert out.result == "MATCH"
     assert artifacts.delta.read_bytes() == res.delta_payload
+
+
+class _Preflighted(Exception):
+    pass
+
+
+def _indexed_ef_job(
+    store: LocalFSStore,
+) -> tuple[AuditJobV2, AnchorCache, tuple[bytes, bytes, bytes]]:
+    """Untrained job whose signed StartState binds an indexed (>1 MiB) EF; lineage in cache."""
+    from dataclasses import replace
+
+    spec = importlib.util.spec_from_file_location(
+        "replay_l1_manifest", Path(__file__).parents[1] / "miner/test_island_launch_v2.py"
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    manifest = mod.tiny_manifest(2)
+    cfg = TrainConfig.from_manifest_v2(manifest)
+    key, auditor = Keypair(bytes([44]) * 32), Keypair(bytes([45]) * 32)
+    cache = AnchorCache()
+    theta = init_params(cfg.model)
+    genesis = cache.genesis(manifest, key.ss58, theta)
+    ef = {"ef": torch.arange(300_000, dtype=torch.float32)}  # pack > PART_BYTES
+    entry = replace(genesis, ef=ef)
+    cache.entries[(manifest.run_id(), key.ss58, -1, entry.layout_hash)] = entry
+    blobs = (pack_state(theta, entry.state), pack_state(ef), pack_state({}))
+    refs = [put_large(b, store.put) for b in blobs]
+    assert refs[0] == sha256_hex(blobs[0]) and refs[1] != sha256_hex(blobs[1])
+    start = StartStateV2(
+        run_id=manifest.run_id(),
+        w=0,
+        hotkey=key.ss58,
+        theta_hash=state_hash(theta),
+        state_object_sha256=refs[0],
+        opt_state_hash=optimizer_hash(entry.state),
+        ef_object_sha256=refs[1],
+        ef_hash=state_hash(ef),
+        parent_anchor_hash=entry.anchor_hash,
+        global_step0=0,
+        anchor_verdict_hash=entry.proof_hash,
+    )
+    n = manifest.training.batch_samples()
+    commit = CommitV2(
+        w=0,
+        hotkey=key.ss58,
+        leaf_scheme="ht-leaf-v1",
+        n_leaves=cfg.inner.n_leaves,
+        leaves_root="11" * 32,
+        metrics_root="11" * 32,
+        final_theta_hash="11" * 32,
+        ef_in_hash=state_hash(ef),
+        ef_out_hash="11" * 32,
+        delta_hash="11" * 32,
+        delta_bytes=1,
+        tokens=n * cfg.model.seq_len,
+    )
+    challenge = AuditChallengeV2(
+        w=0,
+        target=key.ss58,
+        beacon_round=1,
+        beacon_sig_sha256="22" * 32,
+        mode="full",
+        segments=[],
+        reasons=["final"],
+        serve_deadline=100,
+        anchor_hash=start.digest(),
+        audit_mode="anchored-full",
+    )
+    leaf = LeafPreimage(
+        run_id=manifest.run_id(),
+        w=0,
+        t=0,
+        stages=[StageState(theta="11" * 32, m="11" * 32, v="11" * 32)],
+        batch_ids_sha256="11" * 32,
+        rng_ctr=0,
+        loss_f32="00000000",
+        norm_f32="00000000",
+    )
+    job = AuditJobV2(
+        run_id=manifest.run_id(),
+        job_id="33" * 32,
+        auditor_id=auditor.ss58,
+        attempt=1,
+        lease_nonce="44" * 32,
+        lease_expires=50,
+        absolute_deadline=100,
+        reservation_id="55" * 32,
+        replay_step_budget=2 * cfg.inner.H,
+        anchor_age=0,
+        manifest=manifest,
+        challenge_envelope=seal(auditor, "AuditChallengeV2", manifest.run_id(), challenge, 100),
+        commit_envelope=seal(key, "CommitV2", manifest.run_id(), commit, 100),
+        sample_ids=list(range(n)),
+        start_state=start,
+        preimages=[leaf] * cfg.inner.n_leaves,
+        # ArtifactRef.size is the stored object's length: the index for indexed objects.
+        ef_in=ArtifactRef(sha256=refs[1], size=len(store.get(refs[1]))),
+        v0=ArtifactRef(sha256=refs[2], size=len(blobs[2])),
+        created_beacon=1,
+    )
+    return job, cache, blobs
+
+
+def test_indexed_ef_ref_binds_in_audit_preflight_without_training(tmp_path: Path) -> None:
+    from hypertrain.auditor.worker import execute_island_audit
+
+    store = LocalFSStore(tmp_path / "objects")
+    job, cache, blobs = _indexed_ef_job(store)
+
+    def preflight(j: AuditJobV2, objects: Callable[[str], bytes] | None = store.get) -> None:
+        def launch(
+            job: IslandJobV1,
+            directory: Path,
+            *,
+            backend: Literal["cpu", "cuda"],
+            cancel: threading.Event | None = None,
+            trace: bool = False,
+        ) -> NoReturn:
+            raise _Preflighted(job)
+
+        directory = tmp_path / "in"
+        directory.mkdir(exist_ok=True)
+        for name, blob in zip(("start_state", "ef_in", "v0"), blobs, strict=True):
+            (directory / name).write_bytes(blob)
+        with LeaseGuard(50, 100, time.time() + 120) as guard:
+            execute_island_audit(
+                j,
+                directory,
+                cache,
+                guard,
+                now_round=2,
+                deadline_unix=int(time.time()) + 120,
+                backend="cpu",
+                launch=launch,
+                objects=objects,
+            )
+
+    with pytest.raises(_Preflighted) as accepted:
+        preflight(job)
+    local = accepted.value.args[0]
+    assert (local.ef_in_sha256, local.v0_sha256) == tuple(map(sha256_hex, blobs[1:]))
+    # Replay preflight accepts the same refs: it reaches the (emptied) anchor lookup.
+    theta, ef, v0 = blobs
+
+    def replay(
+        j: AuditJobV2, c: AnchorCache, objects: Callable[[str], bytes] | None
+    ) -> None:  # fails in preflight, before any collective or training step
+        emulate(
+            2,
+            lambda comm: audit_island(
+                j,
+                comm,
+                lambda i: np.zeros(0, dtype=np.uint32),
+                theta,
+                ef,
+                v0,
+                c,
+                now_round=2,
+                objects=objects,
+            ),
+        )
+
+    with pytest.raises(AuditInputError, match="no independently verified predecessor"):
+        replay(job, AnchorCache(), store.get)
+    other_ref = put_large(pack_state({"ef": torch.ones(300_000)}), store.put)
+    cases: tuple[tuple[dict[str, object], Callable[[str], bytes] | None], ...] = (
+        ({"size": len(blobs[1])}, store.get),  # logical size where stored index size belongs
+        ({}, None),  # index ref without resolving it
+        ({"sha256": other_ref}, store.get),  # index of another file
+    )
+    for bad, objects in cases:
+        wrong = job.model_copy(update={"ef_in": job.ef_in.model_copy(update=bad)})
+        with pytest.raises(AuditInputError, match="untrusted audit start/state/EF"):
+            preflight(wrong, objects)
+        with pytest.raises(AuditInputError, match="EF object hash/size mismatch"):
+            replay(wrong, cache, objects)

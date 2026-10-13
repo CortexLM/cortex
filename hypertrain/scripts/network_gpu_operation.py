@@ -190,6 +190,11 @@ def execution_environment(op: Operation) -> dict:
         ):
             raise ValueError("custody CUDA driver differs")
         observed["drivers"] = [d.strip() for d in drivers]
+        from hypertrain.miner.island_launch import gpu_uuid
+
+        observed["gpu_uuids"] = [
+            gpu_uuid(torch.cuda.get_device_properties(i).uuid) for i in range(layout.n_gpus)
+        ]
         observed["sm_counts"] = [
             torch.cuda.get_device_properties(i).multi_processor_count for i in range(layout.n_gpus)
         ]

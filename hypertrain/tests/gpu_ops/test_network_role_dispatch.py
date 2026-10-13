@@ -1031,3 +1031,111 @@ def test_real_cli_capture_multiple_original_requests(probe_metadata, monkeypatch
     if fault == "failed-response":
         failed = json.loads((path.parent / "response-api-1.json").read_bytes())
         assert failed["status"] == 409 and failed["response_hex"] == replies[1][1].hex()
+
+
+def test_execution_environment_records_actual_rank_gpu_uuids(monkeypatch, tmp_path):
+    """Remote custody observation carries per-rank UUIDs; layout-derived, no two-GPU constant."""
+    import torch
+
+    n = 8
+    job = SimpleNamespace(
+        manifest=SimpleNamespace(
+            training=SimpleNamespace(
+                reference_spec=SimpleNamespace(
+                    layout=SimpleNamespace(n_gpus=n), driver_allowlist=["595.71.05"]
+                )
+            )
+        )
+    )
+    op = SimpleNamespace(backend="cuda", image_digest="sha256:" + "11" * 32, job=job)
+    raw = [f"{i:08x}-1111-2222-3333-444444444444" for i in range(n)]
+    monkeypatch.setattr(OP.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(
+        OP.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(stdout="595.71.05\n" * n),
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: n)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda i: SimpleNamespace(uuid=raw[i], multi_processor_count=170),
+    )
+    observed = OP.execution_environment(op)
+    assert observed["gpu_uuids"] == ["GPU-" + u for u in raw]
+    assert observed["drivers"] == ["595.71.05"] * n and observed["sm_counts"] == [170] * n
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    with pytest.raises(ValueError, match="layout differs"):
+        OP.execution_environment(op)
+
+
+def test_role_dispatch_provenance_binds_rescued_operation_result(tmp_path):
+    from hypertrain.gpu_ops import role_dispatch
+
+    (tmp_path / "run").mkdir()
+    journal = Journal(tmp_path / "run")
+    directory = tmp_path / "geometry"
+    (directory / "op-x").mkdir(parents=True)
+    result = directory / "op-x/operation-result.json"
+    result.write_bytes(json.dumps({"environment": {"gpu_uuids": ["GPU-a"]}}).encode())
+    with pytest.raises(RuntimeError, match="canonical publication absent"):
+        role_dispatch.provenance(journal, directory)
+    journal.append(
+        "network_canonical_done", role="h1", name="op-x", directory=str(directory / "published")
+    )
+    journal.append(
+        "network_operation_done", role="h1", name="op-x", result_sha256=fsha(result), tar_sha256="t"
+    )
+    value = role_dispatch.provenance(journal, directory)
+    assert value["environment"] == {"gpu_uuids": ["GPU-a"]} and value["role"] == "h1"
+    assert json.loads((directory / "role-dispatch.json").read_bytes()) == value
+    assert role_dispatch.provenance(journal, directory) == value  # crash-resume is idempotent
+    (directory / "role-dispatch.json").write_bytes(b"{}")
+    with pytest.raises(RuntimeError, match="already differs"):
+        role_dispatch.provenance(journal, directory)
+    (directory / "role-dispatch.json").unlink()
+    (directory / "role-dispatch.json").symlink_to(directory / "op-x/operation-result.json")
+    with pytest.raises(RuntimeError, match="already differs"):
+        role_dispatch.provenance(journal, directory)
+    result.write_bytes(b'{"environment": {"gpu_uuids": ["GPU-forged"]}}')
+    with pytest.raises(RuntimeError, match="custody changed"):
+        role_dispatch.provenance(journal, directory)
+
+
+def test_app_role_dispatch_config_installs_constructor_hook(tmp_path, monkeypatch):
+    from pydantic import ValidationError
+
+    from hypertrain.challenge import app as app_module
+    from hypertrain.gpu_ops import role_dispatch
+
+    config = tmp_path / "dispatch.json"
+    config.write_text(
+        json.dumps(
+            {
+                "tree": str(TREE),
+                "run_dir": str(tmp_path / "lifecycle"),
+                "owner_key_file": str(tmp_path / "owner"),
+                "roles": {OWNER.ss58: "h1"},
+                "run_id": "a" * 64,
+            }
+        )
+    )
+    monkeypatch.setenv("HYPERTRAIN_ROLE_DISPATCH", str(config))
+    monkeypatch.setenv("CHALLENGE_STATE_DIR", str(tmp_path / "state"))
+    parsed = app_module.Config.from_env()
+    assert parsed.role_dispatch_file == config
+    store = app_module.create_app(parsed).state.store
+    assert store._role_launch is not None
+    assert store._open_child(tmp_path / "child")._role_launch is store._role_launch
+    # Foreign run: refused before reading the lifecycle (absent here), so before SSH or debit.
+    with pytest.raises(RuntimeError, match="not the authorized run"):
+        store._role_launch("audit", SimpleNamespace(run_id="b" * 64), tmp_path, {})
+    # Authorized run, unadmitted lifecycle: rejects before any SSH, debit or rental.
+    with pytest.raises((FileNotFoundError, Reject)):
+        store._role_launch("audit", SimpleNamespace(run_id="a" * 64), tmp_path, {})
+    config.write_text(json.dumps({"tree": str(TREE), "extra": 1}))
+    with pytest.raises(ValidationError):
+        role_dispatch.load(config)
+    monkeypatch.delenv("HYPERTRAIN_ROLE_DISPATCH")
+    assert app_module.create_app(app_module.Config.from_env()).state.store._role_launch is None

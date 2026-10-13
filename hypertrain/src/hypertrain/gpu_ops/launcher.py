@@ -31,6 +31,9 @@ from hypertrain.gpu_ops.provider import Provider, Response, list_rows, loopback,
 from hypertrain.gpu_ops.remote import Ssh, ensure_identity
 from hypertrain.gpu_ops.verdict import compute_verdict
 
+# Exact Vast reply when this key is already on the instance; any other false reply rejects.
+SSH_ALREADY_ASSOCIATED = {"success": False, "msg": "SSH key already associated with instance."}
+
 EXIT = {"ok": 0, "admission_rejected": 2, "failed_cleaned": 3, "liability_open": 4, "refused": 5}
 MIN_PUT_SPACING = 5.0
 PUT_ENDPOINT = "PUT /api/v0/asks/N/"
@@ -60,6 +63,46 @@ def crash_hook(point: str, base: str) -> None:
         os._exit(137)
 
 
+def network_first_billable(j: Journal) -> float | None:
+    """Earliest provider create; adopted hosts carry the imported, immutable original create."""
+    intents = j.all("create_intent")
+    if intents:
+        return min(float(r["unix"]) for r in intents)
+    adopted = j.last("adopted")
+    return None if adopted is None else float(adopted["first_billable_unix"])
+
+
+def network_hard_end(j: Journal, cfg: dict[str, Any]) -> float | None:
+    """first + H, cut to the signed adoption cutoff when adopted hosts are billed to it."""
+    first = network_first_billable(j)
+    if first is None:
+        return None
+    end = first + network_horizon(cfg)
+    adopted = j.last("adopted")
+    if adopted is not None and not j.all("create_intent"):
+        cutoff = adopted.get("cutoff_unix")
+        if type(cutoff) is not int or not first < cutoff <= end:
+            raise Reject("adoption_cutoff_invalid")
+        end = min(end, cutoff)
+    window = j.last("fresh_window")
+    if window is not None and j.all("create_intent"):
+        # Fresh rental admitted for a signed finite window: never later, never extended.
+        cutoff = window.get("cutoff_unix")
+        if type(cutoff) is not int or not first < cutoff <= end:
+            raise Reject("fresh_window_cutoff_invalid")
+        end = min(end, cutoff)
+    return end
+
+
+def network_horizon(cfg: dict[str, Any]) -> int:
+    """Horizon is reviewed upstream (equal to the signed authorization and profile H); here it
+    is only bounded. Absent means the legacy one-hour lifecycle, exactly."""
+    horizon = cfg.get("hard_deadline_seconds", 3600)
+    if type(horizon) is not int or not 0 < horizon <= 86400:
+        raise Reject("lifecycle_horizon_invalid")
+    return horizon
+
+
 class Orchestrator:
     def __init__(
         self, cfg: dict[str, Any], j: Journal, p: Provider, run_dir: Path, actor: str = "launcher"
@@ -83,10 +126,9 @@ class Orchestrator:
 
     def deadline(self) -> float:
         if self.cfg.get("cleanup_contract") == "network-v2":
-            intents = self.j.all("create_intent")
-            if intents:
-                first = min(float(r["unix"]) for r in intents)
-                return first + 3600
+            end = network_hard_end(self.j, self.cfg)
+            if end is not None:
+                return end
         rec = self.admitted()
         assert rec is not None
         return float(rec["deadline_unix"])
@@ -421,9 +463,17 @@ class Orchestrator:
             "attach-" + role,
             body={"ssh_key": pub},
         )
-        if not r.ok() or r.parsed.get("success") is not True:
+        already = r.ok() and r.parsed == SSH_ALREADY_ASSOCIATED
+        if not r.ok() or (r.parsed.get("success") is not True and not already):
             raise Reject(f"ssh_attach_failed:{role}:HTTP{r.status}")
-        self.j.append("ssh_attached", role=role, instance_id=rec["instance_id"])
+        # The reply does not prove which key; trust() and the pinned SSH probe prove access.
+        self.j.append(
+            "ssh_attached",
+            role=role,
+            instance_id=rec["instance_id"],
+            key_sha256=sha256(pub.encode()),
+            already_associated=already,
+        )
 
     def ssh(self, role: str) -> Ssh:
         st = self.j.last("instance_ready", role=role)

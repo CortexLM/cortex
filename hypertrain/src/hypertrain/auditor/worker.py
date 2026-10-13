@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -98,15 +98,18 @@ def execute_island_audit(
     publication_job: IslandJobV1 | None = None,
     publication_directory: Path | None = None,
     launch: IslandLaunch | None = None,
+    objects: Callable[[str], bytes] | None = None,
 ) -> tuple[Outcome, IslandArtifacts]:
     """Actual torchrun audit runtime; L0 stages authenticated objects and sample proofs.
 
     Subscribe guard.advance to verified beacon events before invoking; no heartbeat renewal.
     directory contains start_state, ef_in, v0, samples, sample_proofs. No HTTP route invented.
+    StartState/ArtifactRef SHAs and sizes describe stored objects (an ht-parts-v1 index above
+    1 MiB) resolved via `objects`; the local IslandJobV1 binds whole-file SHAs.
     """
     import json
 
-    from hypertrain.auditor.replay import VerifiedAnchor, optimizer_hash, pack_state
+    from hypertrain.auditor.replay import VerifiedAnchor, optimizer_hash, pack_state, ref_binds
     from hypertrain.gpu_ops.journal import durable_write
     from hypertrain.protocol.hashing import sha256_hex
     from hypertrain.trainer.compress import state_hash
@@ -123,21 +126,19 @@ def execute_island_audit(
     theta, st = unpack_state(theta_blob)
     ef, _ = unpack_state(ef_blob)
     if (
-        sha256_hex(theta_blob) != start.state_object_sha256
+        not ref_binds(start.state_object_sha256, theta_blob, objects)
         or st is None
         or optimizer_hash(st) != optimizer_hash(prior.state)
         or state_hash(theta) != start.theta_hash
         or (job.manifest.training.inner.state_policy == "carry" and st.step != start.global_step0)
-        or sha256_hex(ef_blob) != job.ef_in.sha256
-        or len(ef_blob) != job.ef_in.size
-        or sha256_hex(ef_blob) != start.ef_object_sha256
+        or not ref_binds(job.ef_in.sha256, ef_blob, objects, job.ef_in.size)
+        or start.ef_object_sha256 != job.ef_in.sha256
         or state_hash(ef) != start.ef_hash
-        or sha256_hex(v0_blob) != job.v0.sha256
-        or len(v0_blob) != job.v0.size
+        or not ref_binds(job.v0.sha256, v0_blob, objects, job.v0.size)
     ):
         raise AuditInputError("untrusted audit start/state/EF")
     start_path = "start_state"
-    start_hash = start.state_object_sha256
+    start_hash = sha256_hex(theta_blob)
     if job.manifest.training.inner.state_policy != "carry":
         # The authenticated anchor still includes m/v; reset/derived kernels take theta only.
         start_path = "audit-theta.safetensors"
@@ -157,8 +158,8 @@ def execute_island_audit(
         sample_ids=job.sample_ids,
         global_step0=start.global_step0,
         start_state_sha256=start_hash,
-        ef_in_sha256=job.ef_in.sha256,
-        v0_sha256=job.v0.sha256,
+        ef_in_sha256=sha256_hex(ef_blob),
+        v0_sha256=sha256_hex(v0_blob),
         deadline=deadline_unix,
         object_paths={
             "start_state": start_path,

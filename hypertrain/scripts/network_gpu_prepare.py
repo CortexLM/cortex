@@ -7,11 +7,26 @@ import hashlib
 import importlib.util
 import io
 import json
+import math
 import os
 import secrets
 import sys
 import tarfile
 from pathlib import Path
+from types import ModuleType
+
+# ponytail: mission bandwidth floor (Mbit/s) lives here, not in the signed profile; move it into
+# profile["admission"] when the profile schema is next re-signed.
+MIN_INET_MBPS = 800
+
+
+def fast_link(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= MIN_INET_MBPS
+    )
 
 
 def digest(path: Path) -> str:
@@ -227,9 +242,158 @@ def candidate_freeze(original: Path, destination: Path, candidates: list[str]) -
     return destination / "freeze.json"
 
 
-def prepare(
-    freeze_path: Path, output: Path, genesis: int, candidates: list[str] | None = None
+def prepare_qualification_base(
+    freeze: dict,
+    tree: Path,
+    maps: dict,
+    controller: ModuleType,
+    output: Path,
+    out: Path,
+    job_dir: Path,
+    ownership: Path,
+    registry: Path,
+    platform: Path,
 ) -> dict:
+    """prune_rescued qualification base only: reuses the generated V2 manifest/job/objects and the
+    task-4 hosts by reference. No synthetic roles, joins, genesis, relay, TLS or services: the real
+    uid247 join and seed context are signed at run time with the existing keys."""
+    profile_path, job_path = out / "profile.json", job_dir / "job.json"
+    profile = json.loads(profile_path.read_bytes())
+    job = json.loads(job_path.read_bytes())
+    if profile["artifacts"].get("remote_retention") != "prune_rescued":
+        raise ValueError("qualification base requires the generated prune_rescued profile")
+    if "sha256:" + digest(registry) != profile["runtime"]["image_digest"]:
+        raise ValueError("registry index must be the pinned image digest")
+    controller.registry_layers(json.loads(registry.read_bytes()), platform)
+    objects = {key: job_dir / rel for key, rel in job["object_paths"].items()}
+    from hypertrain.gpu_ops import network_qualification
+
+    # Exactly what reviewed_launch recomputes: raw tree map with the qualification profile
+    # overlaid at experiments/gpu_network_v2/profile.json (the remote check sees the same tree).
+    overlay, bundle_bytes = controller.effective_bundle(network_qualification, tree, profile_path)
+    source = json.loads(ownership.read_bytes())
+    if isinstance(source, list):
+        # Fresh admit: the measured GET offer rows select two distinct exact-shape machines.
+        limits = controller.admission_limits(profile)
+        if len(source) != 2 or not all(isinstance(o, dict) for o in source):
+            raise ValueError("fresh offers must be two distinct exact-shape pinned-driver machines")
+        hosts = [
+            {"role": r, "machine_id": o.get("machine_id")}
+            for r, o in zip(("h0", "h1"), source, strict=True)
+        ]
+        if (
+            any(type(h["machine_id"]) is not int for h in hosts)
+            or len({h["machine_id"] for h in hosts}) != 2
+            or any(
+                type(o.get("id")) is not int
+                or o.get("num_gpus") != limits["gpus"]
+                or o.get("gpu_name") != limits["gpu_name"]
+                or o.get("driver_version") not in profile["runtime"]["driver_allowlist"]
+                or not fast_link(o.get("inet_up"))
+                or not fast_link(o.get("inet_down"))
+                for o in source
+            )
+        ):
+            raise ValueError("fresh offers must be two distinct exact-shape pinned-driver machines")
+    else:
+        hosts = [
+            {"role": role, "machine_id": source["api_lookup"][s]["machine_id"]}
+            for role, s in (("h0", "hostA"), ("h1", "hostB"))
+        ]
+    if any(type(h["machine_id"]) is not int for h in hosts):
+        raise ValueError("task-4 ownership must name hostA/hostB machine ids")
+    output.mkdir(mode=0o700)
+    private, public = output / "private", output / "public"
+    save(public / "qualification-sources.json", overlay)
+    bundle = public / "qualification-source.tar"
+    save(bundle, bundle_bytes)
+    save(
+        private / "lifecycle-config.json",
+        {
+            "hosts": hosts,
+            "cleanup_contract": "network-v2",
+            "tree": str(tree),
+            "network_profile_file": str(profile_path),
+            "image": freeze["image_candidate"]["ref"],
+            "remote_python": profile["runtime"]["remote_python"],
+            "disk_gb": controller.admission_limits(profile)["disk_gb"],
+            "hard_deadline_seconds": controller.lifecycle_timing(profile)["horizon"],
+            "hard_grace_seconds": 0,
+            "base_url": "https://console.vast.ai",
+            "boot_timeout_seconds": 300,
+            "keyscan_attempts": 1,
+            "create_margin_seconds": 600,
+            # ponytail: fixed remote layout; prepare_record adds key_file + cleanup_deadline_unix.
+            "remote_root": "/data/hypertrain-{role}",
+            "evidence_path": str(output / "private/evidence-run.json"),
+        },
+        True,
+    )
+    save(
+        public / "lifecycle-hashes.json",
+        {
+            name: maps["qualification-sources.json"][name]
+            for name in (
+                "src/hypertrain/gpu_ops/launcher.py",
+                "src/hypertrain/gpu_ops/supervisor.py",
+            )
+        },
+    )
+    paths = {
+        "config": private / "lifecycle-config.json",
+        "profile": profile_path,
+        "sources": public / "qualification-sources.json",
+        "bundle": bundle,
+        "manifest": out / "manifest-envelope.json",
+        "lifecycle_hashes": public / "lifecycle-hashes.json",
+        "registry": registry,
+        "registry_platform": platform,
+        "ownership": ownership,
+        "job": job_path,
+        **{"object_" + key: path for key, path in objects.items()},
+    }
+    staged = sum(p.stat().st_size for p in [bundle, job_path, *objects.values()])
+    record = {
+        "tree": str(tree),
+        "files": {name: {"path": str(p), "sha256": digest(p)} for name, p in sorted(paths.items())},
+        "quota": controller.execution_quota(profile),
+        "staging_bytes": staged,
+        "public_dataset_reviewed": True,
+        "full_genesis_reviewed": True,
+        "preparation_only": True,
+        # Per-role join/seed_context (one real uid247 identity on both hosts) and every fresh
+        # provider/authority file are added by scripts/prepare_record.py at run time.
+        "role_inputs": {
+            "job": "job",
+            "objects": {key: "object_" + key for key in objects},
+        },
+        "remaining": ["roles", "action", "owner", "parent_pid", "cutoff_unix", "admitted_unix"],
+    }
+    save(private / "review-base.json", {"record": record}, True)
+    result = {
+        "status": "QUALIFICATION_BASE_NOT_LAUNCHABLE",
+        "run_id": job["run_id"],
+        "review_base": str(private / "review-base.json"),
+        "review_base_sha256": digest(private / "review-base.json"),
+        "staging_bytes": staged,
+        "quota": record["quota"],
+        "kernels_executed": 0,
+        "provider_calls": 0,
+    }
+    save(output / "prepared.json", result)
+    return result
+
+
+def prepare(
+    freeze_path: Path,
+    output: Path,
+    genesis: int,
+    candidates: list[str] | None = None,
+    qualification: tuple[Path, Path, Path, Path, Path] | None = None,
+) -> dict:
+    if qualification is not None:
+        freeze, tree, maps, _, _, controller = load_frozen(freeze_path)
+        return prepare_qualification_base(freeze, tree, maps, controller, output, *qualification)
     if output.exists() or genesis < 1:
         raise ValueError("new output and positive deterministic CPU genesis required")
     if candidates is not None and candidates != ["580.95.05", "580.159.03"]:
@@ -627,6 +791,13 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cpu-genesis-unix", type=int, required=True)
     parser.add_argument("--candidate-driver", action="append")
+    parser.add_argument(
+        "--qualification-base",
+        nargs=5,
+        type=Path,
+        metavar=("OUT_DIR", "JOB_DIR", "OWNERSHIP", "REGISTRY_INDEX", "REGISTRY_PLATFORM"),
+        help="prune_rescued qualification-only base from generated V2 assets",
+    )
     args = parser.parse_args()
     os.umask(0o077)
     print(
@@ -636,6 +807,9 @@ def main() -> None:
                 args.output.resolve(),
                 args.cpu_genesis_unix,
                 args.candidate_driver,
+                tuple(p.resolve() for p in args.qualification_base)
+                if args.qualification_base
+                else None,
             ),
             sort_keys=True,
         )

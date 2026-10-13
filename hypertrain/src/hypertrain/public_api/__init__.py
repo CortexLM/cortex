@@ -55,27 +55,39 @@ def create_public_app(
         if hit and now - hit[0] < ttl:
             return hit[1], hit[2]
         try:
-            db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            db.row_factory = sqlite3.Row
+            dbs = []
             try:
-                status, body = build(db, path)
+                # Root first, then each isolated run sub-store (ChallengeStore._create_child).
+                for p in (db_path, *sorted(db_path.parent.glob("runs/*/challenge.db"))):
+                    db = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+                    db.row_factory = sqlite3.Row
+                    dbs.append(db)
+                status, body = build(dbs, path)
             finally:
-                db.close()
+                for db in dbs:
+                    db.close()
         except sqlite3.Error:
             return 503, {"detail": "database unreadable"}
         cache[path] = (now, status, body)
         return status, body
 
-    def build(db: sqlite3.Connection, path: str) -> tuple[int, Any]:
+    def build(dbs: list[sqlite3.Connection], path: str) -> tuple[int, Any]:
         metrics = _metrics(metrics_path)
         if path == "/v1/runs":
-            return 200, views.list_runs(db)
+            return 200, views.list_runs(*dbs)
         if path == "/v1/snapshot":
-            snap = views.default_snapshot(db, metrics)
+            snap = views.default_snapshot(dbs[0], metrics, *dbs[1:])
             return (200, snap) if snap else (404, {"detail": "no runs"})
         run_id, _, tail = path.removeprefix("/v1/runs/").partition("/")
-        snap = views.run_snapshot(
-            db, run_id, [x for x in metrics if x.get("run_id", run_id) == run_id]
+        legacy = [x for x in metrics if x.get("run_id", run_id) == run_id]
+        tagged = [x for x in metrics if x.get("run_id") == run_id]  # untagged rows are root's
+        db, snap = next(
+            (
+                (d, s)
+                for i, d in enumerate(dbs)
+                if (s := views.run_snapshot(d, run_id, tagged if i else legacy)) is not None
+            ),
+            (dbs[0], None),
         )
         if snap is None:
             return 404, {"detail": "unknown run"}

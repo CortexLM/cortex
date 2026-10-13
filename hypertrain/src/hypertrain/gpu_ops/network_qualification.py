@@ -21,13 +21,77 @@ import time
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from hypertrain.gpu_ops.journal import durable_write, fsha
 from hypertrain.gpu_ops.launcher import Reject
 from hypertrain.miner.island_launch import confined, launch_argv, validate_artifacts
 from hypertrain.protocol.messages import Hex64, ImageDigest
-from hypertrain.protocol.messages_v2 import IslandJobV1
+from hypertrain.protocol.messages_v2 import IslandJobV1, RunManifestV2
+
+LEGACY_TIMING = {
+    "horizon": 3600,
+    "execution_cap": 40,
+    "teardown": 300,
+    "qualification": 900,
+    "qual_stage": 300,
+    "qual_probe": 180,
+}
+# ponytail: finite ceiling for one prune_rescued lifecycle; raise with a reviewed profile change.
+MAX_LIFECYCLE_SECONDS = 86400
+
+
+def lifecycle_timing(profile: dict) -> dict[str, int]:
+    """Legacy "all" keeps its exact one-hour constants. prune_rescued derives every window from
+    reviewed profile fields, each a positive int that must fit one finite lifecycle horizon."""
+    a = profile.get("artifacts", {})
+    if a.get("remote_retention", "all") == "all":
+        return dict(LEGACY_TIMING)
+    s, q = profile["schedule"], profile["microqualification"]
+    fields = [
+        s["hard_deadline_seconds"],
+        s["staging_seconds"],
+        s["beacon_service_seconds"],
+        s["rescue_delete_seconds"],
+        s["hard_margin_seconds"],
+        s["executions_per_host"],
+        q["qualification_deadline_seconds"],
+        q["staging_seconds"],
+        q["probe_and_transfer_seconds"],
+        q["rescue_delete_seconds"],
+        q["failure_margin_seconds"],
+        a["rescue_transfer_seconds"],
+        a["delete_absence_seconds"],
+    ]
+    if any(type(v) is not int or v <= 0 for v in fields):
+        raise Reject("lifecycle_timing_invalid")
+    horizon, rescue_delete = s["hard_deadline_seconds"], s["rescue_delete_seconds"]
+    qualification = q["qualification_deadline_seconds"]
+    cap = (horizon - s["staging_seconds"] - s["beacon_service_seconds"] - rescue_delete) - s[
+        "hard_margin_seconds"
+    ]
+    cap //= s["executions_per_host"]
+    if (
+        horizon > MAX_LIFECYCLE_SECONDS
+        or a["rescue_transfer_seconds"] + a["delete_absence_seconds"] > rescue_delete
+        or q["rescue_delete_seconds"] < a["rescue_transfer_seconds"] + a["delete_absence_seconds"]
+        or q["staging_seconds"]
+        + q["probe_and_transfer_seconds"]
+        + q["rescue_delete_seconds"]
+        + q["failure_margin_seconds"]
+        > qualification
+        or qualification + s["hard_margin_seconds"] > horizon
+        or cap <= 0
+    ):
+        raise Reject("lifecycle_timing_invalid")
+    return {
+        "horizon": horizon,
+        "execution_cap": cap,
+        "teardown": rescue_delete,
+        "qualification": qualification,
+        "qual_stage": q["staging_seconds"],
+        "qual_probe": q["probe_and_transfer_seconds"],
+    }
 
 
 class Boundary(BaseModel):
@@ -61,9 +125,15 @@ class Environment(Boundary):
     cuda: Literal["13.0"]
     python: Literal["/opt/hypertrain/venv/bin/python"]
     torch_path: str
-    drivers: Annotated[list[str], Field(min_length=2, max_length=2)]
-    sm_counts: Annotated[list[Literal[170]], Field(min_length=2, max_length=2)]
+    drivers: Annotated[list[str], Field(min_length=2, max_length=8)]
+    sm_counts: Annotated[list[Literal[170]], Field(min_length=2, max_length=8)]
     image_digest: ImageDigest
+
+    @model_validator(mode="after")
+    def _one_driver_per_device(self) -> Environment:
+        if len(self.drivers) != len(self.sm_counts):
+            raise ValueError("driver/device count mismatch")
+        return self
 
 
 class Result(Boundary):
@@ -78,6 +148,24 @@ class Result(Boundary):
     rounds: Annotated[list[dict[str, Hex64]], Field(min_length=2, max_length=2)]
     elapsed_seconds: float
     workload_allowed: Literal[False]
+
+
+def round_files(ranks: int, H: int, J: int) -> list[str]:  # noqa: N803 - manifest names
+    """Every rank's final artifacts plus each J-th checkpoint of an H-step round."""
+    if min(ranks, H, J) < 1 or H % J:
+        raise Reject("qualification_layout_invalid")
+    return [
+        f"rank-{rank}/{rel}"
+        for rank in range(ranks)
+        for rel in (
+            "state.safetensors",
+            "ef.safetensors",
+            "delta.bin",
+            "leaves.json",
+            "trace.json",
+            *(f"checkpoints/{t}.safetensors" for t in range(0, H + 1, J)),
+        )
+    ]
 
 
 def select_inventory(text: str, allocated: int, drivers: list[str]) -> tuple[str, str]:
@@ -147,6 +235,7 @@ def check_inputs(cfg: Qualification) -> IslandJobV1:
     if fsha(cfg.lifecycle_receipts) != cfg.lifecycle_receipts_sha256:
         raise Reject("qualification_lifecycle_receipts_changed")
     receipts = json.loads(cfg.lifecycle_receipts.read_bytes())
+    timing = lifecycle_timing(json.loads(cfg.profile.read_bytes()))
     if (
         receipts["instance_id"] != cfg.instance_id
         or receipts["machine_id"] != cfg.machine_id
@@ -156,7 +245,7 @@ def check_inputs(cfg: Qualification) -> IslandJobV1:
         or receipts["known_hosts_sha256"] != cfg.known_hosts_sha256
         or receipts["lifecycle_contract_sha256"] != cfg.lifecycle_contract_sha256
         or receipts["supervisor_pid"] <= 0
-        or receipts["deadline_unix"] > cfg.admitted_unix + 3600
+        or receipts["deadline_unix"] > cfg.admitted_unix + timing["horizon"]
         or receipts["cuda_observed"] is not True
     ):
         raise Reject("qualification_owned_lifecycle_receipt_missing")
@@ -185,12 +274,12 @@ def check_inputs(cfg: Qualification) -> IslandJobV1:
     return job
 
 
-def inspect_environment(cfg: Qualification) -> Environment:
+def inspect_environment(cfg: Qualification, n_gpus: int) -> Environment:
     __import__("hypertrain.trainer")  # Configure determinism before torch import.
     import torch
 
-    if not torch.cuda.is_available() or torch.cuda.device_count() != 2:
-        raise Reject("qualification_requires_actual_two_cuda_devices")
+    if not torch.cuda.is_available() or torch.cuda.device_count() != n_gpus:
+        raise Reject("qualification_requires_actual_layout_cuda_devices")
     if not Path(torch.__file__).resolve().is_relative_to("/venv/main"):
         raise Reject("qualification_torch_import_origin_mismatch")
     smi = shutil.which("nvidia-smi")
@@ -203,7 +292,9 @@ def inspect_environment(cfg: Qualification) -> Environment:
         text=True,
         timeout=10,
     ).stdout.splitlines()
-    if len(drivers) != 2 or any(d.strip() not in cfg.driver_allowlist for d in drivers):
+    if len(drivers) != n_gpus:
+        raise Reject("qualification_requires_actual_layout_cuda_devices")
+    if any(d.strip() not in cfg.driver_allowlist for d in drivers):
         raise Reject("qualification_driver_mismatch")
     return Environment.model_validate(
         {
@@ -214,7 +305,7 @@ def inspect_environment(cfg: Qualification) -> Environment:
             "torch_path": str(Path(torch.__file__).resolve()),
             "drivers": [d.strip() for d in drivers],
             "sm_counts": [
-                torch.cuda.get_device_properties(i).multi_processor_count for i in range(2)
+                torch.cuda.get_device_properties(i).multi_processor_count for i in range(n_gpus)
             ],
             "image_digest": cfg.image_digest,
         }
@@ -223,22 +314,13 @@ def inspect_environment(cfg: Qualification) -> Environment:
 
 def capture(directory: Path, job: IslandJobV1) -> dict[str, str]:
     validate_artifacts(job, directory)
-    fingerprints = {}
-    for rank in range(2):
+    n_gpus = job.manifest.training.reference_spec.layout.n_gpus
+    for rank in range(n_gpus):
         summary = json.loads((directory / f"rank-{rank}/summary.json").read_bytes())
         if summary["backend"] != "cuda":
             raise Reject("qualification_cpu_artifacts_refused")
-        for rel in [
-            "state.safetensors",
-            "ef.safetensors",
-            "delta.bin",
-            "leaves.json",
-            "trace.json",
-        ] + [f"checkpoints/{t}.safetensors" for t in range(0, 31, 5)]:
-            fingerprints[f"rank-{rank}/{rel}"] = fsha(directory / f"rank-{rank}/{rel}")
-        if not (directory / f"rank-{rank}/trace.json").is_file():
-            raise Reject("qualification_trace_missing")
-    return fingerprints
+    inner = job.manifest.training.inner
+    return {rel: fsha(directory / rel) for rel in round_files(n_gpus, inner.H, inner.J)}
 
 
 def run(config_path: Path) -> Result:
@@ -256,7 +338,8 @@ def run(config_path: Path) -> Result:
         os.environ[key] = value
     if os.environ.get("HT_IMAGE_DIGEST") != cfg.image_digest:
         raise Reject("qualification_actual_image_receipt_missing")
-    environment = inspect_environment(cfg)
+    environment = inspect_environment(cfg, job.manifest.training.reference_spec.layout.n_gpus)
+    inner = job.manifest.training.inner
     from hypertrain.auditor.replay import AnchorCache, pack_state, unpack_state
 
     theta, state = unpack_state(
@@ -269,7 +352,9 @@ def run(config_path: Path) -> Result:
         anchor.ef
     ):
         raise Reject("qualification_requires_genesis_ef")
-    if time.time() + 600 > cfg.admitted_unix + 900:
+    timing = lifecycle_timing(json.loads(cfg.profile.read_bytes()))
+    # Legacy: 600 + 900 means staging ends by admitted + 300 (= qual_stage).
+    if time.time() > cfg.admitted_unix + timing["qual_stage"]:
         raise Reject("qualification_staging_deadline_exceeded")
     cfg.output.mkdir(mode=0o700, parents=True, exist_ok=False)
     durable_write(cfg.output / "config.json", config_path.read_bytes())
@@ -289,8 +374,11 @@ def run(config_path: Path) -> Result:
                 for key, rel in [("start_state", "state.safetensors"), ("ef_in", "ef.safetensors")]:
                     shutil.copyfile(previous / "rank-0" / rel, directory / job.object_paths[key])
                     body[key + "_sha256"] = fsha(directory / job.object_paths[key])
-                body.update(w=job.w + 1, global_step0=30)
-            left = min(90, cfg.admitted_unix + 480 - time.time())
+                body.update(w=job.w + 1, global_step0=job.global_step0 + inner.H)
+            left = min(
+                timing["qual_probe"] // 2,
+                cfg.admitted_unix + timing["qual_stage"] + timing["qual_probe"] - time.time(),
+            )
             if left <= 0:
                 raise Reject("qualification_probe_deadline_exceeded")
             body["deadline"] = min(job.deadline, int(time.time() + left))
@@ -340,10 +428,12 @@ def run(config_path: Path) -> Result:
         durable_write(cfg.output / "custody.json", json.dumps(inventory, sort_keys=True).encode())
 
 
-def compare(paths: list[Path]) -> dict[str, bool]:
+def compare(paths: list[Path], manifest: RunManifestV2) -> dict[str, bool]:
+    """Ranks/H/J/image come from the caller's validated manifest, never from a Result."""
     if len(paths) != 2:
         raise Reject("qualification_requires_two_host_results")
     a, b = [Result.model_validate_json(p.read_bytes()) for p in paths]
+    ref, inner = manifest.training.reference_spec, manifest.training.inner
     if (
         a.machine_id == b.machine_id
         or a.instance_id == b.instance_id
@@ -351,23 +441,17 @@ def compare(paths: list[Path]) -> dict[str, bool]:
         or a.profile_sha256 != b.profile_sha256
         or a.sources != b.sources
         or a.environment.image_digest != b.environment.image_digest
+        or any(
+            r.environment.image_digest != ref.image_digest
+            or len(r.environment.sm_counts) != ref.layout.n_gpus
+            for r in (a, b)
+        )
         or a.rounds != b.rounds
     ):
         raise Reject("qualification_two_host_binding_or_bitwise_mismatch")
+    expected = set(round_files(ref.layout.n_gpus, inner.H, inner.J))
     for path, result in zip(paths, (a, b), strict=True):
         for index, files in enumerate(result.rounds):
-            expected = {
-                f"rank-{rank}/{rel}"
-                for rank in range(2)
-                for rel in [
-                    "state.safetensors",
-                    "ef.safetensors",
-                    "delta.bin",
-                    "leaves.json",
-                    "trace.json",
-                ]
-                + [f"checkpoints/{t}.safetensors" for t in range(0, 31, 5)]
-            }
             if set(files) != expected:
                 raise Reject("qualification_full_round_coverage_missing")
             for rel, want in files.items():
@@ -388,9 +472,20 @@ def main() -> None:
             durable_write(Path(destination), bundle(Path(tree)))
         case ["run", config]:
             print(run(Path(config)).model_dump_json())
-        case ["compare", a, b]:
-            print(json.dumps(compare([Path(a), Path(b)])))
+        case ["compare", config_a, config_b, a, b]:
+            jobs = []
+            for config_path, result in ((Path(config_a), Path(a)), (Path(config_b), Path(b))):
+                if Result.model_validate_json(result.read_bytes()).config_sha256 != fsha(
+                    config_path
+                ):
+                    raise Reject("qualification_result_config_mismatch")
+                jobs.append(
+                    check_inputs(Qualification.model_validate_json(config_path.read_bytes()))
+                )
+            if jobs[0].manifest != jobs[1].manifest:
+                raise Reject("qualification_two_host_manifest_mismatch")
+            print(json.dumps(compare([Path(a), Path(b)], jobs[0].manifest)))
         case _:
             raise SystemExit(
-                "usage: sources TREE | run CONFIG | compare A/result.json B/result.json"
+                "usage: sources TREE | run CONFIG | compare CFG_A CFG_B A/result.json B/result.json"
             )

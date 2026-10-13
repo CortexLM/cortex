@@ -789,25 +789,99 @@ class NetworkMiner:
                 self.kp, "WorkScreenV2", self.run_id, screen, challenge.deadline_beacon
             ),
         }
-        for filename in ("state.safetensors", "ef.safetensors", "delta.bin", "leaves.json"):
+        from hypertrain.gpu_ops.work_screen import artifact_ref
+
+        put = self._bounded_put(job.deadline, cancel)
+        for ref, filename in zip(
+            proof.artifact_refs,
+            ("state.safetensors", "ef.safetensors", "delta.bin", "leaves.json"),
+            strict=True,
+        ):
             if time.time() >= job.deadline or cancel is not None and cancel.is_set():
                 raise MinerError("probe deadline/cancellation")
             path = job_path.parent / "published" / "rank-0" / filename
-            response = self.api.c.put(
-                self.api.base + self.url + "/objects/" + sha256_hex(path.read_bytes()),
-                content=path.read_bytes(),
-                headers={
-                    "X-Object-Signature": self.kp.sign(
-                        b"hypertrain/object/2|"
-                        + self.run_id.encode()
-                        + b"|"
-                        + sha256_hex(path.read_bytes()).encode()
-                    ).hex(),
-                    "X-Hotkey": self.kp.ss58,
-                },
-            )
-            response.raise_for_status()
+            if artifact_ref(path, put) != ref:
+                raise MinerError("published artifact differs from screened ref")
+        if time.time() >= job.deadline or cancel is not None and cancel.is_set():
+            raise MinerError("probe deadline/cancellation")
         return result
+
+    def _bounded_put(
+        self, deadline: float, cancel: threading.Event | None
+    ) -> Callable[[bytes], str]:
+        """_put_object that refuses every further part/index PUT once deadline or cancel hits."""
+
+        def put(data: bytes) -> str:
+            if time.time() >= deadline or cancel is not None and cancel.is_set():
+                raise MinerError("publication deadline/cancellation")
+            return self._put_object(data)
+
+        return put
+
+    def _put_object(self, data: bytes) -> str:
+        """One signed v2 object PUT (plain object, part or part index; each <= 1 MiB)."""
+        digest = sha256_hex(data)
+        response = self.api.c.put(
+            self.api.base + self.url + "/objects/" + digest,
+            content=iter([data]),  # one-shot body: httpx keeps no request.content copy
+            headers={
+                "X-Hotkey": self.kp.ss58,
+                "X-Object-Signature": self.kp.sign(
+                    f"hypertrain/object/2|{self.run_id}|{digest}".encode()
+                ).hex(),
+            },
+        )
+        response.raise_for_status()
+        return digest
+
+    def _fetch_inputs(self, job: IslandJobV1, objects: Mapping[str, str], directory: Path) -> None:
+        """objects: name -> stored ref (plain or ht-parts-v1 index); the job pins whole SHAs.
+
+        Each file is verified and atomically replaced; a bad ref never leaves a file behind."""
+        from hypertrain.data.store import StoreError, fetch_to
+
+        whole = {
+            "start_state": job.start_state_sha256,
+            "ef_in": job.ef_in_sha256,
+            "v0": job.v0_sha256,
+        }
+        # Untrusted response: names must be exactly the job's validated (confined) object paths.
+        targets = {(directory / p).resolve() for p in job.object_paths.values()}
+        if set(objects) != set(job.object_paths) or len(targets) != len(job.object_paths):
+            raise MinerError("job object names differ from the job's object paths")
+        for name, digest in objects.items():
+            dest = directory / job.object_paths[name]
+            try:
+                fetch_to(digest, self._get_object, dest)
+            except StoreError as e:
+                raise MinerError(f"job input {name} corrupt: {e}") from None
+            if name in whole:
+                with dest.open("rb") as f:
+                    if hashlib.file_digest(f, "sha256").hexdigest() != whole[name]:
+                        dest.unlink()
+                        raise MinerError("job input hash mismatch")
+
+    def _get_object(self, digest: str) -> bytes:
+        """Bounded streamed GET: ht-parts-v1 parts and indexes are <= 1 MiB each, so a larger
+        body is refused before it is buffered (legacy >1 MiB plain objects are not fetchable)."""
+        from hypertrain.protocol.messages_v2 import MAX_MANIFEST_BYTES, PART_BYTES
+
+        limit = max(PART_BYTES, MAX_MANIFEST_BYTES)
+        with self.api.c.stream(
+            "GET",
+            self.api.base + self.url + "/objects/" + digest,
+            headers={"Accept-Encoding": "identity"},
+        ) as response:
+            response.raise_for_status()
+            # httpx would decode gzip/br before the bound check; a hostile server ignores headers.
+            if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                raise MinerError("job input object has a non-identity content encoding")
+            body = bytearray()
+            for chunk in response.iter_bytes(chunk_size=64 << 10):
+                if len(body) + len(chunk) > limit:
+                    raise MinerError("job input object exceeds the 1 MiB part bound")
+                body.extend(chunk)
+            return bytes(body)
 
     def proof(self, document: Path) -> dict[str, Any]:
         from hypertrain.protocol.envelope_v2 import load_json
@@ -850,7 +924,7 @@ class NetworkMiner:
 
         from hypertrain.miner.island_launch import launch_island
         from hypertrain.protocol import envelope_v2, relay_envelope
-        from hypertrain.protocol.messages_v2 import ArtifactRef, IslandJobV1, RoundOpenV2, WorkProof
+        from hypertrain.protocol.messages_v2 import IslandJobV1, RoundOpenV2, WorkProof
         from hypertrain.protocol.relay_messages import RelayRegistryV1
         from hypertrain.relay.client import RelayClient, chunk_manifest
 
@@ -911,12 +985,7 @@ class NetworkMiner:
         job = IslandJobV1.model_validate(staged["job"])
         directory = self.directory / str(w)
         directory.mkdir(parents=True, exist_ok=True)
-        for name, digest in staged["objects"].items():
-            response = self.api.c.get(self.api.base + self.url + "/objects/" + digest)
-            response.raise_for_status()
-            if sha256_hex(response.content) != digest:
-                raise MinerError("job input hash mismatch")
-            (directory / name).write_bytes(response.content)
+        self._fetch_inputs(job, staged["objects"], directory)
         artifacts = launch_island(
             job,
             directory,
@@ -950,21 +1019,16 @@ class NetworkMiner:
             self.url + "/commit",
             json=envelope_v2.seal(self.kp, "CommitV2", self.run_id, commit, schedule.d_final),
         )
-        refs = []
-        for path in (artifacts.state, artifacts.ef, artifacts.delta, artifacts.leaves):
-            digest = sha256_hex(path.read_bytes())
-            response = self.api.c.put(
-                self.api.base + self.url + "/objects/" + digest,
-                content=path.read_bytes(),
-                headers={
-                    "X-Hotkey": self.kp.ss58,
-                    "X-Object-Signature": self.kp.sign(
-                        f"hypertrain/object/2|{self.run_id}|{digest}".encode()
-                    ).hex(),
-                },
-            )
-            response.raise_for_status()
-            refs.append(ArtifactRef(sha256=digest, size=path.stat().st_size))
+        from hypertrain.gpu_ops.work_screen import artifact_ref
+
+        # Same d_final -> wall clock mapping as the master (store.py: genesis + (d - 1) * 3).
+        put = self._bounded_put(
+            self.manifest.training.beacon.genesis_time + (schedule.d_final - 1) * 3, None
+        )
+        refs = [
+            artifact_ref(path, put)
+            for path in (artifacts.state, artifacts.ef, artifacts.delta, artifacts.leaves)
+        ]
         descriptor = WorkProof(
             admission_id=status["record"]["admission_id"],
             challenge_hash=sha256_hex(canonical(commit)),
@@ -1003,12 +1067,11 @@ class NetworkMiner:
         acceptance = self.api.call(
             "POST", "/v2/relay-receipts", content=canonical(receipt.model_dump(mode="json"))
         )
-        payload = artifacts.delta.read_bytes()
         delta = {
             "w": w,
             "hotkey": self.kp.ss58,
             "delta_hash": commit["delta_hash"],
-            "size": len(payload),
+            "size": artifacts.delta.stat().st_size,
             "uri": "sha256:" + commit["delta_hash"],
             "format": "ht-sparse-v1"
             if self.manifest.training.outer.opt == "sparseloco"

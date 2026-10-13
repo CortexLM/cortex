@@ -31,6 +31,7 @@ from safetensors.torch import load as st_load
 from safetensors.torch import save as st_save
 
 import hypertrain.trainer  # noqa: F401  (determinism before torch users below)
+from hypertrain.data.store import CorruptObjectError, parse_index
 from hypertrain.protocol.envelope import body_digest
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.messages import (
@@ -106,6 +107,32 @@ class AuditInputs:
 class ServedState:
     serve: StateServe
     blob: bytes
+
+
+def ref_binds(
+    ref: str,
+    blob: bytes,
+    objects: Callable[[str], bytes] | None,
+    ref_size: int | None = None,
+) -> bool:
+    """True iff stored ref `ref` (of stored length `ref_size`, if given) names exactly `blob`.
+
+    Plain object: ref is sha256(blob) and the stored length is len(blob). ht-parts-v1: ref
+    is the SHA of the stored index object (length `ref_size`), whose verified `sha256`/`size`
+    are the whole-file SHA and len(blob). Without `objects` only plain refs bind.
+    """
+    if sha256_hex(blob) == ref:
+        return ref_size is None or ref_size == len(blob)
+    if objects is None:
+        return False
+    raw = objects(ref)
+    if sha256_hex(raw) != ref or (ref_size is not None and ref_size != len(raw)):
+        return False
+    try:
+        index = parse_index(raw)
+    except CorruptObjectError:
+        return False
+    return index is not None and (index.sha256, index.size) == (sha256_hex(blob), len(blob))
 
 
 def challenge_hash(ch: AuditChallenge) -> str:
@@ -375,6 +402,7 @@ def audit_island(
     hook: TraceHook | None = None,
     device: torch.device | str = "cpu",
     beacon_now: Callable[[], int] | None = None,
+    objects: Callable[[str], bytes] | None = None,
 ) -> tuple[Outcome, RoundResult]:
     """Full exact-layout replay from an independently checked carry lineage, never served prefix.
 
@@ -394,11 +422,11 @@ def audit_island(
     if job.anchor_age > 1 or not cfg.inner.H <= job.replay_step_budget <= 2 * cfg.inner.H:
         raise AuditInputError("ANCHOR_BUDGET_EXCEEDED")
     start = job.start_state
-    if sha256_hex(theta_blob) != start.state_object_sha256:
+    if not ref_binds(start.state_object_sha256, theta_blob, objects):
         raise AuditInputError("start object hash mismatch")
-    if sha256_hex(ef_blob) != job.ef_in.sha256 or len(ef_blob) != job.ef_in.size:
+    if not ref_binds(job.ef_in.sha256, ef_blob, objects, job.ef_in.size):
         raise AuditInputError("EF object hash/size mismatch")
-    if sha256_hex(v0_blob) != job.v0.sha256 or len(v0_blob) != job.v0.size:
+    if not ref_binds(job.v0.sha256, v0_blob, objects, job.v0.size):
         raise AuditInputError("v0 object hash/size mismatch")
     theta, supplied = unpack_state(theta_blob)
     ef, _ = unpack_state(ef_blob)
@@ -501,6 +529,7 @@ def audit_island_chain(
     cancel: CancelHook | None = None,
     device: torch.device | str = "cpu",
     beacon_now: Callable[[], int] | None = None,
+    objects: Callable[[str], bytes] | None = None,
 ) -> tuple[Outcome, RoundResult]:
     """At most one missing predecessor; both accepted jobs consume current reserved 2H.
 
@@ -534,6 +563,7 @@ def audit_island_chain(
             cancel=live,
             device=device,
             beacon_now=beacon_now,
+            objects=objects,
         )
         if out.result != "MATCH":
             raise AuditInputError("predecessor replay did not MATCH")
@@ -547,6 +577,7 @@ def audit_island_chain(
         cancel=live,
         device=device,
         beacon_now=beacon_now,
+        objects=objects,
     )
 
 

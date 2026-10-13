@@ -57,9 +57,10 @@ def evaluate(
     egress_gb: int,
     phase_cap: Decimal = PHASE_A_CAP_USD,
     reserve: Decimal = CLEANUP_RESERVE_USD,
+    global_cap: Decimal = GLOBAL_CAP_USD,
 ) -> dict[str, Any]:
     hours = Decimal(hard_deadline_seconds) / Decimal(3600)
-    effective_cap = min(GLOBAL_CAP_USD, snapshot0_credit)
+    effective_cap = min(global_cap, snapshot0_credit)
     debits = max(Decimal(0), snapshot0_credit - current_credit)
     per_host = [host_worst_case(o, hours, disk_gb, egress_gb) for o in offers]
     hardware = sum(per_host, Decimal(0))

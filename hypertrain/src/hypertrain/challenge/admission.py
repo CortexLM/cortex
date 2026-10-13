@@ -19,7 +19,14 @@ if TYPE_CHECKING:
 from hypertrain.beacon.core import BeaconRound
 from hypertrain.challenge.admission_store import AdmissionError, AdmissionRecord, AdmissionStore
 from hypertrain.challenge.trust_v2 import FundedStatus, nominal_q
-from hypertrain.data.store import Store
+from hypertrain.data.store import (
+    Store,
+    StoreError,
+    _stream,
+    get_large,
+    parse_index,
+    put_large,
+)
 from hypertrain.data.trial_assignment import trial_assignment_hash, trial_samples
 from hypertrain.gpu_ops.work_screen import IslandLaunch, screen_work
 from hypertrain.ledger.escrow_v2 import EscrowV2, digest
@@ -29,7 +36,9 @@ from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import Finalize
 from hypertrain.protocol.messages_v2 import (
+    PART_BYTES,
     AdmissionPolicyV2,
+    ArtifactRef,
     EscrowLock,
     IslandJobV1,
     JoinChallenge,
@@ -38,6 +47,45 @@ from hypertrain.protocol.messages_v2 import (
     WorkProof,
     WorkScreenV2,
 )
+
+
+def _logical(objects: Store, ref: ArtifactRef, code: str) -> tuple[str, int, bool]:
+    """(whole sha256, logical size, indexed) of `ref`; ref.size is the stored object length."""
+    try:
+        raw = objects.get(ref.sha256)
+        index = parse_index(raw)
+    except StoreError:
+        raise AdmissionError(code) from None
+    if len(raw) != ref.size:
+        raise AdmissionError(code)
+    return (ref.sha256, ref.size, False) if index is None else (index.sha256, index.size, True)
+
+
+def _verify_ref(objects: Store, ref: ArtifactRef, cap: int) -> tuple[str, int]:
+    """Caps bind each stored object (ref and every part); the logical size is bounded by
+    PartIndexV1 (<= MAX_PARTS * PART_BYTES). Parts stream through hashing, never assembled."""
+    if ref.size > cap:
+        raise AdmissionError("PROOF_OBJECT_LIMIT")
+    whole, size, indexed = _logical(objects, ref, "PROOF_OBJECT_HASH")
+    if indexed:
+        if PART_BYTES > cap:
+            raise AdmissionError("PROOF_OBJECT_LIMIT")
+        try:
+            _stream(ref.sha256, objects.get, lambda _part: None)  # part lengths + whole sha
+        except StoreError:
+            raise AdmissionError("PROOF_OBJECT_HASH") from None
+    return whole, size
+
+
+def _put_capped(objects: Store, data: bytes, cap: int) -> str:
+    """put_large with the policy cap bound to every stored object (plain, part, index)."""
+
+    def put(chunk: bytes) -> str:
+        if len(chunk) > cap:
+            raise AdmissionError("SHADOW_PUBLICATION_OBJECT_LIMIT")
+        return objects.put(chunk)
+
+    return put_large(data, put)
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,7 +337,11 @@ class Admission:
             strict=True,
         ):
             data = (directory / "published" / "rank-0" / name).read_bytes()
-            if self.objects.put(data) != ref.sha256:
+            logical = (sha256_hex(data), len(data))
+            if (
+                put_large(data, self.objects.put) != ref.sha256
+                or logical != _logical(self.objects, ref, "REFERENCE_OBJECT_HASH")[:2]
+            ):
                 raise AdmissionError("REFERENCE_OBJECT_HASH")
         with self.escrow.tx():
             current = self.store.db.execute(
@@ -404,8 +456,11 @@ class Admission:
                     or reference.leaves_root != summaries[0]["commitments"]["leaves_root"]
                     or reference.delta_hash != summaries[0]["commitments"]["delta_hash"]
                     or any(
-                        publication["files"]["rank-0/" + name]["sha256"] != ref.sha256
-                        or publication["files"]["rank-0/" + name]["bytes"] != ref.size
+                        (
+                            publication["files"]["rank-0/" + name]["sha256"],
+                            publication["files"]["rank-0/" + name]["bytes"],
+                        )
+                        != _logical(self.objects, ref, "SHADOW_RUNTIME_ACCEPTED_REFERENCE")[:2]
                         for name, ref in zip(
                             ("state.safetensors", "ef.safetensors", "delta.bin", "leaves.json"),
                             reference.artifact_refs,
@@ -534,9 +589,9 @@ class Admission:
             if path.is_file():
                 relative = str(path.relative_to(publication))
                 data = confined(publication, relative).read_bytes()
-                if len(data) > challenge.artifact_limits.max_object_bytes:
-                    raise AdmissionError("SHADOW_PUBLICATION_OBJECT_LIMIT")
-                files[relative] = {"sha256": self.objects.put(data), "bytes": len(data)}
+                _put_capped(self.objects, data, challenge.artifact_limits.max_object_bytes)
+                # Custody `files` keep whole-file sha/bytes; the store holds plain or indexed refs.
+                files[relative] = {"sha256": sha256_hex(data), "bytes": len(data)}
         if len(canonicalize(files)) > challenge.artifact_limits.max_chunk_manifest_bytes:
             raise AdmissionError("SHADOW_PUBLICATION_MANIFEST_LIMIT")
         if any(
@@ -556,7 +611,9 @@ class Admission:
             strict=True,
         ):
             data = path.read_bytes()
-            if sha256_hex(data) != ref.sha256 or len(data) != ref.size:
+            if (sha256_hex(data), len(data)) != _logical(
+                self.objects, ref, "SHADOW_PUBLICATION_PROOF"
+            )[:2]:
                 raise AdmissionError("SHADOW_PUBLICATION_PROOF")
         job_hash = self.objects.put(canonicalize(job.body()))
         publication_hash = self.objects.put(canonicalize(files))
@@ -684,11 +741,7 @@ class Admission:
                 )
                 return self.store.by_id(r.admission_id)
             for a in proof.artifact_refs:
-                if a.size > c.artifact_limits.max_object_bytes:
-                    raise AdmissionError("PROOF_OBJECT_LIMIT")
-                data = self.objects.get(a.sha256)
-                if len(data) != a.size or sha256_hex(data) != a.sha256:
-                    raise AdmissionError("PROOF_OBJECT_HASH")
+                _verify_ref(self.objects, a, c.artifact_limits.max_object_bytes)
             self.store.db.execute(
                 "UPDATE admissions_v2 SET "
                 "proof_digest=?,screen_json=?,screen_until=? WHERE admission_id=?",
@@ -764,7 +817,7 @@ class Admission:
                 return None
             expected = WorkProof.model_validate_json(row["reference_json"])
             challenge = JoinChallenge.model_validate_json(row["challenge"])
-            theta, _ = unpack_state(self.objects.get(expected.artifact_refs[0].sha256))
+            theta, _ = unpack_state(get_large(expected.artifact_refs[0].sha256, self.objects.get))
             final = Finalize(
                 w=row["trial_epoch"],
                 final_theta_hash_w1=state_hash(theta),
@@ -807,7 +860,7 @@ class Admission:
             from hypertrain.auditor.replay import unpack_state
             from hypertrain.trainer.compress import state_hash
 
-            theta, _ = unpack_state(self.objects.get(state_ref.sha256))
+            theta, _ = unpack_state(get_large(state_ref.sha256, self.objects.get))
             if (
                 final.w != row["trial_epoch"]
                 or final.included != [r.hotkey]

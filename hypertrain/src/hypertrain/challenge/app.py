@@ -32,6 +32,7 @@ from hypertrain.challenge.server_keys import ServerKeys
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.data.store import Store as ObjectStore
+from hypertrain.gpu_ops import role_dispatch
 from hypertrain.ledger import Params, vest_rounds_for_q
 from hypertrain.ledger.escrow_v2 import EscrowError
 from hypertrain.protocol.envelope import EnvelopeError
@@ -137,6 +138,7 @@ class Config:
     owner_hotkey: str | None
     params: Params
     netuid: int = 100
+    role_dispatch_file: Path | None = None
 
     @classmethod
     def from_env(cls) -> Config:
@@ -162,6 +164,7 @@ class Config:
                 vest_rounds=int(env("HYPERTRAIN_VEST_ROUNDS", str(vest_rounds_for_q("0.1")))),
             ),
             netuid=int(env("CHALLENGE_NETUID", "100")),
+            role_dispatch_file=path("HYPERTRAIN_ROLE_DISPATCH"),
         )
 
 
@@ -306,6 +309,11 @@ def create_app(
             config.owner_hotkey,
             verify_beacon,
             objects or LocalFSStore(config.state_dir / "objects"),
+            _role_launch=(
+                role_dispatch.load(config.role_dispatch_file)
+                if config.role_dispatch_file is not None
+                else None
+            ),
         )
     )
     store.clock = clock
