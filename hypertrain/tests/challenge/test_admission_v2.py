@@ -11,7 +11,7 @@ import pytest
 from hypertrain.beacon.core import FixtureBeacon
 from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.admission_store import AdmissionError
-from hypertrain.data.store import LocalFSStore
+from hypertrain.data.store import LocalFSStore, get_large
 from hypertrain.ledger.escrow_v2 import Settlement, digest
 from hypertrain.miner.admission import sign_join, sign_proof, sign_rotation
 from hypertrain.protocol.envelope_v2 import seal
@@ -605,7 +605,7 @@ def test_full_shadow_probation_and_graduation_when_funded(tmp_path: Path, trial_
         from hypertrain.auditor.replay import unpack_state
         from hypertrain.trainer.compress import state_hash
 
-        theta, _ = unpack_state(a.objects.get(proof.artifact_refs[0].sha256))
+        theta, _ = unpack_state(get_large(proof.artifact_refs[0].sha256, a.objects.get))
         final = Finalize(
             w=row["trial_epoch"],
             final_theta_hash_w1=state_hash(theta),

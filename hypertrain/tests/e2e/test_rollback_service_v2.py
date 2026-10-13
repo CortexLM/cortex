@@ -29,6 +29,7 @@ spec.loader.exec_module(fixtures)
 @pytest.fixture(scope="module")
 def active_network(tmp_path_factory):
     from hypertrain.auditor.replay import unpack_state
+    from hypertrain.data.store import get_large
     from hypertrain.data.trial_assignment import trial_samples
     from hypertrain.miner.island_launch import validate_artifacts
     from hypertrain.protocol.keys import Keypair
@@ -192,7 +193,7 @@ def active_network(tmp_path_factory):
                     )
                     assert response.status_code == 200, response.text
                     theta, _ = unpack_state(
-                        network.store.objects.get(proof.artifact_refs[0].sha256)
+                        get_large(proof.artifact_refs[0].sha256, network.store.objects.get)
                     )
                     final = Finalize(
                         w=row["trial_epoch"],

@@ -50,6 +50,7 @@ def test_od_carry_admission_reference_requires_real_full_state(od_carry_network)
 
 def test_actual_shadow_trial_does_not_mutate_production(network):
     from hypertrain.auditor.replay import unpack_state
+    from hypertrain.data.store import get_large
     from hypertrain.protocol.messages import Finalize
     from hypertrain.protocol.messages_v2 import EscrowLock, WorkProof, WorkScreenV2
     from hypertrain.trainer.compress import state_hash
@@ -120,7 +121,7 @@ def test_actual_shadow_trial_does_not_mutate_production(network):
         },
     )
     assert response.status_code == 200, response.text
-    theta, _ = unpack_state(network.store.objects.get(proof.artifact_refs[0].sha256))
+    theta, _ = unpack_state(get_large(proof.artifact_refs[0].sha256, network.store.objects.get))
     final = Finalize(
         w=row["trial_epoch"],
         final_theta_hash_w1=state_hash(theta),
@@ -1246,6 +1247,7 @@ def test_four_actual_funded_identities_graduate_shadow_only(network, monkeypatch
 def _graduate_four(network):
     """Execute all required signed references/proofs/finalizations, no authority shortcuts."""
     from hypertrain.auditor.replay import unpack_state
+    from hypertrain.data.store import get_large
     from hypertrain.data.trial_assignment import trial_samples
     from hypertrain.miner.island_launch import validate_artifacts
     from hypertrain.protocol.messages import Finalize
@@ -1318,12 +1320,12 @@ def _graduate_four(network):
                 row["trial_epoch"],
             )
             artifacts = validate_artifacts(job, directory / "published")
-            from hypertrain.protocol.hashing import sha256_hex
+            from hypertrain.gpu_ops.work_screen import artifact_ref
 
             assert [
-                sha256_hex(path.read_bytes())
+                artifact_ref(path)
                 for path in (artifacts.state, artifacts.ef, artifacts.delta, artifacts.leaves)
-            ] == [ref.sha256 for ref in proof.artifact_refs]
+            ] == proof.artifact_refs
             screen = WorkScreenV2(
                 evidence_kind="work-proof-v1",
                 admission_id=identity,
@@ -1343,7 +1345,9 @@ def _graduate_four(network):
                 },
             )
             assert response.status_code == 200, response.text
-            theta, _ = unpack_state(network.store.objects.get(proof.artifact_refs[0].sha256))
+            theta, _ = unpack_state(
+                get_large(proof.artifact_refs[0].sha256, network.store.objects.get)
+            )
             final = Finalize(
                 w=row["trial_epoch"],
                 final_theta_hash_w1=state_hash(theta),
@@ -1526,12 +1530,12 @@ def _od_verified_admissions(network, monkeypatch):
             assert (
                 list(artifacts.ranks) == WorkScreenV2.model_validate(screen_env.body).rank_results
             )
-            from hypertrain.protocol.hashing import sha256_hex
+            from hypertrain.gpu_ops.work_screen import artifact_ref
 
             assert [
-                sha256_hex(path.read_bytes())
+                artifact_ref(path)
                 for path in (artifacts.state, artifacts.ef, artifacts.delta, artifacts.leaves)
-            ] == [ref.sha256 for ref in proof.artifact_refs]
+            ] == proof.artifact_refs
             final_raw = network.store._db.execute(
                 "SELECT receipt FROM admission_reservations WHERE reservation=?",
                 (f"trial-final|{row['admission_id']}|{trial['epoch']}",),

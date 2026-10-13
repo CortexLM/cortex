@@ -6000,7 +6000,7 @@ class ChallengeStore:
             commit = CommitV2.model_validate(json.loads(found[0]["data"])["body"])
             if (model.leaves_root, model.delta_hash) != (commit.leaves_root, commit.delta_hash):
                 raise ChallengeError(422, "leaf root differs from commit")
-            leaves = json.loads(self.objects.get(model.artifact_refs[-1].sha256))
+            leaves = json.loads(get_large(model.artifact_refs[-1].sha256, self.objects.get))
             assert isinstance(leaves, list)
             parsed = [LeafPreimage.model_validate(p) for p in leaves]
             if (

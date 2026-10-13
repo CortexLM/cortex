@@ -14,6 +14,7 @@ import pytest
 import hypertrain.trainer  # noqa: F401
 from hypertrain.auditor.replay import AnchorCache, pack_state, unpack_state
 from hypertrain.data.trial_assignment import trial_samples
+from hypertrain.gpu_ops.work_screen import artifact_ref
 from hypertrain.miner.island_launch import IslandArtifacts
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -98,7 +99,8 @@ def _screen(job, directory, challenge, *, now_beacon, backend):
     refs = []
     for name, raw in values.items():
         (rank / name).write_bytes(raw)
-        refs.append({"sha256": sha256_hex(raw), "size": len(raw)})
+        ref = artifact_ref(rank / name)
+        refs.append({"sha256": ref.sha256, "size": ref.size})
     ranks = [
         RankWorkResult(
             rank=i,

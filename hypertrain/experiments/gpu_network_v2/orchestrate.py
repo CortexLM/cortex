@@ -40,6 +40,7 @@ from hypertrain.gpu_ops.launcher import Orchestrator, Reject
 from hypertrain.gpu_ops.network_qualification import LEGACY_TIMING, lifecycle_timing
 from hypertrain.gpu_ops.provider import Provider, list_rows, loopback, read_api_key
 from hypertrain.gpu_ops.remote import Ssh
+from hypertrain.gpu_ops.work_screen import artifact_ref
 
 
 class D2Job(BaseModel):
@@ -1538,7 +1539,7 @@ class NetworkRuntime:
                 (artifacts.state, artifacts.ef, artifacts.delta, artifacts.leaves),
                 strict=True,
             ):
-                if (ref.sha256, ref.size) != (fsha(path), path.stat().st_size):
+                if ref != artifact_ref(path):
                     raise Reject("completion_original_proof_object_changed")
         elif body["miner_commit"] is not None:
             raise Reject("completion_reference_claims_miner")
