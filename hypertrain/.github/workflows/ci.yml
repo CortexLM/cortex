@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 # Bound CPU kernel dispatch to AVX2, the dev-host golden baseline.
 # Cross-host bitwise agreement still requires the golden tests to pass.
 # ponytail: CI-only; move into setup_determinism if CPU replay must be portable.
@@ -30,6 +34,8 @@ jobs:
         with:
           version: "0.12.17"
           python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
       - run: uv sync --locked --all-extras --group dev
       - name: Native systemd regression (isolated root environment)
         shell: bash
@@ -95,7 +101,7 @@ jobs:
             test "$expected" = "$actual"
             printf 'native source %s %s\n' "$file" "$actual"
           done
-          sudo -n env UV_CACHE_DIR="$native/cache" UV_PYTHON_INSTALL_DIR="$native/python" \
+          sudo -n env UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}" UV_PYTHON_INSTALL_DIR="$native/python" \
             UV_PYTHON_PREFERENCE=only-managed UV_PROJECT_ENVIRONMENT="$native/venv" \
             "$native/uv" sync --project "$native/source" --locked --all-extras --group dev --python 3.12
           sudo -n env -u PYTHONPATH HOME="$native" TMPDIR="$native/tmp" \
@@ -157,6 +163,10 @@ jobs:
   test-slow:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [sim, e2e]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -165,8 +175,10 @@ jobs:
         with:
           version: "0.12.17"
           python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
       - run: uv sync --locked --all-extras --group dev
-      - run: uv run --frozen pytest -q --durations=25 tests/sim tests/e2e
+      - run: uv run --frozen pytest -q --durations=25 tests/${{ matrix.suite }}
 
   # The supervisor canary: server image, Cortex flags, no secrets then mounted secrets.
   canary:
