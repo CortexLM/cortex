@@ -311,3 +311,51 @@ def test_absence_never_confirmed_alerts(fake, tmp_path):
     rc, _, _ = run(fake, tmp_path)
     assert rc == 3
     assert json.loads((tmp_path / "ev/harness-result.json").read_text())["absent"] is False
+
+
+@pytest.fixture
+def mfu_globals():
+    saved = vast.IMAGE, vast.NUM_GPUS, vast.MIN_PCIE_BW
+    yield
+    vast.IMAGE, vast.NUM_GPUS, vast.MIN_PCIE_BW = saved
+
+
+def test_mfu_profile_picks_fast_pcie_host_and_passes_remote_env(fake, tmp_path, mfu_globals):
+    offers = fake.offers
+
+    def with_pcie() -> list[dict]:
+        fast = {"pcie_bw": 53.8, "cuda_max_good": 13.3}
+        out = [o | fast for o in offers()]
+        out[1] |= {"pcie_bw": 26.9}  # cheapest 2x offer: slow PCIe, must be skipped
+        return out
+
+    fake.offers = with_pcie
+    sent: list[str] = []
+
+    class Env(Scripted):
+        def run_remote(self):
+            sent.extend(self.a.remote_env)
+            return 0
+
+    rc, journal, _ = run(
+        fake, tmp_path, "--profile", "mfu", "--remote-env", "HT_MFU_MB=8", harness=Env
+    )
+    assert rc == 0 and sent == ["HT_MFU_MB=8"]
+    assert ("PUT", "/api/v0/asks/11/") in fake.calls  # the pcie_bw 53.8 offer
+    assert vast.IMAGE.startswith("docker.io/vastai/pytorch:")
+
+
+def test_mfu_eligibility_floors(mfu_globals):
+    vast.MIN_PCIE_BW = vast.Decimal("50")
+    o = {**Fake().offers()[1], "pcie_bw": 53.8, "cuda_max_good": 13.3}
+    assert vast.eligible(o)
+    assert not vast.eligible({**o, "pcie_bw": 26.9})
+    assert not vast.eligible({**o, "cuda_max_good": 13.0})
+    assert not vast.eligible({k: v for k, v in o.items() if k != "pcie_bw"})
+    vast.MIN_PCIE_BW = None
+    assert vast.eligible({k: v for k, v in o.items() if k not in ("pcie_bw", "cuda_max_good")})
+
+
+def test_remote_env_must_be_key_value(tmp_path):
+    with pytest.raises(SystemExit):
+        vast.parse(["--key-file", "k", "--max-usd", "1", "--max-minutes", "1", "--remote-env", "X"])
