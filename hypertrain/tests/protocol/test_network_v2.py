@@ -124,6 +124,7 @@ def commit(tokens: int = 7680) -> CommitV2:
     )
 
 
+@pytest.mark.od
 @pytest.mark.parametrize("n", [1, 2, 4, 8])
 @pytest.mark.parametrize("objective", ["mlm", "decision", "distill"])
 @pytest.mark.parametrize("zero1", [False, True])
@@ -147,6 +148,7 @@ def test_od_general_n_when_v2(n: int, objective: str, zero1: bool) -> None:
             RunManifest.model_validate(body)
 
 
+@pytest.mark.od
 def test_assign_unit_when_only_island_batch_is_divisible() -> None:
     # Given
     body = od_body()

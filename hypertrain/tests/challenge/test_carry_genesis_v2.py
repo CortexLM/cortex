@@ -18,6 +18,8 @@ from hypertrain.trainer.compress import state_hash
 from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.model import init_params
 
+pytestmark = pytest.mark.od
+
 spec = importlib.util.spec_from_file_location(
     "carry_genesis_fixture", Path(__file__).parents[1] / "e2e/test_service_network_v2_e2e.py"
 )

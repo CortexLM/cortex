@@ -27,20 +27,20 @@ def od_body() -> dict[str, Any]:
     b = copy.deepcopy(example_manifest().body())
     b["model"] |= {
         "arch": "od-encoder",
-        "n_layers": 2,
-        "d_model": 64,
-        "n_heads": 4,
-        "n_kv_heads": 4,
-        "d_ff": 256,
-        "vocab": 259,
-        "seq_len": 64,
-        "param_count": 187_140,
+        "n_layers": 12,
+        "d_model": 768,
+        "n_heads": 12,
+        "n_kv_heads": 12,
+        "d_ff": 3072,
+        "vocab": 50432,
+        "seq_len": 1024,
+        "param_count": 123_753_984,
         "compute_dtype": "bf16",
         "capacity_factor": f32hex(1.0),
         "aux_loss_coef": f32hex(0.0),
         "od": {
-            "preset": "od-tiny",
-            "head_layers": 1,
+            "preset": "od-base",
+            "head_layers": 2,
             "objective": "mlm",
             "mask_ratio": f32hex(0.3),
             "mask_seed": 7,
@@ -121,8 +121,8 @@ def test_unit_root_without_unit_rejected() -> None:
         lambda b: b["reference_spec"].update(profile="od-bf16-det-v1"),
         lambda b: b["reference_spec"].pop("profile"),
         lambda b: b["reference_spec"]["layout"].update(zero1=True),
-        lambda b: b["model"].update(vocab=260),
-        lambda b: b["model"]["od"].update(head_layers=2),
+        lambda b: b["model"].update(vocab=50433),
+        lambda b: b["model"]["od"].update(head_layers=1),
         lambda b: b["model"]["od"].update(objective="decision"),
         lambda b: b["model"]["od"].update(tokenizer_offset=4),
     ],
@@ -143,7 +143,7 @@ def test_decision_record_len_pins_seq_len() -> None:
     b = od_body()
     b["model"]["od"] |= {"objective": "decision", "record": rec}
     b["model"]["seq_len"] = 1835
-    # d_model etc. still od-tiny; only seq_len/record coupling is under test
+    # d_model etc. still od-base; only seq_len/record coupling is under test
     RunManifest.model_validate(b)
     b["model"]["seq_len"] = 1834
     with pytest.raises(ValidationError):

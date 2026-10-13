@@ -499,6 +499,7 @@ def test_decoder_runtime_consumer_rejects_wrong_trial_without_dispatch(tmp_path,
     )
 
 
+@pytest.mark.od
 def test_decoder_probe_consumer_real_routes_receipt_and_debit_metadata(tmp_path, monkeypatch):
     """One real reference/proof transition; metadata oracle, not independent gradients."""
     from types import SimpleNamespace
@@ -1328,6 +1329,7 @@ def test_endpoint_requires_explicit_https_without_ambient_credentials(tmp_path, 
         driver.Settings.model_validate(body)
 
 
+@pytest.mark.od
 def test_digest_authority_rejects_before_service_write(tmp_path, signed_package):
     directory, _, _, _, _, _ = signed_package
     cfg = settings(tmp_path).model_copy(update={"snapshot": directory})
@@ -1336,6 +1338,7 @@ def test_digest_authority_rejects_before_service_write(tmp_path, signed_package)
     assert not cfg.evidence.exists()
 
 
+@pytest.mark.od
 def test_wrong_role_rejects_before_live_write(tmp_path, monkeypatch, signed_package):
     directory, digest, roles, template, _, _ = signed_package
     cfg = settings(tmp_path).model_copy(update={"snapshot": directory, "snapshot_digest": digest})
@@ -1409,6 +1412,7 @@ def test_precancel_never_launches_child(tmp_path, monkeypatch):
     assert not (tmp_path / "none.log").exists()
 
 
+@pytest.mark.od
 def test_missing_service_adapter_rejects_before_evidence(tmp_path, monkeypatch, signed_package):
     directory, digest, _, _, _, _ = signed_package
     monkeypatch.setattr(driver, "durable_destination", lambda path: True)
@@ -1583,6 +1587,7 @@ def test_rescue_copy_error_preserves_original_workload_exception(tmp_path, monke
     assert result["errors"] and not index["export_complete"]
 
 
+@pytest.mark.od
 @pytest.mark.parametrize("fault", ["offset", "beacon", "valid"])
 def test_prepare_clock_probe_rejects_before_any_output(
     tmp_path, monkeypatch, fault, signed_package

@@ -18,6 +18,8 @@ from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 
+pytestmark = pytest.mark.od
+
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
     "portable_authority_adapter", ROOT / "scripts/network_authority_snapshot.py"

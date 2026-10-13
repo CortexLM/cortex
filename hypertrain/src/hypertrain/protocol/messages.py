@@ -50,7 +50,6 @@ def _omit_none(v: object) -> bool:
 
 OD_PRESETS: dict[str, tuple[int, int, int, int, int]] = {
     # preset: (d_model, n_layers, n_heads, head_layers, vocab)
-    "od-tiny": (64, 2, 4, 1, 259),
     "od-base": (768, 12, 12, 2, 50432),
     "od-large": (1024, 24, 16, 4, 50432),
 }
@@ -70,7 +69,7 @@ class ODRecordSpec(_M):
 
 
 class ODSpec(_M):
-    preset: Literal["od-tiny", "od-base", "od-large"]
+    preset: Literal["od-base", "od-large"]
     head_layers: Pos
     objective: Literal["mlm", "distill", "decision"]
     mask_ratio: F32

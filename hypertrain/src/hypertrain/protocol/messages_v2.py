@@ -151,10 +151,7 @@ class TrainingManifestV2(RunManifest):
                     raise ValueError("OD record required iff objective is not MLM")
                 if od.record is not None and ms.seq_len != od.record.record_len() - 1:
                     raise ValueError("OD record length must equal seq_len+1")
-                if od.objective == "mlm" and (
-                    (od.preset == "od-tiny" and ms.seq_len > 64)
-                    or (od.preset != "od-tiny" and ms.seq_len != 1024)
-                ):
+                if od.objective == "mlm" and ms.seq_len != 1024:
                     raise ValueError("OD MLM sequence length differs from pinned preset")
                 if ds.sample_format != "u16[seq_len+1] token ids":
                     raise ValueError("OD requires u16 records")

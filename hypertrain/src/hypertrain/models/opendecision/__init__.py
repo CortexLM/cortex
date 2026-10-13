@@ -88,9 +88,8 @@ def check_manifest(m: RunManifest | RunManifestV2) -> None:
     if ms.param_count != want:
         raise ValueError(f"param_count {ms.param_count} != {want} trainable for {od.objective}")
     n = PRESETS[od.preset].max_len
-    # A6 pins N = max_len (1024) for real presets; od-tiny (tests only) may use any N <= max_len.
-    tiny_ok = od.preset == "od-tiny" and ms.seq_len <= n
-    if od.objective == "mlm" and ms.seq_len != n and not tiny_ok:
+    # A6 pins N = max_len (1024).
+    if od.objective == "mlm" and ms.seq_len != n:
         raise ValueError(f"mlm seq_len must be {n} for {od.preset} (A6)")
 
 

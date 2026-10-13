@@ -39,6 +39,7 @@ def od_carry_network(tmp_path, request, monkeypatch):
     yield from fixtures.network.__wrapped__(tmp_path, request)
 
 
+@pytest.mark.od
 @pytest.mark.parametrize("od_carry_network", ["mlm", "decision", "distill"], indirect=True)
 def test_od_carry_admission_reference_requires_real_full_state(od_carry_network):
     """First production prerequisite: genuine corresponding-manifest graduation work."""
@@ -145,6 +146,7 @@ def test_actual_shadow_trial_does_not_mutate_production(network):
     assert network.store._services(network.manifest.run_id())[0].balances().issued == 40000
 
 
+@pytest.mark.od
 @pytest.mark.parametrize("network", ["mlm", "decision", "distill"], indirect=True)
 def test_od_two_rank_signed_service_reference_and_proof(network):
     # All OD objectives use the real signed admission/reference/proof/finality routes,
@@ -1378,6 +1380,7 @@ def _graduate_four(network):
     assert network.store._services(network.manifest.run_id())[0].balances().issued == 40000
 
 
+@pytest.mark.od
 @pytest.mark.parametrize("od_carry_network", ["mlm", "decision", "distill"], indirect=True)
 def test_od_four_active_actual_client_two_round_carry_checkpoint(od_carry_network, monkeypatch):
     """Production service path with same-manifest admission and actual HTTP/TLS miners."""
@@ -1865,6 +1868,7 @@ def _od_production_rounds(network, *, after_audits=None):
     assert verify_network_checkpoint(checkpoint, fixtures.COORD.ss58) == []
 
 
+@pytest.mark.od
 @pytest.mark.parametrize("od_carry_network", ["mlm"], indirect=True)
 def test_public_watch_layer_over_actual_fastapi_tls(od_carry_network, monkeypatch):
     """Funded original audits; real public CLI/TLS routes and committed long-poll wake."""

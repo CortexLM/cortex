@@ -66,7 +66,7 @@ def od_cfg() -> TrainConfig:
 def test_config_fills_od_fields(od_cfg: TrainConfig) -> None:
     m = od_cfg.model
     assert (m.arch, m.profile) == ("od-encoder", "od-bf16-det-eager-v1")
-    assert m.od is not None and m.od.preset == "od-tiny"
+    assert m.od is not None and m.od.preset == "od-base"
     hash(m)  # frozen ODSpec keeps ModelConfig hashable for the adapter cache
 
 

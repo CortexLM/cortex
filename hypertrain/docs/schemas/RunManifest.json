@@ -680,7 +680,6 @@
         },
         "preset": {
           "enum": [
-            "od-tiny",
             "od-base",
             "od-large"
           ],

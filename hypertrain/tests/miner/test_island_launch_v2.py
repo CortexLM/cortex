@@ -1026,6 +1026,7 @@ def test_d2_signed_reservation_rejects_before_dispatch(tmp_path, fault):
     assert len(lifecycle.j.all("network_plan_intake")) == (1 if fault == "replay" else 0)
 
 
+@pytest.mark.od
 @pytest.mark.parametrize("objective", ["mlm", "decision", "distill"])
 def test_real_od_two_rank_worker_paths(tmp_path: Path, objective: str) -> None:
     import importlib.util

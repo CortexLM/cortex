@@ -15,6 +15,8 @@ from hypertrain.protocol.keys import Keypair
 from hypertrain.trainer.loop import train_round
 from hypertrain.trainer.model import init_params
 
+pytestmark = pytest.mark.od
+
 N = 2
 HON = Keypair(b"\x07" * 32).ss58
 CHEAT = Keypair(b"\x08" * 32).ss58

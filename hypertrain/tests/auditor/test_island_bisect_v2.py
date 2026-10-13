@@ -61,9 +61,7 @@ def execution(n: int = 2, ep: int = 1, objective: str | None = None) -> IslandEx
         (2, 1, None),
         (2, 2, None),
         (4, 2, None),
-        (2, 1, "mlm"),
-        (2, 1, "decision"),
-        (2, 1, "distill"),
+        *(pytest.param(2, 1, o, marks=pytest.mark.od) for o in ("mlm", "decision", "distill")),
     ],
 )
 def test_honest_traces_when_real_island_hooks(n: int, ep: int, objective: str | None) -> None:

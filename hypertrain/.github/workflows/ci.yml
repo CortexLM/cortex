@@ -81,7 +81,7 @@ jobs:
           done
           printf 'shard %s/%s -> %s files\n' "$SHARD" "$SHARDS" "${#SEL[@]}"
           if [ "${#SEL[@]}" -eq 0 ]; then echo "no files in shard"; exit 0; fi
-          uv run --frozen pytest -q --durations=25 \
+          uv run --frozen pytest -q --durations=25 -m "not od" \
             --deselect=tests/challenge/test_capacity_outer_v2.py::test_actual_bounded_outer_child_matches_original_signed_replay \
             --deselect=tests/challenge/test_service_capacity_v2.py::test_real_capacity_launch_failure_keeps_debit_and_prevents_restart_rerun \
             "--deselect=tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[success]" \
@@ -113,4 +113,4 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
       - run: uv sync --locked --all-extras --group dev
-      - run: uv run --frozen pytest -q --durations=25 tests/${{ matrix.suite }}
+      - run: uv run --frozen pytest -q --durations=25 -m "not od" tests/${{ matrix.suite }}

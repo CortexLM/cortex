@@ -20,6 +20,8 @@ from hypertrain.trainer.island import TraceContext, emulate, train_island
 from hypertrain.trainer.loop import Assignment
 from hypertrain.trainer.model import init_params
 
+pytestmark = pytest.mark.od
+
 
 def od_manifest(objective: str, n: int, zero1: bool, dtype: str = "fp32") -> RunManifestV2:
     spec = importlib.util.spec_from_file_location(

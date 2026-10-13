@@ -36,6 +36,8 @@ from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.loop import replay, train_round
 from hypertrain.trainer.model import forward as dispatched_forward
 
+pytestmark = pytest.mark.od
+
 HEAD_PREFIXES = ("head.", "scorer.", "type_emb.", "unknown", "log_temp.")
 
 

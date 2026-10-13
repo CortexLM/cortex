@@ -1039,6 +1039,7 @@ def test_cleanup_absence_attempt_never_inherits_historical_success(
         assert outcome["provider_after"] is None and outcome["proof_status"] == "CENSORED"
 
 
+@pytest.mark.od
 def test_provider_fix_pinned_kind_version_and_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1140,6 +1141,7 @@ def test_provider_fix_pinned_kind_version_and_fail_closed(
         module.require_capped_node(journal, "missing-marker")
 
 
+@pytest.mark.od
 def test_shim_raw_bytes_exit_and_pinned_kind_empty_preflight(tmp_path: Path) -> None:
     import json
     import os
@@ -1239,6 +1241,7 @@ def test_shim_raw_bytes_exit_and_pinned_kind_empty_preflight(tmp_path: Path) -> 
     assert not any(c[0] in {"run", "create", "start"} for c in calls)
 
 
+@pytest.mark.od
 @pytest.mark.parametrize("kernel_mode", ["valid", "wrong", "missing", "foreign", "forged"])
 def test_pinned_kind_contract_through_capped_start(tmp_path: Path, kernel_mode: str) -> None:
     import json

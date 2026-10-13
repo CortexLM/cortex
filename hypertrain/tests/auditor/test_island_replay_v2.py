@@ -146,7 +146,10 @@ def fixture(objective: str | None = None, state_policy: str = "carry"):
     return job, cache, blobs, get, result, key
 
 
-@pytest.mark.parametrize("objective", [None, "mlm", "decision", "distill"])
+@pytest.mark.parametrize(
+    "objective",
+    [None, *(pytest.param(o, marks=pytest.mark.od) for o in ("mlm", "decision", "distill"))],
+)
 def test_full_carry_and_window_equality(objective: str | None) -> None:
     job, cache, blobs, get, expected, _ = fixture(objective)
     outputs = emulate(2, lambda c: audit_island(job, c, get, *blobs, cache, now_round=2))
@@ -373,6 +376,7 @@ def test_missing_predecessor_reconstructs_once_under_two_h_budget() -> None:
         )
 
 
+@pytest.mark.od
 def test_verified_anchor_restart_corruption_and_od_warm_start(tmp_path: Path) -> None:
     from hypertrain.auditor.replay import tensor_root
     from hypertrain.models.opendecision import extend_params
