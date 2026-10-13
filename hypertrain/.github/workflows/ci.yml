@@ -136,7 +136,9 @@ jobs:
         run: >-
           grep -m1 'model name' /proc/cpuinfo &&
           uv run --frozen python -c "import hypertrain.trainer, torch;
-          print(torch.backends.cpu.get_cpu_capability(), torch.get_num_threads())"
+          print(torch.backends.cpu.get_cpu_capability(), torch.get_num_threads());
+          assert torch.backends.cpu.get_cpu_capability() == 'AVX2';
+          assert torch.get_num_threads() == 1"
       - name: Remaining quality gate (normal runner user)
         run: >-
           bash scripts/check.sh --ignore=tests/sim --ignore=tests/e2e
