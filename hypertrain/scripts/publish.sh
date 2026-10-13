@@ -119,7 +119,6 @@ public_inline={
  "tests/miner/test_island_launch_v2.py": ("\"experiment\": ","hypertrain-network-v2"),
 }
 public_entropy={
- "docs/RESULTS.md": {"f360080129ca48b776b8f50b61bfe90a3a7e5ee84eb8e379fefcf33201c67528"},
  "docs/network-v2.md": {"f360080129ca48b776b8f50b61bfe90a3a7e5ee84eb8e379fefcf33201c67528","3bf8752c74172542a19ec8f387d79c16821bd42cba7335fda8b5bb365211019f"},
  "scripts/relay_kind_smoke.py": {"9af042788b3249f7b1d329581bfe135d1a625af872d71ea22e487b3491f3839b"},
  "tests/gpu_ops/test_network_admit_cli.py": {"451abbd0ff08a09966c08c027ca7a49c24182fbc1c5e7f5ad33ab1ef72247158"},

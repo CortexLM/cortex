@@ -253,7 +253,6 @@ def test_scanner_exact_public_entropy_never_exempts_other_values(tmp_path: Path)
                 contexts.append((relative, line, token))
     qualification = "qualification-usd50-20261009T181257Z/" + "NEXT30-008-RESULT-VERIFY"
     expected = {
-        ("docs/RESULTS.md", qualification),
         ("docs/network-v2.md", qualification),
         (
             "docs/network-v2.md",
