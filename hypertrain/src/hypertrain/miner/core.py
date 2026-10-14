@@ -49,6 +49,28 @@ from hypertrain.trainer.optim import OptState, init_state
 
 log = logging.getLogger("hypertrain.miner")
 EXP_ROUNDS = 2**40  # envelope expiry far beyond any round; replay protection is per (w, type)
+# Backoff between attempts of an idempotent request (object PUT/GET, API GET) that hit a
+# transport error or a 5xx; the last failure propagates. ~31 s worst case per request.
+RETRY_DELAYS: tuple[float, ...] = (1, 2, 4, 8, 16)
+FETCH_WORKERS = 16  # concurrent 1 MiB part GETs per job input (bounded window, ordered sink)
+
+
+def _retrying[T](what: str, fn: Callable[[], T]) -> T:
+    """Run an idempotent request, retrying transport errors and 5xx responses only."""
+    for delay in (*RETRY_DELAYS, None):
+        try:
+            return fn()
+        except (httpx.TransportError, httpx.HTTPStatusError, ChallengeHTTPError) as error:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            status = getattr(error, "status", status)
+            if delay is None or (status is not None and status < 500):
+                raise
+            # Type + status only: request URLs can carry the proxy token.
+            log.warning(
+                "%s failed (%s %s); retry in %ss", what, type(error).__name__, status, delay
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 class MinerError(RuntimeError):
@@ -219,6 +241,11 @@ class Api:
         self.c, self.base = client, base.rstrip("/")
 
     def call(self, method: str, path: str, **kw: Any) -> Any:
+        if method == "GET":  # reads are idempotent; signed POSTs are never replayed here
+            return _retrying("GET " + path, lambda: self._call(method, path, **kw))
+        return self._call(method, path, **kw)
+
+    def _call(self, method: str, path: str, **kw: Any) -> Any:
         r = self.c.request(method, self.base + path, timeout=120, **kw)
         if r.status_code >= 400:
             try:
@@ -819,20 +846,26 @@ class NetworkMiner:
         return put
 
     def _put_object(self, data: bytes) -> str:
-        """One signed v2 object PUT (plain object, part or part index; each <= 1 MiB)."""
+        """One signed v2 object PUT (plain object, part or part index; each <= 1 MiB).
+
+        Bytes body, so httpx sends Content-Length (proxies reject chunked uploads); the PUT is
+        content-addressed, so transport errors and 5xx are retried."""
         digest = sha256_hex(data)
-        response = self.api.c.put(
-            self.api.base + self.url + "/objects/" + digest,
-            content=iter([data]),  # one-shot body: httpx keeps no request.content copy
-            headers={
-                "X-Hotkey": self.kp.ss58,
-                "X-Object-Signature": self.kp.sign(
-                    f"hypertrain/object/2|{self.run_id}|{digest}".encode()
-                ).hex(),
-            },
-        )
-        response.raise_for_status()
-        return digest
+        headers = {
+            "X-Hotkey": self.kp.ss58,
+            "X-Object-Signature": self.kp.sign(
+                f"hypertrain/object/2|{self.run_id}|{digest}".encode()
+            ).hex(),
+        }
+
+        def put() -> str:
+            response = self.api.c.put(
+                self.api.base + self.url + "/objects/" + digest, content=data, headers=headers
+            )
+            response.raise_for_status()
+            return digest
+
+        return _retrying("PUT object " + digest, put)
 
     def _fetch_inputs(self, job: IslandJobV1, objects: Mapping[str, str], directory: Path) -> None:
         """objects: name -> stored ref (plain or ht-parts-v1 index); the job pins whole SHAs.
@@ -852,7 +885,7 @@ class NetworkMiner:
         for name, digest in objects.items():
             dest = directory / job.object_paths[name]
             try:
-                fetch_to(digest, self._get_object, dest)
+                fetch_to(digest, self._get_object, dest, workers=FETCH_WORKERS)
             except StoreError as e:
                 raise MinerError(f"job input {name} corrupt: {e}") from None
             if name in whole:
@@ -867,21 +900,26 @@ class NetworkMiner:
         from hypertrain.protocol.messages_v2 import MAX_MANIFEST_BYTES, PART_BYTES
 
         limit = max(PART_BYTES, MAX_MANIFEST_BYTES)
-        with self.api.c.stream(
-            "GET",
-            self.api.base + self.url + "/objects/" + digest,
-            headers={"Accept-Encoding": "identity"},
-        ) as response:
-            response.raise_for_status()
-            # httpx would decode gzip/br before the bound check; a hostile server ignores headers.
-            if response.headers.get("Content-Encoding", "identity").lower() != "identity":
-                raise MinerError("job input object has a non-identity content encoding")
-            body = bytearray()
-            for chunk in response.iter_bytes(chunk_size=64 << 10):
-                if len(body) + len(chunk) > limit:
-                    raise MinerError("job input object exceeds the 1 MiB part bound")
-                body.extend(chunk)
-            return bytes(body)
+
+        def get() -> bytes:
+            with self.api.c.stream(
+                "GET",
+                self.api.base + self.url + "/objects/" + digest,
+                headers={"Accept-Encoding": "identity"},
+            ) as response:
+                response.raise_for_status()
+                # httpx would decode gzip/br before the bound check; a hostile server ignores
+                # headers.
+                if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                    raise MinerError("job input object has a non-identity content encoding")
+                body = bytearray()
+                for chunk in response.iter_bytes(chunk_size=64 << 10):
+                    if len(body) + len(chunk) > limit:
+                        raise MinerError("job input object exceeds the 1 MiB part bound")
+                    body.extend(chunk)
+                return bytes(body)
+
+        return _retrying("GET object " + digest, get)
 
     def proof(self, document: Path) -> dict[str, Any]:
         from hypertrain.protocol.envelope_v2 import load_json

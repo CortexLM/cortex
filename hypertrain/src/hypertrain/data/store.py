@@ -15,7 +15,10 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Callable, Mapping
+from collections import deque
+from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from itertools import islice
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import parse_qsl, quote, urlsplit
@@ -344,15 +347,33 @@ def put_large(data: bytes, put: Put) -> str:
     return _publish(chunks, put)
 
 
-def _stream(sha: str, get: Get, sink: Callable[[bytes], object]) -> None:
+def _parts(get: Get, shas: list[str], workers: int) -> Iterator[bytes]:
+    """Verified parts in index order; workers > 1 prefetches a bounded window concurrently
+    (at most 4 * workers parts = 4 * workers MiB in flight)."""
+    if workers <= 1:
+        yield from (_get(get, s) for s in shas)
+        return
+    pending = iter(shas)
+    with ThreadPoolExecutor(workers) as pool:
+        try:
+            inflight = deque(pool.submit(_get, get, s) for s in islice(pending, 4 * workers))
+            while inflight:
+                part = inflight.popleft().result()
+                for s in islice(pending, 1):
+                    inflight.append(pool.submit(_get, get, s))
+                yield part
+        finally:  # error/cancel/early close: drop queued GETs instead of draining them
+            pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _stream(sha: str, get: Get, sink: Callable[[bytes], object], workers: int = 1) -> None:
     raw = _get(get, sha)
     index = parse_index(raw)
     if index is None:
         sink(raw)
         return
     whole, size = hashlib.sha256(), 0
-    for i, part_sha in enumerate(index.parts):
-        part = _get(get, part_sha)
+    for i, part in enumerate(_parts(get, list(index.parts), workers)):
         want = PART_BYTES if i < len(index.parts) - 1 else index.size - size
         if len(part) != want:
             raise CorruptObjectError(f"part {i} has length {len(part)}, expected {want}")
@@ -369,13 +390,16 @@ def get_large(sha: str, get: Get) -> bytes:
     return bytes(out)
 
 
-def fetch_to(sha: str, get: Get, dest: Path) -> None:
-    """Verified reassembly into `dest` via same-directory temp + atomic replace."""
+def fetch_to(sha: str, get: Get, dest: Path, workers: int = 1) -> None:
+    """Verified reassembly into `dest` via same-directory temp + atomic replace.
+
+    With workers > 1 parts are fetched concurrently (written in order), so `get` must be
+    thread-safe."""
     dest = Path(dest)
     fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".part")
     try:
         with os.fdopen(fd, "wb") as f:
-            _stream(sha, get, f.write)
+            _stream(sha, get, f.write, workers)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, dest)

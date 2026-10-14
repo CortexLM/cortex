@@ -326,3 +326,83 @@ def test_object_get_rejects_compressed_response_before_decoding(tmp_path: Path):
     with pytest.raises(MinerError, match="content encoding"):
         miner._get_object("ab" * 32)
     assert seen == ["identity"] and served == []
+
+
+def test_object_put_sends_content_length_and_retries_5xx_and_transport(tmp_path: Path, monkeypatch):
+    import hypertrain.miner.core as core
+
+    # Given: a proxy that drops the first PUT, answers 503 to the second, then stores.
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0, 0))
+    miner, store, puts = _parts_miner(tmp_path)
+    route, seen = miner.api.c._transport.handler, []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            (request.headers.get("Content-Length"), request.headers.get("Transfer-Encoding"))
+        )
+        if len(seen) == 1:
+            raise httpx.ConnectError("reset", request=request)
+        return httpx.Response(503) if len(seen) == 2 else route(request)
+
+    miner.api.c._transport.handler = flaky
+    # When: one object PUT.
+    digest = miner._put_object(b"payload")
+    # Then: stored after two retries, every attempt a sized (non-chunked) body.
+    assert store.get(digest) == b"payload" and len(puts) == 1
+    assert seen == [("7", None)] * 3
+
+
+def test_object_put_does_not_retry_4xx_and_gives_up_after_bounded_5xx(tmp_path: Path, monkeypatch):
+    import hypertrain.miner.core as core
+
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0))
+    miner, _, _ = _parts_miner(tmp_path)
+    calls = []
+
+    def answer(status: int):
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(status)
+            return httpx.Response(status)
+
+        return handler
+
+    # 403: refused at once.
+    miner.api.c._transport.handler = answer(403)
+    with pytest.raises(httpx.HTTPStatusError):
+        miner._put_object(b"x")
+    assert calls == [403]
+    # 500 forever: 1 attempt + len(RETRY_DELAYS) retries, then the error propagates.
+    calls.clear()
+    miner.api.c._transport.handler = answer(500)
+    with pytest.raises(httpx.HTTPStatusError):
+        miner._put_object(b"x")
+    assert calls == [500] * 3
+
+
+def test_object_get_and_api_get_retry_5xx_but_signed_post_is_never_replayed(
+    tmp_path: Path, monkeypatch
+):
+    import hypertrain.miner.core as core
+    from hypertrain.miner.core import ChallengeHTTPError
+
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0, 0))
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"part")
+    route, hits = miner.api.c._transport.handler, []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        hits.append(request.method)
+        if len(hits) % 2 == 1:
+            return httpx.Response(502, json={"detail": "bad gateway"})
+        if request.method == "POST":
+            return httpx.Response(200, json={"ok": True})
+        return route(request)
+
+    miner.api.c._transport.handler = flaky
+    assert miner._get_object(sha) == b"part" and hits == ["GET", "GET"]
+    hits.clear()
+    assert "manifest_envelope" in miner.api.call("GET", "/v2/runs/x") and len(hits) == 2
+    hits.clear()
+    with pytest.raises(ChallengeHTTPError, match="502"):
+        miner.api.call("POST", "/v2/runs/x/commit", json={})
+    assert hits == ["POST"]
