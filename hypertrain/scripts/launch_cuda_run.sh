@@ -30,7 +30,9 @@ MINER_SRC=${MINER_SRC:-/data/pydeps/hypertrain}
 REPO=${REPO:-$(cd "$(dirname "$0")/.." && pwd)}
 FIX_BASE=${FIX_BASE:-1a8f91e}
 MINER_SSH=${MINER_SSH:-}
-MINER_KEY=${MINER_KEY:-$RD/vast-m5/id_ed25519}
+MINER_KEY=${MINER_KEY:-}
+# Signed floor: cutoff >= admitted + qualification 9600 s + hard margin 1800 s (orchestrate.py).
+WINDOW=${WINDOW:-11460}
 HOTKEY_SEED=${HOTKEY_SEED:-$RD/keys/uid247-hotkey.seed}
 COORD_KEY=${COORD_KEY:-/root/.config/cortex-secrets/s100-master/challenges/hypertrain/coord.key}
 PROXY_TOKEN=${PROXY_TOKEN:-/root/.config/cortex-secrets/od-large-e2e-miners/proxy.token}
@@ -117,10 +119,9 @@ grep -q '_retrying("PUT object' "$BUNDLE/hypertrain/miner/core.py" || die "bundl
 grep -q 'def _parts' "$BUNDLE/hypertrain/data/store.py" || die "bundle lacks the parallel part fetch"
 log "PREFLIGHT_OK run=$RID image=$IMAGE job_deadline=$JD backend=$BACKEND miner=${MINER_SSH:-unset}"
 if [ "$MODE" = --dry-run ]; then log "DRY_RUN_DONE no provider call, nothing spent"; exit 0; fi
-[ -n "$MINER_SSH" ] || die 'MINER_SSH="host port" of the rented 8x5090 miner host is required'
 
 if [ ! -e "$STATE/window" ]; then
-  A=$(date +%s); CUT=$((A + 13200)); [ "$CUT" -le "$JD" ] || CUT=$JD
+  A=$(date +%s); CUT=$((A + WINDOW)); [ "$CUT" -le "$JD" ] || CUT=$JD
   echo "$A $CUT" > "$STATE/window"
 fi
 read -r A CUT < "$STATE/window"
@@ -143,21 +144,23 @@ COMMON=(--base "$PREP/base/private/review-base.json" --parent-pid "$$" --owner-s
   --run-id "$RID" --provider-key-file "$RD/keys/vast.key" --run-dir "$RUN"
   --source-message "Owner order 2026-10-14: 8x RTX 5090 Vast CUDA run, admission to mining authorized"
   --live --cutoff-unix "$CUT" --admitted-unix "$A")
+LIVE=$PREP/live-$TAG
 if stage admit; then
   [ ! -e "$RUN/journal.jsonl" ] || die "$RUN already holds a transaction of another parent: use a new TAG"
   [ $((A + 9600 + 1800)) -le "$CUT" ] || die "window too short A=$A CUT=$CUT (job deadline $JD)"
-  "$PY" "$T/prepare_record.py" "${COMMON[@]}" --action admit --beacon "$(beacon_round)" \
-    --output "$STATE/review-admit.json" "${CTX[@]}" > "$STATE/admit.out" 2>&1 || die "see $STATE/admit.out"
+  install -d -o 65532 -g 65532 -m 0700 "$RUN" "$LIVE"
+  as_runtime "$PY" "$T/prepare_record.py" "${COMMON[@]}" --action admit --beacon "$(beacon_round)" \
+    --output "$LIVE/review-admit.json" "${CTX[@]}" > "$STATE/admit.out" 2>&1 || die "see $STATE/admit.out"
   done_
 fi
 if stage deps; then
-  "$PY" "$T/task8-deps.py" "$RUN" "$PREP/base/private/review-base.json" > "$STATE/deps.out" 2>&1 \
+  as_runtime "$PY" "$T/task8-deps.py" "$RUN" "$PREP/base/private/review-base.json" > "$STATE/deps.out" 2>&1 \
     || die "see $STATE/deps.out"
   done_
 fi
 if stage qualify; then
-  "$PY" "$T/prepare_record.py" "${COMMON[@]}" --action qualification --beacon "$(beacon_round)" \
-    --output "$STATE/review-qual.json" "${CTX[@]}" > "$STATE/qual.out" 2>&1 || die "see $STATE/qual.out"
+  as_runtime "$PY" "$T/prepare_record.py" "${COMMON[@]}" --action qualification --beacon "$(beacon_round)" \
+    --output "$LIVE/review-qual.json" "${CTX[@]}" > "$STATE/qual.out" 2>&1 || die "see $STATE/qual.out"
   done_
 fi
 if stage rescue; then
@@ -253,6 +256,13 @@ if stage relays; then
   done_
 fi
 if stage miner; then
+  if [ -z "$MINER_SSH" ]; then  # default: mine on qualified host h1 (8x5090, staged, allowlisted)
+    MINER_SSH=$("$PY" -c "import json,sys;r=[x for x in map(json.loads,open(sys.argv[1])) if x.get('kind')=='instance_ready' and x.get('role')=='h1'][-1];print(r['ssh_host'],r['ssh_port'])" "$RUN/journal.jsonl") \
+      || die "no h1 instance_ready in $RUN/journal.jsonl"
+    MINER_KEY=${MINER_KEY:-$RUN/id_ed25519}
+  fi
+  MINER_KEY=${MINER_KEY:-$RD/vast-m5/id_ed25519}
+  echo "$MINER_SSH" > "$STATE/miner_ssh"
   mssh "nvidia-smi --query-gpu=name,driver_version --format=csv,noheader" > "$STATE/miner-gpus.txt" \
     || die "miner ssh to $MINER_SSH"
   [ "$(grep -c 'RTX 5090' "$STATE/miner-gpus.txt")" = 8 ] \
@@ -305,6 +315,8 @@ if stage open; then
   done_
 fi
 if stage minerstart; then
+  [ -n "$MINER_SSH" ] || MINER_SSH=$(cat "$STATE/miner_ssh")
+  MINER_KEY=${MINER_KEY:-$RUN/id_ed25519}
   # [/] keeps pgrep from matching the remote shell whose own argv contains the pattern.
   mssh "pgrep -f '[/]opt/miner/loop.sh' > /dev/null || { setsid nohup bash /opt/miner/loop.sh > /dev/null 2>&1 < /dev/null & }" \
     || die "miner loop start"
