@@ -9,7 +9,7 @@ system; the exact seven-path scope precludes a second indexing module.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, assert_never
@@ -108,8 +108,22 @@ class IslandExecution:
         return result, capture
 
 
+TRACE_BYTES = 64 * 1024 * 1024  # per rank and per J-window trace file
+Retrace = Callable[[int], Sequence[Sequence[TraceEntry]]]
+
+
+def _skeleton(entries: Sequence[TraceEntry], base: int) -> list[tuple[object, ...]]:
+    # Shapes excluded: MoE dispatch rows are data-dependent; the event sequence is not.
+    return [(e.rank, e.step - base, e.microbatch, e.layer, e.op, e.dtype) for e in entries]
+
+
 class IslandParty:
-    """Read-only, rank-major transcript from authenticated execution artifacts."""
+    """Read-only, rank-major transcript from authenticated execution artifacts.
+
+    Commit-path traces cover window 1 only (the determinism probe). Any other window's hooks
+    come from ``retrace(leaf)``: a re-run of that window from checkpoint (leaf-1)*J. Hook events
+    per step do not depend on the step, so every window has window 1's skeleton (checked).
+    """
 
     def __init__(
         self,
@@ -117,12 +131,15 @@ class IslandParty:
         captures: Sequence[IslandCapture],
         *,
         J: int,
+        retrace: Retrace | None = None,
     ) -> None:
-        self.hotkey, self.J = hotkey, J
+        self.hotkey, self.J, self.retrace = hotkey, J, retrace
+        self._lazy: dict[int, tuple[TraceEntry, ...]] = {}
         if not captures or J < 1:
             raise RefereeError("missing island captures or invalid checkpoint stride")
         self.states = dict(captures[0].states)
-        if not self.states or any(c.states != self.states for c in captures):
+        # Rank 0 alone carries checkpoints (ranks are bitwise identical by validate_artifacts).
+        if not self.states or any(c.states and c.states != self.states for c in captures):
             raise RefereeError("rank checkpoint disagreement")
         self.entries = tuple(
             entry
@@ -140,24 +157,65 @@ class IslandParty:
             raise RefereeError("trace rank binding mismatch")
         return True
 
+    @staticmethod
+    def read_trace(directory: Path, relative: str) -> list[TraceEntry]:
+        raw = confined(directory, relative).read_bytes()
+        if len(raw) > TRACE_BYTES:
+            raise RefereeError("local trace exceeds artifact byte budget")
+        # Local hooks contain -1 collective contexts, unlike unsigned wire envelopes.
+        return TypeAdapter(list[TraceEntry]).validate_json(raw)
+
     @classmethod
-    def published(cls, hotkey: str, job: IslandJobV1, directory: Path) -> IslandParty:
+    def published(
+        cls,
+        hotkey: str,
+        job: IslandJobV1,
+        directory: Path,
+        retrace: Retrace | None = None,
+    ) -> IslandParty:
+        """``retrace`` defaults to launch_window on the publication's own backend."""
         validate_artifacts(job, directory)
+        inner = job.manifest.training.inner
         captures: list[IslandCapture] = []
-        for rank in range(job.manifest.training.reference_spec.layout.n_gpus):
+        n_gpus = job.manifest.training.reference_spec.layout.n_gpus
+        for rank in range(n_gpus):
             capture = IslandCapture()
-            raw = confined(directory, f"rank-{rank}/trace.json").read_bytes()
-            if len(raw) > 64 * 1024 * 1024:
-                raise RefereeError("local trace exceeds artifact byte budget")
-            # Local hooks contain -1 collective contexts, unlike unsigned wire envelopes.
-            capture.entries = TypeAdapter(list[TraceEntry]).validate_json(raw)
-            for t in range(0, job.manifest.training.inner.H + 1, job.manifest.training.inner.J):
-                capture.states[t] = confined(
-                    directory,
-                    f"rank-{rank}/checkpoints/{t}.safetensors",
-                ).read_bytes()
+            capture.entries = cls.read_trace(directory, f"rank-{rank}/trace.json")
             captures.append(capture)
-        return cls(hotkey, captures, J=job.manifest.training.inner.J)
+        for t in range(0, inner.H + 1, inner.J):
+            captures[0].states[t] = confined(
+                directory, f"rank-0/checkpoints/{t}.safetensors"
+            ).read_bytes()
+        if retrace is None:
+
+            def retrace(leaf: int) -> list[list[TraceEntry]]:
+                from hypertrain.miner.island_launch import launch_window
+
+                launch_window(job, directory, leaf)
+                return [
+                    cls.read_trace(directory, f"rank-{rank}/windows/{leaf}.json")
+                    for rank in range(n_gpus)
+                ]
+
+        return cls(hotkey, captures, J=inner.J, retrace=retrace)
+
+    def _entries(self, leaf: int) -> tuple[TraceEntry, ...]:
+        lo, hi = (leaf - 1) * self.J, leaf * self.J
+        got = tuple(e for e in self.entries if lo < e.step <= hi)
+        if got or self.retrace is None or leaf == 1:
+            return got
+        if leaf not in self._lazy:
+            ranks = self.retrace(leaf)
+            lazy = tuple(
+                e
+                for rank, entries in enumerate(ranks)
+                for e in entries
+                if self._rank(e, rank) and lo < e.step <= hi
+            )
+            if _skeleton(lazy, lo) != _skeleton(self._entries(1), 0):
+                raise RefereeError("re-run window trace differs from the probe window shape")
+            self._lazy[leaf] = lazy
+        return self._lazy[leaf]
 
     def state_blob(self, leaf: int) -> bytes:
         try:
@@ -174,7 +232,7 @@ class IslandParty:
     def window(self, leaf: int) -> tuple[tuple[TraceEntry, ...], tuple[int, ...], list[str]]:
         if not 1 <= leaf <= self.H // self.J:
             raise RefereeError("window outside committed trajectory")
-        entries = tuple(e for e in self.entries if (leaf - 1) * self.J < e.step <= leaf * self.J)
+        entries = self._entries(leaf)
         if not entries:
             raise RefereeError("missing actual island hooks")
         chain = [self.state_root(leaf - 1)]
@@ -202,16 +260,29 @@ class IslandParty:
             case "layer":
                 if len(ctx) != 1:
                     raise RefereeError("LAYER context requires window")
-                return len(self.window(ctx[0])[1])
+                return len(self._shape(ctx[0]))
             case "op":
                 if len(ctx) != 2:
                     raise RefereeError("OP context requires window/span")
-                _, ends, _ = self.window(ctx[0])
+                ends = self._shape(ctx[0])
                 if not 0 <= ctx[1] < len(ends):
                     raise RefereeError("unknown layer span")
                 return ends[ctx[1]] - (ends[ctx[1] - 1] if ctx[1] else 0)
             case other:
                 assert_never(other)
+
+    def _shape(self, leaf: int) -> tuple[int, ...]:
+        """Span ends of a window, from an already traced one (all windows share the skeleton),
+        so sizing a dispute never forces a re-run."""
+        if not 1 <= leaf <= self.H // self.J:
+            raise RefereeError("window outside committed trajectory")
+        known = (
+            leaf
+            if leaf in self._lazy
+            or any((leaf - 1) * self.J < e.step <= leaf * self.J for e in self.entries)
+            else 1
+        )
+        return self.window(known)[1]
 
     def hashes(self, level: Level, ctx: tuple[int, ...], at: Sequence[int]) -> list[str]:
         span = self.span(level, ctx)

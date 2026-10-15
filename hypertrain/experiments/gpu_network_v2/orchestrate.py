@@ -224,15 +224,30 @@ def artifact_budget(profile: dict[str, Any]) -> Record:
     forward = inn["grad_accum"] * (5 + 6 * layers + 20 * layers)
     # Conservative: every gradient replicated; every parameter owned for all 3 state hooks.
     step_events = forward + tensors * 3 + tensors + tensors * 3 + 6 + tensors * 3
-    trace_events = inn["H"] * step_events + (leaves + 1) * 9 * tensors
+    # Commit path traces window 1 only (determinism probe; disputes re-trace one window).
+    trace_events = inn["J"] * step_events + (leaves + 1) * 9 * tensors
     trace = trace_events * a["trace_bytes_per_event"]
     sample_count = inn["H"] * inn["micro_batch"] * inn["grad_accum"] * lay["n_gpus"]
     sample_bytes = sample_count * (m["seq_len"] + 1) * 2
-    # Inputs remain at job root AND copied into published; proofs/job JSON in metadata budget.
-    inputs = 2 * (state + ef + header + sample_bytes)
-    outputs = lay["n_gpus"] * ((leaves + 1) * state + ef + delta + trace)
+    # Remote disk: inputs stay at job root AND are copied into published (two real copies);
+    # proofs/job JSON in metadata budget. Logs: two files, each under the ulimit file cap.
+    inputs_once = state + ef + header + sample_bytes
+    inputs = 2 * inputs_once
+    # Checkpoints are written by rank 0 only; every rank writes its final state/ef/delta/trace.
+    outputs = leaves * state + lay["n_gpus"] * (state + ef + delta + trace)
     logs = max(a["logs_bytes_per_execution"], 2 * math.ceil(max(trace, state) / 1024) * 1024)
     execution = inputs + outputs + logs + a["metadata_bytes_per_execution"]
+    # Dedup rescue carries each distinct sha256 once: ranks are bitwise identical except
+    # trace/summary, so one rank's tensors + every rank's trace, and inputs at most once.
+    transfer = (
+        inputs_once
+        + (leaves + 1) * state
+        + ef
+        + delta
+        + lay["n_gpus"] * trace
+        + logs
+        + a["metadata_bytes_per_execution"]
+    )
     policy = a.get("remote_retention", "all")
     if policy == "all":
         resident = profile["schedule"]["executions_per_host"]
@@ -248,22 +263,20 @@ def artifact_budget(profile: dict[str, Any]) -> Record:
         raise Reject("unsupported_remote_retention_policy")
     retained = execution * resident
     # Tar record rounding + path headers + terminating records for every retained file.
-    files_per_execution = lay["n_gpus"] * (leaves + 5) + 14
+    files_per_execution = lay["n_gpus"] * 6 + leaves + 14
     tar_overhead = files_per_execution * resident * 2048 + 1048576 + 10240
-    rescue = retained + tar_overhead
+    rescue = transfer * resident + tar_overhead
     per_host = profile["schedule"]["executions_per_host"]
     if policy == "all":
         remote_peak = retained + rescue  # rescue.tar is written next to the outputs
         local = profile["schedule"]["hosts"] * (per_host + 1) * (rescue + execution)
     else:
         # The archive streams over SSH straight into local custody: no remote copy. Locally the
-        # qualification tar stays, and each workload keeps its tar plus one extraction (the
-        # canonical copy hardlinks the verified extraction; cross-rank dedup is not counted).
+        # qualification tar stays, and each workload keeps its tar plus one extraction whose
+        # identical files (other ranks, canonical copy) hardlink one verified copy.
         remote_peak = retained
-        workload_tar = execution + files_per_execution * 2048 + 1048576 + 10240
-        local = profile["schedule"]["hosts"] * (
-            rescue + (per_host - 2) * (workload_tar + execution)
-        )
+        workload_tar = transfer + files_per_execution * 2048 + 1048576 + 10240
+        local = profile["schedule"]["hosts"] * (rescue + (per_host - 2) * (workload_tar + transfer))
     return {
         "remote_retention": policy,
         "local_custody_bytes_required": local,
@@ -273,8 +286,11 @@ def artifact_budget(profile: dict[str, Any]) -> Record:
         "trace_events_per_rank": trace_events,
         "trace_bytes_per_rank": trace,
         "execution_bytes": execution,
+        "execution_transfer_bytes": transfer,
         "retained_bytes_per_host": retained,
         "rescue_tar_bytes_per_host": rescue,
+        # Legacy full-byte rescues (journal rows without dedup_known) re-verify against this.
+        "full_rescue_tar_bytes_per_host": retained + tar_overhead,
         "disk_artifacts_peak_bytes": remote_peak,
         "artifact_transfer_bytes_per_host": retained + rescue,
         "rescue_min_bytes_per_second": math.ceil(rescue / a["rescue_transfer_seconds"]),
@@ -1047,7 +1063,7 @@ class NetworkRuntime:
         if prune:
             self.prune_rescued(role)
             bounds = artifact_budget(self.profile)
-            if shutil.disk_usage(self.lifecycle.dir).free < 2 * bounds["execution_bytes"]:
+            if shutil.disk_usage(self.lifecycle.dir).free < 2 * bounds["execution_transfer_bytes"]:
                 raise Reject("local_custody_disk_exhausted")
         self.reserve(role, name, "workload", 1)
         self.journal.append(
@@ -1139,8 +1155,14 @@ class NetworkRuntime:
             error = exc
             self.journal.append("network_operation_failed", role=role, name=name, error=str(exc))
         finally:
+            # Inputs we uploaded travel back as hashes only: their bytes are already local.
+            local_inputs = {
+                fsha(p): p
+                for p in (directory / rel for rel in job.object_paths.values())
+                if p.is_file() and not p.is_symlink()
+            }
             try:
-                custody = self.rescue(role, fresh=True)
+                custody = self.rescue(role, fresh=True, known=frozenset(local_inputs))
             except (
                 Reject,
                 OSError,
@@ -1163,18 +1185,41 @@ class NetworkRuntime:
         destination = directory / name
         if destination.exists():
             raise Reject("operation_result_destination_exists")
+        # Materialize every manifest file of this execution from one verified copy per sha256:
+        # a carried member (any path) or an input we uploaded. Ranks must match rank-0 first.
+        files: dict[str, Any] = custody["files"]
+        mine = {n.removeprefix(name + "/"): v for n, v in files.items() if n.startswith(name + "/")}
+        if rank_bytes_differ(mine):
+            raise Reject("operation_rank_bytes_differ")
         seen: dict[str, Path] = {}
         with tarfile.open(archive) as source:
-            for member in source.getmembers():
-                prefix = "out/" + name + "/"
-                if member.name.startswith(prefix) and member.isfile():
-                    rel = member.name.removeprefix(prefix)
-                    path = destination / rel
-                    if Path(rel).is_absolute() or ".." in Path(rel).parts:
-                        raise Reject("operation_custody_path")
-                    stream = source.extractfile(member)
+            carried = {
+                files[m.name.removeprefix("out/")]["sha256"]: m
+                for m in source.getmembers()
+                if m.isfile() and m.name.removeprefix("out/") in files
+            }
+            for rel, meta in sorted(mine.items()):
+                path = destination / rel
+                if Path(rel).is_absolute() or ".." in Path(rel).parts:
+                    raise Reject("operation_custody_path")
+                digest = meta["sha256"]
+                if digest in seen and prune:  # verified by this extraction: hardlink
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    os.link(seen[digest], path)
+                    continue
+                if digest in seen:
+                    data = seen[digest].read_bytes()
+                elif digest in carried:
+                    stream = source.extractfile(carried[digest])
                     assert stream is not None
-                    place_verified(path, stream.read(), seen, prune)
+                    data = stream.read()
+                elif digest in local_inputs:
+                    data = local_inputs[digest].read_bytes()
+                else:
+                    raise Reject("operation_custody_bytes_missing")
+                if sha256(data) != digest:
+                    raise Reject("operation_custody_changed")
+                place_verified(path, data, seen, prune)
         result = json.loads((destination / "operation-result.json").read_bytes())
         if (
             result.get("status") != "CAPTURED_NOT_ACCEPTED"
@@ -1582,17 +1627,7 @@ class NetworkRuntime:
         )
         if rescue is None or fsha(rescue["tar"]) != done["tar_sha256"]:
             raise Reject("completion_original_rescue_changed")
-        prefix = "out/" + name + "/"
-        with tarfile.open(rescue["tar"]) as archive:
-            rescued = {}
-            for member in archive.getmembers():
-                if member.name.startswith(prefix) and member.isfile():
-                    rel = member.name.removeprefix(prefix)
-                    if rel in rescued:
-                        raise Reject("completion_duplicate_rescue_member")
-                    stream = archive.extractfile(member)
-                    assert stream is not None
-                    rescued[rel] = sha256(stream.read())
+        rescued = rescued_hashes(Path(rescue["tar"]), name + "/", "completion")
         expected_rescue = {
             publication_name + "/" + rel: meta["sha256"] for rel, meta in files.items()
         }
@@ -1786,16 +1821,9 @@ class NetworkRuntime:
                 )
                 if rescue is None or fsha(Path(rescue["tar"])) != done["tar_sha256"]:
                     raise Reject("operation_canonical_rescue_changed")
-                prefix = "out/" + name + "/" + str(original.relative_to(custody)) + "/"
-                with tarfile.open(rescue["tar"]) as archive:
-                    rescued = {}
-                    for member in archive.getmembers():
-                        if member.name.startswith(prefix) and member.isfile():
-                            stream = archive.extractfile(member)
-                            assert stream is not None
-                            rescued[member.name.removeprefix(prefix)] = sha256(stream.read())
-                    if rescued != files:
-                        raise Reject("operation_canonical_rescue_changed")
+                prefix = name + "/" + str(original.relative_to(custody)) + "/"
+                if rescued_hashes(Path(rescue["tar"]), prefix, "operation_canonical") != files:
+                    raise Reject("operation_canonical_rescue_changed")
                 canonical = directory / "published"
                 with tempfile.TemporaryDirectory(prefix="canonical-", dir=directory) as temporary:
                     staged = Path(temporary) / "published"
@@ -2478,11 +2506,7 @@ class NetworkRuntime:
                 raise Reject("remote_prune_local_custody_missing")
             if fsha(archive) != custody["tar_sha256"]:
                 raise Reject("remote_prune_local_custody_changed")
-            files = verify_export(
-                archive,
-                artifact_budget(self.profile)["rescue_tar_bytes_per_host"],
-                custody.get("hashes_only", False),
-            )
+            files = verify_export(archive, *rescue_mode(self.profile, custody))
             mine = [f for f in files if f.startswith(name + "/")]
             if files != custody["files"] or any(
                 not any(f"rank-{r}" in Path(f).parts for f in mine) for r in ranks
@@ -2501,8 +2525,11 @@ class NetworkRuntime:
             )
         return out
 
-    def rescue(self, role: str, fresh: bool = False) -> Record:
-        """Complete path-preserving, byte/hash checked custody; failure never becomes PASS."""
+    def rescue(self, role: str, fresh: bool = False, known: frozenset[str] = frozenset()) -> Record:
+        """Complete path-preserving, byte/hash checked custody; failure never becomes PASS.
+
+        known: sha256s whose bytes the caller already holds locally (uploaded inputs); after a
+        workload exists they travel as manifest hashes only, like every repeated content."""
         generation = sha256(
             json.dumps(
                 [
@@ -2526,11 +2553,7 @@ class NetworkRuntime:
             archive = Path(old["tar"])
             if not archive.is_file() or fsha(archive) != old["tar_sha256"]:
                 raise Reject("network_rescue_changed_on_resume")
-            verify_export(
-                archive,
-                artifact_budget(self.profile)["rescue_tar_bytes_per_host"],
-                old.get("hashes_only", False),
-            )
+            verify_export(archive, *rescue_mode(self.profile, old))
             return old
         root = self.lifecycle.remote_root(role)
         ssh = self.lifecycle.ssh(role)
@@ -2554,6 +2577,10 @@ class NetworkRuntime:
         # Before any workload, out/ holds only seed + qualification: those rounds are proven by
         # the two hosts' independently computed hashes, so only hashes and small JSON travel.
         hashes_only = not self.journal.all("network_execution_intent", role=role, phase="workload")
+        # After a workload: every distinct content once (rank-0 bytes; identical ranks, inputs
+        # we hold, repeated checkpoints are manifest hashes only), never ~8x full ranks.
+        dedup = sorted(known) if not hashes_only else None
+        mode = " hashes" if hashes_only else " ".join([" dedup", *(dedup or [])])
         if hashes_only:
             # Carried: per round job.json + n_gpus summaries; result/config/custody; seed
             # job.json; slack. Each <= 1 MiB + tar header, plus the <= 1 MiB manifest.
@@ -2564,14 +2591,14 @@ class NetworkRuntime:
             cmd = (
                 f"cd {shlex.quote(root)} && env PYTHONPATH=src {shlex.quote(python)} "
                 "experiments/gpu_network_v2/orchestrate.py export out - "
-                "experiments/gpu_network_v2/profile.json" + (" hashes" if hashes_only else "")
+                "experiments/gpu_network_v2/profile.json" + mode
             )
             log = self.lifecycle.dir / "logs" / f"{role}-network-export-stream.log"
             try:
                 stream_bounded(ssh_argv(ssh, cmd), archive, log, bound, ssh.timeout)
                 remaining()
                 try:
-                    manifest = verify_export(archive, bound, hashes_only)
+                    manifest = verify_export(archive, bound, hashes_only, dedup)
                 except (tarfile.TarError, KeyError, ValueError) as exc:
                     raise Reject("network_rescue_archive_invalid") from exc
                 # Remote's own manifest digest (stderr) must equal the verified local manifest.
@@ -2588,7 +2615,7 @@ class NetworkRuntime:
             cmd = (
                 f"cd {shlex.quote(root)} && env PYTHONPATH=src {shlex.quote(python)} "
                 "experiments/gpu_network_v2/orchestrate.py export out rescue.tar "
-                "experiments/gpu_network_v2/profile.json" + (" hashes" if hashes_only else "")
+                "experiments/gpu_network_v2/profile.json" + mode
             )
             if ssh.run(cmd, "network-export", self.lifecycle.dir / "logs").returncode:
                 raise Reject("network_export_failed")
@@ -2598,7 +2625,7 @@ class NetworkRuntime:
             actual = ssh.get(f"{root}/rescue.tar", archive)
             if actual != expected:
                 raise Reject("network_rescue_sha_mismatch")
-            manifest = verify_export(archive, bound, hashes_only)
+            manifest = verify_export(archive, bound, hashes_only, dedup)
         remaining()
         if generation != sha256(
             json.dumps(
@@ -2627,6 +2654,7 @@ class NetworkRuntime:
             tar_sha256=actual,
             files=manifest,
             hashes_only=hashes_only,
+            dedup_known=dedup,
             elapsed_seconds=time.monotonic() - started,
         )
 
@@ -2644,11 +2672,89 @@ def hash_rescued(name: str) -> bool:
     return Path(name).name in HASH_RESCUE_NAMES
 
 
+def carried_names(
+    files: dict[str, Any], hashes_only: bool = False, dedup: list[str] | None = None
+) -> list[str]:
+    """Archive members, a pure function of the manifest: all; hash-only small JSON; or dedup,
+    the first path (sorted, so rank-0 before rank-N) of each sha256 not already held locally."""
+    if hashes_only:
+        return [n for n in files if hash_rescued(n)]
+    if dedup is None:
+        return list(files)
+    seen = set(dedup)
+    out = []
+    for name in sorted(files):
+        if files[name]["sha256"] not in seen:
+            seen.add(files[name]["sha256"])
+            out.append(name)
+    return out
+
+
+# Data-parallel ranks write bitwise-identical tensors; only trace.json/summary.json differ.
+RANK_IDENTICAL = frozenset({"state.safetensors", "ef.safetensors", "delta.bin", "leaves.json"})
+
+
+def rank_bytes_differ(files: dict[str, Any]) -> bool:
+    """Any rank-N state/ef/delta/leaves/checkpoint whose host hash differs from rank-0's."""
+    for name, meta in files.items():
+        parts = Path(name).parts
+        rank = next((i for i, p in enumerate(parts) if p.startswith("rank-")), None)
+        if rank is None or parts[rank] == "rank-0":
+            continue
+        rest = parts[rank + 1 :]
+        if rest and (rest[0] == "checkpoints" or rest == (rest[0],) and rest[0] in RANK_IDENTICAL):
+            twin = files.get(str(Path(*parts[:rank], "rank-0", *rest)))
+            if twin is None or twin["sha256"] != meta["sha256"]:
+                return True
+    return False
+
+
+def rescued_hashes(tar: Path, prefix: str, scope: str) -> dict[str, str]:
+    """rel -> sha256 of every rescued file under out/<prefix>: hashed carried bytes, plus the
+    manifest hash of a deduplicated file (its content verified once under another path)."""
+    rescued: dict[str, str] = {}
+    with tarfile.open(tar) as archive:
+        names = archive.getnames()
+        if "manifest.json" in names:
+            stream = archive.extractfile("manifest.json")
+            assert stream is not None
+            for name, meta in json.loads(stream.read()).items():
+                if name.startswith(prefix):
+                    rescued[name.removeprefix(prefix)] = meta["sha256"]
+        carried = set()
+        for member in archive.getmembers():
+            if member.name.startswith("out/" + prefix) and member.isfile():
+                rel = member.name.removeprefix("out/" + prefix)
+                if rel in carried:
+                    raise Reject(scope + "_duplicate_rescue_member")
+                carried.add(rel)
+                stream = archive.extractfile(member)
+                assert stream is not None
+                digest = sha256(stream.read())
+                if rescued.setdefault(rel, digest) != digest:
+                    raise Reject(scope + "_rescue_changed")
+    return rescued
+
+
+def rescue_mode(profile: dict[str, Any], row: Record) -> tuple[int, bool, list[str] | None]:
+    """verify_export arguments that re-verify a journaled rescue in its recorded mode."""
+    bounds = artifact_budget(profile)
+    hashes_only, dedup = row.get("hashes_only", False), row.get("dedup_known")
+    full = not hashes_only and dedup is None  # rows recorded before the dedup contract
+    bound = bounds["full_rescue_tar_bytes_per_host" if full else "rescue_tar_bytes_per_host"]
+    return bound, hashes_only, dedup
+
+
 def export_artifacts(
-    directory: Path, archive: Path, profile: dict[str, Any], hashes_only: bool = False
+    directory: Path,
+    archive: Path,
+    profile: dict[str, Any],
+    hashes_only: bool = False,
+    dedup: list[str] | None = None,
 ) -> Record:
     """Archive full paths and every byte (or, hashes_only, every hash plus the small JSON
-    files above); enforce actual shape-derived byte budget."""
+    files above; or dedup, every hash plus each distinct content once); enforce actual
+    shape-derived byte budget."""
     from hypertrain.protocol.hashing import sha256_hex
 
     files: dict[str, dict[str, Any]] = {}
@@ -2660,10 +2766,15 @@ def export_artifacts(
                 "bytes": path.stat().st_size,
                 "sha256": fsha(path),
             }
-    carried = [n for n in files if not hashes_only or hash_rescued(n)]
+    carried = carried_names(files, hashes_only, dedup)
     if hashes_only and any(files[n]["bytes"] > HASH_RESCUE_FILE_BYTES for n in carried):
         raise Reject("export_hash_rescue_file_oversized")
     bounds = artifact_budget(profile)
+    tar_bound = bounds[
+        "full_rescue_tar_bytes_per_host"
+        if not hashes_only and dedup is None
+        else "rescue_tar_bytes_per_host"
+    ]
     if sum(v["bytes"] for v in files.values()) > bounds["retained_bytes_per_host"]:
         raise Reject("actual_artifact_budget_exceeded")
     metadata = json.dumps(files, sort_keys=True).encode()
@@ -2682,7 +2793,7 @@ def export_artifacts(
         # Nothing archived remotely; the caller re-reads this digest over a separate channel.
         sys.stdout.buffer.flush()
         return {"bytes": None, "manifest_sha256": sha256_hex(metadata)}
-    if archive.stat().st_size > bounds["rescue_tar_bytes_per_host"]:
+    if archive.stat().st_size > tar_bound:
         raise Reject("actual_rescue_archive_budget_exceeded")
     with archive.open("rb") as file:
         os.fsync(file.fileno())
@@ -2746,9 +2857,12 @@ def place_verified(path: Path, data: bytes, seen: dict[str, Path], dedup: bool) 
         seen[digest] = path
 
 
-def verify_export(archive: Path, maximum_bytes: int, hashes_only: bool = False) -> Record:
+def verify_export(
+    archive: Path, maximum_bytes: int, hashes_only: bool = False, dedup: list[str] | None = None
+) -> Record:
     """Every carried byte matches the manifest. hashes_only: the manifest still covers every
-    remote file, and exactly the HASH_RESCUE_NAMES files are carried (none may be withheld)."""
+    remote file, and exactly the HASH_RESCUE_NAMES files are carried (none may be withheld).
+    dedup: exactly carried_names() travel, so every manifest hash is carried or held locally."""
     import hashlib
 
     if archive.stat().st_size > maximum_bytes:
@@ -2777,7 +2891,7 @@ def verify_export(archive: Path, maximum_bytes: int, hashes_only: bool = False) 
             for v in files.values()
         ):
             raise Reject("rescue_manifest_malformed")
-        carried = [n for n in files if not hashes_only or hash_rescued(n)]
+        carried = carried_names(files, hashes_only, dedup)
         if {m.name for m in entries} != {"manifest.json", *("out/" + n for n in carried)}:
             raise Reject("rescue_manifest_coverage_mismatch")
         if any(not n or Path(n).is_absolute() or ".." in Path(n).parts for n in files):
@@ -3756,13 +3870,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--live", action="store_true")
     args = parser.parse_args(argv)
     if args.action == "export":
-        if args.extra[2:] not in ([], ["hashes"]):
-            parser.error("export OUT ARCHIVE PROFILE [hashes]")
+        mode = args.extra[2:3]
+        known = args.extra[3:]
+        if (
+            mode not in ([], ["hashes"], ["dedup"])
+            or known
+            and mode != ["dedup"]
+            or not all(len(k) == 64 and set(k) <= set("0123456789abcdef") for k in known)
+        ):
+            parser.error("export OUT ARCHIVE PROFILE [hashes | dedup [KNOWN_SHA256 ...]]")
         exported = export_artifacts(
             args.input,
             Path(args.extra[0]),
             json.loads(Path(args.extra[1]).read_bytes()),
-            args.extra[2:] == ["hashes"],
+            mode == ["hashes"],
+            known if mode == ["dedup"] else None,
         )
         if args.extra[0] == "-":
             print(exported["manifest_sha256"], file=sys.stderr)

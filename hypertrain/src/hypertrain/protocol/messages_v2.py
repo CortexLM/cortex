@@ -409,10 +409,13 @@ class AuditJobV2(WireModel):
             raise ValueError("replay budget must cover H and not exceed 2H")
         if not self.created_beacon < self.lease_expires <= self.absolute_deadline:
             raise ValueError("invalid audit lease deadline")
-        if self.lease_expires > self.created_beacon + 100:
-            raise ValueError("lease exceeds 100 beacon rounds")
-        if self.absolute_deadline > self.created_beacon + 200:
-            raise ValueError("absolute audit deadline exceeds 200 beacon rounds")
+        # ponytail: the job carries no policy bytes, so this structural cap uses the protocol
+        # ceiling MAX_STEP_SECONDS_BOUND; the store issues the exact policy-derived lease.
+        lease = audit_lease_rounds(h, MAX_STEP_SECONDS_BOUND)
+        if self.lease_expires > self.created_beacon + lease:
+            raise ValueError(f"lease exceeds {lease} beacon rounds")
+        if self.absolute_deadline > self.created_beacon + 2 * lease:
+            raise ValueError(f"absolute audit deadline exceeds {2 * lease} beacon rounds")
         if len(self.sample_ids) != self.manifest.training.batch_samples():
             raise ValueError("job assignment length mismatch")
         if self.start_state.run_id != self.run_id:
@@ -617,8 +620,21 @@ class DisputePolicyV2(WireModel):
     max_referee_cost_units: U64
 
 
+BEACON_PERIOD_SECONDS = 3
+MAX_STEP_SECONDS_BOUND = 16.0
+
+
+def audit_lease_rounds(h: int, step_seconds_bound: float) -> int:
+    """Beacon rounds one audit lease lasts: a 2H replay at the step bound plus 100 rounds of
+    slack. H <= 30 keeps the original fixed 100-round lease (absolute cap = 2 * lease)."""
+    if h <= 30:
+        return 100
+    return math.ceil(2 * h * step_seconds_bound / BEACON_PERIOD_SECONDS) + 100
+
+
 class AuditPolicyV2(WireModel):
-    lease_rounds: Literal[100]
+    lease_rounds: Positive
+    step_seconds_bound: F32 = "00008040"  # f32 4.0 s per untraced replay step
     max_attempts: Literal[2]
     max_concurrent_per_auditor: Literal[1]
     max_running_jobs: Literal[2]
@@ -629,6 +645,17 @@ class AuditPolicyV2(WireModel):
     def validate_training(self, training: TrainingManifestV2) -> None:
         if self.max_steps_per_attempt != 2 * training.inner.H:
             raise ValueError("audit policy budget must equal 2H")
+        if self.lease_rounds != audit_lease_rounds(training.inner.H, self.step_bound()):
+            raise ValueError("audit lease must equal the H/step-bound derived lease")
+
+    def step_bound(self) -> float:
+        bound = f32val(self.step_seconds_bound)
+        if not 0 < bound <= MAX_STEP_SECONDS_BOUND:  # also rejects NaN
+            raise ValueError("audit step_seconds_bound must be in (0, 16] seconds")
+        return bound
+
+    def absolute_rounds(self) -> int:
+        return 2 * self.lease_rounds
 
 
 class IslandJobV1(WireModel):

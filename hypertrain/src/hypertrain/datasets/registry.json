@@ -215,7 +215,7 @@
   "dclm-baseline": {
    "config": null,
    "files": [
-    "*.parquet"
+    "**/*.jsonl.zst"
    ],
    "licence": "CC-BY-4.0",
    "repo": "mlfoundations/dclm-baseline-1.0",
@@ -320,7 +320,7 @@
   "pes2o-v2": {
    "config": "v2",
    "files": [
-    "data/v2/*.parquet"
+    "data/v2/*.json.gz"
    ],
    "licence": "ODC-By-1.0",
    "repo": "allenai/peS2o",

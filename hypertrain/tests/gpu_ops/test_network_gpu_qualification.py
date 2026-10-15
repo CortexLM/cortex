@@ -265,7 +265,7 @@ def test_partial_round_coverage_rejects_even_identical_results(tmp_path: Path) -
     paths = results(tmp_path)
     for path in paths:
         data = json.loads(path.read_bytes())
-        del data["rounds"][0]["rank-1/checkpoints/30.safetensors"]
+        del data["rounds"][0]["rank-0/checkpoints/30.safetensors"]
         path.write_text(json.dumps(data))
     # When / Then
     with pytest.raises(Reject, match="coverage_missing"):
@@ -277,10 +277,11 @@ def test_eight_gpu_h4_j2_results_compare_with_full_rank_coverage(tmp_path: Path)
     paths = results(tmp_path, ranks=8, H=4, J=2)
     # When
     result = driver.compare(paths, manifest(8, 4, 2))
-    # Then: 8 ranks x (5 finals + checkpoints 0,2,4), workload gate unchanged.
+    # Then: 8 ranks x 5 finals + rank-0 checkpoints 0,2,4 (only rank 0 writes them).
     rounds = json.loads(paths[0].read_bytes())["rounds"]
     assert result == {"two_host_bitwise_match": True, "workload_allowed": False}
-    assert [len(r) for r in rounds] == [64, 64] and "rank-7/checkpoints/4.safetensors" in rounds[1]
+    assert [len(r) for r in rounds] == [43, 43] and "rank-0/checkpoints/4.safetensors" in rounds[1]
+    assert not any(k.startswith("rank-7/checkpoints/") for k in rounds[1])
 
 
 @pytest.mark.parametrize("attack", ["missing_rank", "same_host", "tamper", "wrong_image"])
@@ -303,7 +304,7 @@ def test_eight_gpu_results_reject_rank_host_custody_and_shape_attacks(
     for path, data in zip(paths, datas, strict=True):
         path.write_text(json.dumps(data))
     if attack == "tamper":
-        (paths[1].parent / "round-1/published/rank-7/checkpoints/2.safetensors").write_bytes(b"x")
+        (paths[1].parent / "round-1/published/rank-0/checkpoints/2.safetensors").write_bytes(b"x")
     match = {"missing_rank": "coverage_missing", "tamper": "custody_changed"}
     # When / Then
     with pytest.raises(Reject, match=match.get(attack, "binding_or_bitwise")):
@@ -370,7 +371,7 @@ def test_eight_gpu_seed_manifest_drives_rank_and_checkpoint_coverage(
     captured = driver.capture(published, job)
     # Then
     assert len(job.sample_ids) == 32 and set(captured) == set(driver.round_files(8, 4, 2))
-    (published / "rank-7/checkpoints/4.safetensors").unlink()
+    (published / "rank-0/checkpoints/4.safetensors").unlink()
     with pytest.raises(FileNotFoundError):
         driver.capture(published, job)
 

@@ -123,26 +123,7 @@ def execute(directory: Path, backend: str) -> None:
         def get(i: int) -> npt.NDArray[np.uint32]:
             return samples[i]
 
-        started = time.monotonic_ns()
-        out = directory / f"rank-{dist.get_rank()}"
-        out.mkdir()
-        (out / "checkpoints").mkdir()
-
-        # Async checkpoint: train_island hands over freshly gathered tensors it never mutates, so
-        # one writer thread serialises them while training continues; drained before outputs.
-        saver = ThreadPoolExecutor(max_workers=1)
-        saves: list[Future[None]] = []
-
-        def checkpoint(t: int, theta: dict[str, torch.Tensor], state: OptState) -> None:
-            saves.append(
-                saver.submit(
-                    lambda: durable_write(
-                        out / "checkpoints" / f"{t}.safetensors", pack_state(theta, state)
-                    )
-                )
-            )
-
-        traces = []
+        traces: list[dict[str, object]] = []
 
         def trace(ctx: TraceContext, x: torch.Tensor) -> torch.Tensor:
             raw = x.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
@@ -159,6 +140,61 @@ def execute(directory: Path, backend: str) -> None:
                 }
             )
             return x
+
+        window = os.environ.get("HT_ISLAND_WINDOW")
+        if window is not None:
+            # Lazy dispute trace: re-run committed window l from rank-0's checkpoint (l-1)*J.
+            leaf, J = int(window), cfg.inner.J
+            if not 1 <= leaf <= cfg.inner.H // J:
+                raise IslandFailure("window outside committed trajectory")
+            start, state = unpack_state(
+                confined(directory, f"rank-0/checkpoints/{(leaf - 1) * J}.safetensors").read_bytes()
+            )
+            if state is None:
+                raise IslandFailure("checkpoint omits optimizer")
+            state.m, state.v = move(state.m), move(state.v)
+            result = train_island(
+                cfg,
+                lay,
+                DistComm(),
+                move(start),
+                Assignment(run_id, job.w, tuple(job.sample_ids), job.global_step0),
+                get,
+                carry=state,
+                hook=trace,
+                steps=((leaf - 1) * J, leaf * J),
+            )
+            committed = json.loads(
+                confined(directory, f"rank-{dist.get_rank()}/leaves.json").read_bytes()
+            )
+            if result.leaves[-1].preimage.model_dump(mode="json") != committed[leaf]:
+                raise IslandFailure("window re-run diverged from the committed leaf")
+            path = directory / f"rank-{dist.get_rank()}/windows/{leaf}.json"
+            path.parent.mkdir(exist_ok=True)
+            durable_write(path, canonicalize(traces))
+            return
+
+        started = time.monotonic_ns()
+        out = directory / f"rank-{dist.get_rank()}"
+        out.mkdir()
+        if dist.get_rank() == 0:
+            (out / "checkpoints").mkdir()
+
+        # Async checkpoint: train_island hands over freshly gathered tensors it never mutates, so
+        # one writer thread serialises them while training continues; drained before outputs.
+        saver = ThreadPoolExecutor(max_workers=1)
+        saves: list[Future[None]] = []
+
+        def checkpoint(t: int, theta: dict[str, torch.Tensor], state: OptState) -> None:
+            if dist.get_rank():
+                return  # ranks are bitwise identical (validate_artifacts); rank 0 keeps the copy
+            saves.append(
+                saver.submit(
+                    lambda: durable_write(
+                        out / "checkpoints" / f"{t}.safetensors", pack_state(theta, state)
+                    )
+                )
+            )
 
         def deadline() -> None:
             if time.time() >= job.deadline:
@@ -177,6 +213,9 @@ def execute(directory: Path, backend: str) -> None:
             hook=trace if os.environ.get("HT_ISLAND_TRACE") == "1" else None,
             cancel=deadline,
             checkpoint=checkpoint,
+            # Commit path: window 1 is the cross-rank/cross-host determinism probe; later
+            # windows are traced lazily on dispute (HT_ISLAND_WINDOW), so trace.json stays small.
+            hook_until=cfg.inner.J,
         )
         for f in saves:
             f.result()  # re-raises a failed write before any result is published

@@ -615,9 +615,10 @@ def test_eight_gpu_od_large_budget_is_geometry_derived() -> None:
     bounds = mod.artifact_budget(od_large_profile(3))
     assert bounds["param_count"] == 353861632 and bounds["tensor_count"] == 339
     # Task 19 measured: state 4246444200, ef 1415481880, delta 359411534,
-    # eight-rank execution output 150085361712 bytes; bounds must cover all of them.
+    # eight-rank execution output 150085361712 bytes with checkpoints on every rank. Checkpoints
+    # are now rank-0 only: 3 x state + 8 x (state + ef + delta) = 60910033512 bytes.
     assert bounds["state_bytes"] >= 4246444200 - 65536
-    assert bounds["execution_bytes"] >= 150085361712
+    assert bounds["execution_bytes"] >= 3 * 4246444200 + 8 * (4246444200 + 1415481880 + 359411534)
     assert bounds["retained_bytes_per_host"] == 3 * bounds["execution_bytes"]
     assert mod.execution_quota(od_large_profile(3))["remaining"] == 2
     for change in (
@@ -681,9 +682,16 @@ def test_prune_rescued_policy_budget_bounds_and_requires_local_custody() -> None
     assert bounds["disk_artifacts_peak_bytes"] < 400_000_000_000
     # 7 per host = 2 qualification + 5 workload executions per host (10 total) within 4.7TB.
     assert bounds["local_custody_bytes_required"] < 4_700_000_000_000
+    # Dedup rescue: each workload keeps one rank's tensors + all traces (~33GB, not ~170GB),
+    # so 8 per host now fits; the bound still grows with the schedule and still binds.
     larger = od_large_profile(8)
     larger["artifacts"] |= {"remote_retention": "prune_rescued"}
-    assert mod.artifact_budget(larger)["local_custody_bytes_required"] > 4_700_000_000_000
+    assert mod.artifact_budget(larger)["local_custody_bytes_required"] < 4_700_000_000_000
+    # Rank-0-only checkpoints already removed most rank redundancy from execution_bytes.
+    assert bounds["execution_transfer_bytes"] < bounds["execution_bytes"] // 2
+    largest = od_large_profile(40)
+    largest["artifacts"] |= {"remote_retention": "prune_rescued"}
+    assert mod.artifact_budget(largest)["local_custody_bytes_required"] > 4_700_000_000_000
     for change in (
         {"remote_retention": "delete"},
         {"remote_retention": "prune_rescued", "retain_all_checkpoints": False},
@@ -707,8 +715,10 @@ def test_prune_rescued_policy_budget_bounds_and_requires_local_custody() -> None
     ready = mod.readiness_budget(pruned | {"artifacts": artifacts}, evidence)
     assert ready["remote_retention"] == "prune_rescued"
     # The image and staging the host still needs are part of the 400GB check, not waived.
-    artifacts |= {"image_and_dependency_bytes": 60_000_000_000}
-    evidence |= {"image_and_dependency_bytes": 60_000_000_000}
+    # Rank-0-only checkpoints shrank the peak, so it takes a larger image to overflow 400GB.
+    image = 400_000_000_000 - bounds["disk_artifacts_peak_bytes"]
+    artifacts |= {"image_and_dependency_bytes": image}
+    evidence |= {"image_and_dependency_bytes": image}
     with pytest.raises(Reject, match="artifact_disk_budget_exceeded"):
         mod.readiness_budget(pruned | {"artifacts": artifacts}, evidence)
 
@@ -956,8 +966,9 @@ def test_hash_only_export_carries_hashes_and_small_json_only(tmp_path: Path) -> 
     with tarfile.open(archive) as t:
         carried = {m.name for m in t.getmembers()}
     # Every remote file is hashed; only result/config/job/summary bytes travel.
-    # 2 rounds x (2 ranks x 12 round files + 2 summaries + job.json) + config + result.
-    assert len(files) == 2 * (2 * 12 + 2 + 1) + 2
+    # 2 rounds x (rank-0 12 + rank-1 5 round files (checkpoints rank-0 only) + 2 summaries
+    # + job.json) + config + result.
+    assert len(files) == 2 * (12 + 5 + 2 + 1) + 2
     assert carried == {"manifest.json"} | {
         "out/" + n for n in files if Path(n).name in mod.HASH_RESCUE_NAMES
     }
@@ -1060,10 +1071,68 @@ def test_streamed_rescue_is_hash_only_until_a_workload_is_reserved(
         carried = {m.name for m in t.getmembers()}
     state = "out/qualification/round-0/published/rank-0/state.safetensors"
     assert record["hashes_only"] is (not workload)
-    assert commands[0].endswith("profile.json" if workload else "profile.json hashes")
+    # After a workload the rescue is deduplicated (each distinct content once), never full.
+    assert commands[0].endswith("profile.json dedup" if workload else "profile.json hashes")
+    assert record["dedup_known"] == ([] if workload else None)
     assert (state in carried) is workload  # hash-only never ships the tensor bytes
     assert state.removeprefix("out/") in record["files"]  # but always its remote hash
     assert runtime.rescue("h0") == record  # resume re-verifies in the recorded mode
+
+
+def dedup_op_tree(tmp_path: Path) -> tuple[Path, str]:
+    """A 2-rank operation output: identical rank tensors/checkpoints, distinct traces."""
+    src = tmp_path / "remote-out"
+    pub = src / "op-a/published"
+    for rank in range(2):
+        d = pub / f"rank-{rank}"
+        (d / "checkpoints").mkdir(parents=True)
+        for f in ("state.safetensors", "ef.safetensors", "delta.bin", "leaves.json"):
+            (d / f).write_bytes(f.encode() * 64)
+        for t in (0, 5):
+            (d / f"checkpoints/{t}.safetensors").write_bytes(b"c%d" % t * 64)
+        (d / "trace.json").write_bytes(b"trace-%d" % rank)
+        (d / "summary.json").write_bytes(b'{"rank": %d}' % rank)
+    (pub / "start_state").write_bytes(b"input" * 64)
+    (src / "op-a/start_state").write_bytes(b"input" * 64)
+    return src, fsha(pub / "start_state")
+
+
+def test_dedup_export_carries_rank0_once_plus_every_rank_hash(tmp_path: Path) -> None:
+    import tarfile
+
+    mod = network_module()
+    src, known = dedup_op_tree(tmp_path)
+    profile = json.loads((TREE / "experiments/gpu_network_v2/profile.json").read_bytes())
+    archive = tmp_path / "dedup.tar"
+    mod.export_artifacts(src, archive, profile, False, [known])
+    files = mod.verify_export(archive, 1 << 30, False, [known])
+    with tarfile.open(archive) as t:
+        carried = {m.name.removeprefix("out/") for m in t.getmembers()} - {"manifest.json"}
+    pub = "op-a/published/"
+    # Every remote file keeps its host-computed hash; bytes travel once per distinct content.
+    assert len(files) == 2 * 8 + 2  # per rank: 4 tensors + 2 checkpoints + trace + summary
+    assert not any(
+        "rank-1/" in n and not n.endswith(("trace.json", "summary.json")) for n in carried
+    )
+    assert {pub + "rank-0/state.safetensors", pub + "rank-0/checkpoints/5.safetensors"} <= carried
+    assert {pub + "rank-1/trace.json", pub + "rank-1/summary.json"} <= carried
+    assert not any(n.endswith("start_state") for n in carried)  # held locally: hash only
+    assert not mod.rank_bytes_differ(files)
+    # A dedup archive is not a full rescue, and the dedup verifier refuses an extra member.
+    with pytest.raises(Reject, match="coverage_mismatch"):
+        mod.verify_export(archive, 1 << 30)
+    with pytest.raises(Reject, match="coverage_mismatch"):
+        mod.verify_export(archive, 1 << 30, False, [])
+    # A rank whose state/checkpoint hash differs from rank-0's is detected from hashes alone.
+    for rel in ("state.safetensors", "checkpoints/5.safetensors"):
+        bad = {k: dict(v) for k, v in files.items()}
+        bad[pub + "rank-1/" + rel]["sha256"] = "ab" * 32
+        assert mod.rank_bytes_differ(bad)
+    bad = {k: v for k, v in files.items() if k != pub + "rank-0/ef.safetensors"}
+    assert mod.rank_bytes_differ(bad)
+    traces = {k: dict(v) for k, v in files.items()}
+    traces[pub + "rank-1/trace.json"]["sha256"] = "cd" * 32
+    assert not mod.rank_bytes_differ(traces)  # traces legitimately differ per rank
 
 
 def test_verified_dedup_hardlinks_identical_bytes_only(tmp_path: Path) -> None:

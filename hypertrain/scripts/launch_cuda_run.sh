@@ -17,7 +17,6 @@ umask 077
 
 TAG=${TAG:-v1}
 RD=${RD:-/data/role-dispatch}
-T=${TOOLS:-$RD/tools}
 E2E=${E2E:-/root/e2e-deploy-wt/hypertrain-e2e-b/.e2e}
 OUT=${OUT:-$RD/manifest/out-$TAG}
 JOB=${JOB:-$RD/manifest/job-$TAG}
@@ -29,6 +28,7 @@ PY=${PY:-$RD/runtime/venv/bin/python}
 MINER_SRC=${MINER_SRC:-/data/pydeps/hypertrain}
 REPO=${REPO:-$(cd "$(dirname "$0")/.." && pwd)}
 FIX_BASE=${FIX_BASE:-1a8f91e}
+T=${TOOLS:-$REPO/scripts/ops}
 MINER_SSH=${MINER_SSH:-}
 MINER_KEY=${MINER_KEY:-}
 # Signed floor: cutoff >= admitted + staging 1800 s + qualification 9600 s + hard margin 1800 s;
@@ -77,7 +77,8 @@ export PYTHONPATH=$HT_TREE/src:$HT_TREE/scripts:$HT_TREE:/data/pydeps:$RD/runtim
 mkdir -p "$STATE"
 
 STAGE=preflight
-for f in "$T"/{prepare_record.py,task8-deps.py,rescue_parallel.py,task8-materialize-roots.py} \
+for f in "$T"/{prepare_record.py,task8-deps.py,hf_seed.py,rescue_parallel.py,rescue_dedup.py} \
+  "$T"/{task8-materialize-roots.py,prepare_runtime.py} \
   "$T"/{backend_bootstrap.py,live_operator.py,auditors.sh} \
   "$E2E/beacon/pusher.py" "$E2E/relays/build_relay_configs.py" "$E2E/relays/deploy_relay.sh" \
   "$OUT/manifest-envelope.json" "$OUT/manifest.json" "$OUT/profile.json" "$JOB/job.json" \
@@ -120,14 +121,28 @@ case $rc in 0) BACKEND=unregistered ;; 3) BACKEND=cuda ;; 4) die "run ${RID:0:8}
 BUNDLE=$STATE/bundle
 rm -rf "$BUNDLE" && mkdir -p "$BUNDLE" && cp -a "$MINER_SRC" "$BUNDLE/hypertrain"
 find "$BUNDLE" -name __pycache__ -prune -exec rm -rf {} +
+# Diff FIX_BASE against the working tree (not HEAD): uncommitted miner changes ship too.
 if ! grep -q '_retrying("PUT object' "$BUNDLE/hypertrain/miner/core.py"; then
-  git -C "$REPO" diff "$FIX_BASE" HEAD -- src/hypertrain/miner/core.py src/hypertrain/data/store.py \
+  git -C "$REPO" diff "$FIX_BASE" -- src/hypertrain/miner/core.py src/hypertrain/data/store.py \
     | patch -p3 --forward --quiet -d "$BUNDLE/hypertrain" || die "transport fixes do not apply onto $MINER_SRC"
 fi
 grep -q '_retrying("PUT object' "$BUNDLE/hypertrain/miner/core.py" || die "bundle lacks the PUT retry fix"
 grep -q 'def _parts' "$BUNDLE/hypertrain/data/store.py" || die "bundle lacks the parallel part fetch"
+grep -q '^UPLOAD_WORKERS = ' "$BUNDLE/hypertrain/miner/core.py" || die "bundle lacks the parallel part PUT"
+grep -q 'def _local_input' "$BUNDLE/hypertrain/miner/core.py" || die "bundle lacks the theta-only input reuse"
+# store.py has no master-side divergence: the bundle copy must be the working tree's bytes.
+cmp -s "$REPO/src/hypertrain/data/store.py" "$BUNDLE/hypertrain/data/store.py" \
+  || die "bundle data/store.py differs from the working tree"
 log "PREFLIGHT_OK run=$RID image=$IMAGE job_deadline=$JD backend=$BACKEND miner=${MINER_SSH:-unset}"
 if [ "$MODE" = --dry-run ]; then log "DRY_RUN_DONE no provider call, nothing spent"; exit 0; fi
+# Runtime uid 65532 and the master container (sees /data only) cannot read a /root checkout:
+# run a frozen copy of the tools from /data.
+if [ "${T#"$RD"/}" = "$T" ]; then
+  TS=$RD/ops-$TAG
+  install -d -o 65532 -g 65532 -m 0700 "$TS"
+  for f in "$T"/*.py "$T"/*.sh; do install -o 65532 -g 65532 -m 0700 "$f" "$TS/"; done
+  T=$TS
+fi
 
 if [ ! -e "$STATE/window" ]; then
   A=$(date +%s); CUT=$((A + WINDOW)); [ "$CUT" -le "$JD" ] || CUT=$JD

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -257,3 +258,48 @@ def test_parallel_fetch_failing_part_leaves_no_temp_and_stops_queueing(tmp_path:
         fetch_to(ref, get, out / "dest", workers=2)
     # Window is 4 * workers = 8 parts: the 9th is never requested.
     assert os.listdir(out) == [] and index.parts[-1] not in asked
+
+
+def test_parallel_publish_puts_parts_concurrently_and_index_last(tmp_path: Path) -> None:
+    # Given: a 9-part file; part 0's PUT only completes once part 1's PUT has started, so a
+    # serial publisher would fail the wait instead of passing.
+    data = _blob(8 * PART_BYTES + 77)
+    src = tmp_path / "f"
+    src.write_bytes(data)
+    serial = Recorder(tmp_path / "serial")
+    want = put_file(src, serial.put)
+    rec, second_started, lock = Recorder(tmp_path / "s"), threading.Event(), threading.Lock()
+
+    def put(chunk: bytes) -> str:
+        if chunk == data[:PART_BYTES]:
+            assert second_started.wait(timeout=10), "parts were not put concurrently"
+        if chunk == data[PART_BYTES : 2 * PART_BYTES]:
+            second_started.set()
+        with lock:
+            return rec.put(chunk)
+
+    # When: published with 4 workers.
+    ref = put_file(src, put, workers=4)
+    # Then: same ref as serial, index last, and it lists the parts in file order.
+    assert ref == want and parse_index(rec.puts[-1]) == parse_index(serial.puts[-1])
+    assert all(parse_index(b) is None for b in rec.puts[:-1])
+    assert get_large(ref, rec.store.get) == data
+
+
+def test_parallel_publish_failing_part_never_puts_index(tmp_path: Path) -> None:
+    data = _blob(8 * PART_BYTES + 1)
+    src = tmp_path / "f"
+    src.write_bytes(data)
+    rec, lock = Recorder(tmp_path / "s"), threading.Lock()
+
+    def put(chunk: bytes) -> str:
+        if chunk == data[3 * PART_BYTES : 4 * PART_BYTES]:
+            raise StoreError("boom")
+        with lock:
+            return rec.put(chunk)
+
+    with pytest.raises(StoreError, match="boom"):
+        put_file(src, put, workers=2)
+    # Window is 2 * workers = 4 parts in flight: no index, and the tail is never queued.
+    assert all(parse_index(b) is None for b in rec.puts)
+    assert data[-1:] not in rec.puts

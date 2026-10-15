@@ -6,7 +6,9 @@ Default loader reads pinned parquet files the curator already fetched into
 
 from __future__ import annotations
 
+import gzip
 import hashlib
+import io
 import json
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
@@ -61,11 +63,24 @@ def parquet_loader(cache: Path) -> Loader:
     def load(src: Source) -> Iterable[Row]:
         import pyarrow.parquet as pq
 
-        files = sorted((cache / src.id).rglob("*.parquet"))
+        root = cache / src.id
+        files = sorted(p for g in ("*.parquet", "*.jsonl.zst", "*.json.gz") for p in root.rglob(g))
         if not files:
-            raise BuildError(f"{src.id}: no parquet files in {cache / src.id}")
+            raise BuildError(f"{src.id}: no parquet/jsonl.zst/json.gz files in {root}")
         for p in files:
-            yield from pq.read_table(p).to_pylist()
+            if p.suffix == ".parquet":
+                yield from pq.read_table(p).to_pylist()
+                continue
+            # dclm-baseline ships *.jsonl.zst and peS2o v2 ships *.json.gz at the pinned revisions
+            if p.suffix == ".zst":
+                import zstandard
+
+                zr = zstandard.ZstdDecompressor().stream_reader(p.open("rb"))
+                with io.TextIOWrapper(zr) as raw:
+                    yield from (json.loads(line) for line in raw if line.strip())
+            else:
+                with gzip.open(p, "rt") as gz:
+                    yield from (json.loads(line) for line in gz if line.strip())
 
     return load
 

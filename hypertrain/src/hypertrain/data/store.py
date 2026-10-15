@@ -17,7 +17,7 @@ import stat
 import tempfile
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import islice
 from pathlib import Path
 from typing import Protocol
@@ -309,31 +309,47 @@ def parse_index(raw: bytes) -> PartIndexV1 | None:
     return index
 
 
-def _publish(chunks: Callable[[], bytes], put: Put) -> str:
+def _publish(chunks: Callable[[], bytes], put: Put, workers: int = 1) -> str:
+    """workers > 1 PUTs parts concurrently (at most 2 * workers parts = 2 * workers MiB in
+    flight, so `put` must be thread-safe); the index is still PUT last, after every part."""
     buf, nxt = chunks(), chunks()
     if not nxt:
         if buf.startswith(INDEX_MAGIC):
             raise StoreError("plain object must not begin with the part-index magic")
         return _put(put, buf)
-    whole, size, parts = hashlib.sha256(), 0, list[str]()
-    while buf:
-        if len(parts) >= MAX_PARTS:
-            raise StoreError("object exceeds MAX_PARTS * PART_BYTES")
-        if nxt and len(buf) != PART_BYTES:
-            raise StoreError("short read before end of object")
-        whole.update(buf)
-        size += len(buf)
-        parts.append(_put(put, buf))
-        buf, nxt = nxt, (chunks() if nxt else b"")
+    whole, size, parts, count = hashlib.sha256(), 0, list[str](), 0
+    pool = ThreadPoolExecutor(workers) if workers > 1 else None
+    inflight: deque[Future[str]] = deque()
+    try:
+        while buf:
+            if count >= MAX_PARTS:
+                raise StoreError("object exceeds MAX_PARTS * PART_BYTES")
+            if nxt and len(buf) != PART_BYTES:
+                raise StoreError("short read before end of object")
+            whole.update(buf)
+            size += len(buf)
+            count += 1
+            if pool is None:
+                parts.append(_put(put, buf))
+            else:
+                if len(inflight) >= 2 * workers:
+                    parts.append(inflight.popleft().result())
+                inflight.append(pool.submit(_put, put, buf))
+            buf, nxt = nxt, (chunks() if nxt else b"")
+        while inflight:
+            parts.append(inflight.popleft().result())
+    finally:  # error/cancel: drop queued PUTs, wait for running ones, never publish the index
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
     index = PartIndexV1(sha256=whole.hexdigest(), size=size, parts=parts)
     return _put(put, index.encode())  # last: readers never see an index before its parts
 
 
-def put_file(path: Path, put: Put) -> str:
+def put_file(path: Path, put: Put, workers: int = 1) -> str:
     """Store `path`; returns the key of the plain object (<= PART_BYTES) or of its part index.
     The final put() call's bytes are the referenced object (len <= MAX_MANIFEST_BYTES)."""
     with Path(path).open("rb") as f:
-        return _publish(lambda: f.read(PART_BYTES), put)
+        return _publish(lambda: f.read(PART_BYTES), put, workers)
 
 
 def put_large(data: bytes, put: Put) -> str:

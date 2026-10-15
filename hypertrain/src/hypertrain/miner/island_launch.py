@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -484,8 +485,10 @@ def validate_artifacts(job: IslandJobV1, directory: Path) -> IslandArtifacts:
                 job.run_id, job.w, p.t, -1
             ):
                 raise IslandFailure("leaf assignment/rng mismatch")
+            if rank:
+                continue  # checkpoints live under rank-0 only; rank-N leaves equal rank-0's
             chk, opt = unpack_state(
-                confined(directory, f"rank-{rank}/checkpoints/{p.t}.safetensors").read_bytes()
+                confined(directory, f"rank-0/checkpoints/{p.t}.safetensors").read_bytes()
             )
             from hypertrain.trainer.loop import stage_states
 
@@ -634,6 +637,55 @@ def launch_island(
             finally:
                 os.close(fd)
         return validate_artifacts(job, published)
+
+
+def launch_window(job: IslandJobV1, published: Path, leaf: int, *, timeout: float = 3600.0) -> None:
+    """Lazy dispute trace: re-run committed window ``leaf`` from rank-0's checkpoint (leaf-1)*J
+    with hooks on, writing rank-N/windows/<leaf>.json. The worker refuses a re-run whose leaf
+    differs from the committed one. Cached: a finished window is never re-run."""
+    published = published.resolve()
+    n_gpus = job.manifest.training.reference_spec.layout.n_gpus
+    outputs = [published / f"rank-{r}/windows/{leaf}.json" for r in range(n_gpus)]
+    summary = load_json(confined(published, "rank-0/summary.json").read_bytes())
+    backend: Literal["cpu", "cuda"]
+    match summary.get("backend") if isinstance(summary, dict) else None:
+        case "cpu":
+            backend = "cpu"
+        case "cuda":
+            backend = "cuda"
+        case _:
+            raise IslandFailure("publication backend missing")
+    ref = job.manifest.training.reference_spec
+    env = dict(
+        os.environ,
+        CUBLAS_WORKSPACE_CONFIG=ref.env.CUBLAS_WORKSPACE_CONFIG,
+        OMP_NUM_THREADS="1",
+        CUDA_DISABLE_PTX_JIT=ref.env.CUDA_DISABLE_PTX_JIT,
+        HT_ISLAND_TRACE="1",
+        HT_ISLAND_WINDOW=str(leaf),
+    )
+    with flock(published.parent / "launch.lock"):
+        if all(p.is_file() for p in outputs):
+            return
+        proc = subprocess.Popen(  # noqa: S603 - fixed interpreter/package, typed layout
+            launch_argv(job, published, backend),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            _, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            raise IslandFailure("window re-run deadline expired") from e
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+        if proc.returncode != 0 or not all(p.is_file() for p in outputs):
+            tail = err[-4000:].decode(errors="replace")
+            raise IslandFailure(f"window re-run failure {proc.returncode}: {tail}")
 
 
 def _launch_unbounded(

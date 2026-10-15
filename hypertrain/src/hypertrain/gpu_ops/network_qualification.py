@@ -151,7 +151,7 @@ class Result(Boundary):
 
 
 def round_files(ranks: int, H: int, J: int) -> list[str]:  # noqa: N803 - manifest names
-    """Every rank's final artifacts plus each J-th checkpoint of an H-step round."""
+    """Every rank's final artifacts plus rank-0's J-th checkpoints (only rank 0 writes them)."""
     if min(ranks, H, J) < 1 or H % J:
         raise Reject("qualification_layout_invalid")
     return [
@@ -163,7 +163,7 @@ def round_files(ranks: int, H: int, J: int) -> list[str]:  # noqa: N803 - manife
             "delta.bin",
             "leaves.json",
             "trace.json",
-            *(f"checkpoints/{t}.safetensors" for t in range(0, H + 1, J)),
+            *(f"checkpoints/{t}.safetensors" for t in range(0, H + 1, J) if not rank),
         )
     ]
 

@@ -1078,3 +1078,34 @@ def test_v1_when_opaque_published_baseline_is_replayed(tmp_path: Path) -> None:
     )
     assert tape_bytes(tape) == bytes.fromhex(tape_fixture["signed_hex"])
     assert sha256_hex(result.to_bytes()) == tape["body"]["out_state"]
+
+
+def test_audit_lease_when_h_scales_with_step_bound() -> None:
+    from hypertrain.protocol.messages import f32hex
+    from hypertrain.protocol.messages_v2 import AuditPolicyV2, audit_lease_rounds
+
+    # Given: the pinned small-H lease and the H=512 / 4 s production bound.
+    assert audit_lease_rounds(30, 4.0) == 100
+    assert audit_lease_rounds(512, 4.0) == 1466  # ceil(2*512*4/3) + 100
+    body = example_manifest().body()
+    body["model"]["param_count"] = 4_329_216
+    body["inner"].update(H=512, J=64)
+    training = wrapper(body).training
+    policy = dict(
+        max_attempts=2,
+        max_concurrent_per_auditor=1,
+        max_running_jobs=2,
+        max_queued_jobs=32,
+        max_anchor_age_rounds=1,
+        max_steps_per_attempt=1024,
+    )
+    # When / Then: only the derived lease validates; absolute cap is twice the lease.
+    ok = AuditPolicyV2(lease_rounds=1466, **policy)
+    ok.validate_training(training)
+    assert ok.absolute_rounds() == 2932
+    with pytest.raises(ValueError, match="derived lease"):
+        AuditPolicyV2(lease_rounds=100, **policy).validate_training(training)
+    with pytest.raises(ValueError, match="step_seconds_bound"):
+        AuditPolicyV2(
+            lease_rounds=1466, step_seconds_bound=f32hex(float("nan")), **policy
+        ).validate_training(training)

@@ -557,7 +557,8 @@ def test_exact_staged_contract_over_real_ssh(tmp_path: Path) -> None:
         assert len(journal.all("network_job_started")) == 1
         rescued = runtime.rescue("h0")
         assert any("rank-0/checkpoints/" in name for name in rescued["files"])
-        assert any("rank-1/checkpoints/" in name for name in rescued["files"])
+        # checkpoints are written by rank 0 only (ranks are bitwise identical)
+        assert not any("rank-1/checkpoints/" in name for name in rescued["files"])
         assert lifecycle.rescue("h0") == "verified"
         assert not journal.all("provider_call")
     finally:

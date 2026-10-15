@@ -406,3 +406,129 @@ def test_object_get_and_api_get_retry_5xx_but_signed_post_is_never_replayed(
     with pytest.raises(ChallengeHTTPError, match="502"):
         miner.api.call("POST", "/v2/runs/x/commit", json={})
     assert hits == ["POST"]
+
+
+def test_fetch_inputs_reuses_own_carry_and_downloads_only_theta(tmp_path: Path):
+    import hashlib
+    from types import SimpleNamespace
+
+    import torch
+
+    from hypertrain.auditor.replay import pack_state
+    from hypertrain.data.store import put_large
+    from hypertrain.trainer.optim import OptState
+
+    # Given: the miner's own previous publication (theta_old + m/v/step, ef) and a new global
+    # theta published by the master as a theta-only object.
+    miner, store, _ = _parts_miner(tmp_path)
+    n = 300_000  # > 1 MiB per tensor: indexed objects
+    carry = OptState({"w": torch.full((n,), 0.5)}, {"w": torch.full((n,), 0.25)}, 7)
+    previous = tmp_path / "prev"
+    previous.mkdir()
+    (previous / "state.safetensors").write_bytes(pack_state({"w": torch.zeros(n)}, carry))
+    ef = pack_state({"w": torch.ones(n)})
+    (previous / "ef.safetensors").write_bytes(ef)
+    theta = {"w": torch.arange(n, dtype=torch.float32)}
+    start = pack_state(theta, carry)
+    theta_ref = put_large(pack_state(theta), store.put)
+    full = {"start_state": put_large(start, store.put), "ef_in": put_large(ef, store.put)}
+    job = SimpleNamespace(
+        start_state_sha256=hashlib.sha256(start).hexdigest(),
+        ef_in_sha256=hashlib.sha256(ef).hexdigest(),
+        v0_sha256="00" * 32,
+        object_paths={"start_state": "start_state", "ef_in": "ef_in"},
+    )
+    gets: list[str] = []
+    fetch = miner._get_object
+    miner._get_object = lambda digest: gets.append(digest) or fetch(digest)
+    directory = tmp_path / "job"
+    directory.mkdir()
+    # When: inputs are fetched with the local carry available.
+    miner._fetch_inputs(job, full, directory, theta_ref, previous)
+    # Then: byte-identical inputs; only the theta object was downloaded.
+    assert (directory / "start_state").read_bytes() == start
+    assert (directory / "ef_in").read_bytes() == ef
+    assert gets[0] == theta_ref and not set(gets) & set(full.values())
+    assert sorted(p.name for p in directory.iterdir()) == ["ef_in", "start_state"]
+
+
+def test_fetch_inputs_falls_back_to_full_download_when_local_carry_differs(tmp_path: Path):
+    import hashlib
+    from types import SimpleNamespace
+
+    import torch
+
+    from hypertrain.auditor.replay import pack_state
+    from hypertrain.data.store import put_large
+    from hypertrain.trainer.optim import OptState
+
+    # Given: a stale local publication whose m/v and ef differ from the master's pins.
+    miner, store, _ = _parts_miner(tmp_path)
+    n = 300_000
+    previous = tmp_path / "prev"
+    previous.mkdir()
+    stale = OptState({"w": torch.zeros(n)}, {"w": torch.zeros(n)}, 1)
+    (previous / "state.safetensors").write_bytes(pack_state({"w": torch.zeros(n)}, stale))
+    (previous / "ef.safetensors").write_bytes(pack_state({"w": torch.zeros(n)}))
+    theta = {"w": torch.arange(n, dtype=torch.float32)}
+    start = pack_state(theta, OptState({"w": torch.ones(n)}, {"w": torch.ones(n)}, 2))
+    ef = pack_state({"w": torch.ones(n)})
+    full = {"start_state": put_large(start, store.put), "ef_in": put_large(ef, store.put)}
+    job = SimpleNamespace(
+        start_state_sha256=hashlib.sha256(start).hexdigest(),
+        ef_in_sha256=hashlib.sha256(ef).hexdigest(),
+        v0_sha256="00" * 32,
+        object_paths={"start_state": "start_state", "ef_in": "ef_in"},
+    )
+    directory = tmp_path / "job"
+    directory.mkdir()
+    # When / Then: the pinned full objects are downloaded instead; no temp file remains.
+    miner._fetch_inputs(job, full, directory, put_large(pack_state(theta), store.put), previous)
+    assert (directory / "start_state").read_bytes() == start
+    assert (directory / "ef_in").read_bytes() == ef
+    assert sorted(p.name for p in directory.iterdir()) == ["ef_in", "start_state"]
+
+
+@pytest.mark.parametrize("bad", ["missing", "corrupt", "wrong_shape"])
+def test_fetch_inputs_falls_back_to_full_download_on_bad_theta_ref(tmp_path: Path, bad: str):
+    import hashlib
+    from types import SimpleNamespace
+
+    import torch
+
+    from hypertrain.auditor.replay import pack_state
+    from hypertrain.data.store import put_large
+    from hypertrain.trainer.optim import OptState
+
+    # Given: a matching local carry, but the theta ref is unfetchable, corrupt or mis-shaped.
+    miner, store, _ = _parts_miner(tmp_path)
+    n = 300_000
+    carry = OptState({"w": torch.full((n,), 0.5)}, {"w": torch.full((n,), 0.25)}, 7)
+    previous = tmp_path / "prev"
+    previous.mkdir()
+    (previous / "state.safetensors").write_bytes(pack_state({"w": torch.zeros(n)}, carry))
+    theta = {"w": torch.arange(n, dtype=torch.float32)}
+    start = pack_state(theta, carry)
+    theta_ref = {
+        "missing": "ab" * 32,
+        "corrupt": store.put(b"not a safetensors file"),
+        "wrong_shape": put_large(pack_state({"w": torch.ones(n + 1)}), store.put),
+    }[bad]
+    full = {"start_state": put_large(start, store.put)}
+    job = SimpleNamespace(
+        start_state_sha256=hashlib.sha256(start).hexdigest(),
+        ef_in_sha256="00" * 32,
+        v0_sha256="00" * 32,
+        object_paths={"start_state": "start_state"},
+    )
+    gets: list[str] = []
+    fetch = miner._get_object
+    miner._get_object = lambda digest: gets.append(digest) or fetch(digest)
+    directory = tmp_path / "job"
+    directory.mkdir()
+    # When: inputs are fetched.
+    miner._fetch_inputs(job, full, directory, theta_ref, previous)
+    # Then: no MinerError; the pinned full object was downloaded; no temp file remains.
+    assert (directory / "start_state").read_bytes() == start
+    assert full["start_state"] in gets
+    assert sorted(p.name for p in directory.iterdir()) == ["start_state"]

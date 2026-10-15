@@ -922,8 +922,16 @@ def train_island(
     cancel: CancelHook | None = None,
     after_step: Callable[[int, Params], None] | None = None,
     checkpoint: Callable[[int, Params, OptState], None] | None = None,
+    hook_until: int | None = None,
+    steps: tuple[int, int] | None = None,
 ) -> RoundResult:
     """One H-step round on this rank; every rank returns the same full RoundResult.
+
+    ``hook_until`` drops ``hook`` after that step (the commit path traces window 1 only).
+    ``steps=(t0, t1)`` re-runs just steps t0+1..t1 from the committed full state at t0, passed as
+    ``theta_start``/``carry`` (lazy per-window dispute trace); its leaves cover only that span
+    and its delta/EF are meaningless. Per-step hook events never depend on earlier steps, so a
+    re-run window emits exactly the events of the continuous round.
 
     ``reduction="bucketed"`` swaps the gradient all_gather for the bucketed reduce-scatter
     (bitwise identical result, see _reduce_bucketed). ``"zero2"`` shards gradients onto the
@@ -950,6 +958,8 @@ def train_island(
             cancel,
             after_step,
             checkpoint,
+            hook_until,
+            steps,
         )
 
 
@@ -968,8 +978,16 @@ def _train_island(
     cancel: CancelHook | None = None,
     after_step: Callable[[int, Params], None] | None = None,
     checkpoint: Callable[[int, Params, OptState], None] | None = None,
+    hook_until: int | None = None,
+    steps: tuple[int, int] | None = None,
 ) -> RoundResult:
     require_threads(cfg.cpu_threads)
+    H, J = cfg.inner.H, cfg.inner.J
+    t0, t1 = steps or (0, H)
+    if not 0 <= t0 < t1 <= H or t0 % J or t1 % J:
+        raise ValueError("re-run steps must be J-aligned within the round")
+    if t0 and carry is None:
+        raise ValueError("re-run from a checkpoint needs its optimizer state")
     check_launch(lay, comm.world)
     traced = HookComm(comm, hook, cancel)
     comm = traced
@@ -983,7 +1001,8 @@ def _train_island(
         adam_names = {n for n in theta_start if not uses_muon(cfg.inner, n)}
         if set(carry.m) != set(theta_start) or set(carry.v) != adam_names:
             raise ValueError("carried full state does not match the model")
-        if carry.step != a.global_step0:
+        base = a.global_step0 if cfg.inner.state_policy == "carry" or not t0 else 0
+        if carry.step != base + t0:
             raise ValueError("carried optimizer step differs from assignment")
         if any(
             x.dtype != torch.float32 or x.shape != theta_start[n].shape
@@ -998,7 +1017,7 @@ def _train_island(
         and lay.ep_size != 1
     ):
         raise ValueError("ep_size incompatible with the model")
-    H, J, mb, ga = cfg.inner.H, cfg.inner.J, cfg.inner.micro_batch, cfg.inner.grad_accum
+    mb, ga = cfg.inner.micro_batch, cfg.inner.grad_accum
     if len(a.sample_ids) != H * mb * ga * lay.n_gpus:
         raise ValueError("assignment length must equal H * micro_batch * grad_accum * n_gpus")
     ia = IslandAssignment(a.run_id, a.w, a.sample_ids, a.global_step0, ranks=lay.n_gpus)
@@ -1014,7 +1033,11 @@ def _train_island(
             carry.step,
         )
     local_v0 = None if v0 is None else {n: geo.local(n, v0[n]) for n in owned if n in v0}
-    st = init_state(cfg.inner, {n: theta[n] for n in owned}, local_carry, local_v0)
+    if t0:
+        assert local_carry is not None
+        st = local_carry.clone()  # mid-round state, whatever the round-start policy
+    else:
+        st = init_state(cfg.inner, {n: theta[n] for n in owned}, local_carry, local_v0)
     pieces = geo.pieces()
     adam = [p for p in pieces if not uses_muon(cfg.inner, p[0])]
     device = theta[names[0]].device
@@ -1037,14 +1060,19 @@ def _train_island(
         v = _assemble(geo, gather_pieces(comm, geo, st.v, adam, geo.owner, device), adam_names)
         return th, OptState(m, v, st.step)
 
+    # A re-run's starting gather is window l-1's closing event, never window l's.
+    traced.step, traced.hook = t0, None if t0 else hook
     th_full, st_full = full()
-    leaves = [_make_leaf(cfg, ia, 0, th_full, st_full, 0.0, 0.0)]
-    if checkpoint is not None:
+    traced.hook = hook
+    leaves = [] if t0 else [_make_leaf(cfg, ia, 0, th_full, st_full, 0.0, 0.0)]
+    if checkpoint is not None and not t0:
         checkpoint(0, th_full, st_full)
     window_start = th_full
     del th_full, st_full  # memory: only window_start (theta) is needed between leaves
     per = mb * ga
-    for t in range(1, H + 1):
+    for t in range(t0 + 1, t1 + 1):
+        if hook_until is not None and t > hook_until:
+            hook = traced.hook = None
         traced.step = t
         if cancel is not None:
             cancel()
@@ -1115,6 +1143,7 @@ def _train_island(
             window_start = th_full
             del th_full, st_full
     del window_start
+    traced.hook = None  # the closing gather is no window's event: every window has one shape
     th_full, st_full = full()
     if ef_in is None:
         ef_in = {n: torch.zeros_like(x) for n, x in th_full.items()}

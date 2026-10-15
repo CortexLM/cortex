@@ -15,6 +15,7 @@ import logging
 import os
 import shutil
 import stat
+import tempfile
 import threading
 import time
 import tomllib
@@ -29,7 +30,7 @@ import httpx
 if TYPE_CHECKING:
     from hypertrain.gpu_ops.work_screen import IslandLaunch
     from hypertrain.miner.island_launch import IslandArtifacts
-    from hypertrain.protocol.messages_v2 import IslandJobV1
+    from hypertrain.protocol.messages_v2 import ArtifactRef, IslandJobV1
 
 import hypertrain.trainer  # noqa: F401  (determinism setup before torch)
 from hypertrain.auditor.bisect import Executor
@@ -53,6 +54,7 @@ EXP_ROUNDS = 2**40  # envelope expiry far beyond any round; replay protection is
 # transport error or a 5xx; the last failure propagates. ~31 s worst case per request.
 RETRY_DELAYS: tuple[float, ...] = (1, 2, 4, 8, 16)
 FETCH_WORKERS = 16  # concurrent 1 MiB part GETs per job input (bounded window, ordered sink)
+UPLOAD_WORKERS = 16  # concurrent 1 MiB part PUTs per artifact (bounded window, index last)
 
 
 def _retrying[T](what: str, fn: Callable[[], T]) -> T:
@@ -73,8 +75,64 @@ def _retrying[T](what: str, fn: Callable[[], T]) -> T:
     raise AssertionError("unreachable")
 
 
+def _upload_ref(path: Path, put: Callable[[bytes], str]) -> ArtifactRef:
+    """artifact_ref(path, put) with UPLOAD_WORKERS concurrent part PUTs (index still last)."""
+    from hypertrain.data.store import put_file
+    from hypertrain.protocol.messages_v2 import ArtifactRef
+
+    last = b""
+
+    def record(data: bytes) -> str:
+        nonlocal last
+        last = data  # the index (or plain object) is put after every part has completed
+        return put(data)
+
+    sha = put_file(path, record, UPLOAD_WORKERS)
+    return ArtifactRef(sha256=sha, size=len(last))
+
+
 class MinerError(RuntimeError):
     pass
+
+
+def _st_header(f: Any) -> tuple[int, dict[str, Any]]:
+    """safetensors header: (data start offset, {name: {dtype, shape, data_offsets}})."""
+    n = int.from_bytes(f.read(8), "little")
+    if not 0 < n <= 100 << 20:
+        raise ValueError("bad safetensors header length")
+    header = json.loads(f.read(n))
+    header.pop("__metadata__", None)
+    return 8 + n, header
+
+
+def _overwrite_theta(state: Path, theta: Path, chunk: int = 16 << 20) -> bool:
+    """Overwrite state's theta/* tensors in place with theta's, chunk by chunk.
+
+    False when the theta file's tensors (names/dtypes/shapes) differ from state's theta/*."""
+    with state.open("r+b") as dst, theta.open("rb") as src:
+        dst_base, dst_header = _st_header(dst)
+        src_base, src_header = _st_header(src)
+        if set(src_header) != {k for k in dst_header if k.startswith("theta/")}:
+            return False
+        for key, entry in src_header.items():
+            target = dst_header[key]
+            if (entry["dtype"], entry["shape"]) != (target["dtype"], target["shape"]):
+                return False
+            (a, b), (c, d) = entry["data_offsets"], target["data_offsets"]
+            if b - a != d - c:
+                return False
+            src.seek(src_base + a)
+            dst.seek(dst_base + c)
+            left = b - a
+            while left:
+                data = src.read(min(chunk, left))
+                if not data:
+                    raise ValueError("theta file truncated")
+                dst.write(data)
+                left -= len(data)
+        dst.flush()
+        os.fsync(dst.fileno())
+    return True
 
 
 class KeyfileError(MinerError):
@@ -816,9 +874,8 @@ class NetworkMiner:
                 self.kp, "WorkScreenV2", self.run_id, screen, challenge.deadline_beacon
             ),
         }
-        from hypertrain.gpu_ops.work_screen import artifact_ref
-
         put = self._bounded_put(job.deadline, cancel)
+        # Eager: admission.proof verifies every proof ref against stored bytes (one-time join).
         for ref, filename in zip(
             proof.artifact_refs,
             ("state.safetensors", "ef.safetensors", "delta.bin", "leaves.json"),
@@ -827,7 +884,7 @@ class NetworkMiner:
             if time.time() >= job.deadline or cancel is not None and cancel.is_set():
                 raise MinerError("probe deadline/cancellation")
             path = job_path.parent / "published" / "rank-0" / filename
-            if artifact_ref(path, put) != ref:
+            if _upload_ref(path, put) != ref:
                 raise MinerError("published artifact differs from screened ref")
         if time.time() >= job.deadline or cancel is not None and cancel.is_set():
             raise MinerError("probe deadline/cancellation")
@@ -867,10 +924,19 @@ class NetworkMiner:
 
         return _retrying("PUT object " + digest, put)
 
-    def _fetch_inputs(self, job: IslandJobV1, objects: Mapping[str, str], directory: Path) -> None:
+    def _fetch_inputs(
+        self,
+        job: IslandJobV1,
+        objects: Mapping[str, str],
+        directory: Path,
+        theta: str | None = None,
+        previous: Path | None = None,
+    ) -> None:
         """objects: name -> stored ref (plain or ht-parts-v1 index); the job pins whole SHAs.
 
-        Each file is verified and atomically replaced; a bad ref never leaves a file behind."""
+        Each file is verified and atomically replaced; a bad ref never leaves a file behind.
+        previous: this miner's own prior publication (rank-0); ef_in, and start_state rebuilt
+        from the public `theta` ref + its own m/v/step, are reused when they hash to the pins."""
         from hypertrain.data.store import StoreError, fetch_to
 
         whole = {
@@ -884,6 +950,8 @@ class NetworkMiner:
             raise MinerError("job object names differ from the job's object paths")
         for name, digest in objects.items():
             dest = directory / job.object_paths[name]
+            if name in whole and self._local_input(name, whole[name], dest, theta, previous):
+                continue
             try:
                 fetch_to(digest, self._get_object, dest, workers=FETCH_WORKERS)
             except StoreError as e:
@@ -893,6 +961,45 @@ class NetworkMiner:
                     if hashlib.file_digest(f, "sha256").hexdigest() != whole[name]:
                         dest.unlink()
                         raise MinerError("job input hash mismatch")
+
+    def _local_input(
+        self, name: str, whole: str, dest: Path, theta: str | None, previous: Path | None
+    ) -> bool:
+        """True iff dest now holds bytes rebuilt locally that hash to `whole` (else untouched).
+
+        Streamed on disk (bounded RAM): start_state = the previous state file with its theta/*
+        byte ranges overwritten from the fetched theta-only file (same names/shapes/dtypes, so
+        the safetensors header and offsets are identical). Any mismatch, or a corrupt or
+        unfetchable theta ref, returns False so the caller downloads the full pinned object."""
+        from hypertrain.data.store import StoreError, fetch_to
+
+        if previous is None:
+            return False
+        source = previous / ("ef.safetensors" if name == "ef_in" else "state.safetensors")
+        if name not in ("ef_in", "start_state") or not source.is_file():
+            return False
+        if name == "start_state" and theta is None:
+            return False
+        fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".part")
+        os.close(fd)
+        out, theta_tmp = Path(tmp), dest.parent / f".{dest.name}.theta.part"
+        try:
+            shutil.copyfile(source, out)
+            if name == "start_state" and theta is not None:
+                fetch_to(theta, self._get_object, theta_tmp, workers=FETCH_WORKERS)
+                if not _overwrite_theta(out, theta_tmp):
+                    return False
+            with out.open("rb") as f:
+                if hashlib.file_digest(f, "sha256").hexdigest() != whole:
+                    return False
+            os.replace(out, dest)
+            return True
+        except (StoreError, MinerError, ValueError, httpx.HTTPError) as e:
+            log.warning("local %s rebuild failed (%s); downloading the pinned object", name, e)
+            return False
+        finally:
+            out.unlink(missing_ok=True)
+            theta_tmp.unlink(missing_ok=True)
 
     def _get_object(self, digest: str) -> bytes:
         """Bounded streamed GET: ht-parts-v1 parts and indexes are <= 1 MiB each, so a larger
@@ -1023,7 +1130,13 @@ class NetworkMiner:
         job = IslandJobV1.model_validate(staged["job"])
         directory = self.directory / str(w)
         directory.mkdir(parents=True, exist_ok=True)
-        self._fetch_inputs(job, staged["objects"], directory)
+        self._fetch_inputs(
+            job,
+            staged["objects"],
+            directory,
+            staged.get("theta"),
+            self.directory / str(w - 1) / "published" / "rank-0" if w else None,
+        )
         artifacts = launch_island(
             job,
             directory,
@@ -1063,10 +1176,11 @@ class NetworkMiner:
         put = self._bounded_put(
             self.manifest.training.beacon.genesis_time + (schedule.d_final - 1) * 3, None
         )
-        refs = [
-            artifact_ref(path, put)
-            for path in (artifacts.state, artifacts.ef, artifacts.delta, artifacts.leaves)
-        ]
+        # state/ef/delta are committed by ref only: no round verifier reads them from the store
+        # (leaves_v2 reads refs[-1]; the delta reaches the master via relay retrieval; audits
+        # replay from master-staged inputs; disputes serve local checkpoints).
+        refs = [artifact_ref(path) for path in (artifacts.state, artifacts.ef, artifacts.delta)]
+        refs.append(_upload_ref(artifacts.leaves, put))
         descriptor = WorkProof(
             admission_id=status["record"]["admission_id"],
             challenge_hash=sha256_hex(canonical(commit)),

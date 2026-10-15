@@ -6119,7 +6119,7 @@ class ChallengeStore:
                     missing.append((entry, identity, job_id, commit))
             if active + len(missing) > policy.max_queued_jobs:
                 raise ChallengeError(503, "audit capacity unavailable; no new reservation")
-            absolute = min(body.d_final, body.d_audit + 200)
+            absolute = min(body.d_final, body.d_audit + policy.absolute_rounds())
             if absolute <= now + 1:
                 raise ChallengeError(503, "audit absolute horizon exhausted")
             result = []
@@ -6309,7 +6309,10 @@ class ChallengeStore:
             if row is None:
                 return None
             nonce = secrets.token_hex(32)
-            expires = min(now + 100, row["absolute"])
+            lease_rounds = AuditPolicyV2.model_validate_json(
+                self.objects.get(manifest.network.audit_policy_hash)
+            ).lease_rounds
+            expires = min(now + lease_rounds, row["absolute"])
             identity = f"{row['w']}:{row['hotkey']}"
             start = StartStateV2.model_validate(self._record_v2(run_id, "start", identity))
             commit_env = self._record_v2(run_id, "commit", identity)
@@ -6567,7 +6570,11 @@ class ChallengeStore:
             directory = self.state_dir / "jobs-v2" / str(w) / hotkey
             directory.mkdir(parents=True, exist_ok=True)
             state = get_large(start.state_object_sha256, self.objects.get)
-            if manifest.training.inner.state_policy != "carry":
+            # carry: also stage the public theta-only object; else the start state is theta only.
+            theta_only: bytes | None = None
+            if manifest.training.inner.state_policy == "carry":
+                theta_only = pack_state(unpack_state(state)[0])
+            else:
                 state = pack_state(unpack_state(state)[0])
             inputs = {
                 "start_state": state,
@@ -6602,7 +6609,10 @@ class ChallengeStore:
                 deadline=manifest.training.beacon.genesis_time + (int(body["d_commit"]) - 1) * 3,
             )
             self._put_record_v2(run_id, "island-job", f"{w}:{hotkey}", job.body())
-            return {"job": job.body(), "objects": hashes}
+            staged: dict[str, Any] = {"job": job.body(), "objects": hashes}
+            if theta_only is not None:  # a miner rebuilds start_state from it + its own m/v
+                staged["theta"] = put_large(theta_only, self.objects.put)
+            return staged
 
     def execute_audit_v2(self, run_id: str, job_id: str, raw: bytes) -> dict[str, Any]:
         """Independent service execution; auditor signature cannot manufacture MATCH."""

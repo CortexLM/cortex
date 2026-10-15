@@ -247,6 +247,12 @@ class _RangeHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(500)
             return
         data = (Path(self.directory) / self.path.lstrip("/")).read_bytes()  # type: ignore[arg-type]
+        if self.headers["Range"] is None:  # plain GET (dataset manifest.json)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         a, b = self.headers["Range"].removeprefix("bytes=").split("-")
         body = data[int(a) : int(b) + 1]
         if self.server.corrupt:  # type: ignore[attr-defined]
@@ -380,3 +386,22 @@ def test_shard_sampler_u16_branch(tmp_path: Path) -> None:
     assert get(7).tolist() == s.row(7).tolist() and get(7).dtype == np.uint32
     with pytest.raises(MinerError, match="unit root"):
         shard_sampler(tmp_path / "src", _manifest_for(m, unit_sha256_root="1" * 64))
+
+
+def test_shard_sampler_u16_remote_units(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    m, pub = _published(tmp_path)
+    (pub / "manifest.json").write_text(m.to_json())
+    srv, url = _serve(pub)
+    try:
+        monkeypatch.setenv("HYPERTRAIN_DATA_BASES", url)
+        get = shard_sampler(tmp_path / "remote", _manifest_for(m))  # no local shards
+        s = U16ShardSamples(tmp_path / "src", m.n_shards, m.samples_per_shard, m.seq_len)
+        assert get(13).tolist() == s.row(13).tolist() and get(13).dtype == np.uint32
+        assert (tmp_path / "remote/units" / m.unit_sha256s[13 // m.unit]).is_file()
+        forged = m.to_json().replace(m.unit_sha256s[0], "0" * 64)
+        (tmp_path / "forged").mkdir()
+        (tmp_path / "forged/manifest.json").write_text(forged)
+        with pytest.raises(MinerError, match="signed roots"):
+            shard_sampler(tmp_path / "forged", _manifest_for(m))
+    finally:
+        srv.shutdown()

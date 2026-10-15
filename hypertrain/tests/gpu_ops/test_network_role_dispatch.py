@@ -333,6 +333,7 @@ def test_loopback_debit_transport_custody_and_nonretryable(context, monkeypatch,
                 + " "
                 + shlex.quote(runtime.lifecycle.remote_root("h0") + "/rescue.tar")
                 + " experiments/gpu_network_v2/profile.json"
+                + command.split("profile.json", 1)[1]  # the runtime's own mode (dedup ...)
             )
         return original_run(ssh, command, tag, logs)
 

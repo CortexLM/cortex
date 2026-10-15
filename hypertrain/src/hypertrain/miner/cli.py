@@ -22,17 +22,87 @@ import numpy as np
 import numpy.typing as npt
 
 from hypertrain.data.shards import ShardSamples, ShardSetManifest, verify_shards
-from hypertrain.datasets.shards16 import ShardSet16Manifest, U16ShardSamples, verify_shards16
+from hypertrain.datasets.fetch import prefetch
+from hypertrain.datasets.shards16 import (
+    U16,
+    ShardSet16Manifest,
+    U16ShardSamples,
+    shard_name16,
+    verify_shards16,
+)
 from hypertrain.miner.core import Miner, MinerConfig, MinerError, NetworkMiner, canonical
 from hypertrain.miner.dispute_watch import add_watch_args, run_follow
 from hypertrain.miner.keys import create_key, list_keys, revoke_key
 from hypertrain.miner.update import Updater, UpdateRejected
+from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.protocol.messages import RunManifest
 from hypertrain.trainer.loop import SampleFn
 
+DATA_BASES_ENV = "HYPERTRAIN_DATA_BASES"
+DEFAULT_DATA_BASE = "http://185.8.107.43:18980/"
+MAX_DATASET_MANIFEST_BYTES = 64 << 20
+
+
+def _data_bases() -> list[str]:
+    raw = os.environ.get(DATA_BASES_ENV) or DEFAULT_DATA_BASE
+    bases = [b.strip() for b in raw.split(",") if b.strip()]
+    if not bases or any(not b.startswith(("http://", "https://")) for b in bases):
+        raise MinerError(f"{DATA_BASES_ENV} must be comma-separated http(s) base URLs")
+    return bases
+
+
+def _dataset_manifest(data_dir: Path, bases: list[str]) -> ShardSet16Manifest:
+    """Local manifest.json, else fetched (bounded) from the first base that serves it."""
+    path = data_dir / "manifest.json"
+    if not path.is_file():
+        errors = []
+        for base in bases:
+            try:
+                with httpx.stream("GET", base.rstrip("/") + "/manifest.json", timeout=60) as r:
+                    r.raise_for_status()
+                    body = bytearray()
+                    for chunk in r.iter_bytes():
+                        body += chunk
+                        if len(body) > MAX_DATASET_MANIFEST_BYTES:
+                            raise MinerError("dataset manifest exceeds 64 MiB")
+            except (httpx.HTTPError, MinerError) as e:
+                errors.append(f"{base}: {e}")
+                continue
+            data_dir.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_bytes(body)
+            tmp.replace(path)
+            break
+        else:
+            raise MinerError(f"dataset manifest unavailable: {errors[-3:]}")
+    return ShardSet16Manifest.from_json(path.read_text())
+
+
+class _RemoteUnits:
+    """Samples from sha256-verified units fetched by HTTP Range on first use, cached under
+    data_dir/units/<unit_sha256>. ponytail: on-demand per unit (8 units per H=512 slot); add a
+    whole-assignment prefetch once the miner core passes its sample ids ahead of training."""
+
+    def __init__(self, data_dir: Path, m: ShardSet16Manifest, bases: list[str]) -> None:
+        self.m, self.bases, self.cache = m, bases, data_dir / "units"
+        self.maps: dict[int, npt.NDArray[np.uint16]] = {}
+
+    def row(self, i: int) -> npt.NDArray[np.uint32]:
+        if not 0 <= i < self.m.n_samples:
+            raise IndexError(i)
+        u, k = divmod(i, self.m.unit)
+        if u not in self.maps:
+            for _ in prefetch(self.m, [u], self.cache, self.bases, streams=1, depth=1):
+                pass
+            path = self.cache / self.m.unit_sha256s[u]
+            self.maps[u] = np.memmap(path, dtype=U16, mode="r").reshape(-1, self.m.seq_len + 1)
+        return self.maps[u][k].astype(np.uint32)
+
 
 def _u16_sampler(data_dir: Path, manifest: RunManifest) -> SampleFn:
-    m = ShardSet16Manifest.from_json((data_dir / "manifest.json").read_text())
+    local = (data_dir / shard_name16(0)).is_file()
+    bases = [] if local else _data_bases()
+    m = _dataset_manifest(data_dir, bases)
     ds = manifest.dataset
     if (m.merkle_root, m.shard_sha256_root, m.n_samples, m.unit_sha256_root) != (
         ds.merkle_root,
@@ -43,6 +113,19 @@ def _u16_sampler(data_dir: Path, manifest: RunManifest) -> SampleFn:
         raise MinerError(
             "local shards are not the run's dataset (merkle/shard root/n_samples/unit root)"
         )
+    if not local:
+        # Untrusted manifest bytes: the unit list must hash to the signed root, and the units
+        # must tile n_samples exactly; each fetched unit is then checked against its listed sha.
+        if (
+            len(m.unit_sha256s) * m.unit != m.n_samples
+            or m.samples_per_shard % m.unit
+            or MerkleTree([bytes.fromhex(h) for h in m.unit_sha256s]).root.hex()
+            != ds.unit_sha256_root
+            or MerkleTree([bytes.fromhex(h) for h in m.shard_sha256s]).root.hex()
+            != ds.shard_sha256_root
+        ):
+            raise MinerError("remote dataset manifest unit/shard lists differ from signed roots")
+        return _RemoteUnits(data_dir, m, bases).row
     errors = verify_shards16(data_dir, m)
     if errors:
         raise MinerError(f"shard verification failed: {errors[:3]}")
