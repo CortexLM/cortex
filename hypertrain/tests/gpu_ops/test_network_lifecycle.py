@@ -891,6 +891,181 @@ def test_streamed_rescue_writes_no_remote_archive_and_verifies_locally(
         assert not list((run / "rescue/h0").iterdir())  # partial archive removed
 
 
+def hash_rescue_tree(tmp_path: Path) -> tuple[Path, dict]:
+    """A 2-rank qualification output whose result.json claims the exact round-file hashes."""
+    from hypertrain.gpu_ops import network_qualification as driver
+
+    src = tmp_path / "remote-out"
+    q = src / "qualification"
+    rounds = []
+    for index in range(2):
+        claimed = {}
+        for rel in driver.round_files(2, 30, 5):
+            path = q / f"round-{index}/published" / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(bytes([index]) * 4096)
+            claimed[rel] = fsha(path)
+        for rank in range(2):
+            (q / f"round-{index}/published/rank-{rank}/summary.json").write_text("{}")
+        (q / f"round-{index}/published/job.json").write_text("{}")
+        rounds.append(claimed)
+    result = {"rounds": rounds}  # only the rounds field is read before full validation fails
+    (q / "config.json").write_text("{}")
+    profile = json.loads((TREE / "experiments/gpu_network_v2/profile.json").read_bytes())
+    return q, {"result": result, "profile": profile, "src": src}
+
+
+def write_result(q: Path, rounds: list[dict]) -> None:
+    from hypertrain.gpu_ops import network_qualification as driver
+
+    env = {
+        "backend": "cuda",
+        "torch": "2.14.0+cu130",
+        "cuda": "13.0",
+        "python": "/opt/hypertrain/venv/bin/python",
+        "torch_path": "/venv/main/torch/__init__.py",
+        "drivers": ["595.84"] * 2,
+        "sm_counts": [170] * 2,
+        "image_digest": "sha256:" + "44" * 32,
+    }
+    result = driver.Result(
+        status="CUDA_ROUNDS_CAPTURED_NOT_WORKLOAD_PASS",
+        config_sha256="11" * 32,
+        profile_sha256="22" * 32,
+        sources={},
+        environment=env,
+        instance_id=1,
+        machine_id=2,
+        role="h0",
+        rounds=rounds,
+        elapsed_seconds=1,
+        workload_allowed=False,
+    )
+    (q / "result.json").write_text(result.model_dump_json())
+
+
+def test_hash_only_export_carries_hashes_and_small_json_only(tmp_path: Path) -> None:
+    import tarfile
+
+    mod = network_module()
+    q, ctx = hash_rescue_tree(tmp_path)
+    write_result(q, ctx["result"]["rounds"])
+    archive = tmp_path / "hash.tar"
+    mod.export_artifacts(ctx["src"], archive, ctx["profile"], True)
+    files = mod.verify_export(archive, 1 << 30, True)
+    with tarfile.open(archive) as t:
+        carried = {m.name for m in t.getmembers()}
+    # Every remote file is hashed; only result/config/job/summary bytes travel.
+    # 2 rounds x (2 ranks x 12 round files + 2 summaries + job.json) + config + result.
+    assert len(files) == 2 * (2 * 12 + 2 + 1) + 2
+    assert carried == {"manifest.json"} | {
+        "out/" + n for n in files if Path(n).name in mod.HASH_RESCUE_NAMES
+    }
+    assert not any(n.endswith(".safetensors") for n in carried)
+    # The same archive is not a full rescue: the full verifier refuses missing bytes.
+    with pytest.raises(Reject, match="coverage_mismatch"):
+        mod.verify_export(archive, 1 << 30)
+
+
+@pytest.mark.parametrize("fault", ["claim", "withheld", "big", "malformed", "unsafe", "budget"])
+def test_hash_only_verify_export_rejects(tmp_path: Path, fault: str) -> None:
+    import io
+    import tarfile
+
+    mod = network_module()
+    q, ctx = hash_rescue_tree(tmp_path)
+    rounds = ctx["result"]["rounds"]
+    if fault == "claim":  # result claims a hash the exported file does not have
+        rounds[1]["rank-1/checkpoints/30.safetensors"] = "ab" * 32
+    write_result(q, rounds)
+    if fault == "big":  # an oversized small-name file is refused at export
+        (q / "round-0/published/rank-0/summary.json").write_bytes(b" " * ((1 << 20) + 1))
+        with pytest.raises(Reject, match="hash_rescue_file_oversized"):
+            mod.export_artifacts(ctx["src"], tmp_path / "x.tar", ctx["profile"], True)
+        return
+    archive = tmp_path / "hash.tar"
+    mod.export_artifacts(ctx["src"], archive, ctx["profile"], True)
+    if fault in ("withheld", "malformed", "unsafe"):
+        with tarfile.open(archive) as t:
+            members = [(m, t.extractfile(m).read()) for m in t.getmembers()]
+        with tarfile.open(archive, "w") as t:
+            for m, data in members:
+                if fault == "withheld" and m.name.endswith("rank-1/summary.json"):
+                    continue
+                if m.name == "manifest.json" and fault != "withheld":
+                    files = json.loads(data)
+                    if fault == "malformed":
+                        files["qualification/config.json"]["sha256"] = "Z" * 64
+                    else:
+                        files["../escape/state.safetensors"] = {"bytes": 1, "sha256": "0" * 64}
+                    data = json.dumps(files).encode()
+                    m.size = len(data)
+                t.addfile(m, io.BytesIO(data))
+    match = {
+        "claim": "result_hash_mismatch",
+        "withheld": "coverage_mismatch",
+        "malformed": "manifest_malformed",
+        "unsafe": "unsafe_path",
+        "budget": "budget_exceeded",
+    }[fault]
+    with pytest.raises(Reject, match=match):
+        mod.verify_export(archive, 4096 if fault == "budget" else 1 << 30, True)
+
+
+@pytest.mark.parametrize("workload", [False, True])
+def test_streamed_rescue_is_hash_only_until_a_workload_is_reserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: bool
+) -> None:
+    import tarfile
+
+    mod = network_module()
+    remote = tmp_path / "remote"
+    rank = remote / "out/qualification/round-0/published/rank-0"
+    rank.mkdir(parents=True)
+    (rank / "summary.json").write_bytes(b"{}")
+    (rank / "state.safetensors").write_bytes(b"s" * 4096)
+    (remote / "experiments/gpu_network_v2").mkdir(parents=True)
+    profile = json.loads((TREE / "experiments/gpu_network_v2/profile.json").read_bytes())
+    profile["artifacts"]["remote_retention"] = "prune_rescued"
+    (remote / "experiments/gpu_network_v2/profile.json").write_text(json.dumps(profile))
+    run = tmp_path / "run"
+    (run / "logs").mkdir(parents=True)
+    script = TREE / "experiments/gpu_network_v2/orchestrate.py"
+    commands: list[str] = []
+
+    def argv(ssh, command):
+        commands.append(command)
+        tail = command.split("profile.json", 1)[1]
+        return [
+            "sh",
+            "-c",
+            f"cd {remote} && PYTHONPATH={TREE / 'src'} {sys.executable} {script} export out - "
+            f"experiments/gpu_network_v2/profile.json{tail}",
+        ]
+
+    monkeypatch.setattr(mod, "ssh_argv", argv)
+    j = Journal(run)
+    if workload:
+        j.append("network_execution_intent", role="h0", name="op", phase="workload", executions=1)
+    runtime = mod.NetworkRuntime.__new__(mod.NetworkRuntime)
+    runtime.journal, runtime.profile = j, profile
+    runtime.lifecycle = SimpleNamespace(
+        dir=run,
+        cfg={"remote_python": sys.executable},
+        remote_root=lambda role: str(remote),
+        ssh=lambda role: SimpleNamespace(timeout=60),
+    )
+    record = runtime.rescue("h0", fresh=True)
+    with tarfile.open(record["tar"]) as t:
+        carried = {m.name for m in t.getmembers()}
+    state = "out/qualification/round-0/published/rank-0/state.safetensors"
+    assert record["hashes_only"] is (not workload)
+    assert commands[0].endswith("profile.json" if workload else "profile.json hashes")
+    assert (state in carried) is workload  # hash-only never ships the tensor bytes
+    assert state.removeprefix("out/") in record["files"]  # but always its remote hash
+    assert runtime.rescue("h0") == record  # resume re-verifies in the recorded mode
+
+
 def test_verified_dedup_hardlinks_identical_bytes_only(tmp_path: Path) -> None:
     mod = network_module()
     seen: dict[str, Path] = {}

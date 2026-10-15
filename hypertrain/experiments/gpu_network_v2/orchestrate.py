@@ -2479,7 +2479,9 @@ class NetworkRuntime:
             if fsha(archive) != custody["tar_sha256"]:
                 raise Reject("remote_prune_local_custody_changed")
             files = verify_export(
-                archive, artifact_budget(self.profile)["rescue_tar_bytes_per_host"]
+                archive,
+                artifact_budget(self.profile)["rescue_tar_bytes_per_host"],
+                custody.get("hashes_only", False),
             )
             mine = [f for f in files if f.startswith(name + "/")]
             if files != custody["files"] or any(
@@ -2524,7 +2526,11 @@ class NetworkRuntime:
             archive = Path(old["tar"])
             if not archive.is_file() or fsha(archive) != old["tar_sha256"]:
                 raise Reject("network_rescue_changed_on_resume")
-            verify_export(archive, artifact_budget(self.profile)["rescue_tar_bytes_per_host"])
+            verify_export(
+                archive,
+                artifact_budget(self.profile)["rescue_tar_bytes_per_host"],
+                old.get("hashes_only", False),
+            )
             return old
         root = self.lifecycle.remote_root(role)
         ssh = self.lifecycle.ssh(role)
@@ -2545,19 +2551,27 @@ class NetworkRuntime:
         destination.mkdir(parents=True, exist_ok=True)
         archive = destination / f"network-rescue-{generation}-{time.time_ns()}.tar"
         bound = artifact_budget(self.profile)["rescue_tar_bytes_per_host"]
+        # Before any workload, out/ holds only seed + qualification: those rounds are proven by
+        # the two hosts' independently computed hashes, so only hashes and small JSON travel.
+        hashes_only = not self.journal.all("network_execution_intent", role=role, phase="workload")
+        if hashes_only:
+            # Carried: per round job.json + n_gpus summaries; result/config/custody; seed
+            # job.json; slack. Each <= 1 MiB + tar header, plus the <= 1 MiB manifest.
+            gpus = self.profile["layout"]["n_gpus"]
+            bound = min(bound, (2 * gpus + 8) * (HASH_RESCUE_FILE_BYTES + 2048) + (2 << 20))
         if self.profile["artifacts"].get("remote_retention", "all") == "prune_rescued":
             # Stream the tar over the pinned SSH channel into local custody; no remote archive.
             cmd = (
                 f"cd {shlex.quote(root)} && env PYTHONPATH=src {shlex.quote(python)} "
                 "experiments/gpu_network_v2/orchestrate.py export out - "
-                "experiments/gpu_network_v2/profile.json"
+                "experiments/gpu_network_v2/profile.json" + (" hashes" if hashes_only else "")
             )
             log = self.lifecycle.dir / "logs" / f"{role}-network-export-stream.log"
             try:
                 stream_bounded(ssh_argv(ssh, cmd), archive, log, bound, ssh.timeout)
                 remaining()
                 try:
-                    manifest = verify_export(archive, bound)
+                    manifest = verify_export(archive, bound, hashes_only)
                 except (tarfile.TarError, KeyError, ValueError) as exc:
                     raise Reject("network_rescue_archive_invalid") from exc
                 # Remote's own manifest digest (stderr) must equal the verified local manifest.
@@ -2574,7 +2588,7 @@ class NetworkRuntime:
             cmd = (
                 f"cd {shlex.quote(root)} && env PYTHONPATH=src {shlex.quote(python)} "
                 "experiments/gpu_network_v2/orchestrate.py export out rescue.tar "
-                "experiments/gpu_network_v2/profile.json"
+                "experiments/gpu_network_v2/profile.json" + (" hashes" if hashes_only else "")
             )
             if ssh.run(cmd, "network-export", self.lifecycle.dir / "logs").returncode:
                 raise Reject("network_export_failed")
@@ -2584,7 +2598,7 @@ class NetworkRuntime:
             actual = ssh.get(f"{root}/rescue.tar", archive)
             if actual != expected:
                 raise Reject("network_rescue_sha_mismatch")
-            manifest = verify_export(archive, bound)
+            manifest = verify_export(archive, bound, hashes_only)
         remaining()
         if generation != sha256(
             json.dumps(
@@ -2612,12 +2626,29 @@ class NetworkRuntime:
             tar=str(archive),
             tar_sha256=actual,
             files=manifest,
+            hashes_only=hashes_only,
             elapsed_seconds=time.monotonic() - started,
         )
 
 
-def export_artifacts(directory: Path, archive: Path, profile: dict[str, Any]) -> Record:
-    """Archive full paths and every byte; enforce actual shape-derived byte budget."""
+# Hash-only rescue still carries every file the controller and challenge master parse: the
+# driver result/config/inventory, job bindings and per-rank summaries. Everything else
+# (states, checkpoints, EF, deltas, traces, logs) travels as its remote sha256 only.
+HASH_RESCUE_NAMES = frozenset(
+    {"result.json", "config.json", "custody.json", "job.json", "summary.json"}
+)
+HASH_RESCUE_FILE_BYTES = 1 << 20
+
+
+def hash_rescued(name: str) -> bool:
+    return Path(name).name in HASH_RESCUE_NAMES
+
+
+def export_artifacts(
+    directory: Path, archive: Path, profile: dict[str, Any], hashes_only: bool = False
+) -> Record:
+    """Archive full paths and every byte (or, hashes_only, every hash plus the small JSON
+    files above); enforce actual shape-derived byte budget."""
     from hypertrain.protocol.hashing import sha256_hex
 
     files: dict[str, dict[str, Any]] = {}
@@ -2629,6 +2660,9 @@ def export_artifacts(directory: Path, archive: Path, profile: dict[str, Any]) ->
                 "bytes": path.stat().st_size,
                 "sha256": fsha(path),
             }
+    carried = [n for n in files if not hashes_only or hash_rescued(n)]
+    if hashes_only and any(files[n]["bytes"] > HASH_RESCUE_FILE_BYTES for n in carried):
+        raise Reject("export_hash_rescue_file_oversized")
     bounds = artifact_budget(profile)
     if sum(v["bytes"] for v in files.values()) > bounds["retained_bytes_per_host"]:
         raise Reject("actual_artifact_budget_exceeded")
@@ -2639,7 +2673,7 @@ def export_artifacts(directory: Path, archive: Path, profile: dict[str, Any]) ->
         if streaming
         else tarfile.open(archive, "w")
     ) as out:
-        for name in files:
+        for name in carried:
             out.add(directory / name, arcname="out/" + name, recursive=False)
         info = tarfile.TarInfo("manifest.json")
         info.size, info.mode, info.mtime = len(metadata), 0o600, 0
@@ -2712,7 +2746,9 @@ def place_verified(path: Path, data: bytes, seen: dict[str, Path], dedup: bool) 
         seen[digest] = path
 
 
-def verify_export(archive: Path, maximum_bytes: int) -> Record:
+def verify_export(archive: Path, maximum_bytes: int, hashes_only: bool = False) -> Record:
+    """Every carried byte matches the manifest. hashes_only: the manifest still covers every
+    remote file, and exactly the HASH_RESCUE_NAMES files are carried (none may be withheld)."""
     import hashlib
 
     if archive.stat().st_size > maximum_bytes:
@@ -2721,29 +2757,67 @@ def verify_export(archive: Path, maximum_bytes: int) -> Record:
         entries = source.getmembers()
         if len({m.name for m in entries}) != len(entries):
             raise Reject("rescue_duplicate_path")
+        if "manifest.json" not in {m.name for m in entries}:
+            raise Reject("rescue_manifest_missing_or_oversized")
         metadata = source.extractfile("manifest.json")
         if metadata is None or source.getmember("manifest.json").size > 1048576:
             raise Reject("rescue_manifest_missing_or_oversized")
-        files = json.loads(metadata.read())
-        if {m.name for m in entries} != {"manifest.json", *("out/" + n for n in files)}:
+        try:
+            files = json.loads(metadata.read())
+        except ValueError as exc:
+            raise Reject("rescue_manifest_malformed") from exc
+        if not isinstance(files, dict) or not all(
+            isinstance(v, dict)
+            and set(v) == {"bytes", "sha256"}
+            and type(v["bytes"]) is int
+            and v["bytes"] >= 0
+            and isinstance(v["sha256"], str)
+            and len(v["sha256"]) == 64
+            and all(c in "0123456789abcdef" for c in v["sha256"])
+            for v in files.values()
+        ):
+            raise Reject("rescue_manifest_malformed")
+        carried = [n for n in files if not hashes_only or hash_rescued(n)]
+        if {m.name for m in entries} != {"manifest.json", *("out/" + n for n in carried)}:
             raise Reject("rescue_manifest_coverage_mismatch")
-        for name, want in files.items():
-            path = Path(name)
-            if (
-                path.is_absolute()
-                or ".." in path.parts
-                or not source.getmember("out/" + name).isfile()
-            ):
+        if any(not n or Path(n).is_absolute() or ".." in Path(n).parts for n in files):
+            raise Reject("rescue_unsafe_path")
+        for name in carried:
+            want = files[name]
+            if not source.getmember("out/" + name).isfile():
                 raise Reject("rescue_unsafe_path")
+            if hashes_only and want["bytes"] > HASH_RESCUE_FILE_BYTES:
+                raise Reject("rescue_hash_file_oversized")
             stream = source.extractfile("out/" + name)
             assert stream is not None
-            digest, size = hashlib.sha256(), 0
+            digest, size, kept = hashlib.sha256(), 0, b""
             while block := stream.read(65536):
                 digest.update(block)
                 size += len(block)
+                if hashes_only and Path(name).name == "result.json":
+                    kept += block  # bounded above by HASH_RESCUE_FILE_BYTES
             if digest.hexdigest() != want["sha256"] or size != want["bytes"]:
                 raise Reject("rescue_content_hash_mismatch")
+            if kept:
+                hash_rescue_binding(name, kept, files)
         return dict(files)
+
+
+def hash_rescue_binding(name: str, data: bytes, files: dict[str, Any]) -> None:
+    """The rescue-time export hash of every round file a qualification result claims must
+    equal the claim: a file changed on disk after capture can no longer hide behind hashes."""
+    from hypertrain.gpu_ops.network_qualification import Result
+
+    try:
+        result = Result.model_validate_json(data)
+    except ValueError as exc:
+        raise Reject("rescue_result_malformed") from exc
+    base = str(Path(name).parent)
+    for index, claimed in enumerate(result.rounds):
+        for rel, want in claimed.items():
+            got = files.get(f"{base}/round-{index}/published/{rel}")
+            if got is None or got["sha256"] != want:
+                raise Reject("rescue_result_hash_mismatch")
 
 
 SEED_OBJECTS = ("start_state", "ef_in", "v0", "samples", "sample_proofs")
@@ -3682,8 +3756,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--live", action="store_true")
     args = parser.parse_args(argv)
     if args.action == "export":
+        if args.extra[2:] not in ([], ["hashes"]):
+            parser.error("export OUT ARCHIVE PROFILE [hashes]")
         exported = export_artifacts(
-            args.input, Path(args.extra[0]), json.loads(Path(args.extra[1]).read_bytes())
+            args.input,
+            Path(args.extra[0]),
+            json.loads(Path(args.extra[1]).read_bytes()),
+            args.extra[2:] == ["hashes"],
         )
         if args.extra[0] == "-":
             print(exported["manifest_sha256"], file=sys.stderr)

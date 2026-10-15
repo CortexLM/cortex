@@ -125,6 +125,89 @@ def test_same_machine_rejects_two_host_claim(tmp_path: Path) -> None:
         driver.compare(paths, manifest())
 
 
+def hash_only(paths: list[Path]) -> None:
+    """What a hash-only rescue leaves locally: custody.json + JSON, no round tensors."""
+    for path in paths:
+        root = path.parent
+        files = {str(p.relative_to(root)): fsha(p) for p in root.rglob("*") if p.is_file()}
+        (root / "custody.json").write_text(json.dumps(files, sort_keys=True))
+        for p in root.glob("round-*/published/**/*"):
+            if p.is_file():
+                p.unlink()
+
+
+def test_hash_only_rescue_compares_from_bound_host_inventories(tmp_path: Path) -> None:
+    # Given
+    paths = results(tmp_path)
+    hash_only(paths)
+    # When
+    result = driver.compare(paths, manifest())
+    # Then
+    assert result == {"two_host_bitwise_match": True, "workload_allowed": False}
+
+
+def test_full_rescue_missing_tensor_rejects_despite_inventory(tmp_path: Path) -> None:
+    # Given: a full-rescue tree with one tensor deleted and a custody.json that still lists it.
+    paths = results(tmp_path)
+    root = paths[1].parent
+    files = {str(p.relative_to(root)): fsha(p) for p in root.rglob("*") if p.is_file()}
+    (root / "custody.json").write_text(json.dumps(files, sort_keys=True))
+    (root / "round-1/published/rank-0/state.safetensors").unlink()
+    # When / Then
+    with pytest.raises(Reject, match="custody_changed"):
+        driver.compare(paths, manifest())
+
+
+@pytest.mark.parametrize(
+    "fault,match",
+    [
+        ("mismatch", "custody_changed"),
+        ("missing_rank", "custody_changed"),
+        ("unbound", "inventory_unbound"),
+        ("malformed", "inventory_malformed"),
+        ("not_hex", "inventory_malformed"),
+        ("oversized", "inventory_oversized"),
+        ("absent", "inventory_missing"),
+    ],
+)
+def test_hash_only_inventory_faults_reject(tmp_path: Path, fault: str, match: str) -> None:
+    # Given
+    paths = results(tmp_path)
+    hash_only(paths)
+    custody = paths[1].parent / "custody.json"
+    data = json.loads(custody.read_bytes())
+    if fault == "mismatch":  # Host B's inventory disagrees with what both results claim.
+        data["round-1/published/rank-1/state.safetensors"] = "ab" * 32
+    elif fault == "missing_rank":
+        data = {k: v for k, v in data.items() if "/rank-1/" not in k}
+    elif fault == "unbound":
+        data["result.json"] = "00" * 32
+    elif fault == "not_hex":
+        data["round-0/published/rank-0/delta.bin"] = "ZZ" * 32
+    custody.write_text(json.dumps(data))
+    if fault == "malformed":
+        custody.write_bytes(b"[not json")
+    elif fault == "oversized":
+        custody.write_bytes(b" " * (driver.INVENTORY_BYTES + 1))
+    elif fault == "absent":
+        custody.unlink()
+    # When / Then
+    with pytest.raises(Reject, match=match):
+        driver.compare(paths, manifest())
+
+
+def test_cross_host_hash_mismatch_rejects_with_hash_only_rescue(tmp_path: Path) -> None:
+    # Given: host B honestly reports a different round hash for one rank.
+    paths = results(tmp_path)
+    data = json.loads(paths[1].read_bytes())
+    data["rounds"][1]["rank-0/delta.bin"] = "cd" * 32
+    paths[1].write_text(json.dumps(data))
+    hash_only(paths)
+    # When / Then
+    with pytest.raises(Reject, match="binding_or_bitwise"):
+        driver.compare(paths, manifest())
+
+
 @pytest.mark.parametrize(
     "field,value", [("backend", "cpu"), ("torch", "2.14.0+cpu"), ("sm_counts", [170])]
 )
