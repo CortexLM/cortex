@@ -31,8 +31,9 @@ REPO=${REPO:-$(cd "$(dirname "$0")/.." && pwd)}
 FIX_BASE=${FIX_BASE:-1a8f91e}
 MINER_SSH=${MINER_SSH:-}
 MINER_KEY=${MINER_KEY:-}
-# Signed floor: cutoff >= admitted + qualification 9600 s + hard margin 1800 s (orchestrate.py).
-WINDOW=${WINDOW:-11460}
+# Signed floor: cutoff >= admitted + staging 1800 s + qualification 9600 s + hard margin 1800 s;
+# task8-deps stops staging at cutoff - (qualification + hard margin), so staging needs its own 1800 s.
+WINDOW=${WINDOW:-13200}
 HOTKEY_SEED=${HOTKEY_SEED:-$RD/keys/uid247-hotkey.seed}
 COORD_KEY=${COORD_KEY:-/root/.config/cortex-secrets/s100-master/challenges/hypertrain/coord.key}
 PROXY_TOKEN=${PROXY_TOKEN:-/root/.config/cortex-secrets/od-large-e2e-miners/proxy.token}
@@ -147,7 +148,7 @@ COMMON=(--base "$PREP/base/private/review-base.json" --parent-pid "$$" --owner-s
 LIVE=$PREP/live-$TAG
 if stage admit; then
   [ ! -e "$RUN/journal.jsonl" ] || die "$RUN already holds a transaction of another parent: use a new TAG"
-  [ $((A + 9600 + 1800)) -le "$CUT" ] || die "window too short A=$A CUT=$CUT (job deadline $JD)"
+  [ $((A + 1800 + 9600 + 1800)) -le "$CUT" ] || die "window too short A=$A CUT=$CUT (job deadline $JD)"
   install -d -o 65532 -g 65532 -m 0700 "$RUN" "$LIVE"
   as_runtime "$PY" "$T/prepare_record.py" "${COMMON[@]}" --action admit --beacon "$(beacon_round)" \
     --output "$LIVE/review-admit.json" "${CTX[@]}" > "$STATE/admit.out" 2>&1 || die "see $STATE/admit.out"
