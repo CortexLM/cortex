@@ -487,8 +487,11 @@ def compare(paths: list[Path], manifest: RunManifestV2) -> dict[str, bool]:
         raise Reject("qualification_two_host_binding_or_bitwise_mismatch")
     expected = set(round_files(ref.layout.n_gpus, inner.H, inner.J))
     for path, result in zip(paths, (a, b), strict=True):
+        # Hash-only rescue still carries JSON (job.json, summary.json): only tensors decide.
         hash_only = not any(
-            p.is_file() or p.is_symlink() for p in path.parent.glob("round-*/published/**/*")
+            (p := path.parent / f"round-{index}/published/{rel}").is_file() or p.is_symlink()
+            for index in range(len(result.rounds))
+            for rel in expected
         )
         claimed = host_inventory(path) if hash_only else {}
         for index, files in enumerate(result.rounds):

@@ -64,14 +64,14 @@ healthy() { mexec python -c 'import httpx;assert httpx.get("http://127.0.0.1:800
 rescued() { "$PY" -c "import json,sys;sys.exit(0 if any(r.get('kind')=='network_rescued' and r.get('role')==sys.argv[2] for r in map(json.loads,open(sys.argv[1]))) else 1)" "$RUN/journal.jsonl" "$1"; }
 mssh() {
   ssh -i "$MINER_KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20 \
-    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$STATE/miner_known_hosts" \
+    -o StrictHostKeyChecking="${MINER_HOSTKEY_POLICY:-accept-new}" -o UserKnownHostsFile="${MINER_KNOWN_HOSTS:-$STATE/miner_known_hosts}" \
     -p "${MINER_SSH#* }" "root@${MINER_SSH%% *}" "$@"
 }
 
 export PYTHONHOME=$RD/runtime/local CUDA_VISIBLE_DEVICES='' HOME=$RD
 # Controller tree: the frozen snapshot admission used (same launcher/orchestrate as every stage).
 HT_TREE=${HT_TREE:-$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1]))["snapshot"])' "$PREP/freeze/freeze.json")/tree}
-[ -f "$HT_TREE/experiments/gpu_network_v2/orchestrate.py" ] || HT_TREE=/data/hypertrain-tree
+[ -f "$HT_TREE/experiments/gpu_network_v2/orchestrate.py" ] || { echo "frozen tree missing: $HT_TREE" >&2; exit 1; }
 export HT_TREE
 export PYTHONPATH=$HT_TREE/src:$HT_TREE/scripts:$HT_TREE:/data/pydeps:$RD/runtime/venv/lib/python3.12/site-packages
 mkdir -p "$STATE"
@@ -85,6 +85,10 @@ for f in "$T"/{prepare_record.py,task8-deps.py,rescue_parallel.py,task8-material
   "$PREP/context/join.json" "$PREP/context/seed_context.json" "$PREP/evidence/evidence.json" \
   "$RD/keys/vast.key" "$RD/keys/owner.seed" "$HOTKEY_SEED" "$PROXY_TOKEN" "$COORD_KEY" "$RD/dispatch.json"; do
   [ -e "$f" ] || die "missing $f"
+done
+# materialize refuses existing roots: fail here, before any spend, not an hour into the run.
+[ -e "$STATE/roots.done" ] || for r in h0 h1; do
+  [ ! -e "/data/hypertrain-$r" ] || die "/data/hypertrain-$r exists: archive it after checking no run reads it"
 done
 RID=$(J "$OUT/manifest-envelope.json" "d['run_id']")
 [ "$(J "$JOB/job.json" "d['run_id']")" = "$RID" ] || die "job-$TAG binds another run than out-$TAG"
@@ -130,6 +134,8 @@ if [ ! -e "$STATE/window" ]; then
   echo "$A $CUT" > "$STATE/window"
 fi
 read -r A CUT < "$STATE/window"
+# Abort = kill -TERM "$(cat $STATE/launcher.pid)": the supervisor tracks this pid (INT/HUP are ignored).
+echo $$ > "$STATE/launcher.pid"
 
 STAGE=beacon
 # The master clock only advances on POST /v1/admin/beacon; the pusher dies on ReadTimeout while
@@ -172,7 +178,7 @@ if stage rescue; then
   pids=()
   for r in h0 h1; do
     rescued "$r" && continue
-    port=18560; [ "$r" = h1 ] && port=18570
+    port=18560; [ "$r" = h1 ] && port=18600  # 16 workers bind base..base+15 each
     as_runtime "$PY" "$T/rescue_parallel.py" --run-dir "$RUN" --role "$r" --via range --workers 16 \
       --public-ip "$PUBLIC" --base-port "$port" > "$STATE/rescue-$r.out" 2>&1 &
     pids+=($!)
@@ -265,6 +271,7 @@ if stage miner; then
     MINER_SSH=$("$PY" -c "import json,sys;r=[x for x in map(json.loads,open(sys.argv[1])) if x.get('kind')=='instance_ready' and x.get('role')=='h1'][-1];print(r['ssh_host'],r['ssh_port'])" "$RUN/journal.jsonl") \
       || die "no h1 instance_ready in $RUN/journal.jsonl"
     MINER_KEY=${MINER_KEY:-$RUN/id_ed25519}
+    MINER_HOSTKEY_POLICY=yes MINER_KNOWN_HOSTS=$RUN/known_hosts-h1  # pinned at admission
   fi
   MINER_KEY=${MINER_KEY:-$RD/vast-m5/id_ed25519}
   echo "$MINER_SSH" > "$STATE/miner_ssh"

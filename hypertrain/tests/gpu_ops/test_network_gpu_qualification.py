@@ -134,6 +134,11 @@ def hash_only(paths: list[Path]) -> None:
         for p in root.glob("round-*/published/**/*"):
             if p.is_file():
                 p.unlink()
+        # The rescue carries per-rank summaries and job bindings (HASH_RESCUE_NAMES).
+        for rank in root.glob("round-*/published/rank-*"):
+            (rank / "summary.json").write_text('{"backend": "cuda"}')
+        for published in root.glob("round-*/published"):
+            (published / "job.json").write_text("{}")
 
 
 def test_hash_only_rescue_compares_from_bound_host_inventories(tmp_path: Path) -> None:
