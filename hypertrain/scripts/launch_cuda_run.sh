@@ -69,7 +69,11 @@ mssh() {
 }
 
 export PYTHONHOME=$RD/runtime/local CUDA_VISIBLE_DEVICES='' HOME=$RD
-export PYTHONPATH=/data/hypertrain-tree/src:/data/hypertrain-tree/scripts:/data/hypertrain-tree:/data/pydeps:$RD/runtime/venv/lib/python3.12/site-packages
+# Controller tree: the frozen snapshot admission used (same launcher/orchestrate as every stage).
+HT_TREE=${HT_TREE:-$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1]))["snapshot"])' "$PREP/freeze/freeze.json")/tree}
+[ -f "$HT_TREE/experiments/gpu_network_v2/orchestrate.py" ] || HT_TREE=/data/hypertrain-tree
+export HT_TREE
+export PYTHONPATH=$HT_TREE/src:$HT_TREE/scripts:$HT_TREE:/data/pydeps:$RD/runtime/venv/lib/python3.12/site-packages
 mkdir -p "$STATE"
 
 STAGE=preflight
