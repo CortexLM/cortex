@@ -90,7 +90,7 @@ returns:
   and returns the same body for every later call with that epoch.
 - `503` means the container cannot score. The master then burns the share for
   that epoch.
-- The call must answer within 60 seconds.
+- The call must answer within 180 seconds.
 
 ### Leaves the master signs
 

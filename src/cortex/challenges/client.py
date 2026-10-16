@@ -109,7 +109,8 @@ class ChallengeClient:
                         "authorization": f"Bearer {token}",
                         "x-platform-challenge-slug": entry.id,
                     },
-                    timeout=60,
+                    # Must exceed a container's own snapshot deadline (Bounty: 120 s).
+                    timeout=180,
                 ) as response:
                     if response.status_code != 200:
                         raise ServiceError(503, f"challenge answered HTTP {response.status_code}")
