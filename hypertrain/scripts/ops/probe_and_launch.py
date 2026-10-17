@@ -172,7 +172,7 @@ def bandwidth(ip, port):
     r = subprocess.run(
         [
             *ssh,
-            f"curl -s -o /dev/null -r 0-{512 << 20} --max-time {BW_S} "
+            f"curl -sL -o /dev/null -r 0-{512 << 20} --max-time {BW_S} "
             f"-w '%{{size_download}} %{{time_total}}' {HF_URL}",
         ],
         capture_output=True,
