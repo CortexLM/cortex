@@ -65,7 +65,10 @@ testpaths = ["tests"]
 # the `pytest` console script does not put the rootdir on sys.path, `python -m pytest` does.
 pythonpath = ["."]
 addopts = "-ra --strict-markers"
-markers = ["od: builds a real od-base OpenDecision model (excluded from PR CI)"]
+markers = [
+  "od: builds a real od-base OpenDecision model (excluded from PR CI)",
+  "fast: CPU mining-path subset run by scripts/check-fast.sh in under 2 minutes (set in tests/conftest.py)",
+]
 
 [tool.ruff]
 target-version = "py312"
