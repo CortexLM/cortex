@@ -23,9 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests" / "e2e"))
 sys.path.insert(0, str(ROOT / "tests" / "trainer"))
 
-import common  # noqa: E402,F401  (determinism before torch)
+import common  # type: ignore[import-not-found]  # noqa: E402,F401  (determinism before torch)
 from common import manifest  # noqa: E402
-from harness import World, key  # noqa: E402
+from harness import World, key  # type: ignore[import-not-found]  # noqa: E402
 
 H, J = 4, 2
 MINER_INDEX = 0x41
@@ -68,8 +68,17 @@ def main() -> int:
     ev["elapsed_seconds"] = round(time.monotonic() - started, 2)
     ev["result"] = "PASS" if code == 0 else "FAIL"
     out.write_text(json.dumps(ev, indent=1, sort_keys=True, default=str))
-    print(json.dumps({"result": ev["result"], "elapsed_seconds": ev["elapsed_seconds"],
-                      "checks": ev["checks"], "failed": ev.get("failed")}, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "result": ev["result"],
+                "elapsed_seconds": ev["elapsed_seconds"],
+                "checks": ev["checks"],
+                "failed": ev.get("failed"),
+            },
+            sort_keys=True,
+        )
+    )
     return code
 
 
