@@ -70,7 +70,8 @@ or permit UID is not a submit path.
 | Key or token | Role |
 | --- | --- |
 | Proof seed | signs Proof topics (`PROOF_SK_FILE`); no bundle, leaf or gateway key exists |
-| operator bearer | protects master administrative routes, including `/v1/weights/raw` and sealing |
+| operator bearer | protects master administrative routes, including sealing (`/v1/admin/seal`) |
+| intake bearer | protects raw leaf intake (`/v1/weights/raw`) only; must differ from the operator bearer |
 | VM orchestrator bearer | authenticates master to the dedicated KVM host; not a wallet |
 | validator hotkey | weight-setting role only: signs root/dissent evidence and Bittensor submissions |
 | challenge internal token | master bearer for a container's `get_weights`; never a signing key |

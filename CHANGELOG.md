@@ -30,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Master: `POST /v1/weights/raw` now requires a separate intake bearer
+- Master: `POST /v1/weights/raw`, protected before wire v2 only by the challenge
+  leaf signature, now requires a separate intake bearer
   (`BASE_GATEWAY_INTAKE_TOKEN_FILE`, `deploy/secrets/master/intake.token`);
   `POST /v1/admin/seal` keeps the operator bearer. Each refuses the other with
   401, and startup refuses identical paths or values (BREAKING for deployments:
@@ -41,8 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   created under v1 are refused: start the gateway on a new `state_dir`. Hash
   integrity (Merkle root, metagraph root, block hash, recomputed final vector) is
   unchanged, and so is the validator hotkey signature on the chain submission.
-- `POST /v1/weights/raw` requires the operator bearer (it was protected only by the
-  challenge leaf signature).
 - The validator hotkey (`--wallet-name`/`--wallet-hotkey`) is required only to
   submit weights or run `--peer-consensus`; `--verify-only` runs without it.
   `scripts/run-validator.sh` needs `WALLET_NAME`/`WALLET_HOTKEY` only to submit.

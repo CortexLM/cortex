@@ -83,7 +83,7 @@ an owner signature approves exact content and visibility.
 
 ## Reward controls
 
-Challenge leaves carry no signature (wire v2); the master records them after the gateway authenticates the operator bearer. The expected set comes
+Challenge leaves carry no signature (wire v2); the master records them after the gateway authenticates the intake bearer (sealing needs the separate operator bearer). The expected set comes
 from the historical metagraph; a challenge cannot shrink it by omission. A
 missing score becomes an explicit `NoScore`, and an unavailable challenge burns
 its share rather than blocking every other challenge.
