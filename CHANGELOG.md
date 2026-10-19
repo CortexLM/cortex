@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `GET /v1/trust`: the gateway serves the challenge profile (challenge keys,
+  shares, measurements). Validators build their trust view from it over HTTPS;
+  `--gateway-public` stays as an optional extra pin.
+- `deploy/compose/role-weight-setter.yml`: the only role with the validator
+  hotkey and consensus seed; `role-validator.yml` is verify-only.
 - Challenge containers (`docs/CHALLENGES.md`): the master loads any Docker
   challenge from an operator registry, polls its authenticated `get_weights`
   once per epoch, signs its leaves and proxies its public routes under
@@ -20,8 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Validators need no change beyond the release; they recompute signed leaves.
 - `GET /v1/metagraph/latest` serves the sealed hotkey map to challenges.
 
+### Changed
+
+- The validator hotkey (`--wallet-name`/`--wallet-hotkey`) is required only to
+  submit weights or run `--peer-consensus`; `--verify-only` runs without it.
+  `scripts/run-validator.sh` needs `WALLET_NAME`/`WALLET_HOTKEY` only to submit.
+- The challenge profile is the unsigned `config/challenges.toml` and
+  `measurements.toml`; changing shares is an edit, a version bump and a master restart.
+
 ### Removed
 
+- The trust-sign system: `cortex trust-sign`, `trust-verify`, owner keygen and
+  ceremony, `.sig` files, `owner.pubkey`, validator `--owner-public`,
+  `--challenges`, `--measurements`, `--minimum-*-version` and `BASE_GATEWAY_HOTKEY`,
+  `BASE_*_MIN_VERSION`, `BASE_OWNER_PUBKEY_FILE`, `docs/how-to/trust-root.md`.
 - The in-process Bounty service (`src/cortex/bounty`, `docs/BOUNTY.md` and the
   `BOUNTY_*` master settings). Bounty now runs as the CortexLM/bounty container;
   its operator guide migrates `bounty.sqlite3` and the session key unchanged.

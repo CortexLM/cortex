@@ -1,6 +1,7 @@
 # Architecture
 
-The owner-signed trust root lists the scoring challenges and their emission
+The challenge profile (`config/challenges.toml`, read by the master and served by
+the gateway at `GET /v1/trust`) lists the scoring challenges and their emission
 shares:
 
 - algorithm 1: legacy bounty/proof 2,000/8,000;
@@ -33,7 +34,7 @@ flowchart LR
 
 | Directory | Responsibility |
 | --- | --- |
-| `src/cortex/protocol` | SCALE wire format, signatures, Merkle roots, aggregation, trust roots |
+| `src/cortex/protocol` | SCALE wire format, signatures, Merkle roots, aggregation, challenge profile |
 | `src/cortex/gateway` | Durable raw leaves and immutable sealed bundles |
 | `src/cortex/validator` | Independent historical chain reads and exact weight submission |
 | `src/cortex/challenges` | Registry, weights client, public proxy and auto-updating supervisor |

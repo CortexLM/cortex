@@ -20,9 +20,9 @@ Shares always sum to 10,000 basis points. Algorithm 1 is the legacy signed
 bounty/proof 2,000/8,000 profile; algorithm 2 is bounty/proof 3,000/7,000
 (document version >=2); algorithm 3 (document version >=3) admits any 1..64
 unique ids and pays each challenge `share * min(sum(leaves), 10^12) / 10^12`.
-Activation is an offline owner ceremony. Design, Prism and Relearn are retired
+Activation is a profile version bump on the master (`config/challenges.toml`). Design, Prism and Relearn are retired
 products and their documentation has been removed. No active code, service,
-trust-root row or leaf may register them.
+challenge profile row or leaf may register them.
 
 Start with [the architecture](docs/ARCHITECTURE.md),
 [Proof](docs/PROOF.md), [challenge containers](docs/CHALLENGES.md) and
@@ -69,22 +69,21 @@ or permit UID is not a submit path.
 
 | Key or token | Role |
 | --- | --- |
-| owner seed | signs challenge and measurement trust documents offline |
 | gateway seed | signs immutable epoch bundles |
-| challenge seed | `<id>.key`; signs that container challenge's leaves and must match the trust root |
-| Proof seed | signs Proof topics and leaves and must match the trust root |
+| challenge seed | `<id>.key`; signs that container challenge's leaves and must match the challenge profile |
+| Proof seed | signs Proof topics and leaves and must match the challenge profile |
 | operator bearer | protects master administrative routes |
 | VM orchestrator bearer | authenticates master to the dedicated KVM host; not a wallet |
-| validator hotkey | signs root/dissent evidence and Bittensor submissions |
+| validator hotkey | weight-setting role only: signs root/dissent evidence and Bittensor submissions |
 | challenge internal token | master bearer for a container's `get_weights`; never a signing key |
 | miner hotkey | signs Bounty pairing or Proof submission payloads |
 
 Do not conflate gateway sealing, master ownership and validator chain signing.
-Follow [the trust-root ceremony](docs/how-to/trust-root.md).
+Validators build their view from the gateway profile at `GET /v1/trust`; the gateway is the single source of truth.
 
 ## Challenge container contracts
 
-- The owner-signed trust root decides emission; the unsigned registry
+- The challenge profile decides emission; the unsigned registry
   (`deploy/challenges/registry.toml`) only decides what runs. A container never
   receives a leaf-signing seed.
 - `challenge-supervisor` is the only process with the Docker socket. It verifies

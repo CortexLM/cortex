@@ -41,7 +41,7 @@ Two roles keep that honest:
 - The **master** runs the gateway, Proof and every challenge container. At the end of each epoch it signs one leaf per miner and seals the epoch into a bundle.
 - A **validator** runs none of that. It downloads the sealed bundle, checks it against locally held trust files and the chain, and submits the weights.
 
-An owner-signed trust root sets each challenge's emission share. If a challenge earns less than its share, the shortfall burns to UID 0. It never moves to another challenge.
+The challenge profile (`config/challenges.toml`, served at `GET /v1/trust`) sets each challenge's emission share. If a challenge earns less than its share, the shortfall burns to UID 0. It never moves to another challenge.
 
 Challenges today:
 
@@ -160,7 +160,7 @@ Tests cover signatures and Rust wire vectors, replay protection, challenge conta
 
 ```
 src/        Python package: gateway, master, validator, miner CLI, Proof, VM host
-config/     trust roots and measurements (owner-signed)
+config/     challenge profile and measurements (unsigned, served by the gateway)
 deploy/     master, validator and KVM host deployment
 docs/       architecture, challenges, guides, specifications
 scripts/    validator script, repository and deployment checks, smoke tests
@@ -184,7 +184,7 @@ What the design relies on:
 
 - The master signs one leaf per miner and seals each epoch. Validators recompute weights from the signed leaves and never trust display fields in the gateway response.
 - Validators pin the gateway key and the owner key themselves. Trust files come from a local copy, not from the gateway.
-- Challenge shares come from the owner-signed trust root. Unused share burns to UID 0.
+- Challenge shares come from the challenge profile. Unused share burns to UID 0.
 - A Proof topic opens only after the control plane verifies the host's execution receipts and signs the document.
 
 What isn't done, honestly:

@@ -1,7 +1,7 @@
 # Proof operator reference
 
 Proof is 70% of Cortex emission under algorithm 2 (80% under the legacy
-owner-signed profile). An operator supplies a research objective; a
+legacy profile). An operator supplies a research objective; a
 topic-scoped recursive language-model agent installs its environment, proposes
 measurable rules, creates private evaluation material, measures a baseline and
 publishes miner documentation. Miners submit code and artifacts against the

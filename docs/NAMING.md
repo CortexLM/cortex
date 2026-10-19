@@ -23,7 +23,6 @@ The preserved signing domains are:
 
 | Domain | Purpose |
 | --- | --- |
-| `base-trustroot-v1` | owner-signed challenge and measurement documents |
 | `base-rawweight-v1` | challenge leaves |
 | `base-bundle-v1` | sealed epoch bundles |
 | `base-root-v1` | validator root statements |
@@ -39,14 +38,14 @@ preimage.
 
 ## Live products
 
-The signed trust root lists the live challenge ids and their shares, which total
+The challenge profile lists the live challenge ids and their shares, which total
 10,000 basis points: legacy `bounty` 2,000 / `proof` 8,000 (algorithm 1),
 3,000 / 7,000 (algorithm 2), or any 1..64 ids matching `[a-z0-9][a-z0-9-]{0,62}`
 (algorithm 3). `proof` is built in; every other id is a
 [challenge container](CHALLENGES.md) named `cortex-challenge-<id>`, with state in
 the `cortex-challenge-<id>-data` volume and routes under `/challenge/<id>/`.
 Design, Prism and Relearn are retired products whose documentation has been
-removed. They are not services, routes, trust-root rows or emission recipients.
+removed. They are not services, routes, challenge profile rows or emission recipients.
 
 ## File and command names
 

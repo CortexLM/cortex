@@ -7,15 +7,18 @@
 From a clone of this repository, after `uv sync --locked --extra chain`:
 
 ```bash
+scripts/run-validator.sh --verify-only   # no wallet or hotkey needed
+# To submit weights, a registered validator wallet is required:
 export WALLET_NAME=validator WALLET_HOTKEY=default
+scripts/run-validator.sh
+# Optional extra pin of the gateway sealing hotkey:
 export GATEWAY_PUBLIC=<gateway hotkey pinned from an independent source>
-scripts/run-validator.sh --verify-only   # then run without the flag to submit
 ```
 
 `scripts/run-validator.sh` defaults to `GATEWAY=https://chain.joinbase.ai`,
 `NETUID=100`, `NETWORK=finney` and `STATE_DB=$HOME/.cortex/validator.sqlite3`.
 It checks that `GET $GATEWAY/v1/weights/latest` answers with the expected
-netuid, takes the trust files and minimum versions from `config/`, reads the
+netuid, reads the challenge profile from the gateway, reads the
 subnet `weights_version` from the chain (override with `VERSION_KEY`) and then
 runs `cortex validator`. `--dry-run` prints the command without running it;
 `--once` runs one tick. The script refuses master-only commands and master
@@ -24,17 +27,18 @@ environments. The sections below describe the underlying CLI.
 Cortex runs a centralized authoritative gateway. The master gateway is the
 authority for weights: it serves `/v1/weights/latest`, `/v1/weights/{epoch}`
 and `/v1/bundle/{epoch}`. A Python validator consumes those endpoints,
-independently verifies the bundle against local owner-signed trust and the
-chain, and submits the verified vector on Bittensor. Cross-checking
+independently verifies the bundle against the gateway-served challenge profile
+and the chain, and submits the verified vector on Bittensor. Cross-checking
 authenticated peer roots against other independently-operated validators is an
 opt-in hardening (`--peer-consensus`), off by default.
 
 Validators never run challenge containers or Proof evaluation, rent GPUs or
 receive miner provider credentials; they need no registry, Docker or challenge
-token. Challenge shares come from the owner-signed trust root: legacy
+token. Challenge shares come from the challenge profile the gateway serves at
+`GET /v1/trust` (the master reads `config/challenges.toml`): legacy
 bounty/proof 2000/8000 (algorithm 1), `bounty` 3000 bps and `proof` 7000 bps
 (algorithm 2), or any unique challenge set summing to 10000 bps (algorithm 3,
-see [activation](../how-to/trust-root.md#activate-container-challenges-algorithm-3)).
+see [Changing emission shares](../../deploy/README.md#changing-emission-shares)).
 
 Sealed `GET /v1/weights/latest` responses expose `algorithm_version` from the
 signed bundle. `emission_shares` contains the configured ceilings; each
@@ -44,20 +48,23 @@ the ten-report Bounty ramp under algorithm 2 and
 unmapped hotkeys still burn. Validators always recompute from signed leaves;
 they never trust these display fields as consensus inputs.
 
-## Prepare local trust and identity
+## Prepare identity
 
 Install the [Python package with its chain extra](README.md#installation).
-Obtain the gateway URL and independently pinned gateway public key, plus the
-owner public key and signed `challenges.toml` and `measurements.toml` trust
-files. Detached signatures live beside each TOML as `.toml.sig`. Do not replace
-local trust files with unverified content received from the gateway.
+Obtain the gateway HTTPS URL. The validator builds its challenge profile
+(challenge keys, shares, measurements) from `GET /v1/trust` on that gateway and
+refuses a profile whose version goes backwards. `--gateway-public` is an optional
+extra pin: it refuses a gateway whose sealing hotkey differs. Obtain it from an
+independent source if you use it. TLS to the gateway is the trust anchor otherwise.
 
-Use a registered Bittensor hotkey in a standard wallet. The current validator
-CLI also requires `--consensus-seed-file`: a private file containing the
-32-byte hexadecimal seed for **that same hotkey**. Startup refuses a mismatch.
-This additional seed requirement is a current validator limitation; the miner
-CLI's encrypted-wallet adapter and `--dev-seed-file` option do not apply here.
-Do not assume that a derived wallet key has an exportable matching seed.
+Verifying needs no wallet: run with `--verify-only` and no `--wallet-name` or
+`--wallet-hotkey`. Submitting weights needs a registered Bittensor hotkey in a
+standard wallet (`--wallet-name`, `--wallet-hotkey`, optional `--wallet-path`);
+the CLI refuses to submit without them. `--consensus-seed-file`, a private file
+with the 32-byte hexadecimal seed for **that same hotkey**, is required only with
+`--peer-consensus`; startup refuses a mismatch. The miner CLI's encrypted-wallet
+adapter and `--dev-seed-file` option do not apply here. Do not assume that a
+derived wallet key has an exportable matching seed.
 
 The Bittensor wallet signs on-chain extrinsics. The consensus seed signs peer
 roots and dissent using the frozen Cortex context. No gateway wallet or
@@ -102,23 +109,27 @@ not authentication; the expected hotkey signature is required.
 
 ## Run the validator
 
-This command can submit on-chain weights. Set its network, netuid, peer address
-and local paths to the intended deployment before running it:
+Verify-only (no hotkey, never submits):
+
+```bash
+uv run cortex validator --verify-only --once \
+  --gateway "$GATEWAY" --network "$CHAIN_NETWORK" --netuid "$NETUID" \
+  --version-key "$VALIDATOR_VERSION_KEY" --state-db ./state/validator.sqlite3
+```
+
+The command below can submit on-chain weights and is the only form that needs a
+wallet. Set its network, netuid, peer address and local paths to the intended
+deployment before running it:
 
 ```bash
 uv run cortex validator \
-  --gateway "$GATEWAY" --gateway-public "$GATEWAY_PUBLIC_KEY" \
+  --gateway "$GATEWAY" [--gateway-public "$GATEWAY_PUBLIC_KEY"] \
   --network "$CHAIN_NETWORK" --netuid "$NETUID" \
   --fallback-endpoints "$CHAIN_FALLBACK_ENDPOINTS_JSON" \
-  --owner-public ./trust/owner.pubkey \
-  --challenges ./trust/challenges.toml \
-  --measurements ./trust/measurements.toml \
-  --minimum-challenges-version "$CHALLENGES_MIN_VERSION" \
-  --minimum-measurements-version "$MEASUREMENTS_MIN_VERSION" \
   --version-key "$VALIDATOR_VERSION_KEY" \
   --wallet-name validator --wallet-hotkey default \
   --consensus-seed-file /private/consensus.key \
-  --peers ./trust/peers.json \
+  --peers ./config/peers.json \
   --state-db ./state/validator.sqlite3 \
   --peer-bind "$PEER_BIND" --peer-port 8091 \
   --peer-tls-certificate /private/tls.crt \
@@ -126,9 +137,8 @@ uv run cortex validator \
 ```
 
 `--wallet-path` defaults to `~/.bittensor/wallets`; polling defaults to
-30 seconds. Trust minimums and the subnet validator version key are required;
-obtain them from the signed production ceremony and live subnet instead of
-guessing. `--fallback-endpoints` is a JSON list of at most eight unique `wss://`
+30 seconds. The subnet validator version key is required; obtain it from the live
+subnet instead of guessing. `--fallback-endpoints` is a JSON list of at most eight unique `wss://`
 RPC origins without credentials, queries or fragments. The Bittensor SDK uses
 them when the primary endpoint fails. Fallbacks are origins only: URL paths are
 also rejected so provider bearer material cannot appear in the process argv or
@@ -149,21 +159,23 @@ or peer-unavailable states return a nonzero process status.
 
 For Compose use the Python
 [validator environment example](../../deploy/env/python-validator.env.example)
-and [validator role](../../deploy/compose/role-validator.yml). Keep the SQLite
-state persistent and wallet, identity and trust directories read-only. The
+with the verify-only [validator role](../../deploy/compose/role-validator.yml) (no
+hotkey) or the [weight-setter role](../../deploy/compose/role-weight-setter.yml)
+(the only role with the validator hotkey and consensus seed). Keep the SQLite
+state persistent and wallet, identity and config directories read-only. The
 role points to the master gateway and has no gateway or challenge service.
 
 ## Verify before dispatch
 
 The validator reads `GET /v1/weights/latest`, obtains the corresponding binary
-bundle, then verifies the independently pinned gateway signature and local
-owner-signed trust root. It checks protocol version, epoch and block hash,
+bundle, then verifies the gateway signature (against `/v1/trust`, plus
+`--gateway-public` when given) and the gateway-served challenge profile. It checks protocol version, epoch and block hash,
 metagraph stakes and UID mapping, challenge keys and emission shares,
 participant completeness, measurements and Merkle root. Frozen wire details
 are in the [bundle specification](../BUNDLE_SPEC.md).
 
-Trust files are reloaded, their activation windows and minimum versions are
-checked, and durable watermarks reject rollback. The sealed block must not be
+The profile is refetched each tick, its activation window is checked, and
+durable version watermarks reject rollback. The sealed block must not be
 in the future or more than `--max-block-lag` blocks old (default `256`). Before
 dispatch the validator rechecks both chain snapshot and latest gateway state;
 a reorg or a changed/unsealed latest response prevents submission.
@@ -238,7 +250,7 @@ The peer listener exposes:
 
 Consensus uses sr25519 signing context `base-sr25519-v1` and SCALE-encoded
 domain/payload vectors. Exact domains are `base-root-v1`, `base-dissent-v1`,
-`base-bundle-v1`, `base-rawweight-v1` and `base-trustroot-v1`. Generic Substrate
+`base-bundle-v1`, `base-rawweight-v1` (`base-trustroot-v1` is retired). Generic Substrate
 `wallet.sign()` signatures cannot replace these signatures.
 
 The Python metagraph projection uses chain-provided integer stakes. Validate

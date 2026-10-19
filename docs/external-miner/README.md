@@ -13,8 +13,8 @@ reproduction or on-chain payment.
 | `bounty` | up to 3000 bps (30%), algorithm 2 | [Pair an account and report bugs](bounty.md) |
 | `proof` | 7000 bps (70%), algorithm 2 | [Discover topics and submit research](proof.md) |
 
-The legacy owner-signed profile remains 2000/8000 (algorithm 1) until
-[activation](../how-to/trust-root.md#activate-proportional-bounty).
+The legacy profile remains 2000/8000 (algorithm 1) until the profile version is
+bumped ([Changing emission shares](../../deploy/README.md#changing-emission-shares)).
 A version-3 owner document may add further [challenge containers](../CHALLENGES.md),
 such as [OpentypeAI/challenge](https://github.com/OpentypeAI/challenge), with
 their own shares; each documents its miner API in its repository and is served
@@ -81,7 +81,7 @@ frozen consensus wire format. The public documentation contract is checked by
 `uv run python scripts/check_repo.py`.
 
 `relearn`, `relearn-image`, `relearn-agent`, `relearn-mm`, `design` and `prism`
-are retired products with no trust-root row or emission. Their documentation
+are retired products with no challenge profile row or emission. Their documentation
 has been removed.
 
 ## License

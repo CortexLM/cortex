@@ -1,6 +1,6 @@
 # Operator security checklist
 
-Use this checklist before a deployment, trust-root rotation or incident
+Use this checklist before a deployment, challenge profile change or incident
 recovery. It complements the [threat model](THREAT_MODEL.md).
 
 ## Credentials
@@ -18,14 +18,15 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
 
 ## Trust and pins
 
-- [ ] `cortex trust-verify` accepts the installed challenge and measurement
-  documents at the deployment epoch.
+- [ ] `GET /v1/trust` on the gateway returns the intended challenge and measurement
+  profile at the deployment epoch, over HTTPS (optionally pinned with
+  `--gateway-public`).
 - [ ] Every challenge public key matches its mounted `<id>.key` (or
   `PROOF_SK_FILE`) seed, and the gateway public key differs from all of them.
-- [ ] The trust root is legacy bounty/proof 2000/8000 (algorithm 1), 3000/7000
+- [ ] The challenge profile is legacy bounty/proof 2000/8000 (algorithm 1), 3000/7000
   (algorithm 2, version >=2), or unique ids summing to 10000 (algorithm 3,
-  version >=3). Complete the matching
-  [activation](how-to/trust-root.md#activate-container-challenges-algorithm-3)
+  version >=3). Bump the profile
+  version (see [Changing emission shares](../deploy/README.md#changing-emission-shares))
   before switching profiles; preserve old journals and sealed bytes.
 - [ ] Every registry entry names the challenge's own `ghcr.io` repository and
   GitHub `source`, keeps `attestation = true`, and runs on `stable` or a pin in

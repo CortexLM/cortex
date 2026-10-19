@@ -2,14 +2,14 @@
 
 A Cortex validator downloads the sealed epoch bundle from the gateway, verifies it and submits the weights on Bittensor subnet 100. `scripts/run-validator.sh` does the setup. The master (gateway, Proof, challenge containers) runs only on the master operator's machine, and this script never starts it.
 
-For the underlying CLI and trust files, see the [validator guide](external-miner/validators.md).
+For the underlying CLI and the challenge profile served by the gateway, see the [validator guide](external-miner/validators.md).
 
 ## Prerequisites
 
 - Linux, Python 3.12 or 3.13, [uv](https://docs.astral.sh/uv/), `curl` and libsodium 1.0.18 or newer.
 - A clone of this repository.
-- A Bittensor wallet with a hotkey registered on netuid 100.
-- The gateway's public hotkey, pinned from an independent, trusted source. Don't copy it from the gateway response.
+- To submit weights only: a Bittensor wallet with a hotkey registered on netuid 100. Verifying needs no wallet.
+- Optional: the gateway's public hotkey, pinned from an independent, trusted source, as an extra check. Don't copy it from the gateway response.
 
 ```bash
 sudo apt-get install libsodium23
@@ -18,17 +18,17 @@ uv sync --locked --extra chain
 
 ## Three steps
 
-1. Set the wallet and the pinned gateway key.
-
-   ```bash
-   export WALLET_NAME=validator WALLET_HOTKEY=default
-   export GATEWAY_PUBLIC=<gateway hotkey pinned from an independent source>
-   ```
-
-2. Run one verification. It never submits.
+1. Run one verification. It never submits and needs no wallet.
 
    ```bash
    scripts/run-validator.sh --verify-only
+   ```
+
+2. To submit, set the wallet. Optionally add the independently pinned gateway key.
+
+   ```bash
+   export WALLET_NAME=validator WALLET_HOTKEY=default
+   export GATEWAY_PUBLIC=<gateway hotkey pinned from an independent source>   # optional
    ```
 
 3. Run for real. It verifies and submits every epoch.
@@ -43,9 +43,9 @@ Environment variables:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `WALLET_NAME` | required | Validator wallet name |
-| `WALLET_HOTKEY` | required | Registered validator hotkey |
-| `GATEWAY_PUBLIC` | required | Independently pinned gateway hotkey |
+| `WALLET_NAME` | required to submit | Validator wallet name |
+| `WALLET_HOTKEY` | required to submit | Registered validator hotkey |
+| `GATEWAY_PUBLIC` | optional | Extra pin of the gateway sealing hotkey |
 | `GATEWAY` | `https://chain.joinbase.ai` | Gateway URL |
 | `NETUID` | `100` | Subnet |
 | `NETWORK` | `finney` | Bittensor network |
@@ -102,8 +102,11 @@ The gateway answered for a different subnet than `NETUID`. Check `GATEWAY` and `
 **It can't read `weights_version`.**
 Set `VERSION_KEY` yourself, or check that `NETWORK` is reachable.
 
-**Where do the trust files come from?**
-From `config/` in your clone. See the [trust-root ceremony](how-to/trust-root.md).
+**Where does the challenge profile come from?**
+From the gateway at `GET /v1/trust` over HTTPS; no local files are needed. `--gateway-public` (`GATEWAY_PUBLIC` in the script) is an optional extra pin of the gateway sealing key.
+
+**Do I need a hotkey?**
+Only to submit weights. `scripts/run-validator.sh --verify-only` and the CLI `--verify-only` need no wallet; submitting needs `WALLET_NAME`/`WALLET_HOTKEY` (`--wallet-name`/`--wallet-hotkey`).
 
 **Does the validator CLI need anything else?**
 The [validator guide](external-miner/validators.md) lists the current requirements for the underlying CLI, such as the consensus seed file.

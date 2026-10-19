@@ -13,6 +13,14 @@ the BASE Python master, so that `/v1/weights/latest` can replace
 the pinned upstream and its frozen vectors win. This supersedes D16, which had made the
 Python float/JSON vectors characterization only.
 
+**Trust provenance amendment:** bundle bytes, hashes, signatures and every wire-format
+section are unchanged. Where this document says "local owner-signed trust root", read
+"challenge profile": the unsigned `config/challenges.toml` and `config/measurements.toml`
+read by the master and served by the gateway at `GET /v1/trust`. Validators build their
+`TrustRoot` from that route over HTTPS (optionally pinning the gateway hotkey) and keep
+version watermarks that refuse rollback. The `base-trustroot-v1` domain is no longer
+produced; no owner signature over these documents exists.
+
 Checklist map: [`BUNDLE_SPEC_CHECKLIST.md`](./BUNDLE_SPEC_CHECKLIST.md).  
 CI gate: `cargo run -p xtask -- spec-check`.
 
@@ -153,7 +161,7 @@ RawWeightBodyV1 = scale(
 )
 ```
 
-`challenge_sig` is sr25519 over `msg`, verifiable with the challenge public key from the **local** owner-signed trust root (`config/challenges.toml`), never from gateway HTTP (D18).
+`challenge_sig` is sr25519 over `msg`, verifiable with the challenge public key from the challenge profile (`config/challenges.toml`, obtained from the gateway `/v1/trust` over HTTPS, optionally gateway-pinned) (D18).
 
 ### 3.5 Sort key before tree build
 
@@ -182,7 +190,7 @@ EpochBundleBodyV1 = scale(
   metagraph_root:       [u8; 32],            // §4.3
   algorithm_version:    u16,                 // aggregation; 1 = §6
   emission_shares:      Vec<(Bytes /*challenge_id*/, u16 /*bps*/)>,  // sorted by challenge_id
-  measurements_digest:  [u8; 32],            // sha256 of local measurements trust root body
+  measurements_digest:  [u8; 32],            // sha256 of the measurements profile body
   uid_map:              Vec<([u8; 32] /*hotkey*/, u16 /*uid*/)>,     // sorted by hotkey
   leaves:               Vec<LeafV1>,         // sorted by scale(challenge_id, miner_hotkey)
   merkle_root:          [u8; 32],            // recomputed over leaf preimages
@@ -223,16 +231,16 @@ metagraph_root = sha256( scale(rows as Vec<MetagraphRow>) )
 
 ---
 
-## 5. Emission shares from owner-signed trust root (f)
+## 5. Emission shares from the challenge profile (f)
 
 | Rule | Requirement |
 |------|-------------|
-| Source of truth | Owner-signed `config/challenges.toml` (trust root), loaded from **local disk** on every validator and on the gateway (D23, D18) |
+| Source of truth | `config/challenges.toml` (challenge profile), read by the master and served by the gateway at `GET /v1/trust`; validators build it from that route (D23, D18) |
 | Bundle role | Gateway **copies** shares into `emission_shares`; it does not invent them |
 | Sum | `sum(bps) == 10_000` exactly, or reject |
 | Sort | `emission_shares` sorted by ascending `scale(challenge_id)` |
-| Validator check | Re-read local trust root; require byte-equal challenge_id set and equal bps per id. Mismatch → reject (`EmissionShareMismatch`) |
-| Unknown challenge | Leaf `challenge_id` absent from local trust root → reject (D18) |
+| Validator check | Refetch the challenge profile; require byte-equal challenge_id set and equal bps per id. Mismatch → reject (`EmissionShareMismatch`) |
+| Unknown challenge | Leaf `challenge_id` absent from the challenge profile → reject (D18) |
 
 Share values are `u16` basis points. No floats.
 
@@ -433,9 +441,9 @@ duplicate uid_map entry, wrong `algorithm_version`) → class B, dissent
 
 Validators **derive** the expected set. They MUST NOT trust a set announced only by the gateway or challenge HTTP API.
 
-### 7.1 Trust-root policy per challenge
+### 7.1 Challenge-profile policy per challenge
 
-In owner-signed `challenges.toml`, each challenge carries:
+In `challenges.toml`, each challenge carries:
 
 ```text
 ParticipantPolicy (SCALE enum for signed body; TOML maps 1:1):
@@ -473,7 +481,7 @@ function expected_participants(challenge_id, policy, block_hash, chain) -> BTree
 
 ### 7.3 Completeness rule
 
-Let `E_c = expected_participants(c, ...)` for each challenge `c` in the local trust root with `bps > 0`.
+Let `E_c = expected_participants(c, ...)` for each challenge `c` in the challenge profile with `bps > 0`.
 
 For every `c` and every `h ∈ E_c`, the bundle `leaves` MUST contain **exactly one** leaf with `(challenge_id=c, miner_hotkey=h)` whose `ScoreOrAbsence` is either `Score` or `NoScore`.
 
@@ -523,7 +531,7 @@ Validators compare:
 | Validator mirroring | Validators MAY re-serve a bundle they have verified and persisted; peers SHOULD prefer multi-source fetch |
 | **No last-known-good** | MUST NOT fall back to a previous epoch's bundle, root, or vector when the current epoch fetch/verify fails. Failure → class B / degraded path, not stale success (aligns with D13 spirit for attestation). The unsealed burn response on `/v1/weights/latest` is an operator-safety default, not a last-known-good seal and **not** a submit path: a validator-local copy of a previously verified seal MUST NOT be used for set-weights while latest is unsealed. Mid-epoch tip revision bumps are intentional tip-tracking, not last-known-good |
 
-Gateway signature and leaf signatures are always verified against local trust roots after fetch.
+Gateway signature and leaf signatures are always verified against the challenge profile after fetch.
 
 ---
 
@@ -579,7 +587,7 @@ DissentV1 = scale(
 
 The following paragraph is **normative wording** for docs and threat models. Do not weaken or inflate:
 
-> base guarantees *no equivocation between validators* and *no undetected deviation by the gateway from the owner-signed challenge and measurement artifacts*. It does **not** guarantee (i) that a challenge's scores are honest, (ii) that the owner is honest — the owner signs the trust roots and runs the gateway, so a malicious owner can authorize a dishonest challenge or a backdoored measurement, (iii) completeness beyond what D24 provides, nor (iv) **chain-anchored, third-party-auditable non-equivocation** — per D5 the property is peer-consensus plus local evidence, verifiable by the participating validators and not by an outside observer after the fact.
+> base guarantees *no equivocation between validators* and *no undetected deviation by the gateway from the gateway-served challenge and measurement profile*. It does **not** guarantee (i) that a challenge's scores are honest, (ii) that the owner is honest — the owner controls the profile and runs the gateway, so a malicious owner can authorize a dishonest challenge or a backdoored measurement, (iii) completeness beyond what D24 provides, nor (iv) **chain-anchored, third-party-auditable non-equivocation** — per D5 the property is peer-consensus plus local evidence, verifiable by the participating validators and not by an outside observer after the fact.
 
 ### 11.2 Mismatch outcomes (D6)
 
@@ -658,7 +666,7 @@ A `verify(bundle, chain, local_trust_root)` implementation MUST check, in order:
 2. `gateway_sig` over body  
 3. `block_hash` matches `chain.block_hash(block_B)`  
 4. `metagraph_root` and `uid_map` match `metagraph_at(block_hash)`  
-5. `emission_shares` equal local trust root and sum to `10_000`  
+5. `emission_shares` equal the challenge profile and sum to `10_000`  
 6. `measurements_digest` equals local measurements digest  
 7. Every leaf challenge key known locally; every `challenge_sig` valid  
 8. Participant-set completeness (§7)  
@@ -686,7 +694,7 @@ Failure modes map to §10.1 reason codes.
 | `base-rawweight-v1` | Challenge leaf body |
 | `base-dissent-v1` | Dissent body |
 | `base-root-v1` | Peer `(epoch, merkle_root)` |
-| `base-trustroot-v1` | Owner trust-root body |
+| `base-trustroot-v1` | Retired: formerly the owner-signed profile body; no longer produced |
 | `base-attest-v1` | Attestation bindings (see AGENT_CHALLENGE / D10; out of scope for leaf math) |
 
 Length-prefix rule: SCALE `Bytes` encoding of the tag string UTF-8 bytes (compact length + bytes), then payload. Task 14 owns the exact sign helper; this appendix names the tags only.
@@ -705,7 +713,7 @@ Length-prefix rule: SCALE `Bytes` encoding of the tag string UTF-8 bytes (compac
 | D9 RFC6962 + EMPTY_ROOT | §3 |
 | D18 local challenge keys | §3.4, §5, §14 |
 | D19 honest claim | §11.1 |
-| D23 emission shares in trust root | §5 |
+| D23 emission shares in challenge profile | §5 |
 | D24 absence + derived set | §3.3, §7 |
 | D26 peer sample | §11.3 |
 

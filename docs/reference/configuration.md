@@ -12,9 +12,8 @@ conflicting values are an error. Existing names and crypto domains are preserved
 | `BASE_CHAIN_ENDPOINT` | Official Bittensor SDK alias (`finney`, `test`, `archive`, `local`) or credential-free `wss://` RPC origin |
 | `BASE_CHAIN_FALLBACK_ENDPOINTS` | JSON list of up to eight credential-free `wss://` fallback RPC endpoints |
 | `BASE_STATE_DIR` | Durable private state directory; default `/var/lib/cortex` |
-| `BASE_OWNER_PUBKEY_FILE` | Trust-root signing public key |
-| `BASE_CHALLENGES_FILE` | Signed challenge configuration; adjacent `.sig` required |
-| `BASE_MEASUREMENTS_FILE` | Signed measurement configuration; adjacent `.sig` required |
+| `BASE_CHALLENGES_FILE` | Unsigned challenge profile (challenge keys and emission shares); served by the gateway at `GET /v1/trust` |
+| `BASE_MEASUREMENTS_FILE` | Unsigned measurement profile; served with the challenge profile |
 | `BASE_GATEWAY_SK_FILE` | Gateway seal seed file |
 | `PROOF_SK_FILE` | Proof topic and leaf seed file |
 | `BASE_GATEWAY_ADMIN_TOKEN_FILE` | Required operator bearer file |
@@ -42,8 +41,17 @@ Container challenges such as Bounty take their settings from the registry
 A trusted challenge that is not registered, unhealthy or returns invalid weights
 burns its share. The Proof seed remains required because every completed epoch
 still needs signed Proof absence leaves. The unavailable Proof share burns and is
-never reassigned. Trust-root profiles and their activation are described in
-[the trust-root ceremony](../how-to/trust-root.md).
+never reassigned. Changing the challenge profile is described in
+[Changing emission shares](../../deploy/README.md#changing-emission-shares).
+
+### Gateway routes
+
+The gateway serves the public `/v1` routes `GET /v1/weights/latest`,
+`GET /v1/weights/{epoch}`, `GET /v1/bundle/{epoch}` and `GET /v1/trust`.
+`GET /v1/trust` returns the current challenge profile (challenges with keys,
+shares and policy, measurements digest, gateway hotkey, versions and
+`introduced_epoch`) as JSON. It is public, unsigned and read-only; validators
+build their trust view from it over HTTPS.
 
 One resource shape applies to the persistent topic VM and each fresh experiment
 VM. The examples explicitly request 1 vCPU, 1024 MiB RAM and 16384 MiB disk;
@@ -73,7 +81,9 @@ The Compose role also needs `BASE_CHALLENGE_SECRETS_HOST_DIR` and
 
 ## Validator
 
-The Compose validator maps these host settings to required CLI arguments:
+The Compose validator maps these host settings to CLI arguments. The verify-only
+`role-validator.yml` needs no wallet; `role-weight-setter.yml` is the only role
+with a validator hotkey and consensus seed:
 
 | Variable | Meaning |
 | --- | --- |
@@ -81,17 +91,18 @@ The Compose validator maps these host settings to required CLI arguments:
 | `BASE_NETUID` | Exact deployed subnet UID |
 | `BASE_CHAIN_ENDPOINT` | Official Bittensor SDK alias (`finney`, `test`, `archive`, `local`) or credential-free `wss://` RPC origin |
 | `BASE_CHAIN_FALLBACK_ENDPOINTS` | JSON list of up to eight credential-free `wss://` fallback RPC endpoints |
-| `BASE_GATEWAY_HOTKEY` | Independently pinned gateway signing public key |
-| `BASE_CHALLENGES_MIN_VERSION` | Minimum accepted owner-signed challenge document version |
-| `BASE_MEASUREMENTS_MIN_VERSION` | Minimum accepted owner-signed measurement document version |
+| `BASE_WALLET_NAME`, `BASE_WALLET_HOTKEY` | Validator wallet and hotkey; weight-setter role only |
 | `BASE_VERSION_KEY` | Exact live subnet validator version key |
 | `BASE_MIN_PEER_SAMPLE` | Required independent permitted-validator peer sample, 0-64 |
 | `BASE_MAX_BLOCK_LAG` | Maximum age of a sealed metagraph block, at least 1 |
 
-The trust minimums and version key are intentionally blank in the example.
-Populate them from reviewed signed documents and the live subnet; do not infer
-them from tests. `--verify-only --once` is the non-dispatch preflight. It still
-requires wallet identity, peer consensus and full historical-chain access.
+The version key is intentionally blank in the example. Populate it from the live
+subnet; do not infer it from tests. The CLI flags `--wallet-name` and
+`--wallet-hotkey` are required only to submit weights (or with `--peer-consensus`);
+`--gateway-public` is an optional extra pin of the gateway sealing key. The
+challenge profile always comes from `GET /v1/trust`. `--verify-only --once` is the
+non-dispatch preflight; it needs no wallet but still requires full historical-chain
+access.
 
 ## VM host
 

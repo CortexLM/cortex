@@ -7,8 +7,8 @@ scientifically valuable.
 
 ## Security claim
 
-An honest validator can detect a bundle that differs from the owner-signed trust
-root, challenge leaves, historical metagraph or deterministic aggregation. Peer
+An honest validator can detect a bundle that differs from the gateway-served
+challenge profile, challenge leaves, historical metagraph or deterministic aggregation. Peer
 root consensus can expose equivocation among participating validators, and
 signed dissent can be retained as local evidence.
 
@@ -22,7 +22,7 @@ challenge keys or generated topic rules that validators will faithfully accept.
 
 | Boundary | Trusted property | Residual risk |
 | --- | --- | --- |
-| owner trust root | challenge ids, keys, shares, measurement digest | owner can sign a malicious replacement |
+| challenge profile (gateway `/v1/trust`) | challenge ids, keys, shares, measurement digest | a compromised gateway or broken TLS can serve a malicious profile; pin `--gateway-public` |
 | master gateway | durable intake and immutable seals | availability and censorship remain operator risks |
 | validator | independent chain snapshot, recomputation and dispatch journal | chain RPC eclipse or colluding validators |
 | challenge container | weights it returns for its own share | can misallocate or zero its own share; never holds a leaf seed, cannot move another challenge's mass |

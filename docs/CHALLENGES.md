@@ -15,9 +15,9 @@ master                   polls weights, signs leaves, seals, proxies /challenge/
 validator                GET /v1/weights/latest + /v1/bundle/<epoch>, recompute, submit
 ```
 
-The owner-signed trust root decides which challenges earn emission and how
+The challenge profile decides which challenges earn emission and how
 much. The unsigned registry only decides what runs. A registered challenge that
-is absent from the trust root runs without emission (burn-in). A trusted
+is absent from the challenge profile runs without emission (burn-in). A trusted
 challenge that is not registered or cannot score emits
 `NoScore(ChallengeInternal)` for every expected hotkey and its share burns.
 
@@ -101,7 +101,7 @@ changes `D`.
 
 | Algorithm | Leaf score for `i` in `E` with `w_i > 0` | Challenge payout |
 | --- | --- | --- |
-| 3 (trust root version >= 3) | `floor(10^12 * w_i / D)` | `share * sum(leaves) / 10^12` |
+| 3 (profile version >= 3) | `floor(10^12 * w_i / D)` | `share * sum(leaves) / 10^12` |
 | 2 (bounty/proof 3000/7000) | `w_i`, which must be an integer below 2^64 | Bounty: `share * min(N, 10) / 10`; Proof: `share` |
 | 1 (legacy bounty/proof 2000/8000) | not scored: every hotkey in `E` gets `NoScore(ChallengeInternal)` | nothing; the share burns |
 

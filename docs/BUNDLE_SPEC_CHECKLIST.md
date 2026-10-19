@@ -12,7 +12,7 @@ CI: `cargo run -p xtask -- spec-check` fails if any letter marker is missing fro
 | (c) | leaf layout, ScoreOrAbsence, sort, EMPTY_ROOT hex | ## 3. Merkle construction (RFC 6962) and leaves (c) | `## 3. Merkle construction (RFC 6962) and leaves (c)` |
 | (d) | block_B, block_hash, metagraph_root | ## 4. Bundle body and block pin (d) | `## 4. Bundle body and block pin (d)` |
 | (e) | full integer aggregation formula | ## 6. Aggregation formula, algorithm_version = 1 (e) | `## 6. Aggregation formula, algorithm_version = 1 (e)` |
-| (f) | emission shares from owner-signed trust root | ## 5. Emission shares from owner-signed trust root (f) | `## 5. Emission shares from owner-signed trust root (f)` |
+| (f) | emission shares from the challenge profile | ## 5. Emission shares from the challenge profile (f) | `## 5. Emission shares from the challenge profile (f)` |
 | (g) | expected participant set derivation + completeness | ## 7. Expected participant set derivation (g) (D24) | `## 7. Expected participant set derivation (g) (D24)` |
 | (h) | final vector equality + sha256 of SCALE bytes | ## 8. Final vector comparison (h) | `## 8. Final vector comparison (h)` |
 | (i) | distribution endpoints; no last-known-good | ## 9. Distribution and caching (i) | `## 9. Distribution and caching (i)` |
