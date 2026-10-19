@@ -5,6 +5,9 @@
 # (they need the opendecision extra). Exits 1 when a suite fails or the budget is exceeded.
 # A skip is never silent: -rs prints each reason and any skip outside ALLOWED_SKIPS fails the
 # gate (a skipped proof proves nothing). Extra arguments go to every pytest run.
+# An xfail of the golden replay fails the gate too (-rx prints it): an unmatched leaf root is
+# not a successful golden comparison. CHECK_PROOF_ALLOW_GOLDEN_XFAIL=1 lets it pass: diagnostic
+# only, never for a release.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
@@ -33,11 +36,17 @@ for suite in "${suites[@]}"; do
   fi
   s=$(date +%s%N)
   rc=0
-  PY_COLORS=0 NO_COLOR=1 timeout -k 5 "$(( (left_ms + 999) / 1000 ))" uv run --frozen python -m pytest -q -rs \
+  PY_COLORS=0 NO_COLOR=1 timeout -k 5 "$(( (left_ms + 999) / 1000 ))" uv run --frozen python -m pytest -q -rs -rx \
     --color=no -p no:cacheprovider -m "not od" --durations=5 "$suite" "$@" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
   if unexpected=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep '^SKIPPED' \
       | grep -Ev -- "^SKIPPED \[[0-9]+\] [^ ]+:[0-9]+: (${ALLOWED_SKIPS})\$"); then
     printf 'check-proof: unexpected skip in %s:\n%s\n' "$suite" "$unexpected" >&2
+    [ "$rc" -ne 0 ] || rc=1
+  fi
+  if [ "${CHECK_PROOF_ALLOW_GOLDEN_XFAIL:-0}" != 1 ] && xfailed=$(sed 's/\x1b\[[0-9;]*m//g' "$log" \
+      | grep '^XFAIL tests/trainer/test_golden_replay\.py'); then
+    printf 'check-proof: golden replay xfail is not a proof (CHECK_PROOF_ALLOW_GOLDEN_XFAIL=1 for diagnostics only):\n%s\n' \
+      "$xfailed" >&2
     [ "$rc" -ne 0 ] || rc=1
   fi
   printf 'check-proof: suite=%s exit=%s elapsed=%sms\n' \
