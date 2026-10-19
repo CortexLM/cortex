@@ -5,7 +5,7 @@
 # (they need the opendecision extra). Exits 1 when a suite fails or the budget is exceeded.
 # A skip is never silent: -rs prints each reason and any skip outside ALLOWED_SKIPS fails the
 # gate (a skipped proof proves nothing). Extra arguments go to every pytest run.
-# An xfail of the golden replay fails the gate too (-rx prints it): an unmatched leaf root is
+# An xfail of the golden replay fails the gate too (-rsx prints it): an unmatched leaf root is
 # not a successful golden comparison. CHECK_PROOF_ALLOW_GOLDEN_XFAIL=1 lets it pass: diagnostic
 # only, never for a release.
 set -euo pipefail
@@ -36,7 +36,7 @@ for suite in "${suites[@]}"; do
   fi
   s=$(date +%s%N)
   rc=0
-  PY_COLORS=0 NO_COLOR=1 timeout -k 5 "$(( (left_ms + 999) / 1000 ))" uv run --frozen python -m pytest -q -rs -rx \
+  PY_COLORS=0 NO_COLOR=1 timeout -k 5 "$(( (left_ms + 999) / 1000 ))" uv run --frozen python -m pytest -q -rsx \
     --color=no -p no:cacheprovider -m "not od" --durations=5 "$suite" "$@" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
   if unexpected=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep '^SKIPPED' \
       | grep -Ev -- "^SKIPPED \[[0-9]+\] [^ ]+:[0-9]+: (${ALLOWED_SKIPS})\$"); then
