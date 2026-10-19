@@ -132,6 +132,8 @@ uv run --frozen python -m hypertrain.beacon check --live
 
 `beacon check --live` fetches and verifies the latest round from the default relays; pass `--relay URL` (repeatable) to use your own.
 
+The server refuses v2 operations once it is more than two rounds (6 s) behind, so keep `uv run --frozen python -m hypertrain.beacon push --api "$API" --admin-token-file "$HT/secrets/admin_token"` running next to it. Every `--interval` (3 s) it asks the relays (`--relay URL`, repeatable, at least two distinct ones, all must agree) for the latest round, verifies it, and pushes the rounds the server is missing, oldest first, at most the last `--catch-up` (20). It prints one JSON line per tick, `{"pushed": [...], "latest": n, "known": n}`; `--once` runs a single tick, for cron. Relay, network, 408, 429 and 5xx failures are retried; exit codes: 0 after a good `--once` tick or on SIGTERM; 1 on any other service status (a 409 means a conflicting round, never overwritten), a failed `--once` tick or `--max-failures` (10) failures in a row; 2 on a usage error, a 401/403, or a token file that is not one `[A-Za-z0-9._~-]+` token.
+
 ### The manifest
 
 `hypertrain.protocol.example.example_manifest()` builds the example CPU manifest. Its `PROVENANCE` dict says where each hyperparameter comes from in the plan and its advisories:
