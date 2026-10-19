@@ -532,6 +532,16 @@ def test_refusal_says_search_was_capped(fake, tmp_path, mfu_globals, monkeypatch
     assert reason.endswith("search stopped after 2 pages of 64: cheaper-first market not exhausted")
 
 
+def test_refusal_says_search_stalled_on_one_price(fake, tmp_path, mfu_globals):
+    base = fake.offers()[1] | {"driver_version": "615.71.09"}
+    flat = [base | {"id": 100 + i, "dph_total": 0.2} for i in range(64)]
+    fake.offers = lambda: [*flat, base | {"id": 99, "dph_total": 0.5}]
+    rc, journal, _ = run(fake, tmp_path, "--dry-run")
+    reason = next(j["reason"] for j in journal if j["event"] == "refused")
+    assert rc == 2 and len(fake.queries) == 2
+    assert reason.endswith("search stalled: 64 offers at 0.2 USD/h fill a page")
+
+
 def test_gpu8_profile_dry_run_selects_eight_gpu_qualified_offer(
     fake, tmp_path, capsys, mfu_globals
 ):

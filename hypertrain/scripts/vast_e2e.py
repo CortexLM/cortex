@@ -270,7 +270,7 @@ class Harness:
             raise Refused(f"credit {credit} < max_usd + 5 = {need}")
         # Drivers are filtered client-side (the API refuses a driver filter), so the cheapest
         # page may hold no qualified offer: page on by price until one is eligible.
-        query, offers, seen, capped = self.offer_query(), [], set(), False
+        query, offers, seen, why = self.offer_query(), [], set(), ""
         skip = set(self.a.exclude_offer)  # here, not in eligible(): profiles override that
         for page in range(OFFER_PAGES):
             q = urllib.parse.urlencode({"q": json.dumps(query)})
@@ -285,9 +285,14 @@ class Harness:
             fit = [o for o in pool if self.eligible(o)]
             prices = [p for o in got if isinstance(o, dict) and (p := dec(o.get("dph_total")))]
             limit = query.get("limit")
-            if fit or not new or not prices or limit is None or len(got) < limit:
+            if fit or not prices or limit is None or len(got) < limit:
                 break
-            capped = page == OFFER_PAGES - 1
+            if not new:  # a whole page at one price: the gte cursor cannot advance
+                why = f"; search stalled: {limit} offers at {max(prices)} USD/h fill a page"
+                break
+            if page == OFFER_PAGES - 1:
+                why = f"; search stopped after {OFFER_PAGES} pages of {limit}: "
+                why += "cheaper-first market not exhausted"
             # gte, not gt: offers at the boundary price may continue on the next page.
             query = {**query, "dph_total": {"gte": float(max(prices))}}
         if not fit:
@@ -300,13 +305,7 @@ class Harness:
                 )
             raise Refused(
                 f"no eligible {self.offer_desc} offer among {len(offers)} "
-                f"({alone} rejected by driver allow-list)"
-                + (
-                    f"; search stopped after {OFFER_PAGES} pages of {query.get('limit')}: "
-                    "cheaper-first market not exhausted"
-                    if capped
-                    else ""
-                )
+                f"({alone} rejected by driver allow-list){why}"
             )
         best = min(fit, key=self.rank)
         cost = worst_case(best, float(self.a.max_minutes), self.disk_gb)
