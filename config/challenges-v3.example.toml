@@ -1,6 +1,7 @@
 # Algorithm 3 template (profile version >= 3). Choose the shares, the next profile
-# version and the activation epoch, replace development public keys, then install
-# it as config/challenges.toml and restart the master.
+# `version` and the activation epoch, then install it as config/challenges.toml.
+# The master reloads the profile before epoch emission; the cautious workflow
+# restarts it between two epochs, just after a seal.
 # Each challenge pays share * min(sum(leaves), 10^12) / 10^12; the rest burns.
 # Container ids also need a row in deploy/challenges/registry.toml to run.
 version = 3

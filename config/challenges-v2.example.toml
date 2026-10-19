@@ -1,6 +1,7 @@
-# Activation template. Replace development public keys, choose the next profile
-# version and activation epoch, then install it as config/challenges.toml and
-# restart the master. No production activation occurs from this file.
+# Activation template. Choose the next profile `version` and activation epoch,
+# then install it as config/challenges.toml. The master reloads the profile before
+# epoch emission; the cautious workflow restarts it between two epochs, just after
+# a seal. No production activation occurs from this file.
 version = 2
 introduced_epoch = "CHOOSE_ACTIVATION_EPOCH"
 
