@@ -1,5 +1,5 @@
 # Unsigned operator registry: which challenge containers the master runs.
-# Emission is decided only by the owner-signed trust root (config/challenges.toml);
+# Emission is decided only by the challenge profile (config/challenges.toml);
 # a registered id absent from it runs without emission. See docs/CHALLENGES.md.
 # The supervisor re-reads this file every tick and the master on every change.
 version = 1

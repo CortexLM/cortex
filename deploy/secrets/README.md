@@ -12,7 +12,7 @@ regular files, owned/readable by that identity, with mode 0400 or 0600.
 | --- | --- |
 | `gateway.key` | 32-byte sr25519 seed for bundle seals |
 | `<id>.key` | leaf seed of each trusted container challenge, e.g. `bounty.key` |
-| `proof.key` | Proof topic/leaf seed matching the trust root |
+| `proof.key` | Proof topic/leaf seed matching the challenge profile |
 | `operator.token` | bearer for master administrative routes |
 | `proof-vm.token` | bearer shared with the dedicated VM host |
 | `proof-vm-ca.pem` | CA used to verify the VM-host TLS certificate |

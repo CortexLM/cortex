@@ -1,6 +1,7 @@
-# Owner-signed measurement allowlist retained by the frozen bundle contract.
+# Measurement allowlist retained by the frozen bundle contract. Served with the
+# challenge profile at GET /v1/trust.
 # The Python Firecracker path does not authorize a legacy CVM measurement, so
-# the list is intentionally empty. Additions require the offline owner ceremony.
+# the list is intentionally empty. Bump `version` when adding an entry.
 version = 5
 introduced_epoch = 0
 

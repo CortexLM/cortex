@@ -81,7 +81,7 @@ def build_bundle(
 ) -> Bundle:
     trust.validate()
     if epoch < trust.introduced_epoch:
-        raise ProtocolError("trust root is not active for bundle epoch")
+        raise ProtocolError("challenge profile is not active for bundle epoch")
     if public_key(gateway_seed) != trust.gateway_hotkey:
         raise ProtocolError("gateway key does not match local trust")
     ordered_rows = canonical_rows(rows)
@@ -146,7 +146,7 @@ def verify_inputs(
     if body.protocol_version != 1 or body.algorithm_version != trust.algorithm_version:
         raise ProtocolError("unsupported bundle version")
     if body.epoch < trust.introduced_epoch:
-        raise ProtocolError("trust root is not active for bundle epoch")
+        raise ProtocolError("challenge profile is not active for bundle epoch")
     if body.netuid != netuid or (epoch is not None and body.epoch != epoch):
         raise ProtocolError("bundle subnet/epoch mismatch")
     if body.gateway_hotkey != trust.gateway_hotkey:

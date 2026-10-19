@@ -564,7 +564,7 @@ async def build_master(
     prepare_master_state(config.state_dir)
     clock = EpochClock(epochs, config.netuid, stale_seconds=config.epoch_stale_seconds)
     state = await clock.refresh()
-    local_trust = trust or config.trust_root(state.epoch)
+    local_trust = trust or config.challenge_profile(state.epoch)
     read_private_file(config.operator_token_file)
     load_registry(config.challenge_registry_file)  # fail fast on an invalid operator registry
     with ExitStack() as cleanup:
@@ -593,7 +593,7 @@ async def build_master(
             chain=chain,
             gateway_seed=lambda: read_seed(config.gateway_seed_file),
             chain_endpoint=chain_endpoint,
-            trust_loader=None if trust is not None else config.trust_root,
+            trust_loader=None if trust is not None else config.challenge_profile,
         )
         proof = _EpochTrackedProof(
             store=proof_store,

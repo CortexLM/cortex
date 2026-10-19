@@ -18,7 +18,7 @@ def put(root, name, content):
     return target
 
 
-def trust_root(proof_share=8000, third=""):
+def challenge_profile(proof_share=8000, third=""):
     return (
         'version = 1\n[[challenges]]\nid = "bounty"\n'
         f'public_key = "{"a" * 64}"\nemission_share_bps = 2000\n'
@@ -43,20 +43,22 @@ def test_frozen_spec_single_byte_change_is_detected(tmp_path):
 
 
 @pytest.mark.parametrize("mutation", ["share", "third", "duplicate", "malformed", "staging"])
-def test_trust_root_rejects_emission_drift_or_extra_products(tmp_path, mutation):
-    path = put(tmp_path, "config/challenges.toml", trust_root())
-    assert CHECK["check_trust_roots"](tmp_path) == []
+def test_challenge_profile_rejects_emission_drift_or_extra_products(tmp_path, mutation):
+    path = put(tmp_path, "config/challenges.toml", challenge_profile())
+    assert CHECK["check_challenge_profiles"](tmp_path) == []
     if mutation == "share":
-        path.write_text(trust_root(proof_share=7000))
+        path.write_text(challenge_profile(proof_share=7000))
     elif mutation == "third":
-        path.write_text(trust_root(third='[[challenges]]\nid = "prism"\nemission_share_bps = 0\n'))
+        path.write_text(
+            challenge_profile(third='[[challenges]]\nid = "prism"\nemission_share_bps = 0\n')
+        )
     elif mutation == "duplicate":
-        path.write_text(trust_root().replace('id = "proof"', 'id = "bounty"'))
+        path.write_text(challenge_profile().replace('id = "proof"', 'id = "bounty"'))
     elif mutation == "malformed":
         path.write_text('challenges = "not an array"')
     else:
-        put(tmp_path, "config/challenges.staging.toml", trust_root(proof_share=7000))
-    assert len(CHECK["check_trust_roots"](tmp_path)) == 1
+        put(tmp_path, "config/challenges.staging.toml", challenge_profile(proof_share=7000))
+    assert len(CHECK["check_challenge_profiles"](tmp_path)) == 1
 
 
 def test_version_three_accepts_any_unique_challenge_set_summing_to_full_emission(tmp_path):
@@ -65,26 +67,26 @@ def test_version_three_accepts_any_unique_challenge_set_summing_to_full_emission
         for name, share in (("bounty", 3000), ("opentype", 5000), ("proof", 2000))
     )
     path = put(tmp_path, "config/challenges.toml", "version = 3\n" + rows)
-    assert CHECK["check_trust_roots"](tmp_path) == []
+    assert CHECK["check_challenge_profiles"](tmp_path) == []
     path.write_text("version = 3\n" + rows.replace("5000", "4999"))
-    assert len(CHECK["check_trust_roots"](tmp_path)) == 1
+    assert len(CHECK["check_challenge_profiles"](tmp_path)) == 1
     path.write_text("version = 3\n" + rows.replace('"opentype"', '"Open_Type"'))
-    assert len(CHECK["check_trust_roots"](tmp_path)) == 1
+    assert len(CHECK["check_challenge_profiles"](tmp_path)) == 1
     path.write_text("version = 2\n" + rows)
-    assert len(CHECK["check_trust_roots"](tmp_path)) == 1
+    assert len(CHECK["check_challenge_profiles"](tmp_path)) == 1
 
 
 @pytest.mark.parametrize("version,accepted", [(1, False), (2, True), (3, True)])
-def test_proportional_trust_template_requires_new_owner_version(tmp_path, version, accepted):
-    put(tmp_path, "config/challenges.toml", trust_root())
+def test_proportional_profile_template_requires_new_version(tmp_path, version, accepted):
+    put(tmp_path, "config/challenges.toml", challenge_profile())
     put(
         tmp_path,
         "config/challenges-v2.example.toml",
-        trust_root(proof_share=7000)
+        challenge_profile(proof_share=7000)
         .replace("2000", "3000")
         .replace("version = 1", f"version = {version}"),
     )
-    assert (CHECK["check_trust_roots"](tmp_path) == []) is accepted
+    assert (CHECK["check_challenge_profiles"](tmp_path) == []) is accepted
 
 
 @pytest.mark.parametrize("method", ["get", "post"])
@@ -247,7 +249,7 @@ def test_default_gate_tolerates_rust_until_final_flag_is_enabled(tmp_path):
         target = tmp_path / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, target)
-    put(tmp_path, "config/challenges.toml", trust_root())
+    put(tmp_path, "config/challenges.toml", challenge_profile())
     put(tmp_path, "Cargo.toml", '[package]\nname="legacy"')
 
     assert CHECK["check_repository"](tmp_path) == []

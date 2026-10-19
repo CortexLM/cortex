@@ -378,7 +378,7 @@ def validate_compose(config: dict, role: str) -> None:
         if not {"/etc/base/config", "/run/secrets", "/var/lib/base"} <= set(mounts):
             raise ValueError("master trust, secret and state mounts are required")
         if mounts["/etc/base/config"].get("type") != "bind":
-            raise ValueError("master trust root must be an operator bind mount")
+            raise ValueError("master challenge profile must be an operator bind mount")
         if mounts["/run/secrets"].get("type") != "bind":
             raise ValueError("master credentials must be an operator bind mount")
         if "/run/wallets" in mounts:

@@ -212,7 +212,7 @@ class MasterConfig:
             return self.proof_seed_file
         return self.challenge_keys_dir / f"{challenge.decode()}.key"
 
-    def trust_root(self, epoch: int) -> TrustRoot:
+    def challenge_profile(self, epoch: int) -> TrustRoot:
         try:
             trust = load_trust(
                 challenges_path=self.challenges_file,
@@ -224,4 +224,4 @@ class MasterConfig:
                     raise ServiceError(503, "challenge signing key does not match the profile")
             return trust
         except (OSError, ValueError, KeyError):
-            raise ServiceError(503, "trust profile unavailable") from None
+            raise ServiceError(503, "challenge profile unavailable") from None

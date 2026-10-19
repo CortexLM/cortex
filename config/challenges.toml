@@ -1,5 +1,6 @@
-# Owner-signed development trust root. Production uses an offline owner ceremony;
-# see docs/how-to/trust-root.md. Only semantic fields enter the signed preimage.
+# Development challenge profile (emission shares and challenge keys). The master reads
+# this unsigned file; the gateway serves it at GET /v1/trust and validators build their
+# view from that. To change shares: edit, bump `version`, restart the master.
 #
 # Two live challenges. Emission: bounty = 2000, proof = 8000 bps (sum 10000).
 # Readiness is independent of these shares: a missing feed, topic, baseline,
