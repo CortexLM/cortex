@@ -163,7 +163,22 @@ hypertrain-miner status --config miner.toml
 hypertrain-miner update --check --manifest-url "$MANIFEST_URL"
 ```
 
-`register --coldkey ... --request-id ... --expiry ...` is the legacy `join-v2` path. A revoked key is rejected on every authenticated miner route.
+`register` posts a server-key grant; it does not submit a contract-2 admission. For contract 2, prepare the hotkey-signed request on the GPU host using its configured hotkey (not a delegated server key):
+
+```bash
+hypertrain-miner join-v2 --config miner.toml --request-id "$REQUEST_ID" --expiry "$EXPIRY" \
+  --coldkey-ss58 "$COLDKEY_SS58" --prepare join.json
+```
+
+Copy `join.json` to the operator machine. It contains only public fields and the hotkey signature; no coldkey is needed on the GPU host. Co-sign and submit without `miner.toml`, then lock collateral from explicit existing origins:
+
+```bash
+hypertrain-miner join-v2-cosign --request join.json --coldkey ~/cold.key --api "$API"
+hypertrain-miner escrow-lock --api "$API" --run-id "$RUN_ID" --coldkey ~/cold.key \
+  --hotkey-ss58 "$HOTKEY_SS58" --units "$UNITS" --origin "$ORIGIN_ID"
+```
+
+`REQUEST_ID`, `RUN_ID` and origin IDs are 64 lowercase hex characters; `EXPIRY` is a beacon round. Inspect the public request before co-signing. Use a new output filename for each preparation. Repeat `--origin` for multiple origins; the CLI never creates origins. `escrow-lock --dry-run` prints only the unsigned operation without posting. Its default expiry is the run's current beacon round plus 1000; `--expiry` overrides it. Identical inputs (including reordered origins) reuse the operation ID. Success reports the event hash, current locked units, total required units and server eligibility; funding alone does not guarantee eligibility. The existing `join-v2 --coldkey ...` path remains available. A revoked key is rejected on every authenticated miner route.
 
 Only sr25519-signed release manifests are accepted; unsigned tags and downgrades are rejected. During the announce window (at least 600 s) `run --auto-update` stages the new wheel while training continues. At the first round boundary at or after `changeover_at`, it swaps `~/.hypertrain/miner/current` atomically and re-executes the new version, which resumes from the round journal. A miner still on the old version 60 s after changeover refuses new rounds. `update --apply` does the stage and swap by hand. `HYPERTRAIN_UPDATE_ROOT` and `HYPERTRAIN_UPDATE_MANIFEST_URL` override the defaults.
 
