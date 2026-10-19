@@ -3467,6 +3467,7 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
         "held-forged",
         "dead-relay",
         "unavailable-relay",
+        "held-corrupt",
     ],
 )
 def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, invalid):
@@ -3526,6 +3527,7 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         "held-forged",
         "dead-relay",
         "unavailable-relay",
+        "held-corrupt",
     }
     chunks = UploadChunkManifest(
         size=len(payload),
@@ -3680,6 +3682,10 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         acks.append(ChunkCustodyAck.model_validate(last_env.body))
     if invalid in {"held-chunk-only", "held-forged"}:
         network.store.objects.put(payload)
+    if invalid == "held-corrupt":  # bit rot in the master's copy of the original
+        corrupt = network.store.objects._path(grant.delta_hash)
+        corrupt.parent.mkdir(parents=True, exist_ok=True)
+        corrupt.write_bytes(b"rot")
     network.push(grant.exp_drand + 1)
     for auditor in AUDITORS:
         url = network.url + f"/relay-observers/{grant.digest()}/{auditor.ss58}"
@@ -3784,10 +3790,12 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         fresh = network.client.get(network.url + f"/rounds/0/relay/{HOT[0].ss58}")
         assert fresh.status_code == 503, fresh.text  # the only relay is out of selection
         assert "no approved healthy relay" in fresh.text
-    elif invalid == "chunk-only":
+    elif invalid in {"chunk-only", "held-corrupt"}:
+        # held-corrupt: the rotten copy counts as absent, so the rescue decides and disables.
         assert rescued.status_code == 200, rescued.text
-        assert network.store.objects.get(grant.delta_hash) == payload
         assert disabled() == 1
+        if invalid == "chunk-only":
+            assert network.store.objects.get(grant.delta_hash) == payload
     elif invalid is not None:
         assert rescued.status_code == 422, rescued.text
         if forged:

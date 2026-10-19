@@ -40,6 +40,7 @@ from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.disputes_v2 import Contest, DisputesV2
 from hypertrain.data.assignment import assign_round
 from hypertrain.data.store import (
+    CorruptObjectError,
     ObjectNotFound,
     StoreError,
     _stream,
@@ -5624,8 +5625,8 @@ class ChallengeStore:
                         sha256_hex(original[c.off : c.off + c.len]) != c.chunk_sha256
                         for c in chunk_manifest.chunks
                     )
-                except ObjectNotFound:
-                    pass
+                except (ObjectNotFound, CorruptObjectError):
+                    pass  # a corrupt copy proves nothing: treat as absent, rescue decides
             if min(evidence.observed_beacons) <= opportunity.service_deadline or max(
                 evidence.observed_beacons
             ) > self._now(self._db):
