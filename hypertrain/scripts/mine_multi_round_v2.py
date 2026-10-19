@@ -282,10 +282,11 @@ def restart_probes(
         "relay_receipts_unchanged": count("relay-receipt") == receipts,
     }
     if not (
-        probe["after_upload"]["delta_unchanged"]
+        probe["after_upload"]["rc"] == 0
+        and probe["after_upload"]["delta_unchanged"]
         and probe["after_upload"]["relay_receipts_unchanged"]
     ):
-        raise RuntimeError(f"rerun after UPLOADED changed the accepted delta: {probe}")
+        raise RuntimeError(f"rerun after UPLOADED not a clean no-op: {probe}")
 
     w = open_round(svc, n, ROUNDS + 1, settle(svc, n, w)).w
     for i, conf in enumerate(configs[1:], 1):
