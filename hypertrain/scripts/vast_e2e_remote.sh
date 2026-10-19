@@ -153,7 +153,8 @@ setup_v = esc.Setup(manifest, net.setup.policy, net.setup.admission_policy, net.
 per = manifest.training.batch_samples()
 
 def stage(d, w, start=None, ef=None):
-    job = esc.stage(setup_v, d, tuple(range(w * per, (w + 1) * per)), w)
+    # The fixture holds 16 rows: at N=8 a round takes 16 samples, so round 1 wraps around.
+    job = esc.stage(setup_v, d, tuple(i % len(setup_v.rows) for i in range(w * per, (w + 1) * per)), w)
     upd = {"deadline": int(time.time()) + 1800}
     if start is not None:
         (d / "start_state").write_bytes(start); (d / "ef_in").write_bytes(ef)

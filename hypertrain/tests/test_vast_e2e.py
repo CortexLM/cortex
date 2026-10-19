@@ -7,6 +7,7 @@ import json
 import os
 import shlex
 import signal
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -509,6 +510,30 @@ def test_gpu_e2e_remote_gets_host_gpu_count(tmp_path):
     assert words[words.index("bash") - 1] == "HT_E2E_GPUS=8"  # env(1): the last value wins
     remote = (vast.ROOT / "scripts/vast_e2e_remote.sh").read_text()
     assert 'N = int(os.environ.get("HT_E2E_GPUS", "2"))' in remote
+
+
+def test_gpu_e2e_remote_runs_eight_ranks_on_cpu(tmp_path):
+    pytest.importorskip("torch")
+    bindir = Path(sys.executable).parent
+    if not (bindir / "hypertrain-miner").exists():
+        pytest.skip("hypertrain-miner not installed next to this interpreter")
+    env = {
+        **os.environ,
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+        "HT_E2E_BACKEND": "cpu",
+        "HT_E2E_GPUS": "8",
+        "HT_E2E_PYTHON": sys.executable,
+        "HT_E2E_SRC": str(vast.ROOT),
+        "HT_E2E_OUT": str(tmp_path / "out"),
+        "HT_E2E_WORK": str(tmp_path / "work"),
+    }
+    script = vast.ROOT / "scripts/vast_e2e_remote.sh"
+    p = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=900)
+    log = tmp_path / "out/network_e2e.log"
+    assert p.returncode == 0, log.read_text()[-2000:] if log.exists() else p.stderr
+    e2e = json.loads((tmp_path / "out/e2e.json").read_text())
+    assert [r["auditor_match"] for r in e2e["rounds"]] == [True, True] and e2e["repeat_match"]
+    assert len(e2e["rounds"][0]["miner"]["files"]) == 8 * 4  # every rank's artifacts
 
 
 def test_miner_cycle_profile_uses_new_remote_script(fake, tmp_path, capsys, mfu_globals):
