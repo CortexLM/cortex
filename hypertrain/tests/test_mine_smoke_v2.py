@@ -115,6 +115,18 @@ def test_main_fails_on_a_post_stage_check_even_when_every_stage_is_green(
     assert ev["result"] == "FAIL" and "delta recorded" in ev["failed"]
 
 
+def test_unknown_break_stage_is_rejected_before_any_stage(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def chain(tmp: Path, ev: dict, stack: object) -> None:
+        raise AssertionError("must not run")
+
+    monkeypatch.setenv("MINE_SMOKE_V2_BREAK", "escrow-lock")
+    monkeypatch.setattr(mine_smoke_v2, "chain", chain)
+    assert mine_smoke_v2.main() == 2
+    assert "'escrow-lock' is not a breakable stage: join-v2" in capsys.readouterr().err
+
+
 def test_sigterm_still_writes_fail_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -12,7 +12,8 @@ A round only opens on a roster of four funded eligible miners with at most one P
 operator role (12 real reference trials each, `"mode": "in-process"` in the evidence).
 
 Writes evidence JSON to $MINE_SMOKE_V2_EVIDENCE (default: a fresh private temp file, path
-printed); exit 0 = PASS (every required stage ran with rc 0), exit 1 = a stage failed.
+printed); exit 0 = PASS (every required stage ran with rc 0), exit 1 = a stage failed,
+exit 2 = MINE_SMOKE_V2_BREAK names no breakable stage.
 MINE_SMOKE_V2_BREAK=<join-v2|probe-v2|proof-v2|run-v2> points that stage at a closed port
 (failure-detection check). SIGTERM (the shell's budget timeout) is recorded as a failure.
 """
@@ -525,6 +526,14 @@ def chain(tmp: Path, ev: dict[str, Any], stack: contextlib.ExitStack) -> None:
 
 
 def main() -> int:
+    broken = os.environ.get("MINE_SMOKE_V2_BREAK")
+    if broken and broken not in REQUIRED:
+        # A typo would otherwise run a green smoke and pass the failure-detection check.
+        print(
+            f"MINE_SMOKE_V2_BREAK={broken!r} is not a breakable stage: {', '.join(REQUIRED)}",
+            file=sys.stderr,
+        )
+        return 2
     ev: dict[str, Any] = {"stages": []}
     out, fd = evidence_file()
     started = time.monotonic()

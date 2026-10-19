@@ -97,7 +97,8 @@ in-process by the operator role (`"mode": "in-process"` in the evidence). PASS
 requires every stage at rc 0 and the round-0 delta recorded; measured ~132 s,
 budget `MINE_SMOKE_V2_BUDGET_SECONDS` (default 300). Evidence (stage, rc, ms) goes
 to `$MINE_SMOKE_V2_EVIDENCE` or a fresh 0600 temp file; `MINE_SMOKE_V2_BREAK=<stage>`
-points one of the four miner stages at a closed port to check failure detection. It proves the CLI
+points one of the four miner stages at a closed port to check failure detection (any
+other name exits 2 before running). It proves the CLI
 chain, not CUDA, audits, settlement or production funding.
 
 ## Join, prove work, fund, graduate
