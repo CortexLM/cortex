@@ -514,7 +514,8 @@ def test_gpu_e2e_remote_gets_host_gpu_count(tmp_path):
     assert 'N = int(os.environ.get("HT_E2E_GPUS", "2"))' in remote
 
 
-def test_gpu_e2e_remote_runs_eight_ranks_on_cpu(tmp_path):
+@pytest.mark.parametrize("ranks", [2, 8])
+def test_gpu_e2e_remote_runs_on_cpu_and_keeps_rank_logs(tmp_path, ranks):
     pytest.importorskip("torch")
     bindir = Path(sys.executable).parent
     if not (bindir / "hypertrain-miner").exists():
@@ -523,7 +524,7 @@ def test_gpu_e2e_remote_runs_eight_ranks_on_cpu(tmp_path):
         **os.environ,
         "PATH": f"{bindir}:{os.environ['PATH']}",
         "HT_E2E_BACKEND": "cpu",
-        "HT_E2E_GPUS": "8",
+        "HT_E2E_GPUS": str(ranks),
         "HT_E2E_PYTHON": sys.executable,
         "HT_E2E_SRC": str(vast.ROOT),
         "HT_E2E_OUT": str(tmp_path / "out"),
@@ -535,7 +536,10 @@ def test_gpu_e2e_remote_runs_eight_ranks_on_cpu(tmp_path):
     assert p.returncode == 0, log.read_text()[-2000:] if log.exists() else p.stderr
     e2e = json.loads((tmp_path / "out/e2e.json").read_text())
     assert [r["auditor_match"] for r in e2e["rounds"]] == [True, True] and e2e["repeat_match"]
-    assert len(e2e["rounds"][0]["miner"]["files"]) == 8 * 4  # every rank's artifacts
+    assert len(e2e["rounds"][0]["miner"]["files"]) == ranks * 4  # every rank's artifacts
+    # Every torchrun worker's stderr lands in the rescued out/ (the 8x5090 failure left none).
+    logs = sorted((tmp_path / "out/torchelastic").rglob("stderr.log"))
+    assert {p.parent.name for p in logs} == {str(r) for r in range(ranks)}
 
 
 def test_miner_cycle_profile_uses_new_remote_script(fake, tmp_path, capsys, mfu_globals):

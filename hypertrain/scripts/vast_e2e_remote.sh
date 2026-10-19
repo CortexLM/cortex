@@ -9,6 +9,9 @@ mkdir -p "$OUT"
 cd "$HT"
 export CUBLAS_WORKSPACE_CONFIG=:4096:8 CUDA_DISABLE_PTX_JIT=1 OMP_NUM_THREADS=1 PYTHONHASHSEED=0
 export HT_IMAGE_DIGEST=sha256:c16a28dd29df300eca0cfb5c5aeacb8947681708634e3cbc8639b530321fe2e2
+# torchrun reads PET_<flag>: tee every rank's stdout/stderr into $OUT, which is rescued. The
+# launcher's own stderr tail keeps only torchrun's summary, not the failing rank's traceback.
+export PET_LOG_DIR="$OUT/torchelastic" PET_TEE=3
 
 step() {
   local name=$1; shift
