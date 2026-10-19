@@ -434,12 +434,12 @@ class EpochEmitter:
                 if pinned.block_hash != block_hash or pinned.block != block:
                     raise ServiceError(503, "completed epoch pin changed")
                 # The event loop serves intake during every await below; close it until sealed.
-                self.gateway.sealing = True
+                self.gateway.sealing = epoch
                 try:
                     await self._emit(epoch, pinned)
                     await self.gateway.seal(epoch, block_b=block)
                 finally:
-                    self.gateway.sealing = False
+                    self.gateway.sealing = None
                 self.journal.sealed(epoch)
                 completed.append(epoch)
                 # Keep each newly completed seal observable for one polling interval.

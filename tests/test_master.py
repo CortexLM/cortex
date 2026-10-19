@@ -638,7 +638,7 @@ async def test_intake_bearer_cannot_inject_a_leaf_while_the_epoch_is_being_seale
     intake = {"authorization": "Bearer fixture-intake-token-0123456789abcdef"}
     operator = {"authorization": "Bearer fixture-operator-token-0123456789abcdef"}
     hotkey = chain.rows[0].hotkey
-    snapshot, posted = chain.snapshot, []
+    snapshot, posted, open_epoch = chain.snapshot, [], []
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(runtime.app()), base_url="https://master"
     ) as client:
@@ -647,6 +647,9 @@ async def test_intake_bearer_cannot_inject_a_leaf_while_the_epoch_is_being_seale
             # Each chain read of the completed-epoch cycle is an await an intake can land in.
             forged = leaf_request(Leaf(b"bounty", hotkey, 12, Score(10**9 + len(posted))))
             posted.append(await client.post("/v1/weights/raw", json=forged, headers=intake))
+            # The open epoch is not part of this seal and stays writable.
+            tip = leaf_request(Leaf(b"bounty", hotkey, 13, Score(len(posted))))
+            open_epoch.append(await client.post("/v1/weights/raw", json=tip, headers=intake))
             return await snapshot(block, netuid)
 
         await runtime.emitter.tick()
@@ -658,11 +661,12 @@ async def test_intake_bearer_cannot_inject_a_leaf_while_the_epoch_is_being_seale
         # the seal's own snapshot read is inside the window.
         assert [response.status_code for response in posted] == [202, 202, 409]
         assert posted[-1].json() == {"error": "epoch sealing in progress"}
+        assert [response.status_code for response in open_epoch] == [202, 202, 202]
         sealed = Bundle.decode(runtime.gateway.store.bundle(12).encoded)
         leaves = sealed.body.leaves
         assert all(leaf.score == NoScore(NoScoreReason.CHALLENGE_INTERNAL) for leaf in leaves)
         # Outside the window the same bearer is accepted for the open epoch.
-        open_leaf = leaf_request(Leaf(b"bounty", hotkey, 13, Score(5)))
+        open_leaf = leaf_request(Leaf(b"bounty", hotkey, 13, Score(50)))
         response = await client.post("/v1/weights/raw", json=open_leaf, headers=intake)
         assert response.status_code == 202
         # Sealing remains the operator's alone.
