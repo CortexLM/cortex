@@ -30,6 +30,7 @@ from hypertrain.datasets.shards16 import (
     shard_name16,
     verify_shards16,
 )
+from hypertrain.miner.coldkey_ops import cosign_join, escrow_lock, prepare_join
 from hypertrain.miner.core import Miner, MinerConfig, MinerError, NetworkMiner, canonical
 from hypertrain.miner.dispute_watch import add_watch_args, run_follow
 from hypertrain.miner.keys import create_key, list_keys, revoke_key
@@ -358,11 +359,29 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--check", action="store_true")
     g.add_argument("--apply", action="store_true")
     s.add_argument("--manifest-url")
+    s = sub.add_parser(
+        "join-v2-cosign", help="operator machine: co-sign and submit a prepared join"
+    )
+    s.add_argument("--request", type=Path, required=True)
+    s.add_argument("--coldkey", type=Path, required=True)
+    s.add_argument("--api", required=True)
+    s = sub.add_parser("escrow-lock", help="operator machine: lock admission collateral")
+    s.add_argument("--api", required=True)
+    s.add_argument("--run-id", required=True)
+    s.add_argument("--coldkey", type=Path, required=True)
+    s.add_argument("--hotkey-ss58", required=True)
+    s.add_argument("--units", type=int, required=True)
+    s.add_argument("--origin", action="append", required=True)
+    s.add_argument("--expiry", type=int)
+    s.add_argument("--dry-run", action="store_true")
     for name in ("join-v2", "status-v2", "probe-v2", "proof-v2", "run-v2", "watch"):
         s = sub.add_parser(name)
         s.add_argument("--config", type=Path)
         if name == "join-v2":
-            s.add_argument("--coldkey", type=Path, required=True)
+            g = s.add_mutually_exclusive_group(required=True)
+            g.add_argument("--coldkey", type=Path)
+            g.add_argument("--prepare", type=Path)
+            s.add_argument("--coldkey-ss58")
             s.add_argument("--request-id", required=True)
             s.add_argument("--expiry", type=int, required=True)
         if name in ("probe-v2", "run-v2", "watch"):
@@ -380,6 +399,52 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
+        if args.command in ("join-v2-cosign", "escrow-lock") or (
+            args.command == "join-v2" and args.prepare is not None
+        ):
+            try:
+                with httpx.Client(timeout=120, follow_redirects=False) as client:
+                    if args.command == "join-v2":
+                        if args.coldkey_ss58 is None:
+                            raise MinerError("join-v2 --prepare requires --coldkey-ss58")
+                        result = prepare_join(
+                            client,
+                            MinerConfig.load(args.config),
+                            args.coldkey_ss58,
+                            args.request_id,
+                            args.expiry,
+                            args.prepare,
+                        )
+                    elif args.command == "join-v2-cosign":
+                        result = cosign_join(client, args.api, args.request, args.coldkey)
+                    else:
+                        result = escrow_lock(
+                            client,
+                            args.api,
+                            args.run_id,
+                            args.coldkey,
+                            args.hotkey_ss58,
+                            args.units,
+                            args.origin,
+                            args.expiry,
+                            args.dry_run,
+                        )
+            except httpx.HTTPStatusError as error:
+                print(
+                    json.dumps(
+                        {"status": error.response.status_code, "body": error.response.text},
+                        sort_keys=True,
+                    )
+                )
+                return 1
+            except (OSError, ValueError, KeyError, TypeError, httpx.InvalidURL) as error:
+                raise MinerError(
+                    f"{args.command}: invalid input or response, or file unavailable"
+                ) from error
+            except httpx.RequestError as error:
+                raise MinerError(f"{args.command}: HTTP request failed") from error
+            print(json.dumps(result, sort_keys=True))
+            return 0
         local = _local_command(args)
         if local is not None:
             print(json.dumps(local, sort_keys=True))
