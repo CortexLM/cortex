@@ -1,7 +1,32 @@
 # Finding: network-v2 rewards never reach `get_weights`
 
-Verdict: **not bridged** (base `1818f9e`). A matured contract-2 reward is never paid as weight.
-Proof: `tests/challenge/test_v2_weights_bridge.py::test_v2_matured_reward_reaches_get_weights`.
+Status: **bridged** (fix option 2 below). Before the fix (base `1818f9e`) a matured
+contract-2 reward was never paid as weight. End-to-end proof:
+`tests/challenge/test_v2_weights_bridge.py::test_v2_matured_reward_reaches_get_weights`
+(slow, no longer xfail). Unit proofs: `tests/challenge/test_v2_weights_pay.py`.
+
+## Bridge
+`ChallengeStore.weights` computes the v1 answer, then `_pay_v2` fills the mass it left as
+`units_burned_this_epoch` from `EscrowV2.payable(round)`. `round` is the drand round of
+`epoch_at` under the run's beacon (`(epoch_at - genesis_time) // period + 1`), so the answer
+never reads the wall clock. Each row is moved `available -> paid` with `EscrowV2.pay` inside
+the transaction that writes `weights_runs`; the weight goes to the origin's hotkey.
+- Paid: free (`available`) units of live reward origins (`escrow_finalized`) whose
+  `mature_at <= round`, oldest maturity first, still held by the owner the origin was issued to.
+- Never paid: `reward_pending`, `admission_locked`, `dispute_locked`, `burned`; shadow
+  (bootstrap) origins and test genesis, which stay collateral (founder decision, 2026-10-19);
+  units transferred to another owner or credited to a referee.
+- Mass: `full_share_mass` stays 10^6 per store; weights + burned == 10^6. Units over the
+  budget stay `available` and pay in later epochs. v1 entitlements are paid first.
+- Idempotent: a stored epoch answer is returned before any v2 work. A failed persist rolls
+  the pay back; the retry recomputes and pays once. The `weights_runs_from` meta key tells
+  such a retry (the v1 journal already holds the epoch) from a genuine pre-multi-run answer.
+- Deregistered hotkey: `registered_weights` (`app.py`) still drops it after the store
+  answered. The escrow units are already `paid`, so they burn to UID0 at the master and are
+  not owed again (the existing `ponytail`). No freeze was added.
+- Child runs (`runs/<id>/`) pay and commit in their own database before the root commits.
+  If the root then fails, its retry is not legacy (`weights_runs_from`), so it reads the
+  child's stored answer and merges it again: the child's units are emitted once.
 
 ## Code path
 - `GET /internal/v1/get_weights` (`src/hypertrain/challenge/app.py:859`) calls `store.weights`
@@ -43,7 +68,7 @@ E       AssertionError: {"challenge_slug":"hypertrain",...,"epoch":0,"full_share
 ```
 With `xfail(strict=True)`: `1 xfailed, 3 warnings in 142.30s`.
 
-## Fix options (not implemented)
+## Fix options (option 2 implemented)
 1. Mirror v2 into the v1 ledger. `finalize_v2` adds one ledger entitlement per origin
    (new `Ledger` event kind). Vesting stays in the ledger. Touches `challenge/store.py`
    (`finalize_v2`), `ledger/ledger.py`. Risk: the same vesting is kept in two places, and an

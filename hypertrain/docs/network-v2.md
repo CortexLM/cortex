@@ -153,6 +153,15 @@ fraud burns collectible exposure rather than redistributing it. Shadow work does
 not influence global theta; authorized production bootstrap issuance is a
 separate policy, not proof of market-backed collateral.
 
+Matured live rewards become weight in `GET /internal/v1/get_weights`. Each epoch answer first
+pays v1 entitlements, then fills the rest of its 10^6 mass with `available` units of live
+reward origins whose `mature_at` is at or before the drand round of `epoch_at`. Those units
+move to `paid` in the same transaction that stores the answer, so a repeated epoch request
+returns the stored bytes and pays nothing again; units over the mass pay in later epochs.
+Locked, disputed, pending, burned, transferred, shadow-bootstrap and genesis units are never
+paid. A hotkey missing from the metagraph is dropped after payment and its units burn to UID0
+(see `docs/findings/v2-weights-bridge.md`).
+
 ## Train one live round and watch disputes
 
 Only run after the operator has opened an eligible, funded round:
