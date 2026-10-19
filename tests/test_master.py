@@ -675,6 +675,33 @@ async def test_intake_bearer_cannot_inject_a_leaf_while_the_epoch_is_being_seale
         assert (await client.post("/v1/admin/seal", json=body, headers=operator)).status_code == 200
 
 
+async def test_emit_window_refuses_intake(master):
+    from cortex.gateway import leaf_request
+
+    runtime, chain = master.runtime, master.chain
+    intake = {"authorization": "Bearer fixture-intake-token-0123456789abcdef"}
+    forged = leaf_request(Leaf(b"bounty", chain.rows[0].hotkey, 12, Score(10**9)))
+    backend, posted = runtime.emitter.proof.backend, []
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app()), base_url="https://master"
+    ) as client:
+
+        class RacingBackend:
+            async def readiness(self):
+                # Proof readiness is awaited inside _emit, after bounty's leaves are replaced.
+                posted.append(await client.post("/v1/weights/raw", json=forged, headers=intake))
+                return await backend.readiness()
+
+        await runtime.emitter.tick()
+        chain.state = EpochState(13, 100, 105)
+        runtime.emitter.proof.backend = RacingBackend()
+        assert await runtime.emitter.tick() == [12]
+        runtime.emitter.proof.backend = backend
+    assert [response.status_code for response in posted] == [409]
+    leaves = Bundle.decode(runtime.gateway.store.bundle(12).encoded).body.leaves
+    assert all(leaf.score == NoScore(NoScoreReason.CHALLENGE_INTERNAL) for leaf in leaves)
+
+
 async def test_a_failed_seal_reopens_intake_for_its_epoch(master):
     from cortex.gateway import leaf_request
 
