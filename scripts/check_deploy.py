@@ -973,12 +973,26 @@ def validate_role_separation(validator: dict, weight_setter: dict) -> None:
         raise ValueError("validator and weight-setter must use separate state volumes")
 
 
+def _env_value(value: str) -> str:
+    """The value Compose reads from an env file: quotes removed, inline ` #` comment dropped."""
+    value = value.strip()
+    if value[:1] in ("'", '"'):
+        closing = value.find(value[0], 1)
+        if closing > 0:
+            return value[1:closing]
+    return value.split(" #", 1)[0].strip()
+
+
 def validate_validator_env(source: str) -> None:
     """An operator's validator env file must not give both roles one identity directory."""
     values = _env_file(source)
-    verify_only = values.get("BASE_VALIDATOR_IDENTITY_DIR", "")
-    setter = values.get("BASE_WEIGHT_SETTER_IDENTITY_DIR", "")
-    if verify_only and setter and Path(verify_only).resolve() == Path(setter).resolve():
+    verify_only = _env_value(values.get("BASE_VALIDATOR_IDENTITY_DIR", ""))
+    setter = _env_value(values.get("BASE_WEIGHT_SETTER_IDENTITY_DIR", ""))
+    if not (verify_only and setter):
+        return
+    first, second = Path(verify_only).resolve(), Path(setter).resolve()
+    # One role nested in the other's directory reads the other's consensus.key too.
+    if first == second or first.is_relative_to(second) or second.is_relative_to(first):
         raise ValueError("validator and weight-setter must use separate identity directories")
 
 

@@ -703,3 +703,28 @@ def test_operator_validator_env_refuses_one_identity_dir_for_both_roles(tmp_path
         CHECK["validate_validator_env"](shared)
     separate = shared.replace(f"={tmp_path}/id/", f"={tmp_path}/setter")
     CHECK["validate_validator_env"](separate)
+
+
+@pytest.mark.parametrize(
+    ("verify_only", "setter"),
+    [
+        ('"{tmp}/id"', "'{tmp}/id'"),
+        ("{tmp}/id # verify-only", "{tmp}/id"),
+        ("{tmp}/id", "{tmp}/id/setter"),
+        ("{tmp}/id/verify", '"{tmp}/id" # parent of the other'),
+    ],
+    ids=["quoted-equal", "inline-comment", "setter-nested", "verify-only-nested"],
+)
+def test_validator_env_quoted_comment_and_nested_dirs(tmp_path, verify_only, setter):
+    example = (ROOT / "deploy/env/python-validator.env.example").read_text()
+
+    def render(first, second):
+        return example.replace(
+            "BASE_VALIDATOR_IDENTITY_DIR=", f"BASE_VALIDATOR_IDENTITY_DIR={first}"
+        ).replace("BASE_WEIGHT_SETTER_IDENTITY_DIR=", f"BASE_WEIGHT_SETTER_IDENTITY_DIR={second}")
+
+    hostile = render(verify_only.format(tmp=tmp_path), setter.format(tmp=tmp_path))
+    with pytest.raises(ValueError, match="identity"):
+        CHECK["validate_validator_env"](hostile)
+    # Siblings sharing a name prefix are separate directories.
+    CHECK["validate_validator_env"](render(f'"{tmp_path}/id" # ok', f"{tmp_path}/id-setter"))

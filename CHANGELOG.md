@@ -27,8 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `deploy/env/python-validator.env` to the directory holding `consensus.key`,
   `tls.crt` and `tls.key`, and point `BASE_VALIDATOR_IDENTITY_DIR` at a
   separate directory without `consensus.key`. `scripts/check_deploy.py
-  --validator-env deploy/env/python-validator.env` refuses one path for both
-  roles; `--check-examples` also refuses one rendered state volume.
+  --validator-env deploy/env/python-validator.env` refuses one path, or one
+  directory inside the other, for both roles (quotes and inline ` #` comments
+  are read as Compose reads them); `--check-examples` also refuses one rendered
+  state volume.
 - A `measurements_version` or `challenges_version` above 1000 is refused. A
   gateway `state_dir` that stored such a profile fails with `corrupt stored
   trust profile`, and a validator journal whose watermark holds such a value
