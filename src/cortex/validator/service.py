@@ -548,8 +548,11 @@ class Validator:
             # The gateway is ours and is the source of truth for the emission profile and the
             # bundle; TLS is the anchor. Integrity of the bundle is recomputed, not signed.
             self.trust = trust_from_json(decode_json(await self._read("/v1/trust", 1024 * 1024)))
-        self.journal.evidence.watermark("challenges_version", self.trust.challenges_version)
-        self.journal.evidence.watermark("measurements_version", self.trust.measurements_version)
+        # Refuse a rollback now, but persist the versions only once the profile has verified
+        # against the chain and the bundle: an unauthenticated profile must not move them.
+        evidence = self.journal.evidence
+        evidence.check_watermark("challenges_version", self.trust.challenges_version)
+        evidence.check_watermark("measurements_version", self.trust.measurements_version)
         body, quarantined = verify_inputs(
             bundle,
             rows=snapshot.rows,
@@ -559,6 +562,8 @@ class Validator:
             epoch=epoch,
             allow_quarantine=True,
         )
+        evidence.watermark("challenges_version", self.trust.challenges_version)
+        evidence.watermark("measurements_version", self.trust.measurements_version)
         self.journal.evidence.watermark("epoch", epoch)
         self.journal.evidence.bundle(bundle)
         if latest.get("merkle_root") != body.merkle_root.hex():

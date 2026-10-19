@@ -591,3 +591,28 @@ async def test_v1_bundle_dissents_as_unsupported_version_before_decoding(network
     assert network.chain.submissions == []
     reason = network.journal.evidence.dissents()[-1].reason
     assert reason == DissentReason.PROTOCOL_VERSION_UNSUPPORTED
+
+
+async def test_hostile_trust_profile_does_not_move_the_version_watermark(network):
+    from cortex.protocol.trust import trust_to_json
+
+    hostile = {**trust_to_json(network.validator.trust), "challenges_version": 2**32 - 1}
+    served = {"profile": hostile}
+
+    def transport(request):
+        if request.url.path == "/v1/trust":
+            return httpx.Response(200, json=served["profile"])
+        return network.handler(request)
+
+    validator = Validator(
+        gateway_url="https://master.invalid",
+        netuid=541,
+        chain=network.chain,
+        journal=network.journal,
+        http=httpx.AsyncClient(transport=httpx.MockTransport(transport)),
+    )
+    with pytest.raises(ProtocolError):  # profile does not match the bundle's shares/version
+        await validator.run_once()
+    assert network.chain.submissions == []
+    served["profile"] = trust_to_json(network.validator.trust)
+    assert (await validator.run_once()).outcome == "submitted"

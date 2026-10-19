@@ -31,12 +31,15 @@ class EvidenceStore:
             );
         """)
 
-    def watermark(self, name: str, value: int) -> None:
+    def check_watermark(self, name: str, value: int) -> None:
         row = self.connection.execute(
             "SELECT value FROM consensus_watermarks WHERE name=?", (name,)
         ).fetchone()
         if row and int(row[0]) > value:
             raise ProtocolError("consensus rollback refused")
+
+    def watermark(self, name: str, value: int) -> None:
+        self.check_watermark(name, value)
         self.connection.execute(
             "INSERT INTO consensus_watermarks VALUES (?,?) "
             "ON CONFLICT(name) DO UPDATE SET value=excluded.value",
