@@ -251,6 +251,11 @@ an exact complete receipt or full original chunk coverage, authenticated healthy
 witnesses and original grant/assignment lineage. The master fetches/hash-checks
 original bytes before acceptance. Rescue preserves custody without backdating
 late acceptance or charging the miner for proven storage failure.
+Multi-chunk custody without a receipt disables the relay key at once only when
+the master holds the original and it proves every chunk hash. Otherwise the key
+is disabled only after rescued bytes hash to `delta_hash`: the grant could not
+tie those chunk hashes to the commit, so a mismatch answers 422 and leaves the
+relay enabled.
 Retention release waits for finality, disputes and vesting; signed extensions,
 overlapping old/new keys and drain preserve existing retrieval authority.
 
