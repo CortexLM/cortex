@@ -264,9 +264,11 @@ late acceptance or charging the miner for proven storage failure.
 Multi-chunk custody without a receipt disables the relay key at once only when
 the master holds the original and it proves every chunk hash. Otherwise the key
 is disabled only after rescued bytes hash to `delta_hash`: the grant could not
-tie those chunk hashes to the commit, so a mismatch answers 422 and leaves the
-relay enabled. A rescue the relay cannot serve at all (HTTP error, including a
-backend 503, or a signed response other than `SERVED`) disables the key too: two
+tie those chunk hashes to the commit, so valid chunks that concatenate to the
+wrong delta answer 422 and leave the relay enabled. A rescue the relay cannot
+serve at all disables the key too: an HTTP error (including a backend 503), a
+signed response other than `SERVED`, a bad response signature or binding, a
+timeout, or streamed bytes that miss the signed, miner-committed chunk hash. Two
 pinned auditors already proved the failure and the relay cannot produce its own
 signed custody. The fallback answers `rescued: false, disabled: true`; the
 `relay-disabled` id is `relay_id:assignment_epoch:key_id` and earlier evidence wins.

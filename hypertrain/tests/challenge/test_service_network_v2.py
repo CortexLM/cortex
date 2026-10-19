@@ -3467,6 +3467,9 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
         "held-forged",
         "dead-relay",
         "unavailable-relay",
+        "garbage-relay",
+        "bad-signature-relay",
+        "timeout-relay",
         "held-corrupt",
     ],
 )
@@ -3527,6 +3530,9 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         "held-forged",
         "dead-relay",
         "unavailable-relay",
+        "garbage-relay",
+        "bad-signature-relay",
+        "timeout-relay",
         "held-corrupt",
     }
     chunks = UploadChunkManifest(
@@ -3750,14 +3756,28 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         return
     if chunk_only:
         assert not failure.json()["disabled"] and disabled() == 0
-    if invalid in {"dead-relay", "unavailable-relay"}:
+    if invalid in {"dead-relay", "unavailable-relay", "garbage-relay"}:
 
-        async def down(*args):
+        async def down(sha, size, file):
             if invalid == "dead-relay":
                 raise StoreError("backend unavailable")  # relay app answers HTTP 503
+            if invalid == "garbage-relay":  # relay signs SERVED, then streams wrong bytes
+                file.write(b"z" * size)
+                file.seek(0)
+                return
             raise CorruptObjectError("bit rot")  # relay signs RetrievalResponse UNAVAILABLE
 
         relay.backing.get = down
+    if invalid in {"bad-signature-relay", "timeout-relay"}:
+        from hypertrain.protocol.envelope import SignatureError
+        from hypertrain.relay.client import RelayClient
+
+        async def broken(*args, **kwargs):
+            if invalid == "bad-signature-relay":
+                raise SignatureError("retrieval response nonce/key/time binding invalid")
+            raise TimeoutError  # what anyio.fail_after raises on a stalled stream
+
+        monkeypatch.setattr(RelayClient, "retrieval", broken)
     app = relay_app(relay, "x" * 32)
     monkeypatch.setattr(
         httpx,
@@ -3767,7 +3787,13 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
     rescued = network.client.post(
         network.url + f"/admin/relay-fallback/{evidence.digest()}", headers=admin()
     )
-    if invalid in {"dead-relay", "unavailable-relay"}:
+    if invalid in {
+        "dead-relay",
+        "unavailable-relay",
+        "garbage-relay",
+        "bad-signature-relay",
+        "timeout-relay",
+    }:
         # Two pinned auditors proved the failure and the relay cannot serve the rescue.
         assert rescued.status_code == 200, rescued.text
         assert rescued.json()["disabled"] and not rescued.json()["rescued"]

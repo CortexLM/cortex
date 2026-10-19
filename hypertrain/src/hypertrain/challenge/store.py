@@ -5697,6 +5697,7 @@ class ChallengeStore:
             has_full_custody,
         )
         from hypertrain.relay.client import RelayClient
+        from hypertrain.relay.core import RelayError
 
         with self._tx(notify=True):
             manifest = self._run_v2(run_id)
@@ -5878,12 +5879,14 @@ class ChallengeStore:
                     payload.seek(0)
                     recovered.extend(payload.read())
                     responses.append((request_raw, response))
-        except httpx.HTTPError:
+        except (httpx.HTTPError, CorruptObjectError, RelayError, SignatureError, TimeoutError):
             unavailable = True
         if unavailable:
             # Two pinned observers proved the contractual failure and the relay cannot serve
-            # its own signed custody either: a dead relay. Bytes that are served but hash
-            # wrong (422 below) can be miner framing and never disable.
+            # its own signed custody either: no response, a bad signature or binding, a
+            # timeout, or a chunk whose bytes miss its signed, miner-committed hash. Only
+            # valid chunks that concatenate to the wrong delta (422 below) can be miner
+            # framing, so that path never disables.
             with self._tx():
                 self._snapshot_current_v2(manifest)
                 disable()
