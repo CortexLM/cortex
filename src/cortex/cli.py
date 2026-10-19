@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -248,11 +249,16 @@ def run_validator_watermark_reset(args: argparse.Namespace) -> None:
         raise SystemExit("Cortex command failed: --confirm required; lowering re-opens rollback")
     if not args.state_db.is_file():
         raise SystemExit("Cortex command failed: validator state database not found")
-    journal = SubmissionJournal(args.state_db)
+    try:
+        journal = SubmissionJournal(args.state_db)
+    except sqlite3.Error as error:
+        raise SystemExit(f"Cortex command failed: {type(error).__name__}") from None
     try:
         old = journal.evidence.reset_watermark(args.name, args.to)
     except ProtocolError as error:
         raise SystemExit(f"Cortex command failed: {error}") from None
+    except sqlite3.Error as error:
+        raise SystemExit(f"Cortex command failed: {type(error).__name__}") from None
     finally:
         journal.close()
     print(json.dumps({"name": args.name, "old_value": old, "new_value": args.to}, indent=2))

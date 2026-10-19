@@ -605,6 +605,13 @@ def test_cli_watermark_reset_refuses_an_unset_watermark_and_allows_equal(network
     assert json.loads(capsys.readouterr().out)["new_value"] == 12
 
 
+def test_cli_watermark_reset_reports_a_non_sqlite_state_file_without_traceback(tmp_path):
+    state = tmp_path / "state.db"
+    state.write_bytes(b"not a database" * 100)
+    with pytest.raises(SystemExit, match="Cortex command failed"):
+        reset(state, "--name", "epoch", "--to", "0", "--confirm")
+
+
 async def test_peer_api_serves_signed_evidence_and_never_claims_dcap_verified(network):
     from cortex.protocol.consensus import RootStatement
     from cortex.validator.evidence import peer_app
