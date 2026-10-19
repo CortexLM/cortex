@@ -39,6 +39,7 @@ DISK_GB = 40
 # 142018: GPUs at 100% util by a hidden tenant; 146840/141607: image pull >15 min (2026-10-12)
 EXCLUDED_MACHINES = (137465, 43459, 142018, 146840, 141607)
 HOURS_PER_MONTH = Decimal(720)
+OFFER_PAGES = 8  # offer-search pages (of offer_query()["limit"]) before admission refuses
 
 
 class Refused(Exception):
@@ -267,15 +268,28 @@ class Harness:
         self.api.log("credit", credit=str(credit), required=str(need))
         if credit < need:
             raise Refused(f"credit {credit} < max_usd + 5 = {need}")
-        q = urllib.parse.urlencode({"q": json.dumps(self.offer_query())})
-        r = self.api.call("GET", "/api/v0/bundles/?" + q)
-        offers = r.body.get("offers") if r.ok() else None
-        if not isinstance(offers, list):
-            raise Refused(f"offer search failed (HTTP {r.status})")
-        # Applied here, not in eligible(): profiles override eligible() (vast_parity, genuine).
-        skip = set(self.a.exclude_offer)
-        pool = [o for o in offers if not isinstance(o, dict) or o.get("id") not in skip]
-        fit = [o for o in pool if self.eligible(o)]
+        # Drivers are filtered client-side (the API refuses a driver filter), so the cheapest
+        # page may hold no qualified offer: page on by price until one is eligible.
+        query, offers, seen, capped = self.offer_query(), [], set(), False
+        skip = set(self.a.exclude_offer)  # here, not in eligible(): profiles override that
+        for page in range(OFFER_PAGES):
+            q = urllib.parse.urlencode({"q": json.dumps(query)})
+            r = self.api.call("GET", "/api/v0/bundles/?" + q)
+            got = r.body.get("offers") if r.ok() else None
+            if not isinstance(got, list):
+                raise Refused(f"offer search failed (HTTP {r.status})")
+            new = [o for o in got if not (isinstance(o, dict) and o.get("id") in seen)]
+            seen |= {o.get("id") for o in got if isinstance(o, dict)}
+            offers += new
+            pool = [o for o in offers if not isinstance(o, dict) or o.get("id") not in skip]
+            fit = [o for o in pool if self.eligible(o)]
+            prices = [p for o in got if isinstance(o, dict) and (p := dec(o.get("dph_total")))]
+            limit = query.get("limit")
+            if fit or not new or not prices or limit is None or len(got) < limit:
+                break
+            capped = page == OFFER_PAGES - 1
+            # gte, not gt: offers at the boundary price may continue on the next page.
+            query = {**query, "dph_total": {"gte": float(max(prices))}}
         if not fit:
             alone = 0  # offers a qualified driver would have made eligible
             if ALLOWED_DRIVERS is not None:
@@ -287,6 +301,12 @@ class Harness:
             raise Refused(
                 f"no eligible {self.offer_desc} offer among {len(offers)} "
                 f"({alone} rejected by driver allow-list)"
+                + (
+                    f"; search stopped after {OFFER_PAGES} pages of {query.get('limit')}: "
+                    "cheaper-first market not exhausted"
+                    if capped
+                    else ""
+                )
             )
         best = min(fit, key=self.rank)
         cost = worst_case(best, float(self.a.max_minutes), self.disk_gb)

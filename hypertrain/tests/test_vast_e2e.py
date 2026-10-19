@@ -76,7 +76,10 @@ class Fake:
             self.queries.append(q)
             if "driver_version" in q:  # real API answer, 2026-10-19
                 return 400, {"error": "driver_vers in None: query values can't be None"}
-            return 200, {"offers": self.offers()}
+            # Real API: sorted by price, server-side dph_total floor, at most `limit` offers.
+            floor = q.get("dph_total", {}).get("gte", 0)
+            rows = sorted(self.offers(), key=lambda o: o["dph_total"])
+            return 200, {"offers": [o for o in rows if o["dph_total"] >= floor][: q["limit"]]}
         if method == "PUT" and path.startswith("/api/v0/asks/"):
             if path in self.gone:
                 return 400, {"success": False, "error": "no_such_ask"}
@@ -507,6 +510,26 @@ def test_refusal_counts_driver_rejections(fake, tmp_path, mfu_globals):
     reason = next(j["reason"] for j in journal if j["event"] == "refused")
     assert rc == 2
     assert reason == "no eligible 2x RTX 5090 offer among 3 (2 rejected by driver allow-list)"
+
+
+def test_qualified_offer_beyond_first_page_is_found(fake, tmp_path, capsys, mfu_globals):
+    base = fake.offers()[1] | {"driver_version": "615.71.09"}
+    cheap = [base | {"id": 100 + i, "dph_total": 0.1 + i / 1000} for i in range(70)]
+    good = base | {"id": 99, "dph_total": 0.5, "driver_version": "580.178.04"}
+    fake.offers = lambda: [*cheap, good]
+    rc, journal, _ = run(fake, tmp_path, "--dry-run")
+    assert rc == 0 and json.loads(capsys.readouterr().out)["chosen_offer"]["id"] == 99
+    assert [q.get("dph_total") for q in fake.queries] == [None, {"gte": cheap[63]["dph_total"]}]
+
+
+def test_refusal_says_search_was_capped(fake, tmp_path, mfu_globals, monkeypatch):
+    monkeypatch.setattr(vast, "OFFER_PAGES", 2)
+    base = fake.offers()[1] | {"driver_version": "615.71.09"}
+    fake.offers = lambda: [base | {"id": 100 + i, "dph_total": 0.1 + i / 100} for i in range(200)]
+    rc, journal, _ = run(fake, tmp_path, "--dry-run")
+    reason = next(j["reason"] for j in journal if j["event"] == "refused")
+    assert rc == 2 and len(fake.queries) == 2
+    assert reason.endswith("search stopped after 2 pages of 64: cheaper-first market not exhausted")
 
 
 def test_gpu8_profile_dry_run_selects_eight_gpu_qualified_offer(
