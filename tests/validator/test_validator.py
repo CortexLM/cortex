@@ -759,6 +759,70 @@ def test_measurements_version_at_the_supported_maximum_is_accepted(network):
     replace(network.validator.trust, measurements_version=MAX_MEASUREMENTS_VERSION).validate()
 
 
+def serve_v3_profile(network, challenges_version):
+    """A v3-sealed epoch whose /v1/trust answer carries the given challenges_version."""
+    from cortex.protocol.trust import trust_to_json
+
+    honest = replace(network.validator.trust, challenges_version=3)
+    leaves = tuple(
+        Leaf(name, row.hotkey, 12, Score(50) if row.uid == 1 else NoScore())
+        for name in (b"bounty", b"proof")
+        for row in network.chain.view.rows
+    )
+    network.bundle = build_bundle(
+        epoch=12,
+        netuid=541,
+        block_b=99,
+        block_hash=bytes([9]) * 32,
+        rows=network.chain.view.rows,
+        leaves=leaves,
+        trust=honest,
+    )
+    floats = aggregate_leaves(
+        network.bundle.body.leaves, honest.shares, network.bundle.body.uid_map, algorithm_version=3
+    )
+    network.latest_overrides.update(uids=list(floats.uids), weights=list(floats.weights))
+    served = {"profile": {**trust_to_json(honest), "challenges_version": challenges_version}}
+
+    def transport(request):
+        if request.url.path == "/v1/trust":
+            return httpx.Response(200, json=served["profile"])
+        return network.handler(request)
+
+    validator = Validator(
+        gateway_url="https://master.invalid",
+        netuid=541,
+        chain=network.chain,
+        journal=network.journal,
+        http=httpx.AsyncClient(transport=httpx.MockTransport(transport)),
+    )
+    return validator, served, trust_to_json(honest)
+
+
+@pytest.mark.parametrize("value", [1001, 2**32 - 1, True, None, "5", 1.0, -1], ids=repr)
+async def test_challenges_version_above_cap_is_refused_before_watermark(network, value):
+    import sqlite3
+
+    validator, served, honest = serve_v3_profile(network, value)
+    with pytest.raises(ProtocolError, match="invalid trust profile"):
+        await validator.run_once()
+    assert network.chain.submissions == []
+    with sqlite3.connect(network.db_path) as connection:
+        assert connection.execute("SELECT name FROM consensus_watermarks").fetchall() == [
+            ("netuid",)
+        ]
+    served["profile"] = honest
+    assert (await validator.run_once()).outcome == "submitted"
+
+
+async def test_challenges_version_boundary_1000_accepted(network):
+    from cortex.protocol.models import MAX_CHALLENGES_VERSION
+
+    assert MAX_CHALLENGES_VERSION == 1000
+    validator, _, _ = serve_v3_profile(network, MAX_CHALLENGES_VERSION)
+    assert (await validator.run_once()).outcome == "submitted"
+
+
 def snapshot_file(path):
     import sqlite3
 
