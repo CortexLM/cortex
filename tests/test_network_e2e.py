@@ -218,11 +218,10 @@ async def test_bounty_container_weights_seal_and_validator_dispatch(
     bounty_share = 2000 if version == 1 else 3000
     trust = TrustRoot(
         (
-            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), bounty_share),
-            ChallengeEntry(b"proof", public_key(bytes([2]) * 32), 10000 - bounty_share),
+            ChallengeEntry(b"bounty", bounty_share),
+            ChallengeEntry(b"proof", 10000 - bounty_share),
         ),
         hashlib.sha256(b"\x00").digest(),
-        public_key(bytes([7]) * 32),
         challenges_version=version,
     )
     fake = FakeChallenges()
@@ -350,13 +349,12 @@ async def test_three_container_challenges_burn_failures_and_unpaid_mass(
     chain.rows += (MetagraphRow(public_key(bytes([22]) * 32), 2),)
     trust = TrustRoot(
         (
-            ChallengeEntry(b"audit", public_key(bytes([4]) * 32), 1000),
-            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 3000),
-            ChallengeEntry(b"opentype", public_key(bytes([3]) * 32), 4000),
-            ChallengeEntry(b"proof", public_key(bytes([2]) * 32), 2000),
+            ChallengeEntry(b"audit", 1000),
+            ChallengeEntry(b"bounty", 3000),
+            ChallengeEntry(b"opentype", 4000),
+            ChallengeEntry(b"proof", 2000),
         ),
         hashlib.sha256(b"\x00").digest(),
-        public_key(bytes([7]) * 32),
         challenges_version=3,
     )
     fake = FakeChallenges()
@@ -431,11 +429,10 @@ async def test_owner_setup_miner_submission_seal_and_validator_dispatch(tmp_path
     chain = FakeEpochChain()
     trust = TrustRoot(
         (
-            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 2000),
-            ChallengeEntry(b"proof", public_key(bytes([2]) * 32), 8000),
+            ChallengeEntry(b"bounty", 2000),
+            ChallengeEntry(b"proof", 8000),
         ),
         hashlib.sha256(b"\x00").digest(),
-        public_key(bytes([7]) * 32),
     )
     hypervisor = ExecutingHypervisor(tmp_path / "guests")
     hypervisor.config = SimpleNamespace(images={"ab" * 32: None})

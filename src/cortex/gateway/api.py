@@ -1,4 +1,4 @@
-"""Master gateway routes; only sealing requires the rotating operator bearer."""
+"""Master gateway routes; writes (raw weights, sealing) require the rotating operator bearer."""
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
@@ -27,6 +27,7 @@ def create_router(service: GatewayService, operator_auth: OperatorAuth) -> APIRo
     @router.post("/v1/weights/raw", status_code=202)
     async def raw_weight(request: Request):
         try:
+            operator_auth.require(request)
             body = RawWeightRequest.model_validate(decode_json(await bounded_body(request, 4096)))
             return service.accept_leaf(body.to_leaf())
         except ValidationError:

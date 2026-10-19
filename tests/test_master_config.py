@@ -11,7 +11,6 @@ from cortex.vm.models import Resources
 def configured_environment():
     return {
         "BASE_NETUID": "541",
-        "BASE_GATEWAY_SK_FILE": "/run/secrets/gateway",
         "PROOF_SK_FILE": "/run/secrets/proof",
         "BASE_GATEWAY_ADMIN_TOKEN_FILE": "/run/secrets/operator",
         "PROOF_VM_ORCHESTRATOR_URL": "https://vm.example",

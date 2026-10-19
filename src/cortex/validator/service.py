@@ -346,7 +346,6 @@ class Validator:
         max_block_lag: int = 256,
         trust_loader: Callable[[int], TrustRoot] | None = None,
         verify_only: bool = False,
-        gateway_public: bytes | None = None,
     ):
         """Verify the gateway seal and submit weights.
 
@@ -362,9 +361,6 @@ class Validator:
         uint(version_key, 8)
         if trust is not None:
             trust.validate()
-        if gateway_public is not None:
-            fixed(gateway_public, 32)
-        self.gateway_public = gateway_public
         gateway = urlsplit(gateway_url)
         if (
             gateway_url != gateway_url.strip()
@@ -435,8 +431,6 @@ class Validator:
                 return await self._run_once()
             except ProtocolError as error:
                 reasons = {
-                    "signature": DissentReason.BUNDLE_SIGNATURE_INVALID,
-                    "challenge signature": DissentReason.LEAF_SIGNATURE_INVALID,
                     "unknown challenge": DissentReason.LEAF_CHALLENGE_KEY_UNKNOWN,
                     "participant": DissentReason.INCOMPLETE_PARTICIPANT_SET,
                     "Merkle": DissentReason.MERKLE_ROOT_MISMATCH,
@@ -548,11 +542,9 @@ class Validator:
         if self.trust_loader:
             self.trust = self.trust_loader(epoch)
         elif not self._fixed_trust:
-            # The gateway is ours and is the source of truth for the emission profile;
-            # TLS plus an optional --gateway-public pin are the only anchors.
+            # The gateway is ours and is the source of truth for the emission profile and the
+            # bundle; TLS is the anchor. Integrity of the bundle is recomputed, not signed.
             self.trust = trust_from_json(decode_json(await self._read("/v1/trust", 1024 * 1024)))
-            if self.gateway_public is not None and self.trust.gateway_hotkey != self.gateway_public:
-                raise ProtocolError("gateway key differs from the pinned --gateway-public")
         self.journal.evidence.watermark("challenges_version", self.trust.challenges_version)
         self.journal.evidence.watermark("measurements_version", self.trust.measurements_version)
         body, quarantined = verify_inputs(
@@ -603,7 +595,7 @@ class Validator:
         if quarantined:
             if self.consensus_seed is None:
                 raise ProtocolError("quarantine requires signed dissent")
-            self._dissent(DissentReason.LEAF_SIGNATURE_INVALID, local_vector)
+            self._dissent(DissentReason.INCOMPLETE_PARTICIPANT_SET, local_vector)
             preflight_outcome = (
                 "dissent_vector_mismatch_and_quarantine"
                 if vector_mismatch

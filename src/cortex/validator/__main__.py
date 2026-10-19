@@ -70,11 +70,6 @@ def parser() -> argparse.ArgumentParser:
     )
     arguments.add_argument("--gateway", required=True)
     arguments.add_argument("--netuid", required=True, type=int)
-    arguments.add_argument(
-        "--gateway-public",
-        help="optional extra pin: refuse a gateway whose sealing hotkey differs. The gateway "
-        "itself (HTTPS) is the trust anchor for the emission profile (/v1/trust)",
-    )
     arguments.add_argument("--network", type=primary_endpoint, default="finney")
     arguments.add_argument("--fallback-endpoints", type=fallback_endpoints, default=[])
     arguments.add_argument(
@@ -186,9 +181,6 @@ async def run(arguments: argparse.Namespace, subtensor, wallet) -> TickResult | 
                 peer_consensus=arguments.peer_consensus,
                 min_peer_sample=arguments.min_peer_sample,
                 max_block_lag=arguments.max_block_lag,
-                gateway_public=decode_hotkey(arguments.gateway_public)
-                if arguments.gateway_public
-                else None,
                 verify_only=arguments.verify_only,
             )
             while True:

@@ -13,7 +13,6 @@ from urllib.parse import urlsplit
 
 from cortex.errors import ServiceError
 from cortex.protocol import TrustRoot
-from cortex.protocol.crypto import public_key
 from cortex.protocol.trust import load_trust
 from cortex.vm.models import Resources
 
@@ -102,10 +101,8 @@ class MasterConfig:
     state_dir: Path
     challenges_file: Path
     measurements_file: Path
-    gateway_seed_file: Path
     proof_seed_file: Path
     operator_token_file: Path
-    challenge_keys_dir: Path = Path("/run/secrets")
     challenge_registry_file: Path | None = None
     challenge_secrets_dir: Path = Path("/run/challenge-secrets")
     chain_endpoint: str = "finney"
@@ -181,10 +178,8 @@ class MasterConfig:
             state_dir=Path(value("BASE_STATE_DIR", "/var/lib/cortex")),
             challenges_file=Path(value("BASE_CHALLENGES_FILE", "config/challenges.toml")),
             measurements_file=Path(value("BASE_MEASUREMENTS_FILE", "config/measurements.toml")),
-            gateway_seed_file=required_path("BASE_GATEWAY_SK_FILE"),
             proof_seed_file=required_path("PROOF_SK_FILE"),
             operator_token_file=required_path("BASE_GATEWAY_ADMIN_TOKEN_FILE"),
-            challenge_keys_dir=Path(value("BASE_CHALLENGE_KEYS_DIR", "/run/secrets")),
             challenge_registry_file=optional_path("BASE_CHALLENGE_REGISTRY_FILE"),
             challenge_secrets_dir=Path(
                 value("BASE_CHALLENGE_SECRETS_DIR", "/run/challenge-secrets")
@@ -206,22 +201,10 @@ class MasterConfig:
             ),
         )
 
-    def challenge_seed_file(self, challenge: bytes) -> Path:
-        """Proof keeps its topic key; every other challenge id uses <keys dir>/<id>.key."""
-        if challenge == b"proof":
-            return self.proof_seed_file
-        return self.challenge_keys_dir / f"{challenge.decode()}.key"
-
     def challenge_profile(self, epoch: int) -> TrustRoot:
         try:
-            trust = load_trust(
-                challenges_path=self.challenges_file,
-                measurements_path=self.measurements_file,
-                gateway_public=public_key(read_seed(self.gateway_seed_file)),
+            return load_trust(
+                challenges_path=self.challenges_file, measurements_path=self.measurements_file
             )
-            for entry in trust.challenges:
-                if public_key(read_seed(self.challenge_seed_file(entry.id))) != entry.public_key:
-                    raise ServiceError(503, "challenge signing key does not match the profile")
-            return trust
         except (OSError, ValueError, KeyError):
             raise ServiceError(503, "challenge profile unavailable") from None

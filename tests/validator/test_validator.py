@@ -8,6 +8,7 @@ import pytest
 from cortex.protocol import (
     Bundle,
     ChallengeEntry,
+    Leaf,
     MetagraphRow,
     NoScore,
     ProtocolError,
@@ -16,9 +17,8 @@ from cortex.protocol import (
     aggregate_leaves,
     build_bundle,
     bundle_digest,
-    sign_leaf,
 )
-from cortex.protocol.crypto import BUNDLE_DOMAIN, public_key, sign_raw
+from cortex.protocol.crypto import public_key
 from cortex.validator import ChainSnapshot, SubmissionJournal, Validator
 from cortex.validator.service import DispatchNotBroadcast, DispatchUncertain
 
@@ -58,27 +58,19 @@ def network(tmp_path):
     rows = tuple(MetagraphRow(public_key(bytes([20 + tag]) * 32), tag) for tag in range(3))
     trust = TrustRoot(
         (
-            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 2000),
-            ChallengeEntry(b"proof", public_key(bytes([2]) * 32), 8000),
+            ChallengeEntry(b"bounty", 2000),
+            ChallengeEntry(b"proof", 8000),
         ),
         sha256(b"\x00").digest(),
-        public_key(bytes([7]) * 32),
     )
 
     def seal(winner=None):
         leaves = tuple(
-            sign_leaf(
-                bytes([seed]) * 32,
-                name,
-                row.hotkey,
-                12,
-                Score(50) if row.uid == winner else NoScore(),
-            )
-            for name, seed in ((b"bounty", 1), (b"proof", 2))
+            Leaf(name, row.hotkey, 12, Score(50) if row.uid == winner else NoScore())
+            for name in (b"bounty", b"proof")
             for row in rows
         )
         return build_bundle(
-            gateway_seed=bytes([7]) * 32,
             epoch=12,
             netuid=541,
             block_b=99,
@@ -228,9 +220,9 @@ async def test_latest_projection_tampering_refuses_dispatch(network, changes, re
     assert network.chain.submissions == []
 
 
-async def test_dishonest_signed_final_vector_is_never_dispatched(network):
+async def test_dishonest_final_vector_is_never_dispatched(network):
     body = replace(network.bundle.body, final_vector=((2, 65535),))
-    network.bundle = Bundle(body, sign_raw(bytes([7]) * 32, BUNDLE_DOMAIN, body.encode()))
+    network.bundle = Bundle(body)
     with pytest.raises(ProtocolError, match="final vector"):
         await network.validator.run_once()
     assert network.chain.submissions == []
@@ -467,7 +459,7 @@ async def test_class_a_submits_independent_vector_and_signed_dissent_after_peer_
     from cortex.protocol.models import encode_final_vector
 
     body = replace(network.bundle.body, final_vector=((2, 65535),))
-    network.bundle = Bundle(body, sign_raw(bytes([7]) * 32, BUNDLE_DOMAIN, body.encode()))
+    network.bundle = Bundle(body)
     signed_peers(network)
     assert (await network.validator.run_once()).outcome == "submitted"
     assert network.chain.submissions == [(541, ((1, 65535),), 1)]
@@ -479,7 +471,7 @@ async def test_class_a_submits_independent_vector_and_signed_dissent_after_peer_
 
 async def test_verify_only_reports_vector_dissent_as_a_degraded_outcome(network):
     body = replace(network.bundle.body, final_vector=((2, 65535),))
-    network.bundle = Bundle(body, sign_raw(bytes([7]) * 32, BUNDLE_DOMAIN, body.encode()))
+    network.bundle = Bundle(body)
     signed_peers(network)
     network.validator.verify_only = True
 
@@ -490,11 +482,11 @@ async def test_verify_only_reports_vector_dissent_as_a_degraded_outcome(network)
 
 
 @pytest.mark.parametrize("challenge,can_submit", [(b"bounty", True), (b"proof", False)])
-async def test_quarantine_uses_surviving_signed_mass_threshold(network, challenge, can_submit):
+async def test_quarantine_uses_surviving_mass_threshold(network, challenge, can_submit):
     from cortex.protocol.merkle import merkle_root
 
     leaves = tuple(
-        replace(leaf, challenge_sig=bytes(64)) if leaf.challenge_id == challenge else leaf
+        replace(leaf, epoch=13) if leaf.challenge_id == challenge else leaf
         for leaf in network.bundle.body.leaves
     )
     body = replace(
@@ -502,7 +494,7 @@ async def test_quarantine_uses_surviving_signed_mass_threshold(network, challeng
         leaves=leaves,
         merkle_root=merkle_root(leaf.encode() for leaf in leaves),
     )
-    network.bundle = Bundle(body, sign_raw(bytes([7]) * 32, BUNDLE_DOMAIN, body.encode()))
+    network.bundle = Bundle(body)
     signed_peers(network)
     if can_submit:
         assert (await network.validator.run_once()).outcome == "submitted"

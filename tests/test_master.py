@@ -13,7 +13,15 @@ from cortex.errors import ServiceError
 from cortex.master import BittensorEpochProvider, EpochClock, EpochState, build_master
 from cortex.proof.models import Baseline, Endpoint, EvaluationReport, Metric, Rule, Topic, digest
 from cortex.proof.service import Readiness, sign_submission, sign_topic
-from cortex.protocol import ChallengeEntry, MetagraphRow, NoScore, NoScoreReason, Score, TrustRoot
+from cortex.protocol import (
+    ChallengeEntry,
+    Leaf,
+    MetagraphRow,
+    NoScore,
+    NoScoreReason,
+    Score,
+    TrustRoot,
+)
 from cortex.protocol.crypto import public_key
 from cortex.validator import ChainSnapshot, SubmissionJournal, Validator
 
@@ -81,16 +89,13 @@ def master_config(tmp_path):
         path.chmod(0o600)
         return path
 
-    secret("bounty.key", bytes([1]) * 32)
     return MasterConfig(
         netuid=541,
         state_dir=tmp_path / "state",
         challenges_file=tmp_path / "challenges.toml",
         measurements_file=tmp_path / "measurements.toml",
-        gateway_seed_file=secret("gateway.key", bytes([7]) * 32),
         proof_seed_file=secret("proof.key", bytes([2]) * 32),
         operator_token_file=secret("operator.token", b"fixture-operator-token"),
-        challenge_keys_dir=tmp_path,
         challenge_secrets_dir=tmp_path / "challenge-secrets",
     )
 
@@ -101,11 +106,10 @@ async def master(tmp_path):
     chain = FakeEpochChain()
     trust = TrustRoot(
         (
-            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 2000),
-            ChallengeEntry(b"proof", public_key(bytes([2]) * 32), 8000),
+            ChallengeEntry(b"bounty", 2000),
+            ChallengeEntry(b"proof", 8000),
         ),
         sha256(b"\x00").digest(),
-        public_key(bytes([7]) * 32),
     )
     runtime = await build_master(config, chain=chain, epochs=chain, trust=trust)
     yield SimpleNamespace(runtime=runtime, config=config, chain=chain, trust=trust)
@@ -191,11 +195,9 @@ async def test_latest_projection_tracks_the_sdk_active_fallback_endpoint(master,
 
 
 async def test_restart_recovers_epoch_pin_and_replaces_stale_positive_with_internal_burn(master):
-    from cortex.protocol import sign_leaf
-
     runtime = master.runtime
     await runtime.emitter.tick()
-    scored = sign_leaf(bytes([2]) * 32, b"proof", master.chain.rows[1].hotkey, 12, Score(100))
+    scored = Leaf(b"proof", master.chain.rows[1].hotkey, 12, Score(100))
     runtime.gateway.accept_leaf(scored)
     restarted = await build_master(
         master.config, chain=master.chain, epochs=master.chain, trust=master.trust
@@ -403,33 +405,31 @@ async def test_private_routes_require_rotating_file_and_master_routes_are_compos
 
 def test_private_seed_rejects_symlinks_permissions_and_accepts_raw_or_hex(tmp_path):
     config = master_config(tmp_path)
-    assert read_seed(config.gateway_seed_file) == bytes([7]) * 32
-    config.gateway_seed_file.write_text("07" * 32)
-    assert read_seed(config.gateway_seed_file) == bytes([7]) * 32
+    assert read_seed(config.proof_seed_file) == bytes([2]) * 32
+    config.proof_seed_file.write_text("02" * 32)
+    assert read_seed(config.proof_seed_file) == bytes([2]) * 32
     link = tmp_path / "link"
-    link.symlink_to(config.gateway_seed_file)
+    link.symlink_to(config.proof_seed_file)
     with pytest.raises(ServiceError):
         read_seed(link)
-    config.gateway_seed_file.chmod(0o644)
+    config.proof_seed_file.chmod(0o644)
     with pytest.raises(ServiceError):
-        read_seed(config.gateway_seed_file)
+        read_seed(config.proof_seed_file)
 
 
 def test_config_base_aliases_fail_closed_and_do_not_accept_inline_secret_values():
     env = {
         "BASE_NETUID": "541",
-        "BASE_GATEWAY_SK_FILE": "/private/gateway",
         "PROOF_SK_FILE": "/private/proof",
         "BASE_GATEWAY_ADMIN_TOKEN_FILE": "/private/token",
-        "BASE_CHALLENGE_KEYS_DIR": "/private",
     }
     alias = {key.replace("BASE_", "CORTEX_"): value for key, value in env.items()}
     assert MasterConfig.from_env(env) == MasterConfig.from_env(alias)
     with pytest.raises(ValueError, match="conflicting"):
         MasterConfig.from_env({**env, "CORTEX_NETUID": "1"})
-    del env["BASE_GATEWAY_SK_FILE"]
-    env["BASE_GATEWAY_SK"] = "secret-inline-material"
-    with pytest.raises(ValueError, match="BASE_GATEWAY_SK_FILE"):
+    del env["PROOF_SK_FILE"]
+    env["PROOF_SK"] = "secret-inline-material"
+    with pytest.raises(ValueError, match="PROOF_SK_FILE"):
         MasterConfig.from_env(env)
 
 
@@ -454,9 +454,6 @@ async def decay_master(tmp_path):
     from cortex.challenges.registry import parse_registry
 
     config = master_config(tmp_path)
-    key = tmp_path / "opentype.key"
-    key.write_bytes(bytes([3]) * 32)
-    key.chmod(0o600)
     entries = []
     for slug in ("bounty", "opentype"):
         token = config.challenge_secrets_dir / slug / "internal.token"
@@ -473,11 +470,10 @@ async def decay_master(tmp_path):
     chain = FakeEpochChain()
     trust = TrustRoot(
         (
-            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 3000),
-            ChallengeEntry(b"opentype", public_key(bytes([3]) * 32), 7000),
+            ChallengeEntry(b"bounty", 3000),
+            ChallengeEntry(b"opentype", 7000),
         ),
         sha256(b"\x00").digest(),
-        public_key(bytes([7]) * 32),
         challenges_version=3,
     )
     seen = []
@@ -514,12 +510,10 @@ async def decay_master(tmp_path):
 async def test_missing_or_invalid_epoch_time_postpones_before_any_leaves_or_seal(
     decay_master, timestamp
 ):
-    from cortex.protocol import sign_leaf
-
     master = decay_master
     runtime = master.runtime
     await runtime.emitter.tick()
-    original = sign_leaf(bytes([1]) * 32, b"bounty", master.chain.rows[1].hotkey, 12, Score(123))
+    original = Leaf(b"bounty", master.chain.rows[1].hotkey, 12, Score(123))
     runtime.gateway.accept_leaf(original)
     before = runtime.gateway.store.leaves(12)
     master.chain.timestamp_seconds = timestamp
@@ -583,9 +577,7 @@ async def test_historical_epoch_time_reaches_http_and_decayed_mass_seals_without
 async def test_bounty_only_algorithm_three_still_seals_without_epoch_time(decay_master):
     master = decay_master
     runtime = master.runtime
-    runtime.gateway.trust = replace(
-        master.trust, challenges=(ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 10000),)
-    )
+    runtime.gateway.trust = replace(master.trust, challenges=(ChallengeEntry(b"bounty", 10000),))
     master.chain.timestamp_seconds = None
     await runtime.emitter.tick()
     master.chain.state = EpochState(13, 100, 105)

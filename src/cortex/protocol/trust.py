@@ -30,11 +30,10 @@ def _policy(value: str | dict) -> ParticipantPolicy:
 
 
 def challenge_entries(document: dict) -> tuple[ChallengeEntry, ...]:
-    """Decode the challenge body exactly as it is signed on the wire."""
+    """Decode the challenge rows (id, share, participant policy)."""
     return tuple(
         ChallengeEntry(
             row["id"].encode(),
-            decode_hotkey(row["public_key"]),
             row["emission_share_bps"],
             _policy(row["policy"]),
         )
@@ -43,7 +42,7 @@ def challenge_entries(document: dict) -> tuple[ChallengeEntry, ...]:
 
 
 def measurements_body(document: dict) -> bytes:
-    """Encode the measurement allowlist exactly as it is signed on the wire."""
+    """Encode the measurement allowlist; its sha256 is the profile's measurements digest."""
     entries = []
     for row in document.get("measurements", []):
         fields = []
@@ -58,16 +57,13 @@ def measurements_body(document: dict) -> bytes:
     return vector(entries, lambda value: value)
 
 
-def load_trust(
-    *, challenges_path: Path, measurements_path: Path, gateway_public: bytes
-) -> TrustRoot:
+def load_trust(*, challenges_path: Path, measurements_path: Path) -> TrustRoot:
     """Build the profile from the master's own TOML files. No signature: the files are local."""
     challenges_doc = tomllib.loads(challenges_path.read_text())
     measurements_doc = tomllib.loads(measurements_path.read_text())
     trust = TrustRoot(
         challenge_entries(challenges_doc),
         sha256(measurements_body(measurements_doc)).digest(),
-        gateway_public,
         challenges_doc["version"],
         measurements_doc["version"],
         max(challenges_doc.get("introduced_epoch", 0), measurements_doc.get("introduced_epoch", 0)),
@@ -93,13 +89,11 @@ def trust_from_json(values: object) -> TrustRoot:
             challenges.append(
                 ChallengeEntry(
                     bytes.fromhex(entry["id"]),
-                    bytes.fromhex(entry["public_key"]),
                     entry["emission_share_bps"],
                     ParticipantPolicy(**policy),
                 )
             )
         values["measurements_digest"] = bytes.fromhex(values["measurements_digest"])
-        values["gateway_hotkey"] = bytes.fromhex(values["gateway_hotkey"])
         trust = TrustRoot(challenges=tuple(challenges), **values)
         trust.validate()
         return trust

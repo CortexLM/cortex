@@ -13,8 +13,6 @@ def required_arguments(tmp_path):
         "https://master.invalid",
         "--netuid",
         "541",
-        "--gateway-public",
-        "11" * 32,
         "--wallet-name",
         "validator",
         "--wallet-hotkey",
@@ -186,13 +184,14 @@ def test_verify_only_validator_starts_without_hotkey_gateway_pin_or_trust_files(
         return TickResult("verified")
 
     monkeypatch.setattr(validator_main, "run", verified)
-    arguments = without(without_hotkey(tmp_path), "--gateway-public")
+    arguments = without_hotkey(tmp_path)
     validator_main.main([*arguments, "--verify-only", "--once"])
     assert seen == {"wallet": None}
 
 
 def test_removed_trust_signing_options_are_gone(tmp_path):
     for flag in (
+        "--gateway-public",
         "--owner-public",
         "--challenges",
         "--measurements",

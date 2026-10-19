@@ -17,15 +17,14 @@ from cortex.http import OperatorAuth
 from cortex.protocol import (
     Bundle,
     ChallengeEntry,
+    Leaf,
     MetagraphRow,
     NoScore,
     NoScoreReason,
     Score,
     TrustRoot,
-    sign_leaf,
 )
-from cortex.protocol.crypto import encode_hotkey, public_key
-from cortex.protocol.scale import ProtocolError
+from cortex.protocol.crypto import encode_hotkey
 from cortex.validator import ChainSnapshot, SubmissionJournal, Validator
 
 
@@ -73,18 +72,16 @@ async def network(tmp_path):
     rows = tuple(MetagraphRow(bytes([tag]) * 32, tag) for tag in range(3))
     trust = TrustRoot(
         (
-            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 2000),
-            ChallengeEntry(b"proof", public_key(bytes([2]) * 32), 8000),
+            ChallengeEntry(b"bounty", 2000),
+            ChallengeEntry(b"proof", 8000),
         ),
         sha256(b"\x00").digest(),
-        public_key(bytes([7]) * 32),
     )
     chain = FakeChain(rows)
     settings = dict(
         trust=trust,
         netuid=541,
         chain=chain,
-        gateway_seed=lambda: bytes([7]) * 32,
         clock=lambda: datetime(2026, 9, 16, 12, tzinfo=UTC),
     )
     service = GatewayService(store=store, **settings)
@@ -113,21 +110,22 @@ async def network(tmp_path):
 
 def leaves(network, epoch=12, winner=1, reason=NoScoreReason.NOT_ATTEMPTED):
     return [
-        sign_leaf(
-            bytes([seed]) * 32,
+        Leaf(
             challenge,
             row.hotkey,
             epoch,
             Score(50) if row.uid == winner else NoScore(reason),
         )
-        for challenge, seed in ((b"bounty", 1), (b"proof", 2))
+        for challenge in (b"bounty", b"proof")
         for row in network.rows
     ]
 
 
 async def intake(network, epoch=12, winner=1, reason=NoScoreReason.NOT_ATTEMPTED):
     for leaf in leaves(network, epoch, winner, reason):
-        response = await network.client.post("/v1/weights/raw", json=leaf_request(leaf))
+        response = await network.client.post(
+            "/v1/weights/raw", json=leaf_request(leaf), headers=network.auth
+        )
         assert response.status_code == 202, response.text
 
 
@@ -137,7 +135,7 @@ async def seal(network, epoch=12, **extra):
     )
 
 
-async def test_signed_intake_seal_latest_validator_and_chain_dispatch(network):
+async def test_intake_seal_latest_validator_and_chain_dispatch(network):
     await intake(network)
     response = await seal(network)
     assert response.status_code == 200, response.text
@@ -178,22 +176,6 @@ async def test_validator_without_local_trust_uses_the_gateway_served_profile(net
     assert (await validator.run_once()).outcome == "submitted"
     assert validator.trust == network.trust
     assert network.chain.submissions == [(541, ((1, 65535),), 1)]
-
-
-async def test_validator_pinned_to_another_gateway_key_refuses_the_served_profile(network):
-    await intake(network)
-    assert (await seal(network)).status_code == 200
-    validator = Validator(
-        gateway_url="https://master.invalid",
-        netuid=541,
-        chain=network.chain,
-        journal=network.journal,
-        http=network.client,
-        gateway_public=bytes(32),
-    )
-    with pytest.raises(ProtocolError, match="pinned --gateway-public"):
-        await validator.run_once()
-    assert network.chain.submissions == []
 
 
 async def test_unsealed_burn_is_available_without_owner_wallet_or_chain(network):
@@ -329,7 +311,9 @@ async def test_sealed_burn_exposes_the_public_weights_contract(network):
 async def test_seal_requires_exact_participant_coverage(network):
     for leaf in leaves(network)[:-1]:
         assert (
-            await network.client.post("/v1/weights/raw", json=leaf_request(leaf))
+            await network.client.post(
+                "/v1/weights/raw", json=leaf_request(leaf), headers=network.auth
+            )
         ).status_code == 202
     response = await seal(network)
     assert response.status_code == 409
@@ -338,11 +322,11 @@ async def test_seal_requires_exact_participant_coverage(network):
     assert network.service.latest()["sealed"] is False
 
 
-async def test_validly_signed_extra_participant_cannot_enter_the_seal(network):
+async def test_extra_participant_cannot_enter_the_seal(network):
     await intake(network)
-    extra = sign_leaf(bytes([1]) * 32, b"bounty", bytes([99]) * 32, 12, Score(1))
+    extra = Leaf(b"bounty", bytes([99]) * 32, 12, Score(1))
     assert (
-        await network.client.post("/v1/weights/raw", json=leaf_request(extra))
+        await network.client.post("/v1/weights/raw", json=leaf_request(extra), headers=network.auth)
     ).status_code == 202
     assert (await seal(network)).status_code == 409
 
@@ -350,7 +334,7 @@ async def test_validly_signed_extra_participant_cannot_enter_the_seal(network):
 @pytest.mark.parametrize(
     "mutation,status",
     [
-        ("signature", 401),
+        ("signature", 400),
         ("retired", 404),
         ("bool", 400),
         ("unknown_field", 400),
@@ -372,28 +356,25 @@ async def test_invalid_intake_leaves_no_row(network, mutation, status):
         body["score_or_absence"] = {"no_score": {"reason": 8}}
     else:
         del body["miner_hotkey"]
-    response = await network.client.post("/v1/weights/raw", json=body)
+    response = await network.client.post("/v1/weights/raw", json=body, headers=network.auth)
     assert response.status_code == status
     assert network.store.leaves(12) == ()
 
 
 async def test_duplicate_and_nonpositive_leaves_cannot_revoke_positive_score(network):
     positive = leaves(network)[1]
-    first = await network.client.post("/v1/weights/raw", json=leaf_request(positive))
-    repeated = sign_leaf(bytes([1]) * 32, b"bounty", positive.miner_hotkey, 12, Score(50))
+    first = await network.client.post(
+        "/v1/weights/raw", json=leaf_request(positive), headers=network.auth
+    )
+    repeated = Leaf(b"bounty", positive.miner_hotkey, 12, Score(50))
     burns = [
-        sign_leaf(
-            bytes([1]) * 32,
-            b"bounty",
-            positive.miner_hotkey,
-            12,
-            NoScore(reason),
-        )
-        for reason in NoScoreReason
+        Leaf(b"bounty", positive.miner_hotkey, 12, NoScore(reason)) for reason in NoScoreReason
     ]
-    zero = sign_leaf(bytes([1]) * 32, b"bounty", positive.miner_hotkey, 12, Score(0))
+    zero = Leaf(b"bounty", positive.miner_hotkey, 12, Score(0))
     for incoming in (repeated, *burns, zero):
-        response = await network.client.post("/v1/weights/raw", json=leaf_request(incoming))
+        response = await network.client.post(
+            "/v1/weights/raw", json=leaf_request(incoming), headers=network.auth
+        )
         assert response.status_code == 409
         assert response.json()["original"]["id"] == first.json()["id"]
         assert response.json()["original"]["score"] == 50
@@ -402,13 +383,7 @@ async def test_duplicate_and_nonpositive_leaves_cannot_revoke_positive_score(net
 
 def bounty_leaves(network, *, winner, reason=NoScoreReason.CHALLENGE_INTERNAL):
     return tuple(
-        sign_leaf(
-            bytes([1]) * 32,
-            b"bounty",
-            row.hotkey,
-            12,
-            Score(50) if row.uid == winner else NoScore(reason),
-        )
+        Leaf(b"bounty", row.hotkey, 12, Score(50) if row.uid == winner else NoScore(reason))
         for row in network.rows
     )
 
@@ -447,7 +422,7 @@ def test_complete_challenge_snapshot_moves_the_winner_without_leaving_stale_scor
     assert scores[network.rows[2].hotkey] == Score(50)
 
 
-@pytest.mark.parametrize("mutation", ["missing", "duplicate", "wrong_challenge", "wrong_sig"])
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "wrong_challenge", "wrong_epoch"])
 def test_invalid_complete_challenge_snapshot_never_mutates_existing_rows(network, mutation):
     expected = {row.hotkey for row in network.rows}
     original = bounty_leaves(network, winner=1)
@@ -458,15 +433,9 @@ def test_invalid_complete_challenge_snapshot_never_mutates_existing_rows(network
     elif mutation == "duplicate":
         incoming[-1] = incoming[0]
     elif mutation == "wrong_challenge":
-        incoming[-1] = sign_leaf(
-            bytes([2]) * 32,
-            b"proof",
-            network.rows[-1].hotkey,
-            12,
-            Score(50),
-        )
+        incoming[-1] = Leaf(b"proof", network.rows[-1].hotkey, 12, Score(50))
     else:
-        incoming[-1] = replace(incoming[-1], challenge_sig=b"\x00" * 64)
+        incoming[-1] = replace(incoming[-1], epoch=13)
 
     with pytest.raises(ServiceError):
         network.service.replace_challenge_leaves(b"bounty", 12, expected, tuple(incoming))
@@ -533,8 +502,10 @@ async def test_changed_payload_supersedes_and_sealed_bytes_stay_immutable(networ
     await intake(network)
     assert (await seal(network)).status_code == 200
     original = (await network.client.get("/v1/bundle/12")).content
-    changed = sign_leaf(bytes([1]) * 32, b"bounty", network.rows[1].hotkey, 12, Score(100))
-    response = await network.client.post("/v1/weights/raw", json=leaf_request(changed))
+    changed = Leaf(b"bounty", network.rows[1].hotkey, 12, Score(100))
+    response = await network.client.post(
+        "/v1/weights/raw", json=leaf_request(changed), headers=network.auth
+    )
     assert response.status_code == 202 and response.json()["superseded"] is True
     assert (await seal(network)).status_code == 200
     assert (await network.client.get("/v1/bundle/12")).content == original
@@ -639,12 +610,9 @@ async def test_simultaneous_seals_converge_on_the_same_immutable_bundle(network)
     assert first.json() == second.json()
 
 
-async def test_wrong_subnet_and_unavailable_signing_key_never_persist_a_seal(network):
+async def test_wrong_subnet_never_persists_a_seal(network):
     await intake(network)
     assert (await seal(network, netuid=1)).status_code == 400
-    network.service.gateway_seed = lambda: bytes([88]) * 32
-    response = await seal(network)
-    assert response.status_code == 503
     assert network.store.bundle(12) is None
 
 
@@ -680,35 +648,13 @@ async def test_historical_root_refuses_corrupt_or_missing_accepted_profile(netwo
     assert response.status_code == 503
 
 
-async def test_historical_root_uses_accepted_challenge_keys_after_key_rotation(network):
-    await intake(network)
-    assert (await seal(network)).status_code == 200
-    original = network.service.bundle_bytes(12)
-    root = Bundle.decode(original).body.merkle_root.hex()
-    trust = replace(
-        network.trust,
-        challenges=tuple(
-            replace(entry, public_key=public_key(bytes([70 + index]) * 32))
-            for index, entry in enumerate(network.trust.challenges)
-        ),
-        challenges_version=2,
-        introduced_epoch=13,
-    )
-    network.service.trust_loader = lambda epoch: trust
-    network.service.refresh_trust(13)
-    second = GatewayStore(network.db_path)
-    try:
-        restarted = GatewayService(store=second, **{**network.settings, "trust": trust})
-        assert restarted.latest()["sealed"] is False
-        assert restarted.bundle_by_root(root) == original
-        assert restarted.trust == trust
-    finally:
-        second.close()
-
-
 async def test_duplicate_json_and_oversized_request_are_rejected_before_store(network):
-    duplicate = await network.client.post("/v1/weights/raw", content='{"epoch": 1, "epoch": 2}')
-    oversized = await network.client.post("/v1/weights/raw", content=b"x" * 4097)
+    duplicate = await network.client.post(
+        "/v1/weights/raw", content='{"epoch": 1, "epoch": 2}', headers=network.auth
+    )
+    oversized = await network.client.post(
+        "/v1/weights/raw", content=b"x" * 4097, headers=network.auth
+    )
     assert duplicate.status_code == 400
     assert oversized.status_code == 413
     assert network.store.leaves(12) == ()
@@ -762,3 +708,42 @@ async def test_content_addressed_bundle_lookup_returns_identical_signed_bytes(ne
     assert response.content == network.service.bundle_bytes(12)
     assert (await network.client.get("/v1/bundle/root/" + "00" * 32)).status_code == 404
     assert (await network.client.get("/v1/bundle/root/invalid")).status_code == 400
+
+
+async def test_raw_weight_intake_requires_the_operator_bearer(network):
+    body = leaf_request(leaves(network)[0])
+    assert (await network.client.post("/v1/weights/raw", json=body)).status_code == 401
+    wrong = {"authorization": "Bearer wrong"}
+    assert (
+        await network.client.post("/v1/weights/raw", json=body, headers=wrong)
+    ).status_code == 401
+    assert network.store.leaves(12) == ()
+    assert (
+        await network.client.post("/v1/weights/raw", json=body, headers=network.auth)
+    ).status_code == 202
+
+
+def test_new_store_is_marked_with_the_wire_format(tmp_path):
+    store = GatewayStore(tmp_path / "fresh.db")
+    store.close()
+    with sqlite3.connect(tmp_path / "fresh.db") as connection:
+        marker = connection.execute(
+            "SELECT value FROM gateway_metadata WHERE name='wire_format'"
+        ).fetchone()
+    assert marker is not None and int(marker[0]) == 2
+    GatewayStore(tmp_path / "fresh.db").close()
+
+
+async def test_store_holding_signed_v1_data_is_refused(network):
+    await intake(network)
+    with sqlite3.connect(network.db_path) as connection:
+        connection.execute("DELETE FROM gateway_metadata WHERE name='wire_format'")
+    with pytest.raises(ServiceError, match="new state dir"):
+        GatewayStore(network.db_path)
+
+
+async def test_store_with_another_wire_format_marker_is_refused(network):
+    with sqlite3.connect(network.db_path) as connection:
+        connection.execute("UPDATE gateway_metadata SET value='1' WHERE name='wire_format'")
+    with pytest.raises(ServiceError, match="wire format"):
+        GatewayStore(network.db_path)

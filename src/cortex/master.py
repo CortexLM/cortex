@@ -31,7 +31,7 @@ from cortex.proof.models import Submission
 from cortex.proof.scoring import SCORE_MAX
 from cortex.proof.service import EvaluationBackend, ProofService, UnwiredBackend
 from cortex.proof.store import ProofStore
-from cortex.protocol import NoScore, NoScoreReason, Score, TrustRoot, sign_leaf
+from cortex.protocol import Leaf, NoScore, NoScoreReason, Score, TrustRoot
 from cortex.protocol.crypto import decode_hotkey, public_key
 from cortex.protocol.merkle import canonical_rows
 from cortex.protocol.models import FULL_SHARE_SCORE
@@ -325,12 +325,11 @@ class EpochEmitter:
         proof: _EpochTrackedProof,
         clock: EpochClock,
         journal: EmissionJournal,
-        challenge_seed: Callable[[bytes], bytes],
         registry: Callable[[], dict[str, RegistryEntry]],
         challenges: ChallengeClient,
     ):
         self.gateway, self.proof, self.clock, self.journal = gateway, proof, clock, journal
-        self.challenge_seed, self.registry, self.challenges = challenge_seed, registry, challenges
+        self.registry, self.challenges = registry, challenges
         self._lock = asyncio.Lock()
 
     async def _scores(
@@ -385,18 +384,11 @@ class EpochEmitter:
             and epoch_at is None
         ):
             raise ServiceError(503, "completed epoch timestamp unavailable")
-        self.proof.topic_public_key = next(
-            (entry.public_key for entry in self.gateway.trust.challenges if entry.id == b"proof"),
-            self.proof.topic_public_key,
-        )
         rows = canonical_rows(snapshot.rows)
         for challenge in self.gateway.trust.challenges:
             expected = challenge.policy.expected(rows)
-            seed = self.challenge_seed(challenge.id)
-            if public_key(seed) != challenge.public_key:
-                raise ServiceError(503, "challenge signing key does not match the profile")
             outcomes = await self._scores(challenge.id, epoch, expected, epoch_at)
-            # No unknown score key can expand E; missing scores are explicit signed absences.
+            # No unknown score key can expand E; missing scores are explicit absences.
             leaves = []
             for hotkey in sorted(expected):
                 score = outcomes.get(hotkey, NoScore(NoScoreReason.NOT_ATTEMPTED))
@@ -404,7 +396,7 @@ class EpochEmitter:
                     score.encode()
                 except ValueError:
                     score = NoScore()
-                leaves.append(sign_leaf(seed, challenge.id, hotkey, epoch, score))
+                leaves.append(Leaf(challenge.id, hotkey, epoch, score))
             self.gateway.replace_challenge_leaves(challenge.id, epoch, expected, tuple(leaves))
 
     async def tick(self) -> list[int]:
@@ -591,16 +583,12 @@ async def build_master(
             trust=local_trust,
             netuid=config.netuid,
             chain=chain,
-            gateway_seed=lambda: read_seed(config.gateway_seed_file),
             chain_endpoint=chain_endpoint,
             trust_loader=None if trust is not None else config.challenge_profile,
         )
         proof = _EpochTrackedProof(
             store=proof_store,
-            topic_public_key=next(
-                (c.public_key for c in local_trust.challenges if c.id == b"proof"),
-                public_key(read_seed(config.proof_seed_file)),
-            ),
+            topic_public_key=public_key(read_seed(config.proof_seed_file)),
             vault=FileVault(config.state_dir / "miner-byok"),
             artifact_dir=config.state_dir / "artifacts",
             backend=proof_backend or UnwiredBackend(),
@@ -612,7 +600,6 @@ async def build_master(
             proof=proof,
             clock=clock,
             journal=journal,
-            challenge_seed=lambda challenge: read_seed(config.challenge_seed_file(challenge)),
             registry=ChallengeRegistry(config.challenge_registry_file),
             challenges=ChallengeClient(http, config.challenge_secrets_dir),
         )

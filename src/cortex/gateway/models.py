@@ -50,7 +50,6 @@ class RawWeightRequest(RequestModel):
     miner_hotkey: str = Field(max_length=132)
     epoch: U64
     score_or_absence: ScoreWire | AbsenceWire
-    challenge_sig: str = Field(max_length=132)
 
     def to_leaf(self) -> Leaf:
         value = self.score_or_absence
@@ -64,7 +63,6 @@ class RawWeightRequest(RequestModel):
             _hex(self.miner_hotkey, 32),
             self.epoch,
             score,
-            _hex(self.challenge_sig, 64),
         )
 
 
@@ -86,5 +84,4 @@ def leaf_request(leaf: Leaf) -> dict:
         miner_hotkey=leaf.miner_hotkey.hex(),
         epoch=leaf.epoch,
         score_or_absence=score,
-        challenge_sig=leaf.challenge_sig.hex(),
     )
