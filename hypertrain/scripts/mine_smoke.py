@@ -5,8 +5,8 @@ as its own process, drives a full round through the e2e harness (train -> aggreg
 finalize) with the tiny 2-layer CPU model and H/J reduced, and fails unless the round reaches
 FINAL with a bitwise MATCH verdict.
 
-Writes evidence JSON to $MINE_SMOKE_EVIDENCE (default ./mine-smoke-evidence.json); exit 0 = PASS,
-exit 1 = the round did not complete.
+Writes evidence JSON to $MINE_SMOKE_EVIDENCE (default: a fresh private temp file, path printed);
+exit 0 = PASS, exit 1 = the round did not complete.
 """
 
 from __future__ import annotations
@@ -31,13 +31,19 @@ H, J = 4, 2
 MINER_INDEX = 0x41
 
 
+def evidence_file() -> tuple[Path, int]:
+    """$MINE_SMOKE_EVIDENCE (never via a symlink), else a fresh 0600 file, never a fixed name."""
+    env = os.environ.get("MINE_SMOKE_EVIDENCE")
+    if env:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+        return Path(env), os.open(env, flags, 0o600)
+    fd, name = tempfile.mkstemp(prefix="mine-smoke-evidence-", suffix=".json")
+    return Path(name), fd
+
+
 def main() -> int:
     ev: dict[str, Any] = {"checks": {}}
-    out = Path(
-        os.environ.get(
-            "MINE_SMOKE_EVIDENCE", str(Path(tempfile.gettempdir()) / "mine-smoke-evidence.json")
-        )
-    )
+    out, fd = evidence_file()
     started = time.monotonic()
     code = 0
     with tempfile.TemporaryDirectory() as d:
@@ -71,13 +77,15 @@ def main() -> int:
                 ev["process_exit_codes"] = w.stop()
     ev["elapsed_seconds"] = round(time.monotonic() - started, 2)
     ev["result"] = "PASS" if code == 0 else "FAIL"
-    out.write_text(json.dumps(ev, indent=1, sort_keys=True, default=str))
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(ev, indent=1, sort_keys=True, default=str))
     print(
         json.dumps(
             {
                 "result": ev["result"],
                 "elapsed_seconds": ev["elapsed_seconds"],
                 "checks": ev["checks"],
+                "evidence": str(out),
                 "failed": ev.get("failed"),
             },
             sort_keys=True,
