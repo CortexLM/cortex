@@ -264,6 +264,9 @@ class Relay:
                     raise RelayError("replacement names another miner/round reservation")
                 if replaced.receipt is not None:
                     raise RelayError("replaced upload already has a receipt")
+                if replaced.chunks:
+                    # Signed chunk custody keeps its retention promise; never drop it.
+                    raise RelayError("replaced upload already holds signed chunk custody")
                 assert grant.replaces is not None
                 del state.uploads[grant.replaces]
                 if state.nonces.get(old.nonce) == grant.replaces:

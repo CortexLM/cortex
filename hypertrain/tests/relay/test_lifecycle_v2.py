@@ -27,7 +27,7 @@ from hypertrain.protocol.relay_messages import (
 )
 from hypertrain.relay.app import create_app
 from hypertrain.relay.client import receipt_verified
-from hypertrain.relay.core import RelayError, Settlement
+from hypertrain.relay.core import AssemblyMismatch, RelayError, Settlement
 
 
 @pytest.mark.parametrize("scope", ["chunk", "receipt", "failed-delete"])
@@ -875,6 +875,21 @@ def test_relay_refuses_replacement_after_receipt(tmp_path: Path) -> None:
             with pytest.raises(RelayError):
                 await rig.relay.accept(raw, manifest, assignment, opened)
             assert (await rig.relay.state()).uploads[old.digest()].receipt is not None
+
+    anyio.run(scenario)
+
+
+def test_relay_refuses_replacement_after_chunk_custody(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            old = await miner_chosen(rig, b"abc")
+            with pytest.raises(AssemblyMismatch):  # the chunk is held under signed custody
+                await rig.put(old, b"xxx")
+            _, manifest, raw, assignment, opened = replacement(rig, b"abc", old.digest())
+            with pytest.raises(RelayError, match="custody"):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            assert (await rig.relay.state()).uploads[old.digest()].chunks
 
     anyio.run(scenario)
 
