@@ -25,6 +25,7 @@ from cortex.protocol import (
     sign_leaf,
 )
 from cortex.protocol.crypto import encode_hotkey, public_key
+from cortex.protocol.scale import ProtocolError
 from cortex.validator import ChainSnapshot, SubmissionJournal, Validator
 
 
@@ -160,6 +161,39 @@ async def test_signed_intake_seal_latest_validator_and_chain_dispatch(network):
     )
     assert (await validator.run_once()).outcome == "submitted"
     assert network.chain.submissions == [(541, ((1, 65535),), 1)]
+
+
+async def test_validator_without_local_trust_uses_the_gateway_served_profile(network):
+    await intake(network)
+    assert (await seal(network)).status_code == 200
+    served = (await network.client.get("/v1/trust")).json()
+    assert served == network.service.trust_profile()
+    validator = Validator(
+        gateway_url="https://master.invalid",
+        netuid=541,
+        chain=network.chain,
+        journal=network.journal,
+        http=network.client,
+    )
+    assert (await validator.run_once()).outcome == "submitted"
+    assert validator.trust == network.trust
+    assert network.chain.submissions == [(541, ((1, 65535),), 1)]
+
+
+async def test_validator_pinned_to_another_gateway_key_refuses_the_served_profile(network):
+    await intake(network)
+    assert (await seal(network)).status_code == 200
+    validator = Validator(
+        gateway_url="https://master.invalid",
+        netuid=541,
+        chain=network.chain,
+        journal=network.journal,
+        http=network.client,
+        gateway_public=bytes(32),
+    )
+    with pytest.raises(ProtocolError, match="pinned --gateway-public"):
+        await validator.run_once()
+    assert network.chain.submissions == []
 
 
 async def test_unsealed_burn_is_available_without_owner_wallet_or_chain(network):
