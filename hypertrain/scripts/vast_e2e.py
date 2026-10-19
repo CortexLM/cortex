@@ -238,7 +238,7 @@ class Harness:
         return offer_query()
 
     def eligible(self, o: Any) -> bool:
-        return eligible(o)
+        return eligible(o) and o["id"] not in self.a.exclude_offer
 
     def rank(self, o: dict[str, Any]) -> tuple[Any, ...]:
         return (dec(o["dph_total"]), o["id"])
@@ -249,6 +249,7 @@ class Harness:
         self.label = f"{self.label_prefix}-{uuid.uuid4().hex[:8]}"
         self.instance_id: int | None = None
         self.create_attempted = False
+        self.retired: list[tuple[int, str]] = []  # stuck hosts boot() deleted: (id, label)
         self.ssh: tuple[str, int] | None = None
         self.cancel = threading.Event()
         self.cleanup_lock = threading.Lock()
@@ -393,6 +394,8 @@ class Harness:
                 self.api.log("boot_timeout", attempt=attempt, instance_id=self.instance_id)
                 if not (self.delete() and self.confirm_absent()):
                     raise RuntimeError("stuck host not confirmed absent")
+                assert self.instance_id is not None
+                self.retired.append((self.instance_id, self.label))
             self.instance_id, self.create_attempted = None, False
             self.label = f"{self.label_prefix}-{uuid.uuid4().hex[:8]}"
             self.result["label"] = self.label
@@ -597,10 +600,13 @@ class Harness:
             if self.instance_id is None and self.create_attempted:
                 self.instance_id = self.find_by_label()
             if self.instance_id is None and not self.create_attempted:
-                self.result["absent"] = True
+                self.result["absent"] = self.retired_absent()
+                if self.retired:  # every host was stuck: still end on a parsed absence
+                    self.result["deleted"] = True
+                    self.api.log("cleanup_done", deleted=True, absent=self.result["absent"])
                 return
             self.result["deleted"] = self.delete()
-            self.result["absent"] = self.confirm_absent()
+            self.result["absent"] = self.confirm_absent() and self.retired_absent()
             self.api.log(
                 "cleanup_done", deleted=self.result["deleted"], absent=self.result["absent"]
             )
@@ -616,15 +622,21 @@ class Harness:
             self.api.sleep(min(60.0, 5.0 * 2**attempt))
         return False
 
-    def confirm_absent(self) -> bool:
+    def confirm_absent(self, iid: int | None = None, label: str | None = None) -> bool:
+        iid, label = iid or self.instance_id, label or self.label
+        q = urllib.parse.urlencode({"select_filters": json.dumps({"label": {"eq": label}})})
         for _ in range(int(self.a.absence_attempts)):
-            rows = self.instances()
+            rows = list_rows(self.api.call("GET", "/api/v1/instances/?" + q))
             if rows is not None and not any(
-                i["id"] == self.instance_id or i.get("label") == self.label for i in rows
+                i["id"] == iid or i.get("label") == label for i in rows
             ):
                 return True
             self.api.sleep(max(5.0, self.api.min_gap))
         return False
+
+    def retired_absent(self) -> bool:
+        """Re-list each host boot() deleted: its absence was seen once, the run proves it last."""
+        return all([self.confirm_absent(i, label) for i, label in self.retired])  # list: check all
 
     def watchdog(self) -> None:
         if not self.cancel.wait(max(0.0, self.deadline - time.time())):
@@ -682,6 +694,14 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
         help="seconds a host may take to become ssh-ready before it is replaced",
     )
     p.add_argument("--boot-retries", type=int, default=2, help="replacement hosts to try")
+    p.add_argument(
+        "--exclude-offer",
+        type=int,
+        action="append",
+        default=[],
+        metavar="ID",
+        help="never rent this offer id (repeatable), e.g. a host whose ssh never accepted the key",
+    )
     p.add_argument("--delete-attempts", type=int, default=6)
     p.add_argument("--absence-attempts", type=int, default=12)
     p.add_argument(

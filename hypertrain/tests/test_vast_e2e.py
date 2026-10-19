@@ -291,6 +291,47 @@ def test_host_stuck_booting_is_replaced_by_next_offer(fake, tmp_path):
     assert json.loads((tmp_path / "ev/harness-result.json").read_text())["absent"] is True
 
 
+def test_every_host_stuck_still_ends_with_parsed_absence(fake, tmp_path):
+    # Real run (instance 56659539): ssh never accepted the key, boot_timeout, DELETE 200, then
+    # the run ended with no cleanup_done and no listing after the boot-time absence check.
+    class NeverReady(Scripted):
+        def ssh_probe(self, host, port):
+            self.probe_error = "root@127.0.0.1: Permission denied (publickey)."
+            return False
+
+    rc, journal, _ = run(
+        fake, tmp_path, "--boot-timeout", "0.3", "--boot-retries", "0", harness=NeverReady
+    )
+    ev = events(journal)
+    assert rc == 1 and fake.asks == ["/api/v0/asks/12/"]
+    assert ev.index("boot_timeout") < ev.index("cleanup_start") < ev.index("cleanup_done")
+    listed = [i for i, j in enumerate(journal) if j.get("path", "").startswith("/api/v1/")]
+    assert listed[-1] > ev.index("cleanup_start")  # absence re-proved at the end
+    done = journal[ev.index("cleanup_done")]
+    assert done["absent"] is True and done["deleted"] is True
+
+
+def test_every_host_stuck_alerts_when_it_reappears(fake, tmp_path):
+    class NeverReady(Scripted):
+        def ssh_probe(self, host, port):
+            return False
+
+        def cleanup(self, reason):
+            fake.deleted, fake.linger = True, 100  # the deleted host is listed again
+            super().cleanup(reason)
+
+    rc, _, _ = run(
+        fake, tmp_path, "--boot-timeout", "0.3", "--boot-retries", "0", harness=NeverReady
+    )
+    assert rc == 3
+    assert json.loads((tmp_path / "ev/harness-result.json").read_text())["absent"] is False
+
+
+def test_excluded_offer_is_never_rented(fake, tmp_path, capsys):
+    rc, _, _ = run(fake, tmp_path, "--dry-run", "--exclude-offer", "12")
+    assert rc == 0 and json.loads(capsys.readouterr().out)["chosen_offer"]["id"] == 11
+
+
 def test_vanished_offer_falls_back_to_next(fake, tmp_path):
     fake.gone = {"/api/v0/asks/12/"}
     rc, journal, _ = run(fake, tmp_path)
