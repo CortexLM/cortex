@@ -5537,6 +5537,15 @@ class ChallengeStore:
                 )
             if set(evidence.chunk_ack_hashes) != {c.digest() for c in chunks}:
                 raise ChallengeError(422, "failure includes unproved chunk custody")
+            if receipt is None:
+                # upload_grant_v2 cannot tie chunk hashes to delta_hash before the master holds
+                # the original, so chunk-only custody may cover bytes no receipt could follow.
+                try:
+                    self.objects.get(grant.delta_hash)
+                except ObjectNotFound:
+                    raise ChallengeError(
+                        409, "chunk-only custody without the original; rescue first"
+                    ) from None
             if min(evidence.observed_beacons) <= opportunity.service_deadline or max(
                 evidence.observed_beacons
             ) > self._now(self._db):

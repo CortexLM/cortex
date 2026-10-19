@@ -3453,7 +3453,9 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
     anyio.run(backing_http.aclose)
 
 
-@pytest.mark.parametrize("invalid", [None, "partial-receipt", "duplicate", "gap", "contradiction"])
+@pytest.mark.parametrize(
+    "invalid", [None, "partial-receipt", "duplicate", "gap", "contradiction", "chunk-only"]
+)
 def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, invalid):
     """Exact two-chunk receipt/prefix regression; no live-round/graduation sweep."""
     import json
@@ -3613,10 +3615,10 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
             yield part
 
         first = await relay.chunk(grant.digest(), 0, source(payload[:-1]))
-        await relay.chunk(grant.digest(), 1, source(payload[-1:]))
-        return opportunity, first, await relay.complete(grant.digest())
+        last = await relay.chunk(grant.digest(), 1, source(payload[-1:]))
+        return opportunity, first, last, await relay.complete(grant.digest())
 
-    opportunity_env, prefix_env, receipt_env = anyio.run(uploaded)
+    opportunity_env, prefix_env, last_env, receipt_env = anyio.run(uploaded)
     opportunity = AcceptedUploadAck.model_validate(opportunity_env.body)
     prefix = ChunkCustodyAck.model_validate(prefix_env.body)
     receipt = RelayReceipt.model_validate(receipt_env.body)
@@ -3639,6 +3641,12 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
     ]
     if invalid == "duplicate":
         artifacts.insert(2, prefix_env.model_dump(mode="json"))
+    # Chunk-only custody while the master never held the original: the grant could not
+    # check that the chunk hashes concatenate to delta_hash, so no key is disabled.
+    acks = [prefix]
+    if invalid == "chunk-only":
+        artifacts[2] = last_env.model_dump(mode="json")
+        acks.append(ChunkCustodyAck.model_validate(last_env.body))
     network.push(grant.exp_drand + 1)
     for auditor in AUDITORS:
         url = network.url + f"/relay-observers/{grant.digest()}/{auditor.ss58}"
@@ -3656,9 +3664,11 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         grant_hash=grant.digest(),
         upload_ack_hash=opportunity.digest(),
         chunk_manifest_hash=grant.chunk_manifest_hash,
-        chunk_ack_hashes=[prefix.digest()],
-        receipt_hash=receipt.digest(),
-        retention_hash=receipt.digest(),
+        chunk_ack_hashes=[a.digest() for a in acks],
+        receipt_hash=None if invalid == "chunk-only" else receipt.digest(),
+        retention_hash=sha256_hex(canonicalize(sorted(a.digest() for a in acks)))
+        if invalid == "chunk-only"
+        else receipt.digest(),
         request=None,
         response=None,
         observer_ids=[a.ss58 for a in AUDITORS],
@@ -3686,6 +3696,14 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
     )
     if invalid == "partial-receipt":
         assert failure.status_code == 422, failure.text
+        anyio.run(backing.aclose)
+        return
+    if invalid == "chunk-only":
+        assert failure.status_code == 409, failure.text
+        assert "rescue" in failure.json()["detail"]
+        assert network.store._db.execute(
+            "SELECT COUNT(*) FROM records_v2 WHERE kind IN ('relay-disabled','relay-failure')"
+        ).fetchone() == (0,)
         anyio.run(backing.aclose)
         return
     assert failure.status_code == 200, failure.text
