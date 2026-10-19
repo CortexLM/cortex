@@ -8,7 +8,7 @@ canonical documentation instead of duplicating runbooks.
 Cortex is an autonomous research subnet on Bittensor. Proof runs inside the
 master. Every other challenge is a Docker container that implements
 [the challenge contract](docs/CHALLENGES.md); the master loads it from an
-operator registry and signs its leaves.
+operator registry and records its leaves.
 
 | Challenge | Source | Purpose |
 | --- | --- | --- |
@@ -69,23 +69,21 @@ or permit UID is not a submit path.
 
 | Key or token | Role |
 | --- | --- |
-| gateway seed | signs immutable epoch bundles |
-| challenge seed | `<id>.key`; signs that container challenge's leaves and must match the challenge profile |
-| Proof seed | signs Proof topics and leaves and must match the challenge profile |
-| operator bearer | protects master administrative routes |
+| Proof seed | signs Proof topics (`PROOF_SK_FILE`); no bundle, leaf or gateway key exists |
+| operator bearer | protects master administrative routes, including `/v1/weights/raw` and sealing |
 | VM orchestrator bearer | authenticates master to the dedicated KVM host; not a wallet |
 | validator hotkey | weight-setting role only: signs root/dissent evidence and Bittensor submissions |
 | challenge internal token | master bearer for a container's `get_weights`; never a signing key |
 | miner hotkey | signs Bounty pairing or Proof submission payloads |
 
-Do not conflate gateway sealing, master ownership and validator chain signing.
+Do not conflate gateway sealing (unsigned), master ownership and validator chain signing.
 Validators build their view from the gateway profile at `GET /v1/trust`; the gateway is the single source of truth.
 
 ## Challenge container contracts
 
 - The challenge profile decides emission; the unsigned registry
   (`deploy/challenges/registry.toml`) only decides what runs. A container never
-  receives a leaf-signing seed.
+  receives a signing key.
 - `challenge-supervisor` is the only process with the Docker socket. It verifies
   image labels and GitHub build provenance, canaries without secrets, rolls back
   on failure and never reads a secret.
@@ -179,7 +177,7 @@ uv build --no-build-isolation
 ```
 
 Challenge verification must exercise a real intake request, failure probes,
-signed leaves, gateway seal, a `sealed: true` fetch and validator recomputation.
+leaves, gateway seal, a `sealed: true` fetch and validator recomputation.
 Health endpoints alone do not verify a challenge. CI must not contact OpenRouter,
 rent provider compute, boot Firecracker or submit an on-chain transaction.
 

@@ -245,6 +245,6 @@ split in the challenge profile. Legacy 2000/8000 deployments retain algorithm 1
 until the profile version is bumped
 ([Changing emission shares](../../deploy/README.md#changing-emission-shares)).
 
-Actual payment additionally needs signed leaves, a valid gateway seal and
+Actual payment additionally needs recorded leaves, a valid gateway seal and
 validator submission on Bittensor. See [validators](validators.md) and
 [troubleshooting](troubleshoot.md).

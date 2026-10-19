@@ -46,8 +46,8 @@ never reassigned. Changing the challenge profile is described in
 
 The gateway serves the public `/v1` routes `GET /v1/weights/latest`,
 `GET /v1/weights/{epoch}`, `GET /v1/bundle/{epoch}` and `GET /v1/trust`.
-`GET /v1/trust` returns the current challenge profile (challenges with keys,
-shares and policy, measurements digest, gateway hotkey, versions and
+`GET /v1/trust` returns the current challenge profile (challenges with
+shares and policy, measurements digest, versions and
 `introduced_epoch`) as JSON. It is public, unsigned and read-only; validators
 build their trust view from it over HTTPS.
 

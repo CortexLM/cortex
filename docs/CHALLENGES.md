@@ -92,7 +92,7 @@ returns:
   that epoch.
 - The call must answer within 180 seconds.
 
-### Leaves the master signs
+### Leaves the master records
 
 Let `E` be the owner-policy participant set of the sealed metagraph, `w_i` the
 returned weight (0 when absent), `W = sum(w_i for i in E)` and
@@ -108,7 +108,7 @@ changes `D`.
 Every other hotkey in `E` receives `NoScore(NotAttempted)`. A failed or invalid
 call gives `NoScore(ChallengeInternal)` to every hotkey in `E`: one invalid
 weight invalidates the whole answer, so an answer is never partially paid.
-Algorithm 1 signed Bounty's legacy champion score, which no container computes,
+Algorithm 1 scored Bounty's legacy champion score, which no container computes,
 so containers are not scored under it; trust watermarks never return to it. Unpaid mass
 always burns to UID0 and never moves to another challenge. Under algorithm 3,
 Bounty with `full_share_mass = 10` pays exactly what algorithm 2 pays:

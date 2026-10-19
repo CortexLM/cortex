@@ -62,7 +62,7 @@ Flags:
 
 ## Verify-only mode
 
-`--verify-only` runs one verification and exits without submitting. Use it first, to confirm your trust files, pinned key and network work. `--dry-run` goes one step less: it prints the `cortex validator` command, with the wallet name and hotkey masked, and starts nothing.
+`--verify-only` runs one verification and exits without submitting. Use it first, to confirm your gateway, chain access and network work. `--dry-run` goes one step less: it prints the `cortex validator` command, with the wallet name and hotkey masked, and starts nothing.
 
 ## What the validator checks
 
@@ -70,10 +70,9 @@ Before starting, the script:
 
 - fetches `GET $GATEWAY/v1/weights/latest` and requires HTTP 200;
 - requires the answer to be JSON with the expected `netuid`;
-- reads the minimum trust-file versions from `config/challenges.toml` and `config/measurements.toml`;
 - reads the subnet `weights_version` from the chain, unless you set `VERSION_KEY`.
 
-Then `cortex validator` takes over. It uses the owner public key and the signed trust files in `config/`, verifies the sealed bundle against them and the chain, and recomputes the weights from the signed leaves. It doesn't trust the display fields in the gateway answer. See the [validator guide](external-miner/validators.md) for the full rules.
+Then `cortex validator` takes over. It fetches the challenge profile from the gateway, verifies the sealed bundle's hashes and Merkle root against it and the chain, and recomputes the weights from the leaves. It doesn't trust the display fields in the gateway answer. See the [validator guide](external-miner/validators.md) for the full rules.
 
 ## Safety notes
 

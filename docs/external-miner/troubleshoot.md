@@ -81,7 +81,7 @@ digest even when its extracted files look identical.
 | `503` credential vault or stored artifact error | Required private inputs are unavailable; the operator must restore or reconcile the accepted job |
 | `503` teardown or evaluation infrastructure failure | No score may be fabricated; failed work may still have a durable job and consumed nonce |
 | `201` with `queued` | The topic explicitly sets `params.defer_scoring: "true"`; the response is not a completed score |
-| `201` with `accepted` but no payment | Topic payout, signed leaves, sealing and chain submission are additional stages |
+| `201` with `accepted` but no payment | Topic payout, leaves, sealing and chain submission are additional stages |
 | POST times out or client disconnects | Accepted work continues; check its returned id or reconcile with the operator before resubmitting |
 
 Normal Proof POST responses are **201-after-score**. The CLI waits 7200 seconds

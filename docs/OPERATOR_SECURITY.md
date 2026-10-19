@@ -11,6 +11,11 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
   build argument, Terraform state, cloud-init payload, log or shell history.
 - [ ] Master operator, per-challenge internal/admin, Proof and VM-host tokens are
   distinct and rotated independently.
+- [ ] The master operator bearer is held only by the master and the operator. It
+  feeds `POST /v1/weights/raw` and seals epochs (`/v1/admin/seal`), so a holder can
+  forge any score and seal it (accepted risk, founder decision 2026-10-19; see the
+  [threat model](THREAT_MODEL.md)). Rotate it on any suspicion. Wire v2 has no
+  independent bundle cross-check: its vectors come from the Python implementation.
 - [ ] Miner BYOK vault storage is durable only as long as queued work requires,
   and terminal jobs have no remaining secret files.
 - [ ] The OpenRouter owner key stays on the VM host and is not exposed to miner
@@ -58,10 +63,10 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
 - [ ] Every registered challenge answers `GET /challenge/<id>/version`, and its
   own readiness probe passes (for Bounty, `/challenge/bounty/v1/status` reports
   `can_score: true` after a real stable feed probe).
-- [ ] Stopping a challenge container makes the next epoch contain signed
+- [ ] Stopping a challenge container makes the next epoch contain
   `ChallengeInternal` leaves for it and burn its share without blocking others.
 - [ ] While Proof is unwired, `PROOF_VM_ORCHESTRATOR_URL` is empty, no Proof topic
-  is open, and its share burns to UID 0 through signed `ChallengeInternal` leaves.
+  is open, and its share burns to UID 0 through `ChallengeInternal` leaves.
 - [ ] When Proof is enabled, `/v1/status` reports a valid topic, sealed baseline,
   registered runner, pinned image, open inference offer and compatible executor
   offer; its failure matrix returns 503 without a scored row.
