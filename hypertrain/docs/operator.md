@@ -23,13 +23,23 @@ You need Python 3.12 through [uv](https://docs.astral.sh/uv/), `curl`, `jq`, `op
 uv sync --frozen --all-extras
 ```
 
-The training data is one pinned FineWeb-Edu parquet (ODC-By 1.0, revision `87f09149`), packed into byte-level u32 shards with a Merkle manifest under `data/`. The first run of `uv run --frozen python experiments/fetch_data.py` downloads and builds it (about 770 MB). After that, re-hash it offline with:
+The training data is a registry mix (`src/hypertrain/datasets/registry.json`, for example `od-a-proxy-v1`), tokenized with the pinned tokenizer into u16 shards with a Merkle manifest. A contract-2 run needs three steps. `build` reads the pinned sources you already fetched into `cache/<source id>/` plus `cache/tokenizer.json`; it never downloads. `pin` re-verifies the shards and writes the `samples` and `proofs` objects the service slices for every trial. It also prints the `training.dataset` fragment for the manifest; `--holdout-dir` adds `holdout_commit` from an existing holdout shard set. `register` copies both objects into the run's store under `CHALLENGE_STATE_DIR/runs/<run_id>/objects` and links them with `PUT /v2/runs/{run_id}/admin/dataset`. So it runs on the service host as the service's uid, after the run is created. The first run of a fresh state dir lives in the root store and is refused.
 
 ```bash doctest
-uv run --frozen python experiments/fetch_data.py --verify-only
+uv run --frozen python -m hypertrain.datasets pin --help >/dev/null
+uv run --frozen python -m hypertrain.datasets register --help >/dev/null
 ```
 
-It prints `merkle_root=8bd23b4f...`, `n_samples=196608` and `VERIFY OK`. Auditors and miners must hold the same bytes, since replay is bitwise.
+```bash doctest-skip:prod
+uv run --frozen python -m hypertrain.datasets build --mix od-a-proxy-v1 --out data --cache cache
+uv run --frozen python -m hypertrain.datasets pin --data-dir data --out-objects pinned \
+  --holdout-dir data/holdout | tee pin.json
+uv run --frozen python -m hypertrain.datasets register --api "$API" --run-id "$RUN" \
+  --admin-token-file /secrets/admin.token --objects pinned --state-dir "$CHALLENGE_STATE_DIR" \
+  --samples-hash "$(jq -r .samples_hash pin.json)" --proofs-hash "$(jq -r .proofs_hash pin.json)"
+```
+
+`python -m hypertrain.datasets verify data` re-hashes a shard set offline and prints `OK`. `pin` and `verify` exit 1 on any shard, unit or `merkle_root` mismatch, and `register` exits 1 on any 4xx/5xx and prints the service's answer. `proofs` holds `n_samples` paths of `depth` hashes (about `n_samples * depth * 67` bytes). Auditors and miners must hold the same bytes, since replay is bitwise.
 
 The protocol pieces each ship a QA script that runs the real code on small inputs. They are the quickest check that a checkout is sound:
 
