@@ -2,7 +2,7 @@
 # registry, src/cortex/challenges/registry.py). Registered but absent from the challenge profile
 # (config/challenges.toml) = burn-in without emission. Secrets in
 # $BASE_CHALLENGE_SECRETS_HOST_DIR/hypertrain/ (0700, owner 65532): internal.token, admin.token,
-# worker.token, coord.key (K_coord seed, never the Cortex leaf seed).
+# worker.token, coord.key (K_coord seed).
 # HYPERTRAIN_OWNER_HOTKEY is the ss58 of hypertrain's K_owner (RunManifest signer); replace
 # before enabling.
 version = 1

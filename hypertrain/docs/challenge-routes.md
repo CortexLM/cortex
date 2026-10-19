@@ -33,7 +33,7 @@ Errors have the shape `{"detail": str}`.
 | `CHALLENGE_ADMIN_TOKEN_FILE` | Bearer for admin, beacon push and aggregator routes |
 | `CHALLENGE_WORKER_TOKEN_FILE` | Bearer for auditors and referees |
 | `CHALLENGE_MASTER_URL` | Used for `GET /v1/metagraph/latest`, which returns `{"hotkeys": {ss58: uid}}` and is cached 30 s |
-| `HYPERTRAIN_COORD_KEY_FILE` | K_coord sr25519 seed: 32 raw bytes or 64 hex. It is never the Cortex leaf seed |
+| `HYPERTRAIN_COORD_KEY_FILE` | K_coord sr25519 seed: 32 raw bytes or 64 hex |
 | `HYPERTRAIN_OWNER_HOTKEY` | ss58 of K_owner, which signs RunManifest |
 | `HYPERTRAIN_GENESIS_UNIX` | Ledger `Params`. Default: quicknet genesis |
 | `HYPERTRAIN_EPOCH_SECONDS` | Ledger `Params`. Default 4320 |

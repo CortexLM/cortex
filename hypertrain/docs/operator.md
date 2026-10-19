@@ -82,7 +82,7 @@ The server is a FastAPI app, `hypertrain.challenge.app:app`. It reads its settin
 | `CHALLENGE_INTERNAL_TOKEN_FILE` | unset | master bearer for `get_weights` |
 | `CHALLENGE_ADMIN_TOKEN_FILE` | unset | operator bearer for `/v1/admin/*` and `/v1/aggregator/*` |
 | `CHALLENGE_WORKER_TOKEN_FILE` | unset | auditor bearer for `/v1/worker/*` |
-| `HYPERTRAIN_COORD_KEY_FILE` | unset | K_coord seed (32 raw bytes or 64 hex), never the Cortex leaf seed |
+| `HYPERTRAIN_COORD_KEY_FILE` | unset | K_coord seed (32 raw bytes or 64 hex) |
 | `HYPERTRAIN_OWNER_HOTKEY` | unset | ss58 of K_owner, the only key that may sign a RunManifest |
 | `HYPERTRAIN_EPOCH_SECONDS` | `4320` | Cortex epoch length |
 | `HYPERTRAIN_EPOCHS_PER_ROUND` | `1` | must equal the manifest `budget.epochs_per_round` |
@@ -311,19 +311,7 @@ install -d -m 0700 -o 65532 -g 65532 "$dir"
 chown 65532:65532 "$dir"/*.token "$dir/coord.key"
 ```
 
-`internal.token` is the master's bearer for `get_weights`. `admin.token` is yours. `worker.token` goes to auditors. `coord.key` is K_coord, which signs receipts, RoundOpen and Forfeit messages; its ss58 goes in the manifest `coord_pubkey`. It is not the Cortex leaf key.
-
-### Leaf key
-
-The leaf key signs the challenge's weight leaves. Generate it on a private machine; `keygen` refuses to overwrite a file:
-
-```bash doctest-skip:prod
-cortex keygen \
-  --seed-out /private/hypertrain-leaf/hypertrain.seed \
-  --public-out /private/hypertrain-leaf/hypertrain.pubkey
-```
-
-Install the seed on the master at `deploy/secrets/master/hypertrain.key` as a private regular file. The master fails closed if it's missing, group-readable, a symlink, or doesn't match the public key in the challenge profile.
+`internal.token` is the master's bearer for `get_weights`. `admin.token` is yours. `worker.token` goes to auditors. `coord.key` is K_coord, which signs receipts, RoundOpen and Forfeit messages inside hypertrain; its ss58 goes in the manifest `coord_pubkey`. Cortex needs no key for hypertrain: it scores through `get_weights` and the gateway is the single source of truth.
 
 ### Registry row and burn-in
 
@@ -339,7 +327,7 @@ A registered id that the challenge profile doesn't list runs without emission. T
 
 ### Challenge profile activation
 
-Add [deploy/challenge-profile-row.example.toml](../deploy/challenge-profile-row.example.toml) to `config/challenges.toml` in the Cortex checkout, with `public_key` set to the leaf public key and every share rebalanced so the total is exactly 10000 bps. Bump `version` and set `introduced_epoch`. There is no signing step: the gateway is the source of truth, the master reads this file and the gateway serves it at `GET /v1/trust`, which validators fetch over HTTPS. Restart the master, then check the gateway's `/v1/trust` lists hypertrain, a new `sealed: true` latest response carries the hypertrain leaf, and an independent validator recomputation matches. Hypertrain returns `full_share_mass = 10^6` per epoch, so any unverified or unvested mass burns rather than going to other miners.
+Add [deploy/challenge-profile-row.example.toml](../deploy/challenge-profile-row.example.toml) to `config/challenges.toml` in the Cortex checkout, with every share rebalanced so the total is exactly 10000 bps. Bump `version` and set `introduced_epoch`. There is no signing step: the gateway is the source of truth, the master reads this file and the gateway serves it at `GET /v1/trust`, which validators fetch over HTTPS. Restart the master, then check the gateway's `/v1/trust` lists hypertrain, a new `sealed: true` latest response carries hypertrain weights, and an independent validator recomputation matches. Hypertrain returns `full_share_mass = 10^6` per epoch, so any unverified or unvested mass burns rather than going to other miners.
 
 ### Rollback
 

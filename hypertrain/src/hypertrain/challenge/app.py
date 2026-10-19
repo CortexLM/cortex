@@ -194,7 +194,7 @@ def _require(path: Path | None, authorization: str | None) -> None:
 
 
 def load_coord_key(path: Path | None) -> Keypair | None:
-    """K_coord seed file: 32 raw bytes or 64 hex chars. Never the Cortex leaf seed."""
+    """K_coord seed file: 32 raw bytes or 64 hex chars."""
     if path is None:
         return None
     try:
