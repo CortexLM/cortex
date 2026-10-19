@@ -17,7 +17,7 @@ import httpx
 from cortex.errors import ServiceError
 from cortex.http import decode_json
 from cortex.protocol import Bundle, MetagraphRow, ProtocolError, TrustRoot
-from cortex.protocol.bundle import bundle_digest, recompute, verify_inputs
+from cortex.protocol.bundle import BUNDLE_PROTOCOL_VERSION, bundle_digest, recompute, verify_inputs
 from cortex.protocol.consensus import Dissent, DissentReason, RootStatement
 from cortex.protocol.crypto import public_key
 from cortex.protocol.models import encode_final_vector
@@ -529,6 +529,9 @@ class Validator:
         if latest.get("netuid", self.netuid) != self.netuid:
             raise ProtocolError("gateway subnet mismatch")
         data = await self._read(f"/v1/bundle/{epoch}", 32 * 1024 * 1024)
+        # The version leads the encoding: a v1 body must not die in decode with a misleading error.
+        if int.from_bytes(data[:2], "little") != BUNDLE_PROTOCOL_VERSION:
+            raise ProtocolError("unsupported bundle version")
         bundle = Bundle.decode(data)
         self._observed = bundle
         tip = await self.chain.current_block()

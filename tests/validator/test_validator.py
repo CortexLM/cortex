@@ -577,3 +577,17 @@ async def test_peer_api_serves_signed_evidence_and_never_claims_dcap_verified(ne
             refused = await http.post(f"/v1/attest/{path}", json={})
             assert refused.status_code == 503
             assert refused.json()["verified"] is False
+
+
+async def test_v1_bundle_dissents_as_unsupported_version_before_decoding(network):
+    from cortex.protocol.consensus import DissentReason
+
+    real = network.bundle
+    # v1 layout differs after the version, so decoding it as v2 would fail with another error.
+    network.bundle = SimpleNamespace(body=real.body, encode=lambda: b"\x01\x00" + b"\xff" * 64)
+    signed_peers(network)
+    with pytest.raises(ProtocolError, match="unsupported bundle version"):
+        await network.validator.run_once()
+    assert network.chain.submissions == []
+    reason = network.journal.evidence.dissents()[-1].reason
+    assert reason == DissentReason.PROTOCOL_VERSION_UNSUPPORTED
