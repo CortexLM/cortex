@@ -799,3 +799,28 @@ def test_recover_does_not_replay_corrupt_object_entry(tmp_path: Path) -> None:
             assert completed.count(rotten.digest()) == 0
 
     anyio.run(scenario)
+
+
+def test_recover_retries_after_transient_error(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Given: the first journal entry's backing read times out once.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            slow, honest = await interrupted_pair(rig)
+            original = rig.store.get
+            failing_get(rig, hashlib.sha256(b"abc").hexdigest(), TimeoutError())
+            relay = rig.new_relay()
+            await relay.recover()
+            state = await relay.state()
+            assert state.uploads[honest.digest()].receipt is not None
+            assert state.uploads[slow.digest()].forward_error is None
+            assert "TimeoutError" in caplog.text
+            # When: the backing recovers and recovery runs again.
+            rig.store.get = original  # type: ignore[method-assign]
+            await relay.recover()
+            # Then: the transient entry is retried and completes.
+            assert (await relay.state()).uploads[slow.digest()].receipt is not None
+
+    anyio.run(scenario)
