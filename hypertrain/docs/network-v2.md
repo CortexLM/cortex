@@ -283,6 +283,9 @@ optional `UploadGrant` field, omitted otherwise, so older grant digests are
 unchanged). The relay then drops its unreceipted reservation for that grant;
 it refuses the replacement when that upload has a receipt or belongs to another
 miner, round or relay, and a wrong `replaces` leaves the old reservation blocking.
+Upgrade order: deploy relays before the master. A master that emits `replaces`
+in an `UploadGrant` (commit e3e5343 onward) is rejected by a relay built before
+that commit (extra fields are forbidden). Roll relays first, then the master.
 A relay whose granted chunks do not assemble to `delta_hash` answers 400
 `AssemblyMismatch`, records it on the upload and skips it in later recovery.
 Retention release waits for finality, disputes and vesting; signed extensions,
