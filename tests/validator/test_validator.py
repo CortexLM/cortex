@@ -951,3 +951,18 @@ def test_cli_watermark_reset_checks_the_recorded_netuid(network, capsys):
         reset(network.db_path, "--name", "epoch", "--to", "11", "--netuid", "7", "--confirm")
     reset(network.db_path, "--name", "epoch", "--to", "11", "--netuid", "541", "--confirm")
     assert json.loads(capsys.readouterr().out)["new_value"] == 11
+
+
+def test_cli_watermark_reset_without_a_recorded_netuid_warns_and_proceeds(network, capsys):
+    import sqlite3
+
+    network.journal.evidence.watermark("epoch", 12)
+    network.journal.close()
+    connection = sqlite3.connect(network.db_path)
+    connection.execute("DELETE FROM consensus_watermarks WHERE name='netuid'")
+    connection.commit()
+    connection.close()  # the last close checkpoints the -wal into the main file
+    reset(network.db_path, "--name", "epoch", "--to", "11", "--netuid", "7", "--confirm")
+    captured = capsys.readouterr()
+    assert "state db records no netuid; --netuid check skipped" in captured.err
+    assert json.loads(captured.out)["new_value"] == 11
