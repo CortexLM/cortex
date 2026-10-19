@@ -14,6 +14,7 @@ from cortex.master import BittensorEpochProvider, EpochClock, EpochState, build_
 from cortex.proof.models import Baseline, Endpoint, EvaluationReport, Metric, Rule, Topic, digest
 from cortex.proof.service import Readiness, sign_submission, sign_topic
 from cortex.protocol import (
+    Bundle,
     ChallengeEntry,
     Leaf,
     MetagraphRow,
@@ -625,3 +626,73 @@ async def test_bounty_only_algorithm_three_still_seals_without_epoch_time(decay_
     assert len(master.seen) == 1
     assert dict(master.seen[0].url.params) == {"epoch": "12"}
     assert runtime.gateway.latest()["sealed"] is True
+
+
+async def test_intake_bearer_cannot_inject_a_leaf_while_the_epoch_is_being_sealed(master):
+    from cortex.gateway import leaf_request
+
+    runtime, chain = master.runtime, master.chain
+    intake = {"authorization": "Bearer fixture-intake-token"}
+    operator = {"authorization": "Bearer fixture-operator-token"}
+    hotkey = chain.rows[0].hotkey
+    snapshot, posted = chain.snapshot, []
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app()), base_url="https://master"
+    ) as client:
+
+        async def racing_snapshot(block, netuid):
+            # Each chain read of the completed-epoch cycle is an await an intake can land in.
+            forged = leaf_request(Leaf(b"bounty", hotkey, 12, Score(10**9 + len(posted))))
+            posted.append(await client.post("/v1/weights/raw", json=forged, headers=intake))
+            return await snapshot(block, netuid)
+
+        await runtime.emitter.tick()
+        chain.state = EpochState(13, 100, 105)
+        chain.snapshot = racing_snapshot
+        assert await runtime.emitter.tick() == [12]
+        chain.snapshot = snapshot
+        # Pin and pin re-read precede the challenge replacement, which overwrites them;
+        # the seal's own snapshot read is inside the window.
+        assert [response.status_code for response in posted] == [202, 202, 409]
+        assert posted[-1].json() == {"error": "epoch sealing in progress"}
+        sealed = Bundle.decode(runtime.gateway.store.bundle(12).encoded)
+        leaves = sealed.body.leaves
+        assert all(leaf.score == NoScore(NoScoreReason.CHALLENGE_INTERNAL) for leaf in leaves)
+        # Outside the window the same bearer is accepted for the open epoch.
+        open_leaf = leaf_request(Leaf(b"bounty", hotkey, 13, Score(5)))
+        response = await client.post("/v1/weights/raw", json=open_leaf, headers=intake)
+        assert response.status_code == 202
+        # Sealing remains the operator's alone.
+        body = {"epoch": 12, "block_b": sealed.body.block_b}
+        assert (await client.post("/v1/admin/seal", json=body, headers=intake)).status_code == 401
+        assert (await client.post("/v1/admin/seal", json=body, headers=operator)).status_code == 200
+
+
+async def test_a_failed_seal_reopens_intake_for_its_epoch(master):
+    from cortex.gateway import leaf_request
+
+    runtime, chain = master.runtime, master.chain
+    intake = {"authorization": "Bearer fixture-intake-token"}
+    leaf = leaf_request(Leaf(b"bounty", chain.rows[0].hotkey, 12, Score(7)))
+    snapshot, calls, posted = chain.snapshot, [], []
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app()), base_url="https://master"
+    ) as client:
+
+        async def failing_seal_snapshot(block, netuid):
+            calls.append(block)
+            if len(calls) == 3:  # the seal's own read
+                posted.append(await client.post("/v1/weights/raw", json=leaf, headers=intake))
+                raise OSError("chain unavailable")
+            return await snapshot(block, netuid)
+
+        await runtime.emitter.tick()
+        chain.state = EpochState(13, 100, 105)
+        chain.snapshot = failing_seal_snapshot
+        with pytest.raises(ServiceError, match="seal inputs unavailable"):
+            await runtime.emitter.tick()
+        chain.snapshot = snapshot
+        assert [response.status_code for response in posted] == [409]
+        assert runtime.gateway.store.bundle(12) is None
+        response = await client.post("/v1/weights/raw", json=leaf, headers=intake)
+        assert response.status_code == 202

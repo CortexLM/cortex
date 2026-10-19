@@ -52,6 +52,8 @@ class GatewayService:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.chain_endpoint = chain_endpoint
         self.trust_loader = trust_loader
+        # Set by the master between replacing an epoch's challenge leaves and sealing it.
+        self.sealing = False
         self.store.accept_trust(trust)
 
     def _chain_endpoint(self) -> str:
@@ -77,6 +79,9 @@ class GatewayService:
         self.trust = trust
 
     def accept_leaf(self, leaf: Leaf) -> dict:
+        if self.sealing:
+            # Raw intake must not land between the authoritative replacement and the seal.
+            raise ServiceError(409, "epoch sealing in progress")
         self.refresh_trust(leaf.epoch)
         entry = next(
             (entry for entry in self.trust.challenges if entry.id == leaf.challenge_id), None

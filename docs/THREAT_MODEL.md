@@ -111,6 +111,10 @@ and `POST /v1/admin/seal` requires the operator bearer
 (`BASE_GATEWAY_ADMIN_TOKEN_FILE`); each route refuses the other token with 401.
 The master refuses to start when both files resolve to the same path or hold the
 same value.
+While the master replaces a completed epoch's challenge leaves and seals it, raw
+intake answers 409 `epoch sealing in progress`, so a raw leaf cannot land after
+the authoritative replacement and before the seal; intake reopens when the seal
+ends or fails.
 
 What remains: before wire v2, forging a leaf also needed a challenge key; now an
 intake-token holder can still write any raw score for any miner, and the master's

@@ -62,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/run-validator.sh` needs `WALLET_NAME`/`WALLET_HOTKEY` only to submit.
 - The challenge profile is the unsigned `config/challenges.toml` and
   `measurements.toml`; changing shares is an edit, a version bump and a master restart.
+- `POST /v1/weights/raw` answers 409 `epoch sealing in progress` while the
+  master replaces a completed epoch's challenge leaves and seals it.
 - A challenge profile whose `measurements_version` exceeds
   `MAX_MEASUREMENTS_VERSION` (1000) is refused by the master and by validators
   before the rollback watermark moves.
