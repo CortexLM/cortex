@@ -180,6 +180,24 @@ curl -fsS -H "$ADMIN" -H 'Content-Type: application/json' --data-binary @"$HT/ma
   "$API/v1/admin/runs" | jq -e '.status == "created"'
 ```
 
+### Contract-2 manifest CLI
+
+Create editable CPU test-mode inputs, then build the owner-signed manifest and stage its six dependency objects before starting the service:
+
+```bash
+uv run --frozen python -m hypertrain.ops.manifest_v2 example --out /tmp/ex
+uv run --frozen python -m hypertrain.ops.manifest_v2 build \
+  --training /tmp/ex/training.json --policies /tmp/ex/policies.json \
+  --relays /tmp/ex/relays.json --owner-seed /private/owner.seed \
+  --exp-round 1000000 --state-dir /tmp/state --out /tmp/out
+```
+
+The example's `coord_pubkey`, two auditors, referees, `reward_authority` and relay public key are **placeholder SS58 public identities, not operational keys**. Replace them before a real run; `coord_pubkey` must match the service's K_coord. The example uses a tiny decoder, `ledger_mode="test"`, a pinned genesis allocation hash and one `.test` relay. It creates no dataset, genesis funding or training round. Custom CPU/GPU runs use the same three JSON shapes; provide valid model dimensions and parameter count, an audit budget of `2H`, and the H/step-bound-derived audit lease. Build computes `init_state_hash`; an existing value must match. It also rejects economics whose `reward_authority` differs from `training.coord_pubkey` (`PINNED_AUTHORITIES`) or whose `round_reward_units` differs from `training.budget.epochs_per_round * 1_000_000` (`MANIFEST_REWARD_BUDGET`). The service's configured auditor set must match `training.auditors`; the offline CLI cannot validate that configuration. Building needs the existing `trainer` extra (`uv sync --frozen --extra trainer`); help and example do not.
+
+The owner seed is an existing private, current-user-owned 0600 file containing 32 raw bytes or 64 hex characters; it is read through the miner's checked loader, never printed or copied. The shared loader strips leading/trailing ASCII whitespace bytes: provide hex for any raw seed whose first or last byte is ASCII whitespace. Choose an expiry drand round later than submission. Both commands require a new or empty output directory. Build writes `manifest.json`, `manifest-envelope.json`, five `policy-<name>.json` files, `relay-registry.json` and `index.json`. The index records `run_id`, `owner_ss58`, six canonical object hashes and hashes of the eight other files; it excludes its own hash.
+
+`--state-dir` is optional; when supplied, the six objects are stored under `/tmp/state/objects/<sha[:2]>/<sha>`. Start the service with `CHALLENGE_STATE_DIR=/tmp/state`, the matching K_coord and `HYPERTRAIN_OWNER_HOTKEY` set to `index.json`'s owner. Submit `manifest-envelope.json` to `POST /v2/admin/runs` with the admin bearer after the service has a valid beacon round. The CLI makes no HTTP requests. Success prints JSON; exit codes: 0 success, 2 input/validation error, 1 unexpected error.
+
 ### Configure, admit, unpause, pause
 
 `train_rounds` is the number of drand rounds between `d_assign` and `d_commit` (the training window). `final_after_upload` is how many rounds after the later of `d_audit` and `d_upload` a round may finalize.
