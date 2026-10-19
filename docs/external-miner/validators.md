@@ -260,8 +260,30 @@ wallet.
 ```bash
 cortex validator-watermark-reset \
   --state-db /var/lib/base/validator.sqlite3 \
-  --name challenges_version --to 2 --confirm
+  --name challenges_version --to 2 --netuid <netuid> --confirm
 ```
+
+`/var/lib/base/validator.sqlite3` is the path inside the validator container. With
+the Compose roles, stop the role and run the command in a one-off container of
+the same service, which mounts the same state volume (`role-weight-setter.yml`
+shown; use `role-validator.yml` for the verify-only role):
+
+```bash
+docker compose --project-directory . --env-file deploy/env/python-validator.env \
+  -f deploy/compose/role-weight-setter.yml stop validator
+docker compose --project-directory . --env-file deploy/env/python-validator.env \
+  -f deploy/compose/role-weight-setter.yml run --rm --no-deps validator \
+  validator-watermark-reset --state-db /var/lib/base/validator.sqlite3 \
+  --name <watermark-name> --to <value> --netuid <netuid> --confirm
+docker compose --project-directory . --env-file deploy/env/python-validator.env \
+  -f deploy/compose/role-weight-setter.yml start validator
+```
+
+The command first opens the file read-only and refuses, without writing, a
+file that is not a validator state database or lacks the named watermark. A
+running validator holding the database makes it fail with `state db locked;
+stop the validator first`. `--netuid` refuses a journal recorded for another
+subnet; a journal that records no netuid skips that check and says so.
 
 It refuses without `--confirm`, refuses a name outside those three, a negative
 value, a watermark that was never set and any value above the current one (it

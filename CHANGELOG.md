@@ -59,7 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `cortex validator-watermark-reset`: operator-only, local repair that lowers a
   wrongly advanced `challenges_version`, `measurements_version` or `epoch`
   watermark (requires `--confirm`, never raises one) and audits it in
-  `consensus_watermark_resets`.
+  `consensus_watermark_resets`. It checks the file read-only first and never
+  writes to a foreign or empty database; `--netuid` refuses another subnet's
+  journal.
 
 ### Changed
 

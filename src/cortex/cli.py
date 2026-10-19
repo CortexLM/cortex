@@ -51,6 +51,7 @@ def parser() -> argparse.ArgumentParser:
     reset.add_argument("--name", choices=RESETTABLE_WATERMARKS, required=True)
     reset.add_argument("--to", type=int, required=True)
     reset.add_argument("--confirm", action="store_true")
+    reset.add_argument("--netuid", type=int, help="refuse a journal recorded for another subnet")
     vm = commands.add_parser("vm-host", help="serve the dedicated Firecracker host")
     vm.add_argument("--config", type=Path, required=True)
     vm.add_argument(
@@ -241,26 +242,59 @@ def run_validator_reconcile(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
+def _watermark_reset_preflight(args: argparse.Namespace) -> None:
+    """Prove the file is a validator journal holding the row, without writing to it."""
+    reader = sqlite3.connect(f"{args.state_db.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        table = reader.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='consensus_watermarks'"
+        ).fetchone()
+        if table is None:
+            raise SystemExit("Cortex command failed: not a validator state database")
+        rows = dict(
+            reader.execute(
+                "SELECT name, value FROM consensus_watermarks WHERE name IN (?, 'netuid')",
+                (args.name,),
+            ).fetchall()
+        )
+    finally:
+        reader.close()
+    if args.name not in rows:
+        raise SystemExit("Cortex command failed: consensus watermark not set")
+    if args.netuid is not None:
+        if "netuid" not in rows:
+            print("state db records no netuid; --netuid check skipped", file=sys.stderr)
+        elif rows["netuid"] != str(args.netuid):
+            raise SystemExit("Cortex command failed: validator journal belongs to another subnet")
+
+
 def run_validator_watermark_reset(args: argparse.Namespace) -> None:
-    from cortex.validator import SubmissionJournal
+    from cortex.validator.evidence import EvidenceStore
 
     # Refusal reasons are fixed strings with no credential, so show them to the operator.
     if not args.confirm:
         raise SystemExit("Cortex command failed: --confirm required; lowering re-opens rollback")
     if not args.state_db.is_file():
         raise SystemExit("Cortex command failed: validator state database not found")
+    connection = None
     try:
-        journal = SubmissionJournal(args.state_db)
-    except sqlite3.Error as error:
-        raise SystemExit(f"Cortex command failed: {type(error).__name__}") from None
-    try:
-        old = journal.evidence.reset_watermark(args.name, args.to)
+        _watermark_reset_preflight(args)
+        # The journal schema and WAL mode belong to the validator; open only the existing file.
+        connection = sqlite3.connect(args.state_db, isolation_level=None, timeout=1)
+        old = EvidenceStore(connection).reset_watermark(args.name, args.to)
     except ProtocolError as error:
         raise SystemExit(f"Cortex command failed: {error}") from None
+    except sqlite3.OperationalError as error:
+        if "locked" in str(error) or "busy" in str(error):
+            raise SystemExit(
+                "Cortex command failed: state db locked; stop the validator first"
+            ) from None
+        raise SystemExit(f"Cortex command failed: {type(error).__name__}") from None
     except sqlite3.Error as error:
         raise SystemExit(f"Cortex command failed: {type(error).__name__}") from None
     finally:
-        journal.close()
+        if connection is not None:
+            connection.close()
     print(json.dumps({"name": args.name, "old_value": old, "new_value": args.to}, indent=2))
 
 

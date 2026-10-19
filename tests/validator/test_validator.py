@@ -757,3 +757,63 @@ def test_measurements_version_at_the_supported_maximum_is_accepted(network):
     from cortex.protocol.models import MAX_MEASUREMENTS_VERSION
 
     replace(network.validator.trust, measurements_version=MAX_MEASUREMENTS_VERSION).validate()
+
+
+def snapshot_file(path):
+    import sqlite3
+
+    stat = path.stat()
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        tables = connection.execute("SELECT name FROM sqlite_master ORDER BY name").fetchall()
+    finally:
+        connection.close()
+    siblings = sorted(item.name for item in path.parent.iterdir())
+    return path.read_bytes(), stat.st_mtime_ns, mode, tables, siblings
+
+
+@pytest.mark.parametrize("kind", ["empty", "foreign"])
+def test_cli_watermark_reset_never_mutates_a_foreign_state_file(tmp_path, kind):
+    import sqlite3
+
+    state = tmp_path / "other" / "state.db"
+    state.parent.mkdir()
+    if kind == "empty":
+        state.touch()
+    else:
+        with sqlite3.connect(state) as connection:
+            connection.execute("CREATE TABLE notes (body TEXT)")
+            connection.execute("INSERT INTO notes VALUES ('kept')")
+        connection.close()
+    before = snapshot_file(state)
+    with pytest.raises(SystemExit, match="not a validator state database"):
+        reset(state, "--name", "epoch", "--to", "0", "--confirm")
+    assert snapshot_file(state) == before
+
+
+def test_cli_watermark_reset_reports_a_locked_state_db(network):
+    import sqlite3
+
+    network.journal.evidence.watermark("epoch", 12)
+    network.journal.close()
+    holder = sqlite3.connect(network.db_path, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(SystemExit, match="state db locked; stop the validator first"):
+            reset(network.db_path, "--name", "epoch", "--to", "11", "--confirm")
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    with sqlite3.connect(network.db_path) as connection:
+        value = connection.execute("SELECT value FROM consensus_watermarks WHERE name='epoch'")
+        assert value.fetchone() == ("12",)
+
+
+def test_cli_watermark_reset_checks_the_recorded_netuid(network, capsys):
+    network.journal.evidence.watermark("epoch", 12)
+    network.journal.close()
+    with pytest.raises(SystemExit, match="belongs to another subnet"):
+        reset(network.db_path, "--name", "epoch", "--to", "11", "--netuid", "7", "--confirm")
+    reset(network.db_path, "--name", "epoch", "--to", "11", "--netuid", "541", "--confirm")
+    assert json.loads(capsys.readouterr().out)["new_value"] == 11
