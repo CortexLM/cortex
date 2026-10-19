@@ -393,7 +393,7 @@ def test_actual_publisher_selector_preserves_public_excludes_private(tmp_path: P
         "tests/challenge/test_authority_snapshot_v2.py",
         "docs/schemas/example-run-manifest.json",
         "docs/operator.md",
-        "deploy/trust-root-v3-row.example.toml",
+        "deploy/challenge-profile-row.example.toml",
         "deploy/k8s/local/fixtures.yaml",
         "scripts/network_authority_snapshot.py",
         "experiments/gpu_network_v2/profile.json",

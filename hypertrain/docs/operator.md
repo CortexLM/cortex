@@ -1,6 +1,6 @@
 # Operator guide
 
-This guide covers running hypertrain yourself: first locally, then on a Cortex master, then for a training run. Every block tagged `doctest` is run by `bash scripts/doctest_docs.sh` from the tree root against the local stack, in order, in one shell. Blocks tagged `doctest-skip:prod` need a real Cortex master. The script lists them but doesn't run them, and they were checked by reading them against the pinned Cortex docs (cortex@d738424: `deploy/README.md`, `docs/how-to/trust-root.md`, `docs/CHALLENGES.md`).
+This guide covers running hypertrain yourself: first locally, then on a Cortex master, then for a training run. Every block tagged `doctest` is run by `bash scripts/doctest_docs.sh` from the tree root against the local stack, in order, in one shell. Blocks tagged `doctest-skip:prod` need a real Cortex master. The script lists them but doesn't run them, and they were checked by reading them against the pinned Cortex docs (Cortex `deploy/README.md` and `docs/CHALLENGES.md`).
 
 Contents:
 
@@ -297,7 +297,7 @@ Relays per region: what is built is the budget line and the beacon side. The man
 
 ## 7. Production on a Cortex master
 
-These steps follow the pinned Cortex deploy guide. None of them run in the doc-test.
+These steps follow the Cortex deploy guide. None of them run in the doc-test.
 
 ### Secrets
 
@@ -315,15 +315,15 @@ chown 65532:65532 "$dir"/*.token "$dir/coord.key"
 
 ### Leaf key
 
-The leaf key signs the challenge's weight leaves for the trust root. Generate it offline; `keygen` refuses to overwrite a file:
+The leaf key signs the challenge's weight leaves. Generate it on a private machine; `keygen` refuses to overwrite a file:
 
 ```bash doctest-skip:prod
 cortex keygen \
-  --seed-out /private/cortex-ceremony/hypertrain.seed \
-  --public-out /private/cortex-ceremony/hypertrain.pubkey
+  --seed-out /private/hypertrain-leaf/hypertrain.seed \
+  --public-out /private/hypertrain-leaf/hypertrain.pubkey
 ```
 
-Install the seed on the master at `deploy/secrets/master/hypertrain.key` as a private regular file. The master fails closed if it's missing, group-readable, a symlink, or doesn't match the signed public key.
+Install the seed on the master at `deploy/secrets/master/hypertrain.key` as a private regular file. The master fails closed if it's missing, group-readable, a symlink, or doesn't match the public key in the challenge profile.
 
 ### Registry row and burn-in
 
@@ -335,33 +335,17 @@ docker compose --project-directory . --env-file deploy/env/master.env \
 curl -fsS https://<master>/challenge/hypertrain/version
 ```
 
-A registered id that the trust root doesn't list runs without emission. That's the burn-in: check `/challenge/hypertrain/version`, `/health` and the logs, launch a small run, and let at least one round finalize before you sign.
+A registered id that the challenge profile doesn't list runs without emission. That's the burn-in: check `/challenge/hypertrain/version`, `/health` and the logs, launch a small run, and let at least one round finalize before you add the profile row.
 
-### Trust root activation (owner-signed, version 3 or higher)
+### Challenge profile activation
 
-Add [deploy/trust-root-v3-row.example.toml](../deploy/trust-root-v3-row.example.toml) to the owner's next challenges document (version 3 or higher, algorithm 3), with `public_key` set to the leaf public key and every share rebalanced so the total is exactly 10000 bps. Raise `version`, set `introduced_epoch`, then sign and verify offline:
-
-```bash doctest-skip:prod
-cortex trust-sign \
-  --kind challenges \
-  --input config/challenges.toml \
-  --seed-file /private/cortex-ceremony/owner.seed \
-  --signature-out config/challenges.toml.sig
-cortex trust-verify \
-  --challenges config/challenges.toml \
-  --measurements config/measurements.toml \
-  --owner-public config/owner.pubkey \
-  --gateway-public "$(tr -d '\n' </private/cortex-ceremony/gateway.pubkey)" \
-  --epoch 0
-```
-
-Drain and pause as the trust-root guide says, install the signed documents and version pins on the master and validators, resume, and check a new `sealed: true` latest response with algorithm 3 leaves and an independent validator recomputation. Hypertrain returns `full_share_mass = 10^6` per epoch, so any unverified or unvested mass burns rather than going to other miners.
+Add [deploy/challenge-profile-row.example.toml](../deploy/challenge-profile-row.example.toml) to `config/challenges.toml` in the Cortex checkout, with `public_key` set to the leaf public key and every share rebalanced so the total is exactly 10000 bps. Bump `version` and set `introduced_epoch`. There is no signing step: the gateway is the source of truth, the master reads this file and the gateway serves it at `GET /v1/trust`, which validators fetch over HTTPS. Restart the master, then check the gateway's `/v1/trust` lists hypertrain, a new `sealed: true` latest response carries the hypertrain leaf, and an independent validator recomputation matches. Hypertrain returns `full_share_mass = 10^6` per epoch, so any unverified or unvested mass burns rather than going to other miners.
 
 ### Rollback
 
 - Image: the supervisor already rolls back a digest that fails `/version`. To hold a known-good image, set `pin = "sha256:..."` in the registry row.
-- Trust root: restoring an older signed file is rejected by version watermarks. Stop submission and sign a higher-version recovery profile through the same ceremony, for example one without the hypertrain row.
-- Retire: sign a higher version without the hypertrain row first, then remove the registry row. Deleting the row stops the container and keeps its volume.
+- Challenge profile: restoring an older `version` is rejected by the gateway and the validator watermark. Publish a higher-version profile instead, for example one without the hypertrain row.
+- Retire: publish a higher profile version without the hypertrain row first, then remove the registry row. Deleting the row stops the container and keeps its volume.
 - A training round: `POST /v1/aggregator/runs/{id}/rounds/{w}/rollback` before finalize. After finality, fraud is handled with money only (burn and clawback), never by subtracting a delta.
 
 ## 8. Budget and teardown
