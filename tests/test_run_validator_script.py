@@ -68,6 +68,7 @@ def test_submitting_without_a_hotkey_fails_but_verify_only_does_not(env):
     assert verify.returncode == 0, verify.stderr
     assert "--wallet" not in verify.stdout
 
+
 def test_netuid_mismatch_fails(env):
     result = run(env | {"NETUID": "541"}, "--dry-run")
     assert result.returncode != 0

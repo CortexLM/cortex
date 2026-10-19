@@ -1,4 +1,5 @@
-# Standalone validator role. Never start a second submitter with the same wallet.
+# Verify-only validator: checks the gateway's sealed weights, never submits, holds no hotkey.
+# The weight-setting validator is role-weight-setter.yml.
 name: cortex-validator
 services:
   validator:
@@ -9,32 +10,12 @@ services:
       - ${BASE_GATEWAY_ENDPOINT:?Set the master gateway HTTPS URL}
       - --netuid
       - ${BASE_NETUID:?Set the Bittensor netuid}
-      - --gateway-public
-      - ${BASE_GATEWAY_HOTKEY:?Set the independently pinned gateway public key}
       - --network
       - ${BASE_CHAIN_ENDPOINT:-finney}
       - --fallback-endpoints
       - ${BASE_CHAIN_FALLBACK_ENDPOINTS:-[]}
-      - --owner-public
-      - /etc/base/config/owner.pubkey
-      - --challenges
-      - /etc/base/config/challenges.toml
-      - --measurements
-      - /etc/base/config/measurements.toml
-      - --minimum-challenges-version
-      - ${BASE_CHALLENGES_MIN_VERSION:?Set the minimum signed challenge version}
-      - --minimum-measurements-version
-      - ${BASE_MEASUREMENTS_MIN_VERSION:?Set the minimum signed measurement version}
-      - --wallet-name
-      - ${BASE_WALLET_NAME:?Set the validator wallet name}
-      - --wallet-hotkey
-      - ${BASE_WALLET_HOTKEY:?Set the validator wallet hotkey name}
-      - --wallet-path
-      - /run/wallets
       - --state-db
       - /var/lib/base/validator.sqlite3
-      - --consensus-seed-file
-      - /run/validator/consensus.key
       - --peers
       - /etc/base/config/peers.json
       - --peer-bind
@@ -53,6 +34,7 @@ services:
       - ${BASE_MIN_PEER_SAMPLE:-1}
       - --max-block-lag
       - ${BASE_MAX_BLOCK_LAG:-256}
+      - --verify-only
     restart: unless-stopped
     init: true
     read_only: true
@@ -64,14 +46,8 @@ services:
       - "${BASE_VALIDATOR_BIND_ADDRESS:?Set the validator VPC address}:8091:8091"
     volumes:
       - type: bind
-        source: ${BASE_TRUST_ROOT_DIR:-config}
+        source: ${BASE_CONFIG_DIR:-config}
         target: /etc/base/config
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${BASE_VALIDATOR_WALLETS_DIR:-deploy/secrets/wallets}
-        target: /run/wallets
         read_only: true
         bind:
           create_host_path: false

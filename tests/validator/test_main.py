@@ -147,16 +147,20 @@ def without(arguments, flag):
     index = arguments.index(flag)
     return arguments[:index] + arguments[index + 2 :]
 
+
 def without_hotkey(tmp_path):
     return without(without(required_arguments(tmp_path), "--wallet-name"), "--wallet-hotkey")
+
 
 def test_weight_setting_validator_without_hotkey_fails_with_a_clear_error(tmp_path):
     with pytest.raises(SystemExit, match="required to submit weights"):
         validator_main.main(without_hotkey(tmp_path))
 
+
 def test_peer_consensus_without_hotkey_fails_even_when_verify_only(tmp_path):
     with pytest.raises(SystemExit, match="required to submit weights or run --peer-consensus"):
         validator_main.main([*without_hotkey(tmp_path), "--verify-only", "--peer-consensus"])
+
 
 def test_verify_only_validator_starts_without_hotkey_gateway_pin_or_trust_files(
     monkeypatch, tmp_path
@@ -186,10 +190,17 @@ def test_verify_only_validator_starts_without_hotkey_gateway_pin_or_trust_files(
     validator_main.main([*arguments, "--verify-only", "--once"])
     assert seen == {"wallet": None}
 
+
 def test_removed_trust_signing_options_are_gone(tmp_path):
-    for flag in ("--owner-public", "--challenges", "--measurements", "--minimum-challenges-version"):
+    for flag in (
+        "--owner-public",
+        "--challenges",
+        "--measurements",
+        "--minimum-challenges-version",
+    ):
         with pytest.raises(SystemExit):
             validator_main.parser().parse_args([*required_arguments(tmp_path), flag, "x"])
+
 
 @pytest.mark.parametrize(
     ("flag", "value", "message"),

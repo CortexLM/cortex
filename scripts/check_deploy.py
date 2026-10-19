@@ -48,7 +48,6 @@ VALIDATOR_HEALTHCHECK = [
 
 MASTER_ENVIRONMENT = {
     "BASE_STATE_DIR": "/var/lib/base",
-    "BASE_OWNER_PUBKEY_FILE": "/etc/base/config/owner.pubkey",
     "BASE_CHALLENGES_FILE": "/etc/base/config/challenges.toml",
     "BASE_MEASUREMENTS_FILE": "/etc/base/config/measurements.toml",
     "BASE_GATEWAY_SK_FILE": "/run/secrets/gateway.key",
@@ -64,19 +63,9 @@ DOCKER_SOCKET = "/var/run/docker.sock"
 VALIDATOR_OPTIONS = {
     "--gateway",
     "--netuid",
-    "--gateway-public",
     "--network",
     "--fallback-endpoints",
-    "--owner-public",
-    "--challenges",
-    "--measurements",
-    "--minimum-challenges-version",
-    "--minimum-measurements-version",
-    "--wallet-name",
-    "--wallet-hotkey",
-    "--wallet-path",
     "--state-db",
-    "--consensus-seed-file",
     "--peers",
     "--peer-bind",
     "--peer-port",
@@ -87,6 +76,14 @@ VALIDATOR_OPTIONS = {
     "--min-peer-sample",
     "--max-block-lag",
 }
+# Only the role that submits weights on-chain holds a validator hotkey (and a consensus seed).
+SETTER_OPTIONS = {
+    "--wallet-name",
+    "--wallet-hotkey",
+    "--wallet-path",
+    "--consensus-seed-file",
+}
+ROLES = {"master": "gateway", "validator": "validator", "weight-setter": "validator"}
 
 
 def validate_pin(image: str, *, base: bool = False) -> None:
@@ -139,18 +136,27 @@ def validate_vm_resource_environment(environment: dict, *, required: bool = True
         _integer(int(value), minimum, maximum, f"VM resource {name}")
 
 
-def _compose_options(command) -> dict[str, str]:
+def _compose_options(command, role: str = "validator") -> dict[str, str]:
     if not isinstance(command, list) or not command or command[0] != "validator":
         raise ValueError("validator must invoke the Python validator entrypoint")
-    if len(command) % 2 != 1 or not all(isinstance(item, str) for item in command):
+    if not all(isinstance(item, str) for item in command):
+        raise ValueError("validator command must contain flag/value pairs")
+    arguments = command[1:]
+    # The verify-only role never submits: it is the one place a validator holds no hotkey.
+    verify_only = arguments[-1:] == ["--verify-only"]
+    if verify_only:
+        arguments = arguments[:-1]
+    if verify_only != (role == "validator"):
+        raise ValueError("only the validator role is --verify-only; weight-setter submits")
+    if len(arguments) % 2:
         raise ValueError("validator command must contain flag/value pairs")
     options: dict[str, str] = {}
-    for index in range(1, len(command), 2):
-        flag, value = command[index], command[index + 1]
+    for flag, value in zip(arguments[::2], arguments[1::2], strict=True):
         if not flag.startswith("--") or not value or flag in options:
             raise ValueError("validator command contains an invalid or duplicate flag")
         options[flag] = value
-    if set(options) != VALIDATOR_OPTIONS:
+    expected = VALIDATOR_OPTIONS | (SETTER_OPTIONS if role == "weight-setter" else set())
+    if not expected <= set(options) <= expected | {"--gateway-public"}:
         raise ValueError("validator command differs from the audited Python runtime contract")
     return options
 
@@ -340,7 +346,7 @@ def _validate_common_service(service: dict) -> dict[str, dict]:
 
 
 def validate_compose(config: dict, role: str) -> None:
-    expected = "gateway" if role == "master" else "validator"
+    expected = ROLES[role]
     services = _mapping(config.get("services"), "services")
     allowed = {expected, "challenge-supervisor"} if role == "master" else {expected}
     if expected not in services or set(services) - allowed:
@@ -395,11 +401,15 @@ def validate_compose(config: dict, role: str) -> None:
         raise ValueError("validator must not require the master profile")
     if service.get("environment"):
         raise ValueError("validator configuration must be explicit command arguments")
-    if not {"/etc/base/config", "/run/wallets", "/run/validator", "/var/lib/base"} <= set(mounts):
-        raise ValueError("validator trust, wallet, identity and state mounts are required")
+    setter = role == "weight-setter"
+    required_mounts = {"/etc/base/config", "/run/validator", "/var/lib/base"}
+    if not required_mounts | ({"/run/wallets"} if setter else set()) <= set(mounts):
+        raise ValueError("validator config, identity and state mounts are required")
     if "/run/secrets" in mounts:
         raise ValueError("validator must not hold challenge signing keys")
-    options = _compose_options(command)
+    if not setter and "/run/wallets" in mounts:
+        raise ValueError("only the weight-setter role may mount a validator wallet")
+    options = _compose_options(command, role)
     _chain_endpoint(options["--network"], "validator chain endpoint")
     _wss_endpoints(options["--fallback-endpoints"], "validator fallback endpoints")
     gateway = urlsplit(options["--gateway"])
@@ -416,8 +426,6 @@ def validate_compose(config: dict, role: str) -> None:
     try:
         netuid = int(options["--netuid"])
         poll = float(options["--poll-seconds"])
-        challenge_version = int(options["--minimum-challenges-version"])
-        measurement_version = int(options["--minimum-measurements-version"])
         version_key = int(options["--version-key"])
         min_peer_sample = int(options["--min-peer-sample"])
         max_block_lag = int(options["--max-block-lag"])
@@ -427,33 +435,28 @@ def validate_compose(config: dict, role: str) -> None:
         not 0 <= netuid <= 65535
         or not math.isfinite(poll)
         or poll <= 0
-        or challenge_version < 1
-        or measurement_version < 1
         or not 0 <= version_key <= 2**64 - 1
         or not 0 <= min_peer_sample <= 64
         or max_block_lag < 1
     ):
         raise ValueError("validator numeric options are invalid")
     fixed = {
-        "--owner-public": "/etc/base/config/owner.pubkey",
-        "--challenges": "/etc/base/config/challenges.toml",
-        "--measurements": "/etc/base/config/measurements.toml",
-        "--wallet-path": "/run/wallets",
         "--state-db": "/var/lib/base/validator.sqlite3",
-        "--consensus-seed-file": "/run/validator/consensus.key",
         "--peers": "/etc/base/config/peers.json",
         "--peer-bind": "0.0.0.0",
         "--peer-port": "8091",
         "--peer-tls-certificate": "/run/validator/tls.crt",
         "--peer-tls-key": "/run/validator/tls.key",
     }
+    if setter:
+        fixed |= {
+            "--wallet-path": "/run/wallets",
+            "--consensus-seed-file": "/run/validator/consensus.key",
+        }
     if any(options[key] != value for key, value in fixed.items()):
         raise ValueError("validator paths or peer listener differ from the runtime contract")
-    if not all(
-        options[name]
-        for name in ("--gateway-public", "--network", "--wallet-name", "--wallet-hotkey")
-    ):
-        raise ValueError("validator identity and network pins are required")
+    if setter and not (options["--wallet-name"] and options["--wallet-hotkey"]):
+        raise ValueError("the weight-setter needs its validator wallet and hotkey names")
     health = service.get("healthcheck", {}).get("test", [])
     if health != VALIDATOR_HEALTHCHECK:
         raise ValueError("validator healthcheck must use its Python liveness endpoint")
@@ -855,8 +858,6 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         "BASE_EMIT_POLL_SECS",
         "BASE_EPOCH_REFRESH_SECS",
         "BASE_EPOCH_STALE_SECS",
-        "BASE_CHALLENGES_MIN_VERSION",
-        "BASE_MEASUREMENTS_MIN_VERSION",
         "PROOF_VM_ORCHESTRATOR_URL",
         "PROOF_VM_ORCHESTRATOR_TOKEN_FILE",
         "PROOF_VM_ORCHESTRATOR_CA_FILE",
@@ -888,8 +889,6 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         emit = float(master["BASE_EMIT_POLL_SECS"])
         refresh = float(master["BASE_EPOCH_REFRESH_SECS"])
         stale = float(master["BASE_EPOCH_STALE_SECS"])
-        challenge_version = int(master["BASE_CHALLENGES_MIN_VERSION"])
-        measurement_version = int(master["BASE_MEASUREMENTS_MIN_VERSION"])
     except ValueError:
         raise ValueError("master example contains invalid numeric settings") from None
     if (
@@ -897,8 +896,6 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         or not all(math.isfinite(item) for item in (emit, refresh, stale))
         or min(emit, refresh) <= 0
         or stale <= refresh
-        or challenge_version < 1
-        or measurement_version < 1
     ):
         raise ValueError("master example contains unsafe timing or netuid settings")
     _wss_endpoints(master["BASE_CHAIN_FALLBACK_ENDPOINTS"], "master fallback endpoints")
@@ -911,17 +908,14 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         "BASE_NETUID",
         "BASE_CHAIN_ENDPOINT",
         "BASE_CHAIN_FALLBACK_ENDPOINTS",
-        "BASE_GATEWAY_HOTKEY",
         "BASE_WALLET_NAME",
         "BASE_WALLET_HOTKEY",
         "BASE_COORDINATION_INTERVAL_SECS",
-        "BASE_CHALLENGES_MIN_VERSION",
-        "BASE_MEASUREMENTS_MIN_VERSION",
         "BASE_VERSION_KEY",
         "BASE_MIN_PEER_SAMPLE",
         "BASE_MAX_BLOCK_LAG",
         "BASE_VALIDATOR_WALLETS_DIR",
-        "BASE_TRUST_ROOT_DIR",
+        "BASE_CONFIG_DIR",
         "BASE_VALIDATOR_IDENTITY_DIR",
         "BASE_VALIDATOR_BIND_ADDRESS",
     }
@@ -966,7 +960,7 @@ def _bind_sources(role: str, compose_dir: Path = ROOT / "deploy/compose") -> Non
 
 
 def _default_sources(config: dict, role: str) -> None:
-    service_name = "gateway" if role == "master" else "validator"
+    service_name = ROLES[role]
     service = config["services"][service_name]
     mounts = {item["target"]: Path(item["source"]) for item in service["volumes"]}
     expected = {"/etc/base/config": ROOT / "config"}
@@ -985,7 +979,7 @@ def _default_sources(config: dict, role: str) -> None:
         ]
         if resolved not in ([], [(ROOT / "deploy/env/master.env").resolve()]):
             raise ValueError("master default env file resolves outside the repository deploy tree")
-    else:
+    elif role == "weight-setter":
         expected["/run/wallets"] = ROOT / "deploy/secrets/wallets"
     for target, source in expected.items():
         if mounts.get(target) != source:
@@ -1007,7 +1001,7 @@ def check_examples() -> None:
     removed = {
         "BASE_MASTER_ENV_FILE",
         "BASE_MASTER_SECRETS_DIR",
-        "BASE_TRUST_ROOT_DIR",
+        "BASE_CONFIG_DIR",
         "BASE_VALIDATOR_WALLETS_DIR",
         "BASE_CHALLENGE_REGISTRY_DIR",
     }
@@ -1021,11 +1015,8 @@ def check_examples() -> None:
             "BASE_GATEWAY_ENDPOINT": "https://master.fixture.invalid",
             "BASE_NETUID": "541",
             "BASE_CHAIN_ENDPOINT": "test",
-            "BASE_GATEWAY_HOTKEY": "e" * 64,
             "BASE_WALLET_NAME": "fixture",
             "BASE_WALLET_HOTKEY": "validator",
-            "BASE_CHALLENGES_MIN_VERSION": "1",
-            "BASE_MEASUREMENTS_MIN_VERSION": "1",
             "BASE_VERSION_KEY": "1",
             "BASE_VALIDATOR_BIND_ADDRESS": "127.0.0.2",
             "BASE_VALIDATOR_IDENTITY_DIR": "/fixture/identity",
@@ -1048,7 +1039,7 @@ def check_examples() -> None:
 
 
 def _render_examples(env: dict[str, str]) -> None:
-    for role in ("master", "validator"):
+    for role in ("master", "validator", "weight-setter"):
         result = subprocess.run(
             [
                 "docker",
@@ -1082,7 +1073,7 @@ def main() -> None:
     modes.add_argument("--check-examples", action="store_true")
     modes.add_argument("--config", type=Path, help="rendered Compose JSON; use - for stdin")
     modes.add_argument("--vm-host-config", type=Path, help="materialized Proof host TOML")
-    parser.add_argument("--role", choices=["master", "validator"])
+    parser.add_argument("--role", choices=list(ROLES))
     args = parser.parse_args()
     try:
         if args.base_image:

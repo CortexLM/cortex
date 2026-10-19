@@ -1,0 +1,84 @@
+# Weight-setting validator: the only role that holds a validator hotkey and submits weights.
+# Never start a second submitter with the same wallet. Use role-validator.yml (verify-only)
+# for everyone else.
+name: cortex-weight-setter
+services:
+  validator:
+    image: ${CORTEX_IMAGE:?Set the published image repository@sha256:digest}
+    command:
+      - validator
+      - --gateway
+      - ${BASE_GATEWAY_ENDPOINT:?Set the master gateway HTTPS URL}
+      - --netuid
+      - ${BASE_NETUID:?Set the Bittensor netuid}
+      - --network
+      - ${BASE_CHAIN_ENDPOINT:-finney}
+      - --fallback-endpoints
+      - ${BASE_CHAIN_FALLBACK_ENDPOINTS:-[]}
+      - --wallet-name
+      - ${BASE_WALLET_NAME:?Set the validator wallet name}
+      - --wallet-hotkey
+      - ${BASE_WALLET_HOTKEY:?Set the validator wallet hotkey name}
+      - --wallet-path
+      - /run/wallets
+      - --state-db
+      - /var/lib/base/validator.sqlite3
+      - --consensus-seed-file
+      - /run/validator/consensus.key
+      - --peers
+      - /etc/base/config/peers.json
+      - --peer-bind
+      - 0.0.0.0
+      - --peer-port
+      - "8091"
+      - --peer-tls-certificate
+      - /run/validator/tls.crt
+      - --peer-tls-key
+      - /run/validator/tls.key
+      - --poll-seconds
+      - ${BASE_COORDINATION_INTERVAL_SECS:-30}
+      - --version-key
+      - ${BASE_VERSION_KEY:?Set the subnet validator version key}
+      - --min-peer-sample
+      - ${BASE_MIN_PEER_SAMPLE:-1}
+      - --max-block-lag
+      - ${BASE_MAX_BLOCK_LAG:-256}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 2m
+    ports:
+      - "${BASE_VALIDATOR_BIND_ADDRESS:?Set the validator VPC address}:8091:8091"
+    volumes:
+      - type: bind
+        source: ${BASE_CONFIG_DIR:-config}
+        target: /etc/base/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${BASE_VALIDATOR_WALLETS_DIR:-deploy/secrets/wallets}
+        target: /run/wallets
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${BASE_VALIDATOR_IDENTITY_DIR:?Set private validator identity directory}
+        target: /run/validator
+        read_only: true
+        bind:
+          create_host_path: false
+      - base-weight-setter-state:/var/lib/base
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    healthcheck:
+      test: [CMD, python, -I, -c, "import ssl,urllib.request; urllib.request.urlopen('https://127.0.0.1:8091/livez', context=ssl._create_unverified_context(), timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+volumes:
+  base-weight-setter-state:

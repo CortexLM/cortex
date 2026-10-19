@@ -28,6 +28,7 @@ def test_deployment_rejects_floating_or_malformed_image_pins(image):
 
 
 def validator_config():
+    """The verify-only validator role: no wallet, no hotkey, no consensus seed."""
     return {
         "services": {
             "validator": {
@@ -55,32 +56,12 @@ def validator_config():
                     "https://master.fixture.invalid",
                     "--netuid",
                     "541",
-                    "--gateway-public",
-                    "e" * 64,
                     "--network",
                     "test",
                     "--fallback-endpoints",
                     "[]",
-                    "--owner-public",
-                    "/etc/base/config/owner.pubkey",
-                    "--challenges",
-                    "/etc/base/config/challenges.toml",
-                    "--measurements",
-                    "/etc/base/config/measurements.toml",
-                    "--minimum-challenges-version",
-                    "1",
-                    "--minimum-measurements-version",
-                    "1",
-                    "--wallet-name",
-                    "fixture",
-                    "--wallet-hotkey",
-                    "validator",
-                    "--wallet-path",
-                    "/run/wallets",
                     "--state-db",
                     "/var/lib/base/validator.sqlite3",
-                    "--consensus-seed-file",
-                    "/run/validator/consensus.key",
                     "--peers",
                     "/etc/base/config/peers.json",
                     "--peer-bind",
@@ -99,6 +80,7 @@ def validator_config():
                     "1",
                     "--max-block-lag",
                     "256",
+                    "--verify-only",
                 ],
                 "ports": [{"target": 8091, "host_ip": "10.0.0.2"}],
                 "tmpfs": ["/tmp:size=32m,mode=1777"],
@@ -107,12 +89,6 @@ def validator_config():
                         "type": "bind",
                         "source": "/fixture/config",
                         "target": "/etc/base/config",
-                        "read_only": True,
-                    },
-                    {
-                        "type": "bind",
-                        "source": "/fixture/wallets",
-                        "target": "/run/wallets",
                         "read_only": True,
                     },
                     {
@@ -126,6 +102,45 @@ def validator_config():
             }
         }
     }
+
+
+def weight_setter_config():
+    config = deepcopy(validator_config())
+    service = config["services"]["validator"]
+    service["command"].remove("--verify-only")
+    service["command"] += [
+        "--wallet-name",
+        "fixture",
+        "--wallet-hotkey",
+        "validator",
+        "--wallet-path",
+        "/run/wallets",
+        "--consensus-seed-file",
+        "/run/validator/consensus.key",
+    ]
+    service["volumes"].append(
+        {"type": "bind", "source": "/fixture/wallets", "target": "/run/wallets", "read_only": True}
+    )
+    return config
+
+
+def test_weight_setter_is_the_only_role_with_a_hotkey():
+    CHECK["validate_compose"](weight_setter_config(), "weight-setter")
+    with pytest.raises(ValueError, match="verify-only|wallet"):
+        CHECK["validate_compose"](weight_setter_config(), "validator")
+    with pytest.raises(ValueError):
+        CHECK["validate_compose"](validator_config(), "weight-setter")
+    leaked = validator_config()
+    leaked["services"]["validator"]["volumes"].append(
+        {"type": "bind", "source": "/w", "target": "/run/wallets", "read_only": True}
+    )
+    with pytest.raises(ValueError, match="only the weight-setter"):
+        CHECK["validate_compose"](leaked, "validator")
+    nameless = weight_setter_config()
+    command = nameless["services"]["validator"]["command"]
+    command[command.index("--wallet-hotkey") + 1] = ""
+    with pytest.raises(ValueError):
+        CHECK["validate_compose"](nameless, "weight-setter")
 
 
 def master_config():
@@ -143,7 +158,6 @@ def master_config():
                 "command": ["master", "--bind", "0.0.0.0", "--port", "8080"],
                 "environment": {
                     "BASE_STATE_DIR": "/var/lib/base",
-                    "BASE_OWNER_PUBKEY_FILE": "/etc/base/config/owner.pubkey",
                     "BASE_CHALLENGES_FILE": "/etc/base/config/challenges.toml",
                     "BASE_MEASUREMENTS_FILE": "/etc/base/config/measurements.toml",
                     "BASE_GATEWAY_SK_FILE": "/run/secrets/gateway.key",
@@ -343,8 +357,6 @@ def test_docker_control_stays_confined_to_the_secretless_supervisor(mutation):
 @pytest.mark.parametrize(
     ("flag", "value"),
     [
-        ("--minimum-challenges-version", "0"),
-        ("--minimum-measurements-version", "0"),
         ("--version-key", "-1"),
         ("--min-peer-sample", "-1"),
         ("--max-block-lag", "0"),
