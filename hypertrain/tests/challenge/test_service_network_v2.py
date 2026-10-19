@@ -3474,7 +3474,7 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
     import anyio
     import httpx
 
-    from hypertrain.data.store import CorruptObjectError, LocalFSStore
+    from hypertrain.data.store import LocalFSStore
     from hypertrain.data.stream_store import StreamStore
     from hypertrain.protocol import envelope_v2, relay_envelope
     from hypertrain.protocol.relay_messages import (
@@ -3490,7 +3490,7 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         UploadGrant,
     )
     from hypertrain.relay.app import create_app as relay_app
-    from hypertrain.relay.core import Relay
+    from hypertrain.relay.core import AssemblyMismatch, Relay
 
     spec = importlib.util.spec_from_file_location(
         "receipt_prefix_shadow",
@@ -3633,7 +3633,7 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         first = await relay.chunk(grant.digest(), 0, source(sent[:-1]))
         if forged:
             # The relay signs both chunk acks, then cannot complete bytes missing delta_hash.
-            with pytest.raises(CorruptObjectError):
+            with pytest.raises(AssemblyMismatch):
                 await relay.chunk(grant.digest(), 1, source(sent[-1:]))
             last = (await relay.state()).uploads[grant.digest()].chunks["1"]
             return opportunity, first, last, last

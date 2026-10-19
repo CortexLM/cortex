@@ -22,6 +22,7 @@ from hypertrain.protocol.relay_messages import (
     RetentionExtension,
     RetrievalRequest,
     RetrievalResponse,
+    UploadGrant,
 )
 from hypertrain.relay.app import create_app
 from hypertrain.relay.client import receipt_verified
@@ -672,5 +673,48 @@ def test_retrieval_when_release_races_durable_read(tmp_path: Path) -> None:
                     resume.set()
             # Then: no nonce/response reservation is minted against released custody.
             assert not (await rig.relay.state()).uploads[grant.digest()].retrievals
+
+    anyio.run(scenario)
+
+
+def test_recover_when_journal_holds_unassemblable_upload(tmp_path: Path) -> None:
+    # Given: a granted manifest whose chunks are valid but concatenate to another hash.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            forged = b"x" * (4 << 20) + b"y"
+            grant, manifest, _, assignment, opened = rig.upload(forged, nonce="91" * 32, w=1)
+            bad = UploadGrant.model_validate({**grant.body(), "delta_hash": H})
+            await rig.relay.accept(rig.seal(bad), manifest, assignment, opened)
+            await rig.put(bad, forged[: 4 << 20], 0)
+            with pytest.raises(RelayError):
+                await rig.put(bad, forged[4 << 20 :], 1)
+            honest, plain, _, assignment, opened = rig.upload(b"abc", nonce="92" * 32, w=2)
+            await rig.relay.accept(rig.seal(honest), plain, assignment, opened)
+            await rig.put(honest, b"abc")
+
+            def interrupted(state) -> None:
+                state.uploads[honest.digest()].receipt = None
+
+            await rig.relay._change(interrupted)
+            # When: a restarted relay recovers the whole journal.
+            relay = rig.new_relay()
+            await relay.recover()
+            completed: list[str] = []
+            complete = relay.complete
+
+            async def counted(grant_hash: str):
+                completed.append(grant_hash)
+                return await complete(grant_hash)
+
+            relay.complete = counted  # type: ignore[method-assign]
+            await relay.recover()
+            # Then: the poisoned entry is failed once, the honest one still gets its receipt.
+            state = await relay.state()
+            assert state.uploads[bad.digest()].receipt is None
+            assert state.uploads[bad.digest()].forward_error == "AssemblyMismatch"
+            assert not rig.store.store._path(H).exists()
+            assert state.uploads[honest.digest()].receipt is not None
+            assert bad.digest() not in completed
 
     anyio.run(scenario)

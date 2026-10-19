@@ -18,7 +18,7 @@ import anyio
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from hypertrain.data.store import CorruptObjectError, ObjectNotFound
+from hypertrain.data.store import CorruptObjectError, ObjectNotFound, StoreError
 from hypertrain.data.stream_store import StreamStore, receive, spool
 from hypertrain.protocol import envelope_v2, relay_envelope
 from hypertrain.protocol.envelope import SignatureError
@@ -51,6 +51,10 @@ from hypertrain.protocol.relay_messages import (
 
 class RelayError(ValueError):
     """Authenticated contract, authorization, quota or lifecycle rejection."""
+
+
+class AssemblyMismatch(RelayError):
+    """Granted chunks are held but their concatenation is not the granted delta."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,11 +403,20 @@ class Relay:
             if not has_full_custody(grant, record.manifest, opportunity, chunks):
                 raise RelayError("completion requires exact timely full custody")
             with spool() as whole:
+                digest = hashlib.sha256()
                 for chunk in record.manifest.chunks:
                     with spool() as file:
                         await self.backing.get(chunk.chunk_sha256, chunk.len, file)
                         while data := file.read(64 << 10):
+                            digest.update(data)
                             whole.write(data)
+                if whole.tell() != grant.size or digest.hexdigest() != grant.delta_hash:
+                    # Deterministic: the held chunks can never assemble, so never retry.
+                    def mismatch(state: Journal) -> None:
+                        self._record(state, grant_hash).forward_error = AssemblyMismatch.__name__
+
+                    await self._change(mismatch)
+                    raise AssemblyMismatch("granted chunks do not assemble to delta_hash")
                 whole.seek(0)
                 await self.backing.put(whole, grant.delta_hash, grant.size)
             now = await self.now()
@@ -472,10 +485,15 @@ class Relay:
             if (
                 len(record.chunks) == len(record.manifest.chunks)
                 and record.master_acceptance is None
+                # Deterministic failures: retrying the same held bytes cannot succeed.
+                and record.forward_error
+                not in (AssemblyMismatch.__name__, CorruptObjectError.__name__)
             ):
                 try:
                     await self.complete(grant_hash)
-                except RelayError as error:
+                except AssemblyMismatch:
+                    continue  # recorded by complete; custody of each chunk stays retrievable
+                except (RelayError, StoreError) as error:
                     # A missed completion deadline must not prevent retained-byte retrieval.
                     failure_name = type(error).__name__
 
