@@ -249,10 +249,11 @@ database to force a retry.
 
 The journal keeps rollback watermarks for `challenges_version`,
 `measurements_version` and `epoch`; a lower served value fails with
-`consensus rollback refused`. A profile whose `measurements_version` is not an
-integer or exceeds `MAX_MEASUREMENTS_VERSION` (1000, `src/cortex/protocol/models.py`)
-is refused as `invalid trust profile` before any watermark moves; the master
-refuses to load such a profile too. If a watermark was advanced wrongly (for example a
+`consensus rollback refused`. A profile whose `measurements_version` or
+`challenges_version` is not an integer or exceeds 1000 (`MAX_MEASUREMENTS_VERSION`
+and `MAX_CHALLENGES_VERSION` in `src/cortex/protocol/models.py`) is refused as
+`invalid trust profile` before any watermark moves, so it needs no
+`validator-watermark-reset`; the master refuses to load such a profile too. If a watermark was advanced wrongly (for example a
 profile version published by mistake and then withdrawn), stop the validator and
 lower it locally. The command touches only the state database: no network, no
 wallet.
