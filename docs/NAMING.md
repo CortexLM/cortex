@@ -23,8 +23,6 @@ The preserved signing domains are:
 
 | Domain | Purpose |
 | --- | --- |
-| `base-rawweight-v1` | challenge leaves |
-| `base-bundle-v1` | sealed epoch bundles |
 | `base-root-v1` | validator root statements |
 | `base-dissent-v1` | validator dissent evidence |
 | `base-proof-topic-v1` | published Proof topics |

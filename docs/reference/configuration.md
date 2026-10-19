@@ -12,12 +12,10 @@ conflicting values are an error. Existing names and crypto domains are preserved
 | `BASE_CHAIN_ENDPOINT` | Official Bittensor SDK alias (`finney`, `test`, `archive`, `local`) or credential-free `wss://` RPC origin |
 | `BASE_CHAIN_FALLBACK_ENDPOINTS` | JSON list of up to eight credential-free `wss://` fallback RPC endpoints |
 | `BASE_STATE_DIR` | Durable private state directory; default `/var/lib/cortex` |
-| `BASE_CHALLENGES_FILE` | Unsigned challenge profile (challenge keys and emission shares); served by the gateway at `GET /v1/trust` |
+| `BASE_CHALLENGES_FILE` | Unsigned challenge profile (emission shares); served by the gateway at `GET /v1/trust` |
 | `BASE_MEASUREMENTS_FILE` | Unsigned measurement profile; served with the challenge profile |
-| `BASE_GATEWAY_SK_FILE` | Gateway seal seed file |
-| `PROOF_SK_FILE` | Proof topic and leaf seed file |
+| `PROOF_SK_FILE` | Proof topic seed file |
 | `BASE_GATEWAY_ADMIN_TOKEN_FILE` | Required operator bearer file |
-| `BASE_CHALLENGE_KEYS_DIR` | Directory of container challenge leaf seeds, `<id>.key`; default `/run/secrets` |
 | `BASE_CHALLENGE_REGISTRY_FILE` | Optional [challenge registry](../CHALLENGES.md); unset runs no container challenge |
 | `BASE_CHALLENGE_SECRETS_DIR` | Per-challenge `<id>/internal.token` bearers; default `/run/challenge-secrets` |
 | `PROOF_VM_ORCHESTRATOR_URL` | Dedicated VM host HTTPS origin |
@@ -99,7 +97,7 @@ with a validator hotkey and consensus seed:
 The version key is intentionally blank in the example. Populate it from the live
 subnet; do not infer it from tests. The CLI flags `--wallet-name` and
 `--wallet-hotkey` are required only to submit weights (or with `--peer-consensus`);
-`--gateway-public` is an optional extra pin of the gateway sealing key. The
+The
 challenge profile always comes from `GET /v1/trust`. `--verify-only --once` is the
 non-dispatch preflight; it needs no wallet but still requires full historical-chain
 access.

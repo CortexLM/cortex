@@ -43,7 +43,7 @@ reviews:
         - Shared observations are untrusted and private until owner-signed approval.
         - A trusted challenge container that is unregistered, failing or returns invalid
           weights yields explicit `ChallengeInternal` leaves; never a stale or guessed
-          score. Containers never receive a leaf seed; only `challenge-supervisor`
+          score. Containers never receive a signing key; only `challenge-supervisor`
           mounts the Docker socket; the proxy never forwards `internal/` paths.
         - Validators independently fetch historical chain state, recompute exact u16
           weights and refuse the unsealed UID0 fallback. A sealed UID0 burn is valid.

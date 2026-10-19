@@ -3,15 +3,15 @@
 # Challenge containers
 
 A Cortex challenge is a Docker image that scores miners. The master runs it,
-reads its weights once per completed epoch, signs one leaf per expected hotkey
+reads its weights once per completed epoch, records one leaf per expected hotkey
 and seals the epoch. Validators only verify the sealed bundle and submit it.
 
 ```text
-owner (offline)          challenges.toml v>=3: id, leaf key, emission bps, policy
+owner (offline)          challenges.toml v>=3: id, emission bps, policy
 master operator          challenge-registry.toml: image, channel, resources, env
 challenge-supervisor     pulls, verifies, canaries, runs and updates containers
 challenge container      public routes + GET /internal/v1/get_weights
-master                   polls weights, signs leaves, seals, proxies /challenge/<id>/
+master                   polls weights, records leaves, seals, proxies /challenge/<id>/
 validator                GET /v1/weights/latest + /v1/bundle/<epoch>, recompute, submit
 ```
 
@@ -42,7 +42,7 @@ writable named volume at `/data`. The image must create `/data` owned by
 
 Every file under `/run/secrets/` comes from the host directory
 `<BASE_CHALLENGE_SECRETS_DIR>/<id>/`, mounted read-only. A container never
-receives a leaf-signing seed.
+receives a signing key.
 
 ### Routes
 

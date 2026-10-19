@@ -84,15 +84,13 @@ Prepare a private directory, owned so container UID 65532 can read it:
 
 ```text
 deploy/secrets/master/
-  gateway.key
-  proof.key
-  bounty.key          # one <id>.key per trusted container challenge
+  proof.key           # signs Proof topics (miners pin its public key)
   operator.token
   proof-vm.token
   proof-vm-ca.pem
 ```
 
-Seeds are raw 32 bytes or 64 hexadecimal characters. Bearers are nonempty opaque values. Files are regular,
+The seed is raw 32 bytes or 64 hexadecimal characters. Nothing else on the master signs: the gateway seals unsigned wire-v2 bundles, so there is no gateway key and no per-challenge leaf key. Bearers are nonempty opaque values. Files are regular,
 not hardlinks or symlinks, and mode 0400 or 0600. The Proof VM token and CA are
 needed only when `PROOF_VM_ORCHESTRATOR_URL` is set.
 
@@ -137,8 +135,7 @@ install -d -m 0700 -o 65532 -g 65532 "$dir"
 chown 65532:65532 "$dir"/*.token
 ```
 
-Put the matching leaf seed at `deploy/secrets/master/<id>.key` (its public key
-is the challenge profile row) and any challenge settings in the registry `env` table,
+Put any challenge settings in the registry `env` table,
 for example `BOUNTY_BACKEND_PUBLIC_URL`. Challenge-specific secrets, such as
 Bounty's `session.key`, go next to the tokens; see each challenge's operator
 guide ([Bounty](https://github.com/CortexLM/bounty/blob/main/docs/operator.md),
@@ -166,8 +163,7 @@ Create `deploy/env/python-validator.env` and set the exact master HTTPS origin,
 netuid, chain network, live subnet `version_key`, VPC peer bind address and private
 host paths. `role-validator.yml` is verify-only and needs no wallet. Weight setting
 is a separate role, `role-weight-setter.yml`, the only one that also takes the
-validator wallet name and hotkey. `--gateway-public` (the gateway sealing key) is an
-optional extra pin; the HTTPS gateway is otherwise the source of the challenge profile. Optional fallback RPCs are a JSON list of at most eight
+validator wallet name and hotkey. The HTTPS gateway is the only anchor for the challenge profile and the bundle; nothing it serves is signed. Optional fallback RPCs are a JSON list of at most eight
 credential-free `wss://` URLs.
 
 The weight-setter mounts the wallet directory read-only at `/run/wallets`; the
@@ -201,7 +197,7 @@ submit.
 
 To run a validator without Compose, use `scripts/run-validator.sh` from a
 repository clone. It needs `WALLET_NAME` and `WALLET_HOTKEY` only to submit weights
-(`--verify-only` needs neither), takes an optional `GATEWAY_PUBLIC` pin, reads the
+(`--verify-only` needs neither), reads the
 challenge profile from the gateway, and refuses to run master-only commands; see the
 [quick start](../docs/external-miner/validators.md#quick-start-one-script).
 
@@ -338,8 +334,8 @@ backing up state, pulling that digest and recreating one role.
 
 The Cortex image itself has deliberately no `git pull`, Docker-socket watcher,
 CI SSH deployment or unattended host updater; only challenge containers
-auto-update, through the supervisor gates above, and they never hold a leaf
-seed. Safe automation of the Cortex image must preserve the same operator gate,
+auto-update, through the supervisor gates above, and they never hold a signing
+key. Safe automation of the Cortex image must preserve the same operator gate,
 take a consistent SQLite backup, verify role health plus a fresh sealed bundle,
 and restore both the prior digest and schema-compatible state on failure.
 

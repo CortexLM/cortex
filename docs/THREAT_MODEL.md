@@ -16,16 +16,16 @@ The Merkle root is not part of the Bittensor weight extrinsic. Peer consensus is
 therefore not a public chain transparency log. A colluding validator set can
 agree on one bad root, and an operator can delete local evidence. The owner signs
 the roots and runs the master, so a malicious owner can authorize dishonest
-challenge keys or generated topic rules that validators will faithfully accept.
+challenge shares or generated topic rules that validators will faithfully accept.
 
 ## Trust boundaries
 
 | Boundary | Trusted property | Residual risk |
 | --- | --- | --- |
-| challenge profile (gateway `/v1/trust`) | challenge ids, keys, shares, measurement digest | a compromised gateway or broken TLS can serve a malicious profile; pin `--gateway-public` |
+| challenge profile (gateway `/v1/trust`) | challenge ids, shares, measurement digest | a compromised gateway or broken TLS can serve a malicious profile; TLS is the only anchor |
 | master gateway | durable intake and immutable seals | availability and censorship remain operator risks |
 | validator | independent chain snapshot, recomputation and dispatch journal | chain RPC eclipse or colluding validators |
-| challenge container | weights it returns for its own share | can misallocate or zero its own share; never holds a leaf seed, cannot move another challenge's mass |
+| challenge container | weights it returns for its own share | can misallocate or zero its own share; holds no signing key, cannot move another challenge's mass |
 | challenge-supervisor | Docker control, image provenance and label checks | holds the Docker socket (host-root equivalent); a compromised GitHub repository with valid provenance ships code |
 | CortexLM/backend feed | Bounty scoring publication | backend controls the underlying adjudication truth |
 | topic RLM guest | topic-scoped setup state | model output is untrusted until checked and signed |

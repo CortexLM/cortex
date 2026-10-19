@@ -10,9 +10,7 @@ regular files, owned/readable by that identity, with mode 0400 or 0600.
 
 | File | Purpose |
 | --- | --- |
-| `gateway.key` | 32-byte sr25519 seed for bundle seals |
-| `<id>.key` | leaf seed of each trusted container challenge, e.g. `bounty.key` |
-| `proof.key` | Proof topic/leaf seed matching the challenge profile |
+| `proof.key` | 32-byte sr25519 seed that signs Proof topics; miners pin its public key (`--proof-public`) |
 | `operator.token` | bearer for master administrative routes |
 | `proof-vm.token` | bearer shared with the dedicated VM host |
 | `proof-vm-ca.pem` | CA used to verify the VM-host TLS certificate |
@@ -40,6 +38,8 @@ The wallet tree is mounted read-only at `/run/wallets`. A separate validator
 identity directory is mounted at `/run/validator` and contains
 `consensus.key`, `tls.crt` and `tls.key`. The validator never receives gateway,
 challenge, Proof, operator or provider credentials.
+
+The master holds no gateway or challenge-leaf signing key: bundles and leaves are unsigned (wire v2).
 
 ## VM-host files
 

@@ -50,10 +50,8 @@ MASTER_ENVIRONMENT = {
     "BASE_STATE_DIR": "/var/lib/base",
     "BASE_CHALLENGES_FILE": "/etc/base/config/challenges.toml",
     "BASE_MEASUREMENTS_FILE": "/etc/base/config/measurements.toml",
-    "BASE_GATEWAY_SK_FILE": "/run/secrets/gateway.key",
     "PROOF_SK_FILE": "/run/secrets/proof.key",
     "BASE_GATEWAY_ADMIN_TOKEN_FILE": "/run/secrets/operator.token",
-    "BASE_CHALLENGE_KEYS_DIR": "/run/secrets",
     "BASE_CHALLENGE_REGISTRY_FILE": "/etc/base/challenges/registry.toml",
     "BASE_CHALLENGE_SECRETS_DIR": "/run/challenge-secrets",
 }
@@ -156,7 +154,7 @@ def _compose_options(command, role: str = "validator") -> dict[str, str]:
             raise ValueError("validator command contains an invalid or duplicate flag")
         options[flag] = value
     expected = VALIDATOR_OPTIONS | (SETTER_OPTIONS if role == "weight-setter" else set())
-    if not expected <= set(options) <= expected | {"--gateway-public"}:
+    if set(options) != expected:
         raise ValueError("validator command differs from the audited Python runtime contract")
     return options
 
@@ -368,7 +366,6 @@ def validate_compose(config: dict, role: str) -> None:
             raise ValueError("master file credentials must use the audited container paths")
         forbidden_values = {
             "OPENROUTER_API_KEY",
-            "BASE_GATEWAY_SK",
             "PROOF_SK",
             "BASE_GATEWAY_ADMIN_TOKEN",
             "PROOF_VM_ORCHESTRATOR_TOKEN",

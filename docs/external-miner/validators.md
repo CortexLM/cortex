@@ -11,8 +11,6 @@ scripts/run-validator.sh --verify-only   # no wallet or hotkey needed
 # To submit weights, a registered validator wallet is required:
 export WALLET_NAME=validator WALLET_HOTKEY=default
 scripts/run-validator.sh
-# Optional extra pin of the gateway sealing hotkey:
-export GATEWAY_PUBLIC=<gateway hotkey pinned from an independent source>
 ```
 
 `scripts/run-validator.sh` defaults to `GATEWAY=https://chain.joinbase.ai`,
@@ -41,21 +39,20 @@ bounty/proof 2000/8000 (algorithm 1), `bounty` 3000 bps and `proof` 7000 bps
 see [Changing emission shares](../../deploy/README.md#changing-emission-shares)).
 
 Sealed `GET /v1/weights/latest` responses expose `algorithm_version` from the
-signed bundle. `emission_shares` contains the configured ceilings; each
+bundle. `emission_shares` contains the configured ceilings; each
 `source_challenges[].emission_percent` reflects its allocated share, including
 the ten-report Bounty ramp under algorithm 2 and
 `min(sum(leaves), 10^12) / 10^12` of the share under algorithm 3. Author allocations to UID0 or
-unmapped hotkeys still burn. Validators always recompute from signed leaves;
+unmapped hotkeys still burn. Validators always recompute from the leaves;
 they never trust these display fields as consensus inputs.
 
 ## Prepare identity
 
 Install the [Python package with its chain extra](README.md#installation).
 Obtain the gateway HTTPS URL. The validator builds its challenge profile
-(challenge keys, shares, measurements) from `GET /v1/trust` on that gateway and
-refuses a profile whose version goes backwards. `--gateway-public` is an optional
-extra pin: it refuses a gateway whose sealing hotkey differs. Obtain it from an
-independent source if you use it. TLS to the gateway is the trust anchor otherwise.
+(challenge ids, shares, measurements) from `GET /v1/trust` on that gateway and
+refuses a profile whose version goes backwards. TLS to the gateway is the trust anchor;
+bundles are unsigned and checked by content hashes and the chain.
 
 Verifying needs no wallet: run with `--verify-only` and no `--wallet-name` or
 `--wallet-hotkey`. Submitting weights needs a registered Bittensor hotkey in a
@@ -123,7 +120,7 @@ deployment before running it:
 
 ```bash
 uv run cortex validator \
-  --gateway "$GATEWAY" [--gateway-public "$GATEWAY_PUBLIC_KEY"] \
+  --gateway "$GATEWAY" \
   --network "$CHAIN_NETWORK" --netuid "$NETUID" \
   --fallback-endpoints "$CHAIN_FALLBACK_ENDPOINTS_JSON" \
   --version-key "$VALIDATOR_VERSION_KEY" \
@@ -168,9 +165,8 @@ role points to the master gateway and has no gateway or challenge service.
 ## Verify before dispatch
 
 The validator reads `GET /v1/weights/latest`, obtains the corresponding binary
-bundle, then verifies the gateway signature (against `/v1/trust`, plus
-`--gateway-public` when given) and the gateway-served challenge profile. It checks protocol version, epoch and block hash,
-metagraph stakes and UID mapping, challenge keys and emission shares,
+bundle, then verifies the gateway-served challenge profile. It checks protocol version, epoch and block hash,
+metagraph stakes and UID mapping, emission shares,
 participant completeness, measurements and Merkle root. Frozen wire details
 are in the [bundle specification](../BUNDLE_SPEC.md).
 
@@ -186,7 +182,7 @@ a reorg or a changed/unsealed latest response prevents submission.
 | Verified sealed Match with `burn_outcome: true`, `uids: [0]`, `weights: [1.0]` | Submit the sealed burn to UID 0 |
 | Verified sealed vector allocating 100% to a nonzero owner or validator-permit UID | Refuse; this is not a burn |
 | Valid inputs (and agreeing peers where required), but gateway's final vector differs | Class A: submit independently recomputed weights and persist signed dissent |
-| A challenge has invalid leaf signatures, wrong leaf epoch or incomplete participants | Quarantine that challenge; submit only if surviving signed mass is at least 5000 bps |
+| A challenge has a wrong leaf epoch or a leaf hash that breaks the Merkle root or incomplete participants | Quarantine that challenge; submit only if surviving mass is at least 5000 bps |
 | Structural failure, unknown challenge, invalid Merkle root, own prior root for the epoch disagrees, or peer disagreement with `--peer-consensus` | Refuse |
 
 Under algorithm 2, quarantining Bounty retains Proof's absolute 7000 bps
@@ -250,7 +246,7 @@ The peer listener exposes:
 
 Consensus uses sr25519 signing context `base-sr25519-v1` and SCALE-encoded
 domain/payload vectors. Exact domains are `base-root-v1`, `base-dissent-v1`,
-`base-bundle-v1`, `base-rawweight-v1` (`base-trustroot-v1` is retired). Generic Substrate
+(`base-bundle-v1`, `base-rawweight-v1` and `base-trustroot-v1` are retired). Generic Substrate
 `wallet.sign()` signatures cannot replace these signatures.
 
 The Python metagraph projection uses chain-provided integer stakes. Validate

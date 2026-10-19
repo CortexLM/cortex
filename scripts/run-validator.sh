@@ -8,10 +8,9 @@
 #   export WALLET_NAME=validator WALLET_HOTKEY=default
 #   scripts/run-validator.sh                 # verify and submit every epoch
 #
-# The gateway (HTTPS) is the trust anchor; no signed trust files are read.
+# The gateway (HTTPS) is the trust anchor; nothing it serves is signed and no keys are pinned.
 # Required env to submit weights (not for --verify-only): WALLET_NAME, WALLET_HOTKEY.
-# Optional env: GATEWAY_PUBLIC (extra pin of the gateway sealing hotkey),
-#   GATEWAY (https://chain.joinbase.ai), NETUID (100),
+# Optional env: GATEWAY (https://chain.joinbase.ai), NETUID (100),
 #   NETWORK (finney), STATE_DB ($HOME/.cortex/validator.sqlite3),
 #   WALLET_PATH ($HOME/.bittensor/wallets), VERSION_KEY (default: live
 #   subnet weights_version read from the chain).
@@ -116,7 +115,6 @@ cmd=(cortex validator
   --gateway "$GATEWAY" --netuid "$NETUID" --network "$NETWORK"
   --version-key "${VERSION_KEY:-0}"
   --state-db "$STATE_DB")
-[[ -z "${GATEWAY_PUBLIC:-}" ]] || cmd+=(--gateway-public "$GATEWAY_PUBLIC")
 [[ -z "${WALLET_NAME:-}" || -z "${WALLET_HOTKEY:-}" ]] ||
   cmd+=(--wallet-name "$WALLET_NAME" --wallet-hotkey "$WALLET_HOTKEY" --wallet-path "$WALLET_PATH")
 if ((verify_only)); then cmd+=(--verify-only --once); elif ((once)); then cmd+=(--once); fi

@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FROZEN_SPECS = {
-    "docs/BUNDLE_SPEC.md": "6059c4f8f7917a4426c5ef88fb8464ff5c98bd5dc1bc82003eb8c6ce7cb04b7e",
+    "docs/BUNDLE_SPEC.md": "45f3b43f95c64678b2074bbd2a984f9743137ffbed71a8dfe14071602f98c12d",
 }
 SHARES = {"bounty": 2000, "proof": 8000}
 PROPORTIONAL_SHARES = {"bounty": 3000, "proof": 7000}
@@ -171,8 +171,6 @@ def check_challenge_profiles(root: Path) -> list[str]:
                     raise ValueError("duplicate id or invalid share")
                 if not CHALLENGE_ID.fullmatch(identifier):
                     raise ValueError("invalid challenge id")
-                if not re.fullmatch(r"[0-9a-f]{64}", row["public_key"]):
-                    raise ValueError("invalid challenge public key")
                 actual[identifier] = share
             if version >= 3:
                 if sum(actual.values()) != 10000:

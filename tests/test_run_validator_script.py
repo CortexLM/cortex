@@ -31,7 +31,6 @@ def env(tmp_path):
         "LATEST_JSON": str(tmp_path / "latest.json"),
         "WALLET_NAME": "coldwallet-secret",
         "WALLET_HOTKEY": "hotkey-secret",
-        "GATEWAY_PUBLIC": "5GatewayPinnedKey",
         "VERSION_KEY": "7",
     }
 
@@ -85,12 +84,17 @@ def test_dry_run_prints_masked_validator_command(env):
     assert "--wallet-name \\*\\*\\* --wallet-hotkey \\*\\*\\*" in command
     for expected in (
         "--netuid 100",
-        "--gateway-public 5GatewayPinnedKey",
         "--version-key 7",
         "--verify-only --once",
     ):
         assert expected in command
-    for removed in ("--owner-public", "--challenges", "--measurements", "minimum"):
+    for removed in (
+        "--owner-public",
+        "--challenges",
+        "--measurements",
+        "minimum",
+        "--gateway-public",
+    ):
         assert removed not in command
     assert "epoch=4242 sealed=true" in result.stderr
 

@@ -24,11 +24,10 @@ uv sync --locked --extra chain
    scripts/run-validator.sh --verify-only
    ```
 
-2. To submit, set the wallet. Optionally add the independently pinned gateway key.
+2. To submit, set the wallet.
 
    ```bash
    export WALLET_NAME=validator WALLET_HOTKEY=default
-   export GATEWAY_PUBLIC=<gateway hotkey pinned from an independent source>   # optional
    ```
 
 3. Run for real. It verifies and submits every epoch.
@@ -45,7 +44,6 @@ Environment variables:
 | --- | --- | --- |
 | `WALLET_NAME` | required to submit | Validator wallet name |
 | `WALLET_HOTKEY` | required to submit | Registered validator hotkey |
-| `GATEWAY_PUBLIC` | optional | Extra pin of the gateway sealing hotkey |
 | `GATEWAY` | `https://chain.joinbase.ai` | Gateway URL |
 | `NETUID` | `100` | Subnet |
 | `NETWORK` | `finney` | Bittensor network |
@@ -81,7 +79,6 @@ Then `cortex validator` takes over. It uses the owner public key and the signed 
 
 - The script refuses `master`, `challenge-supervisor` and `vm-host` as arguments, and exits with code 2.
 - It also refuses to run if `CORTEX_MASTER=1`, `BASE_MASTER_SECRETS_HOST_DIR` or `BASE_CHALLENGE_SECRETS_HOST_DIR` is set. Unset them first.
-- Pin `GATEWAY_PUBLIC` yourself. A key taken from the gateway proves nothing.
 - Keep wallet files private. `--dry-run` masks the wallet name and hotkey in its output.
 - Run `--verify-only` before the first real run.
 
@@ -93,9 +90,6 @@ No. Validators never run challenge containers or Proof evaluation, and they need
 **Do I need a GPU or a KVM host?**
 No. Those are for the master operator.
 
-**The script says `GATEWAY_PUBLIC is not set`.**
-Export the gateway hotkey you pinned from an independent source.
-
 **The script says the netuid doesn't match.**
 The gateway answered for a different subnet than `NETUID`. Check `GATEWAY` and `NETUID`.
 
@@ -103,7 +97,7 @@ The gateway answered for a different subnet than `NETUID`. Check `GATEWAY` and `
 Set `VERSION_KEY` yourself, or check that `NETWORK` is reachable.
 
 **Where does the challenge profile come from?**
-From the gateway at `GET /v1/trust` over HTTPS; no local files are needed. `--gateway-public` (`GATEWAY_PUBLIC` in the script) is an optional extra pin of the gateway sealing key.
+From the gateway at `GET /v1/trust` over HTTPS; no local files are needed.
 
 **Do I need a hotkey?**
 Only to submit weights. `scripts/run-validator.sh --verify-only` and the CLI `--verify-only` need no wallet; submitting needs `WALLET_NAME`/`WALLET_HOTKEY` (`--wallet-name`/`--wallet-hotkey`).

@@ -9,9 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `GET /v1/trust`: the gateway serves the challenge profile (challenge keys,
-  shares, measurements). Validators build their trust view from it over HTTPS;
-  `--gateway-public` stays as an optional extra pin.
+- `GET /v1/trust`: the gateway serves the challenge profile (ids, shares,
+  measurements). Validators build their trust view from it over HTTPS.
 - `deploy/compose/role-weight-setter.yml`: the only role with the validator
   hotkey and consensus seed; `role-validator.yml` is verify-only.
 - Challenge containers (`docs/CHALLENGES.md`): the master loads any Docker
@@ -27,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Wire format v2 (`protocol_version` 2, BREAKING): leaves and bundles carry no
+  signatures and no gateway key. `Leaf` ends at its score, `Bundle` is the body,
+  `ChallengeEntry` has no public key. The old v1 bundles and a gateway `state_dir`
+  created under v1 are refused: start the gateway on a new `state_dir`. Hash
+  integrity (Merkle root, metagraph root, block hash, recomputed final vector) is
+  unchanged, and so is the validator hotkey signature on the chain submission.
+- `POST /v1/weights/raw` requires the operator bearer (it was protected only by the
+  challenge leaf signature).
 - The validator hotkey (`--wallet-name`/`--wallet-hotkey`) is required only to
   submit weights or run `--peer-consensus`; `--verify-only` runs without it.
   `scripts/run-validator.sh` needs `WALLET_NAME`/`WALLET_HOTKEY` only to submit.
@@ -35,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Leaf and bundle signatures: `sign_leaf`, `challenge_sig`, `gateway_sig`,
+  `gateway_hotkey`, challenge leaf keys (`<id>.key`, `BASE_CHALLENGE_KEYS_DIR`),
+  the gateway sealing key (`gateway.key`, `BASE_GATEWAY_SK_FILE`), validator
+  `--gateway-public`/`GATEWAY_PUBLIC` and `cortex keygen`. The gateway and TLS are
+  the only anchor for what validators and miners read.
 - The trust-sign system: `cortex trust-sign`, `trust-verify`, owner keygen and
   ceremony, `.sig` files, `owner.pubkey`, validator `--owner-public`,
   `--challenges`, `--measurements`, `--minimum-*-version` and `BASE_GATEWAY_HOTKEY`,
