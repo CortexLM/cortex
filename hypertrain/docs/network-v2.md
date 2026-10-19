@@ -273,7 +273,8 @@ pinned auditors already proved the failure and the relay cannot produce its own
 signed custody. The fallback answers `rescued: false, disabled: true`; the
 `relay-disabled` id is `relay_id:assignment_epoch:key_id` and earlier evidence wins.
 While a grant is live, `upload-grant` returns the same signed grant for the same
-chunk list and 409 for another list.
+chunk list and 409 for another list, unless the master holds the original delta
+and it proves the new list: then the honest list gets a new grant.
 A relay whose granted chunks do not assemble to `delta_hash` answers 400
 `AssemblyMismatch`, records it on the upload and skips it in later recovery.
 Retention release waits for finality, disputes and vesting; signed extensions,

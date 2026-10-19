@@ -9740,6 +9740,7 @@ class ChallengeStore:
                 (run_id, "%:" + env.signer),
             ).fetchall()
             eligible = []
+            held = False
             for row in assignments:
                 assignment_env = relay_envelope.parse_envelope(json.loads(row["data"]))
                 a = RelayAssignment.model_validate(assignment_env.body)
@@ -9802,6 +9803,7 @@ class ChallengeStore:
                 )
                 if expected == chunk:
                     eligible.append(a)
+                    held = True
             if len(eligible) != 1:
                 raise ChallengeError(409, "one current signed relay assignment required")
             assignment = eligible[0]
@@ -9827,7 +9829,8 @@ class ChallengeStore:
             if chunk.size != commit["delta_bytes"]:
                 raise ChallengeError(422, "grant size differs from accepted commit")
             # One live grant per assignment: a retry gets the stored grant, another chunk
-            # list waits for expiry. Without the original, the list is miner-chosen.
+            # list waits for expiry. Without the original, the list is miner-chosen; with
+            # it, this list was just proven honest and replaces any other live grant.
             for (stored,) in self._db.execute(
                 "SELECT data FROM records_v2 WHERE run_id=? AND kind='grant' "
                 "AND json_extract(data,'$.body.w')=? AND json_extract(data,'$.body.hotkey')=? "
@@ -9845,6 +9848,8 @@ class ChallengeStore:
             ):
                 live = json.loads(stored)
                 if live["body"]["chunk_manifest_hash"] != chunk.chunk_manifest_hash():
+                    if held:
+                        continue
                     raise ChallengeError(409, "live upload grant binds another chunk list")
                 return live
             grant = UploadGrant(
