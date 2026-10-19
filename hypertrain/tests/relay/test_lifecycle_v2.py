@@ -10,6 +10,7 @@ import httpx
 import pytest
 from test_transport_v2 import MASTER, MINER, NEXT, H, Rig
 
+from hypertrain.data.store import CorruptObjectError, ObjectNotFound
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.relay_messages import (
     AcceptedUploadAck,
@@ -716,5 +717,85 @@ def test_recover_when_journal_holds_unassemblable_upload(tmp_path: Path) -> None
             assert not rig.store.store._path(H).exists()
             assert state.uploads[honest.digest()].receipt is not None
             assert bad.digest() not in completed
+
+    anyio.run(scenario)
+
+
+async def interrupted_pair(rig: Rig) -> tuple[UploadGrant, UploadGrant]:
+    # Two fully chunked uploads whose receipts were lost: recover() must complete both.
+    grants = []
+    for data, nonce, w in ((b"abc", "93" * 32, 1), (b"def", "94" * 32, 2)):
+        grant, manifest, raw, assignment, opened = rig.upload(data, nonce=nonce, w=w)
+        await rig.relay.accept(raw, manifest, assignment, opened)
+        await rig.put(grant, data)
+        grants.append(grant)
+
+    def interrupted(state) -> None:
+        for grant in grants:
+            state.uploads[grant.digest()].receipt = None
+
+    await rig.relay._change(interrupted)
+    return grants[0], grants[1]
+
+
+def failing_get(rig: Rig, sha: str, error: Exception) -> None:
+    original = rig.store.get
+
+    async def get(key, size, file):
+        if key == sha:
+            raise error
+        await original(key, size, file)
+
+    rig.store.get = get  # type: ignore[method-assign]
+
+
+def counting(relay) -> list[str]:
+    completed: list[str] = []
+    complete = relay.complete
+
+    async def counted(grant_hash: str):
+        completed.append(grant_hash)
+        return await complete(grant_hash)
+
+    relay.complete = counted
+    return completed
+
+
+def test_recover_continues_after_object_not_found(tmp_path: Path) -> None:
+    # Given: the first journal entry lost its chunk in the backing store.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            lost, honest = await interrupted_pair(rig)
+            failing_get(rig, hashlib.sha256(b"abc").hexdigest(), ObjectNotFound("gone"))
+            # When: a restarted relay recovers the whole journal.
+            relay = rig.new_relay()
+            await relay.recover()
+            # Then: the honest entry gets its receipt and the lost one is recorded.
+            state = await relay.state()
+            assert state.uploads[honest.digest()].receipt is not None
+            assert state.uploads[lost.digest()].receipt is None
+            assert state.uploads[lost.digest()].forward_error == "ObjectNotFound"
+
+    anyio.run(scenario)
+
+
+def test_recover_does_not_replay_corrupt_object_entry(tmp_path: Path) -> None:
+    # Given: the first journal entry's held chunk is rotten.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            rotten, honest = await interrupted_pair(rig)
+            failing_get(rig, hashlib.sha256(b"abc").hexdigest(), CorruptObjectError("bit rot"))
+            relay = rig.new_relay()
+            await relay.recover()
+            completed = counting(relay)
+            # When: recovery runs again.
+            await relay.recover()
+            # Then: the honest entry recovered once and the rotten one is never retried.
+            state = await relay.state()
+            assert state.uploads[honest.digest()].receipt is not None
+            assert state.uploads[rotten.digest()].forward_error == "CorruptObjectError"
+            assert completed.count(rotten.digest()) == 0
 
     anyio.run(scenario)
