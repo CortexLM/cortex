@@ -9,7 +9,7 @@ import httpx
 
 from hypertrain.beacon.core import BeaconError, BeaconUnavailable
 from hypertrain.beacon.drand import RELAYS, DrandQuicknet
-from hypertrain.beacon.push import Pusher, read_token
+from hypertrain.beacon.push import Pusher, read_token, redact_urls
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,18 +32,21 @@ def main(argv: list[str] | None = None) -> int:
 
     relays = tuple(args.relay or RELAYS)
     beacon = DrandQuicknet(relays)
+    shown = [redact_urls(r) for r in relays]
     try:
         info_ok = beacon.info_matches()
         br = beacon.latest()
     except BeaconUnavailable as e:
-        print(json.dumps({"live": "CENSORED(network)", "relays": relays, "error": str(e)}))
+        print(
+            json.dumps({"live": "CENSORED(network)", "relays": shown, "error": redact_urls(str(e))})
+        )
         return 3
     except BeaconError as e:
-        print(json.dumps({"live": "FAIL", "relays": relays, "error": str(e)}))
+        print(json.dumps({"live": "FAIL", "relays": shown, "error": redact_urls(str(e))}))
         return 1
     out = {
         "live": "PASS" if info_ok else "FAIL",
-        "relays": relays,
+        "relays": shown,
         "chain_info_matches_pinned": info_ok,
         "round": br.round,
         "randomness": br.randomness,
@@ -58,7 +61,7 @@ def _http_url(p: argparse.ArgumentParser, flag: str, value: str) -> httpx.URL:
     try:
         url = httpx.URL(value)
     except httpx.InvalidURL as e:
-        p.error(f"{flag}: {e}")
+        p.error(f"{flag}: {redact_urls(str(e))}")
     if url.scheme not in ("http", "https") or not url.host:
         p.error(f"{flag} must be an http(s) URL")
     return url

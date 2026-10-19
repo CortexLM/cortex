@@ -32,12 +32,14 @@ _TOKEN = re.compile(rb"[A-Za-z0-9._~-]+")
 # Userinfo runs to the last `@` before the path: a password may hold quotes or `@`.
 _USERINFO = re.compile(r"(\w[\w+.-]*://)[^/\s]*@")
 _QUERY = re.compile(r"[?#][^\s'\"]*")
+# A path segment (not a `//host`) of >= 24 token chars is taken for a credential (`/key/<apikey>`).
+_PATH_TOKEN = re.compile(r"(?<=[^/]/)[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_-])")
 # A rejected (429) or cut-off (408) POST was not applied, so replaying it is safe.
 _RETRY = frozenset({408, 429})
 
 
 def redact_urls(text: str) -> str:
-    return _QUERY.sub("", _USERINFO.sub(r"\1***@", text))
+    return _PATH_TOKEN.sub("***", _QUERY.sub("", _USERINFO.sub(r"\1***@", text)))
 
 
 class ServiceError(Exception):

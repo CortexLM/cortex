@@ -277,3 +277,36 @@ def test_failure_message_redacts_relay_credentials(wire: Any, cli: Any) -> None:
     assert (rc, out) == (1, "")
     assert "failure 1/" in err and "***@relay.example/x" in err
     assert "SSW" not in err and "SECRETKEY" not in err and "SECFRAG" not in err
+
+
+PATH_SECRET = "sk_" + "A1b2C3d4E5f6G7h8I9j0K1l2"
+
+
+def test_failure_message_redacts_relay_path_credential(wire: Any, cli: Any) -> None:
+    relay = f"https://relay.example/key/{PATH_SECRET}"
+    wire(Service(), relay_client({"relay.example": 503, "b.test": V0}))
+    rc, out, err = cli("--once", relays=["--relay", relay, "--relay", "https://b.test"])
+    assert (rc, out) == (1, "")
+    assert "failure 1/" in err and "https://relay.example/key/***" in err
+    assert PATH_SECRET not in err and PATH_SECRET[:8] not in err
+
+
+def test_live_check_redacts_relays_and_error(wire: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    relay = f"https://u:PASSW@relay.example/{PATH_SECRET}?apikey=SECRETKEY"
+    wire(Service(), relay_client({"relay.example": 503, "b.test": 503}))
+    rc = beacon_cli.main(["check", "--live", "--relay", relay, "--relay", "https://b.test"])
+    out = json.loads(capsys.readouterr().out)
+    assert (rc, out["live"]) == (3, "CENSORED(network)")
+    assert out["relays"] == ["https://***@relay.example/***", "https://b.test"]
+    assert "relay.example/***" in out["error"] and "503" in out["error"]
+    text = json.dumps(out)
+    assert PATH_SECRET not in text and "PASSW" not in text and "SECRETKEY" not in text
+
+
+def test_redact_urls_keeps_short_segments_and_plain_text() -> None:
+    text = f"GET https://h.test/v1/{PATH_SECRET}/latest failed; see /{PATH_SECRET[:23]}"
+    assert push.redact_urls(text) == (
+        f"GET https://h.test/v1/***/latest failed; see /{PATH_SECRET[:23]}"
+    )
+    host = "https://a-relay-hostname-of-24-chars.test/x"
+    assert push.redact_urls(host) == host
