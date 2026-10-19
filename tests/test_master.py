@@ -702,6 +702,23 @@ async def test_emit_window_refuses_intake(master):
     assert all(leaf.score == NoScore(NoScoreReason.CHALLENGE_INTERNAL) for leaf in leaves)
 
 
+async def test_rotated_intake_bearer_is_rechecked_at_the_32_byte_boundary(master):
+    from cortex.gateway import leaf_request
+
+    runtime, chain = master.runtime, master.chain
+    leaf = leaf_request(Leaf(b"bounty", chain.rows[0].hotkey, 12, Score(7)))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app()), base_url="https://master"
+    ) as client:
+        statuses = []
+        for value in ("i" * 31, "i" * 32):
+            master.config.intake_token_file.write_text(value)
+            headers = {"authorization": f"Bearer {value}"}
+            response = await client.post("/v1/weights/raw", json=leaf, headers=headers)
+            statuses.append(response.status_code)
+    assert statuses == [503, 202]
+
+
 async def test_a_failed_seal_reopens_intake_for_its_epoch(master):
     from cortex.gateway import leaf_request
 
