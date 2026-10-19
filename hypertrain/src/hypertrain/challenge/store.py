@@ -9959,6 +9959,21 @@ class ChallengeStore:
                 grant=grant,
                 received_before=deadline,
             )
+            # A rerun must not challenge the relay again: it refuses a second live
+            # retrieval of the same object, and the first acceptance is authoritative.
+            accepted: list[dict[str, Any]] = [
+                json.loads(stored)
+                for (stored,) in self._db.execute(
+                    "SELECT data FROM records_v2 WHERE run_id=? AND kind='master-acceptance' "
+                    "AND json_extract(data,'$.body.w')=? AND json_extract(data,'$.body.hotkey')=?",
+                    (run_id, grant.w, grant.hotkey),
+                )
+            ]
+            for stored in accepted:
+                if stored["body"]["receipt_hash"] == receipt.digest():
+                    return stored
+            if accepted:
+                raise ChallengeError(409, "RELAY_RECEIPT_CONFLICT")
             assignment = self._record_v2(run_id, "relay-assignment", f"{grant.w}:{grant.hotkey}")[
                 "body"
             ]
@@ -9989,17 +10004,24 @@ class ChallengeStore:
         capability = base64.b64encode(
             canonicalize(self._record_v2(run_id, "grant", grant.digest()))
         ).decode()
-        custody_response = await client.get(
-            spec.https_url + f"/v1/uploads/{grant.digest()}/acks",
-            headers={"X-Upload-Grant": capability},
-        )
-        custody_response.raise_for_status()
-        custody = custody_response.json()
-        relay = RelayClient(registry, client)
-        with spool() as payload:
-            response = await relay.retrieval(request_raw, payload, relay_public=env.signer)
-            payload.seek(0)
-            original = payload.read()
+        import httpx
+
+        try:
+            custody_response = await client.get(
+                spec.https_url + f"/v1/uploads/{grant.digest()}/acks",
+                headers={"X-Upload-Grant": capability},
+            )
+            custody_response.raise_for_status()
+            custody = custody_response.json()
+            relay = RelayClient(registry, client)
+            with spool() as payload:
+                response = await relay.retrieval(request_raw, payload, relay_public=env.signer)
+                payload.seek(0)
+                original = payload.read()
+        except httpx.HTTPStatusError as exc:
+            raise ChallengeError(
+                502, f"relay refused master retrieval: HTTP {exc.response.status_code}"
+            ) from exc
         with self._tx():
             current = self._fresh_v2(
                 manifest, f"relay-accept:{receipt.digest()}:{self._now(self._db)}"
