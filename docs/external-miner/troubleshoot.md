@@ -15,7 +15,7 @@ files, provider keys, Bounty sessions or private artifacts in diagnostics.
 | `Bittensor hotkey unavailable` | Check wallet name, hotkey name, wallet root and the password file; loading does not create keys |
 | Encrypted hotkey password file required | Add miner `--wallet-password-file` before the action; the miner does not prompt interactively |
 | Credential file unavailable or not private | Use a regular, non-symlink file with no group/other permissions, such as `0600` |
-| Proof owner public key required | Add miner `--proof-public` with the independently pinned Proof key, not the gateway key |
+| Proof owner public key required | Add miner `--proof-public` with the independently pinned Proof topic key (the gateway has no key) |
 | Invalid Proof signature from `wallet.sign()` | Proof needs Cortex context `base-sr25519-v1`, domain `base-proof-submit-v1`; use the Python wallet signer |
 | HTTP connection failure | Verify the selected gateway URL and TLS; there is no implicit deployment URL |
 

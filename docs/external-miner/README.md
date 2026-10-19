@@ -65,8 +65,8 @@ Place these options before the miner action. Password, development seed, BYOK
 and Bounty session files must be private (for example mode `0600`) and must not
 be symlinks. Wallet loading never creates a wallet or rewrites its key files.
 Never put a mnemonic, private key, session token or provider credential in Git
-or a support ticket. Public challenge signing keys are verification material,
-not miner secrets.
+or a support ticket. Challenge leaves are unsigned (wire v2); the only public key
+a miner pins is the Proof topic key (`--proof-public`).
 
 ## Support
 

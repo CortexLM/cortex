@@ -19,7 +19,7 @@ Start here: [Cortex ecosystem](ecosystem.md) and [Validator quickstart](validato
 ## Run a validator
 
 - [Validator quickstart](validator-quickstart.md): one script, verify-only mode and FAQ.
-- [Validator guide](external-miner/validators.md): the underlying CLI and trust files.
+- [Validator guide](external-miner/validators.md): the underlying CLI, the gateway-served challenge profile and preflight.
 
 ## Mine
 

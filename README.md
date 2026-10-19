@@ -119,7 +119,7 @@ scripts/run-validator.sh --verify-only   # one verification, never submits
 scripts/run-validator.sh                 # verify and submit every epoch
 ```
 
-The script checks the gateway answer, reads the trust files from `config/` and starts `cortex validator`. It refuses master-only commands and master environments. Flags are `--verify-only`, `--once`, `--dry-run` and `--help`. Full walkthrough: [docs/validator-quickstart.md](docs/validator-quickstart.md).
+The script checks the gateway answer and starts `cortex validator`, which reads the unsigned challenge profile from the gateway (`GET /v1/trust`, HTTPS); no local trust file is read. It refuses master-only commands and master environments. Flags are `--verify-only`, `--once`, `--dry-run` and `--help`. Full walkthrough: [docs/validator-quickstart.md](docs/validator-quickstart.md).
 
 ## Quickstart for developers
 

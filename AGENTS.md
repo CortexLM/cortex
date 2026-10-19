@@ -16,7 +16,7 @@ operator registry and records its leaves.
 | `bounty` | [CortexLM/bounty](https://github.com/CortexLM/bounty) container | useful vulnerability reports, scored from the CortexLM/backend public feed |
 | `opentype` | [OpentypeAI/challenge](https://github.com/OpentypeAI/challenge) container | exact-gold typed-decision duels on DiffusionGemma weights |
 
-Shares always sum to 10,000 basis points. Algorithm 1 is the legacy signed
+Shares always sum to 10,000 basis points. Algorithm 1 is the legacy
 bounty/proof 2,000/8,000 profile; algorithm 2 is bounty/proof 3,000/7,000
 (document version >=2); algorithm 3 (document version >=3) admits any 1..64
 unique ids and pays each challenge `share * min(sum(leaves), 10^12) / 10^12`.

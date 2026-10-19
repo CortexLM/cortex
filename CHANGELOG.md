@@ -30,13 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hotkey and consensus seed; `role-validator.yml` is verify-only.
 - Challenge containers (`docs/CHALLENGES.md`): the master loads any Docker
   challenge from an operator registry, polls its authenticated `get_weights`
-  once per epoch, signs its leaves and proxies its public routes under
+  once per epoch, records its leaves and proxies its public routes under
   `/challenge/<id>/`. `cortex challenge-supervisor` pulls `stable`/`edge`/pinned
   GHCR images, checks labels and GitHub build provenance, canaries without
   secrets, updates and rolls back automatically. It alone holds the Docker socket.
-- Owner-activated algorithm 3 (trust document version >=3): 1..64 challenges,
+- Algorithm 3 (challenge profile version >=3): 1..64 challenges,
   each paying `share * min(sum(leaves), 10^12) / 10^12`, remainder burned.
-  Validators need no change beyond the release; they recompute signed leaves.
+  Validators need no change beyond the release; they recompute the unsigned leaves.
 - `GET /v1/metagraph/latest` serves the sealed hotkey map to challenges.
 - `cortex validator-watermark-reset`: operator-only, local repair that lowers a
   wrongly advanced `challenges_version`, `measurements_version` or `epoch`
@@ -83,7 +83,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emission. Proof retains 70%; unused Bounty mass burns to UID0. The legacy
   signed 20/80 profile, algorithm 1 and historical sealed bytes remain intact.
   Activation requires coordinated gateway/validator upgrades and an offline
-  owner signature over the new profile and epoch.
+  owner signature over the new profile and epoch (superseded: the profile is now
+  unsigned and activation is a version bump in `config/challenges.toml`).
 - Bounty-only launch mode with a revision-pinned, fully paginated CortexLM
   backend feed, bounded public writes and readiness checks that fail closed.
 - Validator production preflight, resilient bounded master/validator Bittensor RPC failover and
@@ -108,7 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Initial production operation keeps the signed 2000/8000 Bounty/Proof split;
-  unwired Proof burns its share instead of scaling Bounty to 100%.
+  unwired Proof burns its share instead of scaling Bounty to 100%. (Superseded:
+  the profile is no longer signed.)
 - **BREAKING:** Proof topic and VM JSON documents use schema version 2. Operators
   must generate compatible signed topics and guest images; old JSON signatures
   are not reinterpreted. Frozen bundle and signature domains remain unchanged.
@@ -126,6 +128,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Historical bundle-root lookup retains accepted trust profiles across rotation
   and restart; current weights still require the current profile. The unsigned
   activation template requires an explicit epoch before it can be signed.
+  (Superseded: the profile is no longer signed.)
 - Bounty reconstructs a backend-capped leaderboard from the complete report
   snapshot, avoiding a permanent burn after the public log exceeds 1,000 hotkeys.
 - Bounty adjudication rejects missing or misplaced severity, and external
