@@ -29,6 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   separate directory without `consensus.key`. `scripts/check_deploy.py
   --validator-env deploy/env/python-validator.env` refuses one path for both
   roles; `--check-examples` also refuses one rendered state volume.
+- A `measurements_version` or `challenges_version` above 1000 is refused. A
+  gateway `state_dir` that stored such a profile fails with `corrupt stored
+  trust profile`, and a validator journal whose watermark holds such a value
+  refuses every honest profile with `consensus rollback refused`. Start the
+  gateway on a fresh `state_dir` (wire v2 already requires one); start the
+  validator on a fresh state database or lower the watermark with `cortex
+  validator-watermark-reset`.
 
 ### Upgrade (BREAKING for masters)
 
@@ -87,7 +94,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `POST /v1/weights/raw` answers 409 `epoch sealing in progress` while the
   master replaces a completed epoch's challenge leaves and seals it.
 - A challenge profile whose `measurements_version` exceeds
-  `MAX_MEASUREMENTS_VERSION` (1000) is refused by the master and by validators
+  `MAX_MEASUREMENTS_VERSION` (1000) or whose `challenges_version` exceeds
+  `MAX_CHALLENGES_VERSION` (1000) is refused by the master and by validators
   before the rollback watermark moves.
 
 ### Removed
