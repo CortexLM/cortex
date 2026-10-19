@@ -56,3 +56,31 @@ def test_repository_default_profile_loads():
         challenges_path=root / "challenges.toml", measurements_path=root / "measurements.toml"
     )
     assert sum(value for _, value in trust.shares) == 10000
+
+
+@pytest.mark.parametrize(
+    ("challenges", "measurements"),
+    [
+        (CHALLENGES.format(epoch='"CHOOSE_ACTIVATION_EPOCH"'), "version = 2\n"),
+        (CHALLENGES.format(epoch="0").replace("version = 3", 'version = "3"'), "version = 2\n"),
+    ],
+)
+def test_master_turns_a_placeholder_profile_into_a_clean_503(tmp_path, challenges, measurements):
+    from cortex.config import MasterConfig
+    from cortex.errors import ServiceError
+
+    (tmp_path / "c.toml").write_text(challenges)
+    (tmp_path / "m.toml").write_text(measurements)
+    config = MasterConfig(
+        netuid=541,
+        state_dir=tmp_path,
+        challenges_file=tmp_path / "c.toml",
+        measurements_file=tmp_path / "m.toml",
+        proof_seed_file=tmp_path / "unused",
+        operator_token_file=tmp_path / "unused",
+        intake_token_file=tmp_path / "unused",
+        challenge_secrets_dir=tmp_path,
+    )
+    with pytest.raises(ServiceError, match="challenge profile unavailable") as refused:
+        config.challenge_profile(0)
+    assert refused.value.status == 503
