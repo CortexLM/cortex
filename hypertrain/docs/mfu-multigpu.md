@@ -78,3 +78,27 @@ host with `pcie_bw` >= 50.
   reduce-scatter-shaped owner reduction and a larger micro_batch at dp4 are the next steps.
 - **Elementwise work.** In the compiled trace, CUDA time outside GEMM/attention/NCCL (fp32 adds,
   fills, casts, checkpoint recompute) is still the largest bucket.
+
+## All GPU proofs on one host (`--profile proofs`)
+
+One 2x RTX 5090 instance, one upload, one DELETE and one parsed absence proof at the end. The
+image is the digest-pinned `IMAGE` of `scripts/vast_e2e.py`; Vast pulls it before ssh is ready,
+so the per-step seconds in `out/steps.tsv` (name, rc, seconds) exclude the pull.
+
+```bash
+uv run --frozen python scripts/vast_e2e.py --profile proofs --key-file /var/lib/openbot/.vast-key \
+  --max-usd 8 --max-minutes 45 --dry-run
+```
+
+`--dry-run` prints the chosen offer, then the step list (`PROOF_PLAN`), the pytest node ids
+(`PROOF_TESTS`), the caps and the worst-case cost, without creating anything. Steps: the
+gpu-e2e flow (network round, auditor replay, repeat; `HT_ATTN_BACKEND=math` because the fixture
+model is fp32 with head_dim 4), then with `HT_ATTN_BACKEND` unset: `select_backend` must pick
+sdpa-flash, the GPU-only tests (a skip fails), and a 1B bf16 dp2 round plus replay through
+`run_mfu_dist.py`, checked by `check_gpu_evidence.py --kind mfu` and `attention_backend ==
+sdpa-flash`. `--boot-retries` defaults to 0 here.
+
+Drivers: the default is `--any-driver`, and the offer quote and `harness-result.json` carry
+`driver_qualified` (false when the driver is not in `scripts/genuine_cuda_ci.py` `DRIVERS`, so
+no bitwise claim is made). `--eight-gpu-qualified` rents 8x RTX 5090 with a qualified driver
+only; nothing else selects 8 GPUs for this profile.

@@ -17,10 +17,10 @@ export PET_LOG_DIR="$OUT/torchelastic" PET_TEE=3
 export HT_ATTN_BACKEND=${HT_ATTN_BACKEND:-math}
 
 step() {
-  local name=$1; shift
+  local name=$1 t0=$SECONDS; shift
   "$@" >"$OUT/$name.log" 2>&1
   local rc=$?
-  printf '%s\t%s\n' "$name" "$rc" >>"$OUT/steps.tsv"
+  printf '%s\t%s\t%s\n' "$name" "$rc" "$((SECONDS - t0))" >>"$OUT/steps.tsv"
   return $rc
 }
 : >"$OUT/steps.tsv"
@@ -48,8 +48,9 @@ if [ "$BACKEND" = cuda ]; then
   if "$PY" -c "import hypertrain.miner.admission as a; assert hasattr(a, 'main')" 2>/dev/null; then
     step selfcheck "$PY" -m hypertrain.miner.admission selfcheck
   fi
-  grep -rlE "skipif\([^)]*cuda|requires_cuda|mark\.cuda|cuda\.is_available\(\)" tests \
-    --include='test_*.py' | sort >"$OUT/cuda_test_files.txt" || true
+  # --profile proofs runs its explicit list (gpu_pytest below) instead of this discovery.
+  [ -n "${HT_E2E_PROOFS:-}" ] || grep -rlE "skipif\([^)]*cuda|requires_cuda|mark\.cuda|cuda\.is_available\(\)" \
+    tests --include='test_*.py' | sort >"$OUT/cuda_test_files.txt" || true
   if [ -s "$OUT/cuda_test_files.txt" ]; then
     step cuda_pytest "$PY" -m pytest -q -p no:cacheprovider $(cat "$OUT/cuda_test_files.txt")
   fi
@@ -211,18 +212,51 @@ print(json.dumps({"ok": result["ok"]}))
 sys.exit(0 if result["ok"] else 1)
 PYEOF
 
+# --profile proofs (scripts/vast_e2e.py PROOF_STEPS / PROOF_TESTS): the GPU-only tests and the
+# production attention path, i.e. HT_ATTN_BACKEND unset so select_backend picks sdpa-flash on
+# sm_120. network_e2e above stays on math (fixture model: fp32, head_dim 4).
+gpu_pytest() {
+  # HT_GENUINE_CUDA_INDEX is the CUDA device index for these tests; a skip is a failure.
+  [ -n "${HT_E2E_PROOF_TESTS:-}" ] || return 2
+  env -u HT_ATTN_BACKEND HT_GENUINE_CUDA_INDEX=0 "$PY" -m pytest -rs -p no:cacheprovider \
+    --junitxml="$OUT/gpu-junit.xml" $HT_E2E_PROOF_TESTS || return
+  ! grep -qi skipped "$OUT/gpu_pytest.log" || return 12
+}
+mfu_dp2_check() {
+  "$PY" scripts/check_gpu_evidence.py --kind mfu "$OUT/mfu-dp2-flash.json" || return
+  "$PY" -c "import json, sys; e = json.load(open(sys.argv[1])); print(e['attention_backend'])
+assert e['attention_backend'] == 'sdpa-flash' and e['replay_match'] is True" "$OUT/mfu-dp2-flash.json"
+}
+if [ "$BACKEND" = cuda ] && [ -n "${HT_E2E_PROOFS:-}" ]; then
+  step attn_select env -u HT_ATTN_BACKEND "$PY" -c "import hypertrain.trainer, torch
+from hypertrain.trainer.attention import select_backend
+b = select_backend(torch.device('cuda', 0))
+print(b, torch.__version__, torch.cuda.get_device_capability(0))
+assert b == 'sdpa-flash', b"
+  step gpu_pytest gpu_pytest
+  # 1B bf16 dp2 round + replay (head_dim 128): sdpa-flash inside real training, bitwise replay.
+  step mfu_dp2_flash env -u HT_ATTN_BACKEND "$PY" -m torch.distributed.run --standalone \
+    --nproc-per-node 2 scripts/run_mfu_dist.py --profile mfu-dense-1b-dp2 --device cuda \
+    --reduction zero2o --act-ckpt --nccl-pcie --warmup 1 --out "$OUT/mfu-dp2-flash.json"
+  step mfu_dp2_check mfu_dp2_check
+fi
+
 "$PY" - "$OUT" "$BACKEND" <<'PYEOF'
-import json, sys
+import json, os, sys
 from pathlib import Path
 out = Path(sys.argv[1])
-steps = dict(line.split("\t") for line in (out / "steps.tsv").read_text().splitlines() if line)
-steps = {k: int(v) for k, v in steps.items()}
+rows = [line.split("\t") for line in (out / "steps.tsv").read_text().splitlines() if line]
+steps = {r[0]: int(r[1]) for r in rows}
+seconds = {r[0]: int(r[2]) for r in rows}
 e2e = json.loads((out / "e2e.json").read_text()) if (out / "e2e.json").exists() else None
 files = (out / "cuda_test_files.txt")
 required = ["network_e2e"] + (["nvidia_smi"] if sys.argv[2] == "cuda" else [])
+if sys.argv[2] == "cuda":
+    required += os.environ.get("HT_E2E_PROOFS", "").split()
 ok = all(steps.get(k) == 0 for k in required) and bool(e2e and e2e["ok"]) and all(
     steps[k] == 0 for k in ("selfcheck", "cuda_pytest") if k in steps)
-json.dump({"ok": ok, "backend": sys.argv[2], "steps": steps, "e2e": e2e,
+json.dump({"ok": ok, "backend": sys.argv[2], "steps": steps, "seconds": seconds, "e2e": e2e,
+           "required": required,
            "cuda_test_files": files.read_text().split() if files.exists() else None},
           open(out / "result.json", "w"), indent=2, sort_keys=True)
 print("RESULT ok=%s steps=%s" % (ok, steps))

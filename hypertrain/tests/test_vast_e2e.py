@@ -660,6 +660,94 @@ def test_miner_cycle_profile_uses_new_remote_script(fake, tmp_path, capsys, mfu_
     assert json.loads(capsys.readouterr().out)["chosen_offer"]["id"] == 13
 
 
+def test_proofs_dry_run_prints_plan_with_unqualified_driver(fake, tmp_path, capsys, mfu_globals):
+    offers = fake.offers
+    fake.offers = lambda: [o | {"driver_version": "610.57.04"} for o in offers()]
+    rc, _, _ = run(fake, tmp_path, "--profile", "proofs", "--dry-run", minutes="45", usd="8")
+    chosen, plan = (json.loads(x) for x in capsys.readouterr().out.splitlines())
+    assert rc == 0 and not any(m == "PUT" for m, _ in fake.calls)
+    assert (
+        chosen["chosen_offer"]["id"] == 12 and chosen["chosen_offer"]["driver_qualified"] is False
+    )
+    assert plan["driver_qualified"] is False and plan["caps"]["drivers"] == "any"
+    assert [s.split(":")[0] for s in plan["steps"]] == [n for n, _ in vast.PROOF_PLAN]
+    assert plan["tests"] == list(vast.PROOF_TESTS) and "@sha256:" in plan["image"]
+    assert plan["caps"]["boot_retries"] == 0 and plan["caps"]["num_gpus"] == 2
+    assert f"HT_E2E_PROOFS={' '.join(vast.PROOF_STEPS)}" in plan["remote_env"]
+    assert plan["worst_case_usd"] == chosen["chosen_offer"]["worst_case_usd"]
+
+
+def test_proofs_eight_gpu_only_on_explicit_flag_and_qualified_driver(
+    fake, tmp_path, capsys, mfu_globals
+):
+    base = fake.offers()[1] | {"num_gpus": 8}
+    fake.offers = lambda: [
+        base | {"id": 50, "dph_total": 3.0, "driver_version": "610.57.04"},
+        base | {"id": 51, "dph_total": 4.0, "driver_version": "580.178.04"},
+    ]
+    with pytest.raises(SystemExit):
+        vast.parse([*ARGS, "--profile", "proofs", "--num-gpus", "8"])
+    with pytest.raises(SystemExit):
+        vast.parse([*ARGS, "--profile", "proofs", "--eight-gpu-qualified", "--any-driver"])
+    rc, _, _ = run(
+        fake,
+        tmp_path,
+        "--profile",
+        "proofs",
+        "--eight-gpu-qualified",
+        "--dry-run",
+        minutes="45",
+        usd="8",
+    )
+    chosen, plan = (json.loads(x) for x in capsys.readouterr().out.splitlines())
+    assert rc == 0 and fake.queries[-1]["num_gpus"] == {"eq": 8}
+    assert chosen["chosen_offer"]["id"] == 51 and plan["driver_qualified"] is True
+
+
+def test_proofs_run_records_driver_qualified_false(fake, tmp_path, mfu_globals):
+    offers = fake.offers
+    fake.offers = lambda: [o | {"driver_version": "610.57.04"} for o in offers()]
+    rc, _, _ = run(fake, tmp_path, "--profile", "proofs", minutes="45", usd="8")
+    result = json.loads((tmp_path / "ev/harness-result.json").read_text())
+    assert rc == 0 and result["driver_qualified"] is False and result["absent"] is True
+
+
+def test_driver_qualified_follows_the_fallback_host(fake, tmp_path, mfu_globals):
+    offers = fake.offers
+    fake.offers = lambda: [
+        o | {"driver_version": "580.178.04" if o["id"] == 12 else "610.57.04"} for o in offers()
+    ]
+
+    class StuckFirst(Scripted):
+        def ssh_probe(self, host, port):
+            return len(fake.asks) > 1  # qualified cheapest host never answers ssh
+
+    rc, _, _ = run(
+        fake,
+        tmp_path,
+        "--profile",
+        "proofs",
+        "--boot-timeout",
+        "0.3",
+        "--boot-retries",
+        "1",
+        harness=StuckFirst,
+        minutes="45",
+        usd="8",
+    )
+    result = json.loads((tmp_path / "ev/harness-result.json").read_text())
+    assert rc == 0 and fake.asks == ["/api/v0/asks/12/", "/api/v0/asks/11/"]
+    assert result["driver_qualified"] is False
+
+
+def test_proof_steps_and_tests_exist():
+    remote = (vast.ROOT / "scripts/vast_e2e_remote.sh").read_text()
+    assert all(f"step {name} " in remote for name, _ in vast.PROOF_PLAN)
+    for node in vast.PROOF_TESTS:
+        path, name = node.split("::")
+        assert f"def {name}(" in (vast.ROOT / path).read_text(), node
+
+
 def test_remote_env_must_be_key_value(tmp_path):
     with pytest.raises(SystemExit):
         vast.parse(["--key-file", "k", "--max-usd", "1", "--max-minutes", "1", "--remote-env", "X"])

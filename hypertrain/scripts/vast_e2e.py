@@ -162,6 +162,26 @@ QUALIFIED_DRIVERS: tuple[str, ...] = tuple(_ci.DRIVERS)
 ALLOWED_DRIVERS: tuple[str, ...] | None = QUALIFIED_DRIVERS  # None: --any-driver
 
 
+# --profile proofs: every GPU proof on ONE host, in this order (steps.tsv rows). The first four
+# are the gpu-e2e flow (uv_install only if pip fails); PROOF_STEPS are required to pass.
+PROOF_STEPS = ("attn_select", "gpu_pytest", "mfu_dp2_flash", "mfu_dp2_check")
+PROOF_PLAN = (
+    ("nvidia_smi", "nvidia-smi"),
+    ("pip_install", "pip install --no-deps -e . (uv_install fallback)"),
+    ("selfcheck", "python -m hypertrain.miner.admission selfcheck"),
+    ("network_e2e", "join-v2, 2 chained rounds, auditor replay, repeat; HT_ATTN_BACKEND=math"),
+    ("attn_select", "HT_ATTN_BACKEND unset: select_backend(cuda:0) == sdpa-flash"),
+    ("gpu_pytest", "HT_ATTN_BACKEND unset, HT_GENUINE_CUDA_INDEX=0, any skip fails: PROOF_TESTS"),
+    ("mfu_dp2_flash", "HT_ATTN_BACKEND unset: torchrun 2 ranks, 1B dp2 bf16, run + replay"),
+    ("mfu_dp2_check", "check_gpu_evidence --kind mfu; attention_backend == sdpa-flash"),
+)
+PROOF_TESTS = (
+    "tests/trainer/test_attention_qualified.py::test_qualified_backend_repeats_bitwise",
+    "tests/trainer/test_attention.py::test_backward_bitwise",
+    "tests/trainer/test_optim_fused.py::test_step_has_no_host_sync",
+)
+
+
 def offer_query() -> dict[str, Any]:
     return {
         "gpu_name": {"eq": "RTX 5090"},
@@ -330,6 +350,9 @@ class Harness:
             )
         }
         quote["worst_case_usd"] = str(cost.quantize(Decimal("0.0001")))
+        # Bitwise replay is claimed only on these drivers; --any-driver runs must say so.
+        quote["driver_qualified"] = best.get("driver_version") in QUALIFIED_DRIVERS
+        self.quote = quote
         self.api.log("offer_chosen", seen=len(offers), eligible=len(fit), quote=quote)
         print(
             json.dumps(
@@ -352,6 +375,8 @@ class Harness:
         if self.cancel.is_set():
             raise RuntimeError("cancelled before create")
         self.api.log("create_intent", offer_id=offer["id"], label=self.label, image=IMAGE)
+        # Per rented offer: boot() may fall back to an offer with another driver.
+        self.result["driver_qualified"] = offer.get("driver_version") in QUALIFIED_DRIVERS
         self.create_attempted = True
         r = self.api.call(
             "PUT",
@@ -660,6 +685,27 @@ class Harness:
         """Re-list each host boot() deleted: its absence was seen once, the run proves it last."""
         return all([self.confirm_absent(i, label) for i, label in self.retired])  # list: check all
 
+    def plan(self) -> dict[str, Any]:
+        return {
+            "image": IMAGE,
+            "remote_script": self.a.remote_script,
+            "remote_env": self.a.remote_env,
+            "steps": [f"{name}: {what}" for name, what in PROOF_PLAN],
+            "tests": list(PROOF_TESTS),
+            "caps": {
+                "max_usd": self.a.max_usd,
+                "max_minutes": self.a.max_minutes,
+                "cleanup_reserve_s": self.a.cleanup_reserve,
+                "boot_timeout_s": self.a.boot_timeout,
+                "boot_retries": self.a.boot_retries,
+                "instances": 1,
+                "num_gpus": NUM_GPUS,
+                "drivers": "any" if ALLOWED_DRIVERS is None else list(ALLOWED_DRIVERS),
+            },
+            "worst_case_usd": self.quote["worst_case_usd"],
+            "driver_qualified": self.quote["driver_qualified"],
+        }
+
     def watchdog(self) -> None:
         if not self.cancel.wait(max(0.0, self.deadline - time.time())):
             self.api.log("watchdog_fired", deadline=self.deadline)
@@ -669,6 +715,8 @@ class Harness:
     def run(self) -> int:
         offer = self.admit()
         if self.a.dry_run:
+            if self.a.profile == "proofs":
+                print(json.dumps(self.plan(), sort_keys=True))
             return 0
         dog = threading.Thread(target=self.watchdog, daemon=True)
         dog.start()
@@ -715,7 +763,9 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
         default=900.0,
         help="seconds a host may take to become ssh-ready before it is replaced",
     )
-    p.add_argument("--boot-retries", type=int, default=2, help="replacement hosts to try")
+    p.add_argument(
+        "--boot-retries", type=int, help="replacement hosts to try (default 2; proofs: 0)"
+    )
     p.add_argument(
         "--exclude-offer",
         type=int,
@@ -728,10 +778,12 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--absence-attempts", type=int, default=12)
     p.add_argument(
         "--profile",
-        choices=("gpu-e2e", "miner-flow", "mfu", "miner-cycle", "gpu8"),
+        choices=("gpu-e2e", "miner-flow", "mfu", "miner-cycle", "gpu8", "proofs"),
         default="gpu-e2e",
         help="gpu-e2e: --num-gpus x RTX 5090, pinned GPU image, scripts/vast_e2e_remote.sh; "
         "gpu8: gpu-e2e on 8x RTX 5090; "
+        "proofs: gpu-e2e + PROOF_STEPS (GPU tests, production sdpa-flash attention) on one "
+        "2x RTX 5090 host, any driver (--eight-gpu-qualified: 8x, qualified drivers only); "
         "miner-flow: 1x RTX 5090, vastai/pytorch image, scripts/vast_miner_flow_remote.sh; "
         "miner-cycle: --num-gpus (default 1) x RTX 5090, vastai/pytorch image, "
         "scripts/vast_miner_cycle_remote.sh; "
@@ -756,6 +808,11 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="no driver_version filter; for --profile mfu, where bitwise replay is not compared",
     )
+    p.add_argument(
+        "--eight-gpu-qualified",
+        action="store_true",
+        help="proofs profile: rent 8x RTX 5090, only with a driver in QUALIFIED_DRIVERS",
+    )
     p.add_argument("--min-pcie-bw", type=float, default=50.0, help="mfu profile, GB/s")
     p.add_argument("--remote-env", action="append", default=[], metavar="KEY=VAL")
     a = p.parse_args(argv)
@@ -765,12 +822,25 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
         "miner-cycle": "vast_miner_cycle_remote.sh",
     }.get(a.profile, "vast_e2e_remote.sh")
     gpus = {"miner-flow": 1, "miner-cycle": 1, "gpu8": 8}.get(a.profile, 2)
-    if a.profile in ("miner-flow", "gpu8") and a.num_gpus not in (None, gpus):
+    if a.eight_gpu_qualified:
+        if a.profile != "proofs" or a.any_driver:
+            p.error("--eight-gpu-qualified needs --profile proofs and excludes --any-driver")
+        gpus = 8
+    if a.profile == "proofs":
+        a.any_driver = a.any_driver or not (a.eight_gpu_qualified or a.driver)
+    if a.boot_retries is None:
+        a.boot_retries = 0 if a.profile == "proofs" else 2
+    if a.profile in ("miner-flow", "gpu8", "proofs") and a.num_gpus not in (None, gpus):
         p.error(f"--profile {a.profile} supports only --num-gpus {gpus}")
     a.num_gpus = a.num_gpus or gpus
     if a.remote_script == "vast_e2e_remote.sh":
         # Appended: env(1) keeps the last KEY=VAL, so --remote-env cannot contradict the host.
         a.remote_env = [*a.remote_env, f"HT_E2E_GPUS={a.num_gpus}"]
+        if a.profile == "proofs":
+            a.remote_env += [
+                f"HT_E2E_PROOFS={' '.join(PROOF_STEPS)}",
+                f"HT_E2E_PROOF_TESTS={' '.join(PROOF_TESTS)}",
+            ]
     if unknown := sorted(set(a.driver or ()) - set(QUALIFIED_DRIVERS)):
         p.error(f"--driver {', '.join(unknown)} not in scripts/genuine_cuda_ci.py DRIVERS")
     if any("=" not in kv or not kv.partition("=")[0].isidentifier() for kv in a.remote_env):
