@@ -5610,6 +5610,20 @@ class ChallengeStore:
                 )
             if set(evidence.chunk_ack_hashes) != {c.digest() for c in chunks}:
                 raise ChallengeError(422, "failure includes unproved chunk custody")
+            # upload_grant_v2 cannot tie a multi-chunk list to delta_hash before the master
+            # holds the original, so a miner could frame an honest relay with chunk hashes no
+            # receipt could follow. Unless the held original proves each chunk, such a key is
+            # disabled only once rescue hashes to delta_hash.
+            deferred = receipt is None and len(chunk_manifest.chunks) > 1
+            if deferred:
+                try:
+                    original = self.objects.get(grant.delta_hash)
+                    deferred = any(
+                        sha256_hex(original[c.off : c.off + c.len]) != c.chunk_sha256
+                        for c in chunk_manifest.chunks
+                    )
+                except ObjectNotFound:
+                    pass
             if min(evidence.observed_beacons) <= opportunity.service_deadline or max(
                 evidence.observed_beacons
             ) > self._now(self._db):
@@ -5648,13 +5662,14 @@ class ChallengeStore:
                 evidence.digest(),
                 {"artifacts": data["artifacts"], "observations": data["observations"]},
             )
-            self._put_record_v2(
-                run_id,
-                "relay-disabled",
-                f"{grant.relay_id}:{grant.assignment_epoch}:{evidence.key_id}",
-                {"key_id": evidence.key_id, "evidence_hash": evidence.digest()},
-            )
-            result = {"result": evidence.result, "disabled": True, "miner_penalty": 0}
+            if not deferred:
+                self._put_record_v2(
+                    run_id,
+                    "relay-disabled",
+                    f"{grant.relay_id}:{grant.assignment_epoch}:{evidence.key_id}",
+                    {"key_id": evidence.key_id, "evidence_hash": evidence.digest()},
+                )
+            result = {"result": evidence.result, "disabled": not deferred, "miner_penalty": 0}
         self._notify_processes_v2()
         return result
 
@@ -5846,6 +5861,17 @@ class ChallengeStore:
             if len(recovered) != grant.size or sha256_hex(bytes(recovered)) != grant.delta_hash:
                 raise ChallengeError(422, "rescued original bytes differ from signed commit")
             self.objects.put(bytes(recovered))
+            disabled = f"{grant.relay_id}:{grant.assignment_epoch}:{failure.key_id}"
+            if not self._db.execute(  # Deferred by relay_failure_v2; earlier evidence wins.
+                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='relay-disabled' AND id=?",
+                (run_id, disabled),
+            ).fetchone():
+                self._put_record_v2(
+                    run_id,
+                    "relay-disabled",
+                    disabled,
+                    {"key_id": failure.key_id, "evidence_hash": failure_hash},
+                )
             for request_raw, response in responses:
                 self._put_record_v2(
                     run_id,
@@ -9727,6 +9753,12 @@ class ChallengeStore:
                 try:
                     original = self.objects.get(committed_work.delta_hash)
                 except ObjectNotFound:
+                    # Miners commit the delta by ref only (miner/core.py:run_round); the master
+                    # first holds the bytes after relay retrieval, where relay_receipt_v2 rechecks
+                    # delta_hash and size. A lone chunk is the whole delta, so check it here.
+                    whole = chunk.chunks[0].chunk_sha256 == committed_work.delta_hash
+                    if len(chunk.chunks) > 1 or whole:
+                        eligible.append(a)
                     continue
                 if len(original) != chunk.size or sha256_hex(original) != committed_work.delta_hash:
                     raise ChallengeError(409, "accepted commit original delta corrupt")

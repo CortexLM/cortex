@@ -15,7 +15,7 @@ mapfile -t paths < <(uv run --frozen python - <<'EOF'
 import sys
 sys.path.insert(0, "tests")
 import conftest  # noqa: E402
-print("\n".join([*conftest.FAST_DIRS, *conftest.FAST_FILES]))
+print("\n".join([*conftest.FAST_DIRS, *conftest.FAST_FILES, "tests/test_mine_smoke_v2.py"]))
 EOF
 )
 start=$(date +%s%N)

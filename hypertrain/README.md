@@ -228,6 +228,7 @@ tests/        one directory per package
 ## Contributing
 
 - `uv sync --frozen --all-extras`, then `bash scripts/check.sh` before opening a pull request.
+- `bash scripts/mine-smoke-v2.sh` checks the network-v2 miner CLI chain end to end on CPU, offline (~2 min; see [docs/network-v2.md](docs/network-v2.md#cpu-smoke)).
 - Verification stays bitwise. Tolerance checks, obfuscation or trusted-hardware assumptions are out of scope for the security model.
 - When a route or message changes, update [docs/challenge-routes.md](docs/challenge-routes.md) and regenerate schemas with `uv run --frozen python -m hypertrain.protocol.schema docs/schemas`.
 - Publishing goes through `scripts/publish.sh`, which runs a strict secret scan and requires an out-of-band approval token.

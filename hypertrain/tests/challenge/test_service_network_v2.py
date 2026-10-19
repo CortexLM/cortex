@@ -3453,7 +3453,20 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
     anyio.run(backing_http.aclose)
 
 
-@pytest.mark.parametrize("invalid", [None, "partial-receipt", "duplicate", "gap", "contradiction"])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        None,
+        "partial-receipt",
+        "duplicate",
+        "gap",
+        "contradiction",
+        "chunk-only",
+        "forged",
+        "held-chunk-only",
+        "held-forged",
+    ],
+)
 def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, invalid):
     """Exact two-chunk receipt/prefix regression; no live-round/graduation sweep."""
     import json
@@ -3461,7 +3474,7 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
     import anyio
     import httpx
 
-    from hypertrain.data.store import LocalFSStore
+    from hypertrain.data.store import CorruptObjectError, LocalFSStore
     from hypertrain.data.stream_store import StreamStore
     from hypertrain.protocol import envelope_v2, relay_envelope
     from hypertrain.protocol.relay_messages import (
@@ -3500,11 +3513,16 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
     )
     assert response.status_code == 200, response.text
     payload = b"a" * (4 << 20) + b"b"
+    # forged: miner-chosen chunk hashes that do not concatenate to delta_hash; an
+    # unheld delta lets upload_grant_v2 sign such a manifest.
+    forged = invalid in {"forged", "held-forged"}
+    sent = b"x" * (4 << 20) + b"y" if forged else payload
+    chunk_only = invalid in {"chunk-only", "forged", "held-chunk-only", "held-forged"}
     chunks = UploadChunkManifest(
         size=len(payload),
         chunks=[
-            UploadChunk(index=0, off=0, len=4 << 20, chunk_sha256=sha256_hex(payload[:-1])),
-            UploadChunk(index=1, off=4 << 20, len=1, chunk_sha256=sha256_hex(payload[-1:])),
+            UploadChunk(index=0, off=0, len=4 << 20, chunk_sha256=sha256_hex(sent[:-1])),
+            UploadChunk(index=1, off=4 << 20, len=1, chunk_sha256=sha256_hex(sent[-1:])),
         ],
     )
     net = RelayNetworkManifest(
@@ -3612,14 +3630,20 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         async def source(part):
             yield part
 
-        first = await relay.chunk(grant.digest(), 0, source(payload[:-1]))
-        await relay.chunk(grant.digest(), 1, source(payload[-1:]))
-        return opportunity, first, await relay.complete(grant.digest())
+        first = await relay.chunk(grant.digest(), 0, source(sent[:-1]))
+        if forged:
+            # The relay signs both chunk acks, then cannot complete bytes missing delta_hash.
+            with pytest.raises(CorruptObjectError):
+                await relay.chunk(grant.digest(), 1, source(sent[-1:]))
+            last = (await relay.state()).uploads[grant.digest()].chunks["1"]
+            return opportunity, first, last, last
+        last = await relay.chunk(grant.digest(), 1, source(sent[-1:]))
+        return opportunity, first, last, await relay.complete(grant.digest())
 
-    opportunity_env, prefix_env, receipt_env = anyio.run(uploaded)
+    opportunity_env, prefix_env, last_env, receipt_env = anyio.run(uploaded)
     opportunity = AcceptedUploadAck.model_validate(opportunity_env.body)
     prefix = ChunkCustodyAck.model_validate(prefix_env.body)
-    receipt = RelayReceipt.model_validate(receipt_env.body)
+    receipt = None if forged else RelayReceipt.model_validate(receipt_env.body)
     if invalid == "partial-receipt":
         receipt = receipt.model_copy(update={"size": prefix.len, "delta_hash": prefix.chunk_sha256})
         receipt_env = relay_envelope.parse_envelope(
@@ -3639,6 +3663,14 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
     ]
     if invalid == "duplicate":
         artifacts.insert(2, prefix_env.model_dump(mode="json"))
+    # Chunk-only custody while the master never held the original: the grant could not
+    # check that the chunk hashes concatenate to delta_hash, so disabling waits for rescue.
+    acks = [prefix]
+    if chunk_only:
+        artifacts[2] = last_env.model_dump(mode="json")
+        acks.append(ChunkCustodyAck.model_validate(last_env.body))
+    if invalid in {"held-chunk-only", "held-forged"}:
+        network.store.objects.put(payload)
     network.push(grant.exp_drand + 1)
     for auditor in AUDITORS:
         url = network.url + f"/relay-observers/{grant.digest()}/{auditor.ss58}"
@@ -3656,9 +3688,11 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         grant_hash=grant.digest(),
         upload_ack_hash=opportunity.digest(),
         chunk_manifest_hash=grant.chunk_manifest_hash,
-        chunk_ack_hashes=[prefix.digest()],
-        receipt_hash=receipt.digest(),
-        retention_hash=receipt.digest(),
+        chunk_ack_hashes=[a.digest() for a in acks],
+        receipt_hash=None if chunk_only else receipt.digest(),
+        retention_hash=sha256_hex(canonicalize(sorted(a.digest() for a in acks)))
+        if chunk_only
+        else receipt.digest(),
         request=None,
         response=None,
         observer_ids=[a.ss58 for a in AUDITORS],
@@ -3689,6 +3723,18 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         anyio.run(backing.aclose)
         return
     assert failure.status_code == 200, failure.text
+
+    def disabled():
+        return network.store._db.execute(
+            "SELECT COUNT(*) FROM records_v2 WHERE kind='relay-disabled'"
+        ).fetchone()[0]
+
+    if invalid == "held-chunk-only":  # The held original proves each chunk: disable now.
+        assert failure.json()["disabled"] and disabled() == 1
+        anyio.run(backing.aclose)
+        return
+    if chunk_only:
+        assert not failure.json()["disabled"] and disabled() == 0
     app = relay_app(relay, "x" * 32)
     monkeypatch.setattr(
         httpx,
@@ -3698,8 +3744,14 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
     rescued = network.client.post(
         network.url + f"/admin/relay-fallback/{evidence.digest()}", headers=admin()
     )
-    if invalid is not None:
+    if invalid == "chunk-only":
+        assert rescued.status_code == 200, rescued.text
+        assert network.store.objects.get(grant.delta_hash) == payload
+        assert disabled() == 1
+    elif invalid is not None:
         assert rescued.status_code == 422, rescued.text
+        if forged:
+            assert disabled() == 0
     else:
         assert rescued.status_code == 200, rescued.text
         assert rescued.json()["grant"] == signed_grant
@@ -3732,7 +3784,9 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         "unknown-commit",
     ],
 )
-def test_upload_grant_exact_subject_with_two_live_rounds(network, tmp_path, fault):
+# held=False: miners commit the delta by ref only; the master first stores it at relay receipt.
+@pytest.mark.parametrize("held", [True, False])
+def test_upload_grant_exact_subject_with_two_live_rounds(network, tmp_path, fault, held):
     import anyio
     import httpx
 
@@ -3808,7 +3862,8 @@ def test_upload_grant_exact_subject_with_two_live_rounds(network, tmp_path, faul
         if w == 1 and fault == "wrong-run":
             committed_envelope = envelope_v2.seal(HOT[0], "CommitV2", "ff" * 32, commit, 10000)
         with network.store._tx():
-            network.store.objects.put(payload)
+            if held:
+                network.store.objects.put(payload)
             network.store._put_record_v2(run_id, "relay-assignment", f"{w}:{HOT[0].ss58}", signed)
             network.store._put_record_v2(run_id, "commit", f"{w}:{HOT[0].ss58}", committed_envelope)
     # Exact accepted journal boundary, real signed subjects; no graduation/train.

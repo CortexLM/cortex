@@ -85,6 +85,21 @@ matching TOML fields; unknown TOML keys reject. Other existing fields:
 `allow_file_upload` (false). Do not assume these v1-oriented tuning fields alter
 the v2 server's deadlines or relay chunk policy.
 
+## CPU smoke
+
+`bash scripts/mine-smoke-v2.sh` runs this miner path offline on CPU: it starts the
+real challenge app (tiny test-ledger fixture run, throwaway fixture keys) on
+127.0.0.1 plus a self-signed TLS relay on localhost, then runs `join-v2`,
+`escrow-lock`, four `trial_export`/`probe-v2`/`proof-v2` trials and
+`run-v2 --round 0` as separate `uv run --frozen hypertrain-miner` processes. A round
+needs a four-identity eligible roster, so three peer identities are graduated
+in-process by the operator role (`"mode": "in-process"` in the evidence). PASS
+requires every stage at rc 0 and the round-0 delta recorded; measured ~132 s,
+budget `MINE_SMOKE_V2_BUDGET_SECONDS` (default 300). Evidence (stage, rc, ms) goes
+to `$MINE_SMOKE_V2_EVIDENCE` or a fresh 0600 temp file; `MINE_SMOKE_V2_BREAK=<stage>`
+points one of the four miner stages at a closed port to check failure detection. It proves the CLI
+chain, not CUDA, audits, settlement or production funding.
+
 ## Join, prove work, fund, graduate
 
 Set `REQUEST_ID` to a fresh 64-hex request ID, `EXPIRY_BEACON` to a future
@@ -245,6 +260,11 @@ an exact complete receipt or full original chunk coverage, authenticated healthy
 witnesses and original grant/assignment lineage. The master fetches/hash-checks
 original bytes before acceptance. Rescue preserves custody without backdating
 late acceptance or charging the miner for proven storage failure.
+Multi-chunk custody without a receipt disables the relay key at once only when
+the master holds the original and it proves every chunk hash. Otherwise the key
+is disabled only after rescued bytes hash to `delta_hash`: the grant could not
+tie those chunk hashes to the commit, so a mismatch answers 422 and leaves the
+relay enabled.
 Retention release waits for finality, disputes and vesting; signed extensions,
 overlapping old/new keys and drain preserve existing retrieval authority.
 
