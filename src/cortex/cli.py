@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -16,7 +17,9 @@ import uvicorn
 from cortex.errors import ServiceError
 from cortex.http import read_private_file
 from cortex.miner import MinerClient, load_seed
+from cortex.protocol import ProtocolError
 from cortex.protocol.crypto import decode_hotkey
+from cortex.validator.evidence import RESETTABLE_WATERMARKS
 from cortex.wallet import HotkeySigner, load_wallet_hotkey
 
 
@@ -40,26 +43,15 @@ def parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--attempt-id", required=True)
     reconcile.add_argument("--result", choices=("submitted", "not_broadcast"), required=True)
     reconcile.add_argument("--evidence-digest", required=True)
-    keygen = commands.add_parser("keygen", help="generate an offline sr25519 operator key")
-    keygen.add_argument("--seed-out", type=Path, required=True)
-    keygen.add_argument("--public-out", type=Path, required=True)
-    trust_sign = commands.add_parser(
-        "trust-sign", help="sign a challenge or measurement trust document"
+    reset = commands.add_parser(
+        "validator-watermark-reset",
+        help="lower one wrongly advanced consensus watermark (local state only)",
     )
-    trust_sign.add_argument("--kind", choices=("challenges", "measurements"), required=True)
-    trust_sign.add_argument("--input", type=Path, required=True)
-    trust_sign.add_argument("--seed-file", type=Path, required=True)
-    trust_sign.add_argument("--signature-out", type=Path, required=True)
-    trust_verify = commands.add_parser(
-        "trust-verify", help="verify signed trust documents against local pins"
-    )
-    trust_verify.add_argument("--challenges", type=Path, required=True)
-    trust_verify.add_argument("--measurements", type=Path, required=True)
-    trust_verify.add_argument("--owner-public", type=Path, required=True)
-    trust_verify.add_argument("--gateway-public", required=True)
-    trust_verify.add_argument("--epoch", type=int, required=True)
-    trust_verify.add_argument("--minimum-challenges-version", type=int, default=1)
-    trust_verify.add_argument("--minimum-measurements-version", type=int, default=1)
+    reset.add_argument("--state-db", type=Path, required=True)
+    reset.add_argument("--name", choices=RESETTABLE_WATERMARKS, required=True)
+    reset.add_argument("--to", type=int, required=True)
+    reset.add_argument("--confirm", action="store_true")
+    reset.add_argument("--netuid", type=int, help="refuse a journal recorded for another subnet")
     vm = commands.add_parser("vm-host", help="serve the dedicated Firecracker host")
     vm.add_argument("--config", type=Path, required=True)
     vm.add_argument(
@@ -232,52 +224,6 @@ async def run_master(args: argparse.Namespace) -> None:
         await asyncio.to_thread(close_subtensor, subtensor)
 
 
-def run_keygen(args: argparse.Namespace) -> None:
-    from cortex.operator import generate_key
-
-    public = generate_key(args.seed_out, args.public_out)
-    print(json.dumps({"public_key": public, "seed_file": str(args.seed_out)}))
-
-
-def run_trust_sign(args: argparse.Namespace) -> None:
-    from cortex.operator import sign_trust_document
-
-    sign_trust_document(
-        input_path=args.input,
-        kind=args.kind,
-        seed_path=args.seed_file,
-        signature_path=args.signature_out,
-    )
-    print(json.dumps({"kind": args.kind, "signature_file": str(args.signature_out)}))
-
-
-def run_trust_verify(args: argparse.Namespace) -> None:
-    from cortex.protocol.trust import load_trust_root
-
-    trust = load_trust_root(
-        challenges_path=args.challenges,
-        challenges_signature=Path(str(args.challenges) + ".sig"),
-        measurements_path=args.measurements,
-        measurements_signature=Path(str(args.measurements) + ".sig"),
-        owner_public=decode_hotkey(args.owner_public.read_text().strip()),
-        gateway_public=decode_hotkey(args.gateway_public),
-        epoch=args.epoch,
-        minimum_challenges_version=args.minimum_challenges_version,
-        minimum_measurements_version=args.minimum_measurements_version,
-    )
-    print(
-        json.dumps(
-            {
-                "challenges": {name.decode(): share for name, share in trust.shares},
-                "challenges_version": trust.challenges_version,
-                "measurements_version": trust.measurements_version,
-                "measurements_digest": trust.measurements_digest.hex(),
-            },
-            sort_keys=True,
-        )
-    )
-
-
 def run_validator_reconcile(args: argparse.Namespace) -> None:
     from cortex.validator import SubmissionJournal
 
@@ -294,6 +240,81 @@ def run_validator_reconcile(args: argparse.Namespace) -> None:
     finally:
         journal.close()
     print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def _watermark_reset_preflight(args: argparse.Namespace) -> None:
+    """Prove the file is a validator journal holding the row, without writing to it."""
+    path = args.state_db.resolve()
+    # mode=ro still creates -shm (and opens -wal) beside a WAL database, even a foreign one,
+    # so read only the main file. Pages still in a -wal are invisible: a refusal then names
+    # the checkpoint, and the write open below re-checks the real values.
+    wal = path.with_name(path.name + "-wal").exists()
+    hint = "; stop the validator so SQLite checkpoints its -wal" if wal else ""
+
+    def refuse(reason: str) -> SystemExit:
+        return SystemExit(f"Cortex command failed: {reason}{hint}")
+
+    reader = sqlite3.connect(f"{path.as_uri()}?immutable=1", uri=True)
+    try:
+        tables = reader.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' "
+            "AND name IN ('consensus_watermarks', 'consensus_watermark_resets')"
+        ).fetchone()
+        if tables[0] != 2:
+            raise refuse("not a validator state database")
+        rows = dict(
+            reader.execute(
+                "SELECT name, value FROM consensus_watermarks WHERE name IN (?, 'netuid')",
+                (args.name,),
+            ).fetchall()
+        )
+    finally:
+        reader.close()
+    if args.name not in rows:
+        raise refuse("consensus watermark not set")
+    if args.netuid is not None:
+        if "netuid" not in rows and wal:
+            raise refuse("validator journal netuid unreadable")
+        if "netuid" not in rows:
+            print("state db records no netuid; --netuid check skipped", file=sys.stderr)
+        elif rows["netuid"] != str(args.netuid):
+            raise refuse("validator journal belongs to another subnet")
+
+
+def run_validator_watermark_reset(args: argparse.Namespace) -> None:
+    from cortex.validator.evidence import EvidenceStore
+
+    # Refusal reasons are fixed strings with no credential, so show them to the operator.
+    if not args.confirm:
+        raise SystemExit("Cortex command failed: --confirm required; lowering re-opens rollback")
+    if not args.state_db.is_file():
+        raise SystemExit("Cortex command failed: validator state database not found")
+    connection = None
+    try:
+        _watermark_reset_preflight(args)
+        path = args.state_db.resolve()
+        # A refused write must leave no -wal/-shm beside the file; check before opening it.
+        if not (os.access(path, os.W_OK) and os.access(path.parent, os.W_OK | os.X_OK)):
+            raise SystemExit("Cortex command failed: state db is read-only")
+        # The journal schema and WAL mode belong to the validator; open only the existing file.
+        connection = sqlite3.connect(args.state_db, isolation_level=None, timeout=1)
+        old = EvidenceStore(connection, create_schema=False).reset_watermark(args.name, args.to)
+    except ProtocolError as error:
+        raise SystemExit(f"Cortex command failed: {error}") from None
+    except sqlite3.OperationalError as error:
+        if "locked" in str(error) or "busy" in str(error):
+            raise SystemExit(
+                "Cortex command failed: state db locked; stop the validator first"
+            ) from None
+        raise SystemExit(f"Cortex command failed: {type(error).__name__}") from None
+    except sqlite3.DatabaseError:
+        raise SystemExit("Cortex command failed: not a validator state database") from None
+    except sqlite3.Error as error:
+        raise SystemExit(f"Cortex command failed: {type(error).__name__}") from None
+    finally:
+        if connection is not None:
+            connection.close()
+    print(json.dumps({"name": args.name, "old_value": old, "new_value": args.to}, indent=2))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -323,14 +344,10 @@ def main(argv: list[str] | None = None) -> None:
             from cortex.vm.server import serve
 
             serve(args.config)
-        elif args.command == "keygen":
-            run_keygen(args)
-        elif args.command == "trust-sign":
-            run_trust_sign(args)
-        elif args.command == "trust-verify":
-            run_trust_verify(args)
         elif args.command == "validator-reconcile":
             run_validator_reconcile(args)
+        elif args.command == "validator-watermark-reset":
+            run_validator_watermark_reset(args)
         else:
             action = {"master": run_master, "miner": run_miner, "topic-create": run_topic_create}
             asyncio.run(action[args.command](args))

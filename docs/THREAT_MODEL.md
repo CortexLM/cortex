@@ -7,25 +7,26 @@ scientifically valuable.
 
 ## Security claim
 
-An honest validator can detect a bundle that differs from the owner-signed trust
-root, challenge leaves, historical metagraph or deterministic aggregation. Peer
+An honest validator can detect a bundle that differs from the gateway-served
+challenge profile, challenge leaves, historical metagraph or deterministic aggregation. Peer
 root consensus can expose equivocation among participating validators, and
 signed dissent can be retained as local evidence.
 
 The Merkle root is not part of the Bittensor weight extrinsic. Peer consensus is
 therefore not a public chain transparency log. A colluding validator set can
-agree on one bad root, and an operator can delete local evidence. The owner signs
-the roots and runs the master, so a malicious owner can authorize dishonest
-challenge keys or generated topic rules that validators will faithfully accept.
+agree on one bad root, and an operator can delete local evidence. The operator
+runs the master and the gateway, and the challenge profile is unsigned, so a malicious
+operator can authorize dishonest challenge shares or generated topic rules that validators
+will faithfully accept.
 
 ## Trust boundaries
 
 | Boundary | Trusted property | Residual risk |
 | --- | --- | --- |
-| owner trust root | challenge ids, keys, shares, measurement digest | owner can sign a malicious replacement |
+| challenge profile (gateway `/v1/trust`) | challenge ids, shares, measurement digest | a compromised gateway or broken TLS can serve a malicious profile; TLS is the only anchor |
 | master gateway | durable intake and immutable seals | availability and censorship remain operator risks |
 | validator | independent chain snapshot, recomputation and dispatch journal | chain RPC eclipse or colluding validators |
-| challenge container | weights it returns for its own share | can misallocate or zero its own share; never holds a leaf seed, cannot move another challenge's mass |
+| challenge container | weights it returns for its own share | can misallocate or zero its own share; holds no signing key, cannot move another challenge's mass |
 | challenge-supervisor | Docker control, image provenance and label checks | holds the Docker socket (host-root equivalent); a compromised GitHub repository with valid provenance ships code |
 | CortexLM/backend feed | Bounty scoring publication | backend controls the underlying adjudication truth |
 | topic RLM guest | topic-scoped setup state | model output is untrusted until checked and signed |
@@ -82,7 +83,7 @@ an owner signature approves exact content and visibility.
 
 ## Reward controls
 
-Challenge leaves are signed under keys in the owner root. The expected set comes
+Challenge leaves carry no signature (wire v2); the master records them after the gateway authenticates the intake bearer (sealing needs the separate operator bearer). The expected set comes
 from the historical metagraph; a challenge cannot shrink it by omission. A
 missing score becomes an explicit `NoScore`, and an unavailable challenge burns
 its share rather than blocking every other challenge.
@@ -93,7 +94,7 @@ the complete participant set for one challenge and epoch. A challenge-container
 outage or invalid answer therefore replaces every participant of that challenge
 with `NoScore(ChallengeInternal)` and burns its full share without retaining
 stale positives. A container's first answer per epoch is final, and the master
-signs it once, so a later change cannot rewrite a sealed epoch. `GET /v1/weights/latest`
+records it once, so a later change cannot rewrite a sealed epoch. `GET /v1/weights/latest`
 returns an unsealed UID0 fallback when no valid seal exists; validators refuse
 that fallback. A sealed UID0 burn is valid and must still be submitted after
 independent verification.
@@ -102,6 +103,31 @@ Validator dispatch is journaled. An ambiguous chain response stays pending and
 is not automatically retried, because a blind retry can submit twice. No test or
 health endpoint proves an on-chain payment; that requires observing the actual
 extrinsic and resulting chain state.
+
+### Separate intake and seal bearers (founder decision 2026-10-19)
+
+`POST /v1/weights/raw` requires the intake bearer (`BASE_GATEWAY_INTAKE_TOKEN_FILE`)
+and `POST /v1/admin/seal` requires the operator bearer
+(`BASE_GATEWAY_ADMIN_TOKEN_FILE`); each route refuses the other token with 401.
+The master refuses to start when both files resolve to the same path or hold the
+same value. Bearers are at least 32 bytes and re-checked on every request: each
+private request re-reads both files and answers 503 while either is shorter or
+they are equal, so a rotation cannot silently weaken or merge them.
+While the master replaces a completed epoch's challenge leaves and seals it, raw
+intake answers 409 `epoch sealing in progress`, so a raw leaf cannot land after
+the authoritative replacement and before the seal; intake reopens when the seal
+ends or fails.
+
+What remains: before wire v2, forging a leaf also needed a challenge key; now an
+intake-token holder can still write any raw score for any miner, and the master's
+own epoch seal will include it. The separation only stops that holder from sealing
+on demand. A seal-token holder can seal early but cannot inject scores through raw
+intake. No independent cross-check of a bundle exists: `wire_v2.json` is generated
+by the Python implementation, so no second implementation pins the bytes.
+
+Mitigation: neither token is given to miners, validators or challenge containers;
+hold the intake token only where raw intake is actually needed and rotate each
+token independently on any suspicion.
 
 ## Availability and deployment
 

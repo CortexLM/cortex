@@ -1,6 +1,6 @@
 """Unsigned operator registry of challenge containers.
 
-The registry decides what runs; only the owner-signed trust root decides emission.
+The registry decides what runs; only the challenge profile decides emission.
 """
 
 from __future__ import annotations

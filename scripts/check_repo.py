@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FROZEN_SPECS = {
-    "docs/BUNDLE_SPEC.md": "c7a43fca324a2f44e7c40bca5acde1bd5ea30cabde1e8c0a0011aeedbb4330a3",
+    "docs/BUNDLE_SPEC.md": "45f3b43f95c64678b2074bbd2a984f9743137ffbed71a8dfe14071602f98c12d",
 }
 SHARES = {"bounty": 2000, "proof": 8000}
 PROPORTIONAL_SHARES = {"bounty": 3000, "proof": 7000}
@@ -148,7 +148,7 @@ def check_specs(root: Path) -> list[str]:
     return failures
 
 
-def check_trust_roots(root: Path) -> list[str]:
+def check_challenge_profiles(root: Path) -> list[str]:
     failures = []
     paths = set((root / "config").glob("challenges*.toml"))
     paths.add(root / "config/challenges.toml")
@@ -156,12 +156,12 @@ def check_trust_roots(root: Path) -> list[str]:
         name = path.relative_to(root)
         try:
             if path.is_symlink():
-                raise ValueError("symlinked trust root")
+                raise ValueError("symlinked challenge profile")
             document = tomllib.loads(path.read_text())
             rows = document["challenges"]
             version = document["version"]
             if type(version) is not int or version < 1:
-                raise ValueError("invalid trust document version")
+                raise ValueError("invalid challenge profile version")
             if not isinstance(rows, list) or not 1 <= len(rows) <= (64 if version >= 3 else 2):
                 raise ValueError("unsupported challenge count")
             actual = {}
@@ -171,8 +171,6 @@ def check_trust_roots(root: Path) -> list[str]:
                     raise ValueError("duplicate id or invalid share")
                 if not CHALLENGE_ID.fullmatch(identifier):
                     raise ValueError("invalid challenge id")
-                if not re.fullmatch(r"[0-9a-f]{64}", row["public_key"]):
-                    raise ValueError("invalid challenge public key")
                 actual[identifier] = share
             if version >= 3:
                 if sum(actual.values()) != 10000:
@@ -380,7 +378,7 @@ def check_final(root: Path, files: Iterable[Path]) -> list[str]:
 
 def check_repository(root: Path, *, final: bool = False) -> list[str]:
     files = repository_files(root)
-    failures = check_specs(root) + check_trust_roots(root) + check_public_contracts(root)
+    failures = check_specs(root) + check_challenge_profiles(root) + check_public_contracts(root)
     failures += check_hygiene(root, files)
     if final:
         failures += check_final(root, files)

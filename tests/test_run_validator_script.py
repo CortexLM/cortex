@@ -31,7 +31,6 @@ def env(tmp_path):
         "LATEST_JSON": str(tmp_path / "latest.json"),
         "WALLET_NAME": "coldwallet-secret",
         "WALLET_HOTKEY": "hotkey-secret",
-        "GATEWAY_PUBLIC": "5GatewayPinnedKey",
         "VERSION_KEY": "7",
     }
 
@@ -59,11 +58,14 @@ def test_master_intent_is_refused(env, args, extra):
     assert "cortex master" not in result.stdout
 
 
-def test_missing_gateway_public_fails(env):
-    del env["GATEWAY_PUBLIC"]
-    result = run(env, "--dry-run")
-    assert result.returncode != 0
-    assert "GATEWAY_PUBLIC is not set" in result.stderr
+def test_submitting_without_a_hotkey_fails_but_verify_only_does_not(env):
+    del env["WALLET_NAME"], env["WALLET_HOTKEY"]
+    refused = run(env, "--dry-run")
+    assert refused.returncode != 0
+    assert "WALLET_NAME" in refused.stderr
+    verify = run(env, "--dry-run", "--verify-only")
+    assert verify.returncode == 0, verify.stderr
+    assert "--wallet" not in verify.stdout
 
 
 def test_netuid_mismatch_fails(env):
@@ -82,11 +84,18 @@ def test_dry_run_prints_masked_validator_command(env):
     assert "--wallet-name \\*\\*\\* --wallet-hotkey \\*\\*\\*" in command
     for expected in (
         "--netuid 100",
-        "--gateway-public 5GatewayPinnedKey",
         "--version-key 7",
         "--verify-only --once",
     ):
         assert expected in command
+    for removed in (
+        "--owner-public",
+        "--challenges",
+        "--measurements",
+        "minimum",
+        "--gateway-public",
+    ):
+        assert removed not in command
     assert "epoch=4242 sealed=true" in result.stderr
 
 
@@ -97,3 +106,14 @@ def test_tilde_wallet_path_is_expanded_before_the_hotkey_check(env, tmp_path):
     result = run(env | {"WALLET_PATH": "~/w"}, "--dry-run")
     assert result.returncode == 0
     assert "hotkey file not found" not in result.stderr
+
+
+def test_verify_only_never_reads_the_version_key_from_the_chain(env, tmp_path):
+    # A uv that fails every call stands in for an unreachable RPC.
+    uv = tmp_path / "bin" / "uv"
+    uv.write_text('#!/usr/bin/env bash\n[[ " $* " == *" - "* ]] && exec python3 "${@:6}"\nexit 1\n')
+    uv.chmod(0o755)
+    del env["VERSION_KEY"]
+    result = run(env, "--dry-run", "--verify-only")
+    assert result.returncode == 0, result.stderr
+    assert "--version-key 0" in result.stdout

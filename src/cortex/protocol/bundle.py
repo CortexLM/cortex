@@ -1,11 +1,9 @@
-"""Seal and verify complete, independently recomputed epoch bundles."""
+"""Build and verify complete, independently recomputed epoch bundles (hash integrity only)."""
 
 from collections.abc import Iterable
-from dataclasses import replace
 from hashlib import sha256
 
 from .aggregate import aggregate_leaves
-from .crypto import BUNDLE_DOMAIN, RAW_WEIGHT_DOMAIN, public_key, sign_raw, verify_raw
 from .merkle import canonical_rows, merkle_root, metagraph_root
 from .models import (
     PROPORTIONAL_SHARES,
@@ -13,22 +11,11 @@ from .models import (
     BundleBody,
     Leaf,
     MetagraphRow,
-    NoScore,
-    Score,
     TrustRoot,
 )
 from .scale import ProtocolError, byte_vec
 
-
-def sign_leaf(
-    seed: bytes,
-    challenge_id: bytes,
-    miner_hotkey: bytes,
-    epoch: int,
-    score: Score | NoScore,
-) -> Leaf:
-    unsigned = Leaf(challenge_id, miner_hotkey, epoch, score, bytes(64))
-    return replace(unsigned, challenge_sig=sign_raw(seed, RAW_WEIGHT_DOMAIN, unsigned.payload()))
+BUNDLE_PROTOCOL_VERSION = 2  # v1 carried leaf and gateway signatures; never confused with v2
 
 
 def _verify_leaves(
@@ -49,12 +36,6 @@ def _verify_leaves(
             raise ProtocolError("unknown challenge")
         if leaf.epoch != body.epoch:
             bad.add(challenge.id)
-        if not verify_raw(
-            challenge.public_key, RAW_WEIGHT_DOMAIN, leaf.payload(), leaf.challenge_sig
-        ):
-            if not allow_quarantine:
-                raise ProtocolError("invalid challenge signature")
-            bad.add(challenge.id)
     for challenge in trust.challenges:
         present = {leaf.miner_hotkey for leaf in body.leaves if leaf.challenge_id == challenge.id}
         if present != challenge.policy.expected(rows):
@@ -70,7 +51,6 @@ def _verify_leaves(
 
 def build_bundle(
     *,
-    gateway_seed: bytes,
     epoch: int,
     netuid: int,
     block_b: int,
@@ -81,9 +61,7 @@ def build_bundle(
 ) -> Bundle:
     trust.validate()
     if epoch < trust.introduced_epoch:
-        raise ProtocolError("trust root is not active for bundle epoch")
-    if public_key(gateway_seed) != trust.gateway_hotkey:
-        raise ProtocolError("gateway key does not match local trust")
+        raise ProtocolError("challenge profile is not active for bundle epoch")
     ordered_rows = canonical_rows(rows)
     ordered_leaves = tuple(sorted(leaves, key=lambda leaf: leaf.sort_key))
     uid_map = tuple((row.hotkey, row.uid) for row in ordered_rows)
@@ -91,7 +69,7 @@ def build_bundle(
         ordered_leaves, trust.shares, uid_map, algorithm_version=trust.algorithm_version
     )
     body = BundleBody(
-        1,
+        BUNDLE_PROTOCOL_VERSION,
         epoch,
         netuid,
         block_b,
@@ -104,10 +82,9 @@ def build_bundle(
         ordered_leaves,
         merkle_root(leaf.encode() for leaf in ordered_leaves),
         final.final_vector,
-        trust.gateway_hotkey,
     )
     _verify_leaves(body, ordered_rows, trust)
-    return Bundle(body, sign_raw(gateway_seed, BUNDLE_DOMAIN, body.encode()))
+    return Bundle(body)
 
 
 def verify_bundle(
@@ -143,16 +120,15 @@ def verify_inputs(
     """Rows/hash must come from the chain at body.block_b, never from the gateway."""
     trust.validate()
     body = bundle.body
-    if body.protocol_version != 1 or body.algorithm_version != trust.algorithm_version:
+    if (
+        body.protocol_version != BUNDLE_PROTOCOL_VERSION
+        or body.algorithm_version != trust.algorithm_version
+    ):
         raise ProtocolError("unsupported bundle version")
     if body.epoch < trust.introduced_epoch:
-        raise ProtocolError("trust root is not active for bundle epoch")
+        raise ProtocolError("challenge profile is not active for bundle epoch")
     if body.netuid != netuid or (epoch is not None and body.epoch != epoch):
         raise ProtocolError("bundle subnet/epoch mismatch")
-    if body.gateway_hotkey != trust.gateway_hotkey:
-        raise ProtocolError("untrusted gateway signer")
-    if not verify_raw(body.gateway_hotkey, BUNDLE_DOMAIN, body.encode(), bundle.gateway_sig):
-        raise ProtocolError("invalid gateway signature")
     if body.block_hash != block_hash:
         raise ProtocolError("chain block hash mismatch")
     ordered_rows = canonical_rows(rows)

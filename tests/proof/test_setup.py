@@ -513,7 +513,7 @@ async def test_setup_route_requires_operator_auth_and_returns_only_public_topic(
         accepted = await client.post(
             "/v1/admin/proof/setup",
             json={"policy": policy().model_dump(mode="json")},
-            headers={"Authorization": "Bearer fixture-operator-token"},
+            headers={"Authorization": "Bearer fixture-operator-token-0123456789abcdef"},
         )
 
     assert accepted.status_code == 201 and accepted.json()["status"] == "open"

@@ -13,12 +13,6 @@ def required_arguments(tmp_path):
         "https://master.invalid",
         "--netuid",
         "541",
-        "--gateway-public",
-        "11" * 32,
-        "--minimum-challenges-version",
-        "1",
-        "--minimum-measurements-version",
-        "1",
         "--wallet-name",
         "validator",
         "--wallet-hotkey",
@@ -86,6 +80,8 @@ def test_main_passes_validated_fallback_endpoints_to_bittensor(monkeypatch, tmp_
             pass
 
     class Wallet:
+        hotkey = object()
+
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
@@ -127,6 +123,8 @@ def test_verify_only_once_exits_nonzero_unless_the_outcome_is_verified(monkeypat
             pass
 
     class Wallet:
+        hotkey = object()
+
         def __init__(self, **kwargs):
             pass
 
@@ -146,10 +144,65 @@ def test_verify_only_once_exits_nonzero_unless_the_outcome_is_verified(monkeypat
         validator_main.main([*required_arguments(tmp_path), "--verify-only", "--once"])
 
 
-@pytest.mark.parametrize("flag", ["--minimum-challenges-version", "--minimum-measurements-version"])
-def test_main_rejects_nonpositive_trust_version_pins(flag, tmp_path):
-    with pytest.raises(SystemExit, match="minimum trust versions must be positive"):
-        validator_main.main([*required_arguments(tmp_path), flag, "0"])
+def without(arguments, flag):
+    """Drop `flag value` from an argument list."""
+    index = arguments.index(flag)
+    return arguments[:index] + arguments[index + 2 :]
+
+
+def without_hotkey(tmp_path):
+    return without(without(required_arguments(tmp_path), "--wallet-name"), "--wallet-hotkey")
+
+
+def test_weight_setting_validator_without_hotkey_fails_with_a_clear_error(tmp_path):
+    with pytest.raises(SystemExit, match="required to submit weights"):
+        validator_main.main(without_hotkey(tmp_path))
+
+
+def test_peer_consensus_without_hotkey_fails_even_when_verify_only(tmp_path):
+    with pytest.raises(SystemExit, match="required to submit weights or run --peer-consensus"):
+        validator_main.main([*without_hotkey(tmp_path), "--verify-only", "--peer-consensus"])
+
+
+def test_verify_only_validator_starts_without_hotkey_gateway_pin_or_trust_files(
+    monkeypatch, tmp_path
+):
+    seen = {}
+
+    class Subtensor:
+        def __init__(self, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    bittensor = ModuleType("bittensor")
+    bittensor.Subtensor = Subtensor
+    wallet_module = ModuleType("bittensor_wallet")
+    wallet_module.Wallet = lambda **kwargs: pytest.fail("no wallet must be built")
+    monkeypatch.setitem(sys.modules, "bittensor", bittensor)
+    monkeypatch.setitem(sys.modules, "bittensor_wallet", wallet_module)
+
+    async def verified(arguments, subtensor, wallet):
+        seen["wallet"] = wallet
+        return TickResult("verified")
+
+    monkeypatch.setattr(validator_main, "run", verified)
+    arguments = without_hotkey(tmp_path)
+    validator_main.main([*arguments, "--verify-only", "--once"])
+    assert seen == {"wallet": None}
+
+
+def test_removed_trust_signing_options_are_gone(tmp_path):
+    for flag in (
+        "--gateway-public",
+        "--owner-public",
+        "--challenges",
+        "--measurements",
+        "--minimum-challenges-version",
+    ):
+        with pytest.raises(SystemExit):
+            validator_main.parser().parse_args([*required_arguments(tmp_path), flag, "x"])
 
 
 @pytest.mark.parametrize(
@@ -164,3 +217,47 @@ def test_main_rejects_nonpositive_trust_version_pins(flag, tmp_path):
 def test_main_rejects_unsafe_consensus_settings_before_connecting(flag, value, message, tmp_path):
     with pytest.raises(SystemExit, match=message):
         validator_main.main([*required_arguments(tmp_path), flag, value])
+
+
+@pytest.mark.parametrize("flag", ["--wallet-name", "--wallet-hotkey"])
+def test_half_a_wallet_is_refused_instead_of_silently_ignored(flag, monkeypatch, tmp_path):
+    fake_chain_modules(monkeypatch)
+    monkeypatch.setattr(validator_main, "run", lambda *args: pytest.fail("must not start"))
+    with pytest.raises(SystemExit, match="must be given together"):
+        validator_main.main([*without(required_arguments(tmp_path), flag), "--verify-only"])
+
+
+def fake_chain_modules(monkeypatch):
+    class Subtensor:
+        def __init__(self, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    bittensor = ModuleType("bittensor")
+    bittensor.Subtensor = Subtensor
+    monkeypatch.setitem(sys.modules, "bittensor", bittensor)
+
+
+def test_weight_setter_with_a_missing_hotkey_file_fails_at_startup(monkeypatch, tmp_path):
+    fake_chain_modules(monkeypatch)  # the real bittensor_wallet reads the empty wallet dir
+    monkeypatch.setattr(validator_main, "run", lambda *args: pytest.fail("must not start"))
+    arguments = [*required_arguments(tmp_path), "--wallet-path", str(tmp_path / "wallets")]
+    with pytest.raises(SystemExit, match="hotkey unreadable") as refused:
+        validator_main.main(arguments)
+    assert "default" not in str(refused.value) and "wallets" not in str(refused.value)
+
+
+def test_verify_only_without_hotkey_logs_that_the_chain_preflight_is_skipped(
+    monkeypatch, tmp_path, caplog
+):
+    fake_chain_modules(monkeypatch)
+
+    async def verified(arguments, subtensor, wallet):
+        return TickResult("verified")
+
+    monkeypatch.setattr(validator_main, "run", verified)
+    validator_main.main([*without_hotkey(tmp_path), "--verify-only", "--once"])
+    assert "preflight=skipped" in caplog.text
+    assert "validator permit" in caplog.text

@@ -241,10 +241,10 @@ pass-floor pool among eligible miners and a novelty pool according to new
 improvement; duplicates receive no novelty pool. A miner's Proof score is the
 **sum of per-topic masses**, not a mean of binary passes. The fixed subnet
 split is Bounty 3000 / Proof 7000 bps under algorithm 2; algorithm 3 takes any
-owner-signed split. Legacy owner-signed 2000/8000 deployments retain algorithm 1
-until
-[activation](../how-to/trust-root.md#activate-proportional-bounty).
+split in the challenge profile. Legacy 2000/8000 deployments retain algorithm 1
+until the profile version is bumped
+([Changing emission shares](../../deploy/README.md#changing-emission-shares)).
 
-Actual payment additionally needs signed leaves, a valid gateway seal and
+Actual payment additionally needs recorded leaves, a valid gateway seal and
 validator submission on Bittensor. See [validators](validators.md) and
 [troubleshooting](troubleshoot.md).

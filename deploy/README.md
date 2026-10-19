@@ -84,21 +84,20 @@ Prepare a private directory, owned so container UID 65532 can read it:
 
 ```text
 deploy/secrets/master/
-  gateway.key
-  proof.key
-  bounty.key          # one <id>.key per trusted container challenge
-  operator.token
+  proof.key           # signs Proof topics (miners pin its public key)
+  operator.token      # admin routes and sealing
+  intake.token        # raw leaf intake only; a different value
   proof-vm.token
   proof-vm-ca.pem
 ```
 
-Seeds are raw 32 bytes or 64 hexadecimal characters. Bearers are nonempty opaque values. Files are regular,
+The seed is raw 32 bytes or 64 hexadecimal characters. Nothing else on the master signs: the gateway seals unsigned wire-v2 bundles, so there is no gateway key and no per-challenge leaf key. Bearers are opaque values of at least 32 bytes (for example `openssl rand -hex 32`); `operator.token` and `intake.token` must differ, and the master re-checks both on every request, so a rotation that makes them equal answers 503. Files are regular,
 not hardlinks or symlinks, and mode 0400 or 0600. The Proof VM token and CA are
 needed only when `PROOF_VM_ORCHESTRATOR_URL` is set.
 
-The trust bind defaults to `config/` and contains `owner.pubkey`, both signed
-TOML documents and their adjacent `.sig` files. Verify them before startup with
-the [offline ceremony](../docs/how-to/trust-root.md).
+The config bind defaults to `config/` and holds the unsigned `challenges.toml`
+and `measurements.toml`. The master reads them and the gateway serves them as the
+challenge profile at `GET /v1/trust`; validators build their view from that route.
 
 ```bash
 docker compose --project-directory . --env-file deploy/env/master.env \
@@ -137,16 +136,16 @@ install -d -m 0700 -o 65532 -g 65532 "$dir"
 chown 65532:65532 "$dir"/*.token
 ```
 
-Put the matching leaf seed at `deploy/secrets/master/<id>.key` (its public key
-is the trust-root row) and any challenge settings in the registry `env` table,
+Put any challenge settings in the registry `env` table,
 for example `BOUNTY_BACKEND_PUBLIC_URL`. Challenge-specific secrets, such as
 Bounty's `session.key`, go next to the tokens; see each challenge's operator
 guide ([Bounty](https://github.com/CortexLM/bounty/blob/main/docs/operator.md),
 [OpenType](https://github.com/OpentypeAI/challenge/blob/main/docs/operator.md)).
 
-A registered id that the trust root does not list runs without emission. Use this
-burn-in to check `GET /challenge/<id>/version` and the logs. Then activate it with
-a signed [algorithm 3 profile](../docs/how-to/trust-root.md#activate-container-challenges-algorithm-3).
+A registered id that the challenge profile does not list runs without emission. Use
+this burn-in to check `GET /challenge/<id>/version` and the logs. Then activate it
+with an algorithm 3 profile (`config/challenges-v3.example.toml`), see
+[Changing emission shares](#changing-emission-shares).
 A trusted id that is missing, unhealthy or invalid burns its share.
 
 Operator switches:
@@ -162,13 +161,20 @@ re-reads it every 15 seconds.
 ## Validator
 
 Create `deploy/env/python-validator.env` and set the exact master HTTPS origin,
-netuid, independently pinned gateway public key, chain network, wallet name and
-hotkey, trust-version minimums, live subnet `version_key`, VPC peer bind address
-and private host paths. Optional fallback RPCs are a JSON list of at most eight
+netuid, chain network, live subnet `version_key`, VPC peer bind address and private
+host paths. `role-validator.yml` is verify-only and needs no wallet. Weight setting
+is a separate role, `role-weight-setter.yml`, the only one that also takes the
+validator wallet name and hotkey. The HTTPS gateway is the only anchor for the challenge profile and the bundle; nothing it serves is signed. Optional fallback RPCs are a JSON list of at most eight
 credential-free `wss://` URLs.
 
-The wallet directory is mounted read-only at `/run/wallets`. The validator
-identity directory contains:
+The weight-setter mounts the wallet directory read-only at `/run/wallets`; the
+verify-only role mounts none. The weight-setter's identity directory contains
+the files below and is set with `BASE_WEIGHT_SETTER_IDENTITY_DIR`; the verify-only
+role reads only `tls.crt` and `tls.key` from its own `BASE_VALIDATOR_IDENTITY_DIR`,
+a separate directory without `consensus.key`. Check your env file with
+`uv run python scripts/check_deploy.py --validator-env deploy/env/python-validator.env`;
+it refuses the same path for both roles. Both variables live in the one
+`deploy/env/python-validator.env` passed with `--env-file`:
 
 ```text
 consensus.key
@@ -176,14 +182,18 @@ tls.crt
 tls.key
 ```
 
-The trust directory additionally contains `peers.json`, a JSON object mapping
+The config directory additionally contains `peers.json`, a JSON object mapping
 each validator public-key hex string to one SAN-valid HTTPS origin. Do not run
 two validators with the same wallet: their commit/reveal or rate-limit state can
 conflict.
 
 ```bash
+# verify-only: no hotkey, no consensus seed
 docker compose --project-directory . --env-file deploy/env/python-validator.env \
   -f deploy/compose/role-validator.yml up -d
+# weight setting: the only role with the validator hotkey and consensus seed
+docker compose --project-directory . --env-file deploy/env/python-validator.env \
+  -f deploy/compose/role-weight-setter.yml up -d
 ```
 
 Enable chain submission only after the master returns a current `sealed: true`
@@ -192,11 +202,86 @@ reports `validator outcome=verified` for the same root/vector from historical
 chain state. The unsealed UID0 fallback is a readiness failure, not a weight to
 submit.
 
+`outcome=verified` from the hotkey-less role says nothing about the hotkey: it
+logs `preflight=skipped` and does not check hotkey registration, validator permit
+or the weight rate limit. There is no submission-off switch on the weight-setter,
+so check the hotkey before starting it, on the weight-setter host:
+
+1. Run `WALLET_NAME=... WALLET_HOTKEY=... scripts/run-validator.sh --verify-only`
+   (or `cortex validator --verify-only --once` with `--wallet-name`,
+   `--wallet-hotkey` and `--wallet-path`). With a hotkey, verify-only runs the same
+   chain preflight as a submission and never submits: the hotkey must be
+   registered on the netuid, hold a validator permit, have its weight rate limit
+   elapsed (`blocks_since_last_update > weights_rate_limit`) and the chain limits
+   must accept the sealed vector. A refusal prints `chain_preflight_failed`.
+2. Only then start `role-weight-setter.yml`.
+
+### Upgrading from the single validator role
+
+Before this release `role-validator.yml` held the wallet and submitted. It is now
+verify-only: after the upgrade it keeps running, stays healthy and sets no weights.
+It ignores `BASE_WALLET_NAME`, `BASE_WALLET_HOTKEY`, `BASE_VALIDATOR_WALLETS_DIR`
+and the `consensus.key` in its identity directory (`BASE_GATEWAY_HOTKEY` is removed).
+To keep setting weights, move to `role-weight-setter.yml`: set
+`BASE_WEIGHT_SETTER_IDENTITY_DIR` to the old identity directory (with
+`consensus.key`) and give `BASE_VALIDATOR_IDENTITY_DIR` a new directory with only
+`tls.crt` and `tls.key`. Its state volume `base-weight-setter-state` is new. Started empty, the weight-setter has no
+submission journal and no consensus watermarks: rollback protection restarts
+from the first profile `/v1/trust` serves it, and it does not know the epochs the
+old role already submitted (the chain rate-limit preflight still refuses a second
+set inside the limit). Reconcile any `dispatch_pending` attempt of the old role
+(`cortex validator-reconcile`) before switching, or keep its state by copying the
+volume while both roles are stopped:
+
+```bash
+docker compose --project-directory . --env-file deploy/env/python-validator.env \
+  -f deploy/compose/role-validator.yml down
+docker run --rm --entrypoint cp \
+  -v cortex-validator_base-validator-state:/from:ro \
+  -v cortex-weight-setter_base-weight-setter-state:/var/lib/base \
+  "$CORTEX_IMAGE" -a /from/. /var/lib/base/
+docker compose --project-directory . --env-file deploy/env/python-validator.env \
+  -f deploy/compose/role-weight-setter.yml up -d
+```
+
+The volume names are Compose's `<project>_<volume>` defaults for the `name:` in
+each role file; check yours with `docker volume ls` first. Docker creates the
+target volume on that `docker run` and Compose then warns it was not created by
+Compose; that warning is expected. Copy only an old volume that you no longer
+start: two processes must not share one journal.
+
 To run a validator without Compose, use `scripts/run-validator.sh` from a
-repository clone. It needs `WALLET_NAME`, `WALLET_HOTKEY` and an independently
-pinned `GATEWAY_PUBLIC`, takes trust files from `config/`, and refuses to run
-master-only commands; see the
+repository clone. It needs `WALLET_NAME` and `WALLET_HOTKEY` only to submit weights
+(`--verify-only` needs neither), reads the
+challenge profile from the gateway, and refuses to run master-only commands; see the
 [quick start](../docs/external-miner/validators.md#quick-start-one-script).
+
+## Changing emission shares
+
+The challenge profile is the unsigned `config/challenges.toml` (plus
+`config/measurements.toml`). The master reads it; the gateway is the single source
+of truth and serves it at `GET /v1/trust`.
+
+1. Edit the `[[challenges]]` shares (basis points, sum 10000) in `config/challenges.toml`.
+2. Bump `version`. Adding a third challenge or arbitrary shares needs
+   `version >= 3` (1..64 unique ids summing to 10000); versions 1-2 only
+   accept the 2000/8000 and 3000/7000 splits. Do NOT set `introduced_epoch` in the
+   future: the profile is global, so the master then cannot seal epochs before it
+   and the gateway cannot decode stored seals older than it (`/v1/weights/latest`
+   answers "unsealed" and the emission burns). Keep the existing value, or the epoch
+   of the first bundle the new profile must govern, never above the current epoch.
+   The gateway store refuses a version rollback.
+3. Run `python scripts/check_repo.py`. The master reloads the profile before each
+   epoch emission; the cautious workflow still restarts it between two epochs (just
+   after a seal), because the new shares apply to the next bundle it builds. A change
+   between two seals can make `GET /v1/weights/latest` answer "unsealed" until the
+   next seal; previous bundles stay available by epoch or root. A share-only change
+   is not guaranteed to make sealing fail, so check the next bundle.
+4. Validators read the new profile from `/v1/trust`; no file copy is needed. Keep
+   validators disabled (or accept an `unsealed` answer) until a bundle under the new
+   profile is sealed. Check `GET /v1/trust` shows the new `challenges_version`.
+
+A registered container id still needs a row in `deploy/challenges/registry.toml` to run.
 
 ## Proof VM host
 
@@ -315,12 +400,12 @@ backing up state, pulling that digest and recreating one role.
 
 The Cortex image itself has deliberately no `git pull`, Docker-socket watcher,
 CI SSH deployment or unattended host updater; only challenge containers
-auto-update, through the supervisor gates above, and they never hold a leaf
-seed. Safe automation of the Cortex image must preserve the same operator gate,
+auto-update, through the supervisor gates above, and they never hold a signing
+key. Safe automation of the Cortex image must preserve the same operator gate,
 take a consistent SQLite backup, verify role health plus a fresh sealed bundle,
 and restore both the prior digest and schema-compatible state on failure.
 
 Rollback uses the prior reviewed digest and a schema-compatible state backup.
 Never roll a database backward by deleting rows or replacing the latest seal.
-Trust-root rotations are separate signed ceremonies and do not happen as a side
-effect of an image rollback.
+Challenge profile changes are separate edits of `config/challenges.toml` and do not
+happen as a side effect of an image rollback.

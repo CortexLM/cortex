@@ -28,6 +28,7 @@ def test_deployment_rejects_floating_or_malformed_image_pins(image):
 
 
 def validator_config():
+    """The verify-only validator role: no wallet, no hotkey, no consensus seed."""
     return {
         "services": {
             "validator": {
@@ -55,32 +56,12 @@ def validator_config():
                     "https://master.fixture.invalid",
                     "--netuid",
                     "541",
-                    "--gateway-public",
-                    "e" * 64,
                     "--network",
                     "test",
                     "--fallback-endpoints",
                     "[]",
-                    "--owner-public",
-                    "/etc/base/config/owner.pubkey",
-                    "--challenges",
-                    "/etc/base/config/challenges.toml",
-                    "--measurements",
-                    "/etc/base/config/measurements.toml",
-                    "--minimum-challenges-version",
-                    "1",
-                    "--minimum-measurements-version",
-                    "1",
-                    "--wallet-name",
-                    "fixture",
-                    "--wallet-hotkey",
-                    "validator",
-                    "--wallet-path",
-                    "/run/wallets",
                     "--state-db",
                     "/var/lib/base/validator.sqlite3",
-                    "--consensus-seed-file",
-                    "/run/validator/consensus.key",
                     "--peers",
                     "/etc/base/config/peers.json",
                     "--peer-bind",
@@ -99,6 +80,7 @@ def validator_config():
                     "1",
                     "--max-block-lag",
                     "256",
+                    "--verify-only",
                 ],
                 "ports": [{"target": 8091, "host_ip": "10.0.0.2"}],
                 "tmpfs": ["/tmp:size=32m,mode=1777"],
@@ -107,12 +89,6 @@ def validator_config():
                         "type": "bind",
                         "source": "/fixture/config",
                         "target": "/etc/base/config",
-                        "read_only": True,
-                    },
-                    {
-                        "type": "bind",
-                        "source": "/fixture/wallets",
-                        "target": "/run/wallets",
                         "read_only": True,
                     },
                     {
@@ -126,6 +102,45 @@ def validator_config():
             }
         }
     }
+
+
+def weight_setter_config():
+    config = deepcopy(validator_config())
+    service = config["services"]["validator"]
+    service["command"].remove("--verify-only")
+    service["command"] += [
+        "--wallet-name",
+        "fixture",
+        "--wallet-hotkey",
+        "validator",
+        "--wallet-path",
+        "/run/wallets",
+        "--consensus-seed-file",
+        "/run/validator/consensus.key",
+    ]
+    service["volumes"].append(
+        {"type": "bind", "source": "/fixture/wallets", "target": "/run/wallets", "read_only": True}
+    )
+    return config
+
+
+def test_weight_setter_is_the_only_role_with_a_hotkey():
+    CHECK["validate_compose"](weight_setter_config(), "weight-setter")
+    with pytest.raises(ValueError, match="verify-only|wallet"):
+        CHECK["validate_compose"](weight_setter_config(), "validator")
+    with pytest.raises(ValueError):
+        CHECK["validate_compose"](validator_config(), "weight-setter")
+    leaked = validator_config()
+    leaked["services"]["validator"]["volumes"].append(
+        {"type": "bind", "source": "/w", "target": "/run/wallets", "read_only": True}
+    )
+    with pytest.raises(ValueError, match="only the weight-setter"):
+        CHECK["validate_compose"](leaked, "validator")
+    nameless = weight_setter_config()
+    command = nameless["services"]["validator"]["command"]
+    command[command.index("--wallet-hotkey") + 1] = ""
+    with pytest.raises(ValueError):
+        CHECK["validate_compose"](nameless, "weight-setter")
 
 
 def master_config():
@@ -143,13 +158,11 @@ def master_config():
                 "command": ["master", "--bind", "0.0.0.0", "--port", "8080"],
                 "environment": {
                     "BASE_STATE_DIR": "/var/lib/base",
-                    "BASE_OWNER_PUBKEY_FILE": "/etc/base/config/owner.pubkey",
                     "BASE_CHALLENGES_FILE": "/etc/base/config/challenges.toml",
                     "BASE_MEASUREMENTS_FILE": "/etc/base/config/measurements.toml",
-                    "BASE_GATEWAY_SK_FILE": "/run/secrets/gateway.key",
                     "PROOF_SK_FILE": "/run/secrets/proof.key",
                     "BASE_GATEWAY_ADMIN_TOKEN_FILE": "/run/secrets/operator.token",
-                    "BASE_CHALLENGE_KEYS_DIR": "/run/secrets",
+                    "BASE_GATEWAY_INTAKE_TOKEN_FILE": "/run/secrets/intake.token",
                     "BASE_CHALLENGE_REGISTRY_FILE": "/etc/base/challenges/registry.toml",
                     "BASE_CHALLENGE_SECRETS_DIR": "/run/challenge-secrets",
                 },
@@ -223,6 +236,24 @@ def test_compose_healthcheck_cannot_be_satisfied_by_an_unrelated_command(role):
 
     with pytest.raises(ValueError, match="healthcheck"):
         CHECK["validate_compose"](config, role)
+
+
+@pytest.mark.parametrize(
+    "intake",
+    [None, "/run/secrets/operator.token", "/tmp/intake.token", "inline"],
+)
+def test_master_requires_its_own_audited_intake_bearer_file(intake):
+    config = master_config()
+    environment = config["services"]["gateway"]["environment"]
+    if intake is None:
+        del environment["BASE_GATEWAY_INTAKE_TOKEN_FILE"]
+    elif intake == "inline":
+        environment["BASE_GATEWAY_INTAKE_TOKEN"] = "placeholder"
+    else:
+        environment["BASE_GATEWAY_INTAKE_TOKEN_FILE"] = intake
+
+    with pytest.raises(ValueError, match="credentials"):
+        CHECK["validate_compose"](config, "master")
 
 
 @pytest.mark.parametrize("role", ["master", "validator"])
@@ -343,8 +374,6 @@ def test_docker_control_stays_confined_to_the_secretless_supervisor(mutation):
 @pytest.mark.parametrize(
     ("flag", "value"),
     [
-        ("--minimum-challenges-version", "0"),
-        ("--minimum-measurements-version", "0"),
         ("--version-key", "-1"),
         ("--min-peer-sample", "-1"),
         ("--max-block-lag", "0"),
@@ -607,3 +636,104 @@ def test_committed_bind_mounts_opt_out_of_host_path_creation(role, tmp_path):
 
     with pytest.raises(ValueError, match="bind paths must already exist"):
         CHECK["_bind_sources"](role, tmp_path)
+
+
+def identity_source(config, source):
+    for mount in config["services"]["validator"]["volumes"]:
+        if mount["target"] == "/run/validator":
+            mount["source"] = source
+    return config
+
+
+@pytest.mark.parametrize(
+    ("validator_dir", "setter_dir"),
+    [
+        ("/fixture/identity", "/fixture/identity"),
+        ("/fixture/identity", "/fixture/x/../identity"),
+        ("/fixture/identity", "/fixture/identity/setter"),
+        ("/fixture/identity/setter", "/fixture/identity"),
+    ],
+)
+def test_deploy_check_refuses_one_identity_dir_for_both_validator_roles(validator_dir, setter_dir):
+    with pytest.raises(ValueError, match="identity"):
+        CHECK["validate_role_separation"](
+            identity_source(validator_config(), validator_dir),
+            identity_source(weight_setter_config(), setter_dir),
+        )
+
+
+def test_deploy_check_refuses_one_state_volume_for_both_validator_roles():
+    validator = identity_source(validator_config(), "/fixture/verify-only")
+    setter = identity_source(weight_setter_config(), "/fixture/weight-setter")
+    for config in (validator, setter):
+        for mount in config["services"]["validator"]["volumes"]:
+            if mount["target"] == "/var/lib/base":
+                mount["source"] = "shared-state"
+    with pytest.raises(ValueError, match="state"):
+        CHECK["validate_role_separation"](validator, setter)
+
+
+def test_deploy_check_accepts_separate_identity_dirs_and_the_roles_use_distinct_variables():
+    CHECK["validate_role_separation"](
+        identity_source(validator_config(), "/fixture/verify-only"),
+        identity_source(weight_setter_config(), "/fixture/weight-setter"),
+    )
+    CHECK["validate_role_separation"](
+        identity_source(validator_config(), "/fixture/verify"),
+        identity_source(weight_setter_config(), "/fixture/verify-only"),
+    )
+    validator = (ROOT / "deploy/compose/role-validator.yml").read_text()
+    setter = (ROOT / "deploy/compose/role-weight-setter.yml").read_text()
+    assert "${BASE_VALIDATOR_IDENTITY_DIR:?" in validator
+    assert "${BASE_WEIGHT_SETTER_IDENTITY_DIR:?" in setter
+    assert "BASE_VALIDATOR_IDENTITY_DIR" not in setter
+
+
+def test_rendered_named_volumes_compare_by_their_docker_name():
+    validator = identity_source(validator_config(), "/fixture/verify-only")
+    setter = identity_source(weight_setter_config(), "/fixture/weight-setter")
+    for config, key in ((validator, "base-validator-state"), (setter, "base-weight-setter-state")):
+        for mount in config["services"]["validator"]["volumes"]:
+            if mount["target"] == "/var/lib/base":
+                mount["source"] = key
+        config["volumes"] = {key: {"name": f"{key}-project"}}
+    CHECK["validate_role_separation"](validator, setter)
+    setter["volumes"]["base-weight-setter-state"]["name"] = "base-validator-state-project"
+    with pytest.raises(ValueError, match="state"):
+        CHECK["validate_role_separation"](validator, setter)
+
+
+def test_operator_validator_env_refuses_one_identity_dir_for_both_roles(tmp_path):
+    example = (ROOT / "deploy/env/python-validator.env.example").read_text()
+    shared = example.replace(
+        "BASE_VALIDATOR_IDENTITY_DIR=", f"BASE_VALIDATOR_IDENTITY_DIR={tmp_path}/id"
+    ).replace("BASE_WEIGHT_SETTER_IDENTITY_DIR=", f"BASE_WEIGHT_SETTER_IDENTITY_DIR={tmp_path}/id/")
+    with pytest.raises(ValueError, match="identity"):
+        CHECK["validate_validator_env"](shared)
+    separate = shared.replace(f"={tmp_path}/id/", f"={tmp_path}/setter")
+    CHECK["validate_validator_env"](separate)
+
+
+@pytest.mark.parametrize(
+    ("verify_only", "setter"),
+    [
+        ('"{tmp}/id"', "'{tmp}/id'"),
+        ("{tmp}/id # verify-only", "{tmp}/id"),
+        ("{tmp}/id", "{tmp}/id/setter"),
+        ("{tmp}/id/verify", '"{tmp}/id" # parent of the other'),
+    ],
+    ids=["quoted-equal", "inline-comment", "setter-nested", "verify-only-nested"],
+)
+def test_validator_env_quoted_comment_and_nested_dirs(tmp_path, verify_only, setter):
+    example = (ROOT / "deploy/env/python-validator.env.example").read_text()
+
+    def render(first, second):
+        return example.replace(
+            "BASE_VALIDATOR_IDENTITY_DIR=", f"BASE_VALIDATOR_IDENTITY_DIR={first}"
+        ).replace("BASE_WEIGHT_SETTER_IDENTITY_DIR=", f"BASE_WEIGHT_SETTER_IDENTITY_DIR={second}")
+
+    hostile = render(verify_only.format(tmp=tmp_path), setter.format(tmp=tmp_path))
+    with pytest.raises(ValueError, match="identity"):
+        CHECK["validate_validator_env"](hostile)
+    # Siblings sharing a name prefix are separate directories.
+    CHECK["validate_validator_env"](render(f'"{tmp_path}/id" # ok', f"{tmp_path}/id-setter"))

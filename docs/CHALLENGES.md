@@ -3,21 +3,21 @@
 # Challenge containers
 
 A Cortex challenge is a Docker image that scores miners. The master runs it,
-reads its weights once per completed epoch, signs one leaf per expected hotkey
+reads its weights once per completed epoch, records one leaf per expected hotkey
 and seals the epoch. Validators only verify the sealed bundle and submit it.
 
 ```text
-owner (offline)          challenges.toml v>=3: id, leaf key, emission bps, policy
+owner (offline)          challenges.toml v>=3: id, emission bps, policy
 master operator          challenge-registry.toml: image, channel, resources, env
 challenge-supervisor     pulls, verifies, canaries, runs and updates containers
 challenge container      public routes + GET /internal/v1/get_weights
-master                   polls weights, signs leaves, seals, proxies /challenge/<id>/
+master                   polls weights, records leaves, seals, proxies /challenge/<id>/
 validator                GET /v1/weights/latest + /v1/bundle/<epoch>, recompute, submit
 ```
 
-The owner-signed trust root decides which challenges earn emission and how
+The challenge profile decides which challenges earn emission and how
 much. The unsigned registry only decides what runs. A registered challenge that
-is absent from the trust root runs without emission (burn-in). A trusted
+is absent from the challenge profile runs without emission (burn-in). A trusted
 challenge that is not registered or cannot score emits
 `NoScore(ChallengeInternal)` for every expected hotkey and its share burns.
 
@@ -42,7 +42,7 @@ writable named volume at `/data`. The image must create `/data` owned by
 
 Every file under `/run/secrets/` comes from the host directory
 `<BASE_CHALLENGE_SECRETS_DIR>/<id>/`, mounted read-only. A container never
-receives a leaf-signing seed.
+receives a signing key.
 
 ### Routes
 
@@ -92,7 +92,7 @@ returns:
   that epoch.
 - The call must answer within 180 seconds.
 
-### Leaves the master signs
+### Leaves the master records
 
 Let `E` be the owner-policy participant set of the sealed metagraph, `w_i` the
 returned weight (0 when absent), `W = sum(w_i for i in E)` and
@@ -101,14 +101,14 @@ changes `D`.
 
 | Algorithm | Leaf score for `i` in `E` with `w_i > 0` | Challenge payout |
 | --- | --- | --- |
-| 3 (trust root version >= 3) | `floor(10^12 * w_i / D)` | `share * sum(leaves) / 10^12` |
+| 3 (profile version >= 3) | `floor(10^12 * w_i / D)` | `share * sum(leaves) / 10^12` |
 | 2 (bounty/proof 3000/7000) | `w_i`, which must be an integer below 2^64 | Bounty: `share * min(N, 10) / 10`; Proof: `share` |
 | 1 (legacy bounty/proof 2000/8000) | not scored: every hotkey in `E` gets `NoScore(ChallengeInternal)` | nothing; the share burns |
 
 Every other hotkey in `E` receives `NoScore(NotAttempted)`. A failed or invalid
 call gives `NoScore(ChallengeInternal)` to every hotkey in `E`: one invalid
 weight invalidates the whole answer, so an answer is never partially paid.
-Algorithm 1 signed Bounty's legacy champion score, which no container computes,
+Algorithm 1 scored Bounty's legacy champion score, which no container computes,
 so containers are not scored under it; trust watermarks never return to it. Unpaid mass
 always burns to UID0 and never moves to another challenge. Under algorithm 3,
 Bounty with `full_share_mass = 10` pays exactly what algorithm 2 pays:

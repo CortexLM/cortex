@@ -1,4 +1,4 @@
-"""Gateway sealing boundary: local keys and trust, pinned chain snapshot, durable store."""
+"""Gateway sealing boundary: local trust, pinned chain snapshot, durable store."""
 
 import sqlite3
 from collections.abc import Callable
@@ -6,10 +6,19 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from cortex.errors import ServiceError
-from cortex.protocol import Bundle, Leaf, ProtocolError, TrustRoot, aggregate_leaves, build_bundle
-from cortex.protocol.crypto import BUNDLE_DOMAIN, RAW_WEIGHT_DOMAIN, encode_hotkey, verify_raw
+from cortex.protocol import (
+    BUNDLE_PROTOCOL_VERSION,
+    Bundle,
+    Leaf,
+    ProtocolError,
+    TrustRoot,
+    aggregate_leaves,
+    build_bundle,
+)
+from cortex.protocol.crypto import encode_hotkey
 from cortex.protocol.merkle import merkle_root
 from cortex.protocol.scale import uint
+from cortex.protocol.trust import trust_to_json
 from cortex.validator import ChainSnapshot
 
 from .projection import project, timestamp
@@ -30,7 +39,6 @@ class GatewayService:
         trust: TrustRoot,
         netuid: int,
         chain: SnapshotProvider,
-        gateway_seed: Callable[[], bytes],
         clock: Callable[[], datetime] | None = None,
         chain_endpoint: str | Callable[[], str] = "",
         trust_loader: Callable[[int], TrustRoot] | None = None,
@@ -41,10 +49,11 @@ class GatewayService:
         self.trust = trust
         self.netuid = netuid
         self.chain = chain
-        self.gateway_seed = gateway_seed
         self.clock = clock or (lambda: datetime.now(UTC))
         self.chain_endpoint = chain_endpoint
         self.trust_loader = trust_loader
+        # Epoch the master is between replacing challenge leaves for and sealing, if any.
+        self.sealing: int | None = None
         self.store.accept_trust(trust)
 
     def _chain_endpoint(self) -> str:
@@ -53,6 +62,13 @@ class GatewayService:
         except Exception:
             return ""
         return value if isinstance(value, str) else ""
+
+    def trust_profile(self) -> dict:
+        """Public profile the validators build their local TrustRoot from (TLS is the anchor)."""
+        latest = self.store.latest()
+        if latest is not None:
+            self.refresh_trust(latest.epoch)
+        return trust_to_json(self.trust)
 
     def refresh_trust(self, epoch: int) -> None:
         if self.trust_loader is None:
@@ -63,6 +79,9 @@ class GatewayService:
         self.trust = trust
 
     def accept_leaf(self, leaf: Leaf) -> dict:
+        if self.sealing == leaf.epoch:
+            # Raw intake must not land between the authoritative replacement and the seal.
+            raise ServiceError(409, "epoch sealing in progress")
         self.refresh_trust(leaf.epoch)
         entry = next(
             (entry for entry in self.trust.challenges if entry.id == leaf.challenge_id), None
@@ -73,8 +92,6 @@ class GatewayService:
             leaf.encode()
         except (ValueError, TypeError):
             raise ServiceError(400, "invalid raw weight") from None
-        if not verify_raw(entry.public_key, RAW_WEIGHT_DOMAIN, leaf.payload(), leaf.challenge_sig):
-            raise ServiceError(401, "invalid challenge signature")
         try:
             return self.store.put_leaf(leaf)
         except (sqlite3.Error, ProtocolError):
@@ -103,10 +120,6 @@ class GatewayService:
                 raise ServiceError(400, "invalid challenge snapshot") from None
             if leaf.challenge_id != challenge_id or leaf.epoch != epoch:
                 raise ServiceError(400, "challenge snapshot identity mismatch")
-            if not verify_raw(
-                entry.public_key, RAW_WEIGHT_DOMAIN, leaf.payload(), leaf.challenge_sig
-            ):
-                raise ServiceError(401, "invalid challenge signature")
         try:
             return self.store.replace_challenge_leaves(challenge_id, epoch, leaves)
         except ServiceError:
@@ -130,33 +143,24 @@ class GatewayService:
         bundle = Bundle.decode(stored.encoded)
         if bundle.body.epoch != stored.epoch:
             raise ProtocolError("stored epoch mismatch")
-        # The signature protects the chain root and participant coverage checked at
-        # sealing. Do not reconstruct chain stakes from a uid_map that omits them.
+        # Chain root and participant coverage were checked at sealing. Do not reconstruct
+        # chain stakes from a uid_map that omits them.
         body = bundle.body
         if (
-            body.protocol_version != 1
+            body.protocol_version != BUNDLE_PROTOCOL_VERSION
             or body.algorithm_version != trust.algorithm_version
             or body.epoch < trust.introduced_epoch
             or body.netuid != self.netuid
-            or body.gateway_hotkey != self.trust.gateway_hotkey
-            or body.gateway_hotkey != trust.gateway_hotkey
             or body.emission_shares != trust.shares
             or body.measurements_digest != trust.measurements_digest
-            or not verify_raw(body.gateway_hotkey, BUNDLE_DOMAIN, body.encode(), bundle.gateway_sig)
         ):
             raise ProtocolError("invalid stored seal")
         if merkle_root(leaf.encode() for leaf in body.leaves) != body.merkle_root:
             raise ProtocolError("invalid stored leaf root")
-        keys = {entry.id: entry.public_key for entry in trust.challenges}
+        known = {entry.id for entry in trust.challenges}
         for leaf in body.leaves:
-            if (
-                leaf.epoch != body.epoch
-                or leaf.challenge_id not in keys
-                or not verify_raw(
-                    keys[leaf.challenge_id], RAW_WEIGHT_DOMAIN, leaf.payload(), leaf.challenge_sig
-                )
-            ):
-                raise ProtocolError("invalid stored challenge signature")
+            if leaf.epoch != body.epoch or leaf.challenge_id not in known:
+                raise ProtocolError("invalid stored leaf")
         final = aggregate_leaves(
             body.leaves,
             body.emission_shares,
@@ -251,11 +255,9 @@ class GatewayService:
             snapshot = await self.chain.snapshot(chosen_block, self.netuid)
             if snapshot.block != chosen_block:
                 raise ServiceError(503, "chain snapshot block mismatch")
-            seed = self.gateway_seed()
 
             def build(leaves: tuple[Leaf, ...]) -> Bundle:
                 return build_bundle(
-                    gateway_seed=seed,
                     epoch=epoch,
                     netuid=self.netuid,
                     block_b=chosen_block,

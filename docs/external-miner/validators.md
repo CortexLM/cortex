@@ -7,15 +7,16 @@
 From a clone of this repository, after `uv sync --locked --extra chain`:
 
 ```bash
+scripts/run-validator.sh --verify-only   # no wallet or hotkey needed
+# To submit weights, a registered validator wallet is required:
 export WALLET_NAME=validator WALLET_HOTKEY=default
-export GATEWAY_PUBLIC=<gateway hotkey pinned from an independent source>
-scripts/run-validator.sh --verify-only   # then run without the flag to submit
+scripts/run-validator.sh
 ```
 
 `scripts/run-validator.sh` defaults to `GATEWAY=https://chain.joinbase.ai`,
 `NETUID=100`, `NETWORK=finney` and `STATE_DB=$HOME/.cortex/validator.sqlite3`.
 It checks that `GET $GATEWAY/v1/weights/latest` answers with the expected
-netuid, takes the trust files and minimum versions from `config/`, reads the
+netuid, reads the challenge profile from the gateway, reads the
 subnet `weights_version` from the chain (override with `VERSION_KEY`) and then
 runs `cortex validator`. `--dry-run` prints the command without running it;
 `--once` runs one tick. The script refuses master-only commands and master
@@ -24,40 +25,43 @@ environments. The sections below describe the underlying CLI.
 Cortex runs a centralized authoritative gateway. The master gateway is the
 authority for weights: it serves `/v1/weights/latest`, `/v1/weights/{epoch}`
 and `/v1/bundle/{epoch}`. A Python validator consumes those endpoints,
-independently verifies the bundle against local owner-signed trust and the
-chain, and submits the verified vector on Bittensor. Cross-checking
+independently verifies the bundle against the gateway-served challenge profile
+and the chain, and submits the verified vector on Bittensor. Cross-checking
 authenticated peer roots against other independently-operated validators is an
 opt-in hardening (`--peer-consensus`), off by default.
 
 Validators never run challenge containers or Proof evaluation, rent GPUs or
 receive miner provider credentials; they need no registry, Docker or challenge
-token. Challenge shares come from the owner-signed trust root: legacy
+token. Challenge shares come from the challenge profile the gateway serves at
+`GET /v1/trust` (the master reads `config/challenges.toml`): legacy
 bounty/proof 2000/8000 (algorithm 1), `bounty` 3000 bps and `proof` 7000 bps
 (algorithm 2), or any unique challenge set summing to 10000 bps (algorithm 3,
-see [activation](../how-to/trust-root.md#activate-container-challenges-algorithm-3)).
+see [Changing emission shares](../../deploy/README.md#changing-emission-shares)).
 
 Sealed `GET /v1/weights/latest` responses expose `algorithm_version` from the
-signed bundle. `emission_shares` contains the configured ceilings; each
+bundle. `emission_shares` contains the configured ceilings; each
 `source_challenges[].emission_percent` reflects its allocated share, including
 the ten-report Bounty ramp under algorithm 2 and
 `min(sum(leaves), 10^12) / 10^12` of the share under algorithm 3. Author allocations to UID0 or
-unmapped hotkeys still burn. Validators always recompute from signed leaves;
+unmapped hotkeys still burn. Validators always recompute from the leaves;
 they never trust these display fields as consensus inputs.
 
-## Prepare local trust and identity
+## Prepare identity
 
 Install the [Python package with its chain extra](README.md#installation).
-Obtain the gateway URL and independently pinned gateway public key, plus the
-owner public key and signed `challenges.toml` and `measurements.toml` trust
-files. Detached signatures live beside each TOML as `.toml.sig`. Do not replace
-local trust files with unverified content received from the gateway.
+Obtain the gateway HTTPS URL. The validator builds its challenge profile
+(challenge ids, shares, measurements) from `GET /v1/trust` on that gateway and
+refuses a profile whose version goes backwards. TLS to the gateway is the trust anchor;
+bundles are unsigned and checked by content hashes and the chain.
 
-Use a registered Bittensor hotkey in a standard wallet. The current validator
-CLI also requires `--consensus-seed-file`: a private file containing the
-32-byte hexadecimal seed for **that same hotkey**. Startup refuses a mismatch.
-This additional seed requirement is a current validator limitation; the miner
-CLI's encrypted-wallet adapter and `--dev-seed-file` option do not apply here.
-Do not assume that a derived wallet key has an exportable matching seed.
+Verifying needs no wallet: run with `--verify-only` and no `--wallet-name` or
+`--wallet-hotkey`. Submitting weights needs a registered Bittensor hotkey in a
+standard wallet (`--wallet-name`, `--wallet-hotkey`, optional `--wallet-path`);
+the CLI refuses to submit without them. `--consensus-seed-file`, a private file
+with the 32-byte hexadecimal seed for **that same hotkey**, is required only with
+`--peer-consensus`; startup refuses a mismatch. The miner CLI's encrypted-wallet
+adapter and `--dev-seed-file` option do not apply here. Do not assume that a
+derived wallet key has an exportable matching seed.
 
 The Bittensor wallet signs on-chain extrinsics. The consensus seed signs peer
 roots and dissent using the frozen Cortex context. No gateway wallet or
@@ -102,23 +106,27 @@ not authentication; the expected hotkey signature is required.
 
 ## Run the validator
 
-This command can submit on-chain weights. Set its network, netuid, peer address
-and local paths to the intended deployment before running it:
+Verify-only (no hotkey, never submits):
+
+```bash
+uv run cortex validator --verify-only --once \
+  --gateway "$GATEWAY" --network "$CHAIN_NETWORK" --netuid "$NETUID" \
+  --version-key "$VALIDATOR_VERSION_KEY" --state-db ./state/validator.sqlite3
+```
+
+The command below can submit on-chain weights and is the only form that needs a
+wallet. Set its network, netuid, peer address and local paths to the intended
+deployment before running it:
 
 ```bash
 uv run cortex validator \
-  --gateway "$GATEWAY" --gateway-public "$GATEWAY_PUBLIC_KEY" \
+  --gateway "$GATEWAY" \
   --network "$CHAIN_NETWORK" --netuid "$NETUID" \
   --fallback-endpoints "$CHAIN_FALLBACK_ENDPOINTS_JSON" \
-  --owner-public ./trust/owner.pubkey \
-  --challenges ./trust/challenges.toml \
-  --measurements ./trust/measurements.toml \
-  --minimum-challenges-version "$CHALLENGES_MIN_VERSION" \
-  --minimum-measurements-version "$MEASUREMENTS_MIN_VERSION" \
   --version-key "$VALIDATOR_VERSION_KEY" \
   --wallet-name validator --wallet-hotkey default \
   --consensus-seed-file /private/consensus.key \
-  --peers ./trust/peers.json \
+  --peers ./config/peers.json \
   --state-db ./state/validator.sqlite3 \
   --peer-bind "$PEER_BIND" --peer-port 8091 \
   --peer-tls-certificate /private/tls.crt \
@@ -126,9 +134,8 @@ uv run cortex validator \
 ```
 
 `--wallet-path` defaults to `~/.bittensor/wallets`; polling defaults to
-30 seconds. Trust minimums and the subnet validator version key are required;
-obtain them from the signed production ceremony and live subnet instead of
-guessing. `--fallback-endpoints` is a JSON list of at most eight unique `wss://`
+30 seconds. The subnet validator version key is required; obtain it from the live
+subnet instead of guessing. `--fallback-endpoints` is a JSON list of at most eight unique `wss://`
 RPC origins without credentials, queries or fragments. The Bittensor SDK uses
 them when the primary endpoint fails. Fallbacks are origins only: URL paths are
 also rejected so provider bearer material cannot appear in the process argv or
@@ -147,23 +154,35 @@ never claims its epoch in the journal and never creates an extrinsic. It exits
 successfully only for the exact `verified` outcome; unsealed, changed, degraded
 or peer-unavailable states return a nonzero process status.
 
+Without a hotkey, verify-only logs `preflight=skipped`: it does **not** check
+hotkey registration, validator permit or the weight rate limit, so `verified`
+proves the seal, not that this hotkey can submit. Before the first submission,
+run verify-only once more with `--wallet-name` and `--wallet-hotkey` (both or
+neither; one alone is refused): it then runs the full chain preflight of a
+submission (registered on the netuid, validator permit, rate limit elapsed,
+chain weight limits) without submitting, and a refusal is
+`chain_preflight_failed`. Start the submitting validator only after that run is
+`verified`; it has no submission-off switch. A hotkey file that cannot be read
+stops the process at startup.
+
 For Compose use the Python
 [validator environment example](../../deploy/env/python-validator.env.example)
-and [validator role](../../deploy/compose/role-validator.yml). Keep the SQLite
-state persistent and wallet, identity and trust directories read-only. The
+with the verify-only [validator role](../../deploy/compose/role-validator.yml) (no
+hotkey) or the [weight-setter role](../../deploy/compose/role-weight-setter.yml)
+(the only role with the validator hotkey and consensus seed). Keep the SQLite
+state persistent and wallet, identity and config directories read-only. The
 role points to the master gateway and has no gateway or challenge service.
 
 ## Verify before dispatch
 
 The validator reads `GET /v1/weights/latest`, obtains the corresponding binary
-bundle, then verifies the independently pinned gateway signature and local
-owner-signed trust root. It checks protocol version, epoch and block hash,
-metagraph stakes and UID mapping, challenge keys and emission shares,
+bundle, then verifies the gateway-served challenge profile. It checks protocol version, epoch and block hash,
+metagraph stakes and UID mapping, emission shares,
 participant completeness, measurements and Merkle root. Frozen wire details
 are in the [bundle specification](../BUNDLE_SPEC.md).
 
-Trust files are reloaded, their activation windows and minimum versions are
-checked, and durable watermarks reject rollback. The sealed block must not be
+The profile is refetched each tick, its activation window is checked, and
+durable version watermarks reject rollback. The sealed block must not be
 in the future or more than `--max-block-lag` blocks old (default `256`). Before
 dispatch the validator rechecks both chain snapshot and latest gateway state;
 a reorg or a changed/unsealed latest response prevents submission.
@@ -174,7 +193,7 @@ a reorg or a changed/unsealed latest response prevents submission.
 | Verified sealed Match with `burn_outcome: true`, `uids: [0]`, `weights: [1.0]` | Submit the sealed burn to UID 0 |
 | Verified sealed vector allocating 100% to a nonzero owner or validator-permit UID | Refuse; this is not a burn |
 | Valid inputs (and agreeing peers where required), but gateway's final vector differs | Class A: submit independently recomputed weights and persist signed dissent |
-| A challenge has invalid leaf signatures, wrong leaf epoch or incomplete participants | Quarantine that challenge; submit only if surviving signed mass is at least 5000 bps |
+| A challenge has a wrong leaf epoch or a leaf hash that breaks the Merkle root or incomplete participants | Quarantine that challenge; submit only if surviving mass is at least 5000 bps |
 | Structural failure, unknown challenge, invalid Merkle root, own prior root for the epoch disagrees, or peer disagreement with `--peer-consensus` | Refuse |
 
 Under algorithm 2, quarantining Bounty retains Proof's absolute 7000 bps
@@ -226,6 +245,59 @@ Only `not_broadcast` releases the epoch for a retry. Keep the underlying chain
 receipt or nonce query private; the journal stores its digest. Do not delete the
 database to force a retry.
 
+### Repairing a consensus watermark
+
+The journal keeps rollback watermarks for `challenges_version`,
+`measurements_version` and `epoch`; a lower served value fails with
+`consensus rollback refused`. A profile whose `measurements_version` or
+`challenges_version` is not an integer or exceeds 1000 (`MAX_MEASUREMENTS_VERSION`
+and `MAX_CHALLENGES_VERSION` in `src/cortex/protocol/models.py`) is refused as
+`invalid trust profile` before any watermark moves, so it needs no
+`validator-watermark-reset`; the master refuses to load such a profile too. If a watermark was advanced wrongly (for example a
+profile version published by mistake and then withdrawn), stop the validator and
+lower it locally. The command touches only the state database: no network, no
+wallet.
+
+```bash
+cortex validator-watermark-reset \
+  --state-db /var/lib/base/validator.sqlite3 \
+  --name challenges_version --to 2 --netuid <netuid> --confirm
+```
+
+`/var/lib/base/validator.sqlite3` is the path inside the validator container. With
+the Compose roles, stop the role and run the command in a one-off container of
+the same service, which mounts the same state volume (`role-weight-setter.yml`
+shown; use `role-validator.yml` for the verify-only role):
+
+```bash
+docker compose --project-directory . --env-file deploy/env/python-validator.env \
+  -f deploy/compose/role-weight-setter.yml stop validator
+docker compose --project-directory . --env-file deploy/env/python-validator.env \
+  -f deploy/compose/role-weight-setter.yml run --rm --no-deps validator \
+  validator-watermark-reset --state-db /var/lib/base/validator.sqlite3 \
+  --name <watermark-name> --to <value> --netuid <netuid> --confirm
+docker compose --project-directory . --env-file deploy/env/python-validator.env \
+  -f deploy/compose/role-weight-setter.yml start validator
+```
+
+The command first opens the file read-only and refuses, without writing, a
+file that is not a validator state database or lacks the named watermark.
+Stopping the validator first is required. The `state db locked; stop the
+validator first` error is only a best-effort guard: it triggers while the
+validator is inside a journal write, not between ticks, so a reset against a
+running validator can succeed and then be undone by its next tick. `--netuid` refuses a journal recorded for another
+subnet; a journal that records no netuid skips that check and says so.
+
+It refuses without `--confirm`, refuses a name outside those three, a negative
+value, a watermark that was never set and any value above the current one (it
+only lowers or repairs). It prints the old and new values and appends an audit
+row to `consensus_watermark_resets(name, old_value, new_value, at)` in the same
+transaction.
+
+**Warning:** resetting below a version or epoch this validator really accepted
+re-opens rollback to that value. Confirm the correct value with the master
+operator first.
+
 The peer listener exposes:
 
 | Route | Response |
@@ -238,7 +310,7 @@ The peer listener exposes:
 
 Consensus uses sr25519 signing context `base-sr25519-v1` and SCALE-encoded
 domain/payload vectors. Exact domains are `base-root-v1`, `base-dissent-v1`,
-`base-bundle-v1`, `base-rawweight-v1` and `base-trustroot-v1`. Generic Substrate
+(`base-bundle-v1`, `base-rawweight-v1` and `base-trustroot-v1` are retired). Generic Substrate
 `wallet.sign()` signatures cannot replace these signatures.
 
 The Python metagraph projection uses chain-provided integer stakes. Validate

@@ -15,7 +15,7 @@ files, provider keys, Bounty sessions or private artifacts in diagnostics.
 | `Bittensor hotkey unavailable` | Check wallet name, hotkey name, wallet root and the password file; loading does not create keys |
 | Encrypted hotkey password file required | Add miner `--wallet-password-file` before the action; the miner does not prompt interactively |
 | Credential file unavailable or not private | Use a regular, non-symlink file with no group/other permissions, such as `0600` |
-| Proof owner public key required | Add miner `--proof-public` with the independently pinned Proof key, not the gateway key |
+| Proof owner public key required | Add miner `--proof-public` with the independently pinned Proof topic key (the gateway has no key) |
 | Invalid Proof signature from `wallet.sign()` | Proof needs Cortex context `base-sr25519-v1`, domain `base-proof-submit-v1`; use the Python wallet signer |
 | HTTP connection failure | Verify the selected gateway URL and TLS; there is no implicit deployment URL |
 
@@ -81,7 +81,7 @@ digest even when its extracted files look identical.
 | `503` credential vault or stored artifact error | Required private inputs are unavailable; the operator must restore or reconcile the accepted job |
 | `503` teardown or evaluation infrastructure failure | No score may be fabricated; failed work may still have a durable job and consumed nonce |
 | `201` with `queued` | The topic explicitly sets `params.defer_scoring: "true"`; the response is not a completed score |
-| `201` with `accepted` but no payment | Topic payout, signed leaves, sealing and chain submission are additional stages |
+| `201` with `accepted` but no payment | Topic payout, leaves, sealing and chain submission are additional stages |
 | POST times out or client disconnects | Accepted work continues; check its returned id or reconcile with the operator before resubmitting |
 
 Normal Proof POST responses are **201-after-score**. The CLI waits 7200 seconds
@@ -105,6 +105,7 @@ catalog; follow the documentation and checklist in the current signed topic.
 | Missing/invalid peer sample | Configure independently selected HTTPS peers with metagraph `validator_permit`; do not disable verification |
 | Conflicting signed roots or equivocation | Preserve the journal and signed evidence; reconcile the network state |
 | Stale block, future epoch, reorg or changed latest | Wait for a current valid seal; do not force-submit the old one |
+| `consensus rollback refused` | The gateway serves a lower `challenges_version`, `measurements_version` or epoch than this validator already accepted. Ask the master operator first; only if the higher value was advanced wrongly, lower it with `cortex validator-watermark-reset` (see [the validator guide](validators.md#repairing-a-consensus-watermark)). Do not delete the database |
 | Ambiguous chain dispatch remains pending | Reconcile inclusion/finalization before retrying; retain the SQLite journal |
 | CRv4 or drand failure | Do not fall back to public weights while chain commit-reveal is enabled |
 | `/v1/attest/*` returns `503` and `verified: false` | DCAP verification is not implemented in the Python validator |

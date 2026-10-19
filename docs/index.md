@@ -19,7 +19,7 @@ Start here: [Cortex ecosystem](ecosystem.md) and [Validator quickstart](validato
 ## Run a validator
 
 - [Validator quickstart](validator-quickstart.md): one script, verify-only mode and FAQ.
-- [Validator guide](external-miner/validators.md): the underlying CLI and trust files.
+- [Validator guide](external-miner/validators.md): the underlying CLI, the gateway-served challenge profile and preflight.
 
 ## Mine
 
@@ -30,7 +30,6 @@ Start here: [Cortex ecosystem](ecosystem.md) and [Validator quickstart](validato
 ## Operate
 
 - [Configuration](reference/configuration.md): Python services and credential files.
-- [Trust-root ceremony](how-to/trust-root.md): generate keys, sign and verify operator documents.
 - [Build a Proof guest rootfs](how-to/build-guest-rootfs.md): convert the pinned Python guest stage into measured ext4 bytes.
 - [Deployment](../deploy/README.md): master, validator and dedicated KVM host.
 

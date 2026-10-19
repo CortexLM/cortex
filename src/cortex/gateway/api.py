@@ -1,4 +1,4 @@
-"""Master gateway routes; only sealing requires the rotating operator bearer."""
+"""Master gateway routes; raw intake and sealing each require their own rotating bearer."""
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
@@ -21,12 +21,15 @@ def _error(error: ServiceError) -> JSONResponse:
     return JSONResponse(body, status_code=error.status)
 
 
-def create_router(service: GatewayService, operator_auth: OperatorAuth) -> APIRouter:
+def create_router(
+    service: GatewayService, operator_auth: OperatorAuth, intake_auth: OperatorAuth
+) -> APIRouter:
     router = APIRouter(tags=["gateway"])
 
     @router.post("/v1/weights/raw", status_code=202)
     async def raw_weight(request: Request):
         try:
+            intake_auth.require(request)
             body = RawWeightRequest.model_validate(decode_json(await bounded_body(request, 4096)))
             return service.accept_leaf(body.to_leaf())
         except ValidationError:
@@ -47,6 +50,13 @@ def create_router(service: GatewayService, operator_auth: OperatorAuth) -> APIRo
             )
         except ValidationError:
             return _error(ServiceError(400, "invalid seal body"))
+        except ServiceError as error:
+            return _error(error)
+
+    @router.get("/v1/trust")
+    async def trust():
+        try:
+            return service.trust_profile()
         except ServiceError as error:
             return _error(error)
 

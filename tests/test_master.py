@@ -1,5 +1,6 @@
 import asyncio
 import io
+import secrets
 import tarfile
 from dataclasses import replace
 from hashlib import sha256
@@ -13,7 +14,16 @@ from cortex.errors import ServiceError
 from cortex.master import BittensorEpochProvider, EpochClock, EpochState, build_master
 from cortex.proof.models import Baseline, Endpoint, EvaluationReport, Metric, Rule, Topic, digest
 from cortex.proof.service import Readiness, sign_submission, sign_topic
-from cortex.protocol import ChallengeEntry, MetagraphRow, NoScore, NoScoreReason, Score, TrustRoot
+from cortex.protocol import (
+    Bundle,
+    ChallengeEntry,
+    Leaf,
+    MetagraphRow,
+    NoScore,
+    NoScoreReason,
+    Score,
+    TrustRoot,
+)
 from cortex.protocol.crypto import public_key
 from cortex.validator import ChainSnapshot, SubmissionJournal, Validator
 
@@ -81,17 +91,14 @@ def master_config(tmp_path):
         path.chmod(0o600)
         return path
 
-    secret("bounty.key", bytes([1]) * 32)
     return MasterConfig(
         netuid=541,
         state_dir=tmp_path / "state",
-        owner_public_file=tmp_path / "owner.pubkey",
         challenges_file=tmp_path / "challenges.toml",
         measurements_file=tmp_path / "measurements.toml",
-        gateway_seed_file=secret("gateway.key", bytes([7]) * 32),
         proof_seed_file=secret("proof.key", bytes([2]) * 32),
-        operator_token_file=secret("operator.token", b"fixture-operator-token"),
-        challenge_keys_dir=tmp_path,
+        operator_token_file=secret("operator.token", b"fixture-operator-token-0123456789abcdef"),
+        intake_token_file=secret("intake.token", b"fixture-intake-token-0123456789abcdef"),
         challenge_secrets_dir=tmp_path / "challenge-secrets",
     )
 
@@ -102,11 +109,10 @@ async def master(tmp_path):
     chain = FakeEpochChain()
     trust = TrustRoot(
         (
-            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 2000),
-            ChallengeEntry(b"proof", public_key(bytes([2]) * 32), 8000),
+            ChallengeEntry(b"bounty", 2000),
+            ChallengeEntry(b"proof", 8000),
         ),
         sha256(b"\x00").digest(),
-        public_key(bytes([7]) * 32),
     )
     runtime = await build_master(config, chain=chain, epochs=chain, trust=trust)
     yield SimpleNamespace(runtime=runtime, config=config, chain=chain, trust=trust)
@@ -192,11 +198,9 @@ async def test_latest_projection_tracks_the_sdk_active_fallback_endpoint(master,
 
 
 async def test_restart_recovers_epoch_pin_and_replaces_stale_positive_with_internal_burn(master):
-    from cortex.protocol import sign_leaf
-
     runtime = master.runtime
     await runtime.emitter.tick()
-    scored = sign_leaf(bytes([2]) * 32, b"proof", master.chain.rows[1].hotkey, 12, Score(100))
+    scored = Leaf(b"proof", master.chain.rows[1].hotkey, 12, Score(100))
     runtime.gateway.accept_leaf(scored)
     restarted = await build_master(
         master.config, chain=master.chain, epochs=master.chain, trust=master.trust
@@ -396,41 +400,80 @@ async def test_private_routes_require_rotating_file_and_master_routes_are_compos
         assert (await client.get("/challenge/bounty/v1/status")).status_code == 404
         drain = "/v1/admin/proof/drain"
         assert (await client.post(drain)).status_code == 401
-        master.config.operator_token_file.write_text("rotated-token")
+        master.config.operator_token_file.write_text("rotated-token-0123456789abcdef-xyz")
         assert (
-            await client.post(drain, headers={"authorization": "Bearer rotated-token"})
+            await client.post(
+                drain, headers={"authorization": "Bearer rotated-token-0123456789abcdef-xyz"}
+            )
         ).status_code != 401
+        raw = {"authorization": "Bearer rotated-token-0123456789abcdef-xyz"}
+        assert (await client.post("/v1/weights/raw", json={}, headers=raw)).status_code == 401
+        intake = {"authorization": "Bearer fixture-intake-token-0123456789abcdef"}
+        assert (await client.post("/v1/weights/raw", json={}, headers=intake)).status_code == 400
+        seal = await client.post("/v1/admin/seal", json={"epoch": 12}, headers=intake)
+        assert seal.status_code == 401
+
+
+def fixture_trust():
+    return TrustRoot(
+        (ChallengeEntry(b"bounty", 2000), ChallengeEntry(b"proof", 8000)),
+        sha256(b"\x00").digest(),
+    )
+
+
+@pytest.mark.parametrize("shared", ["same-file", "same-value"])
+async def test_master_refuses_one_bearer_for_intake_and_sealing(tmp_path, shared):
+    config = master_config(tmp_path)
+    if shared == "same-file":
+        config = replace(config, intake_token_file=config.operator_token_file)
+    else:
+        config.intake_token_file.write_bytes(b"fixture-operator-token-0123456789abcdef\n")
+    chain = FakeEpochChain()
+    with pytest.raises(ServiceError, match="must differ"):
+        await build_master(config, chain=chain, epochs=chain, trust=fixture_trust())
+
+
+async def test_master_refuses_a_missing_or_shared_mode_intake_bearer(tmp_path):
+    config = master_config(tmp_path)
+    chain = FakeEpochChain()
+    config.intake_token_file.chmod(0o644)
+    with pytest.raises(ServiceError, match="private"):
+        await build_master(config, chain=chain, epochs=chain, trust=fixture_trust())
+    config.intake_token_file.unlink()
+    with pytest.raises(ServiceError, match="unavailable"):
+        await build_master(config, chain=chain, epochs=chain, trust=fixture_trust())
 
 
 def test_private_seed_rejects_symlinks_permissions_and_accepts_raw_or_hex(tmp_path):
     config = master_config(tmp_path)
-    assert read_seed(config.gateway_seed_file) == bytes([7]) * 32
-    config.gateway_seed_file.write_text("07" * 32)
-    assert read_seed(config.gateway_seed_file) == bytes([7]) * 32
+    assert read_seed(config.proof_seed_file) == bytes([2]) * 32
+    config.proof_seed_file.write_text("02" * 32)
+    assert read_seed(config.proof_seed_file) == bytes([2]) * 32
     link = tmp_path / "link"
-    link.symlink_to(config.gateway_seed_file)
+    link.symlink_to(config.proof_seed_file)
     with pytest.raises(ServiceError):
         read_seed(link)
-    config.gateway_seed_file.chmod(0o644)
+    config.proof_seed_file.chmod(0o644)
     with pytest.raises(ServiceError):
-        read_seed(config.gateway_seed_file)
+        read_seed(config.proof_seed_file)
 
 
 def test_config_base_aliases_fail_closed_and_do_not_accept_inline_secret_values():
     env = {
         "BASE_NETUID": "541",
-        "BASE_GATEWAY_SK_FILE": "/private/gateway",
         "PROOF_SK_FILE": "/private/proof",
         "BASE_GATEWAY_ADMIN_TOKEN_FILE": "/private/token",
-        "BASE_CHALLENGE_KEYS_DIR": "/private",
+        "BASE_GATEWAY_INTAKE_TOKEN_FILE": "/private/intake",
     }
     alias = {key.replace("BASE_", "CORTEX_"): value for key, value in env.items()}
     assert MasterConfig.from_env(env) == MasterConfig.from_env(alias)
     with pytest.raises(ValueError, match="conflicting"):
         MasterConfig.from_env({**env, "CORTEX_NETUID": "1"})
-    del env["BASE_GATEWAY_SK_FILE"]
-    env["BASE_GATEWAY_SK"] = "secret-inline-material"
-    with pytest.raises(ValueError, match="BASE_GATEWAY_SK_FILE"):
+    with pytest.raises(ValueError, match="BASE_GATEWAY_INTAKE_TOKEN_FILE"):
+        MasterConfig.from_env({k: v for k, v in env.items() if "INTAKE" not in k})
+    del env["PROOF_SK_FILE"]
+    env["PROOF_SK"] = "secret-inline-material"
+    with pytest.raises(ValueError, match="PROOF_SK_FILE"):
         MasterConfig.from_env(env)
 
 
@@ -455,9 +498,6 @@ async def decay_master(tmp_path):
     from cortex.challenges.registry import parse_registry
 
     config = master_config(tmp_path)
-    key = tmp_path / "opentype.key"
-    key.write_bytes(bytes([3]) * 32)
-    key.chmod(0o600)
     entries = []
     for slug in ("bounty", "opentype"):
         token = config.challenge_secrets_dir / slug / "internal.token"
@@ -474,11 +514,10 @@ async def decay_master(tmp_path):
     chain = FakeEpochChain()
     trust = TrustRoot(
         (
-            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 3000),
-            ChallengeEntry(b"opentype", public_key(bytes([3]) * 32), 7000),
+            ChallengeEntry(b"bounty", 3000),
+            ChallengeEntry(b"opentype", 7000),
         ),
         sha256(b"\x00").digest(),
-        public_key(bytes([7]) * 32),
         challenges_version=3,
     )
     seen = []
@@ -515,12 +554,10 @@ async def decay_master(tmp_path):
 async def test_missing_or_invalid_epoch_time_postpones_before_any_leaves_or_seal(
     decay_master, timestamp
 ):
-    from cortex.protocol import sign_leaf
-
     master = decay_master
     runtime = master.runtime
     await runtime.emitter.tick()
-    original = sign_leaf(bytes([1]) * 32, b"bounty", master.chain.rows[1].hotkey, 12, Score(123))
+    original = Leaf(b"bounty", master.chain.rows[1].hotkey, 12, Score(123))
     runtime.gateway.accept_leaf(original)
     before = runtime.gateway.store.leaves(12)
     master.chain.timestamp_seconds = timestamp
@@ -584,9 +621,7 @@ async def test_historical_epoch_time_reaches_http_and_decayed_mass_seals_without
 async def test_bounty_only_algorithm_three_still_seals_without_epoch_time(decay_master):
     master = decay_master
     runtime = master.runtime
-    runtime.gateway.trust = replace(
-        master.trust, challenges=(ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 10000),)
-    )
+    runtime.gateway.trust = replace(master.trust, challenges=(ChallengeEntry(b"bounty", 10000),))
     master.chain.timestamp_seconds = None
     await runtime.emitter.tick()
     master.chain.state = EpochState(13, 100, 105)
@@ -594,3 +629,182 @@ async def test_bounty_only_algorithm_three_still_seals_without_epoch_time(decay_
     assert len(master.seen) == 1
     assert dict(master.seen[0].url.params) == {"epoch": "12"}
     assert runtime.gateway.latest()["sealed"] is True
+
+
+async def test_intake_bearer_cannot_inject_a_leaf_while_the_epoch_is_being_sealed(master):
+    from cortex.gateway import leaf_request
+
+    runtime, chain = master.runtime, master.chain
+    intake = {"authorization": "Bearer fixture-intake-token-0123456789abcdef"}
+    operator = {"authorization": "Bearer fixture-operator-token-0123456789abcdef"}
+    hotkey = chain.rows[0].hotkey
+    snapshot, posted, open_epoch = chain.snapshot, [], []
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app()), base_url="https://master"
+    ) as client:
+
+        async def racing_snapshot(block, netuid):
+            # Each chain read of the completed-epoch cycle is an await an intake can land in.
+            forged = leaf_request(Leaf(b"bounty", hotkey, 12, Score(10**9 + len(posted))))
+            posted.append(await client.post("/v1/weights/raw", json=forged, headers=intake))
+            # The open epoch is not part of this seal and stays writable.
+            tip = leaf_request(Leaf(b"bounty", hotkey, 13, Score(len(posted))))
+            open_epoch.append(await client.post("/v1/weights/raw", json=tip, headers=intake))
+            return await snapshot(block, netuid)
+
+        await runtime.emitter.tick()
+        chain.state = EpochState(13, 100, 105)
+        chain.snapshot = racing_snapshot
+        assert await runtime.emitter.tick() == [12]
+        chain.snapshot = snapshot
+        # Pin and pin re-read precede the challenge replacement, which overwrites them;
+        # the seal's own snapshot read is inside the window.
+        assert [response.status_code for response in posted] == [202, 202, 409]
+        assert posted[-1].json() == {"error": "epoch sealing in progress"}
+        assert [response.status_code for response in open_epoch] == [202, 202, 202]
+        sealed = Bundle.decode(runtime.gateway.store.bundle(12).encoded)
+        leaves = sealed.body.leaves
+        assert all(leaf.score == NoScore(NoScoreReason.CHALLENGE_INTERNAL) for leaf in leaves)
+        # Outside the window the same bearer is accepted for the open epoch.
+        open_leaf = leaf_request(Leaf(b"bounty", hotkey, 13, Score(50)))
+        response = await client.post("/v1/weights/raw", json=open_leaf, headers=intake)
+        assert response.status_code == 202
+        # Sealing remains the operator's alone.
+        body = {"epoch": 12, "block_b": sealed.body.block_b}
+        assert (await client.post("/v1/admin/seal", json=body, headers=intake)).status_code == 401
+        assert (await client.post("/v1/admin/seal", json=body, headers=operator)).status_code == 200
+
+
+async def test_emit_window_refuses_intake(master):
+    from cortex.gateway import leaf_request
+
+    runtime, chain = master.runtime, master.chain
+    intake = {"authorization": "Bearer fixture-intake-token-0123456789abcdef"}
+    forged = leaf_request(Leaf(b"bounty", chain.rows[0].hotkey, 12, Score(10**9)))
+    backend, posted = runtime.emitter.proof.backend, []
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app()), base_url="https://master"
+    ) as client:
+
+        class RacingBackend:
+            async def readiness(self):
+                # Proof readiness is awaited inside _emit, after bounty's leaves are replaced.
+                posted.append(await client.post("/v1/weights/raw", json=forged, headers=intake))
+                return await backend.readiness()
+
+        await runtime.emitter.tick()
+        chain.state = EpochState(13, 100, 105)
+        runtime.emitter.proof.backend = RacingBackend()
+        assert await runtime.emitter.tick() == [12]
+        runtime.emitter.proof.backend = backend
+    assert [response.status_code for response in posted] == [409]
+    leaves = Bundle.decode(runtime.gateway.store.bundle(12).encoded).body.leaves
+    assert all(leaf.score == NoScore(NoScoreReason.CHALLENGE_INTERNAL) for leaf in leaves)
+
+
+async def test_rotated_intake_bearer_is_rechecked_at_the_32_byte_boundary(master):
+    from cortex.gateway import leaf_request
+
+    runtime, chain = master.runtime, master.chain
+    leaf = leaf_request(Leaf(b"bounty", chain.rows[0].hotkey, 12, Score(7)))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app()), base_url="https://master"
+    ) as client:
+        statuses = []
+        for value in ("i" * 31, "i" * 32):
+            master.config.intake_token_file.write_text(value)
+            headers = {"authorization": f"Bearer {value}"}
+            response = await client.post("/v1/weights/raw", json=leaf, headers=headers)
+            statuses.append(response.status_code)
+    assert statuses == [503, 202]
+
+
+async def test_a_failed_seal_reopens_intake_for_its_epoch(master):
+    from cortex.gateway import leaf_request
+
+    runtime, chain = master.runtime, master.chain
+    intake = {"authorization": "Bearer fixture-intake-token-0123456789abcdef"}
+    leaf = leaf_request(Leaf(b"bounty", chain.rows[0].hotkey, 12, Score(7)))
+    snapshot, calls, posted = chain.snapshot, [], []
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(runtime.app()), base_url="https://master"
+    ) as client:
+
+        async def failing_seal_snapshot(block, netuid):
+            calls.append(block)
+            if len(calls) == 3:  # the seal's own read
+                posted.append(await client.post("/v1/weights/raw", json=leaf, headers=intake))
+                raise OSError("chain unavailable")
+            return await snapshot(block, netuid)
+
+        await runtime.emitter.tick()
+        chain.state = EpochState(13, 100, 105)
+        chain.snapshot = failing_seal_snapshot
+        with pytest.raises(ServiceError, match="seal inputs unavailable"):
+            await runtime.emitter.tick()
+        chain.snapshot = snapshot
+        assert [response.status_code for response in posted] == [409]
+        assert runtime.gateway.store.bundle(12) is None
+        response = await client.post("/v1/weights/raw", json=leaf, headers=intake)
+        assert response.status_code == 202
+
+
+def bearer(path, value):
+    path.write_text(value)
+    path.chmod(0o600)
+
+
+async def test_a_rotation_to_one_bearer_is_refused_on_every_private_route(master):
+    shared = secrets.token_hex(32)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(master.runtime.app()), base_url="https://master"
+    ) as client:
+        bearer(master.config.operator_token_file, shared)
+        bearer(master.config.intake_token_file, shared)
+        headers = {"authorization": f"Bearer {shared}"}
+        for path in ("/v1/weights/raw", "/v1/admin/seal", "/v1/admin/proof/drain"):
+            response = await client.post(path, json={}, headers=headers)
+            assert response.status_code == 503, path
+            assert response.json() == {"error": "intake and admin bearers must differ"}
+
+
+@pytest.mark.parametrize(
+    ("which", "label"),
+    [
+        ("operator_token_file", "BASE_GATEWAY_ADMIN_TOKEN_FILE"),
+        ("intake_token_file", "BASE_GATEWAY_INTAKE_TOKEN_FILE"),
+    ],
+)
+async def test_a_short_bearer_is_refused_at_startup_and_after_rotation(tmp_path, which, label):
+    config = master_config(tmp_path)
+    short = secrets.token_hex(15) + "  \n"  # 30 bytes once stripped
+    bearer(getattr(config, which), short)
+    chain = FakeEpochChain()
+    with pytest.raises(ServiceError, match=f"^{label}: bearer must be at least 32 bytes$"):
+        await build_master(config, chain=chain, epochs=chain, trust=fixture_trust())
+
+    (tmp_path / "rotated").mkdir()
+    config = master_config(tmp_path / "rotated")
+    runtime = await build_master(config, chain=chain, epochs=chain, trust=fixture_trust())
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(runtime.app()), base_url="https://master"
+        ) as client:
+            bearer(getattr(config, which), short)
+            headers = {"authorization": f"Bearer {short.strip()}"}
+            path = "/v1/admin/seal" if which == "operator_token_file" else "/v1/weights/raw"
+            response = await client.post(path, json={}, headers=headers)
+            assert response.status_code == 503
+            assert response.json() == {"error": f"{label}: bearer must be at least 32 bytes"}
+            assert short.strip() not in response.text
+    finally:
+        await runtime.close()
+
+
+async def test_a_missing_bearer_names_its_setting(tmp_path):
+    config = master_config(tmp_path)
+    config.intake_token_file.unlink()
+    chain = FakeEpochChain()
+    with pytest.raises(ServiceError) as raised:
+        await build_master(config, chain=chain, epochs=chain, trust=fixture_trust())
+    assert raised.value.reason == "BASE_GATEWAY_INTAKE_TOKEN_FILE: credential file unavailable"

@@ -28,6 +28,6 @@ Substrate signing context, not the Cortex one. `bounty-report` posts to
 `/challenge/bounty/v1/reports`. Only a report that CortexLM/backend publishes as
 `valid` earns weight: one point per valid report. Bounty pays
 `share * min(N / 10, 1)`, split in proportion to each author's count, and the
-rest burns to UID0. The master turns the container's weights into signed leaves
+rest burns to UID0. The master turns the container's weights into leaves
 under the [challenge contract](../CHALLENGES.md). Validators never contact the
 container.

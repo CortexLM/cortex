@@ -8,7 +8,7 @@ canonical documentation instead of duplicating runbooks.
 Cortex is an autonomous research subnet on Bittensor. Proof runs inside the
 master. Every other challenge is a Docker container that implements
 [the challenge contract](docs/CHALLENGES.md); the master loads it from an
-operator registry and signs its leaves.
+operator registry and records its leaves.
 
 | Challenge | Source | Purpose |
 | --- | --- | --- |
@@ -16,13 +16,13 @@ operator registry and signs its leaves.
 | `bounty` | [CortexLM/bounty](https://github.com/CortexLM/bounty) container | useful vulnerability reports, scored from the CortexLM/backend public feed |
 | `opentype` | [OpentypeAI/challenge](https://github.com/OpentypeAI/challenge) container | exact-gold typed-decision duels on DiffusionGemma weights |
 
-Shares always sum to 10,000 basis points. Algorithm 1 is the legacy signed
+Shares always sum to 10,000 basis points. Algorithm 1 is the legacy
 bounty/proof 2,000/8,000 profile; algorithm 2 is bounty/proof 3,000/7,000
 (document version >=2); algorithm 3 (document version >=3) admits any 1..64
 unique ids and pays each challenge `share * min(sum(leaves), 10^12) / 10^12`.
-Activation is an offline owner ceremony. Design, Prism and Relearn are retired
+Activation is a profile version bump on the master (`config/challenges.toml`). Design, Prism and Relearn are retired
 products and their documentation has been removed. No active code, service,
-trust-root row or leaf may register them.
+challenge profile row or leaf may register them.
 
 Start with [the architecture](docs/ARCHITECTURE.md),
 [Proof](docs/PROOF.md), [challenge containers](docs/CHALLENGES.md) and
@@ -34,7 +34,7 @@ reproduction or on-chain payment.
 
 | Path | Responsibility |
 | --- | --- |
-| `src/cortex/protocol/` | frozen SCALE, signatures, Merkle and aggregation |
+| `src/cortex/protocol/` | frozen v2 SCALE (unsigned wire), Merkle and aggregation |
 | `src/cortex/gateway/` | durable leaves, immutable seals and burn fallback |
 | `src/cortex/validator/` | independent recomputation, root consensus and chain dispatch |
 | `src/cortex/challenges/` | container registry, weights client, public proxy and auto-updating supervisor |
@@ -48,10 +48,18 @@ The working branch is `main`. Production releases are annotated `v*.*.*` tags.
 
 ## Consensus and compatibility
 
-- Preserve `BASE_*` names, deployed compatibility paths and every `base-*-v1`
-  signature domain. `CORTEX_*` is an accepted master alias only.
-- Do not edit `docs/BUNDLE_SPEC.md`. Its exact SHA-256 value is checked by
-  `scripts/check_repo.py`.
+- Wire format v2 (no signatures on leaves, bundle or gateway) was decided by the
+  founder on 2026-10-19. `docs/BUNDLE_SPEC.md` was changed on purpose by the PR
+  that introduced v2; the `base-trustroot-v1`, `base-rawweight-v1` and
+  `base-bundle-v1` preimages are retired. `tests/protocol/vectors/rust_wire.json`
+  keeps only what still exists; `tests/protocol/vectors/wire_v2.json` is generated
+  by `scripts/gen_wire_vector.py`.
+- Preserve `BASE_*` names, deployed compatibility paths and every remaining
+  `base-*-v1` signature domain. `CORTEX_*` is an accepted master alias only.
+- Do not edit the v2 `docs/BUNDLE_SPEC.md`. Its exact SHA-256 value is pinned in
+  `FROZEN_SPECS` in `scripts/check_repo.py`; do not weaken that check. Any new
+  wire change needs explicit maintainer approval and a second-implementation or
+  independently pinned vector when one exists.
 - Production image references are digest-only. Never invent a digest; an empty
   or unknown pin remains fail-closed.
 - Secrets are private files. Do not put seeds, mnemonics, bearer values, BYOK,
@@ -69,24 +77,24 @@ or permit UID is not a submit path.
 
 | Key or token | Role |
 | --- | --- |
-| owner seed | signs challenge and measurement trust documents offline |
-| gateway seed | signs immutable epoch bundles |
-| challenge seed | `<id>.key`; signs that container challenge's leaves and must match the trust root |
-| Proof seed | signs Proof topics and leaves and must match the trust root |
-| operator bearer | protects master administrative routes |
+| Proof seed | signs Proof topics (`PROOF_SK_FILE`); no bundle, leaf or gateway key exists |
+| operator bearer | protects master administrative routes, including sealing (`/v1/admin/seal`) |
+| intake bearer | protects raw leaf intake (`/v1/weights/raw`) only; must differ from the operator bearer |
 | VM orchestrator bearer | authenticates master to the dedicated KVM host; not a wallet |
-| validator hotkey | signs root/dissent evidence and Bittensor submissions |
+| validator hotkey | weight-setting role only: signs root/dissent evidence and Bittensor submissions |
 | challenge internal token | master bearer for a container's `get_weights`; never a signing key |
 | miner hotkey | signs Bounty pairing or Proof submission payloads |
 
-Do not conflate gateway sealing, master ownership and validator chain signing.
-Follow [the trust-root ceremony](docs/how-to/trust-root.md).
+Operator and intake bearers are at least 32 bytes and re-checked on every request.
+
+Do not conflate gateway sealing (unsigned), master ownership and validator chain signing.
+Validators build their view from the gateway profile at `GET /v1/trust`; the gateway is the single source of truth.
 
 ## Challenge container contracts
 
-- The owner-signed trust root decides emission; the unsigned registry
+- The challenge profile decides emission; the unsigned registry
   (`deploy/challenges/registry.toml`) only decides what runs. A container never
-  receives a leaf-signing seed.
+  receives a signing key.
 - `challenge-supervisor` is the only process with the Docker socket. It verifies
   image labels and GitHub build provenance, canaries without secrets, rolls back
   on failure and never reads a secret.
@@ -180,7 +188,7 @@ uv build --no-build-isolation
 ```
 
 Challenge verification must exercise a real intake request, failure probes,
-signed leaves, gateway seal, a `sealed: true` fetch and validator recomputation.
+leaves, gateway seal, a `sealed: true` fetch and validator recomputation.
 Health endpoints alone do not verify a challenge. CI must not contact OpenRouter,
 rent provider compute, boot Firecracker or submit an on-chain transaction.
 

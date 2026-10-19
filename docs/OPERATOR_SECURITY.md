@@ -1,6 +1,6 @@
 # Operator security checklist
 
-Use this checklist before a deployment, trust-root rotation or incident
+Use this checklist before a deployment, challenge profile change or incident
 recovery. It complements the [threat model](THREAT_MODEL.md).
 
 ## Credentials
@@ -9,8 +9,19 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
   untracked regular file with mode 0400 or 0600 inside a 0700 directory.
 - [ ] No credential is present in an environment example, image layer, compose
   build argument, Terraform state, cloud-init payload, log or shell history.
-- [ ] Master operator, per-challenge internal/admin, Proof and VM-host tokens are
-  distinct and rotated independently.
+- [ ] Master operator, master intake, per-challenge internal/admin, Proof and
+  VM-host tokens are distinct and rotated independently.
+- [ ] The master operator bearer (`operator.token`) seals epochs
+  (`/v1/admin/seal`) and guards the other administrative routes; the separate
+  intake bearer (`intake.token`) only feeds `POST /v1/weights/raw`. The master
+  refuses to start when both files are the same path or hold the same value, and
+  answers 503 on every private route if a rotation later makes them equal. Each
+  bearer needs at least 32 bytes.
+  Neither bearer grants the other's route, but an intake holder can still write
+  forged raw leaves that the master's normal epoch seal will include (see the
+  [threat model](THREAT_MODEL.md)). Hold each only where needed and rotate each
+  on any suspicion. Wire v2 has no independent bundle cross-check: its vectors
+  come from the Python implementation.
 - [ ] Miner BYOK vault storage is durable only as long as queued work requires,
   and terminal jobs have no remaining secret files.
 - [ ] The OpenRouter owner key stays on the VM host and is not exposed to miner
@@ -18,14 +29,13 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
 
 ## Trust and pins
 
-- [ ] `cortex trust-verify` accepts the installed challenge and measurement
-  documents at the deployment epoch.
-- [ ] Every challenge public key matches its mounted `<id>.key` (or
-  `PROOF_SK_FILE`) seed, and the gateway public key differs from all of them.
-- [ ] The trust root is legacy bounty/proof 2000/8000 (algorithm 1), 3000/7000
+- [ ] `GET /v1/trust` on the gateway returns the intended challenge and measurement
+  profile at the deployment epoch, over HTTPS.
+- [ ] The Proof topic key matches `PROOF_SK_FILE`; no gateway or leaf key exists.
+- [ ] The challenge profile is legacy bounty/proof 2000/8000 (algorithm 1), 3000/7000
   (algorithm 2, version >=2), or unique ids summing to 10000 (algorithm 3,
-  version >=3). Complete the matching
-  [activation](how-to/trust-root.md#activate-container-challenges-algorithm-3)
+  version >=3). Bump the profile
+  version (see [Changing emission shares](../deploy/README.md#changing-emission-shares))
   before switching profiles; preserve old journals and sealed bytes.
 - [ ] Every registry entry names the challenge's own `ghcr.io` repository and
   GitHub `source`, keeps `attestation = true`, and runs on `stable` or a pin in
@@ -59,10 +69,10 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
 - [ ] Every registered challenge answers `GET /challenge/<id>/version`, and its
   own readiness probe passes (for Bounty, `/challenge/bounty/v1/status` reports
   `can_score: true` after a real stable feed probe).
-- [ ] Stopping a challenge container makes the next epoch contain signed
+- [ ] Stopping a challenge container makes the next epoch contain
   `ChallengeInternal` leaves for it and burn its share without blocking others.
 - [ ] While Proof is unwired, `PROOF_VM_ORCHESTRATOR_URL` is empty, no Proof topic
-  is open, and its share burns to UID 0 through signed `ChallengeInternal` leaves.
+  is open, and its share burns to UID 0 through `ChallengeInternal` leaves.
 - [ ] When Proof is enabled, `/v1/status` reports a valid topic, sealed baseline,
   registered runner, pinned image, open inference offer and compatible executor
   offer; its failure matrix returns 503 without a scored row.

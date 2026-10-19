@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <b>An autonomous research network on Bittensor subnet 100.</b> Miners compete in challenges, a master seals each epoch into one signed bundle, and validators verify that bundle and submit the weights on-chain.
+  <b>An autonomous research network on Bittensor subnet 100.</b> Miners compete in challenges, a master seals each epoch into one bundle, and validators verify that bundle and submit the weights on-chain.
 </p>
 
 <p align="center">
@@ -38,10 +38,10 @@ Cortex is the subnet that runs research competitions. Each competition is a **ch
 
 Two roles keep that honest:
 
-- The **master** runs the gateway, Proof and every challenge container. At the end of each epoch it signs one leaf per miner and seals the epoch into a bundle.
-- A **validator** runs none of that. It downloads the sealed bundle, checks it against locally held trust files and the chain, and submits the weights.
+- The **master** runs the gateway, Proof and every challenge container. At the end of each epoch it collects one score leaf per miner and seals the epoch into an unsigned bundle.
+- A **validator** runs none of that. It downloads the sealed bundle, checks its hashes, Merkle root and the gateway-served challenge profile against the chain, and submits the weights.
 
-An owner-signed trust root sets each challenge's emission share. If a challenge earns less than its share, the shortfall burns to UID 0. It never moves to another challenge.
+The challenge profile (`config/challenges.toml`, served at `GET /v1/trust`) sets each challenge's emission share. If a challenge earns less than its share, the shortfall burns to UID 0. It never moves to another challenge.
 
 Challenges today:
 
@@ -76,10 +76,10 @@ Sentinel is planned as a miner-improved competitor to CodeRabbit and Greptile, p
 
 ```mermaid
 flowchart LR
-    M["Miner"] --> C["Challenge container"] --> L["Signed leaf"] --> G["Gateway seals epoch"] --> V["Validators verify"] --> N["Weights on chain"]
+    M["Miner"] --> C["Challenge container"] --> L["Score leaf"] --> G["Gateway seals epoch"] --> V["Validators verify"] --> N["Weights on chain"]
 ```
 
-A miner submits work to a challenge. The challenge scores it and the master signs a leaf for that miner. When the epoch ends, the gateway seals all leaves into one bundle. Validators fetch the bundle from `GET https://chain.joinbase.ai/v1/weights/latest`, recompute the weights from the signed leaves and submit them to Bittensor.
+A miner submits work to a challenge. The challenge scores it and the master records a leaf for that miner. When the epoch ends, the gateway seals all leaves into one bundle. Validators fetch the bundle from `GET https://chain.joinbase.ai/v1/weights/latest`, recompute the weights from the leaves and submit them to Bittensor.
 
 ### 2. Who runs what
 
@@ -114,13 +114,12 @@ sudo apt-get install libsodium23
 uv sync --locked --extra chain
 
 export WALLET_NAME=validator WALLET_HOTKEY=default
-export GATEWAY_PUBLIC=<gateway hotkey pinned from an independent source>
 
 scripts/run-validator.sh --verify-only   # one verification, never submits
 scripts/run-validator.sh                 # verify and submit every epoch
 ```
 
-The script checks the gateway answer, reads the trust files from `config/` and starts `cortex validator`. It refuses master-only commands and master environments. Flags are `--verify-only`, `--once`, `--dry-run` and `--help`. Full walkthrough: [docs/validator-quickstart.md](docs/validator-quickstart.md).
+The script checks the gateway answer and starts `cortex validator`, which reads the unsigned challenge profile from the gateway (`GET /v1/trust`, HTTPS); no local trust file is read. It refuses master-only commands and master environments. Flags are `--verify-only`, `--once`, `--dry-run` and `--help`. Full walkthrough: [docs/validator-quickstart.md](docs/validator-quickstart.md).
 
 ## Quickstart for developers
 
@@ -154,13 +153,13 @@ uv run python scripts/check_deploy.py --check-examples
 uv build --no-build-isolation
 ```
 
-Tests cover signatures and Rust wire vectors, replay protection, challenge container outages, auto-update rollback, artifact validation, topic setup, rejected submissions, VM lifecycle failures, RLM recursion and compaction, reward allocation and sealed-weight submission. CI runs offline and never rents a GPU or boots Firecracker.
+Tests cover hashes, Merkle proofs and Rust wire vectors, replay protection, challenge container outages, auto-update rollback, artifact validation, topic setup, rejected submissions, VM lifecycle failures, RLM recursion and compaction, reward allocation and sealed-weight submission. CI runs offline and never rents a GPU or boots Firecracker.
 
 ## Repository layout
 
 ```
 src/        Python package: gateway, master, validator, miner CLI, Proof, VM host
-config/     trust roots and measurements (owner-signed)
+config/     challenge profile and measurements (unsigned, served by the gateway)
 deploy/     master, validator and KVM host deployment
 docs/       architecture, challenges, guides, specifications
 scripts/    validator script, repository and deployment checks, smoke tests
@@ -182,14 +181,14 @@ tests/      offline test suite
 
 What the design relies on:
 
-- The master signs one leaf per miner and seals each epoch. Validators recompute weights from the signed leaves and never trust display fields in the gateway response.
-- Validators pin the gateway key and the owner key themselves. Trust files come from a local copy, not from the gateway.
-- Challenge shares come from the owner-signed trust root. Unused share burns to UID 0.
+- The master records one leaf per miner and seals each epoch. Validators recompute weights from the leaves and never trust display fields in the gateway response.
+- The gateway is the trust anchor (TLS plus its own tokens). Bundles and leaves carry no signatures: integrity rests on content hashes, the Merkle root and the chain snapshot. A compromised gateway can serve a dishonest bundle.
+- Challenge shares come from the challenge profile. Unused share burns to UID 0.
 - A Proof topic opens only after the control plane verifies the host's execution receipts and signs the document.
 
 What isn't done, honestly:
 
-- **The gateway is a central authority.** Validators verify what the master signed. They don't reproduce Proof or challenge scoring themselves. Peer cross-checking between validators is opt-in and off by default.
+- **The gateway is a central authority.** Validators verify the bundle hashes and chain snapshot; they trust the gateway for which leaves exist. They don't reproduce Proof or challenge scoring themselves. Peer cross-checking between validators is opt-in and off by default.
 - **Live status is unproven.** Offline tests don't show live KVM execution, a live model run or confirmed on-chain payment.
 - **Hypertrain is research.** Quality parity with centralized training is not claimed.
 - **Sentinel is not built.** The same goes for monetization in the apps.

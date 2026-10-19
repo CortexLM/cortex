@@ -1,3 +1,5 @@
+import json
+import os
 from dataclasses import replace
 from hashlib import sha256
 from types import SimpleNamespace
@@ -8,6 +10,7 @@ import pytest
 from cortex.protocol import (
     Bundle,
     ChallengeEntry,
+    Leaf,
     MetagraphRow,
     NoScore,
     ProtocolError,
@@ -16,9 +19,8 @@ from cortex.protocol import (
     aggregate_leaves,
     build_bundle,
     bundle_digest,
-    sign_leaf,
 )
-from cortex.protocol.crypto import BUNDLE_DOMAIN, public_key, sign_raw
+from cortex.protocol.crypto import public_key
 from cortex.validator import ChainSnapshot, SubmissionJournal, Validator
 from cortex.validator.service import DispatchNotBroadcast, DispatchUncertain
 
@@ -58,27 +60,19 @@ def network(tmp_path):
     rows = tuple(MetagraphRow(public_key(bytes([20 + tag]) * 32), tag) for tag in range(3))
     trust = TrustRoot(
         (
-            ChallengeEntry(b"bounty", public_key(bytes([1]) * 32), 2000),
-            ChallengeEntry(b"proof", public_key(bytes([2]) * 32), 8000),
+            ChallengeEntry(b"bounty", 2000),
+            ChallengeEntry(b"proof", 8000),
         ),
         sha256(b"\x00").digest(),
-        public_key(bytes([7]) * 32),
     )
 
     def seal(winner=None):
         leaves = tuple(
-            sign_leaf(
-                bytes([seed]) * 32,
-                name,
-                row.hotkey,
-                12,
-                Score(50) if row.uid == winner else NoScore(),
-            )
-            for name, seed in ((b"bounty", 1), (b"proof", 2))
+            Leaf(name, row.hotkey, 12, Score(50) if row.uid == winner else NoScore())
+            for name in (b"bounty", b"proof")
             for row in rows
         )
         return build_bundle(
-            gateway_seed=bytes([7]) * 32,
             epoch=12,
             netuid=541,
             block_b=99,
@@ -228,9 +222,9 @@ async def test_latest_projection_tampering_refuses_dispatch(network, changes, re
     assert network.chain.submissions == []
 
 
-async def test_dishonest_signed_final_vector_is_never_dispatched(network):
+async def test_dishonest_final_vector_is_never_dispatched(network):
     body = replace(network.bundle.body, final_vector=((2, 65535),))
-    network.bundle = Bundle(body, sign_raw(bytes([7]) * 32, BUNDLE_DOMAIN, body.encode()))
+    network.bundle = Bundle(body)
     with pytest.raises(ProtocolError, match="final vector"):
         await network.validator.run_once()
     assert network.chain.submissions == []
@@ -467,7 +461,7 @@ async def test_class_a_submits_independent_vector_and_signed_dissent_after_peer_
     from cortex.protocol.models import encode_final_vector
 
     body = replace(network.bundle.body, final_vector=((2, 65535),))
-    network.bundle = Bundle(body, sign_raw(bytes([7]) * 32, BUNDLE_DOMAIN, body.encode()))
+    network.bundle = Bundle(body)
     signed_peers(network)
     assert (await network.validator.run_once()).outcome == "submitted"
     assert network.chain.submissions == [(541, ((1, 65535),), 1)]
@@ -479,7 +473,7 @@ async def test_class_a_submits_independent_vector_and_signed_dissent_after_peer_
 
 async def test_verify_only_reports_vector_dissent_as_a_degraded_outcome(network):
     body = replace(network.bundle.body, final_vector=((2, 65535),))
-    network.bundle = Bundle(body, sign_raw(bytes([7]) * 32, BUNDLE_DOMAIN, body.encode()))
+    network.bundle = Bundle(body)
     signed_peers(network)
     network.validator.verify_only = True
 
@@ -490,11 +484,11 @@ async def test_verify_only_reports_vector_dissent_as_a_degraded_outcome(network)
 
 
 @pytest.mark.parametrize("challenge,can_submit", [(b"bounty", True), (b"proof", False)])
-async def test_quarantine_uses_surviving_signed_mass_threshold(network, challenge, can_submit):
+async def test_quarantine_uses_surviving_mass_threshold(network, challenge, can_submit):
     from cortex.protocol.merkle import merkle_root
 
     leaves = tuple(
-        replace(leaf, challenge_sig=bytes(64)) if leaf.challenge_id == challenge else leaf
+        replace(leaf, epoch=13) if leaf.challenge_id == challenge else leaf
         for leaf in network.bundle.body.leaves
     )
     body = replace(
@@ -502,7 +496,7 @@ async def test_quarantine_uses_surviving_signed_mass_threshold(network, challeng
         leaves=leaves,
         merkle_root=merkle_root(leaf.encode() for leaf in leaves),
     )
-    network.bundle = Bundle(body, sign_raw(bytes([7]) * 32, BUNDLE_DOMAIN, body.encode()))
+    network.bundle = Bundle(body)
     signed_peers(network)
     if can_submit:
         assert (await network.validator.run_once()).outcome == "submitted"
@@ -565,6 +559,91 @@ async def test_trust_version_rollback_is_refused_across_restart(network):
     assert len(network.chain.submissions) == 1
 
 
+def reset(db_path, *extra):
+    from cortex.cli import main
+
+    main(["validator-watermark-reset", "--state-db", str(db_path), *extra])
+
+
+async def test_cli_watermark_reset_lowers_a_wrong_version_and_audits_it(network, capsys):
+    import sqlite3
+
+    original = network.validator.trust
+    network.validator.trust_loader = lambda _: replace(original, challenges_version=2)
+    await network.validator.run_once()
+    network.journal.close()
+    args = ("--name", "challenges_version", "--to", "1")
+    for refused in (
+        args,  # no --confirm
+        ("--name", "challenges_version", "--to", "3", "--confirm"),  # raising
+        ("--name", "netuid", "--to", "1", "--confirm"),
+        ("--name", "challenges_version", "--to", "-1", "--confirm"),
+    ):
+        with pytest.raises(SystemExit):
+            reset(network.db_path, *refused)
+    capsys.readouterr()
+    reset(network.db_path, *args, "--confirm")
+    assert json.loads(capsys.readouterr().out) == {
+        "name": "challenges_version",
+        "old_value": 2,
+        "new_value": 1,
+    }
+    with sqlite3.connect(network.db_path) as connection:
+        assert connection.execute(
+            "SELECT name, old_value, new_value FROM consensus_watermark_resets"
+        ).fetchall() == [("challenges_version", "2", "1")]
+    network.validator.journal = SubmissionJournal(network.db_path)
+    network.validator.trust_loader = lambda _: original
+    assert (await network.validator.run_once()).outcome == "already_submitted_or_pending"
+
+
+def test_cli_watermark_reset_refuses_an_unset_watermark_and_allows_equal(network, capsys):
+    network.journal.evidence.watermark("epoch", 12)
+    network.journal.close()
+    with pytest.raises(SystemExit):
+        reset(network.db_path, "--name", "measurements_version", "--to", "0", "--confirm")
+    reset(network.db_path, "--name", "epoch", "--to", "12", "--confirm")
+    assert json.loads(capsys.readouterr().out)["new_value"] == 12
+
+
+def test_cli_watermark_reset_reports_a_non_sqlite_state_file_without_traceback(tmp_path):
+    state = tmp_path / "state.db"
+    state.write_bytes(b"not a database" * 100)
+    with pytest.raises(SystemExit, match="Cortex command failed"):
+        reset(state, "--name", "epoch", "--to", "0", "--confirm")
+
+
+@pytest.mark.parametrize(
+    ("kind", "reason"),
+    [
+        ("garbage", "not a validator state database"),
+        ("read-only-file", "state db is read-only"),
+        ("read-only-dir", "state db is read-only"),
+    ],
+)
+def test_watermark_reset_garbage_db_message_has_no_path(network, kind, reason):
+    if kind != "garbage" and os.geteuid() == 0:
+        pytest.skip("root ignores read-only mode bits")
+    network.journal.evidence.watermark("epoch", 12)
+    network.journal.close()
+    state = network.db_path
+    if kind == "garbage":
+        state.write_bytes(b"not a database" * 100)
+    elif kind == "read-only-file":
+        state.chmod(0o444)
+    else:
+        state.parent.chmod(0o555)
+    before = sorted(item.name for item in state.parent.iterdir())
+    try:
+        with pytest.raises(SystemExit) as refused:
+            reset(state, "--name", "epoch", "--to", "11", "--confirm")
+        assert sorted(item.name for item in state.parent.iterdir()) == before
+    finally:
+        state.parent.chmod(0o755)
+        state.chmod(0o644)
+    assert refused.value.code == f"Cortex command failed: {reason}"
+
+
 async def test_peer_api_serves_signed_evidence_and_never_claims_dcap_verified(network):
     from cortex.protocol.consensus import RootStatement
     from cortex.validator.evidence import peer_app
@@ -585,3 +664,308 @@ async def test_peer_api_serves_signed_evidence_and_never_claims_dcap_verified(ne
             refused = await http.post(f"/v1/attest/{path}", json={})
             assert refused.status_code == 503
             assert refused.json()["verified"] is False
+
+
+async def test_v1_bundle_dissents_as_unsupported_version_before_decoding(network):
+    from cortex.protocol.consensus import DissentReason
+
+    real = network.bundle
+    # v1 layout differs after the version, so decoding it as v2 would fail with another error.
+    network.bundle = SimpleNamespace(body=real.body, encode=lambda: b"\x01\x00" + b"\xff" * 64)
+    signed_peers(network)
+    with pytest.raises(ProtocolError, match="unsupported bundle version"):
+        await network.validator.run_once()
+    assert network.chain.submissions == []
+    reason = network.journal.evidence.dissents()[-1].reason
+    assert reason == DissentReason.PROTOCOL_VERSION_UNSUPPORTED
+
+
+async def test_hostile_trust_profile_does_not_move_the_version_watermark(network):
+    from cortex.protocol.trust import trust_to_json
+
+    hostile = {**trust_to_json(network.validator.trust), "challenges_version": 2**32 - 1}
+    served = {"profile": hostile}
+
+    def transport(request):
+        if request.url.path == "/v1/trust":
+            return httpx.Response(200, json=served["profile"])
+        return network.handler(request)
+
+    validator = Validator(
+        gateway_url="https://master.invalid",
+        netuid=541,
+        chain=network.chain,
+        journal=network.journal,
+        http=httpx.AsyncClient(transport=httpx.MockTransport(transport)),
+    )
+    with pytest.raises(ProtocolError):  # profile does not match the bundle's shares/version
+        await validator.run_once()
+    assert network.chain.submissions == []
+    served["profile"] = trust_to_json(network.validator.trust)
+    assert (await validator.run_once()).outcome == "submitted"
+
+
+async def test_cli_validator_reconcile_resolves_an_uncertain_dispatch(network, capsys):
+    from cortex.cli import main
+
+    network.chain.error = DispatchUncertain("RPC disconnected", extrinsic_hash="0x" + "ab" * 32)
+    result = await network.validator.run_once()
+    assert result.outcome == "dispatch_pending"
+    main(
+        [
+            "validator-reconcile",
+            "--state-db", str(network.db_path),
+            "--netuid", "541",
+            "--epoch", "12",
+            "--digest", bundle_digest(network.bundle),
+            "--attempt-id", result.attempt_id,
+            "--result", "not_broadcast",
+            "--evidence-digest", "cd" * 32,
+        ]
+    )  # fmt: skip
+    assert '"state": "reconciled_not_broadcast"' in capsys.readouterr().out
+    assert network.journal.pending(541, 12) is None
+    network.chain.error = None
+    assert (await network.validator.run_once()).outcome == "submitted"
+
+
+def test_cli_validator_reconcile_refuses_an_unknown_dispatch(network):
+    from cortex.cli import main
+
+    with pytest.raises(SystemExit, match="Cortex command failed"):
+        main(
+            [
+                "validator-reconcile",
+                "--state-db", str(network.db_path),
+                "--netuid", "541",
+                "--epoch", "12",
+                "--digest", "ab" * 32,
+                "--attempt-id", "nope",
+                "--result", "submitted",
+                "--evidence-digest", "cd" * 32,
+            ]
+        )  # fmt: skip
+
+
+@pytest.mark.parametrize("value", [True, 1.0, "1", None, [1], 2**32, 2**32 - 1, "max+1"], ids=repr)
+async def test_unsupported_measurements_version_never_moves_the_watermark(network, value):
+    import sqlite3
+
+    from cortex.protocol.models import MAX_MEASUREMENTS_VERSION
+    from cortex.protocol.trust import trust_to_json
+
+    if value == "max+1":
+        value = MAX_MEASUREMENTS_VERSION + 1
+    honest = trust_to_json(network.validator.trust)
+    served = {"profile": {**honest, "measurements_version": value}}
+
+    def transport(request):
+        if request.url.path == "/v1/trust":
+            return httpx.Response(200, json=served["profile"])
+        return network.handler(request)
+
+    validator = Validator(
+        gateway_url="https://master.invalid",
+        netuid=541,
+        chain=network.chain,
+        journal=network.journal,
+        http=httpx.AsyncClient(transport=httpx.MockTransport(transport)),
+    )
+    with pytest.raises(ProtocolError, match="invalid trust profile"):
+        await validator.run_once()
+    assert network.chain.submissions == []
+    with sqlite3.connect(network.db_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT value FROM consensus_watermarks WHERE name='measurements_version'"
+            ).fetchall()
+            == []
+        )
+    served["profile"] = honest
+    assert (await validator.run_once()).outcome == "submitted"
+
+
+def test_measurements_version_at_the_supported_maximum_is_accepted(network):
+    from cortex.protocol.models import MAX_MEASUREMENTS_VERSION
+
+    replace(network.validator.trust, measurements_version=MAX_MEASUREMENTS_VERSION).validate()
+
+
+def serve_v3_profile(network, challenges_version):
+    """A v3-sealed epoch whose /v1/trust answer carries the given challenges_version."""
+    from cortex.protocol.trust import trust_to_json
+
+    honest = replace(network.validator.trust, challenges_version=3)
+    leaves = tuple(
+        Leaf(name, row.hotkey, 12, Score(50) if row.uid == 1 else NoScore())
+        for name in (b"bounty", b"proof")
+        for row in network.chain.view.rows
+    )
+    network.bundle = build_bundle(
+        epoch=12,
+        netuid=541,
+        block_b=99,
+        block_hash=bytes([9]) * 32,
+        rows=network.chain.view.rows,
+        leaves=leaves,
+        trust=honest,
+    )
+    floats = aggregate_leaves(
+        network.bundle.body.leaves, honest.shares, network.bundle.body.uid_map, algorithm_version=3
+    )
+    network.latest_overrides.update(uids=list(floats.uids), weights=list(floats.weights))
+    served = {"profile": {**trust_to_json(honest), "challenges_version": challenges_version}}
+
+    def transport(request):
+        if request.url.path == "/v1/trust":
+            return httpx.Response(200, json=served["profile"])
+        return network.handler(request)
+
+    validator = Validator(
+        gateway_url="https://master.invalid",
+        netuid=541,
+        chain=network.chain,
+        journal=network.journal,
+        http=httpx.AsyncClient(transport=httpx.MockTransport(transport)),
+    )
+    return validator, served, trust_to_json(honest)
+
+
+@pytest.mark.parametrize("value", [1001, 2**32 - 1, True, None, "5", 1.0, -1], ids=repr)
+async def test_challenges_version_above_cap_is_refused_before_watermark(network, value):
+    import sqlite3
+
+    validator, served, honest = serve_v3_profile(network, value)
+    with pytest.raises(ProtocolError, match="invalid trust profile"):
+        await validator.run_once()
+    assert network.chain.submissions == []
+    with sqlite3.connect(network.db_path) as connection:
+        assert connection.execute("SELECT name FROM consensus_watermarks").fetchall() == [
+            ("netuid",)
+        ]
+    served["profile"] = honest
+    assert (await validator.run_once()).outcome == "submitted"
+
+
+async def test_challenges_version_boundary_1000_accepted(network):
+    from cortex.protocol.models import MAX_CHALLENGES_VERSION
+
+    assert MAX_CHALLENGES_VERSION == 1000
+    validator, _, _ = serve_v3_profile(network, MAX_CHALLENGES_VERSION)
+    assert (await validator.run_once()).outcome == "submitted"
+
+
+def snapshot_file(path):
+    import sqlite3
+
+    stat = path.stat()
+    # immutable=1 reads without creating -shm/-wal sidecars, unlike mode=ro.
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?immutable=1", uri=True)
+    try:
+        mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        tables = connection.execute("SELECT name FROM sqlite_master ORDER BY name").fetchall()
+    finally:
+        connection.close()
+    siblings = sorted(item.name for item in path.parent.iterdir())
+    return path.read_bytes(), stat.st_mtime_ns, mode, tables, siblings
+
+
+@pytest.mark.parametrize("kind", ["empty", "foreign", "foreign-wal", "partial"])
+def test_cli_watermark_reset_never_mutates_a_foreign_state_file(tmp_path, kind):
+    import sqlite3
+
+    state = tmp_path / "other" / "state.db"
+    state.parent.mkdir()
+    if kind == "empty":
+        state.touch()
+    else:
+        connection = sqlite3.connect(state)
+        if kind == "foreign-wal":
+            connection.execute("PRAGMA journal_mode=WAL")
+        if kind == "partial":  # the watermark row alone, without the journal's other tables
+            connection.execute("CREATE TABLE consensus_watermarks (name TEXT, value TEXT)")
+            connection.execute("INSERT INTO consensus_watermarks VALUES ('epoch', '12')")
+        else:
+            connection.execute("CREATE TABLE notes (body TEXT)")
+            connection.execute("INSERT INTO notes VALUES ('kept')")
+        connection.commit()
+        connection.close()
+    before = snapshot_file(state)
+    with pytest.raises(SystemExit, match="not a validator state database"):
+        reset(state, "--name", "epoch", "--to", "0", "--confirm")
+    assert snapshot_file(state) == before
+
+
+@pytest.mark.parametrize("schema", ["foreign", "validator"])
+def test_watermark_reset_preflight_leaves_no_shm(network, tmp_path, schema):
+    import shutil
+    import sqlite3
+
+    network.journal.evidence.watermark("epoch", 12)
+    network.journal.close()
+    live = tmp_path / "live" / "state.db"
+    live.parent.mkdir()
+    if schema == "validator":
+        shutil.copy(network.db_path, live)
+    writer = sqlite3.connect(live)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE notes (body TEXT)")
+    writer.execute("INSERT INTO notes VALUES ('only in the wal')")
+    writer.commit()
+    # A copy taken while the writer is open is a crash image: an orphan -wal and no -shm.
+    state = tmp_path / "orphan" / "state.db"
+    state.parent.mkdir()
+    for suffix in ("", "-wal"):
+        shutil.copy(live.with_name(live.name + suffix), state.with_name(state.name + suffix))
+    writer.close()
+
+    def listing():
+        return sorted((item.name, item.stat().st_mtime_ns) for item in state.parent.iterdir())
+
+    before = listing()
+    # The validator row is behind the orphan -wal's frames for "foreign", ahead of them otherwise.
+    with pytest.raises(SystemExit):
+        reset(state, "--name", "epoch", "--to", "11", "--netuid", "7", "--confirm")
+    assert listing() == before
+
+
+def test_cli_watermark_reset_reports_a_locked_state_db(network):
+    import sqlite3
+
+    network.journal.evidence.watermark("epoch", 12)
+    network.journal.close()
+    holder = sqlite3.connect(network.db_path, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(SystemExit, match="state db locked; stop the validator first"):
+            reset(network.db_path, "--name", "epoch", "--to", "11", "--confirm")
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    with sqlite3.connect(network.db_path) as connection:
+        value = connection.execute("SELECT value FROM consensus_watermarks WHERE name='epoch'")
+        assert value.fetchone() == ("12",)
+
+
+def test_cli_watermark_reset_checks_the_recorded_netuid(network, capsys):
+    network.journal.evidence.watermark("epoch", 12)
+    network.journal.close()
+    with pytest.raises(SystemExit, match="belongs to another subnet"):
+        reset(network.db_path, "--name", "epoch", "--to", "11", "--netuid", "7", "--confirm")
+    reset(network.db_path, "--name", "epoch", "--to", "11", "--netuid", "541", "--confirm")
+    assert json.loads(capsys.readouterr().out)["new_value"] == 11
+
+
+def test_cli_watermark_reset_without_a_recorded_netuid_warns_and_proceeds(network, capsys):
+    import sqlite3
+
+    network.journal.evidence.watermark("epoch", 12)
+    network.journal.close()
+    connection = sqlite3.connect(network.db_path)
+    connection.execute("DELETE FROM consensus_watermarks WHERE name='netuid'")
+    connection.commit()
+    connection.close()  # the last close checkpoints the -wal into the main file
+    reset(network.db_path, "--name", "epoch", "--to", "11", "--netuid", "7", "--confirm")
+    captured = capsys.readouterr()
+    assert "state db records no netuid; --netuid check skipped" in captured.err
+    assert json.loads(captured.out)["new_value"] == 11

@@ -13,8 +13,7 @@ from urllib.parse import urlsplit
 
 from cortex.errors import ServiceError
 from cortex.protocol import TrustRoot
-from cortex.protocol.crypto import decode_hotkey, public_key
-from cortex.protocol.trust import load_trust_root
+from cortex.protocol.trust import load_trust
 from cortex.vm.models import Resources
 
 CHAIN_ALIASES = frozenset({"archive", "finney", "local", "test"})
@@ -100,13 +99,11 @@ def _chain_fallback_endpoints(value: object) -> tuple[str, ...]:
 class MasterConfig:
     netuid: int
     state_dir: Path
-    owner_public_file: Path
     challenges_file: Path
     measurements_file: Path
-    gateway_seed_file: Path
     proof_seed_file: Path
     operator_token_file: Path
-    challenge_keys_dir: Path = Path("/run/secrets")
+    intake_token_file: Path
     challenge_registry_file: Path | None = None
     challenge_secrets_dir: Path = Path("/run/challenge-secrets")
     chain_endpoint: str = "finney"
@@ -114,8 +111,6 @@ class MasterConfig:
     emit_poll_seconds: float = 120
     epoch_refresh_seconds: float = 12
     epoch_stale_seconds: float = 60
-    minimum_challenges_version: int = 1
-    minimum_measurements_version: int = 1
     proof_orchestrator_url: str | None = None
     proof_orchestrator_token_file: Path | None = None
     proof_orchestrator_ca_file: Path | None = None
@@ -137,8 +132,6 @@ class MasterConfig:
             or self.emit_poll_seconds <= 0
         ):
             raise ValueError("invalid epoch refresh/emission intervals")
-        if self.minimum_challenges_version < 1 or self.minimum_measurements_version < 1:
-            raise ValueError("trust versions must be positive")
         validate_chain_endpoint(self.chain_endpoint)
         _chain_fallback_endpoints(self.chain_fallback_endpoints)
         if self.proof_orchestrator_url:
@@ -184,13 +177,11 @@ class MasterConfig:
         return cls(
             netuid=int(value("BASE_NETUID")),
             state_dir=Path(value("BASE_STATE_DIR", "/var/lib/cortex")),
-            owner_public_file=Path(value("BASE_OWNER_PUBKEY_FILE", "config/owner.pubkey")),
             challenges_file=Path(value("BASE_CHALLENGES_FILE", "config/challenges.toml")),
             measurements_file=Path(value("BASE_MEASUREMENTS_FILE", "config/measurements.toml")),
-            gateway_seed_file=required_path("BASE_GATEWAY_SK_FILE"),
             proof_seed_file=required_path("PROOF_SK_FILE"),
             operator_token_file=required_path("BASE_GATEWAY_ADMIN_TOKEN_FILE"),
-            challenge_keys_dir=Path(value("BASE_CHALLENGE_KEYS_DIR", "/run/secrets")),
+            intake_token_file=required_path("BASE_GATEWAY_INTAKE_TOKEN_FILE"),
             challenge_registry_file=optional_path("BASE_CHALLENGE_REGISTRY_FILE"),
             challenge_secrets_dir=Path(
                 value("BASE_CHALLENGE_SECRETS_DIR", "/run/challenge-secrets")
@@ -202,8 +193,6 @@ class MasterConfig:
             ),
             epoch_refresh_seconds=float(value("BASE_EPOCH_REFRESH_SECS", "12")),
             epoch_stale_seconds=float(value("BASE_EPOCH_STALE_SECS", "60")),
-            minimum_challenges_version=int(value("BASE_CHALLENGES_MIN_VERSION", "1")),
-            minimum_measurements_version=int(value("BASE_MEASUREMENTS_MIN_VERSION", "1")),
             proof_orchestrator_url=value("PROOF_VM_ORCHESTRATOR_URL") or None,
             proof_orchestrator_token_file=optional_path("PROOF_VM_ORCHESTRATOR_TOKEN_FILE"),
             proof_orchestrator_ca_file=optional_path("PROOF_VM_ORCHESTRATOR_CA_FILE"),
@@ -214,28 +203,13 @@ class MasterConfig:
             ),
         )
 
-    def challenge_seed_file(self, challenge: bytes) -> Path:
-        """Proof keeps its topic key; every other challenge id uses <keys dir>/<id>.key."""
-        if challenge == b"proof":
-            return self.proof_seed_file
-        return self.challenge_keys_dir / f"{challenge.decode()}.key"
-
-    def trust_root(self, epoch: int) -> TrustRoot:
+    def challenge_profile(self, epoch: int) -> TrustRoot:
         try:
-            trust = load_trust_root(
-                challenges_path=self.challenges_file,
-                challenges_signature=Path(str(self.challenges_file) + ".sig"),
-                measurements_path=self.measurements_file,
-                measurements_signature=Path(str(self.measurements_file) + ".sig"),
-                owner_public=decode_hotkey(self.owner_public_file.read_text().strip()),
-                gateway_public=public_key(read_seed(self.gateway_seed_file)),
-                epoch=epoch,
-                minimum_challenges_version=self.minimum_challenges_version,
-                minimum_measurements_version=self.minimum_measurements_version,
+            return load_trust(
+                challenges_path=self.challenges_file, measurements_path=self.measurements_file
             )
-            for entry in trust.challenges:
-                if public_key(read_seed(self.challenge_seed_file(entry.id))) != entry.public_key:
-                    raise ServiceError(503, "challenge signing key does not match owner trust")
-            return trust
-        except (OSError, ValueError):
-            raise ServiceError(503, "signed trust root unavailable") from None
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
+            # ProtocolError and TOMLDecodeError are ValueErrors; TypeError covers a field
+            # type that slips past the explicit checks in load_trust; tomllib recurses per
+            # nested array or inline table.
+            raise ServiceError(503, "challenge profile unavailable") from None

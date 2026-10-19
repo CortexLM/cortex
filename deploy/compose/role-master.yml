@@ -17,20 +17,18 @@ services:
         required: true
     environment:
       BASE_STATE_DIR: /var/lib/base
-      BASE_OWNER_PUBKEY_FILE: /etc/base/config/owner.pubkey
       BASE_CHALLENGES_FILE: /etc/base/config/challenges.toml
       BASE_MEASUREMENTS_FILE: /etc/base/config/measurements.toml
-      BASE_GATEWAY_SK_FILE: /run/secrets/gateway.key
       PROOF_SK_FILE: /run/secrets/proof.key
       BASE_GATEWAY_ADMIN_TOKEN_FILE: /run/secrets/operator.token
-      BASE_CHALLENGE_KEYS_DIR: /run/secrets
+      BASE_GATEWAY_INTAKE_TOKEN_FILE: /run/secrets/intake.token
       BASE_CHALLENGE_REGISTRY_FILE: /etc/base/challenges/registry.toml
       BASE_CHALLENGE_SECRETS_DIR: /run/challenge-secrets
     ports:
       - "${BASE_GATEWAY_BIND_ADDRESS:?Set the master VPC address}:8080:8080"
     volumes:
       - type: bind
-        source: ${BASE_TRUST_ROOT_DIR:-config}
+        source: ${BASE_CONFIG_DIR:-config}
         target: /etc/base/config
         read_only: true
         bind:

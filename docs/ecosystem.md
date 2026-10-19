@@ -38,7 +38,7 @@ flowchart LR
 | `hypertrain` | [CortexLM/hypertrain](https://github.com/CortexLM/hypertrain) | Models from decentralized, verifiable pretraining | Research stage |
 | `sentinel` | none yet | Detectors for code review and security | PLANNED, not live |
 
-Each challenge is its own container with its own repository. The owner-signed trust root sets its emission share, and the contract is in [CHALLENGES.md](CHALLENGES.md).
+Each challenge is its own container with its own repository. The challenge profile sets its emission share, and the contract is in [CHALLENGES.md](CHALLENGES.md).
 
 ## Apps
 
@@ -66,4 +66,4 @@ Sentinel is a future challenge. It is not live and has no repository, container 
 
 The plan is for miners to improve code review and security detectors, with the result feeding Cortex Security Cloud. Cortex Security Cloud would then compete with products such as CodeRabbit and Greptile, on the claim that miners keep improving it. That claim is untested. Nothing here promises a date, a design or a share.
 
-When Sentinel ships, it would load like any other challenge: its own container, a share in the owner-signed trust root and leaves sealed by the master.
+When Sentinel ships, it would load like any other challenge: its own container, a share in the challenge profile and leaves sealed by the master.

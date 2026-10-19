@@ -1,6 +1,7 @@
 # Architecture
 
-The owner-signed trust root lists the scoring challenges and their emission
+The challenge profile (`config/challenges.toml`, read by the master and served by
+the gateway at `GET /v1/trust`) lists the scoring challenges and their emission
 shares:
 
 - algorithm 1: legacy bounty/proof 2,000/8,000;
@@ -33,7 +34,7 @@ flowchart LR
 
 | Directory | Responsibility |
 | --- | --- |
-| `src/cortex/protocol` | SCALE wire format, signatures, Merkle roots, aggregation, trust roots |
+| `src/cortex/protocol` | SCALE wire format, hashes, Merkle roots, aggregation, challenge profile |
 | `src/cortex/gateway` | Durable raw leaves and immutable sealed bundles |
 | `src/cortex/validator` | Independent historical chain reads and exact weight submission |
 | `src/cortex/challenges` | Registry, weights client, public proxy and auto-updating supervisor |
@@ -49,13 +50,13 @@ flowchart LR
 1. At the end of each epoch, the master calls
    `GET /internal/v1/get_weights?epoch=` on each trusted, registered container,
    with its private bearer.
-2. It converts the weights of the sealed participant set into signed leaves:
+2. It converts the weights of the sealed participant set into leaves:
    `floor(10^12 * w / max(W, full_share_mass))` under algorithm 3.
 3. A missing, failing or invalid answer becomes `NoScore(ChallengeInternal)`,
    and that challenge's share burns.
 4. The gateway seals all leaves.
 5. Validators recompute `share * min(sum(leaves), 10^12) / 10^12` per challenge
-   from the signed leaves alone.
+   from the leaves alone.
 
 The supervisor does the following:
 
@@ -115,7 +116,7 @@ published rules without a separately signed revision.
 
 The master records chain epochs and snapshot blocks durably. It emits exact
 participant coverage for both challenges and seals completed epochs only after
-accepted jobs and in-flight intake have finished. A failed challenge emits signed
+accepted jobs and in-flight intake have finished. A failed challenge emits
 `NoScore(ChallengeInternal)` rather than leaving the epoch uncovered.
 
 Validators recompute the bundle against independent chain state. Missing or
@@ -125,7 +126,7 @@ remain pending in the journal to prevent duplicate submission after restart.
 
 ## Compatibility and limits
 
-The bundle/SCALE/signature contracts preserve cross-language vectors. Topic and
+The bundle/SCALE/hash contracts preserve cross-language vectors. Topic and
 VM JSON protocols are explicitly version 2; old JSON topic signatures are not
 silently reinterpreted. The custom Schnorrkel signing context uses Python Merlin
 transcripts and native libsodium Ristretto operations; keep its vectors and

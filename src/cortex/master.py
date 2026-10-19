@@ -24,14 +24,14 @@ from cortex.config import MasterConfig, read_seed
 from cortex.errors import ServiceError
 from cortex.gateway import GatewayService, GatewayStore
 from cortex.gateway import create_router as gateway_router
-from cortex.http import OperatorAuth, read_private_file
+from cortex.http import OperatorAuth, read_bearer
 from cortex.proof.api import create_router as proof_router
 from cortex.proof.artifacts import FileVault
 from cortex.proof.models import Submission
 from cortex.proof.scoring import SCORE_MAX
 from cortex.proof.service import EvaluationBackend, ProofService, UnwiredBackend
 from cortex.proof.store import ProofStore
-from cortex.protocol import NoScore, NoScoreReason, Score, TrustRoot, sign_leaf
+from cortex.protocol import Leaf, NoScore, NoScoreReason, Score, TrustRoot
 from cortex.protocol.crypto import decode_hotkey, public_key
 from cortex.protocol.merkle import canonical_rows
 from cortex.protocol.models import FULL_SHARE_SCORE
@@ -76,6 +76,8 @@ class EpochState:
 # reported rather than guessed at. This bound is generous relative to a tempo of
 # a few hundred blocks and keeps a stuck loop from walking the whole chain.
 _END_BLOCK_SEARCH = 8192
+ADMIN_TOKEN_SETTING = "BASE_GATEWAY_ADMIN_TOKEN_FILE"
+INTAKE_TOKEN_SETTING = "BASE_GATEWAY_INTAKE_TOKEN_FILE"
 
 
 class EpochProvider(Protocol):
@@ -325,12 +327,11 @@ class EpochEmitter:
         proof: _EpochTrackedProof,
         clock: EpochClock,
         journal: EmissionJournal,
-        challenge_seed: Callable[[bytes], bytes],
         registry: Callable[[], dict[str, RegistryEntry]],
         challenges: ChallengeClient,
     ):
         self.gateway, self.proof, self.clock, self.journal = gateway, proof, clock, journal
-        self.challenge_seed, self.registry, self.challenges = challenge_seed, registry, challenges
+        self.registry, self.challenges = registry, challenges
         self._lock = asyncio.Lock()
 
     async def _scores(
@@ -385,18 +386,11 @@ class EpochEmitter:
             and epoch_at is None
         ):
             raise ServiceError(503, "completed epoch timestamp unavailable")
-        self.proof.topic_public_key = next(
-            (entry.public_key for entry in self.gateway.trust.challenges if entry.id == b"proof"),
-            self.proof.topic_public_key,
-        )
         rows = canonical_rows(snapshot.rows)
         for challenge in self.gateway.trust.challenges:
             expected = challenge.policy.expected(rows)
-            seed = self.challenge_seed(challenge.id)
-            if public_key(seed) != challenge.public_key:
-                raise ServiceError(503, "challenge signing key does not match owner trust")
             outcomes = await self._scores(challenge.id, epoch, expected, epoch_at)
-            # No unknown score key can expand E; missing scores are explicit signed absences.
+            # No unknown score key can expand E; missing scores are explicit absences.
             leaves = []
             for hotkey in sorted(expected):
                 score = outcomes.get(hotkey, NoScore(NoScoreReason.NOT_ATTEMPTED))
@@ -404,7 +398,7 @@ class EpochEmitter:
                     score.encode()
                 except ValueError:
                     score = NoScore()
-                leaves.append(sign_leaf(seed, challenge.id, hotkey, epoch, score))
+                leaves.append(Leaf(challenge.id, hotkey, epoch, score))
             self.gateway.replace_challenge_leaves(challenge.id, epoch, expected, tuple(leaves))
 
     async def tick(self) -> list[int]:
@@ -439,8 +433,13 @@ class EpochEmitter:
                 pinned = await self.gateway.chain.snapshot(block, self.gateway.netuid)
                 if pinned.block_hash != block_hash or pinned.block != block:
                     raise ServiceError(503, "completed epoch pin changed")
-                await self._emit(epoch, pinned)
-                await self.gateway.seal(epoch, block_b=block)
+                # The event loop serves intake during every await below; close it until sealed.
+                self.gateway.sealing = epoch
+                try:
+                    await self._emit(epoch, pinned)
+                    await self.gateway.seal(epoch, block_b=block)
+                finally:
+                    self.gateway.sealing = None
                 self.journal.sealed(epoch)
                 completed.append(epoch)
                 # Keep each newly completed seal observable for one polling interval.
@@ -527,8 +526,11 @@ class MasterRuntime:
         async def service_error(request, error: ServiceError):
             return JSONResponse({"error": error.reason}, status_code=error.status)
 
-        operator = OperatorAuth(self.config.operator_token_file)
-        app.include_router(gateway_router(self.gateway, operator))
+        admin_file = (self.config.operator_token_file, ADMIN_TOKEN_SETTING)
+        intake_file = (self.config.intake_token_file, INTAKE_TOKEN_SETTING)
+        operator = OperatorAuth(*admin_file, distinct_from=intake_file)
+        intake = OperatorAuth(*intake_file, distinct_from=admin_file)
+        app.include_router(gateway_router(self.gateway, operator, intake))
         proof = proof_router(self.proof, operator, self.topic_setup)
         app.include_router(proof)
         app.include_router(proof, prefix="/challenge/proof", include_in_schema=False)
@@ -564,8 +566,13 @@ async def build_master(
     prepare_master_state(config.state_dir)
     clock = EpochClock(epochs, config.netuid, stale_seconds=config.epoch_stale_seconds)
     state = await clock.refresh()
-    local_trust = trust or config.trust_root(state.epoch)
-    read_private_file(config.operator_token_file)
+    local_trust = trust or config.challenge_profile(state.epoch)
+    # Holding the intake bearer must never grant sealing, and vice versa.
+    if config.operator_token_file.resolve() == config.intake_token_file.resolve() or (
+        read_bearer(config.operator_token_file, ADMIN_TOKEN_SETTING)
+        == read_bearer(config.intake_token_file, INTAKE_TOKEN_SETTING)
+    ):
+        raise ServiceError(503, "intake and admin bearers must differ")
     load_registry(config.challenge_registry_file)  # fail fast on an invalid operator registry
     with ExitStack() as cleanup:
         gateway_store = GatewayStore(config.state_dir / "gateway.sqlite3")
@@ -591,16 +598,12 @@ async def build_master(
             trust=local_trust,
             netuid=config.netuid,
             chain=chain,
-            gateway_seed=lambda: read_seed(config.gateway_seed_file),
             chain_endpoint=chain_endpoint,
-            trust_loader=None if trust is not None else config.trust_root,
+            trust_loader=None if trust is not None else config.challenge_profile,
         )
         proof = _EpochTrackedProof(
             store=proof_store,
-            topic_public_key=next(
-                (c.public_key for c in local_trust.challenges if c.id == b"proof"),
-                public_key(read_seed(config.proof_seed_file)),
-            ),
+            topic_public_key=public_key(read_seed(config.proof_seed_file)),
             vault=FileVault(config.state_dir / "miner-byok"),
             artifact_dir=config.state_dir / "artifacts",
             backend=proof_backend or UnwiredBackend(),
@@ -612,7 +615,6 @@ async def build_master(
             proof=proof,
             clock=clock,
             journal=journal,
-            challenge_seed=lambda challenge: read_seed(config.challenge_seed_file(challenge)),
             registry=ChallengeRegistry(config.challenge_registry_file),
             challenges=ChallengeClient(http, config.challenge_secrets_dir),
         )

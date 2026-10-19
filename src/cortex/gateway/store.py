@@ -5,23 +5,23 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
 from cortex.errors import ServiceError
 from cortex.protocol import (
+    BUNDLE_PROTOCOL_VERSION,
     Bundle,
-    ChallengeEntry,
     Leaf,
     NoScore,
-    ParticipantPolicy,
     ProtocolError,
     Score,
     TrustRoot,
 )
 from cortex.protocol.scale import Reader, uint
+from cortex.protocol.trust import trust_from_json, trust_to_json
 from cortex.state import secure_sqlite_path
 
 
@@ -95,6 +95,7 @@ class GatewayStore:
                 digest BLOB PRIMARY KEY, profile TEXT NOT NULL
             );
         """)
+        self._require_wire_format()
         for epoch, encoded in self._connection.execute(
             "SELECT epoch,bundle_scale FROM gateway_bundles "
             "WHERE epoch NOT IN (SELECT epoch FROM gateway_bundle_roots)"
@@ -106,6 +107,32 @@ class GatewayStore:
             self._connection.execute(
                 "INSERT OR IGNORE INTO gateway_bundle_roots VALUES (?,?)", (root, epoch)
             )
+
+    def _require_wire_format(self) -> None:
+        """v1 rows carry leaf/gateway signatures and cannot be read as v2: refuse, never convert."""
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT value FROM gateway_metadata WHERE name='wire_format'"
+            ).fetchone()
+            if row is None:
+                used = connection.execute(
+                    "SELECT 1 FROM gateway_raw_leaves UNION ALL "
+                    "SELECT 1 FROM gateway_bundles UNION ALL "
+                    "SELECT 1 FROM gateway_trust_profiles LIMIT 1"
+                ).fetchone()
+                if used:
+                    raise ServiceError(
+                        503,
+                        "gateway database uses the retired signed wire format: use a new state dir",
+                    )
+                connection.execute(
+                    "INSERT INTO gateway_metadata VALUES ('wire_format', ?)",
+                    (str(BUNDLE_PROTOCOL_VERSION),),
+                )
+            elif row[0] != str(BUNDLE_PROTOCOL_VERSION):
+                raise ServiceError(
+                    503, "gateway database wire format mismatch: use a new state dir"
+                )
 
     @contextmanager
     def _transaction(self):
@@ -133,7 +160,7 @@ class GatewayStore:
 
     def accept_trust(self, trust: TrustRoot) -> None:
         trust.validate()
-        profile = json.dumps(asdict(trust), default=bytes.hex, sort_keys=True)
+        profile = json.dumps(trust_to_json(trust), sort_keys=True)
         with self._transaction() as connection:
             for name, value in (
                 ("challenges_version", trust.challenges_version),
@@ -143,7 +170,7 @@ class GatewayStore:
                     "SELECT value FROM gateway_metadata WHERE name=?", (name,)
                 ).fetchone()
                 if row is not None and value < int(row[0]):
-                    raise ServiceError(503, "gateway trust version rollback")
+                    raise ServiceError(503, "gateway profile version rollback")
                 connection.execute(
                     "INSERT INTO gateway_metadata VALUES (?,?) "
                     "ON CONFLICT(name) DO UPDATE SET value=excluded.value",
@@ -167,22 +194,7 @@ class GatewayStore:
                 values = json.loads(profile)
                 if not isinstance(values, dict):
                     raise ProtocolError("corrupt stored trust profile")
-                challenges = []
-                for entry in values.pop("challenges"):
-                    policy = entry["policy"]
-                    policy["hotkeys"] = tuple(bytes.fromhex(key) for key in policy["hotkeys"])
-                    challenges.append(
-                        ChallengeEntry(
-                            bytes.fromhex(entry["id"]),
-                            bytes.fromhex(entry["public_key"]),
-                            entry["emission_share_bps"],
-                            ParticipantPolicy(**policy),
-                        )
-                    )
-                values["measurements_digest"] = bytes.fromhex(values["measurements_digest"])
-                values["gateway_hotkey"] = bytes.fromhex(values["gateway_hotkey"])
-                trust = TrustRoot(challenges=tuple(challenges), **values)
-                trust.validate()
+                trust = trust_from_json(values)
                 profiles.append(trust)
         except (KeyError, TypeError, ValueError) as error:
             raise ProtocolError("corrupt stored trust profile") from error
