@@ -26,16 +26,20 @@ def test_v2_matured_reward_reaches_get_weights(network, monkeypatch, tmp_path):
     store = network.store
     run_id = network.manifest.run_id()
     assert store._record_v2(run_id, "replayed-finality", "0")["shadow"] is False
-    origin, hotkey, mature_at = store._db.execute(
-        "SELECT origin,hotkey,mature_at FROM escrow_origins WHERE reward_round=0 AND issued>0 "
-        "ORDER BY hotkey LIMIT 1"
-    ).fetchone()
+    mature_at = store._db.execute(
+        "SELECT MAX(mature_at) FROM escrow_origins WHERE reward_round=0 AND issued>0"
+    ).fetchone()[0]
     # When: beacon rounds pass mature_at (push_beacon matures it), then Cortex asks for weights.
     network.push(max(network.now, mature_at) + 1)
-    matured = store._db.execute(
-        "SELECT SUM(units) FROM escrow_units WHERE origin=? AND bucket='available'", (origin,)
-    ).fetchone()[0]
-    assert matured and matured > 0
+    # Every round-0 origin, free and still held by its earning owner, is owed to its hotkey.
+    expected: dict[str, float] = {}
+    for hotkey, units in store._db.execute(
+        "SELECT o.hotkey,u.units FROM escrow_units u JOIN escrow_origins o ON o.origin=u.origin "
+        "WHERE o.reward_round=0 AND o.issued>0 AND u.bucket='available' AND u.units>0"
+    ):
+        expected[hotkey] = expected.get(hotkey, 0.0) + units
+    # Four graduated miners, each awarded an equal quarter of the round-0 budget.
+    assert sorted(expected.values()) == [250_000.0] * 4
     epoch_at = int(store.clock())
     epoch = (epoch_at - store.params.genesis_unix) // store.params.epoch_seconds
     token = tmp_path / "internal"
@@ -53,11 +57,12 @@ def test_v2_matured_reward_reaches_get_weights(network, monkeypatch, tmp_path):
             "x-platform-challenge-slug": config.slug,
         },
     )
-    # Then: the matured v2 reward is paid as weight to its hotkey.
+    # Then: exactly the matured v2 units are paid as weight to their hotkeys, the rest burns.
     assert response.status_code == 200, response.text
-    assert response.json()["weights"].get(hotkey, 0) > 0, response.text
     answer = response.json()
-    assert sum(answer["weights"].values()) + answer["metadata"]["units_burned_this_epoch"] == 10**6
+    assert answer["weights"] == expected, response.text
+    assert answer["metadata"]["units_paid"] == sum(expected.values())
+    assert answer["metadata"]["units_burned_this_epoch"] == 10**6 - sum(expected.values())
     # And: a replayed request for the same epoch returns the same bytes and pays nothing twice.
     paid = store._db.execute("SELECT COUNT(*) FROM escrow_events WHERE kind='PAY'").fetchone()[0]
     again = network.client.get(response.request.url, headers=response.request.headers)

@@ -264,3 +264,74 @@ def test_legacy_epoch_after_upgrade_gap_never_repaid(paying) -> None:
     assert again == served
     assert gap["metadata"]["reason"] == "out_of_order" and gap["weights"] == {}
     assert fresh["weights"] == {E.HOT.ss58: 1_000_000.0} and pays(escrow) == 1
+
+
+def origin(escrow, origin_id: str, hotkey: str, units: int, mature_at: int) -> None:
+    """A matured live origin held by its issued owner, as reward_finalize + mature leave it."""
+    escrow.db.execute(
+        "INSERT INTO escrow_origins VALUES(?,?,?,0,?)", (origin_id, units, mature_at, hotkey)
+    )
+    for bucket, held in (("reward_pending", 0), ("available", units)):
+        escrow.db.execute(
+            "INSERT INTO escrow_units VALUES(?,?,?,'',?)", (origin_id, E.COLD.ss58, bucket, held)
+        )
+
+
+def test_oldest_maturity_paid_first_and_same_hotkey_accumulates(paying) -> None:
+    # Given: the fixture origin (HOT, matures 20, 1e6) and two older ones whose ids sort after it.
+    store, escrow, reward, _, _ = paying
+    mature(escrow, reward)
+    origin(escrow, "ff" * 32, E.HOT.ss58, 300_000, 10)
+    origin(escrow, "ee" * 32, "other", 500_000, 15)
+    # When: one epoch with the whole 1e6 mass unpaid by v1.
+    answer = json.loads(store.weights(0, at(escrow, 20), 1))
+    # Then: 300k (round 10) + 500k (round 15) + 200k of the round-20 origin, HOT summed.
+    assert answer["weights"] == {E.HOT.ss58: 500_000.0, "other": 500_000.0}
+    assert answer["metadata"]["units_burned_this_epoch"] == 0
+    left = escrow.db.execute(
+        "SELECT units FROM escrow_units WHERE origin=? AND bucket='available'",
+        (reward.origin_ids[0],),
+    ).fetchone()[0]
+    assert left == 800_000 and pays(escrow) == 3
+
+
+def test_hotkey_past_entry_cap_keeps_units_for_later(paying, monkeypatch) -> None:
+    # Given: a one-entry weight cap and a second hotkey matured between two HOT origins.
+    store, escrow, reward, _, _ = paying
+    mature(escrow, reward)
+    origin(escrow, "ff" * 32, E.HOT.ss58, 300_000, 10)
+    origin(escrow, "ee" * 32, "other", 500_000, 15)
+    monkeypatch.setattr("hypertrain.ledger.MAX_ENTRIES", 1)
+    # When
+    answer = json.loads(store.weights(0, at(escrow, 20), 1))
+    # Then: the capped hotkey is skipped, HOT already listed still fills the mass.
+    assert answer["weights"] == {E.HOT.ss58: 1_000_000.0}
+    assert answer["metadata"]["units_burned_this_epoch"] == 0
+    kept = escrow.db.execute(
+        "SELECT units FROM escrow_units WHERE origin=? AND bucket='available'", ("ee" * 32,)
+    ).fetchone()[0]
+    assert kept == 500_000 and pays(escrow) == 2
+
+
+def test_no_v2_pay_before_any_live_reward_finalized(paying) -> None:
+    # Given: matured units, but no live reward was ever finalized for the run.
+    store, escrow, reward, _, _ = paying
+    mature(escrow, reward)
+    escrow.db.execute("DELETE FROM escrow_finalized")
+    # When
+    answer = json.loads(store.weights(0, at(escrow, 20), 1))
+    # Then: the epoch is the plain v1 answer.
+    assert answer["weights"] == {} and answer["metadata"]["units_burned_this_epoch"] == 10**6
+    assert pays(escrow) == 0
+
+
+def test_out_of_order_epoch_not_completed_with_v2(paying) -> None:
+    # Given: epoch 1 already answered, then Cortex asks for the older epoch 0.
+    store, escrow, reward, _, _ = paying
+    store.weights(1, at(escrow, 19), 1)
+    mature(escrow, reward)
+    # When
+    late = json.loads(store.weights(0, at(escrow, 20), 2))
+    # Then: v1 refuses it as out_of_order and v2 does not fill its burned mass.
+    assert late["metadata"]["reason"] == "out_of_order" and late["weights"] == {}
+    assert pays(escrow) == 0 and escrow.balances().available == 1_000_000
