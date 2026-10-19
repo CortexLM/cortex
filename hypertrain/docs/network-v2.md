@@ -106,15 +106,21 @@ which includes its nonce; `WorkScreenV2` is reserved by admission and nonce.
 alone. Retry the exact stored signed operation: changing expiry or signature does
 not create a new semantic attempt (`protocol/envelope_v2.py:replay_key`).
 
-For each challenge, obtain the coordinator-signed envelope from
-`GET /v2/runs/{run_id}/join/{admission_id}/challenge`. The operator must supply the
-matching staged `IslandJobV1` and all files in its `object_paths` beside the job.
-The CLI does not download/stage an admission job automatically. Given those
-existing files:
+After `GET /v2/runs/{run_id}/join/{admission_id}/challenge` issues a challenge,
+the operator exports the matching staged `IslandJobV1`, its inputs and the signed
+challenge into a new or empty folder:
+
+```bash
+uv run --frozen python -m hypertrain.challenge.trial_export \
+  --api "$API" --run-id "$RUN_ID" --admission-id "$ADMISSION_ID" \
+  --admin-token-file /path/to/admin-token --out trial
+```
+
+Copy `trial/` to the miner, then run:
 
 ```bash
 uv run --frozen hypertrain-miner probe-v2 --config miner.toml \
-  --job trial/job.json --challenge challenge.json > proof.json
+  --job trial/job.json --challenge trial/challenge.json > proof.json
 uv run --frozen hypertrain-miner proof-v2 --config miner.toml --proof proof.json
 ```
 

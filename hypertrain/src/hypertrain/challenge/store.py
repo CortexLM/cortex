@@ -2619,6 +2619,52 @@ class ChallengeStore:
             deadline=deadline,
         ), directory
 
+    def export_trial_v2(self, run_id: str, admission_id: str) -> dict[str, Any]:
+        from hypertrain.data.trial_assignment import trial_samples
+
+        self._services(run_id)
+        with self._lock:
+            manifest = self._run_v2(run_id)
+            row = self._db.execute(
+                "SELECT * FROM admissions_v2 WHERE admission_id=? AND run_id=?",
+                (admission_id, run_id),
+            ).fetchone()
+            if row is None or row["challenge"] is None:
+                raise ChallengeError(409, "NO_CHALLENGE")
+            challenge = JoinChallenge.model_validate_json(row["challenge"])
+            trial = self._db.execute(
+                "SELECT outcome FROM admission_trial_results WHERE epoch=?",
+                (row["trial_epoch"],),
+            ).fetchone()
+            if trial is None or trial["outcome"] != "OPEN":
+                raise ChallengeError(409, "REFERENCE_TRIAL_CLOSED")
+            try:
+                beacon = self._beacon_v2(challenge.seed_beacon)
+            except BeaconError:
+                raise ChallengeError(503, "beacon infrastructure paused") from None
+            samples = trial_samples(manifest, admission_id, challenge.nonce, beacon)
+            job, directory = self.stage_trial_v2(run_id, challenge, samples, row["trial_epoch"])
+            path = directory / "job.json"
+            raw = job.model_dump_json().encode()
+            if path.exists():
+                if path.read_bytes() != raw:
+                    raise ChallengeError(409, "immutable trial job changed")
+            else:
+                with tempfile.TemporaryDirectory(dir=directory) as temporary:
+                    staged = Path(temporary) / "job.json"
+                    staged.write_bytes(raw)
+                    staged.replace(path)
+            objects = {
+                name: self.objects.put((directory / relative).read_bytes())
+                for name, relative in job.object_paths.items()
+            }
+            return {
+                "job": job.body(),
+                "objects": objects,
+                "challenge": challenge.body(),
+                "nonce": challenge.nonce,
+            }
+
     def _dispute_span_v2(
         self, run_id: str, contest: Contest, level: Any, ctx: tuple[int, ...]
     ) -> int:
