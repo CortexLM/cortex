@@ -520,7 +520,8 @@ class MasterRuntime:
             return JSONResponse({"error": error.reason}, status_code=error.status)
 
         operator = OperatorAuth(self.config.operator_token_file)
-        app.include_router(gateway_router(self.gateway, operator))
+        intake = OperatorAuth(self.config.intake_token_file)
+        app.include_router(gateway_router(self.gateway, operator, intake))
         proof = proof_router(self.proof, operator, self.topic_setup)
         app.include_router(proof)
         app.include_router(proof, prefix="/challenge/proof", include_in_schema=False)
@@ -557,7 +558,11 @@ async def build_master(
     clock = EpochClock(epochs, config.netuid, stale_seconds=config.epoch_stale_seconds)
     state = await clock.refresh()
     local_trust = trust or config.challenge_profile(state.epoch)
-    read_private_file(config.operator_token_file)
+    # Holding the intake bearer must never grant sealing, and vice versa.
+    if config.operator_token_file.resolve() == config.intake_token_file.resolve() or (
+        read_private_file(config.operator_token_file) == read_private_file(config.intake_token_file)
+    ):
+        raise ServiceError(503, "intake and admin bearers must differ")
     load_registry(config.challenge_registry_file)  # fail fast on an invalid operator registry
     with ExitStack() as cleanup:
         gateway_store = GatewayStore(config.state_dir / "gateway.sqlite3")

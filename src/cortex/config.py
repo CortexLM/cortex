@@ -103,6 +103,7 @@ class MasterConfig:
     measurements_file: Path
     proof_seed_file: Path
     operator_token_file: Path
+    intake_token_file: Path
     challenge_registry_file: Path | None = None
     challenge_secrets_dir: Path = Path("/run/challenge-secrets")
     chain_endpoint: str = "finney"
@@ -180,6 +181,7 @@ class MasterConfig:
             measurements_file=Path(value("BASE_MEASUREMENTS_FILE", "config/measurements.toml")),
             proof_seed_file=required_path("PROOF_SK_FILE"),
             operator_token_file=required_path("BASE_GATEWAY_ADMIN_TOKEN_FILE"),
+            intake_token_file=required_path("BASE_GATEWAY_INTAKE_TOKEN_FILE"),
             challenge_registry_file=optional_path("BASE_CHALLENGE_REGISTRY_FILE"),
             challenge_secrets_dir=Path(
                 value("BASE_CHALLENGE_SECRETS_DIR", "/run/challenge-secrets")

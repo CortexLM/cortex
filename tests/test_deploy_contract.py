@@ -162,6 +162,7 @@ def master_config():
                     "BASE_MEASUREMENTS_FILE": "/etc/base/config/measurements.toml",
                     "PROOF_SK_FILE": "/run/secrets/proof.key",
                     "BASE_GATEWAY_ADMIN_TOKEN_FILE": "/run/secrets/operator.token",
+                    "BASE_GATEWAY_INTAKE_TOKEN_FILE": "/run/secrets/intake.token",
                     "BASE_CHALLENGE_REGISTRY_FILE": "/etc/base/challenges/registry.toml",
                     "BASE_CHALLENGE_SECRETS_DIR": "/run/challenge-secrets",
                 },
@@ -235,6 +236,24 @@ def test_compose_healthcheck_cannot_be_satisfied_by_an_unrelated_command(role):
 
     with pytest.raises(ValueError, match="healthcheck"):
         CHECK["validate_compose"](config, role)
+
+
+@pytest.mark.parametrize(
+    "intake",
+    [None, "/run/secrets/operator.token", "/tmp/intake.token", "inline"],
+)
+def test_master_requires_its_own_audited_intake_bearer_file(intake):
+    config = master_config()
+    environment = config["services"]["gateway"]["environment"]
+    if intake is None:
+        del environment["BASE_GATEWAY_INTAKE_TOKEN_FILE"]
+    elif intake == "inline":
+        environment["BASE_GATEWAY_INTAKE_TOKEN"] = "placeholder"
+    else:
+        environment["BASE_GATEWAY_INTAKE_TOKEN_FILE"] = intake
+
+    with pytest.raises(ValueError, match="credentials"):
+        CHECK["validate_compose"](config, "master")
 
 
 @pytest.mark.parametrize("role", ["master", "validator"])

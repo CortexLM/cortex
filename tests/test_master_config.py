@@ -13,6 +13,7 @@ def configured_environment():
         "BASE_NETUID": "541",
         "PROOF_SK_FILE": "/run/secrets/proof",
         "BASE_GATEWAY_ADMIN_TOKEN_FILE": "/run/secrets/operator",
+        "BASE_GATEWAY_INTAKE_TOKEN_FILE": "/run/secrets/intake",
         "PROOF_VM_ORCHESTRATOR_URL": "https://vm.example",
         "PROOF_VM_ORCHESTRATOR_TOKEN_FILE": "/run/secrets/vm-token",
         "PROOF_VM_ORCHESTRATOR_CA_FILE": "/run/secrets/vm-ca.pem",

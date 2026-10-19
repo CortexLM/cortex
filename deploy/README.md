@@ -85,7 +85,8 @@ Prepare a private directory, owned so container UID 65532 can read it:
 ```text
 deploy/secrets/master/
   proof.key           # signs Proof topics (miners pin its public key)
-  operator.token
+  operator.token      # admin routes and sealing
+  intake.token        # raw leaf intake only; a different value
   proof-vm.token
   proof-vm-ca.pem
 ```

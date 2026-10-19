@@ -52,6 +52,7 @@ MASTER_ENVIRONMENT = {
     "BASE_MEASUREMENTS_FILE": "/etc/base/config/measurements.toml",
     "PROOF_SK_FILE": "/run/secrets/proof.key",
     "BASE_GATEWAY_ADMIN_TOKEN_FILE": "/run/secrets/operator.token",
+    "BASE_GATEWAY_INTAKE_TOKEN_FILE": "/run/secrets/intake.token",
     "BASE_CHALLENGE_REGISTRY_FILE": "/etc/base/challenges/registry.toml",
     "BASE_CHALLENGE_SECRETS_DIR": "/run/challenge-secrets",
 }
@@ -368,6 +369,7 @@ def validate_compose(config: dict, role: str) -> None:
             "OPENROUTER_API_KEY",
             "PROOF_SK",
             "BASE_GATEWAY_ADMIN_TOKEN",
+            "BASE_GATEWAY_INTAKE_TOKEN",
             "PROOF_VM_ORCHESTRATOR_TOKEN",
         }
         if forbidden_values.intersection(environment):

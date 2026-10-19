@@ -9,13 +9,17 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
   untracked regular file with mode 0400 or 0600 inside a 0700 directory.
 - [ ] No credential is present in an environment example, image layer, compose
   build argument, Terraform state, cloud-init payload, log or shell history.
-- [ ] Master operator, per-challenge internal/admin, Proof and VM-host tokens are
-  distinct and rotated independently.
-- [ ] The master operator bearer is held only by the master and the operator. It
-  feeds `POST /v1/weights/raw` and seals epochs (`/v1/admin/seal`), so a holder can
-  forge any score and seal it (accepted risk, founder decision 2026-10-19; see the
-  [threat model](THREAT_MODEL.md)). Rotate it on any suspicion. Wire v2 has no
-  independent bundle cross-check: its vectors come from the Python implementation.
+- [ ] Master operator, master intake, per-challenge internal/admin, Proof and
+  VM-host tokens are distinct and rotated independently.
+- [ ] The master operator bearer (`operator.token`) seals epochs
+  (`/v1/admin/seal`) and guards the other administrative routes; the separate
+  intake bearer (`intake.token`) only feeds `POST /v1/weights/raw`. The master
+  refuses to start when both files are the same path or hold the same value.
+  Neither bearer grants the other's route, but an intake holder can still write
+  forged raw leaves that the master's normal epoch seal will include (see the
+  [threat model](THREAT_MODEL.md)). Hold each only where needed and rotate each
+  on any suspicion. Wire v2 has no independent bundle cross-check: its vectors
+  come from the Python implementation.
 - [ ] Miner BYOK vault storage is durable only as long as queued work requires,
   and terminal jobs have no remaining secret files.
 - [ ] The OpenRouter owner key stays on the VM host and is not exposed to miner

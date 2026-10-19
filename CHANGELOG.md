@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Master: `POST /v1/weights/raw` now requires a separate intake bearer
+  (`BASE_GATEWAY_INTAKE_TOKEN_FILE`, `deploy/secrets/master/intake.token`);
+  `POST /v1/admin/seal` keeps the operator bearer. Each refuses the other with
+  401, and startup refuses identical paths or values (BREAKING for deployments:
+  create `intake.token` before upgrading).
 - Wire format v2 (`protocol_version` 2, BREAKING): leaves and bundles carry no
   signatures and no gateway key. `Leaf` ends at its score, `Bundle` is the body,
   `ChallengeEntry` has no public key. The old v1 bundles and a gateway `state_dir`

@@ -15,7 +15,8 @@ conflicting values are an error. Existing names and crypto domains are preserved
 | `BASE_CHALLENGES_FILE` | Unsigned challenge profile (emission shares); served by the gateway at `GET /v1/trust` |
 | `BASE_MEASUREMENTS_FILE` | Unsigned measurement profile; served with the challenge profile |
 | `PROOF_SK_FILE` | Proof topic seed file |
-| `BASE_GATEWAY_ADMIN_TOKEN_FILE` | Required operator bearer file |
+| `BASE_GATEWAY_ADMIN_TOKEN_FILE` | Required operator bearer file (admin routes and `/v1/admin/seal`) |
+| `BASE_GATEWAY_INTAKE_TOKEN_FILE` | Required raw-intake bearer file (`/v1/weights/raw` only); path and value must differ from the admin bearer |
 | `BASE_CHALLENGE_REGISTRY_FILE` | Optional [challenge registry](../CHALLENGES.md); unset runs no container challenge |
 | `BASE_CHALLENGE_SECRETS_DIR` | Per-challenge `<id>/internal.token` bearers; default `/run/challenge-secrets` |
 | `PROOF_VM_ORCHESTRATOR_URL` | Dedicated VM host HTTPS origin |

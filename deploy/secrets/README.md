@@ -11,7 +11,8 @@ regular files, owned/readable by that identity, with mode 0400 or 0600.
 | File | Purpose |
 | --- | --- |
 | `proof.key` | 32-byte sr25519 seed that signs Proof topics; miners pin its public key (`--proof-public`) |
-| `operator.token` | bearer for master administrative routes |
+| `operator.token` | bearer for master administrative routes, including `/v1/admin/seal` |
+| `intake.token` | separate bearer for raw leaf intake (`/v1/weights/raw`); must differ from `operator.token` |
 | `proof-vm.token` | bearer shared with the dedicated VM host |
 | `proof-vm-ca.pem` | CA used to verify the VM-host TLS certificate |
 

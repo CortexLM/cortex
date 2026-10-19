@@ -96,6 +96,7 @@ def master_config(tmp_path):
         measurements_file=tmp_path / "measurements.toml",
         proof_seed_file=secret("proof.key", bytes([2]) * 32),
         operator_token_file=secret("operator.token", b"fixture-operator-token"),
+        intake_token_file=secret("intake.token", b"fixture-intake-token"),
         challenge_secrets_dir=tmp_path / "challenge-secrets",
     )
 
@@ -401,6 +402,42 @@ async def test_private_routes_require_rotating_file_and_master_routes_are_compos
         assert (
             await client.post(drain, headers={"authorization": "Bearer rotated-token"})
         ).status_code != 401
+        raw = {"authorization": "Bearer rotated-token"}
+        assert (await client.post("/v1/weights/raw", json={}, headers=raw)).status_code == 401
+        intake = {"authorization": "Bearer fixture-intake-token"}
+        assert (await client.post("/v1/weights/raw", json={}, headers=intake)).status_code == 400
+        seal = await client.post("/v1/admin/seal", json={"epoch": 12}, headers=intake)
+        assert seal.status_code == 401
+
+
+def fixture_trust():
+    return TrustRoot(
+        (ChallengeEntry(b"bounty", 2000), ChallengeEntry(b"proof", 8000)),
+        sha256(b"\x00").digest(),
+    )
+
+
+@pytest.mark.parametrize("shared", ["same-file", "same-value"])
+async def test_master_refuses_one_bearer_for_intake_and_sealing(tmp_path, shared):
+    config = master_config(tmp_path)
+    if shared == "same-file":
+        config = replace(config, intake_token_file=config.operator_token_file)
+    else:
+        config.intake_token_file.write_bytes(b"fixture-operator-token\n")
+    chain = FakeEpochChain()
+    with pytest.raises(ServiceError, match="must differ"):
+        await build_master(config, chain=chain, epochs=chain, trust=fixture_trust())
+
+
+async def test_master_refuses_a_missing_or_shared_mode_intake_bearer(tmp_path):
+    config = master_config(tmp_path)
+    chain = FakeEpochChain()
+    config.intake_token_file.chmod(0o644)
+    with pytest.raises(ServiceError, match="private"):
+        await build_master(config, chain=chain, epochs=chain, trust=fixture_trust())
+    config.intake_token_file.unlink()
+    with pytest.raises(ServiceError, match="unavailable"):
+        await build_master(config, chain=chain, epochs=chain, trust=fixture_trust())
 
 
 def test_private_seed_rejects_symlinks_permissions_and_accepts_raw_or_hex(tmp_path):
@@ -422,11 +459,14 @@ def test_config_base_aliases_fail_closed_and_do_not_accept_inline_secret_values(
         "BASE_NETUID": "541",
         "PROOF_SK_FILE": "/private/proof",
         "BASE_GATEWAY_ADMIN_TOKEN_FILE": "/private/token",
+        "BASE_GATEWAY_INTAKE_TOKEN_FILE": "/private/intake",
     }
     alias = {key.replace("BASE_", "CORTEX_"): value for key, value in env.items()}
     assert MasterConfig.from_env(env) == MasterConfig.from_env(alias)
     with pytest.raises(ValueError, match="conflicting"):
         MasterConfig.from_env({**env, "CORTEX_NETUID": "1"})
+    with pytest.raises(ValueError, match="BASE_GATEWAY_INTAKE_TOKEN_FILE"):
+        MasterConfig.from_env({k: v for k, v in env.items() if "INTAKE" not in k})
     del env["PROOF_SK_FILE"]
     env["PROOF_SK"] = "secret-inline-material"
     with pytest.raises(ValueError, match="PROOF_SK_FILE"):

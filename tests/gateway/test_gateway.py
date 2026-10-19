@@ -68,6 +68,9 @@ async def network(tmp_path):
     token_file = tmp_path / "operator-token"
     token_file.write_text("first-test-token")
     token_file.chmod(0o600)
+    intake_file = tmp_path / "intake-token"
+    intake_file.write_text("intake-test-token")
+    intake_file.chmod(0o600)
     store = GatewayStore(tmp_path / "gateway.db")
     rows = tuple(MetagraphRow(bytes([tag]) * 32, tag) for tag in range(3))
     trust = TrustRoot(
@@ -86,7 +89,7 @@ async def network(tmp_path):
     )
     service = GatewayService(store=store, **settings)
     app = FastAPI()
-    app.include_router(create_router(service, OperatorAuth(token_file)))
+    app.include_router(create_router(service, OperatorAuth(token_file), OperatorAuth(intake_file)))
     journal = SubmissionJournal(tmp_path / "validator.db")
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="https://master.invalid"
@@ -103,6 +106,7 @@ async def network(tmp_path):
             db_path=tmp_path / "gateway.db",
             journal=journal,
             auth={"authorization": "Bearer first-test-token"},
+            intake_auth={"authorization": "Bearer intake-test-token"},
         )
     store.close()
     journal.close()
@@ -124,7 +128,7 @@ def leaves(network, epoch=12, winner=1, reason=NoScoreReason.NOT_ATTEMPTED):
 async def intake(network, epoch=12, winner=1, reason=NoScoreReason.NOT_ATTEMPTED):
     for leaf in leaves(network, epoch, winner, reason):
         response = await network.client.post(
-            "/v1/weights/raw", json=leaf_request(leaf), headers=network.auth
+            "/v1/weights/raw", json=leaf_request(leaf), headers=network.intake_auth
         )
         assert response.status_code == 202, response.text
 
@@ -312,7 +316,7 @@ async def test_seal_requires_exact_participant_coverage(network):
     for leaf in leaves(network)[:-1]:
         assert (
             await network.client.post(
-                "/v1/weights/raw", json=leaf_request(leaf), headers=network.auth
+                "/v1/weights/raw", json=leaf_request(leaf), headers=network.intake_auth
             )
         ).status_code == 202
     response = await seal(network)
@@ -326,7 +330,9 @@ async def test_extra_participant_cannot_enter_the_seal(network):
     await intake(network)
     extra = Leaf(b"bounty", bytes([99]) * 32, 12, Score(1))
     assert (
-        await network.client.post("/v1/weights/raw", json=leaf_request(extra), headers=network.auth)
+        await network.client.post(
+            "/v1/weights/raw", json=leaf_request(extra), headers=network.intake_auth
+        )
     ).status_code == 202
     assert (await seal(network)).status_code == 409
 
@@ -356,7 +362,7 @@ async def test_invalid_intake_leaves_no_row(network, mutation, status):
         body["score_or_absence"] = {"no_score": {"reason": 8}}
     else:
         del body["miner_hotkey"]
-    response = await network.client.post("/v1/weights/raw", json=body, headers=network.auth)
+    response = await network.client.post("/v1/weights/raw", json=body, headers=network.intake_auth)
     assert response.status_code == status
     assert network.store.leaves(12) == ()
 
@@ -364,7 +370,7 @@ async def test_invalid_intake_leaves_no_row(network, mutation, status):
 async def test_duplicate_and_nonpositive_leaves_cannot_revoke_positive_score(network):
     positive = leaves(network)[1]
     first = await network.client.post(
-        "/v1/weights/raw", json=leaf_request(positive), headers=network.auth
+        "/v1/weights/raw", json=leaf_request(positive), headers=network.intake_auth
     )
     repeated = Leaf(b"bounty", positive.miner_hotkey, 12, Score(50))
     burns = [
@@ -373,7 +379,7 @@ async def test_duplicate_and_nonpositive_leaves_cannot_revoke_positive_score(net
     zero = Leaf(b"bounty", positive.miner_hotkey, 12, Score(0))
     for incoming in (repeated, *burns, zero):
         response = await network.client.post(
-            "/v1/weights/raw", json=leaf_request(incoming), headers=network.auth
+            "/v1/weights/raw", json=leaf_request(incoming), headers=network.intake_auth
         )
         assert response.status_code == 409
         assert response.json()["original"]["id"] == first.json()["id"]
@@ -504,7 +510,7 @@ async def test_changed_payload_supersedes_and_sealed_bytes_stay_immutable(networ
     original = (await network.client.get("/v1/bundle/12")).content
     changed = Leaf(b"bounty", network.rows[1].hotkey, 12, Score(100))
     response = await network.client.post(
-        "/v1/weights/raw", json=leaf_request(changed), headers=network.auth
+        "/v1/weights/raw", json=leaf_request(changed), headers=network.intake_auth
     )
     assert response.status_code == 202 and response.json()["superseded"] is True
     assert (await seal(network)).status_code == 200
@@ -650,10 +656,10 @@ async def test_historical_root_refuses_corrupt_or_missing_accepted_profile(netwo
 
 async def test_duplicate_json_and_oversized_request_are_rejected_before_store(network):
     duplicate = await network.client.post(
-        "/v1/weights/raw", content='{"epoch": 1, "epoch": 2}', headers=network.auth
+        "/v1/weights/raw", content='{"epoch": 1, "epoch": 2}', headers=network.intake_auth
     )
     oversized = await network.client.post(
-        "/v1/weights/raw", content=b"x" * 4097, headers=network.auth
+        "/v1/weights/raw", content=b"x" * 4097, headers=network.intake_auth
     )
     assert duplicate.status_code == 400
     assert oversized.status_code == 413
@@ -710,7 +716,21 @@ async def test_content_addressed_bundle_lookup_returns_identical_signed_bytes(ne
     assert (await network.client.get("/v1/bundle/root/invalid")).status_code == 400
 
 
-async def test_raw_weight_intake_requires_the_operator_bearer(network):
+async def test_raw_intake_and_seal_each_refuse_the_other_bearer(network):
+    body = leaf_request(leaves(network)[0])
+    assert (
+        await network.client.post("/v1/weights/raw", json=body, headers=network.auth)
+    ).status_code == 401
+    assert network.store.leaves(12) == ()
+    await intake(network)
+    assert (
+        await network.client.post("/v1/admin/seal", json={"epoch": 12}, headers=network.intake_auth)
+    ).status_code == 401
+    assert network.service.latest()["sealed"] is False
+    assert (await seal(network)).status_code == 200
+
+
+async def test_raw_weight_intake_requires_the_intake_bearer(network):
     body = leaf_request(leaves(network)[0])
     assert (await network.client.post("/v1/weights/raw", json=body)).status_code == 401
     wrong = {"authorization": "Bearer wrong"}
@@ -719,7 +739,7 @@ async def test_raw_weight_intake_requires_the_operator_bearer(network):
     ).status_code == 401
     assert network.store.leaves(12) == ()
     assert (
-        await network.client.post("/v1/weights/raw", json=body, headers=network.auth)
+        await network.client.post("/v1/weights/raw", json=body, headers=network.intake_auth)
     ).status_code == 202
 
 
