@@ -616,3 +616,45 @@ async def test_hostile_trust_profile_does_not_move_the_version_watermark(network
     assert network.chain.submissions == []
     served["profile"] = trust_to_json(network.validator.trust)
     assert (await validator.run_once()).outcome == "submitted"
+
+
+async def test_cli_validator_reconcile_resolves_an_uncertain_dispatch(network, capsys):
+    from cortex.cli import main
+
+    network.chain.error = DispatchUncertain("RPC disconnected", extrinsic_hash="0x" + "ab" * 32)
+    result = await network.validator.run_once()
+    assert result.outcome == "dispatch_pending"
+    main(
+        [
+            "validator-reconcile",
+            "--state-db", str(network.db_path),
+            "--netuid", "541",
+            "--epoch", "12",
+            "--digest", bundle_digest(network.bundle),
+            "--attempt-id", result.attempt_id,
+            "--result", "not_broadcast",
+            "--evidence-digest", "cd" * 32,
+        ]
+    )  # fmt: skip
+    assert '"state": "reconciled_not_broadcast"' in capsys.readouterr().out
+    assert network.journal.pending(541, 12) is None
+    network.chain.error = None
+    assert (await network.validator.run_once()).outcome == "submitted"
+
+
+def test_cli_validator_reconcile_refuses_an_unknown_dispatch(network):
+    from cortex.cli import main
+
+    with pytest.raises(SystemExit, match="Cortex command failed"):
+        main(
+            [
+                "validator-reconcile",
+                "--state-db", str(network.db_path),
+                "--netuid", "541",
+                "--epoch", "12",
+                "--digest", "ab" * 32,
+                "--attempt-id", "nope",
+                "--result", "submitted",
+                "--evidence-digest", "cd" * 32,
+            ]
+        )  # fmt: skip
