@@ -264,7 +264,15 @@ Multi-chunk custody without a receipt disables the relay key at once only when
 the master holds the original and it proves every chunk hash. Otherwise the key
 is disabled only after rescued bytes hash to `delta_hash`: the grant could not
 tie those chunk hashes to the commit, so a mismatch answers 422 and leaves the
-relay enabled.
+relay enabled. A rescue the relay cannot serve at all (HTTP error, including a
+backend 503, or a signed response other than `SERVED`) disables the key too: two
+pinned auditors already proved the failure and the relay cannot produce its own
+signed custody. The fallback answers `rescued: false, disabled: true`; the
+`relay-disabled` id is `relay_id:assignment_epoch:key_id` and earlier evidence wins.
+While a grant is live, `upload-grant` returns the same signed grant for the same
+chunk list and 409 for another list.
+A relay whose granted chunks do not assemble to `delta_hash` answers 400
+`AssemblyMismatch`, records it on the upload and skips it in later recovery.
 Retention release waits for finality, disputes and vesting; signed extensions,
 overlapping old/new keys and drain preserve existing retrieval authority.
 

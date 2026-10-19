@@ -3465,6 +3465,8 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
         "forged",
         "held-chunk-only",
         "held-forged",
+        "dead-relay",
+        "unavailable-relay",
     ],
 )
 def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, invalid):
@@ -3474,7 +3476,7 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
     import anyio
     import httpx
 
-    from hypertrain.data.store import LocalFSStore
+    from hypertrain.data.store import CorruptObjectError, LocalFSStore, StoreError
     from hypertrain.data.stream_store import StreamStore
     from hypertrain.protocol import envelope_v2, relay_envelope
     from hypertrain.protocol.relay_messages import (
@@ -3517,7 +3519,14 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
     # unheld delta lets upload_grant_v2 sign such a manifest.
     forged = invalid in {"forged", "held-forged"}
     sent = b"x" * (4 << 20) + b"y" if forged else payload
-    chunk_only = invalid in {"chunk-only", "forged", "held-chunk-only", "held-forged"}
+    chunk_only = invalid in {
+        "chunk-only",
+        "forged",
+        "held-chunk-only",
+        "held-forged",
+        "dead-relay",
+        "unavailable-relay",
+    }
     chunks = UploadChunkManifest(
         size=len(payload),
         chunks=[
@@ -3735,6 +3744,14 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         return
     if chunk_only:
         assert not failure.json()["disabled"] and disabled() == 0
+    if invalid in {"dead-relay", "unavailable-relay"}:
+
+        async def down(*args):
+            if invalid == "dead-relay":
+                raise StoreError("backend unavailable")  # relay app answers HTTP 503
+            raise CorruptObjectError("bit rot")  # relay signs RetrievalResponse UNAVAILABLE
+
+        relay.backing.get = down
     app = relay_app(relay, "x" * 32)
     monkeypatch.setattr(
         httpx,
@@ -3744,7 +3761,30 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
     rescued = network.client.post(
         network.url + f"/admin/relay-fallback/{evidence.digest()}", headers=admin()
     )
-    if invalid == "chunk-only":
+    if invalid in {"dead-relay", "unavailable-relay"}:
+        # Two pinned auditors proved the failure and the relay cannot serve the rescue.
+        assert rescued.status_code == 200, rescued.text
+        assert rescued.json()["disabled"] and not rescued.json()["rescued"]
+        row = network.store._db.execute(
+            "SELECT id,data FROM records_v2 WHERE kind='relay-disabled'"
+        ).fetchall()
+        assert [(r[0], json.loads(r[1])) for r in row] == [
+            (
+                f"local:{grant.assignment_epoch}:k1",
+                {"key_id": "k1", "evidence_hash": evidence.digest()},
+            )
+        ]
+        with network.store._tx():
+            network.store._db.execute(
+                "DELETE FROM records_v2 WHERE kind='relay-assignment' AND id=?",
+                (f"0:{HOT[0].ss58}",),
+            )
+            network.store._put_record_v2(run_id, "round", "0", {"body": opened})
+            network.store._put_record_v2(run_id, "assignment", f"0:{HOT[0].ss58}", {})
+        fresh = network.client.get(network.url + f"/rounds/0/relay/{HOT[0].ss58}")
+        assert fresh.status_code == 503, fresh.text  # the only relay is out of selection
+        assert "no approved healthy relay" in fresh.text
+    elif invalid == "chunk-only":
         assert rescued.status_code == 200, rescued.text
         assert network.store.objects.get(grant.delta_hash) == payload
         assert disabled() == 1

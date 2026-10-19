@@ -5677,6 +5677,8 @@ class ChallengeStore:
         self, run_id: str, failure_hash: str, client: Any
     ) -> dict[str, Any]:
         """Rescue exact signed bytes; fallback grants never renew the original cutoff."""
+        import httpx
+
         from hypertrain.data.stream_store import spool
         from hypertrain.protocol import relay_envelope
         from hypertrain.protocol.relay_messages import (
@@ -5848,21 +5850,10 @@ class ChallengeStore:
         relay = RelayClient(registry, client)
         recovered = bytearray()
         responses = []
-        for request_raw, signer in requests:
-            with spool() as payload:
-                response = await relay.retrieval(request_raw, payload, relay_public=signer)
-                if RetrievalResponse.model_validate(response.body).status != "SERVED":
-                    raise ChallengeError(409, "original acknowledged bytes unavailable for rescue")
-                payload.seek(0)
-                recovered.extend(payload.read())
-                responses.append((request_raw, response))
-        with self._tx():
-            self._snapshot_current_v2(manifest)
-            if len(recovered) != grant.size or sha256_hex(bytes(recovered)) != grant.delta_hash:
-                raise ChallengeError(422, "rescued original bytes differ from signed commit")
-            self.objects.put(bytes(recovered))
-            disabled = f"{grant.relay_id}:{grant.assignment_epoch}:{failure.key_id}"
-            if not self._db.execute(  # Deferred by relay_failure_v2; earlier evidence wins.
+        disabled = f"{grant.relay_id}:{grant.assignment_epoch}:{failure.key_id}"
+
+        def disable() -> None:  # Deferred by relay_failure_v2; earlier evidence wins.
+            if not self._db.execute(
                 "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='relay-disabled' AND id=?",
                 (run_id, disabled),
             ).fetchone():
@@ -5872,6 +5863,35 @@ class ChallengeStore:
                     disabled,
                     {"key_id": failure.key_id, "evidence_hash": failure_hash},
                 )
+
+        unavailable = False
+        try:
+            for request_raw, signer in requests:
+                with spool() as payload:
+                    response = await relay.retrieval(request_raw, payload, relay_public=signer)
+                    if RetrievalResponse.model_validate(response.body).status != "SERVED":
+                        unavailable = True
+                        break
+                    payload.seek(0)
+                    recovered.extend(payload.read())
+                    responses.append((request_raw, response))
+        except httpx.HTTPError:
+            unavailable = True
+        if unavailable:
+            # Two pinned observers proved the contractual failure and the relay cannot serve
+            # its own signed custody either: a dead relay. Bytes that are served but hash
+            # wrong (422 below) can be miner framing and never disable.
+            with self._tx():
+                self._snapshot_current_v2(manifest)
+                disable()
+            self._notify_processes_v2()
+            return {"rescued": False, "disabled": True, "relay_id": grant.relay_id}
+        with self._tx():
+            self._snapshot_current_v2(manifest)
+            if len(recovered) != grant.size or sha256_hex(bytes(recovered)) != grant.delta_hash:
+                raise ChallengeError(422, "rescued original bytes differ from signed commit")
+            self.objects.put(bytes(recovered))
+            disable()
             for request_raw, response in responses:
                 self._put_record_v2(
                     run_id,
