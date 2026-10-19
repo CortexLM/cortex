@@ -457,11 +457,17 @@ class Harness:
 
     def wait_ready(self) -> None:
         key = self.identity().with_suffix(".pub").read_text().strip()
-        attached, last_error = False, None
+        attached, last_error, last_state = False, None, None
         while time.time() < self.deadline and not self.cancel.is_set():
             rows = self.instances()
             row = next((i for i in rows or [] if i["id"] == self.instance_id), None)
             if row is not None:
+                state = (row.get("actual_status"), row.get("cur_state"), row.get("status_msg"))
+                if state != last_state:  # why a host never gets ssh-ready (image pull, no GPU)
+                    self.api.log(
+                        "boot_state", actual=state[0], cur=state[1], msg=str(state[2])[:200]
+                    )
+                    last_state = state
                 if (
                     row.get("actual_status") in ("exited", "offline")
                     or row.get("cur_state") == "stopped"
