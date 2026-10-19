@@ -216,6 +216,8 @@ def main(argv: list[str] | None = None) -> None:
     arguments = parser().parse_args(argv)
     if not isfinite(arguments.poll_seconds) or arguments.poll_seconds <= 0:
         raise SystemExit("--poll-seconds must be positive")
+    if bool(arguments.wallet_name) != bool(arguments.wallet_hotkey):
+        raise SystemExit("--wallet-name and --wallet-hotkey must be given together")
     submits = not arguments.verify_only
     if (submits or arguments.peer_consensus) and not (
         arguments.wallet_name and arguments.wallet_hotkey
@@ -238,9 +240,6 @@ def main(argv: list[str] | None = None) -> None:
     except ImportError as error:
         raise SystemExit("Install cortex-subnet[chain] to run the validator") from error
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    subtensor = Subtensor(
-        network=arguments.network, fallback_endpoints=arguments.fallback_endpoints
-    )
     # A hotkey exported from a Polkadot-style keystore has no mnemonic, so the
     # wallet library cannot load it (see .hotkey). That file is an alternative
     # source, and exactly one source must be given: a wallet whose hotkey is not
@@ -265,6 +264,17 @@ def main(argv: list[str] | None = None) -> None:
                 hotkey=arguments.wallet_hotkey,
                 path=str(wallet_path),
             )
+            # The library reads the hotkey lazily: without this a missing or
+            # unreadable file only surfaces as dispatch_failed every epoch.
+            try:
+                _ = wallet.hotkey
+            except Exception as error:
+                raise SystemExit(
+                    f"validator hotkey unreadable under --wallet-path: {type(error).__name__}"
+                ) from None
+    subtensor = Subtensor(
+        network=arguments.network, fallback_endpoints=arguments.fallback_endpoints
+    )
     try:
         result = asyncio.run(run(arguments, subtensor, wallet))
         if (

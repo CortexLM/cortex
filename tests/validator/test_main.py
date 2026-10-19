@@ -80,6 +80,8 @@ def test_main_passes_validated_fallback_endpoints_to_bittensor(monkeypatch, tmp_
             pass
 
     class Wallet:
+        hotkey = object()
+
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
@@ -121,6 +123,8 @@ def test_verify_only_once_exits_nonzero_unless_the_outcome_is_verified(monkeypat
             pass
 
     class Wallet:
+        hotkey = object()
+
         def __init__(self, **kwargs):
             pass
 
@@ -213,3 +217,33 @@ def test_removed_trust_signing_options_are_gone(tmp_path):
 def test_main_rejects_unsafe_consensus_settings_before_connecting(flag, value, message, tmp_path):
     with pytest.raises(SystemExit, match=message):
         validator_main.main([*required_arguments(tmp_path), flag, value])
+
+
+@pytest.mark.parametrize("flag", ["--wallet-name", "--wallet-hotkey"])
+def test_half_a_wallet_is_refused_instead_of_silently_ignored(flag, monkeypatch, tmp_path):
+    fake_chain_modules(monkeypatch)
+    monkeypatch.setattr(validator_main, "run", lambda *args: pytest.fail("must not start"))
+    with pytest.raises(SystemExit, match="must be given together"):
+        validator_main.main([*without(required_arguments(tmp_path), flag), "--verify-only"])
+
+
+def fake_chain_modules(monkeypatch):
+    class Subtensor:
+        def __init__(self, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    bittensor = ModuleType("bittensor")
+    bittensor.Subtensor = Subtensor
+    monkeypatch.setitem(sys.modules, "bittensor", bittensor)
+
+
+def test_weight_setter_with_a_missing_hotkey_file_fails_at_startup(monkeypatch, tmp_path):
+    fake_chain_modules(monkeypatch)  # the real bittensor_wallet reads the empty wallet dir
+    monkeypatch.setattr(validator_main, "run", lambda *args: pytest.fail("must not start"))
+    arguments = [*required_arguments(tmp_path), "--wallet-path", str(tmp_path / "wallets")]
+    with pytest.raises(SystemExit, match="hotkey unreadable") as refused:
+        validator_main.main(arguments)
+    assert "default" not in str(refused.value) and "wallets" not in str(refused.value)

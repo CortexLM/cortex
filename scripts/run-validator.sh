@@ -98,7 +98,8 @@ if [[ -n "${WALLET_NAME:-}" && -n "${WALLET_HOTKEY:-}" ]]; then
   fi
 fi
 
-if [[ -n "${WALLET_NAME:-}" && -z "${VERSION_KEY:-}" ]]; then
+# --verify-only never submits, so it needs no live version key and no RPC for it.
+if ((!verify_only)) && [[ -n "${WALLET_NAME:-}" && -z "${VERSION_KEY:-}" ]]; then
   VERSION_KEY="$("${UV[@]}" python -c '
 import sys
 from bittensor import Subtensor

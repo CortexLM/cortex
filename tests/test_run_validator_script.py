@@ -106,3 +106,14 @@ def test_tilde_wallet_path_is_expanded_before_the_hotkey_check(env, tmp_path):
     result = run(env | {"WALLET_PATH": "~/w"}, "--dry-run")
     assert result.returncode == 0
     assert "hotkey file not found" not in result.stderr
+
+
+def test_verify_only_never_reads_the_version_key_from_the_chain(env, tmp_path):
+    # A uv that fails every call stands in for an unreachable RPC.
+    uv = tmp_path / "bin" / "uv"
+    uv.write_text('#!/usr/bin/env bash\n[[ " $* " == *" - "* ]] && exec python3 "${@:6}"\nexit 1\n')
+    uv.chmod(0o755)
+    del env["VERSION_KEY"]
+    result = run(env, "--dry-run", "--verify-only")
+    assert result.returncode == 0, result.stderr
+    assert "--version-key 0" in result.stdout
