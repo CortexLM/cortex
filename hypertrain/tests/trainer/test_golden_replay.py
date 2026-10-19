@@ -128,3 +128,14 @@ def test_island_leaves_root_unchanged(name: str, request: pytest.FixtureRequest)
     }
     assert len(roots) == 1
     _expect_golden("island-" + name, roots.pop(), request)
+
+
+@pytest.mark.parametrize("moe", [False, True], ids=["dense", "moe"])
+def test_leaves_root_is_deterministic_in_process(moe: bool) -> None:
+    # Hardware-independent guard: holds on any CPU class, unlike GOLDEN.
+    cfg = make_cfg(moe=moe)
+    a, b = (
+        train_round(cfg, init_params(cfg.model), assignment(cfg), sample(cfg)).leaves_root
+        for _ in range(2)
+    )
+    assert a == b
