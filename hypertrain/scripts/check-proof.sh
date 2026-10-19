@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Bitwise proof gate: golden replay and its GOLDEN consumers (act ckpt, fp8 off), codec v2,
-# tests/parity, trace parity and island replay v2, the suites scripts/check-fast.sh leaves out. One pytest run per suite so each prints its own
-# wall time; all suites share one budget (default 600 s). `od` tests are excluded as in PR CI
-# (they need the opendecision extra). Exits 1 when a suite fails or the budget is exceeded.
+# tests/parity, trace parity and island replay v2, the suites scripts/check-fast.sh leaves out.
+# One pytest run per suite so each prints its own wall time; all suites share one budget
+# (default 600 s). `od` tests are excluded as in PR CI (they need the opendecision extra).
+# Exits 1 when a suite fails or the budget is exceeded.
 # A skip is never silent: -rs prints each reason and any skip outside ALLOWED_SKIPS fails the
 # gate (a skipped proof proves nothing). Extra arguments go to every pytest run.
 # A golden xfail fails the gate too (-rsx prints it): an unmatched leaf root is not a successful
