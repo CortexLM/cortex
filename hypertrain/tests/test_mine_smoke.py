@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import stat
 import tempfile
@@ -48,3 +49,28 @@ def test_imposed_evidence_path_is_private_and_kept_until_the_write(
         assert target.read_text() == "previous run"  # not truncated before the run
     finally:
         os.close(fd)
+
+
+def test_mine_smoke_stop_failure_still_writes_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class World:
+        def __init__(self, *args: object) -> None:
+            pass
+
+        def miner(self, k: object) -> None:
+            raise RuntimeError("no round in this test")
+
+        def stop(self) -> None:
+            raise TimeoutError("process wait timed out")
+
+    target = tmp_path / "ev.json"
+    monkeypatch.setenv("MINE_SMOKE_EVIDENCE", str(target))
+    monkeypatch.setattr(mine_smoke, "manifest", lambda **kw: None)
+    monkeypatch.setattr(mine_smoke, "World", World)
+    assert mine_smoke.main() == 1
+    capsys.readouterr()
+    ev = json.loads(target.read_text())
+    assert ev["result"] == "FAIL"
+    assert ev["cleanup_failed"] == "TimeoutError: process wait timed out"
+    assert "no round in this test" in ev["failed"]

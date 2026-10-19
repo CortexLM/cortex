@@ -76,7 +76,11 @@ def main() -> int:
             code = 1
         finally:
             if w is not None:
-                ev["process_exit_codes"] = w.stop()
+                try:
+                    ev["process_exit_codes"] = w.stop()
+                except Exception as e:  # noqa: BLE001 - a failed cleanup fails the run, not the write
+                    ev["cleanup_failed"] = f"{type(e).__name__}: {e}"
+                    code = 1
     ev["elapsed_seconds"] = round(time.monotonic() - started, 2)
     ev["result"] = "PASS" if code == 0 else "FAIL"
     os.ftruncate(fd, 0)
