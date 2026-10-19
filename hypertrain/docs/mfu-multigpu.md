@@ -33,7 +33,7 @@ peak, tokens/s, per-step times, `rank_peak_mem_gib` (whole round), `rank_step_pe
 |------|--------|--------|
 | `--reduction zero2o` | Gradients reduced to their ZeRO-2 owner in buckets issued from post-accumulate grad hooks, so communication overlaps the rest of backward. | Bitwise equal to `zero2` (same adds, same order). |
 | `--act-ckpt` (`HT_ACT_CKPT=1`) | Per-layer activation checkpointing. | Same kernels on recompute: bitwise equal. |
-| sdpa-flash | Selected on (sm_120, torch 2.14.0+cu130) from the qualification record in `tests/trainer/data/attn_qualify_sm120.json`. | Qualified by cross-process equality. |
+| sdpa-flash | Selected on (sm_120, torch 2.14.0+cu130) from the qualification record in `tests/trainer/data/attn_qualify_sm120.json`. When the flash kernel rejects the inputs (dtype, head dim, `enable_gqa`), the first accepting path of `attention.PATHS` is probed once per (device, dtype, group, head dim) and logged as `attention backend: <path>`; inputs whose layout the chosen kernel still rejects use math. | Qualified by cross-process equality (flash path only). A fallback path is a function of hardware, torch and geometry, so ranks agree, but it is not qualified. |
 | `--compile` (`HT_COMPILE=1`) | One Inductor graph per layer. | Leaves differ from eager (fusion changes rounding), so a compiled run replays only under the same flag. Both modes replay bitwise. |
 | `--micro-batch N` | Overrides the profile's per-rank micro_batch. | Part of the run; recorded as `HT_MFU_MICRO_BATCH`. |
 | `--nccl-pcie` | setdefaults `NCCL_P2P_DISABLE=1`, Ring, Simple, 4-8 channels, 8 MiB buffers. | Collectives are copies: no numeric effect. |
