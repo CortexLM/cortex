@@ -34,7 +34,7 @@ reproduction or on-chain payment.
 
 | Path | Responsibility |
 | --- | --- |
-| `src/cortex/protocol/` | frozen SCALE, signatures, Merkle and aggregation |
+| `src/cortex/protocol/` | frozen v2 SCALE (unsigned wire), Merkle and aggregation |
 | `src/cortex/gateway/` | durable leaves, immutable seals and burn fallback |
 | `src/cortex/validator/` | independent recomputation, root consensus and chain dispatch |
 | `src/cortex/challenges/` | container registry, weights client, public proxy and auto-updating supervisor |
@@ -48,10 +48,18 @@ The working branch is `main`. Production releases are annotated `v*.*.*` tags.
 
 ## Consensus and compatibility
 
-- Preserve `BASE_*` names, deployed compatibility paths and every `base-*-v1`
-  signature domain. `CORTEX_*` is an accepted master alias only.
-- Do not edit `docs/BUNDLE_SPEC.md`. Its exact SHA-256 value is checked by
-  `scripts/check_repo.py`.
+- Wire format v2 (no signatures on leaves, bundle or gateway) was decided by the
+  founder on 2026-10-19. `docs/BUNDLE_SPEC.md` was changed on purpose by the PR
+  that introduced v2; the `base-trustroot-v1`, `base-rawweight-v1` and
+  `base-bundle-v1` preimages are retired. `tests/protocol/vectors/rust_wire.json`
+  keeps only what still exists; `tests/protocol/vectors/wire_v2.json` is generated
+  by `scripts/gen_wire_vector.py`.
+- Preserve `BASE_*` names, deployed compatibility paths and every remaining
+  `base-*-v1` signature domain. `CORTEX_*` is an accepted master alias only.
+- Do not edit the v2 `docs/BUNDLE_SPEC.md`. Its exact SHA-256 value is pinned in
+  `FROZEN_SPECS` in `scripts/check_repo.py`; do not weaken that check. Any new
+  wire change needs explicit maintainer approval and a second-implementation or
+  independently pinned vector when one exists.
 - Production image references are digest-only. Never invent a digest; an empty
   or unknown pin remains fail-closed.
 - Secrets are private files. Do not put seeds, mnemonics, bearer values, BYOK,
