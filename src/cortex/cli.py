@@ -284,6 +284,10 @@ def run_validator_watermark_reset(args: argparse.Namespace) -> None:
     connection = None
     try:
         _watermark_reset_preflight(args)
+        path = args.state_db.resolve()
+        # A refused write must leave no -wal/-shm beside the file; check before opening it.
+        if not (os.access(path, os.W_OK) and os.access(path.parent, os.W_OK | os.X_OK)):
+            raise SystemExit("Cortex command failed: state db is read-only")
         # The journal schema and WAL mode belong to the validator; open only the existing file.
         connection = sqlite3.connect(args.state_db, isolation_level=None, timeout=1)
         old = EvidenceStore(connection, create_schema=False).reset_watermark(args.name, args.to)
@@ -295,6 +299,8 @@ def run_validator_watermark_reset(args: argparse.Namespace) -> None:
                 "Cortex command failed: state db locked; stop the validator first"
             ) from None
         raise SystemExit(f"Cortex command failed: {type(error).__name__}") from None
+    except sqlite3.DatabaseError:
+        raise SystemExit("Cortex command failed: not a validator state database") from None
     except sqlite3.Error as error:
         raise SystemExit(f"Cortex command failed: {type(error).__name__}") from None
     finally:

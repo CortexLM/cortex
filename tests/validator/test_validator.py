@@ -612,6 +612,35 @@ def test_cli_watermark_reset_reports_a_non_sqlite_state_file_without_traceback(t
         reset(state, "--name", "epoch", "--to", "0", "--confirm")
 
 
+@pytest.mark.parametrize(
+    ("kind", "reason"),
+    [
+        ("garbage", "not a validator state database"),
+        ("read-only-file", "state db is read-only"),
+        ("read-only-dir", "state db is read-only"),
+    ],
+)
+def test_watermark_reset_garbage_db_message_has_no_path(network, kind, reason):
+    network.journal.evidence.watermark("epoch", 12)
+    network.journal.close()
+    state = network.db_path
+    if kind == "garbage":
+        state.write_bytes(b"not a database" * 100)
+    elif kind == "read-only-file":
+        state.chmod(0o444)
+    else:
+        state.parent.chmod(0o555)
+    before = sorted(item.name for item in state.parent.iterdir())
+    try:
+        with pytest.raises(SystemExit) as refused:
+            reset(state, "--name", "epoch", "--to", "11", "--confirm")
+        assert sorted(item.name for item in state.parent.iterdir()) == before
+    finally:
+        state.parent.chmod(0o755)
+        state.chmod(0o644)
+    assert refused.value.code == f"Cortex command failed: {reason}"
+
+
 async def test_peer_api_serves_signed_evidence_and_never_claims_dcap_verified(network):
     from cortex.protocol.consensus import RootStatement
     from cortex.validator.evidence import peer_app
