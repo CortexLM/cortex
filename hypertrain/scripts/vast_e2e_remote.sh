@@ -224,15 +224,19 @@ gpu_pytest() {
 }
 mfu_dp2_check() {
   "$PY" scripts/check_gpu_evidence.py --kind mfu "$OUT/mfu-dp2-flash.json" || return
-  "$PY" -c "import json, sys; e = json.load(open(sys.argv[1])); print(e['attention_backend'])
-assert e['attention_backend'] == 'sdpa-flash' and e['replay_match'] is True" "$OUT/mfu-dp2-flash.json"
+  "$PY" -c "import json, sys; e = json.load(open(sys.argv[1])); print(e['attention_backend'], e['attention_paths'])
+assert e['attention_backend'] == 'sdpa-flash' and e['replay_match'] is True
+assert e['attention_paths'] == ['flash'], e['attention_paths']" "$OUT/mfu-dp2-flash.json"
 }
 if [ "$BACKEND" = cuda ] && [ -n "${HT_E2E_PROOFS:-}" ]; then
   step attn_select env -u HT_ATTN_BACKEND "$PY" -c "import hypertrain.trainer, torch
-from hypertrain.trainer.attention import select_backend
-b = select_backend(torch.device('cuda', 0))
-print(b, torch.__version__, torch.cuda.get_device_capability(0))
-assert b == 'sdpa-flash', b"
+from hypertrain.trainer.attention import attention, chosen_paths, select_backend
+d = torch.device('cuda', 0)
+b = select_backend(d)
+x = [torch.randn(1, h, 256, 128, device=d, dtype=torch.bfloat16) for h in (16, 8, 8)]
+attention(*x, b)  # production geometry: bf16, 2 q heads per kv head, head dim 128
+print(b, chosen_paths(), torch.__version__, torch.cuda.get_device_capability(0))
+assert b == 'sdpa-flash' and chosen_paths() == ['flash'], (b, chosen_paths())"
   step gpu_pytest gpu_pytest
   # 1B bf16 dp2 round + replay (head_dim 128): sdpa-flash inside real training, bitwise replay.
   step mfu_dp2_flash env -u HT_ATTN_BACKEND "$PY" -m torch.distributed.run --standalone \

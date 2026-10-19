@@ -69,3 +69,5 @@ def test_qualified_backend_repeats_bitwise() -> None:
             h.update(x.contiguous().view(torch.uint8).cpu().numpy().tobytes())
         digests.add(h.hexdigest())
     assert len(digests) == 1
+    if backend == "sdpa-flash":  # the qualification record covers flash with enable_gqa only
+        assert A.chosen_paths() == ["flash"]

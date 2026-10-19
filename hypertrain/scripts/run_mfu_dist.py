@@ -34,7 +34,7 @@ import torch.distributed as dist
 
 from run_mfu import PROFILES, manifest_body, summarize  # isort: skip
 
-from hypertrain.trainer.attention import select_backend
+from hypertrain.trainer.attention import chosen_paths, select_backend
 from hypertrain.trainer.island import DistComm, check_launch, island_from_manifest, train_island
 from hypertrain.trainer.loop import Assignment
 from hypertrain.trainer.model import init_params
@@ -191,6 +191,7 @@ def one_round(
         "n_gpus": lay.n_gpus,
         "dp_size": lay.dp_size,
         "attention_backend": select_backend(device),
+        "attention_paths": chosen_paths(),
         **({"trace": [r["trace"] for r in ranks]} if prof is not None else {}),
     }
 
