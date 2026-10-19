@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from hashlib import sha256
 from types import SimpleNamespace
@@ -555,6 +556,53 @@ async def test_trust_version_rollback_is_refused_across_restart(network):
     with pytest.raises(ProtocolError, match="rollback"):
         await network.validator.run_once()
     assert len(network.chain.submissions) == 1
+
+
+def reset(db_path, *extra):
+    from cortex.cli import main
+
+    main(["validator-watermark-reset", "--state-db", str(db_path), *extra])
+
+
+async def test_cli_watermark_reset_lowers_a_wrong_version_and_audits_it(network, capsys):
+    import sqlite3
+
+    original = network.validator.trust
+    network.validator.trust_loader = lambda _: replace(original, challenges_version=2)
+    await network.validator.run_once()
+    network.journal.close()
+    args = ("--name", "challenges_version", "--to", "1")
+    for refused in (
+        args,  # no --confirm
+        ("--name", "challenges_version", "--to", "3", "--confirm"),  # raising
+        ("--name", "netuid", "--to", "1", "--confirm"),
+        ("--name", "challenges_version", "--to", "-1", "--confirm"),
+    ):
+        with pytest.raises(SystemExit):
+            reset(network.db_path, *refused)
+    capsys.readouterr()
+    reset(network.db_path, *args, "--confirm")
+    assert json.loads(capsys.readouterr().out) == {
+        "name": "challenges_version",
+        "old_value": 2,
+        "new_value": 1,
+    }
+    with sqlite3.connect(network.db_path) as connection:
+        assert connection.execute(
+            "SELECT name, old_value, new_value FROM consensus_watermark_resets"
+        ).fetchall() == [("challenges_version", "2", "1")]
+    network.validator.journal = SubmissionJournal(network.db_path)
+    network.validator.trust_loader = lambda _: original
+    assert (await network.validator.run_once()).outcome == "already_submitted_or_pending"
+
+
+def test_cli_watermark_reset_refuses_an_unset_watermark_and_allows_equal(network, capsys):
+    network.journal.evidence.watermark("epoch", 12)
+    network.journal.close()
+    with pytest.raises(SystemExit):
+        reset(network.db_path, "--name", "measurements_version", "--to", "0", "--confirm")
+    reset(network.db_path, "--name", "epoch", "--to", "12", "--confirm")
+    assert json.loads(capsys.readouterr().out)["new_value"] == 12
 
 
 async def test_peer_api_serves_signed_evidence_and_never_claims_dcap_verified(network):

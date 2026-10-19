@@ -234,6 +234,31 @@ Only `not_broadcast` releases the epoch for a retry. Keep the underlying chain
 receipt or nonce query private; the journal stores its digest. Do not delete the
 database to force a retry.
 
+### Repairing a consensus watermark
+
+The journal keeps rollback watermarks for `challenges_version`,
+`measurements_version` and `epoch`; a lower served value fails with
+`consensus rollback refused`. If a watermark was advanced wrongly (for example a
+profile version published by mistake and then withdrawn), stop the validator and
+lower it locally. The command touches only the state database: no network, no
+wallet.
+
+```bash
+cortex validator-watermark-reset \
+  --state-db /var/lib/base/validator.sqlite3 \
+  --name challenges_version --to 2 --confirm
+```
+
+It refuses without `--confirm`, refuses a name outside those three, a negative
+value, a watermark that was never set and any value above the current one (it
+only lowers or repairs). It prints the old and new values and appends an audit
+row to `consensus_watermark_resets(name, old_value, new_value, at)` in the same
+transaction.
+
+**Warning:** resetting below a version or epoch this validator really accepted
+re-opens rollback to that value. Confirm the correct value with the master
+operator first.
+
 The peer listener exposes:
 
 | Route | Response |

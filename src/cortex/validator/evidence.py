@@ -9,6 +9,8 @@ from fastapi.responses import JSONResponse, Response
 from cortex.protocol import Bundle, ProtocolError
 from cortex.protocol.consensus import Dissent, RootStatement
 
+RESETTABLE_WATERMARKS = ("challenges_version", "measurements_version", "epoch")
+
 
 class EvidenceStore:
     def __init__(self, connection: sqlite3.Connection):
@@ -29,6 +31,10 @@ class EvidenceStore:
             CREATE TABLE IF NOT EXISTS consensus_watermarks (
                 name TEXT PRIMARY KEY, value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS consensus_watermark_resets (
+                name TEXT NOT NULL, old_value TEXT NOT NULL, new_value TEXT NOT NULL,
+                at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
         """)
 
     def check_watermark(self, name: str, value: int) -> None:
@@ -45,6 +51,35 @@ class EvidenceStore:
             "ON CONFLICT(name) DO UPDATE SET value=excluded.value",
             (name, str(value)),
         )
+
+    def reset_watermark(self, name: str, value: int) -> int:
+        """Operator repair: lower one rollback watermark and audit it; never raises one."""
+        if name not in RESETTABLE_WATERMARKS:
+            raise ProtocolError("unknown consensus watermark")
+        if type(value) is not int or value < 0:
+            raise ProtocolError("watermark must be a non-negative integer")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT value FROM consensus_watermarks WHERE name=?", (name,)
+            ).fetchone()
+            if row is None:
+                raise ProtocolError("consensus watermark not set")
+            old = int(row[0])
+            if value > old:
+                raise ProtocolError("watermark reset may only lower a value")
+            self.connection.execute(
+                "UPDATE consensus_watermarks SET value=? WHERE name=?", (str(value), name)
+            )
+            self.connection.execute(
+                "INSERT INTO consensus_watermark_resets (name,old_value,new_value) VALUES (?,?,?)",
+                (name, str(old), str(value)),
+            )
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
+        self.connection.execute("COMMIT")
+        return old
 
     def root(self, statement: RootStatement, *, local: bool = False) -> bool:
         statement.verify()

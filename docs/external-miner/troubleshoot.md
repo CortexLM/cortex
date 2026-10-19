@@ -105,6 +105,7 @@ catalog; follow the documentation and checklist in the current signed topic.
 | Missing/invalid peer sample | Configure independently selected HTTPS peers with metagraph `validator_permit`; do not disable verification |
 | Conflicting signed roots or equivocation | Preserve the journal and signed evidence; reconcile the network state |
 | Stale block, future epoch, reorg or changed latest | Wait for a current valid seal; do not force-submit the old one |
+| `consensus rollback refused` | The gateway serves a lower `challenges_version`, `measurements_version` or epoch than this validator already accepted. Ask the master operator first; only if the higher value was advanced wrongly, lower it with `cortex validator-watermark-reset` (see [the validator guide](validators.md#repairing-a-consensus-watermark)). Do not delete the database |
 | Ambiguous chain dispatch remains pending | Reconcile inclusion/finalization before retrying; retain the SQLite journal |
 | CRv4 or drand failure | Do not fall back to public weights while chain commit-reveal is enabled |
 | `/v1/attest/*` returns `503` and `verified: false` | DCAP verification is not implemented in the Python validator |

@@ -16,7 +16,9 @@ import uvicorn
 from cortex.errors import ServiceError
 from cortex.http import read_private_file
 from cortex.miner import MinerClient, load_seed
+from cortex.protocol import ProtocolError
 from cortex.protocol.crypto import decode_hotkey
+from cortex.validator.evidence import RESETTABLE_WATERMARKS
 from cortex.wallet import HotkeySigner, load_wallet_hotkey
 
 
@@ -40,6 +42,14 @@ def parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--attempt-id", required=True)
     reconcile.add_argument("--result", choices=("submitted", "not_broadcast"), required=True)
     reconcile.add_argument("--evidence-digest", required=True)
+    reset = commands.add_parser(
+        "validator-watermark-reset",
+        help="lower one wrongly advanced consensus watermark (local state only)",
+    )
+    reset.add_argument("--state-db", type=Path, required=True)
+    reset.add_argument("--name", choices=RESETTABLE_WATERMARKS, required=True)
+    reset.add_argument("--to", type=int, required=True)
+    reset.add_argument("--confirm", action="store_true")
     vm = commands.add_parser("vm-host", help="serve the dedicated Firecracker host")
     vm.add_argument("--config", type=Path, required=True)
     vm.add_argument(
@@ -230,6 +240,24 @@ def run_validator_reconcile(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
+def run_validator_watermark_reset(args: argparse.Namespace) -> None:
+    from cortex.validator import SubmissionJournal
+
+    # Refusal reasons are fixed strings with no credential, so show them to the operator.
+    if not args.confirm:
+        raise SystemExit("Cortex command failed: --confirm required; lowering re-opens rollback")
+    if not args.state_db.is_file():
+        raise SystemExit("Cortex command failed: validator state database not found")
+    journal = SubmissionJournal(args.state_db)
+    try:
+        old = journal.evidence.reset_watermark(args.name, args.to)
+    except ProtocolError as error:
+        raise SystemExit(f"Cortex command failed: {error}") from None
+    finally:
+        journal.close()
+    print(json.dumps({"name": args.name, "old_value": old, "new_value": args.to}, indent=2))
+
+
 def main(argv: list[str] | None = None) -> None:
     values = sys.argv[1:] if argv is None else argv
     if values and values[0] == "validator":
@@ -259,6 +287,8 @@ def main(argv: list[str] | None = None) -> None:
             serve(args.config)
         elif args.command == "validator-reconcile":
             run_validator_reconcile(args)
+        elif args.command == "validator-watermark-reset":
+            run_validator_watermark_reset(args)
         else:
             action = {"master": run_master, "miner": run_miner, "topic-create": run_topic_create}
             asyncio.run(action[args.command](args))
