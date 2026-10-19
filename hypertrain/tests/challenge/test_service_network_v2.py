@@ -4442,6 +4442,7 @@ def test_upload_grant_replaced_when_original_held(network):
     assert honest.status_code == 200, honest.text
     body = honest.json()["body"]
     assert body["chunk_manifest_hash"] == manifest(payload).chunk_manifest_hash()
+    assert body["replaces"] == "ef" * 32  # the relay may hold the forged reservation
     assert grants() == 2
     retry = request(manifest(payload), expiry=584)
     assert retry.status_code == 200 and retry.json() == honest.json() and grants() == 2

@@ -275,6 +275,11 @@ signed custody. The fallback answers `rescued: false, disabled: true`; the
 While a grant is live, `upload-grant` returns the same signed grant for the same
 chunk list and 409 for another list, unless the master holds the original delta
 and it proves the new list: then the honest list gets a new grant.
+That grant carries `replaces`, the digest of the live grant it supersedes (an
+optional `UploadGrant` field, omitted otherwise, so older grant digests are
+unchanged). The relay then drops its unreceipted reservation for that grant;
+it refuses the replacement when that upload has a receipt or belongs to another
+miner, round or relay, and a wrong `replaces` leaves the old reservation blocking.
 A relay whose granted chunks do not assemble to `delta_hash` answers 400
 `AssemblyMismatch`, records it on the upload and skips it in later recovery.
 Retention release waits for finality, disputes and vesting; signed extensions,

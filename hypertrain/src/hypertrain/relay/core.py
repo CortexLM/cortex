@@ -255,6 +255,19 @@ class Relay:
                 return
             if self.draining:
                 raise RelayError("relay draining; new grants disabled")
+            replaced = state.uploads.get(grant.replaces) if grant.replaces else None
+            if replaced is not None:
+                # Master-signed supersession of this miner's own unreceipted reservation;
+                # a replaced grant the relay never saw needs nothing removed.
+                old = UploadGrant.model_validate(replaced.grant.body)
+                if (old.w, old.hotkey, old.relay_id) != (grant.w, grant.hotkey, grant.relay_id):
+                    raise RelayError("replacement names another miner/round reservation")
+                if replaced.receipt is not None:
+                    raise RelayError("replaced upload already has a receipt")
+                assert grant.replaces is not None
+                del state.uploads[grant.replaces]
+                if state.nonces.get(old.nonce) == grant.replaces:
+                    del state.nonces[old.nonce]
             key_id = self._key(now, state)
             if len(state.uploads) >= self.max_uploads:
                 raise RelayError("retained upload quota exhausted")

@@ -9831,8 +9831,9 @@ class ChallengeStore:
             # One live grant per assignment: a retry gets the stored grant, another chunk
             # list waits for expiry. Without the original, the list is miner-chosen; with
             # it, this list was just proven honest and replaces any other live grant.
-            for (stored,) in self._db.execute(
-                "SELECT data FROM records_v2 WHERE run_id=? AND kind='grant' "
+            replaces = None
+            for stored_id, stored in self._db.execute(
+                "SELECT id, data FROM records_v2 WHERE run_id=? AND kind='grant' "
                 "AND json_extract(data,'$.body.w')=? AND json_extract(data,'$.body.hotkey')=? "
                 "AND json_extract(data,'$.body.relay_id')=? "
                 "AND json_extract(data,'$.body.assignment_epoch')=? "
@@ -9849,6 +9850,9 @@ class ChallengeStore:
                 live = json.loads(stored)
                 if live["body"]["chunk_manifest_hash"] != chunk.chunk_manifest_hash():
                     if held:
+                        # The relay may hold this grant's reservation: name it so the
+                        # relay can release it for the replacement (record id = digest).
+                        replaces = stored_id
                         continue
                     raise ChallengeError(409, "live upload grant binds another chunk list")
                 return live
@@ -9866,6 +9870,7 @@ class ChallengeStore:
                 + 100,
                 nonce=sha256_hex(canonicalize([run_id, assignment.body(), chunk.body()])),
                 exp_drand=assignment.exp_drand,
+                replaces=replaces,
             )
             signed = relay_envelope.seal(
                 self._coord(), "UploadGrant", run_id, grant, grant.exp_drand

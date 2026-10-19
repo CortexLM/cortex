@@ -824,3 +824,84 @@ def test_recover_retries_after_transient_error(
             assert (await relay.state()).uploads[slow.digest()].receipt is not None
 
     anyio.run(scenario)
+
+
+def replacement(rig: Rig, data: bytes, replaces: str, *, hotkey: str = MINER.ss58):
+    # Master-signed grant for the honest chunk list that supersedes `replaces`.
+    grant, manifest, _, assignment, opened = rig.upload(data, nonce="61" * 32)
+    grant = UploadGrant.model_validate({**grant.body(), "hotkey": hotkey, "replaces": replaces})
+    assigned = RelayAssignment.model_validate({**assignment.body, "hotkey": hotkey})
+    return grant, manifest, rig.seal(grant), rig.seal(assigned), opened
+
+
+async def miner_chosen(rig: Rig, data: bytes) -> UploadGrant:
+    # Accepted while the master did not hold the original: the list need not match the delta.
+    grant, _, _, assignment, opened = rig.upload(data)
+    manifest = rig.upload(b"x" * len(data))[1]
+    grant = UploadGrant.model_validate(
+        {**grant.body(), "chunk_manifest_hash": manifest.chunk_manifest_hash()}
+    )
+    await rig.relay.accept(rig.seal(grant), manifest, assignment, opened)
+    return grant
+
+
+def test_relay_accepts_replacement_after_old_accept(tmp_path: Path) -> None:
+    # Given: the relay reserved the round for a miner-chosen list, then the master
+    # (now holding the original) signs a replacement for the honest list.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            old = await miner_chosen(rig, b"abc")
+            grant, manifest, raw, assignment, opened = replacement(rig, b"abc", old.digest())
+            # When: the miner presents the replacement and uploads the original bytes.
+            await rig.relay.accept(raw, manifest, assignment, opened)
+            await rig.put(grant, b"abc")
+            # Then: the upload completes with a receipt and the old reservation is gone.
+            state = await rig.relay.state()
+            assert state.uploads[grant.digest()].receipt is not None
+            assert old.digest() not in state.uploads
+            assert old.nonce not in state.nonces
+
+    anyio.run(scenario)
+
+
+def test_relay_refuses_replacement_after_receipt(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            old, _, _ = await rig.accept(b"abc")
+            await rig.put(old, b"abc")
+            _, manifest, raw, assignment, opened = replacement(rig, b"abc", old.digest())
+            with pytest.raises(RelayError):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            assert (await rig.relay.state()).uploads[old.digest()].receipt is not None
+
+    anyio.run(scenario)
+
+
+def test_relay_refuses_replacement_with_wrong_replaces(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            old = await miner_chosen(rig, b"abc")
+            _, manifest, raw, assignment, opened = replacement(rig, b"abc", "00" * 32)
+            with pytest.raises(RelayError):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            assert old.digest() in (await rig.relay.state()).uploads
+
+    anyio.run(scenario)
+
+
+def test_relay_refuses_replacement_for_other_miner(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            old = await miner_chosen(rig, b"abc")
+            _, manifest, raw, assignment, opened = replacement(
+                rig, b"abc", old.digest(), hotkey=NEXT.ss58
+            )
+            with pytest.raises(RelayError):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            assert old.digest() in (await rig.relay.state()).uploads
+
+    anyio.run(scenario)

@@ -122,6 +122,9 @@ class UploadGrant(WireModel):
     retain_until: Positive
     nonce: Hex64
     exp_drand: Positive
+    # Digest of the unreceipted grant this one supersedes at the same relay; omitted when
+    # None, so existing grant digests and signatures are unchanged.
+    replaces: Hex64 | None = Field(None, exclude_if=lambda v: v is None)
 
     @model_validator(mode="after")
     def _retention(self) -> UploadGrant:
