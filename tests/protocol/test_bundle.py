@@ -15,7 +15,7 @@ from cortex.protocol import (
     build_bundle,
     verify_bundle,
 )
-from cortex.protocol.bundle import recompute
+from cortex.protocol.bundle import recompute, verify_inputs
 from cortex.protocol.merkle import merkle_root
 from cortex.protocol.scale import Reader
 
@@ -187,6 +187,20 @@ def test_tampered_merkle_root_is_detected(network):
     bundle, arguments = network
     with pytest.raises(ProtocolError, match="Merkle root"):
         verify_bundle(Bundle(replace(bundle.body, merkle_root=bytes(32))), **arguments)
+
+
+def test_leaf_from_another_epoch_is_refused_strictly_and_quarantined_when_allowed(network):
+    bundle, arguments = network
+    leaves = list(bundle.body.leaves)
+    # Merkle root is recomputed so that only the epoch is wrong.
+    leaves[0] = replace(leaves[0], epoch=13)
+    body = replace(
+        bundle.body, leaves=tuple(leaves), merkle_root=merkle_root(leaf.encode() for leaf in leaves)
+    )
+    with pytest.raises(ProtocolError, match="leaf epoch mismatch"):
+        verify_bundle(Bundle(body), **arguments)
+    _, quarantined = verify_inputs(Bundle(body), **arguments, allow_quarantine=True)
+    assert quarantined == {leaves[0].challenge_id}
 
 
 def test_decode_rejects_trailing_bytes_and_compact_malleability(network):
