@@ -29,36 +29,38 @@ the transaction that writes `weights_runs`; the weight goes to the origin's hotk
   child's stored answer and merges it again: the child's units are emitted once.
 
 ## Code path
-- `GET /internal/v1/get_weights` (`src/hypertrain/challenge/app.py:859`) calls `store.weights`
-  (`app.py:869`), then the metagraph filter `registered_weights` (`app.py:876`).
-- `ChallengeStore.weights` (`src/hypertrain/challenge/store.py:1990`) answers from
-  `self.ledger.get_weights` (`store.py:2000`), the v1 `Ledger` (`store.py:390`), merged with
-  child runs that are also v1 ledgers (`store.py:2005-2007`, `_merge_answers` `store.py:319`).
-- `Ledger.compute` pays only `state.entitlements` (`src/hypertrain/ledger/ledger.py:316-323`),
-  which are added only by v1 `verdict`/`finalize` events (`ledger.py:203`, `ledger.py:445-450`).
-  Every caller is v1: `store.py:1158`, `:1316`, `:1334`, `:1819-1820`.
-- `finalize_v2` (`store.py:7964`) issues origins with `escrow.reward_finalize`
-  (`store.py:8099`, `src/hypertrain/ledger/escrow_v2.py:606`), `mature_at = now + E_vest_rounds`
-  (`store.py:8053`). It never touches `self.ledger`.
-- `push_beacon` matures them to `available` (`store.py:681-700`, `escrow_v2.py:794`).
-  `EscrowV2.pay` (`escrow_v2.py:964-970`) is a terminal sink with no caller in `src/`.
+- `GET /internal/v1/get_weights` (`src/hypertrain/challenge/app.py:864`) calls `store.weights`
+  (`app.py:874`), then the metagraph filter `registered_weights` (`app.py:884`).
+- `ChallengeStore.weights` (`src/hypertrain/challenge/store.py:1992`) returns a stored
+  `weights_runs` answer first. Otherwise it computes the v1 answer with
+  `self.ledger.get_weights` (`store.py:2029`, `src/hypertrain/ledger/ledger.py:490`) and,
+  when a live v2 reward was finalized, fills it with `_pay_v2` (call `store.py:2033`,
+  definition `store.py:2043`). Child runs merge through `_merge_answers` (`store.py:322`).
+- `_pay_v2` reads `EscrowV2.payable` (`src/hypertrain/ledger/escrow_v2.py:973`) and moves each
+  row with `EscrowV2.pay` (`escrow_v2.py:964`, called at `store.py:2077`), skipping a new
+  hotkey once the answer holds `MAX_ENTRIES` (`store.py:2064`).
+- `finalize_v2` (`store.py:8132`) issues live origins with `escrow.reward_finalize`
+  (`store.py:8267`); `push_beacon` (`store.py:663`) matures them to `available`.
+- `weights_runs_from` is set on the first v2-era call to one past the newest epoch the v1
+  journal answered, so no epoch the journal served before multi-run hosting is re-paid.
 
-Missing link: nothing reads EscrowV2 `available`/`paid` units into a `get_weights` answer.
+Line numbers match the tree of this note's commit; re-grep `def weights`, `_pay_v2`, `def payable` after edits.
 
-Search: `rg -n "get_weights|reward_finalize|\.pay\(|available" src/`, plus `escrow_v2|EscrowV2`.
-Hits: `app.py:856,859`; `store.py:2000` (only weights source); `reward_finalize` at
-`store.py:3851,3919` (shadow) and `:8099` (live); `ledger.py:490`. EscrowV2 users
-(`admission.py`, `admission_store.py`, `disputes_v2.py`) do no weight computation.
-`aggregator/`: only an unrelated "unavailable" string (`rollback_v2.py:193`).
+## Not addressed (relay review, one line each)
+- B4: grants are idempotent per live assignment; nothing revokes one when the original arrives.
+- B5: `relay-disabled` is keyed by registry epoch, so a rotation re-enables a disabled key.
+- B6: the relay accepts at `now == d_upload` (`now > deadline`) while the master refuses
+  `>= d_upload`; no honest relay is disabled by it.
 
 ## Test
 Reuses `_graduate_four` + `_live_checkpoint` (`tests/e2e/test_service_network_v2_e2e.py`).
 They finalize live round 0 via `finalize_v2` (status `SETTLED`, four origins of 250000).
-The test pushes the beacon past `mature_at`, checks the origin is `available`, then calls the
-route. The fixture has no internal token (`tests/challenge/test_service_network_v2.py:661`).
-The test points the app `Config` at a tmp token file. Run time ~140 s, so it is marked `slow`.
+The test pushes the beacon past `mature_at`, reads every `available` round-0 unit, then calls
+the route and asserts the exact weight vector (four hotkeys at 250000), `units_paid` and the
+burned remainder. The fixture has no internal token, so the test points the app `Config` at a
+tmp token file. Run time ~150 s (measured 149 s on the host), so it is marked `slow`.
 
-Without the xfail marker:
+Before the bridge (base `1818f9e`, earlier `> 0` assertion, no xfail marker):
 ```
 >       assert response.json()["weights"].get(hotkey, 0) > 0, response.text
 E       AssertionError: {"challenge_slug":"hypertrain",...,"epoch":0,"full_share_mass":1000000,
