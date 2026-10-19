@@ -68,6 +68,7 @@ addopts = "-ra --strict-markers"
 markers = [
   "od: builds a real od-base OpenDecision model (excluded from PR CI)",
   "fast: CPU mining-path subset run by scripts/check-fast.sh in under 2 minutes (set in tests/conftest.py)",
+  "slow: end-to-end test over ~100 s (run explicitly)",
 ]
 
 [tool.ruff]
