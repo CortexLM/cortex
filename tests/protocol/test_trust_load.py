@@ -114,3 +114,26 @@ def test_master_turns_a_placeholder_profile_into_a_clean_503(tmp_path, challenge
     with pytest.raises(ServiceError, match="challenge profile unavailable") as refused:
         config.challenge_profile(0)
     assert refused.value.status == 503
+
+
+@pytest.mark.parametrize("nested", ["challenges", "measurements"])
+def test_nested_toml_recursion_is_clean_error(tmp_path, nested):
+    from cortex.config import MasterConfig
+    from cortex.errors import ServiceError
+
+    deep = "x = " + "[" * 100000 + "]" * 100000 + "\n"
+    (tmp_path / "c.toml").write_text(deep if nested == "challenges" else "version = 2")
+    (tmp_path / "m.toml").write_text(deep if nested == "measurements" else "version = 2")
+    config = MasterConfig(
+        netuid=541,
+        state_dir=tmp_path,
+        challenges_file=tmp_path / "c.toml",
+        measurements_file=tmp_path / "m.toml",
+        proof_seed_file=tmp_path / "unused",
+        operator_token_file=tmp_path / "unused",
+        intake_token_file=tmp_path / "unused",
+        challenge_secrets_dir=tmp_path,
+    )
+    with pytest.raises(ServiceError, match="challenge profile unavailable") as refused:
+        config.challenge_profile(0)
+    assert refused.value.status == 503

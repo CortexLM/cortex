@@ -208,7 +208,8 @@ class MasterConfig:
             return load_trust(
                 challenges_path=self.challenges_file, measurements_path=self.measurements_file
             )
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
             # ProtocolError and TOMLDecodeError are ValueErrors; TypeError covers a field
-            # type that slips past the explicit checks in load_trust.
+            # type that slips past the explicit checks in load_trust; tomllib recurses per
+            # nested array or inline table.
             raise ServiceError(503, "challenge profile unavailable") from None
