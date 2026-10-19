@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -966,7 +966,10 @@ def validate_role_separation(validator: dict, weight_setter: dict) -> None:
 
     verify_only, setter = sources(validator), sources(weight_setter)
     identity = "/run/validator"
-    if os.path.normpath(verify_only[identity]) == os.path.normpath(setter[identity]):
+    first = PurePosixPath(os.path.normpath(verify_only[identity]))
+    second = PurePosixPath(os.path.normpath(setter[identity]))
+    # One role nested in the other's directory reads the other's consensus.key too.
+    if first.is_relative_to(second) or second.is_relative_to(first):
         raise ValueError("validator and weight-setter must use separate identity directories")
     state = "/var/lib/base"
     if verify_only[state] and verify_only[state] == setter[state]:

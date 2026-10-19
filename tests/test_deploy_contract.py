@@ -647,7 +647,12 @@ def identity_source(config, source):
 
 @pytest.mark.parametrize(
     ("validator_dir", "setter_dir"),
-    [("/fixture/identity", "/fixture/identity"), ("/fixture/identity", "/fixture/x/../identity")],
+    [
+        ("/fixture/identity", "/fixture/identity"),
+        ("/fixture/identity", "/fixture/x/../identity"),
+        ("/fixture/identity", "/fixture/identity/setter"),
+        ("/fixture/identity/setter", "/fixture/identity"),
+    ],
 )
 def test_deploy_check_refuses_one_identity_dir_for_both_validator_roles(validator_dir, setter_dir):
     with pytest.raises(ValueError, match="identity"):
@@ -672,6 +677,10 @@ def test_deploy_check_accepts_separate_identity_dirs_and_the_roles_use_distinct_
     CHECK["validate_role_separation"](
         identity_source(validator_config(), "/fixture/verify-only"),
         identity_source(weight_setter_config(), "/fixture/weight-setter"),
+    )
+    CHECK["validate_role_separation"](
+        identity_source(validator_config(), "/fixture/verify"),
+        identity_source(weight_setter_config(), "/fixture/verify-only"),
     )
     validator = (ROOT / "deploy/compose/role-validator.yml").read_text()
     setter = (ROOT / "deploy/compose/role-weight-setter.yml").read_text()
