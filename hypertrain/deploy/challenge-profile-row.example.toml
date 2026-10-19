@@ -1,6 +1,7 @@
 # Example row for the challenge profile (config/challenges.toml in CortexLM/cortex, served by the
 # gateway at GET /v1/trust). Add it to the profile, rebalance every share so the sum is exactly
-# 10000, bump `version`, restart the master. No key: Cortex signs nothing for a challenge.
+# 10000, bump `version` (>= 3 for a third challenge), restart the master between two epochs.
+# Leave `introduced_epoch` at or below the current epoch. No key: Cortex signs nothing here.
 
 [[challenges]]
 id = "hypertrain"
