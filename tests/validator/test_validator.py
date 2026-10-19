@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import replace
 from hashlib import sha256
 from types import SimpleNamespace
@@ -621,6 +622,8 @@ def test_cli_watermark_reset_reports_a_non_sqlite_state_file_without_traceback(t
     ],
 )
 def test_watermark_reset_garbage_db_message_has_no_path(network, kind, reason):
+    if kind != "garbage" and os.geteuid() == 0:
+        pytest.skip("root ignores read-only mode bits")
     network.journal.evidence.watermark("epoch", 12)
     network.journal.close()
     state = network.db_path
