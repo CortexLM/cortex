@@ -332,6 +332,17 @@ def test_excluded_offer_is_never_rented(fake, tmp_path, capsys):
     assert rc == 0 and json.loads(capsys.readouterr().out)["chosen_offer"]["id"] == 11
 
 
+def test_excluded_offer_honoured_when_profile_overrides_eligible(fake, tmp_path, capsys):
+    # scripts/genuine_cuda_tests.py and scripts/vast_parity.py override eligible() without the
+    # exclude check: --exclude-offer was a silent no-op there.
+    class OwnFilter(Scripted):
+        def eligible(self, o):
+            return vast.eligible(o)
+
+    rc, _, _ = run(fake, tmp_path, "--dry-run", "--exclude-offer", "12", harness=OwnFilter)
+    assert rc == 0 and json.loads(capsys.readouterr().out)["chosen_offer"]["id"] == 11
+
+
 def test_vanished_offer_falls_back_to_next(fake, tmp_path):
     fake.gone = {"/api/v0/asks/12/"}
     rc, journal, _ = run(fake, tmp_path)

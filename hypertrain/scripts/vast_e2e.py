@@ -238,7 +238,7 @@ class Harness:
         return offer_query()
 
     def eligible(self, o: Any) -> bool:
-        return eligible(o) and o["id"] not in self.a.exclude_offer
+        return eligible(o)
 
     def rank(self, o: dict[str, Any]) -> tuple[Any, ...]:
         return (dec(o["dph_total"]), o["id"])
@@ -272,14 +272,17 @@ class Harness:
         offers = r.body.get("offers") if r.ok() else None
         if not isinstance(offers, list):
             raise Refused(f"offer search failed (HTTP {r.status})")
-        fit = [o for o in offers if self.eligible(o)]
+        # Applied here, not in eligible(): profiles override eligible() (vast_parity, genuine).
+        skip = set(self.a.exclude_offer)
+        pool = [o for o in offers if not isinstance(o, dict) or o.get("id") not in skip]
+        fit = [o for o in pool if self.eligible(o)]
         if not fit:
             alone = 0  # offers a qualified driver would have made eligible
             if ALLOWED_DRIVERS is not None:
                 alone = sum(
                     isinstance(o, dict)
                     and any(self.eligible(o | {"driver_version": v}) for v in ALLOWED_DRIVERS)
-                    for o in offers
+                    for o in pool
                 )
             raise Refused(
                 f"no eligible {self.offer_desc} offer among {len(offers)} "
