@@ -264,18 +264,22 @@ of truth and serves it at `GET /v1/trust`.
 
 1. Edit the `[[challenges]]` shares (basis points, sum 10000) in `config/challenges.toml`.
 2. Bump `version`. Adding a third challenge or arbitrary shares needs
-   `challenges_version >= 3` (1..64 unique ids summing to 10000); versions 1-2 only
+   `version >= 3` (1..64 unique ids summing to 10000); versions 1-2 only
    accept the 2000/8000 and 3000/7000 splits. Do NOT set `introduced_epoch` in the
    future: the profile is global, so the master then cannot seal epochs before it
    and the gateway cannot decode stored seals older than it (`/v1/weights/latest`
    answers "unsealed" and the emission burns). Keep the existing value, or the epoch
    of the first bundle the new profile must govern, never above the current epoch.
    The gateway store refuses a version rollback.
-3. Run `python scripts/check_repo.py`, then restart the master between two epochs
-   (just after a seal), because the new shares apply to the next bundle it builds.
-4. Validators pick up the new profile from `/v1/trust` at the next epoch; no
-   validator restart or file copy is needed. Check `GET /v1/trust` shows the new
-   `challenges_version`.
+3. Run `python scripts/check_repo.py`. The master reloads the profile before each
+   epoch emission; the cautious workflow still restarts it between two epochs (just
+   after a seal), because the new shares apply to the next bundle it builds. A change
+   between two seals can make `GET /v1/weights/latest` answer "unsealed" until the
+   next seal; previous bundles stay available by epoch or root. A share-only change
+   is not guaranteed to make sealing fail, so check the next bundle.
+4. Validators read the new profile from `/v1/trust`; no file copy is needed. Keep
+   validators disabled (or accept an `unsealed` answer) until a bundle under the new
+   profile is sealed. Check `GET /v1/trust` shows the new `challenges_version`.
 
 A registered container id still needs a row in `deploy/challenges/registry.toml` to run.
 
