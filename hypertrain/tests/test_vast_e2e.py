@@ -542,6 +542,30 @@ def test_gpu_e2e_remote_runs_on_cpu_and_keeps_rank_logs(tmp_path, ranks):
     assert {p.parent.name for p in logs} == {str(r) for r in range(ranks)}
 
 
+def test_gpu_e2e_remote_forces_math_attention_for_the_fixture_model(tmp_path):
+    # Real 2x RTX 5090 (instance 56659094): every rank died in sdpa-flash with "No available
+    # kernel"; the fixture model is fp32, head_dim 4. Probe the env the remote gives its python.
+    probe = tmp_path / "bin"
+    probe.mkdir()
+    env_dump = tmp_path / "env.json"
+    (probe / "python").write_text(
+        f"#!/bin/sh\nenv | grep -E '^(HT_ATTN_BACKEND|PET_)' > {env_dump}\nexit 1\n"
+    )
+    (probe / "python").chmod(0o755)
+    env = {
+        **os.environ,
+        "HT_E2E_BACKEND": "cpu",
+        "HT_E2E_PYTHON": str(probe / "python"),
+        "HT_E2E_SRC": str(tmp_path),
+        "HT_E2E_OUT": str(tmp_path / "out"),
+    }
+    env.pop("HT_ATTN_BACKEND", None)
+    script = vast.ROOT / "scripts/vast_e2e_remote.sh"
+    subprocess.run(["bash", str(script)], env=env, capture_output=True, timeout=60, check=False)
+    seen = dict(line.split("=", 1) for line in env_dump.read_text().split())
+    assert seen["HT_ATTN_BACKEND"] == "math" and seen["PET_TEE"] == "3"
+
+
 def test_miner_cycle_profile_uses_new_remote_script(fake, tmp_path, capsys, mfu_globals):
     a = vast.parse([*ARGS, "--profile", "miner-cycle"])
     assert a.remote_script == "vast_miner_cycle_remote.sh" and a.num_gpus == 1

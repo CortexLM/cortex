@@ -12,6 +12,9 @@ export HT_IMAGE_DIGEST=sha256:c16a28dd29df300eca0cfb5c5aeacb8947681708634e3cbc86
 # torchrun reads PET_<flag>: tee every rank's stdout/stderr into $OUT, which is rescued. The
 # launcher's own stderr tail keeps only torchrun's summary, not the failing rank's traceback.
 export PET_LOG_DIR="$OUT/torchelastic" PET_TEE=3
+# The fixture model is fp32 with head_dim 4: the sdpa-flash kernel that select_backend qualifies
+# for sm_120 rejects both ("No available kernel"). Miner, auditor and repeat all inherit this.
+export HT_ATTN_BACKEND=${HT_ATTN_BACKEND:-math}
 
 step() {
   local name=$1; shift
