@@ -104,13 +104,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BOUNTY_*` master settings). Bounty now runs as the CortexLM/bounty container;
   its operator guide migrates `bounty.sqlite3` and the session key unchanged.
 
-- Owner-activated algorithm 2: each valid Bounty report earns one point, all
-  authors share proportionally, and ten valid reports unlock its full 30% of
-  emission. Proof retains 70%; unused Bounty mass burns to UID0. The legacy
-  signed 20/80 profile, algorithm 1 and historical sealed bytes remain intact.
-  Activation requires coordinated gateway/validator upgrades and an offline
-  owner signature over the new profile and epoch (superseded: the profile is now
-  unsigned and activation is a version bump in `config/challenges.toml`).
+- Algorithm 2: each valid Bounty report earned one point, all authors shared
+  proportionally, and ten valid reports unlocked Bounty's full 30% of emission;
+  Proof kept 70% and unused Bounty mass burned to UID0. Algorithm 1 and its
+  20/80 profile stayed supported for historical sealed bytes. Activation then
+  needed an offline owner signature over the profile; that signature was later
+  removed with wire v2, and activation is now a version bump in the unsigned
+  `config/challenges.toml`.
 - Bounty-only launch mode with a revision-pinned, fully paginated CortexLM
   backend feed, bounded public writes and readiness checks that fail closed.
 - Validator production preflight, resilient bounded master/validator Bittensor RPC failover and
