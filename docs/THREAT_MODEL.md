@@ -110,7 +110,9 @@ extrinsic and resulting chain state.
 and `POST /v1/admin/seal` requires the operator bearer
 (`BASE_GATEWAY_ADMIN_TOKEN_FILE`); each route refuses the other token with 401.
 The master refuses to start when both files resolve to the same path or hold the
-same value.
+same value. Bearers are at least 32 bytes and re-checked on every request: each
+private request re-reads both files and answers 503 while either is shorter or
+they are equal, so a rotation cannot silently weaken or merge them.
 While the master replaces a completed epoch's challenge leaves and seals it, raw
 intake answers 409 `epoch sealing in progress`, so a raw leaf cannot land after
 the authoritative replacement and before the seal; intake reopens when the seal

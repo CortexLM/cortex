@@ -77,6 +77,8 @@ or permit UID is not a submit path.
 | challenge internal token | master bearer for a container's `get_weights`; never a signing key |
 | miner hotkey | signs Bounty pairing or Proof submission payloads |
 
+Operator and intake bearers are at least 32 bytes and re-checked on every request.
+
 Do not conflate gateway sealing (unsigned), master ownership and validator chain signing.
 Validators build their view from the gateway profile at `GET /v1/trust`; the gateway is the single source of truth.
 
