@@ -92,30 +92,38 @@ def _sdpa_raising(when: Callable[[bool], bool], calls: list[bool]) -> Callable[.
     return sdpa
 
 
-@pytest.mark.parametrize(
-    "when,chosen",
-    [(lambda gqa: gqa, "flash+expanded-kv"), (lambda gqa: True, "math")],  # CPU: no mem-efficient
-)
 def test_fallback_probed_once_when_native_kernel_missing(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    when: Callable[[bool], bool],
-    chosen: str,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     calls: list[bool] = []
     monkeypatch.setattr(A, "_PATHS", {})
-    monkeypatch.setattr(A.F, "scaled_dot_product_attention", _sdpa_raising(when, calls))
+    monkeypatch.setattr(A.F, "scaled_dot_product_attention", _sdpa_raising(lambda gqa: gqa, calls))
     g = torch.Generator().manual_seed(0)
     q, k, v = (torch.randn(2, n, 33, 16, generator=g) for n in (8, 2, 2))
     with caplog.at_level("WARNING", logger=A.__name__):
         first = attention(q, k, v, "sdpa-flash")
         probed = list(calls)
         second = attention(q, k, v, "sdpa-flash")
-    assert probed[0] and len(probed) > 1  # native enable_gqa tried first, then fell back
-    assert calls[len(probed) :] == ([] if chosen == "math" else [False])  # no re-probe
-    assert [r.getMessage().split()[2] for r in caplog.records] == [chosen]  # logged once
+    assert probed[0] and len(probed) > 1  # native enable_gqa tried first, then expanded K/V
+    assert calls[len(probed) :] == [False]  # no re-probe
+    assert [r.getMessage().split()[2] for r in caplog.records] == ["flash+expanded-kv"]
+    assert A.chosen_paths() == ["flash+expanded-kv"]
     assert torch.equal(first, second)
     assert (first - attention(q, k, v)).abs().max() < 1e-5
+
+
+def test_no_flash_path_stops_instead_of_serving_another_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only flash is qualified: no mem-efficient and no math fallback under the sdpa-flash name."""
+    calls: list[bool] = []
+    monkeypatch.setattr(A, "_PATHS", {})
+    monkeypatch.setattr(A.F, "scaled_dot_product_attention", _sdpa_raising(lambda gqa: True, calls))
+    q, k, v = (torch.randn(2, n, 33, 16) for n in (8, 2, 2))
+    with pytest.raises(RuntimeError, match="no flash path"):
+        attention(q, k, v, "sdpa-flash")
+    assert A.PATHS == ("flash", "flash+expanded-kv")
+    assert A._PATHS == {}  # a refusal is not cached as a choice
 
 
 @pytest.mark.parametrize("dt", [torch.float32, torch.bfloat16])
@@ -129,17 +137,14 @@ def test_expanded_kv_close_to_native_gqa(dt: torch.dtype, h: int, kvh: int) -> N
     assert (native.float() - expanded.float()).abs().max() < tol
 
 
-def test_layout_rejected_after_probe_falls_back_to_math(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    monkeypatch.setattr(A, "_REJECTED", set())
+def test_layout_rejected_after_probe_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(A, "_PATHS", {})
     g = torch.Generator().manual_seed(0)
     q, k = (torch.randn(2, n, 33, 16, generator=g) for n in (8, 2))
     v = torch.randn(2, 2, 16, 33, generator=g).transpose(-1, -2)  # stride(-1) != 1: no fused kernel
-    with caplog.at_level("WARNING", logger=A.__name__):
-        assert A._path(q.device, q.dtype, 4, 16) == "flash"  # the contiguous probe accepts flash
-        for _ in range(2):
-            assert torch.equal(attention(q, k, v, "sdpa-flash"), attention(q, k, v))
-        contiguous = attention(q, k, v.contiguous(), "sdpa-flash")
-    assert torch.equal(contiguous, A._sdpa("flash", q, k, v.contiguous()))  # rejection not cached
-    assert sum("rejected" in r.getMessage() for r in caplog.records) == 1
+    assert A._path(q.device, q.dtype, 4, 16) == "flash"  # the contiguous probe accepts flash
+    with pytest.raises(RuntimeError, match="No available kernel"):
+        attention(q, k, v, "sdpa-flash")  # no silent math: the run stops
+    assert torch.equal(
+        attention(q, k, v.contiguous(), "sdpa-flash"), A._sdpa("flash", q, k, v.contiguous())
+    )

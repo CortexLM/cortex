@@ -14,11 +14,12 @@ The math path keeps the explicit K/V expansion: a broadcast (native-GQA) math pa
 by 1 ulp in dK for some shapes, so it cannot be the bitwise oracle. Native GQA lives in the fused
 backends (enable_gqa / flash-attn MQA), which never materialise expanded K/V.
 
-sdpa-flash is a chain, not one kernel: the flash kernel rejects fp32 and some head dims (and
-enable_gqa narrows it further), so the first of PATHS whose kernel accepts the inputs is used. The
-choice is probed once per (device, dtype, q heads per kv head, head dim), cached, and logged once;
-it is a pure function of hardware, torch build and model geometry, so ranks and reruns on the
-same hardware take the same path and stay bitwise equal.
+sdpa-flash is the flash kernel only: with enable_gqa (the qualified path) or, when that is
+rejected, on K/V expanded to q heads. Nothing else is served under this name (no mem-efficient
+kernel, no math fallback): numerics outside the qualification record must stop the run, not
+change silently. The path is probed once per (device, dtype, q heads per kv head, head dim),
+cached and logged once; it is a pure function of hardware, torch build and model geometry, so
+ranks and reruns on the same hardware take the same path. chosen_paths() exposes it for evidence.
 """
 
 from __future__ import annotations
@@ -44,12 +45,10 @@ QUALIFIED_BACKENDS: dict[tuple[tuple[int, int], str], Backend] = {
     ((12, 0), "2.14.0+cu130"): "sdpa-flash",
 }
 
-# sdpa-flash fallback order; "+expanded-kv" repeats K/V heads and calls SDPA without enable_gqa.
-PATHS = ("flash", "mem-efficient", "flash+expanded-kv", "mem-efficient+expanded-kv", "math")
-_KERNELS = {"flash": SDPBackend.FLASH_ATTENTION, "mem-efficient": SDPBackend.EFFICIENT_ATTENTION}
+# sdpa-flash paths, in order; "+expanded-kv" repeats K/V heads and calls SDPA without enable_gqa.
+PATHS = ("flash", "flash+expanded-kv")
 _NO_KERNEL = ("No available kernel", "No viable backend")  # CUDA / CPU dispatcher messages
 _PATHS: dict[tuple[torch.device, torch.dtype, int, int], str] = {}
-_REJECTED: set[tuple[str, torch.device, torch.dtype]] = set()  # real-call rejections, logged once
 
 _MASKS: dict[tuple[int, torch.device], Tensor] = {}
 
@@ -75,11 +74,10 @@ def select_backend(device: torch.device) -> Backend:
 
 
 def _sdpa(path: str, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-    kernel, _, expanded = path.partition("+")
-    if expanded:
+    if path.endswith("+expanded-kv"):
         g = q.shape[1] // k.shape[1]
         k, v = k.repeat_interleave(g, 1), v.repeat_interleave(g, 1)
-    with sdpa_kernel([_KERNELS[kernel]]):
+    with sdpa_kernel([SDPBackend.FLASH_ATTENTION]):
         return F.scaled_dot_product_attention(
             q, k, v, is_causal=True, enable_gqa=k.shape[1] != q.shape[1]
         )
@@ -87,17 +85,20 @@ def _sdpa(path: str, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
 
 @torch.compiler.assume_constant_result  # HT_COMPILE=1 traces the cached choice, not the probe
 def _path(device: torch.device, dtype: torch.dtype, group: int, hd: int) -> str:
-    """First of PATHS whose kernel accepts these inputs, probed once on tiny zero tensors."""
+    """First of PATHS whose kernel accepts these inputs, probed once on tiny zero tensors.
+
+    Raises RuntimeError when none does (e.g. fp32): force HT_ATTN_BACKEND=math for such models.
+    """
     key = (device, dtype, group, hd)
     if key in _PATHS:
         return _PATHS[key]
-    path = "math"
+    path = ""
     # Grad enabled: training constraints apply, and no_grad replay must pick the same path.
     # Identity hooks keep the probe's saved tensors out of an enclosing HT_ACT_CKPT checkpoint.
     with torch.enable_grad(), torch.autograd.graph.saved_tensors_hooks(lambda x: x, lambda x: x):
         q = torch.zeros(1, group, 2, hd, device=device, dtype=dtype, requires_grad=True)
         kv = torch.zeros(1, 1, 2, hd, device=device, dtype=dtype, requires_grad=True)
-        for candidate in PATHS[:-1]:
+        for candidate in PATHS:
             if group == 1 and candidate.endswith("+expanded-kv"):
                 continue
             try:
@@ -108,9 +109,18 @@ def _path(device: torch.device, dtype: torch.dtype, group: int, hd: int) -> str:
                 continue
             path = candidate
             break
+    if not path:
+        raise RuntimeError(
+            f"sdpa-flash: no flash path accepts {device} {dtype} group {group} head dim {hd}"
+        )
     _PATHS[key] = path
     log.warning("attention backend: %s (%s %s, group %d, hd %d)", path, device, dtype, group, hd)
     return path
+
+
+def chosen_paths() -> list[str]:
+    """Distinct sdpa-flash paths this process has used, for run evidence."""
+    return sorted(set(_PATHS.values()))
 
 
 def attention(q: Tensor, k: Tensor, v: Tensor, backend: Backend = "math") -> Tensor:
@@ -118,20 +128,7 @@ def attention(q: Tensor, k: Tensor, v: Tensor, backend: Backend = "math") -> Ten
     b, h, t, hd = q.shape
     kvh = k.shape[1]
     if backend == "sdpa-flash":
-        path = _path(q.device, q.dtype, h // kvh, hd)
-        if path != "math":
-            try:
-                return _sdpa(path, q, k, v)
-            except RuntimeError as e:
-                # The probe sees contiguous tiny tensors; this call's layout (e.g. a last-dim
-                # stride != 1) can still be rejected. Not cached: the path stays a function of
-                # the inputs, not of call order. ponytail: straight to math, not the next of
-                # PATHS; walk PATHS if a production shape ever lands here.
-                if not str(e).startswith(_NO_KERNEL):
-                    raise
-                if (path, q.device, q.dtype) not in _REJECTED:
-                    _REJECTED.add((path, q.device, q.dtype))
-                    log.warning("attention backend: %s rejected %s, using math", path, e)
+        return _sdpa(_path(q.device, q.dtype, h // kvh, hd), q, k, v)
     if backend == "flash-attn":
         from flash_attn import flash_attn_func  # type: ignore[import-not-found]
 
