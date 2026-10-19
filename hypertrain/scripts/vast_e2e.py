@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -757,6 +758,16 @@ def main(
     if a.profile == "mfu":
         MIN_PCIE_BW = Decimal(str(a.min_pcie_bw))
     api = Api(a.api_base, key, a.evidence_dir / "journal.jsonl", min_gap=a.min_gap, sleep=sleep)
+
+    def stop(signum: int, _frame: Any) -> None:
+        # A service stop/restart sends SIGTERM: unwind through cleanup("finally"). Ignore any
+        # repeat so it cannot interrupt the rescue/delete already under way.
+        signal.signal(signum, signal.SIG_IGN)
+        api.log("signal", signum=signum)
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGHUP, stop)
     api.log(
         "start",
         dry_run=a.dry_run,

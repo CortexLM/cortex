@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shlex
+import signal
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -312,6 +314,27 @@ def test_key_reattached_after_permission_denied(fake, tmp_path):
     attaches = [c for c in fake.calls if c == ("POST", f"/api/v0/instances/{IID}/ssh/")]
     assert len(attaches) == 3
     assert [j["event"] for j in journal].count("ssh_probe_failed") == 1
+
+
+def test_sigterm_still_rescues_and_deletes(fake, tmp_path):
+    class Stopped(Scripted):
+        def run_remote(self):
+            os.kill(os.getpid(), signal.SIGTERM)  # service manager stop/restart mid-run
+            return 0
+
+        def rescue(self):
+            os.kill(os.getpid(), signal.SIGTERM)  # a second one must not abort the delete
+            return super().rescue()
+
+    old = signal.signal(signal.SIGTERM, lambda *a: None)  # stand-in so pytest survives
+    try:
+        with pytest.raises(SystemExit) as e:
+            run(fake, tmp_path, harness=Stopped)
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    assert e.value.code == 143
+    assert fake.deleted and (tmp_path / "ev/out/result.json").exists()
+    assert json.loads((tmp_path / "ev/harness-result.json").read_text())["absent"] is True
 
 
 def test_absence_never_confirmed_alerts(fake, tmp_path):
