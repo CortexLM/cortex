@@ -244,12 +244,17 @@ def run_validator_reconcile(args: argparse.Namespace) -> None:
 
 def _watermark_reset_preflight(args: argparse.Namespace) -> None:
     """Prove the file is a validator journal holding the row, without writing to it."""
-    reader = sqlite3.connect(f"{args.state_db.resolve().as_uri()}?mode=ro", uri=True)
+    path = args.state_db.resolve()
+    # mode=ro still creates -shm/-wal beside a WAL database. Without a -wal file every
+    # committed page is in the main file, so an immutable read is exact and creates none.
+    wal = path.with_name(path.name + "-wal").exists()
+    reader = sqlite3.connect(f"{path.as_uri()}?{'mode=ro' if wal else 'immutable=1'}", uri=True)
     try:
-        table = reader.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='consensus_watermarks'"
+        tables = reader.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' "
+            "AND name IN ('consensus_watermarks', 'consensus_watermark_resets')"
         ).fetchone()
-        if table is None:
+        if tables[0] != 2:
             raise SystemExit("Cortex command failed: not a validator state database")
         rows = dict(
             reader.execute(
@@ -281,7 +286,7 @@ def run_validator_watermark_reset(args: argparse.Namespace) -> None:
         _watermark_reset_preflight(args)
         # The journal schema and WAL mode belong to the validator; open only the existing file.
         connection = sqlite3.connect(args.state_db, isolation_level=None, timeout=1)
-        old = EvidenceStore(connection).reset_watermark(args.name, args.to)
+        old = EvidenceStore(connection, create_schema=False).reset_watermark(args.name, args.to)
     except ProtocolError as error:
         raise SystemExit(f"Cortex command failed: {error}") from None
     except sqlite3.OperationalError as error:

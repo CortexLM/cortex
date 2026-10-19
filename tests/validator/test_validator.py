@@ -763,7 +763,8 @@ def snapshot_file(path):
     import sqlite3
 
     stat = path.stat()
-    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    # immutable=1 reads without creating -shm/-wal sidecars, unlike mode=ro.
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?immutable=1", uri=True)
     try:
         mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
         tables = connection.execute("SELECT name FROM sqlite_master ORDER BY name").fetchall()
@@ -773,7 +774,7 @@ def snapshot_file(path):
     return path.read_bytes(), stat.st_mtime_ns, mode, tables, siblings
 
 
-@pytest.mark.parametrize("kind", ["empty", "foreign"])
+@pytest.mark.parametrize("kind", ["empty", "foreign", "foreign-wal", "partial"])
 def test_cli_watermark_reset_never_mutates_a_foreign_state_file(tmp_path, kind):
     import sqlite3
 
@@ -782,9 +783,16 @@ def test_cli_watermark_reset_never_mutates_a_foreign_state_file(tmp_path, kind):
     if kind == "empty":
         state.touch()
     else:
-        with sqlite3.connect(state) as connection:
+        connection = sqlite3.connect(state)
+        if kind == "foreign-wal":
+            connection.execute("PRAGMA journal_mode=WAL")
+        if kind == "partial":  # the watermark row alone, without the journal's other tables
+            connection.execute("CREATE TABLE consensus_watermarks (name TEXT, value TEXT)")
+            connection.execute("INSERT INTO consensus_watermarks VALUES ('epoch', '12')")
+        else:
             connection.execute("CREATE TABLE notes (body TEXT)")
             connection.execute("INSERT INTO notes VALUES ('kept')")
+        connection.commit()
         connection.close()
     before = snapshot_file(state)
     with pytest.raises(SystemExit, match="not a validator state database"):

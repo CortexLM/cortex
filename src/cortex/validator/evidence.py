@@ -13,8 +13,10 @@ RESETTABLE_WATERMARKS = ("challenges_version", "measurements_version", "epoch")
 
 
 class EvidenceStore:
-    def __init__(self, connection: sqlite3.Connection):
+    def __init__(self, connection: sqlite3.Connection, *, create_schema: bool = True):
         self.connection = connection
+        if not create_schema:
+            return
         connection.executescript("""
             CREATE TABLE IF NOT EXISTS consensus_roots (
                 epoch TEXT NOT NULL, hotkey BLOB NOT NULL, root BLOB NOT NULL,
