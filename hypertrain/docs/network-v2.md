@@ -78,7 +78,10 @@ device = "cpu"
 `api` is the service base, without `/v2/runs/...`. `NetworkMiner` requires pinned
 `run_id` and `owner_hotkey`; it verifies the signed wrapper before work.
 `state_source` and `image_digest` remain required shared config fields; v2 round
-inputs are fetched through the job/object endpoints. Relative paths resolve
+inputs are fetched through the job/object endpoints. Re-requesting the same
+round job (a miner restarting after a crash) returns the identical staged job;
+staged inputs that differ on the server answer 409, never an overwrite.
+Relative paths resolve
 against the TOML directory. Environment `HYPERTRAIN_MINER_<FIELD>` overrides
 matching TOML fields; unknown TOML keys reject. Other existing fields:
 `data_dir`, `poll_seconds` (2.0), `chunk_bytes` (67108864),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import importlib
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -104,6 +105,8 @@ def test_island_job_maps_indexed_refs_to_whole_hashes(tmp_path: Path, monkeypatc
     }
     store = ChallengeStore.__new__(ChallengeStore)
     store.objects, store.state_dir = objects, tmp_path / "state"
+    store._db = sqlite3.connect(":memory:")  # empty records_v2: first emission of the job
+    store._db.execute("CREATE TABLE records_v2(run_id, kind, id, data)")
     put: dict[str, object] = {}
     monkeypatch.setattr(store, "_tx", contextlib.nullcontext, raising=False)
     monkeypatch.setattr(store, "_run_v2", lambda *_: manifest, raising=False)

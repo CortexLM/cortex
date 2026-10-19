@@ -319,6 +319,36 @@ def rerun_message(run_id: str, w: int, hotkey: str, rerun_leaves_root: str) -> b
     return f"hypertrain/1|Rerun|{run_id}|{w}|{hotkey}|{rerun_leaves_root}".encode()
 
 
+def _stage_once(path: Path, data: bytes) -> None:
+    """Create-once input for a re-emitted job: identical bytes are kept, others refused (409).
+
+    The final name only ever appears by link(2) of a fully written, fsynced temp file, so it is
+    complete or absent; a SIGKILL leaves at most a unique `.name.*.part` temp, never reused."""
+    import os
+
+    if not os.path.lexists(path):
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".part")
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(tmp, path)
+            except FileExistsError:  # concurrent emission: compared below like any repeat
+                pass
+        finally:
+            os.unlink(tmp)
+        dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+        if stream.read() != data:
+            raise ChallengeError(409, "island job inputs differ from the staged job")
+
+
 def _merge_answers(answers: list[bytes]) -> bytes:
     """One get_weights answer over per-run ledgers: each run owns 10^6 of full_share_mass.
 
@@ -6570,7 +6600,6 @@ class ChallengeStore:
 
     def island_job_v2(self, run_id: str, w: int, hotkey: str) -> dict[str, Any]:
         from hypertrain.auditor.replay import pack_state, unpack_state
-        from hypertrain.gpu_ops.journal import durable_write
         from hypertrain.protocol.messages_v2 import IslandJobV1, StartStateV2
 
         with self._tx():
@@ -6764,7 +6793,7 @@ class ChallengeStore:
             )
             hashes = {}
             for name, value in inputs.items():
-                durable_write(directory / name, value)
+                _stage_once(directory / name, value)
                 hashes[name] = put_large(value, self.objects.put)  # ht-parts-v1 above 1 MiB
             job = IslandJobV1(
                 job_version=1,
@@ -6779,7 +6808,14 @@ class ChallengeStore:
                 object_paths={k: k for k in inputs},
                 deadline=manifest.training.beacon.genesis_time + (int(body["d_commit"]) - 1) * 3,
             )
-            self._put_record_v2(run_id, "island-job", f"{w}:{hotkey}", job.body())
+            stored = self._db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='island-job' AND id=?",
+                (run_id, f"{w}:{hotkey}"),
+            ).fetchone()
+            if stored is None:
+                self._put_record_v2(run_id, "island-job", f"{w}:{hotkey}", job.body())
+            elif json.loads(stored[0]) != job.body():
+                raise ChallengeError(409, "island job inputs differ from the staged job")
             staged: dict[str, Any] = {"job": job.body(), "objects": hashes}
             if theta_only is not None:  # a miner rebuilds start_state from it + its own m/v
                 staged["theta"] = put_large(theta_only, self.objects.put)
