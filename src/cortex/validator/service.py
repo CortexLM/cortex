@@ -22,6 +22,7 @@ from cortex.protocol.consensus import Dissent, DissentReason, RootStatement
 from cortex.protocol.crypto import public_key
 from cortex.protocol.models import encode_final_vector
 from cortex.protocol.scale import fixed, uint
+from cortex.protocol.trust import trust_from_json
 
 from .evidence import EvidenceStore
 
@@ -333,7 +334,7 @@ class Validator:
         *,
         gateway_url: str,
         netuid: int,
-        trust: TrustRoot,
+        trust: TrustRoot | None = None,
         chain: Chain,
         journal: SubmissionJournal,
         http: httpx.AsyncClient,
@@ -345,6 +346,7 @@ class Validator:
         max_block_lag: int = 256,
         trust_loader: Callable[[int], TrustRoot] | None = None,
         verify_only: bool = False,
+        gateway_public: bytes | None = None,
     ):
         """Verify the gateway seal and submit weights.
 
@@ -358,7 +360,11 @@ class Validator:
         """
         uint(netuid, 2)
         uint(version_key, 8)
-        trust.validate()
+        if trust is not None:
+            trust.validate()
+        if gateway_public is not None:
+            fixed(gateway_public, 32)
+        self.gateway_public = gateway_public
         gateway = urlsplit(gateway_url)
         if (
             gateway_url != gateway_url.strip()
@@ -373,7 +379,8 @@ class Validator:
             raise ValueError("gateway URL requires HTTPS without credentials or path")
         self.gateway_url = gateway_url.rstrip("/")
         self.netuid = netuid
-        self.trust = trust
+        self.trust: TrustRoot = trust  # type: ignore[assignment]  # fetched before first use
+        self._fixed_trust = trust is not None
         self.chain = chain
         self.journal = journal
         self.journal.bind_netuid(netuid)
@@ -540,6 +547,12 @@ class Validator:
             raise ProtocolError("bundle epoch does not match the pinned chain block")
         if self.trust_loader:
             self.trust = self.trust_loader(epoch)
+        elif not self._fixed_trust:
+            # The gateway is ours and is the source of truth for the emission profile;
+            # TLS plus an optional --gateway-public pin are the only anchors.
+            self.trust = trust_from_json(decode_json(await self._read("/v1/trust", 1024 * 1024)))
+            if self.gateway_public is not None and self.trust.gateway_hotkey != self.gateway_public:
+                raise ProtocolError("gateway key differs from the pinned --gateway-public")
         self.journal.evidence.watermark("challenges_version", self.trust.challenges_version)
         self.journal.evidence.watermark("measurements_version", self.trust.measurements_version)
         body, quarantined = verify_inputs(

@@ -1,22 +1,14 @@
-"""Read, sign and verify owner-pinned trust roots."""
+"""Read and (de)serialize the gateway trust profile; the gateway is the source of truth."""
 
+import json
 import tomllib
+from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
 
-from .crypto import TRUST_ROOT_DOMAIN, decode_hotkey, verify_raw
+from .crypto import decode_hotkey
 from .models import ChallengeEntry, ParticipantPolicy, TrustRoot
-from .scale import ProtocolError, byte_vec, fixed, uint, vector
-
-
-def _signature(path: Path) -> bytes:
-    raw = path.read_bytes()
-    if len(raw) == 64:
-        return raw
-    try:
-        return fixed(bytes.fromhex(raw.decode().strip().removeprefix("0x")), 64)
-    except (ValueError, UnicodeDecodeError) as error:
-        raise ProtocolError("invalid detached signature") from error
+from .scale import ProtocolError, fixed, vector
 
 
 def _policy(value: str | dict) -> ParticipantPolicy:
@@ -35,10 +27,6 @@ def _policy(value: str | dict) -> ParticipantPolicy:
             hotkeys=tuple(decode_hotkey(k) for k in value["hotkeys"]),
         )
     raise ProtocolError("unknown participant policy")
-
-
-def trust_payload(version: int, introduced_epoch: int, body: bytes) -> bytes:
-    return uint(version, 4) + uint(introduced_epoch, 8) + byte_vec(body)
 
 
 def challenge_entries(document: dict) -> tuple[ChallengeEntry, ...]:
@@ -70,57 +58,50 @@ def measurements_body(document: dict) -> bytes:
     return vector(entries, lambda value: value)
 
 
-def signing_payload(path: Path, kind: str) -> bytes:
-    """Return the detached-signature preimage for an operator document."""
-    document = tomllib.loads(path.read_text())
-    if kind == "challenges":
-        challenges = challenge_entries(document)
-        body = vector(challenges, ChallengeEntry.encode)
-    elif kind == "measurements":
-        body = measurements_body(document)
-    else:
-        raise ProtocolError("unknown trust document kind")
-    return trust_payload(document["version"], document.get("introduced_epoch", 0), body)
-
-
-def load_trust_root(
-    *,
-    challenges_path: Path,
-    challenges_signature: Path,
-    measurements_path: Path,
-    measurements_signature: Path,
-    owner_public: bytes,
-    gateway_public: bytes,
-    epoch: int,
-    minimum_challenges_version: int = 1,
-    minimum_measurements_version: int = 1,
+def load_trust(
+    *, challenges_path: Path, measurements_path: Path, gateway_public: bytes
 ) -> TrustRoot:
-    """Owner key and minimum versions are local pins, never fetched from the gateway."""
+    """Build the profile from the master's own TOML files. No signature: the files are local."""
     challenges_doc = tomllib.loads(challenges_path.read_text())
     measurements_doc = tomllib.loads(measurements_path.read_text())
-    challenges = challenge_entries(challenges_doc)
-    measurement_bytes = measurements_body(measurements_doc)
     trust = TrustRoot(
-        challenges,
-        sha256(measurement_bytes).digest(),
+        challenge_entries(challenges_doc),
+        sha256(measurements_body(measurements_doc)).digest(),
         gateway_public,
         challenges_doc["version"],
         measurements_doc["version"],
         max(challenges_doc.get("introduced_epoch", 0), measurements_doc.get("introduced_epoch", 0)),
     )
-    for document, body, signature_path, minimum in (
-        (challenges_doc, trust.challenges_body(), challenges_signature, minimum_challenges_version),
-        (measurements_doc, measurement_bytes, measurements_signature, minimum_measurements_version),
-    ):
-        version = document["version"]
-        introduced = document.get("introduced_epoch", 0)
-        if version < minimum or introduced > epoch:
-            raise ProtocolError("trust root rollback or future activation")
-        if not verify_raw(
-            owner_public,
-            TRUST_ROOT_DOMAIN,
-            trust_payload(version, introduced, body),
-            _signature(signature_path),
-        ):
-            raise ProtocolError("invalid trust root owner signature")
+    trust.validate()
     return trust
+
+
+def trust_to_json(trust: TrustRoot) -> dict:
+    """Public profile served at /v1/trust and persisted by the gateway store."""
+    return json.loads(json.dumps(asdict(trust), default=bytes.hex))
+
+
+def trust_from_json(values: object) -> TrustRoot:
+    try:
+        if not isinstance(values, dict):
+            raise TypeError("profile must be an object")
+        values = dict(values)
+        challenges = []
+        for entry in values.pop("challenges"):
+            policy = dict(entry["policy"])
+            policy["hotkeys"] = tuple(bytes.fromhex(key) for key in policy["hotkeys"])
+            challenges.append(
+                ChallengeEntry(
+                    bytes.fromhex(entry["id"]),
+                    bytes.fromhex(entry["public_key"]),
+                    entry["emission_share_bps"],
+                    ParticipantPolicy(**policy),
+                )
+            )
+        values["measurements_digest"] = bytes.fromhex(values["measurements_digest"])
+        values["gateway_hotkey"] = bytes.fromhex(values["gateway_hotkey"])
+        trust = TrustRoot(challenges=tuple(challenges), **values)
+        trust.validate()
+        return trust
+    except (KeyError, TypeError, ValueError) as error:
+        raise ProtocolError("invalid trust profile") from error

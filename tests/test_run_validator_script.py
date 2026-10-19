@@ -59,12 +59,14 @@ def test_master_intent_is_refused(env, args, extra):
     assert "cortex master" not in result.stdout
 
 
-def test_missing_gateway_public_fails(env):
-    del env["GATEWAY_PUBLIC"]
-    result = run(env, "--dry-run")
-    assert result.returncode != 0
-    assert "GATEWAY_PUBLIC is not set" in result.stderr
-
+def test_submitting_without_a_hotkey_fails_but_verify_only_does_not(env):
+    del env["WALLET_NAME"], env["WALLET_HOTKEY"]
+    refused = run(env, "--dry-run")
+    assert refused.returncode != 0
+    assert "WALLET_NAME" in refused.stderr
+    verify = run(env, "--dry-run", "--verify-only")
+    assert verify.returncode == 0, verify.stderr
+    assert "--wallet" not in verify.stdout
 
 def test_netuid_mismatch_fails(env):
     result = run(env | {"NETUID": "541"}, "--dry-run")
@@ -87,6 +89,8 @@ def test_dry_run_prints_masked_validator_command(env):
         "--verify-only --once",
     ):
         assert expected in command
+    for removed in ("--owner-public", "--challenges", "--measurements", "minimum"):
+        assert removed not in command
     assert "epoch=4242 sealed=true" in result.stderr
 
 

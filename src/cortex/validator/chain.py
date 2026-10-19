@@ -77,7 +77,8 @@ def close_subtensor(subtensor: Any) -> None:
 class BittensorChain:
     """Optional ``chain`` dependency; no chain calls are made by constructing this adapter."""
 
-    def __init__(self, subtensor: Any, wallet: Any, *, block_time: float = 12.0):
+    def __init__(self, subtensor: Any, wallet: Any = None, *, block_time: float = 12.0):
+        """``wallet`` (the validator hotkey) is needed only to preflight and submit weights."""
         self.subtensor = subtensor
         self.wallet = wallet
         self.block_time = block_time
@@ -149,6 +150,8 @@ class BittensorChain:
     async def preflight(
         self, netuid: int, vector: tuple[tuple[int, int], ...], version_key: int
     ) -> None:
+        if self.wallet is None:  # verify-only without a hotkey: nothing to check on-chain
+            return
         try:
             await asyncio.to_thread(self._preflight, netuid, vector, version_key)
         except Exception as error:
@@ -162,6 +165,8 @@ class BittensorChain:
         for uid, value in vector:
             uint(uid, 2)
             uint(value, 2)
+        if self.wallet is None:
+            raise ProtocolError("submitting weights requires a validator hotkey (wallet)")
         uint(netuid, 2)
         uint(version_key, 8)
         tip = self.subtensor.get_current_block()

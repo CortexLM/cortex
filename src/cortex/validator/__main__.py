@@ -14,7 +14,6 @@ import uvicorn
 from cortex.config import read_seed, validate_chain_endpoint
 from cortex.protocol import ProtocolError
 from cortex.protocol.crypto import decode_hotkey, public_key
-from cortex.protocol.trust import load_trust_root
 
 from .chain import BittensorChain, close_subtensor
 from .evidence import peer_app
@@ -71,16 +70,19 @@ def parser() -> argparse.ArgumentParser:
     )
     arguments.add_argument("--gateway", required=True)
     arguments.add_argument("--netuid", required=True, type=int)
-    arguments.add_argument("--gateway-public", required=True, help="independently pinned hotkey")
-    arguments.add_argument("--owner-public", type=Path, default=Path("config/owner.pubkey"))
-    arguments.add_argument("--challenges", type=Path, default=Path("config/challenges.toml"))
-    arguments.add_argument("--measurements", type=Path, default=Path("config/measurements.toml"))
-    arguments.add_argument("--minimum-challenges-version", type=int, required=True)
-    arguments.add_argument("--minimum-measurements-version", type=int, required=True)
+    arguments.add_argument(
+        "--gateway-public",
+        help="optional extra pin: refuse a gateway whose sealing hotkey differs. The gateway "
+        "itself (HTTPS) is the trust anchor for the emission profile (/v1/trust)",
+    )
     arguments.add_argument("--network", type=primary_endpoint, default="finney")
     arguments.add_argument("--fallback-endpoints", type=fallback_endpoints, default=[])
-    arguments.add_argument("--wallet-name", required=True)
-    arguments.add_argument("--wallet-hotkey", required=True)
+    arguments.add_argument(
+        "--wallet-name", help="validator wallet; required only to submit weights on-chain"
+    )
+    arguments.add_argument(
+        "--wallet-hotkey", help="validator hotkey; required only to submit weights on-chain"
+    )
     arguments.add_argument("--wallet-path", default="~/.bittensor/wallets")
     arguments.add_argument("--state-db", type=Path, required=True)
     arguments.add_argument("--poll-seconds", type=float, default=30)
@@ -123,19 +125,6 @@ async def run(arguments: argparse.Namespace, subtensor, wallet) -> TickResult | 
     epoch = await asyncio.to_thread(subtensor.get_subnet_epoch_index, arguments.netuid)
     if epoch is None:
         raise ProtocolError("cannot read subnet epoch")
-
-    def load_trust(epoch):
-        return load_trust_root(
-            challenges_path=arguments.challenges,
-            challenges_signature=Path(str(arguments.challenges) + ".sig"),
-            measurements_path=arguments.measurements,
-            measurements_signature=Path(str(arguments.measurements) + ".sig"),
-            owner_public=decode_hotkey(arguments.owner_public.read_text().strip()),
-            gateway_public=decode_hotkey(arguments.gateway_public),
-            epoch=epoch,
-            minimum_challenges_version=arguments.minimum_challenges_version,
-            minimum_measurements_version=arguments.minimum_measurements_version,
-        )
 
     # The seed signs cross-validator root statements and dissents, which only
     # exist in a peer-consensus deployment (_crosscheck returns immediately
@@ -185,7 +174,6 @@ async def run(arguments: argparse.Namespace, subtensor, wallet) -> TickResult | 
             validator = Validator(
                 gateway_url=arguments.gateway,
                 netuid=arguments.netuid,
-                trust=load_trust(epoch),
                 chain=BittensorChain(subtensor, wallet),
                 journal=journal,
                 http=http,
@@ -198,7 +186,9 @@ async def run(arguments: argparse.Namespace, subtensor, wallet) -> TickResult | 
                 peer_consensus=arguments.peer_consensus,
                 min_peer_sample=arguments.min_peer_sample,
                 max_block_lag=arguments.max_block_lag,
-                trust_loader=load_trust,
+                gateway_public=decode_hotkey(arguments.gateway_public)
+                if arguments.gateway_public
+                else None,
                 verify_only=arguments.verify_only,
             )
             while True:
@@ -234,8 +224,14 @@ def main(argv: list[str] | None = None) -> None:
     arguments = parser().parse_args(argv)
     if not isfinite(arguments.poll_seconds) or arguments.poll_seconds <= 0:
         raise SystemExit("--poll-seconds must be positive")
-    if arguments.minimum_challenges_version < 1 or arguments.minimum_measurements_version < 1:
-        raise SystemExit("minimum trust versions must be positive")
+    submits = not arguments.verify_only
+    if (submits or arguments.peer_consensus) and not (
+        arguments.wallet_name and arguments.wallet_hotkey
+    ):
+        raise SystemExit(
+            "--wallet-name and --wallet-hotkey are required to submit weights or run "
+            "--peer-consensus; use --verify-only to run without a validator hotkey"
+        )
     if not 0 <= arguments.netuid <= 65535:
         raise SystemExit("--netuid must fit u16")
     if not 0 <= arguments.version_key <= 2**64 - 1:
@@ -261,21 +257,22 @@ def main(argv: list[str] | None = None) -> None:
     # mnemonic wallet does — <path>/<name>/hotkeys/<hotkey> — so the file
     # decides how it is read, and the command line stays what the deploy gate
     # audits. A mnemonic wallet keeps working exactly as before.
-    wallet_path = Path(arguments.wallet_path).expanduser()
-    hotkey_file = wallet_path / arguments.wallet_name / "hotkeys" / arguments.wallet_hotkey
-    wallet: Wallet | PrivateKeyWallet
-    try:
-        private = hotkey_file.is_file() and _carries_private_key(hotkey_file)
-        if private:
-            wallet = load_private_key_wallet(hotkey_file)
-    except ProtocolError as error:
-        raise SystemExit(f"validator wallet refused: {error}") from None
-    if not private:
-        wallet = Wallet(
-            name=arguments.wallet_name,
-            hotkey=arguments.wallet_hotkey,
-            path=str(wallet_path),
-        )
+    wallet: Wallet | PrivateKeyWallet | None = None
+    if arguments.wallet_name and arguments.wallet_hotkey:
+        wallet_path = Path(arguments.wallet_path).expanduser()
+        hotkey_file = wallet_path / arguments.wallet_name / "hotkeys" / arguments.wallet_hotkey
+        try:
+            private = hotkey_file.is_file() and _carries_private_key(hotkey_file)
+            if private:
+                wallet = load_private_key_wallet(hotkey_file)
+        except ProtocolError as error:
+            raise SystemExit(f"validator wallet refused: {error}") from None
+        if not private:
+            wallet = Wallet(
+                name=arguments.wallet_name,
+                hotkey=arguments.wallet_hotkey,
+                path=str(wallet_path),
+            )
     try:
         result = asyncio.run(run(arguments, subtensor, wallet))
         if (

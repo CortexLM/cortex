@@ -50,6 +50,13 @@ def create_router(service: GatewayService, operator_auth: OperatorAuth) -> APIRo
         except ServiceError as error:
             return _error(error)
 
+    @router.get("/v1/trust")
+    async def trust():
+        try:
+            return service.trust_profile()
+        except ServiceError as error:
+            return _error(error)
+
     @router.get("/v1/weights/latest")
     async def latest():
         return service.latest()

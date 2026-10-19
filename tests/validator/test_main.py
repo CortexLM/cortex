@@ -15,10 +15,6 @@ def required_arguments(tmp_path):
         "541",
         "--gateway-public",
         "11" * 32,
-        "--minimum-challenges-version",
-        "1",
-        "--minimum-measurements-version",
-        "1",
         "--wallet-name",
         "validator",
         "--wallet-hotkey",
@@ -146,11 +142,54 @@ def test_verify_only_once_exits_nonzero_unless_the_outcome_is_verified(monkeypat
         validator_main.main([*required_arguments(tmp_path), "--verify-only", "--once"])
 
 
-@pytest.mark.parametrize("flag", ["--minimum-challenges-version", "--minimum-measurements-version"])
-def test_main_rejects_nonpositive_trust_version_pins(flag, tmp_path):
-    with pytest.raises(SystemExit, match="minimum trust versions must be positive"):
-        validator_main.main([*required_arguments(tmp_path), flag, "0"])
+def without(arguments, flag):
+    """Drop `flag value` from an argument list."""
+    index = arguments.index(flag)
+    return arguments[:index] + arguments[index + 2 :]
 
+def without_hotkey(tmp_path):
+    return without(without(required_arguments(tmp_path), "--wallet-name"), "--wallet-hotkey")
+
+def test_weight_setting_validator_without_hotkey_fails_with_a_clear_error(tmp_path):
+    with pytest.raises(SystemExit, match="required to submit weights"):
+        validator_main.main(without_hotkey(tmp_path))
+
+def test_peer_consensus_without_hotkey_fails_even_when_verify_only(tmp_path):
+    with pytest.raises(SystemExit, match="required to submit weights or run --peer-consensus"):
+        validator_main.main([*without_hotkey(tmp_path), "--verify-only", "--peer-consensus"])
+
+def test_verify_only_validator_starts_without_hotkey_gateway_pin_or_trust_files(
+    monkeypatch, tmp_path
+):
+    seen = {}
+
+    class Subtensor:
+        def __init__(self, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    bittensor = ModuleType("bittensor")
+    bittensor.Subtensor = Subtensor
+    wallet_module = ModuleType("bittensor_wallet")
+    wallet_module.Wallet = lambda **kwargs: pytest.fail("no wallet must be built")
+    monkeypatch.setitem(sys.modules, "bittensor", bittensor)
+    monkeypatch.setitem(sys.modules, "bittensor_wallet", wallet_module)
+
+    async def verified(arguments, subtensor, wallet):
+        seen["wallet"] = wallet
+        return TickResult("verified")
+
+    monkeypatch.setattr(validator_main, "run", verified)
+    arguments = without(without_hotkey(tmp_path), "--gateway-public")
+    validator_main.main([*arguments, "--verify-only", "--once"])
+    assert seen == {"wallet": None}
+
+def test_removed_trust_signing_options_are_gone(tmp_path):
+    for flag in ("--owner-public", "--challenges", "--measurements", "--minimum-challenges-version"):
+        with pytest.raises(SystemExit):
+            validator_main.parser().parse_args([*required_arguments(tmp_path), flag, "x"])
 
 @pytest.mark.parametrize(
     ("flag", "value", "message"),

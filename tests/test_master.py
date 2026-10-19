@@ -85,7 +85,6 @@ def master_config(tmp_path):
     return MasterConfig(
         netuid=541,
         state_dir=tmp_path / "state",
-        owner_public_file=tmp_path / "owner.pubkey",
         challenges_file=tmp_path / "challenges.toml",
         measurements_file=tmp_path / "measurements.toml",
         gateway_seed_file=secret("gateway.key", bytes([7]) * 32),

@@ -20,7 +20,6 @@ from .scale import ProtocolError, byte_vec, fixed
 SIGNING_CONTEXT = b"base-sr25519-v1"
 BUNDLE_DOMAIN = b"base-bundle-v1"
 RAW_WEIGHT_DOMAIN = b"base-rawweight-v1"
-TRUST_ROOT_DOMAIN = b"base-trustroot-v1"
 _ORDER = 2**252 + 27742317777372353535851937790883648493
 _ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 

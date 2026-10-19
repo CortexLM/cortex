@@ -10,6 +10,7 @@ from cortex.protocol import Bundle, Leaf, ProtocolError, TrustRoot, aggregate_le
 from cortex.protocol.crypto import BUNDLE_DOMAIN, RAW_WEIGHT_DOMAIN, encode_hotkey, verify_raw
 from cortex.protocol.merkle import merkle_root
 from cortex.protocol.scale import uint
+from cortex.protocol.trust import trust_to_json
 from cortex.validator import ChainSnapshot
 
 from .projection import project, timestamp
@@ -53,6 +54,13 @@ class GatewayService:
         except Exception:
             return ""
         return value if isinstance(value, str) else ""
+
+    def trust_profile(self) -> dict:
+        """Public profile the validators build their local TrustRoot from (TLS is the anchor)."""
+        latest = self.store.latest()
+        if latest is not None:
+            self.refresh_trust(latest.epoch)
+        return trust_to_json(self.trust)
 
     def refresh_trust(self, epoch: int) -> None:
         if self.trust_loader is None:

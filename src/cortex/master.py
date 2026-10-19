@@ -394,7 +394,7 @@ class EpochEmitter:
             expected = challenge.policy.expected(rows)
             seed = self.challenge_seed(challenge.id)
             if public_key(seed) != challenge.public_key:
-                raise ServiceError(503, "challenge signing key does not match owner trust")
+                raise ServiceError(503, "challenge signing key does not match the profile")
             outcomes = await self._scores(challenge.id, epoch, expected, epoch_at)
             # No unknown score key can expand E; missing scores are explicit signed absences.
             leaves = []

@@ -40,26 +40,6 @@ def parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--attempt-id", required=True)
     reconcile.add_argument("--result", choices=("submitted", "not_broadcast"), required=True)
     reconcile.add_argument("--evidence-digest", required=True)
-    keygen = commands.add_parser("keygen", help="generate an offline sr25519 operator key")
-    keygen.add_argument("--seed-out", type=Path, required=True)
-    keygen.add_argument("--public-out", type=Path, required=True)
-    trust_sign = commands.add_parser(
-        "trust-sign", help="sign a challenge or measurement trust document"
-    )
-    trust_sign.add_argument("--kind", choices=("challenges", "measurements"), required=True)
-    trust_sign.add_argument("--input", type=Path, required=True)
-    trust_sign.add_argument("--seed-file", type=Path, required=True)
-    trust_sign.add_argument("--signature-out", type=Path, required=True)
-    trust_verify = commands.add_parser(
-        "trust-verify", help="verify signed trust documents against local pins"
-    )
-    trust_verify.add_argument("--challenges", type=Path, required=True)
-    trust_verify.add_argument("--measurements", type=Path, required=True)
-    trust_verify.add_argument("--owner-public", type=Path, required=True)
-    trust_verify.add_argument("--gateway-public", required=True)
-    trust_verify.add_argument("--epoch", type=int, required=True)
-    trust_verify.add_argument("--minimum-challenges-version", type=int, default=1)
-    trust_verify.add_argument("--minimum-measurements-version", type=int, default=1)
     vm = commands.add_parser("vm-host", help="serve the dedicated Firecracker host")
     vm.add_argument("--config", type=Path, required=True)
     vm.add_argument(
@@ -232,52 +212,6 @@ async def run_master(args: argparse.Namespace) -> None:
         await asyncio.to_thread(close_subtensor, subtensor)
 
 
-def run_keygen(args: argparse.Namespace) -> None:
-    from cortex.operator import generate_key
-
-    public = generate_key(args.seed_out, args.public_out)
-    print(json.dumps({"public_key": public, "seed_file": str(args.seed_out)}))
-
-
-def run_trust_sign(args: argparse.Namespace) -> None:
-    from cortex.operator import sign_trust_document
-
-    sign_trust_document(
-        input_path=args.input,
-        kind=args.kind,
-        seed_path=args.seed_file,
-        signature_path=args.signature_out,
-    )
-    print(json.dumps({"kind": args.kind, "signature_file": str(args.signature_out)}))
-
-
-def run_trust_verify(args: argparse.Namespace) -> None:
-    from cortex.protocol.trust import load_trust_root
-
-    trust = load_trust_root(
-        challenges_path=args.challenges,
-        challenges_signature=Path(str(args.challenges) + ".sig"),
-        measurements_path=args.measurements,
-        measurements_signature=Path(str(args.measurements) + ".sig"),
-        owner_public=decode_hotkey(args.owner_public.read_text().strip()),
-        gateway_public=decode_hotkey(args.gateway_public),
-        epoch=args.epoch,
-        minimum_challenges_version=args.minimum_challenges_version,
-        minimum_measurements_version=args.minimum_measurements_version,
-    )
-    print(
-        json.dumps(
-            {
-                "challenges": {name.decode(): share for name, share in trust.shares},
-                "challenges_version": trust.challenges_version,
-                "measurements_version": trust.measurements_version,
-                "measurements_digest": trust.measurements_digest.hex(),
-            },
-            sort_keys=True,
-        )
-    )
-
-
 def run_validator_reconcile(args: argparse.Namespace) -> None:
     from cortex.validator import SubmissionJournal
 
@@ -323,12 +257,6 @@ def main(argv: list[str] | None = None) -> None:
             from cortex.vm.server import serve
 
             serve(args.config)
-        elif args.command == "keygen":
-            run_keygen(args)
-        elif args.command == "trust-sign":
-            run_trust_sign(args)
-        elif args.command == "trust-verify":
-            run_trust_verify(args)
         elif args.command == "validator-reconcile":
             run_validator_reconcile(args)
         else:
