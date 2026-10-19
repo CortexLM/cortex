@@ -57,6 +57,13 @@ def measurements_body(document: dict) -> bytes:
     return vector(entries, lambda value: value)
 
 
+def _whole(document: dict, name: str, default: int | None = None) -> int:
+    value = document.get(name, default)
+    if type(value) is not int or value < 0:
+        raise ProtocolError(f"{name} must be a non-negative integer, got {value!r}")
+    return value
+
+
 def load_trust(*, challenges_path: Path, measurements_path: Path) -> TrustRoot:
     """Build the profile from the master's own TOML files. No signature: the files are local."""
     challenges_doc = tomllib.loads(challenges_path.read_text())
@@ -64,9 +71,12 @@ def load_trust(*, challenges_path: Path, measurements_path: Path) -> TrustRoot:
     trust = TrustRoot(
         challenge_entries(challenges_doc),
         sha256(measurements_body(measurements_doc)).digest(),
-        challenges_doc["version"],
-        measurements_doc["version"],
-        max(challenges_doc.get("introduced_epoch", 0), measurements_doc.get("introduced_epoch", 0)),
+        _whole(challenges_doc, "version"),
+        _whole(measurements_doc, "version"),
+        max(
+            _whole(challenges_doc, "introduced_epoch", 0),
+            _whole(measurements_doc, "introduced_epoch", 0),
+        ),
     )
     trust.validate()
     return trust
