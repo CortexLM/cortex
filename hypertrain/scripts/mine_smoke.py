@@ -35,8 +35,10 @@ def evidence_file() -> tuple[Path, int]:
     """$MINE_SMOKE_EVIDENCE (never via a symlink), else a fresh 0600 file, never a fixed name."""
     env = os.environ.get("MINE_SMOKE_EVIDENCE")
     if env:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-        return Path(env), os.open(env, flags, 0o600)
+        # No O_TRUNC: a failed start must not empty an existing file; main() truncates at write.
+        fd = os.open(env, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        os.fchmod(fd, 0o600)  # O_CREAT keeps the mode of a file that already exists
+        return Path(env), fd
     fd, name = tempfile.mkstemp(prefix="mine-smoke-evidence-", suffix=".json")
     return Path(name), fd
 
@@ -77,6 +79,7 @@ def main() -> int:
                 ev["process_exit_codes"] = w.stop()
     ev["elapsed_seconds"] = round(time.monotonic() - started, 2)
     ev["result"] = "PASS" if code == 0 else "FAIL"
+    os.ftruncate(fd, 0)
     with os.fdopen(fd, "w") as f:
         f.write(json.dumps(ev, indent=1, sort_keys=True, default=str))
     print(

@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import stat
 import tempfile
 from pathlib import Path
@@ -32,3 +33,18 @@ def test_default_evidence_is_a_fresh_private_file_per_run(
         assert stat.S_IMODE(f.stat().st_mode) == 0o600
         assert "no round in this test" in f.read_text()
     assert not (tmp_path / "victim").exists()
+
+
+def test_imposed_evidence_path_is_private_and_kept_until_the_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "ev.json"
+    target.write_text("previous run")
+    target.chmod(0o644)
+    monkeypatch.setenv("MINE_SMOKE_EVIDENCE", str(target))
+    out, fd = mine_smoke.evidence_file()
+    try:
+        assert out == target and stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert target.read_text() == "previous run"  # not truncated before the run
+    finally:
+        os.close(fd)
