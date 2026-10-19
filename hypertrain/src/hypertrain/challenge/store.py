@@ -9654,6 +9654,12 @@ class ChallengeStore:
                 try:
                     original = self.objects.get(committed_work.delta_hash)
                 except ObjectNotFound:
+                    # Miners commit the delta by ref only (miner/core.py:run_round); the master
+                    # first holds the bytes after relay retrieval, where relay_receipt_v2 rechecks
+                    # delta_hash and size. A lone chunk is the whole delta, so check it here.
+                    whole = chunk.chunks[0].chunk_sha256 == committed_work.delta_hash
+                    if len(chunk.chunks) > 1 or whole:
+                        eligible.append(a)
                     continue
                 if len(original) != chunk.size or sha256_hex(original) != committed_work.delta_hash:
                     raise ChallengeError(409, "accepted commit original delta corrupt")

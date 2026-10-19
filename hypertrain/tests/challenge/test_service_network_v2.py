@@ -3732,7 +3732,9 @@ def test_complete_receipt_prefix_rescue_http(network, monkeypatch, tmp_path, inv
         "unknown-commit",
     ],
 )
-def test_upload_grant_exact_subject_with_two_live_rounds(network, tmp_path, fault):
+# held=False: miners commit the delta by ref only; the master first stores it at relay receipt.
+@pytest.mark.parametrize("held", [True, False])
+def test_upload_grant_exact_subject_with_two_live_rounds(network, tmp_path, fault, held):
     import anyio
     import httpx
 
@@ -3808,7 +3810,8 @@ def test_upload_grant_exact_subject_with_two_live_rounds(network, tmp_path, faul
         if w == 1 and fault == "wrong-run":
             committed_envelope = envelope_v2.seal(HOT[0], "CommitV2", "ff" * 32, commit, 10000)
         with network.store._tx():
-            network.store.objects.put(payload)
+            if held:
+                network.store.objects.put(payload)
             network.store._put_record_v2(run_id, "relay-assignment", f"{w}:{HOT[0].ss58}", signed)
             network.store._put_record_v2(run_id, "commit", f"{w}:{HOT[0].ss58}", committed_envelope)
     # Exact accepted journal boundary, real signed subjects; no graduation/train.
