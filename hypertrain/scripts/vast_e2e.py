@@ -170,9 +170,8 @@ def offer_query() -> dict[str, Any]:
         "reliability": {"gt": 0.98},
         "inet_down": {"gte": 1000},
         **({"pcie_bw": {"gte": float(MIN_PCIE_BW)}} if MIN_PCIE_BW is not None else {}),
-        **(
-            {"driver_version": {"in": list(ALLOWED_DRIVERS)}} if ALLOWED_DRIVERS is not None else {}
-        ),
+        # No driver_version filter: the API answers 400 "driver_vers in None" (2026-10-19);
+        # eligible() applies ALLOWED_DRIVERS to the returned offers.
         "type": "on-demand",
         "order": [["dph_total", "asc"]],
         "limit": 64,

@@ -71,6 +71,8 @@ class Fake:
             q = json.loads(parse_qs(urlsplit(url).query)["q"][0])
             assert q["num_gpus"] == {"eq": vast.NUM_GPUS} and q["gpu_name"] == {"eq": "RTX 5090"}
             self.queries.append(q)
+            if "driver_version" in q:  # real API answer, 2026-10-19
+                return 400, {"error": "driver_vers in None: query values can't be None"}
             return 200, {"offers": self.offers()}
         if method == "PUT" and path.startswith("/api/v0/asks/"):
             if path in self.gone:
@@ -408,12 +410,14 @@ def test_driver_filter_in_query_and_eligible(fake, tmp_path, mfu_globals):
 
     def dry(*extra):
         rc, journal, _ = run(fake, tmp_path, "--dry-run", *extra)
-        chosen = [j for j in journal if j["event"] == "offer_chosen"][-1]
-        return rc, fake.queries[-1].get("driver_version"), chosen["eligible"], chosen["quote"]["id"]
+        chosen = [j for j in journal if j["event"] == "offer_chosen"]
+        return rc, [(j["eligible"], j["quote"]["id"]) for j in chosen[-1:]]
 
-    assert dry() == (0, {"in": list(vast.QUALIFIED_DRIVERS)}, 2, 22)
-    assert dry("--driver", "580.178.04") == (0, {"in": ["580.178.04"]}, 1, 21)
-    assert dry("--any-driver") == (0, None, 4, 20)
+    # The allow-list is applied client-side only: the server answers 400 to a driver filter.
+    assert dry() == (0, [(2, 22)])
+    assert dry("--driver", "580.178.04") == (0, [(1, 21)])
+    assert dry("--any-driver") == (0, [(4, 20)])
+    assert not any("driver_version" in q for q in fake.queries)
     with pytest.raises(SystemExit):
         vast.parse([*ARGS, "--driver", "999.0"])
 
