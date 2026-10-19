@@ -1,4 +1,4 @@
-"""Public gateway JSON contracts, mapped to the signed SCALE leaf payload."""
+"""Public gateway JSON contracts, mapped to the unsigned SCALE leaf payload."""
 
 from typing import Annotated
 
