@@ -9,7 +9,6 @@ For the underlying CLI and the challenge profile served by the gateway, see the 
 - Linux, Python 3.12 or 3.13, [uv](https://docs.astral.sh/uv/), `curl` and libsodium 1.0.18 or newer.
 - A clone of this repository.
 - To submit weights only: a Bittensor wallet with a hotkey registered on netuid 100. Verifying needs no wallet.
-- Optional: the gateway's public hotkey, pinned from an independent, trusted source, as an extra check. Don't copy it from the gateway response.
 
 ```bash
 sudo apt-get install libsodium23

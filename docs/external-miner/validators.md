@@ -280,9 +280,11 @@ docker compose --project-directory . --env-file deploy/env/python-validator.env 
 ```
 
 The command first opens the file read-only and refuses, without writing, a
-file that is not a validator state database or lacks the named watermark. A
-running validator holding the database makes it fail with `state db locked;
-stop the validator first`. `--netuid` refuses a journal recorded for another
+file that is not a validator state database or lacks the named watermark.
+Stopping the validator first is required. The `state db locked; stop the
+validator first` error is only a best-effort guard: it triggers while the
+validator is inside a journal write, not between ticks, so a reset against a
+running validator can succeed and then be undone by its next tick. `--netuid` refuses a journal recorded for another
 subnet; a journal that records no netuid skips that check and says so.
 
 It refuses without `--confirm`, refuses a name outside those three, a negative
