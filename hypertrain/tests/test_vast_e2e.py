@@ -317,25 +317,27 @@ def test_key_reattached_after_permission_denied(fake, tmp_path):
     assert [j["event"] for j in journal].count("ssh_probe_failed") == 1
 
 
-def test_sigterm_still_rescues_and_deletes(fake, tmp_path):
+@pytest.mark.parametrize("during", ["remote", "rescue"])
+def test_stop_signals_never_skip_rescue_or_delete(fake, tmp_path, during):
     class Stopped(Scripted):
         def run_remote(self):
-            os.kill(os.getpid(), signal.SIGTERM)  # service manager stop/restart mid-run
+            if during == "remote":  # service manager stop/restart mid-run
+                os.kill(os.getpid(), signal.SIGTERM)
+                assert self.cancel.is_set()
+                return 143
             return 0
 
         def rescue(self):
-            os.kill(os.getpid(), signal.SIGTERM)  # a second one must not abort the delete
+            os.kill(os.getpid(), signal.SIGTERM)  # a stop landing while cleanup runs
+            os.kill(os.getpid(), signal.SIGHUP)  # and the other stop signal right after
             return super().rescue()
 
-    old = signal.signal(signal.SIGTERM, lambda *a: None)  # stand-in so pytest survives
-    try:
-        with pytest.raises(SystemExit) as e:
-            run(fake, tmp_path, harness=Stopped)
-    finally:
-        signal.signal(signal.SIGTERM, old)
-    assert e.value.code == 143
-    assert fake.deleted and (tmp_path / "ev/out/result.json").exists()
-    assert json.loads((tmp_path / "ev/harness-result.json").read_text())["absent"] is True
+    before = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)
+    rc, journal, _ = run(fake, tmp_path, harness=Stopped)
+    assert (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)) == before
+    result = json.loads((tmp_path / "ev/harness-result.json").read_text())
+    assert rc == 1 and fake.deleted and result["absent"] is True and not result["remote_ok"]
+    assert (tmp_path / "ev/out/result.json").exists() and "cleanup_done" in events(journal)
 
 
 def test_absence_never_confirmed_alerts(fake, tmp_path):

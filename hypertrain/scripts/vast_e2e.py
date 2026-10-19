@@ -326,6 +326,8 @@ class Harness:
         return best
 
     def create(self, offer: dict[str, Any]) -> None:
+        if self.cancel.is_set():
+            raise RuntimeError("cancelled before create")
         self.api.log("create_intent", offer_id=offer["id"], label=self.label, image=IMAGE)
         self.create_attempted = True
         r = self.api.call(
@@ -507,6 +509,8 @@ class Harness:
                 stdout=sink,
                 stderr=log,
             )
+            if self.cancel.is_set() and not self.cleaned:  # signal landed before self.child
+                self.child.kill()
             try:
                 self.child.communicate(stdin, timeout=max(1.0, timeout))
             except subprocess.TimeoutExpired:
@@ -648,7 +652,7 @@ class Harness:
         finally:
             self.cleanup("finally")
             dog.join(timeout=5)
-            self.result["remote_ok"] = rc == 0 and not self.result.get("watchdog")
+            self.result["remote_ok"] = rc == 0 and not ({"watchdog", "signal"} & self.result.keys())
             (self.out / "harness-result.json").write_text(json.dumps(self.result, indent=2))
         if not self.result.get("absent"):
             print(f"ALERT: instance {self.instance_id} absence NOT confirmed", file=sys.stderr)
@@ -758,16 +762,18 @@ def main(
     if a.profile == "mfu":
         MIN_PCIE_BW = Decimal(str(a.min_pcie_bw))
     api = Api(a.api_base, key, a.evidence_dir / "journal.jsonl", min_gap=a.min_gap, sleep=sleep)
+    h = harness(a, api)
 
     def stop(signum: int, _frame: Any) -> None:
-        # A service stop/restart sends SIGTERM: unwind through cleanup("finally"). Ignore any
-        # repeat so it cannot interrupt the rescue/delete already under way.
-        signal.signal(signum, signal.SIG_IGN)
-        api.log("signal", signum=signum)
-        raise SystemExit(128 + signum)
+        # A service stop/restart: cancel like the watchdog does, never raise, so a signal can
+        # not abort a rescue/delete under way. No api.log: this thread may hold its lock.
+        h.result["signal"] = signum
+        h.cancel.set()
+        child = h.child
+        if not h.cleaned and child is not None and child.poll() is None:
+            child.kill()  # once cleanup runs, the child is the rescue: let it finish
 
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGHUP, stop)
+    saved = {s: signal.signal(s, stop) for s in (signal.SIGTERM, signal.SIGHUP)}
     api.log(
         "start",
         dry_run=a.dry_run,
@@ -777,11 +783,14 @@ def main(
         pid=os.getpid(),
     )
     try:
-        return harness(a, api).run()
+        return h.run()
     except Refused as e:
         api.log("refused", reason=str(e))
         print(f"REFUSED: {e}", file=sys.stderr)
         return 2
+    finally:
+        for s, old in saved.items():
+            signal.signal(s, old)
 
 
 if __name__ == "__main__":
