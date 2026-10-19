@@ -4,7 +4,8 @@
 # under -m costs ~45 s on a loaded host). Prints the measured wall time; exits 1 when tests
 # fail or the budget is exceeded. Extra arguments go to pytest.
 # Not a bitwise gate: the fast set excludes golden replay, codec v2, tests/parity/, trace parity
-# and island replay v2; run those before merging protocol-adjacent changes.
+# and island replay v2; scripts/check-proof.sh runs those, run it before merging
+# protocol-adjacent changes.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
@@ -34,5 +35,5 @@ if [ "$elapsed_ms" -gt $(( budget * 1000 )) ]; then
   echo "check-fast: FAIL (${elapsed_ms}ms > ${budget}s)" >&2
   exit 1
 fi
-echo "check-fast: NOTE bitwise suites (golden replay, codec v2, parity, trace parity, island replay v2) are NOT in this gate; run them before merging protocol-adjacent changes"
+echo "check-fast: NOTE bitwise suites (golden replay, codec v2, parity, trace parity, island replay v2) are NOT in this gate; run scripts/check-proof.sh before merging protocol-adjacent changes"
 echo "check-fast: PASS"
