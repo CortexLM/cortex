@@ -758,7 +758,7 @@ class Harness:
 
 
 def parse(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     p.add_argument("--key-file", type=Path, required=True)
     p.add_argument("--max-usd", type=float, required=True)
     p.add_argument("--max-minutes", type=float, required=True)
@@ -870,16 +870,13 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     return a
 
 
-def _mask_remote_env(argv) -> str:
-    """argv for the journal with every --remote-env VALUE hidden (KEY=***)."""
-    out, hide = [], False
+def _mask_remote_env(argv, remote_env) -> str:
+    """argv for the journal with every --remote-env VALUE hidden (KEY=***), any spelling."""
+    out = []
     for tok in argv:
-        if hide:
-            tok, hide = tok.partition("=")[0] + "=***", False
-        elif tok == "--remote-env":
-            hide = True
-        elif tok.startswith("--remote-env="):
-            tok = "--remote-env=" + tok.partition("=")[2].partition("=")[0] + "=***"
+        for kv in sorted(remote_env, key=len, reverse=True):  # TOK=ab must not leave b
+            if kv in tok:
+                tok = tok.replace(kv, kv.partition("=")[0] + "=***")
         out.append(tok)
     return shlex.join(out)
 
@@ -920,7 +917,7 @@ def main(
         dry_run=a.dry_run,
         max_usd=a.max_usd,
         max_minutes=a.max_minutes,
-        argv=_mask_remote_env(sys.argv[1:] if argv is None else argv),
+        argv=_mask_remote_env(sys.argv[1:] if argv is None else argv, a.remote_env),
         pid=os.getpid(),
     )
     try:

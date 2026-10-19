@@ -777,7 +777,22 @@ def test_pagination_keeps_an_existing_price_ceiling(fake, tmp_path, monkeypatch)
 
 def test_journal_argv_never_holds_a_remote_env_value():
     masked = vast._mask_remote_env(
-        ["--remote-env", "TOK=hunter2", "--remote-env=B=s3cret", "--dry-run"]
+        ["--remote-env", "TOK=hunter2", "--remote-env=B=s3cret", "--dry-run"],
+        ["TOK=hunter2", "B=s3cret"],
     )
     assert "hunter2" not in masked and "s3cret" not in masked
     assert "TOK=***" in masked and "B=***" in masked and "--dry-run" in masked
+
+
+@pytest.mark.parametrize(
+    "spelling", [["--remote", "TOK=secret"], ["--remote-e", "TOK=secret"], ["--remote=TOK=secret"]]
+)
+def test_vast_remote_env_masked_for_abbreviated_flags(fake, tmp_path, spelling):
+    # An abbreviation must never reach the journal unmasked: it is refused before any write.
+    with pytest.raises(SystemExit):
+        run(fake, tmp_path, "--dry-run", *spelling)
+    journal = tmp_path / "ev/journal.jsonl"
+    assert not journal.exists() or "secret" not in journal.read_text()
+    # Masking keys on the parsed values, so any spelling that did parse is hidden too.
+    masked = vast._mask_remote_env(["--dry-run", *spelling], ["TOK=secret"])
+    assert "secret" not in masked and "TOK=***" in masked
