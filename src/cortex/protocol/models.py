@@ -16,6 +16,9 @@ BOUNTY_FULL_SHARE_REPORTS = 10
 # Algorithm 3: a challenge's leaves sum to at most this; the shortfall burns to UID0.
 FULL_SHARE_SCORE = 10**12
 CHALLENGE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+# Highest measurement allowlist version this release accepts. A served profile above it is
+# refused before the rollback watermark moves; raising it needs a validator release.
+MAX_MEASUREMENTS_VERSION = 1000
 
 
 class NoScoreReason(IntEnum):
@@ -187,6 +190,8 @@ class TrustRoot:
         fixed(self.measurements_digest, 32)
         uint(self.challenges_version, 4)
         uint(self.measurements_version, 4)
+        if self.measurements_version > MAX_MEASUREMENTS_VERSION:
+            raise ProtocolError("measurements version above the supported maximum")
         uint(self.introduced_epoch, 8)
         for challenge in self.challenges:
             challenge.encode()

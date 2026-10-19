@@ -713,3 +713,47 @@ def test_cli_validator_reconcile_refuses_an_unknown_dispatch(network):
                 "--evidence-digest", "cd" * 32,
             ]
         )  # fmt: skip
+
+
+@pytest.mark.parametrize("value", [True, 1.0, "1", None, [1], 2**32, 2**32 - 1, "max+1"], ids=repr)
+async def test_unsupported_measurements_version_never_moves_the_watermark(network, value):
+    import sqlite3
+
+    from cortex.protocol.models import MAX_MEASUREMENTS_VERSION
+    from cortex.protocol.trust import trust_to_json
+
+    if value == "max+1":
+        value = MAX_MEASUREMENTS_VERSION + 1
+    honest = trust_to_json(network.validator.trust)
+    served = {"profile": {**honest, "measurements_version": value}}
+
+    def transport(request):
+        if request.url.path == "/v1/trust":
+            return httpx.Response(200, json=served["profile"])
+        return network.handler(request)
+
+    validator = Validator(
+        gateway_url="https://master.invalid",
+        netuid=541,
+        chain=network.chain,
+        journal=network.journal,
+        http=httpx.AsyncClient(transport=httpx.MockTransport(transport)),
+    )
+    with pytest.raises(ProtocolError, match="invalid trust profile"):
+        await validator.run_once()
+    assert network.chain.submissions == []
+    with sqlite3.connect(network.db_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT value FROM consensus_watermarks WHERE name='measurements_version'"
+            ).fetchall()
+            == []
+        )
+    served["profile"] = honest
+    assert (await validator.run_once()).outcome == "submitted"
+
+
+def test_measurements_version_at_the_supported_maximum_is_accepted(network):
+    from cortex.protocol.models import MAX_MEASUREMENTS_VERSION
+
+    replace(network.validator.trust, measurements_version=MAX_MEASUREMENTS_VERSION).validate()
