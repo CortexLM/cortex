@@ -33,7 +33,11 @@ MINER_INDEX = 0x41
 
 def main() -> int:
     ev: dict[str, Any] = {"checks": {}}
-    out = Path(os.environ.get("MINE_SMOKE_EVIDENCE", "mine-smoke-evidence.json"))
+    out = Path(
+        os.environ.get(
+            "MINE_SMOKE_EVIDENCE", str(Path(tempfile.gettempdir()) / "mine-smoke-evidence.json")
+        )
+    )
     started = time.monotonic()
     code = 0
     with tempfile.TemporaryDirectory() as d:

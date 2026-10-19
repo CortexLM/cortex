@@ -196,3 +196,36 @@ def test_register_refuses_before_any_write(
     assert set(tmp_path.rglob("*")) == before
     out = capsys.readouterr()
     assert want in out.err and TOKEN not in out.out + out.err
+
+
+@pytest.mark.parametrize("link", ["run", "objects", "prefix"])
+def test_register_refuses_symlink_into_root_store(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    link: str,
+) -> None:
+    argv, state, *_ = _hosted(tmp_path)
+    (state / "objects").mkdir()
+    run = state / "runs" / RUN
+    if link == "run":
+        (run / "objects").rmdir()
+        (run / "challenge.db").unlink()
+        run.rmdir()
+        run.symlink_to(state)
+    elif link == "objects":
+        (run / "objects").rmdir()
+        (run / "objects").symlink_to(state / "objects")
+    else:
+        for h in argv[argv.index("--samples-hash") + 1], argv[argv.index("--proofs-hash") + 1]:
+            (state / "objects" / h[:2]).mkdir(exist_ok=True)
+            if not (run / "objects" / h[:2]).exists():
+                (run / "objects" / h[:2]).symlink_to(state / "objects" / h[:2])
+
+    def handler(_r: httpx.Request) -> httpx.Response:
+        raise AssertionError("refused before any request")
+
+    _serve(monkeypatch, handler)
+    assert main(argv) == 1
+    assert not [p for p in (state / "objects").rglob("*") if p.is_file()]
+    assert "root store" in capsys.readouterr().err

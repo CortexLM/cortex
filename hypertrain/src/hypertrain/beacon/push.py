@@ -28,8 +28,16 @@ from hypertrain.beacon.drand import DrandQuicknet
 # Unchanged by JSON escaping and URL encoding, so redacting an echoed token by exact match holds.
 # Also keeps it out of exceptions: httpx quotes an illegal header value (e.g. a newline) verbatim.
 _TOKEN = re.compile(rb"[A-Za-z0-9._~-]+")
+# Relay URLs (DrandQuicknet errors echo them) may carry userinfo or an `?apikey=` query.
+# Userinfo runs to the last `@` before the path: a password may hold quotes or `@`.
+_USERINFO = re.compile(r"(\w[\w+.-]*://)[^/\s]*@")
+_QUERY = re.compile(r"[?#][^\s'\"]*")
 # A rejected (429) or cut-off (408) POST was not applied, so replaying it is safe.
 _RETRY = frozenset({408, 429})
+
+
+def redact_urls(text: str) -> str:
+    return _QUERY.sub("", _USERINFO.sub(r"\1***@", text))
 
 
 class ServiceError(Exception):
@@ -119,7 +127,8 @@ class Pusher:
                         print(e, file=sys.stderr, flush=True)
                         return 2 if e.status in (401, 403) else 1
                     failures += 1
-                    msg = f"failure {failures}/{max_failures}: {type(e).__name__}: {e}"
+                    why = redact_urls(str(e))
+                    msg = f"failure {failures}/{max_failures}: {type(e).__name__}: {why}"
                     print(msg, file=sys.stderr, flush=True)
                     if once or failures >= max_failures:
                         return 1

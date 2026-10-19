@@ -169,7 +169,7 @@ hypertrain-miner status --config miner.toml
 hypertrain-miner update --check --manifest-url "$MANIFEST_URL"
 ```
 
-`register` posts a server-key grant; it does not submit a contract-2 admission. For contract 2, prepare the hotkey-signed request on the GPU host using its configured hotkey (not a delegated server key):
+`register` (no `--coldkey`) posts the server-key grant (`grant.json` next to the keyfile) and submits no contract-2 admission. `register --coldkey COLDFILE --request-id ID --expiry ROUND` posts no grant; instead it signs a join v2 with the configured keyfile (the server key) and the coldkey and posts it to `/v2/runs/<run_id>/join`, so it needs the coldkey file and belongs on the operator machine. For contract 2, prepare the hotkey-signed request on the GPU host using its configured hotkey (not a delegated server key):
 
 ```bash
 hypertrain-miner join-v2 --config miner.toml --request-id "$REQUEST_ID" --expiry "$EXPIRY" \

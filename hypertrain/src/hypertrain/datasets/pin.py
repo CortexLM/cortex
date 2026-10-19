@@ -94,6 +94,12 @@ def register(
             f"{run}/challenge.db not found: --state-dir must be the service's state dir and "
             "the run a hosted sub-run (the first run lives in the root store, refused here)"
         )
+    # A symlinked run, objects or prefix dir would pass the checks above and write the root store.
+    root = state_dir.resolve()
+    prefixes = [run / "objects" / h[:2] for h in (samples_hash, proofs_hash)]
+    for p in (run.resolve(), *(d.resolve() for d in (run / "objects", *prefixes))):
+        if root / "runs" not in p.parents or p == root / "objects":
+            raise PinError(f"{run}: resolves to {p}, outside {root}/runs or the root store")
     # New prefix dirs take the caller's uid; a foreign one would block the service's own writes.
     if (run / "objects").stat().st_uid != os.geteuid():
         raise PinError(f"{run}/objects belongs to another uid: run register as the service user")

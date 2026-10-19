@@ -268,3 +268,12 @@ def test_sigterm_exits_0_and_restores_handler(wire: Any, cli: Any) -> None:
         assert signal.getsignal(signal.SIGTERM) is outer
     finally:
         signal.signal(signal.SIGTERM, previous)
+
+
+def test_failure_message_redacts_relay_credentials(wire: Any, cli: Any) -> None:
+    relay = "https://u:PA'SSW@relay.example/x?apikey=SECRETKEY#SECFRAG"
+    wire(Service(), relay_client({"relay.example": 503, "b.test": V0}))
+    rc, out, err = cli("--once", relays=["--relay", relay, "--relay", "https://b.test"])
+    assert (rc, out) == (1, "")
+    assert "failure 1/" in err and "***@relay.example/x" in err
+    assert "SSW" not in err and "SECRETKEY" not in err and "SECFRAG" not in err
