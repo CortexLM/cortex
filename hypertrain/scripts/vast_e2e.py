@@ -883,6 +883,7 @@ def _mask_remote_env(argv) -> str:
         out.append(tok)
     return shlex.join(out)
 
+
 def main(
     argv: list[str] | None = None,
     harness: type[Harness] = Harness,
