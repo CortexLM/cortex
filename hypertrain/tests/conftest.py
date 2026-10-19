@@ -49,7 +49,15 @@ def build_corpus(root: Path, n_train: int = 2, n_holdout: int = 1) -> Path:
 # miner client). Chosen from --durations profiles on 2026-10-18; a file is listed, not a test,
 # so new tests in these files are fast by default. FAST_SLOW_TESTS are the few multi-second
 # scale/perf cases inside those files that add nothing to the mining path.
-FAST_DIRS = ("tests/protocol", "tests/beacon", "tests/data", "tests/ledger", "tests/aggregator")
+FAST_DIRS = (
+    "tests/protocol",
+    "tests/beacon",
+    "tests/data",
+    "tests/datasets",
+    "tests/ledger",
+    "tests/aggregator",
+    "tests/ops",
+)
 FAST_FILES = (
     "tests/test_smoke.py",
     "tests/trainer/test_trainer_core.py",
@@ -66,6 +74,8 @@ FAST_FILES = (
     "tests/miner/test_hardware_class.py",
     "tests/miner/test_client_network_v2.py",
     "tests/miner/test_multigpu_cli.py",
+    "tests/miner/test_coldkey_ops.py",
+    "tests/challenge/test_trial_export.py",
 )
 FAST_SLOW_TESTS = (
     "tests/data/test_parts.py::test_oversize_input_never_publishes_index",
