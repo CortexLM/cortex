@@ -94,6 +94,8 @@ with a validator hotkey and consensus seed:
 | `BASE_VERSION_KEY` | Exact live subnet validator version key |
 | `BASE_MIN_PEER_SAMPLE` | Required independent permitted-validator peer sample, 0-64 |
 | `BASE_MAX_BLOCK_LAG` | Maximum age of a sealed metagraph block, at least 1 |
+| `BASE_VALIDATOR_IDENTITY_DIR` | Verify-only role identity directory: `tls.crt`, `tls.key`, no `consensus.key` |
+| `BASE_WEIGHT_SETTER_IDENTITY_DIR` | Weight-setter identity directory: `consensus.key`, `tls.crt`, `tls.key`; must differ from the verify-only one |
 
 The version key is intentionally blank in the example. Populate it from the live
 subnet; do not infer it from tests. The CLI flags `--wallet-name` and

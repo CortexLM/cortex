@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   protection restarts from the first profile it is served. To keep them, stop the
   old role and copy its volume first; see the
   [validator upgrade note](deploy/README.md#upgrading-from-the-single-validator-role).
+- `role-weight-setter.yml` reads its identity directory from the new, required
+  `BASE_WEIGHT_SETTER_IDENTITY_DIR` instead of `BASE_VALIDATOR_IDENTITY_DIR`,
+  which is now the verify-only role's alone. Set it in
+  `deploy/env/python-validator.env` to the directory holding `consensus.key`,
+  `tls.crt` and `tls.key`, and point `BASE_VALIDATOR_IDENTITY_DIR` at a
+  separate directory without `consensus.key`; `scripts/check_deploy.py` refuses
+  one path, or one state volume, for both roles.
 
 ### Upgrade (BREAKING for masters)
 

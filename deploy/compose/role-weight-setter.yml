@@ -66,7 +66,7 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${BASE_VALIDATOR_IDENTITY_DIR:?Set private validator identity directory}
+        source: ${BASE_WEIGHT_SETTER_IDENTITY_DIR:?Set the weight-setter identity directory, not the verify-only one}
         target: /run/validator
         read_only: true
         bind:

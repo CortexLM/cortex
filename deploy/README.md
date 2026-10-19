@@ -169,8 +169,11 @@ credential-free `wss://` URLs.
 
 The weight-setter mounts the wallet directory read-only at `/run/wallets`; the
 verify-only role mounts none. The weight-setter's identity directory contains
-the files below; the verify-only role reads only `tls.crt` and `tls.key`, so give
-it a separate directory without `consensus.key`:
+the files below and is set with `BASE_WEIGHT_SETTER_IDENTITY_DIR`; the verify-only
+role reads only `tls.crt` and `tls.key` from its own `BASE_VALIDATOR_IDENTITY_DIR`,
+a separate directory without `consensus.key`. `scripts/check_deploy.py` refuses
+the same path for both roles. Both variables live in the one
+`deploy/env/python-validator.env` passed with `--env-file`:
 
 ```text
 consensus.key
@@ -218,8 +221,10 @@ Before this release `role-validator.yml` held the wallet and submitted. It is no
 verify-only: after the upgrade it keeps running, stays healthy and sets no weights.
 It ignores `BASE_WALLET_NAME`, `BASE_WALLET_HOTKEY`, `BASE_VALIDATOR_WALLETS_DIR`
 and the `consensus.key` in its identity directory (`BASE_GATEWAY_HOTKEY` is removed).
-To keep setting weights, move to `role-weight-setter.yml`, whose state volume
-`base-weight-setter-state` is new. Started empty, the weight-setter has no
+To keep setting weights, move to `role-weight-setter.yml`: set
+`BASE_WEIGHT_SETTER_IDENTITY_DIR` to the old identity directory (with
+`consensus.key`) and give `BASE_VALIDATOR_IDENTITY_DIR` a new directory with only
+`tls.crt` and `tls.key`. Its state volume `base-weight-setter-state` is new. Started empty, the weight-setter has no
 submission journal and no consensus watermarks: rollback protection restarts
 from the first profile `/v1/trust` serves it, and it does not know the epochs the
 old role already submitted (the chain rate-limit preflight still refuses a second

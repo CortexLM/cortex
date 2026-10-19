@@ -916,6 +916,7 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         "BASE_VALIDATOR_WALLETS_DIR",
         "BASE_CONFIG_DIR",
         "BASE_VALIDATOR_IDENTITY_DIR",
+        "BASE_WEIGHT_SETTER_IDENTITY_DIR",
         "BASE_VALIDATOR_BIND_ADDRESS",
     }
     if set(validator) != validator_required:
@@ -947,6 +948,22 @@ def validate_env_examples(master_source: str, validator_source: str) -> None:
         raise ValueError("validator example contains unsafe network settings")
     _chain_endpoint(validator["BASE_CHAIN_ENDPOINT"], "validator chain endpoint")
     _wss_endpoints(validator["BASE_CHAIN_FALLBACK_ENDPOINTS"], "validator fallback endpoints")
+
+
+def validate_role_separation(validator: dict, weight_setter: dict) -> None:
+    """The verify-only role must not read the weight-setter's identity or journal."""
+
+    def sources(config: dict) -> dict[str, str]:
+        mounts = config["services"][ROLES["validator"]]["volumes"]
+        return {item["target"]: str(item.get("source", "")) for item in mounts}
+
+    verify_only, setter = sources(validator), sources(weight_setter)
+    identity = "/run/validator"
+    if os.path.normpath(verify_only[identity]) == os.path.normpath(setter[identity]):
+        raise ValueError("validator and weight-setter must use separate identity directories")
+    state = "/var/lib/base"
+    if verify_only[state] and verify_only[state] == setter[state]:
+        raise ValueError("validator and weight-setter must use separate state volumes")
 
 
 def _bind_sources(role: str, compose_dir: Path = ROOT / "deploy/compose") -> None:
@@ -1018,7 +1035,8 @@ def check_examples() -> None:
             "BASE_WALLET_HOTKEY": "validator",
             "BASE_VERSION_KEY": "1",
             "BASE_VALIDATOR_BIND_ADDRESS": "127.0.0.2",
-            "BASE_VALIDATOR_IDENTITY_DIR": "/fixture/identity",
+            "BASE_VALIDATOR_IDENTITY_DIR": "/fixture/verify-only-identity",
+            "BASE_WEIGHT_SETTER_IDENTITY_DIR": "/fixture/weight-setter-identity",
         }
     )
     # The runner's Compose still stats the default `env_file` even under
@@ -1038,6 +1056,7 @@ def check_examples() -> None:
 
 
 def _render_examples(env: dict[str, str]) -> None:
+    rendered = {}
     for role in ("master", "validator", "weight-setter"):
         result = subprocess.run(
             [
@@ -1063,6 +1082,8 @@ def _render_examples(env: dict[str, str]) -> None:
         validate_compose(config, role)
         _bind_sources(role)
         _default_sources(config, role)
+        rendered[role] = config
+    validate_role_separation(rendered["validator"], rendered["weight-setter"])
 
 
 def main() -> None:

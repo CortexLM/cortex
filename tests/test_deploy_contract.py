@@ -636,3 +636,45 @@ def test_committed_bind_mounts_opt_out_of_host_path_creation(role, tmp_path):
 
     with pytest.raises(ValueError, match="bind paths must already exist"):
         CHECK["_bind_sources"](role, tmp_path)
+
+
+def identity_source(config, source):
+    for mount in config["services"]["validator"]["volumes"]:
+        if mount["target"] == "/run/validator":
+            mount["source"] = source
+    return config
+
+
+@pytest.mark.parametrize(
+    ("validator_dir", "setter_dir"),
+    [("/fixture/identity", "/fixture/identity"), ("/fixture/identity", "/fixture/x/../identity")],
+)
+def test_deploy_check_refuses_one_identity_dir_for_both_validator_roles(validator_dir, setter_dir):
+    with pytest.raises(ValueError, match="identity"):
+        CHECK["validate_role_separation"](
+            identity_source(validator_config(), validator_dir),
+            identity_source(weight_setter_config(), setter_dir),
+        )
+
+
+def test_deploy_check_refuses_one_state_volume_for_both_validator_roles():
+    validator = identity_source(validator_config(), "/fixture/verify-only")
+    setter = identity_source(weight_setter_config(), "/fixture/weight-setter")
+    for config in (validator, setter):
+        for mount in config["services"]["validator"]["volumes"]:
+            if mount["target"] == "/var/lib/base":
+                mount["source"] = "shared-state"
+    with pytest.raises(ValueError, match="state"):
+        CHECK["validate_role_separation"](validator, setter)
+
+
+def test_deploy_check_accepts_separate_identity_dirs_and_the_roles_use_distinct_variables():
+    CHECK["validate_role_separation"](
+        identity_source(validator_config(), "/fixture/verify-only"),
+        identity_source(weight_setter_config(), "/fixture/weight-setter"),
+    )
+    validator = (ROOT / "deploy/compose/role-validator.yml").read_text()
+    setter = (ROOT / "deploy/compose/role-weight-setter.yml").read_text()
+    assert "${BASE_VALIDATOR_IDENTITY_DIR:?" in validator
+    assert "${BASE_WEIGHT_SETTER_IDENTITY_DIR:?" in setter
+    assert "BASE_VALIDATOR_IDENTITY_DIR" not in setter
