@@ -870,6 +870,19 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     return a
 
 
+def _mask_remote_env(argv) -> str:
+    """argv for the journal with every --remote-env VALUE hidden (KEY=***)."""
+    out, hide = [], False
+    for tok in argv:
+        if hide:
+            tok, hide = tok.partition("=")[0] + "=***", False
+        elif tok == "--remote-env":
+            hide = True
+        elif tok.startswith("--remote-env="):
+            tok = "--remote-env=" + tok.partition("=")[2].partition("=")[0] + "=***"
+        out.append(tok)
+    return shlex.join(out)
+
 def main(
     argv: list[str] | None = None,
     harness: type[Harness] = Harness,
@@ -906,7 +919,7 @@ def main(
         dry_run=a.dry_run,
         max_usd=a.max_usd,
         max_minutes=a.max_minutes,
-        argv=shlex.join(sys.argv[1:] if argv is None else argv),
+        argv=_mask_remote_env(sys.argv[1:] if argv is None else argv),
         pid=os.getpid(),
     )
     try:

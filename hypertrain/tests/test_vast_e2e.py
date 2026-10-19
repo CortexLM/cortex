@@ -773,3 +773,11 @@ def test_pagination_keeps_an_existing_price_ceiling(fake, tmp_path, monkeypatch)
     run(fake, tmp_path, "--dry-run")  # refuses (page of one stalls); only the queries matter
     assert len(fake.queries) > 1 and fake.queries[1]["dph_total"]["gte"] == 0.01
     assert all(q["dph_total"].get("lte") == 0.7 for q in fake.queries)
+
+
+def test_journal_argv_never_holds_a_remote_env_value():
+    masked = vast._mask_remote_env(
+        ["--remote-env", "TOK=hunter2", "--remote-env=B=s3cret", "--dry-run"]
+    )
+    assert "hunter2" not in masked and "s3cret" not in masked
+    assert "TOK=***" in masked and "B=***" in masked and "--dry-run" in masked

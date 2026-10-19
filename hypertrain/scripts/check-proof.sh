@@ -11,6 +11,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 budget="${CHECK_PROOF_BUDGET_SECONDS:-600}"
 # Reasons (extended regex) of skips that do not weaken a proof: the optional full-grid artifact.
+# Matched against the reason only (after "SKIPPED [n] file:line: "), anchored at both ends.
 ALLOWED_SKIPS="${CHECK_PROOF_ALLOWED_SKIPS:-full grid summary not produced yet}"
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
@@ -32,9 +33,10 @@ for suite in "${suites[@]}"; do
   fi
   s=$(date +%s%N)
   rc=0
-  timeout -k 5 "$(( (left_ms + 999) / 1000 ))" uv run --frozen python -m pytest -q -rs \
-    -p no:cacheprovider -m "not od" --durations=5 "$suite" "$@" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
-  if unexpected=$(grep '^SKIPPED' "$log" | grep -Ev -- "$ALLOWED_SKIPS"); then
+  PY_COLORS=0 NO_COLOR=1 timeout -k 5 "$(( (left_ms + 999) / 1000 ))" uv run --frozen python -m pytest -q -rs \
+    --color=no -p no:cacheprovider -m "not od" --durations=5 "$suite" "$@" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
+  if unexpected=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep '^SKIPPED' \
+      | grep -Ev -- "^SKIPPED \[[0-9]+\] [^ ]+:[0-9]+: (${ALLOWED_SKIPS})\$"); then
     printf 'check-proof: unexpected skip in %s:\n%s\n' "$suite" "$unexpected" >&2
     [ "$rc" -ne 0 ] || rc=1
   fi
