@@ -3,7 +3,8 @@
 Flow: credit check -> offer search -> worst-case cost admission -> ONE create -> ssh ready ->
 upload current tree -> scripts/vast_e2e_remote.sh -> rescue /workspace/out -> DELETE -> parsed
 absence. A watchdog thread fires at the wall deadline (minus the cleanup reserve) and runs the
-same rescue+delete. Every provider call is journaled. `--dry-run` stops after the cost calc.
+same rescue+delete. Every provider call is journaled. `--dry-run` stops after the cost calc: it
+makes read-only GET calls (users/current, up to OFFER_PAGES offer pages), never a PUT/DELETE.
 The API key is read from --key-file and never printed or journaled.
 """
 
@@ -314,7 +315,10 @@ class Harness:
                 why = f"; search stopped after {OFFER_PAGES} pages of {limit}: "
                 why += "cheaper-first market not exhausted"
             # gte, not gt: offers at the boundary price may continue on the next page.
-            query = {**query, "dph_total": {"gte": float(max(prices))}}
+            # An existing dph_total bound (lte, or a higher gte) is kept, only the floor moves.
+            bound = query.get("dph_total", {})
+            floor = max(float(max(prices)), bound.get("gte", 0.0))
+            query = {**query, "dph_total": {**bound, "gte": floor}}
         if not fit:
             alone = 0  # offers a qualified driver would have made eligible
             if ALLOWED_DRIVERS is not None:
@@ -695,7 +699,7 @@ class Harness:
         return {
             "image": IMAGE,
             "remote_script": self.a.remote_script,
-            "remote_env": self.a.remote_env,
+            "remote_env": [kv.partition("=")[0] + "=***" for kv in self.a.remote_env],
             "steps": [f"{name}: {what}" for name, what in PROOF_PLAN],
             "tests": list(PROOF_TESTS),
             "caps": {
@@ -745,7 +749,12 @@ class Harness:
         if not self.result.get("absent"):
             print(f"ALERT: instance {self.instance_id} absence NOT confirmed", file=sys.stderr)
             return 3
-        return 0 if self.result["remote_ok"] else 1
+        if not self.result["remote_ok"]:
+            return 1
+        if self.a.profile == "proofs" and not self.result.get("driver_qualified"):
+            print("proofs passed on a driver outside QUALIFIED_DRIVERS: exit 4", file=sys.stderr)
+            return 4  # ran fine, but a bitwise-replay claim is not backed by a qualified driver
+        return 0
 
 
 def parse(argv: list[str] | None = None) -> argparse.Namespace:

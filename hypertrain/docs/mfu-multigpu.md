@@ -91,7 +91,7 @@ uv run --frozen python scripts/vast_e2e.py --profile proofs --key-file /var/lib/
 ```
 
 `--dry-run` prints the chosen offer, then the step list (`PROOF_PLAN`), the pytest node ids
-(`PROOF_TESTS`), the caps and the worst-case cost, without creating anything. Steps: the
+(`PROOF_TESTS`), the caps and the worst-case cost, without creating anything (it does make read-only GET calls: credit and up to 8 offer pages). `remote_env` is printed with values masked (`KEY=***`). A real run exits 4 when it passed on a driver outside `QUALIFIED_DRIVERS`: the result is valid but backs no bitwise-replay claim. Steps: the
 gpu-e2e flow (network round, auditor replay, repeat; `HT_ATTN_BACKEND=math` because the fixture
 model is fp32 with head_dim 4), then with `HT_ATTN_BACKEND` unset: `select_backend` must pick
 sdpa-flash, the GPU-only tests (a skip fails), and a 1B bf16 dp2 round plus replay through

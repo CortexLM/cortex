@@ -673,7 +673,7 @@ def test_proofs_dry_run_prints_plan_with_unqualified_driver(fake, tmp_path, caps
     assert [s.split(":")[0] for s in plan["steps"]] == [n for n, _ in vast.PROOF_PLAN]
     assert plan["tests"] == list(vast.PROOF_TESTS) and "@sha256:" in plan["image"]
     assert plan["caps"]["boot_retries"] == 0 and plan["caps"]["num_gpus"] == 2
-    assert f"HT_E2E_PROOFS={' '.join(vast.PROOF_STEPS)}" in plan["remote_env"]
+    assert "HT_E2E_PROOFS=***" in plan["remote_env"] and "HT_E2E_GPUS=***" in plan["remote_env"]
     assert plan["worst_case_usd"] == chosen["chosen_offer"]["worst_case_usd"]
 
 
@@ -709,7 +709,9 @@ def test_proofs_run_records_driver_qualified_false(fake, tmp_path, mfu_globals):
     fake.offers = lambda: [o | {"driver_version": "610.57.04"} for o in offers()]
     rc, _, _ = run(fake, tmp_path, "--profile", "proofs", minutes="45", usd="8")
     result = json.loads((tmp_path / "ev/harness-result.json").read_text())
-    assert rc == 0 and result["driver_qualified"] is False and result["absent"] is True
+    # ran fine and cleaned up, but the exit code does not claim a qualified-driver pass
+    assert rc == 4 and result["remote_ok"] is True
+    assert result["driver_qualified"] is False and result["absent"] is True
 
 
 def test_driver_qualified_follows_the_fallback_host(fake, tmp_path, mfu_globals):
@@ -736,7 +738,7 @@ def test_driver_qualified_follows_the_fallback_host(fake, tmp_path, mfu_globals)
         usd="8",
     )
     result = json.loads((tmp_path / "ev/harness-result.json").read_text())
-    assert rc == 0 and fake.asks == ["/api/v0/asks/12/", "/api/v0/asks/11/"]
+    assert rc == 4 and fake.asks == ["/api/v0/asks/12/", "/api/v0/asks/11/"]
     assert result["driver_qualified"] is False
 
 
@@ -751,3 +753,23 @@ def test_proof_steps_and_tests_exist():
 def test_remote_env_must_be_key_value(tmp_path):
     with pytest.raises(SystemExit):
         vast.parse(["--key-file", "k", "--max-usd", "1", "--max-minutes", "1", "--remote-env", "X"])
+
+
+def test_dry_run_only_reads_and_masks_remote_env_values(fake, tmp_path, capsys, mfu_globals):
+    rc, _, _ = run(
+        fake, tmp_path, "--profile", "proofs", "--dry-run", "--remote-env", "TOK=hunter2",
+        minutes="45", usd="8",
+    )  # fmt: skip
+    out = capsys.readouterr().out
+    assert rc == 0 and "hunter2" not in out and "TOK=***" in out
+    assert fake.calls and {m for m, _ in fake.calls} == {"GET"}
+
+
+def test_pagination_keeps_an_existing_price_ceiling(fake, tmp_path, monkeypatch):
+    base = vast.offer_query
+    monkeypatch.setattr(
+        vast, "offer_query", lambda: {**base(), "limit": 1, "dph_total": {"lte": 0.7}}
+    )
+    run(fake, tmp_path, "--dry-run")  # refuses (page of one stalls); only the queries matter
+    assert len(fake.queries) > 1 and fake.queries[1]["dph_total"]["gte"] == 0.01
+    assert all(q["dph_total"].get("lte") == 0.7 for q in fake.queries)
