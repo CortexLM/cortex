@@ -154,6 +154,17 @@ never claims its epoch in the journal and never creates an extrinsic. It exits
 successfully only for the exact `verified` outcome; unsealed, changed, degraded
 or peer-unavailable states return a nonzero process status.
 
+Without a hotkey, verify-only logs `preflight=skipped`: it does **not** check
+hotkey registration, validator permit or the weight rate limit, so `verified`
+proves the seal, not that this hotkey can submit. Before the first submission,
+run verify-only once more with `--wallet-name` and `--wallet-hotkey` (both or
+neither; one alone is refused): it then runs the full chain preflight of a
+submission (registered on the netuid, validator permit, rate limit elapsed,
+chain weight limits) without submitting, and a refusal is
+`chain_preflight_failed`. Start the submitting validator only after that run is
+`verified`; it has no submission-off switch. A hotkey file that cannot be read
+stops the process at startup.
+
 For Compose use the Python
 [validator environment example](../../deploy/env/python-validator.env.example)
 with the verify-only [validator role](../../deploy/compose/role-validator.yml) (no

@@ -196,6 +196,20 @@ reports `validator outcome=verified` for the same root/vector from historical
 chain state. The unsealed UID0 fallback is a readiness failure, not a weight to
 submit.
 
+`outcome=verified` from the hotkey-less role says nothing about the hotkey: it
+logs `preflight=skipped` and does not check hotkey registration, validator permit
+or the weight rate limit. There is no submission-off switch on the weight-setter,
+so check the hotkey before starting it, on the weight-setter host:
+
+1. Run `WALLET_NAME=... WALLET_HOTKEY=... scripts/run-validator.sh --verify-only`
+   (or `cortex validator --verify-only --once` with `--wallet-name`,
+   `--wallet-hotkey` and `--wallet-path`). With a hotkey, verify-only runs the same
+   chain preflight as a submission and never submits: the hotkey must be
+   registered on the netuid, hold a validator permit, have its weight rate limit
+   elapsed (`blocks_since_last_update > weights_rate_limit`) and the chain limits
+   must accept the sealed vector. A refusal prints `chain_preflight_failed`.
+2. Only then start `role-weight-setter.yml`.
+
 To run a validator without Compose, use `scripts/run-validator.sh` from a
 repository clone. It needs `WALLET_NAME` and `WALLET_HOTKEY` only to submit weights
 (`--verify-only` needs neither), reads the

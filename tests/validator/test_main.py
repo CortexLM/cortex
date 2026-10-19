@@ -247,3 +247,17 @@ def test_weight_setter_with_a_missing_hotkey_file_fails_at_startup(monkeypatch, 
     with pytest.raises(SystemExit, match="hotkey unreadable") as refused:
         validator_main.main(arguments)
     assert "default" not in str(refused.value) and "wallets" not in str(refused.value)
+
+
+def test_verify_only_without_hotkey_logs_that_the_chain_preflight_is_skipped(
+    monkeypatch, tmp_path, caplog
+):
+    fake_chain_modules(monkeypatch)
+
+    async def verified(arguments, subtensor, wallet):
+        return TickResult("verified")
+
+    monkeypatch.setattr(validator_main, "run", verified)
+    validator_main.main([*without_hotkey(tmp_path), "--verify-only", "--once"])
+    assert "preflight=skipped" in caplog.text
+    assert "validator permit" in caplog.text

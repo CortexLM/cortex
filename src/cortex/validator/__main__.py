@@ -272,6 +272,11 @@ def main(argv: list[str] | None = None) -> None:
                 raise SystemExit(
                     f"validator hotkey unreadable under --wallet-path: {type(error).__name__}"
                 ) from None
+    elif arguments.verify_only:
+        logging.warning(
+            "validator preflight=skipped: no hotkey, so registration, validator permit "
+            "and weight rate limit are not checked"
+        )
     subtensor = Subtensor(
         network=arguments.network, fallback_endpoints=arguments.fallback_endpoints
     )
