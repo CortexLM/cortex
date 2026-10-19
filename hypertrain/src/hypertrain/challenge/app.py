@@ -543,6 +543,11 @@ def create_app(
             raise ChallengeError(422, "expected dataset object linkage")
         return await run(store.for_run(run_id).configure_inputs_v2, run_id, data)
 
+    @app.post("/v2/runs/{run_id}/admin/trial/{admission_id}/export")
+    async def export_trial_v2(run_id: str, admission_id: str, authorization: Auth = None) -> Any:
+        admin(authorization)
+        return await run(store.for_run(run_id).export_trial_v2, run_id, admission_id)
+
     @app.post("/v2/runs/{run_id}/admin/genesis")
     async def genesis_v2(run_id: str, request: Request, authorization: Auth = None) -> Any:
         admin(authorization)
