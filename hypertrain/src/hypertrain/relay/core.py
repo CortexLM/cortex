@@ -8,6 +8,7 @@ is authoritative. Missing master routes leave forwarding pending, never accepted
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -508,6 +509,12 @@ class Relay:
                 except httpx.HTTPError:
                     # Exact failure recorded by complete; custody remains retrievable.
                     continue
+                except (OSError, ValueError) as error:
+                    # Retriable (TimeoutError, ValidationError, SignatureError, I/O): record
+                    # nothing terminal so a later recover() tries again; never log payloads.
+                    logging.getLogger(__name__).warning(
+                        "relay recover deferred: %s", type(error).__name__
+                    )
 
     def _scope(self, record: UploadRecord, hashes: list[str]) -> list[Pin]:
         if (

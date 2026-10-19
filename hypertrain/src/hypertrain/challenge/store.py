@@ -5697,6 +5697,7 @@ class ChallengeStore:
             has_full_custody,
         )
         from hypertrain.relay.client import RelayClient
+        from hypertrain.relay.core import RelayError
 
         with self._tx(notify=True):
             manifest = self._run_v2(run_id)
@@ -5878,12 +5879,14 @@ class ChallengeStore:
                     payload.seek(0)
                     recovered.extend(payload.read())
                     responses.append((request_raw, response))
-        except httpx.HTTPError:
+        except (httpx.HTTPError, CorruptObjectError, RelayError, SignatureError, TimeoutError):
             unavailable = True
         if unavailable:
             # Two pinned observers proved the contractual failure and the relay cannot serve
-            # its own signed custody either: a dead relay. Bytes that are served but hash
-            # wrong (422 below) can be miner framing and never disable.
+            # its own signed custody either: no response, a bad signature or binding, a
+            # timeout, or a chunk whose bytes miss its signed, miner-committed hash. Only
+            # valid chunks that concatenate to the wrong delta (422 below) can be miner
+            # framing, so that path never disables.
             with self._tx():
                 self._snapshot_current_v2(manifest)
                 disable()
@@ -9737,6 +9740,7 @@ class ChallengeStore:
                 (run_id, "%:" + env.signer),
             ).fetchall()
             eligible = []
+            held = False
             for row in assignments:
                 assignment_env = relay_envelope.parse_envelope(json.loads(row["data"]))
                 a = RelayAssignment.model_validate(assignment_env.body)
@@ -9799,6 +9803,7 @@ class ChallengeStore:
                 )
                 if expected == chunk:
                     eligible.append(a)
+                    held = True
             if len(eligible) != 1:
                 raise ChallengeError(409, "one current signed relay assignment required")
             assignment = eligible[0]
@@ -9824,7 +9829,8 @@ class ChallengeStore:
             if chunk.size != commit["delta_bytes"]:
                 raise ChallengeError(422, "grant size differs from accepted commit")
             # One live grant per assignment: a retry gets the stored grant, another chunk
-            # list waits for expiry. Without the original, the list is miner-chosen.
+            # list waits for expiry. Without the original, the list is miner-chosen; with
+            # it, this list was just proven honest and replaces any other live grant.
             for (stored,) in self._db.execute(
                 "SELECT data FROM records_v2 WHERE run_id=? AND kind='grant' "
                 "AND json_extract(data,'$.body.w')=? AND json_extract(data,'$.body.hotkey')=? "
@@ -9842,6 +9848,8 @@ class ChallengeStore:
             ):
                 live = json.loads(stored)
                 if live["body"]["chunk_manifest_hash"] != chunk.chunk_manifest_hash():
+                    if held:
+                        continue
                     raise ChallengeError(409, "live upload grant binds another chunk list")
                 return live
             grant = UploadGrant(
