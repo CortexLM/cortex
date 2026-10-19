@@ -4147,3 +4147,119 @@ def test_network_miner_upload_grant_sends_accepted_commit_body_subject(
         with pytest.raises(CapturedSubject):
             actor.run_round(1)
     assert json.loads(canonicalize(saved["commit"]))["body"]["w"] == 1
+
+
+def test_upload_grant_one_live_grant_when_original_unheld(network):
+    from hypertrain.protocol import relay_envelope
+    from hypertrain.protocol.messages_v2 import CommitV2
+    from hypertrain.protocol.relay_messages import (
+        RelayAssignment,
+        RelayNetworkManifest,
+        UploadChunk,
+        UploadChunkManifest,
+    )
+
+    assert network.join().status_code == 200
+    run_id = network.manifest.run_id()
+    registry = network.store._registry_v2(network.manifest)
+    relay_net = RelayNetworkManifest(
+        run_id=run_id,
+        base_manifest_hash=network.manifest.training.training_hash(),
+        registry_hash=registry.digest(),
+        specs_hash=sha256_hex(canonicalize([s.body() for s in registry.specs])),
+        assignment_policy="master-observed-median3-v1",
+    )
+    payload = b"a" * (4 << 20) + b"b"
+    assignment = RelayAssignment(
+        w=0,
+        hotkey=HOT[0].ss58,
+        primary_id="local",
+        fallback_ids=[],
+        assignment_epoch=0,
+        manifest_hash=relay_net.digest(),
+        exp_drand=552,
+    )
+    commit = CommitV2.model_validate(
+        {
+            "w": 0,
+            "hotkey": HOT[0].ss58,
+            "leaf_scheme": "ht-leaf-v1",
+            "n_leaves": 2,
+            "leaves_root": "01" * 32,
+            "metrics_root": "02" * 32,
+            "final_theta_hash": "03" * 32,
+            "tokens": 8,
+            "ef_in_hash": "04" * 32,
+            "ef_out_hash": "05" * 32,
+            "delta_hash": sha256_hex(payload),
+            "delta_bytes": len(payload),
+        }
+    )
+    with network.store._tx():
+        network.store._put_record_v2(
+            run_id,
+            "relay-assignment",
+            f"0:{HOT[0].ss58}",
+            relay_envelope.seal(COORD, "RelayAssignment", run_id, assignment, 552),
+        )
+        network.store._put_record_v2(
+            run_id, "commit", f"0:{HOT[0].ss58}", network.signed(HOT[0], "CommitV2", commit)
+        )
+    network.push(385)
+
+    def manifest(data):
+        return UploadChunkManifest(
+            size=len(data),
+            chunks=[
+                UploadChunk(index=0, off=0, len=4 << 20, chunk_sha256=sha256_hex(data[:-1])),
+                UploadChunk(index=1, off=4 << 20, len=1, chunk_sha256=sha256_hex(data[-1:])),
+            ],
+        )
+
+    def request(chunks, expiry=583):
+        return network.client.post(
+            network.url + "/upload-grant",
+            json=relay_envelope.seal(HOT[0], "UploadChunkManifest", run_id, chunks, expiry),
+        )
+
+    def grants():
+        return network.store._db.execute(
+            "SELECT COUNT(*) FROM records_v2 WHERE kind='grant'"
+        ).fetchone()[0]
+
+    # An expired grant for another list (e.g. a past attempt) never blocks a new one.
+    stale = manifest(b"x" * (4 << 20) + b"y")
+    with network.store._tx():
+        network.store._put_record_v2(
+            run_id,
+            "grant",
+            "ee" * 32,
+            {
+                "body": {
+                    "w": 0,
+                    "hotkey": HOT[0].ss58,
+                    "relay_id": "local",
+                    "assignment_epoch": 0,
+                    "chunk_manifest_hash": stale.chunk_manifest_hash(),
+                    "exp_drand": 385,
+                }
+            },
+        )
+    first = request(manifest(payload))
+    assert first.status_code == 200, first.text
+    # Honest retry (fresh miner signature, same chunk list): same signed grant, no new row.
+    retry = request(manifest(payload), expiry=584)
+    assert retry.status_code == 200, retry.text
+    assert retry.json() == first.json() and grants() == 2
+    forged = request(stale)
+    assert forged.status_code == 409, forged.text
+    assert "another chunk list" in forged.text and grants() == 2
+    # Concurrent retries serialize on the store transaction: one grant for both.
+    from concurrent.futures import ThreadPoolExecutor
+
+    raw = canonicalize(
+        relay_envelope.seal(HOT[0], "UploadChunkManifest", run_id, manifest(payload), 590)
+    )
+    with ThreadPoolExecutor(2) as pool:
+        both = list(pool.map(lambda _: network.store.upload_grant_v2(run_id, raw), range(2)))
+    assert both == [first.json(), first.json()] and grants() == 2

@@ -9800,6 +9800,27 @@ class ChallengeStore:
             commit = self._record_v2(run_id, "commit", f"{assignment.w}:{env.signer}")["body"]
             if chunk.size != commit["delta_bytes"]:
                 raise ChallengeError(422, "grant size differs from accepted commit")
+            # One live grant per assignment: a retry gets the stored grant, another chunk
+            # list waits for expiry. Without the original, the list is miner-chosen.
+            for (stored,) in self._db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='grant' "
+                "AND json_extract(data,'$.body.w')=? AND json_extract(data,'$.body.hotkey')=? "
+                "AND json_extract(data,'$.body.relay_id')=? "
+                "AND json_extract(data,'$.body.assignment_epoch')=? "
+                "AND json_extract(data,'$.body.exp_drand')>?",
+                (
+                    run_id,
+                    assignment.w,
+                    env.signer,
+                    assignment.primary_id,
+                    assignment.assignment_epoch,
+                    now,
+                ),
+            ):
+                live = json.loads(stored)
+                if live["body"]["chunk_manifest_hash"] != chunk.chunk_manifest_hash():
+                    raise ChallengeError(409, "live upload grant binds another chunk list")
+                return live
             grant = UploadGrant(
                 w=assignment.w,
                 hotkey=env.signer,
