@@ -893,6 +893,39 @@ def test_cli_watermark_reset_never_mutates_a_foreign_state_file(tmp_path, kind):
     assert snapshot_file(state) == before
 
 
+@pytest.mark.parametrize("schema", ["foreign", "validator"])
+def test_watermark_reset_preflight_leaves_no_shm(network, tmp_path, schema):
+    import shutil
+    import sqlite3
+
+    network.journal.evidence.watermark("epoch", 12)
+    network.journal.close()
+    live = tmp_path / "live" / "state.db"
+    live.parent.mkdir()
+    if schema == "validator":
+        shutil.copy(network.db_path, live)
+    writer = sqlite3.connect(live)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE notes (body TEXT)")
+    writer.execute("INSERT INTO notes VALUES ('only in the wal')")
+    writer.commit()
+    # A copy taken while the writer is open is a crash image: an orphan -wal and no -shm.
+    state = tmp_path / "orphan" / "state.db"
+    state.parent.mkdir()
+    for suffix in ("", "-wal"):
+        shutil.copy(live.with_name(live.name + suffix), state.with_name(state.name + suffix))
+    writer.close()
+
+    def listing():
+        return sorted((item.name, item.stat().st_mtime_ns) for item in state.parent.iterdir())
+
+    before = listing()
+    # The validator row is behind the orphan -wal's frames for "foreign", ahead of them otherwise.
+    with pytest.raises(SystemExit):
+        reset(state, "--name", "epoch", "--to", "11", "--netuid", "7", "--confirm")
+    assert listing() == before
+
+
 def test_cli_watermark_reset_reports_a_locked_state_db(network):
     import sqlite3
 

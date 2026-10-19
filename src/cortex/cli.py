@@ -245,17 +245,23 @@ def run_validator_reconcile(args: argparse.Namespace) -> None:
 def _watermark_reset_preflight(args: argparse.Namespace) -> None:
     """Prove the file is a validator journal holding the row, without writing to it."""
     path = args.state_db.resolve()
-    # mode=ro still creates -shm/-wal beside a WAL database. Without a -wal file every
-    # committed page is in the main file, so an immutable read is exact and creates none.
+    # mode=ro still creates -shm (and opens -wal) beside a WAL database, even a foreign one,
+    # so read only the main file. Pages still in a -wal are invisible: a refusal then names
+    # the checkpoint, and the write open below re-checks the real values.
     wal = path.with_name(path.name + "-wal").exists()
-    reader = sqlite3.connect(f"{path.as_uri()}?{'mode=ro' if wal else 'immutable=1'}", uri=True)
+    hint = "; stop the validator so SQLite checkpoints its -wal" if wal else ""
+
+    def refuse(reason: str) -> SystemExit:
+        return SystemExit(f"Cortex command failed: {reason}{hint}")
+
+    reader = sqlite3.connect(f"{path.as_uri()}?immutable=1", uri=True)
     try:
         tables = reader.execute(
             "SELECT count(*) FROM sqlite_master WHERE type='table' "
             "AND name IN ('consensus_watermarks', 'consensus_watermark_resets')"
         ).fetchone()
         if tables[0] != 2:
-            raise SystemExit("Cortex command failed: not a validator state database")
+            raise refuse("not a validator state database")
         rows = dict(
             reader.execute(
                 "SELECT name, value FROM consensus_watermarks WHERE name IN (?, 'netuid')",
@@ -265,12 +271,14 @@ def _watermark_reset_preflight(args: argparse.Namespace) -> None:
     finally:
         reader.close()
     if args.name not in rows:
-        raise SystemExit("Cortex command failed: consensus watermark not set")
+        raise refuse("consensus watermark not set")
     if args.netuid is not None:
+        if "netuid" not in rows and wal:
+            raise refuse("validator journal netuid unreadable")
         if "netuid" not in rows:
             print("state db records no netuid; --netuid check skipped", file=sys.stderr)
         elif rows["netuid"] != str(args.netuid):
-            raise SystemExit("Cortex command failed: validator journal belongs to another subnet")
+            raise refuse("validator journal belongs to another subnet")
 
 
 def run_validator_watermark_reset(args: argparse.Namespace) -> None:
