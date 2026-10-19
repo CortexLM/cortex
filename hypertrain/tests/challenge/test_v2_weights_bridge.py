@@ -19,10 +19,6 @@ network = e2e.network
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason="v2 rewards not bridged to get_weights: store.py:2000 reads only the v1 Ledger",
-)
 def test_v2_matured_reward_reaches_get_weights(network, monkeypatch, tmp_path):
     # Given: the shortest existing flow to a live round 0 that finalize_v2 settles.
     e2e._graduate_four(network)
@@ -60,3 +56,13 @@ def test_v2_matured_reward_reaches_get_weights(network, monkeypatch, tmp_path):
     # Then: the matured v2 reward is paid as weight to its hotkey.
     assert response.status_code == 200, response.text
     assert response.json()["weights"].get(hotkey, 0) > 0, response.text
+    answer = response.json()
+    assert sum(answer["weights"].values()) + answer["metadata"]["units_burned_this_epoch"] == 10**6
+    # And: a replayed request for the same epoch returns the same bytes and pays nothing twice.
+    paid = store._db.execute("SELECT COUNT(*) FROM escrow_events WHERE kind='PAY'").fetchone()[0]
+    again = network.client.get(response.request.url, headers=response.request.headers)
+    assert again.content == response.content
+    assert (
+        store._db.execute("SELECT COUNT(*) FROM escrow_events WHERE kind='PAY'").fetchone()[0]
+        == paid
+    )
