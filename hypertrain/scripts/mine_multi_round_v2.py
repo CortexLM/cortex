@@ -313,6 +313,8 @@ def restart_probes(
     probe["kill_mid_round"] = {
         "killed_after_job_staged": alive and bool(count("island-job", f"{w}:{hot}"))
     }
+    if not probe["kill_mid_round"]["killed_after_job_staged"]:
+        raise RuntimeError("kill probe did not interrupt a staged job")
     try:
         run_v2(stages, configs[0], w, 0)
         probe["kill_mid_round"]["resume"] = "UPLOADED"
