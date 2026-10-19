@@ -346,7 +346,7 @@ class Harness:
 
     def boot(self, offer: dict[str, Any]) -> None:
         """Create + wait for ssh; a vanished offer or a stuck host moves to the next offer."""
-        tried: set[int] = set()
+        tried: set[int | None] = set()
         for attempt in range(1 + int(self.a.boot_retries)):
             tried.add(offer.get("machine_id"))
             try:
