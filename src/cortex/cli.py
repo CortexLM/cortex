@@ -40,11 +40,6 @@ def parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--attempt-id", required=True)
     reconcile.add_argument("--result", choices=("submitted", "not_broadcast"), required=True)
     reconcile.add_argument("--evidence-digest", required=True)
-    keygen = commands.add_parser(
-        "keygen", help="generate an sr25519 seed and public key for a challenge leaf key"
-    )
-    keygen.add_argument("--seed-out", type=Path, required=True)
-    keygen.add_argument("--public-out", type=Path, required=True)
     vm = commands.add_parser("vm-host", help="serve the dedicated Firecracker host")
     vm.add_argument("--config", type=Path, required=True)
     vm.add_argument(
@@ -217,13 +212,6 @@ async def run_master(args: argparse.Namespace) -> None:
         await asyncio.to_thread(close_subtensor, subtensor)
 
 
-def run_keygen(args: argparse.Namespace) -> None:
-    from cortex.keygen import generate_key
-
-    public = generate_key(args.seed_out, args.public_out)
-    print(json.dumps({"public_key": public, "seed_file": str(args.seed_out)}))
-
-
 def run_validator_reconcile(args: argparse.Namespace) -> None:
     from cortex.validator import SubmissionJournal
 
@@ -269,8 +257,6 @@ def main(argv: list[str] | None = None) -> None:
             from cortex.vm.server import serve
 
             serve(args.config)
-        elif args.command == "keygen":
-            run_keygen(args)
         elif args.command == "validator-reconcile":
             run_validator_reconcile(args)
         else:
