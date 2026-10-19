@@ -168,7 +168,9 @@ validator wallet name and hotkey. The HTTPS gateway is the only anchor for the c
 credential-free `wss://` URLs.
 
 The weight-setter mounts the wallet directory read-only at `/run/wallets`; the
-verify-only role mounts none. The validator identity directory contains:
+verify-only role mounts none. The weight-setter's identity directory contains
+the files below; the verify-only role reads only `tls.crt` and `tls.key`, so give
+it a separate directory without `consensus.key`:
 
 ```text
 consensus.key

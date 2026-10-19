@@ -35,9 +35,11 @@ mounts the whole directory read-only at `/run/challenge-secrets` and reads only
 
 ## Validator mounts
 
-The wallet tree is mounted read-only at `/run/wallets`. A separate validator
-identity directory is mounted at `/run/validator` and contains
-`consensus.key`, `tls.crt` and `tls.key`. The validator never receives gateway,
+The weight-setter mounts the wallet tree read-only at `/run/wallets` and a
+separate validator identity directory at `/run/validator` containing
+`consensus.key`, `tls.crt` and `tls.key`. The verify-only role mounts no wallet
+and reads only `tls.crt` and `tls.key` from its identity directory: give it its
+own directory without `consensus.key`, never the weight-setter's. The validator never receives gateway,
 challenge, Proof, operator or provider credentials.
 
 The master holds no gateway or challenge-leaf signing key: bundles and leaves are unsigned (wire v2).
