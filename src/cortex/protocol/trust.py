@@ -11,7 +11,7 @@ from .models import ChallengeEntry, ParticipantPolicy, TrustRoot
 from .scale import ProtocolError, fixed, vector
 
 
-def _policy(value: str | dict) -> ParticipantPolicy:
+def _policy(value: object) -> ParticipantPolicy:
     if value == "all_metagraph_hotkeys":
         return ParticipantPolicy()
     if not isinstance(value, dict):
@@ -22,31 +22,46 @@ def _policy(value: str | dict) -> ParticipantPolicy:
     if kind == "stake_at_least":
         return ParticipantPolicy(1, min_stake=value["min_stake"])
     if kind in ("explicit_allowlist", "all_except_deny_list"):
+        hotkeys = value.get("hotkeys")
+        if not isinstance(hotkeys, list) or not all(isinstance(k, str) for k in hotkeys):
+            raise ProtocolError("participant policy hotkeys must be an array of strings")
         return ParticipantPolicy(
             2 if kind == "explicit_allowlist" else 3,
-            hotkeys=tuple(decode_hotkey(k) for k in value["hotkeys"]),
+            hotkeys=tuple(decode_hotkey(k) for k in hotkeys),
         )
     raise ProtocolError("unknown participant policy")
 
 
+def _row(row: object) -> ChallengeEntry:
+    if not isinstance(row, dict):
+        raise ProtocolError("challenge row must be a table")
+    key, share = row.get("id"), row.get("emission_share_bps")
+    if not isinstance(key, str):
+        raise ProtocolError(f"challenge id must be a string, got {key!r}")
+    if type(share) is not int or not 0 <= share <= 10000:
+        raise ProtocolError(f"emission_share_bps must be an integer in 0..10000, got {share!r}")
+    return ChallengeEntry(key.encode(), share, _policy(row.get("policy")))
+
+
 def challenge_entries(document: dict) -> tuple[ChallengeEntry, ...]:
     """Decode the challenge rows (id, share, participant policy)."""
-    return tuple(
-        ChallengeEntry(
-            row["id"].encode(),
-            row["emission_share_bps"],
-            _policy(row["policy"]),
-        )
-        for row in document["challenges"]
-    )
+    rows = document.get("challenges")
+    if not isinstance(rows, list):
+        raise ProtocolError("challenges must be an array of tables")
+    return tuple(_row(row) for row in rows)
 
 
 def measurements_body(document: dict) -> bytes:
     """Encode the measurement allowlist; its sha256 is the profile's measurements digest."""
     entries = []
-    for row in document.get("measurements", []):
+    rows = document.get("measurements", [])
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ProtocolError("measurements must be an array of tables")
+    for row in rows:
         fields = []
         for name in ("mr_td", "rtmr0", "rtmr1", "rtmr2", "rtmr3", "compose_hash"):
+            if not isinstance(row.get(name), str):
+                raise ProtocolError(f"measurement {name} must be a hex string")
             fields.append(
                 fixed(
                     bytes.fromhex(row[name].removeprefix("0x")),

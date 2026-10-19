@@ -58,13 +58,43 @@ def test_repository_default_profile_loads():
     assert sum(value for _, value in trust.shares) == 10000
 
 
-@pytest.mark.parametrize(
-    ("challenges", "measurements"),
-    [
-        (CHALLENGES.format(epoch='"CHOOSE_ACTIVATION_EPOCH"'), "version = 2\n"),
-        (CHALLENGES.format(epoch="0").replace("version = 3", 'version = "3"'), "version = 2\n"),
-    ],
-)
+GOOD = CHALLENGES.format(epoch="0")
+
+
+def policy(value: str) -> str:
+    return GOOD.replace('policy = "all_metagraph_hotkeys"', f"policy = {value}", 1)
+
+
+MALFORMED = {
+    "epoch-placeholder": (CHALLENGES.format(epoch='"CHOOSE_ACTIVATION_EPOCH"'), "version = 2"),
+    "version-str": (GOOD.replace("version = 3", 'version = "3"'), "version = 2"),
+    "id-int": (GOOD.replace('id = "bounty"', "id = 5"), "version = 2"),
+    "bps-str": (GOOD.replace("= 3000", '= "3000"'), "version = 2"),
+    "bps-bool": (GOOD.replace("= 3000", "= true"), "version = 2"),
+    "bps-range": (GOOD.replace("= 3000", "= 70000"), "version = 2"),
+    "id-missing": (GOOD.replace('id = "bounty"\n', ""), "version = 2"),
+    "bps-missing": (GOOD.replace("emission_share_bps = 3000\n", ""), "version = 2"),
+    "policy-int": (GOOD.replace('policy = "all_metagraph_hotkeys"', "policy = 3"), "version = 2"),
+    "challenges-int": (GOOD.replace("[[challenges]]", "challenges = 1\n[[x]]", 1), "version = 2"),
+    "measurement-int": (GOOD, "version = 2\nmeasurements = [1]"),
+    "measurement-field-int": (GOOD, "version = 2\nmeasurements = [{ mr_td = 1 }]"),
+    "toml-syntax": (GOOD, "version = [2"),
+    "hotkeys-int": (
+        policy('{ type = "explicit_allowlist", hotkeys = 5 }'),
+        "version = 2",
+    ),
+    "hotkey-int": (
+        policy('{ type = "explicit_allowlist", hotkeys = [5] }'),
+        "version = 2",
+    ),
+    "min-stake-str": (
+        policy('{ type = "stake_at_least", min_stake = "x" }'),
+        "version = 2",
+    ),
+}
+
+
+@pytest.mark.parametrize(("challenges", "measurements"), MALFORMED.values(), ids=MALFORMED)
 def test_master_turns_a_placeholder_profile_into_a_clean_503(tmp_path, challenges, measurements):
     from cortex.config import MasterConfig
     from cortex.errors import ServiceError

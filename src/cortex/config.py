@@ -208,5 +208,7 @@ class MasterConfig:
             return load_trust(
                 challenges_path=self.challenges_file, measurements_path=self.measurements_file
             )
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError):
+            # ProtocolError and TOMLDecodeError are ValueErrors; TypeError covers a field
+            # type that slips past the explicit checks in load_trust.
             raise ServiceError(503, "challenge profile unavailable") from None
