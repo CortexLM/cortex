@@ -591,12 +591,12 @@ async def test_executor_api_rotates_or_closes_only_with_operator_auth(setup):
         denied = await client.post("/v1/admin/proof/executor", json=closed.model_dump())
         rotated = await client.post(
             "/v1/admin/proof/executor",
-            headers={"Authorization": "Bearer fixture-operator-token"},
+            headers={"Authorization": "Bearer fixture-operator-token-0123456789abcdef"},
             json=closed.model_dump(),
         )
         forged = await client.post(
             "/v1/admin/proof/executor",
-            headers={"Authorization": "Bearer fixture-operator-token"},
+            headers={"Authorization": "Bearer fixture-operator-token-0123456789abcdef"},
             json=closed.model_copy(update={"machine_shape": "2x"}).model_dump(),
         )
         after = await client.get("/v1/proof/executor")

@@ -91,7 +91,7 @@ deploy/secrets/master/
   proof-vm-ca.pem
 ```
 
-The seed is raw 32 bytes or 64 hexadecimal characters. Nothing else on the master signs: the gateway seals unsigned wire-v2 bundles, so there is no gateway key and no per-challenge leaf key. Bearers are nonempty opaque values. Files are regular,
+The seed is raw 32 bytes or 64 hexadecimal characters. Nothing else on the master signs: the gateway seals unsigned wire-v2 bundles, so there is no gateway key and no per-challenge leaf key. Bearers are opaque values of at least 32 bytes (for example `openssl rand -hex 32`); `operator.token` and `intake.token` must differ, and the master re-checks both on every request, so a rotation that makes them equal answers 503. Files are regular,
 not hardlinks or symlinks, and mode 0400 or 0600. The Proof VM token and CA are
 needed only when `PROOF_VM_ORCHESTRATOR_URL` is set.
 

@@ -83,7 +83,7 @@ def setup(tmp_path):
     backend = FakeVmBoundary()
     vault = FileVault(tmp_path / "vault")
     token = tmp_path / "operator-token"
-    token.write_text("fixture-operator-token")
+    token.write_text("fixture-operator-token-0123456789abcdef")
     token.chmod(0o600)
     service = ProofService(
         store=store,

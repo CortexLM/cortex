@@ -28,12 +28,36 @@ def read_private_file(path: Path, limit: int = 8192) -> str:
         raise ServiceError(503, "credential file unavailable") from None
 
 
+MIN_BEARER_BYTES = 32
+
+
+def read_bearer(path: Path, label: str) -> str:
+    """Read a rotating bearer file; errors name the setting, never the value."""
+    try:
+        value = read_private_file(path)
+    except ServiceError as error:
+        raise ServiceError(error.status, f"{label}: {error.reason}") from None
+    if len(value.encode()) < MIN_BEARER_BYTES:
+        raise ServiceError(503, f"{label}: bearer must be at least {MIN_BEARER_BYTES} bytes")
+    return value
+
+
 class OperatorAuth:
-    def __init__(self, token_file: Path):
-        self.token_file = token_file
+    def __init__(
+        self,
+        token_file: Path,
+        label: str = "BASE_GATEWAY_ADMIN_TOKEN_FILE",
+        distinct_from: tuple[Path, str] | None = None,
+    ):
+        self.token_file, self.label, self.distinct_from = token_file, label, distinct_from
 
     def require(self, request: Request) -> None:
-        expected = read_private_file(self.token_file)
+        expected = read_bearer(self.token_file, self.label)
+        # Both files rotate independently, so the startup distinctness check is not enough.
+        if self.distinct_from is not None and hmac.compare_digest(
+            expected.encode(), read_bearer(*self.distinct_from).encode()
+        ):
+            raise ServiceError(503, "intake and admin bearers must differ")
         supplied = request.headers.get("authorization", "")
         if not hmac.compare_digest(supplied.encode(), ("Bearer " + expected).encode()):
             raise ServiceError(401, "operator bearer required")

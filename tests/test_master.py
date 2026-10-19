@@ -1,5 +1,6 @@
 import asyncio
 import io
+import secrets
 import tarfile
 from dataclasses import replace
 from hashlib import sha256
@@ -96,8 +97,8 @@ def master_config(tmp_path):
         challenges_file=tmp_path / "challenges.toml",
         measurements_file=tmp_path / "measurements.toml",
         proof_seed_file=secret("proof.key", bytes([2]) * 32),
-        operator_token_file=secret("operator.token", b"fixture-operator-token"),
-        intake_token_file=secret("intake.token", b"fixture-intake-token"),
+        operator_token_file=secret("operator.token", b"fixture-operator-token-0123456789abcdef"),
+        intake_token_file=secret("intake.token", b"fixture-intake-token-0123456789abcdef"),
         challenge_secrets_dir=tmp_path / "challenge-secrets",
     )
 
@@ -399,13 +400,15 @@ async def test_private_routes_require_rotating_file_and_master_routes_are_compos
         assert (await client.get("/challenge/bounty/v1/status")).status_code == 404
         drain = "/v1/admin/proof/drain"
         assert (await client.post(drain)).status_code == 401
-        master.config.operator_token_file.write_text("rotated-token")
+        master.config.operator_token_file.write_text("rotated-token-0123456789abcdef-xyz")
         assert (
-            await client.post(drain, headers={"authorization": "Bearer rotated-token"})
+            await client.post(
+                drain, headers={"authorization": "Bearer rotated-token-0123456789abcdef-xyz"}
+            )
         ).status_code != 401
-        raw = {"authorization": "Bearer rotated-token"}
+        raw = {"authorization": "Bearer rotated-token-0123456789abcdef-xyz"}
         assert (await client.post("/v1/weights/raw", json={}, headers=raw)).status_code == 401
-        intake = {"authorization": "Bearer fixture-intake-token"}
+        intake = {"authorization": "Bearer fixture-intake-token-0123456789abcdef"}
         assert (await client.post("/v1/weights/raw", json={}, headers=intake)).status_code == 400
         seal = await client.post("/v1/admin/seal", json={"epoch": 12}, headers=intake)
         assert seal.status_code == 401
@@ -424,7 +427,7 @@ async def test_master_refuses_one_bearer_for_intake_and_sealing(tmp_path, shared
     if shared == "same-file":
         config = replace(config, intake_token_file=config.operator_token_file)
     else:
-        config.intake_token_file.write_bytes(b"fixture-operator-token\n")
+        config.intake_token_file.write_bytes(b"fixture-operator-token-0123456789abcdef\n")
     chain = FakeEpochChain()
     with pytest.raises(ServiceError, match="must differ"):
         await build_master(config, chain=chain, epochs=chain, trust=fixture_trust())
@@ -632,8 +635,8 @@ async def test_intake_bearer_cannot_inject_a_leaf_while_the_epoch_is_being_seale
     from cortex.gateway import leaf_request
 
     runtime, chain = master.runtime, master.chain
-    intake = {"authorization": "Bearer fixture-intake-token"}
-    operator = {"authorization": "Bearer fixture-operator-token"}
+    intake = {"authorization": "Bearer fixture-intake-token-0123456789abcdef"}
+    operator = {"authorization": "Bearer fixture-operator-token-0123456789abcdef"}
     hotkey = chain.rows[0].hotkey
     snapshot, posted = chain.snapshot, []
     async with httpx.AsyncClient(
@@ -672,7 +675,7 @@ async def test_a_failed_seal_reopens_intake_for_its_epoch(master):
     from cortex.gateway import leaf_request
 
     runtime, chain = master.runtime, master.chain
-    intake = {"authorization": "Bearer fixture-intake-token"}
+    intake = {"authorization": "Bearer fixture-intake-token-0123456789abcdef"}
     leaf = leaf_request(Leaf(b"bounty", chain.rows[0].hotkey, 12, Score(7)))
     snapshot, calls, posted = chain.snapshot, [], []
     async with httpx.AsyncClient(
@@ -696,3 +699,64 @@ async def test_a_failed_seal_reopens_intake_for_its_epoch(master):
         assert runtime.gateway.store.bundle(12) is None
         response = await client.post("/v1/weights/raw", json=leaf, headers=intake)
         assert response.status_code == 202
+
+
+def bearer(path, value):
+    path.write_text(value)
+    path.chmod(0o600)
+
+
+async def test_a_rotation_to_one_bearer_is_refused_on_every_private_route(master):
+    shared = secrets.token_hex(32)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(master.runtime.app()), base_url="https://master"
+    ) as client:
+        bearer(master.config.operator_token_file, shared)
+        bearer(master.config.intake_token_file, shared)
+        headers = {"authorization": f"Bearer {shared}"}
+        for path in ("/v1/weights/raw", "/v1/admin/seal", "/v1/admin/proof/drain"):
+            response = await client.post(path, json={}, headers=headers)
+            assert response.status_code == 503, path
+            assert response.json() == {"error": "intake and admin bearers must differ"}
+
+
+@pytest.mark.parametrize(
+    ("which", "label"),
+    [
+        ("operator_token_file", "BASE_GATEWAY_ADMIN_TOKEN_FILE"),
+        ("intake_token_file", "BASE_GATEWAY_INTAKE_TOKEN_FILE"),
+    ],
+)
+async def test_a_short_bearer_is_refused_at_startup_and_after_rotation(tmp_path, which, label):
+    config = master_config(tmp_path)
+    short = secrets.token_hex(15) + "  \n"  # 30 bytes once stripped
+    bearer(getattr(config, which), short)
+    chain = FakeEpochChain()
+    with pytest.raises(ServiceError, match=f"^{label}: bearer must be at least 32 bytes$"):
+        await build_master(config, chain=chain, epochs=chain, trust=fixture_trust())
+
+    (tmp_path / "rotated").mkdir()
+    config = master_config(tmp_path / "rotated")
+    runtime = await build_master(config, chain=chain, epochs=chain, trust=fixture_trust())
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(runtime.app()), base_url="https://master"
+        ) as client:
+            bearer(getattr(config, which), short)
+            headers = {"authorization": f"Bearer {short.strip()}"}
+            path = "/v1/admin/seal" if which == "operator_token_file" else "/v1/weights/raw"
+            response = await client.post(path, json={}, headers=headers)
+            assert response.status_code == 503
+            assert response.json() == {"error": f"{label}: bearer must be at least 32 bytes"}
+            assert short.strip() not in response.text
+    finally:
+        await runtime.close()
+
+
+async def test_a_missing_bearer_names_its_setting(tmp_path):
+    config = master_config(tmp_path)
+    config.intake_token_file.unlink()
+    chain = FakeEpochChain()
+    with pytest.raises(ServiceError) as raised:
+        await build_master(config, chain=chain, epochs=chain, trust=fixture_trust())
+    assert raised.value.reason == "BASE_GATEWAY_INTAKE_TOKEN_FILE: credential file unavailable"

@@ -66,10 +66,10 @@ class FakeChain:
 @pytest.fixture
 async def network(tmp_path):
     token_file = tmp_path / "operator-token"
-    token_file.write_text("first-test-token")
+    token_file.write_text("first-test-token-0123456789abcdef")
     token_file.chmod(0o600)
     intake_file = tmp_path / "intake-token"
-    intake_file.write_text("intake-test-token")
+    intake_file.write_text("intake-test-token-0123456789abcdef")
     intake_file.chmod(0o600)
     store = GatewayStore(tmp_path / "gateway.db")
     rows = tuple(MetagraphRow(bytes([tag]) * 32, tag) for tag in range(3))
@@ -105,8 +105,8 @@ async def network(tmp_path):
             token_file=token_file,
             db_path=tmp_path / "gateway.db",
             journal=journal,
-            auth={"authorization": "Bearer first-test-token"},
-            intake_auth={"authorization": "Bearer intake-test-token"},
+            auth={"authorization": "Bearer first-test-token-0123456789abcdef"},
+            intake_auth={"authorization": "Bearer intake-test-token-0123456789abcdef"},
         )
     store.close()
     journal.close()
@@ -598,10 +598,12 @@ async def test_operator_token_is_required_and_reread_on_rotation(network):
     await intake(network)
     path = "/v1/admin/seal"
     assert (await network.client.post(path, json={"epoch": 12})).status_code == 401
-    network.token_file.write_text("rotated-token")
+    network.token_file.write_text("rotated-token-0123456789abcdef-xyz")
     assert (await seal(network)).status_code == 401
     response = await network.client.post(
-        path, json={"epoch": 12}, headers={"authorization": "Bearer rotated-token"}
+        path,
+        json={"epoch": 12},
+        headers={"authorization": "Bearer rotated-token-0123456789abcdef-xyz"},
     )
     assert response.status_code == 200
     network.token_file.chmod(0o644)

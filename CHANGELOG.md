@@ -22,6 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   old role and copy its volume first; see the
   [validator upgrade note](deploy/README.md#upgrading-from-the-single-validator-role).
 
+### Upgrade (BREAKING for masters)
+
+- `POST /v1/weights/raw` now requires a separate intake bearer
+  (`BASE_GATEWAY_INTAKE_TOKEN_FILE`); `POST /v1/admin/seal` keeps the operator
+  bearer, and each refuses the other with 401. Both bearers need at least 32
+  bytes, and the master refuses to start, and answers 503 on every private
+  route, while they share a path or a value. Before upgrading:
+  1. Create `intake.token` in the master secrets directory
+     (`BASE_MASTER_SECRETS_DIR`, default `deploy/secrets/master/`) with a new
+     value of at least 32 bytes, for example `openssl rand -hex 32`, mode 0600
+     (or 0400) and readable by container UID 65532.
+  2. Check that `operator.token` is also at least 32 bytes; rotate it if not.
+  3. Keep the `role-master.yml` secrets bind to `/run/secrets`: it already
+     mounts `intake.token` and sets
+     `BASE_GATEWAY_INTAKE_TOKEN_FILE=/run/secrets/intake.token`. A custom
+     deployment must mount the file and set that variable itself.
+  4. Give `intake.token` to the raw-intake client only, then restart the master.
+
 ### Added
 
 - `GET /v1/trust`: the gateway serves the challenge profile (ids, shares,
@@ -45,12 +63,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Master: `POST /v1/weights/raw`, protected before wire v2 only by the challenge
-  leaf signature, now requires a separate intake bearer
-  (`BASE_GATEWAY_INTAKE_TOKEN_FILE`, `deploy/secrets/master/intake.token`);
-  `POST /v1/admin/seal` keeps the operator bearer. Each refuses the other with
-  401, and startup refuses identical paths or values (BREAKING for deployments:
-  create `intake.token` before upgrading).
 - Wire format v2 (`protocol_version` 2, BREAKING): leaves and bundles carry no
   signatures and no gateway key. `Leaf` ends at its score, `Bundle` is the body,
   `ChallengeEntry` has no public key. The old v1 bundles and a gateway `state_dir`

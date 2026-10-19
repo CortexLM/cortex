@@ -14,7 +14,9 @@ recovery. It complements the [threat model](THREAT_MODEL.md).
 - [ ] The master operator bearer (`operator.token`) seals epochs
   (`/v1/admin/seal`) and guards the other administrative routes; the separate
   intake bearer (`intake.token`) only feeds `POST /v1/weights/raw`. The master
-  refuses to start when both files are the same path or hold the same value.
+  refuses to start when both files are the same path or hold the same value, and
+  answers 503 on every private route if a rotation later makes them equal. Each
+  bearer needs at least 32 bytes.
   Neither bearer grants the other's route, but an intake holder can still write
   forged raw leaves that the master's normal epoch seal will include (see the
   [threat model](THREAT_MODEL.md)). Hold each only where needed and rotate each

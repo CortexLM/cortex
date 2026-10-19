@@ -24,7 +24,7 @@ from cortex.config import MasterConfig, read_seed
 from cortex.errors import ServiceError
 from cortex.gateway import GatewayService, GatewayStore
 from cortex.gateway import create_router as gateway_router
-from cortex.http import OperatorAuth, read_private_file
+from cortex.http import OperatorAuth, read_bearer
 from cortex.proof.api import create_router as proof_router
 from cortex.proof.artifacts import FileVault
 from cortex.proof.models import Submission
@@ -76,6 +76,8 @@ class EpochState:
 # reported rather than guessed at. This bound is generous relative to a tempo of
 # a few hundred blocks and keeps a stuck loop from walking the whole chain.
 _END_BLOCK_SEARCH = 8192
+ADMIN_TOKEN_SETTING = "BASE_GATEWAY_ADMIN_TOKEN_FILE"
+INTAKE_TOKEN_SETTING = "BASE_GATEWAY_INTAKE_TOKEN_FILE"
 
 
 class EpochProvider(Protocol):
@@ -524,8 +526,10 @@ class MasterRuntime:
         async def service_error(request, error: ServiceError):
             return JSONResponse({"error": error.reason}, status_code=error.status)
 
-        operator = OperatorAuth(self.config.operator_token_file)
-        intake = OperatorAuth(self.config.intake_token_file)
+        admin_file = (self.config.operator_token_file, ADMIN_TOKEN_SETTING)
+        intake_file = (self.config.intake_token_file, INTAKE_TOKEN_SETTING)
+        operator = OperatorAuth(*admin_file, distinct_from=intake_file)
+        intake = OperatorAuth(*intake_file, distinct_from=admin_file)
         app.include_router(gateway_router(self.gateway, operator, intake))
         proof = proof_router(self.proof, operator, self.topic_setup)
         app.include_router(proof)
@@ -565,7 +569,8 @@ async def build_master(
     local_trust = trust or config.challenge_profile(state.epoch)
     # Holding the intake bearer must never grant sealing, and vice versa.
     if config.operator_token_file.resolve() == config.intake_token_file.resolve() or (
-        read_private_file(config.operator_token_file) == read_private_file(config.intake_token_file)
+        read_bearer(config.operator_token_file, ADMIN_TOKEN_SETTING)
+        == read_bearer(config.intake_token_file, INTAKE_TOKEN_SETTING)
     ):
         raise ServiceError(503, "intake and admin bearers must differ")
     load_registry(config.challenge_registry_file)  # fail fast on an invalid operator registry

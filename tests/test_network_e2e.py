@@ -493,7 +493,7 @@ async def test_owner_setup_miner_submission_seal_and_validator_dispatch(tmp_path
         ) as http:
             setup = await http.post(
                 "/v1/admin/proof/setup",
-                headers={"authorization": "Bearer fixture-operator-token"},
+                headers={"authorization": "Bearer fixture-operator-token-0123456789abcdef"},
                 json={
                     "policy": {
                         "topic_id": "topic-a",
