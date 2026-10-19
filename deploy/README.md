@@ -210,6 +210,38 @@ so check the hotkey before starting it, on the weight-setter host:
    must accept the sealed vector. A refusal prints `chain_preflight_failed`.
 2. Only then start `role-weight-setter.yml`.
 
+### Upgrading from the single validator role
+
+Before this release `role-validator.yml` held the wallet and submitted. It is now
+verify-only: after the upgrade it keeps running, stays healthy and sets no weights.
+It ignores `BASE_WALLET_NAME`, `BASE_WALLET_HOTKEY`, `BASE_VALIDATOR_WALLETS_DIR`
+and the `consensus.key` in its identity directory (`BASE_GATEWAY_HOTKEY` is removed).
+To keep setting weights, move to `role-weight-setter.yml`, whose state volume
+`base-weight-setter-state` is new. Started empty, the weight-setter has no
+submission journal and no consensus watermarks: rollback protection restarts
+from the first profile `/v1/trust` serves it, and it does not know the epochs the
+old role already submitted (the chain rate-limit preflight still refuses a second
+set inside the limit). Reconcile any `dispatch_pending` attempt of the old role
+(`cortex validator-reconcile`) before switching, or keep its state by copying the
+volume while both roles are stopped:
+
+```bash
+docker compose --project-directory . --env-file deploy/env/python-validator.env \
+  -f deploy/compose/role-validator.yml down
+docker run --rm --entrypoint cp \
+  -v cortex-validator_base-validator-state:/from:ro \
+  -v cortex-weight-setter_base-weight-setter-state:/var/lib/base \
+  "$CORTEX_IMAGE" -a /from/. /var/lib/base/
+docker compose --project-directory . --env-file deploy/env/python-validator.env \
+  -f deploy/compose/role-weight-setter.yml up -d
+```
+
+The volume names are Compose's `<project>_<volume>` defaults for the `name:` in
+each role file; check yours with `docker volume ls` first. Docker creates the
+target volume on that `docker run` and Compose then warns it was not created by
+Compose; that warning is expected. Copy only an old volume that you no longer
+start: two processes must not share one journal.
+
 To run a validator without Compose, use `scripts/run-validator.sh` from a
 repository clone. It needs `WALLET_NAME` and `WALLET_HOTKEY` only to submit weights
 (`--verify-only` needs neither), reads the

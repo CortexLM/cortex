@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade (BREAKING for validators)
+
+- `deploy/compose/role-validator.yml` is now verify-only: it runs `--verify-only`,
+  mounts no wallet and never submits, while its healthcheck stays green. An
+  existing validator that set weights with it stops setting weights after the
+  upgrade. Deploy `deploy/compose/role-weight-setter.yml` instead, and never run
+  both with the same wallet. `role-validator.yml` now ignores `BASE_WALLET_NAME`,
+  `BASE_WALLET_HOTKEY`, `BASE_VALIDATOR_WALLETS_DIR` and `consensus.key` in
+  `BASE_VALIDATOR_IDENTITY_DIR`; `BASE_GATEWAY_HOTKEY` is removed everywhere.
+- The weight-setter uses a new state volume, `base-weight-setter-state`: its
+  submission journal and consensus watermarks start empty, so rollback
+  protection restarts from the first profile it is served. To keep them, stop the
+  old role and copy its volume first; see the
+  [validator upgrade note](deploy/README.md#upgrading-from-the-single-validator-role).
+
 ### Added
 
 - `GET /v1/trust`: the gateway serves the challenge profile (ids, shares,
