@@ -10,6 +10,7 @@ The API key is read from --key-file and never printed or journaled.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shlex
@@ -30,10 +31,8 @@ IMAGE = (
     "ghcr.io/cortexlm/hypertrain-gpu@sha256:"
     "c16a28dd29df300eca0cfb5c5aeacb8947681708634e3cbc8639b530321fe2e2"
 )
-EVIDENCE = Path(
-    "/root/distributed-decision-training/.omo/evidence/hypertrain-complete-20261010/vast"
-)
 ROOT = Path(__file__).resolve().parents[1]
+EVIDENCE = ROOT / ".evidence" / "vast"  # = --evidence-dir default; siblings use EVIDENCE.parent
 UPLOAD = ["src", "tests", "pyproject.toml", "uv.lock", "scripts", "README.md", "LICENSE"]
 DISK_GB = 40
 # 142018: GPUs at 100% util by a hidden tenant; 146840/141607: image pull >15 min (2026-10-12)
@@ -146,10 +145,19 @@ MINER_FLOW_IMAGE = (
     "450710d89268fcd55632f28fdd80508ee920a53075b3f8e9f828bdc154e3d856"
 )
 NUM_GPUS = 2
-# mfu profile: dp all_gathers cross PCIe (a pcie_bw ~26 host gave 11% MFU vs 37% at 53.8), and
-# the cuda-13.2 image needs cuda_max_good >= 13.2 (a 13.0 host answered create with HTTP 400).
+# mfu profile: dp all_gathers cross PCIe (a pcie_bw ~26 host gave 11% MFU vs 37% at 53.8).
+# Every image is cuda-13.2: cuda_max_good >= 13.2 (a 13.0 host answered create with HTTP 400).
 MIN_PCIE_BW: Decimal | None = None
 MIN_CUDA = Decimal("13.2")
+# Bitwise replay is only claimed on drivers qualified by genuine CUDA CI (single source of truth).
+_ci_spec = importlib.util.spec_from_file_location(
+    "genuine_cuda_ci", Path(__file__).with_name("genuine_cuda_ci.py")
+)
+assert _ci_spec and _ci_spec.loader
+_ci = importlib.util.module_from_spec(_ci_spec)
+_ci_spec.loader.exec_module(_ci)
+QUALIFIED_DRIVERS: tuple[str, ...] = tuple(_ci.DRIVERS)
+ALLOWED_DRIVERS: tuple[str, ...] | None = QUALIFIED_DRIVERS  # None: --any-driver
 
 
 def offer_query() -> dict[str, Any]:
@@ -162,6 +170,9 @@ def offer_query() -> dict[str, Any]:
         "reliability": {"gt": 0.98},
         "inet_down": {"gte": 1000},
         **({"pcie_bw": {"gte": float(MIN_PCIE_BW)}} if MIN_PCIE_BW is not None else {}),
+        **(
+            {"driver_version": {"in": list(ALLOWED_DRIVERS)}} if ALLOWED_DRIVERS is not None else {}
+        ),
         "type": "on-demand",
         "order": [["dph_total", "asc"]],
         "limit": 64,
@@ -183,12 +194,10 @@ def eligible(o: Any) -> bool:
         and r > Decimal("0.98")
         and (d := dec(o.get("inet_down"))) is not None
         and d >= 1000
-        and (
-            MIN_PCIE_BW is None
-            or ((b := dec(o.get("pcie_bw"))) is not None and b >= MIN_PCIE_BW)
-            and (c := dec(o.get("cuda_max_good"))) is not None
-            and c >= MIN_CUDA
-        )
+        and (MIN_PCIE_BW is None or ((b := dec(o.get("pcie_bw"))) is not None and b >= MIN_PCIE_BW))
+        and (c := dec(o.get("cuda_max_good"))) is not None
+        and c >= MIN_CUDA
+        and (ALLOWED_DRIVERS is None or o.get("driver_version") in ALLOWED_DRIVERS)
         and dec(o.get("dph_total")) is not None
         and dec(o.get("storage_cost")) is not None
     )
@@ -217,10 +226,13 @@ def list_rows(r: Response) -> list[dict[str, Any]] | None:
 class Harness:
     # Profile hooks (subclasses such as scripts/vast_parity.py override these; defaults = e2e).
     label_prefix = "hypertrain-e2e"
-    offer_desc = "2x RTX 5090"
     disk_gb = DISK_GB
     upload_paths: list[str] = UPLOAD
     rsync_excludes: list[str] = []
+
+    @property
+    def offer_desc(self) -> str:
+        return f"{NUM_GPUS}x RTX 5090"
 
     def offer_query(self) -> dict[str, Any]:
         return offer_query()
@@ -261,7 +273,17 @@ class Harness:
             raise Refused(f"offer search failed (HTTP {r.status})")
         fit = [o for o in offers if self.eligible(o)]
         if not fit:
-            raise Refused(f"no eligible {self.offer_desc} offer among {len(offers)}")
+            alone = 0  # offers a qualified driver would have made eligible
+            if ALLOWED_DRIVERS is not None:
+                alone = sum(
+                    isinstance(o, dict)
+                    and any(self.eligible(o | {"driver_version": v}) for v in ALLOWED_DRIVERS)
+                    for o in offers
+                )
+            raise Refused(
+                f"no eligible {self.offer_desc} offer among {len(offers)} "
+                f"({alone} rejected by driver allow-list)"
+            )
         best = min(fit, key=self.rank)
         cost = worst_case(best, float(self.a.max_minutes), self.disk_gb)
         quote = {
@@ -346,7 +368,7 @@ class Harness:
 
     def boot(self, offer: dict[str, Any]) -> None:
         """Create + wait for ssh; a vanished offer or a stuck host moves to the next offer."""
-        tried: set[int] = set()
+        tried: set[int | None] = set()
         for attempt in range(1 + int(self.a.boot_retries)):
             tried.add(offer.get("machine_id"))
             try:
@@ -641,7 +663,7 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-minutes", type=float, required=True)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--api-base", default="https://console.vast.ai")
-    p.add_argument("--evidence-dir", type=Path, default=EVIDENCE)
+    p.add_argument("--evidence-dir", type=Path, default=ROOT / ".evidence" / "vast")
     p.add_argument(
         "--cleanup-reserve",
         type=float,
@@ -660,20 +682,51 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--absence-attempts", type=int, default=12)
     p.add_argument(
         "--profile",
-        choices=("gpu-e2e", "miner-flow", "mfu"),
+        choices=("gpu-e2e", "miner-flow", "mfu", "miner-cycle", "gpu8"),
         default="gpu-e2e",
-        help="miner-flow: 1x RTX 5090, vastai/pytorch image, scripts/vast_miner_flow_remote.sh; "
+        help="gpu-e2e: --num-gpus x RTX 5090, pinned GPU image, scripts/vast_e2e_remote.sh; "
+        "gpu8: gpu-e2e on 8x RTX 5090; "
+        "miner-flow: 1x RTX 5090, vastai/pytorch image, scripts/vast_miner_flow_remote.sh; "
+        "miner-cycle: --num-gpus (default 1) x RTX 5090, vastai/pytorch image, "
+        "scripts/vast_miner_cycle_remote.sh; "
         "mfu: --num-gpus x RTX 5090, vastai/pytorch image, pcie_bw >= --min-pcie-bw, "
         "scripts/vast_mfu_remote.sh",
     )
-    p.add_argument("--num-gpus", type=int, choices=(1, 2, 4, 8), default=2, help="mfu profile")
+    p.add_argument(
+        "--num-gpus",
+        type=int,
+        choices=(1, 2, 4, 8),
+        help="GPUs per host, every profile; default 2 (miner-flow, miner-cycle: 1; gpu8: 8)",
+    )
+    drivers = p.add_mutually_exclusive_group()
+    drivers.add_argument(
+        "--driver",
+        action="append",
+        metavar="VERSION",
+        help="only this driver_version (repeatable); must be in scripts/genuine_cuda_ci.py DRIVERS",
+    )
+    drivers.add_argument(
+        "--any-driver",
+        action="store_true",
+        help="no driver_version filter; for --profile mfu, where bitwise replay is not compared",
+    )
     p.add_argument("--min-pcie-bw", type=float, default=50.0, help="mfu profile, GB/s")
     p.add_argument("--remote-env", action="append", default=[], metavar="KEY=VAL")
     a = p.parse_args(argv)
     a.remote_script = {
         "miner-flow": "vast_miner_flow_remote.sh",
         "mfu": "vast_mfu_remote.sh",
+        "miner-cycle": "vast_miner_cycle_remote.sh",
     }.get(a.profile, "vast_e2e_remote.sh")
+    gpus = {"miner-flow": 1, "miner-cycle": 1, "gpu8": 8}.get(a.profile, 2)
+    if a.profile in ("miner-flow", "gpu8") and a.num_gpus not in (None, gpus):
+        p.error(f"--profile {a.profile} supports only --num-gpus {gpus}")
+    a.num_gpus = a.num_gpus or gpus
+    if a.remote_script == "vast_e2e_remote.sh":
+        # Appended: env(1) keeps the last KEY=VAL, so --remote-env cannot contradict the host.
+        a.remote_env = [*a.remote_env, f"HT_E2E_GPUS={a.num_gpus}"]
+    if unknown := sorted(set(a.driver or ()) - set(QUALIFIED_DRIVERS)):
+        p.error(f"--driver {', '.join(unknown)} not in scripts/genuine_cuda_ci.py DRIVERS")
     if any("=" not in kv or not kv.partition("=")[0].isidentifier() for kv in a.remote_env):
         p.error("--remote-env must be KEY=VAL with an identifier KEY")
     if (
@@ -697,11 +750,12 @@ def main(
     if not key:
         print("empty key file", file=sys.stderr)
         return 2
-    global IMAGE, NUM_GPUS, MIN_PCIE_BW
-    if a.profile == "miner-flow":
-        IMAGE, NUM_GPUS = MINER_FLOW_IMAGE, 1
+    global IMAGE, NUM_GPUS, MIN_PCIE_BW, ALLOWED_DRIVERS
+    NUM_GPUS = a.num_gpus
+    ALLOWED_DRIVERS = None if a.any_driver else tuple(a.driver or QUALIFIED_DRIVERS)
+    if a.profile in ("miner-flow", "miner-cycle", "mfu"):
+        IMAGE = MINER_FLOW_IMAGE
     if a.profile == "mfu":
-        IMAGE, NUM_GPUS = MINER_FLOW_IMAGE, a.num_gpus
         MIN_PCIE_BW = Decimal(str(a.min_pcie_bw))
     api = Api(a.api_base, key, a.evidence_dir / "journal.jsonl", min_gap=a.min_gap, sleep=sleep)
     api.log(

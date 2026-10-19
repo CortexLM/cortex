@@ -65,7 +65,10 @@ host with `pcie_bw` >= 50.
 - **Host PCIe.** The same dp2 config measured 11.2-11.5 % on a host where NCCL took ~3.8 s of GPU
   time per step whether P2P was on or off, against 37.2 % on a `pcie_bw` 53.8 (PCIe Gen5) host.
   `--profile mfu` therefore filters offers on `pcie_bw` and requires `cuda_max_good >= 13.2`
-  (the image is CUDA 13.2; a 13.0 host refused create with HTTP 400).
+  (the image is CUDA 13.2; a 13.0 host refused create with HTTP 400). Every profile also keeps
+  only the drivers in `scripts/genuine_cuda_ci.py` `DRIVERS`; MFU does not compare replays, so
+  add `--any-driver` to widen the market. Evidence goes to `.evidence/vast/` unless
+  `--evidence-dir` is given.
 - **Round-end memory, not step memory.** `max_memory_allocated` over a round (~29.9 GiB at
   micro_batch 4) is dominated by the round end: full weights and optimizer state, delta, error
   feedback and the compressed payload. Inside the steps the peak is ~20 GiB, which is why
