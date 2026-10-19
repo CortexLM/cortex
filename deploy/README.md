@@ -208,9 +208,16 @@ The challenge profile is the unsigned `config/challenges.toml` (plus
 of truth and serves it at `GET /v1/trust`.
 
 1. Edit the `[[challenges]]` shares (basis points, sum 10000) in `config/challenges.toml`.
-2. Bump `version` (and set `introduced_epoch` to a future epoch if the change must
-   not apply to the current one). The gateway store refuses a version rollback.
-3. Run `python scripts/check_repo.py`, then restart the master.
+2. Bump `version`. Adding a third challenge or arbitrary shares needs
+   `challenges_version >= 3` (1..64 unique ids summing to 10000); versions 1-2 only
+   accept the 2000/8000 and 3000/7000 splits. Do NOT set `introduced_epoch` in the
+   future: the profile is global, so the master then cannot seal epochs before it
+   and the gateway cannot decode stored seals older than it (`/v1/weights/latest`
+   answers "unsealed" and the emission burns). Keep the existing value, or the epoch
+   of the first bundle the new profile must govern, never above the current epoch.
+   The gateway store refuses a version rollback.
+3. Run `python scripts/check_repo.py`, then restart the master between two epochs
+   (just after a seal), because the new shares apply to the next bundle it builds.
 4. Validators pick up the new profile from `/v1/trust` at the next epoch; no
    validator restart or file copy is needed. Check `GET /v1/trust` shows the new
    `challenges_version`.

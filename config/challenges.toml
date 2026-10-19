@@ -1,6 +1,8 @@
 # Development challenge profile (emission shares). The master reads
 # this unsigned file; the gateway serves it at GET /v1/trust and validators build their
-# view from that. To change shares: edit, bump `version`, restart the master.
+# view from that. To change shares: edit, bump `version`, restart the master between two
+# epochs. Never set `introduced_epoch` above the current epoch (sealing and decoding stop
+# for older epochs). A third challenge or free shares need `challenges_version >= 3`.
 #
 # Two live challenges. Emission: bounty = 2000, proof = 8000 bps (sum 10000).
 # Readiness is independent of these shares: a missing feed, topic, baseline,

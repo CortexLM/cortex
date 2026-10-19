@@ -14,9 +14,10 @@ signed dissent can be retained as local evidence.
 
 The Merkle root is not part of the Bittensor weight extrinsic. Peer consensus is
 therefore not a public chain transparency log. A colluding validator set can
-agree on one bad root, and an operator can delete local evidence. The owner signs
-the roots and runs the master, so a malicious owner can authorize dishonest
-challenge shares or generated topic rules that validators will faithfully accept.
+agree on one bad root, and an operator can delete local evidence. The operator
+runs the master and the gateway, and the challenge profile is unsigned, so a malicious
+operator can authorize dishonest challenge shares or generated topic rules that validators
+will faithfully accept.
 
 ## Trust boundaries
 
