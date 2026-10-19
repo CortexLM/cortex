@@ -102,6 +102,7 @@ from hypertrain.protocol.messages_v2 import (
     AuditPolicyV2,
     DisputePolicyV2,
     EconomicsPolicyV2,
+    EscrowOperation,
     Hex64,
     IslandJobV1,
     JoinChallenge,
@@ -1994,12 +1995,39 @@ class ChallengeStore:
             stored = db.execute(
                 "SELECT answer FROM weights_runs WHERE epoch=?", (epoch,)
             ).fetchone()
+            if stored is not None:  # final: a replay needs no v2 services
+                return bytes(stored[0])
+            # Committed before any journal append: an epoch at or after it that the journal
+            # already answered is a retry after a failed persist, not a pre-multi-run answer.
+            since = self._meta(db, "weights_runs_from", -1)
+            if since < 0 and epoch not in self.ledger._engine.answers:
+                self._set_meta(db, "weights_runs_from", since := epoch)
+        # Only a run that already finalized a live reward can owe v2 weight. Resolved outside
+        # the transaction: building services may open its own.
+        live = (
+            self._db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='escrow_finalized'"
+            ).fetchone()
+            and self._db.execute("SELECT 1 FROM escrow_finalized LIMIT 1").fetchone()
+        )
+        escrows = [
+            self._services(r[0])[0]
+            for r in self._db.execute("SELECT run_id, manifest FROM runs ORDER BY run_id")
+            if live and json.loads(r[1]).get("manifest_version") == 2
+        ]
+        with self._tx() as db:
+            stored = db.execute(
+                "SELECT answer FROM weights_runs WHERE epoch=?", (epoch,)
+            ).fetchone()
             if stored is not None:
                 return bytes(stored[0])
-            legacy = epoch in self.ledger._engine.answers  # answered before multi-run hosting
+            # Answered before multi-run hosting.
+            legacy = epoch in self.ledger._engine.answers and not 0 <= since <= epoch
             answer = self.ledger.get_weights(epoch, epoch_at, computed_at)
             if legacy:
                 return answer
+            if escrows:
+                answer = self._pay_v2(escrows, epoch, epoch_at, answer)
             last = self._meta(db, "last_answer_at", -1)
             self._set_meta(db, "last_answer_at", max(last, epoch_at))
             answers = [answer] + [
@@ -2008,6 +2036,51 @@ class ChallengeStore:
             merged = answer if len(answers) == 1 else _merge_answers(answers)
             db.execute("INSERT INTO weights_runs VALUES(?, ?)", (epoch, merged))
         return merged
+
+    def _pay_v2(self, escrows: list[EscrowV2], epoch: int, epoch_at: int, text: bytes) -> bytes:
+        """Fill the mass the v1 answer left unpaid with matured live v2 reward units.
+
+        Runs inside the weights transaction: EscrowV2.pay nests as a savepoint, so the
+        `available -> paid` moves commit or roll back with the persisted epoch answer.
+        """
+        from hypertrain.ledger import MAX_ENTRIES
+        from hypertrain.ledger.journal import canonical
+
+        answer = json.loads(text)
+        meta = answer["metadata"]
+        if meta["reason"] != "ok":
+            return text
+        weights: dict[str, float] = answer["weights"]
+        budget = meta["units_burned_this_epoch"]
+        for escrow in escrows:
+            beacon = escrow.manifest.training.beacon
+            now = (epoch_at - beacon.genesis_time) // beacon.period + 1  # drand round at epoch_at
+            for row in escrow.payable(now):
+                if budget == 0:
+                    break
+                if row["hotkey"] not in weights and len(weights) >= MAX_ENTRIES:
+                    continue  # ponytail: no ranking across the cap; the units pay later
+                take = min(budget, row["units"])
+                op = EscrowOperation(
+                    operation_id=sha256_hex(
+                        f"ht-pay/2|{escrow.run_id}|{epoch}|{row['origin']}|{row['owner']}".encode()
+                    ),
+                    owner=row["owner"],
+                    units=take,
+                    origin_ids=[row["origin"]],
+                    admission_id=None,
+                    dispute_id=None,
+                )
+                escrow.pay(op, signer=row["owner"])
+                weights[row["hotkey"]] = weights.get(row["hotkey"], 0.0) + take
+                budget -= take
+        paid = meta["units_burned_this_epoch"] - budget
+        if not paid:
+            return text
+        meta["units_paid"] += paid
+        meta["units_burned_this_epoch"] = budget
+        answer["weights"] = {h: weights[h] for h in sorted(weights)}
+        return canonical(answer)
 
     def _run_v2(self, run_id: str) -> RunManifestV2:
         row = self._db.execute("SELECT manifest FROM runs WHERE run_id=?", (run_id,)).fetchone()
