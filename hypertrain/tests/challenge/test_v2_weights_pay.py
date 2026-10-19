@@ -248,3 +248,19 @@ def test_shadow_bootstrap_reward_not_paid(paying) -> None:
         ).fetchall()
     )
     assert held == {reward.origin_ids[0]: "paid", shadow.origin_ids[0]: "available"}
+
+
+def test_legacy_epoch_after_upgrade_gap_never_repaid(paying) -> None:
+    # Given: before the upgrade the v1 journal answered epochs 0 and 2, skipping epoch 1.
+    store, escrow, reward, _, _ = paying
+    mature(escrow, reward)
+    served = {e: store.ledger.get_weights(e, at(escrow, 20) + e * 300, 1) for e in (0, 2)}
+    # When: the first post-upgrade call asks for the gap epoch, then for the answered ones.
+    gap = json.loads(store.weights(1, at(escrow, 20) + 300, 2))
+    again = {e: store.weights(e, at(escrow, 20) + e * 300, 3) for e in (2, 0)}
+    fresh = json.loads(store.weights(3, at(escrow, 20) + 900, 4))
+    # Then: already-served epochs keep their bytes; the out-of-order gap pays nothing;
+    # v2 pays on the first epoch past the journal.
+    assert again == served
+    assert gap["metadata"]["reason"] == "out_of_order" and gap["weights"] == {}
+    assert fresh["weights"] == {E.HOT.ss58: 1_000_000.0} and pays(escrow) == 1

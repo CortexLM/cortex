@@ -1999,9 +1999,11 @@ class ChallengeStore:
                 return bytes(stored[0])
             # Committed before any journal append: an epoch at or after it that the journal
             # already answered is a retry after a failed persist, not a pre-multi-run answer.
+            # Past the newest journal answer, so an upgrade gap never reopens a served epoch.
             since = self._meta(db, "weights_runs_from", -1)
             if since < 0 and epoch not in self.ledger._engine.answers:
-                self._set_meta(db, "weights_runs_from", since := epoch)
+                since = max(self.ledger._engine.answers, default=-1) + 1
+                self._set_meta(db, "weights_runs_from", since)
         # Only a run that already finalized a live reward can owe v2 weight. Resolved outside
         # the transaction: building services may open its own.
         live = (
