@@ -66,6 +66,18 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
       - run: uv sync --locked --all-extras --group dev
+      # Golden leaf roots are per CPU class; record which CPU ran this shard.
+      - name: Runner CPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(lscpu | sed -n 's/^Model name: *//p' | head -n1)
+          VENDOR=$(lscpu | sed -n 's/^Vendor ID: *//p' | head -n1)
+          if lscpu | grep -E '^Flags:' | grep -qw avx512f; then AVX512F=yes; else AVX512F=no; fi
+          TORCH=$(uv run --frozen python -c "import torch;print(torch.__version__, torch.get_num_threads())")
+          LINE="cpu: ${MODEL} | vendor: ${VENDOR} | avx512f: ${AVX512F} | torch, threads: ${TORCH}"
+          echo "$LINE"
+          echo "shard ${{ matrix.shard }} $LINE" >> "$GITHUB_STEP_SUMMARY"
       - name: Sharded suite
         env:
           SHARD: ${{ matrix.shard }}

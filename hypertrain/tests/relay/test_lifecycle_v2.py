@@ -10,6 +10,7 @@ import httpx
 import pytest
 from test_transport_v2 import MASTER, MINER, NEXT, H, Rig
 
+from hypertrain.data.store import CorruptObjectError, ObjectNotFound
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.relay_messages import (
     AcceptedUploadAck,
@@ -22,10 +23,11 @@ from hypertrain.protocol.relay_messages import (
     RetentionExtension,
     RetrievalRequest,
     RetrievalResponse,
+    UploadGrant,
 )
 from hypertrain.relay.app import create_app
 from hypertrain.relay.client import receipt_verified
-from hypertrain.relay.core import RelayError, Settlement
+from hypertrain.relay.core import AssemblyMismatch, RelayError, Settlement
 
 
 @pytest.mark.parametrize("scope", ["chunk", "receipt", "failed-delete"])
@@ -672,5 +674,249 @@ def test_retrieval_when_release_races_durable_read(tmp_path: Path) -> None:
                     resume.set()
             # Then: no nonce/response reservation is minted against released custody.
             assert not (await rig.relay.state()).uploads[grant.digest()].retrievals
+
+    anyio.run(scenario)
+
+
+def test_recover_when_journal_holds_unassemblable_upload(tmp_path: Path) -> None:
+    # Given: a granted manifest whose chunks are valid but concatenate to another hash.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            forged = b"x" * (4 << 20) + b"y"
+            grant, manifest, _, assignment, opened = rig.upload(forged, nonce="91" * 32, w=1)
+            bad = UploadGrant.model_validate({**grant.body(), "delta_hash": H})
+            await rig.relay.accept(rig.seal(bad), manifest, assignment, opened)
+            await rig.put(bad, forged[: 4 << 20], 0)
+            with pytest.raises(RelayError):
+                await rig.put(bad, forged[4 << 20 :], 1)
+            honest, plain, _, assignment, opened = rig.upload(b"abc", nonce="92" * 32, w=2)
+            await rig.relay.accept(rig.seal(honest), plain, assignment, opened)
+            await rig.put(honest, b"abc")
+
+            def interrupted(state) -> None:
+                state.uploads[honest.digest()].receipt = None
+
+            await rig.relay._change(interrupted)
+            # When: a restarted relay recovers the whole journal.
+            relay = rig.new_relay()
+            await relay.recover()
+            completed: list[str] = []
+            complete = relay.complete
+
+            async def counted(grant_hash: str):
+                completed.append(grant_hash)
+                return await complete(grant_hash)
+
+            relay.complete = counted  # type: ignore[method-assign]
+            await relay.recover()
+            # Then: the poisoned entry is failed once, the honest one still gets its receipt.
+            state = await relay.state()
+            assert state.uploads[bad.digest()].receipt is None
+            assert state.uploads[bad.digest()].forward_error == "AssemblyMismatch"
+            assert not rig.store.store._path(H).exists()
+            assert state.uploads[honest.digest()].receipt is not None
+            assert bad.digest() not in completed
+
+    anyio.run(scenario)
+
+
+async def interrupted_pair(rig: Rig) -> tuple[UploadGrant, UploadGrant]:
+    # Two fully chunked uploads whose receipts were lost: recover() must complete both.
+    grants = []
+    for data, nonce, w in ((b"abc", "93" * 32, 1), (b"def", "94" * 32, 2)):
+        grant, manifest, raw, assignment, opened = rig.upload(data, nonce=nonce, w=w)
+        await rig.relay.accept(raw, manifest, assignment, opened)
+        await rig.put(grant, data)
+        grants.append(grant)
+
+    def interrupted(state) -> None:
+        for grant in grants:
+            state.uploads[grant.digest()].receipt = None
+
+    await rig.relay._change(interrupted)
+    return grants[0], grants[1]
+
+
+def failing_get(rig: Rig, sha: str, error: Exception) -> None:
+    original = rig.store.get
+
+    async def get(key, size, file):
+        if key == sha:
+            raise error
+        await original(key, size, file)
+
+    rig.store.get = get  # type: ignore[method-assign]
+
+
+def counting(relay) -> list[str]:
+    completed: list[str] = []
+    complete = relay.complete
+
+    async def counted(grant_hash: str):
+        completed.append(grant_hash)
+        return await complete(grant_hash)
+
+    relay.complete = counted
+    return completed
+
+
+def test_recover_continues_after_object_not_found(tmp_path: Path) -> None:
+    # Given: the first journal entry lost its chunk in the backing store.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            lost, honest = await interrupted_pair(rig)
+            failing_get(rig, hashlib.sha256(b"abc").hexdigest(), ObjectNotFound("gone"))
+            # When: a restarted relay recovers the whole journal.
+            relay = rig.new_relay()
+            await relay.recover()
+            # Then: the honest entry gets its receipt and the lost one is recorded.
+            state = await relay.state()
+            assert state.uploads[honest.digest()].receipt is not None
+            assert state.uploads[lost.digest()].receipt is None
+            assert state.uploads[lost.digest()].forward_error == "ObjectNotFound"
+
+    anyio.run(scenario)
+
+
+def test_recover_does_not_replay_corrupt_object_entry(tmp_path: Path) -> None:
+    # Given: the first journal entry's held chunk is rotten.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            rotten, honest = await interrupted_pair(rig)
+            failing_get(rig, hashlib.sha256(b"abc").hexdigest(), CorruptObjectError("bit rot"))
+            relay = rig.new_relay()
+            await relay.recover()
+            completed = counting(relay)
+            # When: recovery runs again.
+            await relay.recover()
+            # Then: the honest entry recovered once and the rotten one is never retried.
+            state = await relay.state()
+            assert state.uploads[honest.digest()].receipt is not None
+            assert state.uploads[rotten.digest()].forward_error == "CorruptObjectError"
+            assert completed.count(rotten.digest()) == 0
+
+    anyio.run(scenario)
+
+
+def test_recover_retries_after_transient_error(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Given: the first journal entry's backing read times out once.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            slow, honest = await interrupted_pair(rig)
+            original = rig.store.get
+            failing_get(rig, hashlib.sha256(b"abc").hexdigest(), TimeoutError())
+            relay = rig.new_relay()
+            await relay.recover()
+            state = await relay.state()
+            assert state.uploads[honest.digest()].receipt is not None
+            assert state.uploads[slow.digest()].forward_error is None
+            assert "TimeoutError" in caplog.text
+            # When: the backing recovers and recovery runs again.
+            rig.store.get = original  # type: ignore[method-assign]
+            await relay.recover()
+            # Then: the transient entry is retried and completes.
+            assert (await relay.state()).uploads[slow.digest()].receipt is not None
+
+    anyio.run(scenario)
+
+
+def replacement(rig: Rig, data: bytes, replaces: str, *, hotkey: str = MINER.ss58):
+    # Master-signed grant for the honest chunk list that supersedes `replaces`.
+    grant, manifest, _, assignment, opened = rig.upload(data, nonce="61" * 32)
+    grant = UploadGrant.model_validate({**grant.body(), "hotkey": hotkey, "replaces": replaces})
+    assigned = RelayAssignment.model_validate({**assignment.body, "hotkey": hotkey})
+    return grant, manifest, rig.seal(grant), rig.seal(assigned), opened
+
+
+async def miner_chosen(rig: Rig, data: bytes) -> UploadGrant:
+    # Accepted while the master did not hold the original: the list need not match the delta.
+    grant, _, _, assignment, opened = rig.upload(data)
+    manifest = rig.upload(b"x" * len(data))[1]
+    grant = UploadGrant.model_validate(
+        {**grant.body(), "chunk_manifest_hash": manifest.chunk_manifest_hash()}
+    )
+    await rig.relay.accept(rig.seal(grant), manifest, assignment, opened)
+    return grant
+
+
+def test_relay_accepts_replacement_after_old_accept(tmp_path: Path) -> None:
+    # Given: the relay reserved the round for a miner-chosen list, then the master
+    # (now holding the original) signs a replacement for the honest list.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            old = await miner_chosen(rig, b"abc")
+            grant, manifest, raw, assignment, opened = replacement(rig, b"abc", old.digest())
+            # When: the miner presents the replacement and uploads the original bytes.
+            await rig.relay.accept(raw, manifest, assignment, opened)
+            await rig.put(grant, b"abc")
+            # Then: the upload completes with a receipt and the old reservation is gone.
+            state = await rig.relay.state()
+            assert state.uploads[grant.digest()].receipt is not None
+            assert old.digest() not in state.uploads
+            assert old.nonce not in state.nonces
+
+    anyio.run(scenario)
+
+
+def test_relay_refuses_replacement_after_receipt(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            old, _, _ = await rig.accept(b"abc")
+            await rig.put(old, b"abc")
+            _, manifest, raw, assignment, opened = replacement(rig, b"abc", old.digest())
+            with pytest.raises(RelayError):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            assert (await rig.relay.state()).uploads[old.digest()].receipt is not None
+
+    anyio.run(scenario)
+
+
+def test_relay_refuses_replacement_after_chunk_custody(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            old = await miner_chosen(rig, b"abc")
+            with pytest.raises(AssemblyMismatch):  # the chunk is held under signed custody
+                await rig.put(old, b"xxx")
+            _, manifest, raw, assignment, opened = replacement(rig, b"abc", old.digest())
+            with pytest.raises(RelayError, match="custody"):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            assert (await rig.relay.state()).uploads[old.digest()].chunks
+
+    anyio.run(scenario)
+
+
+def test_relay_refuses_replacement_with_wrong_replaces(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            old = await miner_chosen(rig, b"abc")
+            _, manifest, raw, assignment, opened = replacement(rig, b"abc", "00" * 32)
+            with pytest.raises(RelayError):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            assert old.digest() in (await rig.relay.state()).uploads
+
+    anyio.run(scenario)
+
+
+def test_relay_refuses_replacement_for_other_miner(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            old = await miner_chosen(rig, b"abc")
+            _, manifest, raw, assignment, opened = replacement(
+                rig, b"abc", old.digest(), hotkey=NEXT.ss58
+            )
+            with pytest.raises(RelayError):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            assert old.digest() in (await rig.relay.state()).uploads
 
     anyio.run(scenario)

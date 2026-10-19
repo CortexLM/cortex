@@ -970,6 +970,24 @@ class EscrowV2:
             self._move(op, "available", "paid")
             return self._event(op.operation_id, "PAY", op.model_dump_json(), op.owner)
 
+    def payable(self, now_beacon: int) -> list[sqlite3.Row]:
+        """Free units of live reward origins matured by now_beacon, oldest maturity first.
+
+        Shadow (bootstrap) and genesis origins are collateral, never emission. Only units still
+        held by the origin's issued owner pay (its emptied reward_pending row marks it): units
+        transferred to another owner or a referee are not the earning hotkey's to emit.
+        """
+        return self.db.execute(
+            "SELECT u.origin,u.owner,o.hotkey,u.units FROM escrow_units u "
+            "JOIN escrow_origins o ON o.origin=u.origin WHERE u.bucket='available' "
+            "AND u.units>0 AND o.hotkey IS NOT NULL AND o.mature_at<=? "
+            "AND o.origin NOT IN (SELECT origin FROM escrow_shadow_finalized) "
+            "AND EXISTS(SELECT 1 FROM escrow_units p WHERE p.origin=u.origin "
+            "AND p.owner=u.owner AND p.bucket='reward_pending') "
+            "ORDER BY o.mature_at,u.origin,u.owner",
+            (now_beacon,),
+        ).fetchall()
+
     def balances(self, owner: str | None = None) -> Balances:
         query = "SELECT bucket,SUM(units) total FROM escrow_units"
         rows = self.db.execute(

@@ -40,6 +40,7 @@ from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.disputes_v2 import Contest, DisputesV2
 from hypertrain.data.assignment import assign_round
 from hypertrain.data.store import (
+    CorruptObjectError,
     ObjectNotFound,
     StoreError,
     _stream,
@@ -102,6 +103,7 @@ from hypertrain.protocol.messages_v2 import (
     AuditPolicyV2,
     DisputePolicyV2,
     EconomicsPolicyV2,
+    EscrowOperation,
     Hex64,
     IslandJobV1,
     JoinChallenge,
@@ -315,6 +317,50 @@ def assignment_hash(run_id: str, w: int, slot: int, samples: tuple[int, ...]) ->
 def rerun_message(run_id: str, w: int, hotkey: str, rerun_leaves_root: str) -> bytes:
     """sr25519 preimage of a miner's TRANSIENT rerun claim (no protocol message type exists)."""
     return f"hypertrain/1|Rerun|{run_id}|{w}|{hotkey}|{rerun_leaves_root}".encode()
+
+
+def _stage_once(path: Path, data: bytes) -> None:
+    """Create-once input for a re-emitted job: identical bytes are kept, others refused (409).
+
+    The final name only ever appears by link(2) of a fully written, fsynced temp file, so it is
+    complete or absent; a SIGKILL leaves at most a unique `.name.*.part` temp, never reused."""
+    import os
+
+    # Best-effort purge of this name's crash leftovers; the age floor spares a concurrent
+    # emission's live temp, and lstat/unlink never follow a planted symlink.
+    stale = time.time() - 600
+    try:
+        for entry in path.parent.iterdir():
+            name = entry.name
+            if name.startswith(f".{path.name}.") and name.endswith(".part"):
+                try:
+                    if not entry.is_symlink() and entry.lstat().st_mtime < stale:
+                        entry.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    if not os.path.lexists(path):
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".part")
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(tmp, path)
+            except FileExistsError:  # concurrent emission: compared below like any repeat
+                pass
+        finally:
+            os.unlink(tmp)
+        dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+        if stream.read() != data:
+            raise ChallengeError(409, "island job inputs differ from the staged job")
 
 
 def _merge_answers(answers: list[bytes]) -> bytes:
@@ -1994,12 +2040,41 @@ class ChallengeStore:
             stored = db.execute(
                 "SELECT answer FROM weights_runs WHERE epoch=?", (epoch,)
             ).fetchone()
+            if stored is not None:  # final: a replay needs no v2 services
+                return bytes(stored[0])
+            # Committed before any journal append: an epoch at or after it that the journal
+            # already answered is a retry after a failed persist, not a pre-multi-run answer.
+            # Past the newest journal answer, so an upgrade gap never reopens a served epoch.
+            since = self._meta(db, "weights_runs_from", -1)
+            if since < 0 and epoch not in self.ledger._engine.answers:
+                since = max(self.ledger._engine.answers, default=-1) + 1
+                self._set_meta(db, "weights_runs_from", since)
+        # Only a run that already finalized a live reward can owe v2 weight. Resolved outside
+        # the transaction: building services may open its own.
+        live = (
+            self._db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='escrow_finalized'"
+            ).fetchone()
+            and self._db.execute("SELECT 1 FROM escrow_finalized LIMIT 1").fetchone()
+        )
+        escrows = [
+            self._services(r[0])[0]
+            for r in self._db.execute("SELECT run_id, manifest FROM runs ORDER BY run_id")
+            if live and json.loads(r[1]).get("manifest_version") == 2
+        ]
+        with self._tx() as db:
+            stored = db.execute(
+                "SELECT answer FROM weights_runs WHERE epoch=?", (epoch,)
+            ).fetchone()
             if stored is not None:
                 return bytes(stored[0])
-            legacy = epoch in self.ledger._engine.answers  # answered before multi-run hosting
+            # Answered before multi-run hosting.
+            legacy = epoch in self.ledger._engine.answers and not 0 <= since <= epoch
             answer = self.ledger.get_weights(epoch, epoch_at, computed_at)
             if legacy:
                 return answer
+            if escrows:
+                answer = self._pay_v2(escrows, epoch, epoch_at, answer)
             last = self._meta(db, "last_answer_at", -1)
             self._set_meta(db, "last_answer_at", max(last, epoch_at))
             answers = [answer] + [
@@ -2008,6 +2083,51 @@ class ChallengeStore:
             merged = answer if len(answers) == 1 else _merge_answers(answers)
             db.execute("INSERT INTO weights_runs VALUES(?, ?)", (epoch, merged))
         return merged
+
+    def _pay_v2(self, escrows: list[EscrowV2], epoch: int, epoch_at: int, text: bytes) -> bytes:
+        """Fill the mass the v1 answer left unpaid with matured live v2 reward units.
+
+        Runs inside the weights transaction: EscrowV2.pay nests as a savepoint, so the
+        `available -> paid` moves commit or roll back with the persisted epoch answer.
+        """
+        from hypertrain.ledger import MAX_ENTRIES
+        from hypertrain.ledger.journal import canonical
+
+        answer = json.loads(text)
+        meta = answer["metadata"]
+        if meta["reason"] != "ok":
+            return text
+        weights: dict[str, float] = answer["weights"]
+        budget = meta["units_burned_this_epoch"]
+        for escrow in escrows:
+            beacon = escrow.manifest.training.beacon
+            now = (epoch_at - beacon.genesis_time) // beacon.period + 1  # drand round at epoch_at
+            for row in escrow.payable(now):
+                if budget == 0:
+                    break
+                if row["hotkey"] not in weights and len(weights) >= MAX_ENTRIES:
+                    continue  # ponytail: no ranking across the cap; the units pay later
+                take = min(budget, row["units"])
+                op = EscrowOperation(
+                    operation_id=sha256_hex(
+                        f"ht-pay/2|{escrow.run_id}|{epoch}|{row['origin']}|{row['owner']}".encode()
+                    ),
+                    owner=row["owner"],
+                    units=take,
+                    origin_ids=[row["origin"]],
+                    admission_id=None,
+                    dispute_id=None,
+                )
+                escrow.pay(op, signer=row["owner"])
+                weights[row["hotkey"]] = weights.get(row["hotkey"], 0.0) + take
+                budget -= take
+        paid = meta["units_burned_this_epoch"] - budget
+        if not paid:
+            return text
+        meta["units_paid"] += paid
+        meta["units_burned_this_epoch"] = budget
+        answer["weights"] = {h: weights[h] for h in sorted(weights)}
+        return canonical(answer)
 
     def _run_v2(self, run_id: str) -> RunManifestV2:
         row = self._db.execute("SELECT manifest FROM runs WHERE run_id=?", (run_id,)).fetchone()
@@ -2618,6 +2738,52 @@ class ChallengeStore:
             object_paths={name: name for name in inputs},
             deadline=deadline,
         ), directory
+
+    def export_trial_v2(self, run_id: str, admission_id: str) -> dict[str, Any]:
+        from hypertrain.data.trial_assignment import trial_samples
+
+        self._services(run_id)
+        with self._lock:
+            manifest = self._run_v2(run_id)
+            row = self._db.execute(
+                "SELECT * FROM admissions_v2 WHERE admission_id=? AND run_id=?",
+                (admission_id, run_id),
+            ).fetchone()
+            if row is None or row["challenge"] is None:
+                raise ChallengeError(409, "NO_CHALLENGE")
+            challenge = JoinChallenge.model_validate_json(row["challenge"])
+            trial = self._db.execute(
+                "SELECT outcome FROM admission_trial_results WHERE epoch=?",
+                (row["trial_epoch"],),
+            ).fetchone()
+            if trial is None or trial["outcome"] != "OPEN":
+                raise ChallengeError(409, "REFERENCE_TRIAL_CLOSED")
+            try:
+                beacon = self._beacon_v2(challenge.seed_beacon)
+            except BeaconError:
+                raise ChallengeError(503, "beacon infrastructure paused") from None
+            samples = trial_samples(manifest, admission_id, challenge.nonce, beacon)
+            job, directory = self.stage_trial_v2(run_id, challenge, samples, row["trial_epoch"])
+            path = directory / "job.json"
+            raw = job.model_dump_json().encode()
+            if path.exists():
+                if path.read_bytes() != raw:
+                    raise ChallengeError(409, "immutable trial job changed")
+            else:
+                with tempfile.TemporaryDirectory(dir=directory) as temporary:
+                    staged = Path(temporary) / "job.json"
+                    staged.write_bytes(raw)
+                    staged.replace(path)
+            objects = {
+                name: self.objects.put((directory / relative).read_bytes())
+                for name, relative in job.object_paths.items()
+            }
+            return {
+                "job": job.body(),
+                "objects": objects,
+                "challenge": challenge.body(),
+                "nonce": challenge.nonce,
+            }
 
     def _dispute_span_v2(
         self, run_id: str, contest: Contest, level: Any, ctx: tuple[int, ...]
@@ -5491,6 +5657,20 @@ class ChallengeStore:
                 )
             if set(evidence.chunk_ack_hashes) != {c.digest() for c in chunks}:
                 raise ChallengeError(422, "failure includes unproved chunk custody")
+            # upload_grant_v2 cannot tie a multi-chunk list to delta_hash before the master
+            # holds the original, so a miner could frame an honest relay with chunk hashes no
+            # receipt could follow. Unless the held original proves each chunk, such a key is
+            # disabled only once rescue hashes to delta_hash.
+            deferred = receipt is None and len(chunk_manifest.chunks) > 1
+            if deferred:
+                try:
+                    original = self.objects.get(grant.delta_hash)
+                    deferred = any(
+                        sha256_hex(original[c.off : c.off + c.len]) != c.chunk_sha256
+                        for c in chunk_manifest.chunks
+                    )
+                except (ObjectNotFound, CorruptObjectError):
+                    pass  # a corrupt copy proves nothing: treat as absent, rescue decides
             if min(evidence.observed_beacons) <= opportunity.service_deadline or max(
                 evidence.observed_beacons
             ) > self._now(self._db):
@@ -5529,13 +5709,14 @@ class ChallengeStore:
                 evidence.digest(),
                 {"artifacts": data["artifacts"], "observations": data["observations"]},
             )
-            self._put_record_v2(
-                run_id,
-                "relay-disabled",
-                f"{grant.relay_id}:{grant.assignment_epoch}:{evidence.key_id}",
-                {"key_id": evidence.key_id, "evidence_hash": evidence.digest()},
-            )
-            result = {"result": evidence.result, "disabled": True, "miner_penalty": 0}
+            if not deferred:
+                self._put_record_v2(
+                    run_id,
+                    "relay-disabled",
+                    f"{grant.relay_id}:{grant.assignment_epoch}:{evidence.key_id}",
+                    {"key_id": evidence.key_id, "evidence_hash": evidence.digest()},
+                )
+            result = {"result": evidence.result, "disabled": not deferred, "miner_penalty": 0}
         self._notify_processes_v2()
         return result
 
@@ -5543,6 +5724,8 @@ class ChallengeStore:
         self, run_id: str, failure_hash: str, client: Any
     ) -> dict[str, Any]:
         """Rescue exact signed bytes; fallback grants never renew the original cutoff."""
+        import httpx
+
         from hypertrain.data.stream_store import spool
         from hypertrain.protocol import relay_envelope
         from hypertrain.protocol.relay_messages import (
@@ -5558,6 +5741,7 @@ class ChallengeStore:
             has_full_custody,
         )
         from hypertrain.relay.client import RelayClient
+        from hypertrain.relay.core import RelayError
 
         with self._tx(notify=True):
             manifest = self._run_v2(run_id)
@@ -5714,19 +5898,50 @@ class ChallengeStore:
         relay = RelayClient(registry, client)
         recovered = bytearray()
         responses = []
-        for request_raw, signer in requests:
-            with spool() as payload:
-                response = await relay.retrieval(request_raw, payload, relay_public=signer)
-                if RetrievalResponse.model_validate(response.body).status != "SERVED":
-                    raise ChallengeError(409, "original acknowledged bytes unavailable for rescue")
-                payload.seek(0)
-                recovered.extend(payload.read())
-                responses.append((request_raw, response))
+        disabled = f"{grant.relay_id}:{grant.assignment_epoch}:{failure.key_id}"
+
+        def disable() -> None:  # Deferred by relay_failure_v2; earlier evidence wins.
+            if not self._db.execute(
+                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='relay-disabled' AND id=?",
+                (run_id, disabled),
+            ).fetchone():
+                self._put_record_v2(
+                    run_id,
+                    "relay-disabled",
+                    disabled,
+                    {"key_id": failure.key_id, "evidence_hash": failure_hash},
+                )
+
+        unavailable = False
+        try:
+            for request_raw, signer in requests:
+                with spool() as payload:
+                    response = await relay.retrieval(request_raw, payload, relay_public=signer)
+                    if RetrievalResponse.model_validate(response.body).status != "SERVED":
+                        unavailable = True
+                        break
+                    payload.seek(0)
+                    recovered.extend(payload.read())
+                    responses.append((request_raw, response))
+        except (httpx.HTTPError, CorruptObjectError, RelayError, SignatureError, TimeoutError):
+            unavailable = True
+        if unavailable:
+            # Two pinned observers proved the contractual failure and the relay cannot serve
+            # its own signed custody either: no response, a bad signature or binding, a
+            # timeout, or a chunk whose bytes miss its signed, miner-committed hash. Only
+            # valid chunks that concatenate to the wrong delta (422 below) can be miner
+            # framing, so that path never disables.
+            with self._tx():
+                self._snapshot_current_v2(manifest)
+                disable()
+            self._notify_processes_v2()
+            return {"rescued": False, "disabled": True, "relay_id": grant.relay_id}
         with self._tx():
             self._snapshot_current_v2(manifest)
             if len(recovered) != grant.size or sha256_hex(bytes(recovered)) != grant.delta_hash:
                 raise ChallengeError(422, "rescued original bytes differ from signed commit")
             self.objects.put(bytes(recovered))
+            disable()
             for request_raw, response in responses:
                 self._put_record_v2(
                     run_id,
@@ -6399,7 +6614,6 @@ class ChallengeStore:
 
     def island_job_v2(self, run_id: str, w: int, hotkey: str) -> dict[str, Any]:
         from hypertrain.auditor.replay import pack_state, unpack_state
-        from hypertrain.gpu_ops.journal import durable_write
         from hypertrain.protocol.messages_v2 import IslandJobV1, StartStateV2
 
         with self._tx():
@@ -6593,7 +6807,7 @@ class ChallengeStore:
             )
             hashes = {}
             for name, value in inputs.items():
-                durable_write(directory / name, value)
+                _stage_once(directory / name, value)
                 hashes[name] = put_large(value, self.objects.put)  # ht-parts-v1 above 1 MiB
             job = IslandJobV1(
                 job_version=1,
@@ -6608,7 +6822,14 @@ class ChallengeStore:
                 object_paths={k: k for k in inputs},
                 deadline=manifest.training.beacon.genesis_time + (int(body["d_commit"]) - 1) * 3,
             )
-            self._put_record_v2(run_id, "island-job", f"{w}:{hotkey}", job.body())
+            stored = self._db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='island-job' AND id=?",
+                (run_id, f"{w}:{hotkey}"),
+            ).fetchone()
+            if stored is None:
+                self._put_record_v2(run_id, "island-job", f"{w}:{hotkey}", job.body())
+            elif json.loads(stored[0]) != job.body():
+                raise ChallengeError(409, "island job inputs differ from the staged job")
             staged: dict[str, Any] = {"job": job.body(), "objects": hashes}
             if theta_only is not None:  # a miner rebuilds start_state from it + its own m/v
                 staged["theta"] = put_large(theta_only, self.objects.put)
@@ -9569,6 +9790,7 @@ class ChallengeStore:
                 (run_id, "%:" + env.signer),
             ).fetchall()
             eligible = []
+            held = False
             for row in assignments:
                 assignment_env = relay_envelope.parse_envelope(json.loads(row["data"]))
                 a = RelayAssignment.model_validate(assignment_env.body)
@@ -9608,6 +9830,12 @@ class ChallengeStore:
                 try:
                     original = self.objects.get(committed_work.delta_hash)
                 except ObjectNotFound:
+                    # Miners commit the delta by ref only (miner/core.py:run_round); the master
+                    # first holds the bytes after relay retrieval, where relay_receipt_v2 rechecks
+                    # delta_hash and size. A lone chunk is the whole delta, so check it here.
+                    whole = chunk.chunks[0].chunk_sha256 == committed_work.delta_hash
+                    if len(chunk.chunks) > 1 or whole:
+                        eligible.append(a)
                     continue
                 if len(original) != chunk.size or sha256_hex(original) != committed_work.delta_hash:
                     raise ChallengeError(409, "accepted commit original delta corrupt")
@@ -9625,6 +9853,7 @@ class ChallengeStore:
                 )
                 if expected == chunk:
                     eligible.append(a)
+                    held = True
             if len(eligible) != 1:
                 raise ChallengeError(409, "one current signed relay assignment required")
             assignment = eligible[0]
@@ -9649,6 +9878,34 @@ class ChallengeStore:
             commit = self._record_v2(run_id, "commit", f"{assignment.w}:{env.signer}")["body"]
             if chunk.size != commit["delta_bytes"]:
                 raise ChallengeError(422, "grant size differs from accepted commit")
+            # One live grant per assignment: a retry gets the stored grant, another chunk
+            # list waits for expiry. Without the original, the list is miner-chosen; with
+            # it, this list was just proven honest and replaces any other live grant.
+            replaces = None
+            for stored_id, stored in self._db.execute(
+                "SELECT id, data FROM records_v2 WHERE run_id=? AND kind='grant' "
+                "AND json_extract(data,'$.body.w')=? AND json_extract(data,'$.body.hotkey')=? "
+                "AND json_extract(data,'$.body.relay_id')=? "
+                "AND json_extract(data,'$.body.assignment_epoch')=? "
+                "AND json_extract(data,'$.body.exp_drand')>?",
+                (
+                    run_id,
+                    assignment.w,
+                    env.signer,
+                    assignment.primary_id,
+                    assignment.assignment_epoch,
+                    now,
+                ),
+            ):
+                live = json.loads(stored)
+                if live["body"]["chunk_manifest_hash"] != chunk.chunk_manifest_hash():
+                    if held:
+                        # The relay may hold this grant's reservation: name it so the
+                        # relay can release it for the replacement (record id = digest).
+                        replaces = stored_id
+                        continue
+                    raise ChallengeError(409, "live upload grant binds another chunk list")
+                return live
             grant = UploadGrant(
                 w=assignment.w,
                 hotkey=env.signer,
@@ -9663,6 +9920,7 @@ class ChallengeStore:
                 + 100,
                 nonce=sha256_hex(canonicalize([run_id, assignment.body(), chunk.body()])),
                 exp_drand=assignment.exp_drand,
+                replaces=replaces,
             )
             signed = relay_envelope.seal(
                 self._coord(), "UploadGrant", run_id, grant, grant.exp_drand

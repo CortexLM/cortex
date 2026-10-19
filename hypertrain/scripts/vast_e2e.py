@@ -3,16 +3,19 @@
 Flow: credit check -> offer search -> worst-case cost admission -> ONE create -> ssh ready ->
 upload current tree -> scripts/vast_e2e_remote.sh -> rescue /workspace/out -> DELETE -> parsed
 absence. A watchdog thread fires at the wall deadline (minus the cleanup reserve) and runs the
-same rescue+delete. Every provider call is journaled. `--dry-run` stops after the cost calc.
+same rescue+delete. Every provider call is journaled. `--dry-run` stops after the cost calc: it
+makes read-only GET calls (users/current, up to OFFER_PAGES offer pages), never a PUT/DELETE.
 The API key is read from --key-file and never printed or journaled.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -30,15 +33,14 @@ IMAGE = (
     "ghcr.io/cortexlm/hypertrain-gpu@sha256:"
     "c16a28dd29df300eca0cfb5c5aeacb8947681708634e3cbc8639b530321fe2e2"
 )
-EVIDENCE = Path(
-    "/root/distributed-decision-training/.omo/evidence/hypertrain-complete-20261010/vast"
-)
 ROOT = Path(__file__).resolve().parents[1]
+EVIDENCE = ROOT / ".evidence" / "vast"  # = --evidence-dir default; siblings use EVIDENCE.parent
 UPLOAD = ["src", "tests", "pyproject.toml", "uv.lock", "scripts", "README.md", "LICENSE"]
 DISK_GB = 40
 # 142018: GPUs at 100% util by a hidden tenant; 146840/141607: image pull >15 min (2026-10-12)
 EXCLUDED_MACHINES = (137465, 43459, 142018, 146840, 141607)
 HOURS_PER_MONTH = Decimal(720)
+OFFER_PAGES = 8  # offer-search pages (of offer_query()["limit"]) before admission refuses
 
 
 class Refused(Exception):
@@ -146,10 +148,39 @@ MINER_FLOW_IMAGE = (
     "450710d89268fcd55632f28fdd80508ee920a53075b3f8e9f828bdc154e3d856"
 )
 NUM_GPUS = 2
-# mfu profile: dp all_gathers cross PCIe (a pcie_bw ~26 host gave 11% MFU vs 37% at 53.8), and
-# the cuda-13.2 image needs cuda_max_good >= 13.2 (a 13.0 host answered create with HTTP 400).
+# mfu profile: dp all_gathers cross PCIe (a pcie_bw ~26 host gave 11% MFU vs 37% at 53.8).
+# Every image is cuda-13.2: cuda_max_good >= 13.2 (a 13.0 host answered create with HTTP 400).
 MIN_PCIE_BW: Decimal | None = None
 MIN_CUDA = Decimal("13.2")
+# Bitwise replay is only claimed on drivers qualified by genuine CUDA CI (single source of truth).
+_ci_spec = importlib.util.spec_from_file_location(
+    "genuine_cuda_ci", Path(__file__).with_name("genuine_cuda_ci.py")
+)
+assert _ci_spec and _ci_spec.loader
+_ci = importlib.util.module_from_spec(_ci_spec)
+_ci_spec.loader.exec_module(_ci)
+QUALIFIED_DRIVERS: tuple[str, ...] = tuple(_ci.DRIVERS)
+ALLOWED_DRIVERS: tuple[str, ...] | None = QUALIFIED_DRIVERS  # None: --any-driver
+
+
+# --profile proofs: every GPU proof on ONE host, in this order (steps.tsv rows). The first four
+# are the gpu-e2e flow (uv_install only if pip fails); PROOF_STEPS are required to pass.
+PROOF_STEPS = ("attn_select", "gpu_pytest", "mfu_dp2_flash", "mfu_dp2_check")
+PROOF_PLAN = (
+    ("nvidia_smi", "nvidia-smi"),
+    ("pip_install", "pip install --no-deps -e . (uv_install fallback)"),
+    ("selfcheck", "python -m hypertrain.miner.admission selfcheck"),
+    ("network_e2e", "join-v2, 2 chained rounds, auditor replay, repeat; HT_ATTN_BACKEND=math"),
+    ("attn_select", "HT_ATTN_BACKEND unset: select_backend(cuda:0) == sdpa-flash"),
+    ("gpu_pytest", "HT_ATTN_BACKEND unset, HT_GENUINE_CUDA_INDEX=0, any skip fails: PROOF_TESTS"),
+    ("mfu_dp2_flash", "HT_ATTN_BACKEND unset: torchrun 2 ranks, 1B dp2 bf16, run + replay"),
+    ("mfu_dp2_check", "check_gpu_evidence --kind mfu; attention_backend == sdpa-flash"),
+)
+PROOF_TESTS = (
+    "tests/trainer/test_attention_qualified.py::test_qualified_backend_repeats_bitwise",
+    "tests/trainer/test_attention.py::test_backward_bitwise",
+    "tests/trainer/test_optim_fused.py::test_step_has_no_host_sync",
+)
 
 
 def offer_query() -> dict[str, Any]:
@@ -162,6 +193,8 @@ def offer_query() -> dict[str, Any]:
         "reliability": {"gt": 0.98},
         "inet_down": {"gte": 1000},
         **({"pcie_bw": {"gte": float(MIN_PCIE_BW)}} if MIN_PCIE_BW is not None else {}),
+        # No driver_version filter: the API answers 400 "driver_vers in None" (2026-10-19);
+        # eligible() applies ALLOWED_DRIVERS to the returned offers.
         "type": "on-demand",
         "order": [["dph_total", "asc"]],
         "limit": 64,
@@ -183,12 +216,10 @@ def eligible(o: Any) -> bool:
         and r > Decimal("0.98")
         and (d := dec(o.get("inet_down"))) is not None
         and d >= 1000
-        and (
-            MIN_PCIE_BW is None
-            or ((b := dec(o.get("pcie_bw"))) is not None and b >= MIN_PCIE_BW)
-            and (c := dec(o.get("cuda_max_good"))) is not None
-            and c >= MIN_CUDA
-        )
+        and (MIN_PCIE_BW is None or ((b := dec(o.get("pcie_bw"))) is not None and b >= MIN_PCIE_BW))
+        and (c := dec(o.get("cuda_max_good"))) is not None
+        and c >= MIN_CUDA
+        and (ALLOWED_DRIVERS is None or o.get("driver_version") in ALLOWED_DRIVERS)
         and dec(o.get("dph_total")) is not None
         and dec(o.get("storage_cost")) is not None
     )
@@ -217,10 +248,13 @@ def list_rows(r: Response) -> list[dict[str, Any]] | None:
 class Harness:
     # Profile hooks (subclasses such as scripts/vast_parity.py override these; defaults = e2e).
     label_prefix = "hypertrain-e2e"
-    offer_desc = "2x RTX 5090"
     disk_gb = DISK_GB
     upload_paths: list[str] = UPLOAD
     rsync_excludes: list[str] = []
+
+    @property
+    def offer_desc(self) -> str:
+        return f"{NUM_GPUS}x RTX 5090"
 
     def offer_query(self) -> dict[str, Any]:
         return offer_query()
@@ -237,6 +271,7 @@ class Harness:
         self.label = f"{self.label_prefix}-{uuid.uuid4().hex[:8]}"
         self.instance_id: int | None = None
         self.create_attempted = False
+        self.retired: list[tuple[int, str]] = []  # stuck hosts boot() deleted: (id, label)
         self.ssh: tuple[str, int] | None = None
         self.cancel = threading.Event()
         self.cleanup_lock = threading.Lock()
@@ -254,14 +289,48 @@ class Harness:
         self.api.log("credit", credit=str(credit), required=str(need))
         if credit < need:
             raise Refused(f"credit {credit} < max_usd + 5 = {need}")
-        q = urllib.parse.urlencode({"q": json.dumps(self.offer_query())})
-        r = self.api.call("GET", "/api/v0/bundles/?" + q)
-        offers = r.body.get("offers") if r.ok() else None
-        if not isinstance(offers, list):
-            raise Refused(f"offer search failed (HTTP {r.status})")
-        fit = [o for o in offers if self.eligible(o)]
+        # Drivers are filtered client-side (the API refuses a driver filter), so the cheapest
+        # page may hold no qualified offer: page on by price until one is eligible.
+        query, offers, seen, why = self.offer_query(), [], set(), ""
+        skip = set(self.a.exclude_offer)  # here, not in eligible(): profiles override that
+        for page in range(OFFER_PAGES):
+            q = urllib.parse.urlencode({"q": json.dumps(query)})
+            r = self.api.call("GET", "/api/v0/bundles/?" + q)
+            got = r.body.get("offers") if r.ok() else None
+            if not isinstance(got, list):
+                raise Refused(f"offer search failed (HTTP {r.status})")
+            new = [o for o in got if not (isinstance(o, dict) and o.get("id") in seen)]
+            seen |= {o.get("id") for o in got if isinstance(o, dict)}
+            offers += new
+            pool = [o for o in offers if not isinstance(o, dict) or o.get("id") not in skip]
+            fit = [o for o in pool if self.eligible(o)]
+            prices = [p for o in got if isinstance(o, dict) and (p := dec(o.get("dph_total")))]
+            limit = query.get("limit")
+            if fit or not prices or limit is None or len(got) < limit:
+                break
+            if not new:  # a whole page at one price: the gte cursor cannot advance
+                why = f"; search stalled: {limit} offers at {max(prices)} USD/h fill a page"
+                break
+            if page == OFFER_PAGES - 1:
+                why = f"; search stopped after {OFFER_PAGES} pages of {limit}: "
+                why += "cheaper-first market not exhausted"
+            # gte, not gt: offers at the boundary price may continue on the next page.
+            # An existing dph_total bound (lte, or a higher gte) is kept, only the floor moves.
+            bound = query.get("dph_total", {})
+            floor = max(float(max(prices)), bound.get("gte", 0.0))
+            query = {**query, "dph_total": {**bound, "gte": floor}}
         if not fit:
-            raise Refused(f"no eligible {self.offer_desc} offer among {len(offers)}")
+            alone = 0  # offers a qualified driver would have made eligible
+            if ALLOWED_DRIVERS is not None:
+                alone = sum(
+                    isinstance(o, dict)
+                    and any(self.eligible(o | {"driver_version": v}) for v in ALLOWED_DRIVERS)
+                    for o in pool
+                )
+            raise Refused(
+                f"no eligible {self.offer_desc} offer among {len(offers)} "
+                f"({alone} rejected by driver allow-list){why}"
+            )
         best = min(fit, key=self.rank)
         cost = worst_case(best, float(self.a.max_minutes), self.disk_gb)
         quote = {
@@ -285,6 +354,9 @@ class Harness:
             )
         }
         quote["worst_case_usd"] = str(cost.quantize(Decimal("0.0001")))
+        # Bitwise replay is claimed only on these drivers; --any-driver runs must say so.
+        quote["driver_qualified"] = best.get("driver_version") in QUALIFIED_DRIVERS
+        self.quote = quote
         self.api.log("offer_chosen", seen=len(offers), eligible=len(fit), quote=quote)
         print(
             json.dumps(
@@ -304,7 +376,11 @@ class Harness:
         return best
 
     def create(self, offer: dict[str, Any]) -> None:
+        if self.cancel.is_set():
+            raise RuntimeError("cancelled before create")
         self.api.log("create_intent", offer_id=offer["id"], label=self.label, image=IMAGE)
+        # Per rented offer: boot() may fall back to an offer with another driver.
+        self.result["driver_qualified"] = offer.get("driver_version") in QUALIFIED_DRIVERS
         self.create_attempted = True
         r = self.api.call(
             "PUT",
@@ -346,7 +422,7 @@ class Harness:
 
     def boot(self, offer: dict[str, Any]) -> None:
         """Create + wait for ssh; a vanished offer or a stuck host moves to the next offer."""
-        tried: set[int] = set()
+        tried: set[int | None] = set()
         for attempt in range(1 + int(self.a.boot_retries)):
             tried.add(offer.get("machine_id"))
             try:
@@ -369,6 +445,8 @@ class Harness:
                 self.api.log("boot_timeout", attempt=attempt, instance_id=self.instance_id)
                 if not (self.delete() and self.confirm_absent()):
                     raise RuntimeError("stuck host not confirmed absent")
+                assert self.instance_id is not None
+                self.retired.append((self.instance_id, self.label))
             self.instance_id, self.create_attempted = None, False
             self.label = f"{self.label_prefix}-{uuid.uuid4().hex[:8]}"
             self.result["label"] = self.label
@@ -383,11 +461,17 @@ class Harness:
 
     def wait_ready(self) -> None:
         key = self.identity().with_suffix(".pub").read_text().strip()
-        attached, last_error = False, None
+        attached, last_error, last_state = False, None, None
         while time.time() < self.deadline and not self.cancel.is_set():
             rows = self.instances()
             row = next((i for i in rows or [] if i["id"] == self.instance_id), None)
             if row is not None:
+                state = (row.get("actual_status"), row.get("cur_state"), row.get("status_msg"))
+                if state != last_state:  # why a host never gets ssh-ready (image pull, no GPU)
+                    self.api.log(
+                        "boot_state", actual=state[0], cur=state[1], msg=str(state[2])[:200]
+                    )
+                    last_state = state
                 if (
                     row.get("actual_status") in ("exited", "offline")
                     or row.get("cur_state") == "stopped"
@@ -485,6 +569,8 @@ class Harness:
                 stdout=sink,
                 stderr=log,
             )
+            if self.cancel.is_set() and not self.cleaned:  # signal landed before self.child
+                self.child.kill()
             try:
                 self.child.communicate(stdin, timeout=max(1.0, timeout))
             except subprocess.TimeoutExpired:
@@ -571,10 +657,13 @@ class Harness:
             if self.instance_id is None and self.create_attempted:
                 self.instance_id = self.find_by_label()
             if self.instance_id is None and not self.create_attempted:
-                self.result["absent"] = True
+                self.result["absent"] = self.retired_absent()
+                if self.retired:  # every host was stuck: still end on a parsed absence
+                    self.result["deleted"] = True
+                    self.api.log("cleanup_done", deleted=True, absent=self.result["absent"])
                 return
             self.result["deleted"] = self.delete()
-            self.result["absent"] = self.confirm_absent()
+            self.result["absent"] = self.confirm_absent() and self.retired_absent()
             self.api.log(
                 "cleanup_done", deleted=self.result["deleted"], absent=self.result["absent"]
             )
@@ -590,15 +679,42 @@ class Harness:
             self.api.sleep(min(60.0, 5.0 * 2**attempt))
         return False
 
-    def confirm_absent(self) -> bool:
+    def confirm_absent(self, iid: int | None = None, label: str | None = None) -> bool:
+        iid, label = iid or self.instance_id, label or self.label
+        q = urllib.parse.urlencode({"select_filters": json.dumps({"label": {"eq": label}})})
         for _ in range(int(self.a.absence_attempts)):
-            rows = self.instances()
+            rows = list_rows(self.api.call("GET", "/api/v1/instances/?" + q))
             if rows is not None and not any(
-                i["id"] == self.instance_id or i.get("label") == self.label for i in rows
+                i["id"] == iid or i.get("label") == label for i in rows
             ):
                 return True
             self.api.sleep(max(5.0, self.api.min_gap))
         return False
+
+    def retired_absent(self) -> bool:
+        """Re-list each host boot() deleted: its absence was seen once, the run proves it last."""
+        return all([self.confirm_absent(i, label) for i, label in self.retired])  # list: check all
+
+    def plan(self) -> dict[str, Any]:
+        return {
+            "image": IMAGE,
+            "remote_script": self.a.remote_script,
+            "remote_env": [kv.partition("=")[0] + "=***" for kv in self.a.remote_env],
+            "steps": [f"{name}: {what}" for name, what in PROOF_PLAN],
+            "tests": list(PROOF_TESTS),
+            "caps": {
+                "max_usd": self.a.max_usd,
+                "max_minutes": self.a.max_minutes,
+                "cleanup_reserve_s": self.a.cleanup_reserve,
+                "boot_timeout_s": self.a.boot_timeout,
+                "boot_retries": self.a.boot_retries,
+                "instances": 1,
+                "num_gpus": NUM_GPUS,
+                "drivers": "any" if ALLOWED_DRIVERS is None else list(ALLOWED_DRIVERS),
+            },
+            "worst_case_usd": self.quote["worst_case_usd"],
+            "driver_qualified": self.quote["driver_qualified"],
+        }
 
     def watchdog(self) -> None:
         if not self.cancel.wait(max(0.0, self.deadline - time.time())):
@@ -609,6 +725,8 @@ class Harness:
     def run(self) -> int:
         offer = self.admit()
         if self.a.dry_run:
+            if self.a.profile == "proofs":
+                print(json.dumps(self.plan(), sort_keys=True))
             return 0
         dog = threading.Thread(target=self.watchdog, daemon=True)
         dog.start()
@@ -626,22 +744,27 @@ class Harness:
         finally:
             self.cleanup("finally")
             dog.join(timeout=5)
-            self.result["remote_ok"] = rc == 0 and not self.result.get("watchdog")
+            self.result["remote_ok"] = rc == 0 and not ({"watchdog", "signal"} & self.result.keys())
             (self.out / "harness-result.json").write_text(json.dumps(self.result, indent=2))
         if not self.result.get("absent"):
             print(f"ALERT: instance {self.instance_id} absence NOT confirmed", file=sys.stderr)
             return 3
-        return 0 if self.result["remote_ok"] else 1
+        if not self.result["remote_ok"]:
+            return 1
+        if self.a.profile == "proofs" and not self.result.get("driver_qualified"):
+            print("proofs passed on a driver outside QUALIFIED_DRIVERS: exit 4", file=sys.stderr)
+            return 4  # ran fine, but a bitwise-replay claim is not backed by a qualified driver
+        return 0
 
 
 def parse(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     p.add_argument("--key-file", type=Path, required=True)
     p.add_argument("--max-usd", type=float, required=True)
     p.add_argument("--max-minutes", type=float, required=True)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--api-base", default="https://console.vast.ai")
-    p.add_argument("--evidence-dir", type=Path, default=EVIDENCE)
+    p.add_argument("--evidence-dir", type=Path, default=ROOT / ".evidence" / "vast")
     p.add_argument(
         "--cleanup-reserve",
         type=float,
@@ -655,25 +778,86 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
         default=900.0,
         help="seconds a host may take to become ssh-ready before it is replaced",
     )
-    p.add_argument("--boot-retries", type=int, default=2, help="replacement hosts to try")
+    p.add_argument(
+        "--boot-retries", type=int, help="replacement hosts to try (default 2; proofs: 0)"
+    )
+    p.add_argument(
+        "--exclude-offer",
+        type=int,
+        action="append",
+        default=[],
+        metavar="ID",
+        help="never rent this offer id (repeatable), e.g. a host whose ssh never accepted the key",
+    )
     p.add_argument("--delete-attempts", type=int, default=6)
     p.add_argument("--absence-attempts", type=int, default=12)
     p.add_argument(
         "--profile",
-        choices=("gpu-e2e", "miner-flow", "mfu"),
+        choices=("gpu-e2e", "miner-flow", "mfu", "miner-cycle", "gpu8", "proofs"),
         default="gpu-e2e",
-        help="miner-flow: 1x RTX 5090, vastai/pytorch image, scripts/vast_miner_flow_remote.sh; "
+        help="gpu-e2e: --num-gpus x RTX 5090, pinned GPU image, scripts/vast_e2e_remote.sh; "
+        "gpu8: gpu-e2e on 8x RTX 5090; "
+        "proofs: gpu-e2e + PROOF_STEPS (GPU tests, production sdpa-flash attention) on one "
+        "2x RTX 5090 host, any driver (--eight-gpu-qualified: 8x, qualified drivers only); "
+        "miner-flow: 1x RTX 5090, vastai/pytorch image, scripts/vast_miner_flow_remote.sh; "
+        "miner-cycle: --num-gpus (default 1) x RTX 5090, vastai/pytorch image, "
+        "scripts/vast_miner_cycle_remote.sh; "
         "mfu: --num-gpus x RTX 5090, vastai/pytorch image, pcie_bw >= --min-pcie-bw, "
         "scripts/vast_mfu_remote.sh",
     )
-    p.add_argument("--num-gpus", type=int, choices=(1, 2, 4, 8), default=2, help="mfu profile")
+    p.add_argument(
+        "--num-gpus",
+        type=int,
+        choices=(1, 2, 4, 8),
+        help="GPUs per host, every profile; default 2 (miner-flow, miner-cycle: 1; gpu8: 8)",
+    )
+    drivers = p.add_mutually_exclusive_group()
+    drivers.add_argument(
+        "--driver",
+        action="append",
+        metavar="VERSION",
+        help="only this driver_version (repeatable); must be in scripts/genuine_cuda_ci.py DRIVERS",
+    )
+    drivers.add_argument(
+        "--any-driver",
+        action="store_true",
+        help="no driver_version filter; for --profile mfu, where bitwise replay is not compared",
+    )
+    p.add_argument(
+        "--eight-gpu-qualified",
+        action="store_true",
+        help="proofs profile: rent 8x RTX 5090, only with a driver in QUALIFIED_DRIVERS",
+    )
     p.add_argument("--min-pcie-bw", type=float, default=50.0, help="mfu profile, GB/s")
     p.add_argument("--remote-env", action="append", default=[], metavar="KEY=VAL")
     a = p.parse_args(argv)
     a.remote_script = {
         "miner-flow": "vast_miner_flow_remote.sh",
         "mfu": "vast_mfu_remote.sh",
+        "miner-cycle": "vast_miner_cycle_remote.sh",
     }.get(a.profile, "vast_e2e_remote.sh")
+    gpus = {"miner-flow": 1, "miner-cycle": 1, "gpu8": 8}.get(a.profile, 2)
+    if a.eight_gpu_qualified:
+        if a.profile != "proofs" or a.any_driver:
+            p.error("--eight-gpu-qualified needs --profile proofs and excludes --any-driver")
+        gpus = 8
+    if a.profile == "proofs":
+        a.any_driver = a.any_driver or not (a.eight_gpu_qualified or a.driver)
+    if a.boot_retries is None:
+        a.boot_retries = 0 if a.profile == "proofs" else 2
+    if a.profile in ("miner-flow", "gpu8", "proofs") and a.num_gpus not in (None, gpus):
+        p.error(f"--profile {a.profile} supports only --num-gpus {gpus}")
+    a.num_gpus = a.num_gpus or gpus
+    if a.remote_script == "vast_e2e_remote.sh":
+        # Appended: env(1) keeps the last KEY=VAL, so --remote-env cannot contradict the host.
+        a.remote_env = [*a.remote_env, f"HT_E2E_GPUS={a.num_gpus}"]
+        if a.profile == "proofs":
+            a.remote_env += [
+                f"HT_E2E_PROOFS={' '.join(PROOF_STEPS)}",
+                f"HT_E2E_PROOF_TESTS={' '.join(PROOF_TESTS)}",
+            ]
+    if unknown := sorted(set(a.driver or ()) - set(QUALIFIED_DRIVERS)):
+        p.error(f"--driver {', '.join(unknown)} not in scripts/genuine_cuda_ci.py DRIVERS")
     if any("=" not in kv or not kv.partition("=")[0].isidentifier() for kv in a.remote_env):
         p.error("--remote-env must be KEY=VAL with an identifier KEY")
     if (
@@ -684,6 +868,17 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     ):
         p.error("positive budget/minutes and >=5s spacing against the real API required")
     return a
+
+
+def _mask_remote_env(argv, remote_env) -> str:
+    """argv for the journal with every --remote-env VALUE hidden (KEY=***), any spelling."""
+    out = []
+    for tok in argv:
+        for kv in sorted(remote_env, key=len, reverse=True):  # TOK=ab must not leave b
+            if kv in tok:
+                tok = tok.replace(kv, kv.partition("=")[0] + "=***")
+        out.append(tok)
+    return shlex.join(out)
 
 
 def main(
@@ -697,27 +892,43 @@ def main(
     if not key:
         print("empty key file", file=sys.stderr)
         return 2
-    global IMAGE, NUM_GPUS, MIN_PCIE_BW
-    if a.profile == "miner-flow":
-        IMAGE, NUM_GPUS = MINER_FLOW_IMAGE, 1
+    global IMAGE, NUM_GPUS, MIN_PCIE_BW, ALLOWED_DRIVERS
+    NUM_GPUS = a.num_gpus
+    ALLOWED_DRIVERS = None if a.any_driver else tuple(a.driver or QUALIFIED_DRIVERS)
+    if a.profile in ("miner-flow", "miner-cycle", "mfu"):
+        IMAGE = MINER_FLOW_IMAGE
     if a.profile == "mfu":
-        IMAGE, NUM_GPUS = MINER_FLOW_IMAGE, a.num_gpus
         MIN_PCIE_BW = Decimal(str(a.min_pcie_bw))
     api = Api(a.api_base, key, a.evidence_dir / "journal.jsonl", min_gap=a.min_gap, sleep=sleep)
+    h = harness(a, api)
+
+    def stop(signum: int, _frame: Any) -> None:
+        # A service stop/restart: cancel like the watchdog does, never raise, so a signal can
+        # not abort a rescue/delete under way. No api.log: this thread may hold its lock.
+        h.result["signal"] = signum
+        h.cancel.set()
+        child = h.child
+        if not h.cleaned and child is not None and child.poll() is None:
+            child.kill()  # once cleanup runs, the child is the rescue: let it finish
+
+    saved = {s: signal.signal(s, stop) for s in (signal.SIGTERM, signal.SIGHUP)}
     api.log(
         "start",
         dry_run=a.dry_run,
         max_usd=a.max_usd,
         max_minutes=a.max_minutes,
-        argv=shlex.join(sys.argv[1:] if argv is None else argv),
+        argv=_mask_remote_env(sys.argv[1:] if argv is None else argv, a.remote_env),
         pid=os.getpid(),
     )
     try:
-        return harness(a, api).run()
+        return h.run()
     except Refused as e:
         api.log("refused", reason=str(e))
         print(f"REFUSED: {e}", file=sys.stderr)
         return 2
+    finally:
+        for s, old in saved.items():
+            signal.signal(s, old)
 
 
 if __name__ == "__main__":

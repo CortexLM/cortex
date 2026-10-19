@@ -8,6 +8,7 @@ is authoritative. Missing master routes leave forwarding pending, never accepted
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -18,7 +19,7 @@ import anyio
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from hypertrain.data.store import CorruptObjectError, ObjectNotFound
+from hypertrain.data.store import CorruptObjectError, ObjectNotFound, StoreError
 from hypertrain.data.stream_store import StreamStore, receive, spool
 from hypertrain.protocol import envelope_v2, relay_envelope
 from hypertrain.protocol.envelope import SignatureError
@@ -51,6 +52,10 @@ from hypertrain.protocol.relay_messages import (
 
 class RelayError(ValueError):
     """Authenticated contract, authorization, quota or lifecycle rejection."""
+
+
+class AssemblyMismatch(RelayError):
+    """Granted chunks are held but their concatenation is not the granted delta."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +255,22 @@ class Relay:
                 return
             if self.draining:
                 raise RelayError("relay draining; new grants disabled")
+            replaced = state.uploads.get(grant.replaces) if grant.replaces else None
+            if replaced is not None:
+                # Master-signed supersession of this miner's own unreceipted reservation;
+                # a replaced grant the relay never saw needs nothing removed.
+                old = UploadGrant.model_validate(replaced.grant.body)
+                if (old.w, old.hotkey, old.relay_id) != (grant.w, grant.hotkey, grant.relay_id):
+                    raise RelayError("replacement names another miner/round reservation")
+                if replaced.receipt is not None:
+                    raise RelayError("replaced upload already has a receipt")
+                if replaced.chunks:
+                    # Signed chunk custody keeps its retention promise; never drop it.
+                    raise RelayError("replaced upload already holds signed chunk custody")
+                assert grant.replaces is not None
+                del state.uploads[grant.replaces]
+                if state.nonces.get(old.nonce) == grant.replaces:
+                    del state.nonces[old.nonce]
             key_id = self._key(now, state)
             if len(state.uploads) >= self.max_uploads:
                 raise RelayError("retained upload quota exhausted")
@@ -399,11 +420,20 @@ class Relay:
             if not has_full_custody(grant, record.manifest, opportunity, chunks):
                 raise RelayError("completion requires exact timely full custody")
             with spool() as whole:
+                digest = hashlib.sha256()
                 for chunk in record.manifest.chunks:
                     with spool() as file:
                         await self.backing.get(chunk.chunk_sha256, chunk.len, file)
                         while data := file.read(64 << 10):
+                            digest.update(data)
                             whole.write(data)
+                if whole.tell() != grant.size or digest.hexdigest() != grant.delta_hash:
+                    # Deterministic: the held chunks can never assemble, so never retry.
+                    def mismatch(state: Journal) -> None:
+                        self._record(state, grant_hash).forward_error = AssemblyMismatch.__name__
+
+                    await self._change(mismatch)
+                    raise AssemblyMismatch("granted chunks do not assemble to delta_hash")
                 whole.seek(0)
                 await self.backing.put(whole, grant.delta_hash, grant.size)
             now = await self.now()
@@ -472,10 +502,15 @@ class Relay:
             if (
                 len(record.chunks) == len(record.manifest.chunks)
                 and record.master_acceptance is None
+                # Deterministic failures: retrying the same held bytes cannot succeed.
+                and record.forward_error
+                not in (AssemblyMismatch.__name__, CorruptObjectError.__name__)
             ):
                 try:
                     await self.complete(grant_hash)
-                except RelayError as error:
+                except AssemblyMismatch:
+                    continue  # recorded by complete; custody of each chunk stays retrievable
+                except (RelayError, StoreError) as error:
                     # A missed completion deadline must not prevent retained-byte retrieval.
                     failure_name = type(error).__name__
 
@@ -490,6 +525,12 @@ class Relay:
                 except httpx.HTTPError:
                     # Exact failure recorded by complete; custody remains retrievable.
                     continue
+                except (OSError, ValueError) as error:
+                    # Retriable (TimeoutError, ValidationError, SignatureError, I/O): record
+                    # nothing terminal so a later recover() tries again; never log payloads.
+                    logging.getLogger(__name__).warning(
+                        "relay recover deferred: %s", type(error).__name__
+                    )
 
     def _scope(self, record: UploadRecord, hashes: list[str]) -> list[Pin]:
         if (

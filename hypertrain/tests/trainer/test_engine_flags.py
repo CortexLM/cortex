@@ -10,7 +10,7 @@ import hypertrain.trainer  # noqa: F401  (determinism before torch)
 
 # isort: split
 import torch
-from test_golden_replay import GOLDEN
+from test_golden_replay import _expect_golden
 from trainer_fixtures import assignment, make_cfg, sample
 
 from hypertrain.trainer.codec_v2 import decode_v2
@@ -41,11 +41,13 @@ def test_codec_v2_roundtrip_same_ef(codec: str) -> None:
     assert rep.result == "MATCH"
 
 
-def test_fp8_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fp8_off_by_default(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
     monkeypatch.delenv("HT_FP8", raising=False)
     cfg = make_cfg(dtype="bf16")
     assert not fp8_enabled(cfg.model)
-    assert _run(cfg).leaves_root in GOLDEN["loop-dense-adamw-bf16"]
+    _expect_golden("loop-dense-adamw-bf16", _run(cfg).leaves_root, request)
 
 
 def test_fp8_flag_repeatable(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -12,6 +14,7 @@ import hypertrain.trainer  # noqa: F401  (determinism before torch)
 # isort: split
 import torch
 
+from hypertrain.trainer import attention as A
 from hypertrain.trainer.attention import Backend, attention, select_backend
 
 
@@ -74,3 +77,74 @@ def test_backward_bitwise() -> None:
     from scripts.attention_spike import spike
 
     assert spike(torch.device("cuda", int(os.environ["HT_GENUINE_CUDA_INDEX"])))["chosen"]
+
+
+def _sdpa_raising(when: Callable[[bool], bool], calls: list[bool]) -> Callable[..., torch.Tensor]:
+    """F.scaled_dot_product_attention raising the RTX 5090 error when when(enable_gqa)."""
+    real = A.F.scaled_dot_product_attention
+
+    def sdpa(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kw: Any) -> torch.Tensor:
+        calls.append(kw["enable_gqa"])
+        if when(kw["enable_gqa"]):
+            raise RuntimeError("No available kernel. Aborting execution.")
+        return real(q, k, v, **kw)
+
+    return sdpa
+
+
+def test_fallback_probed_once_when_native_kernel_missing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls: list[bool] = []
+    monkeypatch.setattr(A, "_PATHS", {})
+    monkeypatch.setattr(A.F, "scaled_dot_product_attention", _sdpa_raising(lambda gqa: gqa, calls))
+    g = torch.Generator().manual_seed(0)
+    q, k, v = (torch.randn(2, n, 33, 16, generator=g) for n in (8, 2, 2))
+    with caplog.at_level("WARNING", logger=A.__name__):
+        first = attention(q, k, v, "sdpa-flash")
+        probed = list(calls)
+        second = attention(q, k, v, "sdpa-flash")
+    assert probed[0] and len(probed) > 1  # native enable_gqa tried first, then expanded K/V
+    assert calls[len(probed) :] == [False]  # no re-probe
+    assert [r.getMessage().split()[2] for r in caplog.records] == ["flash+expanded-kv"]
+    assert A.chosen_paths() == ["flash+expanded-kv"]
+    assert torch.equal(first, second)
+    assert (first - attention(q, k, v)).abs().max() < 1e-5
+
+
+def test_no_flash_path_stops_instead_of_serving_another_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only flash is qualified: no mem-efficient and no math fallback under the sdpa-flash name."""
+    calls: list[bool] = []
+    monkeypatch.setattr(A, "_PATHS", {})
+    monkeypatch.setattr(A.F, "scaled_dot_product_attention", _sdpa_raising(lambda gqa: True, calls))
+    q, k, v = (torch.randn(2, n, 33, 16) for n in (8, 2, 2))
+    with pytest.raises(RuntimeError, match="no flash path"):
+        attention(q, k, v, "sdpa-flash")
+    assert A.PATHS == ("flash", "flash+expanded-kv")
+    assert A._PATHS == {}  # a refusal is not cached as a choice
+
+
+@pytest.mark.parametrize("dt", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("h,kvh", [(8, 2), (8, 1)])
+def test_expanded_kv_close_to_native_gqa(dt: torch.dtype, h: int, kvh: int) -> None:
+    g = torch.Generator().manual_seed(h * 7 + kvh)
+    q, k, v = (torch.randn(2, n, 33, 16, generator=g).to(dt) for n in (h, kvh, kvh))
+    native = A._sdpa("flash", q, k, v)
+    expanded = A._sdpa("flash+expanded-kv", q, k, v)
+    tol = 2e-2 if dt == torch.bfloat16 else 1e-5
+    assert (native.float() - expanded.float()).abs().max() < tol
+
+
+def test_layout_rejected_after_probe_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(A, "_PATHS", {})
+    g = torch.Generator().manual_seed(0)
+    q, k = (torch.randn(2, n, 33, 16, generator=g) for n in (8, 2))
+    v = torch.randn(2, 2, 16, 33, generator=g).transpose(-1, -2)  # stride(-1) != 1: no fused kernel
+    assert A._path(q.device, q.dtype, 4, 16) == "flash"  # the contiguous probe accepts flash
+    with pytest.raises(RuntimeError, match="No available kernel"):
+        attention(q, k, v, "sdpa-flash")  # no silent math: the run stops
+    assert torch.equal(
+        attention(q, k, v.contiguous(), "sdpa-flash"), A._sdpa("flash", q, k, v.contiguous())
+    )

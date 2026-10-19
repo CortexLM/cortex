@@ -44,6 +44,59 @@ def build_corpus(root: Path, n_train: int = 2, n_holdout: int = 1) -> Path:
     return root
 
 
+# `fast` marker: the CPU mining-path subset scripts/check-fast.sh runs in under 2 minutes
+# (protocol, beacon, data, ledger, aggregator, trainer core, auditor, service contract/rounds,
+# miner client). Chosen from --durations profiles on 2026-10-18; a file is listed, not a test,
+# so new tests in these files are fast by default. FAST_SLOW_TESTS are the few multi-second
+# scale/perf cases inside those files that add nothing to the mining path.
+FAST_DIRS = (
+    "tests/protocol",
+    "tests/beacon",
+    "tests/data",
+    "tests/datasets",
+    "tests/ledger",
+    "tests/aggregator",
+    "tests/ops",
+)
+FAST_FILES = (
+    "tests/test_smoke.py",
+    "tests/trainer/test_trainer_core.py",
+    "tests/auditor/test_auditor.py",
+    "tests/challenge/test_contract.py",
+    "tests/challenge/test_rounds.py",
+    "tests/miner/test_miner.py",
+    "tests/miner/test_segments_e2e.py",
+    "tests/miner/test_selfcheck.py",
+    "tests/miner/test_server_keys.py",
+    "tests/miner/test_cli_v3.py",
+    "tests/miner/test_update.py",
+    "tests/miner/test_genesis_cpu_binding.py",
+    "tests/miner/test_hardware_class.py",
+    "tests/miner/test_client_network_v2.py",
+    "tests/miner/test_multigpu_cli.py",
+    "tests/miner/test_coldkey_ops.py",
+    "tests/challenge/test_trial_export.py",
+)
+FAST_SLOW_TESTS = (
+    "tests/data/test_parts.py::test_oversize_input_never_publishes_index",
+    "tests/aggregator/test_weighted_v2.py::"
+    "test_scale_roster_when_unique_owner_caps_saturate_in_many_stages[1024]",
+    "tests/ledger/test_ledger.py::test_cap_65536_largest_ties_by_hotkey_rest_carried",
+    "tests/challenge/test_contract.py::test_get_weights_p99_under_2s_with_65536_hotkeys",
+)
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    root = Path(str(config.rootpath))
+    for item in items:
+        rel = Path(item.fspath).relative_to(root).as_posix()
+        nodeid = f"{rel}::{item.name}"
+        if (
+            rel in FAST_FILES or any(rel.startswith(d + "/") for d in FAST_DIRS)
+        ) and nodeid not in FAST_SLOW_TESTS:
+            item.add_marker(pytest.mark.fast)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def corpus_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Hermetic corpus: tests and their subprocesses read HYPERTRAIN_DATA_DIR, never <repo>/data.

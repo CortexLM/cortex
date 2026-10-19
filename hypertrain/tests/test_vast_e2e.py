@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import shlex
+import signal
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +26,7 @@ spec.loader.exec_module(vast)
 
 KEY = "fake-secret-key-0123456789"
 IID = 777
+ARGS = ["--key-file", "k", "--max-usd", "1", "--max-minutes", "1"]  # parse() only
 
 
 class Fake:
@@ -34,6 +39,7 @@ class Fake:
         self.throttle: dict[str, int] = {}
         self.asks: list[str] = []
         self.gone: set[str] = set()
+        self.queries: list[dict] = []
 
     def offers(self) -> list[dict]:
         base = dict(
@@ -46,6 +52,8 @@ class Fake:
             inet_down=1200,
             storage_cost=0.2,
             machine_id=1,
+            cuda_max_good=13.2,
+            driver_version="580.178.04",
         )
         return [
             base | {"id": 11, "dph_total": self.dph + 0.3, "machine_id": 2},
@@ -64,8 +72,14 @@ class Fake:
             return 200, {"id": 1, "credit": self.credit}
         if key == "GET /api/v0/bundles/":
             q = json.loads(parse_qs(urlsplit(url).query)["q"][0])
-            assert q["num_gpus"] == {"eq": 2} and q["gpu_name"] == {"eq": "RTX 5090"}
-            return 200, {"offers": self.offers()}
+            assert q["num_gpus"] == {"eq": vast.NUM_GPUS} and q["gpu_name"] == {"eq": "RTX 5090"}
+            self.queries.append(q)
+            if "driver_version" in q:  # real API answer, 2026-10-19
+                return 400, {"error": "driver_vers in None: query values can't be None"}
+            # Real API: sorted by price, server-side dph_total floor, at most `limit` offers.
+            floor = q.get("dph_total", {}).get("gte", 0)
+            rows = sorted(self.offers(), key=lambda o: o["dph_total"])
+            return 200, {"offers": [o for o in rows if o["dph_total"] >= floor][: q["limit"]]}
         if method == "PUT" and path.startswith("/api/v0/asks/"):
             if path in self.gone:
                 return 400, {"success": False, "error": "no_such_ask"}
@@ -280,6 +294,58 @@ def test_host_stuck_booting_is_replaced_by_next_offer(fake, tmp_path):
     assert json.loads((tmp_path / "ev/harness-result.json").read_text())["absent"] is True
 
 
+def test_every_host_stuck_still_ends_with_parsed_absence(fake, tmp_path):
+    # Real run (instance 56659539): ssh never accepted the key, boot_timeout, DELETE 200, then
+    # the run ended with no cleanup_done and no listing after the boot-time absence check.
+    class NeverReady(Scripted):
+        def ssh_probe(self, host, port):
+            self.probe_error = "root@127.0.0.1: Permission denied (publickey)."
+            return False
+
+    rc, journal, _ = run(
+        fake, tmp_path, "--boot-timeout", "0.3", "--boot-retries", "0", harness=NeverReady
+    )
+    ev = events(journal)
+    assert rc == 1 and fake.asks == ["/api/v0/asks/12/"]
+    assert ev.index("boot_timeout") < ev.index("cleanup_start") < ev.index("cleanup_done")
+    listed = [i for i, j in enumerate(journal) if j.get("path", "").startswith("/api/v1/")]
+    assert listed[-1] > ev.index("cleanup_start")  # absence re-proved at the end
+    done = journal[ev.index("cleanup_done")]
+    assert done["absent"] is True and done["deleted"] is True
+
+
+def test_every_host_stuck_alerts_when_it_reappears(fake, tmp_path):
+    class NeverReady(Scripted):
+        def ssh_probe(self, host, port):
+            return False
+
+        def cleanup(self, reason):
+            fake.deleted, fake.linger = True, 100  # the deleted host is listed again
+            super().cleanup(reason)
+
+    rc, _, _ = run(
+        fake, tmp_path, "--boot-timeout", "0.3", "--boot-retries", "0", harness=NeverReady
+    )
+    assert rc == 3
+    assert json.loads((tmp_path / "ev/harness-result.json").read_text())["absent"] is False
+
+
+def test_excluded_offer_is_never_rented(fake, tmp_path, capsys):
+    rc, _, _ = run(fake, tmp_path, "--dry-run", "--exclude-offer", "12")
+    assert rc == 0 and json.loads(capsys.readouterr().out)["chosen_offer"]["id"] == 11
+
+
+def test_excluded_offer_honoured_when_profile_overrides_eligible(fake, tmp_path, capsys):
+    # scripts/genuine_cuda_tests.py and scripts/vast_parity.py override eligible() without the
+    # exclude check: --exclude-offer was a silent no-op there.
+    class OwnFilter(Scripted):
+        def eligible(self, o):
+            return vast.eligible(o)
+
+    rc, _, _ = run(fake, tmp_path, "--dry-run", "--exclude-offer", "12", harness=OwnFilter)
+    assert rc == 0 and json.loads(capsys.readouterr().out)["chosen_offer"]["id"] == 11
+
+
 def test_vanished_offer_falls_back_to_next(fake, tmp_path):
     fake.gone = {"/api/v0/asks/12/"}
     rc, journal, _ = run(fake, tmp_path)
@@ -306,6 +372,29 @@ def test_key_reattached_after_permission_denied(fake, tmp_path):
     assert [j["event"] for j in journal].count("ssh_probe_failed") == 1
 
 
+@pytest.mark.parametrize("during", ["remote", "rescue"])
+def test_stop_signals_never_skip_rescue_or_delete(fake, tmp_path, during):
+    class Stopped(Scripted):
+        def run_remote(self):
+            if during == "remote":  # service manager stop/restart mid-run
+                os.kill(os.getpid(), signal.SIGTERM)
+                assert self.cancel.is_set()
+                return 143
+            return 0
+
+        def rescue(self):
+            os.kill(os.getpid(), signal.SIGTERM)  # a stop landing while cleanup runs
+            os.kill(os.getpid(), signal.SIGHUP)  # and the other stop signal right after
+            return super().rescue()
+
+    before = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)
+    rc, journal, _ = run(fake, tmp_path, harness=Stopped)
+    assert (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)) == before
+    result = json.loads((tmp_path / "ev/harness-result.json").read_text())
+    assert rc == 1 and fake.deleted and result["absent"] is True and not result["remote_ok"]
+    assert (tmp_path / "ev/out/result.json").exists() and "cleanup_done" in events(journal)
+
+
 def test_absence_never_confirmed_alerts(fake, tmp_path):
     fake.linger = 100
     rc, _, _ = run(fake, tmp_path)
@@ -315,9 +404,9 @@ def test_absence_never_confirmed_alerts(fake, tmp_path):
 
 @pytest.fixture
 def mfu_globals():
-    saved = vast.IMAGE, vast.NUM_GPUS, vast.MIN_PCIE_BW
+    saved = vast.IMAGE, vast.NUM_GPUS, vast.MIN_PCIE_BW, vast.ALLOWED_DRIVERS
     yield
-    vast.IMAGE, vast.NUM_GPUS, vast.MIN_PCIE_BW = saved
+    vast.IMAGE, vast.NUM_GPUS, vast.MIN_PCIE_BW, vast.ALLOWED_DRIVERS = saved
 
 
 def test_mfu_profile_picks_fast_pcie_host_and_passes_remote_env(fake, tmp_path, mfu_globals):
@@ -353,9 +442,357 @@ def test_mfu_eligibility_floors(mfu_globals):
     assert not vast.eligible({**o, "cuda_max_good": 13.0})
     assert not vast.eligible({k: v for k, v in o.items() if k != "pcie_bw"})
     vast.MIN_PCIE_BW = None
-    assert vast.eligible({k: v for k, v in o.items() if k not in ("pcie_bw", "cuda_max_good")})
+    assert vast.eligible({k: v for k, v in o.items() if k != "pcie_bw"})
+
+
+def test_cuda_floor_enforced_without_pcie(mfu_globals):
+    vast.MIN_PCIE_BW = None
+    o = Fake().offers()[1]
+    assert vast.eligible(o | {"cuda_max_good": 13.2})
+    assert not vast.eligible(o | {"cuda_max_good": 13.0})
+    assert not vast.eligible({k: v for k, v in o.items() if k != "cuda_max_good"})
+
+
+def test_num_gpus_applies_to_default_profile(fake, tmp_path, capsys, mfu_globals):
+    offers = fake.offers
+    fake.offers = lambda: [*offers(), offers()[1] | {"id": 14, "num_gpus": 8, "dph_total": 2.0}]
+    rc, _, _ = run(fake, tmp_path, "--num-gpus", "8", "--dry-run", usd="10")
+    assert rc == 0 and fake.queries[-1]["num_gpus"] == {"eq": 8}
+    chosen = json.loads(capsys.readouterr().out)["chosen_offer"]
+    assert chosen["id"] == 14 and chosen["num_gpus"] == 8
+
+
+def test_miner_flow_refuses_num_gpus_other_than_one(capsys):
+    argv = [*ARGS, "--profile", "miner-flow"]
+    assert vast.parse(argv).num_gpus == 1
+    with pytest.raises(SystemExit) as e:
+        vast.parse([*argv, "--num-gpus", "2"])
+    assert e.value.code == 2 and "--profile miner-flow" in capsys.readouterr().err
+
+
+def test_default_evidence_dir_is_repo_relative(fake, tmp_path, monkeypatch, mfu_globals):
+    monkeypatch.setattr(vast, "ROOT", tmp_path)
+    (tmp_path / "key").write_text(KEY + "\n")
+    argv = ["--key-file", str(tmp_path / "key"), "--max-usd", "6", "--max-minutes", "90"]
+    assert vast.parse(argv).evidence_dir == tmp_path / ".evidence/vast"
+    argv += ["--api-base", fake.url, "--min-gap", "0", "--dry-run"]
+    assert vast.main(argv, harness=Scripted, sleep=lambda s: None) == 0
+    assert (tmp_path / ".evidence/vast/journal.jsonl").is_file()
+
+
+def test_driver_filter_in_query_and_eligible(fake, tmp_path, mfu_globals):
+    base = fake.offers()[1]
+    shape = [("615.71.09", 0.1), ("580.178.04", 0.4), ("570.211.01", 0.3), (None, 0.2)]
+    offers = [
+        base | {"id": 20 + i, "dph_total": d, "driver_version": v} for i, (v, d) in enumerate(shape)
+    ]
+    del offers[3]["driver_version"]
+    fake.offers = lambda: offers
+
+    def dry(*extra):
+        rc, journal, _ = run(fake, tmp_path, "--dry-run", *extra)
+        chosen = [j for j in journal if j["event"] == "offer_chosen"]
+        return rc, [(j["eligible"], j["quote"]["id"]) for j in chosen[-1:]]
+
+    # The allow-list is applied client-side only: the server answers 400 to a driver filter.
+    assert dry() == (0, [(2, 22)])
+    assert dry("--driver", "580.178.04") == (0, [(1, 21)])
+    assert dry("--any-driver") == (0, [(4, 20)])
+    assert not any("driver_version" in q for q in fake.queries)
+    with pytest.raises(SystemExit):
+        vast.parse([*ARGS, "--driver", "999.0"])
+
+
+def test_refusal_counts_driver_rejections(fake, tmp_path, mfu_globals):
+    offers = fake.offers
+    fake.offers = lambda: [o | {"driver_version": "615.71.09"} for o in offers()]
+    rc, journal, _ = run(fake, tmp_path, "--dry-run")
+    reason = next(j["reason"] for j in journal if j["event"] == "refused")
+    assert rc == 2
+    assert reason == "no eligible 2x RTX 5090 offer among 3 (2 rejected by driver allow-list)"
+
+
+def test_qualified_offer_beyond_first_page_is_found(fake, tmp_path, capsys, mfu_globals):
+    base = fake.offers()[1] | {"driver_version": "615.71.09"}
+    cheap = [base | {"id": 100 + i, "dph_total": 0.1 + i / 1000} for i in range(70)]
+    good = base | {"id": 99, "dph_total": 0.5, "driver_version": "580.178.04"}
+    fake.offers = lambda: [*cheap, good]
+    rc, journal, _ = run(fake, tmp_path, "--dry-run")
+    assert rc == 0 and json.loads(capsys.readouterr().out)["chosen_offer"]["id"] == 99
+    assert [q.get("dph_total") for q in fake.queries] == [None, {"gte": cheap[63]["dph_total"]}]
+
+
+def test_refusal_says_search_was_capped(fake, tmp_path, mfu_globals, monkeypatch):
+    monkeypatch.setattr(vast, "OFFER_PAGES", 2)
+    base = fake.offers()[1] | {"driver_version": "615.71.09"}
+    fake.offers = lambda: [base | {"id": 100 + i, "dph_total": 0.1 + i / 100} for i in range(200)]
+    rc, journal, _ = run(fake, tmp_path, "--dry-run")
+    reason = next(j["reason"] for j in journal if j["event"] == "refused")
+    assert rc == 2 and len(fake.queries) == 2
+    assert reason.endswith("search stopped after 2 pages of 64: cheaper-first market not exhausted")
+
+
+def test_refusal_says_search_stalled_on_one_price(fake, tmp_path, mfu_globals):
+    base = fake.offers()[1] | {"driver_version": "615.71.09"}
+    flat = [base | {"id": 100 + i, "dph_total": 0.2} for i in range(64)]
+    fake.offers = lambda: [*flat, base | {"id": 99, "dph_total": 0.5}]
+    rc, journal, _ = run(fake, tmp_path, "--dry-run")
+    reason = next(j["reason"] for j in journal if j["event"] == "refused")
+    assert rc == 2 and len(fake.queries) == 2
+    assert reason.endswith("search stalled: 64 offers at 0.2 USD/h fill a page")
+
+
+def test_gpu8_profile_dry_run_selects_eight_gpu_qualified_offer(
+    fake, tmp_path, capsys, mfu_globals
+):
+    base = fake.offers()[1] | {"num_gpus": 8, "cuda_max_good": 13.2}
+    unqualified = [
+        ("615.71.09", 11.75),
+        ("575.64.03", 2.9),
+        ("590.44.01", 3.4),
+        ("550.163.01", 3.8),
+        ("560.35.03", 4.0),
+        ("565.77", 4.1),
+        ("600.12", 6.2),
+    ]
+    offers = [
+        base | {"id": 30 + i, "machine_id": 30 + i, "driver_version": v, "dph_total": d}
+        for i, (v, d) in enumerate(unqualified)
+    ]
+    offers += [
+        base | {"id": 40, "driver_version": "580.178.04", "dph_total": 4.28, "pcie_bw": 26.4},
+        base | {"id": 41, "driver_version": "595.84", "dph_total": 5.66, "pcie_bw": 27.0},
+    ]
+    fake.offers = lambda: offers
+    rc, _, _ = run(fake, tmp_path, "--profile", "gpu8", "--dry-run", minutes="30", usd="10")
+    chosen = json.loads(capsys.readouterr().out)["chosen_offer"]
+    assert rc == 0 and not any(m == "PUT" for m, _ in fake.calls)
+    assert fake.queries[-1]["num_gpus"] == {"eq": 8}
+    assert chosen["num_gpus"] == 8 and chosen["dph_total"] == 4.28
+    assert chosen["driver_version"] in vast.QUALIFIED_DRIVERS
+    with pytest.raises(SystemExit):
+        vast.parse([*ARGS, "--profile", "gpu8", "--num-gpus", "2"])
+
+
+def test_gpu_e2e_remote_gets_host_gpu_count(tmp_path):
+    class Capture(vast.Harness):
+        def sh(self, command, **kw):
+            self.command = command
+            return 0
+
+    a = vast.parse(
+        [
+            *ARGS,
+            "--evidence-dir",
+            str(tmp_path),
+            "--profile",
+            "gpu8",
+            "--remote-env",
+            "HT_E2E_GPUS=2",
+        ]
+    )
+    h = Capture(a, vast.Api("http://127.0.0.1:9", KEY, tmp_path / "j.jsonl"))
+    assert h.run_remote() == 0
+    words = shlex.split(h.command)
+    assert words[words.index("bash") - 1] == "HT_E2E_GPUS=8"  # env(1): the last value wins
+    remote = (vast.ROOT / "scripts/vast_e2e_remote.sh").read_text()
+    assert 'N = int(os.environ.get("HT_E2E_GPUS", "2"))' in remote
+
+
+@pytest.mark.parametrize("ranks", [2, 8])
+def test_gpu_e2e_remote_runs_on_cpu_and_keeps_rank_logs(tmp_path, ranks):
+    pytest.importorskip("torch")
+    bindir = Path(sys.executable).parent
+    if not (bindir / "hypertrain-miner").exists():
+        pytest.skip("hypertrain-miner not installed next to this interpreter")
+    env = {
+        **os.environ,
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+        "HT_E2E_BACKEND": "cpu",
+        "HT_E2E_GPUS": str(ranks),
+        "HT_E2E_PYTHON": sys.executable,
+        "HT_E2E_SRC": str(vast.ROOT),
+        "HT_E2E_OUT": str(tmp_path / "out"),
+        "HT_E2E_WORK": str(tmp_path / "work"),
+    }
+    script = vast.ROOT / "scripts/vast_e2e_remote.sh"
+    p = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=900)
+    log = tmp_path / "out/network_e2e.log"
+    assert p.returncode == 0, log.read_text()[-2000:] if log.exists() else p.stderr
+    e2e = json.loads((tmp_path / "out/e2e.json").read_text())
+    assert [r["auditor_match"] for r in e2e["rounds"]] == [True, True] and e2e["repeat_match"]
+    assert len(e2e["rounds"][0]["miner"]["files"]) == ranks * 4  # every rank's artifacts
+    # Every torchrun worker's stderr lands in the rescued out/ (the 8x5090 failure left none).
+    logs = sorted((tmp_path / "out/torchelastic").rglob("stderr.log"))
+    assert {p.parent.name for p in logs} == {str(r) for r in range(ranks)}
+
+
+def test_gpu_e2e_remote_forces_math_attention_for_the_fixture_model(tmp_path):
+    # Real 2x RTX 5090 (instance 56659094): every rank died in sdpa-flash with "No available
+    # kernel"; the fixture model is fp32, head_dim 4. Probe the env the remote gives its python.
+    probe = tmp_path / "bin"
+    probe.mkdir()
+    env_dump = tmp_path / "env.json"
+    (probe / "python").write_text(
+        f"#!/bin/sh\nenv | grep -E '^(HT_ATTN_BACKEND|PET_)' > {env_dump}\nexit 1\n"
+    )
+    (probe / "python").chmod(0o755)
+    env = {
+        **os.environ,
+        "HT_E2E_BACKEND": "cpu",
+        "HT_E2E_PYTHON": str(probe / "python"),
+        "HT_E2E_SRC": str(tmp_path),
+        "HT_E2E_OUT": str(tmp_path / "out"),
+    }
+    env.pop("HT_ATTN_BACKEND", None)
+    script = vast.ROOT / "scripts/vast_e2e_remote.sh"
+    subprocess.run(["bash", str(script)], env=env, capture_output=True, timeout=60, check=False)
+    seen = dict(line.split("=", 1) for line in env_dump.read_text().split())
+    assert seen["HT_ATTN_BACKEND"] == "math" and seen["PET_TEE"] == "3"
+
+
+def test_miner_cycle_profile_uses_new_remote_script(fake, tmp_path, capsys, mfu_globals):
+    a = vast.parse([*ARGS, "--profile", "miner-cycle"])
+    assert a.remote_script == "vast_miner_cycle_remote.sh" and a.num_gpus == 1
+    assert (vast.ROOT / "scripts" / a.remote_script).is_file()
+    rc, _, _ = run(fake, tmp_path, "--profile", "miner-cycle", "--dry-run")
+    assert rc == 0 and vast.NUM_GPUS == 1 and vast.IMAGE == vast.MINER_FLOW_IMAGE
+    assert json.loads(capsys.readouterr().out)["chosen_offer"]["id"] == 13
+
+
+def test_proofs_dry_run_prints_plan_with_unqualified_driver(fake, tmp_path, capsys, mfu_globals):
+    offers = fake.offers
+    fake.offers = lambda: [o | {"driver_version": "610.57.04"} for o in offers()]
+    rc, _, _ = run(fake, tmp_path, "--profile", "proofs", "--dry-run", minutes="45", usd="8")
+    chosen, plan = (json.loads(x) for x in capsys.readouterr().out.splitlines())
+    assert rc == 0 and not any(m == "PUT" for m, _ in fake.calls)
+    assert (
+        chosen["chosen_offer"]["id"] == 12 and chosen["chosen_offer"]["driver_qualified"] is False
+    )
+    assert plan["driver_qualified"] is False and plan["caps"]["drivers"] == "any"
+    assert [s.split(":")[0] for s in plan["steps"]] == [n for n, _ in vast.PROOF_PLAN]
+    assert plan["tests"] == list(vast.PROOF_TESTS) and "@sha256:" in plan["image"]
+    assert plan["caps"]["boot_retries"] == 0 and plan["caps"]["num_gpus"] == 2
+    assert "HT_E2E_PROOFS=***" in plan["remote_env"] and "HT_E2E_GPUS=***" in plan["remote_env"]
+    assert plan["worst_case_usd"] == chosen["chosen_offer"]["worst_case_usd"]
+
+
+def test_proofs_eight_gpu_only_on_explicit_flag_and_qualified_driver(
+    fake, tmp_path, capsys, mfu_globals
+):
+    base = fake.offers()[1] | {"num_gpus": 8}
+    fake.offers = lambda: [
+        base | {"id": 50, "dph_total": 3.0, "driver_version": "610.57.04"},
+        base | {"id": 51, "dph_total": 4.0, "driver_version": "580.178.04"},
+    ]
+    with pytest.raises(SystemExit):
+        vast.parse([*ARGS, "--profile", "proofs", "--num-gpus", "8"])
+    with pytest.raises(SystemExit):
+        vast.parse([*ARGS, "--profile", "proofs", "--eight-gpu-qualified", "--any-driver"])
+    rc, _, _ = run(
+        fake,
+        tmp_path,
+        "--profile",
+        "proofs",
+        "--eight-gpu-qualified",
+        "--dry-run",
+        minutes="45",
+        usd="8",
+    )
+    chosen, plan = (json.loads(x) for x in capsys.readouterr().out.splitlines())
+    assert rc == 0 and fake.queries[-1]["num_gpus"] == {"eq": 8}
+    assert chosen["chosen_offer"]["id"] == 51 and plan["driver_qualified"] is True
+
+
+def test_proofs_run_records_driver_qualified_false(fake, tmp_path, mfu_globals):
+    offers = fake.offers
+    fake.offers = lambda: [o | {"driver_version": "610.57.04"} for o in offers()]
+    rc, _, _ = run(fake, tmp_path, "--profile", "proofs", minutes="45", usd="8")
+    result = json.loads((tmp_path / "ev/harness-result.json").read_text())
+    # ran fine and cleaned up, but the exit code does not claim a qualified-driver pass
+    assert rc == 4 and result["remote_ok"] is True
+    assert result["driver_qualified"] is False and result["absent"] is True
+
+
+def test_driver_qualified_follows_the_fallback_host(fake, tmp_path, mfu_globals):
+    offers = fake.offers
+    fake.offers = lambda: [
+        o | {"driver_version": "580.178.04" if o["id"] == 12 else "610.57.04"} for o in offers()
+    ]
+
+    class StuckFirst(Scripted):
+        def ssh_probe(self, host, port):
+            return len(fake.asks) > 1  # qualified cheapest host never answers ssh
+
+    rc, _, _ = run(
+        fake,
+        tmp_path,
+        "--profile",
+        "proofs",
+        "--boot-timeout",
+        "0.3",
+        "--boot-retries",
+        "1",
+        harness=StuckFirst,
+        minutes="45",
+        usd="8",
+    )
+    result = json.loads((tmp_path / "ev/harness-result.json").read_text())
+    assert rc == 4 and fake.asks == ["/api/v0/asks/12/", "/api/v0/asks/11/"]
+    assert result["driver_qualified"] is False
+
+
+def test_proof_steps_and_tests_exist():
+    remote = (vast.ROOT / "scripts/vast_e2e_remote.sh").read_text()
+    assert all(f"step {name} " in remote for name, _ in vast.PROOF_PLAN)
+    for node in vast.PROOF_TESTS:
+        path, name = node.split("::")
+        assert f"def {name}(" in (vast.ROOT / path).read_text(), node
 
 
 def test_remote_env_must_be_key_value(tmp_path):
     with pytest.raises(SystemExit):
         vast.parse(["--key-file", "k", "--max-usd", "1", "--max-minutes", "1", "--remote-env", "X"])
+
+
+def test_dry_run_only_reads_and_masks_remote_env_values(fake, tmp_path, capsys, mfu_globals):
+    rc, _, _ = run(
+        fake, tmp_path, "--profile", "proofs", "--dry-run", "--remote-env", "TOK=hunter2",
+        minutes="45", usd="8",
+    )  # fmt: skip
+    out = capsys.readouterr().out
+    assert rc == 0 and "hunter2" not in out and "TOK=***" in out
+    assert fake.calls and {m for m, _ in fake.calls} == {"GET"}
+
+
+def test_pagination_keeps_an_existing_price_ceiling(fake, tmp_path, monkeypatch):
+    base = vast.offer_query
+    monkeypatch.setattr(
+        vast, "offer_query", lambda: {**base(), "limit": 1, "dph_total": {"lte": 0.7}}
+    )
+    run(fake, tmp_path, "--dry-run")  # refuses (page of one stalls); only the queries matter
+    assert len(fake.queries) > 1 and fake.queries[1]["dph_total"]["gte"] == 0.01
+    assert all(q["dph_total"].get("lte") == 0.7 for q in fake.queries)
+
+
+def test_journal_argv_never_holds_a_remote_env_value():
+    masked = vast._mask_remote_env(
+        ["--remote-env", "TOK=hunter2", "--remote-env=B=s3cret", "--dry-run"],
+        ["TOK=hunter2", "B=s3cret"],
+    )
+    assert "hunter2" not in masked and "s3cret" not in masked
+    assert "TOK=***" in masked and "B=***" in masked and "--dry-run" in masked
+
+
+@pytest.mark.parametrize(
+    "spelling", [["--remote", "TOK=secret"], ["--remote-e", "TOK=secret"], ["--remote=TOK=secret"]]
+)
+def test_vast_remote_env_masked_for_abbreviated_flags(fake, tmp_path, spelling):
+    # An abbreviation must never reach the journal unmasked: it is refused before any write.
+    with pytest.raises(SystemExit):
+        run(fake, tmp_path, "--dry-run", *spelling)
+    journal = tmp_path / "ev/journal.jsonl"
+    assert not journal.exists() or "secret" not in journal.read_text()
+    # Masking keys on the parsed values, so any spelling that did parse is hidden too.
+    masked = vast._mask_remote_env(["--dry-run", *spelling], ["TOK=secret"])
+    assert "secret" not in masked and "TOK=***" in masked

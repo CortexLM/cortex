@@ -78,12 +78,31 @@ device = "cpu"
 `api` is the service base, without `/v2/runs/...`. `NetworkMiner` requires pinned
 `run_id` and `owner_hotkey`; it verifies the signed wrapper before work.
 `state_source` and `image_digest` remain required shared config fields; v2 round
-inputs are fetched through the job/object endpoints. Relative paths resolve
+inputs are fetched through the job/object endpoints. Re-requesting the same
+round job (a miner restarting after a crash) returns the identical staged job;
+staged inputs that differ on the server answer 409, never an overwrite.
+Relative paths resolve
 against the TOML directory. Environment `HYPERTRAIN_MINER_<FIELD>` overrides
 matching TOML fields; unknown TOML keys reject. Other existing fields:
 `data_dir`, `poll_seconds` (2.0), `chunk_bytes` (67108864),
 `allow_file_upload` (false). Do not assume these v1-oriented tuning fields alter
 the v2 server's deadlines or relay chunk policy.
+
+## CPU smoke
+
+`bash scripts/mine-smoke-v2.sh` runs this miner path offline on CPU: it starts the
+real challenge app (tiny test-ledger fixture run, throwaway fixture keys) on
+127.0.0.1 plus a self-signed TLS relay on localhost, then runs `join-v2`,
+`escrow-lock`, four `trial_export`/`probe-v2`/`proof-v2` trials and
+`run-v2 --round 0` as separate `uv run --frozen hypertrain-miner` processes. A round
+needs a four-identity eligible roster, so three peer identities are graduated
+in-process by the operator role (`"mode": "in-process"` in the evidence). PASS
+requires every stage at rc 0 and the round-0 delta recorded; measured ~132 s,
+budget `MINE_SMOKE_V2_BUDGET_SECONDS` (default 300). Evidence (stage, rc, ms) goes
+to `$MINE_SMOKE_V2_EVIDENCE` or a fresh 0600 temp file; `MINE_SMOKE_V2_BREAK=<stage>`
+points one of the four miner stages at a closed port to check failure detection (any
+other name exits 2 before running). It proves the CLI
+chain, not CUDA, audits, settlement or production funding.
 
 ## Join, prove work, fund, graduate
 
@@ -106,15 +125,21 @@ which includes its nonce; `WorkScreenV2` is reserved by admission and nonce.
 alone. Retry the exact stored signed operation: changing expiry or signature does
 not create a new semantic attempt (`protocol/envelope_v2.py:replay_key`).
 
-For each challenge, obtain the coordinator-signed envelope from
-`GET /v2/runs/{run_id}/join/{admission_id}/challenge`. The operator must supply the
-matching staged `IslandJobV1` and all files in its `object_paths` beside the job.
-The CLI does not download/stage an admission job automatically. Given those
-existing files:
+After `GET /v2/runs/{run_id}/join/{admission_id}/challenge` issues a challenge,
+the operator exports the matching staged `IslandJobV1`, its inputs and the signed
+challenge into a new or empty folder:
+
+```bash
+uv run --frozen python -m hypertrain.challenge.trial_export \
+  --api "$API" --run-id "$RUN_ID" --admission-id "$ADMISSION_ID" \
+  --admin-token-file /path/to/admin-token --out trial
+```
+
+Copy `trial/` to the miner, then run:
 
 ```bash
 uv run --frozen hypertrain-miner probe-v2 --config miner.toml \
-  --job trial/job.json --challenge challenge.json > proof.json
+  --job trial/job.json --challenge trial/challenge.json > proof.json
 uv run --frozen hypertrain-miner proof-v2 --config miner.toml --proof proof.json
 ```
 
@@ -146,6 +171,15 @@ then mature after vesting/dispute conditions. Transfers preserve origin units;
 fraud burns collectible exposure rather than redistributing it. Shadow work does
 not influence global theta; authorized production bootstrap issuance is a
 separate policy, not proof of market-backed collateral.
+
+Matured live rewards become weight in `GET /internal/v1/get_weights`. Each epoch answer first
+pays v1 entitlements, then fills the rest of its 10^6 mass with `available` units of live
+reward origins whose `mature_at` is at or before the drand round of `epoch_at`. Those units
+move to `paid` in the same transaction that stores the answer, so a repeated epoch request
+returns the stored bytes and pays nothing again; units over the mass pay in later epochs.
+Locked, disputed, pending, burned, transferred, shadow-bootstrap and genesis units are never
+paid. A hotkey missing from the metagraph is dropped after payment and its units burn to UID0
+(see `docs/findings/v2-weights-bridge.md`).
 
 ## Train one live round and watch disputes
 
@@ -230,6 +264,30 @@ an exact complete receipt or full original chunk coverage, authenticated healthy
 witnesses and original grant/assignment lineage. The master fetches/hash-checks
 original bytes before acceptance. Rescue preserves custody without backdating
 late acceptance or charging the miner for proven storage failure.
+Multi-chunk custody without a receipt disables the relay key at once only when
+the master holds the original and it proves every chunk hash. Otherwise the key
+is disabled only after rescued bytes hash to `delta_hash`: the grant could not
+tie those chunk hashes to the commit, so valid chunks that concatenate to the
+wrong delta answer 422 and leave the relay enabled. A rescue the relay cannot
+serve at all disables the key too: an HTTP error (including a backend 503), a
+signed response other than `SERVED`, a bad response signature or binding, a
+timeout, or streamed bytes that miss the signed, miner-committed chunk hash. Two
+pinned auditors already proved the failure and the relay cannot produce its own
+signed custody. The fallback answers `rescued: false, disabled: true`; the
+`relay-disabled` id is `relay_id:assignment_epoch:key_id` and earlier evidence wins.
+While a grant is live, `upload-grant` returns the same signed grant for the same
+chunk list and 409 for another list, unless the master holds the original delta
+and it proves the new list: then the honest list gets a new grant.
+That grant carries `replaces`, the digest of the live grant it supersedes (an
+optional `UploadGrant` field, omitted otherwise, so older grant digests are
+unchanged). The relay then drops its unreceipted reservation for that grant;
+it refuses the replacement when that upload has a receipt or belongs to another
+miner, round or relay, and a wrong `replaces` leaves the old reservation blocking.
+Upgrade order: deploy relays before the master. A master that emits `replaces`
+in an `UploadGrant` (commit e3e5343 onward) is rejected by a relay built before
+that commit (extra fields are forbidden). Roll relays first, then the master.
+A relay whose granted chunks do not assemble to `delta_hash` answers 400
+`AssemblyMismatch`, records it on the upload and skips it in later recovery.
 Retention release waits for finality, disputes and vesting; signed extensions,
 overlapping old/new keys and drain preserve existing retrieval authority.
 

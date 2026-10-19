@@ -184,7 +184,7 @@ CI publishes and attests both images to GHCR after each green build on `main`. T
 uv run --frozen python scripts/vast_e2e.py --key-file ~/.vast-key --max-usd 6 --max-minutes 90
 ```
 
-The script rents a single 2x RTX 5090 host with the pinned GPU image and syncs the current source. It runs the GPU self-check, the CUDA test selectors and a full Network v2 round trip (service, multi-GPU miner, auditor replay). It then rescues the results and always deletes the instance. Add `--dry-run` to see the selected offer and its worst-case cost.
+The script rents a single 2x RTX 5090 host with the pinned GPU image and syncs the current source. It runs the GPU self-check, the CUDA test selectors and a full Network v2 round trip (service, multi-GPU miner, auditor replay). It then rescues the results and always deletes the instance. Add `--dry-run` to see the selected offer and its worst-case cost; it makes read-only provider GET calls (credit and offer search) and creates nothing.
 
 ## Components
 
@@ -228,6 +228,7 @@ tests/        one directory per package
 ## Contributing
 
 - `uv sync --frozen --all-extras`, then `bash scripts/check.sh` before opening a pull request.
+- `bash scripts/mine-smoke-v2.sh` checks the network-v2 miner CLI chain end to end on CPU, offline (~2 min; see [docs/network-v2.md](docs/network-v2.md#cpu-smoke)).
 - Verification stays bitwise. Tolerance checks, obfuscation or trusted-hardware assumptions are out of scope for the security model.
 - When a route or message changes, update [docs/challenge-routes.md](docs/challenge-routes.md) and regenerate schemas with `uv run --frozen python -m hypertrain.protocol.schema docs/schemas`.
 - Publishing goes through `scripts/publish.sh`, which runs a strict secret scan and requires an out-of-band approval token.

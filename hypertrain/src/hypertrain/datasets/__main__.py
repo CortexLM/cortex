@@ -1,4 +1,4 @@
-"""python -m hypertrain.datasets build|verify|publish|sources."""
+"""python -m hypertrain.datasets build|verify|pin|register|publish|sources."""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+import httpx
+
 from hypertrain.datasets.build import build_mix
+from hypertrain.datasets.pin import pin_objects, register
 from hypertrain.datasets.shards16 import ShardSet16Manifest, shard_name16, verify_shards16
 
 
@@ -33,6 +36,20 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--limit-docs", type=int)
     v = sub.add_parser("verify")
     v.add_argument("data_dir", type=Path)
+    pn = sub.add_parser("pin", help="write the contract-2 samples/proofs objects of a shard set")
+    pn.add_argument("--data-dir", type=Path, required=True)
+    pn.add_argument("--out-objects", type=Path, required=True)
+    pn.add_argument("--holdout-dir", type=Path, help="holdout shard set (adds holdout_commit)")
+    rg = sub.add_parser("register", help="link pinned objects as a v2 run's dataset inputs")
+    rg.add_argument("--api", required=True, help="challenge base URL")
+    rg.add_argument("--run-id", required=True)
+    rg.add_argument("--admin-token-file", type=Path, required=True)
+    rg.add_argument("--objects", type=Path, required=True, help="pin --out-objects dir")
+    rg.add_argument(
+        "--state-dir", type=Path, required=True, help="the service's CHALLENGE_STATE_DIR"
+    )
+    rg.add_argument("--samples-hash", required=True)
+    rg.add_argument("--proofs-hash", required=True)
     pb = sub.add_parser("publish")
     pb.add_argument("data_dir", type=Path)
     pb.add_argument("--r2", type=Path, help="local target dir (content-addressed copy, tests)")
@@ -59,6 +76,27 @@ def main(argv: list[str] | None = None) -> int:
         errs = verify_shards16(a.data_dir, m)
         print("\n".join(errs) or "OK")
         return 1 if errs else 0
+    elif a.cmd in ("pin", "register"):
+        from hypertrain.data.store import LocalFSStore, StoreError
+
+        try:
+            if a.cmd == "pin":
+                rec = pin_objects(a.data_dir, LocalFSStore(a.out_objects), a.holdout_dir)
+                print(json.dumps(rec, indent=1))
+                return 0
+            with httpx.Client(base_url=a.api, timeout=120) as client:
+                return register(
+                    client,
+                    a.run_id,
+                    a.admin_token_file.read_text().strip(),
+                    a.objects,
+                    a.state_dir,
+                    a.samples_hash,
+                    a.proofs_hash,
+                )
+        except (ValueError, StoreError, OSError, httpx.HTTPError) as e:
+            print(f"{a.cmd}: {e}", file=sys.stderr)
+            return 1
     elif a.cmd == "publish-labels":
         from hypertrain.storage.publish import publish_dir
         from hypertrain.storage.r2 import R2Client, load_config

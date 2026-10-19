@@ -9,12 +9,18 @@ mkdir -p "$OUT"
 cd "$HT"
 export CUBLAS_WORKSPACE_CONFIG=:4096:8 CUDA_DISABLE_PTX_JIT=1 OMP_NUM_THREADS=1 PYTHONHASHSEED=0
 export HT_IMAGE_DIGEST=sha256:c16a28dd29df300eca0cfb5c5aeacb8947681708634e3cbc8639b530321fe2e2
+# torchrun reads PET_<flag>: tee every rank's stdout/stderr into $OUT, which is rescued. The
+# launcher's own stderr tail keeps only torchrun's summary, not the failing rank's traceback.
+export PET_LOG_DIR="$OUT/torchelastic" PET_TEE=3
+# The fixture model is fp32 with head_dim 4: the sdpa-flash kernel that select_backend qualifies
+# for sm_120 rejects both ("No available kernel"). Miner, auditor and repeat all inherit this.
+export HT_ATTN_BACKEND=${HT_ATTN_BACKEND:-math}
 
 step() {
-  local name=$1; shift
+  local name=$1 t0=$SECONDS; shift
   "$@" >"$OUT/$name.log" 2>&1
   local rc=$?
-  printf '%s\t%s\n' "$name" "$rc" >>"$OUT/steps.tsv"
+  printf '%s\t%s\t%s\n' "$name" "$rc" "$((SECONDS - t0))" >>"$OUT/steps.tsv"
   return $rc
 }
 : >"$OUT/steps.tsv"
@@ -42,8 +48,9 @@ if [ "$BACKEND" = cuda ]; then
   if "$PY" -c "import hypertrain.miner.admission as a; assert hasattr(a, 'main')" 2>/dev/null; then
     step selfcheck "$PY" -m hypertrain.miner.admission selfcheck
   fi
-  grep -rlE "skipif\([^)]*cuda|requires_cuda|mark\.cuda|cuda\.is_available\(\)" tests \
-    --include='test_*.py' | sort >"$OUT/cuda_test_files.txt" || true
+  # --profile proofs runs its explicit list (gpu_pytest below) instead of this discovery.
+  [ -n "${HT_E2E_PROOFS:-}" ] || grep -rlE "skipif\([^)]*cuda|requires_cuda|mark\.cuda|cuda\.is_available\(\)" \
+    tests --include='test_*.py' | sort >"$OUT/cuda_test_files.txt" || true
   if [ -s "$OUT/cuda_test_files.txt" ]; then
     step cuda_pytest "$PY" -m pytest -q -p no:cacheprovider $(cat "$OUT/cuda_test_files.txt")
   fi
@@ -73,12 +80,12 @@ spec = importlib.util.spec_from_file_location("svc", root / "tests/challenge/tes
 svc = importlib.util.module_from_spec(spec); sys.modules["svc"] = spec.loader and svc
 spec.loader.exec_module(svc)
 esc = svc.fixture
-N = 2
+N = int(os.environ.get("HT_E2E_GPUS", "2"))
 if backend == "cuda":
     driver = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
                             check=True, capture_output=True, text=True).stdout.split()
     sm = torch.cuda.get_device_properties(0).multi_processor_count
-    assert torch.cuda.device_count() == N, torch.cuda.device_count()
+    assert torch.cuda.device_count() % N == 0, (torch.cuda.device_count(), N)
     result.update(driver=driver, sm_count=sm, gpus=[torch.cuda.get_device_name(i) for i in range(N)])
 else:
     driver, sm = ["cpu-test"], 170
@@ -153,7 +160,8 @@ setup_v = esc.Setup(manifest, net.setup.policy, net.setup.admission_policy, net.
 per = manifest.training.batch_samples()
 
 def stage(d, w, start=None, ef=None):
-    job = esc.stage(setup_v, d, tuple(range(w * per, (w + 1) * per)), w)
+    # The fixture holds 16 rows: at N=8 a round takes 16 samples, so round 1 wraps around.
+    job = esc.stage(setup_v, d, tuple(i % len(setup_v.rows) for i in range(w * per, (w + 1) * per)), w)
     upd = {"deadline": int(time.time()) + 1800}
     if start is not None:
         (d / "start_state").write_bytes(start); (d / "ef_in").write_bytes(ef)
@@ -204,18 +212,55 @@ print(json.dumps({"ok": result["ok"]}))
 sys.exit(0 if result["ok"] else 1)
 PYEOF
 
+# --profile proofs (scripts/vast_e2e.py PROOF_STEPS / PROOF_TESTS): the GPU-only tests and the
+# production attention path, i.e. HT_ATTN_BACKEND unset so select_backend picks sdpa-flash on
+# sm_120. network_e2e above stays on math (fixture model: fp32, head_dim 4).
+gpu_pytest() {
+  # HT_GENUINE_CUDA_INDEX is the CUDA device index for these tests; a skip is a failure.
+  [ -n "${HT_E2E_PROOF_TESTS:-}" ] || return 2
+  env -u HT_ATTN_BACKEND HT_GENUINE_CUDA_INDEX=0 "$PY" -m pytest -rs -p no:cacheprovider \
+    --junitxml="$OUT/gpu-junit.xml" $HT_E2E_PROOF_TESTS || return
+  ! grep -qi skipped "$OUT/gpu_pytest.log" || return 12
+}
+mfu_dp2_check() {
+  "$PY" scripts/check_gpu_evidence.py --kind mfu "$OUT/mfu-dp2-flash.json" || return
+  "$PY" -c "import json, sys; e = json.load(open(sys.argv[1])); print(e['attention_backend'], e['attention_paths'])
+assert e['attention_backend'] == 'sdpa-flash' and e['replay_match'] is True
+assert e['attention_paths'] == ['flash'], e['attention_paths']" "$OUT/mfu-dp2-flash.json"
+}
+if [ "$BACKEND" = cuda ] && [ -n "${HT_E2E_PROOFS:-}" ]; then
+  step attn_select env -u HT_ATTN_BACKEND "$PY" -c "import hypertrain.trainer, torch
+from hypertrain.trainer.attention import attention, chosen_paths, select_backend
+d = torch.device('cuda', 0)
+b = select_backend(d)
+x = [torch.randn(1, h, 256, 128, device=d, dtype=torch.bfloat16) for h in (16, 8, 8)]
+attention(*x, b)  # production geometry: bf16, 2 q heads per kv head, head dim 128
+print(b, chosen_paths(), torch.__version__, torch.cuda.get_device_capability(0))
+assert b == 'sdpa-flash' and chosen_paths() == ['flash'], (b, chosen_paths())"
+  step gpu_pytest gpu_pytest
+  # 1B bf16 dp2 round + replay (head_dim 128): sdpa-flash inside real training, bitwise replay.
+  step mfu_dp2_flash env -u HT_ATTN_BACKEND "$PY" -m torch.distributed.run --standalone \
+    --nproc-per-node 2 scripts/run_mfu_dist.py --profile mfu-dense-1b-dp2 --device cuda \
+    --reduction zero2o --act-ckpt --nccl-pcie --warmup 1 --out "$OUT/mfu-dp2-flash.json"
+  step mfu_dp2_check mfu_dp2_check
+fi
+
 "$PY" - "$OUT" "$BACKEND" <<'PYEOF'
-import json, sys
+import json, os, sys
 from pathlib import Path
 out = Path(sys.argv[1])
-steps = dict(line.split("\t") for line in (out / "steps.tsv").read_text().splitlines() if line)
-steps = {k: int(v) for k, v in steps.items()}
+rows = [line.split("\t") for line in (out / "steps.tsv").read_text().splitlines() if line]
+steps = {r[0]: int(r[1]) for r in rows}
+seconds = {r[0]: int(r[2]) for r in rows}
 e2e = json.loads((out / "e2e.json").read_text()) if (out / "e2e.json").exists() else None
 files = (out / "cuda_test_files.txt")
 required = ["network_e2e"] + (["nvidia_smi"] if sys.argv[2] == "cuda" else [])
+if sys.argv[2] == "cuda":
+    required += os.environ.get("HT_E2E_PROOFS", "").split()
 ok = all(steps.get(k) == 0 for k in required) and bool(e2e and e2e["ok"]) and all(
     steps[k] == 0 for k in ("selfcheck", "cuda_pytest") if k in steps)
-json.dump({"ok": ok, "backend": sys.argv[2], "steps": steps, "e2e": e2e,
+json.dump({"ok": ok, "backend": sys.argv[2], "steps": steps, "seconds": seconds, "e2e": e2e,
+           "required": required,
            "cuda_test_files": files.read_text().split() if files.exists() else None},
           open(out / "result.json", "w"), indent=2, sort_keys=True)
 print("RESULT ok=%s steps=%s" % (ok, steps))

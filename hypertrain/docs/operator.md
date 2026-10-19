@@ -1,6 +1,6 @@
 # Operator guide
 
-This guide covers running hypertrain yourself: first locally, then on a Cortex master, then for a training run. Every block tagged `doctest` is run by `bash scripts/doctest_docs.sh` from the tree root against the local stack, in order, in one shell. Blocks tagged `doctest-skip:prod` need a real Cortex master. The script lists them but doesn't run them, and they were checked by reading them against the pinned Cortex docs (cortex@d738424: `deploy/README.md`, `docs/how-to/trust-root.md`, `docs/CHALLENGES.md`).
+This guide covers running hypertrain yourself: first locally, then on a Cortex master, then for a training run. Every block tagged `doctest` is run by `bash scripts/doctest_docs.sh` from the tree root against the local stack, in order, in one shell. Blocks tagged `doctest-skip:prod` need a real Cortex master. The script lists them but doesn't run them, and they were checked by reading them against the pinned Cortex docs (Cortex `deploy/README.md` and `docs/CHALLENGES.md`).
 
 Contents:
 
@@ -23,13 +23,23 @@ You need Python 3.12 through [uv](https://docs.astral.sh/uv/), `curl`, `jq`, `op
 uv sync --frozen --all-extras
 ```
 
-The training data is one pinned FineWeb-Edu parquet (ODC-By 1.0, revision `87f09149`), packed into byte-level u32 shards with a Merkle manifest under `data/`. The first run of `uv run --frozen python experiments/fetch_data.py` downloads and builds it (about 770 MB). After that, re-hash it offline with:
+The training data is a registry mix (`src/hypertrain/datasets/registry.json`, for example `od-a-proxy-v1`), tokenized with the pinned tokenizer into u16 shards with a Merkle manifest. A contract-2 run needs three steps. `build` reads the pinned sources you already fetched into `cache/<source id>/` plus `cache/tokenizer.json`; it never downloads. `pin` re-verifies the shards and writes the `samples` and `proofs` objects the service slices for every trial. It also prints the `training.dataset` fragment for the manifest; `--holdout-dir` adds `holdout_commit` from an existing holdout shard set. `register` copies both objects into the run's store under `CHALLENGE_STATE_DIR/runs/<run_id>/objects` and links them with `PUT /v2/runs/{run_id}/admin/dataset`. So it runs on the service host as the service's uid, after the run is created. The first run of a fresh state dir lives in the root store and is refused.
 
 ```bash doctest
-uv run --frozen python experiments/fetch_data.py --verify-only
+uv run --frozen python -m hypertrain.datasets pin --help >/dev/null
+uv run --frozen python -m hypertrain.datasets register --help >/dev/null
 ```
 
-It prints `merkle_root=8bd23b4f...`, `n_samples=196608` and `VERIFY OK`. Auditors and miners must hold the same bytes, since replay is bitwise.
+```bash doctest-skip:prod
+uv run --frozen python -m hypertrain.datasets build --mix od-a-proxy-v1 --out data --cache cache
+uv run --frozen python -m hypertrain.datasets pin --data-dir data --out-objects pinned \
+  --holdout-dir data/holdout | tee pin.json
+uv run --frozen python -m hypertrain.datasets register --api "$API" --run-id "$RUN" \
+  --admin-token-file /secrets/admin.token --objects pinned --state-dir "$CHALLENGE_STATE_DIR" \
+  --samples-hash "$(jq -r .samples_hash pin.json)" --proofs-hash "$(jq -r .proofs_hash pin.json)"
+```
+
+`python -m hypertrain.datasets verify data` re-hashes a shard set offline and prints `OK`. `pin` and `verify` exit 1 on any shard, unit or `merkle_root` mismatch, and `register` exits 1 on any 4xx/5xx and prints the service's answer. `proofs` holds `n_samples` paths of `depth` hashes (about `n_samples * depth * 67` bytes). Auditors and miners must hold the same bytes, since replay is bitwise.
 
 The protocol pieces each ship a QA script that runs the real code on small inputs. They are the quickest check that a checkout is sound:
 
@@ -72,7 +82,7 @@ The server is a FastAPI app, `hypertrain.challenge.app:app`. It reads its settin
 | `CHALLENGE_INTERNAL_TOKEN_FILE` | unset | master bearer for `get_weights` |
 | `CHALLENGE_ADMIN_TOKEN_FILE` | unset | operator bearer for `/v1/admin/*` and `/v1/aggregator/*` |
 | `CHALLENGE_WORKER_TOKEN_FILE` | unset | auditor bearer for `/v1/worker/*` |
-| `HYPERTRAIN_COORD_KEY_FILE` | unset | K_coord seed (32 raw bytes or 64 hex), never the Cortex leaf seed |
+| `HYPERTRAIN_COORD_KEY_FILE` | unset | K_coord seed (32 raw bytes or 64 hex) |
 | `HYPERTRAIN_OWNER_HOTKEY` | unset | ss58 of K_owner, the only key that may sign a RunManifest |
 | `HYPERTRAIN_EPOCH_SECONDS` | `4320` | Cortex epoch length |
 | `HYPERTRAIN_EPOCHS_PER_ROUND` | `1` | must equal the manifest `budget.epochs_per_round` |
@@ -132,6 +142,8 @@ uv run --frozen python -m hypertrain.beacon check --live
 
 `beacon check --live` fetches and verifies the latest round from the default relays; pass `--relay URL` (repeatable) to use your own.
 
+The server refuses v2 operations once it is more than two rounds (6 s) behind, so keep `uv run --frozen python -m hypertrain.beacon push --api "$API" --admin-token-file "$HT/secrets/admin_token"` running next to it. Every `--interval` (3 s) it asks the relays (`--relay URL`, repeatable, at least two distinct ones, all must agree) for the latest round, verifies it, and pushes the rounds the server is missing, oldest first, at most the last `--catch-up` (20). It prints one JSON line per tick, `{"pushed": [...], "latest": n, "known": n}`; `--once` runs a single tick, for cron. Relay, network, 408, 429 and 5xx failures are retried; exit codes: 0 after a good `--once` tick or on SIGTERM; 1 on any other service status (a 409 means a conflicting round, never overwritten), a failed `--once` tick or `--max-failures` (10) failures in a row; 2 on a usage error, a 401/403, or a token file that is not one `[A-Za-z0-9._~-]+` token.
+
 ### The manifest
 
 `hypertrain.protocol.example.example_manifest()` builds the example CPU manifest. Its `PROVENANCE` dict says where each hyperparameter comes from in the plan and its advisories:
@@ -177,6 +189,24 @@ RUN=$(jq -r .run_id "$HT/manifest.json")
 curl -fsS -H "$ADMIN" -H 'Content-Type: application/json' --data-binary @"$HT/manifest.json" \
   "$API/v1/admin/runs" | jq -e '.status == "created"'
 ```
+
+### Contract-2 manifest CLI
+
+Create editable CPU test-mode inputs, then build the owner-signed manifest and stage its six dependency objects before starting the service:
+
+```bash
+uv run --frozen python -m hypertrain.ops.manifest_v2 example --out /tmp/ex
+uv run --frozen python -m hypertrain.ops.manifest_v2 build \
+  --training /tmp/ex/training.json --policies /tmp/ex/policies.json \
+  --relays /tmp/ex/relays.json --owner-seed /private/owner.seed \
+  --exp-round 1000000 --state-dir /tmp/state --out /tmp/out
+```
+
+The example's `coord_pubkey`, two auditors, referees, `reward_authority` and relay public key are **placeholder SS58 public identities, not operational keys**. Replace them before a real run; `coord_pubkey` must match the service's K_coord. The example uses a tiny decoder, `ledger_mode="test"`, a pinned genesis allocation hash and one `.test` relay. It creates no dataset, genesis funding or training round. Custom CPU/GPU runs use the same three JSON shapes; provide valid model dimensions and parameter count, an audit budget of `2H`, and the H/step-bound-derived audit lease. Build computes `init_state_hash`; an existing value must match. It also rejects economics whose `reward_authority` differs from `training.coord_pubkey` (`PINNED_AUTHORITIES`) or whose `round_reward_units` differs from `training.budget.epochs_per_round * 1_000_000` (`MANIFEST_REWARD_BUDGET`). The service's configured auditor set must match `training.auditors`; the offline CLI cannot validate that configuration. Building needs the existing `trainer` extra (`uv sync --frozen --extra trainer`); help and example do not.
+
+The owner seed is an existing private, current-user-owned 0600 file containing 32 raw bytes or 64 hex characters; it is read through the miner's checked loader, never printed or copied. The shared loader strips leading/trailing ASCII whitespace bytes: provide hex for any raw seed whose first or last byte is ASCII whitespace. Choose an expiry drand round later than submission. Both commands require a new or empty output directory. Build writes `manifest.json`, `manifest-envelope.json`, five `policy-<name>.json` files, `relay-registry.json` and `index.json`. The index records `run_id`, `owner_ss58`, six canonical object hashes and hashes of the eight other files; it excludes its own hash.
+
+`--state-dir` is optional; when supplied, the six objects are stored under `/tmp/state/objects/<sha[:2]>/<sha>`. Start the service with `CHALLENGE_STATE_DIR=/tmp/state`, the matching K_coord and `HYPERTRAIN_OWNER_HOTKEY` set to `index.json`'s owner. Submit `manifest-envelope.json` to `POST /v2/admin/runs` with the admin bearer after the service has a valid beacon round. The CLI makes no HTTP requests. Success prints JSON; exit codes: 0 success, 2 input/validation error, 1 unexpected error.
 
 ### Configure, admit, unpause, pause
 
@@ -267,7 +297,7 @@ Relays per region: what is built is the budget line and the beacon side. The man
 
 ## 7. Production on a Cortex master
 
-These steps follow the pinned Cortex deploy guide. None of them run in the doc-test.
+These steps follow the Cortex deploy guide. None of them run in the doc-test.
 
 ### Secrets
 
@@ -281,19 +311,7 @@ install -d -m 0700 -o 65532 -g 65532 "$dir"
 chown 65532:65532 "$dir"/*.token "$dir/coord.key"
 ```
 
-`internal.token` is the master's bearer for `get_weights`. `admin.token` is yours. `worker.token` goes to auditors. `coord.key` is K_coord, which signs receipts, RoundOpen and Forfeit messages; its ss58 goes in the manifest `coord_pubkey`. It is not the Cortex leaf key.
-
-### Leaf key
-
-The leaf key signs the challenge's weight leaves for the trust root. Generate it offline; `keygen` refuses to overwrite a file:
-
-```bash doctest-skip:prod
-cortex keygen \
-  --seed-out /private/cortex-ceremony/hypertrain.seed \
-  --public-out /private/cortex-ceremony/hypertrain.pubkey
-```
-
-Install the seed on the master at `deploy/secrets/master/hypertrain.key` as a private regular file. The master fails closed if it's missing, group-readable, a symlink, or doesn't match the signed public key.
+`internal.token` is the master's bearer for `get_weights`. `admin.token` is yours. `worker.token` goes to auditors. `coord.key` is K_coord, which signs receipts, RoundOpen and Forfeit messages inside hypertrain; its ss58 goes in the manifest `coord_pubkey`. Cortex needs no key for hypertrain: it scores through `get_weights` and the gateway is the single source of truth.
 
 ### Registry row and burn-in
 
@@ -305,33 +323,17 @@ docker compose --project-directory . --env-file deploy/env/master.env \
 curl -fsS https://<master>/challenge/hypertrain/version
 ```
 
-A registered id that the trust root doesn't list runs without emission. That's the burn-in: check `/challenge/hypertrain/version`, `/health` and the logs, launch a small run, and let at least one round finalize before you sign.
+A registered id that the challenge profile doesn't list runs without emission. That's the burn-in: check `/challenge/hypertrain/version`, `/health` and the logs, launch a small run, and let at least one round finalize before you add the profile row.
 
-### Trust root activation (owner-signed, version 3 or higher)
+### Challenge profile activation
 
-Add [deploy/trust-root-v3-row.example.toml](../deploy/trust-root-v3-row.example.toml) to the owner's next challenges document (version 3 or higher, algorithm 3), with `public_key` set to the leaf public key and every share rebalanced so the total is exactly 10000 bps. Raise `version`, set `introduced_epoch`, then sign and verify offline:
-
-```bash doctest-skip:prod
-cortex trust-sign \
-  --kind challenges \
-  --input config/challenges.toml \
-  --seed-file /private/cortex-ceremony/owner.seed \
-  --signature-out config/challenges.toml.sig
-cortex trust-verify \
-  --challenges config/challenges.toml \
-  --measurements config/measurements.toml \
-  --owner-public config/owner.pubkey \
-  --gateway-public "$(tr -d '\n' </private/cortex-ceremony/gateway.pubkey)" \
-  --epoch 0
-```
-
-Drain and pause as the trust-root guide says, install the signed documents and version pins on the master and validators, resume, and check a new `sealed: true` latest response with algorithm 3 leaves and an independent validator recomputation. Hypertrain returns `full_share_mass = 10^6` per epoch, so any unverified or unvested mass burns rather than going to other miners.
+Add [deploy/challenge-profile-row.example.toml](../deploy/challenge-profile-row.example.toml) to `config/challenges.toml` in the Cortex checkout, with every share rebalanced so the total is exactly 10000 bps. Bump `version` (a third challenge needs `challenges_version >= 3`) and leave `introduced_epoch` at or below the current epoch: a future value stops the master from sealing older epochs and the gateway from decoding stored seals, which burns the emission. There is no signing step: the gateway is the source of truth, the master reads this file and the gateway serves it at `GET /v1/trust`, which validators fetch over HTTPS. Restart the master, then check the gateway's `/v1/trust` lists hypertrain, a new `sealed: true` latest response carries hypertrain weights, and an independent validator recomputation matches. Hypertrain returns `full_share_mass = 10^6` per epoch, so any unverified or unvested mass burns rather than going to other miners.
 
 ### Rollback
 
 - Image: the supervisor already rolls back a digest that fails `/version`. To hold a known-good image, set `pin = "sha256:..."` in the registry row.
-- Trust root: restoring an older signed file is rejected by version watermarks. Stop submission and sign a higher-version recovery profile through the same ceremony, for example one without the hypertrain row.
-- Retire: sign a higher version without the hypertrain row first, then remove the registry row. Deleting the row stops the container and keeps its volume.
+- Challenge profile: restoring an older `version` is rejected by the gateway and the validator watermark. Publish a higher-version profile instead, for example one without the hypertrain row.
+- Retire: publish a higher profile version without the hypertrain row first, then remove the registry row. Deleting the row stops the container and keeps its volume.
 - A training round: `POST /v1/aggregator/runs/{id}/rounds/{w}/rollback` before finalize. After finality, fraud is handled with money only (burn and clawback), never by subtracting a delta.
 
 ## 8. Budget and teardown

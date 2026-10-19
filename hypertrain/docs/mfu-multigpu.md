@@ -33,7 +33,7 @@ peak, tokens/s, per-step times, `rank_peak_mem_gib` (whole round), `rank_step_pe
 |------|--------|--------|
 | `--reduction zero2o` | Gradients reduced to their ZeRO-2 owner in buckets issued from post-accumulate grad hooks, so communication overlaps the rest of backward. | Bitwise equal to `zero2` (same adds, same order). |
 | `--act-ckpt` (`HT_ACT_CKPT=1`) | Per-layer activation checkpointing. | Same kernels on recompute: bitwise equal. |
-| sdpa-flash | Selected on (sm_120, torch 2.14.0+cu130) from the qualification record in `tests/trainer/data/attn_qualify_sm120.json`. | Qualified by cross-process equality. |
+| sdpa-flash | Selected on (sm_120, torch 2.14.0+cu130) from the qualification record in `tests/trainer/data/attn_qualify_sm120.json`. When the flash kernel rejects `enable_gqa`, the first accepting path of `attention.PATHS` is probed once per (device, dtype, group, head dim) and logged as `attention backend: <path>`; a dtype or head dim no path accepts (e.g. fp32) stops the run (set `HT_ATTN_BACKEND=math` for such models); inputs whose layout the chosen kernel still rejects stop the run with the kernel error (no math fallback). | Qualified by cross-process equality (flash path only). A fallback path is a function of hardware, torch and geometry, so ranks agree, but it is not qualified. |
 | `--compile` (`HT_COMPILE=1`) | One Inductor graph per layer. | Leaves differ from eager (fusion changes rounding), so a compiled run replays only under the same flag. Both modes replay bitwise. |
 | `--micro-batch N` | Overrides the profile's per-rank micro_batch. | Part of the run; recorded as `HT_MFU_MICRO_BATCH`. |
 | `--nccl-pcie` | setdefaults `NCCL_P2P_DISABLE=1`, Ring, Simple, 4-8 channels, 8 MiB buffers. | Collectives are copies: no numeric effect. |
@@ -65,7 +65,10 @@ host with `pcie_bw` >= 50.
 - **Host PCIe.** The same dp2 config measured 11.2-11.5 % on a host where NCCL took ~3.8 s of GPU
   time per step whether P2P was on or off, against 37.2 % on a `pcie_bw` 53.8 (PCIe Gen5) host.
   `--profile mfu` therefore filters offers on `pcie_bw` and requires `cuda_max_good >= 13.2`
-  (the image is CUDA 13.2; a 13.0 host refused create with HTTP 400).
+  (the image is CUDA 13.2; a 13.0 host refused create with HTTP 400). Every profile also keeps
+  only the drivers in `scripts/genuine_cuda_ci.py` `DRIVERS`; MFU does not compare replays, so
+  add `--any-driver` to widen the market. Evidence goes to `.evidence/vast/` unless
+  `--evidence-dir` is given.
 - **Round-end memory, not step memory.** `max_memory_allocated` over a round (~29.9 GiB at
   micro_batch 4) is dominated by the round end: full weights and optimizer state, delta, error
   feedback and the compressed payload. Inside the steps the peak is ~20 GiB, which is why
@@ -75,3 +78,27 @@ host with `pcie_bw` >= 50.
   reduce-scatter-shaped owner reduction and a larger micro_batch at dp4 are the next steps.
 - **Elementwise work.** In the compiled trace, CUDA time outside GEMM/attention/NCCL (fp32 adds,
   fills, casts, checkpoint recompute) is still the largest bucket.
+
+## All GPU proofs on one host (`--profile proofs`)
+
+One 2x RTX 5090 instance, one upload, one DELETE and one parsed absence proof at the end. The
+image is the digest-pinned `IMAGE` of `scripts/vast_e2e.py`; Vast pulls it before ssh is ready,
+so the per-step seconds in `out/steps.tsv` (name, rc, seconds) exclude the pull.
+
+```bash
+uv run --frozen python scripts/vast_e2e.py --profile proofs --key-file /var/lib/openbot/.vast-key \
+  --max-usd 8 --max-minutes 45 --dry-run
+```
+
+`--dry-run` prints the chosen offer, then the step list (`PROOF_PLAN`), the pytest node ids
+(`PROOF_TESTS`), the caps and the worst-case cost, without creating anything (it does make read-only GET calls: credit and up to 8 offer pages). `remote_env` is printed with values masked (`KEY=***`). A real run exits 4 when it passed on a driver outside `QUALIFIED_DRIVERS`: the result is valid but backs no bitwise-replay claim. Steps: the
+gpu-e2e flow (network round, auditor replay, repeat; `HT_ATTN_BACKEND=math` because the fixture
+model is fp32 with head_dim 4), then with `HT_ATTN_BACKEND` unset: `select_backend` must pick
+sdpa-flash, the GPU-only tests (a skip fails), and a 1B bf16 dp2 round plus replay through
+`run_mfu_dist.py`, checked by `check_gpu_evidence.py --kind mfu` and `attention_backend ==
+sdpa-flash`. `--boot-retries` defaults to 0 here.
+
+Drivers: the default is `--any-driver`, and the offer quote and `harness-result.json` carry
+`driver_qualified` (false when the driver is not in `scripts/genuine_cuda_ci.py` `DRIVERS`, so
+no bitwise claim is made). `--eight-gpu-qualified` rents 8x RTX 5090 with a qualified driver
+only; nothing else selects 8 GPUs for this profile.

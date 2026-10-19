@@ -31,11 +31,17 @@ uv run --frozen hypertrain-miner run --help | grep -q -- '--rounds'
 uv run --frozen hypertrain-miner join --help | grep -q -- '--config'
 ```
 
-Get the dataset and check it against the run's Merkle root:
+Get the dataset and check it against the run's Merkle root. A contract-2 `run-v2` job needs no local shards: the service serves each job's `samples` and `sample_proofs` objects, and the island checks every row against the signed `merkle_root`. For a u16 `run`, download `manifest.json` from the operator's base URL into `data_dir`. Save shard `i` as `shard-{i:05d}.u16`; its URL key is `shard_uri_template` with `manifest.shard_sha256s[i]`. Then verify (this covers u16 sets only):
 
 ```bash doctest
-uv run --frozen python experiments/fetch_data.py --verify-only
+uv run --frozen python -m hypertrain.datasets verify --help >/dev/null
 ```
+
+```bash doctest-skip:prod
+uv run --frozen python -m hypertrain.datasets verify data
+```
+
+It prints `OK`, or one line per bad shard and exits 1. If `data_dir` holds no shards, `run` fetches each unit it needs by HTTP Range from `HYPERTRAIN_DATA_BASES` through `hypertrain.datasets.fetch.prefetch`, and checks each unit against the signed unit hashes.
 
 The config is a TOML file. Every key can be overridden with `HYPERTRAIN_MINER_<KEY>` in the environment, and unknown keys are rejected. Relative paths resolve against the config file's directory.
 
@@ -109,7 +115,7 @@ Replay is bitwise, so any of these will turn an honest run into a MISMATCH:
 - Import `hypertrain.trainer` before anything imports torch. It sets `CUBLAS_WORKSPACE_CONFIG=:4096:8`, deterministic algorithms with no warn-only fallback, cuDNN deterministic and no benchmark, TF32 off for matmul and cuDNN, no reduced-precision BF16 reductions, and one CPU thread. The image also sets `CUDA_DISABLE_PTX_JIT=1`.
 - Run the pinned image (`reference_spec.image_digest`), not your own build.
 - Same GPU model and SM count as the reference; driver in the allowlist when there is one.
-- Verified shards (`--verify-only` must print `VERIFY OK`).
+- Verified shards (`python -m hypertrain.datasets verify <data_dir>` must print `OK`).
 - Don't change batch size, accumulation, threads or anything else the manifest fixes.
 
 Check the pins in your environment:
@@ -163,7 +169,22 @@ hypertrain-miner status --config miner.toml
 hypertrain-miner update --check --manifest-url "$MANIFEST_URL"
 ```
 
-`register --coldkey ... --request-id ... --expiry ...` is the legacy `join-v2` path. A revoked key is rejected on every authenticated miner route.
+`register` (no `--coldkey`) posts the server-key grant (`grant.json` next to the keyfile) and submits no contract-2 admission. `register --coldkey COLDFILE --request-id ID --expiry ROUND` posts no grant; instead it signs a join v2 with the configured keyfile (the server key) and the coldkey and posts it to `/v2/runs/<run_id>/join`, so it needs the coldkey file and belongs on the operator machine. For contract 2, prepare the hotkey-signed request on the GPU host using its configured hotkey (not a delegated server key):
+
+```bash
+hypertrain-miner join-v2 --config miner.toml --request-id "$REQUEST_ID" --expiry "$EXPIRY" \
+  --coldkey-ss58 "$COLDKEY_SS58" --prepare join.json
+```
+
+Copy `join.json` to the operator machine. It contains only public fields and the hotkey signature; no coldkey is needed on the GPU host. Co-sign and submit without `miner.toml`, then lock collateral from explicit existing origins:
+
+```bash
+hypertrain-miner join-v2-cosign --request join.json --coldkey ~/cold.key --api "$API"
+hypertrain-miner escrow-lock --api "$API" --run-id "$RUN_ID" --coldkey ~/cold.key \
+  --hotkey-ss58 "$HOTKEY_SS58" --units "$UNITS" --origin "$ORIGIN_ID"
+```
+
+`REQUEST_ID`, `RUN_ID` and origin IDs are 64 lowercase hex characters; `EXPIRY` is a beacon round. Inspect the public request before co-signing. Use a new output filename for each preparation. Repeat `--origin` for multiple origins; the CLI never creates origins. `escrow-lock --dry-run` prints only the unsigned operation without posting. Its default expiry is the run's current beacon round plus 1000; `--expiry` overrides it. Identical inputs (including reordered origins) reuse the operation ID. Success reports the event hash, current locked units, total required units and server eligibility; funding alone does not guarantee eligibility. The existing `join-v2 --coldkey ...` path remains available. A revoked key is rejected on every authenticated miner route.
 
 Only sr25519-signed release manifests are accepted; unsigned tags and downgrades are rejected. During the announce window (at least 600 s) `run --auto-update` stages the new wheel while training continues. At the first round boundary at or after `changeover_at`, it swaps `~/.hypertrain/miner/current` atomically and re-executes the new version, which resumes from the round journal. A miner still on the old version 60 s after changeover refuses new rounds. `update --apply` does the stage and swap by hand. `HYPERTRAIN_UPDATE_ROOT` and `HYPERTRAIN_UPDATE_MANIFEST_URL` override the defaults.
 
@@ -178,7 +199,7 @@ Only sr25519-signed release manifests are accepted; unsigned tags and downgrades
 | `HardwareMismatch: SM count ... != reference 170` | wrong GPU model for this run |
 | `driver ... not in the manifest allowlist` | install an allowed driver |
 | `this client trains single-GPU layouts only` | the run uses a multi-GPU layout, not supported by this client yet |
-| `local shards are not the run's dataset` or `shard verification failed` | re-fetch the data and run `--verify-only` |
+| `local shards are not the run's dataset` or `shard verification failed` | re-fetch the data and run `python -m hypertrain.datasets verify <data_dir>` |
 | 409 on commit | that round is already committed; keep the journal in `workdir` between restarts |
 | status `EXCLUDED` on commit | committed after `d_audit`; move closer to the server or start earlier |
 | MISMATCH on a run you believe is honest | check section 4, then submit your rerun before finalize |

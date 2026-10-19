@@ -1,0 +1,73 @@
+"""Does a matured contract-2 reward origin ever reach GET /internal/v1/get_weights?"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+spec = importlib.util.spec_from_file_location(
+    "v2_weights_bridge_e2e", Path(__file__).parents[1] / "e2e/test_service_network_v2_e2e.py"
+)
+assert spec is not None and spec.loader is not None
+e2e = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = e2e
+spec.loader.exec_module(e2e)
+network = e2e.network
+
+
+@pytest.mark.slow
+def test_v2_matured_reward_reaches_get_weights(network, monkeypatch, tmp_path):
+    # Given: the shortest existing flow to a live round 0 that finalize_v2 settles.
+    e2e._graduate_four(network)
+    e2e._live_checkpoint(network)
+    store = network.store
+    run_id = network.manifest.run_id()
+    assert store._record_v2(run_id, "replayed-finality", "0")["shadow"] is False
+    mature_at = store._db.execute(
+        "SELECT MAX(mature_at) FROM escrow_origins WHERE reward_round=0 AND issued>0"
+    ).fetchone()[0]
+    # When: beacon rounds pass mature_at (push_beacon matures it), then Cortex asks for weights.
+    network.push(max(network.now, mature_at) + 1)
+    # Every round-0 origin, free and still held by its earning owner, is owed to its hotkey.
+    expected: dict[str, float] = {}
+    for hotkey, units in store._db.execute(
+        "SELECT o.hotkey,u.units FROM escrow_units u JOIN escrow_origins o ON o.origin=u.origin "
+        "WHERE o.reward_round=0 AND o.issued>0 AND u.bucket='available' AND u.units>0"
+    ):
+        expected[hotkey] = expected.get(hotkey, 0.0) + units
+    # Four graduated miners, each awarded an equal quarter of the round-0 budget.
+    assert sorted(expected.values()) == [250_000.0] * 4
+    epoch_at = int(store.clock())
+    epoch = (epoch_at - store.params.genesis_unix) // store.params.epoch_seconds
+    token = tmp_path / "internal"
+    token.write_text("integration-internal")
+    route = next(
+        r for r in network.client.app.routes if getattr(r, "path", "") == "/internal/v1/get_weights"
+    )
+    code = route.endpoint.__code__
+    config = route.endpoint.__closure__[code.co_freevars.index("config")].cell_contents
+    monkeypatch.setattr(config, "internal_token_file", token)
+    response = network.client.get(
+        f"/internal/v1/get_weights?epoch={epoch}&epoch_at={epoch_at}",
+        headers={
+            "Authorization": "Bearer integration-internal",
+            "x-platform-challenge-slug": config.slug,
+        },
+    )
+    # Then: exactly the matured v2 units are paid as weight to their hotkeys, the rest burns.
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    assert answer["weights"] == expected, response.text
+    assert answer["metadata"]["units_paid"] == sum(expected.values())
+    assert answer["metadata"]["units_burned_this_epoch"] == 10**6 - sum(expected.values())
+    # And: a replayed request for the same epoch returns the same bytes and pays nothing twice.
+    paid = store._db.execute("SELECT COUNT(*) FROM escrow_events WHERE kind='PAY'").fetchone()[0]
+    again = network.client.get(response.request.url, headers=response.request.headers)
+    assert again.content == response.content
+    assert (
+        store._db.execute("SELECT COUNT(*) FROM escrow_events WHERE kind='PAY'").fetchone()[0]
+        == paid
+    )
