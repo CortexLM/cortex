@@ -117,7 +117,8 @@ class GatewayStore:
             if row is None:
                 used = connection.execute(
                     "SELECT 1 FROM gateway_raw_leaves UNION ALL "
-                    "SELECT 1 FROM gateway_bundles LIMIT 1"
+                    "SELECT 1 FROM gateway_bundles UNION ALL "
+                    "SELECT 1 FROM gateway_trust_profiles LIMIT 1"
                 ).fetchone()
                 if used:
                     raise ServiceError(

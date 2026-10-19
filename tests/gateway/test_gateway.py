@@ -747,3 +747,18 @@ async def test_store_with_another_wire_format_marker_is_refused(network):
         connection.execute("UPDATE gateway_metadata SET value='1' WHERE name='wire_format'")
     with pytest.raises(ServiceError, match="wire format"):
         GatewayStore(network.db_path)
+
+
+def test_store_holding_only_v1_trust_profiles_is_refused_and_not_stamped(tmp_path):
+    path = tmp_path / "v1.db"
+    GatewayStore(path).close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("DELETE FROM gateway_metadata WHERE name='wire_format'")
+        connection.execute("INSERT INTO gateway_trust_profiles VALUES (?,?)", (b"d", "{}"))
+    with pytest.raises(ServiceError, match="new state dir"):
+        GatewayStore(path)
+    with sqlite3.connect(path) as connection:
+        assert (
+            connection.execute("SELECT 1 FROM gateway_metadata WHERE name='wire_format'").fetchone()
+            is None
+        )
