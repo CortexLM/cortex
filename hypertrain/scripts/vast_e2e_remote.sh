@@ -73,12 +73,12 @@ spec = importlib.util.spec_from_file_location("svc", root / "tests/challenge/tes
 svc = importlib.util.module_from_spec(spec); sys.modules["svc"] = spec.loader and svc
 spec.loader.exec_module(svc)
 esc = svc.fixture
-N = 2
+N = int(os.environ.get("HT_E2E_GPUS", "2"))
 if backend == "cuda":
     driver = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
                             check=True, capture_output=True, text=True).stdout.split()
     sm = torch.cuda.get_device_properties(0).multi_processor_count
-    assert torch.cuda.device_count() == N, torch.cuda.device_count()
+    assert torch.cuda.device_count() % N == 0, (torch.cuda.device_count(), N)
     result.update(driver=driver, sm_count=sm, gpus=[torch.cuda.get_device_name(i) for i in range(N)])
 else:
     driver, sm = ["cpu-test"], 170

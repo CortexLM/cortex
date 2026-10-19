@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shlex
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +23,7 @@ spec.loader.exec_module(vast)
 
 KEY = "fake-secret-key-0123456789"
 IID = 777
+ARGS = ["--key-file", "k", "--max-usd", "1", "--max-minutes", "1"]  # parse() only
 
 
 class Fake:
@@ -34,6 +36,7 @@ class Fake:
         self.throttle: dict[str, int] = {}
         self.asks: list[str] = []
         self.gone: set[str] = set()
+        self.queries: list[dict] = []
 
     def offers(self) -> list[dict]:
         base = dict(
@@ -46,6 +49,8 @@ class Fake:
             inet_down=1200,
             storage_cost=0.2,
             machine_id=1,
+            cuda_max_good=13.2,
+            driver_version="580.178.04",
         )
         return [
             base | {"id": 11, "dph_total": self.dph + 0.3, "machine_id": 2},
@@ -64,7 +69,8 @@ class Fake:
             return 200, {"id": 1, "credit": self.credit}
         if key == "GET /api/v0/bundles/":
             q = json.loads(parse_qs(urlsplit(url).query)["q"][0])
-            assert q["num_gpus"] == {"eq": 2} and q["gpu_name"] == {"eq": "RTX 5090"}
+            assert q["num_gpus"] == {"eq": vast.NUM_GPUS} and q["gpu_name"] == {"eq": "RTX 5090"}
+            self.queries.append(q)
             return 200, {"offers": self.offers()}
         if method == "PUT" and path.startswith("/api/v0/asks/"):
             if path in self.gone:
@@ -315,9 +321,9 @@ def test_absence_never_confirmed_alerts(fake, tmp_path):
 
 @pytest.fixture
 def mfu_globals():
-    saved = vast.IMAGE, vast.NUM_GPUS, vast.MIN_PCIE_BW
+    saved = vast.IMAGE, vast.NUM_GPUS, vast.MIN_PCIE_BW, vast.ALLOWED_DRIVERS
     yield
-    vast.IMAGE, vast.NUM_GPUS, vast.MIN_PCIE_BW = saved
+    vast.IMAGE, vast.NUM_GPUS, vast.MIN_PCIE_BW, vast.ALLOWED_DRIVERS = saved
 
 
 def test_mfu_profile_picks_fast_pcie_host_and_passes_remote_env(fake, tmp_path, mfu_globals):
@@ -353,7 +359,138 @@ def test_mfu_eligibility_floors(mfu_globals):
     assert not vast.eligible({**o, "cuda_max_good": 13.0})
     assert not vast.eligible({k: v for k, v in o.items() if k != "pcie_bw"})
     vast.MIN_PCIE_BW = None
-    assert vast.eligible({k: v for k, v in o.items() if k not in ("pcie_bw", "cuda_max_good")})
+    assert vast.eligible({k: v for k, v in o.items() if k != "pcie_bw"})
+
+
+def test_cuda_floor_enforced_without_pcie(mfu_globals):
+    vast.MIN_PCIE_BW = None
+    o = Fake().offers()[1]
+    assert vast.eligible(o | {"cuda_max_good": 13.2})
+    assert not vast.eligible(o | {"cuda_max_good": 13.0})
+    assert not vast.eligible({k: v for k, v in o.items() if k != "cuda_max_good"})
+
+
+def test_num_gpus_applies_to_default_profile(fake, tmp_path, capsys, mfu_globals):
+    offers = fake.offers
+    fake.offers = lambda: [*offers(), offers()[1] | {"id": 14, "num_gpus": 8, "dph_total": 2.0}]
+    rc, _, _ = run(fake, tmp_path, "--num-gpus", "8", "--dry-run", usd="10")
+    assert rc == 0 and fake.queries[-1]["num_gpus"] == {"eq": 8}
+    chosen = json.loads(capsys.readouterr().out)["chosen_offer"]
+    assert chosen["id"] == 14 and chosen["num_gpus"] == 8
+
+
+def test_miner_flow_refuses_num_gpus_other_than_one(capsys):
+    argv = [*ARGS, "--profile", "miner-flow"]
+    assert vast.parse(argv).num_gpus == 1
+    with pytest.raises(SystemExit) as e:
+        vast.parse([*argv, "--num-gpus", "2"])
+    assert e.value.code == 2 and "--profile miner-flow" in capsys.readouterr().err
+
+
+def test_default_evidence_dir_is_repo_relative(fake, tmp_path, monkeypatch, mfu_globals):
+    monkeypatch.setattr(vast, "ROOT", tmp_path)
+    (tmp_path / "key").write_text(KEY + "\n")
+    argv = ["--key-file", str(tmp_path / "key"), "--max-usd", "6", "--max-minutes", "90"]
+    assert vast.parse(argv).evidence_dir == tmp_path / ".evidence/vast"
+    argv += ["--api-base", fake.url, "--min-gap", "0", "--dry-run"]
+    assert vast.main(argv, harness=Scripted, sleep=lambda s: None) == 0
+    assert (tmp_path / ".evidence/vast/journal.jsonl").is_file()
+
+
+def test_driver_filter_in_query_and_eligible(fake, tmp_path, mfu_globals):
+    base = fake.offers()[1]
+    shape = [("615.71.09", 0.1), ("580.178.04", 0.4), ("570.211.01", 0.3), (None, 0.2)]
+    offers = [
+        base | {"id": 20 + i, "dph_total": d, "driver_version": v} for i, (v, d) in enumerate(shape)
+    ]
+    del offers[3]["driver_version"]
+    fake.offers = lambda: offers
+
+    def dry(*extra):
+        rc, journal, _ = run(fake, tmp_path, "--dry-run", *extra)
+        chosen = [j for j in journal if j["event"] == "offer_chosen"][-1]
+        return rc, fake.queries[-1].get("driver_version"), chosen["eligible"], chosen["quote"]["id"]
+
+    assert dry() == (0, {"in": list(vast.QUALIFIED_DRIVERS)}, 2, 22)
+    assert dry("--driver", "580.178.04") == (0, {"in": ["580.178.04"]}, 1, 21)
+    assert dry("--any-driver") == (0, None, 4, 20)
+    with pytest.raises(SystemExit):
+        vast.parse([*ARGS, "--driver", "999.0"])
+
+
+def test_refusal_counts_driver_rejections(fake, tmp_path, mfu_globals):
+    offers = fake.offers
+    fake.offers = lambda: [o | {"driver_version": "615.71.09"} for o in offers()]
+    rc, journal, _ = run(fake, tmp_path, "--dry-run")
+    reason = next(j["reason"] for j in journal if j["event"] == "refused")
+    assert rc == 2
+    assert reason == "no eligible 2x RTX 5090 offer among 3 (2 rejected by driver allow-list)"
+
+
+def test_gpu8_profile_dry_run_selects_eight_gpu_qualified_offer(
+    fake, tmp_path, capsys, mfu_globals
+):
+    base = fake.offers()[1] | {"num_gpus": 8, "cuda_max_good": 13.2}
+    unqualified = [
+        ("615.71.09", 11.75),
+        ("575.64.03", 2.9),
+        ("590.44.01", 3.4),
+        ("550.163.01", 3.8),
+        ("560.35.03", 4.0),
+        ("565.77", 4.1),
+        ("600.12", 6.2),
+    ]
+    offers = [
+        base | {"id": 30 + i, "machine_id": 30 + i, "driver_version": v, "dph_total": d}
+        for i, (v, d) in enumerate(unqualified)
+    ]
+    offers += [
+        base | {"id": 40, "driver_version": "580.178.04", "dph_total": 4.28, "pcie_bw": 26.4},
+        base | {"id": 41, "driver_version": "595.84", "dph_total": 5.66, "pcie_bw": 27.0},
+    ]
+    fake.offers = lambda: offers
+    rc, _, _ = run(fake, tmp_path, "--profile", "gpu8", "--dry-run", minutes="30", usd="10")
+    chosen = json.loads(capsys.readouterr().out)["chosen_offer"]
+    assert rc == 0 and not any(m == "PUT" for m, _ in fake.calls)
+    assert fake.queries[-1]["num_gpus"] == {"eq": 8}
+    assert chosen["num_gpus"] == 8 and chosen["dph_total"] == 4.28
+    assert chosen["driver_version"] in vast.QUALIFIED_DRIVERS
+    with pytest.raises(SystemExit):
+        vast.parse([*ARGS, "--profile", "gpu8", "--num-gpus", "2"])
+
+
+def test_gpu_e2e_remote_gets_host_gpu_count(tmp_path):
+    class Capture(vast.Harness):
+        def sh(self, command, **kw):
+            self.command = command
+            return 0
+
+    a = vast.parse(
+        [
+            *ARGS,
+            "--evidence-dir",
+            str(tmp_path),
+            "--profile",
+            "gpu8",
+            "--remote-env",
+            "HT_E2E_GPUS=2",
+        ]
+    )
+    h = Capture(a, vast.Api("http://127.0.0.1:9", KEY, tmp_path / "j.jsonl"))
+    assert h.run_remote() == 0
+    words = shlex.split(h.command)
+    assert words[words.index("bash") - 1] == "HT_E2E_GPUS=8"  # env(1): the last value wins
+    remote = (vast.ROOT / "scripts/vast_e2e_remote.sh").read_text()
+    assert 'N = int(os.environ.get("HT_E2E_GPUS", "2"))' in remote
+
+
+def test_miner_cycle_profile_uses_new_remote_script(fake, tmp_path, capsys, mfu_globals):
+    a = vast.parse([*ARGS, "--profile", "miner-cycle"])
+    assert a.remote_script == "vast_miner_cycle_remote.sh" and a.num_gpus == 1
+    assert (vast.ROOT / "scripts" / a.remote_script).is_file()
+    rc, _, _ = run(fake, tmp_path, "--profile", "miner-cycle", "--dry-run")
+    assert rc == 0 and vast.NUM_GPUS == 1 and vast.IMAGE == vast.MINER_FLOW_IMAGE
+    assert json.loads(capsys.readouterr().out)["chosen_offer"]["id"] == 13
 
 
 def test_remote_env_must_be_key_value(tmp_path):
