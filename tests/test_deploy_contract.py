@@ -678,3 +678,28 @@ def test_deploy_check_accepts_separate_identity_dirs_and_the_roles_use_distinct_
     assert "${BASE_VALIDATOR_IDENTITY_DIR:?" in validator
     assert "${BASE_WEIGHT_SETTER_IDENTITY_DIR:?" in setter
     assert "BASE_VALIDATOR_IDENTITY_DIR" not in setter
+
+
+def test_rendered_named_volumes_compare_by_their_docker_name():
+    validator = identity_source(validator_config(), "/fixture/verify-only")
+    setter = identity_source(weight_setter_config(), "/fixture/weight-setter")
+    for config, key in ((validator, "base-validator-state"), (setter, "base-weight-setter-state")):
+        for mount in config["services"]["validator"]["volumes"]:
+            if mount["target"] == "/var/lib/base":
+                mount["source"] = key
+        config["volumes"] = {key: {"name": f"{key}-project"}}
+    CHECK["validate_role_separation"](validator, setter)
+    setter["volumes"]["base-weight-setter-state"]["name"] = "base-validator-state-project"
+    with pytest.raises(ValueError, match="state"):
+        CHECK["validate_role_separation"](validator, setter)
+
+
+def test_operator_validator_env_refuses_one_identity_dir_for_both_roles(tmp_path):
+    example = (ROOT / "deploy/env/python-validator.env.example").read_text()
+    shared = example.replace(
+        "BASE_VALIDATOR_IDENTITY_DIR=", f"BASE_VALIDATOR_IDENTITY_DIR={tmp_path}/id"
+    ).replace("BASE_WEIGHT_SETTER_IDENTITY_DIR=", f"BASE_WEIGHT_SETTER_IDENTITY_DIR={tmp_path}/id/")
+    with pytest.raises(ValueError, match="identity"):
+        CHECK["validate_validator_env"](shared)
+    separate = shared.replace(f"={tmp_path}/id/", f"={tmp_path}/setter")
+    CHECK["validate_validator_env"](separate)

@@ -171,8 +171,9 @@ The weight-setter mounts the wallet directory read-only at `/run/wallets`; the
 verify-only role mounts none. The weight-setter's identity directory contains
 the files below and is set with `BASE_WEIGHT_SETTER_IDENTITY_DIR`; the verify-only
 role reads only `tls.crt` and `tls.key` from its own `BASE_VALIDATOR_IDENTITY_DIR`,
-a separate directory without `consensus.key`. `scripts/check_deploy.py` refuses
-the same path for both roles. Both variables live in the one
+a separate directory without `consensus.key`. Check your env file with
+`uv run python scripts/check_deploy.py --validator-env deploy/env/python-validator.env`;
+it refuses the same path for both roles. Both variables live in the one
 `deploy/env/python-validator.env` passed with `--env-file`:
 
 ```text

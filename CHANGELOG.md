@@ -26,8 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is now the verify-only role's alone. Set it in
   `deploy/env/python-validator.env` to the directory holding `consensus.key`,
   `tls.crt` and `tls.key`, and point `BASE_VALIDATOR_IDENTITY_DIR` at a
-  separate directory without `consensus.key`; `scripts/check_deploy.py` refuses
-  one path, or one state volume, for both roles.
+  separate directory without `consensus.key`. `scripts/check_deploy.py
+  --validator-env deploy/env/python-validator.env` refuses one path for both
+  roles; `--check-examples` also refuses one rendered state volume.
 
 ### Upgrade (BREAKING for masters)
 

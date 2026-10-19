@@ -955,7 +955,14 @@ def validate_role_separation(validator: dict, weight_setter: dict) -> None:
 
     def sources(config: dict) -> dict[str, str]:
         mounts = config["services"][ROLES["validator"]]["volumes"]
-        return {item["target"]: str(item.get("source", "")) for item in mounts}
+        named = config.get("volumes") or {}
+        # A rendered named volume's `source` is its key; Docker uses the project-prefixed name.
+        return {
+            item["target"]: str(
+                (named.get(item.get("source")) or {}).get("name") or item.get("source", "")
+            )
+            for item in mounts
+        }
 
     verify_only, setter = sources(validator), sources(weight_setter)
     identity = "/run/validator"
@@ -964,6 +971,15 @@ def validate_role_separation(validator: dict, weight_setter: dict) -> None:
     state = "/var/lib/base"
     if verify_only[state] and verify_only[state] == setter[state]:
         raise ValueError("validator and weight-setter must use separate state volumes")
+
+
+def validate_validator_env(source: str) -> None:
+    """An operator's validator env file must not give both roles one identity directory."""
+    values = _env_file(source)
+    verify_only = values.get("BASE_VALIDATOR_IDENTITY_DIR", "")
+    setter = values.get("BASE_WEIGHT_SETTER_IDENTITY_DIR", "")
+    if verify_only and setter and Path(verify_only).resolve() == Path(setter).resolve():
+        raise ValueError("validator and weight-setter must use separate identity directories")
 
 
 def _bind_sources(role: str, compose_dir: Path = ROOT / "deploy/compose") -> None:
@@ -1093,6 +1109,9 @@ def main() -> None:
     modes.add_argument("--check-examples", action="store_true")
     modes.add_argument("--config", type=Path, help="rendered Compose JSON; use - for stdin")
     modes.add_argument("--vm-host-config", type=Path, help="materialized Proof host TOML")
+    modes.add_argument(
+        "--validator-env", type=Path, help="operator validator env file (python-validator.env)"
+    )
     parser.add_argument("--role", choices=list(ROLES))
     args = parser.parse_args()
     try:
@@ -1103,11 +1122,13 @@ def main() -> None:
         elif args.config and args.role:
             source = sys.stdin.read() if str(args.config) == "-" else args.config.read_text()
             validate_compose(json.loads(source), args.role)
+        elif args.validator_env and not args.role:
+            validate_validator_env(args.validator_env.read_text())
         elif args.vm_host_config and not args.role:
             with args.vm_host_config.open("rb") as stream:
                 validate_vm_host(tomllib.load(stream))
         else:
-            parser.error("--config requires --role; --vm-host-config forbids it")
+            parser.error("--config requires --role; --vm-host-config and --validator-env forbid it")
     except ValueError as error:
         raise SystemExit(f"Deployment check failed: {error}") from None
     except subprocess.CalledProcessError as error:
