@@ -326,6 +326,20 @@ def _stage_once(path: Path, data: bytes) -> None:
     complete or absent; a SIGKILL leaves at most a unique `.name.*.part` temp, never reused."""
     import os
 
+    # Best-effort purge of this name's crash leftovers; the age floor spares a concurrent
+    # emission's live temp, and lstat/unlink never follow a planted symlink.
+    stale = time.time() - 600
+    try:
+        for entry in path.parent.iterdir():
+            name = entry.name
+            if name.startswith(f".{path.name}.") and name.endswith(".part"):
+                try:
+                    if not entry.is_symlink() and entry.lstat().st_mtime < stale:
+                        entry.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    except OSError:
+        pass
     if not os.path.lexists(path):
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".part")
         try:

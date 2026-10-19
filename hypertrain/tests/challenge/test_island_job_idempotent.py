@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from hypertrain.auditor.replay import pack_state
-from hypertrain.challenge.store import ChallengeError
+from hypertrain.challenge.store import ChallengeError, _stage_once
 from hypertrain.data.store import put_large
 from hypertrain.protocol.messages_v2 import StartStateV2
 from hypertrain.trainer.config import TrainConfig
@@ -106,3 +108,40 @@ def test_island_job_route_second_get_is_200_same_body(network, monkeypatch):
     second = network.client.get(network.url + "/rounds/0/job/" + HOT)
     assert second.status_code == 200, second.text
     assert second.json() == first.json()
+
+
+def _part(path: Path, data: bytes, age: float = 0.0) -> Path:
+    path.write_bytes(data)
+    when = time.time() - age
+    os.utime(path, (when, when))
+    return path
+
+
+def test_stage_once_purges_stale_part_files_of_its_own_name(tmp_path):
+    stale = _part(tmp_path / ".start_state.abc123.part", b"torn", age=3600)
+    _stage_once(tmp_path / "start_state", b"x")
+    assert not stale.exists()
+    assert (tmp_path / "start_state").read_bytes() == b"x"
+
+
+def test_stage_once_keeps_fresh_part_files_and_other_names(tmp_path):
+    stale = _part(tmp_path / ".start_state.abc123.part", b"torn", age=3600)
+    fresh = _part(tmp_path / ".start_state.def456.part", b"live")  # a concurrent emission's temp
+    other = _part(tmp_path / ".ef_in.zzz.part", b"other", age=3600)
+    _stage_once(tmp_path / "start_state", b"x")
+    assert not stale.exists()
+    assert fresh.read_bytes() == b"live"
+    assert other.read_bytes() == b"other"
+    assert (tmp_path / "start_state").read_bytes() == b"x"
+
+
+def test_stage_once_purge_does_not_follow_symlinks(tmp_path):
+    target = _part(tmp_path / "outside", b"keep", age=3600)
+    job = tmp_path / "job"
+    job.mkdir()
+    link = job / ".start_state.link.part"
+    link.symlink_to(target)
+    os.utime(link, (target.stat().st_mtime,) * 2, follow_symlinks=False)  # stale link too
+    _stage_once(job / "start_state", b"x")
+    assert link.is_symlink()
+    assert target.read_bytes() == b"keep"
