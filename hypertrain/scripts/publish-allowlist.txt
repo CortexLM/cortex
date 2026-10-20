@@ -175,6 +175,7 @@ src/hypertrain/challenge/store.py:5bc023ca9af1ff8eedaaaa32719611ded1b93836fa6d87
 
 # test fixture value (synthetic, not a credential)
 tests/auditor/aud_fixtures.py:0d949c3ecc7d9c4044e4279b45bb3f003b569a42beb0ebd5c8fcda1b7b9fb6a5  # L42
+tests/beacon/test_push.py:c6a44b08a042c2fefeb9f4d0dc13aaaa27d6eafba8731c15ad3fd27163c7f336  # L282
 tests/challenge/test_admission_v2.py:d6b19e1e09232f110810ee8bd506a4497a0cf7b0f0f6ce9f3d21eecb968c96a8  # L56
 tests/challenge/test_contract.py:d8a58e1216b37763ba783aa441e27e1a6d1d4eeb7bebe4cb14d995d1c2072f2b  # L37
 tests/challenge/test_contract.py:dca6991abfb1e7eb0cf06ef5c6a6389c99d303a012b49e910c44694638086e6f  # L77
@@ -185,6 +186,7 @@ tests/challenge/test_service_network_v2.py:39c103316286f9ef21526344b85dca1c86a93
 tests/challenge/test_service_network_v2.py:6db3469c33b8debcaeb7597fb238d8a434cce7f3be4fd6c61247d8d5c49c4c03  # L2529
 tests/challenge/test_service_network_v2.py:355ba43d75f8d5a922f885c3166b107ca10c387429177317b2a15951abb4f039  # L2536
 tests/challenge/test_service_network_v2.py:3d09f1936ce966319dc2d46b6af880c97593e7fe3c35b1b88bd942e907cfa782  # L2551
+tests/datasets/test_pin.py:2e51842f098911cc7c612015b272581ea20449ba26d4d3e04c34429a1f930ebc  # L19
 tests/e2e/test_service_network_v2_e2e.py:3d09f1936ce966319dc2d46b6af880c97593e7fe3c35b1b88bd942e907cfa782  # L1394
 tests/e2e/test_service_network_v2_e2e.py:a98684130926595a80aa7463d4c6632b80945404481c901f15b3dcbe4d98a3d0  # L1441
 tests/gpu_ops/conftest.py:57fc89f6e67b8940a8bfc8afe90becae2443a421a57798ec03d1afe3fd8060f7  # L19
