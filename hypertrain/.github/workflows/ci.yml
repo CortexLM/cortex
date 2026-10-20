@@ -1,18 +1,20 @@
 name: ci
 
+# main is covered by images.yml, which calls this workflow before publishing. A
+# push trigger here would start a twin run on the same ref (see concurrency).
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_call:
 
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref instead of queueing them.
+# Cancel superseded PR runs on the same ref. In a called run github.workflow is
+# the caller's name, so the images run gets its own group and is never cancelled;
+# images.yml serializes pushes to main itself.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Bound CPU kernel dispatch to AVX2, the dev-host golden baseline.
 env:
