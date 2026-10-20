@@ -87,7 +87,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t ALL < <(git ls-files 'tests/**/test_*.py' \
+          mapfile -t ALL < <(git ls-files ':(glob)tests/**/test_*.py' \
             | grep -v '^tests/sim/' | grep -v '^tests/e2e/' | sort)
           SEL=()
           for i in "${!ALL[@]}"; do

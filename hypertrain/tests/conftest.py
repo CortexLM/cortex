@@ -5,10 +5,11 @@ import os
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import pytest
+
+from systemd_probe import classify_systemd_probe
 
 SEQ_LEN = 1024
 SAMPLES_PER_SHARD = 128
@@ -115,22 +116,6 @@ def corpus_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return d
 
 
-# Messages meaning "this user/host has no usable system manager", not "the probe broke".
-_SYSTEMD_UNAVAILABLE = (
-    "Interactive authentication required",
-    "Access denied",
-    "Failed to connect to bus",
-    "System has not been booted with systemd",
-    "Permission denied",
-)
-
-
-def _classify_systemd_probe(returncode: int, stderr: str) -> Literal["ok", "unavailable", "error"]:
-    if returncode == 0:
-        return "ok"
-    return "unavailable" if any(m in stderr for m in _SYSTEMD_UNAVAILABLE) else "error"
-
-
 @pytest.fixture(scope="session")
 def systemd_manager() -> None:
     """Skip unless this user may start transient units on the system manager, as the product does.
@@ -158,7 +143,7 @@ def systemd_manager() -> None:
             timeout=30,
             check=False,
         )
-        verdict = _classify_systemd_probe(probe.returncode, probe.stderr)
+        verdict = classify_systemd_probe(probe.returncode, probe.stderr)
         reason = f"rc={probe.returncode} {probe.stderr.strip()[-500:]}"
     except FileNotFoundError as exc:
         verdict, reason = "unavailable", repr(exc)
