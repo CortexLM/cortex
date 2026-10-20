@@ -125,8 +125,10 @@ jobs:
       - run: docker build -f docker/Dockerfile.server -t hypertrain:local .
       - run: ENGINE=docker bash scripts/canary.sh
 
+  # The serial suite peaks near 19 GB RSS (tests/auditor/test_od_bisect.py), more
+  # than a 16 GB hosted runner holds; 16 vCPU / 62 GB Blacksmith runner.
   full-suite:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
