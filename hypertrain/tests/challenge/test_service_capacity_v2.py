@@ -716,6 +716,7 @@ def test_changed_codec_source_invalidates_prior_admission_without_requalificatio
     assert store._record_v2(run_id, "service-admission", "run") == prior
 
 
+@pytest.mark.usefixtures("systemd_manager")
 def test_real_capacity_launch_failure_keeps_debit_and_prevents_restart_rerun(
     tiny, tmp_path, monkeypatch
 ):

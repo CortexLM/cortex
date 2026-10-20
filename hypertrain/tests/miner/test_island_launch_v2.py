@@ -304,6 +304,7 @@ def test_noisy_failure_retains_only_bounded_error_tail(
     assert not (tmp_path / "published").exists()
 
 
+@pytest.mark.usefixtures("systemd_manager")
 def test_capacity_branch_uses_real_bounded_failure_before_publication(tmp_path, monkeypatch):
     import os
     import sys

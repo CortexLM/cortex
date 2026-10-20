@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import uuid
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -110,3 +113,61 @@ def corpus_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     d = build_corpus(tmp_path_factory.mktemp("corpus"))
     os.environ["HYPERTRAIN_DATA_DIR"] = str(d)
     return d
+
+
+# Messages meaning "this user/host has no usable system manager", not "the probe broke".
+_SYSTEMD_UNAVAILABLE = (
+    "Interactive authentication required",
+    "Access denied",
+    "Failed to connect to bus",
+    "System has not been booted with systemd",
+    "Permission denied",
+)
+
+
+def _classify_systemd_probe(returncode: int, stderr: str) -> Literal["ok", "unavailable", "error"]:
+    if returncode == 0:
+        return "ok"
+    return "unavailable" if any(m in stderr for m in _SYSTEMD_UNAVAILABLE) else "error"
+
+
+@pytest.fixture(scope="session")
+def systemd_manager() -> None:
+    """Skip unless this user may start transient units on the system manager, as the product does.
+
+    Non-root skips only when the manager is absent or authorization is denied; any other probe
+    failure (EAGAIN, failed transient unit, timeout) is a broken host and fails. Root that cannot
+    is a broken host, not an unprivileged one: fail, so the heavy `native` job (isolated root
+    environment) can never turn green by skipping.
+    """
+    try:
+        probe = subprocess.run(
+            [
+                "systemd-run",
+                "--unit=ht-probe-" + uuid.uuid4().hex,
+                "--wait",
+                "--collect",
+                "--quiet",
+                "--no-ask-password",
+                "--property=MemoryMax=64M",
+                "--property=CPUQuota=50%",
+                "/bin/true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        verdict = _classify_systemd_probe(probe.returncode, probe.stderr)
+        reason = f"rc={probe.returncode} {probe.stderr.strip()[-500:]}"
+    except FileNotFoundError as exc:
+        verdict, reason = "unavailable", repr(exc)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        verdict, reason = "error", repr(exc)
+    if verdict == "ok":
+        return
+    if os.geteuid() == 0:
+        pytest.fail(f"systemd-run as root failed: {reason}")
+    if verdict == "error":
+        pytest.fail(f"systemd-run probe failed: {reason}")
+    pytest.skip(f"system manager transient units unavailable: {reason}")

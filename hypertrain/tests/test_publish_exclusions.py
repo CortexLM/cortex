@@ -358,6 +358,21 @@ def test_reviewed_allowlist_is_exact_path_and_line(tmp_path: Path) -> None:
     )
 
 
+def test_reviewed_fixture_lines_do_not_exempt_secrets_elsewhere(tmp_path: Path) -> None:
+    # The real allowlist exempts these fixture lines only at their exact path and bytes.
+    source = Path(__file__).resolve().parents[1]
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/publish-allowlist.txt").write_bytes(
+        (source / "scripts/publish-allowlist.txt").read_bytes()
+    )
+    for fixture, number in (("tests/beacon/test_push.py", 282), ("tests/datasets/test_pin.py", 19)):
+        line = (source / fixture).read_text().splitlines()[number - 1]
+        assert run_scanner(tmp_path, fixture, line + "\n").returncode == 0
+        assert run_scanner(tmp_path, "src/hypertrain/leak.py", line + "\n").returncode == 1
+    genuine = 'PATH_SECRET = "sk_" + "' + "Zp9Qw2Lm7Xc" + "4Vb8Nk3Rt6Yh1Jd5" + '"'
+    assert run_scanner(tmp_path, "tests/beacon/test_push.py", genuine + "\n").returncode == 1
+
+
 def test_current_repo_tree_scan_clean() -> None:
     source = Path(__file__).resolve().parents[1]
     script = (source / "scripts/publish.sh").read_text()

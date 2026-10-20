@@ -1822,6 +1822,7 @@ def test_image_archive_stdin_through_capture_and_native_shim(tmp_path: Path) -> 
     assert json.loads(journal.read_bytes()) == {"cluster": "hypertrain-v2-stream"}
 
 
+@pytest.mark.usefixtures("systemd_manager")
 def test_launch_safety_independent_systemd_units(tmp_path: Path) -> None:
     import json
     import os
