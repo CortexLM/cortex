@@ -936,6 +936,8 @@ def test_prepared_profile_opening_metadata_without_tensor_calls(
     tiny, tmp_path, monkeypatch, attack, metadata_genesis
 ):
     """Signed hermetic metadata/state oracle; opening never gains kernel approval."""
+    # Store imports the worker lazily; a first import under the trap would bind forbidden.
+    import hypertrain.auditor.worker  # noqa: F401
     from hypertrain.aggregator.core import OuterState
     from hypertrain.auditor.replay import AnchorCache
     from hypertrain.challenge.store import ChallengeError, ChallengeStore
