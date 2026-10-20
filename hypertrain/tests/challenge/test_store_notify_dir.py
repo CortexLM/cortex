@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from conftest import remove_new_empty_notify_dirs
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.data.store import LocalFSStore
+from notify_cleanup import remove_new_empty_notify_dirs
 
 from .conftest import PARAMS
 

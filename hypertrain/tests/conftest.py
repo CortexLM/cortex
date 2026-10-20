@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from notify_cleanup import remove_new_empty_notify_dirs
 from systemd_probe import classify_systemd_probe
 
 SEQ_LEN = 1024
@@ -158,16 +159,6 @@ def systemd_manager() -> None:
     if verdict == "error":
         pytest.fail(f"systemd-run probe failed: {reason}")
     pytest.skip(f"system manager transient units unavailable: {reason}")
-
-
-def remove_new_empty_notify_dirs(root: Path, before: set[str]) -> None:
-    """rmdir only: a non-empty directory may be a concurrent same-uid session's live store."""
-    for path in root.glob("ht-notify-*"):
-        if path.name not in before and path.lstat().st_uid == os.getuid():
-            try:
-                path.rmdir()
-            except OSError:
-                continue  # still in use, or a store a test never closed: leave it visible
 
 
 @pytest.fixture(scope="session", autouse=True)
