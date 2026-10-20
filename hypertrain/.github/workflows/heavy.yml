@@ -160,4 +160,4 @@ jobs:
           chmod 755 "$RUNNER_TEMP/kind-bin/kind"
           "$RUNNER_TEMP/kind-bin/kind" version | grep -q "^kind $v "
           echo "$RUNNER_TEMP/kind-bin" >> "$GITHUB_PATH"
-      - run: bash scripts/check.sh --ignore=tests/sim --ignore=tests/e2e
+      - run: bash scripts/check.sh -rs --ignore=tests/sim --ignore=tests/e2e
