@@ -23,7 +23,12 @@ jobs:
   publish:
     if: github.ref == 'refs/heads/main'
     needs: ci
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    # GitHub-hosted on purpose: this job creates the build provenance, and a Blacksmith runner is
+    # recorded as runnerEnvironment=self-hosted, which `gh attestation verify
+    # --deny-self-hosted-runners` rejects (Cortex verifies its own images that way). The images
+    # published so far are runnerEnvironment=github-hosted; keep that property for a digest that
+    # may be pinned in a registry. The `ci` job above (its first line) stays on Blacksmith.
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
