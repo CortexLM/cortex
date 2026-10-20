@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -278,6 +279,22 @@ async def read_model[M: BaseModel](request: Request, model: type[M]) -> M:
         raise ChallengeError(422, f"{where}: {first.get('msg', 'invalid')}") from None
 
 
+def _lazy_role_launch(path: Path) -> role_dispatch.RoleLaunch:
+    """Load on first use: the supervisor canary boots with an empty /data and must answer."""
+    lock, loaded = threading.Lock(), list[role_dispatch.RoleLaunch]()
+
+    def launch(*args: Any) -> Any:
+        with lock:
+            if not loaded:
+                try:
+                    loaded.append(role_dispatch.load(path))
+                except (OSError, ValueError) as error:  # pydantic ValidationError is a ValueError
+                    raise ChallengeError(503, "ROLE_DISPATCH_UNAVAILABLE") from error
+        return loaded[0](*args)
+
+    return launch
+
+
 def create_app(
     config: Config,
     *,
@@ -310,7 +327,7 @@ def create_app(
             verify_beacon,
             objects or LocalFSStore(config.state_dir / "objects"),
             _role_launch=(
-                role_dispatch.load(config.role_dispatch_file)
+                _lazy_role_launch(config.role_dispatch_file)
                 if config.role_dispatch_file is not None
                 else None
             ),
