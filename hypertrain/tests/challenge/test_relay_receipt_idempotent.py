@@ -10,12 +10,14 @@ import anyio
 import httpx
 import pytest
 
+from hypertrain.challenge.store import ChallengeError
 from hypertrain.data.store import LocalFSStore
 from hypertrain.data.stream_store import StreamStore
 from hypertrain.protocol import envelope_v2, relay_envelope
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.relay_messages import (
+    MasterAcceptanceV2,
     RelayAssignment,
     RelayNetworkManifest,
     RelayReceipt,
@@ -241,3 +243,90 @@ def test_relay_400_on_retrieval_is_a_clean_error_not_500(network, uploaded):
     assert refused.status_code == 502, refused.text
     assert "400" in refused.json()["detail"]
     assert count(network, "master-acceptance") == 0
+
+
+def race(network, monkeypatch, receipt, finish_a):
+    """B passes the first transaction and the relay; A is accepted before B writes."""
+    from hypertrain.relay.client import RelayClient
+
+    real = RelayClient.retrieval
+    pending = [finish_a]
+
+    async def retrieval(self, *args, **kwargs):
+        response = await real(self, *args, **kwargs)
+        if pending:
+            await pending.pop()()
+        return response
+
+    monkeypatch.setattr(RelayClient, "retrieval", retrieval)
+    store = network.store.for_run(network.manifest.run_id())
+
+    async def b():
+        async with httpx.AsyncClient() as client:
+            try:
+                return await store.relay_receipt_v2(
+                    canonicalize(receipt.model_dump(mode="json")), client
+                )
+            except ChallengeError as exc:
+                return exc
+
+    outcome = anyio.run(b)
+    assert not pending
+    return outcome
+
+
+def test_second_transaction_does_not_write_a_second_acceptance_same_receipt(
+    network, uploaded, monkeypatch
+):
+    _, _, receipt = uploaded
+    store = network.store.for_run(network.manifest.run_id())
+    start = store._now(store._db)
+    accepted = []
+
+    async def finish_a():
+        # A arrives after B's relay challenge expired and is accepted one beacon before B writes.
+        network.push(start + 11)
+        async with httpx.AsyncClient() as client:
+            accepted.append(
+                await store.relay_receipt_v2(canonicalize(receipt.model_dump(mode="json")), client)
+            )
+        network.push(start + 12)
+
+    outcome = race(network, monkeypatch, receipt, finish_a)
+    assert count(network, "master-acceptance") == 1
+    assert outcome == accepted[0]
+
+
+def test_second_transaction_conflicts_with_acceptance_of_another_receipt(
+    network, uploaded, monkeypatch
+):
+    _, grant, receipt = uploaded
+    run_id = network.manifest.run_id()
+    store = network.store.for_run(run_id)
+    other = RelayReceipt.model_validate(receipt.body).model_copy(
+        update={"received_drand": RelayReceipt.model_validate(receipt.body).received_drand + 1}
+    )
+
+    async def finish_a():
+        # The real relay only serves its own receipt, so A's acceptance is written as A would.
+        acceptance = MasterAcceptanceV2(
+            w=grant.w,
+            hotkey=grant.hotkey,
+            delta_hash=grant.delta_hash,
+            receipt_hash=other.digest(),
+            received_drand=store._now(store._db),
+        )
+        with store._tx():
+            store._put_record_v2(
+                run_id,
+                "master-acceptance",
+                acceptance.digest(),
+                relay_envelope.seal(
+                    COORD, "MasterAcceptanceV2", run_id, acceptance, grant.retain_until
+                ),
+            )
+
+    outcome = race(network, monkeypatch, receipt, finish_a)
+    assert count(network, "master-acceptance") == 1
+    assert isinstance(outcome, ChallengeError)
+    assert (outcome.status, outcome.detail) == (409, "RELAY_RECEIPT_CONFLICT")

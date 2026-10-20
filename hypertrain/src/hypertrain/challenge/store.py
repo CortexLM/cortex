@@ -9929,6 +9929,25 @@ class ChallengeStore:
             self._put_record_v2(run_id, "chunk-manifest", grant.digest(), chunk.body())
             return signed
 
+    def _accepted_receipt_v2(
+        self, run_id: str, w: int, hotkey: str, receipt_hash: str
+    ) -> dict[str, Any] | None:
+        """Stored acceptance of receipt_hash for (w, hotkey); 409 if another was accepted."""
+        accepted: list[dict[str, Any]] = [
+            json.loads(stored)
+            for (stored,) in self._db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='master-acceptance' "
+                "AND json_extract(data,'$.body.w')=? AND json_extract(data,'$.body.hotkey')=?",
+                (run_id, w, hotkey),
+            )
+        ]
+        for stored in accepted:
+            if stored["body"]["receipt_hash"] == receipt_hash:
+                return stored
+        if accepted:
+            raise ChallengeError(409, "RELAY_RECEIPT_CONFLICT")
+        return None
+
     async def relay_receipt_v2(self, raw: bytes, client: Any) -> dict[str, Any]:
         import base64
 
@@ -9961,19 +9980,10 @@ class ChallengeStore:
             )
             # A rerun must not challenge the relay again: it refuses a second live
             # retrieval of the same object, and the first acceptance is authoritative.
-            accepted: list[dict[str, Any]] = [
-                json.loads(stored)
-                for (stored,) in self._db.execute(
-                    "SELECT data FROM records_v2 WHERE run_id=? AND kind='master-acceptance' "
-                    "AND json_extract(data,'$.body.w')=? AND json_extract(data,'$.body.hotkey')=?",
-                    (run_id, grant.w, grant.hotkey),
-                )
-            ]
-            for stored in accepted:
-                if stored["body"]["receipt_hash"] == receipt.digest():
-                    return stored
-            if accepted:
-                raise ChallengeError(409, "RELAY_RECEIPT_CONFLICT")
+            if (
+                stored := self._accepted_receipt_v2(run_id, grant.w, grant.hotkey, receipt.digest())
+            ) is not None:
+                return stored
             assignment = self._record_v2(run_id, "relay-assignment", f"{grant.w}:{grant.hotkey}")[
                 "body"
             ]
@@ -10023,6 +10033,11 @@ class ChallengeStore:
                 502, f"relay refused master retrieval: HTTP {exc.response.status_code}"
             ) from exc
         with self._tx():
+            # A concurrent submission may have been accepted while this one awaited the relay.
+            if (
+                stored := self._accepted_receipt_v2(run_id, grant.w, grant.hotkey, receipt.digest())
+            ) is not None:
+                return stored
             current = self._fresh_v2(
                 manifest, f"relay-accept:{receipt.digest()}:{self._now(self._db)}"
             )
