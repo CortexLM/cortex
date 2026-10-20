@@ -8,7 +8,18 @@ SCRIPT = Path(__file__).parents[1] / "scripts/launch_cuda_run.sh"
 
 
 def _run(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ, RD=str(tmp_path), STATE=str(tmp_path / "state"), PY="python3")
+    # Stub the frozen tree (checked fail-closed before preflight) and pin TOOLS under tmp_path.
+    tree = tmp_path / "tree"
+    (tree / "experiments/gpu_network_v2").mkdir(parents=True)
+    (tree / "experiments/gpu_network_v2/orchestrate.py").touch()
+    env = dict(
+        os.environ,
+        RD=str(tmp_path),
+        STATE=str(tmp_path / "state"),
+        PY="python3",
+        HT_TREE=str(tree),
+        TOOLS=str(tmp_path / "tools"),
+    )
     return subprocess.run(
         ["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env, timeout=60
     )
