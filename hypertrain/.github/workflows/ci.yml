@@ -25,7 +25,7 @@ env:
 jobs:
   # Format, lint and types only. Fast, high signal, no test execution.
   lint:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,7 +51,7 @@ jobs:
   # is a fraction of the serial run. The native-systemd-only cases are excluded here
   # and run in the nightly heavy workflow (heavy.yml).
   test:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -110,7 +110,7 @@ jobs:
 
   # The slow subprocess suites, in parallel with test.
   test-slow:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 25
     strategy:
       fail-fast: false
