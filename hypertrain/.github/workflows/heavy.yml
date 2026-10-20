@@ -141,4 +141,23 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
       - run: uv sync --locked --all-extras --group dev
+      # The runner image ships its own kind; the od relay tests and relay_kind_smoke.py
+      # require the kind_version pinned in deploy/k8s/versions.json.
+      - name: Install pinned kind
+        env:
+          KIND_SHA256_V0_31_0: eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa
+        run: |
+          set -euo pipefail
+          v="$(python3 -c 'import json; print(json.load(open("deploy/k8s/versions.json"))["kind_version"])')"
+          if [ "$v" != v0.31.0 ]; then
+            echo "kind_version $v: update KIND_SHA256 in heavy.yml" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/kind-bin"
+          curl -fsSLo "$RUNNER_TEMP/kind-bin/kind" \
+            "https://github.com/kubernetes-sigs/kind/releases/download/$v/kind-linux-amd64"
+          echo "$KIND_SHA256_V0_31_0  $RUNNER_TEMP/kind-bin/kind" | sha256sum -c -
+          chmod 755 "$RUNNER_TEMP/kind-bin/kind"
+          "$RUNNER_TEMP/kind-bin/kind" version | grep -q "^kind $v "
+          echo "$RUNNER_TEMP/kind-bin" >> "$GITHUB_PATH"
       - run: bash scripts/check.sh --ignore=tests/sim --ignore=tests/e2e
