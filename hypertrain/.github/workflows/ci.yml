@@ -1,18 +1,20 @@
 name: ci
 
+# main is covered by images.yml, which calls this workflow before publishing. A
+# push trigger here would start a twin run on the same ref (see concurrency).
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_call:
 
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref instead of queueing them.
+# Cancel superseded PR runs on the same ref. In a called run github.workflow is
+# the caller's name, so the images run gets its own group and is never cancelled;
+# images.yml serializes pushes to main itself.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Bound CPU kernel dispatch to AVX2, the dev-host golden baseline.
 env:
@@ -23,7 +25,7 @@ env:
 jobs:
   # Format, lint and types only. Fast, high signal, no test execution.
   lint:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,7 +51,7 @@ jobs:
   # is a fraction of the serial run. The native-systemd-only cases are excluded here
   # and run in the nightly heavy workflow (heavy.yml).
   test:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -108,7 +110,7 @@ jobs:
 
   # The slow subprocess suites, in parallel with test.
   test-slow:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 25
     strategy:
       fail-fast: false
