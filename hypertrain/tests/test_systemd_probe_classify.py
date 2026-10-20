@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import _classify_systemd_probe
+from systemd_probe import classify_systemd_probe
 
 DENIED = [
     "Failed to start transient service unit: Interactive authentication required.",
@@ -14,12 +14,12 @@ DENIED = [
 
 
 def test_ok() -> None:
-    assert _classify_systemd_probe(0, "") == "ok"
+    assert classify_systemd_probe(0, "") == "ok"
 
 
 @pytest.mark.parametrize("stderr", DENIED)
 def test_unavailable(stderr: str) -> None:
-    assert _classify_systemd_probe(1, stderr) == "unavailable"
+    assert classify_systemd_probe(1, stderr) == "unavailable"
 
 
 @pytest.mark.parametrize(
@@ -27,4 +27,4 @@ def test_unavailable(stderr: str) -> None:
     ["Failed to start transient service unit: Resource temporarily unavailable (EAGAIN)", ""],
 )
 def test_error(stderr: str) -> None:
-    assert _classify_systemd_probe(1, stderr) == "error"
+    assert classify_systemd_probe(1, stderr) == "error"
