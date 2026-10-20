@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -88,3 +90,34 @@ def test_valid_file_loaded_once_same_behaviour(
     _foreign(launch, tmp_path)
     _foreign(real(dispatch), tmp_path)  # same refusal as the eager loader
     assert calls == [dispatch]
+
+
+def test_concurrent_first_calls_load_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dispatch = tmp_path / "dispatch.json"
+    _write_valid(dispatch, tmp_path)
+    calls: list[Path] = []
+    real = role_dispatch.load
+
+    def slow(path: Path) -> role_dispatch.RoleLaunch:
+        calls.append(path)
+        time.sleep(0.05)  # widen the window: without the lock every thread loads
+        return real(path)
+
+    monkeypatch.setattr(role_dispatch, "load", slow)
+    launch = _app(tmp_path, dispatch).state.store._role_launch
+    assert launch is not None
+    with ThreadPoolExecutor(16) as pool:
+        for future in [pool.submit(_foreign, launch, tmp_path) for _ in range(16)]:
+            future.result()
+    assert len(calls) == 1
+
+
+def test_unexpected_load_error_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(path: Path) -> role_dispatch.RoleLaunch:
+        raise RuntimeError("not a missing-file problem")
+
+    monkeypatch.setattr(role_dispatch, "load", broken)
+    launch = _app(tmp_path, tmp_path / "dispatch.json").state.store._role_launch
+    assert launch is not None
+    with pytest.raises(RuntimeError, match="not a missing-file problem"):
+        launch("audit", SimpleNamespace(run_id="a" * 64), tmp_path, {})
