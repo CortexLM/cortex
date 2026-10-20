@@ -18,7 +18,10 @@ env:
 
 jobs:
   publish:
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    # GitHub-hosted on purpose: this job produces the build provenance, and a Blacksmith runner is
+    # recorded as runnerEnvironment=self-hosted, which `gh attestation verify
+    # --deny-self-hosted-runners` (this workflow and approve-image-update.yml) rejects.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       actions: read
