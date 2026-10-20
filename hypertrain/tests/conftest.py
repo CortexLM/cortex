@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -110,3 +112,38 @@ def corpus_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     d = build_corpus(tmp_path_factory.mktemp("corpus"))
     os.environ["HYPERTRAIN_DATA_DIR"] = str(d)
     return d
+
+
+@pytest.fixture(scope="session")
+def systemd_manager() -> None:
+    """Skip unless this user may start transient units on the system manager, as the product does.
+
+    Root that cannot is a broken host, not an unprivileged one: fail, so the heavy `native` job
+    (isolated root environment) can never turn green by skipping.
+    """
+    try:
+        probe = subprocess.run(
+            [
+                "systemd-run",
+                "--unit=ht-probe-" + uuid.uuid4().hex,
+                "--wait",
+                "--collect",
+                "--quiet",
+                "--no-ask-password",
+                "--property=MemoryMax=64M",
+                "--property=CPUQuota=50%",
+                "/bin/true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        ok, reason = probe.returncode == 0, f"rc={probe.returncode} {probe.stderr.strip()[-500:]}"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        ok, reason = False, repr(exc)
+    if ok:
+        return
+    if os.geteuid() == 0:
+        pytest.fail(f"systemd-run as root failed: {reason}")
+    pytest.skip(f"system manager transient units unavailable: {reason}")

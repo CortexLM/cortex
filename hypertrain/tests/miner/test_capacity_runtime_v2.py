@@ -23,6 +23,7 @@ def small(monkeypatch, tmp_path):
     return launch.CapacityAttempt("11" * 32, "22" * 32, tmp_path / "runtime.lock", lambda: True)
 
 
+@pytest.mark.usefixtures("systemd_manager")
 @pytest.mark.parametrize("mode", ["success", "oom", "cancel", "deadline"])
 def test_actual_small_kernel_attempt_and_cleanup(tmp_path, small, mode):
     """Subscribe readiness before triggering real bounded command and await pidfd exit."""
@@ -145,6 +146,7 @@ def test_missing_manager_permission_has_no_unbounded_fallback(tmp_path, small, m
     assert not (tmp_path / "attempt/capacity-observed.json").exists()
 
 
+@pytest.mark.usefixtures("systemd_manager")
 def test_real_runner_parent_death_retains_absolute_manager_timer(tmp_path, small):
     """Fork only a stdlib waiting controller; manager timer survives its SIGKILL."""
     path = str(tmp_path / "dead.sock")

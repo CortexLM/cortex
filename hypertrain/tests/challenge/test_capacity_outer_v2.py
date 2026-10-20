@@ -193,6 +193,7 @@ def test_request_metadata_rejects_without_tensor_allocation(tiny, tmp_path, monk
         OuterRequest.parse(data)
 
 
+@pytest.mark.usefixtures("systemd_manager")
 def test_actual_bounded_outer_child_matches_original_signed_replay(tiny, tmp_path, monkeypatch):
     from hypertrain.aggregator.core import OuterState
     from hypertrain.aggregator.tape_v2 import TapeV2, make_tape, replay_tape
@@ -672,6 +673,7 @@ def test_genesis_authority_rejects_before_kernel(genesis_tiny, monkeypatch, atta
     ).fetchone()
 
 
+@pytest.mark.usefixtures("systemd_manager")
 def test_actual_bounded_genesis_preparation_and_duplicate_debit(
     genesis_tiny, tmp_path, monkeypatch
 ):
