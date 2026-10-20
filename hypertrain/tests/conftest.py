@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from notify_cleanup import remove_new_empty_notify_dirs
 from systemd_probe import classify_systemd_probe
 
 SEQ_LEN = 1024
@@ -156,3 +159,20 @@ def systemd_manager() -> None:
     if verdict == "error":
         pytest.fail(f"systemd-run probe failed: {reason}")
     pytest.skip(f"system manager transient units unavailable: {reason}")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _tmp_leak_guard(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Keep the session's IPC and torchrun leftovers out of the shared temp root.
+
+    torchrun reads PET_LOG_DIR as --log-dir, so its logs land under basetemp instead of a fresh
+    tempdir()/torchelastic_*; child processes inherit os.environ. Nothing outside basetemp is
+    deleted except empty ht-notify-* directories that appeared during the session.
+    """
+    root = Path(tempfile.gettempdir())
+    before = {path.name for path in root.glob("ht-notify-*")}
+    patch = pytest.MonkeyPatch()
+    patch.setenv("PET_LOG_DIR", str(tmp_path_factory.mktemp("torchelastic")))
+    yield
+    patch.undo()
+    remove_new_empty_notify_dirs(root, before)
