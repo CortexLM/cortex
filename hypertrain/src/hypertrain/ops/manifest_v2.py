@@ -153,7 +153,7 @@ def _build(args: argparse.Namespace) -> dict[str, JsonValue]:
     return index
 
 
-def _example() -> dict[str, bytes]:
+def _example(ledger_mode: str = "test") -> dict[str, bytes]:
     coord, auditor0, auditor1, referee, relay, cold, other = (
         encode_hotkey(bytes([i]) * 32) for i in range(1, 8)
     )
@@ -197,8 +197,10 @@ def _example() -> dict[str, bytes]:
             max_object_bytes=1_000_000, max_body_bytes=65536, max_chunk_manifest_bytes=1048576
         ),
     )
+    allocation = genesis_allocation_hash([(cold, 20000, 1), (other, 10000, 1)])
+    production = ledger_mode == "production"
     economics = EconomicsPolicyV2(
-        ledger_mode="test",
+        ledger_mode="production" if production else "test",
         G_max_units=100,
         R_collectible_units=100,
         S_min_units=1000,
@@ -206,11 +208,12 @@ def _example() -> dict[str, bytes]:
         gammaV_units=0,
         s_lower_ppm=1_000_000,
         q_floor=1_000_000,
-        genesis_allocation_hash=genesis_allocation_hash([(cold, 20000, 1), (other, 10000, 1)]),
+        genesis_allocation_hash=None if production else allocation,
         reward_authority=coord,
         round_reward_units=1_000_000,
         max_total_issuance=20_000_000,
         shadow_bootstrap_rounds=12,
+        bootstrap_allocation_hash=allocation if production else None,
     )
     aggregation = AggregationPolicyV2(
         arithmetic="flat-cclip-cap-v1",
@@ -295,13 +298,14 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--state-dir", type=Path)
     example = sub.add_parser("example", help="write tiny CPU inputs with public placeholders")
     example.add_argument("--out", type=Path, required=True)
+    example.add_argument("--ledger-mode", choices=("test", "production"), default="test")
     try:
         args = parser.parse_args(argv)
         if args.cmd == "build":
             result = _build(args)
         else:
             _check_out(args.out)
-            files = _example()
+            files = _example(args.ledger_mode)
             _write(args.out, files)
             result = {"files": {name: sha256_hex(raw) for name, raw in files.items()}}
     except ValidationError as error:

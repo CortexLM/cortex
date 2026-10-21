@@ -166,6 +166,40 @@ No automatic migration is provided; separate operator resolution is required.
 Funding uses signed `EscrowLock` via `POST /v2/runs/{run_id}/escrow/lock`, not a
 CLI `--bond` flag. Test genesis has pinned nonfinancial origins; production mode
 has separate reward authority/issuance bounds and no test-genesis conversion.
+
+Production funding is one coordinator-signed `ProductionBootstrap`, posted as an
+`ht/2` envelope to `POST /v2/runs/{run_id}/admin/bootstrap` (admin bearer). The
+run's `EconomicsPolicyV2.bootstrap_allocation_hash` pins its owner/units/maturity
+list (`genesis_allocation_hash` over `[owner, units, mature_at]`); only
+`ledger_mode="production"` may set it, and an unset field is omitted, so earlier
+policy digests and run IDs are unchanged. Origins are
+`ht-origin-bootstrap-v1|run|allocation_hash|index`. The ledger accepts it once per
+run: the same `operation_id` and body replay the stored receipt, the same
+`operation_id` with other content answers `OPERATION_CONFLICT`, and any second
+bootstrap answers `PRODUCTION_BOOTSTRAP_FORBIDDEN`. It is refused when the inner
+authority signature is not `reward_authority` (pinned to `coord_pubkey`), when
+the envelope signer is not the coordinator, when the allocation differs from the
+pin, when bootstrap plus issued and reserved shadow units would exceed
+`max_total_issuance` (`TOTAL_ISSUANCE_BUDGET`; later rewards share the same cap),
+when the run has no CUDA qualification (production refuses the CPU backend) and
+when the latest beacon round is not BLS-verified (`UNVERIFIED_BEACON`).
+Bootstrap units mature on the beacon loop and can be locked or transferred;
+like genesis units they are collateral and never pay through `get_weights`.
+
+Production eligibility also needs the run's `economic-bound` record. `POST
+/v2/runs/{run_id}/admin/economic-bound` (admin bearer, no body) writes it once,
+coordinator-signed, only when the pinned policy satisfies
+`q_floor*s_lower*beta*(R_collectible+S_min) >= G_max` in exact ppm integers
+(`challenge/trust_v2.py:economic_bound`); otherwise it answers 409 and writes
+nothing. The record binds the economics policy hash; later calls return it
+unchanged, and a stored record for another policy answers 409.
+
+A test-ledger run published on the production challenge steers real emission:
+as soon as its first live round finalizes and its reward matures, those units
+enter `get_weights` like any production reward
+(`tests/challenge/test_v2_weights_bridge.py::test_v2_matured_reward_reaches_get_weights`).
+`ledger_mode="test"` does not keep a run out of on-chain weights; do not host a
+test-ledger run on the production challenge unless that emission is intended.
 Rewards are issued only through accepted finality, uniquely tracked by origin,
 then mature after vesting/dispute conditions. Transfers preserve origin units;
 fraud burns collectible exposure rather than redistributing it. Shadow work does
