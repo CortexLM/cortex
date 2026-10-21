@@ -277,3 +277,15 @@ def test_build_refuses_corrupt_existing_object(
     assert captured.err == "error: object store contains corrupt content\n"
     assert path.read_bytes() == b"corrupt"
     assert not (tmp_path / "output" / "manifest-envelope.json").exists()
+
+
+def test_production_example_pins_bootstrap_not_test_genesis(tmp_path: Path) -> None:
+    from hypertrain.protocol.messages_v2 import EconomicsPolicyV2
+
+    out = tmp_path / "production"
+    assert main(["example", "--ledger-mode", "production", "--out", str(out)]) == 0
+    policies = json.loads((out / "policies.json").read_text())
+    economics = EconomicsPolicyV2.model_validate(policies["economics"])
+    assert economics.ledger_mode == "production"
+    assert economics.genesis_allocation_hash is None
+    assert economics.bootstrap_allocation_hash is not None

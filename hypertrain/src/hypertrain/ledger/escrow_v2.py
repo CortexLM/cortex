@@ -1,6 +1,7 @@
 """Conserved origin units. SQLite event journal and receipts commit with bucket changes.
 
 No legacy entitlement import, external deposit, client mint or client slash exists.
+Production issuance outside rewards is one coordinator-signed, policy-pinned bootstrap.
 The service supplies authenticated finality/replay and settlement from its own records.
 """
 
@@ -35,6 +36,7 @@ from hypertrain.protocol.messages_v2 import (
     EscrowTransfer,
     Hex64,
     OriginAllocation,
+    ProductionBootstrap,
     RewardFinalize,
     RunManifestV2,
     ShadowReservationRequestV1,
@@ -55,7 +57,9 @@ def digest(model: BaseModel) -> str:
     return body_digest(model.model_dump(mode="json"))
 
 
-def authority_message(model: TestGenesis | RewardFinalize | ShadowRewardFinalizeV1) -> bytes:
+def authority_message(
+    model: TestGenesis | ProductionBootstrap | RewardFinalize | ShadowRewardFinalizeV1,
+) -> bytes:
     """Origin authority signature is independent of the enclosing envelope signer."""
     return (
         b"hypertrain/origin/2|"
@@ -74,6 +78,10 @@ def genesis_allocation_hash(allocations: Sequence[tuple[str, int, int]]) -> str:
 
 def genesis_origin_id(run_id: str, allocation_hash: str, index: int) -> str:
     return sha256_hex(f"ht-origin-genesis-v2|{run_id}|{allocation_hash}|{index}".encode())
+
+
+def bootstrap_origin_id(run_id: str, allocation_hash: str, index: int) -> str:
+    return sha256_hex(f"ht-origin-bootstrap-v1|{run_id}|{allocation_hash}|{index}".encode())
 
 
 def reward_origin_id(run_id: str, w: int, hotkey: str, finalize_hash: str) -> str:
@@ -306,7 +314,9 @@ class EscrowV2:
         self.db.execute("INSERT INTO escrow_snapshots VALUES(?,?)", (operation_id, state))
         return receipt
 
-    def _authority(self, model: TestGenesis | RewardFinalize | ShadowRewardFinalizeV1) -> None:
+    def _authority(
+        self, model: TestGenesis | ProductionBootstrap | RewardFinalize | ShadowRewardFinalizeV1
+    ) -> None:
         if model.run_id != self.run_id or not verify(
             decode_hotkey(self.policy.reward_authority),
             authority_message(model),
@@ -350,6 +360,51 @@ class EscrowV2:
                     raise EscrowError("GENESIS_ORIGIN_DOMAIN")
                 self._issue(o, None, None)
             return self._event(operation, "TEST_GENESIS", request, genesis.origins[0].owner)
+
+    def production_bootstrap(self, bootstrap: ProductionBootstrap) -> EscrowReceipt:
+        """One pinned production issuance per run; collateral like genesis, never emission."""
+        self._authority(bootstrap)
+        with self.tx():
+            request = bootstrap.model_dump_json(exclude={"authority_sig"})
+            old = self._existing(bootstrap.operation_id, request)
+            if old is not None:
+                return old
+            if (
+                self.policy.ledger_mode != "production"
+                or self.policy.bootstrap_allocation_hash is None
+                or self.db.execute(
+                    "SELECT 1 FROM escrow_events WHERE kind='PRODUCTION_BOOTSTRAP'"
+                ).fetchone()
+            ):
+                raise EscrowError("PRODUCTION_BOOTSTRAP_FORBIDDEN")
+            alloc = [(o.owner, o.units, o.mature_at) for o in bootstrap.origins]
+            if (
+                bootstrap.allocation_hash != self.policy.bootstrap_allocation_hash
+                or genesis_allocation_hash(alloc) != bootstrap.allocation_hash
+            ):
+                raise EscrowError("BOOTSTRAP_ALLOCATION")
+            pending = self.db.execute(
+                "SELECT COUNT(*) FROM records_v2 WHERE run_id=? AND kind='shadow-reservation' "
+                "AND json_extract(data,'$.accepted') IS NULL",
+                (self.run_id,),
+            ).fetchone()[0]
+            if (
+                self.balances().issued
+                + pending * self.policy.round_reward_units
+                + bootstrap.total_units
+                > self.policy.max_total_issuance
+            ):
+                raise EscrowError("TOTAL_ISSUANCE_BUDGET")
+            for i, o in enumerate(bootstrap.origins):
+                if o.origin_id != bootstrap_origin_id(self.run_id, bootstrap.allocation_hash, i):
+                    raise EscrowError("BOOTSTRAP_ORIGIN_DOMAIN")
+                self._issue(o, None, None)  # hotkey NULL: payable() never emits these units
+            return self._event(
+                bootstrap.operation_id,
+                "PRODUCTION_BOOTSTRAP",
+                request,
+                bootstrap.origins[0].owner,
+            )
 
     def reward_allocations(
         self, reward: RewardFinalize | ShadowRewardFinalizeV1, evidence: FinalityEvidence
@@ -973,8 +1028,8 @@ class EscrowV2:
     def payable(self, now_beacon: int) -> list[sqlite3.Row]:
         """Free units of live reward origins matured by now_beacon, oldest maturity first.
 
-        Shadow (bootstrap) and genesis origins are collateral, never emission. Only units still
-        held by the origin's issued owner pay (its emptied reward_pending row marks it): units
+        Shadow, production-bootstrap and genesis origins are collateral, never emission. Only units
+        still held by the origin's issued owner pay (its emptied reward_pending row marks it): units
         transferred to another owner or a referee are not the earning hotkey's to emit.
         """
         return self.db.execute(

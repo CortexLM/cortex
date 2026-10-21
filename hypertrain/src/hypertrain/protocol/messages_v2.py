@@ -582,11 +582,15 @@ class EconomicsPolicyV2(WireModel):
     round_reward_units: U64
     max_total_issuance: U64
     shadow_bootstrap_rounds: Literal[12]
+    # Omitted when absent so every policy digest (and run ID) predating it is unchanged.
+    bootstrap_allocation_hash: Hex64 | None = Field(None, exclude_if=lambda v: v is None)
 
     @model_validator(mode="after")
     def _mode(self) -> EconomicsPolicyV2:
         if (self.ledger_mode == "test") != (self.genesis_allocation_hash is not None):
             raise ValueError("only test mode requires pinned genesis allocation")
+        if self.bootstrap_allocation_hash is not None and self.ledger_mode != "production":
+            raise ValueError("only production mode pins a bootstrap allocation")
         return self
 
 
@@ -727,6 +731,25 @@ class TestGenesis(WireModel):
             raise ValueError("duplicate genesis origin")
         if sum(o.units for o in self.origins) != self.total_units:
             raise ValueError("genesis allocations do not conserve total")
+        return self
+
+
+class ProductionBootstrap(WireModel):
+    """Coordinator-signed one-time production issuance, pinned by bootstrap_allocation_hash."""
+
+    run_id: Hex64
+    operation_id: Hex64
+    allocation_hash: Hex64
+    total_units: Positive
+    origins: Annotated[list[OriginAllocation], Field(min_length=1, max_length=1024)]
+    authority_sig: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{128}$")]
+
+    @model_validator(mode="after")
+    def _conservation(self) -> ProductionBootstrap:
+        if len({o.origin_id for o in self.origins}) != len(self.origins):
+            raise ValueError("duplicate bootstrap origin")
+        if sum(o.units for o in self.origins) != self.total_units:
+            raise ValueError("bootstrap allocations do not conserve total")
         return self
 
 
@@ -939,6 +962,7 @@ MESSAGE_TYPES_V2: dict[str, type[BaseModel]] = {
         DisputePolicyV2,
         AuditPolicyV2,
         TestGenesis,
+        ProductionBootstrap,
         RewardFinalize,
         EscrowLock,
         ShadowRewardFinalizeV1,
