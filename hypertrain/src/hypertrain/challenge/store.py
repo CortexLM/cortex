@@ -817,6 +817,16 @@ class ChallengeStore:
 
     def set_paused(self, run_id: str, paused: bool) -> dict[str, Any]:
         with self._tx() as db:
+            row = db.execute(
+                "SELECT status, manifest FROM runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if row is not None and json.loads(row["manifest"]).get("manifest_version") == 2:
+                # v2 rounds own their state; only a running<->paused display flip is allowed.
+                want, have = ("paused", "running") if paused else ("running", "paused")
+                if row["status"] not in (want, have):
+                    raise ChallengeError(409, f"v2 run is {row['status']}, not {have}")
+                db.execute("UPDATE runs SET status=? WHERE run_id=?", (want, run_id))
+                return {"run_id": run_id, "status": want}
             row, manifest = self._run(db, run_id)
             if paused:
                 db.execute("UPDATE runs SET status='paused' WHERE run_id=?", (run_id,))
