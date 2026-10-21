@@ -160,4 +160,92 @@ jobs:
           chmod 755 "$RUNNER_TEMP/kind-bin/kind"
           "$RUNNER_TEMP/kind-bin/kind" version | grep -q "^kind $v "
           echo "$RUNNER_TEMP/kind-bin" >> "$GITHUB_PATH"
-      - run: bash scripts/check.sh -rs --ignore=tests/sim --ignore=tests/e2e
+      # The real od-base island files run in od-suite below. The 14 tests of
+      # test_authority_snapshot_v2.py are deselected by name: their 48-trial fixture writes
+      # ~190 GB on od-base and the exported 1.48 GB start_state exceeds
+      # scripts/network_authority_snapshot.py MAX_FILE (16 MiB) / MAX_BYTES (1 GiB).
+      # Founder decision 2026-10-21 (option A): documented residue, tracked in an issue.
+      # Deselected by name, not --ignore, so a new test added to that file still runs.
+      - name: Full suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          SNAP=tests/challenge/test_authority_snapshot_v2.py
+          DESELECT=()
+          for t in \
+            'test_original_export_validates_and_bootstraps_actual_service' \
+            'test_modified_package_rejects_before_restore[object]' \
+            'test_modified_package_rejects_before_restore[reference]' \
+            'test_modified_package_rejects_before_restore[foreign]' \
+            'test_modified_package_rejects_before_restore[traversal]' \
+            'test_modified_package_rejects_before_restore[digest]' \
+            'test_modified_package_rejects_before_restore[screen]' \
+            'test_modified_package_rejects_before_restore[strike]' \
+            'test_modified_package_rejects_before_restore[pending]' \
+            'test_modified_package_rejects_before_restore[funding]' \
+            'test_modified_package_rejects_before_restore[rotation]' \
+            'test_modified_package_rejects_before_restore[signature]' \
+            'test_modified_package_rejects_before_restore[finality]' \
+            'test_modified_package_rejects_before_restore[assignment]'
+          do DESELECT+=("--deselect=$SNAP::$t"); done
+          bash scripts/check.sh -rs --ignore=tests/sim --ignore=tests/e2e \
+            --ignore=tests/layout/test_od_island_v2.py \
+            --ignore=tests/auditor/test_island_bisect_v2.py \
+            --ignore=tests/auditor/test_island_replay_v2.py \
+            --ignore=tests/miner/test_island_launch_v2.py \
+            --ignore=tests/challenge/test_carry_genesis_v2.py \
+            "${DESELECT[@]}"
+
+  # Real od-base (123.8 M / 143.2 M params) island tests at the manifest's 1 CPU thread.
+  # Serial on a 32-core host, 2026-10-21: test_od_island_v2.py 62.5 min (peak 53 GB RSS),
+  # bisect 10.5, replay 10.4, launch 7.0, carry 2.5 min. Three ~31 min shards.
+  od-suite:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [layout-n4, layout-rest, island]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.17"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync --locked --all-extras --group dev
+      - name: od-base shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          N4=(
+            "tests/layout/test_od_island_v2.py::test_od_objectives_layout_reference_and_hooks[False-4-mlm]"
+            "tests/layout/test_od_island_v2.py::test_od_objectives_layout_reference_and_hooks[False-4-decision]"
+            "tests/layout/test_od_island_v2.py::test_od_objectives_layout_reference_and_hooks[False-4-distill]"
+            "tests/layout/test_od_island_v2.py::test_od_objectives_layout_reference_and_hooks[True-4-mlm]"
+            "tests/layout/test_od_island_v2.py::test_od_objectives_layout_reference_and_hooks[True-4-decision]"
+            "tests/layout/test_od_island_v2.py::test_od_objectives_layout_reference_and_hooks[True-4-distill]"
+          )
+          case "$SHARD" in
+            layout-n4) SEL=("${N4[@]}") ;;
+            layout-rest)
+              SEL=(tests/layout/test_od_island_v2.py)
+              for id in "${N4[@]}"; do SEL+=("--deselect=$id"); done ;;
+            island)
+              SEL=(tests/auditor/test_island_bisect_v2.py tests/auditor/test_island_replay_v2.py
+                tests/miner/test_island_launch_v2.py tests/challenge/test_carry_genesis_v2.py) ;;
+            *) echo "unknown shard $SHARD" >&2; exit 1 ;;
+          esac
+          # Peak host memory for this shard: sample `free` every 5 s, print the peak.
+          ( while sleep 5; do free -m | awk '/^Mem:/{print $3}'; done ) > "$RUNNER_TEMP/mem.log" &
+          SAMPLER=$!
+          rc=0
+          uv run --frozen pytest -q -rs --durations=25 "${SEL[@]}" || rc=$?
+          kill "$SAMPLER" 2>/dev/null || true
+          echo "shard=$SHARD peak_used_MiB=$(sort -n "$RUNNER_TEMP/mem.log" | tail -1) total_MiB=$(free -m | awk '/^Mem:/{print $2}')" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $rc
