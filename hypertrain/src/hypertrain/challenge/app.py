@@ -570,6 +570,17 @@ def create_app(
         admin(authorization)
         return await run(store.for_run(run_id).genesis_v2, run_id, await v2_raw(request))
 
+    @app.post("/v2/runs/{run_id}/admin/bootstrap")
+    async def bootstrap_v2(run_id: str, request: Request, authorization: Auth = None) -> Any:
+        admin(authorization)
+        hosted = store.for_run(run_id)
+        return await run(hosted.production_bootstrap_v2, run_id, await v2_raw(request))
+
+    @app.post("/v2/runs/{run_id}/admin/economic-bound")
+    async def economic_bound_v2(run_id: str, authorization: Auth = None) -> Any:
+        admin(authorization)
+        return await run(store.for_run(run_id).economic_bound_v2, run_id)
+
     @app.post("/v2/runs/{run_id}/admin/rounds")
     async def open_v2(run_id: str, request: Request, authorization: Auth = None) -> Any:
         admin(authorization)

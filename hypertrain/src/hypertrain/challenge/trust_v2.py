@@ -145,6 +145,17 @@ def audit_floor(
     return AuditFloor(min(q, 1_000_000), required, allowed)
 
 
+def economic_bound(policy: EconomicsPolicyV2) -> bool:
+    """Run-level q*s*beta*(R+S)>=G at the pinned audit floor; exact ppm integers."""
+    return (
+        policy.q_floor
+        * policy.s_lower_ppm
+        * policy.beta_ppm
+        * (policy.R_collectible_units + policy.S_min_units)
+        >= policy.G_max_units * 10**18
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class AuditSelection:
     selected: bool

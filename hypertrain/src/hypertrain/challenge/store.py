@@ -4145,6 +4145,54 @@ class ChallengeStore:
             )
             return receipt.body()
 
+    def production_bootstrap_v2(self, run_id: str, raw: bytes) -> dict[str, JsonValue]:
+        """Pinned production issuance; units mature on the beacon loop, never pay out."""
+        from hypertrain.protocol.messages_v2 import ProductionBootstrap
+
+        escrow, admission, _ = self._services(run_id)  # production refuses CPU here
+        with self._tx():
+            admission._beacon(self._now(self._db))  # production requires a BLS-verified round
+            model = self._authenticated_v2(run_id, raw, "ProductionBootstrap", self._coord().ss58)
+            assert isinstance(model, ProductionBootstrap)
+            return escrow.production_bootstrap(model).body()
+
+    def economic_bound_v2(self, run_id: str) -> dict[str, JsonValue]:
+        """Write the immutable coordinator-signed record only when trust_v2 holds the bound."""
+        from hypertrain.challenge.trust_v2 import economic_bound
+        from hypertrain.protocol.messages import Receipt
+
+        escrow, _, _ = self._services(run_id)
+        with self._tx():
+            row = self._db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='economic-bound' AND id='run'",
+                (run_id,),
+            ).fetchone()
+            if row is not None:
+                stored: dict[str, JsonValue] = json.loads(row[0])
+                if stored["economics_policy_hash"] != escrow.manifest.network.economics_policy_hash:
+                    raise ChallengeError(409, "immutable economic-bound record conflicts")
+                return stored
+            policy = escrow.policy
+            if policy.ledger_mode != "production":
+                raise ChallengeError(409, "economic-bound record is production only")
+            if not economic_bound(policy):
+                raise ChallengeError(409, "economic bound q*s*beta*(R+S)>=G fails")
+            evidence: dict[str, JsonValue] = {
+                "run_id": run_id,
+                "economics_policy_hash": escrow.manifest.network.economics_policy_hash,
+                "bound": "q*s*beta*(R+S)>=G",
+            }
+            now = self._now(self._db)
+            receipt = Receipt(
+                w=0, commit_hash=sha256_hex(canonicalize(evidence)), received_round=max(now, 1)
+            )
+            record = {
+                **evidence,
+                "receipt": envelope_v2.seal(self._coord(), "Receipt", run_id, receipt, NEVER),
+            }
+            self._put_record_v2(run_id, "economic-bound", "run", record)
+            return record
+
     def _service_profile_v2(self, run_id: str) -> _ServiceCapacityV1:
         """Derive the sole admitted tiny shape; never allocate tensors."""
         manifest = self._run_v2(run_id)
