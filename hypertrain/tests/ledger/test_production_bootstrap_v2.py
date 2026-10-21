@@ -222,3 +222,39 @@ def test_bootstrap_units_never_payable(tmp_path: Path) -> None:
     # When / Then: free, matured units exist, yet get_weights has nothing to emit.
     assert e.balances().available == 30000
     assert e.payable(10**9) == []
+
+
+def test_bootstrap_exactly_at_total_issuance_is_accepted(tmp_path: Path) -> None:
+    # Boundary: total == cap passes, 29_999 (above) is rejected in the test above.
+    s = pinned(E.setup("production"), max_total_issuance=30_000)
+    e = E.ledger(s, tmp_path / "ledger.db")
+    e.production_bootstrap(bootstrap(e.run_id))
+    assert e.balances().issued == 30_000 and e.balances().conserved()
+
+
+def _pending_reservation(e) -> None:
+    """A reserved, not yet accepted shadow round: it will mint round_reward_units."""
+    e.db.execute(
+        "INSERT INTO records_v2 VALUES(?,?,?,?)",
+        (e.run_id, "shadow-reservation", "0", '{"binding":{},"accepted":null}'),
+    )
+
+
+@pytest.mark.parametrize("cap_slack,accepted", [(-1, False), (0, True)])
+def test_bootstrap_counts_pending_shadow_reservation_against_cap(
+    tmp_path: Path, cap_slack: int, accepted: bool
+) -> None:
+    # Given: a pending reservation holds round_reward_units of the cap.
+    base = E.setup("production")
+    cap = 30_000 + base.policy.round_reward_units + cap_slack
+    s = pinned(base, max_total_issuance=cap)
+    e = E.ledger(s, tmp_path / "ledger.db")
+    _pending_reservation(e)
+    # When / Then: bootstrap + reservation must fit; one unit short is refused, exact fit passes.
+    if accepted:
+        e.production_bootstrap(bootstrap(e.run_id))
+        assert e.balances().issued == 30_000
+    else:
+        with pytest.raises(EscrowError, match="TOTAL_ISSUANCE_BUDGET"):
+            e.production_bootstrap(bootstrap(e.run_id))
+        assert e.balances().issued == 0
