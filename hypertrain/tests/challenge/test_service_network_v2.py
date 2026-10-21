@@ -4446,3 +4446,25 @@ def test_upload_grant_replaced_when_original_held(network):
     assert grants() == 2
     retry = request(manifest(payload), expiry=584)
     assert retry.status_code == 200 and retry.json() == honest.json() and grants() == 2
+
+
+def test_admin_pause_flips_only_an_opened_v2_run_without_touching_its_state(network):
+    pause = "/v1/admin/runs/" + network.manifest.run_id() + "/paused"
+    # Given a created run: unpausing must never start a run that never opened a round.
+    refused = network.client.put(pause, json={"paused": False}, headers=admin())
+    assert refused.status_code == 409
+    assert network.client.get(network.url).json()["status"] == "created"
+    # Given a running v2 run (status set as open_round_v2 does).
+    with network.store._tx():
+        network.store._db.execute("UPDATE runs SET status='running'")
+    before = network.store._db.execute("SELECT manifest, envelope FROM runs").fetchone()
+    # When / Then: pause and unpause are status-only flips.
+    paused = network.client.put(pause, json={"paused": True}, headers=admin())
+    assert paused.status_code == 200, paused.text
+    assert network.client.get(network.url).json()["status"] == "paused"
+    resumed = network.client.put(pause, json={"paused": False}, headers=admin())
+    assert resumed.status_code == 200, resumed.text
+    assert network.client.get(network.url).json()["status"] == "running"
+    assert tuple(network.store._db.execute("SELECT manifest, envelope FROM runs").fetchone()) == (
+        tuple(before)
+    )
