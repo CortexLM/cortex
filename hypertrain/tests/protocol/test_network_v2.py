@@ -131,13 +131,13 @@ def commit(tokens: int = 7680) -> CommitV2:
 def test_od_general_n_when_v2(n: int, objective: str, zero1: bool) -> None:
     # Given
     body = od_body()
-    body["model"]["param_count"] = 116_288
+    body["model"]["param_count"] = 123_753_984
     body["inner"].update(H=1, J=1, micro_batch=1, grad_accum=1)
     body["reference_spec"]["layout"].update(n_gpus=n, dp_size=n, ep_size=1, zero1=zero1)
     if objective != "mlm":
         rec = {"state_len": 8, "n_questions": 1, "n_options": 2, "opt_len": 2, "instr_len": 2}
         body["model"]["od"].update(objective=objective, record=rec)
-        body["model"].update(seq_len=18, param_count=187_140)
+        body["model"].update(seq_len=18, param_count=143_241_220)
     # When
     model = wrapper(body)
     # Then
@@ -152,7 +152,7 @@ def test_od_general_n_when_v2(n: int, objective: str, zero1: bool) -> None:
 def test_assign_unit_when_only_island_batch_is_divisible() -> None:
     # Given
     body = od_body()
-    body["model"]["param_count"] = 116_288
+    body["model"]["param_count"] = 123_753_984
     body["inner"].update(H=1, J=1, micro_batch=1, grad_accum=1)
     body["reference_spec"]["layout"].update(n_gpus=8, dp_size=8)
     body["dataset"].update(assign_unit=8, unit_sha256_root=H, n_samples=4096)
@@ -1026,7 +1026,7 @@ def test_aggregation_when_computational_f32_is_nonfinite(field: str) -> None:
 @pytest.mark.parametrize("field", ["mask_ratio", "rps_weight", "distill_temp"])
 def test_od_when_objective_f32_is_nonfinite(field: str) -> None:
     body = od_body()  # Given
-    body["model"]["param_count"] = 116_288
+    body["model"]["param_count"] = 123_753_984
     body["model"]["od"][field] = "0000c07f"
     with pytest.raises(ValidationError):  # When / Then
         wrapper(body)

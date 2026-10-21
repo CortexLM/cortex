@@ -33,8 +33,8 @@ def od_manifest(objective: str, n: int, zero1: bool, dtype: str = "fp32") -> Run
     b = mod.od_body()
     rec = dict(state_len=8, n_questions=1, n_options=2, opt_len=2, instr_len=2)
     b["model"].update(
-        seq_len=8 if objective == "mlm" else 18,
-        param_count=116288 if objective == "mlm" else 187140,
+        seq_len=1024 if objective == "mlm" else 18,
+        param_count=123_753_984 if objective == "mlm" else 143_241_220,
         compute_dtype=dtype,
     )
     b["model"]["od"].update(objective=objective, record=None if objective == "mlm" else rec)

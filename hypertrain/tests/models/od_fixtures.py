@@ -17,10 +17,11 @@ from hypertrain.trainer.optim import OptState
 from hypertrain.trainer.rng import rng_ctr, uniform_f64
 
 RUN_ID = "cd" * 32
-SEQ = 32
+SEQ = 32  # v1 training path; check_manifest (A6) pins od-base mlm to N = 1024
+N = 1024
 H, J, MB = 3, 1, 2
 REC = {"state_len": 16, "n_questions": 2, "n_options": 3, "opt_len": 4, "instr_len": 4}
-STAGE_A_COUNT, FULL_COUNT = 116_288, 187_140
+STAGE_A_COUNT, FULL_COUNT = 123_753_984, 143_241_220
 
 
 def _l2_od_body() -> dict[str, Any]:
@@ -32,14 +33,16 @@ def _l2_od_body() -> dict[str, Any]:
     return mod.od_body()  # type: ignore[no-any-return]
 
 
-def od_body(objective: str = "mlm", profile: str = "od-fp32-ref-v1") -> dict[str, Any]:
+def od_body(
+    objective: str = "mlm", profile: str = "od-fp32-ref-v1", seq_len: int = SEQ
+) -> dict[str, Any]:
     b = copy.deepcopy(_l2_od_body())
     b["reference_spec"]["profile"] = profile
     b["model"]["compute_dtype"] = "fp32" if profile == "od-fp32-ref-v1" else "bf16"
     b["inner"] |= {"H": H, "J": J, "micro_batch": MB, "grad_accum": 1}
     b["inner"]["lr_schedule"] |= {"peak_lr": f32hex(1e-3), "warmup": 1}
     if objective == "mlm":
-        b["model"] |= {"seq_len": SEQ, "param_count": STAGE_A_COUNT}
+        b["model"] |= {"seq_len": seq_len, "param_count": STAGE_A_COUNT}
     else:
         shape = RecordShape(**REC)
         b["model"] |= {"seq_len": shape.length - 1, "param_count": FULL_COUNT}
@@ -47,8 +50,10 @@ def od_body(objective: str = "mlm", profile: str = "od-fp32-ref-v1") -> dict[str
     return b
 
 
-def cfg_of(objective: str = "mlm", profile: str = "od-fp32-ref-v1") -> TrainConfig:
-    return TrainConfig.from_manifest(od_body(objective, profile))
+def cfg_of(
+    objective: str = "mlm", profile: str = "od-fp32-ref-v1", seq_len: int = SEQ
+) -> TrainConfig:
+    return TrainConfig.from_manifest(od_body(objective, profile, seq_len))
 
 
 def text_sample(cfg: TrainConfig) -> SampleFn:
