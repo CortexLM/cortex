@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 from pathlib import Path
 
@@ -33,8 +34,8 @@ def od_manifest(objective: str, n: int, zero1: bool, dtype: str = "fp32") -> Run
     b = mod.od_body()
     rec = dict(state_len=8, n_questions=1, n_options=2, opt_len=2, instr_len=2)
     b["model"].update(
-        seq_len=8 if objective == "mlm" else 18,
-        param_count=116288 if objective == "mlm" else 187140,
+        seq_len=1024 if objective == "mlm" else 18,
+        param_count=123_753_984 if objective == "mlm" else 143_241_220,
         compute_dtype=dtype,
     )
     b["model"]["od"].update(objective=objective, record=None if objective == "mlm" else rec)
@@ -103,7 +104,9 @@ def test_od_objectives_layout_reference_and_hooks(objective: str, n: int, zero1:
     seen = [[] for _ in range(n)]
 
     def hook(ctx: TraceContext, x: torch.Tensor) -> torch.Tensor:
-        raw = x.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
+        raw = hashlib.sha256(
+            x.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy()
+        ).digest()
         seen[ctx.rank].append((ctx, raw))
         return x
 
@@ -121,7 +124,9 @@ def test_od_objectives_layout_reference_and_hooks(objective: str, n: int, zero1:
     repeated = [[] for _ in range(n)]
 
     def capture(ctx: TraceContext, x: torch.Tensor) -> torch.Tensor:
-        raw = x.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
+        raw = hashlib.sha256(
+            x.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy()
+        ).digest()
         repeated[ctx.rank].append((ctx, raw))
         return x
 
@@ -133,9 +138,9 @@ def test_od_objectives_layout_reference_and_hooks(objective: str, n: int, zero1:
     if objective != "mlm":
         mlm = TrainConfig.from_manifest_v2(od_manifest("mlm", 1, False))
         extended = extend_params(init_params(mlm.model), cfg.model)
-        assert all(
-            torch.equal(extended[k], init_params(mlm.model)[k]) for k in init_params(mlm.model)
-        )
+        # One independent re-init, not one per key: od-base init is ~3 s.
+        stage_a = init_params(mlm.model)
+        assert all(torch.equal(extended[k], stage_a[k]) for k in stage_a)
     pots = emulate(
         n,
         lambda c: honeypot_island(Honeypot(w.training.coord_pubkey, "honest"), w, c, theta, a, get),

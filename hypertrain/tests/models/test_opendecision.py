@@ -14,6 +14,7 @@ import torch
 from od_fixtures import (
     FULL_COUNT,
     STAGE_A_COUNT,
+    N,
     assignment,
     cfg_of,
     fresh_carry,
@@ -201,7 +202,8 @@ def test_stage_a_param_set_excludes_head() -> None:
     assert sf == {k: tuple(v.shape) for k, v in sd.items()}
     assert sorted(od.init_params(a)) == sorted(sa)
     assert od.stage_of("tok.weight", a, 2) == 0
-    assert od.stage_of("encoder.blocks.1.qkv.weight", a, 2) == 1
+    assert od.stage_of("encoder.blocks.5.qkv.weight", a, 2) == 0
+    assert od.stage_of("encoder.blocks.6.qkv.weight", a, 2) == 1
     assert od.stage_of("scorer.3.bias", full, 2) == 1
 
 
@@ -262,16 +264,16 @@ def test_extend_params_and_warmstart_cli(tmp_path: Path) -> None:
 
 
 def test_check_manifest_param_count() -> None:
-    od.check_manifest(RunManifest.model_validate(od_body()))
+    od.check_manifest(RunManifest.model_validate(od_body(seq_len=N)))
     od.check_manifest(RunManifest.model_validate(od_body("decision")))
-    b = od_body()
+    b = od_body(seq_len=N)
     b["model"]["param_count"] = FULL_COUNT
     with pytest.raises(ValueError, match="param_count"):
         od.check_manifest(RunManifest.model_validate(b))
 
 
 def test_eval_holdout_and_eval_cli(tmp_path: Path) -> None:
-    cfg = cfg_of()
+    cfg = cfg_of(seq_len=N)
     get = text_sample(cfg)
     theta = od.init_params(cfg.model)
     v = od.eval_holdout(cfg.model, theta, get, [0, 1, 2], batch=2)
@@ -285,10 +287,10 @@ def test_eval_holdout_and_eval_cli(tmp_path: Path) -> None:
     write_shards16((get(i) for i in range(8)), hold, cfg.model.seq_len, unit=4, samples_per_shard=8)
     state, man, metrics = tmp_path / "s", tmp_path / "run.json", tmp_path / "public" / "m.jsonl"
     state.write_bytes(pack_state(theta))
-    man.write_text(json.dumps(od_body()))
+    man.write_text(json.dumps(od_body(seq_len=N)))
     args = ["eval", "--manifest", str(man), "--state", str(state), "--holdout", str(hold)]
     assert main([*args, "--w", "4", "--metrics", str(metrics)]) == 0
     line = json.loads(metrics.read_text())
-    run_id = RunManifest.model_validate(od_body()).run_id()
+    run_id = RunManifest.model_validate(od_body(seq_len=N)).run_id()
     want = od.eval_holdout(cfg.model, theta, get, range(8))
     assert line == {"run_id": run_id, "w": 4, "value": want}

@@ -144,7 +144,7 @@ def _authority(root: Path) -> Bundle:
             m.arch != "od-encoder"
             or m.od is None
             or m.od.objective != "mlm"
-            or m.param_count != 116288
+            or m.param_count != 123_753_984
             or layout.n_gpus != 2
             or layout.dp_size != 2
             or layout.ep_size != 1
