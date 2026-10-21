@@ -160,19 +160,41 @@ jobs:
           chmod 755 "$RUNNER_TEMP/kind-bin/kind"
           "$RUNNER_TEMP/kind-bin/kind" version | grep -q "^kind $v "
           echo "$RUNNER_TEMP/kind-bin" >> "$GITHUB_PATH"
-      # The real od-base island files run in od-suite below. test_authority_snapshot_v2.py
-      # cannot run on od-base: its 48-trial fixture writes ~190 GB and the exported
-      # 1.48 GB start_state exceeds scripts/network_authority_snapshot.py MAX_FILE
-      # (16 MiB) / MAX_BYTES (1 GiB). Founder decision 2026-10-21: documented residue,
-      # see livrables/forge/2026-10-21_heavy-od-fixtures.md.
-      - run: >-
-          bash scripts/check.sh -rs --ignore=tests/sim --ignore=tests/e2e
-          --ignore=tests/layout/test_od_island_v2.py
-          --ignore=tests/auditor/test_island_bisect_v2.py
-          --ignore=tests/auditor/test_island_replay_v2.py
-          --ignore=tests/miner/test_island_launch_v2.py
-          --ignore=tests/challenge/test_carry_genesis_v2.py
-          --ignore=tests/challenge/test_authority_snapshot_v2.py
+      # The real od-base island files run in od-suite below. The 14 tests of
+      # test_authority_snapshot_v2.py are deselected by name: their 48-trial fixture writes
+      # ~190 GB on od-base and the exported 1.48 GB start_state exceeds
+      # scripts/network_authority_snapshot.py MAX_FILE (16 MiB) / MAX_BYTES (1 GiB).
+      # Founder decision 2026-10-21 (option A): documented residue, tracked in an issue.
+      # Deselected by name, not --ignore, so a new test added to that file still runs.
+      - name: Full suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          SNAP=tests/challenge/test_authority_snapshot_v2.py
+          DESELECT=()
+          for t in \
+            'test_original_export_validates_and_bootstraps_actual_service' \
+            'test_modified_package_rejects_before_restore[object]' \
+            'test_modified_package_rejects_before_restore[reference]' \
+            'test_modified_package_rejects_before_restore[foreign]' \
+            'test_modified_package_rejects_before_restore[traversal]' \
+            'test_modified_package_rejects_before_restore[digest]' \
+            'test_modified_package_rejects_before_restore[screen]' \
+            'test_modified_package_rejects_before_restore[strike]' \
+            'test_modified_package_rejects_before_restore[pending]' \
+            'test_modified_package_rejects_before_restore[funding]' \
+            'test_modified_package_rejects_before_restore[rotation]' \
+            'test_modified_package_rejects_before_restore[signature]' \
+            'test_modified_package_rejects_before_restore[finality]' \
+            'test_modified_package_rejects_before_restore[assignment]'
+          do DESELECT+=("--deselect=$SNAP::$t"); done
+          bash scripts/check.sh -rs --ignore=tests/sim --ignore=tests/e2e \
+            --ignore=tests/layout/test_od_island_v2.py \
+            --ignore=tests/auditor/test_island_bisect_v2.py \
+            --ignore=tests/auditor/test_island_replay_v2.py \
+            --ignore=tests/miner/test_island_launch_v2.py \
+            --ignore=tests/challenge/test_carry_genesis_v2.py \
+            "${DESELECT[@]}"
 
   # Real od-base (123.8 M / 143.2 M params) island tests at the manifest's 1 CPU thread.
   # Serial on a 32-core host, 2026-10-21: test_od_island_v2.py 62.5 min (peak 53 GB RSS),
@@ -219,4 +241,11 @@ jobs:
                 tests/miner/test_island_launch_v2.py tests/challenge/test_carry_genesis_v2.py) ;;
             *) echo "unknown shard $SHARD" >&2; exit 1 ;;
           esac
-          uv run --frozen pytest -q -rs --durations=25 "${SEL[@]}"
+          # Peak host memory for this shard: sample `free` every 5 s, print the peak.
+          ( while sleep 5; do free -m | awk '/^Mem:/{print $3}'; done ) > "$RUNNER_TEMP/mem.log" &
+          SAMPLER=$!
+          rc=0
+          uv run --frozen pytest -q -rs --durations=25 "${SEL[@]}" || rc=$?
+          kill "$SAMPLER" 2>/dev/null || true
+          echo "shard=$SHARD peak_used_MiB=$(sort -n "$RUNNER_TEMP/mem.log" | tail -1) total_MiB=$(free -m | awk '/^Mem:/{print $2}')" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $rc
