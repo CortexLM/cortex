@@ -232,11 +232,11 @@ def test_bootstrap_exactly_at_total_issuance_is_accepted(tmp_path: Path) -> None
     assert e.balances().issued == 30_000 and e.balances().conserved()
 
 
-def _pending_reservation(e) -> None:
-    """A reserved, not yet accepted shadow round: it will mint round_reward_units."""
+def _pending_reservation(e, accepted: str = "null") -> None:
+    """A shadow reservation row; `accepted` null = pending, it will mint round_reward_units."""
     e.db.execute(
         "INSERT INTO records_v2 VALUES(?,?,?,?)",
-        (e.run_id, "shadow-reservation", "0", '{"binding":{},"accepted":null}'),
+        (e.run_id, "shadow-reservation", "0", f'{{"binding":{{}},"accepted":{accepted}}}'),
     )
 
 
@@ -258,3 +258,15 @@ def test_bootstrap_counts_pending_shadow_reservation_against_cap(
         with pytest.raises(EscrowError, match="TOTAL_ISSUANCE_BUDGET"):
             e.production_bootstrap(bootstrap(e.run_id))
         assert e.balances().issued == 0
+
+
+def test_bootstrap_ignores_accepted_shadow_reservation(tmp_path: Path) -> None:
+    # Given: an accepted reservation. Its units are already in balances().issued, so counting
+    # it again as pending would double count and refuse a bootstrap that exactly fits the cap.
+    s = pinned(E.setup("production"), max_total_issuance=30_000)
+    e = E.ledger(s, tmp_path / "ledger.db")
+    _pending_reservation(e, accepted="1")
+    # When
+    e.production_bootstrap(bootstrap(e.run_id))
+    # Then
+    assert e.balances().issued == 30_000 and e.balances().conserved()
