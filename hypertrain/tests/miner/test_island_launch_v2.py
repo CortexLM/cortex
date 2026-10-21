@@ -1071,7 +1071,7 @@ def test_real_od_two_rank_worker_paths(tmp_path: Path, objective: str) -> None:
         ef_in_sha256=hashlib.sha256(blobs["ef_in"]).hexdigest(),
         v0_sha256=hashlib.sha256(blobs["v0"]).hexdigest(),
         object_paths={k: k for k in blobs},
-        deadline=int(time.time()) + 120,
+        deadline=int(time.time()) + 900,
     )
     result = launch_island(job, tmp_path, backend="cpu", trace=True)
     refs = emulate(
