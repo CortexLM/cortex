@@ -385,11 +385,11 @@ def main(argv: list[str] | None = None) -> int:
             s.add_argument("--request-id", required=True)
             s.add_argument("--expiry", type=int, required=True)
         if name in ("probe-v2", "run-v2", "watch"):
-            s.add_argument("--job", type=Path, required=name == "probe-v2")
+            s.add_argument("--job", type=Path)
         if name == "run-v2":
             s.add_argument("--round", type=int)
         if name == "probe-v2":
-            s.add_argument("--challenge", type=Path, required=True)
+            s.add_argument("--challenge", type=Path)
         if name == "proof-v2":
             s.add_argument("--proof", type=Path, required=True)
         if name == "watch":
@@ -465,7 +465,12 @@ def main(argv: list[str] | None = None) -> int:
                     case "status-v2":
                         result = network.status()
                     case "probe-v2":
-                        result = network.probe(args.job, args.challenge)
+                        if (args.job is None) != (args.challenge is None):
+                            raise MinerError("probe-v2 takes --job and --challenge, or neither")
+                        if args.job is None:
+                            result = network.probe_trial()
+                        else:
+                            result = network.probe(args.job, args.challenge)
                     case "proof-v2":
                         result = network.proof(args.proof)
                     case "run-v2":

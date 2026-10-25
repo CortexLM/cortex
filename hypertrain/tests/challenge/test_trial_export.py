@@ -40,6 +40,16 @@ def export(n, identity):
     return n.client.post(n.url + f"/admin/trial/{identity}/export", headers=service.admin())
 
 
+def job(n, identity, key=service.HOT[0], hotkey=None, run_id=None):
+    """Miner-facing job read, signed by `key` (X-Hotkey defaults to the signer)."""
+    run_id = run_id or n.manifest.run_id()
+    signature = key.sign(f"hypertrain/trial-job/2|{run_id}|{identity}".encode()).hex()
+    return n.client.get(
+        f"/v2/runs/{run_id}/join/{identity}/job",
+        headers={"x-hotkey": hotkey or key.ss58, "x-trial-signature": signature},
+    )
+
+
 def test_export_matches_prepare_reference_inputs(trial):
     n, identity, envelope = trial
     response = export(n, identity)
@@ -135,6 +145,41 @@ def test_export_requires_admin(trial):
     response = n.client.post(n.url + f"/admin/trial/{identity}/export")
     assert response.status_code == 401, response.text
     assert not (n.store.state_dir / "trials-v2").exists()
+
+
+def test_owner_reads_the_admin_export_without_admin_token(trial):
+    n, identity, envelope = trial
+    response = job(n, identity)
+    assert response.status_code == 200, response.text
+    assert response.json() == export(n, identity).json()
+    assert response.json()["challenge"] == envelope["body"]
+
+
+def test_job_route_refuses_another_miners_admission(trial):
+    n, identity, _ = trial
+    other = service.HOT[1]  # registered on the fixture subnet, not this admission's hotkey
+    for response in (
+        job(n, identity, key=other),
+        job(n, identity, key=other, hotkey=service.HOT[0].ss58),
+        job(n, identity, hotkey=other.ss58),
+    ):
+        assert response.status_code == 403, response.text
+        assert response.json() == {"detail": "hotkey is not current accepted identity"}
+    assert not (n.store.state_dir / "trials-v2").exists()
+    assert job(n, identity).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "unknown,status,detail", [("run", 404, "unknown run"), ("admission", 409, "UNKNOWN_ADMISSION")]
+)
+def test_job_route_unknown_ids_answer_like_challenge(trial, unknown, status, detail):
+    n, identity, _ = trial
+    run_id = "cd" * 32 if unknown == "run" else n.manifest.run_id()
+    identity = "ab" * 32 if unknown == "admission" else identity
+    challenge = n.client.get(f"/v2/runs/{run_id}/join/{identity}/challenge")
+    response = job(n, identity, run_id=run_id)
+    assert (response.status_code, response.json()) == (status, {"detail": detail})
+    assert (challenge.status_code, challenge.json()) == (status, {"detail": detail})
 
 
 def test_export_refuses_changed_job(trial):

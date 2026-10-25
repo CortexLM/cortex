@@ -890,6 +890,109 @@ class NetworkMiner:
             raise MinerError("probe deadline/cancellation")
         return result
 
+    def probe_trial(self) -> dict[str, Any]:
+        """probe-v2 without --job: this hotkey's open trial, fetched into a private temp folder."""
+        with tempfile.TemporaryDirectory(prefix="trial-", dir=self.directory) as folder:
+            job, challenge = self._fetch_trial(Path(folder).resolve())
+            return self.probe(job, challenge)
+
+    def _fetch_trial(self, root: Path) -> tuple[Path, Path]:
+        """The folder trial_export writes, from the miner's own signed job read.
+
+        The challenge GET issues the trial when none is open (else returns the stored one);
+        the job, its inputs and the signed challenge are checked as trial_export checks them."""
+        from pydantic import TypeAdapter
+
+        from hypertrain.protocol import envelope_v2
+        from hypertrain.protocol.messages_v2 import Hex64, IslandJobV1, JoinChallenge
+
+        admission_id = self.status()["record"]["admission_id"]
+        url = self.url + f"/join/{admission_id}"
+        envelope = self.api.call("GET", url + "/challenge")
+        signature = self.kp.sign(f"hypertrain/trial-job/2|{self.run_id}|{admission_id}".encode())
+        data = self.api.call(
+            "GET",
+            url + "/job",
+            headers={"X-Hotkey": self.kp.ss58, "X-Trial-Signature": signature.hex()},
+        )
+        try:
+            job = IslandJobV1.model_validate(data["job"])
+            challenge = JoinChallenge.model_validate(data["challenge"])
+            objects = TypeAdapter(dict[str, Hex64]).validate_python(data["objects"])
+            nonce = data["nonce"]
+            signed = envelope_v2.parse_envelope(envelope)
+        except (ValueError, KeyError, TypeError) as error:
+            raise MinerError("malformed trial job response") from error
+        if (
+            job.run_id != self.run_id
+            or challenge.manifest_hash != self.run_id
+            or challenge.admission_id != admission_id
+            or challenge.nonce != nonce
+            or set(objects) != set(job.object_paths)
+        ):
+            raise MinerError("trial job/challenge/object binding differs")
+        for name in ("start_state", "ef_in", "v0"):
+            if objects.get(name) != getattr(job, name + "_sha256"):
+                raise MinerError(f"trial {name} sha256 differs from job")
+        if (
+            signed.type != "JoinChallenge"
+            or signed.run_id != self.run_id
+            or signed.signer != self.manifest.training.coord_pubkey
+            or signed.body != challenge.body()
+            or not envelope_v2.verify_envelope(envelope)
+        ):
+            raise MinerError("signed challenge differs from the trial job")
+        destinations = {root / "job.json", root / "challenge.json"}
+        paths: dict[str, Path] = {}
+        for name, relative in job.object_paths.items():
+            target = (root / relative).resolve()
+            if (
+                target == root
+                or not target.is_relative_to(root)
+                or any(
+                    target == p or target in p.parents or p in target.parents for p in destinations
+                )
+            ):
+                raise MinerError(f"unsafe trial object path: {relative}")
+            destinations.add(target)
+            paths[name] = target
+        for name, digest in objects.items():
+            paths[name].parent.mkdir(parents=True, exist_ok=True)
+            self._get_whole(digest, paths[name])
+        (root / "job.json").write_bytes(canonicalize(job.body()))
+        (root / "challenge.json").write_bytes(canonicalize(envelope))
+        return root / "job.json", root / "challenge.json"
+
+    def _get_whole(self, digest: str, target: Path) -> None:
+        """Stream one whole plain object to `target` and verify it: the trial export stores each
+        input as a single object, so the 1 MiB part bound of _get_object does not apply; the
+        bound is the largest object a part index can describe."""
+        from hypertrain.protocol.messages_v2 import MAX_PARTS, PART_BYTES
+
+        def get() -> None:
+            hasher, size = hashlib.sha256(), 0
+            with self.api.c.stream(
+                "GET",
+                self.api.base + self.url + "/objects/" + digest,
+                headers={"Accept-Encoding": "identity"},
+            ) as r:
+                if not r.is_success:
+                    raise ChallengeHTTPError(r.status_code, "trial input object unavailable")
+                # As _get_object: httpx would decode gzip/br before the bound check.
+                if r.headers.get("Content-Encoding", "identity").lower() != "identity":
+                    raise MinerError("trial input object has a non-identity content encoding")
+                with target.open("wb") as stream:
+                    for chunk in r.iter_bytes(chunk_size=64 << 10):
+                        size += len(chunk)
+                        if size > MAX_PARTS * PART_BYTES:
+                            raise MinerError("trial input object exceeds the object size bound")
+                        hasher.update(chunk)
+                        stream.write(chunk)
+            if hasher.hexdigest() != digest:
+                raise MinerError(f"trial input {target.name} sha256 mismatch")
+
+        _retrying("GET object " + digest, get)
+
     def _bounded_put(
         self, deadline: float, cancel: threading.Event | None
     ) -> Callable[[bytes], str]:

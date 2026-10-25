@@ -143,6 +143,23 @@ uv run --frozen hypertrain-miner probe-v2 --config miner.toml \
 uv run --frozen hypertrain-miner proof-v2 --config miner.toml --proof proof.json
 ```
 
+A joined miner can skip the export: `probe-v2 --config miner.toml > proof.json`
+without `--job`/`--challenge` reads its admission ID (`status-v2`), GETs the
+challenge (which issues the trial when none is open), then
+`GET /v2/runs/{run_id}/join/{admission_id}/job` with headers `X-Hotkey` and
+`X-Trial-Signature` (hex hotkey signature of
+`hypertrain/trial-job/2|{run_id}|{admission_id}`). The route returns the admin
+export's JSON only to the currently registered hotkey that owns the admission:
+unknown run 404, unknown admission 409 `UNKNOWN_ADMISSION`, a deregistered or
+revoked owner 403 like the challenge route, any other hotkey or a missing or bad
+signature 403 (the admin token is no substitute), then the export's own refusals
+(409 `NO_CHALLENGE`, 409 `REFERENCE_TRIAL_CLOSED` once the trial is finalized,
+503 on a beacon pause). The miner checks the job, objects and signed challenge as
+`trial_export` does, streams each input (one uncompressed, sha256-verified
+object; about 4 bytes per parameter for a `reset` start state, more under
+`carry`) into a private temporary folder under its workdir, probes, and deletes
+the folder, also on failure: a re-run downloads and probes again.
+
 `probe-v2` executes the screen and uploads original rank-0 state/EF/delta/leaves;
 stdout contains the signed proof/screen pair. The operator independently prepares
 and finalizes references through authenticated admin routes; miners cannot

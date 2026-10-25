@@ -453,6 +453,32 @@ def create_app(
         await subnet_member((await run(admission.store.by_id, admission_id)).hotkey)
         return await run(store.for_run(run_id).admission_v2, run_id, "challenge", b"", admission_id)
 
+    @app.get("/v2/runs/{run_id}/join/{admission_id}/job")
+    async def trial_job_v2(
+        run_id: str,
+        admission_id: str,
+        x_hotkey: Annotated[str | None, Header()] = None,
+        x_trial_signature: Annotated[str | None, Header()] = None,
+    ) -> Any:
+        from hypertrain.protocol.keys import verify
+
+        # The admin export's payload, only to the registered hotkey that owns the admission:
+        # admission ids are public (admission status), so the caller signs for its hotkey.
+        _, admission, _ = await run(store.for_run(run_id)._services, run_id)
+        hotkey = (await run(admission.store.by_id, admission_id)).hotkey
+        await subnet_member(hotkey)
+        try:
+            valid = x_hotkey == hotkey and verify(
+                decode_hotkey(hotkey),
+                f"hypertrain/trial-job/2|{run_id}|{admission_id}".encode(),
+                bytes.fromhex(x_trial_signature or ""),
+            )
+        except (ValueError, KeyError_):
+            valid = False
+        if not valid:
+            raise ChallengeError(403, "hotkey is not current accepted identity")
+        return await run(store.for_run(run_id).export_trial_v2, run_id, admission_id)
+
     @app.get("/v2/runs/{run_id}/admission/{hotkey}")
     async def admission_status_v2(run_id: str, hotkey: str) -> Any:
         return await run(store.for_run(run_id).admission_v2, run_id, "status", b"", hotkey)
