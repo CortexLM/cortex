@@ -135,6 +135,11 @@ class IslandParty:
     ) -> None:
         self.hotkey, self.J, self.retrace = hotkey, J, retrace
         self._lazy: dict[int, tuple[TraceEntry, ...]] = {}
+        # Per-leaf memos: one checkpoint load+hash and one hook chain per leaf, not per query.
+        self._roots: dict[int, str] = {}
+        self._windows: dict[int, tuple[tuple[TraceEntry, ...], tuple[int, ...], list[str]]] = {}
+        self._traced: dict[int, bool] = {}
+        self._shapes: dict[int, tuple[int, ...]] = {}
         if not captures or J < 1:
             raise RefereeError("missing island captures or invalid checkpoint stride")
         self.states = dict(captures[0].states)
@@ -224,12 +229,20 @@ class IslandParty:
             raise RefereeError("unknown checkpoint") from error
 
     def state_root(self, leaf: int) -> str:
-        theta, state = unpack_state(self.state_blob(leaf))
-        if state is None:
-            raise RefereeError("checkpoint omits optimizer")
-        return tensor_root(theta, state)
+        if leaf not in self._roots:
+            theta, state = unpack_state(self.state_blob(leaf))
+            if state is None:
+                raise RefereeError("checkpoint omits optimizer")
+            self._roots[leaf] = tensor_root(theta, state)
+        return self._roots[leaf]
 
     def window(self, leaf: int) -> tuple[tuple[TraceEntry, ...], tuple[int, ...], list[str]]:
+        if leaf not in self._windows:
+            self._windows[leaf] = self._window(leaf)
+        entries, ends, chain = self._windows[leaf]
+        return entries, ends, list(chain)
+
+    def _window(self, leaf: int) -> tuple[tuple[TraceEntry, ...], tuple[int, ...], list[str]]:
         if not 1 <= leaf <= self.H // self.J:
             raise RefereeError("window outside committed trajectory")
         entries = self._entries(leaf)
@@ -276,13 +289,14 @@ class IslandParty:
         so sizing a dispute never forces a re-run."""
         if not 1 <= leaf <= self.H // self.J:
             raise RefereeError("window outside committed trajectory")
-        known = (
-            leaf
-            if leaf in self._lazy
-            or any((leaf - 1) * self.J < e.step <= leaf * self.J for e in self.entries)
-            else 1
-        )
-        return self.window(known)[1]
+        if leaf not in self._traced:  # self.entries never changes after __init__
+            self._traced[leaf] = any(
+                (leaf - 1) * self.J < e.step <= leaf * self.J for e in self.entries
+            )
+        known = leaf if leaf in self._lazy or self._traced[leaf] else 1
+        if known not in self._shapes:
+            self._shapes[known] = self.window(known)[1]
+        return self._shapes[known]
 
     def hashes(self, level: Level, ctx: tuple[int, ...], at: Sequence[int]) -> list[str]:
         span = self.span(level, ctx)
