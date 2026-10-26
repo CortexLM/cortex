@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -34,7 +35,13 @@ from pathlib import Path
 import httpx
 
 HM = str(Path(sys.executable).with_name("hypertrain-miner"))
-TRANSIENT = ("503", "SEED_NOT_READY", "TRIAL_CAPACITY", "beacon infrastructure paused")
+# Refusals the challenge or its front documents as temporary, matched on the CLI's final error
+# line (stderr) or its JSON error (stdout) only: the INFO log above them holds hex ids.
+TRANSIENT = re.compile(
+    r"ChallengeHTTPError: 50[234]\b|\"status\": 50[234]\b|SEED_NOT_READY|TRIAL_CAPACITY"
+    r"|beacon infrastructure paused|authenticated assignment not ready"
+    r"|ConnectError|ConnectTimeout|ReadTimeout|WriteTimeout|RemoteProtocolError|ReadError"
+)
 ENV = {**os.environ, "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "PYTHONHASHSEED": "0"}
 LOCK = threading.Lock()
 
@@ -68,6 +75,11 @@ def cli(root: Path, i: int, name: str, args: list[str], **extra: object) -> tupl
         },
     )
     return p.returncode, p.stdout, p.stderr
+
+
+def transient(out: str, err: str) -> bool:
+    last = [line for line in err.strip().splitlines() if line.strip()][-1:]
+    return bool(TRANSIENT.search(out.strip()[-500:] + "\n" + "".join(last)))
 
 
 def now_round(api: str) -> int:
@@ -105,61 +117,91 @@ def setup(argv: list[str]) -> int:
 
 
 def status(root: Path, i: int) -> dict:
-    rc, out, err = cli(root, i, "status-v2", ["status-v2", "--config", "miner.toml"])
-    if rc:
-        raise SystemExit(f"status-v2 miner {i} rc={rc}: {err[-300:]}")
-    return json.loads(out)
+    for attempt in range(40):
+        rc, out, err = cli(
+            root, i, "status-v2", ["status-v2", "--config", "miner.toml"], attempt=attempt
+        )
+        if rc == 0:
+            return json.loads(out)
+        if not transient(out, err):
+            raise SystemExit(f"status-v2 miner {i} rc={rc}: {err[-300:]}")
+        time.sleep(3)
+    raise SystemExit(f"status-v2 miner {i}: retries exhausted")
 
 
 def join(root: Path, i: int) -> None:
+    """join-v2 once, then escrow-lock once; both resume from their marker files."""
     m = root / f"m{i}"
     api, run_id = (m / "api.txt").read_text().strip(), (m / "run_id.txt").read_text().strip()
-    if (m / "join.json").exists():
+    if not (m / "join.json").exists():
+        # One request id and expiry per identity, kept before the first call: a join whose
+        # answer was lost replays the same signed request instead of a new one.
+        request = m / "join-request.json"
+        if not request.exists():
+            request.write_text(
+                json.dumps({"request_id": secrets.token_hex(32), "expiry": now_round(api) + 1000})
+            )
+        req = json.loads(request.read_text())
+        for attempt in range(40):
+            rc, out, err = cli(
+                root,
+                i,
+                "join-v2",
+                [
+                    "join-v2",
+                    "--config",
+                    "miner.toml",
+                    "--coldkey",
+                    "cold.seed",
+                    "--request-id",
+                    req["request_id"],
+                    "--expiry",
+                    str(req["expiry"]),
+                ],
+                attempt=attempt,
+            )
+            if rc == 0:
+                break
+            if not transient(out, err):
+                raise SystemExit(f"join-v2 miner {i}: {err[-500:]}")
+            time.sleep(3)
+        else:
+            raise SystemExit(f"join-v2 miner {i}: retries exhausted")
+        (m / "join.json").write_text(out)
+    if (m / "lock.json").exists():
         return
-    rc, out, err = cli(
-        root,
-        i,
-        "join-v2",
-        [
-            "join-v2",
-            "--config",
-            "miner.toml",
-            "--coldkey",
-            "cold.seed",
-            "--request-id",
-            secrets.token_hex(32),
-            "--expiry",
-            str(now_round(api) + 1000),
-        ],
-    )
-    if rc:
-        raise SystemExit(f"join-v2 miner {i}: {err[-500:]}")
-    (m / "join.json").write_text(out)
     from hypertrain.miner.core import load_keyfile
 
     hot = load_keyfile(m / "hot.seed").ss58
-    rc, out, err = cli(
-        root,
-        i,
-        "escrow-lock",
-        [
+    for attempt in range(40):
+        rc, out, err = cli(
+            root,
+            i,
             "escrow-lock",
-            "--api",
-            api,
-            "--run-id",
-            run_id,
-            "--coldkey",
-            "cold.seed",
-            "--hotkey-ss58",
-            hot,
-            "--units",
-            "1000",
-            "--origin",
-            (m / "origin.txt").read_text().strip(),
-        ],
-    )
-    if rc:
-        raise SystemExit(f"escrow-lock miner {i}: {err[-500:]}")
+            [
+                "escrow-lock",
+                "--api",
+                api,
+                "--run-id",
+                run_id,
+                "--coldkey",
+                "cold.seed",
+                "--hotkey-ss58",
+                hot,
+                "--units",
+                "1000",
+                "--origin",
+                (m / "origin.txt").read_text().strip(),
+            ],
+            attempt=attempt,
+        )
+        if rc == 0:
+            (m / "lock.json").write_text(out)
+            return
+        if not transient(out, err):
+            raise SystemExit(f"escrow-lock miner {i}: {out[-300:]} {err[-500:]}")
+        time.sleep(3)
+    raise SystemExit(f"escrow-lock miner {i}: retries exhausted")
 
 
 def trial(root: Path, i: int, k: int) -> None:
@@ -172,7 +214,7 @@ def trial(root: Path, i: int, k: int) -> None:
         if rc == 0:
             proof.write_text(out)
             break
-        if not any(t in err[-2000:] for t in TRANSIENT):
+        if not transient(out, err):
             raise SystemExit(f"probe-v2 miner {i} trial {k}: {err[-800:]}")
         time.sleep(3)
     else:
@@ -188,7 +230,7 @@ def trial(root: Path, i: int, k: int) -> None:
         )
         if rc == 0:
             return
-        if not any(t in err[-2000:] for t in TRANSIENT):
+        if not transient(out, err):
             raise SystemExit(f"proof-v2 miner {i} trial {k}: {err[-800:]}")
         time.sleep(3)
     raise SystemExit(f"proof-v2 miner {i} trial {k}: retries exhausted")
@@ -248,7 +290,7 @@ def round_(argv: list[str]) -> int:
                 attempt=attempt,
             )
             results[i] = out.strip()[-200:]
-            if '"UPLOADED"' in out or not any(t in err[-2000:] for t in TRANSIENT):
+            if '"UPLOADED"' in out or not transient(out, err):
                 return
             time.sleep(3)
 
