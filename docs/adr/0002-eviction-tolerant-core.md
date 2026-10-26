@@ -22,7 +22,9 @@
 | During a trial, past its deadline | The trial stays `OPEN` and holds one of the run's 2 trial places (`TRIAL_CAPACITY`), so two vanished miners block every newcomer. That lasts until someone requests that admission's challenge [V code, A review reproduction]. That request suspends the miner (`SUSPENDED`, reason `CHALLENGE_EXPIRED`) and marks the trial `EXPIRED` [V]. `join` refuses any coldkey with a non-`ACTIVE` admission [V]. `resume` needs `resolve_pending`, which needs a pending dispute, and an expiry has none: no route found back [V code, H no other route] | `admission.py:241-246`, `:216-228`, `:162-166`, `:1029-1062` |
 | During island training | `torchrun --max-restarts=0`, no elastic rendezvous; nothing is published [V]. `schedule_audits_v2` reads every roster member's commit, and a missing one raises 409 for the whole round [V]. Nothing excludes a no-show, so the round never applies and `w+2` never opens: the run stalls. The miner itself is not penalised [V] | `src/hypertrain/miner/island_launch.py:402-415`; `src/hypertrain/challenge/store.py:6384-6388`, `:2151-2161`; `src/hypertrain/challenge/finality_v2.py:41-57` |
 | After commit, before the delta | `verified_inputs_v2` needs the delta of every non-excluded member, so aggregate and finalize return 409 [V]. Missing leaves end in audit exhaustion, which excludes the miner (`INFRASTRUCTURE`) and marks the whole round `EXCLUDED`: nobody in it is paid [V] | `store.py:7896-7906`, `:6650-6672` |
-| During audit or finalize | The miner is not needed: the audit replays master-staged inputs, and finalize is coordinator-only [A research of `store.py:6897-7336`, `:8285-8361`] | |
+| During an audit | The miner is not needed: the audit replays master-staged inputs [A research of `store.py:6897-7336`] | |
+| During a dispute | The miner is the first expected party, with a turn deadline [V]. A silent miner loses with `PARTY_TIMEOUT` [V], an accepted rollback exclusion, so it loses the round's reward [V]. Its contest lock is slashed only for `FRAUD` [V]: an evicted honest miner loses the round, not its stake | `src/hypertrain/challenge/disputes_v2.py:332-334`, `:759-774`, `:833-838`; `src/hypertrain/aggregator/rollback_v2.py:116`; `store.py:9243-9252` |
+| Finalize and `get_weights` | Finalize is coordinator-only and splits the round reward by tokens over the included works [V]. `get_weights` answers once per epoch, and that first answer is final [V]. A stalled round never finalizes, so its reward is never issued [H, from the stall above] | `store.py:8333-8345`; `src/hypertrain/ledger/ledger.py:490-498`; `src/hypertrain/challenge/app.py:918-939` |
 | Reassignment | None. The sample cursor advances by the whole roster, so a vanished miner's samples are skipped, not reassigned [V] | `store.py:5181-5190` |
 | Checkpoints | Written every J steps (`src/hypertrain/trainer/island.py:1144-1147`), on rank 0 only [V]. They serve audits and disputes, never a resume: a restart retrains from step 0 unless `published/` exists [A research of `island_launch.py:586-639`] | `src/hypertrain/miner/island_worker.py:188-197` |
 | Spot notice | A shell watchdog polls IMDSv2 and stops the run [V]; no leave message exists | `scripts/b300/run_host.sh:96-105` |
@@ -66,8 +68,8 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
    the coordinator's clock only, so host clock skew never decides an expiry; a heartbeat renews
    it (simulator: 5 s heartbeat, 20 or 60 s TTL).
    - Every grant takes a token from one counter that only grows. A rejoin under the same id
-     *replaces* the holder: the old token is fenced, and its shards move to the new token with
-     a fresh progress window.
+     *replaces* the holder: the old token is fenced, and its shards move to the new token. The
+     replacement restarts the member's progress window once per link, not at every rejoin.
    - An id belongs to one owner, and a revoked id never rejoins.
    - `join` admits a host key only if the injected `admit(member, owner, signer)` authority
      agrees. In production that is a server key the owner's coldkey granted for this run
@@ -82,9 +84,12 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
    capacity (default 1 shard per host). It is a pure function of an ordered event log, so an
    auditor can recompute it. Only pending shards are planned: a departure moves only the
    departed member's shards, and a live holder is never displaced. **Progress deadline**: a
-   holder with no accepted link within `progress_ms` of receiving the shard or of its last link
-   loses its lease (exit `STALLED`, not penalised). The shard is reassigned, and the member may
-   join again. A host that heartbeats but cannot upload therefore never stalls a round.
+   member holding work loses its lease (exit `STALLED`, not penalised) when it makes no
+   accepted link within `progress_ms`. The window is counted per member, from its last
+   accepted link or from when it started holding work, and a new shard does not reopen it. Its
+   shards are reassigned and the member may join again. A sweep lapses every late member before
+   it plans the freed shards. A host that heartbeats but cannot upload, or restarts in a loop,
+   therefore never stalls a round; a crash loop loses its shard within about two windows.
 3. **Checkpoints** (`checkpoint.py`, `store.py`).
    - What: the full state a shard resumes from. For hypertrain that is the `pack_state` blob of
      theta, m and v in fp32 plus the step (`src/hypertrain/auditor/replay.py:142-149`), so
@@ -114,9 +119,9 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
    resumed from the right state, and each link (parent step to step) is one replayable audit
    segment.
 5. **Detection and the signed leave** (`notice.py`, `drain.py`).
-   - `AwsSpotNotice` reads IMDSv2 and renews an expired session once. Any other answer, and an
-     unreachable or silent IMDS, raises `NoticeError`; the caller keeps working under its
-     lease. `FakeNoticeSource` replays a schedule.
+   - `AwsSpotNotice` reads IMDSv2 and renews an expired session once, never through an HTTP
+     proxy. Any other answer, and an unreachable or silent IMDS, raises `NoticeError`; the
+     caller keeps working under its lease. `FakeNoticeSource` replays a schedule.
    - The miner calls `DrainHandler.check()` between inner steps and keeps heartbeating while it
      drains. If the time left covers the last measured flush plus a margin, it flushes a
      checkpoint at the current step, then sends the leave; otherwise it leaves at once.
@@ -125,7 +130,8 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
    - The leave is `JCS(LeaveNotice{version, run_id, member, signer, lease, reason,
      provider_time, heads})` under domain `hypertrain/elastic-leave/1|`, signed by the host key
      the member registered at join (`protocol.server_keys.check_sig`). `heads` (at most 1,024)
-     and `provider_time` are evidence that the coordinator records but never trusts.
+     and `provider_time` are evidence: the verified notice is kept on the member's `NOTICE`
+     departure and never trusted over the coordinator's own heads.
    - A host without a notice is detected by lease expiry or by the progress deadline.
 6. **Coordinator and settlement** (`coordinator.py`).
    - Every mutating entry point (`open_round`, `join`, `heartbeat`, `leave`, `tick`, `commit`)
@@ -140,8 +146,9 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
      it, so an evicted miner keeps all it had accepted.
    - Only a link that fails the audit penalises its producer, whose member is revoked.
      Departures (`NOTICE`, `LAPSE`, `STALLED`, `REPLACED`) are never penalised.
-   - A round opens only once every shard of the previous one is complete. `open_round` returns
-     the closed round's final settlement, departures up to that call included.
+   - A round opens only once every shard of the previous one is complete. `open_round` checks
+     each unit with the manifest's own types before changing any state, and returns the closed
+     round's final settlement, departures up to that call included.
 7. **Missed trial or eviction; admission and settlement (proposal P1, opt-in v3 flag).** No v2
    path changes in this batch. P1 adds a field to the v3 run policy, so it is bound into the
    run's policy digest (`WorkUnit.policy`); changing it means a new run, and v2 manifests cannot
@@ -156,9 +163,11 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
 
    Under P1:
    - A round is a set of S shards held under leases, not a fixed roster that must all commit.
-     Roster sizing: the run policy fixes S. Any M ≥ 1 live members make progress, in
-     ⌈S / (M·capacity)⌉ waves, and members beyond S·capacity are hot spares. The quorum is
-     "every shard complete, whoever completes it", so a no-show never stalls a round.
+     Roster sizing: the run policy fixes S, and any M ≥ 1 live members make progress. At the
+     default capacity of 1, ⌈S/M⌉ waves are needed and members beyond S are hot spares. With
+     capacity c > 1, as few as ⌈S/c⌉ members may hold every shard while the rest stay idle, so
+     c > 1 pays only if a miner trains its shards in parallel. The quorum is "every shard
+     complete, whoever completes it", so a no-show never stalls a round.
    - An eviction is a verified leave under a live lease, a lapse (hard kill, host loss,
      partition: indistinguishable from honest failure) or a stall. None is penalised, and
      accepted links are credited. A held shard that never progressed earns nothing. Only a link
@@ -171,6 +180,11 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
      holding a pending place and blocking its coldkey for the rest of the run.
    - The audit replays links, which maps to today's anchored replay; disputes bisect inside a
      link (step, layer, op) as today.
+   - A dispute turn belongs to the owner, not to the host. The owner's replacement host answers
+     it from the store (published artifacts and the link chain), so the turn deadline must
+     exceed the replacement delay. An honest miner evicted mid-turn otherwise loses the round by
+     `PARTY_TIMEOUT`, as today. Whether a verified leave extends the open turn by one
+     replacement window is a founder decision [H proposal].
    - Partial participation is credited per accepted step. How the v2 per-miner cap (Q/4,
      hence at least 4 verified miners) applies is a founder decision.
    - When P1 is wired into a challenge path, the modules that decide acceptance (`coordinator`,
@@ -243,12 +257,15 @@ seeded schedules:
 The reference miner loop joins, heartbeats (also while it drains), restores, trains,
 checkpoints every `ckpt_every` steps, commits and retries a lost answer.
 
-Checks of the core, which any core bug in the mutation list below trips:
+Checks of the core's observable behaviour. They catch the membership, assignment,
+progress-deadline and retry mutants of the list below. The store, notice and signature,
+admission, compare-and-set and chain-splice mutants are caught only by their unit tests: the
+simulator uses an in-memory store, a fake notice source and admitted, honest hosts. The checks:
 
 - no shard leaves a live holder;
 - no lease above its capacity;
 - a dead host's lease is released within the TTL;
-- no live, connected host is stalled;
+- no holder is stalled without a fault (partition, kill, loss or eviction) in its window;
 - no live work is refused or moved (`refused`, `displaced`);
 - every accepted link is in the final chain;
 - each step is credited once;
@@ -291,10 +308,10 @@ Reading:
 - The cheater's forged link is refused in every run and only the cheater is penalised. The
   makespan doubles because its slot gets no replacement.
 
-The soak (`soak`) ran 4,000 seeds x 11 scenarios with 0 violations on the final code [V]. Its
-configurations draw at random:
+The soak (`soak`) ran 8,000 seeds x 11 scenarios with 0 violations on the final code [V],
+over two disjoint seed ranges. Its configurations draw at random:
 
-- hosts, regions, shards, steps and rounds;
+- hosts, regions, shards, steps and rounds, and a capacity of 1 or 2;
 - checkpoint intervals and write times of 5, 15 or 30 s;
 - TTLs of 20 or 60 s and restart times;
 - host lease guards that are wrong;
@@ -302,15 +319,17 @@ configurations draw at random:
 
 ### Mutation check
 
-`scripts/check_elastic_mutants.py` applies 46 single-snippet mutants and requires each named
+`scripts/check_elastic_mutants.py` applies 53 single-snippet mutants and requires each named
 test to fail (pytest exit 1; a collection error does not count). The child writes no bytecode
-and SIGTERM restores the file. Result: 46/46 killed [V, 2026-10-26]. Among them:
+and SIGTERM restores the file. Result: 53/53 killed [V, 2026-10-26]. Among them:
 
 | Mutant | Caught by (`tests/elastic/`) |
 | --- | --- |
 | checkpoint write not atomic (written under its key) | `test_store.py::test_put_killed_before_fsync_publishes_nothing` (child killed by SIGKILL at the data fsync) |
 | lease never expires | `test_membership.py::test_lease_lapses_without_a_heartbeat` |
 | a holder that never progresses keeps its shard | `test_coordinator.py::test_a_holder_that_stops_progressing_loses_its_shard_unpenalised` |
+| every rejoin restarts the progress window (crash loop) | `test_coordinator.py::test_a_host_that_rejoins_in_a_loop_still_loses_a_shard_it_never_advances` |
+| a late member is handed shards in the sweep that lapses it | `test_coordinator.py::test_late_members_are_all_lapsed_before_their_shards_move` |
 | an unadmitted key joins and replaces the live holder | `test_coordinator.py::test_only_an_admitted_key_joins_or_replaces_a_member` |
 | double assignment: capacity not consumed | `test_assignment.py::test_plan_gives_each_pending_shard_to_one_member_within_its_capacity` (hypothesis) |
 | double assignment: a held shard planned again | `test_coordinator.py::test_a_departure_moves_only_the_departed_members_shards` |
@@ -332,7 +351,7 @@ From `hypertrain/`:
 
 ```bash
 uv run --frozen pytest -q tests/elastic                   # CI job `elastic`, about 15 s
-uv run --frozen python scripts/check_elastic_mutants.py   # about 1 min
+uv run --frozen python scripts/check_elastic_mutants.py   # about 45 s
 uv run --frozen python -m hypertrain.elastic.sim table    # one run per scenario
 uv run --frozen python -m hypertrain.elastic.sim aggregate --seeds 200   # the evidence table
 uv run --frozen python -m hypertrain.elastic.sim soak --seeds 5000
@@ -399,6 +418,8 @@ step timeout and then the mutation check, on a 4-vCPU runner.
   - a put killed before its rename leaves its temporary file (`.<sha>.<uuid>.tmp`) under the
     store root until the host's owner removes it;
   - no test injects a power loss, so the directory fsyncs are covered by review only;
+  - a member killed repeatedly before it completes a link loses its shard within about two
+    progress windows, by design and without penalty;
   - the progress deadline is a run parameter and must exceed the slowest honest link, which the
     simulator checks for its own configurations.
 
