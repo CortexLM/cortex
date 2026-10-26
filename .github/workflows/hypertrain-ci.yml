@@ -109,7 +109,7 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t ALL < <(git ls-files ':(glob)tests/**/test_*.py' \
-            | grep -v '^tests/sim/' | grep -v '^tests/e2e/' | sort)
+            | grep -v '^tests/sim/' | grep -v '^tests/e2e/' | grep -v '^tests/elastic/' | sort)
           SEL=()
           for i in "${!ALL[@]}"; do
             if (( i % SHARDS == SHARD )); then SEL+=("${ALL[$i]}"); fi
@@ -150,6 +150,31 @@ jobs:
           cache-dependency-glob: "hypertrain/uv.lock"
       - run: uv sync --locked --all-extras --group dev
       - run: uv run --frozen pytest -q --durations=25 -m "not od" tests/${{ matrix.suite }}
+
+  # Eviction-tolerant core and its GPU-less simulator (docs/adr/0002 at the monorepo root):
+  # every scenario, 300 random runs, then each named test must fail under its mutant. No torch
+  # is installed; the suite must finish within its 5-minute step timeout.
+  elastic:
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'v3-') || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.17"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "hypertrain/uv.lock"
+      - run: uv sync --locked --group dev
+      - name: Simulator and property suite
+        timeout-minutes: 5
+        run: uv run --frozen pytest -q --durations=10 tests/elastic
+      - name: Mutation check
+        timeout-minutes: 5
+        run: uv run --frozen python scripts/check_elastic_mutants.py
 
   # Bitwise proof gate (scripts/check-proof.sh). The shards report a golden leaf root
   # outside GOLDEN as an xfail; this gate fails it. Informational: GOLDEN holds no root

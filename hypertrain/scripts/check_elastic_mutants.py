@@ -1,0 +1,269 @@
+"""Mutation check of the elastic core (ADR 0002): each mutant must fail its named test.
+
+A mutant replaces one exact snippet of one file, the named test runs, and the file is restored.
+The check fails when a test still passes under its mutant (pytest exit 1 is the only kill: a
+collection error is not), when a snippet is not found exactly once, or when the suite fails
+without mutants. Run from hypertrain/:
+
+    uv run --frozen python scripts/check_elastic_mutants.py
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = "src/hypertrain/elastic/"
+TESTS = "tests/elastic/"
+
+
+@dataclass(frozen=True, slots=True)
+class Mutant:
+    name: str
+    path: str
+    old: str
+    new: str
+    test: str
+
+
+MUTANTS = (
+    Mutant(
+        "checkpoint write not atomic",
+        SRC + "store.py",
+        'tmp = path.parent / f".{sha}.{uuid.uuid4().hex}.tmp"',
+        "tmp = path",
+        "test_store.py::test_put_killed_before_fsync_publishes_nothing",
+    ),
+    Mutant(
+        "checkpoint write not synced before rename",
+        SRC + "store.py",
+        "                os.fsync(fd)\n",
+        "",
+        "test_store.py::test_put_killed_before_fsync_publishes_nothing",
+    ),
+    Mutant(
+        "torn object under its key trusted",
+        SRC + "store.py",
+        "if self._intact(path, sha):",
+        "if path.exists():",
+        "test_store.py::test_put_rewrites_a_torn_object_under_its_key",
+    ),
+    Mutant(
+        "lease never expires",
+        SRC + "membership.py",
+        "return member.status is Status.ACTIVE and self.clock.now_ms() < member.lease.expires_ms",
+        "return member.status is Status.ACTIVE",
+        "test_membership.py::test_lease_lapses_without_a_heartbeat",
+    ),
+    Mutant(
+        "rejoin reuses a token (no fencing)",
+        SRC + "membership.py",
+        "self._tokens += 1",
+        "self._tokens = 1",
+        "test_membership.py::test_rejoin_fences_every_older_token",
+    ),
+    Mutant(
+        "double assignment: capacity not consumed",
+        SRC + "assignment.py",
+        "left[member] -= 1",
+        "left[member] -= 0",
+        "test_assignment.py::test_plan_gives_each_pending_shard_to_one_member_within_its_capacity",
+    ),
+    Mutant(
+        "double assignment: a held shard is planned again",
+        SRC + "coordinator.py",
+        "if s.holder is None and not s.done]",
+        "if not s.done]",
+        "test_coordinator.py::test_a_departure_moves_only_the_departed_members_shards",
+    ),
+    Mutant(
+        "a non-holder extends a shard",
+        SRC + "coordinator.py",
+        "if s.holder != Holder(member, token):",
+        "if s.holder is None:",
+        "test_coordinator.py::test_only_the_live_holder_extends_a_shard",
+    ),
+    Mutant(
+        "a stale lease reaches the shard checks",
+        SRC + "coordinator.py",
+        "        m = self.membership.check(member, token)\n        s = self._shards.get(shard)",
+        "        m = self.membership.get(member)\n        assert m is not None\n"
+        "        s = self._shards.get(shard)",
+        "test_coordinator.py::test_a_replacement_host_resumes_the_shard_from_the_accepted_head",
+    ),
+    Mutant(
+        "head not compare-and-set",
+        SRC + "checkpoint.py",
+        "if manifest.parent != head:",
+        "if False:",
+        "test_coordinator.py::test_a_commit_must_extend_the_accepted_head",
+    ),
+    Mutant(
+        "retried commit refused",
+        SRC + "coordinator.py",
+        "if key in s.accepted:",
+        "if False:",
+        "test_coordinator.py::test_a_retried_commit_is_acknowledged_again_without_new_credit",
+    ),
+    Mutant(
+        "retried commit credited twice",
+        SRC + "coordinator.py",
+        "            return Accepted(shard, key, s.accepted[key], True)",
+        "            s.links.append(s.links[-1])\n"
+        "            return Accepted(shard, key, s.accepted[key], True)",
+        "test_coordinator.py::test_a_retried_commit_is_acknowledged_again_without_new_credit",
+    ),
+    Mutant(
+        "accepted work dropped at a departure",
+        SRC + "coordinator.py",
+        "        for s in released:\n            s.holder = None\n",
+        "        for s in released:\n            s.holder, s.head, s.step = None, None, 0\n",
+        "test_coordinator.py::test_a_lapsed_lease_releases_its_shard_and_head_without_a_tick",
+    ),
+    Mutant(
+        "replacement host does not inherit the shards",
+        SRC + "coordinator.py",
+        "            for s in self._held(replaced.token):\n"
+        "                s.holder = Holder(member, lease.token)\n",
+        "",
+        "test_coordinator.py::test_a_replacement_host_resumes_the_shard_from_the_accepted_head",
+    ),
+    Mutant(
+        "resume trusts a spliced chain",
+        SRC + "checkpoint.py",
+        "            if not manifest.binds(unit):\n"
+        '                raise CheckpointError("WRONG_UNIT", key)\n'
+        "            if out",
+        "            if out",
+        "test_checkpoint.py::test_resume_refuses_a_chain_spliced_from_another_shard",
+    ),
+    Mutant(
+        "manifest written before its state",
+        SRC + "checkpoint.py",
+        "        if not self.store.exists(state):\n"
+        '            raise CheckpointError("MISSING_STATE", state)\n',
+        "",
+        "test_checkpoint.py::test_a_manifest_is_never_written_before_its_state",
+    ),
+    Mutant(
+        "forged leave signature accepted",
+        SRC + "notice.py",
+        "if not check_sig(",
+        "if False and check_sig(",
+        "test_coordinator.py::test_a_forged_leave_signature_is_refused",
+    ),
+    Mutant(
+        "leave from an unregistered key accepted",
+        SRC + "coordinator.py",
+        "if notice.signer != m.signer:",
+        "if False:",
+        "test_coordinator.py::test_a_leave_signed_by_a_key_the_member_did_not_register_is_refused",
+    ),
+    Mutant(
+        "retried leave refused",
+        SRC + "coordinator.py",
+        "if done is not None and done[0] == (notice.member, notice.signer):",
+        "if False:",
+        "test_coordinator.py::test_a_signed_leave_releases_the_shards_at_once_without_penalty",
+    ),
+    Mutant(
+        "drain flushes past the deadline",
+        SRC + "drain.py",
+        "fits = notice.deadline_ms - started >= self.flush_ms + self.margin_ms",
+        "fits = True",
+        "test_drain.py::test_a_late_notice_leaves_at_once_without_flushing",
+    ),
+    Mutant(
+        "drain ignores the measured flush time",
+        SRC + "drain.py",
+        "        self.flush_ms = ms\n",
+        "        del ms\n",
+        "test_drain.py::test_the_budget_follows_the_last_measured_flush",
+    ),
+    Mutant(
+        "no leave when the flush fails",
+        SRC + "drain.py",
+        "        finally:\n            self._leave(notice)",
+        "        except BaseException:\n            raise\n"
+        "        else:\n            self._leave(notice)",
+        "test_drain.py::test_a_failed_flush_still_leaves_and_raises",
+    ),
+    Mutant(
+        "hibernate read as a two-minute notice",
+        SRC + "notice.py",
+        '0 if action == "hibernate" else ',
+        "",
+        "test_notice.py::test_a_hibernate_notice_leaves_no_time",
+    ),
+    Mutant(
+        "expired IMDS session not renewed",
+        SRC + "notice.py",
+        "if r.status_code == 401:",
+        "if False:",
+        "test_notice.py::test_an_expired_session_is_renewed_once",
+    ),
+    Mutant(
+        "a lapse is penalised",
+        SRC + "coordinator.py",
+        "        released = self._held(m.lease.token)\n",
+        "        self._penalties[m.owner] += kind is Exit.LAPSE\n"
+        "        released = self._held(m.lease.token)\n",
+        "test_sim.py::test_lapses_and_notices_never_penalise_an_honest_miner",
+    ),
+    Mutant(
+        "miner ignores the checkpoint interval",
+        SRC + "sim.py",
+        "if w.step - w.committed_step >= cfg.ckpt_every or w.step == w.unit.steps:",
+        "if w.step == w.unit.steps:",
+        "test_sim.py::test_each_loss_wastes_at_most_one_checkpoint_interval[loss]",
+    ),
+    Mutant(
+        "replacement resumes from the base, not the head",
+        SRC + "sim.py",
+        "self.sim.checkpoints.resume(a.unit, a.head)",
+        "self.sim.checkpoints.resume(a.unit, None)",
+        "test_sim.py::test_resuming_the_same_heads_again_and_again_changes_nothing",
+    ),
+)
+
+
+def pytest(target: str) -> int:
+    cmd = [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", target]
+    run = subprocess.run(  # noqa: S603  (fixed argv: this interpreter and a test id)
+        cmd, cwd=ROOT, capture_output=True, timeout=900, check=False
+    )
+    return run.returncode
+
+
+def check(m: Mutant) -> str:
+    path = ROOT / m.path
+    original = path.read_bytes()
+    text = original.decode()
+    if text.count(m.old) != 1:
+        return f"snippet found {text.count(m.old)} times"
+    try:
+        path.write_text(text.replace(m.old, m.new))
+        code = pytest(TESTS + m.test)
+    finally:
+        path.write_bytes(original)
+    return "killed" if code == 1 else f"SURVIVED (pytest exit {code})"
+
+
+def main() -> int:
+    if pytest(TESTS) != 0:
+        print("the elastic suite fails without mutants")
+        return 1
+    rows = [(m, check(m)) for m in MUTANTS]
+    print("| mutant | file | caught by | result |\n|---|---|---|---|")
+    for m, result in rows:
+        print(f"| {m.name} | {Path(m.path).name} | `{m.test}` | {result} |")
+    survivors = [m.name for m, result in rows if result != "killed"]
+    print(f"\n{len(rows) - len(survivors)}/{len(rows)} mutants killed")
+    return 1 if survivors else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
