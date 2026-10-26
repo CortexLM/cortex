@@ -224,3 +224,6 @@ tests/test_vast_e2e.py:49238c9f34e47fe081a5d3ea76d645ec76b431e5e0e29edf446714ee6
 
 # release.yml: writes the HYPERTRAIN_RELEASE_KEY secret (env reference, no value) to a 0600 temp file
 .github/workflows/release.yml:8bf198a2bc2d8d641723acf3b8f8faafd9499d29d4d1e705c24ce769e308009a  # L51
+
+# d20 manifest builder: default relay public key (an ss58 address, k1 of relay-joinbase), not a credential
+scripts/b300/d20/build_test_manifest.sh:d2392660f21fee38fde86c1695d9e5348e79cb6a2b684b9aa0ddfe7ac37a42ec  # L34
