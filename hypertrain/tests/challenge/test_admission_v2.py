@@ -648,7 +648,7 @@ def test_production_screen_spans_40_trial_campaign_then_expires(
     tmp_path: Path, trial_launches
 ) -> None:
     # Given: the admission policy `manifest_v2 example --ledger-mode production` emits, and the
-    # oldest screen when round 0 settles after a 40-trial campaign (3 ACTIVE x 12 + 1 PROBATION
+    # oldest screen at round 0's d_final after a 40-trial campaign (3 ACTIVE x 12 + 1 PROBATION
     # x 4): the PROBATION miner, screened first. Each real trial spends its whole window: proof
     # and finalize at seed + challenge_rounds, so the next seed is one round later.
     from hypertrain.ops.manifest_v2 import main as manifest_cli
@@ -694,10 +694,11 @@ def test_production_screen_spans_40_trial_campaign_then_expires(
     assert status.record.state == "PROBATION" and status.record.clean_count == 4
     # When: the other 36 trials run back to back at the same worst case, then round 0 opens
     # with the TEST run-2 offsets (b14a975e: d_final 470 rounds after the open request).
-    settle = deadline + 36 * (policy.challenge_rounds + 1) + 470
-    # Then: the first screen still holds when round 0 settles, and still lapses after
-    # work_screen_epoch_rounds without a new proof.
-    assert a.status(HOT.ss58, now=settle).eligible
+    d_final = deadline + 36 * (policy.challenge_rounds + 1) + 470
+    # Then: the first screen still holds at round 0's d_final, and still lapses after
+    # work_screen_epoch_rounds without a new proof. Aggregation and finalization re-check
+    # eligibility at or after d_final; the rest of the window is their budget.
+    assert a.status(HOT.ss58, now=d_final).eligible
     assert not a.status(HOT.ss58, now=deadline + policy.work_screen_epoch_rounds + 1).eligible
 
 

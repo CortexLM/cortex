@@ -175,12 +175,22 @@ graduation. Join quotas, one concurrent non-ACTIVE identity per coldkey, funded
 locks and known-owner caps bound exposure; they do not reveal every Sybil owner.
 
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
-rounds after its accepted proof; a miner without a newer proof then loses
-eligibility. `manifest_v2 example` writes 6000 (about 5 h): trials run back to
-back, each within `challenge_rounds` + 1 rounds, so the first screen of a
-40-trial campaign (3 × 12 ACTIVE + 4 PROBATION) must still hold when round 0
-settles. The former 1000 (about 50 min) could not. The value is per run: it is
-part of the admission policy hash, hence of the run ID.
+rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
+refused (`CHALLENGE_EXPIRED`) once more than `challenge_rounds` rounds have passed since
+the miner's join or its last trial finalization. Only an admin suspend and resume
+reopens it, and resume restarts probation at zero clean trials. So a miner that waits
+while others run their trials stays eligible until its last proof plus
+`work_screen_epoch_rounds`, for the rest of the run.
+
+`manifest_v2 example` writes 6000 (about 5 h). In a serial 40-trial campaign
+(3 × 12 ACTIVE + 4 PROBATION), each trial spans at most about `challenge_rounds` + 1
+rounds when finalization and joins are prompt; joinbase-6 measured about 64. The first
+screen must then cover 36 more trials and round 0 up to its `d_final`: 4106 rounds with
+the joinbase-6 offsets, 5180 with the `od_large_manifest.py` offsets. The former 1000
+(about 50 min) could not reach round 0. The cost: one screen now vouches for a miner's
+hardware for about 5 h instead of 50 min. The same value sets the IP-prefix quota epoch,
+which only rotates the prefix HMAC namespace. The value is per run: it is part of the
+admission policy hash, hence of the run ID.
 
 Prefix quotas use a stable coordinator-private HMAC namespace pinned atomically
 in the store. Reopening the same store with the same coordinator does not reset
