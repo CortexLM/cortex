@@ -1,0 +1,122 @@
+{
+ "purpose": "Bitwise repeatability of the sdpa-flash attention backend on B300 (sm_103) under hypertrain.trainer determinism settings (use_deterministic_algorithms=True); companion of attn_qualify_sm120.json, a separate replay domain",
+ "torch": "2.14.0+cu130",
+ "cuda": "13.0",
+ "cudnn": 92400,
+ "gpu": "NVIDIA B300 SXM6 AC",
+ "capability": [
+  10,
+  3
+ ],
+ "sm_count": 148,
+ "deterministic_algorithms": true,
+ "driver": "595.91.07 on every GPU of both hosts (host_probe.json / nvidia-smi.csv of each host)",
+ "image": "ghcr.io/cortexlm/cortex/hypertrain-gpu@sha256:f4b2885f2dc89478da645b9f5e6f02891cd3309ef0a1f2aa0de04328e11cba0f (torch/CUDA runtime only)",
+ "code": "hypertrain checkout df6fe60d bind-mounted read-only over the image package (PYTHONPATH=/opt/ht/src); trainer/attention.py at that commit",
+ "arch_list_note": "torch.cuda.get_arch_list() has no sm_103 (sm_75..sm_100, sm_120) on both hosts; that the cc 10.3 GPUs run the sm_100 cubins is an inference, not measured",
+ "method": "Fresh process per run (8 runs: hostA GPU 4, hostA GPU 5, hostA GPU 6, hostA GPU 7, hostB GPU 4, hostB GPU 5, hostB GPU 6, hostB GPU 7; 2 AWS hosts with 8 B300 each), 3 in-process repeats each, seed 0 (cuda Generator), loss=sum(o.float()^2); one sha256 over the concatenated raw bytes of out,dq,dk,dv. max_abs_err_vs_math compares the forward output only. peak_mib of sdpa-flash includes the math reference output still held. Timing = mean of 10 fwd+bwd (no hashing) after 3 warmups, on hosts shared with other S3 jobs; the 1b math timing (~245 ms vs 41-56 ms on sm_120) is unexplained and is not a B300 math benchmark. GPU N = CUDA_VISIBLE_DEVICES=N (CUDA_DEVICE_ORDER unset). sdpa-flash path chosen: flash. Script: livrables/forge/2026-10-26_qualif-b300/tools/attn_qualify.py (mining sprint S3, 2026-10-26).",
+ "shapes": {
+  "1b": {
+   "b,h,kvh,T,hd": [
+    4,
+    16,
+    8,
+    2048,
+    128
+   ],
+   "dtype": "bf16",
+   "backends": {
+    "math": {
+     "cross_process_equal": true,
+     "in_process_equal_all_runs": true,
+     "hashes": "f61407a989dd4e8c835f6625f35d6bedafadf27e46ad0a045618388c9f4574d9",
+     "max_abs_err_vs_math": 0.0,
+     "peak_mib": 4452.0009765625,
+     "ms_fwd_bwd_per_run": [
+      244.3996,
+      246.6312,
+      251.3925,
+      246.6936,
+      246.7739,
+      242.9811,
+      259.9723,
+      243.589
+     ]
+    },
+    "sdpa-flash": {
+     "cross_process_equal": true,
+     "in_process_equal_all_runs": true,
+     "hashes": "59712efc69fe4f360ade6d0c206c57cd39533e07cb81dd049cfa895038b76585",
+     "max_abs_err_vs_math": 0.015625,
+     "peak_mib": 805.005859375,
+     "ms_fwd_bwd_per_run": [
+      1.7603,
+      1.7594,
+      1.7596,
+      1.7594,
+      1.756,
+      1.7507,
+      1.7603,
+      1.7563
+     ]
+    }
+   }
+  },
+  "small": {
+   "b,h,kvh,T,hd": [
+    2,
+    4,
+    2,
+    64,
+    32
+   ],
+   "dtype": "bf16",
+   "backends": {
+    "math": {
+     "cross_process_equal": true,
+     "in_process_equal_all_runs": true,
+     "hashes": "4ff0a80541d624d68da6e24f3e992e92856512e0b659957540a7eccae674499c",
+     "max_abs_err_vs_math": 0.0,
+     "peak_mib": 68.7900390625,
+     "ms_fwd_bwd_per_run": [
+      1.3355,
+      1.382,
+      1.339,
+      0.8944,
+      1.3299,
+      1.3548,
+      1.303,
+      1.3208
+     ]
+    },
+    "sdpa-flash": {
+     "cross_process_equal": true,
+     "in_process_equal_all_runs": true,
+     "hashes": "b4c7cd7da352feef554e0d10b4cb0980f3086f8d3742bd82b626f7f488b782f7",
+     "max_abs_err_vs_math": 0.015625,
+     "peak_mib": 70.9248046875,
+     "ms_fwd_bwd_per_run": [
+      0.8908,
+      0.9254,
+      0.806,
+      0.4293,
+      0.9527,
+      0.9034,
+      0.5031,
+      0.6939
+     ]
+    }
+   }
+  }
+ },
+ "candidate": {
+  "capability": [
+   10,
+   3
+  ],
+  "torch": "2.14.0+cu130",
+  "backend": "sdpa-flash",
+  "criterion": "cross_process_equal on every shape, the sm_120 record's criterion"
+ },
+ "table_entry": "none: QUALIFIED_BACKENDS (trainer/attention.py) has no (10, 3) entry, select_backend returns math on B300 and runs force HT_ATTN_BACKEND=sdpa-flash; adding the entry is Forge's decision"
+}
