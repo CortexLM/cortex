@@ -204,7 +204,7 @@ The Lium validator (13.223.237.157) opens SSH sessions on both hosts about every
 The executor stays up: stopping it would take the nodes OFFLINE at Lium (SN51 decision D19). So:
 
 - The :08/:23/:38/:53 schedule is NOT reliable (observed on 2026-10-26: a challenge started about 5 minutes after the announced slot). The validator checks can take all 8 GPUs, not only GPU 0 (host A, 15:14Z: 8 foreign `python` processes from the executor container). `watchtower` can also update and recreate `executor-executor-1` without notice (host A, 15:24Z).
-- Rule before every run and every step: `nvidia-smi --query-compute-apps=pid,process_name --format=csv`. If a `/root/app/.venv/bin/python` process is listed, wait. A cycle starts at `docker logs executor-executor-1 2>&1 | grep upload_ssh_key` and ends at `remove_ssh_key` (30 s to 8 min). A short-lived Lium pod seen on a paused node (44 s, killed by the executor, exit 137) was not a served rental.
+- Rule before every run and every step: `nvidia-smi --query-compute-apps=pid,process_name --format=csv`. If a `/root/app/.venv/bin/python` process is listed, wait. A cycle starts at `docker logs executor-executor-1 2>&1 | grep upload_ssh_key` and ends at `remove_ssh_key` (30 s to 8 min on hosts A and B; 4 to 12.5 minutes on a third host, below). A short-lived Lium pod seen on a paused node (44 s, killed by the executor, exit 137) was not a served rental.
 - For a run with at most 7 GPUs, leaving GPU 0 out (`CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7`) helps only against the GPU 0 challenge, not against a full-host check.
 - Tolerate an OOM at start-up (any rank) and re-run the step after the cycle ends. Never stop the executor.
 - Before each step also record `nvidia-smi --query-gpu=index,memory.used --format=csv`.
@@ -213,26 +213,43 @@ The executor stays up: stopping it would take the nodes OFFLINE at Lium (SN51 de
 ### Gate a step and record the overlap
 
 `hypertrain/scripts/b300/cycle_gate.sh` applies the two checks above and prints one JSON line per
-poll. It exits 0 only when no compute app of another owner is on the selected GPUs (`--gpus 2,3`;
-default all; processes under `--ours`, default `/opt/hypertrain/`, are ours) and the executor's last
-`upload_ssh_key` / `remove_ssh_key` marker is not an `upload_ssh_key` younger than `--cycle-max`
-(default 720 s). An older unmatched upload is reported as `stale_upload` and does not block. It exits
-1 after `--timeout` seconds (default 1800). It only reads `nvidia-smi` and `docker logs` of the
-executor container (`HT_GATE_EXECUTOR`, default `executor-executor-1`).
+poll. It exits 0 only when all of these hold:
 
-`hypertrain/scripts/b300/gpu_watch.sh OUT_PREFIX [INTERVAL]` appends the compute apps to
-`OUT_PREFIX.apps.csv` and the memory used per GPU to `OUT_PREFIX.mem.csv` every `INTERVAL` seconds
-(default 2), until it is killed. A failed `nvidia-smi` call writes a `nvidia-smi-failed` row. Start it
-before a timed step and compare its rows with the executor markers of the step's window.
+- No compute app is on the selected GPUs (`--gpus 2,3`; default all) except processes whose name
+  starts with `--ours` (default `/opt/hypertrain/`). This is a name match, not an owner check: our
+  own short-lived processes also show as `[No data]` or a bare `python`, and those count as foreign, so
+  another job of ours can block the gate for a moment.
+- The executor log (`docker logs -t --since 30m` of `HT_GATE_EXECUTOR`, default
+  `executor-executor-1`) shows no open cycle. Over the `POST /upload_ssh_key` and
+  `POST /remove_ssh_key` lines with a 2xx status younger than `--cycle-max` (default 900 s, above the
+  783 s of the longest cycle observed), each upload opens a cycle and each removal closes one. An
+  older unmatched upload is reported as `stale_upload` and does not block.
+- The log holds at least one marker. A recreated executor container (watchtower) has an empty log
+  while the cycles go on, so with no marker the gate waits; `--allow-no-marker` is for a host without
+  a validator.
+- `nvidia-smi`, the executor log and the marker times (GNU `date`) could be read. Otherwise the gate
+  does not clear.
+
+Exit codes: 0 clear; 1 not clear before `--timeout` (default 1800 s); 2 usage; 4 `nvidia-smi` or the
+executor log was unreadable at the last poll. It only reads `nvidia-smi` and the executor's logs.
+
+`hypertrain/scripts/b300/gpu_watch.sh OUT_PREFIX [INTERVAL]` truncates and then appends the compute
+apps to `OUT_PREFIX.apps.csv` and the memory used per GPU to `OUT_PREFIX.mem.csv` every `INTERVAL`
+seconds (default 2), until it is killed. A failed or hung (10 s) `nvidia-smi` call writes a
+`nvidia-smi-failed` row. Start it before a timed step and compare its rows with the executor markers
+of the step's window.
 
 Observed on a third host (Hyderabad, 2026-10-26): the executor logged an `upload_ssh_key` every
 15 minutes (at about :02, :17, :32 and :47 of the hour, 8 consecutive cycles from 20:02Z to 21:47Z)
 and the matching `remove_ssh_key` 4 to 12.5 minutes later; in 2 of the 8 cycles a second upload came
-about 7 minutes after the first, before the removals. In the one cycle watched in detail the
-validator's `/root/app/.venv/bin/python` held 271,534 MiB of GPU 0 from 5 min 38 s after the upload
-for at least 65 s. Rows named `[No data]` (about 1 GiB) also appeared on the GPU a step was using, with
-process ids among that step's own; their owner was not established, and a short-lived process of the step
-itself can show this way. These are observations, not a schedule: keep gating.
+about 7 minutes after the first, before the removals. An upload/removal pair 8 s apart at 21:15
+coincides with the pause of the node and is unexplained. In the one cycle watched in detail the
+validator's `/root/app/.venv/bin/python` appeared on GPU 0 5 min 38 s after the upload, held
+271,534 MiB for about 59 s and was present for at least 65 s. Rows named `[No data]` (about 1 GiB)
+appeared on the GPU a step was using; each such pid is also listed there under our own process name,
+so they are our short-lived processes seen before the name resolved. From about 22:30Z the uploads
+were irregular (22:29:59, 22:38:06, 22:44:07, 22:53:07). These are observations, not a schedule: keep
+gating, and keep the check on the whole host (an earlier cycle used all 8 GPUs).
 
 ## Local CUDA run-v2 (d20 harness)
 
@@ -241,17 +258,24 @@ itself can show this way. These are observations, not a schedule: keep gating.
 one GPU of a B300 host:
 
 ```text
-run_container.sh --image REPO@sha256:<64 hex> --gpu N --out DIR [--mode smoke|multi]
+run_container.sh --image REPO@sha256:<64 hex> --gpu N --out DIR [--mode MODE]
                  [--driver 595.91.07] [--sm-count 148] [--no-gate] [--gate-timeout SECONDS]
 ```
 
-It waits for `cycle_gate.sh` (unless `--no-gate`), starts `gpu_watch.sh`, then runs one `--rm`
-container named `ht-s9-<mode>` on `--gpus device=N` with the checkout mounted read-only at
-`/opt/ht` first on `PYTHONPATH` (and `pytest==9.1.1` installed from PyPI inside the container). Use a
-GPU other than 0: the validator's challenge takes GPU 0 first. `--out` must not exist. It writes
-`gate.jsonl`, `gpu-watch.{apps,mem}.csv`, `stdout.log`, `stderr.log`, `events.jsonl`, the script's
-evidence (`multi.json` or `mine-smoke-v2.json`) and `run.json` (window, exit code, and every executor
-SSH-key marker inside the window).
+`MODE` is `smoke` or `multi` (the fixture decoder) or `smoke-kimi`, `multi-kimi`, `job-kimi` (below).
+It waits for `cycle_gate.sh` (unless `--no-gate`; exit 3 if the gate does not clear within
+`--gate-timeout`), starts `gpu_watch.sh`, then runs one `--rm` container named `ht-s9-<mode>-gpu<N>`
+on `--gpus device=N` with the checkout mounted read-only at `/opt/ht`, first on `PYTHONPATH` (and
+`pytest==9.1.1` installed from PyPI inside the container). The gate looks at the whole host whatever
+GPU you pick; choosing one other than 0 only avoids the GPU the validator's challenge was seen on
+first. `--out` must not exist. On SIGINT or SIGTERM only that container is removed and the exit code is
+143 (a shell ignores SIGINT in a job it starts with `&`, `nohup` or not, so use SIGTERM there);
+otherwise the exit code is the container's. It writes `gate.jsonl`, `gpu-watch.{apps,mem}.csv`,
+`stdout.log`, `stderr.log`, `events.jsonl`, `executor-markers.txt`, the script's evidence
+(`multi.json`, `mine-smoke-v2.json` or `job-kimi.json`) and `run.json`: the window, the exit code,
+`interrupted`, the last gate line, `executor_log_ok`, the last SSH-key marker before the window
+(`last_marker_before_window`) and every marker inside it (`executor_markers_in_window`). An empty list
+with `executor_log_ok: false` means the log could not be read, not that nothing happened.
 
 Real: the challenge app, the TLS relay, the `hypertrain-miner` processes, admission, the probation
 trials, the CUDA training inside `run-v2`, the audits (replayed in the challenge process on the same
