@@ -403,7 +403,15 @@ def main() -> None:
     args = ap.parse_args()
     doc = run_manifest(dataclasses.replace(PROFILE, compute_dtype=args.dtype))
     results = qualify(doc, args.device, args.rounds)
-    print(json.dumps({"device": args.device, "dtype": args.dtype, "rounds": results}, indent=1))
+    info: dict[str, Any] = {"device": args.device, "dtype": args.dtype, "torch": torch.__version__}
+    if torch.device(args.device).type == "cuda":  # B300 = capability [10, 3] (sm_103)
+        i = torch.cuda.current_device()
+        info |= {
+            "gpu": torch.cuda.get_device_name(i),
+            "capability": list(torch.cuda.get_device_capability(i)),
+            "arch_list": torch.cuda.get_arch_list(),
+        }
+    print(json.dumps({**info, "rounds": results}, indent=1))
     if len({json.dumps(r, sort_keys=True) for r in results}) != 1:
         raise SystemExit("MISMATCH: rounds differ on this host")
 

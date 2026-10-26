@@ -133,24 +133,30 @@ is marked `gpu` and is skipped without CUDA.
 
 ## B300 qualification
 
-Run on each B300 host from `hypertrain/`, inside the GPU image or an env synced with
-`uv sync --frozen --extra trainer` and a CUDA torch. No key, no network and no dataset are
-needed: tokens are Philox ids. Keep outputs in `/tmp/<agent>-<run>/`.
+Target (Forge, 2026-10-26): 2 hosts, each with 8 x B300, compute capability 10.3 (sm_103).
+The profile is single-device: one process uses one GPU (77M parameters, under 2 GB of fp32
+weights, grads and AdamW state [H estimate]), so "1-2 GPUs" means one or two independent
+processes on GPU 0 and GPU 1. Run from `hypertrain/` on each host, inside the GPU image
+(`torch==2.14.0+cu130`; whether this build ships sm_103 kernels is [?], so check `arch_list`
+in the output) or in an env synced with `uv sync --frozen --extra trainer` and a CUDA torch.
+No key, no network and no dataset are needed: tokens are Philox ids. Keep outputs in
+`/tmp/<agent>-<run>/`.
 
 ```bash
 OUT=/tmp/<agent>-<run>; mkdir -p "$OUT"; HOST=$(hostname -s)
-# 1. CUDA test: two rounds in one process must be bitwise equal.
-uv run --no-sync pytest -m gpu -p no:cacheprovider --basetemp="$OUT/pt" -s \
-  tests/models/test_kimi_tiny.py
-# 2. Two qualification rounds per process, two processes per host.
-for i in 1 2; do
-  uv run --no-sync python -m hypertrain.models.kimi_tiny --device cuda --rounds 2 \
-    > "$OUT/kimi-$HOST-$i.json" || echo "round mismatch in process $i"
-done
-# 3. Same host: both processes must print the same run_id, leaves_root, delta_hash, state_root.
-diff <(jq -S .rounds "$OUT/kimi-$HOST-1.json") <(jq -S .rounds "$OUT/kimi-$HOST-2.json")
-# 4. Across hosts: compare .rounds[0] of each host's file (same GPU model and torch build).
-jq -c '.rounds[0] | {leaves_root, delta_hash, state_root}' "$OUT"/kimi-*-1.json
+# 1. CUDA test on GPU 0: two rounds in one process must be bitwise equal.
+CUDA_VISIBLE_DEVICES=0 uv run --no-sync pytest -m gpu -p no:cacheprovider \
+  --basetemp="$OUT/pt" -s tests/models/test_kimi_tiny.py
+# 2. Two processes per host (GPU 0 and GPU 1, in parallel), two rounds each.
+for g in 0 1; do
+  CUDA_VISIBLE_DEVICES=$g uv run --no-sync python -m hypertrain.models.kimi_tiny \
+    --device cuda --rounds 2 > "$OUT/kimi-$HOST-gpu$g.json" &
+done; wait   # a process exits non-zero ("MISMATCH") if its two rounds differ
+# 3. Same host: capability must be [10, 3], and both processes must print identical rounds.
+jq -c '{gpu, capability, torch}' "$OUT"/kimi-$HOST-gpu*.json
+diff <(jq -S .rounds "$OUT/kimi-$HOST-gpu0.json") <(jq -S .rounds "$OUT/kimi-$HOST-gpu1.json")
+# 4. Across the 2 hosts: copy one file per host and compare the three roots.
+jq -c '.rounds[0] | {leaves_root, delta_hash, state_root}' "$OUT"/kimi-*-gpu0.json
 ```
 
 `state_root` here is `final_theta_hash`, the state hash of the final parameters. The network
