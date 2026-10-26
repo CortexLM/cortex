@@ -3,7 +3,8 @@
 A class is (normalized GPU name, compute capability, torch version, CUDA runtime, determinism
 settings digest). A miner joins only if every GPU in its island is in the run's allowed set; an
 island mixing classes is admitted only when the run's reduction_order is "unit" (unit order makes
-the result independent of which class computed which unit; rank order does not).
+the result independent of which class computed which unit; rank order does not), and the order must
+be one the run's arch allows (models/registry.py).
 """
 
 from __future__ import annotations
@@ -14,9 +15,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from hypertrain.miner.core import Gpu
+from hypertrain.models.registry import REDUCTION_ORDERS, check_reduction_order
 from hypertrain.protocol.jcs import canonicalize
-
-REDUCTION_ORDERS = ("rank", "unit")
 
 
 @dataclass(frozen=True, order=True)
@@ -61,9 +61,15 @@ def admit(
     run_classes: Collection[HardwareClass],
     declared: Sequence[HardwareClass],
     reduction_order: str = "rank",
+    *,
+    arch: str,
 ) -> Admission:
     if reduction_order not in REDUCTION_ORDERS:
         return Admission(False, f"unknown reduction_order {reduction_order!r}")
+    try:
+        check_reduction_order(arch, reduction_order)
+    except ValueError as refused:
+        return Admission(False, str(refused))
     if not declared:
         return Admission(False, "no hardware declared")
     outside = sorted(set(declared) - set(run_classes))

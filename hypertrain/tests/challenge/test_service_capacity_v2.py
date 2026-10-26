@@ -506,6 +506,22 @@ def test_source_binding_ignores_unrelated_methods_but_rejects_capacity_changes(t
         assert ChallengeStore._service_implementation_v2(source, paths) != original
 
 
+def test_capacity_profile_binds_the_arch_registry(tiny, monkeypatch):
+    # Given: the profile of a real owner-signed run.
+    store, manifest = tiny
+    before = store._service_profile_v2(manifest.run_id()).implementation_hash
+    real = Path.read_bytes
+
+    def edited(path: Path) -> bytes:
+        data = real(path)
+        return data + b"\n" if path.parts[-2:] == ("models", "registry.py") else data
+
+    # When: one byte of the arch registry changes.
+    monkeypatch.setattr(Path, "read_bytes", edited)
+    # Then: the bound implementation changes.
+    assert store._service_profile_v2(manifest.run_id()).implementation_hash != before
+
+
 def test_finalization_cannot_reset_charges_and_nested_failure_cannot_erase_debit(tiny):
     store, manifest = reserved(tiny)
     run_id = manifest.run_id()

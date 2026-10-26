@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+from typing import NoReturn
 
 import pytest
 import torch
 from layout_fixtures import setup
 
+import hypertrain.models.kimi_tiny as kt
 from hypertrain.protocol.messages import Layout
 from hypertrain.trainer.island import emulate, train_island
 from hypertrain.trainer.leaf_v2 import CHUNK, tree_hash
@@ -55,6 +57,20 @@ def test_default_rank_order_stays_layout_dependent() -> None:
 def test_units_must_divide_world() -> None:
     with pytest.raises(ValueError, match="multiple of world"):
         _unit_run(3)
+
+
+@pytest.mark.parametrize("world", [1, 2])
+def test_kimi_unit_order_is_refused_before_training(world: int) -> None:
+    # Its router bias moves per backward pass from the local load: ranks would diverge.
+    cfg = dataclasses.replace(setup("single-dense")[0], model=kt.MICRO)
+    a = Assignment("ab" * 32, 0, tuple(range(cfg.inner.H * 2 * cfg.inner.micro_batch)))
+
+    def trained(i: int) -> NoReturn:
+        raise AssertionError("a sample was loaded")
+
+    theta0 = init_params(cfg.model)
+    with pytest.raises(ValueError, match="does not allow reduction_order 'unit'"):
+        emulate(world, lambda c: train_unit_order(cfg, c, theta0, a, trained, 2))
 
 
 def _spec_tree_hash(t: dict[str, torch.Tensor]) -> str:

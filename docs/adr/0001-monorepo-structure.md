@@ -33,6 +33,11 @@
   None of them reads a path above the hypertrain project root (no `git rev-parse
   --show-toplevel`; `store.py:4260` resolves `parents[1]` of its own file).
 
+  Amended by decision D18 (ADR 0006, 2026-10-26): `implementation_hash` now covers ten files
+  (`models/registry.py` added) and moved from `5a0b2374…` to `02e208a3…`. `ModelSpec.arch`
+  in `protocol/messages.py` is now a registry name. Existing manifest bytes, run_ids, golden
+  leaf roots and the v1 schemas did not move.
+
 ## Decision
 
 ### 1. Layout

@@ -4253,6 +4253,7 @@ class ChallengeStore:
             "trainer/compress.py",
             "trainer/config.py",
             "trainer/model.py",
+            "models/registry.py",
             "miner/island_launch.py",
             "aggregator/capacity_worker.py",
             "auditor/replay.py",

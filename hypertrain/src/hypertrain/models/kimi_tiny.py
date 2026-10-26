@@ -13,8 +13,9 @@ The bias ``layers.NNN.router_bias`` is a parameter-dict tensor, so leaves, delta
 it. Forward reads it detached: its gradient is None and AdamW leaves the 1-D zero-moment tensor
 bitwise unchanged. The backward of ``_BalanceTap`` applies ``b += gamma * sign(mean_load - load)``
 in place, so a batch is routed with the bias from before its own load (one update per backward
-pass = per micro-batch). Single device only: the island trainer is refused (its EP ``moe``), and
-``trainer.unit_order`` with world > 1 would update a per-rank bias (no load all-reduce).
+pass = per micro-batch). No load is all-reduced, so the registry entry (models/registry.py) allows
+one rank and the "rank" reduction order only: the island trainer runs it unsharded on one GPU and
+refuses more, and ``trainer.unit_order`` refuses it.
 """
 
 from __future__ import annotations
@@ -41,7 +42,6 @@ from torch import Tensor
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.trainer.config import CompressConfig, InnerConfig, ModelConfig, TrainConfig
 from hypertrain.trainer.model import (
-    ARCH_REGISTRY,
     Params,
     _apply_rope,
     _rms,
@@ -106,11 +106,6 @@ class Dims:
     q_rank: int  # q_lora_rank = 12 * head (K2 1536)
     kv_rank: int  # kv_lora_rank = 4 * head (K2 512)
     dense_ff: int  # first-layer FFN = (top_k + shared) * expert ff (K2 18432 = 9 * 2048)
-
-
-def register() -> None:
-    """Opt-in runtime registration; the permanent ARCH_REGISTRY line is hash-covered (Forge)."""
-    ARCH_REGISTRY[ARCH] = "hypertrain.models.kimi_tiny"  # not __name__: "__main__" under -m
 
 
 def dims(cfg: ModelConfig) -> Dims:
@@ -327,8 +322,8 @@ def traced_forward(
 
 
 def run_manifest(model: ModelConfig = PROFILE) -> dict[str, Any]:
-    """Unsigned TEST run document for this profile. Not a protocol RunManifest: ModelSpec.arch is
-    a frozen protocol Literal (ADR 0001), so no network run can carry it yet (ADR 0006)."""
+    """Unsigned TEST run document for this profile (B300 qualification, no key, no network).
+    A network run uses a signed RunManifestV2 with ``model.arch`` = ARCH (ADR 0006)."""
     fields = dataclasses.asdict(model)
     if (fields.pop("od"), fields.pop("profile"), fields.pop("precision_policy")) != (
         None,
@@ -375,7 +370,6 @@ def qualify(doc: dict[str, Any], device: str, rounds: int) -> list[dict[str, str
     within a host (bitwise) and across hosts."""
     from hypertrain.trainer.loop import Assignment, train_round
 
-    register()
     cfg = train_config(doc)
     run_id = run_manifest_id(doc)
     n = cfg.inner.H * cfg.inner.micro_batch * cfg.inner.grad_accum

@@ -59,7 +59,7 @@ def make_cfg(
 
 
 def make_kimi_cfg(dtype: str = "fp32", codec: str = "dense-int8") -> TrainConfig:
-    """make_cfg with the kimi-k3-pro-tiny MICRO model (ADR 0006); caller registers the arch."""
+    """make_cfg with the kimi-k3-pro-tiny MICRO model (ADR 0006)."""
     from hypertrain.models.kimi_tiny import MICRO
 
     cfg = make_cfg(dtype=dtype, codec=codec)

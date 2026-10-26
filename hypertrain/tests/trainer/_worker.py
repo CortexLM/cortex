@@ -18,9 +18,6 @@ from trainer_fixtures import assignment, make_cfg, make_kimi_cfg, sample  # noqa
 
 arch, dtype, codec = sys.argv[1:4]
 if arch == "kimi":
-    from hypertrain.models import kimi_tiny
-
-    kimi_tiny.register()
     cfg = make_kimi_cfg(dtype=dtype, codec=codec)
 else:
     cfg = make_cfg(moe=arch == "moe", dtype=dtype, codec=codec)
