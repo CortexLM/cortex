@@ -5,12 +5,15 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+from typing import NoReturn
 
 import pytest
 import torch
 
 import hypertrain.models.kimi_tiny as kt
+from hypertrain.protocol.messages import Layout
 from hypertrain.trainer.config import ModelConfig
+from hypertrain.trainer.island import emulate, train_island
 from hypertrain.trainer.loop import Assignment, train_round
 from hypertrain.trainer.model import Params, forward, init_params, param_shapes
 
@@ -236,6 +239,37 @@ def test_run_manifest_is_unsigned_strict_and_trains() -> None:
     res = train_round(cfg, init_params(cfg.model), a, kt.synthetic_sample(cfg))
     assert len(res.leaves) == cfg.inner.H // cfg.inner.J + 1
     assert not torch.equal(res.final_theta[MOE + "router_bias"], torch.zeros(cfg.model.n_experts))
+
+
+def test_one_rank_island_equals_the_reference_loop() -> None:
+    # run-v2 trains with train_island; on one rank it must be the loop.train_round reference.
+    doc = kt.run_manifest(kt.MICRO)
+    cfg = kt.train_config(doc)
+    a = Assignment(kt.run_manifest_id(doc), 0, tuple(range(cfg.inner.H * cfg.inner.micro_batch)))
+    get, theta0 = kt.synthetic_sample(cfg), init_params(cfg.model)
+    ref = train_round(cfg, theta0, a, get)
+    one = Layout(pp=1, n_gpus=1, dp_size=1, ep_size=1, zero1=False)
+    (got,) = emulate(1, lambda c: train_island(cfg, one, c, theta0, a, get))
+    assert (got.leaves_root, got.delta_hash, got.final_theta_hash) == (
+        ref.leaves_root,
+        ref.delta_hash,
+        ref.final_theta_hash,
+    )
+    assert not torch.equal(got.final_theta[MOE + "router_bias"], theta0[MOE + "router_bias"])
+
+
+@pytest.mark.parametrize("dp", [1, 2])
+def test_island_refuses_a_second_rank_before_training(dp: int) -> None:
+    cfg = kt.train_config(kt.run_manifest(kt.MICRO))
+    lay = Layout(pp=1, n_gpus=2, dp_size=dp, ep_size=2 // dp, zero1=False)
+    a = Assignment("ab" * 32, 0, tuple(range(2 * cfg.inner.H * cfg.inner.micro_batch)))
+
+    def trained(i: int) -> NoReturn:
+        raise AssertionError("a sample was loaded")
+
+    theta0 = init_params(cfg.model)
+    with pytest.raises(ValueError, match="at most 1 rank"):
+        emulate(2, lambda c: train_island(cfg, lay, c, theta0, a, trained))
 
 
 @pytest.mark.gpu

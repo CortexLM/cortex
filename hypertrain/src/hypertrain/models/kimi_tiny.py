@@ -13,8 +13,9 @@ The bias ``layers.NNN.router_bias`` is a parameter-dict tensor, so leaves, delta
 it. Forward reads it detached: its gradient is None and AdamW leaves the 1-D zero-moment tensor
 bitwise unchanged. The backward of ``_BalanceTap`` applies ``b += gamma * sign(mean_load - load)``
 in place, so a batch is routed with the bias from before its own load (one update per backward
-pass = per micro-batch). Single device only: the island trainer is refused (its EP ``moe``), and
-``trainer.unit_order`` with world > 1 would update a per-rank bias (no load all-reduce).
+pass = per micro-batch). No load is all-reduced, so the registry entry (models/registry.py) allows
+one rank and the "rank" reduction order only: the island trainer runs it unsharded on one GPU and
+refuses more, and ``trainer.unit_order`` refuses it.
 """
 
 from __future__ import annotations

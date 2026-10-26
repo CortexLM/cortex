@@ -35,6 +35,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from hypertrain.models.registry import ARCH_REGISTRY
 from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.protocol.messages import Layout, RunManifest
 from hypertrain.protocol.messages_v2 import RunManifestV2
@@ -368,8 +369,10 @@ class Geometry:
         return self.model.n_experts // self.ep if self.model.is_moe else 0
 
     def is_expert(self, name: str) -> bool:
+        # Expert parallelism shards the decoder MoE only; another arch keeps its MoE unsharded.
         return (
             self.model.is_moe
+            and self.model.arch == "decoder"
             and name.startswith("layers.")
             and name.endswith((".w1", ".w2", ".w3"))
         )
@@ -597,7 +600,7 @@ def _rank_grads(
     (unused params, zeros) and, with grad_accum == 1, never builds a full gradient buffer."""
     names = sorted(theta)
     ga, mb = cfg.inner.grad_accum, cfg.inner.micro_batch
-    moe = _moe_ep(comm, geo) if cfg.model.is_moe else None
+    moe = _moe_ep(comm, geo) if cfg.model.is_moe and cfg.model.arch == "decoder" else None
     lazy = on_ready is not None and ga == 1
     grads = {} if lazy else {n: torch.zeros_like(theta[n]) for n in names}
     delivered: set[str] = set()
@@ -1017,6 +1020,9 @@ def _train_island(
         and lay.ep_size != 1
     ):
         raise ValueError("ep_size incompatible with the model")
+    ranks = ARCH_REGISTRY[cfg.model.arch].max_ranks
+    if ranks is not None and lay.n_gpus > ranks:
+        raise ValueError(f"{cfg.model.arch} trains on at most {ranks} rank(s) per island")
     mb, ga = cfg.inner.micro_batch, cfg.inner.grad_accum
     if len(a.sample_ids) != H * mb * ga * lay.n_gpus:
         raise ValueError("assignment length must equal H * micro_batch * grad_accum * n_gpus")

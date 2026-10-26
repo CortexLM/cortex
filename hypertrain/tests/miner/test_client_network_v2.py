@@ -103,6 +103,120 @@ def test_two_rank_manifest_launches_real_runtime(tmp_path: Path):
     assert Path(result["state"]).exists()
 
 
+def test_kimi_manifest_joins_and_runs_v2_through_the_cli(monkeypatch, tmp_path: Path):
+    """D18: join-v2 then run-v2 --job for kimi-k3-pro-tiny through the signed v2 manifest; the
+    torchrun worker (a fresh interpreter) must equal the in-process reference loop bit for bit."""
+    import importlib.util
+    import math
+    import sys
+
+    import numpy as np
+
+    import hypertrain.models.kimi_tiny as kt
+    from hypertrain.auditor.replay import unpack_state
+    from hypertrain.miner import cli
+    from hypertrain.protocol.hashing import MerkleTree
+    from hypertrain.protocol.messages import f32hex
+    from hypertrain.trainer.compress import state_hash
+    from hypertrain.trainer.config import TrainConfig
+    from hypertrain.trainer.loop import Assignment, train_round
+    from hypertrain.trainer.model import init_params, param_shapes
+
+    spec = importlib.util.spec_from_file_location(
+        "kimi_fixture", Path(__file__).parents[1] / "ledger/test_escrow_v2.py"
+    )
+    fixture = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = fixture
+    spec.loader.exec_module(fixture)
+    # Given: an owner-signed v2 manifest with the kimi MICRO geometry and a real dataset.
+    s = fixture.setup()
+    body = s.manifest.body()
+    training = body["training"]
+    training["model"].update(
+        arch=kt.ARCH,
+        n_layers=3,
+        d_model=32,
+        n_heads=4,
+        n_kv_heads=4,
+        d_ff=16,
+        vocab=64,
+        seq_len=16,
+        n_experts=8,
+        top_k_experts=2,
+        rope_theta=50000,
+        init_seed=7,
+        capacity_factor=f32hex(1.0),
+        aux_loss_coef=f32hex(1e-4),
+        param_count=sum(math.prod(x) for x in kt.param_shapes(kt.MICRO).values()),
+    )
+    training["inner"].update(H=2, J=1, micro_batch=2)
+    rows = ((np.arange(16 * 17) * 7919 + 3).reshape(16, 17) % 64).astype("<u4")
+    tree = MerkleTree([r.tobytes() for r in rows])
+    training["dataset"].update(merkle_root=tree.root.hex(), n_samples=16, depth=4)
+    cfg = TrainConfig.from_manifest_v2(RunManifestV2.model_validate(body))
+    training["init_state_hash"] = state_hash(init_params(cfg.model))
+    manifest = RunManifestV2.model_validate(body)
+    run = manifest.run_id()
+    s = fixture.Setup(manifest, s.policy, s.admission_policy, rows, tree)
+    job = fixture.stage(s, tmp_path / "attempt", (0, 1, 2, 3), 0)
+    (tmp_path / "attempt/job.json").write_text(job.model_dump_json())
+    for name, seed in (("hot.key", b"b"), ("cold.key", b"c")):
+        (tmp_path / name).write_bytes(seed * 32)
+        (tmp_path / name).chmod(0o600)
+    config = tmp_path / "miner.toml"
+    config.write_text(
+        f'api = "https://service.test"\nkeyfile = "{tmp_path / "hot.key"}"\n'
+        f'workdir = "{tmp_path / "work"}"\nstate_source = "unused"\n'
+        f'image_digest = "{manifest.training.reference_spec.image_digest}"\n'
+        f'run_id = "{run}"\nowner_hotkey = "{fixture.COORD.ss58}"\ndevice = "cpu"\n'
+    )
+    envelope = seal(fixture.COORD, "RunManifestV2", run, manifest, 1000)
+    joins: list[dict] = []
+
+    def master(request: httpx.Request) -> httpx.Response:
+        if (request.method, request.url.path) == ("GET", f"/v2/runs/{run}"):
+            return httpx.Response(200, json={"manifest_envelope": envelope})
+        if (request.method, request.url.path) == ("POST", f"/v2/runs/{run}/join"):
+            joins.append(json.loads(request.content))
+            return httpx.Response(200, json={"state": "APPLIED"})
+        return httpx.Response(404, json={"detail": "unexpected route"})
+
+    client_type = httpx.Client
+    monkeypatch.setattr(
+        cli.httpx,
+        "Client",
+        lambda **kwargs: client_type(transport=httpx.MockTransport(master), **kwargs),
+    )
+    args = ["--config", str(config)]
+    # When
+    joined = ["join-v2", *args, "--coldkey", str(tmp_path / "cold.key")]
+    assert cli.main([*joined, "--request-id", "ab" * 32, "--expiry", "100"]) == 0
+    assert cli.main(["run-v2", *args, "--job", str(tmp_path / "attempt/job.json")]) == 0
+    # Then: the join binds this run and policy; the worker trained kimi exactly as the reference.
+    assert [(j["run_id"], j["policy_hash"]) for j in joins] == [
+        (run, manifest.network.admission_policy_hash)
+    ]
+    published = tmp_path / "attempt/published/rank-0"
+    commitments = json.loads((published / "summary.json").read_bytes())["commitments"]
+    theta0 = init_params(cfg.model)
+    ref = train_round(
+        cfg,
+        theta0,
+        Assignment(run, 0, (0, 1, 2, 3), 0),
+        lambda i: rows[i].astype(np.uint32),
+    )
+    assert (
+        commitments["leaves_root"],
+        commitments["final_theta_hash"],
+        commitments["delta_hash"],
+    ) == (ref.leaves_root, ref.final_theta_hash, ref.delta_hash)
+    assert (published / "delta.bin").read_bytes() == ref.delta_payload
+    theta, _ = unpack_state((published / "state.safetensors").read_bytes())
+    assert sorted(theta) == sorted(param_shapes(cfg.model)) == sorted(kt.param_shapes(cfg.model))
+    bias = "layers.001.router_bias"
+    assert not np.array_equal(theta[bias].numpy(), theta0[bias].numpy())
+
+
 def test_run_v2_cli_dispatches_exact_round_argument(monkeypatch, capsys, tmp_path):
     from hypertrain.miner import cli
 
