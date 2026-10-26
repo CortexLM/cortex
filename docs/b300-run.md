@@ -63,9 +63,11 @@ Send `commands=["tail -n 40 /results/$(hostname -s)/run.log"]` to read progress,
   that writes `run.log`. The drain then logs straight to `run.log`. The unit uses
   `KillMode=mixed` so that systemd signals the script first. `TimeoutStopSec` must exceed
   `HT_B300_STOP_GRACE` plus the upload time.
-- **Re-run:** run the same command. A step whose `steps/<name>.rc` is `0` is skipped; `--force`
-  re-runs it. `host_probe` always re-runs, and so does a step that a stop interrupted. `--steps`
-  selects a subset, still in the fixed order. Each invocation starts a new `--duration` deadline.
+- **Re-run:** run the same command. A step whose `steps/<name>.rc` is `0 <image>` for the same
+  image is skipped; a new `--image` or `--force` re-runs it. A second run on the same results
+  directory is refused (exit 2, `.lock`). `host_probe` always re-runs, and so does a step that a
+  stop interrupted. `--steps` selects a subset, still in the fixed order. Each invocation starts a
+  new `--duration` deadline.
 
 ## Steps and exit codes
 
@@ -76,7 +78,7 @@ The steps run in this order. The run stops at the first step that fails.
 | `host_probe` | `nvidia-smi`, the `/sys/class/infiniband` listing, `fi_info` if present, `df`, then `b300/host_check.py` | 3 `host-probe-failed` |
 | `pull` | `docker pull` of the digest, then a check that `RepoDigests` contains it | 4 `pull-failed` |
 | `gpu_probe` | `b300/gpu_probe.py` in the image, `--network none` | 5 `gpu-probe-failed` |
-| `mfu` | `torch.distributed.run` on 8 ranks: `run_mfu_dist.py --profile mfu-dense-1b-dp8 --reduction zero2o --act-ckpt --warmup 1`, `--network none`, then `check_gpu_evidence.py --kind mfu` | 6 `mfu-failed` |
+| `mfu` | `torch.distributed.run` on 8 ranks: `run_mfu_dist.py --profile mfu-dense-1b-dp8 --reduction zero2o --act-ckpt --warmup 1` on the default Docker network (torchrun's store uses the container hostname), then `check_gpu_evidence.py --kind mfu` | 6 `mfu-failed` |
 | `miner_test` | `scripts/mine_smoke_v2.py` under `timeout ${HT_B300_SMOKE_BUDGET:-900}` | 7 `miner-test-failed` |
 | `miner_prod` | only with `--prod`: `run-v2 --round <W>` for each round | 8 `miner-prod-failed` |
 
@@ -87,7 +89,7 @@ and labelled `io.cortex.b300-run=<run_id>`.
 ## Results and PASS criteria
 
 Every run writes `run.log` (appended across runs), `steps.tsv` (one row per executed step: name,
-rc, seconds, run_id), `steps/<name>.rc` (the latest rc of each step) and `stop.json` under
+rc, seconds, run_id), `steps/<name>.rc` (the latest rc of each step and its image) and `stop.json` under
 `/results/<host>/`. `stop.json` holds `run_id`, `reason`, `rc`, `image`, `steps` (rc per step),
 `ran` (steps executed by this invocation) and `spot_notice`. `spot-instance-action.json` is
 written only after a Spot notice.
@@ -109,7 +111,7 @@ written only after a Spot notice.
     sm_120 (`QUALIFIED_BACKENDS` in `hypertrain/src/hypertrain/trainer/attention.py`).
   - `smoke.errors`: must be empty. An entry such as `no kernel image is available` means the wheel
     cannot run that kernel on sm_103. That is a blocker; report it.
-- **mfu** writes `mfu-dp8-flash.json` and `torchelastic/` (per-rank logs). The bench forces
+- **mfu** writes `mfu-dp8-flash.json`; per-rank output is teed into `run.log`. The bench forces
   `HT_ATTN_BACKEND=sdpa-flash`. PASS: `check_gpu_evidence.py` prints `VALID`, `replay_match` is
   `true`, `attention_backend` is `sdpa-flash` and `attention_paths` is `["flash"]`. Compare
   `tokens_per_s` between hosts. `mfu` and `vendor.mfu` use the RTX 5090 bf16 peak (209.5e12,
