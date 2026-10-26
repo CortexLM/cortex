@@ -13,7 +13,8 @@ The bias ``layers.NNN.router_bias`` is a parameter-dict tensor, so leaves, delta
 it. Forward reads it detached: its gradient is None and AdamW leaves the 1-D zero-moment tensor
 bitwise unchanged. The backward of ``_BalanceTap`` applies ``b += gamma * sign(mean_load - load)``
 in place, so a batch is routed with the bias from before its own load (one update per backward
-pass = per micro-batch). Single device only: island DP ranks would diverge (no load all-reduce).
+pass = per micro-batch). Single device only: the island trainer is refused (its EP ``moe``), and
+``trainer.unit_order`` with world > 1 would update a per-rank bias (no load all-reduce).
 """
 
 from __future__ import annotations
@@ -353,7 +354,10 @@ def train_config(doc: dict[str, Any]) -> TrainConfig:
         raise ValueError("not a hypertrain TEST run document")
     model = ModelConfig(**doc["model"])
     dims(model)
-    return TrainConfig(model, InnerConfig(**doc["inner"]), CompressConfig(**doc["compress"]))
+    inner = InnerConfig(**doc["inner"])
+    if inner.grad_accum != 1:  # the bias rule runs per backward pass = per step only at ga 1
+        raise ValueError(f"{ARCH} TEST runs need grad_accum == 1")
+    return TrainConfig(model, inner, CompressConfig(**doc["compress"]))
 
 
 def synthetic_sample(cfg: TrainConfig) -> Callable[[int], npt.NDArray[np.uint32]]:

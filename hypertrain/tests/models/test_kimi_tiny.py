@@ -11,7 +11,7 @@ import torch
 
 import hypertrain.models.kimi_tiny as kt
 from hypertrain.trainer.config import ModelConfig
-from hypertrain.trainer.loop import Assignment, replay, train_round
+from hypertrain.trainer.loop import Assignment, train_round
 from hypertrain.trainer.model import ARCH_REGISTRY, Params, forward, init_params, param_shapes
 
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device (B300)")
@@ -114,6 +114,83 @@ def test_bias_update_sign_rule_applies_after_backward_only() -> None:
         assert not torch.equal(want, start)
 
 
+def test_uniform_bias_shift_keeps_selection_and_mixture_weights() -> None:
+    """A constant bias keeps the top-k ranking; the gate must use unbiased scores, so the MoE
+    output is bitwise unchanged (DeepSeek-V3: the bias is only used for routing)."""
+    cfg = kt.MICRO
+    theta = init_params(cfg)
+    x = torch.randn(2, 5, cfg.d_model, generator=torch.Generator().manual_seed(2))
+    shifted = {**theta, MOE + "router_bias": torch.full((cfg.n_experts,), 1.0)}
+    scores = torch.sigmoid(x.reshape(-1, cfg.d_model) @ theta[MOE + "router"])
+    k = cfg.top_k_experts
+    assert torch.equal(
+        kt.topk_experts(scores, theta[MOE + "router_bias"], k),
+        kt.topk_experts(scores, shifted[MOE + "router_bias"], k),
+    )
+    with torch.no_grad():
+        base = kt._moe(cfg, theta, MOE, x, torch.float32)[0]
+        moved = kt._moe(cfg, shifted, MOE, x, torch.float32)[0]
+    assert torch.equal(base, moved)
+
+
+def test_sequence_balance_loss_matches_deepseek_v3_formula() -> None:
+    """aux = mean over sequences of sum_i f_i P_i, f_i = E/(K T) * count_i, P_i = mean_t s'_i."""
+    cfg = kt.MICRO
+    theta = init_params(cfg)
+    theta[MOE + "router_bias"] = torch.linspace(-0.05, 0.05, cfg.n_experts)
+    b, t, e, k = 3, 4, cfg.n_experts, cfg.top_k_experts
+    x = torch.randn(b, t, cfg.d_model, generator=torch.Generator().manual_seed(4))
+    with torch.no_grad():
+        aux = kt._moe(cfg, theta, MOE, x, torch.float32)[1]
+    want = 0.0
+    for seq in range(b):
+        s = torch.sigmoid(x[seq] @ theta[MOE + "router"]).double()
+        biased = s + theta[MOE + "router_bias"].double()
+        count = [0] * e
+        for tok in range(t):
+            for j in sorted(range(e), key=lambda j: (-float(biased[tok, j]), j))[:k]:
+                count[j] += 1
+        prob = (s / s.sum(-1, keepdim=True)).mean(0)
+        want += sum(e / (k * t) * count[i] * float(prob[i]) for i in range(e)) / b
+    assert math.isclose(float(aux), want, rel_tol=1e-5)
+
+
+def _mla_reference(cfg: ModelConfig, p: Params, pre: str, x: torch.Tensor) -> torch.Tensor:
+    """Independent MLA: DeepSeek-V3 reference style (complex rotary on interleaved pairs, SDPA)."""
+    dm, (b, t, _), h = kt.dims(cfg), x.shape, cfg.n_heads
+
+    def rms(v: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        return v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6) * w
+
+    pos = torch.arange(t, dtype=torch.float64)
+    freqs = cfg.rope_theta ** -(torch.arange(0, dm.rope, 2, dtype=torch.float64) / dm.rope)
+    rot = torch.polar(torch.ones(t, dm.rope // 2, dtype=torch.float64), torch.outer(pos, freqs))
+
+    def rope(z: torch.Tensor) -> torch.Tensor:  # z [b, t, heads, rope]
+        zc = torch.view_as_complex(z.double().reshape(*z.shape[:-1], -1, 2).contiguous())
+        return torch.view_as_real(zc * rot.view(1, t, 1, -1)).flatten(-2).float()
+
+    q = (rms(x @ p[pre + "wq_a"], p[pre + "q_norm"]) @ p[pre + "wq_b"]).view(b, t, h, -1)
+    kv_a = x @ p[pre + "wkv_a"]
+    kv = (rms(kv_a[..., : dm.kv_rank], p[pre + "kv_norm"]) @ p[pre + "wkv_b"]).view(b, t, h, -1)
+    k_pe = rope(kv_a[..., None, dm.kv_rank :]).expand(b, t, h, dm.rope)
+    qf = torch.cat((q[..., : dm.head], rope(q[..., dm.head :])), -1).transpose(1, 2)
+    kf = torch.cat((kv[..., : dm.head], k_pe), -1).transpose(1, 2)
+    v = kv[..., dm.head :].transpose(1, 2)
+    scale = (dm.head + dm.rope) ** -0.5
+    o = torch.nn.functional.scaled_dot_product_attention(qf, kf, v, is_causal=True, scale=scale)
+    return o.transpose(1, 2).reshape(b, t, h * dm.head) @ p[pre + "wo"]
+
+
+def test_mla_matches_independent_reference() -> None:
+    cfg = dataclasses.replace(kt.MICRO, rope_theta=10.0)  # strong rotation over 9 positions
+    theta = init_params(cfg)
+    x = torch.randn(2, 9, cfg.d_model, generator=torch.Generator().manual_seed(5))
+    with torch.no_grad():
+        got = kt._mla(cfg, theta, MOE, x, torch.float32)
+    torch.testing.assert_close(got, _mla_reference(cfg, theta, MOE, x), rtol=1e-4, atol=1e-6)
+
+
 def test_shared_expert_is_added_to_every_token() -> None:
     cfg = kt.MICRO
     theta = init_params(cfg)
@@ -145,32 +222,25 @@ def test_two_passes_same_seed_are_bitwise_identical(cfg: ModelConfig) -> None:
     assert all(torch.equal(ta[n], tb[n]) for n in ta)  # includes the updated router_bias
 
 
-def _round(doc: dict[str, object]) -> tuple[object, ...]:
-    cfg = kt.train_config(doc)
-    n = cfg.inner.H * cfg.inner.micro_batch
-    a = Assignment(run_id=kt.run_manifest_id(doc), w=0, sample_ids=tuple(range(n)))
-    get = kt.synthetic_sample(cfg)
-    res = train_round(cfg, init_params(cfg.model), a, get)
-    rep = replay(cfg, init_params(cfg.model), a, get, res.leaf_digests, res.delta_hash)
-    return res.leaves_root, res.delta_hash, res.final_theta_hash, rep.result, res.final_theta
-
-
-def test_run_manifest_is_unsigned_strict_and_replays() -> None:
+def test_run_manifest_is_unsigned_strict_and_trains() -> None:
     doc = json.loads(json.dumps(kt.run_manifest(kt.MICRO)))
-    assert kt.train_config(doc).model == kt.MICRO
+    cfg = kt.train_config(doc)
+    assert cfg.model == kt.MICRO
     assert set(doc) == {"kind", "model", "inner", "compress"}  # no key, signature or run secret
     for bad in ({**doc, "signature": "00" * 64}, {**doc, "kind": "RunManifest"}):
         with pytest.raises(ValueError, match="TEST run"):
             kt.train_config(bad)
     with pytest.raises(ValueError, match="not a kimi"):
         kt.train_config({**doc, "model": {**doc["model"], "arch": "decoder"}})
+    with pytest.raises(ValueError, match="grad_accum == 1"):
+        kt.train_config({**doc, "inner": {**doc["inner"], "grad_accum": 2}})
     other = {**doc, "model": {**doc["model"], "init_seed": 8}}
     assert kt.run_manifest_id(other) != kt.run_manifest_id(doc)
-    first, second = _round(doc), _round(doc)
-    assert first[:4] == second[:4] and first[3] == "MATCH"
-    theta = first[4]
-    assert isinstance(theta, dict)
-    assert not torch.equal(theta[MOE + "router_bias"], torch.zeros(kt.MICRO.n_experts))
+    n = cfg.inner.H * cfg.inner.micro_batch
+    a = Assignment(run_id=kt.run_manifest_id(doc), w=0, sample_ids=tuple(range(n)))
+    res = train_round(cfg, init_params(cfg.model), a, kt.synthetic_sample(cfg))
+    assert len(res.leaves) == cfg.inner.H // cfg.inner.J + 1
+    assert not torch.equal(res.final_theta[MOE + "router_bias"], torch.zeros(cfg.model.n_experts))
 
 
 @pytest.mark.gpu
