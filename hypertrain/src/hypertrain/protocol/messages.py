@@ -85,6 +85,10 @@ class ODSpec(_M):
     distill_temp: F32
 
 
+# v1 is frozen (ADR 0001): the archs a v1 manifest may name; later archs have v2 rules only.
+V1_ARCHS = ("decoder", "od-encoder")
+
+
 class ModelSpec(_M):
     # A model registry name (ADR 0006). Omitted = "decoder"; it is always dumped, so the bytes
     # and run_ids of existing manifests are unchanged.
@@ -352,8 +356,7 @@ class RunManifest(_M):
             _check_od(self)
         elif self.reference_spec.profile is not None:
             raise ValueError("profile is only valid for arch == od-encoder")
-        # v1 is frozen (ADR 0001): an arch registered later has its rules in v2 only.
-        if self.model.arch not in ("decoder", "od-encoder"):
+        if self.model.arch not in V1_ARCHS:
             raise ValueError(f"arch {self.model.arch!r} needs manifest_version 2")
         return self
 

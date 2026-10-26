@@ -428,10 +428,8 @@
       "additionalProperties": false,
       "properties": {
         "arch": {
-          "default": "decoder",
           "enum": [
             "decoder",
-            "kimi-k3-pro-tiny",
             "od-encoder"
           ],
           "title": "Arch",
@@ -571,6 +569,7 @@
         }
       },
       "required": [
+        "arch",
         "n_layers",
         "d_model",
         "n_heads",
