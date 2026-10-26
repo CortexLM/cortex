@@ -61,7 +61,8 @@ def admit(
     run_classes: Collection[HardwareClass],
     declared: Sequence[HardwareClass],
     reduction_order: str = "rank",
-    arch: str = "decoder",
+    *,
+    arch: str,
 ) -> Admission:
     if reduction_order not in REDUCTION_ORDERS:
         return Admission(False, f"unknown reduction_order {reduction_order!r}")
