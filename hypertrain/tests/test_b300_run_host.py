@@ -341,3 +341,23 @@ def test_prod_rounds_upload_and_never_print_the_key(env, tmp_path):
     results = tmp_path / "results"
     assert sentinel not in p.stdout + p.stderr
     assert not [f for f in results.rglob("*") if f.is_file() and sentinel in f.read_text()]
+
+
+def test_process_group_sigterm_still_drains(env, tmp_path):
+    # systemd and SSM cancel signal the whole group: tee dies with the script, the drain must not.
+    argv = ["bash", str(SCRIPT), "--results-root", str(tmp_path / "results"), "--host", "h1"]
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv
+        argv,
+        env={**env, "FAKE_BLOCK": "gpu_probe"},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 30
+    while not (tmp_path / "state/ctr-gpu_probe").exists():
+        assert time.monotonic() < deadline and proc.poll() is None
+        time.sleep(0.05)
+    os.killpg(proc.pid, signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    assert stop_json(tmp_path)["reason"] == "signal"
+    assert ["stop", "--time", "60", "ctr-gpu_probe"] in docker_calls(tmp_path)

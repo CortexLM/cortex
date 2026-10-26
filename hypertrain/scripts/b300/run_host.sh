@@ -118,7 +118,9 @@ upload_results() {
 }
 finish() {
   local reason=$1 rc=$2 ids
-  trap '' TERM INT
+  # A group signal (systemd stop, SSM cancel) also kills tee: log straight to the file from here.
+  trap '' TERM INT PIPE
+  exec >>"$out/run.log" 2>&1
   kill "$watchdog_pid" 2>/dev/null || true
   ids=$("$DOCKER" ps -q --filter "label=io.cortex.b300-run=$run_id" 2>/dev/null || true)
   if [ -n "$ids" ]; then
