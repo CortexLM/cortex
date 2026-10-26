@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build OFFLINE a B300 TEST run manifest (v2) for the S3-qualified dense decoder, then dry-run
+# Build OFFLINE a B300 TEST run manifest (v2) with S3's dense decoder geometry, then dry-run
 # validate it with the repo's own parsers. Nothing is published, POSTed or contacted.
 # NOTE: image f4b2885f is built from 2f4406bd, whose Environment.sm_counts is Literal[170], so a
 # manifest pinned to f4b2885f can never get a 148-SM CUDA qualification; rerun this script with
@@ -14,6 +14,11 @@
 # Model: the dense-1b-bf16 qualification geometry (scripts/mfu_profiles.json mfu-dense-1b,
 # H=8 J=4 micro_batch=2 warmup=2 lr=3e-3, dense-int8), layout pp=1 ep=1 dp=2 n_gpus=2.
 # The dataset is a synthetic 4096-sample u32 fixture (no quality claim).
+# Only the model geometry and inner settings come from S3's dense_qualify.py; the dp2 layout
+# and the codec error-feedback setting were not part of S3's qualification. The dry run checks
+# expiry at round 1, and it cannot show that POSTing this run before its CUDA qualification
+# record exists freezes the run's backend to cpu. HT_D20_RELAY_URL overrides are not
+# supported by the dry run, which expects https://relay.joinbase.ai.
 set -euo pipefail
 
 if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
@@ -30,6 +35,9 @@ RELAY_PUBKEY=${HT_D20_RELAY_PUBKEY:-5G6pRydHHhv5Hr9PsHoDJdgbMpFJ86a47b5m2i7UYb2G
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
 case $IMAGE in sha256:*) ;; *) echo "IMAGE_DIGEST must be sha256:<64 hex>" >&2; exit 2 ;; esac
+# The Python stages run from $HT, so a relative OUT_DIR would point somewhere else there.
+case $OUT in /*) ;; *) echo "OUT_DIR must be an absolute path" >&2; exit 2 ;; esac
+if [ -L "$OUT" ] || [ -L "$OUT/secrets" ]; then echo "OUT_DIR or its secrets/ is a symlink" >&2; exit 2; fi
 for d in inputs out state; do
     if [ -e "$OUT/$d" ]; then echo "$OUT/$d already exists; use a fresh OUT_DIR" >&2; exit 2; fi
 done
