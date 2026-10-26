@@ -28,7 +28,7 @@ Labels: [V] verified by a command or run in this session, [A] reported by a cite
   - `_bootstrap_backend_v2` parses `engine.Result`, so the table applies at l.2419.
   - The driver allowlist (l.2439) and the manifest `sm_count` equality (l.2440) still apply.
   - Both are now tested with the B300 driver 595.91.07.
-- **Legacy results** [V]: the founder chose option A through the relay question,
+- **Legacy results** [V]: Forge chose option A in answer to the relay question,
   2026-10-26 ("A — compatible 5090").
   - A `result.json` without `capabilities` is accepted only if every count is 170, which is
     what `Literal[170]` accepted. 148 or any other count is refused.
@@ -203,7 +203,7 @@ Measured at `90660c31` and at this branch [V]:
 ## Risks
 
 - **Legacy 170-SM results.** A 170-SM result without capabilities is still accepted. This is
-  the old behaviour, kept on purpose by the founder's choice.
+  the old behaviour, kept on purpose by Forge's choice.
 - **`compare()` has no `sm_count` binding.** It does not bind `sm_count` to the manifest. This
   predates the change; the store and `inspect_environment` enforce it. The reviewer's finding
   was refuted and left out of scope.

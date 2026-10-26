@@ -4,7 +4,7 @@
   decides promotion to `v3`; nothing here changes a production run, master, profile or
   emission.
 - Order: Principal SN100 D21 (plan `v3-s100-test-stack`, part a). The legacy-result rule in
-  Decision 3 was chosen by the founder on 2026-10-26 (option A, "compatible 5090").
+  Decision 3 was chosen by Forge on 2026-10-26 (option A, "compatible 5090"), in answer to the session question.
 - Labels: **[V]** verified in code or by a run on the date above, **[A]** reported by a cited
   document or brief, **[H]** hypothesis, **[?]** unknown.
 
