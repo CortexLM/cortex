@@ -1,7 +1,8 @@
 """Layout-invariant "unit-order" gradient reduction (heterogeneous compute, plan 1.8 / 6.4).
 
-Opt-in only: reached solely through ``train_unit_order`` (run reduction_order "unit"); the v1
-rank-order paths (loop.train_round, island.train_island) and their leaf bytes are untouched.
+Opt-in only: reached solely through ``train_unit_order`` (run reduction_order "unit"), and only
+for an arch whose registry entry allows "unit" (models/registry.py); the v1 rank-order paths
+(loop.train_round, island.train_island) and their leaf bytes are untouched.
 
 Each step's global batch is ``units`` fixed units of ``micro_batch`` consecutive sample ids;
 rank r of W computes units [r*U/W, (r+1)*U/W), one forward/backward per unit, fp32 grads. Unit
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
+from hypertrain.models.registry import check_reduction_order
 from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.trainer.compress import compress, payload_hash, state_hash
 from hypertrain.trainer.config import TrainConfig
@@ -88,6 +90,7 @@ def train_unit_order(
     ef_in: Params | None = None,
 ) -> UnitOrderResult:
     """One H-step round; every rank returns the same result for any world dividing ``units``."""
+    check_reduction_order(cfg.model.arch, "unit")
     require_threads(cfg.cpu_threads)
     if units < 1 or units % comm.world:
         raise ValueError(f"units={units} must be a positive multiple of world {comm.world}")

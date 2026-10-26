@@ -35,3 +35,13 @@ def test_mixed_island_needs_unit_order() -> None:
 def test_rejects_empty_or_unknown_order() -> None:
     assert not admit({RTX5090}, []).accepted
     assert not admit({RTX5090}, [RTX5090], reduction_order="fast").accepted
+
+
+def test_unit_order_refused_for_a_rank_only_arch() -> None:
+    mixed = ({RTX5090, H100}, [RTX5090, H100])
+    got = admit(*mixed, reduction_order="unit", arch="kimi-k3-pro-tiny")
+    assert not got.accepted and "does not allow reduction_order 'unit'" in got.reason
+    assert not admit(*mixed, reduction_order="rank", arch="kimi-k3-pro-tiny").accepted
+    assert admit({RTX5090}, [RTX5090], arch="kimi-k3-pro-tiny").accepted
+    assert admit(*mixed, reduction_order="unit", arch="decoder").accepted
+    assert not admit({RTX5090}, [RTX5090], arch="nope").accepted
