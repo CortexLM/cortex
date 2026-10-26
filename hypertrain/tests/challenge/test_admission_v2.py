@@ -644,13 +644,14 @@ def test_full_shadow_probation_and_graduation_when_funded(tmp_path: Path, trial_
     assert not a.status(HOT.ss58, now=14).eligible
 
 
-def test_production_screen_spans_40_trial_campaign_then_expires(
+def test_production_screen_holds_over_4_real_and_36_modelled_trials_then_expires(
     tmp_path: Path, trial_launches
 ) -> None:
     # Given: the admission policy `manifest_v2 example --ledger-mode production` emits, and the
     # oldest screen at round 0's d_final after a 40-trial campaign (3 ACTIVE x 12 + 1 PROBATION
-    # x 4): the PROBATION miner, screened first. Each real trial spends its whole window: proof
-    # and finalize at seed + challenge_rounds, so the next seed is one round later.
+    # x 4): the PROBATION miner, screened first. Only its 4 trials run for real. Each spends its
+    # whole window: proof and finalize at seed + challenge_rounds, so the next seed is one round
+    # later.
     from hypertrain.ops.manifest_v2 import main as manifest_cli
 
     example = tmp_path / "example"
@@ -692,8 +693,9 @@ def test_production_screen_spans_40_trial_campaign_then_expires(
         assert final is not None
         status = a.finalize_trial(admission, final, now=deadline)
     assert status.record.state == "PROBATION" and status.record.clean_count == 4
-    # When: the other 36 trials run back to back at the same worst case, then round 0 opens
-    # with the TEST run-2 offsets (b14a975e: d_final 470 rounds after the open request).
+    # When: the other 36 trials and round 0 are arithmetic, not run: challenge_rounds + 1 rounds
+    # per back-to-back worst-case trial, then 470 rounds from round 0's open request to its
+    # d_final, as reported for TEST run 2 (b14a975e) and not replayed here.
     d_final = deadline + 36 * (policy.challenge_rounds + 1) + 470
     # Then: the first screen still holds at round 0's d_final, and still lapses after
     # work_screen_epoch_rounds without a new proof. Aggregation and finalization re-check
