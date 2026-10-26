@@ -19,6 +19,9 @@
   fencing tokens, deterministic shard reassignment, content-addressed checkpoint chains checked
   back to the round's base, the AWS IMDSv2 spot notice, a signed leave and a drain that flushes
   only when it fits before the deadline; see `docs/adr/0002` at the monorepo root.
+- GPU-less eviction simulator `python -m hypertrain.elastic.sim` (`table`, `soak`): 8-GPU hosts
+  on a fake clock under seeded notice, hard-kill, host-loss, partition, regional-loss and drought
+  schedules; every run must end in the uninterrupted run's state hash.
 
 ### Changed
 - CUDA network qualification records each device's compute capability with its SM count and
