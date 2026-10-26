@@ -184,7 +184,9 @@ def _example(ledger_mode: str = "test") -> dict[str, bytes]:
         q_base="0000803e",
         E=4,
         clean_finalizations=12,
-        work_screen_epoch_rounds=1000,
+        # ~5 h of 3 s rounds: the oldest screen of a 40-trial admission campaign (3 x 12 + 4,
+        # each <= challenge_rounds + 1) must outlast round 0. 1000 (~50 min) cannot.
+        work_screen_epoch_rounds=6000,
         max_pending=32,
         max_trial_replays=2,
         max_trials_per_beacon=2,

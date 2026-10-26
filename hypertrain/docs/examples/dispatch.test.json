@@ -1,0 +1,14 @@
+{
+  "owner_key_file": "<container path of the TEST owner seed, 0600, uid 65532>",
+  "roles": {
+    "5DAsfbVY9nD7hhQL7EoRQn15F5XTmMEHYXxwYqK51dTpuEXD": "<owned host role>",
+    "5DJbxE1pXY7Vns2a7Hp5c7jmVnY27o628oH7kDZAuRtCYGWA": "<owned host role>",
+    "5DX6EbDaQ3dBtVH2fD37MNuniDDHzaKrtfiiryS3NN9YMtkN": "<owned host role>",
+    "5Dc3FErGRXoAksbCyDFXAJAycbAcuG3pmb18uziSPqSujYDA": "<owned host role>",
+    "5GsVoGzBbWGggF8zvWwafGdCsHisjuE2ciBDvCV3FaXuZjmD": "<owned host role>",
+    "5HTeBRrLQDkQK7muJdRNfLv2mk7uqcRs8MGHKUzjDcVRMNAh": "<owned host role>"
+  },
+  "run_dir": "<container path of the admitted lifecycle run dir>",
+  "run_id": "16bc75dd475eaf7a6bcd85d8dbe89b9f57b31c8d080f252c6478ac52fcac3602",
+  "tree": "<container path of the reviewed frozen source tree>"
+}

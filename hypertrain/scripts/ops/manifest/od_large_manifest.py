@@ -338,7 +338,7 @@ def main() -> None:
             q_base="0000803e",
             E=4,
             clean_finalizations=12,
-            work_screen_epoch_rounds=1000,
+            work_screen_epoch_rounds=6000,
             max_pending=32,
             max_trial_replays=2,
             max_trials_per_beacon=2,
