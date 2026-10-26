@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 from hypertrain.gpu_ops.journal import durable_write, fsha
 from hypertrain.gpu_ops.launcher import Reject
 from hypertrain.miner.island_launch import confined, launch_argv, validate_artifacts
-from hypertrain.protocol.messages import Hex64, ImageDigest
+from hypertrain.protocol.messages import Hex64, ImageDigest, Pos
 from hypertrain.protocol.messages_v2 import IslandJobV1, RunManifestV2
 
 LEGACY_TIMING = {
@@ -126,7 +126,7 @@ class Environment(Boundary):
     python: Literal["/opt/hypertrain/venv/bin/python"]
     torch_path: str
     drivers: Annotated[list[str], Field(min_length=2, max_length=8)]
-    sm_counts: Annotated[list[Literal[170]], Field(min_length=2, max_length=8)]
+    sm_counts: Annotated[list[Pos], Field(min_length=2, max_length=8)]
     image_digest: ImageDigest
 
     @model_validator(mode="after")
@@ -274,7 +274,7 @@ def check_inputs(cfg: Qualification) -> IslandJobV1:
     return job
 
 
-def inspect_environment(cfg: Qualification, n_gpus: int) -> Environment:
+def inspect_environment(cfg: Qualification, n_gpus: int, sm_count: int) -> Environment:
     __import__("hypertrain.trainer")  # Configure determinism before torch import.
     import torch
 
@@ -296,6 +296,9 @@ def inspect_environment(cfg: Qualification, n_gpus: int) -> Environment:
         raise Reject("qualification_requires_actual_layout_cuda_devices")
     if any(d.strip() not in cfg.driver_allowlist for d in drivers):
         raise Reject("qualification_driver_mismatch")
+    sm_counts = [torch.cuda.get_device_properties(i).multi_processor_count for i in range(n_gpus)]
+    if any(s != sm_count for s in sm_counts):
+        raise Reject("qualification_sm_profile_mismatch")
     return Environment.model_validate(
         {
             "backend": "cuda",
@@ -304,9 +307,7 @@ def inspect_environment(cfg: Qualification, n_gpus: int) -> Environment:
             "python": sys.executable,
             "torch_path": str(Path(torch.__file__).resolve()),
             "drivers": [d.strip() for d in drivers],
-            "sm_counts": [
-                torch.cuda.get_device_properties(i).multi_processor_count for i in range(n_gpus)
-            ],
+            "sm_counts": sm_counts,
             "image_digest": cfg.image_digest,
         }
     )
@@ -338,7 +339,8 @@ def run(config_path: Path) -> Result:
         os.environ[key] = value
     if os.environ.get("HT_IMAGE_DIGEST") != cfg.image_digest:
         raise Reject("qualification_actual_image_receipt_missing")
-    environment = inspect_environment(cfg, job.manifest.training.reference_spec.layout.n_gpus)
+    ref = job.manifest.training.reference_spec
+    environment = inspect_environment(cfg, ref.layout.n_gpus, ref.sm_count)
     inner = job.manifest.training.inner
     from hypertrain.auditor.replay import AnchorCache, pack_state, unpack_state
 
