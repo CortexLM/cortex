@@ -1,0 +1,29 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "commit_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Commit Hash",
+      "type": "string"
+    },
+    "received_round": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "Received Round",
+      "type": "integer"
+    },
+    "w": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "W",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "w",
+    "commit_hash",
+    "received_round"
+  ],
+  "title": "Receipt",
+  "type": "object"
+}

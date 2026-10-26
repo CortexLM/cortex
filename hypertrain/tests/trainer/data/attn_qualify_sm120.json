@@ -1,0 +1,145 @@
+{
+ "purpose": "Bitwise repeatability of fused SDPA backends and HT_COMPILE=1 on sm_120 under hypertrain.trainer determinism settings (use_deterministic_algorithms=True)",
+ "torch": "2.14.0+cu130",
+ "cuda": "13.0",
+ "cudnn": 92400,
+ "gpu": "NVIDIA GeForce RTX 5090",
+ "capability": [
+  12,
+  0
+ ],
+ "deterministic_algorithms": true,
+ "method": "Fresh process per run (4 runs: p1,p2 without Python headers so Inductor failed to build; p3,p4 with C_INCLUDE_PATH set), 3 in-process repeats each, seed 0, loss=sum(o.float()^2); sha256 over raw bytes of out,dq,dk,dv. Timing = mean of 10 fwd+bwd after 3 warmups.",
+ "shapes": {
+  "1b": {
+   "b,h,kvh,T,hd": [
+    4,
+    16,
+    8,
+    2048,
+    128
+   ],
+   "dtype": "bf16",
+   "backends": {
+    "math": {
+     "cross_process_equal": true,
+     "in_process_equal_all_runs": true,
+     "hashes": "100e6125ca665a2b7427d1fbedb4c216f4a1145699345406c36c3844ac61a5cf",
+     "max_abs_err_vs_math": 0.0,
+     "peak_mib": 4644.0009765625,
+     "ms_fwd_bwd_per_run": [
+      56.38629120076075,
+      55.51910260110162,
+      40.77135460101999,
+      41.14792829786893
+     ]
+    },
+    "sdpa-flash": {
+     "cross_process_equal": true,
+     "in_process_equal_all_runs": true,
+     "hashes": "4a8d7618533a278dec6ff984fbc566fbdae220dc283ac03cc1ff483d5d245753",
+     "max_abs_err_vs_math": 0.0234375,
+     "peak_mib": 901.001953125,
+     "ms_fwd_bwd_per_run": [
+      8.142065102583729,
+      8.232197200413793,
+      6.248672300716862,
+      5.968932301038876
+     ]
+    },
+    "sdpa-cudnn": {
+     "cross_process_equal": null,
+     "in_process_equal_all_runs": null,
+     "error": "RuntimeError: No available kernel. Aborting execution.",
+     "warnings": [
+      "Flash attention has been runtime disabled. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:588.)",
+      "Flash attention kernel not used because: (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:1242.)",
+      "Memory Efficient attention has been runtime disabled. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:600.)",
+      "Memory efficient kernel not used because: (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:1240.)",
+      "cuDNN SDPA is not deterministic. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:934.)",
+      "cuDNN attention kernel not used because: (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:1244.)"
+     ]
+    },
+    "sdpa-efficient": {
+     "cross_process_equal": true,
+     "in_process_equal_all_runs": true,
+     "hashes": "6275c9f88693f5d9f790a6e5e372514f0a1e1e044b010f6c1f36cedf9ab6a0bd",
+     "max_abs_err_vs_math": 0.0234375,
+     "peak_mib": 740.501953125,
+     "ms_fwd_bwd_per_run": [
+      18.774292600573972,
+      19.161776901455596,
+      14.147652901010588,
+      13.88964939978905
+     ]
+    }
+   }
+  },
+  "small": {
+   "b,h,kvh,T,hd": [
+    2,
+    4,
+    2,
+    64,
+    32
+   ],
+   "dtype": "bf16",
+   "backends": {
+    "math": {
+     "cross_process_equal": true,
+     "in_process_equal_all_runs": true,
+     "hashes": "4ff0a80541d624d68da6e24f3e992e92856512e0b659957540a7eccae674499c",
+     "max_abs_err_vs_math": 0.0
+    },
+    "sdpa-flash": {
+     "cross_process_equal": true,
+     "in_process_equal_all_runs": true,
+     "hashes": "b4c7cd7da352feef554e0d10b4cb0980f3086f8d3742bd82b626f7f488b782f7",
+     "max_abs_err_vs_math": 0.015625
+    },
+    "sdpa-cudnn": {
+     "cross_process_equal": null,
+     "in_process_equal_all_runs": null,
+     "error": "RuntimeError: No available kernel. Aborting execution.",
+     "warnings": [
+      "Flash attention has been runtime disabled. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:588.)",
+      "Flash attention kernel not used because: (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:1242.)",
+      "Memory Efficient attention has been runtime disabled. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/sdp_utils_cpp.h:600.)",
+      "Memory efficient kernel not used because: (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:1240.)",
+      "cuDNN SDPA is not deterministic. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:934.)",
+      "cuDNN attention kernel not used because: (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp:1244.)"
+     ]
+    },
+    "sdpa-efficient": {
+     "cross_process_equal": true,
+     "in_process_equal_all_runs": true,
+     "hashes": "f7200a994fb9a6d4591e6841d0ad5fbebedf3def31bea87546590240f02ca5a7",
+     "max_abs_err_vs_math": 0.015625
+    }
+   }
+  }
+ },
+ "decoder_2layer": {
+  "cfg": "n_layers=2 d_model=256 h=4 kvh=2 d_ff=512 T=128 b=2 bf16",
+  "HT_COMPILE=0": {
+   "hash": "5fb2750d4c9a765296a1f5b007bcb73910d168e270e3dd15a524b10c754ee8ba",
+   "cross_process_equal": true,
+   "in_process_equal": true
+  },
+  "HT_COMPILE=1": {
+   "hash": "4a794f2e692894def0962c75cae110f7e7383d2bb57bbff4787cf732ea744519",
+   "cross_process_equal": true,
+   "in_process_equal": true,
+   "note": "p1/p2 raised InductorError (Python.h missing for /usr/bin/python3.12); p3/p4 share the Inductor cache, so cross-process equality covers kernel execution, not independent codegen. Compiled != eager by design."
+  },
+  "note": "uses default selector (math attention); with sdpa-flash qualified, compiled graph includes the flash kernel"
+ },
+ "qualified": {
+  "capability": [
+   12,
+   0
+  ],
+  "torch": "2.14.0+cu130",
+  "backend": "sdpa-flash"
+ }
+}

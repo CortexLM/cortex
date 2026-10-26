@@ -1,0 +1,67 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "cause_hashes": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Cause Hashes",
+      "type": "array"
+    },
+    "excluded": {
+      "items": {
+        "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Excluded",
+      "type": "array"
+    },
+    "new_outer_state_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "New Outer State Hash",
+      "type": "string"
+    },
+    "new_theta_hash_w2": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "New Theta Hash W2",
+      "type": "string"
+    },
+    "old_theta_hash_w2": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Old Theta Hash W2",
+      "type": "string"
+    },
+    "recomputed": {
+      "items": {
+        "enum": [
+          "agg_w",
+          "step_w",
+          "agg_w1",
+          "step_w1"
+        ],
+        "type": "string"
+      },
+      "title": "Recomputed",
+      "type": "array"
+    },
+    "w": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "W",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "w",
+    "excluded",
+    "old_theta_hash_w2",
+    "new_theta_hash_w2",
+    "new_outer_state_hash",
+    "recomputed",
+    "cause_hashes"
+  ],
+  "title": "Rollback",
+  "type": "object"
+}

@@ -1,0 +1,164 @@
+{
+  "manifest": {
+    "auditors": [
+      "5DP4qTec9XxffaALGWsEPhS1oWrDWMBjzhBmyzShREMJpymt"
+    ],
+    "beacon": {
+      "chain_hash": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
+      "genesis_time": 1692803367,
+      "period": 3
+    },
+    "budget": {
+      "epochs_per_round": 1
+    },
+    "coord_pubkey": "5HB7kpn92RS7uF9uWn8bXSvPVKFPg8kPUFDd5sbveGjX6Dbi",
+    "dataset": {
+      "depth": 20,
+      "holdout_commit": "09b8d64e7737102d91157dc98a9c865bc0fe8a192e94c1ad52571a94669a89ab",
+      "merkle_root": "3ef3ef2d8f7b29f4a9bcc4505f63f4f49f9a42531441a0675e02f181dd311b6b",
+      "n_samples": 781250,
+      "sample_format": "u32[seq_len+1] token ids",
+      "shard_sha256_root": "641e28a7d843fbe097ca375cbdf44da41f6887d307b102ebf6288555941ff570",
+      "shard_uri_template": "data/shards/{index:05d}.u32"
+    },
+    "init_state_hash": "cf005f18d23a27c1e989859e78f0cafae621895160488168c65abd1afe5c7e02",
+    "inner": {
+      "H": 30,
+      "J": 5,
+      "betas": [
+        "6666663f",
+        "3333733f"
+      ],
+      "eps": "77cc2b32",
+      "grad_accum": 1,
+      "grad_clip": "0000803f",
+      "lr_schedule": {
+        "decay": 1900,
+        "peak_lr": "52499d39",
+        "stable": 8000,
+        "type": "wsd",
+        "warmup": 100
+      },
+      "micro_batch": 8,
+      "muon_momentum": "3333733f",
+      "ns_steps": 5,
+      "opt": "adamw",
+      "rewarmup_steps": 0,
+      "state_policy": "carry",
+      "wd": "cdcccc3d"
+    },
+    "model": {
+      "arch": "decoder",
+      "aux_loss_coef": "0ad7233c",
+      "capacity_factor": "0000a03f",
+      "compute_dtype": "fp32",
+      "d_ff": 1024,
+      "d_model": 256,
+      "init_seed": 0,
+      "init_std": "0ad7a33c",
+      "master_dtype": "fp32",
+      "n_experts": 1,
+      "n_heads": 4,
+      "n_kv_heads": 4,
+      "n_layers": 4,
+      "param_count": 3279104,
+      "rope_theta": 10000,
+      "router_tiebreak": "lowest_index",
+      "seq_len": 256,
+      "top_k_experts": 1,
+      "vocab": 259
+    },
+    "operator_budget": {
+      "auditor": {
+        "gpus_per_instance": 1,
+        "instances": 1,
+        "usd_micro_per_round": 0
+      },
+      "honeypot": {
+        "gpus_per_instance": 1,
+        "instances": 0,
+        "rate": "8fc2f53c",
+        "usd_micro_per_round": 0
+      },
+      "relay": {
+        "gpus_per_instance": 0,
+        "instances": 1,
+        "usd_micro_per_round": 0
+      }
+    },
+    "outer": {
+      "bits": 8,
+      "cclip_iters": 1,
+      "cclip_tau": "0000803f",
+      "center": "prev_outer_update",
+      "ef_beta": "00000000",
+      "lr": "cdcccc3e",
+      "momentum": "6666663f",
+      "opt": "nesterov",
+      "preclip_norm": "0000803f",
+      "topk_frac": "0000803f"
+    },
+    "reference_spec": {
+      "driver_allowlist": [],
+      "env": {
+        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+        "CUDA_DISABLE_PTX_JIT": "1",
+        "cpu_threads": 1
+      },
+      "image_digest": "sha256:a49fbc36d67c6a71b8e04b43ccfb3dee36863aa17110bcac5507e30af71b372a",
+      "layout": {
+        "dp_size": 1,
+        "ep_size": 1,
+        "n_gpus": 1,
+        "pp": 1,
+        "zero1": false
+      },
+      "sm_count": 170,
+      "spec_doc_sha256": "1e00181664a0a8b6650e420923666acb8f0e78b7cb74663b9c23d67208a53fcf"
+    },
+    "tokenizer": {
+      "name": "ht-byte-259",
+      "sha256": "82206d97f368c3558e0cbc53d009995ad9ec512c9c81bf8d0ab4c6117cd1bff9"
+    },
+    "verify": {
+      "E_vest_rounds": 10,
+      "Q_top": 1,
+      "T": {
+        "assign_after_open": 20,
+        "audit_after_commit": 40,
+        "dispute_per_level": 600,
+        "serve_deadline": 900,
+        "upload_after_commit": 300
+      },
+      "cluster_rules_sha256": "4498708c4405bc21ee30593cfb07f18b176063f367525daffdb780875bed1347",
+      "forgive_per_epoch": 1,
+      "influence_cap": "0000803e",
+      "k_segments": 3,
+      "probation_rounds": 10,
+      "q_base": "cdcccc3d",
+      "s_min_reward_multiple": 10
+    }
+  },
+  "provenance": {
+    "UNSOURCED (provisional, todo 13)": "inner betas/eps/wd/clip/lr, preclip/cclip, model dims",
+    "UNSOURCED inner (provisional, todo 13)": "lr warmup/stable/decay, micro_batch=8",
+    "UNSOURCED inner muon (provisional, todo 13)": "muon_momentum=0.95, ns_steps=5",
+    "UNSOURCED model (provisional, todo 13)": "capacity_factor=1.25, aux_loss_coef=0.01, init_std=0.02",
+    "UNSOURCED outer (provisional, todo 13)": "topk_frac=1.0, bits=8, ef_beta=0.0",
+    "UNSOURCED verify (provisional, todo 13)": "k_segments=3, Q_top=1, influence_cap=0.25",
+    "inner.H=30,J=5": "plan todo 16 Phase B round shape; ultrabrain section 1.1 n_leaves=H/J+1",
+    "inner.rewarmup_steps=0": "carry has no per-round re-warmup (segment replay requires 0)",
+    "inner.state_policy=carry": "todo 7 decision (experiments/results/decision.json: A1/A2/A3 FAIL) -> carry + segment audits; switched from reset by todo 13",
+    "model.vocab=259": "plan todo 4 byte-level 259-token CPU tokenizer",
+    "operator_budget.honeypot.rate=0.03": "ultrabrain section 4 honeypots 1-5%",
+    "outer.center=prev_outer_update": "ultrabrain section 3c",
+    "outer.lr=0.4,momentum=0.9": "parity section 2 starting grid eta_g in {0.4..1.0}, mom 0.9",
+    "reference_spec.env.cpu_threads=1, layout.pp=1": "todo 6 CPU determinism pin; provisional",
+    "reference_spec.layout n_gpus=dp_size=ep_size=1, zero1=false": "todo 11 single-rank CPU island; GPU runs pin their own layout",
+    "verify.E/probation/S_min=ceil(1/q)=10": "ultrabrain section 4 E=ceil(1/q)",
+    "verify.T": "ultrabrain section 1.2 timeouts in drand rounds (3 s): 20/40/300/900/600",
+    "verify.forgive_per_epoch=1": "ultrabrain section 4 (verif SYNTH section 6)",
+    "verify.q_base=0.1": "ultrabrain section 3a default q"
+  },
+  "run_id": "ad8beb30084a2e53f817c45f1cbfdf1491162575f10f2c3d190645081b2ba2ff"
+}

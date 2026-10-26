@@ -1,0 +1,132 @@
+{
+  "$defs": {
+    "RosterEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "hotkey": {
+          "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+          "title": "Hotkey",
+          "type": "string"
+        },
+        "q_i": {
+          "pattern": "^[0-9a-f]{8}$",
+          "title": "Q I",
+          "type": "string"
+        },
+        "slot": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Slot",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hotkey",
+        "slot",
+        "q_i"
+      ],
+      "title": "RosterEntry",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "center_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Center Hash",
+      "type": "string"
+    },
+    "d_assign": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "D Assign",
+      "type": "integer"
+    },
+    "d_audit": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "D Audit",
+      "type": "integer"
+    },
+    "d_commit": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "D Commit",
+      "type": "integer"
+    },
+    "d_final": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "D Final",
+      "type": "integer"
+    },
+    "d_open": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "D Open",
+      "type": "integer"
+    },
+    "d_upload": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "D Upload",
+      "type": "integer"
+    },
+    "honeypot_commit": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Honeypot Commit",
+      "type": "string"
+    },
+    "outer_state_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Outer State Hash",
+      "type": "string"
+    },
+    "prev_final_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Prev Final Hash",
+      "type": "string"
+    },
+    "roster": {
+      "items": {
+        "$ref": "#/$defs/RosterEntry"
+      },
+      "title": "Roster",
+      "type": "array"
+    },
+    "roster_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Roster Hash",
+      "type": "string"
+    },
+    "theta_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Theta Hash",
+      "type": "string"
+    },
+    "w": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "W",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "w",
+    "prev_final_hash",
+    "theta_hash",
+    "outer_state_hash",
+    "center_hash",
+    "roster",
+    "roster_hash",
+    "honeypot_commit",
+    "d_open",
+    "d_assign",
+    "d_commit",
+    "d_audit",
+    "d_upload",
+    "d_final"
+  ],
+  "title": "RoundOpen",
+  "type": "object"
+}

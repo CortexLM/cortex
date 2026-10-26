@@ -1,0 +1,21 @@
+{
+ "verdict": "CENSORED",
+ "reason": "fixture: one leftover owned instance",
+ "inventory": {
+  "parsed": true,
+  "total_rows": 1,
+  "owned_instances": 1
+ },
+ "cost": {
+  "cap_usd": "10",
+  "lines": [
+   {
+    "item": "whole_debit_phase_a",
+    "usd": "1.20"
+   }
+  ],
+  "total_usd": "1.20"
+ },
+ "runs": [],
+ "hosts": []
+}

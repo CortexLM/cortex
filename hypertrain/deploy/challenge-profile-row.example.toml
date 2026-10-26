@@ -1,0 +1,24 @@
+# Example challenge profile with hypertrain active (config/challenges.toml in CortexLM/cortex,
+# served by the gateway at GET /v1/trust). The live profile is version 1 with bounty = 2000 and
+# proof = 8000 bps; here proof drops to 7000 to give hypertrain 1000. The shares must sum to
+# exactly 10000. `version` is 3 because a third challenge needs version >= 3; bump it above the
+# live value. It is a whole file: replace the live profile with it, never append it (duplicate
+# keys). Restart the master between two epochs.
+# Leave `introduced_epoch` at or below the current epoch. No key: Cortex signs nothing here.
+version = 3
+introduced_epoch = 0
+
+[[challenges]]
+id = "bounty"
+emission_share_bps = 2000
+policy = "all_metagraph_hotkeys"
+
+[[challenges]]
+id = "proof"
+emission_share_bps = 7000
+policy = "all_metagraph_hotkeys"
+
+[[challenges]]
+id = "hypertrain"
+emission_share_bps = 1000
+policy = "all_metagraph_hotkeys"

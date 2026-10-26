@@ -1,0 +1,86 @@
+{
+  "$defs": {
+    "ReplayEnv": {
+      "additionalProperties": false,
+      "properties": {
+        "driver": {
+          "title": "Driver",
+          "type": "string"
+        },
+        "gpu_uuid_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Gpu Uuid Sha256",
+          "type": "string"
+        },
+        "image_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Image Digest",
+          "type": "string"
+        },
+        "sm_count": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Sm Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "image_digest",
+        "driver",
+        "gpu_uuid_sha256",
+        "sm_count"
+      ],
+      "title": "ReplayEnv",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "challenge_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Challenge Hash",
+      "type": "string"
+    },
+    "first_bad_leaf": {
+      "anyOf": [
+        {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "First Bad Leaf"
+    },
+    "recomputed_leaves_root": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Recomputed Leaves Root",
+      "type": "string"
+    },
+    "replay_env": {
+      "$ref": "#/$defs/ReplayEnv"
+    },
+    "result": {
+      "enum": [
+        "MATCH",
+        "MISMATCH",
+        "WITHHELD",
+        "BAD_PROOF",
+        "ASSIGNMENT_VIOLATION"
+      ],
+      "title": "Result",
+      "type": "string"
+    }
+  },
+  "required": [
+    "challenge_hash",
+    "first_bad_leaf",
+    "result",
+    "recomputed_leaves_root",
+    "replay_env"
+  ],
+  "title": "ReplayVerdict",
+  "type": "object"
+}

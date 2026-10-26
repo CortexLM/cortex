@@ -1,0 +1,174 @@
+name: ci
+
+# main is covered by images.yml, which calls this workflow before publishing. A
+# push trigger here would start a twin run on the same ref (see concurrency).
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# Cancel superseded PR runs on the same ref. In a called run github.workflow is
+# the caller's name, so the images run gets its own group and is never cancelled;
+# images.yml serializes pushes to main itself.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Bound CPU kernel dispatch to AVX2, the dev-host golden baseline.
+env:
+  ATEN_CPU_CAPABILITY: avx2
+  MKL_CBWR: AVX2
+  ONEDNN_MAX_CPU_ISA: AVX2
+
+jobs:
+  # Format, lint and types only. Fast, high signal, no test execution.
+  lint:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.17"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync --locked --all-extras --group dev
+      - name: Format, lint, types
+        run: |
+          set -euo pipefail
+          uv run --frozen ruff format --check
+          uv run --frozen ruff check
+          MYPYPATH=src:scripts:. uv run --frozen mypy --explicit-package-bases \
+            --package hypertrain --module experiments.gpu_network_v2.orchestrate \
+            --module scripts.network_service_proof --module scripts.network_gpu_operation
+
+  # Whole non-sim/non-e2e suite, sharded round-robin over test files so wall-clock
+  # is a fraction of the serial run. The native-systemd-only cases are excluded here
+  # and run in the nightly heavy workflow (heavy.yml).
+  test:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.17"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync --locked --all-extras --group dev
+      # Golden leaf roots are per CPU class; record which CPU ran this shard.
+      - name: Runner CPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(lscpu | sed -n 's/^Model name: *//p' | head -n1)
+          VENDOR=$(lscpu | sed -n 's/^Vendor ID: *//p' | head -n1)
+          if lscpu | grep -E '^Flags:' | grep -qw avx512f; then AVX512F=yes; else AVX512F=no; fi
+          TORCH=$(uv run --frozen python -c "import torch;print(torch.__version__, torch.get_num_threads())")
+          LINE="cpu: ${MODEL} | vendor: ${VENDOR} | avx512f: ${AVX512F} | torch, threads: ${TORCH}"
+          echo "$LINE"
+          echo "shard ${{ matrix.shard }} $LINE" >> "$GITHUB_STEP_SUMMARY"
+      - name: Sharded suite
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: "8"
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t ALL < <(git ls-files ':(glob)tests/**/test_*.py' \
+            | grep -v '^tests/sim/' | grep -v '^tests/e2e/' | sort)
+          SEL=()
+          for i in "${!ALL[@]}"; do
+            if (( i % SHARDS == SHARD )); then SEL+=("${ALL[$i]}"); fi
+          done
+          printf 'shard %s/%s -> %s files\n' "$SHARD" "$SHARDS" "${#SEL[@]}"
+          if [ "${#SEL[@]}" -eq 0 ]; then echo "no files in shard"; exit 0; fi
+          uv run --frozen pytest -q --durations=25 -m "not od" \
+            --deselect=tests/challenge/test_capacity_outer_v2.py::test_actual_bounded_outer_child_matches_original_signed_replay \
+            --deselect=tests/challenge/test_service_capacity_v2.py::test_real_capacity_launch_failure_keeps_debit_and_prevents_restart_rerun \
+            "--deselect=tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[success]" \
+            "--deselect=tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[oom]" \
+            "--deselect=tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[cancel]" \
+            "--deselect=tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[deadline]" \
+            --deselect=tests/miner/test_capacity_runtime_v2.py::test_real_runner_parent_death_retains_absolute_manager_timer \
+            --deselect=tests/miner/test_island_launch_v2.py::test_capacity_branch_uses_real_bounded_failure_before_publication \
+            --deselect=tests/challenge/test_capacity_outer_v2.py::test_actual_bounded_genesis_preparation_and_duplicate_debit \
+            --deselect=tests/relay/test_transport_v2.py::test_launch_safety_independent_systemd_units \
+            "${SEL[@]}"
+
+  # The slow subprocess suites, in parallel with test.
+  test-slow:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [sim, e2e]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.17"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync --locked --all-extras --group dev
+      - run: uv run --frozen pytest -q --durations=25 -m "not od" tests/${{ matrix.suite }}
+
+  # Bitwise proof gate (scripts/check-proof.sh). The shards report a golden leaf root
+  # outside GOLDEN as an xfail; this gate fails it. Informational: GOLDEN holds no root
+  # from a Blacksmith runner yet, so a red gate fails neither ci nor the images publish
+  # that calls it.
+  check-proof:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.17"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync --locked --all-extras --group dev
+      # Golden leaf roots are per CPU class; record which CPU ran the gate.
+      - name: Runner CPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(lscpu | sed -n 's/^Model name: *//p' | head -n1)
+          VENDOR=$(lscpu | sed -n 's/^Vendor ID: *//p' | head -n1)
+          if lscpu | grep -E '^Flags:' | grep -qw avx512f; then AVX512F=yes; else AVX512F=no; fi
+          TORCH=$(uv run --frozen python -c "import torch;print(torch.__version__, torch.get_num_threads())")
+          LINE="cpu: ${MODEL} | vendor: ${VENDOR} | avx512f: ${AVX512F} | torch, threads: ${TORCH}"
+          echo "$LINE"
+          echo "check-proof $LINE" >> "$GITHUB_STEP_SUMMARY"
+      - name: Bitwise proof gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/check-proof.sh 2>&1 | tee "$RUNNER_TEMP/check-proof.log"
+      - name: Upload check-proof output
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: check-proof-output
+          path: ${{ runner.temp }}/check-proof.log
+          if-no-files-found: warn

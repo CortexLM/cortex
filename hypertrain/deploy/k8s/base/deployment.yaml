@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hypertrain-relay
+spec:
+  replicas: 2
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: hypertrain-relay
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: hypertrain-relay
+        hypertrain.network/role: relay
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: hypertrain-relay
+      containers:
+        - name: relay
+          image: ghcr.io/cortexlm/hypertrain
+          imagePullPolicy: IfNotPresent
+          command: [uvicorn, hypertrain.relay.app:app]
+          args: [--host, 0.0.0.0, --port, "8000", --workers, "1"]
+          envFrom:
+            - configMapRef:
+                name: relay-environment
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+              ephemeral-storage: 2Gi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+              ephemeral-storage: 3Gi
+          startupProbe:
+            httpGet: {path: /livez, port: http}
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: {path: /livez, port: http}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 20
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /opt/venv/bin/python
+                  - -c
+                  - "import httpx,pathlib; t=pathlib.Path('/run/relay-secrets/drain.token').read_text().strip(); r=httpx.post('http://127.0.0.1:8000/internal/drain',headers={'Authorization':'Bearer '+t},timeout=100); r.raise_for_status()"
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+            - {name: secrets, mountPath: /run/relay-secrets, readOnly: true}
+            - {name: cache, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap:
+            name: relay-contract
+        - name: secrets
+          secret:
+            secretName: relay-runtime-v1
+            defaultMode: 0440
+        - name: cache
+          emptyDir:
+            sizeLimit: 2Gi

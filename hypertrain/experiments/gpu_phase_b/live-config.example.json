@@ -1,0 +1,56 @@
+{
+ "base_url": "https://console.vast.ai",
+ "key_file": "/path/to/vast-key",
+ "budget_snapshot": "/path/to/budget-snapshot.json",
+ "phase_a_settled_debit_usd": "0.630",
+ "phase_cap_usd": "33.48",
+ "image": "docker.io/vastai/pytorch:2.14.0-cu130-cuda-13.2-mini-py312-2026-09-08@sha256:450710d89268fcd55632f28fdd80508ee920a53075b3f8e9f828bdc154e3d856",
+ "staging": {
+  "path": "base image by digest (= FROM of the todo-15 GPU image hypertrain-gpu:local ae7f42fe80f3) + stage.tar (hypertrain src, experiments/gpu_phase_b, hashed requirements, shard) streamed over ssh and checked by sha256 + pip install --require-hashes",
+  "why": "the todo-15 image is 11.6 GB (11.3 GB base + 308 MB /opt/hypertrain venv); docker save/scp/load is impossible inside a Vast container (no docker daemon) and a registry push is forbidden; the base digest is what the GPU image builds FROM, so torch/CUDA bits are identical; same path proven on 3 hosts in todo 12",
+  "provenance": "worker records env.code_sha256 over the imported hypertrain sources and stage_tar_sha256 is journaled; image /opt/hypertrain/src differs from the tree only in src/hypertrain/challenge/store.py (not imported by the trainer)"
+ },
+ "num_gpus": 8,
+ "disk_gb": 60,
+ "egress_gb": 2,
+ "hard_deadline_seconds": 5400,
+ "hard_grace_seconds": 1800,
+ "create_margin_seconds": 3600,
+ "cleanup_margin_seconds": 900,
+ "boot_timeout_seconds": 900,
+ "hosts": [
+  {
+   "role": "h0",
+   "machine_id": 54141,
+   "max_dph_total": 5.042333333333333
+  },
+  {
+   "role": "h1",
+   "machine_id": 47115,
+   "max_dph_total": 5.089466666666667
+  }
+ ],
+ "tree": "/path/to/hypertrain",
+ "shard": "data/train/shard-00000.u32",
+ "remote_root": "/workspace/ht-phase-b",
+ "remote_python": "/venv/main/bin/python",
+ "setup_command": "/venv/main/bin/python -c 'import sys,torch; sys.exit(torch.__version__ != \"2.14.0+cu130\" or torch.cuda.device_count() != 8)' && /venv/main/bin/python -m pip install --no-deps --require-hashes -r docker/phase-a/requirements.txt && (command -v iperf3 >/dev/null || (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iperf3) || true)",
+ "create_env": {
+  "-p 5201:5201": "1"
+ },
+ "net_measurements": true,
+ "net_budget_seconds": 900,
+ "ssh_user": "root",
+ "profile": "phase_b",
+ "device": "cuda",
+ "evidence_path": "/path/to/evidence.json",
+ "poll_seconds": 15,
+ "supervisor_check_seconds": 30,
+ "keyscan_attempts": 20,
+ "ssh_timeout_seconds": 3600,
+ "provider_min_interval_seconds": 1,
+ "create_min_interval_seconds": 6,
+ "provenance": "example: copy to live-config.json (unpublished) and fill in; select_hosts.py rewrites hosts/provenance",
+ "min_reliability": 0.99,
+ "min_inet_down_mbps": 1000
+}

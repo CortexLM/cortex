@@ -1,0 +1,92 @@
+{
+  "$defs": {
+    "StageState": {
+      "additionalProperties": false,
+      "properties": {
+        "m": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "M",
+          "type": "string"
+        },
+        "theta": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Theta",
+          "type": "string"
+        },
+        "v": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "V",
+          "type": "string"
+        }
+      },
+      "required": [
+        "theta",
+        "m",
+        "v"
+      ],
+      "title": "StageState",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "batch_ids_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Batch Ids Sha256",
+      "type": "string"
+    },
+    "loss_f32": {
+      "pattern": "^[0-9a-f]{8}$",
+      "title": "Loss F32",
+      "type": "string"
+    },
+    "norm_f32": {
+      "pattern": "^[0-9a-f]{8}$",
+      "title": "Norm F32",
+      "type": "string"
+    },
+    "rng_ctr": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Rng Ctr",
+      "type": "integer"
+    },
+    "run_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "stages": {
+      "items": {
+        "$ref": "#/$defs/StageState"
+      },
+      "minItems": 1,
+      "title": "Stages",
+      "type": "array"
+    },
+    "t": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "T",
+      "type": "integer"
+    },
+    "w": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "W",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "run_id",
+    "w",
+    "t",
+    "stages",
+    "batch_ids_sha256",
+    "rng_ctr",
+    "loss_f32",
+    "norm_f32"
+  ],
+  "title": "LeafPreimage",
+  "type": "object"
+}

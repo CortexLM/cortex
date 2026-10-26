@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: relay-environment
+data:
+  RELAY_CONFIG: /config/relay.json
+  RELAY_SECRETS: /run/relay-secrets
+  REGION: eu
+  OMP_NUM_THREADS: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  # Operator creates relay-contract ConfigMap from signed run-specific relay.json.
+  # No fake public run/registry/master key is committed.

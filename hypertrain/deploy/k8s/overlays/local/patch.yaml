@@ -1,0 +1,44 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hypertrain-relay
+$patch: delete
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hypertrain-relay
+spec:
+  template:
+    spec:
+      containers:
+        - name: relay
+          command: [/opt/venv/bin/python, /fixture/relay_kind_smoke.py, --fixture, relay]
+          args: []
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /opt/venv/bin/python
+                  - -c
+                  - "import httpx,pathlib,socket; t=pathlib.Path('/run/proof/drain.token').read_text().strip(); h=socket.gethostbyname(socket.gethostname()); r=httpx.post('http://'+h+':8000/internal/drain',headers={'Authorization':'Bearer '+t},timeout=100); r.raise_for_status()"
+          volumeMounts:
+            - {name: script, mountPath: /fixture, readOnly: true}
+            - {name: fixture-secrets, mountPath: /run/proof, readOnly: true}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+              ephemeral-storage: 32Mi
+            limits:
+              cpu: 250m
+              memory: 192Mi
+              ephemeral-storage: 128Mi
+      volumes:
+        - name: script
+          configMap: {name: proof-script}
+        - name: fixture-secrets
+          secret: {secretName: proof-secrets, defaultMode: 0440}
+        - name: cache
+          emptyDir:
+            sizeLimit: 96Mi

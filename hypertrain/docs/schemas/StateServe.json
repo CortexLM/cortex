@@ -1,0 +1,48 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "challenge_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Challenge Hash",
+      "type": "string"
+    },
+    "hotkey": {
+      "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+      "title": "Hotkey",
+      "type": "string"
+    },
+    "merkle_proof_leaf_in_leaves_root": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Merkle Proof Leaf In Leaves Root",
+      "type": "array"
+    },
+    "t": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "T",
+      "type": "integer"
+    },
+    "tensor_root": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Tensor Root",
+      "type": "string"
+    },
+    "uri": {
+      "title": "Uri",
+      "type": "string"
+    }
+  },
+  "required": [
+    "hotkey",
+    "challenge_hash",
+    "t",
+    "uri",
+    "tensor_root",
+    "merkle_proof_leaf_in_leaves_root"
+  ],
+  "title": "StateServe",
+  "type": "object"
+}

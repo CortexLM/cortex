@@ -1,0 +1,27 @@
+# Only reviewed public values; different secrets on the same line still detect.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Historical public source digest, not a signing key"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''(^|/)(scripts/publish\.sh|tests/protocol/fixtures/network_v1_baseline\.json)$''']
+regexes = ['''^d3030488eb18aaafc0feceb256666bcc63fc15c4e6ae0bb008980affd96976a2$''']
+
+[[rules.allowlists]]
+description = "Deliberate synthetic credential-shaped rejection input"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''(^|/)tests/gpu_ops/test_gpu_ops\.py$''']
+regexes = ['''^7875e0437f396a1d$''']
+
+[[rules.allowlists]]
+description = "Static fake S3 signing input for in-memory test transport"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''(^|/)tests/storage/fakes\.py$''']
+regexes = ['''^SECRETSECRETSECRETSECRET1234567890abcd$''']

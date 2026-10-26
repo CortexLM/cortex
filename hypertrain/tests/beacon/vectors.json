@@ -1,0 +1,15 @@
+{
+  "source": "drand quicknet, fetched 2026-10-07 from api.drand.sh, api2.drand.sh, api3.drand.sh and drand.cloudflare.com (all identical)",
+  "rounds": [
+    {
+      "round": 1000000,
+      "randomness": "b22aad4794f7451896f7a371aa46106fd84d919f3f569acd5b2fddf1d1440af3",
+      "signature": "83ad29e4c409f9470fc2ef02f90214df49e02b441a1a241a82d622d9f608ef98fd8b11a029f1bee9d9e83b45088abe72"
+    },
+    {
+      "round": 20000000,
+      "randomness": "f39c98df5525968e6622e0c63edb3d1f9c5607cf780db78abdded36e4b3dba95",
+      "signature": "96892582a33552a7b67ba44ef09c3ccd535bbebe760c93ecf45be8958d0c0f06390c6d19d7bf492eb806af7eef6b125c"
+    }
+  ]
+}

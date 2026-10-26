@@ -1,0 +1,66 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "N": {
+      "maximum": 1024,
+      "minimum": 2,
+      "title": "N",
+      "type": "integer"
+    },
+    "dispute_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Dispute Id",
+      "type": "string"
+    },
+    "hashes": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Hashes",
+      "type": "array"
+    },
+    "interval": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      ],
+      "title": "Interval",
+      "type": "array"
+    },
+    "level": {
+      "enum": [
+        "step",
+        "layer",
+        "op"
+      ],
+      "title": "Level",
+      "type": "string"
+    },
+    "party": {
+      "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+      "title": "Party",
+      "type": "string"
+    }
+  },
+  "required": [
+    "dispute_id",
+    "level",
+    "interval",
+    "N",
+    "hashes",
+    "party"
+  ],
+  "title": "Bisect",
+  "type": "object"
+}

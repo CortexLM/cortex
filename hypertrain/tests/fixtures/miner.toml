@@ -1,0 +1,9 @@
+api = "http://127.0.0.1:18765"
+keyfile = "../../.qa-miner/miner.key"
+workdir = "../../.qa-miner/work"
+state_source = "../../.qa-miner/states"
+data_dir = "../../.qa-miner/data"
+image_digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+device = "cpu"
+poll_seconds = 0.05
+allow_file_upload = true

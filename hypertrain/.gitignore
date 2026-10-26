@@ -1,0 +1,16 @@
+/data/
+.venv/
+__pycache__/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.evidence/
+
+# audit/report/plan artifacts (kept out of the product repo)
+experiments/results/
+plan.md
+plan.json
+docs/RESULTS.md
+docs/incentive-audit.md
+*-RESULT.md

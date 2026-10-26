@@ -1,0 +1,30 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "enum": [
+        "accept",
+        "contest"
+      ],
+      "title": "Action",
+      "type": "string"
+    },
+    "hotkey": {
+      "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+      "title": "Hotkey",
+      "type": "string"
+    },
+    "verdict_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Verdict Hash",
+      "type": "string"
+    }
+  },
+  "required": [
+    "hotkey",
+    "verdict_hash",
+    "action"
+  ],
+  "title": "Dispute",
+  "type": "object"
+}

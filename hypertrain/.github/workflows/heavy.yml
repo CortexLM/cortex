@@ -1,0 +1,251 @@
+name: heavy
+
+# Everything too slow for per-PR CI (native systemd regression, docker canary,
+# full serial suite). Runs nightly and on demand.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.17"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync --locked --all-extras --group dev
+      - name: Native systemd regression (isolated root environment)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(ps -p 1 -o comm= | xargs)" = systemd
+          sudo -n systemctl show --property=Version
+          test -f /sys/fs/cgroup/cgroup.controllers
+          native="$(sudo -n mktemp -d /tmp/htn.XXXXXX)"
+          test "$(sudo -n stat -c '%a:%u' "$native")" = 700:0
+          cleanup() {
+            status=$?
+            sudo -n python3 - "$native" "$status" <<'PY'
+          import json
+          import pathlib
+          import re
+          import shutil
+          import subprocess
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          if sys.argv[2] != "0":
+              for name in ("capacity-stdout.log", "capacity-stderr.log"):
+                  for log in (root / "tmp").rglob(name):
+                      print(str(log), log.read_text(errors="replace"), flush=True)
+          units = set()
+          for record in (root / "tmp").rglob("capacity-attempt.json"):
+              body = json.loads(record.read_text())
+              for field in ("unit", "timer", "timer_service"):
+                  unit = body[field]
+                  if not re.fullmatch(r"ht-cap-[0-9a-f]{32}(?:-deadline)?\.(?:service|timer)", unit):
+                      raise ValueError("unexpected native unit name")
+                  units.add(unit)
+          for unit in sorted(units):
+              observed = subprocess.run(
+                  ["systemctl", "show", unit, "-p", "LoadState"],
+                  check=True, capture_output=True, text=True, timeout=10,
+              ).stdout
+              if observed.strip() == "LoadState=not-found":
+                  continue
+              subprocess.run(["systemctl", "stop", unit], check=True, timeout=30)
+              observed = subprocess.run(
+                  ["systemctl", "show", unit, "-p", "ActiveState", "-p", "MainPID", "-p", "ControlPID"],
+                  check=True, capture_output=True, text=True, timeout=10,
+              ).stdout
+              fields = dict(line.split("=", 1) for line in observed.splitlines())
+              if fields["ActiveState"] not in ("inactive", "failed") or any(
+                  int(fields.get(field, "0")) for field in ("MainPID", "ControlPID")
+              ):
+                  raise RuntimeError("native child still active; retaining isolated environment")
+          shutil.rmtree(root)
+          PY
+          }
+          trap cleanup EXIT
+          sudo -n install -m 755 "$(command -v uv)" "$native/uv"
+          sudo -n mkdir -m 700 "$native/source" "$native/tmp"
+          git ls-files -z -- . ':!**/.git/**' ':!**/.venv/**' ':!**/*cache*/**' \
+            ':!**/__pycache__/**' ':!**/secrets/**' ':!**/.env' ':!**/.env.*' | \
+            tar --null -T - -cf - | sudo -n tar --no-same-owner -xf - -C "$native/source"
+          for file in uv.lock tests/challenge/test_capacity_outer_v2.py tests/challenge/test_service_capacity_v2.py tests/miner/test_capacity_runtime_v2.py tests/miner/test_island_launch_v2.py tests/relay/test_transport_v2.py; do
+            expected="$(sha256sum "$file" | cut -d ' ' -f 1)"
+            actual="$(sudo -n sha256sum "$native/source/$file" | cut -d ' ' -f 1)"
+            test "$expected" = "$actual"
+            printf 'native source %s %s\n' "$file" "$actual"
+          done
+          sudo -n env UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}" UV_PYTHON_INSTALL_DIR="$native/python" \
+            UV_PYTHON_PREFERENCE=only-managed UV_PROJECT_ENVIRONMENT="$native/venv" \
+            "$native/uv" sync --project "$native/source" --locked --all-extras --group dev --python 3.12
+          sudo -n env -u PYTHONPATH HOME="$native" TMPDIR="$native/tmp" \
+            PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+            bash -c '
+              set -euo pipefail
+              cd "$1/source"
+              "$1/venv/bin/python" -c "import os, hypertrain; print(\"native affinity\", sorted(os.sched_getaffinity(0))); assert os.geteuid() == 0; assert hypertrain.__file__.startswith(os.getcwd() + \"/src/\")"
+              test -x "$1/venv/bin/hypertrain"
+              "$1/venv/bin/hypertrain" --help >/dev/null
+              /usr/bin/timeout --signal=TERM --kill-after=10s 299s \
+                "$1/venv/bin/python" -m pytest -q -x --tb=short -p no:cacheprovider \
+                --basetemp="$1/tmp" \
+                tests/challenge/test_capacity_outer_v2.py::test_actual_bounded_outer_child_matches_original_signed_replay \
+                tests/challenge/test_service_capacity_v2.py::test_real_capacity_launch_failure_keeps_debit_and_prevents_restart_rerun \
+                "tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[success]" \
+                "tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[oom]" \
+                "tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[cancel]" \
+                "tests/miner/test_capacity_runtime_v2.py::test_actual_small_kernel_attempt_and_cleanup[deadline]" \
+                tests/miner/test_capacity_runtime_v2.py::test_real_runner_parent_death_retains_absolute_manager_timer \
+                tests/miner/test_island_launch_v2.py::test_capacity_branch_uses_real_bounded_failure_before_publication \
+                tests/challenge/test_capacity_outer_v2.py::test_actual_bounded_genesis_preparation_and_duplicate_debit \
+                tests/relay/test_transport_v2.py::test_launch_safety_independent_systemd_units
+            ' bash "$native" 2>&1 | tee "$RUNNER_TEMP/hypertrain-native-stdout.log"
+
+  canary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker build -f docker/Dockerfile.server -t hypertrain:local .
+      - run: ENGINE=docker bash scripts/canary.sh
+
+  # The serial suite peaks near 19 GB RSS (tests/auditor/test_od_bisect.py), more
+  # than a 16 GB hosted runner holds; 16 vCPU / 62 GB Blacksmith runner.
+  full-suite:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.17"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync --locked --all-extras --group dev
+      # The runner image ships its own kind; the od relay tests and relay_kind_smoke.py
+      # require the kind_version pinned in deploy/k8s/versions.json.
+      - name: Install pinned kind
+        env:
+          KIND_SHA256_V0_31_0: eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa
+        run: |
+          set -euo pipefail
+          v="$(python3 -c 'import json; print(json.load(open("deploy/k8s/versions.json"))["kind_version"])')"
+          if [ "$v" != v0.31.0 ]; then
+            echo "kind_version $v: update KIND_SHA256 in heavy.yml" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/kind-bin"
+          curl -fsSLo "$RUNNER_TEMP/kind-bin/kind" \
+            "https://github.com/kubernetes-sigs/kind/releases/download/$v/kind-linux-amd64"
+          echo "$KIND_SHA256_V0_31_0  $RUNNER_TEMP/kind-bin/kind" | sha256sum -c -
+          chmod 755 "$RUNNER_TEMP/kind-bin/kind"
+          "$RUNNER_TEMP/kind-bin/kind" version | grep -q "^kind $v "
+          echo "$RUNNER_TEMP/kind-bin" >> "$GITHUB_PATH"
+      # The real od-base island files run in od-suite below. The 14 tests of
+      # test_authority_snapshot_v2.py are deselected by name: their 48-trial fixture writes
+      # ~190 GB on od-base and the exported 1.48 GB start_state exceeds
+      # scripts/network_authority_snapshot.py MAX_FILE (16 MiB) / MAX_BYTES (1 GiB).
+      # Founder decision 2026-10-21 (option A): documented residue, tracked in an issue.
+      # Deselected by name, not --ignore, so a new test added to that file still runs.
+      - name: Full suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          SNAP=tests/challenge/test_authority_snapshot_v2.py
+          DESELECT=()
+          for t in \
+            'test_original_export_validates_and_bootstraps_actual_service' \
+            'test_modified_package_rejects_before_restore[object]' \
+            'test_modified_package_rejects_before_restore[reference]' \
+            'test_modified_package_rejects_before_restore[foreign]' \
+            'test_modified_package_rejects_before_restore[traversal]' \
+            'test_modified_package_rejects_before_restore[digest]' \
+            'test_modified_package_rejects_before_restore[screen]' \
+            'test_modified_package_rejects_before_restore[strike]' \
+            'test_modified_package_rejects_before_restore[pending]' \
+            'test_modified_package_rejects_before_restore[funding]' \
+            'test_modified_package_rejects_before_restore[rotation]' \
+            'test_modified_package_rejects_before_restore[signature]' \
+            'test_modified_package_rejects_before_restore[finality]' \
+            'test_modified_package_rejects_before_restore[assignment]'
+          do DESELECT+=("--deselect=$SNAP::$t"); done
+          bash scripts/check.sh -rs --ignore=tests/sim --ignore=tests/e2e \
+            --ignore=tests/layout/test_od_island_v2.py \
+            --ignore=tests/auditor/test_island_bisect_v2.py \
+            --ignore=tests/auditor/test_island_replay_v2.py \
+            --ignore=tests/miner/test_island_launch_v2.py \
+            --ignore=tests/challenge/test_carry_genesis_v2.py \
+            "${DESELECT[@]}"
+
+  # Real od-base (123.8 M / 143.2 M params) island tests at the manifest's 1 CPU thread.
+  # Serial on a 32-core host, 2026-10-21: test_od_island_v2.py 62.5 min (peak 53 GB RSS),
+  # bisect 10.5, replay 10.4, launch 7.0, carry 2.5 min. Three ~31 min shards.
+  od-suite:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [layout-n4, layout-rest, island]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.17"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - run: uv sync --locked --all-extras --group dev
+      - name: od-base shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          N4=(
+            "tests/layout/test_od_island_v2.py::test_od_objectives_layout_reference_and_hooks[False-4-mlm]"
+            "tests/layout/test_od_island_v2.py::test_od_objectives_layout_reference_and_hooks[False-4-decision]"
+            "tests/layout/test_od_island_v2.py::test_od_objectives_layout_reference_and_hooks[False-4-distill]"
+            "tests/layout/test_od_island_v2.py::test_od_objectives_layout_reference_and_hooks[True-4-mlm]"
+            "tests/layout/test_od_island_v2.py::test_od_objectives_layout_reference_and_hooks[True-4-decision]"
+            "tests/layout/test_od_island_v2.py::test_od_objectives_layout_reference_and_hooks[True-4-distill]"
+          )
+          case "$SHARD" in
+            layout-n4) SEL=("${N4[@]}") ;;
+            layout-rest)
+              SEL=(tests/layout/test_od_island_v2.py)
+              for id in "${N4[@]}"; do SEL+=("--deselect=$id"); done ;;
+            island)
+              SEL=(tests/auditor/test_island_bisect_v2.py tests/auditor/test_island_replay_v2.py
+                tests/miner/test_island_launch_v2.py tests/challenge/test_carry_genesis_v2.py) ;;
+            *) echo "unknown shard $SHARD" >&2; exit 1 ;;
+          esac
+          # Peak host memory for this shard: sample `free` every 5 s, print the peak.
+          ( while sleep 5; do free -m | awk '/^Mem:/{print $3}'; done ) > "$RUNNER_TEMP/mem.log" &
+          SAMPLER=$!
+          rc=0
+          uv run --frozen pytest -q -rs --durations=25 "${SEL[@]}" || rc=$?
+          kill "$SAMPLER" 2>/dev/null || true
+          echo "shard=$SHARD peak_used_MiB=$(sort -n "$RUNNER_TEMP/mem.log" | tail -1) total_MiB=$(free -m | awk '/^Mem:/{print $2}')" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $rc

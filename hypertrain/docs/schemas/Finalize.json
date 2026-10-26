@@ -1,0 +1,37 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "entitlements_root": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Entitlements Root",
+      "type": "string"
+    },
+    "final_theta_hash_w1": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Final Theta Hash W1",
+      "type": "string"
+    },
+    "included": {
+      "items": {
+        "pattern": "^[1-9A-HJ-NP-Za-km-z]{46,50}$",
+        "type": "string"
+      },
+      "title": "Included",
+      "type": "array"
+    },
+    "w": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "W",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "w",
+    "final_theta_hash_w1",
+    "included",
+    "entitlements_root"
+  ],
+  "title": "Finalize",
+  "type": "object"
+}

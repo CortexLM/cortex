@@ -1,0 +1,19 @@
+# Copy, edit, pass with --config. Any OpenAI-compatible /chat/completions endpoint works.
+base_url = "https://openrouter.ai/api/v1"
+model = "deepseek/deepseek-v4.1-flash"
+api_key_env = "OPENROUTER_API_KEY"   # or: api_key_file = "/root/.config/hypertrain/openrouter.key"
+# headers = { "HTTP-Referer" = "https://github.com/CortexLM/hypertrain", "X-Title" = "hypertrain" }
+temperature = 0.0
+top_logprobs = 20
+max_concurrency = 8
+timeout_s = 60.0
+retries = 5
+backoff_s = 1.0
+max_usd = 10.0            # hard cap: no call is made that could exceed it
+price_prompt = 0.0000000356      # USD/token, fallback when the response has no usage.cost
+price_completion = 0.000001
+# Sent verbatim as request fields. An empty table ({}) omits the field (endpoints that reject it).
+reasoning = { enabled = false }       # keeps the single max_tokens=1 for the answer letter
+provider = { require_parameters = true }   # OpenRouter: only providers honouring logprobs; default for openrouter.ai
+rotations = 0             # 0 = all K+1 cyclic rotations; N = at most N
+cache_dir = "teacher-cache"

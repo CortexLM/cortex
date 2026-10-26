@@ -1,0 +1,5 @@
+docker.io/vastai/pytorch:2.14.0-cu130-cuda-13.2-mini-py312-2026-09-08@sha256:450710d89268fcd55632f28fdd80508ee920a53075b3f8e9f828bdc154e3d856
+# Phase A runtime: public Vast PyTorch image (torch 2.14.0+cu130, CPython 3.12, Vast sshd), pinned by
+# Docker Hub index digest (queried 2026-10-07 via hub.docker.com/v2/repositories/vastai/pytorch/tags).
+# Non-torch deps installed at stage time: pip install --require-hashes -r docker/phase-a/requirements.txt
+# run_phase_a.py refuses to run unless torch.__version__ == 2.14.0+cu130 and SM count == 170.
