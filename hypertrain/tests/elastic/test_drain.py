@@ -87,4 +87,5 @@ def test_a_failed_leave_is_retried_by_the_next_check_and_the_drain_runs_once() -
     assert drain.drained is None
     first = drain.check()
     assert first is not None and drain.check() is first
-    assert host.events == [("flush", 15_000), ("flush", 20_000), ("leave", 20_000)]
+    assert first.flushed
+    assert host.events == [("flush", 15_000), ("leave", 15_000)]

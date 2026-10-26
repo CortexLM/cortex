@@ -130,17 +130,31 @@ MUTANTS = (
     Mutant(
         "retried commit refused",
         SRC + "coordinator.py",
-        "if key in s.accepted:",
+        "if done is not None and (done[0], done[2]) == (shard, member):",
         "if False:",
         "test_coordinator.py::test_a_retried_commit_is_acknowledged_again_without_new_credit",
     ),
     Mutant(
         "retried commit credited twice",
         SRC + "coordinator.py",
-        "            return Accepted(shard, key, s.accepted[key], True)",
-        "            s.links.append(s.links[-1])\n"
-        "            return Accepted(shard, key, s.accepted[key], True)",
+        "            return Accepted(shard, key, done[1], True)",
+        "            self._shards[shard].links.append(self._shards[shard].links[-1])\n"
+        "            return Accepted(shard, key, done[1], True)",
         "test_coordinator.py::test_a_retried_commit_is_acknowledged_again_without_new_credit",
+    ),
+    Mutant(
+        "a retry after its lease ended is refused",
+        SRC + "coordinator.py",
+        "        done = self._accepted.get(key)\n",
+        "        self.membership.check(member, token)\n        done = self._accepted.get(key)\n",
+        "test_coordinator.py::test_a_retried_commit_is_acknowledged_after_its_lease_and_round_ended",
+    ),
+    Mutant(
+        "accepted links forgotten at a round boundary",
+        SRC + "coordinator.py",
+        "        self._departures = []\n",
+        "        self._departures = []\n        self._accepted.clear()\n",
+        "test_coordinator.py::test_a_retried_commit_is_acknowledged_after_its_lease_and_round_ended",
     ),
     Mutant(
         "accepted work dropped at a departure",
@@ -210,11 +224,18 @@ MUTANTS = (
         "test_drain.py::test_the_budget_follows_the_last_measured_flush",
     ),
     Mutant(
+        "a failed leave is retried with a second poll and flush",
+        SRC + "drain.py",
+        "        if self._pending is None:\n",
+        "        if True:\n",
+        "test_drain.py::test_a_failed_leave_is_retried_by_the_next_check_and_the_drain_runs_once",
+    ),
+    Mutant(
         "no leave when the flush fails",
         SRC + "drain.py",
-        "        finally:\n            self._leave(notice)",
-        "        except BaseException:\n            raise\n"
-        "        else:\n            self._leave(notice)",
+        "            finally:\n                self._pending = (notice, flushed, started)\n",
+        "            except BaseException:\n                raise\n            else:\n"
+        "                self._pending = (notice, flushed, started)\n",
         "test_drain.py::test_a_failed_flush_still_leaves_and_raises",
     ),
     Mutant(

@@ -180,6 +180,20 @@ def test_a_retried_commit_is_acknowledged_again_without_new_credit() -> None:
     assert coord.settle().credits == {"owner-a": 3}
 
 
+def test_a_retried_commit_is_acknowledged_after_its_lease_and_round_ended() -> None:
+    _, coord, (unit,) = setup()
+    a = join(coord, "a")
+    k3 = link(coord, unit, None, 3, a)
+    coord.commit("a", a.token, 0, k3)
+    k6 = link(coord, unit, k3, 6, a)
+    coord.commit("a", a.token, 0, k6)  # the answer is lost; the round completes
+    coord.leave(sign_leave(notice(a, KEYS["a"]), KEYS["a"]))
+    coord.open_round([WorkUnit(RUN, POLICY, 1, 0, unit.base, 6)])
+    again = coord.commit("a", a.token, 0, k6)
+    assert (again.step, again.duplicate) == (6, True)
+    assert coord.settle().credits == {}
+
+
 def test_a_failed_audit_penalises_only_its_producer() -> None:
     forged = hashlib.sha256(b"forged").hexdigest()
     _, coord, (unit,) = setup(audit=lambda _unit, m: m.state != forged)

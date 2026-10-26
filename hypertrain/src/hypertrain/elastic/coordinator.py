@@ -106,7 +106,6 @@ class _Shard:
     head: str | None = None
     step: int = 0
     links: list[Link] = field(default_factory=list)
-    accepted: dict[str, int] = field(default_factory=dict)
     since_ms: int = 0  # holder assigned or last link accepted
 
     @property
@@ -158,6 +157,7 @@ class Coordinator:
         self._departures: list[Departure] = []
         self._penalties: Counter[str] = Counter()
         self._left: dict[int, tuple[tuple[str, str], Departure]] = {}
+        self._accepted: dict[str, tuple[int, int, str]] = {}  # key -> (shard, step, member)
 
     # ---- rounds ----
 
@@ -230,15 +230,17 @@ class Coordinator:
     # ---- work ----
 
     def commit(self, member: str, token: int, shard: int, key: str) -> Accepted:
-        """Accept `key` as the new head of `shard`; a link accepted before is acknowledged
-        again without new credit, so a retry after a lost answer is safe."""
+        """Accept `key` as the new head of `shard`. A link its member had accepted before is
+        acknowledged again without new credit, even after that lease or round ended, so a
+        retry after a lost answer is safe."""
         self._sweep()
+        done = self._accepted.get(key)
+        if done is not None and (done[0], done[2]) == (shard, member):
+            return Accepted(shard, key, done[1], True)
         m = self.membership.check(member, token)
         s = self._shards.get(shard)
         if s is None:
             raise CoordinatorError("UNKNOWN_SHARD", str(shard))
-        if key in s.accepted:
-            return Accepted(shard, key, s.accepted[key], True)
         if s.holder != Holder(member, token):
             raise CoordinatorError("NOT_HOLDER", f"shard {shard}")
         manifest = self.checkpoints.check_link(s.unit, s.head, key)
@@ -250,7 +252,7 @@ class Coordinator:
             self._depart(m, Exit.REVOKED)
             raise CoordinatorError("AUDIT_FAILED", key)
         s.links.append(Link(key, member, m.owner, manifest.step - s.step))
-        s.accepted[key] = manifest.step
+        self._accepted[key] = (shard, manifest.step, member)
         s.head, s.step, s.since_ms = key, manifest.step, self.clock.now_ms()
         if s.done:
             s.holder = None
