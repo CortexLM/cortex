@@ -76,7 +76,11 @@ If the TEST manifest is rebuilt (another GPU image digest, other coldkeys, anoth
   and key file (`role_dispatch.py:102-107`, `gpu_ops/provider.py:1`).
 
 A test on other hardware therefore needs a new TEST manifest for that hardware and its own
-qualification. Run its challenge with `HYPERTRAIN_ROLE_DISPATCH` unset, on a GPU host.
+qualification. With `HYPERTRAIN_ROLE_DISPATCH` unset, the challenge computes each trusted
+reference in-process with the run's backend (`challenge/store.py:2976-2978`), so the challenge
+host needs that hardware. Rented or listed machines are never servers (founder rule,
+2026-10-26), so the challenge stays on the operator host. GPU references on rented hardware then
+need a dispatch target that is not a Vast lifecycle host, which does not exist yet.
 
 ## Validate
 
