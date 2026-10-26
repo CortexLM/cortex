@@ -177,6 +177,17 @@ Separate packages were chosen over `v3-` tags in the production packages for thr
 - B300 is `sm_103` [A Scout 2026-10-29]. The GPU image recipe is unchanged, and whether
   its torch 2.14 cu130 wheels ship `sm_103` kernels is unknown [?]. ADR 0004 decides.
 
+## Decided by Principal SN100 (D14, 2026-10-26)
+
+- Attestation source: any future production hypertrain pin comes from the images built in
+  the `CortexLM/cortex` monorepo (new SLSA identity, v3 package names), with provenance
+  verified and the D2 guards applied. `CortexLM/hypertrain` publishes no further image.
+- Release path: monorepo only (tags and workflows in `CortexLM/cortex`).
+  `CortexLM/hypertrain` is frozen: no further PR or release from us.
+- No rollback of the v3-monorepo batch.
+- The GitHub archival date of `CortexLM/hypertrain` stays a founder decision (recommendation:
+  after `v3` is merged into `main` and a first production image is served from cortex).
+
 ## Deferred
 
 - Archiving `CortexLM/hypertrain`: a founder action. The archive must keep `images.yml`,
