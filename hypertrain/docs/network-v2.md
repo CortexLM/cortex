@@ -174,6 +174,14 @@ lower nominal probation/base rates. Calendar age or a legacy bond flag is not
 graduation. Join quotas, one concurrent non-ACTIVE identity per coldkey, funded
 locks and known-owner caps bound exposure; they do not reveal every Sybil owner.
 
+A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
+rounds after its accepted proof; a miner without a newer proof then loses
+eligibility. `manifest_v2 example` writes 6000 (about 5 h): trials run back to
+back, each within `challenge_rounds` + 1 rounds, so the first screen of a
+40-trial campaign (3 × 12 ACTIVE + 4 PROBATION) must still hold when round 0
+settles. The former 1000 (about 50 min) could not. The value is per run: it is
+part of the admission policy hash, hence of the run ID.
+
 Prefix quotas use a stable coordinator-private HMAC namespace pinned atomically
 in the store. Reopening the same store with the same coordinator does not reset
 current prefix buckets. A populated legacy store without the namespace pin, or
