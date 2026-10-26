@@ -97,6 +97,12 @@ Measured with `network_qualification.sources()`/`bundle()` and
   4. B300 TEST manifest: `sm_count` 148, `driver_allowlist` with `595.91.07`, and the GPU
      digest the qualification runs on. Produce the two-host CUDA qualification with this code,
      so `result.json` carries `[10, 3]`. Bootstrap it before the run is created (S5).
+- This change removes S5's first two blockers: the challenge image cannot parse a 148-SM
+  record, and the GPU image `f4b2885f` cannot write one. The second goes away only once the
+  qualification runs this code, from the new GPU image or from a staged tree at this commit
+  [H]. The others stand: s100 has no GPU, the TEST challenge needs a CUDA reference and audit
+  executor it can reach (dispatch is Vast-only), and no auditor polls the TEST challenge [A,
+  S5 `REPORT.md` on `v3-d20-gpu-test`]. They are parts c and d of the plan.
 
 ## Not changed
 
