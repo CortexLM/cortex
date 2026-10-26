@@ -35,7 +35,12 @@ headers = {"Authorization": "Bearer " + Path(secret, "admin.token").read_text().
 client = httpx.Client(base_url=api, timeout=600)
 raw = (stage / "manifest-envelope.json").read_bytes()
 run_id = envelope_v2.parse_envelope(raw).run_id
-objects = LocalFSStore(Path(data, "objects"))
+# A run POSTed while the root store already hosts one lives in its own child store.
+child = Path(data, "runs", run_id)
+store = (
+    child if step not in ("objects", "run") and (child / "challenge.db").is_file() else Path(data)
+)
+objects = LocalFSStore(store / "objects")
 out: dict[str, object] = {"run_id": run_id, "step": step}
 if step == "objects":
     names = sorted(stage.glob("policy-*.json")) + [stage / "relay-registry.json"]
@@ -81,7 +86,7 @@ elif step == "genesis":
     out["genesis"] = [r.status_code, r.text[:300]]
     out["origins"] = [o["origin_id"] for o in origins]
 elif step == "status":
-    db = sqlite3.connect(Path(data, "challenge.db").as_uri() + "?mode=ro", uri=True)
+    db = sqlite3.connect((store / "challenge.db").as_uri() + "?mode=ro", uri=True)
     out["runs"] = db.execute("SELECT run_id, status FROM runs").fetchall()
     out["records"] = db.execute(
         "SELECT kind, id, substr(data, 1, 160) FROM records_v2 WHERE run_id=? AND kind IN "
