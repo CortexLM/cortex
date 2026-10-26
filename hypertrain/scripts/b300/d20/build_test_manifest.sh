@@ -18,6 +18,8 @@
 # (1 layer, d_model 8, vocab 16, seq 4, H=1 J=1, 16 samples), layout n_gpus=1, for a cpu-backend
 # TEST run whose references and audits the challenge replays on CPU.
 # HT_D20_COLDKEYS=N (default 2) seeds cold-0..cold-N-1, each with 20000 genesis units.
+# HT_D20_RELAY_PUBKEY (required): SS58 of the relay key k1 that relay-joinbase signs with; the
+# current value is the `pubkey` of /data/relay/config/relay.json on s100 (k1).
 # inputs/genesis-allocation.json and inputs/proofs.json feed the run's genesis and dataset intake.
 # Only the model geometry and inner settings come from S3's dense_qualify.py; the dp2 layout
 # and the codec error-feedback setting were not part of S3's qualification. The dry run checks
@@ -36,7 +38,7 @@ SM_COUNT=$3
 OUT=$4
 EXP_ROUND=${5:-}
 RELAY_URL=${HT_D20_RELAY_URL:-https://relay.joinbase.ai}
-RELAY_PUBKEY=${HT_D20_RELAY_PUBKEY:-5G6pRydHHhv5Hr9PsHoDJdgbMpFJ86a47b5m2i7UYb2GfqCp}
+RELAY_PUBKEY=${HT_D20_RELAY_PUBKEY:?set HT_D20_RELAY_PUBKEY to the SS58 of the TEST relay key k1}
 GEOMETRY=${HT_D20_GEOMETRY:-dense-1b}
 COLDKEYS=${HT_D20_COLDKEYS:-2}
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
