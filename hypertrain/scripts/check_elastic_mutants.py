@@ -3,13 +3,18 @@
 A mutant replaces one exact snippet of one file, the named test runs, and the file is restored.
 The check fails when a test still passes under its mutant (pytest exit 1 is the only kill: a
 collection error is not), when a snippet is not found exactly once, or when the suite fails
-without mutants. Run from hypertrain/:
+without mutants. The child never writes bytecode and the module's cached bytecode is removed
+around each run, so a test always runs the mutant and nothing of it survives the restore; SIGTERM
+and SIGHUP restore the file too. Run from hypertrain/:
 
     uv run --frozen python scripts/check_elastic_mutants.py
 """
 
 from __future__ import annotations
 
+import importlib.util
+import os
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -231,9 +236,10 @@ MUTANTS = (
 
 
 def pytest(target: str) -> int:
-    cmd = [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", target]
+    cmd = [sys.executable, "-B", "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", target]
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     run = subprocess.run(  # noqa: S603  (fixed argv: this interpreter and a test id)
-        cmd, cwd=ROOT, capture_output=True, timeout=900, check=False
+        cmd, cwd=ROOT, env=env, capture_output=True, timeout=900, check=False
     )
     return run.returncode
 
@@ -244,15 +250,20 @@ def check(m: Mutant) -> str:
     text = original.decode()
     if text.count(m.old) != 1:
         return f"snippet found {text.count(m.old)} times"
+    cache = Path(importlib.util.cache_from_source(str(path)))
     try:
         path.write_text(text.replace(m.old, m.new))
+        cache.unlink(missing_ok=True)
         code = pytest(TESTS + m.test)
     finally:
         path.write_bytes(original)
+        cache.unlink(missing_ok=True)
     return "killed" if code == 1 else f"SURVIVED (pytest exit {code})"
 
 
 def main() -> int:
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda signum, _frame: sys.exit(128 + signum))
     if pytest(TESTS) != 0:
         print("the elastic suite fails without mutants")
         return 1
