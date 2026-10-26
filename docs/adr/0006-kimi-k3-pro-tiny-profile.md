@@ -98,6 +98,12 @@ sources above.
   (`trainer/island.py:600`), and this arch's `forward` rejects it with `ValueError`. Islands
   therefore fail closed instead of running a different MoE [V]. Island DP would also need an
   all-reduce of the expert loads, which is not implemented.
+- `trainer/unit_order.train_unit_order` calls `forward` without `moe`, so it is **not**
+  refused. With world > 1, each rank updates its own bias, and the leaves then depend on the
+  world size (reproduced by review, 2026-10-26 [V]). No production caller exists today (only
+  `tests/layout`). A guard there is outside this change's scope and is left to Forge.
+- `grad_accum > 1` would apply the rule once per micro-batch. TEST run documents therefore
+  require `grad_accum == 1` (`train_config`).
 - `HT_COMPILE`, `HT_ACT_CKPT`, `HT_MOE_GROUPED` and FP8 apply to `decoder` only; this arch
   ignores them.
 - GPU determinism on B300 is [?] until the qualification below runs.
@@ -113,9 +119,14 @@ fails under the mutation listed below (CPU run, 2026-10-26 [V]):
 | shared expert | `test_shared_expert_is_added_to_every_token` | shared expert dropped from the output |
 | bias update | `test_bias_update_sign_rule_applies_after_backward_only` | sign of the rule flipped |
 | determinism | `test_two_passes_same_seed_are_bitwise_identical` | unseeded noise on the router logits |
+| selection-only bias | `test_uniform_bias_shift_keeps_selection_and_mixture_weights` | gate computed from biased scores |
+| seq-wise balance loss | `test_sequence_balance_loss_matches_deepseek_v3_formula` | wrong sequence axis; no score normalisation; batch-wise loss |
+| MLA RoPE | `test_mla_matches_independent_reference` | no RoPE on the key; no RoPE on the query; theta doubled |
 
-The file also checks the profile size and K2 layout, forward/backward shapes on the full profile
-and the unsigned TEST run document (strict keys, replay `MATCH`). The dense/moe matrix in
+The last three rows were added after an independent review found that those mutations passed the
+earlier suite. The file also checks the profile size and K2 layout, forward/backward shapes on
+the full profile, and the unsigned TEST run document (strict keys, `grad_accum == 1`, one round
+trains the bias). The dense/moe matrix in
 `tests/trainer/test_trainer_core.py` (two processes, identical roots; replay of every leaf)
 now includes `kimi` (fp32/sparseloco, bf16/dense-int8). `test_profile_two_rounds_bitwise_on_cuda`
 is marked `gpu` and is skipped without CUDA.
@@ -146,3 +157,14 @@ jq -c '.rounds[0] | {leaves_root, delta_hash, state_root}' "$OUT"/kimi-*-1.json
 `state_root` of the v2 capacity genesis cannot be computed for this arch, because no protocol
 manifest can carry it [V]. Agreement across hosts on the same GPU model is [H] until the run
 above; agreement across GPU models or torch builds is not expected.
+
+## CPU evidence (2026-10-26, torch 2.14.0+cpu)
+
+- The profile has 77,001,376 parameters. Init takes 1.3 s and one fp32 forward/backward over
+  1 x 32 tokens takes 0.3 s on the CI host [V].
+- `python -m hypertrain.models.kimi_tiny --device cpu --dtype fp32 --rounds 2` was run in two
+  processes. All four rounds printed `run_id ca9598d7…`, `leaves_root 0e7f7ad8…41b5`,
+  `delta_hash cd441fff…77ab` and `state_root 9e94b577…55d8` [V]. These are CPU fp32 values
+  only. The B300 run uses bf16 and will print different hashes.
+- `implementation_hash` of the v2 capacity profile is `5a0b2374…0190a578a` on both base
+  `4e0a6457` and this branch [V].
