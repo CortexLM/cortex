@@ -4,7 +4,8 @@ Hosts are 8-GPU units running a toy deterministic training workload against the 
 Coordinator, CheckpointManager, DrainHandler and FakeNoticeSource on one FakeClock. Seeded fault
 schedules take hosts away: a provider notice then a kill, a hard kill (the process dies and
 restarts on the same host), a host loss (the machine is gone and a replacement is provisioned),
-a network partition, a correlated regional loss and a capacity drought. A run must end in the
+a network partition, a partition from the store only, a correlated regional loss and a capacity
+drought. A run must end in the
 state hash of the run without faults, with every accepted link in the final chains, no step
 credited twice, every loss of progress within one checkpoint interval and no penalty for an
 honest host.
@@ -136,6 +137,13 @@ class SimConfig:
         if self.ttl_ms <= self.heartbeat_ms:
             raise ValueError("ttl_ms must exceed heartbeat_ms")
 
+    @property
+    def progress_ms(self) -> int:
+        """The coordinator's progress deadline: twice the longest honest wait for one link."""
+        return 2 * (
+            self.heartbeat_ms + self.restore_ms + self.ckpt_every * self.step_ms + self.ckpt_ms
+        )
+
     def horizon_ms(self) -> int:
         """Rough makespan without faults, the window in which faults are drawn."""
         waves = -(-self.shards // self.hosts)
@@ -147,7 +155,8 @@ class SimConfig:
 class Fault:
     """`notice`: interruption notice at `at_ms`, kill at `until_ms`. `kill`: the process dies
     and restarts on the same host. `loss`: the host is gone. `partition`: the host cannot reach
-    the coordinator or the store until `until_ms`."""
+    the coordinator or the store until `until_ms`. `store-partition`: it reaches the coordinator
+    but not the store."""
 
     at_ms: int
     kind: str
@@ -169,6 +178,7 @@ SCENARIOS = (
     "kill",
     "loss",
     "partition",
+    "store-partition",
     "region-notice",
     "region-loss",
     "drought",
@@ -199,11 +209,14 @@ def schedule(name: str, cfg: SimConfig, seed: int) -> Schedule:
         if kind == "partition":
             span = rng.randrange(cfg.ttl_ms // cfg.tick_ms + 1, 4 * cfg.ttl_ms // cfg.tick_ms)
             return Fault(at, kind, target, at + span * cfg.tick_ms)
+        if kind == "store-partition":
+            span = rng.randrange(cfg.progress_ms // cfg.tick_ms, 3 * cfg.progress_ms // cfg.tick_ms)
+            return Fault(at, kind, target, at + span * cfg.tick_ms)
         return Fault(at, kind, target)
 
     if name == "none":
         return Schedule(name)
-    if name in ("notice", "short-notice", "kill", "loss", "partition"):
+    if name in ("notice", "short-notice", "kill", "loss", "partition", "store-partition"):
         return Schedule(name, (fault(name, when(), slot()),))
     if name in ("region-notice", "region-loss"):
         at, kind = when(), name.removeprefix("region-")
@@ -213,7 +226,7 @@ def schedule(name: str, cfg: SimConfig, seed: int) -> Schedule:
         lost = tuple(fault("loss", at, s) for s in region())
         return Schedule(name, lost, ((at, at + 6 * cfg.provision_ms),))
     if name == "churn":
-        kinds = ("notice", "short-notice", "kill", "loss", "partition")
+        kinds = ("notice", "short-notice", "kill", "loss", "partition", "store-partition")
         faults = sorted(
             (fault(rng.choice(kinds), when(), slot()) for _ in range(rng.randrange(2, 9))),
             key=lambda f: (f.at_ms, f.slot),
@@ -328,7 +341,7 @@ class _Host:
     def tick(self) -> None:
         if not self.alive or self.left:
             return
-        if self.leaving is not None and not self.sim.reachable(self.slot):
+        if self.leaving is not None and not self.sim.store_reachable(self.slot):
             self.drain_partitioned = True
         if self.busy_until and self.now >= self.busy_until:
             self._free()
@@ -398,6 +411,9 @@ class _Host:
 
     def _restore(self, a: Assignment) -> None:
         def resumed() -> None:
+            if not self.sim.store_reachable(self.slot):
+                self._busy(self.sim.cfg.tick_ms, "restore", resumed)
+                return
             step, state = self.sim.checkpoints.resume(a.unit, a.head)
             self.work = _Work(a.unit, step, state, a.head, step)
             self.sim.resumes += 1
@@ -459,7 +475,7 @@ class _Host:
         unit, parent, step, state = w.unit, w.committed, w.step, w.state
 
         def written() -> None:
-            if not self.sim.reachable(self.slot):
+            if not self.sim.store_reachable(self.slot):
                 self._busy(self.sim.cfg.tick_ms, "ckpt", written)
                 return
             key = self.sim.checkpoints.save(unit, parent, step, state, self.member, lease.token)
@@ -487,6 +503,7 @@ class _Host:
         """Send the signed leave, retried every tick while the coordinator is unreachable."""
         assert self.leaving is not None and self.lease is not None
         if not self.sim.reachable(self.slot):
+            self.drain_partitioned = True
             return
         if self.unacked is not None:
             self._commit(*self.unacked)
@@ -573,6 +590,7 @@ class Simulation:
             clock=self.clock,
             store=self.store,
             ttl_ms=cfg.ttl_ms,
+            progress_ms=cfg.progress_ms,
             seed=SIM_TAG + struct.pack(">Q", seed),
             audit=self._audit,
         )
@@ -581,6 +599,7 @@ class Simulation:
         self.incarnations: Counter[int] = Counter()
         self.events: list[_Event] = []
         self.partitions: dict[int, int] = {}
+        self.store_partitions: dict[int, int] = {}
         self.losses: list[Loss] = []
         self.computed = 0
         self.accepted = 0
@@ -600,6 +619,9 @@ class Simulation:
 
     def reachable(self, slot: int) -> bool:
         return self.clock.now_ms() >= self.partitions.get(slot, 0)
+
+    def store_reachable(self, slot: int) -> bool:
+        return self.reachable(slot) and self.clock.now_ms() >= self.store_partitions.get(slot, 0)
 
     def _audit(self, unit: WorkUnit, manifest: CheckpointManifest) -> bool:
         """Replay the link from its parent state: the auditor of the toy workload."""
@@ -621,6 +643,12 @@ class Simulation:
             if start <= at < end:
                 at = end
         self.events.append(_Event(at, "boot", slot))
+
+    def _new_machine(self, slot: int) -> None:
+        """A replacement is another machine: the old one's partitions do not follow it."""
+        self.partitions.pop(slot, None)
+        self.store_partitions.pop(slot, None)
+        self._replace(slot, self.cfg.provision_ms, droughts=True)
 
     def _open(self, round_: int) -> None:
         base = self.store.put(self.state)
@@ -646,10 +674,11 @@ class Simulation:
             self._replace(f.slot, self.cfg.restart_ms, droughts=False)
         elif f.kind == "loss":
             host.die("loss")
-            self.partitions.pop(f.slot, None)
-            self._replace(f.slot, self.cfg.provision_ms, droughts=True)
+            self._new_machine(f.slot)
         elif f.kind == "partition":
             self.partitions[f.slot] = f.until_ms
+        elif f.kind == "store-partition":
+            self.store_partitions[f.slot] = f.until_ms
         else:
             raise ValueError(f"unknown fault {f.kind!r}")
 
@@ -661,8 +690,7 @@ class Simulation:
             host = self.hosts[e.slot]
             if e.kind == "evict" and host.alive and host.incarnation == e.incarnation:
                 host.die("notice")
-                self.partitions.pop(e.slot, None)
-                self._replace(e.slot, self.cfg.provision_ms, droughts=True)
+                self._new_machine(e.slot)
             elif e.kind == "boot" and not host.alive and not host.retired:
                 self._boot(e.slot)
 
@@ -800,13 +828,14 @@ def table(results: Sequence[SimResult], cfg: SimConfig) -> str:
     """Markdown table: one row per run, waste in inner steps and GPU-hours."""
     step_gpu_ms = cfg.step_ms * cfg.gpus_per_host
     rows = [
-        "| scenario | done | final = ref | exits (notice/lapse/replaced/revoked) | penalised "
-        "| computed | accepted | wasted | max loss (bound) | drain s | makespan min | GPU-h "
-        "| useful % |",
+        "| scenario | done | final = ref | exits (notice/lapse/stalled/replaced/revoked) "
+        "| penalised | computed | accepted | wasted | max loss (bound) | drain s "
+        "| makespan min | GPU-h | useful % |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
-        exits = "/".join(str(r.exits.get(k, 0)) for k in ("notice", "lapse", "replaced", "revoked"))
+        kinds = ("notice", "lapse", "stalled", "replaced", "revoked")
+        exits = "/".join(str(r.exits.get(k, 0)) for k in kinds)
         useful = 100 * r.accepted_steps * step_gpu_ms / r.gpu_ms if r.gpu_ms else 0.0
         rows.append(
             f"| {r.scenario} | {'yes' if r.completed else 'NO'} | {'yes' if r.final_ok else 'NO'} "

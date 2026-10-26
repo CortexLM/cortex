@@ -85,6 +85,20 @@ MUTANTS = (
         "test_coordinator.py::test_a_departure_moves_only_the_departed_members_shards",
     ),
     Mutant(
+        "a holder that never progresses keeps its shard",
+        SRC + "coordinator.py",
+        "if s.holder is not None and now - s.since_ms >= self.progress_ms",
+        "if False",
+        "test_coordinator.py::test_a_holder_that_stops_progressing_loses_its_shard_unpenalised",
+    ),
+    Mutant(
+        "an accepted link does not restart the progress deadline",
+        SRC + "coordinator.py",
+        "s.head, s.step, s.since_ms = key, manifest.step, self.clock.now_ms()",
+        "s.head, s.step = key, manifest.step",
+        "test_coordinator.py::test_a_holder_that_stops_progressing_loses_its_shard_unpenalised",
+    ),
+    Mutant(
         "a non-holder extends a shard",
         SRC + "coordinator.py",
         "if s.holder != Holder(member, token):",
@@ -132,7 +146,7 @@ MUTANTS = (
         "replacement host does not inherit the shards",
         SRC + "coordinator.py",
         "            for s in self._held(replaced.token):\n"
-        "                s.holder = Holder(member, lease.token)\n",
+        "                s.holder, s.since_ms = Holder(member, lease.token), self.clock.now_ms()\n",
         "",
         "test_coordinator.py::test_a_replacement_host_resumes_the_shard_from_the_accepted_head",
     ),

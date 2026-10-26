@@ -7,7 +7,7 @@ import pytest
 
 from hypertrain.elastic.checkpoint import CheckpointError, CheckpointManifest, WorkUnit
 from hypertrain.elastic.clock import FakeClock
-from hypertrain.elastic.coordinator import Coordinator, CoordinatorError, Exit
+from hypertrain.elastic.coordinator import Coordinator, CoordinatorError, Exit, Holder
 from hypertrain.elastic.membership import Lease, LeaseError
 from hypertrain.elastic.notice import LeaveNotice, NoticeError, SignedLeave, sign_leave
 from hypertrain.elastic.store import MemoryCheckpointStore
@@ -16,6 +16,7 @@ from hypertrain.protocol.keys import Keypair
 RUN = "run-1"
 POLICY = hashlib.sha256(b"policy").hexdigest()
 TTL = 1_000
+PROGRESS = 4_000
 KEYS = {name: Keypair(bytes([i + 1]) * 32) for i, name in enumerate("abcdz")}
 
 
@@ -24,7 +25,15 @@ def setup(
 ) -> tuple[FakeClock, Coordinator, list[WorkUnit]]:
     clock = FakeClock()
     store = MemoryCheckpointStore()
-    coord = Coordinator(run_id=RUN, clock=clock, store=store, ttl_ms=TTL, seed=b"s", audit=audit)
+    coord = Coordinator(
+        run_id=RUN,
+        clock=clock,
+        store=store,
+        ttl_ms=TTL,
+        progress_ms=PROGRESS,
+        seed=b"s",
+        audit=audit,
+    )
     base = store.put(b"base")
     units = [WorkUnit(RUN, POLICY, 0, shard, base, 6) for shard in range(shards)]
     coord.open_round(units)
@@ -83,6 +92,35 @@ def test_a_lapsed_lease_releases_its_shard_and_head_without_a_tick() -> None:
     assert [(d.member, d.kind, d.released) for d in departures] == [("a", Exit.LAPSE, (0,))]
     with pytest.raises(LeaseError):
         coord.commit("a", a.token, 0, link(coord, unit, k3, 6, a))
+
+
+def test_a_holder_that_stops_progressing_loses_its_shard_unpenalised() -> None:
+    clock, coord, (unit,) = setup()
+    a, b = join(coord, "a"), join(coord, "b")
+
+    def wait(ms: int) -> None:  # both keep heartbeating, so no lease runs out
+        for _ in range(ms // 500):
+            clock.advance(500)
+            coord.heartbeat("b", b.token)
+            if coord.membership.get("a").status == "active":
+                coord.heartbeat("a", a.token)
+
+    wait(1_000)
+    k3 = link(coord, unit, None, 3, a)
+    coord.commit("a", a.token, 0, k3)  # progress: the deadline restarts here
+    wait(PROGRESS - 500)
+    assert coord.holder(0) == Holder("a", a.token)
+    wait(500)
+    assert [(d.member, d.kind, d.released) for d in coord.settle().departures] == [
+        ("a", Exit.STALLED, (0,))
+    ]
+    assert coord.holder(0) == Holder("b", b.token)
+    assert coord.heartbeat("b", b.token).assignments[0].head == k3
+    with pytest.raises(LeaseError) as e:
+        coord.heartbeat("a", a.token)
+    assert e.value.code == "LAPSED"
+    settlement = coord.settle()
+    assert settlement.penalties == {} and settlement.credits == {"owner-a": 3}
 
 
 def test_a_departure_moves_only_the_departed_members_shards() -> None:

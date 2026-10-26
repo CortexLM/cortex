@@ -24,7 +24,7 @@ from hypertrain.elastic.sim import (
 )
 
 CFG = SimConfig()
-LOSSY = ("kill", "loss", "partition", "region-loss", "drought", "churn")
+LOSSY = ("kill", "loss", "partition", "store-partition", "region-loss", "drought", "churn")
 
 
 @pytest.mark.parametrize("seed", range(4))
@@ -69,7 +69,8 @@ def test_lapses_and_notices_never_penalise_an_honest_miner() -> None:
             result = simulate(CFG, name, seed)
             assert result.penalized == ()
             exits.update(result.exits)
-    assert exits["lapse"] > 0 and exits["notice"] > 0 and exits["replaced"] == 0
+    assert exits["lapse"] > 0 and exits["notice"] > 0 and exits["stalled"] > 0
+    assert exits["replaced"] == 0
     restarts = replace(CFG, restart_ms=5_000)  # back before the lease runs out: a replacement
     assert sum(simulate(restarts, "kill", seed).exits.get("replaced", 0) for seed in range(4))
     assert all(simulate(restarts, "kill", seed).penalized == () for seed in range(4))

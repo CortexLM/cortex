@@ -100,6 +100,12 @@ class Membership:
         m.status = Status.LEFT
         return m
 
+    def lapse(self, member: str) -> Member:
+        """End a live lease now, as if it had run out; the member may join again."""
+        m = self._members[member]
+        m.status = Status.LAPSED
+        return m
+
     def revoke(self, member: str) -> Member:
         m = self._members[member]
         m.status = Status.REVOKED

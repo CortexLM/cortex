@@ -1,11 +1,13 @@
 """Coordinator of one elastic run: membership, shard holders, checkpoint heads and credit.
 
-Every entry point first lapses expired leases, so no decision rests on a dead lease. A shard has
+Every entry point first lapses expired leases, so no decision rests on a dead lease, and ends
+the lease of any holder that made no accepted link within `progress_ms` of being given a shard
+or of its last link: a host that heartbeats but cannot upload never stalls a round. A shard has
 at most one holder, a (member, token) pair, and only that holder extends the shard's head, by a
 link whose parent is the head (compare-and-set). Accepted links are never undone. Credit is the
 number of steps each accepted link adds, paid to the owner of the member that produced it.
-Leaving, lapsing or being replaced costs a member nothing it had accepted; only a link that
-fails the audit is penalised, and its member is revoked.
+Leaving, lapsing, stalling or being replaced costs a member nothing it had accepted; only a link
+that fails the audit is penalised, and its member is revoked.
 
 The coordinator is single-threaded state: production serialises calls (the master's store or a
 Durable Object, ADR 0003) and persists the ordered calls, which replay to the same state.
@@ -38,6 +40,7 @@ class CoordinatorError(Exception):
 class Exit(StrEnum):
     NOTICE = "notice"  # signed leave notice under a live lease
     LAPSE = "lapse"  # lease ran out: hard kill, host loss or partition
+    STALLED = "stalled"  # no accepted link within progress_ms; its lease is ended
     REPLACED = "replaced"  # the same member id joined from another host
     REVOKED = "revoked"  # one of its links failed the audit
 
@@ -95,6 +98,7 @@ class _Shard:
     step: int = 0
     links: list[Link] = field(default_factory=list)
     accepted: dict[str, int] = field(default_factory=dict)
+    since_ms: int = 0  # holder assigned or last link accepted
 
     @property
     def done(self) -> bool:
@@ -121,12 +125,16 @@ class Coordinator:
         clock: Clock,
         store: CheckpointStore,
         ttl_ms: int,
+        progress_ms: int,
         seed: bytes,
         capacity: int = 1,
         audit: Audit | None = None,
     ) -> None:
         if capacity < 1:
             raise ValueError("capacity must be >= 1")
+        if progress_ms <= 0:
+            raise ValueError("progress_ms must be > 0")
+        self.progress_ms = progress_ms
         self.run_id = run_id
         self.clock = clock
         self.membership = Membership(clock, ttl_ms)
@@ -168,7 +176,7 @@ class Coordinator:
         lease, replaced = self.membership.join(member, owner, signer)
         if replaced is not None:
             for s in self._held(replaced.token):
-                s.holder = Holder(member, lease.token)
+                s.holder, s.since_ms = Holder(member, lease.token), self.clock.now_ms()
             self._record(member, owner, replaced.token, Exit.REPLACED, ())
         self._assign()
         return self._grant(lease)
@@ -222,7 +230,7 @@ class Coordinator:
             raise CoordinatorError("AUDIT_FAILED", key)
         s.links.append(Link(key, member, m.owner, manifest.step - s.step))
         s.accepted[key] = manifest.step
-        s.head, s.step = key, manifest.step
+        s.head, s.step, s.since_ms = key, manifest.step, self.clock.now_ms()
         if s.done:
             s.holder = None
             self._assign()
@@ -275,7 +283,17 @@ class Coordinator:
         return d
 
     def _sweep(self) -> list[Departure]:
-        return [self._depart(m, Exit.LAPSE) for m in self.membership.expire()]
+        out = [self._depart(m, Exit.LAPSE) for m in self.membership.expire()]
+        now = self.clock.now_ms()
+        late = {
+            s.holder.member
+            for s in self._shards.values()
+            if s.holder is not None and now - s.since_ms >= self.progress_ms
+        }
+        out += [
+            self._depart(self.membership.lapse(member), Exit.STALLED) for member in sorted(late)
+        ]
+        return out
 
     def _assign(self) -> None:
         pending = [shard for shard, s in self._shards.items() if s.holder is None and not s.done]
@@ -285,5 +303,9 @@ class Coordinator:
         live = {m.id: m.lease.token for m in self.membership.active()}
         free = {member: self.capacity - load[token] for member, token in live.items()}
         seed = self.seed + struct.pack(">Q", self.round)
+        now = self.clock.now_ms()
         for shard, member in plan(seed, pending, free).items():
-            self._shards[shard].holder = Holder(member, live[member])
+            self._shards[shard].holder, self._shards[shard].since_ms = (
+                Holder(member, live[member]),
+                now,
+            )
