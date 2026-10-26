@@ -75,6 +75,8 @@ fi
 out=$results_root/$host
 mkdir -p "$out/steps"
 exec > >(tee -a "$out/run.log") 2>&1
+exec 9>"$out/.lock"
+flock -n 9 || die "another run_host.sh holds $out/.lock"
 run_id=$(date -u +%Y%m%dT%H%M%SZ)-$$
 deadline=$(($(date +%s) + seconds))
 log() { echo "[$(date -u +%H:%M:%S)] $*"; }
@@ -103,7 +105,7 @@ watchdog() {
     return
   done
 }
-watchdog $$ &
+watchdog $$ 9>&- &
 watchdog_pid=$!
 
 upload_results() {
@@ -137,7 +139,7 @@ rows = [r.split("\t") for r in tsv.read_text().splitlines() if r] if tsv.exists(
 notice = out / "spot-instance-action.json"
 stop = {
     "run_id": run_id, "reason": reason, "rc": int(rc), "image": image,
-    "steps": {p.stem: int(p.read_text()) for p in sorted((out / "steps").glob("*.rc"))},
+    "steps": {p.stem: int(p.read_text().split()[0]) for p in sorted((out / "steps").glob("*.rc"))},
     "ran": [r[0] for r in rows if r[3:4] == [run_id]],
     "spot_notice": json.loads(notice.read_text()) if notice.exists() else None,
 }
@@ -160,14 +162,14 @@ step() {
   local name=$1 t0 rc=0
   shift
   [[ " $steps " == *" $name "* ]] || return 0
-  if [ "$force" = 0 ] && [ "$name" != host_probe ] && [ "$(cat "$out/steps/$name.rc" 2>/dev/null)" = 0 ]; then
-    log "skip $name: passed in an earlier run"
+  if [ "$force" = 0 ] && [ "$name" != host_probe ] && [ "$(cat "$out/steps/$name.rc" 2>/dev/null)" = "0 $image" ]; then
+    log "skip $name: passed in an earlier run with this image"
     return 0
   fi
   log "step $name"
   t0=$(date +%s)
   "$@" || rc=$?
-  echo "$rc" >"$out/steps/$name.rc"
+  echo "$rc $image" >"$out/steps/$name.rc"
   printf '%s\t%s\t%s\t%s\n' "$name" "$rc" "$(($(date +%s) - t0))" "$run_id" >>"$out/steps.tsv"
   log "step $name rc=$rc"
   return "$rc"
@@ -180,7 +182,7 @@ container() {
   "$DOCKER" rm -f "$name" >/dev/null 2>&1 || true
   "$DOCKER" run --rm --init --name "$name" --label "io.cortex.b300-run=$run_id" --gpus all \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
-    -v "$HT:/opt/ht:ro" -v "$out:/out" -w /opt/ht/scripts "$@" &
+    -v "$HT:/opt/ht:ro" -v "$out:/out" -w /opt/ht/scripts "$@" 9>&- &
   wait $!
 }
 PY=/opt/hypertrain/venv/bin/python
@@ -201,7 +203,7 @@ host_probe() {
 }
 pull() {
   local got
-  "$DOCKER" pull "$image" >"$out/pull.log" 2>&1 &
+  "$DOCKER" pull "$image" >"$out/pull.log" 2>&1 9>&- &
   wait $! || { tail -n 20 "$out/pull.log"; return 1; }
   got=$("$DOCKER" image inspect --format '{{json .RepoDigests}}' "$image") || return
   echo "$got" >"$out/pull-digests.json"
@@ -215,8 +217,10 @@ mfu() {
   # sdpa-flash is qualified for sm_120 only (trainer/attention.py QUALIFIED_BACKENDS), so on
   # sm_103 select_backend returns math; HT_ATTN_BACKEND forces the flash path, as on the 5090.
   local ev=mfu-dp$EXPECT_GPUS-flash.json
-  container mfu --network none -e HT_ATTN_BACKEND=sdpa-flash -e PET_LOG_DIR=/out/torchelastic \
-    -e PET_TEE=3 --entrypoint "$PY" "$image" -m torch.distributed.run --standalone \
+  # Default network: torchrun --standalone resolves the container hostname for its store. Rank
+  # output is teed into run.log; a PET_LOG_DIR under /out would be a root-only 0700 directory.
+  container mfu -e HT_ATTN_BACKEND=sdpa-flash -e PET_TEE=3 --entrypoint "$PY" "$image" \
+    -m torch.distributed.run --standalone \
     --nproc-per-node "$EXPECT_GPUS" run_mfu_dist.py --profile "mfu-dense-1b-dp$EXPECT_GPUS" \
     --device cuda --reduction zero2o --act-ckpt --warmup 1 ${PEAK:+--measured-peak "$PEAK"} \
     --out "/out/$ev" || return
@@ -241,7 +245,7 @@ miner_test() {
     -e PATH=/opt/ht/scripts/b300/shim:/opt/hypertrain/venv/bin:/usr/local/bin:/usr/bin:/bin \
     -e MINE_SMOKE_V2_EVIDENCE=/out/mine-smoke-v2.json --entrypoint bash "$image" -c \
     'uv-pinned pip install --quiet --target /tmp/pyextra pytest==9.1.1 &&
-     exec timeout -k 5 "$1" python scripts/mine_smoke_v2.py' smoke "$SMOKE_BUDGET" \
+     exec timeout -k 5 "$1" python mine_smoke_v2.py' smoke "$SMOKE_BUDGET" \
     >"$out/mine-smoke-v2.stdout" || return
   python3 - "$out/mine-smoke-v2.json" <<'PY'
 import json, sys

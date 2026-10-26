@@ -53,6 +53,17 @@ elif cmd == "run":
     label = argv[argv.index("--label") + 1].split("=", 1)[1]
     mounts = dict(a.split(":")[:2] for a in argv if a.count(":") >= 1 and a.startswith("/"))
     out = pathlib.Path(next(h for h, c in mounts.items() if c == "/out"))
+    # Resolve the program like python would: relative to -w, through the bind mounts.
+    workdir = argv[len(argv) - 1 - argv[::-1].index("-w") + 1]
+    if "-c" in argv:
+        prog = next(w for w in argv[argv.index("-c") + 1].split() if w.endswith(".py"))
+    else:
+        prog = next((a for a in argv if a.endswith(".py")), None)
+    if prog is not None:
+        path = prog if prog.startswith("/") else f"{workdir}/{prog}"
+        host = next((h + path[len(c):] for h, c in mounts.items() if path.startswith(c + "/")), "")
+        if not pathlib.Path(host).is_file():
+            sys.exit(f"python: can't open file {path!r}")
     if name == os.environ.get("FAKE_BLOCK"):
         ctr = state / f"ctr-{name}"
         ctr.write_text(label)
@@ -191,7 +202,8 @@ def test_full_run_pins_the_digest_and_runs_the_8gpu_flash_bench(env, tmp_path):
     assert ["pull", IMAGE] in docker_calls(tmp_path)
     (mfu,) = runs_of(tmp_path, "mfu")
     assert mfu[mfu.index("--entrypoint") + 2] == IMAGE
-    assert "HT_ATTN_BACKEND=sdpa-flash" in mfu and mfu[mfu.index("--network") + 1] == "none"
+    assert "HT_ATTN_BACKEND=sdpa-flash" in mfu
+    assert "--network" not in mfu  # torchrun --standalone must resolve the container hostname
     assert mfu[mfu.index("--nproc-per-node") + 1] == "8"
     assert mfu[mfu.index("--profile") + 1] == "mfu-dense-1b-dp8"
     assert "--nccl-pcie" not in mfu  # B300 GPUs talk over NVLink
@@ -241,6 +253,25 @@ def test_rerun_skips_passed_steps_but_reprobes_the_host(env, tmp_path):
     assert ["info", "--format", "{{.DockerRootDir}}"] in again  # host probe ran again
     assert run(env, tmp_path, "--force", "--steps", "mfu").returncode == 0
     assert len(runs_of(tmp_path, "mfu")) == 2
+
+
+def test_new_image_reruns_steps_that_passed_with_the_old_one(env, tmp_path):
+    assert run(env, tmp_path).returncode == 0
+    other = f"ghcr.io/cortexlm/cortex/hypertrain-gpu@sha256:{'1' * 64}"
+    assert run({**env, "FAKE_PULL_RC": "1"}, tmp_path, "--image", other).returncode == 4
+    assert ["pull", other] in docker_calls(tmp_path)
+
+
+def test_a_second_run_on_the_same_results_is_refused(env, tmp_path):
+    import fcntl
+
+    out = tmp_path / "results/h1"
+    out.mkdir(parents=True)
+    with (out / ".lock").open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        p = run(env, tmp_path)
+    assert p.returncode == 2 and ".lock" in p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
 
 
 def test_mfu_replay_mismatch_fails_and_stops_before_mining(env, tmp_path):
