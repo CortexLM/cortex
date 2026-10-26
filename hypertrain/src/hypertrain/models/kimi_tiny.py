@@ -41,7 +41,6 @@ from torch import Tensor
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.trainer.config import CompressConfig, InnerConfig, ModelConfig, TrainConfig
 from hypertrain.trainer.model import (
-    ARCH_REGISTRY,
     Params,
     _apply_rope,
     _rms,
@@ -106,11 +105,6 @@ class Dims:
     q_rank: int  # q_lora_rank = 12 * head (K2 1536)
     kv_rank: int  # kv_lora_rank = 4 * head (K2 512)
     dense_ff: int  # first-layer FFN = (top_k + shared) * expert ff (K2 18432 = 9 * 2048)
-
-
-def register() -> None:
-    """Opt-in runtime registration; the permanent ARCH_REGISTRY line is hash-covered (Forge)."""
-    ARCH_REGISTRY[ARCH] = "hypertrain.models.kimi_tiny"  # not __name__: "__main__" under -m
 
 
 def dims(cfg: ModelConfig) -> Dims:
@@ -375,7 +369,6 @@ def qualify(doc: dict[str, Any], device: str, rounds: int) -> list[dict[str, str
     within a host (bitwise) and across hosts."""
     from hypertrain.trainer.loop import Assignment, train_round
 
-    register()
     cfg = train_config(doc)
     run_id = run_manifest_id(doc)
     n = cfg.inner.H * cfg.inner.micro_batch * cfg.inner.grad_accum

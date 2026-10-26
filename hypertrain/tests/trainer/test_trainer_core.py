@@ -35,7 +35,7 @@ from hypertrain.trainer.compress import (
 from hypertrain.trainer.config import CompressConfig, InnerConfig, TrainConfig
 from hypertrain.trainer.determinism import apply_reference_env
 from hypertrain.trainer.loop import Assignment, batch_hash, replay, stage_states, train_round
-from hypertrain.trainer.model import ARCH_REGISTRY, init_params, route
+from hypertrain.trainer.model import init_params, route
 from hypertrain.trainer.optim import OptState, derive_v0, init_state
 from hypertrain.trainer.rng import philox4x32, rng_ctr
 
@@ -113,8 +113,7 @@ def test_late_setup_after_bare_torch_import_is_rejected() -> None:
 
 
 @pytest.mark.parametrize("arch", ["dense", "moe", "kimi"])
-def test_replay_reproduces_every_leaf(arch: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(ARCH_REGISTRY, "kimi-k3-pro-tiny", "hypertrain.models.kimi_tiny")
+def test_replay_reproduces_every_leaf(arch: str) -> None:
     cfg = make_kimi_cfg() if arch == "kimi" else make_cfg(moe=arch == "moe")
     theta0, a, get = init_params(cfg.model), assignment(cfg), sample(cfg)
     res = train_round(cfg, theta0, a, get)

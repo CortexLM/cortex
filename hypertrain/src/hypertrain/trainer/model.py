@@ -20,6 +20,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
+from hypertrain.models.registry import ARCH_REGISTRY
 from hypertrain.trainer.attention import attention, select_backend
 from hypertrain.trainer.config import ModelConfig
 from hypertrain.trainer.rng import rng_ctr, uniform_f64
@@ -27,15 +28,11 @@ from hypertrain.trainer.rng import rng_ctr, uniform_f64
 Params = dict[str, Tensor]
 
 
-# Model registry: arch name -> module exposing param_shapes/stage_of/init_params/forward.
-ARCH_REGISTRY = {"od-encoder": "hypertrain.models.opendecision"}
-
-
 def _arch_impl(cfg: ModelConfig) -> ModuleType:
     """Non-decoder architecture module from ARCH_REGISTRY (patch point for tests)."""
     if cfg.arch not in ARCH_REGISTRY:
-        raise ValueError(f"unknown arch {cfg.arch!r}; registered: decoder, {sorted(ARCH_REGISTRY)}")
-    return importlib.import_module(ARCH_REGISTRY[cfg.arch])
+        raise ValueError(f"unknown arch {cfg.arch!r}; registered: {sorted(ARCH_REGISTRY)}")
+    return importlib.import_module(ARCH_REGISTRY[cfg.arch].module)
 
 
 def compute_dtype(cfg: ModelConfig) -> torch.dtype:

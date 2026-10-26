@@ -12,15 +12,10 @@ import torch
 import hypertrain.models.kimi_tiny as kt
 from hypertrain.trainer.config import ModelConfig
 from hypertrain.trainer.loop import Assignment, train_round
-from hypertrain.trainer.model import ARCH_REGISTRY, Params, forward, init_params, param_shapes
+from hypertrain.trainer.model import Params, forward, init_params, param_shapes
 
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device (B300)")
 MOE = "layers.001."
-
-
-@pytest.fixture(autouse=True)
-def _registered(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(ARCH_REGISTRY, kt.ARCH, kt.__name__)
 
 
 def _tokens(cfg: ModelConfig, b: int, t: int, seed: int = 0) -> torch.Tensor:

@@ -276,6 +276,7 @@ def preadmission_collector_regression() -> None:
                 "aggregator/tape_v2.py",
                 "auditor/replay.py",
                 "miner/island_launch.py",
+                "models/registry.py",
                 "trainer/compress.py",
                 "trainer/config.py",
                 "trainer/model.py",
