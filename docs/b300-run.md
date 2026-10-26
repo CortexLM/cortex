@@ -234,6 +234,43 @@ for at least 65 s. Rows named `[No data]` (about 1 GiB) also appeared on the GPU
 process ids among that step's own; their owner was not established, and a short-lived process of the step
 itself can show this way. These are observations, not a schedule: keep gating.
 
+## Local CUDA run-v2 (d20 harness)
+
+`hypertrain/scripts/b300/d20/run_container.sh` runs the repository's two CPU end-to-end scripts
+(`scripts/mine_smoke_v2.py`, `scripts/mine_multi_round_v2.py`) with a CUDA miner and CUDA audits on
+one GPU of a B300 host:
+
+```text
+run_container.sh --image REPO@sha256:<64 hex> --gpu N --out DIR [--mode smoke|multi]
+                 [--driver 595.91.07] [--sm-count 148] [--no-gate] [--gate-timeout SECONDS]
+```
+
+It waits for `cycle_gate.sh` (unless `--no-gate`), starts `gpu_watch.sh`, then runs one `--rm`
+container named `ht-s9-<mode>` on `--gpus device=N` with the checkout mounted read-only at
+`/opt/ht` first on `PYTHONPATH` (and `pytest==9.1.1` installed from PyPI inside the container). Use a
+GPU other than 0: the validator's challenge takes GPU 0 first. `--out` must not exist. It writes
+`gate.jsonl`, `gpu-watch.{apps,mem}.csv`, `stdout.log`, `stderr.log`, `events.jsonl`, the script's
+evidence (`multi.json` or `mine-smoke-v2.json`) and `run.json` (window, exit code, and every executor
+SSH-key marker inside the window).
+
+Real: the challenge app, the TLS relay, the `hypertrain-miner` processes, admission, the probation
+trials, the CUDA training inside `run-v2`, the audits (replayed in the challenge process on the same
+GPU), aggregation and `get_weights`. The miner's CUDA worker gates (torch `2.14.0+cu130`,
+`HT_IMAGE_DIGEST`, driver allowlist, SM count) apply. Substituted, as `d20/gpu_run_v2.py` states:
+
+- the fixture manifest's `reference_spec` is pinned to the B300 image, driver and SM count, which
+  gives a new `run_id`;
+- the CUDA qualification record is a fixture-owner-signed **stand-in**, installed before the run is
+  created. The real record needs two results from two distinct machines, which one host cannot
+  give, so a PASS here does not exercise `_bootstrap_backend_v2`;
+- `role-dispatch.json` is written from the challenge process's own GPU and is not a dispatcher's
+  record; its image digest is `HT_IMAGE_DIGEST`, the same variable that pins the manifest;
+- the subnet transport and the beacon are the pytest network fixture's.
+
+The harness also logs a `device_class` event: the capability and SM count torch reports for the
+visible GPUs, and the verdict of the repository's own `unqualified_device` (ADR 0007), `null` when
+the pair is in the table.
+
 ## Not proven yet
 
 `hypertrain/tests/test_b300_run_host.py` drives the script against fake docker, nvidia-smi, aws

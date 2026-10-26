@@ -14,7 +14,11 @@ admission, audits and get_weights are the repository's own code. The harness cha
    This is a STAND-IN. No engine Result backs it, and S3's qualification (889M dense, one GPU
    per host) does not cover this tiny n_gpus=1 fixture model. Because it replaces
    `_bootstrap_backend_v2`, the only in-process user of gpu_ops/network_qualification.py, the
-   PASS does not exercise the 8a90d9bc fix.
+   PASS does not exercise the 8a90d9bc fix. A real qualification needs two results from two
+   distinct machines (`compare` refuses equal machine_id, instance_id or role), so one host cannot
+   replace this stand-in. The harness does run the repository's own device-class check
+   (`network_qualification.unqualified_device`, ADR 0007) on the (capability, SM count) pairs that
+   torch reports for the visible GPUs and logs it as a `device_class` event.
 3. After each CUDA audit replay, and before `_dispatch_env_v2` reads it, the harness writes
    role-dispatch.json from this challenge process's GPU: nvidia-smi driver and UUID, plus the
    torch SM count. It is not a dispatcher and it is not bound to the publication. Its
@@ -80,6 +84,23 @@ def _event(**fields: Any) -> None:
     if path:
         with open(path, "a") as out:
             out.write(json.dumps(fields, sort_keys=True, default=str) + "\n")
+
+
+def _device_class() -> None:
+    """Log the repository's device-class verdict for the GPUs this process sees (real values)."""
+    import torch
+
+    from hypertrain.gpu_ops.network_qualification import unqualified_device
+
+    props = [torch.cuda.get_device_properties(i) for i in range(torch.cuda.device_count())]
+    capabilities = [(p.major, p.minor) for p in props]
+    sm_counts = [p.multi_processor_count for p in props]
+    _event(
+        event="device_class",
+        capabilities=capabilities,
+        sm_counts=sm_counts,
+        unqualified=unqualified_device(capabilities, sm_counts),
+    )
 
 
 def _patch_store(owner: Any) -> None:
@@ -180,6 +201,7 @@ def _load_service() -> Any:
 
     fixture.setup = b300_setup
     _patch_store(svc.OWNER)
+    _device_class()
     return svc
 
 
