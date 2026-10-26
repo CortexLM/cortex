@@ -23,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -44,8 +45,11 @@ def _local_gpus(n: int) -> dict[str, Any]:
 
     from hypertrain.miner.island_launch import gpu_uuid
 
-    rows = subprocess.run(  # noqa: S603 - PATH nvidia-smi, fixed query
-        ["nvidia-smi", "--query-gpu=uuid,driver_version", "--format=csv,noheader"],
+    smi = shutil.which("nvidia-smi")
+    if smi is None:
+        raise RuntimeError("nvidia-smi unavailable")
+    rows = subprocess.run(  # noqa: S603 - PATH-resolved nvidia-smi, fixed query
+        [smi, "--query-gpu=uuid,driver_version", "--format=csv,noheader"],
         check=True,
         capture_output=True,
         text=True,
