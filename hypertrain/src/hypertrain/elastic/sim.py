@@ -37,6 +37,8 @@ from hypertrain.elastic.coordinator import (
     Assignment,
     Coordinator,
     CoordinatorError,
+    Departure,
+    Exit,
     Grant,
     Holder,
 )
@@ -611,6 +613,8 @@ class Simulation:
         self.events: list[_Event] = []
         self.partitions: dict[int, int] = {}
         self.store_partitions: dict[int, int] = {}
+        self.cuts: dict[int, list[tuple[int, int]]] = {}  # slot -> partitions of either kind
+        self.departures: list[Departure] = []
         self.losses: list[Loss] = []
         self.computed = 0
         self.accepted = 0
@@ -694,8 +698,10 @@ class Simulation:
             self._new_machine(f.slot)
         elif f.kind == "partition":
             self.partitions[f.slot] = f.until_ms
+            self.cuts.setdefault(f.slot, []).append((f.at_ms, f.until_ms))
         elif f.kind == "store-partition":
             self.store_partitions[f.slot] = f.until_ms
+            self.cuts.setdefault(f.slot, []).append((f.at_ms, f.until_ms))
         else:
             raise ValueError(f"unknown fault {f.kind!r}")
 
@@ -756,6 +762,7 @@ class Simulation:
         settlement = self.coord.settle()
         self.accepted += sum(settlement.credits.values())
         self.exits.update(d.kind.value for d in settlement.departures)
+        self.departures += settlement.departures
         self.penalized.update(settlement.penalties)
 
     def run(self) -> SimResult:
@@ -795,6 +802,12 @@ class Simulation:
                 self.violations.append(f"loss of {loss.steps} steps above ckpt_every: {loss}")
             if loss.kind == "displaced" or loss.kind.startswith("refused"):
                 self.violations.append(f"the coordinator refused or moved live work: {loss}")
+        for d in self.departures:  # a dead host may stall before it lapses; a live one may not
+            window = (d.at_ms - cfg.progress_ms, d.at_ms)
+            cuts = self.cuts.get(int(d.member[1:]), [])
+            cut = any(a <= window[1] and b >= window[0] for a, b in cuts)
+            if d.kind is Exit.STALLED and d.token not in self.dead_leases and not cut:
+                self.violations.append(f"{d.member} stalled alive with its network up")
         if self.computed - self.accepted > sum(loss.steps for loss in self.losses):
             self.violations.append("wasted steps not accounted for by any loss")
         final_ok = completed and self.state == reference(cfg.rounds, cfg.shards, cfg.steps)
@@ -868,6 +881,43 @@ def table(results: Sequence[SimResult], cfg: SimConfig) -> str:
     return "\n".join(rows)
 
 
+EXIT_KINDS = ("notice", "lapse", "stalled", "replaced", "revoked")
+
+
+def aggregate(cfg: SimConfig, names: Sequence[str], seeds: Sequence[int]) -> tuple[str, bool]:
+    """Markdown table of each scenario over `seeds`, and whether every run was clean.
+
+    Exits are totals over the runs. Wasted steps are computed minus accepted inner steps; the
+    max loss is the largest single loss against its bound (`ckpt_every`). Drain seconds,
+    makespan and GPU-hours are means per run; GPU-hours are compared with the fault-free run of
+    the same configuration."""
+    base = simulate(cfg, "none", seeds[0]).gpu_ms
+    rows = [
+        "| scenario | runs | done, final = ref | violations "
+        "| exits notice/lapse/stalled/replaced/revoked | penalised runs "
+        "| wasted steps mean / max | max loss (bound) | drain s | makespan min | GPU-h (vs none) |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    clean = True
+    for name in names:
+        rs = [simulate(cfg, name, seed) for seed in seeds]
+        clean = clean and not any(r.violations for r in rs)
+        exits = "/".join(str(sum(r.exits.get(k, 0) for r in rs)) for k in EXIT_KINDS)
+        wasted = [r.wasted_steps for r in rs]
+        gpu_h = sum(r.gpu_ms for r in rs) / len(rs) / 3_600_000
+        rows.append(
+            f"| {name} | {len(rs)} | {sum(r.completed and r.final_ok for r in rs)} "
+            f"| {sum(bool(r.violations) for r in rs)} | {exits} "
+            f"| {sum(bool(r.penalized) for r in rs)} "
+            f"| {sum(wasted) / len(rs):.1f} / {max(wasted)} "
+            f"| {max(r.max_loss for r in rs)} ({cfg.ckpt_every}) "
+            f"| {sum(r.drain_ms for r in rs) / len(rs) / 1000:.1f} "
+            f"| {sum(r.makespan_ms for r in rs) / len(rs) / 60_000:.1f} "
+            f"| {gpu_h:.2f} ({100 * (gpu_h * 3_600_000 / base - 1):+.0f} %) |"
+        )
+    return "\n".join(rows), clean
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m hypertrain.elastic.sim")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -880,7 +930,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     soak.add_argument("--seeds", type=int, default=200)
     soak.add_argument("--start", type=int, default=0)
+    agg = sub.add_parser("aggregate", help="each scenario over many seeds (the ADR's tables)")
+    agg.add_argument("--seeds", type=int, default=200)
+    agg.add_argument("--hosts", type=int, default=SimConfig().hosts)
+    agg.add_argument("--shards", type=int, default=SimConfig().shards)
+    agg.add_argument("--ckpt-every", type=int, default=SimConfig().ckpt_every)
+    agg.add_argument("--cheater", type=int, help="slot of a host that forges one link")
+    agg.add_argument("--scenarios", nargs="+", choices=SCENARIOS, default=list(SCENARIOS))
     args = parser.parse_args(argv)
+    if args.command == "aggregate":
+        cfg = SimConfig(hosts=args.hosts, shards=args.shards, ckpt_every=args.ckpt_every)
+        if args.cheater is not None:
+            cfg = replace(cfg, cheaters=(args.cheater,))
+        text, clean = aggregate(cfg, args.scenarios, range(args.seeds))
+        print(text)
+        return 0 if clean else 1
     if args.command == "table":
         cfg = SimConfig(hosts=args.hosts, shards=args.shards)
         results = [simulate(cfg, name, args.seed) for name in SCENARIOS]

@@ -341,6 +341,13 @@ MUTANTS = (
         "test_sim.py::test_every_scenario_ends_in_the_uninterrupted_state[none-0]",
     ),
     Mutant(
+        "progress deadline shorter than one honest link",
+        SRC + "sim.py",
+        "self.heartbeat_ms + self.restore_ms + self.ckpt_every * self.step_ms + self.ckpt_ms",
+        "self.heartbeat_ms + self.restore_ms + self.step_ms + self.ckpt_ms",
+        "test_sim.py::test_every_scenario_ends_in_the_uninterrupted_state[none-0]",
+    ),
+    Mutant(
         "a draining miner stops heartbeating",
         SRC + "sim.py",
         "            if self.now >= self.next_hb_ms:\n"

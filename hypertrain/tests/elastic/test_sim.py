@@ -136,3 +136,13 @@ def test_the_table_reports_every_scenario(capsys: pytest.CaptureFixture[str]) ->
     names = [row.split(" | ")[0].removeprefix("| ") for row in rows[1:]]
     assert names == [*SCENARIOS, "churn + cheater"]
     assert all(row.split(" | ")[1:3] == ["yes", "yes"] for row in rows[1:])
+
+
+def test_aggregate_reports_each_scenario_over_its_seeds(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["aggregate", "--seeds", "3", "--scenarios", "none", "loss"]) == 0
+    rows = [line for line in capsys.readouterr().out.splitlines() if line.startswith("| ")]
+    cells = [row.split(" | ") for row in rows[1:]]
+    assert [(c[0].removeprefix("| "), c[1], c[2], c[3]) for c in cells] == [
+        ("none", "3", "3", "0"),
+        ("loss", "3", "3", "0"),
+    ]
