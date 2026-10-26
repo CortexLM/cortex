@@ -3,7 +3,7 @@
 The core writes only content-addressed, write-once objects: the key is the sha256 hex of the
 bytes. The head of each checkpoint chain lives in the coordinator, never in a mutable store key,
 so a store needs no compare-and-swap and never rewrites a key (R2 accepts one write per second
-per key). The R2 implementation of this protocol arrives with hypertrain.dataplane (ADR 0003).
+per key). The R2 implementation of this protocol comes with v3-dataplane (ADR 0003).
 """
 
 from __future__ import annotations
