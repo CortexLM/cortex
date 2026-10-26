@@ -12,13 +12,18 @@ run_host.sh [--image REPO@sha256:<64 hex>] [--results-root DIR] [--host NAME]
 
 ## Prerequisites
 
-- `python3`, `curl`, `nvidia-smi`, and Docker with the nvidia runtime. The invoking user must run
-  `docker` without sudo (`docker info` works).
+- `python3`, `curl`, `flock`, `nvidia-smi`, and Docker with the nvidia runtime. The script uses
+  `docker` when `docker info` works, otherwise `sudo -n docker`. On the AWS hosts `ubuntu` is not
+  in the docker group, so it takes the `sudo -n` path.
+- The hosts also run Lium `executor-*` containers. Never touch them. The script only removes or
+  stops containers named `<prefix>-<step>` (`HT_B300_CONTAINER_PREFIX`, default `ht-b300`) that
+  carry its own run label. Start GPU steps only after the AWS agent reports the host free.
 - The monorepo at branch `v3-b300-run` (public repository):
   `git clone --depth 1 --branch v3-b300-run https://github.com/CortexLM/cortex.git ~/cortex`.
   Its `hypertrain/` directory is mounted read-only into every container.
-- A results root (default `/results`) writable by the invoking user:
-  `sudo install -d -o "$USER" /results`. It and the Docker root each need 100 GiB free.
+- A results root (default `/results`) writable by the invoking user. Put it on the NVMe RAID:
+  `sudo install -d -o "$USER" /mnt/nvme/results && sudo ln -sfn /mnt/nvme/results /results`.
+  It and the Docker root each need 100 GiB free.
 - For `--upload s3://<bucket>/<prefix>` only: the `aws` CLI and an instance role that can write
   to that prefix. A `systemd-run` unit gets the default system PATH, which lacks `/snap/bin`;
   without `aws` on it the log says `upload skipped: aws CLI not found`.
