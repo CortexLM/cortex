@@ -67,6 +67,14 @@ def _local_gpus(n: int) -> dict[str, Any]:
     }
 
 
+def _event(**fields: Any) -> None:
+    """One JSON line per harness observation in $HT_D20_EVENTS (no secrets are logged)."""
+    path = os.environ.get("HT_D20_EVENTS")
+    if path:
+        with open(path, "a") as out:
+            out.write(json.dumps(fields, sort_keys=True, default=str) + "\n")
+
+
 def _patch_store(owner: Any) -> None:
     from hypertrain.challenge.store import ChallengeStore
     from hypertrain.protocol import envelope_v2
@@ -78,6 +86,8 @@ def _patch_store(owner: Any) -> None:
     if getattr(ChallengeStore, "_d20_patched", False):
         return
     create, dispatch = ChallengeStore._create_run_v2, ChallengeStore._dispatch_env_v2
+    backend_of, audit = ChallengeStore._backend_v2, ChallengeStore.execute_audit_v2
+    seen: set[tuple[str, str]] = set()
 
     def _create_run_v2(self: Any, raw: bytes) -> Any:
         env = envelope_v2.parse_envelope(raw)
@@ -113,10 +123,33 @@ def _patch_store(owner: Any) -> None:
             n = manifest.training.reference_spec.layout.n_gpus
             body = {"environment": _local_gpus(n), "source": "s5-d20 measured in-container"}
             target.write_bytes(canonicalize(body))
-        return dispatch(self, manifest, directory)
+        replay, raw = dispatch(self, manifest, directory)
+        _event(event="dispatch_env", replay_env=replay.model_dump(mode="json"))
+        return replay, raw
+
+    def _backend_v2(self: Any, manifest: Any) -> Any:
+        backend = backend_of(self, manifest)
+        if (manifest.run_id(), backend) not in seen:
+            seen.add((manifest.run_id(), backend))
+            _event(event="backend", run_id=manifest.run_id(), backend=backend)
+        return backend
+
+    def execute_audit_v2(self: Any, run_id: str, job_id: str, raw: bytes) -> Any:
+        out = audit(self, run_id, job_id, raw)
+        verdict = out["verdict"]
+        _event(
+            event="audit",
+            job_id=job_id,
+            identity=out["identity"],
+            result=verdict["result"],
+            replay_env=verdict["replay_env"],
+        )
+        return out
 
     ChallengeStore._create_run_v2 = _create_run_v2  # type: ignore[method-assign]
     ChallengeStore._dispatch_env_v2 = _dispatch_env_v2  # type: ignore[method-assign]
+    ChallengeStore._backend_v2 = _backend_v2  # type: ignore[method-assign]
+    ChallengeStore.execute_audit_v2 = execute_audit_v2  # type: ignore[method-assign]
     ChallengeStore._d20_patched = True  # type: ignore[attr-defined]
 
 
