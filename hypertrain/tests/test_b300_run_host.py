@@ -31,6 +31,8 @@ FAKE_DOCKER = r"""
 import json, os, pathlib, sys, time
 argv = sys.argv[1:]
 state = pathlib.Path(os.environ["FAKE_STATE"])
+if os.environ.get("FAKE_NEEDS_SUDO") == "1" and os.environ.get("FAKE_SUDO") != "1":
+    sys.exit("permission denied while trying to connect to the docker API")
 with (state / "docker.jsonl").open("a") as f:
     f.write(json.dumps(argv) + "\n")
 cmd = argv[0]
@@ -112,6 +114,16 @@ else:
     print("fake nvidia-smi table")
 """
 
+FAKE_SUDO = r"""
+import json, os, pathlib, sys
+with (pathlib.Path(os.environ["FAKE_STATE"]) / "sudo.jsonl").open("a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+args = sys.argv[1:]
+if args[:1] == ["-n"]:
+    args = args[1:]
+os.execvpe(args[0], args, {**os.environ, "FAKE_SUDO": "1"})
+"""
+
 FAKE_AWS = r"""
 import json, os, pathlib, sys
 with (pathlib.Path(os.environ["FAKE_STATE"]) / "aws.jsonl").open("a") as f:
@@ -159,7 +171,8 @@ def env(tmp_path: Path, imds: str) -> dict[str, str]:
     for d in (bindir, state, efa, tmp_path / "results"):
         d.mkdir()
     (efa / "rdmap0s0").mkdir()
-    for name, body in (("docker", FAKE_DOCKER), ("nvidia-smi", FAKE_SMI), ("aws", FAKE_AWS)):
+    fakes = {"docker": FAKE_DOCKER, "nvidia-smi": FAKE_SMI, "aws": FAKE_AWS, "sudo": FAKE_SUDO}
+    for name, body in fakes.items():
         (bindir / name).write_text(f"#!{sys.executable}\n{body}")
         (bindir / name).chmod(0o755)
     return {
@@ -209,6 +222,14 @@ def test_full_run_pins_the_digest_and_runs_the_8gpu_flash_bench(env, tmp_path):
     assert "--nccl-pcie" not in mfu  # B300 GPUs talk over NVLink
     (smoke,) = runs_of(tmp_path, "miner_test")
     assert smoke[smoke.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"  # 0600 evidence
+
+
+def test_docker_without_group_membership_goes_through_sudo(env, tmp_path):
+    p = run({**env, "FAKE_NEEDS_SUDO": "1"}, tmp_path)
+    assert p.returncode == 0, p.stdout + p.stderr
+    sudo = [json.loads(x) for x in (tmp_path / "state/sudo.jsonl").read_text().splitlines()]
+    assert ["-n", "docker", "pull", IMAGE] in sudo
+    assert all(c[:2] == ["-n", "docker"] for c in sudo)
 
 
 @pytest.mark.parametrize(

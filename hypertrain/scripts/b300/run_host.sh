@@ -12,7 +12,6 @@ set -euo pipefail
 
 DEFAULT_IMAGE=ghcr.io/cortexlm/cortex/hypertrain-gpu@sha256:f4b2885f2dc89478da645b9f5e6f02891cd3309ef0a1f2aa0de04328e11cba0f
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-DOCKER=${DOCKER:-docker}
 IMDS=${HT_IMDS_URL:-http://169.254.169.254}
 POLL=${HT_B300_POLL_SECONDS:-5}
 EXPECT_DRIVER=${HT_B300_EXPECT_DRIVER:-595.91.07}
@@ -24,6 +23,7 @@ MIN_DISK_GB=${HT_B300_MIN_DISK_GB:-100}
 STOP_GRACE=${HT_B300_STOP_GRACE:-60}
 SMOKE_BUDGET=${HT_B300_SMOKE_BUDGET:-900}
 PEAK=${HT_B300_PEAK_FLOPS:-}
+PREFIX=${HT_B300_CONTAINER_PREFIX:-ht-b300}
 ALL_STEPS="host_probe pull gpu_probe mfu miner_test miner_prod"
 
 usage() {
@@ -77,6 +77,17 @@ mkdir -p "$out/steps"
 exec > >(tee -a "$out/run.log") 2>&1
 exec 9>"$out/.lock"
 flock -n 9 || die "another run_host.sh holds $out/.lock"
+# The ubuntu user of the AWS hosts is not in the docker group: fall back to passwordless sudo.
+if [ -n "${DOCKER:-}" ]; then
+  docker_cmd=("$DOCKER")
+elif docker info >/dev/null 2>&1; then
+  docker_cmd=(docker)
+elif sudo -n docker info >/dev/null 2>&1; then
+  docker_cmd=(sudo -n docker)
+else
+  die "docker is not usable, directly or through sudo -n"
+fi
+dk() { "${docker_cmd[@]}" "$@"; }
 run_id=$(date -u +%Y%m%dT%H%M%SZ)-$$
 deadline=$(($(date +%s) + seconds))
 log() { echo "[$(date -u +%H:%M:%S)] $*"; }
@@ -124,11 +135,11 @@ finish() {
   trap '' TERM INT PIPE
   exec >>"$out/run.log" 2>&1
   kill "$watchdog_pid" 2>/dev/null || true
-  ids=$("$DOCKER" ps -q --filter "label=io.cortex.b300-run=$run_id" 2>/dev/null || true)
+  ids=$(dk ps -q --filter "label=io.cortex.b300-run=$run_id" 2>/dev/null || true)
   if [ -n "$ids" ]; then
     log "stopping containers ($reason): $(echo "$ids" | tr '\n' ' ')"
     # shellcheck disable=SC2086  # one container id per word
-    "$DOCKER" stop --time "$STOP_GRACE" $ids >/dev/null || true
+    dk stop --time "$STOP_GRACE" $ids >/dev/null || true
   fi
   python3 - "$out" "$reason" "$rc" "$run_id" "$image" <<'PY'
 import json, sys
@@ -177,10 +188,10 @@ step() {
 
 # docker runs in the background: a signal then interrupts `wait` instead of waiting for docker.
 container() {
-  local name=ht-b300-$1
+  local name=$PREFIX-$1
   shift
-  "$DOCKER" rm -f "$name" >/dev/null 2>&1 || true
-  "$DOCKER" run --rm --init --name "$name" --label "io.cortex.b300-run=$run_id" --gpus all \
+  dk rm -f "$name" >/dev/null 2>&1 || true
+  dk run --rm --init --name "$name" --label "io.cortex.b300-run=$run_id" --gpus all \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
     -v "$HT:/opt/ht:ro" -v "$out:/out" -w /opt/ht/scripts "$@" 9>&- &
   wait $!
@@ -195,7 +206,7 @@ host_probe() {
   nvidia-smi >"$out/nvidia-smi.txt" 2>&1 || true
   { ls -1 "$EFA_SYSFS" 2>/dev/null || true; } >"$out/efa-devices.txt"
   if command -v fi_info >/dev/null; then fi_info -p efa -t FI_EP_RDM >"$out/fi_info.txt" 2>&1 || true; fi
-  docker_root=$("$DOCKER" info --format '{{.DockerRootDir}}' 2>/dev/null) || docker_root=/var/lib/docker
+  docker_root=$(dk info --format '{{.DockerRootDir}}' 2>/dev/null) || docker_root=/var/lib/docker
   df -P -B1G "$results_root" "$docker_root" >"$out/df.txt" 2>/dev/null || df -P -B1G "$results_root" >"$out/df.txt"
   python3 "$HT/scripts/b300/host_check.py" --out "$out/host_probe.json" --nvidia-smi "$out/nvidia-smi.csv" \
     --efa "$out/efa-devices.txt" --df "$out/df.txt" --driver "$EXPECT_DRIVER" --gpus "$EXPECT_GPUS" \
@@ -203,9 +214,9 @@ host_probe() {
 }
 pull() {
   local got
-  "$DOCKER" pull "$image" >"$out/pull.log" 2>&1 9>&- &
+  dk pull "$image" >"$out/pull.log" 2>&1 9>&- &
   wait $! || { tail -n 20 "$out/pull.log"; return 1; }
-  got=$("$DOCKER" image inspect --format '{{json .RepoDigests}}' "$image") || return
+  got=$(dk image inspect --format '{{json .RepoDigests}}' "$image") || return
   echo "$got" >"$out/pull-digests.json"
   [[ $got == *"${image#*@}"* ]] || { log "pulled digests $got lack ${image#*@}"; return 1; }
 }
