@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Swap the image of the s100 TEST challenge (compose service `challenge` only) and roll it back.
-# Never touches the production challenge, the master, the beacon, the relay or the master stub.
+# Swap the image of the s100 TEST challenge, retune the TEST beacon pusher, and roll both back.
+# Never touches the production challenge, the master, the relay or the master stub.
 # Run on s100 over stdin: ssh root@s100 'bash -s -- CMD ARGS' < challenge_image.sh
 #   backup TS            snapshot compose files, both SQLite DBs and inspect JSON (env names only)
 #   swap NEW_REF BACKUP  gate, pin NEW_REF on the challenge service, up -d --no-deps challenge
+#   beacon BACKUP        gate, set the pusher to --interval 0.2 --catch-up 3 (the production
+#                        twin's values; 3/20 holds the lag above the freshness bound of 2 rounds)
 #   paper BACKUP         dry rollback: the backed-up compose file must parse and resolve the old image
-#   rollback BACKUP      restore the compose file and recreate the challenge on the old image
+#   rollback BACKUP      restore the compose file, recreate challenge and beacon as they were
 #   restore-db BACKUP    stop the challenge, put the backed-up DBs back, start it (only if needed)
 set -euo pipefail
 T=/root/backups/hypertrain-test; F=$T/compose.test.yml; C=hypertrain-test-challenge
@@ -30,6 +32,27 @@ check() { # what an operator reads after any change
   for p in version health public/v1/runs; do
     printf '%s ' "$p"; curl -s -m 10 -w ' %{http_code}\n' "$API/$p" | cut -c1-200; done
   printf 'public runs sha '; curl -s -m 10 "$API/public/v1/runs" | sha256sum | cut -c1-64; }
+apply() { # apply STEP BACKUP PATH..: $F.new must differ from $F in exactly PATH.., then go live
+  local step=$1 B=$2; shift 2
+  compose "$F" config --format json > "$B/config-before-$step.json"
+  compose "$F.new" config --format json > "$B/config-after-$step.json"
+  diff "$F" "$F.new" || true
+  python3 -I - "$B/config-before-$step.json" "$B/config-after-$step.json" "$@" <<'EOF' \
+    || { rm -f "$F.new"; echo "unexpected compose change"; exit 5; }
+import json, sys
+def flat(x, p=""):
+    if isinstance(x, dict):
+        return {k: v for n, c in x.items() for k, v in flat(c, f"{p}.{n}" if p else n).items()}
+    if isinstance(x, list):
+        return {k: v for i, c in enumerate(x) for k, v in flat(c, f"{p}.{i}").items()}
+    return {p: x}
+a, b = (flat(json.load(open(f))) for f in sys.argv[1:3])
+changed = sorted(k for k in a.keys() | b.keys() if a.get(k) != b.get(k))
+print("changed", changed)
+sys.exit(0 if changed == sorted(sys.argv[3:]) else 5)
+EOF
+  cp -p "$F" "$B/compose.test.yml.before-$step"; mv "$F.new" "$F"; date -u +%FT%TZ
+  compose "$F" up -d --no-deps "$step" 2>&1 | tail -3; }
 backup_dir() { [ -d "$1" ] && [ -f "$1/compose.test.yml" ] && [ -f "$1/challenge.db" ] \
   || { echo "not a backup dir: $1"; exit 4; }; }
 case $cmd in
@@ -60,31 +83,28 @@ swap)
   NEW=${2:?NEW_REF}; B=${3:?BACKUP}; backup_dir "$B"; gate
   [[ $NEW =~ ^ghcr\.io/cortexlm/cortex/hypertrain@sha256:[0-9a-f]{64}$ ]] || { echo "bad ref"; exit 4; }
   [ "$(docker image inspect "$NEW" --format '{{.Id}}')" = "${NEW#*@}" ] || { echo "image not pulled"; exit 4; }
-  cmp -s "$F" "$B/compose.test.yml" || { echo "compose changed since backup"; exit 4; }
   grep -c '^    container_name: hypertrain-test-challenge$' "$F" | grep -qx 1 || { echo "anchor"; exit 4; }
   umask 077; sed "/^    container_name: hypertrain-test-challenge\$/a\\    image: $NEW" "$F" > "$F.new"
-  diff "$F" "$F.new" || true
-  images "$F.new" > "$B/images-after.txt"; images "$F" > "$B/images-before.txt"
-  diff "$B/images-before.txt" "$B/images-after.txt" || true
-  # exactly one resolved image may differ: the challenge, and only to NEW
-  python3 -I - "$B/images-before.txt" "$B/images-after.txt" "$NEW" <<'EOF'
-import sys
-a, b, new = sys.argv[1:]
-before = dict(l.split() for l in open(a)); after = dict(l.split() for l in open(b))
-diff = {k for k in before if before[k] != after.get(k)} | (after.keys() - before.keys())
-sys.exit(0 if diff == {"challenge"} and after["challenge"] == new else 5)
-EOF
-  mv "$F.new" "$F"; date -u +%FT%TZ
-  compose "$F" up -d --no-deps challenge 2>&1 | tail -3
+  apply challenge "$B" services.challenge.image
+  images "$F"
   for i in $(seq 1 30); do curl -sf -m 5 -o /dev/null "$API/version" && break; sleep 1; done
   sleep 6; date -u +%FT%TZ; check;;
+beacon)
+  B=${2:?BACKUP}; backup_dir "$B"; gate
+  umask 077; sed -e 's|--interval, "3",$|--interval, "0.2",|' \
+    -e 's|--catch-up, "20", --max-failures|--catch-up, "3", --max-failures|' "$F" > "$F.new"
+  apply beacon "$B" services.beacon.entrypoint.9 services.beacon.entrypoint.11
+  sleep 20; docker logs --since 25s hypertrain-test-beacon 2>&1 | tail -4 | cut -c1-160
+  curl -s -m 10 "$API/v1/beacon/latest" | python3 -I -c '
+import json,sys,time
+r=json.load(sys.stdin)["round"]; print("lag", (int(time.time())-1692803367)//3+1-r)';;
 paper)
   B=${2:?BACKUP}; backup_dir "$B"; images "$B/compose.test.yml"
   echo "live: $(docker inspect "$C" --format '{{.Config.Image}}')"
-  echo "would run: cp -p $B/compose.test.yml $F && docker compose -f $F up -d --no-deps challenge";;
+  echo "would run: cp -p $B/compose.test.yml $F && docker compose -f $F up -d --no-deps challenge beacon";;
 rollback)
   B=${2:?BACKUP}; backup_dir "$B"; date -u +%FT%TZ
-  cp -p "$B/compose.test.yml" "$F"; compose "$F" up -d --no-deps challenge 2>&1 | tail -3
+  cp -p "$B/compose.test.yml" "$F"; compose "$F" up -d --no-deps challenge beacon 2>&1 | tail -3
   for i in $(seq 1 30); do curl -sf -m 5 -o /dev/null "$API/version" && break; sleep 1; done
   sleep 6; check;;
 restore-db)
