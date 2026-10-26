@@ -64,6 +64,7 @@ def operator(tmp_path, monkeypatch):
         q_base="0000803e",
         E=4,
         clean_finalizations=12,
+        # Only its digest enters the manifest: the faked service sets screen_until itself.
         work_screen_epoch_rounds=1000,
         max_pending=32,
         max_trial_replays=2,

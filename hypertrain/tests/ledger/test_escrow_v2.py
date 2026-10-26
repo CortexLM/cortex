@@ -86,6 +86,8 @@ def setup(mode: str = "test") -> Setup:
         q_base="0000803e",
         E=4,
         clean_finalizations=12,
+        # Mechanism fixture, not the operator policy: a test that needs the operator screen
+        # length loads `manifest_v2 example` (test_admission_v2.py).
         work_screen_epoch_rounds=1000,
         max_pending=32,
         max_trial_replays=2,
