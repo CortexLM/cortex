@@ -28,8 +28,10 @@ PROBLEM: The checks it makes are correct. It passes on manifest-run2 and manifes
 EVIDENCE: Scratch copies of manifest-run2. With policy-admission.json changed to work_screen_epoch_rounds=1 and index.json re-hashed, the script prints `16bc75dd… 5DqRX… 34300000` with exit=0. With the index entry for policy-admission.json removed and the file replaced by `{}`, it also exits 0. Without the rehash the policy tamper fails (`sha256 differs`). With manifest.json changed and rehashed it fails (`differs from the signed body`); with a changed sig and rehash it fails (`signature does not verify`). Adding the check below still passes run1 and run2 and fails both tampered copies (`policy-admission.json: not the object the signed manifest pins`, `index.json does not list the eight build files`).
 FIX: Insert before `print(index["run_id"], env.signer, env.exp_drand)`:
 ```python
-pins = {f"policy-{n}.json": getattr(manifest.network, f"{n}_policy_hash")
-        for n in ("admission", "economics", "aggregation", "audit", "dispute")}
+pins = {
+    f"policy-{n}.json": getattr(manifest.network, f"{n}_policy_hash")
+    for n in ("admission", "economics", "aggregation", "audit", "dispute")
+}
 pins["relay-registry.json"] = manifest.network.relay_registry_hash
 if set(index["files"]) != {*pins, "manifest.json", "manifest-envelope.json"}:
     sys.exit("index.json does not list the eight build files")
