@@ -111,7 +111,8 @@ written only after a Spot notice.
   digests on every GPU and every repeat. Also read:
   - `arch_list`: expect `["sm_75","sm_80","sm_86","sm_90","sm_100","sm_120"]`. There is no
     `sm_103`; the B300 runs the `sm_100` cubins.
-  - `devices[].sm_count`: the B300 SM count. The repository does not state it; report it.
+  - `devices[].sm_count`: the B300 SM count, measured as 148 on host B on 2026-10-26. Production
+    manifests must pin that value.
   - `devices[].select_backend`: `math` on sm_103, because `sdpa-flash` is qualified only on
     sm_120 (`QUALIFIED_BACKENDS` in `hypertrain/src/hypertrain/trainer/attention.py`).
   - `smoke.errors`: must be empty. An entry such as `no kernel image is available` means the wheel
