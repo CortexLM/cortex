@@ -96,8 +96,12 @@ def _event(**fields: Any) -> None:
             out.write(json.dumps(fields, sort_keys=True, default=str) + "\n")
 
 
+DEVICE_CLASS: dict[str, Any] = {}
+
+
 def _device_class() -> None:
-    """Log the repository's device-class verdict for the GPUs this process sees (real values)."""
+    """Record the repository's device-class verdict for the GPUs this process sees (real values) and
+    stop when there is no GPU or the verdict refuses the pair: a run there would prove nothing."""
     import torch
 
     from hypertrain.gpu_ops.network_qualification import unqualified_device
@@ -105,12 +109,13 @@ def _device_class() -> None:
     props = [torch.cuda.get_device_properties(i) for i in range(torch.cuda.device_count())]
     capabilities = [(p.major, p.minor) for p in props]
     sm_counts = [p.multi_processor_count for p in props]
-    _event(
-        event="device_class",
-        capabilities=capabilities,
-        sm_counts=sm_counts,
-        unqualified=unqualified_device(capabilities, sm_counts),
-    )
+    reason = unqualified_device(capabilities, sm_counts)
+    DEVICE_CLASS.update(capabilities=capabilities, sm_counts=sm_counts, unqualified=reason)
+    _event(event="device_class", **DEVICE_CLASS)
+    if not props:
+        raise SystemExit("no CUDA device is visible to the harness")
+    if reason is not None:
+        raise SystemExit(f"the repository refuses this device class: {reason}")
 
 
 def _kimi_setup(fixture: Any, s: Any) -> Any:
@@ -167,7 +172,9 @@ def _job_kimi() -> int:
 
     The miner's torchrun worker (device cuda, a fresh interpreter) must equal an in-process CUDA
     `train_round` on the same samples: same leaves_root, final_theta_hash, delta_hash and delta
-    bytes, and the router bias must have moved. Writes $HT_D20_EVIDENCE and prints the same JSON.
+    bytes, and the router bias must move. The staged job's deadline is the fixture's 120 s, which
+    covers join-v2 and the run (65.8 s on the B300). Writes $HT_D20_EVIDENCE and prints the same
+    JSON; a failing join or run is written as FAIL with the exit codes, not as a crash.
     """
     import tempfile
 
@@ -188,99 +195,124 @@ def _job_kimi() -> int:
     manifest = s.manifest
     run = manifest.run_id()
     cfg = TrainConfig.from_manifest_v2(manifest)
-    tmp = Path(tempfile.mkdtemp(prefix="d20-kimi-job-"))
-    job = fixture.stage(s, tmp / "attempt", (0, 1, 2, 3), 0)
-    (tmp / "attempt/job.json").write_text(job.model_dump_json())
-    for name, seed in (("hot.key", b"b"), ("cold.key", b"c")):
-        (tmp / name).write_bytes(seed * 32)
-        (tmp / name).chmod(0o600)
-    config = tmp / "miner.toml"
-    config.write_text(
-        f'api = "https://service.test"\nkeyfile = "{tmp / "hot.key"}"\n'
-        f'workdir = "{tmp / "work"}"\nstate_source = "unused"\n'
-        f'image_digest = "{manifest.training.reference_spec.image_digest}"\n'
-        f'run_id = "{run}"\nowner_hotkey = "{fixture.COORD.ss58}"\ndevice = "cuda"\n'
-    )
-    envelope = seal(fixture.COORD, "RunManifestV2", run, manifest, 1000)
-    joins: list[dict[str, Any]] = []
-
-    def master(request: httpx.Request) -> httpx.Response:
-        if (request.method, request.url.path) == ("GET", f"/v2/runs/{run}"):
-            return httpx.Response(200, json={"manifest_envelope": envelope})
-        if (request.method, request.url.path) == ("POST", f"/v2/runs/{run}/join"):
-            joins.append(json.loads(request.content))
-            return httpx.Response(200, json={"state": "APPLIED"})
-        return httpx.Response(404, json={"detail": "unexpected route"})
-
-    client_type = httpx.Client
-    cli.httpx.Client = lambda **kwargs: client_type(transport=httpx.MockTransport(master), **kwargs)  # type: ignore[assignment,misc]
-    try:
-        args = ["--config", str(config)]
-        started = time.monotonic()
-        joined = cli.main(
-            [
-                "join-v2",
-                *args,
-                "--coldkey",
-                str(tmp / "cold.key"),
-                "--request-id",
-                "ab" * 32,
-                "--expiry",
-                "100",
-            ]
+    with tempfile.TemporaryDirectory(prefix="d20-kimi-job-") as work:
+        tmp = Path(work)
+        job = fixture.stage(s, tmp / "attempt", (0, 1, 2, 3), 0)
+        (tmp / "attempt/job.json").write_text(job.model_dump_json())
+        for name, seed in (("hot.key", b"b"), ("cold.key", b"c")):
+            (tmp / name).write_bytes(seed * 32)
+            (tmp / name).chmod(0o600)
+        config = tmp / "miner.toml"
+        config.write_text(
+            f'api = "https://service.test"\nkeyfile = "{tmp / "hot.key"}"\n'
+            f'workdir = "{tmp / "work"}"\nstate_source = "unused"\n'
+            f'image_digest = "{manifest.training.reference_spec.image_digest}"\n'
+            f'run_id = "{run}"\nowner_hotkey = "{fixture.COORD.ss58}"\ndevice = "cuda"\n'
         )
-        ran = cli.main(["run-v2", *args, "--job", str(tmp / "attempt/job.json")])
-        elapsed = time.monotonic() - started
-    finally:
-        cli.httpx.Client = client_type  # type: ignore[misc]
-    published = tmp / "attempt/published/rank-0"
-    summary = json.loads((published / "summary.json").read_bytes())
-    commitments = summary["commitments"]
-    theta0 = init_params(cfg.model)
-    ref = train_round(
-        cfg,
-        {k: v.to("cuda") for k, v in theta0.items()},
-        Assignment(run, 0, (0, 1, 2, 3), 0),
-        lambda i: s.rows[i].astype(np.uint32),
-    )
-    theta, _ = unpack_state((published / "state.safetensors").read_bytes())
-    bias = "layers.001.router_bias"
-    checks = {
-        "join_rc0": joined == 0,
-        "run_rc0": ran == 0,
-        "join_binds_run_and_policy": [(j["run_id"], j["policy_hash"]) for j in joins]
-        == [(run, manifest.network.admission_policy_hash)],
-        "summary_backend_cuda": summary.get("backend") == "cuda",
-        "commitments_equal_cuda_reference": (
-            commitments["leaves_root"],
-            commitments["final_theta_hash"],
-            commitments["delta_hash"],
+        envelope = seal(fixture.COORD, "RunManifestV2", run, manifest, 1000)
+        joins: list[dict[str, Any]] = []
+
+        def master(request: httpx.Request) -> httpx.Response:
+            if (request.method, request.url.path) == ("GET", f"/v2/runs/{run}"):
+                return httpx.Response(200, json={"manifest_envelope": envelope})
+            if (request.method, request.url.path) == ("POST", f"/v2/runs/{run}/join"):
+                joins.append(json.loads(request.content))
+                return httpx.Response(200, json={"state": "APPLIED"})
+            return httpx.Response(404, json={"detail": "unexpected route"})
+
+        client_type = httpx.Client
+        cli.httpx.Client = lambda **kwargs: client_type(
+            transport=httpx.MockTransport(master), **kwargs
+        )  # type: ignore[assignment,misc]
+        try:
+            args = ["--config", str(config)]
+            started = time.monotonic()
+            joined = cli.main(
+                [
+                    "join-v2",
+                    *args,
+                    "--coldkey",
+                    str(tmp / "cold.key"),
+                    "--request-id",
+                    "ab" * 32,
+                    "--expiry",
+                    "100",
+                ]
+            )
+            ran = cli.main(["run-v2", *args, "--job", str(tmp / "attempt/job.json")])
+            elapsed = time.monotonic() - started
+        finally:
+            cli.httpx.Client = client_type  # type: ignore[misc]
+        published = tmp / "attempt/published/rank-0"
+        base: dict[str, Any] = {
+            "mode": "job-kimi",
+            "run_id": run,
+            "dtype": KIMI_DTYPE,
+            "gpu": torch.cuda.get_device_name(0),
+            "device_class": DEVICE_CLASS,
+            "join_v2_plus_run_v2_job_elapsed_seconds": round(elapsed, 1),
+        }
+        if joined != 0 or ran != 0 or not (published / "summary.json").exists():
+            return _finish_job(
+                {
+                    **base,
+                    "result": "FAIL",
+                    "checks": {
+                        "join_rc0": joined == 0,
+                        "run_rc0": ran == 0,
+                        "summary_written": (published / "summary.json").exists(),
+                    },
+                }
+            )
+        commitments = json.loads((published / "summary.json").read_bytes())["commitments"]
+        backend = json.loads((published / "summary.json").read_bytes()).get("backend")
+        theta0 = init_params(cfg.model)
+        ref = train_round(
+            cfg,
+            {k: v.to("cuda") for k, v in theta0.items()},
+            Assignment(run, 0, (0, 1, 2, 3), 0),
+            lambda i: s.rows[i].astype(np.uint32),
         )
-        == (ref.leaves_root, ref.final_theta_hash, ref.delta_hash),
-        "delta_bytes_equal": (published / "delta.bin").read_bytes() == ref.delta_payload,
-        "parameter_set": sorted(theta)
-        == sorted(param_shapes(cfg.model))
-        == sorted(kt.param_shapes(cfg.model)),
-        "router_bias_moved": not np.array_equal(theta[bias].numpy(), theta0[bias].numpy()),
-    }
-    result = {
-        "mode": "job-kimi",
-        "result": "PASS" if all(checks.values()) else "FAIL",
-        "checks": checks,
-        "run_id": run,
-        "dtype": KIMI_DTYPE,
-        "gpu": torch.cuda.get_device_name(0),
-        "run_v2_job_elapsed_seconds": round(elapsed, 1),
-        "commitments": {
-            k: commitments[k] for k in ("leaves_root", "final_theta_hash", "delta_hash")
-        },
-        "reference": {
-            "leaves_root": ref.leaves_root,
-            "final_theta_hash": ref.final_theta_hash,
-            "delta_hash": ref.delta_hash,
-        },
-    }
-    text = json.dumps(result, indent=1, sort_keys=True)
+        theta, _ = unpack_state((published / "state.safetensors").read_bytes())
+        bias = "layers.001.router_bias"
+        checks = {
+            "join_rc0": True,
+            "run_rc0": True,
+            "join_binds_run_and_policy": [(j["run_id"], j["policy_hash"]) for j in joins]
+            == [(run, manifest.network.admission_policy_hash)],
+            "summary_backend_cuda": backend == "cuda",
+            "commitments_equal_cuda_reference": (
+                commitments["leaves_root"],
+                commitments["final_theta_hash"],
+                commitments["delta_hash"],
+            )
+            == (ref.leaves_root, ref.final_theta_hash, ref.delta_hash),
+            "delta_bytes_equal": (published / "delta.bin").read_bytes() == ref.delta_payload,
+            "parameter_set": sorted(theta)
+            == sorted(param_shapes(cfg.model))
+            == sorted(kt.param_shapes(cfg.model)),
+            "router_bias_moved": not np.array_equal(theta[bias].numpy(), theta0[bias].numpy()),
+        }
+        return _finish_job(
+            {
+                **base,
+                "result": "PASS" if all(checks.values()) else "FAIL",
+                "checks": checks,
+                "commitments": {
+                    k: commitments[k] for k in ("leaves_root", "final_theta_hash", "delta_hash")
+                },
+                "reference": {
+                    "leaves_root": ref.leaves_root,
+                    "final_theta_hash": ref.final_theta_hash,
+                    "delta_hash": ref.delta_hash,
+                },
+            }
+        )
+
+
+def _finish_job(result: dict[str, Any]) -> int:
+    """Write the job-kimi evidence ($HT_D20_EVIDENCE), print it, and return the exit code."""
+    text = json.dumps(result, indent=1, sort_keys=True, default=str)
     if os.environ.get("HT_D20_EVIDENCE"):
         Path(os.environ["HT_D20_EVIDENCE"]).write_text(text)
     print(text)
