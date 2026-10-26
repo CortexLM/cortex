@@ -234,8 +234,10 @@ miner_test() {
   # relay on 127.0.0.1 with the test ledger, driven by join-v2 -> probe-v2 -> proof-v2 -> run-v2
   # through the real CLI (CPU device). It loads tests/ from the mounted checkout and imports
   # pytest, which the image lacks, so pytest goes to a throwaway target inside the container.
+  # Its evidence file is mode 0600: run as the invoking user so the host can read and upload it.
   # shellcheck disable=SC2016  # $1 expands in the container shell
-  container miner_test -e PYTHONPATH=/tmp/pyextra:/opt/ht/src -e PYTHONDONTWRITEBYTECODE=1 \
+  container miner_test --user "$(id -u):$(id -g)" -e HOME=/tmp \
+    -e PYTHONPATH=/tmp/pyextra:/opt/ht/src -e PYTHONDONTWRITEBYTECODE=1 \
     -e PATH=/opt/ht/scripts/b300/shim:/opt/hypertrain/venv/bin:/usr/local/bin:/usr/bin:/bin \
     -e MINE_SMOKE_V2_EVIDENCE=/out/mine-smoke-v2.json --entrypoint bash "$image" -c \
     'uv-pinned pip install --quiet --target /tmp/pyextra pytest==9.1.1 &&

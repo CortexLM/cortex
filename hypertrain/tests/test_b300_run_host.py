@@ -195,6 +195,8 @@ def test_full_run_pins_the_digest_and_runs_the_8gpu_flash_bench(env, tmp_path):
     assert mfu[mfu.index("--nproc-per-node") + 1] == "8"
     assert mfu[mfu.index("--profile") + 1] == "mfu-dense-1b-dp8"
     assert "--nccl-pcie" not in mfu  # B300 GPUs talk over NVLink
+    (smoke,) = runs_of(tmp_path, "miner_test")
+    assert smoke[smoke.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"  # 0600 evidence
 
 
 @pytest.mark.parametrize(
