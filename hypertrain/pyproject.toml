@@ -70,6 +70,7 @@ markers = [
   "fast: CPU mining-path subset run by scripts/check-fast.sh in under 2 minutes (set in tests/conftest.py)",
   "slow: end-to-end test over ~100 s (run explicitly)",
   "gpu: needs a CUDA device, skipped without one (B300 qualification, docs/adr/0006)",
+  "cloudflare: live Cloudflare R2 test, skipped unless HT_CLOUDFLARE_ENV_FILE and HT_R2_TEST_BUCKET are set (docs/adr/0003)",
 ]
 
 [tool.ruff]
