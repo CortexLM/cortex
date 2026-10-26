@@ -618,7 +618,9 @@ def _rank_grads(
 
                 def ready(p: Tensor, n: str = n) -> None:
                     g, p.grad = p.grad, None
-                    assert g is not None and on_ready is not None
+                    if g is None:  # no gradient (kimi's router bias): undelivered, like unused
+                        return
+                    assert on_ready is not None
                     # zeros + g == g + 0.0 bit for bit (IEEE add commutes; -0.0 -> +0.0)
                     g = grads.pop(n).add_(g) if n in grads else g.add_(0.0)
                     delivered.add(n)

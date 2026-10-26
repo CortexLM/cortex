@@ -241,15 +241,20 @@ def test_run_manifest_is_unsigned_strict_and_trains() -> None:
     assert not torch.equal(res.final_theta[MOE + "router_bias"], torch.zeros(cfg.model.n_experts))
 
 
-def test_one_rank_island_equals_the_reference_loop() -> None:
-    # run-v2 trains with train_island; on one rank it must be the loop.train_round reference.
+@pytest.mark.parametrize(
+    "reduction",
+    ["all_gather", "bucketed", "overlap", "zero2", "zero3", "zero2_overlap", "zero3_overlap"],
+)
+def test_one_rank_island_equals_the_reference_loop(reduction: str) -> None:
+    # run-v2 trains with train_island; on one rank it must be the loop.train_round reference,
+    # whatever the reduction (the router bias never has a gradient).
     doc = kt.run_manifest(kt.MICRO)
     cfg = kt.train_config(doc)
     a = Assignment(kt.run_manifest_id(doc), 0, tuple(range(cfg.inner.H * cfg.inner.micro_batch)))
     get, theta0 = kt.synthetic_sample(cfg), init_params(cfg.model)
     ref = train_round(cfg, theta0, a, get)
-    one = Layout(pp=1, n_gpus=1, dp_size=1, ep_size=1, zero1=False)
-    (got,) = emulate(1, lambda c: train_island(cfg, one, c, theta0, a, get))
+    one = Layout(pp=1, n_gpus=1, dp_size=1, ep_size=1, zero1=reduction.startswith("zero"))
+    (got,) = emulate(1, lambda c: train_island(cfg, one, c, theta0, a, get, reduction=reduction))
     assert (got.leaves_root, got.delta_hash, got.final_theta_hash) == (
         ref.leaves_root,
         ref.delta_hash,
