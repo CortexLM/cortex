@@ -1,7 +1,9 @@
-name: heavy
+name: hypertrain-heavy
 
 # Everything too slow for per-PR CI (native systemd regression, docker canary,
-# full serial suite). Runs nightly and on demand.
+# full serial suite). Runs nightly and on demand. GitHub only runs schedule and
+# workflow_dispatch from a workflow file on the default branch, so on v3 this
+# file is inert until it reaches main.
 on:
   schedule:
     - cron: "0 3 * * *"
@@ -9,6 +11,11 @@ on:
 
 permissions:
   contents: read
+
+# The hypertrain project (pyproject.toml, uv.lock, tests) lives in hypertrain/.
+defaults:
+  run:
+    working-directory: hypertrain
 
 jobs:
   native:
@@ -23,7 +30,7 @@ jobs:
           version: "0.12.17"
           python-version: "3.12"
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "hypertrain/uv.lock"
       - run: uv sync --locked --all-extras --group dev
       - name: Native systemd regression (isolated root environment)
         shell: bash
@@ -139,7 +146,7 @@ jobs:
           version: "0.12.17"
           python-version: "3.12"
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "hypertrain/uv.lock"
       - run: uv sync --locked --all-extras --group dev
       # The runner image ships its own kind; the od relay tests and relay_kind_smoke.py
       # require the kind_version pinned in deploy/k8s/versions.json.
@@ -150,7 +157,7 @@ jobs:
           set -euo pipefail
           v="$(python3 -c 'import json; print(json.load(open("deploy/k8s/versions.json"))["kind_version"])')"
           if [ "$v" != v0.31.0 ]; then
-            echo "kind_version $v: update KIND_SHA256 in heavy.yml" >&2
+            echo "kind_version $v: update KIND_SHA256 in hypertrain-heavy.yml" >&2
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/kind-bin"
@@ -215,7 +222,7 @@ jobs:
           version: "0.12.17"
           python-version: "3.12"
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "hypertrain/uv.lock"
       - run: uv sync --locked --all-extras --group dev
       - name: od-base shard
         env:

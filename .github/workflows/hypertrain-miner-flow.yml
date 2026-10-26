@@ -1,9 +1,17 @@
-name: miner-flow
+name: hypertrain-miner-flow
 
 on:
   push:
-    branches: [main, "boat/**"]
+    branches: [main, v3, "v3-*"]
+    paths:
+      - "hypertrain/**"
+      - ".gitignore"
+      - ".github/workflows/hypertrain-miner-flow.yml"
   pull_request:
+    paths:
+      - "hypertrain/**"
+      - ".gitignore"
+      - ".github/workflows/hypertrain-miner-flow.yml"
 
 permissions:
   contents: read
@@ -12,13 +20,20 @@ concurrency:
   group: miner-flow-${{ github.ref }}
   cancel-in-progress: true
 
+# The hypertrain project (pyproject.toml, uv.lock, scripts) lives in hypertrain/.
+defaults:
+  run:
+    working-directory: hypertrain
+
 jobs:
   miner-flow:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     container: ubuntu:24.04
     steps:
+      # Before checkout hypertrain/ does not exist yet; this step must not use the default directory.
       - run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates curl
+        working-directory: /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -27,6 +42,7 @@ jobs:
           version: "0.12.17"
           python-version: "3.12"
           enable-cache: true
+          cache-dependency-glob: "hypertrain/uv.lock"
       - run: uv sync --locked --all-extras --group dev
       - run: uv run --frozen hypertrain-miner --help
       - run: uv run --frozen pytest -q tests/miner/test_server_keys.py tests/miner/test_update.py tests/miner/test_cli_v3.py
@@ -38,5 +54,5 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: miner-flow-evidence
-          path: miner-flow-evidence.json
+          path: hypertrain/miner-flow-evidence.json
           if-no-files-found: warn

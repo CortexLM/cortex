@@ -1,20 +1,32 @@
-name: ci
+name: hypertrain-ci
 
-# main is covered by images.yml, which calls this workflow before publishing. A
-# push trigger here would start a twin run on the same ref (see concurrency).
+# Pushes to v3 are covered by hypertrain-images.yml, which calls this workflow before
+# publishing; a v3 push trigger here would start a twin run on the same ref (see concurrency).
+# Batch branches v3-* run it on push. A change touching neither hypertrain/ nor the root
+# .gitignore (which ruff honours inside hypertrain/) skips this suite.
 on:
+  push:
+    branches: ["v3-*"]
+    paths:
+      - "hypertrain/**"
+      - ".gitignore"
+      - ".github/workflows/hypertrain-ci.yml"
   pull_request:
+    paths:
+      - "hypertrain/**"
+      - ".gitignore"
+      - ".github/workflows/hypertrain-ci.yml"
   workflow_call:
 
 permissions:
   contents: read
 
-# Cancel superseded PR runs on the same ref. In a called run github.workflow is
-# the caller's name, so the images run gets its own group and is never cancelled;
-# images.yml serializes pushes to main itself.
+# Cancel superseded PR and batch-branch runs on the same ref. In a called run github.workflow
+# is the caller's name, so the images run gets its own group and is never cancelled;
+# hypertrain-images.yml serializes pushes itself.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/v3-') }}
 
 # Bound CPU kernel dispatch to AVX2, the dev-host golden baseline.
 env:
@@ -22,9 +34,17 @@ env:
   MKL_CBWR: AVX2
   ONEDNN_MAX_CPU_ISA: AVX2
 
+# The hypertrain project (pyproject.toml, uv.lock, tests) lives in hypertrain/.
+defaults:
+  run:
+    working-directory: hypertrain
+
+# Every job skips a pull request from a v3-* branch of this repository: the push run of the
+# same head commit already reports these checks on the pull request.
 jobs:
   # Format, lint and types only. Fast, high signal, no test execution.
   lint:
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'v3-') || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
@@ -36,7 +56,7 @@ jobs:
           version: "0.12.17"
           python-version: "3.12"
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "hypertrain/uv.lock"
       - run: uv sync --locked --all-extras --group dev
       - name: Format, lint, types
         run: |
@@ -49,8 +69,9 @@ jobs:
 
   # Whole non-sim/non-e2e suite, sharded round-robin over test files so wall-clock
   # is a fraction of the serial run. The native-systemd-only cases are excluded here
-  # and run in the nightly heavy workflow (heavy.yml).
+  # and run in the nightly hypertrain-heavy.yml, which only runs from the default branch.
   test:
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'v3-') || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 25
     strategy:
@@ -66,7 +87,7 @@ jobs:
           version: "0.12.17"
           python-version: "3.12"
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "hypertrain/uv.lock"
       - run: uv sync --locked --all-extras --group dev
       # Golden leaf roots are per CPU class; record which CPU ran this shard.
       - name: Runner CPU
@@ -110,6 +131,7 @@ jobs:
 
   # The slow subprocess suites, in parallel with test.
   test-slow:
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'v3-') || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 25
     strategy:
@@ -125,7 +147,7 @@ jobs:
           version: "0.12.17"
           python-version: "3.12"
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "hypertrain/uv.lock"
       - run: uv sync --locked --all-extras --group dev
       - run: uv run --frozen pytest -q --durations=25 -m "not od" tests/${{ matrix.suite }}
 
@@ -134,6 +156,7 @@ jobs:
   # from a Blacksmith runner yet, so a red gate fails neither ci nor the images publish
   # that calls it.
   check-proof:
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'v3-') || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 15
     continue-on-error: true
@@ -146,7 +169,7 @@ jobs:
           version: "0.12.17"
           python-version: "3.12"
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: "hypertrain/uv.lock"
       - run: uv sync --locked --all-extras --group dev
       # Golden leaf roots are per CPU class; record which CPU ran the gate.
       - name: Runner CPU
