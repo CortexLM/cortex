@@ -14,7 +14,8 @@ runbook step 6. Nothing signs or hashes it: its integrity rests on file ownershi
 | One run | A job of any other `run_id` raises `RuntimeError("role dispatch job is not the authorized run")` before any I/O. | `role_dispatch.py:96-97` |
 | All hosted runs | The same dispatcher serves every run on that challenge, CPU runs included: only the listed run is served, every other run's replays fail. | `challenge/store.py:540-551` |
 | Owner key | `owner_key_file` is used **online**: the challenge seals an owner `Receipt` for every dispatched operation. 0600, owned by the process uid (65532 in the image). | `miner/core.py:156-167`, `scripts/network_service_proof.py:1118-1162` |
-| Workload gate | Every dispatched operation needs a `network_workload_promoted` journal record in `run_dir`. Only the signed decoder continuation writes it, so od-base / od-encoder runs are refused (`workload_not_promoted`) until CortexLM/hypertrain#25 lands. | `experiments/gpu_network_v2/orchestrate.py:859-863`, `:3667` |
+| Workload gate | Every dispatched operation needs a `network_workload_promoted` journal record in `run_dir`. Only `NetworkRuntime.promote` writes it. Its callers are the signed decoder `continue` action and the CI harness, both on the decoder profile. So od-base / od-encoder runs are refused (`workload_not_promoted`) until the fix for CortexLM/hypertrain#25 lands in CortexLM/cortex (the hypertrain repository is frozen). | `experiments/gpu_network_v2/orchestrate.py:859-863`, `:872-904`, `:3667`; `scripts/genuine_cuda_ci.py:705` |
+| Host files | On every dispatched call the challenge reads `tree/scripts/network_service_proof.py`, `tree/experiments/gpu_network_v2/orchestrate.py`, `run_dir/config.json`, the `network_profile_file` and the `key_file` (Vast API key) named in that config, and the owner seed. All of them must be readable as uid 65532 inside the challenge container. | `role_dispatch.py:98-120` |
 
 `role-dispatch.json` is a different file: the per-publication provenance written next to each
 dispatched result (`role_dispatch.py:55-79`) and checked by CUDA audits (`store.py:7337-7380`).
@@ -27,8 +28,10 @@ dispatched result (`role_dispatch.py:55-79`) and checked by CUDA audits (`store.
 - **CUDA run** (qualification record present): its audits need `role-dispatch.json`, which only
   the dispatcher writes in repo code. The joinbase-6 CUDA TEST run used the out-of-repo
   same-host harness (`serve_challenge.py`, dispatch unset) instead.
-- **Production run on od-base**: needs the file **and** issue #25 (workload promotion for
-  od-encoder, roles for several hotkeys, a host field). The file alone is not enough.
+- **Any od-base run** (`training.model.arch` `od-encoder`), TEST or production: needs the file
+  **and** the issue #25 fix (workload promotion for od-encoder, a host field). The file alone
+  is not enough. `roles` already maps several hotkeys; only `launch_cuda_run.sh:245` rewrites it
+  to one.
 
 ## The TEST run file
 
@@ -36,19 +39,44 @@ dispatched result (`role_dispatch.py:55-79`) and checked by CUDA audits (`store.
 `16bc75dd475eaf7a6bcd85d8dbe89b9f57b31c8d080f252c6478ac52fcac3602` (joinbase-6 `manifest-run2`:
 `ledger_mode=test`, admission policy `d0a5538d…` with `work_screen_epoch_rounds` 6000, relay
 registry `471aeedb…` with `relay.joinbase.ai`). It was built and sealed and never created on a
-challenge. Its `roles` keys are the six public TEST miner hotkeys of that manifest. The three paths
-and the role names are placeholders, and the file is **not installable** until they name:
+challenge. Its `roles` keys are the six TEST miner hotkeys of that build (`miner0-hot` …
+`miner5-hot` in `manifest-run2/public-keys.json`, the six `metagraph.json` hotkeys);
+`manifest.json` itself names no miner.
+
+It is an **od-base** run. Even with every placeholder resolved, each dispatched reference, audit
+or referee reserves a workload execution and is refused `workload_not_promoted` until issue #25
+is fixed (`orchestrate.py:1068`, `:859-863`). It also needs its own 2-host CUDA qualification
+record on the test challenge. Without one its backend is `cpu`, and `launch_adapter` refuses
+it (`orchestrate.py:1724-1729`).
+
+The three paths and the role names are placeholders, and the file is **not installable** until
+they name:
 
 - `tree`: the reviewed frozen source tree inside the test challenge container
   (`scripts/ops/prepare_runtime.py freeze`);
 - `run_dir`: an admitted lifecycle run dir (`config.json`, journal, SSH keys), created by an
-  `admit` against the Vast account;
+  `admit` against the Vast account. Its `config.json` names the Vast API key file and the
+  network profile, which the challenge reads on every dispatched call;
 - `owner_key_file`: the TEST owner seed of that stack (`HYPERTRAIN_OWNER_HOTKEY` of
   `hypertrain-test-challenge`), never a production key;
 - each role: the lifecycle host role that hotkey owns (`h0`, `h1`, …).
 
 If the TEST manifest is rebuilt (another GPU image digest, other coldkeys, another policy), the
 `run_id` changes. Recompute it from the new `manifest.json` and edit `run_id` and `roles`.
+
+**Not for B300 hosts.** `16bc75dd…` pins the RTX 5090 reference:
+
+- `reference_spec.image_digest` `sha256:f4f1663b…`, layout dp2 on 2 GPUs, `sm_count` 170, and a
+  driver allowlist without 595.91.07.
+- A trial screen qualifies only with the manifest's layout and image digest
+  (`challenge/store.py:2586-2602`).
+- A CUDA qualification needs every host driver in the allowlist and `sm_count` equal
+  (`store.py:2439-2440`).
+- The dispatcher drives only Vast lifecycle hosts: `run_dir/config.json` names a Vast `base_url`
+  and key file (`role_dispatch.py:102-107`, `gpu_ops/provider.py:1`).
+
+A test on other hardware therefore needs a new TEST manifest for that hardware and its own
+qualification. Run its challenge with `HYPERTRAIN_ROLE_DISPATCH` unset, on a GPU host.
 
 ## Validate
 
@@ -85,8 +113,9 @@ and the stuck TEST run `b14a975e…`, and stops the TEST run at the unresolved p
 
 ## Install on the `hypertrain-test` stack only (not run)
 
-Preconditions: the placeholders are resolved, the validation above passes, the test challenge
-hosts no CPU-backend run, and the host change is approved. Never write
+Preconditions: issue #25 is fixed (run `16bc75dd…` is od-base), the run has its CUDA
+qualification record on the test challenge, the placeholders are resolved, the validation above
+passes, the test challenge hosts no CPU-backend run, and the host change is approved. Never write
 `/data/role-dispatch/dispatch.json` (the production file, bound to `7753ff75…`) and never restart
 `cortex-challenge-hypertrain`. `scripts/launch_cuda_run.sh dispatch` writes that production file
 and restarts that container: do not use it for a TEST run.
@@ -96,15 +125,35 @@ and restarts that container: do not use it for a TEST run.
 docker inspect hypertrain-test-challenge \
   --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
 sha256sum /data/role-dispatch/dispatch.json      # production file, before
+# dispatch.test.json: the resolved, validated copy, copied to s100 first
+#   (scp <file> root@chain.joinbase.ai:/root/backups/dispatch.test.json)
 install -d -o 65532 -g 65532 -m 0700 /data/hypertrain-test/state/role-dispatch
-install -o 65532 -g 65532 -m 0600 dispatch.test.json \
+install -o 65532 -g 65532 -m 0600 /root/backups/dispatch.test.json \
   /data/hypertrain-test/state/role-dispatch/dispatch.json
 cp -p /root/backups/hypertrain-test/compose.test.yml \
   /root/backups/hypertrain-test/compose.test.yml.<UTC timestamp>
-# compose.test.yml, service `challenge`, environment:
-#   HYPERTRAIN_ROLE_DISPATCH: <container path of /data/hypertrain-test/state>/role-dispatch/dispatch.json
+# compose.test.yml, service `challenge`:
+#   environment: HYPERTRAIN_ROLE_DISPATCH: <container path of /data/hypertrain-test/state>/role-dispatch/dispatch.json
+#   volumes, unless already under the test state volume (uid 65532 readable):
+#     <frozen tree>:<tree>:ro, <lifecycle run dir>:<run_dir>, <TEST owner seed>:<owner_key_file>:ro,
+#     and the key_file and network_profile_file paths named in <run_dir>/config.json (path only)
 docker compose -p hypertrain-test -f /root/backups/hypertrain-test/compose.test.yml up -d challenge
 curl -fsS 127.0.0.1:18996/version
+# the file loads lazily: check every path it names from inside the container now
+docker exec hypertrain-test-challenge python -I -c 'import json, os, sys
+from pathlib import Path
+from hypertrain.gpu_ops.role_dispatch import DispatchConfig
+c = DispatchConfig.model_validate_json(Path(os.environ["HYPERTRAIN_ROLE_DISPATCH"]).read_bytes())
+config = c.run_dir / "config.json"
+paths = [c.tree / "scripts/network_service_proof.py", c.owner_key_file, config,
+         c.tree / "experiments/gpu_network_v2/orchestrate.py"]
+if config.is_file():
+    cfg = json.loads(config.read_bytes())
+    paths += [Path(cfg["key_file"]), Path(cfg["network_profile_file"])]
+missing = [str(p) for p in paths if not p.is_file()]
+if missing:
+    sys.exit("missing: " + " ".join(missing))
+print(c.run_id)'
 sha256sum /data/role-dispatch/dispatch.json      # production file, after: unchanged
 ```
 
