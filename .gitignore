@@ -24,6 +24,8 @@ build/
 *.seed
 **/wallets/
 **/coldkey*
+# Hypertrain source module, not a wallet file; ruff and git add honour this file.
+!/hypertrain/src/hypertrain/miner/coldkey_ops.py
 **/hotkey*
 **/*mnemonic*
 deploy/env/*.env

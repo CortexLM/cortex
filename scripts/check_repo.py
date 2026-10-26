@@ -111,7 +111,8 @@ SECRET_PATTERNS = (
     re.compile(rb"sk-(?:proj-|ant-api\d+-)?[A-Za-z0-9_-]{40,}"),
     re.compile(rb"gh[pousr]_[A-Za-z0-9]{30,}"),
     re.compile(rb"github_pat_[A-Za-z0-9_]{40,}"),
-    re.compile(rb"AKIA[A-Z0-9]{16}"),
+    # AKIAIOSFODNN7EXAMPLE is the public AWS documentation key ID used by hypertrain test vectors.
+    re.compile(rb"AKIA(?!IOSFODNN7EXAMPLE)[A-Z0-9]{16}"),
     re.compile(rb"AGE-SECRET-KEY-[A-Z0-9]{40,}"),
     re.compile(rb"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----"),
 )

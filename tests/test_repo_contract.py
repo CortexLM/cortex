@@ -177,6 +177,13 @@ def test_credential_detection_never_prints_the_secret(tmp_path):
     assert secret not in str(failures)
 
 
+def test_only_the_documented_aws_example_key_id_is_not_a_credential(tmp_path):
+    put(tmp_path, "docs_example.py", 'key_id = "AKIAIOSFODNN7EXAMPLE"')
+    put(tmp_path, "real.py", f'key_id = "{"AKIA" + "IOSFODNN7EXAMPLF"}"')
+    failures = CHECK["check_hygiene"](tmp_path, [Path("docs_example.py"), Path("real.py")])
+    assert failures == ["real.py: possible embedded credential (value redacted)"]
+
+
 def test_git_inventory_ignores_local_cache_but_catches_force_tracked_cache(tmp_path):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     put(tmp_path, ".gitignore", "__pycache__/\n")
