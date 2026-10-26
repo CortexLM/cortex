@@ -287,6 +287,7 @@ class _Work:
     committed: str | None
     committed_step: int
     acc_ms: int = 0
+    forged: bool = False
 
 
 class _Host:
@@ -356,8 +357,12 @@ class _Host:
         if self.now >= self.next_poll_ms:
             self.next_poll_ms = self.now + self.sim.cfg.poll_ms
             self.drain.check()
+            if self.left:
+                return
         if self.leaving is not None:
-            if not self.busy_until:
+            if self.now >= self.next_hb_ms:
+                self._heartbeat()  # the lease must outlive the flush
+            if self.lease is not None and not self.busy_until:
                 self._send_leave()
             return
         if self.unacked is not None:
@@ -406,7 +411,7 @@ class _Host:
         held = {a.unit.shard: a for a in grant.assignments}
         if self.work is not None and self.work.unit.shard not in held and self.unacked is None:
             self._lose("displaced")
-        if self.work is None and held and not self.busy_until:
+        if self.work is None and held and not self.busy_until and self.leaving is None:
             self._restore(held[min(held)])
 
     def _restore(self, a: Assignment) -> None:
@@ -444,6 +449,8 @@ class _Host:
         if self.sim.rng.randrange(1_000_000) < self.sim.cfg.ack_loss_ppm:
             self.unacked = (key, step)
             return
+        if w.forged:
+            self.sim.violations.append(f"slot {self.slot}: a forged link was accepted")
         self.unacked = None
         w.committed, w.committed_step = key, step
         if step == w.unit.steps:
@@ -461,7 +468,9 @@ class _Host:
         if w.acc_ms < cfg.step_ms:
             return
         w.acc_ms = 0
-        step = w.step + (1 if self.cheats and w.step == cfg.ckpt_every else 0)
+        step = w.step
+        if self.cheats and w.step == cfg.ckpt_every:
+            step, w.forged = w.step + 1, True  # skips an inner step: the audit must catch it
         w.state = inner_step(w.state, w.unit.round, w.unit.shard, step)
         w.step += 1
         self.sim.computed += 1
@@ -784,6 +793,8 @@ class Simulation:
         for loss in self.losses:
             if loss.steps > cfg.ckpt_every:
                 self.violations.append(f"loss of {loss.steps} steps above ckpt_every: {loss}")
+            if loss.kind == "displaced" or loss.kind.startswith("refused"):
+                self.violations.append(f"the coordinator refused or moved live work: {loss}")
         if self.computed - self.accepted > sum(loss.steps for loss in self.losses):
             self.violations.append("wasted steps not accounted for by any loss")
         final_ok = completed and self.state == reference(cfg.rounds, cfg.shards, cfg.steps)
@@ -826,6 +837,8 @@ def random_config(rng: random.Random) -> SimConfig:
         restart_ms=rng.choice((5_000, 30_000)),
         guard_ms=rng.choice((20_000, 40_000)),
         ack_loss_ppm=rng.choice((0, 100_000, 300_000)),
+        ckpt_ms=rng.choice((5_000, 15_000, 30_000)),
+        ttl_ms=rng.choice((20_000, 60_000)),
     )
 
 

@@ -331,6 +331,31 @@ MUTANTS = (
         "test_sim.py::test_lapses_and_notices_never_penalise_an_honest_miner",
     ),
     Mutant(
+        "a valid link refused once (accepted work silently wasted)",
+        SRC + "coordinator.py",
+        "        if s.holder != Holder(member, token):\n",
+        "        if key not in self.__dict__.setdefault('_seen', set()):\n"
+        "            self.__dict__['_seen'].add(key)\n"
+        '            raise CoordinatorError("FLAKY", key)\n'
+        "        if s.holder != Holder(member, token):\n",
+        "test_sim.py::test_every_scenario_ends_in_the_uninterrupted_state[none-0]",
+    ),
+    Mutant(
+        "a draining miner stops heartbeating",
+        SRC + "sim.py",
+        "            if self.now >= self.next_hb_ms:\n"
+        "                self._heartbeat()  # the lease must outlive the flush\n",
+        "",
+        "test_sim.py::test_a_slow_flush_keeps_its_lease_and_leaves_with_a_notice",
+    ),
+    Mutant(
+        "a miner sends its leave twice",
+        SRC + "sim.py",
+        "            self.drain.check()\n            if self.left:\n                return\n",
+        "            self.drain.check()\n",
+        "test_sim.py::test_a_notice_too_short_to_flush_leaves_at_once_and_once",
+    ),
+    Mutant(
         "miner ignores the checkpoint interval",
         SRC + "sim.py",
         "if w.step - w.committed_step >= cfg.ckpt_every or w.step == w.unit.steps:",

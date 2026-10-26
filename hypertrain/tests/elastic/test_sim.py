@@ -62,6 +62,16 @@ def test_a_drained_notice_loses_no_step() -> None:
     assert drained >= 4
 
 
+def test_a_notice_too_short_to_flush_leaves_at_once_and_once() -> None:
+    drains = 0
+    for seed in range(10):
+        result = simulate(CFG, "short-notice", seed)
+        assert result.violations == ()
+        assert result.exits.get("notice", 0) == result.drains and result.drain_ms == 0
+        drains += result.drains
+    assert drains >= 3
+
+
 def test_lapses_and_notices_never_penalise_an_honest_miner() -> None:
     exits: Counter[str] = Counter()
     for name in (*LOSSY, "notice", "region-notice"):
@@ -97,6 +107,23 @@ def test_resuming_the_same_heads_again_and_again_changes_nothing() -> None:
     chain = sim.checkpoints.chain(unit, sim.coord.settle().heads[0])
     assert [link.step for link in chain] == [3, 6, 9, 12]
     assert len({link.lease for link in chain}) == 4  # each link from another host
+
+
+def test_a_short_notice_inside_a_partition_is_not_a_failed_drain() -> None:
+    # The notice lands while the host cannot reach the coordinator and the kill follows a
+    # second later: the leave cannot go out, and that is the partition's doing, not the drain's.
+    faults = (Fault(9_000, "partition", 0, 34_000), Fault(16_000, "notice", 0, 17_000))
+    result = Simulation(CFG, Schedule("notice-in-partition", faults), 0).run()
+    assert result.violations == () and result.final_ok
+    assert result.exits.get("lapse") == 1 and result.exits.get("notice", 0) == 0
+
+
+def test_a_slow_flush_keeps_its_lease_and_leaves_with_a_notice() -> None:
+    cfg = replace(CFG, ckpt_ms=30_000, ttl_ms=20_000)  # the flush outlasts one lease
+    for seed in range(4):
+        result = simulate(cfg, "notice", seed)
+        assert result.violations == () and result.wasted_steps == 0
+        assert result.exits.get("notice", 0) == result.drains
 
 
 def test_the_simulator_is_deterministic() -> None:
