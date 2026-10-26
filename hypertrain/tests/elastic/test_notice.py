@@ -2,6 +2,9 @@
 
 import datetime as dt
 import json
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
@@ -104,6 +107,40 @@ def test_an_unreachable_imds_raises_a_notice_error(error: type[httpx.TransportEr
     client = httpx.Client(base_url="http://imds.test", transport=httpx.MockTransport(down))
     with pytest.raises(NoticeError):
         AwsSpotNotice(FakeClock(), client=client, wall=lambda: WALL).poll()
+
+
+class LinkLocal(BaseHTTPRequestHandler):
+    """A real IMDSv2 endpoint on 127.0.0.1: a session, then no scheduled interruption."""
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"session")
+
+    def do_GET(self) -> None:  # noqa: N802
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+@pytest.fixture
+def imds_url() -> Iterator[str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), LinkLocal)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+
+
+def test_the_imds_client_never_goes_through_a_proxy(
+    imds_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    for name in ("HTTP_PROXY", "http_proxy", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")  # nothing listens there
+    assert AwsSpotNotice(FakeClock(), base_url=imds_url).poll() is None
 
 
 def test_the_fake_source_delivers_its_notice_from_its_time_on() -> None:

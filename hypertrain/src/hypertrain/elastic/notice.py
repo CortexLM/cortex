@@ -96,7 +96,8 @@ class AwsSpotNotice:
     ) -> None:
         self.clock = clock
         self.wall = wall
-        self._client = client or httpx.Client(base_url=base_url, timeout=timeout)
+        # IMDS is link-local: never through HTTP(S)_PROXY, as the AWS SDKs do
+        self._client = client or httpx.Client(base_url=base_url, timeout=timeout, trust_env=False)
         self._token: tuple[str, int] | None = None
 
     def _send(self, method: str, path: str, headers: dict[str, str]) -> httpx.Response:
@@ -159,7 +160,7 @@ class ShardHead(WireModel):
 class LeaveNotice(WireModel):
     """A member's last word: it leaves under lease `lease`. `heads` are the last links it saw
     accepted and `provider_time` is the provider's interruption timestamp: evidence for the
-    audit, which the coordinator records but never trusts over its own heads."""
+    audit, kept on the member's Departure, never trusted over the coordinator's own heads."""
 
     version: Literal[1] = 1
     run_id: Identifier

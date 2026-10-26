@@ -5,12 +5,13 @@ Coordinator, CheckpointManager, DrainHandler and FakeNoticeSource on one FakeClo
 schedules take hosts away: a provider notice then a kill, a hard kill (the process dies and
 restarts on the same host), a host loss (the machine is gone and a replacement is provisioned),
 a network partition, a partition from the store only, a correlated regional loss and a capacity
-drought. A run must end in the
-state hash of the run without faults, with every accepted link in the final chains, no step
-credited twice, every loss of progress within one checkpoint interval and no penalty for an
-honest host.
+drought. A run must end in the state hash of the run without faults, with every accepted link in
+the final chains, no step credited twice, no live work refused or moved, no forged link
+accepted, no holder stalled without a fault, every loss of progress within one checkpoint
+interval and no penalty for an honest host.
 
     uv run --frozen python -m hypertrain.elastic.sim table
+    uv run --frozen python -m hypertrain.elastic.sim aggregate --seeds 200
     uv run --frozen python -m hypertrain.elastic.sim soak --seeds 5000
 
 A long soak runs disjoint seed ranges in parallel, one process each:

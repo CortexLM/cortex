@@ -30,12 +30,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from hypertrain.data.store import _check_key
+from pydantic import ValidationError
+
 from hypertrain.elastic.assignment import plan
 from hypertrain.elastic.checkpoint import CheckpointManager, CheckpointManifest, WorkUnit
 from hypertrain.elastic.clock import Clock
 from hypertrain.elastic.membership import Lease, LeaseError, Member, Membership
-from hypertrain.elastic.notice import NoticeError, SignedLeave, verify_leave
+from hypertrain.elastic.notice import LeaveNotice, NoticeError, SignedLeave, verify_leave
 from hypertrain.elastic.store import CheckpointStore
 from hypertrain.protocol.keys import KeyError_, decode_hotkey
 
@@ -66,6 +67,7 @@ class Departure:
     kind: Exit
     at_ms: int
     released: tuple[int, ...]
+    notice: LeaveNotice | None = None  # the verified leave, kept as evidence (NOTICE only)
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +146,8 @@ class Coordinator:
     ) -> None:
         if capacity < 1:
             raise ValueError("capacity must be >= 1")
+        if not MEMBER_ID.fullmatch(run_id):
+            raise ValueError("run_id must be an Identifier, as every manifest carries it")
         if progress_ms <= 0:
             raise ValueError("progress_ms must be > 0")
         self.progress_ms = progress_ms
@@ -172,11 +176,22 @@ class Coordinator:
             raise ValueError("a round needs at least one unit")
         if any(not s.done for s in self._shards.values()):
             raise CoordinatorError("ROUND_OPEN", f"round {self.round} is not complete")
-        for u in units:
-            _check_key(u.policy)
-            _check_key(u.base)
-            if u.steps < 1 or u.shard < 0:
-                raise ValueError("a unit needs a shard >= 0 and at least one step")
+        for u in units:  # a unit no manifest can bind would block every later round
+            try:
+                CheckpointManifest(
+                    run_id=u.run_id,
+                    policy=u.policy,
+                    round=u.round,
+                    shard=u.shard,
+                    base=u.base,
+                    parent=None,
+                    step=u.steps,
+                    state=u.base,
+                    producer="open-round",
+                    lease=1,
+                )
+            except ValidationError as e:
+                raise ValueError(f"unit {u.shard}: {e.error_count()} invalid fields") from None
             if not self.checkpoints.store.exists(u.base):
                 raise ValueError(f"base state {u.base} is not in the store")
         rounds = {u.round for u in units}
@@ -238,7 +253,7 @@ class Coordinator:
         if notice.signer != m.signer:
             raise NoticeError("leave notice signed by a key the member did not register")
         self.membership.leave(m.id, m.lease.token)
-        departure = self._depart(m, Exit.NOTICE)
+        departure = self._depart(m, Exit.NOTICE, notice=notice)
         self._left[notice.lease] = ((m.id, m.signer), departure)
         return departure
 
@@ -311,17 +326,26 @@ class Coordinator:
         return Grant(lease, tuple(Assignment(s.unit, s.head, s.step) for s in held))
 
     def _record(
-        self, member: str, owner: str, token: int, kind: Exit, released: tuple[int, ...]
+        self,
+        member: str,
+        owner: str,
+        token: int,
+        kind: Exit,
+        released: tuple[int, ...],
+        notice: LeaveNotice | None = None,
     ) -> Departure:
-        d = Departure(member, owner, token, kind, self.clock.now_ms(), released)
+        d = Departure(member, owner, token, kind, self.clock.now_ms(), released, notice)
         self._departures.append(d)
         return d
 
-    def _depart(self, m: Member, kind: Exit, *, assign: bool = True) -> Departure:
+    def _depart(
+        self, m: Member, kind: Exit, *, assign: bool = True, notice: LeaveNotice | None = None
+    ) -> Departure:
         released = self._held(m.lease.token)
         for s in released:
             s.holder = None
-        d = self._record(m.id, m.owner, m.lease.token, kind, tuple(s.unit.shard for s in released))
+        shards = tuple(s.unit.shard for s in released)
+        d = self._record(m.id, m.owner, m.lease.token, kind, shards, notice)
         if assign:
             self._assign()
         return d

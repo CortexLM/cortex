@@ -294,6 +294,7 @@ def test_a_signed_leave_releases_the_shards_at_once_without_penalty() -> None:
     signed = sign_leave(notice(a, KEYS["a"]), KEYS["a"])
     departure = coord.leave(signed)
     assert (departure.kind, departure.released) == (Exit.NOTICE, (0,))
+    assert departure.notice == signed.notice  # heads and provider time kept as evidence
     assert coord.holder(0) is not None and coord.holder(0).member == "b"
     assert coord.leave(signed) == departure  # a retry after a lost answer
     settlement = coord.settle()
@@ -390,10 +391,22 @@ def test_open_round_refuses_units_no_manifest_can_bind() -> None:
         WorkUnit(RUN, POLICY, 1, 0, unit.base, 0),
         WorkUnit(RUN, POLICY.upper(), 1, 0, unit.base, 6),
         WorkUnit(RUN, POLICY, 1, 0, missing, 6),
+        WorkUnit(RUN, POLICY, 1, 2**53, unit.base, 6),
+        WorkUnit(RUN, POLICY, 2**64, 0, unit.base, 6),
     ):
         with pytest.raises(ValueError):
             coord.open_round([bad])
-    assert coord.round == 0
+    assert coord.round == 0 and coord.settle().complete
+    with pytest.raises(ValueError):
+        Coordinator(
+            run_id="cortex/v3 run",
+            clock=FakeClock(),
+            store=MemoryCheckpointStore(),
+            ttl_ms=TTL,
+            progress_ms=PROGRESS,
+            seed=b"s",
+            admit=lambda *_: True,
+        )
 
 
 def test_a_departure_after_the_last_commit_is_in_the_closing_settlement() -> None:

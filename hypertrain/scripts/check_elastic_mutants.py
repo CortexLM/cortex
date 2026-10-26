@@ -364,11 +364,46 @@ MUTANTS = (
         "test_sim.py::test_every_scenario_ends_in_the_uninterrupted_state[none-0]",
     ),
     Mutant(
-        "progress deadline shorter than one honest link",
+        "progress deadline no longer than an honest link (only the stall oracle sees it)",
         SRC + "sim.py",
-        "self.heartbeat_ms + self.restore_ms + self.ckpt_every * self.step_ms + self.ckpt_ms",
-        "self.heartbeat_ms + self.restore_ms + self.step_ms + self.ckpt_ms",
+        "        return 2 * (\n"
+        "            self.heartbeat_ms + self.restore_ms"
+        " + self.ckpt_every * self.step_ms + self.ckpt_ms\n"
+        "        )\n",
+        "        return self.restore_ms + self.ckpt_every * self.step_ms + self.ckpt_ms\n",
         "test_sim.py::test_every_scenario_ends_in_the_uninterrupted_state[none-0]",
+    ),
+    Mutant(
+        "a leave blocked by a partition counts as a failed drain",
+        SRC + "sim.py",
+        "        if not self.sim.reachable(self.slot):\n"
+        "            self.drain_partitioned = True\n"
+        "            return\n",
+        "        if not self.sim.reachable(self.slot):\n            return\n",
+        "test_sim.py::test_a_short_notice_inside_a_partition_is_not_a_failed_drain",
+    ),
+    Mutant(
+        "the IMDS client goes through HTTP_PROXY",
+        SRC + "notice.py",
+        "trust_env=False",
+        "trust_env=True",
+        "test_notice.py::test_the_imds_client_never_goes_through_a_proxy",
+    ),
+    Mutant(
+        "open_round accepts a unit no manifest can bind",
+        SRC + "coordinator.py",
+        "            except ValidationError as e:\n"
+        '                raise ValueError(f"unit {u.shard}: {e.error_count()} invalid fields")'
+        " from None\n",
+        "            except ValidationError:\n                pass\n",
+        "test_coordinator.py::test_open_round_refuses_units_no_manifest_can_bind",
+    ),
+    Mutant(
+        "the leave's evidence is dropped",
+        SRC + "coordinator.py",
+        "departure = self._depart(m, Exit.NOTICE, notice=notice)",
+        "departure = self._depart(m, Exit.NOTICE)",
+        "test_coordinator.py::test_a_signed_leave_releases_the_shards_at_once_without_penalty",
     ),
     Mutant(
         "a draining miner stops heartbeating",
