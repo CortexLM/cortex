@@ -10,5 +10,10 @@
 - GPU determinism Phase A on RTX 5090 hosts (bitwise-identical across 3 hosts).
 - Docs, CI, image and release workflows, Dockerfiles.
 
+### Changed
+- CUDA network qualification accepts the SM count pinned by the signed manifest's
+  `reference_spec.sm_count` instead of only 170, and rejects any device off that count with
+  `qualification_sm_profile_mismatch` (opt-in B300 support).
+
 ### Not yet
 - Quality parity with centralized training is not claimed.

@@ -21,6 +21,7 @@ Start here: [Cortex ecosystem](ecosystem.md) and [Validator quickstart](validato
 - [ADR 0001: monorepo structure](adr/0001-monorepo-structure.md): layout, lockfiles, workflows, v3 images and the old-repository references to migrate.
 - [Hypertrain import provenance](provenance/hypertrain-import.md): commit map, byte-identity and `git log --follow` checks.
 - [Hypertrain](../hypertrain/README.md): the imported project, with its own documentation in `hypertrain/docs/`.
+- [B300 host run](b300-run.md): `run_host.sh` on an AWS p6-b300 host: steps, exit codes, results, auto-stop and the two-host comparison.
 
 ## Run a validator
 

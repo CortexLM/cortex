@@ -1,0 +1,6 @@
+#!/bin/sh
+# scripts/mine_smoke_v2.py runs every stage as `uv run --frozen CMD ...`. The GPU image has its
+# venv on PATH and no uv, so run_host.sh puts this shim first on PATH: run CMD directly.
+[ "${1:-}" = run ] && shift
+[ "${1:-}" = --frozen ] && shift
+exec "$@"

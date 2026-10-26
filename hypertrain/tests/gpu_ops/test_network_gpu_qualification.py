@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -348,6 +349,62 @@ def test_environment_rejects_driver_count_differing_from_devices(tmp_path: Path)
     # When / Then
     with pytest.raises(ValidationError, match="driver/device count"):
         driver.Environment.model_validate(data)
+
+
+def test_result_admits_positive_sm_count_other_than_rtx_5090(tmp_path: Path) -> None:
+    # Given: a B300-style result; the store, not the schema, binds it to reference_spec.sm_count.
+    data = json.loads(results(tmp_path)[0].read_bytes())
+    data["environment"]["sm_counts"] = [148, 148]
+    # When
+    result = driver.Result.model_validate_json(json.dumps(data))
+    # Then: a non-positive count is still refused.
+    assert result.environment.sm_counts == [148, 148]
+    data["environment"]["sm_counts"] = [0, 0]
+    with pytest.raises(ValidationError):
+        driver.Result.model_validate_json(json.dumps(data))
+
+
+def fake_cuda_host(monkeypatch: pytest.MonkeyPatch, sm_counts: list[int]) -> None:
+    """Fake the image's torch/nvidia-smi probes; no GPU or subprocess is touched."""
+    import torch  # After hypertrain.trainer configured determinism.
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: len(sm_counts))
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda i: SimpleNamespace(multi_processor_count=sm_counts[i]),
+    )
+    monkeypatch.setattr(torch, "__file__", "/venv/main/torch/__init__.py")
+    monkeypatch.setattr(torch, "__version__", "2.14.0+cu130")
+    monkeypatch.setattr(torch.version, "cuda", "13.0")
+    monkeypatch.setattr(driver.sys, "executable", "/opt/hypertrain/venv/bin/python")
+    monkeypatch.setattr(driver.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    smi = SimpleNamespace(stdout="595.84\n" * len(sm_counts))
+    monkeypatch.setattr(driver.subprocess, "run", lambda *a, **k: smi)
+
+
+def test_inspect_environment_records_sm_count_named_by_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a manifest naming 148 SMs and a host whose devices all report 148.
+    cfg = seed_config(tmp_path, TREE / "experiments/gpu_network_v2/profile.json")
+    fake_cuda_host(monkeypatch, [148, 148])
+    # When
+    environment = driver.inspect_environment(cfg, 2, 148)
+    # Then
+    assert environment.sm_counts == [148, 148]
+
+
+def test_inspect_environment_refuses_device_off_manifest_sm_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: an RTX 5090 (170-SM) manifest and a host with one 148-SM device.
+    cfg = seed_config(tmp_path, TREE / "experiments/gpu_network_v2/profile.json")
+    fake_cuda_host(monkeypatch, [170, 148])
+    # When / Then
+    with pytest.raises(Reject, match="qualification_sm_profile_mismatch"):
+        driver.inspect_environment(cfg, 2, 170)
 
 
 def test_eight_gpu_seed_manifest_drives_rank_and_checkpoint_coverage(
