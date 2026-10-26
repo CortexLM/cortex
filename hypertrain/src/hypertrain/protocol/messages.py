@@ -13,10 +13,13 @@ from pydantic import (
     Field,
     StrictBool,
     StrictInt,
+    StrictStr,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 
+from hypertrain.models.registry import ARCH_REGISTRY
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 
@@ -83,7 +86,9 @@ class ODSpec(_M):
 
 
 class ModelSpec(_M):
-    arch: Literal["decoder", "od-encoder"]
+    # A model registry name (ADR 0006). Omitted = "decoder"; it is always dumped, so the bytes
+    # and run_ids of existing manifests are unchanged.
+    arch: StrictStr = Field("decoder", json_schema_extra={"enum": [*sorted(ARCH_REGISTRY)]})
     n_layers: Pos
     d_model: Pos
     n_heads: Pos
@@ -105,6 +110,13 @@ class ModelSpec(_M):
     od: ODSpec | None = Field(None, exclude_if=_omit_none)
     # D4 / plan S4: omitted = "default" (bf16/fp32 GEMMs), so existing run_ids are unchanged.
     precision_policy: Literal["default", "fp8-rowwise"] | None = Field(None, exclude_if=_omit_none)
+
+    @field_validator("arch")
+    @classmethod
+    def _registered_arch(cls, arch: str) -> str:
+        if arch not in ARCH_REGISTRY:
+            raise ValueError(f"unknown arch {arch!r}; registered: {sorted(ARCH_REGISTRY)}")
+        return arch
 
     @model_validator(mode="after")
     def _od_iff_encoder(self) -> ModelSpec:
@@ -340,6 +352,9 @@ class RunManifest(_M):
             _check_od(self)
         elif self.reference_spec.profile is not None:
             raise ValueError("profile is only valid for arch == od-encoder")
+        # v1 is frozen (ADR 0001): an arch registered later has its rules in v2 only.
+        if self.model.arch not in ("decoder", "od-encoder"):
+            raise ValueError(f"arch {self.model.arch!r} needs manifest_version 2")
         return self
 
     def body(self) -> dict[str, object]:

@@ -321,8 +321,8 @@ def traced_forward(
 
 
 def run_manifest(model: ModelConfig = PROFILE) -> dict[str, Any]:
-    """Unsigned TEST run document for this profile. Not a protocol RunManifest: ModelSpec.arch is
-    a frozen protocol Literal (ADR 0001), so no network run can carry it yet (ADR 0006)."""
+    """Unsigned TEST run document for this profile (B300 qualification, no key, no network).
+    A network run uses a signed RunManifestV2 with ``model.arch`` = ARCH (ADR 0006)."""
     fields = dataclasses.asdict(model)
     if (fields.pop("od"), fields.pop("profile"), fields.pop("precision_policy")) != (
         None,

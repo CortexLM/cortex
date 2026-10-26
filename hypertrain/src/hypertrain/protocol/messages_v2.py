@@ -16,6 +16,7 @@ from pydantic import (
     model_validator,
 )
 
+from hypertrain.models.registry import ARCH_REGISTRY
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import (
@@ -110,6 +111,9 @@ class TrainingManifestV2(RunManifest):
             raise ValueError("dense models require EP1")
         if ms.n_experts % lay.ep_size:
             raise ValueError("EP must divide expert count")
+        ranks = ARCH_REGISTRY[ms.arch].max_ranks
+        if ranks is not None and lay.n_gpus > ranks:
+            raise ValueError(f"{ms.arch} trains on at most {ranks} rank(s) per island")
         match ms.arch:
             case "decoder":
                 if ref.profile is not None:
@@ -169,6 +173,30 @@ class TrainingManifestV2(RunManifest):
                 if od.objective != "mlm":
                     count += 4 * d + head_layers * (16 * d * d + 11 * d)
                     count += d * d + 4 * d + 4
+            case "kimi-k3-pro-tiny":
+                if ref.profile is not None:
+                    raise ValueError("profile is only valid for OD")
+                if inn.grad_accum != 1:  # the router bias moves once per backward pass
+                    raise ValueError("kimi requires grad_accum 1")
+                d, h, ff, e = ms.d_model, ms.n_heads, ms.d_ff, ms.n_experts
+                hd = d // h
+                if ms.n_kv_heads != h or hd % 4 or e == 1 or ms.n_layers == 1:
+                    raise ValueError("kimi MLA/MoE geometry mismatch")
+                # Every token reaches its top-k experts and no fp8 path exists: signed values
+                # other than these would claim behaviour the model does not have.
+                if f32val(ms.capacity_factor) != 1 or ms.precision_policy not in (None, "default"):
+                    raise ValueError("kimi requires capacity=1 and the default precision")
+                # Shape-only count of models/kimi_tiny.param_shapes: MLA (q rank 12hd, kv rank
+                # 4hd, rope hd/2) per layer, layer 0 dense of (top_k + 1) * d_ff, then routed
+                # experts, router + bias and one shared expert.
+                q, kv, rope = 12 * hd, 4 * hd, hd // 2
+                mla = 2 * d + d * q + q + q * h * (hd + rope) + d * (kv + rope) + kv
+                mla += kv * h * 2 * hd + h * hd * d
+                moe = d * e + e + 3 * e * d * ff + 3 * d * ff
+                count = (
+                    2 * ms.vocab * d + d + ms.n_layers * mla + 3 * d * (ms.top_k_experts + 1) * ff
+                )
+                count += (ms.n_layers - 1) * moe
             case unreachable:
                 raise ValueError(f"unsupported architecture {unreachable}")
         if ms.param_count != count:
