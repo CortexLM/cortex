@@ -155,22 +155,34 @@ def sigv4_presign(
     amz_date: str,
     expires: int,
     service: str = "s3",
+    *,
+    headers: Mapping[str, str] | None = None,
 ) -> str:
-    """Query-string SigV4 (UNSIGNED-PAYLOAD), host-only signed headers."""
+    """Query-string SigV4 (UNSIGNED-PAYLOAD). The URL's own query (UploadPart's partNumber and
+    uploadId) is signed and kept. Every header in `headers` is signed as well, so the holder must
+    send it verbatim: R2 answers 403 without it, and checks a signed x-amz-content-sha256 against
+    the body (400 XAmzContentSHA256Mismatch), which binds the URL to one exact payload."""
     if not 1 <= expires <= 604800:
         raise ValueError("expires must be in [1, 604800] seconds")
     u = urlsplit(url)
     date = amz_date[:8]
     scope = f"{date}/{region}/{service}/aws4_request"
-    params = {
-        "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
-        "X-Amz-Credential": f"{creds.access_key_id}/{scope}",
-        "X-Amz-Date": amz_date,
-        "X-Amz-Expires": str(expires),
-        "X-Amz-SignedHeaders": "host",
-    }
+    hdrs = {"host": u.netloc}
+    hdrs.update({k.lower(): " ".join(v.split()) for k, v in (headers or {}).items()})
+    signed = ";".join(sorted(hdrs))
+    params = dict(parse_qsl(u.query, keep_blank_values=True))
+    params.update(
+        {
+            "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+            "X-Amz-Credential": f"{creds.access_key_id}/{scope}",
+            "X-Amz-Date": amz_date,
+            "X-Amz-Expires": str(expires),
+            "X-Amz-SignedHeaders": signed,
+        }
+    )
     q = _canon_query(params)
-    canon = "\n".join([method, u.path or "/", q, f"host:{u.netloc}\n", "host", "UNSIGNED-PAYLOAD"])
+    canon_h = "".join(f"{k}:{hdrs[k]}\n" for k in sorted(hdrs))
+    canon = "\n".join([method, u.path or "/", q, canon_h, signed, "UNSIGNED-PAYLOAD"])
     sts = "\n".join(
         ["AWS4-HMAC-SHA256", amz_date, scope, hashlib.sha256(canon.encode()).hexdigest()]
     )
