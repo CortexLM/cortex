@@ -15,6 +15,10 @@
   (omitted = `decoder`; existing manifest bytes and run_ids unchanged); v2 manifests carry
   `kimi-k3-pro-tiny` on a one-GPU island, v1 manifests refuse it (D18, ADR 0006).
 - Docs, CI, image and release workflows, Dockerfiles.
+- Eviction-tolerant core `hypertrain.elastic` (v3, not wired into the v2 challenge): leases with
+  fencing tokens, deterministic shard reassignment, content-addressed checkpoint chains checked
+  back to the round's base, the AWS IMDSv2 spot notice, a signed leave and a drain that flushes
+  only when it fits before the deadline; see `docs/adr/0002` at the monorepo root.
 
 ### Changed
 - CUDA network qualification records each device's compute capability with its SM count and
