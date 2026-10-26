@@ -112,6 +112,33 @@ def test_concurrent_first_calls_load_once(tmp_path: Path, monkeypatch: pytest.Mo
     assert len(calls) == 1
 
 
+def test_test_run_dispatch_file_authorizes_only_its_test_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: the TEST run file from docs/role-dispatch.md, loaded the way the challenge loads it.
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    launch = _app(tmp_path, TREE / "docs/examples/dispatch.test.json").state.store._role_launch
+    assert launch is not None
+    # When / Then: the production-challenge run and the stuck TEST run are refused before any I/O.
+    for foreign in (
+        "7753ff754eea7867bcaf1dcc92f5064e99f4adaeef8f5ec1d5a86acf7b43ca0f",
+        "b14a975efb7ad8e1ee3e1565b48f741b3d2a93fd1c9c20b069dde6c9d2272375",
+    ):
+        with pytest.raises(RuntimeError, match="not the authorized run"):
+            launch("audit", SimpleNamespace(run_id=foreign), tmp_path, {})
+    # The TEST run passes the binding, then stops at its unresolved host paths: not installable
+    # until the placeholders name a real tree, lifecycle run dir and owner seed.
+    with pytest.raises(OSError):
+        launch(
+            "audit",
+            SimpleNamespace(
+                run_id="16bc75dd475eaf7a6bcd85d8dbe89b9f57b31c8d080f252c6478ac52fcac3602"
+            ),
+            tmp_path,
+            {},
+        )
+
+
 def test_unexpected_load_error_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def broken(path: Path) -> role_dispatch.RoleLaunch:
         raise RuntimeError("not a missing-file problem")
