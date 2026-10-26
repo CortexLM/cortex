@@ -197,6 +197,17 @@ profile, image and flags.
   compare with `jq -S '.commitments|del(.leaves)'`.
 - B300 results are a replay domain of their own. Never compare them with RTX 5090 roots.
 
+## Lium validator cycle on GPU 0 (D19, 2026-10-26)
+
+The Lium validator (13.223.237.157) opens SSH sessions on both hosts about every 15 minutes (at :08, :23, :38 and :53 on host B, removed about 7 minutes later) and runs a matmul challenge inside the `executor` container. That challenge holds most of the VRAM of GPU 0 for 2 to 5 minutes, and the executor process sometimes keeps a resident 810 MiB. It happens whether or not rentals are paused. Observed on host B on 2026-10-26: two dp8 attempts failed at 14:27:44Z and about 14:30Z with a rank 0 `torch.OutOfMemoryError` (about 265 GiB of the 267.68 GiB held by another process). [V by the AWS agent: executor docker logs, docker events, journalctl ssh]
+
+The executor stays up: stopping it would take the nodes OFFLINE at Lium (SN51 decision D19). So:
+
+- For a run with at most 7 GPUs, leave GPU 0 out: `CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7`.
+- For dp8, or when GPU 0 is needed, start in a safe window and re-run after an OOM that happens on rank 0 at start. Safe windows, host B clock: about :32-:38, :47-:53, :02-:08 and :17-:23. Check them on host A before relying on them [?].
+- Before each step record `nvidia-smi --query-compute-apps=pid,used_memory --format=csv` and `nvidia-smi --query-gpu=index,memory.used --format=csv`.
+- A throughput figure measured with 8 GPUs must say whether a validator cycle overlapped the timed steps (compare the run window with the cycle times above). Bitwise results (`leaves_root`, `delta_hash`, `state_root`) do not depend on the cycle: the dp8 qualification already obtained stays valid.
+
 ## Not proven yet
 
 `hypertrain/tests/test_b300_run_host.py` drives the script against fake docker, nvidia-smi, aws
