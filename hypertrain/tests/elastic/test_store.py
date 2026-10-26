@@ -12,14 +12,19 @@ from hypertrain.elastic.store import LocalCheckpointStore
 
 DATA = b"checkpoint-state" * 4096
 
-# The child dies by SIGKILL the moment put() asks for durability, as a host does when the
-# provider pulls it in the middle of a checkpoint write.
+# The child dies by SIGKILL the moment put() asks for the data to be durable, as a host does when
+# the provider pulls it in the middle of a checkpoint write; directory fsyncs go through.
 KILLED_AT_FSYNC = """
-import os, signal, sys
+import os, signal, stat, sys
 from pathlib import Path
 from hypertrain.elastic.store import LocalCheckpointStore
 store = LocalCheckpointStore(Path(sys.argv[1]))
-os.fsync = lambda fd: os.kill(os.getpid(), signal.SIGKILL)
+sync = os.fsync
+def fsync(fd):
+    if stat.S_ISREG(os.fstat(fd).st_mode):
+        os.kill(os.getpid(), signal.SIGKILL)
+    sync(fd)
+os.fsync = fsync
 store.put(b"checkpoint-state" * 4096)
 """
 

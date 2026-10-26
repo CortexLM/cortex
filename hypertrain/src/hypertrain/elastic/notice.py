@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Annotated, Literal, Protocol
 
 import httpx
-from pydantic import StringConstraints
+from pydantic import Field, StringConstraints
 
 from hypertrain.elastic.clock import Clock
 from hypertrain.protocol.jcs import canonicalize
@@ -30,6 +30,7 @@ IMDS = "http://169.254.169.254"
 SESSION_PATH = "/latest/api/token"
 INSTANCE_ACTION_PATH = "/latest/meta-data/spot/instance-action"
 SESSION_TTL_S = 21600
+MAX_HEADS = 1024
 
 
 class NoticeError(RuntimeError):
@@ -78,9 +79,10 @@ class AwsSpotNotice:
     GET /latest/meta-data/spot/instance-action answers 404 until EC2 schedules an interruption,
     then {"action": "terminate"|"stop"|"hibernate", "time": "YYYY-MM-DDTHH:MM:SSZ"} about two
     minutes ahead; hibernation starts at once, so a hibernate notice has no time left. The
-    session token is fetched with PUT /latest/api/token and refreshed on 401. Any other answer
-    raises NoticeError: the host keeps its lease, which still bounds the loss. In a container
-    the token PUT needs an IMDS hop limit of 2 or host networking.
+    session token is fetched with PUT /latest/api/token and refreshed on 401. Any other answer,
+    and an unreachable or silent IMDS, raises NoticeError: the caller keeps working under its
+    lease, which still bounds the loss. In a container the token PUT needs an IMDS hop limit of
+    2 or host networking, or it times out.
     """
 
     def __init__(
@@ -97,12 +99,20 @@ class AwsSpotNotice:
         self._client = client or httpx.Client(base_url=base_url, timeout=timeout)
         self._token: tuple[str, int] | None = None
 
+    def _send(self, method: str, path: str, headers: dict[str, str]) -> httpx.Response:
+        try:
+            return self._client.request(method, path, headers=headers)
+        except httpx.HTTPError as e:
+            raise NoticeError(f"IMDS unreachable ({type(e).__name__})") from None
+
     def _session_token(self) -> str:
         now = self.clock.now_ms()
         if self._token is not None and now < self._token[1]:
             return self._token[0]
-        r = self._client.put(
-            SESSION_PATH, headers={"X-aws-ec2-metadata-token-ttl-seconds": str(SESSION_TTL_S)}
+        r = self._send(
+            "PUT",
+            SESSION_PATH,
+            {"X-aws-ec2-metadata-token-ttl-seconds": str(SESSION_TTL_S)},
         )
         if r.status_code != 200 or not r.text:
             raise NoticeError(f"IMDS token: HTTP {r.status_code}")
@@ -112,7 +122,7 @@ class AwsSpotNotice:
 
     def _instance_action(self) -> httpx.Response:
         headers = {"X-aws-ec2-metadata-token": self._session_token()}
-        return self._client.get(INSTANCE_ACTION_PATH, headers=headers)
+        return self._send("GET", INSTANCE_ACTION_PATH, headers)
 
     def poll(self) -> Interruption | None:
         r = self._instance_action()
@@ -147,8 +157,9 @@ class ShardHead(WireModel):
 
 
 class LeaveNotice(WireModel):
-    """A member's last word: it leaves under lease `lease`, and `heads` are the last links it
-    had accepted. `provider_time` is the provider's interruption timestamp, kept as evidence."""
+    """A member's last word: it leaves under lease `lease`. `heads` are the last links it saw
+    accepted and `provider_time` is the provider's interruption timestamp: evidence for the
+    audit, which the coordinator records but never trusts over its own heads."""
 
     version: Literal[1] = 1
     run_id: Identifier
@@ -157,7 +168,7 @@ class LeaveNotice(WireModel):
     lease: Positive
     reason: Literal["interruption", "operator"]
     provider_time: Stamp
-    heads: list[ShardHead]
+    heads: Annotated[list[ShardHead], Field(max_length=MAX_HEADS)]
 
     def signing_message(self) -> bytes:
         return LEAVE_DOMAIN + canonicalize(self.body(), allow_float=False)

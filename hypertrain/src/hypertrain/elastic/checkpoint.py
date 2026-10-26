@@ -16,7 +16,7 @@ from typing import Literal
 
 from pydantic import ValidationError
 
-from hypertrain.data.store import ObjectNotFound
+from hypertrain.data.store import CorruptObjectError, ObjectNotFound
 from hypertrain.elastic.store import CheckpointStore
 from hypertrain.protocol.envelope import EnvelopeError
 from hypertrain.protocol.envelope_v2 import load_json
@@ -117,6 +117,8 @@ class CheckpointManager:
             raw = self.store.get(key)
         except ObjectNotFound:
             raise CheckpointError("MISSING_MANIFEST", key) from None
+        except CorruptObjectError:
+            raise CheckpointError("CORRUPT_OBJECT", key) from None
         if not raw.startswith(MANIFEST_MAGIC):
             raise CheckpointError("NOT_A_MANIFEST", key)
         try:
@@ -166,3 +168,5 @@ class CheckpointManager:
             return step, self.store.get(key)
         except ObjectNotFound:
             raise CheckpointError("MISSING_STATE", key) from None
+        except CorruptObjectError:
+            raise CheckpointError("CORRUPT_OBJECT", key) from None

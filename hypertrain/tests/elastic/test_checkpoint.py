@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -9,14 +10,15 @@ from hypertrain.elastic.checkpoint import (
     MANIFEST_MAGIC,
     CheckpointError,
     CheckpointManager,
+    CheckpointManifest,
     WorkUnit,
 )
-from hypertrain.elastic.store import MemoryCheckpointStore
+from hypertrain.elastic.store import CheckpointStore, LocalCheckpointStore, MemoryCheckpointStore
 
 POLICY = hashlib.sha256(b"policy").hexdigest()
 
 
-def unit_for(store: MemoryCheckpointStore, shard: int = 3, steps: int = 10) -> WorkUnit:
+def unit_for(store: CheckpointStore, shard: int = 3, steps: int = 10) -> WorkUnit:
     return WorkUnit("run-1", POLICY, 0, shard, store.put(b"base"), steps)
 
 
@@ -86,3 +88,38 @@ def test_only_canonical_manifest_bytes_are_manifests() -> None:
         with pytest.raises(CheckpointError) as e:
             cp.manifest(raw_key)
         assert e.value.code == code
+
+
+def test_a_link_past_the_end_of_its_unit_is_refused() -> None:
+    store = MemoryCheckpointStore()
+    cp = CheckpointManager(store)
+    unit = unit_for(store)
+    late = CheckpointManifest(
+        run_id=unit.run_id,
+        policy=unit.policy,
+        round=unit.round,
+        shard=unit.shard,
+        base=unit.base,
+        parent=None,
+        step=unit.steps + 1,
+        state=store.put(b"s11"),
+        producer="m1",
+        lease=1,
+    )
+    key = store.put(late.encode())  # written directly, as a dishonest miner can
+    for check in (lambda: cp.check_link(unit, None, key), lambda: cp.chain(unit, key)):
+        with pytest.raises(CheckpointError) as e:
+            check()
+        assert e.value.code == "WRONG_UNIT"
+
+
+def test_a_torn_state_is_a_checkpoint_error(tmp_path: Path) -> None:
+    store = LocalCheckpointStore(tmp_path)
+    cp = CheckpointManager(store)
+    unit = unit_for(store)
+    head = cp.save(unit, None, 4, b"state-at-4", "m1", 1)
+    state = cp.manifest(head).state
+    (tmp_path / state[:2] / state).write_bytes(b"state")  # torn by a foreign writer
+    with pytest.raises(CheckpointError) as e:
+        cp.resume(unit, head)
+    assert e.value.code == "CORRUPT_OBJECT"

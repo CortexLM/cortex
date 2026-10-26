@@ -27,6 +27,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from hypertrain.data.store import _check_key
 from hypertrain.elastic.assignment import plan
 from hypertrain.elastic.checkpoint import CheckpointManager, CheckpointManifest, WorkUnit
 from hypertrain.elastic.clock import Clock
@@ -161,11 +162,20 @@ class Coordinator:
 
     # ---- rounds ----
 
-    def open_round(self, units: Sequence[WorkUnit]) -> None:
+    def open_round(self, units: Sequence[WorkUnit]) -> Settlement | None:
+        """Close the complete current round and open the next one; returns the closed round's
+        final settlement, departures up to this call included (None before the first round)."""
         if not units:
             raise ValueError("a round needs at least one unit")
         if any(not s.done for s in self._shards.values()):
             raise CoordinatorError("ROUND_OPEN", f"round {self.round} is not complete")
+        for u in units:
+            _check_key(u.policy)
+            _check_key(u.base)
+            if u.steps < 1 or u.shard < 0:
+                raise ValueError("a unit needs a shard >= 0 and at least one step")
+            if not self.checkpoints.store.exists(u.base):
+                raise ValueError(f"base state {u.base} is not in the store")
         rounds = {u.round for u in units}
         if len(rounds) != 1 or rounds.pop() <= self.round:
             raise ValueError("units must share one round after the current one")
@@ -173,12 +183,14 @@ class Coordinator:
             raise ValueError("units belong to another run")
         if len({u.shard for u in units}) != len(units):
             raise ValueError("duplicate shard")
+        closed = self.settle() if self._shards else None
         self.round = units[0].round
         self._shards = {u.shard: _Shard(u) for u in sorted(units, key=lambda u: u.shard)}
         self._departures = []
         self._penalties = Counter()
         self._sweep()
         self._assign()
+        return closed
 
     # ---- members ----
 
@@ -210,9 +222,9 @@ class Coordinator:
         """Release the member's shards now. A leave already accepted under the same lease is
         answered again with its departure, so a retry after a lost answer is safe."""
         self._sweep()
+        if signed.notice.run_id != self.run_id:  # cheap checks before the signature
+            raise NoticeError(f"leave notice for run {signed.notice.run_id}")
         notice = verify_leave(signed)
-        if notice.run_id != self.run_id:
-            raise NoticeError(f"leave notice for run {notice.run_id}")
         done = self._left.get(notice.lease)
         if done is not None and done[0] == (notice.member, notice.signer):
             return done[1]
@@ -260,6 +272,7 @@ class Coordinator:
         return Accepted(shard, key, s.step, False)
 
     def settle(self) -> Settlement:
+        self._sweep()
         credits: Counter[str] = Counter()
         for s in self._shards.values():
             for link in s.links:

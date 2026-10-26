@@ -5,9 +5,11 @@ import json
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from hypertrain.elastic.clock import FakeClock
 from hypertrain.elastic.notice import (
+    MAX_HEADS,
     AwsSpotNotice,
     FakeNoticeSource,
     LeaveNotice,
@@ -94,6 +96,16 @@ def test_an_unexpected_answer_raises(status: int, body: object) -> None:
         source(Imds(status, body), FakeClock()).poll()
 
 
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ReadTimeout])
+def test_an_unreachable_imds_raises_a_notice_error(error: type[httpx.TransportError]) -> None:
+    def down(request: httpx.Request) -> httpx.Response:
+        raise error("no route to 169.254.169.254", request=request)
+
+    client = httpx.Client(base_url="http://imds.test", transport=httpx.MockTransport(down))
+    with pytest.raises(NoticeError):
+        AwsSpotNotice(FakeClock(), client=client, wall=lambda: WALL).poll()
+
+
 def test_the_fake_source_delivers_its_notice_from_its_time_on() -> None:
     clock = FakeClock()
     fake = FakeNoticeSource(clock)
@@ -117,6 +129,9 @@ def test_the_leave_signature_covers_every_field() -> None:
     )
     signed = sign_leave(body, key)
     assert verify_leave(signed) == body
+    too_many = [{"shard": i, "head": None} for i in range(MAX_HEADS + 1)]
+    with pytest.raises(ValidationError):
+        LeaveNotice.model_validate({**body.body(), "heads": too_many})
     for change in (
         {"run_id": "run-2"},
         {"member": "m02"},

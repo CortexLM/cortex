@@ -19,8 +19,9 @@ from hypertrain.data.store import CorruptObjectError, ObjectNotFound, _check_key
 
 class CheckpointStore(Protocol):
     """put returns the sha256 hex of `data` and never exposes a partial or unsynced object
-    under that key; get verifies the content hash; exists is true only for a complete object
-    and does not read it."""
+    under that key; get verifies the content hash. exists is true once a put of that key has
+    completed and does not read the bytes, so only get proves them: the store's root belongs to
+    the store alone."""
 
     def put(self, data: bytes) -> str: ...
     def get(self, sha: str) -> bytes: ...
@@ -28,7 +29,11 @@ class CheckpointStore(Protocol):
 
 
 def _fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    _fsync_file(path, os.O_DIRECTORY)
+
+
+def _fsync_file(path: Path, flags: int = 0) -> None:
+    fd = os.open(path, os.O_RDONLY | flags)
     try:
         os.fsync(fd)
     finally:
@@ -55,8 +60,13 @@ class LocalCheckpointStore:
         sha = hashlib.sha256(data).hexdigest()
         path = self._path(sha)
         if self._intact(path, sha):
+            # an earlier writer may have died between its rename and its directory fsync
+            _fsync_file(path)
+            _fsync_dir(path.parent)
             return sha
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.parent.is_dir():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _fsync_dir(self.root)
         tmp = path.parent / f".{sha}.{uuid.uuid4().hex}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:

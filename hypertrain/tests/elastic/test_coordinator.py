@@ -262,6 +262,78 @@ def test_a_replacement_host_resumes_the_shard_from_the_accepted_head() -> None:
     assert coord.settle().credits == {"owner-a": 6}
 
 
+def test_a_holder_cannot_commit_a_link_another_member_produced() -> None:
+    clock, coord, (unit,) = setup()
+    a, b = join(coord, "a"), join(coord, "b")
+    a_link = link(coord, unit, None, 3, a)  # saved, never committed
+    clock.advance(TTL // 2)
+    coord.heartbeat("b", b.token)
+    clock.advance(TTL // 2)
+    assert coord.heartbeat("b", b.token).assignments[0].unit == unit  # a lapsed, b holds
+    with pytest.raises(CoordinatorError) as e:
+        coord.commit("b", b.token, 0, a_link)
+    assert e.value.code == "WRONG_PRODUCER"
+    assert coord.settle().credits == {}
+
+
+def test_a_head_whose_state_was_never_uploaded_is_refused() -> None:
+    _, coord, (unit,) = setup()
+    a = join(coord, "a")
+    ghost = CheckpointManifest(
+        run_id=unit.run_id,
+        policy=unit.policy,
+        round=unit.round,
+        shard=unit.shard,
+        base=unit.base,
+        parent=None,
+        step=3,
+        state=hashlib.sha256(b"never uploaded").hexdigest(),
+        producer="a",
+        lease=a.token,
+    )
+    key = coord.checkpoints.store.put(ghost.encode())
+    with pytest.raises(CheckpointError) as e:
+        coord.commit("a", a.token, 0, key)
+    assert e.value.code == "MISSING_STATE"
+    assert coord.settle().heads == {0: None}
+
+
+def test_a_leave_signed_for_another_run_is_refused() -> None:
+    _, coord, _ = setup()
+    a = join(coord, "a")  # token 1 here, and token 1 for the same key in any other run
+    replayed = notice(a, KEYS["a"]).model_copy(update={"run_id": "run-0"})
+    with pytest.raises(NoticeError):
+        coord.leave(sign_leave(replayed, KEYS["a"]))
+    assert coord.holder(0) == Holder("a", a.token)
+
+
+def test_open_round_refuses_units_no_manifest_can_bind() -> None:
+    _, coord, (unit,) = setup()
+    a = join(coord, "a")
+    coord.commit("a", a.token, 0, link(coord, unit, None, 6, a))
+    missing = hashlib.sha256(b"not stored").hexdigest()
+    for bad in (
+        WorkUnit(RUN, POLICY, 1, 0, unit.base, 0),
+        WorkUnit(RUN, POLICY.upper(), 1, 0, unit.base, 6),
+        WorkUnit(RUN, POLICY, 1, 0, missing, 6),
+    ):
+        with pytest.raises(ValueError):
+            coord.open_round([bad])
+    assert coord.round == 0
+
+
+def test_a_departure_after_the_last_commit_is_in_the_closing_settlement() -> None:
+    _, coord, (unit,) = setup()
+    a, b = join(coord, "a"), join(coord, "b")
+    coord.commit("a", a.token, 0, link(coord, unit, None, 6, a))
+    assert coord.settle().complete
+    coord.leave(sign_leave(notice(b, KEYS["b"]), KEYS["b"]))  # idle b leaves before round 1
+    closed = coord.open_round([WorkUnit(RUN, POLICY, 1, 0, unit.base, 6)])
+    assert closed is not None and closed.round == 0
+    assert [(d.member, d.kind) for d in closed.departures] == [("b", Exit.NOTICE)]
+    assert coord.settle().departures == ()
+
+
 def test_a_round_opens_only_once_every_shard_is_complete() -> None:
     _, coord, (unit,) = setup()
     with pytest.raises(CoordinatorError) as e:

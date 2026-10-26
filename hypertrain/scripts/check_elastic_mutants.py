@@ -189,6 +189,76 @@ MUTANTS = (
         "test_checkpoint.py::test_a_manifest_is_never_written_before_its_state",
     ),
     Mutant(
+        "a holder commits a link another member produced",
+        SRC + "coordinator.py",
+        "if manifest.producer != member or manifest.lease != token:",
+        "if False:",
+        "test_coordinator.py::test_a_holder_cannot_commit_a_link_another_member_produced",
+    ),
+    Mutant(
+        "a head whose state was never uploaded is accepted",
+        SRC + "checkpoint.py",
+        "        if not self.store.exists(manifest.state):\n"
+        '            raise CheckpointError("MISSING_STATE", manifest.state)\n',
+        "",
+        "test_coordinator.py::test_a_head_whose_state_was_never_uploaded_is_refused",
+    ),
+    Mutant(
+        "a link past the end of its unit is accepted",
+        SRC + "checkpoint.py",
+        ") and self.step <= unit.steps",
+        ")",
+        "test_checkpoint.py::test_a_link_past_the_end_of_its_unit_is_refused",
+    ),
+    Mutant(
+        "a torn state surfaces as a store error",
+        SRC + "checkpoint.py",
+        "            return step, self.store.get(key)\n"
+        "        except ObjectNotFound:\n"
+        '            raise CheckpointError("MISSING_STATE", key) from None\n'
+        "        except CorruptObjectError:\n",
+        "            return step, self.store.get(key)\n"
+        "        except ObjectNotFound:\n"
+        '            raise CheckpointError("MISSING_STATE", key) from None\n'
+        "        except ZeroDivisionError:\n",
+        "test_checkpoint.py::test_a_torn_state_is_a_checkpoint_error",
+    ),
+    Mutant(
+        "a leave from another run accepted",
+        SRC + "coordinator.py",
+        "if signed.notice.run_id != self.run_id:",
+        "if False:",
+        "test_coordinator.py::test_a_leave_signed_for_another_run_is_refused",
+    ),
+    Mutant(
+        "a leave with unbounded heads accepted",
+        SRC + "notice.py",
+        "heads: Annotated[list[ShardHead], Field(max_length=MAX_HEADS)]",
+        "heads: list[ShardHead]",
+        "test_notice.py::test_the_leave_signature_covers_every_field",
+    ),
+    Mutant(
+        "a round opens on a base that is not stored",
+        SRC + "coordinator.py",
+        "            if not self.checkpoints.store.exists(u.base):\n",
+        "            if False:\n",
+        "test_coordinator.py::test_open_round_refuses_units_no_manifest_can_bind",
+    ),
+    Mutant(
+        "departures after the last commit are dropped",
+        SRC + "coordinator.py",
+        "closed = self.settle() if self._shards else None",
+        "closed = None",
+        "test_coordinator.py::test_a_departure_after_the_last_commit_is_in_the_closing_settlement",
+    ),
+    Mutant(
+        "an unreachable IMDS raises a transport error",
+        SRC + "notice.py",
+        "        except httpx.HTTPError as e:\n",
+        "        except ZeroDivisionError as e:\n",
+        "test_notice.py::test_an_unreachable_imds_raises_a_notice_error",
+    ),
+    Mutant(
         "forged leave signature accepted",
         SRC + "notice.py",
         "if not check_sig(",
