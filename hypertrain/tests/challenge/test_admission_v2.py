@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,11 +20,13 @@ from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize
 from hypertrain.protocol.messages_v2 import (
+    AdmissionPolicyV2,
     EscrowLock,
     HardwareHint,
     JoinChallenge,
     JoinRequest,
     RotateRequest,
+    RunManifestV2,
     WorkProof,
     WorkScreenV2,
 )
@@ -638,6 +642,66 @@ def test_full_shadow_probation_and_graduation_when_funded(tmp_path: Path, trial_
     r = submit(a, bad, screen, 14)
     assert r.state == "SUSPENDED" and r.pending_dispute
     assert not a.status(HOT.ss58, now=14).eligible
+
+
+def test_production_screen_holds_over_4_real_and_36_modelled_trials_then_expires(
+    tmp_path: Path, trial_launches
+) -> None:
+    # Given: the admission policy `manifest_v2 example --ledger-mode production` emits, and the
+    # oldest screen at round 0's d_final after a 40-trial campaign (3 ACTIVE x 12 + 1 PROBATION
+    # x 4): the PROBATION miner, screened first. Only its 4 trials run for real. Each spends its
+    # whole window: proof and finalize at seed + challenge_rounds, so the next seed is one round
+    # later.
+    from hypertrain.ops.manifest_v2 import main as manifest_cli
+
+    example = tmp_path / "example"
+    assert manifest_cli(["example", "--ledger-mode", "production", "--out", str(example)]) == 0
+    policy = AdmissionPolicyV2.model_validate(
+        json.loads((example / "policies.json").read_bytes())["admission"]
+    )
+    base = setup()
+    body = base.manifest.body()
+    body["network"]["admission_policy_hash"] = digest(policy)
+    s = replace(base, manifest=RunManifestV2.model_validate(body), admission_policy=policy)
+    a = service(s, tmp_path)
+    admission = apply(a, s)
+    origin, _ = fund(a.escrow)
+    op = EscrowLock(
+        operation_id="22" * 32,
+        owner=COLD.ss58,
+        units=1000,
+        origin_ids=[origin],
+        admission_id=admission,
+        dispute_id=None,
+        kind="LOCK_ADMISSION",
+    )
+    a.lock(canonicalize(seal(COLD, "EscrowLock", a.escrow.run_id, op, 500)), now=1)
+    for _ in range(4):
+        seed = a.store.db.execute(
+            "SELECT seed_beacon FROM admissions_v2 WHERE admission_id=?", (admission,)
+        ).fetchone()[0]
+        a.challenge(admission, now=seed)
+        deadline = seed + policy.challenge_rounds
+        a.prepare_reference(admission, now=deadline)
+        proof, screen = current_proof(a, admission, deadline)
+        a.proof(
+            canonicalize(sign_proof(HOT, a.escrow.run_id, proof, 100000)),
+            canonicalize(seal(HOT, "WorkScreenV2", a.escrow.run_id, screen, 100000)),
+            now=deadline,
+        )
+        final = a.trial_finality(admission, now=deadline)
+        assert final is not None
+        status = a.finalize_trial(admission, final, now=deadline)
+    assert status.record.state == "PROBATION" and status.record.clean_count == 4
+    # When: the other 36 trials and round 0 are arithmetic, not run: challenge_rounds + 1 rounds
+    # per back-to-back worst-case trial, then 470 rounds from round 0's open request to its
+    # d_final, as reported for TEST run 2 (b14a975e) and not replayed here.
+    d_final = deadline + 36 * (policy.challenge_rounds + 1) + 470
+    # Then: the first screen still holds at round 0's d_final, and still lapses after
+    # work_screen_epoch_rounds without a new proof. Aggregation and finalization re-check
+    # eligibility at or after d_final; the rest of the window is their budget.
+    assert a.status(HOT.ss58, now=d_final).eligible
+    assert not a.status(HOT.ss58, now=deadline + policy.work_screen_epoch_rounds + 1).eligible
 
 
 def test_zero_origins_cannot_graduate_even_after_calendar_age(tmp_path: Path) -> None:

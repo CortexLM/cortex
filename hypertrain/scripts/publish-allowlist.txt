@@ -11,6 +11,14 @@ deploy/k8s/base/deployment.yaml:643e0b4814a0fc78f91f6c666975ebc51c329d2e0b2b872f
 docs/schemas/example-run-manifest.json:d6c2efa4d6f5a08608a6e8c114a67afcbc1b093d5e497c5db0e60ef0c4cfc65a  # L4
 docs/schemas/example-run-manifest.json:c3fca5da8004d552a17bda784d1bebe31da0cc9e9a78ed701fd20fc3e404c4d9  # L14
 
+# public SS58 addresses (TEST run 16bc75dd miner hotkeys, checksum-valid; role values are <...> placeholders)
+docs/examples/dispatch.test.json:cdf32ef1f5cf5a063701410d485d00b8e2edfbaff44c922d53e3bb3e38661963  # L4
+docs/examples/dispatch.test.json:a3fbc7856554c8faef902ae10a74898cbf7b395be90e3b8d38d555b384236b49  # L5
+docs/examples/dispatch.test.json:96b9fb6007bbbe57e2e132c6cac72ee1757e169286bc058400628dcc24501e28  # L6
+docs/examples/dispatch.test.json:219d48357736f9321b11723270cde7d13eab04c056d1a490e8f68d093ffc6291  # L7
+docs/examples/dispatch.test.json:f919b92f44b1d154aecc03df51bee483b000aa88b4d6f2e1e6557600899e3a84  # L8
+docs/examples/dispatch.test.json:d9327fff897e5bdae79137fea74d048d17b37d15b0985853abba35c6c2f92a33  # L9
+
 # parity run id field equals cell|s+seed (checked: all 150 equal cell|s seed)
 experiments/results/parity_runs.jsonl:6bcd28432d31a15bb5d742585546920d72824e9cc31cce049b84ff957d879108  # L1
 experiments/results/parity_runs.jsonl:f390e2aa53aba151a37d2876930e8f3ed1c5bd1230ae73e5ca76fb7514c401c4  # L2

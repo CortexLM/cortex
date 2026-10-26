@@ -174,6 +174,46 @@ lower nominal probation/base rates. Calendar age or a legacy bond flag is not
 graduation. Join quotas, one concurrent non-ACTIVE identity per coldkey, funded
 locks and known-owner caps bound exposure; they do not reveal every Sybil owner.
 
+A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
+rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
+refused (`CHALLENGE_EXPIRED`) once more than `challenge_rounds` rounds have passed since
+the miner's join or its last trial finalization. Only a suspend and resume reopens it,
+and resume restarts probation at zero clean trials. No admin route calls them: `suspend`
+runs when a dispute opens, and `resume` only after a nonfraud dispute settlement. So a
+miner that waits while others run their trials stays eligible until its last proof plus
+`work_screen_epoch_rounds`, for the rest of the run.
+
+The renewal window does not grow with `work_screen_epoch_rounds`. A trial finalization
+sets the next seed one round later, and the next trial must fit in the `challenge_rounds`
+rounds after that seed: always 100, which the policy schema fixes, about 5 min at 3 s
+rounds. The challenge deadline is seed + 100 whenever the challenge is requested, and the
+proof must be accepted by then. A challenge left unproven past its deadline suspends the
+miner (`CHALLENGE_EXPIRED`) at its next challenge request. So a miner that is down for
+longer than that window minus one trial's duration cannot renew its screen, whatever
+`work_screen_epoch_rounds` is. At most two trials are open at once across the run (the
+schema fixes `max_trial_replays` at 2). In a run longer than `work_screen_epoch_rounds`
+(about 5 h at 6000), every ACTIVE miner must therefore chain its trials, each one proven
+inside its window, to stay eligible. Otherwise only the suspend and resume above bring it
+back, to PROBATION at zero clean trials.
+
+`manifest_v2 example` writes 6000 (about 5 h). In a serial 40-trial campaign
+(3 × 12 ACTIVE + 4 PROBATION), each trial spans at most about `challenge_rounds` + 1
+rounds when finalization and joins are prompt; joinbase-6 measured about 64. The first
+screen must then cover 36 more trials and round 0 up to its `d_final`: 4106 rounds with
+the joinbase-6 offsets, 5180 with the `od_large_manifest.py` offsets. The former 1000
+(about 50 min) could not reach round 0. The cost: one screen now vouches for a miner's
+hardware for about 5 h instead of 50 min. The same value is the IP-prefix quota epoch,
+`now // work_screen_epoch_rounds`. The epoch is part of the prefix HMAC, so every prefix
+starts a full bucket each epoch, and joins delete the `ip:%` quota rows of earlier epochs.
+At 6000 both happen every 6000 rounds instead of every 1000. The value is per run: it is
+part of the admission policy hash, hence of the run ID.
+
+`manifest_v2 example --ledger-mode production` writes the same 6000. It is sized for the
+TEST admission campaign above, and with it an ACTIVE miner that stops trialing is
+ineligible about 5 h after its last proof, for the rest of the run. Decide how an idle
+miner re-screens (a larger value or a code change) before signing a production admission
+policy.
+
 Prefix quotas use a stable coordinator-private HMAC namespace pinned atomically
 in the store. Reopening the same store with the same coordinator does not reset
 current prefix buckets. A populated legacy store without the namespace pin, or

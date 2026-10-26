@@ -11,9 +11,12 @@ import pytest
 
 import hypertrain.trainer  # noqa: F401
 from hypertrain.auditor.replay import unpack_state
+from hypertrain.data.store import LocalFSStore
+from hypertrain.ops.manifest_v2 import main as manifest_cli
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
+from hypertrain.protocol.messages_v2 import AdmissionPolicyV2
 from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.model import init_params
 
@@ -65,6 +68,15 @@ def test_real_seed_exact_profile_genesis_and_tokenizer(generated):
         assert secret.stat().st_mode & 0o777 == 0o600
         assert Keypair(secret.read_bytes()).ss58 == key
     assert not list(public.rglob("*.seed"))
+
+
+def test_seed_screen_epoch_is_the_manifest_example_value(generated, tmp_path):
+    public, _, digest = generated
+    pinned = seed.validate(public, digest).manifest.network.admission_policy_hash
+    policy = AdmissionPolicyV2.model_validate_json(LocalFSStore(public / "objects").get(pinned))
+    assert manifest_cli(["example", "--out", str(tmp_path / "example")]) == 0
+    example = json.loads((tmp_path / "example/policies.json").read_bytes())["admission"]
+    assert policy.work_screen_epoch_rounds == example["work_screen_epoch_rounds"]
 
 
 @pytest.mark.parametrize("fault", ["genesis", "samples", "profile", "signature", "hash"])

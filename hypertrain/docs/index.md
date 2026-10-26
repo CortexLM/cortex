@@ -7,6 +7,8 @@
 - [Parity specification](parity.md): topology for many replicas across datacenters, formulas, schedule, pre-registered TOST protocol, CPU grid results.
 - [Multi-GPU training and MFU](mfu-multigpu.md): running the 1B island on several RTX 5090s over PCIe, every knob, measured MFU and its limits.
 - [Challenge routes](challenge-routes.md): every HTTP route, body, auth and status code.
+- [Production run signing](prod-run-signing.md): what the owner and the coordinator sign for a production run, in runbook order, and the relay registry edit.
+- [Role dispatch](role-dispatch.md): the one-run `dispatch.json` authorization, the TEST run file and its install on the test stack.
 - [Message schemas](schemas/): JSON Schema for each signed message ([RunManifest](schemas/RunManifest.json), [Commit](schemas/Commit.json), [DeltaManifest](schemas/DeltaManifest.json), [Receipt](schemas/Receipt.json), [Forfeit](schemas/Forfeit.json), [Dispute](schemas/Dispute.json), [Finalize](schemas/Finalize.json) and the rest). Regenerate with `uv run --frozen python -m hypertrain.protocol.schema docs/schemas`.
 - [Design notes](README.md).
 

@@ -112,6 +112,54 @@ def test_concurrent_first_calls_load_once(tmp_path: Path, monkeypatch: pytest.Mo
     assert len(calls) == 1
 
 
+def test_test_run_dispatch_file_authorizes_only_its_test_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: the TEST run file from docs/role-dispatch.md, loaded the way the challenge loads it.
+    # Past the run binding, dispatch loads two host modules from the file's tree: record both
+    # and stop before the lifecycle files, since the placeholders name no real tree, lifecycle
+    # run dir or owner seed.
+    example = TREE / "docs/examples/dispatch.test.json"
+    loads: list[tuple[str, Path]] = []
+
+    class PastBinding(Exception):
+        pass
+
+    def record(name: str, path: Path) -> SimpleNamespace:
+        loads.append((name, path))
+        if name == "network_role_runtime":
+            raise PastBinding
+        return SimpleNamespace()
+
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.setattr(role_dispatch, "_module", record)
+    launch = _app(tmp_path, example).state.store._role_launch
+    assert launch is not None
+    # When / Then: the production-challenge run and the stuck TEST run are refused before any I/O.
+    for foreign in (
+        "7753ff754eea7867bcaf1dcc92f5064e99f4adaeef8f5ec1d5a86acf7b43ca0f",
+        "b14a975efb7ad8e1ee3e1565b48f741b3d2a93fd1c9c20b069dde6c9d2272375",
+    ):
+        with pytest.raises(RuntimeError, match="not the authorized run"):
+            launch("audit", SimpleNamespace(run_id=foreign), tmp_path, {})
+    assert loads == []
+    # The TEST run passes the binding and loads both modules from its own tree.
+    with pytest.raises(PastBinding):
+        launch(
+            "audit",
+            SimpleNamespace(
+                run_id="16bc75dd475eaf7a6bcd85d8dbe89b9f57b31c8d080f252c6478ac52fcac3602"
+            ),
+            tmp_path,
+            {},
+        )
+    tree = Path(json.loads(example.read_bytes())["tree"])
+    assert loads == [
+        ("network_service_proof", tree / "scripts/network_service_proof.py"),
+        ("network_role_runtime", tree / "experiments/gpu_network_v2/orchestrate.py"),
+    ]
+
+
 def test_unexpected_load_error_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def broken(path: Path) -> role_dispatch.RoleLaunch:
         raise RuntimeError("not a missing-file problem")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 import sys
@@ -289,3 +290,18 @@ def test_production_example_pins_bootstrap_not_test_genesis(tmp_path: Path) -> N
     assert economics.ledger_mode == "production"
     assert economics.genesis_allocation_hash is None
     assert economics.bootstrap_allocation_hash is not None
+
+
+def test_od_large_manifest_screen_epoch_is_the_example_value(tmp_path: Path) -> None:
+    # Not run: od_large_manifest.main() needs a built shards16 set and the 354M-parameter
+    # od-encoder init. Read the one AdmissionPolicyV2 call it pins in the manifest instead.
+    script = Path(__file__).parents[2] / "scripts/ops/manifest/od_large_manifest.py"
+    (call,) = [
+        node
+        for node in ast.walk(ast.parse(script.read_text()))
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "AdmissionPolicyV2"
+    ]
+    (rounds,) = [k.value for k in call.keywords if k.arg == "work_screen_epoch_rounds"]
+    assert main(["example", "--out", str(tmp_path / "example")]) == 0
+    example = json.loads((tmp_path / "example" / "policies.json").read_text())["admission"]
+    assert ast.literal_eval(rounds) == example["work_screen_epoch_rounds"]
