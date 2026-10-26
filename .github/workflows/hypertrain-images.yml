@@ -1,0 +1,165 @@
+name: hypertrain-images
+
+# On every push to v3 that changes hypertrain/, after hypertrain-ci passes: build each image once,
+# push it as v3-sha-<commit> to the monorepo's own packages, attest the exact pushed digest and
+# verify that attestation with the monorepo identity before reporting the digest.
+# The production packages ghcr.io/cortexlm/hypertrain and ghcr.io/cortexlm/hypertrain-gpu, their
+# tags and their pinned digests stay CortexLM/hypertrain builds: nothing here writes them, and no
+# edge, stable or vX.Y.Z alias is made (docs/adr/0001-monorepo-structure.md).
+on:
+  push:
+    branches: [v3]
+    paths:
+      - "hypertrain/**"
+      - ".gitignore"
+      - ".github/workflows/hypertrain-ci.yml"
+      - ".github/workflows/hypertrain-images.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hypertrain-images-v3
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    if: github.ref == 'refs/heads/v3'
+    uses: ./.github/workflows/hypertrain-ci.yml
+
+  publish:
+    if: github.ref == 'refs/heads/v3'
+    needs: ci
+    # GitHub-hosted on purpose: this job creates the build provenance, and a Blacksmith runner is
+    # recorded as runnerEnvironment=self-hosted, which `gh attestation verify
+    # --deny-self-hosted-runners` rejects (Cortex verifies its own images that way). The images
+    # published so far are runnerEnvironment=github-hosted; keep that property for a digest that
+    # may be pinned in a registry. The `ci` job above (its first line) stays on Blacksmith.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: server
+            dockerfile: hypertrain/docker/Dockerfile.server
+            image: ghcr.io/cortexlm/cortex/hypertrain
+          - name: gpu
+            dockerfile: hypertrain/docker/Dockerfile.gpu
+            image: ghcr.io/cortexlm/cortex/hypertrain-gpu
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ${{ matrix.image }}
+      TAG: v3-sha-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Refuse a production package or tag
+        run: |
+          set -euo pipefail
+          case "$IMAGE" in
+            ghcr.io/cortexlm/cortex/hypertrain | ghcr.io/cortexlm/cortex/hypertrain-gpu) ;;
+            *) echo "refused: $IMAGE is not a v3 package" >&2; exit 1 ;;
+          esac
+          [[ "$TAG" =~ ^v3-sha-[0-9a-f]{40}$ ]] || { echo "refused: tag $TAG" >&2; exit 1; }
+      - name: Free disk for the CUDA base image
+        if: matrix.name == 'gpu'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Read version
+        id: meta
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("hypertrain/pyproject.toml","rb"))["project"]["version"])')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: hypertrain
+          file: ${{ matrix.dockerfile }}
+          push: true
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ github.sha }}
+          # The Dockerfiles name CortexLM/hypertrain, the source of the production digests. This
+          # build is attested by CortexLM/cortex, and the supervisor requires the source label and
+          # the attestation repository to agree, so the label names the monorepo.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          tags: ${{ env.IMAGE }}:${{ env.TAG }}
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Verify the pushed digest, its labels and its provenance
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          evidence="$RUNNER_TEMP/evidence"
+          mkdir -p "$evidence"
+          docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest}}' > "$evidence/manifest.json"
+          test "$(jq -r .digest "$evidence/manifest.json")" = "$DIGEST"
+          docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{json .Image}}' > "$evidence/image-config.json"
+          jq -e --arg source "https://github.com/$GITHUB_REPOSITORY" --arg revision "$GITHUB_SHA" '
+            .config.Labels as $labels
+            | $labels["org.opencontainers.image.source"] == $source
+              and $labels["org.opencontainers.image.revision"] == $revision
+              and $labels["io.cortex.challenge.slug"] == "hypertrain"
+              and $labels["io.cortex.challenge.contract"] == "1"' "$evidence/image-config.json"
+          gh attestation verify "oci://$IMAGE@$DIGEST" \
+            --repo "$GITHUB_REPOSITORY" \
+            --source-digest "$GITHUB_SHA" \
+            --source-ref refs/heads/v3 \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/hypertrain-images.yml" \
+            --deny-self-hosted-runners \
+            --bundle-from-oci \
+            --format json > "$evidence/attestation.json"
+          jq -n --arg image "$IMAGE@$DIGEST" --arg tag "$TAG" --arg commit "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{schema_version: 1, image: $image, tag: $tag, commit: $commit, ref: $ref,
+              platform: "linux/amd64", provenance: "github-artifact-attestation", run: $run}' \
+            > "$evidence/image.json"
+      - name: Check the supervisor contract on the published server digest
+        if: matrix.name == 'server'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE@$DIGEST"
+          ENGINE=docker bash hypertrain/scripts/verify_image.sh "$IMAGE@$DIGEST" hypertrain "https://github.com/$GITHUB_REPOSITORY"
+      - name: Upload image evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hypertrain-${{ matrix.name }}-image-${{ github.sha }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 90
+      - name: Report the attested digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            printf 'Published %s@%s (tag %s)\n\n' "$IMAGE" "$DIGEST" "$TAG"
+            printf 'Provenance verified: --repo %s --signer-workflow %s --source-ref refs/heads/v3 --deny-self-hosted-runners\n' \
+              "$GITHUB_REPOSITORY" "$GITHUB_REPOSITORY/.github/workflows/hypertrain-images.yml"
+          } >> "$GITHUB_STEP_SUMMARY"
