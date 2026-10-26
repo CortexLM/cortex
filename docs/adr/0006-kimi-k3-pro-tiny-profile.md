@@ -88,7 +88,7 @@ sources above.
 4. Registration is an explicit opt-in: `kimi_tiny.register()` adds the arch to
    `ARCH_REGISTRY` at runtime. **No `implementation_hash` file changes.** Permanent
    registration needs one line in `trainer/model.py` (hash-covered) and is left to Forge.
-5. The TEST run manifest is an unsigned module-level document (`test_run_manifest()`), not a
+5. The TEST run manifest is an unsigned module-level document (`run_manifest()`), not a
    protocol `RunManifest`, because `ModelSpec.arch` is a frozen protocol Literal (ADR 0001).
    A network run with this profile needs a protocol change that Forge must decide.
 
