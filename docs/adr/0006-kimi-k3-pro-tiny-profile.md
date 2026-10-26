@@ -82,7 +82,7 @@ sources above.
    `None` and AdamW leaves it unchanged (1-D, no decay, zero moments). A custom autograd node
    on the router logits applies `b += gamma * sign(mean_load - load)` during backward.
    The current batch is never routed with a bias derived from itself. `loop._train_step`,
-   `auditor/bisect.traced_step` and the island mirror all run the same update without a code
+   `loop.replay` and `auditor/bisect.traced_step` all run the same update without a code
    change. The update runs once per backward pass, that is per micro-batch; with
    `grad_accum = 1` this equals the DeepSeek-V3 per-step rule.
 4. Registration is an explicit opt-in: `kimi_tiny.register()` adds the arch to
@@ -94,13 +94,55 @@ sources above.
 
 ## Limits
 
-- Single device per island only. With island DP > 1, each rank would update the bias from its
-  own loads and the replicas would diverge. A load all-reduce is not implemented [V by design].
+- Single device only. The island trainer passes its expert-parallel MoE to every MoE arch
+  (`trainer/island.py:600`), and this arch's `forward` rejects it with `ValueError`. Islands
+  therefore fail closed instead of running a different MoE [V]. Island DP would also need an
+  all-reduce of the expert loads, which is not implemented.
 - `HT_COMPILE`, `HT_ACT_CKPT`, `HT_MOE_GROUPED` and FP8 apply to `decoder` only; this arch
   ignores them.
 - GPU determinism on B300 is [?] until the qualification below runs.
 
+## Tests
+
+`hypertrain/tests/models/test_kimi_tiny.py` has one named test per behaviour. Each test
+fails under the mutation listed below (CPU run, 2026-10-26 [V]):
+
+| Behaviour | Test | Mutation that it catches |
+| --- | --- | --- |
+| routing | `test_topk_selects_on_biased_scores_and_gates_unbiased` | bias ignored in top-k selection |
+| shared expert | `test_shared_expert_is_added_to_every_token` | shared expert dropped from the output |
+| bias update | `test_bias_update_sign_rule_applies_after_backward_only` | sign of the rule flipped |
+| determinism | `test_two_passes_same_seed_are_bitwise_identical` | unseeded noise on the router logits |
+
+The file also checks the profile size and K2 layout, forward/backward shapes on the full profile
+and the unsigned TEST run document (strict keys, replay `MATCH`). The dense/moe matrix in
+`tests/trainer/test_trainer_core.py` (two processes, identical roots; replay of every leaf)
+now includes `kimi` (fp32/sparseloco, bf16/dense-int8). `test_profile_two_rounds_bitwise_on_cuda`
+is marked `gpu` and is skipped without CUDA.
+
 ## B300 qualification
 
-Commands, the test count and the measured CPU evidence are added with the implementation
-commit.
+Run on each B300 host from `hypertrain/`, inside the GPU image or an env synced with
+`uv sync --frozen --extra trainer` and a CUDA torch. No key, no network and no dataset are
+needed: tokens are Philox ids. Keep outputs in `/tmp/<agent>-<run>/`.
+
+```bash
+OUT=/tmp/<agent>-<run>; mkdir -p "$OUT"; HOST=$(hostname -s)
+# 1. CUDA test: two rounds in one process must be bitwise equal.
+uv run --no-sync pytest -m gpu -p no:cacheprovider --basetemp="$OUT/pt" -s \
+  tests/models/test_kimi_tiny.py
+# 2. Two qualification rounds per process, two processes per host.
+for i in 1 2; do
+  uv run --no-sync python -m hypertrain.models.kimi_tiny --device cuda --rounds 2 \
+    > "$OUT/kimi-$HOST-$i.json" || echo "round mismatch in process $i"
+done
+# 3. Same host: both processes must print the same run_id, leaves_root, delta_hash, state_root.
+diff <(jq -S .rounds "$OUT/kimi-$HOST-1.json") <(jq -S .rounds "$OUT/kimi-$HOST-2.json")
+# 4. Across hosts: compare .rounds[0] of each host's file (same GPU model and torch build).
+jq -c '.rounds[0] | {leaves_root, delta_hash, state_root}' "$OUT"/kimi-*-1.json
+```
+
+`state_root` here is `final_theta_hash`, the state hash of the final parameters. The network
+`state_root` of the v2 capacity genesis cannot be computed for this arch, because no protocol
+manifest can carry it [V]. Agreement across hosts on the same GPU model is [H] until the run
+above; agreement across GPU models or torch builds is not expected.

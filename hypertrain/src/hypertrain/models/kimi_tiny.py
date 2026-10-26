@@ -109,7 +109,7 @@ class Dims:
 
 def register() -> None:
     """Opt-in runtime registration; the permanent ARCH_REGISTRY line is hash-covered (Forge)."""
-    ARCH_REGISTRY[ARCH] = __name__
+    ARCH_REGISTRY[ARCH] = "hypertrain.models.kimi_tiny"  # not __name__: "__main__" under -m
 
 
 def dims(cfg: ModelConfig) -> Dims:
