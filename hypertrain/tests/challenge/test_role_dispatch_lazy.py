@@ -128,15 +128,23 @@ def test_test_run_dispatch_file_authorizes_only_its_test_run(
             launch("audit", SimpleNamespace(run_id=foreign), tmp_path, {})
     # The TEST run passes the binding, then stops at its unresolved host paths: not installable
     # until the placeholders name a real tree, lifecycle run dir and owner seed.
-    with pytest.raises(OSError):
-        launch(
-            "audit",
-            SimpleNamespace(
-                run_id="16bc75dd475eaf7a6bcd85d8dbe89b9f57b31c8d080f252c6478ac52fcac3602"
-            ),
-            tmp_path,
-            {},
-        )
+    # role_dispatch._module registers a module before executing it, so the placeholder tree
+    # leaves a half-executed one that would shadow later `import network_service_proof`.
+    modules = {"network_service_proof", "network_role_runtime"}
+    preloaded = modules & sys.modules.keys()
+    try:
+        with pytest.raises(FileNotFoundError):
+            launch(
+                "audit",
+                SimpleNamespace(
+                    run_id="16bc75dd475eaf7a6bcd85d8dbe89b9f57b31c8d080f252c6478ac52fcac3602"
+                ),
+                tmp_path,
+                {},
+            )
+    finally:
+        for name in modules - preloaded:
+            sys.modules.pop(name, None)
 
 
 def test_unexpected_load_error_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
