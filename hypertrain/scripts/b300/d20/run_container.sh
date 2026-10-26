@@ -9,8 +9,10 @@
 #      an overlap with a validator cycle is a fact in the evidence and not an assumption.
 # Everything is written under OUT_DIR (must not exist yet). The container is named
 # ht-s9-<mode>; only that name is ever removed. The Lium executor-* containers are never touched.
-# usage: run_container.sh --image REPO@sha256:<64 hex> --gpu N --out DIR [--mode smoke|multi]
+# usage: run_container.sh --image REPO@sha256:<64 hex> --gpu N --out DIR [--mode MODE]
 #                         [--driver 595.91.07] [--sm-count 148] [--no-gate] [--gate-timeout SECONDS]
+# MODE: smoke | multi (dense fixture model) or smoke-kimi | multi-kimi | job-kimi (kimi-k3-pro-tiny;
+# HT_D20_KIMI_DTYPE=bf16|fp32 selects its compute dtype, default bf16).
 set -euo pipefail
 
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -37,7 +39,7 @@ while [ "$#" -gt 0 ]; do
 done
 [[ $image =~ ^[a-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ $gpu =~ ^[0-9]+$ ]] || usage
-[[ $mode =~ ^(smoke|multi)$ ]] || usage
+[[ $mode =~ ^(smoke|multi|smoke-kimi|multi-kimi|job-kimi)$ ]] || usage
 [[ $gate_timeout =~ ^[0-9]+$ ]] || usage
 [[ $out == /* ]] || { echo "--out must be an absolute path" >&2; exit 2; }
 [ ! -e "$out" ] || { echo "$out already exists; use a fresh --out" >&2; exit 2; }
@@ -68,6 +70,7 @@ dk run --rm --init --name "$name" --gpus "device=$gpu" --ipc=host \
   -e HYPERTRAIN_MINER_DEVICE=cuda -e "HT_IMAGE_DIGEST=${image#*@}" \
   -e "HT_D20_DRIVER=$driver" -e "HT_D20_SM_COUNT=$sm_count" -e HT_D20_EVENTS=/out/events.jsonl \
   -e MINE_SMOKE_V2_EVIDENCE=/out/mine-smoke-v2.json -e MINE_MULTI_ROUND_V2_EVIDENCE=/out/multi.json \
+  -e HT_D20_EVIDENCE=/out/job-kimi.json -e "HT_D20_KIMI_DTYPE=${HT_D20_KIMI_DTYPE:-bf16}" \
   -v "$HT:/opt/ht:ro" -v "$out:/out" -w /opt/ht/scripts --entrypoint bash "$image" -c \
   'uv-pinned pip install --quiet --target /tmp/pyextra pytest==9.1.1 &&
    exec python b300/d20/gpu_run_v2.py "$1"' run "$mode" \

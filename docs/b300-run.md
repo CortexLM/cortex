@@ -271,6 +271,16 @@ The harness also logs a `device_class` event: the capability and SM count torch 
 visible GPUs, and the verdict of the repository's own `unqualified_device` (ADR 0007), `null` when
 the pair is in the table.
 
+`--mode smoke-kimi`, `multi-kimi` and `job-kimi` run kimi-k3-pro-tiny (ADR 0006) instead of the fixture
+decoder, with its MICRO geometry (73,200 parameters) and `HT_D20_KIMI_DTYPE` (`bf16`, the default, or
+`fp32`). `smoke-kimi` and `multi-kimi` are the same chains as `smoke` and `multi`; `job-kimi` is the CLI
+test `tests/miner/test_client_network_v2.py::test_kimi_manifest_joins_and_runs_v2_through_the_cli` on
+CUDA: `join-v2`, then `run-v2 --job`, and the miner's torchrun worker must equal an in-process CUDA
+`train_round` (same `leaves_root`, `final_theta_hash`, `delta_hash` and delta bytes; the router bias
+must move). It writes `job-kimi.json`. The 77M-parameter PROFILE cannot ride this challenge: the
+fixture admission policy caps one object at 1,000,000 bytes and the PROFILE state is about 0.9 GB.
+Disputes and bisection on kimi are not exercised.
+
 ## Not proven yet
 
 `hypertrain/tests/test_b300_run_host.py` drives the script against fake docker, nvidia-smi, aws
