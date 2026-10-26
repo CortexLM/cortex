@@ -29,10 +29,12 @@ def test_kimi_registered_without_runtime_registration() -> None:
     assert param_shapes(kt.MICRO) == kt.param_shapes(kt.MICRO)
 
 
-def test_registry_cannot_be_extended_at_runtime() -> None:
-    # implementation_hash covers registry.py; a runtime entry would bypass it.
+def test_registry_cannot_be_changed_at_runtime() -> None:
+    # implementation_hash covers registry.py; a runtime entry or edit would bypass it.
     with pytest.raises(TypeError):
         ARCH_REGISTRY["nope"] = Arch("hypertrain.models.kimi_tiny")  # type: ignore[index]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ARCH_REGISTRY[kt.ARCH].max_ranks = None  # type: ignore[misc]
 
 
 def test_unknown_arch_rejected() -> None:
