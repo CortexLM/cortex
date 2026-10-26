@@ -210,6 +210,30 @@ The executor stays up: stopping it would take the nodes OFFLINE at Lium (SN51 de
 - Before each step also record `nvidia-smi --query-gpu=index,memory.used --format=csv`.
 - A throughput figure measured with 8 GPUs must say whether a validator cycle overlapped the timed steps (compare the run window with the `upload_ssh_key` and `remove_ssh_key` lines of the executor log). Bitwise results (`leaves_root`, `delta_hash`, `state_root`) do not depend on the cycle: the dp8 qualification already obtained stays valid.
 
+### Gate a step and record the overlap
+
+`hypertrain/scripts/b300/cycle_gate.sh` applies the two checks above and prints one JSON line per
+poll. It exits 0 only when no compute app of another owner is on the selected GPUs (`--gpus 2,3`;
+default all; processes under `--ours`, default `/opt/hypertrain/`, are ours) and the executor's last
+`upload_ssh_key` / `remove_ssh_key` marker is not an `upload_ssh_key` younger than `--cycle-max`
+(default 720 s). An older unmatched upload is reported as `stale_upload` and does not block. It exits
+1 after `--timeout` seconds (default 1800). It only reads `nvidia-smi` and `docker logs` of the
+executor container (`HT_GATE_EXECUTOR`, default `executor-executor-1`).
+
+`hypertrain/scripts/b300/gpu_watch.sh OUT_PREFIX [INTERVAL]` appends the compute apps to
+`OUT_PREFIX.apps.csv` and the memory used per GPU to `OUT_PREFIX.mem.csv` every `INTERVAL` seconds
+(default 2), until it is killed. A failed `nvidia-smi` call writes a `nvidia-smi-failed` row. Start it
+before a timed step and compare its rows with the executor markers of the step's window.
+
+Observed on a third host (Hyderabad, 2026-10-26): the executor logged an `upload_ssh_key` every
+15 minutes (at about :02, :17, :32 and :47 of the hour, 8 consecutive cycles from 20:02Z to 21:47Z)
+and the matching `remove_ssh_key` 4 to 12.5 minutes later; in 2 of the 8 cycles a second upload came
+about 7 minutes after the first, before the removals. In the one cycle watched in detail the
+validator's `/root/app/.venv/bin/python` held 271,534 MiB of GPU 0 from 5 min 38 s after the upload
+for at least 65 s. Rows named `[No data]` (about 1 GiB) also appeared on the GPU a step was using, with
+process ids among that step's own; their owner was not established, and a short-lived process of the step
+itself can show this way. These are observations, not a schedule: keep gating.
+
 ## Not proven yet
 
 `hypertrain/tests/test_b300_run_host.py` drives the script against fake docker, nvidia-smi, aws
