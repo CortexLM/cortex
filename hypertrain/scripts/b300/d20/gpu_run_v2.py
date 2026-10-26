@@ -1,21 +1,28 @@
 """S5 / D20 local harness: the S3 E2E scripts with a CUDA backend on one B300 GPU.
 
 Runs scripts/mine_smoke_v2.py (`smoke`) or scripts/mine_multi_round_v2.py (`multi`) inside one
-`--rm` container of the GPU image, with the checkout (it contains 8a90d9bc) mounted read-only
-at /opt/ht and first on PYTHONPATH. The challenge app, the TLS relay, the miner CLI processes,
-admission, audits and get_weights are the repository's own code. Only three things change:
+`--rm` container of the GPU image, with the checkout mounted read-only at /opt/ht and first on
+PYTHONPATH. The challenge app comes from the pytest network fixture: a fake subnet transport and
+a fixture beacon whose verifier accepts any signature. The TLS relay, the miner CLI processes,
+admission, audits and get_weights are the repository's own code. The harness changes this:
 
 1. The fixture manifest's reference_spec pins the B300 values: HT_IMAGE_DIGEST, driver
    HT_D20_DRIVER and sm_count HT_D20_SM_COUNT. The run_id changes accordingly.
-2. Before the run is created, the harness installs a CUDA qualification record signed by the
-   fixture owner, with the same shape `_bootstrap_backend_v2` writes. This is a STAND-IN: no
-   engine Result backs it. The hardware evidence is S3's 2-host dense qualification.
-3. Before each CUDA audit, the role-dispatch provenance the original `_dispatch_env_v2` reads is
-   written from this container's GPU (driver, SM count and UUID measured here). It is not a
-   dispatcher; the original method still validates it against the manifest.
+2. Before any run is created, the harness installs a CUDA qualification record signed by the
+   fixture owner, for every manifest posted (with no prior signature check). It carries only
+   the fields `_backend_v2` checks; the bootstrap's configs, results and summaries are absent.
+   This is a STAND-IN. No engine Result backs it, and S3's qualification (889M dense, one GPU
+   per host) does not cover this tiny n_gpus=1 fixture model. Because it replaces
+   `_bootstrap_backend_v2`, the only in-process user of gpu_ops/network_qualification.py, the
+   PASS does not exercise the 8a90d9bc fix.
+3. After each CUDA audit replay, and before `_dispatch_env_v2` reads it, the harness writes
+   role-dispatch.json from this challenge process's GPU: nvidia-smi driver and UUID, plus the
+   torch SM count. It is not a dispatcher and it is not bound to the publication. Its
+   image_digest is HT_IMAGE_DIGEST, so the image check is circular; the original method still
+   checks driver, SM count and UUIDs against the manifest.
 
-The miner device comes from HYPERTRAIN_MINER_DEVICE=cuda (MinerConfig env override). Not proof
-of production qualification, of the s100 TEST stack or of any on-chain payment.
+The miner device comes from HYPERTRAIN_MINER_DEVICE=cuda (MinerConfig env override). This is not
+proof of production qualification, of the s100 TEST stack or of any on-chain payment.
 """
 
 from __future__ import annotations
