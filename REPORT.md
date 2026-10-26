@@ -42,7 +42,7 @@ Founder/Forge decision at 15:58Z: **B** (A, plus a local GPU run-v2 on host B).
 | Priority | Item | State |
 |---|---|---|
 | 1 | Offline B300 TEST manifest and disposable keys, dry-run validated | **DONE** [V]: 21/21 checks, 3 tamper probes rejected; not published |
-| 2 | `--rm` container on host B: in-process TEST challenge and relay, B300 CUDA manifest at 148 SM, `8a90d9bc` source mounted read-only, GPU training inside run-v2, UPLOADED, audits MATCH, `get_weights` 200 | **PASS twice** [V]: run 1 632.5 s, run 2 643.1 s |
+| 2 | `--rm` container on host B: in-process TEST challenge and relay, B300 CUDA manifest at 148 SM, `8a90d9bc` source mounted read-only, GPU training inside run-v2, UPLOADED, audits MATCH, `get_weights` 200 | **PASS twice** [V]: run 1 632.5 s, run 2 643.1 s. The `8a90d9bc` code is mounted but **not exercised** (see the harness changes) |
 | 3 | Clean host B, REPORT | **DONE** [V] 16:26Z: only the image and `executor-*` remain, same as S3's final state |
 | - | Same chain against the s100 TEST stack | **BLOCKED** (above) |
 
@@ -82,11 +82,20 @@ TLS relay, the `hypertrain-miner` CLI processes, admission, audits, aggregation 
 are the repository's code. The harness changes exactly three things:
 1. The fixture manifest's `reference_spec` becomes `f4b2885f` / `595.91.07` / 148, which gives a new run_id.
 2. A CUDA qualification record **stand-in**, signed by the fixture owner and shaped like the one
-   `_bootstrap_backend_v2` writes, is installed before the run is created. No engine Result backs it.
-   The hardware qualification is S3's: dense, 2 hosts, 8 identical rounds [A].
-3. Before each CUDA audit, the `role-dispatch.json` that `_dispatch_env_v2` reads is written from
-   this container's GPU (nvidia-smi driver and UUID, torch SM count). The original method still
-   validates it against the manifest.
+   `_bootstrap_backend_v2` writes (only the fields `_backend_v2` checks), is installed before the run
+   is created. No engine Result backs it, and S3's qualification (889M dense, one GPU per host) does
+   not cover this tiny n_gpus=1 model. Because it replaces `_bootstrap_backend_v2`, the only
+   in-process user of `network_qualification.py`, **the PASS does not exercise `8a90d9bc`**: the same
+   run would pass on the image's own `2f4406bd` source [V, review: only that file differs under
+   `src/` apart from kimi_tiny and 4 lines of manifest_v2].
+3. After each CUDA audit replay, and before `_dispatch_env_v2` reads it, `role-dispatch.json` is
+   written from the challenge process's GPU: nvidia-smi driver and UUID, plus the torch SM count.
+   It is not bound to the publication, and its image digest comes from `HT_IMAGE_DIGEST`, the same
+   variable that pins the manifest, so that check is circular. The original method still checks
+   driver, SM count and UUIDs.
+
+The app runs on the pytest network fixture: a fake subnet transport and a fixture beacon that
+accepts any signature.
 
 The miner runs with `HYPERTRAIN_MINER_DEVICE=cuda`. The CUDA worker refuses to run unless torch
 is `2.14.0+cu130`, `HT_IMAGE_DIGEST` equals the manifest digest, the driver is in the allowlist and
@@ -97,11 +106,11 @@ differs from the run backend (`admission.py:597-601`).
 |---|---|---|
 | result | **PASS**, rc 0, 632.5 s | **PASS**, rc 0, 643.1 s |
 | run_id | `f4e1af49c4a9c2ba…f14a` | `f021c22b292f1fca…9cdb` |
-| chain | join-v2 → escrow → 4 trials (probe/proof) → 3 peers graduated → round 0 and 1: 4 × run-v2 UPLOADED, 4 audits MATCH each (the script raises otherwise, `mine_multi_round_v2.py:199-200`), aggregate, finalize; restart after upload is idempotent; kill mid-round resumes to UPLOADED | same; finalize hashes `4c2e3275…` (w0), `ad2e6c5c…` (w1) |
+| chain | join-v2 → escrow → 4 trials (probe/proof) → 3 peers graduated → rounds 0–3 with 4 × run-v2 UPLOADED each (16 timed calls); rounds 0, 1 and 2 settled with 4 audits MATCH each (the script raises otherwise, `mine_multi_round_v2.py:199-200`; round 2 is settled inside the restart probes, `:291`), aggregate, finalize; restart after upload is idempotent; kill mid-round resumes to UPLOADED | same; finalize hashes `4c2e3275…` (w0), `ad2e6c5c…` (w1) |
 | `get_weights` | 200, 4 × 250000 (miner `5HHKpzQf…` 250000), `reason ok` | 200, same weights |
 | backend frozen by the challenge | not logged in run 1 | `cuda`, once, for run `f021c22b…` [V, `events.jsonl`] |
-| audits executed by the challenge | not logged | **12 × MATCH**, 0 other; 12 dispatch envs, all `driver 595.91.07`, `sm_count 148`, `image f4b2885f`, one GPU (`gpu_uuid_sha256 b080cd68…`) [V] |
-| GPU 5 use (nvidia-smi every 2 s) | not watched | our `/opt/hypertrain/venv/bin/python` in 116 of 130 samples from 16:14:40 to 16:25:05Z, at 1.3–1.4 GiB [V, `gpu-watch.csv`] |
+| audits executed by the challenge | not logged (run 1 does not show which device audited) | **12 × MATCH** (rounds 0, 1, 2 × 4), 0 other; 12 dispatch envs, all `driver 595.91.07`, `sm_count 148`, `image f4b2885f`, one GPU (`gpu_uuid_sha256 b080cd68…`) [V] |
+| GPU 5 use (nvidia-smi loop, mean gap 3.65 s, max 10.7 s) | not watched | 130 GPU-5 rows: 116 ours (`/opt/hypertrain/venv/bin/python`, 16:14:40–16:25:05Z, 14–1410 MiB), 2 validator rows, 12 `[No data]` rows at 618/1022 MiB (16:15:23–16:24:33Z, owner unknown [?]) [V, `gpu-watch.csv`] |
 | stages | see below | join 2.6 s, escrow 2.7 s, probe 55.4 s first then 9.7 s, proof 9.4–9.6 s, graduation 250.9 s, run-v2 10.3–10.7 s × 16 |
 | preflight | no compute app, last executor marker `remove_ssh_key` | **deviation**: `/root/app/.venv/bin/python` listed, last marker `upload_ssh_key` 16:08:28Z; see Risks |
 
@@ -112,24 +121,26 @@ Durations of run 1 [V] (`hostB-run1/multi.json`):
 | join-v2 | 2.6 s |
 | escrow-lock | 2.7 s |
 | trial export | 0.6 s × 4 |
-| probe-v2 (miner GPU trial) | 53.4 s first (CUDA init), then 9.4–9.6 s |
+| probe-v2 (miner GPU trial) | 53.4 s first (CUDA init [H]), then 9.4–9.7 s |
 | proof-v2 | 9.4–9.6 s × 4 |
 | graduate 3 peers (36 GPU reference trials, in-process) | 247.5 s |
 | run-v2 | 10.2–10.8 s × 16 |
 | audits + finalize | not timed separately (inside 632.5 s) |
-| whole run | 632.5 s (CPU harness on B, S3: 385.7 s [A]) |
+| whole run | 632.5 s (CPU harness on B, S3: 385.7 s, run-v2 7.4–7.9 s [A]) |
 
 The toy model (1 layer, d_model 8) makes the GPU slower than the CPU here, because each process
 pays CUDA start-up [H: probe 9.4 s vs 6.7 s on CPU]. These numbers are path durations, not throughput.
 
-Other durations: image pull 0 s (already present) [V]; checkout shipped to B in 6 s (8.8 MB) [V];
+Other durations (session console, not in the evidence folder): image pull 0 s (already present) [V];
+checkout shipped to B in 6 s (8.8 MB) [V];
 host B → `https://relay.joinbase.ai/test-master` GET 0.69–0.84 s, connect 0.23–0.34 s [V].
 
 ## Evidence
 
 All in `livrables/forge/2026-10-26_d20-gpu-test/`:
-- `manifest/`: public manifest outputs, inputs, `validation.txt`, `probes.out` (no seed: a
-  grep for every seed value over the folder finds nothing [V]);
+- `manifest/`: public manifest outputs, inputs, `validation.txt`, `probes.out`. A grep for every
+  seed value over this folder at 16:14Z (then `manifest/` and the probe file only) found nothing [V].
+  The seeds were deleted at 16:27Z with `/tmp/s5-d20`; they never left that directory [H];
 - `hostB-net-probe.txt`;
 - `hostB-run1/`: `multi.json`, stdout, stderr, console;
 - `hostB-run2/`: `multi.json`, `events.jsonl` (no timestamps), `gpu-watch.csv`, `gpu5.csv`, console.
@@ -155,11 +166,17 @@ All in `livrables/forge/2026-10-26_d20-gpu-test/`:
   one at 16:14:23Z) and **also on GPU 5 for a few seconds** (a `/root/app/.venv/bin/python` at
   2666 MiB at 16:14:54–16:14:56Z). A second cycle started at 16:18:43Z (`upload_ssh_key`). No OOM
   and no failed stage. Run 2 timings overlapped validator cycles; the results are bitwise checks
-  (MATCH) and do not depend on that. Run 1 was clean at preflight. The next launcher should gate on
-  the check rather than print it.
-- The qualification record and the dispatch provenance are harness stand-ins. The PASS proves the
-  GPU path inside run-v2 and the audit replay on CUDA; it does **not** prove production
-  qualification, the s100 TEST stack, a dispatcher or any payment.
+  (MATCH) and do not depend on that. Run 1 was clean at preflight, but the 16:08:28Z cycle started
+  inside its window (16:02:23–16:13:03Z, around the end of graduation) and run 1 had no watcher, so
+  **neither run's durations are known to be free of validator load**. The next launcher should
+  gate on the check rather than print it.
+- The qualification record and the dispatch provenance are harness stand-ins. Both PASSes show
+  miner GPU training inside run-v2 (the CUDA worker's own gates). Run 2 alone shows that the
+  challenge froze `cuda` and replayed the 12 audits on the GPU. Neither proves production
+  qualification, the `8a90d9bc` fix, the s100 TEST stack, a dispatcher or any payment.
+- Builder known gaps (header): the dry run checks expiry at round 1, does not support
+  `HT_D20_RELAY_URL` overrides, and cannot show the cpu-freeze footgun. Relative and symlinked
+  OUT_DIRs are now refused (`9b35c28c`, tested: rc 2 both).
 - The toy model is not the 1B; memory and throughput of the real profile come from S1/S3.
 
 ## Not verified
