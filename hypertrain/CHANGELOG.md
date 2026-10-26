@@ -14,6 +14,13 @@
   reduction orders), covered by `implementation_hash`. `ModelSpec.arch` names a registry entry
   (omitted = `decoder`; existing manifest bytes and run_ids unchanged); v2 manifests carry
   `kimi-k3-pro-tiny` on a one-GPU island, v1 manifests refuse it (D18, ADR 0006).
+- R2 data plane (`docs/adr/0003` at the monorepo root): `storage.r2.R2Client` gains multipart,
+  ListParts, conditional complete, bound presigned URLs, an opt-in `Retry` and a configurable
+  SigV4 `R2Config.region`; `storage.cas`
+  stores content-addressed objects in parts of whole 4 MiB blocks (8 MiB by default) with
+  relay-identical block lists, resumable uploads and block-verified downloads; `storage.offer`
+  hands credential-free hosts presigned UploadPart URLs bound to each part's sha256.
+  `data.store.sigv4_presign` now signs the URL query and extra headers.
 - Docs, CI, image and release workflows, Dockerfiles.
 
 ### Changed

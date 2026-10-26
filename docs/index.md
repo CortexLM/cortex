@@ -19,6 +19,7 @@ Start here: [Cortex ecosystem](ecosystem.md) and [Validator quickstart](validato
 ## Cortex v3 monorepo
 
 - [ADR 0001: monorepo structure](adr/0001-monorepo-structure.md): layout, lockfiles, workflows, v3 images and the old-repository references to migrate.
+- [ADR 0003: Cloudflare R2 data plane](adr/0003-cloudflare-data-plane.md): direct host-to-R2 bulk transfer, 4 MiB-block multipart, content-addressed keys, presigned part offers, cost model, the [multi-region measurement plan](dataplane/measurement-plan.md) and the [test resources](dataplane/resources.md).
 - [ADR 0006: `kimi-k3-pro-tiny` test profile](adr/0006-kimi-k3-pro-tiny-profile.md): Kimi K2-family MLA + MoE test architecture, gap table, B300 qualification commands, and the D18 permanent registry entry and per-run `arch`.
 - [ADR 0007: SM counts per CUDA architecture](adr/0007-sm-counts-per-arch.md): the (capability, SM count) table for CUDA qualification, hash consequences and the TEST-stack image swap.
 - [Hypertrain import provenance](provenance/hypertrain-import.md): commit map, byte-identity and `git log --follow` checks.
