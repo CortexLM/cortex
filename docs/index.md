@@ -16,6 +16,12 @@ Start here: [Cortex ecosystem](ecosystem.md) and [Validator quickstart](validato
 - [Bundle specification](BUNDLE_SPEC.md): frozen consensus wire contract.
 - [Naming](NAMING.md): preserved `BASE_*` variables and signature domains.
 
+## Cortex v3 monorepo
+
+- [ADR 0001: monorepo structure](adr/0001-monorepo-structure.md): layout, lockfiles, workflows, v3 images and the old-repository references to migrate.
+- [Hypertrain import provenance](provenance/hypertrain-import.md): commit map, byte-identity and `git log --follow` checks.
+- [Hypertrain](../hypertrain/README.md): the imported project, with its own documentation in `hypertrain/docs/`.
+
 ## Run a validator
 
 - [Validator quickstart](validator-quickstart.md): one script, verify-only mode and FAQ.

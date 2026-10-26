@@ -59,6 +59,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Branch `v3`, the Cortex v3 monorepo, holds `CortexLM/hypertrain` under
+  `hypertrain/` with its full history. All 236 imported commits are
+  byte-identical to their originals; at the branch tip only
+  `hypertrain/.github/` differs, because its workflows moved to
+  `.github/workflows/hypertrain-*.yml` (`gpu-vast.yml` and `release.yml` were
+  not ported). ADR `docs/adr/0001-monorepo-structure.md` records the layout,
+  and the commit map is in `docs/provenance/hypertrain-import.md`.
+  `hypertrain-ci` and `hypertrain-miner-flow` run when `hypertrain/`, the root
+  `.gitignore` or their workflow file changes, including on batch branches
+  `v3-*`. `hypertrain-heavy` only runs from the default branch, so it does
+  not run on `v3`. `hypertrain-images` builds
+  `ghcr.io/cortexlm/cortex/hypertrain` and `ghcr.io/cortexlm/cortex/hypertrain-gpu`
+  from `v3` only, as `v3-sha-<commit>` with `CortexLM/cortex` build
+  provenance. Production hypertrain packages, tags and pins are unchanged.
 - `GET /v1/trust`: the gateway serves the challenge profile (ids, shares,
   measurements). Validators build their trust view from it over HTTPS.
 - `deploy/compose/role-weight-setter.yml`: the only role with the validator

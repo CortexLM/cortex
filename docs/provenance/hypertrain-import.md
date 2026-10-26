@@ -104,6 +104,31 @@ git log --follow --format=%H e61461c3 -- hypertrain/src/hypertrain/challenge/sto
 - Attestations of images built before the import name `CortexLM/hypertrain` and stay valid
   there. Images built from the monorepo carry the `CortexLM/cortex` identity (ADR 0001 §6).
 
+## After the import
+
+The later `v3` commits change nothing under `hypertrain/` except its `.github/` directory.
+GitHub only reads the root `.github/workflows/`, so the workflows moved there (ADR 0001 §5):
+
+```sh
+git diff --stat e61461c3 v3 -- hypertrain ':!hypertrain/.github'     # empty
+git diff -M --name-status e61461c3 v3 -- hypertrain/.github .github/workflows/hypertrain-*
+# R077  hypertrain/.github/workflows/ci.yml          .github/workflows/hypertrain-ci.yml
+# R095  hypertrain/.github/workflows/heavy.yml       .github/workflows/hypertrain-heavy.yml
+# R066  hypertrain/.github/workflows/miner-flow.yml  .github/workflows/hypertrain-miner-flow.yml
+# A     .github/workflows/hypertrain-images.yml      (rewritten from images.yml)
+# D     hypertrain/.github/workflows/images.yml
+# D     hypertrain/.github/workflows/gpu-vast.yml     (not ported)
+# D     hypertrain/.github/workflows/release.yml      (not ported)
+```
+
+The moved workflows keep their history. `git log --follow --
+.github/workflows/hypertrain-ci.yml` lists the move commit, then the 13 commits of the
+original `ci.yml` down to `728e693e`. `hypertrain-heavy.yml` shows 13 + 1 and
+`hypertrain-miner-flow.yml` 1 + 1. `hypertrain-images.yml` shares too little with the
+original `images.yml` for rename detection, so its history starts at its own commit; the
+original stays readable with `git show e61461c3:hypertrain/.github/workflows/images.yml`.
+The same command reads `gpu-vast.yml` and `release.yml`.
+
 ## Commit map (all 236 commits, newest first)
 
 | # | CortexLM/hypertrain | CortexLM/cortex `v3` | Author date | Subject (as imported) |

@@ -35,10 +35,10 @@ flowchart LR
 | Challenge | Repository | What it produces | Status |
 | --- | --- | --- | --- |
 | `bounty` | [CortexLM/bounty](https://github.com/CortexLM/bounty) | Vulnerability reports | Loaded as a container |
-| `hypertrain` | [CortexLM/hypertrain](https://github.com/CortexLM/hypertrain) | Models from decentralized, verifiable pretraining | Research stage |
+| `hypertrain` | [`hypertrain/`](../hypertrain/README.md) on branch `v3`, imported from [CortexLM/hypertrain](https://github.com/CortexLM/hypertrain) | Models from decentralized, verifiable pretraining | Research stage |
 | `sentinel` | none yet | Detectors for code review and security | PLANNED, not live |
 
-Each challenge is its own container with its own repository. The challenge profile sets its emission share, and the contract is in [CHALLENGES.md](CHALLENGES.md).
+Each challenge is its own container. `bounty` has its own repository; on branch `v3`, `hypertrain` lives in `hypertrain/` of this repository. The challenge profile sets its emission share, and the contract is in [CHALLENGES.md](CHALLENGES.md).
 
 ## Apps
 

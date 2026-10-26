@@ -48,7 +48,7 @@ Challenges today:
 | Challenge | What miners do | Repository |
 | --- | --- | --- |
 | `bounty` | Report vulnerabilities in products | [CortexLM/bounty](https://github.com/CortexLM/bounty) |
-| `hypertrain` | Decentralized, verifiable LLM pretraining (research stage) | [CortexLM/hypertrain](https://github.com/CortexLM/hypertrain) |
+| `hypertrain` | Decentralized, verifiable LLM pretraining (research stage) | [`hypertrain/`](hypertrain/README.md) on branch `v3`, imported from [CortexLM/hypertrain](https://github.com/CortexLM/hypertrain) |
 
 A further challenge, Sentinel, is planned and is not live. See [docs/ecosystem.md](docs/ecosystem.md).
 
@@ -155,15 +155,31 @@ uv build --no-build-isolation
 
 Tests cover hashes, Merkle proofs and Rust wire vectors, replay protection, challenge container outages, auto-update rollback, artifact validation, topic setup, rejected submissions, VM lifecycle failures, RLM recursion and compaction, reward allocation and sealed-weight submission. CI runs offline and never rents a GPU or boots Firecracker.
 
+## Cortex v3 monorepo
+
+Branch `v3` is the Cortex v3 monorepo. It holds Cortex and [hypertrain](hypertrain/README.md), imported from `CortexLM/hypertrain` with its full history. `main` is unchanged until `v3` is merged. The layout, lockfiles, workflows and image names are decided in [ADR 0001](docs/adr/0001-monorepo-structure.md). The commit map and byte-identity checks are in the [provenance record](docs/provenance/hypertrain-import.md).
+
+- `hypertrain/` is a self-contained project with its own `pyproject.toml` and `uv.lock`. Run its commands from that directory:
+
+  ```bash
+  cd hypertrain
+  uv sync --locked --all-extras --group dev
+  bash scripts/check.sh
+  ```
+
+- Workflows live in `.github/workflows/`. Cortex keeps `ci.yml`, `images.yml` and `approve-image-update.yml`. Hypertrain's are prefixed: `hypertrain-ci.yml`, `hypertrain-heavy.yml`, `hypertrain-miner-flow.yml` and `hypertrain-images.yml`. The hypertrain suite runs only when `hypertrain/`, the root `.gitignore` or its own workflow file changes. `hypertrain-heavy.yml` runs only from the default branch, so not on `v3`.
+- On `v3`, images build only as `ghcr.io/cortexlm/cortex/hypertrain` and `ghcr.io/cortexlm/cortex/hypertrain-gpu`, tagged `v3-sha-<commit>`, with `CortexLM/cortex` build provenance. Production still runs digests built by `CortexLM/hypertrain`. No production pin changes on `v3`.
+
 ## Repository layout
 
 ```
-src/        Python package: gateway, master, validator, miner CLI, Proof, VM host
-config/     challenge profile and measurements (unsigned, served by the gateway)
-deploy/     master, validator and KVM host deployment
-docs/       architecture, challenges, guides, specifications
-scripts/    validator script, repository and deployment checks, smoke tests
-tests/      offline test suite
+src/         Python package: gateway, master, validator, miner CLI, Proof, VM host
+config/      challenge profile and measurements (unsigned, served by the gateway)
+deploy/      master, validator and KVM host deployment
+docs/        architecture, challenges, guides, specifications, ADRs, provenance
+scripts/     validator script, repository and deployment checks, smoke tests
+tests/       offline test suite
+hypertrain/  hypertrain project: its own package, tests, scripts, docs and images (branch v3)
 ```
 
 ## Components
