@@ -1,5 +1,9 @@
 # Production run: what the owner and the coordinator sign
 
+> **Deferred, not for today.** Founder decision D17 (2026-10-26 14:16Z): the 17:00Z sprint
+> is local tests only, with no production run. This page is kept as written and was not
+> finished or re-reviewed.
+
 Checklist for runbook steps 1-7 of a `ledger_mode=production` hypertrain run on the Cortex
 master. It names every signature, the key, the tool, the inputs and their digests, the files the
 signature touches and the check to run afterwards. `<…>` is a value to fill in. No key material
