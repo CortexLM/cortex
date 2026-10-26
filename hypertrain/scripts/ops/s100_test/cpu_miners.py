@@ -294,11 +294,12 @@ def round_(argv: list[str]) -> int:
                 return
             time.sleep(3)
 
-    threads = [threading.Thread(target=one, args=(i,)) for i in miners]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    # One miner at a time: on s100 the TEST relay BLS-verifies drand in now() on every
+    # capability and chunk call, and four concurrent uploads (2026-10-26 22:29Z) pushed its
+    # handlers past its own 2-round staleness bound, so every first chunk got 400. One by one,
+    # each upload took about 12 s.
+    for i in miners:
+        one(i)
     ok = all('"UPLOADED"' in results.get(i, "") for i in miners)
     print(json.dumps({"w": w, "uploaded": ok, "results": results}))
     return 0 if ok else 1
