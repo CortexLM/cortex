@@ -11,9 +11,14 @@
 #   OUT_DIR/out      manifest_v2 build output (must not exist yet)
 #   OUT_DIR/state    object store of the policy and relay-registry objects
 # EXP_ROUND defaults to the current drand quicknet round (local clock) + 864000 (~30 days).
-# Model: the dense-1b-bf16 qualification geometry (scripts/mfu_profiles.json mfu-dense-1b,
-# H=8 J=4 micro_batch=2 warmup=2 lr=3e-3, dense-int8), layout pp=1 ep=1 dp=2 n_gpus=2.
-# The dataset is a synthetic 4096-sample u32 fixture (no quality claim).
+# HT_D20_GEOMETRY=dense-1b (default): the dense-1b-bf16 qualification geometry
+# (scripts/mfu_profiles.json mfu-dense-1b, H=8 J=4 micro_batch=2 warmup=2 lr=3e-3, dense-int8),
+# layout pp=1 ep=1 dp=2 n_gpus=2, a synthetic 4096-sample u32 fixture (no quality claim).
+# HT_D20_GEOMETRY=tiny-cpu: the CPU mechanism model of tests/ledger/test_escrow_v2.py setup()
+# (1 layer, d_model 8, vocab 16, seq 4, H=1 J=1, 16 samples), layout n_gpus=1, for a cpu-backend
+# TEST run whose references and audits the challenge replays on CPU.
+# HT_D20_COLDKEYS=N (default 2) seeds cold-0..cold-N-1, each with 20000 genesis units.
+# inputs/genesis-allocation.json and inputs/proofs.json feed the run's genesis and dataset intake.
 # Only the model geometry and inner settings come from S3's dense_qualify.py; the dp2 layout
 # and the codec error-feedback setting were not part of S3's qualification. The dry run checks
 # expiry at round 1, and it cannot show that POSTing this run before its CUDA qualification
@@ -32,8 +37,12 @@ OUT=$4
 EXP_ROUND=${5:-}
 RELAY_URL=${HT_D20_RELAY_URL:-https://relay.joinbase.ai}
 RELAY_PUBKEY=${HT_D20_RELAY_PUBKEY:-5G6pRydHHhv5Hr9PsHoDJdgbMpFJ86a47b5m2i7UYb2GfqCp}
+GEOMETRY=${HT_D20_GEOMETRY:-dense-1b}
+COLDKEYS=${HT_D20_COLDKEYS:-2}
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
+case $GEOMETRY in dense-1b|tiny-cpu) ;; *) echo "HT_D20_GEOMETRY: dense-1b or tiny-cpu" >&2; exit 2 ;; esac
+case $COLDKEYS in [1-9]) ;; *) echo "HT_D20_COLDKEYS must be 1..9" >&2; exit 2 ;; esac
 case $IMAGE in sha256:*) ;; *) echo "IMAGE_DIGEST must be sha256:<64 hex>" >&2; exit 2 ;; esac
 # The Python stages run from $HT, so a relative OUT_DIR would point somewhere else there.
 case $OUT in /*) ;; *) echo "OUT_DIR must be an absolute path" >&2; exit 2 ;; esac
@@ -48,7 +57,7 @@ mkdir "$OUT/inputs"
 
 cd "$HT"
 uv run --no-sync python -I - "$IMAGE" "$DRIVER" "$SM_COUNT" "$OUT" "$EXP_ROUND" \
-    "$RELAY_URL" "$RELAY_PUBKEY" <<'PY'
+    "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" <<'PY'
 import json
 import os
 import secrets
@@ -67,10 +76,11 @@ from hypertrain.protocol.messages import f32hex
 from hypertrain.protocol.messages import drand_round_at
 from hypertrain.trainer.rng import rng_ctr, uniform_f64
 
-image, driver, sm_count, out, exp_round, relay_url, relay_pubkey = sys.argv[1:]
+image, driver, sm_count, out, exp_round, relay_url, relay_pubkey, geometry, coldkeys = sys.argv[1:]
 out_dir = Path(out)
 secret_dir, inputs = out_dir / "secrets", out_dir / "inputs"
-ROLES = ("owner", "coord", "auditor-0", "auditor-1", "referee", "cold-0", "cold-1")
+COLD = tuple(f"cold-{i}" for i in range(int(coldkeys)))
+ROLES = ("owner", "coord", "auditor-0", "auditor-1", "referee", *COLD)
 ss58 = {}
 for role in ROLES:
     path = secret_dir / f"{role}.seed"
@@ -81,48 +91,82 @@ for role in ROLES:
     ss58[role] = load_keyfile(path).ss58
 ss58["relay-k1"] = relay_pubkey
 
-SEQ, VOCAB, N = 2048, 32768, 4096
-rows = np.empty((N, SEQ + 1), dtype="<u4")
-for i in range(N):
-    u = uniform_f64(SEQ + 1, rng_ctr("d20-dense-test-data", 0, i, 0))
-    rows[i] = np.floor(u * VOCAB).astype("<u4")
-(inputs / "samples.u32").write_bytes(rows.tobytes())
-tree = MerkleTree([row.tobytes() for row in rows])
-
-reference = canonicalize(
-    {
-        "purpose": "B300_TEST_RUN_NOT_PUBLIC_QUALITY",
-        "qualification_profile": "dense-1b-bf16",
-        "geometry_source": "scripts/mfu_profiles.json mfu-dense-1b; S3 dense_qualify.py inner",
-        "image_digest": image,
-        "driver_allowlist": [driver],
-        "sm_count": int(sm_count),
-        "dataset": "synthetic philox u32 ids, label d20-dense-test-data, 4096 x 2049",
+body = json.loads(example_manifest().model_dump_json())
+if geometry == "dense-1b":
+    SEQ, VOCAB, N = 2048, 32768, 4096
+    rows = np.empty((N, SEQ + 1), dtype="<u4")
+    for i in range(N):
+        u = uniform_f64(SEQ + 1, rng_ctr("d20-dense-test-data", 0, i, 0))
+        rows[i] = np.floor(u * VOCAB).astype("<u4")
+    tree = MerkleTree([row.tobytes() for row in rows])
+    reference = canonicalize(
+        {
+            "purpose": "B300_TEST_RUN_NOT_PUBLIC_QUALITY",
+            "qualification_profile": "dense-1b-bf16",
+            "geometry_source": "scripts/mfu_profiles.json mfu-dense-1b; S3 dense_qualify.py inner",
+            "image_digest": image,
+            "driver_allowlist": [driver],
+            "sm_count": int(sm_count),
+            "dataset": "synthetic philox u32 ids, label d20-dense-test-data, 4096 x 2049",
+        }
+    )
+    body["model"].update(
+        arch="decoder", n_layers=16, d_model=2048, n_heads=16, n_kv_heads=8, d_ff=5632,
+        n_experts=1, top_k_experts=1, vocab=VOCAB, seq_len=SEQ, compute_dtype="bf16",
+        param_count=889_260_032,
+    )
+    body["inner"].update(
+        H=8, J=4, micro_batch=2, grad_accum=1, state_policy="reset", rewarmup_steps=0
+    )
+    body["inner"]["lr_schedule"].update(peak_lr=f32hex(3e-3), warmup=2, stable=100000, decay=0)
+    body["tokenizer"] = {
+        "name": "ht-synthetic-ids-32768",
+        "sha256": sha256_hex(b"d20 synthetic token ids: no tokenizer, vocab 32768"),
     }
+    body["dataset"].update(
+        merkle_root=tree.root.hex(),
+        depth=12,
+        n_samples=N,
+        sample_format="u32[seq_len+1] token ids",
+        shard_uri_template="samples.u32",
+        shard_sha256_root=MerkleTree([bytes.fromhex(sha256_hex(rows.tobytes()))]).root.hex(),
+        holdout_commit=sha256_hex(b"D20 synthetic B300 test fixture: no quality holdout"),
+    )
+    layout = {"pp": 1, "n_gpus": 2, "dp_size": 2, "ep_size": 1, "zero1": False}
+else:
+    from hypertrain.trainer.config import TrainConfig
+    from hypertrain.trainer.model import param_shapes
+
+    # Same model, inner loop and samples as tests/ledger/test_escrow_v2.py setup(), which the
+    # CPU network E2E (scripts/mine_multi_round_v2.py) mines through audits to get_weights.
+    rows = (np.arange(16 * 5).reshape(16, 5) % 16).astype("<u4")
+    tree = MerkleTree([row.tobytes() for row in rows])
+    reference = canonicalize(
+        {
+            "purpose": "S100_TEST_CPU_RUN_NOT_PUBLIC_QUALITY",
+            "geometry_source": "tests/ledger/test_escrow_v2.py setup() mechanism model",
+            "image_digest": image,
+            "driver_allowlist": [driver],
+            "sm_count": int(sm_count),
+            "dataset": "16 x 5 u32 ids, arange % 16",
+        }
+    )
+    body["model"].update(
+        n_layers=1, d_model=8, n_heads=2, n_kv_heads=2, d_ff=12, vocab=16, seq_len=4,
+        n_experts=1, top_k_experts=1,
+    )
+    body["inner"].update(H=1, J=1, micro_batch=1, grad_accum=1, state_policy="reset")
+    body["inner"]["lr_schedule"].update(warmup=0, stable=100, peak_lr=f32hex(0.001))
+    body["model"]["param_count"] = sum(
+        int(np.prod(s)) for s in param_shapes(TrainConfig.from_manifest(body).model).values()
+    )
+    body["dataset"].update(merkle_root=tree.root.hex(), n_samples=16, depth=4)
+    layout = {"pp": 1, "n_gpus": 1, "dp_size": 1, "ep_size": 1, "zero1": False}
+(inputs / "samples.u32").write_bytes(rows.tobytes())
+(inputs / "proofs.json").write_bytes(
+    canonicalize([[p.hex() for p in tree.proof(i)] for i in range(len(rows))])
 )
 (inputs / "reference-spec.json").write_bytes(reference)
-
-body = json.loads(example_manifest().model_dump_json())
-body["model"].update(
-    arch="decoder", n_layers=16, d_model=2048, n_heads=16, n_kv_heads=8, d_ff=5632,
-    n_experts=1, top_k_experts=1, vocab=VOCAB, seq_len=SEQ, compute_dtype="bf16",
-    param_count=889_260_032,
-)
-body["inner"].update(H=8, J=4, micro_batch=2, grad_accum=1, state_policy="reset", rewarmup_steps=0)
-body["inner"]["lr_schedule"].update(peak_lr=f32hex(3e-3), warmup=2, stable=100000, decay=0)
-body["tokenizer"] = {
-    "name": "ht-synthetic-ids-32768",
-    "sha256": sha256_hex(b"d20 synthetic token ids: no tokenizer, vocab 32768"),
-}
-body["dataset"].update(
-    merkle_root=tree.root.hex(),
-    depth=12,
-    n_samples=N,
-    sample_format="u32[seq_len+1] token ids",
-    shard_uri_template="samples.u32",
-    shard_sha256_root=MerkleTree([bytes.fromhex(sha256_hex(rows.tobytes()))]).root.hex(),
-    holdout_commit=sha256_hex(b"D20 synthetic B300 test fixture: no quality holdout"),
-)
 body["coord_pubkey"] = ss58["coord"]
 body["auditors"] = [ss58["auditor-0"], ss58["auditor-1"]]
 body["reference_spec"].update(
@@ -130,12 +174,14 @@ body["reference_spec"].update(
     driver_allowlist=[driver],
     sm_count=int(sm_count),
     spec_doc_sha256=sha256_hex(reference),
-    layout={"pp": 1, "n_gpus": 2, "dp_size": 2, "ep_size": 1, "zero1": False},
+    layout=layout,
 )
 del body["init_state_hash"]
 (inputs / "training.json").write_bytes(canonicalize(body, allow_float=False))
 
 outer = body["outer"]
+allocation = [(ss58[c], 20000, 1) for c in COLD]
+(inputs / "genesis-allocation.json").write_bytes(canonicalize(allocation))
 policies = {
     "admission": {
         "q_base": "0000803e", "E": 4, "clean_finalizations": 12,
@@ -151,9 +197,7 @@ policies = {
         "ledger_mode": "test", "G_max_units": 100, "R_collectible_units": 100,
         "S_min_units": 1000, "beta_ppm": 1000000, "gammaV_units": 0, "s_lower_ppm": 1000000,
         "q_floor": 1000000,
-        "genesis_allocation_hash": genesis_allocation_hash(
-            [(ss58["cold-0"], 20000, 1), (ss58["cold-1"], 20000, 1)]
-        ),
+        "genesis_allocation_hash": genesis_allocation_hash(allocation),
         "reward_authority": ss58["coord"],
         "round_reward_units": body["budget"]["epochs_per_round"] * 1_000_000,
         "max_total_issuance": 20000000, "shadow_bootstrap_rounds": 12,
@@ -202,7 +246,7 @@ uv run --no-sync python -I -m hypertrain.ops.manifest_v2 build \
     --relays "$OUT/inputs/relays.json" --owner-seed "$OUT/secrets/owner.seed" \
     --exp-round "$(cat "$OUT/inputs/exp-round.txt")" --state-dir "$OUT/state" --out "$OUT/out"
 
-uv run --no-sync python -I - "$OUT" "$IMAGE" "$DRIVER" "$SM_COUNT" <<'PY'
+uv run --no-sync python -I - "$OUT" "$IMAGE" "$DRIVER" "$SM_COUNT" "$GEOMETRY" <<'PY'
 """Dry-run: the checks POST /v2/admin/runs (store._create_run_v2) runs, minus the database."""
 import json
 import sys
@@ -218,6 +262,7 @@ from hypertrain.protocol.messages_v2 import (
 from hypertrain.protocol.relay_messages import RelayRegistryV1
 
 out, image, driver, sm_count = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
+n_gpus = 2 if sys.argv[5] == "dense-1b" else 1
 keys = json.loads((out / "inputs/public-keys.json").read_bytes())
 raw = (out / "out/manifest-envelope.json").read_bytes()
 index = json.loads((out / "out/index.json").read_bytes())
@@ -254,7 +299,7 @@ checks.update(
     arch_decoder=t.model.arch == "decoder" and t.model.od is None,
     profile_none=ref.profile is None,
     layout=ref.layout.model_dump() == {
-        "pp": 1, "n_gpus": 2, "dp_size": 2, "ep_size": 1, "zero1": False
+        "pp": 1, "n_gpus": n_gpus, "dp_size": n_gpus, "ep_size": 1, "zero1": False
     },
     image_digest=ref.image_digest == image,
     driver_allowlist=ref.driver_allowlist == [driver],
