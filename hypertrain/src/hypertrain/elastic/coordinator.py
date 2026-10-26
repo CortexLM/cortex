@@ -9,12 +9,18 @@ number of steps each accepted link adds, paid to the owner of the member that pr
 Leaving, lapsing, stalling or being replaced costs a member nothing it had accepted; only a link
 that fails the audit is penalised, and its member is revoked.
 
+Trust: `admit` decides which host key may join as a member (in production, a server key that the
+owner's coldkey granted for this run, `protocol.server_keys.SignedGrant`). The caller must
+authenticate every heartbeat and commit as signed by that member's registered key; tokens fence,
+they are not credentials. The leave is verified here because it is kept as evidence.
+
 The coordinator is single-threaded state: production serialises calls (the master's store or a
 Durable Object, ADR 0003) and persists the ordered calls, which replay to the same state.
 """
 
 from __future__ import annotations
 
+import re
 import struct
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -24,11 +30,14 @@ from enum import StrEnum
 from hypertrain.elastic.assignment import plan
 from hypertrain.elastic.checkpoint import CheckpointManager, CheckpointManifest, WorkUnit
 from hypertrain.elastic.clock import Clock
-from hypertrain.elastic.membership import Lease, Member, Membership
+from hypertrain.elastic.membership import Lease, LeaseError, Member, Membership
 from hypertrain.elastic.notice import NoticeError, SignedLeave, verify_leave
 from hypertrain.elastic.store import CheckpointStore
+from hypertrain.protocol.keys import KeyError_, decode_hotkey
 
 Audit = Callable[[WorkUnit, CheckpointManifest], bool]
+Admit = Callable[[str, str, str], bool]  # (member, owner, signer) -> may join
+MEMBER_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 
 
 class CoordinatorError(Exception):
@@ -127,6 +136,7 @@ class Coordinator:
         ttl_ms: int,
         progress_ms: int,
         seed: bytes,
+        admit: Admit,
         capacity: int = 1,
         audit: Audit | None = None,
     ) -> None:
@@ -135,6 +145,7 @@ class Coordinator:
         if progress_ms <= 0:
             raise ValueError("progress_ms must be > 0")
         self.progress_ms = progress_ms
+        self.admit = admit
         self.run_id = run_id
         self.clock = clock
         self.membership = Membership(clock, ttl_ms)
@@ -172,7 +183,17 @@ class Coordinator:
     # ---- members ----
 
     def join(self, member: str, owner: str, signer: str) -> Grant:
+        """Grant `member` a lease for host key `signer` if `admit` allows it; a live holder of
+        the same id is replaced only by an admitted key of the same owner."""
         self._sweep()
+        if not MEMBER_ID.fullmatch(member):
+            raise LeaseError("BAD_MEMBER", member[:128])
+        try:
+            decode_hotkey(signer)
+        except KeyError_:
+            raise LeaseError("BAD_SIGNER", member) from None
+        if not self.admit(member, owner, signer):
+            raise LeaseError("NOT_ADMITTED", member)
         lease, replaced = self.membership.join(member, owner, signer)
         if replaced is not None:
             for s in self._held(replaced.token):

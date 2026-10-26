@@ -99,6 +99,13 @@ MUTANTS = (
         "test_coordinator.py::test_a_holder_that_stops_progressing_loses_its_shard_unpenalised",
     ),
     Mutant(
+        "an unadmitted key joins and replaces the live holder",
+        SRC + "coordinator.py",
+        "if not self.admit(member, owner, signer):",
+        "if False:",
+        "test_coordinator.py::test_only_an_admitted_key_joins_or_replaces_a_member",
+    ),
+    Mutant(
         "a non-holder extends a shard",
         SRC + "coordinator.py",
         "if s.holder != Holder(member, token):",

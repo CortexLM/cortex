@@ -32,6 +32,7 @@ def setup(
         ttl_ms=TTL,
         progress_ms=PROGRESS,
         seed=b"s",
+        admit=lambda _member, _owner, signer: signer != KEYS["z"].ss58,  # z holds no grant
         audit=audit,
     )
     base = store.put(b"base")
@@ -76,6 +77,22 @@ def test_only_the_live_holder_extends_a_shard() -> None:
         coord.commit("b", b.token, 0, link(coord, unit, None, 3, b))
     assert e.value.code == "NOT_HOLDER"
     assert coord.commit("a", a.token, 0, link(coord, unit, None, 3, a)).step == 3
+
+
+def test_only_an_admitted_key_joins_or_replaces_a_member() -> None:
+    _, coord, _ = setup()
+    a = join(coord, "a")
+    for member, signer, code in (
+        ("a", KEYS["z"].ss58, "NOT_ADMITTED"),
+        ("a", "not-an-ss58-key", "BAD_SIGNER"),
+        ("a b", KEYS["c"].ss58, "BAD_MEMBER"),
+    ):
+        with pytest.raises(LeaseError) as e:
+            coord.join(member, "owner-a", signer)
+        assert e.value.code == code
+    assert coord.holder(0) == Holder("a", a.token)
+    assert coord.heartbeat("a", a.token).lease.token == a.token
+    assert coord.settle().departures == ()
 
 
 def test_a_lapsed_lease_releases_its_shard_and_head_without_a_tick() -> None:

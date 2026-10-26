@@ -592,10 +592,12 @@ class Simulation:
             ttl_ms=cfg.ttl_ms,
             progress_ms=cfg.progress_ms,
             seed=SIM_TAG + struct.pack(">Q", seed),
+            admit=self._admit,
             audit=self._audit,
         )
         self.checkpoints = self.coord.checkpoints
         self.hosts: dict[int, _Host] = {}
+        self.granted: set[tuple[str, str, str]] = set()  # (member, owner, host key) issued
         self.incarnations: Counter[int] = Counter()
         self.events: list[_Event] = []
         self.partitions: dict[int, int] = {}
@@ -633,9 +635,15 @@ class Simulation:
         out = replay(state, unit.round, unit.shard, start, manifest.step)
         return hashlib.sha256(out).hexdigest() == manifest.state
 
+    def _admit(self, member: str, owner: str, signer: str) -> bool:
+        """Each miner grants a key to every host it boots; only those keys may join."""
+        return (member, owner, signer) in self.granted
+
     def _boot(self, slot: int) -> None:
         self.incarnations[slot] += 1
-        self.hosts[slot] = _Host(self, slot, self.incarnations[slot])
+        host = _Host(self, slot, self.incarnations[slot])
+        self.granted.add((host.member, host.owner, host.key.ss58))
+        self.hosts[slot] = host
 
     def _replace(self, slot: int, delay_ms: int, droughts: bool) -> None:
         at = self.clock.now_ms() + delay_ms
