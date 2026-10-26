@@ -19,6 +19,7 @@ Start here: [Cortex ecosystem](ecosystem.md) and [Validator quickstart](validato
 ## Cortex v3 monorepo
 
 - [ADR 0001: monorepo structure](adr/0001-monorepo-structure.md): layout, lockfiles, workflows, v3 images and the old-repository references to migrate.
+- [ADR 0006: `kimi-k3-pro-tiny` test profile](adr/0006-kimi-k3-pro-tiny-profile.md): Kimi K2-family MLA + MoE test architecture, gap table and B300 qualification commands.
 - [Hypertrain import provenance](provenance/hypertrain-import.md): commit map, byte-identity and `git log --follow` checks.
 - [Hypertrain](../hypertrain/README.md): the imported project, with its own documentation in `hypertrain/docs/`.
 - [B300 host run](b300-run.md): `run_host.sh` on an AWS p6-b300 host: steps, exit codes, results, auto-stop and the two-host comparison.

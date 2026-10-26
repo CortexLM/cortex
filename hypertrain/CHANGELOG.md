@@ -8,6 +8,8 @@
 - drand-beacon sampled replay audits with Merkle commitments.
 - CPU simulations: DiLoCo state-policy study, parity grid, mechanism tables.
 - GPU determinism Phase A on RTX 5090 hosts (bitwise-identical across 3 hosts).
+- `kimi-k3-pro-tiny` test architecture (MLA, shared-expert MoE, aux-loss-free routing bias),
+  opt-in through `hypertrain.models.kimi_tiny.register()`; see `docs/adr/0006` at the monorepo root.
 - Docs, CI, image and release workflows, Dockerfiles.
 
 ### Changed
