@@ -87,16 +87,39 @@ MUTANTS = (
     Mutant(
         "a holder that never progresses keeps its shard",
         SRC + "coordinator.py",
-        "if s.holder is not None and now - s.since_ms >= self.progress_ms",
+        "if s.holder is not None and now - self._progress[s.holder.member][0] >= self.progress_ms",
         "if False",
         "test_coordinator.py::test_a_holder_that_stops_progressing_loses_its_shard_unpenalised",
     ),
     Mutant(
         "an accepted link does not restart the progress deadline",
         SRC + "coordinator.py",
-        "s.head, s.step, s.since_ms = key, manifest.step, self.clock.now_ms()",
-        "s.head, s.step = key, manifest.step",
+        "        self._progress[member] = (self.clock.now_ms(), False)"
+        "  # an accepted link restarts it\n",
+        "",
         "test_coordinator.py::test_a_holder_that_stops_progressing_loses_its_shard_unpenalised",
+    ),
+    Mutant(
+        "every rejoin restarts the progress window",
+        SRC + "coordinator.py",
+        "if window is not None and not window[1]:",
+        "if window is not None:",
+        "test_coordinator.py::test_a_host_that_rejoins_in_a_loop_still_loses_a_shard_it_never_advances",
+    ),
+    Mutant(
+        "a new shard restarts the window of a member already holding one",
+        SRC + "coordinator.py",
+        "            if member not in holding:"
+        "  # it starts holding work: its progress window opens\n",
+        "            if True:\n",
+        "test_coordinator.py::test_a_shard_handed_to_a_busy_member_does_not_extend_its_window",
+    ),
+    Mutant(
+        "a late member is handed shards in the sweep that lapses it",
+        SRC + "coordinator.py",
+        "            self._depart(self.membership.lapse(member), Exit.STALLED, assign=False)",
+        "            self._depart(self.membership.lapse(member), Exit.STALLED, assign=True)",
+        "test_coordinator.py::test_late_members_are_all_lapsed_before_their_shards_move",
     ),
     Mutant(
         "an unadmitted key joins and replaces the live holder",
@@ -167,7 +190,7 @@ MUTANTS = (
         "replacement host does not inherit the shards",
         SRC + "coordinator.py",
         "            for s in self._held(replaced.token):\n"
-        "                s.holder, s.since_ms = Holder(member, lease.token), self.clock.now_ms()\n",
+        "                s.holder = Holder(member, lease.token)\n",
         "",
         "test_coordinator.py::test_a_replacement_host_resumes_the_shard_from_the_accepted_head",
     ),

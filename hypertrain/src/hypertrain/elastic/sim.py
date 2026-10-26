@@ -118,6 +118,7 @@ class SimConfig:
     ack_loss_ppm: int = 0
     cheaters: tuple[int, ...] = ()
     gpus_per_host: int = 8
+    capacity: int = 1  # shards a host may hold; it trains them one after the other
 
     def __post_init__(self) -> None:
         if min(self.hosts, self.regions, self.shards, self.steps, self.rounds) < 1:
@@ -604,6 +605,7 @@ class Simulation:
             progress_ms=cfg.progress_ms,
             seed=SIM_TAG + struct.pack(">Q", seed),
             admit=self._admit,
+            capacity=cfg.capacity,
             audit=self._audit,
         )
         self.checkpoints = self.coord.checkpoints
@@ -613,7 +615,7 @@ class Simulation:
         self.events: list[_Event] = []
         self.partitions: dict[int, int] = {}
         self.store_partitions: dict[int, int] = {}
-        self.cuts: dict[int, list[tuple[int, int]]] = {}  # slot -> partitions of either kind
+        self.cuts: dict[int, list[tuple[int, int]]] = {}  # slot -> partitions, kills, losses
         self.departures: list[Departure] = []
         self.losses: list[Loss] = []
         self.computed = 0
@@ -692,9 +694,11 @@ class Simulation:
             self.events.append(_Event(f.until_ms, "evict", f.slot, host.incarnation))
         elif f.kind == "kill":
             host.die("kill")
+            self.cuts.setdefault(f.slot, []).append((f.at_ms, f.at_ms))
             self._replace(f.slot, self.cfg.restart_ms, droughts=False)
         elif f.kind == "loss":
             host.die("loss")
+            self.cuts.setdefault(f.slot, []).append((f.at_ms, f.at_ms))
             self._new_machine(f.slot)
         elif f.kind == "partition":
             self.partitions[f.slot] = f.until_ms
@@ -713,6 +717,7 @@ class Simulation:
             host = self.hosts[e.slot]
             if e.kind == "evict" and host.alive and host.incarnation == e.incarnation:
                 host.die("notice")
+                self.cuts.setdefault(e.slot, []).append((e.at_ms, e.at_ms))
                 self._new_machine(e.slot)
             elif e.kind == "boot" and not host.alive and not host.retired:
                 self._boot(e.slot)
@@ -802,12 +807,14 @@ class Simulation:
                 self.violations.append(f"loss of {loss.steps} steps above ckpt_every: {loss}")
             if loss.kind == "displaced" or loss.kind.startswith("refused"):
                 self.violations.append(f"the coordinator refused or moved live work: {loss}")
-        for d in self.departures:  # a dead host may stall before it lapses; a live one may not
+        # a holder hit by no fault in its window (no partition, kill, loss or eviction; a dead
+        # host may stall before it lapses) must never be stalled
+        for d in self.departures:
             window = (d.at_ms - cfg.progress_ms, d.at_ms)
             cuts = self.cuts.get(int(d.member[1:]), [])
             cut = any(a <= window[1] and b >= window[0] for a, b in cuts)
             if d.kind is Exit.STALLED and d.token not in self.dead_leases and not cut:
-                self.violations.append(f"{d.member} stalled alive with its network up")
+                self.violations.append(f"{d.member} stalled with no fault in its window")
         if self.computed - self.accepted > sum(loss.steps for loss in self.losses):
             self.violations.append("wasted steps not accounted for by any loss")
         final_ok = completed and self.state == reference(cfg.rounds, cfg.shards, cfg.steps)
@@ -852,6 +859,7 @@ def random_config(rng: random.Random) -> SimConfig:
         ack_loss_ppm=rng.choice((0, 100_000, 300_000)),
         ckpt_ms=rng.choice((5_000, 15_000, 30_000)),
         ttl_ms=rng.choice((20_000, 60_000)),
+        capacity=rng.choice((1, 2)),
     )
 
 

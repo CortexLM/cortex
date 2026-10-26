@@ -21,7 +21,9 @@ KEYS = {name: Keypair(bytes([i + 1]) * 32) for i, name in enumerate("abcdz")}
 
 
 def setup(
-    shards: int = 1, audit: Callable[[WorkUnit, CheckpointManifest], bool] | None = None
+    shards: int = 1,
+    audit: Callable[[WorkUnit, CheckpointManifest], bool] | None = None,
+    capacity: int = 1,
 ) -> tuple[FakeClock, Coordinator, list[WorkUnit]]:
     clock = FakeClock()
     store = MemoryCheckpointStore()
@@ -34,6 +36,7 @@ def setup(
         seed=b"s",
         admit=lambda _member, _owner, signer: signer != KEYS["z"].ss58,  # z holds no grant
         audit=audit,
+        capacity=capacity,
     )
     base = store.put(b"base")
     units = [WorkUnit(RUN, POLICY, 0, shard, base, 6) for shard in range(shards)]
@@ -138,6 +141,77 @@ def test_a_holder_that_stops_progressing_loses_its_shard_unpenalised() -> None:
     assert e.value.code == "LAPSED"
     settlement = coord.settle()
     assert settlement.penalties == {} and settlement.credits == {"owner-a": 3}
+
+
+def keep_alive(clock: FakeClock, coord: Coordinator, leases: dict[str, Lease], ms: int) -> None:
+    """Advance `ms`, heartbeating every live member each 500 ms so no lease runs out."""
+    for _ in range(ms // 500):
+        clock.advance(500)
+        for name, lease in leases.items():
+            if coord.membership.get(name).status == "active":
+                try:
+                    coord.heartbeat(name, lease.token)
+                except LeaseError as e:
+                    assert e.code == "LAPSED"  # stalled by this very call's sweep
+
+
+def test_a_host_that_rejoins_in_a_loop_still_loses_a_shard_it_never_advances() -> None:
+    clock, coord, _ = setup()
+    leases = {"a": join(coord, "a"), "b": join(coord, "b")}
+    assert coord.holder(0) == Holder("a", leases["a"].token)
+    for _ in range(2 * PROGRESS // 500):  # a crash loop: a new host for a every 500 ms
+        keep_alive(clock, coord, leases, 500)
+        if coord.membership.get("a").status == "active":
+            leases["a"] = join(coord, "a")
+    assert coord.holder(0) == Holder("b", leases["b"].token)
+    kinds = [d.kind for d in coord.settle().departures if d.member == "a"]
+    assert Exit.STALLED in kinds and kinds.count(Exit.REPLACED) > 1
+
+
+def test_a_member_working_two_shards_in_turn_is_not_stalled() -> None:
+    clock, coord, units = setup(shards=2, capacity=2)
+    leases = {"a": join(coord, "a")}
+    assert coord.holder(0) == coord.holder(1) == Holder("a", leases["a"].token)
+    for shard in (0, 1):  # shard 1 waits while shard 0 is trained
+        head = None
+        for step in range(1, 7):
+            keep_alive(clock, coord, leases, PROGRESS // 2)
+            head = link(coord, units[shard], head, step, leases["a"])
+            coord.commit("a", leases["a"].token, shard, head)
+    settlement = coord.settle()
+    assert settlement.complete and settlement.departures == ()
+    assert settlement.credits == {"owner-a": 12}
+
+
+def test_a_shard_handed_to_a_busy_member_does_not_extend_its_window() -> None:
+    clock, coord, units = setup(shards=3, capacity=2)
+    leases = {"a": join(coord, "a"), "b": join(coord, "b")}
+    mine = [s for s in range(3) if coord.holder(s).member == "a"]
+    assert len(mine) == 2  # a holds two shards, b the third
+    keep_alive(clock, coord, leases, 500)
+    coord.commit("a", leases["a"].token, mine[0], link(coord, units[mine[0]], None, 6, leases["a"]))
+    keep_alive(clock, coord, leases, 500)  # a's window runs from that link at t=500
+    coord.leave(sign_leave(notice(leases["b"], KEYS["b"]), KEYS["b"]))
+    assert {s for s in range(3) if coord.holder(s) == Holder("a", leases["a"].token)} == {
+        mine[1],
+        next(s for s in range(3) if s not in mine),
+    }  # b's shard moves to a at t=1000, which a never advances
+    del leases["b"]
+    keep_alive(clock, coord, leases, PROGRESS - 500)  # to t = 500 + PROGRESS
+    stalled = [d for d in coord.settle().departures if d.kind is Exit.STALLED]
+    assert [(d.member, d.at_ms) for d in stalled] == [("a", 500 + PROGRESS)]
+
+
+def test_late_members_are_all_lapsed_before_their_shards_move() -> None:
+    clock, coord, _ = setup(shards=3, capacity=2)
+    leases = {"a": join(coord, "a"), "b": join(coord, "b")}
+    held = {name: tuple(s for s in range(3) if coord.holder(s).member == name) for name in "ab"}
+    assert sorted(len(shards) for shards in held.values()) == [1, 2]
+    keep_alive(clock, coord, leases, PROGRESS)  # nobody ever commits
+    departures = coord.settle().departures
+    assert {d.member: (d.kind, d.released) for d in departures} == {
+        name: (Exit.STALLED, shards) for name, shards in held.items()
+    }
 
 
 def test_a_departure_moves_only_the_departed_members_shards() -> None:
