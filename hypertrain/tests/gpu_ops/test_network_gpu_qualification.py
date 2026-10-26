@@ -23,6 +23,8 @@ from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.model import param_shapes
 
 TREE = Path(__file__).parents[2]
+# Compute capabilities (major, minor) of the measured device classes.
+RTX_5090, B300 = (12, 0), (10, 3)
 
 
 def results(tmp_path: Path, ranks: int = 2, H: int = 30, J: int = 5) -> list[Path]:  # noqa: N803
@@ -53,6 +55,7 @@ def results(tmp_path: Path, ranks: int = 2, H: int = 30, J: int = 5) -> list[Pat
                 torch_path="/venv/torch/__init__.py",
                 drivers=["595.84"] * ranks,
                 sm_counts=[170] * ranks,
+                capabilities=[RTX_5090] * ranks,
                 image_digest="sha256:" + "44" * 32,
             ),
             instance_id=i + 1,
@@ -351,60 +354,117 @@ def test_environment_rejects_driver_count_differing_from_devices(tmp_path: Path)
         driver.Environment.model_validate(data)
 
 
-def test_result_admits_positive_sm_count_other_than_rtx_5090(tmp_path: Path) -> None:
-    # Given: a B300-style result; the store, not the schema, binds it to reference_spec.sm_count.
+@pytest.mark.parametrize(
+    "capability,sm_count", [(RTX_5090, 170), (B300, 148)], ids=["rtx5090", "b300"]
+)
+def test_result_admits_each_qualified_capability_sm_pair(
+    tmp_path: Path, capability: tuple[int, int], sm_count: int
+) -> None:
+    # Given: a result whose devices are one row of the per-arch table.
     data = json.loads(results(tmp_path)[0].read_bytes())
-    data["environment"]["sm_counts"] = [148, 148]
+    data["environment"].update(capabilities=[capability] * 2, sm_counts=[sm_count] * 2)
     # When
     result = driver.Result.model_validate_json(json.dumps(data))
-    # Then: a non-positive count is still refused.
-    assert result.environment.sm_counts == [148, 148]
-    data["environment"]["sm_counts"] = [0, 0]
-    with pytest.raises(ValidationError):
+    # Then
+    assert result.environment.capabilities == [capability] * 2
+    assert result.environment.sm_counts == [sm_count] * 2
+
+
+@pytest.mark.parametrize(
+    "capabilities,sm_counts,match",
+    [
+        ([RTX_5090] * 2, [148] * 2, r"capability 12\.0 qualifies \[170\] SMs, not 148"),
+        ([(9, 0)] * 2, [132] * 2, r"capability 9\.0 is not a qualified device class"),
+        ([RTX_5090], [170, 132], "capability/device count mismatch"),
+    ],
+    ids=["b300_count_on_rtx5090", "unknown_pair", "unlisted_device"],
+)
+def test_result_refuses_pair_outside_the_table(
+    tmp_path: Path, capabilities: list[tuple[int, int]], sm_counts: list[int], match: str
+) -> None:
+    # Given
+    data = json.loads(results(tmp_path)[0].read_bytes())
+    data["environment"].update(capabilities=capabilities, sm_counts=sm_counts)
+    # When / Then
+    with pytest.raises(ValidationError, match=match):
         driver.Result.model_validate_json(json.dumps(data))
 
 
-def fake_cuda_host(monkeypatch: pytest.MonkeyPatch, sm_counts: list[int]) -> None:
+def test_result_without_capabilities_is_an_rtx_5090_record_only(tmp_path: Path) -> None:
+    # Given: result.json as written before capabilities were recorded (Literal[170] era).
+    data = json.loads(results(tmp_path)[0].read_bytes())
+    del data["environment"]["capabilities"]
+    # When
+    legacy = driver.Result.model_validate_json(json.dumps(data))
+    # Then: it still qualifies 170-SM devices and serializes without the field...
+    assert legacy.environment.capabilities is None
+    assert "capabilities" not in json.loads(legacy.model_dump_json())["environment"]
+    # ...but cannot stand for any other device class.
+    data["environment"]["sm_counts"] = [148, 148]
+    with pytest.raises(ValidationError, match="without capabilities qualifies 170-SM"):
+        driver.Result.model_validate_json(json.dumps(data))
+
+
+def fake_cuda_host(
+    monkeypatch: pytest.MonkeyPatch, devices: list[tuple[tuple[int, int], int]]
+) -> None:
     """Fake the image's torch/nvidia-smi probes; no GPU or subprocess is touched."""
     import torch  # After hypertrain.trainer configured determinism.
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: len(sm_counts))
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: len(devices))
     monkeypatch.setattr(
         torch.cuda,
         "get_device_properties",
-        lambda i: SimpleNamespace(multi_processor_count=sm_counts[i]),
+        lambda i: SimpleNamespace(
+            major=devices[i][0][0], minor=devices[i][0][1], multi_processor_count=devices[i][1]
+        ),
     )
     monkeypatch.setattr(torch, "__file__", "/venv/main/torch/__init__.py")
     monkeypatch.setattr(torch, "__version__", "2.14.0+cu130")
     monkeypatch.setattr(torch.version, "cuda", "13.0")
     monkeypatch.setattr(driver.sys, "executable", "/opt/hypertrain/venv/bin/python")
     monkeypatch.setattr(driver.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
-    smi = SimpleNamespace(stdout="595.84\n" * len(sm_counts))
+    smi = SimpleNamespace(stdout="595.84\n" * len(devices))
     monkeypatch.setattr(driver.subprocess, "run", lambda *a, **k: smi)
 
 
-def test_inspect_environment_records_sm_count_named_by_manifest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "capability,sm_count", [(RTX_5090, 170), (B300, 148)], ids=["rtx5090", "b300"]
+)
+def test_inspect_environment_records_capability_with_manifest_sm_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capability: tuple[int, int], sm_count: int
 ) -> None:
-    # Given: a manifest naming 148 SMs and a host whose devices all report 148.
+    # Given: a manifest naming the host's SM count, on a qualified device class.
     cfg = seed_config(tmp_path, TREE / "experiments/gpu_network_v2/profile.json")
-    fake_cuda_host(monkeypatch, [148, 148])
+    fake_cuda_host(monkeypatch, [(capability, sm_count)] * 2)
     # When
-    environment = driver.inspect_environment(cfg, 2, 148)
+    environment = driver.inspect_environment(cfg, 2, sm_count)
     # Then
-    assert environment.sm_counts == [148, 148]
+    assert environment.capabilities == [capability] * 2
+    assert environment.sm_counts == [sm_count] * 2
 
 
 def test_inspect_environment_refuses_device_off_manifest_sm_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Given: an RTX 5090 (170-SM) manifest and a host with one 148-SM device.
+    # Given: an RTX 5090 (170-SM) manifest and a host with one B300 device.
     cfg = seed_config(tmp_path, TREE / "experiments/gpu_network_v2/profile.json")
-    fake_cuda_host(monkeypatch, [170, 148])
+    fake_cuda_host(monkeypatch, [(RTX_5090, 170), (B300, 148)])
     # When / Then
     with pytest.raises(Reject, match="qualification_sm_profile_mismatch"):
         driver.inspect_environment(cfg, 2, 170)
+
+
+def test_inspect_environment_refuses_manifest_count_on_unqualified_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a 148-SM manifest and 148-SM devices that report the RTX 5090 capability.
+    cfg = seed_config(tmp_path, TREE / "experiments/gpu_network_v2/profile.json")
+    fake_cuda_host(monkeypatch, [(RTX_5090, 148)] * 2)
+    # When / Then
+    with pytest.raises(Reject, match=r"qualification_sm_profile_unqualified:device 0"):
+        driver.inspect_environment(cfg, 2, 148)
 
 
 def test_eight_gpu_seed_manifest_drives_rank_and_checkpoint_coverage(

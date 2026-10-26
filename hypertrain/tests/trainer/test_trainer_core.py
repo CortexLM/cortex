@@ -12,7 +12,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from trainer_fixtures import RUN_ID, H, J, assignment, make_cfg, sample, small_manifest_body
+from trainer_fixtures import (
+    RUN_ID,
+    H,
+    J,
+    assignment,
+    make_cfg,
+    make_kimi_cfg,
+    sample,
+    small_manifest_body,
+)
 
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.hashing import MerkleTree
@@ -26,7 +35,7 @@ from hypertrain.trainer.compress import (
 from hypertrain.trainer.config import CompressConfig, InnerConfig, TrainConfig
 from hypertrain.trainer.determinism import apply_reference_env
 from hypertrain.trainer.loop import Assignment, batch_hash, replay, stage_states, train_round
-from hypertrain.trainer.model import init_params, route
+from hypertrain.trainer.model import ARCH_REGISTRY, init_params, route
 from hypertrain.trainer.optim import OptState, derive_v0, init_state
 from hypertrain.trainer.rng import philox4x32, rng_ctr
 
@@ -60,6 +69,8 @@ def _collect(p: subprocess.Popen[str]) -> dict[str, object]:
         ("dense", "bf16", "sparseloco"),
         ("moe", "fp32", "sparseloco"),
         ("moe", "bf16", "dense-int8"),
+        ("kimi", "fp32", "sparseloco"),
+        ("kimi", "bf16", "dense-int8"),
     ],
 )
 def test_two_processes_identical_roots(arch: str, dtype: str, codec: str) -> None:
@@ -101,9 +112,10 @@ def test_late_setup_after_bare_torch_import_is_rejected() -> None:
     assert "torch imported before hypertrain determinism setup" in out.stderr
 
 
-@pytest.mark.parametrize("moe", [False, True])
-def test_replay_reproduces_every_leaf(moe: bool) -> None:
-    cfg = make_cfg(moe=moe)
+@pytest.mark.parametrize("arch", ["dense", "moe", "kimi"])
+def test_replay_reproduces_every_leaf(arch: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(ARCH_REGISTRY, "kimi-k3-pro-tiny", "hypertrain.models.kimi_tiny")
+    cfg = make_kimi_cfg() if arch == "kimi" else make_cfg(moe=arch == "moe")
     theta0, a, get = init_params(cfg.model), assignment(cfg), sample(cfg)
     res = train_round(cfg, theta0, a, get)
     rep = replay(cfg, theta0, a, get, res.leaf_digests, res.delta_hash)

@@ -1,6 +1,6 @@
 """Standalone child process: run one round and print leaves/delta hashes as JSON.
 
-Usage: python _worker.py <dense|moe> <fp32|bf16> <codec> [flip_batch_index]
+Usage: python _worker.py <dense|moe|kimi> <fp32|bf16> <codec> [flip_batch_index]
 Imports hypertrain.trainer before torch so determinism setup runs first.
 """
 
@@ -14,10 +14,16 @@ from hypertrain.trainer.loop import train_round
 from hypertrain.trainer.model import init_params
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
-from trainer_fixtures import assignment, make_cfg, sample  # noqa: E402
+from trainer_fixtures import assignment, make_cfg, make_kimi_cfg, sample  # noqa: E402
 
 arch, dtype, codec = sys.argv[1:4]
-cfg = make_cfg(moe=arch == "moe", dtype=dtype, codec=codec)
+if arch == "kimi":
+    from hypertrain.models import kimi_tiny
+
+    kimi_tiny.register()
+    cfg = make_kimi_cfg(dtype=dtype, codec=codec)
+else:
+    cfg = make_cfg(moe=arch == "moe", dtype=dtype, codec=codec)
 a = assignment(cfg, flip=int(sys.argv[4]) if len(sys.argv) > 4 else None)
 res = train_round(cfg, init_params(cfg.model), a, sample(cfg))
 print(

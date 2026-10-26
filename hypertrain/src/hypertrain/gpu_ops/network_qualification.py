@@ -39,6 +39,25 @@ LEGACY_TIMING = {
 }
 # ponytail: finite ceiling for one prune_rescued lifecycle; raise with a reviewed profile change.
 MAX_LIFECYCLE_SECONDS = 86400
+# CUDA compute capability (major, minor) -> SM counts a qualification may record, one row per
+# measured device class (docs/adr/0007-sm-counts-per-arch.md). A device is qualified only as a
+# pair in this table that also equals the manifest's reference_spec.sm_count.
+SM_COUNTS: dict[tuple[int, int], frozenset[int]] = {
+    (12, 0): frozenset({170}),  # RTX 5090 (sm_120), gpu_network_v2 hosts
+    (10, 3): frozenset({148}),  # B300 SXM6 AC (sm_103), docs/b300-run.md hosts A and B
+}
+
+
+def unqualified_device(capabilities: list[tuple[int, int]], sm_counts: list[int]) -> str | None:
+    """Why the first device whose (capability, SM count) pair is not in SM_COUNTS is refused."""
+    for index, ((major, minor), sm) in enumerate(zip(capabilities, sm_counts, strict=True)):
+        device = f"device {index}: capability {major}.{minor}"
+        accepted = SM_COUNTS.get((major, minor))
+        if accepted is None:
+            return f"{device} is not a qualified device class"
+        if sm not in accepted:
+            return f"{device} qualifies {sorted(accepted)} SMs, not {sm}"
+    return None
 
 
 def lifecycle_timing(profile: dict) -> dict[str, int]:
@@ -127,12 +146,30 @@ class Environment(Boundary):
     torch_path: str
     drivers: Annotated[list[str], Field(min_length=2, max_length=8)]
     sm_counts: Annotated[list[Pos], Field(min_length=2, max_length=8)]
+    # One per device. None only in a result written before capabilities were recorded; it is
+    # omitted from JSON so such a result.json keeps its bytes.
+    capabilities: list[tuple[StrictInt, StrictInt]] | None = Field(
+        None, exclude_if=lambda v: v is None
+    )
     image_digest: ImageDigest
 
     @model_validator(mode="after")
     def _one_driver_per_device(self) -> Environment:
         if len(self.drivers) != len(self.sm_counts):
             raise ValueError("driver/device count mismatch")
+        return self
+
+    @model_validator(mode="after")
+    def _qualified_devices(self) -> Environment:
+        if self.capabilities is None:  # Literal[170] era: every such result is an RTX 5090.
+            if any(s not in SM_COUNTS[(12, 0)] for s in self.sm_counts):
+                raise ValueError("a result without capabilities qualifies 170-SM RTX 5090 only")
+            return self
+        if len(self.capabilities) != len(self.sm_counts):
+            raise ValueError("capability/device count mismatch")
+        reason = unqualified_device(self.capabilities, self.sm_counts)
+        if reason is not None:
+            raise ValueError(reason)
         return self
 
 
@@ -296,9 +333,14 @@ def inspect_environment(cfg: Qualification, n_gpus: int, sm_count: int) -> Envir
         raise Reject("qualification_requires_actual_layout_cuda_devices")
     if any(d.strip() not in cfg.driver_allowlist for d in drivers):
         raise Reject("qualification_driver_mismatch")
-    sm_counts = [torch.cuda.get_device_properties(i).multi_processor_count for i in range(n_gpus)]
+    devices = [torch.cuda.get_device_properties(i) for i in range(n_gpus)]
+    sm_counts = [d.multi_processor_count for d in devices]
+    capabilities = [(d.major, d.minor) for d in devices]
     if any(s != sm_count for s in sm_counts):
         raise Reject("qualification_sm_profile_mismatch")
+    reason = unqualified_device(capabilities, sm_counts)
+    if reason is not None:
+        raise Reject(f"qualification_sm_profile_unqualified:{reason}")
     return Environment.model_validate(
         {
             "backend": "cuda",
@@ -308,6 +350,7 @@ def inspect_environment(cfg: Qualification, n_gpus: int, sm_count: int) -> Envir
             "torch_path": str(Path(torch.__file__).resolve()),
             "drivers": [d.strip() for d in drivers],
             "sm_counts": sm_counts,
+            "capabilities": capabilities,
             "image_digest": cfg.image_digest,
         }
     )

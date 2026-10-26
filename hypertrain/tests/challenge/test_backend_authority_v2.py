@@ -156,6 +156,11 @@ def authority(tmp_path, monkeypatch, request):
     body["training"]["beacon"] = network.manifest.training.beacon.model_dump(mode="json")
     body["training"]["coord_pubkey"] = service.COORD.ss58
     body["training"]["auditors"] = [key.ss58 for key in service.AUDITORS]
+    host = getattr(request, "param", None)  # Default: the seed's RTX 5090 reference and devices.
+    if host is not None:
+        body["training"]["reference_spec"].update(
+            sm_count=host["sm_count"], driver_allowlist=[host["driver"]]
+        )
     manifest = RunManifestV2.model_validate(body)
     job = job.model_copy(update={"manifest": manifest, "run_id": manifest.run_id()})
     original.seed_job.write_text(job.model_dump_json())
@@ -177,6 +182,7 @@ def authority(tmp_path, monkeypatch, request):
                 "role": f"h{index}",
                 "lifecycle_receipts": receipts,
                 "lifecycle_receipts_sha256": fsha(receipts),
+                "driver_allowlist": manifest.training.reference_spec.driver_allowlist,
             }
         )
         config = seed_dir / f"config-{index}.json"
@@ -192,6 +198,14 @@ def authority(tmp_path, monkeypatch, request):
             image_digest=manifest.training.reference_spec.image_digest,
             torch_path="/venv/main/lib/torch/__init__.py",
         )
+        if host is not None:
+            result["environment"].update(
+                drivers=[host["driver"]] * 2,
+                capabilities=[host["capability"]] * 2,
+                sm_counts=[host["devices"]] * 2,
+            )
+            if host["capability"] is None:  # result.json written before capabilities existed
+                del result["environment"]["capabilities"]
         path.write_text(json.dumps(result))
     objects = LocalFSStore(tmp_path / "objects")
     for field in (
@@ -438,6 +452,52 @@ def test_invalid_reviewed_authority_rejects_without_install(authority, fault):
             envelope_v2.seal(service.OWNER, "Receipt", manifest.run_id(), receipt, 100)
         )
     with pytest.raises((ChallengeError, ValueError, Reject)):
+        store._bootstrap_backend_v2(manifest, configs, results, raw)
+    assert (
+        store._db.execute("SELECT COUNT(*) FROM records_v2 WHERE kind='qualification'").fetchone()[
+            0
+        ]
+        == 0
+    )
+
+
+# Manifest reference (sm_count, driver) and the host devices' recorded (capability, SM count).
+RTX_5090 = {"sm_count": 170, "driver": "595.84", "capability": [12, 0], "devices": 170}
+B300 = {"sm_count": 148, "driver": "595.91.07", "capability": [10, 3], "devices": 148}
+
+
+@pytest.mark.parametrize(
+    "authority",
+    [RTX_5090, {**RTX_5090, "capability": None}, B300],
+    indirect=True,
+    ids=["rtx5090", "rtx5090_without_capabilities", "b300"],
+)
+def test_qualified_device_class_installs_cuda_backend(authority):
+    store, manifest, configs, results, raw = authority
+    store._bootstrap_backend_v2(manifest, configs, results, raw)
+    register(store, manifest)
+    assert store._backend_v2(manifest) == "cuda"
+
+
+@pytest.mark.parametrize(
+    "authority,error",
+    [
+        ({**B300, "capability": [12, 0]}, r"capability 12\.0 qualifies \[170\] SMs, not 148"),
+        ({**B300, "sm_count": 132, "capability": [9, 0], "devices": 132}, r"capability 9\.0"),
+        ({**B300, "capability": None}, "without capabilities qualifies 170-SM"),
+        ({**B300, "sm_count": 170}, "reviewed CUDA runtime/reference binding differs"),
+    ],
+    indirect=["authority"],
+    ids=[
+        "b300_count_on_rtx5090",
+        "unknown_pair",
+        "b300_count_without_capabilities",
+        "b300_devices_under_170_manifest",
+    ],
+)
+def test_unqualified_or_off_reference_device_installs_nothing(authority, error):
+    store, manifest, configs, results, raw = authority
+    with pytest.raises((ChallengeError, ValueError), match=error):
         store._bootstrap_backend_v2(manifest, configs, results, raw)
     assert (
         store._db.execute("SELECT COUNT(*) FROM records_v2 WHERE kind='qualification'").fetchone()[
