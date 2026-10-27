@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from scripts.network_gpu_operation import Operation
 
     from hypertrain.gpu_ops.work_screen import IslandLaunch
+    from hypertrain.protocol.env_pins import EnvPin
     from hypertrain.protocol.messages import ReplayEnv
 
 from hypertrain.beacon import BeaconError, BeaconRound
@@ -4429,9 +4430,13 @@ class ChallengeStore:
             "miner/island_launch.py",
             "aggregator/capacity_worker.py",
             "auditor/replay.py",
+            "protocol/env_pins.py",
+            "trainer/determinism.py",
         )
         source = Path(__file__).resolve().parents[1]
-        implementation = self._service_implementation_v2(source, paths)
+        implementation = self._service_implementation_v2(
+            source, paths, manifest.training.reference_spec.env.pin()
+        )
         backend = self._record_v2(run_id, "execution-backend", "run")
         return _ServiceCapacityV1(
             version=1,
@@ -4449,8 +4454,12 @@ class ChallengeStore:
         )
 
     @staticmethod
-    def _service_implementation_v2(source: Path, paths: tuple[str, ...]) -> str:
-        """Bind capacity semantics, not unrelated shared-store methods or line numbers."""
+    def _service_implementation_v2(source: Path, paths: tuple[str, ...], pin: EnvPin) -> str:
+        """Bind capacity semantics, not unrelated shared-store methods or line numbers.
+
+        The manifest's environment pin is part of the implementation: the same code under another
+        pin computes other bytes, and the files that give the pin its meaning are in ``paths``.
+        """
         tree = ast.parse((source / "challenge/store.py").read_text())
         owned = {
             "_ServiceCapacityV1",
@@ -4498,6 +4507,7 @@ class ChallengeStore:
         if set(code) != owned:
             raise ChallengeError(409, "SERVICE_CAPACITY_IMPLEMENTATION")
         code.update({path: sha256_hex((source / path).read_bytes()) for path in paths})
+        code["env_pin"] = sha256_hex(canonicalize(pin.body()))
         return sha256_hex(canonicalize(code))
 
     def _service_boundary_v2(

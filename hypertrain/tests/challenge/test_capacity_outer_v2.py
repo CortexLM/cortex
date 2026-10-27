@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from env_pin_fixtures import CPU_AVX2, CPU_AVX512
 from hypertrain.aggregator.capacity_worker import (
     OuterInput,
     OuterRequest,
@@ -637,6 +638,51 @@ def genesis_opening(manifest, *, final=40):
     return canonicalize(
         envelope_v2.seal(fixture.service.COORD, "RoundOpenV2", manifest.run_id(), body, 100)
     )
+
+
+@pytest.mark.parametrize("tiny", [CPU_AVX2, CPU_AVX512], indirect=True)
+def test_genesis_request_binds_the_implementation_to_the_pin_of_its_manifest(tiny):
+    from hypertrain.aggregator.capacity_worker import GenesisRequest
+    from hypertrain.protocol import envelope_v2
+    from hypertrain.protocol.env_pins import EnvPin
+    from hypertrain.protocol.messages import Receipt
+
+    store, manifest = tiny
+    run = manifest.run_id()
+    own = manifest.training.reference_spec.env.pin()
+    other = EnvPin.from_body(CPU_AVX512 if own.cpu == "avx2" else CPU_AVX2)
+    profile, receipt = fixture.signed_profile(store, manifest)
+
+    def request(body: bytes, signed: bytes) -> GenesisRequest:
+        return GenesisRequest(
+            manifest=manifest,
+            profile=json.loads(body),
+            manifest_envelope=envelope_v2.seal(
+                fixture.service.OWNER, "RunManifestV2", run, manifest, 100
+            ),
+            receipt=json.loads(signed),
+            opening=json.loads(genesis_opening(manifest)),
+            accepted=1,
+        )
+
+    # Given: the worker's own check of the profile the owner signed.
+    assert len(request(profile, receipt).validate_authority()) == 4
+    # When: the owner signs a profile whose implementation was bound under the other class.
+    forged = json.loads(profile)
+    forged["implementation_hash"] = fixture.hash_under(other)
+    body = canonicalize(forged)
+    signed = canonicalize(
+        envelope_v2.seal(
+            fixture.service.OWNER,
+            "Receipt",
+            run,
+            Receipt(w=0, commit_hash=sha256_hex(body), received_round=1),
+            100,
+        )
+    )
+    # Then: the worker refuses it, because it recomputes the hash under the manifest's pin.
+    with pytest.raises(ValueError, match="capacity genesis authority differs"):
+        request(body, signed).validate_authority()
 
 
 @pytest.mark.parametrize("attack", ["run", "profile", "source", "cancel", "expired"])

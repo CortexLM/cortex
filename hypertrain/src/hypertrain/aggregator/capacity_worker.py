@@ -73,9 +73,13 @@ class GenesisRequest(WireModel):
             "miner/island_launch.py",
             "aggregator/capacity_worker.py",
             "auditor/replay.py",
+            "protocol/env_pins.py",
+            "trainer/determinism.py",
         )
         source = ChallengeStore._service_implementation_v2(
-            Path(__file__).resolve().parents[1], paths
+            Path(__file__).resolve().parents[1],
+            paths,
+            self.manifest.training.reference_spec.env.pin(),
         )
         if (
             self.profile.get("run_id") != run

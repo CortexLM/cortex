@@ -397,6 +397,31 @@ breaker bounds the attempt-based one).
     never what it cannot (MKL's branch and oneDNN's ISA after init, `LD_PRELOAD`). It is not authority:
     the verdict stays bit equality with the server's reference and with every audit, and a MISMATCH
     under a conforming declaration is still a MISMATCH.
+14. **`implementation_hash` binds the pin and the code that gives it meaning.**
+    `ChallengeStore._service_implementation_v2(source, paths, pin)` takes the manifest's `EnvPin` as a
+    required argument and adds `env_pin = sha256(canonicalize(pin.body()))` to the hashed map. The
+    whole body is covered, not the class names: `cpu`, `gpu`, every `present` value and every
+    `absent` name, so two pins with equal `present` and `absent` but another GPU class hash
+    differently. Both call sites pass `manifest.training.reference_spec.env.pin()`:
+    `_service_profile_v2` and `GenesisRequest.validate_authority` (the worker recomputes the hash
+    under the pin of the manifest it is given). `protocol/env_pins.py` (which pin can exist and what
+    environment it implies: tables, `check`, `pinned_environ`) and `trainer/determinism.py` (what a
+    worker does about it: `require_env_pin`, `apply_reference_env`, `require_gpu_class`) join the
+    ten hashed files, which makes twelve. Not hashed, on purpose: `trainer/env_probe.py` (answers
+    whether a host can honor a pin, at `join`, `probe` and bootstrap; nothing it computes is signed),
+    `protocol/messages.py` and `messages_v2.py` (the manifest models call `env_pins.check` and refuse
+    at parse time; what a manifest says is hashed through its `run_id`, which the profile binds), and
+    `gpu_ops/cuda_executor.py` with its runner (the profile admits the `cpu` backend only,
+    `SERVICE_PROFILE_BACKEND`; the executor is bound by its own image and source pins, part 4 and ADR
+    0008). Hashing whole `protocol/` and `trainer/` instead would move the hash, and refuse every
+    installed `service-admission` record, for edits that decide nothing about the pin. The file list
+    is written three times: `challenge/store.py` (`_service_profile_v2`),
+    `aggregator/capacity_worker.py` (`GenesisRequest.validate_authority`) and
+    `tests/challenge/protected_opening_fixture_static.py` (the reviewed bundle pins). A genesis
+    validates only if the first two agree, and
+    `test_the_three_lists_of_hashed_files_agree_and_name_the_pin_files` reads all three by AST and
+    fails on any difference. The fixture's pin is a digest of reviewed code computed without a
+    manifest, so it carries the file list but not the `env_pin` term. [V]
 
 ### Consequences
 
@@ -437,6 +462,36 @@ breaker bounds the attempt-based one).
 - `MKL_CBWR=AVX2` falls back to AUTO off Intel [A: oneMKL "Specifying Code Branches"]; `COMPATIBLE` is
   the documented portable branch at the cost of SSE2-only GEMM. It is not in the tables yet: it enters
   with a measurement on a second CPU class.
+- Hash consequences (decision 14). `implementation_hash` is a function of the manifest's pin and of the
+  twelve files: there is no longer one value per tree. It moves with the pin term, the two new files
+  and the edited owned names (`_service_profile_v2`, `_service_implementation_v2`). The digests of
+  `challenge/store.py` and `aggregator/capacity_worker.py` move, and so do `sources()` of
+  `network_qualification` (it hashes every `src/hypertrain/**/*.py`) and the reviewed `bundle`. Older
+  qualification configs then stop validating against a tree at this commit
+  (`qualification_source_or_profile_changed`) and the dispatch source pins are recomputed, as after
+  ADRs 0007 and 0008. The required pin had already moved every example `run_id`, `reference_hash` and
+  `training_hash`. The measured values are recorded at the integration tip with these commands, run
+  with `PYTHONPATH=TREE/src:TREE` in the virtual environment of `hypertrain/`, where `TREE` is the
+  `hypertrain/` directory of an unpacked `git archive` of the commit under measure (the last one
+  prints `implementation_hash` under the pin of the example manifest, then its `run_id`):
+
+  ```
+  python TREE/scripts/network_gpu_qualification.py sources TREE | sha256sum
+  python TREE/scripts/network_gpu_qualification.py bundle-hash TREE
+  sha256sum TREE/src/hypertrain/challenge/store.py
+  python - <<'EOF'
+  import ast, pathlib
+  from hypertrain.challenge.store import ChallengeStore
+  from hypertrain.protocol.example import example_manifest
+  src = pathlib.Path("TREE/src/hypertrain")
+  fn = next(n for n in ast.walk(ast.parse((src / "challenge/store.py").read_text()))
+            if isinstance(n, ast.FunctionDef) and n.name == "_service_profile_v2")
+  paths = next(ast.literal_eval(n.value) for n in ast.walk(fn)
+               if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "paths")
+  m = example_manifest()
+  print(ChallengeStore._service_implementation_v2(src, paths, m.reference_spec.env.pin()), m.run_id())
+  EOF
+  ```
 
 ### Rejected alternatives
 

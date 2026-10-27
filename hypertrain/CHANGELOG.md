@@ -87,6 +87,9 @@
   in the proof route before the reference is paid and in `Admission.proof`, before anything is
   written (no strike, no suspension, the trial stays open). `sign_join` takes `env=`;
   `IslandArtifacts.env` is what the ranks observed; the worker writes `summary.json["env"]`.
+  The CPU service profile's `implementation_hash` covers the manifest's whole pin body and the files
+  `protocol/env_pins.py` and `trainer/determinism.py` (twelve files; `_service_implementation_v2`
+  takes the `EnvPin`), so it differs per pin and an installed profile no longer matches.
 
 ### Changed
 - A challenge poll after the deadline no longer suspends a miner whose proof was accepted
