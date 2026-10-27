@@ -717,6 +717,7 @@ def _funded_dispute_watch(network):
         (hot.ss58,),
     ).fetchone()
     contest = json.loads(row[0])
+    network.mark_verdict_mismatch(hot.ss58, contest["w"])
     verdict_hash = contest["verdict_hash"]
     dispute_id = sha256_hex(canonicalize([network.manifest.run_id(), verdict_hash, hot.ss58]))
     origin = network.store._db.execute(
@@ -845,6 +846,7 @@ def _funded_dispute_watch(network):
         (hot2.ss58,),
     ).fetchone()
     second = json.loads(row[0])
+    network.mark_verdict_mismatch(hot2.ss58, second["w"])
     second_id = sha256_hex(
         canonicalize([network.manifest.run_id(), second["verdict_hash"], hot2.ss58])
     )
@@ -1051,6 +1053,7 @@ def _funded_auditor_fraud(network):
         (hot.ss58,),
     ).fetchone()
     contest = json.loads(row[0])
+    network.mark_verdict_mismatch(hot.ss58, contest["w"])
     dispute_id = sha256_hex(canonicalize([run_id, contest["verdict_hash"], hot.ss58]))
     origin = network.store._db.execute(
         "SELECT origin FROM escrow_units WHERE owner=? AND bucket='available' AND units>=100",
@@ -1906,6 +1909,7 @@ def _public_watch_fastapi_tls(network, monkeypatch):
             (hot.ss58,),
         ).fetchone()[0]
     )
+    network.mark_verdict_mismatch(hot.ss58, contest["w"])
     verdict_hash = contest["verdict_hash"]
     dispute_id = sha256_hex(canonicalize([run_id, verdict_hash, hot.ss58]))
     origin = network.store._db.execute(

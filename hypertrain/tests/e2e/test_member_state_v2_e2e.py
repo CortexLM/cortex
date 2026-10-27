@@ -13,7 +13,9 @@ import test_rollback_service_v2 as rollback
 from challenge.five_identity_network_v2 import five_identity_network
 from hypertrain.miner.admission import sign_rotation, sign_rotation_consent
 from hypertrain.protocol.hashing import sha256_hex
+from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize
+from hypertrain.protocol.messages_v2 import DisputeV2, EscrowLock
 
 fixtures = rollback.fixtures
 
@@ -119,6 +121,53 @@ def test_a_sanction_after_the_aggregate_does_not_stop_the_finalize(n):
     inputs = sorted(item["roster"]["hotkey"] for item in tape_inputs)
     assert inputs == sorted(k.ss58 for k in members)
     assert paid(n, 0) == [(h, 250000) for h in inputs]
+
+
+def open_contest(n, hot, cold):
+    """Fund a contest bond and open the member's contest of its own round 0 verdict."""
+    contest = json.loads(
+        n.store._db.execute(
+            "SELECT data FROM records_v2 WHERE kind='contest' AND json_extract(data,'$.miner')=? "
+            "AND json_extract(data,'$.w')=0",
+            (hot.ss58,),
+        ).fetchone()[0]
+    )
+    dispute_id = sha256_hex(canonicalize([n.manifest.run_id(), contest["verdict_hash"], hot.ss58]))
+    origin = n.store._db.execute(
+        "SELECT origin FROM escrow_units WHERE owner=? AND bucket='available' AND units>=100",
+        (cold.ss58,),
+    ).fetchone()[0]
+    lock = EscrowLock(
+        operation_id="df" * 32,
+        owner=cold.ss58,
+        units=100,
+        origin_ids=[origin],
+        admission_id=None,
+        dispute_id=dispute_id,
+        kind="LOCK_CONTEST",
+    )
+    assert n.client.post(n.url + "/escrow/lock", json=n.signed(cold, "EscrowLock", lock)).is_success
+    body = DisputeV2(
+        hotkey=hot.ss58,
+        verdict_hash=contest["verdict_hash"],
+        action="contest",
+        bond_lock=lock.operation_id,
+    )
+    return n.client.post(n.url + "/dispute", json=n.signed(hot, "DisputeV2", body))
+
+
+def test_a_member_cannot_suspend_itself_by_contesting_its_own_match(n):
+    # Given: round 0 audited, the verdict of the fifth member is MATCH.
+    rollback.execute_round(n, 0, aggregate=False)
+    hot, cold = fixtures.HOT[4], fixtures.COLD[4]
+    # When: it funds and opens a contest of that verdict.
+    contest = open_contest(n, hot, cold)
+    # Then: refused before anything is written, and the round goes on with all five.
+    assert (contest.status_code, "NOTHING_TO_CONTEST" in contest.text) == (409, True)
+    assert standing(n, hot.ss58) == ("ACTIVE", 0, 0)
+    applied = aggregate(n)
+    assert applied.status_code == 200, applied.text
+    assert finalize(n, 0, applied.json(), fixtures.HOT).status_code == 200
 
 
 def test_a_member_whose_screen_lapsed_is_left_out_and_the_run_goes_on(n):

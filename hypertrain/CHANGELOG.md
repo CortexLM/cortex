@@ -170,6 +170,14 @@
   free. A retry of an applied rotation is still answered. `Admission.rounds_listing` and `open_rounds` serve `rotate` and
   `lock_settlement`. Rotate between rounds. See `docs/adr/0011-audit-integrity.md` (Part 8,
   decision 21) at the monorepo root.
+- A miner can no longer contest a verdict that upholds its work: `POST .../dispute` answers 409
+  `NOTHING_TO_CONTEST` when the audit lease of the contesting miner in that round says MATCH. A
+  funded contest of its own MATCH suspended the contestant (`PENDING_DISPUTE`), pinned its round
+  and, once the server closed it, left the contestant on a fresh probation that is not live; the
+  contest bond came back, so leaving the round that way was free. A MISMATCH is contested as
+  before. The store's `contest_of` callback refuses, so
+  `disputes_v2.py` is unchanged. See `docs/adr/0011-audit-integrity.md` (Part 8, decision 21) at
+  the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.
