@@ -45,6 +45,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -275,39 +276,78 @@ def _job_kimi() -> int:
         )
         theta, _ = unpack_state((published / "state.safetensors").read_bytes())
         bias = "layers.001.router_bias"
-        checks = {
-            "join_rc0": True,
-            "run_rc0": True,
-            "join_binds_run_and_policy": [(j["run_id"], j["policy_hash"]) for j in joins]
-            == [(run, manifest.network.admission_policy_hash)],
-            "summary_backend_cuda": backend == "cuda",
-            "commitments_equal_cuda_reference": (
-                commitments["leaves_root"],
-                commitments["final_theta_hash"],
-                commitments["delta_hash"],
-            )
-            == (ref.leaves_root, ref.final_theta_hash, ref.delta_hash),
-            "delta_bytes_equal": (published / "delta.bin").read_bytes() == ref.delta_payload,
-            "parameter_set": sorted(theta)
-            == sorted(param_shapes(cfg.model))
-            == sorted(kt.param_shapes(cfg.model)),
-            "router_bias_moved": not np.array_equal(theta[bias].numpy(), theta0[bias].numpy()),
+        reference = {
+            "leaves_root": ref.leaves_root,
+            "final_theta_hash": ref.final_theta_hash,
+            "delta_hash": ref.delta_hash,
         }
+        verdict = _job_verdict(
+            run=run,
+            policy_hash=manifest.network.admission_policy_hash,
+            joins=joins,
+            backend=backend,
+            commitments=commitments,
+            reference=reference,
+            delta=(published / "delta.bin").read_bytes(),
+            reference_delta=ref.delta_payload,
+            parameters=theta,
+            engine_parameters=param_shapes(cfg.model),
+            model_parameters=kt.param_shapes(cfg.model),
+            bias_before=theta0[bias].numpy(),
+            bias_after=theta[bias].numpy(),
+        )
         return _finish_job(
             {
                 **base,
-                "result": "PASS" if all(checks.values()) else "FAIL",
-                "checks": checks,
+                **verdict,
                 "commitments": {
                     k: commitments[k] for k in ("leaves_root", "final_theta_hash", "delta_hash")
                 },
-                "reference": {
-                    "leaves_root": ref.leaves_root,
-                    "final_theta_hash": ref.final_theta_hash,
-                    "delta_hash": ref.delta_hash,
-                },
+                "reference": reference,
             }
         )
+
+
+def _job_verdict(
+    *,
+    run: str,
+    policy_hash: str,
+    joins: list[dict[str, Any]],
+    backend: object,
+    commitments: dict[str, str],
+    reference: dict[str, str],
+    delta: bytes,
+    reference_delta: bytes,
+    parameters: Iterable[str],
+    engine_parameters: Iterable[str],
+    model_parameters: Iterable[str],
+    bias_before: Any,
+    bias_after: Any,
+) -> dict[str, Any]:
+    """The job-kimi checks and PASS/FAIL from plain values (no torch), so they run without CUDA.
+
+    `commitments` and `backend` come from the miner's summary.json, `reference` and
+    `reference_delta` from the in-process CUDA `train_round`, `joins` are the bodies POSTed. A
+    failing join or run returned before this point, hence the two True entries.
+    """
+    import numpy as np
+
+    keys = ("leaves_root", "final_theta_hash", "delta_hash")
+    checks = {
+        "join_rc0": True,
+        "run_rc0": True,
+        "join_binds_run_and_policy": [(j["run_id"], j["policy_hash"]) for j in joins]
+        == [(run, policy_hash)],
+        "summary_backend_cuda": backend == "cuda",
+        "commitments_equal_cuda_reference": tuple(commitments[k] for k in keys)
+        == tuple(reference[k] for k in keys),
+        "delta_bytes_equal": delta == reference_delta,
+        "parameter_set": sorted(parameters)
+        == sorted(engine_parameters)
+        == sorted(model_parameters),
+        "router_bias_moved": not np.array_equal(bias_after, bias_before),
+    }
+    return {"result": "PASS" if all(checks.values()) else "FAIL", "checks": checks}
 
 
 def _finish_job(result: dict[str, Any]) -> int:
