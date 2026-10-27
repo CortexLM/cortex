@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("gpu_probe", ROOT / "scripts/b300/gpu_probe.py")
@@ -26,3 +30,36 @@ def test_a_kernel_error_on_every_device_still_fails():
     verdict = gpu_probe.evaluate({f"cuda:{i}": [err, err] for i in range(8)})
     assert not verdict["ok"] and verdict["mismatches"] == []
     assert len(verdict["errors"]) == 8
+
+
+def run_main(monkeypatch: pytest.MonkeyPatch, out: Path) -> int:
+    argv = ["gpu_probe.py", "--out", str(out), "--device", "cpu", "--expect-gpus", "0"]
+    monkeypatch.setattr(sys, "argv", [*argv, "--expect-cc", "any", "--repeats", "1"])
+    return gpu_probe.main()
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        TypeError("unsupported operand"),
+        AssertionError("x.grad is None"),
+        KeyboardInterrupt(),
+        SystemExit(3),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+def test_any_failure_replaces_a_stale_ok_json_and_still_propagates(
+    exc: BaseException, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "gpu_probe.json"
+    out.write_text(json.dumps({"ok": True, "stale": True}))
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise exc
+
+    monkeypatch.setattr(gpu_probe, "attention", boom)
+    with pytest.raises(type(exc)):  # a programming error is not turned into a device error
+        run_main(monkeypatch, out)
+    doc = json.loads(out.read_text())
+    assert doc["ok"] is False and "stale" not in doc
+    assert doc["error"] == f"{type(exc).__name__}: {exc}"

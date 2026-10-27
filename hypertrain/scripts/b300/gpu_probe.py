@@ -9,7 +9,10 @@ A kernel error (e.g. no kernel image for the device) is recorded as the digest v
 
 Usage (inside the GPU image, HT_* env as the miner runs it):
   python scripts/b300/gpu_probe.py --out /results/gpu_probe.json --expect-gpus 8 --expect-cc 10.3
-Exit 0 when every check passes, 1 otherwise; the JSON is written either way.
+Exit 0 when every check passes, 1 otherwise. The JSON at --out is rewritten on every run: when the
+probe raises (any exception, KeyboardInterrupt and SystemExit included) it holds
+{"ok": false, "error": "<Type>: <message>"} and the exception still ends the process non-zero.
+Only a RuntimeError of a kernel is a device error; any other exception is a defect and surfaces.
 """
 
 from __future__ import annotations
@@ -149,10 +152,18 @@ def main() -> int:
     if a.expect_cc != "any":
         major, minor = a.expect_cc.split(".")
         cc = (int(major), int(minor))
-    ev = probe(a.repeats, a.device)
-    ev["checks"] = checks(ev, a.expect_gpus, cc)
-    ev["ok"] = all(ev["checks"].values())
-    a.out.write_text(json.dumps(ev, indent=1, sort_keys=True))
+    ev: dict[str, Any] = {"kind": "b300-gpu-probe", "ok": False}
+    try:
+        ev |= probe(a.repeats, a.device)
+        ev["checks"] = checks(ev, a.expect_gpus, cc)
+        ev["ok"] = all(ev["checks"].values())
+    except BaseException as e:  # incl. KeyboardInterrupt: the run still fails, the file says so
+        ev["ok"] = False
+        ev["error"] = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        # Always replaces the file: a stale ok:true from an earlier run must not survive this one.
+        a.out.write_text(json.dumps(ev, indent=1, sort_keys=True))
     print(json.dumps({"ok": ev["ok"], "checks": ev["checks"], "arch_list": ev["arch_list"]}))
     return 0 if ev["ok"] else 1
 
