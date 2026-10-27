@@ -379,8 +379,9 @@ Flat aggregation retains each miner's original delta: norm preclip, previous
 outer-update CClip, then deterministic integer allocation. Q=16777216; final
 weights sum Q, each miner <=4194304, total probation <=4194304, plus signed
 known-owner group bounds. No post-cap renormalization. Four eligible ACTIVE
-miners can carry exact quarter weights; infeasible cohorts reject. Similarity
-alone is not fraud evidence. Audits replay each miner's own assignment.
+miners can carry exact quarter weights; infeasible cohorts reject. A round of
+four therefore cannot lose a member. Similarity alone is not fraud evidence.
+Audits replay each miner's own assignment.
 
 A miner whose audit could not run (no auditor finished it in two windows of two
 leases each) is left out of that round (`excluded`, reason `INFRASTRUCTURE`) and
@@ -394,6 +395,23 @@ At most two speculative rounds may be applied; opening w+2 waits for w to settle
 or be excluded and repaired. Retain original input objects, signed tapes,
 accepted envelopes, carry anchors and full bounded predecessor history. Reward
 `get_weights` is not a model-checkpoint download endpoint.
+
+A roster member that has not committed when audits are scheduled is left out of its
+round: its `excluded` record gets reason `NO_SHOW` (stage `commit`), the audits of the
+other members are created, and the round is aggregated and finalized without it. A member
+that committed and passed its audit but uploaded no delta by `d_upload` is left out the
+same way when the round is aggregated (stage `delta`). Its reward share goes to the
+members that remain, split by tokens as for any exclusion. Nobody is suspended, struck or
+slashed for either. A member left out before its audit has no anchor for that round and
+cannot be rostered again in this run; one left out at the delta stage keeps its anchor.
+The remaining members must still carry the allocation: at least four, more when probation
+or owner-group caps bind, counting `NO_SHOW`, `UNVERIFIED` and `INFRASTRUCTURE`
+exclusions of the round together. Otherwise `audits` or `aggregate` answers 409
+`ROUND_INFEASIBLE`, nothing is written and the run stays blocked until an operator
+decision; there is no void round. Call `audits` once `d_audit` has passed and before
+`absolute` minus one round, `absolute` being the smaller of `d_final` and `d_audit` plus
+twice `lease_rounds`; a later call answers 503 for every roster and the round cannot be
+audited. Open rounds with five or more members when an eviction is plausible.
 
 Regional relays are transport/cache only, not regional arithmetic aggregators.
 An upload opportunity acknowledgment is not custody. Completion failure requires

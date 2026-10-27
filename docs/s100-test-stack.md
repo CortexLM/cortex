@@ -235,8 +235,11 @@ That gives 3 ACTIVE and 1 PROBATION. Rules that decide how identities are spent:
   joins a miner only when its turn starts.
 
 A round opens on a roster of four funded, eligible miners with at most one in PROBATION. The
-operator opens it, the miners upload, and the operator settles it. The operator runs
-`scripts/ops/live_operator.py` inside the TEST challenge:
+operator opens it, the miners upload, and the operator settles it. Open it with five when an
+eviction is plausible: a miner that never commits is left out (`excluded`, reason `NO_SHOW`) and
+the others are audited and paid, while four miners cannot lose anyone (`audits` answers 409
+`ROUND_INFEASIBLE`). `finalize` lists the roster minus the `excluded` records, read after the
+aggregate. The operator runs `scripts/ops/live_operator.py` inside the TEST challenge:
 
 ```bash
 L="docker exec -i hypertrain-test-challenge python -I - --master http://127.0.0.1:8000 \
@@ -261,6 +264,10 @@ of 101 to 200 rounds a second auditor can take the job inside the same window.
 `live_operator.py open` accepts any gap from 2 to 200 rounds for every H; 200 is the service
 horizon (`store.py:5109`). A round with a wider gap closes later: 100 more rounds (5 minutes) per
 extra 100.
+
+Run `audits` as soon as `now >= d_audit`: it must be called before beacon round `absolute - 1`
+(`absolute = min(d_final, d_audit + 2 * lease_rounds)`), and a call after that answers 503 for every
+roster.
 
 **Upload one miner at a time.** A relay image built before `BeaconCache` (`relay/app.py`)
 BLS-verifies drand in `now()` on every capability and chunk call; later images share one verified

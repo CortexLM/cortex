@@ -60,6 +60,12 @@
   `T.dispute_per_level` rounds after its `turn_deadline`; the contested miner's suspension is
   lifted to a fresh probation. A failing closure is journaled as `dispute-exit-failed`. See
   `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- A roster member that never commits no longer stalls its round: audits are scheduled for the
+  members that committed, the absent one is left out (`NO_SHOW`, no sanction), and a member that
+  passed its audit but never uploads its delta is left out when the round is aggregated; a round
+  the remaining members cannot carry is refused with 409 `ROUND_INFEASIBLE`. The new helpers
+  join the owned set of `implementation_hash`, which changes. See
+  `docs/adr/0011-audit-integrity.md` at the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.
