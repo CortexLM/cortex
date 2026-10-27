@@ -290,8 +290,11 @@ GPU), aggregation and `get_weights`. The miner's CUDA worker gates (torch `2.14.
 - the fixture manifest's `reference_spec` is pinned to the B300 image, driver and SM count, which
   gives a new `run_id`;
 - the CUDA qualification record is a fixture-owner-signed **stand-in**, installed before the run is
-  created. The real record needs two results from two distinct machines, which one host cannot
-  give, so a PASS here does not exercise `_bootstrap_backend_v2`;
+  created. The real record needs two results from two hosts. `compare`
+  (`gpu_ops/network_qualification.py`) refuses a pair whose `machine_id`, `instance_id` or `role`
+  are equal, but those are labels the caller writes into each result: a relabelled copy of one
+  host's result passes, so `compare` does not by itself stop one host from giving both. A PASS
+  here does not exercise `_bootstrap_backend_v2`;
 - `role-dispatch.json` is written from the challenge process's own GPU and is not a dispatcher's
   record; its image digest is `HT_IMAGE_DIGEST`, the same variable that pins the manifest;
 - the subnet transport and the beacon are the pytest network fixture's.
@@ -300,6 +303,13 @@ The harness also logs a `device_class` event: the capability and SM count torch 
 visible GPUs, and the verdict of the repository's own `unqualified_device` (ADR 0007), `null` when
 the pair is in the table. It stops when no GPU is visible or when the verdict is not `null`, but the
 verdict does not enter the run's qualification record, which stays the stand-in above.
+
+The check is by (capability, SM count) only, from the table `SM_COUNTS` in
+`gpu_ops/network_qualification.py` (RTX 5090: 12.0 with 170 SMs; B300: 10.3 with 148). It reads
+neither the model name nor a GPU UUID. An RTX 5090 is in the table and would pass under
+`--sm-count 170`, and a GB300 that reports the same pair as a B300 cannot be told from one, so
+"B300" in an evidence folder is the operator's word plus this class check. Authenticating the
+machine is future work (D26, branch `v3-cuda-executor`, not in this tree).
 
 `--mode smoke-kimi`, `multi-kimi` and `job-kimi` run kimi-k3-pro-tiny (ADR 0006) instead of the fixture
 decoder, with its MICRO geometry (73,200 parameters) and `HT_D20_KIMI_DTYPE` (`bf16`, the default, or
