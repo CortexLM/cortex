@@ -540,8 +540,10 @@ tape it replays, a repair worker, signing authority or output artifact that fail
 independent worker that disagrees with the tape the coordinator signed, answers a 500
 `TAPE_INTEGRITY: <reason>` on every route, the rollback routes included.
 `finalize` pays the inputs recorded with the applied tape, whatever the members' standing is
-when it runs, except an admission banned since: `Finalize.included` lists the inputs less the
-banned ones, and the ledger refuses (`BANNED_WORK`) a reward for a banned admission. A member
+when it runs, except a coldkey convicted since: `Finalize.included` lists the inputs less every
+admission of a coldkey that has a banned one, and the ledger refuses (`BANNED_WORK`) a reward for
+it. When no input is left, the Finalize lists nobody, the round settles with no reward (the answer
+is `{"status": "CLOSED_UNPAID"}`) and the ledger passes over it when the next round is finalized. A member
 suspended, struck or with a burned bond between the aggregate and the finalize is still paid for
 the round it was verified in (the finalize used to re-derive the live set and answer 403 for
 ever); a member convicted of training fraud in that window is paid nothing, and its share goes to

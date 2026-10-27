@@ -19,7 +19,7 @@ import struct
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from fractions import Fraction
@@ -6135,26 +6135,34 @@ class ChallengeStore:
         self._put_record_v2(run_id, "finality", str(w), status)
 
     def _banned_v2(self, hotkey: str) -> bool:
-        """Whether the admission that ever held `hotkey` was convicted of training fraud.
+        """Whether the coldkey behind `hotkey` was convicted of training fraud (D59, D64).
 
-        Read by the ledger before it mints a round's work: a convicted admission is paid nothing,
-        however the Finalize that lists it came to be signed. The hotkey history is searched too,
-        since a rotation changes the hotkey and not the admission."""
+        Read by the ledger before it mints a round's work: a convicted coldkey is paid nothing,
+        however the Finalize that lists it came to be signed, and that includes its other
+        admissions, which the conviction does not ban but whose reward is the owner's. The hotkey
+        history is searched too, since a rotation changes the hotkey and not the admission."""
         return (
             self._db.execute(
-                "SELECT 1 FROM admissions_v2 WHERE state='BANNED' AND (hotkey=? OR admission_id IN "
+                "SELECT 1 FROM admissions_v2 b WHERE b.state='BANNED' AND b.coldkey IN "
+                "(SELECT a.coldkey FROM admissions_v2 a WHERE a.hotkey=? OR a.admission_id IN "
                 "(SELECT admission_id FROM admission_history WHERE hotkey=?)) LIMIT 1",
                 (hotkey, hotkey),
             ).fetchone()
             is not None
         )
 
+    def _unconvicted_v2(self, hotkeys: Iterable[str]) -> list[str]:
+        """The hotkeys, sorted, less those of a convicted coldkey: what a Finalize may list."""
+        return sorted(hotkey for hotkey in hotkeys if not self._banned_v2(hotkey))
+
     def _round_closure_v2(self, run_id: str, w: int) -> str | None:
         """The hash that closed round w without a reward, else None. Derived, never stored.
 
         A round is closed without a reward when finality closed it as excluded (an accepted
-        rollback, or an exclusion before it was applied) or as retired; pending, settled,
-        awaiting its rollback, with an open audit or dispute, or without a record, it is not.
+        rollback, or an exclusion before it was applied) or as retired, or when it settled with a
+        Finalize that lists nobody (every input of its tape belonged to a convicted coldkey);
+        pending, settled with a paid input, awaiting its rollback, with an open audit or dispute,
+        or without a record, it is not.
         """
         from hypertrain.challenge.finality_v2 import RoundStatus
 
@@ -6167,6 +6175,13 @@ class ChallengeStore:
         status = RoundStatus(**json.loads(row[0]))
         if status.closed and status.disposition in ("EXCLUDED", "RETIRED"):
             return status.resolution_hash
+        if status.closed and status.disposition == "SETTLED":
+            final = self._db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='finalize' AND id=?",
+                (run_id, str(w)),
+            ).fetchone()
+            if final is not None and not json.loads(final[0])["body"]["included"]:
+                return status.resolution_hash
         return None
 
     def _close_blocked_disputes_v2(self, run_id: str) -> None:
@@ -8849,7 +8864,7 @@ class ChallengeStore:
                     or final_request.final_theta_hash_w1 != original_applied["theta_hash"]
                     or original_applied.get("kind") == "repair"
                     or final_request.included
-                    != sorted(entry.hotkey for entry in final_opening.roster)
+                    != self._unconvicted_v2(entry.hotkey for entry in final_opening.roster)
                 ):
                     raise ChallengeError(409, "SERVICE_FINALIZE_AUTHORITY")
                 self.aggregate_v2(run_id, w)
@@ -8871,14 +8886,11 @@ class ChallengeStore:
                     409, "repair evidence is model-only; cannot mint miner rewards"
                 )
             status = RoundStatus(**self._record_v2(run_id, "finality", str(w)))
-            # The applied tape is the commitment: pay its inputs however they stand now, except an
-            # admission convicted since (BANNED), whose share the others take by tokens. The state
-            # is read by admission id: a rotation changes the hotkey.
-            store = self._services(run_id)[1].store
-            included = sorted(
+            # The applied tape is the commitment: pay its inputs however they stand now, except a
+            # coldkey convicted since, whose share the others take by tokens.
+            included = self._unconvicted_v2(
                 item["roster"]["hotkey"]
                 for item in self._record_v2(run_id, "tape-inputs", str(w))["inputs"]
-                if store.by_id(item["roster"]["admission_id"]).state != "BANNED"
             )
             if model.w != w or model.included != included:
                 raise ChallengeError(
@@ -8891,6 +8903,16 @@ class ChallengeStore:
             self._put_record_v2(
                 run_id, "finalize", str(w), envelope_v2.parse_envelope(raw).model_dump(mode="json")
             )
+            if not included:
+                # Every input of the tape belongs to a convicted coldkey: the round settles with
+                # no reward. _round_closure_v2 derives the closure from this record, so the ledger
+                # records the round as withdrawn when the next one is finalized.
+                closed: dict[str, JsonValue] = {
+                    "status": "CLOSED_UNPAID",
+                    "theta_hash": model.final_theta_hash_w1,
+                }
+                self._put_record_v2(run_id, "finalize-result", str(w), closed)
+                return closed
             self._put_record_v2(
                 run_id,
                 "replayed-finality",

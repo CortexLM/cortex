@@ -141,11 +141,17 @@
 
 ### Fixed
 - A member convicted of training fraud between the aggregate and the finalize of a round is no
-  longer paid for it: `finalize` leaves an admission that is `BANNED` out of the paid set (read by
-  admission id, a rotation changes the hotkey), the coordinator-signed `Finalize.included` lists
-  the others, their tokens split the whole round budget, and the ledger refuses a reward for a banned
-  admission (`BANNED_WORK`). `scripts/ops/live_operator.py finalize` lists the same set. A member
-  that is only suspended or has a burned bond is still paid for the round it was verified in. See
+  longer paid for it, nor is any other admission of its coldkey (D64): `finalize` leaves out an
+  input whose coldkey has a `BANNED` admission (read through the admission's hotkey history, a
+  rotation changes the hotkey), the coordinator-signed `Finalize.included` lists the others, their
+  tokens split the whole round budget, and the ledger refuses a reward for a convicted coldkey
+  (`BANNED_WORK`). A round whose inputs all belong to convicted coldkeys settles with an empty
+  `Finalize.included` and answers `CLOSED_UNPAID`: nothing is minted, and the ledger records the
+  round as withdrawn when the next one is finalized, so a convicted round no longer blocks the
+  reward order of the rounds after it. The service-admitted path compares `included` with the
+  roster less the convicted coldkeys instead of the whole roster.
+  `scripts/ops/live_operator.py finalize` lists the same set. A member that is only suspended or
+  has a burned bond is still paid for the round it was verified in. See
   `docs/adr/0011-audit-integrity.md` (Part 8, decision 23).
 - The dispute event poll is a request signed in its body, as the other owner routes: `POST
   /v2/runs/{run_id}/disputes` takes the party's `WatchRequest{party, cursor, wait_seconds}` envelope

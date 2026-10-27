@@ -171,17 +171,21 @@ def test_open_refuses_a_hotkey_whose_screen_ends_before_the_round_does(
 
 
 @pytest.mark.parametrize(
-    ("banned", "paid"),
-    [(None, [0, 1]), (0, [1])],
-    ids=["nobody-banned", "first-input-banned"],
+    ("banned", "sibling", "paid"),
+    [(None, None, [0, 1]), (0, None, [1]), (2, 1, [0])],
+    ids=["nobody-banned", "first-input-banned", "input-of-a-banned-coldkey"],
 )
-def test_finalize_lists_the_inputs_of_the_applied_tape_minus_a_banned_admission(
-    master_args: list[str], monkeypatch: pytest.MonkeyPatch, banned: int | None, paid: list[int]
+def test_finalize_lists_the_inputs_of_the_applied_tape_minus_a_banned_coldkey(
+    master_args: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    banned: int | None,
+    sibling: int | None,
+    paid: list[int],
 ) -> None:
     """A member whose delta never arrived is excluded while the master aggregates, so the
     Finalize the operator signs must be built after that call, not before. It lists the inputs
-    of the tape that call applied, less an admission convicted since (state read by admission
-    id: a rotation changes the hotkey)."""
+    of the tape that call applied, less every admission of a coldkey convicted since (the
+    sibling `sibling` runs the coldkey of `banned`, which need not be an input itself)."""
     args = live_operator.argparse.Namespace(
         master=master_args[1],
         run_id=master_args[3],
@@ -239,10 +243,13 @@ def test_finalize_lists_the_inputs_of_the_applied_tape_minus_a_banned_admission(
 
     put("round", "0", envelope)
     with closing(sqlite3.connect(database)) as db, db:
-        db.execute("CREATE TABLE admissions_v2(admission_id TEXT, state TEXT)")
+        db.execute("CREATE TABLE admissions_v2(admission_id TEXT, state TEXT, coldkey TEXT)")
         for slot, entry in enumerate(roster):
             state = "BANNED" if slot == banned else "ACTIVE"
-            db.execute("INSERT INTO admissions_v2 VALUES(?,?)", (entry["admission_id"], state))
+            coldkey = f"cold{banned if slot == sibling else slot}"
+            db.execute(
+                "INSERT INTO admissions_v2 VALUES(?,?,?)", (entry["admission_id"], state, coldkey)
+            )
     sent: list[tuple[str, dict]] = []
 
     def call(self: Any, method: str, path: str, body: Any = None, admin: bool = False) -> Any:

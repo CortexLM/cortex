@@ -1108,12 +1108,19 @@ the table as covering them.
     `admission_history`, so no `REASSIGNED` cause exists). The survivors check that follows answers 409
     `ROUND_INFEASIBLE` and persists nothing when the rest cannot carry Q (then the reaper retires).
 23. `finalize_v2` pays the inputs recorded with the applied tape and no longer re-derives the live set,
-    except an admission that is BANNED when the round is finalized (D59, D62): its share goes to the
-    others by tokens, the signed `Finalize.included` lists the others, and the ledger refuses the work of
-    a banned admission (`BANNED_WORK`, a callback `banned` of `EscrowV2` that searches the hotkey
-    history). A member that is suspended or has a burned bond but is not banned is paid for the round it
-    was verified in. This is a prerequisite of every sanction: it must land before the first commit that
-    calls the hook.
+    except a coldkey that has a BANNED admission when the round is finalized (D59, D62, D64): its share
+    goes to the others by tokens, the signed `Finalize.included` lists the others, and the ledger refuses
+    the work of a convicted coldkey (`BANNED_WORK`, a callback `banned` of `EscrowV2` that searches the
+    hotkey history). The ban is by coldkey, not by admission: the conviction burns the coldkey's bond and
+    unvested rewards, an owner who runs a second hotkey is the same party, and a second admission paid
+    for the same round would hand the convicted owner the reward the sanction took (Lens m1, D64-1; the
+    other admissions are not banned, only unpaid). If every input is left out, the Finalize lists nobody:
+    `finalize_v2` settles the round, mints nothing and answers `CLOSED_UNPAID`, and `_round_closure_v2`
+    reads the closure from that record (a SETTLED round whose `finalize` lists nobody), so the ledger
+    records `ROUND_WITHDRAWN` at the next finalize and `FINALIZE_ORDER` is free (Lens m2). The service
+    path compares `Finalize.included` with the roster less the convicted coldkeys (Lens m3). A member that
+    is suspended or has a burned bond but is not convicted is paid for the round it was verified in. This
+    is a prerequisite of every sanction: it must land before the first commit that calls the hook.
 24. No sanction for `INELIGIBLE`: its cause is the member's own state or the effect of a sanction already
     applied. A sanction is not booked for an absent member whose admission is already unfit.
 

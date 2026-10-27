@@ -197,6 +197,59 @@ def test_a_member_convicted_between_the_aggregate_and_the_finalize_is_not_paid(n
     assert escrow.balances().conserved()
 
 
+def test_a_sibling_of_a_convicted_coldkey_is_not_paid(n):
+    # Given: round 0 applied with five inputs, and the second hotkey run by the owner of the
+    # first (several admissions may share a coldkey once the first is ACTIVE); the first one is
+    # then convicted of training fraud, which burns that coldkey's bond and unvested rewards.
+    run = n.manifest.run_id()
+    convicted, sibling = fixtures.HOT[0], fixtures.HOT[1]
+    others = fixtures.HOT[2:]
+    applied = rollback.execute_round(n, 0)
+    with n.store._tx():
+        n.store._db.execute(
+            "UPDATE admissions_v2 SET coldkey=? WHERE hotkey=?",
+            (fixtures.COLD[0].ss58, sibling.ss58),
+        )
+    escrow, admission, _ = n.store._services(run)
+    admission.seize_bond(
+        admission_id(n, convicted.ss58), reason="TRAINING_FRAUD", evidence_hash="ab" * 32, now=n.now
+    )
+    assert (standing(n, convicted.ss58)[0], standing(n, sibling.ss58)[0]) == ("BANNED", "ACTIVE")
+    # When: a Finalize that still lists the sibling is refused, and the one without it settles.
+    stale = finalize(n, 0, applied, fixtures.HOT[1:])
+    settled = finalize(n, 0, applied, others)
+    # Then: neither the convicted member nor its coldkey's other admission is paid; the three
+    # others share the whole round budget.
+    assert stale.status_code == 422, stale.text
+    assert settled.status_code == 200, settled.text
+    budget = escrow.policy.round_reward_units
+    assert [h for h, _ in paid(n, 0)] == sorted(k.ss58 for k in others)
+    assert sum(units for _, units in paid(n, 0)) == budget
+    assert escrow.balances().conserved()
+
+
+def test_a_round_whose_inputs_are_all_banned_closes_unpaid(n):
+    # Given: round 0 applied with five inputs, every one convicted before the finalize.
+    run = n.manifest.run_id()
+    applied = rollback.execute_round(n, 0)
+    escrow, admission, _ = n.store._services(run)
+    for key in fixtures.HOT:
+        admission.seize_bond(
+            admission_id(n, key.ss58), reason="TRAINING_FRAUD", evidence_hash="ab" * 32, now=n.now
+        )
+    assert {standing(n, k.ss58)[0] for k in fixtures.HOT} == {"BANNED"}
+    issued = escrow.balances().issued
+    # When: the Finalize lists nobody.
+    closed = finalize(n, 0, applied, [])
+    # Then: the round is settled with no reward (a named answer, not a 4xx the operator cannot
+    # leave), nothing is minted, and the ledger passes over the round for the next one.
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["status"] == "CLOSED_UNPAID"
+    assert paid(n, 0) == [] and escrow.balances().issued == issued
+    assert n.store._round_closure_v2(run, 0) is not None
+    assert finalize(n, 0, applied, []).json() == closed.json()
+
+
 def test_a_member_whose_screen_lapsed_is_left_out_and_the_run_goes_on(n):
     # Given: round 0 audited; the screen of the fifth member ends before the aggregate.
     run = n.manifest.run_id()

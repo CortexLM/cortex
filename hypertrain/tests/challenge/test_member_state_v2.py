@@ -130,6 +130,29 @@ def test_the_cause_of_an_unfit_entry_is_named(network, change, cause):
     assert network.store._unfit_cause_v2(admission, hotkey, network.now) == cause
 
 
+def test_a_finalize_lists_nobody_of_a_convicted_coldkey(network):
+    # Given: three admissions, the second run by the owner of the first (several admissions may
+    # share a coldkey once the first is ACTIVE)
+    run = network.manifest.run_id()
+    first, second, third = activate_identities(network, fixtures, range(3))
+    with network.store._tx():
+        network.store._db.execute(
+            "UPDATE admissions_v2 SET coldkey=? WHERE admission_id=?",
+            (fixtures.COLD[0].ss58, second),
+        )
+    hotkeys = [key.ss58 for key in fixtures.HOT[:3]]
+    assert network.store._unconvicted_v2(reversed(hotkeys)) == sorted(hotkeys)
+    # When: the first is convicted of training fraud
+    network.store._services(run)[1].seize_bond(
+        first, reason="TRAINING_FRAUD", evidence_hash=EVIDENCE, now=network.now
+    )
+    # Then: its coldkey's other admission is left out with it; the unrelated one stays, and the
+    # second admission itself is not banned
+    assert network.store._unconvicted_v2(hotkeys) == [fixtures.HOT[2].ss58]
+    assert network.store._services(run)[1].store.by_id(second).state == "ACTIVE"
+    assert network.store._services(run)[1].store.by_id(third).state == "ACTIVE"
+
+
 @pytest.mark.parametrize("name", ["_unfit_cause_v2", "_exclude_unfit_members_v2"])
 def test_the_exit_helpers_are_bound_to_the_service_implementation(name):
     # The exit decides who is paid, so a run that holds a service-admission record must see the

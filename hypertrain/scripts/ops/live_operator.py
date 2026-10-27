@@ -232,15 +232,17 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
 
 
 def included(m: Master, w: int) -> list[str]:
-    """What finalize_v2 pays: the inputs of the applied tape, less an admission banned since.
+    """What finalize_v2 pays: the inputs of the applied tape, less every admission of a coldkey
+    convicted since.
 
-    The state is read by the roster entry's admission id, which a rotation does not change.
+    The coldkey is read by the roster entry's admission id, which a rotation does not change.
     """
     out = []
     for item in m.record("tape-inputs", str(w))["inputs"]:
         entry = item["roster"]
         if not m.query(
-            "SELECT 1 FROM admissions_v2 WHERE admission_id=? AND state='BANNED'",
+            "SELECT 1 FROM admissions_v2 b WHERE b.state='BANNED' AND b.coldkey="
+            "(SELECT coldkey FROM admissions_v2 WHERE admission_id=?)",
             entry["admission_id"],
         ):
             out.append(entry["hotkey"])
