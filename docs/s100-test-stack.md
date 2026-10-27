@@ -44,6 +44,11 @@ these hold:
 - the latest seal is sealed and less than 30 minutes old (the first half of the 72-minute window);
 - the latest seal is for the epoch just before the master's current one.
 
+`HT_GATE_MAX_AGE_S` replaces only the 30-minute limit (1..4320 seconds, one epoch), for a change the
+founder approved outside the first half of the window. Readyz 200, a sealed seal and the previous
+epoch are still required, the script prints the value whenever it is set, and a malformed value
+exits 4 before any call: `ssh root@s100 "HT_GATE_MAX_AGE_S=4000 bash -s -- swap $NEW $B" < $T/challenge_image.sh`.
+
 `rollback` and `restore-db` are not gated: they are the way back.
 
 `swap`, `beacon`, `paper` and `rollback` also refuse (exit 4, before any container or live
@@ -389,7 +394,7 @@ means the run was POSTed first: it is frozen, build a new manifest.
 
 Then re-bind the relay (section 3) and start the TEST auditors on `$RID` (section 4). Auditors
 lease and ask the challenge to execute; the challenge sends the replay to X. Miners for a CUDA run
-run on the GPU host with the GPU image (`docs/b300-run.md`, `miner_prod`), not with `cpu_miners.py`.
+run on a GPU host in a `--rm` container of the GPU image, with `cpu_miners.py` in CUDA mode (6.7).
 
 ### 6.6 What to look at
 
@@ -407,3 +412,24 @@ host whose driver, capability, SM count, image digest or GPU set contradicts the
 quarantined until the challenge restarts, a deadline or a cancelled lease is never retried, and a
 partial or tampered result is never published. With one host, one failure costs one attempt of
 `max_attempts` (3).
+
+### 6.7 Miners on the GPU host
+
+`cpu_miners.py` with `HT_MINER_DEVICE=cuda` drives the same real miner CLI for a CUDA run, from the GPU
+image's own python (`/opt/hypertrain/venv/bin/python`, no checkout). In that mode it does not need the
+ATen pin (the reference runs on a GPU host), it needs `HT_IMAGE_DIGEST` (the manifest's image digest,
+which `island_worker.py` compares), `setup` writes `device = "cuda"`, a `probe-v2` or `run-v2` call
+first waits up to 240 s for the GPU to hold under 2 GiB (a Lium validator cycle holds about 265 GiB),
+and a 500 from the challenge (its remote reference failed) is retried like a 503.
+
+```bash
+sudo -n docker run --rm --init --gpus device=5 --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp -e HT_IMAGE_DIGEST=$GPU -e HT_MINER_DEVICE=cuda \
+  -v $D/scripts:/s:ro -v $D:$D -w $D --entrypoint /opt/hypertrain/venv/bin/python \
+  ghcr.io/cortexlm/cortex/hypertrain-gpu@$GPU -I /s/cpu_miners.py admit $D/mine "1:12,2:12"
+```
+
+`setup` takes no `--gpus`; `$D` holds `scripts/cpu_miners.py`, `seeds/` and the miner directories. Two
+drivers on different GPUs with disjoint plans overlap one miner's probe with the other's reference, but
+the challenge computes references one at a time under its store lock. Gate the node with
+`hypertrain/scripts/b300/cycle_gate.sh --gpus 5` before each driver.
