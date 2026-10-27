@@ -179,8 +179,8 @@ after this batch [V; tool: `measure_hashes.py` over a `git archive` of each comm
 | `implementation_hash` | `02e208a3…0189cc` | unchanged |
 | `store.py` sha256 | `b5bc9904…aaec88` | unchanged |
 | `network_qualification.py` sha256 | `dab7a6ab…7bda15` | unchanged |
-| `sources()` map, canonical sha256 | `a9f091ad…64e274` (136 files) | `9616cce4…2661fb` (138 files) |
-| `bundle-hash` | 2,201,600 bytes, `8340ae6d…73c7d7` | 2,252,800 bytes, `6eb0fe03…e9572d` |
+| `sources()` map, canonical sha256 | `a9f091ad…64e274` (136 files) | `c903d68e…74ea11` (138 files) |
+| `bundle-hash` | 2,201,600 bytes, `8340ae6d…73c7d7` | 2,252,800 bytes, `c029b6bb…e5913a` |
 
 Consequences, each the same kind as ADR 0007's:
 
