@@ -3,9 +3,11 @@
 Decision record: docs/adr/0008-generic-cuda-executor.md. A second `RoleLaunch` next to the Vast
 `role_dispatch`: no provider API, no lifecycle, no rental. The challenge starts the digest-pinned
 GPU image with `docker run --rm` over SSH, streams the island inputs in as a tar on stdin and the
-rank artifacts back as a tar on stdout, so nothing persists on the host. It never takes the host's
-word for the result: the artifacts are re-validated here and the observed environment is checked
-against the signed manifest before `role-dispatch.json` and `published/` are written.
+rank artifacts back as a tar on stdout, so nothing persists on the host except the image and one
+CUDA compute cache directory per image digest (docs/adr/0012-executor-performance.md). It never
+takes the host's word for the result: the artifacts are re-validated here and the observed
+environment is checked against the signed manifest before `role-dispatch.json` and `published/`
+are written.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     StringConstraints,
     field_validator,
@@ -83,6 +86,22 @@ SMALL = 1 << 20
 POLL = 0.25
 MARGIN = 5
 LOG_TAIL = 600
+# The GPU image runs as root, so the driver keeps its compute cache in /root/.nv. The host side is
+# one directory per image digest below the ssh user's home, or below a configured absolute root.
+CACHE_TARGET = "/root/.nv"
+CACHE_ROOT = ".cortex-cuda-executor/compute-cache"
+CACHE_PLAIN = re.compile(r"/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*")
+CACHE_LEAF = 32  # hex characters of the manifest image digest that name the directory
+CACHE_PATH_MAX = 400
+
+
+def plain_path(value: str) -> bool:
+    """An absolute path of plain words: safe inside a `--mount` spec and a shell word."""
+    return (
+        len(value) <= CACHE_PATH_MAX
+        and CACHE_PLAIN.fullmatch(value) is not None
+        and not {".", ".."} & set(value.split("/"))
+    )
 
 
 class HostLost(IslandFailure):
@@ -121,6 +140,8 @@ class HostSpec(Boundary):
     identity_file: Path  # path only: the key is never read or copied here
     known_hosts_file: Path  # the operator's pinned host keys; no trust on first use
     docker: tuple[str, ...] = Field(("docker",), min_length=1, max_length=4)
+    # Absolute root of the compute cache on the host; None keeps it under the ssh user's home.
+    compute_cache_dir: Path | None = None
 
     @field_validator("address")
     @classmethod
@@ -137,6 +158,13 @@ class HostSpec(Boundary):
             part and all(c.isalnum() or c in "_./=+-" for c in part) for part in value
         ):
             raise ValueError("docker must be a short argv of plain words")
+        return value
+
+    @field_validator("compute_cache_dir")
+    @classmethod
+    def _cache_root(cls, value: Path | None) -> Path | None:
+        if value is not None and (len(str(value)) > 200 or not plain_path(str(value))):
+            raise ValueError("compute_cache_dir must be an absolute path of plain words")
         return value
 
     @model_validator(mode="after")
@@ -164,6 +192,7 @@ class ExecutorConfig(Boundary):
     state_dir: Path  # journal and remote stderr logs; never read back as authority
     hosts: list[HostSpec] = Field(min_length=1, max_length=8)
     network: Literal["default", "none"] = "default"
+    compute_cache: StrictBool = True  # bind-mount one persistent CUDA compute cache per image
     max_attempts: StrictInt = Field(3, ge=1, le=10)
     sweeps: StrictInt = Field(3, ge=1, le=20)
     sweep_pause_seconds: StrictInt = Field(15, ge=0, le=600)
@@ -253,8 +282,17 @@ def parse_snapshot(text: str) -> Snapshot:
 
 
 def run_command(
-    docker: Sequence[str], image: str, name: str, job_digest: str, uuids: Sequence[str], net: str
+    docker: Sequence[str],
+    image: str,
+    name: str,
+    job_digest: str,
+    uuids: Sequence[str],
+    net: str,
+    cache_dir: str | None = None,
 ) -> str:
+    # `--mount` needs the source to exist; `-v` would make a root-owned directory when it does not.
+    if cache_dir is not None and not plain_path(cache_dir):
+        raise ValueError("compute cache directory must be an absolute path of plain words")
     argv = [
         *docker,
         "run",
@@ -273,6 +311,7 @@ def run_command(
         "memlock=-1",
         "--ulimit",
         "stack=67108864",
+        *(["--mount", f"type=bind,src={cache_dir},dst={CACHE_TARGET}"] if cache_dir else []),
         "--entrypoint",
         IMAGE_PYTHON,
         image,
@@ -281,6 +320,35 @@ def run_command(
         RUNNER_SOURCE,
     ]
     return shlex.join(argv)
+
+
+def cache_location(root: Path | None, image_digest: str) -> tuple[str, re.Pattern[str]]:
+    """Shell assignment of the cache directory, and the pattern the host's report must match.
+
+    Without a configured root the directory is below the ssh user's home, which the host's own
+    shell expands (`sudo` only starts after, so it is the ssh user's and not root's).
+    """
+    leaf = image_digest.removeprefix("sha256:")[:CACHE_LEAF]
+    if root is None:
+        return (
+            f'D="$HOME/{CACHE_ROOT}/{leaf}"',
+            re.compile(rf"/[A-Za-z0-9._/-]{{1,300}}/{re.escape(CACHE_ROOT)}/{leaf}"),
+        )
+    path = f"{root}/{leaf}"
+    return f"D={shlex.quote(path)}", re.compile(re.escape(path))
+
+
+def prepare_command(assignment: str) -> str:
+    """Create the directory for the ssh user and print the absolute path.
+
+    `umask 077` makes every directory it creates private, so no other user of the host can seed
+    the cache; a leaf that is a link is refused (the daemon would resolve it as root), and `chmod`
+    fails on a directory that belongs to somebody else.
+    """
+    return (
+        f'{assignment}; umask 077; mkdir -p -- "$D" && [ ! -L "$D" ] '
+        f'&& chmod 0700 -- "$D" && printf \'%s\\n\' "$D"'
+    )
 
 
 class Transport(Protocol):
@@ -471,6 +539,9 @@ class Executor:
         self._guard = threading.Lock()
         self._machines: dict[str, int] = {}
         self._quarantined: dict[str, str] = {}
+        # (host label, image digest) -> the compute cache directory already created on that host;
+        # a host runs one attempt at a time, so no key has two writers
+        self._cache_dirs: dict[tuple[str, str], str] = {}
 
     # -- selection ------------------------------------------------------------------------
 
@@ -582,6 +653,43 @@ class Executor:
         )
         if code:
             raise HostLost(f"image pull exited {code}: {_tail(err)}")
+
+    def _cache(
+        self,
+        label: str,
+        ref: ReferenceSpec,
+        deadline: float,
+        cancel: threading.Event | None,
+        work: Path,
+    ) -> str | None:
+        """The host directory to mount as the container's compute cache, created on first use.
+
+        The host's answer is only accepted when it is the path we asked for. Remembered per host
+        and image until an attempt fails, so a directory removed by hand costs one attempt.
+        """
+        if not self.config.compute_cache:
+            return None
+        key = (label, ref.image_digest)
+        if key in self._cache_dirs:
+            return self._cache_dirs[key]
+        assignment, expected = cache_location(self.hosts[label].compute_cache_dir, ref.image_digest)
+        out, err = work / f"cache-{time.monotonic_ns()}.out", work / "cache.err"
+        code = self._remote(
+            label,
+            prepare_command(assignment),
+            stdout=out,
+            stderr=err,
+            deadline=deadline,
+            cancel=cancel,
+            limit=30,
+        )
+        if code:
+            raise AttemptFailed(f"cannot prepare the compute cache directory: {_tail(err)}")
+        reported = out.read_text(errors="replace").splitlines()
+        if len(reported) != 1 or not expected.fullmatch(reported[0]) or not plain_path(reported[0]):
+            raise AttemptFailed("the host reported an unexpected compute cache directory")
+        self._cache_dirs[key] = reported[0]
+        return reported[0]
 
     def _select(self, snapshot: Snapshot, ref: ReferenceSpec, image: str) -> list[Gpu]:
         n = ref.layout.n_gpus
@@ -817,8 +925,19 @@ class Executor:
             machine = self._admit(label, snapshot)
             chosen = self._select(snapshot, ref, image)
             n = len(chosen)
+            try:
+                cache = self._cache(label, ref, job.deadline, cancel, work)
+            except AttemptFailed as error:
+                # A speed-up must not fail a job the host can run: go on without it, on the record.
+                self.journal.append("exec_cache_unavailable", label=label, reason=str(error))
+                cache = None
             self.journal.append(
-                "exec_attempt", label=label, name=name, operation=operation, job=job.digest()
+                "exec_attempt",
+                label=label,
+                name=name,
+                operation=operation,
+                job=job.digest(),
+                compute_cache=cache is not None,
             )
             input_tar, result_tar = work / "input.tar", work / "result.tar"
             request = self._request(job, directory, chosen, trace, input_tar)
@@ -833,6 +952,7 @@ class Executor:
                         job.digest(),
                         [g.uuid for g in chosen],
                         self.config.network,
+                        cache,
                     ),
                     stdin=input_tar,
                     stdout=result_tar,
@@ -842,8 +962,11 @@ class Executor:
                     max_bytes=self.config.max_result_bytes,
                 )
             except (HostLost, Aborted, AttemptFailed):
+                self._cache_dirs.pop((label, ref.image_digest), None)
                 self._remove(label, name, work)
                 raise
+            if code:
+                self._cache_dirs.pop((label, ref.image_digest), None)  # it may be what failed
             if code == RUNNER_REFUSED_ENVIRONMENT:
                 raise HostRefused(f"container refused the devices: {_tail(log)}")
             if code == RUNNER_PROBE_FAILED:
@@ -872,6 +995,7 @@ class Executor:
                 "image": {"requested": image, "repo_digests": list(snapshot.repo_digests or ())},
                 "runner_sha256": sha256(RUNNER_SOURCE.encode()),
                 "result_tar_sha256": _file_sha(result_tar),
+                "compute_cache": cache is not None,
                 "environment": observed,
             }
             artifacts = self._publish(job, directory, staging, record, trace)

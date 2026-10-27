@@ -6,8 +6,14 @@
 #   backup TS            snapshot compose files, both SQLite DBs (integrity ok), relay.json,
 #                        metagraph.json and inspect JSON (env names only), with SHA256SUMS
 #   swap NEW_REF BACKUP  gate, pin NEW_REF on the challenge service, up -d --no-deps challenge
-#   beacon BACKUP        gate, set the pusher to --interval 0.2 --catch-up 3 (the production
-#                        twin's values; 3/20 holds the lag above the freshness bound of 2 rounds)
+#   beacon BACKUP        gate, set the pusher to --interval 0.2 --catch-up 60 --max-failures 100.
+#                        A store lock (a remote reference) hides rounds from the pusher and it
+#                        pushes oldest first, at most catch-up of them: 60 skips none up to a lock
+#                        of 150 s (a skipped round can be a trial's seed), 100 failures outlast
+#                        140 s of refused connections. The gate then stays closed for a few times
+#                        the lock. Takes the stock cadence (3 / 20) and the one the previous
+#                        version of this script left behind (0.2 / 3); a budget of 100 or more
+#                        is kept. docs/adr/0012
 #   paper BACKUP         dry rollback: the backed-up compose file must parse and resolve the old image
 #   rollback BACKUP      restore the compose file, recreate challenge and beacon as they were, and
 #                        put back relay.json / metagraph.json (restarting relay / stub) if changed
@@ -77,6 +83,7 @@ check() { # what an operator reads after any change
     printf '%s ' "$p"; curl -s -m 10 -w ' %{http_code}\n' "$API/$p" | cut -c1-200; done
   printf 'public runs sha '; curl -s -m 10 "$API/public/v1/runs" | sha256sum | cut -c1-64; }
 apply() { # apply STEP BACKUP PATH..: $F.new must differ from $F in exactly PATH.., then go live
+  # (a PATH written +PATH may or may not differ; if every PATH is optional something must)
   local step=$1 B=$2; shift 2
   compose "$F" config --format json > "$B/config-before-$step.json"
   compose "$F.new" config --format json > "$B/config-after-$step.json"
@@ -95,8 +102,17 @@ def flat(x, p=""):
 a, b = (flat(json.load(open(f))) for f in sys.argv[1:3])
 changed = sorted(k for k in a.keys() | b.keys() if a.get(k) != b.get(k))
 print("changed", changed)
-sys.exit(0 if changed == sorted(sys.argv[3:]) else 5)
+required = {p for p in sys.argv[3:] if not p.startswith("+")}
+allowed = required | {p[1:] for p in sys.argv[3:] if p.startswith("+")}
+sys.exit(0 if required <= set(changed) <= allowed and (required or changed) else 5)
 EOF
+  if [ "$step" = beacon ]; then # the cadence the edit was meant to reach, read from the resolved config
+    python3 -I -c '
+import json,sys
+e=json.load(open(sys.argv[1]))["services"]["beacon"]["entrypoint"]
+sys.exit(0 if (e[9],e[11])==("0.2","60") and int(e[13])>=100 else 5)' "$B/config-after-$step.json" \
+      || { rm -f "$F.new"; echo "beacon cadence not reached"; exit 5; }
+  fi
   cp -p "$F" "$B/compose.test.yml.before-$step"; mv "$F.new" "$F"; date -u +%FT%TZ
   compose "$F" up -d --no-deps "$step" 2>&1 | tail -3; }
 backup_dir() { local f listed; for f in compose.test.yml challenge.db server_keys.db SHA256SUMS; do
@@ -151,9 +167,11 @@ swap)
   images "$F"; live "${NEW#*@}"; sleep 6; date -u +%FT%TZ; check;;
 beacon)
   B=${2:?BACKUP}; backup_dir "$B"; gate
-  umask 077; sed -e 's|--interval, "3",$|--interval, "0.2",|' \
-    -e 's|--catch-up, "20", --max-failures|--catch-up, "3", --max-failures|' "$F" > "$F.new"
-  apply beacon "$B" services.beacon.entrypoint.9 services.beacon.entrypoint.11
+  umask 077; sed -E -e 's#--interval, "(3|0\.2)",$#--interval, "0.2",#' \
+    -e 's#--catch-up, "(20|3|60)", --max-failures#--catch-up, "60", --max-failures#' \
+    -e 's#(--max-failures, ")([0-9]|[1-9][0-9])"#\1100"#' "$F" > "$F.new"
+  apply beacon "$B" +services.beacon.entrypoint.9 +services.beacon.entrypoint.11 \
+    +services.beacon.entrypoint.13
   sleep 20; docker logs --since 25s hypertrain-test-beacon 2>&1 | tail -4 | cut -c1-160
   curl -s -m 10 "$API/v1/beacon/latest" | python3 -I -c '
 import json,sys,time

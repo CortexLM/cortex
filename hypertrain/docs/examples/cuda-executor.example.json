@@ -23,6 +23,7 @@
     }
   ],
   "network": "default",
+  "compute_cache": true,
   "max_attempts": 3,
   "sweeps": 3,
   "sweep_pause_seconds": 15,
