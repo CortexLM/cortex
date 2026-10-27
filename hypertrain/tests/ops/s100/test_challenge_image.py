@@ -26,6 +26,7 @@ from .sandbox import (
     NEW_REF,
     OLD_ID,
     OLD_REF,
+    OTHER_ID,
     RELAY,
     REPO,
     SCRIPT_TEXT,
@@ -112,6 +113,75 @@ def test_a_seal_younger_than_30_minutes_for_the_previous_epoch_opens_the_gate(bo
     box.pull(NEW_REF)
     box.seal(age=age)
     box.run(*call("swap", backup), mutates={CHALLENGE})
+
+
+def test_a_second_swap_replaces_the_image_line_of_the_first_instead_of_adding_one(box, backup):
+    other = f"{REPO}@{OTHER_ID}"
+    box.pull(NEW_REF)
+    box.pull(other)
+    box.seal(age=60)
+    box.run(*call("swap", backup), mutates={CHALLENGE})
+    box.run("swap", other, str(backup), mutates={CHALLENGE})
+    lines = [x for x in box.f.read_text().splitlines() if x.startswith("    image: ")]
+    assert lines == [f"    image: {other}"]  # a key defined twice is a compose parse error
+    assert box.container(CHALLENGE)["Config"]["Image"] == other
+
+
+# HT_GATE_MAX_AGE_S replaces the 30-min limit and nothing else of the gate.
+LIMIT = {"HT_GATE_MAX_AGE_S": "4000"}
+
+
+@pytest.mark.parametrize("cmd", ["swap", "beacon"])
+@pytest.mark.parametrize("age", [1800, 3000, 3999.5])
+def test_the_age_override_opens_a_gate_that_only_the_age_closed(box, backup, cmd, age):
+    box.pull(NEW_REF)
+    box.seal(age=age)
+    before = box.snapshot()
+    box.run(*call(cmd, backup), rc=3)  # without the setting the gate is closed
+    assert box.snapshot() == before
+    out = box.run(*call(cmd, backup), mutates={CHALLENGE if cmd == "swap" else BEACON}, env=LIMIT)
+    assert "age limit overridden: HT_GATE_MAX_AGE_S=4000 (default 1800)" in out.out
+
+
+OVERRIDDEN = {  # what the override must still refuse
+    "age-at-the-new-limit": ({"age": 4000}, 3),
+    "age-over-the-new-limit": ({"age": 4000.5}, 3),
+    "age-negative": ({"age": -1}, 3),
+    "sealed-false": ({"sealed": False}, 3),
+    "sealed-string": ({"sealed": "true"}, 3),
+    "epoch-is-now": ({"epoch": EPOCH}, 3),
+    "epoch-two-behind": ({"epoch": EPOCH - 2}, 3),
+    "weights-garbage": ({"weights": "not json"}, 3),
+    "weights-unreachable": ({"weights": False}, 3),
+    "readyz-503": ({"ready": 503}, 2),
+}
+
+
+@pytest.mark.parametrize("cmd", ["swap", "beacon"])
+@pytest.mark.parametrize(("seal", "rc"), OVERRIDDEN.values(), ids=OVERRIDDEN)
+def test_the_age_override_keeps_readyz_sealed_and_previous_epoch(box, backup, cmd, seal, rc):
+    box.pull(NEW_REF)
+    box.seal(**{"age": 3000, **seal})
+    before = box.snapshot()
+    box.run(*call(cmd, backup), rc=rc, env=LIMIT)
+    assert box.snapshot() == before
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "-5", "4321", "99999", "1e3", "1800 ", "07", "1.5"])
+def test_a_malformed_age_override_is_refused_before_any_call(box, backup, value):
+    box.pull(NEW_REF)
+    box.seal(age=60)
+    before = box.snapshot()
+    out = box.run(*call("swap", backup), rc=4, env={"HT_GATE_MAX_AGE_S": value}).out
+    assert "HT_GATE_MAX_AGE_S must be 1..4320 seconds" in out
+    assert box.snapshot() == before
+    assert box.polls(f"{MASTER}/readyz") == 0
+
+
+def test_the_default_gate_does_not_mention_an_override(box, backup):
+    box.pull(NEW_REF)
+    box.seal(age=60)
+    assert "overridden" not in box.run(*call("swap", backup), mutates={CHALLENGE}).out
 
 
 # --- backup validity ------------------------------------------------------------------------
