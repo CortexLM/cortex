@@ -212,16 +212,27 @@ Reading:
   write a mailbox object again, up to 5 GiB, until the URL expires); a ledger line; at most 50 USD.
   The code does not install a rule.
 - **Hash consequences** (measured with `network_qualification.sources()` / `bundle()` and
-  `ChallengeStore._service_implementation_v2`, before = `33b50656`, after = this branch's tip):
+  `ChallengeStore._service_implementation_v2`, before = `c7ab9b1d` (origin/v3 with ADR 0012), after = this branch's tip, 2026-10-27):
 
 | Value | Before | After |
 | --- | --- | --- |
-| HASHES_PLACEHOLDER | | |
+| `implementation_hash` | 02e208a3…0189cc | unchanged |
+| `store.py` sha256 | 71005ecd…2eab3c | unchanged |
+| `network_qualification.py` sha256 | dab7a6ab…7bda15 | unchanged |
+| `sources()` map, canonical sha256 | ca84b7cb…837ad9 (151 files) | f7cd6dae…c69f18 (152 files) |
+| `bundle-hash` | 2,406,400 bytes, e809c519…1d6b1a | 2,457,600 bytes, 4b7ef59e…73014a |
+| `cuda_executor.py` sha256 | 8c4cb625…2a9f4e | fdefab16…50bed5 |
+| `cuda_executor_runner.py` sha256 (`runner_sha256`) | a4eaa094…60ca5b | 5930be17…4dff90 |
 
-  Older qualification configs stop validating against a tree at this commit, as after ADR 0007 and
-  0008; `runner_sha256` of the provenance changes. The batches are not additive: ADR 0012 (on branch
-  `v3-executor-perf`, not in this tree) assumes the runner is unchanged. No wire message, manifest
-  field, run id or golden changes.
+  The new module and the edits to `cuda_executor.py`, the runner and `storage/cas.py` move the
+  `sources()` map and the reviewed bundle, as any source change does; `implementation_hash`
+  (`challenge/store.py` owned names and ten listed paths, none under `gpu_ops` or `storage`),
+  `store.py`, `network_qualification.py`, run ids, goldens and protocol messages are unchanged. Older
+  qualification configs stop validating against a tree at this commit (`qualification_source_or_profile_changed`),
+  as after ADRs 0007 and 0008, and the dispatch source pins must be recomputed once after the last
+  `src` commit of the integration. `runner_sha256` of the provenance changes. ADR 0012
+  (`docs/adr/0012-executor-performance.md`) states that the runner is not edited and `runner_sha256`
+  is unchanged: that holds for 0012 alone, and not once both land.
 - Residual risk: with `network = default` (required) a compromised island could reach the declare,
   offer and part URLs of this one job until they expire. The island is image-pinned and parses
   safetensors without pickle; the URLs are kept out of its environment, argv, work directory and log.
