@@ -8,21 +8,18 @@ from pathlib import Path
 import pytest
 import test_rollback_service_v2 as rollback
 
+from challenge.five_identity_network_v2 import five_identity_network
 from hypertrain.aggregator.core import FinalityError
 from hypertrain.auditor.island_bisect import IslandParty
 from hypertrain.challenge.finality_v2 import require_open
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
-from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import Finalize
 from hypertrain.protocol.messages_v2 import (
     BisectV2,
     DisputeV2,
     EscrowLock,
     IslandJobV1,
-    RankWorkResult,
-    RunManifestV2,
-    WorkScreenV2,
 )
 
 fixtures = rollback.fixtures
@@ -31,88 +28,7 @@ fixtures = rollback.fixtures
 @pytest.fixture(scope="module")
 def activated_network(tmp_path_factory):
     """Five ACTIVE identities by SQL: the 12-trial ladder has its own e2e and its own cache."""
-    patch = pytest.MonkeyPatch()
-    fixtures.HOT = [Keypair(bytes([80 + i]) * 32) for i in range(5)]
-    fixtures.COLD = [Keypair(bytes([90 + i]) * 32) for i in range(5)]
-    original = fixtures.fixture.setup
-
-    def carry_setup():
-        setup = original()
-        body = setup.manifest.body()
-        body["training"]["inner"].update(state_policy="carry", rewarmup_steps=0)
-        return fixtures.fixture.Setup(
-            RunManifestV2.model_validate(body),
-            setup.policy,
-            setup.admission_policy,
-            setup.rows,
-            setup.tree,
-        )
-
-    patch.setattr(fixtures.fixture, "setup", carry_setup)
-    original_genesis = fixtures.Genesis
-
-    def full_genesis(**fields):
-        fields["total_units"] = sum(origin.units for origin in fields["origins"])
-        return original_genesis(**fields)
-
-    patch.setattr(fixtures, "Genesis", full_genesis)
-    generator = fixtures.network.__wrapped__(
-        tmp_path_factory.mktemp("dispute-exit"), type("Request", (), {"param": None})()
-    )
-    network = next(generator)
-    try:
-        spec = network.manifest.training.reference_spec
-        for i in range(5):
-            if i:
-                network.push(network.now + 101)
-            response = network.join(i)
-            assert response.status_code == 200, response.text
-            identity = response.json()["admission_id"]
-            lock = EscrowLock(
-                operation_id=f"{i + 1:064x}",
-                owner=fixtures.COLD[i].ss58,
-                units=1000,
-                origin_ids=[network.origin_ids[i]],
-                admission_id=identity,
-                dispute_id=None,
-                kind="LOCK_ADMISSION",
-            )
-            response = network.client.post(
-                network.url + "/escrow/lock",
-                json=network.signed(fixtures.COLD[i], "EscrowLock", lock),
-            )
-            assert response.status_code == 200, response.text
-            screen = WorkScreenV2(
-                evidence_kind="work-proof-v1",
-                admission_id=identity,
-                nonce=sha256_hex(b"nonce"),
-                policy_hash=network.manifest.network.admission_policy_hash,
-                image_digest=spec.image_digest,
-                layout=spec.layout,
-                challenge_hash=sha256_hex(b"challenge"),
-                rank_results=[
-                    RankWorkResult(
-                        rank=rank,
-                        fingerprint=sha256_hex(b"rank"),
-                        elapsed_ns=1,
-                        allocated_bytes=1,
-                        reserved_bytes=1,
-                        total_bytes=1 << 30,
-                    )
-                    for rank in range(spec.layout.n_gpus)
-                ],
-                artifact_hashes=[sha256_hex(b"artifact")],
-            )
-            with network.store._tx():
-                network.store._db.execute(
-                    "UPDATE admissions_v2 SET state='ACTIVE',clean_count=12,screen_json=?,"
-                    "screen_until=1000000000 WHERE admission_id=?",
-                    (screen.model_dump_json(), identity),
-                )
-        yield network
-    finally:
-        generator.close()
-        patch.undo()
+    yield from five_identity_network(tmp_path_factory, fixtures)
 
 
 def contest_and_pause(n, hot, cold) -> str:
