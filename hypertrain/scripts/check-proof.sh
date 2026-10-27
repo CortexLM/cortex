@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Bitwise proof gate: golden replay and its GOLDEN consumers (act ckpt, fp8 off), codec v2,
-# tests/parity, trace parity and island replay v2, the suites scripts/check-fast.sh leaves out.
+# Bitwise proof gate: golden replay and its GOLDEN consumers (act ckpt, fp8 off, kimi MICRO round
+# roots), codec v2, tests/parity, trace parity and island replay v2, the suites
+# scripts/check-fast.sh leaves out.
 # One pytest run per suite so each prints its own wall time; all suites share one budget
 # (default 600 s). `od` tests are excluded as in PR CI (they need the opendecision extra).
 # Exits 1 when a suite fails or the budget is exceeded.
@@ -8,8 +9,9 @@
 # gate (a skipped proof proves nothing). Extra arguments go to every pytest run.
 # A golden xfail fails the gate too (-rsx prints it): an unmatched leaf root is not a successful
 # golden comparison. It is matched on the reason of tests/trainer/test_golden_replay.py
-# _expect_golden, so every GOLDEN consumer is covered. CHECK_PROOF_ALLOW_GOLDEN_XFAIL=1 lets it
-# pass: diagnostic only, never for a release.
+# XFAIL_REASON (_expect_golden, and tests/models/test_kimi_golden.py directly), so every golden
+# consumer is covered. CHECK_PROOF_ALLOW_GOLDEN_XFAIL=1 lets it pass: diagnostic only, never for
+# a release.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
@@ -24,6 +26,7 @@ suites=(
   tests/trainer/test_golden_replay.py
   tests/trainer/test_act_ckpt.py
   tests/trainer/test_engine_flags.py::test_fp8_off_by_default
+  tests/models/test_kimi_golden.py
   tests/trainer/test_codec_v2.py
   tests/parity/test_parity.py
   tests/auditor/test_trace_parity.py

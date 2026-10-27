@@ -2,13 +2,19 @@
 # One B300 host run (docs/b300-run.md at the monorepo root): host probe, digest-pinned pull,
 # in-container GPU probe, 8-GPU MFU bench with bitwise replay, the miner flow against the test
 # challenge, and production rounds with --prod.
-# Stops on --duration (default 3h), SIGTERM/SIGINT or an EC2 Spot interruption notice: it stops
-# this run's containers, writes stop.json and uploads the results when --upload is given.
-# Idempotent: a step that passed (steps/<name>.rc = 0) is skipped on re-run unless --force; the
-# host probe always runs. Results go to <results-root>/<host>/. Nothing secret is read here: the
-# miner config and key directory are bind-mounted by path and never printed.
+# Stops on --duration (default 3h), SIGTERM/SIGINT/SIGHUP or an EC2 Spot interruption notice: it
+# stops this run's containers, writes stop.json and uploads the results when --upload is given.
+# An unexpected exit takes the same path (reason unexpected-exit).
+# Idempotent: a step that passed (steps/<name>.rc = "0 <image> <commit>") is skipped on re-run
+# when the image and the clean git commit are the same, unless --force; the host probe always
+# runs. Results go to <results-root>/<host>/. Nothing secret is read here: the miner config and
+# key directory are bind-mounted by path and never printed.
 # shellcheck disable=SC2329  # step functions and on_signal are invoked through step() and trap
 set -euo pipefail
+# The input checks below are regexes: in en_US.UTF-8 [0-9] and [a-z] match thousands of other code
+# points (Arabic-Indic digits, accented letters), and the arithmetic that follows only prints an
+# error and goes on.
+export LC_ALL=C
 
 DEFAULT_IMAGE=ghcr.io/cortexlm/cortex/hypertrain-gpu@sha256:f4b2885f2dc89478da645b9f5e6f02891cd3309ef0a1f2aa0de04328e11cba0f
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -25,6 +31,14 @@ SMOKE_BUDGET=${HT_B300_SMOKE_BUDGET:-900}
 PEAK=${HT_B300_PEAK_FLOPS:-}
 PREFIX=${HT_B300_CONTAINER_PREFIX:-ht-b300}
 ALL_STEPS="host_probe pull gpu_probe mfu miner_test miner_prod"
+# What --upload copies out of the results directory. Everything else there (the lock, the IMDS
+# scratch file, anything a miner or an operator left behind) stays on the host.
+UPLOAD_INCLUDE=(
+  run.log steps.tsv stop.json spot-instance-action.json
+  nvidia-smi.csv nvidia-smi.txt efa-devices.txt fi_info.txt df.txt host_probe.json
+  pull.log pull-digests.json gpu_probe.json 'mfu-dp*-flash.json'
+  mine-smoke-v2.json mine-smoke-v2.stdout 'steps/*.rc' 'miner-prod/round-*.json'
+)
 
 usage() {
   cat <<'EOF'
@@ -54,29 +68,56 @@ while [ $# -gt 0 ]; do
 done
 
 die() { echo "run_host: $*" >&2; exit 2; }
+((BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1))) ||
+  die "bash 5.1 or newer is needed (wait -n -p): $BASH_VERSION"
+# Operator text is matched against a regex before it reaches arithmetic or a command line: bash
+# reads 08 as an invalid octal number and evaluates $(...) inside $(( )), so a number is never
+# computed from an unchecked string and every conversion is forced to base 10 (10#).
+# aws joins its --exclude/--include patterns to the source directory without escaping it, so a
+# [1], ? or * in the results root defeats the upload allowlist (everything would be uploaded); a
+# colon is a docker bind-mount separator; a relative root is a docker volume name.
+[[ $results_root =~ ^/[A-Za-z0-9._/+@=,-]*$ ]] ||
+  die "--results-root must be an absolute path of letters, digits and ._/+@=,-: $results_root"
 [[ $image =~ ^[a-z0-9][a-z0-9./_-]*@sha256:[0-9a-f]{64}$ ]] || die "image must be REPO@sha256:<64 hex>: $image"
-[[ $host =~ ^[A-Za-z0-9._-]+$ ]] || die "bad host name: $host"
-case $duration in
-  *h) seconds=${duration%h}; seconds=$((seconds * 3600)) ;;
-  *m) seconds=${duration%m}; seconds=$((seconds * 60)) ;;
-  *) seconds=$duration ;;
+[[ $host =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "bad host name: $host"
+[[ $duration =~ ^([0-9]{1,6})([hm]?)$ ]] || die "bad --duration (3h, 90m or seconds): $duration"
+case ${BASH_REMATCH[2]} in
+  h) unit=3600 ;;
+  m) unit=60 ;;
+  *) unit=1 ;;
 esac
-[[ $seconds =~ ^[0-9]+$ ]] && [ "$seconds" -gt 0 ] || die "bad --duration: $duration"
+seconds=$((10#${BASH_REMATCH[1]} * unit))
+[ "$seconds" -gt 0 ] || die "bad --duration (not positive): $duration"
+# The poll interval is 0.001 to 59.999 s: it must stay well inside the 2-minute Spot notice.
+[[ $POLL =~ ^([0-9]|[1-5][0-9])(\.[0-9]{1,3})?$ && $POLL =~ [1-9] ]] ||
+  die "HT_B300_POLL_SECONDS must be 0.001 to 59.999 seconds: $POLL"
+[[ $STOP_GRACE =~ ^[0-9]{1,4}$ ]] || die "HT_B300_STOP_GRACE must be whole seconds, at most 9999: $STOP_GRACE"
+STOP_GRACE=$((10#$STOP_GRACE))
+[[ $EXPECT_GPUS =~ ^[1-9][0-9]?$ ]] || die "HT_B300_EXPECT_GPUS must be 1 to 99: $EXPECT_GPUS"
+[[ $PREFIX =~ ^ht-[a-z0-9][a-z0-9_.-]*$ ]] || die "HT_B300_CONTAINER_PREFIX must start with ht-: $PREFIX"
 for s in $steps; do [[ " $ALL_STEPS " == *" $s "* ]] || die "unknown step: $s"; done
+out=$results_root/$host
 if [ "$prod" = 1 ]; then
   [ -n "${HT_B300_PROD_ENDPOINT:-}" ] || die "--prod needs HT_B300_PROD_ENDPOINT"
   [ -f "${HT_B300_MINER_CONFIG:-}" ] || die "--prod needs HT_B300_MINER_CONFIG (a miner.toml path)"
   [[ ${HT_B300_PROD_ROUNDS:-} =~ ^[0-9]+( [0-9]+)*$ ]] || die "--prod needs HT_B300_PROD_ROUNDS"
+  # The results directory is mounted at /out and uploaded: the miner directory (miner.toml, key
+  # file, workdir) must be neither inside it nor above it.
+  miner_dir=$(realpath -m -- "$(dirname -- "$HT_B300_MINER_CONFIG")")
+  out_real=$(realpath -m -- "$out")
+  case $miner_dir/ in "$out_real"/*) die "HT_B300_MINER_CONFIG is inside the results directory $out" ;; esac
+  case $out_real/ in "$miner_dir"/*) die "HT_B300_MINER_CONFIG is above the results directory $out" ;; esac
 else
-  steps=${steps/miner_prod/}
+  steps=${steps//miner_prod/}
 fi
 [ -z "$upload" ] || [[ $upload =~ ^s3://[a-z0-9.-]+(/[A-Za-z0-9._/-]*)?$ ]] || die "bad --upload: $upload"
 
-out=$results_root/$host
 mkdir -p "$out/steps"
 exec > >(tee -a "$out/run.log") 2>&1
 exec 9>"$out/.lock"
 flock -n 9 || die "another run_host.sh holds $out/.lock"
+# State of an earlier run that this run would otherwise report as its own.
+rm -f -- "$out/.stop-reason" "$out/.instance-action" "$out/spot-instance-action.json" 2>/dev/null || true
 # The ubuntu user of the AWS hosts is not in the docker group: fall back to passwordless sudo.
 if [ -n "${DOCKER:-}" ]; then
   docker_cmd=("$DOCKER")
@@ -91,7 +132,21 @@ dk() { "${docker_cmd[@]}" "$@"; }
 run_id=$(date -u +%Y%m%dT%H%M%SZ)-$$
 deadline=$(($(date +%s) + seconds))
 log() { echo "[$(date -u +%H:%M:%S)] $*"; }
-log "run $run_id host=$host image=$image steps=[$steps] duration=${seconds}s prod=$prod"
+# The checkout is bind-mounted into every container: its scripts, and for miner_test its hypertrain
+# package, run in place of the image's. Record which commit that is and whether the tree was
+# modified (untracked files show in the mount too). A modified or non-git tree is code nobody can
+# name: a step that passed with it is never skipped.
+rev=$(git -C "$HT" rev-parse HEAD 2>/dev/null) || rev=unknown
+dirty=unknown
+if [ "$rev" != unknown ] && tree=$(git -C "$HT" status --porcelain -- . 2>/dev/null); then
+  if [ -z "$tree" ]; then dirty=0; else dirty=1; fi
+fi
+case $dirty in
+  0) code=$rev ;;
+  1) code=$rev+dirty ;;
+  *) code=unknown ;;
+esac
+log "run $run_id host=$host image=$image steps=[$steps] duration=${seconds}s prod=$prod rev=$rev dirty=$dirty"
 
 # --- auto-stop: the deadline or a Spot notice sends SIGTERM to this script --------------------
 spot_notice() {
@@ -105,10 +160,13 @@ spot_notice() {
 }
 watchdog() {
   while sleep "$POLL"; do
+    # Left behind by a SIGKILLed script, it would write into a results directory that a newer
+    # run may own and TERM a pid that may have been reused.
+    kill -0 "$1" 2>/dev/null || return
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      echo duration >"$out/.stop-reason"
+      echo duration >"$out/.stop-reason" || true
     elif spot_notice; then
-      echo spot-interruption >"$out/.stop-reason"
+      echo spot-interruption >"$out/.stop-reason" || true
     else
       continue
     fi
@@ -116,14 +174,19 @@ watchdog() {
     return
   done
 }
-watchdog $$ 9>&- &
+# Its output goes nowhere: a sleep that outlives the script must not hold the caller's pipe.
+watchdog $$ 9>&- >/dev/null 2>&1 &
 watchdog_pid=$!
+log "watchdog pid $watchdog_pid"
+bg_pid= # the docker client of the step that is running, killed by finish
 
 upload_results() {
+  local filters=(--exclude '*') f
   [ -n "$upload" ] || return 0
+  for f in "${UPLOAD_INCLUDE[@]}"; do filters+=(--include "$f"); done
   if ! command -v aws >/dev/null; then
     log "upload skipped: aws CLI not found"
-  elif aws s3 cp --recursive --only-show-errors "$out" "${upload%/}/$host/"; then
+  elif aws s3 cp --recursive --only-show-errors "${filters[@]}" "$out" "${upload%/}/$host/"; then
     log "uploaded to ${upload%/}/$host/"
   else
     log "upload FAILED"
@@ -131,70 +194,151 @@ upload_results() {
 }
 finish() {
   local reason=$1 rc=$2 ids
-  # A group signal (systemd stop, SSM cancel) also kills tee: log straight to the file from here.
-  trap '' TERM INT PIPE
+  # Last thing the script does, whatever called it: no later signal or EXIT trap may interrupt it
+  # and no failing command (a run.log that cannot be written, a docker that does not answer) may
+  # skip the next one. A group signal (systemd stop, SSM cancel) also kills tee: log straight to
+  # the file from here.
+  trap '' TERM INT HUP PIPE
+  trap - EXIT
+  set +e
   exec >>"$out/run.log" 2>&1
   kill "$watchdog_pid" 2>/dev/null || true
-  ids=$(dk ps -q --filter "label=io.cortex.b300-run=$run_id" 2>/dev/null || true)
+  ids=$(dk ps -q --filter "label=io.cortex.b300-run=$run_id" 2>/dev/null) ||
+    log "could not list this run's containers: docker ps failed"
   if [ -n "$ids" ]; then
     log "stopping containers ($reason): $(echo "$ids" | tr '\n' ' ')"
     # shellcheck disable=SC2086  # one container id per word
-    dk stop --time "$STOP_GRACE" $ids >/dev/null || true
+    dk stop --time "$STOP_GRACE" $ids >/dev/null || log "docker stop failed"
   fi
-  python3 - "$out" "$reason" "$rc" "$run_id" "$image" <<'PY'
+  if [ -n "$bg_pid" ]; then # a docker pull has no container to stop
+    pkill -TERM -P "$bg_pid" 2>/dev/null || true
+    kill -TERM "$bg_pid" 2>/dev/null || true
+  fi
+  # A file that cannot be read goes to "errors" in stop.json; it never stops the file or the upload.
+  # The record of an earlier run is removed first: if this one cannot be written, the upload must
+  # not present the old verdict as this run's.
+  rm -f -- "$out/stop.json" 2>/dev/null || true
+  python3 - "$out" "$reason" "$rc" "$run_id" "$image" "$rev" "$dirty" <<'PY' ||
 import json, sys
 from pathlib import Path
-out, reason, rc, run_id, image = Path(sys.argv[1]), *sys.argv[2:]
-tsv = out / "steps.tsv"
-rows = [r.split("\t") for r in tsv.read_text().splitlines() if r] if tsv.exists() else []
-notice = out / "spot-instance-action.json"
+out, reason, rc, run_id, image, rev, dirty = Path(sys.argv[1]), *sys.argv[2:]
+errors, steps, rows, notice = [], {}, [], None
+for p in sorted((out / "steps").glob("*.rc")):
+    try:
+        steps[p.stem] = int(p.read_text().split()[0])
+    except (OSError, ValueError, IndexError) as e:
+        errors.append(f"steps/{p.name}: {type(e).__name__}")
+try:
+    rows = [r.split("\t") for r in (out / "steps.tsv").read_text().splitlines() if r]
+except FileNotFoundError:
+    pass
+except (OSError, ValueError) as e:
+    errors.append(f"steps.tsv: {type(e).__name__}")
+try:
+    text = (out / "spot-instance-action.json").read_text()
+    try:
+        notice = json.loads(text)
+    except ValueError as e:
+        errors.append(f"spot-instance-action.json: {type(e).__name__}")
+        notice = {"unparsed": text[:200]}
+except FileNotFoundError:
+    pass
+except (OSError, ValueError) as e:
+    errors.append(f"spot-instance-action.json: {type(e).__name__}")
 stop = {
     "run_id": run_id, "reason": reason, "rc": int(rc), "image": image,
-    "steps": {p.stem: int(p.read_text().split()[0]) for p in sorted((out / "steps").glob("*.rc"))},
-    "ran": [r[0] for r in rows if r[3:4] == [run_id]],
-    "spot_notice": json.loads(notice.read_text()) if notice.exists() else None,
+    "git_rev": rev, "git_dirty": {"0": False, "1": True}.get(dirty),
+    "steps": steps, "ran": [r[0] for r in rows if r[3:4] == [run_id]],
+    "spot_notice": notice, "errors": errors,
 }
 (out / "stop.json").write_text(json.dumps(stop, indent=1, sort_keys=True))
 print("STOP", json.dumps({k: stop[k] for k in ("reason", "rc", "steps")}, sort_keys=True))
 PY
+    { log "stop.json was not written"; [ "$rc" -ne 0 ] || rc=1; }
   upload_results
   exit "$rc"
 }
 on_signal() {
   local reason
   reason=$(cat "$out/.stop-reason" 2>/dev/null || echo signal)
-  rm -f "$out/.stop-reason"
+  rm -f "$out/.stop-reason" 2>/dev/null || true
   finish "$reason" 143
 }
-trap on_signal TERM INT
+# $? is 0 when bash runs this for a fatal signal (SIGPIPE from a dead tee, SIGUSR1...): a stop.json
+# that says unexpected-exit must not say rc 0.
+on_exit() {
+  local rc=$?
+  finish unexpected-exit "$((rc == 0 ? 1 : rc))"
+}
+trap on_signal TERM INT HUP
+trap on_exit EXIT
 
 # --- step runner -------------------------------------------------------------------------------
+# What a step writes under $out, except the files its own shell redirection truncates when it
+# starts and the per-round files of miner_prod (removed round by round). It is removed before the
+# step runs, together with the step's rc: a step that dies before it writes must not leave the file
+# of an earlier run (a gpu_probe.json with ok:true) beside, or an old pass without its file.
+step_evidence() {
+  case $1 in
+    host_probe) echo nvidia-smi.txt efa-devices.txt fi_info.txt df.txt host_probe.json ;;
+    pull) echo pull-digests.json ;;
+    gpu_probe) echo gpu_probe.json ;;
+    mfu) echo "mfu-dp$EXPECT_GPUS-flash.json" ;;
+    miner_test) echo mine-smoke-v2.json ;;
+  esac
+}
 step() {
-  local name=$1 t0 rc=0
+  local name=$1 t0 rc=0 f files
   shift
   [[ " $steps " == *" $name "* ]] || return 0
-  if [ "$force" = 0 ] && [ "$name" != host_probe ] && [ "$(cat "$out/steps/$name.rc" 2>/dev/null)" = "0 $image" ]; then
-    log "skip $name: passed in an earlier run with this image"
+  if [ "$force" = 0 ] && [ "$name" != host_probe ] && [ "$dirty" = 0 ] &&
+    [ "$(cat "$out/steps/$name.rc" 2>/dev/null)" = "0 $image $code" ]; then
+    log "skip $name: passed in an earlier run with this image and commit"
     return 0
   fi
+  # Without the watchdog neither --duration nor a Spot notice can stop the run. (A watchdog that
+  # already sent its TERM is not seen here: the trap runs before the next command.)
+  if ! kill -0 "$watchdog_pid" 2>/dev/null; then
+    log "the watchdog died: nothing would stop this run at --duration or a Spot notice"
+    finish watchdog-died 9
+  fi
+  read -ra files <<<"$(step_evidence "$name")"
+  for f in "${files[@]}" "steps/$name.rc"; do rm -f -- "$out/$f"; done
   log "step $name"
   t0=$(date +%s)
   "$@" || rc=$?
-  echo "$rc $image" >"$out/steps/$name.rc"
+  echo "$rc $image $code" >"$out/steps/$name.rc"
   printf '%s\t%s\t%s\t%s\n' "$name" "$rc" "$(($(date +%s) - t0))" "$run_id" >>"$out/steps.tsv"
   log "step $name rc=$rc"
   return "$rc"
 }
 
 # docker runs in the background: a signal then interrupts `wait` instead of waiting for docker.
+# Container names are global to the host while the flock covers one results directory, so this
+# script never removes a container by name: a name already in use makes `docker run` fail, and
+# only `finish` stops containers, by this run's label.
+# Waits for the docker client in bg_pid and returns its status. The watchdog is waited on with it:
+# if it dies, neither --duration nor a Spot notice can stop the step, so stop the run now rather
+# than at the next step. (A watchdog that has sent its TERM never gets here: the trap runs first.)
+wait_client() {
+  local done_pid='' rc=0
+  wait -n -p done_pid "$bg_pid" "$watchdog_pid" || rc=$?
+  if [ "$done_pid" = "$watchdog_pid" ]; then
+    log "the watchdog died during a step: nothing would stop this run at --duration or a Spot notice"
+    finish watchdog-died 9
+  fi
+  bg_pid=
+  return "$rc"
+}
 container() {
-  local name=$PREFIX-$1
+  local name=$PREFIX-$1 rc=0
   shift
-  dk rm -f "$name" >/dev/null 2>&1 || true
   dk run --rm --init --name "$name" --label "io.cortex.b300-run=$run_id" --gpus all \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
     -v "$HT:/opt/ht:ro" -v "$out:/out" -w /opt/ht/scripts "$@" 9>&- &
-  wait $!
+  bg_pid=$!
+  wait_client || rc=$?
+  return "$rc"
 }
 PY=/opt/hypertrain/venv/bin/python
 
@@ -215,7 +359,8 @@ host_probe() {
 pull() {
   local got
   dk pull "$image" >"$out/pull.log" 2>&1 9>&- &
-  wait $! || { tail -n 20 "$out/pull.log"; return 1; }
+  bg_pid=$!
+  wait_client || { tail -n 20 "$out/pull.log"; return 1; }
   got=$(dk image inspect --format '{{json .RepoDigests}}' "$image") || return
   echo "$got" >"$out/pull-digests.json"
   [[ $got == *"${image#*@}"* ]] || { log "pulled digests $got lack ${image#*@}"; return 1; }
@@ -272,6 +417,10 @@ miner_prod() {
   local cfg=$HT_B300_MINER_CONFIG dir w summary
   dir=$(cd "$(dirname "$cfg")" && pwd)
   mkdir -p "$out/miner-prod"
+  # The files of every round this step will run, including those it may never reach.
+  for w in $HT_B300_PROD_ROUNDS; do
+    rm -f -- "$out/miner-prod/round-$w.json" "$out/miner-prod/round-$w-commitments.json"
+  done
   for w in $HT_B300_PROD_ROUNDS; do
     [ "$(date +%s)" -lt "$deadline" ] || { log "deadline reached before round $w"; return 1; }
     container "miner-prod-$w" --user "$(id -u):$(id -g)" -e HOME=/tmp \

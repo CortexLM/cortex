@@ -105,7 +105,7 @@ def test_v1_manifest_refuses_an_arch_registered_after_v1() -> None:
         {},
         # The profile itself (77,001,376 parameters, bf16 in production).
         {f: getattr(kt.PROFILE, f) for f in MICRO},
-        dict(n_layers=2, d_model=64, n_heads=2, n_kv_heads=2, d_ff=8, n_experts=4, top_k_experts=1),
+        dict(n_layers=2, d_model=64, n_heads=2, n_kv_heads=2, d_ff=8, n_experts=4, top_k_experts=2),
     ],
     ids=["micro", "profile", "two-layer"],
 )
@@ -128,6 +128,8 @@ def test_kimi_v2_param_count_rule_matches_the_implementation(geometry: dict[str,
         (lambda b: b["model"].update(d_model=24), "geometry"),  # head dim 6, not a multiple of 4
         (lambda b: b["model"].update(n_experts=1, top_k_experts=1), "geometry"),
         (lambda b: b["model"].update(n_layers=1), "geometry"),
+        (lambda b: b["model"].update(top_k_experts=1), "top_k_experts"),
+        (lambda b: b["inner"].update(opt="muon"), "inner.opt"),
     ],
     ids=[
         "dp2",
@@ -141,6 +143,8 @@ def test_kimi_v2_param_count_rule_matches_the_implementation(geometry: dict[str,
         "head-dim",
         "dense",
         "no-moe-layer",
+        "one-routed-expert",
+        "muon",
     ],
 )
 def test_kimi_v2_rule_rejects(change: Any, error: str) -> None:
