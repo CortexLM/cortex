@@ -1,13 +1,19 @@
 """Real tiny carried work; two repaired rounds, signed independent negative controls."""
 
+import os
 from dataclasses import dataclass, replace
 from functools import partial
+from pathlib import Path
+from subprocess import CalledProcessError, CompletedProcess
+from typing import Any
 
 import numpy as np
 import pytest
 import torch
 from test_weighted_v2 import KEY, H, economics, policy, roster
 
+from env_pin_fixtures import CPU_FP32, HOSTILE, ambient
+from hypertrain.aggregator import rollback_v2
 from hypertrain.aggregator.core import OuterState, TapeError, load_state
 from hypertrain.aggregator.rollback_v2 import (
     RepairAuthority,
@@ -29,7 +35,12 @@ from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import Chunk, f32hex
-from hypertrain.protocol.messages_v2 import CommitV2, DeltaManifestV2, RunManifestV2
+from hypertrain.protocol.messages_v2 import (
+    CommitV2,
+    DeltaManifestV2,
+    DisputePolicyV2,
+    RunManifestV2,
+)
 from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.island import Comm, IslandAssignment, emulate, train_island
 from hypertrain.trainer.loop import Assignment, train_round
@@ -585,3 +596,112 @@ def test_finite_input_terminal_overflow_rejects_before_publication(
                 reference_reward_units=100,
             ),
         )
+
+
+def pinned_manifest() -> RunManifestV2:
+    body = tiny_manifest().body()
+    body["training"]["reference_spec"]["env"]["pinned"] = CPU_FP32
+    return RunManifestV2.model_validate(body)
+
+
+PINNED_WORKER_ENV = {
+    "ATEN_CPU_CAPABILITY": "avx2",
+    "HT_ATTN_BACKEND": "math",
+    "MKL_CBWR": "AVX2",
+    "OMP_DYNAMIC": "FALSE",
+    "ONEDNN_MAX_CPU_ISA": "ALL",  # CPU_FP32 does not name it: the ambient stays
+    "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+    "OMP_NUM_THREADS": "1",
+}
+
+
+def test_worker_env_follows_the_manifest_pins(monkeypatch: pytest.MonkeyPatch) -> None:
+    ambient(monkeypatch, **HOSTILE)
+    ambient_env = dict(os.environ)
+    env = rollback_v2._worker_env(pinned_manifest())
+    assert {k: env.get(k) for k in [*HOSTILE, "CUBLAS_WORKSPACE_CONFIG", "OMP_NUM_THREADS"]} == {
+        **PINNED_WORKER_ENV,
+        "HT_FP8": None,
+        "HT_MOE_GROUPED": None,
+        "OMP_THREAD_LIMIT": None,
+    }
+    assert os.environ == ambient_env
+    unpinned = rollback_v2._worker_env(tiny_manifest())
+    assert unpinned == {
+        **ambient_env,
+        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+        "OMP_NUM_THREADS": "1",
+    }
+
+
+def record_environment_then_fail(seen: dict[str, str]) -> Any:
+    """Stand-in for subprocess.run in rollback_v2: the worker never starts."""
+
+    def run(argv: list[str], *, env: dict[str, str], check: bool = False, **kwargs: Any) -> Any:
+        seen.update(env)
+        if check:
+            raise CalledProcessError(1, argv, b"", b"stopped after reading the environment")
+        return CompletedProcess(argv, 1, b"", b"stopped after reading the environment")
+
+    return run
+
+
+def signed_context(key: Keypair, body: dict[str, Any]) -> dict[str, Any]:
+    message = b"hypertrain/rollback/context/1|" + sha256_hex(canonicalize(body)).encode()
+    return {"signer": key.ss58, "body": body, "sig": key.sign(message).hex()}
+
+
+def assert_pinned_worker_environment(seen: dict[str, str]) -> None:
+    assert {k: seen.get(k) for k in PINNED_WORKER_ENV} == PINNED_WORKER_ENV
+    assert not {"HT_FP8", "HT_MOE_GROUPED", "OMP_THREAD_LIMIT"} & set(seen)
+
+
+def test_history_worker_is_started_under_the_manifest_pins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ambient(monkeypatch, **HOSTILE)
+    manifest, key, seen = pinned_manifest(), Keypair(bytes([7]) * 32), {}
+    context = signed_context(key, {"manifest": manifest.body(), "timeout_seconds": 5})
+    monkeypatch.setattr(rollback_v2.subprocess, "run", record_environment_then_fail(seen))
+    with pytest.raises(TapeError, match="history replay failed: stopped after reading"):
+        rollback_v2.replay_history_context(LocalFSStore(tmp_path), manifest, context, key.ss58)
+    assert_pinned_worker_environment(seen)
+
+
+def test_repair_worker_is_started_under_the_manifest_pins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ambient(monkeypatch, **HOSTILE)
+    store, key, seen = LocalFSStore(tmp_path), Keypair(bytes([7]) * 32), {}
+    referees = DisputePolicyV2(
+        referees=[key.ss58],
+        max_open=32,
+        max_transcript_entries=256,
+        max_entry_bytes=65536,
+        fanout=2,
+        max_referee_reassignments=1,
+        max_referee_cost_units=1,
+    )
+    document = pinned_manifest().body()
+    document["network"]["dispute_policy_hash"] = store.put(referees.model_dump_json().encode())
+    manifest = RunManifestV2.model_validate(document)
+    qualification = {"execution_backend": {"backend": "cpu", "authority_hash": None}}
+    context = signed_context(
+        key,
+        {
+            "run_id": manifest.run_id(),
+            "backend": "cpu",
+            "qualification": qualification,
+            "qualification_hash": sha256_hex(canonicalize(qualification)),
+            "manifest": manifest.body(),
+            "w": 0,
+            "timeout_seconds": 5,
+            "exclusion_proofs": [],
+            "excluded": [],
+            "sources": [],
+        },
+    )
+    monkeypatch.setattr(rollback_v2.subprocess, "run", record_environment_then_fail(seen))
+    with pytest.raises(TapeError, match="repair worker failed: stopped after reading"):
+        rollback_v2.execute_repair_context(store, manifest, context, key.ss58)
+    assert_pinned_worker_environment(seen)

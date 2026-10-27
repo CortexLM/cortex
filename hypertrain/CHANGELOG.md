@@ -69,7 +69,7 @@
   under the pinned environment, cached per process).
   `launch_island`, `launch_window` and `_launch_unbounded` start island ranks under the pins and
   raise `EnvPinRefused` (an `IslandFailure`) before charging capacity when this host cannot honor
-  them.
+  them. The rollback repair and history workers get the same pins.
   The miner's dispute follower answers a pinned CPU publication from its published trace instead
   of replaying it in the daemon (behavior change for pinned manifests only).
 
