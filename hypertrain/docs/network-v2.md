@@ -471,8 +471,10 @@ is never reward-finalized and never paid, and it does not stop the rounds after 
 `finalize` accepts round w only if w is the first round that is neither reward-finalized nor
 withdrawn: when a lower round is closed without a reward, the same `finalize` first records it
 once in the escrow journal (event `ROUND_WITHDRAWN`, with the hash that closed it), in the same
-transaction, then pays w. The record moves no unit and sanctions nobody. A refused `finalize`
-records nothing, and a run that rolled back before this record existed is not stuck: its next
+transaction, then pays w. The record moves no unit and sanctions nobody. The ledger refuses the
+evidence of such a round itself with 409 `ROUND_CLOSED_UNPAID` (`finalize` already refuses a
+repaired or an unapplied round before the ledger is asked). A refused `finalize` records
+nothing, and a run that rolled back before this record existed is not stuck: its next
 `finalize` records the closed rounds. A round that is pending, settled, awaiting its rollback,
 or that has an open audit or dispute is not withdrawn and still answers the next round 409
 `FINALIZE_ORDER`.

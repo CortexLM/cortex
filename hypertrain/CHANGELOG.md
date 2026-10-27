@@ -163,6 +163,10 @@
   snapshot change, nothing minted or moved, and a run already stuck this way is released by its
   next `finalize`. A round that is pending, settled, awaiting its rollback or has an open audit
   or dispute still blocks. See `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- The ledger no longer pays a round that finality closed without a reward: its reward evidence is
+  refused with `ROUND_CLOSED_UNPAID` (409), before and after the round was recorded as withdrawn.
+  `finalize` already stopped a repaired or an unapplied round upstream; this is the ledger's own
+  rule, so a future caller cannot mint it.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

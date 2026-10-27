@@ -713,6 +713,9 @@ class EscrowV2:
                     expected = last + 1 if last is not None else 0
                     number = reward.shadow_ordinal
                 case RewardFinalize():
+                    # Whatever the caller checked, finality's closure is the ledger's own rule.
+                    if self.round_closure is not None and self.round_closure(reward.w) is not None:
+                        raise EscrowError("ROUND_CLOSED_UNPAID")
                     expected = self._first_open_round(below=reward.w)
                     number = reward.w
                 case unreachable:

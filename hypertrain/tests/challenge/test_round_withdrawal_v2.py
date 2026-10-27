@@ -261,6 +261,25 @@ def test_a_closed_round_is_recorded_once(network, ledger: EscrowV2) -> None:
     ledger.verify()
 
 
+@pytest.mark.parametrize("close", [closed_unpaid, rolled_back], ids=["exclusion", "rollback"])
+def test_the_evidence_of_a_closed_round_is_never_paid(network, ledger: EscrowV2, close) -> None:
+    store, run = network.store, network.manifest.run_id()
+    _, reward0, evidence0 = signed_round(network, ledger, 0)
+    _, reward1, evidence1 = signed_round(network, ledger, 1)
+    put_finality(store, close(run, 0))
+    put_finality(store, unresolved(run, 1))
+    issued = ledger.balances().issued
+    # Nothing is recorded yet, so round 0 is the first open round: only its closure refuses it.
+    with pytest.raises(EscrowError, match="ROUND_CLOSED_UNPAID"):
+        ledger.reward_finalize(reward0, evidence0)
+    assert (withdrawals(ledger), minted_since(ledger, issued)) == ([], 0)
+    # Once round 1 has recorded it, the same evidence is still refused for what it is.
+    ledger.reward_finalize(reward1, evidence1)
+    with pytest.raises(EscrowError, match="ROUND_CLOSED_UNPAID"):
+        ledger.reward_finalize(reward0, evidence0)
+    assert minted_since(ledger, issued) == ledger.policy.round_reward_units
+
+
 def test_the_event_chain_commits_to_the_withdrawal(network, ledger: EscrowV2) -> None:
     store, run = network.store, network.manifest.run_id()
     _, reward1, evidence1 = signed_round(network, ledger, 1)
