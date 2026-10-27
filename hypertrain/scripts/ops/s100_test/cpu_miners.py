@@ -10,13 +10,20 @@ Each stage is timed into DIR/stages.tsv; seeds stay 0600 in DIR/m<i>/ and are ne
   admit DIR PLAN       PLAN "1:12,2:12,3:12,0:4": miner:target clean trials, in order
   round DIR W I [I..]  run-v2 --round W for the listed miners, in parallel
 A trial is retried only on the transient refusals the challenge documents (503, SEED_NOT_READY,
-TRIAL_CAPACITY); any other failure stops the plan, since a missed trial suspends the identity.
+TRIAL_CAPACITY); any other failure stops the plan, since a missed trial strands the identity
+(409 CHALLENGE_EXPIRED).
 
 ATEN_CPU_CAPABILITY must name the challenge host's ATen CPU capability (avx2 for s100, a Zen 3).
 Trials and audits score only on bitwise equality with the challenge's own CPU replay, and the
 AVX-512 kernels of a newer miner host give data-dependent last-bit differences in the optimizer
 state (2026-10-26: trial 6 of 6 SUSPENDED PENDING_REPLAY_MISMATCH; the same job matched under
 ATEN_CPU_CAPABILITY=avx2). admit and round refuse to start without it.
+
+HT_MINER_DEVICE=cuda drives a GPU miner for a CUDA run instead: run this script with the GPU image's
+python (`docker run --gpus device=N -e HT_IMAGE_DIGEST=<manifest image digest> -e
+HT_MINER_DEVICE=cuda`, docs/s100-test-stack.md section 6.5). The ATen pin is then not needed
+(the reference runs on a GPU host), HT_IMAGE_DIGEST is, a CLI stage that uses the GPU first waits
+for the GPU to be idle, and a 500 from the challenge (its remote reference failed) is retried.
 """
 
 from __future__ import annotations
@@ -42,8 +49,36 @@ TRANSIENT = re.compile(
     r"|beacon infrastructure paused|authenticated assignment not ready"
     r"|ConnectError|ConnectTimeout|ReadTimeout|WriteTimeout|RemoteProtocolError|ReadError"
 )
+DEVICE = os.environ.get("HT_MINER_DEVICE", "cpu")
+if DEVICE == "cuda":
+    TRANSIENT = re.compile(TRANSIENT.pattern + r"|ChallengeHTTPError: 500\b")
+GPU_STAGES = ("probe-v2", "run-v2")
 ENV = {**os.environ, "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "PYTHONHASHSEED": "0"}
 LOCK = threading.Lock()
+
+
+def wait_gpu_idle(limit_mib: int = 2048, patience: float = 240) -> None:
+    """Nothing of ours holds the GPU between two CLI processes, so memory in use is foreign: the
+    Lium validator's matmul holds ~265 GiB for minutes and the CUDA worker would die with OOM.
+    240 s: the first challenge is due 100 rounds (5 min) after the join."""
+    smi = shutil.which("nvidia-smi")
+    if smi is None:
+        raise SystemExit("nvidia-smi unavailable")
+    start = time.monotonic()
+    while True:
+        query = subprocess.run(  # noqa: S603 - PATH-resolved nvidia-smi, fixed query
+            [smi, "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=20,
+        )
+        used = max(int(x) for x in query.stdout.split())
+        if used <= limit_mib:
+            return
+        if time.monotonic() - start > patience:
+            raise SystemExit(f"GPU still busy after {patience:.0f}s: {used} MiB in use")
+        time.sleep(10)
 
 
 def log(root: Path, row: dict[str, object]) -> None:
@@ -55,6 +90,8 @@ def log(root: Path, row: dict[str, object]) -> None:
 
 def cli(root: Path, i: int, name: str, args: list[str], **extra: object) -> tuple[int, str, str]:
     m = root / f"m{i}"
+    if DEVICE == "cuda" and name in GPU_STAGES:
+        wait_gpu_idle()
     t0 = time.monotonic()
     p = subprocess.run(  # noqa: S603 - fixed miner CLI argv, no shell
         [HM, *args], cwd=m, env=ENV, capture_output=True, text=True, timeout=1800
@@ -106,7 +143,7 @@ def setup(argv: list[str]) -> int:
             "image_digest": image,
             "run_id": run_id,
             "owner_hotkey": owner,
-            "device": "cpu",
+            "device": DEVICE,
         }
         (m / "miner.toml").write_text("".join(f"{k} = {json.dumps(v)}\n" for k, v in conf.items()))
         (m / "origin.txt").write_text(origin_ids[i] + "\n")
@@ -237,6 +274,11 @@ def trial(root: Path, i: int, k: int) -> None:
 
 
 def require_capability() -> None:
+    if DEVICE == "cuda":
+        # island_worker.py refuses a worker whose HT_IMAGE_DIGEST differs from the manifest's.
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", os.environ.get("HT_IMAGE_DIGEST", "")):
+            raise SystemExit("set HT_IMAGE_DIGEST to the manifest image_digest (docker run -e)")
+        return
     if not os.environ.get("ATEN_CPU_CAPABILITY"):
         raise SystemExit(
             "set ATEN_CPU_CAPABILITY to the challenge host's capability (avx2 on s100)"
@@ -247,6 +289,8 @@ def admit(argv: list[str]) -> int:
     require_capability()
     root, plan = Path(argv[0]), [tuple(map(int, x.split(":"))) for x in argv[1].split(",")]
     for i, target in plan:
+        if DEVICE == "cuda":
+            wait_gpu_idle()  # the join starts the 100-round window of the first challenge
         join(root, i)
         while True:
             record = status(root, i)["record"]

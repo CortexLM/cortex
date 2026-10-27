@@ -125,9 +125,19 @@ which includes its nonce; `WorkScreenV2` is reserved by admission and nonce.
 alone. Retry the exact stored signed operation: changing expiry or signature does
 not create a new semantic attempt (`protocol/envelope_v2.py:replay_key`).
 
-After `GET /v2/runs/{run_id}/join/{admission_id}/challenge` issues a challenge,
-the operator exports the matching staged `IslandJobV1`, its inputs and the signed
-challenge into a new or empty folder:
+The challenge is issued by the owner's signed `GET
+/v2/runs/{run_id}/join/{admission_id}/challenge`: headers `X-Hotkey` and
+`X-Trial-Signature`, the hex signature by the admission's current hotkey of
+`hypertrain/trial-challenge/2|{run_id}|{admission_id}`. Opening a trial takes one of
+the run's two trial places, so nobody else may ask for it: unknown run 404, unknown
+admission 409 `UNKNOWN_ADMISSION`, a deregistered or revoked owner 403, any other
+hotkey, another domain, run or admission, or a missing or bad signature 403 `hotkey is
+not current accepted identity`. The admin token is no substitute. The signature is
+static, like the other header-signed routes: it replays only what the owner may ask,
+and an asking never suspends anyone. Once a challenge is issued, the operator exports
+the matching staged `IslandJobV1`, its inputs and the signed challenge (the export
+carries it as `challenge_envelope`; the CLI does not call the route) into a new or
+empty folder:
 
 ```bash
 uv run --frozen python -m hypertrain.challenge.trial_export \
@@ -145,7 +155,7 @@ uv run --frozen hypertrain-miner proof-v2 --config miner.toml --proof proof.json
 
 A joined miner can skip the export: `probe-v2 --config miner.toml > proof.json`
 without `--job`/`--challenge` reads its admission ID (`status-v2`), GETs the
-challenge (which issues the trial when none is open), then
+challenge with its signature (which issues the trial when none is open), then
 `GET /v2/runs/{run_id}/join/{admission_id}/job` with headers `X-Hotkey` and
 `X-Trial-Signature` (hex hotkey signature of
 `hypertrain/trial-job/2|{run_id}|{admission_id}`). The route returns the admin
@@ -174,6 +184,28 @@ lower nominal probation/base rates. Calendar age or a legacy bond flag is not
 graduation. Join quotas, one concurrent non-ACTIVE identity per coldkey, funded
 locks and known-owner caps bound exposure; they do not reveal every Sybil owner.
 
+An application that holds no stake and can no longer progress does not keep its place.
+An `APPLIED` row is dead once more than `challenge_rounds` rounds have passed since its
+seed (`join` sets it one round after the join): `challenge` then refuses it for ever. At
+the start of every `join` the service suspends each dead row that has no locked unit and no
+lock waiting in the outbox, with reason `APPLIED_EXPIRED`. The row, its transitions and its
+spent hotkey stay; the pending place and the coldkey are released, so the miner may apply
+again with a new hotkey. Only `APPLIED_EXPIRED` rows are ignored by the one-non-`ACTIVE`-row
+rule; every other non-`ACTIVE` row still blocks its coldkey. A funded row is never touched.
+
+The policy may also set `max_unfunded_per_prefix` (1 to 32; absent by default and then
+omitted from the digest, so every earlier policy digest and run id is unchanged). `join`
+then answers `PREFIX_PENDING_CAPACITY` when the /24 (IPv4) or /64 (IPv6) of the caller already
+holds that many unfunded `APPLIED` rows; funded rows and later states do not count, so an
+operator who funds right after joining is never refused. The prefix is kept as a tag keyed by
+the coordinator's secret, not bound to the quota epoch, in the table `admission_origin`
+(created on open; a database from before it has no tags and counts nothing). A run that sets
+the field has a new policy digest and a new run id, and an image without the field refuses
+its policy (`extra='forbid'`), so the challenge image ships first. Enable it only once the
+challenge container sees real client addresses: behind a proxy every client may share one
+prefix, and the cap becomes a global cap on unfunded newcomers. A first value to try is
+`join_burst` (4).
+
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
 rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
 refused (`CHALLENGE_EXPIRED`) once more than `challenge_rounds` rounds have passed since
@@ -189,14 +221,22 @@ The renewal window does not grow with `work_screen_epoch_rounds`. A trial finali
 sets the next seed one round later, and the next trial must fit in the `challenge_rounds`
 rounds after that seed: always 100, which the policy schema fixes, about 5 min at 3 s
 rounds. The challenge deadline is seed + 100 whenever the challenge is requested, and the
-proof must be accepted by then. A challenge left unproven past its deadline suspends the
-miner (`CHALLENGE_EXPIRED`) at its next challenge request. So a miner that is down for
+proof must be accepted by then. A challenge left unproven past its deadline is closed
+`EXPIRED` by the master at the next beacon push (or at the next challenge request, which
+frees the place first). Nobody is suspended: the miner keeps its state, its clean trials and
+its screen, and a later request answers 409 `CHALLENGE_EXPIRED` until a re-seed exists. The
+deadline round itself still accepts a proof. A trial whose proof was accepted is never expired
+by the clock, and its finalization may follow the deadline: the miner may re-post the exact
+accepted proof and screen after their deadline to run a finalization that failed (the proof
+route commits the proof and the finalization separately). A different proof after the
+deadline is refused. So a miner that is down for
 longer than that window minus one trial's duration cannot renew its screen, whatever
 `work_screen_epoch_rounds` is. At most two trials are open at once across the run (the
 schema fixes `max_trial_replays` at 2). In a run longer than `work_screen_epoch_rounds`
 (about 5 h at 6000), every ACTIVE miner must therefore chain its trials, each one proven
 inside its window, to stay eligible. Otherwise only the suspend and resume above bring it
-back, to PROBATION at zero clean trials.
+back, to PROBATION at zero clean trials; an expired trial changes none of that, it only frees
+its place.
 
 `manifest_v2 example` writes 6000 (about 5 h). In a serial 40-trial campaign
 (3 × 12 ACTIVE + 4 PROBATION), each trial spans at most about `challenge_rounds` + 1
@@ -225,6 +265,23 @@ No automatic migration is provided; separate operator resolution is required.
 Funding uses signed `EscrowLock` via `POST /v2/runs/{run_id}/escrow/lock`, not a
 CLI `--bond` flag. Test genesis has pinned nonfinancial origins; production mode
 has separate reward authority/issuance bounds and no test-genesis conversion.
+
+The bond is the `LOCK_ADMISSION` of the admission. It has its own settlement, derived from
+the admission's records on every call (ADR 0010, Part 6), and `GET /v2/runs/{run_id}/admission/{hotkey}`
+lists it under `bond`: per residual lock its units, whether it is `releasable`, its
+`release_beacon` and the `finality_hash` and `closed_dispute_root` to sign. The owner takes it
+back with the existing signed `EscrowRelease` (`POST .../escrow/release`) carrying those two
+hashes. It is released only when the admission is not `BANNED` and has no pending dispute or
+lock in the outbox, every round whose roster lists it is closed, none of its hotkeys has
+unvested rewards, it is not live (`ACTIVE`, or `PROBATION` with four clean trials, until its
+screen ends), and the last reward origin of its hotkeys has matured. The bond is burned by the
+service and never through a route, in three cases: a referee verdict of fraud against the miner
+(it also burns the coldkey's unvested rewards and bans the admission; `LOCK_BANNED` follows), a
+round-stage audit mismatch that the caller confirmed as the miner's (`reason="AUDIT_MISMATCH"`:
+the admission is suspended with one strike, and its coldkey stays bound as in probation), and a
+roster member that never committed (`reason="NO_SHOW"`). The last two burn the bond alone. An
+uncontested `MISMATCH`, an infrastructure closure and a verdict against the auditor leave it
+intact.
 
 Production funding is one coordinator-signed `ProductionBootstrap`, posted as an
 `ht/2` envelope to `POST /v2/runs/{run_id}/admin/bootstrap` (admin bearer). The

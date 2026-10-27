@@ -5,7 +5,12 @@
   interfaces: nothing in the v2 challenge imports it, and no production run, pin, master or
   emission profile changes. Amended 2026-10-27 by the branch `v3-core-eviction-fixes` (the Lens
   gate, F1 to F7). Rows "During island training" and "After commit, before the delta" amended
-  2026-10-27 by ADR 0011 part 5 (AUD-06).
+  2026-10-27 by ADR 0011 part 5 (AUD-06). Amended 2026-10-27 by ADR 0010 for every run, not only
+  P1 runs: an unproven trial is closed `EXPIRED` by the clock and suspends nobody, an unsigned
+  challenge GET no longer exists, a dead unfunded `APPLIED` row is suspended `APPLIED_EXPIRED` at
+  the next `join`, and a signed leave names the coordinator epoch. The rows of "What happens
+  today" and of "P1 and the v2 admission rules" that describe the earlier behaviour are kept as
+  the record of the review.
 - Order: founder, 2026-10-26: the network runs mostly on Spot 8x B300 hosts that can be evicted
   at any time, with no lost work and no reinstall by hand (programme §2.3-2.4). Design
   checklist: lot brief `B-eviction-tolerant-core.md`.

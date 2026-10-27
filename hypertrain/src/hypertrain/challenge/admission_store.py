@@ -67,6 +67,14 @@ class AdmissionStore:
           CREATE TABLE IF NOT EXISTS admission_pending(
             dispute_id TEXT PRIMARY KEY, admission_id TEXT NOT NULL, evidence_hash TEXT NOT NULL,
             coldkey TEXT NOT NULL, resolved INTEGER NOT NULL DEFAULT 0);
+          CREATE TABLE IF NOT EXISTS admission_origin(
+            admission_id TEXT PRIMARY KEY, prefix_tag TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS admission_sanctions(
+            admission_id TEXT NOT NULL, reason TEXT NOT NULL, evidence_hash TEXT NOT NULL,
+            beacon INTEGER NOT NULL, PRIMARY KEY(admission_id, reason, evidence_hash));
+          CREATE TABLE IF NOT EXISTS admission_seizures(
+            lock_id TEXT PRIMARY KEY, admission_id TEXT NOT NULL, reason TEXT NOT NULL,
+            evidence_hash TEXT NOT NULL, beacon INTEGER NOT NULL);
         """)
 
     def record(self, hotkey: str) -> AdmissionRecord:
@@ -151,6 +159,8 @@ class AdmissionStore:
             "INSERT INTO admission_transitions(admission_id,state,reason,beacon) VALUES(?,?,?,?)",
             (admission_id, state, reason, beacon),
         )
+        if state != "APPLIED":  # the prefix tag only serves the cap on APPLIED rows
+            self.db.execute("DELETE FROM admission_origin WHERE admission_id=?", (admission_id,))
 
     def bind_pending(self, record: AdmissionRecord, dispute_id: str, evidence_hash: str) -> None:
         """Bind current evidence; settled IDs cannot authorize later incidents."""

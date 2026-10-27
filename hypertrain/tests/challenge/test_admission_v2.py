@@ -217,23 +217,355 @@ def test_resume_requires_fresh_challenge_without_erasing_history(tmp_path: Path)
     assert a.store.record(HOT.ss58).clean_count == 0
 
 
-def test_trial_capacity_released_when_challenge_expires(tmp_path: Path) -> None:
-    # Given
+def applied(a: Admission, s: Setup, index: int, now: int) -> str:
+    """An APPLIED identity of its own keys (hot == cold), as the capacity tests use."""
+    from hypertrain.protocol.keys import Keypair
+
+    key = Keypair(bytes([30 + index]) * 32)
+    request_id = f"{index + 1:02x}" * 32
+    joined = a.join(canonicalize(request(s, request_id, key, key).body()), now=now, ip_prefix="x")
+    return joined.admission_id
+
+
+def open_trials(a: Admission) -> int:
+    return a.store.db.execute(
+        "SELECT COUNT(*) FROM admission_trial_results WHERE outcome='OPEN'"
+    ).fetchone()[0]
+
+
+def test_reaper_closes_only_unproven_trials_past_deadline_and_penalises_nobody(
+    tmp_path: Path,
+) -> None:
+    # Given: two trials issued at round 2 (deadline 102) and never proved
+    s = setup()
+    a = service(s, tmp_path)
+    holders = [applied(a, s, i, 1) for i in range(2)]
+    for holder in holders:
+        a.challenge(holder, now=2)
+    # When / Then: the deadline round still accepts a proof, so nothing closes at 102
+    assert a.reap_expired_trials(now=102) == [] and open_trials(a) == 2
+    assert a.reap_expired_trials(now=103) == [0, 1] and open_trials(a) == 0
+    assert [
+        row[0]
+        for row in a.store.db.execute("SELECT outcome FROM admission_trial_results ORDER BY epoch")
+    ] == ["EXPIRED", "EXPIRED"]
+    # Expiry is bookkeeping, not a sanction: state, strikes and seed are untouched, and the
+    # closed trial is not taken again (one trial per seed).
+    for holder in holders:
+        record = a.store.by_id(holder)
+        assert (record.state, record.strikes, record.clean_count) == ("APPLIED", 0, 0)
+    assert a.store.db.execute("SELECT seed_beacon FROM admissions_v2").fetchall()[0][0] == 2
+    with pytest.raises(AdmissionError, match="CHALLENGE_EXPIRED"):
+        a.challenge(holders[0], now=104)
+    assert a.store.db.execute("SELECT COUNT(*) FROM admission_trials").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("state", ["APPLIED", "ACTIVE"])
+def test_challenge_issued_when_two_unproven_trials_are_past_their_deadline(
+    tmp_path: Path, state: str
+) -> None:
+    # Given: two registered identities open a trial each and never prove it. The Lens
+    # starvation: they are still holding both places thousands of rounds later.
+    s = setup()
+    a = service(s, tmp_path)
+    holders = [applied(a, s, i, 1) for i in range(2)]
+    for holder in holders:
+        a.challenge(holder, now=2)
+        a.store.transition(holder, state, "TEST", 2)  # a lapsed re-screen of an ACTIVE miner
+    newcomer = applied(a, s, 2, 5000)
+    # When: the newcomer asks inside its own window
+    envelope = a.challenge(newcomer, now=5001)
+    # Then: it is served, and nobody was suspended for the trial they left open (an unfunded
+    # application that lapsed is retired by the join itself, which is another rule)
+    assert envelope["type"] == "JoinChallenge"
+    assert "CHALLENGE_EXPIRED" not in [
+        row[0] for row in a.store.db.execute("SELECT reason FROM admission_transitions")
+    ]
+    if state == "ACTIVE":
+        assert [a.store.by_id(h).state for h in holders] == [state, state]
+
+
+def sybil_join(a: Admission, s: Setup, index: int, now: int, prefix: str = "203.0.113.0/24"):
+    """A registered identity with keys of its own that never funds its application."""
+    from hypertrain.protocol.keys import Keypair
+
+    request_id = f"{index + 1:02x}" * 32
+    hot, cold = Keypair(bytes([100 + index]) * 32), Keypair(bytes([140 + index]) * 32)
+    return a.join(canonicalize(request(s, request_id, hot, cold).body()), now=now, ip_prefix=prefix)
+
+
+def test_unfunded_applied_rows_release_their_places_once_the_window_is_dead(
+    tmp_path: Path,
+) -> None:
+    # Given: the Lens flood. 32 unfunded joins from one /24 at round 1 (seed 2, window to 102).
+    s = setup()
+    a = service(s, tmp_path)
+    sybils = [sybil_join(a, s, i, 1).admission_id for i in range(32)]
+    honest = request(s, "ee" * 32, OTHER, COLD)
+    # When / Then: while the window is open the places are really taken. The refused join
+    # rolls back, so it reaps nothing at round 102, where challenge() could still serve.
+    with pytest.raises(AdmissionError, match="PENDING_CAPACITY"):
+        a.join(canonicalize(honest.body()), now=102, ip_prefix="198.51.100.0/24")
+    assert a.store.db.execute("SELECT COUNT(*) FROM admission_transitions").fetchone()[0] == 0
+    # Once the window is over the rows are dead: an honest join (even with the coldkey of a
+    # sybil) takes a place, and the 32 rows are suspended, not deleted.
+    joined = a.join(canonicalize(honest.body()), now=103, ip_prefix="198.51.100.0/24")
+    assert joined.state == "APPLIED"
+    rows = {
+        r[0]: (r[1], r[2])
+        for r in a.store.db.execute("SELECT admission_id,state,reason FROM admissions_v2")
+    }
+    assert {rows[i] for i in sybils} == {("SUSPENDED", "APPLIED_EXPIRED")}
+    assert a.store.db.execute("SELECT COUNT(*) FROM admissions_v2").fetchone()[0] == 33
+    assert (
+        a.store.db.execute(
+            "SELECT COUNT(*) FROM admission_transitions WHERE reason='APPLIED_EXPIRED'"
+        ).fetchone()[0]
+        == 32
+    )
+    # Their hotkeys stay spent: the application is dead, the identity is not recycled.
+    from hypertrain.protocol.keys import Keypair
+
+    reused = request(s, "f0" * 32, Keypair(bytes([100]) * 32), Keypair(b"\x5a" * 32))
+    with pytest.raises(AdmissionError, match="HOTKEY_HISTORY_EXISTS"):
+        a.join(canonicalize(reused.body()), now=104, ip_prefix="elsewhere")
+
+
+def test_funded_or_outbox_pending_applied_row_is_never_reaped(tmp_path: Path) -> None:
+    # Given: two applications past their window that hold stake: one locked, one whose lock
+    # is only in the outbox (crash before the ledger commit).
+    from hypertrain.protocol.keys import Keypair
+
+    s = setup()
+    a = service(s, tmp_path)
+    funded = apply(a, s)
+    origin, _ = fund(a.escrow)
+    op = EscrowLock(
+        operation_id="22" * 32,
+        owner=COLD.ss58,
+        units=1000,
+        origin_ids=[origin],
+        admission_id=funded,
+        dispute_id=None,
+        kind="LOCK_ADMISSION",
+    )
+    a.lock(canonicalize(seal(COLD, "EscrowLock", a.escrow.run_id, op, 500)), now=1)
+    queued_hot = Keypair(b"\x31" * 32)
+    queued = a.join(
+        canonicalize(request(s, "33" * 32, queued_hot, OTHER).body()), now=1, ip_prefix="queued"
+    ).admission_id
+    pending = EscrowLock(
+        operation_id="44" * 32,
+        owner=OTHER.ss58,
+        units=1000,
+        origin_ids=[origin],
+        admission_id=queued,
+        dispute_id=None,
+        kind="LOCK_ADMISSION",
+    )
+    a.store.enqueue_lock(pending, OTHER.ss58)
+    # When: a later join looks for dead applications
+    a.join(
+        canonicalize(request(s, "55" * 32, Keypair(b"\x32" * 32), Keypair(b"\x33" * 32)).body()),
+        now=500,
+        ip_prefix="later",
+    )
+    # Then: neither is touched, and the funded coldkey still holds its one application
+    assert [a.store.by_id(i).state for i in (funded, queued)] == ["APPLIED", "APPLIED"]
+    assert a.store.db.execute("SELECT COUNT(*) FROM admission_transitions").fetchone()[0] == 0
+    with pytest.raises(AdmissionError, match="COLDKEY_PROBATION_EXISTS"):
+        a.join(
+            canonicalize(request(s, "66" * 32, Keypair(b"\x34" * 32), COLD).body()),
+            now=501,
+            ip_prefix="x",
+        )
+
+
+def test_reaped_coldkey_can_apply_again_but_other_suspensions_still_block_it(
+    tmp_path: Path,
+) -> None:
+    from hypertrain.protocol.keys import Keypair
+
+    s = setup()
+    a = service(s, tmp_path)
+    # Given: HOT/COLD applied and never fetched its challenge; OTHER's coldkey was suspended by
+    # an operator.
+    apply(a, s)
+    suspended = a.join(
+        canonicalize(request(s, "77" * 32, Keypair(b"\x35" * 32), OTHER).body()),
+        now=1,
+        ip_prefix="y",
+    ).admission_id
+    a.suspend(a.store.by_id(suspended).hotkey, reason="OPERATOR", now=2)
+    # When: both coldkeys apply again after the window
+    again = a.join(
+        canonicalize(request(s, "88" * 32, Keypair(b"\x36" * 32), COLD).body()),
+        now=103,
+        ip_prefix="z",
+    )
+    # Then: the lapsed application no longer blocks its coldkey; the operator's suspension does
+    assert again.state == "APPLIED" and again.coldkey == COLD.ss58
+    with pytest.raises(AdmissionError, match="COLDKEY_PROBATION_EXISTS"):
+        a.join(
+            canonicalize(request(s, "99" * 32, Keypair(b"\x37" * 32), OTHER).body()),
+            now=104,
+            ip_prefix="w",
+        )
+    # and a lapsed application whose trial was issued but never proved is dead the same way
+    stale = a.join(
+        canonicalize(request(s, "aa" * 32, Keypair(b"\x38" * 32), Keypair(b"\x39" * 32)).body()),
+        now=110,
+        ip_prefix="v",
+    ).admission_id
+    a.challenge(stale, now=111)
+    a.join(
+        canonicalize(request(s, "bb" * 32, Keypair(b"\x3a" * 32), Keypair(b"\x3b" * 32)).body()),
+        now=300,
+        ip_prefix="u",
+    )
+    assert (a.store.by_id(stale).state, a.store.by_id(stale).reason) == (
+        "SUSPENDED",
+        "APPLIED_EXPIRED",
+    )
+    assert open_trials(a) == 0
+
+
+def capped_setup(cap: int) -> Setup:
+    """The test setup with the optional per-prefix cap on unfunded applications."""
+    base = setup()
+    policy = base.admission_policy.model_copy(update={"max_unfunded_per_prefix": cap})
+    body = base.manifest.body()
+    body["network"]["admission_policy_hash"] = digest(policy)
+    return replace(base, manifest=RunManifestV2.model_validate(body), admission_policy=policy)
+
+
+def join_from(a: Admission, s: Setup, index: int, now: int, prefix: str, cold=None):
+    from hypertrain.protocol.keys import Keypair
+
+    hot = HOT if index == 0 else Keypair(bytes([100 + index]) * 32)
+    cold = cold or (COLD if index == 0 else Keypair(bytes([140 + index]) * 32))
+    request_id = f"{index + 1:02x}" * 32
+    return a.join(canonicalize(request(s, request_id, hot, cold).body()), now=now, ip_prefix=prefix)
+
+
+def test_prefix_cap_counts_only_unfunded_applied_rows_of_that_prefix(tmp_path: Path) -> None:
+    # Given: at most 2 unfunded applications per prefix
+    s = capped_setup(2)
+    a = service(s, tmp_path)
+    first = join_from(a, s, 0, 1, "203.0.113.0/24").admission_id
+    join_from(a, s, 1, 1, "203.0.113.0/24")
+    # When / Then: a third from the same prefix is refused and leaves nothing behind
+    with pytest.raises(AdmissionError, match="PREFIX_PENDING_CAPACITY"):
+        join_from(a, s, 2, 1, "203.0.113.0/24")
+    assert a.store.db.execute("SELECT COUNT(*) FROM admissions_v2").fetchone()[0] == 2
+    assert a.store.db.execute("SELECT COUNT(*) FROM admission_origin").fetchone()[0] == 2
+    # another prefix is not affected
+    assert join_from(a, s, 2, 1, "198.51.100.0/24").state == "APPLIED"
+    # a funded application does not count: it paid for its place
+    origin, _ = fund(a.escrow)
+    op = EscrowLock(
+        operation_id="22" * 32,
+        owner=COLD.ss58,
+        units=1000,
+        origin_ids=[origin],
+        admission_id=first,
+        dispute_id=None,
+        kind="LOCK_ADMISSION",
+    )
+    a.lock(canonicalize(seal(COLD, "EscrowLock", a.escrow.run_id, op, 500)), now=1)
+    assert join_from(a, s, 3, 1, "203.0.113.0/24").state == "APPLIED"
+    # and the same joins pass where the policy sets no cap
+    free = setup()
+    (tmp_path / "free").mkdir()
+    b = service(free, tmp_path / "free")
+    for index in range(4):
+        join_from(b, free, index, 1, "203.0.113.0/24")
+
+
+def test_prefix_cap_survives_restart_and_epoch_rollover_then_frees_with_the_window(
+    tmp_path: Path,
+) -> None:
+    from hypertrain.protocol.keys import Keypair
+
+    # Given: two unfunded applications at round 999, the last round of quota epoch 0
+    # (work_screen_epoch_rounds is 1000 in this setup); their window runs to round 1100.
+    s = capped_setup(2)
+    a = service(s, tmp_path)
+    for index in range(2):
+        join_from(a, s, index, 999, "203.0.113.0/24", cold=Keypair(bytes([150 + index]) * 32))
+    tags = [r[0] for r in a.store.db.execute("SELECT prefix_tag FROM admission_origin")]
+    assert len(set(tags)) == 1 and "203.0.113" not in tags[0]
+    # the tag is keyed by the coordinator's secret, so it names the prefix to nobody else
+    other = Admission(
+        a.escrow,
+        s.admission_policy,
+        COORD,
+        beacon=a.beacon,
+        stage_reference=a.stage_reference,
+        objects=a.objects,
+        ip_secret=b"another-secret",
+        qualified=a.qualified,
+        conservative_bound=a.conservative_bound,
+        backend="cpu",
+    )
+    assert other._prefix_tag("203.0.113.0/24") != tags[0]
+    assert a._prefix_tag("203.0.113.0/24") == tags[0] != a._prefix_tag("198.51.100.0/24")
+    # When: the service restarts and a third arrives in epoch 1, rows still alive
+    restored = service(s, tmp_path)
+    with pytest.raises(AdmissionError, match="PREFIX_PENDING_CAPACITY"):
+        join_from(restored, s, 2, 1001, "203.0.113.0/24")
+    # Then: once the window is over the rows are retired, the tag goes with them, the cap frees
+    joined = join_from(restored, s, 2, 1101, "203.0.113.0/24")
+    assert joined.state == "APPLIED"
+    assert restored.store.db.execute("SELECT COUNT(*) FROM admission_origin").fetchone()[0] == 1
+
+
+def test_database_without_origin_table_gets_it_and_counts_nothing(tmp_path: Path) -> None:
+    # Given: an application accepted before the table existed (a database of an older version)
+    s = capped_setup(2)
+    a = service(s, tmp_path)
+    join_from(a, s, 0, 1, "203.0.113.0/24")
+    a.store.db.execute("DROP TABLE admission_origin")
+    # When: the service opens it again
+    restored = service(s, tmp_path)
+    # Then: the table is back and the legacy row counts against no prefix
+    assert restored.store.db.execute("SELECT COUNT(*) FROM admission_origin").fetchone()[0] == 0
+    join_from(restored, s, 1, 2, "203.0.113.0/24")
+    join_from(restored, s, 2, 2, "203.0.113.0/24")
+    with pytest.raises(AdmissionError, match="PREFIX_PENDING_CAPACITY"):
+        join_from(restored, s, 3, 2, "203.0.113.0/24")
+
+
+def test_poll_after_deadline_keeps_miner_whose_proof_is_accepted(tmp_path: Path) -> None:
+    # Given: a proof accepted on the last round of the window; its finalization has not run
+    # (the proof route commits the proof and the finalization in two transactions).
     s = setup()
     a = service(s, tmp_path)
     admission = apply(a, s)
     a.challenge(admission, now=2)
-    # When
+    a.prepare_reference(admission, now=2)
+    proof, screen = current_proof(a, admission, 2)
+    raw = canonicalize(sign_proof(HOT, a.escrow.run_id, proof, 102))
+    screen_raw = canonicalize(seal(HOT, "WorkScreenV2", a.escrow.run_id, screen, 102))
+    assert a.proof(raw, screen_raw, now=102).state == "PROBATION"
+    # When: any caller polls after the deadline
     a.challenge(admission, now=103)
-    # Then: expiry is infrastructure suspension, not a fabricated clean result.
-    assert a.store.record(HOT.ss58).state == "SUSPENDED"
-    assert (
-        a.store.db.execute(
-            "SELECT COUNT(*) FROM admission_trial_results WHERE outcome='OPEN'"
-        ).fetchone()[0]
-        == 0
-    )
-    assert a.store.record(HOT.ss58).clean_count == 0
+    # Then: the accepted proof is not a missed window
+    assert a.store.record(HOT.ss58).state == "PROBATION"
+    # The miner retries the very same signed pair: its envelopes expired at the deadline, yet
+    # the exact replay is answered, so the finalization that failed can run.
+    assert a.reference_due(raw, now=103) is None
+    assert a.proof(raw, screen_raw, now=103).state == "PROBATION"
+    # The clock does not expire a proven trial either: it waits for its finalization.
+    assert a.reap_expired_trials(now=103) == [] and open_trials(a) == 1
+    final = a.trial_finality(admission, now=103)
+    assert final is not None
+    status = a.finalize_trial(admission, final, now=103)
+    assert (status.record.state, status.record.clean_count) == ("PROBATION", 1)
+    # A different proof after the deadline is still refused.
+    other = WorkProof.model_validate({**proof.body(), "delta_hash": H})
+    with pytest.raises(ValueError):
+        a.proof(canonicalize(sign_proof(HOT, a.escrow.run_id, other, 102)), screen_raw, now=103)
 
 
 @pytest.mark.parametrize("boundary", ["before_ledger", "after_ledger", "after_receipt"])

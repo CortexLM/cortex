@@ -43,6 +43,37 @@
   run's state hash.
 
 ### Changed
+- A challenge poll after the deadline no longer suspends a miner whose proof was accepted
+  (RTA-05), and the exact accepted proof and screen may be re-posted after their deadline so
+  that a finalization that failed can run. See `docs/adr/0010-admission-hardening.md` at the
+  monorepo root.
+- An unproven challenge past its deadline is closed `EXPIRED` by the master at the next beacon
+  push and no longer suspends the miner (RTA-03); a later request answers 409
+  `CHALLENGE_EXPIRED`. The two trial places can no longer be held for good by identities that
+  never prove. ADR 0010.
+- `GET /v2/runs/{run_id}/join/{admission_id}/challenge` needs the owner's signature
+  (`X-Hotkey`, `X-Trial-Signature` over `hypertrain/trial-challenge/2|run|admission`, as the
+  `/job` route does with its own domain), so a third party can no longer open a rival's trial
+  (RTA-04). The admin export carries the signed challenge as `challenge_envelope` and
+  `trial_export` no longer calls the route; the miner signs the GET. A client built before this
+  change gets 403. ADR 0010.
+- At the start of every `join`, an `APPLIED` row that is past its challenge window
+  (`seed + challenge_rounds`) and holds no stake is suspended as `APPLIED_EXPIRED`: 32 unfunded
+  joins can no longer hold every pending place for good (RTA-02). Its coldkey may apply again;
+  its hotkey stays spent; a funded row is never touched. ADR 0010.
+- Optional admission policy field `max_unfunded_per_prefix` (1 to 32): `join` refuses a new
+  application with `PREFIX_PENDING_CAPACITY` when its /24 or /64 already holds that many unfunded
+  `APPLIED` rows (RTA-02). Absent by default and omitted from the digest, so no existing policy
+  digest or run id changes. ADR 0010.
+- The admission bond can be released and slashed (RTA-06). `EscrowV2` takes an optional
+  `admission_settlement` and settles a `LOCK_ADMISSION` through it, by lock kind; the settlement
+  is derived from the admission's records. `Admission.settle_fraud(dispute_id)` runs with every
+  accepted resolution: a referee verdict of fraud against the miner burns the bond and the
+  coldkey's unvested rewards and bans the admission. `Admission.seize_bond(admission_id,
+  reason, evidence_hash, now)` burns the bond for a no-show (`reason="NO_SHOW"`), a confirmed
+  round-stage audit mismatch (`"AUDIT_MISMATCH"`: also suspends with one strike) or a convicted
+  miner (`"TRAINING_FRAUD"`); `Admission.release_bond` and the status key `bond` serve the
+  owner. `EscrowV2.slash` takes `burn_pending` (default: today's behaviour). ADR 0010.
 - CUDA network qualification records each device's compute capability with its SM count and
   accepts a device only when the pair is a row of `network_qualification.SM_COUNTS` (RTX 5090
   12.0 = 170, B300 10.3 = 148) and the count equals the signed manifest's

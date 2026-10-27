@@ -16,8 +16,9 @@
 #                        through a compose override file; only that variable may change
 #   executor-off BACKUP  drop the override and recreate the challenge without the variable
 # rollback and restore-db are not gated: they are the way back from a bad change.
-# swap, beacon, paper and rollback refuse (exit 4) a compose file with a service whose container_name
-# is missing or is not one of the six TEST names; restore-db runs no compose.
+# swap, beacon, paper, rollback, executor and executor-off refuse (exit 4) a compose file with a
+# service whose container_name is missing or is not one of the six TEST names; executor checks the
+# live file and the live file merged with its override. restore-db runs no compose.
 set -euo pipefail
 T=/root/backups/hypertrain-test; F=$T/compose.test.yml; C=hypertrain-test-challenge
 STATE=/data/hypertrain-test/state; API=http://127.0.0.1:18996; MASTER=http://10.177.245.39:8080
@@ -51,15 +52,21 @@ backup_names() { # backup_names BACKUP: its compose file, which rollback copies 
   cfg=$(compose "$f" config --format json) && test_names "$f" <<< "$cfg" || exit 4; }
 gate() { # readyz 200, no seal backlog, and a sealed seal younger than 30 min (first half of the
   # 72-min window; a seal delayed by unfinished work would make "young" mean "late", so the
-  # sealed epoch must also be the one just before the master's current epoch)
-  local ready; ready=$(curl -sf -m 10 "$MASTER/readyz") || { echo "GATE readyz not 200"; exit 2; }
+  # sealed epoch must also be the one just before the master's current epoch).
+  # HT_GATE_MAX_AGE_S replaces only the 30-min limit (1..4320 s, one epoch), for a change the
+  # founder approved outside the first half of the window; it is printed whenever it is set.
+  local max=${HT_GATE_MAX_AGE_S:-1800} ready
+  [[ $max =~ ^[1-9][0-9]{0,3}$ && $max -le 4320 ]] \
+    || { echo "GATE HT_GATE_MAX_AGE_S must be 1..4320 seconds"; exit 4; }
+  [ "$max" -eq 1800 ] || echo "GATE age limit overridden: HT_GATE_MAX_AGE_S=$max (default 1800)"
+  ready=$(curl -sf -m 10 "$MASTER/readyz") || { echo "GATE readyz not 200"; exit 2; }
   curl -s -m 10 "$MASTER/v1/weights/latest" | python3 -I -c '
 import json,sys,datetime
 d=json.load(sys.stdin); c=datetime.datetime.fromisoformat(d["computed_at"].replace("Z","+00:00"))
 age=(datetime.datetime.now(datetime.timezone.utc)-c).total_seconds(); now=json.loads(sys.argv[1])["epoch"]
 print("gate seal epoch",d["epoch"],"master epoch",now,"sealed",d.get("sealed"),"age_s",int(age))
-sys.exit(0 if d.get("sealed") is True and 0<=age<1800 and d["epoch"]==now-1 else 3)' "$ready" \
-    || { echo "GATE seal not sealed, older than 30 min, or behind"; exit 3; }; }
+sys.exit(0 if d.get("sealed") is True and 0<=age<int(sys.argv[2]) and d["epoch"]==now-1 else 3)' \
+    "$ready" "$max" || { echo "GATE seal not sealed, older than ${max}s, or behind"; exit 3; }; }
 live() { # live IMAGE_ID: the challenge answers /version and runs exactly IMAGE_ID
   local i; for i in $(seq 1 30); do curl -sf -m 5 -o /dev/null "$API/version" && break; sleep 1; done
   curl -sf -m 5 -o /dev/null "$API/version" || { echo "challenge /version not 2xx"; exit 7; }
@@ -137,7 +144,9 @@ swap)
   [[ $NEW =~ ^ghcr\.io/cortexlm/cortex/hypertrain@sha256:[0-9a-f]{64}$ ]] || { echo "bad ref"; exit 4; }
   [ "$(docker image inspect "$NEW" --format '{{.Id}}')" = "${NEW#*@}" ] || { echo "image not pulled"; exit 4; }
   grep -c '^    container_name: hypertrain-test-challenge$' "$F" | grep -qx 1 || { echo "anchor"; exit 4; }
-  umask 077; sed "/^    container_name: hypertrain-test-challenge\$/a\\    image: $NEW" "$F" > "$F.new"
+  # a second swap finds the image line the first one added: drop it, or the key would be defined twice
+  umask 077; sed '/^    container_name: hypertrain-test-challenge$/{n;/^    image: /d}' "$F" \
+    | sed "/^    container_name: hypertrain-test-challenge\$/a\\    image: $NEW" > "$F.new"
   apply challenge "$B" services.challenge.image
   images "$F"; live "${NEW#*@}"; sleep 6; date -u +%FT%TZ; check;;
 beacon)
@@ -178,8 +187,12 @@ executor)
   [[ $P =~ ^/data/[A-Za-z0-9._/-]+\.json$ ]] || { echo "PATH must be /data/....json in the container"; exit 4; }
   O=$T/compose.executor.yml; umask 077
   printf 'services:\n  challenge:\n    environment:\n      HYPERTRAIN_CUDA_EXECUTOR: %s\n' "$P" > "$O.new"
-  compose "$F" config --format json > "$B/config-before-executor.json"
-  (cd "$T" && docker compose -f "$F" -f "$O.new" config --format json) > "$B/config-after-executor.json"
+  { compose "$F" config --format json > "$B/config-before-executor.json" \
+    && (cd "$T" && docker compose -f "$F" -f "$O.new" config --format json) > "$B/config-after-executor.json"; } \
+    || { rm -f "$O.new"; echo "REFUSED $F: compose cannot resolve it with the override"; exit 4; }
+  # the file alone is what swap, rollback and executor-off bring up later; the pair is what up gets now
+  { test_names "$F" < "$B/config-before-executor.json" \
+    && test_names "$F -f $O.new" < "$B/config-after-executor.json"; } || { rm -f "$O.new"; exit 4; }
   python3 -I - "$B/config-before-executor.json" "$B/config-after-executor.json" \
       services.challenge.environment.HYPERTRAIN_CUDA_EXECUTOR <<'EOF' \
     || { rm -f "$O.new"; echo "unexpected compose change"; exit 5; }
@@ -199,7 +212,9 @@ EOF
   (cd "$T" && docker compose -f "$F" -f "$O" up -d --no-deps challenge 2>&1 | tail -3)
   live "$(docker inspect "$C" --format '{{.Image}}')"; sleep 6; check;;
 executor-off)
-  B=${2:?BACKUP}; backup_dir "$B"; date -u +%FT%TZ
+  B=${2:?BACKUP}; backup_dir "$B"
+  cfg=$(compose "$F" config --format json) && test_names "$F" <<< "$cfg" || exit 4
+  date -u +%FT%TZ
   rm -f "$T/compose.executor.yml"; compose "$F" up -d --no-deps challenge 2>&1 | tail -3
   live "$(docker inspect "$C" --format '{{.Image}}')"; sleep 6; check;;
 *) echo "unknown $cmd"; exit 2;;

@@ -36,7 +36,9 @@ from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import LeafPreimage, Receipt, RunManifest
 from hypertrain.protocol.messages_v2 import (
     AcceptV2,
+    AdmissionPolicyV2,
     AggregationPolicyV2,
+    ArtifactLimits,
     ArtifactRef,
     AuditChallengeV2,
     AuditJobV2,
@@ -105,6 +107,59 @@ def wrapper(training: dict[str, JsonValue] | None = None) -> RunManifestV2:
             },
         }
     )
+
+
+def example_admission_policy(**extra: JsonValue) -> AdmissionPolicyV2:
+    """The policy `manifest_v2 example` writes, field by field."""
+    return AdmissionPolicyV2(
+        q_base="0000803e",
+        E=4,
+        clean_finalizations=12,
+        work_screen_epoch_rounds=6000,
+        max_pending=32,
+        max_trial_replays=2,
+        max_trials_per_beacon=2,
+        join_per_beacon=2,
+        join_burst=4,
+        ip_prefix_per_beacon=32,
+        ip_prefix_burst=64,
+        challenge_rounds=100,
+        artifact_limits=ArtifactLimits(
+            max_object_bytes=1_000_000, max_body_bytes=65536, max_chunk_manifest_bytes=1048576
+        ),
+        **extra,
+    )
+
+
+EXAMPLE_ADMISSION_DIGEST = "c3fd6d4d47c406fa6add423091f2ae22b38bd9ed8ebe92df472f589672b3e3e3"
+EXAMPLE_ADMISSION_RUN_ID = "4efbc85d9f5014d7f62a9dca644cc0bde7c98bb733bae9f2e5a456878cc43f97"
+
+
+def run_id_of(policy: AdmissionPolicyV2) -> str:
+    body = wrapper().body()
+    body["network"]["admission_policy_hash"] = policy.digest()
+    return RunManifestV2.model_validate(body).run_id()
+
+
+def test_admission_policy_without_the_prefix_cap_keeps_its_digest_and_run_id() -> None:
+    # The pins were measured on the base tree (33b50656), before the field existed: a policy
+    # that does not set it is byte-for-byte the policy of every run signed so far.
+    policy = example_admission_policy()
+    assert "max_unfunded_per_prefix" not in policy.body()
+    assert policy.digest() == EXAMPLE_ADMISSION_DIGEST
+    assert run_id_of(policy) == EXAMPLE_ADMISSION_RUN_ID
+
+
+def test_prefix_cap_changes_the_digest_and_run_id_only_when_set() -> None:
+    capped = example_admission_policy(max_unfunded_per_prefix=4)
+    assert capped.body()["max_unfunded_per_prefix"] == 4
+    assert capped.digest() != EXAMPLE_ADMISSION_DIGEST
+    assert run_id_of(capped) != EXAMPLE_ADMISSION_RUN_ID
+    assert AdmissionPolicyV2.model_validate(capped.body()) == capped
+    # the cap is 1..32 (it cannot exceed the pending places)
+    for bad in (0, 33, -1, True, 1.5):
+        with pytest.raises(ValidationError):
+            example_admission_policy(max_unfunded_per_prefix=bad)
 
 
 def commit(tokens: int = 7680) -> CommitV2:

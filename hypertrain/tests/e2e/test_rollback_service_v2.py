@@ -146,7 +146,7 @@ def active_network(tmp_path_factory):
                 assert response.status_code == 200, response.text
                 for _ in range(12):
                     network.push(network.now + 1)
-                    response = network.client.get(network.url + "/join/" + identity + "/challenge")
+                    response = network.challenge(identity)
                     assert response.status_code == 200, response.text
                     challenge = JoinChallenge.model_validate(response.json()["body"])
                     response = network.client.post(

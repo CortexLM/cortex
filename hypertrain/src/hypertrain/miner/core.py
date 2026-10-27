@@ -896,11 +896,17 @@ class NetworkMiner:
             job, challenge = self._fetch_trial(Path(folder).resolve())
             return self.probe(job, challenge)
 
+    def _owner_headers(self, domain: str, admission_id: str) -> dict[str, str]:
+        """This hotkey's signature over `domain|run|admission`, as the owner-only routes check."""
+        message = f"{domain}|{self.run_id}|{admission_id}".encode()
+        return {"X-Hotkey": self.kp.ss58, "X-Trial-Signature": self.kp.sign(message).hex()}
+
     def _fetch_trial(self, root: Path) -> tuple[Path, Path]:
         """The folder trial_export writes, from the miner's own signed job read.
 
-        The challenge GET issues the trial when none is open (else returns the stored one);
-        the job, its inputs and the signed challenge are checked as trial_export checks them."""
+        The signed challenge GET issues the trial when none is open (else returns the stored
+        one); the job, its inputs and the signed challenge are checked as trial_export checks
+        them."""
         from pydantic import TypeAdapter
 
         from hypertrain.protocol import envelope_v2
@@ -908,12 +914,15 @@ class NetworkMiner:
 
         admission_id = self.status()["record"]["admission_id"]
         url = self.url + f"/join/{admission_id}"
-        envelope = self.api.call("GET", url + "/challenge")
-        signature = self.kp.sign(f"hypertrain/trial-job/2|{self.run_id}|{admission_id}".encode())
+        envelope = self.api.call(
+            "GET",
+            url + "/challenge",
+            headers=self._owner_headers("hypertrain/trial-challenge/2", admission_id),
+        )
         data = self.api.call(
             "GET",
             url + "/job",
-            headers={"X-Hotkey": self.kp.ss58, "X-Trial-Signature": signature.hex()},
+            headers=self._owner_headers("hypertrain/trial-job/2", admission_id),
         )
         try:
             job = IslandJobV1.model_validate(data["job"])

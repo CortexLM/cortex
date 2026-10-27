@@ -1493,7 +1493,7 @@ def generate(root: Path, scope: Path) -> None:
                         int((time.time() - network.manifest.training.beacon.genesis_time) // 3) + 1
                     )
                     network.push(max(network.now + 1, emitted))
-                response = network.client.get(network.url + "/join/" + identity + "/challenge")
+                response = network.challenge(identity)
                 assert response.status_code == 200, response.text
                 challenge = JoinChallenge.model_validate(response.json()["body"])
                 trial = network.store._db.execute(

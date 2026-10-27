@@ -601,6 +601,10 @@ class AdmissionPolicyV2(WireModel):
     ip_prefix_burst: Literal[64]
     challenge_rounds: Literal[100]
     artifact_limits: ArtifactLimits
+    # Omitted when absent so every policy digest (and run ID) predating it is unchanged.
+    max_unfunded_per_prefix: Annotated[StrictInt, Field(ge=1, le=32)] | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
 
 
 class EconomicsPolicyV2(WireModel):

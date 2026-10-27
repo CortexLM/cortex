@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from hypertrain.data.trial_assignment import trial_samples
+from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages_v2 import IslandJobV1, JoinChallenge
@@ -31,7 +32,7 @@ def trial(network):
     assert response.status_code == 200, response.text
     identity = response.json()["admission_id"]
     network.push(network.now + 1)
-    response = network.client.get(network.url + f"/join/{identity}/challenge")
+    response = network.challenge(identity)
     assert response.status_code == 200, response.text
     return network, identity, response.json()
 
@@ -50,6 +51,57 @@ def job(n, identity, key=service.HOT[0], hotkey=None, run_id=None):
     )
 
 
+def test_challenge_route_refuses_everyone_but_the_owner(network):
+    # Given: HOT[0] joined and its seed round arrived; HOT[1] is a registered rival. Opening a
+    # trial takes one of the run's trial places, so only the owner may ask for it.
+    identity = network.join().json()["admission_id"]
+    network.push(network.now + 1)
+    run_id = network.manifest.run_id()
+    owner, rival = service.HOT[0], service.HOT[1]
+    domain = "hypertrain/trial-challenge/2"
+
+    def sign(key, domain=domain, run=run_id, admission=identity):
+        return key.sign(f"{domain}|{run}|{admission}".encode()).hex()
+
+    forged = {
+        "no headers": {},
+        "the admin token": service.admin(),
+        "a rival signing as itself": {"x-hotkey": rival.ss58, "x-trial-signature": sign(rival)},
+        "a rival's signature under the owner's key": {
+            "x-hotkey": owner.ss58,
+            "x-trial-signature": sign(rival),
+        },
+        "the owner's signature under the rival's key": {
+            "x-hotkey": rival.ss58,
+            "x-trial-signature": sign(owner),
+        },
+        "the owner's job signature": {
+            "x-hotkey": owner.ss58,
+            "x-trial-signature": sign(owner, domain="hypertrain/trial-job/2"),
+        },
+        "another run": {"x-hotkey": owner.ss58, "x-trial-signature": sign(owner, run="ff" * 32)},
+        "another admission": {
+            "x-hotkey": owner.ss58,
+            "x-trial-signature": sign(owner, admission="ee" * 32),
+        },
+        "a signature that is not hex": {"x-hotkey": owner.ss58, "x-trial-signature": "zz"},
+    }
+    # When / Then: every one is refused alike, and nothing was issued
+    for name, headers in forged.items():
+        response = network.client.get(network.url + f"/join/{identity}/challenge", headers=headers)
+        assert (response.status_code, response.json()) == (
+            403,
+            {"detail": "hotkey is not current accepted identity"},
+        ), name
+    db = network.store._db
+    assert db.execute("SELECT challenge FROM admissions_v2").fetchone()[0] is None
+    assert db.execute("SELECT COUNT(*) FROM admission_trials").fetchone()[0] == 0
+    # The owner's signed request issues the trial, and asking again returns the same envelope.
+    first = network.challenge(identity)
+    assert first.status_code == 200 and first.json()["type"] == "JoinChallenge"
+    assert network.challenge(identity).json() == first.json()
+
+
 def test_export_matches_prepare_reference_inputs(trial):
     n, identity, envelope = trial
     response = export(n, identity)
@@ -64,6 +116,9 @@ def test_export_matches_prepare_reference_inputs(trial):
         )
     )
     assert body["challenge"] == challenge.body()
+    # The operator reads the coordinator-signed envelope from the export, not from the route.
+    assert body["challenge_envelope"] == envelope
+    assert envelope_v2.verify_envelope(body["challenge_envelope"])
     assert body["nonce"] == challenge.nonce
     row = n.store._db.execute(
         "SELECT trial_epoch FROM admissions_v2 WHERE admission_id=?", (identity,)
@@ -230,12 +285,13 @@ def cli(trial, tmp_path, monkeypatch):
             body = response.json()
             body["job"]["object_paths"]["samples"] = fault["job"]
             return httpx.Response(200, json=body)
-        if fault.get("challenge") and request.url.path.endswith("/challenge"):
+        if response.status_code == 200 and request.method == "POST" and fault.get("challenge"):
             body = response.json()
+            envelope = body["challenge_envelope"]
             if fault["challenge"] == "signature":
-                body["sig"] = "00" * 64
+                envelope["sig"] = "00" * 64
             else:
-                body["body"]["nonce"] = "cd" * 32
+                envelope["body"]["nonce"] = "cd" * 32
             return httpx.Response(200, json=body)
         return httpx.Response(response.status_code, content=response.content)
 
@@ -295,7 +351,8 @@ def test_cli_exports_copyable_folder(cli, trial, capsys, record_property, monkey
     staged = n.store.state_dir / "trials-v2" / report["nonce"]
     for relative in job.object_paths.values():
         assert (out / relative).read_bytes() == (staged / relative).read_bytes()
-    assert len(requests) == 7
+    assert len(requests) == 6
+    assert not any(r.url.path.endswith("/challenge") for r in requests)
     assert requests[0].method == "POST"
     assert requests[0].url.path == n.url + f"/admin/trial/{identity}/export"
     assert requests[0].headers["authorization"] == service.admin()["Authorization"]

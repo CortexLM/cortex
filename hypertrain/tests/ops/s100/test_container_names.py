@@ -1,7 +1,8 @@
 """challenge_image.sh refuses a compose file that names a container outside the TEST stack.
 
-beacon and rollback run `docker compose up -d --no-deps` on the container_name values of the live
-compose file or of the backup's: one token away from the TEST names is a production container.
+beacon, rollback, executor and executor-off run `docker compose up -d --no-deps` on the
+container_name values of the live compose file or of the backup's: one token away from the TEST
+names is a production container.
 """
 
 from __future__ import annotations
@@ -141,3 +142,103 @@ def test_rollback_accepts_a_relative_backup_path(box, backup):
     relative = backup.relative_to(box.root)
     box.run("rollback", relative, mutates={CHALLENGE, BEACON})
     assert box.container(CHALLENGE)["Image"] == OLD_ID
+
+
+# --- executor and executor-off: the live file, and for executor the merged config -------------
+
+
+def extra(name: str | None) -> str:
+    """COMPOSE plus a fourth service, which `up -d --no-deps challenge` would leave alone."""
+    line = "" if name is None else f"    container_name: {name}\n"
+    return f"{COMPOSE}  extra:\n    <<: *common\n{line}"
+
+
+def behind_a_profile(service: str) -> str:
+    """COMPOSE with the service under its own right name but in a profile that is off."""
+    line = f"    container_name: {NAME[service]}\n"
+    return COMPOSE.replace(line, f"{line}    profiles: [debug]\n")
+
+
+def names(service: str, name: str) -> str:
+    return f"service {service} names container {name}"
+
+
+def unnamed(service: str) -> str:
+    return f"service {service} declares no container_name"
+
+
+def must_be(service: str) -> str:
+    return f"service {service} must be {NAME[service]}"
+
+
+LIVE = {  # id: (live compose, the line the refusal prints)
+    "challenge-is-production": (
+        named("challenge", "cortex-challenge-hypertrain"),
+        names("challenge", "cortex-challenge-hypertrain"),
+    ),
+    "challenge-has-no-name": (named("challenge", None), unnamed("challenge")),
+    # a TEST name, but not the container this `up` recreates
+    "challenge-wears-the-relay-name": (
+        named("challenge", "hypertrain-test-relay"),
+        must_be("challenge"),
+    ),
+    # compose config leaves it out, up -d --no-deps challenge would still start it
+    "challenge-is-behind-a-profile": (behind_a_profile("challenge"), must_be("challenge")),
+    "beacon-is-the-production-twin": (
+        named("beacon", "hypertrain-beacon"),
+        names("beacon", "hypertrain-beacon"),
+    ),
+    "stub-has-no-name": (named("master-stub", None), unnamed("master-stub")),
+    "extra-service-is-a-production-container": (
+        extra("hypertrain-auditor-0"),
+        names("extra", "hypertrain-auditor-0"),
+    ),
+    "extra-service-has-no-name": (extra(None), unnamed("extra")),
+}
+
+
+@pytest.mark.parametrize("cmd", ["executor", "executor-off"])
+@pytest.mark.parametrize(("text", "refusal"), LIVE.values(), ids=LIVE)
+def test_the_executor_commands_refuse_a_live_compose_naming_a_container_outside_the_test_stack(
+    box, backup, cmd, text, refusal
+):
+    box.run(*call("executor", backup), mutates={CHALLENGE})  # leaves an override in place
+    box.f.write_text(text)
+    before = box.snapshot()
+    assert before["override"] is not None
+    out = box.run(*call(cmd, backup), rc=4).out
+    assert f"REFUSED {box.f}: {refusal}" in out
+    assert box.snapshot() == before  # no live file written or removed, the override in place
+
+
+@pytest.mark.parametrize("cmd", ["executor", "executor-off"])
+def test_the_executor_commands_refuse_a_live_compose_that_does_not_parse(box, backup, cmd):
+    box.run(*call("executor", backup), mutates={CHALLENGE})
+    box.f.write_text("services:\n  challenge: [unclosed\n")
+    before = box.snapshot()
+    box.run(*call(cmd, backup), rc=4)
+    assert box.snapshot() == before
+
+
+def test_executor_refuses_when_only_the_merged_config_names_another_container(box, backup):
+    # the live file is fine. No override this script writes can make compose resolve another name,
+    # so merge_patch stands in for a compose or a template that does: without the guard the diff
+    # check still refuses, with exit 5 and without naming the container
+    box.docker(merge_patch={"challenge": {"container_name": "cortex-challenge-hypertrain"}})
+    before = box.snapshot()
+    out = box.run(*call("executor", backup), rc=4).out
+    refused = names("challenge", "cortex-challenge-hypertrain")
+    assert f"REFUSED {box.f} -f {box.override}.new: {refused}" in out
+    assert box.snapshot() == before
+
+
+@pytest.mark.parametrize("cmd", ["executor", "executor-off"])
+def test_the_live_file_is_checked_on_its_own_even_when_a_merge_would_hide_it(box, backup, cmd):
+    # swap, rollback and executor-off bring the file up alone, whatever the pair resolves to
+    box.run(*call("executor", backup), mutates={CHALLENGE})
+    box.f.write_text(named("beacon", "hypertrain-beacon"))
+    box.docker(merge_patch={"beacon": {"container_name": BEACON}})
+    before = box.snapshot()
+    out = box.run(*call(cmd, backup), rc=4).out
+    assert f"REFUSED {box.f}: {names('beacon', 'hypertrain-beacon')}" in out
+    assert box.snapshot() == before

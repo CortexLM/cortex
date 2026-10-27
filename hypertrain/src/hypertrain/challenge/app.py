@@ -469,11 +469,42 @@ def create_app(
         await subnet_member(data.get("hotkey") if isinstance(data, dict) else None)
         return await run(store.for_run(run_id).admission_v2, run_id, "join", raw, "", prefix)
 
-    @app.get("/v2/runs/{run_id}/join/{admission_id}/challenge")
-    async def challenge_v2(run_id: str, admission_id: str) -> Any:
-        # Opening a trial consumes replay capacity: only for currently registered hotkeys.
+    async def admission_owner(
+        run_id: str,
+        admission_id: str,
+        domain: str,
+        x_hotkey: str | None,
+        signature: str | None,
+    ) -> None:
+        """Only the registered hotkey that owns the admission: admission ids are public
+        (admission status), so the caller signs `domain|run|admission` for its hotkey."""
+        from hypertrain.protocol.keys import verify
+
         _, admission, _ = await run(store.for_run(run_id)._services, run_id)
-        await subnet_member((await run(admission.store.by_id, admission_id)).hotkey)
+        hotkey = (await run(admission.store.by_id, admission_id)).hotkey
+        await subnet_member(hotkey)
+        try:
+            valid = x_hotkey == hotkey and verify(
+                decode_hotkey(hotkey),
+                f"{domain}|{run_id}|{admission_id}".encode(),
+                bytes.fromhex(signature or ""),
+            )
+        except (ValueError, KeyError_):
+            valid = False
+        if not valid:
+            raise ChallengeError(403, "hotkey is not current accepted identity")
+
+    @app.get("/v2/runs/{run_id}/join/{admission_id}/challenge")
+    async def challenge_v2(
+        run_id: str,
+        admission_id: str,
+        x_hotkey: Annotated[str | None, Header()] = None,
+        x_trial_signature: Annotated[str | None, Header()] = None,
+    ) -> Any:
+        # Opening a trial takes one of the run's trial places: only the owner may ask for it.
+        await admission_owner(
+            run_id, admission_id, "hypertrain/trial-challenge/2", x_hotkey, x_trial_signature
+        )
         return await run(store.for_run(run_id).admission_v2, run_id, "challenge", b"", admission_id)
 
     @app.get("/v2/runs/{run_id}/join/{admission_id}/job")
@@ -483,23 +514,10 @@ def create_app(
         x_hotkey: Annotated[str | None, Header()] = None,
         x_trial_signature: Annotated[str | None, Header()] = None,
     ) -> Any:
-        from hypertrain.protocol.keys import verify
-
-        # The admin export's payload, only to the registered hotkey that owns the admission:
-        # admission ids are public (admission status), so the caller signs for its hotkey.
-        _, admission, _ = await run(store.for_run(run_id)._services, run_id)
-        hotkey = (await run(admission.store.by_id, admission_id)).hotkey
-        await subnet_member(hotkey)
-        try:
-            valid = x_hotkey == hotkey and verify(
-                decode_hotkey(hotkey),
-                f"hypertrain/trial-job/2|{run_id}|{admission_id}".encode(),
-                bytes.fromhex(x_trial_signature or ""),
-            )
-        except (ValueError, KeyError_):
-            valid = False
-        if not valid:
-            raise ChallengeError(403, "hotkey is not current accepted identity")
+        # The admin export's payload, only to the owner.
+        await admission_owner(
+            run_id, admission_id, "hypertrain/trial-job/2", x_hotkey, x_trial_signature
+        )
         return await run(store.for_run(run_id).export_trial_v2, run_id, admission_id)
 
     @app.get("/v2/runs/{run_id}/admission/{hotkey}")
