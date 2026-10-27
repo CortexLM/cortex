@@ -907,6 +907,7 @@ class Admission:
             Intake(self.escrow.run_id, {"EscrowLock": lambda s: s == r.coldkey}).accept(raw, now)
             if op.owner != r.coldkey or op.kind != "LOCK_ADMISSION":
                 raise AdmissionError("LOCK_OWNER_OR_KIND")
+            self.escrow.require_lock_capacity(op)  # before an outbox row nobody can apply
             self.store.enqueue_lock(op, env.signer)
         return self.store.reconcile_lock(op.operation_id).event_hash
 

@@ -221,7 +221,13 @@ a coordinator namespace mismatch, fails with HTTP 503 without resetting quotas.
 No automatic migration is provided; separate operator resolution is required.
 
 Funding uses signed `EscrowLock` via `POST /v2/runs/{run_id}/escrow/lock`, not a
-CLI `--bond` flag. Test genesis has pinned nonfinancial origins; production mode
+CLI `--bond` flag. A new admission lock must hold at least a tenth of `S_min_units`
+(`LOCK_BELOW_MINIMUM`); a coldkey holds at most 2,048 open admission locks (`OPEN_LOCK_CAP`,
+twice the roster ceiling of 1,024) and the ledger at most 4,096 (`LEDGER_LOCK_CAP`). A cap
+refuses a new lock only, so replaying an accepted lock returns its receipt, and closing a lock
+makes room. The funding status of an admission (`GET .../admission/{hotkey}`, public) reads
+the owner's open locks through a partial index, so its cost grows with those locks and not
+with the ledger (it was quadratic in the number of locks: 96 s at 40,000). Test genesis has pinned nonfinancial origins; production mode
 has separate reward authority/issuance bounds and no test-genesis conversion.
 
 The ledger keeps two key spaces for its events. A client event (`escrow/lock`,

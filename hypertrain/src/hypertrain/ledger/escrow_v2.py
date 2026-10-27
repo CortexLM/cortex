@@ -64,6 +64,11 @@ def digest(model: BaseModel) -> str:
 # event can occupy an id the service later needs.
 SERVER_SCOPE = "srv:"
 CLIENT_ONLY_KINDS = frozenset({"LOCK_ADMISSION", "LOCK_CONTEST", "TRANSFER"})
+# Open admission locks (ADR 0014 part 4). The roster ceiling is 1,024 miners (MAX_ROSTER_CEILING of
+# the challenge store); a coldkey that owns a whole roster needs one lock and one top-up per miner,
+# and the ledger holds twice that for all coldkeys. A lock is at least a tenth of the funding floor.
+MAX_OPEN_LOCKS_PER_COLDKEY = 2048
+MAX_OPEN_LOCKS_LEDGER = 4096
 _SERVER_KEY = re.compile(r"srv:[0-9a-f]{64}")
 
 
@@ -275,6 +280,10 @@ class EscrowV2:
             PRIMARY KEY(run_id,kind,id));
           CREATE TABLE IF NOT EXISTS escrow_snapshots(
             operation_id TEXT PRIMARY KEY, state TEXT NOT NULL);
+          -- The open admission locks of an owner, nothing else. Do not add a general
+          -- (owner, bucket, ref) index: the planner would prefer it and walk the closed locks too.
+          CREATE INDEX IF NOT EXISTS escrow_open_admission_locks
+            ON escrow_units(owner, ref) WHERE bucket='admission_locked' AND units>0;
         """)
         with self.tx():
             rows = self.db.execute("SELECT * FROM escrow_config").fetchall()
@@ -924,6 +933,7 @@ class EscrowV2:
             old = self._owner_operation(op, signer, server=False)
             if old is not None:
                 return old
+            self.require_lock_capacity(op)
             bucket = "admission_locked" if op.kind == "LOCK_ADMISSION" else "dispute_locked"
             self._move(op, "available", bucket, destination_ref=op.operation_id)
             return self._event(
@@ -1204,20 +1214,50 @@ class EscrowV2:
             ),
         )
 
+    def open_locks(self, admission_id: str, owner: str) -> list[sqlite3.Row]:
+        """Event hash and locked units of the owner's open locks of this admission, oldest first.
+
+        Its cost is the number of open locks of the owner, not the size of the ledger.
+        """
+        return self.db.execute(
+            "SELECT e.event_hash AS event_hash, SUM(u.units) AS units "
+            "FROM escrow_units u JOIN escrow_events e "
+            "ON e.operation_id=u.ref AND e.kind='LOCK_ADMISSION' "
+            "WHERE u.bucket='admission_locked' AND u.units>0 AND u.owner=? "
+            "AND json_extract(e.request,'$.owner')=u.owner "
+            "AND json_extract(e.request,'$.admission_id')=? "
+            "GROUP BY e.seq ORDER BY e.seq",
+            (owner, admission_id),
+        ).fetchall()
+
     def locked(self, admission_id: str, owner: str) -> tuple[int, str]:
-        units, hashes = 0, []
-        for r in self.db.execute("SELECT * FROM escrow_events WHERE kind='LOCK_ADMISSION'"):
-            op = EscrowLock.model_validate_json(r["request"])
-            if op.admission_id == admission_id and op.owner == owner:
-                amount = self.db.execute(
-                    "SELECT COALESCE(SUM(units),0) FROM escrow_units WHERE "
-                    "bucket='admission_locked' AND ref=? AND owner=?",
-                    (op.operation_id, owner),
-                ).fetchone()[0]
-                if amount:
-                    units += amount
-                    hashes.append(r["event_hash"])
+        rows = self.open_locks(admission_id, owner)
+        hashes = [r["event_hash"] for r in rows]
+        units = sum(r["units"] for r in rows)
         return units, sha256_hex(canonicalize(hashes)) if hashes else "0" * 64
+
+    def require_lock_capacity(self, op: EscrowLock) -> None:
+        """Refuse a NEW admission lock that is dust or would exceed a cap; a replay passes.
+
+        The caps bound the state a funded account can grow and the cost of `locked()`; the minimum
+        makes filling the ledger cap cost a tenth of the funding floor per lock.
+        """
+        if op.kind != "LOCK_ADMISSION" or self._existing(
+            op.operation_id, op.model_dump_json(), server=False
+        ):
+            return
+        if op.units < max(1, self.policy.S_min_units // 10):
+            raise EscrowError("LOCK_BELOW_MINIMUM")
+        count = (
+            "SELECT COUNT(DISTINCT ref) FROM escrow_units "
+            "WHERE bucket='admission_locked' AND units>0"
+        )
+        if self.db.execute(count + " AND owner=?", (op.owner,)).fetchone()[0] >= (
+            MAX_OPEN_LOCKS_PER_COLDKEY
+        ):
+            raise EscrowError("OPEN_LOCK_CAP")
+        if self.db.execute(count).fetchone()[0] >= MAX_OPEN_LOCKS_LEDGER:
+            raise EscrowError("LEDGER_LOCK_CAP")
 
     def _conservation(self) -> None:
         for row in self.db.execute(

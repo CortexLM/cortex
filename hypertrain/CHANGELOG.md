@@ -80,6 +80,12 @@
   released with that object's settlement over `POST /escrow/release`. `EscrowV2.lock_status` asks a
   resolver of admission locks, or nothing (`UNACCEPTED_SETTLEMENT`), and never the dispute or origin
   tables; `Admission.settle_fraud` uses it (Lens F4 iii).
+- Escrow: the funding status of an admission (`EscrowV2.locked`, behind the unauthenticated
+  `GET .../admission/{hotkey}`) read every lock of the ledger and ran one unindexed sum per lock under the
+  store lock: 1.08 s at 5,000 open locks, 5.4 s at 10,000, 96 s at 40,000 on the real code, enough to
+  make every v2 operation answer 503 once the beacon lagged 6 s. It now reads the owner's open locks
+  through a partial index (the same value, bit for bit). New admission locks must hold a tenth of the
+  funding floor and are capped at 2,048 per coldkey and 4,096 in the ledger (Lens F7a).
 
 ### Not yet
 - Quality parity with centralized training is not claimed.
