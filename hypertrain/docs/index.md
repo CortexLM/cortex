@@ -9,6 +9,7 @@
 - [Challenge routes](challenge-routes.md): every HTTP route, body, auth and status code.
 - [Production run signing](prod-run-signing.md): what the owner and the coordinator sign for a production run, in runbook order, and the relay registry edit.
 - [Role dispatch](role-dispatch.md): the one-run `dispatch.json` authorization, the TEST run file and its install on the test stack.
+- [Generic CUDA executor](cuda-executor.md): `HYPERTRAIN_CUDA_EXECUTOR`, references and audit replays on any SSH + Docker GPU host, host contract, config and provenance.
 - [Message schemas](schemas/): JSON Schema for each signed message ([RunManifest](schemas/RunManifest.json), [Commit](schemas/Commit.json), [DeltaManifest](schemas/DeltaManifest.json), [Receipt](schemas/Receipt.json), [Forfeit](schemas/Forfeit.json), [Dispute](schemas/Dispute.json), [Finalize](schemas/Finalize.json) and the rest). Regenerate with `uv run --frozen python -m hypertrain.protocol.schema docs/schemas`.
 - [Design notes](README.md).
 

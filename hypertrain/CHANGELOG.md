@@ -14,6 +14,12 @@
   reduction orders), covered by `implementation_hash`. `ModelSpec.arch` names a registry entry
   (omitted = `decoder`; existing manifest bytes and run_ids unchanged); v2 manifests carry
   `kimi-k3-pro-tiny` on a one-GPU island, v1 manifests refuse it (D18, ADR 0006).
+- Generic CUDA executor (`HYPERTRAIN_CUDA_EXECUTOR`, `hypertrain.gpu_ops.cuda_executor`): the
+  challenge sends references, audit replays and referee runs to any SSH + Docker GPU host, with
+  the container started by the manifest's image digest, nothing persisted on the host and a
+  `role-dispatch.json` provenance the existing CUDA audit checks accept. Mutually exclusive with
+  `HYPERTRAIN_ROLE_DISPATCH`; the Vast dispatcher is unchanged. See `docs/adr/0008` at the
+  monorepo root and `docs/cuda-executor.md`.
 - Docs, CI, image and release workflows, Dockerfiles.
 
 ### Changed

@@ -73,7 +73,7 @@ daemon and no open port.
 | Host key | Pinned by the operator in `known_hosts_file` (verify the fingerprint out of band, for example in the Lium panel). `StrictHostKeyChecking=yes`, `GlobalKnownHostsFile=/dev/null`, `-F /dev/null`, `IdentitiesOnly`, `BatchMode`, no agent, no forwarding, no TTY, `ServerAliveInterval` 15 s, `ServerAliveCountMax` 3, `ConnectTimeout`. No trust-on-first-use: a replaced machine fails the key check and is a lost host. |
 | Docker | `docker` argv prefix per host (`["docker"]`, or `["sudo","-n","docker"]` on the Lium and AWS hosts). Only these verbs are used: `image inspect`, `pull`, `run`, `rm -f <own name>`. Containers are named `ht-exec-<16 hex>`, labelled `io.cortex.cuda-executor`, and never touch an `executor-*` or any other container. |
 | Image | `image_repository` in the config plus the digest of the signed manifest: the container is started as `repo@sha256:<manifest reference_spec.image_digest>`. A tag is never accepted. If the image is absent it is pulled by digest. |
-| Container | `docker run --rm -i --init --gpus "device=<uuids>" --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -e <pins> --entrypoint /opt/hypertrain/venv/bin/python <image> -I -c <runner>`. No volume, no bind mount, no host path. These flags are the ones `scripts/b300/run_host.sh` already uses plus `-i` and the device list. `network` is `default` or `none` per config (see Not verified). |
+| Container | `docker run --rm -i --init --name ht-exec-<16 hex> --label io.cortex.cuda-executor=<job> --gpus "device=<uuids>" --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --entrypoint /opt/hypertrain/venv/bin/python <image> -I -c <runner>`. No volume, no bind mount, no host path, no `-e`: the determinism pins, `HT_IMAGE_DIGEST`, `HT_ISLAND_TRACE`, `HT_GPU_UUIDS` and `CUDA_VISIBLE_DEVICES` travel in `request.json` and the runner applies an allowlisted set of them to the island's environment. These flags are the ones `scripts/b300/run_host.sh` already uses plus `-i`, `--name`, `--label` and the device list. `network` is `default` or `none` per config (see Not verified). |
 | Data in and out | Inputs travel as a tar on the SSH standard input; results come back as a tar on the standard output. Nothing is written on the host outside the container's own layer, which `--rm` deletes. The only persistent thing is the pulled image layer cache. |
 | GPU probe | One SSH call before each attempt reads `nvidia-smi --query-gpu=uuid,name,driver_version,compute_cap,memory.used`, `--query-compute-apps=gpu_uuid,pid,process_name`, the host epoch and `docker image inspect` (`RepoDigests`). A GPU is idle when no compute app is listed on it and `memory.used` is at most `idle_gpu_memory_mib` (default 2048, the Lium executor keeps about 810 MiB resident). The executor takes the `n_gpus` idle GPUs with the lowest UUIDs. Fewer: the host is busy for this job. |
 
@@ -97,7 +97,7 @@ environment         backend, image_digest, python, torch, torch_path, cuda,
                     drivers[n], sm_counts[n], capabilities[n][2], gpu_uuids[n], gpu_names[n]
 ```
 
-- `machine_id` is a positive 63-bit integer derived from the sorted UUIDs of **all** GPUs on the
+- `machine_id` is a positive 52-bit integer (JSON-safe) derived from the sorted UUIDs of **all** GPUs on the
   host (physical identity: two jobs on different GPU subsets of one box, or one box listed twice
   under two labels, share it). `instance_id` is derived from the pinned `known_hosts_file` bytes
   and `address:port` (the OS or rental instance). Both are integers so a future qualification
@@ -116,11 +116,11 @@ environment         backend, image_digest, python, torch, torch_path, cuda,
 
 | Event | Class | Action |
 | --- | --- | --- |
-| SSH exit 255, connect or key failure, `ServerAlive` timeout, stream cut | host lost | Mark the host down for this launch, `docker rm -f` its container best effort, try the next host. Never accepts bytes already received. |
+| SSH exit 255, connect or key failure, `ServerAlive` timeout, stream cut, a host probe or image pull that outlives its own limit, a failing `nvidia-smi` query | host lost | `docker rm -f` its container best effort and skip the host for the rest of this pass over the host list (the next pass tries it again). The host is not quarantined. Bytes already received are never accepted. |
 | Host busy (foreign compute app, memory used, too few idle GPUs) | busy | Try the next host; when all are busy wait `sweep_pause_seconds` and sweep again (`sweeps`, default 3). |
-| Clock skew above 5 s, GPU set changed for a label, duplicate `machine_id`, wrong driver, capability or SM pair, image digest not in `RepoDigests`, container sees other UUIDs than selected | host refused | The host is quarantined until the challenge restarts and the next host is tried. A refusal is not a job failure. |
-| Container exits non-zero (OOM during a validator cycle, island refusal, `docker run` error) | attempt failed | Count one attempt (`max_attempts`, default 3); retry on another host, or on the same host after a pause when it is the only one. |
-| Exit 0 but no `COMPLETE` member, hash mismatch, size over `max_result_bytes`, unsafe tar member, `validate_artifacts` failure, `backend != cuda`, missing `trace.json` when traced | attempt failed | Nothing is published. |
+| Clock skew above 5 s, GPU set changed for a label, duplicate `machine_id`, wrong driver, capability or SM pair, image digest not in `RepoDigests`, container sees other UUIDs than selected (runner exit 4), host-reported fields that do not parse or exceed their bounds | host refused | The host is quarantined until the challenge restarts and the next host is tried. A refusal is not a job failure, and the pass over the host list ends as soon as every host is quarantined. |
+| Container exits non-zero (OOM during a validator cycle, island refusal, a device probe that could not run (runner exit 9), `docker run` error), even if it wrote a complete tar first | attempt failed | Count one attempt (`max_attempts`, default 3); retry on another host, or on the same host after a pause when it is the only one. |
+| Exit 0 but no `COMPLETE` member, hash mismatch, size over `max_result_bytes` (tar or the sum of its members), unsafe tar member (link, device, sparse, duplicate, foreign name), any failure while validating the received bytes, `backend != cuda`, missing or malformed `trace.json` when traced, a record the store could not read back | attempt failed | Nothing is published. |
 | Job deadline reached or `cancel` set | abort | Kill the SSH process group, `docker rm -f`, raise `IslandFailure`. No retry. |
 | All hosts and attempts exhausted | no result | Raise `IslandFailure`; the lease or reference fails as it does today. No partial result exists to accept. |
 
@@ -151,9 +151,9 @@ anyone with root on the host can forge every observation below [V by reasoning, 
 - Transport integrity: the `COMPLETE` manifest, a byte cap, and a whitelist tar reader (regular
   files under `rank-<n>/` plus `environment.json`, no link, device, absolute or `..` name, no
   duplicate) written by the challenge, never `extractall`.
-- Secrets: the SSH environment is rebuilt (`PATH` only); no token, seed, bearer or key content
+- Secrets: the SSH environment is rebuilt (`PATH`, `HOME` and `LC_ALL` only); no token, seed, bearer or key content
   reaches a command line, the container, the journal or `role-dispatch.json`. The identity file
-  is a path. Remote stderr is bounded and stored 0600 under the executor state directory.
+  is a path. Remote stderr is bounded (16 MiB), stored 0600 under a 0700 `logs/` directory of the executor state directory, and shown in errors only as a printable 600-byte tail.
 - Residual risk, unchanged from the Vast path: a compromised host can return a self-consistent
   but wrong trajectory, which `validate_artifacts` cannot detect. A false MISMATCH against an
   honest miner is the harmful direction; a false MATCH needs the miner's outputs.
@@ -179,8 +179,8 @@ after this batch [V; tool: `measure_hashes.py` over a `git archive` of each comm
 | `implementation_hash` | `02e208a3…0189cc` | unchanged |
 | `store.py` sha256 | `b5bc9904…aaec88` | unchanged |
 | `network_qualification.py` sha256 | `dab7a6ab…7bda15` | unchanged |
-| `sources()` map, canonical sha256 | `a9f091ad…64e274` | AFTER_SOURCES |
-| `bundle-hash` | 2,201,600 bytes, `8340ae6d…73c7d7` | AFTER_BUNDLE |
+| `sources()` map, canonical sha256 | `a9f091ad…64e274` (136 files) | `9616cce4…2661fb` (138 files) |
+| `bundle-hash` | 2,201,600 bytes, `8340ae6d…73c7d7` | 2,252,800 bytes, `6eb0fe03…e9572d` |
 
 Consequences, each the same kind as ADR 0007's:
 

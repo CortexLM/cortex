@@ -80,7 +80,9 @@ qualification. With `HYPERTRAIN_ROLE_DISPATCH` unset, the challenge computes eac
 reference in-process with the run's backend (`challenge/store.py:2976-2978`), so the challenge
 host needs that hardware. Rented or listed machines are never servers (founder rule,
 2026-10-26), so the challenge stays on the operator host. GPU references on rented hardware then
-need a dispatch target that is not a Vast lifecycle host, which does not exist yet.
+need a dispatch target that is not a Vast lifecycle host: the generic CUDA executor
+(`HYPERTRAIN_CUDA_EXECUTOR`, [cuda-executor.md](cuda-executor.md)) is that target, over SSH and a
+digest-pinned container, and is mutually exclusive with this file.
 
 ## Validate
 
