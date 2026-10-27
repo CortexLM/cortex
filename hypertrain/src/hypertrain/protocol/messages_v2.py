@@ -1011,6 +1011,13 @@ class DisputeWatchRequest(WireModel):
     wait: Annotated[StrictInt, Field(ge=0, le=30)]
 
 
+class ObjectUploadRequest(WireModel):
+    """An admitted miner's upload of one object: binds the uploader, the sha256 and the length."""
+
+    sha256: Hex64
+    size: U64
+
+
 MESSAGE_TYPES_V2: dict[str, type[BaseModel]] = {
     cls.__name__: cls
     for cls in (
@@ -1049,6 +1056,7 @@ MESSAGE_TYPES_V2: dict[str, type[BaseModel]] = {
         BisectV2,
         ResolutionV2,
         DisputeWatchRequest,
+        ObjectUploadRequest,
         Receipt,
         StateServe,
         ReplayVerdict,

@@ -305,6 +305,19 @@
   stopped the master from answering anything else. The role lookup of the watch and ack routes
   now holds the store lock like every other use of the shared connection (`docs/adr/0014`,
   Part 8).
+- The miner's trial job read is `POST /v2/runs/{run}/join/{admission}/job` with a signed ht/2
+  body (`TrialJobRequest {admission_id}`, signed by the admission's hotkey, expiry at most 20
+  rounds ahead of the master's round) instead of a `GET` with `X-Hotkey` and `X-Trial-Signature`
+  headers. The header route is removed (405) with no shim, for the reasons of the dispute watch
+  above; a refused request answers 403 as before (`docs/adr/0014`, Part 8).
+- Object uploads are `POST /v2/runs/{run}/objects/{sha256}` instead of `PUT` with `X-Hotkey` and
+  `X-Object-Signature` headers (removed, 405, no shim, for the reasons above). The body is the
+  uploader's signed `ObjectUploadRequest {sha256, size}` envelope behind a 4-byte length, then the
+  object: one stateless request, no multipart dependency, and the signed length gives the pinned
+  per-object limit an early 413. The envelope expires at most 20 rounds past the master's round;
+  the miner reads that round at most every 15 seconds and signs again for each retry. The master
+  verifies the signature, then the uploader's admission, before it reads the object
+  (`docs/adr/0014`, Part 8).
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

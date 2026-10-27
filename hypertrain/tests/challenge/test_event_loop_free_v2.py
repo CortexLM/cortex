@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import socket
 import threading
 import time
@@ -13,6 +15,7 @@ import pytest
 import uvicorn
 
 from hypertrain.protocol import relay_envelope
+from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.relay_messages import RelayReceipt
 
@@ -86,28 +89,29 @@ def in_background(call, out: dict, name: str) -> threading.Thread:
     return thread
 
 
-def test_forged_object_put_is_refused_while_the_store_lock_is_held(gated, subnet_master, served):
+def test_forged_object_upload_is_refused_while_the_store_lock_is_held(gated, subnet_master, served):
     n = gated
     run_id = n.manifest.run_id()
     subnet_master.registered.add(HOT[1].ss58)  # on the subnet, never admitted to the run
     refresh(n)
     root, server = served(n.client.app)
-    sha = "ab" * 32
+    data = b"x"
+    sha = hashlib.sha256(data).hexdigest()
     out: dict = {}
 
-    def put(signature: str) -> httpx.Response:
-        return httpx.put(
-            f"{root}{n.url}/objects/{sha}",
-            content=b"x",
-            headers={"x-hotkey": HOT[1].ss58, "x-object-signature": signature},
-            timeout=30,
-        )
+    def put(frame: bytes) -> httpx.Response:
+        return httpx.post(f"{root}{n.url}/objects/{sha}", content=frame, timeout=30)
 
-    genuine = HOT[1].sign(f"hypertrain/object/2|{run_id}|{sha}".encode()).hex()
+    genuine_frame = n.object_frame(HOT[1], data)
+    head = int.from_bytes(genuine_frame[:4], "big")
+    envelope = json.loads(genuine_frame[4 : 4 + head])
+    envelope["sig"] = "00" * 64  # a signature that cannot verify
+    broken = canonicalize(envelope)
+    forged_frame = len(broken).to_bytes(4, "big") + broken + data
     with LockHeld(n.store.for_run(run_id)):
-        parked = in_background(lambda: put(genuine), out, "genuine")
+        parked = in_background(lambda: put(genuine_frame), out, "genuine")
         in_flight(server, 1)
-        forged = in_background(lambda: put("00" * 64), out, "forged")
+        forged = in_background(lambda: put(forged_frame), out, "forged")
         # A forged signature is refused without touching the lock at all.
         forged.join(10)
         assert not forged.is_alive(), "forged-signature PUT waited for the store lock"

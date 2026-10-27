@@ -61,6 +61,8 @@ Auth = Annotated[str | None, Header()]
 # pinned auditors, referees and coordinator, one poll each.
 WATCH_PER_PARTY = 2
 WATCH_TOTAL = 128
+# The signed request that heads an object upload is a few hundred bytes; refuse a longer one.
+UPLOAD_HEAD_MAX = 4096
 
 
 class _Strict(BaseModel):
@@ -717,44 +719,68 @@ def create_app(
         admin(authorization)
         return await run(store.for_run(run_id).open_round_v2, run_id, await v2_raw(request))
 
-    @app.put("/v2/runs/{run_id}/objects/{sha256}")
-    async def put_object_v2(
-        run_id: str,
-        sha256: str,
-        request: Request,
-        x_hotkey: Annotated[str, Header()],
-        x_object_signature: Annotated[str, Header()],
-    ) -> Any:
-        from hypertrain.protocol.keys import verify
+    @app.post("/v2/runs/{run_id}/objects/{sha256}")
+    async def put_object_v2(run_id: str, sha256: str, request: Request) -> Any:
+        from hypertrain.protocol import envelope_v2
+        from hypertrain.protocol.messages_v2 import REQUEST_HORIZON, ObjectUploadRequest
 
-        await subnet_member(x_hotkey)
+        # The body is a frame: 4 bytes (big endian) giving the length of the uploader's signed
+        # ObjectUploadRequest, that envelope, then the object. A signature cannot travel in a
+        # header (the master proxy drops them), and the envelope binds uploader, sha256 and
+        # length, so everything is decided before a byte of the object is read.
+        stream = request.stream()
+        buffer, length = bytearray(), -1
+        async for chunk in stream:
+            buffer.extend(chunk)
+            if len(buffer) >= 4:
+                length = int.from_bytes(buffer[:4], "big")
+                if length > UPLOAD_HEAD_MAX or len(buffer) >= 4 + length:
+                    break
+        signed, rest = bytes(buffer[4 : 4 + length]), buffer[4 + length :]
+        # Nothing in the store is needed to check a signature: a forged one never waits for the
+        # store lock, and a registered hotkey is only a public string.
+        valid = 0 <= length <= UPLOAD_HEAD_MAX and len(buffer) >= 4 + length
+        if valid:
+            try:
+                envelope = envelope_v2.parse_envelope(signed)
+                upload = ObjectUploadRequest.model_validate(envelope.body)
+                valid = upload.sha256 == sha256 and envelope_v2.verify_envelope(signed)
+            except (EnvelopeError, ValidationError):
+                valid = False
+        if not valid:
+            raise ChallengeError(403, "object signature mismatch")
+        await subnet_member(envelope.signer)
         hosted = store.for_run(run_id)
-        # A registered hotkey is only a public string: the signature comes before the store, so a
-        # stranger cannot make the route wait for the store lock.
+
+        def admitted() -> tuple[int, int]:
+            with hosted._lock:
+                hosted._run_v2(run_id)
+                hosted._owner_v2(run_id, envelope.signer)
+                now = hosted._now(hosted._db)
+            return now, hosted._services(run_id)[1].policy.artifact_limits.max_object_bytes
+
+        # Admission objects are separately bounded by the pinned policy.
+        now, limit = await run(admitted)
         try:
-            valid = verify(
-                decode_hotkey(x_hotkey),
-                f"hypertrain/object/2|{run_id}|{sha256}".encode(),
-                bytes.fromhex(x_object_signature),
-            )
-        except (ValueError, KeyError_):
+            envelope_v2.Intake(run_id).accept(signed, now)
+            valid = envelope.exp_drand <= now + REQUEST_HORIZON
+        except EnvelopeError:
             valid = False
         if not valid:
             raise ChallengeError(403, "object signature mismatch")
-
-        def admitted() -> int:
-            with hosted._lock:
-                hosted._run_v2(run_id)
-                hosted._owner_v2(run_id, x_hotkey)
-            return hosted._services(run_id)[1].policy.artifact_limits.max_object_bytes
-
-        # Admission objects are separately bounded by the pinned policy.
-        limit = await run(admitted)
-        raw = bytearray()
-        async for chunk in request.stream():
-            raw.extend(chunk)
-            if len(raw) > limit:
-                raise ChallengeError(413, "object exceeds pinned admission limit")
+        if upload.size > limit:
+            raise ChallengeError(413, "object exceeds pinned admission limit")
+        raw = bytearray(rest)
+        # The signed length is the cap: past it, do not wait for the rest of the body.
+        while len(raw) <= upload.size:
+            try:
+                raw.extend(await anext(stream))
+            except StopAsyncIteration:
+                break
+        if len(raw) > upload.size:
+            raise ChallengeError(413, "object longer than its signed size")
+        if len(raw) < upload.size:
+            raise ChallengeError(422, "object length differs")
         if hashlib.sha256(raw).hexdigest() != sha256:
             raise ChallengeError(422, "object hash differs")
         key = await run(hosted.objects.put, bytes(raw))

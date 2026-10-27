@@ -115,6 +115,26 @@ class Network:
             self.url + "/disputes/watch", json=self.signed(key, "DisputeWatchRequest", poll, expiry)
         )
 
+    def object_frame(self, key, data, *, sha=None, size=None, exp=None, run_id=None):
+        """The body of an object upload: the uploader's signed request, then the object itself."""
+        request = canonicalize(
+            seal(
+                key,
+                "ObjectUploadRequest",
+                run_id or self.manifest.run_id(),
+                {"sha256": sha or sha256_hex(data), "size": len(data) if size is None else size},
+                self.now + REQUEST_HORIZON if exp is None else exp,
+            )
+        )
+        return len(request).to_bytes(4, "big") + request + data
+
+    def put_object(self, key, data, *, path_sha=None, **frame):
+        """Upload `data` as `key`; the path is its sha256 unless `path_sha` says otherwise."""
+        sha = path_sha or frame.get("sha") or sha256_hex(data)
+        return self.client.post(
+            self.url + "/objects/" + sha, content=self.object_frame(key, data, **frame)
+        )
+
     def join(self, index=0):
         request = sign_join(
             HOT[index],
@@ -4671,6 +4691,8 @@ def test_network_miner_upload_grant_sends_accepted_commit_body_subject(
         pass
 
     def call(method, path, **kwargs):
+        if path == network.url:
+            return {"now_round": network.now}
         if path.endswith("/rounds/1"):
             return {
                 "round_open": network.signed(COORD, "RoundOpenV2", opening),

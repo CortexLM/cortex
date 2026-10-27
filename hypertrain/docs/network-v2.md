@@ -179,6 +179,24 @@ stdout contains the signed proof/screen pair. The operator independently prepare
 and finalizes references through authenticated admin routes; miners cannot
 self-finalize or turn a successful probe into ACTIVE status.
 
+Every object a miner uploads (an artifact, a part, a part index) is
+`POST /v2/runs/{run_id}/objects/{sha256}`. No header carries a signature; the
+body is a frame: 4 bytes (big endian) giving the length of a signed ht/2
+envelope of type `ObjectUploadRequest {sha256, size}`, that envelope, then
+exactly `size` bytes of the object. The envelope is signed by the admitted
+hotkey and binds the uploader, the sha256 and the length, so the master checks
+the signature, the uploader's admission and the pinned object limit before it
+reads the object. Its expiry is at most 20 rounds (about a minute) past the
+master's current round: the miner signs the round it read (reused for at most
+15 seconds) plus 20, and signs again for every retry. Refusals: an envelope
+longer than 4096 bytes or cut short, a bad signature, another run, another
+sha256 than the path's, an expired or too distant envelope, an unregistered
+hotkey, or a hotkey that is not admitted answer 403; a signed size above the
+pinned object limit, or more bytes than the signed size, 413; fewer bytes, or
+bytes that do not hash to the sha256, 422. The old `PUT` with `X-Hotkey` and
+`X-Object-Signature` headers is removed (405). Uploads are content-addressed,
+so repeating one is harmless; the miner retries transport errors and 5xx.
+
 Current admission policy fixes E=4 and requires 12 clean finalized participations
 plus canary blocks 1,2,3. The first four are shadow-only. Later PROBATION influence
 also requires funded eligibility; ACTIVE requires current screening, sufficient
