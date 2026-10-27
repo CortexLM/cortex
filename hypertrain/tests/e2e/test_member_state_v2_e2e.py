@@ -5,10 +5,13 @@ One test per state, on five ACTIVE identities (see challenge/five_identity_netwo
 
 from __future__ import annotations
 
+import json
+
 import pytest
 import test_rollback_service_v2 as rollback
 
 from challenge.five_identity_network_v2 import five_identity_network
+from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.messages import Finalize
 
 fixtures = rollback.fixtures
@@ -24,6 +27,31 @@ def admission_id(n, hotkey):
     return n.store._db.execute(
         "SELECT admission_id FROM admissions_v2 WHERE hotkey=?", (hotkey,)
     ).fetchone()[0]
+
+
+def standing(n, hotkey):
+    row = n.store._db.execute(
+        "SELECT state,strikes,pending_dispute FROM admissions_v2 WHERE hotkey=?", (hotkey,)
+    ).fetchone()
+    return tuple(row)
+
+
+def excluded(n):
+    return {
+        r[0]: json.loads(r[1])
+        for r in n.store._db.execute("SELECT id,data FROM records_v2 WHERE kind='excluded'")
+    }
+
+
+def aggregate(n, w=0):
+    return n.client.post(n.url + f"/admin/rounds/{w}/aggregate", headers=fixtures.admin())
+
+
+def set_screen(n, hotkey, until):
+    with n.store._tx():
+        n.store._db.execute(
+            "UPDATE admissions_v2 SET screen_until=? WHERE hotkey=?", (until, hotkey)
+        )
 
 
 def finalize(n, w, applied, members):
@@ -68,3 +96,47 @@ def test_a_sanction_after_the_aggregate_does_not_stop_the_finalize(n):
     inputs = sorted(item["roster"]["hotkey"] for item in tape_inputs)
     assert inputs == sorted(k.ss58 for k in members)
     assert paid(n, 0) == [(h, 250000) for h in inputs]
+
+
+def test_a_member_whose_screen_lapsed_is_left_out_and_the_run_goes_on(n):
+    # Given: round 0 audited; the screen of the fifth member ends before the aggregate.
+    run = n.manifest.run_id()
+    survivors, lapsed = fixtures.HOT[:4], fixtures.HOT[4]
+    rollback.execute_round(n, 0, aggregate=False)
+    set_screen(n, lapsed.ss58, n.now + 3)
+    n.push(n.now + 10)
+    # When
+    applied = aggregate(n)
+    # Then: it is left out with its cause and no sanction; the other four are aggregated and paid.
+    assert applied.status_code == 200, applied.text
+    assert excluded(n) == {
+        f"0:{lapsed.ss58}": {
+            "reason": "INELIGIBLE",
+            "stage": "aggregate",
+            "cause": "SCREEN_LAPSED",
+            "evidence_hash": sha256_hex(
+                f"ht-ineligible/1|{run}|0|{lapsed.ss58}|SCREEN_LAPSED".encode()
+            ),
+        }
+    }
+    assert standing(n, lapsed.ss58) == ("ACTIVE", 0, 0)
+    assert finalize(n, 0, applied.json(), survivors).status_code == 200
+    assert paid(n, 0) == [(h, 250000) for h in sorted(k.ss58 for k in survivors)]
+    # And the run goes on: round 1 opens with the four.
+    assert rollback.execute_round(n, 1, hotkeys=survivors, open_only=True).status_code == 200
+
+
+def test_four_members_cannot_lose_one_but_the_round_waits_for_it(n):
+    # Given: a roster of exactly four, one of which lapses after its audit.
+    four = fixtures.HOT[:4]
+    rollback.execute_round(n, 0, hotkeys=four, aggregate=False)
+    set_screen(n, four[3].ss58, n.now + 3)
+    n.push(n.now + 10)
+    # When: the remaining three cannot carry the round.
+    refused = aggregate(n)
+    # Then: a named refusal that persists nothing (never a bare 500) ...
+    assert (refused.status_code, "ROUND_INFEASIBLE" in refused.text) == (409, True)
+    assert excluded(n) == {}
+    # ... so the round resumes as soon as the member is eligible again.
+    set_screen(n, four[3].ss58, 10**9)
+    assert aggregate(n).status_code == 200

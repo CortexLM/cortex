@@ -342,6 +342,13 @@ Run `audits` as soon as `now >= d_audit`: it must be called before beacon round 
 (`absolute = min(d_final, d_audit + 2 * lease_rounds)`), and a call after that answers 503 for every
 roster.
 
+Run `finalize` (it aggregates first) before `d_final`. The aggregate reads every audited member's
+admission at the call and leaves out one that no longer qualifies (`excluded`, reason
+`INELIGIBLE`, with its `cause`: rotated away, banned, suspended, back on probation, screen
+ended, bond burned); nobody is sanctioned for it and the others are paid. A roster of four then
+answers 409 `ROUND_INFEASIBLE` and writes nothing: repair the member's standing, or open the
+next round with five.
+
 **Upload one miner at a time.** A relay image built before `BeaconCache` (`relay/app.py`)
 BLS-verifies drand in `now()` on every capability and chunk call; later images share one verified
 beacon per drand period and put the `RelayError` text in the 400 body as `detail`. Four concurrent

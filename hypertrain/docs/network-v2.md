@@ -488,6 +488,17 @@ standing is when it runs: `Finalize.included` must list them. A member suspended
 with a burned bond between the aggregate and the finalize is still paid for the round it was
 verified in; the finalize used to re-derive the live set and answer 403 for ever.
 
+An audited member whose admission no longer qualifies it when the round is aggregated is left
+out of the round too: `excluded`, reason `INELIGIBLE`, stage `aggregate`, with a `cause`
+(`ROTATED`: its hotkey no longer names an admission; `BANNED`; `SUSPENDED`, also while a contest
+is pending; `NOT_LIVE`: back on a fresh probation; `SCREEN_LAPSED`; `UNFUNDED`: its bond is gone,
+burned for instance). The admission is read at the `aggregate` call, so a member that is fit
+then is kept. Nobody is sanctioned for it: the cause is the member's own state or the effect of
+a sanction already applied. The remaining members must still carry the allocation; with four
+rostered, one unfit member makes `aggregate` answer 409 `ROUND_INFEASIBLE` and writes nothing,
+and the round aggregates as soon as the member is eligible again. Call `aggregate` before
+`d_final`: the later the call, the more screens have ended.
+
 Regional relays are transport/cache only, not regional arithmetic aggregators.
 An upload opportunity acknowledgment is not custody. Completion failure requires
 an exact complete receipt or full original chunk coverage, authenticated healthy

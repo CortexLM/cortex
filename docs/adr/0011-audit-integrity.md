@@ -1085,8 +1085,10 @@ the table as covering them.
     `disputes_v2.py` is not touched; a MISMATCH can still be contested. `open_round_v2` refuses an entry whose
     `screen_until` is before `d_final`.
 22. `aggregate_v2` first leaves out, with `excluded {reason: INELIGIBLE, stage: aggregate, cause}`, every
-    audited member whose admission no longer qualifies (`ROTATED`, `REASSIGNED`, `BANNED`, `SUSPENDED`,
-    `NOT_LIVE`, `SCREEN_LAPSED`, `UNFUNDED`). The survivors check that follows answers 409
+    audited member whose admission no longer qualifies (`ROTATED`, `BANNED`, `SUSPENDED`, `NOT_LIVE`,
+    `SCREEN_LAPSED`, `UNFUNDED`; a member is rotated when its hotkey no longer names an admission, and a
+    hotkey names one admission for good, since `join` and `rotate` both refuse a hotkey in
+    `admission_history`, so no `REASSIGNED` cause exists). The survivors check that follows answers 409
     `ROUND_INFEASIBLE` and persists nothing when the rest cannot carry Q (then the reaper retires).
 23. `finalize_v2` pays exactly the inputs recorded with the applied tape and no longer re-derives the live
     set. This is a prerequisite of every sanction: it must land before the first commit that calls the hook.

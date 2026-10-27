@@ -151,6 +151,13 @@
   so a sanction that lands between the aggregate and the finalize (a suspension, a burned bond)
   no longer answers 403 for ever. `finalize_v2` is an owned function: `implementation_hash`
   changes. See `docs/adr/0011-audit-integrity.md` (Part 8, decision 23) at the monorepo root.
+- An audited roster member whose admission no longer qualifies it when the round is aggregated
+  (hotkey rotated, banned, suspended, back on probation, screen ended, bond gone) no longer
+  makes `aggregate` answer 403 for the whole round for ever: it is left out (`excluded`, reason
+  `INELIGIBLE`, with a `cause`, no sanction) and the others are paid. A roster that the rest
+  cannot carry answers 409 `ROUND_INFEASIBLE` and writes nothing. The new helpers join the owned
+  set of `implementation_hash`, which changes. See `docs/adr/0011-audit-integrity.md` (Part 8,
+  decision 22) at the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

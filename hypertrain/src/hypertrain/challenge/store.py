@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 from hypertrain.beacon import BeaconError, BeaconRound
 from hypertrain.challenge import audit_cooldown_v2
 from hypertrain.challenge.admission import Admission
+from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import EXCLUSION_ABANDONED, Contest, DisputesV2
 from hypertrain.data.assignment import assign_round
 from hypertrain.data.store import (
@@ -4315,6 +4316,8 @@ class ChallengeStore:
             "_put_no_show_v2",
             "_exclude_no_shows_v2",
             "_exclude_missing_deltas_v2",
+            "_unfit_cause_v2",
+            "_exclude_unfit_members_v2",
             "lease_v2",
             "complete_audit_v2",
             "finalize_v2",
@@ -6457,6 +6460,67 @@ class ChallengeStore:
             if entry.hotkey in audited and f"{w}:{entry.hotkey}" not in delivered | excluded:
                 self._put_no_show_v2(run_id, w, entry.hotkey, "delta")
 
+    def _unfit_cause_v2(self, admission: Any, hotkey: str, now: int) -> str | None:
+        """Why a roster member's admission no longer qualifies it, or None while it does.
+
+        The terms follow `Admission.status().eligible`, first match wins. Any other
+        AdmissionError (an unverifiable beacon, say) is a fault of ours and propagates.
+        """
+        try:
+            status = admission.status(hotkey, now=now)
+        except AdmissionError as error:
+            if error.code != "UNKNOWN_HOTKEY":
+                raise
+            return "ROTATED"
+        if status.eligible:
+            return None
+        record = status.record
+        if record.state in ("BANNED", "SUSPENDED"):
+            return record.state
+        if record.state != "ACTIVE" and (record.state != "PROBATION" or record.clean_count < 4):
+            return "NOT_LIVE"
+        return "SCREEN_LAPSED" if now > record.screen_until else "UNFUNDED"
+
+    def _exclude_unfit_members_v2(self, run_id: str, w: int) -> None:
+        """Leave out an audited member whose admission no longer qualifies it for this round.
+
+        The wait is on the member, not on the round: aggregate refused for everybody until the
+        member recovered, and a lapsed screen never does. The cause is judged here, as late as
+        possible, inside the transaction that aggregates, so a member that is fit at the call
+        is kept and the ROUND_INFEASIBLE of the survivors check rolls the exclusions back. No
+        sanction: the cause is the member's own state or the effect of one already applied.
+        """
+        from hypertrain.protocol.messages_v2 import RoundOpenV2
+
+        admission = self._services(run_id)[1]
+        body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", str(w))["body"])
+        now = self._now(self._db)
+        audited = {
+            row[0]
+            for row in self._db.execute(
+                "SELECT hotkey FROM audit_leases_v2 WHERE run_id=? AND w=? AND state='completed'",
+                (run_id, w),
+            )
+        }
+        excluded = self._round_ids_v2(run_id, "excluded", w)
+        for entry in body.roster:
+            if entry.hotkey not in audited or f"{w}:{entry.hotkey}" in excluded:
+                continue
+            cause = self._unfit_cause_v2(admission, entry.hotkey, now)
+            if cause is not None:
+                evidence = f"ht-ineligible/1|{run_id}|{w}|{entry.hotkey}|{cause}"
+                self._put_record_v2(
+                    run_id,
+                    "excluded",
+                    f"{w}:{entry.hotkey}",
+                    {
+                        "reason": "INELIGIBLE",
+                        "stage": "aggregate",
+                        "cause": cause,
+                        "evidence_hash": sha256_hex(evidence.encode()),
+                    },
+                )
+
     def schedule_audits_v2(self, run_id: str, w: int) -> list[str]:
         from hypertrain.protocol.messages_v2 import AuditChallengeV2, CommitV2, RoundOpenV2
 
@@ -8578,6 +8642,7 @@ class ChallengeStore:
             history = [s for s in self._history_v2(run_id) if s.w < w]
             require_apply(run_id, w, history)
             self._exclude_missing_deltas_v2(run_id, w)
+            self._exclude_unfit_members_v2(run_id, w)
             inputs = self.verified_inputs_v2(run_id, w)
             self._require_survivors_v2(manifest, [x.roster for x in inputs])
             policy = AggregationPolicyV2.model_validate_json(

@@ -1,0 +1,160 @@
+"""R-C2 at the store: why a roster entry no longer matches a live admission, and who is left out."""
+# ruff: noqa: F811  (the `network` fixture parameter shadows the imported fixture)
+
+from __future__ import annotations
+
+import ast
+import json
+import unittest.mock
+from pathlib import Path
+
+import pytest
+
+from hypertrain.beacon import BeaconRound
+from hypertrain.challenge.admission_store import AdmissionError
+from hypertrain.challenge.store import ChallengeStore
+from hypertrain.miner.admission import sign_rotation, sign_rotation_consent
+from hypertrain.protocol.hashing import sha256_hex
+from hypertrain.protocol.jcs import canonicalize
+
+from . import test_service_network_v2 as fixtures
+from .audit_lease_fixture_v2 import D_AUDIT, seed_round
+from .five_identity_network_v2 import activate_identities
+from .test_service_network_v2 import network  # noqa: F401  (pytest fixture import)
+
+EVIDENCE = "ab" * 32
+TREE = Path(__file__).parents[2]
+
+
+def seize(reason):
+    def apply(n, admission, hotkey, identity):
+        admission.seize_bond(identity, reason=reason, evidence_hash=EVIDENCE, now=n.now)
+
+    return apply
+
+
+def rotate(n, admission, hotkey, identity):
+    run = n.manifest.run_id()
+    request = sign_rotation_consent(
+        fixtures.REFEREE,
+        run_id=run,
+        coldkey=fixtures.COLD[0].ss58,
+        hotkey=hotkey,
+        operation_id="aa" * 32,
+        expires_beacon=10000,
+    )
+    admission.rotate(canonicalize(sign_rotation(fixtures.COLD[0], run, request, 10000)), now=n.now)
+
+
+def suspend_for_a_dispute(n, admission, hotkey, identity):
+    admission.suspend(
+        hotkey,
+        reason="PENDING_DISPUTE",
+        now=n.now,
+        pending_dispute=True,
+        dispute_id="dd" * 32,
+        evidence_hash=EVIDENCE,
+    )
+
+
+def resume_on_fresh_probation(n, admission, hotkey, identity):
+    admission.suspend(hotkey, reason="TEST", now=n.now)
+    admission.resume(hotkey, now=n.now)
+
+
+def end_the_screen(n, admission, hotkey, identity):
+    with n.store._tx():
+        n.store._db.execute(
+            "UPDATE admissions_v2 SET screen_until=? WHERE admission_id=?", (n.now - 1, identity)
+        )
+
+
+@pytest.mark.parametrize(
+    ("change", "cause"),
+    [
+        (lambda *_: None, None),
+        (rotate, "ROTATED"),
+        (seize("TRAINING_FRAUD"), "BANNED"),
+        (seize("AUDIT_MISMATCH"), "SUSPENDED"),
+        (suspend_for_a_dispute, "SUSPENDED"),
+        (resume_on_fresh_probation, "NOT_LIVE"),
+        (end_the_screen, "SCREEN_LAPSED"),
+        (seize("NO_SHOW"), "UNFUNDED"),
+    ],
+    ids=[
+        "fit",
+        "rotated",
+        "banned",
+        "suspended-and-unfunded",
+        "pending-dispute",
+        "fresh-probation",
+        "screen-lapsed",
+        "unfunded",
+    ],
+)
+def test_the_cause_of_an_unfit_entry_is_named(network, change, cause):
+    # Given: a rostered admission, ACTIVE and funded, that then changes through the real hooks.
+    run = network.manifest.run_id()
+    (identity,) = activate_identities(network, fixtures, range(1))
+    admission = network.store._services(run)[1]
+    hotkey = fixtures.HOT[0].ss58
+    # When
+    change(network, admission, hotkey, identity)
+    # Then
+    assert network.store._unfit_cause_v2(admission, hotkey, network.now) == cause
+
+
+@pytest.mark.parametrize("name", ["_unfit_cause_v2", "_exclude_unfit_members_v2"])
+def test_the_exit_helpers_are_bound_to_the_service_implementation(name):
+    # The exit decides who is paid, so a run that holds a service-admission record must see the
+    # implementation change when it does (the owned set of `_service_implementation_v2`).
+    source = TREE / "src/hypertrain"
+    paths = ("aggregator/core.py", "aggregator/tape_v2.py")
+    original = ChallengeStore._service_implementation_v2(source, paths)
+    tree = ast.parse((source / "challenge/store.py").read_text())
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
+    node.body.append(ast.Pass())
+    with unittest.mock.patch("hypertrain.challenge.store.ast.parse", return_value=tree):
+        assert ChallengeStore._service_implementation_v2(source, paths) != original
+
+
+def test_a_beacon_fault_is_not_a_cause_to_leave_a_member_out(network, monkeypatch):
+    # Given: an admission that cannot read a verified beacon at this round.
+    admission = network.store._services(network.manifest.run_id())[1]
+    monkeypatch.setattr(admission, "beacon", lambda now: BeaconRound(now + 1, "", "", False))
+    # When / Then: the fault propagates; it must not read as "the member rotated away".
+    with pytest.raises(AdmissionError, match="UNVERIFIED_BEACON"):
+        network.store._unfit_cause_v2(admission, fixtures.HOT[0].ss58, network.now)
+
+
+def test_only_an_audited_member_that_is_not_already_excluded_is_left_out(network):
+    # Given: a seeded round of five whose members have no admission (every entry is unfit);
+    # members 0, 1, 2 and 4 completed their audit, 3 is still queued, 4 was already excluded.
+    store, run = network.store, network.manifest.run_id()
+    keys = seed_round(network, n=5)
+    network.push(D_AUDIT)
+    store.schedule_audits_v2(run, 0)
+    unverified = {"reason": "UNVERIFIED", "evidence_hash": EVIDENCE}
+    with store._tx():
+        store._db.execute(
+            "UPDATE audit_leases_v2 SET state='completed',result='MATCH' WHERE hotkey IN (?,?,?,?)",
+            tuple(keys[i].ss58 for i in (0, 1, 2, 4)),
+        )
+        store._put_record_v2(run, "excluded", f"0:{keys[4].ss58}", unverified)
+        # When
+        store._exclude_unfit_members_v2(run, 0)
+    # Then
+    seen = {
+        r[0]: json.loads(r[1])
+        for r in store._db.execute("SELECT id,data FROM records_v2 WHERE kind='excluded'")
+    }
+    assert set(seen) == {f"0:{keys[i].ss58}" for i in (0, 1, 2, 4)}
+    assert seen[f"0:{keys[4].ss58}"] == unverified
+    for i in (0, 1, 2):
+        assert seen[f"0:{keys[i].ss58}"] == {
+            "reason": "INELIGIBLE",
+            "stage": "aggregate",
+            "cause": "ROTATED",
+            "evidence_hash": sha256_hex(f"ht-ineligible/1|{run}|0|{keys[i].ss58}|ROTATED".encode()),
+        }
+    assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 5
