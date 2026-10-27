@@ -165,6 +165,15 @@ def authority(tmp_path, monkeypatch, request):
         body["training"]["reference_spec"].update(
             sm_count=host["sm_count"], driver_allowlist=[host["driver"]]
         )
+    production_policy = None
+    if host is not None and host.get("ledger_mode") == "production":
+        # The same run on the production ledger: only the economics policy differs.
+        econ = EconomicsPolicyV2.model_validate_json(
+            network.store.objects.get(network.manifest.network.economics_policy_hash)
+        )
+        changed = {"ledger_mode": "production", "genesis_allocation_hash": None}
+        production_policy = canonicalize(econ.model_copy(update=changed).body())
+        body["network"]["economics_policy_hash"] = sha256_hex(production_policy)
     manifest = RunManifestV2.model_validate(body)
     job = job.model_copy(update={"manifest": manifest, "run_id": manifest.run_id()})
     original.seed_job.write_text(job.model_dump_json())
@@ -228,6 +237,8 @@ def authority(tmp_path, monkeypatch, request):
         "relay_registry_hash",
     ):
         objects.put(network.store.objects.get(getattr(network.manifest.network, field)))
+    if production_policy is not None:
+        objects.put(production_policy)
     store = ChallengeStore(
         tmp_path / "authority-store",
         network.store.params,
@@ -455,6 +466,7 @@ def test_invalid_reviewed_authority_rejects_without_install(authority, fault):
 # Manifest reference (sm_count, driver) and the host devices' recorded (capability, SM count).
 RTX_5090 = {"sm_count": 170, "driver": "595.84", "capability": [12, 0], "devices": 170}
 B300 = {"sm_count": 148, "driver": "595.91.07", "capability": [10, 3], "devices": 148}
+PRODUCTION = {**RTX_5090, "ledger_mode": "production"}
 
 
 @pytest.mark.parametrize(
@@ -564,21 +576,88 @@ def test_strict_record_carries_host_attestation_and_resolves_cuda(authority):
             assert store.objects.get(fsha(path.parent / name)) == (path.parent / name).read_bytes()
 
 
-def test_label_only_installs_exactly_the_legacy_seven_keys_and_is_idempotent(authority):
-    # Given: results of the Vast lifecycle, signed by an owner who named the label-only mode.
+def install_unattested(store, manifest, configs, results, *, record):
+    """A qualification record whose evidence holds no host_attestation, put in the store the way
+    bootstrap does: `label_only`, with its mark, or `legacy`, the seven keys signed before
+    attestations existed (a store installed long ago holds such a record)."""
+    evidence = gpu.evidence_for(manifest, configs, results, label_only=True)
+    if record == "legacy":
+        del evidence["qualification_mode"]
+    receipt = envelope_v2.parse_envelope(reviewed(manifest, evidence)).model_dump(mode="json")
+    held = {**evidence, "authority_hash": store.objects.put(canonicalize(evidence))}
+    held["receipt"] = receipt
+    image = manifest.training.reference_spec.image_digest
+    store._put_record_v2(manifest.run_id(), "qualification", image, held)
+
+
+@pytest.mark.parametrize(
+    "authority",
+    [None, PRODUCTION],
+    indirect=True,
+    ids=["test_ledger", "production_ledger"],
+)
+@pytest.mark.parametrize("record", ["strict", "label_only", "legacy"])
+def test_only_a_test_run_may_stand_on_a_qualification_without_attested_hosts(authority, record):
+    # Given: a run qualified on attested hosts, by label only, or by a record installed before
+    # attestations existed.
+    store, manifest, configs, results, raw = authority
+    if record == "strict":
+        bootstrap(store, manifest, configs, results, raw)
+    else:
+        install_unattested(store, manifest, configs, results, record=record)
+    register(store, manifest)
+    production = (
+        EconomicsPolicyV2.model_validate_json(
+            store.objects.get(manifest.network.economics_policy_hash)
+        ).ledger_mode
+        == "production"
+    )
+    # When / Then: a production run refuses to build its services on the unattested record, and
+    # says what the record is; a test run keeps every record it has.
+    if production and record != "strict":
+        kind = record.replace("_", "-")
+        with pytest.raises(ChallengeError, match=rf"attested hosts.*{kind}") as refused:
+            store._services(manifest.run_id())
+        assert refused.value.status == 409
+        assert manifest.run_id() not in store._services_v2
+    else:
+        escrow, admission, _ = store._services(manifest.run_id())
+        assert admission.backend == "cuda" and (escrow.policy.ledger_mode == "production") == (
+            production
+        )
+
+
+@pytest.mark.parametrize("authority", [PRODUCTION], indirect=True, ids=["production_ledger"])
+def test_label_only_bootstrap_of_a_production_manifest_installs_nothing(authority):
+    # Given: the production economics policy is already in the object store, so the store can tell.
+    store, manifest, configs, results, _ = authority
+    raw = reviewed(manifest, gpu.evidence_for(manifest, configs, results, label_only=True))
+    # When / Then: refused before a record that no production run could use is installed.
+    with pytest.raises(ChallengeError, match="attested hosts") as refused:
+        store._bootstrap_backend_v2(manifest, configs, results, raw, pins=None)
+    assert refused.value.status == 409
+    assert qualification_records(store) == 0
+
+
+@pytest.mark.parametrize("receipt", ["marked", "signed_before_the_mark"])
+def test_label_only_installs_the_evidence_its_receipt_names_and_is_idempotent(authority, receipt):
+    # Given: results of the Vast lifecycle, signed by an owner who named the label-only mode,
+    # over the evidence with its mark, or (a receipt from before the mark) over the seven keys.
     store, manifest, configs, results, _ = authority
     evidence = gpu.evidence_for(manifest, configs, results, label_only=True)
+    if receipt == "signed_before_the_mark":
+        del evidence["qualification_mode"]
     raw = reviewed(manifest, evidence)
     # When
     store._bootstrap_backend_v2(manifest, configs, results, raw, pins=None)
     store._bootstrap_backend_v2(manifest, configs, results, raw, pins=None)
-    # Then: today's seven keys, so a re-bootstrap with the same inputs stays the same record.
+    # Then: the record is the evidence that was signed, and a re-bootstrap is the same record.
     record = store._record_v2(
         manifest.run_id(), "qualification", manifest.training.reference_spec.image_digest
     )
     held = envelope_v2.load_json(store.objects.get(record["authority_hash"]))
     assert held == evidence and "host_attestation" not in held
-    assert sorted(held) == [
+    seven = [
         "backend",
         "configs",
         "layout_hash",
@@ -587,7 +666,15 @@ def test_label_only_installs_exactly_the_legacy_seven_keys_and_is_idempotent(aut
         "run_id",
         "summaries",
     ]
+    if receipt == "marked":
+        assert held["qualification_mode"] == record["qualification_mode"] == "label-only"
+        assert sorted(held) == sorted([*seven, "qualification_mode"])
+    else:
+        assert sorted(held) == seven and "qualification_mode" not in record
     assert qualification_records(store) == 1
+    # And a test run stands on either record.
+    register(store, manifest)
+    assert store._services(manifest.run_id())[1].backend == "cuda"
 
 
 @pytest.mark.parametrize(

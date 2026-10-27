@@ -450,7 +450,10 @@ breaker bounds the attempt-based one).
 4. **Gate.** `_bootstrap_backend_v2(..., *, pins)` takes the pins as a required keyword (`None` = label-only).
    One non-owned builder, `ChallengeStore._qualification_evidence_v2`, serves the store and
    `scripts/ops/backend_bootstrap.py`. Strict evidence adds `host_attestation` (fingerprints and sha256 of the
-   four files); the four files enter the object store. Legacy results with `pins=None` give today's 7 keys.
+   four files); the four files enter the object store. Label-only evidence (`pins=None`) is the 7 keys signed
+   before attestations existed plus `qualification_mode: "label-only"`. A receipt signed before the mark existed
+   (over the 7 keys alone) still installs the unmarked record it was signed for, so a store rebuilt from such
+   receipts stays valid.
 5. **Image binding (QUAL-02).** `cuda_executor_runner` (stdlib only) measures the package installed in the
    image with `python -I` (so `PYTHONPATH` and the cwd cannot substitute it): sha256 of the compact sorted
    JSON of `{"src/hypertrain/<rel>": sha256}` over every `*.py`, equal to the JCS form for the ASCII names
@@ -462,11 +465,20 @@ breaker bounds the attempt-based one).
    The executor reports the measurement, and an optional pin in `ExecutorConfig` refuses a host that reports
    another value, so reference and referee runs are covered too. The executor config also refuses two hosts
    that pin the same SSH key or the same address and port, and `Executor._admit` refuses overlapping GPU sets.
-7. **Legacy and Vast.** Installed records stay valid. Strict is the default for new bootstraps; label-only
-   (`--label-only`, `pins=None`, `host_keys=None`) is the explicit switch and remains the route of the Vast
-   lifecycle (`launch_cuda_run.sh`, `orchestrate.py:2303,3338`), whose `machine_id` comes from the provider
-   listing and is checked distinct by the owner-run admission (`launcher.py:220-222`) [A]. A label-only record is not marked: its evidence is byte-identical to today's.
-   An image built before this change cannot run the new `run()`; it can only be qualified label-only.
+7. **Label-only is a test-ledger switch (D60).** Installed records stay valid. Strict is the default for new
+   bootstraps; label-only (`--label-only`, `pins=None`, `host_keys=None`) is the explicit switch for a
+   test-ledger run. Its evidence is marked (`qualification_mode`), and a production run refuses every
+   qualification record without `host_attestation`, marked or legacy: `_services` raises 409 `production CUDA
+   qualification needs attested hosts, not label-only` (or `legacy`) before the run's services exist, and
+   `_bootstrap_backend_v2` refuses `pins=None` as soon as the manifest's economics policy is in the object
+   store and says production. Both edits are outside the owned names (`_backend_v2` is untouched), so
+   `implementation_hash` does not move. `scripts/launch_cuda_run.sh` settles the trust mode in preflight,
+   before any spend: a production ledger needs `QUAL_KNOWN_HOSTS_H0/H1` and `QUAL_FINGERPRINT_H0/H1`, and
+   `--label-only` needs `QUAL_LABEL_ONLY=1` on a test ledger. The Vast lifecycle (`orchestrate.py:2303,3338`,
+   `machine_id` from the provider listing, checked distinct by the owner-run admission, `launcher.py:220-222`
+   [A]) yields no attestation, so its route into a production run is closed until a strict producer for it
+   exists. An image built before this change cannot run the new `run()`; it can only be qualified label-only,
+   that is, for a test-ledger run.
 8. **Stated limits.** The gate protects the engine path against accidental or lazy relabelling (a relabelled
    copy, a stale or foreign attestation, one machine listed twice). It does not bind a malicious owner:
    an operator who also forges a second key and a matching inventory, the TEST stand-in
@@ -489,6 +501,8 @@ breaker bounds the attempt-based one).
 - `sources()` changes in six files, so older qualification configs no longer validate against the tree and
   dispatch source pins must be recomputed (ADR 0007 and ADR 0008 precedent). Run ids and installed records
   do not change.
+- A production run no longer starts from a label-only or legacy qualification record, whatever the owner
+  signed; installed legacy records stay valid for test-ledger runs.
 - Cost: one SSH round trip per host and about 6 ms of `ssh-keygen`.
 
 ### Rejected alternatives
@@ -504,8 +518,9 @@ breaker bounds the attempt-based one).
    config field: the party being checked writes it; the owner-signed record carries the value instead.
 6. A baked `/opt/hypertrain/build.json`: lives inside the digest it vouches for. Hashing `uv.lock`: the
    tree's lock does not affect execution.
-7. A default-label-only `compare`: the bare Lens Q1 call would keep passing. A marker key in label-only
-   evidence: it would change every existing evidence digest.
+7. A default-label-only `compare`: the bare Lens Q1 call would keep passing. (A marker key in label-only
+   evidence was rejected first because it changes the evidence digest of every label-only receipt. D60 asked for
+   it; decision 4 keeps installing a receipt signed over the unmarked 7 keys, so no signed receipt is lost.)
 8. Driving qualification through `cuda_executor`, so the challenge observes each host itself: the stronger
    long-term design, but it needs a new qualification driver. Left for later.
 
@@ -517,6 +532,8 @@ breaker bounds the attempt-based one).
 - The in-image program matched `sources()` on a wheel of this tree and on the dev editable install (144 files,
   same digest). In the CI-built image it is [?].
 - `ssh-keygen` under a uid without a passwd entry exits 255 with `No user exists for uid` [A: adversarial review]; not reproduced.
+- The private genuine-index suites (`HT_GENUINE_CUDA_INDEX`) were not run (no index on the development host):
+  their receipts predate the mark and take the unmarked path of decision 4.
 - Interaction with AUD-01 (a 409 after publication is booked as auditor silence) is not studied.
 
 ### Sources

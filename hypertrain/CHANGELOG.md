@@ -77,6 +77,21 @@
   of replaying it in the daemon (behavior change for pinned manifests only).
 
 ### Changed
+- A production run no longer stands on a CUDA qualification without host attestation.
+  `network_qualification.compare` takes its trust mode as a required keyword (`host_keys`: the two
+  pinned SSH host keys, or `None` for label-only) and, with keys, requires each host's signed
+  statement about its own `result.json` (`attestation.json` and `attestation.sig`, written by
+  `scripts/ops/qualification_attest.py`), distinct keys, GPU sets and boot ids, and device UUIDs
+  in the result. `scripts/ops/backend_bootstrap.py` needs `--known-hosts` with
+  `--host-fingerprint`, or `--label-only`. A label-only record carries `qualification_mode:
+  "label-only"` in its owner-signed evidence; a production run refuses it, and any record
+  installed before attestations existed, with 409 `production CUDA qualification needs attested
+  hosts` (`_bootstrap_backend_v2` refuses it earlier when the economics policy is already
+  stored). Test-ledger runs and installed legacy records keep working; a receipt signed over the
+  seven legacy keys still installs. `scripts/launch_cuda_run.sh` settles the mode in preflight:
+  a production launch needs `QUAL_KNOWN_HOSTS_H0/H1` and `QUAL_FINGERPRINT_H0/H1`, and
+  `--label-only` needs `QUAL_LABEL_ONLY=1` on a test ledger, so the Vast lifecycle can no longer
+  launch a production run. See `docs/adr/0011-audit-integrity.md` (part 4) at the monorepo root.
 - A challenge poll after the deadline no longer suspends a miner whose proof was accepted
   (RTA-05), and the exact accepted proof and screen may be re-posted after their deadline so
   that a finalization that failed can run. See `docs/adr/0010-admission-hardening.md` at the

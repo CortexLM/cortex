@@ -2414,8 +2414,9 @@ class ChallengeStore:
     ) -> dict[str, JsonValue]:
         """The owner-signed qualification evidence; the store and backend_bootstrap.py share it.
 
-        `keys` are the two pinned SSH host keys of a strict bootstrap, None for the explicit
-        label-only mode, whose evidence is the seven keys signed before attestations existed."""
+        `keys` are the two pinned SSH host keys of a strict bootstrap. None is the explicit
+        label-only mode: the seven keys signed before attestations existed plus a mark that says
+        so, which a production run refuses (_unattested_production_v2)."""
         from hypertrain.gpu_ops import host_attest
         from hypertrain.gpu_ops.journal import fsha
 
@@ -2434,13 +2435,23 @@ class ChallengeStore:
                 for rank in range(ref.layout.n_gpus)
             ],
         }
-        if keys is not None:
+        if keys is None:
+            evidence["qualification_mode"] = "label-only"
+        else:
             evidence["host_attestation"] = {
                 "host_keys": [host_attest.fingerprint(key) for key in keys],
                 "statements": [sha256_hex(a.raw) for a in attestations],
                 "signatures": [sha256_hex(a.signature) for a in attestations],
             }
         return evidence
+
+    @staticmethod
+    def _unattested_production_v2(kind: str) -> ChallengeError:
+        """A production run stands on attested hosts only (docs/adr/0011, part 4, decision 7):
+        `kind` is the mark of a label-only record, or `legacy` for one installed without it."""
+        return ChallengeError(
+            409, f"production CUDA qualification needs attested hosts, not {kind}"
+        )
 
     def _bootstrap_backend_v2(
         self,
@@ -2455,7 +2466,9 @@ class ChallengeStore:
 
         `pins` are each host's known_hosts file and the fingerprint the owner typed from the
         provider console: the two results must then come from two attested hosts. None is the
-        explicit label-only mode, for results that cannot carry attestations (the Vast lifecycle).
+        explicit label-only mode, for a TEST run: a production run never stands on it, and this
+        refuses it as soon as the economics policy is in the object store to say so (a launch
+        that registers its policies later is stopped by `_services` instead).
         """
         from hypertrain.gpu_ops import host_attest
         from hypertrain.gpu_ops import network_qualification as engine
@@ -2465,16 +2478,36 @@ class ChallengeStore:
         ref = manifest.training.reference_spec
         config_bytes = tuple(p.read_bytes() for p in configs)
         result_bytes = tuple(p.read_bytes() for p in results)
+        if pins is None:
+            try:
+                economics = EconomicsPolicyV2.model_validate_json(
+                    self.objects.get(manifest.network.economics_policy_hash)
+                )
+            except ObjectNotFound:
+                economics = None
+            if economics is not None and economics.ledger_mode == "production":
+                raise self._unattested_production_v2("label-only")
         keys = None if pins is None else engine.pinned_keys(config_bytes, pins)
         attestations = [] if keys is None else [host_attest.load(p) for p in results]
         evidence = self._qualification_evidence_v2(
             manifest, config_bytes, result_bytes, results, keys, attestations
         )
-        digest = sha256_hex(canonicalize(evidence))
         receipt = envelope_v2.Intake(
             manifest.run_id(), {"Receipt": lambda h: h == self.owner_hotkey}
         ).accept(raw, self._now(self._db))
         env = envelope_v2.parse_envelope(raw)
+        # A receipt the owner signed before the mark existed commits to the seven keys alone. It
+        # installs the unmarked record it was signed for, exactly as it did, so that a store
+        # rebuilt from such receipts stays valid; a production run refuses that record anyway.
+        unmarked = {k: v for k, v in evidence.items() if k != "qualification_mode"}
+        legacy = (
+            unmarked != evidence
+            and isinstance(receipt, Receipt)
+            and receipt.commit_hash == sha256_hex(canonicalize(unmarked))
+        )
+        if legacy:
+            evidence = unmarked
+        digest = sha256_hex(canonicalize(evidence))
         if (
             env.type != "Receipt"
             or not isinstance(receipt, Receipt)
@@ -2514,6 +2547,8 @@ class ChallengeStore:
         rebuilt = self._qualification_evidence_v2(
             manifest, config_bytes, result_bytes, results, keys, attestations
         )
+        if legacy:
+            rebuilt.pop("qualification_mode")
         if rebuilt != evidence:
             raise ChallengeError(409, "qualification summary custody changed during bootstrap")
         with self._tx():
@@ -2638,6 +2673,14 @@ class ChallengeStore:
             backend = self._backend_v2(manifest)
             n = manifest.network
             econ = EconomicsPolicyV2.model_validate_json(self.objects.get(n.economics_policy_hash))
+            if backend == "cuda" and econ.ledger_mode == "production":
+                held = self._record_v2(
+                    run_id, "qualification", manifest.training.reference_spec.image_digest
+                )
+                if "host_attestation" not in held:
+                    raise self._unattested_production_v2(
+                        str(held.get("qualification_mode", "legacy"))
+                    )
             escrow = EscrowV2(
                 self._db,
                 manifest,

@@ -28,7 +28,8 @@ mode = p.add_mutually_exclusive_group(required=True)
 mode.add_argument(
     "--label-only",
     action="store_true",
-    help="results without a host attestation (the Vast lifecycle): nothing proves two machines",
+    help="results without a host attestation: nothing proves two machines, the record is marked "
+    "label-only and a production run refuses it (test-ledger runs only)",
 )
 mode.add_argument(
     "--known-hosts",

@@ -336,9 +336,10 @@ GPU), aggregation and `get_weights`. The miner's CUDA worker gates (torch `2.14.
 - the CUDA qualification record is a fixture-owner-signed **stand-in**, installed before the run is
   created. The real record needs two results from two hosts. `compare`
   (`gpu_ops/network_qualification.py`) refuses a pair whose `machine_id`, `instance_id` or `role`
-  are equal, but those are labels the caller writes into each result: a relabelled copy of one
-  host's result passes, so `compare` does not by itself stop one host from giving both. A PASS
-  here does not exercise `_bootstrap_backend_v2`;
+  are equal, but those are labels the caller writes into each result. In strict mode (the only mode
+  a production run accepts, ADR 0011 part 4) it also requires each host's SSH host-key attestation
+  of its own result, so a relabelled copy of one host's result is refused; label-only mode does not
+  check that. A PASS here exercises neither, nor `_bootstrap_backend_v2`;
 - `role-dispatch.json` is written from the challenge process's own GPU and is not a dispatcher's
   record; its image digest is `HT_IMAGE_DIGEST`, the same variable that pins the manifest;
 - the subnet transport and the beacon are the pytest network fixture's.
@@ -353,7 +354,9 @@ The check is by (capability, SM count) only, from the table `SM_COUNTS` in
 neither the model name nor a GPU UUID. An RTX 5090 is in the table and would pass under
 `--sm-count 170`, and a GB300 that reports the same pair as a B300 cannot be told from one, so
 "B300" in an evidence folder is the operator's word plus this class check. Authenticating the
-machine is future work (D26, branch `v3-cuda-executor`, not in this tree).
+machine is done outside this harness: the generic CUDA executor is merged and `compare` authenticates
+each host by a pinned SSH host-key attestation (ADR 0011 part 4), but this harness installs the
+stand-in record and does not exercise either.
 
 `--mode smoke-kimi`, `multi-kimi` and `job-kimi` run kimi-k3-pro-tiny (ADR 0006) instead of the fixture
 decoder, with its MICRO geometry (73,200 parameters) and `HT_D20_KIMI_DTYPE` (`bf16`, the default, or

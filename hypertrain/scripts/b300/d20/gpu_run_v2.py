@@ -16,15 +16,17 @@ admission, audits and get_weights are the repository's own code. The harness cha
    `_bootstrap_backend_v2`, the only in-process user of gpu_ops/network_qualification.py, the
    PASS does not exercise the 8a90d9bc fix. A real qualification needs two results from two
    hosts. `compare` refuses a pair whose machine_id, instance_id or role are equal, but those are
-   labels the caller writes into each result: a relabelled copy of one host's result passes, so
-   `compare` does not stop one host from supplying both. The harness does run the repository's own
+   labels the caller writes into each result. In strict mode (the only mode a production run
+   accepts, ADR 0011 part 4) it also requires each host's SSH host-key attestation of its own
+   result, so a relabelled copy of one host's result is refused; label-only mode does not check
+   that, and this harness exercises neither. The harness does run the repository's own
    device-class check (`network_qualification.unqualified_device`, ADR 0007) on the (capability,
    SM count) pairs that torch reports for the visible GPUs and logs it as a `device_class` event.
    That check reads neither the model name nor a GPU UUID: an RTX 5090 (12.0, 170 SMs) is in the
    table and would pass here with HT_D20_SM_COUNT=170, and a GB300 that reports the same pair as
    a B300 cannot be told from one. "B300" in an evidence folder is the operator's word plus that
-   class check; authenticating the machine is future work (D26, branch v3-cuda-executor, not in
-   this tree).
+   class check; the machine is authenticated outside this harness, by the attestation that strict
+   `compare` requires (ADR 0011 part 4), which this harness does not exercise.
 3. After each CUDA audit replay, and before `_dispatch_env_v2` reads it, the harness writes
    role-dispatch.json from this challenge process's GPU: nvidia-smi driver and UUID, plus the
    torch SM count. It is not a dispatcher and it is not bound to the publication. Its

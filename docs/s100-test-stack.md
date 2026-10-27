@@ -377,7 +377,8 @@ What is **TEST-only** here, exactly:
 - `cuda_qualification.py` installs the CUDA backend record with stand-in evidence signed by the
   TEST owner. It replaces the two-host Vast qualification (`_bootstrap_backend_v2`, `compare`) and
   proves nothing about bitwise reproduction on X. It refuses a non-`test` ledger.
-- Production still needs the two-host qualification, which stays Vast-shaped.
+- Production still needs the two-host qualification, now on attested hosts: a production run refuses
+  a label-only or legacy record (ADR 0011 part 4), and the Vast lifecycle yields no attestation.
 
 The paths below use the state volume that is `/data` in the container:
 

@@ -194,7 +194,9 @@ def evidence_for(
             for rank in range(reference.layout.n_gpus)
         ],
     }
-    if not label_only:
+    if label_only:
+        evidence["qualification_mode"] = "label-only"
+    else:
         evidence["host_attestation"] = {
             "host_keys": [typed_fingerprint(known_hosts_of(p)) for p in results],
             "statements": [fsha(p.parent / host_attest.ATTESTATION) for p in results],

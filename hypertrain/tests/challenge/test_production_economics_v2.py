@@ -60,6 +60,12 @@ def hosted(tmp_path: Path, monkeypatch, *, cuda: bool, **economics):
     )
     if cuda:
         monkeypatch.setattr(store, "_backend_v2", lambda m: "cuda")
+        # A production run builds its services only on a qualification with host attestation.
+        attested = {"host_keys": [], "statements": [], "signatures": []}
+        image = manifest.training.reference_spec.image_digest
+        store._put_record_v2(
+            manifest.run_id(), "qualification", image, {"host_attestation": attested}
+        )
     return store, manifest.run_id()
 
 
