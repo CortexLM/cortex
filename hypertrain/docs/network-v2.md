@@ -648,10 +648,47 @@ A relay whose granted chunks do not assemble to `delta_hash` answers 400
 Retention release waits for finality, disputes and vesting; signed extensions,
 overlapping old/new keys and drain preserve existing retrieval authority.
 
+A relay counts the uploads it still holds, not every record it ever accepted. An
+upload is held while it is a reservation (no receipt, service deadline not passed)
+or while one of its custody pins is neither released nor past its signed horizon.
+A released or lapsed upload stops counting; its bytes stay pinned until the
+master-signed release (ADR 0014 Part 6). There is no count cap by default (it was 64
+for the life of the run). `max_uploads` in `relay.json` is an optional operator limit,
+`R x ceil(retention window / round length)` for `R` miners per round, and an `accept`
+past it answers 400 `retained upload quota exhausted`. `/readyz` does not depend on
+the count: the chunk PUTs, retention and release that free a place use the same Service.
+The physical limit is the journal, one JSON blob of at most 16 MiB that every mutation
+rewrites. `accept` answers 400 `relay journal capacity exhausted` when the new record
+plus 1,280 B per chunk acknowledgment would take it above 12 MiB, which leaves 4 MiB for
+acknowledgments, receipts, retrievals, extensions and releases of uploads already held.
+A record stays in the journal after its custody is released or lapsed: nothing removes
+one yet. It carries the signed `RoundOpenV2`, so its size grows with the roster: a
+completed one-chunk upload adds about 10 KB to the journal at 16 miners (a 9.8 KB record
+plus its index and nonce entry) and 13.8 KB at 32 miners, plus about 1.1 KB per further
+chunk. The 12 MiB budget then holds about 1,200 such uploads, i.e. 75 rounds of 16 miners,
+and about 900, i.e. 28 rounds, at 32 miners.
+`tests/relay/test_lifecycle_v2.py::test_journal_budget_when_rounds_carry_a_roster`
+measures the growth of one upload and checks the 1,200 and 900 figures against the real guard.
+
+The journal fill is reported, not only enforced. `/readyz` answers
+`{"ready", "journal_bytes", "journal_budget", "journal_fill", "alarm"}` and `alarm` turns
+true above 80 % of the budget (9.6 MiB); while it is true each probe also writes a warning
+`relay journal fill NN% (B of BUDGET bytes)`. The alarm never makes the replica unready and
+never refuses a request: only `accept` past the budget does. Custody lives to its horizon,
+about 10 hours or 36 rounds of 335 beacons (16.75 minutes), so 36 rounds of 16 miners hold
+16 x 36 x 10 KB = 5.8 MB, 46 % of the budget, and 36 rounds of 32 miners hold 15.9 MB,
+126 % (`test_readyz_when_custody_horizon_of_rounds_has_no_early_release` measures both).
+Runbook for the alarm: the run is larger than this relay's journal. Add a relay to the
+signed registry; the registry must hold more than one relay before any run of 16 miners
+or more (D51 5). Do not raise the 12 MiB budget: above 16 MiB every journal write fails,
+a release included.
+
 Relay configuration is `RelayConfig` in `src/hypertrain/relay/app.py`:
 `run_id`, `master_public`, `master_url`, signed `registry`/`network_manifest`,
 `relay_id`, `region`, `active_key`, `signing_files`, `observer_public_keys`, plus
-`s3_endpoint`/`s3_bucket`/`s3_prefix`/`s3_region` or `local_backing`.
+`s3_endpoint`/`s3_bucket`/`s3_prefix`/`s3_region` or `local_backing`, and optionally
+`max_uploads` (a positive integer, omitted from the file when unset so that an older
+relay image still loads it).
 `RELAY_CONFIG` selects its JSON; `RELAY_SECRETS` selects mounted signing files,
 `drain.token` and S3 `object.json`. Do not mount coordinator/admin keys into relays.
 Authoritative external backing is separate from disposable pod cache.

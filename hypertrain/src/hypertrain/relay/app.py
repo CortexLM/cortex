@@ -17,7 +17,7 @@ import anyio
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from hypertrain.beacon.core import BeaconError, BeaconRound, round_at_or_after
 from hypertrain.beacon.drand import QUICKNET_GENESIS, QUICKNET_PERIOD, DrandQuicknet
@@ -63,6 +63,8 @@ class RelayConfig(BaseModel):
     s3_prefix: str = "relay/"
     s3_region: str = "auto"
     local_backing: str | None = None
+    # Omitted when unset, so a relay.json that does not use it still loads in an older image.
+    max_uploads: int | None = Field(None, ge=1, exclude_if=lambda v: v is None)
 
 
 class _Fetch:
@@ -186,7 +188,17 @@ def create_app(relay: Relay, drain_token: str) -> FastAPI:
             value = await relay.ready()
         except RelayError:
             value = False
-        return JSONResponse({"ready": value}, status_code=200 if value else 503)
+        fill = await relay.journal_fill()
+        return JSONResponse(
+            {
+                "ready": value,
+                "journal_bytes": fill.used,
+                "journal_budget": fill.budget,
+                "journal_fill": round(fill.ratio, 4),
+                "alarm": fill.alarm,
+            },
+            status_code=200 if value else 503,
+        )
 
     @app.get("/probe")
     async def probe() -> JSONResponse:
@@ -346,6 +358,7 @@ async def runtime(app: FastAPI) -> AsyncIterator[None]:
             backing=StreamStore(store, client),
             now=now,
             forward=forward,
+            max_uploads=config.max_uploads,
         )
         if min(config.registry.exp_drand, config.network_manifest.exp_drand) < await now():
             raise RelayError("pinned registry/network manifest expired")

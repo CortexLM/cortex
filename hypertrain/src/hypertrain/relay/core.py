@@ -49,6 +49,15 @@ from hypertrain.protocol.relay_messages import (
     validate_release,
 )
 
+# StreamStore refuses a journal above 16 MiB on every write, release included. Accepting a new
+# upload stops at this budget so that the acknowledgments, receipts, retrievals, extensions and
+# releases of uploads already held still fit.
+JOURNAL_BUDGET = 12 << 20
+# Journal bytes one chunk acknowledgment and its pin add after accept (measured 985 B, 30% margin).
+ACK_BYTES = 1280
+# /readyz and the log report the journal fill and raise an alarm above this share of the budget.
+ALARM_FILL = 0.8
+
 
 class RelayError(ValueError):
     """Authenticated contract, authorization, quota or lifecycle rejection."""
@@ -56,6 +65,22 @@ class RelayError(ValueError):
 
 class AssemblyMismatch(RelayError):
     """Granted chunks are held but their concatenation is not the granted delta."""
+
+
+@dataclass(frozen=True, slots=True)
+class JournalFill:
+    """Stored journal bytes against the accept budget; the alarm never makes a replica unready."""
+
+    used: int
+    budget: int
+
+    @property
+    def ratio(self) -> float:
+        return self.used / self.budget
+
+    @property
+    def alarm(self) -> bool:
+        return self.ratio > ALARM_FILL
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +166,8 @@ class Relay:
         forward: Callable[[RelayEnvelope], Awaitable[RelayEnvelope]] | None = None,
         settlement: Callable[[str], Awaitable[Settlement]] | None = None,
         epoch_rounds: int = 100,
-        max_uploads: int = 64,
+        max_uploads: int | None = None,
+        journal_budget: int = JOURNAL_BUDGET,
     ) -> None:
         specs = [s for s in registry.specs if s.id == relay_id and s.region == region]
         if len(specs) != 1 or active_key not in keys:
@@ -154,6 +180,7 @@ class Relay:
         self.now, self.forward = now, forward
         self.settlement = settlement
         self.epoch_rounds, self.max_uploads = epoch_rounds, max_uploads
+        self.journal_budget = journal_budget
         self.draining = False
         self.inflight = 0
         self.changed = anyio.Event()
@@ -207,6 +234,13 @@ class Relay:
         ):
             raise RelayError("active key revoked or outside signed validity interval")
         return key_id
+
+    @staticmethod
+    def held(record: UploadRecord, now: int) -> bool:
+        """Still owed by this relay: a live reservation, or custody neither released nor lapsed."""
+        if record.pins:
+            return any(p.delete_after is None and p.horizon >= now for p in record.pins.values())
+        return AcceptedUploadAck.model_validate(record.opportunity.body).service_deadline >= now
 
     async def accept(
         self,
@@ -272,7 +306,9 @@ class Relay:
                 if state.nonces.get(old.nonce) == grant.replaces:
                     del state.nonces[old.nonce]
             key_id = self._key(now, state)
-            if len(state.uploads) >= self.max_uploads:
+            if self.max_uploads is not None and (
+                sum(self.held(u, now) for u in state.uploads.values()) >= self.max_uploads
+            ):
                 raise RelayError("retained upload quota exhausted")
             reserved = sum(
                 UploadGrant.model_validate(u.grant.body).size
@@ -313,6 +349,8 @@ class Relay:
                 opportunity=self._seal(ack, key_id, grant.retain_until),
                 key_public=self.keys[key_id].ss58,
             )
+            if len(state.serialize()) + len(manifest.chunks) * ACK_BYTES > self.journal_budget:
+                raise RelayError("relay journal capacity exhausted")
 
         state = await self._change(commit)
         return state.uploads[grant_hash].opportunity
@@ -776,7 +814,7 @@ class Relay:
             if record.receipt is None
             and AcceptedUploadAck.model_validate(record.opportunity.body).service_deadline >= now
         )
-        if len(state.uploads) >= self.max_uploads or reserved >= self.spec.max_inflight_bytes:
+        if reserved >= self.spec.max_inflight_bytes:
             return False
         # Persisted CAS proves write privilege; independent object probe proves backing readability.
         await self._change(lambda state: None)
@@ -787,6 +825,18 @@ class Relay:
         with spool() as file:
             await self.backing.get(sha, 22, file)
         return True
+
+    async def journal_fill(self) -> JournalFill:
+        data, _ = await self.backing.journal(self.journal_key)
+        fill = JournalFill(len(data), self.journal_budget)
+        if fill.alarm:
+            logging.getLogger(__name__).warning(
+                "relay journal fill %.0f%% (%d of %d bytes)",
+                fill.ratio * 100,
+                fill.used,
+                fill.budget,
+            )
+        return fill
 
     async def acks(self, grant_hash: str, cursor: int = 0) -> list[RelayEnvelope]:
         record = self._record(await self.state(), grant_hash)

@@ -11,7 +11,10 @@ import pytest
 from test_transport_v2 import MASTER, MINER, NEXT, H, Rig
 
 from hypertrain.data.store import CorruptObjectError, ObjectNotFound
+from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.jcs import canonicalize
+from hypertrain.protocol.keys import Keypair
+from hypertrain.protocol.messages_v2 import RosterEntryV2
 from hypertrain.protocol.relay_messages import (
     AcceptedUploadAck,
     AvailabilityContext,
@@ -25,6 +28,7 @@ from hypertrain.protocol.relay_messages import (
     RetrievalResponse,
     UploadGrant,
 )
+from hypertrain.relay import core as relay_core
 from hypertrain.relay.app import create_app
 from hypertrain.relay.client import receipt_verified
 from hypertrain.relay.core import AssemblyMismatch, RelayError, Settlement
@@ -610,17 +614,394 @@ def test_ready_when_durable_probe_and_key_valid(tmp_path: Path) -> None:
     anyio.run(scenario)
 
 
-def test_ready_when_shared_upload_capacity_exhausted(tmp_path: Path) -> None:
-    # Given: a durable outstanding upload exhausts the shared reservation quota.
+async def settled(grant_hash: str) -> Settlement:
+    return Settlement(H, 1, H, 1, 1)
+
+
+def round_nonce(w: int) -> str:
+    return f"{w:064x}"
+
+
+async def upload_round(rig: Rig, w: int, data: bytes | None = None) -> UploadGrant:
+    data = data or b"round-%d" % w
+    grant, manifest, raw, assignment, opened = rig.upload(data, nonce=round_nonce(w), w=w)
+    await rig.relay.accept(raw, manifest, assignment, opened)
+    await rig.put(grant, data)
+    return grant
+
+
+async def release_pins(rig: Rig, grant: UploadGrant, only: list[str] | None = None) -> None:
+    for digest in only or (await rig.relay.state()).uploads[grant.digest()].pins:
+        await rig.relay.release(
+            rig.seal(
+                CustodyRelease(
+                    grant_hash=grant.digest(),
+                    custody_hashes=[digest],
+                    retention_hash=digest,
+                    finality_hash=H,
+                    vesting_beacon=1,
+                    closed_dispute_root=H,
+                    release_beacon=11,
+                )
+            )
+        )
+
+
+def late_upload(rig: Rig, data: bytes, w: int):
+    # A grant for a round opened after the custody horizon (200) of the first rounds lapsed.
+    grant, manifest, _, assignment, opened = rig.upload(data, nonce=round_nonce(w), w=w)
+    grant = UploadGrant.model_validate({**grant.body(), "retain_until": 400, "exp_drand": 250})
+    assignment = rig.seal(RelayAssignment.model_validate({**assignment.body, "exp_drand": 250}))
+    opened = envelope_v2.parse_envelope(
+        envelope_v2.seal(
+            MASTER,
+            "RoundOpenV2",
+            opened.run_id,
+            {**opened.body, "d_upload": 245, "d_final": 260},
+            300,
+        )
+    )
+    return grant, manifest, rig.seal(grant), assignment, opened
+
+
+def with_roster(opened, miners: int):
+    # The signed RoundOpenV2 a relay stores in every record carries the whole roster.
+    roster = [
+        RosterEntryV2(
+            hotkey=Keypair(bytes([i + 1]) * 32).ss58,
+            slot=i,
+            q_i="0000803f",
+            admission_id=H,
+            coldkey_group=f"owner{i}",
+            state="ACTIVE",
+            eligible_weight=1 << 22,
+        ).model_dump(mode="json")
+        for i in range(miners)
+    ]
+    return envelope_v2.parse_envelope(
+        envelope_v2.seal(
+            MASTER, "RoundOpenV2", opened.run_id, {**opened.body, "roster": roster}, 50
+        )
+    )
+
+
+async def completed_upload(rig: Rig, miners: int):
+    """One real one-chunk upload of a round with `miners` rostered; the record and the journal
+    bytes it adds (the record plus its index and nonce entries)."""
+    data = b"round-1"
+    grant, manifest, raw, assignment, opened = rig.upload(data, nonce=round_nonce(1))
+    empty = len((await rig.relay.state()).serialize())
+    await rig.relay.accept(raw, manifest, assignment, with_roster(opened, miners))
+    await rig.put(grant, data)
+    state = await rig.relay.state()
+    return state.uploads[grant.digest()], len(state.serialize()) - empty
+
+
+def hold_copies(record, count: int):
+    """Journal change that holds `count` copies of a record under distinct grants and nonces."""
+
+    def change(state) -> None:
+        for i in range(count):
+            key = f"{i + 1:064x}"
+            state.uploads[key] = record
+            state.nonces["f" * 8 + key[8:]] = key
+
+    return change
+
+
+def test_quota_when_settled_uploads_are_released(tmp_path: Path) -> None:
+    # Given: a quota of three held uploads and a miner pinned to this relay every round.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            rig.relay.max_uploads = 3
+            rig.relay.settlement = settled
+            grants = []
+            for w in range(1, 11):
+                grants.append(await upload_round(rig, w))
+                if w >= 3:  # the round two behind has settled and is released
+                    await release_pins(rig, grants[w - 3])
+            await upload_round(rig, 11)  # rounds 9, 10 and 11 hold the three places
+            _, manifest, raw, assignment, opened = rig.upload(
+                b"twelve", nonce=round_nonce(12), w=12
+            )
+            # When: a twelfth upload arrives while nothing else is released.
+            with pytest.raises(RelayError, match="quota"):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            # Then: releasing one held upload frees exactly one place.
+            await release_pins(rig, grants[8])
+            await rig.relay.accept(raw, manifest, assignment, opened)
+
+    anyio.run(scenario)
+
+
+def test_quota_when_custody_is_released_in_part(tmp_path: Path) -> None:
     async def scenario() -> None:
         async with httpx.AsyncClient() as client:
             rig = Rig(tmp_path, client)
             rig.relay.max_uploads = 1
-            await rig.accept(b"abc")
+            rig.relay.settlement = settled
+            grant = await upload_round(rig, 1)
+            record = (await rig.relay.state()).uploads[grant.digest()]
+            receipt = RelayReceipt.model_validate(record.receipt.body).digest()
+            _, manifest, raw, assignment, opened = rig.upload(b"two", nonce=round_nonce(2), w=2)
+            # When: the receipt is released but the chunk acknowledgment is still pinned.
+            await release_pins(rig, grant, [receipt])
+            with pytest.raises(RelayError, match="quota"):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            # Then: the place frees only with the last pin.
+            await release_pins(rig, grant, [d for d in record.pins if d != receipt])
+            await rig.relay.accept(raw, manifest, assignment, opened)
+
+    anyio.run(scenario)
+
+
+def test_quota_when_reservation_deadline_passed(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            rig.relay.max_uploads = 1
+            await rig.accept(b"abc")  # reservation with service deadline 35, no bytes ever sent
+            _, manifest, raw, assignment, opened = late_upload(rig, b"def", 2)
+            # When: the deadline is still current, then one beacon later.
+            rig.clock = 35
+            with pytest.raises(RelayError, match="quota"):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            rig.clock = 36
+            # Then: the abandoned reservation stops holding the place.
+            await rig.relay.accept(raw, manifest, assignment, opened)
+
+    anyio.run(scenario)
+
+
+def test_quota_when_custody_horizon_lapsed(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            rig.relay.max_uploads = 2
+            first = await upload_round(rig, 1)
+            await upload_round(rig, 2)
+            _, manifest, raw, assignment, opened = late_upload(rig, b"late", 3)
+            rig.relay.active_key = "k2"
+            # Retrieval is served up to and including the signed horizon (200): still held.
+            for clock in (100, 200):
+                rig.clock = clock
+                with pytest.raises(RelayError, match="quota"):
+                    await rig.relay.accept(raw, manifest, assignment, opened)
+            # When: the signed custody horizon of both uploads passes without a release.
+            rig.clock = 201
+            await rig.relay.accept(raw, manifest, assignment, opened)
+            # Then: lapsed custody stops counting but is not dropped from the journal.
+            assert (await rig.relay.state()).uploads[first.digest()].receipt is not None
+
+    anyio.run(scenario)
+
+
+def test_quota_when_default_relay_takes_more_than_64_uploads(tmp_path: Path) -> None:
+    # Retained uploads used to be capped at 64 for the life of the run (TRN-02, T-LV-03).
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            for w in range(1, 71):
+                await upload_round(rig, w)
+            assert len((await rig.relay.state()).uploads) == 70
+            assert await rig.relay.ready()
+
+    anyio.run(scenario)
+
+
+def test_ready_stays_up_when_quota_exhausted(tmp_path: Path) -> None:
+    # Given: one held reservation fills the configured quota.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            rig.relay.max_uploads = 1
+            grant, _, _ = await rig.accept(b"abc")
             # When: readiness is evaluated without any active request in this process.
-            ready = await rig.relay.ready()
-            # Then: new traffic is not routed into an exhausted replica.
-            assert not ready
+            # Then: the replica stays routable; chunk PUTs, retention and release use the Service.
+            assert await rig.relay.ready()
+            with pytest.raises(RelayError, match="quota"):
+                await upload_round(rig, 2)
+            await rig.put(grant, b"abc")
+            assert (await rig.relay.state()).uploads[grant.digest()].receipt is not None
+
+    anyio.run(scenario)
+
+
+def test_accept_when_journal_budget_exhausted(tmp_path: Path) -> None:
+    # Given: a twin relay that accepted both reservations shows the journal size they need.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            twin = Rig(tmp_path / "twin", client)
+            await twin.accept(b"abc")
+            _, manifest, raw, assignment, opened = twin.upload(b"def", nonce=round_nonce(2), w=2)
+            await twin.relay.accept(raw, manifest, assignment, opened)
+            needed = len((await twin.relay.state()).serialize())
+
+            rig = Rig(tmp_path / "rig", client)
+            held, _, _ = await rig.accept(b"abc")
+            before = len((await rig.relay.state()).serialize())
+            # When: the record fits the budget but not the acknowledgment its chunk will add.
+            rig.relay.journal_budget = needed
+            with pytest.raises(RelayError, match="journal capacity"):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            # Then: nothing was written, and the held upload still completes past the budget.
+            assert len((await rig.relay.state()).serialize()) == before
+            await rig.put(held, b"abc")
+            assert (await rig.relay.state()).uploads[held.digest()].receipt is not None
+            # The limit is exact: one byte short is refused, the exact sum is accepted.
+            exact = len((await rig.relay.state()).serialize()) + needed - before
+            rig.relay.journal_budget = exact + relay_core.ACK_BYTES - 1
+            with pytest.raises(RelayError, match="journal capacity"):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            rig.relay.journal_budget = exact + relay_core.ACK_BYTES
+            await rig.relay.accept(raw, manifest, assignment, opened)
+
+    anyio.run(scenario)
+
+
+def test_journal_budget_when_chunk_acknowledgment_is_written(tmp_path: Path) -> None:
+    # The guard reserves ACK_BYTES per chunk at accept so that the acknowledgment fits later.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            data = b"a" * (4 << 20) + b"z"
+            grant, _, _ = await rig.accept(data)
+            before = len((await rig.relay.state()).serialize())
+            await rig.put(grant, data[: 4 << 20], 0)
+            grown = len((await rig.relay.state()).serialize()) - before
+            assert 0 < grown <= relay_core.ACK_BYTES
+
+    anyio.run(scenario)
+
+
+def test_accept_when_default_journal_budget_nears_the_metadata_quota(tmp_path: Path) -> None:
+    # StreamStore refuses a journal above 16 MiB on every write, release included: the default
+    # budget must stop new uploads well before that, and must not stop them early.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+
+            def filler(megabytes: int):
+                def change(state) -> None:
+                    state.nonces["filler"] = "x" * (megabytes << 20)
+
+                return change
+
+            await rig.relay._change(filler(8))
+            await upload_round(rig, 1)
+            await rig.relay._change(filler(15))
+            with pytest.raises(RelayError, match="journal capacity"):
+                await upload_round(rig, 2)
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    ("miners", "fits", "refused"),
+    [(16, 1_200, 1_300), (32, 900, 1_000)],
+    ids=["16-miners", "32-miners"],
+)
+def test_journal_budget_when_rounds_carry_a_roster(
+    tmp_path: Path, miners: int, fits: int, refused: int
+) -> None:
+    # The estimate in docs/network-v2.md: a completed one-chunk upload adds about 10 KB to the
+    # journal at 16 miners (the roster is stored in every record) and 13.8 KB at 32, so the 12 MiB
+    # budget holds about 1,200 uploads (75 rounds of 16) and about 900 (28 rounds of 32).
+    # One real record is measured, copied into the journal, and the real guard decides.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            record, grown = await completed_upload(rig, miners)
+            assert grown == pytest.approx({16: 10_000, 32: 13_800}[miners], rel=0.03)
+
+            _, manifest, raw, assignment, opened = rig.upload(b"next", nonce=round_nonce(2), w=2)
+            opened = with_roster(opened, miners)
+            await rig.relay._change(hold_copies(record, refused))
+            with pytest.raises(RelayError, match="journal capacity"):
+                await rig.relay.accept(raw, manifest, assignment, opened)
+
+            await rig.relay._change(lambda state: state.uploads.clear())
+            await rig.relay._change(hold_copies(record, fits))
+            await rig.relay.accept(raw, manifest, assignment, opened)
+
+    anyio.run(scenario)
+
+
+def test_readyz_when_journal_fill_crosses_eighty_percent_of_the_budget(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # D53: an unattended run never blocks on the journal, and the operator is told before it fills.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            # A budget whose 80 % is a whole number of bytes makes the threshold exact.
+            budget = rig.relay.journal_budget = 1000
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=create_app(rig.relay, "t" * 32)),
+                base_url="https://relay.test",
+            ) as wire:
+                await rig.relay._change(lambda state: state.nonces.update(filler=""))
+                base = len((await rig.relay.state()).serialize())
+                limit = budget * 4 // 5
+                for size, alarm in ((limit, False), (limit + 1, True)):
+                    await rig.relay._change(
+                        lambda state, n=size - base: state.nonces.update(filler="x" * n)
+                    )
+                    caplog.clear()
+                    answer = await wire.get("/readyz")
+                    # The alarm reports; it never makes the replica unready.
+                    assert answer.status_code == 200, answer.text
+                    assert answer.json() == {
+                        "ready": True,
+                        "journal_bytes": size,
+                        "journal_budget": budget,
+                        "journal_fill": pytest.approx(size / budget, abs=1e-4),
+                        "alarm": alarm,
+                    }
+                    logged = [
+                        r.getMessage() for r in caplog.records if "journal fill" in r.getMessage()
+                    ]
+                    assert bool(logged) == alarm
+                    if alarm:
+                        assert logged == [f"relay journal fill 80% ({size} of {budget} bytes)"]
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    ("miners", "fill", "alarm"),
+    [(16, 0.46, False), (32, 1.26, True)],
+    ids=["16-miners", "32-miners"],
+)
+def test_readyz_when_custody_horizon_of_rounds_has_no_early_release(
+    tmp_path: Path, miners: int, fill: float, alarm: bool
+) -> None:
+    # Sizing in docs/network-v2.md: custody lives to its horizon, about 10 hours = 36 rounds of
+    # 16.75 minutes. 16 miners x 36 rounds x 10 KB = 5.8 MB is under half of the budget; 32 miners
+    # x 36 x 13.8 KB = 15.9 MB is over it, so that run needs the early release. Over budget, the
+    # replica still serves what it holds and only refuses a new reservation.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            record, _ = await completed_upload(rig, miners)
+            await rig.relay._change(lambda state: state.uploads.clear())
+            await rig.relay._change(hold_copies(record, miners * 36))
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=create_app(rig.relay, "t" * 32)),
+                base_url="https://relay.test",
+            ) as wire:
+                answer = await wire.get("/readyz")
+            assert answer.status_code == 200, answer.text
+            assert answer.json()["journal_fill"] == pytest.approx(fill, abs=0.02)
+            assert answer.json()["alarm"] == alarm
+            _, manifest, raw, assignment, opened = rig.upload(b"next", nonce=round_nonce(2), w=2)
+            opened = with_roster(opened, miners)
+            if alarm:
+                with pytest.raises(RelayError, match="journal capacity"):
+                    await rig.relay.accept(raw, manifest, assignment, opened)
+            else:
+                await rig.relay.accept(raw, manifest, assignment, opened)
 
     anyio.run(scenario)
 

@@ -132,6 +132,15 @@
   `qualification_sm_profile_unqualified`; the challenge refuses both at bootstrap. A
   `result.json` written before capabilities were recorded still qualifies 170-SM devices only.
   See `docs/adr/0007-sm-counts-per-arch.md` at the monorepo root.
+- Relay upload quota (ADR 0014 Part 6, TRN-02): a relay counts the uploads it still holds
+  (a live reservation, or custody with a pin neither released nor past its horizon) instead of
+  every record it ever accepted, and has no default count cap (it was 64 for the life of the
+  run, after which every miner assigned to it was refused and `/readyz` turned false).
+  `relay.json` gains an optional `max_uploads`, omitted from the file when unset. `accept`
+  refuses with `relay journal capacity exhausted` before the journal passes 12 MiB (the
+  metadata limit is 16 MiB), and `/readyz` no longer depends on the count. `/readyz` also reports
+  `journal_bytes`, `journal_budget`, `journal_fill` and `alarm` (above 80 % of the budget, with a
+  warning in the log); the alarm never makes a replica unready.
 
 ### Fixed
 - Escrow: the events the service writes (reward finalize, maturity, the payment of `get_weights`,

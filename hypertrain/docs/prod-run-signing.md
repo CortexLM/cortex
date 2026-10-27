@@ -185,7 +185,9 @@ eligible. [V] `challenge/store.py:4159-4194`, `:2618-2627`
 K_coord envelopes for that run: the `RelayRegistryV1` (S1's `relay-registry.json`) and a
 `RelayNetworkManifest {run_id, base_manifest_hash, registry_hash, specs_hash,
 assignment_policy "master-observed-median3-v1"}`. Plus `relay_id`, `region`, `active_key`,
-`signing_files`, `observer_public_keys` and the backing store. [V] `relay/app.py:49-65`,
+`signing_files`, `observer_public_keys` and the backing store, and optionally `max_uploads`
+(positive integer, default absent: the count of held uploads is unbounded and only the journal
+budget of 12 MiB limits a relay; `docs/network-v2.md`). [V] `relay/app.py:49-67`,
 `protocol/relay_messages.py:88-93`
 
 `base_manifest_hash` must be `training_hash()` of the manifest, **not** the run_id: the master
@@ -196,7 +198,8 @@ the run_id and is not usable for production. The tools used for the TEST relays
 
 Check: the relay starts only if both envelopes are signed by `master_public` for `run_id`, the
 registry digest and specs hash match, and neither envelope has expired. Then
-`curl -fsS https://<relay host>/readyz` returns 200. [V] `relay/app.py:201-231`
+`curl -fsS https://<relay host>/readyz` returns 200; its body reports `journal_fill` and
+`alarm` (`docs/network-v2.md`). [V] `relay/app.py:201-231`
 
 ## S7 `dispatch.json` (runbook step 6)
 
