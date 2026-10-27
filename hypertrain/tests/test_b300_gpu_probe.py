@@ -17,7 +17,8 @@ assert spec is not None and spec.loader is not None
 gpu_probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gpu_probe)  # imports hypertrain.trainer before torch
 torch = gpu_probe.torch
-import hypertrain.models.kimi_tiny as kt  # noqa: E402  (after gpu_probe: determinism before torch)
+import hypertrain.models  # noqa: E402  (after gpu_probe: determinism before torch)
+import hypertrain.models.kimi_tiny as kt  # noqa: E402
 import hypertrain.trainer.attention as attn  # noqa: E402
 
 
@@ -129,3 +130,27 @@ def test_a_kimi_runtime_error_is_recorded_as_a_digest_error(
     assert "matmul_fp32" in out and "math_out" in out  # the other smokes still ran
     errors = gpu_probe.evaluate({"cuda:0": [out]})["errors"]
     assert errors == ["cuda:0: kimi_micro: error: no kernel image is available"]
+
+
+def test_an_image_without_kimi_still_leaves_a_failed_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pinned image installs hypertrain at build time; one built before kimi-k3-pro-tiny has no
+    # such module. That must fail the probe through the JSON: an import error while the script
+    # loads would end it before main() and leave an earlier run's ok:true in place.
+    out = tmp_path / "gpu_probe.json"
+    out.write_text(json.dumps({"ok": True, "stale": True}))
+    monkeypatch.setitem(sys.modules, "hypertrain.models.kimi_tiny", None)
+    monkeypatch.delattr(hypertrain.models, "kimi_tiny")  # `from hypertrain.models import` reads it
+    fresh_spec = importlib.util.spec_from_file_location(
+        "gpu_probe_without_kimi", ROOT / "scripts/b300/gpu_probe.py"
+    )
+    assert fresh_spec is not None and fresh_spec.loader is not None
+    fresh = importlib.util.module_from_spec(fresh_spec)
+    fresh_spec.loader.exec_module(fresh)
+    argv = ["gpu_probe.py", "--out", str(out), "--device", "cpu", "--expect-gpus", "0"]
+    monkeypatch.setattr(sys, "argv", [*argv, "--expect-cc", "any", "--repeats", "1"])
+    with pytest.raises(ImportError):
+        fresh.main()
+    doc = json.loads(out.read_text())
+    assert doc["ok"] is False and "stale" not in doc and "kimi_tiny" in doc["error"]

@@ -33,7 +33,6 @@ from hypertrain.trainer import DETERMINISM  # must precede torch
 # isort: split
 import torch
 
-from hypertrain.models import kimi_tiny
 from hypertrain.trainer.attention import Backend, attention, chosen_paths, select_backend
 
 GEOMETRY = {"batch": 1, "heads": 16, "kv_heads": 8, "seq": 256, "head_dim": 128}
@@ -73,6 +72,10 @@ def workload(device: torch.device) -> dict[str, str]:
     try:
         # One kimi-k3-pro-tiny MICRO round in the miner's dtype: eager MLA and the MoE sort, which
         # the attention smoke above never touches. Its roots must agree across repeats and devices.
+        # Imported here: an image without the module must fail through main()'s JSON, not while
+        # this script loads.
+        from hypertrain.models import kimi_tiny
+
         doc = kimi_tiny.run_manifest(dataclasses.replace(kimi_tiny.MICRO, compute_dtype="bf16"))
         (res,) = kimi_tiny.qualify(doc, str(device), 1)
         for root in ("leaves_root", "delta_hash", "state_root"):
