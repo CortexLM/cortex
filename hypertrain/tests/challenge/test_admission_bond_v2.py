@@ -338,6 +338,24 @@ def test_release_bond_waits_for_the_last_reward_to_vest_and_for_a_live_screen_to
     assert balances(world).admission_locked == 0
 
 
+def test_the_status_of_a_bond_reads_the_rounds_once_however_many_locks_it_holds(
+    world: World,
+) -> None:
+    # Given: an admission with three locks, on a route anyone may poll
+    world.bond(300)
+    world.bond(300, operation="23" * 32)
+    world.bond(300, operation="24" * 32)
+    scans: list[str] = []
+    world.a.store.db.set_trace_callback(
+        lambda sql: scans.append(sql) if "json_each" in sql else None
+    )
+    # When
+    status = world.a.bond(world.admission, now=10)
+    # Then: all three are reported from a single scan of the run's rounds
+    assert [entry["units"] for entry in status["locks"]] == [300, 300, 300]  # type: ignore[union-attr,index]
+    assert len(scans) == 1
+
+
 def test_a_probation_miner_with_four_clean_trials_is_live_and_keeps_its_bond(world: World) -> None:
     # Given: PROBATION is live from the fourth clean trial (it may then be eligible), not before
     world.bond()
