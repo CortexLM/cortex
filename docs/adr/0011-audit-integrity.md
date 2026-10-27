@@ -1009,14 +1009,20 @@ the table as covering them.
 7. **A retired round is a record, not a tape.** `applied[w] = {kind: "null", out_state = prev_state, ...}`,
    `finality[w]` has the new closed disposition `RETIRED`, `retired[w]` holds the evidence
    `{v: "ht-round-retired-v1", run_id, w, cause, roster_hash, survivors, theta_hash}` whose sha256 is the
-   evidence hash. `open_round_v2` is unchanged: it reads `applied[w]` and the anchors of round `w`.
-8. **Causes, each re-derived by the primitive** (`_retire_round_v2`, called by the reaper's per-round
-   savepoint and by nothing else; idempotent, it cannot void a healthy round): `INFEASIBLE` (`now >= d_commit`
-   and `allocate_weights` over the survivors raises; every term only shrinks) and `AUDIT_WINDOW_MISSED` (no
-   lease row and `now >= absolute - 1`). Both require every earlier round closed (so no rollback window
-   contains a retired round; an open predecessor delays the retirement and the state is recorded in
-   `round-exit`), an unapplied `PENDING` status and no `service-admission` record. The one definition of
-   "survivors" is the planner's: the roster minus the excluded, minus the members with no commit from
+   evidence hash, with `evidence_hash` and `retired_beacon`. `open_round_v2` is unchanged: it reads
+   `applied[w]` and the anchors of round `w`.
+8. **Causes, each re-derived by the primitive** (`_retire_round_v2(run_id, w, cause, survivors)`, called
+   by the reaper's per-round savepoint and by nothing else; inside the caller's transaction, idempotent: a
+   retired round answers its record): `INFEASIBLE` (`now >= d_commit` and `allocate_weights` over the
+   survivors raises; every term only shrinks) and `AUDIT_WINDOW_MISSED` (no lease row and
+   `now >= absolute - 1`). Both require every earlier round closed (so no rollback window contains a
+   retired round), an unapplied `PENDING` status and no `service-admission` record. The survivors (hotkeys
+   of the roster) are an argument and the primitive never calls the planner: it derives the cause from
+   them and from the facts, so a caller cannot void a round that can still carry. A refusal is
+   `ROUND_RETIRE_REFUSED: <reason>` and writes nothing; an open predecessor is one, the reaper waits and
+   records the state in `round-exit`. The primitive also writes nothing until every anchor is carried, so
+   a failing carry (a full disk) leaves the round `PENDING`. The one definition of "survivors" is the
+   planner's: the roster minus the excluded, minus the members with no commit from
    `d_commit`, minus the committed members with no delta from `d_upload`. A round whose audited members
    became ineligible (decision 22) is retired at `d_final` if too few remain.
 9. **Anchors carried, nothing recomputed.** Every roster member's anchor `w` is its anchor `w - 1` under new
@@ -1024,12 +1030,15 @@ the table as covering them.
    is rewritten, `state_root` and `ef_hash` are unchanged. Survivors restart `w + 1` from the optimizer
    state and error feedback they held at the start of `w`. Training: theta, outer momentum and centre are
    unchanged (an identity, not a zero-update step, which would move theta by momentum); the data window of
-   `w` is consumed. A miner needs no action: its start state is pinned by hash (`IslandJobV1`) and a
-   commit with another `ef_in_hash` is refused.
+   `w` is consumed. The members that never committed are carried too (their anchor `w - 1` exists since
+   the opening); the files are published by an atomic rename, the metadata is written durably and the
+   record says `carried_from`. A miner needs no action: its start state is pinned by hash (`IslandJobV1`)
+   and a commit with another `ef_in_hash` is refused.
 10. **Audits, disputes, locks, grants.** Open leases become `exhausted/ROUND_RETIRED` and their guards are
     revoked; new work on the round answers 409 `ROUND_RETIRED` (`schedule_audits_v2`, `aggregate_v2`,
-    `finalize_v2`, `rollback_v2`; owned names); completed verdicts stay as evidence. A dispute is not
-    waited for: an open one leaves the round retired but not closed until Part 1 closes it.
+    `finalize_v2`, `rollback_v2` for either round of its window; owned names), and `_persist_anchor_v2`
+    refuses an anchor for a retired round, so a late MATCH cannot replace a carried one; completed
+    verdicts stay as evidence. A dispute is not waited for: an open one leaves the round retired but not closed until Part 1 closes it.
     `relay_settlement_v2` answers for the grants of a retired round. The honest bonds are released by
     `lock_settlement` as soon as the round is closed.
 11. **The next round.** The operator opens `w + 1` with `prev_final_hash = retired[w].evidence_hash`

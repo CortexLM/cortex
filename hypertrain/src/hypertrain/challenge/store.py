@@ -19,7 +19,7 @@ import struct
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from fractions import Fraction
@@ -42,7 +42,7 @@ from hypertrain.challenge import audit_cooldown_v2
 from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import EXCLUSION_ABANDONED, Contest, DisputesV2
-from hypertrain.challenge.exit_v2 import MAX_LAG_ROUNDS
+from hypertrain.challenge.exit_v2 import MAX_LAG_ROUNDS, Retire
 from hypertrain.data.assignment import assign_round
 from hypertrain.data.store import (
     CorruptObjectError,
@@ -6236,12 +6236,204 @@ class ChallengeStore:
         if old != entry:
             self._put_record_v2(run_id, "dispute-exit-failed", dispute_id, entry)
 
+    def _require_unretired_v2(self, run_id: str, w: int) -> None:
+        """New work on a retired round is refused: its null tape and carried anchors are final."""
+        if self._db.execute(
+            "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='retired' AND id=?", (run_id, str(w))
+        ).fetchone():
+            raise ChallengeError(409, f"ROUND_RETIRED: round {w} reached no tape and takes no work")
+
+    def _carry_anchor_v2(
+        self, run_id: str, manifest: RunManifestV2, hotkey: str, w: int, evidence_hash: str
+    ) -> dict[str, Any]:
+        """The record of anchor `w` of a member that sat out round `w`: its anchor `w - 1` under
+        new hashes. The tensors are never loaded: the two files are linked (copied across
+        filesystems) and only the metadata that names the round and the proof is rewritten, so the
+        cost does not depend on the model; `state_root` and `ef_hash`, which `AnchorCache.restore`
+        checks against the files, stay. The files are published atomically, the record is the
+        caller's to write."""
+        import os
+        import shutil
+
+        from hypertrain.gpu_ops.journal import durable_write
+
+        source = self._record_v2(run_id, "anchor", f"{w - 1}:{hotkey}")
+        if source["backend"] not in ("genesis", self._backend_v2(manifest)):
+            raise ChallengeError(409, "anchor backend differs from frozen run execution")
+        origin = Path(str(source["path"]))
+        metadata = json.loads((origin / "metadata").read_bytes())
+        metadata.update(
+            w=w,
+            proof_hash=sha256_hex(f"ht-carried-proof/1|{evidence_hash}|{hotkey}".encode()),
+            anchor_hash=sha256_hex(
+                f"ht-carried-anchor/1|{evidence_hash}|{hotkey}|{source['anchor_hash']}".encode()
+            ),
+        )
+        directory = self.state_dir / "anchors-v2" / hotkey
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / metadata["anchor_hash"]
+        if not target.exists():
+            with tempfile.TemporaryDirectory(dir=directory, prefix="anchor-") as tmp:
+                for name in ("state", "ef"):
+                    try:
+                        os.link(origin / name, Path(tmp) / name)
+                    except OSError:  # another filesystem: the copy is the same bytes
+                        shutil.copyfile(origin / name, Path(tmp) / name)
+                durable_write(Path(tmp) / "metadata", json.dumps(metadata, sort_keys=True).encode())
+                os.rename(tmp, target)
+        return {
+            **source,
+            "path": str(target),
+            "anchor_hash": metadata["anchor_hash"],
+            "proof_hash": metadata["proof_hash"],
+            "w": w,
+            "carried_from": w - 1,
+        }
+
+    def _retire_round_v2(
+        self, run_id: str, w: int, cause: Retire, survivors: Collection[str]
+    ) -> dict[str, Any]:
+        """Close a round that cannot reach a tape as a null round (ADR 0011 Part 8, decisions 7
+        to 11). Runs inside the caller's transaction; idempotent, a retired round answers its
+        record. The cause is derived here from the facts and `survivors` (hotkeys: the exit
+        planner owns that definition), so a caller cannot void a round that can still carry:
+
+        - INFEASIBLE: the commit window is over and the survivors cannot carry one update;
+        - AUDIT_WINDOW_MISSED: nobody scheduled audits and `audits` answers 503 from now on.
+
+        It also needs every earlier round closed (no rollback window may hold a retired round), a
+        pending unapplied round and a run that is not service-admitted. Nothing is written before
+        every anchor is carried, so a failure leaves the round as it was. The ledger is not
+        called: its next reward finalize records a round finality closed without reward."""
+        from hypertrain.aggregator.core import OuterState
+        from hypertrain.challenge.finality_v2 import RoundStatus, retire
+        from hypertrain.protocol.messages_v2 import RoundOpenV2
+        from hypertrain.trainer.config import TrainConfig
+        from hypertrain.trainer.model import init_params
+
+        def refuse(reason: str) -> ChallengeError:
+            return ChallengeError(409, f"ROUND_RETIRE_REFUSED: {reason}")
+
+        held = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='retired' AND id=?",
+            (run_id, str(w)),
+        ).fetchone()
+        if held is not None:
+            return dict(json.loads(held[0]))
+        if self._db.execute(
+            "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission' AND id='run'",
+            (run_id,),
+        ).fetchone():
+            raise refuse("a service-admitted run keeps its roster complete")
+        manifest = self._run_v2(run_id)
+        before = [status for status in self._history_v2(run_id) if status.w < w]
+        if [status.w for status in before] != list(range(w)) or not all(
+            status.closed for status in before
+        ):
+            raise refuse("an earlier round is not closed")
+        body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", str(w))["body"])
+        status = RoundStatus(**self._record_v2(run_id, "finality", str(w)))
+        now = self._now(self._db)
+        roster = {entry.hotkey: entry for entry in body.roster}
+        names = sorted(set(survivors))
+        if not set(names) <= roster.keys():
+            raise refuse("a survivor is not on the roster")
+        if cause == "INFEASIBLE":
+            if now < body.d_commit:
+                raise refuse("the commit window is still open")
+            try:
+                self._require_survivors_v2(manifest, [roster[h] for h in names])
+            except ChallengeError:
+                carries = False
+            else:
+                carries = True
+            if carries:
+                raise refuse("the survivors can carry the round")
+        else:
+            audit = AuditPolicyV2.model_validate_json(
+                self.objects.get(manifest.network.audit_policy_hash)
+            )
+            if self._db.execute(
+                "SELECT 1 FROM audit_leases_v2 WHERE run_id=? AND w=?", (run_id, w)
+            ).fetchone():
+                raise refuse("audits were scheduled")
+            if now < min(body.d_final, body.d_audit + audit.absolute_rounds()) - 1:
+                raise refuse("the audit window is still open")
+        if w:
+            previous = self._record_v2(run_id, "applied", str(w - 1))
+            prev_state, theta_hash = str(previous["out_state"]), str(previous["theta_hash"])
+            predecessor = str(previous["tape_hash"])
+        else:
+            theta = init_params(TrainConfig.from_manifest_v2(manifest).model)
+            initial = OuterState.init({k: v.detach().cpu().numpy() for k, v in theta.items()})
+            prev_state = self.objects.put(initial.to_bytes())
+            theta_hash, predecessor = initial.hashes()["theta_hash"], "0" * 64
+        evidence: dict[str, JsonValue] = {
+            "v": "ht-round-retired-v1",
+            "run_id": run_id,
+            "w": w,
+            "cause": cause,
+            "roster_hash": body.roster_hash,
+            "survivors": [*names],
+            "theta_hash": theta_hash,
+        }
+        evidence_hash = self.objects.put(canonicalize(evidence))
+        closed = retire(status, theta_hash, evidence_hash)
+        # Every roster member restarts the next round from the state it held at the start of this
+        # one: same optimizer state, same error feedback, as if the round had not run.
+        carried = {
+            entry.hotkey: self._carry_anchor_v2(run_id, manifest, entry.hotkey, w, evidence_hash)
+            for entry in body.roster
+        }
+        record: dict[str, JsonValue] = {
+            **evidence,
+            "evidence_hash": evidence_hash,
+            "retired_beacon": now,
+        }
+        self._put_record_v2(
+            run_id,
+            "applied",
+            str(w),
+            {
+                "kind": "null",
+                "tape_hash": evidence_hash,
+                "out_state": prev_state,
+                "prev_state": prev_state,
+                "theta_hash": theta_hash,
+                "predecessor_tape_hash": predecessor,
+            },
+        )
+        self._put_record_v2(run_id, "retired", str(w), record)
+        self._put_record_v2(run_id, "finality", str(w), asdict(closed))
+        for hotkey, anchor in carried.items():
+            self._put_record_v2(run_id, "anchor", f"{w}:{hotkey}", anchor)
+        # Nothing of this round may finish after the retirement; a finished audit stays evidence.
+        open_jobs = [
+            row[0]
+            for row in self._db.execute(
+                "SELECT id FROM audit_leases_v2 "
+                "WHERE run_id=? AND w=? AND state IN ('queued','running')",
+                (run_id, w),
+            )
+        ]
+        self._db.execute(
+            "UPDATE audit_leases_v2 SET state='exhausted',result='ROUND_RETIRED' "
+            "WHERE run_id=? AND w=? AND state IN ('queued','running')",
+            (run_id, w),
+        )
+        for job_id in open_jobs:
+            guard = self._lease_guards_v2.pop(job_id, None)
+            if guard is not None:
+                guard.revoke()
+        return record
+
     def _persist_anchor_v2(self, manifest: RunManifestV2, anchor: Any, cache: Any) -> None:
         from hypertrain.auditor.replay import tensor_root
         from hypertrain.trainer.compress import state_hash
 
         if anchor.backend not in ("genesis", self._backend_v2(manifest)):
             raise ChallengeError(409, "anchor backend differs from frozen run execution")
+        self._require_unretired_v2(manifest.run_id(), anchor.w)
         path = cache.persist(self.state_dir / "anchors-v2" / anchor.hotkey, anchor)
         self._put_record_v2(
             manifest.run_id(),
@@ -6719,6 +6911,7 @@ class ChallengeStore:
                 self._service_boundary_v2(run_id, w, heavy=True)
             body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", str(w))["body"])
             self.require_roster_v2(run_id, roster=body.roster)
+            self._require_unretired_v2(run_id, w)
             now = self._fresh_v2(manifest, f"audit:{w}", body.d_audit)
             if now < body.d_audit:
                 raise ChallengeError(409, "audit beacon not ready")
@@ -8741,6 +8934,7 @@ class ChallengeStore:
         with self._tx():
             manifest = self._run_v2(run_id)
             self.require_roster_v2(run_id, w)
+            self._require_unretired_v2(run_id, w)
             self._fresh_v2(manifest, f"aggregate:{w}:{self._now(self._db)}")
             existing = self._db.execute(
                 "SELECT data FROM records_v2 WHERE run_id=? AND kind='applied' AND id=?",
@@ -8880,6 +9074,7 @@ class ChallengeStore:
                     raise ChallengeError(409, "conflicting finalized origin authority")
                 return self._record_v2(run_id, "finalize-result", str(w))
             self.require_roster_v2(run_id, w)
+            self._require_unretired_v2(run_id, w)
             applied = self._record_v2(run_id, "applied", str(w))
             if applied.get("kind") == "repair":
                 raise ChallengeError(
@@ -9596,6 +9791,7 @@ class ChallengeStore:
             statuses = []
             for w in (model.w, model.w + 1):
                 self.require_roster_v2(run_id, w)
+                self._require_unretired_v2(run_id, w)
                 status = RoundStatus(**self._record_v2(run_id, "finality", str(w)))
                 statuses.append(status)
                 if status.disposition == "SETTLED":

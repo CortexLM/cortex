@@ -238,6 +238,17 @@
   before. The store's `contest_of` callback refuses, so
   `disputes_v2.py` is unchanged. See `docs/adr/0011-audit-integrity.md` (Part 8, decision 21) at
   the monorepo root.
+- A round that cannot reach a tape can be closed as a retired round instead of blocking the run
+  and the bond of every honest member for ever: the store records a null tape (the model does not
+  move), `finality` `RETIRED` and the evidence, carries every roster member's anchor `w - 1` as
+  its anchor `w` under new hashes (the tensor files are linked, nothing is loaded), cancels the
+  open audit leases, and `audits`, `aggregate`, `finalize` and `rollback` of that round answer 409
+  `ROUND_RETIRED`; no late audit result can replace a carried anchor. The causes (`INFEASIBLE`,
+  `AUDIT_WINDOW_MISSED`) are re-derived from the facts, the escrow is not called (the next reward
+  `finalize` records the round as withdrawn). `schedule_audits_v2`, `aggregate_v2`, `finalize_v2`
+  and `rollback_v2` are owned functions: `implementation_hash` changes. See
+  `docs/adr/0011-audit-integrity.md` (Part 8, decisions 7 to 11) at the monorepo root and
+  `docs/network-v2.md`.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

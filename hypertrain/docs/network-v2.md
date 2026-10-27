@@ -527,6 +527,31 @@ decision; there is no void round. Call `audits` once `d_audit` has passed and be
 twice `lease_rounds`; a later call answers 503 for every roster and the round cannot be
 audited. Open rounds with five or more members when an eviction is plausible.
 
+A round that cannot reach a tape can be retired (ADR 0011 part 8, decisions 7 to 11) instead of
+blocking the run for good. Two causes, each re-derived by the master from the facts: the members
+that can still deliver (committed, not left out, and with their delta once `d_upload` has passed)
+cannot carry one complete update (`INFEASIBLE`, from `d_commit`), or nobody scheduled audits and
+`audits` answers 503 from `absolute` minus one round (`AUDIT_WINDOW_MISSED`). It also waits until
+every earlier round is closed and is refused for a service-admitted run (`ROUND_RETIRE_REFUSED:
+<reason>`, nothing written; no route asks for it). The master closes the
+round as a null round: `applied` is a record of kind `null` whose output state is its input state
+(the model, the outer momentum and the centre do not move, the data window is consumed), `finality`
+is `RETIRED` (closed), and `retired` holds the evidence `{v: ht-round-retired-v1, run_id, w,
+cause, roster_hash, survivors, theta_hash}`, whose sha256 is the evidence hash, with
+`retired_beacon`. Every roster member, the ones that never committed too, gets for round `w` the
+anchor it held for `w - 1` under new hashes (`ht-carried-proof/1`, `ht-carried-anchor/1`; the two
+tensor files are linked and only the metadata is rewritten, `state_root` and `ef_hash` stay), so
+round `w + 1` restarts from the optimizer state and the error feedback round `w` started from.
+The open audit leases of the round end `exhausted` with result `ROUND_RETIRED` and their guards
+are revoked; a finished verdict stays as evidence. From then on `audits`, `aggregate`, `finalize`
+and `rollback` of that round answer 409 `ROUND_RETIRED`, and no late audit result can replace a
+carried anchor. Nothing is minted for it and the escrow is not called at retirement: the next
+reward `finalize` records the round as withdrawn, as for any round closed without a reward.
+Round `w + 1` is opened by the operator with `prev_final_hash` set to the evidence hash. It needs
+four eligible members that hold an anchor for `w`, which are the members of the retired roster
+(a member that was never rostered has none: 409 `missing accepted anchor`); fewer answer 409
+`ROUND_INFEASIBLE`. A retirement costs every roster member a round of work and reward.
+
 A request that the allocation caps or the finality rules refuse is a 409 whose detail starts
 with a code, on every route, and writes nothing. `ROUND_INFEASIBLE: <reason>`: the members
 cannot carry one complete update (opening a round with fewer than four eligible members, a
