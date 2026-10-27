@@ -518,17 +518,31 @@ passed its audit but uploaded no delta by `d_upload` is left out the same way by
 push at or after `d_upload` (stage `delta`). `audits` and `aggregate` write the same records
 for a member the beacon route did not see (a challenge restarted before the run was served
 again). Its reward share goes to the members that remain, split by tokens as for any
-exclusion. Nobody is suspended, struck or slashed for either. A member left out before its
-audit has no anchor for that round and cannot be rostered again in this run; one left out at
-the delta stage keeps its anchor. The remaining members must still carry the allocation: at
-least four, more when probation or owner-group caps bind, counting `NO_SHOW`, `UNVERIFIED`
-and `INFRASTRUCTURE` exclusions of the round together. Otherwise `audits` or `aggregate`
-answers 409 `ROUND_INFEASIBLE`, no member is left out, a `round-exit` record names the
-reason (`INFEASIBLE`) and the run stays blocked until an operator decision; there is no void
-round. Call `audits` once `d_audit` has passed and before `absolute` minus one round,
-`absolute` being the smaller of `d_final` and `d_audit` plus twice `lease_rounds`; a later
-call answers 503 for every roster and the round cannot be audited. Open rounds with five or
-more members when an eviction is plausible.
+exclusion. A member left out before its audit has no anchor for that round and cannot be
+rostered again in this run; one left out at the delta stage keeps its anchor. The remaining
+members must still carry the allocation: at least four, more when probation or owner-group
+caps bind, counting `NO_SHOW`, `UNVERIFIED` and `INFRASTRUCTURE` exclusions of the round
+together. Otherwise `audits` or `aggregate` answers 409 `ROUND_INFEASIBLE`, no member is
+left out, a `round-exit` record names the reason (`INFEASIBLE`) and the run stays blocked
+until an operator decision; there is no void round. Call `audits` once `d_audit` has passed
+and before `absolute` minus one round, `absolute` being the smaller of `d_final` and
+`d_audit` plus twice `lease_rounds`; a later call answers 503 for every roster and the round
+cannot be audited. Open rounds with five or more members when an eviction is plausible.
+
+A member left out for its silence is sanctioned in the same push, unless the master cannot
+show that it could have been heard. The push books the blame (`exit-sanction`, id
+`<w>:<hotkey>`) and applies it: the admission is suspended (reason `NO_SHOW`) with one
+strike and its bond is burned, as for a confirmed audit mismatch. That holds for a round the
+rest cannot carry too: its silent members are sanctioned although none is left out. The
+blame is the miner's only if the window it missed was served and somebody used it. It is the
+infrastructure's, the row is `WAIVED` and nothing happens to the admission, when the master
+was refusing its callers while the window was open (`beacon-pause`: the wall clock was more
+than two rounds ahead of the last round the master held), when nobody committed (commit
+stage) or when nobody delivered a delta (delta stage). A sanction that fails is journaled
+(`exit-failed`) and retried on the next push; the member is out of its round all the same.
+There is no route back from this suspension: a miner whose host is evicted before `d_commit`
+loses its identity like a free identity does (ADR 0011 Part 8, decision 12 and Decisions for
+Forge 1).
 
 A round that cannot reach a tape can be retired (ADR 0011 part 8, decisions 7 to 11) instead of
 blocking the run for good. Two causes, each re-derived by the master from the facts: the members

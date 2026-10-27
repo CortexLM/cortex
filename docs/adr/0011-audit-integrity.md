@@ -1000,12 +1000,15 @@ the table as covering them.
    transaction; a sanction that raises would keep the member in the round for ever, which is the freeze
    this part removes.
 5. **Blame is a witnessed fact.** `NO_SHOW` is the miner's only if the window it missed was served and
-   somebody used it: the reaper records `beacon-pause` when the wall clock was more than two rounds ahead
-   of the last round it had (the predicate `_fresh_v2` refuses on); a commit-stage absence in a round
-   where nobody committed is infrastructure; a delta-stage absence is infrastructure when nobody
-   delivered a delta or the upload window was paused. No waiver is one a miner can pick (an `accept` or
-   an upload grant costs a free identity nothing). The wall clock never decides when an exit happens, only
-   whether the miner is blamed.
+   somebody used it: the reaper records `beacon-pause` when the wall clock was more than two rounds ahead of
+   the last round it had (the predicate `_fresh_v2` refuses on). The record is one per contiguous pause, not
+   per push, since a pusher that catches up round by round shows the same pause at every push and each
+   record would move `_rollback_snapshot_v2`: it names the first refused view and the last one
+   (`emitted - 3`), every view in between being refused whenever it is held. A commit-stage absence is
+   infrastructure if a refused view lies in the assignment window `[d_assign, d_commit)` or if nobody
+   committed; a delta-stage absence is infrastructure if one lies in `[d_commit, d_upload)` or if nobody
+   delivered a delta. No waiver is one a miner can pick (an `accept` or an upload grant costs a free
+   identity nothing). The wall clock never decides when an exit happens, only whether the miner is blamed.
 6. **Not automated.** The master does not open the next round, draw its roster or lower the quorum: a
    `RoundOpenV2` is the operator's signed schedule and the caps are pinned by the schema.
 
@@ -1072,10 +1075,13 @@ the table as covering them.
     the hook. The gate (about 25 lines: a PENDING row until no earlier unclosed round lists the member) is
     the documented fallback if decision 23 is refused.
 14. **`SanctionHook`.** The sweeper calls the hook through a Protocol of one method
-    (`seize_bond(admission_id, *, reason, evidence_hash, now)`), bound to `Admission` in production and to a
-    fake in tests. It never calls `TRAINING_FRAUD`: that stays `settle_fraud`'s. The evidence hash is the
-    exclusion's own, re-derived by the reaper before use; a record whose evidence does not re-derive is
-    never sanctioned.
+    (`seize_bond(admission_id, *, reason, evidence_hash, now)`), bound to `Admission` in production
+    (`ChallengeStore.sanction_hook` is `None`) and to a fake in tests, which seeded rounds need: their
+    admission ids are synthetic. It never calls `TRAINING_FRAUD`: that stays `settle_fraud`'s. The evidence
+    hash is the exclusion's own. A `NO_SHOW` that a lazy writer recorded (`audits`, `aggregate`, the lease
+    expiry) is adopted on the next push, only while its round is not closed (a deployment must not sanction
+    the past) and only if its evidence re-derives from the round; a record that does not re-derive is never
+    sanctioned.
 15. **What reaches the hook.** Two shapes only: an `excluded NO_SHOW`, and an `excluded UNVERIFIED` backed
     by a completed `MISMATCH` lease, the stored executed verdict whose digest is the excluded evidence and a
     graded verdict. Nothing the auditor or the host did reaches it: executor exceptions, quarantines, lease
@@ -1177,7 +1183,7 @@ the table as covering them.
 | State | Test (file) | Scenario | Mutant |
 | --- | --- | --- | --- |
 | dispute | `tests/challenge/test_dispute_exit_v2.py` (exists) + the e2e | forged delta + contest: the run restarts, `w + 2` opens | the closure removed |
-| commit | `tests/challenge/test_exit_reaper_v2.py` | 6 rostered, 2 silent: both excluded at `d_commit`, sanctioned, 4 audited and paid, round 1 opens | eager exit removed |
+| commit | `tests/challenge/test_exit_reaper_v2.py`, `tests/e2e/test_exit_states_v2_e2e.py` | 6 rostered, 2 silent: both excluded at `d_commit`, sanctioned, 4 audited and paid, round 1 opens | eager exit removed; the sweeper removed |
 | leaves | same file | a member commits and never posts leaves: dropped at `absolute` as `NO_SHOW/leaves`, the others settle | stage naming |
 | delta | `tests/challenge/test_exit_reaper_v2.py`, `tests/e2e/test_no_show_resume_v2.py` | an audited member never uploads: excluded at `d_upload`, the round settles | the delta exit |
 | audit job | `test_audit_liveness_v2.py` (exists) | one poisoned job costs its miner, not the round | exhaustion drop |
@@ -1235,7 +1241,7 @@ the table as covering them.
   refused (fail closed). A rollback whose history holds an exit exclusion fails closed, as after
   `UNVERIFIED`.
 - Existing tests that change deliberately: `test_seize_bond_burns_the_bond_of_a_no_show_and_nothing_else`
-  (the state becomes `SUSPENDED`), the e2e no-show test that expects 409 `ROUND_INFEASIBLE` after the push
+  (the state becomes `PROBATION`, D63), the e2e no-show test that expects 409 `ROUND_INFEASIBLE` after the push
   (it expects `ROUND_RETIRED`), and every test that opens a funded dispute against an honest MATCH (the
   helper marks the lease row MISMATCH first). Each is updated in the commit that changes the behaviour.
 

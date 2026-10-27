@@ -136,8 +136,19 @@
   puts the admission back on a fresh probation (state reason `NO_SHOW`, new trials, no
   suspension); a second one for other evidence inside `NO_SHOW_STRIKE_WINDOW_SCREENS` (4) work
   screens suspends it, as `"AUDIT_MISMATCH"` does at once (D63). A banned admission stays banned,
-  unvested rewards are spared and the coldkey stays bound as in probation. ADR 0010
-  Part 6, ADR 0011 Part 8 decision 12.
+  unvested rewards are spared and the coldkey stays bound as in probation. The exit reaper of the
+  beacon route calls it. ADR 0010 Part 6, ADR 0011 Part 8 decision 12.
+- A roster member left out for its silence is sanctioned in the same beacon push: its bond is
+  burned and it gets one strike (a probation the first time, a suspension the second time inside
+  the window, D63), through the new row `exit-sanction` (`PENDING`, `APPLIED` or `WAIVED`, id
+  `<w>:<hotkey>`) that a sweeper applies and retries, so that a failing sanction never keeps the
+  member in the round. The blame is the miner's only when the window it missed was served and
+  somebody used it: the master records `beacon-pause` (once per pause) when its wall clock was
+  more than two rounds ahead of the last round it held, and a silence in a round where nobody
+  committed, or a missing delta in a round nobody delivered to, is waived. A NO_SHOW that a lazy
+  writer recorded is adopted on the next push. `ChallengeStore.sanction_hook` (None: the run's
+  `Admission`) is the seam a test binds. A suspension has no route back. See
+  `docs/adr/0011-audit-integrity.md` (Part 8) at the monorepo root.
 
 ### Fixed
 - A member convicted of training fraud between the aggregate and the finalize of a round is no

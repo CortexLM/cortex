@@ -23,6 +23,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from contextlib import contextmanager
 from dataclasses import asdict
 from fractions import Fraction
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -45,13 +46,19 @@ from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import EXCLUSION_ABANDONED, Contest, DisputesV2
 from hypertrain.challenge.exit_v2 import (
     MAX_LAG_ROUNDS,
+    SANCTION,
     Exclusion,
     Member,
     Retire,
     RoundSnapshot,
     Schedule,
+    classify,
+    no_show_evidence,
+    pause_span,
     plan_round,
+    served,
 )
+from hypertrain.challenge.sanction_v2 import SanctionHook
 from hypertrain.data.assignment import assign_round
 from hypertrain.data.store import (
     CorruptObjectError,
@@ -451,6 +458,8 @@ class ChallengeStore:
         self._intakes: dict[str, Intake] = {}
         self.state_dir = state_dir
         self.clock: Callable[[], float] = time.time
+        # What applies an exit sanction; None is the run's own `Admission`. A test binds a fake.
+        self.sanction_hook: SanctionHook | None = None
         self._services_v2: dict[str, tuple[Any, Any, Any]] = {}
         self.beacon_arrived = threading.Condition()
         self._lease_guards_v2: dict[str, Any] = {}
@@ -727,6 +736,7 @@ class ChallengeStore:
             known = db.execute("SELECT * FROM beacon WHERE round=?", (br.round,)).fetchone()
             if known is not None and known["signature"] != br.signature:
                 raise ChallengeError(409, f"conflicting payload for drand round {br.round}")
+            previous_now = self._now(db)
             if known is None:
                 db.execute(
                     "INSERT INTO beacon VALUES(?, ?, ?, ?)",
@@ -762,7 +772,7 @@ class ChallengeStore:
                             raise
                 self._expire_leases_v2(run_id, br.round)
             self._reap_v2(run_id, "dispute", self._close_blocked_disputes_v2)
-            self._reap_v2(run_id, "exit", self._reap_exits_v2)
+            self._reap_v2(run_id, "exit", partial(self._reap_exits_v2, previous=previous_now))
             with self._tx():  # own transaction: bookkeeping must not undo maturation or leases
                 admission.reap_expired_trials(now=self._now(self._db))
         for _, _, disputes in self._services_v2.values():
@@ -6450,12 +6460,15 @@ class ChallengeStore:
         """The rounds that are not closed, ascending: `RoundStatus.closed` is the one definition."""
         return [status for status in self._history_v2(run_id) if not status.closed]
 
-    def _reap_exits_v2(self, run_id: str) -> None:
-        """Leave out the roster members that missed the bound of their wait (ADR 0011 Part 8).
+    def _reap_exits_v2(self, run_id: str, previous: int) -> None:
+        """Leave out the roster members that missed the bound of their wait (ADR 0011 Part 8),
+        book whose fault it is and apply the sanctions that are due.
 
-        One transaction, one savepoint per unclosed round: a round that cannot be reaped is
-        journaled (`exit-failed`, id `<w>:reap`) and the others go on. A service run is skipped:
-        its roster must stay complete (`verified_inputs_v2`).
+        `previous` is the last round the master held before this push. The pause witness has a
+        transaction of its own, so that nothing after it can lose it. Then one transaction, one
+        savepoint per unclosed round, per adoption and per sanction: a step that cannot be done is
+        journaled (`exit-failed`, id `<key>:<step>`) and the others go on. A service run is
+        skipped: its roster must stay complete (`verified_inputs_v2`).
         """
         escrow = self._services_v2[run_id][0]
         with self._tx():
@@ -6464,15 +6477,44 @@ class ChallengeStore:
                 (run_id,),
             ).fetchone():
                 return
+            self._witness_pause_v2(run_id, previous)
+        with self._tx():
             now = self._now(self._db)
-            for status in self._open_rounds_v2(run_id):
+            pauses = self._pauses_v2(run_id)
+            unclosed = self._open_rounds_v2(run_id)
+            for status in unclosed:
                 try:
                     with escrow.tx():
-                        self._reap_round_v2(run_id, status, now)
+                        self._reap_round_v2(run_id, status, now, pauses)
                 except Exception as error:
                     self._journal_exit_v2(run_id, str(status.w), "reap", error)
+            self._adopt_exclusions_v2(run_id, pauses, {status.w for status in unclosed})
+            self._sweep_sanctions_v2(run_id, now)
 
-    def _reap_round_v2(self, run_id: str, status: RoundStatus, now: int) -> None:
+    def _witness_pause_v2(self, run_id: str, previous: int) -> None:
+        """Record, once per pause, that the master refused its callers (`beacon-pause`, id the
+        first refused view, `to` the last). A pusher that catches up round by round shows the same
+        pause on every push, and a record each would move `_rollback_snapshot_v2` each time."""
+        beacon = self._run_v2(run_id).training.beacon
+        emitted = (int(self.clock()) - beacon.genesis_time) // beacon.period + 1
+        span = pause_span(previous, emitted)
+        if span is None or any(
+            first <= previous <= last for first, last in self._pauses_v2(run_id)
+        ):
+            return
+        self._put_record_v2(run_id, "beacon-pause", str(span[0]), {"to": span[1]})
+
+    def _pauses_v2(self, run_id: str) -> list[tuple[int, int]]:
+        return [
+            (int(row[0]), int(json.loads(row[1])["to"]))
+            for row in self._db.execute(
+                "SELECT id,data FROM records_v2 WHERE run_id=? AND kind='beacon-pause'", (run_id,)
+            )
+        ]
+
+    def _reap_round_v2(
+        self, run_id: str, status: RoundStatus, now: int, pauses: list[tuple[int, int]]
+    ) -> None:
         """Ask the planner what one unclosed round owes the beacon, and record the answer."""
         from hypertrain.protocol.messages_v2 import RoundOpenV2
 
@@ -6514,8 +6556,8 @@ class ChallengeStore:
                 audited=frozenset(r["hotkey"] for r in leases if r["state"] == "completed"),
                 delivered=hotkeys_of("delta"),
                 applied=status.applied,
-                served=True,  # the exit never depends on whose fault it is (decision 4)
-                served_upload=True,
+                served=served(pauses, body.d_assign, body.d_commit),
+                served_upload=served(pauses, body.d_commit, body.d_upload),
                 has_leases=bool(leases),
                 carries=carries,
             )
@@ -6526,16 +6568,130 @@ class ChallengeStore:
             self._put_changed_v2(run_id, "round-exit", str(w), {"state": plan.retire})
 
     def _exclude_v2(self, run_id: str, w: int, exclusion: Exclusion) -> None:
-        """The one writer of an exit exclusion. `_put_no_show_v2` writes the bytes of the lazy
-        writers, which stay as a backstop that finds nothing absent. A member of a round that
-        cannot go on is not excluded: `schedule_audits_v2` keeps answering ROUND_INFEASIBLE."""
-        if not exclusion.record:
+        """The one writer of an exit exclusion: the record, the audit count and the blame row.
+
+        `_put_no_show_v2` writes the bytes of the lazy writers, which stay as a backstop that
+        finds nothing absent. A member of a round that cannot go on is not excluded
+        (`schedule_audits_v2` keeps answering ROUND_INFEASIBLE) but its blame is booked all the
+        same. A booked row is never rewritten: it may be PENDING or APPLIED by now.
+        """
+        identity = f"{w}:{exclusion.hotkey}"
+        if self._db.execute(
+            "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='exit-sanction' AND id=?",
+            (run_id, identity),
+        ).fetchone():
             return
-        self._put_no_show_v2(run_id, w, exclusion.hotkey, exclusion.stage)
-        if exclusion.stage == "commit":  # no audit will run for this member
-            finality = self._record_v2(run_id, "finality", str(w))
-            finality["unresolved_audits"] = max(0, int(finality["unresolved_audits"]) - 1)
-            self._put_record_v2(run_id, "finality", str(w), finality)
+        if exclusion.record:
+            self._put_no_show_v2(run_id, w, exclusion.hotkey, exclusion.stage)
+            if exclusion.stage == "commit":  # no audit will run for this member
+                finality = self._record_v2(run_id, "finality", str(w))
+                finality["unresolved_audits"] = max(0, int(finality["unresolved_audits"]) - 1)
+                self._put_record_v2(run_id, "finality", str(w), finality)
+        self._book_sanction_v2(
+            run_id,
+            identity,
+            exclusion.admission_id,
+            exclusion.stage,
+            exclusion.blame,
+            no_show_evidence(run_id, w, exclusion.hotkey, exclusion.stage),
+        )
+
+    def _book_sanction_v2(
+        self,
+        run_id: str,
+        identity: str,
+        admission_id: str,
+        stage: str,
+        blame: str,
+        evidence_hash: str,
+    ) -> None:
+        """The sanction of an exit, as a row of its own (ADR 0011 Part 8, decision 4): the miner's
+        blame is PENDING until the sweeper applies it, anybody else's is WAIVED."""
+        self._put_record_v2(
+            run_id,
+            "exit-sanction",
+            identity,
+            {
+                "admission_id": admission_id,
+                "reason": "NO_SHOW",
+                "stage": stage,
+                "blame": blame,
+                "evidence_hash": evidence_hash,
+                "state": "PENDING" if blame == "MINER" else "WAIVED",
+            },
+        )
+
+    def _adopt_exclusions_v2(
+        self, run_id: str, pauses: list[tuple[int, int]], unclosed: set[int]
+    ) -> None:
+        """Book the blame of a NO_SHOW that a lazy writer recorded (the `audits` call, an
+        `aggregate`, the lease expiry), so the sanction does not depend on who caught the silence.
+        Only in a round that is not closed: a closed round is history, and a deployment must not
+        sanction the past."""
+        escrow = self._services_v2[run_id][0]
+        for row in self._db.execute(
+            "SELECT e.id,e.data FROM records_v2 e WHERE e.run_id=? AND e.kind='excluded' "
+            "AND json_extract(e.data,'$.reason')='NO_SHOW' AND NOT EXISTS ("
+            "SELECT 1 FROM records_v2 s WHERE s.run_id=e.run_id AND s.kind='exit-sanction' "
+            "AND s.id=e.id) ORDER BY e.id",
+            (run_id,),
+        ).fetchall():
+            if int(row["id"].split(":", 1)[0]) not in unclosed:
+                continue
+            try:
+                with escrow.tx():
+                    self._adopt_exclusion_v2(run_id, row["id"], json.loads(row["data"]), pauses)
+            except Exception as error:
+                self._journal_exit_v2(run_id, row["id"], "adopt", error)
+
+    def _adopt_exclusion_v2(
+        self, run_id: str, identity: str, record: dict[str, Any], pauses: list[tuple[int, int]]
+    ) -> None:
+        from hypertrain.protocol.messages_v2 import RoundOpenV2
+
+        text, hotkey = identity.split(":", 1)
+        w, stage = int(text), record["stage"]
+        body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", text)["body"])
+        entry = next((e for e in body.roster if e.hotkey == hotkey), None)
+        evidence = no_show_evidence(run_id, w, hotkey, stage)
+        if entry is None or record["evidence_hash"] != evidence:
+            return  # a record that does not re-derive from its own round is never sanctioned
+        window = (
+            (body.d_assign, body.d_commit) if stage == "commit" else (body.d_commit, body.d_upload)
+        )
+        blame = classify(
+            stage,
+            served=served(pauses, *window),
+            committed_any=bool(self._round_ids_v2(run_id, "commit", w)),
+            delivered_any=bool(self._round_ids_v2(run_id, "delta", w)),
+        )
+        self._book_sanction_v2(run_id, identity, entry.admission_id, stage, blame, evidence)
+
+    def _sweep_sanctions_v2(self, run_id: str, now: int) -> None:
+        """Apply every PENDING sanction through the hook, one savepoint each. A sanction that
+        fails is journaled and retried on the next push; the member is out of its round all the
+        same."""
+        escrow, admission, _ = self._services_v2[run_id]
+        hook: SanctionHook = self.sanction_hook or admission
+        for row in self._db.execute(
+            "SELECT id,data FROM records_v2 WHERE run_id=? AND kind='exit-sanction' "
+            "AND json_extract(data,'$.state')='PENDING' ORDER BY id",
+            (run_id,),
+        ).fetchall():
+            record = json.loads(row["data"])
+            try:
+                with escrow.tx():
+                    hook.seize_bond(
+                        record["admission_id"],
+                        reason=SANCTION[(record["reason"], record["stage"])],
+                        evidence_hash=record["evidence_hash"],
+                        now=now,
+                    )
+                    self._put_record_v2(
+                        run_id, "exit-sanction", row["id"], {**record, "state": "APPLIED"}
+                    )
+            except Exception as error:
+                self._journal_exit_v2(run_id, row["id"], "sanction", error)
 
     def _journal_exit_v2(self, run_id: str, key: str, stage: str, error: Exception) -> None:
         """The last failure of one step of the exit reaper, rewritten only when it changes."""

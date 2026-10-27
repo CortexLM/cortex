@@ -339,10 +339,11 @@ confirmed as the miner's. If Forge still wants a no-show's bond burned, the call
 `Admission.seize_bond(admission_id, *,
 reason, evidence_hash, now)` with `reason="NO_SHOW"` for a roster member that never committed and
 `reason="AUDIT_MISMATCH"` for a confirmed round-stage mismatch; `evidence_hash` is 64 hex naming
-the round and what confirmed it; call it inside the transaction that excludes the member. To
-give a bond back on the owner's authenticated request, `Admission.release_bond(admission_id,
-now=...)`. Both resolve everything by admission id, nest in `escrow.tx()`, are idempotent and
-write nothing when there is no residual bond.
+the round and what confirmed it; call it from a step that retries, not inside the transaction
+that excludes the member (ADR 0011 Part 8 decision 4: a sanction that raises would keep the
+member in the round). To give a bond back on the owner's authenticated request,
+`Admission.release_bond(admission_id, now=...)`. Both resolve everything by admission id, nest in
+`escrow.tx()`, are idempotent and write nothing when there is no residual bond.
 
 Consequences. An honest miner leaves with its bond after its screen lapsed, its last round
 closed and its rewards vested; the wait is `E_vest_rounds` beacon rounds after the last

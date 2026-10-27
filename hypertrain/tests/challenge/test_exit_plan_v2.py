@@ -191,3 +191,40 @@ def test_every_exit_the_planner_or_the_lease_expiry_books_has_a_seizure_reason()
     booked = {(e.reason, e.stage) for e in commit + delta} | {("NO_SHOW", "leaves")}
     assert booked == set(x.SANCTION)
     assert set(x.SANCTION.values()) <= set(get_args(SeizureReason))
+
+
+@pytest.mark.parametrize(
+    ("previous", "emitted", "span"),
+    [
+        (10, 12, None),
+        (10, 13, (10, 10)),
+        (10, 20, (10, 17)),
+        (0, 50, None),
+    ],
+    ids=["on-time", "first-refused-view", "caught-up-late", "no-beacon-yet"],
+)
+def test_a_push_shows_a_pause_only_when_the_master_refused_its_callers(previous, emitted, span):
+    assert x.pause_span(previous, emitted) == span
+
+
+@pytest.mark.parametrize(
+    ("spans", "is_served"),
+    [
+        ([], True),
+        ([(95, 99)], True),
+        ([(95, 100)], False),
+        ([(129, 140)], False),
+        ([(130, 140)], True),
+        ([(10, 20), (125, 126)], False),
+    ],
+    ids=[
+        "no-pause",
+        "ends-before",
+        "ends-on-the-first-round",
+        "starts-in",
+        "starts-after",
+        "one-of-two",
+    ],
+)
+def test_a_window_is_served_unless_a_refused_view_falls_inside_it(spans, is_served):
+    assert x.served(spans, 100, 130) is is_served

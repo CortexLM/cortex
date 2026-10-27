@@ -8,10 +8,13 @@ database and no clock.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Literal
+
+from hypertrain.challenge.sanction_v2 import SanctionReason
+from hypertrain.protocol.hashing import sha256_hex
 
 Blame = Literal["MINER", "INFRASTRUCTURE"]
 Stage = Literal["commit", "leaves", "delta"]
@@ -20,6 +23,30 @@ Retire = Literal["INFEASIBLE", "AUDIT_WINDOW_MISSED"]
 # The master refuses its callers once the wall clock is more than this many rounds ahead of the
 # last round it holds: the beacon is paused, and a pause is never a miner's silence.
 MAX_LAG_ROUNDS = 2
+
+
+def pause_span(previous: int, emitted: int) -> tuple[int, int] | None:
+    """The views the master refused its callers in, shown by one push, or None.
+
+    `previous` is the last round the master held before the push and `emitted` the round the wall
+    clock is at. A view more than MAX_LAG_ROUNDS behind the clock is refused for as long as it is
+    held, and the clock only moves on: every view from `previous` to `emitted - MAX_LAG_ROUNDS - 1`
+    was refused, however fast the pusher then catches up. The views stand for the wall-clock
+    moments of the pause, which can only waive a blame, never add one.
+    """
+    if previous < 1 or emitted - previous <= MAX_LAG_ROUNDS:
+        return None
+    return previous, emitted - MAX_LAG_ROUNDS - 1
+
+
+def served(spans: Iterable[tuple[int, int]], low: int, high: int) -> bool:
+    """Whether the master served the window [low, high): none of its refused views is in it."""
+    return not any(first < high and low <= last for first, last in spans)
+
+
+def no_show_evidence(run_id: str, w: int, hotkey: str, stage: str) -> str:
+    """The evidence hash of an exclusion for silence: the preimage `_put_no_show_v2` signs."""
+    return sha256_hex(f"ht-no-show/1|{run_id}|{w}|{hotkey}|{stage}".encode())
 
 
 class Wait(StrEnum):
@@ -72,7 +99,7 @@ BOUNDS: Mapping[Wait, Callable[[Schedule], int]] = {
 }
 
 # (reason, stage) of an exclusion -> the seizure reason of `Admission.seize_bond`.
-SANCTION: Mapping[tuple[str, str], str] = {
+SANCTION: Mapping[tuple[str, str], SanctionReason] = {
     ("NO_SHOW", "commit"): "NO_SHOW",
     ("NO_SHOW", "leaves"): "NO_SHOW",
     ("NO_SHOW", "delta"): "NO_SHOW",

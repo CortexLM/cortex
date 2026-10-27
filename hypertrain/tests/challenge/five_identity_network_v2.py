@@ -92,6 +92,18 @@ def push_through(network: Any, number: int) -> None:
         network.push(rnd)
 
 
+def push_late(network: Any, fixtures: Any, number: int, *, wall: int) -> None:
+    """Deliver beacon round `number` while the wall clock is at round `wall`: the pusher is late,
+    and the master refused its callers meanwhile."""
+    network.now = number
+    genesis = network.manifest.training.beacon.genesis_time
+    network.store.clock = lambda: genesis + (wall - 1) * 3
+    response = network.client.post(
+        "/v1/admin/beacon", json=fixtures.fixture_beacon(number), headers=fixtures.admin()
+    )
+    assert response.status_code == 200, response.text
+
+
 def five_identity_network(tmp_path_factory: Any, fixtures: Any, *, size: int = 5) -> Iterator[Any]:
     """Body of a module-scoped fixture: the fixtures module with `size` keys, all ACTIVE.
 
