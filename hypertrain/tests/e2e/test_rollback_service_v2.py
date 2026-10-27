@@ -218,7 +218,8 @@ def active_network(tmp_path_factory):
         patch.undo()
 
 
-def execute_round(network, w, *, open_only=False):
+def execute_round(network, w, *, open_only=False, hotkeys=None, forge=None):
+    """One real round for `hotkeys`; `forge` maps a hotkey to CommitV2 fields it lies about."""
     import anyio
     import httpx
     import torch
@@ -259,7 +260,7 @@ def execute_round(network, w, *, open_only=False):
             for n, x in load_state(network.store.objects, previous["out_state"]).theta.items()
         }
     starts, roster = [], []
-    hotkeys = fixtures.HOT[:4] if w == 2 else fixtures.HOT
+    hotkeys = hotkeys or (fixtures.HOT[:4] if w == 2 else fixtures.HOT)
     for i, hot in enumerate(hotkeys):
         status = network.store._services(manifest.run_id())[1].status(hot.ss58, now=network.now)
         anchor = (
@@ -332,7 +333,7 @@ def execute_round(network, w, *, open_only=False):
     response = network.client.get(network.url + f"/rounds/{w}")
     assert response.status_code == 200, response.text
     payloads = []
-    for i, hot in enumerate(fixtures.HOT):
+    for i, hot in enumerate(hotkeys):
         assignment = next(a for a in response.json()["assignment"] if a["hotkey"] == hot.ss58)
         screen = json.loads(
             network.store._db.execute(
@@ -388,6 +389,9 @@ def execute_round(network, w, *, open_only=False):
                 "delta_bytes": artifacts.delta.stat().st_size,
             }
         )
+        lies = (forge or {}).get(hot.ss58)
+        if lies:
+            commit = commit.model_copy(update=lies)
         accepted = network.client.post(
             network.url + "/commit", json=network.signed(hot, "CommitV2", commit)
         )
@@ -407,7 +411,8 @@ def execute_round(network, w, *, open_only=False):
             network.url + "/leaves", json=network.signed(hot, "WorkProof", proof)
         )
         assert accepted.status_code == 200, accepted.text
-        payloads.append((hot, artifacts.delta))
+        if not lies:  # a forged commit has no matching delta manifest to upload
+            payloads.append((hot, artifacts.delta))
 
     async def transport():
         async with httpx.AsyncClient() as backing_http:
@@ -496,7 +501,8 @@ def execute_round(network, w, *, open_only=False):
         network.url + f"/admin/rounds/{w}/audits", headers=fixtures.admin()
     )
     assert accepted.status_code == 200, accepted.text
-    for i in range(5):
+    verdicts = {}
+    for i in range(len(hotkeys)):
         auditor = fixtures.AUDITORS[i % 2]
         accepted = network.client.post(
             network.url + "/worker/lease",
@@ -525,12 +531,15 @@ def execute_round(network, w, *, open_only=False):
             ),
         )
         assert executed.status_code == 200, executed.text
-        assert executed.json()["verdict"]["result"] == "MATCH"
+        verdicts[job["start_state"]["hotkey"]] = executed.json()["verdict"]["result"]
         accepted = network.client.post(
             network.url + "/worker/jobs/" + job["job_id"] + "/complete",
             json=network.signed(auditor, "ReplayVerdict", executed.json()["verdict"]),
         )
         assert accepted.status_code == 200, accepted.text
+    assert verdicts == {
+        hot.ss58: "MISMATCH" if hot.ss58 in (forge or {}) else "MATCH" for hot in hotkeys
+    }
     accepted = network.client.post(
         network.url + f"/admin/rounds/{w}/aggregate", headers=fixtures.admin()
     )
