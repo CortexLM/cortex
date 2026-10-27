@@ -16,34 +16,26 @@ from types import ModuleType
 from typing import Any
 
 import httpx
+from pydantic import create_model
 
 from hypertrain.ledger.escrow_v2 import (
-    EscrowError,
     EscrowReceipt,
     EscrowV2,
     FinalityEvidence,
-    ShadowReservationEvidence,
     authority_message,
-    digest,
 )
 from hypertrain.protocol.envelope import body_digest
-from hypertrain.protocol.envelope_v2 import EnvelopeV2, seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
-from hypertrain.protocol.messages import Finalize
 from hypertrain.protocol.messages_v2 import (
-    CommitV2,
     RewardFinalize,
     ShadowRewardFinalizeV1,
-)
-from hypertrain.protocol.messages_v2 import (
-    ShadowReservationRequestV1 as ReservationRequest,
 )
 from hypertrain.protocol.messages_v2 import (
     ShadowReservationV1 as Reservation,
 )
 
-from .support import Real, bare_escrow, match_settlement, table_names
+from .support import Real, bare_escrow, error_code, match_settlement, table_names
 
 UNIT = 1_000_000  # round_reward_units of the fixture policy
 MATURE_AT = 20  # vesting round of the fixture reward
@@ -147,51 +139,20 @@ def file_engine(fixture: ModuleType, real: Real, path: Any) -> Engine:
     return Engine(fixture, escrow, evidence, live, setup)
 
 
-def refusal_code(call: Any) -> str:
-    """Code of the EscrowError `call` raises (support.error_code, kept next to its callers)."""
-    try:
-        call()
-    except EscrowError as error:
-        return error.code
-    raise AssertionError("expected an EscrowError, nothing was raised")
+refusal_code = error_code  # the lot's helper under the name the tests of this package use
 
 
-def second_epoch_reservation(
-    built: Engine, index: int, epoch: int
-) -> tuple[ReservationRequest, ShadowReservationEvidence]:
-    """The same work re-labelled as trial epoch `epoch`, signed as the service would sign it."""
-    fixture, evidence = built.fixture, built.evidence
-    run_id = built.escrow.run_id
-    first = Finalize.model_validate(evidence.finalize.body)
-    commit = CommitV2.model_validate(evidence.works[0].commit.body).model_copy(update={"w": epoch})
-    final = first.model_copy(update={"w": epoch})
-    final_env = EnvelopeV2.model_validate(seal(fixture.COORD, "Finalize", run_id, final, 200))
-    commit_env = EnvelopeV2.model_validate(seal(fixture.HOT, "CommitV2", run_id, commit, 200))
-    request = ReservationRequest(
-        run_id=run_id,
-        admission_id=admission_id(index),
-        hotkey=commit.hotkey,
-        coldkey=evidence.works[0].owner,
-        trial_epoch=epoch,
-        commit_hash=digest(commit),
-        finalize_hash=digest(final),
-        custody_hash=evidence.tape_hash,
-        graph_hash=fixture.H,
-        economic_admission_hash=fixture.H,
-        nonce=fixture.H,
-        assignment_hash=fixture.H,
-        finalized_beacon=evidence.finalized_beacon,
-        mature_at=evidence.finalized_beacon + built.escrow.manifest.training.verify.E_vest_rounds,
-    )
-    custody = ShadowReservationEvidence(
-        finalize=final_env,
-        commit=commit_env,
-        owner=evidence.works[0].owner,
-        sample_ids=evidence.works[0].sample_ids,
-        custody_hash=evidence.tape_hash,
-        reference_final_state_hash=fixture.VERIFIED_SHADOW_STATES[evidence.tape_hash],
-    )
-    return request, custody
+def as_live_class(fixture: ModuleType, reward: ShadowRewardFinalizeV1) -> ShadowRewardFinalizeV1:
+    """`reward` carrying the reward authority's signature over its own body as a live reward.
+
+    A stand-in class with the shadow fields and the name RewardFinalize gives the message the live
+    domain would sign for this body, so only the domain separation of `authority_message` can
+    refuse it.
+    """
+    live_named = create_model("RewardFinalize", __base__=ShadowRewardFinalizeV1)
+    stand_in = live_named.model_validate(reward.model_dump())
+    signature = fixture.COORD.sign(authority_message(stand_in)).hex()
+    return reward.model_copy(update={"authority_sig": signature})
 
 
 def db_digest(db: sqlite3.Connection) -> str:
@@ -215,7 +176,10 @@ def reauthenticate(
     verdict_signer: Any = None,
 ) -> dict[str, Any]:
     """A copy of a shadow-acceptance body with the given fields changed and every hash and
-    signature that depends on them made again, so only those fields differ from the original."""
+    signature that depends on them made again, so only those fields differ from the original.
+
+    The signers are the in-memory test keys of the network fixture: the helper isolates which
+    check refused a change, it cannot sign for a deployed service."""
     from hypertrain.protocol.messages_v2 import ShadowRewardFinalizeV1 as Reward
 
     from .support import SERVICE_FIXTURE, load_fixture_module

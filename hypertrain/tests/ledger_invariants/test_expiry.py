@@ -6,10 +6,16 @@ sibling test) shows that the scenario reaches the point under test. A control th
 holding raises ControlFailed: the scenario changed and the test is to be rewritten, which is
 neither a pass nor the expected failure.
 
+A "[candidate]" in a reason marks a hole whose desired behaviour is the Lens' reading or one of
+several valid remedies; the other holes are reproduced defects asserted on an observable outcome,
+and a test that presumes one remedy says so below.
+
 CRD-15, A2W-17: the finalize re-reads the stored commit and verdict envelopes at the
 finalize-time beacon; a miner or an auditor that sealed a short expiry freezes the round. The
-ledger-level test shows the mechanism in milliseconds; the end-to-end test (four members really
-trained and audited, 30 s) is the one a fix anywhere in the store or the ledger turns green.
+ledger-level test shows the mechanism in milliseconds and turns green with a ledger-side fix;
+the end-to-end test (four members really trained and audited, 30 s) turns green with any fix
+that lets the round finalize. A fix that refuses the short commit at intake makes its control
+fail (ControlFailed), which is the signal to rewrite it.
 A2W-16: a round wider than one audit lease cannot be audited late. FIN-05: a replay of a
 finalize returns the stored result while its envelope is live. FIN-23: a stale beacon refuses
 a round write with 503 and leaves nothing behind. BND-16: signed genesis, bootstrap and reward
@@ -49,6 +55,7 @@ from .support import (
 )
 from .support_expiry import (
     OFFSETS,
+    ControlFailed,
     activate,
     audited,
     control,
@@ -122,7 +129,10 @@ def test_an_expiry_that_lapsed_after_acceptance_cannot_block_the_reward(
     finalized = real_reward[1].finalized_beacon
     # Control: sealed to expire at the finalize beacon itself, the same reward is issued.
     live = bare_escrow(li_escrow, setup)
-    live.reward_finalize(reward, reseal(li_escrow, real_reward, which, finalized))
+    try:
+        live.reward_finalize(reward, reseal(li_escrow, real_reward, which, finalized))
+    except ExpiredError as error:  # the xfail expects ExpiredError from the lapsed call alone
+        raise ControlFailed("an expiry equal to the finalize beacon is already refused") from error
     control(live.balances().issued == ISSUED, "the reward is not issued with a live expiry")
     # One round shorter: every beacon the store could have taken the envelope at is earlier.
     lapsed = bare_escrow(li_escrow, setup)
@@ -156,7 +166,14 @@ def test_a_round_whose_only_fault_is_one_short_lived_commit_still_finalizes(
 
         network.signed = signed
         # Four members train, publish, are audited MATCH and are aggregated: all answered 200.
-        applied = rounds.execute_round(network, 0, hotkeys=members)
+        # execute_round asserts each answer; one of them failing is a changed scenario (a commit
+        # refused at intake, say), not the hole this test is about.
+        try:
+            applied = rounds.execute_round(network, 0, hotkeys=members)
+        except AssertionError as error:
+            raise ControlFailed(
+                f"the round with a short-lived commit did not run: {error}"
+            ) from error
         control(network.now == lapses, "execute_round no longer ends at d_audit")
         network.push(network.now + 1)
         with world.store._lock:
@@ -314,7 +331,11 @@ class Settled:
 
 def settled(world: World) -> Settled:
     """Seed what `finalize_v2` stores at its first success: a full round is 30 s of training and
-    audit, and the replay branch reads exactly these two records once the round is open."""
+    audit, and the replay branch reads exactly these two records once the round is open.
+
+    The first success also reserves the signed operation (a nonce row); the first call of a test
+    creates it here, so a test that sends another body first reaches the stored-body comparison
+    on its own, which a real first finalize makes a second line of defence."""
     network = world.network
     activate(world, 4)
     _, opened = open_round(world, [0, 1, 2, 3], OFFSETS)

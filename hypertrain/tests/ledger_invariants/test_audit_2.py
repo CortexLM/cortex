@@ -274,7 +274,17 @@ def test_each_job_decrements_the_counter_once_whether_it_completes_or_is_exhaust
             assert sa.complete(n, cast.keys[row["auditor"]], row["id"], stored).status_code == 200
             assert counter() == open_audits(store)
         assert counter() == 3
-        # And the horizon passes over the three that were never leased.
+        # And one of the three reaches its own deadline first (a test-owned stand-in: the jobs of a
+        # round share one deadline, so the counter could not be read between two exhaustions).
+        first = next(r for h, r in sa.lease_rows(store).items() if h not in held)
+        with store._tx():
+            store._db.execute(
+                "UPDATE audit_leases_v2 SET absolute=? WHERE id=?", (n.now + 5, first["id"])
+            )
+        n.push(n.now + 5)
+        assert sa.lease_rows(store)[first["hotkey"]]["state"] == "exhausted"
+        assert (counter(), open_audits(store)) == (2, 2)
+        # And the horizon passes over the two that were never leased.
         n.push(horizon)
         assert (counter(), open_audits(store)) == (0, 0)
         after = settled_state(store)
@@ -493,7 +503,7 @@ def test_a_commit_cannot_declare_its_own_entitlement(world: sa.World) -> None:
             commit.validate_assignment(manifest, samples + 1)
 
 
-# --- A2W-01, A2W-03: what the escrow credits ---------------------------------------------------
+# --- A2W-01, A2W-03, A2W-14: what the escrow credits -------------------------------------------
 
 
 def with_verdict(
@@ -515,6 +525,17 @@ def with_verdict(
         )
     )
     return replace(evidence, works=(replace(item, verdict=envelope),))
+
+
+def with_commit(li_escrow: ModuleType, real: Real, **changes: Any) -> Any:
+    """The real finality evidence, its one commit replaced by `changes` and sealed by the miner."""
+    setup, evidence, _ = real
+    item = evidence.works[0]
+    body = CommitV2.model_validate(item.commit.body).model_copy(update=changes)
+    envelope = EnvelopeV2.model_validate(
+        seal(li_escrow.HOT, "CommitV2", setup.manifest.run_id(), body, 200)
+    )
+    return replace(evidence, works=(replace(item, commit=envelope),))
 
 
 MISSES = {
@@ -572,6 +593,25 @@ def test_a_verdict_of_a_key_outside_the_auditor_set_or_an_expired_one_mints_noth
         with pytest.raises(error, match=text):
             escrow.reward_finalize(reward, evidence)
         assert escrow.balances().issued == 0
+
+
+def test_a_commit_that_declares_more_tokens_than_its_assignment_mints_nothing(
+    li_escrow: ModuleType, real_reward: Real
+) -> None:
+    # Given: the real reward, whose one commit is replaced by the miner's own signature over the
+    # same commit with one token more than the server derives from its assignment.
+    setup, real, reward = real_reward
+    declared = CommitV2.model_validate(real.works[0].commit.body).tokens + 1
+    inflated = with_commit(li_escrow, real_reward, tokens=declared)
+    # Control: the untouched commit mints the whole budget.
+    control = bare_escrow(li_escrow, setup)
+    control.reward_finalize(reward, real)
+    assert control.balances().issued == reward.budget_units == 1_000_000
+    escrow = bare_escrow(li_escrow, setup)
+    # When / Then: the escrow credits the server's token count only, so the commit is refused.
+    with pytest.raises(ValueError, match="tokens differ from server-derived entitlement"):
+        escrow.reward_finalize(reward, inflated)
+    assert escrow.balances().issued == 0
 
 
 def test_a_verdict_that_answers_another_challenge_mints_nothing(

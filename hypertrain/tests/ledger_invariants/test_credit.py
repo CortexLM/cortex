@@ -1,6 +1,6 @@
-"""Credit paths of the ledger and of finalize_v2 (Lens CRD-01..CRD-10, CRD-12, CRD-23): a round
-credits each miner once, in order, only for audited MATCH work, with an allocation the ledger
-recomputes itself, to the coldkey bound at join.
+"""Credit paths of the ledger and of finalize_v2 (Lens CRD-01..CRD-10, CRD-12, CRD-23, CRD-25): a
+round credits each miner once, in order, only for audited MATCH work, with an allocation the
+ledger recomputes itself, to the coldkey bound at join.
 
 Every test states a defence the protocol must hold: the ledger refuses X and its durable state
 is unchanged, or it credits once. The rounds are signed with test keys and no model execution
@@ -217,7 +217,7 @@ def test_an_identical_finalize_after_a_restart_returns_the_stored_receipt_and_mo
     reason="CRD-06+CRD-D08: an identical live finalize is re-authenticated by the current owner, "
     "replay and signature callbacks before the stored receipt is looked up, so a retry after "
     "the owner mapping changed or a callback became unavailable is refused instead of "
-    "answered from the immutable event (the store's finalize-result cache hides it)",
+    "answered from the immutable event (the store's finalize-result cache hides it) [candidate]",
 )
 def test_an_identical_finalize_is_answered_from_the_stored_event_when_a_callback_fails(
     li_escrow: ModuleType, setup: Any
@@ -578,10 +578,13 @@ def test_a_unit_amount_is_an_exact_integer_between_one_and_two_to_the_53_minus_o
         OriginAllocation.model_validate({**origin.body(), "units": amount})
     for edge in (1, 2**53 - 1):
         assert OriginAllocation.model_validate({**origin.body(), "units": edge}).units == edge
-        assert RewardFinalize.model_validate({**reward.body(), "budget_units": edge})
+        assert (
+            RewardFinalize.model_validate({**reward.body(), "budget_units": edge}).budget_units
+            == edge
+        )
 
 
-# --- the store: finalize_v2 on a real audited and aggregated round (CRD-02/05/08/09/12/23) -----
+# --- the store: finalize_v2 on a real audited and aggregated round (CRD-02/05/08/09/12/23/25) -
 
 
 @pytest.fixture(scope="module")
@@ -865,3 +868,22 @@ def test_the_first_finalize_after_a_restart_is_accepted(audited_round: AuditedRo
     round_.restore()
     round_.store._services_v2.clear()  # the process was restarted; no route has run yet
     assert round_.finalize().status_code == 200
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="CRD-25+CRD-D07: Finalize.entitlements_root is never read for a live round, so a "
+    "coordinator-signed Finalize whose root commits to nothing that is credited is accepted "
+    "and minted [candidate]",
+)
+def test_a_finalize_whose_entitlements_root_commits_to_nothing_credited_is_refused(
+    audited_round: AuditedRound,
+) -> None:
+    round_ = audited_round
+    round_.restore()
+    response = round_.finalize(entitlements_root="ab" * 32)
+    minted = credited(round_)
+    assert 400 <= response.status_code < 500 and minted == [], (
+        f"HTTP {response.status_code}: {len(minted)} origins were credited under a free-form root"
+    )

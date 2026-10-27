@@ -231,4 +231,111 @@ MUTANTS = [
         "tests": [HOLD],
         "why": "The operator's timeout closes the dispute but never settles the contest bond.",
     },
+    {
+        "id": "exit-skips-settled-rounds",
+        "invariants": ["DIA-14", "FIN-20"],
+        "path": STORE,
+        "old": (
+            "                cause = disputes.blocked_cause(turn, now)\n"
+            "                if cause is None:\n"
+            "                    continue\n"
+        ),
+        "new": (
+            "                cause = disputes.blocked_cause(turn, now)\n"
+            "                if cause is None or self._record_v2(\n"
+            '                    run_id, "finality", str(turn.contest.w)\n'
+            '                ).get("disposition") == "SETTLED":\n'
+            "                    continue\n"
+        ),
+        "tests": [CLOSE + "[never-answered-round-settled]"],
+        "why": "The exit leaves the contests of a settled round open, so round 2 stays blocked.",
+    },
+    {
+        "id": "exit-skips-turns-the-party-acknowledged",
+        "invariants": ["DIA-14", "DIA-15"],
+        "path": STORE,
+        "old": (
+            "                cause = disputes.blocked_cause(turn, now)\n"
+            "                if cause is None:\n"
+            "                    continue\n"
+        ),
+        "new": (
+            "                cause = disputes.blocked_cause(turn, now)\n"
+            "                if cause is None or self._db.execute(\n"
+            '                    "SELECT 1 FROM dispute_acks_v2 LIMIT 1"\n'
+            "                ).fetchone():\n"
+            "                    continue\n"
+        ),
+        "tests": [CLOSE + "[acked-then-silent-round-pending]"],
+        "why": "A turn whose party acknowledged it is left to the operator's timeout for ever.",
+    },
+    {
+        "id": "exit-grace-boundary-inclusive",
+        "invariants": ["DIA-15"],
+        "path": DISPUTES,
+        "old": "        return EXCLUSION_ABANDONED if now > turn.turn_deadline + grace else None",
+        "new": "        return EXCLUSION_ABANDONED if now >= turn.turn_deadline + grace else None",
+        "tests": [TIMEOUT],
+        "why": "The last round of the operator's timeout window already belongs to the beacon.",
+    },
+    {
+        "id": "exit-stops-after-one-closure",
+        "invariants": ["DS-06", "DIA-14"],
+        "path": STORE,
+        "old": (
+            "                        self._recount_disputes_v2(run_id, turn.contest.w)\n"
+            "                except Exception as error:"
+            "  # one poisoned dispute must not stop the beacon\n"
+        ),
+        "new": (
+            "                        self._recount_disputes_v2(run_id, turn.contest.w)\n"
+            "                        break\n"
+            "                except Exception as error:"
+            "  # one poisoned dispute must not stop the beacon\n"
+        ),
+        "tests": [QUEUE],
+        "why": "One dispute is closed per beacon round: 32 stalled contests pin the queue for 32.",
+    },
+    {
+        "id": "exit-lifts-the-audit-exclusion",
+        "invariants": ["DIA-14"],
+        "path": STORE,
+        "old": (
+            "                        disputes.settle_lock(turn.dispute_id, now=now)\n"
+            "                        self._recount_disputes_v2(run_id, turn.contest.w)\n"
+        ),
+        "new": (
+            "                        disputes.settle_lock(turn.dispute_id, now=now)\n"
+            "                        self._recount_disputes_v2(run_id, turn.contest.w)\n"
+            "                        self._db.execute(\n"
+            '                            "DELETE FROM records_v2 WHERE "\n'
+            "                            \"kind='excluded' AND id=?\",\n"
+            '                            (f"{turn.contest.w}:{turn.contest.miner}",),\n'
+            "                        )\n"
+        ),
+        "tests": [CLOSE + "[never-answered-round-pending]"],
+        "why": "The server lifts the audit's exclusion when it closes a contest nobody decided.",
+    },
+    {
+        "id": "resolution-route-decrements-the-hold",
+        "invariants": ["DIA-16", "DIB-18"],
+        "path": STORE,
+        "old": (
+            '                        if action in ("dispute", "resolution"):\n'
+            "                            self._recount_disputes_v2(run_id, "
+            'result["contest"]["w"])\n'
+        ),
+        "new": (
+            '                        if action == "dispute":\n'
+            "                            self._recount_disputes_v2(run_id, "
+            'result["contest"]["w"])\n'
+            '                        if action == "resolution":\n'
+            '                            w = result["contest"]["w"]\n'
+            '                            hold = self._record_v2(run_id, "finality", str(w))\n'
+            '                            hold["unresolved_disputes"] -= 1\n'
+            '                            self._put_record_v2(run_id, "finality", str(w), hold)\n'
+        ),
+        "tests": [HOLD],
+        "why": "A resolution lowers the hold by one, not a recount: a replay subtracts twice.",
+    },
 ]

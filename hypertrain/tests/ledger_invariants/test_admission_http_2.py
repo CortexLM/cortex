@@ -29,6 +29,7 @@ from .support import load_fixture_module, memory_db
 from .support_admission_http import ADMISSION_FIXTURE, COLDS, HOTS, TrialRig, build_rig, table_rows
 
 H = "ab" * 32
+MINER = load_fixture_module(*ADMISSION_FIXTURE).HOT
 
 
 @pytest.fixture(scope="module")
@@ -150,6 +151,7 @@ def proved(rig: TrialRig, tmp_path: Path) -> Admission:
         ("another_participant", {"included": [HOTS[0].ss58]}),
         ("another_reference", {"entitlements_root": H}),
         ("another_final_state", {"final_theta_hash_w1": H}),
+        ("an_additional_participant", {"included": [MINER.ss58, HOTS[0].ss58]}),
     ],
 )
 def test_ad02_a_finalize_not_bound_to_this_participation_credits_nothing(

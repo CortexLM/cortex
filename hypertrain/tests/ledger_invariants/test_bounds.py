@@ -1,10 +1,11 @@
-"""Bootstrap economic bound and stake floor (BND-01 .. BND-17): policy, audit floor and ledger.
+"""Economic bound, stake floor and ledger (BND-01 .. BND-20): policy, audit floor and ledger.
 
 Each test states a defence the economics of a run must hold: the bound is exact integer
 arithmetic, the stake floor is rounded up and identical in its three implementations, every
 roster entry is audited with probability one, a production bootstrap is the owner-pinned
-allocation issued once, and a run keeps one policy and one ledger mode for life. The issuance cap,
-the round split and the store and HTTP half of the package are in test_bounds_2.py.
+allocation issued once, a run keeps one policy and one ledger mode for life, total issuance
+stays under the pinned cap, and a round issues exactly its budget. The store and HTTP half of
+the package is in test_bounds_2.py.
 """
 
 from __future__ import annotations
@@ -356,27 +357,10 @@ def test_a_policy_without_one_of_its_fields_is_refused_none_has_a_default(field:
     assert refuses(lambda: EconomicsPolicyV2.model_validate(body))
 
 
-# BND-09, BND-10, BND-13 and BND-14: the production bootstrap and the test genesis.
-
-
-def test_the_production_bootstrap_is_issued_once_and_replays_with_the_same_receipt(
-    li_escrow: ModuleType,
-) -> None:
-    _, escrow, allocation = pinned_production(li_escrow)
-    request = pinned_bootstrap(li_escrow, escrow.run_id, allocation)
-    first = escrow.production_bootstrap(request)
-    balances = escrow.balances()
-    # The same operation and body is a replay: the stored receipt, nothing more issued.
-    assert escrow.production_bootstrap(request) == first and escrow.balances() == balances
-    # The same operation id with other content conflicts; a fresh operation id is a second issue.
-    other = pinned_bootstrap(li_escrow, escrow.run_id, [(li_escrow.COLD.ss58, 30_000, 1)])
-    assert error_code(lambda: escrow.production_bootstrap(other)) == "OPERATION_CONFLICT"
-    again = pinned_bootstrap(li_escrow, escrow.run_id, allocation, operation="55" * 32)
-    code = error_code(lambda: escrow.production_bootstrap(again))
-    assert code == "PRODUCTION_BOOTSTRAP_FORBIDDEN"
-    assert escrow.balances() == balances
-    kinds = [r["kind"] for r in escrow.db.execute("SELECT kind FROM escrow_events")]
-    assert kinds == ["PRODUCTION_BOOTSTRAP"]
+# BND-09, BND-10, BND-13 and BND-14: the production bootstrap and the test genesis. The ledger
+# half of "the bootstrap is issued once and a replay returns the stored receipt" is already pinned
+# by test_bootstrap_idempotent_per_operation_and_once_per_run in
+# tests/ledger/test_production_bootstrap_v2.py; the store half is in test_bounds_2.py.
 
 
 def test_the_test_genesis_has_one_operation_a_replay_returns_it_other_content_conflicts(
@@ -449,9 +433,9 @@ def test_a_bootstrap_conserves_its_total_and_its_origins_are_distinct(
     body = pinned_bootstrap(li_escrow, "ab" * 32, [(li_escrow.COLD.ss58, 20_000, 1)]).body()
     assert ProductionBootstrap.model_validate(body).total_units == 20_000
     assert refuses(lambda: ProductionBootstrap.model_validate({**body, "total_units": 20_001}))
-    assert refuses(
-        lambda: ProductionBootstrap.model_validate({**body, "origins": body["origins"] * 2})
-    )
+    # The repeated origin states a total that matches its sum, so only distinctness refuses it.
+    repeated = {**body, "origins": body["origins"] * 2, "total_units": 40_000}
+    assert refuses(lambda: ProductionBootstrap.model_validate(repeated))
 
 
 def test_a_test_genesis_is_refused_once_the_ledger_has_any_event(li_escrow: ModuleType) -> None:
@@ -547,11 +531,14 @@ def test_the_ledger_refuses_a_round_reward_that_is_not_epochs_per_round_times_a_
 ) -> None:
     setup = li_escrow.setup("production")
     assert li_escrow.ledger(setup, memory_db()).policy.round_reward_units == 1_000_000
-    # The manifest pins the new policy digest, so only the budget relation is violated.
-    off_by_one = repinned(setup, round_reward_units=1_000_001)
-    database = memory_db()
-    assert error_code(lambda: li_escrow.ledger(off_by_one, database)) == "MANIFEST_REWARD_BUDGET"
-    assert "escrow_events" not in table_names(database)
+    # The manifest pins the new policy digest, so only the budget relation is violated, one unit
+    # above or one unit below.
+    for off_by_one in (1_000_001, 999_999):
+        database = memory_db()
+        pinned = repinned(setup, round_reward_units=off_by_one)
+        refused = error_code(lambda p=pinned, d=database: li_escrow.ledger(p, d))
+        assert refused == "MANIFEST_REWARD_BUDGET"
+        assert "escrow_events" not in table_names(database)
     consistent = repinned(setup, epochs_per_round=2, round_reward_units=2_000_000)
     assert li_escrow.ledger(consistent, memory_db()).policy.round_reward_units == 2_000_000
 

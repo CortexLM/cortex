@@ -503,6 +503,17 @@ class World:
             yield network, cast
 
 
+SESSION_WORLDS: list[World] = []
+
+
+def session_world(factory: pytest.TempPathFactory) -> World:
+    """The one World of the pytest process. test_audit.py and test_audit_2.py both ask for it: a
+    fixture imported into a second module is a second fixture, which would rebuild every stage."""
+    if not SESSION_WORLDS:
+        SESSION_WORLDS.append(World(factory.mktemp("audit-world")))
+    return SESSION_WORLDS[0]
+
+
 def detail(response: Any) -> tuple[int, str]:
     return response.status_code, response.json()["detail"]
 

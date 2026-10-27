@@ -59,7 +59,8 @@ RESTART = (
     "test_a_restart_between_acceptance_and_retry_returns_the_stored_response_and_issues_nothing"
 )
 STAGED = "test_staged_trial_inputs_are_created_once_and_never_overwritten"
-ROUTE_CUSTODY = "test_a_settled_first_trial_is_reserved_with_its_custody_in_one_commit"
+ROUTE_CUSTODY = "test_a_settled_first_trial_is_reserved_with_its_custody_record_and_issues_nothing"
+ATOMIC_CUSTODY = "test_a_reservation_whose_custody_record_cannot_be_stored_takes_no_ordinal"
 TEST_AUTHORITY = "test_a_test_ledger_reservation_binds_the_policy_digest_not_an_operator_record"
 LAPSING = "test_a_commit_envelope_that_lapses_after_the_reservation_cannot_strand_the_credit"
 DEFAULT_FLOW = "test_the_reference_the_service_runs_retains_no_accepted_execution_by_default"
@@ -179,6 +180,19 @@ MUTANTS = [
         "why": (
             "an origin authority message is accepted without a valid reward-authority signature."
         ),
+    },
+    {
+        "id": "shd14-authority-message-without-the-class-name",
+        "invariants": ["SHD-14"],
+        "path": LEDGER,
+        "old": (
+            '        b"hypertrain/origin/2|"\n'
+            "        + type(model).__name__.encode()\n"
+            '        + b"|"\n'
+        ),
+        "new": '        b"hypertrain/origin/2|"\n        + b"|"\n',
+        "tests": [ledger(OWN_SIGNATURE, "live reward class name")],
+        "why": "the origin authority message no longer separates the shadow and the live reward.",
     },
     {
         "id": "shd14-round-budget-not-checked",
@@ -315,6 +329,15 @@ MUTANTS = [
         "new": "            if event is None:",
         "tests": [ledger(REOPEN_CHECKS, "stored receipt")],
         "why": "a restart accepts a reservation whose stored acceptance receipt was altered.",
+    },
+    {
+        "id": "shd13-reopen-does-not-compare-the-trial-epoch",
+        "invariants": ["SHD-13"],
+        "path": LEDGER,
+        "old": '                or binding.trial_epoch != row["trial_epoch"]\n',
+        "new": "",
+        "tests": [ledger(REOPEN_CHECKS, "trial epoch")],
+        "why": "a restart accepts a credited row whose trial epoch disagrees with its reservation.",
     },
     {
         "id": "shd15-live-issuance-ignores-pending-reservations",
@@ -609,6 +632,93 @@ MUTANTS = [
         "why": "an ordinal is returned for a reservation whose original custody was not recorded.",
     },
     {
+        "id": "shd12-custody-record-written-after-the-reservation-commits",
+        "invariants": ["SHD-12"],
+        "path": STORE,
+        "old": (
+            "                        yield db\n"
+            "                        if old is None:\n"
+            "                            store._put_record_v2(\n"
+            "                                run_id,\n"
+            '                                "shadow-custody",\n'
+            "                                semantic_key,\n"
+            "                                {\n"
+            '                                    "request": request.model_dump(mode="json"),\n'
+            '                                    "accepted_at": now,\n'
+            "                                },\n"
+            "                            )\n"
+            "\n"
+            "            intake = ReservationEscrow(\n"
+            "                self._db,\n"
+            "                escrow.manifest,\n"
+            "                escrow.policy,\n"
+            "                auditors=escrow.auditors,\n"
+            "                replay_finality=escrow.replay_finality,\n"
+            "                settlement=escrow.settlement,\n"
+            "                owner_of=escrow.owner_of,\n"
+            "                assignment_of=escrow.assignment_of,\n"
+            "            )\n"
+            "            intake.mutex = self._lock\n"
+            "            reserved = intake.reserve_shadow(\n"
+            "                binding,\n"
+            "                ShadowReservationEvidence(\n"
+            "                    finalize=request.finalize,\n"
+            "                    commit=request.commit,\n"
+            "                    owner=row.coldkey,\n"
+            "                    sample_ids=tuple(job.sample_ids),\n"
+            "                    custody_hash=request.custody.digest(),\n"
+            "                    reference_final_state_hash=final.final_theta_hash_w1,\n"
+            "                ),\n"
+            "            )\n"
+        ),
+        "new": (
+            "                        yield db\n"
+            "                        pass\n"
+            "\n"
+            "            intake = ReservationEscrow(\n"
+            "                self._db,\n"
+            "                escrow.manifest,\n"
+            "                escrow.policy,\n"
+            "                auditors=escrow.auditors,\n"
+            "                replay_finality=escrow.replay_finality,\n"
+            "                settlement=escrow.settlement,\n"
+            "                owner_of=escrow.owner_of,\n"
+            "                assignment_of=escrow.assignment_of,\n"
+            "            )\n"
+            "            intake.mutex = self._lock\n"
+            "            reserved = intake.reserve_shadow(\n"
+            "                binding,\n"
+            "                ShadowReservationEvidence(\n"
+            "                    finalize=request.finalize,\n"
+            "                    commit=request.commit,\n"
+            "                    owner=row.coldkey,\n"
+            "                    sample_ids=tuple(job.sample_ids),\n"
+            "                    custody_hash=request.custody.digest(),\n"
+            "                    reference_final_state_hash=final.final_theta_hash_w1,\n"
+            "                ),\n"
+            "            )\n"
+            "            if (\n"
+            "                self._db.execute(\n"
+            '                    "SELECT 1 FROM records_v2 WHERE run_id=? "\n'
+            "                    \"AND kind='shadow-custody' AND id=?\",\n"
+            "                    (run_id, semantic_key),\n"
+            "                ).fetchone()\n"
+            "                is None\n"
+            "            ):\n"
+            "                store._put_record_v2(\n"
+            "                    run_id,\n"
+            '                    "shadow-custody",\n'
+            "                    semantic_key,\n"
+            "                    {\n"
+            '                        "request": request.model_dump(mode="json"),\n'
+            '                        "accepted_at": now,\n'
+            "                    },\n"
+            "                )\n"
+        ),
+        "tests": [service(ATOMIC_CUSTODY)],
+        "why": "a failure between the reservation and its custody record leaves an orphan ordinal.",
+    },
+    {
         "id": "shd10-test-ledger-authority-is-not-the-economics-policy",
         "invariants": ["SHD-10"],
         "path": STORE,
@@ -661,5 +771,162 @@ MUTANTS = [
         "new": "record",
         "tests": [service(RESTART), LOST_RESPONSE],
         "why": "a lost reply cannot be redelivered: the retry finds evidence without a response.",
+    },
+    {
+        "id": "shd01-shadow-origin-not-unique",
+        "invariants": ["SHD-01"],
+        "path": LEDGER,
+        "old": "reservation_hash TEXT UNIQUE, origin TEXT UNIQUE);",
+        "new": "reservation_hash TEXT UNIQUE, origin TEXT);",
+        "tests": [ledger(TABLE_REFUSES)],
+        "why": "the schema accepts two credit rows for one origin.",
+    },
+    {
+        "id": "shd01-shadow-ordinal-not-unique",
+        "invariants": ["SHD-01"],
+        "path": LEDGER,
+        "old": "ordinal INTEGER PRIMARY KEY, trial_epoch INTEGER, finalize_hash TEXT,",
+        "new": "ordinal INTEGER, trial_epoch INTEGER, finalize_hash TEXT,",
+        "tests": [ledger(TABLE_REFUSES)],
+        "why": "the schema accepts two credit rows for one ordinal.",
+    },
+    {
+        "id": "shd02-conflicting-request-returns-the-stored-reservation",
+        "invariants": ["SHD-02"],
+        "path": LEDGER,
+        "old": (
+            '                if old["digest"] != semantic:\n'
+            '                    raise EscrowError("SHADOW_RESERVATION_CONFLICT")'
+        ),
+        "new": (
+            "                if False:\n"
+            '                    raise EscrowError("SHADOW_RESERVATION_CONFLICT")'
+        ),
+        "tests": [ledger(ONE_SLOT)],
+        "why": "another request under a reserved key silently returns the stored reservation.",
+    },
+    {
+        "id": "shd14-verdict-root-not-checked",
+        "invariants": ["SHD-14"],
+        "path": LEDGER,
+        "old": (
+            "        if sha256_hex(canonicalize(verdicts)) != reward.verdict_root:\n"
+            '            raise EscrowError("VERDICT_ROOT")'
+        ),
+        "new": '        if False:\n            raise EscrowError("VERDICT_ROOT")',
+        "tests": [ledger(DERIVED, "verdict root")],
+        "why": "a reward naming other verdicts than the validated ones is credited.",
+    },
+    {
+        "id": "shd15-last-round-under-the-cap-cannot-be-reserved",
+        "invariants": ["SHD-15"],
+        "path": LEDGER,
+        "old": (
+            "                self.balances().issued + self.policy.round_reward_units\n"
+            "                > self.policy.max_total_issuance"
+        ),
+        "new": (
+            "                self.balances().issued + self.policy.round_reward_units\n"
+            "                >= self.policy.max_total_issuance"
+        ),
+        "tests": [ledger(CAP_HOLDS), ledger(RANDOM_LAWS)],
+        "why": "the reservation bound refuses a round that still fits under the cap.",
+    },
+    {
+        "id": "shd18-collateral-of-another-finality-matures",
+        "invariants": ["SHD-18"],
+        "path": LEDGER,
+        "old": '                        or status.finality_hash != finality["finalize_hash"]\n',
+        "new": "",
+        "tests": [ledger(SETTLEMENT_GATE, "another finality")],
+        "why": "a settlement of another finality releases the collateral.",
+    },
+    {
+        "id": "shd18-collateral-matures-before-the-release-round",
+        "invariants": ["SHD-18"],
+        "path": LEDGER,
+        "old": (
+            "                        or now_beacon < status.release_beacon\n"
+            "                        or finality is None\n"
+        ),
+        "new": "                        or finality is None\n",
+        "tests": [ledger(SETTLEMENT_GATE, "release after now")],
+        "why": "collateral matures before the settlement release round.",
+    },
+    {
+        "id": "shd03-unresolved-pending-reference-ignored-by-the-reservation",
+        "invariants": ["SHD-03"],
+        "path": STORE,
+        "old": (
+            "                                or db.execute(\n"
+            "                                    "
+            '"SELECT 1 FROM admission_pending WHERE admission_id=? "\n'
+            '                                    "AND resolved=0",\n'
+            "                                    (admission_id,),\n"
+            "                                ).fetchone()\n"
+            "                                is not None\n"
+        ),
+        "new": "",
+        "tests": [service(FIRST_TRIAL, "an unresolved pending reference")],
+        "why": "an admission with an unresolved pending reference obtains a reservation.",
+    },
+    {
+        "id": "shd05-symlink-in-a-retained-publication-accepted",
+        "invariants": ["SHD-05"],
+        "path": STORE,
+        "old": (
+            "                    if path.is_symlink() or not (path.is_file() or path.is_dir()):\n"
+        ),
+        "new": "                    if not (path.is_file() or path.is_dir()):\n",
+        "tests": [service(CUSTODY, "special file in the publication")],
+        "why": "a symlink inside a retained publication backs a reservation.",
+    },
+    {
+        "id": "shd09-receipt-completed-after-the-evidence-time-accepted",
+        "invariants": ["SHD-09"],
+        "path": STORE,
+        "old": "not binding.finalized_beacon <= receipt.completed_beacon <= now",
+        "new": "not binding.finalized_beacon <= receipt.completed_beacon",
+        "tests": [service(EVIDENCE, "completion after the evidence time")],
+        "why": "a receipt completed after the time of the evidence backs a credit.",
+    },
+    {
+        "id": "shd09-replay-image-not-compared-by-the-store",
+        "invariants": ["SHD-09"],
+        "path": STORE,
+        "old": (
+            "            or verdict.replay_env.image_digest != "
+            "manifest.training.reference_spec.image_digest\n"
+        ),
+        "new": "",
+        "tests": [service(EVIDENCE, "replay image that is not the pinned one")],
+        "why": "the store no longer checks the pinned replay image of the verdict.",
+    },
+    {
+        "id": "shd22-infrastructure-outcome-matures",
+        "invariants": ["SHD-18", "SHD-22"],
+        "path": STORE,
+        "old": 'unresolved = admission.pending_dispute or trial[0] != "MATCH"',
+        "new": 'unresolved = admission.pending_dispute or trial[0] == "FRAUD"',
+        "tests": [service(NEVER_MATURES, "infrastructure outcome")],
+        "why": "only a FRAUD trial outcome keeps collateral pending; INFRASTRUCTURE matures.",
+    },
+    {
+        "id": "shd24-reward-route-checks-only-that-a-header-exists",
+        "invariants": ["SHD-24"],
+        "path": APP,
+        "old": (
+            "        admin(authorization)\n"
+            "        return await run(\n"
+            "            store.for_run(run_id).shadow_reward_v2"
+        ),
+        "new": (
+            "        if authorization is None:\n"
+            "            admin(authorization)\n"
+            "        return await run(\n"
+            "            store.for_run(run_id).shadow_reward_v2"
+        ),
+        "tests": [service(BEARER, "reward-a wrong bearer")],
+        "why": "any presented credential opens the acceptance route.",
     },
 ]

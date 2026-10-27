@@ -61,7 +61,9 @@ SPARE = MINERS  # a registered hotkey that never joined: the only legal rotation
 class ScenarioError(Exception):
     """A control failed: the scenario did not reach the point a strict xfail test is about.
 
-    Not an AssertionError, so that an xfail(raises=AssertionError) cannot swallow it.
+    Not an AssertionError, so that an xfail(raises=AssertionError) cannot swallow it. Pytest turns
+    an AssertionError raised in a fixture or in a helper into an expected failure as well, so every
+    step that builds a scenario checks with `control`, never with `assert`.
     """
 
 
@@ -141,7 +143,7 @@ def activated_network(root: Path) -> Iterator[Any]:
 def activate(network: Any, index: int) -> str:
     """Join identity `index` and make it ACTIVE and funded; returns its admission id."""
     response = network.join(index)
-    assert response.status_code == 200, response.text
+    control(response.status_code == 200, response.text)
     identity = str(response.json()["admission_id"])
     lock = EscrowLock(
         operation_id=f"{index + 1:064x}",
@@ -155,7 +157,7 @@ def activate(network: Any, index: int) -> str:
     response = network.client.post(
         network.url + "/escrow/lock", json=network.signed(cold(index), "EscrowLock", lock)
     )
-    assert response.status_code == 200, response.text
+    control(response.status_code == 200, response.text)
     spec = network.manifest.training.reference_spec
     screen = WorkScreenV2(
         evidence_kind="work-proof-v1",
@@ -270,13 +272,13 @@ def open_round(network: Any, w: int, members: Sequence[int]) -> Round:
     response = rollback().execute_round(
         network, w, open_only=True, hotkeys=[hot(i) for i in members]
     )
-    assert response.status_code == 200, response.text
+    control(response.status_code == 200, response.text)
     opening = RoundOpenV2.model_validate(
         network.store._record_v2(network.manifest.run_id(), "round", str(w))["body"]
     )
     network.push(opening.d_assign)
     answer = network.client.get(network.url + f"/rounds/{w}")
-    assert answer.status_code == 200, answer.text
+    control(answer.status_code == 200, answer.text)
     rnd = Round(network, w, list(members), opening)
     rnd.assignments = {a["hotkey"]: a["assignment_hash"] for a in answer.json()["assignment"]}
     return rnd
@@ -370,13 +372,13 @@ def join_forged(rnd: Round, index: int, *, leaves: bool = True) -> CommitV2:
     """Accept, commit and (unless `leaves` is False) publish leaves for a member that did not
     train. Every step is checked: the member is a well behaved participant of the scenario."""
     response = accept(rnd, index)
-    assert response.status_code == 200, response.text
+    control(response.status_code == 200, response.text)
     commit = forged_commit(rnd, index)
     response = post_commit(rnd, index, commit)
-    assert response.status_code == 200, response.text
+    control(response.status_code == 200, response.text)
     if leaves:
         response = publish_leaves(rnd, index, forged_leaves(rnd, index), commit)
-        assert response.status_code == 200, response.text
+        control(response.status_code == 200, response.text)
     return commit
 
 
@@ -387,7 +389,7 @@ def train(rnd: Round, indices: Sequence[int]) -> None:
     jobs = {}
     for index in indices:
         response = accept(rnd, index)
-        assert response.status_code == 200, response.text
+        control(response.status_code == 200, response.text)
         staged = rnd.store.island_job_v2(rnd.run_id, rnd.w, rnd.hotkey(index))
         jobs[index] = IslandJobV1.model_validate(staged["job"])
     with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
@@ -423,9 +425,9 @@ def train(rnd: Round, indices: Sequence[int]) -> None:
             },
         )
         committed = post_commit(rnd, index, commit)
-        assert committed.status_code == 200, committed.text
+        control(committed.status_code == 200, committed.text)
         published_leaves = publish_leaves(rnd, index, leaves, commit)
-        assert published_leaves.status_code == 200, published_leaves.text
+        control(published_leaves.status_code == 200, published_leaves.text)
         deliver_delta(rnd, index, artifacts.delta.read_bytes())
 
 
@@ -459,7 +461,7 @@ def deliver_delta(rnd: Round, index: int, delta: bytes) -> None:
         "master_acceptance_hash": acceptance.digest(),
     }
     response = rnd.post("/delta", net.signed(hot(index), "DeltaManifestV2", body))
-    assert response.status_code == 200, response.text
+    control(response.status_code == 200, response.text)
 
 
 def schedule(rnd: Round) -> Any:
@@ -493,7 +495,7 @@ def audit_queue(rnd: Round, jobs: int, first_tag: int = 1) -> None:
         for auditor in auditors[: min(2, remaining)]:
             response = post_lease(rnd, lease_ask(rnd, auditor, tag))
             tag += 1
-            assert response.status_code == 200, response.text
+            control(response.status_code == 200, response.text)
             leased.append((auditor, response.json()["body"]))
 
         def execute(auditor: Keypair, job: dict[str, Any]) -> Any:
@@ -510,14 +512,14 @@ def audit_queue(rnd: Round, jobs: int, first_tag: int = 1) -> None:
             futures = [pool.submit(execute, auditor, job) for auditor, job in leased]
             executed = [future.result(timeout=LAUNCH_SECONDS) for future in futures]
         for (auditor, job), response in zip(leased, executed, strict=True):
-            assert response.status_code == 200, response.text
+            control(response.status_code == 200, response.text)
             verdict = response.json()["verdict"]
-            assert verdict["result"] == "MATCH", verdict
+            control(verdict["result"] == "MATCH", str(verdict))
             completed = rnd.post(
                 f"/worker/jobs/{job['job_id']}/complete",
                 net.signed(auditor, "ReplayVerdict", verdict),
             )
-            assert completed.status_code == 200, completed.text
+            control(completed.status_code == 200, completed.text)
         remaining -= len(leased)
 
 
@@ -548,7 +550,7 @@ def without_record(rnd: Round, kind: str, identity: str) -> Iterator[None]:
             "SELECT data FROM records_v2 WHERE run_id=? AND kind=? AND id=?",
             (rnd.run_id, kind, identity),
         ).fetchone()
-        assert row is not None, f"no {kind} record {identity}"
+        control(row is not None, f"no {kind} record {identity}")
         rnd.store._db.execute(
             "DELETE FROM records_v2 WHERE run_id=? AND kind=? AND id=?",
             (rnd.run_id, kind, identity),
@@ -585,7 +587,7 @@ def screen_expired(rnd: Round, index: int) -> Iterator[None]:
 
 def eligible(rnd: Round, index: int) -> bool:
     answer = rnd.network.client.get(rnd.network.url + "/admission/" + rnd.hotkey(index))
-    assert answer.status_code == 200, answer.text
+    control(answer.status_code == 200, answer.text)
     return bool(answer.json()["eligible"])
 
 
@@ -608,7 +610,10 @@ def next_opening(rnd: Round, members: Sequence[int]) -> Any:
         "d_final": net.now + 200,
     }
     opening = RoundOpenV2.model_validate(body)
-    assert [e.hotkey for e in opening.roster] == [rnd.hotkey(i) for i in members]
+    control(
+        [e.hotkey for e in opening.roster] == [rnd.hotkey(i) for i in members],
+        "the opening names the members it was built for",
+    )
     return net.client.post(
         net.url + "/admin/rounds",
         json=net.signed(service().COORD, "RoundOpenV2", opening),
@@ -629,7 +634,9 @@ class Chain:
     leaves, whose job sorts last in the queue. The five audits complete; the quiet member's job
     cannot be leased and is exhausted when the beacon reaches its horizon. Round 1 is opened on
     four of the five survivors (the quiet member has no anchor to start from). The tests are
-    ordered by phase: a test of an earlier phase reads a state a later phase has consumed.
+    ordered by phase: a test of an earlier phase reads a state a later phase has consumed. An
+    aggregation attempt that a fix lets succeed (A2W-21) applies round 0 inside its own test, so
+    the controls and pins that follow it are re-derived when that marker is lifted.
     """
 
     def __init__(self, network: Any):
@@ -649,7 +656,7 @@ class Chain:
             join_forged(rnd, rnd.quiet, leaves=False)
             train(rnd, [i for i in rnd.members if i != rnd.quiet])
             response = schedule(rnd)
-            assert response.status_code == 200, response.text
+            control(response.status_code == 200, response.text)
             audit_queue(rnd, MINERS - 1)
             self.network.push(rnd.absolute)
             self._r0 = rnd
@@ -663,7 +670,7 @@ class Chain:
         """Round 0 aggregated; its model state hash."""
         if self._theta0 is None:
             response = aggregate(self.r0)
-            assert response.status_code == 200, response.text
+            control(response.status_code == 200, response.text)
             self._theta0 = str(response.json()["theta_hash"])
             self.tape0_inputs = sorted(
                 item["roster"]["hotkey"] for item in response.json()["tape"]["body"]["inputs"]
@@ -677,10 +684,10 @@ class Chain:
             rnd = open_round(self.network, 1, self.survivors[:4])
             train(rnd, rnd.members)
             response = schedule(rnd)
-            assert response.status_code == 200, response.text
+            control(response.status_code == 200, response.text)
             audit_queue(rnd, len(rnd.members), first_tag=50)
             response = aggregate(rnd)
-            assert response.status_code == 200, response.text
+            control(response.status_code == 200, response.text)
             self._r1, self._theta1 = rnd, str(response.json()["theta_hash"])
         assert self._r1 is not None
         return self._r1, self._theta1

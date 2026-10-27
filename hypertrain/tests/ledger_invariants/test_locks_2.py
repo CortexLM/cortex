@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -65,6 +66,7 @@ def snapshot(lab: Lab) -> tuple[tuple[object, ...], ...]:
         pytest.param("short-stake", False, id="one-unit-short"),
         pytest.param("pending-dispute", False, id="pending-dispute"),
         pytest.param("screen-lapsed", False, id="screen-lapsed"),
+        pytest.param("screen-ends-now", True, id="screen-ends-this-round"),
         pytest.param("probation-three-clean", False, id="probation-below-four"),
         pytest.param("applied", False, id="applied"),
         pytest.param("suspended", False, id="suspended"),
@@ -87,6 +89,7 @@ def test_eligibility_needs_current_stake_standing_and_screen(
         "probation-three-clean": {"state": "PROBATION", "clean_count": 3},
         "pending-dispute": {"pending_dispute": 1},
         "screen-lapsed": {"screen_until": 4},
+        "screen-ends-now": {"screen_until": 5},
         "applied": {"state": "APPLIED"},
         "suspended": {"state": "SUSPENDED"},
         "banned": {"state": "BANNED"},
@@ -106,16 +109,13 @@ def test_eligibility_needs_current_stake_standing_and_screen(
     )
 
 
-@pytest.mark.parametrize("role", ["coordinator", "auditor", "referee", "run-owner"])
+@pytest.mark.parametrize("role", ["coordinator", "auditor"])
 def test_no_role_key_is_exempt_from_the_stake(tmp_path: Path, role: str) -> None:
-    # Given: an ACTIVE admission on a key the run itself pins to a role
+    # Given: an ACTIVE admission on a key this bare ledger pins to a role (the coordinator by the
+    # manifest, the auditor by the ledger's auditor set). The referee is pinned only by the
+    # service fixture: its case is the roster test of test_locks.
     lab = Lab(tmp_path)
-    key = {
-        "coordinator": lab.A.COORD,
-        "auditor": lab.A.fixtures.AUDITOR,
-        "referee": Keypair(b"\x71" * 32),
-        "run-owner": Keypair(b"\x77" * 32),
-    }[role]
+    key = {"coordinator": lab.A.COORD, "auditor": lab.A.fixtures.AUDITOR}[role]
     admission = lab.join(hot=key)
     lab.live(admission)
 
@@ -132,25 +132,53 @@ def test_no_role_key_is_exempt_from_the_stake(tmp_path: Path, role: str) -> None
     assert standing() == (True, STAKE)
 
 
+def with_policy(setup: Any, **terms: int) -> Any:
+    """`setup` with the economics policy terms `terms` replaced and the new digest pinned."""
+    policy = EconomicsPolicyV2.model_validate({**setup.policy.model_dump(), **terms})
+    body = setup.manifest.body()
+    body["network"]["economics_policy_hash"] = digest(policy)
+    return replace(setup, manifest=RunManifestV2.model_validate(body), policy=policy)
+
+
+@pytest.mark.parametrize(
+    ("terms", "required"),
+    [
+        # The fixture policy has S_min 1000, a collectible reward of 100 (times the manifest's
+        # multiple of 10, which is also 1000) and a goal of 100: each case raises one term alone.
+        pytest.param({"S_min_units": 4000}, 4000, id="minimum-stake"),
+        pytest.param({"R_collectible_units": 600}, 6000, id="collectible-reward-multiple"),
+        pytest.param({"G_max_units": 7000}, 7000, id="goal-over-the-stake-fraction"),
+    ],
+)
+def test_the_required_stake_is_the_largest_of_its_three_terms(
+    tmp_path: Path, terms: dict[str, int], required: int
+) -> None:
+    # Given: an ACTIVE admission under a policy in which one stake term alone is the largest
+    base = Lab(tmp_path / "base")
+    lab = Lab(tmp_path / "policy", setup=with_policy(base.s, **terms))
+    admission = lab.join()
+    lab.live(admission)
+
+    def standing() -> tuple[bool, int]:
+        status = lab.a.status(lab.A.HOT.ss58, now=5)
+        return status.eligible, status.funding.locked_units
+
+    # When / Then: one unit short of that term is not enough and exactly the term is
+    lab.stake(admission, required - 1)
+    assert standing() == (False, required - 1)
+    lab.stake(admission, 1, operation="23" * 32)
+    assert standing() == (True, required)
+
+
 def test_the_stake_gate_is_the_policy_a_run_that_requires_nothing_gates_nothing(
     tmp_path: Path,
 ) -> None:
     # Given: the same admission under the fixture policy and under a stand-in policy, owned by
     # this test, that sets the three stake terms to zero (the condition of LCK-01 broken)
     strict = Lab(tmp_path / "strict")
-    policy = EconomicsPolicyV2.model_validate(
-        {
-            **strict.s.policy.model_dump(),
-            "S_min_units": 0,
-            "R_collectible_units": 0,
-            "G_max_units": 0,
-        }
-    )
-    body = strict.s.manifest.body()
-    body["network"]["economics_policy_hash"] = digest(policy)
     free = Lab(
         tmp_path / "free",
-        setup=replace(strict.s, manifest=RunManifestV2.model_validate(body), policy=policy),
+        setup=with_policy(strict.s, S_min_units=0, R_collectible_units=0, G_max_units=0),
     )
     eligible = {}
     for name, lab in (("strict", strict), ("free", free)):
@@ -171,19 +199,24 @@ def test_the_stake_gate_is_the_policy_a_run_that_requires_nothing_gates_nothing(
         pytest.param("eleven-clean-finalizations", id="eleven-clean-finalizations"),
         pytest.param("canary-block-missing", id="canary-block-missing"),
         pytest.param("not-in-probation", id="not-in-probation"),
+        pytest.param("already-active", id="already-active"),
         pytest.param("screen-lapsed", id="screen-lapsed"),
     ],
 )
 def test_graduation_needs_funding_clean_finalizations_and_every_canary_block(
     tmp_path: Path, fault: str | None
 ) -> None:
-    # Given: a PROBATION admission one call away from ACTIVE, and one condition broken
+    # Given: a PROBATION admission one call away from ACTIVE, and one condition broken. An
+    # ACTIVE admission meets every other condition: only its state stops a second transition.
+    state = {"not-in-probation": "APPLIED", "already-active": "ACTIVE"}.get(
+        fault or "", "PROBATION"
+    )
     lab = Lab(tmp_path)
     admission = lab.join()
     lab.stake(admission, STAKE - 1 if fault == "stake-one-short" else STAKE)
     lab.set(
         admission,
-        state="APPLIED" if fault == "not-in-probation" else "PROBATION",
+        state=state,
         clean_count=11 if fault == "eleven-clean-finalizations" else 12,
         canary_blocks="1,2" if fault == "canary-block-missing" else "1,2,3",
         screen_until=4 if fault == "screen-lapsed" else 1_000_000,
@@ -201,7 +234,7 @@ def test_graduation_needs_funding_clean_finalizations_and_every_canary_block(
         assert (status.record.state, status.eligible) == ("ACTIVE", True)
         assert graduated == [("ACTIVE", "GRADUATED_FULL_REPLAY")]
     else:
-        assert status.record.state == ("APPLIED" if fault == "not-in-probation" else "PROBATION")
+        assert status.record.state == state
         assert graduated == []
 
 
@@ -282,6 +315,21 @@ def test_a_second_application_is_refused_for_a_known_hotkey_or_an_unsettled_cold
     lab.live(admission)
     lab.join(hot=other, cold=lab.A.COLD, request="33" * 32)
     assert applications() == 2
+
+
+@pytest.mark.parametrize("state", ["PROBATION", "SUSPENDED"])
+def test_a_coldkey_with_a_probation_or_suspended_admission_cannot_admit_another_hotkey(
+    tmp_path: Path, state: str
+) -> None:
+    # Given: the coldkey's only admission is not ACTIVE: still on probation, or suspended with
+    # its strikes (a new hotkey would start again without them)
+    lab = Lab(tmp_path)
+    admission = lab.join()
+    lab.set(admission, state=state, strikes=2)
+    before = snapshot(lab)
+    # When / Then: a second hotkey of that coldkey is refused and nothing is written
+    refusal = code(lambda: lab.join(hot=lab.A.OTHER, cold=lab.A.COLD, request="33" * 32))
+    assert refusal == "COLDKEY_PROBATION_EXISTS" and snapshot(lab) == before
 
 
 def test_a_join_signed_for_another_policy_is_refused_and_writes_nothing(tmp_path: Path) -> None:

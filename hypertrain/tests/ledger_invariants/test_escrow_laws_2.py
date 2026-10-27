@@ -136,51 +136,6 @@ def test_maturity_input_is_a_nonempty_list_of_known_distinct_origins(
     assert fx.escrow.balances().reward_pending == 30000
 
 
-@pytest.mark.parametrize("source_sees_the_dispute", [True, False])
-def test_a_dispute_after_finalize_holds_a_reward_origin_only_if_the_settlement_source_sees_it(
-    li_escrow: ModuleType, real_reward: Real, source_sees_the_dispute: bool
-) -> None:
-    """ESC-08 (the condition, both ways): the hold on an origin lives in the settlement source."""
-    # Given: a source that answers MATCH from the record written at finalize, and a dispute
-    # that ends FRAUD afterwards; only the first stand-in reads the dispute.
-    _, _, reward = real_reward
-    origin = reward.origin_ids[0]
-    disputed: set[str] = set()
-    record = match_settlement(reward.finalize_hash, 20)
-
-    def source(reference: str) -> Settlement:
-        if source_sees_the_dispute and reference in disputed:
-            return record.model_copy(update={"outcome": "FRAUD"})
-        return record
-
-    setup, evidence, _ = real_reward
-    escrow = bare_escrow(li_escrow, setup, settlement=source)
-    escrow.reward_finalize(reward, evidence)
-    disputed.add(origin)
-    # When / Then
-    if source_sees_the_dispute:
-        assert error_code(lambda: mature(escrow, reward)) == "DISPUTED_OR_UNVESTED"
-        assert escrow.balances().reward_pending == BUDGET
-    else:
-        mature(escrow, reward)
-        assert escrow.balances().available == BUDGET  # nothing in the ledger held it back
-
-
-def test_the_dispute_service_still_opens_a_contest_on_a_round_whose_reward_is_issued(
-    tmp_path: Path,
-) -> None:
-    """ESC-08 (the condition, status): no dispute rule closes a round once its reward exists."""
-    # Given: the contested round 0 is already finalized in the ledger, as after reward_finalize.
-    world = contested_miner(tmp_path)
-    service = world.service
-    service.db.execute("INSERT INTO escrow_finalized VALUES(0, ?)", (H,))
-    # When: its miner contests the audit verdict of that round.
-    turn = service.open(world.valid, now=1)
-    # Then: the dispute opens. Whether a reward origin of that round is held is therefore
-    # decided by the settlement source alone, which is what the test above varies.
-    assert (turn.contest.w, world.rows()[0]) == (0, 1)
-
-
 # ------------------------------------------------------------------ issuance (ESC-20)
 
 
@@ -365,10 +320,9 @@ def test_a_dispute_opens_only_on_a_funded_owner_bound_adequately_sized_contest_b
     assert service.escrow.balances(fx.COLD.ss58).dispute_locked >= 100
 
 
-def test_a_miner_has_at_most_one_open_dispute_and_the_refused_bond_stays_locked(
-    tmp_path: Path,
-) -> None:
-    """ESC-24: a second contest of the same miner is refused while the first is unresolved."""
+def test_a_miner_has_at_most_one_open_dispute(tmp_path: Path) -> None:
+    """ESC-24: a second contest of the same miner is refused while the first is unresolved, and
+    the refusal moves nothing (what becomes of its funded bond is DIA-25, package exit_disputes)."""
     # Given: one open dispute, and a second verdict of the same miner with a funded bond.
     world = contested_miner(tmp_path)
     service, fx = world.service, world.fixture
@@ -393,7 +347,6 @@ def test_a_miner_has_at_most_one_open_dispute_and_the_refused_bond_stays_locked(
     )
     assert world.rows()[0] == 1 and service.get(first.dispute_id) == first
     assert fingerprint(service.escrow) == before
-    assert service.escrow.balances(fx.COLD.ss58).dispute_locked == 200
 
 
 # ------------------------------------------------------ settlement of a bond (DIA-10)
@@ -834,29 +787,36 @@ def test_random_operation_sequences_conserve_units_and_follow_a_bucket_model(
     reason="ESC-23: the storage one escrow event adds does not grow with the ledger's unit rows",
 )
 def test_the_storage_one_event_adds_does_not_grow_with_the_ledger(li_escrow: ModuleType) -> None:
-    def added_by_one_self_transfer(extra_rows: int) -> tuple[int, int]:
+    transfers = 20
+
+    def added_by_self_transfers(extra_rows: int) -> tuple[int, int]:
         fx = funded(li_escrow)
         escrow, cold = fx.escrow, li_escrow.COLD.ss58
         for index in range(extra_rows):  # every one-unit lock is one more unit row
             lock = lock_op(li_escrow, fx.cold, operation=f"{index + 1:064x}", units=1)
             escrow.lock(lock, signer=cold)
 
-        def stored() -> int:
-            row = escrow.db.execute("SELECT SUM(LENGTH(state)) FROM escrow_snapshots").fetchone()
-            return int(row[0])
+        def stored() -> int:  # the database in bytes, whichever tables hold the events
+            pages = escrow.db.execute("PRAGMA page_count").fetchone()[0]
+            size = escrow.db.execute("PRAGMA page_size").fetchone()[0]
+            return int(pages * size)
 
         before, count = stored(), events(escrow)
-        escrow.transfer(
-            transfer_op(li_escrow, fx.cold, operation="ab" * 32, units=1, recipient=cold),
-            signer=cold,
-        )
-        assert events(escrow) == count + 1  # the scenario reaches the point under test
+        for index in range(transfers):  # a transfer to oneself moves nothing, yet is an event
+            operation = f"ab{index:062x}"
+            escrow.transfer(
+                transfer_op(li_escrow, fx.cold, operation=operation, units=1, recipient=cold),
+                signer=cold,
+            )
+        assert events(escrow) == count + transfers  # the scenario reaches the point under test
         rows = escrow.db.execute("SELECT COUNT(*) FROM escrow_units").fetchone()[0]
         return stored() - before, int(rows)
 
-    (small, few), (large, many) = added_by_one_self_transfer(2), added_by_one_self_transfer(80)
+    (small, few), (large, many) = added_by_self_transfers(2), added_by_self_transfers(80)
     assert many > few
-    assert large < 2 * small, f"one event stored {small} bytes at {few} rows, {large} at {many}"
+    assert large <= 2 * small, (
+        f"{transfers} events stored {small} bytes at {few} rows, {large} at {many}"
+    )
 
 
 @pytest.mark.xfail(

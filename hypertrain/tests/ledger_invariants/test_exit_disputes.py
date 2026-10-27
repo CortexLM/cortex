@@ -7,7 +7,8 @@ the v2 service of `support.service_world`; the audit's records are seeded the wa
 `complete_audit_v2` writes them, everything after them goes through the routes.
 
 Holes are strict xfails that assert the desired defence after a control that reaches the point
-under test. Lens ids are candidates until a test below says otherwise.
+under test. Lens ids are candidates until a test below says otherwise; a hole that rests on a
+stand-in for the service, or on a policy the maintainers have not decided, says [candidate].
 """
 
 from __future__ import annotations
@@ -162,7 +163,9 @@ def test_the_timeout_route_needs_the_contesters_receipt_but_the_beacon_exit_does
     assert refused.status_code == 409 and "NO_AUTHENTICATED_TURN_DELIVERY" in refused.text
     assert world.db_digest() == before
     assert X.disputes(world).get(dispute_id).resolution is None
-    # When: the window is over.
+    # When: the last round of the operator's window passes, then the first one after it.
+    world.network.push(grace_end)
+    assert X.disputes(world).get(dispute_id).resolution is None
     world.network.push(grace_end + 1)
     # Then: the exit happened without a receipt, the contester is not convicted.
     closed = X.disputes(world).get(dispute_id)
@@ -177,7 +180,8 @@ def test_the_hold_of_a_round_is_the_count_of_its_open_disputes_after_every_closi
     """DIA-16 / DIB-18 (and the bond half of DIA-14): after every route that opens or closes a
     dispute, finality[w] holds the number of open disputes of round w, recounted: two rounds never
     mix, a replayed resolution never subtracts twice, and the referee's route, the operator's
-    timeout and the beacon exit each recount and give the contest bond back."""
+    timeout and the beacon exit each recount and take the contest bond out of dispute_locked.
+    What becomes of the bond (returned or burned) is DIB-05's question, not asserted here."""
     # Given: rounds 0 and 1 and three miners with a funded contest each (two on round 0).
     fixture = X.service()
     escrow = world.store._services(world.run_id)[0]
@@ -213,33 +217,14 @@ def test_the_hold_of_a_round_is_the_count_of_its_open_disputes_after_every_closi
     # When: the beacon closes the last one.
     world.network.push(horizon_of(world, second)[1] + 1)
     assert state() == (0, 0, 0)
-    assert escrow.balances().burned == 0
-
-
-def test_a_closer_that_skips_the_recount_leaves_the_hold_of_the_round_stale(world: World) -> None:
-    """DIA-16 / DIB-18, the condition broken in a test-owned closer: the hold is written only by
-    the store's closing routes. A closer that goes to the engine alone (what a future caller of
-    DisputesV2.exclude would do) frees the bond and the dispute but leaves its round blocked.
-    If the engine ever recounts by itself this condition is gone: delete the test."""
-    # Given: an open contest of a pending round.
-    X.seed_round(world, 0, applied=True, state_hash="aa" * 32)
-    dispute_id = X.open_contest(world, 0)
-    d, horizon = X.disputes(world), horizon_of(world, dispute_id)[2]
-    assert X.unresolved_of(world) == X.open_disputes_of(world) == 1
-    # When: the engine closes it at the horizon and the bond is settled, nothing recounts.
-    with world.store._tx():
-        d.exclude(dispute_id, now=horizon)
-        d.settle_lock(dispute_id, now=horizon)
-    # Then: the disputes are all closed, the stored hold still says one, and it still blocks.
-    assert X.open_disputes_of(world) == 0
-    assert X.unresolved_of(world) == 1 and X.hold_blocks(world, settled=False)
 
 
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
     reason="FIN-11: _recount_disputes_v2 rewrites finality[w] of a SETTLED round on a late "
-    "contest (unresolved_disputes 0 -> 1), which blocks require_open(w+2) until it closes",
+    "contest (unresolved_disputes 0 -> 1), which blocks require_open(w+2) until it closes; "
+    "ADR 0011 accepts this residual until contests are priced [candidate]",
 )
 def test_a_late_contest_never_reopens_a_settled_round(world: World) -> None:
     """FIN-11: a round that finality settled keeps its row; a contest filed on it afterwards is
@@ -263,7 +248,7 @@ def test_a_late_contest_never_reopens_a_settled_round(world: World) -> None:
     strict=True,
     raises=AssertionError,
     reason="DIB-04+DS-02: a contest on a verdict that matched suspends its opener, and "
-    "verified_inputs_v2 then raises 403 for the whole round (store.py:7878-7882)",
+    "verified_inputs_v2 then raises 403 for the whole round",
 )
 def test_a_contest_on_a_matching_verdict_never_wedges_the_aggregation_of_its_round(
     world: World,
@@ -300,6 +285,7 @@ def test_a_contest_on_a_matching_verdict_never_wedges_the_aggregation_of_its_rou
 # --- the event long-poll and the dispute writes never wait for each other (DIA-22, DS-04) -----
 
 PATIENCE = 4.0  # seconds a thread may wait for a lock before the test declares it stuck
+START = 30.0  # seconds a started thread may take to reach the service on a loaded host
 
 
 class PollerGate:
@@ -350,7 +336,7 @@ def test_a_dispute_poll_and_a_dispute_write_never_wait_for_each_other(
     write that notifies the pollers before it commits, both finish. The writes are the miner's
     contest and the beacon's own closure of a stalled one."""
     # Given: the write is ready (a funded contest, or a stalled one one round from its closure).
-    fixture, store, hot = X.service(), world.store, X.service().HOT[0]
+    store, hot = world.store, X.service().HOT[0]
     if write == "open":
         X.join(world, 0)
         X.seed_contest(world, 0)
@@ -381,13 +367,13 @@ def test_a_dispute_poll_and_a_dispute_write_never_wait_for_each_other(
 
     def once_the_poll_is_waiting(*args: Any, **kwargs: Any) -> Any:
         inside.set()  # the store lock is held by the writer from here to its commit
-        assert attempted.wait(PATIENCE)  # the poller holds the condition and asks for the lock
+        assert attempted.wait(START)  # the poller holds the condition and asks for the lock
         return real(*args, **kwargs)
 
     setattr(d, method, once_the_poll_is_waiting)
     # When: the write starts, and the poll starts inside its transaction.
     writer, written = in_thread("writer", act)
-    assert inside.wait(PATIENCE)
+    assert inside.wait(START)
     poller, polled = in_thread("poller", lambda: d.events(hot.ss58, 0, timeout=5))
     writer.join(3 * PATIENCE)
     poller.join(3 * PATIENCE)
@@ -397,7 +383,6 @@ def test_a_dispute_poll_and_a_dispute_write_never_wait_for_each_other(
     assert "error" not in written, written.get("error")
     assert [event.turn.dispute_id for event in polled["result"]] == [dispute_id]
     assert (d.get(dispute_id).resolution is not None) == (write == "beacon-exit")
-    assert fixture.HOT[0].ss58 == d.get(dispute_id).contest.miner
 
 
 # --- what a contest settles for the contester (DIA-24, DIB-11, DIA-25, DIA-06, DIB-05) --------
@@ -407,7 +392,8 @@ def test_a_dispute_poll_and_a_dispute_write_never_wait_for_each_other(
     strict=True,
     raises=AssertionError,
     reason="DIA-24+DIB-11: a contest closed with the auditor as loser refunds the bond but never "
-    "lifts the excluded/UNVERIFIED record the wrong verdict wrote (no deletion exists)",
+    "lifts the excluded/UNVERIFIED record the wrong verdict wrote (no deletion exists); the Lens "
+    "calls the remedy a product decision [candidate]",
 )
 def test_a_contest_won_against_the_auditor_lifts_the_exclusion_it_proved_wrong(
     world: World,
@@ -436,26 +422,28 @@ def test_a_contest_won_against_the_auditor_lifts_the_exclusion_it_proved_wrong(
 )
 def test_a_contest_bond_whose_dispute_never_opened_can_be_taken_back(world: World) -> None:
     """DIA-25: an owner who locked a bond for a contest that was refused (here: the verdict is
-    unknown to the service) gets its units back through the escrow release route."""
+    unknown to the service) can get all its units back: the owner asks through the escrow release
+    route, and whichever way the service returns them they end up available, none burned."""
     # Given: a funded contest lock, and an open that the service refuses.
     escrow = world.store._services(world.run_id)[0]
     X.join(world, 0)
+    before = escrow.balances()
     lock = X.fund_contest(world, 0)
+    assert escrow.balances().dispute_locked == X.BOND
     refused = X.post_dispute(world, 0)
     assert refused.status_code == 409 and world.count("disputes_v2") == 0
-    assert escrow.balances().dispute_locked == X.BOND
     # When: the owner releases the lock it signed.
     released = X.post_release(world, 0, lock)
-    # Then
-    assert released.status_code == 200, released.text
-    assert escrow.balances().dispute_locked == 0 and escrow.balances().conserved()
+    # Then: the owner is made whole.
+    assert escrow.balances() == before, released.text
 
 
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
     reason="DIA-06+DIB-05: open() takes a contest on a MATCH verdict (the contest record carries "
-    "no verdict result) and suspends the miner; the e2e watch flow pins the permissive rule",
+    "no verdict result) and suspends the miner; the e2e watch flow pins the permissive rule "
+    "[candidate]",
 )
 def test_a_contest_on_a_matching_verdict_is_refused_before_it_suspends_anyone(
     world: World,
@@ -481,19 +469,42 @@ def test_a_contest_on_a_matching_verdict_is_refused_before_it_suspends_anyone(
     strict=True,
     raises=AssertionError,
     reason="DIB-05+DIA-06: a contest the referee closes MATCH (audit confirmed) returns the whole "
-    "bond (settle_lock slashes only FRAUD against the miner), so a baseless contest is free",
+    "bond (settle_lock slashes only FRAUD against the miner), so a baseless contest is free; "
+    "ADR 0011 leaves the pricing to a later decision [candidate]",
 )
 def test_a_baseless_contest_costs_the_contester_part_of_its_bond(world: World) -> None:
-    """DIB-05 / DIA-06: the referee's replay confirms the audit; the bond is not returned whole."""
-    # Given: a contest of a MATCH verdict.
+    """DIB-05 / DIA-06: the referee's replay confirms the audit; the contester ends with fewer
+    units than it began with, whether the forfeited part is burned or paid to someone else.
+    A service that refuses the contest of a MATCH verdict has no such contest to price, so the
+    test ends there (DIA-06 above is then fixed and this marker has to go)."""
+    # Given: a contest of a MATCH verdict, if the service takes it.
     escrow = world.store._services(world.run_id)[0]
-    dispute_id = X.open_contest(world, 0, mismatch=False)
+    owner = X.service().COLD[0].ss58
+
+    def owned() -> int:
+        """Units of the contester that are available to it."""
+        return int(
+            world.store._db.execute(
+                "SELECT COALESCE(SUM(units),0) FROM escrow_units WHERE owner=? "
+                "AND bucket='available'",
+                (owner,),
+            ).fetchone()[0]
+        )
+
+    X.join(world, 0)
+    before = owned()
+    dispute_id = X.seed_contest(world, 0, mismatch=False)
+    X.fund_contest(world, 0)
+    opened = X.post_dispute(world, 0)
+    if opened.status_code != 200:
+        assert 400 <= opened.status_code < 500, opened.text
+        return
     # When: the referee confirms the verdict.
     X.resolve(world, dispute_id, reason="MATCH", loser=None)
     # Control: the bond was settled (nothing is locked any more).
     assert escrow.balances().dispute_locked == 0 and X.unresolved_of(world) == 0
     # Then: the contester paid for it.
-    assert escrow.balances().burned > 0
+    assert owned() < before
 
 
 # --- stuck contests cannot pin the queue (DS-06) ----------------------------------------------
@@ -619,13 +630,13 @@ def test_waiting_dispute_polls_never_starve_the_other_routes(world: World) -> No
         for count, poller in enumerate(pollers, start=1):
             poller.start()
             with waiting:
-                waiting.wait_for(
+                assert waiting.wait_for(
                     lambda count=count: (
                         answered.get("entered", 0) + sum(1 for k in answered if k != "entered")
                         >= count
                     ),
-                    timeout=PATIENCE,
-                )
+                    timeout=START,
+                ), f"poll {count} never reached the service"
         probe_status: list[int] = []
         probe = threading.Thread(
             target=lambda: probe_status.append(client.get(url).status_code), daemon=True

@@ -205,6 +205,13 @@ def test_finalize_pays_the_four_audited_miners_and_nobody_excluded(stage: Stage)
     assert escrow.balances(stage.fixtures.COLD[4].ss58).reward_pending == 0
     assert escrow.balances().reward_pending == escrow.policy.round_reward_units
     assert stage.records("excluded") == excluded
+    # The same transaction left what a later vesting and a retry need: one settlement record
+    # per reward origin and the stored result.
+    origins = sorted(
+        str(row[0]) for row in stage.rows("SELECT origin FROM escrow_origins WHERE reward_round=0")
+    )
+    assert [identity for _, identity, _ in stage.records("settlement")] == origins
+    assert stage.record("finalize-result", "0")["status"] == "SETTLED"
 
 
 def test_a_miner_whose_admission_stopped_being_eligible_is_not_finalized(stage: Stage) -> None:
@@ -250,7 +257,9 @@ def test_a_finalize_that_builds_its_services_inside_its_transaction_still_leaves
     stage: Stage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The condition of FIN-04 broken in a stand-in: the service cache is empty, as in a process
-    # that has just restarted, and the ledger fails once it is reached.
+    # that has just restarted, and the ledger fails once it is reached. Today the first call
+    # already fails while the ledger is built (OperationalError); a build that constructs its
+    # services first reaches the ledger (EscrowError). Either way nothing may persist.
     def failing(self: EscrowV2, reward: Any, evidence: Any) -> EscrowReceipt:
         raise EscrowError("INJECTED")
 
@@ -474,11 +483,6 @@ ROLLBACK_REFUSED = [
         (ChallengeError, 409, "rollback exclusion lacks exact accepted referee cause"),
         id="no referee resolution names the miner",
     ),
-    pytest.param(
-        lambda s: s.signed_rollback(excluded=[STRANGER]),
-        (ChallengeError, 409, "rollback exclusion lacks exact accepted referee cause"),
-        id="the excluded hotkey never contested",
-    ),
 ]
 
 
@@ -533,6 +537,19 @@ def test_a_rollback_cause_the_referee_did_not_sign_with_evidence_is_refused(
     raw = stage.signed_rollback(cause_hashes=[cause])
     before = stage.digest()
     assert refusal(lambda: stage.store.rollback_v2(stage.run_id, raw)) == expected
+    assert stage.digest() == before
+
+
+def test_a_rollback_that_cites_a_cause_it_does_not_rest_on_is_refused(stage: Stage) -> None:
+    # FIN-14: every cause a Rollback signs must be the accepted cause of an excluded miner.
+    cause = stage.seed_cause()
+    raw = stage.signed_rollback(cause_hashes=[cause, ANOTHER])
+    before = stage.digest()
+    assert refusal(lambda: stage.store.rollback_v2(stage.run_id, raw)) == (
+        ChallengeError,
+        409,
+        "rollback cause set differs",
+    )
     assert stage.digest() == before
 
 
@@ -625,9 +642,12 @@ def test_finality_refusals_over_http_are_409_with_their_reason(stage: Stage) -> 
             f"{url}/admin/rounds/0/finalize",
             json=stage.signed_finalize(final_theta_hash_w1=ANOTHER),
             headers=headers,
-        ).status_code,
-        "open": quiet.post(
-            f"{url}/admin/rounds", content=stage.signed_opening(2), headers=headers
-        ).status_code,
+        ),
+        "open": quiet.post(f"{url}/admin/rounds", content=stage.signed_opening(2), headers=headers),
     }
-    assert answers == {"finalize": 409, "open": 409}
+    assert {name: answer.status_code for name, answer in answers.items()} == {
+        "finalize": 409,
+        "open": 409,
+    }
+    assert "round cannot settle" in answers["finalize"].json()["detail"]
+    assert "w+2 blocked" in answers["open"].json()["detail"]

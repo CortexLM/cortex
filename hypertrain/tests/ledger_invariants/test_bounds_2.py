@@ -106,7 +106,7 @@ def test_a_test_mode_run_has_no_economic_bound_record_to_write(tmp_path: Path) -
     strict=True,
     raises=AssertionError,
     reason="BND-03+BND-D06: the economic-bound gate must reject a record bound to another policy "
-    "or without a coordinator receipt, not accept any row of that kind",
+    "or without a coordinator receipt, not accept any row of that kind [candidate]",
 )
 def test_a_forged_economic_bound_row_does_not_open_production_influence(tmp_path: Path) -> None:
     with production_run(tmp_path, G_max_units=1100) as run:
@@ -280,7 +280,7 @@ def test_a_policy_object_edited_in_the_object_store_cannot_become_the_policy_of_
     strict=True,
     raises=AssertionError,
     reason="BND-04+BND-D07: the dataset linkage of a run must be fixed once a round exists; the "
-    "operator route replaces it at any time",
+    "operator route replaces it at any time [candidate]",
 )
 def test_the_dataset_linkage_cannot_be_replaced_once_a_round_exists(tmp_path: Path) -> None:
     with service_world(tmp_path) as world:
@@ -295,7 +295,8 @@ def test_the_dataset_linkage_cannot_be_replaced_once_a_round_exists(tmp_path: Pa
             "proofs_hash": world.store.objects.put(b"other proofs"),
         }
         changed = world.client.put(route, json=other, headers=world.admin)
-        assert changed.status_code == 409
+        # Any refusal is a correct fix; what must hold is that the linkage did not move.
+        assert 400 <= changed.status_code < 500
         assert world.store._record_v2(world.run_id, "dataset", "inputs") == linkage
 
 
@@ -582,6 +583,7 @@ CHARGE_FAULTS = {
     "boolean attempt": ("job", True, 1),
     "empty operation": ("", 1, 1),
     "operation of 257 bytes": ("x" * 257, 1, 1),
+    "operation of 258 bytes in 129 characters": ("é" * 129, 1, 1),
 }
 
 

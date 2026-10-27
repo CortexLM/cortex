@@ -57,6 +57,13 @@ PRODUCTION_CPU = (
     "tests/challenge/test_production_economics_v2.py::test_bootstrap_route_refuses_cpu_backend"
 )
 COMPARATOR = A2 + "test_the_audit_decision_is_bound_to_every_committed_hash"
+ANOTHER_AUDITOR = A1 + "test_a_verdict_signed_by_another_allowlisted_auditor_is_refused"
+PAYS = A2 + "test_a_finalized_round_pays_the_matched_members_and_not_the_excluded_one"
+HORIZON_EXHAUSTS = A2 + "test_after_the_horizon_nothing_late_can_change_an_excluded_round"
+UNSCHEDULED = (
+    A2 + "test_without_scheduled_audits_the_counter_stays_at_the_roster_and_the_round_waits"
+)
+DECLARED_TOKENS = A2 + "test_a_commit_that_declares_more_tokens_than_its_assignment_mints_nothing"
 
 MUTANTS: list[dict[str, object]] = [
     {
@@ -487,5 +494,78 @@ MUTANTS: list[dict[str, object]] = [
         "new": '{"ReplayVerdict": lambda s: True}',
         "tests": [OUTSIDE_THE_SET],
         "why": "the escrow credits a verdict signed by a key that is not an auditor.",
+    },
+    {
+        "id": "aud-complete-accepts-another-allowlisted-auditor",
+        "invariants": ["A2W-04", "A2W-05"],
+        "path": STORE,
+        "old": 'verdict = self._authenticated_v2(run_id, raw, "ReplayVerdict", row["auditor"])',
+        "new": "sender = envelope_v2.parse_envelope(raw).signer\n"
+        "            verdict = self._authenticated_v2(\n"
+        "                run_id,\n"
+        "                raw,\n"
+        '                "ReplayVerdict",\n'
+        '                sender if sender in manifest.training.auditors else row["auditor"],\n'
+        "            )",
+        "tests": [ANOTHER_AUDITOR],
+        "why": "any allowlisted auditor, not only the holder, completes a lease.",
+    },
+    {
+        "id": "aud-sweep-decrements-twice",
+        "invariants": ["A2W-12"],
+        "path": STORE,
+        "old": '(finality["unresolved_audits"])) - 1)\n                self._put_record_v2(',
+        "new": '(finality["unresolved_audits"])) - 2)\n                self._put_record_v2(',
+        "tests": [DECREMENTS],
+        "why": "an exhausted job takes two units off the open-audit counter, which the clamp at "
+        "zero hides when every job is exhausted at once.",
+    },
+    {
+        "id": "aud-tape-accepts-a-sampled-replay",
+        "invariants": ["A2W-01", "A2W-09"],
+        "path": TAPE,
+        "old": '        r.result != "MATCH"\n        or r.audit_mode != "anchored-full"\n'
+        "        or (",
+        "new": '        r.result != "MATCH"\n        or (',
+        "tests": [TAPE_GATE],
+        "why": "a replay that audited a sample of the leaves enters the tape as a full audit.",
+    },
+    {
+        "id": "aud-escrow-credits-declared-tokens",
+        "invariants": ["A2W-14"],
+        "path": ESCROW,
+        "old": "            c.validate_assignment(self.manifest, len(item.sample_ids))\n",
+        "new": "",
+        "tests": [DECLARED_TOKENS],
+        "why": "the reward path credits the token count a commit declares, not the server's.",
+    },
+    {
+        "id": "aud-reward-owner-is-the-miner-hotkey",
+        "invariants": ["A2W-11", "A2W-14"],
+        "path": ESCROW,
+        "old": "owner=work[h][0],",
+        "new": "owner=h,",
+        "tests": [PAYS],
+        "why": "the reward origins of the matched members are owned by their hotkeys, not by "
+        "the coldkeys that funded them.",
+    },
+    {
+        "id": "aud-horizon-leaves-queued-jobs",
+        "invariants": ["A2W-12", "A2W-13"],
+        "path": STORE,
+        "old": 'elif now >= row["absolute"]:',
+        "new": "elif False:",
+        "tests": [HORIZON_EXHAUSTS],
+        "why": "a job that never found an auditor is still queued after the audit horizon.",
+    },
+    {
+        "id": "aud-round-opens-with-no-open-audit",
+        "invariants": ["A2W-12"],
+        "path": STORE,
+        "old": '"unresolved_audits": len(body.roster),',
+        "new": '"unresolved_audits": 0,',
+        "tests": [UNSCHEDULED],
+        "why": "a round opens with no audit counted as open, so the settle guard on open audits "
+        "has nothing to refuse.",
     },
 ]

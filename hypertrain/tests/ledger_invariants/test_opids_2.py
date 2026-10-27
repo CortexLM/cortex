@@ -99,7 +99,7 @@ def test_a_client_event_never_blocks_the_maturity_id_over_http(tmp_path: Path, k
     assert (effect.available, effect.reward_pending) == (10500, 0)
 
     # When: a funded coldkey signs an event with that id on the public route, before round 5.
-    with service_world(tmp_path / "squat") as world:
+    with service_world(tmp_path / "contended") as world:
         world.network.push(2)
         seed_pending_origin(world, pending, cold[0].ss58, 500, mature_at=5)
         origin = world.network.origin_ids[1]
@@ -135,21 +135,16 @@ def test_a_third_party_event_never_makes_the_owner_lock_command_fail(
     assert Keypair(bytes([90]) * 32).ss58 == cold.ss58
 
     def lock_command(world: World, *, dry_run: bool) -> Any:
-        try:
-            return escrow_lock(
-                world.client,
-                "http://testserver",
-                world.run_id,
-                keyfile,
-                hot.ss58,
-                1000,
-                [world.network.origin_ids[0]],
-                dry_run=dry_run,
-            )
-        except httpx.HTTPStatusError as error:
-            raise StepRefused(
-                f"the lock command was refused: {error.response.status_code} {error.response.text}"
-            ) from error
+        return escrow_lock(
+            world.client,
+            "http://testserver",
+            world.run_id,
+            keyfile,
+            hot.ss58,
+            1000,
+            [world.network.origin_ids[0]],
+            dry_run=dry_run,
+        )
 
     # Given: the control, where the owner runs its lock command and nobody else signs anything.
     with service_world(tmp_path / "control") as world:
@@ -160,7 +155,7 @@ def test_a_third_party_event_never_makes_the_owner_lock_command_fail(
     assert served["locked_units"] == 1000
 
     # When: another funded coldkey signs an event with the id of that command before the owner.
-    with service_world(tmp_path / "squat") as world:
+    with service_world(tmp_path / "contended") as world:
         assert world.network.join().status_code == 200
         world.network.push(2)
         origin = world.network.origin_ids[1]
@@ -168,8 +163,15 @@ def test_a_third_party_event_never_makes_the_owner_lock_command_fail(
         assert neutral.status_code == 200, neutral.text
         client_event_over_http(world, kind, bystander, command_id, origin)
 
-        # Then: the owner's command succeeds as in the control.
-        assert lock_command(world, dry_run=False) == served
+        # Then: the owner's command succeeds as in the control. The event hash chains every event
+        # before it, so it differs between the two worlds by construction and is not compared.
+        try:
+            outcome = lock_command(world, dry_run=False)
+        except httpx.HTTPStatusError as error:
+            raise StepRefused(
+                f"the lock command was refused: {error.response.status_code} {error.response.text}"
+            ) from error
+        assert {**outcome, "event_hash": None} == {**served, "event_hash": None}
 
 
 # --- SG-09: one signed operation id, one body ----------------------------------------------------
@@ -318,11 +320,12 @@ def test_an_admission_lock_is_applied_once_and_a_refused_one_leaves_no_outbox_ro
                 url, json=world.network.signed(cold[0], "EscrowLock", operation)
             )
 
-        # Given: the lock is applied and acknowledged.
+        # Given: the lock is applied and acknowledged, so nothing is pending for the admission.
         first = post(lock)
         assert first.status_code == 200, first.text
         stored = world.db_digest()
         assert world.count("admission_outbox", "receipt IS NOT NULL") == 1
+        assert not world.store._services(world.run_id)[1].store.pending_outbox(admission_id)
 
         # When: the same lock comes again, then a different body under its id, then a lock the
         # ledger cannot fund.

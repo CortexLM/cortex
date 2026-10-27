@@ -19,7 +19,7 @@ FAILS = ENGINE + "test_an_operation_that_fails_before_its_event_commits_changes_
 NESTED = ENGINE + "test_a_failed_operation_inside_a_callers_transaction_is_undone_alone"
 GUARD = ENGINE + "test_the_engine_refuses_to_be_built_inside_an_open_transaction"
 TERMINAL = ENGINE + "test_exactly_one_terminal_transition_applies_to_a_dispute"
-CONCURRENT_LOCKS = "tests/ledger/test_escrow_v2.py::test_concurrent_locks_when_same_funded_origin"
+SERIALIZED = ENGINE + "test_an_operation_in_progress_keeps_another_connection_from_starting_one"
 SIGNED_TWICE = (
     HTTP + "test_a_signed_operation_sent_twice_is_applied_once_and_another_body_is_refused"
 )
@@ -122,7 +122,7 @@ MUTANTS = [
     },
     {
         "id": "opids-outbox-accepts-another-body",
-        "invariants": ["LCK-12"],
+        "invariants": ["LCK-12", "SG-09"],
         "path": OUTBOX,
         "old": (
             '            if row and (row["request"] !='
@@ -294,8 +294,35 @@ MUTANTS = [
         "path": LEDGER,
         "old": '            self.db.execute("SAVEPOINT escrow" if nested else "BEGIN IMMEDIATE")\n',
         "new": '            self.db.execute("SAVEPOINT escrow" if nested else "BEGIN")\n',
-        "tests": [CONCURRENT_LOCKS],
+        "tests": [SERIALIZED],
         "why": "an operation opens a deferred transaction, so two connections stop serializing.",
+    },
+    {
+        "id": "opids-resolution-compared-on-its-reason-only",
+        "invariants": ["DIA-08"],
+        "path": DISPUTES,
+        "old": "                if model != turn.resolution:\n",
+        "new": "                if model.reason != turn.resolution.reason:\n",
+        "tests": [TERMINAL],
+        "why": "a second resolution with the stored reason but other evidence is taken for it.",
+    },
+    {
+        "id": "opids-resolution-compared-on-its-evidence-only",
+        "invariants": ["DIA-08"],
+        "path": DISPUTES,
+        "old": "                if model != turn.resolution:\n",
+        "new": "                if model.evidence_hash != turn.resolution.evidence_hash:\n",
+        "tests": [TERMINAL],
+        "why": "a second resolution on the stored evidence but another outcome is taken for it.",
+    },
+    {
+        "id": "opids-acknowledged-lock-still-pending",
+        "invariants": ["LCK-12"],
+        "path": OUTBOX,
+        "old": '"SELECT request FROM admission_outbox WHERE receipt IS NULL"',
+        "new": '"SELECT request FROM admission_outbox"',
+        "tests": [LOCK_ONCE],
+        "why": "an acknowledged lock still counts as pending, so the admission is never eligible.",
     },
     {
         "id": "opids-resolution-conflict-after-the-evidence-lookup",

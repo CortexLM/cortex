@@ -48,6 +48,10 @@ LEDGER_FINALITY = (
     T + "test_the_ledger_credits_nothing_for_a_finalize_it_cannot_authenticate_and_replay"
 )
 CAUSE_REFUSED = T2 + "test_a_rollback_cause_the_referee_did_not_sign_with_evidence_is_refused"
+CAUSE_SET = T2 + "test_a_rollback_that_cites_a_cause_it_does_not_rest_on_is_refused"
+EXCLUDE_CLOSES = T + "test_an_exclusion_closes_a_round_only_when_no_applied_tape_is_left_to_repair"
+CHALLENGE_SIGNER = T + "test_an_audit_challenge_the_reward_authority_did_not_sign_credits_nobody"
+SELF_AUDIT = T + "test_a_miner_is_not_credited_for_a_verdict_it_signed_itself"
 
 
 def mutant(
@@ -515,5 +519,176 @@ MUTANTS = [
         "                if False:\n",
         [CAUSE_REFUSED],
         "A resolution without registered independent referee work removes a miner.",
+    ),
+    mutant(
+        "exclude-closes-an-applied-round-at-once",
+        ["FIN-12", "FIN-10"],
+        FINALITY,
+        "        rollback_complete=not status.applied,\n",
+        "        rollback_complete=True,\n",
+        [EXCLUDE_CLOSES],
+        "An applied round that is excluded counts as repaired before any rollback ran.",
+    ),
+    mutant(
+        "exclude-never-closes-an-unapplied-round",
+        ["FIN-12"],
+        FINALITY,
+        "        rollback_complete=not status.applied,\n",
+        "        rollback_complete=False,\n",
+        [EXCLUDE_CLOSES],
+        "An excluded round that never applied waits for a rollback that has nothing to repair.",
+    ),
+    mutant(
+        "ledger-ignores-the-reference-image",
+        ["FIN-03"],
+        ESCROW,
+        "                    or x.replay_env.image_digest\n"
+        "                    != self.manifest.training.reference_spec.image_digest\n",
+        "",
+        [AUDIT_PROVEN],
+        "A verdict replayed in another image is credited.",
+    ),
+    mutant(
+        "ledger-ignores-the-driver-allowlist",
+        ["FIN-03"],
+        ESCROW,
+        "                    or x.replay_env.driver\n"
+        "                    not in self.manifest.training.reference_spec.driver_allowlist\n",
+        "",
+        [AUDIT_PROVEN],
+        "A verdict replayed with an unlisted driver is credited.",
+    ),
+    mutant(
+        "ledger-accepts-a-self-audit",
+        ["FIN-03"],
+        ESCROW,
+        "                or any(e.signer == c.hotkey for e in envs)\n",
+        "",
+        [SELF_AUDIT],
+        "A miner that is also a pinned auditor is credited on a verdict it signed itself.",
+    ),
+    mutant(
+        "ledger-accepts-a-challenge-of-any-signer",
+        ["FIN-03"],
+        ESCROW,
+        'self.run_id, {"AuditChallengeV2": lambda s: s == self.policy.reward_authority}',
+        'self.run_id, {"AuditChallengeV2": lambda s: True}',
+        [CHALLENGE_SIGNER],
+        "An audit challenge the reward authority did not sign binds the verdict to a commit.",
+    ),
+    mutant(
+        "finalize-writes-no-settlement-records",
+        ["FIN-04"],
+        STORE,
+        "            for origin in origins:\n"
+        "                self._put_record_v2(\n"
+        "                    run_id,\n"
+        '                    "settlement",',
+        "            for origin in []:\n"
+        "                self._put_record_v2(\n"
+        "                    run_id,\n"
+        '                    "settlement",',
+        [PAYS_AUDITED],
+        "A reward origin is credited without the settlement record that lets it vest.",
+    ),
+    mutant(
+        "finalize-accepts-an-expired-envelope",
+        ["FIN-01"],
+        "src/hypertrain/protocol/envelope_v2.py",
+        "        if now_round > env.exp_drand:\n",
+        "        if False:\n",
+        [FINALIZE_MATRIX],
+        "A Finalize whose signed expiry has passed settles the round.",
+    ),
+    mutant(
+        "open-starts-from-any-public-theta",
+        ["FIN-13"],
+        STORE,
+        "            if body.theta_hash != state_hash(theta):\n",
+        "            if False:\n",
+        [OPENING],
+        "A round opens on a start state that is not the predecessor's authenticated output.",
+    ),
+    mutant(
+        "rollback-ignores-open-disputes",
+        ["FIN-14"],
+        STORE,
+        "if not status.applied or status.unresolved_audits or status.unresolved_disputes:",
+        "if not status.applied or status.unresolved_audits:",
+        [ROLLBACK_MATRIX],
+        "A rollback starts while a dispute of one of the two rounds is open.",
+    ),
+    mutant(
+        "rollback-ignores-open-audits",
+        ["FIN-14"],
+        STORE,
+        "if not status.applied or status.unresolved_audits or status.unresolved_disputes:",
+        "if not status.applied or status.unresolved_disputes:",
+        [ROLLBACK_MATRIX],
+        "A rollback starts while an audit of one of the two rounds is open.",
+    ),
+    mutant(
+        "rollback-ignores-an-unapplied-round",
+        ["FIN-14"],
+        STORE,
+        "if not status.applied or status.unresolved_audits or status.unresolved_disputes:",
+        "if status.unresolved_audits or status.unresolved_disputes:",
+        [ROLLBACK_MATRIX],
+        "A rollback starts on a round whose tape was never applied.",
+    ),
+    mutant(
+        "rollback-ignores-the-recomputed-steps",
+        ["FIN-14"],
+        STORE,
+        'if model.recomputed != ["agg_w", "step_w", "agg_w1", "step_w1"]:',
+        "if False:",
+        [ROLLBACK_MATRIX],
+        "A rollback that lists fewer recomputed steps reaches the repair.",
+    ),
+    mutant(
+        "rollback-ignores-the-original-theta",
+        ["FIN-14"],
+        STORE,
+        'if model.old_theta_hash_w2 != old["theta_hash"]:',
+        "if False:",
+        [ROLLBACK_MATRIX],
+        "A rollback of another original theta reaches the repair.",
+    ),
+    mutant(
+        "rollback-reaches-past-the-window",
+        ["FIN-14"],
+        STORE,
+        '"AND CAST(id AS INTEGER)>?",',
+        '"AND CAST(id AS INTEGER)>?+99",',
+        [ROLLBACK_MATRIX],
+        "A rollback reaches past the two-round speculative window.",
+    ),
+    mutant(
+        "rollback-accepts-causes-it-does-not-rest-on",
+        ["FIN-14"],
+        STORE,
+        'if {e["evidence_hash"] for e in evidence} != set(model.cause_hashes):',
+        "if False:",
+        [CAUSE_SET],
+        "A rollback that signs causes beyond the ones that exclude its miners is accepted.",
+    ),
+    mutant(
+        "rollback-accepts-a-resolution-of-another-signer",
+        ["FIN-14"],
+        STORE,
+        '                        signed["signer"] != turn["contest"]["referee"]\n'
+        '                        or signed["signer"] not in policy.referees\n',
+        "                        False\n",
+        [CAUSE_REFUSED],
+        "A resolution signed by a key that was not the contest's referee is a cause.",
+    ),
+    mutant(
+        "legacy-finalizes-a-wrong-included-set",
+        ["FIN-27"],
+        STORE,
+        "            if list(m.included) != included:\n",
+        "            if False:\n",
+        [LEGACY],
+        "A legacy Finalize naming other miners than the audited ones appends to the journal.",
     ),
 ]

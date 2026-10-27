@@ -6,7 +6,6 @@ service does not hold on this tree; each carries a control that reaches the poin
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import base64
 import hashlib
@@ -18,10 +17,9 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-import hypertrain
 from hypertrain.data.store import ObjectNotFound
 from hypertrain.data.stream_store import spool
-from hypertrain.protocol import envelope_v2
+from hypertrain.protocol import envelope_v2, relay_envelope
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Receipt
 from hypertrain.protocol.messages_v2 import WorkProof
@@ -30,6 +28,7 @@ from hypertrain.protocol.relay_messages import (
     CustodyRelease,
     UploadGrant,
 )
+from hypertrain.relay import app as relay_app
 from hypertrain.relay.app import create_app as create_relay_app
 from hypertrain.relay.core import RelayError, Settlement
 
@@ -40,14 +39,15 @@ from .support_http_auth import (
     changed,
     detail,
     durable_state,
+    log_record_writes,
     open_round,
     quiet_client,
     seed_relay_scenario,
+    sibling_runtime,
     sibling_service,
 )
 
 RELAY_FIXTURE = ("li_relay_fixture", "relay/test_transport_v2.py")
-SOURCE = Path(hypertrain.__file__).resolve().parent
 
 
 # SG-05 ------------------------------------------------------------------------------------
@@ -65,6 +65,8 @@ def test_a_dispute_watch_header_captured_in_an_earlier_round_is_refused_later(
     party = service.HOT[0]
     with service_world(tmp_path) as world:
         n = world.network
+        # The control signs the preimage the service accepts today: a fix that adds a round or a
+        # nonce to it changes this line with the service.
         text = f"hypertrain/watch/2|{n.manifest.run_id()}|{party.ss58}".encode()
         headers = {"x-dispute-signature": party.sign(text).hex()}
         url = n.url + "/disputes"
@@ -88,6 +90,7 @@ def test_a_trial_job_header_captured_in_an_earlier_round_is_refused_later(tmp_pa
         identity = n.join(0).json()["admission_id"]
         n.push(2)
         assert n.client.get(n.url + f"/join/{identity}/challenge").status_code == 200
+        # As above: the preimage is the one the service accepts today.
         text = f"hypertrain/trial-job/2|{n.manifest.run_id()}|{identity}".encode()
         headers = {"x-hotkey": owner.ss58, "x-trial-signature": owner.sign(text).hex()}
         url = n.url + f"/join/{identity}/job"
@@ -168,9 +171,10 @@ def test_a_second_anonymous_observer_challenge_does_not_void_the_pending_one(
         first = observer_challenge(client, url)
         accepted = client.post(url, json=observer_answer(world, scenario, first))
         assert accepted.status_code == 200, accepted.text
-        # A stranger who knows the grant and the observer asks again before the observer answers.
+        # A stranger who knows the grant and the observer asks again before the observer answers;
+        # what that second ask is told does not matter, only that the pending challenge survives.
         pending = observer_challenge(client, url)
-        observer_challenge(client, url)
+        client.get(url)
         answer = client.post(url, json=observer_answer(world, scenario, pending))
         assert answer.status_code == 200, detail(answer)
 
@@ -190,7 +194,7 @@ def test_an_observer_challenge_asked_for_in_a_later_round_is_a_mapped_answer(
         assert client.get(url).status_code == 200  # control: the first round issues a challenge
         world.network.push(5)
         later = client.get(url)
-        assert later.status_code < 500, f"answered {later.status_code} in the next round"
+        assert later.status_code != 500, "an unmapped error answers the ask of the next round"
 
 
 # GT-05 ------------------------------------------------------------------------------------
@@ -224,20 +228,21 @@ def test_repeated_anonymous_reads_of_a_round_leave_the_stored_state_as_the_first
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="GT-05+HTP-02: a repeated anonymous read of the round view performs no write",
+    reason="GT-05+HTP-02: a repeated anonymous read of the round view rewrites no stored record",
 )
-def test_a_repeated_anonymous_round_view_rewrites_nothing(tmp_path: Path) -> None:
+def test_a_repeated_anonymous_round_view_rewrites_no_stored_record(tmp_path: Path) -> None:
     with service_world(tmp_path) as world:
         open_round(world)
         client = quiet_client(world.app)
         url = f"/v2/runs/{world.run_id}/rounds/0"
         hosted = world.store.for_run(world.run_id)
         assert client.get(url).status_code == 200
-        writes = hosted._db.total_changes
+        with hosted._lock:
+            written = log_record_writes(hosted._db)
         assert client.get(url).status_code == 200
-        assert hosted._db.total_changes == writes, (
-            f"{hosted._db.total_changes - writes} rows rewritten by the second read"
-        )
+        with hosted._lock:
+            rewritten = written()
+    assert rewritten == [], f"{len(rewritten)} stored records rewritten by the second read"
 
 
 # LV-01 / LV-02 ----------------------------------------------------------------------------
@@ -323,32 +328,55 @@ def test_a_signed_object_upload_never_takes_the_store_lock_on_the_event_loop(
 # LV-03 ------------------------------------------------------------------------------------
 
 
-def runtime_relay_keywords() -> set[str]:
-    """Keyword arguments the shipped entry point passes when it builds the `Relay`."""
-    tree = ast.parse((SOURCE / "relay/app.py").read_text())
-    runtime = next(
-        n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "runtime"
-    )
-    builds = [
-        node
-        for node in ast.walk(runtime)
-        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Relay"
-    ]
-    assert len(builds) == 1
-    return {k.arg for k in builds[0].keywords if k.arg}
-
-
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="LV-03+TRN-02: the shipped relay entry point gives the relay the settlement journal "
-    "that releasing a retained upload needs",
+    reason="LV-03+TRN-02: the shipped relay can act on a master release of a retained upload",
 )
-def test_the_shipped_relay_is_built_with_the_settlement_a_release_needs() -> None:
-    keywords = runtime_relay_keywords()
-    wiring = {"run_id", "registry", "backing", "now"}
-    assert wiring <= keywords  # control: this is the call that builds the served relay
-    assert "settlement" in keywords
+def test_the_shipped_relay_does_not_refuse_a_release_for_want_of_a_settlement_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = sibling_runtime()
+    built: list[Any] = []
+    create = relay_app.create_app
+
+    def capture(relay: Any, drain_token: str) -> Any:
+        built.append(relay)
+        return create(relay, drain_token)
+
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no master in this test", request=request)
+
+    monkeypatch.setattr(relay_app, "create_app", capture)
+    monkeypatch.setattr(
+        relay_app,
+        "http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(unreachable)),
+    )
+    release = CustodyRelease(
+        grant_hash=HASH,
+        custody_hashes=[HASH],
+        retention_hash=HASH,
+        finality_hash=HASH,
+        vesting_beacon=1,
+        closed_dispute_root=HASH,
+        release_beacon=11,
+    )
+
+    async def scenario() -> str:
+        async with runtime.serving(tmp_path, monkeypatch, runtime.JUST_AFTER_BOUNDARY):
+            assert len(built) == 1  # control: this is the relay the entry point builds
+            sealed = relay_envelope.seal(
+                runtime.MASTER, "CustodyRelease", runtime.RUN, release, 10_000
+            )
+            try:
+                await built[0].release(relay_envelope.parse_envelope(sealed))
+            except Exception as error:
+                return str(error)
+            return ""
+
+    answer = asyncio.run(scenario())
+    assert "settlement journal not configured" not in answer, answer
 
 
 def sealed_release(rig: Any, grant: UploadGrant, custody: ChunkCustodyAck) -> Any:
@@ -367,7 +395,7 @@ def sealed_release(rig: Any, grant: UploadGrant, custody: ChunkCustodyAck) -> An
 
 @pytest.mark.xfail(
     strict=True,
-    raises=RelayError,
+    raises=AssertionError,
     reason="LV-03+TRN-02: a released upload frees its slot in the retained-upload cap",
 )
 def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: Path) -> None:
@@ -398,7 +426,10 @@ def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: P
             # Finality releases custody of both served rounds.
             for earlier, custody in served:
                 await rig.relay.release(sealed_release(rig, earlier, custody))
-            await rig.relay.accept(raw, manifest, assignment, opened)
+            try:
+                await rig.relay.accept(raw, manifest, assignment, opened)
+            except RelayError as error:
+                assert "retained upload quota" not in str(error), "released uploads still count"
 
     asyncio.run(scenario())
 
@@ -422,17 +453,20 @@ def test_one_hotkey_cannot_store_more_objects_than_a_proof_can_reference(tmp_pat
     with service_world(tmp_path) as world:
         n = world.network
         assert n.join(0).status_code == 200
-        accepted = 0
-        for i in range(limit + 1):
+
+        def store(i: int) -> int:
             body = f"artifact {i}".encode()
             sha = hashlib.sha256(body).hexdigest()
             signature = miner.sign(f"hypertrain/object/2|{world.run_id}|{sha}".encode()).hex()
-            stored = n.client.put(
+            return n.client.put(
                 n.url + "/objects/" + sha,
                 content=body,
                 headers={"x-hotkey": miner.ss58, "x-object-signature": signature},
-            )
-            accepted += stored.status_code == 200
+            ).status_code
+
+        statuses = [store(i) for i in range(limit + 1)]
+        assert statuses[0] == 200  # control: a signed upload of an admitted miner is served
+        accepted = statuses.count(200)
         assert accepted == limit, (
             f"{accepted} objects stored for one hotkey; {limit} is the most a proof lists"
         )

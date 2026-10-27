@@ -1,7 +1,8 @@
 """Mutants of the disputes package: one realistic regression each of the contest machine.
 
-Run: scripts/check_ledger_invariant_mutants.py --only <id> ... (see its --help). The two
-`forged` mutants group runs a real round (about 45 s each); every other mutant is a few seconds.
+Run: scripts/check_ledger_invariant_mutants.py --only <id> ... (see its --help). The five
+mutants named after the FORGED test run a real round (about 45 s each); every other mutant is a
+few seconds.
 """
 
 # ruff: noqa: E501  (snippets and node ids are verbatim; wrapping them would change them)
@@ -58,6 +59,19 @@ ADVERSE = (
     + "test_a_miner_with_an_adverse_audit_verdict_is_minted_nothing_even_if_the_finalize_names_it"
 )
 UNVERIFIED = BARE + "test_a_reward_cannot_be_minted_for_a_hotkey_without_verified_work"
+CONVICT = BARE + "test_a_referee_cannot_convict_with_evidence_the_service_never_registered"
+UNRESOLVED = BARE + "test_an_unresolved_contest_releases_nothing_whatever_the_clock_says"
+STATE_REQUEST = (
+    BARE + "test_a_state_request_is_refused_for_a_closed_dispute_a_late_round_or_a_bad_checkpoint"
+)
+SERVED_EVENT = BARE + "test_a_served_event_is_signed_by_the_coordinator_and_no_field_can_be_altered"
+ATOMIC_BARE = (
+    BARE + "test_a_failing_settlement_leaves_the_dispute_unresolved_when_both_share_one_transaction"
+)
+HORIZON = BARE + "test_an_answer_near_the_end_never_extends_its_turn_past_the_absolute_horizon"
+XFAIL_TIMEOUT = (
+    HTTP + "test_a_timeout_leaves_the_same_durable_resolution_record_as_a_referee_resolution"
+)
 
 ROUTE_OPEN = HTTP + "test_only_the_audited_miner_can_open_a_contest_over_the_service_route"
 PRINCIPAL = HTTP + "test_each_dispute_route_accepts_only_its_intended_principal"
@@ -704,5 +718,335 @@ MUTANTS = [
         "new": '            if False:\n                raise ChallengeError(409, "immutable referee descriptor conflicts")',
         "tests": [DECISION_TABLE],
         "why": "A second referee call can run against a descriptor that differs from the first.",
+    },
+    {
+        "id": "dsp-turn-deadline-past-the-horizon",
+        "invariants": ["DIA-07"],
+        "path": D,
+        "old": (
+            'update["turn_deadline"] = min(\n'
+            "                now + self.escrow.manifest.training.verify.T.dispute_per_level,\n"
+            "                turn.absolute_deadline,\n"
+            "            )"
+        ),
+        "new": 'update["turn_deadline"] = now + self.escrow.manifest.training.verify.T.dispute_per_level',
+        "tests": [HORIZON],
+        "why": "An answer near the end extends the turn past the absolute horizon.",
+    },
+    {
+        "id": "dsp-reassign-after-resolution",
+        "invariants": ["DIA-07", "DIB-13"],
+        "path": D,
+        "old": (
+            "                not turn.paused\n"
+            "                or turn.resolution is not None\n"
+            "                or now >= turn.absolute_deadline"
+        ),
+        "new": (
+            "                not turn.paused\n                or now >= turn.absolute_deadline"
+        ),
+        "tests": [PROPERTY],
+        "why": "A decided and paused dispute can still have its referee replaced.",
+    },
+    {
+        "id": "dsp-unresolved-settlement-passes",
+        "invariants": ["DIA-12", "DIB-10"],
+        "path": D,
+        "old": (
+            "            if status.unresolved:\n"
+            '                raise DisputeError("UNRESOLVED_CONTEST")'
+        ),
+        "new": ("            if False:\n                raise DisputeError('UNRESOLVED_CONTEST')"),
+        "tests": [UNRESOLVED],
+        "why": "settle_lock goes on with an open contest.",
+    },
+    {
+        "id": "dsp-timeout-without-any-ack",
+        "invariants": ["DIB-14"],
+        "path": D,
+        "old": (
+            "            if not delivered:\n"
+            '                raise DisputeError("NO_AUTHENTICATED_TURN_DELIVERY")'
+        ),
+        "new": (
+            "            if False:\n"
+            "                raise DisputeError('NO_AUTHENTICATED_TURN_DELIVERY')"
+        ),
+        "tests": [TIMEOUT + "[miner]"],
+        "why": "A turn that no acknowledgement shows delivered can be timed out.",
+    },
+    {
+        "id": "dsp-closed-dispute-blocks-the-miner",
+        "invariants": ["DIA-05"],
+        "path": D,
+        "old": "                t.resolution is None and t.contest.miner == contest.miner for t in active",
+        "new": "                t.contest.miner == contest.miner for t in active",
+        "tests": [ONE_PER_MINER],
+        "why": "A miner whose dispute was closed can never contest again.",
+    },
+    {
+        "id": "dsp-coordinator-may-referee",
+        "invariants": ["DIA-04"],
+        "path": D,
+        "old": (
+            "                contest.miner,\n"
+            "                contest.auditor,\n"
+            "                self.key.ss58,\n"
+            "            ):\n"
+            '                raise DisputeError("INDEPENDENT_REFEREE_REQUIRED")'
+        ),
+        "new": (
+            "                contest.miner,\n"
+            "                contest.auditor,\n"
+            "            ):\n"
+            '                raise DisputeError("INDEPENDENT_REFEREE_REQUIRED")'
+        ),
+        "tests": [PINNED_PARTY],
+        "why": "The coordinator can be the referee of a dispute it runs.",
+    },
+    {
+        "id": "dsp-miner-may-referee",
+        "invariants": ["DIA-04"],
+        "path": D,
+        "old": (
+            "                contest.miner,\n"
+            "                contest.auditor,\n"
+            "                self.key.ss58,\n"
+            "            ):\n"
+            '                raise DisputeError("INDEPENDENT_REFEREE_REQUIRED")'
+        ),
+        "new": (
+            "                contest.auditor,\n"
+            "                self.key.ss58,\n"
+            "            ):\n"
+            '                raise DisputeError("INDEPENDENT_REFEREE_REQUIRED")'
+        ),
+        "tests": [PINNED_PARTY],
+        "why": "The contesting miner can judge its own dispute.",
+    },
+    {
+        "id": "dsp-reassign-to-an-unpinned-key",
+        "invariants": ["DIA-04"],
+        "path": D,
+        "old": (
+            "                or referee not in self.policy.referees\n"
+            "                or referee\n"
+            "                in ("
+        ),
+        "new": ("                or referee\n                in ("),
+        "tests": [REASSIGN],
+        "why": "The replacement referee need not be one the operator pinned.",
+    },
+    {
+        "id": "dsp-reassign-to-the-coordinator",
+        "invariants": ["DIA-04"],
+        "path": D,
+        "old": (
+            "                    turn.contest.referee,\n"
+            "                    self.key.ss58,\n"
+            "                )\n"
+            "            ):\n"
+            '                raise DisputeError("REFEREE_REASSIGNMENT_BOUND")'
+        ),
+        "new": (
+            "                    turn.contest.referee,\n"
+            "                )\n"
+            "            ):\n"
+            '                raise DisputeError("REFEREE_REASSIGNMENT_BOUND")'
+        ),
+        "tests": [REASSIGN],
+        "why": "The coordinator can be named the replacement referee.",
+    },
+    {
+        "id": "dsp-state-request-on-a-resolved-dispute",
+        "invariants": ["DIA-20"],
+        "path": D,
+        "old": (
+            "                turn.resolution is not None\n"
+            "                or now > turn.absolute_deadline\n"
+            "                or not (0 <= checkpoint <= turn.contest.step_span)"
+        ),
+        "new": (
+            "                now > turn.absolute_deadline\n"
+            "                or not (0 <= checkpoint <= turn.contest.step_span)"
+        ),
+        "tests": [STATE_REQUEST],
+        "why": "A checkpoint is requested of a miner for a dispute already decided.",
+    },
+    {
+        "id": "dsp-ack-stored-twice",
+        "invariants": ["DIA-18", "SG-14"],
+        "path": D,
+        "old": (
+            "self.db.execute(\n"
+            '                "INSERT OR IGNORE INTO dispute_acks_v2 VALUES(?,?,?)",'
+        ),
+        "new": ('self.db.execute(\n                "INSERT INTO dispute_acks_v2 VALUES(?,?,?)",'),
+        "tests": [ACK],
+        "why": "The same acknowledgement sent twice breaks on the primary key instead of being a no-op.",
+    },
+    {
+        "id": "dsp-resolution-commits-early",
+        "invariants": ["DIA-13", "DIB-10"],
+        "path": D,
+        "old": (
+            '            turn = turn.model_copy(update={"resolution": model, "resolved_beacon": now})\n'
+            "            self._save(turn)\n"
+            "        self.notify()"
+        ),
+        "new": (
+            '            turn = turn.model_copy(update={"resolution": model, "resolved_beacon": now})\n'
+            "            self._save(turn)\n"
+            "            self.db.commit()\n"
+            "        self.notify()"
+        ),
+        "tests": [ATOMIC_BARE],
+        "why": "The decision is committed before the caller has settled the bond.",
+    },
+    {
+        "id": "dsp-dispute-state-route-without-the-operator-bearer",
+        "invariants": ["DIB-25"],
+        "path": A,
+        "old": (
+            "        admin(authorization)\n"
+            "        return await run(store.for_run(run_id).dispute_state_v2, run_id, dispute_id, checkpoint)"
+        ),
+        "new": "        return await run(store.for_run(run_id).dispute_state_v2, run_id, dispute_id, checkpoint)",
+        "tests": [PRINCIPAL],
+        "why": "Anyone can ask a miner to serve a checkpoint.",
+    },
+    {
+        "id": "dsp-rollback-preview-route-without-the-operator-bearer",
+        "invariants": ["DIB-25"],
+        "path": A,
+        "old": (
+            "        admin(authorization)\n"
+            "        try:\n"
+            "            return await run(\n"
+            "                store.for_run(run_id).rollback_preview_v2, run_id, await v2_raw(request)\n"
+            "            )"
+        ),
+        "new": (
+            "        try:\n"
+            "            return await run(\n"
+            "                store.for_run(run_id).rollback_preview_v2, run_id, await v2_raw(request)\n"
+            "            )"
+        ),
+        "tests": [PRINCIPAL],
+        "why": "Anyone can run the master's rollback preview.",
+    },
+    {
+        "id": "dsp-timeout-skips-the-round-recount",
+        "invariants": ["DIB-15", "DIB-13"],
+        "path": S,
+        "old": (
+            "                disputes.settle_lock(dispute_id, now=self._now(self._db))\n"
+            "                self._recount_disputes_v2(run_id, result.contest.w)\n"
+            "        disputes.notify()"
+        ),
+        "new": (
+            "                disputes.settle_lock(dispute_id, now=self._now(self._db))\n"
+            "        disputes.notify()"
+        ),
+        "tests": [XFAIL_TIMEOUT],
+        "why": "A timed-out dispute keeps holding its round open.",
+    },
+    {
+        "id": "dsp-state-serve-for-another-challenge",
+        "invariants": ["DIA-20"],
+        "path": D,
+        "old": (
+            "                and (\n"
+            "                    e.turn.contest.challenge_hash,\n"
+            "                    e.checkpoint * stride,\n"
+            "                )\n"
+            "                == (model.challenge_hash, model.t)"
+        ),
+        "new": "                and e.checkpoint * stride == model.t",
+        "tests": [SERVE],
+        "why": "A state serve for another challenge answers the request.",
+    },
+    {
+        "id": "dsp-event-signature-skips-the-turn",
+        "invariants": ["DIA-17"],
+        "path": D,
+        "old": 'model.model_dump(mode="json", exclude={"sig"}),',
+        "new": 'model.model_dump(mode="json", exclude={"sig", "turn"}),',
+        "tests": [SERVED_EVENT],
+        "why": "The coordinator signature no longer covers the turn an event announces.",
+    },
+    {
+        "id": "dsp-rollback-over-an-unresolved-audit",
+        "invariants": ["DIB-19"],
+        "path": S,
+        "old": "                if not status.applied or status.unresolved_audits or status.unresolved_disputes:",
+        "new": "                if not status.applied or status.unresolved_disputes:",
+        "tests": [ROLLBACK_STATE + "[audit-unresolved]"],
+        "why": "A rollback proceeds over a round whose audit is still open.",
+    },
+    {
+        "id": "dsp-rollback-over-an-unapplied-round",
+        "invariants": ["DIB-19"],
+        "path": S,
+        "old": "                if not status.applied or status.unresolved_audits or status.unresolved_disputes:",
+        "new": "                if status.unresolved_audits or status.unresolved_disputes:",
+        "tests": [ROLLBACK_STATE + "[not-applied]"],
+        "why": "A rollback proceeds over a round that was never applied.",
+    },
+    {
+        "id": "dsp-resolution-trusts-the-referee",
+        "invariants": ["DIA-19", "DIB-01", "DS-05"],
+        "path": D,
+        "old": (
+            "            row = self.db.execute(\n"
+            '                "SELECT body FROM dispute_evidence_v2 WHERE hash=?", (model.evidence_hash,)\n'
+            "            ).fetchone()\n"
+            "            if row is None:\n"
+            '                raise DisputeError("UNVERIFIED_REFEREE_EVIDENCE")\n'
+            "            evidence = RefereeEvidence.model_validate_json(row[0])\n"
+            "            if (evidence.dispute_id, evidence.transcript_hash, evidence.reason, evidence.loser) != (\n"
+            "                turn.dispute_id,\n"
+            "                turn.transcript_hash,\n"
+            "                model.reason,\n"
+            "                model.loser,\n"
+            "            ):\n"
+            '                raise DisputeError("REFEREE_EVIDENCE_BINDING")\n'
+        ),
+        "new": "",
+        "tests": [CONVICT],
+        "why": "The referee's resolution is taken without any evidence the service registered.",
+    },
+    {
+        "id": "dsp-bond-of-another-coldkey",
+        "invariants": ["DIB-16"],
+        "path": D,
+        "old": "            if (lock.owner, lock.dispute_id) != (self.owner_of(contest.miner), dispute_id) or (",
+        "new": "            if lock.dispute_id != dispute_id or (",
+        "tests": [OWN_BOND + "[another-coldkey]"],
+        "why": "A bond funded by another coldkey backs the contest.",
+    },
+    {
+        "id": "dsp-miner-fraud-releases-the-bond",
+        "invariants": ["DIA-12", "DIB-10"],
+        "path": D,
+        "old": (
+            '                and turn.resolution.reason == "FRAUD"\n'
+            "                and status.loser == turn.contest.miner"
+        ),
+        "new": (
+            '                and turn.resolution.reason == "NEVER"\n'
+            "                and status.loser == turn.contest.miner"
+        ),
+        "tests": [BURN + "[the-miner-cheated]"],
+        "why": "A miner convicted of fraud gets its bond back.",
+    },
+    {
+        "id": "dsp-rollback-ignores-the-next-round",
+        "invariants": ["DIB-19"],
+        "path": S,
+        "old": "            for w in (model.w, model.w + 1):",
+        "new": "            for w in (model.w,):",
+        "tests": [ROLLBACK_STATE + "[round-w1-settled]"],
+        "why": "A rollback checks the finality of round w only, so a settled w+1 is rewritten.",
     },
 ]

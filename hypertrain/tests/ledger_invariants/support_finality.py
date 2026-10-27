@@ -393,6 +393,7 @@ class Rounds:
         challenge0 = AuditChallengeV2.model_validate(base.challenge.body)
         verdict0 = ReplayVerdict.model_validate(base.verdict.body)
         keys = [fixture.HOT, *MINERS][:count]
+        challenger = MINERS[2] if tamper == "foreign challenge signer" else fixture.COORD
         works, verdicts, owners = [], [], {}
         for hot in keys:
             commit = commit0.model_copy(update={"w": w, "hotkey": hot.ss58})
@@ -400,7 +401,7 @@ class Rounds:
             verdict = verdict0.model_copy(update={"challenge_hash": digest(challenge)})
             auditor = fixture.AUDITOR
             if tamper is not None:
-                verdict, auditor = self._tampered(verdict, tamper)
+                verdict, auditor = self._tampered(verdict, tamper, hot)
             owner = fixture.COLD.ss58 if hot is fixture.HOT else fixture.OTHER.ss58
             owners[hot.ss58] = owner
             verdicts.append(digest(verdict))
@@ -409,7 +410,7 @@ class Rounds:
                     EnvelopeV2.model_validate(seal(hot, "CommitV2", run_id, commit, 200)),
                     EnvelopeV2.model_validate(seal(auditor, "ReplayVerdict", run_id, verdict, 200)),
                     EnvelopeV2.model_validate(
-                        seal(fixture.COORD, "AuditChallengeV2", run_id, challenge, 200)
+                        seal(challenger, "AuditChallengeV2", run_id, challenge, 200)
                     ),
                     owner,
                     (0,),
@@ -464,7 +465,9 @@ class Rounds:
         )
         return Round(reward, evidence, tuple(reward.origin_ids))
 
-    def _tampered(self, verdict: ReplayVerdict, tamper: str) -> tuple[ReplayVerdict, Keypair]:
+    def _tampered(
+        self, verdict: ReplayVerdict, tamper: str, miner: Keypair
+    ) -> tuple[ReplayVerdict, Keypair]:
         """The verdict an audit would carry if it did not prove the commit, and its signer."""
         env = verdict.replay_env
         match tamper:
@@ -486,7 +489,9 @@ class Rounds:
                 other = {"challenge_hash": sha256_hex(b"another challenge")}
             case "unpinned auditor":
                 return verdict, MINERS[2]
-            case "foreign finalize signer" | "another replayed theta":
+            case "self audit":
+                return verdict, miner
+            case "foreign finalize signer" | "foreign challenge signer" | "another replayed theta":
                 return verdict, self.fixture.AUDITOR
             case _:
                 raise ValueError(tamper)

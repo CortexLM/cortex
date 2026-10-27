@@ -79,6 +79,7 @@ def test_the_owner_releases_a_contest_bond_only_with_the_terms_of_its_own_closed
     # and none with the terms of anything but this dispute
     refused(H, H, "foreign")
     refused(closed.finality_hash, H, "root")
+    refused(H, closed.closed_dispute_root, "finality")
     response = rig.release(miner, contest.bond, closed.finality_hash, closed.closed_dispute_root)
     assert response.status_code == 200, response.text
     after = units_of(rig.escrow, miner.coldkey)
@@ -176,8 +177,9 @@ def test_a_live_admission_keeps_its_stake_when_the_lock_is_named_like_a_closed_d
     strict=True,
     raises=EscrowError,
     reason="ESC-12+CRD-21+ES-04+BND-19: the owner of an admission with no open obligation can "
-    "release its stake, but the store has no settlement for an admission lock (no dispute row, "
-    "no settlement record), so every honest release is UNACCEPTED_SETTLEMENT",
+    "release its stake (the unlock condition is a pending product decision: this is the weakest "
+    "one), but the store has no settlement for an admission lock (no dispute row, no settlement "
+    "record), so every honest release is UNACCEPTED_SETTLEMENT",
 )
 def test_the_owner_releases_the_stake_of_an_admission_with_no_open_obligation(rig: Rig) -> None:
     # Given: an application that never reached a trial, a roster, a dispute or a reward
@@ -216,9 +218,9 @@ def lose_the_contest(rig: Rig) -> tuple[Miner, EscrowLock, Contest]:
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="AD-09+DIA-23: an admission whose miner lost a finalized FRAUD resolution is banned, "
-    "but Admission.settle_fraud has no caller, so the miner stays SUSPENDED with its pending "
-    "dispute for ever",
+    reason="LCK-06+AD-09+DIA-23: an admission whose miner lost a finalized FRAUD resolution is "
+    "banned, but Admission.settle_fraud has no caller, so the miner stays SUSPENDED with its "
+    "pending dispute for ever",
 )
 def test_a_lost_fraud_contest_bans_the_admission(rig: Rig) -> None:
     miner, _, _ = lose_the_contest(rig)
@@ -229,8 +231,9 @@ def test_a_lost_fraud_contest_bans_the_admission(rig: Rig) -> None:
     strict=True,
     raises=AssertionError,
     reason="LCK-06+DIB-08+ES-04+BND-19: the admission stake of a miner who lost a FRAUD contest "
-    "is burned with the contest bond, but the store has no settlement for the admission lock, "
-    "so the stake stays locked, neither burned nor releasable",
+    "is burned with the contest bond (burn rather than freeze is a pending founder decision), "
+    "but the store has no settlement for the admission lock, so the stake stays locked, neither "
+    "burned nor releasable",
 )
 def test_a_lost_fraud_contest_burns_the_admission_stake(rig: Rig) -> None:
     miner, _, _ = lose_the_contest(rig)
@@ -393,9 +396,10 @@ def test_a_miner_who_lost_a_fraud_contest_has_no_route_back_and_no_new_applicati
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="AD-06: a miner suspended by a replay mismatch has a signed route back to PROBATION, "
-    "but the pending dispute of a trial mismatch is an id no dispute row or settlement record "
-    "carries, so the recovery route can only answer UNACCEPTED_SETTLEMENT",
+    reason="AD-06: a miner suspended by a replay mismatch has a signed route back to PROBATION "
+    "(or the docs name that suspension terminal: a pending product decision), but the pending "
+    "dispute of a trial mismatch is an id no dispute row or settlement record carries, so the "
+    "recovery route can only answer UNACCEPTED_SETTLEMENT",
 )
 def test_a_miner_suspended_by_a_replay_mismatch_has_a_signed_route_back(rig: Rig) -> None:
     # Given: the state Admission.proof leaves on a trial whose proof differs from the reference:
@@ -410,6 +414,8 @@ def test_a_miner_suspended_by_a_replay_mismatch_has_a_signed_route_back(rig: Rig
         dispute_id=pending,
         evidence_hash=ident("replay-mismatch evidence"),
     )
+    suspended = rig.admission.store.record(miner.hotkey)
+    assert (suspended.state, suspended.pending_dispute) == ("SUSPENDED", True)
     rig.net.push(300)
     # When: the miner asks to be let back
     response = recover(rig, miner, pending)
@@ -465,7 +471,10 @@ def test_a_round_opens_only_when_every_roster_member_is_currently_funded(
         pytest.param("state", "PROBATION", 403, NOT_FUNDED, id="state"),
         pytest.param("q_i", "00000000", 403, NOT_FUNDED, id="quality"),
         pytest.param(
-            "eligible_weight", 4194303, 422, "live eligible ceiling must be Q/4", id="weight"
+            "eligible_weight", 4194303, 422, "live eligible ceiling must be Q/4", id="weight-below"
+        ),
+        pytest.param(
+            "eligible_weight", 4194305, 422, "live eligible ceiling must be Q/4", id="weight-above"
         ),
     ],
 )

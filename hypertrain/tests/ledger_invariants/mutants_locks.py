@@ -21,11 +21,15 @@ API = "tests/ledger_invariants/test_locks_2.py::"
 EXISTING = "tests/challenge/test_admission_v2.py::"
 
 ELIGIBILITY = API + "test_eligibility_needs_current_stake_standing_and_screen"
+REQUIRED_STAKE = API + "test_the_required_stake_is_the_largest_of_its_three_terms"
 ROLE_KEYS = API + "test_no_role_key_is_exempt_from_the_stake"
 GRADUATION = API + "test_graduation_needs_funding_clean_finalizations_and_every_canary_block"
 ROTATION = API + "test_rotation_keeps_the_standing_and_the_history_of_both_keys"
 SECOND_APPLICATION = (
     API + "test_a_second_application_is_refused_for_a_known_hotkey_or_an_unsettled_coldkey"
+)
+COLDKEY_STATE = (
+    API + "test_a_coldkey_with_a_probation_or_suspended_admission_cannot_admit_another_hotkey"
 )
 RECOVERY = API + "test_recovery_needs_a_resolved_nonfraud_record_at_or_past_its_release_round"
 BANNED = (
@@ -71,6 +75,22 @@ PENDING_TERM_GONE = """\
 SCREEN_TERM = """\
             and now <= r.screen_until
 """
+GOAL_TERM = """\
+            (p.G_max_units * 10**18 + denominator - 1) // denominator
+            if denominator
+            else p.G_max_units + units + 1,
+"""
+COLLECTIBLE_TERM = (
+    "            self.escrow.manifest.training.verify.s_min_units(p.R_collectible_units),\n"
+)
+SCREEN_AND_STAKE = """\
+            and now <= r.screen_until
+            and units >= required
+"""
+SCREEN_ENDS_EARLY = """\
+            and now < r.screen_until
+            and units >= required
+"""
 OUTBOX_TERM = """\
             and not self.store.pending_outbox(r.admission_id)
 """
@@ -83,6 +103,14 @@ GRADUATE_CONDITION = """\
 """
 GRADUATE_WITHOUT_FUNDING = """\
                 and r.canary_blocks == (1, 2, 3)
+"""
+GRADUATE_STATE = """\
+                r.state == "PROBATION"
+                and r.clean_count >= self.policy.clean_finalizations
+"""
+GRADUATE_ANY_LIVE_STATE = """\
+                r.state in ("PROBATION", "ACTIVE")
+                and r.clean_count >= self.policy.clean_finalizations
 """
 GRADUATE_WITHOUT_CANARIES = """\
                 and s.eligible
@@ -135,6 +163,12 @@ PASS = """\
 """
 COLDKEY_QUERY = "\"SELECT 1 FROM admissions_v2 WHERE coldkey=? AND state!='ACTIVE'\""
 COLDKEY_QUERY_ANY = '"SELECT 1 FROM admissions_v2 WHERE coldkey=?"'
+COLDKEY_QUERY_NOT_SUSPENDED = (
+    "\"SELECT 1 FROM admissions_v2 WHERE coldkey=? AND state NOT IN ('ACTIVE','SUSPENDED')\""
+)
+COLDKEY_QUERY_NOT_PROBATION = (
+    "\"SELECT 1 FROM admissions_v2 WHERE coldkey=? AND state NOT IN ('ACTIVE','PROBATION')\""
+)
 COLD_SIGNATURE = (
     ") and verify(decode_hotkey(request.coldkey), msg, bytes.fromhex(request.cold_sig))"
 )
@@ -200,6 +234,8 @@ WEIGHT_CEILING = """\
                 if entry.eligible_weight != 4194304:
                     raise ChallengeError(422, "live eligible ceiling must be Q/4")
 """
+WEIGHT_CEILING_CHECK = "                if entry.eligible_weight != 4194304:\n"
+WEIGHT_BELOW_ONLY = "                if entry.eligible_weight < 4194304:\n"
 POLICY_REFUSAL = """\
             raise AdmissionError("POLICY_CHANGED")
 """
@@ -254,6 +290,10 @@ RELEASE_TERMS = """\
 RELEASE_WITHOUT_ROUND = """\
                 or (op.finality_hash, op.closed_dispute_root)
                 != (status.finality_hash, status.closed_dispute_root)
+            ):
+                raise EscrowError("DISPUTED_OR_UNVESTED")"""
+RELEASE_WITHOUT_FINALITY_HASH = """\
+                or op.closed_dispute_root != status.closed_dispute_root
             ):
                 raise EscrowError("DISPUTED_OR_UNVESTED")"""
 RELEASE_WITHOUT_TERMS = """\
@@ -346,6 +386,33 @@ MUTANTS = [
         "tests": [ELIGIBILITY + "[bound-not-conservative]"],
         "why": "a run whose bound is not conservative still pays an admission.",
     },
+    {
+        "id": "locks-eligibility-drops-the-goal-term",
+        "invariants": ["LCK-01"],
+        "path": ADMISSION,
+        "old": GOAL_TERM,
+        "new": "            0,\n",
+        "tests": [REQUIRED_STAKE + "[goal-over-the-stake-fraction]"],
+        "why": "the stake that covers the run's goal is not required: a smaller stake is eligible.",
+    },
+    {
+        "id": "locks-eligibility-drops-the-collectible-reward-term",
+        "invariants": ["LCK-01"],
+        "path": ADMISSION,
+        "old": COLLECTIBLE_TERM,
+        "new": "            0,\n",
+        "tests": [REQUIRED_STAKE + "[collectible-reward-multiple]"],
+        "why": "the multiple of the collectible reward is not required: a smaller stake counts.",
+    },
+    {
+        "id": "locks-eligibility-ends-the-screen-a-round-early",
+        "invariants": ["LCK-01"],
+        "path": ADMISSION,
+        "old": SCREEN_AND_STAKE,
+        "new": SCREEN_ENDS_EARLY,
+        "tests": [ELIGIBILITY + "[screen-ends-this-round]"],
+        "why": "a miner whose screen ends this very round is already ineligible.",
+    },
     # --- LCK-03: ACTIVE only through graduate -----------------------------------------------
     {
         "id": "locks-graduation-skips-funding",
@@ -374,6 +441,15 @@ MUTANTS = [
         "tests": [GRADUATION + "[canary-block-missing]"],
         "why": "a miner graduates with a canary block missing.",
     },
+    {
+        "id": "locks-graduation-repeats-for-an-active-admission",
+        "invariants": ["LCK-03"],
+        "path": ADMISSION,
+        "old": GRADUATE_STATE,
+        "new": GRADUATE_ANY_LIVE_STATE,
+        "tests": [GRADUATION + "[already-active]"],
+        "why": "an ACTIVE admission is graduated again: a second ACTIVE transition on record.",
+    },
     # --- LCK-02: roster, accept and finalize inputs ----------------------------------------
     {
         "id": "locks-roster-accepts-an-ineligible-member",
@@ -399,8 +475,17 @@ MUTANTS = [
         "path": STORE,
         "old": WEIGHT_CEILING,
         "new": "",
-        "tests": [ROSTER_ENTRY + "[weight]"],
+        "tests": [ROSTER_ENTRY + "[weight-below]", ROSTER_ENTRY + "[weight-above]"],
         "why": "a roster entry carries an eligible weight other than the live ceiling Q/4.",
+    },
+    {
+        "id": "locks-roster-takes-a-weight-above-the-ceiling",
+        "invariants": ["LCK-02"],
+        "path": STORE,
+        "old": WEIGHT_CEILING_CHECK,
+        "new": WEIGHT_BELOW_ONLY,
+        "tests": [ROSTER_ENTRY + "[weight-above]"],
+        "why": "a roster entry carries more eligible weight than the live ceiling Q/4.",
     },
     {
         "id": "locks-accept-skips-eligibility",
@@ -465,6 +550,24 @@ MUTANTS = [
         "new": PASS,
         "tests": [SECOND_APPLICATION, BANNED],
         "why": "a coldkey holds a second admission while its first is not ACTIVE.",
+    },
+    {
+        "id": "locks-join-lets-a-suspended-coldkey-apply-again",
+        "invariants": ["LCK-23"],
+        "path": ADMISSION,
+        "old": COLDKEY_QUERY,
+        "new": COLDKEY_QUERY_NOT_SUSPENDED,
+        "tests": [COLDKEY_STATE + "[SUSPENDED]"],
+        "why": "a coldkey whose admission is suspended starts again with a fresh admission.",
+    },
+    {
+        "id": "locks-join-lets-a-probation-coldkey-apply-again",
+        "invariants": ["LCK-23"],
+        "path": ADMISSION,
+        "old": COLDKEY_QUERY,
+        "new": COLDKEY_QUERY_NOT_PROBATION,
+        "tests": [COLDKEY_STATE + "[PROBATION]"],
+        "why": "a coldkey whose admission is still on probation holds a second admission.",
     },
     {
         "id": "locks-join-blocks-an-active-coldkey",
@@ -640,6 +743,15 @@ MUTANTS = [
         "new": RELEASE_WITHOUT_TERMS,
         "tests": [BOND],
         "why": "a release is accepted with terms that are not those of the settlement.",
+    },
+    {
+        "id": "locks-release-ignores-the-finality-hash",
+        "invariants": ["ESC-10", "ESC-12"],
+        "path": LEDGER,
+        "old": RELEASE_TERMS,
+        "new": RELEASE_WITHOUT_FINALITY_HASH,
+        "tests": [BOND],
+        "why": "a release naming another finalization than the settlement's is accepted.",
     },
     {
         "id": "locks-a-lost-contest-never-burns-the-bond",

@@ -1,4 +1,4 @@
-"""get_weights over HTTP and over several runs (WGT-09, 15, 16, 20, 23 and AU-06, AU-07).
+"""get_weights over HTTP and over several runs (WGT-09, 10, 15, 16, 20, 23 and AU-06, AU-07).
 
 The HTTP world is the lot's `service_world`: the real v2 network fixture with an app that holds the
 internal bearer. Its metagraph is replaced by one the test changes between requests. Live origins
@@ -247,6 +247,33 @@ def test_a_merged_answer_sums_the_runs_and_each_run_pays_only_its_own_origins(
         assert root.store.weights(0, root.when(40), 9) == first
 
 
+ADDITIVE = (
+    "units_paid",
+    "units_burned_this_epoch",
+    "hotkeys_capped",
+    "ledger_minted",
+    "ledger_burned",
+    "ledger_paid",
+    "ledger_pending",
+)
+
+
+def run_counters(weights: dict[str, int]) -> dict[str, int]:
+    """The additive counters of one run's answer, every one non-zero so that a counter the merge
+    forgets to add is not hidden by a zero."""
+    paid = sum(weights.values())
+    burned, pending, earlier = len(weights) + 1, 2 * len(weights) + 3, paid + 2
+    return {
+        "units_paid": paid,
+        "units_burned_this_epoch": FULL_SHARE_MASS - paid,
+        "hotkeys_capped": len(weights) + 1,
+        "ledger_minted": burned + earlier + pending,
+        "ledger_burned": burned,
+        "ledger_paid": earlier,
+        "ledger_pending": pending,
+    }
+
+
 @given(
     runs=st.lists(
         st.dictionaries(st.sampled_from(["a", "b", "c"]), st.integers(1, 400_000), max_size=3),
@@ -257,13 +284,12 @@ def test_a_merged_answer_sums_the_runs_and_each_run_pays_only_its_own_origins(
 def test_merging_runs_is_sum_preserving_and_independent_of_the_order_of_the_children(
     runs: list[dict[str, int]],
 ) -> None:
-    """WGT-15 (property): per-hotkey sums, additive metadata and mass add up; the children's order
-    changes nothing but the order the answers are listed in."""
+    """WGT-15 (property): per-hotkey sums, every additive counter and the mass add up; the
+    children's order changes nothing but the order the answers are listed in."""
     from hypertrain.challenge.store import _merge_answers
     from hypertrain.ledger.journal import canonical
 
     def answer(weights: dict[str, int]) -> bytes:
-        paid = sum(weights.values())
         return canonical(
             {
                 "challenge_slug": "hypertrain",
@@ -274,13 +300,7 @@ def test_merging_runs_is_sum_preserving_and_independent_of_the_order_of_the_chil
                     "epoch_at": 9,
                     "round_at": 1,
                     "reason": "ok",
-                    "units_paid": paid,
-                    "units_burned_this_epoch": FULL_SHARE_MASS - paid,
-                    "hotkeys_capped": 0,
-                    "ledger_minted": paid,
-                    "ledger_burned": 0,
-                    "ledger_paid": paid,
-                    "ledger_pending": 0,
+                    **run_counters(weights),
                 },
                 "computed_at": 5,
             }
@@ -292,39 +312,44 @@ def test_merging_runs_is_sum_preserving_and_independent_of_the_order_of_the_chil
     assert_answer_shape(merged, mass=len(runs) * FULL_SHARE_MASS)
     meta = merged["metadata"]
     assert meta["runs"] == len(runs)
-    assert meta["ledger_paid"] == meta["units_paid"] == sum(sum(w.values()) for w in runs)
+    for key in ADDITIVE:
+        assert meta[key] == sum(run_counters(w)[key] for w in runs), key
     tail_reversed = [runs[0], *reversed(runs[1:])]
     assert parse(_merge_answers([answer(w) for w in tail_reversed])) == merged
 
 
-@pytest.mark.parametrize("retried", [True, False])
-def test_a_child_payment_reaches_an_answer_only_when_the_same_epoch_is_retried(
+FROZEN_CHILD_LOSS = pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="WGT-15+WGT-D6: units a child marked paid while the root failed to persist the merged "
+    "answer are in a delivered answer, or were never marked paid (children commit in their own "
+    "database before the root persists) [candidate]",
+)
+
+
+@pytest.mark.parametrize("retried", [True, pytest.param(False, marks=FROZEN_CHILD_LOSS)])
+def test_units_a_child_paid_while_the_root_failed_to_persist_reach_a_delivered_answer(
     li_escrow: ModuleType, retried: bool
 ) -> None:
-    """WGT-15 (condition): a child commits its payout before the root persists the merged answer.
+    """WGT-15: a child commits its payout before the root persists the merged answer.
 
-    The master must retry the same epoch after a failure; asking another epoch instead leaves the
-    child's units marked paid in a stored child answer that no delivered answer ever carried.
+    The master retries the same epoch after a failure, which the control exercises; when it asks
+    another epoch instead, the units must still reach an answer it receives.
     """
     with two_stores(li_escrow) as (root, child):
         fail_persist(root.store._db)
-        # Given: the root fails to persist the merged answer after the child committed.
+        # Given: the root fails to persist the merged answer of epoch 0.
         with pytest.raises(sqlite3.IntegrityError):
             root.store.weights(0, root.when(20), 1)
         recover_persist(root.store._db)
-        assert child.escrow.balances().paid == 400_000
-        assert root.escrow.balances().paid == 0
         # When: the master retries epoch 0, or moves on to epoch 1.
-        epoch = 0 if retried else 1
-        merged = parse(root.store.weights(epoch, root.when(21), 2))
-        # Then
+        merged = parse(root.store.weights(0 if retried else 1, root.when(21), 2))
+        # Then: control, the retry delivers the child's units with the root's.
         if retried:
             assert merged["weights"] == {"hk-root": 100_000.0, "hk-shared": 1_100_000.0}
-        else:
-            assert merged["weights"] == {"hk-root": 100_000.0, "hk-shared": 700_000.0}
+        # And: every unit an escrow marked paid is in the answer that was delivered.
         delivered = int(sum(merged["weights"].values()))
-        assert delivered == (1_200_000 if retried else 800_000)
-        assert child.escrow.balances().paid == 400_000
+        assert delivered == root.escrow.balances().paid + child.escrow.balances().paid
         assert len(pay_events(child.escrow)) == 1
 
 

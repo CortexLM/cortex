@@ -27,7 +27,7 @@ from .support_audit import audit_kinds, detail, running, settled_state
 
 @pytest.fixture(scope="session", name="world")
 def audit_world(tmp_path_factory: pytest.TempPathFactory) -> sa.World:
-    return sa.World(tmp_path_factory.mktemp("audit-world"))
+    return sa.session_world(tmp_path_factory)
 
 
 # --- A2W-02, AU-04: who may lease --------------------------------------------------------------

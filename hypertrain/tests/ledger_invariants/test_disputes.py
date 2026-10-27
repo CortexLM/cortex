@@ -13,7 +13,7 @@ from dataclasses import replace
 from types import ModuleType
 
 import pytest
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 from hypertrain.challenge.disputes_v2 import DisputeError
@@ -704,22 +704,33 @@ def test_events_are_durable_cursors_grow_across_a_restart_and_a_lost_wakeup_dela
     assert [e.cursor for e in mine] == sorted(e.cursor for e in mine)
     assert [e.cursor for e in restarted.events(hot, mine[0].cursor)] == [e.cursor for e in mine[1:]]
     assert restarted.events(hot, mine[-1].cursor) == []
-    # And a wake-up that never arrives only delays a waiting reader: the table is the truth
+
+    # And a wake-up that never arrives only delays a waiting reader: the table is the truth.
+    # The reader's wait ends when the test says its timeout has run out, so no wall-clock delay
+    # decides whether the event was written before the reader looked again.
+    class Lapsing(threading.Condition):
+        def __init__(self) -> None:
+            super().__init__()
+            self.waiting, self.lapsed = threading.Event(), threading.Event()
+
+        def wait_for(self, predicate, timeout=None):
+            self.waiting.set()
+            assert self.lapsed.wait(10)
+            return super().wait_for(predicate, timeout=0)
+
     restarted.notify = lambda: None
-    waiting: list = []
-    ready = threading.Event()
-
-    def reader() -> None:
-        ready.set()
-        waiting.extend(restarted.events(hot, mine[-1].cursor, timeout=0.3))
-
-    thread = threading.Thread(target=reader)
-    thread.start()
-    assert ready.wait(5)
+    restarted.condition = lapsing = Lapsing()
+    heard: list = []
+    reader = threading.Thread(
+        target=lambda: heard.extend(restarted.events(hot, mine[-1].cursor, timeout=30))
+    )
+    reader.start()
+    assert lapsing.waiting.wait(10)
     rig.say(opened.dispute_id, rig.f.AUDITOR, AUDITOR_SAYS)
-    thread.join(10)
-    assert not thread.is_alive()
-    assert [e.turn.level for e in waiting] == ["op"]
+    lapsing.lapsed.set()
+    reader.join(10)
+    assert not reader.is_alive()
+    assert [e.turn.level for e in heard] == ["op"]
 
 
 # --- DIA-18, SG-14: an acknowledgement binds the addressed party to the exact event -------------
@@ -816,7 +827,7 @@ def test_a_self_signed_event_is_authentic_but_only_the_coordinator_signer_is_aut
 def test_a_timeout_needs_the_acknowledged_turn_and_two_distinct_healthy_permitted_witnesses(
     li_escrow: ModuleType, silent: str
 ) -> None:
-    # Covers DIB-14, DIA-17.
+    # Covers DIB-14, DIA-17, DIA-12.
     # Given: the silent party's turn is open and past its deadline; the earlier turn of the same
     # party was acknowledged, which must not count as delivery of this one. The policy pins both
     # parties as referees, so only the witness rule itself can keep them from witnessing.
@@ -914,6 +925,9 @@ CLOSERS = {
 }
 
 
+# A decided dispute that was also paused: the only state in which a late reassignment is not
+# already refused for being unpaused, so a random draw would rarely reach it.
+@example(ops=["agree", "agree", "match", "reassign"])
 @given(ops=st.lists(st.sampled_from(STEPS), max_size=14))
 def test_any_sequence_of_moves_keeps_a_dispute_monotone_and_its_decision_final(
     li_escrow: ModuleType, ops: list[str]
@@ -997,6 +1011,34 @@ def test_any_sequence_of_moves_keeps_a_dispute_monotone_and_its_decision_final(
         assert balances.burned == (BOND if verdict_burns else 0)
 
 
+def test_an_answer_near_the_end_never_extends_its_turn_past_the_absolute_horizon(
+    li_escrow: ModuleType,
+) -> None:
+    # Covers DIA-07.
+    # Given: levels of 64 positions, deeper than the horizon (12 turn windows, sized at opening
+    # from the contest's own spans) allows for, so a descent can outlast it
+    rig = make_rig(li_escrow)
+    rig.d.span = lambda contest, level, ctx: 64
+    opened, _ = rig.open(VERDICT)
+    window = rig.escrow.manifest.training.verify.T.dispute_per_level
+    turn, now = opened, opened.turn_deadline - 1
+    # When each answer arrives one beacon before the deadline it was given
+    for _ in range(30):
+        key = rig.f.HOT if turn.expected_party == rig.f.HOT.ss58 else rig.f.AUDITOR
+        says = MINER_SAYS if key is rig.f.HOT else [MINER_SAYS[0], MINER_SAYS[1], "dd" * 32]
+        turn, _ = rig.say(opened.dispute_id, key, says, now=now)
+        # Then: no turn ever outlives the horizon fixed at the opening
+        assert turn.turn_deadline <= opened.absolute_deadline
+        assert turn.absolute_deadline == opened.absolute_deadline
+        if now + window > opened.absolute_deadline:
+            break
+        now = turn.turn_deadline - 1
+    # Control: the last answer came so late that its own window alone would have crossed the
+    # horizon, and the horizon is what ended the turn
+    assert now + window > opened.absolute_deadline
+    assert turn.turn_deadline == opened.absolute_deadline
+
+
 # --- DIA-13: the decision and the settlement of the bond commit together (CONDITIONAL) ----------
 
 
@@ -1040,35 +1082,16 @@ def test_a_failing_settlement_leaves_the_dispute_unresolved_when_both_share_one_
     )
 
 
-def test_a_closer_that_commits_the_decision_before_settling_strands_the_bond(
-    li_escrow: ModuleType, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Covers DIA-13.
-    # Given: the condition broken in a stand-in closer that uses two transactions
-    rig = make_rig(li_escrow)
-    turn, _ = rig.open(VERDICT)
-    evidence = rig.evidence(turn)
-    rig.d.register_evidence(evidence)
-    fail_release(rig, monkeypatch)
-    # When its second transaction fails
-    rig.resolve(turn, evidence)
-    with pytest.raises(SettleFails):
-        rig.d.settle_lock(turn.dispute_id, now=3)
-    # Then: the dispute is closed yet the bond is still locked, which is the state the store's
-    # single transaction exists to rule out
-    assert rig.d.get(turn.dispute_id).resolution is not None
-    assert rig.d.settlement(turn.lock_id).unresolved is False
-    assert locked(rig, turn.lock_id) == BOND
-
-
-# --- the same machine behind the real routes ----------------------------------------------------
+# --- DIA-19: the referee cannot introduce the evidence it signs over (CONDITIONAL) --------------
 
 
 def test_a_referee_cannot_convict_with_evidence_the_service_never_registered(
     li_escrow: ModuleType,
 ) -> None:
     # Covers DIA-19, DIB-01, DS-05.
-    # Given: an open dispute and a referee who signs FRAUD against the miner over evidence it wrote
+    # Given: an open dispute and a referee who signs FRAUD against the miner over evidence it wrote.
+    # The condition of DIA-19 is that register_evidence stays an internal capability of the
+    # service, so nothing a claimant or the referee signs ever reaches it.
     rig = make_rig(li_escrow)
     turn, _ = rig.open(VERDICT)
     invented = rig.evidence(turn, "FRAUD", rig.f.HOT.ss58, op="invented-by-the-referee")
@@ -1076,25 +1099,6 @@ def test_a_referee_cannot_convict_with_evidence_the_service_never_registered(
     raw = rig.signed_resolution(turn, invented)
     refused_unchanged(rig, "UNVERIFIED_REFEREE_EVIDENCE", lambda: rig.d.resolution(raw, now=3))
     assert rig.escrow.balances().burned == 0
-
-
-def test_the_referee_would_decide_the_bond_if_evidence_could_be_registered_from_outside(
-    li_escrow: ModuleType,
-) -> None:
-    # Covers DIA-19.
-    # Given: the condition broken in a stand-in: a path that lets the referee's own document be
-    # registered as evidence, as the service registers its replay
-    rig = make_rig(li_escrow)
-    turn, _ = rig.open(VERDICT)
-    invented = rig.evidence(turn, "FRAUD", rig.f.HOT.ss58, op="invented-by-the-referee")
-    rig.d.register_evidence(invented)
-    # When the referee signs over it
-    with rig.escrow.tx():
-        rig.resolve(turn, invented)
-        rig.d.settle_lock(turn.dispute_id, now=3)
-    # Then: DisputesV2 does not question the content: the whole bond burns on the referee's word,
-    # which is why register_evidence must stay an internal capability of the service
-    assert rig.escrow.balances().burned == BOND
 
 
 # --- DIB-06: an adverse audit verdict earns the miner no reward ------------------------------
@@ -1169,6 +1173,7 @@ def test_a_timeout_racing_a_resolution_has_one_winner_and_the_loser_is_refused(
     evidence = rig.evidence(turn)
     rig.d.register_evidence(evidence)
     inside, proceed, finished = threading.Event(), threading.Event(), threading.Event()
+    attempting = threading.Event()
     seen: dict[str, str] = {}
 
     def resolver() -> None:
@@ -1180,6 +1185,7 @@ def test_a_timeout_racing_a_resolution_has_one_winner_and_the_loser_is_refused(
 
     def timer() -> None:
         assert inside.wait(10)
+        attempting.set()
         try:
             rig.d.timeout(turn.dispute_id, proofs, now=due)
         except DisputeError as error:
@@ -1191,6 +1197,7 @@ def test_a_timeout_racing_a_resolution_has_one_winner_and_the_loser_is_refused(
         thread.start()
     assert inside.wait(10)
     # When: the timeout is attempted, it waits behind the open transaction
+    assert attempting.wait(10)
     assert not finished.wait(0.3)
     proceed.set()
     for thread in threads:

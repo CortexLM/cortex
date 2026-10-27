@@ -369,13 +369,16 @@ def signed_requests(
     run_id: str,
     expiry: int = 10_000,
     job: dict[str, Any] | None = None,
+    *,
+    body_run: str | None = None,
 ) -> dict[str, Signed]:
     """One correctly signed request per route type, every envelope sealed for `run_id`.
 
     The bodies are well formed and the signers are the roles each route expects, so the only
     thing that differs from a request of the hosted run is the run the signature names. `job`
     is a live lease (the body of a leased AuditJobV2): execute and complete look the lease up
-    before they read the envelope, so without it they never reach the signature.
+    before they read the envelope, so without it they never reach the signature. `body_run` is
+    the run the genesis body names inside its envelope (by default `run_id`).
     """
     from hypertrain.ledger.escrow_v2 import authority_message, genesis_origin_id
     from hypertrain.protocol.envelope_v2 import seal
@@ -501,13 +504,14 @@ def signed_requests(
     final = Finalize(w=rnd.w, final_theta_hash_w1=one, included=[h0.ss58], entitlements_root=two)
     allocation = [(c.ss58, 10_000, 1) for c in (cold(i) for i in range(4))]
     genesis_hash = fixture.genesis_allocation_hash(allocation)
+    named = run_id if body_run is None else body_run
     unsigned = TestGenesis(
-        run_id=run_id,
+        run_id=named,
         allocation_hash=genesis_hash,
         total_units=40_000,
         origins=[
             OriginAllocation(
-                origin_id=genesis_origin_id(run_id, genesis_hash, i),
+                origin_id=genesis_origin_id(named, genesis_hash, i),
                 owner=owner,
                 units=units,
                 mature_at=at,

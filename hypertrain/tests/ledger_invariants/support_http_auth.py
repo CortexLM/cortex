@@ -12,8 +12,9 @@ import hashlib
 import inspect
 import re
 import sqlite3
+import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from importlib import import_module
 from pathlib import Path
 from types import ModuleType
@@ -31,7 +32,7 @@ from hypertrain.protocol.server_keys import (
     signing_message,
 )
 
-from .support import SLUG, World, table_names
+from .support import SLUG, TESTS, World, load_fixture_module, table_names
 
 HASH = "ab" * 32
 UNKNOWN_RUN = "cd" * 32
@@ -258,6 +259,18 @@ def sibling_service() -> ModuleType:
     return sibling_gate().service  # type: ignore[no-any-return]
 
 
+def sibling_runtime() -> ModuleType:
+    """tests/relay/test_beacon_cache.py: its `serving` runs the real `runtime()` lifespan of the
+    relay on a local backing. That module imports the relay fixture by its bare name, so the
+    directory is on the import path only while it loads."""
+    directory = str(TESTS / "relay")
+    sys.path.insert(0, directory)
+    try:
+        return load_fixture_module("li_relay_runtime", "relay/test_beacon_cache.py")
+    finally:
+        sys.path.remove(directory)
+
+
 def endpoints(app: Any) -> dict[Key, Any]:
     """(method, path) -> handler function, mounts excluded."""
     found: dict[Key, Any] = {}
@@ -304,6 +317,19 @@ def durable_state(world: World) -> dict[str, str]:
     )
     state["files"] = hashlib.sha256(repr(names).encode()).hexdigest()
     return state
+
+
+def log_record_writes(db: sqlite3.Connection) -> Callable[[], list[tuple[str, str]]]:
+    """From now on, log the (kind, id) of every row written to `records_v2` (insert, replace or
+    update, whatever the statement) in a TEMP table of this connection, which never reaches the
+    database file. Returns the reader of the log."""
+    db.execute("CREATE TEMP TABLE record_writes(kind TEXT, id TEXT)")
+    for event in ("INSERT", "UPDATE"):
+        db.execute(
+            f"CREATE TEMP TRIGGER record_{event.lower()} AFTER {event} ON main.records_v2 "
+            "BEGIN INSERT INTO record_writes VALUES (new.kind, new.id); END"
+        )
+    return lambda: [(row[0], row[1]) for row in db.execute("SELECT kind, id FROM record_writes")]
 
 
 def changed(before: Mapping[str, str], after: Mapping[str, str]) -> set[str]:
@@ -385,6 +411,21 @@ def seed_relay_scenario(world: World) -> RelayScenario:
             (proof.model_dump_json(),),
         )
     return RelayScenario(run_id, grant, grant.digest(), observer, miner)
+
+
+LEASE_NONCE = "cd" * 32
+
+
+def seed_audit_lease(world: World, auditor: Keypair, job_id: str = HASH) -> None:
+    """A running audit lease of `auditor` on `job_id`, written test-side: what a lease request
+    leaves behind. Its nonce is `LEASE_NONCE`, which the asks of the tests do not carry."""
+    store = world.store.for_run(world.run_id)
+    with store._tx():
+        store._db.execute(
+            "INSERT INTO audit_leases_v2(id, run_id, w, hotkey, state, auditor, nonce) "
+            "VALUES(?, ?, 0, ?, 'running', ?, ?)",
+            (job_id, world.run_id, sibling_service().HOT[0].ss58, auditor.ss58, LEASE_NONCE),
+        )
 
 
 # The names of `challenge.test_subnet_gate_v2._routes`, one callable per miner-signed v2 route.
@@ -473,8 +514,6 @@ def open_round(world: World, count: int = 4) -> list[Keypair]:
     """
     from hypertrain.protocol.hashing import sha256_hex
     from hypertrain.protocol.messages_v2 import EscrowLock, RankWorkResult, WorkScreenV2
-
-    from .support import load_fixture_module
 
     service = sibling_service()
     network = world.network

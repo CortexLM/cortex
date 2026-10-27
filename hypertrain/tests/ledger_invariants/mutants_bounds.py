@@ -19,7 +19,8 @@ FLOOR_PROPERTY = (
 )
 FLOOR_ROUNDS_UP = T + "test_the_stake_floor_rounds_up_where_the_exact_quotient_is_fractional"
 BOOTSTRAP_ONCE = (
-    T + "test_the_production_bootstrap_is_issued_once_and_replays_with_the_same_receipt"
+    "tests/ledger/test_production_bootstrap_v2.py::"
+    "test_bootstrap_idempotent_per_operation_and_once_per_run"
 )
 BOOTSTRAP_REFUSED = (
     T + "test_a_bootstrap_other_than_the_owner_pinned_allocation_is_refused_and_issues_nothing"
@@ -596,7 +597,7 @@ MUTANTS += [
     },
     {
         "id": "bnd-production-without-qualification",
-        "invariants": ["BND-18"],
+        "invariants": ["BND-13", "BND-18"],
         "path": STORE,
         "old": (
             'if econ.ledger_mode != "test":\n'
@@ -736,5 +737,41 @@ MUTANTS += [
             "when_admission_missing_or_count_excess"
         ],
         "why": "a roster above 16 is accepted without any admitted capacity profile.",
+    },
+]
+
+MUTANTS += [
+    {
+        "id": "bnd-bootstrap-duplicate-origin-allowed",
+        "invariants": ["BND-10"],
+        "path": MESSAGES,
+        "old": (
+            "        if len({o.origin_id for o in self.origins}) != len(self.origins):\n"
+            '            raise ValueError("duplicate bootstrap origin")'
+        ),
+        "new": '        if False:\n            raise ValueError("duplicate bootstrap origin")',
+        "tests": [T + "test_a_bootstrap_conserves_its_total_and_its_origins_are_distinct"],
+        "why": "a bootstrap may repeat an origin id whose units still add up to its total.",
+    },
+    {
+        "id": "bnd-round-reward-relation-one-sided",
+        "invariants": ["BND-04", "BND-20"],
+        "path": ESCROW,
+        "old": "if policy.round_reward_units != manifest.training.budget.epochs_per_round",
+        "new": "if policy.round_reward_units > manifest.training.budget.epochs_per_round",
+        "tests": [
+            T
+            + "test_the_ledger_refuses_a_round_reward_that_is_not_epochs_per_round_times_a_million"
+        ],
+        "why": "a policy that pays less per round than its manifest's epochs justify is accepted.",
+    },
+    {
+        "id": "bnd-charge-operation-length-in-chars",
+        "invariants": ["BND-21"],
+        "path": STORE,
+        "old": "or len(operation.encode()) > 256",
+        "new": "or len(operation) > 256",
+        "tests": [CHARGE_BOUNDS],
+        "why": "the 256-byte bound on a charge's operation name counts characters, not bytes.",
     },
 ]

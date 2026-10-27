@@ -14,6 +14,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
 from types import ModuleType
 
@@ -45,6 +46,7 @@ from .support_weights import (
     pay_id,
     recover_persist,
     reward_store,
+    stored_bytes,
 )
 
 ISSUED = 1_000_000
@@ -233,7 +235,7 @@ FROZEN_DISPUTE = pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
     reason="WGT-05+WGT-D3: units whose origin settlement is disputed again after vesting are "
-    "not emitted (network-v2.md promises disputed units are never paid) [candidate]",
+    "not emitted (network-v2.md:281 lists disputed units among those never paid) [candidate]",
 )
 
 
@@ -307,10 +309,12 @@ def test_a_failed_persist_pays_nothing_and_the_retry_of_the_same_epoch_pays_once
         # Then: no unit moved, no event was written, no answer exists.
         assert host.escrow.balances() == balances and events(host.escrow) == written
         assert weights_rows(host.store._db) == 0
-    # And: the retry of the same epoch pays the unit once and the answer is final.
+    # And: the retry of the same epoch pays the unit once; its answer is the one the first attempt
+    # journaled (the retry's own computed_at is not in it), and it is final.
     recover_persist(host.store._db)
-    retry = ask(host, 0)
+    retry = ask(host, 0, computed_at=9)
     assert retry["weights"] == {li_escrow.HOT.ss58: float(ISSUED)}
+    assert retry["computed_at"] == 1
     assert host.escrow.balances().paid == ISSUED and pays(host.escrow) == 1
     assert host.store.weights(0, at(host.escrow, HOLD_AT), 9) == host.store.weights(
         0, at(host.escrow, HOLD_AT + 3), 10
@@ -321,7 +325,7 @@ FROZEN_RETRY = pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
     reason="WGT-07+WGT-D6: the retry of a journaled but unpersisted epoch pays only what matured "
-    "by the epoch_at the journal holds for that epoch, not by the retry's own epoch_at",
+    "by the epoch_at the journal holds for that epoch, not by the retry's own epoch_at [candidate]",
 )
 
 
@@ -381,6 +385,17 @@ def test_a_higher_epoch_with_an_earlier_epoch_at_is_out_of_order(li_escrow: Modu
         assert host.store.weights(4, at(host.escrow, 50), 3) == late
         # And the units it did not pay stay owed: the next in-order epoch pays them.
         assert host.answer(5, HOLD_AT + 1)["weights"] == {"hk1": 500_000.0}
+
+
+def test_epochs_asked_at_the_same_chain_time_are_both_in_order(li_escrow: ModuleType) -> None:
+    """WGT-08: only an epoch_at before the newest answered one is out of order, not an equal one."""
+    with mode_store(li_escrow) as host:
+        host.origin("aa" * 32, "hk", 1_500_000, 5)
+        # When: two consecutive epochs are asked at the same chain time.
+        first, second = host.answer(0, HOLD_AT), host.answer(1, HOLD_AT)
+        # Then: both are answered in order and the second pays what the first left owed.
+        assert (first["metadata"]["reason"], second["metadata"]["reason"]) == ("ok", "ok")
+        assert (first["weights"], second["weights"]) == ({"hk": 1_000_000.0}, {"hk": 500_000.0})
 
 
 # --- WGT-10: an epoch without payable units is a defined full burn -------------------------------
@@ -525,7 +540,11 @@ def test_every_stored_answer_conserves_the_mass_and_pays_what_the_documentation_
 
 
 def test_the_answer_envelope_has_exactly_the_documented_fields(li_escrow: ModuleType) -> None:
-    """WGT-11/WGT-18: a pure-v2 store still answers in the ledger's envelope."""
+    """WGT-11/WGT-18: a pure-v2 store still answers in the ledger's envelope.
+
+    docs/challenge-routes.md names the top-level fields and docs/mechanism.md the counters; the
+    metadata keys beyond those are the ones the ledger emits today, so a new key is a decision.
+    """
     with mode_store(li_escrow) as host:
         host.origin("aa" * 32, "hk", 1_000, 5)
         answer = host.answer(0, HOLD_AT)
@@ -684,14 +703,15 @@ def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
     # Given: another owner holds one free unit, received by an ordinary owner-signed transfer.
     host.escrow.transfer(transfer("66" * 32, cold, 1), signer=cold)
     # When: that owner signs an event whose id is the one the service derives for the payout of
-    # epoch 0 (the control signs nothing); the escrow may refuse it (a reserved id) or accept it.
+    # epoch 0 (the control signs nothing).
     if preempt:
-        try:
+        # The same event under an ordinary id is accepted, so a refusal below is about its id.
+        host.escrow.transfer(transfer("67" * 32, other, 1), signer=other)
+        # An escrow that reserves service ids and refuses this event is a correct fix.
+        with suppress(EscrowError):
             host.escrow.transfer(
                 transfer(pay_id(host.run_id, 0, origin, cold), other, 1), signer=other
             )
-        except EscrowError:
-            pass
     # Then: either way the epoch pays the earner its free units, in one PAY event.
     answer = ask(host, 0)
     assert answer["weights"] == {li_escrow.HOT.ss58: float(ISSUED - 1)}
@@ -767,57 +787,32 @@ def test_a_stored_answer_does_not_move_when_units_are_locked_or_burned_later(
 # --- WGT-21: the cost of paying must not grow with the history -----------------------------------
 
 
-def last_pay_state_bytes(li_escrow: ModuleType, origins: int) -> int:
+def bytes_stored_by_one_payout(li_escrow: ModuleType, origins: int) -> int:
+    """Bytes an epoch answer adds to the store when it pays one of `origins` origins."""
     with mode_store(li_escrow) as host:
-        for index in range(origins):
-            host.origin(f"{index:02x}" * 32, f"hk{index}", 1_000, 5)
+        host.origin("00" * 32, "hk0", 1_000, 5)
+        for index in range(1, origins):
+            host.origin(f"{index:02x}" * 32, f"hk{index}", 1_000, 30)  # not due at HOLD_AT
+        before = stored_bytes(host.store._db)
         answer = host.answer(0, HOLD_AT)
-        assert answer["metadata"]["units_paid"] == origins * 1_000
-        last = pay_events(host.escrow)[-1]["id"]
-        return int(
-            host.escrow.db.execute(
-                "SELECT LENGTH(state) FROM escrow_snapshots WHERE operation_id=?", (last,)
-            ).fetchone()[0]
-        )
+        assert answer["weights"] == {"hk0": 1_000.0} and len(pay_events(host.escrow)) == 1
+        return stored_bytes(host.store._db) - before
 
 
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="WGT-21+WGT-D4: the state stored with one PAY event does not grow with the number of "
-    "origins ever issued (every escrow event stores a full snapshot; structural proxy, no clock)",
+    reason="WGT-21+WGT-D4: the bytes one payout adds to the store do not grow with the number of "
+    "origins the escrow holds (every escrow event stores a full snapshot; storage proxy, no clock)",
 )
-def test_the_state_stored_per_pay_event_does_not_grow_with_the_number_of_origins(
+def test_the_storage_cost_of_one_payout_does_not_grow_with_the_number_of_origins(
     li_escrow: ModuleType,
 ) -> None:
-    small, large = last_pay_state_bytes(li_escrow, 8), last_pay_state_bytes(li_escrow, 32)
+    small, large = (
+        bytes_stored_by_one_payout(li_escrow, 8),
+        bytes_stored_by_one_payout(li_escrow, 32),
+    )
     assert 0 < small and large < 2 * small
-
-
-# --- WGT-17: a settled round cannot be rewritten ------------------------------------------------
-
-
-def test_a_settled_round_cannot_be_excluded_afterwards() -> None:
-    """WGT-17: reward origins exist only for SETTLED rounds, and late fraud there is money-only."""
-    from hypertrain.aggregator.core import FinalityError
-    from hypertrain.challenge.finality_v2 import RoundStatus, exclude
-
-    def status(disposition: str) -> RoundStatus:
-        return RoundStatus(
-            run_id="aa" * 32,
-            w=0,
-            applied=True,
-            disposition=disposition,  # type: ignore[arg-type]
-            unresolved_disputes=0,
-            unresolved_audits=0,
-            rollback_complete=False,
-            state_hash="bb" * 32,
-            resolution_hash=None,
-        )
-
-    assert exclude(status("PENDING"), "cc" * 32).disposition == "EXCLUDED"
-    with pytest.raises(FinalityError, match="cannot rewrite model history"):
-        exclude(status("SETTLED"), "cc" * 32)
 
 
 # --- WGT-18: the legacy journal that still orders every epoch fails closed -----------------------

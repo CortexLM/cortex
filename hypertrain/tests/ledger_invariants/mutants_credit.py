@@ -32,6 +32,7 @@ FINALIZE_CALL = (
 MODEL = (
     C1 + "test_finalize_attempts_in_any_order_credit_each_round_once_and_follow_the_ledger_model"
 )
+PINNED_ALLOCATION = C2 + "test_origins_that_do_not_hash_to_the_pinned_allocation_are_refused"
 
 
 def mutant(
@@ -697,5 +698,49 @@ MUTANTS = [
         "            )\n            escrow.mutex",
         [QUORUM],
         "the service switches the auditor quorum on without supplying the extra verdicts.",
+    ),
+    mutant(
+        "credit-genesis-allocation-not-recomputed",
+        ["CRD-16"],
+        ESCROW,
+        "                or (genesis_allocation_hash(alloc) != genesis.allocation_hash)\n",
+        "",
+        [PINNED_ALLOCATION + "[genesis]"],
+        "a genesis that names the pinned allocation hash may carry other units than the ones it "
+        "hashes to.",
+    ),
+    mutant(
+        "credit-bootstrap-allocation-not-recomputed",
+        ["CRD-17"],
+        ESCROW,
+        "                or genesis_allocation_hash(alloc) != bootstrap.allocation_hash\n",
+        "",
+        [PINNED_ALLOCATION + "[bootstrap]"],
+        "a bootstrap that names the pinned allocation hash may carry other units than the ones "
+        "it hashes to.",
+    ),
+    mutant(
+        "credit-settlement-lookup-ignores-the-reference",
+        ["CRD-20"],
+        STORE,
+        "\"SELECT data FROM records_v2 WHERE run_id=? AND kind='settlement' AND id=?\"",
+        "\"SELECT data FROM records_v2 WHERE run_id=? AND kind='settlement' AND (id=? OR 1)\"",
+        [C2 + "test_the_service_settlement_is_the_record_the_service_wrote_and_nothing_else"],
+        "any reference is answered with the first settlement the service recorded.",
+    ),
+    mutant(
+        "credit-rotation-migrates-the-earning-hotkey",
+        ["CRD-12"],
+        ADMISSION,
+        "            self.store.db.execute(\n"
+        '                "UPDATE admissions_v2 SET hotkey=? WHERE admission_id=? AND hotkey=?",\n',
+        "            self.escrow.db.execute(\n"
+        '                "UPDATE escrow_origins SET hotkey=? WHERE hotkey=?",\n'
+        "                (op.new_hotkey, op.hotkey),\n"
+        "            )\n"
+        "            self.store.db.execute(\n"
+        '                "UPDATE admissions_v2 SET hotkey=? WHERE admission_id=? AND hotkey=?",\n',
+        [C1 + "test_a_rotation_after_the_credit_does_not_move_the_credit_to_another_identity"],
+        "a rotation re-labels the origins a hotkey already earned with its successor.",
     ),
 ]

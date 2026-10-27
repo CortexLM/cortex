@@ -4,7 +4,8 @@ Shadow rewards are collateral: one origin of one round budget per reservation, n
 Every test here states a defence the ledger must hold and asserts, for a refusal, the exact
 code and that nothing moved. The work is the real w=0 execution of `real_reward`; the ledger is
 the production EscrowV2 on a private database, so a refusal comes from the ledger and from nothing
-a stand-in decided. Where the store guards what the ledger does not, the test says so.
+a stand-in decided. What only the store guards (the first-trial rule of a reservation) is tested
+in test_shadow_2.py.
 """
 
 from __future__ import annotations
@@ -40,11 +41,11 @@ from .support_shadow import (
     MATURE_AT,
     UNIT,
     Engine,
+    as_live_class,
     engine,
     file_engine,
     refusal_code,
     resign_shadow,
-    second_epoch_reservation,
 )
 
 
@@ -253,33 +254,6 @@ def test_reservations_take_one_pending_slot_and_the_ordinals_zero_to_eleven_in_o
     built.escrow.verify()
 
 
-def test_a_ledger_called_directly_does_not_enforce_the_first_trial_rule_of_the_store(
-    li_escrow: ModuleType, real_reward: Real
-) -> None:
-    """SHD-02 holds under a condition: reservations reach the ledger only through the store.
-
-    The store's wrapper refuses a reservation unless the epoch is the admission's first finalized
-    trial (test_shadow_2.py). EscrowV2.reserve_shadow keys only on (admission, epoch), so a caller
-    that skips the wrapper gets a second ordinal for one admission. This test names that
-    dependency: if the rule moves into the ledger, update both halves together.
-    """
-    # Given: admission 0 credited for trial epoch 0
-    built = engine(li_escrow, real_reward, awards=3)
-    first = built.reserve(0)
-    built.accept(first)
-
-    # When: the same admission is reserved again for trial epoch 1, straight on the ledger
-    request, custody = second_epoch_reservation(built, 0, epoch=1)
-    second = built.escrow.reserve_shadow(request, custody)
-
-    # Then: the ledger alone issues it a second ordinal
-    assert (second.admission_id, second.trial_epoch, second.shadow_ordinal) == (
-        first.admission_id,
-        1,
-        1,
-    )
-
-
 # --- SHD-14: amount, owner and maturity are derived by the ledger ----------------------------
 
 BODY_FAULTS = {
@@ -354,7 +328,6 @@ def evidence_faults(built: Engine) -> dict[str, Any]:
             facts,
             "UNVERIFIED_REWARD_WORK",
         ),
-        "live evidence": (lambda: None, built.evidence, "REWARD_DOMAIN"),
         "owner changed after the reservation": (
             lambda: setattr(built.escrow, "owner_of", lambda _hotkey: fixture.OTHER.ss58),
             replace(facts, works=(foreign,)),
@@ -364,8 +337,7 @@ def evidence_faults(built: Engine) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    "fault",
-    ["foreign owner", "another assignment", "live evidence", "owner changed after the reservation"],
+    "fault", ["foreign owner", "another assignment", "owner changed after the reservation"]
 )
 def test_shadow_work_is_credited_to_the_reserved_owner_and_assignment_only(
     li_escrow: ModuleType, real_reward: Real, fault: str
@@ -382,15 +354,19 @@ def test_shadow_work_is_credited_to_the_reserved_owner_and_assignment_only(
     assert built.marker() == before
 
 
-@pytest.mark.parametrize("signature", ["zeros", "live reward signature"])
+@pytest.mark.parametrize("signature", ["zeros", "live reward class name"])
 def test_a_shadow_reward_needs_its_own_authority_signature(
     li_escrow: ModuleType, real_reward: Real, signature: str
 ) -> None:
-    # Given: the signature of the live reward of the same round (another message class) or none
+    # Given: a shadow reward with no authority signature, or with the signature the reward
+    # authority would make over this very body for a live reward (the class name is the only
+    # difference between the two messages)
     built = engine(li_escrow, real_reward)
     reward = built.reward(built.reserve())
-    forged = reward.model_copy(
-        update={"authority_sig": "0" * 128 if signature == "zeros" else built.live.authority_sig}
+    forged = (
+        reward.model_copy(update={"authority_sig": "0" * 128})
+        if signature == "zeros"
+        else as_live_class(li_escrow, reward)
     )
     before = built.marker()
 
@@ -439,6 +415,11 @@ PERSISTED_FAULTS = {
     "reservation hash": (
         "UPDATE escrow_shadow_finalized SET reservation_hash=?",
         ("ee" * 32,),
+        "SHADOW_PERSISTED_BINDING",
+    ),
+    "trial epoch": (
+        "UPDATE escrow_shadow_finalized SET trial_epoch=?",
+        (5,),
         "SHADOW_PERSISTED_BINDING",
     ),
     "ordinal gap": ("UPDATE escrow_shadow_finalized SET ordinal=?", (1,), "SHADOW_FINALIZE_ORDER"),
@@ -548,29 +529,6 @@ def test_a_reward_is_refused_with_the_other_domains_evidence_whichever_way_round
         "REWARD_DOMAIN"
     )
     assert built.marker() == before
-
-
-def test_the_same_work_is_credited_once_in_each_domain_under_disjoint_origins(
-    li_escrow: ModuleType, real_reward: Real
-) -> None:
-    """The ledger alone credits one Finalize once as shadow and once as live.
-
-    SHD-16 holds under a condition: the store hands the ledger a trial Finalize for a shadow
-    reward and a replayed-finality record for a live one. This test names the ledger-level
-    consequence the condition protects against: two conserved origins, one per domain.
-    """
-    # Given / When
-    built = engine(li_escrow, real_reward)
-    shadow = built.accept(built.reserve())
-    live = built.escrow.reward_finalize(built.live, built.evidence)
-
-    # Then
-    assert shadow.operation_id != live.operation_id
-    origins = {row["origin"] for row in issued_origins(built)}
-    assert origins == {*built.reward(built.reserve()).origin_ids, *built.live.origin_ids}
-    assert len(origins) == 2
-    assert built.escrow.balances().issued == 2 * UNIT and built.escrow.balances().conserved()
-    assert built.events("SHADOW_REWARD_FINALIZE") == built.events("REWARD_FINALIZE") == 1
 
 
 # --- SHD-17: shadow origins are collateral, never emission -----------------------------------

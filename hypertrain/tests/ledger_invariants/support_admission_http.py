@@ -177,16 +177,21 @@ class Gate:
         return self.client.get(f"{self.url}/join/{admission_id}/challenge", headers=headers)
 
     def rotation_request(
-        self, cold: Keypair, old_hot: Keypair, new_hot: Keypair, label: str = "rotation"
+        self, cold: Keypair, old_hot: Keypair, new_hot: Keypair | str, label: str = "rotation"
     ) -> dict[str, Any]:
-        """The signed rotation body. Part 1 of ADR 0010 adds the new hotkey's consent here."""
+        """The signed rotation body. `new_hot` is a Keypair when its holder takes part in the
+        rotation and a bare address when the coldkey names a hotkey whose key it does not hold.
+        Part 1 of ADR 0010 adds the new hotkey's consent here, signed for a Keypair only, so that
+        a test of an unconsented rotation stays unconsented after the fix.
+        """
+        address = new_hot if isinstance(new_hot, str) else new_hot.ss58
         request = RotateRequest(
-            hotkey=old_hot.ss58, new_hotkey=new_hot.ss58, operation_id=sha256_hex(label.encode())
+            hotkey=old_hot.ss58, new_hotkey=address, operation_id=sha256_hex(label.encode())
         )
         return sign_rotation(cold, self.run_id, request, 10000)
 
     def rotate(
-        self, cold: Keypair, old_hot: Keypair, new_hot: Keypair, label: str = "rotation"
+        self, cold: Keypair, old_hot: Keypair, new_hot: Keypair | str, label: str = "rotation"
     ) -> httpx.Response:
         return self.client.post(
             f"{self.url}/admission/{old_hot.ss58}/rotate",

@@ -17,12 +17,14 @@ RELAY_CORE = "src/hypertrain/relay/core.py"
 RELAY_APP = "src/hypertrain/relay/app.py"
 
 OP_MATRIX = A + "test_a_bearer_route_refuses_every_wrong_credential_and_changes_nothing[OP]"
+INT_MATRIX = A + "test_a_bearer_route_refuses_every_wrong_credential_and_changes_nothing[INT]"
 WK_MATRIX = A + "test_a_bearer_route_refuses_every_wrong_credential_and_changes_nothing[WK]"
 OP_FOREIGN = A + "test_no_bearer_class_opens_a_route_of_another_class[OP]"
 WK_FOREIGN = A + "test_no_bearer_class_opens_a_route_of_another_class[WK]"
 INT_FOREIGN = A + "test_no_bearer_class_opens_a_route_of_another_class[INT]"
 OP_UNCONFIGURED = A + "test_an_unconfigured_bearer_makes_its_routes_503_for_every_caller[OP]"
 ROUTE_TABLE = A + "test_every_route_of_the_three_applications_has_a_recorded_principal"
+RELAY_TABLE = A + "test_every_relay_route_has_a_recorded_principal"
 UNREGISTERED = (
     A + "test_a_signer_off_the_subnet_is_refused_403_before_any_state_change_on_every_gated_route"
 )
@@ -40,7 +42,7 @@ KEY_LIFECYCLE = (
 KEY_CENSOR = A + "test_nobody_but_the_key_holder_can_censor_a_hotkey_through_a_server_key_grant"
 PURE_READS = A + "test_a_pure_read_get_writes_nothing_durable"
 IDEMPOTENT_INFRA = A + "test_health_and_admission_status_write_only_idempotent_infrastructure_rows"
-LATER_ROUND = A + "test_admission_status_in_a_later_round_still_writes_only_its_pin_row"
+LATER_ROUND = A + "test_admission_status_in_a_later_round_writes_at_most_its_pin_row"
 ROUND_READS = (
     B + "test_repeated_anonymous_reads_of_a_round_leave_the_stored_state_as_the_first_left_it"
 )
@@ -463,7 +465,7 @@ MUTANTS: list[dict[str, Any]] = [
         "    async def journal() -> JSONResponse:\n"
         '        return JSONResponse((await relay.state()).model_dump(mode="json"))\n\n'
         '    @app.get("/livez")\n    async def live() -> JSONResponse:',
-        [A + "test_every_relay_route_has_a_recorded_principal"],
+        [RELAY_TABLE],
         "a new relay route exposes the journal without anybody deciding who may read it.",
     ),
     mutant(
@@ -504,5 +506,95 @@ MUTANTS: list[dict[str, Any]] = [
         "        hotkey = (await run(admission.store.by_id, admission_id)).hotkey\n",
         [REVOKED],
         "the trial job GET stops checking the hotkey of the admission it exports for.",
+    ),
+    mutant(
+        "http-auth-get-weights-without-bearer",
+        ["AU-01"],
+        APP,
+        "        _require(config.internal_token_file, authorization)\n"
+        "        if x_platform_challenge_slug != config.slug:",
+        "        if x_platform_challenge_slug != config.slug:",
+        [INT_MATRIX],
+        "get_weights no longer asks for the internal bearer, so the slug header is all it checks.",
+    ),
+    mutant(
+        "http-auth-empty-token-file-is-a-token",
+        ["AU-01"],
+        APP,
+        "    return token or None",
+        "    return token",
+        [OP_UNCONFIGURED],
+        "an empty or blank token file is an empty secret, so an empty bearer opens the routes.",
+    ),
+    mutant(
+        "http-auth-bearer-compared-by-length",
+        ["AU-01"],
+        APP,
+        "    if not hmac.compare_digest(\n"
+        "        hashlib.sha256(presented.encode()).digest(),\n"
+        "        hashlib.sha256(expected.encode()).digest(),\n"
+        "    ):\n",
+        "    if len(presented) != len(expected):\n",
+        [OP_MATRIX],
+        "only the length of the bearer is compared, so any token of that length opens a route.",
+    ),
+    mutant(
+        "http-auth-v1-registered-metagraph-dropped",
+        ["AU-05"],
+        APP,
+        "        if signer not in await metagraph.hotkeys():\n"
+        '            raise ChallengeError(403, "the hotkey is not registered on the subnet")\n'
+        '\n    @app.get("/health")',
+        '\n    @app.get("/health")',
+        [UNREGISTERED],
+        "the v1 intake check keeps the revocation test but no longer asks the metagraph.",
+    ),
+    mutant(
+        "http-auth-dispute-watch-without-party-gate",
+        ["AU-05"],
+        APP,
+        "        await party_member(run_id, party)\n"
+        "        _, _, disputes = await run(store.for_run(run_id)._services, run_id)",
+        "        _, _, disputes = await run(store.for_run(run_id)._services, run_id)",
+        [UNREGISTERED],
+        "the dispute watch GET forgets its membership gate; its static header is the only check.",
+    ),
+    mutant(
+        "http-auth-admission-lock-accepts-any-signer",
+        ["AU-05"],
+        "src/hypertrain/challenge/admission.py",
+        'Intake(self.escrow.run_id, {"EscrowLock": lambda s: s == r.coldkey}).accept(raw, now)',
+        'Intake(self.escrow.run_id, {"EscrowLock": lambda s: True}).accept(raw, now)',
+        [FORGED],
+        "an admission stake lock is accepted from a signer other than the admission's coldkey.",
+    ),
+    mutant(
+        "http-auth-audit-execution-ignores-lease-owner",
+        ["AU-05"],
+        STORE,
+        '            if row is None or row["state"] != "running" or row["auditor"] != env.signer:',
+        '            if row is None or row["state"] != "running":',
+        [FORGED],
+        "an audit execution of a leased job is served to a signer that does not hold the lease.",
+    ),
+    mutant(
+        "http-auth-server-key-may-equal-the-coldkey",
+        ["SG-15"],
+        KEYS,
+        "        if g.server_pub == g.coldkey:\n"
+        '            raise ChallengeError(422, "the server key must differ from the coldkey")\n',
+        "",
+        [KEY_LIFECYCLE],
+        "a coldkey registers itself as its own server key.",
+    ),
+    mutant(
+        "http-auth-relay-acks-without-capability",
+        ["AU-01"],
+        RELAY_APP,
+        "    async def acks(grant_hash: str, request: Request, cursor: int = 0) -> JSONResponse:\n"
+        "        await upload_capability(request, grant_hash)\n",
+        "    async def acks(grant_hash: str, request: Request, cursor: int = 0) -> JSONResponse:\n",
+        [RELAY_TABLE],
+        "the relay ack listing no longer asks for the master-signed upload capability.",
     ),
 ]

@@ -8,6 +8,7 @@ client sees and leaves every row of every table as it was.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,10 +87,9 @@ def referee_resolution(miner: Contested, reason: str = "MATCH", loser: str | Non
     )
     return evidence, resolution
 
-    # Covers DS-01, DIA-03, DIB-16.
-
 
 def test_only_the_audited_miner_can_open_a_contest_over_the_service_route(tmp_path: Path) -> None:
+    # Covers DS-01, DIA-03, DIB-16, DIB-25.
     with service_world(tmp_path) as world:
         # Given: two joined miners, each with the contest record its own audit produced
         miner, other = contested(world, 0), contested(world, 1)
@@ -153,10 +153,9 @@ def test_only_the_audited_miner_can_open_a_contest_over_the_service_route(tmp_pa
         assert (world.count("disputes_v2"), miner.turn().contest.miner) == (1, miner.hot.ss58)
         assert miner.turn().lock_id == bond.operation_id
 
-    # Covers DIB-25, DIA-17, DIB-12, DS-05.
-
 
 def test_each_dispute_route_accepts_only_its_intended_principal(tmp_path: Path) -> None:
+    # Covers DIB-25, DIA-17, DIB-12, DIB-01, DS-05.
     with service_world(tmp_path) as world:
         # Given: an open dispute of miner 0 whose turn is the miner's, and a second joined miner
         miner, other = contested(world, 0), contested(world, 1)
@@ -260,10 +259,9 @@ def ack_of(miner: Contested, key: Keypair, **override) -> EventAck:
     made = EventAck.model_validate(fields)
     return made.model_copy(update={"sig": key.sign(signed_message(made)).hex()})
 
-    # Covers SG-14, DIA-18.
-
 
 def test_an_ack_over_the_route_binds_the_addressed_party_and_stores_one_row(tmp_path: Path) -> None:
+    # Covers SG-14, DIA-18.
     with service_world(tmp_path) as world:
         # Given: miner 0's dispute is open, so an event is addressed to it; miner 1 is a subscriber
         miner, other = contested(world, 0), contested(world, 1)
@@ -350,10 +348,9 @@ def test_a_receipt_signed_for_another_purpose_cannot_recover_a_suspended_miner(
         assert recover(miner.hot, dispute, 5).status_code == 200
         assert state() == ("PROBATION", 0)
 
-    # Covers DIB-23.
-
 
 def test_v1_dispute_routes_never_reach_a_v2_run(tmp_path: Path) -> None:
+    # Covers DIB-23.
     from hypertrain.protocol import envelope
     from hypertrain.protocol.messages import Bisect, Dispute, Resolution, StateServe
 
@@ -574,10 +571,9 @@ def test_a_rollback_is_refused_for_a_settled_unapplied_or_unaudited_round(
         assert verdict_of(rollback_attempt(world, raw)) == (409, detail)
         assert world.db_digest() == before
 
-    # Covers DIB-19.
-
 
 def test_a_rollback_is_refused_while_a_dispute_of_the_round_is_unresolved(tmp_path: Path) -> None:
+    # Covers DIB-19.
     with service_world(tmp_path) as world:
         # Given: applied, closed rounds 0 and 1 (control: the rollback gets past the gate)
         seed_rounds(world)
@@ -598,46 +594,6 @@ def test_a_rollback_is_refused_while_a_dispute_of_the_round_is_unresolved(tmp_pa
         closed = miner.post("/resolution", service.REFEREE, "ResolutionV2", resolution)
         assert closed.status_code == 200
         assert verdict_of(rollback_attempt(world, raw)) == PAST_THE_GATE
-
-
-def test_the_rollback_gate_reads_the_recounted_record_so_a_path_that_skips_the_recount_is_unseen(
-    tmp_path: Path,
-    # Covers DIB-19.
-) -> None:
-    with service_world(tmp_path) as world:
-        # Given: the condition of DIB-19 broken in a stand-in: a dispute opened by code that does
-        # not run the store's recount
-        seed_rounds(world)
-        miner = contested(world, 0)
-        miner.fund()
-        bond = miner.lock()
-        miner.disputes().open(
-            canonicalize(
-                envelope_v2.seal(
-                    miner.hot,
-                    "DisputeV2",
-                    world.run_id,
-                    DisputeV2(
-                        hotkey=miner.hot.ss58,
-                        verdict_hash=miner.verdict,
-                        action="contest",
-                        bond_lock=bond.operation_id,
-                    ),
-                    10_000,
-                )
-            ),
-            now=world.network.now,
-        )
-        raw = rollback_raw(world, [miner.hot.ss58], ["dd" * 32])
-        # Then: the dispute is unresolved, yet the gate, which trusts the finality record, passes
-        assert miner.turn().resolution is None
-        assert world.store._record_v2(world.run_id, "finality", "0")["unresolved_disputes"] == 0
-        assert verdict_of(rollback_attempt(world, raw)) == PAST_THE_GATE
-        # The recount that every real handler runs closes that gap
-        with world.store._tx():
-            world.store._recount_disputes_v2(world.run_id, 0)
-        gate = (409, "rollback requires applied closed audit/dispute work")
-        assert verdict_of(rollback_attempt(world, raw)) == gate
 
 
 def test_a_rollback_exclusion_needs_one_referee_signed_fraud_resolution_with_matching_causes(
@@ -712,7 +668,7 @@ def test_a_rollback_exclusion_needs_one_referee_signed_fraud_resolution_with_mat
         assert found == [{"hotkey": hot, "reason": "FRAUD", "evidence_hash": cause}]
 
 
-# --- DIA-19: evidence is the trust anchor, so only the service may register it (CONDITIONAL) -----
+# --- DIB-24: the rollback revision follows every dispute change; a push walks a stable registry
 
 
 def test_any_change_of_a_dispute_changes_the_revision_a_rollback_repair_must_still_match(
@@ -741,7 +697,7 @@ def test_any_change_of_a_dispute_changes_the_revision_a_rollback_repair_must_sti
     raises=RuntimeError,
     reason=(
         "DIB-24+DIB-D12: the beacon push iterates the lease-guard registry that a referee call "
-        "registers into from another thread, without a copy or the store lock"
+        "registers into from another thread, without a copy or the store lock [candidate]"
     ),
 )
 def test_a_beacon_push_survives_a_referee_call_registering_a_guard_meanwhile(
@@ -750,25 +706,40 @@ def test_a_beacon_push_survives_a_referee_call_registering_a_guard_meanwhile(
 ) -> None:
     with service_world(tmp_path) as world:
         store, net = world.store, world.network
-
-        class Racing:
-            """A guard whose advance coincides with another call registering its own."""
-
-            def advance(self, _round: int) -> None:
-                store._lease_guards_v2["late-referee-call"] = Late()
+        registered = threading.Event()
 
         class Late:
             def advance(self, _round: int) -> None:
                 return None
 
+        def register_like_a_referee_call() -> None:
+            # referee_v2 registers its guard inside the store transaction, so under the lock
+            with store._lock:
+                store._lease_guards_v2["late-referee-call"] = Late()
+            registered.set()
+
+        class Racing:
+            """A guard whose advance coincides with another call registering its own."""
+
+            def advance(self, _round: int) -> None:
+                racer.start()
+                # Walking the live registry sees the registration at once. A push that holds the
+                # store lock keeps it out, so this wait may run out without it.
+                registered.wait(10)
+
+        racer = threading.Thread(target=register_like_a_referee_call)
         # Control: with only well-behaved guards the push succeeds
         store._lease_guards_v2["steady"] = Late()
         net.push(net.now + 1)
         store._lease_guards_v2["racing"] = Racing()
         # When the registry changes size while the push walks it
         net.push(net.now + 1)
-        # Then (desired): the beacon is accepted whatever another call registers
-        assert store._lease_guards_v2["late-referee-call"] is not None
+        # Then (desired): the beacon is accepted, whatever another call registers, and the
+        # registration lands
+        assert registered.wait(10)
+        racer.join(10)
+        assert not racer.is_alive()
+        assert "late-referee-call" in store._lease_guards_v2
 
 
 # --- a real round in which one of five miners forged its commit and then contested --------------

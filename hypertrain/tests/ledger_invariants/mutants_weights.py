@@ -4,7 +4,6 @@ STORE = "src/hypertrain/challenge/store.py"
 ESCROW = "src/hypertrain/ledger/escrow_v2.py"
 LEDGER = "src/hypertrain/ledger/ledger.py"
 APP = "src/hypertrain/challenge/app.py"
-FINALITY = "src/hypertrain/challenge/finality_v2.py"
 
 W1 = "tests/ledger_invariants/test_weights.py::"
 W2 = "tests/ledger_invariants/test_weights_2.py::"
@@ -26,6 +25,9 @@ EARLIER = W1 + "test_a_higher_epoch_with_an_earlier_epoch_at_is_out_of_order"
 MERGED = W2 + "test_a_merged_answer_sums_the_runs_and_each_run_pays_only_its_own_origins"
 MERGE_PROPERTY = (
     W2 + "test_merging_runs_is_sum_preserving_and_independent_of_the_order_of_the_children"
+)
+CHILD_PAID = (
+    W2 + "test_units_a_child_paid_while_the_root_failed_to_persist_reach_a_delivered_answer"
 )
 REPLAY = (
     W2 + "test_a_stored_answer_replays_without_the_v2_services_and_not_while_the_metagraph_is_down"
@@ -173,14 +175,14 @@ MUTANTS = [
     },
     {
         "id": "wgt-answer-is-stored-under-epoch-at",
-        "invariants": ["WGT-06", "WGT-17"],
+        "invariants": ["WGT-06", "WGT-15", "WGT-17"],
         "path": STORE,
         "old": 'db.execute("INSERT INTO weights_runs VALUES(?, ?)", (epoch, merged))',
         "new": 'db.execute("INSERT INTO weights_runs VALUES(?, ?)", (epoch_at, merged))',
         "tests": [
             FINAL,
             W1 + "test_a_stored_answer_does_not_move_when_units_are_locked_or_burned_later",
-            W2 + "test_a_child_payment_reaches_an_answer_only_when_the_same_epoch_is_retried[True]",
+            CHILD_PAID + "[True]",
             CONTRACT + "test_get_weights_first_answer_is_immutable",
         ],
         "why": "the final answer is keyed on epoch_at, so a re-ask with another time recomputes.",
@@ -281,7 +283,7 @@ MUTANTS = [
     },
     {
         "id": "wgt-budget-is-not-reduced-by-a-payout",
-        "invariants": ["WGT-11"],
+        "invariants": ["WGT-11", "WGT-12"],
         "path": STORE,
         "old": "                budget -= take\n",
         "new": "                budget -= 0\n",
@@ -417,18 +419,6 @@ MUTANTS = [
         "why": "an epoch asked without epoch_at is answered at its start, a whole epoch early.",
     },
     {
-        "id": "wgt-settled-round-can-be-excluded",
-        "invariants": ["WGT-17"],
-        "path": FINALITY,
-        "old": (
-            '    if status.disposition == "SETTLED":\n'
-            '        raise FinalityError("finalized late fraud cannot rewrite model history")\n'
-        ),
-        "new": "",
-        "tests": [W1 + "test_a_settled_round_cannot_be_excluded_afterwards"],
-        "why": "a late contest can exclude a round whose rewards were already issued.",
-    },
-    {
         "id": "wgt-replay-skips-the-metagraph",
         "invariants": ["WGT-20", "AU-06"],
         "path": APP,
@@ -531,5 +521,44 @@ MUTANTS = [
             W1 + "test_a_store_that_finalized_no_reward_answers_a_defined_full_burn[True]",
         ],
         "why": "a run that never finalized a live reward is asked for v2 weight anyway.",
+    },
+    {
+        "id": "wgt-equal-epoch-at-is-out-of-order",
+        "invariants": ["WGT-08"],
+        "path": LEDGER,
+        "old": "        if epoch < self.last_epoch or epoch_at < self.last_answer_at:",
+        "new": "        if epoch < self.last_epoch or epoch_at <= self.last_answer_at:",
+        "tests": [W1 + "test_epochs_asked_at_the_same_chain_time_are_both_in_order"],
+        "why": "an epoch asked at the chain time of the previous answer is wrongly out_of_order.",
+    },
+    {
+        "id": "wgt-journal-answer-is-recomputed-on-retry",
+        "invariants": ["WGT-07"],
+        "path": LEDGER,
+        "old": (
+            "        if epoch in self._engine.answers:\n"
+            '            return canonical(self._engine.answers[epoch]["answer"])\n'
+        ),
+        "new": (
+            "        if False:\n"
+            '            return canonical(self._engine.answers[epoch]["answer"])\n'
+        ),
+        "tests": [
+            W1 + "test_a_failed_persist_pays_nothing_and_the_retry_of_the_same_epoch_pays_once"
+        ],
+        "why": "a retry of a journaled epoch recomputes the v1 answer instead of reading it.",
+    },
+    {
+        "id": "wgt-merge-forgets-an-additive-counter",
+        "invariants": ["WGT-15"],
+        "path": STORE,
+        "old": (
+            '        "units_burned_this_epoch",\n'
+            '        "hotkeys_capped",\n'
+            '        "ledger_minted",\n'
+        ),
+        "new": '        "units_burned_this_epoch",\n        "ledger_minted",\n',
+        "tests": [MERGE_PROPERTY],
+        "why": "the merged answer reports the capped count of the first run alone.",
     },
 ]

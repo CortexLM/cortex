@@ -28,7 +28,7 @@ from hypertrain.ledger import FULL_SHARE_MASS, Params
 from hypertrain.ledger.escrow_v2 import EscrowV2
 from hypertrain.protocol.hashing import sha256_hex
 
-from .support import SLUG, Hosted, Real, at, known_replay
+from .support import SLUG, Hosted, Real, at, known_replay, table_names
 
 EXACT = 2**53
 
@@ -79,6 +79,16 @@ def assert_answer_shape(answer: dict[str, Any], *, mass: int = FULL_SHARE_MASS) 
     assert sum(int(w) for w in weights.values()) == meta["units_paid"]
     assert meta["units_paid"] + meta["units_burned_this_epoch"] == mass
     assert 0 <= meta["units_paid"] <= mass
+
+
+def stored_bytes(db: sqlite3.Connection) -> int:
+    """Bytes held by every column of every table: the storage cost, whichever table keeps it."""
+    total = 0
+    for table in table_names(db):
+        columns = [row[1] for row in db.execute(f'PRAGMA table_info("{table}")')]
+        size = " + ".join(f'IFNULL(LENGTH(CAST("{column}" AS BLOB)), 0)' for column in columns)
+        total += int(db.execute(f'SELECT IFNULL(SUM({size}), 0) FROM "{table}"').fetchone()[0])
+    return total
 
 
 def pay_id(run_id: str, epoch: int, origin: str, owner: str) -> str:

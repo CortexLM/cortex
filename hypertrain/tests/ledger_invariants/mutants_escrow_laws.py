@@ -22,6 +22,7 @@ RELEASE_BOUND = L + "test_a_lock_releases_at_most_what_it_locked_and_only_throug
 SLASH_AUTHORITY = L + "test_a_slash_needs_the_reward_authority_and_a_bounded_referee_cost"
 SLASH_COST_BOUND = L + "test_a_referee_cost_never_exceeds_the_units_slashed"
 SLASH_SETTLEMENT = L + "test_a_slash_needs_a_resolved_vested_fraud_settlement_bound_to_the_request"
+SLASH_REFERENCES = L + "test_a_slash_burns_only_the_lock_it_names_with_matching_references"
 RELEASE_GATE = (
     L + "test_a_release_waits_for_a_resolved_vested_non_fraud_settlement_bound_to_its_hashes"
 )
@@ -45,7 +46,7 @@ STAKE_COUNT = L + "test_stake_counts_only_locks_that_name_its_admission_and_owne
 ONE_BACKING = L + "test_the_same_units_cannot_back_two_locks_or_two_admissions"
 MODEL = L2 + "test_random_operation_sequences_conserve_units_and_follow_a_bucket_model"
 BOND = L2 + "test_a_dispute_opens_only_on_a_funded_owner_bound_adequately_sized_contest_bond"
-ONE_OPEN = L2 + "test_a_miner_has_at_most_one_open_dispute_and_the_refused_bond_stays_locked"
+ONE_OPEN = L2 + "test_a_miner_has_at_most_one_open_dispute"
 SETTLE_ONCE = L2 + "test_a_bond_is_settled_once_whole_and_with_the_production_default_cost"
 MATURITY = L2 + "test_a_reward_matures_only_after_vesting_and_a_resolved_hash_bound_settlement"
 STAKE_HTTP = L2 + "test_an_admission_stake_is_accepted_only_from_the_coldkey_recorded_at_join"
@@ -55,9 +56,6 @@ COLLATERAL = L + "test_collateral_issued_at_genesis_is_never_payable_as_weight"
 HELD = "tests/challenge/test_v2_weights_pay.py::test_held_units_never_paid"
 LOCKED_NEVER = (
     "tests/challenge/test_v2_weights_pay.py::test_dispute_locked_and_burned_units_never_paid"
-)
-PAID_ONCE = (
-    "tests/challenge/test_v2_weights_pay.py::test_matured_reward_paid_once_when_epoch_asked_twice"
 )
 SHARED_MASS = "tests/challenge/test_v2_weights_pay.py::test_v1_and_v2_share_one_full_share_mass"
 PAY_ROLLS_BACK = (
@@ -143,7 +141,7 @@ MUTANTS = [
     },
     {
         "id": "el-move-ignores-bucket",
-        "invariants": ["ESC-07", "LCK-11"],
+        "invariants": ["ESC-07"],
         "path": ESCROW,
         "old": (
             '            "SELECT * FROM escrow_units WHERE owner=? AND bucket=? AND ref=?",\n'
@@ -168,7 +166,7 @@ MUTANTS = [
             '            "SELECT * FROM escrow_units WHERE owner=? AND bucket=?",\n'
             "            (op.owner, source),"
         ),
-        "tests": [RELEASE_BOUND, ONE_BACKING],
+        "tests": [RELEASE_BOUND],
         "why": "a release draws on every lock of the owner, not on the lock it names.",
     },
     {
@@ -196,6 +194,54 @@ MUTANTS = [
         "new": "            if lock is None:",
         "tests": [RELEASE_LAWS],
         "why": "any recorded event, a transfer for one, is accepted as the lock to release.",
+    },
+    {
+        "id": "el-release-dispute-reference-ignored",
+        "invariants": ["ESC-09"],
+        "path": ESCROW,
+        "old": (
+            '            original = EscrowLock.model_validate_json(lock["request"])\n'
+            "            if (op.admission_id, op.dispute_id, op.owner) != (\n"
+            "                original.admission_id,\n"
+            "                original.dispute_id,\n"
+            "                original.owner,\n"
+            "            ):"
+        ),
+        "new": (
+            '            original = EscrowLock.model_validate_json(lock["request"])\n'
+            "            if (op.admission_id, op.owner) != (\n"
+            "                original.admission_id,\n"
+            "                original.owner,\n"
+            "            ):"
+        ),
+        "tests": [RELEASE_LAWS],
+        "why": "a release may name another dispute than the one its contest bond was locked for.",
+    },
+    {
+        "id": "el-slash-reference-unchecked",
+        "invariants": ["ESC-14"],
+        "path": ESCROW,
+        "old": (
+            '            original = EscrowLock.model_validate_json(row["request"])\n'
+            "            if (op.admission_id, op.dispute_id, op.owner) != ("
+        ),
+        "new": (
+            '            original = EscrowLock.model_validate_json(row["request"])\n'
+            "            if False and (op.admission_id, op.dispute_id, op.owner) != ("
+        ),
+        "tests": [SLASH_REFERENCES],
+        "why": "a slash may name any admission, dispute or owner next to a real lock id.",
+    },
+    {
+        "id": "el-slash-lock-kind-unchecked",
+        "invariants": ["ESC-14"],
+        "path": ESCROW,
+        "old": (
+            '            if row is None or row["kind"] not in ("LOCK_ADMISSION", "LOCK_CONTEST"):'
+        ),
+        "new": "            if row is None:",
+        "tests": [SLASH_REFERENCES],
+        "why": "any recorded event, a transfer for one, is accepted as the lock to slash.",
     },
     {
         "id": "el-slash-authority-unchecked",
@@ -394,6 +440,33 @@ MUTANTS = [
         "why": "the stored hash of an event is no longer recomputed at reopen.",
     },
     {
+        "id": "el-verify-sequence-unchecked",
+        "invariants": ["ESC-22"],
+        "path": ESCROW,
+        "old": '                row["seq"] != i\n                or row["prev_hash"] != prev\n',
+        "new": '                row["prev_hash"] != prev\n',
+        "tests": [REOPEN],
+        "why": "reopening no longer checks that the event sequence numbers are contiguous.",
+    },
+    {
+        "id": "el-verify-receipt-operation-unchecked",
+        "invariants": ["ESC-22"],
+        "path": ESCROW,
+        "old": '                or receipt.operation_id != row["operation_id"]\n',
+        "new": "",
+        "tests": [REOPEN],
+        "why": "reopening no longer checks that a stored receipt belongs to its event.",
+    },
+    {
+        "id": "el-verify-receipt-mode-unchecked",
+        "invariants": ["ESC-22"],
+        "path": ESCROW,
+        "old": "                or receipt.ledger_mode != self.policy.ledger_mode\n",
+        "new": "",
+        "tests": [REOPEN],
+        "why": "reopening no longer checks that a stored receipt was issued in this ledger mode.",
+    },
+    {
         "id": "el-verify-final-conservation-dropped",
         "invariants": ["ESC-22", "ESC-06"],
         "path": ESCROW,
@@ -555,6 +628,41 @@ MUTANTS = [
         "why": "a reward origin vests before its maturity round.",
     },
     {
+        "id": "el-maturity-ignores-settlement-hashes",
+        "invariants": ["ESC-08"],
+        "path": ESCROW,
+        "old": (
+            "                        or finality is None\n"
+            '                        or status.finality_hash != finality["finalize_hash"]\n'
+        ),
+        "new": "                        or finality is None\n",
+        "tests": [MATURITY],
+        "why": "a reward origin vests on a settlement that answers another finalize.",
+    },
+    {
+        "id": "el-maturity-ignores-release-beacon",
+        "invariants": ["ESC-08"],
+        "path": ESCROW,
+        "old": "                        or now_beacon < status.release_beacon\n",
+        "new": "",
+        "tests": [MATURITY],
+        "why": "a reward origin vests before the release horizon of its settlement.",
+    },
+    {
+        "id": "el-maturity-ignores-open-dispute",
+        "invariants": ["ESC-08"],
+        "path": ESCROW,
+        "old": (
+            "                        status.unresolved\n"
+            '                        or status.outcome == "FRAUD"\n'
+        ),
+        "new": (
+            '                        False\n                        or status.outcome == "FRAUD"\n'
+        ),
+        "tests": [MATURITY],
+        "why": "a reward origin whose dispute is still open vests.",
+    },
+    {
         "id": "el-http-pay-route-added",
         "invariants": ["ESC-02"],
         "path": "src/hypertrain/challenge/app.py",
@@ -637,7 +745,7 @@ MUTANTS = [
         "path": STORE,
         "old": '                take = min(budget, row["units"])',
         "new": '                take = row["units"]',
-        "tests": [SHARED_MASS, PAID_ONCE],
+        "tests": [SHARED_MASS],
         "why": "an epoch pays every unit of the origin, whatever mass is left.",
     },
     {

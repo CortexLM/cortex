@@ -17,7 +17,10 @@ BOOTSTRAP = (
     ONE + "test_a_production_bootstrap_envelope_of_one_run_is_refused_by_the_store_of_another"
 )
 
+PAIR = TWO + "test_a_trial_pair_with_one_unfit_envelope_is_refused_whichever_one_it_is"
+
 STORE = "src/hypertrain/challenge/store.py"
+ADMISSION_PY = "src/hypertrain/challenge/admission.py"
 ENVELOPE = "src/hypertrain/protocol/envelope_v2.py"
 ESCROW = "src/hypertrain/ledger/escrow_v2.py"
 
@@ -30,6 +33,17 @@ MUTANTS = [
         "new": "if False:",
         "tests": [BOUND + "[transfer-sealed-for-another-run]", BOOTSTRAP],
         "why": "an envelope sealed for another run passes the route's run check and executes.",
+    },
+    {
+        "id": "exp-intake-skips-embedded-run-check",
+        "invariants": ["BND-16"],
+        "path": ENVELOPE,
+        "old": "if body_run != env.run_id:",
+        "new": "if False:",
+        "tests": [
+            TWO + "test_a_signed_body_naming_another_run_is_refused_whatever_run_its_envelope_names"
+        ],
+        "why": "a body that names another run is accepted inside an envelope of this run.",
     },
     {
         "id": "exp-store-trusts-the-envelopes-run",
@@ -90,6 +104,20 @@ MUTANTS = [
         ),
         "tests": [TWO + "test_expiry_is_judged_on_the_stored_beacon_whatever_the_wall_clock_says"],
         "why": "expiry is read off the wall clock instead of the verified beacon in the database.",
+    },
+    {
+        "id": "exp-trial-screen-never-checked",
+        "invariants": ["SG-01"],
+        "path": ADMISSION_PY,
+        "old": "            intake.accept(raw, at)\n            intake.accept(screen_raw, at)\n",
+        "new": "            intake.accept(raw, at)\n",
+        "tests": [
+            PAIR + "[screen-sealed-for-another-run]",
+            PAIR + "[screen-relabeled-to-this-run]",
+            PAIR + "[screen-expiry-extended]",
+            PAIR + "[screen-expired]",
+        ],
+        "why": "the work screen of a trial pair is never verified once its proof is.",
     },
     {
         "id": "exp-freshness-lag-of-one",

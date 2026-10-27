@@ -1,7 +1,8 @@
 """Admission defences over the signed HTTP routes of the v2 service.
 
-Lens C1 LCK-15, LCK-17, LCK-20, LCK-21, SHD-04 and C2 SG-06..08, GT-01, GT-02, GT-03, AD-01,
-AD-02, AD-05, OR-01, RL-01. Every test states what the service must refuse or keep, and that a
+Lens C1 LCK-15, LCK-17, LCK-20, LCK-21, SHD-04 and C2 SG-06..08, GT-01, GT-03, AD-01, AD-02,
+AD-05, OR-01, RL-01 (GT-02 is pinned by tests/challenge/test_admission_v2.py, see
+mutants_admission_http.py). Every test states what the service must refuse or keep, and that a
 refusal leaves the admission tables and the escrow log as they were. A hole is an xfail(strict)
 test whose body asserts the desired defence; the steps that make its scenario meaningful raise
 PreconditionError, which is not an AssertionError, so a broken scenario fails loudly instead of
@@ -121,18 +122,22 @@ def test_sg06_a_join_with_one_defect_is_refused_and_leaves_no_trace(gate: Gate, 
 
 
 def test_sg06_repeating_a_join_returns_the_same_admission_and_spends_no_quota(gate: Gate) -> None:
-    # Given: an admitted application
+    # Given: an admitted application, and a later beacon (a client retries after a restart)
     hot, cold = service.HOT[0], service.COLD[0]
     first = gate.join(hot, cold)
     assert first.status_code == 200, first.text
-    spent = gate.snapshot()["admission_quota"]
-    precondition(len(spent) == 3, f"quota rows of the hotkey, the coldkey and the prefix: {spent}")
+    gate.push(5)
+    held = gate.snapshot()
+    precondition(
+        len(held["admission_quota"]) == 3,
+        f"quota rows of the hotkey, the coldkey and the prefix: {held['admission_quota']}",
+    )
     # When: the exact request arrives again, as many times as the client retries
     repeats = [gate.join(hot, cold) for _ in range(3)]
-    # Then: the stored answer, one identity, nothing charged
+    # Then: the stored answer, one identity, nothing charged and no admission row touched
     assert [r.json() for r in repeats] == [first.json()] * 3
     assert gate.count("admissions_v2") == 1
-    assert gate.snapshot()["admission_quota"] == spent
+    assert gate.snapshot() == held
     # And: another body under the same (coldkey, request id) is a conflict, not a second identity
     before = gate.world.db_digest()
     conflicting = gate.join(service.HOT[1], cold)
@@ -218,9 +223,11 @@ def test_sg07_a_join_cannot_use_one_key_as_hotkey_and_coldkey(gate: Gate) -> Non
 
 
 def test_sg08_only_the_coldkey_of_the_admission_can_rotate_it(gate: Gate) -> None:
-    # Given: an admission of COLD[0]; COLD[1] is another participant's coldkey
+    # Given: an admission of COLD[0]; COLD[1] is the coldkey of another admission, so a signer
+    # that merely owns some admission is not enough
     hot, cold = service.HOT[0], service.COLD[0]
     precondition(gate.join(hot, cold).status_code == 200, "setup join")
+    precondition(gate.join(service.HOT[1], service.COLD[1]).status_code == 200, "other join")
     before = gate.world.db_digest()
     # When / Then: a coldkey that does not own it is refused
     foreign = gate.rotate(service.COLD[1], hot, HOTS[0], "foreign")
@@ -247,19 +254,19 @@ def test_sg08_only_the_coldkey_of_the_admission_can_rotate_it(gate: Gate) -> Non
 )
 def test_lck17_a_rotation_onto_a_hotkey_that_never_agreed_is_refused(gate: Gate) -> None:
     # Given: an admission that rotates once onto a hotkey of its owner (the control), and a
-    # registered hotkey of someone else that never applied
-    owner, mine, victim, victim_cold = service.COLD[0], HOTS[0], HOTS[1], COLDS[1]
+    # registered hotkey of another participant that never applied
+    owner, mine, other, other_cold = service.COLD[0], HOTS[0], HOTS[1], COLDS[1]
     precondition(gate.join(service.HOT[0], owner).status_code == 200, "setup join")
     own = gate.rotate(owner, service.HOT[0], mine, "own hotkey")
     precondition(own.status_code == 200, f"the owner's own rotation was refused: {own.text}")
-    precondition(victim.ss58 in gate.subnet.registered, "the victim is on the subnet")
-    # When: the coldkey alone names the victim's hotkey
-    taken = gate.rotate(owner, mine, victim, "squat")
-    # Then: refused by the admission rules, not by routing, and the victim can still apply
+    precondition(other.ss58 in gate.subnet.registered, "the other hotkey is on the subnet")
+    # When: the coldkey alone names that hotkey, whose key it does not hold
+    taken = gate.rotate(owner, mine, other.ss58, "without consent")
+    # Then: refused by the admission rules, not by routing, and its holder can still apply
     assert taken.status_code in (403, 409), taken.text
     assert "not registered on the subnet" not in taken.text
-    assert gate.count("admission_history", "hotkey=?", (victim.ss58,)) == 0
-    applied = gate.join(victim, victim_cold, "victim applies")
+    assert gate.count("admission_history", "hotkey=?", (other.ss58,)) == 0
+    applied = gate.join(other, other_cold, "holder applies")
     assert applied.status_code == 200, applied.text
 
 
@@ -379,10 +386,8 @@ def test_gt01_only_the_owner_can_open_the_trial_of_an_admission(gate: Gate) -> N
     anonymous = gate.challenge(rival_id)
     wrong_key = gate.challenge(rival_id, as_hotkey=service.HOT[3])
     # Then: refused, and no trial exists for the rival
-    assert (anonymous.status_code, wrong_key.status_code) in {(401, 401), (403, 403)}, (
-        anonymous.text,
-        wrong_key.text,
-    )
+    assert anonymous.status_code in (401, 403), anonymous.text
+    assert wrong_key.status_code in (401, 403), wrong_key.text
     assert gate.row(rival)["challenge"] is None
     assert gate.count("admission_trials", "admission_id=?", (rival_id,)) == 0
     assert gate.world.db_digest() == before
@@ -406,7 +411,7 @@ def test_gt01_a_poll_after_the_deadline_by_anyone_expires_or_suspends_nobody(
     outcome = gate.snapshot()["admission_trial_results"][0][-1]
     precondition(outcome == "EXPIRED", f"the clock did not close the trial: {outcome}")
     before = gate.world.db_digest()
-    # When: a caller that is not the owner polls, and so does the owner
+    # When: a caller that is not the owner polls
     stranger = gate.challenge(admission_id)
     # Then: nothing is written, nobody is suspended, struck or credited
     assert stranger.status_code in (401, 403, 409), stranger.text
@@ -420,12 +425,35 @@ def test_gt01_a_poll_after_the_deadline_by_anyone_expires_or_suspends_nobody(
     )
 
 
+@pytest.mark.parametrize("state", ["SUSPENDED", "BANNED"])
+def test_gt03_the_clock_closes_the_trial_of_a_suspended_or_banned_holder(
+    gate: Gate, state: str
+) -> None:
+    # Given: a trial its owner opened, then a holder that is suspended or banned: no request of
+    # that holder can ever free the place the trial keeps
+    hot, cold = service.HOT[1], service.COLD[1]
+    admission_id = gate.admission_id(hot, cold)
+    gate.push(2)
+    own = gate.challenge(admission_id, hot)
+    precondition(own.status_code == 200, f"the owner's own request failed: {own.text}")
+    gate.admission.store.transition(admission_id, state, "TEST", 2)
+    precondition(gate.count("admission_trial_results", "outcome='OPEN'") == 1, "no open trial")
+    deadline = json.loads(gate.row(hot)["challenge"])["deadline_beacon"]
+    # When: the beacon passes the deadline
+    gate.push(deadline + 1)
+    # Then: the trial is closed on the clock and the holder's standing is untouched
+    assert gate.count("admission_trial_results", "outcome='OPEN'") == 0
+    assert gate.row(hot)["state"] == state
+
+
 # AD-01, LCK-21, AD-05: capacity and identity rules of the application queue.
 
 
 def test_ad01_the_pending_places_are_bounded_and_a_refusal_changes_nothing(gate: Gate) -> None:
-    # Given: every pending place taken
+    # Given: every pending place taken, one of them by an application that passed its trial
     fill_pending_places(gate)
+    passed = gate.row(HOTS[0])["admission_id"]
+    gate.admission.store.transition(passed, "PROBATION", "TEST", gate.network.now)
     before = gate.world.db_digest()
     # When / Then: one more is refused, and the refusal leaves no trace
     refused = gate.join(service.HOT[0], service.COLD[0])
@@ -490,11 +518,14 @@ def test_ad05_a_coldkey_has_one_non_active_admission_and_an_active_one_may_apply
     # Given: an admission of COLD[0] that is not ACTIVE
     cold = service.COLD[0]
     first = gate.admission_id(service.HOT[0], cold)
-    before = gate.world.db_digest()
-    # When / Then: a second hotkey of the same coldkey is refused, and nothing is reserved
-    blocked = gate.join(service.HOT[1], cold, "second")
-    assert (blocked.status_code, detail(blocked)) == (409, "COLDKEY_PROBATION_EXISTS")
-    assert gate.world.db_digest() == before
+    # When / Then: a second hotkey of the same coldkey is refused, in every non-ACTIVE state of
+    # the first admission, and nothing is reserved
+    for state in ("APPLIED", "PROBATION", "SUSPENDED", "BANNED"):
+        gate.admission.store.transition(first, state, "TEST", gate.network.now)
+        before = gate.world.db_digest()
+        blocked = gate.join(service.HOT[1], cold, "second")
+        assert (blocked.status_code, detail(blocked)) == (409, "COLDKEY_PROBATION_EXISTS"), state
+        assert gate.world.db_digest() == before, state
     # And: once the first one is ACTIVE the same request is admitted
     gate.admission.store.transition(first, "ACTIVE", "TEST", gate.network.now)
     allowed = gate.join(service.HOT[1], cold, "second")
@@ -514,16 +545,17 @@ def test_ad05_a_coldkey_has_one_non_active_admission_and_an_active_one_may_apply
     reason="RL-01+ESC-02: one key can add ledger events through the escrow routes without any "
     "bound per beacon [candidate]",
 )
-def test_rl01_one_key_cannot_fill_the_ledger_with_net_zero_transfers_in_one_beacon(
+def test_rl01_the_escrow_transfers_of_one_key_are_bounded_in_one_beacon(
     gate: Gate,
 ) -> None:
-    # Given: the largest burst the policy gives any identity-creating request, and a funded key
+    # Given: the largest burst the policy gives any identity-creating request (the repository
+    # states no bound for the escrow routes), and a funded key
     bound = gate.policy.ip_prefix_burst
     owner, origin = service.COLD[0], gate.network.origin_ids[0]
 
     def self_transfer(index: int):
         operation = EscrowTransfer(
-            operation_id=sha256_hex(f"net-zero-{index}".encode()),
+            operation_id=sha256_hex(f"bounded-{index}".encode()),
             owner=owner.ss58,
             units=1,
             origin_ids=[origin],
@@ -538,14 +570,14 @@ def test_rl01_one_key_cannot_fill_the_ledger_with_net_zero_transfers_in_one_beac
 
     first = self_transfer(0)
     precondition(first.status_code == 200, f"the first transfer was refused: {first.text}")
-    # When: it sends one more than that, each a distinct operation
+    # When: it sends distinct operations until the first refusal, or one more than that burst
     served = 1
     for index in range(1, bound + 1):
         if self_transfer(index).status_code != 200:
             break
         served += 1
-    # Then: it was throttled before the bound
-    assert served <= bound, f"{served} net-zero transfers were served in one beacon"
+    # Then: the service refused before serving more than the burst
+    assert served <= bound, f"{served} transfers were served in one beacon"
 
 
 # AD-02: a trial is finalized at most once. A real shadow trial, finalized by the service itself.

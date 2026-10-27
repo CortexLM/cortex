@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import re
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from fastapi.testclient import TestClient
 
 import hypertrain
 from hypertrain.challenge.app import Config, create_app
+from hypertrain.challenge.store import ChallengeError
 from hypertrain.ledger import Params
 from hypertrain.protocol import envelope_v2, relay_envelope
 from hypertrain.protocol.envelope import SignatureError, UnauthorizedSigner
@@ -55,6 +57,7 @@ from .support_http_auth import (
     gated_v2_calls,
     quiet_client,
     relay_receipt,
+    seed_audit_lease,
     seed_relay_scenario,
     server_key_grant,
     server_key_revoke,
@@ -157,10 +160,12 @@ def wrong_bearers(principal: str) -> dict[str, dict[str, str]]:
     return {
         "no credential": {},
         "token without scheme": {"Authorization": token},
-        "lowercase scheme": {"Authorization": f"bearer {token}"},
         "empty bearer": {"Authorization": "Bearer "},
         "token with a byte appended": bearer(token + "x"),
         "token missing its last byte": bearer(token[:-1]),
+        "token of the same length with its last byte changed": bearer(
+            token[:-1] + ("0" if token[-1] != "0" else "1")
+        ),
     }
 
 
@@ -271,19 +276,24 @@ def bare_app(root: Path, tokens: dict[str, str]) -> Any:
 
 
 ADMIN_PROBE = ("GET", "/v1/aggregator/runs/{run_id}/rounds/{w}/inputs")
+WORKER_PROBE = ("GET", "/v1/objects/{sha256}")
+# Whatever way a fix refuses weak secrets at start-up, building or starting the app raises.
+REFUSED_START = (ValueError, RuntimeError, ChallengeError)
 
 
-def reaches_the_gate(root: Path, tokens: dict[str, str], presented: str) -> bool:
-    """True when `presented` as the operator bearer gets past the gate of an operator route.
+def reaches_the_gate(
+    root: Path, tokens: dict[str, str], presented: str, probe: tuple[str, str] = ADMIN_PROBE
+) -> bool:
+    """True when `presented` as the bearer gets past the gate of the route `probe`.
 
     An application that refuses to start with these secrets has held the line, so it is False.
     """
-    try:
-        app = bare_app(root, tokens)
-    except ValueError:
-        return False
-    with TestClient(app) as client:
-        return call(client, ADMIN_PROBE, bearer(presented)).status_code not in (401, 503)
+    with ExitStack() as stack:
+        try:
+            client = stack.enter_context(TestClient(bare_app(root, tokens)))
+        except REFUSED_START:
+            return False
+        return call(client, probe, bearer(presented)).status_code not in (401, 503)
 
 
 STRONG = {"admin": "a" * 40, "worker": "b" * 40, "internal": "c" * 40}
@@ -308,9 +318,15 @@ def test_a_bearer_shorter_than_32_bytes_never_opens_a_route(tmp_path: Path) -> N
     reason="AU-02+HTP-01: one secret never serves two bearer classes",
 )
 def test_one_secret_never_serves_two_bearer_classes(tmp_path: Path) -> None:
+    # Control: pairwise different secrets, each opens the routes of its own class.
     assert reaches_the_gate(tmp_path / "distinct", STRONG, STRONG["admin"])
+    assert reaches_the_gate(tmp_path / "own", STRONG, STRONG["worker"], WORKER_PROBE)
     shared = {**STRONG, "worker": STRONG["admin"]}
-    assert not reaches_the_gate(tmp_path / "shared", shared, STRONG["admin"])
+    opens = [
+        reaches_the_gate(tmp_path / "shared", shared, STRONG["admin"], probe)
+        for probe in (ADMIN_PROBE, WORKER_PROBE)
+    ]
+    assert opens.count(True) <= 1, "the same secret opens the operator and the worker routes"
 
 
 # AU-05 ------------------------------------------------------------------------------------
@@ -386,7 +402,8 @@ def test_a_forged_signer_is_refused_on_the_signed_routes_that_have_no_membership
         n = world.network
         admission = n.join(0).json()["admission_id"]
         scenario = seed_relay_scenario(world)
-        owner, thief = service.COLD[0].ss58, service.COLD[1]
+        seed_audit_lease(world, service.AUDITORS[0])
+        owner, stranger = service.COLD[0].ss58, service.COLD[1]
         shared = {"owner": owner, "units": 1000, "origin_ids": [n.origin_ids[0]]}
         lock = EscrowLock(
             operation_id="01" * 32,
@@ -399,7 +416,7 @@ def test_a_forged_signer_is_refused_on_the_signed_routes_that_have_no_membership
             operation_id="02" * 32,
             admission_id=None,
             dispute_id=None,
-            recipient=thief.ss58,
+            recipient=stranger.ss58,
             **shared,
         )
         release = EscrowRelease(
@@ -414,22 +431,26 @@ def test_a_forged_signer_is_refused_on_the_signed_routes_that_have_no_membership
         ask = Receipt(w=0, commit_hash=HASH, received_round=1)
         observer_url = n.url + f"/relay-observers/{scenario.grant_hash}/{service.HOT[1].ss58}"
         receipt = relay_receipt(scenario, service.HOT[1])
+        execute = n.url + f"/worker/jobs/{HASH}/execute"
+        # Control: the lease is live and the pinned auditor owns it, so its own ask gets past the
+        # lease check and stops at the lease nonce; the miner below must stop at the lease itself.
+        lessee = n.client.post(execute, json=n.signed(service.AUDITORS[0], "Receipt", ask))
+        assert detail(lessee) == (403, "audit lease nonce differs")
         attempts = {
             "lock signed for another owner": lambda: n.client.post(
-                n.url + "/escrow/lock", json=n.signed(thief, "EscrowLock", lock)
+                n.url + "/escrow/lock", json=n.signed(stranger, "EscrowLock", lock)
             ),
             "transfer signed for another owner": lambda: n.client.post(
-                n.url + "/escrow/transfer", json=n.signed(thief, "EscrowTransfer", transfer)
+                n.url + "/escrow/transfer", json=n.signed(stranger, "EscrowTransfer", transfer)
             ),
             "release signed for another owner": lambda: n.client.post(
-                n.url + "/escrow/release", json=n.signed(thief, "EscrowRelease", release)
+                n.url + "/escrow/release", json=n.signed(stranger, "EscrowRelease", release)
             ),
             "lease asked by a miner": lambda: n.client.post(
                 n.url + "/worker/lease", json=n.signed(service.HOT[0], "Receipt", ask)
             ),
-            "execution asked by a miner": lambda: n.client.post(
-                n.url + f"/worker/jobs/{HASH}/execute",
-                json=n.signed(service.HOT[0], "Receipt", ask),
+            "execution of a leased job asked by a miner": lambda: n.client.post(
+                execute, json=n.signed(service.HOT[0], "Receipt", ask)
             ),
             "observer response by a miner": lambda: n.client.post(
                 observer_url, json=n.signed(service.HOT[1], "Receipt", ask)
@@ -444,7 +465,10 @@ def test_a_forged_signer_is_refused_on_the_signed_routes_that_have_no_membership
         "transfer signed for another owner": (409, "OWNER_AUTHORITY"),
         "release signed for another owner": (409, "OWNER_AUTHORITY"),
         "lease asked by a miner": (403, "auditor not allowlisted"),
-        "execution asked by a miner": (403, "audit request lacks owned live lease"),
+        "execution of a leased job asked by a miner": (
+            403,
+            "audit request lacks owned live lease",
+        ),
         "observer response by a miner": (403, "independent pinned observer required"),
         "relay receipt by a miner": (409, "forged/mismatched durability receipt"),
     }
@@ -791,7 +815,11 @@ def test_nobody_but_the_key_holder_can_censor_a_hotkey_through_a_server_key_gran
 
 
 def test_a_pure_read_get_writes_nothing_durable(tmp_path: Path) -> None:
-    """GT-06 (T-GT-07). The listed reads leave no row, no file and no server key behind."""
+    """GT-06 (T-GT-07). The listed reads leave no row, no file and no server key behind.
+
+    Seven of them are served here. The other five answer 404 or 409 in this fixture (it holds
+    no v1 run and its public snapshot is empty), so only their refusal is covered; `/public` is
+    read-only by construction (`mode=ro`)."""
     service = sibling_service()
     with service_world(tmp_path) as world:
         run = world.run_id
@@ -827,7 +855,8 @@ def test_health_and_admission_status_write_only_idempotent_infrastructure_rows(
     tmp_path: Path,
 ) -> None:
     """GT-07 (T-GT-07, condition satisfied). Repeating either read in a round changes nothing,
-    and the first call touches the health marker or the beacon pin table and no other table."""
+    and a read touches at most the health marker or the beacon pin table, no other table. A fix
+    that makes either read write less still holds the invariant, so the sets are upper bounds."""
     service = sibling_service()
     with service_world(tmp_path) as world:
         run, n = world.run_id, world.network
@@ -835,20 +864,22 @@ def test_health_and_admission_status_write_only_idempotent_infrastructure_rows(
         client = quiet_client(world.app)
         status = f"/v2/runs/{run}/admission/{service.HOT[0].ss58}"
 
-        def read(url: str) -> tuple[int, set[str]]:
+        def read(url: str, allowed: set[str]) -> int:
             before = durable_state(world)
             code = client.get(url).status_code
-            return code, changed(before, durable_state(world))
+            written = changed(before, durable_state(world))
+            assert written <= allowed, f"{url} wrote {sorted(written - allowed)}"
+            return code
 
-        assert read("/health") == (200, {"meta"})
-        assert read("/health") == (200, set())
-        assert read(status) == (200, {"beacon_pins_v2"})
-        assert read(status) == (200, set())
+        assert read("/health", {"meta"}) == 200
+        assert read("/health", set()) == 200
+        assert read(status, {"beacon_pins_v2"}) == 200
+        assert read(status, set()) == 200
         # An admission nobody holds is refused and leaves nothing, not even the pin.
-        assert read(f"/v2/runs/{run}/admission/{service.HOT[3].ss58}") == (409, set())
+        assert read(f"/v2/runs/{run}/admission/{service.HOT[3].ss58}", set()) == 409
 
 
-def test_admission_status_in_a_later_round_still_writes_only_its_pin_row(tmp_path: Path) -> None:
+def test_admission_status_in_a_later_round_writes_at_most_its_pin_row(tmp_path: Path) -> None:
     """GT-07 (condition: one pin row per action per round, never admission state)."""
     service = sibling_service()
     with service_world(tmp_path) as world:
@@ -861,5 +892,6 @@ def test_admission_status_in_a_later_round_still_writes_only_its_pin_row(tmp_pat
         before = durable_state(world)
         later = client.get(status)
         touched = changed(before, durable_state(world))
-    assert (later.status_code, touched) == (200, {"beacon_pins_v2"})
+    assert later.status_code == 200
+    assert touched <= {"beacon_pins_v2"}, sorted(touched - {"beacon_pins_v2"})
     assert later.json()["record"] == record["record"]

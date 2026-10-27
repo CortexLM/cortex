@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.app import Config, create_app
-from hypertrain.challenge.store import ChallengeStore
+from hypertrain.challenge.store import ChallengeError, ChallengeStore
 from hypertrain.miner.admission import sign_rotation
 from hypertrain.protocol.envelope_v2 import parse_envelope
 from hypertrain.protocol.jcs import canonicalize
@@ -162,7 +162,7 @@ FIRST_TRIAL_FAULTS = {
 }
 
 
-def test_a_settled_first_trial_is_reserved_with_its_custody_in_one_commit(
+def test_a_settled_first_trial_is_reserved_with_its_custody_record_and_issues_nothing(
     reserved_trial: Any,
 ) -> None:
     # Given: the control of the refusals below
@@ -178,6 +178,33 @@ def test_a_settled_first_trial_is_reserved_with_its_custody_in_one_commit(
     assert (counts(n, "shadow-reservation"), counts(n, "shadow-custody")) == (1, 1)
     assert escrow.balances() == before
     assert n.store._db.execute("SELECT COUNT(*) FROM escrow_shadow_finalized").fetchone()[0] == 0
+
+
+def test_a_reservation_whose_custody_record_cannot_be_stored_takes_no_ordinal(
+    reserved_trial: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a request that is valid in every way, and a store that cannot write the custody record
+    n, identity, body = reserved_trial
+    write = n.store._put_record_v2
+
+    def refuse_custody(run_id: str, kind: str, record_id: str, data: Any) -> None:
+        if kind == "shadow-custody":
+            raise ChallengeError(503, "custody record unavailable")
+        write(run_id, kind, record_id, data)
+
+    monkeypatch.setattr(n.store, "_put_record_v2", refuse_custody)
+    before = db_digest(n.store._db)
+
+    # When / Then: the reservation fails whole, so the ordinal it took is not left behind
+    refusal(reserve(n, identity, body), 503, "custody record unavailable")
+    assert db_digest(n.store._db) == before
+
+    # And: with the record writable again, the same request is the first reservation (ordinal 0)
+    monkeypatch.undo()
+    retry = reserve(n, identity, body)
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["shadow_ordinal"] == 0
+    assert (counts(n, "shadow-reservation"), counts(n, "shadow-custody")) == (1, 1)
 
 
 @pytest.mark.parametrize("fault", FIRST_TRIAL_FAULTS)

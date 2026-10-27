@@ -77,7 +77,7 @@ def test_a_client_event_never_blocks_the_reward_finalize_id(
     setup, evidence, reward = real_reward
     # Given: the control, a ledger without the bystander, shows the id and the effect of the step.
     control, _ = collateral_escrow(li_escrow, setup)
-    served = service_step(lambda: control.reward_finalize(reward, evidence))
+    served = control.reward_finalize(reward, evidence)
     finalize_id = served.operation_id
     effect = reward_effect(control)
     assert effect == (1_001_000, 1_000_000)
@@ -99,7 +99,8 @@ def test_a_client_event_never_blocks_the_reward_finalize_id(
     strict=True,
     raises=StepRefused,
     reason="ESC-04+BND-24+SG-11: a client event cannot take the id the service derives for the "
-    "shadow finalize of a trial, so a trial reward can always be issued",
+    "shadow finalize of a trial, so a trial reward can always be issued; the id embeds the "
+    "reservation hash, which no unauthenticated route serves [candidate]",
 )
 def test_a_client_event_never_blocks_the_shadow_finalize_id(
     li_escrow: ModuleType, real_reward: Real, kind: str
@@ -115,9 +116,7 @@ def test_a_client_event_never_blocks_the_shadow_finalize_id(
     # Given: the control run of the shadow finalize.
     control, _, signed = shadow_ledger()
     shadow_evidence = dataclasses.replace(evidence, shadow=True)
-    finalize_id = service_step(
-        lambda: control.reward_finalize(signed, shadow_evidence)
-    ).operation_id
+    finalize_id = control.reward_finalize(signed, shadow_evidence).operation_id
     effect = reward_effect(control)
     assert effect == (1_001_000, 1_000_000)
 
@@ -144,12 +143,13 @@ def release_ids(escrow) -> list[str]:
     return [row[0] for row in rows]
 
 
-def resolved_and_settled(world, turn):
+def resolved_and_settled(world, turn, settle=lambda step: step()):
     """What the resolution route does: the referee's resolution and the release of the bond in
-    one transaction, so a refused release also takes the resolution back."""
+    one transaction, so a refused release also takes the resolution back. A control calls it
+    as it is: a refusal there fails the test. The run under test passes `service_step`."""
     with world.escrow.tx():
         closed = world.resolve_match(turn, now=3)
-        service_step(lambda: world.disputes.settle_lock(turn.dispute_id, now=3))
+        settle(lambda: world.disputes.settle_lock(turn.dispute_id, now=3))
     return closed
 
 
@@ -187,12 +187,12 @@ def test_a_client_event_never_blocks_the_weights_payout_id(
     # Given: the control run of get_weights pays the earning owner and shows the payout id.
     with hosted_reward(tmp_path / "control", li_escrow, real_reward, real_settlement=True) as run:
         matured_with_a_bystander(run, li_escrow)
-        served = service_step(lambda: run.answer(0))
+        served = run.answer(0)
         payout_ids = pay_ids(run.escrow)
     assert served["weights"] == {li_escrow.HOT.ss58: 999_998.0} and len(payout_ids) == 1
 
     # When: a funded bystander signs an event with exactly that id before the epoch is asked.
-    with hosted_reward(tmp_path / "squat", li_escrow, real_reward, real_settlement=True) as run:
+    with hosted_reward(tmp_path / "contended", li_escrow, real_reward, real_settlement=True) as run:
         origin = matured_with_a_bystander(run, li_escrow)
         key = li_escrow.OTHER
         client_event(run.escrow, kind, key, fresh_id("neutral"), origin)
@@ -231,7 +231,7 @@ def test_a_client_event_never_blocks_the_dispute_settlement_id(
     assert len(settle_ids) == 1 and effect.dispute_locked == 0 and effect.available == 20000
 
     # When: a funded bystander signs an event with that id while the dispute is open.
-    with dispute_world(tmp_path / "squat", li_escrow) as world:
+    with dispute_world(tmp_path / "contended", li_escrow) as world:
         turn = opened(world)
         key, origin = li_escrow.OTHER, world.origins[1]
         client_event(world.escrow, kind, key, fresh_id("neutral"), origin)
@@ -239,13 +239,13 @@ def test_a_client_event_never_blocks_the_dispute_settlement_id(
 
         # Then: the referee's resolution and the release of the bond go through together, as
         # without the bystander.
-        resolved_and_settled(world, turn)
+        resolved_and_settled(world, turn, settle=service_step)
         assert world.disputes.get(turn.dispute_id).resolution is not None
         assert world.escrow.balances(li_escrow.COLD.ss58) == effect
         assert release_ids(world.escrow) == settle_ids
 
 
-FIRST_VERDICT, SECOND_VERDICT = "11" * 32, "55" * 32
+FIRST_VERDICT, SECOND_VERDICT, THIRD_VERDICT = "11" * 32, "55" * 32, "66" * 32
 
 
 def borrowing_dispute(world, li_escrow):
@@ -259,8 +259,16 @@ def borrowing_dispute(world, li_escrow):
     first = world.resolve_match(
         world.open(li_escrow.HOT, FIRST_VERDICT, first_bond.operation_id, now=1), now=3
     )
-    service_step(lambda: world.disputes.settle_lock(first_id, now=3))
+    world.disputes.settle_lock(first_id, now=3)
     assert world.escrow.balances(li_escrow.COLD.ss58).dispute_locked == 0  # its own life works
+
+    # Control: the second miner's own bond and dispute are accepted, resolved and settled under an
+    # id of their own, so a refusal below is the refusal of the borrowed id and of nothing else.
+    own_id = world.add_contest(THIRD_VERDICT, world.miner_two)
+    world.bond(li_escrow.OTHER, "77" * 32, own_id, world.origins[1])
+    world.resolve_match(world.open(world.miner_two, THIRD_VERDICT, "77" * 32, now=3), now=3)
+    world.disputes.settle_lock(own_id, now=3)
+    assert world.escrow.balances(li_escrow.OTHER.ss58).dispute_locked == 0
 
     second_id = world.add_contest(SECOND_VERDICT, world.miner_two)
     bond = second = None
@@ -312,7 +320,7 @@ def test_an_admission_lock_borrowing_a_closed_disputes_id_cannot_be_released(
         first = world.resolve_match(
             world.open(li_escrow.HOT, FIRST_VERDICT, bond.operation_id, now=1), now=3
         )
-        service_step(lambda: world.disputes.settle_lock(first_id, now=3))
+        world.disputes.settle_lock(first_id, now=3)
 
         # Given: an ordinary admission lock has no settlement of its own, so it cannot be released.
         ordinary = li_escrow.lock(world.origins[1], fresh_id("ordinary-lock"), 100)
@@ -370,12 +378,12 @@ def test_a_bond_borrowing_a_reward_origins_id_cannot_keep_that_origin_from_vesti
     # Given: the control, where the origin of round 0 vests at round 5.
     with dispute_world(tmp_path / "control", li_escrow) as world:
         seed_reward_origin(world, reward_origin, cold, 500, 5, finalize_hash)
-        service_step(lambda: world.escrow.mature(fresh_id("mature"), (reward_origin,), 5))
+        world.escrow.mature(fresh_id("mature"), (reward_origin,), 5)
         effect = world.escrow.balances(cold)
     assert (effect.available, effect.reward_pending) == (20500, 0)
 
     # When: OTHER's miner opens a dispute whose bond lock carries the origin id.
-    with dispute_world(tmp_path / "squat", li_escrow) as world:
+    with dispute_world(tmp_path / "contended", li_escrow) as world:
         seed_reward_origin(world, reward_origin, cold, 500, 5, finalize_hash)
         dispute_id = world.add_contest(SECOND_VERDICT, world.miner_two)
         refused(
@@ -446,7 +454,7 @@ def test_an_admission_lock_borrowing_a_reward_origins_id_cannot_be_released(
     strict=True,
     raises=DefenceMissing,
     reason="ESC-19: an escrow operation that completes while its caller is handling an unrelated "
-    "exception is committed, not rolled back behind a receipt",
+    "exception is committed, not rolled back behind a receipt [candidate]",
 )
 def test_an_operation_completed_inside_an_except_block_is_committed(
     li_escrow: ModuleType, tmp_path: Path
@@ -569,6 +577,46 @@ def test_a_failed_operation_inside_a_callers_transaction_is_undone_alone(
     assert reopened.balances(other).available == 10000 + 300
     events = [row[1] for row in ledger_state(reopened)[1]]
     assert sent.operation_id in events and failing.operation_id not in events
+
+
+def test_an_operation_in_progress_keeps_another_connection_from_starting_one(
+    li_escrow: ModuleType, tmp_path: Path
+) -> None:
+    setup, path = li_escrow.setup(), tmp_path / "ledger.db"
+    first = li_escrow.ledger(setup, path)
+    origin, _ = li_escrow.fund(first)
+    second = li_escrow.ledger(setup, path)
+    second.db.execute("PRAGMA busy_timeout=0")
+    cold = li_escrow.COLD.ss58
+    mine = li_escrow.lock(origin, fresh_id("mine"), 15000)
+    rival = li_escrow.lock(origin, fresh_id("rival"), 15000)
+    outcome: dict[str, str | None] = {}
+
+    # Given: a second connection to the same file asks for the same funds at the instant the
+    # first operation reads the ledger (no thread: the interleaving is the authorizer's).
+    def rival_arrives(action: int, *_: object) -> int:
+        if action == sqlite3.SQLITE_READ and "rival" not in outcome:
+            outcome["rival"] = None
+            try:
+                second.lock(rival, signer=cold)
+                outcome["rival"] = "ran to completion"
+            except sqlite3.OperationalError as error:
+                outcome["rival"] = str(error)
+        return sqlite3.SQLITE_OK
+
+    # When: the first operation runs.
+    first.db.set_authorizer(rival_arrives)
+    try:
+        outcome["first"] = first.lock(mine, signer=cold).operation_id
+    except EscrowError as error:
+        outcome["first"] = error.code
+    finally:
+        first.db.set_authorizer(None)
+
+    # Then: the write lock was already the first operation's, so the rival could not start and the
+    # funds went to the first operation alone.
+    assert outcome == {"rival": "database is locked", "first": mine.operation_id}
+    assert first.balances(cold).admission_locked == 15000
 
 
 def test_the_engine_refuses_to_be_built_inside_an_open_transaction(li_escrow: ModuleType) -> None:
@@ -758,6 +806,7 @@ def test_exactly_one_terminal_transition_applies_to_a_dispute(
         frozen = (disputes.get(dispute_id), ledger_state(world.escrow))
 
         # When: every other terminal transition, or any further move, is attempted later.
+        stored = closed.resolution
         different = ResolutionV2(
             dispute_id=dispute_id,
             transcript_hash=closed.transcript_hash,
@@ -765,15 +814,23 @@ def test_exactly_one_terminal_transition_applies_to_a_dispute(
             loser=li_escrow.HOT.ss58,
             evidence_hash=fresh_id("evidence nobody registered"),
         )
+        # Each of the next two agrees with the stored resolution on one field that identifies it,
+        # so a comparison that looks at that field alone would take it for the stored one.
+        other_evidence = stored.model_copy(update={"evidence_hash": fresh_id("other evidence")})
+        other_outcome = different.model_copy(update={"evidence_hash": stored.evidence_hash})
         late = closed.turn_deadline + 1
         proofs = helpers.availability(disputes, closed, (li_escrow.COORD, referee), late)
+
+        def resolve(body: ResolutionV2):
+            raw = canonicalize(seal(referee, "ResolutionV2", world.run_id, body, 100000))
+            return lambda: disputes.resolution(raw, now=4)
+
         refusals = {
-            "a different resolution": (
+            "a different resolution": ("RESOLUTION_CONFLICT", resolve(different)),
+            "the same outcome on other evidence": ("RESOLUTION_CONFLICT", resolve(other_evidence)),
+            "another outcome on the stored evidence": (
                 "RESOLUTION_CONFLICT",
-                lambda: disputes.resolution(
-                    canonicalize(seal(referee, "ResolutionV2", world.run_id, different, 100000)),
-                    now=4,
-                ),
+                resolve(other_outcome),
             ),
             "a timeout": (
                 "TIMEOUT_NOT_DUE",

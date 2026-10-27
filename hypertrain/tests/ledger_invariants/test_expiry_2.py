@@ -113,29 +113,63 @@ VARIANTS = {
 }
 
 
+def unfit(world: World, rnd: Any, job: Any, route: str, variant: str) -> tuple[Any, Any]:
+    """The request of `route` made unfit in one way of VARIANTS, and the payload to send."""
+    foreign = foreign_run_id(world)
+    if variant == "sealed-for-another-run":
+        request = sealed_for(world, rnd, job, route, foreign, 10_000)
+        return request, request.payload
+    if variant == "relabeled-to-this-run":
+        request = sealed_for(world, rnd, job, route, foreign, 10_000)
+        return request, envelopes_of(request, lambda e: {**e, "run_id": world.run_id})
+    if variant == "expiry-extended":
+        request = sealed_for(world, rnd, job, route, world.run_id, 10_000)
+        return request, envelopes_of(request, lambda e: {**e, "exp_drand": e["exp_drand"] + 1000})
+    request = sealed_for(world, rnd, job, route, world.run_id, world.network.now - 1)
+    return request, request.payload
+
+
 @pytest.mark.parametrize("variant", list(VARIANTS))
 @pytest.mark.parametrize("route", ROUTES)
 def test_a_signed_envelope_is_bound_to_its_run_its_expiry_and_its_signature(
     routes_world: tuple[World, Any, Any], route: str, variant: str
 ) -> None:
     world, rnd, job = routes_world
-    now = world.network.now
-    foreign = foreign_run_id(world)
-    if variant == "sealed-for-another-run":
-        request = sealed_for(world, rnd, job, route, foreign, 10_000)
-        sent = request.payload
-    elif variant == "relabeled-to-this-run":
-        request = sealed_for(world, rnd, job, route, foreign, 10_000)
-        sent = envelopes_of(request, lambda e: {**e, "run_id": world.run_id})
-    elif variant == "expiry-extended":
-        request = sealed_for(world, rnd, job, route, world.run_id, 10_000)
-        sent = envelopes_of(request, lambda e: {**e, "exp_drand": e["exp_drand"] + 1000})
-    else:
-        request = sealed_for(world, rnd, job, route, world.run_id, now - 1)
-        sent = request.payload
+    request, sent = unfit(world, rnd, job, route, variant)
     before, written = tables(world), files(world)
     refused = request.post(world, payload=sent)
     assert (refused.status_code, refused.json()["detail"]) == (409, VARIANTS[variant])
+    assert touched(before, tables(world)) == [] and files(world) == written
+
+
+@pytest.mark.parametrize("variant", list(VARIANTS))
+@pytest.mark.parametrize("unfit_part", ["proof", "screen"])
+def test_a_trial_pair_with_one_unfit_envelope_is_refused_whichever_one_it_is(
+    routes_world: tuple[World, Any, Any], unfit_part: str, variant: str
+) -> None:
+    # With both envelopes unfit, the check of the first masks a missing check of the second.
+    world, rnd, job = routes_world
+    sound = sealed_for(world, rnd, job, "join-proof", world.run_id, 10_000)
+    request, sent = unfit(world, rnd, job, "join-proof", variant)
+    pair = {**sound.payload, unfit_part: sent[unfit_part]}
+    before, written = tables(world), files(world)
+    refused = request.post(world, payload=pair)
+    assert (refused.status_code, refused.json()["detail"]) == (409, VARIANTS[variant])
+    assert touched(before, tables(world)) == [] and files(world) == written
+
+
+def test_a_signed_body_naming_another_run_is_refused_whatever_run_its_envelope_names(
+    routes_world: tuple[World, Any, Any],
+) -> None:
+    # BND-16: the envelope belongs to this run and is correctly signed; its genesis body does not.
+    world, rnd, job = routes_world
+    request = signed_requests(world, rnd, world.run_id, 10_000, job, body_run=foreign_run_id(world))
+    before, written = tables(world), files(world)
+    refused = request["genesis"].post(world)
+    assert (refused.status_code, refused.json()["detail"]) == (
+        409,
+        "embedded run ID differs from envelope",
+    )
     assert touched(before, tables(world)) == [] and files(world) == written
 
 
@@ -410,10 +444,12 @@ def test_a_stale_beacon_refuses_an_object_put_a_leaf_publication_and_a_trial_exp
     raises=AssertionError,
     reason=(
         "CK-03: the round that seeds a trial challenge was never pushed and the request dies "
-        "with an unhandled BeaconUnavailable (HTTP 500) instead of a retryable 503"
+        "with an unhandled BeaconUnavailable (HTTP 500) instead of a handled refusal"
     ),
 )
-def test_a_challenge_request_for_a_seed_round_that_was_not_pushed_is_a_503(tmp_path: Path) -> None:
+def test_a_challenge_request_for_a_seed_round_that_was_not_pushed_is_a_handled_refusal(
+    tmp_path: Path,
+) -> None:
     with service_world(tmp_path) as world:
         identity = world.network.join(0).json()["admission_id"]
         seed = world.store._db.execute("SELECT seed_beacon FROM admissions_v2").fetchone()[0]
@@ -427,7 +463,8 @@ def test_a_challenge_request_for_a_seed_round_that_was_not_pushed_is_a_503(tmp_p
         )
         control(backfill.status_code == 200, f"backfill: {backfill.text}")
         control(quiet.get(url).status_code == 200, "the challenge is not served after backfill")
-        assert refused.status_code == 503, refused.text
+        # The app answers a paused beacon with 503 and an admission refusal with 409.
+        assert refused.status_code in (409, 503), refused.text
 
 
 # --- SG-04: no signed expiry is bounded ---------------------------------------------------------
@@ -482,7 +519,7 @@ def far_join(world: World) -> Any:
                 raises=AssertionError,
                 reason=(
                     "SG-04: an escrow transfer whose expiry is the largest canonical integer is "
-                    "accepted, so a captured request stays replayable for ever [candidate]"
+                    "accepted: no horizon bounds a client-signed expiry [candidate]"
                 ),
             ),
         ),
@@ -493,8 +530,8 @@ def far_join(world: World) -> Any:
                 strict=True,
                 raises=AssertionError,
                 reason=(
-                    "SG-04: a rotation whose expiry is the largest canonical integer is accepted, "
-                    "so a captured request stays replayable for ever [candidate]"
+                    "SG-04: a rotation whose expiry is the largest canonical integer is accepted: "
+                    "no horizon bounds a client-signed expiry [candidate]"
                 ),
             ),
         ),
@@ -505,8 +542,8 @@ def far_join(world: World) -> Any:
                 strict=True,
                 raises=AssertionError,
                 reason=(
-                    "SG-04: a join whose expiry is the largest canonical integer is accepted, "
-                    "so a captured request stays replayable for ever [candidate]"
+                    "SG-04: a join whose expiry is the largest canonical integer is accepted: "
+                    "no horizon bounds a client-signed expiry [candidate]"
                 ),
             ),
         ),

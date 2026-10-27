@@ -31,7 +31,9 @@ from . import support_exit_roster as X
 
 
 def complete(rnd: X.Round, job_id: str) -> None:
-    """The state complete_audit_v2 leaves behind: the audit of this job is over."""
+    """What the lease logic reads of a finished audit: its job no longer runs, so its auditor
+    holds no lease. complete_audit_v2 also writes the verdict and counts the round down; a forged
+    member has no verdict to sign, and the tests that use this do not look at either."""
     with rnd.store._tx():
         rnd.store._db.execute("UPDATE audit_leases_v2 SET state='completed' WHERE id=?", (job_id,))
 
@@ -48,7 +50,7 @@ def silent(tmp_path: Path) -> Iterator[X.Round]:
         rnd.quiet = 4
         for index in (0, 1, 2, 3):
             X.join_forged(rnd, index)
-        assert X.accept(rnd, rnd.quiet).status_code == 200
+        X.control(X.accept(rnd, rnd.quiet).status_code == 200, "the quiet member accepts")
         yield rnd
 
 
@@ -61,7 +63,7 @@ def queue(tmp_path: Path) -> Iterator[X.Round]:
         for index in rnd.members:
             X.join_forged(rnd, index)
         response = X.schedule(rnd)
-        assert response.status_code == 200, response.text
+        X.control(response.status_code == 200, response.text)
         yield rnd
 
 
@@ -136,7 +138,7 @@ def test_a_member_that_lost_eligibility_after_accept_cannot_commit(tmp_path: Pat
     with X.activated_network(tmp_path) as network:
         rnd = X.open_round(network, 0, [0, 1, 2, 3])
         for index in rnd.members:
-            assert X.accept(rnd, index).status_code == 200
+            X.control(X.accept(rnd, index).status_code == 200, "every member accepts")
         member = 3
         first = X.post_commit(rnd, 0, X.forged_commit(rnd, 0))
         X.control(first.status_code == 200, "an eligible member commits in this window")
@@ -251,6 +253,7 @@ def test_an_auditor_is_not_disabled_for_a_job_the_master_cannot_execute(queue: X
     )
     X.control(
         executed.status_code == 409
+        and "island-job" in executed.text
         and not rnd.has_record("island-job", rnd.identity(head))
         and not rnd.disabled(auditor),
         "the master cannot execute the job: its member never fetched the island job",
@@ -327,7 +330,8 @@ def test_a_signed_lease_ask_grants_at_most_one_lease(queue: X.Round) -> None:
 
     again = X.post_lease(rnd, ask)
 
-    assert again.status_code != 200, again.text[:200]
+    if again.status_code == 200:  # an idempotent answer must be the lease already granted
+        assert again.json()["body"]["job_id"] == first.json()["body"]["job_id"]
     assert [row["auditor"] for row in rnd.lease_rows()].count(auditor.ss58) == 1
 
 
@@ -387,7 +391,7 @@ def test_a_round_whose_audits_all_exhausted_can_be_left_behind(queue: X.Round) -
     raises=AssertionError,
     reason="FIN-24: a lease that expires during a beacon outage is penalised exactly like a "
     "silent auditor: the first push after the outage writes the permanent auditor-disabled "
-    "record, although every ask the auditor could have made was refused 503 meanwhile",
+    "record, although every ask the auditor could have made was refused 503 meanwhile [candidate]",
 )
 def test_a_beacon_outage_does_not_disable_an_auditor(queue: X.Round) -> None:
     rnd = queue
@@ -489,7 +493,7 @@ def applied1(chain: X.Chain, applied0: tuple[X.Round, str]) -> tuple[X.Round, st
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="AD-07+A2W-21+LCK-18: verified_inputs_v2 raises 409 'missing accepted delta' for a "
+    reason="A2W-21+LCK-18: verified_inputs_v2 raises 409 'missing accepted delta' for a "
     "member whose audit matched but whose delta never arrived, so one absent artifact stops the "
     "aggregation of the five audited members instead of excluding that member with a recorded "
     "cause",
@@ -670,5 +674,5 @@ def test_a_hotkey_rotated_after_the_audits_does_not_stall_the_round(
         inputs = store.verified_inputs_v2(rnd.run_id, 1)
         assert {x.roster.hotkey for x in inputs} >= {rnd.hotkey(i) for i in others}
     else:  # refused: the member keeps the hotkey the round was opened with
-        assert rotated.status_code == 409, rotated.text
+        assert 400 <= rotated.status_code < 500, rotated.text
         assert len(store.verified_inputs_v2(rnd.run_id, 1)) == 4

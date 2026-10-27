@@ -1,6 +1,6 @@
-"""Origins that are not a round's reward, settlement and conservation (Lens CRD-11..CRD-25):
-genesis, bootstrap and shadow issuance, the settlement a maturity needs, the cap, conservation,
-and the store-side owner and atomicity conditions of a credit.
+"""Origins that are not a round's reward, settlement and conservation (Lens CRD-05, CRD-08,
+CRD-11..CRD-24): genesis, bootstrap and shadow issuance, the settlement a maturity needs, the cap,
+conservation, and the store-side owner and atomicity conditions of a credit.
 
 Every test states a defence the protocol must hold: the ledger or the store refuses X and its
 durable state is unchanged, units are conserved, or a credit is made once. Test keys only.
@@ -24,11 +24,12 @@ from hypertrain.aggregator.core import FinalityError
 from hypertrain.challenge.finality_v2 import RoundStatus, settle
 from hypertrain.challenge.store import ChallengeError
 from hypertrain.ledger.escrow_v2 import (
-    EscrowError,
     EscrowV2,
     Settlement,
+    bootstrap_origin_id,
     digest,
     genesis_allocation_hash,
+    genesis_origin_id,
 )
 from hypertrain.miner.admission import sign_join, sign_rotation
 from hypertrain.protocol.hashing import sha256_hex
@@ -253,23 +254,43 @@ def test_a_bootstrap_outside_its_conditions_is_refused_and_issues_nothing_more(
     assert ledger_rows(escrow) == rows
 
 
-def test_a_bootstrap_replays_conflicts_on_another_body_and_is_never_emission(
-    li_escrow: ModuleType,
+@pytest.mark.parametrize("kind", ["genesis", "bootstrap"])
+def test_origins_that_do_not_hash_to_the_pinned_allocation_are_refused(
+    li_escrow: ModuleType, kind: str
 ) -> None:
-    """CRD-17: the same bootstrap again returns the first receipt, another body under the same
-    operation is OPERATION_CONFLICT, and matured bootstrap units are never payable."""
-    allocation = bootstrap_allocation(li_escrow)
-    escrow = reopen(li_escrow, bootstrap_setup(li_escrow), memory_db())
-    bootstrap = make_bootstrap(li_escrow, escrow.run_id, allocation, operation=BOOT_OP)
-    first = escrow.production_bootstrap(bootstrap)
-    again = make_bootstrap(li_escrow, escrow.run_id, allocation, operation=BOOT_OP)
-    assert escrow.production_bootstrap(again) == first
-    other = make_bootstrap(
-        li_escrow, escrow.run_id, [(li_escrow.COLD.ss58, 30000, 1)], operation=BOOT_OP
-    )
-    assert refusal(lambda: escrow.production_bootstrap(other)) == "OPERATION_CONFLICT"
-    escrow.mature(H, tuple(o.origin_id for o in bootstrap.origins), 1)
-    assert escrow.balances().available == 30000 and escrow.payable(10**9) == []
+    """CRD-16 CRD-17: an issuance can name the pinned allocation hash, and origin ids derived from
+    it, and still carry other units. The ledger hashes the origins it is given, so that issuance
+    is refused and issues nothing."""
+    other = [(li_escrow.COLD.ss58, 30000, 1)]
+    if kind == "genesis":
+        escrow = reopen(li_escrow, li_escrow.setup("test"), memory_db())
+        pin = escrow.policy.genesis_allocation_hash
+        assert pin is not None
+        forged = make_genesis(
+            li_escrow,
+            escrow.run_id,
+            allocation=other,
+            pinned_hash=pin,
+            origin_ids={0: genesis_origin_id(escrow.run_id, pin, 0)},
+        )
+        issue: Callable[[], object] = partial(escrow.test_genesis, forged)
+        code = "GENESIS_ALLOCATION"
+    else:
+        escrow = reopen(li_escrow, bootstrap_setup(li_escrow), memory_db())
+        pin = escrow.policy.bootstrap_allocation_hash
+        assert pin is not None
+        forged_bootstrap = make_bootstrap(
+            li_escrow,
+            escrow.run_id,
+            other,
+            operation=BOOT_OP,
+            pinned_hash=pin,
+            origin_ids={0: bootstrap_origin_id(escrow.run_id, pin, 0)},
+        )
+        issue = partial(escrow.production_bootstrap, forged_bootstrap)
+        code = "BOOTSTRAP_ALLOCATION"
+    assert refusal(issue) == code
+    assert event_count(escrow) == 0 and escrow.balances().issued == 0
 
 
 # --- CRD-18 / CRD-19: shadow origins -------------------------------------------------------------
@@ -436,8 +457,9 @@ def test_the_service_settlement_is_the_record_the_service_wrote_and_nothing_else
     li_escrow: ModuleType, setup: Any, tmp_path: Path
 ) -> None:
     """CRD-20: with the store's own callback an origin whose finalize left no settlement record
-    answers UNACCEPTED_SETTLEMENT, as does any reference nobody recorded; once the service writes
-    the record with the reward, the same maturity succeeds."""
+    answers UNACCEPTED_SETTLEMENT, as does any reference nobody recorded, before and after the
+    service writes the records of its reward; the records of the reward then let its maturity
+    succeed."""
     plan = build_plan(li_escrow, setup, HOTKEYS)
     reward, evidence = plan.build()
     with hosted_reward(tmp_path, li_escrow, (setup, evidence, reward), real_settlement=True) as h:
@@ -450,6 +472,7 @@ def test_the_service_settlement_is_the_record_the_service_wrote_and_nothing_else
         assert refusal(lambda: h.store._settlement_v2(h.run_id, H)) == "UNACCEPTED_SETTLEMENT"
         assert h.escrow.balances().reward_pending == BUDGET
         h.finalize()
+        assert refusal(lambda: h.store._settlement_v2(h.run_id, H)) == "UNACCEPTED_SETTLEMENT"
         h.escrow.mature("77" * 32, origins, 20)
         assert h.escrow.balances().available == BUDGET and h.escrow.balances().conserved()
 
@@ -578,68 +601,6 @@ def test_a_ledger_whose_rows_were_edited_is_refused_when_reopened(
     escrow.db.execute(statement.format(other=owner(7).ss58))
     escrow.db.close()
     assert refusal(lambda: ledger_for(li_escrow, setup, plan, path)) == code
-
-
-# --- CRD-25 and the operation ids a client may not take -----------------------------------------
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="CRD-25+CRD-D07: Finalize.entitlements_root is never read for a live round, so a "
-    "coordinator-signed Finalize whose root commits to nothing that is credited is accepted "
-    "and minted",
-)
-def test_a_finalize_whose_entitlements_root_commits_to_nothing_credited_is_refused(
-    li_escrow: ModuleType, setup: Any
-) -> None:
-    plan = build_plan(li_escrow, setup, HOTKEYS, entitlements_root="ab" * 32)
-    reward, evidence = plan.build()
-    escrow = ledger_for(li_escrow, setup, plan)
-    try:
-        escrow.reward_finalize(reward, evidence)
-        refused = False
-    except EscrowError:
-        refused = True
-    assert refused, f"{escrow.balances().issued} units were issued under a free-form root"
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="CRD-01+ESC-D3: the service derives the operation id of a round's reward from the "
-    "public run id and round number, and a client transfer may carry any operation id, so one "
-    "unit sent under that id makes the round's finalize OPERATION_CONFLICT for ever",
-)
-def test_a_client_escrow_event_never_blocks_the_service_reward_of_a_round(
-    li_escrow: ModuleType,
-) -> None:
-    setup = li_escrow.setup("test")
-    plan = build_plan(li_escrow, setup, [miner(0)])
-    reward, evidence = plan.build()
-    twin = ledger_for(li_escrow, setup, plan)
-    reserved = twin.reward_finalize(reward, evidence).operation_id  # learnt from a dry run
-    escrow = ledger_for(li_escrow, setup, plan)
-    origin, _ = li_escrow.fund(escrow)
-    cold = li_escrow.COLD.ss58
-    escrow.transfer(
-        EscrowTransfer(
-            operation_id=reserved,
-            owner=cold,
-            recipient=li_escrow.OTHER.ss58,
-            units=1,
-            origin_ids=[origin],
-            admission_id=None,
-            dispute_id=None,
-        ),
-        signer=cold,
-    )
-    try:
-        escrow.reward_finalize(reward, evidence)
-        outcome = "credited"
-    except EscrowError as error:
-        outcome = error.code
-    assert outcome == "credited", f"the round was refused with {outcome}"
 
 
 # --- CRD-14: the share of one coldkey -------------------------------------------------------------

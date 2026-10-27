@@ -179,6 +179,15 @@ def test_a_settled_round_cannot_be_excluded_and_a_conflicting_exclusion_is_refus
         exclude(excluded, ANOTHER)
 
 
+def test_an_exclusion_closes_a_round_only_when_no_applied_tape_is_left_to_repair() -> None:
+    # FIN-12 + FIN-10: an applied round that is excluded keeps the w+2 gate shut until its
+    # rollback ran; a round that never applied has nothing to repair.
+    applied = exclude(status(), FINAL)
+    assert (applied.rollback_complete, applied.closed) == (False, False)
+    never_applied = exclude(status(applied=False), FINAL)
+    assert (never_applied.rollback_complete, never_applied.closed) == (True, True)
+
+
 # -- FIN-12: at most two speculative rounds -------------------------------------------------------
 
 OPEN_REFUSED = [
@@ -532,6 +541,31 @@ def test_a_verdict_of_an_unpinned_auditor_credits_nobody(rounds: Rounds) -> None
     with pytest.raises(UnauthorizedSigner, match="not authorized for message role"):
         escrow.reward_finalize(bad.reward, bad.evidence)
     assert escrow.balances().issued == 0
+
+
+def test_an_audit_challenge_the_reward_authority_did_not_sign_credits_nobody(
+    rounds: Rounds,
+) -> None:
+    # FIN-03: the challenge a verdict answers must come from the reward authority.
+    escrow = rounds.escrow()
+    bad = rounds.build(0, tamper="foreign challenge signer")
+    with pytest.raises(UnauthorizedSigner, match="not authorized for message role"):
+        escrow.reward_finalize(bad.reward, bad.evidence)
+    assert escrow.balances().issued == 0
+
+
+def test_a_miner_is_not_credited_for_a_verdict_it_signed_itself(rounds: Rounds) -> None:
+    # FIN-03: a pinned auditor key is accepted on any verdict, but never on its own commit.
+    escrow = rounds.escrow()
+    escrow.auditors = escrow.auditors | {rounds.fixture.HOT.ss58}
+    bad = rounds.build(0, tamper="self audit")
+    assert error_code(lambda: escrow.reward_finalize(bad.reward, bad.evidence)) == (
+        "UNVERIFIED_REWARD_WORK"
+    )
+    assert escrow.balances().issued == 0
+    good = rounds.build(0)
+    escrow.reward_finalize(good.reward, good.evidence)
+    assert escrow.balances().issued == rounds.budget
 
 
 # -- FIN-25: the store's transaction helper leaves no transaction open -----------------------------

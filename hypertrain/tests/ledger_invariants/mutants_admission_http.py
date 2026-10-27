@@ -29,6 +29,10 @@ REAPER_BOUNDARY = (
 STRANGER_POLL = (
     HTTP + "::test_gt01_a_poll_after_the_deadline_by_anyone_expires_or_suspends_nobody[APPLIED]"
 )
+STRANGER_POLL_ACTIVE = STRANGER_POLL.replace("[APPLIED]", "[ACTIVE]")
+CLOCK_CLOSES = HTTP + "::test_gt03_the_clock_closes_the_trial_of_a_suspended_or_banned_holder"
+PENDING_BOUND = HTTP + "::test_ad01_the_pending_places_are_bounded_and_a_refusal_changes_nothing"
+ROTATE_OWNER = HTTP + "::test_sg08_only_the_coldkey_of_the_admission_can_rotate_it"
 
 MUTANTS = [
     {
@@ -44,7 +48,7 @@ MUTANTS = [
     },
     {
         "id": "join-signature-check-removed",
-        "invariants": ["SG-06", "OR-01"],
+        "invariants": ["SG-06"],
         "path": ADMISSION,
         "old": """        if not verify_join(request, self.escrow.run_id, now):
             raise AdmissionError("DUAL_SIGNATURE_RUN_OR_EXPIRY")""",
@@ -177,9 +181,7 @@ MUTANTS = [
         "path": ADMISSION,
         "old": "            if count >= self.policy.max_pending:",
         "new": "            if count > self.policy.max_pending:",
-        "tests": [
-            HTTP + "::test_ad01_the_pending_places_are_bounded_and_a_refusal_changes_nothing"
-        ],
+        "tests": [PENDING_BOUND],
         "why": "the 33rd pending application is admitted.",
     },
     {
@@ -188,7 +190,7 @@ MUTANTS = [
         "path": ADMISSION,
         "old": """{"RotateRequest": lambda s: s == history["coldkey"]}""",
         "new": """{"RotateRequest": lambda s: True}""",
-        "tests": [HTTP + "::test_sg08_only_the_coldkey_of_the_admission_can_rotate_it"],
+        "tests": [ROTATE_OWNER],
         "why": "any signer can move another participant's admission.",
     },
     {
@@ -267,6 +269,7 @@ MUTANTS = [
         "tests": [
             HARDENING + "::test_beacon_push_frees_the_places_of_unproven_challenges",
             STRANGER_POLL,
+            CLOCK_CLOSES,
         ],
         "why": "two unproven trials hold both trial places until someone asks for their challenge.",
     },
@@ -409,5 +412,136 @@ MUTANTS = [
             + "::test_ad03_an_equal_proof_is_accepted_and_credited_only_by_the_finalization"
         ],
         "why": "accepting a proof credits a clean participation before the coordinator finalizes.",
+    },
+    {
+        "id": "join-pending-capacity-ignores-probation",
+        "invariants": ["AD-01", "LCK-21"],
+        "path": ADMISSION,
+        "old": "\"SELECT COUNT(*) FROM admissions_v2 WHERE state IN ('APPLIED','PROBATION')\"",
+        "new": "\"SELECT COUNT(*) FROM admissions_v2 WHERE state IN ('APPLIED')\"",
+        "tests": [PENDING_BOUND],
+        "why": "an application that passed its trial no longer holds a pending place.",
+    },
+    {
+        "id": "join-coldkey-guard-ignores-probation",
+        "invariants": ["AD-05"],
+        "path": ADMISSION,
+        "old": " AND state!='ACTIVE'",
+        "new": " AND state NOT IN ('ACTIVE','PROBATION')",
+        "tests": [COLDKEY_ONE],
+        "why": "a coldkey on probation applies again with a fresh hotkey.",
+    },
+    {
+        "id": "join-coldkey-guard-ignores-suspended",
+        "invariants": ["AD-05"],
+        "path": ADMISSION,
+        "old": " AND state!='ACTIVE'",
+        "new": " AND state NOT IN ('ACTIVE','SUSPENDED')",
+        "tests": [COLDKEY_ONE],
+        "why": "a coldkey whose admission is suspended applies again with a fresh hotkey.",
+    },
+    {
+        "id": "join-coldkey-guard-ignores-banned",
+        "invariants": ["AD-05"],
+        "path": ADMISSION,
+        "old": " AND state!='ACTIVE'",
+        "new": " AND state NOT IN ('ACTIVE','BANNED')",
+        "tests": [COLDKEY_ONE],
+        "why": "a coldkey whose admission is banned applies again with a fresh hotkey.",
+    },
+    {
+        "id": "join-hotkey-history-ignores-active-admissions",
+        "invariants": ["AD-05"],
+        "path": ADMISSION,
+        "old": """"SELECT 1 FROM admission_history WHERE hotkey=?", (request.hotkey,)""",
+        "new": (
+            '"SELECT 1 FROM admission_history h JOIN admissions_v2 a '
+            "ON a.admission_id=h.admission_id WHERE h.hotkey=? AND a.state!='ACTIVE'\", "
+            "(request.hotkey,)"
+        ),
+        "tests": [PROPERTY],
+        "why": "the hotkey of an ACTIVE miner is admitted again under another coldkey.",
+    },
+    {
+        "id": "rotation-signer-any-coldkey-with-an-admission",
+        "invariants": ["SG-08"],
+        "path": ADMISSION,
+        "old": """{"RotateRequest": lambda s: s == history["coldkey"]}""",
+        "new": (
+            """{"RotateRequest": lambda s: s in {"""
+            """r[0] for r in self.store.db.execute("SELECT coldkey FROM admission_history")}}"""
+        ),
+        "tests": [ROTATE_OWNER],
+        "why": "the owner of any admission can move another participant's admission.",
+    },
+    {
+        "id": "join-replay-refreshes-the-seed",
+        "invariants": ["SG-06"],
+        "path": ADMISSION,
+        "old": """                return self.store.by_id(old["receipt"])""",
+        "new": """                self.store.db.execute(
+                    "UPDATE admissions_v2 SET seed_beacon=? WHERE admission_id=?",
+                    (now + 1, old["receipt"]),
+                )
+                return self.store.by_id(old["receipt"])""",
+        "tests": [REPLAY],
+        "why": "a retried join at a later beacon moves the seed round of the admission it returns.",
+    },
+    {
+        "id": "reaper-skips-suspended-holders",
+        "invariants": ["GT-03", "LCK-21"],
+        "path": ADMISSION,
+        "old": "AND a.proof_digest IS NULL ",
+        "new": "AND a.proof_digest IS NULL AND a.state!='SUSPENDED' ",
+        "tests": [CLOCK_CLOSES + "[SUSPENDED]"],
+        "why": "a trial held by a suspended identity keeps its place for good.",
+    },
+    {
+        "id": "reaper-skips-banned-holders",
+        "invariants": ["GT-03", "LCK-21"],
+        "path": ADMISSION,
+        "old": "AND a.proof_digest IS NULL ",
+        "new": "AND a.proof_digest IS NULL AND a.state!='BANNED' ",
+        "tests": [CLOCK_CLOSES + "[BANNED]"],
+        "why": "a trial held by a banned identity keeps its place for good.",
+    },
+    {
+        "id": "reaper-suspends-active-holders",
+        "invariants": ["GT-03", "LCK-20"],
+        "path": ADMISSION,
+        "old": "            return epochs",
+        "new": """            for epoch in epochs:
+                holder = self.store.db.execute(
+                    "SELECT admission_id FROM admission_trials WHERE epoch=?", (epoch,)
+                ).fetchone()[0]
+                if self.store.by_id(holder).state == "ACTIVE":
+                    self.store.transition(holder, "SUSPENDED", "CHALLENGE_EXPIRED", now)
+            return epochs""",
+        "tests": [STRANGER_POLL_ACTIVE],
+        "why": "an ACTIVE miner whose trial lapsed is suspended by the clock.",
+    },
+    {
+        "id": "finalize-accepts-an-additional-participant",
+        "invariants": ["AD-02"],
+        "path": ADMISSION,
+        "old": "final.included != [r.hotkey]",
+        "new": "r.hotkey not in final.included",
+        "tests": [FINALIZE_BOUND + "[an_additional_participant-changes4]"],
+        "why": "a Finalize that also includes other hotkeys credits this participation.",
+    },
+    {
+        "id": "proof-replay-credits-again",
+        "invariants": ["AD-02"],
+        "path": ADMISSION,
+        "old": """                    raise AdmissionError("PROOF_REPLAY_CONFLICT")
+                return r""",
+        "new": """                    raise AdmissionError("PROOF_REPLAY_CONFLICT")
+                self.store.db.execute(
+                    "UPDATE admissions_v2 SET clean_count=clean_count+1 WHERE admission_id=?",
+                    (r.admission_id,),
+                )
+                return r""",
+        "tests": [REPLAYED_OVER_HTTP],
+        "why": "re-posting the accepted proof credits a clean participation again.",
     },
 ]

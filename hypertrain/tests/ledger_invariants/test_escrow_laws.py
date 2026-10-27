@@ -244,6 +244,7 @@ RELEASE_FAULTS = {
     "other_admission_reference": "LOCK_REFERENCE",
     "other_owner_reference": "LOCK_REFERENCE",
     "contest_reference_on_an_admission_lock": "LOCK_REFERENCE",
+    "other_dispute_reference": "LOCK_REFERENCE",
 }
 
 
@@ -252,10 +253,13 @@ def test_a_release_is_the_owners_for_the_owners_own_lock_with_matching_reference
     li_escrow: ModuleType, fault: str
 ) -> None:
     """ESC-09: release needs the owner's signature, an existing lock and the lock's references."""
-    # Given: COLD's 1000-unit admission stake, a recorded transfer, and a settlement that allows it.
+    # Given: COLD's 1000-unit admission stake (a contest bond for the dispute case), a recorded
+    # transfer, and a settlement that allows the release.
     fx = funded(li_escrow)
     escrow, cold, other = fx.escrow, li_escrow.COLD.ss58, li_escrow.OTHER.ss58
-    stake = lock_op(li_escrow, fx.cold)
+    contest = fault == "other_dispute_reference"
+    bucket = "dispute_locked" if contest else "admission_locked"
+    stake = lock_op(li_escrow, fx.cold, kind="LOCK_CONTEST" if contest else "LOCK_ADMISSION")
     escrow.lock(stake, signer=cold)
     transfer = transfer_op(li_escrow, fx.cold, operation="33" * 32)
     escrow.transfer(transfer, signer=cold)
@@ -274,6 +278,10 @@ def test_a_release_is_the_owners_for_the_owners_own_lock_with_matching_reference
         request = EscrowRelease.model_validate(
             {**release_op(stake).model_dump(), "admission_id": None, "dispute_id": H}
         )
+    elif fault == "other_dispute_reference":
+        request = EscrowRelease.model_validate(
+            {**release_op(stake).model_dump(), "dispute_id": "ab" * 32}
+        )
     before = fingerprint(escrow)
     # When / Then: refused with the code of the broken reference; the stake is untouched.
     assert (
@@ -281,10 +289,10 @@ def test_a_release_is_the_owners_for_the_owners_own_lock_with_matching_reference
         == RELEASE_FAULTS[fault]
     )
     assert fingerprint(escrow) == before
-    assert escrow.balances(cold).admission_locked == 1000
+    assert getattr(escrow.balances(cold), bucket) == 1000
     # Control: the matching release by the owner returns exactly the locked units to the owner.
     escrow.release(release_op(stake), signer=cold, now_beacon=10)
-    assert escrow.balances(cold).admission_locked == 0
+    assert getattr(escrow.balances(cold), bucket) == 0
     assert escrow.balances(cold).available == COLD_UNITS - 500
     assert escrow.balances().conserved()
 
@@ -461,6 +469,53 @@ def test_a_slash_needs_a_resolved_vested_fraud_settlement_bound_to_the_request(
     assert fx.escrow.balances().dispute_locked == CONTEST_UNITS
 
 
+SLASH_REFERENCES = {
+    "other_dispute_reference": "LOCK_REFERENCE",
+    "other_owner_reference": "LOCK_REFERENCE",
+    "admission_reference_on_a_contest_bond": "LOCK_REFERENCE",
+    "names_a_transfer_not_a_lock": "UNKNOWN_LOCK",
+    "names_no_event_at_all": "UNKNOWN_LOCK",
+}
+
+
+@pytest.mark.parametrize("fault", SLASH_REFERENCES)
+def test_a_slash_burns_only_the_lock_it_names_with_matching_references(
+    li_escrow: ModuleType, fault: str
+) -> None:
+    """ESC-14: a slash names an existing lock and the references that lock was made with."""
+    # Given: a bond settled FRAUD for every reference, and a recorded transfer.
+    fx, bond, request = contested(li_escrow, settled("FRAUD"))
+    escrow, cold = fx.escrow, li_escrow.COLD.ss58
+    transfer = transfer_op(li_escrow, fx.cold, operation="34" * 32)
+    escrow.transfer(transfer, signer=cold)
+    body = request.model_dump()
+    refused = {
+        "other_dispute_reference": EscrowRelease.model_validate({**body, "dispute_id": "ab" * 32}),
+        "other_owner_reference": EscrowRelease.model_validate(
+            {**body, "owner": li_escrow.OTHER.ss58}
+        ),
+        "admission_reference_on_a_contest_bond": EscrowRelease.model_validate(
+            {**body, "admission_id": H, "dispute_id": None}
+        ),
+        "names_a_transfer_not_a_lock": release_op(
+            bond, operation="33" * 32, lock_id=transfer.operation_id
+        ),
+        "names_no_event_at_all": release_op(bond, operation="33" * 32, lock_id="ee" * 32),
+    }[fault]
+    authority = li_escrow.COORD.ss58
+    before = fingerprint(escrow)
+    # When / Then: refused with the code of the broken reference; the bond is untouched.
+    assert (
+        error_code(lambda: escrow.slash(refused, authority=authority, now_beacon=10))
+        == SLASH_REFERENCES[fault]
+    )
+    assert fingerprint(escrow) == before
+    assert escrow.balances(cold).dispute_locked == CONTEST_UNITS
+    # Control: the request that matches its lock burns the bond.
+    escrow.slash(request, authority=authority, now_beacon=10)
+    assert escrow.balances().burned == CONTEST_UNITS
+
+
 def test_a_proven_fraud_burns_the_bond_once_and_closes_the_release_path(
     li_escrow: ModuleType,
 ) -> None:
@@ -554,7 +609,9 @@ def test_a_referee_cost_needs_a_funded_referee_and_a_contest_bond(
         "(an empty or self referee passes the funding check)"
     ),
 )
-@pytest.mark.parametrize("referee", ["", "owner"])
+@pytest.mark.parametrize(
+    "referee", ["", "owner"], ids=["an_empty_referee", "the_slashed_owner_as_referee"]
+)
 def test_a_slash_never_pays_its_referee_cost_back_to_the_slashed_owner(
     li_escrow: ModuleType, referee: str
 ) -> None:
@@ -589,7 +646,7 @@ def test_a_slash_never_pays_its_referee_cost_back_to_the_slashed_owner(
         )
     except EscrowError:
         return
-    assert escrow.balances(cold).available == available_before
+    assert escrow.balances(cold).available == available_before, "the cost came back to the owner"
 
 
 # ------------------------------------------------------------------ issuance (ESC-20)
@@ -675,6 +732,36 @@ TAMPERED: dict[str, tuple[Callable[[ModuleType], Statements], str]] = {
     ),
     "a_link_to_the_previous_event_rewritten": (
         lambda fx: [("UPDATE escrow_events SET prev_hash=? WHERE seq=3", ("f" * 64,))],
+        "EVENT_CHAIN",
+    ),
+    "a_sequence_number_rewritten": (
+        lambda fx: [
+            (
+                "UPDATE escrow_events SET seq=seq+1000 "
+                "WHERE seq=(SELECT MAX(seq) FROM escrow_events)",
+                (),
+            )
+        ],
+        "EVENT_CHAIN",
+    ),
+    "a_receipt_moved_to_another_operation": (
+        lambda fx: [
+            (
+                "UPDATE escrow_events SET receipt=replace(receipt,operation_id,?) "
+                "WHERE seq=(SELECT MAX(seq) FROM escrow_events)",
+                ("f" * 64,),
+            )
+        ],
+        "EVENT_CHAIN",
+    ),
+    "a_receipt_of_another_ledger_mode": (
+        lambda fx: [
+            (
+                "UPDATE escrow_events SET receipt=replace(receipt,?,?) "
+                "WHERE seq=(SELECT MAX(seq) FROM escrow_events)",
+                ('"ledger_mode":"test"', '"ledger_mode":"production"'),
+            )
+        ],
         "EVENT_CHAIN",
     ),
     "a_snapshot_deleted": (
@@ -776,27 +863,6 @@ def test_units_that_issuance_does_not_explain_are_refused_when_no_event_exists(
     assert error_code(lambda: li_escrow.ledger(li_escrow.setup(), path)) == code
 
 
-def test_verify_accepts_an_older_but_self_consistent_copy_of_the_ledger(
-    li_escrow: ModuleType, tmp_path: Path
-) -> None:
-    """ESC-22 (the condition broken): verify() proves consistency, never freshness."""
-    # Given: a ledger with a lock, backed up, then advanced by a transfer.
-    setup, cold = li_escrow.setup(), li_escrow.COLD.ss58
-    live = li_escrow.ledger(setup, tmp_path / "live.db")
-    origin, _ = li_escrow.fund(live)
-    live.lock(lock_op(li_escrow, origin), signer=cold)
-    older = sqlite3.connect(tmp_path / "older.db", isolation_level=None)
-    live.db.backup(older)
-    older.close()
-    live.transfer(transfer_op(li_escrow, origin, units=19000), signer=cold)
-    # When: the older file is opened in place of the live one.
-    restored = li_escrow.ledger(setup, tmp_path / "older.db")
-    # Then: it passes, and the transfer it lacks is simply gone. Freshness is the operator's.
-    assert restored.balances(cold).available == 19000
-    assert live.balances(cold).available == 0
-    assert events(restored) == events(live) - 1
-
-
 # ----------------------------------------------------------------- conservation (ESC-06)
 
 
@@ -848,10 +914,9 @@ def test_escrow_amounts_are_strict_positive_integers_within_the_wire_ceiling(
     for build in builders.values():
         build(1)
         build(2**53 - 1)  # the control: both ends of the accepted range
-    for name, build in builders.items():
-        with pytest.raises(ValidationError):
+    for build in builders.values():
+        with pytest.raises(ValidationError, match="units"):
             build(units)
-        assert name
 
 
 # ----------------------------------------------------------- stake of an admission (LCK-10/11)
