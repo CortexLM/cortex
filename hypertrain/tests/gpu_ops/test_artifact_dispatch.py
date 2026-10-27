@@ -11,16 +11,20 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from hypertrain.gpu_ops import artifact_transfer as at
 from hypertrain.gpu_ops import cuda_executor
-from hypertrain.gpu_ops.cuda_executor import ARTIFACTS_ENV
+from hypertrain.gpu_ops.cuda_executor import ARTIFACTS_ENV, Aborted
 from hypertrain.miner.island_launch import IslandFailure
+from hypertrain.storage.cas import R2ObjectStore
 
 from .artifact_fakes import MiB, TimedFakeR2, credentials_file, serve_http
 from .test_cuda_executor_dispatch import (  # noqa: F401 - fixtures and helpers of the harness
@@ -35,6 +39,14 @@ from .test_cuda_executor_dispatch import (  # noqa: F401 - fixtures and helpers 
     publication_digest,
     record_of,
 )
+
+
+@pytest.fixture(autouse=True)
+def plenty_of_disk(monkeypatch):
+    """The disk gate reads the free space of the machine; these tests are not about it."""
+    monkeypatch.setattr(
+        at, "shutil", SimpleNamespace(disk_usage=lambda path: SimpleNamespace(free=1 << 50))
+    )
 
 
 @pytest.fixture
@@ -218,8 +230,9 @@ def test_a_store_that_fails_during_the_upload_fails_the_attempt_with_nothing_lef
     assert len(journal_of(pool, "exec_attempt_failed")) == 1
 
 
+@pytest.mark.parametrize("lease_event", [False, True], ids=["no-lease-event", "with-lease-event"])
 def test_an_answering_thread_that_dies_ends_the_attempt_and_removes_the_container(
-    make_pool, canned, tmp_path, monkeypatch, r2
+    make_pool, canned, tmp_path, monkeypatch, r2, lease_event
 ):
     store, front = r2
     store.fault_key("HeadObject", "declare.json", None, *([503] * 2000))  # the probe passes
@@ -230,7 +243,7 @@ def test_an_answering_thread_that_dies_ends_the_attempt_and_removes_the_containe
     home = canned.stage(tmp_path / "home")
     started = time.monotonic()
     with pytest.raises(IslandFailure, match="offer thread: R2Error"):
-        dispatch(pool, home, "audit")
+        dispatch(pool, home, "audit", cancel=threading.Event() if lease_event else None)
     # the container was stopped at once, not left to wait out its minute for an offer
     assert time.monotonic() - started < 20
 
@@ -238,6 +251,107 @@ def test_an_answering_thread_that_dies_ends_the_attempt_and_removes_the_containe
     assert pool.toolbox.events(
         "rm"
     )  # docker rm -f of its own container, not a wait for the deadline
+
+
+class _Later:
+    """Stands in for the `time` module inside artifact_transfer; `offset` moves its wall clock."""
+
+    offset = 0.0
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def time(self):
+        return time.time() + self.offset
+
+
+def test_a_lease_cancelled_during_the_download_stops_it_and_publishes_nothing(
+    make_pool, canned, tmp_path, monkeypatch, r2
+):
+    store, front = r2
+    pool = make_pool(labels=("a",), config={"max_attempts": 1})
+    pad(pool, tmp_path, 20)
+    enable(tmp_path, monkeypatch, front)
+    cancel = threading.Event()
+    real = R2ObjectStore.fetch_to
+
+    def cancelling(self, sha, dest, **kwargs):
+        cancel.set()  # the lease is cancelled as the download starts
+        return real(self, sha, dest, **kwargs)
+
+    monkeypatch.setattr(R2ObjectStore, "fetch_to", cancelling)
+    home = canned.stage(tmp_path / "home")
+    with pytest.raises(Aborted, match="lease cancelled"):
+        dispatch(pool, home, "audit", cancel=cancel)
+
+    assert_nothing_published(home)
+    assert store.uploads == {} and objects_left(store) == []
+
+
+def test_a_job_deadline_that_passes_during_the_download_stops_it(
+    make_pool, canned, tmp_path, monkeypatch, r2
+):
+    store, front = r2
+    pool = make_pool(labels=("a",), config={"max_attempts": 1})
+    pad(pool, tmp_path, 20)
+    enable(tmp_path, monkeypatch, front)
+    clock = _Later()
+    monkeypatch.setattr(at, "time", clock)
+    real = R2ObjectStore.fetch_to
+
+    def late(self, sha, dest, **kwargs):
+        clock.offset = 7200.0  # the lease ran out while the object was coming
+        return real(self, sha, dest, **kwargs)
+
+    monkeypatch.setattr(R2ObjectStore, "fetch_to", late)
+    home = canned.stage(tmp_path / "home")
+    with pytest.raises(Aborted, match="job deadline expired"):
+        dispatch(pool, home, "audit")
+
+    assert_nothing_published(home)
+    assert store.uploads == {} and objects_left(store) == []
+
+
+def test_the_downloaded_tar_is_gone_before_the_publication_is_copied(
+    make_pool, canned, tmp_path, monkeypatch, r2
+):
+    store, front = r2
+    pool = make_pool(labels=("a",))
+    seen = []
+    real = cuda_executor.Executor._publish
+
+    def spy(self, job, directory, staging, record, trace):
+        seen.append((staging.parent / "result.tar").exists())
+        return real(self, job, directory, staging, record, trace)
+
+    monkeypatch.setattr(cuda_executor.Executor, "_publish", spy)
+    dispatch(pool, canned.stage(tmp_path / "classic"), "audit")  # the control: the ssh way keeps it
+    enable(tmp_path, monkeypatch, front)
+    dispatch(pool, canned.stage(tmp_path / "r2"), "audit")
+    assert seen == [True, False]
+
+
+def test_a_request_that_cannot_be_built_still_closes_the_session(
+    make_pool, canned, tmp_path, monkeypatch, r2
+):
+    store, front = r2
+    pool = make_pool(labels=("a",))
+    enable(tmp_path, monkeypatch, front)
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("the request could not be built")
+
+    monkeypatch.setattr(cuda_executor.Executor, "_request", boom)
+    with pytest.raises(RuntimeError, match="could not be built"):
+        dispatch(pool, canned.stage(tmp_path / "home"), "audit")
+
+    assert journal_kinds(pool).count("exec_artifact_begin") == 1
+    assert journal_kinds(pool).count("exec_artifact_end") == 1
+
+
+def test_the_settings_are_named_as_the_operator_page_says():
+    assert ARTIFACTS_ENV == "HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS"
+    assert at.OFFER_SLACK == 5 and at.MIN_ISLAND_SECONDS == 30
 
 
 def test_a_result_over_the_cap_is_refused_and_the_attempt_says_so(

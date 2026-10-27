@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import io
 import json
+import os
 import random
 import sys
 import tarfile
@@ -18,6 +19,7 @@ import tracemalloc
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -87,6 +89,7 @@ def drive(
     code = runner.serve(io.BytesIO(package(FILES, raw)), out, err, probe=probe_ok, launch=launch)
     if thread is not None:
         thread.join(30)
+    assert challenge.error is None, repr(challenge.error)
     return Run(code, out.getvalue(), err.getvalue(), raw, challenge)
 
 
@@ -570,7 +573,7 @@ def test_throttling_is_waited_out_as_the_store_asks(
     assert runner._call(spec, "PUT", "https://r2.test/x") == (200, b"ok")
 
     assert 3 <= waits[0] <= 16 and 1 <= waits[1] < 3
-    assert waits[2] == runner.RETRY_CAP and waits[3] < 1
+    assert waits[2] == 16.0 and waits[3] < 1
 
 
 def test_a_transfer_past_its_deadline_sends_nothing(
@@ -594,6 +597,242 @@ def test_serve_accepts_a_declaration_whose_first_reply_was_lost(
     assert run.code == 0, run.err
     declared = [row[2] for row in fake.served("PutObject", "declare.json")]
     assert declared == [503, 412]  # the retry meets the stored object and takes it as its own
+
+
+@pytest.mark.parametrize(
+    ("url", "origin"),
+    [
+        ("https://r2.test/x", ("https", "r2.test")),
+        (
+            "https://acct.r2.cloudflarestorage.com/b/k?a=b",
+            ("https", "acct.r2.cloudflarestorage.com"),
+        ),
+        ("http://127.0.0.1:9/x", ("http", "127.0.0.1:9")),
+        ("http://[::1]:9/x", ("http", "[::1]:9")),
+    ],
+)
+def test_check_url_accepts_https_and_a_literal_loopback_address(
+    url: str, origin: tuple[str, str]
+) -> None:
+    assert runner.check_url(url) == origin
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://r2.test/x",
+        "http://10.0.0.5/x",
+        "http://localhost/x",
+        "http://127.0.0.1.evil.example/x",
+        "http://127.0.0.1@evil.example/x",
+        "ftp://r2.test/x",
+        "https://u:p@r2.test/x",
+        "https://r2.test/x#f",
+        "/x",
+        "https://r2.test",
+        "https:///x",
+        "https://r2.test:99999/x",
+        "https://r2.test/" + "a" * 5000,
+        "https://r2.test/caf\u00e9",
+        "https://r2.test/\x07",
+        "https://r2.test/a b",
+        7,
+        None,
+    ],
+)
+def test_check_url_refuses_everything_else(url: Any) -> None:
+    with pytest.raises(runner.TransferError, match="bad url"):
+        runner.check_url(url)
+    with pytest.raises(runner.TransferError, match="bad url"):
+        runner.check_url("https://r2.test/x", ("https", "other.test"))  # the origin is pinned
+
+
+def test_serve_prints_a_refusal_only_if_it_is_a_word(monkeypatch: pytest.MonkeyPatch) -> None:
+    run = drive(TimedFakeR2(), monkeypatch, answer={"refuse": "deadline"})
+    assert run.code == 10 and "offer refused deadline" in run.err
+    hostile = drive(TimedFakeR2(), monkeypatch, answer={"refuse": "X-Amz-Signature=abcdef"})
+    assert hostile.code == 10 and "offer refused unknown" in hostile.err
+    assert "abcdef" not in hostile.err
+
+
+@pytest.mark.parametrize(
+    ("name", "low", "high"),
+    [(name, *bounds) for name, bounds in runner.ARTIFACT_FIELDS.items()],
+    ids=list(runner.ARTIFACT_FIELDS),
+)
+def test_serve_refuses_one_step_outside_each_range_of_the_request_block(
+    monkeypatch: pytest.MonkeyPatch, name: str, low: int, high: int
+) -> None:
+    for outside in (low - 1, high + 1):
+        run = drive(TimedFakeR2(), monkeypatch, block={name: outside}, answering=False)
+        assert run.code == 2 and f"field {name} is out of range" in run.err
+    odd = drive(TimedFakeR2(), monkeypatch, block={"part_bytes": 10 * MiB}, answering=False)
+    assert odd.code == 2 and "4 MiB blocks" in odd.err
+
+
+def test_the_island_and_its_work_directory_never_see_a_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    found: dict[str, Any] = {}
+
+    def spy(request: dict[str, Any], attempt: Path, budget: float, log: Path) -> int:
+        launch_tree(request, attempt, budget, log)
+        signatures = [
+            parse_qs(urlsplit(request["artifact"][name]).query)["X-Amz-Signature"][0]
+            for name in ("declare_put", "offer_get")
+        ]
+        found["signatures"] = signatures
+        found["env"] = [k for k, v in os.environ.items() if any(s in v for s in signatures)]
+        found["files"] = [
+            str(p)
+            for p in attempt.rglob("*")
+            if p.is_file() and any(s.encode() in p.read_bytes() for s in signatures)
+        ]
+        found["files_seen"] = sum(p.is_file() for p in attempt.rglob("*"))
+        return 0
+
+    run = drive(TimedFakeR2(), monkeypatch, launch=spy)
+    assert run.code == 0, run.err
+    # the positive control: the signatures are real and the scan walked the inputs it covers
+    assert len(found["signatures"]) == 2 and all(len(s) == 64 for s in found["signatures"])
+    assert found["files_seen"] >= 3
+    assert found["env"] == [] and found["files"] == []
+
+
+def test_a_link_in_the_island_output_keeps_its_own_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def linking(request: dict[str, Any], attempt: Path, budget: float, log: Path) -> int:
+        launch_tree(request, attempt, budget, log)
+        os.symlink("/etc/passwd", attempt / "rank-0" / "link")
+        return 0
+
+    run = drive(TimedFakeR2(), monkeypatch, launch=linking, answering=False)
+    assert run.code == 5 and "link or a special file" in run.err
+
+
+def test_the_transfer_ends_at_the_budget_the_request_gave(
+    monkeypatch: pytest.MonkeyPatch, fast_clock: Clock
+) -> None:
+    def slow(request: dict[str, Any], attempt: Path, budget: float, log: Path) -> int:
+        launch_tree(request, attempt, budget, log)
+        fast_clock.advance(601)  # request budget_seconds is 600
+        return 0
+
+    run = drive(TimedFakeR2(), monkeypatch, launch=slow, answering=False)
+    assert run.code == 10 and "deadline reached" in run.err
+
+
+def test_a_part_that_fails_stops_the_parts_queued_behind_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = TimedFakeR2()
+    inner = bridge(fake)
+    puts: list[str] = []
+
+    def seam(method: str, url: str, headers: Any, *rest: Any) -> Any:
+        if method == "PUT" and "partNumber=" in url:
+            puts.append(url)
+            return 403, {}, b""
+        return inner(method, url, headers, *rest)
+
+    def big(request: dict[str, Any], attempt: Path, budget: float, log: Path) -> int:
+        write_tree(attempt, size=40 * MiB, ranks=1)
+        return 0
+
+    run = drive(fake, monkeypatch, block={"workers": 1}, launch=big, seam=seam)
+    assert run.code == 10 and "HTTP 403" in run.err
+    assert len(puts) <= 2  # five parts were queued: at most the one already started follows
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+def test_these_statuses_are_retried(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    replies = iter([(status, {"retry-after": ""}, b""), (200, {}, b"ok")])
+    monkeypatch.setattr(runner, "http_send", lambda *args: next(replies))
+    monkeypatch.setattr(runner, "_sleep", lambda seconds: None)
+    block = Challenge(TimedFakeR2(), client_for(TimedFakeR2())).request_block()
+    spec = runner.Transfer(block, deadline=runner._monotonic() + 600)
+    assert runner._call(spec, "PUT", "https://r2.test/x") == (200, b"ok")
+
+
+def test_a_transport_error_is_retried_and_a_fatal_one_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    def flaky(*args: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise runner.TransferError("transport ConnectionResetError")
+        return 200, {}, b"ok"
+
+    monkeypatch.setattr(runner, "http_send", flaky)
+    monkeypatch.setattr(runner, "_sleep", lambda seconds: None)
+    block = Challenge(TimedFakeR2(), client_for(TimedFakeR2())).request_block()
+    spec = runner.Transfer(block, deadline=runner._monotonic() + 600)
+    assert runner._call(spec, "GET", "https://r2.test/x") == (200, b"ok") and len(calls) == 2
+
+    def fatal(*args: Any) -> Any:
+        calls.append(1)
+        raise runner.TransferError("response too large", fatal=True)
+
+    monkeypatch.setattr(runner, "http_send", fatal)
+    calls.clear()
+    with pytest.raises(runner.TransferError, match="too large"):
+        runner._call(spec, "GET", "https://r2.test/x")
+    assert len(calls) == 1
+
+
+def _offer_for(count: int, pages: int, monkeypatch: pytest.MonkeyPatch) -> Any:
+    declared = b"declared"
+    offer = {
+        "version": 1,
+        "declare_sha256": sha(declared),
+        "ttl_s": 600,
+        "parts": [f"https://r2.test/p/{n}?a=b" for n in range(count)],
+        "list": [f"https://r2.test/l/{n}?a=b" for n in range(pages)],
+    }
+    monkeypatch.setattr(runner, "http_send", lambda *a: (200, {}, json.dumps(offer).encode()))
+    block = Challenge(TimedFakeR2(), client_for(TimedFakeR2())).request_block()
+    spec = runner.Transfer(block, deadline=runner._monotonic() + 600)
+    return runner._offer(spec, block, declared, count)
+
+
+@pytest.mark.parametrize(
+    ("count", "pages", "accepted"),
+    [
+        (1, 1, True),
+        (1000, 1, True),
+        (1001, 2, True),
+        (2500, 3, True),
+        (1001, 1, False),
+        (1000, 2, False),
+    ],
+)
+def test_the_offer_lists_one_page_of_parts_per_thousand_parts(
+    monkeypatch: pytest.MonkeyPatch, count: int, pages: int, accepted: bool
+) -> None:
+    if accepted:
+        assert len(_offer_for(count, pages, monkeypatch)["parts"]) == count
+    else:
+        with pytest.raises(runner.TransferError, match="does not answer"):
+            _offer_for(count, pages, monkeypatch)
+
+
+def test_the_held_parts_are_read_from_every_page_of_the_part_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def page(first: int) -> bytes:
+        rows = "".join(
+            f"<Part><PartNumber>{n}</PartNumber><Size>{n * 3}</Size></Part>"
+            for n in range(first, first + 1000)
+        )
+        return f'<ListPartsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{rows}</ListPartsResult>'.encode()
+
+    pages = {"https://r2.test/l/0?a=b": page(1), "https://r2.test/l/1?a=b": page(1001)}
+    monkeypatch.setattr(runner, "http_send", lambda m, url, *a: (200, {}, pages[url]))
+    block = Challenge(TimedFakeR2(), client_for(TimedFakeR2())).request_block()
+    spec = runner.Transfer(block, deadline=runner._monotonic() + 600)
+    held = runner._held(spec, list(pages))
+    assert len(held) == 2000 and held[1] == 3 and held[2000] == 6000
 
 
 # -- the real client on a real socket ------------------------------------------------------------

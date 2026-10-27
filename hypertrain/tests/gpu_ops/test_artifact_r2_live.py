@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -153,8 +154,11 @@ def test_the_store_answers_as_the_transfer_assumes(backend: Backend) -> None:
 
 
 def test_a_real_artifact_goes_through_the_runner_and_the_challenge_side(
-    backend: Backend, tmp_path: Path
+    backend: Backend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    if backend.name == "fake":  # what the host has left is not what this leg is about
+        free = SimpleNamespace(free=1 << 50)
+        monkeypatch.setattr(at, "shutil", SimpleNamespace(disk_usage=lambda path: free))
     creds = at.load_credentials(backend.credentials)
     settings = at.ArtifactSettings(
         credentials_file=backend.credentials,

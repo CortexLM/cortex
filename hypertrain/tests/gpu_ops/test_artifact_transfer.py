@@ -24,13 +24,14 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 
+from hypertrain.data.store import ObjectNotFound, StoreError
 from hypertrain.gpu_ops import artifact_transfer as at
 from hypertrain.gpu_ops import cuda_executor_runner as runner
 from hypertrain.gpu_ops.cuda_executor import Aborted, AttemptFailed, HostRefused
 from hypertrain.gpu_ops.journal import Journal
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.storage.cas import BLOCK_BYTES, BlockList, PartPlan, scan
-from hypertrain.storage.r2 import ObjectInfo
+from hypertrain.storage.r2 import ObjectConflict, ObjectInfo, R2Error, UploadGone
 
 from .artifact_fakes import (
     BUCKET,
@@ -56,6 +57,15 @@ CANARY = "CANARY" + "7" * 26
 @pytest.fixture(autouse=True)
 def process_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield from isolated_process(tmp_path, monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def plenty_of_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The disk gate reads the free space of the machine; a test of something else must not
+    depend on what other jobs on the host have left of it."""
+    monkeypatch.setattr(
+        at, "shutil", SimpleNamespace(disk_usage=lambda path: SimpleNamespace(free=1 << 50))
+    )
 
 
 class Job:
@@ -693,7 +703,9 @@ def test_two_downloads_at_once_do_not_both_count_on_the_same_free_disk(
 ) -> None:
     fake = TimedFakeR2()
     broker, _ = make_broker(tmp_path, fake)
-    monkeypatch.setattr(at.shutil, "disk_usage", lambda path: SimpleNamespace(free=5 << 30))
+    monkeypatch.setattr(
+        at, "shutil", SimpleNamespace(disk_usage=lambda path: SimpleNamespace(free=5 << 30))
+    )
     first = broker.reserve(3 << 30, tmp_path)  # one attempt has set 3 GiB aside
     with pytest.raises(AttemptFailed, match="not enough disk"):
         broker.reserve(3 << 30, tmp_path)  # 5 GiB free is enough for one, not for both
@@ -709,7 +721,9 @@ def test_a_disk_too_small_for_the_artifact_is_found_out_before_the_download(
     pair = run_pair(broker, fake, monkeypatch)
     status = tmp_path / "status.out"
     status.write_bytes(pair.out)
-    monkeypatch.setattr(at.shutil, "disk_usage", lambda path: SimpleNamespace(free=1 << 20))
+    monkeypatch.setattr(
+        at, "shutil", SimpleNamespace(disk_usage=lambda path: SimpleNamespace(free=1 << 20))
+    )
 
     with pytest.raises(AttemptFailed, match="not enough disk"):
         pair.session.collect(status, lambda: None, lost=False)
@@ -738,6 +752,191 @@ def test_a_store_that_cannot_answer_about_the_parts_is_a_no_and_not_a_crash(
     with pytest.raises(AttemptFailed, match="artifact upload failed: ParseError"):
         session.collect(status, lambda: None, lost=False)  # finish_upload lists the parts too
     session.close()
+
+
+@pytest.mark.parametrize(
+    "error", [OSError, ObjectNotFound, UploadGone, ObjectConflict, StoreError, R2Error]
+)
+def test_every_storage_error_after_the_upload_is_an_attempt_failure_that_names_its_class(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    pair = run_pair(broker, fake, monkeypatch)
+    status = tmp_path / "status.out"
+    status.write_bytes(pair.out)
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise error("secret detail that must not travel")
+
+    real_finish = at.finish_upload
+    monkeypatch.setattr(at, "finish_upload", broken)
+    with pytest.raises(AttemptFailed) as caught:
+        pair.session.collect(status, lambda: None, lost=False)
+    assert str(caught.value) == f"artifact upload failed: {error.__name__}"
+    monkeypatch.setattr(at, "finish_upload", real_finish)
+    with pytest.raises(AttemptFailed) as download:
+        monkeypatch.setattr(at.R2ObjectStore, "fetch_to", broken)
+        pair.session.collect(status, lambda: None, lost=False)
+    assert str(download.value) == f"artifact download failed: {error.__name__}"
+    pair.session.close()
+
+
+def test_closing_never_raises_and_the_journal_says_what_could_not_be_cleaned(
+    tmp_path: Path,
+) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    session = open_session(broker, request=b"r")
+    declare(session, fake, encode(synthetic(sha(b"r"), 9 * MiB + 3)))
+    assert session.state == "offered" and len(fake.uploads) == 1
+    fake.fault_key("AbortMultipartUpload", "", *([503] * 10))
+    fake.fault_key("DeleteObject", "", *([503] * 40))
+
+    session.close()  # the store refuses every cleanup call: this must still return
+
+    recorded = kinds(broker)
+    assert recorded.count("exec_artifact_cleanup_failed") >= 3
+    assert recorded[-1] == "exec_artifact_end"
+
+
+def test_a_status_line_that_names_another_size_or_state_is_refused(tmp_path: Path) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    session = open_session(broker, request=b"r")
+    data = random.Random(11).randbytes(9 * MiB)
+    host_declaring(session, fake, data, data)
+    upload_as_host(fake, session, data, [1, 2])
+    session.stop_thread()
+    status = tmp_path / "status.out"
+    for line in (
+        {"artifact": "pending", "sha256": sha(data), "size": len(data)},
+        {"artifact": "uploaded", "sha256": sha(data), "size": len(data) + 1},
+    ):
+        status.write_bytes(json.dumps(line).encode())
+        with pytest.raises(AttemptFailed, match="status line"):
+            session.collect(status, lambda: None, lost=False)
+    session.close()
+
+
+@pytest.mark.parametrize("slack", [-1, 0], ids=["one-byte-short", "exactly-enough"])
+def test_the_disk_gate_is_two_point_two_times_the_artifact_plus_one_gib(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slack: int
+) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    pair = run_pair(broker, fake, monkeypatch)
+    status = tmp_path / "status.out"
+    status.write_bytes(pair.out)
+    size = pair.session.declared.size  # type: ignore[union-attr]
+    asked: list[Path] = []
+
+    def usage(path: Path) -> SimpleNamespace:
+        asked.append(path)
+        return SimpleNamespace(free=int(2.2 * size) + (1 << 30) + slack)
+
+    monkeypatch.setattr(at, "shutil", SimpleNamespace(disk_usage=usage))
+    if slack < 0:
+        with pytest.raises(AttemptFailed, match="not enough disk"):
+            pair.session.collect(status, lambda: None, lost=False)
+    else:
+        pair.session.collect(status, lambda: None, lost=False)
+    assert asked == [tmp_path]  # the disk the download is written to
+    pair.session.close()
+
+
+def test_the_journal_records_what_a_sweep_by_hand_would_need(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = TimedFakeR2()
+    broker, settings = make_broker(tmp_path, fake)
+    job = Job()
+    pair = run_pair(broker, fake, monkeypatch, job)
+    status = tmp_path / "status.out"
+    status.write_bytes(pair.out)
+    pair.session.collect(status, lambda: None, lost=False)
+    session = pair.session
+    session.close()
+
+    records = [json.loads(line) for line in broker.journal.path.read_text().splitlines()]
+    begin, offered, done, end = records
+    assert (begin["nonce"], begin["prefix"]) == (session.nonce, session.prefix)
+    assert begin["expires_unix"] == int(job.deadline) + settings.url_margin_seconds
+    declared = session.declared
+    assert declared is not None
+    assert (offered["size"], offered["parts"]) == (declared.size, len(declared.parts))
+    assert (done["sha256"], done["size"]) == (declared.sha256, declared.size)
+    assert 0 <= done["upload_ms"] < 30_000 and 0 <= done["download_ms"] < 30_000  # milliseconds
+    assert end["nonce"] == session.nonce
+
+
+WIRE = {
+    "part_bytes": "part_bytes",
+    "workers": "workers",
+    "reserve_seconds": "reserve_seconds",
+    "poll_ms": "poll_ms",
+    "offer_wait_s": "offer_wait_seconds",
+    "retry_attempts": "retry_attempts",
+    "retry_base_ms": "retry_base_ms",
+    "timeout_s": "request_timeout_seconds",
+}
+
+
+class _Scripted:
+    """Stands in for the `time` module inside artifact_transfer: a scripted monotonic clock."""
+
+    def __init__(self, *readings: float) -> None:
+        self._readings = iter(readings)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+    def monotonic(self) -> float:
+        return next(self._readings)
+
+
+def test_the_announced_lifetime_is_what_the_urls_have_left_less_elapsed_poll_and_slack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)  # poll_ms 10: one second rounded up
+    session = open_session(broker, request=b"r")
+    monkeypatch.setattr(at, "time", _Scripted(100.0, 103.2))  # 3.2 s between making and announcing
+    offer = json.loads(declare(session, fake, encode(synthetic(sha(b"r"), 9 * MiB + 3))))
+    lived = int(parse_qs(urlsplit(offer["parts"][0]).query)["X-Amz-Expires"][0])
+    assert offer["ttl_s"] == lived - 4 - 1 - 5
+
+
+def test_the_size_and_the_declaration_are_accepted_exactly_at_their_caps(tmp_path: Path) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake, max_artifact_bytes=1 << 30)
+    assert broker.declaration_cap == 4096 + 72 * (256 + 128)
+    body = encode(synthetic(sha(b"r"), 1 << 30))
+    for pad, answer in ((0, None), (1, "too_large")):
+        session = open_session(broker, request=b"r")
+        padded = body + b" " * (broker.declaration_cap - len(body) + pad)
+        assert len(padded) == broker.declaration_cap + pad
+        got = json.loads(declare(session, fake, padded))
+        assert got.get("refused") == answer
+        session.close()
+
+
+@pytest.mark.parametrize("wire", sorted(WIRE))
+@pytest.mark.parametrize("extreme", ["ge", "le"])
+def test_every_setting_reaches_the_container_as_its_own_field_within_the_runner_bounds(
+    tmp_path: Path, wire: str, extreme: str
+) -> None:
+    field = at.ArtifactSettings.model_fields[WIRE[wire]]
+    value = next(getattr(m, extreme) for m in field.metadata if hasattr(m, extreme))
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake, **{WIRE[wire]: value})
+    session = broker.begin(Job(seconds=100_000), "audit")  # type: ignore[arg-type]
+    assert session is not None
+    assert session.block[wire] == value
+    assert runner.artifact_block({"artifact": session.block}) is not None  # its bounds hold it
+    others = {w: session.block[w] for w in WIRE if w != wire}
+    defaults = {w: getattr(broker.settings, WIRE[w]) for w in WIRE if w != wire}
+    assert others == defaults  # no other field was swapped with it
 
 
 def test_a_host_lost_after_its_last_part_is_salvaged_from_what_the_store_holds(

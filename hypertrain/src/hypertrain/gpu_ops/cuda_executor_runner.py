@@ -428,7 +428,9 @@ def check_url(url: object, origin: tuple[str, str] | None = None) -> tuple[str, 
         secure = parts.scheme == "https"
         if not (secure or (parts.scheme == "http" and _loopback(parts.hostname))):
             raise ValueError
-        if " " in url or "@" in parts.netloc or parts.fragment or not parts.path.startswith("/"):
+        if not parts.hostname or " " in url or "@" in parts.netloc or parts.fragment:
+            raise ValueError
+        if not parts.path.startswith("/"):
             raise ValueError
         found = (parts.scheme, parts.netloc)
         if origin is not None and found != origin:
