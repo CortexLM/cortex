@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 from hypertrain.beacon import BeaconError, BeaconRound
 from hypertrain.challenge.admission import Admission
-from hypertrain.challenge.disputes_v2 import Contest, DisputesV2
+from hypertrain.challenge.disputes_v2 import EXCLUSION_ABANDONED, Contest, DisputesV2
 from hypertrain.data.assignment import assign_round
 from hypertrain.data.store import (
     CorruptObjectError,
@@ -747,6 +747,7 @@ class ChallengeStore:
                         ):
                             raise
                 self._expire_leases_v2(run_id, br.round)
+            self._close_blocked_disputes_v2(run_id)
         for _, _, disputes in self._services_v2.values():
             disputes.notify()
         self._notify_processes_v2()
@@ -6043,6 +6044,46 @@ class ChallengeStore:
             (w,),
         ).fetchone()[0]
         self._put_record_v2(run_id, "finality", str(w), status)
+
+    def _close_blocked_disputes_v2(self, run_id: str) -> None:
+        """Close, without a loser, every dispute no party and no referee can still decide.
+
+        The beacon round is the clock. A closure is INFRASTRUCTURE with loser None: the contest
+        bond is released in full, nothing is slashed and the audit's own exclusion stays.
+        One savepoint per dispute; a failure is journaled and never stops the beacon route.
+        """
+        escrow, _, disputes = self._services_v2[run_id]
+        with self._tx():
+            now = self._now(self._db)
+            for turn in disputes.unresolved():
+                cause = disputes.blocked_cause(turn, now)
+                if cause is None:
+                    continue
+                try:
+                    with escrow.tx():
+                        if cause == EXCLUSION_ABANDONED:
+                            disputes.pause(turn.dispute_id)  # exclude() is due only when paused
+                        disputes.exclude(turn.dispute_id, now=now, cause=cause)
+                        disputes.settle_lock(turn.dispute_id, now=now)
+                        self._recount_disputes_v2(run_id, turn.contest.w)
+                except Exception as error:  # one poisoned dispute must not stop the beacon
+                    self._journal_dispute_exit_v2(run_id, turn.dispute_id, "close", error)
+
+    def _journal_dispute_exit_v2(
+        self, run_id: str, dispute_id: str, stage: str, error: Exception
+    ) -> None:
+        """Last failure per dispute, rewritten only on change so the rollback revision holds."""
+        code = getattr(error, "code", None)
+        entry: dict[str, JsonValue] = {
+            "stage": stage,
+            "error": type(error).__name__ + (f":{code}" if isinstance(code, str) else ""),
+        }
+        try:
+            old: dict[str, Any] | None = self._record_v2(run_id, "dispute-exit-failed", dispute_id)
+        except ChallengeError:
+            old = None
+        if old != entry:
+            self._put_record_v2(run_id, "dispute-exit-failed", dispute_id, entry)
 
     def _persist_anchor_v2(self, manifest: RunManifestV2, anchor: Any, cache: Any) -> None:
         from hypertrain.auditor.replay import tensor_root
