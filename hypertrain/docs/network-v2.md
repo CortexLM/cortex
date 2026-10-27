@@ -482,6 +482,11 @@ identical bytes may be sent again until they expire. A body that is not an unexp
 run or signer, a bad signature, an expired envelope, a request signed further ahead than 20
 rounds) answers 403, as does a party that is neither a pinned role nor on the subnet; a master
 that has verified no beacon round yet answers 503.
+The master allows each party two polls at a time and 128 in all; a further poll is refused at
+once with 429, and `watch --follow` retries it with its normal backoff. A wait runs on its own
+threads, so parked polls do not slow `/health` or any other route. A poll whose client has left
+still holds its slot until its wait ends (30 seconds at most), so a restarted watcher may
+overlap the last poll of the one it replaces.
 STEP/LAYER/OP answers and requested `StateServe` proofs come from validated
 published traces/checkpoints. The coordinator signature covers the event's
 `Turn.contest.w`; the watcher requires that round to match the original validated

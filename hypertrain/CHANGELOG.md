@@ -299,6 +299,12 @@
   nothing outside this repository runs on it. `HttpDisputeTransport` takes the party's key, the
   run id and a beacon reader; the miner no longer puts the static signature on its HTTP client.
   Every refused poll answers 403, as the header route did (`docs/adr/0014`, Part 8).
+- Dispute watch polls run on their own thread pool and are bounded: two at a time per party and
+  128 in all, a further poll answers 429 at once (`watch --follow` already backs off on 429). A
+  wait used to occupy a thread of the pool every other route shares, so 32 waiting watchers
+  stopped the master from answering anything else. The role lookup of the watch and ack routes
+  now holds the store lock like every other use of the shared connection (`docs/adr/0014`,
+  Part 8).
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

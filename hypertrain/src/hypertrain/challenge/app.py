@@ -12,6 +12,7 @@ import os
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
@@ -54,6 +55,12 @@ OWNER_REQUEST_MAX_ROUNDS = 100  # a captured owner request replays for at most 5
 HEX64 = r"^[0-9a-f]{64}$"
 SS58 = r"^[1-9A-HJ-NP-Za-km-z]{46,50}$"
 Auth = Annotated[str | None, Header()]
+# Dispute watchers pin a worker thread for up to 30 s: they get their own pool, never the shared
+# one. Per party: 2, so a restarted watcher overlaps the last poll of its predecessor (an
+# abandoned poll keeps its thread until it times out). Total: above max_roster (32) plus the
+# pinned auditors, referees and coordinator, one poll each.
+WATCH_PER_PARTY = 2
+WATCH_TOTAL = 128
 
 
 class _Strict(BaseModel):
@@ -389,6 +396,21 @@ def create_app(
     app.state.metagraph = metagraph
     server_keys = ServerKeys(config.state_dir / "server_keys.db")
     app.state.server_keys = server_keys
+    watch_pool = ThreadPoolExecutor(WATCH_TOTAL, thread_name_prefix="dispute-watch")
+    watching: dict[str, int] = {}
+    watching_lock = threading.Lock()
+
+    def claim_watch(party: str) -> None:
+        with watching_lock:
+            if sum(watching.values()) >= WATCH_TOTAL or watching.get(party, 0) >= WATCH_PER_PARTY:
+                raise ChallengeError(429, "too many concurrent dispute polls")
+            watching[party] = watching.get(party, 0) + 1
+
+    def release_watch(party: str) -> None:
+        with watching_lock:
+            watching[party] -= 1
+            if not watching[party]:
+                del watching[party]
 
     async def not_revoked(hotkey: str) -> None:
         if await run(server_keys.is_revoked, hotkey):
@@ -405,7 +427,8 @@ def create_app(
         from hypertrain.protocol.messages_v2 import DisputePolicyV2
 
         hosted = store.for_run(run_id)
-        manifest = hosted._run_v2(run_id)
+        with hosted._lock:  # one shared connection: an unlocked read races the writers
+            manifest = hosted._run_v2(run_id)
         policy = DisputePolicyV2.model_validate_json(
             hosted.objects.get(manifest.network.dispute_policy_hash)
         )
@@ -441,6 +464,7 @@ def create_app(
 
     @app.on_event("shutdown")
     def close_notifications() -> None:
+        watch_pool.shutdown(wait=False, cancel_futures=True)
         store.close_v2_notifications()
 
     async def v2_raw(request: Request) -> bytes:
@@ -953,7 +977,15 @@ def create_app(
             raise ChallengeError(403, "party event access requires signature")
         await party_member(run_id, poll.party)
         _, _, disputes = await run(hosted._services, run_id)
-        events = await run(lambda: disputes.events(poll.party, poll.cursor, timeout=poll.wait))
+        claim_watch(poll.party)
+        try:
+            future = watch_pool.submit(disputes.events, poll.party, poll.cursor, timeout=poll.wait)
+        except BaseException:
+            release_watch(poll.party)
+            raise
+        # The slot lasts as long as the thread: a client that disconnects does not stop the wait.
+        future.add_done_callback(lambda _: release_watch(poll.party))
+        events = await asyncio.wrap_future(future)
         return [e.model_dump(mode="json") for e in events]
 
     @app.post("/v2/runs/{run_id}/disputes/ack")
