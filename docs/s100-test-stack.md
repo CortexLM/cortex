@@ -301,7 +301,7 @@ ssh root@s100 "docker run --rm -i --user 65532:65532 -v $X:/data/executor --entr
 ```
 
 Expect `"status": "ok"`, `"driver": "595.91.07"`, `"capability": [10, 3]`, as many idle GPUs as the
-manifest's layout (`n_gpus`, 2 for `dense-1b`) and `"image_present": true` (the first job pulls
+manifest's layout (`n_gpus`, 1 for `tiny-cpu`) and `"image_present": true` (the first job pulls
 the image by digest if it is absent). `unreachable` carries the ssh error: wrong key, wrong host
 key, port, user or `sudo -n docker`. `refused` with "unparseable host probe" usually means the
 ssh user's login shell prints to stdout in a non-interactive session (an unguarded `~/.bashrc`):
@@ -310,10 +310,17 @@ the result tar travels on stdout too, so fix that on X first. Nothing secret is 
 ### 6.3 Build the CUDA manifest and its TEST backend record
 
 ```bash
-HT_D20_GEOMETRY=dense-1b HT_D20_COLDKEYS=4 HT_D20_RELAY_PUBKEY=<relay k1 ss58> \
+HT_D20_GEOMETRY=tiny-cpu HT_D20_COLDKEYS=4 HT_D20_RELAY_PUBKEY=<relay k1 ss58> \
   hypertrain/scripts/b300/d20/build_test_manifest.sh $GPU 595.91.07 148 $OUT
 $PY -I $T/cuda_qualification.py build $OUT/out $OUT/secrets/owner.seed
 ```
+
+Use the `tiny-cpu` geometry (728 parameters, `n_gpus=1`, H=1) for the first CUDA run, the model S5
+already ran on a B300: its publication is a few kilobytes, so a reference or audit fits in its lease
+whatever the link to X. The `dense-1b` geometry (889M parameters, `n_gpus=2`) returns every
+checkpoint, final state and error-feedback tensor of both ranks through ssh: by arithmetic from the
+tensor sizes about 60 GB per job [H, not measured], which a 100-round (5 min) audit lease cannot
+carry over an ordinary link. Do not start there.
 
 Copy the public outputs to `/data/hypertrain-test/state/<stage>/` as in section 2 and add
 `qualification-test.json` (it holds the stand-in evidence and the owner's Receipt, no secret).

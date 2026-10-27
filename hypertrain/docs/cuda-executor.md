@@ -91,6 +91,8 @@ restore the compose backup and run the same `up -d challenge`. Never touch
 
 - One job per host at a time; throughput on one host is serial.
 - Transfer volume is the whole publication (checkpoints included), capped by `max_result_bytes`.
+  For the 889M-parameter `dense-1b` geometry that is about 60 GB per job by arithmetic [H, not
+  measured], more than an audit lease can move over an ordinary link: start with a small model.
 - Dispute window re-runs (`launch_window`) still run where the dispute code runs them.
 - The host is trusted like a Vast host: it can return a self-consistent but wrong trajectory, and
   the executor cannot tell. Dual execution on two machines is a later option (ADR 0008).
