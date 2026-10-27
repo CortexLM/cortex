@@ -71,7 +71,20 @@ Each change is refused unless the resolved compose config differs in exactly the
 `swap` fails unless `/version` answers and the challenge runs the new image ID.
 
 `backup` refuses to finish unless both SQLite copies pass `integrity_check`. It also keeps
-`relay.json` and `metagraph.json`. Every step that takes a backup verifies its `SHA256SUMS`.
+`relay.json` and `metagraph.json`.
+
+Every command that takes a backup directory (`swap`, `beacon`, `paper`, `rollback`, `restore-db`)
+refuses it with exit 4 unless:
+- `compose.test.yml`, `challenge.db`, `server_keys.db` and `SHA256SUMS` exist;
+- `sha256sum -c --strict` passes, so a malformed or cut line fails;
+- `SHA256SUMS` lists `compose.test.yml`, `challenge.db` and `server_keys.db`, and also
+  `compose.relay.yml`, `relay.json`, `metagraph.json` and `inspect-before.json` when they exist
+  (`rollback` writes the two JSON files back over live ones and reads `inspect-before.json`), so a
+  `SHA256SUMS` cut short cannot hide a corrupt file.
+
+Backups from the first versions of the script list five files and have no `relay.json` or
+`metagraph.json`; they still pass. The files `swap` and `beacon` add (`config-*.json`,
+`compose.test.yml.before-*`) and `restore-db-aside-*` are never used, so they are not checked.
 
 ### Beacon lag
 

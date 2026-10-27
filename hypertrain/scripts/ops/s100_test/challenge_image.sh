@@ -83,9 +83,17 @@ sys.exit(0 if changed == sorted(sys.argv[3:]) else 5)
 EOF
   cp -p "$F" "$B/compose.test.yml.before-$step"; mv "$F.new" "$F"; date -u +%FT%TZ
   compose "$F" up -d --no-deps "$step" 2>&1 | tail -3; }
-backup_dir() { local f; for f in compose.test.yml challenge.db server_keys.db SHA256SUMS; do
+backup_dir() { local f listed; for f in compose.test.yml challenge.db server_keys.db SHA256SUMS; do
     [ -f "$1/$f" ] || { echo "not a backup dir: $1 (no $f)"; exit 4; }; done
-  (cd "$1" && sha256sum -c --quiet SHA256SUMS) || { echo "backup $1 fails SHA256SUMS"; exit 4; }; }
+  # --strict fails on a malformed line instead of skipping it. A SHA256SUMS cut short still verifies
+  # the files it lists, so every file used later must be listed too ("HASH  NAME" or "HASH *NAME").
+  # Files added afterwards (config-*.json, compose.test.yml.before-*, restore-db-aside-*) are never used.
+  (cd "$1" && sha256sum -c --strict --quiet SHA256SUMS) || { echo "backup $1 fails SHA256SUMS"; exit 4; }
+  listed=$(sed -E 's/^[0-9a-fA-F]{64} [ *]//' "$1/SHA256SUMS")
+  for f in compose.test.yml challenge.db server_keys.db compose.relay.yml relay.json metagraph.json \
+      inspect-before.json; do
+    if [ -e "$1/$f" ] && ! grep -qxF -- "$f" <<< "$listed"; then
+      echo "backup $1: $f is not listed in SHA256SUMS"; exit 4; fi; done; }
 case $cmd in
 backup)
   TS=${2:?TS}; B=/root/backups/hypertrain-test-s7-$TS
