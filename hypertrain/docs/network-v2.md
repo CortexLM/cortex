@@ -264,6 +264,23 @@ Funding uses signed `EscrowLock` via `POST /v2/runs/{run_id}/escrow/lock`, not a
 CLI `--bond` flag. Test genesis has pinned nonfinancial origins; production mode
 has separate reward authority/issuance bounds and no test-genesis conversion.
 
+The bond is the `LOCK_ADMISSION` of the admission. It has its own settlement, derived from
+the admission's records on every call (ADR 0010, Part 6), and `GET /v2/runs/{run_id}/admission/{hotkey}`
+lists it under `bond`: per residual lock its units, whether it is `releasable`, its
+`release_beacon` and the `finality_hash` and `closed_dispute_root` to sign. The owner takes it
+back with the existing signed `EscrowRelease` (`POST .../escrow/release`) carrying those two
+hashes. It is released only when the admission is not `BANNED` and has no pending dispute or
+lock in the outbox, every round whose roster lists it is closed, none of its hotkeys has
+unvested rewards, it is not live (`ACTIVE`, or `PROBATION` with four clean trials, until its
+screen ends), and the last reward origin of its hotkeys has matured. The bond is burned by the
+service and never through a route, in three cases: a referee verdict of fraud against the miner
+(it also burns the coldkey's unvested rewards and bans the admission; `LOCK_BANNED` follows), a
+round-stage audit mismatch that the caller confirmed as the miner's (`reason="AUDIT_MISMATCH"`:
+the admission is suspended with one strike, and its coldkey stays bound as in probation), and a
+roster member that never committed (`reason="NO_SHOW"`). The last two burn the bond alone. An
+uncontested `MISMATCH`, an infrastructure closure and a verdict against the auditor leave it
+intact.
+
 Production funding is one coordinator-signed `ProductionBootstrap`, posted as an
 `ht/2` envelope to `POST /v2/runs/{run_id}/admin/bootstrap` (admin bearer). The
 run's `EconomicsPolicyV2.bootstrap_allocation_hash` pins its owner/units/maturity

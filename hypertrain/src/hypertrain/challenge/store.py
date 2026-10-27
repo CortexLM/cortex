@@ -2837,6 +2837,7 @@ class ChallengeStore:
                         result = admission.challenge(identity, now=now)
                     case "status":
                         result = asdict(admission.status(identity, now=now))
+                        result["bond"] = admission.bond(result["record"]["admission_id"], now=now)
                         screen = self._db.execute(
                             "SELECT screen_json FROM admissions_v2 WHERE hotkey=?", (identity,)
                         ).fetchone()
@@ -2916,6 +2917,7 @@ class ChallengeStore:
                             self._put_record_v2(run_id, "finality", str(w), finality)
                         if action == "resolution":
                             disputes.settle_lock(result["dispute_id"], now=now)
+                            admission.settle_fraud(result["dispute_id"], now=now)
                             self._put_record_v2(
                                 run_id,
                                 "resolution",

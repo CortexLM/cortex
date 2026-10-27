@@ -69,6 +69,12 @@ class AdmissionStore:
             coldkey TEXT NOT NULL, resolved INTEGER NOT NULL DEFAULT 0);
           CREATE TABLE IF NOT EXISTS admission_origin(
             admission_id TEXT PRIMARY KEY, prefix_tag TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS admission_sanctions(
+            admission_id TEXT NOT NULL, reason TEXT NOT NULL, evidence_hash TEXT NOT NULL,
+            beacon INTEGER NOT NULL, PRIMARY KEY(admission_id, reason, evidence_hash));
+          CREATE TABLE IF NOT EXISTS admission_seizures(
+            lock_id TEXT PRIMARY KEY, admission_id TEXT NOT NULL, reason TEXT NOT NULL,
+            evidence_hash TEXT NOT NULL, beacon INTEGER NOT NULL);
         """)
 
     def record(self, hotkey: str) -> AdmissionRecord:

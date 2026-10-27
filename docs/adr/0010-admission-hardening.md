@@ -2,8 +2,8 @@
 
 - Status: draft for branch `v3-admission-hardening`, 2026-10-27 (Principal SN100 D36 and D36 bis).
   Forge decides promotion to `v3`. Nothing here changes a production run, master, profile,
-  emission, pin or digest. Part 6 (the admission bond) waits for the answers in "Decisions
-  for Forge" before its code is written.
+  emission, pin or digest. Part 6 (the admission bond) follows the recommended option; the
+  questions that remain are in "Decisions for Forge".
 - Order: brief `v3-admission-hardening.md`. Findings come from the Lens red team A
   (`livrables/lens/redteam-live/rtA.md`, RTA-01 to RTA-06) and B (`rtB.md`, EB-01), tree
   `65be1962`. This ADR is written before any code, as the brief requires.
@@ -214,62 +214,105 @@ surface pinned by `tests/elastic/test_imports.py` is unchanged. The name is `epo
 `incarnation`, because the simulator already uses `incarnation` for a host-slot restart.
 `scripts/check_elastic_mutants.py` goes from 165 to 170 mutants.
 
-### 6. The admission bond (RTA-06) - proposal, final text after the answers of Forge
+### 6. The admission bond (RTA-06)
 
 Nothing in this part changes a manifest, a policy digest, a wire message, an economic constant or
 `implementation_hash`: it gives the two ledger operations that exist (`EscrowV2.release`,
-`EscrowV2.slash`) the settlement they never had.
+`EscrowV2.slash`) the settlement they never had. The order for it is Principal SN100 D36 bis
+("wire the fraud settlement and the bond release"); the seizure of a no-show's bond is Forge's
+request of 2026-10-27 for the audit-integrity lot (AUD-06b).
 
 Context [V]. The bond is an `EscrowLock(kind=LOCK_ADMISSION)` signed by the coldkey; eligibility
 needs locked units >= max(`S_min_units`, `verify.s_min_units(R_collectible_units)`, a
-`G_max / (s_lower * beta)` bound) (`admission.py:913-948`). `release` and `slash` read
+`G_max / (s_lower * beta)` bound) (`admission.py` `status`). `release` and `slash` read
 `settlement(lock_id)`, and `_settlement_v2` answers only for dispute and contest-lock ids and for
-the reward-origin rows `finalize_v2` writes; an admission lock gets `UNACCEPTED_SETTLEMENT`.
-`Admission.settle_fraud` has no caller and could not succeed (it asks `settlement` about an
-admission lock). A referee `FRAUD` against the miner slashes the contest lock only
-(`disputes_v2.py:863-901`) and leaves the miner `SUSPENDED` with `pending_dispute` for ever. An
-uncontested `MISMATCH` writes `records_v2 excluded UNVERIFIED` and nothing else
-(`store.py:7600-7606`). The production gate counts `s_lower * beta * (R + S)` as collectible on
-detection (`challenge/trust_v2.py:101-155`): with the bond unslashable that premise is false.
-Two further defects of the same mechanism, reproduced: the settlement callback is one namespace
-for lock, dispute and reward-origin ids, so a lock whose `operation_id` equals a dispute id is
-released as soon as that dispute closes without fraud; and the operation id of a settlement is
-predictable (`sha256(JCS([dispute_id, "settle"]))`), so the owner can register it first with a
-self-transfer and turn the slash into `OPERATION_CONFLICT` (this also freezes
-`DisputesV2.settle_lock`, and with it the referee's resolution transaction: a finding for the
-audit-integrity lot).
+the reward-origin rows `finalize_v2` writes; an admission lock got `UNACCEPTED_SETTLEMENT`.
+`Admission.settle_fraud` had no caller and could not succeed (it asked `settlement` about an
+admission lock). A referee `FRAUD` against the miner slashed the contest lock only
+(`disputes_v2.py` `settle_lock`) and left the miner `SUSPENDED` with `pending_dispute` for ever.
+An uncontested `MISMATCH` writes `records_v2 excluded UNVERIFIED` and nothing else. The production
+gate counts `s_lower * beta * (R + S)` as collectible on detection (`challenge/trust_v2.py`): with
+the bond unslashable that premise was false. Two more defects of the same mechanism, reproduced:
+the settlement callback is one namespace for lock, dispute and reward-origin ids, so a lock
+whose `operation_id` equals a dispute id was released as soon as that dispute closed without
+fraud; and the operation id of a settlement is predictable
+(`sha256(JCS([dispute_id, "settle"]))`), so the owner can register it first with a self-transfer
+and turn the slash into `OPERATION_CONFLICT`. The second also freezes
+`DisputesV2.settle_lock` for a contest, and with it the referee's resolution transaction: a
+finding for the audit-integrity lot, which this part does not fix there.
 
-Proposal.
+Decision.
 
-1. **Typed resolver.** `EscrowV2` takes an optional `admission_settlement` callback. `release`
-   and `slash` pick the resolver from the kind of the lock event (`LOCK_ADMISSION` uses it, every
-   other kind and `mature` keep `settlement`). `Admission` installs its own derivation. The lock
-   kind closes both aliasing directions and `_settlement_v2` is untouched.
-2. **Derived, never stored.** The settlement of an admission lock is computed on every call from
-   persisted rows. `FRAUD` mirrors the convicting dispute settlement exactly; otherwise it is
-   unresolved until the release gate of 4 holds, then `MATCH`.
-3. **Slash and ban.** Only a referee `ResolutionV2` with `reason=FRAUD` and `loser ==
-   contest.miner` convicts. In the same transaction as `DisputesV2.settle_lock`, the
-   `resolution` branch of `admission_v2` calls `Admission.settle_fraud(dispute_id)`: it resolves
-   the admission by `Contest.admission_id` (never by hotkey, which a rotation changes), checks
-   the `admission_pending` linkage, burns the residual units of every `LOCK_ADMISSION` of that
-   admission (`EscrowV2.slash`, which also burns the owner's `reward_pending`), marks the pending
-   row resolved and sets `BANNED`. The operation id is an HMAC of the lock id under the
-   coordinator-private `ip_secret`: deterministic for retries, unguessable for squatters.
-   `Admission.lock` refuses a `BANNED` admission.
-4. **Release.** The owner signs the existing `EscrowRelease`; the route is unchanged and
-   `GET .../admission/{hotkey}` gains a response-only `bond` key with the exact `finality_hash`
-   and `closed_dispute_root` to sign. The derived settlement is `MATCH` only when the admission
-   is not `BANNED`, has no pending dispute and no outbox entry, is not live (`ACTIVE` or
-   `PROBATION` with four clean trials and `now <= screen_until`: a live miner keeps its bond),
-   every round whose roster lists it is closed, none of its disputes is unresolved, none of its
-   hotkeys has `reward_pending` units, and `now >=` the largest of the `mature_at` of its reward
-   origins, `finalized_beacon + verify.E_vest_rounds` of each rostered round and the resolution
-   beacon of each dispute. No constant is added: every term is a policy or ledger value.
-5. **Not sanctioned.** An uncontested `MISMATCH`, an `INFRASTRUCTURE` close (ADR 0011),
+1. **Typed resolver.** `EscrowV2.admission_settlement` (a callback, `None` keeps the single
+   one). `release` and `slash` choose the resolver by the kind of the lock event: a
+   `LOCK_ADMISSION` uses it, every other kind and `mature` keep `settlement`. `Admission`
+   installs `lock_settlement` when it is built. The lock kind closes both aliasing directions;
+   `_settlement_v2` is untouched.
+2. **Derived, never stored.** `Admission.lock_settlement(lock_id)` is computed from persisted
+   rows on every call. `FRAUD` once the lock has a row in `admission_seizures` (decision 3).
+   Otherwise `MATCH`, unresolved until: the admission is not `BANNED`, has no `pending_dispute`,
+   no unresolved `admission_pending` row and no lock in the outbox; every round whose roster
+   lists it is closed (`RoundStatus.closed`); none of its hotkeys has `reward_pending` units;
+   and `release_beacon` is reached, the last `mature_at` of its reward origins and, while it is
+   live (`ACTIVE`, or `PROBATION` with four clean trials), the end of its current screen plus
+   one: a live miner keeps its bond, which is what makes it eligible. `finality_hash` and
+   `closed_dispute_root` are hashes of what was read (rounds and origins, dispute ids), so the
+   owner signs the state it saw. No constant is added.
+3. **Seizure.** `Admission.seize_bond(admission_id, *, reason, evidence_hash, now)` is an
+   internal, authenticated service hook (the coordinator is the ledger's reward authority); no
+   route calls it. It records each residual lock in `admission_seizures`, which makes its
+   derived settlement `FRAUD` for good (never releasable), and burns it through `EscrowV2.slash`
+   under an operation id that is an HMAC of the lock id with the coordinator-private
+   `ip_secret`: deterministic for retries, unguessable for a squatter. A second call finds
+   nothing left. The admission is resolved by id, never by hotkey, which a rotation changes.
+   Reasons: `TRAINING_FRAUD` also burns the owner's unvested rewards (the ledger's rule for a
+   slashed admission lock) and bans the admission (`BANNED`, terminal; `Admission.lock` then
+   answers `LOCK_BANNED`); `AUDIT_MISMATCH`, a round-stage audit mismatch that the caller has
+   confirmed as the miner's (D47), suspends the admission (reason `AUDIT_MISMATCH`), adds one
+   strike and burns the bond alone, and the coldkey stays bound by the one-non-`ACTIVE`-row rule
+   as in probation; `NO_SHOW` burns the bond alone (`EscrowV2.slash(burn_pending=False)`) and
+   leaves the admission as it is, ineligible until it is funded again. A (reason, evidence)
+   pair is applied once, recorded in `admission_sanctions`: a retry adds no strike. The ledger
+   keeps its existing meaning of a slash; the new keyword defaults to it, so no earlier event
+   changes. The caller decides whose fault it is: a verdict against the auditor and the
+   closures of ADR 0011 never reach `seize_bond` (`settle_fraud` returns `False` for them).
+4. **Conviction.** `Admission.settle_fraud(dispute_id, *, now)` replaces the old function (no
+   caller, no test). The `resolution` branch of `admission_v2` calls it in the transaction of
+   `DisputesV2.settle_lock`. Only an accepted, resolved dispute settlement with outcome `FRAUD`
+   (reason `FRAUD`, loser == the miner of the contest) convicts, and only if the pending
+   reference bound when the dispute opened names the same admission, coldkey and evidence and the
+   verdict's release beacon is reached; any other closure returns `False` and changes nothing.
+   Conviction calls `seize_bond(reason="TRAINING_FRAUD")`. Because it shares the transaction, a
+   failure of the hook rolls back the resolution (fail closed).
+5. **Release.** The owner signs the existing `EscrowRelease`; the route is unchanged.
+   `GET .../admission/{hotkey}` gains a response-only `bond` key listing the residual locks with
+   `releasable`, `release_beacon` and the `finality_hash` and `closed_dispute_root` to sign.
+   `Admission.release_bond(admission_id, *, now)` is the internal equivalent for an authenticated
+   request of the owner: all residual locks or none (`BOND_NOT_RELEASABLE`).
+6. **Not sanctioned.** An uncontested `MISMATCH`, an `INFRASTRUCTURE` close (ADR 0011),
    `PARTY_TIMEOUT`, `WITHHELD`, `AUDITOR_FAULT` and `FRAUD` against the auditor leave the bond
    intact. ADR 0011 refuses a conviction on the raw comparator while DET-01 and DET-01b can
    `MISMATCH` an honest miner, and no manifest value gives a contest window.
+
+For other lots (audit-integrity, AUD-06b and D47): `Admission.seize_bond(admission_id, *,
+reason, evidence_hash, now)` with `reason="NO_SHOW"` for a roster member that never committed and
+`reason="AUDIT_MISMATCH"` for a confirmed round-stage mismatch; `evidence_hash` is 64 hex naming
+the round and what confirmed it; call it inside the transaction that excludes the member. To
+give a bond back on the owner's authenticated request, `Admission.release_bond(admission_id,
+now=...)`. Both resolve everything by admission id, nest in `escrow.tx()`, are idempotent and
+write nothing when there is no residual bond.
+
+Consequences. An honest miner leaves with its bond after its screen lapsed, its last round
+closed and its rewards vested; the wait is `E_vest_rounds` beacon rounds after the last
+finalization unless a dispute is open. The bound `q * s_lower * beta * (R + S) >= G` becomes true
+for contested detections and for no-shows; a cheater who never contests is excluded and keeps
+its bond until the Forge question on a contest window is answered. Contesting now risks the
+whole admission bond, the coldkey's unvested rewards and a ban instead of the contest bond:
+with DET-01b open an honest, falsely `MISMATCH`ed miner should not contest (the cure is DET-01b,
+not this part). A round that never closes pins the bonds of its roster until DSP-01 and AUD-06
+close it. Other `ACTIVE` admissions of a convicted coldkey keep their state but lose their
+unvested rewards to the ledger's burn. An admission-trial `MISMATCH` binds a pending reference
+that nothing settles, so that bond stays held (left open below).
 
 Rejected: a persisted `settlement` row per lock (stale, allows release while rostered, needs a
 writer in `finalize_v2` or `complete_audit_v2`, which are in `implementation_hash`); a service
@@ -277,8 +320,9 @@ sweep that releases for the owner (frees honest miners that are merely suspended
 step to the beacon route); slashing an uncontested `MISMATCH` after a window (no window exists,
 single-operator replay, DET-01b); a slash fraction or a referee share (a new economic constant;
 the whole lock is the only share valid for every `s_lower <= 1`); banning every admission of the
-coldkey; hooks in `complete_audit_v2`, `finalize_v2` or `referee_v2` (they change
-`implementation_hash`).
+coldkey; a retirement state on release (a live miner cannot release at all, so the grief of
+withdrawing the bond just before a round opens does not arise); hooks in `complete_audit_v2`,
+`finalize_v2` or `referee_v2` (they change `implementation_hash`).
 
 ## Hash consequences
 
@@ -313,22 +357,23 @@ is filled by the last commit of the lot.
 
 ## Decisions for Forge
 
-1. **Bond burn (Part 6).** Option A (recommended): a referee `FRAUD` against the miner burns the
-   admission bond and the coldkey's `reward_pending` and bans the admission. Option D: ban and
-   freeze the bond without burning, if the founder withholds the burn (ADR 0002 "Penalties":
-   any slash for a failed audit is founder-only).
+1. **Bond burn (Part 6).** Implemented as recommended: a referee `FRAUD` against the miner burns
+   the admission bond and the coldkey's unvested rewards and bans the admission; a no-show
+   seizure burns the bond alone. ADR 0002 "Penalties" makes any slash for a failed audit
+   founder-only: the order of D36 bis and Forge's request of 2026-10-27 are taken as that
+   decision for these two cases. To withhold the burn, `seize_bond` keeps recording the seizure
+   and the ban and only the `slash` call goes.
 2. **Uncontested MISMATCH.** The brief says "a miner convicted by a MISMATCH audit is slashed".
-   Option A convicts only through a contest and a referee verdict. Convicting an uncontested
+   Part 6 convicts only through a contest and a referee verdict. Convicting an uncontested
    `MISMATCH` needs a window W that no manifest field provides (`E_vest_rounds` is 10 beacon
    rounds in the example, `dispute_per_level` is a per-turn timeout), and should wait for the
    DET-01b fix. Give W, or confirm that it waits.
-3. **Release.** A live miner cannot release; the rest follows the gate of Part 6.4. Confirm, or
-   ask for an exit that retires the admission (`SUSPENDED / BOND_RELEASED`).
-4. **Proxy headers.** Is the public miner path through the Cortex proxy (Part 3)?
-5. **Residuals left open:** targeted trial squatting needs a funded-only trial place (policy
+3. **Proxy headers.** Is the public miner path through the Cortex proxy (Part 3)?
+4. **Residuals left open:** targeted trial squatting needs a funded-only trial place (policy
    field); the route back for a stranded miner is ADR 0002 P1 / ADR 0011 D40; an admission-trial
-   `MISMATCH` binds a pending row that nothing settles (the bond and the coldkey stay locked);
-   `PROBATION` rows are not reaped.
+   `MISMATCH` binds a pending reference that nothing settles (the bond and the coldkey stay
+   locked); `PROBATION` rows are not reaped; `DisputesV2.settle_lock` derives its operation id
+   from public data and can be squatted (audit-integrity lot).
 
 ## Not verified
 

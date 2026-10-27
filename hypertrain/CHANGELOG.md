@@ -65,6 +65,15 @@
   application with `PREFIX_PENDING_CAPACITY` when its /24 or /64 already holds that many unfunded
   `APPLIED` rows (RTA-02). Absent by default and omitted from the digest, so no existing policy
   digest or run id changes. ADR 0010.
+- The admission bond can be released and slashed (RTA-06). `EscrowV2` takes an optional
+  `admission_settlement` and settles a `LOCK_ADMISSION` through it, by lock kind; the settlement
+  is derived from the admission's records. `Admission.settle_fraud(dispute_id)` runs with every
+  accepted resolution: a referee verdict of fraud against the miner burns the bond and the
+  coldkey's unvested rewards and bans the admission. `Admission.seize_bond(admission_id,
+  reason, evidence_hash, now)` burns the bond for a no-show (`reason="NO_SHOW"`), a confirmed
+  round-stage audit mismatch (`"AUDIT_MISMATCH"`: also suspends with one strike) or a convicted
+  miner (`"TRAINING_FRAUD"`); `Admission.release_bond` and the status key `bond` serve the
+  owner. `EscrowV2.slash` takes `burn_pending` (default: today's behaviour). ADR 0010.
 - CUDA network qualification records each device's compute capability with its SM count and
   accepts a device only when the pair is a row of `network_qualification.SM_COUNTS` (RTX 5090
   12.0 = 170, B300 10.3 = 148) and the count equals the signed manifest's
