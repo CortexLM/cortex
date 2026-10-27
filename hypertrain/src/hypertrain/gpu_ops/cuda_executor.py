@@ -84,6 +84,7 @@ POLL = 0.25
 MARGIN = 5
 LOG_TAIL = 600
 MAX_DIGESTS = 32  # RepoDigests entries kept from a host probe
+HOST_JSON_DEPTH = 8  # COMPLETE nests two levels and environment.json three: deeper is a bomb
 
 
 class HostLost(IslandFailure):
@@ -415,6 +416,35 @@ def _private(path: Path, flag: int) -> IO[bytes]:
     return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | flag, 0o600), "wb")
 
 
+def shallow(raw: bytes) -> str:
+    """Decode a document a host wrote; refuse the host when it nests deeper than a runner writes.
+
+    The caller has bounded the size. One linear scan that skips strings counts the nesting, so no
+    parser is ever handed a document deep enough to recurse (a count that over-reads a malformed
+    document is harmless: json refuses it anyway). The scan reads the decoded text, never bytes
+    that json could take for UTF-16.
+    """
+    text = raw.decode()
+    depth, quoted, escaped = 0, False, False
+    for char in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > HOST_JSON_DEPTH:
+                raise HostRefused("host document nests deeper than any runner writes")
+        elif char in "]}":
+            depth -= 1
+    return text
+
+
 def _file_sha(path: Path) -> str:
     with open(path, "rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -713,8 +743,10 @@ class Executor:
         if not complete or "environment.json" not in small:
             raise AttemptFailed("result is missing environment.json or the COMPLETE member")
         try:
-            done = json.loads(small["COMPLETE"])
-            environment = ObservedEnvironment.model_validate_json(small["environment.json"])
+            done = json.loads(shallow(small["COMPLETE"]))
+            environment = ObservedEnvironment.model_validate_json(
+                shallow(small["environment.json"])
+            )
         except ValueError as error:
             raise AttemptFailed("result metadata is malformed") from error
         listed = {**written, "environment.json": sha256(small["environment.json"])}

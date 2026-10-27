@@ -1027,6 +1027,46 @@ def test_a_pool_that_used_its_attempts_ends_in_a_plain_island_failure(make_pool,
     assert len(journal_of(pool, "exec_attempt_failed")) == 2
 
 
+# Bytes no honest runner can write and that exhaust a parser of ours are an attack, not a failed
+# attempt: the host is quarantined on the spot (it ran once) and the next one serves the job.
+RESULT_BOMBS = {
+    "complete-100000-levels-deep": {"mode": "mutate", "name": "deep-complete", "depth": 100_000},
+    "environment-100000-levels-deep": {
+        "mode": "mutate",
+        "name": "deep-environment",
+        "depth": 100_000,
+    },
+}
+
+
+@pytest.mark.parametrize("bomb", RESULT_BOMBS)
+def test_result_that_exhausts_a_parser_quarantines_the_host_and_the_next_one_serves(
+    make_pool, canned, tmp_path, bomb
+):
+    evil, good = hostile_and_healthy(canned)
+    pool = make_pool(labels=("a", "b"))
+    pool.toolbox.scenario.global_runs(RESULT_BOMBS[bomb], {"mode": "ok"})
+    factory = cuda_executor.load(pool.config_path)
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home, factory=factory)
+
+    assert [run["host"] for run in pool.toolbox.runs()] == [pool.address(evil), pool.address(good)]
+    (refused,) = journal_of(pool, "exec_host_refused")
+    assert refused["label"] == evil
+    assert journal_of(pool, "exec_attempt_failed") == []  # a refusal costs no attempt
+    assert record_of(home)["host"]["label"] == good
+    assert (home / "published/rank-0/delta.bin").read_bytes() == (
+        canned.tree / "rank-0/delta.bin"
+    ).read_bytes()
+
+    calls = len(pool.toolbox.ssh_calls(host=pool.address(evil)))
+    later = canned.stage(tmp_path / "later")
+    dispatch(pool, later, factory=factory)
+    # the quarantined host is never offered a job again
+    assert len(pool.toolbox.ssh_calls(host=pool.address(evil))) == calls
+    assert record_of(later)["host"]["label"] == good
+
+
 OOM = {"mode": "exit", "code": 1, "stderr": "CUDA out of memory"}
 
 

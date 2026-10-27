@@ -1180,6 +1180,69 @@ def test_read_result_never_accepts_a_cut_or_foreign_stream(
             read(executor, tmp_path / name, raw)
 
 
+# -- documents a host wrote --------------------------------------------------------------------
+
+
+def nested(depth: int) -> bytes:
+    return b"[" * depth + b"]" * depth
+
+
+# The runner writes 2 levels in COMPLETE and 3 in environment.json: the limit is 8.
+@pytest.mark.parametrize(("depth", "accepted"), [(8, True), (9, False)])
+def test_shallow_nesting_limit_is_inclusive(depth: int, accepted: bool) -> None:
+    if accepted:
+        assert ce.shallow(nested(depth)) == nested(depth).decode()
+    else:
+        with pytest.raises(ce.HostRefused, match="nests deeper"):
+            ce.shallow(nested(depth))
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"[" * 100_000, b'{"a":' * 100_000, nested(100_000)],
+    ids=["opening-brackets", "opening-objects", "closed-brackets"],
+)
+def test_shallow_refuses_a_bomb_before_any_parser_sees_it(raw: bytes) -> None:
+    with pytest.raises(ce.HostRefused):
+        ce.shallow(raw)
+
+
+def test_shallow_counts_nesting_not_brackets() -> None:
+    # closers bring the depth back down, and brackets inside a string (even one that holds an
+    # escaped quote) do not count
+    again = nested(8) * 3
+    inside = json.dumps({"a": "[" * 100, "b": '\\"' + "{" * 100}).encode()
+    assert ce.shallow(again) == again.decode() and ce.shallow(inside) == inside.decode()
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        pytest.param(result_entries(done=nested(100_000)), id="complete-100000-levels"),
+        pytest.param(result_entries(done=nested(9)), id="complete-one-level-too-deep"),
+        pytest.param(result_entries(environment=nested(100_000)), id="environment-100000-levels"),
+    ],
+)
+def test_read_result_refuses_the_host_whose_metadata_nests_beyond_any_runner(
+    executor: ce.Executor, tmp_path: Path, entries: list[tuple[str, bytes, bytes]]
+) -> None:
+    with pytest.raises(ce.HostRefused, match="nests deeper"):
+        read(executor, tmp_path, tar_of(entries))
+
+
+def test_read_result_takes_the_metadata_as_utf8_and_nothing_else(
+    executor: ce.Executor, tmp_path: Path
+) -> None:
+    # json.loads(bytes) would take UTF-16 for a document, and a parser differential is a way in
+    entries = result_entries()
+    done = dict((name, raw) for name, raw, _ in entries)["COMPLETE"]
+    entries = [
+        (n, done.decode().encode("utf-16") if n == "COMPLETE" else p, k) for n, p, k in entries
+    ]
+    with pytest.raises(ce.AttemptFailed, match="result metadata is malformed"):
+        read(executor, tmp_path, tar_of(entries))
+
+
 # -- provenance identity -----------------------------------------------------------------------
 
 

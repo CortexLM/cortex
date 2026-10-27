@@ -77,6 +77,9 @@ Everything a host sends is bytes to check, never a statement to believe
   run on it. The line is read by a grammar, not by a JSON parser.
 - A probe whose clock is not a `time_t` (a 400-digit `date +%s` would overflow the comparison with
   the challenge clock) refuses the host the same way.
+- A result whose `COMPLETE` or `environment.json` nests deeper than 8 levels (the container
+  program writes 2 and 3) refuses the host, after one container run: no honest container program
+  writes it. Both documents are read as UTF-8 only.
 - When no host can serve the job, `launch` raises a plain `IslandFailure`: "cuda executor found
   no host able to run the job: ..." when every host is quarantined or unavailable, "cuda executor
   gave up: ..." after `max_attempts` failed attempts, and `Aborted` (a subclass) when the job

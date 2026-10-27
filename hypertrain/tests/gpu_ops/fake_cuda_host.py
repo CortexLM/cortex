@@ -28,6 +28,8 @@ The scenario is one JSON file keyed by host address (`hosts`), plus a `global` s
 refused, and the destination must be pinned in the `UserKnownHostsFile` the caller names, as
 `address` for port 22 and `[address]:port` otherwise (StrictHostKeyChecking=yes).
 `exit-after`: the container streams a complete valid result, then exits with `code`.
+`mutate`: the genuine result with one hostile change, named by `name`; the other keys of the run
+size a bomb (`depth`, `claim`) or give a member its bytes (`text`).
 `probe-fail`: the runner's device probe fails (the real runner then exits 9).
 `detached`: the container runs in a session of its own, so killing the local ssh does not stop it;
 only `docker rm -f NAME` does, and it waits while the global `rm_hold` flag is set.
@@ -321,6 +323,10 @@ def dumps(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
+def nested(depth):
+    return b"[" * depth + b"]" * depth
+
+
 def mutated(genuine, entry):
     members = decode(genuine)
     body = [m for m in members if m[0] != "COMPLETE"]
@@ -367,6 +373,11 @@ def mutated(genuine, entry):
         recompute = True
     elif name == "environment":
         body = edit(body, "environment.json", lambda d: dumps(dict(json.loads(d), **entry["set"])))
+        recompute = True
+    elif name == "deep-complete":
+        return encode(body + [("COMPLETE", nested(entry["depth"]), "file")])
+    elif name == "deep-environment":
+        body = edit(body, "environment.json", lambda d: nested(entry["depth"]))
         recompute = True
     else:
         usage("unknown mutation %r" % name)
