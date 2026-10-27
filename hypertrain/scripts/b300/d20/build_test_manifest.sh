@@ -6,11 +6,22 @@
 # an image that contains commit 8a90d9bc.
 #
 # Usage: build_test_manifest.sh IMAGE_DIGEST DRIVER SM_COUNT OUT_DIR [EXP_ROUND]
+#        build_test_manifest.sh --clean OUT_DIR
 #   OUT_DIR/secrets  disposable seeds (0700 dir, 0600 files, reused if present, never printed)
 #   OUT_DIR/inputs   training/policies/relays JSON, public keys, synthetic dataset shard
 #   OUT_DIR/out      manifest_v2 build output (must not exist yet)
 #   OUT_DIR/state    object store of the policy and relay-registry objects
+# IMAGE_DIGEST is sha256: and 64 lowercase hex, DRIVER digits and dots (or cpu-test, the tiny-cpu
+# value), SM_COUNT and EXP_ROUND digits: all checked before anything is created (exit 2).
 # EXP_ROUND defaults to the current drand quicknet round (local clock) + 864000 (~30 days).
+# A build that fails or is interrupted (SIGINT, SIGTERM, SIGHUP) removes what it created and nothing
+# else: OUT_DIR and its missing parents if it made them, secrets/ if it made it, the seeds it made
+# (pre-staged seeds stay), inputs, out and state. The exit code is the failure's. SIGKILL cannot be
+# trapped: clean that OUT_DIR with --clean.
+# --clean OUT_DIR removes secrets, inputs, out and state under OUT_DIR, then OUT_DIR if it is empty,
+# when the campaign is over. It exits 2 and removes nothing for a relative path, a symlinked OUT_DIR,
+# secrets, inputs, out or state, and a directory with neither inputs/training.json nor secrets/. It
+# prints directory names only.
 # HT_D20_GEOMETRY=dense-1b (default): the dense-1b-bf16 qualification geometry
 # (scripts/mfu_profiles.json mfu-dense-1b, H=8 J=4 micro_batch=2 warmup=2 lr=3e-3, dense-int8),
 # layout pp=1 ep=1 dp=2 n_gpus=2, a synthetic 4096-sample u32 fixture (no quality claim).
@@ -28,8 +39,29 @@
 # supported by the dry run, which expects https://relay.joinbase.ai.
 set -euo pipefail
 
+if [ "${1:-}" = --clean ]; then
+    [ "$#" -eq 2 ] || { echo "usage: $0 --clean OUT_DIR" >&2; exit 2; }
+    OUT=$2
+    case $OUT in /*) ;; *) echo "OUT_DIR must be an absolute path" >&2; exit 2 ;; esac
+    for p in "$OUT" "$OUT/secrets" "$OUT/inputs" "$OUT/out" "$OUT/state"; do
+        if [ -L "$p" ]; then echo "$p is a symlink; nothing removed" >&2; exit 2; fi
+    done
+    if [ ! -f "$OUT/inputs/training.json" ] && [ ! -d "$OUT/secrets" ]; then
+        echo "$OUT has no inputs/training.json and no secrets/: not a builder output; nothing removed" >&2
+        exit 2
+    fi
+    removed=()
+    for d in secrets inputs out state; do
+        if [ -e "$OUT/$d" ]; then rm -rf -- "${OUT:?}/$d"; removed+=("$d"); fi
+    done
+    echo "removed under $OUT: ${removed[*]:-nothing}"
+    if rmdir -- "$OUT" 2>/dev/null; then echo "removed $OUT"; else echo "kept $OUT (not empty)"; fi
+    exit 0
+fi
+
 if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
     echo "usage: $0 IMAGE_DIGEST DRIVER SM_COUNT OUT_DIR [EXP_ROUND]" >&2
+    echo "       $0 --clean OUT_DIR" >&2
     exit 2
 fi
 IMAGE=$1
@@ -45,13 +77,55 @@ HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
 case $GEOMETRY in dense-1b|tiny-cpu) ;; *) echo "HT_D20_GEOMETRY: dense-1b or tiny-cpu" >&2; exit 2 ;; esac
 case $COLDKEYS in [1-9]) ;; *) echo "HT_D20_COLDKEYS must be 1..9" >&2; exit 2 ;; esac
-case $IMAGE in sha256:*) ;; *) echo "IMAGE_DIGEST must be sha256:<64 hex>" >&2; exit 2 ;; esac
+[[ $IMAGE =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "IMAGE_DIGEST must be sha256:<64 lowercase hex>" >&2; exit 2; }
+[[ $DRIVER =~ ^([0-9][0-9.]*|cpu-test)$ ]] || { echo "DRIVER must be digits and dots (or cpu-test)" >&2; exit 2; }
+[[ $SM_COUNT =~ ^[0-9]+$ ]] || { echo "SM_COUNT must be digits" >&2; exit 2; }
+[ -z "$EXP_ROUND" ] || [[ $EXP_ROUND =~ ^[0-9]+$ ]] || { echo "EXP_ROUND must be digits" >&2; exit 2; }
 # The Python stages run from $HT, so a relative OUT_DIR would point somewhere else there.
 case $OUT in /*) ;; *) echo "OUT_DIR must be an absolute path" >&2; exit 2 ;; esac
 if [ -L "$OUT" ] || [ -L "$OUT/secrets" ]; then echo "OUT_DIR or its secrets/ is a symlink" >&2; exit 2; fi
 for d in inputs out state; do
-    if [ -e "$OUT/$d" ]; then echo "$OUT/$d already exists; use a fresh OUT_DIR" >&2; exit 2; fi
+    if [ -e "$OUT/$d" ] || [ -L "$OUT/$d" ]; then echo "$OUT/$d already exists; use a fresh OUT_DIR" >&2; exit 2; fi
 done
+
+# From here on a failed run removes what it created and nothing else. inputs, out and state did
+# not exist above, so whatever is there then is this run's; of secrets/ only the seeds that were not
+# there before are removed, and the directories only when this run made them and they are empty.
+new_root=
+if [ ! -e "$OUT" ]; then
+    new_root=$OUT
+    while [ ! -e "$(dirname -- "$new_root")" ]; do new_root=$(dirname -- "$new_root"); done
+fi
+made_seed_dir=0
+declare -A prestaged=()
+if [ -d "$OUT/secrets" ]; then
+    for f in "$OUT/secrets"/*; do [ ! -e "$f" ] || prestaged[${f##*/}]=1; done
+else
+    made_seed_dir=1
+fi
+finished=0
+clean_failed_run() {
+    local rc=$? f d
+    trap - EXIT
+    # A script killed by SIGTERM or SIGHUP (an ssh drop) runs this trap with $? still 0, so a build
+    # that did not reach its last line counts as failed whatever $? says.
+    if [ "$rc" -ne 0 ] || [ "$finished" -ne 1 ]; then
+        set +e
+        rm -rf -- "$OUT/inputs" "$OUT/out" "$OUT/state"
+        for f in "$OUT/secrets"/*; do
+            [ ! -e "$f" ] || [ -n "${prestaged[${f##*/}]:-}" ] || rm -f -- "$f"
+        done
+        [ "$made_seed_dir" -eq 0 ] || rmdir -- "$OUT/secrets" 2>/dev/null
+        if [ -n "$new_root" ]; then
+            d=$OUT
+            while rmdir -- "$d" 2>/dev/null && [ "$d" != "$new_root" ]; do d=$(dirname -- "$d"); done
+        fi
+        echo "build failed or interrupted (exit $rc): removed what this run created under $OUT" >&2
+    fi
+    exit "$rc"
+}
+trap clean_failed_run EXIT
+
 mkdir -p "$OUT"
 if [ ! -d "$OUT/secrets" ]; then mkdir -m 0700 "$OUT/secrets"; fi
 chmod 0700 "$OUT/secrets"
@@ -324,3 +398,4 @@ print(json.dumps({
 if not all(checks.values()):
     sys.exit("DRY-RUN VALIDATION FAILED")
 PY
+finished=1

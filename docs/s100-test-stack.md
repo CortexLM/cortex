@@ -156,6 +156,11 @@ A run POSTed while the TEST challenge already hosts one goes to the child store 
 - `publish_run.py` (after `run`), `round_status.py` and `weights_once.py` follow it;
 - use `--state-dir /data/runs/<run id>` for `live_operator.py`.
 
+A build that fails or is interrupted removes what it created (seeds you pre-staged stay). When the
+campaign is over, clean `$OUT` with `hypertrain/scripts/b300/d20/build_test_manifest.sh --clean $OUT`:
+it deletes `secrets`, `inputs`, `out` and `state` under `$OUT`, then `$OUT` if it is empty, and
+refuses a relative path, a symlink or a directory that is not a builder output.
+
 ## 3. Re-bind the TEST relay to the run
 
 The relay serves one run (`/data/relay/config/relay.json`). `relay_config.py` re-seals its registry
