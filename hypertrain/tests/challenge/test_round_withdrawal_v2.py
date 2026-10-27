@@ -8,7 +8,7 @@ from dataclasses import asdict, replace
 
 import pytest
 
-from hypertrain.challenge.finality_v2 import RoundStatus, exclude, require_open
+from hypertrain.challenge.finality_v2 import RoundStatus, exclude, require_open, retire
 from hypertrain.ledger.escrow_v2 import (
     EscrowError,
     EscrowV2,
@@ -174,9 +174,15 @@ def withdrawals(ledger: EscrowV2) -> list[dict]:
 
 # Rounds 0..n-1 as finality holds them, round n is offered to the ledger. A round that cannot be
 # paid or repaired any more is recorded and passed over; every other state keeps blocking.
+def retired(run: str, w: int) -> RoundStatus:
+    """A round that could not reach a tape, closed with the model unchanged (ADR 0011 Part 8)."""
+    return retire(replace(unresolved(run, w), applied=False), "00" * 32, H)
+
+
 CLOSURES = {
     "whole-round-exclusion": ((closed_unpaid, closed_unpaid), [0, 1]),
     "accepted-rollback": ((rolled_back, rolled_back), [0, 1]),
+    "retired": ((retired, retired), [0, 1]),
     "pending": ((unresolved,), []),
     "settled": (
         (lambda run, w: replace(unresolved(run, w), disposition="SETTLED", resolution_hash=H),),
