@@ -597,6 +597,42 @@ def test_trial_input_get_gives_up_on_a_404_that_stays_after_bounded_jittered_ret
     assert all(0.5 <= d <= 1.5 for d in delays) and len(set(delays)) > 1
 
 
+def _break_the_journal(miner) -> None:
+    """journal.jsonl is a directory, so the next Journal.append fails with a real OSError."""
+    (miner.directory / "journal.jsonl").mkdir()
+
+
+def test_a_journal_failure_never_replaces_the_http_error(tmp_path: Path, monkeypatch, caplog):
+    import hypertrain.miner.core as core
+    from hypertrain.miner.core import ChallengeHTTPError
+
+    # Given: a trial input that never arrives and a journal that cannot be written (m1: the
+    # append runs inside the handler of the HTTP error).
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0))
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"trial input")
+    _break_the_journal(miner)
+    gets = _answer_object_gets(miner, 404, None)
+    # When / Then: the caller still sees the 404 it would have seen, after every retry, and the
+    # lost journal line is logged.
+    with pytest.raises(ChallengeHTTPError, match="^404: trial input object unavailable$"):
+        miner._get_whole(sha, tmp_path / "input")
+    assert len(gets) == 3
+    assert caplog.text.count("retry not journaled") == 2
+
+
+def test_a_journal_failure_does_not_stop_a_retry_that_succeeds(tmp_path: Path, monkeypatch):
+    import hypertrain.miner.core as core
+
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0))
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"trial input")
+    _break_the_journal(miner)
+    gets = _answer_object_gets(miner, 404, 1)
+    miner._get_whole(sha, tmp_path / "input")
+    assert (tmp_path / "input").read_bytes() == b"trial input" and len(gets) == 2
+
+
 def test_part_get_retries_a_transient_404_and_fails_with_the_http_error_when_it_stays(
     tmp_path: Path, monkeypatch
 ):

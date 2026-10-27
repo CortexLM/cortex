@@ -73,7 +73,7 @@ def _retrying[T](
     """Run an idempotent request, retrying transport errors, 5xx responses and the `also` statuses.
 
     `noted(what, status, attempt, delay)` sees each retry before its wait; status is None for a
-    transport error."""
+    transport error. It may fail without effect on the request."""
     for attempt, delay in enumerate((*RETRY_DELAYS, None), 1):
         try:
             return fn()
@@ -88,7 +88,14 @@ def _retrying[T](
                 "%s failed (%s %s); retry in %.1fs", what, type(error).__name__, status, delay
             )
             if noted is not None:
-                noted(what, status, attempt, delay)
+                # A diagnostic line must not decide the request: if it cannot be written, say so
+                # and let the request go on as the HTTP error alone dictates.
+                try:
+                    noted(what, status, attempt, delay)
+                except Exception as failure:
+                    log.warning(
+                        "%s: retry not journaled (%s: %s)", what, type(failure).__name__, failure
+                    )
             time.sleep(delay)
     raise AssertionError("unreachable")
 
