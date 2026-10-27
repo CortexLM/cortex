@@ -41,3 +41,27 @@ def test_beacon_push_frees_the_places_of_unproven_challenges(network):
     network.push(104)
     response = network.challenge(newcomer)
     assert response.status_code == 200, response.text
+
+
+def test_unfunded_join_past_its_window_does_not_block_its_coldkey(network):
+    # Given: HOT[0] applied with COLD[0] and never funded or asked for its challenge
+    first = network.join(0)
+    assert first.status_code == 200, first.text
+    network.push(103)  # its window (to round 102) is over
+    # When: the same coldkey applies again with another registered hotkey
+    request = service.sign_join(
+        service.HOT[1],
+        service.COLD[0],
+        run_id=network.manifest.run_id(),
+        request_id="ab" * 32,
+        expires_beacon=10000,
+        policy_hash=network.manifest.network.admission_policy_hash,
+        hardware_hint=service.HardwareHint(device_name="cpu", device_count=1, driver="advisory"),
+    )
+    second = network.client.post(
+        network.url + "/join", content=service.canonicalize(request.body())
+    )
+    # Then: the dead application was retired by the dispatcher's join
+    assert second.status_code == 200, second.text
+    record = network.client.get(network.url + f"/admission/{service.HOT[0].ss58}").json()["record"]
+    assert (record["state"], record["reason"]) == ("SUSPENDED", "APPLIED_EXPIRED")

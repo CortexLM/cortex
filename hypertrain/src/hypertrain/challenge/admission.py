@@ -155,12 +155,14 @@ class Admission:
             if old:
                 self.store.reserve(key, request_hash, old["receipt"])
                 return self.store.by_id(old["receipt"])
+            self.reap_dead_applications(now=now)
             if self.store.db.execute(
                 "SELECT 1 FROM admission_history WHERE hotkey=?", (request.hotkey,)
             ).fetchone():
                 raise AdmissionError("HOTKEY_HISTORY_EXISTS")
             if self.store.db.execute(
-                "SELECT 1 FROM admissions_v2 WHERE coldkey=? AND state!='ACTIVE'",
+                "SELECT 1 FROM admissions_v2 WHERE coldkey=? AND state!='ACTIVE' "
+                "AND NOT (state='SUSPENDED' AND reason='APPLIED_EXPIRED')",
                 (request.coldkey,),
             ).fetchone():
                 raise AdmissionError("COLDKEY_PROBATION_EXISTS")
@@ -203,6 +205,32 @@ class Admission:
             )
             self.store.reserve(key, request_hash, admission_id)
             return self.store.by_id(admission_id)
+
+    def reap_dead_applications(self, *, now: int) -> list[str]:
+        """Suspend as APPLIED_EXPIRED every APPLIED row that cannot progress and holds no stake.
+
+        An APPLIED row is dead once `now > seed_beacon + challenge_rounds`: challenge() then
+        refuses for ever, and only join, finalize_trial and resume write the seed. Without this
+        the row keeps one of the max_pending places and its coldkey for good.
+        The row, its transitions and its spent hotkey stay (no deletion, no new state). A row
+        with a lock, or with one waiting in the outbox, is never touched: releasing stakes is the
+        owner's. It runs at the start of join, not in challenge() or status(): a raising
+        operation rolls its transaction back, and a GET must not write.
+        """
+        with self.escrow.tx():
+            self.reap_expired_trials(now=now)
+            dead = self.store.db.execute(
+                "SELECT admission_id,coldkey FROM admissions_v2 "
+                "WHERE state='APPLIED' AND seed_beacon+?<? ORDER BY admission_id",
+                (self.policy.challenge_rounds, now),
+            ).fetchall()
+            reaped = []
+            for row in dead:
+                units, _ = self.escrow.locked(row["admission_id"], row["coldkey"])
+                if units == 0 and not self.store.pending_outbox(row["admission_id"]):
+                    self.store.transition(row["admission_id"], "SUSPENDED", "APPLIED_EXPIRED", now)
+                    reaped.append(str(row["admission_id"]))
+            return reaped
 
     def reap_expired_trials(self, *, now: int) -> list[int]:
         """Close every OPEN trial with no accepted proof whose deadline has passed.

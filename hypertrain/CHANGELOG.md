@@ -57,6 +57,10 @@
   (RTA-04). The admin export carries the signed challenge as `challenge_envelope` and
   `trial_export` no longer calls the route; the miner signs the GET. A client built before this
   change gets 403. ADR 0010.
+- At the start of every `join`, an `APPLIED` row that is past its challenge window
+  (`seed + challenge_rounds`) and holds no stake is suspended as `APPLIED_EXPIRED`: 32 unfunded
+  joins can no longer hold every pending place for good (RTA-02). Its coldkey may apply again;
+  its hotkey stays spent; a funded row is never touched. ADR 0010.
 - CUDA network qualification records each device's compute capability with its SM count and
   accepts a device only when the pair is a row of `network_qualification.SM_COUNTS` (RTX 5090
   12.0 = 170, B300 10.3 = 148) and the count equals the signed manifest's

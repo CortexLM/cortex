@@ -184,6 +184,15 @@ lower nominal probation/base rates. Calendar age or a legacy bond flag is not
 graduation. Join quotas, one concurrent non-ACTIVE identity per coldkey, funded
 locks and known-owner caps bound exposure; they do not reveal every Sybil owner.
 
+An application that holds no stake and can no longer progress does not keep its place.
+An `APPLIED` row is dead once more than `challenge_rounds` rounds have passed since its
+seed (`join` sets it one round after the join): `challenge` then refuses it for ever. At
+the start of every `join` the service suspends each dead row that has no locked unit and no
+lock waiting in the outbox, with reason `APPLIED_EXPIRED`. The row, its transitions and its
+spent hotkey stay; the pending place and the coldkey are released, so the miner may apply
+again with a new hotkey. Only `APPLIED_EXPIRED` rows are ignored by the one-non-`ACTIVE`-row
+rule; every other non-`ACTIVE` row still blocks its coldkey. A funded row is never touched.
+
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
 rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
 refused (`CHALLENGE_EXPIRED`) once more than `challenge_rounds` rounds have passed since

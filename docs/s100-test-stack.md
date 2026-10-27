@@ -238,8 +238,10 @@ That gives 3 ACTIVE and 1 PROBATION. Rules that decide how identities are spent:
 - **One non-ACTIVE identity per coldkey** (`COLDKEY_PROBATION_EXISTS`). A coldkey funds a second
   hotkey only after its first one is ACTIVE.
 - **The first challenge is due 100 rounds (5 min) after the join.** An identity that misses it
-  stays APPLIED and blocks its coldkey for good (`admission.py` `challenge`). This is why `admit`
-  joins a miner only when its turn starts.
+  can no longer progress (`admission.py` `challenge`). If it holds no stake, the next `join`
+  suspends it as `APPLIED_EXPIRED` and its coldkey may apply again with a new hotkey (ADR 0010);
+  a funded one stays APPLIED and blocks its coldkey. This is why `admit` joins a miner only
+  when its turn starts.
 
 A round opens on a roster of four funded, eligible miners with at most one in PROBATION. The
 operator opens it, the miners upload, and the operator settles it. The operator runs
