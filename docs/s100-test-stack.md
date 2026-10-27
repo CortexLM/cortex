@@ -456,9 +456,12 @@ reach a round: no `run-v2`, no audit, no `get_weights`.
 - **Cold CUDA start.** Each fresh container pays 25-45 s of CPU for the first use of the CUDA kernels
   (on A: first fp32 matmul 6 s, bf16 matmul 10 s, AdamW 5 s; the second process of the same container
   takes 0.7-2 s). The cache lives in `/root/.nv` of the container. S13 kept it with a wrapper in the
-  `docker` field of `cuda-executor.json` that adds only `-v <host dir>:/root/.nv` to `docker run`; the
-  config is read once, so a change needs `docker restart hypertrain-test-challenge` between two trials.
-  The executor has no option for it yet.
+  `docker` field of `cuda-executor.json` that added only `-v <host dir>:/root/.nv` to `docker run`.
+  The executor now does this itself (`compute_cache`, default on, ADR 0012): one directory per image
+  digest under `~/.cortex-cuda-executor/compute-cache` of the ssh user, mounted with `--mount`. **Remove
+  the wrapper** from the `docker` field (`["sudo","-n","docker"]` again): with both, the container would
+  get two mounts on `/root/.nv`. The first reference after a new image digest is still cold (43-64 s):
+  run it alone, before a second driver starts.
 - **The reference holds the store lock**, so the beacon pusher times out meanwhile and every trial
   waits for it to catch up (503 "beacon infrastructure paused" for 10-70 s). A second driver or a
   second executor host does not shorten the references; two drivers only overlap the miner side.

@@ -16,10 +16,10 @@ other option; the two are mutually exclusive.
   driver with `nvidia-smi`, Docker with the NVIDIA runtime, a POSIX login shell, a clock within a
   few seconds of the challenge's.
 - No Python, no checkout, no listening port. The challenge pulls
-  `image_repository@<manifest reference_spec.image_digest>` if it is absent (the only thing that
-  stays on the host is that image) and runs it with `docker run --rm`. Inputs go in on the SSH
-  standard input and the rank artifacts come back on the standard output; no file is written on
-  the host outside the container.
+  `image_repository@<manifest reference_spec.image_digest>` if it is absent and runs it with
+  `docker run --rm`. Inputs go in on the SSH standard input and the rank artifacts come back on
+  the standard output; no job file is written on the host. What stays on the host is that image
+  and one compute cache directory per image digest ([below](#compute-cache)).
 - On shared hosts (Lium) never use the `executor-*` containers; the executor only touches
   containers named `ht-exec-<16 hex>`. It takes the `n_gpus` idle GPUs with the lowest UUIDs (no
   compute app on them and at most `idle_gpu_memory_mib` used) and treats the host as busy
@@ -37,8 +37,9 @@ reads it from `HYPERTRAIN_CUDA_EXECUTOR` on first use; a missing or invalid file
 | `run_id` | The one run whose CUDA jobs are served. A CUDA job of another run raises before any SSH call. CPU jobs (any run) still run in-process. |
 | `image_repository` | Repository part of the image reference; the digest always comes from the signed manifest. |
 | `state_dir` | Journal (`journal.jsonl`) and remote stderr logs (`logs/`), mode 0700. Evidence only. |
-| `hosts[]` | `label` (unique), `address`, `port`, `user`, `identity_file`, `known_hosts_file`, `docker` (argv prefix, default `["docker"]`). 1 to 8 hosts. |
+| `hosts[]` | `label` (unique), `address`, `port`, `user`, `identity_file`, `known_hosts_file`, `docker` (argv prefix, default `["docker"]`), `compute_cache_dir` (optional absolute root of the cache on that host). 1 to 8 hosts. |
 | `network` | `default`, or `none` for `--network none`. Whether a multi-rank torchrun starts under `none` is unverified; keep `default` until a GPU run shows otherwise. |
+| `compute_cache` | `true` (default): bind-mount a persistent CUDA compute cache into every container ([below](#compute-cache)). `false`: no mount, the ADR 0008 command. |
 | `max_attempts`, `sweeps`, `sweep_pause_seconds` | Container runs per job (default 3), passes over the host list (3) and the pause between passes (15 s). |
 | `idle_gpu_memory_mib`, `max_clock_skew_seconds` | Idle threshold per GPU (2048 MiB) and the largest accepted difference between host and challenge clocks (5 s). |
 | `max_result_bytes`, `pull_timeout_seconds`, `ssh_connect_timeout_seconds` | Result size cap (16 GiB), image pull bound, SSH connect bound. |
@@ -52,6 +53,34 @@ yourself; there is no trust on first use, so a replaced machine fails the key ch
 ssh-keyscan -p 22 -t ed25519 <host> > known_hosts.<label>   # then compare the fingerprint
 ssh-keygen -lf known_hosts.<label>                          # with the provider's console
 ```
+
+## Compute cache
+
+A fresh `--rm` container pays 25-45 s of CPU for the first use of the CUDA kernels; the driver's
+compute cache (`/root/.nv` in the image, which runs as root) removes most of it. S13 measured a
+reference at 57-64 s without a persistent cache and 12-19 s with one, on a B300 host, through a
+`docker` wrapper that added the mount (the first reference after a new image still took 43 s). The
+executor now does it by default ([ADR 0012](../../docs/adr/0012-executor-performance.md)):
+
+- Before each container it runs, as the ssh user and never through `sudo`, `mkdir -p` and
+  `chmod 0700` on `<root>/<first 32 hex of the manifest image digest>` and reads back the path. The
+  root is `$HOME/.cortex-cuda-executor/compute-cache`, or `hosts[].compute_cache_dir`, an
+  absolute path of letters, digits and `._-` only (use it when the home directory is small, or its
+  path holds a space or a comma; `/mnt/nvme/...` on Lium hosts). A report that is not the path asked
+  for fails the attempt. The call is remembered per host and image until an attempt fails.
+- The container gets exactly one more flag, `--mount type=bind,src=<that directory>,dst=/root/.nv`
+  (`--mount`, because `-v` would create a missing source as root). Nothing else changes: no
+  `--privileged`, no capability, no device, no `-e`.
+- One directory per image digest, so a cache made by another image never serves this one. A new
+  image pays one cold start. The driver bounds each directory (`CUDA_CACHE_MAXSIZE`, default set by
+  the driver, not by the executor).
+- `role-dispatch.json` records `compute_cache: true|false` and the journal's `exec_attempt` the same,
+  so "did a persistent cache serve this result" has an answer. The cache holds binaries the driver
+  built; whether it can change a result is not proven (S13's 28 matches ran with and without it).
+- Removal is the operator's: the files are root's, so `sudo rm -rf ~/.cortex-cuda-executor`
+  (or the named root). `compute_cache: false` restores the previous command exactly.
+- Nothing below ran on a GPU in this repository's tests: they model the mount and the warm/cold
+  difference on the fake host.
 
 ## What a job produces
 

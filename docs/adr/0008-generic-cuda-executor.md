@@ -5,6 +5,10 @@
   and no code in this batch was run on a GPU host (see "Not verified").
 - Order: Principal SN100 D26, brief `v3-cuda-executor`. Founder rule of 2026-10-26: rented or
   listed machines are never servers; the challenge stays on the operator host.
+- Amended by [ADR 0012](0012-executor-performance.md) (2026-10-27): the "Container" and "Data in and
+  out" rows below now carry one exception, a bind mount of the executor's own compute cache directory
+  at `/root/.nv` (one directory per image digest, created by the executor, `compute_cache: false`
+  restores the text as written).
 - Labels: **[V]** verified in code or by a command on the date above, **[A]** reported by a
   cited document or session, **[H]** hypothesis, **[?]** unknown.
 
