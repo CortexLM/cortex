@@ -20,6 +20,7 @@
 2. AUD-01: audit liveness (lease expiry, executor failure, exhaustion).
 3. DET-01, DET-01b: process-environment pin of island workers.
 4. QUAL-01, QUAL-02: host and image binding of the CUDA qualification.
+5. AUD-06: a roster member that never commits.
 
 ## Part 1: disputes that nobody can decide (DSP-01)
 
@@ -508,3 +509,127 @@ breaker bounds the attempt-based one).
 - Lens red team B report 2.1 to 2.3, `rtB_qualification_relabel.py`, `rtB_executor_host_attacks.py`, 2026-10-27 [A].
 - Adversarial review of the first QUAL-01 design, 2026-10-27 [A].
 - `docs/adr/0001`, `0007-sm-counts-per-arch.md`, `0008-generic-cuda-executor.md`.
+
+## Part 5: a roster member that never commits (AUD-06)
+
+- Lens red team B finding AUD-06 (IMPORTANT, documented in ADR 0002) with Principal D38 quater.
+  Nothing in this part changes a manifest, a policy, a wire format, a protocol constant, an economic
+  parameter or a run id. `implementation_hash` changes (owned names). Sanction S0 and the reward rule
+  below await Principal sign-off.
+- Sources, 2026-10-27: Lens red team B report 1.4; ADR 0002 (context rows, decisions 5 to 7, I5); the
+  code at `65be1962`; throwaway tests and 5-identity runs on a scratch copy of `hypertrain/` with the
+  fix applied; the adversarial review of the design.
+
+### Context
+
+- `schedule_audits_v2` reads the commit of every roster member and a missing one raises 409
+  `missing accepted commit` for the whole round (`challenge/store.py:6385-6387`, raised by
+  `_record_v2` at `:2151-2161`). No audit job exists for anyone and nothing times out. [V]
+  Base tree, 5 roster entries and 4 commits: 409 at `d_audit` and again 500 rounds past
+  `d_final`, no lease, finality `PENDING` with `unresolved_audits = 5`, no `excluded` record. In a
+  real 5-identity round the `audits` call answers the same 409. [V]
+- The absence is final at `d_commit`. `training_v2` takes accept and commit only for
+  `d_assign <= now < d_commit` (`:6161-6162`), delta only for `now < d_upload` (`:6163`), and
+  `RoundOpenV2` orders `d_commit < d_audit` strictly (`protocol/messages_v2.py:330-334`). [V]
+- Kind `excluded` has one reader, `verified_inputs_v2`, and only for presence (`:7873-7879`; the
+  operator tool mirrors it, `scripts/ops/live_operator.py:242-255`). `finalize_v2` pays the members
+  that function returns, split by tokens (`:8292`, `:8342-8351`). `settle` refuses only
+  disposition `EXCLUDED`, unresolved audits or disputes (`challenge/finality_v2.py:68-79`). An
+  `UNVERIFIED` verdict already drops one member and leaves the disposition alone (`:7600-7606`). [V]
+- A round needs four members whose caps carry Q. `TapeBodyV2.inputs` has `min_length=4`
+  (`aggregator/tape_v2.py:88`), a member is capped at Q/4 (`protocol/messages_v2.py:638`) and all
+  probation members together at Q/4. Three survivors raise `InsufficientEligibleWeight`. [V]
+- A member needs its own anchor of round `w-1` to be rostered at `w` (`:5155`, `:6069-6071`).
+  Anchors come from genesis (`:5205`), from a `MATCH` audit (`:7318-7328`) and from rollback
+  (`:9157`). A member left out before its audit never re-enters this run (measured: 409
+  `missing accepted anchor`); one left out after a `MATCH` audit does (measured: round 1 opens). [V]
+- The audit step has a window. `schedule_audits_v2` answers 503 `audit absolute horizon exhausted`
+  when `absolute <= now + 1`, with `absolute = min(d_final, d_audit + 2 * lease_rounds)`
+  (`:6396-6398`). A first call at `d_final - 1` gets that 503 for a full honest roster too
+  (measured), because no job can be created. The operated shape keeps
+  `d_final - d_audit <= lease_rounds` (`live_operator.py:123-134`). [V]
+- Without leaves, `lease_v2` raises 409 at the first queued job (`:6593`) and never skips it, so
+  the honest jobs behind it wait until `absolute`, when every queued job is exhausted. [V]
+- ADR 0002: a verified leave, a lapse and a stall are never penalised, because a lapse cannot be
+  told from an honest failure; only a failed audit penalises (decisions 5 to 7, I5). v2 has no
+  leave message, so an honest eviction and a deliberate no-show look the same. [A]
+
+### Decision
+
+1. **When.** A roster member with no accepted `commit` for round `w` is a no-show. Grace: none,
+   because intake closed at `d_commit`. The delay is the commit window the operator already
+   chose in `RoundOpenV2`; no constant is added.
+2. **Trigger: lazy.** The first `audits` call (`POST /v2/runs/{id}/admin/rounds/{w}/audits`) with
+   `d_audit <= now <= absolute - 2` leaves the absent members out, in the transaction that creates
+   the jobs of the others. A call outside the window answers 503 for every roster and writes
+   nothing. An eager trigger in `push_beacon` was weighed and not taken: it cannot revive a round
+   whose jobs can no longer be created, and it adds a writer to the beacon route.
+3. **Record.** `excluded` / `{w}:{hotkey}` = `{reason: "NO_SHOW", stage, evidence_hash}` with
+   `stage` in `commit`, `delta` and `evidence_hash = sha256("ht-no-show/1|run|w|hotkey|stage")`.
+   The tape `Exclusion.reason` literal (`tape_v2.py:74`) is not touched.
+4. **The rest of the round.** `unresolved_audits` drops once per absent member and the disposition
+   stays `PENDING`: the others are audited, aggregated and finalized by existing code. The absent
+   share goes to them by the existing token rule (measured: 5 x 200000 becomes 4 x 250000).
+5. **Per-round budget.** A probe (`allocate_weights` over the remaining members) refuses with 409
+   `ROUND_INFEASIBLE`, persisting nothing, when scheduling and when aggregating. `NO_SHOW`,
+   `UNVERIFIED` and `INFRASTRUCTURE` exclusions of one round together must leave members whose
+   caps carry Q: four equal members, fewer once probation or owner-group caps bind.
+6. **Sanction S0.** None: no admission, strike, bond or ledger effect. The member loses that
+   round's reward and, if it was left out before its audit, its place in the run. It is not
+   suspended or struck. This is ADR 0002's rule for an eviction, applied to a member that cannot
+   be told from one.
+7. **Delta stage.** `aggregate_v2` leaves out a member that passed its audit and has no delta once
+   `now >= d_upload`. No decrement: its audit already did it. The member keeps its anchor.
+8. **Leaves stage.** `lease_v2` skips a queued job whose member has no `leaves` record. The job
+   stays queued until `absolute`; its exhaustion is AUD-01's. Naming that exhaustion `NO_SHOW`
+   is a separate, droppable step that awaits Forge.
+9. **Not solved here.** Survivors that cannot carry the round (the run stays blocked, explicitly);
+   rejoin of a member left out (Q3); a rollback whose history holds such a round; tapes that name
+   the exclusion; a round whose audit window was missed (no exit for any roster).
+
+### Consequences
+
+- A 5-member round with one absent member settles with four, pays them, and opens `w+2`. [V:
+  real round 0 settled, round 1 settled, round 2 opened; the silent member's admission row is
+  unchanged.] Six members with two absent: store level only. [H for the real round]
+- The same machinery serves any member left out before aggregation: this real round also
+  exercises the `verified_inputs_v2` skip that Part 2's drops rely on. [V]
+- A 4-member roster cannot lose anyone: `ROUND_INFEASIBLE`, no worse than before. The TEST
+  runbook opens rounds on four miners; it must ask for five when an eviction is plausible.
+- A member that commits but never uploads its delta no longer freezes the round at aggregate
+  (before: 409 `missing accepted delta` after `d_upload`, with all audits `MATCH`). [V]
+- The composite case (a `NO_SHOW` and a later `UNVERIFIED` leaving fewer than four) now answers
+  409 `ROUND_INFEASIBLE` at aggregate instead of a bare `InsufficientEligibleWeight`; the round
+  stays `PENDING` and the run blocked. No void-round lineage exists. [V for the delta variant, H
+  for the composite]
+- Any later rollback whose bounded history holds a round with a pre-apply exclusion fails closed
+  (`aggregator/rollback_v2.py:455-458`: tape inputs must cover the opening roster). This already
+  holds after `UNVERIFIED` and `INFRASTRUCTURE`; one idle identity can now cause it. [V by reading]
+- Beacon lag then burst across the commit window excludes members that could not get in (503
+  while lagging, then 409 closed). They are not sanctioned and lose the round. D40's own case, a
+  trial across a pause, is outside this part.
+- P1 (elastic shards) stays the real fix for eviction; this is the v2 floor and changes no wire.
+
+### Rejected alternatives
+
+1. **Whole-round `EXCLUDED` for a no-show:** voids the honest members' reward (`settle` refuses it,
+   `finality_v2.py:74`) and does not resume.
+2. **A signed amended opening without the absent member:** changes `roster_hash`, the slot
+   assignment and the wire; every member would retrain.
+3. **A synthetic `MISMATCH` for the absent member:** invents a verdict with no commit to compare.
+4. **Commit grace beyond `d_commit`:** intake is closed there; a protocol decision, not a constant.
+5. **`admission.suspend`, a strike, a per-coldkey budget:** `resume` has no caller in `src` except
+   after a dispute, `strikes` means a failed proof, and a budget needs new policy fields that
+   change the run ID. The `NO_SHOW` records are the evidence a later budget would count.
+6. **Eager exclusion from `push_beacon`:** see Decision 2.
+7. **Writing in `verified_inputs_v2`:** a read function used by aggregate and finalize.
+8. **A void or null round when the survivors are too few:** needs lineage design (`applied[w]` opens
+   `w+1`, survivors need anchors, rollback assumes one tape per round).
+
+### Not verified
+
+- Six members with two absent end to end; the composite case; a beacon lag then burst; CUDA; the
+  service path (roster over 16 or a service-admission record), which still ends in the heavy 503.
+- A leaves-less job whose member posts leaves after `absolute`; the NO_SHOW naming of leaves
+  exhaustion (needs AUD-01's code, absent from this tree).
+- The `implementation_hash` of the final tree and a rollback after a `NO_SHOW` round (reading only).
