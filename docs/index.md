@@ -25,6 +25,7 @@ Start here: [Cortex ecosystem](ecosystem.md) and [Validator quickstart](validato
 - [Hypertrain import provenance](provenance/hypertrain-import.md): commit map, byte-identity and `git log --follow` checks.
 - [Hypertrain](../hypertrain/README.md): the imported project, with its own documentation in `hypertrain/docs/`.
 - [B300 host run](b300-run.md): `run_host.sh` on an AWS p6-b300 host: steps, exit codes, results, auto-stop and the two-host comparison.
+- [s100 TEST stack](s100-test-stack.md): swap the TEST challenge image, TEST auditors, a CPU TEST run mined from a remote host, rollback, and the CPU-capability pin.
 
 ## Run a validator
 
