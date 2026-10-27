@@ -338,7 +338,7 @@ def test_the_li_profile_is_not_left_loaded_for_the_rest_of_the_session() -> None
     assert settings.get_current_profile_name() != "li"
 
 
-FINDING_ID = re.compile(r"[A-Z]{2,4}(-[A-Z]?[0-9A-Za-z]+)+")
+FINDING_ID = re.compile(r"[A-Z][A-Z0-9]{1,3}(-[A-Z]?[0-9A-Za-z]+)+")
 FORBIDDEN_MARKS = frozenset({"skip", "skipif", "od", "gpu", "cloudflare"})
 FORBIDDEN_CALLS = frozenset({"skip", "importorskip", "xfail"})
 CLOCKS = frozenset({"perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns", "process_time"})
