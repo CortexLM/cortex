@@ -607,6 +607,22 @@ def hash_under(pin: EnvPin) -> str:
     return ChallengeStore._service_implementation_v2(SOURCE, store_paths(), pin)
 
 
+def test_source_binding_covers_the_environment_the_capacity_worker_runs_under():
+    # Given: the hash of the capacity implementation, and the AST of the store.
+    import unittest.mock
+
+    original = hash_under(TEST_PIN)
+    tree = ast.parse(STORE.read_text())
+    node = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_capacity_env_v2"
+    )
+    # When: the function that builds that environment changes.
+    node.body.append(ast.Pass())
+    # Then: the bound implementation changes.
+    with unittest.mock.patch("hypertrain.challenge.store.ast.parse", return_value=tree):
+        assert hash_under(TEST_PIN) != original
+
+
 def test_implementation_hash_differs_for_every_class_pin():
     # Given: every CPU class, GPU class and attention backend the tables admit.
     by_combination = {

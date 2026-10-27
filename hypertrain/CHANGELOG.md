@@ -90,6 +90,9 @@
   The CPU service profile's `implementation_hash` covers the manifest's whole pin body and the files
   `protocol/env_pins.py` and `trainer/determinism.py` (twelve files; `_service_implementation_v2`
   takes the `EnvPin`), so it differs per pin and an installed profile no longer matches.
+  The capacity workers (genesis and outer step) are started under the manifest's pin
+  (`ChallengeStore._capacity_env_v2`), the genesis attestation must show that same environment, and
+  `python -m hypertrain.aggregator.capacity_worker` refuses a process that does not honor the pin.
 
 ### Changed
 - A challenge poll after the deadline no longer suspends a miner whose proof was accepted

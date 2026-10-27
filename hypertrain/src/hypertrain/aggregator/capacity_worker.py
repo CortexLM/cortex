@@ -405,6 +405,13 @@ def execute(directory: Path) -> None:
         _execute(root_fd)
 
 
+def _require_pin(manifest: RunManifestV2) -> None:
+    """Refuse to compute under an environment other than the manifest's pin, before any torch op."""
+    from hypertrain.trainer.determinism import apply_reference_env
+
+    apply_reference_env(manifest.training.reference_spec.env.model_dump())
+
+
 def _execute(root_fd: int) -> None:
     import hypertrain.trainer  # noqa: F401
     from hypertrain.aggregator.core import OuterState, load_state
@@ -418,9 +425,11 @@ def _execute(root_fd: int) -> None:
         request_genesis = GenesisRequest.model_validate(parsed)
         if canonicalize(request_genesis.body()) != raw:
             raise ValueError("noncanonical genesis request")
+        _require_pin(request_genesis.manifest)
         _genesis(root_fd, request_genesis)
         return
     request = OuterRequest.parse(raw)
+    _require_pin(request.manifest)
     config = TrainConfig.from_manifest_v2(request.manifest)
     shapes = param_shapes(config.model)
     deltas = {x.commit.delta_hash for x in request.inputs}

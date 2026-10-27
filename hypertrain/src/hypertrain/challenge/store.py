@@ -4478,6 +4478,7 @@ class ChallengeStore:
             "training_v2",
             "verified_inputs_v2",
             "aggregate_v2",
+            "_capacity_env_v2",
             "_capacity_outer_v2",
             "_prepare_capacity_genesis_v2",
             "island_job_v2",
@@ -4774,12 +4775,7 @@ class ChallengeStore:
             directory / "runtime",
             deadline,
             capacity,
-            env=dict(
-                PATH=os.defpath,
-                OMP_NUM_THREADS="1",
-                MKL_NUM_THREADS="1",
-                CUBLAS_WORKSPACE_CONFIG=":4096:8",
-            ),
+            env=self._capacity_env_v2(manifest, {"PATH": os.defpath}),
             cancel=cancel,
         )
         result, objects = collect_genesis(directory, request)
@@ -5116,13 +5112,7 @@ class ChallengeStore:
                         "hypertrain.aggregator.capacity_worker",
                         str(directory.absolute()),
                     ]
-                    or execution["env"]
-                    != {
-                        "PATH": os.defpath,
-                        "OMP_NUM_THREADS": "1",
-                        "MKL_NUM_THREADS": "1",
-                        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-                    }
+                    or execution["env"] != self._capacity_env_v2(manifest, {"PATH": os.defpath})
                     or kernel["memory.max"] != str(1 << 30)
                     or kernel["memory.swap.max"] != "0"
                     or kernel["cpu.max"] != "50000 100000"
@@ -8580,6 +8570,23 @@ class ChallengeStore:
             )
         return works
 
+    @staticmethod
+    def _capacity_env_v2(manifest: RunManifestV2, base: Mapping[str, str]) -> dict[str, str]:
+        """The one environment a capacity worker runs under and its attestation must show.
+
+        ATen, MKL and oneDNN read their variables at first use, so the worker has them from its
+        first instruction or refuses (``apply_reference_env``): the manifest's pin is applied
+        over ``base`` and the fixed thread and cuBLAS keys.
+        """
+        from hypertrain.protocol.env_pins import pinned_environ
+
+        fixed = {
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+        }
+        return pinned_environ({**base, **fixed}, manifest.training.reference_spec.env.pin())
+
     def _capacity_outer_v2(self, run_id: str, w: int) -> dict[str, Any]:
         """Internal bounded adapter; public heavy gate remains independently closed."""
         import os
@@ -8667,9 +8674,7 @@ class ChallengeStore:
                 run_id, w, "outer", 1, kind="outer", units=int(resource["outer_work_units"])
             ),
         )
-        env = dict(
-            os.environ, OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", CUBLAS_WORKSPACE_CONFIG=":4096:8"
-        )
+        env = self._capacity_env_v2(manifest, os.environ)
         run_capacity_argv(
             [
                 sys.executable,

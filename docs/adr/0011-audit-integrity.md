@@ -422,6 +422,22 @@ breaker bounds the attempt-based one).
     `test_the_three_lists_of_hashed_files_agree_and_name_the_pin_files` reads all three by AST and
     fails on any difference. The fixture's pin is a digest of reviewed code computed without a
     manifest, so it carries the file list but not the `env_pin` term. [V]
+15. **The capacity workers run under the pin.** `ChallengeStore._capacity_env_v2(manifest, base)` builds
+    the one environment of the genesis and the outer worker: `base` (genesis: `PATH` only; outer: the
+    server's `os.environ`), the fixed `OMP_NUM_THREADS`, `MKL_NUM_THREADS` and `CUBLAS_WORKSPACE_CONFIG`,
+    then the manifest's pin (`pinned_environ`: present set, absent removed). `_prepare_capacity_genesis_v2`
+    and `_capacity_outer_v2` hand it to `run_capacity_argv`, and `open_round_v2` compares the `env` of
+    the execution record with the same function, so a genesis attested under another environment is
+    refused (`SERVICE_PROTECTED_OPEN_RUNTIME`). The worker's entry point calls `apply_reference_env` on
+    the manifest of its request, genesis and outer alike, before any tensor operation, so a worker
+    started without the pin exits non-zero naming the variables. Before, the master's own computation
+    (`decompress`, the outer step) ran under whatever capability the host resolved, while the island
+    ranks it replays were pinned; `compress`/`decompress` bytes differ under
+    `ATEN_CPU_CAPABILITY=default` (Context). `_capacity_env_v2` is an owned name of
+    `implementation_hash`. The hermetic tests cover the three environments handed over and compared
+    and the refusal of a bare worker; the `systemd_manager` tests were not run (the host denies
+    transient units) and still build their own environment from `os.environ`, which the test process
+    pins. [V by those tests; the transient-unit path is not run]
 
 ### Consequences
 
