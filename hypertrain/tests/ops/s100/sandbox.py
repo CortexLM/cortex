@@ -11,6 +11,7 @@ on s100. The sandbox runs a COPY with only those path prefixes rewritten into a 
   replaced by the later file; a service is valid once merged. A recreated container gets the
   image environment overlaid with the merged `environment`. The flag `merge_patch` stands for a
   compose that resolves two files differently from each alone: it is merged over the result.
+  A container is found by its name, where compose finds it by project and service labels.
 - `curl`: a URL map (urls.json) for the master gate and the challenge API; unknown URLs fail.
 - `python3`: the real interpreter, with `datetime.now` frozen for the seal-window code.
 - `sleep` (no-op), `install` (without -o/-g, which need root), and tripwires for exactly these

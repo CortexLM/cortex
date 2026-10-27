@@ -208,19 +208,22 @@ def test_the_executor_commands_refuse_a_live_compose_naming_a_container_outside_
     assert before["override"] is not None
     out = box.run(*call(cmd, backup), rc=4).out
     assert f"REFUSED {box.f}: {refusal}" in out
-    assert box.snapshot() == before  # no file written or removed, the override still in place
+    assert box.snapshot() == before  # no live file written or removed, the override in place
 
 
-def test_executor_off_refuses_a_live_compose_that_does_not_parse(box, backup):
+@pytest.mark.parametrize("cmd", ["executor", "executor-off"])
+def test_the_executor_commands_refuse_a_live_compose_that_does_not_parse(box, backup, cmd):
     box.run(*call("executor", backup), mutates={CHALLENGE})
     box.f.write_text("services:\n  challenge: [unclosed\n")
     before = box.snapshot()
-    box.run("executor-off", backup, rc=4)
+    box.run(*call(cmd, backup), rc=4)
     assert box.snapshot() == before
 
 
 def test_executor_refuses_when_only_the_merged_config_names_another_container(box, backup):
-    # the live file is fine; the fake compose resolves it together with the override differently
+    # the live file is fine. No override this script writes can make compose resolve another name,
+    # so merge_patch stands in for a compose or a template that does: without the guard the diff
+    # check still refuses, with exit 5 and without naming the container
     box.docker(merge_patch={"challenge": {"container_name": "cortex-challenge-hypertrain"}})
     before = box.snapshot()
     out = box.run(*call("executor", backup), rc=4).out
