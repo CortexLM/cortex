@@ -5169,6 +5169,8 @@ class ChallengeStore:
                     raise ChallengeError(403, "roster lacks current funded admission authority")
                 if entry.eligible_weight != 4194304:
                     raise ChallengeError(422, "live eligible ceiling must be Q/4")
+                if r.screen_until < body.d_final:
+                    raise ChallengeError(403, "roster screen ends before the round's audit window")
                 if body.w == 0:
                     anchor = cache.genesis(manifest, entry.hotkey, theta)
                 else:

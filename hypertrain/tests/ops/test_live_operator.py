@@ -131,6 +131,45 @@ def test_cli_open_with_an_auditable_window_reaches_the_master(
     assert master_calls == [("GET", "")]
 
 
+@pytest.mark.parametrize(("margin", "refused"), [(-1, True), (0, False)], ids=["short", "exact"])
+def test_open_refuses_a_hotkey_whose_screen_ends_before_the_round_does(
+    master_args: list[str], monkeypatch: pytest.MonkeyPatch, margin: int, refused: bool
+) -> None:
+    # Given: one eligible hotkey whose screen ends `margin` rounds from the d_final of the opening.
+    now, offsets, hotkey = 1000, window(98), Keypair(b"\x01" * 32).ss58
+    d_final = now + offsets[5]
+    state = Path(master_args[5])
+    relays = json.loads((state.parent / "inputs" / "relays.json").read_text())
+    with closing(sqlite3.connect(state / "challenge.db")) as db, db:
+        db.execute(
+            "INSERT INTO records_v2 VALUES(?,?,?,?)",
+            (master_args[3], "registry", "current", json.dumps({"body": relays})),
+        )
+
+    def call(self: Any, method: str, path: str, body: object = None, admin: bool = False) -> Any:
+        if (method, path) == ("GET", ""):
+            return {"now_round": now}
+        if (method, path) == ("GET", "/admission/" + hotkey):
+            record = {
+                "admission_id": sha256_hex(b"admission"),
+                "coldkey": "cold0",
+                "state": "ACTIVE",
+                "screen_until": d_final + margin,
+            }
+            return {"eligible": True, "record": record}
+        raise Reached
+
+    monkeypatch.setattr(live_operator.Master, "call", call)
+    args = [*open_args(master_args, 98)]
+    args[args.index("--hotkey") + 1] = hotkey
+    # When / Then: the short screen is refused by name; the exact one gets as far as the master.
+    with pytest.raises(SystemExit if refused else Reached) as raised:
+        live_operator.main(args)
+    if refused:
+        message = f"screen of {hotkey} ends at round {d_final - 1}, before d_final {d_final}"
+        assert message in str(raised.value)
+
+
 def test_finalize_lists_the_members_the_aggregate_step_left_out(
     master_args: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

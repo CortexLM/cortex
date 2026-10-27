@@ -499,6 +499,13 @@ rostered, one unfit member makes `aggregate` answer 409 `ROUND_INFEASIBLE` and w
 and the round aggregates as soon as the member is eligible again. Call `aggregate` before
 `d_final`: the later the call, the more screens have ended.
 
+A round opens only with members whose screen covers it. `open` answers 403 "roster screen ends
+before the round's audit window" for an entry whose `screen_until` is before the round's
+`d_final`; an entry whose screen ends exactly at `d_final` is accepted, since a member is eligible
+while `now <= screen_until`. A screen cannot be renewed by waiting, so a lapse inside the window
+used to be a free way out of a round. `scripts/ops/live_operator.py open` refuses the same entry
+by name before it sends anything.
+
 Regional relays are transport/cache only, not regional arithmetic aggregators.
 An upload opportunity acknowledgment is not custody. Completion failure requires
 an exact complete receipt or full original chunk coverage, authenticated healthy

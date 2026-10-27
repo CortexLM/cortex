@@ -158,6 +158,11 @@
   cannot carry answers 409 `ROUND_INFEASIBLE` and writes nothing. The new helpers join the owned
   set of `implementation_hash`, which changes. See `docs/adr/0011-audit-integrity.md` (Part 8,
   decision 22) at the monorepo root.
+- A round opens only with roster members whose screen covers it: `open` answers 403 "roster
+  screen ends before the round's audit window" for an entry whose `screen_until` is before the
+  round's `d_final` (equal is accepted), and `scripts/ops/live_operator.py open` refuses the same
+  entry by name. `open_round_v2` is an owned function: `implementation_hash` changes. See
+  `docs/adr/0011-audit-integrity.md` (Part 8, decision 21) at the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

@@ -1083,7 +1083,7 @@ the table as covering them.
     closed (a round without a finality record counts as open). A contest of a verdict whose audit result
     is MATCH is refused with 409 `NOTHING_TO_CONTEST` by the store's `contest_of` callback, so
     `disputes_v2.py` is not touched; a MISMATCH can still be contested. `open_round_v2` refuses an entry whose
-    `screen_until` is before `d_final`.
+    `screen_until` is before `d_final` (403; equal is accepted), and `live_operator open` refuses it by name.
 22. `aggregate_v2` first leaves out, with `excluded {reason: INELIGIBLE, stage: aggregate, cause}`, every
     audited member whose admission no longer qualifies (`ROTATED`, `BANNED`, `SUSPENDED`, `NOT_LIVE`,
     `SCREEN_LAPSED`, `UNFUNDED`; a member is rotated when its hotkey no longer names an admission, and a

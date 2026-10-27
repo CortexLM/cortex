@@ -140,3 +140,17 @@ def test_four_members_cannot_lose_one_but_the_round_waits_for_it(n):
     # ... so the round resumes as soon as the member is eligible again.
     set_screen(n, four[3].ss58, 10**9)
     assert aggregate(n).status_code == 200
+
+
+@pytest.mark.parametrize(("margin", "refused"), [(-1, True), (0, False)], ids=["short", "exact"])
+def test_a_roster_entry_must_keep_its_screen_until_the_round_ends(n, margin, refused):
+    # Given: the screen of one member ends `margin` rounds from the d_final of the opening below
+    # (execute_round opens with d_final = now + 200).
+    set_screen(n, fixtures.HOT[4].ss58, n.now + 200 + margin)
+    # When / Then: a screen that ends before the round's audit window does is refused at open;
+    # one that ends exactly at d_final is accepted (eligible is `now <= screen_until`).
+    if refused:
+        with pytest.raises(AssertionError, match="roster screen ends before the round's audit"):
+            rollback.execute_round(n, 0, open_only=True)
+    else:
+        assert rollback.execute_round(n, 0, open_only=True).status_code == 200

@@ -304,8 +304,9 @@ That gives 3 ACTIVE and 1 PROBATION. Rules that decide how identities are spent:
   a funded one stays APPLIED and blocks its coldkey. This is why `admit` joins a miner only
   when its turn starts.
 
-A round opens on a roster of four funded, eligible miners with at most one in PROBATION. The
-operator opens it, the miners upload, and the operator settles it. Open it with five when an
+A round opens on a roster of four funded, eligible miners with at most one in PROBATION, each with
+a screen that lasts to the round's `d_final` (`open` refuses a hotkey whose screen ends earlier and
+names the round). The operator opens it, the miners upload, and the operator settles it. Open it with five when an
 eviction is plausible: a miner that never commits is left out (`excluded`, reason `NO_SHOW`) and
 the others are audited and paid, while four miners cannot lose anyone (`audits` answers 409
 `ROUND_INFEASIBLE`). `finalize` lists the roster minus the `excluded` records, read after the
