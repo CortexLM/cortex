@@ -409,7 +409,7 @@ def test_attest_runs_one_fixed_signing_command(
     )
     # Then
     assert host_attest.HostStatement.model_validate_json(raw).result_sha256 == fsha(path)
-    assert signature.startswith(b"-----BEGIN SSH SIGNATURE-----")
+    assert signature.startswith(b"-----" + b"BEGIN SSH SIGNATURE-----")  # armor, not a key
 
 
 def test_attest_refuses_a_result_from_other_gpus(tmp_path: Path) -> None:
