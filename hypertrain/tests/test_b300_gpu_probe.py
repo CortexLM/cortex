@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -15,7 +17,8 @@ assert spec is not None and spec.loader is not None
 gpu_probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gpu_probe)  # imports hypertrain.trainer before torch
 torch = gpu_probe.torch
-import hypertrain.trainer.attention as attn  # noqa: E402  (after gpu_probe: determinism before torch)
+import hypertrain.models.kimi_tiny as kt  # noqa: E402  (after gpu_probe: determinism before torch)
+import hypertrain.trainer.attention as attn  # noqa: E402
 
 
 def test_cpu_smoke_is_bitwise_stable_and_one_flipped_digest_fails():
@@ -93,3 +96,36 @@ def test_a_kernel_error_is_recorded_under_the_selected_backend(
     out = gpu_probe.workload(torch.device("cpu"))
     assert out["sdpa-flash"] == "error: no kernel image is available"
     assert not any(k.startswith(("math", "sdpa-flash_")) for k in out)
+
+
+KIMI_ROOTS = ("leaves_root", "delta_hash", "state_root")
+
+
+def test_the_kimi_micro_roots_join_the_digests_and_a_flipped_one_is_a_mismatch() -> None:
+    cpu = torch.device("cpu")
+    first, second = gpu_probe.workload(cpu), gpu_probe.workload(cpu)
+    doc = kt.run_manifest(dataclasses.replace(kt.MICRO, compute_dtype="bf16"))  # as production
+    (res,) = kt.qualify(doc, "cpu", 1)
+    for root in KIMI_ROOTS:
+        assert re.fullmatch("[0-9a-f]{64}", first[f"kimi_micro_{root}"])
+        assert first[f"kimi_micro_{root}"] == res[root]
+    assert first == second
+    flipped = {"cpu": [first], "cuda:3": [{**first, "kimi_micro_state_root": "0" * 64}]}
+    verdict = gpu_probe.evaluate(flipped)
+    assert not verdict["ok"] and verdict["mismatches"] == ["cuda:3 repeat 0"]
+
+
+def test_a_kimi_runtime_error_is_recorded_as_a_digest_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_kernel(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("no kernel image is available")
+
+    monkeypatch.delenv("HT_ATTN_BACKEND", raising=False)  # the CPU default backend is math
+    monkeypatch.setattr(kt, "qualify", no_kernel)
+    out = gpu_probe.workload(torch.device("cpu"))
+    assert out["kimi_micro"] == "error: no kernel image is available"
+    assert not any(k.startswith("kimi_micro_") for k in out)
+    assert "matmul_fp32" in out and "math_out" in out  # the other smokes still ran
+    errors = gpu_probe.evaluate({"cuda:0": [out]})["errors"]
+    assert errors == ["cuda:0: kimi_micro: error: no kernel image is available"]
