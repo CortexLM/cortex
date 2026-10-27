@@ -510,22 +510,25 @@ nothing, and a run that rolled back before this record existed is not stuck: its
 or that has an open audit or dispute is not withdrawn and still answers the next round 409
 `FINALIZE_ORDER`.
 
-A roster member that has not committed when audits are scheduled is left out of its
-round: its `excluded` record gets reason `NO_SHOW` (stage `commit`), the audits of the
-other members are created, and the round is aggregated and finalized without it. A member
-that committed and passed its audit but uploaded no delta by `d_upload` is left out the
-same way when the round is aggregated (stage `delta`). Its reward share goes to the
-members that remain, split by tokens as for any exclusion. Nobody is suspended, struck or
-slashed for either. A member left out before its audit has no anchor for that round and
-cannot be rostered again in this run; one left out at the delta stage keeps its anchor.
-The remaining members must still carry the allocation: at least four, more when probation
-or owner-group caps bind, counting `NO_SHOW`, `UNVERIFIED` and `INFRASTRUCTURE`
-exclusions of the round together. Otherwise `audits` or `aggregate` answers 409
-`ROUND_INFEASIBLE`, nothing is written and the run stays blocked until an operator
-decision; there is no void round. Call `audits` once `d_audit` has passed and before
-`absolute` minus one round, `absolute` being the smaller of `d_final` and `d_audit` plus
-twice `lease_rounds`; a later call answers 503 for every roster and the round cannot be
-audited. Open rounds with five or more members when an eviction is plausible.
+A roster member that has not committed when the commit window closes is left out of its
+round by the first beacon push at or after `d_commit`: its `excluded` record gets reason
+`NO_SHOW` (stage `commit`), the audits of the other members are created when `audits` is
+called, and the round is aggregated and finalized without it. A member that committed and
+passed its audit but uploaded no delta by `d_upload` is left out the same way by the first
+push at or after `d_upload` (stage `delta`). `audits` and `aggregate` write the same records
+for a member the beacon route did not see (a challenge restarted before the run was served
+again). Its reward share goes to the members that remain, split by tokens as for any
+exclusion. Nobody is suspended, struck or slashed for either. A member left out before its
+audit has no anchor for that round and cannot be rostered again in this run; one left out at
+the delta stage keeps its anchor. The remaining members must still carry the allocation: at
+least four, more when probation or owner-group caps bind, counting `NO_SHOW`, `UNVERIFIED`
+and `INFRASTRUCTURE` exclusions of the round together. Otherwise `audits` or `aggregate`
+answers 409 `ROUND_INFEASIBLE`, no member is left out, a `round-exit` record names the
+reason (`INFEASIBLE`) and the run stays blocked until an operator decision; there is no void
+round. Call `audits` once `d_audit` has passed and before `absolute` minus one round,
+`absolute` being the smaller of `d_final` and `d_audit` plus twice `lease_rounds`; a later
+call answers 503 for every roster and the round cannot be audited. Open rounds with five or
+more members when an eviction is plausible.
 
 A round that cannot reach a tape can be retired (ADR 0011 part 8, decisions 7 to 11) instead of
 blocking the run for good. Two causes, each re-derived by the master from the facts: the members

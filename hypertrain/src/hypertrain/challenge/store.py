@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from experiments.gpu_network_v2.orchestrate import NetworkRuntime
     from scripts.network_gpu_operation import Operation
 
+    from hypertrain.challenge.finality_v2 import RoundStatus
     from hypertrain.gpu_ops.host_attest import Attestation
     from hypertrain.gpu_ops.network_qualification import HostPin
     from hypertrain.gpu_ops.work_screen import IslandLaunch
@@ -42,7 +43,15 @@ from hypertrain.challenge import audit_cooldown_v2
 from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import EXCLUSION_ABANDONED, Contest, DisputesV2
-from hypertrain.challenge.exit_v2 import MAX_LAG_ROUNDS, Retire
+from hypertrain.challenge.exit_v2 import (
+    MAX_LAG_ROUNDS,
+    Exclusion,
+    Member,
+    Retire,
+    RoundSnapshot,
+    Schedule,
+    plan_round,
+)
 from hypertrain.data.assignment import assign_round
 from hypertrain.data.store import (
     CorruptObjectError,
@@ -752,7 +761,8 @@ class ChallengeStore:
                         ):
                             raise
                 self._expire_leases_v2(run_id, br.round)
-            self._close_blocked_disputes_v2(run_id)
+            self._reap_v2(run_id, "dispute", self._close_blocked_disputes_v2)
+            self._reap_v2(run_id, "exit", self._reap_exits_v2)
             with self._tx():  # own transaction: bookkeeping must not undo maturation or leases
                 admission.reap_expired_trials(now=self._now(self._db))
         for _, _, disputes in self._services_v2.values():
@@ -6426,6 +6436,126 @@ class ChallengeStore:
             if guard is not None:
                 guard.revoke()
         return record
+
+    def _reap_v2(self, run_id: str, stage: str, reap: Callable[[str], None]) -> None:
+        """Run one reaper after its beacon committed. A failure is journaled (`exit-failed`, id
+        `run:<stage>`) and stops neither the beacon route nor the reaper behind it."""
+        try:
+            reap(run_id)
+        except Exception as error:
+            with self._tx():
+                self._journal_exit_v2(run_id, "run", stage, error)
+
+    def _open_rounds_v2(self, run_id: str) -> list[RoundStatus]:
+        """The rounds that are not closed, ascending: `RoundStatus.closed` is the one definition."""
+        return [status for status in self._history_v2(run_id) if not status.closed]
+
+    def _reap_exits_v2(self, run_id: str) -> None:
+        """Leave out the roster members that missed the bound of their wait (ADR 0011 Part 8).
+
+        One transaction, one savepoint per unclosed round: a round that cannot be reaped is
+        journaled (`exit-failed`, id `<w>:reap`) and the others go on. A service run is skipped:
+        its roster must stay complete (`verified_inputs_v2`).
+        """
+        escrow = self._services_v2[run_id][0]
+        with self._tx():
+            if self._db.execute(
+                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission' AND id='run'",
+                (run_id,),
+            ).fetchone():
+                return
+            now = self._now(self._db)
+            for status in self._open_rounds_v2(run_id):
+                try:
+                    with escrow.tx():
+                        self._reap_round_v2(run_id, status, now)
+                except Exception as error:
+                    self._journal_exit_v2(run_id, str(status.w), "reap", error)
+
+    def _reap_round_v2(self, run_id: str, status: RoundStatus, now: int) -> None:
+        """Ask the planner what one unclosed round owes the beacon, and record the answer."""
+        from hypertrain.protocol.messages_v2 import RoundOpenV2
+
+        w = status.w
+        manifest = self._run_v2(run_id)
+        body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", str(w))["body"])
+        audit = AuditPolicyV2.model_validate_json(
+            self.objects.get(manifest.network.audit_policy_hash)
+        )
+        entries = {e.hotkey: e for e in body.roster}
+
+        def carries(hotkeys: Collection[str]) -> bool:
+            try:
+                self._require_survivors_v2(manifest, [entries[h] for h in hotkeys])
+            except ChallengeError:
+                return False
+            return True
+
+        def hotkeys_of(kind: str) -> frozenset[str]:
+            return frozenset(i.split(":", 1)[1] for i in self._round_ids_v2(run_id, kind, w))
+
+        leases = self._db.execute(
+            "SELECT hotkey,state FROM audit_leases_v2 WHERE run_id=? AND w=?", (run_id, w)
+        ).fetchall()
+        plan = plan_round(
+            RoundSnapshot(
+                w=w,
+                schedule=Schedule(
+                    now=now,
+                    d_commit=body.d_commit,
+                    d_audit=body.d_audit,
+                    d_upload=body.d_upload,
+                    d_final=body.d_final,
+                    lease_rounds=audit.lease_rounds,
+                ),
+                roster=tuple(Member(e.hotkey, e.admission_id) for e in body.roster),
+                committed=hotkeys_of("commit"),
+                excluded=hotkeys_of("excluded"),
+                audited=frozenset(r["hotkey"] for r in leases if r["state"] == "completed"),
+                delivered=hotkeys_of("delta"),
+                applied=status.applied,
+                served=True,  # the exit never depends on whose fault it is (decision 4)
+                served_upload=True,
+                has_leases=bool(leases),
+                carries=carries,
+            )
+        )
+        for exclusion in plan.exclusions:
+            self._exclude_v2(run_id, w, exclusion)
+        if plan.retire is not None:
+            self._put_changed_v2(run_id, "round-exit", str(w), {"state": plan.retire})
+
+    def _exclude_v2(self, run_id: str, w: int, exclusion: Exclusion) -> None:
+        """The one writer of an exit exclusion. `_put_no_show_v2` writes the bytes of the lazy
+        writers, which stay as a backstop that finds nothing absent. A member of a round that
+        cannot go on is not excluded: `schedule_audits_v2` keeps answering ROUND_INFEASIBLE."""
+        if not exclusion.record:
+            return
+        self._put_no_show_v2(run_id, w, exclusion.hotkey, exclusion.stage)
+        if exclusion.stage == "commit":  # no audit will run for this member
+            finality = self._record_v2(run_id, "finality", str(w))
+            finality["unresolved_audits"] = max(0, int(finality["unresolved_audits"]) - 1)
+            self._put_record_v2(run_id, "finality", str(w), finality)
+
+    def _journal_exit_v2(self, run_id: str, key: str, stage: str, error: Exception) -> None:
+        """The last failure of one step of the exit reaper, rewritten only when it changes."""
+        code = getattr(error, "code", None)
+        entry: dict[str, JsonValue] = {
+            "stage": stage,
+            "error": type(error).__name__ + (f":{code}" if isinstance(code, str) else ""),
+        }
+        self._put_changed_v2(run_id, "exit-failed", f"{key}:{stage}", entry)
+
+    def _put_changed_v2(
+        self, run_id: str, kind: str, identity: str, entry: Mapping[str, JsonValue]
+    ) -> None:
+        """Write a derived fact only when it differs from what is stored."""
+        try:
+            old: dict[str, Any] | None = self._record_v2(run_id, kind, identity)
+        except ChallengeError:
+            old = None
+        if old != entry:
+            self._put_record_v2(run_id, kind, identity, entry)
 
     def _persist_anchor_v2(self, manifest: RunManifestV2, anchor: Any, cache: Any) -> None:
         from hypertrain.auditor.replay import tensor_root

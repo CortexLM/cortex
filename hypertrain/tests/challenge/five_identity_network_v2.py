@@ -1,4 +1,4 @@
-"""Five ACTIVE identities on the service-network fixture, without the 12-trial ladder.
+"""Five (or `size`) ACTIVE identities on the service-network fixture, without the 12-trial ladder.
 
 `test_service_network_v2_e2e.py::test_four_actual_funded_identities_graduate_shadow_only` covers
 the real ladder (admission, reference, proof, finalization, twelve times per identity, minutes).
@@ -81,15 +81,26 @@ def activate_identities(
     return identities
 
 
-def five_identity_network(tmp_path_factory: Any, fixtures: Any) -> Iterator[Any]:
-    """Body of a module-scoped fixture: the fixtures module with five keys, all ACTIVE.
+def push_through(network: Any, number: int) -> None:
+    """Push every beacon round up to `number`, one by one, as the real pusher does.
 
-    Carry state policy and a genesis that covers five coldkeys, as `active_network` in
+    `network.push(n)` jumps straight to `n` and sets the clock to it: the master reads a jump as a
+    pause of its beacon (ADR 0011 Part 8), which is never a miner's silence. A test that needs a
+    silence to count walks the rounds.
+    """
+    for rnd in range(network.now + 1, number + 1):
+        network.push(rnd)
+
+
+def five_identity_network(tmp_path_factory: Any, fixtures: Any, *, size: int = 5) -> Iterator[Any]:
+    """Body of a module-scoped fixture: the fixtures module with `size` keys, all ACTIVE.
+
+    Carry state policy and a genesis that covers `size` coldkeys, as `active_network` in
     `tests/e2e/test_rollback_service_v2.py` sets them up, so round 1 can follow round 0.
     """
     patch = pytest.MonkeyPatch()
-    patch.setattr(fixtures, "HOT", [Keypair(bytes([80 + i]) * 32) for i in range(5)])
-    patch.setattr(fixtures, "COLD", [Keypair(bytes([90 + i]) * 32) for i in range(5)])
+    patch.setattr(fixtures, "HOT", [Keypair(bytes([80 + i]) * 32) for i in range(size)])
+    patch.setattr(fixtures, "COLD", [Keypair(bytes([90 + i]) * 32) for i in range(size)])
     original_setup = fixtures.fixture.setup
     original_genesis = fixtures.Genesis
 
@@ -116,7 +127,7 @@ def five_identity_network(tmp_path_factory: Any, fixtures: Any) -> Iterator[Any]
     )
     network = next(generator)
     try:
-        activate_identities(network, fixtures)
+        activate_identities(network, fixtures, range(size))
         yield network
     finally:
         generator.close()

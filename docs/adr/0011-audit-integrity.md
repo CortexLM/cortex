@@ -949,9 +949,9 @@ in this order and without the peer:
 | # | Waiting state | Who can block it | Bound | Exit action | Blame | Sanction | Test |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | dispute (Part 1, done) | a funded contestant that cannot win; a silent auditor or referee | dead end: next push; abandoned: `turn_deadline + T + 1`; paused final op: `absolute_deadline + 1` | pause, `exclude` (loser None), `settle_lock`, `resolve_pending` | infrastructure | none; a referee `FRAUD` goes through `settle_fraud` | `test_dispute_exit_v2` |
-| 2 | roster commit (Part 5) | a roster member that never commits | `d_commit` (was: the first `audits` call) | `excluded NO_SHOW/commit`, `unresolved_audits - 1`; if the rest cannot carry: row 7 | miner, unless the assignment window was paused or nobody committed | D44 (decision 12) | `test_exit_commit` |
+| 2 | roster commit (Part 5) | a roster member that never commits | `d_commit` (was: the first `audits` call) | `excluded NO_SHOW/commit`, `unresolved_audits - 1`; if the rest cannot carry: row 7 | miner, unless the assignment window was paused or nobody committed | D44 (decision 12) | `test_exit_reaper_v2` |
 | 3 | leaves never posted | a member that committed and never posts `/leaves` | `absolute` (<= `d_final`) | the queued job is dropped as `NO_SHOW/leaves`, no re-arm | miner (no auditor ever touched the job) | as 2 | `test_exit_leaves` |
-| 4 | delta never uploaded | an audited member, or the relay | `d_upload` | `excluded NO_SHOW/delta` | miner, unless nobody delivered or the upload window was paused | as 2 | `test_exit_delta` |
+| 4 | delta never uploaded | an audited member, or the relay | `d_upload` | `excluded NO_SHOW/delta` | miner, unless nobody delivered or the upload window was paused | as 2 | `test_exit_reaper_v2` |
 | 5 | audit job, lease (Part 2, done) | an auditor, an executor host, a miner whose sealed input cannot be leased | attempt `L`; two windows of `A`; the second ends where the sealed commit ends | cooldown, requeue, re-arm once, drop only the miner (`INFRASTRUCTURE`); `MINER_INPUT_REFUSED` dropped at once | infrastructure; miner only for an input it sealed short | none | `test_audit_liveness_v2` |
 | 6 | audit window missed | the operator who never calls `audits` | `absolute - 1` | the round is retired (`AUDIT_WINDOW_MISSED`) | infrastructure | none | `test_exit_audit_window` |
 | 7 | round infeasible (AC-CLIFF) | nobody in particular: the Q/4 caps after any exclusion above | the push that first sees the survivors cannot carry | blame booked per member; the round is retired (`INFEASIBLE`); the next opening answers 409 until four anchored members are eligible | per member (rows 2 to 4) | per member | `test_exit_infeasible` |
@@ -979,13 +979,18 @@ the table as covering them.
 2. **One reaper on `push_beacon`**, after the dispute reaper and before the trial reaper: its own
    transaction, one savepoint per unclosed round, a run-level guard so that nothing reaches the beacon
    route after the beacon committed, failures journaled as `exit-failed` and rewritten only when they
-   change (so `_rollback_snapshot_v2` is stable under a persistent failure). It reads a snapshot of each
-   round, asks the pure planner and applies the answer through `_exclude_v2`, the single function that
-   records an exclusion and books its blame. It skips a run with a `service-admission` record (its roster
-   must stay complete).
+   change (so `_rollback_snapshot_v2` is stable under a persistent failure). The dispute reaper of Part 1
+   has the same guard, so a failure of one cannot skip the other; a run-level failure is journaled as
+   `exit-failed` with the id `run:dispute` or `run:exit`, a round's as `<w>:reap`. The reaper reads a
+   snapshot of each round, asks the pure planner and applies the answer through `_exclude_v2`, the
+   single function that records an exclusion and books its blame. It skips a run with a
+   `service-admission` record (its roster must stay complete).
 3. **Eager exits.** The first push with `now >= d_commit` excludes every member with no commit, the first
    with `now >= d_upload` every audited member with no delta. The records are byte-identical to the lazy
-   writers' (`_exclude_no_shows_v2`, `_exclude_missing_deltas_v2`), which stay as a backstop. A queued job
+   writers' (`_exclude_no_shows_v2`, `_exclude_missing_deltas_v2`), which stay as a backstop. When the
+   rest cannot carry the round the reaper writes no exclusion at all, so that `schedule_audits_v2` keeps
+   answering 409 `ROUND_INFEASIBLE` with nothing persisted (Part 5); the plan is only the `round-exit`
+   marker (`INFEASIBLE` or `AUDIT_WINDOW_MISSED`) until decision 8 retires the round. A queued job
    whose miner never posted leaves is dropped at `absolute` as `NO_SHOW/leaves`, with the miner's blame
    and no re-arm: only the master lacks the leaves, no auditor ever touched the job, and a second window
    cannot help. This amends Part 2 decisions 8 and 9 for this one case.
@@ -1172,9 +1177,9 @@ the table as covering them.
 | State | Test (file) | Scenario | Mutant |
 | --- | --- | --- | --- |
 | dispute | `tests/challenge/test_dispute_exit_v2.py` (exists) + the e2e | forged delta + contest: the run restarts, `w + 2` opens | the closure removed |
-| commit | `tests/challenge/test_exit_v2.py::commit` | 6 rostered, 2 silent: both excluded at `d_commit`, sanctioned, 4 audited and paid, round 1 opens | eager exit removed; sanction gate removed |
+| commit | `tests/challenge/test_exit_reaper_v2.py` | 6 rostered, 2 silent: both excluded at `d_commit`, sanctioned, 4 audited and paid, round 1 opens | eager exit removed |
 | leaves | same file | a member commits and never posts leaves: dropped at `absolute` as `NO_SHOW/leaves`, the others settle | stage naming |
-| delta | same file | an audited member never uploads: excluded at `d_upload`, the round settles | the delta exit |
+| delta | `tests/challenge/test_exit_reaper_v2.py`, `tests/e2e/test_no_show_resume_v2.py` | an audited member never uploads: excluded at `d_upload`, the round settles | the delta exit |
 | audit job | `test_audit_liveness_v2.py` (exists) | one poisoned job costs its miner, not the round | exhaustion drop |
 | audit window | same file | nobody calls `audits`: retired at `absolute - 1`, round 1 opens | the cause |
 | infeasible (AC-CLIFF) | `tests/e2e/test_retired_round_v2.py` | 4 rostered, 1 silent: 409 `ROUND_INFEASIBLE` (not 500), retired, honest bonds released; round 1 opens with four anchored eligible members; 5 rostered, 1 silent: settles with four | retire on any exclusion |

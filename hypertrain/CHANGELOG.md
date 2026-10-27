@@ -182,6 +182,14 @@
   the remaining members cannot carry is refused with 409 `ROUND_INFEASIBLE`. The new helpers
   join the owned set of `implementation_hash`, which changes. See
   `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- A silent roster member is left out at the bound of its wait, no longer when somebody next calls
+  the round: the first beacon push at or after `d_commit` records `excluded` `NO_SHOW` (stage
+  `commit`) for every member with no commit, and the first at or after `d_upload` for every audited
+  member with no delta. The records are those of the lazy writers, which stay as a backstop. A round
+  the rest cannot carry keeps its membership facts and gets a `round-exit` marker. The reaper skips a
+  service run, and a failure of it, or of the dispute reaper, is journaled as `exit-failed` and
+  stops neither the beacon push nor the other reaper. No one is sanctioned yet. See
+  `docs/adr/0011-audit-integrity.md` (Part 8) at the monorepo root.
 - A round the caps or the finality rules refuse is a 409, no longer a bare 500: opening a round
   with a roster the Q/4 caps cannot carry (fewer than four eligible members) or round w+2 without
   round w+1 answered `Internal Server Error`. `InsufficientEligibleWeight` now answers 409

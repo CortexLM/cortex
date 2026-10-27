@@ -106,14 +106,14 @@ def test_a_member_that_commits_but_never_uploads_a_delta_is_left_out(activated_n
     assert excluded(n) == {}
 
     n.push(opening.d_upload)
+    # The push left it out: nobody has called aggregate yet.
+    assert {k: (v["reason"], v["stage"]) for k, v in excluded(n).items()} == {
+        f"0:{lazy.ss58}": ("NO_SHOW", "delta")
+    }
     applied = aggregate(n, 0)
     assert applied.status_code == 200, applied.text
 
     assert audit_results(n) == ["MATCH"] * 5
-    seen = excluded(n)
-    assert {k: (v["reason"], v["stage"]) for k, v in seen.items()} == {
-        f"0:{lazy.ss58}": ("NO_SHOW", "delta")
-    }
     assert n.store._record_v2(n.manifest.run_id(), "finality", "0")["unresolved_audits"] == 0
     assert finalize(n, 0, applied.json(), survivors)["status"] == "SETTLED"
     assert standing(n, lazy.ss58) == before

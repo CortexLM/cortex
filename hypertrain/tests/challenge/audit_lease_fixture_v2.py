@@ -40,15 +40,19 @@ def lease_rounds(net) -> int:
     return policy.lease_rounds
 
 
-def seed_round(net, n=4, *, executable=False, gap=200, commit_exp=None, nan_leaf=None, silent=()):
-    """Write round 0 (opening, starts, commits, leaves, finality) straight into `records_v2`.
+def seed_round(
+    net, n=4, *, executable=False, gap=200, commit_exp=None, nan_leaf=None, silent=(), deltas=True
+):
+    """Write round 0 (opening, starts, commits, leaves, deltas, finality) into `records_v2`.
 
     `executable` also persists the genesis anchors and writes the island inputs, so that
     `execute_audit_v2` reaches the executor boundary. `gap` is `d_final - d_audit`: 100 leaves
     one lease window, 200 two full ones. `commit_exp` (one round for everybody, or {miner index:
     round}; default 10000, a commit that outlives every window) and `nan_leaf` ({miner index:
     value}) set or poison what a miner sealed: an honest miner seals `d_final`. `silent`: indexes
-    of roster members that get a start record and nothing else (opened, started, no commit)."""
+    of roster members that get a start record and nothing else (opened, started, no commit).
+    `deltas`: every member that committed also delivered its delta manifest; a round nobody
+    delivered to reads, to the exit reaper, as an upload path that failed for everybody."""
     nan_leaf = nan_leaf or {}
     expiry = commit_exp if isinstance(commit_exp, dict) else dict.fromkeys(range(n), commit_exp)
     store, manifest = net.store, net.manifest
@@ -208,6 +212,20 @@ def seed_round(net, n=4, *, executable=False, gap=200, commit_exp=None, nan_leaf
                     )
                 },
             )
+            if deltas:
+                chunk = {"off": 0, "len": commit.delta_bytes, "sha256": commit.delta_hash}
+                delta = {
+                    "w": 0,
+                    "hotkey": key.ss58,
+                    "delta_hash": commit.delta_hash,
+                    "size": commit.delta_bytes,
+                    "uri": "sha256:" + commit.delta_hash,
+                    "format": "ht-sparse-v1",
+                    "chunks": [chunk],
+                    "grant_hash": "00" * 32,
+                    "master_acceptance_hash": "00" * 32,
+                }
+                store._put_record_v2(run, "delta", ident, net.signed(key, "DeltaManifestV2", delta))
         store._put_record_v2(
             run,
             "finality",
