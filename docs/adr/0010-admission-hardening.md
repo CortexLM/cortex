@@ -116,45 +116,57 @@ Residual: two fresh identities timed to a victim's join can still hold both plac
 window, because `max_trial_replays` is `Literal[2]`; a funded-only place would need a new
 policy field and is left to Forge.
 
-### 3. The owner asks for its trial in a signed body (RTA-04)
+### 3. The owner asks for its trial and reads its job in a signed body (RTA-04)
 
-Decided (Principal SN100 D51 to D53): the master proxy is the only entry path of a miner. It
+Decided (Principal SN100 D51 to D54): the master proxy is the only entry path of a miner. It
 forwards `content-type`, `accept` and `authorization` and nothing else
 (`src/cortex/challenges/proxy.py:14`, `docs/CHALLENGES.md`), so **no signature travels in an HTTP
 header**. A miner request whose authority is a hotkey's signature carries that signature as a
 signed `ht/2` envelope in the body of the request, checked by `envelope_v2.Intake` (run id, signer,
-signature, expiry). This part applies the rule to the challenge request.
+signature, expiry). This part applies the rule to the two routes of the trial that only its owner
+may call: the challenge request and the job read. One helper serves both.
 
 1. `POST /v2/runs/{run_id}/join/{admission_id}/challenge` replaces the unsigned `GET` (now 405).
    The body is the envelope of the new message `ChallengeRequest{admission_id}`, signed by the
    admission's current hotkey. Order of refusals: unknown run 404, unknown admission 409, a
    deregistered or revoked owner 403, then any body that is not an unexpired `ChallengeRequest`
    of this run, for this admission, signed by that hotkey (empty, not JSON, another message, run,
-   admission or signer, a bad signature, an expired envelope) 403 `hotkey is not current accepted
-   identity`. The admin bearer is not a credential.
-2. The check lives in the route, not in `Admission.challenge`, which stays the trusted
+   admission or signer, a bad signature, an expired envelope, an expiry beyond the bound of point
+   3) 403 `hotkey is not current accepted identity`. The admin bearer is not a credential.
+2. `POST /v2/runs/{run_id}/join/{admission_id}/job` replaces `GET` with the headers `X-Hotkey` and
+   `X-Trial-Signature` (now 405). The body is the envelope of the new message
+   `JobRequest{admission_id}`, signed by the admission's current hotkey, with the same order of
+   refusals. A distinct message type, so that a captured challenge request does not read a job
+   and a captured job request does not open a trial.
+3. The expiry is the signer's choice, so the service bounds it: an envelope that expires more
+   than `OWNER_REQUEST_MAX_ROUNDS` = 100 rounds (five minutes at 3 s per round) after the
+   service's current round is refused like any other forgery. The constant is a route constant of
+   `challenge/app.py`, outside `implementation_hash`; no manifest field carries a request window
+   and a new one would change the run id. The miner signs 20 rounds ahead
+   (`OWNER_REQUEST_ROUNDS`, a client-side choice, a minute), from the round the service reports.
+4. The check lives in the routes, not in `Admission.challenge`, which stays the trusted
    in-process API ("not routes"). The regression is therefore an HTTP test, which also closes
    the Lens caveat that the HTTP path was not run.
-3. The admin export (`export_trial_v2`) returns the stored coordinator-signed envelope as
+5. The admin export (`export_trial_v2`) returns the stored coordinator-signed envelope as
    `challenge_envelope`, and `challenge/trial_export.py` stops calling the route. The miner
-   (`NetworkMiner._fetch_trial`) reads the current round and signs a request valid for
-   `CHALLENGE_REQUEST_ROUNDS` = 20 rounds (a client-side choice, a minute at 3 s per round).
-   Scripts and tests sign through `Network.challenge`.
+   (`NetworkMiner._fetch_trial`) signs both requests. Scripts and tests sign through
+   `Network.challenge` and `Network.owner_request`.
 
-Consequences. The envelope's expiry bounds a replay of a capture; no server constant, no nonce
-store. The request is idempotent (asking again returns the stored challenge), and with
-decision 2 an asking never suspends anyone. A third party who captures the owner's request on the
-wire (TLS is the protection) can ask for the trial only until the envelope expires, and learns
-nothing new. Rejected: a signature in a header, which the proxy drops; a single-use nonce (a lost
-response locks the miner out, and it adds a write per request); enforcing inside
-`Admission.challenge` (22 direct callers, a conflict with decision 2, and a caller identity the
-service cannot verify); accepting the admin bearer (contradicts `network-v2.md`).
+Consequences. The envelope's expiry, bounded by the service, limits a replay of a capture; there
+is no nonce store. Both requests are idempotent (asking again returns the stored challenge or
+job), and with decision 2 an asking never suspends anyone. A third party who captures the owner's
+request on the wire (TLS is the protection) can ask for the trial or read the job only until the
+envelope expires, at most five minutes, and learns nothing new. Rejected: a signature in a header,
+which the proxy drops; a single-use nonce (a lost response locks the miner out, and it adds a
+write per request); enforcing inside `Admission.challenge` (22 direct callers, a conflict with
+decision 2, and a caller identity the service cannot verify); accepting the admin bearer
+(contradicts `network-v2.md`).
 
-The same rule covers the other routes that sign in a header today: `GET .../job` (`X-Hotkey` and
-`X-Trial-Signature`), `PUT .../objects/{sha}` (`X-Hotkey` and `X-Object-Signature`) and
-`GET .../disputes` (`x-dispute-signature`). Each becomes a request whose signed envelope is in the
-body. That conversion changes the route, its miner client and its tests one by one, and this
-commit series does not make it: until it is made those routes do not work through the proxy.
+The same rule covers the two other routes that sign in a header today and that are not part of
+admission: `PUT /v2/runs/{run_id}/objects/{sha256}` (`X-Hotkey` and `X-Object-Signature`) and
+`GET /v2/runs/{run_id}/disputes` (`x-dispute-signature`). Each becomes a request whose signed
+envelope is in the body. That conversion is made by the changes that own those routes, not by
+this series: until it is made they do not work through the proxy.
 
 ### 4. Dead unfunded joins release their places; an optional per-prefix cap (RTA-02)
 
@@ -362,10 +374,10 @@ Baseline measured on `33b50656` with `ChallengeStore._service_implementation_v2`
   still validates against its own frozen tree; installed qualification records stay valid.
 - The server image gets a new digest at rebuild. A manifest that enables the optional cap pins
   nothing else.
-- Wire: `RotateRequest` gains `new_hot_sig`; `LeaveNotice` gains `epoch`; a new message type
-  `ChallengeRequest`; the export payload gains `challenge_envelope`; the unsigned
-  `GET .../challenge` becomes `POST .../challenge` with a signed body; `GET .../admission/{hotkey}`
-  gains `bond` in Part 6. None is a manifest or SCALE wire message; `docs/BUNDLE_SPEC.md` and the
+- Wire: `RotateRequest` gains `new_hot_sig`; `LeaveNotice` gains `epoch`; two new message types
+  `ChallengeRequest` and `JobRequest`; the export payload gains `challenge_envelope`; the unsigned
+  `GET .../challenge` and the header-signed `GET .../job` become `POST` with a signed body;
+  `GET .../admission/{hotkey}` gains `bond` in Part 6. None is a manifest or SCALE wire message; `docs/BUNDLE_SPEC.md` and the
   frozen vectors are untouched.
 
 ## Decisions for Forge
