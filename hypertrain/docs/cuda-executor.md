@@ -111,6 +111,38 @@ the artifact commitments itself (`validate_artifacts`) and checks the environmen
 signed manifest and the ADR 0007 table before it publishes; a host that returns a partial,
 tampered or unverifiable result produces nothing, and the job moves to another host or fails.
 
+## Results through R2 (opt-in)
+
+By default the rank artifacts come back on the SSH standard output. For results of several GB that
+cannot fit a lease on one SSH stream, point `HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS` at a settings file
+([`examples/cuda-executor-artifacts.example.json`](examples/cuda-executor-artifacts.example.json)):
+the container hashes the same tar, declares the hashes in R2, uploads it to presigned part URLs the
+challenge hands out, and the challenge fetches it, checking every 4 MiB block and the whole sha256,
+before the unchanged checks run. The host never holds a credential. Decision record:
+[ADR 0013](../../docs/adr/0013-executor-artifacts-via-r2.md), which also says which result sizes fit
+which windows. Nothing here has run against a GPU host or the real R2 service.
+
+| Field | Meaning |
+| --- | --- |
+| `credentials_file` | The R2 token: a regular file of the challenge's user, mode 0600, holding only `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (must start `cortex-v3-`) and optionally `R2_ENDPOINT` (https). The process environment is ignored. Use a bucket-scoped token, never the Cloudflare account token. |
+| `operations` | Which of `reference`, `audit`, `referee` use R2 (default `audit`, `referee`: a reference holds the store lock for the whole launch). Others run the SSH way. |
+| `part_bytes`, `max_artifact_bytes` | Part size (a multiple of 4 MiB, 8 to 64 MiB; the challenge chooses, the host cannot) and the largest result accepted (at most 10,000 parts). Default 16 MiB and 16 GiB: raise the second per profile. |
+| `workers` | Parallel parts, on both sides. |
+| `reserve_seconds` | Taken from the island's time budget so the transfer has time left (default 60). |
+| `url_margin_seconds`, `url_ttl_cap_seconds` | URLs live the time left to the job deadline plus the margin, at most the cap. |
+| `poll_ms`, `offer_wait_seconds` | How often each side looks for the other's mailbox object, and how long the container waits for the offer. |
+| `request_timeout_seconds`, `retry_attempts`, `retry_base_ms` | Per request and backoff, on both sides. |
+| `fallback` | `classic` (default): if R2 is unreachable when an attempt starts, that attempt uses the SSH way; `fail`: it fails. |
+
+Requirements: `network` must be `default` (the container reaches R2 over HTTPS; the image needs a CA
+bundle); the bucket should expire `runs/*/exec/` and abort incomplete uploads after one day (the code
+deletes its own uploads and objects, not the two small mailbox objects of an attempt). A host that
+cannot reach R2 is skipped without using an attempt. The journal gets `exec_artifact_begin`,
+`_offered`, `_done`, `_end`, `_unavailable`, `_salvaged` and `_cleanup_failed`; `role-dispatch.json`
+gets an `artifact` block (transport, sha256, size, part size, parts, upload and download
+milliseconds). A host lost after its last part is salvaged; one lost earlier costs the upload, and
+the next attempt starts again.
+
 ## Install on the `hypertrain-test` stack only (not run)
 
 Preconditions: a TEST manifest for the hardware (`sm_count`, `driver_allowlist`, GPU image digest)
@@ -136,8 +168,10 @@ restore the compose backup and run the same `up -d challenge`. Never touch
 
 - One job per host at a time; throughput on one host is serial.
 - Transfer volume is the whole publication (checkpoints included), capped by `max_result_bytes`.
-  For the 889M-parameter `dense-1b` geometry that is about 60 GB per job by arithmetic [H, not
-  measured], more than an audit lease can move over an ordinary link: start with a small model.
+  Over SSH one stream carries about 2 MiB per round trip; for results of more than a few GB use the
+  R2 transfer above. The job inputs still go over SSH. The `dense-1b` geometry (889M parameters)
+  moves about 62 GB per job and, with AdamW, has a 10.7 GB state that the part-index ceiling of 8 GiB
+  refuses, whatever the transport; start with a small model (ADR 0013, "Windows").
 - Dispute window re-runs (`launch_window`) still run where the dispute code runs them.
 - The host is trusted like a Vast host: it can return a self-consistent but wrong trajectory, and
   the executor cannot tell. Dual execution on two machines is a later option (ADR 0008).
