@@ -1,5 +1,6 @@
 """Publisher selector/copy/scanner functions, without cloning, commits or pushes."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -371,6 +372,25 @@ def test_reviewed_fixture_lines_do_not_exempt_secrets_elsewhere(tmp_path: Path) 
         assert run_scanner(tmp_path, "src/hypertrain/leak.py", line + "\n").returncode == 1
     genuine = 'PATH_SECRET = "sk_" + "' + "Zp9Qw2Lm7Xc" + "4Vb8Nk3Rt6Yh1Jd5" + '"'
     assert run_scanner(tmp_path, "tests/beacon/test_push.py", genuine + "\n").returncode == 1
+
+
+def test_every_reviewed_line_entry_still_matches_a_line_of_its_file() -> None:
+    # Merging a file that replaces a reviewed line leaves its path:sha256 entry exempting nothing
+    # now and a future identical line unreviewed, and no scan fails on it. An entry for a file
+    # outside this tree belongs to the standalone repository's layout and is not checked.
+    source = Path(__file__).resolve().parents[1]
+    stale = []
+    for raw in (source / "scripts/publish-allowlist.txt").read_text().splitlines():
+        entry = raw.split("#")[0].strip()
+        if not entry:
+            continue
+        path, _, digest = entry.rpartition(":")
+        target = source / path
+        if target.is_file():
+            lines = target.read_text(errors="ignore").splitlines()
+            if digest not in {hashlib.sha256(line.encode()).hexdigest() for line in lines}:
+                stale.append(entry)
+    assert stale == []
 
 
 def test_current_repo_tree_scan_clean() -> None:
