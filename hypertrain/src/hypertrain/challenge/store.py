@@ -7409,51 +7409,52 @@ class ChallengeStore:
                                 ),
                             },
                         )
-                guard.check()
-                outcome, artifacts = execute_island_audit(
-                    job,
-                    directory,
-                    cache,
-                    guard,
-                    now_round=now,
-                    deadline_unix=deadline,
-                    backend=backend,
-                    objects=self.objects.get,  # resolves stored ht-parts-v1 refs
-                    publication_job=geometry_job,
-                    publication_directory=geometry_directory,
-                    launch=(
-                        self._role_launch(
-                            "audit",
-                            geometry_job,
-                            geometry_directory,
-                            {
-                                "run_id": run_id,
-                                "job_id": job_id,
-                                "audit_job": job.body(),
-                                "descriptor_hash": descriptor_hash,
-                                "descriptor": descriptor,
-                                "descriptor_receipt": self._record_v2(
-                                    run_id, "audit-geometry", f"{job_id}:{row['nonce']}"
-                                )["receipt"],
-                                "hotkey": row["hotkey"],
-                                "auditor": row["auditor"],
-                            },
-                        )
-                        if self._role_launch is not None
-                        else None
-                    ),
-                )
-                from hypertrain.auditor.island_bisect import IslandParty
+                with self._booking_executor_failure_v2(run_id, job_id, job.lease_nonce, guard):
+                    guard.check()
+                    outcome, artifacts = execute_island_audit(
+                        job,
+                        directory,
+                        cache,
+                        guard,
+                        now_round=now,
+                        deadline_unix=deadline,
+                        backend=backend,
+                        objects=self.objects.get,  # resolves stored ht-parts-v1 refs
+                        publication_job=geometry_job,
+                        publication_directory=geometry_directory,
+                        launch=(
+                            self._role_launch(
+                                "audit",
+                                geometry_job,
+                                geometry_directory,
+                                {
+                                    "run_id": run_id,
+                                    "job_id": job_id,
+                                    "audit_job": job.body(),
+                                    "descriptor_hash": descriptor_hash,
+                                    "descriptor": descriptor,
+                                    "descriptor_receipt": self._record_v2(
+                                        run_id, "audit-geometry", f"{job_id}:{row['nonce']}"
+                                    )["receipt"],
+                                    "hotkey": row["hotkey"],
+                                    "auditor": row["auditor"],
+                                },
+                            )
+                            if self._role_launch is not None
+                            else None
+                        ),
+                    )
+                    from hypertrain.auditor.island_bisect import IslandParty
 
-                if artifacts.directory != geometry_directory / "published":
-                    raise ChallengeError(409, "independent audit publication directory differs")
-                IslandParty.published(row["hotkey"], geometry_job, artifacts.directory)
-                dispatched = (
-                    self._dispatch_env_v2(manifest, geometry_directory)
-                    if backend == "cuda"
-                    else None
-                )
-                guard.check()
+                    if artifacts.directory != geometry_directory / "published":
+                        raise ChallengeError(409, "independent audit publication directory differs")
+                    IslandParty.published(row["hotkey"], geometry_job, artifacts.directory)
+                    dispatched = (
+                        self._dispatch_env_v2(manifest, geometry_directory)
+                        if backend == "cuda"
+                        else None
+                    )
+                    guard.check()
             with self._tx():
                 current = self._db.execute(
                     "SELECT * FROM audit_leases_v2 WHERE id=?", (job_id,)
@@ -7524,6 +7525,60 @@ class ChallengeStore:
             with self._lock:
                 if self._lease_guards_v2.get(job_id) is guard:
                     del self._lease_guards_v2[job_id]
+
+    @contextmanager
+    def _booking_executor_failure_v2(
+        self, run_id: str, job_id: str, nonce: str, guard: Any
+    ) -> Iterator[None]:
+        """Whatever leaves the executor boundary is booked against the attempt, then re-raised.
+        A cancelled guard (wall timer, revoke) is left to the verified beacon."""
+        try:
+            yield
+        except Exception as error:
+            if not guard.cancelled.is_set():
+                self._fail_audit_attempt_v2(run_id, job_id, nonce, error)
+            raise
+
+    def _fail_audit_attempt_v2(
+        self, run_id: str, job_id: str, nonce: str, error: Exception
+    ) -> None:
+        """Retire the running attempt at once instead of holding the lease to its expiry.
+
+        Circuit breaker: the same error class on a second job within one lease is the signature
+        of a host-wide outage, not of one miner's input. Then the lease is held to its expiry
+        (EXECUTOR_INTERRUPTED, no cooldown) so the outage cannot burn every job's attempts in
+        seconds. The same job failing twice, or another error class, is booked."""
+        with self._tx():
+            row = self._db.execute(
+                "SELECT * FROM audit_leases_v2 WHERE id=? AND run_id=?", (job_id, run_id)
+            ).fetchone()
+            if row is None or row["state"] != "running" or row["nonce"] != nonce:
+                return
+            now = self._now(self._db)
+            if now >= row["expires"]:
+                self._expire_leases_v2(run_id, now)
+                return
+            name = type(error).__name__
+            held = self._db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='audit-failure-latch' "
+                "AND id='run'",
+                (run_id,),
+            ).fetchone()
+            if held is not None:
+                latch = json.loads(held[0])
+                lease_rounds = AuditPolicyV2.model_validate_json(
+                    self.objects.get(self._run_v2(run_id).network.audit_policy_hash)
+                ).lease_rounds
+                if (
+                    latch["error"] == name
+                    and latch["job_id"] != job_id
+                    and now < latch["at"] + lease_rounds
+                ):
+                    return
+            self._put_record_v2(
+                run_id, "audit-failure-latch", "run", {"error": name, "job_id": job_id, "at": now}
+            )
+            self._retire_audit_attempt_v2(run_id, row, now, "EXECUTOR_FAILED", error=name)
 
     def _dispatch_env_v2(
         self, manifest: RunManifestV2, directory: Path

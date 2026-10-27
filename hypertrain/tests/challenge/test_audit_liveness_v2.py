@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -132,21 +133,30 @@ def test_a_preparation_failure_leaves_no_guard_behind(network, monkeypatch):
     assert job["job_id"] not in store._lease_guards_v2
 
 
-def test_an_unwinding_attempt_does_not_release_the_guard_of_the_next_one(network, monkeypatch):
+def hostile_launch(monkeypatch, error=RecursionError):
     from hypertrain.auditor import worker
 
+    def hostile(job, directory, **kwargs):
+        raise error("hostile executor host")
+
+    monkeypatch.setattr(worker, "launch_island", hostile)
+
+
+def test_an_unwinding_attempt_does_not_release_the_guard_of_the_next_one(network, monkeypatch):
     store, run = network.store, network.manifest.run_id()
     seed_round(network, executable=True)
     schedule(network)
     job = lease(network, A, 1).json()["body"]
+    hostile_launch(monkeypatch)
+    real = store._fail_audit_attempt_v2
     sentinel = object()
 
-    def launch(job_, directory, **kwargs):
-        store._lease_guards_v2[job["job_id"]] = sentinel  # attempt 2 registered while we unwind
-        raise IslandFailure("stop")
+    def hand_over(run_id, job_id, nonce, error):
+        real(run_id, job_id, nonce, error)  # attempt 1 is retired and requeued at once
+        store._lease_guards_v2[job_id] = sentinel  # the other auditor's attempt 2 has registered
 
-    monkeypatch.setattr(worker, "launch_island", launch)
-    with pytest.raises(IslandFailure):
+    monkeypatch.setattr(store, "_fail_audit_attempt_v2", hand_over)
+    with pytest.raises(RecursionError):
         store.execute_audit_v2(run, job["job_id"], execute_request(network, A, job))
     assert store._lease_guards_v2[job["job_id"]] is sentinel
 
@@ -286,3 +296,131 @@ def test_an_expiry_after_the_verdict_was_stored_is_the_auditors_silence(network)
     network.push(job["lease_expires"])
     cooldown_until(lease(network, A, 2))
     assert failure_cause(store, run, job) == "AUDITOR_SILENT"
+
+
+def test_s3_a_failing_executor_hands_the_job_to_the_other_auditor_at_once(network, monkeypatch):
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, executable=True)
+    schedule(network)
+    hostile_launch(monkeypatch)
+
+    def leased(auditor, n):
+        response = lease(network, auditor, n)
+        assert response.status_code == 200, response.text
+        return response.json()["body"]
+
+    def execute(auditor, job, error=RecursionError):
+        with pytest.raises(error):
+            store.execute_audit_v2(run, job["job_id"], execute_request(network, auditor, job))
+
+    first = leased(A, 1)
+    execute(A, first)  # attempt 1 fails at once: queued for the other auditor
+    row = lease_row(store, first["job_id"])
+    assert (row["state"], row["attempts"], json.loads(row["tried"])) == ("queued", 1, [A.ss58])
+    failure = store._record_v2(
+        run, "audit-attempt-failure", f"{first['job_id']}:{first['lease_nonce']}"
+    )
+    assert (failure["cause"], failure["error"]) == ("EXECUTOR_FAILED", "RecursionError")
+    other = leased(A, 2)  # A was not silent, so it is not refused; it just cannot retake that job
+    assert other["job_id"] != first["job_id"]
+    retry = leased(B, 3)  # the oldest queued job is the failed one: attempt 2 by the other auditor
+    assert (retry["job_id"], retry["attempt"]) == (first["job_id"], 2)
+    execute(B, retry)  # attempt 2 fails too, same job: booked, nobody holds the job any more
+    assert lease_row(store, first["job_id"])["state"] != "running"
+    second = store._record_v2(
+        run, "audit-attempt-failure", f"{first['job_id']}:{retry['lease_nonce']}"
+    )
+    assert second["attempt"] == 2
+    cooled = store._db.execute(
+        "SELECT COUNT(*) FROM records_v2 WHERE kind IN ('auditor-cooldown','auditor-disabled')"
+    ).fetchone()[0]
+    assert cooled == 0
+
+
+@pytest.mark.parametrize(
+    ("latch_error", "latch_age", "booked"),
+    [("RecursionError", 0, False), ("MemoryError", 0, True), ("RecursionError", 100, True)],
+)
+def test_the_same_error_on_a_second_job_within_a_lease_is_held_not_burned(
+    network, monkeypatch, latch_error, latch_age, booked
+):
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, executable=True)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+    with store._tx():  # another job already failed with this class
+        store._put_record_v2(
+            run,
+            "audit-failure-latch",
+            "run",
+            {"error": latch_error, "job_id": "00" * 32, "at": network.now - latch_age},
+        )
+    hostile_launch(monkeypatch)
+    with pytest.raises(RecursionError):
+        store.execute_audit_v2(run, job["job_id"], execute_request(network, A, job))
+    row = lease_row(store, job["job_id"])
+    assert (row["state"], row["attempts"]) == (("queued", 1) if booked else ("running", 1))
+
+
+def test_a_failure_after_the_lease_ran_out_belongs_to_the_expiry(network, monkeypatch):
+    """The beacon row is stored but the push thread has not reached the guard yet: the lease
+    already ran out, so the failure is not booked as the executor's (no latch, no new cause)."""
+    from hypertrain.auditor import worker
+
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, executable=True)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+    store._services_v2.clear()  # no beacon push reaps the lease for us
+
+    def late(job_, directory, **kwargs):
+        store._lease_guards_v2[job["job_id"]].advance = lambda verified_beacon: None
+        network.push(job["lease_expires"])
+        raise RecursionError("hostile executor host")
+
+    monkeypatch.setattr(worker, "launch_island", late)
+    with pytest.raises(RecursionError):
+        store.execute_audit_v2(run, job["job_id"], execute_request(network, A, job))
+    assert failure_cause(store, run, job) == "EXECUTOR_INTERRUPTED"
+    assert lease_row(store, job["job_id"])["state"] == "queued"
+
+
+def test_a_cancelled_guard_is_left_to_the_beacon(network, monkeypatch):
+    """Mutant guard (green before and after): a wall timer or a revoke already cancelled the
+    guard, so the verified beacon owns the expiry and the fail-fast must not book it."""
+    from hypertrain.auditor import worker
+
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, executable=True)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+
+    def cancelled(job_, directory, **kwargs):
+        store._lease_guards_v2[job["job_id"]].cancelled.set()
+        raise IslandFailure("cancelled")
+
+    monkeypatch.setattr(worker, "launch_island", cancelled)
+    with pytest.raises(IslandFailure):
+        store.execute_audit_v2(run, job["job_id"], execute_request(network, A, job))
+    assert lease_row(store, job["job_id"])["state"] == "running"
+
+
+def test_a_store_side_failure_before_the_executor_boundary_keeps_the_lease(network, monkeypatch):
+    """Mutant guard (green before and after): the handler is scoped to the executor boundary, a
+    storage error in the preparation keeps today's behaviour (the auditor may retry)."""
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, executable=True)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+    real_put = store.objects.put
+
+    def disk_full(data):
+        if b'"audit_job_hash"' in data:  # the lease descriptor, written just before the replay
+            raise OSError("no space left on device")
+        return real_put(data)
+
+    monkeypatch.setattr(store.objects, "put", disk_full)
+    with pytest.raises(OSError):
+        store.execute_audit_v2(run, job["job_id"], execute_request(network, A, job))
+    row = lease_row(store, job["job_id"])
+    assert (row["state"], row["attempts"]) == ("running", 1)
