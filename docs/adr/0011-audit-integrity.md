@@ -967,10 +967,15 @@ the table as covering them.
 
 **A. The mechanism**
 
-1. **The table is data.** `challenge/exit_v2.py` holds `Wait` (an enum of the states), `Row`
-   (blocker, bound, exit, blame, sanction, driver, test) and `TABLE`. A bound is an anchor of the round
-   schedule plus one symbolic term. A test asserts that every `Wait` has a row, every bound is no later
-   than the round's horizon, and every named test exists.
+1. **The bounds are data, the table is this ADR's.** `challenge/exit_v2.py` holds `Wait` (an enum of the
+   states, with the two refusals at the door of decision 21), `BOUNDS` (one function of the round
+   schedule per state, no new constant), the pure planner and the blame rule. The table above is the one
+   table; the code does not repeat its prose, which would drift. A test asserts that every `Wait` has a
+   bound, that each is a value of the round schedule no later than one round past the end of the second
+   audit window, and that every exit the planner books has a seizure reason (decision 12). The bound of
+   row 1 in code is its outer one (a turn cannot outlive its job, so the end of the second audit window
+   plus one); the nearer ones are Part 1's. The lag after which the master counts a pause (decision 5)
+   is the single constant `MAX_LAG_ROUNDS`, shared with the freshness gates of the store.
 2. **One reaper on `push_beacon`**, after the dispute reaper and before the trial reaper: its own
    transaction, one savepoint per unclosed round, a run-level guard so that nothing reaches the beacon
    route after the beacon committed, failures journaled as `exit-failed` and rewritten only when they

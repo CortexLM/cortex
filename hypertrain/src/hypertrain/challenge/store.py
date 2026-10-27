@@ -41,6 +41,7 @@ from hypertrain.beacon import BeaconError, BeaconRound
 from hypertrain.challenge import audit_cooldown_v2
 from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.disputes_v2 import EXCLUSION_ABANDONED, Contest, DisputesV2
+from hypertrain.challenge.exit_v2 import MAX_LAG_ROUNDS
 from hypertrain.data.assignment import assign_round
 from hypertrain.data.store import (
     CorruptObjectError,
@@ -2188,7 +2189,7 @@ class ChallengeStore:
         emitted = (
             int(self.clock()) - manifest.training.beacon.genesis_time
         ) // manifest.training.beacon.period + 1
-        if now < 1 or now < emitted - 2:
+        if now < 1 or now < emitted - MAX_LAG_ROUNDS:
             raise ChallengeError(503, "beacon infrastructure paused")
 
     def _fresh_v2(self, manifest: RunManifestV2, operation: str, rnd: int | None = None) -> int:
@@ -2210,7 +2211,7 @@ class ChallengeStore:
             # Test-only functional CPU evidence; never a production BLS qualification.
             b = self._beacon_v2(pin)
             emitted = (int(self.clock()) - manifest.training.beacon.genesis_time) // 3 + 1
-            if now < emitted - 2:
+            if now < emitted - MAX_LAG_ROUNDS:
                 self._db.execute(
                     "UPDATE beacon_pins_v2 SET paused=1,reason='STALE' "
                     "WHERE run_id=? AND operation_id=?",
@@ -2241,7 +2242,7 @@ class ChallengeStore:
                     now_seconds=int(self.clock()),
                     genesis_seconds=manifest.training.beacon.genesis_time,
                     period_seconds=manifest.training.beacon.period,
-                    max_lag_rounds=2,
+                    max_lag_rounds=MAX_LAG_ROUNDS,
                 )
             except BeaconUnavailable:
                 raise ChallengeError(
