@@ -2895,16 +2895,7 @@ class ChallengeStore:
                                 evidence_hash=result["contest"]["evidence_hash"],
                             )
                         if action in ("dispute", "resolution"):
-                            w = result["contest"]["w"]
-                            finality = self._record_v2(run_id, "finality", str(w))
-                            pending = self._db.execute(
-                                "SELECT COUNT(*) FROM disputes_v2 "
-                                "WHERE json_extract(turn,'$.contest.w')=? "
-                                "AND json_extract(turn,'$.resolution') IS NULL",
-                                (w,),
-                            ).fetchone()[0]
-                            finality["unresolved_disputes"] = pending
-                            self._put_record_v2(run_id, "finality", str(w), finality)
+                            self._recount_disputes_v2(run_id, result["contest"]["w"])
                         if action == "resolution":
                             disputes.settle_lock(result["dispute_id"], now=now)
                             self._put_record_v2(
@@ -6043,6 +6034,16 @@ class ChallengeStore:
             )
         ]
 
+    def _recount_disputes_v2(self, run_id: str, w: int) -> None:
+        status = self._record_v2(run_id, "finality", str(w))
+        status["unresolved_disputes"] = self._db.execute(
+            "SELECT COUNT(*) FROM disputes_v2 "
+            "WHERE json_extract(turn,'$.contest.w')=? "
+            "AND json_extract(turn,'$.resolution') IS NULL",
+            (w,),
+        ).fetchone()[0]
+        self._put_record_v2(run_id, "finality", str(w), status)
+
     def _persist_anchor_v2(self, manifest: RunManifestV2, anchor: Any, cache: Any) -> None:
         from hypertrain.auditor.replay import tensor_root
         from hypertrain.trainer.compress import state_hash
@@ -8942,15 +8943,7 @@ class ChallengeStore:
             result = disputes.timeout(dispute_id, (proofs[0], proofs[1]), now=self._now(self._db))
             if result.resolution is not None:
                 disputes.settle_lock(dispute_id, now=self._now(self._db))
-                w = result.contest.w
-                status = self._record_v2(run_id, "finality", str(w))
-                status["unresolved_disputes"] = self._db.execute(
-                    "SELECT COUNT(*) FROM disputes_v2 "
-                    "WHERE json_extract(turn,'$.contest.w')=? "
-                    "AND json_extract(turn,'$.resolution') IS NULL",
-                    (w,),
-                ).fetchone()[0]
-                self._put_record_v2(run_id, "finality", str(w), status)
+                self._recount_disputes_v2(run_id, result.contest.w)
         disputes.notify()
         self._notify_processes_v2()
         return result.body()
