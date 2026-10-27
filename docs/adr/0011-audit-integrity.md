@@ -1113,7 +1113,9 @@ the table as covering them.
     tolerate one, D44's two need six) and enforced in `scripts/ops/live_operator.py open` (`--tolerate`,
     default 1; `--tolerate 0` opens four, explicitly), not in `open_round_v2`: the store keeps the protocol
     minimum of four, the protected-service open stays at exactly four, and a store floor of five would be a
-    new constant that breaks every four-member fixture and the TEST runbook.
+    new constant that breaks every four-member fixture and the TEST runbook. The detail is
+    `<CODE>: <message of the exception>`; the two rollback routes mapped a `TapeError` to a bare 409
+    before the handlers existed and keep that message.
 
 ### The tests: one per waiting state, each proves the run continues
 

@@ -498,6 +498,15 @@ decision; there is no void round. Call `audits` once `d_audit` has passed and be
 twice `lease_rounds`; a later call answers 503 for every roster and the round cannot be
 audited. Open rounds with five or more members when an eviction is plausible.
 
+A request that the allocation caps or the finality rules refuse is a 409 whose detail starts
+with a code, on every route, and writes nothing. `ROUND_INFEASIBLE: <reason>`: the members
+cannot carry one complete update (opening a round with fewer than four eligible members, a
+rollback that would leave fewer, an aggregation over an input set or delta it cannot weigh).
+`ROUND_BLOCKED: <reason>`: finality or the tape refuses the call (opening round w+2 before
+round w+1 exists or while w is unresolved, applying a round whose predecessor is not applied,
+settling a round that cannot settle, a tape that fails its own checks). The two rollback routes
+answer a tape error with its bare message, as before.
+
 Regional relays are transport/cache only, not regional arithmetic aggregators.
 An upload opportunity acknowledgment is not custody. Completion failure requires
 an exact complete receipt or full original chunk coverage, authenticated healthy
