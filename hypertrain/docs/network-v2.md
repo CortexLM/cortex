@@ -290,13 +290,16 @@ hashes. It is released only when the admission is not `BANNED` and has no pendin
 lock in the outbox, every round whose roster lists it is closed, none of its hotkeys has
 unvested rewards, it is not live (`ACTIVE`, or `PROBATION` with four clean trials, until its
 screen ends), and the last reward origin of its hotkeys has matured. The bond is burned by the
-service and never through a route, in three cases: a referee verdict of fraud against the miner
-(it also burns the coldkey's unvested rewards and bans the admission; `LOCK_BANNED` follows), a
-round-stage audit mismatch that the caller confirmed as the miner's (`reason="AUDIT_MISMATCH"`:
-the admission is suspended with one strike, and its coldkey stays bound as in probation), and a
-roster member that never committed (`reason="NO_SHOW"`). The last two burn the bond alone. An
-uncontested `MISMATCH`, an infrastructure closure and a verdict against the auditor leave it
-intact.
+service and never through a route. Today one case is wired: a referee verdict of fraud against
+the miner, which burns the bond, bans the admission (`LOCK_BANNED` follows) and, while the
+admission still holds a residual lock, burns the coldkey's unvested rewards with it. Two more
+reasons exist as internal hooks, `Admission.seize_bond(reason="AUDIT_MISMATCH")` for a
+round-stage audit mismatch that its caller confirmed as the miner's (the admission is suspended
+with one strike, and its coldkey stays bound as in probation) and `reason="NO_SHOW"` for a
+roster member that never committed; both burn the bond alone, and nothing in this tree calls
+them yet: they wait for the audit lot. An uncontested `MISMATCH`, an infrastructure closure and
+a verdict against the auditor leave the bond intact. The status route reads the run's rounds
+once per call for an admission that holds a bond.
 
 Production funding is one coordinator-signed `ProductionBootstrap`, posted as an
 `ht/2` envelope to `POST /v2/runs/{run_id}/admin/bootstrap` (admin bearer). The
