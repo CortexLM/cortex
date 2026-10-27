@@ -246,7 +246,10 @@ rounds. The challenge deadline is seed + 100 whenever the challenge is requested
 proof must be accepted by then. A challenge left unproven past its deadline is closed
 `EXPIRED` by the master at the next beacon push (or at the next challenge request, which
 frees the place first). Nobody is suspended: the miner keeps its state, its clean trials and
-its screen, and a later request answers 409 `CHALLENGE_EXPIRED` until a re-seed exists. The
+its screen, and a later request answers 409 `CHALLENGE_EXPIRED` until a re-seed exists. A
+beacon pusher that was down or slowed (an operator changed the cadence during a trial, the S13
+incident) is the same case: its catch-up carries the beacon past the deadline, and the miner is
+refused, not suspended. The
 deadline round itself still accepts a proof. A trial whose proof was accepted is never expired
 by the clock, and its finalization may follow the deadline: the miner may re-post the exact
 accepted proof and screen after their deadline to run a finalization that failed (the proof
