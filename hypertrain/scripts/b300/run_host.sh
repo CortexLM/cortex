@@ -10,6 +10,10 @@
 # miner config and key directory are bind-mounted by path and never printed.
 # shellcheck disable=SC2329  # step functions and on_signal are invoked through step() and trap
 set -euo pipefail
+# The input checks below are regexes: in en_US.UTF-8 [0-9] and [a-z] match thousands of other code
+# points (Arabic-Indic digits, accented letters), and the arithmetic that follows only prints an
+# error and goes on.
+export LC_ALL=C
 
 DEFAULT_IMAGE=ghcr.io/cortexlm/cortex/hypertrain-gpu@sha256:f4b2885f2dc89478da645b9f5e6f02891cd3309ef0a1f2aa0de04328e11cba0f
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -68,6 +72,11 @@ die() { echo "run_host: $*" >&2; exit 2; }
 # Operator text is matched against a regex before it reaches arithmetic or a command line: bash
 # reads 08 as an invalid octal number and evaluates $(...) inside $(( )), so a number is never
 # computed from an unchecked string and every conversion is forced to base 10 (10#).
+# aws joins its --exclude/--include patterns to the source directory without escaping it, so a
+# [1], ? or * in the results root defeats the upload allowlist (everything would be uploaded); a
+# colon is a docker bind-mount separator; a relative root is a docker volume name.
+[[ $results_root =~ ^/[A-Za-z0-9._/+@=,-]*$ ]] ||
+  die "--results-root must be an absolute path of letters, digits and ._/+@=,-: $results_root"
 [[ $image =~ ^[a-z0-9][a-z0-9./_-]*@sha256:[0-9a-f]{64}$ ]] || die "image must be REPO@sha256:<64 hex>: $image"
 [[ $host =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "bad host name: $host"
 [[ $duration =~ ^([0-9]{1,6})([hm]?)$ ]] || die "bad --duration (3h, 90m or seconds): $duration"

@@ -638,7 +638,21 @@ def test_duration_injection_is_refused_before_it_is_evaluated(env, tmp_path):
     assert docker_calls(tmp_path) == []
 
 
-@pytest.mark.parametrize("bad", ["1.5h", "h", "3d", "1h30m", "0", "0h", "-5"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "1.5h",
+        "h",
+        "3d",
+        "1h30m",
+        "0",
+        "0h",
+        "-5",
+        "1000000",  # seven digits: past the cap that keeps 10#N * unit from wrapping
+        "9223372036854775807",
+        "5124095576030432h",  # would wrap to 3584 s
+    ],
+)
 def test_malformed_duration_is_refused_before_docker(env, tmp_path, bad):
     p = run(env, tmp_path, "--duration", bad)
     assert p.returncode == 2 and "--duration" in p.stderr, p.stdout + p.stderr
@@ -798,7 +812,13 @@ def test_upload_ships_the_evidence_and_nothing_else(env, tmp_path):
     (out / "miner").mkdir(parents=True)
     (out / "miner/miner.toml").write_text('keyfile = "hk.bin"\n')
     (out / "hk.bin").write_text(SENTINEL)
-    (out / "notes.txt").write_text("stray")
+    (out / "miner-prod").mkdir()
+    (out / "steps").mkdir()
+    # One stray per extension and directory the allowlist names: a pattern widened to *.json,
+    # *.log, *.tsv, steps/* or miner-prod/* must show up here.
+    strays = ("notes.txt", "stray.json", "x.log", "extra.tsv", "steps/x.txt", "miner-prod/o.json")
+    for stray in strays:
+        (out / stray).write_text("stray")
     p = run(env, tmp_path, "--upload", "s3://bucket/b300")
     assert p.returncode == 0, p.stdout + p.stderr
     assert uploaded(tmp_path) == EVIDENCE
@@ -1192,3 +1212,68 @@ def test_a_custom_container_prefix_names_the_containers(env, tmp_path):
     assert p.returncode == 0, p.stdout + p.stderr
     (probe,) = [c for c in docker_calls(tmp_path) if c[0] == "run"]
     assert probe[probe.index("--name") + 1] == "ht-other-gpu_probe"
+
+
+@pytest.mark.parametrize("where", ["h1-keys", "../res"])
+def test_a_miner_directory_beside_the_results_directory_is_accepted(env, tmp_path, where):
+    # Prefix siblings of the results directory are not inside it and not above it.
+    prod = prod_env((tmp_path / "results" / where).resolve())
+    p = run({**env, **prod}, tmp_path, "--prod")
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+def test_the_miner_directory_guard_does_not_depend_on_the_upload(env, tmp_path):
+    prod = prod_env(tmp_path / "results/h1/miner")
+    p = run({**env, **prod}, tmp_path, "--prod")
+    assert p.returncode == 2 and "inside the results directory" in p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+# --- text that is not ASCII, and a results root the upload filters cannot be trusted with -------
+
+
+def has_locale(name: str) -> bool:
+    out = subprocess.run(["locale", "-a"], capture_output=True, text=True, check=False).stdout
+    return name.lower().replace("-", "") in out.lower().replace("-", "")
+
+
+@pytest.mark.skipif(not has_locale("en_US.utf8"), reason="needs the en_US.UTF-8 locale")
+@pytest.mark.parametrize(
+    "var,value",
+    [
+        ("HT_B300_STOP_GRACE", "５"),  # fullwidth digit five
+        ("HT_B300_POLL_SECONDS", "٣"),  # Arabic-Indic digit three
+        ("HT_B300_CONTAINER_PREFIX", "ht-é"),
+        ("HT_B300_EXPECT_GPUS", "٨"),
+    ],
+)
+def test_non_ascii_digits_and_letters_are_refused_in_a_utf8_locale(env, tmp_path, var, value):
+    # [0-9] and [a-z] match thousands of other code points in en_US.UTF-8; the arithmetic that
+    # follows prints an error and goes on, so the script itself must use the C locale.
+    p = run({**env, "LC_ALL": "en_US.UTF-8", var: value}, tmp_path)
+    assert p.returncode == 2 and var in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.skipif(not has_locale("en_US.utf8"), reason="needs the en_US.UTF-8 locale")
+@pytest.mark.parametrize("flag,value", [("--duration", "٣h"), ("--host", "é")])
+def test_non_ascii_arguments_are_refused_in_a_utf8_locale(env, tmp_path, flag, value):
+    p = run({**env, "LC_ALL": "en_US.UTF-8"}, tmp_path, flag, value)
+    assert p.returncode == 2 and flag.lstrip("-").replace("host", "host name") in p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize("root", ["{}/res[1]", "{}/a?b", "{}/a*b", "{}/a:rw", "rel/path", ""])
+def test_the_results_root_is_an_absolute_path_without_filter_or_mount_characters(
+    env, tmp_path, root
+):
+    # aws joins its filter patterns to the source directory unescaped: a [1] in the path turns
+    # --exclude '*' into a pattern that matches nothing, and everything is uploaded. Every root
+    # lives under tmp_path (the relative one through cwd) so that a script that accepts it cannot
+    # write anywhere else.
+    argv = ["bash", str(SCRIPT), "--results-root", root.format(tmp_path), "--host", "h1"]
+    p = subprocess.run(  # noqa: S603 - fixed argv
+        argv, env=env, cwd=tmp_path, capture_output=True, text=True, timeout=30, check=False
+    )
+    assert p.returncode == 2 and "--results-root" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
