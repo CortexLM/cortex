@@ -309,15 +309,20 @@ a screen that lasts to the round's `d_final` (`open` refuses a hotkey whose scre
 names the round). The operator opens it, the miners upload, and the operator settles it. Open it with five when an
 eviction is plausible: a miner that never commits is left out (`excluded`, reason `NO_SHOW`) and
 the others are audited and paid, while four miners cannot lose anyone (`audits` answers 409
-`ROUND_INFEASIBLE`). `finalize` lists the inputs of the applied tape (read after the aggregate), less any admission
-banned since. The operator runs `scripts/ops/live_operator.py` inside the TEST challenge:
+`ROUND_INFEASIBLE`). The miner left out is also sanctioned unless the master's beacon was late:
+its bond is burned and it gets a strike, a probation the first time and a suspension the second
+time inside the strike window (D63, ADR 0011 Part 8). A roster of R
+members tolerates R - 4 left out, so `open` asks for it: `--tolerate K` (default 1) refuses fewer
+than 4 + K hotkeys, and the four-miner round below tolerates nobody, which it says with
+`--tolerate 0`. `finalize` lists the inputs of the applied tape (read after the aggregate), less
+every admission of a coldkey convicted since. The operator runs `scripts/ops/live_operator.py` inside the TEST challenge:
 
 ```bash
 L="docker exec -i hypertrain-test-challenge python -I - --master http://127.0.0.1:8000 \
   --run-id $RID --state-dir /data --coord-key /run/secrets/coord.key \
   --admin-token-file /run/secrets/admin.token"
 O=hypertrain/scripts/ops/live_operator.py
-ssh root@s100 "$L open --w 0 --hotkey H0 --hotkey H1 --hotkey H2 --hotkey H3 \
+ssh root@s100 "$L open --w 0 --hotkey H0 --hotkey H1 --hotkey H2 --hotkey H3 --tolerate 0 \
   --offsets 3,6,80,82,150,180" < $O     # gap 98: one lease window; end with 282 (gap 200) to fit a replacement lease
 ATEN_CPU_CAPABILITY=avx2 $PY -I $T/cpu_miners.py round DIR 0 0 1 2 3   # one miner at a time
 ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID 0" < $T/round_status.py

@@ -154,6 +154,11 @@
   (`master-acceptance`). The member is still left out of the round, its `exit-sanction` row is
   `WAIVED` and nothing happens to its admission. A member that uploads and then withholds its
   delta manifest is waived the same way (D59). ADR 0011 Part 8, decision 5.
+- `scripts/ops/live_operator.py open` takes `--tolerate K` (default 1) and refuses a roster of
+  fewer than 4 + K hotkeys, naming the arithmetic: a roster of R members tolerates R - 4 left out
+  (the Q/4 caps need four), so five tolerate one and six tolerate two. `--tolerate 0` opens four
+  on purpose, as the TEST runbook does. The store keeps the protocol minimum of four. A script
+  that opens fewer than five hotkeys must pass `--tolerate 0`. ADR 0011 Part 8, decision 27.
 
 ### Fixed
 - A member convicted of training fraud between the aggregate and the finalize of a round is no

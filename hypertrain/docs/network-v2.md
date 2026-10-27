@@ -527,7 +527,13 @@ left out, a `round-exit` record names the reason (`INFEASIBLE`) and the run stay
 until an operator decision; there is no void round. Call `audits` once `d_audit` has passed
 and before `absolute` minus one round, `absolute` being the smaller of `d_final` and
 `d_audit` plus twice `lease_rounds`; a later call answers 503 for every roster and the round
-cannot be audited. Open rounds with five or more members when an eviction is plausible.
+cannot be audited.
+
+The minimum roster is arithmetic: the caps of the aggregation policy are protocol constants and
+a round needs four members, so a roster of R members tolerates R - 4 left out. Four tolerate
+none, five tolerate one, six tolerate two. `scripts/ops/live_operator.py open --tolerate K`
+(default 1) refuses a roster of fewer than 4 + K hotkeys and names the arithmetic; `--tolerate 0`
+opens four on purpose. The store itself keeps the protocol minimum of four.
 
 A member that committed and never posted its leaves has no audit: its queued job is dropped at
 the first `absolute` (`excluded`, reason `NO_SHOW`, stage `leaves`), without a second window, and

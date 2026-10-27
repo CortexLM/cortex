@@ -123,9 +123,13 @@ def master_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     return calls
 
 
-def open_args(master_args: list[str], gap: int) -> list[str]:
+def open_args(
+    master_args: list[str], gap: int, *, hotkeys: int = 5, tolerate: int | None = None
+) -> list[str]:
     offsets = ",".join(str(x) for x in window(gap))
-    return [*master_args, "open", "--w", "0", "--hotkey", "h0", "--offsets", offsets]
+    roster = [arg for i in range(hotkeys) for arg in ("--hotkey", f"h{i}")]
+    extra = [] if tolerate is None else ["--tolerate", str(tolerate)]
+    return [*master_args, "open", "--w", "0", *roster, *extra, "--offsets", offsets]
 
 
 @pytest.mark.parametrize("gap", [98, 100, 101, 192, 200])
@@ -174,6 +178,53 @@ def test_open_refuses_a_hotkey_whose_screen_ends_before_the_round_does(
     if refused:
         message = f"screen of {hotkey} ends at round {d_final - 1}, before d_final {d_final}"
         assert message in str(raised.value)
+
+
+# A roster of R members tolerates R - 4 silent ones (the Q/4 caps need four members): the default
+# asks for one, so four hotkeys must be asked for with --tolerate 0.
+@pytest.mark.parametrize(
+    ("hotkeys", "tolerate"),
+    [(5, None), (4, 0), (6, 2)],
+    ids=["five-by-default", "four-asked-for", "six-for-two"],
+)
+def test_cli_open_accepts_a_roster_that_tolerates_what_was_asked(
+    master_args: list[str],
+    master_calls: list[tuple[str, str]],
+    hotkeys: int,
+    tolerate: int | None,
+) -> None:
+    with pytest.raises(Reached):
+        live_operator.main(open_args(master_args, 98, hotkeys=hotkeys, tolerate=tolerate))
+    assert master_calls == [("GET", "")]
+
+
+@pytest.mark.parametrize(
+    ("hotkeys", "tolerate"),
+    [(4, None), (5, 2), (3, 0)],
+    ids=["four-by-default", "five-for-two", "three-for-none"],
+)
+def test_cli_open_refuses_a_roster_that_tolerates_less_than_asked(
+    master_args: list[str],
+    master_calls: list[tuple[str, str]],
+    hotkeys: int,
+    tolerate: int | None,
+) -> None:
+    asked = 1 if tolerate is None else tolerate
+    with pytest.raises(SystemExit) as refused:
+        live_operator.main(open_args(master_args, 98, hotkeys=hotkeys, tolerate=tolerate))
+    message = str(refused.value)
+    assert master_calls == []
+    assert f"{hotkeys} hotkeys tolerate {max(hotkeys - 4, 0)}" in message
+    assert f"--tolerate {asked}" in message
+    assert f"open at least {4 + asked} hotkeys" in message
+
+
+def test_cli_open_refuses_a_negative_tolerance(
+    master_args: list[str], master_calls: list[tuple[str, str]]
+) -> None:
+    with pytest.raises(SystemExit, match="--tolerate must be >= 0"):
+        live_operator.main(open_args(master_args, 98, hotkeys=3, tolerate=-1))
+    assert master_calls == []
 
 
 @pytest.mark.parametrize(
@@ -336,6 +387,8 @@ def test_open_chains_to_the_finalize_of_the_round_before_or_to_the_evidence_of_i
         return {}
 
     monkeypatch.setattr(live_operator.Master, "call", call)
+    # one member is enough to see where the opening chains; the floor has its own tests above
+    monkeypatch.setattr(live_operator, "check_roster_floor", lambda *_: None)
     args = [*master_args, "open", "--w", "1", "--hotkey", hotkey, "--offsets"]
     args.append(",".join(str(x) for x in window(98)))
 

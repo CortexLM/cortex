@@ -105,6 +105,24 @@ def refuse_service_run(m: Master) -> None:
         raise SystemExit("run has a service-admission record; this helper refuses it")
 
 
+# The Q/4 caps of the aggregation policy are protocol constants: a round needs four members.
+MIN_MEMBERS = 4
+
+
+def check_roster_floor(hotkeys: list[str], tolerate: int) -> None:
+    """A roster of R members tolerates R - 4 silent ones (ADR 0011 Part 8): refuse a roster that
+    tolerates fewer than asked, with the arithmetic. `--tolerate 0` opens four on purpose."""
+    if tolerate < 0:
+        raise SystemExit("--tolerate must be >= 0")
+    if len(hotkeys) < MIN_MEMBERS + tolerate:
+        raise SystemExit(
+            f"{len(hotkeys)} hotkeys tolerate {max(len(hotkeys) - MIN_MEMBERS, 0)} silent "
+            f"members (a round needs {MIN_MEMBERS}, so R tolerates R - {MIN_MEMBERS}) and "
+            f"--tolerate {tolerate} asks for {tolerate}: open at least {MIN_MEMBERS + tolerate} "
+            "hotkeys, or lower --tolerate"
+        )
+
+
 def check_open_shape(w: int, hotkeys: list[str], offsets: list[int]) -> None:
     if w < 0 or not hotkeys or len(set(hotkeys)) != len(hotkeys):
         raise SystemExit("need w >= 0 and unique hotkeys")
@@ -289,6 +307,13 @@ def main(argv: list[str] | None = None) -> int:
     o.add_argument("--w", type=int, required=True)
     o.add_argument("--hotkey", action="append", required=True)
     o.add_argument("--offsets", required=True, help="d_open..d_final beacon offsets, 6 ints")
+    o.add_argument(
+        "--tolerate",
+        type=int,
+        default=1,
+        help="silent members the roster must survive (default 1: open at least 5 hotkeys); "
+        "0 opens four",
+    )
     sub.add_parser("audits").add_argument("--w", type=int, required=True)
     sub.add_parser("finalize").add_argument("--w", type=int, required=True)
     args = parser.parse_args(argv)
@@ -298,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError:
             raise SystemExit("offsets must be integers") from None
         check_open_shape(args.w, args.hotkey, offsets)
+        check_roster_floor(args.hotkey, args.tolerate)
     m = Master(args)
     if args.command == "open":
         out = open_round(m, args.w, args.hotkey, offsets)
