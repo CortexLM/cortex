@@ -154,3 +154,49 @@ def test_an_image_without_kimi_still_leaves_a_failed_json(
         fresh.main()
     doc = json.loads(out.read_text())
     assert doc["ok"] is False and "stale" not in doc and "kimi_tiny" in doc["error"]
+
+
+B300 = {"capability": [10, 3], "sm_count": 148}
+HOST = {
+    "torch": "2.14.0+cu130",
+    "torch_cuda": "13.0",
+    "device_count": 8,
+    "devices": [B300] * 8,
+    "smoke": {"ok": True},
+    "arch_list": [],
+}
+
+
+def test_the_expected_host_passes_every_check() -> None:
+    assert set(gpu_probe.checks(HOST, 8, (10, 3)).values()) == {True}
+
+
+@pytest.mark.parametrize(
+    ("change", "failed"),
+    [
+        ({"torch": "2.13.0+cu130"}, "torch_cu130"),
+        ({"torch_cuda": "12.9"}, "torch_cu130"),
+        ({"device_count": 7, "devices": [B300] * 7}, "gpu_count"),
+        ({"device_count": 9, "devices": [B300] * 9}, "gpu_count"),  # more is another host too
+        ({"devices": [B300] * 7 + [{**B300, "capability": [10, 0]}]}, "capability"),
+        ({"devices": [B300] * 7 + [{**B300, "sm_count": 132}]}, "same_sm_count"),
+        ({"smoke": {"ok": False}}, "bitwise_smoke"),
+    ],
+    ids=["torch", "cuda", "fewer", "more", "mixed-capability", "mixed-sm", "smoke"],
+)
+def test_one_wrong_fact_fails_exactly_its_check(change: dict[str, object], failed: str) -> None:
+    checks = gpu_probe.checks({**HOST, **change}, 8, (10, 3))
+    assert [name for name, ok in checks.items() if not ok] == [failed]
+
+
+@pytest.mark.parametrize(("smoke_ok", "rc"), [(True, 0), (False, 1)])
+def test_the_exit_code_and_the_json_follow_the_verdict(
+    smoke_ok: bool, rc: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "gpu_probe.json"
+    monkeypatch.setattr(gpu_probe, "probe", lambda *_: {**HOST, "smoke": {"ok": smoke_ok}})
+    argv = ["gpu_probe.py", "--out", str(out), "--expect-gpus", "8", "--expect-cc", "10.3"]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gpu_probe.main() == rc
+    doc = json.loads(out.read_text())
+    assert doc["ok"] is smoke_ok and doc["checks"]["bitwise_smoke"] is smoke_ok
