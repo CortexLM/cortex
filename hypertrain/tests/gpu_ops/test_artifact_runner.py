@@ -398,6 +398,87 @@ def test_serve_refuses_a_request_with_a_url_it_would_not_print_and_prints_none(
     assert run.code == 2 and CANARY not in run.err
 
 
+@pytest.mark.parametrize(
+    ("field", "url"),
+    [
+        ("declare_put", "http://r2.test/bkt/declare.json?a=b"),
+        ("declare_put", "http://10.0.0.5/bkt/declare.json?a=b"),
+        ("declare_put", "ftp://r2.test/bkt/declare.json"),
+        ("declare_put", "https://user:pass@r2.test/bkt/declare.json?a=b"),
+        ("declare_put", "https://r2.test/bkt/declare.json?a=b#fragment"),
+        ("declare_put", "/bkt/declare.json?a=b"),
+        ("offer_get", "https://elsewhere.test/bkt/offer.json?a=b"),
+        ("offer_get", "https://r2.test:8443/bkt/offer.json?a=b"),
+        ("offer_get", 7),
+    ],
+    ids=[
+        "plain-http",
+        "plain-http-private-address",
+        "other-scheme",
+        "user-info",
+        "fragment",
+        "no-origin",
+        "offer-on-another-host",
+        "offer-on-another-port",
+        "offer-not-a-string",
+    ],
+)
+def test_serve_refuses_urls_that_are_not_https_on_one_origin(
+    monkeypatch: pytest.MonkeyPatch, field: str, url: Any
+) -> None:
+    launched: list[int] = []
+
+    def never(*args: Any) -> int:
+        launched.append(1)
+        return 0
+
+    run = drive(TimedFakeR2(), monkeypatch, block={field: url}, answering=False, launch=never)
+    assert (run.code, launched) == (2, []) and "not acceptable" in run.err
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"workers": 0},
+        {"workers": 33},
+        {"workers": True},
+        {"part_bytes": 1 * MiB},
+        {"part_bytes": 6 * MiB},
+        {"part_bytes": 128 * MiB},
+        {"reserve_seconds": -1},
+        {"retry_attempts": 0},
+        {"retry_attempts": 11},
+        {"timeout_s": 0},
+        {"poll_ms": 1},
+        {"offer_wait_s": 0},
+        {"version": 2},
+        {"surprise": 1},
+        {"declare_put": None},
+    ],
+    ids=str,
+)
+def test_serve_refuses_a_request_block_outside_what_it_knows(
+    monkeypatch: pytest.MonkeyPatch, change: dict[str, Any]
+) -> None:
+    run = drive(TimedFakeR2(), monkeypatch, block=change, answering=False)
+    assert run.code == 2 and "request artifact" in run.err
+
+
+def test_serve_refuses_a_request_block_with_a_field_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = TimedFakeR2()
+    challenge = Challenge(fake, client_for(fake))
+    block = challenge.request_block()
+    del block["timeout_s"]
+    raw = request_bytes(FILES, block)
+    out, err = io.BytesIO(), io.StringIO()
+    code = runner.serve(
+        io.BytesIO(package(FILES, raw)), out, err, probe=probe_ok, launch=launch_tree
+    )
+    assert code == 2 and "other fields" in err.getvalue()
+
+
 @pytest.mark.parametrize(("stage", "code"), [("preflight", 11), ("transfer", 10)])
 def test_serve_prints_no_url_when_the_http_layer_raises_one_in_its_message(
     monkeypatch: pytest.MonkeyPatch, stage: str, code: int
@@ -476,6 +557,29 @@ def test_throttling_is_waited_out_as_the_store_asks(
     assert waits[2] == runner.RETRY_CAP and waits[3] < 1
 
 
+def test_a_transfer_past_its_deadline_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch, fast_clock: Clock
+) -> None:
+    sent: list[str] = []
+    monkeypatch.setattr(runner, "http_send", lambda *args: sent.append("x") or (200, {}, b""))
+    block = Challenge(TimedFakeR2(), client_for(TimedFakeR2())).request_block()
+    spec = runner.Transfer(block, deadline=fast_clock.time())  # already reached
+    with pytest.raises(runner.TransferError, match="deadline reached"):
+        runner._call(spec, "GET", "https://r2.test/x")
+    assert sent == []
+
+
+def test_serve_accepts_a_declaration_whose_first_reply_was_lost(
+    monkeypatch: pytest.MonkeyPatch, fast_clock: Clock
+) -> None:
+    fake = TimedFakeR2()
+    fake.fault("PutObject", 503, after=True)  # the declaration is stored, its reply is lost
+    run = drive(fake, monkeypatch)
+    assert run.code == 0, run.err
+    declared = [row[2] for row in fake.served("PutObject", "declare.json")]
+    assert declared == [503, 412]  # the retry meets the stored object and takes it as its own
+
+
 # -- the real client on a real socket ------------------------------------------------------------
 
 
@@ -512,5 +616,20 @@ def test_the_stdlib_client_reads_an_early_refusal_instead_of_a_broken_pipe() -> 
                 "PUT", f"{front.base}/x", {"x-test": "1"}, b"x" * (6 * MiB), 10, 1024
             )
             assert status == 403
+    finally:
+        front.close()
+
+
+def test_the_stdlib_client_refuses_a_reply_bigger_than_the_limit_it_was_given() -> None:
+    fake = TimedFakeR2()
+    front = serve_http(fake)
+    try:
+        client = client_for(fake, front.base)
+        fake.objects["big"] = (b"x" * (2 * MiB), {})
+        url = client.presign("GET", "big")
+        status, _, body = runner.http_send("GET", url, {}, None, 10, 3 * MiB)
+        assert (status, len(body)) == (200, 2 * MiB)
+        with pytest.raises(runner.TransferError, match="response too large"):
+            runner.http_send("GET", url, {}, None, 10, 1 * MiB)
     finally:
         front.close()

@@ -12,6 +12,7 @@ import json
 import os
 import random
 import re
+import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -255,7 +256,9 @@ BAD = [
     pytest.param(lambda d: d.update(version=True), "malformed", id="version-boolean"),
     pytest.param(lambda d: d.update(version=2), "malformed", id="version-2"),
     pytest.param(
-        lambda d: d.update(part_bytes=16 * MiB), "malformed", id="part-size-chosen-by-host"
+        lambda d: d.update(part_bytes=16 * MiB, parts=d["parts"][:1]),  # lists agree with it
+        "malformed",
+        id="part-size-chosen-by-host",
     ),
     pytest.param(lambda d: d["blocks"].pop(), "malformed", id="one-block-short"),
     pytest.param(lambda d: d["parts"].append(sha(b"x")), "malformed", id="one-part-too-many"),
@@ -323,6 +326,38 @@ def test_a_declaration_over_the_cap_is_refused_without_being_read(tmp_path: Path
     assert fake.served("GetObject", "declare.json") == []  # sized by HEAD, never fetched
     assert fake.served("HeadObject", "declare.json")
     del settings
+
+
+def test_the_declaration_is_read_by_range_even_if_the_object_grows_after_it_was_sized(
+    tmp_path: Path,
+) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    session = open_session(broker, request=b"r")
+    key = session.prefix + "declare.json"
+    small = encode(synthetic(sha(b"r"), 9 * MiB + 3))
+    http = client_for(fake).http
+    http.put(session.block["declare_put"], content=small, headers={"if-none-match": "*"})
+    fake.hooks["GetObject"] = lambda: fake.objects.__setitem__(key, (b"x" * (4 * MiB), {}))
+
+    session.start()
+    assert session.thread is not None
+    session.thread.join(10)
+
+    (read,) = fake.served("GetObject", "declare.json")
+    assert read[4] == len(small)  # the bytes HEAD announced, not the 4 MiB that replaced them
+    assert json.loads(mailbox(session, fake)[1] or b"") == {"version": 1, "refused": "malformed"}
+
+
+def test_a_declaration_url_cannot_overwrite_what_it_has_written(tmp_path: Path) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    session = open_session(broker)
+    http = client_for(fake).http
+    url, headers = session.block["declare_put"], {"if-none-match": "*"}
+    assert http.put(url, content=b"first", headers=headers).status_code == 200
+    assert http.put(url, content=b"second", headers=headers).status_code == 412
+    assert fake.objects[session.prefix + "declare.json"][0] == b"first"
 
 
 def test_the_declaration_is_read_once_whatever_the_host_does_next(tmp_path: Path) -> None:
@@ -405,7 +440,7 @@ def test_closing_while_the_upload_is_being_opened_leaves_no_open_upload(tmp_path
     session.start()
     assert entered.wait(10)  # the thread is inside CreateMultipartUpload
 
-    closer = __import__("threading").Thread(target=session.close)
+    closer = threading.Thread(target=session.close)
     closer.start()  # waits for the thread to end (bounded), then cleans
     release.set()
     closer.join(30)
@@ -475,6 +510,54 @@ def test_a_host_that_declares_other_bytes_than_it_uploads_is_refused_and_leaves_
         session.prefix + "declare.json",
         session.prefix + "offer.json",
     ]
+
+
+def test_a_part_that_is_held_but_short_is_not_a_delivered_part(tmp_path: Path) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    session = open_session(broker, request=b"r")
+    data = random.Random(8).randbytes(9 * MiB)
+    short = b"tiny"
+    plan = PartPlan(len(data), 8 * MiB)
+    s = scan(len(data), lambda off, n: data[off : off + n], plan)
+    declared = synthetic(
+        sha(b"r"),
+        len(data),
+        sha256=sha(data),
+        blocks=list(s.blocks.blocks),
+        parts=[s.part_sha256[0], sha(short)],  # the host binds part 2 to four bytes
+    )
+    client_for(fake).http.put(
+        session.block["declare_put"], content=encode(declared), headers={"if-none-match": "*"}
+    )
+    session.start()
+    assert wait_for(lambda: session.state == "offered")
+    offer = json.loads(mailbox(session, fake)[1] or b"")
+    http = client_for(fake).http
+    for url, body in zip(offer["parts"], (data[: 8 * MiB], short), strict=True):
+        sent = http.put(url, content=body, headers={"x-amz-content-sha256": sha(body)})
+        assert sent.status_code == 200
+    session.stop_thread()
+
+    assert not session.parts_held()  # part 2 is there, but at 4 bytes and not at 1 MiB + 3
+    session.close()
+
+
+def test_closing_waits_for_the_answering_thread_to_stop(tmp_path: Path) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    session = open_session(broker)
+    entered, release = fake.gate("HeadObject")
+    session.start()
+    assert entered.wait(10)  # the thread is inside a request
+
+    closer = threading.Thread(target=session.close)
+    closer.start()
+    closer.join(0.3)
+    assert closer.is_alive()  # close() does not return while the thread can still act
+    release.set()
+    closer.join(15)
+    assert not closer.is_alive()
 
 
 def test_a_container_that_exits_zero_with_a_part_missing_has_not_delivered(

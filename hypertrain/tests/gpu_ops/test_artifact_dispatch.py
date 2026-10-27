@@ -224,15 +224,50 @@ def test_an_answering_thread_that_dies_ends_the_attempt_and_removes_the_containe
     store, front = r2
     store.fault_key("HeadObject", "declare.json", None, *([503] * 40))  # the probe passes
     pool = make_pool(labels=("a",), config={"max_attempts": 1})
-    enable(tmp_path, monkeypatch, front, retry_attempts=2)
+    enable(tmp_path, monkeypatch, front, retry_attempts=2, offer_wait_seconds=60)
     home = canned.stage(tmp_path / "home")
+    started = time.monotonic()
     with pytest.raises(IslandFailure, match="offer thread: R2Error"):
         dispatch(pool, home, "audit")
+    # the container was stopped at once, not left to wait out its minute for an offer
+    assert time.monotonic() - started < 20
 
     assert_nothing_published(home)
     assert pool.toolbox.events(
         "rm"
     )  # docker rm -f of its own container, not a wait for the deadline
+
+
+def test_a_result_over_the_cap_is_refused_and_the_attempt_says_so(
+    make_pool, canned, tmp_path, monkeypatch, r2
+):
+    store, front = r2
+    pool = make_pool(labels=("a",), config={"max_attempts": 1})
+    pad(pool, tmp_path, 20)
+    enable(tmp_path, monkeypatch, front, max_artifact_bytes=1 * MiB)
+    home = canned.stage(tmp_path / "home")
+    with pytest.raises(IslandFailure, match=r"declaration refused \(too_large\)"):
+        dispatch(pool, home, "audit")
+
+    assert_nothing_published(home)
+    assert store.served("CreateMultipartUpload") == [] and store.served("UploadPart") == []
+
+
+def test_one_executor_serves_an_r2_job_and_then_a_classic_one_without_carrying_anything_over(
+    make_pool, canned, tmp_path, monkeypatch, r2
+):
+    store, front = r2
+    pool = make_pool(labels=("a",))
+    enable(tmp_path, monkeypatch, front)
+    factory = cuda_executor.load(pool.config_path)
+    first = canned.stage(tmp_path / "first")
+    dispatch(pool, first, "audit", factory=factory)
+    assert record_of(first)["artifact"]["transport"] == "r2"
+
+    store.fault_key("HeadObject", "declare.json", *([503] * 10))  # R2 is gone for the next job
+    second = canned.stage(tmp_path / "second")
+    dispatch(pool, second, "audit", factory=factory)
+    assert "artifact" not in record_of(second)
 
 
 def test_a_host_that_floods_stdout_in_r2_mode_is_cut_at_a_status_line_not_at_16_gib(

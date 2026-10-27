@@ -609,7 +609,7 @@ class ArtifactExecutor(Executor):
     def _publish(
         self, job: IslandJobV1, directory: Path, staging: Path, record: dict[str, Any], trace: bool
     ) -> Any:
-        collected = getattr(self._ctx, "collected", None)
+        collected, self._ctx.collected = getattr(self._ctx, "collected", None), None
         if collected is not None:
             record = {**record, "artifact": collected}
             (staging.parent / "result.tar").unlink(missing_ok=True)  # peak disk: one copy fewer
