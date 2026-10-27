@@ -110,10 +110,6 @@ def test_a_pusher_that_pushes_the_head_first_would_reopen_the_gate_within_second
         assert got.final_lag <= 2 and got.gate_closed_after_lock <= 10, (lock, offset, got)
 
 
-# Imports to have in the file: `import re`, `import httpx`, `import hypertrain.beacon.push as push`,
-# `from .beacon_model import MEASURED, TIMEOUT, Costs, Relays, World, simulate`,
-# `from .sandbox import BEACON, SCRIPT_TEXT`. The `shipped` fixture is the one already in the file.
-
 POST = "/v1/admin/beacon"
 ROUND_7 = {"round": 7, "signature": "aa", "randomness": "bb"}
 
@@ -160,3 +156,56 @@ def test_in_a_child_store_the_root_keeps_the_round_at_once_and_the_child_gets_it
     world.now = 20.0
     assert world.get("/v1/beacon/latest").json() == {"round": 7}  # not blocked by the lock
     assert world.now == pytest.approx(20.01)
+
+
+def test_a_head_first_tick_pushes_the_head_then_the_oldest_skipped_round_and_nothing_else():
+    # the clock at 24 s is in drand round 9 and the service holds round 1: 7, 8 and 9 are due. An
+    # unsorted set of {7, 8, 9} iterates 8 first, so only a sorted refill picks 7.
+    world = World(None, Costs(pusher=0.1, service=0.1), 1e9, "root")
+    world.now = 24.0
+    pusher = HeadFirstPusher(world, Relays(world), "token", 3)  # type: ignore[arg-type]
+    first = pusher.tick()
+    assert (first["latest"], first["known"], first["pushed"]) == (9, 1, [9, 7])
+    second = pusher.tick()  # still inside round 9, which the service now holds
+    assert (second["known"], second["pushed"]) == (9, [8])
+    assert pusher.tick()["pushed"] == []  # nothing is due: nothing is pushed again
+
+
+def test_the_model_stands_for_the_client_timeout_and_the_gate_bound_of_the_code(
+    tmp_path, monkeypatch
+):
+    """The model copies two constants of the code; a change of either must reach this file."""
+    import inspect
+    import re
+    from types import SimpleNamespace
+
+    import hypertrain.beacon.__main__ as beacon_cli
+    from hypertrain.challenge.store import ChallengeStore
+
+    from .beacon_model import LAG_BOUND
+
+    gate = re.search(
+        r"now < emitted - (\d+)", inspect.getsource(ChallengeStore._snapshot_current_v2)
+    )
+    assert gate and int(gate[1]) == LAG_BOUND
+
+    seen: dict[str, object] = {}
+
+    class Client:
+        def __init__(self, **options: object) -> None:
+            seen.update(options)
+
+        def __enter__(self) -> Client:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    token = tmp_path / "admin.token"
+    token.write_text("t" * 32)
+    monkeypatch.setattr(httpx, "Client", Client)
+    monkeypatch.setattr(beacon_cli, "Pusher", lambda *a: SimpleNamespace(run=lambda *r: 0))
+    argv = ["push", "--api", "http://svc.test", "--admin-token-file", str(token)]
+    relays = ["--relay", "https://a.test", "--relay", "https://b.test"]
+    assert beacon_cli.main([*argv, *relays, "--once"]) == 0
+    assert seen["timeout"] == TIMEOUT

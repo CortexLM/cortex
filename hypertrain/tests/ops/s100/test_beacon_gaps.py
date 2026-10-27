@@ -89,10 +89,20 @@ def test_only_the_window_asked_for_counts(tmp_path, capsys):
 
 def test_a_child_store_is_read_when_the_run_lives_in_one(tmp_path, capsys):
     database(tmp_path / "challenge.db", range(900, 1000), runs=[RUN])
-    database(tmp_path / "runs" / RUN / "challenge.db", [*range(900, 950), *range(960, 1000)])
+    database(
+        tmp_path / "runs" / RUN / "challenge.db", [*range(900, 950), *range(960, 1000)], runs=[RUN]
+    )
     assert run(capsys, tmp_path)[0] == 0
     code, out = run(capsys, tmp_path, "1800", RUN)
     assert code == 3 and out["missing_count"] == 10
+
+
+def test_a_child_directory_that_never_got_its_run_is_not_read(tmp_path, capsys):
+    # store.py drops a runs/<id> whose `runs` table is empty: an aborted creation, a stale copy
+    database(tmp_path / "challenge.db", range(900, 1000), runs=[RUN])
+    database(tmp_path / "runs" / RUN / "challenge.db", range(10, 50))
+    code, err = run(capsys, tmp_path, "1800", RUN)
+    assert code == 4 and "is not hosted by" in err
 
 
 def test_a_run_the_root_hosts_is_read_from_the_root_and_an_unknown_one_is_refused(tmp_path, capsys):
@@ -100,7 +110,7 @@ def test_a_run_the_root_hosts_is_read_from_the_root_and_an_unknown_one_is_refuse
     code, out = run(capsys, tmp_path, "1800", RUN)  # no child store: the root hosts it
     assert code == 3 and out["missing_count"] == 10
     code, err = run(capsys, tmp_path, "1800", "cd" * 32)  # a mistyped id is not read from the root
-    assert code == 4 and "does not know it" in err
+    assert code == 4 and "is not hosted by" in err
 
 
 def test_a_hole_at_the_start_of_the_window_counts_when_older_rounds_exist(tmp_path, capsys):
@@ -112,6 +122,15 @@ def test_a_hole_at_the_start_of_the_window_counts_when_older_rounds_exist(tmp_pa
     # on a database that never held older rounds the same start is just where it began
     database(tmp_path / "fresh" / "challenge.db", range(910, 1000))
     assert run(capsys, tmp_path / "fresh", "300")[0] == 0
+
+
+@pytest.mark.parametrize("seconds", ["1", "3", "9"])
+def test_a_healthy_pusher_at_its_normal_lag_is_never_stale_whatever_the_window(
+    tmp_path, capsys, seconds
+):
+    database(tmp_path / "challenge.db", range(900, 999))  # lag 2: the normal state
+    code, out = run(capsys, tmp_path, seconds)
+    assert code == 0 and out["stale"] is False and out["gate_open"] is True
 
 
 def test_a_dead_pusher_is_stale_and_a_late_one_has_the_gate_closed(tmp_path, capsys):
@@ -290,3 +309,9 @@ def test_the_script_run_as_documented_ends_with_the_status_main_returns():
         )
     assert done.returncode == 4
     assert "no challenge.db at /data/challenge.db" in done.stderr
+
+
+def test_a_window_that_reaches_back_past_the_first_round_starts_at_round_one(tmp_path, capsys):
+    database(tmp_path / "challenge.db", range(900, 1000))
+    code, out = run(capsys, tmp_path, "86400")  # 28800 rounds before round 1000: there is no such
+    assert code == 0 and out["window_start"] == 1  # round, the drand chain begins at 1

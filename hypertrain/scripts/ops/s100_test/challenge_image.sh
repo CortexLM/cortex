@@ -110,7 +110,8 @@ EOF
     python3 -I -c '
 import json,sys
 e=json.load(open(sys.argv[1]))["services"]["beacon"]["entrypoint"]
-sys.exit(0 if (e[9],e[11])==("0.2","60") and int(e[13])>=100 else 5)' "$B/config-after-$step.json" \
+flags=(e[8],e[10],e[12])==("--interval","--catch-up","--max-failures")
+sys.exit(0 if flags and (e[9],e[11])==("0.2","60") and int(e[13])>=100 else 5)' "$B/config-after-$step.json" \
       || { rm -f "$F.new"; echo "beacon cadence not reached"; exit 5; }
   fi
   cp -p "$F" "$B/compose.test.yml.before-$step"; mv "$F.new" "$F"; date -u +%FT%TZ

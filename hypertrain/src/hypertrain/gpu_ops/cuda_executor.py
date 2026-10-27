@@ -342,11 +342,16 @@ def prepare_command(assignment: str) -> str:
     """Create the directory for the ssh user and print the absolute path.
 
     `umask 077` makes every directory it creates private, so no other user of the host can seed
-    the cache; a leaf that is a link is refused (the daemon would resolve it as root), and `chmod`
-    fails on a directory that belongs to somebody else.
+    the cache. A leaf that is a link is refused (the daemon would resolve it as root), and so is one
+    the ssh user does not own: `chmod` would refuse it for an ordinary user but not for root, whose
+    chmod would make someone else's directory private and keep it writable by its owner. The reasons
+    are printed, because they end up in the journal.
     """
     return (
-        f'{assignment}; umask 077; mkdir -p -- "$D" && [ ! -L "$D" ] '
+        f'{assignment}; umask 077; mkdir -p -- "$D" '
+        f'&& {{ [ ! -L "$D" ] || {{ echo "compute cache directory is a link" >&2; exit 1; }}; }} '
+        f'&& {{ [ -O "$D" ] || {{ echo "compute cache directory is not owned by this user" >&2; '
+        f"exit 1; }}; }} "
         f'&& chmod 0700 -- "$D" && printf \'%s\\n\' "$D"'
     )
 
@@ -665,7 +670,7 @@ class Executor:
         """The host directory to mount as the container's compute cache, created on first use.
 
         The host's answer is only accepted when it is the path we asked for. Remembered per host
-        and image until an attempt fails, so a directory removed by hand costs one attempt.
+        and image until a container run fails, so a directory removed by hand costs one attempt.
         """
         if not self.config.compute_cache:
             return None

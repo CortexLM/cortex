@@ -157,8 +157,12 @@ ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - 1800 $RID" <
 ```
 
 Exit 0: nothing missing in the last 30 minutes. 3: a hole (`missing`, and `stranded` names who waits
-for it: stop the run and report it) or a stale table. 4: bad arguments or a run the stack does not
-host. Take a baseline before the retune and run it again after every ten trials.
+for it: stop the run and report it) or a table that is dead (`stale`). 4: bad arguments or a run the
+stack does not host. A pusher that is only behind exits 0: read `lag` and `gate_open` in the JSON.
+Take a baseline before the retune (without `$RID` until the run is published: the tool reads the
+store that hosts the run and refuses an id it cannot find) and run it again after every ten trials.
+After a challenge restart during a lock, run it on the child store too: rounds the root kept and the
+child never got are invisible to the pusher.
 
 ### Rollback
 

@@ -2481,3 +2481,29 @@ def test_a_cancelled_job_does_not_wait_for_the_cache_directory(
     with pytest.raises(ce.Aborted, match="lease cancelled"):
         executor._cache("h1", ref, time.time() + 600, cancel, work)  # type: ignore[arg-type]
     assert executor._cache_dirs == {}
+
+
+def test_prepare_command_says_why_it_refuses_a_link(tmp_path: Path) -> None:
+    assignment, _ = ce.cache_location(None, DIGEST)
+    leaf = tmp_path / ".cortex-cuda-executor/compute-cache" / LEAF
+    leaf.parent.mkdir(parents=True)
+    leaf.symlink_to(tmp_path)
+    done = shell_prepare(ce.prepare_command(assignment), tmp_path)
+    assert done.returncode == 1 and done.stdout == ""
+    assert "compute cache directory is a link" in done.stderr  # it reaches the journal
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root owns /usr: nothing would be refused")
+def test_prepare_command_refuses_a_directory_the_user_does_not_own_before_it_touches_it() -> None:
+    # /usr belongs to root; as root, chmod would succeed on a directory someone else can still
+    # write to, so the owner is checked first and the mode is never changed
+    before = Path("/usr").stat().st_mode
+    done = subprocess.run(
+        ["sh", "-c", ce.prepare_command("D=/usr")],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"]},
+    )
+    assert done.returncode == 1 and done.stdout == ""
+    assert "not owned by this user" in done.stderr
+    assert Path("/usr").stat().st_mode == before
