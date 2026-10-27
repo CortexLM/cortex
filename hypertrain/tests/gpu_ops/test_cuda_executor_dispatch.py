@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from env_pin_fixtures import HOSTILE, honest_observation
 from hypertrain.gpu_ops import cuda_executor, cuda_executor_runner
 from hypertrain.miner.island_launch import IslandFailure, validate_artifacts
 from hypertrain.protocol.envelope import body_digest
@@ -35,6 +36,7 @@ from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import CanonicalizationError, canonicalize
 
 from . import fake_cuda_host as fake
+from .pin_wire import PIN
 
 spec = importlib.util.spec_from_file_location(
     "cuda_dispatch_backend_fixture",
@@ -266,6 +268,8 @@ def test_dispatch_publishes_validated_artifacts_with_accepted_provenance(
         "capabilities": [[10, 3]] * 2,
         "gpu_uuids": selected,
         "gpu_names": ["NVIDIA B300 SXM6 AC"] * 2,
+        "pinned_env": honest_observation(ref.env.pin())["env"],
+        "cpu_capability": ref.env.pin().capability,
     }
     assert record == {
         "executor": "cuda-executor-v1",
@@ -318,6 +322,7 @@ def test_container_receives_the_job_inputs_and_the_pinned_environment(
     ref = canned.manifest.training.reference_spec
     devices = ",".join(uuids(0, 0, 1))
     assert launched["env"] == {
+        **honest_observation(ref.env.pin())["env"],  # the pin: set names and removed ones (None)
         "CUBLAS_WORKSPACE_CONFIG": ref.env.CUBLAS_WORKSPACE_CONFIG,
         "CUDA_DISABLE_PTX_JIT": ref.env.CUDA_DISABLE_PTX_JIT,
         "CUDA_VISIBLE_DEVICES": devices,
@@ -330,6 +335,25 @@ def test_container_receives_the_job_inputs_and_the_pinned_environment(
         "PYTHONHASHSEED": "0",
     }
     assert 0 < launched["budget"] <= canned.job.deadline - time.time()
+
+
+def test_the_container_runs_the_manifest_pin_whatever_the_host_adds_to_its_environment(
+    make_pool, canned, tmp_path
+):
+    # The image's own ENV, or a daemon, hands the container everything the pin sets otherwise or
+    # removes: the island must still start under exactly the pin.
+    ambient = {**HOSTILE, "HT_COMPILE": "1", "MKL_CBWR": "COMPATIBLE"}
+    pool = make_pool(labels=("a",), hosts={"a": {"container_env": ambient}})
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home)
+
+    pin = canned.manifest.training.reference_spec.env.pin()
+    (launched,) = pool.toolbox.events("launch")
+    expected = honest_observation(pin)["env"]
+    assert {name: launched["env"][name] for name in fake.PIN_NAMES} == expected
+    assert set(pin.absent) <= set(ambient)  # the host did hand the container what the pin removes
+    environment = record_of(home)["environment"]
+    assert (environment["pinned_env"], environment["cpu_capability"]) == (expected, pin.capability)
 
 
 @pytest.mark.parametrize("variant", ["plain", "sudo", "network-none", "no-cache"])
@@ -584,7 +608,10 @@ REFUSALS = {
     "container-reports-another-device-class": (
         {
             "runs": [
-                {"mode": "env", "env": {"capabilities": [[12, 0]] * 2, "sm_counts": [170, 170]}}
+                {
+                    "mode": "lying-runner",
+                    "env": {"capabilities": [[12, 0]] * 2, "sm_counts": [170, 170]},
+                }
             ]
         },
         "container environment contradicts the host probe",
@@ -597,7 +624,7 @@ REFUSALS = {
     ),
     "container-sees-other-uuids": (
         {"runs": [{"mode": "env", "env": {"gpu_uuids": uuids(0, 2, 3)}}]},
-        "container refused the devices: .*visible GPUs differ from the requested devices",
+        "container refused the environment: .*visible GPUs differ from the requested devices",
         1,
     ),
     "container-reports-a-uuid-that-is-not-hex": (
@@ -640,6 +667,86 @@ def test_host_contradicting_the_manifest_is_refused_and_nothing_is_published(
     assert refusal["label"] == "a" and re.search(cause, refusal["reason"])
     assert "exec_published" not in journal_kinds(pool)
     assert len(pool.toolbox.runs()) == container_runs  # a host seen to contradict runs nothing
+
+
+def honest_env_with(**values):
+    """The names of the pin as an honest container reports them, with `values` on top."""
+    return {**honest_observation(PIN)["env"], **values}
+
+
+# (host, why the pin is not honored, the name the refusal gives)
+PIN_NOT_HONORED = {
+    "container-reports-another-attention-backend": (
+        {"runs": [{"mode": "env", "env": {"pinned_env": honest_env_with(HT_ATTN_BACKEND="x")}}]},
+        "HT_ATTN_BACKEND",
+    ),
+    "container-reports-fp8-switched-on": (
+        {"runs": [{"mode": "env", "env": {"pinned_env": honest_env_with(HT_FP8="1")}}]},
+        "HT_FP8",
+    ),
+    "container-reports-another-device-class": (
+        {"runs": [{"mode": "env", "env": {"capabilities": [[12, 0]] * 2}}]},
+        "device class",
+    ),
+    "host-cpu-cannot-honor-the-isa-pin": ({"cpu_isa": "DEFAULT"}, "ATen CPU capability"),
+}
+
+
+@pytest.mark.parametrize("case", PIN_NOT_HONORED)
+def test_a_host_that_does_not_honor_the_pin_is_refused_before_the_island_starts(
+    make_pool, canned, tmp_path, case
+):
+    overrides, culprit = PIN_NOT_HONORED[case]
+    pool = make_pool(labels=("a",), hosts={"a": overrides})
+    home = canned.stage(tmp_path / "home")
+    with pytest.raises(
+        IslandFailure, match="a refused: container refused the environment"
+    ) as caught:
+        dispatch(pool, home)
+
+    assert culprit in str(caught.value) and not isinstance(caught.value, cuda_executor.Aborted)
+    assert_nothing_published(home)
+    (refusal,) = journal_of(pool, "exec_host_refused")  # quarantined, once, with the reason
+    assert refusal["label"] == "a" and culprit in refusal["reason"]
+    assert "exec_attempt_failed" not in journal_kinds(pool)  # and not retried as a failed attempt
+    (run,) = pool.toolbox.runs()
+    assert run["code"] == cuda_executor.RUNNER_REFUSED_ENVIRONMENT
+    assert pool.toolbox.events("launch") == []  # the island never started
+
+
+# The same contradictions reported by a container program that did not check them: the executor
+# judges the report itself.
+LYING_RUNNER = {
+    "reports-another-attention-backend": (
+        {"pinned_env": honest_env_with(HT_ATTN_BACKEND="sdpa-flash")},
+        "HT_ATTN_BACKEND",
+    ),
+    "reports-fp8-switched-on": ({"pinned_env": honest_env_with(HT_FP8="1")}, "HT_FP8"),
+    "reports-no-isa-pin": ({"pinned_env": honest_env_with(ATEN_CPU_CAPABILITY=None)}, "ATEN_CPU"),
+    "reports-the-default-code-path": ({"cpu_capability": "DEFAULT"}, "cpu_capability"),
+}
+
+
+@pytest.mark.parametrize("case", LYING_RUNNER)
+def test_a_container_program_that_does_not_check_the_pin_is_caught_by_the_executor(
+    make_pool, canned, tmp_path, case
+):
+    reported, culprit = LYING_RUNNER[case]
+    pool = make_pool(
+        labels=("a",), hosts={"a": {"runs": [{"mode": "lying-runner", "env": reported}]}}
+    )
+    home = canned.stage(tmp_path / "home")
+    with pytest.raises(IslandFailure, match="a refused: container environment diverges") as caught:
+        dispatch(pool, home)
+
+    assert culprit in str(caught.value)
+    assert_nothing_published(home)
+    assert len(pool.toolbox.events("launch")) == 1  # the program ran the island: only we caught it
+    (refusal,) = journal_of(pool, "exec_host_refused")
+    assert refusal["label"] == "a" and culprit in refusal["reason"]
+    assert "exec_attempt_failed" not in journal_kinds(
+        pool
+    ) and "exec_published" not in journal_kinds(pool)
 
 
 @pytest.mark.parametrize(
@@ -883,6 +990,27 @@ MALFORMED_RESULTS = {
         "result failed validation: rank job binding mismatch",
         {"mode": "mutate", "name": "wrong-job-hash"},
     ),
+    # The rank summaries are what the island declared about its environment: a summary that does
+    # not show the manifest pin is not a publication, and says nothing against the host.
+    **{
+        f"rank-summary-{label}": (
+            "result failed validation: rank 0 observed an environment that differs",
+            {"mode": "mutate", "name": "rank-env", "set": declared},
+        )
+        for label, declared in {
+            "another-attention-backend": {
+                "env": {**honest_observation(PIN)["env"], "HT_ATTN_BACKEND": "sdpa-flash"}
+            },
+            "fp8-switched-on": {"env": {**honest_observation(PIN)["env"], "HT_FP8": "1"}},
+            "another-cpu-capability": {"cpu_capability": "DEFAULT"},
+            "another-gpu-class": {"gpu": "sm_120"},
+            "no-gpu-class": {"gpu": "none"},
+        }.items()
+    },
+    "rank-summary-without-an-environment": (
+        "result failed validation: .*EnvObservation",
+        {"mode": "mutate", "name": "rank-env", "replace": None},
+    ),
 }
 
 
@@ -899,6 +1027,7 @@ def test_tampered_or_incomplete_result_is_refused_and_nothing_is_published(
     assert_nothing_published(home)
     assert journal_kinds(pool).count("exec_attempt_failed") == 1
     assert "exec_published" not in journal_kinds(pool) and len(pool.toolbox.runs()) == 1
+    assert "exec_host_refused" not in journal_kinds(pool)  # a bad result is not a bad host
 
 
 def test_refused_result_is_followed_by_a_fresh_attempt_and_only_its_bytes_are_published(

@@ -17,13 +17,19 @@ The scenario is one JSON file keyed by host address (`hosts`), plus a `global` s
     hosts[address] = {down, hostkey_ok, port, user, identity, home, clock_skew,
                       gpus[{uuid,name,driver,cc,mem,sm}], busy[uuid], busy_sequence[[uuid]],
                       smi_fail, images[ref], inspect_reports[ref], raw_inspect,
-                      pull{fails|digest|output}, runs[run], cold_start, warm_start}
+                      pull{fails|digest|output}, runs[run], cold_start, warm_start,
+                      container_env, cpu_isa}
     global = {canned{job_sha256: tree}, runs[run], rm_hold}  # global runs are consumed first
-    run = {mode: ok | vanish | truncate | exit | exit-after | probe-fail | env | hang | oversize |
-                 flood | mutate, detached, die_after_puts, ...}
+    run = {mode: ok | vanish | truncate | exit | exit-after | probe-fail | env | lying-runner |
+                 hang | oversize | flood | mutate, detached, die_after_puts, ...}
 
 `smi_fail` is `query-gpu` or `query-compute-apps`: that nvidia-smi query prints nothing and exits 3.
 `raw_inspect` is the text `docker image inspect` prints, whatever the image list is.
+`container_env` is what the container starts with besides the request (the image's own ENV,
+anything the daemon injects): the runner must replace it with the pin. `cpu_isa` is the best ISA of
+the host CPU (DEFAULT, AVX2 or AVX512, default AVX512): like ATen, the container resolves the
+ISA the request names when the CPU has it and the CPU's best one otherwise, and its probe reports
+the names of the pin as the container sees them.
 `home` is the ssh user's home (`$HOME` of the remote shell). A `--mount type=bind` must name an
 existing directory, as with the real daemon. A run that mounts `/root/.nv` is `cold` until a run
 has left a marker in that directory, then `warm`; a run without the mount is `none` (the cache dies
@@ -33,8 +39,11 @@ seconds (default 0) and leaves the marker when it succeeds, so a persistent cach
 refused, and the destination must be pinned in the `UserKnownHostsFile` the caller names, as
 `address` for port 22 and `[address]:port` otherwise (StrictHostKeyChecking=yes).
 `exit-after`: the container streams a complete valid result, then exits with `code`.
+`lying-runner`: the container program does not check the pin it was given (as `env`, the run may
+also make its probe say whatever it likes), so only the executor's own judgement catches it.
 `mutate`: the genuine result with one hostile change, named by `name`; the other keys of the run
-size a bomb (`depth`, `claim`) or give a member its bytes (`text`).
+size a bomb (`depth`, `claim`), give a member its bytes (`text`) or the rank summaries another
+declared environment (`rank-env`: `set` merges into it, `replace` replaces it).
 `probe-fail`: the runner's device probe fails (the real runner then exits 9).
 `die_after_puts`: with the result going to R2 (docs/adr/0013), the host vanishes (as `vanish`)
 when the runner starts its n+1th part upload.
@@ -65,6 +74,21 @@ OTHER_DRIVER = "595.71.06"
 # Device classes of docs/adr/0007: (capability) -> SM count, written down here on purpose so the
 # fake host does not read the table the executor is checked against.
 SM_COUNTS = {"10.3": 148, "12.0": 170}
+# The GPU class a manifest of that SM count pins, and every name a pin speaks about: written down
+# here on purpose, pinned to the tables by tests/gpu_ops/test_cuda_executor_pin.py.
+GPU_CLASS = {148: "sm_103", 170: "sm_120"}
+PIN_NAMES = (
+    "ATEN_CPU_CAPABILITY",
+    "HT_ATTN_BACKEND",
+    "HT_COMPILE",
+    "HT_FP8",
+    "HT_MOE_GROUPED",
+    "MKL_CBWR",
+    "OMP_DYNAMIC",
+    "OMP_THREAD_LIMIT",
+    "ONEDNN_MAX_CPU_ISA",
+)
+ISA_ORDER = ("DEFAULT", "AVX2", "AVX512")
 
 COMMON = r"""
 import fcntl
@@ -396,6 +420,16 @@ def mutated(genuine, entry):
     elif name == "environment":
         body = edit(body, "environment.json", lambda d: dumps(dict(json.loads(d), **entry["set"])))
         recompute = True
+    elif name == "rank-env":  # every rank summary declares another environment
+        def declared(d):
+            summary = json.loads(d)
+            summary["env"] = (
+                entry["replace"] if "replace" in entry else dict(summary["env"], **entry["set"])
+            )
+            return dumps(summary)
+
+        body = edit(body, "summary.json", declared)
+        recompute = True
     elif name == "extended-header-claim":  # a header of `type` that claims `claim` bytes of records
         claim = b"\x80" + entry["claim"].to_bytes(11, "big")
         return header("claim", entry["type"].encode(), claim) + genuine
@@ -535,6 +569,14 @@ def run(argv):
             "capabilities": [[int(x) for x in g["cc"].split(".")] for g in chosen],
             "drivers": [g["driver"] for g in chosen],
         }
+        # ATen caps its dispatch at what the CPU supports and ignores a value it does not know
+        best = host.get("cpu_isa", "AVX512")
+        asked = os.environ.get("ATEN_CPU_CAPABILITY", "").upper()
+        fits = asked in ISA_ORDER and ISA_ORDER.index(asked) <= ISA_ORDER.index(best)
+        observed.update(
+            pinned_env={name: os.environ.get(name) for name in PIN_NAMES},
+            cpu_capability=asked if fits else best,
+        )
         observed.update(entry.get("env", {}))
         return observed
 
@@ -549,7 +591,7 @@ def run(argv):
             "launch",
             name=name,
             inputs=received,
-            env={k: os.environ.get(k) for k in sorted(namespace["ENV_KEYS"])},
+            env={k: os.environ.get(k) for k in sorted({*namespace["ENV_KEYS"], *PIN_NAMES})},
             budget=int(budget),
         )
         give_up = time.monotonic() + 15
@@ -571,7 +613,11 @@ def run(argv):
         return 0
 
     captured = io.BytesIO()
-    code = namespace["serve"](io.BytesIO(stdin), captured, sys.stderr, probe=probe, launch=launch)
+    os.environ.update(host.get("container_env", {}))
+    unchecked = {"check_pin": lambda request, environment: ""} if mode == "lying-runner" else {}
+    code = namespace["serve"](
+        io.BytesIO(stdin), captured, sys.stderr, probe=probe, launch=launch, **unchecked
+    )
     genuine = captured.getvalue()
     out = sys.stdout.buffer
     if code:
@@ -772,6 +818,8 @@ def make_toolbox(root: Path) -> Toolbox:
         "DOCKER_LOG": str(toolbox.docker_log_path),
         "HOST_BIN": str(host_bin),
         "HOST_TMP": str(host_tmp),
+        "PIN_NAMES": PIN_NAMES,
+        "ISA_ORDER": ISA_ORDER,
     }
     header = f"#!{sys.executable}\n" + "".join(f"{k} = {v!r}\n" for k, v in constants.items())
     for directory, name, body in (
@@ -811,13 +859,19 @@ def gpu(
 
 
 def dispatch_manifest(manifest: Any, *, n_gpus: int, sm_count: int, drivers: list[str]) -> Any:
-    """The fixture manifest with a CUDA reference: the layout and device class the host reports."""
+    """The fixture manifest with a CUDA reference: the layout and device class the host reports,
+    and the environment pin of that class (the CPU class of the fixture is kept)."""
+    from hypertrain.protocol.env_pins import class_pin
+    from hypertrain.protocol.messages import EnvPins
+
     ref = manifest.training.reference_spec
+    pinned = EnvPins.model_validate(class_pin(ref.env.pinned.cpu, GPU_CLASS[sm_count]))
     ref = ref.model_copy(
         update={
             "layout": ref.layout.model_copy(update={"n_gpus": n_gpus, "dp_size": n_gpus}),
             "driver_allowlist": drivers,
             "sm_count": sm_count,
+            "env": ref.env.model_copy(update={"pinned": pinned}),
         }
     )
     return manifest.model_copy(

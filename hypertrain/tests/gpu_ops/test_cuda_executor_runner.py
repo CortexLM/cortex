@@ -26,10 +26,13 @@ from typing import Any
 import pytest
 
 import hypertrain.trainer  # noqa: F401 - pins determinism before any test imports torch
+from env_pin_fixtures import HOSTILE
 from hypertrain.gpu_ops import cuda_executor as ce
 from hypertrain.gpu_ops import cuda_executor_runner as runner
 from hypertrain.miner.island_launch import launch_argv
 from hypertrain.protocol.messages_v2 import IslandJobV1
+
+from .pin_wire import PIN, honest_report, request_pin
 
 REG = tarfile.REGTYPE
 MISSING = object()
@@ -92,6 +95,7 @@ def request_env() -> dict[str, str]:
         "HT_ISLAND_TRACE": "0",
         "HT_GPU_UUIDS": U0,
         "CUDA_VISIBLE_DEVICES": U0,
+        **request_pin()["env"],
     }
 
 
@@ -106,6 +110,8 @@ def request_bytes(files: dict[str, bytes], **over: Any) -> bytes:
         "budget_seconds": BUDGET,
         "inputs": {name: sha(raw) for name, raw in files.items()},
         "env": request_env(),
+        "unset": request_pin()["unset"],
+        "gpu": request_pin()["gpu"],
     }
     for key, value in over.items():
         if value is MISSING:
@@ -141,7 +147,12 @@ def run(stdin: bytes, **kwargs: Any) -> Outcome:
 
 
 def probe_ok(request: dict[str, Any]) -> dict[str, Any]:
-    return {"backend": "cuda", "gpu_uuids": list(request["uuids"]), "sm_counts": [148]}
+    return {
+        "backend": "cuda",
+        "gpu_uuids": list(request["uuids"]),
+        "sm_counts": [148],
+        **honest_report(len(request["uuids"])),
+    }
 
 
 def never(what: str) -> Callable[..., Any]:
@@ -185,7 +196,12 @@ def test_serve_ships_the_rank_files_environment_and_a_closing_complete() -> None
         return write_ranks(request, attempt, budget, log)
 
     def probe(request: dict[str, Any]) -> dict[str, Any]:
-        return {"backend": "cuda", "gpu_uuids": [U0, U1], "sm_counts": [148, 148]}
+        return {
+            "backend": "cuda",
+            "gpu_uuids": [U0, U1],
+            "sm_counts": [148, 148],
+            **honest_report(2),
+        }
 
     out = run(package(files, raw), probe=probe, launch=launch)
     assert (out.code, out.stderr) == (0, "")
@@ -266,6 +282,35 @@ def refusals() -> dict[str, bytes]:
     add("env-null", request_bytes(files, env={**request_env(), "OMP_NUM_THREADS": None}))
     add("env-list", request_bytes(files, env=["HT_IMAGE_DIGEST"]))
     add("no-env", request_bytes(files, env=MISSING))
+    # The pin travels complete: every name it sets, the exact list it removes, one GPU class.
+    for name in request_pin()["env"]:
+        add(
+            f"env-without-the-pinned-{name}",
+            request_bytes(files, env={k: v for k, v in request_env().items() if k != name}),
+        )
+    unset = request_pin()["unset"]
+    for label, bad in {
+        "missing": MISSING,
+        "null": None,
+        "string": unset[0],
+        "object": dict.fromkeys(unset, "1"),
+        "name-not-a-string": [*unset[:-1], 1],
+        "unknown-name": [*unset[:-1], "LD_PRELOAD"],
+        "a-name-the-pin-sets": [*unset[:-1], "HT_ATTN_BACKEND"],
+        "missing-a-name": unset[:-1],
+        "duplicate": [*unset, unset[0]],
+        "reordered": unset[::-1],
+        "empty": [],
+    }.items():
+        add(f"unset-{label}", request_bytes(files, unset=bad))
+    for label, bad in {
+        "missing": MISSING,
+        "null": None,
+        "number": 103,
+        "unknown-class": "sm_90",
+        "list": ["sm_103"],
+    }.items():
+        add(f"gpu-{label}", request_bytes(files, gpu=bad))
     for key in ("budget_seconds", "n_gpus"):
         for label, value in {"string": "1", "float": 1.5, "null": None, "missing": MISSING}.items():
             add(f"{key}-{label}", request_bytes(files, **{key: value}))
@@ -324,6 +369,101 @@ def test_serve_exits_4_when_the_container_sees_other_devices_and_never_launches(
     assert out.code == 4
     assert out.stdout == b""
     assert "differ from the requested devices" in out.stderr
+
+
+# -- the environment pin ------------------------------------------------------------------------
+
+PIN_NAMES = sorted({*dict(PIN.present), *PIN.absent})
+
+
+def table_view() -> dict[str, str | None]:
+    """The names a pin speaks about as this process sees them: the value, None when unset."""
+    return {name: os.environ.get(name) for name in PIN_NAMES}
+
+
+def test_serve_replaces_a_hostile_ambient_with_the_pin_before_the_probe_and_the_island(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name, value in {**HOSTILE, "HT_COMPILE": "1"}.items():
+        monkeypatch.setenv(name, value)
+    assert all(table_view()[name] for name in PIN.absent)  # the ambient sets what the pin removes
+    seen: dict[str, dict[str, str | None]] = {}
+
+    def probe(request: dict[str, Any]) -> dict[str, Any]:
+        seen["probe"] = table_view()
+        return probe_ok(request)
+
+    def launch(request: dict[str, Any], attempt: Path, budget: float, log: Path) -> int:
+        seen["island"] = table_view()
+        return write_ranks(request, attempt, budget, log)
+
+    out = run(package(input_files()), probe=probe, launch=launch)
+    assert (out.code, out.stderr) == (0, "")
+    expected = {name: dict(PIN.present).get(name) for name in PIN_NAMES}
+    assert [expected[name] for name in PIN.absent] == [None] * len(PIN.absent)
+    assert seen == {"probe": expected, "island": expected}
+
+
+def reported(**changes: Any) -> dict[str, Any]:
+    """What a container reports when it honors the pin, with `changes` on top."""
+    return {**honest_report(1), **changes}
+
+
+def other_env(**values: str | None) -> dict[str, Any]:
+    return reported(pinned_env={**honest_report()["pinned_env"], **values})
+
+
+CONTRADICTIONS = {
+    "another-attention-backend": (other_env(HT_ATTN_BACKEND="sdpa-flash"), "HT_ATTN_BACKEND"),
+    "fp8-switched-on": (other_env(HT_FP8="1"), "HT_FP8"),
+    "a-removed-name-is-still-set": (other_env(OMP_THREAD_LIMIT="2"), "OMP_THREAD_LIMIT"),
+    "a-set-name-is-missing": (other_env(MKL_CBWR=None), "MKL_CBWR"),
+    "a-set-name-has-another-value": (other_env(ONEDNN_MAX_CPU_ISA="ALL"), "ONEDNN_MAX_CPU_ISA"),
+    "the-cpu-cannot-honor-the-isa": (reported(cpu_capability="DEFAULT"), "ATen CPU capability"),
+    "the-cpu-resolves-a-higher-isa": (reported(cpu_capability="AVX512"), "ATen CPU capability"),
+    "no-cpu-capability": ({k: v for k, v in reported().items() if k != "cpu_capability"}, "ATen"),
+    "no-environment-report": (
+        {k: v for k, v in reported().items() if k != "pinned_env"},
+        "MKL_CBWR",
+    ),
+    "environment-report-not-an-object": (reported(pinned_env=[]), "MKL_CBWR"),
+    "another-device-class": (reported(capabilities=[[12, 0]]), "device class"),
+    "devices-of-two-classes": (reported(capabilities=[[10, 3], [12, 0]]), "device class"),
+    "no-capabilities": (
+        {k: v for k, v in reported().items() if k != "capabilities"},
+        "device class",
+    ),
+    "capabilities-not-pairs": (reported(capabilities=[10, 3]), "device class"),
+    "capabilities-with-a-word": (reported(capabilities=[["10", "3"]]), "device class"),
+}
+
+
+@pytest.mark.parametrize(("report", "culprit"), CONTRADICTIONS.values(), ids=list(CONTRADICTIONS))
+def test_serve_exits_4_before_the_island_when_the_probe_contradicts_the_pin(
+    report: dict[str, Any], culprit: str
+) -> None:
+    files = input_files()
+    stdin = package(files, request_bytes(files))
+    out = run(
+        stdin, probe=lambda request: {"gpu_uuids": [U0], **report}, launch=never("the island")
+    )
+    assert out.code == 4  # the exit the executor maps to a refused host, not to a failed attempt
+    assert out.stdout == b""
+    assert "environment contradicts the pin" in out.stderr
+    assert culprit in out.stderr
+
+
+def test_serve_does_not_echo_a_host_value_beyond_a_short_repr() -> None:
+    files = input_files()
+    long = "x" * 5000 + "\nforged line"
+    out = run(
+        package(files),
+        probe=lambda request: {"gpu_uuids": [U0], **other_env(HT_FP8=long)},
+        launch=never("the island"),
+    )
+    assert out.code == 4
+    assert "forged line" not in out.stderr and out.stderr.count("\n") == 1
+    assert len(out.stderr) < 400
 
 
 @pytest.mark.parametrize(
@@ -486,13 +626,14 @@ def test_torchrun_launches_the_challenge_argv_with_the_request_env_in_its_own_se
 
     seen = fake_island(monkeypatch, finish, gone)
     stdin, uuids = island_stdin(2)
-    out = run(stdin, probe=lambda request: {"gpu_uuids": uuids})
+    out = run(stdin, probe=lambda request: {"gpu_uuids": uuids, **honest_report(len(uuids))})
     assert (out.code, out.stderr) == (0, "")
     (proc,) = seen.procs
     # The runner cannot import the challenge's hypertrain; this pins its copy of the argv to it.
     assert proc.argv == launch_argv(island_job(2), Path(proc.argv[-2]), "cuda")
     assert proc.kwargs["start_new_session"] is True
     assert {k: proc.kwargs["env"][k] for k in request_env()} == request_env()
+    assert not set(PIN.absent) & set(proc.kwargs["env"])  # what the pin removes does not reach it
     assert BUDGET - 30 < proc.waits[0] <= BUDGET
     assert seen.kills == [(4242, signal.SIGKILL)]  # stragglers of the island group die as well
     assert proc.waits[-1] is None  # and the group leader is reaped
@@ -518,7 +659,7 @@ def test_serve_exits_3_with_the_tail_of_the_island_log(monkeypatch: pytest.Monke
 
     seen = fake_island(monkeypatch, crash)
     stdin, uuids = island_stdin(1)
-    out = run(stdin, probe=lambda request: {"gpu_uuids": uuids})
+    out = run(stdin, probe=lambda request: {"gpu_uuids": uuids, **honest_report(len(uuids))})
     assert (out.code, out.stdout) == (3, b"")
     assert "island exited 1" in out.stderr
     assert "RuntimeError: driver refused by the worker" in out.stderr
@@ -548,7 +689,7 @@ def test_serve_kills_the_whole_island_group_when_the_budget_ends_or_docker_stops
 ) -> None:
     seen = fake_island(monkeypatch, on_wait)
     stdin, uuids = island_stdin(1)
-    out = run(stdin, probe=lambda request: {"gpu_uuids": uuids})
+    out = run(stdin, probe=lambda request: {"gpu_uuids": uuids, **honest_report(len(uuids))})
     assert (out.code, out.stdout) == (code, b"")
     assert message in out.stderr
     assert seen.kills == [(4242, signal.SIGKILL)]
@@ -585,6 +726,7 @@ _DEVICES = [
 cuda = types.SimpleNamespace(
     device_count=lambda: len(_DEVICES), get_device_properties=lambda i: _DEVICES[i]
 )
+backends = types.SimpleNamespace(cpu=types.SimpleNamespace(get_cpu_capability=lambda: "AVX512"))
 """
 
 FAKE_SMI = """#!/bin/sh
@@ -618,6 +760,11 @@ def test_probe_reports_normalized_uuids_and_each_devices_own_driver(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     torch_file = install_fake_devices(tmp_path, monkeypatch, FAKE_SMI % {"u0": U0, "u1": U1})
+    # What the probe process inherits from the runner: the table names it speaks about.
+    for name in PIN_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HT_ATTN_BACKEND", "math")
+    monkeypatch.setenv("HT_FP8", "1")
     observed = runner.probe_environment({})
     assert observed == {
         "backend": "cuda",
@@ -631,6 +778,9 @@ def test_probe_reports_normalized_uuids_and_each_devices_own_driver(
         "sm_counts": [148, 148],
         "capabilities": [[10, 3], [10, 3]],
         "drivers": ["580.95.05", "575.64.03"],
+        # every name of the tables, as the probe process sees it, and what ATen resolved
+        "pinned_env": {**dict.fromkeys(PIN_NAMES), "HT_ATTN_BACKEND": "math", "HT_FP8": "1"},
+        "cpu_capability": "AVX512",
     }
 
 

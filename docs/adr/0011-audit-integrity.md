@@ -438,6 +438,44 @@ breaker bounds the attempt-based one).
     and the refusal of a bare worker; the `systemd_manager` tests were not run (the host denies
     transient units) and still build their own environment from `os.environ`, which the test process
     pins. [V by those tests; the transient-unit path is not run]
+16. CUDA executor, request. The executor ran the island in a container whose environment it built
+    from ten fixed names; the container program refused any other name (exit 2) and the island
+    worker, which checks the pin, would have refused the missing ones, so a pinned manifest could
+    not be served at all. [V by reading `cuda_executor.py` `_request`, `cuda_executor_runner.py`
+    `ENV_KEYS`] `Executor._request` now puts the pin in `request.json`: the names the pin sets join
+    the fixed ones in `env`, `unset` is the pin's sorted `absent` list and `gpu` its GPU class, all
+    under the `request_sha256` that `COMPLETE` binds. The container program is stdlib only (it
+    cannot import the image's hypertrain) and keeps a copy of the table's names, which
+    `tests/gpu_ops/test_cuda_executor_pin.py` holds equal to the tables; it refuses (exit 2) a
+    request that does not carry the pin whole (a pinned name missing, a name outside the tables,
+    `unset` other than the table's list, an unknown class), then sets `env`, removes `unset`,
+    probes and launches, so the image's own `ENV` or a daemon cannot leave a name the pin removes.
+    [V: fake host with a hostile `container_env`]
+17. CUDA executor, host honesty before the island. The probe reports the table's names as its
+    process sees them (`pinned_env`), the capability ATen resolved
+    (`torch.backends.cpu.get_cpu_capability()`) and the devices' capabilities. The container
+    program compares them with the request and exits 4 before the island starts when a name differs,
+    the capability is not the pinned one or the devices are not of the pinned class; the executor
+    already maps exit 4 to `HostRefused` (EXE-01 quarantine). Without this an honest host that
+    cannot honor the pin (a CPU below the class, an ARM host that reports 10.3 and 148 SMs like a
+    B300) would make the island refuse after a cold start, exit 3, and the executor would retry the
+    same host as a failed attempt. [V: fake host; the real probe source against a fake torch] [H:
+    the cu130 build exposes `torch.backends.cpu.get_cpu_capability()` as the CPU build does; ATen
+    on a GPU host clamps `ATEN_CPU_CAPABILITY` to the CPU as it does here] [?: the base image's own
+    `ENV`, `docker image inspect --format '{{json .Config.Env}}'`]
+18. CUDA executor, the executor judges again. The container program is the host's code, so
+    `_check_environment` compares the report (`pinned_env`, `cpu_capability`, the class of the
+    reported capabilities) with the manifest's pin using `observation_divergence`, the comparison
+    the server applies to a rank summary, and raises `HostRefused`: a program that does not check
+    is caught, once, with the island run. A report without those fields, or of the wrong shape, is
+    a malformed result (a failed attempt, not a quarantine); a name the host chose is shown through
+    `repr` cut at 40 characters (EXE-01). The rank summaries' `env` observation is checked by
+    `validate_artifacts` (`EnvPinRefused`): on publication it runs inside `_publish`'s `except`,
+    so a summary that differs is an `AttemptFailed`, nothing is published and the host is not
+    quarantined for what a file says; on resume (`published()`) the refusal is a plain
+    `IslandFailure`. `launch` refuses a manifest whose GPU class is `none` before any ssh
+    call: it describes a CPU run, and judging it against every GPU host would quarantine them all
+    for the manifest's fault. [V: fake host]
 
 ### Consequences
 
@@ -470,8 +508,10 @@ breaker bounds the attempt-based one).
 - A host above the class is capped by the pinned variables; a host below it (an AVX2-only CPU under
   `avx512`) is refused by the probe because ATen clamps the capability silently and the probe reads
   what ATen resolved [H: inferred from the clamping, no AVX2-only host here].
-- A pinned CUDA manifest cannot be qualified or served by the executor until those paths carry the
-  pin (fails closed); the later commits of this part change that.
+- The executor serves a pinned manifest (decisions 16 to 18). A GPU host must offer a CPU that
+  reaches the manifest's CPU class: one that does not is quarantined at its first container run
+  instead of being retried, and an operator reads "container refused the environment" in the
+  journal. No throughput was measured for the CUDA path under the pin.
 - `implementation_hash` changes; runs holding a `service-admission` record then fail
   `SERVICE_PROFILE_AUTHORITY` (`store.py:4631`) and cannot be re-bootstrapped after a round opened.
   The runs are recreated anyway.
@@ -554,6 +594,11 @@ breaker bounds the attempt-based one).
 - The repair/history torchrun path with pins and the challenge path end to end with AUD-01 (read,
   not run).
 - A divergence the process cannot see (decision 13) ends as a MISMATCH, as before this part.
+- The CUDA executor under the pin (decisions 16 to 18): nothing ran on a GPU. The fake host
+  (`tests/gpu_ops/fake_cuda_host.py`) replaces the island and the device probe, and models ATen's
+  clamping of the capability to the host CPU; the real probe source ran only against a fake torch.
+  No AVX2-less or ARM GPU host was available, so the quarantine of such a host is tested against a
+  modelled CPU.
 
 ## Part 4: host and image binding of the CUDA qualification (QUAL-01, QUAL-02)
 

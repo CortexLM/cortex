@@ -20,6 +20,12 @@ other option; the two are mutually exclusive.
   `docker run --rm`. Inputs go in on the SSH standard input and the rank artifacts come back on
   the standard output; no job file is written on the host. What stays on the host is that image
   and one compute cache directory per image digest ([below](#compute-cache)).
+- An x86-64 CPU that reaches the manifest's CPU class (`reference_spec.env.pinned.cpu`, `avx2`
+  or `avx512`; [the pin](#the-environment-pin)). ATen clamps the capability to what the CPU
+  supports (inferred from the clamping seen on a CPU host; no AVX2-less or ARM GPU host was
+  available), so a CPU without AVX2, or an ARM host such as a Grace machine that reports 10.3 and
+  148 SMs like a B300, cannot honor the pin: the container program sees it and the host is refused
+  and quarantined before any island starts.
 - On shared hosts (Lium) never use the `executor-*` containers; the executor only touches
   containers named `ht-exec-<16 hex>`. It takes the `n_gpus` idle GPUs with the lowest UUIDs (no
   compute app on them and at most `idle_gpu_memory_mib` used) and treats the host as busy
@@ -99,11 +105,50 @@ has not run on a GPU host: the tests model the mount and the warm/cold differenc
   where it is not, a container root can leave root-owned files, including setuid ones, in the cache
   directory.
 
+## The environment pin
+
+Every manifest pins its process environment ([protocol.md](protocol.md), section 7, item 4a;
+ADR 0011, part 3), so the container must run the island under exactly that environment whatever
+the image's `ENV` or the host's daemon add. The pin travels in `request.json`, under the
+`request_sha256` that `COMPLETE` binds:
+
+| Field | Content |
+| --- | --- |
+| `env` | The fixed names (`PYTHONHASHSEED`, `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `CUBLAS_WORKSPACE_CONFIG`, `CUDA_DISABLE_PTX_JIT`, `NVIDIA_TF32_OVERRIDE`, `HT_IMAGE_DIGEST`, `HT_ISLAND_TRACE`, `HT_GPU_UUIDS`, `CUDA_VISIBLE_DEVICES`) and every name the pin sets (`ATEN_CPU_CAPABILITY`, `MKL_CBWR`, `OMP_DYNAMIC`, `ONEDNN_MAX_CPU_ISA`, `HT_ATTN_BACKEND`). |
+| `unset` | The names the pin leaves unset, as the sorted list of the table (`HT_COMPILE`, `HT_FP8`, `HT_MOE_GROUPED`, `OMP_THREAD_LIMIT`). |
+| `gpu` | The pin's GPU class (`sm_103` or `sm_120`). |
+
+The container program (stdlib only; it keeps its own copy of the names, which a test holds equal
+to the tables) refuses with exit 2 a request that does not carry the pin whole: a pinned name
+missing from `env`, a name outside the tables, an `unset` other than the table's list, an unknown
+class. Then, in this order, it sets `env`, removes `unset`, probes and launches. The probe, a
+child started under that environment, adds to what it reports `pinned_env` (the value, or null,
+of every name of the tables as the child sees it), `cpu_capability` (what
+`torch.backends.cpu.get_cpu_capability()` resolved) and the devices' `capabilities`.
+
+Before it starts the island the program compares the report with the request and exits 4 ("container
+refused the environment") when a name has another value or is still set, when ATen did not resolve
+the capability the pin names (`ATEN_CPU_CAPABILITY` upper-cased), or when the devices are not of the
+request's class. The executor maps exit 4 to a refused host, so an honest host that cannot honor
+the pin is quarantined at once and not retried, after a cold start, as a failed attempt.
+
+The executor does not take the program's word for it: `_check_environment` judges the same report
+against the manifest's pin with the comparison the island worker uses, and quarantines the host
+when it diverges (`container environment diverges from the manifest pin: 'HT_FP8', ...`; names the
+host chose are shown through `repr`, cut at 40 characters). A report that lacks the two fields or
+has the wrong shape is a malformed result, a failed attempt and not a quarantine. Every rank
+summary a host returns must show the pin in its `env` observation (`validate_artifacts`): a
+summary that does not is a failed attempt, nothing is published, and the host is not quarantined
+for what a file says. A manifest whose GPU class is `none` is refused by `launch` before any ssh
+call (it describes a CPU run; judging it per host would quarantine them all).
+
+`role-dispatch.json` records `pinned_env` and `cpu_capability` in `environment`. Nothing here ran on a GPU: the fake host replaces the island and the device probe.
+
 ## What a job produces
 
 Next to the usual `published/` directory the executor writes `role-dispatch.json`, which
 `ChallengeStore._dispatch_env_v2` reads for a CUDA audit. Besides `environment` (backend, image
-digest, drivers, SM counts, capabilities, GPU UUIDs and names) it records the host label, a
+digest, drivers, SM counts, capabilities, GPU UUIDs and names, and the pin as observed) it records the host label, a
 `machine_id` derived from every GPU UUID of the host and an `instance_id` derived from the pinned
 host keys, the requested image reference and the daemon's `RepoDigests`, the hash of the container
 program, the hash of the received tar and the hash of the published files. Two labels that

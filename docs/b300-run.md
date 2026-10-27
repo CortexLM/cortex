@@ -191,7 +191,11 @@ HT_B300_PROD_ROUNDS="<W1> <W2>" nohup ~/cortex/hypertrain/scripts/b300/run_host.
 - **Manifest pins (owner/Principal action):** the signed run manifest must pin
   `reference_spec.sm_count` to the B300 SM count and include 595.91.07 in `driver_allowlist`
   (`miner/core.py` refuses otherwise). `reference_spec.image_digest` must equal the image digest
-  (`miner/island_worker.py` refuses otherwise; the script passes it as `HT_IMAGE_DIGEST`).
+  (`miner/island_worker.py` refuses otherwise; the script passes it as `HT_IMAGE_DIGEST`). It
+  must also pin the environment (`reference_spec.env.pinned`) with GPU class `sm_103`; the
+  attention backend is a value of the pin (`math` is what `select_backend` picks on sm_103), and
+  the generic CUDA executor applies and checks the pin in the container
+  (`hypertrain/docs/cuda-executor.md`, "The environment pin").
 
 ## Auto-stop
 

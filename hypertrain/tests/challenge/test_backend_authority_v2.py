@@ -375,6 +375,7 @@ def saved_geometry(manifest, hotkey, directory, *, published=False):
                     {
                         "job_hash": job.digest(),
                         "backend": "cpu",
+                        "env": honest_observation(manifest.training.reference_spec.env.pin()),
                         "optimizer_step": cfg.inner.H,
                         "commitments": commitments,
                         "work": {
@@ -385,7 +386,6 @@ def saved_geometry(manifest, hotkey, directory, *, published=False):
                             "reserved_bytes": 0,
                             "total_bytes": 1,
                         },
-                        "env": honest_observation(manifest.training.reference_spec.env.pin()),
                     }
                 )
             )

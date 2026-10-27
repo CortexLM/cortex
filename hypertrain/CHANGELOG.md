@@ -79,6 +79,12 @@
   `SERVICE_PROFILE_ENV_PIN`).
   The miner's dispute follower answers every publication from its published trace instead of
   replaying it in the daemon (the in-process replay of an unpinned CPU publication is gone).
+  The generic CUDA executor sends the pin to the container (`request.json` gains `unset` and
+  `gpu`, `env` the names the pin sets); the container program applies it and refuses with exit 4,
+  before the island starts, a host whose probe shows another environment, ATen capability or device
+  class, and the executor judges the same report (`pinned_env`, `cpu_capability` in
+  `environment.json` and `role-dispatch.json`) and quarantines that host. See
+  `docs/cuda-executor.md`.
   Breaking: every `run_id`, `reference_hash` and `training_hash` changes; existing runs are
   recreated. `kimi_tiny.train_config` and `qualify` take the `EnvPin` the caller's process honors.
   The miner declares its probed environment in bodies it signs: `JoinRequest.env` and
