@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from hypertrain.protocol.env_pins import EnvPin
 from hypertrain.protocol.messages import ODSpec, RunManifest, f32val
 from hypertrain.protocol.messages_v2 import RunManifestV2, TrainingManifestV2
 
@@ -132,6 +133,7 @@ class TrainConfig:
     compress: CompressConfig
     n_stages: int = 1
     cpu_threads: int = 1
+    env_pin: EnvPin | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= self.n_stages <= self.model.n_layers:
@@ -209,4 +211,5 @@ class TrainConfig:
             compress=compress,
             n_stages=ref.layout.pp,
             cpu_threads=ref.env.cpu_threads,
+            env_pin=ref.env.pin(),
         )

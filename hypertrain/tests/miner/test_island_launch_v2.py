@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -26,8 +27,12 @@ from hypertrain.trainer.loop import Assignment
 from hypertrain.trainer.model import init_params, param_shapes
 
 
-def tiny_manifest(n: int = 2, ep: int = 1, zero1: bool = True) -> RunManifestV2:
+def tiny_manifest(
+    n: int = 2, ep: int = 1, zero1: bool = True, pinned: dict[str, Any] | None = None
+) -> RunManifestV2:
     b = example_manifest().body()
+    if pinned is not None:
+        b["reference_spec"]["env"]["pinned"] = pinned
     b["model"].update(
         n_layers=1,
         d_model=8,
@@ -74,8 +79,10 @@ def tiny_manifest(n: int = 2, ep: int = 1, zero1: bool = True) -> RunManifestV2:
     )
 
 
-def staged_job(directory: Path, n: int = 2, ep: int = 1) -> IslandJobV1:
-    w = tiny_manifest(n, ep)
+def staged_job(
+    directory: Path, n: int = 2, ep: int = 1, pinned: dict[str, Any] | None = None
+) -> IslandJobV1:
+    w = tiny_manifest(n, ep, pinned=pinned)
     cfg = TrainConfig.from_manifest_v2(w)
     theta = init_params(cfg.model)
     rows = np.arange(16 * 5, dtype=np.uint32).reshape(16, 5) % 16

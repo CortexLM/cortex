@@ -60,7 +60,10 @@
   CPU round bytes (`ATEN_CPU_CAPABILITY`, `MKL_CBWR`, `ONEDNN_MAX_CPU_ISA`, `HT_ATTN_BACKEND`,
   `OMP_DYNAMIC`, and `HT_COMPILE`, `HT_FP8`, `HT_MOE_GROUPED`, `OMP_THREAD_LIMIT` pinned unset).
   A manifest without the field keeps its bytes and `run_id`; the table is in `docs/protocol.md`
-  section 7 and the decision in `docs/adr/0011` (part 3) at the monorepo root.
+  section 7 and the decision in `docs/adr/0011` (part 3) at the monorepo root. The island and
+  repair workers and the in-process entry points (`train_round`, `train_island`,
+  `train_unit_order`) refuse a process whose environment, or ATen capability, diverges from the
+  pin, naming the variable; a pinned rank records `env_pin` in `summary.json`.
 
 ### Changed
 - A challenge poll after the deadline no longer suspends a miner whose proof was accepted
