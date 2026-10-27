@@ -225,7 +225,8 @@ ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID" < $T/w
 d_final)` (`store.py:6586-6589`). `AuditJobV2` refuses `expires > created + 100` when H <= 30
 (`messages_v2.py:441-444`, `:659-663`). Audits can only be created once `now >= d_audit`, so with
 a wider gap every lease answers 409 "lease exceeds 100 beacon rounds" and the round is never
-audited. `live_operator.py` accepts gaps up to 200 rounds.
+audited. `live_operator.py open` refuses a gap above `audit_lease_rounds(H, 16.0)` for the
+manifest's H (100 rounds when H <= 30) and above 200 rounds for any H.
 
 **Upload one miner at a time.** The TEST relay BLS-verifies drand in `now()` on every capability
 and chunk call (`relay/app.py:259-264`). Four concurrent uploads kept it past its own 2-round
