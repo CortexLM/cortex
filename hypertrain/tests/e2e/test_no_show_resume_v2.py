@@ -117,3 +117,14 @@ def test_a_member_that_commits_but_never_uploads_a_delta_is_left_out(activated_n
     assert n.store._record_v2(n.manifest.run_id(), "finality", "0")["unresolved_audits"] == 0
     assert finalize(n, 0, applied.json(), survivors)["status"] == "SETTLED"
     assert standing(n, lazy.ss58) == before
+
+
+def test_a_round_the_remaining_members_cannot_carry_is_refused_by_name(activated_network):
+    n = activated_network
+    opening = rollback.execute_round(n, 0, skip_delta=fixtures.HOT[3:], aggregate=False)
+    n.push(opening.d_upload)
+
+    refused = aggregate(n, 0)
+
+    assert (refused.status_code, "ROUND_INFEASIBLE" in refused.text) == (409, True)
+    assert excluded(n) == {}

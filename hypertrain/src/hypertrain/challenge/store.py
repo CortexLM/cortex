@@ -8545,6 +8545,7 @@ class ChallengeStore:
             require_apply(run_id, w, history)
             self._exclude_missing_deltas_v2(run_id, w)
             inputs = self.verified_inputs_v2(run_id, w)
+            self._require_survivors_v2(manifest, [x.roster for x in inputs])
             policy = AggregationPolicyV2.model_validate_json(
                 self.objects.get(manifest.network.aggregation_policy_hash)
             )
