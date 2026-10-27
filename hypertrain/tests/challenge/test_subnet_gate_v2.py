@@ -335,27 +335,30 @@ def test_trial_job_refused_like_challenge_once_owner_deregistered(gated, subnet_
     identity = n.join(0).json()["admission_id"]
     n.push(2)
     assert n.challenge(identity).status_code == 200
-    message = f"hypertrain/trial-job/2|{n.manifest.run_id()}|{identity}".encode()
-    signed = {"x-hotkey": HOT[0].ss58, "x-trial-signature": HOT[0].sign(message).hex()}
+    signed = n.owner_request("JobRequest", identity)
     url = n.url + "/join/" + identity + "/job"
     # When: the hotkey leaves the subnet.
     subnet_master.registered.clear()
     refresh(n)
-    # Then: the owner's signature, the admin token, or both get the challenge route's refusal.
+    # Then: the owner's signed request, the admin token, or both get the challenge route's refusal.
     challenge = n.challenge(identity)
     assert challenge.status_code == 403
     assert challenge.json() == {"detail": "the hotkey is not registered on the subnet"}
-    for headers in (signed, service.admin(), {**signed, **service.admin()}):
-        response = n.client.get(url, headers=headers)
-        assert (response.status_code, response.json()) == (403, challenge.json()), headers
+    for request in (
+        {"json": signed},
+        {"headers": service.admin()},
+        {"json": signed, "headers": service.admin()},
+    ):
+        response = n.client.post(url, **request)
+        assert (response.status_code, response.json()) == (403, challenge.json()), request
     assert not (n.store.state_dir / "trials-v2").exists()
     # And: registered again, the admin token still does not stand in for the signature.
     subnet_master.registered.add(HOT[0].ss58)
     refresh(n)
-    response = n.client.get(url, headers=service.admin())
+    response = n.client.post(url, headers=service.admin())
     assert response.status_code == 403
     assert response.json() == {"detail": "hotkey is not current accepted identity"}
-    assert n.client.get(url, headers=signed).status_code == 200
+    assert n.client.post(url, json=signed).status_code == 200
 
 
 def test_weights_exclude_deregistered_hotkeys(tmp_path, secrets_dir, clock):

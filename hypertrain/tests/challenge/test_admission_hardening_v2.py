@@ -140,31 +140,6 @@ def test_owner_takes_the_bond_back_through_the_routes(network):
     assert status["bond"] == {"locks": []}
 
 
-def test_a_lock_named_after_a_dispute_is_not_released_by_that_dispute(network):
-    # Given: the owner names its bond after the dispute id that its own contest will have, and
-    # holds the application open with an unresolved pending reference
-    from hypertrain.protocol.hashing import sha256_hex
-
-    run_id = network.manifest.run_id()
-    verdict = "11" * 32
-    dispute_id = sha256_hex(service.canonicalize([run_id, verdict, service.HOT[0].ss58]))
-    identity, lock = lock_bond(network, operation=dispute_id)
-    with network.store._tx() as db:
-        db.execute(
-            "INSERT INTO admission_pending VALUES(?,?,?,?,0)",
-            ("ee" * 32, identity, "ff" * 32, service.COLD[0].ss58),
-        )
-    status = network.client.get(network.url + f"/admission/{service.HOT[0].ss58}").json()
-    (entry,) = status["bond"]["locks"]
-    assert entry["releasable"] is False
-    # When / Then: the signed release is refused whatever the dispute id would say
-    response = network.client.post(
-        network.url + "/escrow/release", json=release_request(network, identity, lock, entry)
-    )
-    assert response.status_code == 409 and "DISPUTED_OR_UNVESTED" in response.text
-    assert balances(network).admission_locked == 1000
-
-
 def convict_through_the_routes(network, identity, loser):
     """The miner contests its verdict over HTTP; the referee rules against `loser`."""
     from hypertrain.auditor.island_bisect import RefereeEvidence
@@ -256,10 +231,66 @@ def convict_through_the_routes(network, identity, loser):
     return network.signed(service.REFEREE, "ResolutionV2", resolution)
 
 
+def test_a_lock_named_after_a_dispute_is_not_released_by_that_dispute(network):
+    # Given: the owner names its bond after the dispute id that its own contest will have, and
+    # the referee rules for the miner: the dispute settles in its favour
+    from hypertrain.protocol.hashing import sha256_hex
+
+    run_id = network.manifest.run_id()
+    dispute_id = sha256_hex(service.canonicalize([run_id, "11" * 32, service.HOT[0].ss58]))
+    identity, lock = lock_bond(network, operation=dispute_id)
+    verdict = convict_through_the_routes(network, identity, service.AUDITORS[0].ss58)
+    resolved = network.client.post(network.url + "/resolution", json=verdict)
+    assert resolved.status_code == 200, resolved.text
+    settlement = network.store._services(run_id)[2].settlement(dispute_id)
+    assert settlement.outcome == "MATCH" and not settlement.unresolved
+    # When: the owner signs a release with the hashes of that dispute's settlement
+    entry = {
+        "origin_ids": [network.origin_ids[0]],
+        "finality_hash": settlement.finality_hash,
+        "closed_dispute_root": settlement.closed_dispute_root,
+    }
+    response = network.client.post(
+        network.url + "/escrow/release", json=release_request(network, identity, lock, entry)
+    )
+    # Then: the bond is settled by the admission's own state, not by the dispute it is named after
+    assert response.status_code == 409 and "DISPUTED_OR_UNVESTED" in response.text
+    assert balances(network).admission_locked == 1000
+
+
+def test_a_conviction_that_cannot_be_settled_rolls_the_resolution_back(network, monkeypatch):
+    # Given: a funded miner whose referee verdict goes against it, and a settlement hook that fails
+    from hypertrain.challenge.admission import Admission
+    from hypertrain.challenge.admission_store import AdmissionError
+
+    identity, _ = lock_bond(network)
+    verdict = convict_through_the_routes(network, identity, service.HOT[0].ss58)
+
+    def fails(self, dispute_id, *, now):
+        raise AdmissionError("UNPROVEN_TRAINING_FRAUD")
+
+    db = network.store._db
+    with monkeypatch.context() as patch:
+        patch.setattr(Admission, "settle_fraud", fails)
+        # When
+        refused = network.client.post(network.url + "/resolution", json=verdict)
+    # Then: nothing of the resolution is kept, so the verdict can be posted again
+    assert refused.status_code == 409, refused.text
+    assert (
+        db.execute("SELECT json_extract(turn,'$.resolution') FROM disputes_v2").fetchone()[0]
+        is None
+    )
+    assert db.execute("SELECT COUNT(*) FROM escrow_events WHERE kind='SLASH'").fetchone()[0] == 0
+    assert (balances(network).admission_locked, balances(network).burned) == (1000, 0)
+    retried = network.client.post(network.url + "/resolution", json=verdict)
+    assert retried.status_code == 200, retried.text
+    assert (balances(network).admission_locked, balances(network).burned) == (0, 1100)
+
+
 @pytest.mark.parametrize("miner_loses", [True, False])
 def test_referee_fraud_against_the_miner_seizes_the_bond_through_the_routes(network, miner_loses):
     # Given: a funded miner that contested its verdict, a referee verdict, posted twice
-    identity, lock = lock_bond(network)
+    identity, _ = lock_bond(network)
     loser = service.HOT[0].ss58 if miner_loses else service.AUDITORS[0].ss58
     verdict = convict_through_the_routes(network, identity, loser)
     # When
@@ -286,7 +317,6 @@ def test_referee_fraud_against_the_miner_seizes_the_bond_through_the_routes(netw
         # the auditor lost: the miner's bond is intact and it stays suspended pending recovery
         assert (b.admission_locked, b.burned, slashes) == (1000, 0, 0)
         assert state["state"] == "SUSPENDED"
-    assert lock.operation_id
 
 
 def test_coldkey_alone_cannot_burn_a_registered_unjoined_hotkey_over_http(network):

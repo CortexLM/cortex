@@ -476,6 +476,8 @@ def test_decoder_runtime_consumer_rejects_wrong_trial_without_dispatch(tmp_path,
 
     def respond(request):
         calls.append(request.url.path)
+        if request.method == "GET":  # the run status, whose round the signed request expires from
+            return httpx.Response(200, json={"now_round": 2})
         return httpx.Response(
             200, json=envelope_v2.seal(coord, "JoinChallenge", job.run_id, challenge, 101)
         )
@@ -495,7 +497,12 @@ def test_decoder_runtime_consumer_rejects_wrong_trial_without_dispatch(tmp_path,
                 threading.Event(),
             )
     assert calls == (
-        [] if fault == "identity" else [f"/v2/runs/{job.run_id}/join/" + "11" * 32 + "/challenge"]
+        []
+        if fault == "identity"
+        else [
+            f"/v2/runs/{job.run_id}",
+            f"/v2/runs/{job.run_id}/join/" + "11" * 32 + "/challenge",
+        ]
     )
 
 

@@ -19,7 +19,7 @@ import pytest
 
 from hypertrain.auditor.island_bisect import RefereeEvidence
 from hypertrain.beacon.core import BeaconRound
-from hypertrain.challenge.store import ChallengeError, ChallengeStore
+from hypertrain.challenge.store import ESCROW_ID_NAMESPACE_META, ChallengeError, ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.ledger import Params
 from hypertrain.ledger.escrow_v2 import SERVER_SCOPE, Settlement, escrow_id_key
@@ -202,7 +202,7 @@ def test_the_store_derives_every_server_id_under_the_coordinator_id_key(served) 
     assert genesis == SERVER_SCOPE + hmac.digest(key, raw.encode(), "sha256").hex()
     assert genesis != SERVER_SCOPE + raw  # the public formula does not give the stored key
     pinned = n.store._db.execute(
-        "SELECT value FROM meta WHERE key='escrow-id-namespace-v2'"
+        "SELECT value FROM meta WHERE key=?", (ESCROW_ID_NAMESPACE_META,)
     ).fetchone()["value"]
     assert pinned == sha256_hex(key)
 

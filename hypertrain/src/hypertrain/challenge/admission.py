@@ -64,6 +64,17 @@ from hypertrain.protocol.messages_v2 import (
 SeizureReason = Literal["TRAINING_FRAUD", "NO_SHOW", "AUDIT_MISMATCH"]
 
 
+@dataclass(frozen=True)
+class _Standing:
+    """What a MATCH settlement of any lock of one admission depends on, apart from the lock."""
+
+    unresolved: bool
+    rounds: list[list[object]]
+    origins: list[str]
+    disputes: list[str]
+    release_beacon: int
+
+
 def _logical(objects: Store, ref: ArtifactRef, code: str) -> tuple[str, int, bool]:
     """(whole sha256, logical size, indexed) of `ref`; ref.size is the stored object length."""
     try:
@@ -101,17 +112,6 @@ def _put_capped(objects: Store, data: bytes, cap: int) -> str:
         return objects.put(chunk)
 
     return put_large(data, put)
-
-
-@dataclass(frozen=True, slots=True)
-class BondFacts:
-    """What every lock of one admission shares in its derived settlement (see lock_settlement)."""
-
-    unresolved: bool
-    pending: list[str]
-    rounds: list[list[object]]
-    origins: list[str]
-    release: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1278,47 +1278,7 @@ class Admission:
             if status is None or not status.closed
         ]
 
-    def bond_facts(self, admission_id: str) -> BondFacts:
-        """The part of a lock's settlement that its admission shares; one pass for all its locks."""
-        r = self.store.by_id(admission_id)
-        unresolved = r.state == "BANNED" or r.pending_dispute
-        unresolved = unresolved or self.store.pending_outbox(admission_id)
-        pending = self.store.db.execute(
-            "SELECT dispute_id,resolved FROM admission_pending WHERE admission_id=? "
-            "ORDER BY dispute_id",
-            (admission_id,),
-        ).fetchall()
-        unresolved = unresolved or any(not p["resolved"] for p in pending)
-        rounds: list[list[object]] = []
-        for _, status in self.rounds_listing(admission_id):
-            unresolved = unresolved or status is None or not status.closed
-            if status is not None:
-                rounds.append([status.w, status.disposition, status.resolution_hash])
-        origins = self.store.db.execute(
-            "SELECT origin,mature_at FROM escrow_origins WHERE hotkey IN "
-            "(SELECT hotkey FROM admission_history WHERE admission_id=?) ORDER BY origin",
-            (admission_id,),
-        ).fetchall()
-        unvested = self.store.db.execute(
-            # Fixed order: the admission's origins, then their rows by primary key. The planner
-            # would otherwise scan every unit row of the ledger.
-            "SELECT 1 FROM escrow_origins o CROSS JOIN escrow_units u ON u.origin=o.origin "
-            "WHERE u.bucket='reward_pending' AND u.units>0 AND o.hotkey IN "
-            "(SELECT hotkey FROM admission_history WHERE admission_id=?) LIMIT 1",
-            (admission_id,),
-        ).fetchone()
-        release = max((o["mature_at"] for o in origins), default=0)
-        if r.state == "ACTIVE" or (r.state == "PROBATION" and r.clean_count >= 4):
-            release = max(release, r.screen_until + 1)
-        return BondFacts(
-            unresolved or unvested is not None,
-            [p["dispute_id"] for p in pending],
-            rounds,
-            [o["origin"] for o in origins],
-            release,
-        )
-
-    def lock_settlement(self, lock_id: str, facts: BondFacts | None = None) -> Settlement:
+    def lock_settlement(self, lock_id: str, standing: _Standing | None = None) -> Settlement:
         """What may happen to one admission lock. Derived, never stored.
 
         FRAUD once the lock was seized (`seize_bond`). Otherwise MATCH, and unresolved until
@@ -1356,28 +1316,69 @@ class Admission:
                 evidence_hash=seized["evidence_hash"],
                 **who,
             )
-        facts = facts or self.bond_facts(admission_id)
+        st = standing or self._standing(admission_id)
         return Settlement(
             finality_hash=sha256_hex(
-                canonicalize(["ht-bond-final-v1", lock_id, facts.rounds, facts.origins])
+                canonicalize(["ht-bond-final-v1", lock_id, st.rounds, st.origins])
             ),
-            closed_dispute_root=sha256_hex(canonicalize(["ht-bond-closed-v1", facts.pending])),
-            release_beacon=facts.release,
-            unresolved=facts.unresolved,
+            closed_dispute_root=sha256_hex(canonicalize(["ht-bond-closed-v1", st.disputes])),
+            release_beacon=st.release_beacon,
+            unresolved=st.unresolved,
             outcome="MATCH",
             **who,
+        )
+
+    def _standing(self, admission_id: str) -> _Standing:
+        """The admission-level reads of `lock_settlement`: one scan of the run's rounds, however
+        many locks the admission holds."""
+        r = self.store.by_id(admission_id)
+        unresolved = r.state == "BANNED" or r.pending_dispute
+        unresolved = unresolved or self.store.pending_outbox(admission_id)
+        pending = self.store.db.execute(
+            "SELECT dispute_id,resolved FROM admission_pending WHERE admission_id=? "
+            "ORDER BY dispute_id",
+            (admission_id,),
+        ).fetchall()
+        unresolved = unresolved or any(not p["resolved"] for p in pending)
+        rounds: list[list[object]] = []
+        for _, status in self.rounds_listing(admission_id):
+            unresolved = unresolved or status is None or not status.closed
+            if status is not None:
+                rounds.append([status.w, status.disposition, status.resolution_hash])
+        origins = self.store.db.execute(
+            "SELECT origin,mature_at FROM escrow_origins WHERE hotkey IN "
+            "(SELECT hotkey FROM admission_history WHERE admission_id=?) ORDER BY origin",
+            (admission_id,),
+        ).fetchall()
+        unvested = self.store.db.execute(
+            # Fixed order: the admission's origins, then their rows by primary key. The planner
+            # would otherwise scan every unit row of the ledger.
+            "SELECT 1 FROM escrow_origins o CROSS JOIN escrow_units u ON u.origin=o.origin "
+            "WHERE u.bucket='reward_pending' AND u.units>0 AND o.hotkey IN "
+            "(SELECT hotkey FROM admission_history WHERE admission_id=?) LIMIT 1",
+            (admission_id,),
+        ).fetchone()
+        release = max((o["mature_at"] for o in origins), default=0)
+        if r.state == "ACTIVE" or (r.state == "PROBATION" and r.clean_count >= 4):
+            release = max(release, r.screen_until + 1)
+        return _Standing(
+            unresolved=unresolved or unvested is not None,
+            rounds=rounds,
+            origins=[o["origin"] for o in origins],
+            disputes=[p["dispute_id"] for p in pending],
+            release_beacon=release,
         )
 
     def bond(self, admission_id: str, *, now: int) -> dict[str, JsonValue]:
         """The admission's locked bond and what the owner must sign to take it back (status)."""
         locks: list[JsonValue] = []
-        facts: BondFacts | None = None
+        standing = None
         for lock in self._bond_locks(admission_id):
             origins, units = self._residual(lock)
             if not units:
                 continue
-            facts = facts or self.bond_facts(admission_id)
-            s = self.lock_settlement(lock.operation_id, facts)
+            standing = standing or self._standing(admission_id)
+            s = self.lock_settlement(lock.operation_id, standing)
             locks.append(
                 {
                     "lock_id": lock.operation_id,
@@ -1403,14 +1404,14 @@ class Admission:
         """
         self._beacon(now)
         receipts: list[EscrowReceipt] = []
-        facts: BondFacts | None = None
+        standing = None
         with self.escrow.tx():
             for lock in self._bond_locks(admission_id):
                 origins, units = self._residual(lock)
                 if not units:
                     continue
-                facts = facts or self.bond_facts(admission_id)
-                s = self.lock_settlement(lock.operation_id, facts)
+                standing = standing or self._standing(admission_id)
+                s = self.lock_settlement(lock.operation_id, standing)
                 if s.unresolved or s.outcome == "FRAUD" or now < s.release_beacon:
                     raise AdmissionError("BOND_NOT_RELEASABLE")
                 op = EscrowRelease(
@@ -1446,7 +1447,9 @@ class Admission:
         auditor, and the closures of ADR 0011 are not convictions.
 
         TRAINING_FRAUD (a referee verdict, see settle_fraud): also burns the owner's unvested
-        rewards and bans the admission (terminal; `lock` then answers LOCK_BANNED).
+        rewards, as part of slashing a residual lock (after an earlier bond-only seizure there
+        is none, and the rewards survive), and bans the admission (terminal; `lock` then
+        answers LOCK_BANNED).
         AUDIT_MISMATCH (a round-stage audit mismatch the caller has confirmed as the miner's):
         suspends the admission, reason AUDIT_MISMATCH, adds one strike, and burns the bond alone.
         The coldkey stays bound by the one-non-ACTIVE-admission rule, as in probation, and the
@@ -1467,7 +1470,7 @@ class Admission:
                 ).rowcount
                 == 1
             )
-            facts: BondFacts | None = None
+            standing: _Standing | None = None
             for lock in self._bond_locks(admission_id):
                 origins, units = self._residual(lock)
                 if not units:
@@ -1476,8 +1479,8 @@ class Admission:
                     "INSERT OR IGNORE INTO admission_seizures VALUES(?,?,?,?,?)",
                     (lock.operation_id, admission_id, reason, evidence_hash, now),
                 )
-                facts = facts or self.bond_facts(admission_id)
-                s = self.lock_settlement(lock.operation_id, facts)
+                standing = standing or self._standing(admission_id)
+                s = self.lock_settlement(lock.operation_id, standing)
                 op = EscrowRelease(
                     operation_id=self._bond_operation("slash", lock.operation_id),
                     owner=lock.owner,
@@ -1511,9 +1514,11 @@ class Admission:
 
         Called with the dispute id when a resolution is accepted. Only an accepted, resolved
         dispute settlement whose outcome is FRAUD (reason FRAUD and loser == the miner of the
-        contest) convicts; any other closure returns False and changes nothing. The pending
-        reference bound when the dispute opened must name the same admission, coldkey and
-        evidence.
+        contest) convicts. It returns False and changes nothing when there is no pending
+        reference, the dispute is unresolved or the outcome is not FRAUD. The pending reference
+        bound when the dispute opened must name the same admission, coldkey and evidence, and the
+        release beacon must be reached, or UNPROVEN_TRAINING_FRAUD is raised and the resolution
+        that called it is rolled back.
         """
         self._beacon(now)
         with self.escrow.tx():

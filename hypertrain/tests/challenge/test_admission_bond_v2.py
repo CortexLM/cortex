@@ -39,6 +39,7 @@ sys.modules[_spec.name] = T
 _spec.loader.exec_module(T)
 HOT, COLD, OTHER, COORD, H = T.HOT, T.COLD, T.OTHER, T.COORD, T.H
 REFEREE = Keypair(b"\x71" * 32)
+NEW_HOT = Keypair(b"\x72" * 32)
 
 
 class World:
@@ -198,13 +199,18 @@ def events(w: World) -> int:
     return w.a.store.db.execute("SELECT COUNT(*) FROM escrow_events").fetchone()[0]
 
 
-def unclosed_round(w: World, *, closed: bool) -> None:
-    """A round that lists the admission, with the finality record of the store."""
+def rostered_round(w: World) -> None:
+    """A round that lists the admission, before the store wrote any finality record for it."""
     roster = [{"admission_id": w.admission, "hotkey": HOT.ss58}]
     w.a.store.db.execute(
         "INSERT OR REPLACE INTO records_v2 VALUES(?,?,?,?)",
         (w.run_id, "round", "0", json.dumps({"body": {"roster": roster}})),
     )
+
+
+def unclosed_round(w: World, *, closed: bool) -> None:
+    """A round that lists the admission, with the finality record of the store."""
+    rostered_round(w)
     status = {
         "run_id": w.run_id,
         "w": 0,
@@ -222,12 +228,12 @@ def unclosed_round(w: World, *, closed: bool) -> None:
     )
 
 
-def reward(w: World, *, vested: bool, mature_at: int = 50) -> None:
-    """A reward origin of the admission's hotkey, still pending or already matured."""
+def reward(w: World, *, vested: bool, mature_at: int = 50, hotkey: str = HOT.ss58) -> None:
+    """A reward origin of one hotkey of the admission, still pending or already matured."""
     db = w.a.store.db
     db.execute(
         "INSERT OR REPLACE INTO escrow_origins VALUES(?,?,?,?,?)",
-        ("aa" * 32, 500, mature_at, 0, HOT.ss58),
+        ("aa" * 32, 500, mature_at, 0, hotkey),
     )
     db.execute("DELETE FROM escrow_units WHERE origin=?", ("aa" * 32,))
     db.execute(
@@ -238,7 +244,7 @@ def reward(w: World, *, vested: bool, mature_at: int = 50) -> None:
 
 def test_release_bond_gives_the_bond_back_once_the_admission_is_quiet(world: World) -> None:
     # Given: a funded application that never joined a round
-    bond = world.bond()
+    world.bond()
     assert balances(world).admission_locked == 1000
     # When
     receipts = world.a.release_bond(world.admission, now=5)
@@ -250,7 +256,6 @@ def test_release_bond_gives_the_bond_back_once_the_admission_is_quiet(world: Wor
     assert world.a.release_bond(world.admission, now=6) == []
     assert events(world) == before
     assert world.a.bond(world.admission, now=6) == {"locks": []}
-    assert bond.operation_id
 
 
 @pytest.mark.parametrize(
@@ -260,6 +265,7 @@ def test_release_bond_gives_the_bond_back_once_the_admission_is_quiet(world: Wor
         "unresolved_pending_row",
         "outbox",
         "open_round",
+        "round_without_finality",
         "unvested_reward",
         "banned",
     ],
@@ -291,6 +297,8 @@ def test_release_bond_is_refused_while_something_the_bond_covers_is_open(
             world.a.store.enqueue_lock(queued, COLD.ss58)
         case "open_round":
             unclosed_round(world, closed=False)
+        case "round_without_finality":
+            rostered_round(world)
         case "unvested_reward":
             reward(world, vested=False)
         case "banned":
@@ -308,7 +316,7 @@ def test_release_bond_is_refused_while_something_the_bond_covers_is_open(
             db.execute("UPDATE admission_pending SET resolved=1")
         case "outbox":
             world.a.store.reconcile_lock(queued.operation_id)
-        case "open_round":
+        case "open_round" | "round_without_finality":
             unclosed_round(world, closed=True)
         case "unvested_reward":
             reward(world, vested=True)
@@ -326,6 +334,9 @@ def test_release_bond_waits_for_the_last_reward_to_vest_and_for_a_live_screen_to
     reward(world, vested=True, mature_at=50)
     with pytest.raises(AdmissionError, match="BOND_NOT_RELEASABLE"):
         world.a.release_bond(world.admission, now=49)
+    # the status says the same on both sides of the boundary
+    assert world.a.bond(world.admission, now=49)["locks"][0]["releasable"] is False  # type: ignore[index]
+    assert world.a.bond(world.admission, now=50)["locks"][0]["releasable"] is True  # type: ignore[index]
     world.a.store.db.execute(
         "UPDATE admissions_v2 SET state='ACTIVE',screen_until=200 WHERE admission_id=?",
         (world.admission,),
@@ -336,6 +347,48 @@ def test_release_bond_waits_for_the_last_reward_to_vest_and_for_a_live_screen_to
     # When: the screen has lapsed
     world.a.release_bond(world.admission, now=201)
     assert balances(world).admission_locked == 0
+
+
+@pytest.mark.parametrize(
+    "vested,now,released",
+    [(False, 1000, False), (True, 49, False), (True, 50, True)],
+    ids=["unvested", "vested_not_mature", "mature"],
+)
+def test_a_rotated_admission_keeps_its_bond_for_the_rewards_of_its_old_hotkey(
+    world: World, vested: bool, now: int, released: bool
+) -> None:
+    # Given: the miner rotated to a new hotkey; a reward (maturing at round 50) was earned by
+    # the old one
+    world.bond()
+    world.a.rotate(T.rotation(world.a, HOT, NEW_HOT, "33" * 32), now=2)
+    assert world.a.store.record(NEW_HOT.ss58).admission_id == world.admission
+    reward(world, vested=vested, mature_at=50, hotkey=HOT.ss58)
+    # When / Then: the bond waits for what the old hotkey earned, as for the current one
+    if released:
+        world.a.release_bond(world.admission, now=now)
+        assert balances(world).admission_locked == 0
+    else:
+        with pytest.raises(AdmissionError, match="BOND_NOT_RELEASABLE"):
+            world.a.release_bond(world.admission, now=now)
+        assert balances(world).admission_locked == 1000
+
+
+def test_the_status_of_a_bond_reads_the_rounds_once_however_many_locks_it_holds(
+    world: World,
+) -> None:
+    # Given: an admission with three locks, on a route anyone may poll
+    world.bond(300)
+    world.bond(300, operation="23" * 32)
+    world.bond(300, operation="24" * 32)
+    scans: list[str] = []
+    world.a.store.db.set_trace_callback(
+        lambda sql: scans.append(sql) if "json_each" in sql else None
+    )
+    # When
+    status = world.a.bond(world.admission, now=10)
+    # Then: all three are reported from a single scan of the run's rounds
+    assert [entry["units"] for entry in status["locks"]] == [300, 300, 300]  # type: ignore[union-attr,index]
+    assert len(scans) == 1
 
 
 def test_a_probation_miner_with_four_clean_trials_is_live_and_keeps_its_bond(world: World) -> None:
@@ -462,10 +515,11 @@ def test_seize_bond_burns_the_bond_of_a_no_show_and_nothing_else(world: World) -
     assert events(world) == before
     # a seized lock is never releasable, and the miner may fund again
     assert world.a.bond(world.admission, now=7) == {"locks": []}
-    again = world.bond(200, operation="24" * 32)
+    world.bond(200, operation="24" * 32)
     reward(world, vested=True, mature_at=1)  # the unvested reward the burn spared has vested
     assert world.a.bond(world.admission, now=1000)["locks"][0]["releasable"] is True  # type: ignore[index]
-    assert again.operation_id
+    seized = world.a.lock_settlement("22" * 32)
+    assert seized.outcome == "FRAUD"
     release = EscrowRelease(
         operation_id="67" * 32,
         owner=COLD.ss58,
@@ -474,8 +528,8 @@ def test_seize_bond_burns_the_bond_of_a_no_show_and_nothing_else(world: World) -
         admission_id=world.admission,
         dispute_id=None,
         lock_id="22" * 32,
-        finality_hash=H,
-        closed_dispute_root=H,
+        finality_hash=seized.finality_hash,
+        closed_dispute_root=seized.closed_dispute_root,
     )
     with pytest.raises(EscrowError, match="DISPUTED_OR_UNVESTED"):
         world.a.escrow.release(release, signer=COLD.ss58, now_beacon=100)
@@ -620,10 +674,15 @@ def test_a_verdict_that_does_not_convict_the_miner_leaves_the_bond_alone(
     assert world.a.store.by_id(world.admission).state != "BANNED"
 
 
-def test_settle_fraud_refuses_a_verdict_bound_to_another_admission(world: World) -> None:
-    # Given: the pending reference names this admission but the verdict's evidence differs
+@pytest.mark.parametrize("differs", ["evidence", "coldkey"])
+def test_settle_fraud_refuses_a_verdict_bound_to_another_admission(
+    world: World, differs: str
+) -> None:
+    # Given: the pending reference names this admission but the verdict's evidence differs, or
+    # the verdict was settled for another coldkey than the admission's
     world.bond()
-    world.contest = world.contest.model_copy(update={"evidence_hash": "66" * 32})
+    if differs == "evidence":
+        world.contest = world.contest.model_copy(update={"evidence_hash": "66" * 32})
     world.a.suspend(
         HOT.ss58,
         reason="PENDING_DISPUTE",
@@ -633,6 +692,10 @@ def test_settle_fraud_refuses_a_verdict_bound_to_another_admission(world: World)
         evidence_hash="55" * 32,
     )
     world.convict(bind=False)
+    if differs == "coldkey":
+        world.a.store.db.execute(
+            "UPDATE admissions_v2 SET coldkey=? WHERE admission_id=?", (OTHER.ss58, world.admission)
+        )
     # When / Then
     with pytest.raises(AdmissionError, match="UNPROVEN_TRAINING_FRAUD"):
         world.a.settle_fraud(world.dispute_id, now=3)

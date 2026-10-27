@@ -8,7 +8,9 @@ The log belongs to one run and has one writer at a time. In production it is a r
 coordinator's database, where ADR 0003 keeps lease state; a log that is lost, rolled back or
 shared reopens the hole, so it fails rather than guesses: a missing or unreadable log is an
 error, a log that moved under its coordinator refuses to save, and the local file is locked for
-as long as a coordinator holds it.
+as long as a coordinator holds it. A log restored from an older copy cannot be told from inside,
+since the restore brings the mark back with the file: the leave is bound to the coordinator's epoch
+(membership.py), which is never stored here.
 """
 
 from __future__ import annotations

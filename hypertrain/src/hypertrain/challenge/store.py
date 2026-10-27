@@ -274,6 +274,10 @@ class _ServiceCapacityV1(BaseModel):
 MAX_ROSTER_CEILING = 1024
 
 
+# The meta row that pins which coordinator secret the escrow ids were derived from.
+ESCROW_ID_NAMESPACE_META = "escrow-id-namespace-v2"
+
+
 class ChallengeError(Exception):
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(detail)
@@ -2365,11 +2369,11 @@ class ChallengeStore:
                 return int(row["created"])
         else:
             model = envelope_v2.MESSAGE_TYPES_V2[envelope.type].model_validate(envelope.body)
-            key = "auth:" + _dumps(
+            slot = "auth:" + _dumps(
                 list(envelope_v2.replay_key(envelope.type, run_id, envelope.signer, model))
             )
             row = self._db.execute(
-                "SELECT envelope, accepted_beacon FROM accepted_v2 WHERE key=?", (key,)
+                "SELECT envelope, accepted_beacon FROM accepted_v2 WHERE key=?", (slot,)
             ).fetchone()
             if row is not None and envelope_v2.parse_envelope(row["envelope"]) == envelope:
                 return int(row["accepted_beacon"])
@@ -2623,9 +2627,11 @@ class ChallengeStore:
         key = escrow_id_key(self._coord()._secret)
         namespace = sha256_hex(key)
         with self._tx() as db:
-            row = db.execute("SELECT value FROM meta WHERE key='escrow-id-namespace-v2'").fetchone()
+            row = db.execute(
+                "SELECT value FROM meta WHERE key=?", (ESCROW_ID_NAMESPACE_META,)
+            ).fetchone()
             if row is None:
-                db.execute("INSERT INTO meta VALUES('escrow-id-namespace-v2', ?)", (namespace,))
+                db.execute("INSERT INTO meta VALUES(?, ?)", (ESCROW_ID_NAMESPACE_META, namespace))
             elif row["value"] != namespace:
                 raise ChallengeError(503, "escrow id namespace differs")
         return key

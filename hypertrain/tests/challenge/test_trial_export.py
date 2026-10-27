@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from hypertrain.challenge.app import OWNER_REQUEST_MAX_ROUNDS
 from hypertrain.data.trial_assignment import trial_samples
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.hashing import sha256_hex
@@ -41,14 +42,55 @@ def export(n, identity):
     return n.client.post(n.url + f"/admin/trial/{identity}/export", headers=service.admin())
 
 
-def job(n, identity, key=service.HOT[0], hotkey=None, run_id=None):
-    """Miner-facing job read, signed by `key` (X-Hotkey defaults to the signer)."""
-    run_id = run_id or n.manifest.run_id()
-    signature = key.sign(f"hypertrain/trial-job/2|{run_id}|{identity}".encode()).hex()
-    return n.client.get(
-        f"/v2/runs/{run_id}/join/{identity}/job",
-        headers={"x-hotkey": hotkey or key.ss58, "x-trial-signature": signature},
+def job(n, identity, key=None, *, expires=None, run_id=None):
+    """Miner-facing job read: a POST whose body is the owner's (or `key`'s) signed JobRequest."""
+    request = n.owner_request("JobRequest", identity, key, expires=expires)
+    return n.client.post(
+        n.url + f"/join/{identity}/job"
+        if run_id is None
+        else f"/v2/runs/{run_id}/join/{identity}/job",
+        json=request,
     )
+
+
+def forgeries(n, identity, message):
+    """Bodies that are not the owner's unexpired `message` for `identity`, whatever else they
+    carry. The master proxy forwards no signature header: the proof is only in the body."""
+    owner, rival = service.HOT[0], service.HOT[1]
+    other = "JobRequest" if message == "ChallengeRequest" else "ChallengeRequest"
+    now = n.store._now(n.store._db)
+    mine = n.owner_request(message, identity)
+    return {
+        "no body": b"",
+        "a body that is not json": b"not json",
+        "a rival signing as itself": n.owner_request(message, identity, rival),
+        "the owner's request for another admission": n.signed(
+            owner, message, {"admission_id": "ee" * 32}, now + 5
+        ),
+        "the owner's request under another run": service.seal(
+            owner, message, "ff" * 32, {"admission_id": identity}, now + 5
+        ),
+        "the owner's request for the other route": n.owner_request(other, identity),
+        "another message of the owner": n.signed(
+            owner, "Receipt", {"w": 0, "commit_hash": "11" * 32, "received_round": 1}, now + 5
+        ),
+        "an expired request of the owner": n.owner_request(message, identity, expires=now - 1),
+        "a request with the owner's signature cut": {**mine, "sig": "00" * 64},
+        "a request with a rival as signer": {**mine, "signer": rival.ss58},
+    }
+
+
+def send(n, url, body):
+    if isinstance(body, bytes):
+        return n.client.post(url, content=body)
+    return n.client.post(url, json=body)
+
+
+def assert_refused(response, name=""):
+    assert (response.status_code, response.json()) == (
+        403,
+        {"detail": "hotkey is not current accepted identity"},
+    ), name
 
 
 def test_challenge_route_refuses_everyone_but_the_owner(network):
@@ -56,43 +98,12 @@ def test_challenge_route_refuses_everyone_but_the_owner(network):
     # trial takes one of the run's trial places, so only the owner may ask for it.
     identity = network.join().json()["admission_id"]
     network.push(network.now + 1)
-    run_id = network.manifest.run_id()
-    owner, rival = service.HOT[0], service.HOT[1]
-    domain = "hypertrain/trial-challenge/2"
-
-    def sign(key, domain=domain, run=run_id, admission=identity):
-        return key.sign(f"{domain}|{run}|{admission}".encode()).hex()
-
-    forged = {
-        "no headers": {},
-        "the admin token": service.admin(),
-        "a rival signing as itself": {"x-hotkey": rival.ss58, "x-trial-signature": sign(rival)},
-        "a rival's signature under the owner's key": {
-            "x-hotkey": owner.ss58,
-            "x-trial-signature": sign(rival),
-        },
-        "the owner's signature under the rival's key": {
-            "x-hotkey": rival.ss58,
-            "x-trial-signature": sign(owner),
-        },
-        "the owner's job signature": {
-            "x-hotkey": owner.ss58,
-            "x-trial-signature": sign(owner, domain="hypertrain/trial-job/2"),
-        },
-        "another run": {"x-hotkey": owner.ss58, "x-trial-signature": sign(owner, run="ff" * 32)},
-        "another admission": {
-            "x-hotkey": owner.ss58,
-            "x-trial-signature": sign(owner, admission="ee" * 32),
-        },
-        "a signature that is not hex": {"x-hotkey": owner.ss58, "x-trial-signature": "zz"},
-    }
-    # When / Then: every one is refused alike, and nothing was issued
-    for name, headers in forged.items():
-        response = network.client.get(network.url + f"/join/{identity}/challenge", headers=headers)
-        assert (response.status_code, response.json()) == (
-            403,
-            {"detail": "hotkey is not current accepted identity"},
-        ), name
+    url = network.url + f"/join/{identity}/challenge"
+    # When / Then: every forgery is refused alike, and nothing was issued
+    for name, body in forgeries(network, identity, "ChallengeRequest").items():
+        assert_refused(send(network, url, body), name)
+    # the earlier contract, a GET with signature headers, is gone
+    assert network.client.get(url).status_code == 405
     db = network.store._db
     assert db.execute("SELECT challenge FROM admissions_v2").fetchone()[0] is None
     assert db.execute("SELECT COUNT(*) FROM admission_trials").fetchone()[0] == 0
@@ -100,6 +111,50 @@ def test_challenge_route_refuses_everyone_but_the_owner(network):
     first = network.challenge(identity)
     assert first.status_code == 200 and first.json()["type"] == "JoinChallenge"
     assert network.challenge(identity).json() == first.json()
+
+
+def test_job_route_refuses_everyone_but_the_owner(trial):
+    n, identity, _ = trial
+    url = n.url + f"/join/{identity}/job"
+    for name, body in forgeries(n, identity, "JobRequest").items():
+        assert_refused(send(n, url, body), name)
+    # the earlier contract, a GET with signature headers, is gone
+    assert n.client.get(url).status_code == 405
+    assert not (n.store.state_dir / "trials-v2").exists()
+    assert job(n, identity).status_code == 200
+
+
+def owner_post(n, route, identity, request):
+    return n.client.post(n.url + f"/join/{identity}/{route}", json=request)
+
+
+@pytest.mark.parametrize(
+    "route,message", [("challenge", "ChallengeRequest"), ("job", "JobRequest")]
+)
+def test_a_captured_owner_request_is_good_only_until_its_expiry(trial, route, message):
+    # Given: the owner's request, as a third party may capture it on the wire
+    n, identity, _ = trial
+    now = n.store._now(n.store._db)
+    captured = n.owner_request(message, identity, expires=now + 5)
+    assert owner_post(n, route, identity, captured).status_code == 200
+    # When: its expiry has passed
+    n.push(n.now + 6)
+    # Then: replaying it asks for nothing
+    assert_refused(owner_post(n, route, identity, captured))
+
+
+@pytest.mark.parametrize(
+    "route,message", [("challenge", "ChallengeRequest"), ("job", "JobRequest")]
+)
+def test_an_owner_request_may_expire_only_so_far_ahead(trial, route, message):
+    # The envelope's expiry is the owner's choice, so the service bounds it: a capture cannot be
+    # signed to replay for long.
+    n, identity, _ = trial
+    now = n.store._now(n.store._db)
+    farthest = n.owner_request(message, identity, expires=now + OWNER_REQUEST_MAX_ROUNDS)
+    assert owner_post(n, route, identity, farthest).status_code == 200
+    beyond = n.owner_request(message, identity, expires=now + OWNER_REQUEST_MAX_ROUNDS + 1)
+    assert_refused(owner_post(n, route, identity, beyond))
 
 
 def test_export_matches_prepare_reference_inputs(trial):
@@ -210,20 +265,6 @@ def test_owner_reads_the_admin_export_without_admin_token(trial):
     assert response.json()["challenge"] == envelope["body"]
 
 
-def test_job_route_refuses_another_miners_admission(trial):
-    n, identity, _ = trial
-    other = service.HOT[1]  # registered on the fixture subnet, not this admission's hotkey
-    for response in (
-        job(n, identity, key=other),
-        job(n, identity, key=other, hotkey=service.HOT[0].ss58),
-        job(n, identity, hotkey=other.ss58),
-    ):
-        assert response.status_code == 403, response.text
-        assert response.json() == {"detail": "hotkey is not current accepted identity"}
-    assert not (n.store.state_dir / "trials-v2").exists()
-    assert job(n, identity).status_code == 200
-
-
 @pytest.mark.parametrize(
     "unknown,status,detail", [("run", 404, "unknown run"), ("admission", 409, "UNKNOWN_ADMISSION")]
 )
@@ -231,7 +272,7 @@ def test_job_route_unknown_ids_answer_like_challenge(trial, unknown, status, det
     n, identity, _ = trial
     run_id = "cd" * 32 if unknown == "run" else n.manifest.run_id()
     identity = "ab" * 32 if unknown == "admission" else identity
-    challenge = n.client.get(f"/v2/runs/{run_id}/join/{identity}/challenge")
+    challenge = n.client.post(f"/v2/runs/{run_id}/join/{identity}/challenge", content=b"{}")
     response = job(n, identity, run_id=run_id)
     assert (response.status_code, response.json()) == (status, {"detail": detail})
     assert (challenge.status_code, challenge.json()) == (status, {"detail": detail})

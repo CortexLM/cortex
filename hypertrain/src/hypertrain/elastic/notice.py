@@ -3,8 +3,8 @@
 A NoticeSource tells a host that its provider will take it away: AwsSpotNotice reads the EC2
 instance metadata service (IMDSv2) and FakeNoticeSource replays a schedule. A notice carries a
 deadline on the host's own monotonic clock. The host answers with a LeaveNotice signed by the
-server key it registered at join; the coordinator verifies it against that key and the live
-lease token before releasing the member's shards.
+server key it registered at join; the coordinator verifies it against that key, the epoch of
+its own start and the live lease token before releasing the member's shards.
 """
 
 from __future__ import annotations
@@ -158,15 +158,18 @@ class ShardHead(WireModel):
 
 
 class LeaveNotice(WireModel):
-    """A member's last word: it leaves under lease `lease`. `heads` are the last links it saw
-    accepted and `provider_time` is the provider's interruption timestamp: evidence for the
-    audit, kept on the member's Departure, never trusted over the coordinator's own heads."""
+    """A member's last word: it leaves under lease `lease` of the coordinator start `epoch`
+    (a log restored from a copy may reissue the token, never the epoch). `heads` are the last
+    links it saw accepted and `provider_time` is the provider's interruption timestamp:
+    evidence for the audit, kept on the member's Departure, never trusted over the
+    coordinator's own heads."""
 
     version: Literal[1] = 1
     run_id: Identifier
     member: Identifier
     signer: SS58
     lease: Positive
+    epoch: Hex64
     reason: Literal["interruption", "operator"]
     provider_time: Stamp
     heads: Annotated[list[ShardHead], Field(max_length=MAX_HEADS)]

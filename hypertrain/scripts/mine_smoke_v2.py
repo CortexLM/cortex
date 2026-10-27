@@ -474,13 +474,9 @@ def chain(tmp: Path, ev: dict[str, Any], stack: contextlib.ExitStack) -> None:
     with httpx.Client(base_url=api, timeout=60) as http:
         for trial in range(1, TRIALS + 1):
             n.push(n.now + 1)
-            # The owner's signed challenge GET issues the trial; export reads the stored one.
-            owner = svc.HOT[0]
-            message = f"hypertrain/trial-challenge/2|{rid}|{admission}".encode()
-            http.get(
-                f"/v2/runs/{rid}/join/{admission}/challenge",
-                headers={"x-hotkey": owner.ss58, "x-trial-signature": owner.sign(message).hex()},
-            ).raise_for_status()
+            # The owner's signed challenge request issues the trial; export reads the stored one.
+            asked = n.owner_request("ChallengeRequest", admission, svc.HOT[0])
+            http.post(f"/v2/runs/{rid}/join/{admission}/challenge", json=asked).raise_for_status()
             out = tmp / f"trial-{trial}"
             stage(
                 stages,
