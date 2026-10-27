@@ -18,13 +18,16 @@ lives in a child store, with mode=ro. Prints one JSON line and nothing secret:
                            table holds rounds from before the window, the window's own first
                            rounds count too
     missing_count          how many
-    stale                  rounds exist but none inside the window: the pusher has been dead
+    stale                  rounds exist, none inside the window, and the table is behind by more
+                           than the gate bound: the pusher has been dead
     stranded               identities (first 12 characters of the id) in a state that asks for a
                            challenge whose seed_beacon is one of the missing rounds
 
 Exit 0: nothing missing in the window. 3: a round is missing, or the table is stale. 4: bad
-arguments, unknown run or no beacon table. With a RUN_ID the run must live in a child store or be
-known to the root store: a mistyped id is not read from the wrong database.
+arguments, unknown run or no beacon table. The exit code is about holes and a dead pusher: a pusher
+that is only behind exits 0 with `gate_open` false, so read `lag` and `gate_open` from the JSON.
+With a RUN_ID the store that is read (the child's, or the root's when there is none) must have a
+`runs` row for it: a mistyped or half-created id is not read from the wrong database.
 """
 
 from __future__ import annotations
@@ -78,7 +81,7 @@ def report(db: sqlite3.Connection, since: int, wall: float) -> dict[str, Any]:
         "first": first,
         "missing": missing[:LISTED],
         "missing_count": len(missing),
-        "stale": bool(now) and not held,
+        "stale": bool(now) and not held and emitted - now > LAG_BOUND,
         "stranded": stranded,
     }
 
@@ -101,13 +104,14 @@ def main(argv: list[str], data: Path = Path("/data"), wall: float | None = None)
         return 4
     db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
     try:
-        if len(argv) == 2 and not hosted:  # no child store: the root must be the run's host
-            if not db.execute("SELECT 1 FROM runs WHERE run_id=?", (argv[1],)).fetchone():
-                print(
-                    f"run {argv[1][:12]} has no child store and the root does not know it",
-                    file=sys.stderr,
-                )
-                return 4
+        # the store that is read must host the run: a child directory whose `runs` table is empty
+        # is an aborted creation (store.py drops it on the next create), not a store to read
+        if (
+            len(argv) == 2
+            and not db.execute("SELECT 1 FROM runs WHERE run_id=?", (argv[1],)).fetchone()
+        ):
+            print(f"run {argv[1][:12]} is not hosted by {path.parent}", file=sys.stderr)
+            return 4
         out = report(db, since, time.time() if wall is None else wall)
     except sqlite3.Error as error:
         print(f"cannot read the beacon table: {type(error).__name__}", file=sys.stderr)

@@ -64,12 +64,13 @@ The executor now does it by default ([ADR 0012](../../docs/adr/0012-executor-per
 has not run on a GPU host: the tests model the mount and the warm/cold difference on the fake host.
 
 - Before each container it runs, as the ssh user and never through `sudo`, `umask 077`, `mkdir -p`,
-  a refusal of a link and `chmod 0700` on `<root>/<first 32 hex of the manifest image digest>`, and
+  a refusal of a link or of a directory it does not own, and `chmod 0700` on `<root>/<first 32 hex of the manifest image digest>`, and
   reads back the path. The root is `$HOME/.cortex-cuda-executor/compute-cache`, or
   `hosts[].compute_cache_dir`, an absolute path of letters, digits and `._-` only (use it when the
   home directory is small, or its path holds a space or a comma; `/mnt/nvme/...` on Lium hosts).
   `mkdir -p` also creates the parents of a named root, with the same umask. A report that is not
-  the path asked for is refused. The call is remembered per host and image until an attempt fails.
+  the path asked for is refused. The call is remembered per host and image until a container run
+  fails.
 - If the directory cannot be prepared (read-only home, odd `$HOME`, a link in the way) the attempt
   goes on **without** the cache: `compute_cache` is false in its provenance and journal entry, and
   the journal gets an `exec_cache_unavailable` line with the host's reason. A lost host (ssh down,

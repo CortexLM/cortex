@@ -2174,7 +2174,8 @@ def test_a_link_in_place_of_the_cache_directory_is_refused_and_its_target_left_a
 ):
     pool = make_pool(labels=("a",))
     target = tmp_path / "somewhere-else"
-    target.mkdir(mode=0o755)
+    target.mkdir()
+    target.chmod(0o755)  # mkdir(mode=) is masked by the umask; the test needs this exact mode
     link = pool.home("a") / CACHE_ROOT / cache_leaf(canned)
     link.parent.mkdir(parents=True)
     link.symlink_to(target)

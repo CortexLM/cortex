@@ -707,3 +707,41 @@ def test_restore_db_keeps_the_live_dbs_aside_and_installs_the_backed_up_ones(box
     assert started["db"] == digest_of(backup / "challenge.db")
     assert started["files"] == list(DB_FILES)
     assert box.container(CHALLENGE)["State"]["Status"] == "running"
+
+
+@pytest.mark.parametrize("budget", ["99", '"05"'], ids=["unquoted-99", "leading-zero"])
+def test_beacon_refuses_a_failure_budget_below_100_that_it_cannot_rewrite(box, backup, budget):
+    # the sed raises only a quoted whole number of one or two digits without a leading zero: any
+    # other budget reaches the post-check as it is, and the post-check wants 100 or more
+    live = with_cadence("3", "20", budget)
+    assert live != COMPOSE
+    box.f.write_text(live)
+    before = box.snapshot()
+    out = box.run("beacon", backup, rc=5).out
+    assert "beacon cadence not reached" in out
+    assert box.f.read_text() == live and box.snapshot() == before and not box.new.exists()
+
+
+def test_beacon_checks_the_flags_at_the_positions_it_reads_not_only_their_values(box, backup):
+    # a label whose value is "60" sits where the catch-up value would: the values read 0.2 / 60 /
+    # 100 but the pusher would still run with --catch-up 20
+    live = COMPOSE.replace(
+        '--catch-up, "20", --max-failures, "5"]',
+        '--label, "60", --max-failures, "5", --catch-up, "20"]',
+    )
+    assert live != COMPOSE
+    box.f.write_text(live)
+    before = box.snapshot()
+    out = box.run("beacon", backup, rc=5).out
+    assert "beacon cadence not reached" in out
+    assert box.f.read_text() == live and box.snapshot() == before and not box.new.exists()
+
+
+def test_a_swap_to_the_image_the_challenge_already_pins_changes_nothing_and_is_refused(box, backup):
+    # the image is the one field a swap must change: a run that changes nothing is not a swap
+    box.pull(NEW_REF)
+    box.run(*call("swap", backup), mutates={CHALLENGE})
+    before = box.snapshot()
+    out = box.run(*call("swap", backup), rc=5).out
+    assert "changed []" in out and "unexpected compose change" in out
+    assert box.snapshot() == before and not box.new.exists()

@@ -86,10 +86,12 @@ ran 28 locks with the single `--catch-up 3` pusher and reported no stranded seed
   per image digest keeps a cache made by another image from serving this one and gives a new image a clean
   start; it does **not** make a result independent of the driver or of the host's history.
 - The executor creates the directory itself, over ssh, before the container starts, as the ssh user and
-  never through `sudo`: `umask 077`, `mkdir -p`, a refusal of a link in place of the leaf, `chmod 0700`
-  (the call fails if the directory belongs to another user). It reads back the path it was given and refuses
-  a report that is not the path it asked for. The directory is remembered per host and image and forgotten
-  after any failed attempt, so a directory removed by hand costs one attempt, not the job. Everything the
+  never through `sudo`: `umask 077`, `mkdir -p`, a refusal (with a printed reason) of a link in place of the
+  leaf and of a directory the ssh user does not own, then `chmod 0700`. The ownership test matters when the ssh
+  user is root, as it often is on rented hosts: root's `chmod` would make another user's directory private and
+  leave it writable by its owner. It reads back the path it was given and refuses a report that is not the
+  path it asked for. The directory is remembered per host and image and forgotten after a failed container
+  run, so a directory removed by hand costs one attempt, not the job. Everything the
   executor writes on the host is this directory and the parents `mkdir -p` creates for it.
 - **If the directory cannot be prepared the attempt runs without the cache**, with `compute_cache: false`
   in its provenance and journal entry and an `exec_cache_unavailable` journal line carrying the reason
@@ -323,5 +325,8 @@ read 2026-10-27.
 No GPU run in this batch: the cache effect (57-64 s to 12-19 s) is S13's measurement on one B300 host through a
 wrapper and the mechanism is unknown [?]. No docker daemon was available: the single mount, the refusal of two
 mounts on one target and the behaviour under user-namespace remapping are from the fake host and from memory.
+A challenge restart while a child store is locked can leave rounds in the root that the child never got; the
+pusher reads the root's highest round and cannot refill them, and a seed in one of them is stranded. Reasoned
+from the code, not reproduced; `beacon_gaps.py` with the run id on the child store would show it.
 The beacon numbers are a model validated on two S13 observations, not a measurement on the s100 stack, and they
 depend on a round costing 2.4 s. Part B is a design: its unlocked phase has the hazards listed and is untested.
