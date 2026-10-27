@@ -124,24 +124,25 @@ which windows. Nothing here has run against a GPU host or the real R2 service.
 
 | Field | Meaning |
 | --- | --- |
-| `credentials_file` | The R2 token: a regular file of the challenge's user, mode 0600, holding only `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (must start `cortex-v3-`) and optionally `R2_ENDPOINT` (https). The process environment is ignored. Use a bucket-scoped token, never the Cloudflare account token. |
+| `credentials_file` | The R2 token: a regular file of the challenge's user, mode 0600, holding only `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (must start `cortex-v3-`) and optionally `R2_ENDPOINT` (https; plain http only to a literal loopback address). The process environment is ignored. Use a bucket-scoped token, never the Cloudflare account token. |
 | `operations` | Which of `reference`, `audit`, `referee` use R2 (default `audit`, `referee`: a reference holds the store lock for the whole launch). Others run the SSH way. |
-| `part_bytes`, `max_artifact_bytes` | Part size (a multiple of 4 MiB, 8 to 64 MiB; the challenge chooses, the host cannot) and the largest result accepted (at most 10,000 parts). Default 16 MiB and 16 GiB: raise the second per profile. |
-| `workers` | Parallel parts, on both sides. |
-| `reserve_seconds` | Taken from the island's time budget so the transfer has time left (default 60). |
-| `url_margin_seconds`, `url_ttl_cap_seconds` | URLs live the time left to the job deadline plus the margin, at most the cap. |
-| `poll_ms`, `offer_wait_seconds` | How often each side looks for the other's mailbox object, and how long the container waits for the offer. |
+| `part_bytes`, `max_artifact_bytes` | Part size (a multiple of 4 MiB, 8 to 64 MiB; the challenge chooses, the host cannot) and the largest result accepted (at most 10,000 parts). Default 16 MiB and 16 GiB. Raise `max_artifact_bytes` per profile **together with `max_result_bytes`** of the executor config, which still bounds the tar after the download: the executor refuses to load with `max_artifact_bytes` above it. |
+| `workers` | Parallel parts: uploads in the container, ranged downloads on the challenge. |
+| `reserve_seconds` | Taken from the island's time budget so the transfer has time left (default 60). A lease with less than this plus 30 s left does not use R2 (`exec_artifact_skipped`). |
+| `url_margin_seconds`, `url_ttl_cap_seconds` | The two mailbox URLs live the time left to the job deadline plus the margin (at most 7 days); the part and list URLs, made after the island ran, live the same but at most the cap (default 3600). The container is told a shorter life than they have left. |
+| `poll_ms`, `offer_wait_seconds`, `store_blip_seconds` | How often each side looks for the other's mailbox object, how long the container waits for the offer, and how long the challenge waits out a store that fails while the island runs (default 30 s) before it ends the attempt. |
 | `request_timeout_seconds`, `retry_attempts`, `retry_base_ms` | Per request and backoff, on both sides. |
 | `fallback` | `classic` (default): if R2 is unreachable when an attempt starts, that attempt uses the SSH way; `fail`: it fails. |
 
 Requirements: `network` must be `default` (the container reaches R2 over HTTPS; the image needs a CA
-bundle); the bucket should expire `runs/*/exec/` and abort incomplete uploads after one day (the code
-deletes its own uploads and objects, not the two small mailbox objects of an attempt). A host that
-cannot reach R2 is skipped without using an attempt. The journal gets `exec_artifact_begin`,
-`_offered`, `_done`, `_end`, `_unavailable`, `_salvaged` and `_cleanup_failed`; `role-dispatch.json`
-gets an `artifact` block (transport, sha256, size, part size, parts, upload and download
-milliseconds). A host lost after its last part is salvaged; one lost earlier costs the upload, and
-the next attempt starts again.
+bundle). The attempt's objects live under the bucket prefix `exec/<run>/<job>/<nonce>/`; give the
+bucket the rules "abort incomplete uploads after one day" and "expire after one day" on the literal
+prefix `exec/`. The code deletes its own uploads, objects and mailbox, but a host that still holds a
+URL can write a mailbox object again until it expires. A host that cannot reach R2 is skipped without
+using an attempt. The journal gets `exec_artifact_begin`, `_offered`, `_done`, `_end`, `_unavailable`,
+`_skipped`, `_salvaged` and `_cleanup_failed`; `role-dispatch.json` gets an `artifact` block
+(transport, sha256, size, part size, parts, upload and download milliseconds). A host lost after its
+last part is salvaged; one lost earlier costs the upload, and the next attempt starts again.
 
 ## Install on the `hypertrain-test` stack only (not run)
 

@@ -4,8 +4,9 @@
   promotion to `v3`. Nothing here changes a production run, master, profile, pin or emission,
   and no code in this batch was run on a GPU host (see "Not verified").
   Amended 2026-10-27 by ADR 0013: with `HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS` the result no longer
-  returns on the ssh standard output (Decision 2, "Data in and out", and Section 4 do not apply to
-  it); inputs still do.
+  returns on the ssh standard output (the result half of the "Data in and out" row and of the
+  transfer rows of the failure model); inputs still do, and every check on the received bytes
+  (including `max_result_bytes`) still applies.
 - Order: Principal SN100 D26, brief `v3-cuda-executor`. Founder rule of 2026-10-26: rented or
   listed machines are never servers; the challenge stays on the operator host.
 - Amended by [ADR 0012](0012-executor-performance.md) (2026-10-27): the "Container" and "Data in and

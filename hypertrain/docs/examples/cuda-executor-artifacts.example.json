@@ -8,6 +8,7 @@
   "url_margin_seconds": 30,
   "url_ttl_cap_seconds": 3600,
   "poll_ms": 500,
+  "store_blip_seconds": 30,
   "offer_wait_seconds": 120,
   "request_timeout_seconds": 30,
   "retry_attempts": 4,
