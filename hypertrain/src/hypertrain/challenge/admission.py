@@ -1026,19 +1026,25 @@ class Admission:
             self.store.enqueue_lock(op, env.signer)
         return self.store.reconcile_lock(op.operation_id).event_hash
 
+    def bond_required(self, locked: int) -> int:
+        """The locked units an admission needs to be eligible (`locked` only matters when the
+        policy has no collectible bound: then no amount is enough)."""
+        p = self.escrow.policy
+        denominator = p.s_lower_ppm * p.beta_ppm * 1_000_000
+        return max(
+            p.S_min_units,
+            self.escrow.manifest.training.verify.s_min_units(p.R_collectible_units),
+            (p.G_max_units * 10**18 + denominator - 1) // denominator
+            if denominator
+            else p.G_max_units + locked + 1,
+        )
+
     def status(self, hotkey: str, *, now: int) -> AdmissionStatus:
         self._beacon(now)
         r = self.store.record(hotkey)
         units, receipt = self.escrow.locked(r.admission_id, r.coldkey)
         p = self.escrow.policy
-        denominator = p.s_lower_ppm * p.beta_ppm * 1_000_000
-        required = max(
-            p.S_min_units,
-            self.escrow.manifest.training.verify.s_min_units(p.R_collectible_units),
-            (p.G_max_units * 10**18 + denominator - 1) // denominator
-            if denominator
-            else p.G_max_units + units + 1,
-        )
+        required = self.bond_required(units)
         funding = FundedStatus(
             self.escrow.run_id,
             hotkey,

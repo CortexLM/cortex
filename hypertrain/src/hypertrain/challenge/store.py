@@ -6576,7 +6576,13 @@ class ChallengeStore:
             return record.state
         if record.state != "ACTIVE" and (record.state != "PROBATION" or record.clean_count < 4):
             return "NOT_LIVE"
-        return "SCREEN_LAPSED" if now > record.screen_until else "UNFUNDED"
+        if now > record.screen_until:
+            return "SCREEN_LAPSED"
+        if status.funding.locked_units < admission.bond_required(status.funding.locked_units):
+            return "UNFUNDED"
+        # Every other term of `eligible` (an unsettled lock in the outbox, a policy without a
+        # collectible bound) is not a fault of the member: name nothing rather than mislabel it.
+        raise ChallengeError(500, f"UNMODELLED_ELIGIBILITY_TERM: {hotkey}")
 
     def _exclude_unfit_members_v2(self, run_id: str, w: int) -> None:
         """Leave out an audited member whose admission no longer qualifies it for this round.

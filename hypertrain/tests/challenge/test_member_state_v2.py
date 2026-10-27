@@ -67,6 +67,13 @@ def resume_on_fresh_probation(n, admission, hotkey, identity):
     admission.resume(hotkey, now=n.now)
 
 
+def lose_the_bond(n, admission, hotkey, identity):
+    """The bond leaves the ledger without a state change of the admission (a ledger fault: every
+    seizure of the product suspends)."""
+    with n.store._tx():
+        n.store._db.execute("UPDATE escrow_units SET units=0 WHERE bucket='admission_locked'")
+
+
 def end_the_screen(n, admission, hotkey, identity):
     with n.store._tx():
         n.store._db.execute(
@@ -84,7 +91,8 @@ def end_the_screen(n, admission, hotkey, identity):
         (suspend_for_a_dispute, "SUSPENDED"),
         (resume_on_fresh_probation, "NOT_LIVE"),
         (end_the_screen, "SCREEN_LAPSED"),
-        (seize("NO_SHOW"), "UNFUNDED"),
+        (seize("NO_SHOW"), "SUSPENDED"),
+        (lose_the_bond, "UNFUNDED"),
     ],
     ids=[
         "fit",
@@ -94,6 +102,7 @@ def end_the_screen(n, admission, hotkey, identity):
         "pending-dispute",
         "fresh-probation",
         "screen-lapsed",
+        "no-show-is-suspended",
         "unfunded",
     ],
 )
