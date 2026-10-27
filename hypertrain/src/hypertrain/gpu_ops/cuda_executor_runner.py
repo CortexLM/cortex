@@ -104,6 +104,32 @@ print(json.dumps({
 """
 
 
+# The package installed in the image, listed by the image's own interpreter in isolated mode: no
+# PYTHONPATH, no user site and no working directory on sys.path, so nothing the caller set can stand
+# in for it. Every *.py under the package directory, named as `sources()` of the qualification
+# names it, with the sha256 of its bytes. A link, a special file or a non-ASCII name is refused.
+IMAGE_SOURCES = """
+import hashlib, importlib.util, json
+from pathlib import Path
+spec = importlib.util.find_spec("hypertrain")
+places = list(spec.submodule_search_locations or []) if spec else []
+if len(places) != 1:
+    raise SystemExit("refused: hypertrain is not exactly one package directory")
+root = Path(places[0]).resolve()
+found = {}
+for path in sorted(root.rglob("*.py")):
+    relative = path.relative_to(root).as_posix()
+    if not relative.isascii() or path.resolve() != root / relative or not path.is_file():
+        raise SystemExit("refused: " + ascii(relative))
+    found["src/hypertrain/" + relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+print(json.dumps(found, sort_keys=True, separators=(",", ":")))
+"""
+IMAGE_SOURCES_LIMIT = 1 << 20
+IMAGE_SOURCES_TIMEOUT = 60
+_PACKAGE_FILE = re.compile(r"src/hypertrain/[\x21-\x7e]+\.py")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
 def _monotonic() -> float:
     return time.monotonic()
 
@@ -191,6 +217,47 @@ def probe_environment(request: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(observed, dict):
         raise Refused(9, "environment probe answered a non-object")
     return observed
+
+
+def measure_image_sources() -> dict[str, str]:
+    """The package files of the installed image, `{"src/hypertrain/<rel>": sha256}`."""
+    try:
+        proc = subprocess.run(  # noqa: S603 - the interpreter running this file, fixed source
+            [sys.executable, "-I", "-c", IMAGE_SOURCES],
+            capture_output=True,
+            timeout=IMAGE_SOURCES_TIMEOUT,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        raise Refused(9, f"image sources could not be measured: {type(error).__name__}") from None
+    if proc.returncode:
+        tail = proc.stderr[-TAIL:].decode(errors="replace")
+        raise Refused(9, "image sources could not be measured: " + tail)
+    if len(proc.stdout) > IMAGE_SOURCES_LIMIT:
+        raise Refused(9, "image sources are too large")
+    try:
+        files = json.loads(proc.stdout)
+    except ValueError:
+        files = None
+    if (
+        not isinstance(files, dict)
+        or not files
+        or not all(
+            isinstance(name, str)
+            and _PACKAGE_FILE.fullmatch(name)
+            and isinstance(digest, str)
+            and _SHA256.fullmatch(digest)
+            for name, digest in files.items()
+        )
+    ):
+        raise Refused(9, "image sources are not a package map")
+    return files
+
+
+def sources_digest(files: Mapping[str, str]) -> str:
+    """sha256 of the map as compact JSON with sorted keys, which is the canonical (JCS) form the
+    challenge computes from `sources()` for the ASCII names `IMAGE_SOURCES` allows."""
+    return _sha(json.dumps(dict(files), sort_keys=True, separators=(",", ":")).encode())
 
 
 def torchrun(request: dict[str, Any], attempt: Path, budget: float, log: Path) -> int:

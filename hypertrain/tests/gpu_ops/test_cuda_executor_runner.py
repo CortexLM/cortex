@@ -6,6 +6,7 @@ and the shipped `python -I -c` entry run for real with a fake torch, a fake nvid
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import json
@@ -28,10 +29,13 @@ import pytest
 import hypertrain.trainer  # noqa: F401 - pins determinism before any test imports torch
 from hypertrain.gpu_ops import cuda_executor as ce
 from hypertrain.gpu_ops import cuda_executor_runner as runner
+from hypertrain.gpu_ops import network_qualification as qualification
 from hypertrain.miner.island_launch import launch_argv
+from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages_v2 import IslandJobV1
 
 REG = tarfile.REGTYPE
+TREE = Path(__file__).parents[2]
 MISSING = object()
 DIGEST = "sha256:" + "ab" * 32
 BUDGET = 600
@@ -699,6 +703,141 @@ def test_probe_takes_its_answer_from_the_last_line_whatever_torch_printed_before
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=printed, stderr=""),
     )
     assert runner.probe_environment({}) == {"backend": "cuda"}
+
+
+# -- the sources of the installed image -----------------------------------------------------------
+
+
+def package_files_of_the_tree() -> dict[str, str]:
+    """The `src/hypertrain/**/*.py` entries of the qualification's own map of a tree."""
+    return {
+        name: digest
+        for name, digest in qualification.sources(TREE).items()
+        if name.startswith("src/hypertrain/") and name.endswith(".py")
+    }
+
+
+def test_image_sources_digest_is_the_jcs_digest_of_the_package_files_of_sources() -> None:
+    # Given: the installed package (an editable install of this tree) and the tree's own map.
+    expected = package_files_of_the_tree()
+    # When
+    measured = runner.measure_image_sources()
+    # Then: one map, and one digest that the challenge side can compute from `sources()` alone.
+    assert measured == expected
+    assert runner.sources_digest(measured) == sha(canonicalize(expected))
+
+
+def test_measure_ignores_pythonpath_and_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a package named hypertrain in the working directory and on PYTHONPATH.
+    decoy = tmp_path / "decoy"
+    (decoy / "hypertrain").mkdir(parents=True)
+    (decoy / "hypertrain/__init__.py").write_text("DECOY = True\n")
+    (decoy / "hypertrain/stolen.py").write_text("x = 1\n")
+    monkeypatch.setenv("PYTHONPATH", str(decoy))
+    monkeypatch.chdir(decoy)
+    # When
+    measured = runner.measure_image_sources()
+    # Then: the installed package was measured, not the one a caller put in front of it.
+    assert measured == package_files_of_the_tree()
+    assert "src/hypertrain/stolen.py" not in measured
+
+
+def test_image_sources_program_imports_only_stdlib() -> None:
+    # The program runs in the image's own interpreter before anything of hypertrain is trusted.
+    nodes = list(ast.walk(ast.parse(runner.IMAGE_SOURCES)))
+    imported = {a.name.split(".")[0] for n in nodes if isinstance(n, ast.Import) for a in n.names}
+    imported |= {
+        n.module.split(".")[0] for n in nodes if isinstance(n, ast.ImportFrom) and n.module
+    }
+    assert imported and imported <= sys.stdlib_module_names
+
+
+def measure_fake_package(directory: Path, name: str, content: bytes = b"x = 1\n") -> Any:
+    """Run the measuring program against a hypertrain package built in `directory`."""
+    (directory / "hypertrain").mkdir(exist_ok=True)
+    (directory / "hypertrain/__init__.py").write_bytes(b"")
+    target = directory / "hypertrain" / name
+    if name == "link.py":
+        target.symlink_to(directory / "hypertrain/__init__.py")
+    else:
+        target.write_bytes(content)
+    code = f"import sys; sys.path.insert(0, {str(directory)!r})\n{runner.IMAGE_SOURCES}"
+    return subprocess.run(
+        [sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60, check=False
+    )
+
+
+@pytest.mark.parametrize("name", ["link.py", "caf\u00e9.py"], ids=["symlink", "non-ascii"])
+def test_image_sources_program_refuses_a_link_and_a_non_ascii_name(
+    tmp_path: Path, name: str
+) -> None:
+    done = measure_fake_package(tmp_path, name)
+    assert done.returncode != 0 and done.stdout == ""
+    assert "refused" in done.stderr
+
+
+def test_image_sources_program_lists_a_plain_package_in_sorted_compact_json(
+    tmp_path: Path,
+) -> None:
+    done = measure_fake_package(tmp_path, "b.py", b"y = 2\n")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == (
+        "{"
+        f'"src/hypertrain/__init__.py":"{sha(b"")}",'
+        f'"src/hypertrain/b.py":"{sha(b"y = 2" + chr(10).encode())}"'
+        "}\n"
+    )
+
+
+GOOD_KEY = b'"src/hypertrain/x.py"'
+
+
+@pytest.mark.parametrize(
+    "outcome,why",
+    [
+        (SimpleNamespace(returncode=1, stdout=b"", stderr=b"boom"), "could not be measured"),
+        (SimpleNamespace(returncode=0, stdout=b"not json", stderr=b""), "are not a package map"),
+        (SimpleNamespace(returncode=0, stdout=b"[]", stderr=b""), "are not a package map"),
+        (SimpleNamespace(returncode=0, stdout=b"{}", stderr=b""), "are not a package map"),
+        (
+            SimpleNamespace(
+                returncode=0, stdout=b'{"other/x.py":"' + b"a" * 64 + b'"}', stderr=b""
+            ),
+            "are not a package map",
+        ),
+        (
+            SimpleNamespace(returncode=0, stdout=b"{" + GOOD_KEY + b':"abc"}', stderr=b""),
+            "are not a package map",
+        ),
+        (SimpleNamespace(returncode=0, stdout=b" " * ((1 << 20) + 1), stderr=b""), "are too large"),
+        (subprocess.TimeoutExpired(["measure"], 60), "could not be measured"),
+    ],
+    ids=[
+        "failed",
+        "not-json",
+        "list",
+        "empty",
+        "foreign-key",
+        "short-digest",
+        "oversized",
+        "timeout",
+    ],
+)
+def test_measure_refuses_an_answer_that_is_not_a_map_of_package_files_with_exit_9(
+    monkeypatch: pytest.MonkeyPatch, outcome: Any, why: str
+) -> None:
+    def fake_run(*args: Any, **kwargs: Any) -> Any:
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    with pytest.raises(runner.Refused) as refusal:
+        runner.measure_image_sources()
+    assert refusal.value.code == 9
+    assert f"image sources {why}" in str(refusal.value)
 
 
 def test_shipped_source_runs_under_isolated_python_and_refuses_a_host_without_cuda(
