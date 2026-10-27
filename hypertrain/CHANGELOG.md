@@ -101,6 +101,8 @@
   evidence as `image_sources_sha256`. The GPU image must be rebuilt from a tree that contains the
   runner measurement before it can be qualified, and again after every change to
   `src/hypertrain/**/*.py`. Results written before the field still compare label-only.
+  The generic CUDA executor's runner makes the same measurement before each island starts
+  (exit 9 if it fails) and `role-dispatch.json` carries it as `environment.image_sources_sha256`.
 - A challenge poll after the deadline no longer suspends a miner whose proof was accepted
   (RTA-05), and the exact accepted proof and screen may be re-posted after their deadline so
   that a finalization that failed can run. See `docs/adr/0010-admission-hardening.md` at the

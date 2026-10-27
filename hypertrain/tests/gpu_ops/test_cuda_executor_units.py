@@ -626,6 +626,25 @@ def test_observed_number_lists_are_bounded_to_8_entries(field: str, item: Any) -
         observed(**{field: [item] * 9})
 
 
+@pytest.mark.parametrize("claimed", ["ab" * 32, None])
+def test_observed_image_sources_are_a_sha256_or_absent(claimed: str | None) -> None:
+    assert observed(image_sources_sha256=claimed).image_sources_sha256 == claimed
+    assert observed().image_sources_sha256 is None  # a runner from before the field
+
+
+@pytest.mark.parametrize(
+    "claimed", ["AB" * 32, "ab" * 31, "ab" * 33, "xy" * 32, 12, ""], ids=lambda v: str(v)[:6]
+)
+def test_observed_image_sources_that_are_not_a_sha256_are_refused(claimed: Any) -> None:
+    with pytest.raises(ValidationError):
+        observed(image_sources_sha256=claimed)
+
+
+def test_check_environment_forwards_the_reported_image_sources(executor: ce.Executor) -> None:
+    record = executor._check_environment(observed(image_sources_sha256="ab" * 32), spec(), [gpu(0)])
+    assert record["image_sources_sha256"] == "ab" * 32
+
+
 def test_check_environment_returns_what_the_store_reads(executor: ce.Executor) -> None:
     chosen = [gpu(0), gpu(1)]
     record = executor._check_environment(observed(2), spec(n=2), chosen)

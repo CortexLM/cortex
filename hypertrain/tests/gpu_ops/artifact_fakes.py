@@ -419,6 +419,16 @@ def probe_ok(request: dict[str, Any]) -> dict[str, Any]:
     return {"backend": "cuda", "gpu_uuids": list(request["uuids"]), "sm_counts": [148]}
 
 
+# The package files the fake container's image holds. serve reports their digest in
+# environment.json, so the tar it sends carries it; a test never measures the installed package.
+MEASURED = {"src/hypertrain/a.py": "11" * 32}
+MEASURED_SHA256 = sha(json.dumps(MEASURED, sort_keys=True, separators=(",", ":")).encode())
+
+
+def measured() -> dict[str, str]:
+    return dict(MEASURED)
+
+
 def request_bytes(files: dict[str, bytes], artifact: dict[str, Any] | None) -> bytes:
     body: dict[str, Any] = {
         "version": 1,
@@ -453,5 +463,6 @@ def oracle(raw: bytes) -> bytes:
         attempt = Path(scratch)
         write_tree(attempt)
         out = io.BytesIO()
-        runner.write_outputs(out, attempt, probe_ok({"uuids": [U0]}), raw)
+        environment = {**probe_ok({"uuids": [U0]}), "image_sources_sha256": MEASURED_SHA256}
+        runner.write_outputs(out, attempt, environment, raw)
         return out.getvalue()

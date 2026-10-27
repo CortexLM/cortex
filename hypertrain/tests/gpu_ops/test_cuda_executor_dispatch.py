@@ -266,6 +266,7 @@ def test_dispatch_publishes_validated_artifacts_with_accepted_provenance(
         "capabilities": [[10, 3]] * 2,
         "gpu_uuids": selected,
         "gpu_names": ["NVIDIA B300 SXM6 AC"] * 2,
+        "image_sources_sha256": sha256_hex(canonicalize(fake.IMAGE_SOURCES)),
     }
     assert record == {
         "executor": "cuda-executor-v1",

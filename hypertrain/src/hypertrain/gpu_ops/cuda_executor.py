@@ -565,6 +565,9 @@ class ObservedEnvironment(Boundary):
     sm_counts: Annotated[list[StrictInt], Field(max_length=MAX_GPUS)]
     capabilities: Annotated[list[tuple[StrictInt, StrictInt]], Field(max_length=MAX_GPUS)]
     drivers: Annotated[list[Text], Field(max_length=MAX_GPUS)]
+    # sha256 of the package files the image holds, measured by the runner in isolated mode. None
+    # only from a runner that predates the measurement; the pin and the store treat it as unknown.
+    image_sources_sha256: Hex64 | None = None
 
 
 class Executor:

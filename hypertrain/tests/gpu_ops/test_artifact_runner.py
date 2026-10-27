@@ -39,6 +39,7 @@ from .artifact_fakes import (
     client_for,
     isolated_process,
     launch_tree,
+    measured,
     moved_clock,
     oracle,
     package,
@@ -86,7 +87,9 @@ def drive(
     challenge.raw = raw
     thread = challenge.answer(**(answer or {})) if answering else None
     out, err = io.BytesIO(), io.StringIO()
-    code = runner.serve(io.BytesIO(package(FILES, raw)), out, err, probe=probe_ok, launch=launch)
+    code = runner.serve(
+        io.BytesIO(package(FILES, raw)), out, err, probe=probe_ok, launch=launch, measure=measured
+    )
     if thread is not None:
         thread.join(30)
     assert challenge.error is None, repr(challenge.error)
@@ -480,7 +483,12 @@ def test_serve_refuses_a_request_block_with_a_field_missing(
     raw = request_bytes(FILES, block)
     out, err = io.BytesIO(), io.StringIO()
     code = runner.serve(
-        io.BytesIO(package(FILES, raw)), out, err, probe=probe_ok, launch=launch_tree
+        io.BytesIO(package(FILES, raw)),
+        out,
+        err,
+        probe=probe_ok,
+        launch=launch_tree,
+        measure=measured,
     )
     assert code == 2 and "other fields" in err.getvalue()
 
@@ -850,7 +858,12 @@ def test_the_stdlib_client_completes_a_transfer_over_loopback_http(
         thread = challenge.answer()
         out, err = io.BytesIO(), io.StringIO()
         code = runner.serve(
-            io.BytesIO(package(FILES, raw)), out, err, probe=probe_ok, launch=launch_tree
+            io.BytesIO(package(FILES, raw)),
+            out,
+            err,
+            probe=probe_ok,
+            launch=launch_tree,
+            measure=measured,
         )
         thread.join(30)
     finally:

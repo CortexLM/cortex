@@ -36,6 +36,7 @@ from .artifact_fakes import (
     TimedFakeR2,
     credentials_file,
     isolated_process,
+    measured,
     package,
     probe_ok,
     request_bytes,
@@ -190,7 +191,12 @@ def test_a_real_artifact_goes_through_the_runner_and_the_challenge_side(
         out, err = io.BytesIO(), io.StringIO()
         began = time.perf_counter()
         code = runner.serve(
-            io.BytesIO(package(FILES, raw)), out, err, probe=probe_ok, launch=launch
+            io.BytesIO(package(FILES, raw)),
+            out,
+            err,
+            probe=probe_ok,
+            launch=launch,
+            measure=measured,
         )
         sent = time.perf_counter() - began
         session.stop_thread()

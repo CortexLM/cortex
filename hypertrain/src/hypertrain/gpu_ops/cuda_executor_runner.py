@@ -8,8 +8,8 @@ observed environment and a closing `COMPLETE` member leaves on stdout. Nothing i
 a private temporary directory of the container.
 
 Exit codes: 0 done, 2 bad request or input, 3 island failed, 4 visible devices differ from the
-request, 5 unsafe output, 6 budget exhausted, 7 terminated, 8 reader gone, 9 device probe could
-not run, 10 artifact transfer failed, 11 artifact store unreachable.
+request, 5 unsafe output, 6 budget exhausted, 7 terminated, 8 reader gone, 9 device probe or image
+measurement could not run, 10 artifact transfer failed, 11 artifact store unreachable.
 
 With an `artifact` block in request.json (docs/adr/0013-executor-artifacts-via-r2.md) the result
 tar does not leave on stdout: it is hashed in place, declared in R2 and uploaded to presigned URLs
@@ -818,6 +818,7 @@ def serve(
     *,
     probe: Callable[[dict[str, Any]], dict[str, Any]] = probe_environment,
     launch: Callable[[dict[str, Any], Path, float, Path], int] = torchrun,
+    measure: Callable[[], dict[str, str]] = measure_image_sources,
 ) -> int:
     started = _monotonic()
     signal.signal(signal.SIGTERM, _terminated)
@@ -839,6 +840,7 @@ def serve(
                 or len(wanted) != request["n_gpus"]
             ):
                 raise Refused(4, "visible GPUs differ from the requested devices")
+            environment = {**environment, "image_sources_sha256": sources_digest(measure())}
             reserve = 0 if artifact is None else artifact["reserve_seconds"]
             code = launch(
                 request,

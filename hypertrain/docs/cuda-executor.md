@@ -103,7 +103,9 @@ has not run on a GPU host: the tests model the mount and the warm/cold differenc
 
 Next to the usual `published/` directory the executor writes `role-dispatch.json`, which
 `ChallengeStore._dispatch_env_v2` reads for a CUDA audit. Besides `environment` (backend, image
-digest, drivers, SM counts, capabilities, GPU UUIDs and names) it records the host label, a
+digest, drivers, SM counts, capabilities, GPU UUIDs and names, and `image_sources_sha256`, the
+digest of the `src/hypertrain/**/*.py` files the container's own image holds, listed by the runner
+with `python -I` before the island starts: a measurement failure is exit 9) it records the host label, a
 `machine_id` derived from every GPU UUID of the host and an `instance_id` derived from the pinned
 host keys, the requested image reference and the daemon's `RepoDigests`, the hash of the container
 program, the hash of the received tar and the hash of the published files. Two labels that

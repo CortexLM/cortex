@@ -43,6 +43,7 @@ from .artifact_fakes import (
     credentials_file,
     isolated_process,
     launch_tree,
+    measured,
     oracle,
     package,
     probe_ok,
@@ -180,7 +181,12 @@ def run_pair(
     session.start()
     out, err = io.BytesIO(), io.StringIO()
     code = runner.serve(
-        io.BytesIO(package(FILES, raw)), out, err, probe=probe_ok, launch=launch_tree
+        io.BytesIO(package(FILES, raw)),
+        out,
+        err,
+        probe=probe_ok,
+        launch=launch_tree,
+        measure=measured,
     )
     session.stop_thread()
     return Pair(session, code, out.getvalue(), err.getvalue(), raw)

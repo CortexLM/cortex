@@ -136,7 +136,13 @@ class Outcome:
     stderr: str
 
 
+# What a container whose image holds two package files measures; serve takes it as an argument so
+# that no test depends on the package installed next to it.
+MEASURED = {"src/hypertrain/a.py": "11" * 32, "src/hypertrain/b.py": "22" * 32}
+
+
 def run(stdin: bytes, **kwargs: Any) -> Outcome:
+    kwargs.setdefault("measure", lambda: MEASURED)
     out, err = io.BytesIO(), io.StringIO()
     code = runner.serve(io.BytesIO(stdin), out, err, **kwargs)
     leftovers = list(Path(tempfile.gettempdir()).iterdir())
@@ -205,7 +211,8 @@ def test_serve_ships_the_rank_files_environment_and_a_closing_complete() -> None
     ]
     assert names[-2:] == ["environment.json", "COMPLETE"]  # COMPLETE closes the stream
     body = dict(members)
-    assert json.loads(body["environment.json"]) == probe({})
+    measured = {"image_sources_sha256": sha(canonicalize(MEASURED))}
+    assert json.loads(body["environment.json"]) == {**probe({}), **measured}
     assert json.loads(body["COMPLETE"]) == {
         "version": 1,
         "files": {name: sha(body[name]) for name in names[:-1]},
@@ -404,7 +411,12 @@ class Gone(io.BytesIO):
 def test_serve_exits_8_when_the_reader_is_gone(when: str) -> None:
     stdin = io.BytesIO(package(input_files()))
     err = io.StringIO()
-    assert runner.serve(stdin, Gone(when), err, probe=probe_ok, launch=write_ranks) == 8
+    assert (
+        runner.serve(
+            stdin, Gone(when), err, probe=probe_ok, launch=write_ranks, measure=lambda: MEASURED
+        )
+        == 8
+    )
 
 
 def test_serve_gives_the_island_the_budget_minus_the_time_already_spent(
@@ -420,6 +432,44 @@ def test_serve_gives_the_island_the_budget_minus_the_time_already_spent(
 
     assert run(package(input_files()), probe=probe_ok, launch=launch).code == 0
     assert BUDGET - 300 < seen[0] <= BUDGET - 100  # probe and input transfer eat the wall budget
+
+
+def test_serve_reports_the_measured_sources_in_environment_json() -> None:
+    # Given: a container whose image holds the two package files of MEASURED.
+    out = run(package(input_files()), probe=probe_ok, launch=write_ranks)
+    # When
+    environment = json.loads(dict(read_tar(out.stdout))["environment.json"])
+    # Then: the digest of the whole map is reported next to what the probe saw, and nothing else
+    # of the probe's answer was touched.
+    assert out.code == 0
+    assert environment["image_sources_sha256"] == sha(canonicalize(MEASURED))
+    assert environment["gpu_uuids"] == [U0] and environment["sm_counts"] == [148]
+
+
+def test_serve_exits_9_and_ships_nothing_when_the_image_cannot_be_measured() -> None:
+    # Given: the in-image measurement fails.
+    def unmeasurable() -> dict[str, str]:
+        raise runner.Refused(9, "image sources could not be measured: boom")
+
+    # When
+    out = run(
+        package(input_files()), probe=probe_ok, launch=never("the island"), measure=unmeasurable
+    )
+    # Then: no island started and no byte of a result left.
+    assert out.code == 9 and out.stdout == b""
+    assert "image sources could not be measured: boom" in out.stderr
+
+
+def test_serve_measures_only_after_it_has_seen_the_requested_devices() -> None:
+    # Given: a container that sees other devices than the ones requested.
+    def probe(request: dict[str, Any]) -> dict[str, Any]:
+        return {"backend": "cuda", "gpu_uuids": [U1], "sm_counts": [148]}
+
+    # When / Then: exit 4 first; the measurement (a subprocess) is not spent on it.
+    out = run(
+        package(input_files()), probe=probe, launch=never("the island"), measure=never("measure")
+    )
+    assert out.code == 4
 
 
 # -- torchrun: the island process -------------------------------------------------------------
