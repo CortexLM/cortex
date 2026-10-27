@@ -6,8 +6,11 @@
 #   backup TS            snapshot compose files, both SQLite DBs (integrity ok), relay.json,
 #                        metagraph.json and inspect JSON (env names only), with SHA256SUMS
 #   swap NEW_REF BACKUP  gate, pin NEW_REF on the challenge service, up -d --no-deps challenge
-#   beacon BACKUP        gate, set the pusher to --interval 0.2 --catch-up 3 (the production
-#                        twin's values; 3/20 holds the lag above the freshness bound of 2 rounds)
+#   beacon BACKUP        gate, set the pusher to --interval 0.2 --catch-up 40 --max-failures 30.
+#                        A store lock (a remote reference) hides rounds from the pusher and it
+#                        pushes oldest first, at most catch-up of them: 40 skips none up to a
+#                        lock of 120 s (a skipped round can be a trial's seed), 30 failures outlast
+#                        one of 300 s. The gate then stays closed about 4x the lock. docs/adr/0012
 #   paper BACKUP         dry rollback: the backed-up compose file must parse and resolve the old image
 #   rollback BACKUP      restore the compose file, recreate challenge and beacon as they were, and
 #                        put back relay.json / metagraph.json (restarting relay / stub) if changed
@@ -151,9 +154,11 @@ swap)
   images "$F"; live "${NEW#*@}"; sleep 6; date -u +%FT%TZ; check;;
 beacon)
   B=${2:?BACKUP}; backup_dir "$B"; gate
-  umask 077; sed -e 's|--interval, "3",$|--interval, "0.2",|' \
-    -e 's|--catch-up, "20", --max-failures|--catch-up, "3", --max-failures|' "$F" > "$F.new"
-  apply beacon "$B" services.beacon.entrypoint.9 services.beacon.entrypoint.11
+  umask 077; sed -E -e 's|--interval, "3",$|--interval, "0.2",|' \
+    -e 's|--catch-up, "20", --max-failures, "[0-9]+"|--catch-up, "40", --max-failures, "30"|' \
+    "$F" > "$F.new"
+  apply beacon "$B" services.beacon.entrypoint.9 services.beacon.entrypoint.11 \
+    services.beacon.entrypoint.13
   sleep 20; docker logs --since 25s hypertrain-test-beacon 2>&1 | tail -4 | cut -c1-160
   curl -s -m 10 "$API/v1/beacon/latest" | python3 -I -c '
 import json,sys,time

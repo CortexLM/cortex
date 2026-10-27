@@ -76,7 +76,7 @@ ssh root@s100 "bash -s -- post" < $T/snap.sh
 
 Each change is refused unless the resolved compose config differs in exactly the expected fields:
 - `swap`: `services.challenge.image`;
-- `beacon`: `services.beacon.entrypoint.9` and `.11`.
+- `beacon`: `services.beacon.entrypoint.9`, `.11` and `.13` (interval, catch-up, failure budget).
 
 `swap` fails unless `/version` answers and the challenge runs the new image ID.
 
@@ -103,12 +103,46 @@ beacon lags more than 2 rounds (`store.py` `_snapshot_current_v2`).
 
 On s100 each round costs about 2.4 s against the 3 s drand period. The pusher verifies each round
 with py_ecc BLS (about 1.2 s) and the challenge verifies it again on ingest. With the original
-`--interval 3 --catch-up 20` the lag held at 8-9 rounds. `beacon` applies the production twin's
-`--interval 0.2 --catch-up 3`, which gave 1-2 rounds when idle (measured 2026-10-26).
+`--interval 3 --catch-up 20` the lag held at 8-9 rounds; with `--interval 0.2` it is 1-2 rounds
+when idle (measured 2026-10-26).
 
-Under trial load the lag reaches 3 again. Each in-process CPU reference holds the store while the
-pusher waits, and the pusher recovers only 0.6 s per 3 s drand period. So expect 503 "beacon
-infrastructure paused" for 30-40 s after each reference, and retry.
+**A store lock stops the beacon.** A remote or in-process reference holds the challenge's store lock
+for its whole duration (13-19 s with the CUDA cache, 43-64 s without), and both
+`GET /v1/beacon/latest` and `POST /v1/admin/beacon` wait for it. The pusher gets 10 s timeouts (a
+failure each), and when the lock ends it refills the missing rounds oldest first at one round per
+2.4 s while the clock adds 3 s per 3 s period. Two things can go wrong, and the cadence decides which:
+
+- `--catch-up N` pushes at most the last N rounds after the highest one the service holds. Rounds
+  older than that are skipped for good, because the service reports only its highest round. The
+  challenge reads exact rounds: after a trial is finalized in round `n`, the identity's seed is round
+  `n + 1`. A seed in a skipped round answers 500 `BeaconUnavailable: round N not pushed` until the
+  window is over and the identity is suspended `CHALLENGE_EXPIRED`.
+- `--max-failures N` consecutive failures end the pusher (the container restarts, and the failures
+  are counted again from zero).
+
+`beacon` therefore sets `--interval 0.2 --catch-up 40 --max-failures 30`: no round is skipped in a lock
+of up to 120 s (`ceil(lock / 3) + 4` rounds is the minimum catch-up) and the pusher survives 300 s
+(`ceil(lock / 11.4) + 5` failures). The old `--catch-up 3` skipped rounds after any lock over about
+9 s. Never start a second pusher, and never backfill rounds by hand during trials: S13 lost two
+identities that way.
+
+The price is time. The model of the real pusher (`tests/ops/s100/test_beacon_lock_tolerance.py`,
+checked against two S13 observations) says the gate stays closed for up to about `4 x lock + 10` s
+after the lock is freed: 30-40 s after a 13 s reference, 1 minute after 19 s, **4 minutes after a
+60 s reference**. Expect 503s in that window and retry them. Hence two rules: keep the CUDA cache (the
+executor does by default), and run the first reference after a new image (43-64 s, cold) alone, before
+a second driver starts. Releasing the lock during the reference (ADR 0012 section 2) or a pusher that
+pushes the newest round first is what removes the wait.
+
+Proving it instead of inferring it: `beacon_gaps.py` lists rounds missing from the `beacon` table and
+the identities whose seed is one of them, read-only.
+
+```bash
+ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - 1800" < $T/beacon_gaps.py
+```
+
+Exit 0 means no round is missing in the last 30 minutes; 3 means a hole, and `stranded` names who
+waits for it (the identity cannot recover: stop the run and report it). Run it after every ten trials.
 
 ### Rollback
 

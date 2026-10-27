@@ -358,12 +358,14 @@ def test_swap_gives_the_challenge_the_whole_30_attempt_loop_to_answer(box, backu
 def test_beacon_retunes_exactly_the_pusher_and_a_second_run_is_refused(box, backup):
     out = box.run("beacon", backup, mutates={BEACON}).out
     assert "beacon: pushed round 1" in out and "lag" in out
-    retuned = COMPOSE.replace('--interval, "3"', '--interval, "0.2"').replace(
-        '--catch-up, "20"', '--catch-up, "3"'
+    retuned = (
+        COMPOSE.replace('--interval, "3"', '--interval, "0.2"')
+        .replace('--catch-up, "20"', '--catch-up, "40"')
+        .replace('--max-failures, "5"', '--max-failures, "30"')
     )
     assert box.f.read_text() == retuned
     entrypoint = box.live_yaml()["services"]["beacon"]["entrypoint"]
-    assert (entrypoint[9], entrypoint[11]) == ("0.2", "3")
+    assert (entrypoint[9], entrypoint[11], entrypoint[13]) == ("0.2", "40", "30")
     assert stat.S_IMODE(box.f.stat().st_mode) == 0o600
     out = box.run("beacon", backup, rc=5).out
     assert "unexpected compose change" in out
@@ -371,7 +373,7 @@ def test_beacon_retunes_exactly_the_pusher_and_a_second_run_is_refused(box, back
 
 
 def test_beacon_refuses_a_compose_where_the_retune_would_change_more_than_the_pusher(box, backup):
-    # the master-stub carries the same two lines the sed rewrites: the diff then has 4 fields, not 2
+    # the master-stub carries the same lines the sed rewrites: the diff then has 6 fields, not 3
     stub = (
         "    entrypoint:\n"
         '      [python, -m, stub, --interval, "3",\n'
@@ -386,6 +388,27 @@ def test_beacon_refuses_a_compose_where_the_retune_would_change_more_than_the_pu
     assert "unexpected compose change" in out and "services.master-stub.entrypoint" in out
     assert box.f.read_text() == live
     assert box.snapshot() == before and not box.new.exists()
+
+
+@pytest.mark.parametrize("failures", ['"ten"', "10", '""'], ids=["word", "bare-number", "empty"])
+def test_beacon_refuses_a_compose_whose_failure_budget_it_cannot_rewrite(box, backup, failures):
+    # the catch-up and the failure budget are rewritten as one pair: if the budget is not a quoted
+    # number the pair does not match, only the interval changes, and the diff check stops it
+    live = COMPOSE.replace('"5"]', f"{failures}]")
+    assert live != COMPOSE
+    box.f.write_text(live)
+    before = box.snapshot()
+    out = box.run("beacon", backup, rc=5).out
+    assert "unexpected compose change" in out
+    assert box.f.read_text() == live and box.snapshot() == before and not box.new.exists()
+
+
+def test_beacon_raises_a_failure_budget_that_was_set_higher_than_the_pair_it_rewrites(box, backup):
+    # an operator's own budget of 12 becomes 30; the catch-up it sat next to becomes 40
+    box.f.write_text(COMPOSE.replace('"5"]', '"12"]'))
+    box.run("beacon", backup, mutates={BEACON})
+    entrypoint = box.live_yaml()["services"]["beacon"]["entrypoint"]
+    assert (entrypoint[9], entrypoint[11], entrypoint[13]) == ("0.2", "40", "30")
 
 
 # --- paper ----------------------------------------------------------------------------------
