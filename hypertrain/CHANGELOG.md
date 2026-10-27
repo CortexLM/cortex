@@ -65,12 +65,17 @@
   push and no longer suspends the miner (RTA-03); a later request answers 409
   `CHALLENGE_EXPIRED`. The two trial places can no longer be held for good by identities that
   never prove. ADR 0010.
-- `GET /v2/runs/{run_id}/join/{admission_id}/challenge` needs the owner's signature
-  (`X-Hotkey`, `X-Trial-Signature` over `hypertrain/trial-challenge/2|run|admission`, as the
-  `/job` route does with its own domain), so a third party can no longer open a rival's trial
-  (RTA-04). The admin export carries the signed challenge as `challenge_envelope` and
-  `trial_export` no longer calls the route; the miner signs the GET. A client built before this
-  change gets 403. ADR 0010.
+- The challenge is asked by `POST /v2/runs/{run_id}/join/{admission_id}/challenge` whose body is
+  a `ChallengeRequest` envelope signed by the admission's hotkey (new message type, expiry-bound),
+  replacing the unsigned `GET`: a third party can no longer open a rival's trial (RTA-04), and no
+  signature travels in a header, since the master proxy forwards none (D51). The admin export
+  carries the signed challenge as `challenge_envelope` and `trial_export` no longer calls the
+  route; the miner signs its request. A client built before this change gets 405. ADR 0010.
+- The miner's job read is `POST /v2/runs/{run_id}/join/{admission_id}/job` whose body is a
+  `JobRequest` envelope signed by the admission's hotkey, replacing `GET` with the headers
+  `X-Hotkey` and `X-Trial-Signature`, which the master proxy does not forward (D51 to D54). The
+  service refuses an owner request (challenge or job) that expires more than 100 rounds ahead of
+  its current round. A client built before this change gets 405. ADR 0010.
 - At the start of every `join`, an `APPLIED` row that is past its challenge window
   (`seed + challenge_rounds`) and holds no stake is suspended as `APPLIED_EXPIRED`: 32 unfunded
   joins can no longer hold every pending place for good (RTA-02). Its coldkey may apply again;
@@ -82,17 +87,23 @@
 - The admission bond can be released and slashed (RTA-06). `EscrowV2` takes an optional
   `admission_settlement` and settles a `LOCK_ADMISSION` through it, by lock kind; the settlement
   is derived from the admission's records. `Admission.settle_fraud(dispute_id)` runs with every
-  accepted resolution: a referee verdict of fraud against the miner burns the bond and the
-  coldkey's unvested rewards and bans the admission. `Admission.seize_bond(admission_id,
-  reason, evidence_hash, now)` burns the bond for a no-show (`reason="NO_SHOW"`), a confirmed
-  round-stage audit mismatch (`"AUDIT_MISMATCH"`: also suspends with one strike) or a convicted
-  miner (`"TRAINING_FRAUD"`); `Admission.release_bond` and the status key `bond` serve the
-  owner. `EscrowV2.slash` takes `burn_pending` (default: today's behaviour). ADR 0010.
+  accepted resolution: a referee verdict of fraud against the miner burns the bond, bans the
+  admission and, while it still holds a residual lock, burns the coldkey's unvested rewards.
+  `Admission.seize_bond(admission_id, reason, evidence_hash, now)` is the internal hook for a
+  no-show (`reason="NO_SHOW"`), a confirmed round-stage audit mismatch (`"AUDIT_MISMATCH"`: also
+  suspends with one strike) or a convicted miner (`"TRAINING_FRAUD"`, the only one called in this
+  tree: the audit gives a no-show no sanction, ADR 0011); `Admission.release_bond` and the
+  status key `bond` serve the owner. `EscrowV2.slash` takes `burn_pending` (default: today's
+  behaviour). ADR 0010.
 - `RotateRequest` needs the new hotkey's signature (`new_hot_sig`, own domain
   `hypertrain/rotate/2|`; `miner.admission.sign_rotation_consent`): one coldkey signature can no
   longer burn a registered hotkey that never joined (RTA-01). A new rotation is charged to
   `join_burst` per coldkey per `work_screen_epoch_rounds` (`ROTATION_QUOTA`); a banned admission
   cannot rotate. A client that signs the three-field body gets 409. ADR 0010.
+- A signed elastic leave names the coordinator epoch, drawn at random at every start and never
+  kept in the token log: a log restored from an older copy, or a copy or hard link of it, can
+  re-issue a token but no longer lets an old leave release the new lease (EB-01). `LeaveNotice`
+  gains the required field `epoch`; `Coordinator.leave` answers `STALE_EPOCH`. ADR 0010.
 - CUDA network qualification records each device's compute capability with its SM count and
   accepts a device only when the pair is a row of `network_qualification.SM_COUNTS` (RTX 5090
   12.0 = 170, B300 10.3 = 148) and the count equals the signed manifest's

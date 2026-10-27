@@ -32,8 +32,10 @@ they are not credentials. The leave is verified here because it is kept as evide
 The coordinator is single-threaded state: production serialises calls (the master's database,
 ADR 0003, which rejects a Durable Object for it). This library persists only the token mark
 (`tokens`): a restarted coordinator never reissues a token, so a signed leave or a stale host of
-the old process names no live lease, and every host joins again. Rebuilding the heads, credits
-and revocations is the wiring's job.
+the old process names no live lease, and every host joins again. A log restored from an older
+copy would reissue them, so a leave also names the epoch the coordinator drew at its start (ADR
+0010): the leave of an earlier start is refused whatever token the log hands out again.
+Rebuilding the heads, credits and revocations is the wiring's job.
 """
 
 from __future__ import annotations
@@ -289,6 +291,8 @@ class Coordinator:
         self._sweep()
         if signed.notice.run_id != self.run_id:  # cheap checks before the signature
             raise NoticeError(f"leave notice for run {signed.notice.run_id}")
+        if signed.notice.epoch != self.membership.epoch:
+            raise LeaseError("STALE_EPOCH", signed.notice.member)
         notice = verify_leave(signed)
         done = self._left.get(notice.lease) or self._left_before.get(notice.lease)
         if done is not None and done[0] == (notice.member, notice.signer):

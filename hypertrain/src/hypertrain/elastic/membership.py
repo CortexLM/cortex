@@ -5,11 +5,14 @@ while `now < expires_ms` on the coordinator's clock, and a heartbeat renews it. 
 takes its token from one counter that only grows, so a rejoin or a replacement host fences every
 older holder: the old token is refused from then on, even if its host is still running. The
 counter is saved (TokenLog) before a lease is returned, so it also outlives a restart of the
-coordinator: no token is issued twice, and a signed leave names one lease for ever.
+coordinator: no token is issued twice, and a signed leave names one lease for ever. A lease also
+carries the epoch of the start that granted it, drawn at random and never kept in the log, so a
+log restored from an older copy cannot make an old leave name a new lease.
 """
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -35,6 +38,7 @@ class Lease:
     member: str
     token: int
     expires_ms: int
+    epoch: str  # the epoch of the coordinator that granted it: a leave must name it
 
 
 @dataclass(slots=True)
@@ -59,6 +63,9 @@ class Membership:
         self._members: dict[str, Member] = {}
         self._log = tokens
         self._tokens = tokens.load()
+        # Drawn at every start and never read back from the log: a log restored from an older
+        # copy hands out tokens an earlier start already delivered, but not its epoch.
+        self.epoch = secrets.token_hex(32)
 
     def _live(self, member: Member) -> bool:
         return member.status is Status.ACTIVE and self.clock.now_ms() < member.lease.expires_ms
@@ -67,7 +74,7 @@ class Membership:
         token = self._tokens + 1
         self._tokens = token  # spent even if the save fails: it may have become durable
         self._log.save(token)  # before the lease exists: a token that was lost is never reissued
-        return Lease(member, token, self.clock.now_ms() + self.ttl_ms)
+        return Lease(member, token, self.clock.now_ms() + self.ttl_ms, self.epoch)
 
     def join(self, member: str, owner: str, signer: str) -> tuple[Lease, Lease | None]:
         """Grant a fresh lease. Joining an id that is still active (its lease not yet swept by
@@ -98,7 +105,7 @@ class Membership:
 
     def renew(self, member: str, token: int) -> Lease:
         m = self.check(member, token)
-        m.lease = Lease(member, token, self.clock.now_ms() + self.ttl_ms)
+        m.lease = Lease(member, token, self.clock.now_ms() + self.ttl_ms, self.epoch)
         return m.lease
 
     def leave(self, member: str, token: int) -> Member:

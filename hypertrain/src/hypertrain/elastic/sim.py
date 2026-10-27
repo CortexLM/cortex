@@ -535,6 +535,7 @@ class _Host:
                 member=self.member,
                 signer=self.key.ss58,
                 lease=self.lease.token,
+                epoch=self.lease.epoch,
                 reason="interruption",
                 provider_time=self.leaving.provider_time,
                 heads=heads,

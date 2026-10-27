@@ -185,7 +185,6 @@ src/hypertrain/challenge/store.py:5bc023ca9af1ff8eedaaaa32719611ded1b93836fa6d87
 tests/auditor/aud_fixtures.py:0d949c3ecc7d9c4044e4279b45bb3f003b569a42beb0ebd5c8fcda1b7b9fb6a5  # L42
 tests/beacon/test_push.py:c6a44b08a042c2fefeb9f4d0dc13aaaa27d6eafba8731c15ad3fd27163c7f336  # L282
 tests/challenge/test_admission_v2.py:d6b19e1e09232f110810ee8bd506a4497a0cf7b0f0f6ce9f3d21eecb968c96a8  # L56
-tests/challenge/test_admission_v2.py:bcd5adb4a391a10d2e17a85772abfa8a186896aff9ae1358ea1fd7de75ef3353  # L537 second ip secret fixture
 tests/challenge/test_contract.py:d8a58e1216b37763ba783aa441e27e1a6d1d4eeb7bebe4cb14d995d1c2072f2b  # L37
 tests/challenge/test_contract.py:dca6991abfb1e7eb0cf06ef5c6a6389c99d303a012b49e910c44694638086e6f  # L77
 tests/challenge/test_contract.py:7def0a86639a1067a39bd0ae92df8aa9c8808fad7a6ef55ebe9d45bd4c0154c6  # L79

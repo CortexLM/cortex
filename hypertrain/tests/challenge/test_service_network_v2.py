@@ -24,6 +24,7 @@ from hypertrain.ledger.escrow_v2 import (
     genesis_origin_id,
 )
 from hypertrain.miner.admission import sign_join
+from hypertrain.miner.core import OWNER_REQUEST_ROUNDS
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -87,17 +88,21 @@ class Network:
     def signed(self, key, type, body, expiry=10000):
         return seal(key, type, self.manifest.run_id(), body, expiry)
 
-    def challenge(self, identity, key=None):
-        """GET the challenge as the admission's own hotkey (or as `key`): only the owner may ask."""
+    def owner_request(self, message, identity, key=None, *, expires=None):
+        """The envelope only the admission's own hotkey (or `key`) can sign for its owner routes,
+        expiring `OWNER_REQUEST_ROUNDS` after the service's current round unless `expires`."""
         row = self.store._db.execute(
             "SELECT hotkey FROM admissions_v2 WHERE admission_id=?", (identity,)
         ).fetchone()
         key = key or next((k for k in [*HOT, REFEREE] if row and k.ss58 == row[0]), HOT[0])
-        message = f"hypertrain/trial-challenge/2|{self.manifest.run_id()}|{identity}".encode()
-        return self.client.get(
-            self.url + f"/join/{identity}/challenge",
-            headers={"x-hotkey": key.ss58, "x-trial-signature": key.sign(message).hex()},
-        )
+        expires = expires or self.store._now(self.store._db) + OWNER_REQUEST_ROUNDS
+        return self.signed(key, message, {"admission_id": identity}, expires)
+
+    def challenge(self, identity, key=None, *, expires=None):
+        """Ask for the admission's trial as its own hotkey (or as `key`): only the owner may ask,
+        by a signed envelope in the body."""
+        request = self.owner_request("ChallengeRequest", identity, key, expires=expires)
+        return self.client.post(self.url + f"/join/{identity}/challenge", json=request)
 
     def join(self, index=0):
         request = sign_join(
@@ -2629,23 +2634,27 @@ def test_unfunded_lock_cannot_create_collateral(network):
 def test_cross_run_signed_rotation_rejects(network):
     from hypertrain.miner.admission import sign_rotation_consent
 
-    # Given
+    # Given: a rotation whose consent is valid for this run, under an envelope of another run
     network.join()
     request = sign_rotation_consent(
         REFEREE,
-        run_id="ff" * 32,
+        run_id=network.manifest.run_id(),
         coldkey=COLD[0].ss58,
         hotkey=HOT[0].ss58,
         operation_id="ae" * 32,
         expires_beacon=100,
     )
+    url = network.url + "/admission/" + HOT[0].ss58 + "/rotate"
     # When
     response = network.client.post(
-        network.url + "/admission/" + HOT[0].ss58 + "/rotate",
-        json=seal(COLD[0], "RotateRequest", "ff" * 32, request, 100),
+        url, json=seal(COLD[0], "RotateRequest", "ff" * 32, request, 100)
     )
-    # Then
+    # Then: only the envelope's run is wrong, and that is refused
     assert response.status_code == 409
+    accepted = network.client.post(
+        url, json=seal(COLD[0], "RotateRequest", network.manifest.run_id(), request, 100)
+    )
+    assert accepted.status_code == 200, accepted.text
 
 
 def test_second_run_cannot_mix_shared_state_directory(network):
