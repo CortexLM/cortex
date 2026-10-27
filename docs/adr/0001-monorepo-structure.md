@@ -193,6 +193,18 @@ Separate packages were chosen over `v3-` tags in the production packages for thr
 - The GitHub archival date of `CortexLM/hypertrain` stays a founder decision (recommendation:
   after `v3` is merged into `main` and a first production image is served from cortex).
 
+## Branch protection and the production pin (D30, D33, 2026-10-27)
+
+- `v3` carries the ruleset "v3 protected: no force-push, no deletion" (id 25938567; rules
+  `deletion` and `non_fast_forward`, no bypass). Fast-forward pushes by repository admins stay
+  allowed, with no mandatory pull request (continuous work). `main` keeps its existing ruleset.
+  The repository has four administrators; reducing them is a founder decision, not urgent.
+- `hypertrain-images.yml` publishes and attests on every push to `v3`. The guard that keeps this
+  from reaching production: **no production pin comes from `v3` without Principal SN100's
+  decision AND a verification of the SLSA provenance of the digest** (D2, D14: source ref,
+  signer workflow, source digest, no self-hosted runner). An image published by a third-party push
+  therefore cannot reach s100.
+
 ## Deferred
 
 - Archiving `CortexLM/hypertrain`: a founder action. The archive must keep `images.yml`,
