@@ -303,7 +303,9 @@ ssh root@s100 "docker run --rm -i --user 65532:65532 -v $X:/data/executor --entr
 Expect `"status": "ok"`, `"driver": "595.91.07"`, `"capability": [10, 3]`, as many idle GPUs as the
 manifest's layout (`n_gpus`, 2 for `dense-1b`) and `"image_present": true` (the first job pulls
 the image by digest if it is absent). `unreachable` carries the ssh error: wrong key, wrong host
-key, port, user or `sudo -n docker`. Nothing secret is printed.
+key, port, user or `sudo -n docker`. `refused` with "unparseable host probe" usually means the
+ssh user's login shell prints to stdout in a non-interactive session (an unguarded `~/.bashrc`):
+the result tar travels on stdout too, so fix that on X first. Nothing secret is printed.
 
 ### 6.3 Build the CUDA manifest and its TEST backend record
 
