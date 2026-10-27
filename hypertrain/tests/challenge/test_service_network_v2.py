@@ -87,17 +87,15 @@ class Network:
     def signed(self, key, type, body, expiry=10000):
         return seal(key, type, self.manifest.run_id(), body, expiry)
 
-    def challenge(self, identity, key=None):
-        """GET the challenge as the admission's own hotkey (or as `key`): only the owner may ask."""
+    def challenge(self, identity, key=None, *, expires=10000):
+        """Ask for the admission's trial as its own hotkey (or as `key`): only the owner may ask,
+        by a signed envelope in the body."""
         row = self.store._db.execute(
             "SELECT hotkey FROM admissions_v2 WHERE admission_id=?", (identity,)
         ).fetchone()
         key = key or next((k for k in [*HOT, REFEREE] if row and k.ss58 == row[0]), HOT[0])
-        message = f"hypertrain/trial-challenge/2|{self.manifest.run_id()}|{identity}".encode()
-        return self.client.get(
-            self.url + f"/join/{identity}/challenge",
-            headers={"x-hotkey": key.ss58, "x-trial-signature": key.sign(message).hex()},
-        )
+        request = self.signed(key, "ChallengeRequest", {"admission_id": identity}, expires)
+        return self.client.post(self.url + f"/join/{identity}/challenge", json=request)
 
     def join(self, index=0):
         request = sign_join(

@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from hypertrain.miner import cli
-from hypertrain.protocol.keys import decode_hotkey, verify
+from hypertrain.protocol import envelope_v2
 
 _spec = importlib.util.spec_from_file_location(
     "probe_trial_service_fixture",
@@ -117,13 +117,17 @@ def test_probe_v2_without_job_fetches_own_trial_and_completes(miner, capsys):
     assert n.url + f"/join/{identity}/job" in paths
     assert not any("/admin/" in p for p in paths)
     assert not any("authorization" in r.headers for r in requests)
-    # The challenge GET carries the owner's signature, in its own domain.
+    # The challenge request is a POST whose body is the owner's signed envelope: no signature
+    # travels in a header (the master proxy forwards none).
     asked = next(r for r in requests if r.url.path.endswith("/challenge"))
-    message = f"hypertrain/trial-challenge/2|{n.manifest.run_id()}|{identity}".encode()
-    assert asked.headers["x-hotkey"] == HOT.ss58
-    assert verify(
-        decode_hotkey(HOT.ss58), message, bytes.fromhex(asked.headers["x-trial-signature"])
+    assert asked.method == "POST" and "x-trial-signature" not in asked.headers
+    envelope = envelope_v2.parse_envelope(asked.content)
+    assert (envelope.type, envelope.signer, envelope.body) == (
+        "ChallengeRequest",
+        HOT.ss58,
+        {"admission_id": identity},
     )
+    assert envelope_v2.verify_envelope(asked.content)
     assert list(folder.iterdir()) == []
     # The service accepts the probe's proof (it replays the reference itself) ...
     response = n.client.post(n.url + "/join/proof", json=signed)

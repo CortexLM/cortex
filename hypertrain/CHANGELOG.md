@@ -51,12 +51,12 @@
   push and no longer suspends the miner (RTA-03); a later request answers 409
   `CHALLENGE_EXPIRED`. The two trial places can no longer be held for good by identities that
   never prove. ADR 0010.
-- `GET /v2/runs/{run_id}/join/{admission_id}/challenge` needs the owner's signature
-  (`X-Hotkey`, `X-Trial-Signature` over `hypertrain/trial-challenge/2|run|admission`, as the
-  `/job` route does with its own domain), so a third party can no longer open a rival's trial
-  (RTA-04). The admin export carries the signed challenge as `challenge_envelope` and
-  `trial_export` no longer calls the route; the miner signs the GET. A client built before this
-  change gets 403. ADR 0010.
+- The challenge is asked by `POST /v2/runs/{run_id}/join/{admission_id}/challenge` whose body is
+  a `ChallengeRequest` envelope signed by the admission's hotkey (new message type, expiry-bound),
+  replacing the unsigned `GET`: a third party can no longer open a rival's trial (RTA-04), and no
+  signature travels in a header, since the master proxy forwards none (D51). The admin export
+  carries the signed challenge as `challenge_envelope` and `trial_export` no longer calls the
+  route; the miner signs its request. A client built before this change gets 405. ADR 0010.
 - At the start of every `join`, an `APPLIED` row that is past its challenge window
   (`seed + challenge_rounds`) and holds no stake is suspended as `APPLIED_EXPIRED`: 32 unfunded
   joins can no longer hold every pending place for good (RTA-02). Its coldkey may apply again;

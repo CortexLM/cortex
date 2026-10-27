@@ -53,53 +53,75 @@ def job(n, identity, key=service.HOT[0], hotkey=None, run_id=None):
 
 def test_challenge_route_refuses_everyone_but_the_owner(network):
     # Given: HOT[0] joined and its seed round arrived; HOT[1] is a registered rival. Opening a
-    # trial takes one of the run's trial places, so only the owner may ask for it.
+    # trial takes one of the run's trial places, so only the owner may ask for it. The proof is
+    # a signed envelope in the body: the master proxy forwards no signature header.
     identity = network.join().json()["admission_id"]
     network.push(network.now + 1)
     run_id = network.manifest.run_id()
     owner, rival = service.HOT[0], service.HOT[1]
-    domain = "hypertrain/trial-challenge/2"
-
-    def sign(key, domain=domain, run=run_id, admission=identity):
-        return key.sign(f"{domain}|{run}|{admission}".encode()).hex()
-
+    other_run = "ff" * 32
+    owners = network.signed(owner, "ChallengeRequest", {"admission_id": identity})
     forged = {
-        "no headers": {},
-        "the admin token": service.admin(),
-        "a rival signing as itself": {"x-hotkey": rival.ss58, "x-trial-signature": sign(rival)},
-        "a rival's signature under the owner's key": {
-            "x-hotkey": owner.ss58,
-            "x-trial-signature": sign(rival),
-        },
-        "the owner's signature under the rival's key": {
-            "x-hotkey": rival.ss58,
-            "x-trial-signature": sign(owner),
-        },
-        "the owner's job signature": {
-            "x-hotkey": owner.ss58,
-            "x-trial-signature": sign(owner, domain="hypertrain/trial-job/2"),
-        },
-        "another run": {"x-hotkey": owner.ss58, "x-trial-signature": sign(owner, run="ff" * 32)},
-        "another admission": {
-            "x-hotkey": owner.ss58,
-            "x-trial-signature": sign(owner, admission="ee" * 32),
-        },
-        "a signature that is not hex": {"x-hotkey": owner.ss58, "x-trial-signature": "zz"},
+        "no body": b"",
+        "a body that is not json": b"not json",
+        "a rival signing as itself": network.signed(
+            rival, "ChallengeRequest", {"admission_id": identity}
+        ),
+        "the owner's request for another admission": network.signed(
+            owner, "ChallengeRequest", {"admission_id": "ee" * 32}
+        ),
+        "the owner's request under another run": service.seal(
+            owner, "ChallengeRequest", other_run, {"admission_id": identity}, 10000
+        ),
+        "another message of the owner": network.signed(
+            owner, "Receipt", {"w": 0, "commit_hash": "11" * 32, "received_round": 1}
+        ),
+        "an expired request of the owner": network.signed(
+            owner, "ChallengeRequest", {"admission_id": identity}, expiry=network.now - 1
+        ),
+        "a request with the owner's signature cut": {**owners, "sig": "00" * 64},
+        "a request with a rival as signer": {**owners, "signer": rival.ss58},
     }
     # When / Then: every one is refused alike, and nothing was issued
-    for name, headers in forged.items():
-        response = network.client.get(network.url + f"/join/{identity}/challenge", headers=headers)
+    url = network.url + f"/join/{identity}/challenge"
+    for name, body in forged.items():
+        if isinstance(body, bytes):
+            response = network.client.post(url, content=body)
+        else:
+            response = network.client.post(url, json=body)
         assert (response.status_code, response.json()) == (
             403,
             {"detail": "hotkey is not current accepted identity"},
         ), name
+    # the earlier contract, a GET with signature headers, is gone
+    assert network.client.get(url).status_code == 405
     db = network.store._db
     assert db.execute("SELECT challenge FROM admissions_v2").fetchone()[0] is None
     assert db.execute("SELECT COUNT(*) FROM admission_trials").fetchone()[0] == 0
     # The owner's signed request issues the trial, and asking again returns the same envelope.
-    first = network.challenge(identity)
+    first = network.client.post(url, json=owners)
     assert first.status_code == 200 and first.json()["type"] == "JoinChallenge"
-    assert network.challenge(identity).json() == first.json()
+    assert network.client.post(url, json=owners).json() == first.json()
+    assert run_id == network.manifest.run_id()
+
+
+def test_a_captured_challenge_request_is_good_only_until_its_expiry(network):
+    # Given: the owner's request, as a third party may capture it on the wire
+    identity = network.join().json()["admission_id"]
+    network.push(network.now + 1)
+    captured = network.signed(
+        service.HOT[0], "ChallengeRequest", {"admission_id": identity}, expiry=network.now + 5
+    )
+    url = network.url + f"/join/{identity}/challenge"
+    assert network.client.post(url, json=captured).status_code == 200
+    # When: its expiry has passed
+    network.push(network.now + 6)
+    # Then: replaying it asks for nothing
+    replay = network.client.post(url, json=captured)
+    assert (replay.status_code, replay.json()) == (
+        403,
+        {"detail": "hotkey is not current accepted identity"},
+    )
 
 
 def test_export_matches_prepare_reference_inputs(trial):
@@ -231,7 +253,7 @@ def test_job_route_unknown_ids_answer_like_challenge(trial, unknown, status, det
     n, identity, _ = trial
     run_id = "cd" * 32 if unknown == "run" else n.manifest.run_id()
     identity = "ab" * 32 if unknown == "admission" else identity
-    challenge = n.client.get(f"/v2/runs/{run_id}/join/{identity}/challenge")
+    challenge = n.client.post(f"/v2/runs/{run_id}/join/{identity}/challenge", content=b"{}")
     response = job(n, identity, run_id=run_id)
     assert (response.status_code, response.json()) == (status, {"detail": detail})
     assert (challenge.status_code, challenge.json()) == (status, {"detail": detail})

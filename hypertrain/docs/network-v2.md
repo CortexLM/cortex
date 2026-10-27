@@ -125,19 +125,22 @@ which includes its nonce; `WorkScreenV2` is reserved by admission and nonce.
 alone. Retry the exact stored signed operation: changing expiry or signature does
 not create a new semantic attempt (`protocol/envelope_v2.py:replay_key`).
 
-The challenge is issued by the owner's signed `GET
-/v2/runs/{run_id}/join/{admission_id}/challenge`: headers `X-Hotkey` and
-`X-Trial-Signature`, the hex signature by the admission's current hotkey of
-`hypertrain/trial-challenge/2|{run_id}|{admission_id}`. Opening a trial takes one of
-the run's two trial places, so nobody else may ask for it: unknown run 404, unknown
-admission 409 `UNKNOWN_ADMISSION`, a deregistered or revoked owner 403, any other
-hotkey, another domain, run or admission, or a missing or bad signature 403 `hotkey is
-not current accepted identity`. The admin token is no substitute. The signature is
-static, like the other header-signed routes: it replays only what the owner may ask,
-and an asking never suspends anyone. Once a challenge is issued, the operator exports
-the matching staged `IslandJobV1`, its inputs and the signed challenge (the export
-carries it as `challenge_envelope`; the CLI does not call the route) into a new or
-empty folder:
+The challenge is issued by the owner's signed request: `POST
+/v2/runs/{run_id}/join/{admission_id}/challenge` with, as its body, an `ht/2` envelope of the
+message `ChallengeRequest{admission_id}` signed by the admission's current hotkey
+(`envelope_v2.seal(hotkey, "ChallengeRequest", run_id, {"admission_id": ...}, expiry)`). The proof
+is in the body, never in a header: the master proxy is the only miner entry path and forwards
+only `content-type`, `accept` and `authorization`. Opening a trial takes one of the run's two
+trial places, so nobody else may ask for it: unknown run 404, unknown admission 409, a
+deregistered or revoked owner 403, and any body that is not an unexpired `ChallengeRequest`
+of this run, for this admission, signed by the current hotkey (empty, not JSON, another
+message, run, admission or signer, a bad signature, an expired envelope) 403 `hotkey is not
+current accepted identity`. The admin token is no substitute, and the earlier unsigned `GET`
+answers 405. The envelope's expiry bounds a replay of a capture (the miner client signs about
+20 rounds ahead, a minute); the request is idempotent, so asking again returns the stored
+challenge, and an asking never suspends anyone. Once a challenge is issued, the operator exports
+the matching staged `IslandJobV1`, its inputs and the signed challenge (the export carries it as
+`challenge_envelope`; the CLI does not call the route) into a new or empty folder:
 
 ```bash
 uv run --frozen python -m hypertrain.challenge.trial_export \
@@ -154,8 +157,8 @@ uv run --frozen hypertrain-miner proof-v2 --config miner.toml --proof proof.json
 ```
 
 A joined miner can skip the export: `probe-v2 --config miner.toml > proof.json`
-without `--job`/`--challenge` reads its admission ID (`status-v2`), GETs the
-challenge with its signature (which issues the trial when none is open), then
+without `--job`/`--challenge` reads its admission ID (`status-v2`), POSTs its signed challenge
+request (which issues the trial when none is open), then
 `GET /v2/runs/{run_id}/join/{admission_id}/job` with headers `X-Hotkey` and
 `X-Trial-Signature` (hex hotkey signature of
 `hypertrain/trial-job/2|{run_id}|{admission_id}`). The route returns the admin
