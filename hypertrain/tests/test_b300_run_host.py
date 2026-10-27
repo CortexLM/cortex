@@ -10,6 +10,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -285,11 +286,14 @@ def env(tmp_path: Path, imds: str) -> dict[str, str]:
         "HT_B300_POLL_SECONDS": "0.2",
         "HT_B300_EFA_SYSFS": str(efa),
         "HT_B300_MIN_DISK_GB": "0",
+        "GIT_CEILING_DIRECTORIES": str(tmp_path),
     }
 
 
-def run(env: dict[str, str], tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    argv = ["bash", str(SCRIPT), "--results-root", str(tmp_path / "results"), "--host", "h1"]
+def run(
+    env: dict[str, str], tmp_path: Path, *args: str, script: Path = SCRIPT
+) -> subprocess.CompletedProcess[str]:
+    argv = ["bash", str(script), "--results-root", str(tmp_path / "results"), "--host", "h1"]
     return subprocess.run(
         [*argv, *args], env=env, capture_output=True, text=True, timeout=60, check=False
     )
@@ -302,6 +306,25 @@ def docker_calls(tmp_path: Path) -> list[list[str]]:
 
 def runs_of(tmp_path: Path, name: str) -> list[list[str]]:
     return [c for c in docker_calls(tmp_path) if c[0] == "run" and f"ht-b300-{name}" in c]
+
+
+def git(ht: Path, *args: str) -> str:
+    cfg = ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
+    done = subprocess.run(  # noqa: S603 - fixed argv
+        ["git", "-C", str(ht), *cfg, *args], check=True, capture_output=True, text=True
+    )
+    return done.stdout.strip()
+
+
+@pytest.fixture
+def checkout(tmp_path: Path) -> Path:
+    """A clean git checkout holding only scripts/: the HT that a copy of run_host.sh mounts."""
+    ht = tmp_path / "ht"
+    shutil.copytree(ROOT / "scripts", ht / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+    git(ht, "init", "-q")
+    git(ht, "add", ".")
+    git(ht, "commit", "-q", "-m", "scripts")
+    return ht
 
 
 def uploaded(tmp_path: Path, dest: str = "bucket/b300/h1") -> set[str]:
@@ -406,14 +429,15 @@ def test_pulled_image_must_carry_the_pinned_digest(env, tmp_path):
     assert runs_of(tmp_path, "gpu_probe") == []
 
 
-def test_rerun_skips_passed_steps_but_reprobes_the_host(env, tmp_path):
-    assert run(env, tmp_path).returncode == 0
+def test_rerun_skips_passed_steps_but_reprobes_the_host(env, tmp_path, checkout):
+    script = checkout / "scripts/b300/run_host.sh"
+    assert run(env, tmp_path, script=script).returncode == 0
     first = len(docker_calls(tmp_path))
-    assert run(env, tmp_path).returncode == 0
+    assert run(env, tmp_path, script=script).returncode == 0
     again = docker_calls(tmp_path)[first:]
     assert [c for c in again if c[0] in ("pull", "run")] == []
     assert ["info", "--format", "{{.DockerRootDir}}"] in again  # host probe ran again
-    assert run(env, tmp_path, "--force", "--steps", "mfu").returncode == 0
+    assert run(env, tmp_path, "--force", "--steps", "mfu", script=script).returncode == 0
     assert len(runs_of(tmp_path, "mfu")) == 2
 
 
@@ -755,3 +779,49 @@ def test_prod_upload_carries_the_round_evidence_but_never_the_key(env, tmp_path)
     assert uploaded(tmp_path) == EVIDENCE | {"steps/miner_prod.rc"} | rounds
     root = tmp_path / "state/s3"
     assert not [f for f in root.rglob("*") if f.is_file() and SENTINEL in f.read_text()]
+
+
+# --- which code ran (B4) -------------------------------------------------------------------------
+
+
+def test_the_run_records_the_commit_it_ran(env, tmp_path, checkout):
+    assert run(env, tmp_path, script=checkout / "scripts/b300/run_host.sh").returncode == 0
+    head = git(checkout, "rev-parse", "HEAD")
+    stop = stop_json(tmp_path)
+    assert stop["git_rev"] == head and stop["git_dirty"] is False
+    assert f"rev={head} dirty=0" in (tmp_path / "results/h1/run.log").read_text()
+
+
+def test_a_new_commit_reruns_what_passed_with_the_old_one(env, tmp_path, checkout):
+    script = checkout / "scripts/b300/run_host.sh"
+    assert run(env, tmp_path, script=script).returncode == 0
+    (checkout / "scripts/new.txt").write_text("x")
+    git(checkout, "add", ".")
+    git(checkout, "commit", "-q", "-m", "new")
+    assert run(env, tmp_path, script=script).returncode == 0
+    assert len(runs_of(tmp_path, "gpu_probe")) == 2 and len(runs_of(tmp_path, "mfu")) == 2
+    assert stop_json(tmp_path)["git_rev"] == git(checkout, "rev-parse", "HEAD")
+
+
+def test_a_modified_checkout_is_flagged_and_never_skipped(env, tmp_path, checkout):
+    script = checkout / "scripts/b300/run_host.sh"
+    (checkout / "scripts/mfu_profiles.json").write_text("{}")  # tracked file, changed
+    for n in (1, 2):  # the same dirty tree twice: still a different, unknown code
+        assert run(env, tmp_path, script=script).returncode == 0
+        assert stop_json(tmp_path)["git_dirty"] is True
+        assert len(runs_of(tmp_path, "gpu_probe")) == n
+    (checkout / "scripts/mfu_profiles.json").unlink()
+    git(checkout, "checkout", "--", "scripts/mfu_profiles.json")
+    (checkout / "scripts/untracked.py").write_text("x = 1\n")  # the mount shows it as well
+    assert run(env, tmp_path, script=script).returncode == 0
+    assert stop_json(tmp_path)["git_dirty"] is True
+
+
+def test_a_tree_without_git_is_unknown_and_never_skipped(env, tmp_path):
+    script = tmp_path / "plain/scripts/b300/run_host.sh"
+    shutil.copytree(ROOT / "scripts", tmp_path / "plain/scripts")
+    for n in (1, 2):
+        assert run(env, tmp_path, script=script).returncode == 0
+        stop = stop_json(tmp_path)
+        assert stop["git_rev"] == "unknown" and stop["git_dirty"] is None
+        assert len(runs_of(tmp_path, "gpu_probe")) == n

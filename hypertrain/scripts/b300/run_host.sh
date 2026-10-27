@@ -116,7 +116,21 @@ dk() { "${docker_cmd[@]}" "$@"; }
 run_id=$(date -u +%Y%m%dT%H%M%SZ)-$$
 deadline=$(($(date +%s) + seconds))
 log() { echo "[$(date -u +%H:%M:%S)] $*"; }
-log "run $run_id host=$host image=$image steps=[$steps] duration=${seconds}s prod=$prod"
+# The checkout is bind-mounted into every container: its scripts, and for miner_test its hypertrain
+# package, run in place of the image's. Record which commit that is and whether the tree was
+# modified (untracked files show in the mount too). A modified or non-git tree is code nobody can
+# name: a step that passed with it is never skipped.
+rev=$(git -C "$HT" rev-parse HEAD 2>/dev/null) || rev=unknown
+dirty=unknown
+if [ "$rev" != unknown ] && tree=$(git -C "$HT" status --porcelain -- . 2>/dev/null); then
+  if [ -z "$tree" ]; then dirty=0; else dirty=1; fi
+fi
+case $dirty in
+  0) code=$rev ;;
+  1) code=$rev+dirty ;;
+  *) code=unknown ;;
+esac
+log "run $run_id host=$host image=$image steps=[$steps] duration=${seconds}s prod=$prod rev=$rev dirty=$dirty"
 
 # --- auto-stop: the deadline or a Spot notice sends SIGTERM to this script --------------------
 spot_notice() {
@@ -169,15 +183,16 @@ finish() {
     # shellcheck disable=SC2086  # one container id per word
     dk stop --time "$STOP_GRACE" $ids >/dev/null || true
   fi
-  python3 - "$out" "$reason" "$rc" "$run_id" "$image" <<'PY'
+  python3 - "$out" "$reason" "$rc" "$run_id" "$image" "$rev" "$dirty" <<'PY'
 import json, sys
 from pathlib import Path
-out, reason, rc, run_id, image = Path(sys.argv[1]), *sys.argv[2:]
+out, reason, rc, run_id, image, rev, dirty = Path(sys.argv[1]), *sys.argv[2:]
 tsv = out / "steps.tsv"
 rows = [r.split("\t") for r in tsv.read_text().splitlines() if r] if tsv.exists() else []
 notice = out / "spot-instance-action.json"
 stop = {
     "run_id": run_id, "reason": reason, "rc": int(rc), "image": image,
+    "git_rev": rev, "git_dirty": {"0": False, "1": True}.get(dirty),
     "steps": {p.stem: int(p.read_text().split()[0]) for p in sorted((out / "steps").glob("*.rc"))},
     "ran": [r[0] for r in rows if r[3:4] == [run_id]],
     "spot_notice": json.loads(notice.read_text()) if notice.exists() else None,
@@ -201,8 +216,9 @@ step() {
   local name=$1 t0 rc=0
   shift
   [[ " $steps " == *" $name "* ]] || return 0
-  if [ "$force" = 0 ] && [ "$name" != host_probe ] && [ "$(cat "$out/steps/$name.rc" 2>/dev/null)" = "0 $image" ]; then
-    log "skip $name: passed in an earlier run with this image"
+  if [ "$force" = 0 ] && [ "$name" != host_probe ] && [ "$dirty" = 0 ] &&
+    [ "$(cat "$out/steps/$name.rc" 2>/dev/null)" = "0 $image $code" ]; then
+    log "skip $name: passed in an earlier run with this image and commit"
     return 0
   fi
   # Without the watchdog neither --duration nor a Spot notice can stop the run. (A watchdog that
@@ -214,7 +230,7 @@ step() {
   log "step $name"
   t0=$(date +%s)
   "$@" || rc=$?
-  echo "$rc $image" >"$out/steps/$name.rc"
+  echo "$rc $image $code" >"$out/steps/$name.rc"
   printf '%s\t%s\t%s\t%s\n' "$name" "$rc" "$(($(date +%s) - t0))" "$run_id" >>"$out/steps.tsv"
   log "step $name rc=$rc"
   return "$rc"
