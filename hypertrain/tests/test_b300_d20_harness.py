@@ -16,6 +16,7 @@ import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -349,3 +350,204 @@ def test_local_gpus_refuses_unless_nvidia_smi_and_torch_both_see_exactly_n(
 
     with pytest.raises(RuntimeError, match=message):
         harness._local_gpus(1)
+
+
+def job_values(**changes: Any) -> dict[str, Any]:
+    """Plain values for which every job-kimi check holds; `changes` overrides single inputs."""
+    import numpy as np
+
+    commitments = {"leaves_root": "root", "final_theta_hash": "theta", "delta_hash": "delta"}
+    values: dict[str, Any] = {
+        "run": "run-1",
+        "policy_hash": "policy-1",
+        "joins": [{"run_id": "run-1", "policy_hash": "policy-1"}],
+        "backend": "cuda",
+        "commitments": commitments,
+        "reference": dict(commitments),
+        "delta": b"delta-bytes",
+        "reference_delta": b"delta-bytes",
+        "parameters": ["tok_emb", "layers.001.router_bias"],
+        # Same set in another order: the harness compares sorted names.
+        "engine_parameters": ["layers.001.router_bias", "tok_emb"],
+        "model_parameters": ["tok_emb", "layers.001.router_bias"],
+        "bias_before": np.zeros(4, dtype="float32"),
+        "bias_after": np.array([0, 0, 1, 0], dtype="float32"),
+    }
+    return {**values, **changes}
+
+
+def test_job_verdict_is_a_pass_with_all_eight_checks_when_every_value_agrees(
+    harness: ModuleType,
+) -> None:
+    verdict = harness._job_verdict(**job_values())
+
+    assert verdict["result"] == "PASS"
+    assert verdict["checks"] == dict.fromkeys(
+        (
+            "join_rc0",
+            "run_rc0",
+            "join_binds_run_and_policy",
+            "summary_backend_cuda",
+            "commitments_equal_cuda_reference",
+            "delta_bytes_equal",
+            "parameter_set",
+            "router_bias_moved",
+        ),
+        True,
+    )
+
+
+def wrong_commitment(**changes: str) -> dict[str, Any]:
+    return job_values(commitments={**job_values()["commitments"], **changes})
+
+
+@pytest.mark.parametrize(
+    ("values", "failed"),
+    [
+        (job_values(backend="cpu"), "summary_backend_cuda"),
+        (job_values(backend=None), "summary_backend_cuda"),
+        (wrong_commitment(leaves_root="other"), "commitments_equal_cuda_reference"),
+        (wrong_commitment(final_theta_hash="other"), "commitments_equal_cuda_reference"),
+        (wrong_commitment(delta_hash="other"), "commitments_equal_cuda_reference"),
+        # Two correct values in each other's place: every value exists, the pairing is wrong.
+        (
+            wrong_commitment(leaves_root="delta", delta_hash="root"),
+            "commitments_equal_cuda_reference",
+        ),
+        (job_values(delta=b"delta-byteZ"), "delta_bytes_equal"),
+        (job_values(parameters=["tok_emb"]), "parameter_set"),
+        (job_values(engine_parameters=["tok_emb", "layers.001.router_bias", "x"]), "parameter_set"),
+        (job_values(model_parameters=["layers.001.router_bias"]), "parameter_set"),
+        (job_values(bias_after=job_values()["bias_before"].copy()), "router_bias_moved"),
+        (
+            job_values(joins=[{"run_id": "run-2", "policy_hash": "policy-1"}]),
+            "join_binds_run_and_policy",
+        ),
+        (
+            job_values(joins=[{"run_id": "run-1", "policy_hash": "policy-2"}]),
+            "join_binds_run_and_policy",
+        ),
+        (job_values(joins=[]), "join_binds_run_and_policy"),
+        (job_values(joins=job_values()["joins"] * 2), "join_binds_run_and_policy"),
+    ],
+    ids=[
+        "backend_cpu",
+        "backend_missing",
+        "leaves_root",
+        "final_theta_hash",
+        "delta_hash",
+        "commitments_swapped",
+        "delta_bytes",
+        "parameters_published_short",
+        "parameters_engine_extra",
+        "parameters_model_short",
+        "router_bias_unmoved",
+        "join_other_run",
+        "join_other_policy",
+        "join_missing",
+        "join_twice",
+    ],
+)
+def test_job_verdict_fails_on_exactly_the_check_whose_input_is_wrong(
+    harness: ModuleType, values: dict[str, Any], failed: str
+) -> None:
+    verdict = harness._job_verdict(**values)
+
+    assert verdict["result"] == "FAIL"
+    assert [name for name, ok in verdict["checks"].items() if not ok] == [failed]
+
+
+def test_job_verdict_never_passes_a_summary_without_commitments(harness: ModuleType) -> None:
+    with pytest.raises(KeyError):
+        harness._job_verdict(**job_values(commitments={}, reference={}))
+
+
+@pytest.mark.parametrize(
+    ("changes", "result", "code"),
+    [({}, "PASS", 0), ({"backend": "cpu"}, "FAIL", 1)],
+    ids=["pass", "fail"],
+)
+def test_finish_job_writes_the_evidence_and_exits_with_the_verdict(
+    harness: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    changes: dict[str, Any],
+    result: str,
+    code: int,
+) -> None:
+    evidence = tmp_path / "job-kimi.json"
+    monkeypatch.setenv("HT_D20_EVIDENCE", str(evidence))
+    verdict = harness._job_verdict(**job_values(**changes))
+
+    assert harness._finish_job({"mode": "job-kimi", **verdict}) == code
+
+    written = json.loads(evidence.read_text())
+    assert (written["result"], written["checks"]) == (result, verdict["checks"])
+    assert capsys.readouterr().out == evidence.read_text() + "\n"
+
+
+def test_the_patched_create_run_records_a_qualification_that_says_it_is_a_stand_in(
+    harness: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hypertrain.challenge.store as store_module
+    from hypertrain.protocol import envelope_v2
+    from hypertrain.protocol.hashing import sha256_hex
+
+    class FakeStore:
+        """What _patch_store wraps and what the patched _create_run_v2 touches, nothing else."""
+
+        existing = False
+
+        def __init__(self) -> None:
+            self.objects_put: list[bytes] = []
+            self.records: list[tuple[str, str, str, dict[str, Any]]] = []
+            self.created: list[Any] = []
+            self.objects = SimpleNamespace(put=self._put)
+            self._db = SimpleNamespace(
+                execute=lambda sql, params: SimpleNamespace(
+                    fetchone=lambda: (1,) if self.existing else None
+                )
+            )
+
+        def _put(self, data: bytes) -> str:
+            self.objects_put.append(data)
+            return sha256_hex(data)
+
+        @staticmethod
+        def _now(db: Any) -> int:
+            return 3
+
+        def _put_record_v2(self, run_id: str, kind: str, ident: str, record: Any) -> None:
+            self.records.append((run_id, kind, ident, record))
+
+        def _create_run_v2(self, raw: Any) -> str:
+            self.created.append(raw)
+            return "created"
+
+        def _unused(self, *args: Any) -> None:
+            raise AssertionError("not under test")
+
+        _dispatch_env_v2 = _backend_v2 = execute_audit_v2 = _unused
+
+    fixture = load("d20_escrow_fixture", FIXTURE)
+    manifest = fixture.setup().manifest
+    raw = envelope_v2.seal(fixture.COORD, "RunManifestV2", manifest.run_id(), manifest, 1000)
+    monkeypatch.setattr(store_module, "ChallengeStore", FakeStore)
+    harness._patch_store(fixture.COORD)
+    store = FakeStore()
+
+    assert store._create_run_v2(raw) == "created"
+
+    [(run_id, kind, ident, record)] = store.records
+    assert (run_id, kind) == (manifest.run_id(), "qualification")
+    assert ident == manifest.training.reference_spec.image_digest
+    assert record["backend"] == "cuda" and "stand-in" in record["harness"]
+    # The authority object the record points to carries the same marker.
+    assert sha256_hex(store.objects_put[0]) == record["authority_hash"]
+    assert json.loads(store.objects_put[0])["harness"] == record["harness"]
+    assert envelope_v2.parse_envelope(record["receipt"]).signer == fixture.COORD.ss58
+    # With a record already there only the original create runs.
+    store.existing = True
+    store._create_run_v2(raw)
+    assert len(store.records) == 1 and store.created == [raw, raw]
