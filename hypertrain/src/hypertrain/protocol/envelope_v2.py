@@ -29,6 +29,7 @@ from hypertrain.protocol.messages_v2 import (
     Identifier,
     JoinRequest,
     Positive,
+    RotateRequest,
     RunManifestV2,
 )
 
@@ -385,6 +386,30 @@ def verify_join(request: JoinRequest, run_id: str, now_round: int) -> bool:
         return verify(
             decode_hotkey(request.hotkey), msg, bytes.fromhex(request.hot_sig)
         ) and verify(decode_hotkey(request.coldkey), msg, bytes.fromhex(request.cold_sig))
+    except (KeyError_, CanonicalizationError):
+        return False
+
+
+def rotate_signing_message(
+    request: RotateRequest, coldkey: str, run_id: str, expires_beacon: int
+) -> bytes:
+    """What the new hotkey signs to agree to be bound to `coldkey` in place of `request.hotkey`.
+
+    Its own domain, so no other signature of that hotkey can stand in for it; the run, the expiry
+    and the operation id keep it from being replayed elsewhere. The new hotkey is the verifying
+    key itself, so it needs no place in the data.
+    """
+    data = {**request.model_dump(mode="json", exclude={"new_hot_sig"}), "coldkey": coldkey}
+    return _signing_message(b"hypertrain/rotate/2|", "RotateRequest", data, expires_beacon, run_id)
+
+
+def verify_rotate(request: RotateRequest, coldkey: str, run_id: str, expires_beacon: int) -> bool:
+    try:
+        return verify(
+            decode_hotkey(request.new_hotkey),
+            rotate_signing_message(request, coldkey, run_id, expires_beacon),
+            bytes.fromhex(request.new_hot_sig),
+        )
     except (KeyError_, CanonicalizationError):
         return False
 

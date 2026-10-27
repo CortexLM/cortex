@@ -585,6 +585,9 @@ class RotateRequest(WireModel):
     hotkey: SS58
     new_hotkey: SS58
     operation_id: Hex64
+    # The new hotkey's consent (envelope_v2.rotate_signing_message): the coldkey alone cannot
+    # rebind an admission onto a hotkey that never agreed.
+    new_hot_sig: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{128}$")]
 
 
 class AdmissionPolicyV2(WireModel):

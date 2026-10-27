@@ -18,7 +18,7 @@ from typing import Any
 
 from pydantic import JsonValue
 
-from hypertrain.protocol.envelope_v2 import join_signing_message, seal
+from hypertrain.protocol.envelope_v2 import join_signing_message, rotate_signing_message, seal
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import HardwareHint, JoinRequest, RotateRequest, WorkProof
 
@@ -58,6 +58,29 @@ def sign_proof(
     hotkey: Keypair, run_id: str, proof: WorkProof, expires_beacon: int
 ) -> dict[str, JsonValue]:
     return seal(hotkey, "WorkProof", run_id, proof, expires_beacon)
+
+
+def sign_rotation_consent(
+    new_hotkey: Keypair,
+    *,
+    run_id: str,
+    coldkey: str,
+    hotkey: str,
+    operation_id: str,
+    expires_beacon: int,
+) -> RotateRequest:
+    """The new hotkey agrees to replace `hotkey` under `coldkey`; the coldkey seals the result
+    with `sign_rotation`, using the same `expires_beacon`."""
+    request = RotateRequest(
+        hotkey=hotkey,
+        new_hotkey=new_hotkey.ss58,
+        operation_id=operation_id,
+        new_hot_sig="0" * 128,
+    )
+    message = rotate_signing_message(request, coldkey, run_id, expires_beacon)
+    return RotateRequest.model_validate(
+        {**request.body(), "new_hot_sig": new_hotkey.sign(message).hex()}
+    )
 
 
 def sign_rotation(

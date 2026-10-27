@@ -206,6 +206,19 @@ challenge container sees real client addresses: behind a proxy every client may 
 prefix, and the cap becomes a global cap on unfunded newcomers. A first value to try is
 `join_burst` (4).
 
+Rotation. `POST /v2/runs/{run_id}/admission/{hotkey}/rotate` moves an admission to a new
+hotkey. The coldkey of the admission seals the `RotateRequest` envelope, and the new hotkey
+consents in the body: `new_hot_sig`, its signature of
+`hypertrain/rotate/2|RotateRequest|<sha256 of JCS{coldkey,hotkey,new_hotkey,operation_id}>|<exp>|<run>`
+(`miner.admission.sign_rotation_consent`, then `sign_rotation` with the same expiry). The
+coldkey alone is refused (`ROTATION_CONSENT`, or 409 for the earlier three-field body), so no
+one can rebind an admission onto a registered hotkey that never agreed and spend that hotkey
+for good. A new rotation costs one unit of a budget of `join_burst` per coldkey and per
+`work_screen_epoch_rounds` window (`ROTATION_QUOTA`; a retry of the same `operation_id` costs
+nothing and answers the same admission, whatever its fresh signatures); a `BANNED` admission
+cannot rotate (`TERMINAL_BANNED`); the new hotkey must be unspent (`NEW_HOTKEY_HISTORY`).
+Locks, strikes and a pending dispute follow the admission.
+
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
 rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
 refused (`CHALLENGE_EXPIRED`) once more than `challenge_rounds` rounds have passed since

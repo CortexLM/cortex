@@ -74,6 +74,11 @@
   round-stage audit mismatch (`"AUDIT_MISMATCH"`: also suspends with one strike) or a convicted
   miner (`"TRAINING_FRAUD"`); `Admission.release_bond` and the status key `bond` serve the
   owner. `EscrowV2.slash` takes `burn_pending` (default: today's behaviour). ADR 0010.
+- `RotateRequest` needs the new hotkey's signature (`new_hot_sig`, own domain
+  `hypertrain/rotate/2|`; `miner.admission.sign_rotation_consent`): one coldkey signature can no
+  longer burn a registered hotkey that never joined (RTA-01). A new rotation is charged to
+  `join_burst` per coldkey per `work_screen_epoch_rounds` (`ROTATION_QUOTA`); a banned admission
+  cannot rotate. A client that signs the three-field body gets 409. ADR 0010.
 - CUDA network qualification records each device's compute capability with its SM count and
   accepts a device only when the pair is a row of `network_qualification.SM_COUNTS` (RTX 5090
   12.0 = 170, B300 10.3 = 148) and the count equals the signed manifest's

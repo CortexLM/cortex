@@ -133,7 +133,9 @@ class AdmissionStore:
         self.db.execute("INSERT INTO admission_reservations VALUES(?,?,?)", (key, digest, receipt))
         return receipt
 
-    def quota(self, identity: str, now: int, rate: int, burst: int) -> None:
+    def quota(
+        self, identity: str, now: int, rate: int, burst: int, *, code: str = "JOIN_QUOTA"
+    ) -> None:
         row = self.db.execute(
             "SELECT * FROM admission_quota WHERE identity=?", (identity,)
         ).fetchone()
@@ -141,7 +143,7 @@ class AdmissionStore:
             raise AdmissionError("BEACON_REGRESSION")
         tokens = min(burst, row["tokens"] + (now - row["beacon"]) * rate) if row else burst
         if not tokens:
-            raise AdmissionError("JOIN_QUOTA")
+            raise AdmissionError(code)
         self.db.execute(
             "INSERT INTO admission_quota VALUES(?,?,?) ON CONFLICT(identity) DO "
             "UPDATE SET beacon=excluded.beacon,tokens=excluded.tokens",

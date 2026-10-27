@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from hypertrain.protocol.envelope_v2 import signing_message
 from hypertrain.protocol.messages_v2 import (
     DisputeV2,
     EscrowLock,
@@ -286,3 +287,31 @@ def test_referee_fraud_against_the_miner_seizes_the_bond_through_the_routes(netw
         assert (b.admission_locked, b.burned, slashes) == (1000, 0, 0)
         assert state["state"] == "SUSPENDED"
     assert lock.operation_id
+
+
+def test_coldkey_alone_cannot_burn_a_registered_unjoined_hotkey_over_http(network):
+    # Given: HOT[0] joined; HOT[1] is registered on the subnet but has not joined
+    assert network.join(0).status_code == 200
+    run_id = network.manifest.run_id()
+    body = {
+        "hotkey": service.HOT[0].ss58,
+        "new_hotkey": service.HOT[1].ss58,
+        "operation_id": "ab" * 32,
+    }
+    envelope = {
+        "v": "ht/2",
+        "type": "RotateRequest",
+        "run_id": run_id,
+        "body": body,
+        "signer": service.COLD[0].ss58,
+        "exp_drand": 10000,
+        "sig": service.COLD[0].sign(signing_message("RotateRequest", body, 10000, run_id)).hex(),
+    }
+    # When: the coldkey signs alone, as the Lens did
+    refused = network.client.post(
+        network.url + f"/admission/{service.HOT[0].ss58}/rotate",
+        content=service.canonicalize(envelope),
+    )
+    # Then: refused, and the victim joins with its own two keys
+    assert refused.status_code == 409, refused.text
+    assert network.join(1).status_code == 200
