@@ -81,3 +81,40 @@ def test_restore_db_runs_no_compose_so_it_ignores_container_names(box, backup):
     box.reseal(backup)
     box.run("restore-db", backup, mutates={CHALLENGE})
     assert box.container(CHALLENGE)["Image"] == OLD_ID
+
+
+def test_a_beacon_behind_a_profile_is_refused_because_up_would_still_start_it(box, backup):
+    # compose config leaves a service whose profile is off out of its output, but
+    # `up -d --no-deps beacon` enables that profile and recreates the container it names.
+    gated = named("beacon", "hypertrain-beacon").replace(
+        "    container_name: hypertrain-beacon\n",
+        "    container_name: hypertrain-beacon\n    profiles: [debug]\n",
+    )
+    assert gated != COMPOSE
+    box.f.write_text(gated)
+    before = box.snapshot()
+    out = box.run("beacon", backup, rc=4).out
+    assert "service beacon must be hypertrain-test-beacon" in out
+    assert box.snapshot() == before
+
+
+@pytest.mark.parametrize("cmd", ["beacon", "rollback"])
+def test_a_test_name_on_the_wrong_service_is_refused(box, backup, cmd):
+    # hypertrain-test-relay is a TEST name, but the service `up` recreates is called beacon.
+    wrong = named("beacon", "hypertrain-test-relay")
+    if cmd == "beacon":
+        box.f.write_text(wrong)
+    else:
+        (backup / "compose.test.yml").write_text(wrong)
+        box.reseal(backup)
+    before = box.snapshot()
+    out = box.run(*call(cmd, backup), rc=4).out
+    assert "service beacon must be hypertrain-test-beacon" in out
+    assert box.snapshot() == before
+
+
+def test_rollback_accepts_a_relative_backup_path(box, backup):
+    # compose runs in the backups directory, so the name check must not resolve the path there.
+    relative = backup.relative_to(box.root)
+    box.run("rollback", relative, mutates={CHALLENGE, BEACON})
+    assert box.container(CHALLENGE)["Image"] == OLD_ID

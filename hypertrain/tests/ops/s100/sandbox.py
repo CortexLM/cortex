@@ -159,7 +159,9 @@ def render(fmt, c):
 
 
 if a[:2] == ["compose", "-f"] and a[3:6] == ["config", "--format", "json"] and len(a) == 6:
-    print(json.dumps({"name": "hypertrain-test", "services": services(a[2])}))
+    # as compose does: a service whose profile is off is left out of config (up still starts it)
+    active = {n: v for n, v in services(a[2]).items() if "profiles" not in v}
+    print(json.dumps({"name": "hypertrain-test", "services": active}))
 elif a[:2] == ["compose", "-f"] and a[3:6] == ["up", "-d", "--no-deps"] and len(a) > 6:
     up(a[2], a[6:])
 elif a[0] == "inspect" and len(a) == 4 and a[2] == "--format" and a[3] in FORMATS:

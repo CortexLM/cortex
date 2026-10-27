@@ -31,15 +31,21 @@ TEST_NAMES="hypertrain-test-challenge hypertrain-test-beacon hypertrain-test-mas
 test_names() { # test_names FILE < compose config JSON of FILE
   python3 -I -c '
 import json,sys
-ok=sys.argv[2].split(); bad=0
-for n,s in sorted(json.load(sys.stdin)["services"].items()):
+ok=sys.argv[2].split(); bad=0; svc=json.load(sys.stdin)["services"]
+for n,s in sorted(svc.items()):
     c=s.get("container_name")
     if c not in ok:
         bad=1; print("REFUSED %s: service %s %s" % (sys.argv[1], n, "names container "+c if c else "declares no container_name"))
+# up -d --no-deps challenge beacon names these two services: compose config leaves out a service whose
+# profile is off, which up would still start, and a TEST name on the wrong service is no better
+for n,c in (("challenge","hypertrain-test-challenge"),("beacon","hypertrain-test-beacon")):
+    if svc.get(n,{}).get("container_name")!=c:
+        bad=1; print("REFUSED %s: service %s must be %s" % (sys.argv[1], n, c))
 sys.exit(bad)' "$1" "$TEST_NAMES"; }
 backup_names() { # backup_names BACKUP: its compose file, which rollback copies over the live one
-  local cfg; cfg=$(compose "$1/compose.test.yml" config --format json) \
-    && test_names "$1/compose.test.yml" <<< "$cfg" || exit 4; }
+  # compose() runs in $T, so a relative BACKUP must be made absolute first
+  local cfg f; f=$(cd "$1" && pwd)/compose.test.yml
+  cfg=$(compose "$f" config --format json) && test_names "$f" <<< "$cfg" || exit 4; }
 gate() { # readyz 200, no seal backlog, and a sealed seal younger than 30 min (first half of the
   # 72-min window; a seal delayed by unfinished work would make "young" mean "late", so the
   # sealed epoch must also be the one just before the master's current epoch)
