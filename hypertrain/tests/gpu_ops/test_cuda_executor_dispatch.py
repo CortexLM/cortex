@@ -956,6 +956,8 @@ PROBE_BOMBS = {
         lambda image: {"raw_inspect": json.dumps([image, "x"]).replace('"x"', '"\\ud800"')},
         "RepoDigests",
     ),
+    # int - float raises OverflowError once the int has more than 308 digits
+    "clock-of-400-digits": (lambda image: {"clock_skew": 10**400}, "impossible clock"),
 }
 
 

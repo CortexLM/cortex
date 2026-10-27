@@ -249,6 +249,8 @@ def parse_snapshot(text: str) -> Snapshot:
         raise HostRefused(f"unparseable host probe: {type(error).__name__}") from error
     if not gpus or len({g.uuid for g in gpus}) != len(gpus):
         raise HostRefused("host probe lists no GPU or a duplicate GPU")
+    if not -(1 << 63) <= epoch < 1 << 63:  # `date +%s` prints a time_t; a float holds 308 digits
+        raise HostRefused("host probe lists an impossible clock")
     if not absent and not _REPO_DIGESTS.fullmatch(digests):
         raise HostRefused("host probe lists a malformed RepoDigests")
     listed = () if absent else tuple(re.findall(r'"([^"]*)"', digests))

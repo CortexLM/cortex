@@ -75,6 +75,8 @@ Everything a host sends is bytes to check, never a statement to believe
   without space, quote or backslash, at most 256 characters each) refuses the host: it is
   quarantined until the challenge restarts and the next host serves the job, with no container
   run on it. The line is read by a grammar, not by a JSON parser.
+- A probe whose clock is not a `time_t` (a 400-digit `date +%s` would overflow the comparison with
+  the challenge clock) refuses the host the same way.
 - When no host can serve the job, `launch` raises a plain `IslandFailure`: "cuda executor found
   no host able to run the job: ..." when every host is quarantined or unavailable, "cuda executor
   gave up: ..." after `max_attempts` failed attempts, and `Aborted` (a subclass) when the job

@@ -334,6 +334,10 @@ REFUSED_PROBES = [
     pytest.param(probe_text(epoch="soon"), id="epoch-not-int"),
     pytest.param(probe_text(epoch=""), id="epoch-empty"),
     pytest.param(probe_text(epoch=None), id="no-epoch-section"),
+    # a time_t holds 63 bits and a float 308 digits: `date +%s` prints nothing beyond the first
+    pytest.param(probe_text(epoch=str(1 << 63)), id="epoch-beyond-time_t"),
+    pytest.param(probe_text(epoch=str(-(1 << 63) - 1)), id="epoch-below-time_t"),
+    pytest.param(probe_text(epoch="9" * 400), id="epoch-400-digits"),
     pytest.param(probe_text(image="not json"), id="digests-not-json"),
     pytest.param(probe_text(image="[" * 100_000 + "]" * 100_000), id="digests-100000-levels"),
     pytest.param(probe_text(image="[" * 900_000), id="digests-900000-opening-brackets"),
