@@ -997,6 +997,20 @@ class ResolutionV2(WireModel):
         return self
 
 
+# A request signed in the body of an HTTP request (never in a header: the master proxy drops
+# those) is a bearer until it expires, so the master refuses one signed further ahead than this
+# many rounds of its own (about a minute): a captured request cannot be replayed for longer.
+REQUEST_HORIZON = 20
+
+
+class DisputeWatchRequest(WireModel):
+    """One long poll of a party's dispute events, signed by that party."""
+
+    party: SS58
+    cursor: U64
+    wait: Annotated[StrictInt, Field(ge=0, le=30)]
+
+
 MESSAGE_TYPES_V2: dict[str, type[BaseModel]] = {
     cls.__name__: cls
     for cls in (
@@ -1034,6 +1048,7 @@ MESSAGE_TYPES_V2: dict[str, type[BaseModel]] = {
         DisputeV2,
         BisectV2,
         ResolutionV2,
+        DisputeWatchRequest,
         Receipt,
         StateServe,
         ReplayVerdict,

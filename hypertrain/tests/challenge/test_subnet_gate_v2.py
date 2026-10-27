@@ -236,7 +236,6 @@ def _routes(n, hot, cold):
         "operation_id": H,
         "new_hot_sig": consent.new_hot_sig,
     }
-    watch = hot.sign(f"hypertrain/watch/2|{run_id}|{hot.ss58}".encode()).hex()
     obj = hot.sign(f"hypertrain/object/2|{run_id}|{H}".encode()).hex()
     c, u = n.client, n.url
     dispute = {"hotkey": hot.ss58, "verdict_hash": H, "action": "accept", "bond_lock": None}
@@ -267,9 +266,7 @@ def _routes(n, hot, cold):
         "dispute": lambda: c.post(u + "/dispute", json=n.signed(hot, "DisputeV2", dispute)),
         "bisect": lambda: c.post(u + "/bisect", json=n.signed(hot, "BisectV2", bisect)),
         "state-serve": lambda: c.post(u + "/state-serve", json=n.signed(hot, "StateServe", serve)),
-        "disputes": lambda: c.get(
-            u + "/disputes", params={"party": hot.ss58}, headers={"x-dispute-signature": watch}
-        ),
+        "disputes/watch": lambda: n.watch(hot),
         "disputes/ack": lambda: c.post(u + "/disputes/ack", json=ack),
     }
 

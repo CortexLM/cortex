@@ -778,21 +778,20 @@ def _funded_dispute_watch(network):
             response.status_code, content=response.content, headers=dict(response.headers)
         )
 
-    with httpx.Client(
-        transport=httpx.MockTransport(request),
-        headers={
-            "X-Dispute-Signature": hot.sign(
-                f"hypertrain/watch/2|{network.manifest.run_id()}|{hot.ss58}".encode()
-            ).hex()
-        },
-    ) as client:
+    with httpx.Client(transport=httpx.MockTransport(request)) as client:
         states = PublishedStates(
             job, published, LocalFSStore(network.store.state_dir / "watch-objects")
         )
         watcher = DisputeWatch(
             network.store.state_dir / "watch-client",
             hot,
-            HttpDisputeTransport(client, "https://service.test" + network.url),
+            HttpDisputeTransport(
+                client,
+                "https://service.test" + network.url,
+                hot,
+                network.manifest.run_id(),
+                lambda: network.now,
+            ),
             run_id=network.manifest.run_id(),
             coordinator=fixtures.COORD.ss58,
             party=lambda _: IslandParty.published(hot.ss58, job, published),
@@ -1896,7 +1895,13 @@ def _public_watch_fastapi_tls(network, monkeypatch):
     from hypertrain.protocol import envelope_v2
     from hypertrain.protocol.hashing import sha256_hex
     from hypertrain.protocol.jcs import canonicalize
-    from hypertrain.protocol.messages_v2 import BisectV2, DisputeV2, EscrowLock, IslandJobV1
+    from hypertrain.protocol.messages_v2 import (
+        REQUEST_HORIZON,
+        BisectV2,
+        DisputeV2,
+        EscrowLock,
+        IslandJobV1,
+    )
 
     hot, run_id = fixtures.HOT[0], network.manifest.run_id()
     escrow, _, disputes = network.store._services(run_id)
@@ -2052,10 +2057,10 @@ def _public_watch_fastapi_tls(network, monkeypatch):
             )
             assert opened.status_code == 200, opened.text
             before = escrow.balances()
-            params = {"party": hot.ss58, "cursor": 0, "timeout": 0}
-            signature = hot.sign(f"hypertrain/watch/2|{run_id}|{hot.ss58}".encode()).hex()
-            events = client.get(
-                "/disputes", params=params, headers={"X-Dispute-Signature": signature}
+            poll = {"party": hot.ss58, "cursor": 0, "wait": 0}
+            expiry = network.now + REQUEST_HORIZON
+            events = client.post(
+                "/disputes/watch", json=network.signed(hot, "DisputeWatchRequest", poll, expiry)
             )
             assert events.status_code == 200, events.text
             event = WatchEvent.model_validate(events.json()[0])
@@ -2072,14 +2077,9 @@ def _public_watch_fastapi_tls(network, monkeypatch):
                 t: [tuple(r) for r in network.store._db.execute(f'SELECT * FROM "{t}"')]
                 for t in tables
             }
-            assert client.get("/disputes", params=params).status_code == 403
-            wrong = hot.sign(f"hypertrain/watch/2|{'ff' * 32}|{hot.ss58}".encode()).hex()
-            assert (
-                client.get(
-                    "/disputes", params=params, headers={"X-Dispute-Signature": wrong}
-                ).status_code
-                == 403
-            )
+            assert client.post("/disputes/watch").status_code == 403
+            wrong = envelope_v2.seal(hot, "DisputeWatchRequest", "ff" * 32, poll, expiry)
+            assert client.post("/disputes/watch", json=wrong).status_code == 403
             assert client.post("/disputes/ack", json=ack.body()).status_code == 409
             assert {
                 t: [tuple(r) for r in network.store._db.execute(f'SELECT * FROM "{t}"')]

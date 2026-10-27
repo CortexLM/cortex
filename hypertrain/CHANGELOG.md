@@ -292,6 +292,13 @@
   (a long operation, or a stranger who only knows a registered hotkey, or an anonymous receipt)
   used to stop the whole process, `/version` included. A bad signature now answers 403 before
   404 (unknown run) or 403 (hotkey not admitted); nothing else changes (`docs/adr/0014`, Part 8).
+- The dispute watch poll is `POST /v2/runs/{run}/disputes/watch` with a signed ht/2 body
+  (`DisputeWatchRequest {party, cursor, wait}`, expiry at most 20 rounds ahead of the master's
+  round) instead of `GET .../disputes` with an `X-Dispute-Signature` header. The header route is
+  removed with no shim: the master proxy drops custom headers, the signature never expired, and
+  nothing outside this repository runs on it. `HttpDisputeTransport` takes the party's key, the
+  run id and a beacon reader; the miner no longer puts the static signature on its HTTP client.
+  Every refused poll answers 403, as the header route did (`docs/adr/0014`, Part 8).
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

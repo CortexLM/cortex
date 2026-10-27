@@ -470,6 +470,18 @@ uv run --frozen hypertrain-miner watch --config miner.toml \
 
 This command performs one bounded long-poll pass, then exits with a processed
 count; repeat under an operator supervisor. Timeout range is 0..30 seconds.
+Each poll is `POST /v2/runs/{run}/disputes/watch` and its body is a signed ht/2 envelope of
+type `DisputeWatchRequest {party, cursor, wait}`, signed by the party itself; `wait` is whole
+seconds, so a fractional `--timeout` is rounded up. The old `GET .../disputes` with an
+`X-Dispute-Signature` header is removed: a header does not cross the master proxy, and that
+signature never expired. The master accepts a poll whose `exp_drand` is at most 20 rounds
+(about a minute) past its current round, and the miner signs the current round plus 20, so a
+captured request is replayable for that long and no longer. A poll reserves nothing: the
+identical bytes may be sent again until they expire. A body that is not an unexpired
+`DisputeWatchRequest` of this run signed by its own party (empty, not JSON, another message,
+run or signer, a bad signature, an expired envelope, a request signed further ahead than 20
+rounds) answers 403, as does a party that is neither a pinned role nor on the subnet; a master
+that has verified no beacon round yet answers 503.
 STEP/LAYER/OP answers and requested `StateServe` proofs come from validated
 published traces/checkpoints. The coordinator signature covers the event's
 `Turn.contest.w`; the watcher requires that round to match the original validated

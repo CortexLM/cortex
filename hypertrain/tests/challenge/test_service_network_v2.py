@@ -32,6 +32,7 @@ from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import f32hex
 from hypertrain.protocol.messages_v2 import (
+    REQUEST_HORIZON,
     AggregationPolicyV2,
     AuditPolicyV2,
     DisputePolicyV2,
@@ -105,6 +106,14 @@ class Network:
         by a signed envelope in the body."""
         request = self.owner_request("ChallengeRequest", identity, key, expires=expires)
         return self.client.post(self.url + f"/join/{identity}/challenge", json=request)
+
+    def watch(self, key, cursor=0, wait=0):
+        """Poll `key`'s own dispute events: the request is signed in the body, with an expiry."""
+        poll = {"party": key.ss58, "cursor": cursor, "wait": wait}
+        expiry = self.now + REQUEST_HORIZON
+        return self.client.post(
+            self.url + "/disputes/watch", json=self.signed(key, "DisputeWatchRequest", poll, expiry)
+        )
 
     def join(self, index=0):
         request = sign_join(
@@ -2905,13 +2914,13 @@ def test_signed_event_access_and_forged_ack_reject(network):
 
     # Given: genuine dual-signed identity; no pending dispute events.
     network.join()
-    url = network.url + "/disputes?party=" + HOT[0].ss58
-    # When
-    denied = network.client.get(url)
-    signature = (
-        HOT[0].sign(f"hypertrain/watch/2|{network.manifest.run_id()}|{HOT[0].ss58}".encode()).hex()
+    # When: HOT[1] signs a poll that names HOT[0] as the party.
+    stolen = {"party": HOT[0].ss58, "cursor": 0, "wait": 0}
+    denied = network.client.post(
+        network.url + "/disputes/watch",
+        json=network.signed(HOT[1], "DisputeWatchRequest", stolen, network.now + REQUEST_HORIZON),
     )
-    accepted = network.client.get(url, headers={"X-Dispute-Signature": signature})
+    accepted = network.watch(HOT[0])
     ack = EventAck(
         run_id=network.manifest.run_id(),
         party=HOT[0].ss58,

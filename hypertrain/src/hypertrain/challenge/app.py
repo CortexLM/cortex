@@ -924,31 +924,36 @@ def create_app(
         admin(authorization)
         return await run(store.for_run(run_id).relay_drain_v2, run_id, relay_id)
 
-    @app.get("/v2/runs/{run_id}/disputes")
-    async def events_v2(
-        run_id: str,
-        party: str,
-        cursor: int = 0,
-        wait_seconds: Annotated[float, Query(alias="timeout")] = 0,
-        x_dispute_signature: Annotated[str | None, Header()] = None,
-    ) -> Any:
-        from hypertrain.protocol.keys import verify
+    @app.post("/v2/runs/{run_id}/disputes/watch")
+    async def events_v2(run_id: str, request: Request) -> Any:
+        from hypertrain.protocol.envelope_v2 import Intake, parse_envelope
+        from hypertrain.protocol.messages_v2 import REQUEST_HORIZON, DisputeWatchRequest
 
-        if cursor < 0 or not 0 <= wait_seconds <= 30:
-            raise ChallengeError(422, "invalid event cursor or wait")
+        hosted = store.for_run(run_id)
+
+        def beacon_now() -> int:
+            with hosted._lock:
+                return hosted._now(hosted._db)
+
+        now = await run(beacon_now)
+        if now < 1:
+            raise ChallengeError(503, "no verified beacon")
+        # The poll is authenticated by its signed body, not by a header the master proxy would
+        # drop. Nothing is reserved (a poll repeats): the expiry alone ends a captured request,
+        # and the master refuses one signed further ahead than the horizon.
         try:
-            valid = verify(
-                decode_hotkey(party),
-                f"hypertrain/watch/2|{run_id}|{party}".encode(),
-                bytes.fromhex(x_dispute_signature or ""),
-            )
-        except (ValueError, KeyError_):
+            raw = await v2_raw(request)
+            envelope = parse_envelope(raw)
+            poll = DisputeWatchRequest.model_validate(envelope.body)
+            Intake(run_id, {"DisputeWatchRequest": poll.party.__eq__}).accept(raw, now)
+            valid = envelope.exp_drand <= now + REQUEST_HORIZON
+        except (EnvelopeError, ValidationError):
             valid = False
         if not valid:
             raise ChallengeError(403, "party event access requires signature")
-        await party_member(run_id, party)
-        _, _, disputes = await run(store.for_run(run_id)._services, run_id)
-        events = await run(lambda: disputes.events(party, cursor, timeout=wait_seconds))
+        await party_member(run_id, poll.party)
+        _, _, disputes = await run(hosted._services, run_id)
+        events = await run(lambda: disputes.events(poll.party, poll.cursor, timeout=poll.wait))
         return [e.model_dump(mode="json") for e in events]
 
     @app.post("/v2/runs/{run_id}/disputes/ack")

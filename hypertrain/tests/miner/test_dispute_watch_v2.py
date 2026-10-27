@@ -297,10 +297,9 @@ def test_public_watch_layer_after_socket_long_poll(tmp_path: Path) -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     from hypertrain.miner.cli import main
-    from hypertrain.protocol.envelope_v2 import seal
+    from hypertrain.protocol.envelope_v2 import Intake, seal
     from hypertrain.protocol.jcs import canonicalize
-    from hypertrain.protocol.keys import decode_hotkey, verify
-    from hypertrain.protocol.messages_v2 import BisectV2
+    from hypertrain.protocol.messages_v2 import REQUEST_HORIZON, BisectV2
 
     challenge = helpers("challenge/test_disputes_v2.py")
     service, f, _, _, raw = challenge.service(tmp_path)
@@ -360,30 +359,22 @@ def test_public_watch_layer_after_socket_long_poll(tmp_path: Path) -> None:
             self.wfile.write(encoded)
 
         def do_GET(self) -> None:
-            from urllib.parse import parse_qs, urlsplit
-
-            url = urlsplit(self.path)
-            requests.append(url.path)
-            if url.path == run_url:
-                self.response({"manifest_envelope": envelope, "now_round": 2})
-                return
-            assert url.path == run_url + "/disputes"
-            query = parse_qs(url.query)
-            identity = query["party"][0]
-            assert verify(
-                decode_hotkey(identity),
-                f"hypertrain/watch/2|{service.run_id}|{identity}".encode(),
-                bytes.fromhex(self.headers["X-Dispute-Signature"]),
-            )
-            events = service.events(
-                identity, int(query["cursor"][0]), timeout=float(query["timeout"][0])
-            )
-            self.response([event.model_dump(mode="json") for event in events])
+            requests.append(self.path)
+            assert self.path == run_url
+            self.response({"manifest_envelope": envelope, "now_round": 2})
 
         def do_POST(self) -> None:
             body = self.rfile.read(int(self.headers["Content-Length"]))
             requests.append(self.path)
-            if self.path == run_url + "/disputes/ack":
+            if self.path == run_url + "/disputes/watch":
+                assert "X-Dispute-Signature" not in self.headers
+                poll = Intake(service.run_id, {"DisputeWatchRequest": f.HOT.ss58.__eq__}).accept(
+                    body, 2
+                )
+                assert parse_envelope(body).exp_drand <= 2 + REQUEST_HORIZON
+                events = service.events(poll.party, poll.cursor, timeout=poll.wait)
+                self.response([event.model_dump(mode="json") for event in events])
+            elif self.path == run_url + "/disputes/ack":
                 ack = EventAck.model_validate_json(body)
                 service.acknowledge(ack, now=2)
                 self.response({"accepted": ack.cursor})
@@ -463,7 +454,7 @@ def test_public_watch_layer_after_socket_long_poll(tmp_path: Path) -> None:
             ).fetchone()
             assert cursor == event.cursor and done == 1
             assert BisectV2.model_validate(parse_envelope(durable).body) == accepted
-        assert run_url + "/disputes" in requests
+        assert run_url + "/disputes/watch" in requests
         assert run_url + "/disputes/ack" in requests and run_url + "/bisect" in requests
     finally:
         server.shutdown()
