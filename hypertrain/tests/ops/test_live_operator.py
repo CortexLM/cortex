@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,8 @@ import pytest
 from scripts.ops import live_operator
 from scripts.ops.live_operator import check_open_shape
 
+from hypertrain.aggregator.core import OuterState
+from hypertrain.auditor.replay import AnchorCache, tensor_root
 from hypertrain.ops.manifest_v2 import main as manifest_main
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.hashing import sha256_hex
@@ -19,6 +22,9 @@ from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import f32hex
 from hypertrain.protocol.messages_v2 import PolicyHashes, RoundOpenV2, RunManifestV2
+from hypertrain.trainer.compress import state_hash
+from hypertrain.trainer.config import TrainConfig
+from hypertrain.trainer.model import init_params
 
 HOTKEYS = ["a", "b"]
 
@@ -266,3 +272,82 @@ def test_finalize_lists_the_inputs_of_the_applied_tape_minus_a_banned_coldkey(
 
     assert [path for path, _ in sent] == ["/admin/rounds/0/aggregate", "/admin/rounds/0/finalize"]
     assert sent[1][1]["body"]["included"] == sorted(keys[slot].ss58 for slot in paid)
+
+
+@pytest.mark.parametrize("closure", ["finalized", "retired", "neither"])
+def test_open_chains_to_the_finalize_of_the_round_before_or_to_the_evidence_of_its_retirement(
+    master_args: list[str], monkeypatch: pytest.MonkeyPatch, closure: str
+) -> None:
+    # Given: round 0 closed as `closure` says, and one member holding the anchor of round 0
+    state, run = Path(master_args[5]), master_args[3]
+    master = live_operator.Master(
+        live_operator.argparse.Namespace(
+            master=master_args[1],
+            run_id=run,
+            state_dir=state,
+            coord_key=Path(master_args[7]),
+            admin_token_file=Path(master_args[9]),
+        )
+    )
+    manifest, hotkey = master.manifest(), Keypair(b"\x01" * 32).ss58
+    theta = init_params(TrainConfig.from_manifest_v2(manifest).model)
+    cache = AnchorCache()
+    anchor = replace(cache.genesis(manifest, hotkey, theta), w=0)
+    cache.entries[(run, hotkey, 0, cache.layout_hash(manifest))] = anchor
+    initial = OuterState.init({k: v.detach().cpu().numpy() for k, v in theta.items()})
+    finalize_body, evidence_hash = {"w": 0, "included": [hotkey]}, "ab" * 32
+    records = {
+        ("applied", "0"): {"out_state": master.objects.put(initial.to_bytes())},
+        ("anchor", f"0:{hotkey}"): {
+            "path": str(cache.persist(state / "anchors-v2" / hotkey, anchor)),
+            "anchor_hash": anchor.anchor_hash,
+            "proof_hash": anchor.proof_hash,
+            "state_root": tensor_root(anchor.theta, anchor.state),
+            "ef_hash": state_hash(anchor.ef),
+            "backend": "genesis",
+        },
+        ("registry", "current"): {
+            "body": json.loads((state.parent / "inputs" / "relays.json").read_text())
+        },
+    }
+    if closure == "finalized":
+        records[("finalize", "0")] = {"body": finalize_body}
+    if closure == "retired":
+        records[("retired", "0")] = {"evidence_hash": evidence_hash, "cause": "INFEASIBLE"}
+    with closing(sqlite3.connect(state / "challenge.db")) as db, db:
+        for (kind, identity), data in records.items():
+            db.execute(
+                "INSERT INTO records_v2 VALUES(?,?,?,?)", (run, kind, identity, json.dumps(data))
+            )
+    sent: list[Any] = []
+
+    def call(self: Any, method: str, path: str, body: Any = None, admin: bool = False) -> Any:
+        if (method, path) == ("GET", ""):
+            return {"now_round": 1000}
+        if (method, path) == ("GET", "/admission/" + hotkey):
+            record = {
+                "admission_id": sha256_hex(b"admission"),
+                "coldkey": "cold0",
+                "state": "ACTIVE",
+                "screen_until": 10**6,
+            }
+            return {"eligible": True, "record": record}
+        sent.append(body)
+        return {}
+
+    monkeypatch.setattr(live_operator.Master, "call", call)
+    args = [*master_args, "open", "--w", "1", "--hotkey", hotkey, "--offsets"]
+    args.append(",".join(str(x) for x in window(98)))
+
+    # When / Then: the opening of round 1 chains to the finalize of round 0, or to the evidence
+    # of its retirement; a round that is neither is refused by name
+    if closure == "neither":
+        with pytest.raises(SystemExit, match="missing accepted finalize:0"):
+            live_operator.main(args)
+        assert sent == []
+    else:
+        live_operator.main(args)
+        expected = (
+            sha256_hex(canonicalize(finalize_body)) if closure == "finalized" else evidence_hash
+        )
+        assert [s["body"]["prev_final_hash"] for s in sent] == [expected]

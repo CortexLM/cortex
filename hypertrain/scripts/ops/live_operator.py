@@ -118,6 +118,18 @@ def check_open_shape(w: int, hotkeys: list[str], offsets: list[int]) -> None:
         raise SystemExit("offsets: need 2 <= d_final-d_audit <= 200 and d_upload > d_commit")
 
 
+def previous_final_hash(m: Master, w: int) -> str:
+    """What the opening of round w + 1 chains to: the finalize of round w, or the evidence of
+    its retirement when the round reached no tape (ADR 0011 Part 8, decision 11)."""
+    exists = "SELECT 1 FROM records_v2 WHERE run_id=? AND kind=? AND id=?"
+    if (
+        m.query(exists, m.run_id, "finalize", str(w)) is None
+        and m.query(exists, m.run_id, "retired", str(w)) is not None
+    ):
+        return str(m.record("retired", str(w))["evidence_hash"])
+    return sha256_hex(canonicalize(m.record("finalize", str(w))["body"]))
+
+
 def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dict:
     """RoundOpenV2 rebuilt the way open_round_v2 recomputes it (store.py:4892-4939)."""
     refuse_service_run(m)
@@ -135,7 +147,7 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
             k: torch.from_numpy(v.copy())
             for k, v in load_state(m.objects, applied["out_state"]).theta.items()
         }
-        prev_final = sha256_hex(canonicalize(m.record("finalize", str(w - 1))["body"]))
+        prev_final = previous_final_hash(m, w - 1)
     starts, roster = [], []
     for slot, hot in enumerate(hotkeys):
         status = m.call("GET", "/admission/" + hot)

@@ -1042,7 +1042,8 @@ the table as covering them.
     `relay_settlement_v2` answers for the grants of a retired round. The honest bonds are released by
     `lock_settlement` as soon as the round is closed.
 11. **The next round.** The operator opens `w + 1` with `prev_final_hash = retired[w].evidence_hash`
-    (`live_operator` reads it). It needs four eligible members that hold an anchor for `w`; fewer answers
+    (`live_operator open` reads it when round `w` has no `finalize`). It needs four eligible members that
+    hold an anchor for `w`; fewer answers
     409 `ROUND_INFEASIBLE` and the run idles with nothing locked. A new member cannot join: Q3.
 
 **C. The sanction (D44, D47)**

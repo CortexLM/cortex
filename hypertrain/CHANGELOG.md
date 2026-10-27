@@ -249,6 +249,9 @@
   and `rollback_v2` are owned functions: `implementation_hash` changes. See
   `docs/adr/0011-audit-integrity.md` (Part 8, decisions 7 to 11) at the monorepo root and
   `docs/network-v2.md`.
+- `scripts/ops/live_operator.py open` opens the round that follows a retired one: when round
+  `w - 1` has no `finalize`, `prev_final_hash` is the evidence hash of its `retired` record instead
+  of the tool stopping with "missing accepted finalize" (a round that is neither is still refused).
 
 ### Not yet
 - Quality parity with centralized training is not claimed.
