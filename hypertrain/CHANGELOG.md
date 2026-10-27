@@ -35,6 +35,12 @@
   `compute_cache: false` restores the previous command; `role-dispatch.json` and the journal
   record whether the mount was requested. See `docs/adr/0012` at the monorepo root and
   `docs/cuda-executor.md`.
+- Executor results through R2 (`HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS`,
+  `hypertrain.gpu_ops.artifact_transfer`, opt-in): the container hashes the result tar, declares the
+  hashes in R2 and uploads it to presigned part URLs bound to them; the challenge verifies every
+  block and the whole sha256 before the unchanged checks. The host holds URLs only. See
+  `docs/adr/0013` at the monorepo root and `docs/cuda-executor.md`. `R2ObjectStore.fetch_to` takes
+  an optional `check` callback.
 - Docs, CI, image and release workflows, Dockerfiles.
 - Eviction-tolerant core `hypertrain.elastic` (v3, not wired into the v2 challenge): leases with
   fencing tokens, saved before they are granted so that a restart never reissues one, and a

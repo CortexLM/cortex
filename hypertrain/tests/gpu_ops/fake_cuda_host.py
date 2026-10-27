@@ -20,7 +20,7 @@ The scenario is one JSON file keyed by host address (`hosts`), plus a `global` s
                       cold_start, warm_start}
     global = {canned{job_sha256: tree}, runs[run], rm_hold}  # global runs are consumed first
     run = {mode: ok | vanish | truncate | exit | exit-after | probe-fail | env | hang | oversize |
-                 flood | mutate, detached, ...}
+                 flood | mutate, detached, die_after_puts, ...}
 
 `smi_fail` is `query-gpu` or `query-compute-apps`: that nvidia-smi query prints nothing and exits 3.
 `home` is the ssh user's home (`$HOME` of the remote shell). A `--mount type=bind` must name an
@@ -33,6 +33,8 @@ refused, and the destination must be pinned in the `UserKnownHostsFile` the call
 `address` for port 22 and `[address]:port` otherwise (StrictHostKeyChecking=yes).
 `exit-after`: the container streams a complete valid result, then exits with `code`.
 `probe-fail`: the runner's device probe fails (the real runner then exits 9).
+`die_after_puts`: with the result going to R2 (docs/adr/0013), the host vanishes (as `vanish`)
+when the runner starts its n+1th part upload.
 `detached`: the container runs in a session of its own, so killing the local ssh does not stop it;
 only `docker rm -f NAME` does, and it waits while the global `rm_hold` flag is set.
 
@@ -202,6 +204,7 @@ import io
 import shutil
 import signal
 import tarfile
+import threading
 from pathlib import Path
 
 ADDRESS = os.environ["FAKE_HOST_ADDRESS"]
@@ -462,6 +465,21 @@ def run(argv):
     canned = data["global"]["canned"]
     namespace = {"__name__": "cuda_executor_runner_under_test"}
     exec(compile(source, "<runner>", "exec"), namespace)
+    if entry.get("die_after_puts") is not None:
+        real, counted = namespace["http_send"], threading.Lock()
+        puts = [0]
+
+        def dying(method, url, headers, body, timeout, limit):
+            if method == "PUT" and "partNumber=" in url:
+                with counted:
+                    puts[0] += 1
+                    gone = puts[0] > entry["die_after_puts"]
+                if gone:
+                    log("run_end", name=name, code=199)
+                    os._exit(199)
+            return real(method, url, headers, body, timeout, limit)
+
+        namespace["http_send"] = dying
 
     def probe(request):
         if mode == "probe-fail":

@@ -3,6 +3,10 @@
 - Status: draft for branch `v3-cuda-executor`, 2026-10-26 (Principal SN100 D26). Forge decides
   promotion to `v3`. Nothing here changes a production run, master, profile, pin or emission,
   and no code in this batch was run on a GPU host (see "Not verified").
+  Amended 2026-10-27 by ADR 0013: with `HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS` the result no longer
+  returns on the ssh standard output (the result half of the "Data in and out" row and of the
+  transfer rows of the failure model); inputs still do, and every check on the received bytes
+  (including `max_result_bytes`) still applies.
 - Order: Principal SN100 D26, brief `v3-cuda-executor`. Founder rule of 2026-10-26: rented or
   listed machines are never servers; the challenge stays on the operator host.
 - Amended by [ADR 0012](0012-executor-performance.md) (2026-10-27): the "Container" and "Data in and
@@ -209,7 +213,7 @@ Consequences, each the same kind as ADR 0007's:
   configured hosts. Throughput on a single host is serial.
 - Transfer volume equals the publication size (checkpoints included), bounded by
   `max_result_bytes` (default 16 GiB). Models whose publication exceeds that, or whose transfer
-  does not fit the lease, need a different transport [?].
+  does not fit the lease, need a different transport (ADR 0013 provides one for results, opt-in).
 - The key and `known_hosts` files must be readable by uid 65532 inside the challenge container.
   Installing them on s100 is an operator step on the TEST stack only and is not part of this
   batch (`hypertrain/docs/cuda-executor.md`).
