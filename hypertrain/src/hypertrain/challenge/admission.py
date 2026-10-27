@@ -220,7 +220,7 @@ class Admission:
                     (row["trial_epoch"],),
                 ).fetchone()
                 if trial and trial["outcome"] == "OPEN":
-                    if now > c.deadline_beacon:
+                    if now > c.deadline_beacon and row["proof_digest"] is None:
                         self.store.transition(admission_id, "SUSPENDED", "CHALLENGE_EXPIRED", now)
                         self.store.db.execute(
                             "UPDATE admission_trial_results SET outcome='EXPIRED' WHERE epoch=?",
@@ -668,23 +668,27 @@ class Admission:
                 raise AdmissionError("PROOF_TYPE")
             proof = WorkProof.model_validate(env.body)
             r = self.store.by_id(proof.admission_id)
+            row = self.store.db.execute(
+                "SELECT * FROM admissions_v2 WHERE admission_id=?", (r.admission_id,)
+            ).fetchone()
+            # The exact pair already accepted may be retried after its deadline, so a
+            # finalization that failed after the proof can run; a new proof may not.
+            replay = row["proof_digest"] == digest(proof)
+            at = min(now, env.exp_drand, screen_env.exp_drand) if replay else now
             intake = Intake(
                 self.escrow.run_id,
                 {"WorkProof": lambda s: s == r.hotkey, "WorkScreenV2": lambda s: s == r.hotkey},
             )
-            intake.accept(raw, now)
-            intake.accept(screen_raw, now)
+            intake.accept(raw, at)
+            intake.accept(screen_raw, at)
             screen = WorkScreenV2.model_validate(screen_env.body)
-            row = self.store.db.execute(
-                "SELECT * FROM admissions_v2 WHERE admission_id=?", (r.admission_id,)
-            ).fetchone()
             if row["challenge"] is None or row["reference_json"] is None:
                 raise AdmissionError("REFERENCE_NOT_COMMITTED")
             c = JoinChallenge.model_validate_json(row["challenge"])
             if (
                 r.state not in ("APPLIED", "PROBATION", "ACTIVE")
                 or r.pending_dispute
-                or now > c.deadline_beacon
+                or (now > c.deadline_beacon and not replay)
             ):
                 raise AdmissionError("PROOF_STATE_OR_DEADLINE")
             if (
@@ -771,12 +775,13 @@ class Admission:
         proof = WorkProof.model_validate(env.body)
         with self.escrow.tx():
             r = self.store.by_id(proof.admission_id)
-            Intake(self.escrow.run_id, {"WorkProof": r.hotkey.__eq__}).accept(raw, now)
             row = self.store.db.execute(
-                "SELECT challenge,reference_commitment,trial_epoch FROM admissions_v2 "
-                "WHERE admission_id=?",
+                "SELECT challenge,reference_commitment,trial_epoch,proof_digest "
+                "FROM admissions_v2 WHERE admission_id=?",
                 (r.admission_id,),
             ).fetchone()
+            at = min(now, env.exp_drand) if row["proof_digest"] == digest(proof) else now
+            Intake(self.escrow.run_id, {"WorkProof": r.hotkey.__eq__}).accept(raw, at)
             if row["challenge"] is None or row["reference_commitment"] is not None:
                 return None
             trial = self.store.db.execute(

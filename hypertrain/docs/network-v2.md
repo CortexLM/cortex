@@ -188,7 +188,11 @@ sets the next seed one round later, and the next trial must fit in the `challeng
 rounds after that seed: always 100, which the policy schema fixes, about 5 min at 3 s
 rounds. The challenge deadline is seed + 100 whenever the challenge is requested, and the
 proof must be accepted by then. A challenge left unproven past its deadline suspends the
-miner (`CHALLENGE_EXPIRED`) at its next challenge request. So a miner that is down for
+miner (`CHALLENGE_EXPIRED`) at its next challenge request. A trial whose proof was accepted
+is never expired by a later request, and its finalization may follow the deadline: the miner
+may re-post the exact accepted proof and screen after their deadline to run a finalization
+that failed (the proof route commits the proof and the finalization separately). A different
+proof after the deadline is refused. So a miner that is down for
 longer than that window minus one trial's duration cannot renew its screen, whatever
 `work_screen_epoch_rounds` is. At most two trials are open at once across the run (the
 schema fixes `max_trial_replays` at 2). In a run longer than `work_screen_epoch_rounds`

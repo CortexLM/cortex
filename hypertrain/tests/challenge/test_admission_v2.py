@@ -236,6 +236,36 @@ def test_trial_capacity_released_when_challenge_expires(tmp_path: Path) -> None:
     assert a.store.record(HOT.ss58).clean_count == 0
 
 
+def test_poll_after_deadline_keeps_miner_whose_proof_is_accepted(tmp_path: Path) -> None:
+    # Given: a proof accepted on the last round of the window; its finalization has not run
+    # (the proof route commits the proof and the finalization in two transactions).
+    s = setup()
+    a = service(s, tmp_path)
+    admission = apply(a, s)
+    a.challenge(admission, now=2)
+    a.prepare_reference(admission, now=2)
+    proof, screen = current_proof(a, admission, 2)
+    raw = canonicalize(sign_proof(HOT, a.escrow.run_id, proof, 102))
+    screen_raw = canonicalize(seal(HOT, "WorkScreenV2", a.escrow.run_id, screen, 102))
+    assert a.proof(raw, screen_raw, now=102).state == "PROBATION"
+    # When: any caller polls after the deadline
+    a.challenge(admission, now=103)
+    # Then: the accepted proof is not a missed window
+    assert a.store.record(HOT.ss58).state == "PROBATION"
+    # The miner retries the very same signed pair: its envelopes expired at the deadline, yet
+    # the exact replay is answered, so the finalization that failed can run.
+    assert a.reference_due(raw, now=103) is None
+    assert a.proof(raw, screen_raw, now=103).state == "PROBATION"
+    final = a.trial_finality(admission, now=103)
+    assert final is not None
+    status = a.finalize_trial(admission, final, now=103)
+    assert (status.record.state, status.record.clean_count) == ("PROBATION", 1)
+    # A different proof after the deadline is still refused.
+    other = WorkProof.model_validate({**proof.body(), "delta_hash": H})
+    with pytest.raises(ValueError):
+        a.proof(canonicalize(sign_proof(HOT, a.escrow.run_id, other, 102)), screen_raw, now=103)
+
+
 @pytest.mark.parametrize("boundary", ["before_ledger", "after_ledger", "after_receipt"])
 def test_outbox_single_lock_when_crash_boundary(tmp_path: Path, boundary: str) -> None:
     # Given: reserve durable operation before any accounting effect.
