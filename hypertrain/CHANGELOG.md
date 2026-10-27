@@ -57,6 +57,11 @@
   signature travels in a header, since the master proxy forwards none (D51). The admin export
   carries the signed challenge as `challenge_envelope` and `trial_export` no longer calls the
   route; the miner signs its request. A client built before this change gets 405. ADR 0010.
+- The miner's job read is `POST /v2/runs/{run_id}/join/{admission_id}/job` whose body is a
+  `JobRequest` envelope signed by the admission's hotkey, replacing `GET` with the headers
+  `X-Hotkey` and `X-Trial-Signature`, which the master proxy does not forward (D51 to D54). The
+  service refuses an owner request (challenge or job) that expires more than 100 rounds ahead of
+  its current round. A client built before this change gets 405. ADR 0010.
 - At the start of every `join`, an `APPLIED` row that is past its challenge window
   (`seed + challenge_rounds`) and holds no stake is suspended as `APPLIED_EXPIRED`: 32 unfunded
   joins can no longer hold every pending place for good (RTA-02). Its coldkey may apply again;

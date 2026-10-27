@@ -163,10 +163,11 @@ decision 2, and a caller identity the service cannot verify); accepting the admi
 (contradicts `network-v2.md`).
 
 The same rule covers the two other routes that sign in a header today and that are not part of
-admission: `PUT /v2/runs/{run_id}/objects/{sha256}` (`X-Hotkey` and `X-Object-Signature`) and
-`GET /v2/runs/{run_id}/disputes` (`x-dispute-signature`). Each becomes a request whose signed
-envelope is in the body. That conversion is made by the changes that own those routes, not by
-this series: until it is made they do not work through the proxy.
+admission. `PUT /v2/runs/{run_id}/objects/{sha256}` (`X-Hotkey` and `X-Object-Signature`) is
+converted by the lot `escrow-relay-fixes`, and `GET /v2/runs/{run_id}/disputes`
+(`x-dispute-signature`) by the lot `audit-integrity-2`. Each becomes a request whose signed
+envelope is in the body. This series does not convert them: until those lots land they do not
+work through the proxy.
 
 ### 4. Dead unfunded joins release their places; an optional per-prefix cap (RTA-02)
 
