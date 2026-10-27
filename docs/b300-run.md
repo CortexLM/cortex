@@ -233,11 +233,12 @@ poll. It exits 0 only when all of these hold:
 Exit codes: 0 clear; 1 not clear before `--timeout` (default 1800 s); 2 usage; 4 `nvidia-smi` or the
 executor log was unreadable at the last poll. It only reads `nvidia-smi` and the executor's logs.
 
-`hypertrain/scripts/b300/gpu_watch.sh OUT_PREFIX [INTERVAL]` truncates and then appends the compute
-apps to `OUT_PREFIX.apps.csv` and the memory used per GPU to `OUT_PREFIX.mem.csv` every `INTERVAL`
-seconds (default 2), until it is killed. A failed or hung (10 s) `nvidia-smi` call writes a
-`nvidia-smi-failed` row. Start it before a timed step and compare its rows with the executor markers
-of the step's window.
+`hypertrain/scripts/b300/gpu_watch.sh OUT_PREFIX [INTERVAL [PARENT_PID]]` truncates and then appends
+the compute apps to `OUT_PREFIX.apps.csv` and the memory used per GPU to `OUT_PREFIX.mem.csv` every
+`INTERVAL` seconds (default 2), until it is killed. With `PARENT_PID` (a positive integer) it also
+ends at its next sample once that process no longer exists, so a launcher killed with SIGKILL leaves
+no watcher behind. A failed or hung (10 s) `nvidia-smi` call writes a `nvidia-smi-failed` row. Start
+it before a timed step and compare its rows with the executor markers of the step's window.
 
 Observed on a third host (Hyderabad, 2026-10-26): the executor logged an `upload_ssh_key` every
 15 minutes (at about :02, :17, :32 and :47 of the hour, 8 consecutive cycles from 20:02Z to 21:47Z)
@@ -264,18 +265,22 @@ run_container.sh --image REPO@sha256:<64 hex> --gpu N --out DIR [--mode MODE]
 
 `MODE` is `smoke` or `multi` (the fixture decoder) or `smoke-kimi`, `multi-kimi`, `job-kimi` (below).
 It waits for `cycle_gate.sh` (unless `--no-gate`; exit 3 if the gate does not clear within
-`--gate-timeout`), starts `gpu_watch.sh`, then runs one `--rm` container named `ht-s9-<mode>-gpu<N>`
-on `--gpus device=N` with the checkout mounted read-only at `/opt/ht`, first on `PYTHONPATH` (and
-`pytest==9.1.1` installed from PyPI inside the container). The gate looks at the whole host whatever
-GPU you pick; choosing one other than 0 only avoids the GPU the validator's challenge was seen on
-first. `--out` must not exist. On SIGINT or SIGTERM only that container is removed and the exit code is
-143 (a shell ignores SIGINT in a job it starts with `&`, `nohup` or not, so use SIGTERM there);
-otherwise the exit code is the container's. It writes `gate.jsonl`, `gpu-watch.{apps,mem}.csv`,
-`stdout.log`, `stderr.log`, `events.jsonl`, `executor-markers.txt`, the script's evidence
-(`multi.json`, `mine-smoke-v2.json` or `job-kimi.json`) and `run.json`: the window, the exit code,
-`interrupted`, the last gate line, `executor_log_ok`, the last SSH-key marker before the window
-(`last_marker_before_window`) and every marker inside it (`executor_markers_in_window`). An empty list
-with `executor_log_ok: false` means the log could not be read, not that nothing happened.
+`--gate-timeout`), starts `gpu_watch.sh` with its own pid, then runs one `--rm` container named
+`ht-s9-<mode>-gpu<N>` on `--gpus device=N` with the checkout mounted read-only at `/opt/ht`, first on
+`PYTHONPATH` (and `pytest==9.1.1` installed from PyPI inside the container). The gate looks at the
+whole host whatever GPU you pick; choosing one other than 0 only avoids the GPU the validator's
+challenge was seen on first. `--out` must not exist. On SIGINT, SIGTERM or SIGHUP (an ssh drop) only
+that container is removed and the exit code is 143 (a shell ignores SIGINT in a job it starts with
+`&`, `nohup` or not, so use SIGTERM there); otherwise the exit code is the container's. SIGKILL
+cannot be trapped: the launcher then writes no `run.json`, the container runs until it ends and
+`--rm` removes it, the watcher ends by itself at its next sample, and the next run of the same
+mode and GPU removes a leftover container of that name first (also one that is still running). It
+writes `gate.jsonl`, `gpu-watch.{apps,mem}.csv`, `stdout.log`, `stderr.log`, `events.jsonl`,
+`executor-markers.txt`, the script's evidence (`multi.json`, `mine-smoke-v2.json` or
+`job-kimi.json`) and `run.json`: the window, the exit code, `interrupted`, the last gate line,
+`executor_log_ok`, the last SSH-key marker before the window (`last_marker_before_window`) and every
+marker inside it (`executor_markers_in_window`). An empty list with `executor_log_ok: false` means
+the log could not be read, not that nothing happened.
 
 Real: the challenge app, the TLS relay, the `hypertrain-miner` processes, admission, the probation
 trials, the CUDA training inside `run-v2`, the audits (replayed in the challenge process on the same

@@ -31,10 +31,12 @@ OURS = "/opt/hypertrain/venv/bin/python"
 DIGEST = "sha256:" + "ab" * 32
 IMAGE = f"ghcr.io/cortexlm/cortex/hypertrain-gpu@{DIGEST}"
 
-# A shell ignores SIGINT in jobs it starts with `&` without job control, and a signal ignored at
-# entry cannot be trapped; pytest may be such a job (a CI script, nohup). Reset it before exec.
-DEFAULT_SIGINT = (
-    "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); "
+# A shell ignores SIGINT in jobs it starts with `&` without job control, and `nohup` ignores SIGHUP;
+# a signal ignored at entry cannot be trapped, and pytest may be such a job (a CI script, nohup).
+# Reset both before exec.
+DEFAULT_SIGNALS = (
+    "import os, signal, sys; "
+    "signal.signal(signal.SIGINT, signal.SIG_DFL); signal.signal(signal.SIGHUP, signal.SIG_DFL); "
     "os.execv(sys.argv[1], sys.argv[1:])"
 )
 
@@ -432,7 +434,11 @@ def test_runner_says_so_when_the_executor_log_cannot_be_read(host, tmp_path):
     assert (record["gated"], record["gate_last"], record["executor_log_ok"]) == (False, None, False)
 
 
-@pytest.mark.parametrize("interrupt", [signal.SIGTERM, signal.SIGINT], ids=["sigterm", "sigint"])
+@pytest.mark.parametrize(
+    "interrupt",
+    [signal.SIGTERM, signal.SIGINT, signal.SIGHUP],
+    ids=["sigterm", "sigint", "sighup"],
+)
 def test_runner_removes_only_its_container_and_reports_143_when_interrupted(
     host, tmp_path, interrupt
 ):
@@ -442,7 +448,7 @@ def test_runner_removes_only_its_container_and_reports_143_when_interrupted(
         [
             sys.executable,
             "-c",
-            DEFAULT_SIGINT,
+            DEFAULT_SIGNALS,
             str(RUNNER),
             "--image",
             IMAGE,
@@ -468,3 +474,76 @@ def test_runner_removes_only_its_container_and_reports_143_when_interrupted(
     assert (record["rc"], record["interrupted"]) == (143, True)
     removed = (Path(host["FAKE_STATE"]) / "docker.rm").read_text().split()
     assert set(removed) <= {"rm", "-f", "ht-s9-multi-gpu5"} and "ht-s9-multi-gpu5" in removed
+
+
+def wait_until(condition, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.1)
+    return condition()
+
+
+def watcher_pids(prefix: Path) -> list[int]:
+    """Processes that have `prefix` as an argument: the gpu_watch.sh of one run (and its forks)."""
+    pids = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+        except OSError:  # the process ended between the listing and the read
+            continue
+        if str(prefix).encode() in argv:
+            pids.append(int(entry.name))
+    return pids
+
+
+def test_a_sigkilled_runner_leaves_no_watcher_but_a_live_runner_keeps_it_sampling(host, tmp_path):
+    set_state(host, executor_log=marker("remove", 300))
+    out = tmp_path / "out"
+    prefix = out / "gpu-watch"
+    run_pid = Path(host["FAKE_STATE"]) / "run.pid"
+    proc = subprocess.Popen(
+        [str(RUNNER), "--image", IMAGE, "--gpu", "5", "--out", str(out)],
+        env={**os.environ, **host, "FAKE_RUN_SLEEP": "60"},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert wait_until(run_pid.exists, 30)
+        # Alive: the watcher takes sample after sample (header plus at least two rows).
+        mem = prefix.with_suffix(".mem.csv")
+        assert wait_until(lambda: mem.exists() and len(mem.read_text().splitlines()) >= 3, 30)
+        assert watcher_pids(prefix)
+        proc.kill()
+        proc.wait(timeout=10)
+        assert wait_until(lambda: not watcher_pids(prefix), 30), "the watcher outlived its launcher"
+    finally:
+        # SIGKILL skips every trap: end the fake container (a sleep) and any stuck watcher here.
+        leftovers = watcher_pids(prefix)
+        if run_pid.exists():
+            leftovers.append(int(run_pid.read_text()))
+        for pid in leftovers:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:  # already gone
+                pass
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+@pytest.mark.parametrize("parent", ["12x", "0"], ids=["not_a_number", "zero"])
+def test_watch_refuses_a_parent_pid_that_is_not_positive_before_writing_anything(
+    host, tmp_path, parent
+):
+    run = subprocess.run(
+        [str(WATCH), str(tmp_path / "w"), "1", parent],
+        env={**os.environ, **host},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert run.returncode == 2 and "PARENT_PID" in run.stderr
+    assert list(tmp_path.glob("w.*")) == []

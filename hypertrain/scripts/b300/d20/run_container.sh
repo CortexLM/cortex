@@ -8,9 +8,12 @@
 #   4. run.json records the window, the exit code, the last gate line, whether the executor log
 #      could be read, the last SSH-key marker before the window and every marker inside it.
 # Everything is written under OUT_DIR (must not exist yet). The container is named
-# ht-s9-<mode>-gpu<N>; only that name is ever removed, also on SIGINT/SIGTERM (exit code 143; a shell
-# ignores SIGINT in a job it starts with `&` and nohup does not change that, so start it in the
-# foreground or send SIGTERM). The Lium executor-* containers are never touched.
+# ht-s9-<mode>-gpu<N>; only that name is ever removed, also on SIGINT/SIGTERM/SIGHUP (exit code 143;
+# a shell ignores SIGINT in a job it starts with `&` and nohup does not change that, so start it in
+# the foreground or send SIGTERM). SIGKILL cannot be trapped: the container then runs to its end and
+# `--rm` removes it, no run.json is written, the watcher ends by itself (gpu_watch.sh PARENT_PID) and
+# the next run of the same mode and GPU removes a leftover container of that name first. The Lium
+# executor-* containers are never touched.
 # usage: run_container.sh --image REPO@sha256:<64 hex> --gpu N --out DIR [--mode MODE]
 #                         [--driver 595.91.07] [--sm-count 148] [--no-gate] [--gate-timeout SECONDS]
 # MODE: smoke | multi (dense fixture model) or smoke-kimi | multi-kimi | job-kimi (kimi-k3-pro-tiny;
@@ -63,13 +66,13 @@ if [ "$gate" -eq 1 ]; then
   fi
 fi
 
-"$B300/gpu_watch.sh" "$out/gpu-watch" 2 &
+"$B300/gpu_watch.sh" "$out/gpu-watch" 2 "$$" &
 watcher=$!
 interrupted=0
 cleanup() { kill "$watcher" 2>/dev/null || true; }
 on_signal() { interrupted=1; dk rm -f "$name" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
-trap on_signal INT TERM
+trap on_signal INT TERM HUP
 
 started=$(date -u +%FT%TZ)
 rc=0
