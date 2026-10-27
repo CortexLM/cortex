@@ -27,7 +27,7 @@
   progress deadline, joins admitted by the run's authority, deterministic shard reassignment
   (a shard a busy host never works goes to a member that holds nothing), content-addressed
   checkpoint chains checked back to the round's base, idempotent commit and leave retries
-  (answered for two rounds, so memory stays bounded), a required audit before any credit and
+  (answered for two rounds, so the retry memory stays bounded), a required audit before any credit and
   `withdraw` of a link found invalid later, the AWS IMDSv2 spot notice, a signed leave and a
   drain that flushes only when it fits before the deadline; see `docs/adr/0002` at the monorepo
   root.

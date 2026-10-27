@@ -3,6 +3,9 @@
 - Status: draft for branch `v3-dataplane-cloudflare`, 2026-10-26 (Principal SN100 D13). Forge
   decides promotion to `v3`. Nothing here changes a production run, master, relay, profile,
   pin, DNS record or emission. The challenge still stores objects on local disk by default.
+  Amended 2026-10-27 by the branch `v3-core-eviction-fixes`: checkpoint retention (Decisions 3
+  and 5, Consequences, cost model, founder decision 1), after finding F7 of the Lens review of
+  `v3-core-eviction` (see ADR 0002, Sources).
 - Order: brief `v3-dataplane-cloudflare` and checklist `C-cloudflare-data-plane`. The part size
   rule in Decision 2 is Forge's answer to the session question on 2026-10-26 (option A: parts
   are 4 MiB multiples, 8 MiB by default).
@@ -111,7 +114,7 @@
    - `runs/<run_id>/objects/<sha256>`: written by the coordinator.
    - `runs/<run_id>/up/<hotkey>/<sha256>`: host uploads.
    - `runs/<run_id>/ckpt/<sha256>`: eviction checkpoints, chained by ADR 0002: state objects and
-     their manifests of about 400 bytes. A chain is read from its head back to its base and a
+     their manifests of 344 to 720 bytes. A chain is read from its head back to its base and a
      link replays from its parent state, so which of them may be deleted, and when, is ADR 0002's
      rule ("Retention of checkpoint objects"), not a per-prefix choice.
    - A multipart object carries `x-amz-meta-sha256` and `x-amz-meta-blocks`. The second names a
@@ -122,13 +125,16 @@
      - abort incomplete uploads after 1 day under `runs/`;
      - the coordinator deletes settled deltas as it goes (DeleteObject is free). It deletes
        checkpoint objects only by the rule of ADR 0002 ("Retention of checkpoint objects"): a
-       state once its link is audited and out of dispute, a manifest never before its round's
-       retention ends. "Superseded by a newer head" is not enough, because a resumer reads every
-       manifest back to the base and a link replays from its parent state;
+       state once the link it ends and the link built on it are both released (audited, out of
+       dispute, grace elapsed; the last state of a shard: once the round is settled and the next
+       base is stored), a manifest never before its round's retention ends. "Superseded by a
+       newer head" is not enough, because a resumer reads every manifest back to the base and a
+       link replays from its parent state;
      - expire `runs/<run_id>/` after settlement and the dispute window (founder decision). R2
-       counts object age, not run state, so on `ckpt/` this rule is created only once the run is
-       settled and its disputes are closed (or the coordinator lists and deletes the prefix
-       then): a rule installed at run start would expire the head state of a stalled round;
+       counts object age, not run state [A, r2/buckets/object-lifecycles], so on `ckpt/` this
+       rule is created only once the run is settled and its disputes are closed (or the
+       coordinator lists and deletes the prefix then): a rule installed at run start would
+       expire the head state of a stalled round;
      - never expire `datasets/`.
 
      The cost model's retention figures assume these deletes and keep K = 2 states per host
@@ -307,13 +313,14 @@ Assumptions [H, every one a placeholder until ADR 0002 and the founder fix them]
 - 144 rounds/day (10 min);
 - a 126 MB delta per host-round, which the coordinator reads back once;
 - 1.98 GB of round inputs published once per round and read by every host;
-- 24 checkpoints of 1.485 GB per host per day, K states held per host at any time, with K = 2
-  (the last two kept) in the rows below. ADR 0002's rule keeps a state until its link is
-  released, so K = 2 holds only if T_hold, the time from a link's acceptance to its release, is
-  at most one checkpoint interval [?]. The rows are a lower bound for checkpoint storage: the
-  extra cost is hosts x (K - 2) x 1.485 GB x $0.015 per GB-month [H, arithmetic]. The 24 per day
-  also disagree with ADR 0002's example interval of 10 minutes and with a link at the end of
-  each unit, which write and read more checkpoints than the rows count [?];
+- 24 checkpoints of 1.485 GB per host per day, K states held per shard at any time (one shard
+  per host at the default capacity of 1), with K = 2 (the last two kept) in the rows below.
+  ADR 0002's rule keeps a state until its link is released, so K = 2 holds only if T_hold, the
+  time from a link's acceptance to its release, is at most one checkpoint interval [?]. The
+  rows are a lower bound for checkpoint storage: the extra cost is hosts x (K - 2) x 1.485 GB x
+  $0.015 per GB-month [H, arithmetic]. The 24 per day also disagree with ADR 0002's example
+  interval of 10 minutes and with a link at the end of each unit, which write and read more
+  checkpoints than the rows count [?];
 - one 2.1 GB admission trial per host per day, kept 1 day;
 - deltas kept 10.1 h (the TEST `retain_until`) and round inputs 1 day, which needs the
   coordinator deletes of Decision 3;
