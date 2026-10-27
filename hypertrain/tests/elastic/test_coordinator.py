@@ -2,6 +2,8 @@
 
 import gc
 import hashlib
+import os
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
@@ -93,6 +95,7 @@ def notice(lease: Lease, signer: Keypair) -> LeaveNotice:
         member=lease.member,
         signer=signer.ss58,
         lease=lease.token,
+        epoch=lease.epoch,
         reason="interruption",
         provider_time="2026-10-26T12:00:00Z",
         heads=[],
@@ -475,14 +478,76 @@ def test_a_signed_leave_cannot_be_replayed_after_a_restart(tmp_path: Path, durab
     restarted.open_round(units)
     new = restarted.join("a", "owner-a", KEYS["a"].ss58).lease
     assert new.token > old.token
-    for replay in (
-        lambda: restarted.leave(signed),
-        lambda: restarted.heartbeat("a", old.token),  # a host of the old process is fenced too
+    for replay, code in (
+        (lambda: restarted.leave(signed), "STALE_EPOCH"),
+        (lambda: restarted.heartbeat("a", old.token), "STALE_TOKEN"),  # the old host is fenced too
     ):
         with pytest.raises(LeaseError) as e:
             replay()
-        assert e.value.code == "STALE_TOKEN"
+        assert e.value.code == code
     assert restarted.holder(0) == Holder("a", new.token)
+
+
+def test_a_leave_signed_before_a_token_log_was_restored_cannot_release_the_lease_it_reissues(
+    tmp_path: Path,
+) -> None:
+    clock, store = FakeClock(), MemoryCheckpointStore()
+    units = [WorkUnit(RUN, POLICY, 0, 0, store.put(b"base"), 6)]
+    path, backup = tmp_path / "tokens", tmp_path / "backup"
+    log = LocalTokenLog.create(path)
+    first = coordinator(clock, store, log)
+    shutil.copyfile(path, backup)  # the operator's backup, at mark 0
+    log.close()
+    log = LocalTokenLog(path)
+    second = coordinator(clock, store, log)
+    second.open_round(units)
+    old = join(second, "a")
+    signed = sign_leave(notice(old, KEYS["a"]), KEYS["a"])  # seen on the wire
+    log.close()
+    shutil.copyfile(backup, path)  # the volume is restored from that backup
+    third = coordinator(clock, store, LocalTokenLog(path))
+    third.open_round(units)
+    new = join(third, "a")
+    assert new.token == old.token  # the restored mark hands the same token to the same member
+    assert len({c.membership.epoch for c in (first, second, third)}) == 3
+    with pytest.raises(LeaseError) as e:
+        third.leave(signed)
+    assert e.value.code == "STALE_EPOCH"
+    assert third.holder(0) == Holder("a", new.token)  # refused before it released anything
+    assert third.leave(sign_leave(notice(new, KEYS["a"]), KEYS["a"])).kind is Exit.NOTICE
+
+
+@pytest.mark.parametrize("copy", [shutil.copyfile, os.link], ids=["copy", "hard link"])
+def test_a_leave_signed_under_one_coordinator_cannot_release_a_lease_of_a_copy_of_its_log(
+    tmp_path: Path, copy: Callable[[Path, Path], object]
+) -> None:
+    clock, store = FakeClock(), MemoryCheckpointStore()
+    units = [WorkUnit(RUN, POLICY, 0, 0, store.put(b"base"), 6)]
+    original, other = tmp_path / "tokens", tmp_path / "tokens-copy"
+    first_log = LocalTokenLog.create(original)
+    copy(original, other)  # a second name has its own lock: nothing refuses the second start
+    first, second = (
+        coordinator(clock, store, first_log),
+        coordinator(clock, store, LocalTokenLog(other)),
+    )
+    first.open_round(units)
+    second.open_round(units)
+    a1, a2 = join(first, "a"), join(second, "a")
+    assert a1.token == a2.token  # both coordinators issue token 1
+    signed = sign_leave(notice(a1, KEYS["a"]), KEYS["a"])
+    with pytest.raises(LeaseError) as e:
+        second.leave(signed)
+    assert e.value.code == "STALE_EPOCH"
+    assert second.holder(0) == Holder("a", a2.token)
+    assert first.leave(signed).kind is Exit.NOTICE  # its own coordinator still honours it
+
+
+def test_a_heartbeat_keeps_the_epoch_of_the_lease_it_renews() -> None:
+    _, coord, _ = setup()
+    a = join(coord, "a")
+    renewed = coord.heartbeat("a", a.token).lease
+    assert renewed.epoch == a.epoch
+    assert coord.leave(sign_leave(notice(renewed, KEYS["a"]), KEYS["a"])).kind is Exit.NOTICE
 
 
 def test_a_coordinator_does_not_start_on_a_token_log_it_cannot_read(tmp_path: Path) -> None:

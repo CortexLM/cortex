@@ -79,6 +79,10 @@
   longer burn a registered hotkey that never joined (RTA-01). A new rotation is charged to
   `join_burst` per coldkey per `work_screen_epoch_rounds` (`ROTATION_QUOTA`); a banned admission
   cannot rotate. A client that signs the three-field body gets 409. ADR 0010.
+- A signed elastic leave names the coordinator epoch, drawn at random at every start and never
+  kept in the token log: a log restored from an older copy, or a copy or hard link of it, can
+  re-issue a token but no longer lets an old leave release the new lease (EB-01). `LeaveNotice`
+  gains the required field `epoch`; `Coordinator.leave` answers `STALE_EPOCH`. ADR 0010.
 - CUDA network qualification records each device's compute capability with its SM count and
   accepts a device only when the pair is a row of `network_qualification.SM_COUNTS` (RTX 5090
   12.0 = 170, B300 10.3 = 148) and the count equals the signed manifest's

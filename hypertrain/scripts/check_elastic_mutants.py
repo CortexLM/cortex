@@ -1315,6 +1315,43 @@ MUTANTS = (
         "self.sim.checkpoints.resume(a.unit, None)",
         "test_sim.py::test_resuming_the_same_heads_again_and_again_changes_nothing",
     ),
+    Mutant(
+        "every coordinator start reuses one epoch",
+        SRC + "membership.py",
+        "self.epoch = secrets.token_hex(32)",
+        'self.epoch = "0" * 64',
+        "test_coordinator.py::test_a_leave_signed_before_a_token_log_was_restored_cannot_release_the_lease_it_reissues",
+    ),
+    Mutant(
+        "the epoch is derived from the token log, which a restore brings back",
+        SRC + "membership.py",
+        "self.epoch = secrets.token_hex(32)",
+        'self.epoch = f"{self._tokens:064x}"',
+        "test_coordinator.py::test_a_leave_signed_before_a_token_log_was_restored_cannot_release_the_lease_it_reissues",
+    ),
+    Mutant(
+        "a leave of another coordinator epoch is accepted",
+        SRC + "coordinator.py",
+        "if signed.notice.epoch != self.membership.epoch:",
+        "if False:",
+        "test_coordinator.py::test_a_leave_signed_under_one_coordinator_cannot_release_a_lease_of_a_copy_of_its_log",
+    ),
+    Mutant(
+        "a renewed lease takes another epoch",
+        SRC + "membership.py",
+        "m.lease = Lease(member, token, self.clock.now_ms() + self.ttl_ms, self.epoch)",
+        'm.lease = Lease(member, token, self.clock.now_ms() + self.ttl_ms, "0" * 64)',
+        "test_coordinator.py::test_a_heartbeat_keeps_the_epoch_of_the_lease_it_renews",
+    ),
+    Mutant(
+        "the leave signature does not cover the epoch",
+        SRC + "notice.py",
+        "return LEAVE_DOMAIN + canonicalize(self.body(), allow_float=False)",
+        "return LEAVE_DOMAIN + canonicalize(\n"
+        '            {k: v for k, v in self.body().items() if k != "epoch"}, allow_float=False\n'
+        "        )",
+        "test_notice.py::test_the_leave_signature_covers_every_field",
+    ),
 )
 
 
