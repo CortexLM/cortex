@@ -1,12 +1,12 @@
 # ADR 0014: escrow key spaces, typed settlement references, finalize at acceptance, ledger growth, relay grants
 
 - Status: draft for branch `v3-escrow-relay-fixes`, 2026-10-27 (Principal SN100 D45, D48, D49,
-  D50, D51; Forge arbitration D52 of the same day, which amends the first text). Forge decides
+  D50, D51, D52 and D53, relayed by Forge; D52 and D53 amend the first text). Forge decides
   promotion to `v3`. Nothing here changes a production run, master, profile, emission, pin or
   digest, and no wire message that a manifest or `docs/BUNDLE_SPEC.md` covers.
 - Order: brief `v3-escrow-relay-fixes`. Findings come from the Lens C1 report (families F1, F3,
   F4, F6, F7) and the Lens C2 report (TRN-02 and the IMPORTANT tail), tree `33b50656`
-  (`origin/v3`, 2026-10-27). This ADR is written before the code. Order of work (D50, D52):
+  (`origin/v3`, 2026-10-27). This ADR is written before the code. Order of work (D50, D52, D53):
   F1 + F4, then M2 (the finalize half of F3), then F7a, then TRN-02, then F6, F7b, ESC-02 and
   the rest; one commit per finding, each with tests that are red on its parent and green on it.
 - Labels: **[V]** verified in this tree by reading or by a command (2026-10-27), **[A]** reported
@@ -46,8 +46,13 @@ All findings were reproduced in-process on `33b50656` by at least one design ana
    values is the HMAC of its preimage under that key: operation ids (reward finalize, shadow
    finalize, maturity, weights payout, dispute settlement) and origin ids (reward, shadow, genesis,
    bootstrap). The preimages are today's strings, which already carry the type tag, the run, the
-   round and the subject (D52: `HMAC(secret, (run, round, type, subject))`); a ledger built without
-   a key (unit tests, read-only tools) derives the legacy unkeyed value, byte for byte.
+   round and the subject (D52: `HMAC(secret, (run, round, type, subject))`). **There is no unkeyed
+   mode (D53).** A ledger built without a key is a read-only verifier: every server operation
+   (`test_genesis`, `production_bootstrap`, `reward_finalize`, `mature`, `slash`, `pay`,
+   `release_settlement`) refuses with `ID_KEY_REQUIRED`, so no run can silently keep predictable ids;
+   the unit-test helper passes a fixed test key, the store always passes the coordinator key, and a
+   test builds the production store and asserts the key reaches the ledger. The unkeyed derivation
+   survives only to **verify** origin rows that were issued before the key existed (point 6).
 2. **Continuity pin (I3).** `ChallengeStore` stores `sha256(id key)` in `meta`
    (`escrow-id-namespace-v2`) at first use and refuses with 503 `escrow id namespace differs` when
    the secret later yields another key, exactly as `_prefix_secret_v2` does with
@@ -202,19 +207,24 @@ F7a (liveness, conditional blocker):
    aggregate: a missed writer would make `locked()` silently wrong and it decides `eligible`. A
    general `(owner, bucket, ref)` index must not be added later without re-checking the plan (a test
    pins `EXPLAIN QUERY PLAN`).
-2. Two caps on open `LOCK_ADMISSION` locks, enforced in `EscrowV2.lock` after the replay lookup (a
-   coldkey at the cap still gets its old receipt back; the miner CLI and the protected-opening fixture
-   re-post saved locks) and pre-checked in `Admission.lock` so no outbox row is left that `reconcile_lock`
-   can never apply: **64 per coldkey** (2 × `max_pending`) and **4,096 in the ledger** (D52 m1; the
-   roster ceiling is 1,024 and a miner needs one or two locks). The per-coldkey cap bounds the cost of
-   `locked()` for that coldkey; the global cap bounds the state that many funded coldkeys can create,
-   because "40,006 unreachable locks" holds per coldkey only. Refusals: `OPEN_LOCK_CAP` and
-   `LEDGER_LOCK_CAP` (HTTP 409). Contest locks are not capped (33 contests by one owner is a pinned case).
-   A minimum lock amount is not added: the caps bound the count regardless of amount.
+2. Caps on open `LOCK_ADMISSION` locks, enforced in `EscrowV2.lock` after the replay lookup (a coldkey
+   at a cap still gets its old receipt back; the miner CLI and the protected-opening fixture re-post
+   saved locks) and pre-checked in `Admission.lock` so no outbox row is left that `reconcile_lock` can
+   never apply. They are sized from the real roster, not from the pending queue (D52 m1, D53 2): the
+   roster ceiling is 1,024 miners [V `store.py` `max_roster`], a coldkey that owns a whole roster needs
+   one lock and one top-up per miner, so **2,048 per coldkey** (`OPEN_LOCK_CAP`) and **4,096 in the
+   ledger** (`LEDGER_LOCK_CAP`, twice the honest worst case). The per-coldkey cap bounds the cost of
+   `locked()` (about 4 µs per open lock, 8 ms at the cap [V]); the ledger cap bounds the state that many
+   funded coldkeys can create, because "40,006 unreachable locks" holds per coldkey only. **A minimum
+   amount per lock** of `max(1, S_min_units // 10)` (100 units in the example policy, HTTP 409
+   `LOCK_BELOW_MINIMUM`) makes the ledger cap costly to exhaust: filling it needs 4,096 locks of at
+   least a tenth of the funding floor each, held by funded coldkeys, instead of 4,096 dust locks. The
+   floor is a code constant derived from the policy value, not a policy field. Contest locks are not
+   capped (33 contests by one owner is a pinned case).
 3. `GET /admission/{hotkey}` stays public and gets cheap, not authenticated or cached: four
    in-repo clients (the miner, the coldkey CLI, the operator tool, the proof script) call it unsigned
    and ADR 0010's `admission_owner()` relies on admission ids being public. After the index it costs
-   2.4 ms at 100 locks and 0.17 s at 40,006 locks of one coldkey [V]. A flood of cheap GETs is the
+   2.4 ms at 100 locks and 0.17 s at 40,006 locks of one coldkey [V], and at most a few ms at the cap. A flood of cheap GETs is the
    generic ingress gap (no limiter exists), not F7a.
 
 F7b (IMPORTANT):
@@ -238,8 +248,9 @@ F7b (IMPORTANT):
 
 1. New client events (never a replay, never a service-driven call) are metered by the quota that
    `join` already uses: identity `escrow:<owner>:<now // work_screen_epoch_rounds>`, rate 0, burst
-   **16** per coldkey and window (D52 m1: a coldkey that admits 16 miners must not throttle itself;
-   the earlier 4 was a self-throttle). It is charged after the signature is verified, before any
+   **2,048** per coldkey and window, i.e. twice the roster ceiling (D53 2: burst at least twice the
+   expected miners; a coldkey that admits 16 miners with a lock and a top-up each needs 32, and the
+   first sizes, 4 then 16, would have throttled an honest operator). It is charged after the signature is verified, before any
    ledger work, in the same transaction (a refusal consumes neither the token nor the replay nonce).
    Refusal `ESCROW_QUOTA` (HTTP 409). The burst is a module constant, not a policy field. The cleanup
    uses a key-range predicate that can use the primary-key index (a default `LIKE` cannot). With the
@@ -249,42 +260,59 @@ F7b (IMPORTANT):
    is bypassed by hops to fresh keys (79 signers accepted once each, reproduced over HTTP [V]). No
    in-repo flow transfers to an unknown wallet. This is a product rule; see "Decisions for Forge".
 
-### Part 6. Relay grants (TRN-02, D51 5)
+### Part 6. Relay grants (TRN-02, D51 5, D53 1)
 
-1. The quota counts **held** uploads: a reservation whose service deadline has not passed and has no
-   receipt, or custody whose pins are neither released nor past their horizon. Receipt and deadline
-   release a reservation; a lapsed horizon stops counting custody. Not counting is not deleting: the
-   bytes stay pinned until the master-signed release, no signed promise is dropped.
-2. The default is **no count cap**; the physical limit is the journal, one JSON blob of at most 16 MiB
-   rewritten whole on every mutation. `accept` refuses with `relay journal capacity exhausted` before a
-   mutation would take the journal above a 12 MiB budget (4 MiB headroom for chunk acks, receipts,
-   retrievals, extensions and releases). `RelayConfig.max_uploads` is an optional operator knob.
-   `ready()` no longer depends on the count: the exit path (release, extension, retrievals, chunk PUTs)
-   goes through the same Service, so a quota that turns `/readyz` false removes the means of clearing it.
-   **Record size and estimate for a run of 16 miners or more [V measured]:** a record is about 4.2 KB
-   fixed plus 0.234 KB per roster entry plus 1.1 KB per chunk plus about 1.0 KB for the receipt; a
-   16-miner round with one-chunk deltas is about 10 KB per record and 160 KB per round, so the 12 MiB
-   budget holds about 1,200 records, i.e. 75 rounds, before the first release; at 32 miners about 13 KB
-   per record and 30 rounds; a 2 GiB delta (512 chunks) is about 580 KB per record and about 28 records.
-   The held-upload accounting does not shorten that window by itself (custody lives until the horizon,
-   about 10 hours); the release path and pruning of point 3 are what keep the steady state flat, and the
-   journal guard is the backstop that turns exhaustion into a clear refusal instead of a stuck journal.
-3. The reclaim path is wired: a public, read-only master route returns a coordinator-signed
-   `RelaySettlementView` (built from `relay_settlement_v2`), the relay verifies it with
-   `master_message` and feeds the existing `settlement` callback; no admin credential enters the relay.
-   **What the view exposes (D51 3):** the grant hash, the finality hash, the finality beacon, the closed
-   dispute root, the closed beacon and the vesting beacon; no hotkey, no coldkey, no origin id, no roster.
-   The finality hash was an input of the origin-id derivation; origin ids are keyed (Part 1.9), so
-   publishing it no longer helps to compute one. The route is addressed by the grant hash, which only the
-   miner, the relay and the master hold. Spent records (all pins released and past `delete_after`, or a
-   reservation with no custody past its deadline) are pruned at the end of `collect()`, which a periodic
-   task now calls. Who releases a grant is still an operator action (`POST .../admin/relay/{grant}/release`).
-4. Rejected: renewal of the 64 grants (a new wire message that refreshes a number with no physical
+The rule (D53 1): an unattended run must never block on the relay journal, and nothing in the path
+needs an operator. Four mechanisms, each in its own commit, in this order.
+
+1. **The quota counts held uploads and slides (A).** An upload is held while it is a reservation
+   (service deadline not passed, no receipt) or custody (pins neither released nor lapsed). Receipt and
+   deadline release a reservation; a lapsed horizon stops counting custody. The count cap is optional
+   (`RelayConfig.max_uploads`); the default is none, because the physical limit is the journal. `ready()`
+   no longer depends on the count: the exit path (release, extension, retrievals, chunk PUTs) goes through
+   the same Service, so a quota that turns `/readyz` false removes the means of clearing it.
+2. **The journal budget is a guard, an alarm and a size (A).** The journal is one JSON blob of at most
+   16 MiB rewritten whole on every mutation. `accept` refuses with `relay journal capacity exhausted`
+   before a mutation would take it above a 12 MiB budget (4 MiB headroom for chunk acks, receipts,
+   retrievals, extensions and releases). `/readyz` and a log line report the fill ratio and raise an
+   **alarm above 80 %** (9.6 MiB); the runbook says what to do (below). **Sizing, measured [V]:** a record
+   is about 4.2 KB fixed plus 0.234 KB per roster entry plus 1.1 KB per chunk plus 1.0 KB for the receipt,
+   so about 10 KB at 16 miners and 13 KB at 32 miners with one-chunk deltas; a round is 335 beacons, about
+   16.75 minutes; custody lives to its horizon, about 10 hours or 36 rounds. **With the rotation of point 4
+   (records leave at their horizon) the steady state is 16 miners × 36 rounds × 10 KB = 5.8 MB, 48 % of the
+   budget; at 32 miners it is 15 MB, 125 %, so a run of 32 miners needs the early release of point 3.** A
+   2 GiB delta (512 chunks) is about 580 KB per record.
+3. **Release is automatic (B, D).** The relay learns what the master settled from a public, read-only,
+   coordinator-signed `RelaySettlementView` (B) and feeds the existing `settlement` callback; no admin
+   credential enters the relay. **What the view exposes (D51 3):** the grant hash, the finality hash, the
+   finality beacon, the closed dispute root, the closed beacon and the vesting beacon; no hotkey, no
+   coldkey, no origin id, no roster. The finality hash was an input of the origin-id derivation; origin
+   ids are keyed (Part 1.9), so publishing it no longer helps to compute one. The master then releases
+   without an operator (D): a periodic task of the master lists the grants that have a durable receipt and
+   no `relay-release` record and calls the existing release path (`relay_control_v2`, which already
+   refuses before vesting, dispute closure and the epoch grace) for each that is due. A grant is thus
+   released a round or two after its finality instead of at its horizon, and the steady state at 32 miners
+   is about three rounds of records (1.2 MB). `POST .../admin/relay/{grant}/release` stays for the operator.
+4. **Rotation by age, and pruning (C).** `collect()` runs from a periodic task in the relay. A pin whose
+   horizon is past by the epoch grace (100 beacons) with no extension is **lapsed**: the signed promise
+   has ended (a retrieval is only valid until `min(requested + 10, horizon)` and an extension only before the
+   horizon, so nothing can use the bytes any more), and the object is deleted and the record pruned like a
+   released one, with no release. A round that closes without a reward never settles, so its grants are
+   never released; age is what frees them. Spent records are pruned only when no live record or in-flight
+   publication needs the same object. This changes the earlier rule "bytes stay pinned until a release":
+   after the signed horizon plus the grace the relay owes nothing.
+5. **Runbook (docs).** Alarm: `journal_fill > 0.8` on `/readyz` or the log line. First check that the
+   master's release task runs (`relay-release` records appear one or two rounds after finality). If it
+   does and the fill still rises, the run is larger than the journal: add a relay to the signed registry
+   (required before any run of 16 miners or more, D51 5). Do not raise the budget above 12 MiB (the
+   16 MiB wall bricks every mutation, including release).
+6. Rejected: renewal of the 64 grants (a new wire message that refreshes a number with no physical
    meaning); spreading assignments (production has one relay [A], and `assignment_policy` is a literal
    pinned in nine places); embedding the settlement fields in `CustodyRelease` (smaller, but removes the
-   cross-check against the master's current record); deleting lapsed unreleased records (their bytes
-   would leak with no record to release them). A second relay in the signed registry is needed before
-   any run of 16 miners or more, not before the off-chain proof (D51 5).
+   cross-check against the master's current record); keeping lapsed bytes pinned for ever (it is what makes
+   an unattended relay fill up). Not done: automatic **extension** of custody while a dispute is open
+   (still an operator action, `POST .../admin/relay/{grant}/extend`); an unattended run that has an open
+   dispute at the horizon loses that custody.
 
 ### Part 7. Shadow maturity is failure-isolated (F6, CL-14)
 
@@ -304,9 +332,10 @@ envelope with an expiry that the server bounds. Four header signatures exist; al
 the dispute watch (`X-Dispute-Signature`, SIG-01/DSP-09), the trial job (`X-Trial-Signature`), the object
 upload (`X-Object-Signature`, `PUT /v2/runs/{run}/objects/{sha}`) and the challenge GET that ADR 0010
 decision 3 adds. This lot converts the first three. The fourth is owned by `v3-admission-hardening`
-(RTA-04), whose code is not in this base: **ADR 0010 decision 3 is amended by this ADR**: the challenge
-request is a `POST` whose body is a signed envelope, not a `GET` with two headers, and the branch must follow
-before it merges. The dispute watch also gets a per-party and a total bound on concurrent long polls, on its own
+(RTA-04), whose code is not in this base. ADR 0010 decision 3 and its open proxy question (0010 lines
+121, 137-145 and 373) are **amended by their own lot, on instruction**: the challenge request is a `POST`
+whose body is a signed envelope, not a `GET` with two headers. This ADR keeps only the rule and this
+cross-reference. The dispute watch also gets a per-party and a total bound on concurrent long polls, on its own
 thread pool. Other IMPORTANT items follow in their own commits and are recorded in the report with their sibling
 status: HTP-07 (the observer challenge is handed back until answered; the pin id carries the round), ADM-04
 (no store lock on the event loop before the signature check; the anonymous relay-receipt route too),
@@ -327,7 +356,8 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
   `docs/OPERATOR_SECURITY.md` already say). HTTP gains `OPEN_LOCK_CAP`, `LEDGER_LOCK_CAP`, `SELF_TRANSFER`,
   `ESCROW_QUOTA`, `UNKNOWN_RECIPIENT`, `CONTEST_LOCK_ID_COLLISION` (all 409) and 429 on the dispute watch;
   the watch, trial job and object upload change from header-signed requests to body envelopes. The relay
-  gains one message type and one public GET; an old relay still fails `release` closed.
+  gains one message type and one public GET, a periodic collect task and a fill report on `/readyz`; the
+  master gains a periodic release task; an old relay still fails `release` closed.
 - `sources()` of `network_qualification` changes like for any source edit; stored qualification
   configs validate against their own frozen tree.
 - A chain that already holds an early release of an open dispute's bond (the F4 evasion happened)
@@ -339,13 +369,14 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
 1. **ESC-D5.** Accept the residual of Part 1.10, or approve owner-scoped client keys (a bigger change in
    four consumers, a hashed function and the outbox key) and a CLI lock id derived with a secret.
 2. **F7b structural.** Approve (or refuse) the digest-in-preimage scheme with 1,000-event checkpoints.
-3. **Caps and quota.** 64 open admission locks per coldkey and 4,096 in the ledger; escrow burst 16 per
-   window; the `UNKNOWN_RECIPIENT` rule.
+3. **Caps and quota.** 2,048 open admission locks per coldkey, 4,096 in the ledger, a minimum lock of a
+   tenth of the funding floor, escrow burst 2,048 per window; the `UNKNOWN_RECIPIENT` rule.
 4. **Early-release chain** (Context): is a repair needed for a chain that already released a bond?
 
-Decided by Forge in D52 and applied above, not asked: no header signatures (I1), origin ids not
-enumerable (I2), continuity pin and fail-closed (I3), the server key space enforced by type (I4), one rule
-for `FINALIZE_ORDER` in ADR 0011 (m2), caps and burst (m1), the journal estimate (m3).
+Decided by the Principal SN100 (D52, D53) and applied above, not asked: no header signatures, origin ids not
+enumerable, continuity pin and fail-closed, the server key space enforced by type, no unkeyed mode, one rule
+for `FINALIZE_ORDER` in ADR 0011, caps with a minimum amount and a burst sized from the roster, an automatic
+release with an alarm and a runbook, the journal estimate.
 
 ## Not verified
 
