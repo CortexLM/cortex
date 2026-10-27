@@ -19,6 +19,8 @@ from .sandbox import (
     CHALLENGE,
     COMPOSE,
     EPOCH,
+    EXECUTOR_PATH,
+    EXECUTOR_VAR,
     MASTER,
     NEW_ID,
     NEW_REF,
@@ -378,6 +380,30 @@ def test_rollback_fails_unless_the_challenge_is_back_on_the_old_image(
     box.run(*call("swap", backup), mutates={CHALLENGE})
     box.docker(**{fault: True})
     assert message in box.run("rollback", backup, rc=rc, mutates=mutates).out
+
+
+# --- executor, executor-off -----------------------------------------------------------------
+
+
+def test_executor_adds_the_variable_to_the_challenge_alone_and_executor_off_drops_it(box, backup):
+    original = tree(backup)
+    out = box.run(*call("executor", backup), mutates={CHALLENGE}).out
+    assert box.env(CHALLENGE)[EXECUTOR_VAR] == EXECUTOR_PATH
+    assert box.env(CHALLENGE)["TZ"] == "UTC"  # the rest of its environment is kept
+    assert EXECUTOR_VAR not in box.env(BEACON)
+    assert f"changed ['services.challenge.environment.{EXECUTOR_VAR}']" in out
+    assert box.override.read_text() == (
+        f"services:\n  challenge:\n    environment:\n      {EXECUTOR_VAR}: {EXECUTOR_PATH}\n"
+    )
+    assert stat.S_IMODE(box.override.stat().st_mode) == 0o600
+    assert box.f.read_text() == COMPOSE  # the base file is never edited
+    assert not box.override.with_name("compose.executor.yml.new").exists()
+    assert {k: v for k, v in tree(backup).items() if k in original} == original
+
+    box.run("executor-off", backup, mutates={CHALLENGE})
+    assert not box.override.exists()
+    assert EXECUTOR_VAR not in box.env(CHALLENGE) and box.env(CHALLENGE)["TZ"] == "UTC"
+    assert box.f.read_text() == COMPOSE
 
 
 # --- restore-db -----------------------------------------------------------------------------

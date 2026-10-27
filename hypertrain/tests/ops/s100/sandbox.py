@@ -6,6 +6,11 @@ on s100. The sandbox runs a COPY with only those path prefixes rewritten into a 
 - `docker`: a stateful fake (docker.json: containers, images, flags) of exactly the shapes the
   script uses; any other shape fails. Every mutating call (up, stop, start, restart) is recorded
   with the container name it hit: the tests compare that set with the one the command may touch.
+  `compose -f A -f B ...` merges the files as compose does for the one override file the script
+  writes: `environment` (a list or a mapping) key by key, a mapping recursively, any other value
+  replaced by the later file; a service is valid once merged. A recreated container gets the
+  image environment overlaid with the merged `environment`. The flag `merge_patch` stands for a
+  compose that resolves two files differently from each alone: it is merged over the result.
 - `curl`: a URL map (urls.json) for the master gate and the challenge API; unknown URLs fail.
 - `python3`: the real interpreter, with `datetime.now` frozen for the seal-window code.
 - `sleep` (no-op), `install` (without -o/-g, which need root), and tripwires for exactly these
@@ -48,8 +53,10 @@ PROD_NAMES = (
 REPO = "ghcr.io/cortexlm/cortex/hypertrain"
 OLD_ID, NEW_ID, OTHER_ID, BEACON_ID = (f"sha256:{c * 32}" for c in ("0a", "1b", "0c", "2d"))
 OLD_REF, NEW_REF = f"{REPO}@{OLD_ID}", f"{REPO}@{NEW_ID}"
+EXECUTOR_PATH, EXECUTOR_VAR = "/data/executor/cuda-executor.json", "HYPERTRAIN_CUDA_EXECUTOR"
 NOW, EPOCH = "2026-10-27T12:00:00+00:00", 1000
 SECRET = "env-value-that-must-never-reach-a-backup"
+IMAGE_ENV = [f"HYPERTRAIN_ADMIN_TOKEN={SECRET}", "TZ=UTC"]  # what every container starts with
 SCRIPT_TEXT = SCRIPT.read_text()
 # Pinned here, not read from the script: the expected URLs must not follow an edit of the script.
 # API is the TEST challenge port (docs/s100-test-stack.md); MASTER is the production master the
@@ -113,22 +120,43 @@ def mutate(op, name):  # what the live DB looked like when the container was tou
     st["mutations"].append([op, name, seen])
 
 
-def services(path):
+def load(path):  # one compose file's services as written, `environment` as a mapping
     import yaml
     if not os.path.isabs(path) or not os.path.exists(path):
         done(1, "no configuration file provided: " + path)
     try:
         svcs = yaml.safe_load(open(path))["services"]
-    except (yaml.YAMLError, KeyError, TypeError) as e:
+        for spec in svcs.values():
+            env = spec.get("environment") or {}
+            if isinstance(env, list):
+                env = dict(e.split("=", 1) for e in env)
+            if env:
+                spec["environment"] = {k: str(v) for k, v in env.items()}
+    except (yaml.YAMLError, KeyError, TypeError, AttributeError) as e:
         done(1, "invalid compose file %s: %s" % (path, str(e).replace("\n", " ")))
+    return svcs
+
+
+def merge(base, over):
+    if not (isinstance(base, dict) and isinstance(over, dict)):
+        return over
+    return {**base, **{k: merge(base.get(k), v) for k, v in over.items()}}
+
+
+def services(paths):
+    svcs = {}
+    for path in paths:
+        svcs = merge(svcs, load(path))
+    if len(paths) > 1:
+        svcs = merge(svcs, st["merge_patch"])
     for name, spec in svcs.items():
         if "image" not in spec:
             done(1, "service %s has neither an image nor a build context" % name)
     return svcs
 
 
-def up(path, names):
-    svcs = services(path)
+def up(paths, names):
+    svcs = services(paths)
     for s in names:
         if s not in svcs:
             done(1, "no such service: " + s)
@@ -145,9 +173,10 @@ def up(path, names):
             done(1, "Error response from daemon: cannot start " + name)
         if not st["stale_up"]:  # compose recreated nothing: the old container keeps running
             started = "2026-10-27T12:00:%02dZ" % st["counter"]
+            env = dict(e.split("=", 1) for e in st["image_env"]) | svcs[s].get("environment", {})
             st["containers"][name] = {
                 "Name": "/" + name, "Image": st["images"][ref],
-                "Config": {"Image": ref, "Env": old["Config"].get("Env", [])},
+                "Config": {"Image": ref, "Env": ["%s=%s" % kv for kv in env.items()]},
                 "State": {"Status": "running", "StartedAt": started}, "RestartCount": 0}
         print(" Container %s  Started" % name, file=sys.stderr)
 
@@ -161,12 +190,15 @@ def render(fmt, c):
     return re.sub(r"\{\{\.([\w.]+)\}\}", field, fmt)
 
 
-if a[:2] == ["compose", "-f"] and a[3:6] == ["config", "--format", "json"] and len(a) == 6:
+files, rest = [], a[1:]  # `compose -f A [-f B ...] CMD ...`
+while a[0] == "compose" and rest[:1] == ["-f"] and len(rest) > 1:
+    files, rest = files + [rest[1]], rest[2:]
+if files and rest == ["config", "--format", "json"]:
     # as compose does: a service whose profile is off is left out of config (up still starts it)
-    active = {n: v for n, v in services(a[2]).items() if "profiles" not in v}
+    active = {n: v for n, v in services(files).items() if "profiles" not in v}
     print(json.dumps({"name": "hypertrain-test", "services": active}))
-elif a[:2] == ["compose", "-f"] and a[3:6] == ["up", "-d", "--no-deps"] and len(a) > 6:
-    up(a[2], a[6:])
+elif files and rest[:3] == ["up", "-d", "--no-deps"] and len(rest) > 3:
+    up(files, rest[3:])
 elif a[0] == "inspect" and len(a) == 4 and a[2] == "--format" and a[3] in FORMATS:
     if a[1] not in st["containers"]:
         done(1, "Error: No such object: " + a[1])
@@ -298,8 +330,11 @@ def sandboxed(text: str, root: Path) -> str:
 
 
 def call(cmd: str, backup: Path) -> tuple[str, ...]:
-    """The arguments of `cmd` for a backup directory (swap also takes the new image)."""
-    return ("swap", NEW_REF, str(backup)) if cmd == "swap" else (cmd, str(backup))
+    """The arguments of `cmd` for a backup directory (swap also takes the new image, executor the
+    path of its config inside the container)."""
+    if cmd == "swap":
+        return ("swap", NEW_REF, str(backup))
+    return (cmd, str(backup), EXECUTOR_PATH) if cmd == "executor" else (cmd, str(backup))
 
 
 def make_db(path: Path, rows: tuple[str, ...]) -> None:
@@ -319,11 +354,10 @@ def rows(path: Path) -> list[str]:
 
 
 def container(name: str, image_id: str) -> dict:
-    env = [f"HYPERTRAIN_ADMIN_TOKEN={SECRET}", "TZ=UTC"]
     return {
         "Name": "/" + name,
         "Image": image_id,
-        "Config": {"Image": OLD_REF, "Env": env},
+        "Config": {"Image": OLD_REF, "Env": list(IMAGE_ENV)},
         "State": {"Status": "running", "StartedAt": "t0"},
         "RestartCount": 0,
     }
@@ -343,6 +377,7 @@ class Box:
         self.t = root / "root/backups/hypertrain-test"
         self.f = self.t / "compose.test.yml"
         self.new = self.t / "compose.test.yml.new"
+        self.override = self.t / "compose.executor.yml"
         self.state_dir = root / "data/hypertrain-test/state"
         self.relay_json = root / "data/relay/config/relay.json"
         self.stub_json = root / "data/hypertrain-test/config/metagraph.json"
@@ -373,6 +408,8 @@ class Box:
                 "counter": 0,
                 "fail_up": False,
                 "stale_up": False,
+                "image_env": IMAGE_ENV,
+                "merge_patch": {},
                 "mutations": [],
                 "calls": [],
                 "logs": "beacon: pushed round 1",
@@ -452,13 +489,23 @@ class Box:
     def container(self, name: str) -> dict:
         return self.docker()["containers"][name]
 
+    def env(self, name: str) -> dict[str, str]:
+        """The environment a container runs with."""
+        return dict(e.split("=", 1) for e in self.container(name)["Config"]["Env"])
+
     def live_yaml(self) -> dict:
         return yaml.safe_load(self.f.read_text())
 
     def snapshot(self) -> dict[str, object]:
-        """Digest of every live file the script may write, and whether it left a $F.new."""
+        """Digest of every live file the script may write, whether it left a $F.new, and the
+        executor override with its .new (None: no such file)."""
         files = [self.f, self.relay_json, self.stub_json, *self.state_dir.glob("*.db")]
-        return {p.name: digest_of(p) for p in files} | {"compose.new": self.new.exists()}
+        pending = self.override.with_name(self.override.name + ".new")
+        return {p.name: digest_of(p) for p in files} | {
+            "compose.new": self.new.exists(),
+            "override": digest_of(self.override) if self.override.exists() else None,
+            "override.new": pending.exists(),
+        }
 
     def run(
         self,
