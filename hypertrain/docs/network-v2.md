@@ -193,6 +193,19 @@ spent hotkey stay; the pending place and the coldkey are released, so the miner 
 again with a new hotkey. Only `APPLIED_EXPIRED` rows are ignored by the one-non-`ACTIVE`-row
 rule; every other non-`ACTIVE` row still blocks its coldkey. A funded row is never touched.
 
+The policy may also set `max_unfunded_per_prefix` (1 to 32; absent by default and then
+omitted from the digest, so every earlier policy digest and run id is unchanged). `join`
+then answers `PREFIX_PENDING_CAPACITY` when the /24 (IPv4) or /64 (IPv6) of the caller already
+holds that many unfunded `APPLIED` rows; funded rows and later states do not count, so an
+operator who funds right after joining is never refused. The prefix is kept as a tag keyed by
+the coordinator's secret, not bound to the quota epoch, in the table `admission_origin`
+(created on open; a database from before it has no tags and counts nothing). A run that sets
+the field has a new policy digest and a new run id, and an image without the field refuses
+its policy (`extra='forbid'`), so the challenge image ships first. Enable it only once the
+challenge container sees real client addresses: behind a proxy every client may share one
+prefix, and the cap becomes a global cap on unfunded newcomers. A first value to try is
+`join_burst` (4).
+
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
 rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
 refused (`CHALLENGE_EXPIRED`) once more than `challenge_rounds` rounds have passed since

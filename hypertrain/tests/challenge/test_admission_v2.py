@@ -430,6 +430,112 @@ def test_reaped_coldkey_can_apply_again_but_other_suspensions_still_block_it(
     assert open_trials(a) == 0
 
 
+def capped_setup(cap: int) -> Setup:
+    """The test setup with the optional per-prefix cap on unfunded applications."""
+    base = setup()
+    policy = base.admission_policy.model_copy(update={"max_unfunded_per_prefix": cap})
+    body = base.manifest.body()
+    body["network"]["admission_policy_hash"] = digest(policy)
+    return replace(base, manifest=RunManifestV2.model_validate(body), admission_policy=policy)
+
+
+def join_from(a: Admission, s: Setup, index: int, now: int, prefix: str, cold=None):
+    from hypertrain.protocol.keys import Keypair
+
+    hot = HOT if index == 0 else Keypair(bytes([100 + index]) * 32)
+    cold = cold or (COLD if index == 0 else Keypair(bytes([140 + index]) * 32))
+    request_id = f"{index + 1:02x}" * 32
+    return a.join(canonicalize(request(s, request_id, hot, cold).body()), now=now, ip_prefix=prefix)
+
+
+def test_prefix_cap_counts_only_unfunded_applied_rows_of_that_prefix(tmp_path: Path) -> None:
+    # Given: at most 2 unfunded applications per prefix
+    s = capped_setup(2)
+    a = service(s, tmp_path)
+    first = join_from(a, s, 0, 1, "203.0.113.0/24").admission_id
+    join_from(a, s, 1, 1, "203.0.113.0/24")
+    # When / Then: a third from the same prefix is refused and leaves nothing behind
+    with pytest.raises(AdmissionError, match="PREFIX_PENDING_CAPACITY"):
+        join_from(a, s, 2, 1, "203.0.113.0/24")
+    assert a.store.db.execute("SELECT COUNT(*) FROM admissions_v2").fetchone()[0] == 2
+    assert a.store.db.execute("SELECT COUNT(*) FROM admission_origin").fetchone()[0] == 2
+    # another prefix is not affected
+    assert join_from(a, s, 2, 1, "198.51.100.0/24").state == "APPLIED"
+    # a funded application does not count: it paid for its place
+    origin, _ = fund(a.escrow)
+    op = EscrowLock(
+        operation_id="22" * 32,
+        owner=COLD.ss58,
+        units=1000,
+        origin_ids=[origin],
+        admission_id=first,
+        dispute_id=None,
+        kind="LOCK_ADMISSION",
+    )
+    a.lock(canonicalize(seal(COLD, "EscrowLock", a.escrow.run_id, op, 500)), now=1)
+    assert join_from(a, s, 3, 1, "203.0.113.0/24").state == "APPLIED"
+    # and the same joins pass where the policy sets no cap
+    free = setup()
+    (tmp_path / "free").mkdir()
+    b = service(free, tmp_path / "free")
+    for index in range(4):
+        join_from(b, free, index, 1, "203.0.113.0/24")
+
+
+def test_prefix_cap_survives_restart_and_epoch_rollover_then_frees_with_the_window(
+    tmp_path: Path,
+) -> None:
+    from hypertrain.protocol.keys import Keypair
+
+    # Given: two unfunded applications at round 999, the last round of quota epoch 0
+    # (work_screen_epoch_rounds is 1000 in this setup); their window runs to round 1100.
+    s = capped_setup(2)
+    a = service(s, tmp_path)
+    for index in range(2):
+        join_from(a, s, index, 999, "203.0.113.0/24", cold=Keypair(bytes([150 + index]) * 32))
+    tags = [r[0] for r in a.store.db.execute("SELECT prefix_tag FROM admission_origin")]
+    assert len(set(tags)) == 1 and "203.0.113" not in tags[0]
+    # the tag is keyed by the coordinator's secret, so it names the prefix to nobody else
+    other = Admission(
+        a.escrow,
+        s.admission_policy,
+        COORD,
+        beacon=a.beacon,
+        stage_reference=a.stage_reference,
+        objects=a.objects,
+        ip_secret=b"another-secret",
+        qualified=a.qualified,
+        conservative_bound=a.conservative_bound,
+        backend="cpu",
+    )
+    assert other._prefix_tag("203.0.113.0/24") != tags[0]
+    assert a._prefix_tag("203.0.113.0/24") == tags[0] != a._prefix_tag("198.51.100.0/24")
+    # When: the service restarts and a third arrives in epoch 1, rows still alive
+    restored = service(s, tmp_path)
+    with pytest.raises(AdmissionError, match="PREFIX_PENDING_CAPACITY"):
+        join_from(restored, s, 2, 1001, "203.0.113.0/24")
+    # Then: once the window is over the rows are retired, the tag goes with them, the cap frees
+    joined = join_from(restored, s, 2, 1101, "203.0.113.0/24")
+    assert joined.state == "APPLIED"
+    assert restored.store.db.execute("SELECT COUNT(*) FROM admission_origin").fetchone()[0] == 1
+
+
+def test_database_without_origin_table_gets_it_and_counts_nothing(tmp_path: Path) -> None:
+    # Given: an application accepted before the table existed (a database of an older version)
+    s = capped_setup(2)
+    a = service(s, tmp_path)
+    join_from(a, s, 0, 1, "203.0.113.0/24")
+    a.store.db.execute("DROP TABLE admission_origin")
+    # When: the service opens it again
+    restored = service(s, tmp_path)
+    # Then: the table is back and the legacy row counts against no prefix
+    assert restored.store.db.execute("SELECT COUNT(*) FROM admission_origin").fetchone()[0] == 0
+    join_from(restored, s, 1, 2, "203.0.113.0/24")
+    join_from(restored, s, 2, 2, "203.0.113.0/24")
+    with pytest.raises(AdmissionError, match="PREFIX_PENDING_CAPACITY"):
+        join_from(restored, s, 3, 2, "203.0.113.0/24")
+
+
 def test_poll_after_deadline_keeps_miner_whose_proof_is_accepted(tmp_path: Path) -> None:
     # Given: a proof accepted on the last round of the window; its finalization has not run
     # (the proof route commits the proof and the finalization in two transactions).

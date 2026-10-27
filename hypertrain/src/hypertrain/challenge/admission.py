@@ -171,6 +171,11 @@ class Admission:
             ).fetchone()[0]
             if count >= self.policy.max_pending:
                 raise AdmissionError("PENDING_CAPACITY")
+            tag = self._prefix_tag(ip_prefix)
+            if tag is not None and self._unfunded_in_prefix(tag) >= (
+                self.policy.max_unfunded_per_prefix or 0
+            ):
+                raise AdmissionError("PREFIX_PENDING_CAPACITY")
             for identity in (request.hotkey, request.coldkey):
                 self.store.quota(identity, now, self.policy.join_per_beacon, self.policy.join_burst)
             epoch = now // self.policy.work_screen_epoch_rounds
@@ -203,8 +208,32 @@ class Admission:
                 "INSERT INTO admission_history VALUES(?,?,?)",
                 (request.hotkey, admission_id, request.coldkey),
             )
+            if tag is not None:
+                self.store.db.execute(
+                    "INSERT INTO admission_origin VALUES(?,?)", (admission_id, tag)
+                )
             self.store.reserve(key, request_hash, admission_id)
             return self.store.by_id(admission_id)
+
+    def _prefix_tag(self, ip_prefix: str) -> str | None:
+        """Coordinator-keyed tag of the /24 or /64, only when the policy caps unfunded rows.
+
+        Not bound to the quota epoch, so the cap survives the epoch rollover; keyed, so the
+        stored tag does not reveal the prefix.
+        """
+        if self.policy.max_unfunded_per_prefix is None:
+            return None
+        message = f"admission-prefix|{self.escrow.run_id}|{ip_prefix}".encode()
+        return hmac.digest(self.ip_secret, message, "sha256").hex()
+
+    def _unfunded_in_prefix(self, tag: str) -> int:
+        rows = self.store.db.execute(
+            "SELECT a.admission_id,a.coldkey FROM admission_origin o "
+            "JOIN admissions_v2 a ON a.admission_id=o.admission_id "
+            "WHERE o.prefix_tag=? AND a.state='APPLIED'",
+            (tag,),
+        ).fetchall()
+        return sum(self._unfunded(row["admission_id"], row["coldkey"]) for row in rows)
 
     def reap_dead_applications(self, *, now: int) -> list[str]:
         """Suspend as APPLIED_EXPIRED every APPLIED row that cannot progress and holds no stake.
@@ -226,11 +255,15 @@ class Admission:
             ).fetchall()
             reaped = []
             for row in dead:
-                units, _ = self.escrow.locked(row["admission_id"], row["coldkey"])
-                if units == 0 and not self.store.pending_outbox(row["admission_id"]):
+                if self._unfunded(row["admission_id"], row["coldkey"]):
                     self.store.transition(row["admission_id"], "SUSPENDED", "APPLIED_EXPIRED", now)
                     reaped.append(str(row["admission_id"]))
             return reaped
+
+    def _unfunded(self, admission_id: str, coldkey: str) -> bool:
+        """No locked unit and no lock waiting in the outbox."""
+        units, _ = self.escrow.locked(admission_id, coldkey)
+        return units == 0 and not self.store.pending_outbox(admission_id)
 
     def reap_expired_trials(self, *, now: int) -> list[int]:
         """Close every OPEN trial with no accepted proof whose deadline has passed.
