@@ -33,7 +33,14 @@ from hypertrain.data.trial_assignment import trial_assignment_hash, trial_sample
 from hypertrain.gpu_ops.work_screen import IslandLaunch, screen_work
 from hypertrain.ledger.escrow_v2 import EscrowError, EscrowV2, Settlement, digest
 from hypertrain.protocol.envelope import body_digest
-from hypertrain.protocol.envelope_v2 import Intake, load_json, parse_envelope, seal, verify_join
+from hypertrain.protocol.envelope_v2 import (
+    Intake,
+    load_json,
+    parse_envelope,
+    seal,
+    verify_join,
+    verify_rotate,
+)
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
@@ -1060,6 +1067,12 @@ class Admission:
             return self.status(hotkey, now=now)
 
     def rotate(self, raw: bytes, *, now: int) -> AdmissionRecord:
+        """Move an admission to another hotkey, with the consent of both keys.
+
+        The coldkey of the admission seals the envelope; the new hotkey signed the body
+        (`new_hot_sig`), as a joining hotkey does. A new rotation, never a replay, is charged to
+        `join_burst` per coldkey per `work_screen_epoch_rounds`; a banned admission cannot rotate.
+        """
         self._beacon(now)
         env = parse_envelope(raw)
         if env.type != "RotateRequest":
@@ -1074,18 +1087,31 @@ class Admission:
             Intake(self.escrow.run_id, {"RotateRequest": lambda s: s == history["coldkey"]}).accept(
                 raw, now
             )
+            if not verify_rotate(op, history["coldkey"], self.escrow.run_id, env.exp_drand):
+                raise AdmissionError("ROTATION_CONSENT")
             key = f"rotate|{op.operation_id}"
+            # sr25519 signatures are randomized: the replay digest leaves the consent out
+            request_hash = body_digest(op.model_dump(mode="json", exclude={"new_hot_sig"}))
             old = self.store.db.execute(
                 "SELECT * FROM admission_reservations WHERE reservation=?", (key,)
             ).fetchone()
             if old:
-                self.store.reserve(key, body_digest(env.body), old["receipt"])
+                self.store.reserve(key, request_hash, old["receipt"])
                 return self.store.by_id(history["admission_id"])
             r = self.store.record(op.hotkey)
             if self.store.db.execute(
                 "SELECT 1 FROM admission_history WHERE hotkey=?", (op.new_hotkey,)
             ).fetchone():
                 raise AdmissionError("NEW_HOTKEY_HISTORY")
+            if r.state == "BANNED":
+                raise AdmissionError("TERMINAL_BANNED")
+            self.store.quota(
+                f"rotate:{r.coldkey}:{now // self.policy.work_screen_epoch_rounds}",
+                now,
+                0,
+                self.policy.join_burst,
+                code="ROTATION_QUOTA",
+            )
             self.store.db.execute(
                 "UPDATE admissions_v2 SET hotkey=? WHERE admission_id=? AND hotkey=?",
                 (op.new_hotkey, r.admission_id, op.hotkey),
@@ -1094,7 +1120,7 @@ class Admission:
                 "INSERT INTO admission_history VALUES(?,?,?)",
                 (op.new_hotkey, r.admission_id, r.coldkey),
             )
-            self.store.reserve(key, body_digest(env.body), r.admission_id)
+            self.store.reserve(key, request_hash, r.admission_id)
             return self.store.by_id(r.admission_id)
 
     def suspend(

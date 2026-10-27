@@ -2627,11 +2627,18 @@ def test_unfunded_lock_cannot_create_collateral(network):
 
 
 def test_cross_run_signed_rotation_rejects(network):
-    from hypertrain.protocol.messages_v2 import RotateRequest
+    from hypertrain.miner.admission import sign_rotation_consent
 
     # Given
     network.join()
-    request = RotateRequest(hotkey=HOT[0].ss58, new_hotkey=REFEREE.ss58, operation_id="ae" * 32)
+    request = sign_rotation_consent(
+        REFEREE,
+        run_id="ff" * 32,
+        coldkey=COLD[0].ss58,
+        hotkey=HOT[0].ss58,
+        operation_id="ae" * 32,
+        expires_beacon=100,
+    )
     # When
     response = network.client.post(
         network.url + "/admission/" + HOT[0].ss58 + "/rotate",
@@ -2753,7 +2760,7 @@ def test_stale_beacon_preserves_pause_before_join_identity(network):
 
 def test_rotation_and_status_never_call_dense_allocator(network, monkeypatch):
     import hypertrain.aggregator.weighted_v2 as weighted
-    from hypertrain.miner.admission import sign_rotation
+    from hypertrain.miner.admission import sign_rotation, sign_rotation_consent
 
     # Given
     identity = network.join().json()["admission_id"]
@@ -2764,12 +2771,17 @@ def test_rotation_and_status_never_call_dense_allocator(network, monkeypatch):
     )
     # When
     status = network.client.get(network.url + "/admission/" + HOT[0].ss58)
-    from hypertrain.protocol.messages_v2 import RotateRequest
-
     rotate = sign_rotation(
         COLD[0],
         network.manifest.run_id(),
-        RotateRequest(hotkey=HOT[0].ss58, new_hotkey=REFEREE.ss58, operation_id="df" * 32),
+        sign_rotation_consent(
+            REFEREE,
+            run_id=network.manifest.run_id(),
+            coldkey=COLD[0].ss58,
+            hotkey=HOT[0].ss58,
+            operation_id="df" * 32,
+            expires_beacon=1000,
+        ),
         1000,
     )
     response = network.client.post(
