@@ -6727,6 +6727,14 @@ class ChallengeStore:
                 ):
                     continue
                 identity = f"{candidate['w']}:{candidate['hotkey']}"
+                if (
+                    self._db.execute(
+                        "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='leaves' AND id=?",
+                        (run_id, identity),
+                    ).fetchone()
+                    is None
+                ):
+                    continue  # leaves have no deadline: leasable once posted, never blocking
                 commit_env = self._record_v2(run_id, "commit", identity)
                 leaves_record = self._record_v2(run_id, "leaves", identity)
                 leaves = json.loads(self.objects.get(str(leaves_record["object"])))

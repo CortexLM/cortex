@@ -11,7 +11,9 @@ from hypertrain.challenge.store import ChallengeError
 from hypertrain.protocol.hashing import sha256_hex
 
 from .audit_lease_fixture_v2 import (
+    AUDITOR_A,
     D_AUDIT,
+    lease,
     network,  # noqa: F401  (pytest fixture import)
     seed_round,
 )
@@ -117,3 +119,22 @@ def test_the_delta_stage_leaves_out_only_audited_members_that_are_not_excluded(n
     assert seen[f"0:{keys[0].ss58}"]["stage"] == "delta"
     assert seen[f"0:{keys[1].ss58}"] == unverified
     assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 5
+
+
+def test_a_job_without_leaves_does_not_starve_the_audits_behind_it(network):
+    store, run = network.store, network.manifest.run_id()
+    keys = seed_round(network, n=5)
+    order = sorted(job_id(run, k.ss58) for k in keys)
+    stuck = next(k for k in keys if job_id(run, k.ss58) == order[0])
+    network.push(D_AUDIT)
+    store.schedule_audits_v2(run, 0)
+    with store._tx():
+        store._db.execute(
+            "DELETE FROM records_v2 WHERE run_id=? AND kind='leaves' AND id=?",
+            (run, f"0:{stuck.ss58}"),
+        )
+
+    response = lease(network, AUDITOR_A, 1)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["body"]["job_id"] == order[1]
