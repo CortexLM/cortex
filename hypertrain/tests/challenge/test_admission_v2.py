@@ -534,7 +534,7 @@ def test_prefix_cap_survives_restart_and_epoch_rollover_then_frees_with_the_wind
         beacon=a.beacon,
         stage_reference=a.stage_reference,
         objects=a.objects,
-        ip_secret=b"another-secret",
+        ip_secret=b"second-prefix-key",
         qualified=a.qualified,
         conservative_bound=a.conservative_bound,
         backend="cpu",
