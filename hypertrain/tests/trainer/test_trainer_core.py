@@ -41,6 +41,7 @@ from hypertrain.trainer.rng import philox4x32, rng_ctr
 
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parents[1] / "src" / "hypertrain" / "trainer"
+MODELS = SRC.with_name("models")
 WORKER = HERE / "_worker.py"
 CHILD_ENV = {k: v for k, v in os.environ.items() if k != "CUBLAS_WORKSPACE_CONFIG"}
 
@@ -417,17 +418,25 @@ def test_philox_known_answer_vectors() -> None:
 
 
 def test_forbidden_constructs_absent() -> None:
-    forbidden = re.compile(r"\b(topk|index_add_?|scatter_add_?|compile|allclose|isclose)\(")
+    # index_put_ stays allowed with its default accumulate=False (the `x[idx] = v` assignments
+    # lower to it); only the accumulating form has an unpinned summation order. The arguments
+    # may hold two levels of nested parentheses and span lines.
+    args = r"(?:[^()]|\((?:[^()]|\([^()]*\))*\))*"
+    forbidden = re.compile(
+        r"\b(?:topk|index_add_?|scatter_add_?|scatter_reduce_?|compile|allclose|isclose)\("
+        rf"|\bindex_put_?\({args}\baccumulate\s*=\s*True\b"
+    )
     # S3 relaxation (owner decision recorded in checkpoint.md): exactly one torch.compile call,
     # in model._compiled_layer, reachable only under HT_COMPILE=1 (flag recorded by run_mfu).
     gated = "torch.compile(layer, dynamic=False)"
-    for path in SRC.glob("*.py"):
+    for path in [*SRC.glob("*.py"), *MODELS.rglob("*.py")]:
+        rel = path.relative_to(SRC.parent).as_posix()
         text = path.read_text()
-        if path.name == "model.py":
+        if rel == "trainer/model.py":
             assert text.count(gated) == 1 and 'os.environ.get("HT_COMPILE") == "1"' in text
             text = text.replace(gated, "")
         hits = forbidden.findall(text)
-        assert not hits, f"{hits} in {path.name}"
+        assert not hits, f"{hits} in {rel}"
 
 
 def test_leaf_batch_ids_sha256_matches_assigned_ids() -> None:

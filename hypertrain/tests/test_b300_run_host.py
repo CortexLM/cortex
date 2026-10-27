@@ -6,14 +6,17 @@ EC2 instance metadata over HTTP (session PUT, then spot/instance-action). No GPU
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -28,7 +31,7 @@ SESSION = "fake-imds-session"
 NOTICE = {"action": "terminate", "time": "2026-10-26T14:00:00Z"}
 
 FAKE_DOCKER = r"""
-import json, os, pathlib, sys, time
+import json, os, pathlib, re, sys, time
 argv = sys.argv[1:]
 state = pathlib.Path(os.environ["FAKE_STATE"])
 if os.environ.get("FAKE_NEEDS_SUDO") == "1" and os.environ.get("FAKE_SUDO") != "1":
@@ -36,23 +39,99 @@ if os.environ.get("FAKE_NEEDS_SUDO") == "1" and os.environ.get("FAKE_SUDO") != "
 with (state / "docker.jsonl").open("a") as f:
     f.write(json.dumps(argv) + "\n")
 cmd = argv[0]
+if cmd in os.environ.get("FAKE_DOCKER_FAIL", "").split(","):
+    sys.exit(f"Error response from daemon: {cmd} failed")
+if cmd in ("run", "pull"):
+    try:  # fd 9 is the flock of the results directory: a long-lived child must not hold it
+        os.fstat(9)
+        (state / "fd9-leaked").touch()
+    except OSError:
+        pass
+
+
+# Containers are state/ctr-<id> files holding {"name", "labels"}; <file>.stopped and <file>.removed
+# mark a container that exited or was removed. Looked up, filtered and destroyed like docker does.
+def containers():
+    for p in sorted(state.glob("ctr-*")):
+        if p.suffix not in (".stopped", ".removed", ".tmp"):
+            yield p, json.loads(p.read_text())
+
+
+def marker(p, kind):
+    return pathlib.Path(f"{p}.{kind}")
+
+
+def running(p):
+    return not marker(p, "stopped").exists() and not marker(p, "removed").exists()
+
+
+def find(ref):
+    hits = [(p, d) for p, d in containers() if ref in (p.name, d["name"]) and running(p)]
+    return hits[0] if hits else None
+
+
+def matches(doc, flt):
+    key, _, val = flt.partition("=")
+    if key == "label":
+        k, eq, v = val.partition("=")
+        return k in doc["labels"] and (not eq or doc["labels"][k] == v)
+    if key == "name":
+        return bool(re.search(val, doc["name"]) or re.search(val, "/" + doc["name"]))
+    sys.exit(f"Error response from daemon: invalid filter '{key}'")
+
+
+def destroy(ref, kind, rm=False):
+    hit = find(ref)
+    if hit is None:
+        print(f"Error response from daemon: No such container: {ref}", file=sys.stderr)
+        return 1
+    marker(hit[0], kind).touch()
+    if rm:
+        marker(hit[0], "removed").touch()
+    with (state / "destroyed.jsonl").open("a") as f:
+        f.write(json.dumps([kind, hit[0].name, hit[1]["name"]]) + "\n")
+    return 0
+
+
 if cmd == "info":
     print(state)
 elif cmd == "pull":
+    if os.environ.get("FAKE_PULL_SLEEP"):
+        (state / "pull.pid").write_text(str(os.getpid()))
+        time.sleep(float(os.environ["FAKE_PULL_SLEEP"]))
     sys.exit(int(os.environ.get("FAKE_PULL_RC", "0")))
 elif cmd == "image":
     print(json.dumps([os.environ.get("FAKE_REPO_DIGEST", argv[-1])]))
 elif cmd == "ps":
-    rid = argv[argv.index("--filter") + 1].rsplit("=", 1)[1]
-    for p in state.glob("ctr-*"):
-        if p.read_text() == rid and not p.with_suffix(".stopped").exists():
-            print(p.name)
+    every = any(a in ("-a", "--all", "-aq", "-qa") for a in argv[1:])
+    flts = [argv[i + 1] for i, a in enumerate(argv) if a == "--filter"]
+    for p, doc in containers():
+        if (every or running(p)) and not marker(p, "removed").exists():
+            if all(matches(doc, f) for f in flts):
+                print(p.name)
 elif cmd == "stop":
-    for cid in argv[3:]:
-        (state / cid).with_suffix(".stopped").touch()
+    args, skip = [], False
+    for a in argv[1:]:
+        if skip:
+            skip = False
+        elif a in ("-t", "--time"):
+            skip = True
+        else:
+            args.append(a)
+    sys.exit(max([destroy(ref, "stopped") for ref in args], default=0))
+elif cmd == "rm":
+    force = any(a in ("-f", "--force") for a in argv[1:])
+    refs = [a for a in argv[1:] if not a.startswith("-")]
+    sys.exit(max([destroy(ref, "stopped", rm=True) if force else 1 for ref in refs], default=0))
 elif cmd == "run":
-    name = argv[argv.index("--name") + 1].removeprefix("ht-b300-")
-    label = argv[argv.index("--label") + 1].split("=", 1)[1]
+    full = argv[argv.index("--name") + 1]
+    name = full.removeprefix("ht-b300-")
+    labels = dict(argv[i + 1].split("=", 1) for i, a in enumerate(argv) if a == "--label")
+    if find(full) is not None:
+        print(f'docker: Error response from daemon: Conflict. The container name "/{full}" is '
+              "already in use. You have to remove (or rename) that container to be able to "
+              "reuse that name.", file=sys.stderr)
+        sys.exit(125)
     mounts = dict(a.split(":")[:2] for a in argv if a.count(":") >= 1 and a.startswith("/"))
     out = pathlib.Path(next(h for h, c in mounts.items() if c == "/out"))
     # Resolve the program like python would: relative to -w, through the bind mounts.
@@ -66,18 +145,26 @@ elif cmd == "run":
         host = next((h + path[len(c):] for h, c in mounts.items() if path.startswith(c + "/")), "")
         if not pathlib.Path(host).is_file():
             sys.exit(f"python: can't open file {path!r}")
+    crash = os.environ.get("FAKE_CRASH", "")
+    if crash and (name == crash or (crash == "miner_prod" and name.startswith("miner-prod-"))):
+        sys.exit(1)  # dies before it writes any evidence
     if name == os.environ.get("FAKE_BLOCK"):
         ctr = state / f"ctr-{name}"
-        ctr.write_text(label)
-        while not ctr.with_suffix(".stopped").exists():
+        for kind in ("stopped", "removed"):
+            marker(ctr, kind).unlink(missing_ok=True)
+        part = pathlib.Path(f"{ctr}.tmp")  # published whole: a reader never sees it half written
+        part.write_text(json.dumps({"name": full, "labels": labels}))
+        os.replace(part, ctr)
+        while not marker(ctr, "stopped").exists():
             time.sleep(0.05)
-        sys.exit(143)
+        sys.exit(int(os.environ.get("FAKE_BLOCK_RC", "143")))
     if name == "gpu_probe":
         ok = os.environ.get("FAKE_GPU_OK", "1") == "1"
         (out / "gpu_probe.json").write_text(json.dumps({"ok": ok}))
         sys.exit(0 if ok else 1)
     if name == "mfu":
-        steps, w, tps, fpt, n, peak = [1.0, 1.0, 1.0], 1, 65536, 6 * 10**9, 8, 209.5e12
+        n = int(argv[argv.index("--nproc-per-node") + 1])
+        steps, w, tps, fpt, peak = [1.0, 1.0, 1.0], 1, 65536, 6 * 10**9, 209.5e12
         mfu = tps * 2 / 2.0 * fpt / (n * peak)
         root = "ab" * 32
         replay = root if os.environ.get("FAKE_REPLAY", "1") == "1" else "cd" * 32
@@ -85,8 +172,10 @@ elif cmd == "run":
               "flops_per_token": fpt, "n_gpus": n, "dp_size": n, "peak_vendor_flops": peak,
               "vendor": {"mfu": mfu, "tokens_per_s": tps}, "tokens_per_s": tps,
               "leaves_root": root, "replay_leaves_root": replay, "rank_leaves_roots": [root] * n,
-              "replay_match": replay == root, "attention_backend": "sdpa-flash",
-              "attention_paths": ["flash"], "gpu_name": "fake B300"}
+              "replay_match": replay == root,
+              "attention_backend": os.environ.get("FAKE_MFU_BACKEND", "sdpa-flash"),
+              "attention_paths": os.environ.get("FAKE_MFU_PATHS", "flash").split(","),
+              "gpu_name": "fake B300"}
         (out / argv[-1].removeprefix("/out/")).write_text(json.dumps(ev))
     elif name == "miner_test":
         result = os.environ.get("FAKE_SMOKE", "PASS")
@@ -104,14 +193,32 @@ elif cmd == "run":
 """
 
 FAKE_SMI = r"""
-import os, sys
+import os, sys, time
 if any(a.startswith("--query-gpu") for a in sys.argv):
+    if os.environ.get("FAKE_SMI_FAIL"):
+        sys.exit("NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver")
+    time.sleep(float(os.environ.get("FAKE_SMI_SLEEP", "0")))
     n, drv, cc = (os.environ.get(k, d) for k, d in
                   (("FAKE_GPUS", "8"), ("FAKE_DRIVER", "595.91.07"), ("FAKE_CC", "10.3")))
     for i in range(int(n)):
-        print(f"{i}, NVIDIA B300 SXM6 AC, {drv}, {cc}, 275040 MiB, 00000000:{i:02X}:00.0")
+        last = i == int(n) - 1  # FAKE_DRIVER_LAST / FAKE_CC_LAST: the last GPU differs
+        d = os.environ.get("FAKE_DRIVER_LAST", drv) if last else drv
+        c = os.environ.get("FAKE_CC_LAST", cc) if last else cc
+        print(f"{i}, NVIDIA B300 SXM6 AC, {d}, {c}, 275040 MiB, 00000000:{i:02X}:00.0")
 else:
     print("fake nvidia-smi table")
+"""
+
+# df -P -B1G PATH...: one row per path, Used from FAKE_DF_USED, Available from FAKE_DF_AVAIL
+# (comma separated, in path order; 500 when absent). Used is large on purpose.
+FAKE_DF = r"""
+import os, sys
+paths = [a for a in sys.argv[1:] if not a.startswith("-")]
+avail = os.environ.get("FAKE_DF_AVAIL", "").split(",")
+print("Filesystem 1G-blocks Used Available Capacity Mounted on")
+for i, _ in enumerate(paths):
+    free = int(avail[i]) if i < len(avail) and avail[i] else 500
+    print(f"/dev/fake{i} 1000G {os.environ.get('FAKE_DF_USED', '900')}G {free}G 50% /mnt/fake{i}")
 """
 
 FAKE_SUDO = r"""
@@ -124,17 +231,64 @@ if args[:1] == ["-n"]:
 os.execvpe(args[0], args, {**os.environ, "FAKE_SUDO": "1"})
 """
 
+# aws s3 cp --recursive SRC s3://DST with the CLI's filters: --exclude/--include are tried in order
+# on SRC/<relative path>, the last match wins, everything is included by default. The files that
+# pass are copied under state/s3/<bucket and key>.
 FAKE_AWS = r"""
-import json, os, pathlib, sys
-with (pathlib.Path(os.environ["FAKE_STATE"]) / "aws.jsonl").open("a") as f:
+import fnmatch, json, os, pathlib, shutil, sys, time
+state = pathlib.Path(os.environ["FAKE_STATE"])
+args = sys.argv[1:]
+with (state / "aws.jsonl").open("a") as f:
+    f.write(json.dumps(args) + "\n")
+time.sleep(float(os.environ.get("FAKE_AWS_SLEEP", "0")))
+if os.environ.get("FAKE_AWS_STDERR"):
+    print(os.environ["FAKE_AWS_STDERR"], file=sys.stderr)
+if args[:2] != ["s3", "cp"] or "--recursive" not in args:  # a directory is one object otherwise
+    sys.exit("fake aws: only 's3 cp --recursive' is modelled")
+filters, paths, i = [], [], 2
+while i < len(args):
+    if args[i] in ("--exclude", "--include"):
+        filters.append((args[i][2:], args[i + 1]))
+        i += 2
+    else:
+        if not args[i].startswith("--"):
+            paths.append(args[i])
+        i += 1
+src, dst = pathlib.Path(paths[0]), paths[1].removeprefix("s3://")
+for f in sorted(src.rglob("*")):
+    if f.is_file():
+        keep = True
+        for kind, pattern in filters:
+            if fnmatch.fnmatchcase(str(f), f"{src}/{pattern}"):
+                keep = kind == "include"
+        if keep:
+            target = state / "s3" / dst / f.relative_to(src)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(f, target)
+"""
+
+FAKE_FI_INFO = "print('fake fi_info')\n"
+
+# pkill: log the call, then run the real one found outside the fake bin directory.
+FAKE_PKILL = r"""
+import json, os, pathlib, shutil, sys
+here = str(pathlib.Path(sys.argv[0]).parent)
+with (pathlib.Path(os.environ["FAKE_STATE"]) / "pkill.jsonl").open("a") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")
+path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep) if d != here)
+real = shutil.which("pkill", path=path)
+os.execv(real, [real, *sys.argv[1:]])
 """
 
 
 class Imds(BaseHTTPRequestHandler):
     notice = False
+    status = 0  # answer every authenticated GET with this status when set
+    delay = 0.0  # seconds every request takes
+    gets = 0
 
     def do_PUT(self) -> None:  # noqa: N802 - http.server API
+        time.sleep(Imds.delay)
         ok = (
             self.path == "/latest/api/token"
             and "X-aws-ec2-metadata-token-ttl-seconds" in self.headers
@@ -145,9 +299,13 @@ class Imds(BaseHTTPRequestHandler):
             self.wfile.write(SESSION.encode())
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
+        Imds.gets += 1
+        time.sleep(Imds.delay)
         authed = self.headers.get("X-aws-ec2-metadata-token") == SESSION
         hit = self.path == "/latest/meta-data/spot/instance-action" and authed and Imds.notice
-        self.send_response(200 if hit else (404 if authed else 401))
+        self.send_response(
+            Imds.status if Imds.status and authed else 200 if hit else (404 if authed else 401)
+        )
         self.end_headers()
         if hit:
             self.wfile.write(json.dumps(NOTICE).encode())
@@ -158,11 +316,16 @@ class Imds(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def imds() -> Iterator[str]:
-    Imds.notice = False
+    Imds.notice, Imds.status, Imds.delay, Imds.gets = False, 0, 0.0, 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), Imds)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    server.daemon_threads = True  # a request that sleeps must not hold the teardown
+    server.block_on_close = False
+    threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    ).start()
     yield f"http://127.0.0.1:{server.server_address[1]}"
     server.shutdown()
+    server.server_close()
 
 
 @pytest.fixture
@@ -171,26 +334,77 @@ def env(tmp_path: Path, imds: str) -> dict[str, str]:
     for d in (bindir, state, efa, tmp_path / "results"):
         d.mkdir()
     (efa / "rdmap0s0").mkdir()
-    fakes = {"docker": FAKE_DOCKER, "nvidia-smi": FAKE_SMI, "aws": FAKE_AWS, "sudo": FAKE_SUDO}
+    fakes = {
+        "docker": FAKE_DOCKER,
+        "nvidia-smi": FAKE_SMI,
+        "aws": FAKE_AWS,
+        "sudo": FAKE_SUDO,
+        "fi_info": FAKE_FI_INFO,
+        "df": FAKE_DF,
+        "pkill": FAKE_PKILL,
+    }
     for name, body in fakes.items():
         (bindir / name).write_text(f"#!{sys.executable}\n{body}")
         (bindir / name).chmod(0o755)
+    # HT_B300_*, DOCKER and AWS_* in the caller's shell (a B300 host exports some of them) would
+    # change what the script does or send it to a real docker.
+    inherited = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("HT_B300_", "AWS_", "GIT_")) and k not in ("DOCKER", "HT_IMDS_URL")
+    }
+    ACTIVE["tmp"] = tmp_path
     return {
-        **os.environ,
+        **inherited,
         "PATH": f"{bindir}:{os.environ['PATH']}",
         "FAKE_STATE": str(state),
         "HT_IMDS_URL": imds,
         "HT_B300_POLL_SECONDS": "0.2",
         "HT_B300_EFA_SYSFS": str(efa),
         "HT_B300_MIN_DISK_GB": "0",
+        "GIT_CEILING_DIRECTORIES": str(tmp_path),
     }
 
 
-def run(env: dict[str, str], tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    argv = ["bash", str(SCRIPT), "--results-root", str(tmp_path / "results"), "--host", "h1"]
-    return subprocess.run(
-        [*argv, *args], env=env, capture_output=True, text=True, timeout=60, check=False
+# A pytest started in the background or under nohup passes SIGINT and SIGHUP on as ignored, and a
+# shell cannot trap what was ignored when it started: reset them, then become bash.
+LAUNCH = (
+    "import os, signal, sys\n"
+    "for s in (signal.SIGINT, signal.SIGHUP):\n"
+    "    signal.signal(s, signal.SIG_DFL)\n"
+    "os.execvp('bash', ['bash', *sys.argv[1:]])\n"
+)
+
+
+def script_argv(script: Path, tmp_path: Path, root: Path | None = None) -> list[str]:
+    root_arg = str(root or tmp_path / "results")
+    return [sys.executable, "-c", LAUNCH, str(script), "--results-root", root_arg, "--host", "h1"]
+
+
+def run(
+    env: dict[str, str],
+    tmp_path: Path,
+    *args: str,
+    script: Path = SCRIPT,
+    root: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv
+        [*script_argv(script, tmp_path, root), *args],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=60)
+    except subprocess.TimeoutExpired:  # free the blocked fakes, then take the whole tree down
+        for ctr in (tmp_path / "state").glob("ctr-*"):
+            Path(f"{ctr}.stopped").touch()
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
 def docker_calls(tmp_path: Path) -> list[list[str]]:
@@ -202,8 +416,87 @@ def runs_of(tmp_path: Path, name: str) -> list[list[str]]:
     return [c for c in docker_calls(tmp_path) if c[0] == "run" and f"ht-b300-{name}" in c]
 
 
+def git(ht: Path, *args: str) -> str:
+    cfg = ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
+    plain = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    done = subprocess.run(  # noqa: S603 - fixed argv
+        ["git", "-C", str(ht), *cfg, *args], check=True, capture_output=True, text=True, env=plain
+    )
+    return done.stdout.strip()
+
+
+@pytest.fixture
+def checkout(tmp_path: Path) -> Path:
+    """A clean git checkout holding only scripts/: the HT that a copy of run_host.sh mounts."""
+    ht = tmp_path / "ht"
+    shutil.copytree(ROOT / "scripts", ht / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+    git(ht, "init", "-q")
+    git(ht, "add", ".")
+    git(ht, "commit", "-q", "-m", "scripts")
+    return ht
+
+
+def uploaded(tmp_path: Path, dest: str = "bucket/b300/h1") -> set[str]:
+    """Relative paths the fake aws copied to s3://<dest>."""
+    root = tmp_path / "state/s3" / dest
+    return {str(f.relative_to(root)) for f in root.rglob("*") if f.is_file()}
+
+
 def stop_json(tmp_path: Path) -> dict[str, Any]:
     return json.loads((tmp_path / "results/h1/stop.json").read_text())
+
+
+def alive(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
+
+
+def watchdog_pid(tmp_path: Path) -> int:
+    match = re.search(r"watchdog pid (\d+)", (tmp_path / "results/h1/run.log").read_text())
+    assert match
+    return int(match.group(1))
+
+
+ACTIVE: dict[str, Path] = {}  # the running test's tmp_path, for failure messages
+
+
+def run_log(tmp_path: Path | None = None) -> str:
+    log = (tmp_path or ACTIVE["tmp"]) / "results/h1/run.log"
+    return log.read_text() if log.exists() else ""
+
+
+def wait_until(cond: Callable[[], object], what: str, timeout: float = 30) -> None:
+    end = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < end, f"timed out waiting for {what}\n{run_log()[-1500:]}"
+        time.sleep(0.05)
+
+
+@pytest.fixture
+def launch(env: dict[str, str], tmp_path: Path) -> Iterator[Callable[..., subprocess.Popen[bytes]]]:
+    """Start run_host.sh in its own process group; teardown frees fake containers and kills it."""
+    procs: list[subprocess.Popen[bytes]] = []
+
+    def start(*args: str, script: Path = SCRIPT, **extra_env: str) -> subprocess.Popen[bytes]:
+        proc = subprocess.Popen(  # noqa: S603 - fixed argv
+            [*script_argv(script, tmp_path), *args],
+            env={**env, **extra_env},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        procs.append(proc)
+        return proc
+
+    yield start
+    for ctr in (tmp_path / "state").glob("ctr-*"):
+        ctr.with_suffix(".stopped").touch()
+    for proc in procs:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
 
 
 def test_full_run_pins_the_digest_and_runs_the_8gpu_flash_bench(env, tmp_path):
@@ -212,6 +505,7 @@ def test_full_run_pins_the_digest_and_runs_the_8gpu_flash_bench(env, tmp_path):
     stop = stop_json(tmp_path)
     assert stop["reason"] == "completed"
     assert stop["steps"] == {"host_probe": 0, "pull": 0, "gpu_probe": 0, "mfu": 0, "miner_test": 0}
+    assert stop["ran"] == ["host_probe", "pull", "gpu_probe", "mfu", "miner_test"]
     assert ["pull", IMAGE] in docker_calls(tmp_path)
     (mfu,) = runs_of(tmp_path, "mfu")
     assert mfu[mfu.index("--entrypoint") + 2] == IMAGE
@@ -238,6 +532,9 @@ def test_docker_without_group_membership_goes_through_sudo(env, tmp_path):
         ({"FAKE_DRIVER": "580.95.05"}, "driver"),
         ({"FAKE_GPUS": "7"}, "gpu_count"),
         ({"FAKE_CC": "12.0"}, "compute_cap"),
+        ({"FAKE_GPUS": "9"}, "gpu_count"),  # more than expected is a different host too
+        ({"FAKE_DRIVER_LAST": "580.95.05"}, "driver"),  # one GPU on another driver
+        ({"FAKE_CC_LAST": "10.0"}, "compute_cap"),  # one GPU of another capability
     ],
 )
 def test_wrong_host_stops_before_any_pull(env, tmp_path, fake, check):
@@ -265,22 +562,27 @@ def test_pulled_image_must_carry_the_pinned_digest(env, tmp_path):
     assert runs_of(tmp_path, "gpu_probe") == []
 
 
-def test_rerun_skips_passed_steps_but_reprobes_the_host(env, tmp_path):
-    assert run(env, tmp_path).returncode == 0
+def test_rerun_skips_passed_steps_but_reprobes_the_host(env, tmp_path, checkout):
+    script = checkout / "scripts/b300/run_host.sh"
+    assert run(env, tmp_path, script=script).returncode == 0
     first = len(docker_calls(tmp_path))
-    assert run(env, tmp_path).returncode == 0
+    assert run(env, tmp_path, script=script).returncode == 0
     again = docker_calls(tmp_path)[first:]
     assert [c for c in again if c[0] in ("pull", "run")] == []
     assert ["info", "--format", "{{.DockerRootDir}}"] in again  # host probe ran again
-    assert run(env, tmp_path, "--force", "--steps", "mfu").returncode == 0
+    for kept in ("gpu_probe.json", "mfu-dp8-flash.json", "mine-smoke-v2.json"):
+        assert (tmp_path / "results/h1" / kept).exists()  # a skipped step keeps its evidence
+    assert run(env, tmp_path, "--force", "--steps", "mfu", script=script).returncode == 0
     assert len(runs_of(tmp_path, "mfu")) == 2
 
 
-def test_new_image_reruns_steps_that_passed_with_the_old_one(env, tmp_path):
-    assert run(env, tmp_path).returncode == 0
+def test_new_image_reruns_steps_that_passed_with_the_old_one(env, tmp_path, checkout):
+    script = checkout / "scripts/b300/run_host.sh"
+    assert run(env, tmp_path, script=script).returncode == 0
     other = f"ghcr.io/cortexlm/cortex/hypertrain-gpu@sha256:{'1' * 64}"
-    assert run({**env, "FAKE_PULL_RC": "1"}, tmp_path, "--image", other).returncode == 4
+    assert run(env, tmp_path, "--image", other, script=script).returncode == 0
     assert ["pull", other] in docker_calls(tmp_path)
+    assert len(runs_of(tmp_path, "gpu_probe")) == 2 and len(runs_of(tmp_path, "mfu")) == 2
 
 
 def test_a_second_run_on_the_same_results_is_refused(env, tmp_path):
@@ -322,17 +624,8 @@ def test_spot_notice_stops_containers_and_uploads(env, tmp_path):
     stop = stop_json(tmp_path)
     assert stop["reason"] == "spot-interruption" and stop["spot_notice"] == NOTICE
     assert ["stop", "--time", "60", "ctr-miner_test"] in docker_calls(tmp_path)
-    aws = [json.loads(x) for x in (tmp_path / "state/aws.jsonl").read_text().splitlines()]
-    assert aws == [
-        [
-            "s3",
-            "cp",
-            "--recursive",
-            "--only-show-errors",
-            str(tmp_path / "results/h1"),
-            "s3://bucket/b300/h1/",
-        ]
-    ]
+    assert len((tmp_path / "state/aws.jsonl").read_text().splitlines()) == 1
+    assert {"stop.json", "spot-instance-action.json", "run.log"} <= uploaded(tmp_path)
 
 
 def test_duration_deadline_stops_the_run(env, tmp_path):
@@ -340,20 +633,12 @@ def test_duration_deadline_stops_the_run(env, tmp_path):
     p = run({**env, "FAKE_BLOCK": "mfu"}, tmp_path, "--duration", "2")
     assert p.returncode == 143 and stop_json(tmp_path)["reason"] == "duration"
     assert time.monotonic() - t0 < 30
+    assert not (tmp_path / "results/h1/.stop-reason").exists()  # consumed, not left for a next run
 
 
-def test_sigterm_drains_the_running_container(env, tmp_path):
-    argv = ["bash", str(SCRIPT), "--results-root", str(tmp_path / "results"), "--host", "h1"]
-    proc = subprocess.Popen(  # noqa: S603 - fixed argv
-        argv,
-        env={**env, "FAKE_BLOCK": "gpu_probe"},
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    deadline = time.monotonic() + 30
-    while not (tmp_path / "state/ctr-gpu_probe").exists():
-        assert time.monotonic() < deadline and proc.poll() is None
-        time.sleep(0.05)
+def test_sigterm_drains_the_running_container(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
     proc.send_signal(signal.SIGTERM)
     assert proc.wait(timeout=30) == 143
     stop = stop_json(tmp_path)
@@ -397,21 +682,896 @@ def test_prod_rounds_upload_and_never_print_the_key(env, tmp_path):
     assert not [f for f in results.rglob("*") if f.is_file() and sentinel in f.read_text()]
 
 
-def test_process_group_sigterm_still_drains(env, tmp_path):
+def test_process_group_sigterm_still_drains(env, tmp_path, launch):
     # systemd and SSM cancel signal the whole group: tee dies with the script, the drain must not.
-    argv = ["bash", str(SCRIPT), "--results-root", str(tmp_path / "results"), "--host", "h1"]
-    proc = subprocess.Popen(  # noqa: S603 - fixed argv
-        argv,
-        env={**env, "FAKE_BLOCK": "gpu_probe"},
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    deadline = time.monotonic() + 30
-    while not (tmp_path / "state/ctr-gpu_probe").exists():
-        assert time.monotonic() < deadline and proc.poll() is None
-        time.sleep(0.05)
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
     os.killpg(proc.pid, signal.SIGTERM)
     assert proc.wait(timeout=30) == 143
     assert stop_json(tmp_path)["reason"] == "signal"
     assert ["stop", "--time", "60", "ctr-gpu_probe"] in docker_calls(tmp_path)
+
+
+# --- input validation (B1): text is checked before it reaches arithmetic or a command line ------
+
+
+def test_duration_injection_is_refused_before_it_is_evaluated(env, tmp_path):
+    marker = tmp_path / "pwned"
+    p = run(env, tmp_path, "--duration", f"image[$(touch {marker})]h")
+    assert p.returncode == 2 and "--duration" in p.stderr, p.stdout + p.stderr
+    assert not marker.exists()
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "1.5h",
+        "h",
+        "3d",
+        "1h30m",
+        "0",
+        "0h",
+        "-5",
+        "1000000",  # seven digits: past the cap that keeps 10#N * unit from wrapping
+        "9223372036854775807",
+        "5124095576030432h",  # would wrap to 3584 s
+    ],
+)
+def test_malformed_duration_is_refused_before_docker(env, tmp_path, bad):
+    p = run(env, tmp_path, "--duration", bad)
+    assert p.returncode == 2 and "--duration" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "duration,seconds", [("08h", 8 * 3600), ("09", 9), ("010h", 10 * 3600), ("090m", 90 * 60)]
+)
+def test_leading_zeros_are_decimal(env, tmp_path, duration, seconds):
+    p = run(env, tmp_path, "--duration", duration, "--steps", "host_probe")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert f"duration={seconds}s" in (tmp_path / "results/h1/run.log").read_text()
+
+
+def test_a_leading_zero_duration_still_arms_the_spot_watchdog(env, tmp_path, launch):
+    # bash read 08h as an invalid octal number: the deadline stayed unset and the watchdog died on
+    # set -u, taking the Spot drain with it while the run went on.
+    proc = launch("--duration", "08h", FAKE_BLOCK="mfu")
+    wait_until(lambda: (tmp_path / "state/ctr-mfu").exists(), "the mfu container")
+    Imds.notice = True
+    try:
+        rc = proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        pytest.fail("the run ignored the Spot notice: its watchdog is dead")
+    assert rc == 143 and stop_json(tmp_path)["reason"] == "spot-interruption"
+
+
+@pytest.mark.parametrize("poll", ["abc", "0", "0.0", "-1", "60", "5s", "9.9999", "05", ".5"])
+def test_malformed_poll_interval_is_refused_before_docker(env, tmp_path, poll):
+    p = run({**env, "HT_B300_POLL_SECONDS": poll}, tmp_path)
+    assert p.returncode == 2 and "HT_B300_POLL_SECONDS" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize("grace", ["60s", "-1", "1e3", "0x10", "99999"])
+def test_malformed_stop_grace_is_refused_before_docker(env, tmp_path, grace):
+    p = run({**env, "HT_B300_STOP_GRACE": grace}, tmp_path)
+    assert p.returncode == 2 and "HT_B300_STOP_GRACE" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+def test_stop_grace_with_leading_zeros_reaches_docker_as_decimal(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="gpu_probe", HT_B300_STOP_GRACE="060")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    assert ["stop", "--time", "60", "ctr-gpu_probe"] in docker_calls(tmp_path)
+
+
+@pytest.mark.parametrize("prefix", ["executor", "pod_x", "ht b300", "ht-", "../ht-x", "HT-b300"])
+def test_container_prefix_must_stay_in_the_ht_namespace(env, tmp_path, prefix):
+    p = run({**env, "HT_B300_CONTAINER_PREFIX": prefix}, tmp_path)
+    assert p.returncode == 2 and "HT_B300_CONTAINER_PREFIX" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize("host", ["..", ".", ".hidden", "a/b", "-x"])
+def test_host_name_cannot_leave_the_results_root(env, tmp_path, host):
+    p = run(env, tmp_path, "--host", host)
+    assert p.returncode == 2 and "bad host name" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+    assert not (tmp_path / "steps").exists()  # no directory was made above the results root
+
+
+def test_a_watchdog_that_died_outside_a_wait_stops_the_run_before_the_next_step(
+    env, tmp_path, launch
+):
+    # host_probe runs in the foreground: only the check at the top of step() can see the death.
+    proc = launch("--steps", "host_probe pull", FAKE_SMI_SLEEP="2")
+    wait_until(lambda: "step host_probe" in run_log(), "the host probe")
+    os.kill(watchdog_pid(tmp_path), signal.SIGKILL)
+    assert proc.wait(timeout=20) == 9 and stop_json(tmp_path)["reason"] == "watchdog-died"
+    assert [c for c in docker_calls(tmp_path) if c[0] in ("pull", "run")] == []
+
+
+# --- containers (B2): a run only ever touches containers it started ------------------------------
+
+LIUM = {"com.docker.compose.service": "executor"}
+OTHER_RUN = {"io.cortex.b300-run": "20261027T000000Z-1"}
+
+
+def seed_container(tmp_path: Path, name: str, labels: dict[str, str]) -> Path:
+    """A container another process started: the fake docker lists, stops and removes it."""
+    ctr = tmp_path / "state" / f"ctr-{name.removeprefix('ht-b300-')}"
+    ctr.write_text(json.dumps({"name": name, "labels": labels}))
+    return ctr
+
+
+def untouched(ctr: Path) -> bool:
+    return not Path(f"{ctr}.stopped").exists() and not Path(f"{ctr}.removed").exists()
+
+
+def test_a_running_container_with_the_same_name_is_not_removed(env, tmp_path):
+    # Another invocation (other results root, same host) owns ht-b300-gpu_probe. The container
+    # names are global to the host and the flock is per results directory: removing by name
+    # SIGKILLed that run's container.
+    theirs = seed_container(tmp_path, "ht-b300-gpu_probe", OTHER_RUN)
+    p = run(env, tmp_path)
+    assert p.returncode == 5 and "already in use" in p.stdout + p.stderr, p.stdout + p.stderr
+    assert untouched(theirs)
+    assert not [c for c in docker_calls(tmp_path) if c[0] == "rm"]
+    assert runs_of(tmp_path, "mfu") == []
+
+
+def test_a_drain_stops_this_runs_containers_only(env, tmp_path, launch):
+    executor = seed_container(tmp_path, "executor-executor-1", LIUM)
+    other = seed_container(tmp_path, "ht-b300-mfu", OTHER_RUN)
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    assert Path(f"{tmp_path}/state/ctr-gpu_probe.stopped").exists()
+    assert untouched(executor) and untouched(other)
+    log = (tmp_path / "state/destroyed.jsonl").read_text().splitlines()
+    assert [json.loads(x)[2] for x in log] == ["ht-b300-gpu_probe"]
+
+
+# --- upload (B3): the key must not leave the host ------------------------------------------------
+
+SENTINEL = "do-not-upload-this-sentinel"
+EVIDENCE = {
+    "run.log",
+    "steps.tsv",
+    "stop.json",
+    "nvidia-smi.csv",
+    "nvidia-smi.txt",
+    "efa-devices.txt",
+    "fi_info.txt",
+    "df.txt",
+    "host_probe.json",
+    "pull.log",
+    "pull-digests.json",
+    "gpu_probe.json",
+    "mfu-dp8-flash.json",
+    "mine-smoke-v2.json",
+    "mine-smoke-v2.stdout",
+    *(f"steps/{s}.rc" for s in ("host_probe", "pull", "gpu_probe", "mfu", "miner_test")),
+}
+
+
+def prod_env(cfg_dir: Path, rounds: str = "3") -> dict[str, str]:
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "miner.toml").write_text('keyfile = "hk.bin"\nworkdir = "work"\n')
+    (cfg_dir / "hk.bin").write_text(SENTINEL)
+    return {
+        "HT_B300_PROD_ENDPOINT": "https://master.example/challenge/hypertrain",
+        "HT_B300_MINER_CONFIG": str(cfg_dir / "miner.toml"),
+        "HT_B300_PROD_ROUNDS": rounds,
+    }
+
+
+def test_upload_ships_the_evidence_and_nothing_else(env, tmp_path):
+    out = tmp_path / "results/h1"
+    (out / "miner").mkdir(parents=True)
+    (out / "miner/miner.toml").write_text('keyfile = "hk.bin"\n')
+    (out / "hk.bin").write_text(SENTINEL)
+    (out / "miner-prod").mkdir()
+    (out / "steps").mkdir()
+    # One stray per extension and directory the allowlist names: a pattern widened to *.json,
+    # *.log, *.tsv, steps/* or miner-prod/* must show up here.
+    strays = (
+        "notes.txt",
+        "stray.json",
+        "x.log",
+        "extra.tsv",
+        "steps/x.txt",
+        "miner-prod/o.json",
+        "mfu-dp8-notes.txt",
+        "mfu-dp8-flash.json.bak",
+    )
+    for stray in strays:
+        (out / stray).write_text("stray")
+    p = run(env, tmp_path, "--upload", "s3://bucket/b300")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert uploaded(tmp_path) == EVIDENCE
+
+
+@pytest.mark.parametrize("where", ["inside", "parent", "symlink", "same"])
+def test_a_miner_config_next_to_the_results_is_refused(env, tmp_path, where):
+    out = tmp_path / "results/h1"
+    cfg_dir = {
+        "inside": out / "miner",
+        "parent": tmp_path / "results",
+        "symlink": tmp_path / "link",
+        "same": out,
+    }[where]
+    if where == "symlink":
+        (out / "miner").mkdir(parents=True)
+        cfg_dir.symlink_to(out / "miner")
+    prod = prod_env(cfg_dir)
+    p = run({**env, **prod}, tmp_path, "--prod", "--upload", "s3://bucket/b300")
+    assert p.returncode == 2 and "HT_B300_MINER_CONFIG" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == [] and not (tmp_path / "state/aws.jsonl").exists()
+
+
+def test_prod_upload_carries_the_round_evidence_but_never_the_key(env, tmp_path):
+    prod = prod_env(tmp_path / "miner", rounds="3 4")
+    p = run({**env, **prod}, tmp_path, "--prod", "--upload", "s3://bucket/b300")
+    assert p.returncode == 0, p.stdout + p.stderr
+    rounds = {f"miner-prod/round-{w}{s}.json" for w in "34" for s in ("", "-commitments")}
+    assert uploaded(tmp_path) == EVIDENCE | {"steps/miner_prod.rc"} | rounds
+
+
+# --- which code ran (B4) -------------------------------------------------------------------------
+
+
+def test_the_run_records_the_commit_it_ran(env, tmp_path, checkout):
+    assert run(env, tmp_path, script=checkout / "scripts/b300/run_host.sh").returncode == 0
+    head = git(checkout, "rev-parse", "HEAD")
+    stop = stop_json(tmp_path)
+    assert stop["git_rev"] == head and stop["git_dirty"] is False
+    assert f"rev={head} dirty=0" in (tmp_path / "results/h1/run.log").read_text()
+
+
+def test_a_new_commit_reruns_what_passed_with_the_old_one(env, tmp_path, checkout):
+    script = checkout / "scripts/b300/run_host.sh"
+    assert run(env, tmp_path, script=script).returncode == 0
+    (checkout / "scripts/new.txt").write_text("x")
+    git(checkout, "add", ".")
+    git(checkout, "commit", "-q", "-m", "new")
+    assert run(env, tmp_path, script=script).returncode == 0
+    assert len(runs_of(tmp_path, "gpu_probe")) == 2 and len(runs_of(tmp_path, "mfu")) == 2
+    assert stop_json(tmp_path)["git_rev"] == git(checkout, "rev-parse", "HEAD")
+
+
+def test_a_modified_checkout_is_flagged_and_never_skipped(env, tmp_path, checkout):
+    script = checkout / "scripts/b300/run_host.sh"
+    (checkout / "scripts/mfu_profiles.json").write_text("{}")  # tracked file, changed
+    for n in (1, 2):  # the same dirty tree twice: still a different, unknown code
+        assert run(env, tmp_path, script=script).returncode == 0
+        assert stop_json(tmp_path)["git_dirty"] is True
+        assert len(runs_of(tmp_path, "gpu_probe")) == n
+    (checkout / "scripts/mfu_profiles.json").unlink()
+    git(checkout, "checkout", "--", "scripts/mfu_profiles.json")
+    (checkout / "scripts/untracked.py").write_text("x = 1\n")  # the mount shows it as well
+    assert run(env, tmp_path, script=script).returncode == 0
+    assert stop_json(tmp_path)["git_dirty"] is True
+
+
+def test_a_tree_without_git_is_unknown_and_never_skipped(env, tmp_path):
+    script = tmp_path / "plain/scripts/b300/run_host.sh"
+    shutil.copytree(ROOT / "scripts", tmp_path / "plain/scripts")
+    for n in (1, 2):
+        assert run(env, tmp_path, script=script).returncode == 0
+        stop = stop_json(tmp_path)
+        assert stop["git_rev"] == "unknown" and stop["git_dirty"] is None
+        assert len(runs_of(tmp_path, "gpu_probe")) == n
+
+
+# --- shutdown paths: every way out drains, writes stop.json and uploads --------------------------
+
+
+def test_sighup_drains_like_sigterm_and_leaves_no_watchdog(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    pid = watchdog_pid(tmp_path)
+    proc.send_signal(signal.SIGHUP)
+    assert proc.wait(timeout=30) == 143
+    assert stop_json(tmp_path)["reason"] == "signal"
+    assert ["stop", "--time", "60", "ctr-gpu_probe"] in docker_calls(tmp_path)
+    wait_until(lambda: not alive(pid), "the watchdog to be gone")
+
+
+def test_an_unexpected_exit_still_drains_uploads_and_stops_the_watchdog(env, tmp_path, launch):
+    # SIGUSR1 kills the shell without the TERM/INT/HUP handler; bash runs the EXIT trap for it.
+    proc = launch("--upload", "s3://bucket/b300", FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    pid = watchdog_pid(tmp_path)
+    proc.send_signal(signal.SIGUSR1)
+    assert proc.wait(timeout=30) != 0
+    stop = stop_json(tmp_path)
+    assert stop["reason"] == "unexpected-exit" and stop["rc"] != 0  # never a clean-looking 0
+    assert ["stop", "--time", "60", "ctr-gpu_probe"] in docker_calls(tmp_path)
+    assert "stop.json" in uploaded(tmp_path)
+    wait_until(lambda: not alive(pid), "the watchdog to be gone")
+
+
+def test_a_stop_during_the_pull_ends_the_pull(env, tmp_path, launch):
+    proc = launch(FAKE_PULL_SLEEP="300")  # far longer than the wait below: it must be killed
+    pidfile = tmp_path / "state/pull.pid"
+    wait_until(lambda: pidfile.exists() and pidfile.read_text(), "the docker pull")
+    pid = int(pidfile.read_text())
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    wait_until(lambda: not alive(pid), "the docker pull client to be gone", timeout=10)
+
+
+def test_a_corrupt_rc_file_does_not_stop_the_stop_json_or_the_upload(env, tmp_path):
+    (tmp_path / "results/h1/steps").mkdir(parents=True)
+    (tmp_path / "results/h1/steps/stray.rc").write_text("")
+    p = run(env, tmp_path, "--upload", "s3://bucket/b300")
+    assert p.returncode == 0, p.stdout + p.stderr
+    stop = stop_json(tmp_path)
+    assert "stray" not in stop["steps"] and any("stray.rc" in e for e in stop["errors"])
+    assert "stop.json" in uploaded(tmp_path)
+
+
+def test_a_spot_answer_that_is_not_json_is_kept_as_text(env, tmp_path, monkeypatch):
+    def get(self: BaseHTTPRequestHandler) -> None:
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"<html>ok</html>" + b"x" * 5000)
+
+    monkeypatch.setattr(Imds, "do_GET", get)
+    p = run({**env, "FAKE_BLOCK": "gpu_probe"}, tmp_path, "--upload", "s3://bucket/b300")
+    assert p.returncode == 143, p.stdout + p.stderr
+    stop = stop_json(tmp_path)
+    assert stop["reason"] == "spot-interruption"
+    assert stop["spot_notice"] == {"unparsed": ("<html>ok</html>" + "x" * 5000)[:200]}
+    assert any("spot-instance-action.json" in e for e in stop["errors"])
+    assert "stop.json" in uploaded(tmp_path)
+
+
+def test_the_upload_runs_even_when_stop_json_cannot_be_written(env, tmp_path):
+    (tmp_path / "results/h1/stop.json").mkdir(parents=True)
+    p = run(env, tmp_path, "--upload", "s3://bucket/b300")
+    assert p.returncode == 1, p.stdout + p.stderr  # a completed run without its record is not 0
+    assert {"run.log", "steps.tsv"} <= uploaded(tmp_path)
+    assert "stop.json was not written" in (tmp_path / "results/h1/run.log").read_text()
+
+
+# --- stale evidence (B6): a step removes what an earlier run left before it starts ---------------
+
+STALE = json.dumps({"ok": True, "stale": True})
+
+
+@pytest.mark.parametrize(
+    "crash,rc,files,extra",
+    [
+        (
+            {"FAKE_SMI_FAIL": "1"},
+            3,
+            ["host_probe.json", "df.txt", "efa-devices.txt", "fi_info.txt", "nvidia-smi.txt"],
+            [],
+        ),
+        ({"FAKE_PULL_RC": "1"}, 4, ["pull-digests.json"], []),
+        ({"FAKE_CRASH": "gpu_probe"}, 5, ["gpu_probe.json"], []),
+        ({"FAKE_CRASH": "mfu"}, 6, ["mfu-dp8-flash.json"], []),
+        (
+            {"FAKE_CRASH": "mfu", "HT_B300_EXPECT_GPUS": "4", "FAKE_GPUS": "4"},
+            6,
+            ["mfu-dp4-flash.json"],
+            [],
+        ),
+        ({"FAKE_CRASH": "miner_test"}, 7, ["mine-smoke-v2.json"], []),
+        ({"FAKE_CRASH": "miner_prod"}, 8, ["miner-prod/round-3-commitments.json"], ["--prod"]),
+    ],
+    ids=["host_probe", "pull", "gpu_probe", "mfu", "mfu-dp4", "miner_test", "miner_prod"],
+)
+def test_a_step_that_dies_early_leaves_no_evidence_of_an_earlier_run(
+    env, tmp_path, crash, rc, files, extra
+):
+    out = tmp_path / "results/h1"
+    (out / "miner-prod").mkdir(parents=True)
+    for name in files:
+        (out / name).write_text(STALE)
+    prod = prod_env(tmp_path / "miner") if extra else {}
+    p = run({**env, **crash, **prod}, tmp_path, *extra)
+    assert p.returncode == rc, p.stdout + p.stderr
+    stale = [n for n in files if (out / n).exists() and "stale" in (out / n).read_text()]
+    assert stale == []
+
+
+# --- the gates (B7): each one stops the run, and a mutant that opens it is caught -----------------
+
+
+def test_a_failed_gpu_probe_stops_the_run_before_mfu(env, tmp_path):
+    p = run({**env, "FAKE_GPU_OK": "0"}, tmp_path)
+    assert p.returncode == 5, p.stdout + p.stderr
+    stop = stop_json(tmp_path)
+    assert stop["reason"] == "gpu-probe-failed" and stop["steps"]["gpu_probe"] != 0
+    assert runs_of(tmp_path, "mfu") == [] and runs_of(tmp_path, "miner_test") == []
+
+
+@pytest.mark.parametrize(
+    "avail,passes",
+    [("500,500", True), ("100,100", True), ("500,99", False), ("99,500", False)],
+)
+def test_the_results_and_the_docker_root_each_need_the_free_space(env, tmp_path, avail, passes):
+    # Used is 900 GiB on both: reading that column, or the larger of the two, would pass.
+    fake = {"HT_B300_MIN_DISK_GB": "100", "FAKE_DF_AVAIL": avail}
+    p = run({**env, **fake}, tmp_path, "--steps", "host_probe")
+    probe = json.loads((tmp_path / "results/h1/host_probe.json").read_text())
+    assert probe["checks"]["disk"] is passes and probe["free_gb"] != {}
+    assert p.returncode == (0 if passes else 3), p.stdout + p.stderr
+
+
+def test_containers_stay_isolated_and_do_not_inherit_the_lock(env, tmp_path):
+    prod = prod_env(tmp_path / "miner")
+    p = run({**env, **prod}, tmp_path, "--prod")
+    assert p.returncode == 0, p.stdout + p.stderr
+    runs = [c for c in docker_calls(tmp_path) if c[0] == "run"]
+    assert len(runs) == 4  # gpu_probe, mfu, miner_test and one production round
+    for c in runs:
+        assert {"--rm", "--init"} <= set(c)
+        assert c[c.index("--label") + 1].startswith("io.cortex.b300-run=")
+        assert c[c.index("--gpus") + 1] == "all"
+        assert any(a.endswith(":/opt/ht:ro") for a in c)  # the recorded commit stays the code
+    (probe,) = runs_of(tmp_path, "gpu_probe")
+    assert probe[probe.index("--network") + 1] == "none"
+    for name in ("miner_test", "miner-prod-3"):  # the key file must belong to the invoking user
+        (c,) = runs_of(tmp_path, name)
+        assert c[c.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
+    assert not (tmp_path / "state/fd9-leaked").exists()
+
+
+# --- a step that starts again forgets its old pass, and only its own evidence goes ---------------
+
+
+def test_an_interrupted_forced_rerun_is_not_remembered_as_a_pass(env, tmp_path, checkout, launch):
+    script = checkout / "scripts/b300/run_host.sh"
+    assert run(env, tmp_path, script=script).returncode == 0
+    proc = launch("--force", "--steps", "gpu_probe", script=script, FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the forced gpu_probe")
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    assert not (tmp_path / "results/h1/steps/gpu_probe.rc").exists()
+    assert "gpu_probe" not in stop_json(tmp_path)["steps"]  # it was cut, it did not pass
+    assert run(env, tmp_path, script=script).returncode == 0  # a plain run must do it again
+    assert len(runs_of(tmp_path, "gpu_probe")) == 3
+    assert (tmp_path / "results/h1/gpu_probe.json").exists()
+
+
+def test_a_clean_run_does_not_reuse_a_pass_recorded_on_a_modified_tree(env, tmp_path, checkout):
+    script = checkout / "scripts/b300/run_host.sh"
+    (checkout / "scripts/mfu_profiles.json").write_text("{}")
+    assert run(env, tmp_path, script=script).returncode == 0
+    git(checkout, "checkout", "--", "scripts/mfu_profiles.json")
+    assert run(env, tmp_path, script=script).returncode == 0
+    assert stop_json(tmp_path)["git_dirty"] is False
+    assert len(runs_of(tmp_path, "gpu_probe")) == 2  # same commit, but not the code that passed
+
+
+def test_a_pass_recorded_by_the_previous_script_is_not_trusted(env, tmp_path, checkout):
+    (tmp_path / "results/h1/steps").mkdir(parents=True)
+    (tmp_path / "results/h1/steps/gpu_probe.rc").write_text(f"0 {IMAGE}")  # "<rc> <image>" only
+    assert run(env, tmp_path, script=checkout / "scripts/b300/run_host.sh").returncode == 0
+    assert len(runs_of(tmp_path, "gpu_probe")) == 1
+
+
+def test_new_rounds_keep_the_evidence_of_the_rounds_before(env, tmp_path):
+    first = {**env, **prod_env(tmp_path / "miner", rounds="3 4")}
+    assert run(first, tmp_path, "--prod").returncode == 0
+    later = {**env, **prod_env(tmp_path / "miner", rounds="5")}
+    p = run(later, tmp_path, "--prod", "--steps", "miner_prod", "--force")
+    assert p.returncode == 0, p.stdout + p.stderr
+    kept = sorted(f.name for f in (tmp_path / "results/h1/miner-prod").iterdir())
+    assert kept == [f"round-{w}{s}.json" for w in "345" for s in ("-commitments", "")]
+
+
+@pytest.mark.parametrize("gpus", ["8 ../victim", "0", "99x", "100", "08"])
+def test_the_expected_gpu_count_is_a_plain_number(env, tmp_path, gpus):
+    p = run({**env, "HT_B300_EXPECT_GPUS": gpus}, tmp_path)
+    assert p.returncode == 2 and "HT_B300_EXPECT_GPUS" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+# --- the watchdog stays honest while a step runs --------------------------------------------------
+
+
+def test_a_watchdog_that_dies_during_a_step_is_noticed_before_the_step_ends(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="mfu")
+    wait_until(lambda: (tmp_path / "state/ctr-mfu").exists(), "the mfu container")
+    os.kill(watchdog_pid(tmp_path), signal.SIGKILL)
+    try:  # the container still runs: only the missing watchdog can end this
+        rc = proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        pytest.fail("the run kept going for the whole step without a watchdog")
+    assert rc == 9 and stop_json(tmp_path)["reason"] == "watchdog-died"
+    assert Path(f"{tmp_path}/state/ctr-mfu.stopped").exists()  # and it was drained
+
+
+def test_a_watchdog_does_not_outlive_the_script_that_started_it(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    pid = watchdog_pid(tmp_path)
+    proc.send_signal(signal.SIGKILL)  # no trap runs: nothing tells the watchdog to stop
+    proc.wait(timeout=10)
+    wait_until(lambda: not alive(pid), "the orphan watchdog to notice and leave", timeout=10)
+
+
+def test_a_reason_file_that_cannot_be_written_does_not_disarm_the_deadline(env, tmp_path, launch):
+    (tmp_path / "results/h1/.stop-reason").mkdir(parents=True)  # echo > it fails
+    proc = launch("--duration", "2", FAKE_BLOCK="mfu")
+    try:  # whichever step the deadline finds, the TERM must still be sent
+        rc = proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        pytest.fail("the watchdog died on its reason file and the deadline never fired")
+    assert rc == 143
+    ctr = tmp_path / "state/ctr-mfu"
+    assert not ctr.exists() or Path(f"{ctr}.stopped").exists()  # drained if it had started
+
+
+def test_the_spot_reason_file_failing_does_not_disarm_the_notice(env, tmp_path, launch):
+    (tmp_path / "results/h1/.stop-reason").mkdir(parents=True)
+    proc = launch(FAKE_BLOCK="mfu")
+    wait_until(lambda: (tmp_path / "state/ctr-mfu").exists(), "the mfu container")
+    Imds.notice = True
+    try:
+        rc = proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        pytest.fail("the watchdog died on its reason file and the Spot notice was never acted on")
+    assert rc == 143 and Path(f"{tmp_path}/state/ctr-mfu.stopped").exists()
+
+
+def test_the_watchdog_does_not_hold_the_callers_pipe_after_the_script_exits(env, tmp_path):
+    slow = {**env, "HT_B300_POLL_SECONDS": "9"}
+    t0 = time.monotonic()
+    p = run(slow, tmp_path, "--steps", "host_probe")
+    assert p.returncode == 0 and time.monotonic() - t0 < 5  # not 9 s: the sleep child is detached
+    again = run(slow, tmp_path, "--steps", "host_probe")  # nor the run lock (fd 9)
+    assert again.returncode == 0, again.stdout + again.stderr
+
+
+def test_a_stop_reason_left_by_an_earlier_run_does_not_label_this_stop(env, tmp_path, launch):
+    out = tmp_path / "results/h1"
+    out.mkdir(parents=True)
+    (out / ".stop-reason").write_text("spot-interruption\n")
+    (out / "spot-instance-action.json").write_text(json.dumps(NOTICE))
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    proc.send_signal(signal.SIGTERM)  # an operator stop
+    assert proc.wait(timeout=30) == 143
+    stop = stop_json(tmp_path)
+    assert stop["reason"] == "signal" and stop["spot_notice"] is None
+
+
+# --- finish() runs to the end whatever fails inside it -------------------------------------------
+
+
+def test_a_log_that_cannot_be_written_does_not_stop_the_drain(env, tmp_path, launch):
+    proc = launch("--upload", "s3://bucket/b300", FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    out = tmp_path / "results/h1"
+    (out / "run.log").rename(out / "run.log.moved")
+    (out / "run.log").mkdir()  # the append in finish() now fails, as on a full or read-only disk
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    assert ["stop", "--time", "60", "ctr-gpu_probe"] in docker_calls(tmp_path)
+    assert stop_json(tmp_path)["reason"] == "signal" and "stop.json" in uploaded(tmp_path)
+
+
+@pytest.mark.parametrize("failing", ["ps", "stop"])
+def test_a_failing_docker_does_not_stop_the_drain_and_is_logged(env, tmp_path, launch, failing):
+    proc = launch("--upload", "s3://bucket/b300", FAKE_BLOCK="gpu_probe", FAKE_DOCKER_FAIL=failing)
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    assert stop_json(tmp_path)["reason"] == "signal" and "stop.json" in uploaded(tmp_path)
+    log = (tmp_path / "results/h1/run.log").read_text()
+    assert ("could not list" if failing == "ps" else "docker stop failed") in log
+
+
+def test_sigint_drains_like_sigterm(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    proc.send_signal(signal.SIGINT)
+    assert proc.wait(timeout=30) == 143 and stop_json(tmp_path)["reason"] == "signal"
+
+
+def test_signals_during_the_upload_do_not_start_a_second_drain(env, tmp_path, launch):
+    # The host probe fails, so finish() runs outside any trap; a slow upload gives time to signal.
+    proc = launch("--upload", "s3://bucket/b300", FAKE_SMI_FAIL="1", FAKE_AWS_SLEEP="3")
+    aws = tmp_path / "state/aws.jsonl"
+    wait_until(lambda: aws.exists() and aws.read_text(), "the upload to start")
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        proc.send_signal(sig)
+    assert proc.wait(timeout=30) == 3  # the host-probe verdict, not 143
+    assert len(aws.read_text().splitlines()) == 1
+    assert (tmp_path / "results/h1/run.log").read_text().count("\nSTOP ") == 1
+
+
+def test_a_repeated_miner_prod_does_not_run_without_prod(env, tmp_path):
+    # Only the first occurrence used to be dropped: the second ran production rounds with none of
+    # the --prod checks (here: a miner directory inside the results directory).
+    prod = prod_env(tmp_path / "results/h1/miner")
+    p = run({**env, **prod}, tmp_path, "--steps", "miner_prod miner_prod")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert runs_of(tmp_path, "miner-prod-3") == [] and runs_of(tmp_path, "gpu_probe") == []
+    assert stop_json(tmp_path)["steps"] == {}
+
+
+def test_a_custom_container_prefix_names_the_containers(env, tmp_path):
+    p = run({**env, "HT_B300_CONTAINER_PREFIX": "ht-other"}, tmp_path, "--steps", "gpu_probe")
+    assert p.returncode == 0, p.stdout + p.stderr
+    (probe,) = [c for c in docker_calls(tmp_path) if c[0] == "run"]
+    assert probe[probe.index("--name") + 1] == "ht-other-gpu_probe"
+
+
+@pytest.mark.parametrize("where", ["h1-keys", "../res"])
+def test_a_miner_directory_beside_the_results_directory_is_accepted(env, tmp_path, where):
+    # Prefix siblings of the results directory are not inside it and not above it.
+    prod = prod_env((tmp_path / "results" / where).resolve())
+    p = run({**env, **prod}, tmp_path, "--prod")
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+def test_the_miner_directory_guard_does_not_depend_on_the_upload(env, tmp_path):
+    prod = prod_env(tmp_path / "results/h1/miner")
+    p = run({**env, **prod}, tmp_path, "--prod")
+    assert p.returncode == 2 and "inside the results directory" in p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+# --- text that is not ASCII, and a results root the upload filters cannot be trusted with -------
+
+
+def has_locale(name: str) -> bool:
+    try:
+        out = subprocess.run(["locale", "-a"], capture_output=True, text=True, check=False).stdout
+    except FileNotFoundError:
+        return False
+    return name.lower().replace("-", "") in out.lower().replace("-", "")
+
+
+@pytest.mark.skipif(not has_locale("en_US.utf8"), reason="needs the en_US.UTF-8 locale")
+@pytest.mark.parametrize(
+    "var,value",
+    [
+        ("HT_B300_STOP_GRACE", "５"),  # fullwidth digit five
+        ("HT_B300_POLL_SECONDS", "٣"),  # Arabic-Indic digit three
+        ("HT_B300_CONTAINER_PREFIX", "ht-é"),
+        ("HT_B300_EXPECT_GPUS", "٨"),
+    ],
+)
+def test_non_ascii_digits_and_letters_are_refused_in_a_utf8_locale(env, tmp_path, var, value):
+    # [0-9] and [a-z] match thousands of other code points in en_US.UTF-8; the arithmetic that
+    # follows prints an error and goes on, so the script itself must use the C locale.
+    p = run({**env, "LC_ALL": "en_US.UTF-8", var: value}, tmp_path)
+    assert p.returncode == 2 and var in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.skipif(not has_locale("en_US.utf8"), reason="needs the en_US.UTF-8 locale")
+@pytest.mark.parametrize("flag,value", [("--duration", "٣h"), ("--host", "é")])
+def test_non_ascii_arguments_are_refused_in_a_utf8_locale(env, tmp_path, flag, value):
+    p = run({**env, "LC_ALL": "en_US.UTF-8"}, tmp_path, flag, value)
+    assert p.returncode == 2 and flag.lstrip("-").replace("host", "host name") in p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize("root", ["{}/res[1]", "{}/a?b", "{}/a*b", "{}/a:rw", "rel/path", ""])
+def test_the_results_root_is_an_absolute_path_without_filter_or_mount_characters(
+    env, tmp_path, root
+):
+    # aws joins its filter patterns to the source directory unescaped: a [1] in the path turns
+    # --exclude '*' into a pattern that matches nothing, and everything is uploaded. Every root
+    # lives under tmp_path (the relative one through cwd) so that a script that accepts it cannot
+    # write anywhere else.
+    argv = ["bash", str(SCRIPT), "--results-root", root.format(tmp_path), "--host", "h1"]
+    p = subprocess.run(  # noqa: S603 - fixed argv
+        argv, env=env, cwd=tmp_path, capture_output=True, text=True, timeout=30, check=False
+    )
+    assert p.returncode == 2 and "--results-root" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+# --- the record of a run is this run's record ----------------------------------------------------
+
+
+def test_a_read_only_stop_json_of_an_earlier_run_is_replaced_not_uploaded(env, tmp_path):
+    out = tmp_path / "results/h1"
+    out.mkdir(parents=True)
+    (out / "stop.json").write_text(json.dumps({"reason": "mfu-failed", "rc": 6, "run_id": "old"}))
+    (out / "stop.json").chmod(0o444)
+    p = run(env, tmp_path, "--upload", "s3://bucket/b300")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert stop_json(tmp_path)["reason"] == "completed"  # not the old verdict
+    uploaded_stop = json.loads((tmp_path / "state/s3/bucket/b300/h1/stop.json").read_text())
+    assert uploaded_stop["reason"] == "completed"
+
+
+def test_rounds_a_failed_miner_prod_never_reached_keep_no_old_pass(env, tmp_path):
+    first = {**env, **prod_env(tmp_path / "miner", rounds="3 4")}
+    assert run(first, tmp_path, "--prod").returncode == 0
+    again = {**first, "FAKE_CRASH": "miner_prod"}  # round 3 dies, round 4 is never reached
+    p = run(again, tmp_path, "--prod", "--steps", "miner_prod", "--force", "--upload", "s3://b/p")
+    assert p.returncode == 8, p.stdout + p.stderr
+    kept = sorted(f.name for f in (tmp_path / "results/h1/miner-prod").iterdir())
+    assert kept == ["round-3.json"]  # the (empty) output of the crashed round, nothing of round 4
+    assert not [f for f in uploaded(tmp_path, "b/p/h1") if "round-4" in f]
+
+
+# --- the gates the second review showed unpinned -------------------------------------------------
+
+
+def test_a_miner_directory_inside_a_symlinked_results_root_is_refused(env, tmp_path):
+    # /results is usually a link to the NVMe: the physical path of the key directory must still
+    # be recognised as inside it.
+    real = tmp_path / "real"
+    (real / "h1/miner").mkdir(parents=True)
+    (tmp_path / "results").rmdir()  # the fixture made an empty one
+    (tmp_path / "results").symlink_to(real)
+    prod = prod_env(real / "h1/miner")
+    p = run({**env, **prod}, tmp_path, "--prod")
+    assert p.returncode == 2 and "inside the results directory" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize("rounds", ["", "3 ../x", "3;touch", "a", "3  4", "$(id)"])
+def test_production_rounds_are_plain_numbers(env, tmp_path, rounds):
+    prod = {**prod_env(tmp_path / "miner"), "HT_B300_PROD_ROUNDS": rounds}
+    p = run({**env, **prod}, tmp_path, "--prod")
+    assert p.returncode == 2 and "HT_B300_PROD_ROUNDS" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+def test_the_miner_config_must_be_a_file(env, tmp_path):
+    prod = {**prod_env(tmp_path / "miner"), "HT_B300_MINER_CONFIG": str(tmp_path / "miner")}
+    p = run({**env, **prod}, tmp_path, "--prod")  # a directory, not a miner.toml
+    assert p.returncode == 2 and "a miner.toml path" in p.stderr, p.stdout + p.stderr
+
+
+@pytest.mark.parametrize(
+    "dest",
+    ["http://x/y", "s3://", "s3://B/x", "s3://b/x y", "s3://b/--endpoint-url=x", "-x", "bucket/x"],
+)
+def test_the_upload_destination_is_an_s3_url_without_options(env, tmp_path, dest):
+    p = run(env, tmp_path, "--upload", dest)
+    assert p.returncode == 2 and "--upload" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == [] and not (tmp_path / "state/aws.jsonl").exists()
+
+
+@pytest.mark.parametrize("steps", ["gpu", "gpu_probe typo", "pull,mfu", "MFU"])
+def test_an_unknown_step_is_refused_not_run_as_nothing(env, tmp_path, steps):
+    p = run(env, tmp_path, "--steps", steps)
+    assert p.returncode == 2 and "unknown step" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+def test_an_unknown_option_is_refused(env, tmp_path):
+    p = run(env, tmp_path, "--frobnicate")
+    assert p.returncode == 2 and "usage" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize("digest", ["abc", "0" * 63, "0" * 65, "G" * 64])
+def test_an_image_digest_is_exactly_64_hex_digits(env, tmp_path, digest):
+    p = run(env, tmp_path, "--image", f"ghcr.io/cortexlm/cortex/hypertrain-gpu@sha256:{digest}")
+    assert p.returncode == 2 and "REPO@sha256" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+def test_a_run_for_another_gpu_count_and_capability_uses_them_everywhere(env, tmp_path):
+    fake = {
+        "HT_B300_EXPECT_GPUS": "4",
+        "HT_B300_EXPECT_CC": "12.0",
+        "FAKE_GPUS": "4",
+        "FAKE_CC": "12.0",
+    }
+    p = run({**env, **fake}, tmp_path)
+    assert p.returncode == 0, p.stdout + p.stderr
+    (probe,) = runs_of(tmp_path, "gpu_probe")
+    assert probe[probe.index("--expect-gpus") + 1] == "4"
+    assert probe[probe.index("--expect-cc") + 1] == "12.0"
+    (mfu,) = runs_of(tmp_path, "mfu")
+    assert mfu[mfu.index("--nproc-per-node") + 1] == "4"
+    assert mfu[mfu.index("--profile") + 1] == "mfu-dense-1b-dp4"
+    assert (tmp_path / "results/h1/mfu-dp4-flash.json").exists()
+    probe_json = json.loads((tmp_path / "results/h1/host_probe.json").read_text())
+    assert probe_json["expected"]["gpus"] == 4 and probe_json["expected"]["compute_cap"] == "12.0"
+
+
+def test_a_finished_run_signals_no_process(env, tmp_path):
+    # finish() kills the docker client only while one is running; a stale pid could have been
+    # reused by then.
+    assert run(env, tmp_path).returncode == 0
+    assert not (tmp_path / "state/pkill.jsonl").exists()
+
+
+def test_an_imds_error_is_not_a_spot_notice(env, tmp_path, launch):
+    Imds.status = 503  # throttled, or a token that expired: not an interruption
+    proc = launch(FAKE_BLOCK="gpu_probe", FAKE_BLOCK_RC="0")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    wait_until(lambda: Imds.gets >= 3, "three polls of the metadata service")
+    Path(f"{tmp_path}/state/ctr-gpu_probe.stopped").touch()  # the container then exits 0
+    assert proc.wait(timeout=30) == 0
+    stop = stop_json(tmp_path)
+    assert stop["reason"] == "completed" and stop["spot_notice"] is None
+
+
+def test_a_hanging_imds_does_not_defer_the_deadline(env, tmp_path, launch):
+    Imds.delay = 15  # the service accepts the connection and never answers
+    t0 = time.monotonic()
+    proc = launch("--duration", "2", FAKE_BLOCK="mfu")
+    assert proc.wait(timeout=12) == 143  # curl gives up after 2 s; 15 s of waiting would fail this
+    assert stop_json(tmp_path)["reason"] == "duration" and time.monotonic() - t0 < 12
+
+
+def test_finish_keeps_stderr_after_a_group_signal(env, tmp_path, launch):
+    # The group signal kills tee: what aws or docker print on stderr in finish() must still land
+    # in run.log.
+    mark = "AWS-STDERR-MARK"
+    proc = launch("--upload", "s3://bucket/b300", FAKE_BLOCK="gpu_probe", FAKE_AWS_STDERR=mark)
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    os.killpg(proc.pid, signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    assert mark in run_log(tmp_path)
+
+
+def test_finish_stops_the_watchdog_itself_not_at_its_next_poll(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="gpu_probe", HT_B300_POLL_SECONDS="30")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    pid = watchdog_pid(tmp_path)
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    wait_until(lambda: not alive(pid), "the watchdog to be stopped by finish()", timeout=3)
+
+
+def test_steps_tsv_records_how_long_each_step_took(env, tmp_path):
+    assert run(env, tmp_path).returncode == 0
+    rows = [r.split("\t") for r in (tmp_path / "results/h1/steps.tsv").read_text().splitlines()]
+    assert [r[0] for r in rows] == ["host_probe", "pull", "gpu_probe", "mfu", "miner_test"]
+    assert all(0 <= int(r[2]) < 60 for r in rows)  # seconds, not an epoch timestamp
+
+
+def test_changes_outside_the_mounted_directory_do_not_make_the_tree_dirty(env, tmp_path):
+    # hypertrain/ is a directory of the monorepo: only what the containers can see counts.
+    mono = tmp_path / "mono"
+    shutil.copytree(
+        ROOT / "scripts", mono / "hypertrain/scripts", ignore=shutil.ignore_patterns("__pycache__")
+    )
+    (mono / "docs").mkdir()
+    (mono / "docs/a.md").write_text("x")
+    git(mono, "init", "-q")
+    git(mono, "add", ".")
+    git(mono, "commit", "-q", "-m", "all")
+    (mono / "docs/note.md").write_text("untracked, outside hypertrain/")
+    script = mono / "hypertrain/scripts/b300/run_host.sh"
+    assert run(env, tmp_path, script=script).returncode == 0
+    assert stop_json(tmp_path)["git_dirty"] is False
+    (mono / "hypertrain/scripts/new.py").write_text("x = 1\n")
+    assert run(env, tmp_path, script=script).returncode == 0
+    assert stop_json(tmp_path)["git_dirty"] is True
+
+
+@pytest.mark.parametrize(
+    "fake",
+    [
+        {"FAKE_MFU_PATHS": "flash+expanded-kv"},
+        {"FAKE_MFU_PATHS": "math"},
+        {"FAKE_MFU_BACKEND": "math"},
+    ],
+    ids=["expanded-kv", "math-path", "math-backend"],
+)
+def test_an_mfu_run_off_the_flash_path_fails_the_step(env, tmp_path, fake):
+    p = run({**env, **fake}, tmp_path)
+    assert p.returncode == 6, p.stdout + p.stderr
+    assert runs_of(tmp_path, "miner_test") == []
+
+
+def test_a_results_root_with_every_documented_character_works(env, tmp_path):
+    root = tmp_path / "A@b+c=d,e_f.g-h"  # the whole accepted alphabet, one of each kind
+    p = run(env, tmp_path, "--steps", "host_probe", "--upload", "s3://bucket/b300", root=root)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert (root / "h1/stop.json").exists() and "stop.json" in uploaded(tmp_path)

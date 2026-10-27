@@ -131,8 +131,11 @@ def test_uniform_bias_shift_keeps_selection_and_mixture_weights() -> None:
     assert torch.equal(base, moved)
 
 
-def test_sequence_balance_loss_matches_deepseek_v3_formula() -> None:
-    """aux = mean over sequences of sum_i f_i P_i, f_i = E/(K T) * count_i, P_i = mean_t s'_i."""
+def test_sequence_balance_loss_counts_the_routed_selection() -> None:
+    """aux = mean over sequences of sum_i f_i P_i, f_i = E/(K T) * count_i of the routed (biased)
+    selection, P_i = mean_t s'_i of the unbiased normalised scores. DeepSeek-V3 eq. 18 counts the
+    unbiased top-k instead: the bias below makes the two differ, so this pins the documented
+    deviation (ADR 0006, S10 K5)."""
     cfg = kt.MICRO
     theta = init_params(cfg)
     theta[MOE + "router_bias"] = torch.linspace(-0.05, 0.05, cfg.n_experts)
@@ -232,6 +235,10 @@ def test_run_manifest_is_unsigned_strict_and_trains() -> None:
         kt.train_config({**doc, "model": {**doc["model"], "arch": "decoder"}})
     with pytest.raises(ValueError, match="grad_accum == 1"):
         kt.train_config({**doc, "inner": {**doc["inner"], "grad_accum": 2}})
+    with pytest.raises(ValueError, match="inner.opt == adamw"):
+        kt.train_config({**doc, "inner": {**doc["inner"], "opt": "muon"}})
+    with pytest.raises(ValueError, match="top_k_experts >= 2"):
+        kt.train_config({**doc, "model": {**doc["model"], "top_k_experts": 1}})
     other = {**doc, "model": {**doc["model"], "init_seed": 8}}
     assert kt.run_manifest_id(other) != kt.run_manifest_id(doc)
     n = cfg.inner.H * cfg.inner.micro_batch
@@ -275,6 +282,28 @@ def test_island_refuses_a_second_rank_before_training(dp: int) -> None:
     theta0 = init_params(cfg.model)
     with pytest.raises(ValueError, match="at most 1 rank"):
         emulate(2, lambda c: train_island(cfg, lay, c, theta0, a, trained))
+
+
+def test_forward_refuses_an_expert_parallel_moe_override() -> None:
+    cfg = kt.MICRO
+    with pytest.raises(ValueError, match="moe override"):
+        kt.forward(cfg, init_params(cfg), _tokens(cfg, 1, 4), moe=kt._moe)
+
+
+def test_qualify_cli_exits_on_differing_rounds_and_reports_equal_ones(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The B300 qualification reads this exit code: two rounds that differ must not pass."""
+    same = {"run_id": "r", "leaves_root": "1", "delta_hash": "2", "state_root": "3"}
+    monkeypatch.setattr("sys.argv", ["kimi_tiny", "--device", "cpu", "--dtype", "fp32"])
+    monkeypatch.setattr(kt, "qualify", lambda doc, device, rounds: [same, same])
+    kt.main()
+    assert json.loads(capsys.readouterr().out)["rounds"] == [same, same]
+    monkeypatch.setattr(
+        kt, "qualify", lambda doc, device, rounds: [same, {**same, "state_root": "4"}]
+    )
+    with pytest.raises(SystemExit, match="MISMATCH"):
+        kt.main()
 
 
 @pytest.mark.gpu

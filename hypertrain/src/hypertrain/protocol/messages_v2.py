@@ -186,6 +186,13 @@ class TrainingManifestV2(RunManifest):
                 # other than these would claim behaviour the model does not have.
                 if f32val(ms.capacity_factor) != 1 or ms.precision_policy not in (None, "default"):
                     raise ValueError("kimi requires capacity=1 and the default precision")
+                # Muon names the decoder tensors (optim.MUON_SUFFIXES): on kimi it would reach only
+                # wo/w1/w2/w3 and leave wq_a, wkv_b and the shared expert on AdamW at the Muon lr.
+                if inn.opt != "adamw":
+                    raise ValueError("kimi requires inner.opt adamw")
+                # One routed expert makes the normalised gate the constant ROUTED_SCALE.
+                if ms.top_k_experts < 2:
+                    raise ValueError("kimi requires top_k_experts >= 2")
                 # Shape-only count of models/kimi_tiny.param_shapes: MLA (q rank 12hd, kv rank
                 # 4hd, rope hd/2) per layer, layer 0 dense of (top_k + 1) * d_ff, then routed
                 # experts, router + bias and one shared expert.

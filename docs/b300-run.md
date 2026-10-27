@@ -12,16 +12,25 @@ run_host.sh [--image REPO@sha256:<64 hex>] [--results-root DIR] [--host NAME]
 
 ## Prerequisites
 
-- `python3`, `curl`, `flock`, `nvidia-smi`, and Docker with the nvidia runtime. The script uses
-  `docker` when `docker info` works, otherwise `sudo -n docker`. On the AWS hosts `ubuntu` is not
-  in the docker group, so it takes the `sudo -n` path.
-- The hosts also run Lium `executor-*` containers. Never touch them. The script only removes or
-  stops containers named `<prefix>-<step>` (`HT_B300_CONTAINER_PREFIX`, default `ht-b300`) that
-  carry its own run label. Start GPU steps only after the AWS agent reports the host free.
+- bash 5.1 or newer (Ubuntu 22.04 and 24.04 qualify; the script exits 2 on an older one),
+  `python3`, `curl`, `flock`, `git` (the commit of the checkout is recorded), `nvidia-smi`, and
+  Docker with the nvidia runtime. The script uses `docker` when `docker info` works, otherwise
+  `sudo -n docker`. On the AWS hosts `ubuntu` is not in the docker group, so it takes the `sudo -n`
+  path.
+- The hosts also run Lium `executor-*` containers. Never touch them. The script never removes a
+  container by name. It names its containers `<prefix>-<step>` (`HT_B300_CONTAINER_PREFIX`,
+  default `ht-b300`, see the input rules below) and, when a run ends, stops only those that carry
+  its own run label. A name already in use makes `docker run` fail (exit 5 to 8). After a hard kill
+  (SIGKILL, OOM) the previous run's container may still hold the name and the GPUs: list it with
+  `docker ps --filter label=io.cortex.b300-run` (prefix `sudo -n` where the script needs it), check
+  that it is yours, and remove it by id.
+  Start GPU steps only after the AWS agent reports the host free.
 - The monorepo at branch `v3-b300-run` (public repository):
   `git clone --depth 1 --branch v3-b300-run https://github.com/CortexLM/cortex.git ~/cortex`.
   Its `hypertrain/` directory is mounted read-only into every container.
-- A results root (default `/results`) writable by the invoking user. Put it on the NVMe RAID:
+- A results root (default `/results`) writable by the invoking user, as an absolute path of
+  letters, digits and `._/+@=,-` (the upload filters and the bind mount cannot take more). Put it
+  on the NVMe RAID:
   `sudo install -d -o "$USER" /mnt/nvme/results && sudo ln -sfn /mnt/nvme/results /results`.
   It and the Docker root each need 100 GiB free.
 - For `--upload s3://<bucket>/<prefix>` only: the `aws` CLI and an instance role that can write
@@ -31,7 +40,10 @@ run_host.sh [--image REPO@sha256:<64 hex>] [--results-root DIR] [--host NAME]
 
 The default image
 `ghcr.io/cortexlm/cortex/hypertrain-gpu@sha256:f4b2885f2dc89478da645b9f5e6f02891cd3309ef0a1f2aa0de04328e11cba0f`
-is public: an anonymous `docker pull` works without `docker login`.
+is public: an anonymous `docker pull` works without `docker login`. It was built before
+`hypertrain.models.kimi_tiny` existed and `gpu_probe` runs a kimi MICRO round from the image's own
+package: with this pin the step fails with `ImportError: cannot import name 'kimi_tiny'` (exit 5).
+Pass `--image` with a build that contains the module.
 
 ## Start, stop, re-run
 
@@ -68,11 +80,14 @@ Send `commands=["tail -n 40 /results/$(hostname -s)/run.log"]` to read progress,
   that writes `run.log`. The drain then logs straight to `run.log`. The unit uses
   `KillMode=mixed` so that systemd signals the script first. `TimeoutStopSec` must exceed
   `HT_B300_STOP_GRACE` plus the upload time.
-- **Re-run:** run the same command. A step whose `steps/<name>.rc` is `0 <image>` for the same
-  image is skipped; a new `--image` or `--force` re-runs it. A second run on the same results
-  directory is refused (exit 2, `.lock`). `host_probe` always re-runs, and so does a step that a
-  stop interrupted. `--steps` selects a subset, still in the fixed order. Each invocation starts a
-  new `--duration` deadline.
+- **Re-run:** run the same command. A step whose `steps/<name>.rc` is `0 <image> <commit>` for the
+  same image and the same clean git commit of the checkout is skipped. A new `--image`, a new
+  commit or `--force` re-runs it, and so does a modified tree (untracked files count) or a tree
+  without git: code nobody can name is never skipped. A step that starts again first removes its
+  own evidence files and its `.rc`, so a step that a stop interrupted has no `.rc` and re-runs.
+  A second run on the same results directory is refused (exit 2, `.lock`). `host_probe` always
+  re-runs. `--steps` selects a subset, still in the fixed order. Each invocation starts a new
+  `--duration` deadline.
 
 ## Steps and exit codes
 
@@ -88,16 +103,29 @@ The steps run in this order. The run stops at the first step that fails.
 | `miner_prod` | only with `--prod`: `run-v2 --round <W>` for each round | 8 `miner-prod-failed` |
 
 Other exit codes: `0` completed; `2` bad arguments, including `--prod` without its variables;
-`143` stopped by a signal, `--duration` or a Spot notice. Containers are named `ht-b300-<step>`
-and labelled `io.cortex.b300-run=<run_id>`.
+`9` `watchdog-died`; `143` stopped by a signal, `--duration` or a Spot notice. Once the start-up
+checks have passed, any other death of the script drains the same way with reason
+`unexpected-exit` and its exit status (1 if it had none). Before that, for example when the results
+directory cannot be created, the script exits 1 with nothing to drain and no `stop.json`. A run
+whose `stop.json` cannot be written exits 1 even if its steps passed. Containers are named `ht-b300-<step>` and labelled `io.cortex.b300-run=<run_id>`.
+
+Inputs are checked as text, in the C locale, before they are used (exit 2): `--duration` is `N`,
+`Nm` or `Nh` with at most 6 digits and not zero (leading zeros are decimal); `--host` starts with a
+letter or digit and has only letters, digits and `._-`; `HT_B300_POLL_SECONDS` is a plain decimal
+from 0.001 to 59.999 (at most 3 decimals, no leading zero); `HT_B300_STOP_GRACE` has at most 4
+digits; `HT_B300_EXPECT_GPUS` is 1 to 99; `HT_B300_CONTAINER_PREFIX` is `ht-`, then a lowercase
+letter or digit, then lowercase letters, digits and `_.-`; `--results-root` is as described above.
 
 ## Results and PASS criteria
 
 Every run writes `run.log` (appended across runs), `steps.tsv` (one row per executed step: name,
-rc, seconds, run_id), `steps/<name>.rc` (the latest rc of each step and its image) and `stop.json` under
-`/results/<host>/`. `stop.json` holds `run_id`, `reason`, `rc`, `image`, `steps` (rc per step),
-`ran` (steps executed by this invocation) and `spot_notice`. `spot-instance-action.json` is
-written only after a Spot notice.
+rc, seconds, run_id), `steps/<name>.rc` (the latest rc of each step, with its image and commit) and
+`stop.json` under `/results/<host>/`. `stop.json` holds `run_id`, `reason`, `rc`, `image`,
+`git_rev` and `git_dirty` (the checkout's HEAD and whether the tree was modified; `unknown` and
+`null` without git), `steps` (rc per step), `ran` (steps executed by this invocation),
+`spot_notice` and `errors` (an rc file, `steps.tsv` or Spot answer that could not be read; a Spot
+answer that is not JSON is kept as `{"unparsed": <first 200 characters>}`).
+`spot-instance-action.json` is written only after a Spot notice of this run.
 
 - **host_probe** writes `host_probe.json`, `nvidia-smi.csv`, `nvidia-smi.txt`, `efa-devices.txt`,
   `df.txt`, and `fi_info.txt` when `fi_info` exists. PASS: `ok: true` and every `checks` entry is
@@ -107,8 +135,11 @@ written only after a Spot notice.
 - **pull** writes `pull.log` and `pull-digests.json`. PASS: the list contains the requested digest.
 - **gpu_probe** writes `gpu_probe.json`. PASS: `ok: true`, with `checks` `torch_cu130`,
   `gpu_count`, `capability`, `same_sm_count` and `bitwise_smoke` all true. `bitwise_smoke` means
-  that an fp32 matmul, a bf16 matmul and a flash-SDPA forward and backward pass gave the same
-  digests on every GPU and every repeat. Also read:
+  that an fp32 matmul, a bf16 matmul, the attention forward and backward pass of the backend that
+  `select_backend` picks for the device (`HT_ATTN_BACKEND` included: `math` on sm_103) and one
+  kimi-k3-pro-tiny MICRO round (bf16; the three roots are the `kimi_micro_*` digests) gave the same
+  digests on every GPU and every repeat. If the probe raises, `gpu_probe.json` holds
+  `{"ok": false, "error": ...}`; an earlier run's file is removed before the step. Also read:
   - `arch_list`: expect `["sm_75","sm_80","sm_86","sm_90","sm_100","sm_120"]`. There is no
     `sm_103`; the B300 runs the `sm_100` cubins.
   - `devices[].sm_count`: the B300 SM count, measured as 148 on host B on 2026-10-26. Production
@@ -139,7 +170,8 @@ written only after a Spot notice.
 - `HT_B300_MINER_CONFIG`: the path to `miner.toml`, which must set `device = "cuda"` (the default
   is `cpu`). Its directory is mounted at the same path, so the `keyfile` and `workdir` it names
   must be inside it. The container runs as `--user $(id -u):$(id -g)`, so the keyfile must have
-  mode 0600 and belong to the invoking user.
+  mode 0600 and belong to the invoking user. That directory must be neither inside nor above the
+  results directory (exit 2): the results directory is mounted at `/out` and uploaded.
 - `HT_B300_PROD_ROUNDS`: the round numbers the operator opened, separated by spaces.
 
 ```bash
@@ -152,8 +184,10 @@ HT_B300_PROD_ROUNDS="<W1> <W2>" nohup ~/cortex/hypertrain/scripts/b300/run_host.
   beforehand. No owner key is on the host.
 - **PASS:** every `round-<W>.json` is `{"status": "UPLOADED"}`. `UPLOADED` means the upload was
   accepted, not that the audit succeeded or that payment was made.
-- **New rounds** after a passed `miner_prod` need `--prod --steps miner_prod --force`. A round that
-  would start after the deadline fails the step.
+- **New rounds** after a passed `miner_prod` need `--prod --steps miner_prod --force`. The step
+  removes the files of the rounds in `HT_B300_PROD_ROUNDS`, including any it never reaches, before
+  it starts; the files of other rounds stay. A round that would start after the deadline fails the
+  step.
 - **Manifest pins (owner/Principal action):** the signed run manifest must pin
   `reference_spec.sm_count` to the B300 SM count and include 595.91.07 in `driver_allowlist`
   (`miner/core.py` refuses otherwise). `reference_spec.image_digest` must equal the image digest
@@ -161,14 +195,24 @@ HT_B300_PROD_ROUNDS="<W1> <W2>" nohup ~/cortex/hypertrain/scripts/b300/run_host.
 
 ## Auto-stop
 
-A stop comes from `--duration` (default `3h`; `3h`, `90m` or seconds), from SIGTERM or SIGINT to
-the script's pid, or from a Spot notice: a watchdog polls IMDSv2
-`latest/meta-data/spot/instance-action` every `HT_B300_POLL_SECONDS` (default 5). The script then
-runs `docker stop --time ${HT_B300_STOP_GRACE:-60}` on this run's containers (label
-`io.cortex.b300-run`) and writes `stop.json` with `reason` `duration`, `spot-interruption` or
-`signal`. With `--upload`, it copies the results to `s3://<bucket>/<prefix>/<host>/` through
-`aws s3 cp --recursive`; it also does this after a completed or a failed run. Local NVMe does not
-survive Spot termination: use `--upload`, or collect with `scp` or `aws s3` before you stop.
+A stop comes from `--duration` (default `3h`; `3h`, `90m` or seconds), from SIGTERM, SIGINT or
+SIGHUP to the script's pid (the documented `nohup ... &` start ignores SIGHUP, because of `nohup`,
+and SIGINT, because it is a background job of a non-interactive shell: use SIGTERM), or from a Spot
+notice: a watchdog polls IMDSv2 `latest/meta-data/spot/instance-action` every
+`HT_B300_POLL_SECONDS` (default 5). The script then runs `docker stop --time
+${HT_B300_STOP_GRACE:-60}` on this run's containers (label `io.cortex.b300-run=<run_id>`) and
+writes `stop.json` with `reason` `duration`, `spot-interruption`, `signal`, `unexpected-exit`,
+`watchdog-died` (the watchdog is waited on during `pull` and every container step and checked
+before each step; without it neither `--duration` nor a Spot notice could stop the run) or the
+`*-failed` reason of a step. With `--upload`, it copies the
+evidence files to `s3://<bucket>/<prefix>/<host>/` through `aws s3 cp --recursive` with
+`--exclude '*'` and one `--include` per file: `run.log`, `steps.tsv`, `stop.json`,
+`spot-instance-action.json`, `steps/*.rc`, the files listed under each step above and
+`miner-prod/round-*.json`. The lock, the IMDS scratch file and anything else in the directory stay
+on the host. It does this after a completed or a failed run; `aws s3 cp` never deletes, so a file
+of an earlier run can stay under the prefix beside this run's `stop.json`: read `stop.json` first.
+Local NVMe does not survive Spot termination: use `--upload`, or collect with `scp` or `aws s3`
+before you stop.
 
 ## Collect and compare the two hosts
 

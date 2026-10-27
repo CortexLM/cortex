@@ -3,7 +3,8 @@
 Architecture only: random init, no weights, no tokenizer. Multi-head Latent Attention with a
 decoupled RoPE key, one dense first layer, then MoE layers with one shared expert and sigmoid
 top-k routing balanced by a selection-only bias (auxiliary-loss-free, DeepSeek-V3 sign rule) plus
-the DeepSeek-V3 sequence-wise balance loss as ``aux``.
+a sequence-wise balance loss as ``aux``: DeepSeek-V3 eq. 17-20 with f_i counted on the routed
+(biased) selection, as torchtitan does, not on the unbiased top-k of eq. 18 (ADR 0006).
 
 Deterministic like ``trainer.model``: top-k is ``route`` (stable descending sort, ties -> lowest
 expert index) with capacity = token count (no drops), dispatch/combine are ``permute_rows``
@@ -116,6 +117,8 @@ def dims(cfg: ModelConfig) -> Dims:
         raise ValueError("MLA needs n_kv_heads == n_heads and a head dim divisible by 4")
     if not cfg.is_moe or cfg.n_layers <= FIRST_DENSE:
         raise ValueError(f"{ARCH} needs n_experts > 1 and n_layers > {FIRST_DENSE}")
+    if cfg.top_k_experts < 2:  # the gate of a single expert is the constant ROUTED_SCALE
+        raise ValueError(f"{ARCH} needs top_k_experts >= 2")
     return Dims(head, head // 2, 12 * head, 4 * head, (cfg.top_k_experts + N_SHARED) * cfg.d_ff)
 
 
@@ -266,7 +269,8 @@ def _moe(
     routed = y.view(k, n, d).sum(0)
     s1, s3, s2 = (p[pre + "shared_" + w].to(dt) for w in ("w1", "w3", "w2"))
     shared = _swiglu(flat, s1, s3, s2)
-    # DeepSeek-V3 sequence-wise balance loss: mean over sequences of sum_i f_i * P_i.
+    # Sequence-wise balance loss: mean over sequences of sum_i f_i * P_i, with f_i counted on
+    # the routed (biased) selection; DeepSeek-V3 eq. 18 counts the unbiased top-k (ADR 0006).
     seq = torch.arange(n, device=x.device).repeat(k) // t
     hits = torch.bincount(seq * e + experts, minlength=b * e).view(b, e).float()
     prob = (scores / scores.sum(-1, keepdim=True)).view(b, t, e).mean(1)
@@ -352,6 +356,8 @@ def train_config(doc: dict[str, Any]) -> TrainConfig:
     inner = InnerConfig(**doc["inner"])
     if inner.grad_accum != 1:  # the bias rule runs per backward pass = per step only at ga 1
         raise ValueError(f"{ARCH} TEST runs need grad_accum == 1")
+    if inner.opt != "adamw":  # optim.MUON_SUFFIXES names decoder tensors, not wq_a/shared_*
+        raise ValueError(f"{ARCH} TEST runs need inner.opt == adamw")
     return TrainConfig(model, inner, CompressConfig(**doc["compress"]))
 
 

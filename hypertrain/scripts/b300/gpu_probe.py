@@ -1,20 +1,32 @@
 """In-container GPU probe for scripts/b300/run_host.sh (step c): torch build, devices, determinism.
 
 Records the torch build (version, CUDA, compiled arch list), every visible device (name,
-capability, SM count, memory) and a bitwise determinism smoke. The smoke runs a fixed fp32 and
-bf16 matmul and the production flash-SDPA geometry (bf16, 16 q heads, 8 kv heads, head dim 128,
-forward and backward) on each device, several times. It passes only when every repeat on every
-device yields the same digests. Inputs are generated on the CPU, so all devices see the same bytes.
-A kernel error (e.g. no kernel image for the device) is recorded as the digest value.
+capability, SM count, memory) and a bitwise determinism smoke. The smoke runs, on each device and
+several times, a fixed fp32 and bf16 matmul, the production attention geometry (bf16, 16 q heads,
+8 kv heads, head dim 128, forward and backward) and one kimi-k3-pro-tiny MICRO round (bf16, eager
+MLA and the MoE sort). The attention backend is the one select_backend() picks for that device,
+HT_ATTN_BACKEND included: "math" on sm_103 until a backend is qualified there, flash-SDPA on
+RTX 5090. It passes only when every repeat on every device yields the same digests, the three
+MICRO roots included. Inputs are generated on the CPU, so all devices see the same bytes.
+A kernel error (a RuntimeError, e.g. no kernel image for the device) is recorded as the digest
+value; any other exception is a defect and surfaces.
+
+The image must contain hypertrain.models.kimi_tiny. One built before it (the default pin of
+run_host.sh predates it) fails here with ImportError (cannot import name 'kimi_tiny'): pass
+--image of a newer build.
 
 Usage (inside the GPU image, HT_* env as the miner runs it):
   python scripts/b300/gpu_probe.py --out /results/gpu_probe.json --expect-gpus 8 --expect-cc 10.3
-Exit 0 when every check passes, 1 otherwise; the JSON is written either way.
+Exit 0 when every check passes, 1 otherwise. When the probe raises (any exception,
+KeyboardInterrupt and SystemExit included) the JSON at --out becomes
+{"ok": false, "error": "<Type>: <message>"} and the exception still ends the process non-zero. A
+kill (docker stop) or bad arguments leave an old file in place: run_host.sh removes it first.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import sys
@@ -36,7 +48,7 @@ def digest(t: torch.Tensor) -> str:
 
 
 def workload(device: torch.device) -> dict[str, str]:
-    """Digests of one smoke pass on ``device``; an exception becomes ``error: <message>``."""
+    """Digests of one smoke pass on ``device``; a RuntimeError becomes ``error: <message>``."""
     g = torch.Generator().manual_seed(0)
     a, b = (torch.randn(1024, 1024, generator=g) for _ in range(2))
     n, h, kvh, t, hd = (GEOMETRY[k] for k in ("batch", "heads", "kv_heads", "seq", "head_dim"))
@@ -49,7 +61,9 @@ def workload(device: torch.device) -> dict[str, str]:
         out["matmul_bf16"] = digest(a.to(device, torch.bfloat16) @ b.to(device, torch.bfloat16))
     except RuntimeError as e:
         out["matmul"] = f"error: {e}"
-    backend: Backend = "sdpa-flash" if device.type == "cuda" else "math"
+    # The backend production training takes on this device (HT_ATTN_BACKEND included), not a
+    # fixed one: on sm_103 that is "math", the numerics the later steps will actually run.
+    backend: Backend = select_backend(device)
     try:
         qkv = [x.to(device, torch.bfloat16).requires_grad_() for x in (q, k, v)]
         o = attention(qkv[0], qkv[1], qkv[2], backend)
@@ -60,6 +74,19 @@ def workload(device: torch.device) -> dict[str, str]:
             out[f"{backend}_{name}"] = digest(x.grad)
     except RuntimeError as e:
         out[backend] = f"error: {e}"
+    try:
+        # One kimi-k3-pro-tiny MICRO round in the miner's dtype: eager MLA and the MoE sort, which
+        # the attention smoke above never touches. Its roots must agree across repeats and devices.
+        # Imported here: an image without the module must fail through main()'s JSON, not while
+        # this script loads.
+        from hypertrain.models import kimi_tiny
+
+        doc = kimi_tiny.run_manifest(dataclasses.replace(kimi_tiny.MICRO, compute_dtype="bf16"))
+        (res,) = kimi_tiny.qualify(doc, str(device), 1)
+        for root in ("leaves_root", "delta_hash", "state_root"):
+            out[f"kimi_micro_{root}"] = res[root]
+    except RuntimeError as e:
+        out["kimi_micro"] = f"error: {e}"
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     return out
@@ -149,10 +176,18 @@ def main() -> int:
     if a.expect_cc != "any":
         major, minor = a.expect_cc.split(".")
         cc = (int(major), int(minor))
-    ev = probe(a.repeats, a.device)
-    ev["checks"] = checks(ev, a.expect_gpus, cc)
-    ev["ok"] = all(ev["checks"].values())
-    a.out.write_text(json.dumps(ev, indent=1, sort_keys=True))
+    ev: dict[str, Any] = {"kind": "b300-gpu-probe", "ok": False}
+    try:
+        ev |= probe(a.repeats, a.device)
+        ev["checks"] = checks(ev, a.expect_gpus, cc)
+        ev["ok"] = all(ev["checks"].values())
+    except BaseException as e:  # incl. KeyboardInterrupt: the run still fails, the file says so
+        ev["ok"] = False
+        ev["error"] = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        # Always replaces the file: a stale ok:true from an earlier run must not survive this one.
+        a.out.write_text(json.dumps(ev, indent=1, sort_keys=True))
     print(json.dumps({"ok": ev["ok"], "checks": ev["checks"], "arch_list": ev["arch_list"]}))
     return 0 if ev["ok"] else 1
 
