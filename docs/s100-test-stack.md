@@ -244,7 +244,7 @@ L="docker exec -i hypertrain-test-challenge python -I - --master http://127.0.0.
   --admin-token-file /run/secrets/admin.token"
 O=hypertrain/scripts/ops/live_operator.py
 ssh root@s100 "$L open --w 0 --hotkey H0 --hotkey H1 --hotkey H2 --hotkey H3 \
-  --offsets 3,6,80,82,150,180" < $O     # d_final - d_audit = 98 <= 100
+  --offsets 3,6,80,82,150,180" < $O     # gap 98: one lease window; end with 282 (gap 200) to fit a replacement lease
 ATEN_CPU_CAPABILITY=avx2 $PY -I $T/cpu_miners.py round DIR 0 0 1 2 3   # one miner at a time
 ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID 0" < $T/round_status.py
 ssh root@s100 "$L audits --w 0" < $O     # once now >= d_audit
@@ -252,13 +252,14 @@ ssh root@s100 "$L finalize --w 0" < $O   # once every audit lease is complete wi
 ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID" < $T/weights_once.py
 ```
 
-**Keep `d_final - d_audit <= 100` beacon rounds.** Audit jobs are created with
-`created = d_audit` (`store.py:6427`), and each lease gets `expires = min(now + lease_rounds,
-d_final)` (`store.py:6586-6589`). `AuditJobV2` refuses `expires > created + 100` when H <= 30
-(`messages_v2.py:441-444`, `:659-663`). Audits can only be created once `now >= d_audit`, so with
-a wider gap every lease answers 409 "lease exceeds 100 beacon rounds" and the round is never
-audited. `live_operator.py open` refuses a gap above `audit_lease_rounds(H, 16.0)` for the
-manifest's H (100 rounds when H <= 30) and above 200 rounds for any H.
+**`d_final - d_audit` decides how many audit leases fit in a round.** The store dates every
+lease by the round it starts in (`created_beacon = now`), so a lease validates at any round before
+`absolute = min(d_final, d_audit + 2 * lease_rounds)`; `lease_rounds` is 100 for H <= 30. With a
+gap of 100 rounds or less the first lease runs to `d_final`: if its auditor goes silent nobody
+replaces it and the job is exhausted at `d_final`. With a gap of 101 to 200 rounds a second auditor
+can take the job inside the same window. `live_operator.py open` accepts any gap from 2 to 200
+rounds for every H; 200 is the service horizon (`store.py:5109`). A round with a wider gap closes
+later: 100 more rounds (5 minutes) per extra 100.
 
 **Upload one miner at a time.** A relay image built before `BeaconCache` (`relay/app.py`)
 BLS-verifies drand in `now()` on every capability and chunk call; later images share one verified
