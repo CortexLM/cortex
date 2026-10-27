@@ -3,6 +3,7 @@ selection and the whitelist reader of the result tar. No ssh, docker or GPU runs
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import io
@@ -61,6 +62,10 @@ def pinned(tmp_path: Path) -> tuple[Path, Path]:
 
 def host_data(pinned: tuple[Path, Path], label: str = "h1", **over: Any) -> dict[str, Any]:
     key, known = pinned
+    if label != "h1" and "known_hosts_file" not in over:  # every other host pins a key of its own
+        known = known.with_name(f"known_hosts_{label}")
+        blob = base64.b64encode(f"host key of {label}".encode()).decode()
+        known.write_text(f"{label}.example.com ssh-ed25519 {blob}\n")
     return {
         "label": label,
         "address": "gpu-1.example.com",
@@ -229,6 +234,51 @@ def test_config_host_labels_are_unique(tmp_path: Path, pinned: tuple[Path, Path]
     twice = [host_data(pinned, "h1"), host_data(pinned, "h1", address="gpu-2.example.com")]
     with pytest.raises(ValidationError, match="host labels must be unique"):
         load_config(config_data(tmp_path, pinned, hosts=twice))
+
+
+def test_two_labels_pinning_the_same_ssh_host_key_are_refused_at_load(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    # Given: one box listed twice, under two labels and two addresses, with one pinned key (X4).
+    blob = "AAAA"  # the key of pinned's known_hosts
+    copy = tmp_path / "known_hosts_copy"
+    copy.write_text(f"gpu-2.example.com ssh-ed25519 {blob} the same key, another name\n")
+    shared_file = host_data(
+        pinned, "h2", address="gpu-2.example.com", known_hosts_file=str(pinned[1])
+    )
+    copied_key = host_data(pinned, "h2", address="gpu-2.example.com", known_hosts_file=str(copy))
+    own_key = host_data(pinned, "h2", address="gpu-2.example.com")
+    # When / Then: the same file, or the same key in another file, is refused; its own key loads.
+    for second in (shared_file, copied_key):
+        with pytest.raises(ValidationError, match="h1 and h2 pin the same host key"):
+            load_config(config_data(tmp_path, pinned, hosts=[host_data(pinned, "h1"), second]))
+    assert (
+        len(load_config(config_data(tmp_path, pinned, hosts=[host_data(pinned), own_key])).hosts)
+        == 2
+    )
+
+
+def test_certificate_authority_lines_are_not_a_pinned_host_key(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    # Given: both hosts trust one CA, and each pins a key of its own.
+    authority = "@cert-authority *.example.com ssh-ed25519 Q0FDQQ==\n"
+    second = host_data(pinned, "h2", address="gpu-2.example.com")
+    for known in (pinned[1], Path(second["known_hosts_file"])):
+        known.write_text(authority + known.read_text())
+    # When / Then
+    config = load_config(config_data(tmp_path, pinned, hosts=[host_data(pinned), second]))
+    assert [h.label for h in config.hosts] == ["h1", "h2"]
+
+
+def test_same_address_and_port_twice_is_refused(tmp_path: Path, pinned: tuple[Path, Path]) -> None:
+    # Given: two labels with their own keys that name one endpoint.
+    twice = [host_data(pinned, "h1"), host_data(pinned, "h2")]
+    # When / Then
+    with pytest.raises(ValidationError, match="hosts must not share an address and port"):
+        load_config(config_data(tmp_path, pinned, hosts=twice))
+    other_port = [host_data(pinned, "h1"), host_data(pinned, "h2", port=2222)]
+    assert len(load_config(config_data(tmp_path, pinned, hosts=other_port)).hosts) == 2
 
 
 @pytest.mark.parametrize("mode", [0o640, 0o604, 0o660, 0o606, 0o666, 0o777])
@@ -508,6 +558,16 @@ def test_one_machine_is_one_label_and_a_label_keeps_its_machine(executor: ce.Exe
         executor._admit("h2", snap([gpu(0)]))
 
 
+def test_a_gpu_in_two_labels_refuses_the_second_label(executor: ce.Executor) -> None:
+    # Given: h1 holds GPUs 0 and 1.
+    executor._admit("h1", snap([gpu(0), gpu(1)]))
+    # When / Then: another box that prints one of them is the same hardware behind a new set.
+    with pytest.raises(ce.HostRefused, match="shares a GPU with host h1"):
+        executor._admit("h2", snap([gpu(1), gpu(2)]))
+    # The refusal left no trace: h2 is still free to be a machine of its own.
+    assert executor._admit("h2", snap([gpu(2), gpu(3)]))
+
+
 # -- selection ---------------------------------------------------------------------------------
 
 
@@ -643,6 +703,38 @@ def test_observed_image_sources_that_are_not_a_sha256_are_refused(claimed: Any) 
 def test_check_environment_forwards_the_reported_image_sources(executor: ce.Executor) -> None:
     record = executor._check_environment(observed(image_sources_sha256="ab" * 32), spec(), [gpu(0)])
     assert record["image_sources_sha256"] == "ab" * 32
+
+
+PIN = "ab" * 32
+
+
+@pytest.mark.parametrize(
+    "reported,accepted",
+    [(PIN, True), ("cd" * 32, False), (None, False)],
+    ids=["the-pinned-image", "another-image", "no-measurement"],
+)
+def test_container_image_sources_must_equal_the_pin_when_one_is_set(
+    tmp_path: Path, pinned: tuple[Path, Path], reported: str | None, accepted: bool
+) -> None:
+    pinned_executor = ce.Executor(
+        load_config(config_data(tmp_path, pinned, image_sources_sha256=PIN)), transports={}
+    )
+    environment = observed(image_sources_sha256=reported)
+    if accepted:
+        record = pinned_executor._check_environment(environment, spec(), [gpu(0)])
+        assert record["image_sources_sha256"] == PIN
+        return
+    with pytest.raises(ce.HostRefused, match="image sources differ from the pinned image"):
+        pinned_executor._check_environment(environment, spec(), [gpu(0)])
+
+
+@pytest.mark.parametrize("reported", [PIN, None])
+def test_an_unset_pin_accepts_any_reported_image_sources(
+    executor: ce.Executor, reported: str | None
+) -> None:
+    environment = observed(image_sources_sha256=reported)
+    record = executor._check_environment(environment, spec(), [gpu(0)])
+    assert record["image_sources_sha256"] == reported
 
 
 def test_check_environment_returns_what_the_store_reads(executor: ce.Executor) -> None:
@@ -1418,7 +1510,11 @@ def test_attempt_record_tells_machines_apart_by_gpus_and_instances_by_address_an
         "h3": FakeHost([gpu(3)]),
         "h4": FakeHost([gpu(4)]),
     }
-    config = load_config(config_data(tmp_path, pinned, hosts=hosts))
+    # The config refuses these layouts (each shares an endpoint or a key with another host), so the
+    # hosts are set after loading: what is under test is the identity the record derives, one
+    # factor at a time.
+    config = load_config(config_data(tmp_path, pinned))
+    config = config.model_copy(update={"hosts": [ce.HostSpec.model_validate(h) for h in hosts]})
     executor = ce.Executor(config, transports=boxes)
     records: list[dict[str, Any]] = []
 

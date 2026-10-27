@@ -206,13 +206,36 @@ class ExecutorConfig(Boundary):
     max_result_bytes: StrictInt = Field(16 << 30, ge=SMALL)
     pull_timeout_seconds: StrictInt = Field(900, ge=30)
     ssh_connect_timeout_seconds: StrictInt = Field(15, ge=1, le=120)
+    # Operator pin of the package files the image holds (cuda_executor_runner.sources_digest, the
+    # value a qualification records): a container that reports another one refuses its host.
+    image_sources_sha256: Hex64 | None = None
 
     @model_validator(mode="after")
     def _unique(self) -> ExecutorConfig:
         labels = [h.label for h in self.hosts]
         if len(set(labels)) != len(labels):
             raise ValueError("host labels must be unique")
+        endpoints = [(h.address, h.port) for h in self.hosts]
+        if len(set(endpoints)) != len(endpoints):
+            raise ValueError("hosts must not share an address and port")
+        owners: dict[tuple[str, str], str] = {}
+        for host in self.hosts:
+            for key in _pinned_keys(host.known_hosts_file):
+                owner = owners.setdefault(key, host.label)
+                if owner != host.label:
+                    raise ValueError(f"hosts {owner} and {host.label} pin the same host key")
         return self
+
+
+def _pinned_keys(known_hosts: Path) -> set[tuple[str, str]]:
+    """(key type, base64 blob) of every host key line; a marker line (`@cert-authority`,
+    `@revoked`) is not the key of a host."""
+    keys = set()
+    for line in known_hosts.read_text(errors="replace").splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and not fields[0].startswith(("#", "@")):
+            keys.add((fields[1], fields[2]))
+    return keys
 
 
 @dataclass(frozen=True)
@@ -594,6 +617,7 @@ class Executor:
         self._guard = threading.Lock()
         self._machines: dict[str, int] = {}
         self._quarantined: dict[str, str] = {}
+        self._gpus: dict[str, frozenset[str]] = {}
         # (host label, image digest) -> the compute cache directory already created on that host;
         # a host runs one attempt at a time, so no key has two writers
         self._cache_dirs: dict[tuple[str, str], str] = {}
@@ -633,7 +657,8 @@ class Executor:
 
     def _admit(self, label: str, snapshot: Snapshot) -> int:
         """machine_id from every GPU UUID of the host; one machine per label, one label each."""
-        machine = _ident("machine", ",".join(sorted(g.uuid for g in snapshot.gpus)))
+        uuids = frozenset(g.uuid for g in snapshot.gpus)
+        machine = _ident("machine", ",".join(sorted(uuids)))
         with self._guard:
             known = self._machines.get(label)
             owner = next((k for k, v in self._machines.items() if v == machine), None)
@@ -641,7 +666,13 @@ class Executor:
                 raise HostRefused("the machine behind this host changed")
             if owner is not None and owner != label:
                 raise HostRefused(f"same machine as host {owner}")
+            # A box that prints some of another label's GPUs under a new set is that hardware
+            # again: the machine id follows the whole set, so only the overlap shows it.
+            shared = next((k for k, v in self._gpus.items() if k != label and v & uuids), None)
+            if shared is not None:
+                raise HostRefused(f"shares a GPU with host {shared}")
             self._machines[label] = machine
+            self._gpus[label] = uuids
         return machine
 
     # -- one attempt ----------------------------------------------------------------------
@@ -931,6 +962,9 @@ class Executor:
             or environment.drivers[0] not in ref.driver_allowlist
         ):
             raise HostRefused(reason or "container environment contradicts the host probe")
+        pin = self.config.image_sources_sha256
+        if pin is not None and environment.image_sources_sha256 != pin:
+            raise HostRefused("container image sources differ from the pinned image")
         return {**environment.model_dump(mode="json"), "image_digest": ref.image_digest}
 
     def _publish(
