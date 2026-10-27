@@ -161,8 +161,11 @@ A run POSTed while the TEST challenge already hosts one goes to the child store 
 
 A build that fails or is interrupted removes what it created (seeds you pre-staged stay). When the
 campaign is over, clean `$OUT` with `hypertrain/scripts/b300/d20/build_test_manifest.sh --clean $OUT`:
-it deletes `secrets`, `inputs`, `out` and `state` under `$OUT`, then `$OUT` if it is empty, and
-refuses a relative path, a symlink or a directory that is not a builder output.
+it deletes `secrets`, `inputs`, `out` and `state` under `$OUT`, then `$OUT` if it is empty. It
+refuses a relative path, `/`, a symlink (also with a trailing slash) and any directory it cannot
+prove is a builder output: `inputs/training.json` with `inputs/public-keys.json`, or a seed in
+`secrets/`, and `secrets/` may hold only `*.seed` files and `state/` only `objects/`. The TEST
+stack's own `/data/hypertrain-test` is refused (its `secrets/` holds `coord.key`).
 
 ## 3. Re-bind the TEST relay to the run
 

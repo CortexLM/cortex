@@ -19,9 +19,11 @@
 # (pre-staged seeds stay), inputs, out and state. The exit code is the failure's. SIGKILL cannot be
 # trapped: clean that OUT_DIR with --clean.
 # --clean OUT_DIR removes secrets, inputs, out and state under OUT_DIR, then OUT_DIR if it is empty,
-# when the campaign is over. It exits 2 and removes nothing for a relative path, a symlinked OUT_DIR,
-# secrets, inputs, out or state, and a directory with neither inputs/training.json nor secrets/. It
-# prints directory names only.
+# when the campaign is over. It exits 2 and removes nothing for a relative path, / , a symlinked
+# OUT_DIR, secrets, inputs, out or state (a trailing slash is stripped first), and a directory it
+# cannot prove is a builder output: it needs inputs/training.json with inputs/public-keys.json, or
+# a seed in secrets/; secrets/ may hold only *.seed files and state/ only objects/ (so the TEST
+# stack's own secrets/ and state/ are refused). It prints directory names only.
 # HT_D20_GEOMETRY=dense-1b (default): the dense-1b-bf16 qualification geometry
 # (scripts/mfu_profiles.json mfu-dense-1b, H=8 J=4 micro_batch=2 warmup=2 lr=3e-3, dense-int8),
 # layout pp=1 ep=1 dp=2 n_gpus=2, a synthetic 4096-sample u32 fixture (no quality claim).
@@ -43,13 +45,33 @@ if [ "${1:-}" = --clean ]; then
     [ "$#" -eq 2 ] || { echo "usage: $0 --clean OUT_DIR" >&2; exit 2; }
     OUT=$2
     case $OUT in /*) ;; *) echo "OUT_DIR must be an absolute path" >&2; exit 2 ;; esac
+    # A trailing slash (shell completion adds one to a symlinked directory) would make -L false.
+    while [ "$OUT" != / ] && [ "${OUT%/}" != "$OUT" ]; do OUT=${OUT%/}; done
+    [ "$OUT" != / ] || { echo "OUT_DIR must not be /" >&2; exit 2; }
     for p in "$OUT" "$OUT/secrets" "$OUT/inputs" "$OUT/out" "$OUT/state"; do
         if [ -L "$p" ]; then echo "$p is a symlink; nothing removed" >&2; exit 2; fi
     done
-    if [ ! -f "$OUT/inputs/training.json" ] && [ ! -d "$OUT/secrets" ]; then
-        echo "$OUT has no inputs/training.json and no secrets/: not a builder output; nothing removed" >&2
-        exit 2
+    # rm -rf as root: remove only what is provably a builder output, never another stack's
+    # secrets/ or state/ (the TEST stack has both, with coord.key and challenge.db in them).
+    not_ours() { echo "$OUT is not a builder output ($1); nothing removed" >&2; exit 2; }
+    proof=0
+    if [ -f "$OUT/inputs/training.json" ] && [ -f "$OUT/inputs/public-keys.json" ]; then proof=1; fi
+    if [ -d "$OUT/secrets" ]; then
+        for f in "$OUT/secrets"/* "$OUT/secrets"/.[!.]*; do
+            { [ -e "$f" ] || [ -L "$f" ]; } || continue
+            case ${f##*/} in
+                *.seed) { [ -f "$f" ] && [ ! -L "$f" ]; } || not_ours "secrets/${f##*/}"; proof=1 ;;
+                *) not_ours "secrets/${f##*/}" ;;
+            esac
+        done
     fi
+    if [ -d "$OUT/state" ]; then
+        for f in "$OUT/state"/* "$OUT/state"/.[!.]*; do
+            { [ -e "$f" ] || [ -L "$f" ]; } || continue
+            [ "${f##*/}" = objects ] || not_ours "state/${f##*/}"
+        done
+    fi
+    [ "$proof" -eq 1 ] || not_ours "no inputs/training.json with public-keys.json, no seed"
     removed=()
     for d in secrets inputs out state; do
         if [ -e "$OUT/$d" ]; then rm -rf -- "${OUT:?}/$d"; removed+=("$d"); fi
@@ -83,6 +105,8 @@ case $COLDKEYS in [1-9]) ;; *) echo "HT_D20_COLDKEYS must be 1..9" >&2; exit 2 ;
 [ -z "$EXP_ROUND" ] || [[ $EXP_ROUND =~ ^[0-9]+$ ]] || { echo "EXP_ROUND must be digits" >&2; exit 2; }
 # The Python stages run from $HT, so a relative OUT_DIR would point somewhere else there.
 case $OUT in /*) ;; *) echo "OUT_DIR must be an absolute path" >&2; exit 2 ;; esac
+while [ "$OUT" != / ] && [ "${OUT%/}" != "$OUT" ]; do OUT=${OUT%/}; done
+[ "$OUT" != / ] || { echo "OUT_DIR must not be /" >&2; exit 2; }
 if [ -L "$OUT" ] || [ -L "$OUT/secrets" ]; then echo "OUT_DIR or its secrets/ is a symlink" >&2; exit 2; fi
 for d in inputs out state; do
     if [ -e "$OUT/$d" ] || [ -L "$OUT/$d" ]; then echo "$OUT/$d already exists; use a fresh OUT_DIR" >&2; exit 2; fi

@@ -270,6 +270,7 @@ def fake_output(out: Path, layout: str = "full") -> list[str]:
     if layout in ("full", "inputs_only"):
         (out / "inputs").mkdir(parents=True)
         (out / "inputs/training.json").write_text("{}")
+        (out / "inputs/public-keys.json").write_text("{}")
         (out / "out").mkdir()
         (out / "out/manifest-envelope.json").write_text("{}")
         (out / "state/objects").mkdir(parents=True)
@@ -309,12 +310,12 @@ def test_clean_refuses_a_relative_path_and_removes_nothing(host, tmp_path):
     assert tree(tmp_path) == before
 
 
-@pytest.mark.parametrize("link", ["out_dir", "secrets", "inputs"])
+@pytest.mark.parametrize("link", ["out_dir", "out_dir_slash", "secrets", "inputs", "out", "state"])
 def test_clean_never_follows_a_symlink_and_removes_nothing(host, tmp_path, link):
     real = tmp_path / "real"
     fake_output(real)
     (real / "canary").write_text("keep")
-    if link == "out_dir":
+    if link.startswith("out_dir"):
         target = tmp_path / "link"
         target.symlink_to(real)
     else:
@@ -324,7 +325,9 @@ def test_clean_never_follows_a_symlink_and_removes_nothing(host, tmp_path, link)
         target.symlink_to(moved)
     before = tree(tmp_path)
 
-    run = clean(host, str(tmp_path / "link" if link == "out_dir" else real))
+    # A trailing slash resolves the link, so `[ -L ]` alone would let it through.
+    given = {"out_dir": f"{tmp_path / 'link'}", "out_dir_slash": f"{tmp_path / 'link'}/"}
+    run = clean(host, given.get(link, str(real)))
 
     assert run.returncode == 2 and "symlink" in run.stderr
     assert tree(tmp_path) == before
@@ -340,4 +343,100 @@ def test_clean_refuses_a_directory_that_is_not_a_builder_output(host, tmp_path):
     run = clean(host, str(other))
 
     assert run.returncode == 2 and "not a builder output" in run.stderr
+    assert tree(tmp_path) == before
+
+
+def test_clean_refuses_the_root_even_with_slashes(host, tmp_path):
+    run = clean(host, "//")
+    assert run.returncode == 2 and "must not be /" in run.stderr
+
+
+NOT_OURS = {
+    # the TEST stack's own root: its secrets/ and state/ are not a builder's
+    "test_stack_root": [
+        "secrets/coord.key",
+        "state/challenge.db",
+        "config/metagraph.json",
+    ],
+    "a_key_among_the_seeds": [
+        "inputs/training.json",
+        "inputs/public-keys.json",
+        "secrets/coord.key",
+    ],
+    "a_database_among_the_objects": [
+        "inputs/training.json",
+        "inputs/public-keys.json",
+        "state/challenge.db",
+    ],
+    "training_json_alone": ["inputs/training.json", "out/report.txt"],
+}
+
+
+@pytest.mark.parametrize("files", NOT_OURS.values(), ids=NOT_OURS)
+def test_clean_refuses_a_directory_it_cannot_prove_is_a_builder_output(host, tmp_path, files):
+    other = tmp_path / "stack"
+    for name in files:
+        (other / name).parent.mkdir(parents=True, exist_ok=True)
+        (other / name).write_text("keep")
+    before = tree(tmp_path)
+
+    run = clean(host, str(other))
+
+    assert run.returncode == 2 and "not a builder output" in run.stderr
+    assert tree(tmp_path) == before
+
+
+def test_clean_quotes_an_out_dir_with_a_space_and_a_glob_character(host, tmp_path):
+    # Unquoted, `rm -rf $OUT/inputs` would split at the space and remove tmp_path/my.
+    (tmp_path / "my").mkdir()
+    (tmp_path / "my/canary").write_text("keep")
+    out = tmp_path / "my out*" / "o"
+    fake_output(out)
+
+    run = clean(host, str(out))
+
+    assert run.returncode == 0, run.stderr
+    assert (tmp_path / "my/canary").read_text() == "keep"
+    assert tree(tmp_path / "my out*") == []
+
+
+def test_a_failed_build_cleans_up_in_an_out_dir_with_a_space_and_a_glob_character(host, tmp_path):
+    (tmp_path / "my").mkdir()
+    (tmp_path / "my/canary").write_text("keep")
+    out = tmp_path / "my out*" / "o"
+
+    run = build(host, out, env={"FAKE_UV_FAIL_ON": "2"})
+
+    assert run.returncode == 9 and uv_calls(host) == 2
+    assert (tmp_path / "my/canary").read_text() == "keep"
+    assert not (tmp_path / "my out*").exists()
+
+
+def test_a_failure_leaves_an_empty_parent_directory_that_was_already_there(host, tmp_path):
+    campaign = tmp_path / "campaign"
+    campaign.mkdir()
+
+    run = build(host, campaign / "o", env={"FAKE_UV_FAIL_ON": "2"})
+
+    assert run.returncode == 9 and campaign.is_dir() and tree(campaign) == []
+
+
+@pytest.mark.parametrize("link", ["out_dir", "out_dir_slash", "secrets"])
+def test_a_build_into_a_symlink_is_refused_and_touches_nothing(host, tmp_path, link):
+    real = tmp_path / "real"
+    (real / "secrets").mkdir(parents=True)
+    (real / "secrets/owner.seed").write_text("ab" * 32)
+    if link == "secrets":
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "secrets").symlink_to(real / "secrets")
+        given = str(out)
+    else:
+        (tmp_path / "link").symlink_to(real)
+        given = str(tmp_path / "link") + ("/" if link == "out_dir_slash" else "")
+    before = tree(tmp_path)
+
+    run = build(host, given)
+
+    assert run.returncode == 2 and "symlink" in run.stderr and uv_calls(host) == 0
     assert tree(tmp_path) == before
