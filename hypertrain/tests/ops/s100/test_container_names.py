@@ -1,8 +1,8 @@
 """challenge_image.sh refuses a compose file that names a container outside the TEST stack.
 
-beacon, rollback and executor run `docker compose up -d --no-deps` on the container_name values
-of the live compose file or of the backup's: one token away from the TEST names is a production
-container.
+beacon, rollback, executor and executor-off run `docker compose up -d --no-deps` on the
+container_name values of the live compose file or of the backup's: one token away from the TEST
+names is a production container.
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ def test_rollback_accepts_a_relative_backup_path(box, backup):
     assert box.container(CHALLENGE)["Image"] == OLD_ID
 
 
-# --- executor: the live file and the live file merged with its override ---------------------
+# --- executor and executor-off: the live file, and for executor the merged config -------------
 
 
 def extra(name: str | None) -> str:
@@ -175,16 +175,27 @@ LIVE = {  # id: (live compose, the service refused, its container_name)
 }
 
 
+@pytest.mark.parametrize("cmd", ["executor", "executor-off"])
 @pytest.mark.parametrize(("text", "service", "name"), LIVE.values(), ids=LIVE)
-def test_executor_refuses_a_live_compose_naming_a_container_outside_the_test_stack(
-    box, backup, text, service, name
+def test_the_executor_commands_refuse_a_live_compose_naming_a_container_outside_the_test_stack(
+    box, backup, cmd, text, service, name
 ):
+    if cmd == "executor-off":
+        box.run(*call("executor", backup), mutates={CHALLENGE})  # leaves the override in place
     box.f.write_text(text)
     before = box.snapshot()
-    out = box.run(*call("executor", backup), rc=4).out
+    out = box.run(*call(cmd, backup), rc=4).out
     detail = f"names container {name}" if name else "declares no container_name"
     assert f"REFUSED {box.f}: service {service} {detail}" in out
-    assert box.snapshot() == before  # no override written, no live file touched
+    assert box.snapshot() == before  # no file written or removed, the override still in place
+
+
+def test_executor_off_refuses_a_live_compose_that_does_not_parse(box, backup):
+    box.run(*call("executor", backup), mutates={CHALLENGE})
+    box.f.write_text("services:\n  challenge: [unclosed\n")
+    before = box.snapshot()
+    box.run("executor-off", backup, rc=4)
+    assert box.snapshot() == before
 
 
 def test_executor_refuses_when_only_the_merged_config_names_another_container(box, backup):

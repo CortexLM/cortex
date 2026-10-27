@@ -46,17 +46,18 @@ these hold:
 
 `rollback` and `restore-db` are not gated: they are the way back.
 
-`swap`, `beacon`, `paper`, `rollback` and `executor` also refuse (exit 4, before any container or
-live file is touched) a compose file in which any service has no `container_name` or one that is not
-a TEST container (`hypertrain-test-challenge`, `-beacon`, `-master-stub`, `-relay`, `-auditor-0`,
-`-auditor-1`). `docker compose up` acts on the names the file declares, so a file naming
-`hypertrain-beacon` would otherwise recreate the production twin. `swap` and `beacon` check the live
-file and the edited copy; `executor` checks the live file and the live file merged with its
-override; `paper` and `rollback` check the backup's `compose.test.yml` before it can replace the
-live one. The services `up` recreates, `challenge` and `beacon`, must be in that config
-under exactly `hypertrain-test-challenge` and `hypertrain-test-beacon`: `compose config` leaves out a
-service behind a profile, which `up` would still start, and a TEST name on the wrong service is
-refused. `restore-db` runs no compose and is not checked.
+`swap`, `beacon`, `paper`, `rollback`, `executor` and `executor-off` also refuse (exit 4, before any
+container or live file is touched) a compose file in which any service has no `container_name` or
+one that is not a TEST container (`hypertrain-test-challenge`, `-beacon`, `-master-stub`, `-relay`,
+`-auditor-0`, `-auditor-1`). `docker compose up` acts on the names the file declares, so a file
+naming `hypertrain-beacon` would otherwise recreate the production twin. `swap` and `beacon` check
+the live file and the edited copy; `executor` checks the live file and the live file merged with its
+override; `executor-off` checks the live file and leaves the override in place when it refuses;
+`paper` and `rollback` check the backup's `compose.test.yml` before it can replace the live one. The
+services `up` recreates, `challenge` and `beacon`, must be in that config under exactly
+`hypertrain-test-challenge` and `hypertrain-test-beacon`: `compose config` leaves out a service
+behind a profile, which `up` would still start, and a TEST name on the wrong service is refused.
+`restore-db` runs no compose and is not checked.
 
 ```bash
 ssh root@s100 "docker pull -q $NEW"
