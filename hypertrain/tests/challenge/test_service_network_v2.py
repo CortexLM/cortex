@@ -104,6 +104,20 @@ class Network:
         request = self.owner_request("ChallengeRequest", identity, key, expires=expires)
         return self.client.post(self.url + f"/join/{identity}/challenge", json=request)
 
+    def mark_verdict_mismatch(self, hotkey, w=0):
+        """Make the audit lease of `hotkey` in round `w` say MISMATCH, the verdict a contest is for.
+
+        The store refuses to contest a verdict that upholds the work (NOTHING_TO_CONTEST), and
+        every miner here is honest. The tests that open a funded dispute to exercise the dispute
+        machinery call this first; the dispute code never reads the row again (the referee reads
+        the signed verdict record).
+        """
+        with self.store._tx():
+            self.store._db.execute(
+                "UPDATE audit_leases_v2 SET result='MISMATCH' WHERE run_id=? AND w=? AND hotkey=?",
+                (self.manifest.run_id(), w, hotkey),
+            )
+
     def join(self, index=0):
         request = sign_join(
             HOT[index],

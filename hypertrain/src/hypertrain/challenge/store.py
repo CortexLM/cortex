@@ -2682,7 +2682,7 @@ class ChallengeStore:
                 escrow,
                 dispute_policy,
                 self._coord(),
-                contest_of=lambda h: Contest.model_validate(self._record_v2(run_id, "contest", h)),
+                contest_of=lambda h: self._contest_v2(run_id, h),
                 owner_of=lambda hot: self._owner_v2(run_id, hot),
                 span=lambda contest, level, ctx: self._dispute_span_v2(run_id, contest, level, ctx),
             )
@@ -2849,6 +2849,22 @@ class ChallengeStore:
                 "challenge_envelope": envelope_v2.load_json(receipt["receipt"]),
                 "nonce": challenge.nonce,
             }
+
+    def _contest_v2(self, run_id: str, verdict_hash: str) -> Contest:
+        """The accepted contest record. A verdict that upholds the work has nothing to contest.
+
+        Only the miner itself can contest its verdict, so a MATCH could only suspend the
+        contestant and pin its round. A missing lease row (a hand-written contest record) and a
+        MISMATCH are contested as before; the dispute code never reads the row again.
+        """
+        contest = Contest.model_validate(self._record_v2(run_id, "contest", verdict_hash))
+        row = self._db.execute(
+            "SELECT result FROM audit_leases_v2 WHERE run_id=? AND w=? AND hotkey=?",
+            (run_id, contest.w, contest.miner),
+        ).fetchone()
+        if row is not None and row[0] == "MATCH":
+            raise ChallengeError(409, "NOTHING_TO_CONTEST: the verdict upholds the work")
+        return contest
 
     def _dispute_span_v2(
         self, run_id: str, contest: Contest, level: Any, ctx: tuple[int, ...]

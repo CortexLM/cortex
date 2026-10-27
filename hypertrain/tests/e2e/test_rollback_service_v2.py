@@ -868,6 +868,7 @@ def exclude_miner(network):
             (hot.ss58,),
         ).fetchone()[0]
     )
+    n.mark_verdict_mismatch(hot.ss58, contest["w"])
     dispute_id = sha256_hex(canonicalize([run, contest["verdict_hash"], hot.ss58]))
     origin = n.store._db.execute(
         "SELECT origin FROM escrow_units WHERE owner=? AND bucket='available' AND units>=100",

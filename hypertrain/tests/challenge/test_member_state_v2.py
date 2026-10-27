@@ -19,6 +19,7 @@ from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 
+from . import test_dispute_exit_v2 as disputes
 from . import test_service_network_v2 as fixtures
 from .audit_lease_fixture_v2 import D_AUDIT, seed_round
 from .five_identity_network_v2 import activate_identities
@@ -162,6 +163,42 @@ def test_only_an_audited_member_that_is_not_already_excluded_is_left_out(network
             "evidence_hash": sha256_hex(f"ht-ineligible/1|{run}|0|{keys[i].ss58}|ROTATED".encode()),
         }
     assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 5
+
+
+@pytest.mark.parametrize(
+    ("result", "status"),
+    [("MATCH", 409), ("MISMATCH", 200), (None, 200)],
+    ids=["match", "mismatch", "no-lease-row"],
+)
+def test_a_miner_cannot_contest_a_verdict_that_upholds_its_work(network, result, status):
+    # Given: the audit lease of the contesting miner says `result` (no row at all for None).
+    if result is not None:
+        with network.store._tx():
+            network.store._db.execute(
+                "INSERT INTO audit_leases_v2(id,run_id,w,hotkey,state,result) VALUES(?,?,?,?,?,?)",
+                (
+                    sha256_hex(b"lease"),
+                    network.manifest.run_id(),
+                    disputes.W,
+                    disputes.HOT[0].ss58,
+                    "completed",
+                    result,
+                ),
+            )
+    # When: it funds and opens a contest of that verdict.
+    _, response = disputes.post_dispute(network)
+    # Then: a MATCH has nothing to contest, so nothing is written; a MISMATCH, and a verdict
+    # with no lease row to look at, are contested as before.
+    assert response.status_code == status, response.text
+    miner = network.store._db.execute(
+        "SELECT state,pending_dispute FROM admissions_v2 WHERE hotkey=?", (disputes.HOT[0].ss58,)
+    ).fetchone()
+    opened = network.store._db.execute("SELECT COUNT(*) FROM disputes_v2").fetchone()[0]
+    if status == 409:
+        assert "NOTHING_TO_CONTEST" in response.text
+        assert (tuple(miner), opened) == (("APPLIED", 0), 0)
+    else:
+        assert (tuple(miner), opened) == (("SUSPENDED", 1), 1)
 
 
 def rotation(w: World, *, old=HOT, new=OTHER, operation: str = "33" * 32) -> bytes:

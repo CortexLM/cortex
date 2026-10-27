@@ -427,6 +427,14 @@ Independent referees use their own accepted current execution deadline while
 preserving historical publication descriptors. Losing-party checks, funded
 contests and fixed absolute horizons prevent arbitrary transcript resets.
 
+A contest needs a verdict to contest. A miner cannot contest a verdict that upholds its work:
+`POST .../dispute` answers 409 `NOTHING_TO_CONTEST`, and nothing is written, when the audit
+lease of the contesting miner in the contest's round says MATCH. Only the miner itself can open
+the contest of its verdict, so a MATCH contest could only suspend the contestant, pin its round
+and, once the server closes the dispute, leave it on a fresh probation that is not live: a free
+way out of the round, since the contest bond comes back. A MISMATCH, a false one included, is
+contested as before.
+
 A dispute that nobody can decide is closed by the server on the next verified beacon
 round, not convicted. The resolution is `INFRASTRUCTURE` with no loser: the verdict and
 the audit's own exclusion of the contested miner stand, the contest bond is released in
