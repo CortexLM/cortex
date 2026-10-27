@@ -19,6 +19,7 @@
 1. DSP-01: disputes that nobody can decide.
 2. AUD-01: audit liveness (lease expiry, executor failure, exhaustion).
 3. DET-01, DET-01b: process-environment pin of island workers.
+4. QUAL-01, QUAL-02: host and image binding of the CUDA qualification.
 
 ## Part 1: disputes that nobody can decide (DSP-01)
 
@@ -377,3 +378,133 @@ breaker bounds the attempt-based one).
   capability; an environment mutated after library initialisation is not detected.
 - The repair/history torchrun path with pins, the capacity worker's outer path on a DEFAULT-class host,
   and the challenge path end to end with AUD-01 (read, not run).
+
+## Part 4: host and image binding of the CUDA qualification (QUAL-01, QUAL-02)
+
+- Lens red team B findings QUAL-01 and QUAL-02 (IMPORTANT) with Principal D36 bis and D38 quater. No
+  manifest, schema, run id, golden, constant or installed record changes. No QUAL commit changes
+  `implementation_hash` by itself (the gate and the dispatch check live outside the owned names). No code
+  of this part ran on a GPU host.
+
+### Context
+
+- `network_qualification.compare` (`src/hypertrain/gpu_ops/network_qualification.py:507-555`) accepts two
+  results when `machine_id`, `instance_id` and `role` differ and the profile, sources, image digest and
+  rounds are equal. All of these are labels written into files by whoever holds the files. A byte copy of
+  one host's result with three labels rewritten returns `{'two_host_bitwise_match': True}`; `drivers`,
+  `torch_path`, `config_sha256` and `elapsed_seconds` can be changed afterwards and are never compared.
+  `Environment` (`:141-173`) holds no device UUID, host key or signature. [V: Lens `rtB_qualification_relabel.py`
+  5 passed; a scratch old-API test fails with `DID NOT RAISE Reject`]
+- The production gate `_bootstrap_backend_v2` (`challenge/store.py:2376-2485`) re-derives nothing: it checks
+  each result against its own config, calls `compare`, and the owner `Receipt` signs the digest of 7
+  evidence keys. `_backend_v2` (`:2487-2534`) re-reads only that evidence (ADR 0007). [V]
+- The executor derives `machine_id` from the GPU UUIDs the host prints (`cuda_executor.py:508-519`): one box
+  under two labels that prints fresh UUIDs is admitted as two machines (Lens X4). [V]
+- Qualification measures `cfg.tree` (`PYTHONPATH=cfg.tree/src`, `network_qualification.py:436-443`); audits
+  run the package installed in the image (`docker/Dockerfile.gpu:37`). `HT_IMAGE_DIGEST` is an environment
+  echo (`miner/island_worker.py:50`). Nothing links the sources a result claims to the code the audited
+  image runs. [V]
+- `Qualification.known_hosts_sha256` already exists, is compared with the lifecycle receipt
+  (`network_qualification.py:136,282`) and is filled with `fsha(ssh.known_hosts)` by the orchestrator
+  (`experiments/gpu_network_v2/orchestrate.py:3797-3829`). [V]
+- The executor probe holds no boot id and no instance evidence (`cuda_executor.py:201-210`). The SSH
+  channel, authenticated by the operator's pinned `known_hosts`, is the strongest machine handle the
+  challenge side has. [V] No non-Vast tool in the repository writes a qualification config (ADR 0007). [A]
+
+### Decision
+
+1. **Host statement.** Each host signs, with its SSH host key, a canonical JSON statement
+   `{version, config_sha256, result_sha256, image_digest, gpu_uuids, drivers, boot_id}` (namespace
+   `hypertrain-qualification-v1`). `scripts/ops/qualification_attest.py` runs on the operator machine over the
+   host's pinned SSH channel (`[sudo -n] ssh-keygen -Y sign -f /etc/ssh/ssh_host_ed25519_key`), verifies its
+   output against the pin, and writes `attestation.json` and `attestation.sig` beside `result.json`. Nothing
+   is staged on the host.
+2. **`compare(paths, manifest, *, host_keys)`.** The keyword is required. `None` is the explicit label-only
+   mode (item 7). With keys, `compare` also requires per host: a valid signature under the pin
+   (`ssh-keygen -Y verify`, `namespaces=` in `allowed_signers`), a canonical statement, `result_sha256`,
+   `config_sha256` and `image_digest` equal to the result's, the result's GPU UUIDs a subset of the
+   attested ones, and across hosts different pins, disjoint GPU sets and different `boot_id`.
+3. **Pins.** A pin is the single `ssh-ed25519` key of the operator's `known_hosts` file for the host. The
+   file must hash to `Qualification.known_hosts_sha256` and its `SHA256:` fingerprint must equal the one the
+   owner typed from the provider console (`backend_bootstrap.py --host-fingerprint`). The pin and the
+   fingerprints are recorded in the evidence; nothing in the repository verifies where the owner got them.
+4. **Gate.** `_bootstrap_backend_v2(..., *, pins)` takes the pins as a required keyword (`None` = label-only).
+   One non-owned builder, `ChallengeStore._qualification_evidence_v2`, serves the store and
+   `scripts/ops/backend_bootstrap.py`. Strict evidence adds `host_attestation` (fingerprints and sha256 of the
+   four files); the four files enter the object store. Legacy results with `pins=None` give today's 7 keys.
+5. **Image binding (QUAL-02).** `cuda_executor_runner` (stdlib only) measures the package installed in the
+   image with `python -I` (so `PYTHONPATH` and the cwd cannot substitute it): sha256 of the compact sorted
+   JSON of `{"src/hypertrain/<rel>": sha256}` over every `*.py`, equal to the JCS form for the ASCII names
+   the program enforces. `Environment.image_sources_sha256` records it. `run()` refuses to start when the
+   `*.py` of `sources(tree)` differ from the measurement (`qualification_tree_is_not_the_image`), `compare`
+   re-checks it against `result.sources`, and the value enters the evidence.
+6. **Audit-time check.** `_dispatch_env_v2` compares the dispatch record's `image_sources_sha256` with the
+   qualification record's (409 on a difference, 503 when absent); a record without the field adds no check.
+   The executor reports the measurement, and an optional pin in `ExecutorConfig` refuses a host that reports
+   another value, so reference and referee runs are covered too. The executor config also refuses two hosts
+   that pin the same SSH key or the same address and port, and `Executor._admit` refuses overlapping GPU sets.
+7. **Legacy and Vast.** Installed records stay valid. Strict is the default for new bootstraps; label-only
+   (`--label-only`, `pins=None`, `host_keys=None`) is the explicit switch and remains the route of the Vast
+   lifecycle (`launch_cuda_run.sh`, `orchestrate.py:2303,3338`), whose `machine_id` comes from the provider
+   listing and is checked distinct by the owner-run admission (`launcher.py:220-222`) [A]. A label-only record is not marked: its evidence is byte-identical to today's.
+   An image built before this change cannot run the new `run()`; it can only be qualified label-only.
+8. **Stated limits.** The gate protects the engine path against accidental or lazy relabelling (a relabelled
+   copy, a stale or foreign attestation, one machine listed twice). It does not bind a malicious owner:
+   an operator who also forges a second key and a matching inventory, the TEST stand-in
+   (`scripts/ops/s100_test/cuda_qualification.py`) and the owner key can still install any record (QUAL-03).
+   A compromised host can sign anything with its own key. The signature proves that the holder of the pinned
+   key agreed to the statement, not where the computation ran. The in-image digest covers the package `*.py`
+   only and is produced by the image's own interpreter on an operator-controlled host: it detects drift and
+   mistakes, not a malicious host. Package data, dependencies, torch and the base image are bound by the
+   image digest alone. The numbers 16 GPUs, 4 KiB, 2 KiB and 10 s are local limits with no consensus effect.
+
+### Consequences
+
+- A strict CUDA backend record can no longer come from one host relabelled twice, nor from a tree that
+  differs from the audited image, unless the operator forges a second key and inventory.
+- The server image must contain this change to parse new results (`extra="forbid"`) and carries
+  `openssh-client` already (`docker/Dockerfile.server:41`). The GPU image must be rebuilt from a tree that
+  contains this change for strict or tree-bound qualification; image `4e5f4b7e` cannot.
+- Every change to a `src/hypertrain/**/*.py` file now needs a rebuilt GPU image before qualification
+  (`qualification_tree_is_not_the_image`); this was already implied by the image digest pin.
+- `sources()` changes in six files, so older qualification configs no longer validate against the tree and
+  dispatch source pins must be recomputed (ADR 0007 and ADR 0008 precedent). Run ids and installed records
+  do not change.
+- Cost: one SSH round trip per host and about 6 ms of `ssh-keygen`.
+
+### Rejected alternatives
+
+1. Host-printed identity inside `result.json` (UUIDs, boot id): the party being checked writes it (Lens Q1, Q2, X4).
+2. A host-side program that builds and signs the statement: stages code on a machine whose output is the
+   thing under test; the operator-side tool uses only fixed commands.
+3. A pure-Python Ed25519 and SSHSIG verifier: own cryptography to review, while `openssh-client` is already in
+   the server image and `ssh-keygen` is used by three existing test modules.
+4. Required EC2 identity-document evidence: AWS only, needs AWS's certificate [?], absent from the probe.
+5. Expected image hash from the challenge's own installed package: server and GPU images are released
+   independently (ADR 0008). From the registry manifest: it lists layers, not sources. From an operator
+   config field: the party being checked writes it; the owner-signed record carries the value instead.
+6. A baked `/opt/hypertrain/build.json`: lives inside the digest it vouches for. Hashing `uv.lock`: the
+   tree's lock does not affect execution.
+7. A default-label-only `compare`: the bare Lens Q1 call would keep passing. A marker key in label-only
+   evidence: it would change every existing evidence digest.
+8. Driving qualification through `cuda_executor`, so the challenge observes each host itself: the stronger
+   long-term design, but it needs a new qualification driver. Left for later.
+
+### Not verified
+
+- No run on a GPU, AWS, Lium or Vast host. `sudo -n ssh-keygen -Y sign` on a real
+  `/etc/ssh/ssh_host_ed25519_key` is [H]; whether the D34 toolbox writes the real `known_hosts_sha256` is [?].
+- A Vast container's sshd key may be shared across instances [H]; strict Vast qualification is a follow-up.
+- The in-image program matched `sources()` on a wheel of this tree and on the dev editable install (144 files,
+  same digest). In the CI-built image it is [?].
+- `ssh-keygen` under a uid without a passwd entry exits 255 with `No user exists for uid` [A: adversarial review]; not reproduced.
+- Interaction with AUD-01 (a 409 after publication is booked as auditor silence) is not studied.
+
+### Sources
+
+- `hypertrain/src/hypertrain/gpu_ops/{network_qualification,cuda_executor,cuda_executor_runner}.py`,
+  `challenge/store.py:2376-2534,4249-4322,7338-7377`, `miner/island_worker.py:45-70`,
+  `experiments/gpu_network_v2/orchestrate.py:2303,3338,3797-3829`, `docker/Dockerfile.{gpu,server}`, 2026-10-27.
+- Lens red team B report 2.1 to 2.3, `rtB_qualification_relabel.py`, `rtB_executor_host_attacks.py`, 2026-10-27 [A].
+- Adversarial review of the first QUAL-01 design, 2026-10-27 [A].
+- `docs/adr/0001`, `0007-sm-counts-per-arch.md`, `0008-generic-cuda-executor.md`.
