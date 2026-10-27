@@ -22,7 +22,12 @@ from hypertrain.beacon.drand import QUICKNET_GENESIS, QUICKNET_PERIOD
 from hypertrain.protocol import relay_envelope
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.relay_envelope import RelayEnvelope
-from hypertrain.protocol.relay_messages import RelayAssignment, RelayNetworkManifest
+from hypertrain.protocol.relay_messages import (
+    RelayAssignment,
+    RelayNetworkManifest,
+    RelayReceipt,
+    UploadGrant,
+)
 from hypertrain.relay import app as relay_app
 from hypertrain.relay.app import AcceptRequest, RelayConfig, create_app
 
@@ -363,3 +368,16 @@ def test_relay_json_refuses_a_max_uploads_that_admits_nothing(
                 pass
 
     anyio.run(scenario)
+
+
+async def hold_a_receipted_upload(tmp_path: Path) -> tuple[UploadGrant, str]:
+    """A complete upload in the journal the served relay reads; returns the grant, receipt pin."""
+    async with httpx.AsyncClient() as client:
+        rig = Rig(tmp_path / "store", client)
+        data = b"round-1"
+        grant, manifest, raw, assignment, opened = rig.upload(data, nonce="01" * 32)
+        await rig.relay.accept(raw, manifest, assignment, opened)
+        await rig.put(grant, data)
+        record = (await rig.relay.state()).uploads[grant.digest()]
+        assert record.receipt is not None
+        return grant, RelayReceipt.model_validate(record.receipt.body).digest()

@@ -2977,6 +2977,70 @@ def test_failure_json_flags_cannot_create_relay_or_miner_authority(network):
     assert network.store._services(network.manifest.run_id())[0].balances().burned == 0
 
 
+def test_relay_settlement_view_route_is_public_and_writes_nothing_for_an_unknown_grant(network):
+    # A relay holds no bearer: the route answers without Authorization, signs nothing for a grant
+    # the master never issued, and leaves the database untouched.
+    before = network.store._db.total_changes
+    response = network.client.get(network.url + "/relay-settlements/" + "0" * 64)
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": "missing accepted grant: " + "0" * 64}
+    assert network.store._db.total_changes == before
+
+
+def test_relay_settlement_view_serves_exactly_the_six_signed_facts_of_a_settled_grant(network):
+    from hypertrain.protocol import relay_envelope
+
+    run_id = network.manifest.run_id()
+    grant_hash = "cd" * 32
+    network.push(50)
+
+    def settle(disposition: str, unresolved_disputes: int = 0) -> None:
+        with network.store._tx():
+            network.store._put_record_v2(run_id, "grant", grant_hash, {"body": {"w": 3}})
+            network.store._put_record_v2(
+                run_id,
+                "finality",
+                "3",
+                {
+                    "disposition": disposition,
+                    "unresolved_audits": 0,
+                    "unresolved_disputes": unresolved_disputes,
+                },
+            )
+            network.store._put_record_v2(
+                run_id,
+                "replayed-finality",
+                "3",
+                {"finalize_hash": "ab" * 32, "finalized_beacon": 30},
+            )
+
+    url = network.url + "/relay-settlements/" + grant_hash
+    for refused in (("PENDING", 0), ("SETTLED", 1)):
+        settle(*refused)
+        assert network.client.get(url).status_code == 409
+    settle("SETTLED")
+    before = network.store._db.total_changes
+    response = network.client.get(url)  # no Authorization header: a relay holds no bearer
+    assert response.status_code == 200, response.text
+    assert network.store._db.total_changes == before
+    envelope = relay_envelope.parse_envelope(response.json())
+    assert relay_envelope.verify_envelope(response.json())
+    assert (envelope.signer, envelope.type, envelope.run_id) == (
+        COORD.ss58,
+        "RelaySettlementView",
+        run_id,
+    )
+    assert envelope.exp_drand == network.now + 10
+    assert envelope.body == {
+        "grant_hash": grant_hash,
+        "finality_hash": "ab" * 32,
+        "finality_beacon": 30,
+        "closed_dispute_root": sha256_hex(canonicalize([])),
+        "closed_beacon": 30,
+        "vesting_beacon": 30 + network.manifest.training.verify.E_vest_rounds,
+    }
+
+
 def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, tmp_path):
     """Reuse genuine ACTIVE12 snapshot; one live round, no repeated graduation."""
     import json
@@ -2999,7 +3063,8 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
         UploadGrant,
     )
     from hypertrain.relay.app import create_app as relay_app
-    from hypertrain.relay.core import Relay, Settlement
+    from hypertrain.relay.client import settlement_from_master
+    from hypertrain.relay.core import Relay
 
     spec = importlib.util.spec_from_file_location(
         "relay_lifecycle_e2e",
@@ -3063,6 +3128,7 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
     monkeypatch.setattr(network.store, "relay_receipt_v2", capture)
     watched = module._funded_dispute_watch
     real_post = network.client.post
+    real_get = network.client.get
     unresolved_rejections = []
 
     def post_with_dispute_pin(url, *args, **kwargs):
@@ -3076,6 +3142,8 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
                 headers=admin(),
             )
             assert pinned.status_code == 409, pinned.text
+            unsettled = real_get(network.url + f"/relay-settlements/{receipt.grant_hash}")
+            assert unsettled.status_code == 409, unsettled.text
             unresolved_rejections.append(pinned.status_code)
         return response
 
@@ -3102,8 +3170,25 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
     async def now():
         return network.now
 
-    async def settled(grant_hash):
-        return Settlement(**network.store.relay_settlement_v2(run_id, grant_hash))
+    class MasterBehindProxy(httpx.AsyncBaseTransport):
+        """The master's public route, forwarding only the headers the master proxy forwards."""
+
+        def __init__(self):
+            self.requests = []
+            self.app = httpx.ASGITransport(app=network.client.app)
+
+        async def handle_async_request(self, request):
+            self.requests.append(request)
+            kept = ("accept", "authorization", "content-type")
+            forwarded = httpx.Request(
+                request.method,
+                request.url,
+                headers={k: v for k, v in request.headers.items() if k in kept},
+                content=request.content,
+            )
+            return await self.app.handle_async_request(forwarded)
+
+    master = MasterBehindProxy()
 
     relay = Relay(
         run_id=run_id,
@@ -3117,7 +3202,9 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
         active_key="k1",
         backing=StreamStore(LocalFSStore(network.store.state_dir / "relay-backing"), backing_http),
         now=now,
-        settlement=settled,
+    )
+    relay.settlement = settlement_from_master(
+        relay, real_client(transport=master), "https://master.test"
     )
     shutil.copytree(network.store.state_dir / "relay-backing", tmp_path / "relay-before-release")
     app = relay_app(relay, "x" * 32)
@@ -3139,6 +3226,20 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
     )
     assert response.status_code == 200, response.text
     assert response.json()["type"] == "CustodyRelease"
+    # The relay asked the public route, only for this grant, and sent no credential.
+    assert {r.method for r in master.requests} == {"GET"}
+    assert {r.url.path for r in master.requests} == {
+        network.url + f"/relay-settlements/{grant.digest()}"
+    }
+    assert not any("authorization" in r.headers for r in master.requests)
+    before_view = network.store._db.total_changes
+    public = real_get(network.url + f"/relay-settlements/{grant.digest()}")
+    assert public.status_code == 200, public.text
+    assert network.store._db.total_changes == before_view
+    view = relay_envelope.parse_envelope(public.json())
+    assert (view.signer, view.type, view.run_id) == (COORD.ss58, "RelaySettlementView", run_id)
+    assert view.exp_drand > network.now
+    assert view.body == {"grant_hash": grant.digest(), **settlement}
 
     async def check_release():
         state = await relay.state()
@@ -3342,7 +3443,6 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
             active_key="k2",
             backing=relay.backing,
             now=now,
-            settlement=settled,
         )
         assert await rotated_relay.ready()
         original = (await rotated_relay.state()).uploads[grant.digest()]

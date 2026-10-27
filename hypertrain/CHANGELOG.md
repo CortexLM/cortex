@@ -141,6 +141,12 @@
   metadata limit is 16 MiB), and `/readyz` no longer depends on the count. `/readyz` also reports
   `journal_bytes`, `journal_budget`, `journal_fill` and `alarm` (above 80 % of the budget, with a
   warning in the log); the alarm never makes a replica unready.
+- Relay release path (ADR 0014 Part 6, TRN-02): the master serves a public, read-only,
+  coordinator-signed `RelaySettlementView` at `GET /v2/runs/{run_id}/relay-settlements/{grant_hash}`
+  (new relay message type; exactly the grant hash, finality hash and beacon, closed dispute root and
+  beacon, and vesting beacon), and a relay answers `CustodyRelease` from it. Until now `runtime()` never
+  configured a settlement source, so a production relay refused every release. No credential enters the
+  relay.
 
 ### Fixed
 - Escrow: the events the service writes (reward finalize, maturity, the payment of `get_weights`,

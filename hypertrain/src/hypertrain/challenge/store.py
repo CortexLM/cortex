@@ -9136,6 +9136,19 @@ class ChallengeStore:
             )
             return asdict(settled)
 
+    def relay_settlement_view_v2(self, run_id: str, grant_hash: str) -> dict[str, Any]:
+        """Coordinator-signed copy of relay_settlement_v2 for a relay; read-only, no credential."""
+        from hypertrain.protocol import relay_envelope
+        from hypertrain.protocol.relay_messages import RelaySettlementView
+
+        with self._lock:
+            view = RelaySettlementView(
+                grant_hash=grant_hash, **self.relay_settlement_v2(run_id, grant_hash)
+            )
+            return relay_envelope.seal(
+                self._coord(), "RelaySettlementView", run_id, view, self._now(self._db) + 10
+            )
+
     def dispute_state_v2(self, run_id: str, dispute_id: str, checkpoint: int) -> dict[str, Any]:
         _, _, disputes = self._services(run_id)
         with self._tx():

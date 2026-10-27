@@ -187,7 +187,9 @@ K_coord envelopes for that run: the `RelayRegistryV1` (S1's `relay-registry.json
 assignment_policy "master-observed-median3-v1"}`. Plus `relay_id`, `region`, `active_key`,
 `signing_files`, `observer_public_keys` and the backing store, and optionally `max_uploads`
 (positive integer, default absent: the count of held uploads is unbounded and only the journal
-budget of 12 MiB limits a relay; `docs/network-v2.md`). [V] `relay/app.py:49-67`,
+budget of 12 MiB limits a relay; `docs/network-v2.md`). `master_url` must be reachable from the relay over
+credential-free HTTPS for `/v2/relay-receipts` and for the public, read-only
+`GET /v2/runs/<run_id>/relay-settlements/<grant_hash>` that a release is checked against. [V] `relay/app.py:49-67`,
 `protocol/relay_messages.py:88-93`
 
 `base_manifest_hash` must be `training_hash()` of the manifest, **not** the run_id: the master

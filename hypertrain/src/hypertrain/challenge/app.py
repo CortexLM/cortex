@@ -787,6 +787,10 @@ def create_app(
             hosted = store.for_run(relay_envelope.parse_envelope(raw).run_id)
             return await hosted.relay_receipt_v2(raw, transport)
 
+    @app.get("/v2/runs/{run_id}/relay-settlements/{grant_hash}")
+    async def relay_settlement_view_v2(run_id: str, grant_hash: str) -> Any:
+        return await run(store.for_run(run_id).relay_settlement_view_v2, run_id, grant_hash)
+
     @app.get("/v2/runs/{run_id}/admin/relay-settlement/{grant_hash}")
     async def relay_settlement_v2(run_id: str, grant_hash: str, authorization: Auth = None) -> Any:
         admin(authorization)

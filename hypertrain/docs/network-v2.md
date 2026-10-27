@@ -683,6 +683,23 @@ signed registry; the registry must hold more than one relay before any run of 16
 or more (D51 5). Do not raise the 12 MiB budget: above 16 MiB every journal write fails,
 a release included.
 
+A relay learns what the master settled from a public, read-only, coordinator-signed view,
+not from the release message and not with a credential. `GET /v2/runs/{run_id}/relay-settlements/{grant_hash}`
+needs no bearer and writes nothing. It answers a relay envelope of type `RelaySettlementView`
+that expires 10 beacons after the master's newest beacon and carries exactly `grant_hash`,
+`finality_hash`, `finality_beacon`, `closed_dispute_root`, `closed_beacon` and
+`vesting_beacon`: no hotkey, coldkey, origin id or roster. It answers 409 until the round is
+settled and every dispute of the round is resolved, and for a grant the master never issued.
+A relay answering `POST /v1/uploads/{grant_hash}/release` fetches the view with a bare GET,
+verifies the pinned master key, run, type and expiry, checks that it names the same grant,
+and refuses a release whose finality, dispute and vesting facts differ from it. The relay
+therefore needs `master_url` in `relay.json` to reach the master over credential-free HTTPS
+for this route as for `/v2/relay-receipts`. A relay built before this route exists still
+refuses every release, as it did; a master without the route makes a new relay refuse too
+(HTTP 503), so release never succeeds on facts the master did not sign. The release is still
+sent by the master: `POST /v2/runs/{run_id}/admin/relay/{grant_hash}/release` (operator bearer)
+once `now >= max(finality, vesting, closed) + 100`.
+
 Relay configuration is `RelayConfig` in `src/hypertrain/relay/app.py`:
 `run_id`, `master_public`, `master_url`, signed `registry`/`network_manifest`,
 `relay_id`, `region`, `active_key`, `signing_files`, `observer_public_keys`, plus

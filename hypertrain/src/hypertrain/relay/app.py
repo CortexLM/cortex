@@ -34,7 +34,7 @@ from hypertrain.protocol.relay_messages import (
     UploadChunkManifest,
     UploadGrant,
 )
-from hypertrain.relay.client import forward_receipt, http_client
+from hypertrain.relay.client import forward_receipt, http_client, settlement_from_master
 from hypertrain.relay.core import Relay, RelayError
 
 
@@ -360,6 +360,7 @@ async def runtime(app: FastAPI) -> AsyncIterator[None]:
             forward=forward,
             max_uploads=config.max_uploads,
         )
+        relay.settlement = settlement_from_master(relay, client, config.master_url)
         if min(config.registry.exp_drand, config.network_manifest.exp_drand) < await now():
             raise RelayError("pinned registry/network manifest expired")
         live_app = create_app(relay, drain_token)
