@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import base64
+import getpass
 import json
 import os
+import shlex
+import shutil
+import socket
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +19,21 @@ import pytest
 from pydantic import ValidationError
 
 from hypertrain.gpu_ops import host_attest
+from hypertrain.gpu_ops import network_qualification as driver
+from hypertrain.gpu_ops.journal import fsha
 from hypertrain.gpu_ops.launcher import Reject
 
+from .test_network_gpu_qualification import (
+    boot_id,
+    host_gpus,
+    key_file,
+    manifest,
+    pins,
+    results,
+    typed_fingerprint,
+)
+
+TREE = Path(__file__).parents[2]
 GPU_A = "GPU-0a1b2c3d-0000-4000-8000-000000000001"
 GPU_B = "GPU-0a1b2c3d-0000-4000-8000-000000000002"
 BOOT_ID = "5e2f3b6c-7e5a-4b0f-9c8d-1f2e3d4c5b6a"
@@ -323,3 +342,339 @@ def test_load_refuses_what_is_not_a_plain_canonical_pair(
     # When / Then
     with pytest.raises(Reject, match=f"^qualification_attestation_{code}$"):
         host_attest.load(result)
+
+
+def host_that_prints(index: int, key: Path, *, driver="595.84", sudo=True, key_path=None):
+    """A run() standing for the host over its SSH channel: it answers the fixed facts command from
+    a table and signs with the real ssh-keygen and a throw-away key standing for the host key."""
+    facts = "".join(f"{u}, {driver}\n" for u in host_gpus(index)) + f"{boot_id(index)}\n"
+    path = key_path or host_attest.HOST_KEY_PATH
+    signing = f"ssh-keygen -Y sign -f {shlex.quote(path)} -n {host_attest.NAMESPACE}"
+
+    def run(command: str, stdin: bytes) -> bytes:
+        if command == host_attest.FACTS:
+            return facts.encode()
+        assert command == ("sudo -n " if sudo else "") + signing  # the one fixed signing command
+        return sign(stdin, key)
+
+    return run
+
+
+def unattested(tmp_path: Path) -> list[Path]:
+    """Two results with their attestation files removed: what the rescue leaves."""
+    paths = results(tmp_path)
+    for path in paths:
+        (path.parent / host_attest.ATTESTATION).unlink()
+        (path.parent / host_attest.SIGNATURE).unlink()
+    return paths
+
+
+def test_attest_output_passes_strict_compare_and_equals_the_independent_statement(
+    tmp_path: Path,
+) -> None:
+    # Given: the statements the test fixture writes on its own, then results without any.
+    paths = results(tmp_path)
+    independent = [(p.parent / host_attest.ATTESTATION).read_bytes() for p in paths]
+    for path in paths:
+        (path.parent / host_attest.ATTESTATION).unlink()
+        (path.parent / host_attest.SIGNATURE).unlink()
+    keys = pins(paths)
+    # When: the producer attests each host over its (fake) channel and writes the files.
+    for index, path in enumerate(paths):
+        host = host_that_prints(index, key_file(path, index))
+        raw, signature = host_attest.attest(host, path, pin=keys[index])
+        host_attest.write_files(path, raw, signature)
+    # Then
+    assert [(p.parent / host_attest.ATTESTATION).read_bytes() for p in paths] == independent
+    assert driver.compare(paths, manifest(), host_keys=keys) == {
+        "two_host_bitwise_match": True,
+        "workload_allowed": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "sudo,key_path",
+    [(True, None), (False, None), (True, "/srv/host keys/ssh_host_ed25519_key")],
+    ids=["sudo", "no_sudo", "path_with_a_space"],
+)
+def test_attest_runs_one_fixed_signing_command(
+    tmp_path: Path, sudo: bool, key_path: str | None
+) -> None:
+    # Given
+    [path, _] = unattested(tmp_path)
+    host = host_that_prints(0, key_file(path, 0), sudo=sudo, key_path=key_path)
+    # When: the fake host asserts the exact command text it is given.
+    raw, signature = host_attest.attest(
+        host, path, key_path=key_path or host_attest.HOST_KEY_PATH, sudo=sudo, pin=pins([path])[0]
+    )
+    # Then
+    assert host_attest.HostStatement.model_validate_json(raw).result_sha256 == fsha(path)
+    assert signature.startswith(b"-----BEGIN SSH SIGNATURE-----")
+
+
+def test_attest_refuses_a_result_from_other_gpus(tmp_path: Path) -> None:
+    # Given: the operator points the producer at host 1 for host 0's result.
+    [path, _] = unattested(tmp_path)
+    wrong_box = host_that_prints(1, key_file(path, 1))
+    # When / Then
+    with pytest.raises(Reject, match="^qualification_attestation_wrong_host$"):
+        host_attest.attest(wrong_box, path, pin=pins([path])[0])
+
+
+def test_attest_refuses_a_result_with_another_driver(tmp_path: Path) -> None:
+    # Given: the box runs a driver the result never recorded.
+    [path, _] = unattested(tmp_path)
+    host = host_that_prints(0, key_file(path, 0), driver="595.91")
+    # When / Then
+    with pytest.raises(Reject, match="^qualification_attestation_wrong_host$"):
+        host_attest.attest(host, path, pin=pins([path])[0])
+
+
+def test_attest_refuses_a_result_without_recorded_gpus(tmp_path: Path) -> None:
+    # Given: a result written before device UUIDs were recorded.
+    [path, _] = unattested(tmp_path)
+    data = json.loads(path.read_bytes())
+    del data["environment"]["gpu_uuids"]
+    path.write_text(json.dumps(data))
+    # When / Then
+    with pytest.raises(Reject, match="^qualification_attestation_wrong_host$"):
+        host_attest.attest(host_that_prints(0, key_file(path, 0)), path, pin=pins([path])[0])
+
+
+def test_attest_refuses_output_not_signed_by_the_pin(tmp_path: Path) -> None:
+    # Given: the pin the owner has is another host's key.
+    [path, other] = unattested(tmp_path)
+    host = host_that_prints(0, key_file(path, 0))
+    # When / Then: the producer verifies its own output before it hands anything back.
+    with pytest.raises(Reject, match="^qualification_attestation_signature$"):
+        host_attest.attest(host, path, pin=pins([other])[0])
+
+
+@pytest.mark.parametrize(
+    "plant",
+    ["statement", "signature", "statement_symlink", "signature_symlink"],
+)
+def test_write_files_refuses_to_overwrite_a_planted_file(tmp_path: Path, plant: str) -> None:
+    # Given: a container planted one of the two files in its output directory.
+    [path, _] = unattested(tmp_path)
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"not for us")
+    name = host_attest.ATTESTATION if plant.startswith("statement") else host_attest.SIGNATURE
+    planted = path.parent / name
+    if plant.endswith("symlink"):
+        planted.symlink_to(victim)
+    else:
+        planted.write_bytes(b"planted")
+    # When / Then
+    with pytest.raises(Reject, match="^qualification_attestation_exists$"):
+        host_attest.write_files(path, b"statement", b"signature")
+    assert victim.read_bytes() == b"not for us"
+    assert {p.name for p in path.parent.glob("attestation.*")} == {name}  # no half-written pair
+    if plant.endswith("symlink"):
+        assert planted.is_symlink()
+    else:
+        assert planted.read_bytes() == b"planted"
+
+
+def test_write_files_writes_private_files(tmp_path: Path) -> None:
+    # Given
+    [path, _] = unattested(tmp_path)
+    # When
+    host_attest.write_files(path, b"statement", b"signature")
+    # Then
+    modes = {p.name: p.stat().st_mode & 0o777 for p in path.parent.glob("attestation.*")}
+    assert modes == {host_attest.ATTESTATION: 0o600, host_attest.SIGNATURE: 0o600}
+    assert (path.parent / host_attest.SIGNATURE).read_bytes() == b"signature"
+
+
+GOOD_ROWS = f"{GPU_A}, 595.84\n{GPU_B}, 595.84\n"
+
+
+def test_parse_facts_reads_the_two_commands_output() -> None:
+    # Given: nvidia-smi prints upper case hex on some drivers; boot_id is one line.
+    text = f"{GPU_A.upper()}, 595.91.07\n{GPU_B}, 595.84\n{BOOT_ID}\n"
+    # When
+    facts = host_attest.parse_facts(text)
+    # Then
+    assert facts == host_attest.HostFacts([GPU_A, GPU_B], ["595.91.07", "595.84"], BOOT_ID)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "garbage\n",
+        GOOD_ROWS,
+        f"{BOOT_ID}\n",
+        f"{GPU_A}, 595.84\n{GPU_A}, 595.84\n{BOOT_ID}\n",
+        f"{GPU_A}, 595.84\n{BOOT_ID.upper()}\n",
+        f"{GPU_A}\n{BOOT_ID}\n",
+        f"{GPU_A}, 595.84\n\n{BOOT_ID}\n",
+        f"{GPU_A}, 595.84\n{BOOT_ID}\nextra\n",
+        "".join(f"GPU-0a1b2c3d-0000-4000-8000-{i:012x}, 595.84\n" for i in range(17)) + BOOT_ID,
+    ],
+    ids=[
+        "empty",
+        "garbage",
+        "no_boot_id",
+        "no_gpu",
+        "duplicate_uuid",
+        "bad_boot_id",
+        "row_without_driver",
+        "blank_line",
+        "trailing_output",
+        "seventeen_gpus",
+    ],
+)
+def test_parse_facts_is_strict(text: str) -> None:
+    # When / Then
+    with pytest.raises(Reject, match="^qualification_host_facts_malformed$"):
+        host_attest.parse_facts(text)
+
+
+def test_qualification_attest_help_runs() -> None:
+    # Given / When: the operator tool is top-level code, so loading it is the smoke test.
+    done = subprocess.run(
+        [sys.executable, str(TREE / "scripts/ops/qualification_attest.py"), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    # Then
+    assert done.returncode == 0 and "--executor-config" in done.stdout
+
+
+SSHD = Path("/usr/sbin/sshd")
+
+
+class Daemon:
+    """A loopback sshd of the current user standing for GPU host `index`: its host key is the key
+    attested; nvidia-smi, cat and sudo are stubs on the remote PATH, ssh-keygen is the real one."""
+
+    def __init__(self, tmp_path: Path, index: int) -> None:
+        self.state = tmp_path / f"sshd-{index}"
+        self.state.mkdir(mode=0o700)
+        for name in ("host", "client"):
+            subprocess.run(
+                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.state / name)],
+                check=True,
+            )
+        authorized = self.state / "authorized_keys"
+        authorized.write_text((self.state / "client.pub").read_text())
+        authorized.chmod(0o600)
+        self.host_key = " ".join((self.state / "host.pub").read_text().split()[:2])
+        stubs = self.state / "bin"
+        stubs.mkdir()
+        rows = "".join(f"{u}, 595.84\\n" for u in host_gpus(index))
+        for name, body in {
+            "nvidia-smi": f"printf '{rows}'",
+            "cat": f"echo {boot_id(index)}",  # the only file FACTS reads is the boot id
+            "sudo": f'touch {self.state}/sudo-used; shift; exec "$@"',  # drops -n
+        }.items():
+            (stubs / name).write_text(f"#!/bin/sh\n{body}\n")
+            (stubs / name).chmod(0o755)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            self.port = int(probe.getsockname()[1])
+        (self.state / "sshd_config").write_text(
+            f"ListenAddress 127.0.0.1\nPort {self.port}\nHostKey {self.state}/host\n"
+            f"PidFile {self.state}/pid\nAuthorizedKeysFile {authorized}\nStrictModes no\n"
+            "PasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\n"
+            f"AllowUsers {getpass.getuser()}\nLogLevel ERROR\n"
+            f"SetEnv PATH={stubs}:/usr/bin:/bin\n"
+        )
+        self.process = subprocess.Popen(
+            [str(SSHD), "-D", "-e", "-f", str(self.state / "sshd_config")],
+            stdout=(self.state / "sshd.log").open("ab"),
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        for _ in range(400):
+            try:
+                socket.create_connection(("127.0.0.1", self.port), timeout=0.2).close()
+                return
+            except OSError:
+                time.sleep(0.025)
+        self.process.kill()
+        raise AssertionError("sshd did not start: " + (self.state / "sshd.log").read_text())
+
+    def executor_config(self, tmp_path: Path, label: str) -> Path:
+        known_hosts = self.state / "known_hosts"
+        known_hosts.write_text(f"[127.0.0.1]:{self.port} {self.host_key}\n")
+        config = tmp_path / f"executor-{label}.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "run_id": "ab" * 32,
+                    "image_repository": "example/image",
+                    "state_dir": str(tmp_path / f"executor-state-{label}"),
+                    "hosts": [
+                        {
+                            "label": label,
+                            "address": "127.0.0.1",
+                            "port": self.port,
+                            "user": getpass.getuser(),
+                            "identity_file": str(self.state / "client"),
+                            "known_hosts_file": str(known_hosts),
+                        }
+                    ],
+                }
+            )
+        )
+        return config
+
+    def stop(self) -> None:
+        self.process.terminate()
+        self.process.wait(timeout=10)
+
+
+@pytest.mark.skipif(
+    not SSHD.exists() or shutil.which("ssh") is None, reason="needs ssh and /usr/sbin/sshd"
+)
+def test_qualification_attest_attests_two_hosts_over_real_ssh(tmp_path: Path) -> None:
+    # Given: two loopback daemons, each its own host key and GPUs, and results without attestations.
+    paths = unattested(tmp_path)
+    daemons: list[Daemon] = []
+    independent = [
+        host_attest.statement_bytes(
+            host_attest.HostStatement(
+                version=1,
+                config_sha256="11" * 32,
+                result_sha256=fsha(path),
+                image_digest="sha256:" + "44" * 32,
+                gpu_uuids=sorted(host_gpus(index)),
+                drivers=["595.84"],
+                boot_id=boot_id(index),
+            )
+        )
+        for index, path in enumerate(paths)
+    ]
+    try:
+        for index in range(2):
+            daemons.append(Daemon(tmp_path, index))
+        # When: the operator tool runs once per host; host 1 lets its SSH user read the host key.
+        for index, (path, daemon) in enumerate(zip(paths, daemons, strict=True)):
+            config = daemon.executor_config(tmp_path, f"host-{index}")
+            done = subprocess.run(
+                [sys.executable, str(TREE / "scripts/ops/qualification_attest.py")]
+                + ["--executor-config", str(config), "--host", f"host-{index}"]
+                + ["--result", str(path), "--host-key-path", str(daemon.state / "host")]
+                + (["--no-sudo"] if index == 1 else []),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            # Then: it prints the fingerprint the owner compares with the provider console...
+            assert done.returncode == 0, done.stderr
+            known_hosts = daemon.state / "known_hosts"
+            assert f"fingerprint {typed_fingerprint(known_hosts)}\n" in done.stdout
+            assert (daemon.state / "sudo-used").exists() == (index == 0)
+            # ...and the statement is the independent one for that box.
+            assert (path.parent / host_attest.ATTESTATION).read_bytes() == independent[index]
+        verdict = driver.compare(paths, manifest(), host_keys=[d.host_key for d in daemons])
+    finally:
+        for daemon in daemons:
+            daemon.stop()
+    assert verdict == {"two_host_bitwise_match": True, "workload_allowed": False}
