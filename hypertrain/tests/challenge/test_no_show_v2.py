@@ -86,3 +86,34 @@ def test_a_round_the_survivors_cannot_carry_excludes_nobody(network, size, silen
     assert excluded(store, run) == {}
     assert store._db.execute("SELECT COUNT(*) FROM audit_leases_v2").fetchone()[0] == 0
     assert store._record_v2(run, "finality", "0") == before
+
+
+def test_the_delta_stage_leaves_out_only_audited_members_that_are_not_excluded(network):
+    # Kills two mutants the end-to-end delta test cannot tell apart from the fix: dropping the
+    # "audit completed" condition (every member whose audit is still queued would be left out
+    # and its unresolved audit stranded) and overwriting an earlier exclusion (a failed audit
+    # would be renamed NO_SHOW). The end-to-end round has only completed audits and no cheater.
+    store, run = network.store, network.manifest.run_id()
+    keys = seed_round(network, n=5)
+    network.push(D_AUDIT)
+    store.schedule_audits_v2(run, 0)
+    unverified = {"reason": "UNVERIFIED", "evidence_hash": "ab" * 32}
+    with store._tx():
+        store._db.execute(
+            "UPDATE audit_leases_v2 SET state='completed' WHERE hotkey IN (?,?)",
+            (keys[0].ss58, keys[1].ss58),
+        )
+        store._put_record_v2(run, "excluded", f"0:{keys[1].ss58}", unverified)
+    network.push(D_AUDIT + 1)
+
+    with store._tx():
+        store._exclude_missing_deltas_v2(run, 0)
+
+    seen = excluded(store, run)
+    assert {k: v["reason"] for k, v in seen.items()} == {
+        f"0:{keys[0].ss58}": "NO_SHOW",
+        f"0:{keys[1].ss58}": "UNVERIFIED",
+    }
+    assert seen[f"0:{keys[0].ss58}"]["stage"] == "delta"
+    assert seen[f"0:{keys[1].ss58}"] == unverified
+    assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 5

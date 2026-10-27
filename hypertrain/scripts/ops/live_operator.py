@@ -244,8 +244,8 @@ def finalize(m: Master, w: int) -> dict:
     """One aggregate, then Finalize bound to the applied theta (store.py:7994-7998)."""
     refuse_service_run(m)
     opening = RoundOpenV2.model_validate(m.record("round", str(w))["body"])
-    keep = included(m, w, opening)
     applied = m.call("POST", f"/admin/rounds/{w}/aggregate", admin=True)
+    keep = included(m, w, opening)  # after the aggregate: it may leave out a member without a delta
     final = Finalize(
         w=w,
         final_theta_hash_w1=applied["theta_hash"],

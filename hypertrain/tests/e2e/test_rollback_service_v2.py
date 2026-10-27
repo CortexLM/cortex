@@ -218,9 +218,20 @@ def active_network(tmp_path_factory):
         patch.undo()
 
 
-def execute_round(network, w, *, open_only=False, hotkeys=None, forge=None, silent=()):
+def execute_round(
+    network,
+    w,
+    *,
+    open_only=False,
+    hotkeys=None,
+    forge=None,
+    silent=(),
+    skip_delta=(),
+    aggregate=True,
+):
     """One real round for `hotkeys`; `forge` maps a hotkey to CommitV2 fields it lies about,
-    `silent` members are rostered but never accept or commit."""
+    `silent` members are rostered but never accept or commit, `skip_delta` members commit and
+    never upload their delta; `aggregate=False` returns the RoundOpenV2 after the audits."""
     import anyio
     import httpx
     import torch
@@ -414,7 +425,7 @@ def execute_round(network, w, *, open_only=False, hotkeys=None, forge=None, sile
             network.url + "/leaves", json=network.signed(hot, "WorkProof", proof)
         )
         assert accepted.status_code == 200, accepted.text
-        if not lies:  # a forged commit has no matching delta manifest to upload
+        if not lies and hot not in skip_delta:  # a forged commit has no delta manifest to upload
             payloads.append((hot, artifacts.delta))
 
     async def transport():
@@ -545,6 +556,8 @@ def execute_round(network, w, *, open_only=False, hotkeys=None, forge=None, sile
         for hot in hotkeys
         if hot not in silent
     }
+    if not aggregate:
+        return opening
     accepted = network.client.post(
         network.url + f"/admin/rounds/{w}/aggregate", headers=fixtures.admin()
     )

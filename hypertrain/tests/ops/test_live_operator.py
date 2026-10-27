@@ -13,8 +13,12 @@ from scripts.ops import live_operator
 from scripts.ops.live_operator import check_open_shape
 
 from hypertrain.ops.manifest_v2 import main as manifest_main
+from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.hashing import sha256_hex
+from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
-from hypertrain.protocol.messages_v2 import RunManifestV2
+from hypertrain.protocol.messages import f32hex
+from hypertrain.protocol.messages_v2 import PolicyHashes, RoundOpenV2, RunManifestV2
 
 HOTKEYS = ["a", "b"]
 
@@ -125,3 +129,83 @@ def test_cli_open_with_an_auditable_window_reaches_the_master(
     with pytest.raises(Reached):
         live_operator.main(open_args(master_args, gap))
     assert master_calls == [("GET", "")]
+
+
+def test_finalize_lists_the_members_the_aggregate_step_left_out(
+    master_args: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member whose delta never arrived is excluded while the master aggregates, so the
+    Finalize the operator signs must be built after that call, not before."""
+    args = live_operator.argparse.Namespace(
+        master=master_args[1],
+        run_id=master_args[3],
+        state_dir=Path(master_args[5]),
+        coord_key=Path(master_args[7]),
+        admin_token_file=Path(master_args[9]),
+    )
+    master = live_operator.Master(args)
+    manifest = master.manifest()
+    keys = [Keypair(bytes([i + 1]) * 32) for i in range(3)]
+    roster = [
+        {
+            "hotkey": key.ss58,
+            "slot": slot,
+            "q_i": f32hex(1),
+            "admission_id": sha256_hex(f"a{slot}".encode()),
+            "coldkey_group": f"cold{slot}",
+            "state": "ACTIVE",
+            "eligible_weight": 4194304,
+        }
+        for slot, key in enumerate(keys)
+    ]
+    opening = RoundOpenV2(
+        w=0,
+        prev_final_hash="0" * 64,
+        theta_hash="11" * 32,
+        outer_state_hash="0" * 64,
+        center_hash="0" * 64,
+        roster_hash=sha256_hex(canonicalize(roster)),
+        honeypot_commit="0" * 64,
+        d_open=2,
+        d_assign=3,
+        d_commit=4,
+        d_audit=5,
+        d_upload=6,
+        d_final=9,
+        contract_version=2,
+        policy_hashes=PolicyHashes.model_validate(
+            {name: getattr(manifest.network, name) for name in PolicyHashes.model_fields}
+        ),
+        registry_epoch=0,
+        start_state_index_hash="22" * 32,
+        audit_mode="anchored-full",
+        roster=roster,
+    )
+    envelope = envelope_v2.seal(master.coord, "RoundOpenV2", master.run_id, opening, 9)
+    database = Path(master_args[5]) / "challenge.db"
+
+    def put(kind: str, identity: str, data: object) -> None:
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute(
+                "INSERT INTO records_v2 VALUES(?,?,?,?)",
+                (master.run_id, kind, identity, json.dumps(data)),
+            )
+
+    put("round", "0", envelope)
+    for key in keys:
+        put("commit", f"0:{key.ss58}", {"body": {}})
+    sent: list[tuple[str, dict]] = []
+
+    def call(self: Any, method: str, path: str, body: Any = None, admin: bool = False) -> Any:
+        sent.append((path, body))
+        if path.endswith("/aggregate"):
+            put("excluded", f"0:{keys[2].ss58}", {"reason": "NO_SHOW", "stage": "delta"})
+            return {"theta_hash": "33" * 32}
+        return {}
+
+    monkeypatch.setattr(live_operator.Master, "call", call)
+
+    live_operator.finalize(master, 0)
+
+    assert [path for path, _ in sent] == ["/admin/rounds/0/aggregate", "/admin/rounds/0/finalize"]
+    assert sent[1][1]["body"]["included"] == sorted(key.ss58 for key in keys[:2])

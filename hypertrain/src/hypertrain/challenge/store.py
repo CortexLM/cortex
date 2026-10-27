@@ -4303,6 +4303,7 @@ class ChallengeStore:
             "_require_survivors_v2",
             "_put_no_show_v2",
             "_exclude_no_shows_v2",
+            "_exclude_missing_deltas_v2",
             "lease_v2",
             "complete_audit_v2",
             "finalize_v2",
@@ -6413,6 +6414,30 @@ class ChallengeStore:
         finality["unresolved_audits"] = max(0, int(finality["unresolved_audits"]) - len(absent))
         self._put_record_v2(run_id, "finality", str(w), finality)
 
+    def _exclude_missing_deltas_v2(self, run_id: str, w: int) -> None:
+        """Leave out an audited member whose delta never arrived.
+
+        Delta intake closes at d_upload (training_v2). The member's audit already resolved and
+        decremented unresolved_audits, so only the record is written.
+        """
+        from hypertrain.protocol.messages_v2 import RoundOpenV2
+
+        body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", str(w))["body"])
+        if self._now(self._db) < body.d_upload:
+            return
+        audited = {
+            row[0]
+            for row in self._db.execute(
+                "SELECT hotkey FROM audit_leases_v2 WHERE run_id=? AND w=? AND state='completed'",
+                (run_id, w),
+            )
+        }
+        excluded = self._round_ids_v2(run_id, "excluded", w)
+        delivered = self._round_ids_v2(run_id, "delta", w)
+        for entry in body.roster:
+            if entry.hotkey in audited and f"{w}:{entry.hotkey}" not in delivered | excluded:
+                self._put_no_show_v2(run_id, w, entry.hotkey, "delta")
+
     def schedule_audits_v2(self, run_id: str, w: int) -> list[str]:
         from hypertrain.protocol.messages_v2 import AuditChallengeV2, CommitV2, RoundOpenV2
 
@@ -8518,6 +8543,7 @@ class ChallengeStore:
                 return {"tape": tape.body_json(), **saved}
             history = [s for s in self._history_v2(run_id) if s.w < w]
             require_apply(run_id, w, history)
+            self._exclude_missing_deltas_v2(run_id, w)
             inputs = self.verified_inputs_v2(run_id, w)
             policy = AggregationPolicyV2.model_validate_json(
                 self.objects.get(manifest.network.aggregation_policy_hash)

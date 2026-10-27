@@ -56,6 +56,12 @@ def finalize(network, w, applied, survivors):
     return response.json()
 
 
+def aggregate(network, w):
+    return network.client.post(
+        network.url + f"/admin/rounds/{w}/aggregate", headers=fixtures.admin()
+    )
+
+
 def test_round_proceeds_to_w_plus_2_after_a_member_never_commits(activated_network):
     n = activated_network
     run = n.manifest.run_id()
@@ -86,3 +92,28 @@ def test_round_proceeds_to_w_plus_2_after_a_member_never_commits(activated_netwo
     assert finalize(n, 1, second, survivors)["status"] == "SETTLED"
     require_open(run, 2, n.store._history_v2(run))
     assert rollback.execute_round(n, 2, open_only=True).status_code == 200
+
+
+def test_a_member_that_commits_but_never_uploads_a_delta_is_left_out(activated_network):
+    n = activated_network
+    lazy, survivors = fixtures.HOT[4], fixtures.HOT[:4]
+    before = standing(n, lazy.ss58)
+
+    opening = rollback.execute_round(n, 0, skip_delta=(lazy,), aggregate=False)
+    n.push(opening.d_upload - 1)
+    early = aggregate(n, 0)
+    assert (early.status_code, "missing accepted delta" in early.text) == (409, True)
+    assert excluded(n) == {}
+
+    n.push(opening.d_upload)
+    applied = aggregate(n, 0)
+    assert applied.status_code == 200, applied.text
+
+    assert audit_results(n) == ["MATCH"] * 5
+    seen = excluded(n)
+    assert {k: (v["reason"], v["stage"]) for k, v in seen.items()} == {
+        f"0:{lazy.ss58}": ("NO_SHOW", "delta")
+    }
+    assert n.store._record_v2(n.manifest.run_id(), "finality", "0")["unresolved_audits"] == 0
+    assert finalize(n, 0, applied.json(), survivors)["status"] == "SETTLED"
+    assert standing(n, lazy.ss58) == before
