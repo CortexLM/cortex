@@ -53,7 +53,7 @@ EXP_ROUNDS = 2**40  # envelope expiry far beyond any round; replay protection is
 # Backoff between attempts of an idempotent request (object PUT/GET, API GET) that hit a
 # transport error or a 5xx; the last failure propagates. ~31 s worst case per request.
 RETRY_DELAYS: tuple[float, ...] = (1, 2, 4, 8, 16)
-CHALLENGE_REQUEST_ROUNDS = 20  # a signed challenge request lives about a minute at 3 s rounds
+OWNER_REQUEST_ROUNDS = 20  # a signed owner request lives about a minute at 3 s rounds
 FETCH_WORKERS = 16  # concurrent 1 MiB part GETs per job input (bounded window, ordered sink)
 UPLOAD_WORKERS = 16  # concurrent 1 MiB part PUTs per artifact (bounded window, index last)
 
@@ -901,8 +901,8 @@ class NetworkMiner:
         """The folder trial_export writes, from the miner's own signed job read.
 
         The challenge request, a body signed by this hotkey, issues the trial when none is open
-        (else returns the stored one); the job, its inputs and the signed challenge are checked
-        as trial_export checks them."""
+        (else returns the stored one); the job request, signed the same way, reads its job. The
+        job, its inputs and the signed challenge are checked as trial_export checks them."""
         from pydantic import TypeAdapter
 
         from hypertrain.protocol import envelope_v2
@@ -911,20 +911,18 @@ class NetworkMiner:
         admission_id = self.status()["record"]["admission_id"]
         url = self.url + f"/join/{admission_id}"
         now = self.api.call("GET", self.url)["now_round"]
-        request = envelope_v2.seal(
-            self.kp,
-            "ChallengeRequest",
-            self.run_id,
-            {"admission_id": admission_id},
-            now + CHALLENGE_REQUEST_ROUNDS,
-        )
-        envelope = self.api.call("POST", url + "/challenge", json=request)
-        signature = self.kp.sign(f"hypertrain/trial-job/2|{self.run_id}|{admission_id}".encode())
-        data = self.api.call(
-            "GET",
-            url + "/job",
-            headers={"X-Hotkey": self.kp.ss58, "X-Trial-Signature": signature.hex()},
-        )
+
+        def asked(message: str) -> dict[str, Any]:
+            return envelope_v2.seal(
+                self.kp,
+                message,
+                self.run_id,
+                {"admission_id": admission_id},
+                now + OWNER_REQUEST_ROUNDS,
+            )
+
+        envelope = self.api.call("POST", url + "/challenge", json=asked("ChallengeRequest"))
+        data = self.api.call("POST", url + "/job", json=asked("JobRequest"))
         try:
             job = IslandJobV1.model_validate(data["job"])
             challenge = JoinChallenge.model_validate(data["challenge"])

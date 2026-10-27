@@ -36,17 +36,19 @@ from hypertrain.data.store import Store as ObjectStore
 from hypertrain.gpu_ops import role_dispatch
 from hypertrain.ledger import Params, vest_rounds_for_q
 from hypertrain.ledger.escrow_v2 import EscrowError
-from hypertrain.protocol.envelope import EnvelopeError
+from hypertrain.protocol.envelope import EnvelopeError, ExpiredError
 from hypertrain.protocol.envelope_v2 import load_json
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import KeyError_, Keypair, decode_hotkey
 from hypertrain.protocol.messages import QUICKNET_GENESIS
+from hypertrain.protocol.messages_v2 import ChallengeRequest, JobRequest
 from hypertrain.protocol.server_keys import SignedGrant, SignedRevoke
 from hypertrain.public_api import create_public_app
 
 VERSION = "0.1.0"
 BODY_MAX = 1024 * 1024
 METAGRAPH_TTL = 30.0
+OWNER_REQUEST_MAX_ROUNDS = 100  # a captured owner request replays for at most 5 minutes
 HEX64 = r"^[0-9a-f]{64}$"
 SS58 = r"^[1-9A-HJ-NP-Za-km-z]{46,50}$"
 Auth = Annotated[str | None, Header()]
@@ -477,48 +479,41 @@ def create_app(
         await subnet_member(hotkey)
         return hotkey
 
-    @app.post("/v2/runs/{run_id}/join/{admission_id}/challenge")
-    async def challenge_v2(run_id: str, admission_id: str, request: Request) -> Any:
+    async def owner_request(
+        run_id: str,
+        admission_id: str,
+        request: Request,
+        message: type[ChallengeRequest] | type[JobRequest],
+    ) -> None:
+        """Only the owner of an admission may ask: its current hotkey signs `message` with the
+        admission id. Admission ids are public, and the master proxy forwards no signature
+        header, so the proof is a signed envelope in the BODY. Its expiry bounds a replay of a
+        capture: further than OWNER_REQUEST_MAX_ROUNDS ahead of the beacon is refused."""
         from hypertrain.protocol import envelope_v2
-        from hypertrain.protocol.messages_v2 import ChallengeRequest
 
-        # Opening a trial takes one of the run's trial places: only the owner may ask for it.
-        # Admission ids are public, so the owner's proof is a signed envelope in the BODY (the
-        # master proxy forwards no signature header): its expiry bounds a replay of a capture.
         hotkey = await admission_hotkey(run_id, admission_id)
         try:
-            asked = envelope_v2.Intake(run_id, {"ChallengeRequest": hotkey.__eq__}).accept(
-                await v2_raw(request), await run(locked_now)
-            )
-            valid = isinstance(asked, ChallengeRequest) and asked.admission_id == admission_id
+            raw = await v2_raw(request)
+            now = await run(locked_now)
+            if envelope_v2.parse_envelope(raw).exp_drand > now + OWNER_REQUEST_MAX_ROUNDS:
+                raise ExpiredError("expiry too far ahead")
+            asked = envelope_v2.Intake(run_id, {message.__name__: hotkey.__eq__}).accept(raw, now)
+            valid = isinstance(asked, message) and asked.admission_id == admission_id
         except EnvelopeError:
             valid = False
         if not valid:
             raise ChallengeError(403, "hotkey is not current accepted identity")
+
+    @app.post("/v2/runs/{run_id}/join/{admission_id}/challenge")
+    async def challenge_v2(run_id: str, admission_id: str, request: Request) -> Any:
+        # Opening a trial takes one of the run's trial places.
+        await owner_request(run_id, admission_id, request, ChallengeRequest)
         return await run(store.for_run(run_id).admission_v2, run_id, "challenge", b"", admission_id)
 
-    @app.get("/v2/runs/{run_id}/join/{admission_id}/job")
-    async def trial_job_v2(
-        run_id: str,
-        admission_id: str,
-        x_hotkey: Annotated[str | None, Header()] = None,
-        x_trial_signature: Annotated[str | None, Header()] = None,
-    ) -> Any:
-        from hypertrain.protocol.keys import verify
-
-        # The admin export's payload, only to the registered hotkey that owns the admission:
-        # admission ids are public (admission status), so the caller signs for its hotkey.
-        hotkey = await admission_hotkey(run_id, admission_id)
-        try:
-            valid = x_hotkey == hotkey and verify(
-                decode_hotkey(hotkey),
-                f"hypertrain/trial-job/2|{run_id}|{admission_id}".encode(),
-                bytes.fromhex(x_trial_signature or ""),
-            )
-        except (ValueError, KeyError_):
-            valid = False
-        if not valid:
-            raise ChallengeError(403, "hotkey is not current accepted identity")
+    @app.post("/v2/runs/{run_id}/join/{admission_id}/job")
+    async def trial_job_v2(run_id: str, admission_id: str, request: Request) -> Any:
+        # The admin export's payload, only to the registered hotkey that owns the admission.
+        await owner_request(run_id, admission_id, request, JobRequest)
         return await run(store.for_run(run_id).export_trial_v2, run_id, admission_id)
 
     @app.get("/v2/runs/{run_id}/admission/{hotkey}")

@@ -41,7 +41,7 @@ from hypertrain.data.store import LocalFSStore, get_large, put_large
 from hypertrain.gpu_ops.journal import Journal, durable_write, fsha
 from hypertrain.gpu_ops.work_screen import IslandLaunch
 from hypertrain.miner.admission import sign_join
-from hypertrain.miner.core import load_keyfile
+from hypertrain.miner.core import OWNER_REQUEST_ROUNDS, load_keyfile
 from hypertrain.miner.island_launch import IslandArtifacts
 from hypertrain.protocol import envelope_v2, relay_envelope
 from hypertrain.protocol.hashing import sha256_hex
@@ -748,9 +748,16 @@ def decoder_join_lock(
     return admission_id
 
 
-def challenge_request(hot: Keypair, run_id: str, admission_id: str) -> dict:
-    """The challenge route answers only the admission's own hotkey: a signed body, no header."""
-    return envelope_v2.seal(hot, "ChallengeRequest", run_id, {"admission_id": admission_id}, 10**9)
+def challenge_request(hot: Keypair, run_id: str, admission_id: str, now: int) -> dict:
+    """The challenge route answers only the admission's own hotkey: a signed body, no header,
+    good for the miner client's `OWNER_REQUEST_ROUNDS` after the service's current round."""
+    return envelope_v2.seal(
+        hot,
+        "ChallengeRequest",
+        run_id,
+        {"admission_id": admission_id},
+        now + OWNER_REQUEST_ROUNDS,
+    )
 
 
 def decoder_operation(
@@ -779,7 +786,9 @@ def decoder_operation(
     if spec.operation == "probe":
         challenge_response = client.post(
             root + "/join/" + spec.binding + "/challenge",
-            json=challenge_request(hot, spec.job.run_id, spec.binding),
+            json=challenge_request(
+                hot, spec.job.run_id, spec.binding, client.get(root).json()["now_round"]
+            ),
         )
         challenge_response.raise_for_status()
         signed_challenge = envelope_v2.parse_envelope(challenge_response.json())
@@ -1978,7 +1987,7 @@ def decoder_continue(
                     advance(row[0])
                     response = client.post(
                         f"/v2/runs/{graph.run_id}/join/{admission}/challenge",
-                        json=challenge_request(hot, graph.run_id, admission),
+                        json=challenge_request(hot, graph.run_id, admission, now()),
                     )
                     response.raise_for_status()
                     signed = response.json()
