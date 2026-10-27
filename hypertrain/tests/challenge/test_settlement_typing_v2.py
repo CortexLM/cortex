@@ -427,3 +427,160 @@ def test_contest_lock_has_no_settlement_without_a_contest_resolver(tmp_path: Pat
     with pytest.raises(EscrowError, match="UNACCEPTED_SETTLEMENT"):
         e.release(contest_release(origin, E.H), signer=E.COLD.ss58, now_beacon=10)
     assert e.balances().dispute_locked == 1000
+
+
+# ------------------------------------------------------------------ admission locks are typed too
+A = _load("settlement_typing_admission_fixture", "test_admission_v2.py")
+
+
+def admission_lock_world(tmp_path: Path, name: str, owner_funds: bool = True):
+    """An admission whose coldkey holds one admission lock under `name`; no admission resolver."""
+    s = A.setup()
+    a = A.service(s, tmp_path)
+    admission_id = A.apply(a, s)
+    origin, _ = A.fixtures.fund(a.escrow)
+    lock = EscrowLock(
+        operation_id=name,
+        owner=A.COLD.ss58,
+        units=1000,
+        origin_ids=[origin],
+        admission_id=admission_id,
+        dispute_id=None,
+        kind="LOCK_ADMISSION",
+    )
+    a.escrow.lock(lock, signer=A.COLD.ss58)
+    a.escrow.admission_settlement = None  # what the store wires today: nothing settles a bond
+    return a, lock
+
+
+def release_of(lock: EscrowLock, finality_hash: str, root: str) -> EscrowRelease:
+    return EscrowRelease(
+        operation_id="88" * 32,
+        owner=lock.owner,
+        units=lock.units,
+        origin_ids=lock.origin_ids,
+        admission_id=lock.admission_id,
+        dispute_id=None,
+        lock_id=lock.operation_id,
+        finality_hash=finality_hash,
+        closed_dispute_root=root,
+    )
+
+
+def test_an_admission_lock_has_no_settlement_without_an_admission_resolver(tmp_path: Path) -> None:
+    # Given: the callback that settles disputes and origins would answer MATCH for any name.
+    a, lock = admission_lock_world(tmp_path, "77" * 32)
+    match = Settlement(
+        finality_hash=E.H,
+        closed_dispute_root=E.H,
+        release_beacon=10,
+        unresolved=False,
+        outcome="MATCH",
+    )
+    a.escrow.settlement = lambda reference: match
+    # When / Then: an admission lock is not settled by it.
+    with pytest.raises(EscrowError, match="UNACCEPTED_SETTLEMENT"):
+        a.escrow.release(release_of(lock, E.H, E.H), signer=A.COLD.ss58, now_beacon=20)
+    assert a.escrow.balances(A.COLD.ss58).admission_locked == 1000
+    # and with a resolver for admission locks, the same release settles.
+    a.escrow.admission_settlement = lambda reference: match
+    a.escrow.release(release_of(lock, E.H, E.H), signer=A.COLD.ss58, now_beacon=20)
+    assert a.escrow.balances(A.COLD.ss58).admission_locked == 0
+
+
+def test_an_admission_lock_named_like_a_closed_dispute_is_not_released_by_it(
+    tmp_path: Path,
+) -> None:
+    # Given: a closed, vested dispute, and an admission lock that carries its id.
+    d, f, ref, first = first_dispute_closed(tmp_path)
+    closed = d.settlement(first.dispute_id)
+    origin = free_origin(d.db, f.COLD.ss58)
+    borrowed = EscrowLock(
+        operation_id=first.dispute_id,
+        owner=f.COLD.ss58,
+        units=100,
+        origin_ids=[origin],
+        admission_id=E.H,
+        dispute_id=None,
+        kind="LOCK_ADMISSION",
+    )
+    d.escrow.lock(borrowed, signer=f.COLD.ss58)
+    d.escrow.admission_settlement = None
+    # When / Then: the dispute's settlement does not release it.
+    with pytest.raises(EscrowError, match="UNACCEPTED_SETTLEMENT"):
+        d.escrow.release(
+            release_of(borrowed, closed.finality_hash, closed.closed_dispute_root),
+            signer=f.COLD.ss58,
+            now_beacon=5,
+        )
+    assert d.escrow.balances(f.COLD.ss58).admission_locked == 100
+
+
+def test_an_admission_lock_named_like_a_reward_origin_is_not_released_over_the_routes(net) -> None:
+    n = net
+    run_id = n.manifest.run_id()
+    admission_id = n.join(0).json()["admission_id"]
+    escrow = n.store._services(run_id)[0]
+    origin = seed_reward_origin(n, run_id, b"settled-origin", COLD[3].ss58)
+    n.push(2)
+    held = free(n, COLD[0].ss58)
+    lock = EscrowLock(
+        operation_id=origin,
+        owner=COLD[0].ss58,
+        units=1000,
+        origin_ids=[held],
+        admission_id=admission_id,
+        dispute_id=None,
+        kind="LOCK_ADMISSION",
+    )
+    posted = n.client.post(n.url + "/escrow/lock", json=n.signed(COLD[0], "EscrowLock", lock))
+    assert posted.status_code == 200, posted.text
+    n.push(12)  # past the origin's release beacon
+    release = release_of(lock, "ab" * 32, sha256_hex(canonicalize([])))
+    response = n.client.post(
+        n.url + "/escrow/release", json=n.signed(COLD[0], "EscrowRelease", release)
+    )
+    assert response.status_code == 409 and "UNACCEPTED_SETTLEMENT" in response.text
+    assert escrow.balances(COLD[0].ss58).admission_locked == 1000
+
+
+def test_settle_fraud_asks_the_admission_resolver_and_not_the_dispute_table(tmp_path: Path) -> None:
+    # Given: a name under which a dispute or an origin was convicted, borrowed by an admission lock.
+    a, lock = admission_lock_world(tmp_path, "77" * 32)
+    fraud = Settlement(
+        finality_hash=E.H,
+        closed_dispute_root=E.H,
+        release_beacon=10,
+        unresolved=False,
+        outcome="FRAUD",
+    )
+    a.escrow.settlement = lambda reference: fraud
+    # When / Then: the lookup of an admission lock does not reach that conviction.
+    with pytest.raises(EscrowError, match="UNACCEPTED_SETTLEMENT"):
+        a.settle_fraud(A.HOT.ss58, lock.operation_id, now=20)
+    assert a.store.record(A.HOT.ss58).state != "BANNED"
+    # A resolver for admission locks may convict.
+    a.escrow.admission_settlement = lambda reference: fraud
+    a.settle_fraud(A.HOT.ss58, lock.operation_id, now=20)
+    assert a.store.record(A.HOT.ss58).state == "BANNED"
+
+
+def test_an_unknown_lock_is_refused_before_any_settlement_is_asked(tmp_path: Path) -> None:
+    asked: list[str] = []
+
+    def settlement(reference: str) -> Settlement:
+        asked.append(reference)
+        return Settlement(
+            finality_hash=E.H,
+            closed_dispute_root=E.H,
+            release_beacon=10,
+            unresolved=False,
+            outcome="MATCH",
+        )
+
+    e = E.ledger(E.setup(), tmp_path / "ledger.db", settlement=settlement)
+    origin, _ = E.fund(e)
+    ghost = contest_release(origin, E.H).model_copy(update={"lock_id": "99" * 32})
+    with pytest.raises(EscrowError, match="UNKNOWN_LOCK"):
+        e.release(ghost, signer=E.COLD.ss58, now_beacon=10)
+    assert asked == []  # a name that is no lock is not looked up in the dispute or origin tables

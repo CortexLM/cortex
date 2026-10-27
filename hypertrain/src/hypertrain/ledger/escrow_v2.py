@@ -222,6 +222,7 @@ class EscrowV2:
         id_key: bytes | None = None,
         contest_settlement: Callable[[EscrowLock], Settlement] | None = None,
         accepted_at: Callable[[EnvelopeV2], int] | None = None,
+        admission_settlement: Callable[[str], Settlement] | None = None,
     ) -> None:
         if auditor_quorum is not None:
             k, n = auditor_quorum
@@ -241,7 +242,7 @@ class EscrowV2:
         self.settlement, self.owner_of, self.assignment_of = settlement, owner_of, assignment_of
         self.shadow_assignment_of, self.shadow_settlement = shadow_assignment_of, shadow_settlement
         self.id_key, self.contest_settlement = id_key, contest_settlement
-        self.accepted_at = accepted_at
+        self.accepted_at, self.admission_settlement = accepted_at, admission_settlement
         self.mutex = threading.RLock()
         match database:
             case Path():
@@ -1007,17 +1008,24 @@ class EscrowV2:
         """The service's release of a settled lock: its id is derived, so it is a server event."""
         return self._release(op, signer, now_beacon, server=True)
 
-    def _lock_status(self, lock_id: str) -> Settlement:
+    def lock_status(self, lock_id: str) -> Settlement:
         """Settlement that governs a lock, chosen by the kind of the lock event.
 
         A contest bond is settled by the dispute that took it, found through the lock's own signed
-        dispute id; a lock is never looked up in the dispute or origin tables by its name.
+        dispute id. An admission lock is settled by the resolver of admission locks, or by nothing:
+        the dispute and origin tables are never searched for the name a client gave a lock.
         """
         row = self.db.execute(
             "SELECT request,kind FROM escrow_events WHERE operation_id=?", (lock_id,)
         ).fetchone()
-        if row is None or row["kind"] != "LOCK_CONTEST":
-            return self.settlement(lock_id)
+        if row is None:
+            raise EscrowError("UNKNOWN_LOCK")
+        if row["kind"] == "LOCK_ADMISSION":
+            if self.admission_settlement is None:
+                raise EscrowError("UNACCEPTED_SETTLEMENT")
+            return self.admission_settlement(lock_id)
+        if row["kind"] != "LOCK_CONTEST":
+            raise EscrowError("UNKNOWN_LOCK")
         if self.contest_settlement is None:
             raise EscrowError("UNACCEPTED_SETTLEMENT")
         lock = EscrowLock.model_validate_json(row["request"])
@@ -1033,7 +1041,7 @@ class EscrowV2:
             old = self._owner_operation(op, signer, server=server)
             if old is not None:
                 return old
-            status = self._lock_status(op.lock_id)
+            status = self.lock_status(op.lock_id)
             if (
                 status.unresolved
                 or status.outcome == "FRAUD"
@@ -1084,7 +1092,7 @@ class EscrowV2:
             old = self._existing(op.operation_id, request, server=True)
             if old is not None:
                 return old
-            status = self._lock_status(op.lock_id)
+            status = self.lock_status(op.lock_id)
             if (
                 status.unresolved
                 or status.outcome != "FRAUD"

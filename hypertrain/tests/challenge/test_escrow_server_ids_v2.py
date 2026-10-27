@@ -27,7 +27,7 @@ from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
-from hypertrain.protocol.messages_v2 import EscrowTransfer, ResolutionV2
+from hypertrain.protocol.messages_v2 import EscrowLock, EscrowTransfer, ResolutionV2
 
 
 def load(name: str, path: Path):
@@ -209,3 +209,40 @@ def test_a_changed_coordinator_secret_fails_closed(served) -> None:
         n.store._services(run)
     assert error.value.status == 503 and "escrow id namespace differs" in str(error.value)
     assert run not in n.store._services_v2  # nothing was built with the wrong key
+
+
+def test_no_public_route_returns_an_origin_id(served) -> None:
+    # Origin ids are readable by their holder (who receives them from the operator) and by the
+    # admin; the routes a third party can call, and the receipts of the escrow routes, carry none.
+    n = served
+    origins = {row[0] for row in n.store._db.execute("SELECT origin FROM escrow_origins")}
+    assert len(origins) == len(N.COLD)
+    n.join(0)
+    held = n.origin_ids[1]
+    lock = EscrowLock(
+        operation_id="31" * 32,
+        owner=N.COLD[1].ss58,
+        units=100,
+        origin_ids=[held],
+        admission_id=None,
+        dispute_id="32" * 32,
+        kind="LOCK_CONTEST",
+    )
+    unknown = lock.model_copy(update={"operation_id": "33" * 32, "origin_ids": ["34" * 32]})
+    responses = [
+        n.client.get(n.url),
+        n.client.get(n.url + "/admission/" + N.HOT[0].ss58),
+        n.client.post(n.url + "/escrow/lock", json=n.signed(N.COLD[1], "EscrowLock", lock)),
+        n.client.post(n.url + "/escrow/lock", json=n.signed(N.COLD[1], "EscrowLock", unknown)),
+        n.client.post(
+            n.url + "/escrow/transfer",
+            json=n.signed(
+                N.COLD[1], "EscrowTransfer", transfer(N.COLD[1], N.COLD[2], held, "35" * 32)
+            ),
+        ),
+    ]
+    assert [r.status_code for r in responses[:3]] == [200, 200, 200]
+    assert responses[3].status_code == 409  # an unknown origin is refused by code, not echoed
+    for response in responses:
+        for origin in origins:
+            assert origin not in response.text, response.request.url

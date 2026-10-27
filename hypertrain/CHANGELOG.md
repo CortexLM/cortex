@@ -76,6 +76,10 @@
   older dispute's id made the new dispute unresolvable (its settlement resolved on the other row) and a
   lock named like a reward origin got that origin's settlement. `POST /dispute` refuses a bond named
   like an existing dispute or origin (`CONTEST_LOCK_ID_COLLISION`) (Lens F4).
+- Admission locks are typed too: a lock named like a closed dispute or a settled reward origin was
+  released with that object's settlement over `POST /escrow/release`. `EscrowV2.lock_status` asks a
+  resolver of admission locks, or nothing (`UNACCEPTED_SETTLEMENT`), and never the dispute or origin
+  tables; `Admission.settle_fraud` uses it (Lens F4 iii).
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

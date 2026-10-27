@@ -1095,13 +1095,13 @@ class Admission:
         self._beacon(now)
         with self.escrow.tx():
             r = self.store.record(hotkey)
-            status = self.escrow.settlement(lock_id)
             lock_row = self.store.db.execute(
                 "SELECT request FROM escrow_events WHERE operation_id=? AND kind='LOCK_ADMISSION'",
                 (lock_id,),
             ).fetchone()
             if lock_row is None:
                 raise AdmissionError("UNKNOWN_FRAUD_LOCK")
+            status = self.escrow.lock_status(lock_id)
             op = EscrowLock.model_validate_json(lock_row["request"])
             if (
                 op.admission_id != r.admission_id

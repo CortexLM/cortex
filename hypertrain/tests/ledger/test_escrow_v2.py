@@ -204,22 +204,23 @@ def ledger(
     def no_unverified_finality(evidence: FinalityEvidence) -> str:
         raise EscrowError("NO_REPLAY_ACCEPTANCE")
 
+    generic = settlement or (
+        lambda _: Settlement(
+            finality_hash=H,
+            closed_dispute_root=H,
+            release_beacon=10,
+            unresolved=False,
+            outcome="MATCH",
+        )
+    )
     return EscrowV2(
         database,
         s.manifest,
         s.policy,
         auditors=frozenset({AUDITOR.ss58}),
         replay_finality=replay or no_unverified_finality,
-        settlement=settlement
-        or (
-            lambda _: Settlement(
-                finality_hash=H,
-                closed_dispute_root=H,
-                release_beacon=10,
-                unresolved=False,
-                outcome="MATCH",
-            )
-        ),
+        settlement=generic,
+        admission_settlement=generic,
         owner_of=lambda h: COLD.ss58 if h == HOT.ss58 else OTHER.ss58,
         assignment_of=lambda w, h: (0,),
         shadow_assignment_of=lambda binding: (0,),

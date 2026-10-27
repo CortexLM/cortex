@@ -377,7 +377,10 @@ dispute that took it, found through the lock's own signed `dispute_id` and check
 dispute's recorded bond, and a dispute or a reward origin is found by its own id; no lookup
 treats a lock id as a dispute id or the reverse. `POST /dispute` refuses a bond whose name is
 already a dispute or a reward origin (`CONTEST_LOCK_ID_COLLISION`, 409). A contest lock that no
-dispute took as its bond has no settlement and is not released. See `docs/adr/0014` at the
+dispute took as its bond has no settlement and is not released. An admission lock is settled
+by the resolver of admission locks or by nothing: the dispute and origin tables are never
+searched for its name, and the production master wires no resolver yet, so an admission bond is
+neither released nor slashed (ADR 0010 part 6 adds the resolver). See `docs/adr/0014` at the
 monorepo root.
 
 ## Weights, finality and custody
