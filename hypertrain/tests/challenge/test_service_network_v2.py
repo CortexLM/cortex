@@ -2902,13 +2902,18 @@ def test_signed_event_access_and_forged_ack_reject(network):
 
     # Given: genuine dual-signed identity; no pending dispute events.
     network.join()
-    url = network.url + "/disputes?party=" + HOT[0].ss58
-    # When
-    denied = network.client.get(url)
-    signature = (
-        HOT[0].sign(f"hypertrain/watch/2|{network.manifest.run_id()}|{HOT[0].ss58}".encode()).hex()
-    )
-    accepted = network.client.get(url, headers={"X-Dispute-Signature": signature})
+    url = network.url + "/disputes"
+    expires = network.now + OWNER_REQUEST_ROUNDS
+
+    def asked(key):
+        return network.signed(
+            key, "WatchRequest", {"party": HOT[0].ss58, "cursor": 0, "wait_seconds": 0}, expires
+        )
+
+    # When: the party's own signed request, then the same request signed by another hotkey
+    denied = network.client.post(url, json=asked(HOT[1]))
+    accepted = network.client.post(url, json=asked(HOT[0]))
+    old_style = network.client.get(url, params={"party": HOT[0].ss58})
     ack = EventAck(
         run_id=network.manifest.run_id(),
         party=HOT[0].ss58,
@@ -2921,6 +2926,7 @@ def test_signed_event_access_and_forged_ack_reject(network):
     # Then
     assert denied.status_code == 403
     assert accepted.status_code == 200 and accepted.json() == []
+    assert old_style.status_code == 405
     assert rejected.status_code == 409
     assert network.store._db.execute("SELECT COUNT(*) FROM dispute_acks_v2").fetchone()[0] == 0
 
