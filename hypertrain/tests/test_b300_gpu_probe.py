@@ -171,32 +171,72 @@ def test_the_expected_host_passes_every_check() -> None:
     assert set(gpu_probe.checks(HOST, 8, (10, 3)).values()) == {True}
 
 
-@pytest.mark.parametrize(
-    ("change", "failed"),
-    [
-        ({"torch": "2.13.0+cu130"}, "torch_cu130"),
-        ({"torch_cuda": "12.9"}, "torch_cu130"),
-        ({"device_count": 7, "devices": [B300] * 7}, "gpu_count"),
-        ({"device_count": 9, "devices": [B300] * 9}, "gpu_count"),  # more is another host too
-        ({"devices": [B300] * 7 + [{**B300, "capability": [10, 0]}]}, "capability"),
-        ({"devices": [B300] * 7 + [{**B300, "sm_count": 132}]}, "same_sm_count"),
-        ({"smoke": {"ok": False}}, "bitwise_smoke"),
-    ],
-    ids=["torch", "cuda", "fewer", "more", "mixed-capability", "mixed-sm", "smoke"],
-)
+WRONG_FACTS = [
+    pytest.param({"torch": "2.13.0+cu130"}, "torch_cu130", id="torch"),
+    pytest.param({"torch_cuda": "12.9"}, "torch_cu130", id="cuda"),
+    pytest.param({"device_count": 7, "devices": [B300] * 7}, "gpu_count", id="fewer"),
+    pytest.param({"device_count": 9, "devices": [B300] * 9}, "gpu_count", id="more"),
+    pytest.param(
+        {"devices": [B300] * 7 + [{**B300, "capability": [10, 0]}]}, "capability", id="mixed-cc"
+    ),
+    pytest.param(
+        {"devices": [B300] * 7 + [{**B300, "sm_count": 132}]}, "same_sm_count", id="mixed-sm"
+    ),
+    pytest.param({"smoke": {"ok": False}}, "bitwise_smoke", id="smoke"),
+]
+
+
+@pytest.mark.parametrize(("change", "failed"), WRONG_FACTS)
 def test_one_wrong_fact_fails_exactly_its_check(change: dict[str, object], failed: str) -> None:
     checks = gpu_probe.checks({**HOST, **change}, 8, (10, 3))
     assert [name for name, ok in checks.items() if not ok] == [failed]
 
 
-@pytest.mark.parametrize(("smoke_ok", "rc"), [(True, 0), (False, 1)])
+@pytest.mark.parametrize(("change", "failed"), [pytest.param({}, None, id="ok"), *WRONG_FACTS])
 def test_the_exit_code_and_the_json_follow_the_verdict(
-    smoke_ok: bool, rc: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    change: dict[str, object],
+    failed: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     out = tmp_path / "gpu_probe.json"
-    monkeypatch.setattr(gpu_probe, "probe", lambda *_: {**HOST, "smoke": {"ok": smoke_ok}})
+    monkeypatch.setattr(gpu_probe, "probe", lambda *_: {**HOST, **change})
     argv = ["gpu_probe.py", "--out", str(out), "--expect-gpus", "8", "--expect-cc", "10.3"]
     monkeypatch.setattr(sys, "argv", argv)
-    assert gpu_probe.main() == rc
+    rc = gpu_probe.main()
     doc = json.loads(out.read_text())
-    assert doc["ok"] is smoke_ok and doc["checks"]["bitwise_smoke"] is smoke_ok
+    # Exit code, JSON verdict and the failed check must agree, whichever fact is wrong.
+    assert (rc, doc["ok"]) == ((0, True) if failed is None else (1, False))
+    assert [n for n, ok in doc["checks"].items() if not ok] == ([failed] if failed else [])
+
+
+def test_the_smoke_runs_on_the_device_under_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No GPU needed: the meta device has no data but takes the same code path. The backend must be
+    # asked about this device and the kimi round must be started on it, whatever the current CUDA
+    # device is. (select_backend answers for any non-CUDA device with "math", so only a stand-in
+    # that checks its argument can tell a wrong device from the right one.)
+    meta = torch.device("meta")
+    started: list[str] = []
+
+    def pick(device: torch.device) -> str:
+        assert device == meta, f"select_backend asked about {device}"
+        return "math"
+
+    def qualify(doc: dict[str, object], device: str, rounds: int) -> list[dict[str, str]]:
+        started.append(device)
+        return [{k: "e" * 64 for k in KIMI_ROOTS}]
+
+    monkeypatch.setattr(gpu_probe, "select_backend", pick)
+    monkeypatch.setattr(gpu_probe, "digest", lambda t: "d" * 64)
+    monkeypatch.setattr(kt, "qualify", qualify)
+    out = gpu_probe.workload(meta)
+    assert started == ["meta"]
+    assert out["math_out"] == "d" * 64 and out["kimi_micro_state_root"] == "e" * 64
+
+
+def test_every_repeat_runs_the_whole_smoke() -> None:
+    ev = gpu_probe.probe(2, "cpu")
+    runs = ev["runs"]["cpu"]
+    assert ev["repeats"] == 2 and len(runs) == 2
+    assert all(f"kimi_micro_{root}" in run for run in runs for root in KIMI_ROOTS)
+    assert runs[0] == runs[1] and ev["smoke"]["ok"]

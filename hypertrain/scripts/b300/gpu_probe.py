@@ -11,11 +11,15 @@ MICRO roots included. Inputs are generated on the CPU, so all devices see the sa
 A kernel error (a RuntimeError, e.g. no kernel image for the device) is recorded as the digest
 value; any other exception is a defect and surfaces.
 
+The image must contain hypertrain.models.kimi_tiny. One built before it (the default pin of
+run_host.sh predates it) fails here with ModuleNotFoundError: pass --image of a newer build.
+
 Usage (inside the GPU image, HT_* env as the miner runs it):
   python scripts/b300/gpu_probe.py --out /results/gpu_probe.json --expect-gpus 8 --expect-cc 10.3
-Exit 0 when every check passes, 1 otherwise. The JSON at --out is rewritten on every run. When the
-probe raises (any exception, KeyboardInterrupt and SystemExit included) it holds
-{"ok": false, "error": "<Type>: <message>"} and the exception still ends the process non-zero.
+Exit 0 when every check passes, 1 otherwise. When the probe raises (any exception,
+KeyboardInterrupt and SystemExit included) the JSON at --out becomes
+{"ok": false, "error": "<Type>: <message>"} and the exception still ends the process non-zero. A
+kill (docker stop) or bad arguments leave an old file in place: run_host.sh removes it first.
 """
 
 from __future__ import annotations
