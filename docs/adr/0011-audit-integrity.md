@@ -1039,7 +1039,9 @@ the table as covering them.
     `finalize_v2`, `rollback_v2` for either round of its window; owned names), and `_persist_anchor_v2`
     refuses an anchor for a retired round, so a late MATCH cannot replace a carried one; completed
     verdicts stay as evidence. A dispute is not waited for: an open one leaves the round retired but not closed until Part 1 closes it.
-    `relay_settlement_v2` answers for the grants of a retired round. The honest bonds are released by
+    `relay_settlement_v2` answers for the grants of a retired round (its finality hash is the evidence
+    hash, its finality beacon `retired_beacon`, its vesting `retired_beacon + E_vest_rounds`; an open
+    dispute still pins it). The honest bonds are released by
     `lock_settlement` as soon as the round is closed.
 11. **The next round.** The operator opens `w + 1` with `prev_final_hash = retired[w].evidence_hash`
     (`live_operator open` reads it when round `w` has no `finalize`). It needs four eligible members that

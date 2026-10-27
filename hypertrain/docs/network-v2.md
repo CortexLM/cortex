@@ -547,6 +547,10 @@ are revoked; a finished verdict stays as evidence. From then on `audits`, `aggre
 and `rollback` of that round answer 409 `ROUND_RETIRED`, and no late audit result can replace a
 carried anchor. Nothing is minted for it and the escrow is not called at retirement: the next
 reward `finalize` records the round as withdrawn, as for any round closed without a reward.
+The relay custody of its uploads is settled by the retirement: the finality hash is the evidence
+hash, the finality beacon is `retired_beacon` and vesting ends `E_vest_rounds` after it (an open
+dispute against the round still pins the custody). The bond of every roster member is released
+as soon as the round is closed.
 Round `w + 1` is opened by the operator with `prev_final_hash` set to the evidence hash
 (`scripts/ops/live_operator.py open` reads `retired/w` when round `w` has no `finalize`, and
 still refuses by name a round that has neither). It needs four eligible members that hold an anchor for `w`, which are the members of the retired roster

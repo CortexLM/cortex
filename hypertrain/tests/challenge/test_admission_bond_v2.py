@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -19,6 +19,7 @@ from hypertrain.challenge.admission import (
 )
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import Contest, DisputesV2
+from hypertrain.challenge.finality_v2 import RoundStatus, retire
 from hypertrain.ledger.escrow_v2 import EscrowError
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
@@ -232,6 +233,15 @@ def unclosed_round(w: World, *, closed: bool) -> None:
     )
 
 
+def retired_round(w: World) -> None:
+    """The round of `unclosed_round(closed=False)` once the store retired it: closed, no reward."""
+    pending = RoundStatus(w.run_id, 0, False, "PENDING", 0, 1, False, H, None)
+    w.a.store.db.execute(
+        "INSERT OR REPLACE INTO records_v2 VALUES(?,?,?,?)",
+        (w.run_id, "finality", "0", json.dumps(asdict(retire(pending, H, "88" * 32)))),
+    )
+
+
 def reward(w: World, *, vested: bool, mature_at: int = 50, hotkey: str = HOT.ss58) -> None:
     """A reward origin of one hotkey of the admission, still pending or already matured."""
     db = w.a.store.db
@@ -326,6 +336,20 @@ def test_release_bond_is_refused_while_something_the_bond_covers_is_open(
             reward(world, vested=True)
         case "banned":
             db.execute("UPDATE admissions_v2 SET state='APPLIED'")
+    world.a.release_bond(world.admission, now=1000)
+    assert balances(world).admission_locked == 0 and balances(world).conserved()
+
+
+def test_a_retired_round_releases_the_bond_of_its_roster(world: World) -> None:
+    # Given: a round that lists the admission and can never close: the bond stays held
+    world.bond()
+    unclosed_round(world, closed=False)
+    with pytest.raises(AdmissionError, match="BOND_NOT_RELEASABLE"):
+        world.a.release_bond(world.admission, now=1000)
+    assert balances(world).admission_locked == 1000
+    # When: the store retires the round
+    retired_round(world)
+    # Then: the bond of its roster is released, without a reward and without a settled round
     world.a.release_bond(world.admission, now=1000)
     assert balances(world).admission_locked == 0 and balances(world).conserved()
 

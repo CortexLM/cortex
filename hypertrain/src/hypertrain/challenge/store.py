@@ -9293,12 +9293,21 @@ class ChallengeStore:
             w = int(grant["w"])
             status = self._record_v2(run_id, "finality", str(w))
             if (
-                status["disposition"] != "SETTLED"
+                status["disposition"] not in ("SETTLED", "RETIRED")
                 or status["unresolved_audits"]
                 or status["unresolved_disputes"]
             ):
                 raise ChallengeError(409, "relay custody remains pinned by unresolved finality")
-            accepted = self._record_v2(run_id, "replayed-finality", str(w))
+            if status["disposition"] == "RETIRED":
+                # No finalize exists: the evidence of the retirement is the finality of the round.
+                accepted = {
+                    "finalize_hash": status["resolution_hash"],
+                    "finalized_beacon": self._record_v2(run_id, "retired", str(w))[
+                        "retired_beacon"
+                    ],
+                }
+            else:
+                accepted = self._record_v2(run_id, "replayed-finality", str(w))
             turns = [
                 json.loads(r[0])
                 for r in self._db.execute(

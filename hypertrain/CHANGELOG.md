@@ -252,6 +252,10 @@
 - `scripts/ops/live_operator.py open` opens the round that follows a retired one: when round
   `w - 1` has no `finalize`, `prev_final_hash` is the evidence hash of its `retired` record instead
   of the tool stopping with "missing accepted finalize" (a round that is neither is still refused).
+- The relay custody of the uploads of a retired round can be settled and released: the settlement
+  answered 409 "pinned by unresolved finality" for ever because it knew only a `SETTLED` round.
+  Its finality hash is now the evidence hash of the retirement and its vesting ends
+  `E_vest_rounds` after the retirement beacon; an open dispute still pins it.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.
