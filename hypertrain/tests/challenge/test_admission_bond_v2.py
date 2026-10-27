@@ -12,7 +12,11 @@ import pytest
 from pydantic import ValidationError
 
 from hypertrain.auditor.island_bisect import RefereeEvidence
-from hypertrain.challenge.admission import Admission, SeizureReason
+from hypertrain.challenge.admission import (
+    NO_SHOW_STRIKE_WINDOW_SCREENS,
+    Admission,
+    SeizureReason,
+)
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import Contest, DisputesV2
 from hypertrain.ledger.escrow_v2 import EscrowError
@@ -462,7 +466,9 @@ def test_a_lock_cannot_borrow_the_settlement_of_another_id(world: World) -> None
     assert balances(world).admission_locked == 1000
 
 
-def test_seize_bond_suspends_strikes_and_burns_the_bond_of_a_no_show(world: World) -> None:
+def test_seize_bond_puts_a_first_no_show_on_probation_with_a_strike_and_burns_the_bond(
+    world: World,
+) -> None:
     # Given: two locks and unvested rewards of the same coldkey, plus a second admission
     world.bond(1000)
     world.bond(500, operation="23" * 32)
@@ -481,7 +487,9 @@ def test_seize_bond_suspends_strikes_and_burns_the_bond_of_a_no_show(world: Worl
     world.a.lock(canonicalize(seal(OTHER, "EscrowLock", world.run_id, held, 500)), now=1)
     # and a sibling admission of the same coldkey (allowed once the first one is ACTIVE)
     world.a.store.db.execute(
-        "UPDATE admissions_v2 SET state='ACTIVE' WHERE admission_id=?", (world.admission,)
+        "UPDATE admissions_v2 SET state='ACTIVE',clean_count=7,screen_until=50 "
+        "WHERE admission_id=?",
+        (world.admission,),
     )
     sibling_request = T.request(world.s, "98" * 32, Keypair(b"\x42" * 32), COLD)
     sibling = world.a.join(
@@ -499,13 +507,15 @@ def test_seize_bond_suspends_strikes_and_burns_the_bond_of_a_no_show(world: Worl
     world.a.lock(canonicalize(seal(COLD, "EscrowLock", world.run_id, kept, 500)), now=1)
     # When
     burned = world.a.seize_bond(world.admission, reason="NO_SHOW", evidence_hash=H, now=5)
-    # Then: the whole bond burns and the admission is suspended with one strike; the rewards,
-    # the other admissions and the ledger are left alone
+    # Then: the whole bond burns and the admission is back on a fresh probation with one strike
+    # (D63: a first no-show is not a suspension); the rewards, the other admissions and the
+    # ledger are left alone
     assert burned == 1500
     b = balances(world)
     assert (b.burned, b.reward_pending, b.admission_locked) == (1500, 500, 600) and b.conserved()
     record = world.a.store.by_id(world.admission)
-    assert (record.state, record.reason, record.strikes) == ("SUSPENDED", "NO_SHOW", 1)
+    assert (record.state, record.reason, record.strikes) == ("PROBATION", "NO_SHOW", 1)
+    assert (record.clean_count, record.screen_until) == (0, 0)
     assert not record.pending_dispute
     assert world.a.store.by_id(bystander).state == "APPLIED"
     assert world.a.store.by_id(sibling).strikes == 0
@@ -586,12 +596,12 @@ def test_audit_mismatch_does_not_lift_a_ban(world: World) -> None:
 @pytest.mark.parametrize(
     ("prior", "expected"),
     [
-        (None, ("SUSPENDED", "NO_SHOW", 1)),
+        (None, ("PROBATION", "NO_SHOW", 1)),
         ("TRAINING_FRAUD", ("BANNED", "FINALIZED_TRAINING_FRAUD", 0)),
     ],
     ids=["unfunded", "banned"],
 )
-def test_a_no_show_suspends_an_unfunded_admission_and_does_not_lift_a_ban(
+def test_a_first_no_show_puts_an_unfunded_admission_on_probation_and_does_not_lift_a_ban(
     world: World, prior: SeizureReason | None, expected: tuple[str, str, int]
 ) -> None:
     # Given: an ACTIVE admission with no bond to burn, or one already banned for fraud
@@ -609,6 +619,36 @@ def test_a_no_show_suspends_an_unfunded_admission_and_does_not_lift_a_ban(
     again = T.request(world.s, "97" * 32, Keypair(b"\x43" * 32), COLD)
     with pytest.raises(AdmissionError, match="COLDKEY_PROBATION_EXISTS"):
         world.a.join(canonicalize(again.body()), now=7, ip_prefix="elsewhere")
+
+
+@pytest.mark.parametrize(
+    ("gap", "expected"),
+    [(-1, ("SUSPENDED", "NO_SHOW", 2)), (0, ("PROBATION", "NO_SHOW", 2))],
+    ids=["inside-the-window", "at-its-end"],
+)
+def test_a_second_no_show_suspends_like_a_fraud_only_inside_the_strike_window(
+    world: World, gap: int, expected: tuple[str, str, int]
+) -> None:
+    # Given: a member put back on probation by a first no-show at beacon 5, and back in a roster
+    # (ACTIVE) when it stays silent again
+    window = NO_SHOW_STRIKE_WINDOW_SCREENS * world.a.policy.work_screen_epoch_rounds
+    world.bond()
+    world.a.store.db.execute(
+        "UPDATE admissions_v2 SET state='ACTIVE' WHERE admission_id=?", (world.admission,)
+    )
+    world.a.seize_bond(world.admission, reason="NO_SHOW", evidence_hash=H, now=5)
+    assert world.a.store.by_id(world.admission).state == "PROBATION"
+    world.a.store.db.execute(
+        "UPDATE admissions_v2 SET state='ACTIVE' WHERE admission_id=?", (world.admission,)
+    )
+    # When: the second no-show, for another round's evidence
+    world.a.seize_bond(
+        world.admission, reason="NO_SHOW", evidence_hash="77" * 32, now=5 + window + gap
+    )
+    # Then: inside the window of the first strike it is a suspension, after it a probation again;
+    # either way it is a second strike
+    record = world.a.store.by_id(world.admission)
+    assert (record.state, record.reason, record.strikes) == expected
 
 
 def test_seize_bond_for_fraud_also_burns_unvested_rewards_and_bans(world: World) -> None:

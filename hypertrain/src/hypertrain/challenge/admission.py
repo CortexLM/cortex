@@ -63,6 +63,10 @@ from hypertrain.protocol.messages_v2 import (
 
 SeizureReason = Literal["TRAINING_FRAUD", "NO_SHOW", "AUDIT_MISMATCH"]
 
+# A no-show is a strike for this many work screens (D63): a second one inside the window
+# suspends the admission like a fraud, a later one is a first again.
+NO_SHOW_STRIKE_WINDOW_SCREENS = 4
+
 
 @dataclass(frozen=True)
 class _Standing:
@@ -1175,20 +1179,24 @@ class Admission:
             r = self.store.record(hotkey)
             if r.state != "SUSPENDED" or r.pending_dispute:
                 raise AdmissionError("RESUME_STATE")
-            self.store.transition(r.admission_id, "PROBATION", "RESUME_FRESH_PROBATION", now)
-            self.store.db.execute(
-                "UPDATE admission_trial_results SET outcome='INFRASTRUCTURE' "
-                "WHERE epoch=(SELECT trial_epoch FROM admissions_v2 WHERE admission_id=?) "
-                "AND outcome='OPEN'",
-                (r.admission_id,),
-            )
-            self.store.db.execute(
-                "UPDATE admissions_v2 SET challenge=NULL,proof_digest=NULL,reference_json=NULL,"
-                "reference_commitment=NULL,screen_json=NULL,"
-                "clean_count=0,canary_blocks='',screen_until=0,seed_beacon=? WHERE "
-                "admission_id=?",
-                (now + 1, r.admission_id),
-            )
+            self._fresh_probation(r.admission_id, "RESUME_FRESH_PROBATION", now)
+
+    def _fresh_probation(self, admission_id: str, reason: str, now: int) -> None:
+        """New trials from nothing: the open trial is void, the clean count and screen restart."""
+        self.store.transition(admission_id, "PROBATION", reason, now)
+        self.store.db.execute(
+            "UPDATE admission_trial_results SET outcome='INFRASTRUCTURE' "
+            "WHERE epoch=(SELECT trial_epoch FROM admissions_v2 WHERE admission_id=?) "
+            "AND outcome='OPEN'",
+            (admission_id,),
+        )
+        self.store.db.execute(
+            "UPDATE admissions_v2 SET challenge=NULL,proof_digest=NULL,reference_json=NULL,"
+            "reference_commitment=NULL,screen_json=NULL,"
+            "clean_count=0,canary_blocks='',screen_until=0,seed_beacon=? WHERE "
+            "admission_id=?",
+            (now + 1, admission_id),
+        )
 
     def resolve_pending(self, hotkey: str, reference: str, *, now: int) -> None:
         """Resume only from L5's authenticated nonfraud settlement, preserving strikes."""
@@ -1455,11 +1463,14 @@ class Admission:
         rewards, as part of slashing a residual lock (after an earlier bond-only seizure there
         is none, and the rewards survive), and bans the admission (terminal; `lock` then
         answers LOCK_BANNED).
-        AUDIT_MISMATCH (a round-stage audit mismatch the caller has confirmed as the miner's) and
-        NO_SHOW (a roster member excluded for its silence, ADR 0011 Part 8): suspend the
-        admission with the seizure reason as the state reason, add one strike, and burn the bond
-        alone. The coldkey stays bound by the one-non-ACTIVE-admission rule, as in probation, and
-        the round's reward of the honest peers is not touched.
+        AUDIT_MISMATCH (a round-stage audit mismatch the caller has confirmed as the miner's)
+        suspends the admission with the seizure reason as the state reason, adds one strike and
+        burns the bond alone. NO_SHOW (a roster member excluded for its silence, ADR 0011 Part 8,
+        D63) adds one strike and burns the bond alone too, but the first one puts the admission
+        back on a fresh probation (new trials, no suspension); a second one inside
+        `NO_SHOW_STRIKE_WINDOW_SCREENS` work screens of an earlier one suspends it like a fraud.
+        The coldkey stays bound by the one-non-ACTIVE-admission rule, as in probation, and the
+        round's reward of the honest peers is not touched.
         """
         TypeAdapter(Hex64).validate_python(evidence_hash)
         if reason not in ("TRAINING_FRAUD", "NO_SHOW", "AUDIT_MISMATCH"):
@@ -1505,12 +1516,31 @@ class Admission:
             if reason == "TRAINING_FRAUD" and r.state != "BANNED":
                 self.store.transition(admission_id, "BANNED", "FINALIZED_TRAINING_FRAUD", now)
             if reason in ("AUDIT_MISMATCH", "NO_SHOW") and first and r.state != "BANNED":
-                self.store.transition(admission_id, "SUSPENDED", reason, now)
+                if (
+                    reason == "NO_SHOW"
+                    and r.state != "SUSPENDED"
+                    and not self._repeat_no_show(admission_id, evidence_hash, now)
+                ):
+                    self._fresh_probation(admission_id, reason, now)
+                else:
+                    self.store.transition(admission_id, "SUSPENDED", reason, now)
                 self.store.db.execute(
                     "UPDATE admissions_v2 SET strikes=strikes+1 WHERE admission_id=?",
                     (admission_id,),
                 )
         return burned
+
+    def _repeat_no_show(self, admission_id: str, evidence_hash: str, now: int) -> bool:
+        """Whether an earlier no-show of the admission, for other evidence, is still a strike."""
+        window = NO_SHOW_STRIKE_WINDOW_SCREENS * self.policy.work_screen_epoch_rounds
+        return (
+            self.store.db.execute(
+                "SELECT 1 FROM admission_sanctions WHERE admission_id=? AND reason='NO_SHOW' "
+                "AND evidence_hash!=? AND beacon>? LIMIT 1",
+                (admission_id, evidence_hash, now - window),
+            ).fetchone()
+            is not None
+        )
 
     def settle_fraud(self, dispute_id: str, *, now: int) -> bool:
         """Seize and ban on a referee verdict of training fraud against the miner.

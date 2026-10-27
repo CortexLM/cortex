@@ -38,6 +38,16 @@ def seize(reason):
     return apply
 
 
+def seize_a_no_show_twice(n, admission, hotkey, identity):
+    """The member is back in a roster (ACTIVE) when it stays silent a second time."""
+    seize("NO_SHOW")(n, admission, hotkey, identity)
+    with n.store._tx():
+        n.store._db.execute(
+            "UPDATE admissions_v2 SET state='ACTIVE' WHERE admission_id=?", (identity,)
+        )
+    admission.seize_bond(identity, reason="NO_SHOW", evidence_hash="cd" * 32, now=n.now)
+
+
 def rotate(n, admission, hotkey, identity):
     run = n.manifest.run_id()
     request = sign_rotation_consent(
@@ -91,7 +101,8 @@ def end_the_screen(n, admission, hotkey, identity):
         (suspend_for_a_dispute, "SUSPENDED"),
         (resume_on_fresh_probation, "NOT_LIVE"),
         (end_the_screen, "SCREEN_LAPSED"),
-        (seize("NO_SHOW"), "SUSPENDED"),
+        (seize("NO_SHOW"), "NOT_LIVE"),
+        (seize_a_no_show_twice, "SUSPENDED"),
         (lose_the_bond, "UNFUNDED"),
     ],
     ids=[
@@ -102,7 +113,8 @@ def end_the_screen(n, admission, hotkey, identity):
         "pending-dispute",
         "fresh-probation",
         "screen-lapsed",
-        "no-show-is-suspended",
+        "first-no-show-is-probation",
+        "second-no-show-is-suspended",
         "unfunded",
     ],
 )

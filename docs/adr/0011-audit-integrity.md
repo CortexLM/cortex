@@ -1038,10 +1038,16 @@ the table as covering them.
 
 **C. The sanction (D44, D47)**
 
-12. **`NO_SHOW` sanctions as `AUDIT_MISMATCH` does [sign-off].** `seize_bond(NO_SHOW)` suspends, adds one
-    strike and burns the bond (unvested rewards spared, the coldkey stays bound by the one-non-ACTIVE-row
-    rule); a one-tuple change in `admission.py`. It resolves by the admission id of the roster entry, so a
-    rotation cannot dodge it, and is idempotent per (reason, evidence).
+12. **`NO_SHOW` has two tiers (D63, which replaces D44's "suspends" and ADR 0010's "bond only").**
+    `seize_bond(NO_SHOW)` adds one strike and burns the bond (unvested rewards spared, the coldkey stays
+    bound by the one-non-ACTIVE-row rule). The first one puts the admission back on a fresh probation
+    (`PROBATION`, reason `NO_SHOW`, new trials from `clean_count` 0, the open trial void): the way back is
+    the trials, no operator. A second one for other evidence inside `NO_SHOW_STRIKE_WINDOW_SCREENS` (4) work
+    screens of an earlier no-show of the same admission suspends it like an `AUDIT_MISMATCH`. The window is
+    the one constant this decision adds (`admission.py`, not a policy field: a policy field changes every
+    run id) and is Forge's to retune; it is measured in beacons from the beacon of the earlier sanction row.
+    It resolves by the admission id of the roster entry, so a rotation cannot dodge it, and is idempotent per
+    (reason, evidence). Tests: one per tier, plus the boundary of the window.
 13. **No gate: `finalize` pays the applied tape (decision 23).** An earlier design made the sweeper wait
     for the member's earlier unclosed rounds, because a sanction makes the member ineligible and `finalize`
     of an applied round re-checks eligibility. A gate cannot hold `settle_fraud` (it runs inside a referee's
@@ -1223,8 +1229,9 @@ the table as covering them.
 
 ### Decisions for Forge
 
-1. `NO_SHOW` suspends and strikes (decision 12), as D44 says, against ADR 0002 I5 and D40; the alternative is
-   bond-only (one keyword).
+1. `NO_SHOW` is two tiers (decision 12, D63): a first one is a probation with a strike and the bond burnt, a
+   second inside four work screens a suspension. Settled by the Principal; the length of the window is the
+   open parameter.
 2. The window of decision 17 (`dispute_per_level` rounds from the first push that sees the verdict) and the
    grades of decision 16.
 3. Whether `AUDIT_MISMATCH` rows are enforced in production before the auditor-side responder exists
