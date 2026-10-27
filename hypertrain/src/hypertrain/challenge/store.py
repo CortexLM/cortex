@@ -740,13 +740,20 @@ class ChallengeStore:
                             (origin[0],),
                             br.round,
                         )
-                    except EscrowError as error:
-                        if error.code not in (
+                    except Exception as error:  # one stuck origin must not stop the beacon
+                        code = error.code if isinstance(error, EscrowError) else None
+                        if code in (
                             "DISPUTED_OR_UNVESTED",
                             "IMMATURE_OR_UNKNOWN_ORIGIN",
                             "ALREADY_MATURED",
                         ):
-                            raise
+                            continue
+                        if isinstance(error, sqlite3.Error) or code in (
+                            "CONSERVATION",
+                            "ORIGIN_CONSERVATION",
+                        ):
+                            raise  # the ledger or its store is broken: stop, never skip
+                        self._journal_maturity_failure_v2(run_id, origin[0], error)
                 self._expire_leases_v2(run_id, br.round)
         for _, _, disputes in self._services_v2.values():
             disputes.notify()
@@ -754,6 +761,24 @@ class ChallengeStore:
         for child in self._children.values():
             child.push_beacon(payload)
         return result
+
+    def _journal_maturity_failure_v2(self, run_id: str, origin: str, error: Exception) -> None:
+        """Last unexpected maturity failure per origin, rewritten only on change.
+
+        No beacon field: `_rollback_snapshot_v2` hashes every record and must stay stable under a
+        persistent failure.
+        """
+        code = error.code if isinstance(error, EscrowError) else None
+        entry: dict[str, JsonValue] = {
+            "error": type(error).__name__ + (f":{code}" if code else ""),
+            "detail": str(error)[:200],
+        }
+        try:
+            old: dict[str, Any] | None = self._record_v2(run_id, "maturity-failed", origin)
+        except ChallengeError:
+            old = None
+        if old != entry:
+            self._put_record_v2(run_id, "maturity-failed", origin, entry)
 
     def latest_beacon(self) -> dict[str, Any]:
         with self._lock:

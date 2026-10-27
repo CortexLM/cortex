@@ -86,6 +86,13 @@
   make every v2 operation answer 503 once the beacon lagged 6 s. It now reads the owner's open locks
   through a partial index (the same value, bit for bit). New admission locks must hold a tenth of the
   funding floor and are capped at 2,048 per coldkey and 4,096 in the ledger (Lens F7a).
+- The beacon route no longer stops at one escrow origin that cannot mature. A shadow reward whose
+  hotkey rotated after acceptance (`signer is not authorized for message role`) or whose job object
+  went missing (`ObjectNotFound`) rolled back the whole round's maturity and lease expiry and made
+  `POST /v1/admin/beacon` answer 409 or 500 at every later round. Each origin now matures in its own
+  savepoint; one that fails for another reason than vesting or an open dispute stays `reward_pending`,
+  is journaled as `records_v2 kind='maturity-failed'` and is retried at every round. A conservation
+  failure or a SQLite error still aborts the call (Lens F6, SHD-D3).
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

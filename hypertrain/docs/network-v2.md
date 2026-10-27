@@ -291,6 +291,15 @@ fraud burns collectible exposure rather than redistributing it. Shadow work does
 not influence global theta; authorized production bootstrap issuance is a
 separate policy, not proof of market-backed collateral.
 
+Each due origin matures in its own savepoint when a beacon round is pushed. An origin that cannot
+(a shadow reward whose original custody no longer revalidates, because its hotkey rotated or a job
+object is missing) stays `reward_pending` and is retried at every round; it does not stop the
+round's other origins, the lease expiry or the beacon route. The last such failure is journaled in
+`records_v2` with `kind='maturity-failed'` (`{error, detail}`, rewritten only when it changes, never
+deleted). List the origins still stuck, on `challenge.db`:
+`SELECT m.id, m.data FROM records_v2 m JOIN escrow_units u ON u.origin=m.id AND u.bucket='reward_pending' AND u.units>0 WHERE m.kind='maturity-failed';`.
+A conservation failure or a SQLite error is not isolated: the push fails.
+
 When a round is finalized, the stored commit, the verdicts and the audit challenge are
 verified at the beacon at which this master accepted each of them (the `accepted_v2` row of
 the commit and of the verdict, the lease of the challenge), never at the finalize beacon. An
