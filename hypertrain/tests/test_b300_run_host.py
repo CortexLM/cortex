@@ -392,8 +392,8 @@ def launch(env: dict[str, str], tmp_path: Path) -> Iterator[Callable[..., subpro
     """Start run_host.sh in its own process group; teardown frees fake containers and kills it."""
     procs: list[subprocess.Popen[bytes]] = []
 
-    def start(*args: str, **extra_env: str) -> subprocess.Popen[bytes]:
-        argv = ["bash", str(SCRIPT), "--results-root", str(tmp_path / "results"), "--host", "h1"]
+    def start(*args: str, script: Path = SCRIPT, **extra_env: str) -> subprocess.Popen[bytes]:
+        argv = ["bash", str(script), "--results-root", str(tmp_path / "results"), "--host", "h1"]
         proc = subprocess.Popen(  # noqa: S603 - fixed argv
             [*argv, *args],
             env={**env, **extra_env},
@@ -483,6 +483,8 @@ def test_rerun_skips_passed_steps_but_reprobes_the_host(env, tmp_path, checkout)
     again = docker_calls(tmp_path)[first:]
     assert [c for c in again if c[0] in ("pull", "run")] == []
     assert ["info", "--format", "{{.DockerRootDir}}"] in again  # host probe ran again
+    for kept in ("gpu_probe.json", "mfu-dp8-flash.json", "mine-smoke-v2.json"):
+        assert (tmp_path / "results/h1" / kept).exists()  # a skipped step keeps its evidence
     assert run(env, tmp_path, "--force", "--steps", "mfu", script=script).returncode == 0
     assert len(runs_of(tmp_path, "mfu")) == 2
 
@@ -1015,3 +1017,54 @@ def test_containers_stay_isolated_and_do_not_inherit_the_lock(env, tmp_path):
         (c,) = runs_of(tmp_path, name)
         assert c[c.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
     assert not (tmp_path / "state/fd9-leaked").exists()
+
+
+# --- a step that starts again forgets its old pass, and only its own evidence goes ---------------
+
+
+def test_an_interrupted_forced_rerun_is_not_remembered_as_a_pass(env, tmp_path, checkout, launch):
+    script = checkout / "scripts/b300/run_host.sh"
+    assert run(env, tmp_path, script=script).returncode == 0
+    proc = launch("--force", "--steps", "gpu_probe", script=script, FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the forced gpu_probe")
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    assert not (tmp_path / "results/h1/steps/gpu_probe.rc").exists()
+    assert "gpu_probe" not in stop_json(tmp_path)["steps"]  # it was cut, it did not pass
+    assert run(env, tmp_path, script=script).returncode == 0  # a plain run must do it again
+    assert len(runs_of(tmp_path, "gpu_probe")) == 3
+    assert (tmp_path / "results/h1/gpu_probe.json").exists()
+
+
+def test_a_clean_run_does_not_reuse_a_pass_recorded_on_a_modified_tree(env, tmp_path, checkout):
+    script = checkout / "scripts/b300/run_host.sh"
+    (checkout / "scripts/mfu_profiles.json").write_text("{}")
+    assert run(env, tmp_path, script=script).returncode == 0
+    git(checkout, "checkout", "--", "scripts/mfu_profiles.json")
+    assert run(env, tmp_path, script=script).returncode == 0
+    assert stop_json(tmp_path)["git_dirty"] is False
+    assert len(runs_of(tmp_path, "gpu_probe")) == 2  # same commit, but not the code that passed
+
+
+def test_a_pass_recorded_by_the_previous_script_is_not_trusted(env, tmp_path, checkout):
+    (tmp_path / "results/h1/steps").mkdir(parents=True)
+    (tmp_path / "results/h1/steps/gpu_probe.rc").write_text(f"0 {IMAGE}")  # "<rc> <image>" only
+    assert run(env, tmp_path, script=checkout / "scripts/b300/run_host.sh").returncode == 0
+    assert len(runs_of(tmp_path, "gpu_probe")) == 1
+
+
+def test_new_rounds_keep_the_evidence_of_the_rounds_before(env, tmp_path):
+    first = {**env, **prod_env(tmp_path / "miner", rounds="3 4")}
+    assert run(first, tmp_path, "--prod").returncode == 0
+    later = {**env, **prod_env(tmp_path / "miner", rounds="5")}
+    p = run(later, tmp_path, "--prod", "--steps", "miner_prod", "--force")
+    assert p.returncode == 0, p.stdout + p.stderr
+    kept = sorted(f.name for f in (tmp_path / "results/h1/miner-prod").iterdir())
+    assert kept == [f"round-{w}{s}.json" for w in "345" for s in ("-commitments", "")]
+
+
+@pytest.mark.parametrize("gpus", ["8 ../victim", "0", "99x", "100", "08"])
+def test_the_expected_gpu_count_is_a_plain_number(env, tmp_path, gpus):
+    p = run({**env, "HT_B300_EXPECT_GPUS": gpus}, tmp_path)
+    assert p.returncode == 2 and "HT_B300_EXPECT_GPUS" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []

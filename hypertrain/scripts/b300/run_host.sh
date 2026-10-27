@@ -81,6 +81,7 @@ seconds=$((10#${BASH_REMATCH[1]} * unit))
   die "HT_B300_POLL_SECONDS must be 0.001 to 59.999 seconds: $POLL"
 [[ $STOP_GRACE =~ ^[0-9]{1,4}$ ]] || die "HT_B300_STOP_GRACE must be whole seconds, at most 9999: $STOP_GRACE"
 STOP_GRACE=$((10#$STOP_GRACE))
+[[ $EXPECT_GPUS =~ ^[1-9][0-9]?$ ]] || die "HT_B300_EXPECT_GPUS must be 1 to 99: $EXPECT_GPUS"
 [[ $PREFIX =~ ^ht-[a-z0-9][a-z0-9_.-]*$ ]] || die "HT_B300_CONTAINER_PREFIX must start with ht-: $PREFIX"
 for s in $steps; do [[ " $ALL_STEPS " == *" $s "* ]] || die "unknown step: $s"; done
 out=$results_root/$host
@@ -245,8 +246,9 @@ trap on_exit EXIT
 
 # --- step runner -------------------------------------------------------------------------------
 # What a step writes under $out, except the files its own shell redirection truncates when it
-# starts. It is removed before the step runs: a step that dies before it writes must not leave the
-# file of an earlier run (a gpu_probe.json with ok:true) beside its rc.
+# starts and the per-round files of miner_prod (removed round by round). It is removed before the
+# step runs, together with the step's rc: a step that dies before it writes must not leave the file
+# of an earlier run (a gpu_probe.json with ok:true) beside, or an old pass without its file.
 step_evidence() {
   case $1 in
     host_probe) echo nvidia-smi.txt efa-devices.txt fi_info.txt df.txt host_probe.json ;;
@@ -254,11 +256,10 @@ step_evidence() {
     gpu_probe) echo gpu_probe.json ;;
     mfu) echo "mfu-dp$EXPECT_GPUS-flash.json" ;;
     miner_test) echo mine-smoke-v2.json ;;
-    miner_prod) echo 'miner-prod/round-*.json' ;;
   esac
 }
 step() {
-  local name=$1 t0 rc=0 f
+  local name=$1 t0 rc=0 f files
   shift
   [[ " $steps " == *" $name "* ]] || return 0
   if [ "$force" = 0 ] && [ "$name" != host_probe ] && [ "$dirty" = 0 ] &&
@@ -272,8 +273,8 @@ step() {
     log "the watchdog died: nothing would stop this run at --duration or a Spot notice"
     finish watchdog-died 9
   fi
-  # shellcheck disable=SC2086  # the patterns are globs
-  for f in $(step_evidence "$name"); do rm -f -- "$out"/$f; done
+  read -ra files <<<"$(step_evidence "$name")"
+  for f in "${files[@]}" "steps/$name.rc"; do rm -f -- "$out/$f"; done
   log "step $name"
   t0=$(date +%s)
   "$@" || rc=$?
@@ -378,6 +379,7 @@ miner_prod() {
   mkdir -p "$out/miner-prod"
   for w in $HT_B300_PROD_ROUNDS; do
     [ "$(date +%s)" -lt "$deadline" ] || { log "deadline reached before round $w"; return 1; }
+    rm -f -- "$out/miner-prod/round-$w.json" "$out/miner-prod/round-$w-commitments.json"
     container "miner-prod-$w" --user "$(id -u):$(id -g)" -e HOME=/tmp \
       -e HYPERTRAIN_MINER_API="$HT_B300_PROD_ENDPOINT" -e HT_IMAGE_DIGEST="${image#*@}" \
       -v "$dir:$dir" "$image" run-v2 --config "$dir/$(basename "$cfg")" --round "$w" \
