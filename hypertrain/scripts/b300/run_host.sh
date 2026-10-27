@@ -214,6 +214,9 @@ finish() {
     kill -TERM "$bg_pid" 2>/dev/null || true
   fi
   # A file that cannot be read goes to "errors" in stop.json; it never stops the file or the upload.
+  # The record of an earlier run is removed first: if this one cannot be written, the upload must
+  # not present the old verdict as this run's.
+  rm -f -- "$out/stop.json" 2>/dev/null || true
   python3 - "$out" "$reason" "$rc" "$run_id" "$image" "$rev" "$dirty" <<'PY' ||
 import json, sys
 from pathlib import Path
@@ -250,7 +253,7 @@ stop = {
 (out / "stop.json").write_text(json.dumps(stop, indent=1, sort_keys=True))
 print("STOP", json.dumps({k: stop[k] for k in ("reason", "rc", "steps")}, sort_keys=True))
 PY
-    log "stop.json was not written"
+    { log "stop.json was not written"; [ "$rc" -ne 0 ] || rc=1; }
   upload_results
   exit "$rc"
 }
@@ -413,9 +416,12 @@ miner_prod() {
   local cfg=$HT_B300_MINER_CONFIG dir w summary
   dir=$(cd "$(dirname "$cfg")" && pwd)
   mkdir -p "$out/miner-prod"
+  # The files of every round this step will run, including those it may never reach.
+  for w in $HT_B300_PROD_ROUNDS; do
+    rm -f -- "$out/miner-prod/round-$w.json" "$out/miner-prod/round-$w-commitments.json"
+  done
   for w in $HT_B300_PROD_ROUNDS; do
     [ "$(date +%s)" -lt "$deadline" ] || { log "deadline reached before round $w"; return 1; }
-    rm -f -- "$out/miner-prod/round-$w.json" "$out/miner-prod/round-$w-commitments.json"
     container "miner-prod-$w" --user "$(id -u):$(id -g)" -e HOME=/tmp \
       -e HYPERTRAIN_MINER_API="$HT_B300_PROD_ENDPOINT" -e HT_IMAGE_DIGEST="${image#*@}" \
       -v "$dir:$dir" "$image" run-v2 --config "$dir/$(basename "$cfg")" --round "$w" \

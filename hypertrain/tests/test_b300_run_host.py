@@ -971,7 +971,7 @@ def test_a_spot_answer_that_is_not_json_is_kept_as_text(env, tmp_path, monkeypat
 def test_the_upload_runs_even_when_stop_json_cannot_be_written(env, tmp_path):
     (tmp_path / "results/h1/stop.json").mkdir(parents=True)
     p = run(env, tmp_path, "--upload", "s3://bucket/b300")
-    assert p.returncode == 0, p.stdout + p.stderr
+    assert p.returncode == 1, p.stdout + p.stderr  # a completed run without its record is not 0
     assert {"run.log", "steps.tsv"} <= uploaded(tmp_path)
     assert "stop.json was not written" in (tmp_path / "results/h1/run.log").read_text()
 
@@ -1286,3 +1286,29 @@ def test_the_results_root_is_an_absolute_path_without_filter_or_mount_characters
     )
     assert p.returncode == 2 and "--results-root" in p.stderr, p.stdout + p.stderr
     assert docker_calls(tmp_path) == []
+
+
+# --- the record of a run is this run's record ----------------------------------------------------
+
+
+def test_a_read_only_stop_json_of_an_earlier_run_is_replaced_not_uploaded(env, tmp_path):
+    out = tmp_path / "results/h1"
+    out.mkdir(parents=True)
+    (out / "stop.json").write_text(json.dumps({"reason": "mfu-failed", "rc": 6, "run_id": "old"}))
+    (out / "stop.json").chmod(0o444)
+    p = run(env, tmp_path, "--upload", "s3://bucket/b300")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert stop_json(tmp_path)["reason"] == "completed"  # not the old verdict
+    uploaded_stop = json.loads((tmp_path / "state/s3/bucket/b300/h1/stop.json").read_text())
+    assert uploaded_stop["reason"] == "completed"
+
+
+def test_rounds_a_failed_miner_prod_never_reached_keep_no_old_pass(env, tmp_path):
+    first = {**env, **prod_env(tmp_path / "miner", rounds="3 4")}
+    assert run(first, tmp_path, "--prod").returncode == 0
+    again = {**first, "FAKE_CRASH": "miner_prod"}  # round 3 dies, round 4 is never reached
+    p = run(again, tmp_path, "--prod", "--steps", "miner_prod", "--force", "--upload", "s3://b/p")
+    assert p.returncode == 8, p.stdout + p.stderr
+    kept = sorted(f.name for f in (tmp_path / "results/h1/miner-prod").iterdir())
+    assert kept == ["round-3.json"]  # the (empty) output of the crashed round, nothing of round 4
+    assert not [f for f in uploaded(tmp_path, "b/p/h1") if "round-4" in f]
