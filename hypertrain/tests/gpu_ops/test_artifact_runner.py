@@ -8,18 +8,13 @@ contract and not against the broker that implements the other half."""
 from __future__ import annotations
 
 import ast
-import hashlib
 import io
 import json
-import os
 import random
-import signal
 import sys
 import tarfile
-import tempfile
 import time
 import tracemalloc
-import uuid as uuidlib
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -31,105 +26,44 @@ from hypertrain.gpu_ops import cuda_executor_runner as runner
 from hypertrain.storage.cas import PartPlan, scan
 from hypertrain.storage.offer import finish_upload
 
-from .artifact_fakes import Challenge, Clock, TimedFakeR2, bridge, client_for, serve_http
+from .artifact_fakes import (
+    FILES,
+    U0,
+    Challenge,
+    Clock,
+    MiB,
+    TimedFakeR2,
+    bridge,
+    client_for,
+    isolated_process,
+    launch_tree,
+    moved_clock,
+    oracle,
+    package,
+    probe_ok,
+    request_bytes,
+    serve_http,
+    sha,
+    write_tree,
+)
 
-MiB = 1 << 20
 DIGEST = "sha256:" + "ab" * 32
-U0 = "GPU-" + str(uuidlib.UUID(int=(1 << 120) | 0xABCDEF0123))
 CANARY = "CANARYSIGNATURE" + "0" * 20  # a value no honest code path may print
-
-
-def sha(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 @pytest.fixture(autouse=True)
 def process_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    scratch = tmp_path / "tmp"
-    scratch.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
-    term, environment = signal.getsignal(signal.SIGTERM), dict(os.environ)
-    signal.signal(signal.SIGTERM, signal.SIG_DFL)
-    yield
-    signal.signal(signal.SIGTERM, term if term is not None else signal.SIG_DFL)
-    os.environ.clear()
-    os.environ.update(environment)
+    yield from isolated_process(tmp_path, monkeypatch)
 
 
 @pytest.fixture
 def fast_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
-    """The runner's monotonic clock and sleep on one movable clock: nothing really waits."""
-    clock = Clock(1000.0)
-    monkeypatch.setattr(runner, "_monotonic", clock.time)
-    monkeypatch.setattr(runner, "_sleep", clock.advance)
-    return clock
-
-
-# -- a tree the fake island 'trains' -----------------------------------------------------------
-
-
-def write_tree(attempt: Path, size: int = 17 * MiB + 5, ranks: int = 1) -> None:
-    """Rank files of every shape the tar writer meets: empty, odd, a 512 multiple, a long path."""
-    for rank in range(ranks):
-        base = attempt / f"rank-{rank}"
-        (base / "checkpoints").mkdir(parents=True)
-        (base / "state.safetensors").write_bytes(random.Random(rank).randbytes(size))
-        (base / "summary.json").write_bytes(f"summary {rank}".encode())
-        (base / "empty.bin").write_bytes(b"")
-        (base / "block.bin").write_bytes(b"b" * 1024)
-        (base / "checkpoints" / ("c" * 120 + ".safetensors")).write_bytes(b"c" * 513)
-
-
-def launch_tree(request: dict[str, Any], attempt: Path, budget: float, log: Path) -> int:
-    write_tree(attempt, ranks=request["n_gpus"])
-    return 0
-
-
-def probe_ok(request: dict[str, Any]) -> dict[str, Any]:
-    return {"backend": "cuda", "gpu_uuids": list(request["uuids"]), "sm_counts": [148]}
-
-
-def request_bytes(files: dict[str, bytes], artifact: dict[str, Any] | None) -> bytes:
-    body: dict[str, Any] = {
-        "version": 1,
-        "n_gpus": 1,
-        "uuids": [U0],
-        "job_sha256": sha(files["job.json"]),
-        "budget_seconds": 600,
-        "inputs": {name: sha(raw) for name, raw in files.items()},
-        "env": {"PYTHONHASHSEED": "0", "HT_GPU_UUIDS": U0, "CUDA_VISIBLE_DEVICES": U0},
-    }
-    if artifact is not None:
-        body["artifact"] = artifact
-    return json.dumps(body, indent=1).encode()
-
-
-def package(files: dict[str, bytes], raw: bytes) -> bytes:
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
-        for name, payload in {"request.json": raw, **files}.items():
-            info = tarfile.TarInfo(name)
-            info.size = len(payload)
-            archive.addfile(info, io.BytesIO(payload))
-    return buffer.getvalue()
-
-
-FILES = {"job.json": b'{"job": 1}', "start_state": b"s" * 3000}
+    return moved_clock(monkeypatch)
 
 
 class Run:
     def __init__(self, code: int, out: bytes, err: str, raw: bytes, challenge: Challenge) -> None:
         self.code, self.out, self.err, self.raw, self.challenge = code, out, err, raw, challenge
-
-
-def oracle(raw: bytes) -> bytes:
-    """What the classic path streams for the same tree, environment and request."""
-    with tempfile.TemporaryDirectory() as scratch:
-        attempt = Path(scratch)
-        write_tree(attempt)
-        out = io.BytesIO()
-        runner.write_outputs(out, attempt, probe_ok({"uuids": [U0]}), raw)
-        return out.getvalue()
 
 
 def drive(

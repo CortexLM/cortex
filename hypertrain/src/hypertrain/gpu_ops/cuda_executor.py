@@ -68,6 +68,7 @@ if TYPE_CHECKING:
 RoleLaunch = Callable[[str, "IslandJobV1", Path, Mapping[str, Any]], "IslandLaunch"]
 
 EXECUTOR = "cuda-executor-v1"
+ARTIFACTS_ENV = "HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS"
 LABEL = "io.cortex.cuda-executor"
 IMAGE_PYTHON = "/opt/hypertrain/venv/bin/python"
 RUNNER_SOURCE = Path(cuda_executor_runner.__file__).read_text()
@@ -720,6 +721,8 @@ class Executor:
         chosen: Sequence[Gpu],
         trace: bool,
         input_tar: Path,
+        *,
+        extra: Mapping[str, Any] | None = None,
     ) -> bytes:
         ref = job.manifest.training.reference_spec
         uuids = [g.uuid for g in chosen]
@@ -747,6 +750,7 @@ class Executor:
                     "HT_GPU_UUIDS": ",".join(uuids),
                     "CUDA_VISIBLE_DEVICES": ",".join(uuids),
                 },
+                **(extra or {}),
             }
         )
         with tarfile.open(input_tar, "x:", format=tarfile.PAX_FORMAT) as archive:
@@ -1160,7 +1164,13 @@ def _sync_tree(root: Path) -> None:
 
 def load(path: Path) -> RoleLaunch:
     config = ExecutorConfig.model_validate_json(path.read_bytes())
-    executor = Executor(config)
+    artifacts = os.environ.get(ARTIFACTS_ENV)
+    if artifacts:  # opt-in: results through R2 (docs/adr/0013-executor-artifacts-via-r2.md)
+        from hypertrain.gpu_ops import artifact_transfer
+
+        executor: Executor = artifact_transfer.build(config, Path(artifacts))
+    else:
+        executor = Executor(config)
 
     def factory(
         operation: str, accepted: IslandJobV1, home: Path, context: Mapping[str, Any]
