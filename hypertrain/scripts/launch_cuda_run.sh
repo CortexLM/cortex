@@ -210,8 +210,10 @@ fi
 if stage bootstrap; then
   RES=()
   for r in h0 h1; do RES+=("$(J "/data/hypertrain-$r/qualification.json" "d['output']")/result.json"); done
+  # Vast results carry no host attestation, so this route is label-only on purpose: nothing here
+  # proves the two hosts are two machines (hypertrain/docs/prod-run-signing.md S3: strict mode).
   mexec python -B "$T/backend_bootstrap.py" --manifest-envelope "$OUT/manifest-envelope.json" \
-    --owner-seed "$RD/keys/owner.seed" \
+    --owner-seed "$RD/keys/owner.seed" --label-only \
     --config /data/hypertrain-h0/qualification.json /data/hypertrain-h1/qualification.json \
     --result "${RES[@]}" > "$STATE/bootstrap.out" 2>&1 || die "see $STATE/bootstrap.out"
   done_

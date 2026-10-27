@@ -24,6 +24,8 @@ from hypertrain.gpu_ops import network_qualification as driver
 from hypertrain.gpu_ops.journal import fsha
 from hypertrain.gpu_ops.launcher import Reject
 from hypertrain.protocol.example import example_manifest
+from hypertrain.protocol.hashing import sha256_hex
+from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages_v2 import IslandJobV1, RunManifestV2
 from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.model import param_shapes
@@ -117,15 +119,15 @@ def key_file(path: Path, index: int) -> Path:
 def attest(path: Path, signer: int | None = None, **override: Any) -> None:
     """Sign, as an SSH host key, what the host would say about the result.json now on disk."""
     index = host_index(path)
-    result = driver.Result.model_validate_json(path.read_bytes())
+    data = json.loads(path.read_bytes())  # Raw: a host also signs results the engine refuses.
     statement = host_attest.HostStatement.model_validate(
         {
             "version": 1,
-            "config_sha256": result.config_sha256,
+            "config_sha256": data["config_sha256"],
             "result_sha256": fsha(path),
-            "image_digest": result.environment.image_digest,
+            "image_digest": data["environment"]["image_digest"],
             "gpu_uuids": sorted(host_gpus(index)),
-            "drivers": sorted(set(result.environment.drivers)),
+            "drivers": sorted(set(data["environment"]["drivers"])),
             "boot_id": boot_id(index),
         }
         | override
@@ -146,10 +148,59 @@ def host_index(path: Path) -> int:
     return int(path.parent.name.removeprefix("host-"))
 
 
+def known_hosts_of(path: Path) -> Path:
+    return key_file(path, host_index(path)).with_suffix(".known_hosts")
+
+
 def pins(paths: list[Path]) -> list[str]:
     """The host keys the operator pinned: one `ssh-ed25519` key per host's known_hosts file."""
-    known = [key_file(p, host_index(p)).with_suffix(".known_hosts") for p in paths]
-    return [host_attest.pinned_key(k.read_bytes()) for k in known]
+    return [host_attest.pinned_key(known_hosts_of(p).read_bytes()) for p in paths]
+
+
+def typed_fingerprint(known_hosts: Path) -> str:
+    """What a provider console prints for the host key: ssh-keygen's own fingerprint, not ours."""
+    listing = subprocess.run(
+        ["ssh-keygen", "-l", "-f", str(known_hosts)], check=True, capture_output=True, text=True
+    ).stdout
+    return listing.split()[1]
+
+
+def typed_pins(paths: list[Path]) -> list[driver.HostPin]:
+    """The pins the owner types: each host's known_hosts file and its console fingerprint."""
+    return [driver.HostPin(known_hosts_of(p), typed_fingerprint(known_hosts_of(p))) for p in paths]
+
+
+def evidence_for(
+    manifest: RunManifestV2,
+    configs: tuple[Path, ...],
+    results: tuple[Path, ...],
+    *,
+    label_only: bool = False,
+) -> dict[str, Any]:
+    """The owner-signed qualification evidence, written out independently of the store's builder
+    so that drift between the two is a failing digest, not a shared mistake."""
+    reference = manifest.training.reference_spec
+    evidence: dict[str, Any] = {
+        "run_id": manifest.run_id(),
+        "backend": "cuda",
+        "reference_hash": sha256_hex(canonicalize(reference.model_dump(mode="json"))),
+        "layout_hash": reference.layout.model_dump_json(),
+        "configs": [fsha(p) for p in configs],
+        "results": [fsha(p) for p in results],
+        "summaries": [
+            fsha(path.parent / f"round-{round_index}/published/rank-{rank}/summary.json")
+            for path in results
+            for round_index in range(2)
+            for rank in range(reference.layout.n_gpus)
+        ],
+    }
+    if not label_only:
+        evidence["host_attestation"] = {
+            "host_keys": [typed_fingerprint(known_hosts_of(p)) for p in results],
+            "statements": [fsha(p.parent / host_attest.ATTESTATION) for p in results],
+            "signatures": [fsha(p.parent / host_attest.SIGNATURE) for p in results],
+        }
+    return evidence
 
 
 def manifest(ranks: int = 2, H: int = 30, J: int = 5) -> RunManifestV2:  # noqa: N803
@@ -357,10 +408,10 @@ def test_compare_refuses_one_key_for_two_hosts(tmp_path: Path) -> None:
 
 def committed_pins(tmp_path: Path, paths: list[Path]) -> tuple[list[Path], list[driver.HostPin]]:
     """Per host: a config committing to its known_hosts file, and the pin the owner types."""
-    configs, host_pins = [], []
+    configs = []
     for path in paths:
         index = host_index(path)
-        known = key_file(path, index).with_suffix(".known_hosts")
+        known = known_hosts_of(path)
         directory = tmp_path / f"cfg-{index}"
         directory.mkdir()
         cfg = seed_config(directory, TREE / "experiments/gpu_network_v2/profile.json")
@@ -368,8 +419,7 @@ def committed_pins(tmp_path: Path, paths: list[Path]) -> tuple[list[Path], list[
         config = directory / "config.json"
         config.write_bytes(committed.model_dump_json().encode())
         configs.append(config)
-        host_pins.append(driver.HostPin(known, host_attest.fingerprint(pins([path])[0])))
-    return configs, host_pins
+    return configs, typed_pins(paths)
 
 
 def test_pinned_keys_accepts_the_committed_known_hosts_and_typed_fingerprint(
@@ -1074,7 +1124,7 @@ manifest = RunManifestV2.model_validate({"manifest_version":2,"training":body,"n
 store = ChallengeStore.__new__(ChallengeStore)
 try:
     store._bootstrap_backend_v2(manifest, (Path("missing-config"),)*2,
-                                (Path("missing-result"),)*2, b"")
+                                (Path("missing-result"),)*2, b"", pins=None)
 except FileNotFoundError as error:
     assert error.filename == "missing-config", str(error)
 else:

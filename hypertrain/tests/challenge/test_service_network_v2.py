@@ -246,7 +246,8 @@ def genuine_network(path: Path, destination: Path, *, accepted: bool = True):
             headers=admin(),
         )
         assert response.status_code == 200, response.text
-        initial._bootstrap_backend_v2(manifest, configs, results, raw)
+        # Historical run from the private index: it predates attestations, so label-only.
+        initial._bootstrap_backend_v2(manifest, configs, results, raw, pins=None)
         response = client.post(
             "/v2/admin/runs",
             content=files["manifest_envelope"].read_bytes(),

@@ -12,8 +12,8 @@ from hypertrain.beacon import parse_round
 from hypertrain.challenge.app import Config, load_coord_key
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.data.store import LocalFSStore
+from hypertrain.gpu_ops import host_attest
 from hypertrain.gpu_ops import network_qualification as engine
-from hypertrain.gpu_ops.journal import fsha
 from hypertrain.miner.core import load_keyfile
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.jcs import canonicalize
@@ -24,7 +24,28 @@ p.add_argument("--manifest-envelope", type=Path, required=True)
 p.add_argument("--owner-seed", type=Path, required=True)
 p.add_argument("--config", type=Path, nargs=2, required=True, help="h0 h1: <output>/config.json")
 p.add_argument("--result", type=Path, nargs=2, required=True, help="h0 h1: <output>/result.json")
+mode = p.add_mutually_exclusive_group(required=True)
+mode.add_argument(
+    "--label-only",
+    action="store_true",
+    help="results without a host attestation (the Vast lifecycle): nothing proves two machines",
+)
+mode.add_argument(
+    "--known-hosts",
+    type=Path,
+    nargs=2,
+    metavar=("KH0", "KH1"),
+    help="h0 h1: each host's known_hosts file; its hash is the config's known_hosts_sha256",
+)
+p.add_argument(
+    "--host-fingerprint",
+    nargs=2,
+    metavar=("FP0", "FP1"),
+    help="h0 h1: SHA256:... fingerprint of each host's SSH key, typed from the provider console",
+)
 a = p.parse_args()
+if bool(a.known_hosts) != bool(a.host_fingerprint):
+    p.error("--known-hosts and --host-fingerprint go together")
 
 raw = a.manifest_envelope.read_bytes()
 env = envelope_v2.parse_envelope(raw)
@@ -41,25 +62,23 @@ for config_path in a.config:
     job = engine.check_inputs(engine.Qualification.model_validate_json(config_path.read_bytes()))
     if job.manifest != manifest:
         sys.exit(f"{config_path}: qualification seed job binds another manifest")
-verdict = engine.compare(list(a.result), manifest, host_keys=None)
+config_bytes = [c.read_bytes() for c in a.config]
+pins = None
+if a.known_hosts:
+    pins = [engine.HostPin(h, fp) for h, fp in zip(a.known_hosts, a.host_fingerprint, strict=True)]
+keys = None if pins is None else engine.pinned_keys(config_bytes, pins)
+verdict = engine.compare(list(a.result), manifest, host_keys=keys)
 if verdict != {"two_host_bitwise_match": True, "workload_allowed": False}:
     sys.exit(f"two-host comparison did not match: {verdict}")
 
-ref = manifest.training.reference_spec
-evidence = {
-    "run_id": manifest.run_id(),
-    "backend": "cuda",
-    "reference_hash": hashlib.sha256(canonicalize(ref.model_dump(mode="json"))).hexdigest(),
-    "layout_hash": ref.layout.model_dump_json(),
-    "configs": [fsha(c) for c in a.config],
-    "results": [fsha(r) for r in a.result],
-    "summaries": [
-        fsha(r.parent / f"round-{w}/published/rank-{k}/summary.json")
-        for r in a.result
-        for w in range(2)
-        for k in range(ref.layout.n_gpus)
-    ],
-}
+evidence = ChallengeStore._qualification_evidence_v2(
+    manifest,
+    config_bytes,
+    [r.read_bytes() for r in a.result],
+    a.result,
+    keys,
+    [] if keys is None else [host_attest.load(r) for r in a.result],
+)
 authority = hashlib.sha256(canonicalize(evidence)).hexdigest()
 
 store = ChallengeStore(
@@ -79,10 +98,18 @@ try:
         {"w": 0, "commit_hash": authority, "received_round": now},
         now + 100,
     )
-    store._bootstrap_backend_v2(manifest, tuple(a.config), tuple(a.result), canonicalize(receipt))
+    store._bootstrap_backend_v2(
+        manifest, tuple(a.config), tuple(a.result), canonicalize(receipt), pins=pins
+    )
     print(
         json.dumps(
-            {"run_id": manifest.run_id(), "received_round": now, "authority_hash": authority}
+            {
+                "run_id": manifest.run_id(),
+                "received_round": now,
+                "authority_hash": authority,
+                "mode": "label-only" if keys is None else "strict",
+                "host_keys": [] if keys is None else [host_attest.fingerprint(k) for k in keys],
+            }
         )
     )
 finally:

@@ -19,7 +19,7 @@ import struct
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from fractions import Fraction
@@ -32,6 +32,8 @@ if TYPE_CHECKING:
     from experiments.gpu_network_v2.orchestrate import NetworkRuntime
     from scripts.network_gpu_operation import Operation
 
+    from hypertrain.gpu_ops.host_attest import Attestation
+    from hypertrain.gpu_ops.network_qualification import HostPin
     from hypertrain.gpu_ops.work_screen import IslandLaunch
     from hypertrain.protocol.messages import ReplayEnv
 
@@ -2377,21 +2379,23 @@ class ChallengeStore:
             raise EscrowError("FINALITY_TAPE_REPLAY_MISMATCH")
         return str(record["theta_hash"])
 
-    def _bootstrap_backend_v2(
-        self,
+    @staticmethod
+    def _qualification_evidence_v2(
         manifest: RunManifestV2,
-        configs: tuple[Path, Path],
-        results: tuple[Path, Path],
-        raw: bytes,
-    ) -> None:
-        """Internal owner-reviewed CUDA evidence; install before run/service creation."""
-        from hypertrain.gpu_ops import network_qualification as engine
+        config_bytes: Sequence[bytes],
+        result_bytes: Sequence[bytes],
+        results: Sequence[Path],
+        keys: Sequence[str] | None,
+        attestations: Sequence[Attestation],
+    ) -> dict[str, JsonValue]:
+        """The owner-signed qualification evidence; the store and backend_bootstrap.py share it.
+
+        `keys` are the two pinned SSH host keys of a strict bootstrap, None for the explicit
+        label-only mode, whose evidence is the seven keys signed before attestations existed."""
+        from hypertrain.gpu_ops import host_attest
         from hypertrain.gpu_ops.journal import fsha
-        from hypertrain.protocol.messages import Receipt
 
         ref = manifest.training.reference_spec
-        config_bytes = tuple(p.read_bytes() for p in configs)
-        result_bytes = tuple(p.read_bytes() for p in results)
         evidence: dict[str, JsonValue] = {
             "run_id": manifest.run_id(),
             "backend": "cuda",
@@ -2406,6 +2410,42 @@ class ChallengeStore:
                 for rank in range(ref.layout.n_gpus)
             ],
         }
+        if keys is not None:
+            evidence["host_attestation"] = {
+                "host_keys": [host_attest.fingerprint(key) for key in keys],
+                "statements": [sha256_hex(a.raw) for a in attestations],
+                "signatures": [sha256_hex(a.signature) for a in attestations],
+            }
+        return evidence
+
+    def _bootstrap_backend_v2(
+        self,
+        manifest: RunManifestV2,
+        configs: tuple[Path, Path],
+        results: tuple[Path, Path],
+        raw: bytes,
+        *,
+        pins: Sequence[HostPin] | None,
+    ) -> None:
+        """Internal owner-reviewed CUDA evidence; install before run/service creation.
+
+        `pins` are each host's known_hosts file and the fingerprint the owner typed from the
+        provider console: the two results must then come from two attested hosts. None is the
+        explicit label-only mode, for results that cannot carry attestations (the Vast lifecycle).
+        """
+        from hypertrain.gpu_ops import host_attest
+        from hypertrain.gpu_ops import network_qualification as engine
+        from hypertrain.gpu_ops.journal import fsha
+        from hypertrain.protocol.messages import Receipt
+
+        ref = manifest.training.reference_spec
+        config_bytes = tuple(p.read_bytes() for p in configs)
+        result_bytes = tuple(p.read_bytes() for p in results)
+        keys = None if pins is None else engine.pinned_keys(config_bytes, pins)
+        attestations = [] if keys is None else [host_attest.load(p) for p in results]
+        evidence = self._qualification_evidence_v2(
+            manifest, config_bytes, result_bytes, results, keys, attestations
+        )
         digest = sha256_hex(canonicalize(evidence))
         receipt = envelope_v2.Intake(
             manifest.run_id(), {"Receipt": lambda h: h == self.owner_hotkey}
@@ -2446,14 +2486,11 @@ class ChallengeStore:
             ):
                 raise ChallengeError(403, "reviewed CUDA runtime/reference binding differs")
         # Rehash all rescued rank/round/checkpoint bytes.
-        engine.compare(list(results), manifest, host_keys=None)
-        summaries = [
-            fsha(path.parent / f"round-{round_index}/published/rank-{rank}/summary.json")
-            for path in results
-            for round_index in range(2)
-            for rank in range(ref.layout.n_gpus)
-        ]
-        if evidence["summaries"] != summaries:
+        engine.compare(list(results), manifest, host_keys=keys)
+        rebuilt = self._qualification_evidence_v2(
+            manifest, config_bytes, result_bytes, results, keys, attestations
+        )
+        if rebuilt != evidence:
             raise ChallengeError(409, "qualification summary custody changed during bootstrap")
         with self._tx():
             row = self._db.execute(
@@ -2475,9 +2512,12 @@ class ChallengeStore:
                 ).fetchone()
             ):
                 raise ChallengeError(409, "backend qualification must precede run services")
-            for path, data in zip(
-                (*configs, *results), (*config_bytes, *result_bytes), strict=True
-            ):
+            held = [*zip((*configs, *results), (*config_bytes, *result_bytes), strict=True)]
+            if keys is not None:
+                for path, attestation in zip(results, attestations, strict=True):
+                    held.append((path.parent / host_attest.ATTESTATION, attestation.raw))
+                    held.append((path.parent / host_attest.SIGNATURE, attestation.signature))
+            for path, data in held:
                 if path.read_bytes() != data:
                     raise ChallengeError(409, "qualification custody changed during bootstrap")
                 self.objects.put(data)
