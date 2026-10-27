@@ -53,6 +53,11 @@
   See `docs/adr/0007-sm-counts-per-arch.md` at the monorepo root.
 
 ### Fixed
+- The dispute long poll can no longer deadlock the store. `DisputesV2` has one lock order, the
+  store lock then a leaf condition: `events()` reads the event table outside the condition and parks
+  on a counter, so a mutator that notifies inside its transaction never waits for a poller that
+  waits for the store lock. A debug assertion reports an inverted acquisition. See
+  `docs/adr/0011-audit-integrity.md` at the monorepo root.
 - Generic CUDA executor: bytes a host writes can no longer leave `Executor.launch` as
   `RecursionError`, `MemoryError` or `OverflowError`. A probe that does not parse or exceeds a bound,
   a result whose metadata nests deeper than 8 levels and a tar whose extended header asks for more
