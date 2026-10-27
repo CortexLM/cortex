@@ -15,6 +15,7 @@ later attempt cannot adopt the upload of an earlier one, and a stale object cann
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import secrets
@@ -71,6 +72,8 @@ CREDENTIAL_NAMES = frozenset(
 BUCKET_PREFIX = "cortex-v3-"
 DISK_RESERVE = 1 << 30
 JOIN_SECONDS = 15
+MIN_ISLAND_SECONDS = 30  # a lease with less than this left after the reserve runs the ssh way
+OFFER_SLACK = 5  # seconds taken off the lifetime announced to the container
 
 
 class ArtifactSettings(Boundary):
@@ -289,9 +292,8 @@ class Session:
             if self.closed:
                 return
         blocks = BlockList(declared.size, declared.blocks)
-        offer = offer_upload(
-            self.store, declared.sha256, blocks, declared.parts, expires=self._ttl()
-        )
+        ttl, made = self._ttl(), time.monotonic()
+        offer = offer_upload(self.store, declared.sha256, blocks, declared.parts, expires=ttl)
         with self.lock:
             if self.closed:
                 self.broker.abort(self.store.key(declared.sha256), offer.upload_id)
@@ -300,11 +302,17 @@ class Session:
         self.broker.journal.append(
             "exec_artifact_offered", nonce=self.nonce, size=declared.size, parts=len(declared.parts)
         )
+        # the container counts the lifetime from the moment it reads the offer, the URLs have been
+        # running since they were made: announce less than they have left
+        poll = math.ceil(self.broker.settings.poll_ms / 1000)
+        announced = ttl - math.ceil(time.monotonic() - made) - poll - OFFER_SLACK
+        if announced < 1:
+            raise Refusal("deadline")
         body = canonicalize(
             {
                 "version": 1,
                 "declare_sha256": sha256(raw),
-                "ttl_s": self._ttl(),
+                "ttl_s": announced,
                 "parts": [part.url for part in offer.parts],
                 "list": list(offer.list_urls),
             }
@@ -459,6 +467,10 @@ class Broker:
         """A session for this attempt, or None when the attempt runs the classic way."""
         if operation not in self.settings.operations:
             return None
+        left = job.deadline - time.time()
+        if left < self.settings.reserve_seconds + MIN_ISLAND_SECONDS:
+            self.journal.append("exec_artifact_skipped", reason="lease too short for the reserve")
+            return None
         nonce = secrets.token_hex(16)
         prefix = f"runs/{job.run_id}/exec/{job.digest()}/{nonce}/"
         try:
@@ -612,7 +624,7 @@ class ArtifactExecutor(Executor):
         collected, self._ctx.collected = getattr(self._ctx, "collected", None), None
         if collected is not None:
             record = {**record, "artifact": collected}
-            (staging.parent / "result.tar").unlink(missing_ok=True)  # peak disk: one copy fewer
+            (staging.parent / "result.tar").unlink(missing_ok=True)  # the staged copy is enough now
         return super()._publish(job, directory, staging, record, trace)
 
 

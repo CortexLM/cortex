@@ -693,13 +693,13 @@ def test_a_host_lost_after_its_last_part_is_salvaged_from_what_the_store_holds(
 
 
 @pytest.mark.parametrize(
-    ("left", "ttl"), [(1, 31), (10, 40), (3570, 3600), (100_000, 3600)], ids=str
+    ("left", "ttl"), [(30, 60), (100, 130), (3570, 3600), (100_000, 3600)], ids=str
 )
 def test_urls_live_as_long_as_the_lease_plus_a_margin_and_never_past_the_cap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, left: int, ttl: int
 ) -> None:
     fake = TimedFakeR2()
-    broker, _ = make_broker(tmp_path, fake)
+    broker, _ = make_broker(tmp_path, fake, reserve_seconds=0)
     now = time.time()
     job = Job()
     job.deadline = now + left
@@ -710,12 +710,47 @@ def test_urls_live_as_long_as_the_lease_plus_a_margin_and_never_past_the_cap(
         assert parse_qs(urlsplit(session.block[name]).query)["X-Amz-Expires"] == [str(ttl)]
 
 
-def test_a_lease_that_is_over_gets_no_urls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_lifetime_announced_to_the_container_is_shorter_than_the_urls_have_left(
+    tmp_path: Path,
+) -> None:
     fake = TimedFakeR2()
     broker, _ = make_broker(tmp_path, fake)
-    job = Job(seconds=-5)
-    with pytest.raises(Aborted):
-        broker.begin(job, "audit")  # type: ignore[arg-type]
+    session = open_session(broker, request=b"r")
+    offer = json.loads(declare(session, fake, encode(synthetic(sha(b"r"), 9 * MiB + 3))))
+    lived = int(parse_qs(urlsplit(offer["parts"][0]).query)["X-Amz-Expires"][0])
+    assert offer["ttl_s"] <= lived - at.OFFER_SLACK  # it starts counting later than they do
+
+
+def test_an_offer_that_would_be_dead_on_arrival_is_refused(tmp_path: Path) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake, url_margin_seconds=0, reserve_seconds=0)
+    job = Job(seconds=at.MIN_ISLAND_SECONDS + 4)  # urls of 34 s: 34 - 1 - 5 is fine...
+    session = open_session(broker, job, request=b"r")
+    session.job.deadline = time.time() + 5  # ...but by the time the offer is made 5 s are left
+    assert json.loads(declare(session, fake, encode(synthetic(sha(b"r"), 9 * MiB + 3)))) == {
+        "version": 1,
+        "refused": "deadline",
+    }
+
+
+def test_a_lease_too_short_for_the_reserve_runs_the_ssh_way(tmp_path: Path) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake, reserve_seconds=60)
+    assert broker.begin(Job(seconds=60 + at.MIN_ISLAND_SECONDS - 5), "audit") is None  # type: ignore[arg-type]
+    assert kinds(broker) == ["exec_artifact_skipped"] and fake.ledger == []
+    assert broker.begin(Job(seconds=60 + at.MIN_ISLAND_SECONDS + 5), "audit") is not None  # type: ignore[arg-type]
+
+
+def test_a_lease_that_ends_before_the_offer_is_made_gets_a_refusal(tmp_path: Path) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    session = open_session(broker, request=b"r")
+    session.job.deadline = time.time() - 1  # the island ran past the lease
+    assert json.loads(declare(session, fake, encode(synthetic(sha(b"r"), 9 * MiB + 3)))) == {
+        "version": 1,
+        "refused": "deadline",
+    }
+    assert fake.served("CreateMultipartUpload") == []
 
 
 def test_an_operation_that_is_not_listed_runs_the_classic_way(tmp_path: Path) -> None:
