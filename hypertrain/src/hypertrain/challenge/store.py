@@ -2316,6 +2316,35 @@ class ChallengeStore:
         assert isinstance(samples, list) and all(type(i) is int for i in samples)
         return tuple(int(str(i)) for i in samples)
 
+    def _accepted_beacon_v2(self, run_id: str, envelope: envelope_v2.EnvelopeV2) -> int:
+        """Beacon at which this master accepted exactly this stored envelope.
+
+        The reward ledger judges stored evidence there, not at the finalize beacon. A commit or
+        a verdict is judged at the beacon of its accepted_v2 row; the coordinator's own audit
+        challenge has no row, its lease holds the first beacon at which it can have been sealed.
+        """
+        if envelope.type == "AuditChallengeV2":
+            body = envelope.body
+            row = self._db.execute(
+                "SELECT created, challenge FROM audit_leases_v2 "
+                "WHERE run_id=? AND w=? AND hotkey=?",
+                (run_id, body["w"], body["target"]),
+            ).fetchone()
+            stored = json.loads(row["challenge"]) if row is not None else None
+            if stored == envelope.model_dump(mode="json"):
+                return int(row["created"])
+        else:
+            model = envelope_v2.MESSAGE_TYPES_V2[envelope.type].model_validate(envelope.body)
+            key = "auth:" + _dumps(
+                list(envelope_v2.replay_key(envelope.type, run_id, envelope.signer, model))
+            )
+            row = self._db.execute(
+                "SELECT envelope, accepted_beacon FROM accepted_v2 WHERE key=?", (key,)
+            ).fetchone()
+            if row is not None and envelope_v2.parse_envelope(row["envelope"]) == envelope:
+                return int(row["accepted_beacon"])
+        raise ChallengeError(409, "reward evidence was not accepted by this master")
+
     def _settlement_v2(self, run_id: str, reference: str) -> Settlement:
         """Settlement of a dispute by its id or of a reward origin by its id, never of a lock."""
         disputes = self._services_v2.get(run_id)
@@ -2593,6 +2622,7 @@ class ChallengeStore:
                 shadow_assignment_of=lambda binding: self._shadow_assignment_v2(run_id, binding),
                 shadow_settlement=lambda origin: self._shadow_settlement_v2(run_id, origin),
                 id_key=self._escrow_id_key_v2(),
+                accepted_at=lambda envelope: self._accepted_beacon_v2(run_id, envelope),
             )
             escrow.mutex = self._lock  # One SQLite authority lock, including event acknowledgments.
 

@@ -65,6 +65,12 @@
   tools that build a genesis or bootstrap pass `escrow_id_key(coordinator secret)`. `finalize_v2` builds
   the reward's origin list through the ledger, so `implementation_hash` changes (service-admission
   records must be re-bootstrapped).
+- Reward finalize judges the stored commit, verdicts and audit challenge at the beacon where this
+  master accepted each of them, not at the finalize beacon. Honest envelopes expire at or before
+  `d_final`, so any delayed finalize (an open contest, a beacon pause, an operator that waited) used
+  to fail for ever with `envelope expired` and freeze the next rounds (Lens F3, mechanism M2). A
+  ledger without the acceptance callback refuses to finalize. `live_operator finalize` seals its
+  `Finalize` until `max(d_final, now) + 1000`.
 - Disputes: a contest bond is settled by the dispute that took it, found through the lock's own
   signed dispute id, and a dispute or reward origin is found by its own id. A bond whose name was an
   older dispute's id made the new dispute unresolvable (its settlement resolved on the other row) and a

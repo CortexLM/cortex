@@ -66,6 +66,7 @@ torch = importlib.import_module("torch")
 
 COORD = Keypair(bytes(range(32)))
 ID_KEY = escrow_id_key(bytes(range(32)))
+ACCEPTED_BEACON = 5  # the beacon at which the fixtures' stored evidence is taken to be accepted
 AUDITOR = Keypair(bytes(31) + b"\x01")
 HOT = Keypair(b"\x07" * 32)
 COLD = Keypair(b"\x08" * 32)
@@ -198,6 +199,7 @@ def ledger(
     settlement: Callable[[str], Settlement] | None = None,
     replay: Callable[[FinalityEvidence], str] | None = None,
     id_key: bytes | None = ID_KEY,
+    accepted_at: Callable[[EnvelopeV2], int] | None = lambda envelope: ACCEPTED_BEACON,
 ) -> EscrowV2:
     def no_unverified_finality(evidence: FinalityEvidence) -> str:
         raise EscrowError("NO_REPLAY_ACCEPTANCE")
@@ -223,6 +225,7 @@ def ledger(
         shadow_assignment_of=lambda binding: (0,),
         shadow_settlement=settlement,
         id_key=id_key,
+        accepted_at=accepted_at,
     )
 
 

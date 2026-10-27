@@ -221,6 +221,7 @@ class EscrowV2:
         auditor_quorum: tuple[int, int] | None = None,
         id_key: bytes | None = None,
         contest_settlement: Callable[[EscrowLock], Settlement] | None = None,
+        accepted_at: Callable[[EnvelopeV2], int] | None = None,
     ) -> None:
         if auditor_quorum is not None:
             k, n = auditor_quorum
@@ -240,6 +241,7 @@ class EscrowV2:
         self.settlement, self.owner_of, self.assignment_of = settlement, owner_of, assignment_of
         self.shadow_assignment_of, self.shadow_settlement = shadow_assignment_of, shadow_settlement
         self.id_key, self.contest_settlement = id_key, contest_settlement
+        self.accepted_at = accepted_at
         self.mutex = threading.RLock()
         match database:
             case Path():
@@ -468,6 +470,22 @@ class EscrowV2:
                 server=True,
             )
 
+    def _accepted(self, envelope: EnvelopeV2, evidence: FinalityEvidence) -> int:
+        """Beacon at which the service accepted `envelope`.
+
+        Stored evidence is judged there, never at the finalize beacon: an envelope valid when it
+        was accepted stays valid for the finalisation of its round, so a delayed finalize cannot be
+        vetoed by the expiry a signer chose. Shadow evidence is pinned to its own beacon.
+        """
+        if evidence.shadow:
+            return evidence.finalized_beacon
+        if self.accepted_at is None:
+            raise EscrowError("ACCEPTANCE_AUTHORITY_UNAVAILABLE")
+        beacon = self.accepted_at(envelope)
+        if type(beacon) is not int or not 1 <= beacon <= evidence.finalized_beacon:
+            raise EscrowError("ACCEPTANCE_BEACON")
+        return beacon
+
     def reward_allocations(
         self, reward: RewardFinalize | ShadowRewardFinalizeV1, evidence: FinalityEvidence
     ) -> tuple[OriginAllocation, ...]:
@@ -518,20 +536,22 @@ class EscrowV2:
                 return signer == expected
 
             c = Intake(self.run_id, {"CommitV2": commit_authority}).accept(
-                item.commit.model_dump(mode="json"), evidence.finalized_beacon
+                item.commit.model_dump(mode="json"), self._accepted(item.commit, evidence)
             )
             if item.extra_verdicts and self.auditor_quorum is None:
                 raise EscrowError("QUORUM_NOT_ENABLED")
             envs = (item.verdict, *item.extra_verdicts)
             vs = [
                 Intake(self.run_id, {"ReplayVerdict": lambda s: s in self.auditors}).accept(
-                    e.model_dump(mode="json"), evidence.finalized_beacon
+                    e.model_dump(mode="json"), self._accepted(e, evidence)
                 )
                 for e in envs
             ]
             challenge = Intake(
                 self.run_id, {"AuditChallengeV2": lambda s: s == self.policy.reward_authority}
-            ).accept(item.challenge.model_dump(mode="json"), evidence.finalized_beacon)
+            ).accept(
+                item.challenge.model_dump(mode="json"), self._accepted(item.challenge, evidence)
+            )
             if not isinstance(c, CommitV2) or not all(isinstance(x, ReplayVerdict) for x in vs):
                 raise EscrowError("REWARD_WORK_TYPE")
             verdict_list = [x for x in vs if isinstance(x, ReplayVerdict)]

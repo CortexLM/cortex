@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 from scripts.ops import live_operator
-from scripts.ops.live_operator import check_open_args
+from scripts.ops.live_operator import check_open_args, finalize_expiry
 
 from hypertrain.ops.manifest_v2 import main as manifest_main
 from hypertrain.protocol.keys import Keypair
@@ -202,3 +202,12 @@ def test_cli_open_checks_the_window_against_the_manifest_h(
     with pytest.raises(Reached):
         live_operator.main(open_args(master_args, 150))
     assert master_calls == []
+
+
+@pytest.mark.parametrize(("d_final", "now", "expected"), [(500, 100, 1500), (500, 900, 1900)])
+def test_finalize_envelope_outlives_a_finalize_posted_after_d_final(
+    d_final: int, now: int, expected: int
+) -> None:
+    # The operator may finalize at d_final + N; the envelope must not expire before the post.
+    assert finalize_expiry(d_final, now) == expected
+    assert finalize_expiry(d_final, now) > now

@@ -255,6 +255,18 @@ def included(m: Master, w: int, opening: RoundOpenV2) -> list[str]:
     return sorted(out)
 
 
+FINALIZE_EXPIRY_MARGIN = 1000  # the margin the trial Finalize of the store already uses
+
+
+def finalize_expiry(d_final: int, now: int) -> int:
+    """Last round of the Finalize envelope: a finalize after d_final must still be accepted.
+
+    The stored commit, verdicts and challenge are judged at their acceptance beacon, so a late
+    finalize can settle; the Finalize itself is a fresh request and has to be unexpired when posted.
+    """
+    return max(d_final, now) + FINALIZE_EXPIRY_MARGIN
+
+
 def finalize(m: Master, w: int) -> dict:
     """One aggregate, then Finalize bound to the applied theta (store.py:7994-7998)."""
     refuse_service_run(m)
@@ -267,7 +279,8 @@ def finalize(m: Master, w: int) -> dict:
         included=keep,
         entitlements_root="0" * 64,
     )
-    signed = envelope_v2.seal(m.coord, "Finalize", m.run_id, final, opening.d_final)
+    expiry = finalize_expiry(opening.d_final, m.call("GET", "")["now_round"])
+    signed = envelope_v2.seal(m.coord, "Finalize", m.run_id, final, expiry)
     return m.call("POST", f"/admin/rounds/{w}/finalize", signed, True)
 
 

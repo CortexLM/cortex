@@ -285,6 +285,17 @@ fraud burns collectible exposure rather than redistributing it. Shadow work does
 not influence global theta; authorized production bootstrap issuance is a
 separate policy, not proof of market-backed collateral.
 
+When a round is finalized, the stored commit, the verdicts and the audit challenge are
+verified at the beacon at which this master accepted each of them (the `accepted_v2` row of
+the commit and of the verdict, the lease of the challenge), never at the finalize beacon. An
+envelope that was valid when it was accepted therefore stays valid for the finalisation of its
+round: a finalize that comes late (an open contest, a beacon pause, an operator that waited)
+settles. The ledger refuses an acceptance beacon outside `[1, finalize beacon]`, and a ledger
+without the acceptance callback refuses to finalize (`ACCEPTANCE_AUTHORITY_UNAVAILABLE`). The
+operator's `Finalize` is a fresh request and must be unexpired when it is posted;
+`live_operator finalize` seals it until `max(d_final, now) + 1000`. Work screens still bound how
+late a round can be finalized: members whose screen has lapsed are no longer eligible.
+
 Matured live rewards become weight in `GET /internal/v1/get_weights`. Each epoch answer first
 pays v1 entitlements, then fills the rest of its 10^6 mass with `available` units of live
 reward origins whose `mature_at` is at or before the drand round of `epoch_at`. Those units
