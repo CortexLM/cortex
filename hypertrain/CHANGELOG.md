@@ -131,6 +131,11 @@
   `qualification_sm_profile_unqualified`; the challenge refuses both at bootstrap. A
   `result.json` written before capabilities were recorded still qualifies 170-SM devices only.
   See `docs/adr/0007-sm-counts-per-arch.md` at the monorepo root.
+- `Admission.seize_bond(reason="NO_SHOW")` suspends the admission (state reason `NO_SHOW`) and adds
+  one strike before it burns the bond, as `"AUDIT_MISMATCH"` already did; a banned admission stays
+  banned, unvested rewards are spared and the coldkey stays bound as in probation. No caller exists
+  yet. It is the founder's literal D44 and a sign-off item; the alternative is bond-only. ADR 0010
+  Part 6, ADR 0011 Part 8 decision 12.
 
 ### Fixed
 - The dispute event poll is a request signed in its body, as the other owner routes: `POST

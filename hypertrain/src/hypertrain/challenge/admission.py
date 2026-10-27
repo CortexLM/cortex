@@ -1429,14 +1429,12 @@ class Admission:
         auditor, and the closures of ADR 0011 are not convictions.
 
         TRAINING_FRAUD (a referee verdict, see settle_fraud): also burns the owner's unvested
-        rewards, as part of slashing a residual lock (after an earlier bond-only seizure there
-        is none, and the rewards survive), and bans the admission (terminal; `lock` then
-        answers LOCK_BANNED).
-        AUDIT_MISMATCH (a round-stage audit mismatch the caller has confirmed as the miner's):
-        suspends the admission, reason AUDIT_MISMATCH, adds one strike, and burns the bond alone.
-        The coldkey stays bound by the one-non-ACTIVE-admission rule, as in probation, and the
-        round's reward of the honest peers is not touched. NO_SHOW (a roster member that never
-        committed): the bond alone; the admission stays, ineligible until it is funded again.
+        rewards and bans the admission (terminal; `lock` then answers LOCK_BANNED).
+        AUDIT_MISMATCH (a round-stage audit mismatch the caller has confirmed as the miner's) and
+        NO_SHOW (a roster member excluded for its silence, ADR 0011 Part 8): suspend the
+        admission with the seizure reason as the state reason, add one strike, and burn the bond
+        alone. The coldkey stays bound by the one-non-ACTIVE-admission rule, as in probation, and
+        the round's reward of the honest peers is not touched.
         """
         TypeAdapter(Hex64).validate_python(evidence_hash)
         if reason not in ("TRAINING_FRAUD", "NO_SHOW", "AUDIT_MISMATCH"):
@@ -1481,8 +1479,8 @@ class Admission:
                 burned += units
             if reason == "TRAINING_FRAUD" and r.state != "BANNED":
                 self.store.transition(admission_id, "BANNED", "FINALIZED_TRAINING_FRAUD", now)
-            if reason == "AUDIT_MISMATCH" and first and r.state != "BANNED":
-                self.store.transition(admission_id, "SUSPENDED", "AUDIT_MISMATCH", now)
+            if reason in ("AUDIT_MISMATCH", "NO_SHOW") and first and r.state != "BANNED":
+                self.store.transition(admission_id, "SUSPENDED", reason, now)
                 self.store.db.execute(
                     "UPDATE admissions_v2 SET strikes=strikes+1 WHERE admission_id=?",
                     (admission_id,),

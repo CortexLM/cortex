@@ -12,7 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from hypertrain.auditor.island_bisect import RefereeEvidence
-from hypertrain.challenge.admission import Admission
+from hypertrain.challenge.admission import Admission, SeizureReason
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import Contest, DisputesV2
 from hypertrain.ledger.escrow_v2 import EscrowError
@@ -459,7 +459,7 @@ def test_a_lock_cannot_borrow_the_settlement_of_another_id(world: World) -> None
     assert balances(world).admission_locked == 1000
 
 
-def test_seize_bond_burns_the_bond_of_a_no_show_and_nothing_else(world: World) -> None:
+def test_seize_bond_suspends_strikes_and_burns_the_bond_of_a_no_show(world: World) -> None:
     # Given: two locks and unvested rewards of the same coldkey, plus a second admission
     world.bond(1000)
     world.bond(500, operation="23" * 32)
@@ -496,20 +496,25 @@ def test_seize_bond_burns_the_bond_of_a_no_show_and_nothing_else(world: World) -
     world.a.lock(canonicalize(seal(COLD, "EscrowLock", world.run_id, kept, 500)), now=1)
     # When
     burned = world.a.seize_bond(world.admission, reason="NO_SHOW", evidence_hash=H, now=5)
-    # Then: the whole bond burns, the rewards and the state are left alone, nothing leaks
+    # Then: the whole bond burns and the admission is suspended with one strike; the rewards,
+    # the other admissions and the ledger are left alone
     assert burned == 1500
     b = balances(world)
     assert (b.burned, b.reward_pending, b.admission_locked) == (1500, 500, 600) and b.conserved()
-    assert world.a.store.by_id(world.admission).state == "ACTIVE"  # the state is not touched
+    record = world.a.store.by_id(world.admission)
+    assert (record.state, record.reason, record.strikes) == ("SUSPENDED", "NO_SHOW", 1)
+    assert not record.pending_dispute
     assert world.a.store.by_id(bystander).state == "APPLIED"
+    assert world.a.store.by_id(sibling).strikes == 0
     assert world.a.bond(sibling, now=1000)["locks"][0]["units"] == 300  # type: ignore[index]
     rows = world.a.store.db.execute("SELECT reason FROM admission_seizures").fetchall()
     assert [r[0] for r in rows] == ["NO_SHOW", "NO_SHOW"]
     world.a.escrow.verify()
-    # a second call finds nothing left and writes nothing
+    # a second call finds nothing left, writes nothing and adds no strike
     before = events(world)
     assert world.a.seize_bond(world.admission, reason="NO_SHOW", evidence_hash=H, now=6) == 0
     assert events(world) == before
+    assert world.a.store.by_id(world.admission).strikes == 1
     # a seized lock is never releasable, and the miner may fund again
     assert world.a.bond(world.admission, now=7) == {"locks": []}
     world.bond(200, operation="24" * 32)
@@ -571,6 +576,34 @@ def test_audit_mismatch_does_not_lift_a_ban(world: World) -> None:
     world.a.seize_bond(world.admission, reason="AUDIT_MISMATCH", evidence_hash="77" * 32, now=6)
     record = world.a.store.by_id(world.admission)
     assert (record.state, record.strikes) == ("BANNED", 0)
+
+
+@pytest.mark.parametrize(
+    ("prior", "expected"),
+    [
+        (None, ("SUSPENDED", "NO_SHOW", 1)),
+        ("TRAINING_FRAUD", ("BANNED", "FINALIZED_TRAINING_FRAUD", 0)),
+    ],
+    ids=["unfunded", "banned"],
+)
+def test_a_no_show_suspends_an_unfunded_admission_and_does_not_lift_a_ban(
+    world: World, prior: SeizureReason | None, expected: tuple[str, str, int]
+) -> None:
+    # Given: an ACTIVE admission with no bond to burn, or one already banned for fraud
+    world.a.store.db.execute(
+        "UPDATE admissions_v2 SET state='ACTIVE' WHERE admission_id=?", (world.admission,)
+    )
+    if prior:
+        world.bond()
+        world.a.seize_bond(world.admission, reason=prior, evidence_hash=H, now=5)
+    # When
+    world.a.seize_bond(world.admission, reason="NO_SHOW", evidence_hash="77" * 32, now=6)
+    # Then: the state, its reason and the strikes follow the rule, and the coldkey stays bound
+    record = world.a.store.by_id(world.admission)
+    assert (record.state, record.reason, record.strikes) == expected
+    again = T.request(world.s, "97" * 32, Keypair(b"\x43" * 32), COLD)
+    with pytest.raises(AdmissionError, match="COLDKEY_PROBATION_EXISTS"):
+        world.a.join(canonicalize(again.body()), now=7, ip_prefix="elsewhere")
 
 
 def test_seize_bond_for_fraud_also_burns_unvested_rewards_and_bans(world: World) -> None:

@@ -295,9 +295,10 @@ Decision.
    earlier bond-only seizure a conviction bans and burns no reward, see Decisions for Forge 4)
    and bans the admission (`BANNED`, terminal; `Admission.lock` then answers `LOCK_BANNED`); `AUDIT_MISMATCH`, a round-stage audit mismatch that the caller has
    confirmed as the miner's (D47), suspends the admission (reason `AUDIT_MISMATCH`), adds one
-   strike and burns the bond alone, and the coldkey stays bound by the one-non-`ACTIVE`-row rule
-   as in probation; `NO_SHOW` burns the bond alone (`EscrowV2.slash(burn_pending=False)`) and
-   leaves the admission as it is, ineligible until it is funded again. A (reason, evidence)
+   strike and burns the bond alone (`EscrowV2.slash(burn_pending=False)`), and the coldkey stays
+   bound by the one-non-`ACTIVE`-row rule as in probation; `NO_SHOW` does the same under its own
+   reason, as ADR 0011 Part 8 decision 12 amends it (it first burned the bond and left the
+   admission as it was, ineligible until funded again). A (reason, evidence)
    pair is applied once, recorded in `admission_sanctions`: a retry adds no strike. The ledger
    keeps its existing meaning of a slash; the new keyword defaults to it, so no earlier event
    changes. The caller decides whose fault it is: a verdict against the auditor and the
@@ -392,8 +393,8 @@ Baseline measured on `33b50656` with `ChallengeStore._service_implementation_v2`
 
 1. **Bond burn (Part 6).** Implemented as recommended: a referee `FRAUD` against the miner burns
    the admission bond and, while a residual lock exists, the coldkey's unvested rewards, and bans
-   the admission; a no-show
-   seizure burns the bond alone. ADR 0002 "Penalties" makes any slash for a failed audit
+   the admission; a no-show seizure burns the bond, adds a strike and suspends (ADR 0011 Part 8
+   decision 12; the alternative is bond-only). ADR 0002 "Penalties" makes any slash for a failed audit
    founder-only: the order of D36 bis and Forge's request of 2026-10-27 are taken as that
    decision for these two cases. To withhold the burn, `seize_bond` keeps recording the seizure
    and the ban and only the `slash` call goes.
