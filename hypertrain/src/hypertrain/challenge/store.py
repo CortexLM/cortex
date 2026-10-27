@@ -10734,6 +10734,7 @@ class ChallengeStore:
         return None
 
     async def relay_receipt_v2(self, raw: bytes, client: Any) -> dict[str, Any]:
+        import asyncio
         import base64
 
         from hypertrain.data.stream_store import spool
@@ -10744,61 +10745,72 @@ class ChallengeStore:
         env = relay_envelope.parse_envelope(raw)
         run_id = env.run_id
         receipt = RelayReceipt.model_validate(env.body)
-        with self._tx():
-            manifest = self._run_v2(run_id)
-            grant = UploadGrant.model_validate(
-                self._record_v2(run_id, "grant", receipt.grant_hash)["body"]
-            )
-            registry = self._registry_v2(manifest)
-            body = self._record_v2(run_id, "round", str(grant.w))["body"]
-            now = self._fresh_v2(
-                manifest, f"relay-receipt:{receipt.digest()}:{self._now(self._db)}"
-            )
-            deadline = int(str(body["d_upload"]))
-            receipt_verified(
-                env,
-                registry=registry,
-                relay_id=grant.relay_id,
-                run_id=run_id,
-                grant=grant,
-                received_before=deadline,
-            )
-            # A rerun must not challenge the relay again: it refuses a second live
-            # retrieval of the same object, and the first acceptance is authoritative.
-            if (
-                stored := self._accepted_receipt_v2(run_id, grant.w, grant.hotkey, receipt.digest())
-            ) is not None:
-                return stored
-            assignment = self._record_v2(run_id, "relay-assignment", f"{grant.w}:{grant.hotkey}")[
-                "body"
-            ]
-            request = RetrievalRequest(
-                request_id=secrets.token_hex(32),
-                nonce=secrets.token_hex(32),
-                relay_id=grant.relay_id,
-                key_id=receipt.key_id,
-                assignment_hash=body_digest(assignment),
-                grant_hash=grant.digest(),
-                custody_ack_hashes=[],
-                receipt_hash=receipt.digest(),
-                retention_hash=receipt.digest(),
-                object_or_chunk_hash=grant.delta_hash,
-                size=grant.size,
-                requested_beacon=now,
-                deadline_beacon=min(now + 10, receipt.retain_until),
-            )
-            request_raw = relay_envelope.parse_envelope(
-                relay_envelope.seal(
-                    self._coord(), "RetrievalRequest", run_id, request, request.deadline_beacon
+
+        def prepare() -> tuple[dict[str, Any] | None, Any]:
+            """Store work only: it runs in a worker thread, never on the event loop."""
+            with self._tx():
+                manifest = self._run_v2(run_id)
+                grant = UploadGrant.model_validate(
+                    self._record_v2(run_id, "grant", receipt.grant_hash)["body"]
                 )
-            )
-            self._put_record_v2(
-                run_id, "retrieval", request.digest(), request_raw.model_dump(mode="json")
-            )
+                registry = self._registry_v2(manifest)
+                body = self._record_v2(run_id, "round", str(grant.w))["body"]
+                now = self._fresh_v2(
+                    manifest, f"relay-receipt:{receipt.digest()}:{self._now(self._db)}"
+                )
+                deadline = int(str(body["d_upload"]))
+                receipt_verified(
+                    env,
+                    registry=registry,
+                    relay_id=grant.relay_id,
+                    run_id=run_id,
+                    grant=grant,
+                    received_before=deadline,
+                )
+                # A rerun must not challenge the relay again: it refuses a second live
+                # retrieval of the same object, and the first acceptance is authoritative.
+                if (
+                    stored := self._accepted_receipt_v2(
+                        run_id, grant.w, grant.hotkey, receipt.digest()
+                    )
+                ) is not None:
+                    return stored, None
+                assignment = self._record_v2(
+                    run_id, "relay-assignment", f"{grant.w}:{grant.hotkey}"
+                )["body"]
+                request = RetrievalRequest(
+                    request_id=secrets.token_hex(32),
+                    nonce=secrets.token_hex(32),
+                    relay_id=grant.relay_id,
+                    key_id=receipt.key_id,
+                    assignment_hash=body_digest(assignment),
+                    grant_hash=grant.digest(),
+                    custody_ack_hashes=[],
+                    receipt_hash=receipt.digest(),
+                    retention_hash=receipt.digest(),
+                    object_or_chunk_hash=grant.delta_hash,
+                    size=grant.size,
+                    requested_beacon=now,
+                    deadline_beacon=min(now + 10, receipt.retain_until),
+                )
+                request_raw = relay_envelope.parse_envelope(
+                    relay_envelope.seal(
+                        self._coord(), "RetrievalRequest", run_id, request, request.deadline_beacon
+                    )
+                )
+                self._put_record_v2(
+                    run_id, "retrieval", request.digest(), request_raw.model_dump(mode="json")
+                )
+                capability = base64.b64encode(
+                    canonicalize(self._record_v2(run_id, "grant", grant.digest()))
+                ).decode()
+                return None, (manifest, grant, registry, deadline, request, request_raw, capability)
+
+        stored, prepared = await asyncio.to_thread(prepare)
+        if stored is not None:
+            return stored
+        manifest, grant, registry, deadline, request, request_raw, capability = prepared
         spec = next(s for s in registry.specs if s.id == grant.relay_id)
-        capability = base64.b64encode(
-            canonicalize(self._record_v2(run_id, "grant", grant.digest()))
-        ).decode()
         import httpx
 
         try:
@@ -10817,42 +10829,48 @@ class ChallengeStore:
             raise ChallengeError(
                 502, f"relay refused master retrieval: HTTP {exc.response.status_code}"
             ) from exc
-        with self._tx():
-            # A concurrent submission may have been accepted while this one awaited the relay.
-            if (
-                stored := self._accepted_receipt_v2(run_id, grant.w, grant.hotkey, receipt.digest())
-            ) is not None:
-                return stored
-            current = self._fresh_v2(
-                manifest, f"relay-accept:{receipt.digest()}:{self._now(self._db)}"
-            )
-            if (
-                current >= deadline
-                or sha256_hex(original) != grant.delta_hash
-                or len(original) != grant.size
-            ):
-                raise ChallengeError(
-                    422, "master independently retrieved mismatched or late payload"
-                )
-            self.objects.put(original)
-            from hypertrain.protocol.relay_messages import MasterAcceptanceV2
 
-            acceptance = MasterAcceptanceV2(
-                w=grant.w,
-                hotkey=grant.hotkey,
-                delta_hash=grant.delta_hash,
-                receipt_hash=receipt.digest(),
-                received_drand=current,
-            )
-            signed = relay_envelope.seal(
-                self._coord(), "MasterAcceptanceV2", run_id, acceptance, grant.retain_until
-            )
-            self._put_record_v2(
-                run_id, "relay-receipt", receipt.digest(), env.model_dump(mode="json")
-            )
-            self._put_record_v2(run_id, "relay-custody", grant.digest(), {"artifacts": custody})
-            self._put_record_v2(
-                run_id, "retrieval-response", request.digest(), response.model_dump(mode="json")
-            )
-            self._put_record_v2(run_id, "master-acceptance", acceptance.digest(), signed)
-            return signed
+        def accept() -> dict[str, Any]:
+            with self._tx():
+                # A concurrent submission may have been accepted while this one awaited the relay.
+                if (
+                    stored := self._accepted_receipt_v2(
+                        run_id, grant.w, grant.hotkey, receipt.digest()
+                    )
+                ) is not None:
+                    return stored
+                current = self._fresh_v2(
+                    manifest, f"relay-accept:{receipt.digest()}:{self._now(self._db)}"
+                )
+                if (
+                    current >= deadline
+                    or sha256_hex(original) != grant.delta_hash
+                    or len(original) != grant.size
+                ):
+                    raise ChallengeError(
+                        422, "master independently retrieved mismatched or late payload"
+                    )
+                self.objects.put(original)
+                from hypertrain.protocol.relay_messages import MasterAcceptanceV2
+
+                acceptance = MasterAcceptanceV2(
+                    w=grant.w,
+                    hotkey=grant.hotkey,
+                    delta_hash=grant.delta_hash,
+                    receipt_hash=receipt.digest(),
+                    received_drand=current,
+                )
+                signed = relay_envelope.seal(
+                    self._coord(), "MasterAcceptanceV2", run_id, acceptance, grant.retain_until
+                )
+                self._put_record_v2(
+                    run_id, "relay-receipt", receipt.digest(), env.model_dump(mode="json")
+                )
+                self._put_record_v2(run_id, "relay-custody", grant.digest(), {"artifacts": custody})
+                self._put_record_v2(
+                    run_id, "retrieval-response", request.digest(), response.model_dump(mode="json")
+                )
+                self._put_record_v2(run_id, "master-acceptance", acceptance.digest(), signed)
+                return signed
+
+        return await asyncio.to_thread(accept)

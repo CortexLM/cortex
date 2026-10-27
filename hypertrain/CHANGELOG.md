@@ -281,6 +281,17 @@
   free. A retry of an applied rotation is still answered. `Admission.rounds_listing` and `open_rounds` serve `rotate` and
   `lock_settlement`. Rotate between rounds. See `docs/adr/0011-audit-integrity.md` (Part 8,
   decision 21) at the monorepo root.
+- `GET /v2/runs/{run}/relay-observers/{grant}/{observer}` hands back the pending challenge until
+  the observer answers it or it lapses (it used to replace it on every call, so any caller
+  could invalidate the observer's response), and no longer reads the accepted reference bytes
+  to do so. Its beacon pin carries the round: an exchange that straddled a beacon round used to
+  end in HTTP 500 for ever (`docs/adr/0014`, Part 8).
+- `PUT /v2/runs/{run}/objects/{sha256}` checks the object signature before it touches the store,
+  and the store work of that route, of `GET .../objects/{sha256}` and of `POST /v2/relay-receipts`
+  runs in the worker pool instead of on the event loop. A request that waits for the store lock
+  (a long operation, or a stranger who only knows a registered hotkey, or an anonymous receipt)
+  used to stop the whole process, `/version` included. A bad signature now answers 403 before
+  404 (unknown run) or 403 (hotkey not admitted); nothing else changes (`docs/adr/0014`, Part 8).
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

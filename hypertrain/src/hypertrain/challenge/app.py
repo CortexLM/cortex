@@ -705,9 +705,8 @@ def create_app(
 
         await subnet_member(x_hotkey)
         hosted = store.for_run(run_id)
-        with hosted._lock:
-            hosted._run_v2(run_id)
-            hosted._owner_v2(run_id, x_hotkey)
+        # A registered hotkey is only a public string: the signature comes before the store, so a
+        # stranger cannot make the route wait for the store lock.
         try:
             valid = verify(
                 decode_hotkey(x_hotkey),
@@ -718,9 +717,16 @@ def create_app(
             valid = False
         if not valid:
             raise ChallengeError(403, "object signature mismatch")
+
+        def admitted() -> int:
+            with hosted._lock:
+                hosted._run_v2(run_id)
+                hosted._owner_v2(run_id, x_hotkey)
+            return hosted._services(run_id)[1].policy.artifact_limits.max_object_bytes
+
         # Admission objects are separately bounded by the pinned policy.
+        limit = await run(admitted)
         raw = bytearray()
-        limit = hosted._services(run_id)[1].policy.artifact_limits.max_object_bytes
         async for chunk in request.stream():
             raw.extend(chunk)
             if len(raw) > limit:
@@ -741,11 +747,14 @@ def create_app(
     @app.get("/v2/runs/{run_id}/objects/{sha256}")
     async def object_v2(run_id: str, sha256: str) -> Response:
         hosted = store.for_run(run_id)
-        hosted._run_v2(run_id)
+
+        def read() -> bytes:
+            with hosted._lock:  # one shared connection: only the run lookup needs the lock
+                hosted._run_v2(run_id)
+            return hosted.objects.get(sha256)
+
         # Published run datasets/state are public, content identity still verifies.
-        return Response(
-            await run(hosted.objects.get, sha256), media_type="application/octet-stream"
-        )
+        return Response(await run(read), media_type="application/octet-stream")
 
     for action in ("accept", "commit", "delta"):
 
