@@ -33,7 +33,7 @@ from urllib.parse import parse_qsl, unquote
 
 import httpx
 import pytest
-from tests.storage.fake_r2 import CFG, FakeR2, _error
+from tests.storage.fake_r2 import CFG, FakeR2, _error, _xml
 from tests.storage.fakes import SECRET
 
 from hypertrain.gpu_ops import cuda_executor_runner as runner
@@ -111,6 +111,18 @@ class TimedFakeR2(FakeR2):
             if len(self.ops) > before:
                 self._record(self.ops[-1][0], key, response.status_code, req, response.content)
             return response
+
+    def _ListObjects(self, req: httpx.Request, key: str, params: dict[str, str]) -> httpx.Response:
+        """ListObjectsV2 in one page: what R2Client.list_prefix reads."""
+        prefix = params.get("prefix", "")
+        rows = "".join(
+            f"<Contents><Key>{k}</Key><Size>{len(v[0])}</Size></Contents>"
+            for k, v in sorted(self.objects.items())
+            if k.startswith(prefix)
+        )
+        return httpx.Response(
+            200, content=_xml("ListBucketResult", f"<IsTruncated>false</IsTruncated>{rows}")
+        )
 
     def _record(self, op: str, key: str, status: int, req: httpx.Request, out: bytes) -> None:
         self.ledger.append((op, key, status, len(req.content), len(out)))
