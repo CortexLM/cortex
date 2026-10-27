@@ -1,7 +1,8 @@
 """challenge_image.sh refuses a compose file that names a container outside the TEST stack.
 
-beacon and rollback run `docker compose up -d --no-deps` on the container_name values of the live
-compose file or of the backup's: one token away from the TEST names is a production container.
+beacon, rollback and executor run `docker compose up -d --no-deps` on the container_name values
+of the live compose file or of the backup's: one token away from the TEST names is a production
+container.
 """
 
 from __future__ import annotations
@@ -141,3 +142,66 @@ def test_rollback_accepts_a_relative_backup_path(box, backup):
     relative = backup.relative_to(box.root)
     box.run("rollback", relative, mutates={CHALLENGE, BEACON})
     assert box.container(CHALLENGE)["Image"] == OLD_ID
+
+
+# --- executor: the live file and the live file merged with its override ---------------------
+
+
+def extra(name: str | None) -> str:
+    """COMPOSE plus a fourth service, which `up -d --no-deps challenge` would leave alone."""
+    line = "" if name is None else f"    container_name: {name}\n"
+    return f"{COMPOSE}  extra:\n    <<: *common\n{line}"
+
+
+LIVE = {  # id: (live compose, the service refused, its container_name)
+    "challenge-is-production": (
+        named("challenge", "cortex-challenge-hypertrain"),
+        "challenge",
+        "cortex-challenge-hypertrain",
+    ),
+    "challenge-has-no-name": (named("challenge", None), "challenge", None),
+    "beacon-is-the-production-twin": (
+        named("beacon", "hypertrain-beacon"),
+        "beacon",
+        "hypertrain-beacon",
+    ),
+    "stub-has-no-name": (named("master-stub", None), "master-stub", None),
+    "extra-service-is-a-production-container": (
+        extra("hypertrain-auditor-0"),
+        "extra",
+        "hypertrain-auditor-0",
+    ),
+    "extra-service-has-no-name": (extra(None), "extra", None),
+}
+
+
+@pytest.mark.parametrize(("text", "service", "name"), LIVE.values(), ids=LIVE)
+def test_executor_refuses_a_live_compose_naming_a_container_outside_the_test_stack(
+    box, backup, text, service, name
+):
+    box.f.write_text(text)
+    before = box.snapshot()
+    out = box.run(*call("executor", backup), rc=4).out
+    detail = f"names container {name}" if name else "declares no container_name"
+    assert f"REFUSED {box.f}: service {service} {detail}" in out
+    assert box.snapshot() == before  # no override written, no live file touched
+
+
+def test_executor_refuses_when_only_the_merged_config_names_another_container(box, backup):
+    # the live file is fine; the fake compose resolves it together with the override differently
+    box.docker(merge_patch={"challenge": {"container_name": "cortex-challenge-hypertrain"}})
+    before = box.snapshot()
+    out = box.run(*call("executor", backup), rc=4).out
+    refused = "service challenge names container cortex-challenge-hypertrain"
+    assert f"REFUSED {box.f} -f {box.override}.new: {refused}" in out
+    assert box.snapshot() == before
+
+
+def test_executor_refuses_a_live_file_that_the_merged_config_would_hide(box, backup):
+    # `swap`, `rollback` and `executor-off` bring up the file alone, whatever the pair resolves to
+    box.f.write_text(named("beacon", "hypertrain-beacon"))
+    box.docker(merge_patch={"beacon": {"container_name": BEACON}})
+    before = box.snapshot()
+    out = box.run(*call("executor", backup), rc=4).out
+    assert f"REFUSED {box.f}: service beacon names container hypertrain-beacon" in out
+    assert box.snapshot() == before
