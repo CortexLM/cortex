@@ -459,7 +459,9 @@ def test_a_refusal_that_cannot_be_written_also_ends_the_attempt(tmp_path: Path) 
     assert session.failure == "refusal could not be written: R2Error"
 
 
-def test_closing_while_the_upload_is_being_opened_leaves_no_open_upload(tmp_path: Path) -> None:
+def test_closing_while_the_upload_is_being_opened_leaves_no_open_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fake = TimedFakeR2()
     broker, _ = make_broker(tmp_path, fake)
     session = open_session(broker, request=b"r")
@@ -467,19 +469,18 @@ def test_closing_while_the_upload_is_being_opened_leaves_no_open_upload(tmp_path
     http = client_for(fake).http
     body = encode(synthetic(sha(b"r"), 9 * MiB + 3))
     http.put(session.block["declare_put"], content=body, headers={"if-none-match": "*"})
+    monkeypatch.setattr(at, "JOIN_SECONDS", 0.2)  # a store that hangs: close() cannot wait for it
     session.start()
     assert entered.wait(10)  # the thread is inside CreateMultipartUpload
 
-    closer = threading.Thread(target=session.close)
-    closer.start()  # waits for the thread to end (bounded), then cleans
-    release.set()
-    closer.join(30)
-    assert not closer.is_alive()
-    if session.thread is not None:
-        session.thread.join(10)
+    session.close()  # returns while the thread is still in that call
+    assert session.thread is not None and session.thread.is_alive()
+    release.set()  # the upload is created after the session was closed
+    session.thread.join(10)
 
-    assert fake.uploads == {}  # the upload the thread opened after the close was aborted by it
-    assert leftovers(fake, session) == []  # and its block list and the mailbox went with it
+    assert not session.thread.is_alive()
+    assert fake.uploads == {}  # the thread aborted the upload it had just opened
+    assert leftovers(fake, session) == []  # and its block list; no offer was written
 
 
 def test_an_upload_the_session_does_not_know_about_is_found_by_its_key_and_aborted(
@@ -696,6 +697,25 @@ def test_an_object_that_is_not_the_one_declared_is_not_fetched(
         r for r in fake.served("GetObject") if r[1].endswith(pair.session.declared.sha256)
     ] == []  # type: ignore[union-attr]
     pair.session.close()
+
+
+def test_closing_gives_back_the_disk_that_was_set_aside_for_the_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    pair = run_pair(broker, fake, monkeypatch)
+    status = tmp_path / "status.out"
+    status.write_bytes(pair.out)
+    need = int(2.2 * pair.session.declared.size) + (1 << 30)  # type: ignore[union-attr]
+    monkeypatch.setattr(
+        at, "shutil", SimpleNamespace(disk_usage=lambda path: SimpleNamespace(free=need + 1))
+    )
+    pair.session.collect(status, lambda: None, lost=False)  # sets `need` aside
+    with pytest.raises(AttemptFailed, match="not enough disk"):
+        broker.reserve(need, tmp_path)  # nothing is left for another download
+    pair.session.close()
+    assert broker.reserve(need, tmp_path) == need  # until this attempt is over
 
 
 def test_two_downloads_at_once_do_not_both_count_on_the_same_free_disk(
@@ -1037,6 +1057,14 @@ def test_an_operation_that_is_not_listed_runs_the_classic_way(tmp_path: Path) ->
     broker, _ = make_broker(tmp_path, fake)
     assert broker.begin(Job(), "reference") is None  # type: ignore[arg-type]
     assert fake.ledger == [] and kinds(broker) == []
+
+
+def test_one_failed_probe_is_enough_to_leave_the_attempt_to_the_ssh_way(tmp_path: Path) -> None:
+    fake = TimedFakeR2()
+    fake.fault_key("HeadObject", "declare.json", 503)  # a retry would have found the store fine
+    broker, _ = make_broker(tmp_path, fake)
+    assert broker.begin(Job(), "audit") is None  # type: ignore[arg-type]
+    assert kinds(broker) == ["exec_artifact_unavailable"]
 
 
 @pytest.mark.parametrize(("fallback", "outcome"), [("classic", None), ("fail", AttemptFailed)])
