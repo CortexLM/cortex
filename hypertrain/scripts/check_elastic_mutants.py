@@ -742,7 +742,8 @@ MUTANTS = (
         SRC + "coordinator.py",
         "        if s.holder is not None:"
         "  # the honest holder resumes from the link before: fresh clocks\n"
-        "            self._progress[s.holder.member] = (self.clock.now_ms(), False)\n",
+        "            self._progress[s.holder.member] = (self.clock.now_ms(), False)\n"
+        "            s.since_ms = self.clock.now_ms()\n",
         "",
         "test_coordinator.py::test_withdrawing_gives_the_honest_holder_a_fresh_window",
     ),
@@ -849,6 +850,73 @@ MUTANTS = (
         "test_assignment.py::test_the_score_is_the_documented_formula",
     ),
     Mutant(
+        "a shard its busy holder never works stays with it",
+        SRC + "coordinator.py",
+        "        self._hand_over_idle_shards()\n        return out\n",
+        "        return out\n",
+        "test_coordinator.py::test_a_shard_its_busy_holder_never_works_goes_to_a_member_that_holds_nothing",
+    ),
+    Mutant(
+        "a shard is handed over before its window is over",
+        SRC + "coordinator.py",
+        "            if not idle or holder is None or now - s.since_ms < self.progress_ms:\n",
+        "            if not idle or holder is None:\n",
+        "test_coordinator.py::test_a_member_that_advances_both_its_shards_keeps_them",
+    ),
+    Mutant(
+        "a link does not restart the clock of its shard",
+        SRC + "coordinator.py",
+        "        s.since_ms = s.linked_ms = self.clock.now_ms()\n",
+        "        s.linked_ms = self.clock.now_ms()\n",
+        "test_coordinator.py::test_a_member_that_advances_both_its_shards_keeps_them",
+    ),
+    Mutant(
+        "a shard's clock starts when the round opens, not when it is assigned",
+        SRC + "coordinator.py",
+        "            self._shards[shard].since_ms = self.clock.now_ms()\n",
+        "",
+        "test_coordinator.py::test_a_member_that_advances_both_its_shards_keeps_them",
+    ),
+    Mutant(
+        "a shard passes to a member that is busy",
+        SRC + "coordinator.py",
+        "        idle = {m.id: m.lease.token for m in self.membership.active()"
+        " if m.lease.token not in held}\n",
+        "        idle = {m.id: m.lease.token for m in self.membership.active()}\n",
+        "test_coordinator.py::test_shards_do_not_pass_between_busy_members",
+    ),
+    Mutant(
+        "an idle member is handed every stale shard at once",
+        SRC + "coordinator.py",
+        "Holder(to, idle.pop(to))",
+        "Holder(to, idle[to])",
+        "test_coordinator.py::test_a_member_that_holds_nothing_is_handed_one_shard_at_a_time",
+    ),
+    Mutant(
+        "the member that receives a shard has no progress window",
+        SRC + "coordinator.py",
+        "            self._progress[to] = (now, False)"
+        "  # it starts holding work: its progress window opens\n",
+        "",
+        "test_coordinator.py::test_a_shard_its_busy_holder_never_works_goes_to_a_member_that_holds_nothing",
+    ),
+    Mutant(
+        "a hand-over is not recorded",
+        SRC + "coordinator.py",
+        "            self._moves.append(Move(shard, holder.member, holder.token, to, now))\n",
+        "",
+        "test_coordinator.py::test_a_shard_its_busy_holder_never_works_goes_to_a_member_that_holds_nothing",
+    ),
+    Mutant(
+        "a replacement host restarts the clock of the shards it inherits",
+        SRC + "coordinator.py",
+        "                self._progress[member] = (self.clock.now_ms(), True)\n",
+        "                self._progress[member] = (self.clock.now_ms(), True)\n"
+        "                for s in self._held(lease.token):\n"
+        "                    s.since_ms = self.clock.now_ms()\n",
+        "test_coordinator.py::test_a_rejoin_does_not_refresh_the_clock_of_a_shard_nobody_works",
+    ),
+    Mutant(
         "a leave names as many heads as it likes",
         SRC + "coordinator.py",
         "        if len(notice.heads) > len(self._shards):"
@@ -884,11 +952,255 @@ MUTANTS = (
         "test_assignment.py::test_a_departure_moves_only_the_shards_of_the_member_that_left",
     ),
     Mutant(
+        "a commit refused because its shard was handed over counts as a refusal",
+        SRC + "sim.py",
+        "            elif self._handed_over(w.unit.shard, self.lease.token):\n"
+        '                self._lose("handed over")'
+        "  # the commit was on its way when the shard moved\n",
+        "",
+        "test_sim.py::test_work_in_flight_when_its_shard_is_handed_over_is_not_a_refusal",
+    ),
+    Mutant(
+        "a hand-over takes the shard its holder works first",
+        SRC + "coordinator.py",
+        "            if s is mine[0] and not any("
+        "t.linked_ms > s.since_ms for t in mine if t is not s):\n"
+        "                continue  # it works its first shard first, and has advanced no other\n",
+        "",
+        "test_coordinator.py::test_a_hand_over_takes_a_queued_shard_never_the_one_its_holder_works",
+    ),
+    Mutant(
+        "a hand-over goes to the last idle member",
+        SRC + "coordinator.py",
+        "to = plan(self._seed(), [shard], dict.fromkeys(idle, 1))[shard]",
+        "to = sorted(idle)[-1]",
+        "test_coordinator.py::test_a_hand_over_goes_to_the_rendezvous_winner_among_the_idle",
+    ),
+    Mutant(
+        "a hand-over goes to the idle member with the newest lease",
+        SRC + "coordinator.py",
+        "to = plan(self._seed(), [shard], dict.fromkeys(idle, 1))[shard]",
+        "to = max(idle, key=lambda m: idle[m])",
+        "test_coordinator.py::test_a_hand_over_goes_to_the_rendezvous_winner_among_the_idle",
+    ),
+    Mutant(
+        "a hand-over plans with the run seed alone",
+        SRC + "coordinator.py",
+        "to = plan(self._seed(), [shard], dict.fromkeys(idle, 1))[shard]",
+        "to = plan(self.seed, [shard], dict.fromkeys(idle, 1))[shard]",
+        "test_coordinator.py::test_a_hand_over_goes_to_the_rendezvous_winner_among_the_idle",
+    ),
+    Mutant(
+        "a hand-over target is opened with a window that is over at once",
+        SRC + "coordinator.py",
+        "            self._progress[to] = (now, False)  # it starts holding work: its progress"
+        " window opens\n",
+        "            self._progress[to] = (0, False)\n",
+        "test_coordinator.py::"
+        "test_a_shard_its_busy_holder_never_works_goes_to_a_member_that_holds_nothing",
+    ),
+    Mutant(
         "another member's retry of a key is acknowledged",
         SRC + "coordinator.py",
         "        if done is not None and (done[0], done[2]) == (shard, member):\n",
         "        if done is not None and done[0] == shard:\n",
         "test_coordinator.py::test_another_member_cannot_have_a_link_it_did_not_produce_acknowledged",
+    ),
+    Mutant(
+        "a round keeps the hand-overs of the one before",
+        SRC + "coordinator.py",
+        "        self._moves = []\n        self._penalties = Counter()\n",
+        "        self._penalties = Counter()\n",
+        "test_coordinator.py::test_a_round_reports_only_its_own_hand_overs",
+    ),
+    Mutant(
+        "the host that loses a shard to a hand-over keeps its old window",
+        SRC + "coordinator.py",
+        "            self._progress[holder.member] = (now, True)"
+        "  # it lost work through no fault of its own\n",
+        "",
+        "test_coordinator.py::test_a_host_that_loses_a_shard_to_a_hand_over_gets_a_fresh_window",
+    ),
+    Mutant(
+        "a recorded hand-over excuses every later move of its shard",
+        SRC + "sim.py",
+        "                    self.handed.discard((shard, before.token))"
+        "  # one Move explains one move\n",
+        "                    pass\n",
+        "test_sim.py::test_a_hand_over_explains_one_move_of_its_shard_and_no_other",
+    ),
+    Mutant(
+        "the host that loses a shard to a hand-over keeps its old window, in the simulator",
+        SRC + "coordinator.py",
+        "            self._progress[holder.member] = (now, True)"
+        "  # it lost work through no fault of its own\n",
+        "",
+        "test_sim.py::test_a_host_that_loses_work_to_a_hand_over_is_not_stalled_for_it",
+    ),
+    Mutant(
+        "a hand-over leaves its holder with nothing",
+        SRC + "coordinator.py",
+        "            mine.remove(s)\n",
+        "",
+        "test_coordinator.py::test_a_host_never_loses_its_last_shard_to_the_hand_overs_of_one_sweep",
+    ),
+    Mutant(
+        "an advance in the millisecond a shard was got frees it",
+        SRC + "coordinator.py",
+        "t.linked_ms > s.since_ms",
+        "t.linked_ms >= s.since_ms",
+        "test_coordinator.py::test_an_advance_in_the_millisecond_a_shard_was_got_does_not_free_it",
+    ),
+    Mutant(
+        "idle shards are handed over before the freed ones are planned",
+        SRC + "coordinator.py",
+        "        if out:\n            self._assign()\n        self._hand_over_idle_shards()\n",
+        "        self._hand_over_idle_shards()\n        if out:\n            self._assign()\n",
+        "test_coordinator.py::"
+        "test_a_shard_a_stall_frees_goes_to_the_idle_member_not_to_a_hand_over",
+    ),
+    Mutant(
+        "a hand-over leaves its source a window a replacement may renew",
+        SRC + "coordinator.py",
+        "self._progress[holder.member] = (now, True)",
+        "self._progress[holder.member] = (now, False)",
+        "test_coordinator.py::test_the_window_a_hand_over_gives_is_not_renewed_by_a_replacement",
+    ),
+    Mutant(
+        "a hand-over leaves its target a window a replacement cannot renew",
+        SRC + "coordinator.py",
+        "self._progress[to] = (now, False)",
+        "self._progress[to] = (now, True)",
+        "test_coordinator.py::test_the_window_a_hand_over_gives_is_not_renewed_by_a_replacement",
+    ),
+    Mutant(
+        "a link after a hand-over keeps the window flag of the hand-over",
+        SRC + "coordinator.py",
+        "        self._progress[member] = (self.clock.now_ms(), False)"
+        "  # an accepted link restarts it\n",
+        "        self._progress[member] = (self.clock.now_ms(), self._progress[member][1])\n",
+        "test_coordinator.py::test_the_window_a_hand_over_gives_is_not_renewed_by_a_replacement",
+    ),
+    Mutant(
+        "a withdrawn link stays an advance of its shard",
+        SRC + "coordinator.py",
+        "        s.linked_ms = -1\n        if s.holder is not None:",
+        "        if s.holder is not None:",
+        "test_coordinator.py::"
+        "test_a_withdrawn_link_is_no_advance_for_the_hand_over_rule_or_the_clock",
+    ),
+    Mutant(
+        "a shard whose link was withdrawn keeps its old clock",
+        SRC + "coordinator.py",
+        "            s.since_ms = self.clock.now_ms()\n",
+        "",
+        "test_coordinator.py::"
+        "test_a_withdrawn_link_is_no_advance_for_the_hand_over_rule_or_the_clock",
+    ),
+    Mutant(
+        "a shard keeps the link time of the host that released it",
+        SRC + "coordinator.py",
+        "            self._shards[shard].linked_ms = -1\n",
+        "",
+        "test_coordinator.py::"
+        "test_a_shard_released_by_another_host_does_not_carry_that_hosts_link_time",
+    ),
+    Mutant(
+        "a hand-over takes the shard a host trains in turn",
+        SRC + "coordinator.py",
+        "            if s is mine[0] and not any("
+        "t.linked_ms > s.since_ms for t in mine if t is not s):\n"
+        "                continue  # it works its first shard first, and has advanced no other\n",
+        "",
+        "test_sim.py::test_a_host_that_trains_three_shards_in_turn_is_not_robbed_by_a_hand_over",
+    ),
+    Mutant(
+        "a host that works its second shard first keeps the first for ever",
+        SRC + "coordinator.py",
+        "            if s is mine[0] and not any("
+        "t.linked_ms > s.since_ms for t in mine if t is not s):\n",
+        "            if s is mine[0]:\n",
+        "test_coordinator.py::test_a_host_that_works_its_second_shard_first_loses_the_first",
+    ),
+    Mutant(
+        "a link does not say that its host advanced the shard",
+        SRC + "coordinator.py",
+        "        s.since_ms = s.linked_ms = self.clock.now_ms()\n",
+        "        s.since_ms = self.clock.now_ms()\n",
+        "test_coordinator.py::test_a_host_that_works_its_second_shard_first_loses_the_first",
+    ),
+    Mutant(
+        "a hand-over is recorded with another token",
+        SRC + "coordinator.py",
+        "Move(shard, holder.member, holder.token, to, now)",
+        "Move(shard, holder.member, holder.token + 1, to, now)",
+        "test_coordinator.py::test_a_shard_its_busy_holder_never_works_goes_to_a_member_that_holds_nothing",
+    ),
+    Mutant(
+        "a hand-over is fined",
+        SRC + "coordinator.py",
+        "            self._moves.append(Move(shard, holder.member, holder.token, to, now))\n",
+        "            self._penalties[holder.member] += 1\n"
+        "            self._moves.append(Move(shard, holder.member, holder.token, to, now))\n",
+        "test_coordinator.py::test_a_shard_its_busy_holder_never_works_goes_to_a_member_that_holds_nothing",
+    ),
+    Mutant(
+        "a hand-over goes to the first idle member, not the rendezvous winner",
+        SRC + "coordinator.py",
+        "to = plan(self._seed(), [shard], dict.fromkeys(idle, 1))[shard]",
+        "to = sorted(idle)[0]",
+        "test_coordinator.py::test_a_hand_over_goes_to_the_rendezvous_winner_among_the_idle",
+    ),
+    Mutant(
+        "the simulator does not label a hand-over",
+        SRC + "sim.py",
+        '            self._lose("handed over" if handed else "displaced")\n',
+        '            self._lose("displaced")\n',
+        "test_sim.py::test_work_in_flight_when_its_shard_is_handed_over_is_not_a_refusal",
+    ),
+    Mutant(
+        "the simulator's oracle forgets recorded hand-overs",
+        SRC + "sim.py",
+        "                if (shard, before.token) in self.handed:\n",
+        "                if False:\n",
+        "test_sim.py::test_work_in_flight_when_its_shard_is_handed_over_is_not_a_refusal",
+    ),
+    Mutant(
+        "the simulator's oracle allows any move of a shard",
+        SRC + "sim.py",
+        "                elif before.token not in self.departed:\n",
+        "                elif False:\n",
+        "test_sim.py::test_the_oracle_still_flags_a_hand_over_the_coordinator_did_not_record",
+    ),
+    Mutant(
+        "a handed-over shard keeps its old clock",
+        SRC + "coordinator.py",
+        "            s.holder, s.since_ms, s.linked_ms = Holder(to, idle.pop(to)), now, -1\n",
+        "            s.holder, s.linked_ms = Holder(to, idle.pop(to)), -1\n",
+        "test_coordinator.py::test_a_handed_over_shard_gets_a_fresh_clock",
+    ),
+    Mutant(
+        "a hand-over goes to a busy member that has room",
+        SRC + "coordinator.py",
+        "        idle = {m.id: m.lease.token for m in self.membership.active()"
+        " if m.lease.token not in held}\n",
+        "        idle = {m.id: m.lease.token for m in self.membership.active()"
+        " if len(held.get(m.lease.token, ())) < self.capacity}\n",
+        "test_sim.py::test_runs_with_hand_overs_keep_every_invariant",
+    ),
+    Mutant(
+        "the simulator's oracle lets a hand-over go to a member that held a shard",
+        SRC + "sim.py",
+        "            if kept:\n",
+        "            if False:\n",
+        "test_sim.py::test_the_oracle_flags_a_hand_over_to_a_member_that_held_a_shard",
+    ),
+    Mutant(
+        "the simulator's hand-over excuses outlive their round",
+        SRC + "sim.py",
+        "        self.handed.clear()  # a hand-over excuses a move of its own round only\n",
+        "",
+        "test_sim.py::test_a_hand_over_excuses_a_move_of_its_own_round_only",
     ),
     Mutant(
         "a lapse is penalised",

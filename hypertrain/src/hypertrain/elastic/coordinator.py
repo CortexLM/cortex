@@ -1,16 +1,22 @@
 """Coordinator of one elastic run: membership, shard holders, checkpoint heads and credit.
 
-Every mutating entry point and settle() first lapse expired leases, so no decision rests on a
-dead lease, and end the lease of any holder that made no accepted link within `progress_ms`
-(counted per member from its last accepted link, or from when it started holding work; a
-replacement host restarts that window once per link, not at every rejoin): a host that
-heartbeats but cannot upload, or restarts in a loop, never stalls a round. holder() and links()
-are pure reads and may show a lapsed holder until the next such call. A shard has
-at most one holder, a (member, token) pair, and only that holder extends the shard's head, by a
-link whose parent is the head (compare-and-set). Credit is the number of steps each accepted
-link adds, paid to the owner of the member that produced it. Leaving, lapsing, stalling or being
-replaced costs a member nothing it had accepted; only a link that fails the audit is penalised,
-and its member is revoked.
+Every mutating entry point and settle() first lapse expired leases (open_round refuses a bad call
+before it sweeps), so no decision rests on a dead lease, and end the lease of any holder that made
+no accepted link within `progress_ms` (counted per member from its last accepted link, or from
+when it started holding work; a replacement host restarts that window once per link, not at every
+rejoin): a host that heartbeats but cannot upload, or restarts in a loop, never stalls a round.
+With capacity above 1 that window is shared by a member's shards, so a member that advances one of
+them could keep another for ever while a live member that holds nothing waits; a shard that was
+assigned or last advanced `progress_ms` ago is therefore handed to such a member when its holder
+holds two or more shards and is not working it (a Move, not a departure; a host works its first
+shard first), and a holder with nobody to hand it to keeps it. The holder's window restarts at
+each Move, since the coordinator took work from it, so a host that never works its first shard
+outlives its window by at most capacity - 1 more. holder() and links() are pure reads and may
+show a lapsed holder until the next such call. A shard has at most one holder, a (member,
+token) pair, and only that holder extends the shard's head, by a link whose parent is the head
+(compare-and-set). Credit is the number of steps each accepted link adds, paid to the owner of the
+member that produced it. Leaving, lapsing, stalling or being replaced costs a member nothing it
+had accepted; only a link that fails the audit is penalised, and its member is revoked.
 
 No link is credited without an audit: `audit` is required and runs inside commit(). A replay of
 a whole link may be too slow for that call, so the audit can be a cheap check and the full replay
@@ -106,6 +112,17 @@ class Accepted:
 
 
 @dataclass(frozen=True, slots=True)
+class Move:
+    """A shard handed from a live member that held two or more shards to one that held none."""
+
+    shard: int
+    from_member: str
+    from_token: int
+    to_member: str
+    at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class Link:
     key: str
     member: str
@@ -126,6 +143,8 @@ class _Shard:
     head: str | None = None
     step: int = 0
     links: list[Link] = field(default_factory=list)
+    since_ms: int = 0  # when its holder got it, or last advanced it
+    linked_ms: int = -1  # when its holder last advanced it; -1 for never
 
     @property
     def done(self) -> bool:
@@ -142,6 +161,7 @@ class Settlement:
     credits: dict[str, int]
     penalties: dict[str, int]
     departures: tuple[Departure, ...]
+    moves: tuple[Move, ...]
 
 
 class Coordinator:
@@ -177,6 +197,7 @@ class Coordinator:
         self.round = -1
         self._shards: dict[int, _Shard] = {}
         self._departures: list[Departure] = []
+        self._moves: list[Move] = []
         self._penalties: Counter[str] = Counter()
         # Retry answers, kept for the round they were given in and the round after it, so the
         # memory of a long run stays bounded by two rounds.
@@ -226,6 +247,7 @@ class Coordinator:
         self._left_before, self._left = self._left, {}
         self._accepted_before, self._accepted = self._accepted, {}
         self._departures = []
+        self._moves = []
         self._penalties = Counter()
         self._sweep()
         self._assign()
@@ -282,6 +304,9 @@ class Coordinator:
         return departure
 
     def tick(self) -> list[Departure]:
+        """Lapse and stall what is due and hand idle shards over. It returns the departures of
+        this call only: the Moves, and the departures of sweeps that other entry points ran,
+        are read from settle()."""
         return self._sweep()
 
     # ---- work ----
@@ -311,6 +336,7 @@ class Coordinator:
         s.links.append(Link(key, member, m.owner, manifest.step - s.step))
         self._accepted[key] = (shard, manifest.step, member)
         s.head, s.step = key, manifest.step
+        s.since_ms = s.linked_ms = self.clock.now_ms()
         self._progress[member] = (self.clock.now_ms(), False)  # an accepted link restarts it
         if s.done:
             s.holder = None
@@ -351,8 +377,10 @@ class Coordinator:
         self.membership.revoke(m.id)
         if live:
             self._depart(m, Exit.REVOKED, assign=False)
+        s.linked_ms = -1
         if s.holder is not None:  # the honest holder resumes from the link before: fresh clocks
             self._progress[s.holder.member] = (self.clock.now_ms(), False)
+            s.since_ms = self.clock.now_ms()
         self._assign()  # a shard that was complete is pending again
         return voided
 
@@ -369,6 +397,7 @@ class Coordinator:
             credits=dict(credits),
             penalties=dict(self._penalties),
             departures=tuple(self._departures),
+            moves=tuple(self._moves),
         )
 
     def links(self, shard: int) -> tuple[Link, ...]:
@@ -415,7 +444,7 @@ class Coordinator:
 
     def _sweep(self) -> list[Departure]:
         """Lapse expired leases, then stalled holders, and only then plan the freed shards, so
-        no late member is handed a shard in the same sweep."""
+        no late member is handed a shard in the same sweep; last, hand idle shards over."""
         out = [self._depart(m, Exit.LAPSE, assign=False) for m in self.membership.expire()]
         now = self.clock.now_ms()
         late = {
@@ -429,7 +458,42 @@ class Coordinator:
         ]
         if out:
             self._assign()
+        self._hand_over_idle_shards()
         return out
+
+    def _hand_over_idle_shards(self) -> None:
+        """Give a shard that saw no accepted link within `progress_ms` to a live member that
+        holds nothing: its holder keeps its other shards and is not stalled. With no such
+        member, nothing moves. A member that holds a shard is taken to be working it, so shards
+        never pass between busy members. A host works its shards in ascending order, as its
+        grant lists them, so its first shard is taken only if the host advanced another one after
+        it got, or last advanced, that first one (strictly after); a host never loses its last
+        shard. The source's window restarts, once per Move; a replacement after it renews nothing
+        until the host links again."""
+        if self.capacity < 2:
+            return
+        now = self.clock.now_ms()
+        held: dict[int, list[_Shard]] = {}  # each holder's shards, in shard order
+        for s in self._shards.values():
+            if s.holder is not None:
+                held.setdefault(s.holder.token, []).append(s)
+        idle = {m.id: m.lease.token for m in self.membership.active() if m.lease.token not in held}
+        for shard, s in self._shards.items():
+            holder = s.holder
+            if not idle or holder is None or now - s.since_ms < self.progress_ms:
+                continue
+            mine = held[holder.token]
+            if s is mine[0] and not any(t.linked_ms > s.since_ms for t in mine if t is not s):
+                continue  # it works its first shard first, and has advanced no other
+            to = plan(self._seed(), [shard], dict.fromkeys(idle, 1))[shard]
+            self._progress[to] = (now, False)  # it starts holding work: its progress window opens
+            s.holder, s.since_ms, s.linked_ms = Holder(to, idle.pop(to)), now, -1
+            self._progress[holder.member] = (now, True)  # it lost work through no fault of its own
+            mine.remove(s)
+            self._moves.append(Move(shard, holder.member, holder.token, to, now))
+
+    def _seed(self) -> bytes:
+        return self.seed + struct.pack(">Q", self.round)
 
     def _assign(self) -> None:
         pending = [shard for shard, s in self._shards.items() if s.holder is None and not s.done]
@@ -438,10 +502,11 @@ class Coordinator:
         load = Counter(s.holder.token for s in self._shards.values() if s.holder is not None)
         live = {m.id: m.lease.token for m in self.membership.active()}
         free = {member: self.capacity - load[token] for member, token in live.items()}
-        seed = self.seed + struct.pack(">Q", self.round)
         holding = {s.holder.member for s in self._shards.values() if s.holder is not None}
-        for shard, member in plan(seed, pending, free).items():
+        for shard, member in plan(self._seed(), pending, free).items():
             self._shards[shard].holder = Holder(member, live[member])
+            self._shards[shard].since_ms = self.clock.now_ms()
+            self._shards[shard].linked_ms = -1
             if member not in holding:  # it starts holding work: its progress window opens
                 self._progress[member] = (self.clock.now_ms(), False)
                 holding.add(member)

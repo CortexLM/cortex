@@ -116,13 +116,61 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
    `sha256("ht-elastic-assign-v1|" || seed || shard || member)` among members with free
    capacity (default 1 shard per host). It is a pure function of an ordered event log, so an
    auditor can recompute it. Only pending shards are planned: a departure moves only the
-   departed member's shards, and a live holder is never displaced. **Progress deadline**: a
-   member holding work loses its lease (exit `STALLED`, not penalised) when it makes no
-   accepted link within `progress_ms`. The window is counted per member, from its last
-   accepted link or from when it started holding work, and a new shard does not reopen it. Its
-   shards are reassigned and the member may join again. A sweep lapses every late member before
-   it plans the freed shards. A host that heartbeats but cannot upload, or restarts in a loop,
-   therefore never stalls a round; a crash loop loses its shard within about two windows.
+   departed member's shards, and a live holder is never displaced, bar the hand-over below.
+   **Progress deadline**: a member holding work loses its lease (exit `STALLED`, not
+   penalised) when it makes no accepted link within `progress_ms`. The window is counted per
+   member, from its last accepted link or from when it started holding work, and a new shard
+   does not reopen it. Its shards are reassigned and the member may join again. A sweep lapses
+   every late member before it plans the freed shards. A host that heartbeats but cannot
+   upload, or restarts in a loop, therefore never stalls a round; a crash loop loses its shard
+   within about two windows.
+   **Hand-over** (capacity above 1). Because the window belongs to the member, a host that
+   advances one of its shards could keep another for ever: Lens measured a second shard held
+   960 windows without a link while a live member waited. Each shard therefore also keeps the
+   time it was assigned or last advanced, and the time of its last link; a replacement host
+   does not refresh them, or a host that rejoins once per link would keep an unworked shard for
+   ever. A shard that is a window old is handed to a live member that holds nothing (the idle
+   member with the highest rendezvous score for that shard), one shard per idle member and
+   sweep, unless it is the one its holder works:
+   - a host works its shards in ascending order, which is the order of its grant, so the first
+     shard of a holder is taken only if the holder has advanced another of its shards after it
+     got, or last advanced, that first one (strictly after: a link in the same millisecond does
+     not count). A host that trains its shards in turn is not robbed of the one it trains; a
+     host that works its second shard first and starves the first still loses the first;
+   - a host never loses its last shard, also when several of its shards are old in one sweep.
+
+   It is a `Move` in the settlement, not a departure: nobody is penalised, the holder keeps its
+   lease and its other shards, and its progress window restarts at each Move, since the
+   coordinator took work from it; a rejoin after a Move does not renew it again, a link
+   re-arms that. A host that never works its first shard therefore outlives its window by up
+   to capacity - 1 further windows, one for each shard it loses, and then stalls as before
+   (3 shards at capacity 3 and a window of 4 s: stalled 2.75 windows after the last link
+   instead of 1 [V, review of 2026-10-27]). The freed shards are planned before the hand-over
+   runs, so an idle member takes a shard a stall freed, not one from a working host. With no
+   idle member nothing moves. A member that holds a shard is taken to be working it, so
+   shards never pass between busy members [V
+   `test_a_shard_its_busy_holder_never_works_goes_to_a_member_that_holds_nothing`,
+   `test_a_hand_over_takes_a_queued_shard_never_the_one_its_holder_works`,
+   `test_a_host_that_works_its_second_shard_first_loses_the_first`,
+   `test_a_host_never_loses_its_last_shard_to_the_hand_overs_of_one_sweep`,
+   `test_a_shard_a_stall_frees_goes_to_the_idle_member_not_to_a_hand_over`,
+   `test_the_window_a_hand_over_gives_is_not_renewed_by_a_replacement`]. Costs:
+   - a shard can still be taken while its holder works its first link on it, when a lower
+     shard was assigned to the holder after it started: it then wastes that restore and up to
+     one checkpoint interval of steps (161 hand-over losses in 13,123 capacity-2 simulator runs
+     over seeds 0 to 2,399 of `random_config`, 5 to 19 for each 150 seeds; 131 of them more
+     than half an interval, none above one) [V, a throwaway script of the review, not in the
+     tree];
+   - the planner is not load-aware: at `open_round`, and at each `join` while the first hosts
+     fill their capacity, a host often wins two shards while others hold none, and the second
+     waits a whole window before the first hand-over. The fault-free simulator at 4 hosts and 4
+     shards, 2 rounds, took 26.3 minutes and 14.03 GPU-h at capacity 2 against 21.6 minutes and
+     11.51 GPU-h at capacity 1, 22 % more of each (mean of 50 seeds) [V]. Capacity above 1
+     should be configured only when hosts train their shards in parallel;
+   - two idle members that heartbeat and never upload can take a waiting shard in turn, each
+     stalled after a window without penalty, as they can take a pending shard at capacity 1
+     today. The hand-over lets them take it from an honest holder. The stall budget of founder
+     decision 4 bounds this; this library does not.
 3. **Checkpoints** (`checkpoint.py`, `store.py`).
    - What: the full state a shard resumes from. For hypertrain that is the `pack_state` blob of
      theta, m and v in fp32 plus the step (`src/hypertrain/auditor/replay.py:142-149`), so
@@ -313,7 +361,7 @@ simulator uses an in-memory store, a fake notice source and admitted, honest hos
 - no lease above its capacity;
 - a dead host's lease is released within the TTL;
 - no holder is stalled without a fault (partition, kill, loss or eviction) in its window;
-- no live work is refused or moved (`refused`, `displaced`);
+- no live work is refused or moved (`refused`, `displaced`), bar a recorded hand-over;
 - every accepted link is in the final chain;
 - each step is credited once;
 - no forged link is accepted;
@@ -482,6 +530,11 @@ step timeout and then the mutation check, on a 4-vCPU runner.
   - the coordinator's heads, credits, links, owners and revocations live in memory: only the
     token mark survives a restart, and rebuilding the rest is the wiring batch's work, for
     which the API has no restore call yet;
+  - the simulator's oracle does not check the Move rule itself (that a hand-over leaves its
+    holder a shard and never takes the shard the holder trains): its snapshot of the holders is
+    taken once per tick, so a source that completed a shard in the same tick looks emptied, and
+    a check on it gave false alarms in 410 of 6,600 runs. Those properties are held by the unit
+    tests of the hand-over and by their mutants [V];
   - the progress deadline is a run parameter and must exceed the slowest honest link, which the
     simulator checks for its own configurations.
 
