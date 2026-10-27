@@ -2006,4 +2006,4 @@ def test_a_float_or_unsafe_integer_in_the_context_fails_when_the_launch_is_built
 
     assert pool.toolbox.ssh_log() == []
     context["descriptor"]["claims"][0]["steps"][2] = 3  # the same context without it is accepted
-    assert factory("audit", canned.job, canned.stage(tmp_path / "again"), context)
+    assert callable(factory("audit", canned.job, canned.stage(tmp_path / "again"), context))

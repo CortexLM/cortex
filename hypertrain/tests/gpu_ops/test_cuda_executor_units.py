@@ -878,12 +878,13 @@ def test_read_result_refuses_a_pax_sparse_member_whatever_tarfile_makes_of_it(
     assert not (tmp_path / "sandbox" / "stage" / "rank-0" / "big.bin").exists()
 
 
+@pytest.mark.parametrize("n_gpus", [ce.MAX_GPUS, ce.MAX_GPUS + 1])
 def test_launch_refuses_a_layout_wider_than_the_provenance_can_record_before_any_host(
-    tmp_path: Path, pinned: tuple[Path, Path]
+    tmp_path: Path, pinned: tuple[Path, Path], n_gpus: int
 ) -> None:
     job = island_job(tmp_path / "job")
     reference = job.manifest.training.reference_spec
-    layout = reference.layout.model_copy(update={"n_gpus": ce.MAX_GPUS + 1, "dp_size": 9})
+    layout = reference.layout.model_copy(update={"n_gpus": n_gpus, "dp_size": n_gpus})
     training = job.manifest.training.model_copy(
         update={"reference_spec": reference.model_copy(update={"layout": layout})}
     )
@@ -892,10 +893,12 @@ def test_launch_refuses_a_layout_wider_than_the_provenance_can_record_before_any
     )
     order: list[str] = []
     executor = executor_with(tmp_path, pinned, {"h1": Down("h1", order)}, sweeps=1)
-    with pytest.raises(ce.IslandFailure, match="at most 8 GPUs") as caught:
+    reaches_a_host = n_gpus <= ce.MAX_GPUS  # the dp8 box is the largest layout it carries
+    expected = "no host able to run the job" if reaches_a_host else "at most 8 GPUs"
+    with pytest.raises(ce.IslandFailure, match=expected) as caught:
         executor.launch("audit", "b" * 64, wide, tmp_path / "job", trace=False, cancel=None)
-    assert order == [] and not isinstance(caught.value, ce.Aborted)
-    assert not executor.journal.path.exists()
+    assert order == (["h1"] if reaches_a_host else []) and not isinstance(caught.value, ce.Aborted)
+    assert executor.journal.path.exists() is reaches_a_host
 
 
 def test_read_result_still_accepts_old_style_regular_members(
@@ -1001,8 +1004,9 @@ def test_read_result_small_member_cap_is_inclusive(
     "name", ["known hosts", "known%h", "known\ttab", "relative/known_hosts"], ids=str
 )
 def test_known_hosts_path_that_ssh_would_misread_is_refused(
-    tmp_path: Path, pinned: tuple[Path, Path], name: str
+    tmp_path: Path, pinned: tuple[Path, Path], name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.chdir(tmp_path)  # the relative case must not write into the checkout
     # OpenSSH reads UserKnownHostsFile as a list of files and expands % tokens: a path with a space
     # would silently pin nothing and every host would fail as merely lost.
     path = tmp_path / name if not name.startswith("relative") else Path(name)
@@ -1011,7 +1015,6 @@ def test_known_hosts_path_that_ssh_would_misread_is_refused(
     data = with_value(config_data(tmp_path, pinned), ("hosts", 0, "known_hosts_file"), str(path))
     with pytest.raises(ValidationError, match="absolute path without spaces"):
         load_config(data)
-    path.unlink()
 
 
 COLLISIONS = [
@@ -1509,6 +1512,26 @@ def test_snapshot_accepts_a_host_clock_up_to_the_configured_skew_and_no_further(
         )
     else:
         with pytest.raises(ce.HostRefused, match="host clock differs from the challenge clock"):
+            executor._snapshot("h1", IMAGE, now + 600, None, tmp_path / "work")
+
+
+@pytest.mark.parametrize(("skew", "accepted"), [(8, True), (10, True), (11, False)])
+def test_the_configured_skew_limit_is_the_one_applied(
+    tmp_path: Path,
+    pinned: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    skew: int,
+    accepted: bool,
+) -> None:
+    now = 1_800_000_000.0
+    monkeypatch.setattr(ce, "time", FixedClock(now))
+    executor = probe_for(
+        tmp_path, pinned, Reply(probe_text(epoch=str(int(now) + skew))), max_clock_skew_seconds=10
+    )
+    if accepted:
+        executor._snapshot("h1", IMAGE, now + 600, None, tmp_path / "work")
+    else:
+        with pytest.raises(ce.HostRefused, match="host clock differs"):
             executor._snapshot("h1", IMAGE, now + 600, None, tmp_path / "work")
 
 

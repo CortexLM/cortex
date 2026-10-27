@@ -69,7 +69,7 @@ daemon and no open port.
 
 | Item | Contract |
 | --- | --- |
-| SSH | `address`, `port`, `user`, `identity_file` (a path), `known_hosts_file` (a path). The config never holds a key. The challenge never reads the key: it passes the path to `ssh -i`. Load refuses an identity file that is not a regular file owned by the process uid with mode 0600. |
+| SSH | `address`, `port`, `user`, `identity_file` (a path), `known_hosts_file` (a path). The config never holds a key. The challenge never reads the key: it passes the path to `ssh -i`. Load refuses an identity file that is not a regular file owned by the process uid, or that has any group or other permission bit. |
 | Host key | Pinned by the operator in `known_hosts_file` (verify the fingerprint out of band, for example in the Lium panel). `StrictHostKeyChecking=yes`, `GlobalKnownHostsFile=/dev/null`, `-F /dev/null`, `IdentitiesOnly`, `BatchMode`, no agent, no forwarding, no TTY, `ServerAliveInterval` 15 s, `ServerAliveCountMax` 3, `ConnectTimeout`. No trust-on-first-use: a replaced machine fails the key check and is a lost host. |
 | Docker | `docker` argv prefix per host (`["docker"]`, or `["sudo","-n","docker"]` on the Lium and AWS hosts). Only these verbs are used: `image inspect`, `pull`, `run`, `rm -f <own name>`. Containers are named `ht-exec-<16 hex>`, labelled `io.cortex.cuda-executor`, and never touch an `executor-*` or any other container. |
 | Image | `image_repository` in the config plus the digest of the signed manifest: the container is started as `repo@sha256:<manifest reference_spec.image_digest>`. A tag is never accepted. If the image is absent it is pulled by digest. |
