@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from hypertrain.challenge.store import ChallengeError
@@ -147,3 +149,140 @@ def test_an_unwinding_attempt_does_not_release_the_guard_of_the_next_one(network
     with pytest.raises(IslandFailure):
         store.execute_audit_v2(run, job["job_id"], execute_request(network, A, job))
     assert store._lease_guards_v2[job["job_id"]] is sentinel
+
+
+def cooldown_until(response):
+    assert response.status_code == 403 and "cooldown until round" in response.json()["detail"], (
+        response.text
+    )
+    return int(re.search(r"until round (\d+)", response.json()["detail"]).group(1))
+
+
+def test_a_silent_auditor_is_refused_only_until_the_cooldown_ends(network):
+    seed_round(network)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+    network.push(job["lease_expires"])  # A never answers; B is idle and free
+    until = cooldown_until(lease(network, A, 2))
+    assert until == job["lease_expires"] + lease_rounds(network)  # one lease
+    network.push(until - 1)
+    cooldown_until(lease(network, A, 3))
+    network.push(until)
+    assert lease(network, A, 4).status_code in (200, 204)  # served, or nothing left to serve
+
+
+def test_a_refused_poll_does_not_push_the_cooldown_further(network):
+    """A refusing call rolls its own expiry back, so the next poll derives the cooldown again:
+    it must come out the same, or an auditor that keeps polling is never released."""
+    seed_round(network)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+    network.store._services_v2.clear()  # a restarted master: no beacon push reaps the lease
+    network.push(job["lease_expires"] + 30)  # the expiry is only noticed 30 rounds late
+    until = cooldown_until(lease(network, A, 2))
+    assert until == job["lease_expires"] + lease_rounds(network)
+    network.push(until - 1)
+    assert cooldown_until(lease(network, A, 3)) == until
+    network.push(until)
+    assert lease(network, A, 4).status_code in (200, 204)
+
+
+def test_two_silent_auditors_never_leave_the_run_without_an_auditor(network):
+    seed_round(network)
+    schedule(network)
+    first = lease(network, A, 1).json()["body"]
+    second = lease(network, B, 2).json()["body"]
+    network.push(max(first["lease_expires"], second["lease_expires"]))  # both expire in one pass
+    answers = [lease(network, key, n) for n, key in enumerate((A, B), 3)]
+    assert sorted(r.status_code for r in answers) == [200, 403]  # one refused, one still serves
+
+
+def test_a_legacy_permanent_disable_record_no_longer_blocks_the_lease(network):
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network)
+    schedule(network)
+    with store._tx():
+        store._put_record_v2(
+            run, "auditor-disabled", A.ss58, {"job_id": "00" * 32, "reason": "LEASE_EXPIRED"}
+        )
+    assert lease(network, A, 1).status_code == 200
+
+
+def test_a_cooling_observer_cannot_attest_and_a_released_one_can_try(network):
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+    store._services_v2.clear()  # a restarted master: no beacon push reaps the lease for us
+    network.push(job["lease_expires"])
+    grant = "9" * 64
+    with store._tx():
+        store._put_record_v2(run, "grant", grant, {"body": {"hotkey": miners(1)[0].ss58, "w": 0}})
+    with pytest.raises(ChallengeError) as refused:
+        store.relay_observer_v2(run, grant, A.ss58)
+    assert refused.value.status == 403
+    network.push(job["lease_expires"] + lease_rounds(network))
+    with pytest.raises(ChallengeError) as released:
+        store.relay_observer_v2(run, grant, A.ss58)
+    assert released.value.status == 409 and "reference" in released.value.detail
+
+
+def failure_cause(store, run, job):
+    return store._record_v2(run, "audit-attempt-failure", f"{job['job_id']}:{job['lease_nonce']}")[
+        "cause"
+    ]
+
+
+def test_an_expiry_while_the_executor_ran_is_not_the_auditors_silence(network, monkeypatch):
+    from hypertrain.auditor import worker
+
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, executable=True)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+
+    def slow_host(job_, directory, **kwargs):
+        network.push(job["lease_expires"])  # the beacon reaches the expiry while the replay runs
+        raise IslandFailure("cancelled")
+
+    monkeypatch.setattr(worker, "launch_island", slow_host)
+    with pytest.raises(IslandFailure):
+        store.execute_audit_v2(run, job["job_id"], execute_request(network, A, job))
+    assert lease(network, A, 2).status_code == 200  # triggers the expiry; A is not refused
+    row = lease_row(store, job["job_id"])
+    assert (row["state"], row["attempts"]) == ("queued", 1)
+    assert failure_cause(store, run, job) == "EXECUTOR_INTERRUPTED"
+
+
+def test_a_preparation_refusal_by_the_master_is_not_the_auditors_silence(network, monkeypatch):
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, executable=True)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+
+    def missing_anchor(*args, **kwargs):
+        raise ChallengeError(409, "missing accepted anchor")
+
+    monkeypatch.setattr(store, "_restore_anchor_v2", missing_anchor)
+    with pytest.raises(ChallengeError, match="missing accepted anchor"):
+        store.execute_audit_v2(run, job["job_id"], execute_request(network, A, job))
+    network.push(job["lease_expires"])
+    assert lease(network, A, 2).status_code == 200  # the committed REQUESTED marker saves A
+    assert failure_cause(store, run, job) == "EXECUTOR_INTERRUPTED"
+
+
+def test_an_expiry_after_the_verdict_was_stored_is_the_auditors_silence(network):
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+    with store._tx():
+        store._put_record_v2(
+            run,
+            "audit-execution",
+            f"{job['job_id']}:{job['lease_nonce']}",
+            {"state": "EXECUTED", "at": 21},
+        )
+    network.push(job["lease_expires"])
+    cooldown_until(lease(network, A, 2))
+    assert failure_cause(store, run, job) == "AUDITOR_SILENT"

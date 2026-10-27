@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from hypertrain.protocol.messages import ReplayEnv
 
 from hypertrain.beacon import BeaconError, BeaconRound
+from hypertrain.challenge import audit_cooldown_v2
 from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.disputes_v2 import EXCLUSION_ABANDONED, Contest, DisputesV2
 from hypertrain.data.assignment import assign_round
@@ -5297,11 +5298,10 @@ class ChallengeStore:
                 self._coord().ss58,
             }:
                 raise ChallengeError(403, "independent pinned observer required")
-            if self._db.execute(
-                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='auditor-disabled' AND id=?",
-                (run_id, observer),
-            ).fetchone():
-                raise ChallengeError(403, "disabled observer cannot establish health")
+            self._expire_leases_v2(run_id, now)
+            until = self._cooling_until_v2(run_id, observer, now)
+            if until is not None:
+                raise ChallengeError(403, f"observer in auditor cooldown until round {until}")
             reference = self._db.execute(
                 "SELECT reference FROM admission_trial_results WHERE outcome='MATCH' "
                 "AND reference IS NOT NULL ORDER BY epoch DESC LIMIT 1"
@@ -6605,11 +6605,9 @@ class ChallengeStore:
             assert isinstance(model, Receipt)
             now = self._fresh_v2(manifest, f"lease:{self._now(self._db)}")
             self._expire_leases_v2(run_id, now)
-            if self._db.execute(
-                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='auditor-disabled' AND id=?",
-                (run_id, env.signer),
-            ).fetchone():
-                raise ChallengeError(403, "silent auditor disabled pending review")
+            until = self._cooling_until_v2(run_id, env.signer, now)
+            if until is not None:
+                raise ChallengeError(403, f"auditor cooldown until round {until}")
             if self._db.execute(
                 "SELECT 1 FROM audit_leases_v2 WHERE auditor=? AND state='running'", (env.signer,)
             ).fetchone():
@@ -6730,45 +6728,108 @@ class ChallengeStore:
             (run_id,),
         ).fetchall()
         for row in rows:
-            if row["state"] == "exhausted":
-                continue
             if row["state"] == "running" and now >= row["expires"]:
-                self._put_record_v2(
-                    run_id,
-                    "auditor-disabled",
-                    row["auditor"],
-                    {"job_id": row["id"], "reason": "LEASE_EXPIRED"},
-                )
-                state = "exhausted" if row["attempts"] >= 2 or now >= row["absolute"] else "queued"
-                self._db.execute(
-                    "UPDATE audit_leases_v2 SET state=?,result='AUDIT_INFRASTRUCTURE' WHERE id=?",
-                    (state, row["id"]),
-                )
-                expired_guard = self._lease_guards_v2.pop(row["id"], None)
-                if expired_guard is not None:
-                    expired_guard.revoke()
-            elif now >= row["absolute"]:
+                self._retire_audit_attempt_v2(run_id, row, now, self._expiry_cause_v2(run_id, row))
+            elif row["state"] == "queued" and now >= row["absolute"]:
                 self._db.execute(
                     "UPDATE audit_leases_v2 SET state='exhausted',"
                     "result='AUDIT_INFRASTRUCTURE' WHERE id=?",
                     (row["id"],),
                 )
-            current = self._db.execute(
-                "SELECT state FROM audit_leases_v2 WHERE id=?", (row["id"],)
-            ).fetchone()[0]
-            if current == "exhausted":
-                self._put_record_v2(
-                    run_id,
-                    "excluded",
-                    f"{row['w']}:{row['hotkey']}",
-                    {"reason": "INFRASTRUCTURE", "evidence_hash": sha256_hex(row["id"].encode())},
-                )
-                finality = self._record_v2(run_id, "finality", str(row["w"]))
-                finality["disposition"] = "EXCLUDED"
-                finality["resolution_hash"] = sha256_hex(row["id"].encode())
-                finality["rollback_complete"] = not finality["applied"]
-                finality["unresolved_audits"] = max(0, int(str(finality["unresolved_audits"])) - 1)
-                self._put_record_v2(run_id, "finality", str(row["w"]), finality)
+                self._exhaust_audit_job_v2(run_id, row)
+
+    def _expiry_cause_v2(self, run_id: str, row: sqlite3.Row) -> str:
+        """An auditor that asked for the execution is not silent: the master owed the verdict."""
+        marker = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='audit-execution' AND id=?",
+            (run_id, f"{row['id']}:{row['nonce']}"),
+        ).fetchone()
+        if marker is not None and json.loads(marker[0])["state"] == "REQUESTED":
+            return "EXECUTOR_INTERRUPTED"
+        return "AUDITOR_SILENT"
+
+    def _retire_audit_attempt_v2(
+        self, run_id: str, row: sqlite3.Row, now: int, cause: str, error: str | None = None
+    ) -> None:
+        """End the running attempt of a lease: requeue it for the other auditor or exhaust it.
+        Only an AUDITOR_SILENT attempt costs its auditor a cooldown."""
+        state = "exhausted" if row["attempts"] >= 2 or now >= row["absolute"] else "queued"
+        self._db.execute(
+            "UPDATE audit_leases_v2 SET state=?,result='AUDIT_INFRASTRUCTURE' WHERE id=?",
+            (state, row["id"]),
+        )
+        guard = self._lease_guards_v2.pop(row["id"], None)
+        if guard is not None:
+            guard.revoke()
+        failure: dict[str, JsonValue] = {
+            "job_id": row["id"],
+            "attempt": row["attempts"],
+            "auditor": row["auditor"],
+            "cause": cause,
+            "at": now,
+            "state": state,
+        }
+        if error is not None:
+            failure["error"] = error
+        self._put_record_v2(run_id, "audit-attempt-failure", f"{row['id']}:{row['nonce']}", failure)
+        if cause == "AUDITOR_SILENT":
+            self._cool_down_auditor_v2(run_id, row)
+        if state == "exhausted":
+            self._exhaust_audit_job_v2(run_id, row)
+
+    def _cooling_until_v2(self, run_id: str, auditor: str, now: int) -> int | None:
+        record = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='auditor-cooldown' AND id=?",
+            (run_id, auditor),
+        ).fetchone()
+        return audit_cooldown_v2.cooling_until(json.loads(record[0]) if record else None, now)
+
+    def _cool_down_auditor_v2(self, run_id: str, row: sqlite3.Row) -> None:
+        """The silence began when the lease ran out, not when somebody noticed: a refusing call
+        rolls its own expiry back (`_tx`), so the round that observes it must not move `until`."""
+        silent_since = row["expires"]
+        manifest = self._run_v2(run_id)
+        policy = AuditPolicyV2.model_validate_json(
+            self.objects.get(manifest.network.audit_policy_hash)
+        )
+        records = {
+            r[0]: json.loads(r[1])
+            for r in self._db.execute(
+                "SELECT id,data FROM records_v2 WHERE run_id=? AND kind='auditor-cooldown'",
+                (run_id,),
+            )
+        }
+        self._put_record_v2(
+            run_id,
+            "auditor-cooldown",
+            row["auditor"],
+            audit_cooldown_v2.next_record(
+                records.get(row["auditor"]),
+                job_id=row["id"],
+                cause="AUDITOR_SILENT",
+                now=silent_since,
+                lease_rounds=policy.lease_rounds,
+                absolute_rounds=policy.absolute_rounds(),
+                free=audit_cooldown_v2.others_free(
+                    manifest.training.auditors, row["auditor"], records, silent_since
+                ),
+            ),
+        )
+
+    def _exhaust_audit_job_v2(self, run_id: str, row: sqlite3.Row) -> None:
+        """A job that ran out of attempts or time: today the miner and the whole round pay."""
+        self._put_record_v2(
+            run_id,
+            "excluded",
+            f"{row['w']}:{row['hotkey']}",
+            {"reason": "INFRASTRUCTURE", "evidence_hash": sha256_hex(row["id"].encode())},
+        )
+        finality = self._record_v2(run_id, "finality", str(row["w"]))
+        finality["disposition"] = "EXCLUDED"
+        finality["resolution_hash"] = sha256_hex(row["id"].encode())
+        finality["rollback_complete"] = not finality["applied"]
+        finality["unresolved_audits"] = max(0, int(str(finality["unresolved_audits"])) - 1)
+        self._put_record_v2(run_id, "finality", str(row["w"]), finality)
 
     def island_job_v2(self, run_id: str, w: int, hotkey: str) -> dict[str, Any]:
         from hypertrain.auditor.replay import pack_state, unpack_state
@@ -7015,6 +7076,26 @@ class ChallengeStore:
             assert hasattr(request, "commit_hash")
             if request.commit_hash != row["nonce"]:
                 raise ChallengeError(403, "audit lease nonce differs")
+            # Committed on its own, before the preparation below can refuse: from here a missing
+            # verdict is the master's debt, not the auditor's silence (_expiry_cause_v2).
+            marker = f"{job_id}:{row['nonce']}"
+            if (
+                self._db.execute(
+                    "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='audit-execution' AND id=?",
+                    (run_id, marker),
+                ).fetchone()
+                is None
+            ):
+                self._put_record_v2(
+                    run_id,
+                    "audit-execution",
+                    marker,
+                    {"state": "REQUESTED", "at": self._now(self._db)},
+                )
+        with self._tx():
+            row = self._db.execute("SELECT * FROM audit_leases_v2 WHERE id=?", (job_id,)).fetchone()
+            if row["state"] != "running" or row["nonce"] != request.commit_hash:
+                raise ChallengeError(409, "audit lease changed before execution")
             if job_id in self._lease_guards_v2:
                 raise ChallengeError(409, "audit execution already running for this lease")
             now = self._fresh_v2(manifest, f"audit-execute:{job_id}:{self._now(self._db)}")
@@ -7413,6 +7494,12 @@ class ChallengeStore:
                 identity = f"{job.start_state.w}:{job.start_state.hotkey}"
                 self._put_record_v2(
                     run_id, "executed-verdict", job_id, verdict.model_dump(mode="json")
+                )
+                self._put_record_v2(
+                    run_id,
+                    "audit-execution",
+                    f"{job_id}:{job.lease_nonce}",
+                    {"state": "EXECUTED", "at": fresh},
                 )
                 self._put_record_v2(
                     run_id, "audit-artifacts", job_id, {"directory": str(artifacts.directory)}
