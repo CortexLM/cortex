@@ -1083,10 +1083,12 @@ the table as covering them.
     closed (a round without a finality record counts as open). A contest of a verdict whose audit result
     is MATCH is refused with 409 `NOTHING_TO_CONTEST` by the store's `contest_of` callback, so
     `disputes_v2.py` is not touched; a MISMATCH can still be contested. `open_round_v2` refuses an entry whose
-    `screen_until` is before `d_final`.
+    `screen_until` is before `d_final` (403; equal is accepted), and `live_operator open` refuses it by name.
 22. `aggregate_v2` first leaves out, with `excluded {reason: INELIGIBLE, stage: aggregate, cause}`, every
-    audited member whose admission no longer qualifies (`ROTATED`, `REASSIGNED`, `BANNED`, `SUSPENDED`,
-    `NOT_LIVE`, `SCREEN_LAPSED`, `UNFUNDED`). The survivors check that follows answers 409
+    audited member whose admission no longer qualifies (`ROTATED`, `BANNED`, `SUSPENDED`, `NOT_LIVE`,
+    `SCREEN_LAPSED`, `UNFUNDED`; a member is rotated when its hotkey no longer names an admission, and a
+    hotkey names one admission for good, since `join` and `rotate` both refuse a hotkey in
+    `admission_history`, so no `REASSIGNED` cause exists). The survivors check that follows answers 409
     `ROUND_INFEASIBLE` and persists nothing when the rest cannot carry Q (then the reaper retires).
 23. `finalize_v2` pays exactly the inputs recorded with the applied tape and no longer re-derives the live
     set. This is a prerequisite of every sanction: it must land before the first commit that calls the hook.
@@ -1174,7 +1176,9 @@ the table as covering them.
 - An honest evicted miner is sanctioned like a free identity (ADR 0002 I5 and D40 say the opposite; v2 has
   no leave message to tell them apart). The pause witness and the zero-commit rule are the only
   exculpation, and there is no route back from `SUSPENDED` **[sign-off]**.
-- Owners rotate between rounds only. A rollback across a retired round and a checkpoint that spans one are
+- Owners rotate between rounds only. ADR 0010 decision 1.3 (rotation of a `SUSPENDED` row with a
+  pending dispute stays legal) is narrowed: a contest pins its round, so such a row is refused
+  while that round is unclosed. A rollback across a retired round and a checkpoint that spans one are
   refused (fail closed). A rollback whose history holds an exit exclusion fails closed, as after
   `UNVERIFIED`.
 - Existing tests that change deliberately: `test_seize_bond_burns_the_bond_of_a_no_show_and_nothing_else`

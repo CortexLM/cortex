@@ -125,6 +125,7 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
     check_open_shape(w, hotkeys, offsets)
     cfg = TrainConfig.from_manifest_v2(manifest)
     now = m.call("GET", "")["now_round"]
+    d = [now + o for o in offsets]
     theta, prev_final = init_params(cfg.model), "0" * 64
     if w:
         import torch
@@ -142,6 +143,13 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
         # (owner-solo override skips trial/screen), so `eligible` alone is authoritative.
         if not status["eligible"]:
             raise SystemExit("admission is not eligible: " + hot)
+        # open_round_v2 refuses the same entry: the screen must cover the round up to d_final.
+        screen_until = status["record"]["screen_until"]
+        if screen_until < d[5]:
+            raise SystemExit(
+                f"screen of {hot} ends at round {screen_until}, before d_final {d[5]}: "
+                "renew it with a trial first, or open a shorter round"
+            )
         cache = AnchorCache()
         if w:
             a = m.record("anchor", f"{w - 1}:{hot}")
@@ -196,7 +204,6 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
             m.objects.get(manifest.network.relay_registry_hash)
         )
     )
-    d = [now + o for o in offsets]
     opening = RoundOpenV2(
         w=w,
         prev_final_hash=prev_final,

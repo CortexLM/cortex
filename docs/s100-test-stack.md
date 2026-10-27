@@ -304,8 +304,9 @@ That gives 3 ACTIVE and 1 PROBATION. Rules that decide how identities are spent:
   a funded one stays APPLIED and blocks its coldkey. This is why `admit` joins a miner only
   when its turn starts.
 
-A round opens on a roster of four funded, eligible miners with at most one in PROBATION. The
-operator opens it, the miners upload, and the operator settles it. Open it with five when an
+A round opens on a roster of four funded, eligible miners with at most one in PROBATION, each with
+a screen that lasts to the round's `d_final` (`open` refuses a hotkey whose screen ends earlier and
+names the round). The operator opens it, the miners upload, and the operator settles it. Open it with five when an
 eviction is plausible: a miner that never commits is left out (`excluded`, reason `NO_SHOW`) and
 the others are audited and paid, while four miners cannot lose anyone (`audits` answers 409
 `ROUND_INFEASIBLE`). `finalize` lists the roster minus the `excluded` records, read after the
@@ -341,6 +342,13 @@ extra 100.
 Run `audits` as soon as `now >= d_audit`: it must be called before beacon round `absolute - 1`
 (`absolute = min(d_final, d_audit + 2 * lease_rounds)`), and a call after that answers 503 for every
 roster.
+
+Run `finalize` (it aggregates first) before `d_final`. The aggregate reads every audited member's
+admission at the call and leaves out one that no longer qualifies (`excluded`, reason
+`INELIGIBLE`, with its `cause`: rotated away, banned, suspended, back on probation, screen
+ended, bond burned); nobody is sanctioned for it and the others are paid. A roster of four then
+answers 409 `ROUND_INFEASIBLE` and writes nothing: repair the member's standing, or open the
+next round with five.
 
 **Upload one miner at a time.** A relay image built before `BeaconCache` (`relay/app.py`)
 BLS-verifies drand in `now()` on every capability and chunk call; later images share one verified

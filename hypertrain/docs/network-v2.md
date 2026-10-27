@@ -217,7 +217,12 @@ for good. A new rotation costs one unit of a budget of `join_burst` per coldkey 
 `work_screen_epoch_rounds` window (`ROTATION_QUOTA`; a retry of the same `operation_id` costs
 nothing and answers the same admission, whatever its fresh signatures); a `BANNED` admission
 cannot rotate (`TERMINAL_BANNED`); the new hotkey must be unspent (`NEW_HOTKEY_HISTORY`).
-Locks, strikes and a pending dispute follow the admission.
+Locks, strikes and a pending dispute follow the admission. A rotation is refused with 409
+`ROTATION_ROUND_OPEN` while a round that lists the admission is not closed (no audit or
+dispute pending, and finalized, or excluded with its rollback complete; a round with no
+finality record counts as open), because the roster names the hotkey and the old one is
+refused at intake the moment the admission moves: rotate between rounds. A retry of a rotation that was applied is still
+answered. There is no emergency rotation of a hotkey that a round lists.
 
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
 rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
@@ -563,6 +568,29 @@ rollback that would leave fewer, an aggregation over an input set or delta it ca
 round w+1 exists or while w is unresolved, applying a round whose predecessor is not applied,
 settling a round that cannot settle, a tape that fails its own checks). The two rollback routes
 answer a tape error with its bare message, as before.
+
+`finalize` pays exactly the inputs recorded with the applied tape, whatever the members'
+standing is when it runs: `Finalize.included` must list them. A member suspended, struck or
+with a burned bond between the aggregate and the finalize is still paid for the round it was
+verified in; the finalize used to re-derive the live set and answer 403 for ever.
+
+An audited member whose admission no longer qualifies it when the round is aggregated is left
+out of the round too: `excluded`, reason `INELIGIBLE`, stage `aggregate`, with a `cause`
+(`ROTATED`: its hotkey no longer names an admission; `BANNED`; `SUSPENDED`, also while a contest
+is pending; `NOT_LIVE`: back on a fresh probation; `SCREEN_LAPSED`; `UNFUNDED`: its bond is gone,
+burned for instance). The admission is read at the `aggregate` call, so a member that is fit
+then is kept. Nobody is sanctioned for it: the cause is the member's own state or the effect of
+a sanction already applied. The remaining members must still carry the allocation; with four
+rostered, one unfit member makes `aggregate` answer 409 `ROUND_INFEASIBLE` and writes nothing,
+and the round aggregates as soon as the member is eligible again. Call `aggregate` before
+`d_final`: the later the call, the more screens have ended.
+
+A round opens only with members whose screen covers it. `open` answers 403 "roster screen ends
+before the round's audit window" for an entry whose `screen_until` is before the round's
+`d_final`; an entry whose screen ends exactly at `d_final` is accepted, since a member is eligible
+while `now <= screen_until`. A screen cannot be renewed by waiting, so a lapse inside the window
+used to be a free way out of a round. `scripts/ops/live_operator.py open` refuses the same entry
+by name before it sends anything.
 
 Regional relays are transport/cache only, not regional arithmetic aggregators.
 An upload opportunity acknowledgment is not custody. Completion failure requires
