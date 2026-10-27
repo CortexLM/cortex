@@ -137,6 +137,7 @@ class RoundSnapshot:
     excluded: frozenset[str]
     audited: frozenset[str]
     delivered: frozenset[str]
+    uploaded: frozenset[str]  # members the master holds a relay receipt or an acceptance for
     applied: bool
     served: bool
     served_upload: bool
@@ -144,13 +145,22 @@ class RoundSnapshot:
     carries: Callable[[Collection[str]], bool]
 
 
-def classify(stage: Stage, *, served: bool, committed_any: bool, delivered_any: bool) -> Blame:
+def classify(
+    stage: Stage,
+    *,
+    served: bool,
+    committed_any: bool,
+    delivered_any: bool,
+    uploaded: bool = False,
+) -> Blame:
     """Whose fault a NO_SHOW is. Only a witnessed silence is the miner's; `served` is the pause
-    witness of the window the stage waits on (assignment window, upload window)."""
+    witness of the window the stage waits on (assignment window, upload window). A delta the
+    master never received is not the miner's when the master holds a relay receipt or an
+    acceptance of the member's upload (`uploaded`): the relay or the storage lost it."""
     if stage == "commit":
         return "MINER" if served and committed_any else "INFRASTRUCTURE"
     if stage == "delta":
-        return "MINER" if served and delivered_any else "INFRASTRUCTURE"
+        return "MINER" if served and delivered_any and not uploaded else "INFRASTRUCTURE"
     return "MINER"  # leaves: the master holds neither the leaves nor an auditor's fault
 
 
@@ -172,14 +182,20 @@ def plan_round(s: RoundSnapshot) -> RoundPlan:
             if m.hotkey not in s.committed and m.hotkey not in s.excluded
         ]
     if now >= s.schedule.d_upload:
-        blame = classify(
-            "delta",
-            served=s.served_upload,
-            committed_any=bool(s.committed),
-            delivered_any=bool(s.delivered),
-        )
         out += [
-            Exclusion(m.hotkey, m.admission_id, "NO_SHOW", "delta", blame)
+            Exclusion(
+                m.hotkey,
+                m.admission_id,
+                "NO_SHOW",
+                "delta",
+                classify(
+                    "delta",
+                    served=s.served_upload,
+                    committed_any=bool(s.committed),
+                    delivered_any=bool(s.delivered),
+                    uploaded=m.hotkey in s.uploaded,
+                ),
+            )
             for m in roster
             if m.hotkey in s.audited and m.hotkey not in s.delivered and m.hotkey not in s.excluded
         ]

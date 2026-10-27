@@ -6512,6 +6512,19 @@ class ChallengeStore:
             )
         ]
 
+    def _uploaded_v2(self, run_id: str, w: int) -> frozenset[str]:
+        """The members whose upload the master holds evidence of: a relay receipt, or the
+        acceptance the master signed after fetching the bytes. Both bodies carry `w`, `hotkey`."""
+        return frozenset(
+            row[0]
+            for row in self._db.execute(
+                "SELECT DISTINCT json_extract(data,'$.body.hotkey') FROM records_v2 "
+                "WHERE run_id=? AND kind IN ('relay-receipt','master-acceptance') "
+                "AND json_extract(data,'$.body.w')=?",
+                (run_id, w),
+            )
+        )
+
     def _reap_round_v2(
         self, run_id: str, status: RoundStatus, now: int, pauses: list[tuple[int, int]]
     ) -> None:
@@ -6555,6 +6568,7 @@ class ChallengeStore:
                 excluded=hotkeys_of("excluded"),
                 audited=frozenset(r["hotkey"] for r in leases if r["state"] == "completed"),
                 delivered=hotkeys_of("delta"),
+                uploaded=self._uploaded_v2(run_id, w),
                 applied=status.applied,
                 served=served(pauses, body.d_assign, body.d_commit),
                 served_upload=served(pauses, body.d_commit, body.d_upload),
@@ -6664,6 +6678,7 @@ class ChallengeStore:
             served=served(pauses, *window),
             committed_any=bool(self._round_ids_v2(run_id, "commit", w)),
             delivered_any=bool(self._round_ids_v2(run_id, "delta", w)),
+            uploaded=hotkey in self._uploaded_v2(run_id, w),
         )
         self._book_sanction_v2(run_id, identity, entry.admission_id, stage, blame, evidence)
 

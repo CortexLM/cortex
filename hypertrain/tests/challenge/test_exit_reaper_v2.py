@@ -9,7 +9,9 @@ import json
 import pytest
 
 from hypertrain.challenge.store import ChallengeStore
+from hypertrain.protocol import relay_envelope
 from hypertrain.protocol.hashing import sha256_hex
+from hypertrain.protocol.relay_messages import MasterAcceptanceV2, RelayReceipt
 
 from . import test_service_network_v2 as fixtures
 from .audit_lease_fixture_v2 import D_AUDIT, network, seed_round  # noqa: F401  (fixture import)
@@ -86,6 +88,33 @@ def no_show(run: str, hotkey: str, stage: str) -> tuple[str, str, str]:
     return ("NO_SHOW", stage, evidence)
 
 
+def upload_evidence(net, kind: str, hotkey: str, w: int) -> None:
+    """What the master keeps of an upload that reached the relay: the relay's receipt, or the
+    acceptance the master signed after fetching the bytes. Both bodies name round and hotkey."""
+    run = net.manifest.run_id()
+    if kind == "master-acceptance":
+        body = MasterAcceptanceV2(
+            w=w, hotkey=hotkey, delta_hash="ff" * 32, receipt_hash="aa" * 32, received_drand=10
+        )
+        signed = relay_envelope.seal(fixtures.COORD, "MasterAcceptanceV2", run, body, 10000)
+    else:
+        body = RelayReceipt(
+            w=w,
+            hotkey=hotkey,
+            delta_hash="ff" * 32,
+            size=10,
+            grant_hash="bb" * 32,
+            chunk_manifest_hash="cc" * 32,
+            durable_object_key="object",
+            key_id="k1",
+            received_drand=10,
+            retain_until=1000,
+        )
+        signed = relay_envelope.seal(fixtures.RELAY, "RelayReceipt", run, body, 10000)
+    with net.store._tx():
+        net.store._put_record_v2(run, kind, body.digest(), signed)
+
+
 def commit_records(net, hotkeys) -> None:
     with net.store._tx():
         for hot in hotkeys:  # the reaper reads who committed, not what
@@ -142,24 +171,46 @@ def test_a_silent_member_is_sanctioned_only_when_the_master_could_have_heard_it(
 
 
 @pytest.mark.parametrize(
-    ("deltas", "undelivered", "late", "excluded", "marker", "booked", "applied"),
+    ("deltas", "undelivered", "late", "evidence", "excluded", "marker", "booked", "applied"),
     [
-        (True, [5], False, {5}, {}, {5: ("MINER", "APPLIED")}, [5]),
-        (True, [5], True, {5}, {}, {5: ("INFRASTRUCTURE", "WAIVED")}, []),
+        (True, [5], False, None, {5}, {}, {5: ("MINER", "APPLIED")}, [5]),
+        (True, [5], True, None, {5}, {}, {5: ("INFRASTRUCTURE", "WAIVED")}, []),
+        (True, [5], False, ("relay-receipt", 5, 0), {5}, {}, {5: ("INFRASTRUCTURE", "WAIVED")}, []),
+        (
+            True,
+            [5],
+            False,
+            ("master-acceptance", 5, 0),
+            {5},
+            {},
+            {5: ("INFRASTRUCTURE", "WAIVED")},
+            [],
+        ),
+        (True, [5], False, ("master-acceptance", 0, 0), {5}, {}, {5: ("MINER", "APPLIED")}, [5]),
+        (True, [5], False, ("master-acceptance", 5, 1), {5}, {}, {5: ("MINER", "APPLIED")}, [5]),
         (
             False,
             [],
             False,
+            None,
             set(),
             {"0": {"state": "INFEASIBLE"}},
             dict.fromkeys(range(6), ("INFRASTRUCTURE", "WAIVED")),
             [],
         ),
     ],
-    ids=["one-member-short", "upload-window-paused", "nobody-delivered"],
+    ids=[
+        "one-member-short",
+        "upload-window-paused",
+        "the-relay-lost-the-upload",
+        "the-master-lost-the-upload",
+        "the-upload-of-another-member",
+        "the-upload-of-another-round",
+        "nobody-delivered",
+    ],
 )
 def test_the_push_at_d_upload_leaves_out_an_audited_member_without_a_delta(
-    network, hook, deltas, undelivered, late, excluded, marker, booked, applied
+    network, hook, deltas, undelivered, late, evidence, excluded, marker, booked, applied
 ):
     # A round nobody delivered a delta to is an upload path that failed for everybody: no member
     # is left out for it, and the survivors that cannot carry the round are only marked.
@@ -174,6 +225,9 @@ def test_the_push_at_d_upload_leaves_out_an_audited_member_without_a_delta(
                 "DELETE FROM records_v2 WHERE run_id=? AND kind='delta' AND id=?",
                 (run, f"0:{keys[i].ss58}"),
             )
+    if evidence:
+        kind, slot, w = evidence
+        upload_evidence(network, kind, keys[slot].ss58, w)
     network.push(D_AUDIT)  # the bound is d_upload, one round later
     assert records(network, "excluded") == {}
 
@@ -267,6 +321,39 @@ def test_a_no_show_a_lazy_writer_recorded_is_adopted_while_its_round_is_open(
     assert sorted(c[2] for c in hook.calls) == sorted(
         no_show(run, keys[i].ss58, "commit")[2] for i in sanctioned
     )
+
+
+@pytest.mark.parametrize(
+    ("evidence", "row"),
+    [(None, ("MINER", "APPLIED")), ("relay-receipt", ("INFRASTRUCTURE", "WAIVED"))],
+    ids=["no-evidence", "the-relay-holds-a-receipt"],
+)
+def test_a_delta_a_lazy_writer_left_out_is_adopted_with_the_upload_evidence(
+    network, hook, monkeypatch, evidence, row
+):
+    store, run = network.store, network.manifest.run_id()
+    keys = seed_round(network, n=6)
+    with monkeypatch.context() as restarted:  # the beacon route did not see the round
+        restarted.setattr(ChallengeStore, "_reap_exits_v2", lambda *_a, **_k: None)
+        push_through(network, D_AUDIT)
+        store.schedule_audits_v2(run, 0)
+        with store._tx():
+            store._db.execute("UPDATE audit_leases_v2 SET state='completed'")
+            store._db.execute(
+                "DELETE FROM records_v2 WHERE run_id=? AND kind='delta' AND id=?",
+                (run, f"0:{keys[5].ss58}"),
+            )
+        push_through(network, D_AUDIT + 1)
+        with store._tx():
+            store._exclude_missing_deltas_v2(run, 0)  # what aggregate does
+        assert set(excluded_as(network)) == {f"0:{keys[5].ss58}"}
+    if evidence:
+        upload_evidence(network, evidence, keys[5].ss58, 0)
+
+    push_through(network, D_AUDIT + 2)
+
+    assert rows_of(network) == {f"0:{keys[5].ss58}": row}
+    assert len(hook.calls) == (row[1] == "APPLIED")
 
 
 def test_a_lagging_pusher_leaves_one_witness_per_pause(network):

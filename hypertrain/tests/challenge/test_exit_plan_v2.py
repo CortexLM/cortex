@@ -28,6 +28,7 @@ def snap(*, at: int = 5, roster=ROSTER, **kw) -> x.RoundSnapshot:
         excluded=frozenset(),
         audited=frozenset(),
         delivered=frozenset(),
+        uploaded=frozenset(),
         applied=False,
         served=True,
         served_upload=True,
@@ -97,16 +98,17 @@ def test_an_earlier_exclusion_counts_against_the_survivors():
 
 
 @pytest.mark.parametrize(
-    ("stage", "served", "committed_any", "delivered_any", "blame"),
+    ("stage", "served", "committed_any", "delivered_any", "uploaded", "blame"),
     [
-        ("commit", True, True, False, "MINER"),
-        ("commit", False, True, False, "INFRASTRUCTURE"),
-        ("commit", True, False, False, "INFRASTRUCTURE"),
-        ("delta", True, True, True, "MINER"),
-        ("delta", False, True, True, "INFRASTRUCTURE"),
-        ("delta", True, True, False, "INFRASTRUCTURE"),
-        ("leaves", True, True, True, "MINER"),
-        ("leaves", False, False, False, "MINER"),
+        ("commit", True, True, False, False, "MINER"),
+        ("commit", False, True, False, False, "INFRASTRUCTURE"),
+        ("commit", True, False, False, False, "INFRASTRUCTURE"),
+        ("delta", True, True, True, False, "MINER"),
+        ("delta", False, True, True, False, "INFRASTRUCTURE"),
+        ("delta", True, True, False, False, "INFRASTRUCTURE"),
+        ("delta", True, True, True, True, "INFRASTRUCTURE"),
+        ("leaves", True, True, True, False, "MINER"),
+        ("leaves", False, False, False, False, "MINER"),
     ],
     ids=[
         "commit-served",
@@ -115,12 +117,21 @@ def test_an_earlier_exclusion_counts_against_the_survivors():
         "delta-served",
         "delta-paused",
         "delta-nobody-delivered",
+        "delta-the-master-holds-an-upload-receipt",
         "leaves-served",
         "leaves-whatever-the-window",
     ],
 )
-def test_only_a_witnessed_silence_is_the_miners(stage, served, committed_any, delivered_any, blame):
-    got = x.classify(stage, served=served, committed_any=committed_any, delivered_any=delivered_any)
+def test_only_a_witnessed_silence_is_the_miners(
+    stage, served, committed_any, delivered_any, uploaded, blame
+):
+    got = x.classify(
+        stage,
+        served=served,
+        committed_any=committed_any,
+        delivered_any=delivered_any,
+        uploaded=uploaded,
+    )
     assert got == blame
 
 
@@ -139,8 +150,10 @@ def test_the_commit_stage_reads_the_assignment_window_and_the_zero_commit_rule()
         ({"delivered": keys(0, 1, 2, 3, 4)}, "MINER"),
         ({"delivered": keys(0, 1, 2, 3, 4), "served_upload": False}, "INFRASTRUCTURE"),
         ({"delivered": frozenset()}, "INFRASTRUCTURE"),
+        ({"delivered": keys(0, 1, 2, 3, 4), "uploaded": keys(5)}, "INFRASTRUCTURE"),
+        ({"delivered": keys(0, 1, 2, 3, 4), "uploaded": keys(0)}, "MINER"),
     ],
-    ids=["served", "paused", "nobody-delivered"],
+    ids=["served", "paused", "nobody-delivered", "upload-evidence", "evidence-of-another-member"],
 )
 def test_the_delta_stage_excludes_an_audited_member_without_a_delta(kw, blame):
     everyone = keys(*range(6))

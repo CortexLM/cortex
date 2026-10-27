@@ -951,7 +951,7 @@ in this order and without the peer:
 | 1 | dispute (Part 1, done) | a funded contestant that cannot win; a silent auditor or referee | dead end: next push; abandoned: `turn_deadline + T + 1`; paused final op: `absolute_deadline + 1` | pause, `exclude` (loser None), `settle_lock`, `resolve_pending` | infrastructure | none; a referee `FRAUD` goes through `settle_fraud` | `test_dispute_exit_v2` |
 | 2 | roster commit (Part 5) | a roster member that never commits | `d_commit` (was: the first `audits` call) | `excluded NO_SHOW/commit`, `unresolved_audits - 1`; if the rest cannot carry: row 7 | miner, unless the assignment window was paused or nobody committed | D44 (decision 12) | `test_exit_reaper_v2` |
 | 3 | leaves never posted | a member that committed and never posts `/leaves` | `absolute` (<= `d_final`) | the queued job is dropped as `NO_SHOW/leaves`, no re-arm | miner (no auditor ever touched the job) | as 2 | `test_exit_leaves` |
-| 4 | delta never uploaded | an audited member, or the relay | `d_upload` | `excluded NO_SHOW/delta` | miner, unless nobody delivered or the upload window was paused | as 2 | `test_exit_reaper_v2` |
+| 4 | delta never uploaded | an audited member, or the relay | `d_upload` | `excluded NO_SHOW/delta` | miner, unless nobody delivered, the upload window was paused or the master holds a receipt or an acceptance of its upload | as 2 | `test_exit_reaper_v2` |
 | 5 | audit job, lease (Part 2, done) | an auditor, an executor host, a miner whose sealed input cannot be leased | attempt `L`; two windows of `A`; the second ends where the sealed commit ends | cooldown, requeue, re-arm once, drop only the miner (`INFRASTRUCTURE`); `MINER_INPUT_REFUSED` dropped at once | infrastructure; miner only for an input it sealed short | none | `test_audit_liveness_v2` |
 | 6 | audit window missed | the operator who never calls `audits` | `absolute - 1` | the round is retired (`AUDIT_WINDOW_MISSED`) | infrastructure | none | `test_exit_audit_window` |
 | 7 | round infeasible (AC-CLIFF) | nobody in particular: the Q/4 caps after any exclusion above | the push that first sees the survivors cannot carry | blame booked per member; the round is retired (`INFEASIBLE`); the next opening answers 409 until four anchored members are eligible | per member (rows 2 to 4) | per member | `test_exit_infeasible` |
@@ -1006,9 +1006,14 @@ the table as covering them.
    record would move `_rollback_snapshot_v2`: it names the first refused view and the last one
    (`emitted - 3`), every view in between being refused whenever it is held. A commit-stage absence is
    infrastructure if a refused view lies in the assignment window `[d_assign, d_commit)` or if nobody
-   committed; a delta-stage absence is infrastructure if one lies in `[d_commit, d_upload)` or if nobody
-   delivered a delta. No waiver is one a miner can pick (an `accept` or an upload grant costs a free
-   identity nothing). The wall clock never decides when an exit happens, only whether the miner is blamed.
+   committed; a delta-stage absence is infrastructure if one lies in `[d_commit, d_upload)`, if nobody
+   delivered a delta, or if the master holds a `relay-receipt` or its own `master-acceptance` for that
+   member and round (the bytes reached custody and the relay or the storage lost what the master lacks,
+   D59). No other waiver is one a miner can pick (an `accept` or an upload grant costs a free identity
+   nothing). A receipt costs the upload of the bytes the member committed to, which a free identity can
+   also make: a member that uploads and then withholds its delta manifest is waived, and the round goes on
+   without it all the same. The wall clock never decides when an exit happens, only whether the miner is
+   blamed.
 6. **Not automated.** The master does not open the next round, draw its roster or lower the quorum: a
    `RoundOpenV2` is the operator's signed schedule and the caps are pinned by the schema.
 

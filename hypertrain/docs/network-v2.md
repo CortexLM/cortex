@@ -538,11 +538,12 @@ blame is the miner's only if the window it missed was served and somebody used i
 infrastructure's, the row is `WAIVED` and nothing happens to the admission, when the master
 was refusing its callers while the window was open (`beacon-pause`: the wall clock was more
 than two rounds ahead of the last round the master held), when nobody committed (commit
-stage) or when nobody delivered a delta (delta stage). A sanction that fails is journaled
-(`exit-failed`) and retried on the next push; the member is out of its round all the same.
-There is no route back from this suspension: a miner whose host is evicted before `d_commit`
-loses its identity like a free identity does (ADR 0011 Part 8, decision 12 and Decisions for
-Forge 1).
+stage), when nobody delivered a delta, or when the master holds a relay receipt or its own
+acceptance of the member's upload (delta stage: the relay or the storage lost it). A
+sanction that fails is journaled (`exit-failed`) and retried on the next push; the member is
+out of its round all the same. There is no route back from this suspension: a miner whose
+host is evicted before `d_commit` loses its identity like a free identity does (ADR 0011
+Part 8, decision 12 and Decisions for Forge 1).
 
 A round that cannot reach a tape can be retired (ADR 0011 part 8, decisions 7 to 11) instead of
 blocking the run for good. Two causes, each re-derived by the master from the facts: the members

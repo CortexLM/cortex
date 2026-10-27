@@ -149,6 +149,11 @@
   writer recorded is adopted on the next push. `ChallengeStore.sanction_hook` (None: the run's
   `Admission`) is the seam a test binds. A suspension has no route back. See
   `docs/adr/0011-audit-integrity.md` (Part 8) at the monorepo root.
+- A delta the master never received is not the miner's fault when the master holds evidence of the
+  member's upload for that round: a relay receipt (`relay-receipt`) or its own acceptance
+  (`master-acceptance`). The member is still left out of the round, its `exit-sanction` row is
+  `WAIVED` and nothing happens to its admission. A member that uploads and then withholds its
+  delta manifest is waived the same way (D59). ADR 0011 Part 8, decision 5.
 
 ### Fixed
 - A member convicted of training fraud between the aggregate and the finalize of a round is no
