@@ -179,9 +179,11 @@ rounds after its accepted proof. A newer proof needs a new challenge. A challeng
 refused (`CHALLENGE_EXPIRED`) once more than `challenge_rounds` rounds have passed since
 the miner's join or its last trial finalization. Only a suspend and resume reopens it,
 and resume restarts probation at zero clean trials. No admin route calls them: `suspend`
-runs when a dispute opens, and `resume` only after a nonfraud dispute settlement. So a
-miner that waits while others run their trials stays eligible until its last proof plus
-`work_screen_epoch_rounds`, for the rest of the run.
+runs when a dispute opens, and `resume` only after a nonfraud dispute settlement. The
+server's own closure of a dispute nobody can decide resumes the miner by itself; every
+other nonfraud settlement needs the miner's signed recovery call (see the dispute
+paragraphs below). So a miner that waits while others run their trials stays eligible
+until its last proof plus `work_screen_epoch_rounds`, for the rest of the run.
 
 The renewal window does not grow with `work_screen_epoch_rounds`. A trial finalization
 sets the next seed one round later, and the next trial must fit in the `challenge_rounds`
@@ -337,6 +339,39 @@ watch directory across identities or discard it on restart. The CLI has no
 Independent referees use their own accepted current execution deadline while
 preserving historical publication descriptors. Losing-party checks, funded
 contests and fixed absolute horizons prevent arbitrary transcript resets.
+
+A dispute that nobody can decide is closed by the server on the next verified beacon
+round, not convicted. The resolution is `INFRASTRUCTURE` with no loser: the verdict and
+the audit's own exclusion of the contested miner stand, the contest bond is released in
+full, and nothing is slashed, struck or banned. Three cases close:
+
+- a dispute past its absolute horizon, strictly after the last round `resolution()` still
+  accepts, so a referee's signed resolution in the horizon round itself still decides it;
+- a transcript paused anywhere but on its single final op, which the referee cannot score;
+- an unpaused turn whose expected party has not moved `T.dispute_per_level` rounds after its
+  `turn_deadline`, acknowledged or not. The operator's witnessed `timeout()` keeps exactly
+  that window.
+
+A paused final op stays with the referee until the horizon. The evidence of a closure names
+its cause: `bounded-infrastructure-exclusion` (horizon), `unadjudicable-paused-transcript`
+or `abandoned-turn`. Closing a dispute recounts the round's unresolved disputes to zero; the
+coordinator's `finalize` for that round then settles it, and round `w+2` opens only after
+that. The beacon round is the clock, so after a long beacon outage the first push closes
+every expired dispute at once and the `timeout()` window is skipped for them. A closure that
+fails is rolled back, journaled as a `dispute-exit-failed` record (stage and error class
+only) and retried at the next beacon.
+
+The same closure lifts the contested miner's `PENDING_DISPUTE` suspension to `PROBATION`
+with zero clean trials and its strikes untouched: a fresh probation is the cost of a
+contest, and an infrastructure fault never leaves an honest miner suspended. If that lift
+fails it is journaled with stage `admission` and the closure stands. Any other nonfraud
+settlement (a referee `MATCH`, a witnessed `timeout()` or a failed lift) is lifted by the
+miner with `POST /v2/runs/<run_id>/admission/recover`: a `Receipt` envelope signed by the
+miner's hotkey (a subnet member), with body `{"w": <contest round>, "commit_hash":
+"<dispute_id>", "received_round": <latest beacon round>}` and an expiry of at least the
+latest round. The dispute must be the exact unresolved pending one of that miner and its
+settlement nonfraud, otherwise the route answers 403 "recovery reference differs from exact
+current pending dispute". The result is the same fresh probation.
 
 ## Weights, finality and custody
 
