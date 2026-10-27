@@ -285,7 +285,14 @@ def sandboxed(text: str, root: Path) -> str:
     for prefix in ("/root/backups", "/data/hypertrain-test", "/data/relay"):
         assert prefix in text, f"{prefix} is gone from the script: update the sandbox rewrite"
         text = text.replace(prefix, f"{root}{prefix}")
-    stray = re.findall(r"(?<!@)/(?:root|data)\b\S*", text.replace(str(root), "@"))
+    # the `executor` command validates a path INSIDE the challenge container (`/data/....json`): a
+    # pattern and its message, not a host path, so the sandbox must not rewrite them
+    in_container = {r"/data/[A-Za-z0-9._/-]+\.json$", "/data/....json"}
+    stray = [
+        p
+        for p in re.findall(r"(?<!@)/(?:root|data)\b\S*", text.replace(str(root), "@"))
+        if p not in in_container
+    ]
     assert not stray, f"host paths the sandbox does not rewrite: {stray}"
     return text
 
