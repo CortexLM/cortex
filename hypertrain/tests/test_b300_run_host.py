@@ -163,7 +163,8 @@ elif cmd == "run":
         (out / "gpu_probe.json").write_text(json.dumps({"ok": ok}))
         sys.exit(0 if ok else 1)
     if name == "mfu":
-        steps, w, tps, fpt, n, peak = [1.0, 1.0, 1.0], 1, 65536, 6 * 10**9, 8, 209.5e12
+        n = int(argv[argv.index("--nproc-per-node") + 1])
+        steps, w, tps, fpt, peak = [1.0, 1.0, 1.0], 1, 65536, 6 * 10**9, 209.5e12
         mfu = tps * 2 / 2.0 * fpt / (n * peak)
         root = "ab" * 32
         replay = root if os.environ.get("FAKE_REPLAY", "1") == "1" else "cd" * 32
@@ -171,8 +172,10 @@ elif cmd == "run":
               "flops_per_token": fpt, "n_gpus": n, "dp_size": n, "peak_vendor_flops": peak,
               "vendor": {"mfu": mfu, "tokens_per_s": tps}, "tokens_per_s": tps,
               "leaves_root": root, "replay_leaves_root": replay, "rank_leaves_roots": [root] * n,
-              "replay_match": replay == root, "attention_backend": "sdpa-flash",
-              "attention_paths": ["flash"], "gpu_name": "fake B300"}
+              "replay_match": replay == root,
+              "attention_backend": os.environ.get("FAKE_MFU_BACKEND", "sdpa-flash"),
+              "attention_paths": os.environ.get("FAKE_MFU_PATHS", "flash").split(","),
+              "gpu_name": "fake B300"}
         (out / argv[-1].removeprefix("/out/")).write_text(json.dumps(ev))
     elif name == "miner_test":
         result = os.environ.get("FAKE_SMOKE", "PASS")
@@ -190,10 +193,11 @@ elif cmd == "run":
 """
 
 FAKE_SMI = r"""
-import os, sys
+import os, sys, time
 if any(a.startswith("--query-gpu") for a in sys.argv):
     if os.environ.get("FAKE_SMI_FAIL"):
         sys.exit("NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver")
+    time.sleep(float(os.environ.get("FAKE_SMI_SLEEP", "0")))
     n, drv, cc = (os.environ.get(k, d) for k, d in
                   (("FAKE_GPUS", "8"), ("FAKE_DRIVER", "595.91.07"), ("FAKE_CC", "10.3")))
     for i in range(int(n)):
@@ -237,6 +241,8 @@ args = sys.argv[1:]
 with (state / "aws.jsonl").open("a") as f:
     f.write(json.dumps(args) + "\n")
 time.sleep(float(os.environ.get("FAKE_AWS_SLEEP", "0")))
+if os.environ.get("FAKE_AWS_STDERR"):
+    print(os.environ["FAKE_AWS_STDERR"], file=sys.stderr)
 if args[:2] != ["s3", "cp"] or "--recursive" not in args:  # a directory is one object otherwise
     sys.exit("fake aws: only 's3 cp --recursive' is modelled")
 filters, paths, i = [], [], 2
@@ -263,11 +269,26 @@ for f in sorted(src.rglob("*")):
 
 FAKE_FI_INFO = "print('fake fi_info')\n"
 
+# pkill: log the call, then run the real one found outside the fake bin directory.
+FAKE_PKILL = r"""
+import json, os, pathlib, shutil, sys
+here = str(pathlib.Path(sys.argv[0]).parent)
+with (pathlib.Path(os.environ["FAKE_STATE"]) / "pkill.jsonl").open("a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep) if d != here)
+real = shutil.which("pkill", path=path)
+os.execv(real, [real, *sys.argv[1:]])
+"""
+
 
 class Imds(BaseHTTPRequestHandler):
     notice = False
+    status = 0  # answer every authenticated GET with this status when set
+    delay = 0.0  # seconds every request takes
+    gets = 0
 
     def do_PUT(self) -> None:  # noqa: N802 - http.server API
+        time.sleep(Imds.delay)
         ok = (
             self.path == "/latest/api/token"
             and "X-aws-ec2-metadata-token-ttl-seconds" in self.headers
@@ -278,9 +299,13 @@ class Imds(BaseHTTPRequestHandler):
             self.wfile.write(SESSION.encode())
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
+        Imds.gets += 1
+        time.sleep(Imds.delay)
         authed = self.headers.get("X-aws-ec2-metadata-token") == SESSION
         hit = self.path == "/latest/meta-data/spot/instance-action" and authed and Imds.notice
-        self.send_response(200 if hit else (404 if authed else 401))
+        self.send_response(
+            Imds.status if Imds.status and authed else 200 if hit else (404 if authed else 401)
+        )
         self.end_headers()
         if hit:
             self.wfile.write(json.dumps(NOTICE).encode())
@@ -291,8 +316,10 @@ class Imds(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def imds() -> Iterator[str]:
-    Imds.notice = False
+    Imds.notice, Imds.status, Imds.delay, Imds.gets = False, 0, 0.0, 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), Imds)
+    server.daemon_threads = True  # a request that sleeps must not hold the teardown
+    server.block_on_close = False
     threading.Thread(
         target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
     ).start()
@@ -314,6 +341,7 @@ def env(tmp_path: Path, imds: str) -> dict[str, str]:
         "sudo": FAKE_SUDO,
         "fi_info": FAKE_FI_INFO,
         "df": FAKE_DF,
+        "pkill": FAKE_PKILL,
     }
     for name, body in fakes.items():
         (bindir / name).write_text(f"#!{sys.executable}\n{body}")
@@ -323,8 +351,9 @@ def env(tmp_path: Path, imds: str) -> dict[str, str]:
     inherited = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith(("HT_B300_", "AWS_")) and k not in ("DOCKER", "HT_IMDS_URL")
+        if not k.startswith(("HT_B300_", "AWS_", "GIT_")) and k not in ("DOCKER", "HT_IMDS_URL")
     }
+    ACTIVE["tmp"] = tmp_path
     return {
         **inherited,
         "PATH": f"{bindir}:{os.environ['PATH']}",
@@ -337,12 +366,30 @@ def env(tmp_path: Path, imds: str) -> dict[str, str]:
     }
 
 
+# A pytest started in the background or under nohup passes SIGINT and SIGHUP on as ignored, and a
+# shell cannot trap what was ignored when it started: reset them, then become bash.
+LAUNCH = (
+    "import os, signal, sys\n"
+    "for s in (signal.SIGINT, signal.SIGHUP):\n"
+    "    signal.signal(s, signal.SIG_DFL)\n"
+    "os.execvp('bash', ['bash', *sys.argv[1:]])\n"
+)
+
+
+def script_argv(script: Path, tmp_path: Path, root: Path | None = None) -> list[str]:
+    root_arg = str(root or tmp_path / "results")
+    return [sys.executable, "-c", LAUNCH, str(script), "--results-root", root_arg, "--host", "h1"]
+
+
 def run(
-    env: dict[str, str], tmp_path: Path, *args: str, script: Path = SCRIPT
+    env: dict[str, str],
+    tmp_path: Path,
+    *args: str,
+    script: Path = SCRIPT,
+    root: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    argv = ["bash", str(script), "--results-root", str(tmp_path / "results"), "--host", "h1"]
     proc = subprocess.Popen(  # noqa: S603 - fixed argv
-        [*argv, *args],
+        [*script_argv(script, tmp_path, root), *args],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -371,8 +418,9 @@ def runs_of(tmp_path: Path, name: str) -> list[list[str]]:
 
 def git(ht: Path, *args: str) -> str:
     cfg = ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
+    plain = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     done = subprocess.run(  # noqa: S603 - fixed argv
-        ["git", "-C", str(ht), *cfg, *args], check=True, capture_output=True, text=True
+        ["git", "-C", str(ht), *cfg, *args], check=True, capture_output=True, text=True, env=plain
     )
     return done.stdout.strip()
 
@@ -411,10 +459,18 @@ def watchdog_pid(tmp_path: Path) -> int:
     return int(match.group(1))
 
 
+ACTIVE: dict[str, Path] = {}  # the running test's tmp_path, for failure messages
+
+
+def run_log(tmp_path: Path | None = None) -> str:
+    log = (tmp_path or ACTIVE["tmp"]) / "results/h1/run.log"
+    return log.read_text() if log.exists() else ""
+
+
 def wait_until(cond: Callable[[], object], what: str, timeout: float = 30) -> None:
     end = time.monotonic() + timeout
     while not cond():
-        assert time.monotonic() < end, f"timed out waiting for {what}"
+        assert time.monotonic() < end, f"timed out waiting for {what}\n{run_log()[-1500:]}"
         time.sleep(0.05)
 
 
@@ -424,9 +480,8 @@ def launch(env: dict[str, str], tmp_path: Path) -> Iterator[Callable[..., subpro
     procs: list[subprocess.Popen[bytes]] = []
 
     def start(*args: str, script: Path = SCRIPT, **extra_env: str) -> subprocess.Popen[bytes]:
-        argv = ["bash", str(script), "--results-root", str(tmp_path / "results"), "--host", "h1"]
         proc = subprocess.Popen(  # noqa: S603 - fixed argv
-            [*argv, *args],
+            [*script_argv(script, tmp_path), *args],
             env={**env, **extra_env},
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -521,11 +576,13 @@ def test_rerun_skips_passed_steps_but_reprobes_the_host(env, tmp_path, checkout)
     assert len(runs_of(tmp_path, "mfu")) == 2
 
 
-def test_new_image_reruns_steps_that_passed_with_the_old_one(env, tmp_path):
-    assert run(env, tmp_path).returncode == 0
+def test_new_image_reruns_steps_that_passed_with_the_old_one(env, tmp_path, checkout):
+    script = checkout / "scripts/b300/run_host.sh"
+    assert run(env, tmp_path, script=script).returncode == 0
     other = f"ghcr.io/cortexlm/cortex/hypertrain-gpu@sha256:{'1' * 64}"
-    assert run({**env, "FAKE_PULL_RC": "1"}, tmp_path, "--image", other).returncode == 4
+    assert run(env, tmp_path, "--image", other, script=script).returncode == 0
     assert ["pull", other] in docker_calls(tmp_path)
+    assert len(runs_of(tmp_path, "gpu_probe")) == 2 and len(runs_of(tmp_path, "mfu")) == 2
 
 
 def test_a_second_run_on_the_same_results_is_refused(env, tmp_path):
@@ -689,7 +746,7 @@ def test_a_leading_zero_duration_still_arms_the_spot_watchdog(env, tmp_path, lau
     assert rc == 143 and stop_json(tmp_path)["reason"] == "spot-interruption"
 
 
-@pytest.mark.parametrize("poll", ["abc", "0", "0.0", "-1", "60", "5s"])
+@pytest.mark.parametrize("poll", ["abc", "0", "0.0", "-1", "60", "5s", "9.9999", "05", ".5"])
 def test_malformed_poll_interval_is_refused_before_docker(env, tmp_path, poll):
     p = run({**env, "HT_B300_POLL_SECONDS": poll}, tmp_path)
     assert p.returncode == 2 and "HT_B300_POLL_SECONDS" in p.stderr, p.stdout + p.stderr
@@ -726,17 +783,15 @@ def test_host_name_cannot_leave_the_results_root(env, tmp_path, host):
     assert not (tmp_path / "steps").exists()  # no directory was made above the results root
 
 
-def test_a_dead_watchdog_stops_the_run_before_the_next_step(env, tmp_path, launch):
-    proc = launch(FAKE_BLOCK="gpu_probe", FAKE_BLOCK_RC="0")
-    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+def test_a_watchdog_that_died_outside_a_wait_stops_the_run_before_the_next_step(
+    env, tmp_path, launch
+):
+    # host_probe runs in the foreground: only the check at the top of step() can see the death.
+    proc = launch("--steps", "host_probe pull", FAKE_SMI_SLEEP="2")
+    wait_until(lambda: "step host_probe" in run_log(), "the host probe")
     os.kill(watchdog_pid(tmp_path), signal.SIGKILL)
-    (tmp_path / "state/ctr-gpu_probe.stopped").touch()  # the container then exits 0
-    try:
-        rc = proc.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        pytest.fail("the run went on without a watchdog")
-    assert rc == 9 and stop_json(tmp_path)["reason"] == "watchdog-died"
-    assert runs_of(tmp_path, "mfu") == []
+    assert proc.wait(timeout=20) == 9 and stop_json(tmp_path)["reason"] == "watchdog-died"
+    assert [c for c in docker_calls(tmp_path) if c[0] in ("pull", "run")] == []
 
 
 # --- containers (B2): a run only ever touches containers it started ------------------------------
@@ -824,7 +879,16 @@ def test_upload_ships_the_evidence_and_nothing_else(env, tmp_path):
     (out / "steps").mkdir()
     # One stray per extension and directory the allowlist names: a pattern widened to *.json,
     # *.log, *.tsv, steps/* or miner-prod/* must show up here.
-    strays = ("notes.txt", "stray.json", "x.log", "extra.tsv", "steps/x.txt", "miner-prod/o.json")
+    strays = (
+        "notes.txt",
+        "stray.json",
+        "x.log",
+        "extra.tsv",
+        "steps/x.txt",
+        "miner-prod/o.json",
+        "mfu-dp8-notes.txt",
+        "mfu-dp8-flash.json.bak",
+    )
     for stray in strays:
         (out / stray).write_text("stray")
     p = run(env, tmp_path, "--upload", "s3://bucket/b300")
@@ -956,14 +1020,14 @@ def test_a_spot_answer_that_is_not_json_is_kept_as_text(env, tmp_path, monkeypat
     def get(self: BaseHTTPRequestHandler) -> None:
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"<html>ok</html>")
+        self.wfile.write(b"<html>ok</html>" + b"x" * 5000)
 
     monkeypatch.setattr(Imds, "do_GET", get)
     p = run({**env, "FAKE_BLOCK": "gpu_probe"}, tmp_path, "--upload", "s3://bucket/b300")
     assert p.returncode == 143, p.stdout + p.stderr
     stop = stop_json(tmp_path)
     assert stop["reason"] == "spot-interruption"
-    assert stop["spot_notice"] == {"unparsed": "<html>ok</html>"}
+    assert stop["spot_notice"] == {"unparsed": ("<html>ok</html>" + "x" * 5000)[:200]}
     assert any("spot-instance-action.json" in e for e in stop["errors"])
     assert "stop.json" in uploaded(tmp_path)
 
@@ -993,10 +1057,16 @@ STALE = json.dumps({"ok": True, "stale": True})
         ({"FAKE_PULL_RC": "1"}, 4, ["pull-digests.json"], []),
         ({"FAKE_CRASH": "gpu_probe"}, 5, ["gpu_probe.json"], []),
         ({"FAKE_CRASH": "mfu"}, 6, ["mfu-dp8-flash.json"], []),
+        (
+            {"FAKE_CRASH": "mfu", "HT_B300_EXPECT_GPUS": "4", "FAKE_GPUS": "4"},
+            6,
+            ["mfu-dp4-flash.json"],
+            [],
+        ),
         ({"FAKE_CRASH": "miner_test"}, 7, ["mine-smoke-v2.json"], []),
         ({"FAKE_CRASH": "miner_prod"}, 8, ["miner-prod/round-3-commitments.json"], ["--prod"]),
     ],
-    ids=["host_probe", "pull", "gpu_probe", "mfu", "miner_test", "miner_prod"],
+    ids=["host_probe", "pull", "gpu_probe", "mfu", "mfu-dp4", "miner_test", "miner_prod"],
 )
 def test_a_step_that_dies_early_leaves_no_evidence_of_an_earlier_run(
     env, tmp_path, crash, rc, files, extra
@@ -1045,6 +1115,8 @@ def test_containers_stay_isolated_and_do_not_inherit_the_lock(env, tmp_path):
     for c in runs:
         assert {"--rm", "--init"} <= set(c)
         assert c[c.index("--label") + 1].startswith("io.cortex.b300-run=")
+        assert c[c.index("--gpus") + 1] == "all"
+        assert any(a.endswith(":/opt/ht:ro") for a in c)  # the recorded commit stays the code
     (probe,) = runs_of(tmp_path, "gpu_probe")
     assert probe[probe.index("--network") + 1] == "none"
     for name in ("miner_test", "miner-prod-3"):  # the key file must belong to the invoking user
@@ -1131,11 +1203,24 @@ def test_a_watchdog_does_not_outlive_the_script_that_started_it(env, tmp_path, l
 def test_a_reason_file_that_cannot_be_written_does_not_disarm_the_deadline(env, tmp_path, launch):
     (tmp_path / "results/h1/.stop-reason").mkdir(parents=True)  # echo > it fails
     proc = launch("--duration", "2", FAKE_BLOCK="mfu")
+    try:  # whichever step the deadline finds, the TERM must still be sent
+        rc = proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        pytest.fail("the watchdog died on its reason file and the deadline never fired")
+    assert rc == 143
+    ctr = tmp_path / "state/ctr-mfu"
+    assert not ctr.exists() or Path(f"{ctr}.stopped").exists()  # drained if it had started
+
+
+def test_the_spot_reason_file_failing_does_not_disarm_the_notice(env, tmp_path, launch):
+    (tmp_path / "results/h1/.stop-reason").mkdir(parents=True)
+    proc = launch(FAKE_BLOCK="mfu")
     wait_until(lambda: (tmp_path / "state/ctr-mfu").exists(), "the mfu container")
+    Imds.notice = True
     try:
         rc = proc.wait(timeout=20)
     except subprocess.TimeoutExpired:
-        pytest.fail("the watchdog died on its reason file and the deadline never fired")
+        pytest.fail("the watchdog died on its reason file and the Spot notice was never acted on")
     assert rc == 143 and Path(f"{tmp_path}/state/ctr-mfu.stopped").exists()
 
 
@@ -1242,7 +1327,10 @@ def test_the_miner_directory_guard_does_not_depend_on_the_upload(env, tmp_path):
 
 
 def has_locale(name: str) -> bool:
-    out = subprocess.run(["locale", "-a"], capture_output=True, text=True, check=False).stdout
+    try:
+        out = subprocess.run(["locale", "-a"], capture_output=True, text=True, check=False).stdout
+    except FileNotFoundError:
+        return False
     return name.lower().replace("-", "") in out.lower().replace("-", "")
 
 
@@ -1312,3 +1400,178 @@ def test_rounds_a_failed_miner_prod_never_reached_keep_no_old_pass(env, tmp_path
     kept = sorted(f.name for f in (tmp_path / "results/h1/miner-prod").iterdir())
     assert kept == ["round-3.json"]  # the (empty) output of the crashed round, nothing of round 4
     assert not [f for f in uploaded(tmp_path, "b/p/h1") if "round-4" in f]
+
+
+# --- the gates the second review showed unpinned -------------------------------------------------
+
+
+def test_a_miner_directory_inside_a_symlinked_results_root_is_refused(env, tmp_path):
+    # /results is usually a link to the NVMe: the physical path of the key directory must still
+    # be recognised as inside it.
+    real = tmp_path / "real"
+    (real / "h1/miner").mkdir(parents=True)
+    (tmp_path / "results").rmdir()  # the fixture made an empty one
+    (tmp_path / "results").symlink_to(real)
+    prod = prod_env(real / "h1/miner")
+    p = run({**env, **prod}, tmp_path, "--prod")
+    assert p.returncode == 2 and "inside the results directory" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize("rounds", ["", "3 ../x", "3;touch", "a", "3  4", "$(id)"])
+def test_production_rounds_are_plain_numbers(env, tmp_path, rounds):
+    prod = {**prod_env(tmp_path / "miner"), "HT_B300_PROD_ROUNDS": rounds}
+    p = run({**env, **prod}, tmp_path, "--prod")
+    assert p.returncode == 2 and "HT_B300_PROD_ROUNDS" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+def test_the_miner_config_must_be_a_file(env, tmp_path):
+    prod = {**prod_env(tmp_path / "miner"), "HT_B300_MINER_CONFIG": str(tmp_path / "miner")}
+    p = run({**env, **prod}, tmp_path, "--prod")  # a directory, not a miner.toml
+    assert p.returncode == 2 and "a miner.toml path" in p.stderr, p.stdout + p.stderr
+
+
+@pytest.mark.parametrize(
+    "dest",
+    ["http://x/y", "s3://", "s3://B/x", "s3://b/x y", "s3://b/--endpoint-url=x", "-x", "bucket/x"],
+)
+def test_the_upload_destination_is_an_s3_url_without_options(env, tmp_path, dest):
+    p = run(env, tmp_path, "--upload", dest)
+    assert p.returncode == 2 and "--upload" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == [] and not (tmp_path / "state/aws.jsonl").exists()
+
+
+@pytest.mark.parametrize("steps", ["gpu", "gpu_probe typo", "pull,mfu", "MFU"])
+def test_an_unknown_step_is_refused_not_run_as_nothing(env, tmp_path, steps):
+    p = run(env, tmp_path, "--steps", steps)
+    assert p.returncode == 2 and "unknown step" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+def test_an_unknown_option_is_refused(env, tmp_path):
+    p = run(env, tmp_path, "--frobnicate")
+    assert p.returncode == 2 and "usage" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize("digest", ["abc", "0" * 63, "0" * 65, "G" * 64])
+def test_an_image_digest_is_exactly_64_hex_digits(env, tmp_path, digest):
+    p = run(env, tmp_path, "--image", f"ghcr.io/cortexlm/cortex/hypertrain-gpu@sha256:{digest}")
+    assert p.returncode == 2 and "REPO@sha256" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+def test_a_run_for_another_gpu_count_and_capability_uses_them_everywhere(env, tmp_path):
+    fake = {
+        "HT_B300_EXPECT_GPUS": "4",
+        "HT_B300_EXPECT_CC": "12.0",
+        "FAKE_GPUS": "4",
+        "FAKE_CC": "12.0",
+    }
+    p = run({**env, **fake}, tmp_path)
+    assert p.returncode == 0, p.stdout + p.stderr
+    (probe,) = runs_of(tmp_path, "gpu_probe")
+    assert probe[probe.index("--expect-gpus") + 1] == "4"
+    assert probe[probe.index("--expect-cc") + 1] == "12.0"
+    (mfu,) = runs_of(tmp_path, "mfu")
+    assert mfu[mfu.index("--nproc-per-node") + 1] == "4"
+    assert mfu[mfu.index("--profile") + 1] == "mfu-dense-1b-dp4"
+    assert (tmp_path / "results/h1/mfu-dp4-flash.json").exists()
+    probe_json = json.loads((tmp_path / "results/h1/host_probe.json").read_text())
+    assert probe_json["expected"]["gpus"] == 4 and probe_json["expected"]["compute_cap"] == "12.0"
+
+
+def test_a_finished_run_signals_no_process(env, tmp_path):
+    # finish() kills the docker client only while one is running; a stale pid could have been
+    # reused by then.
+    assert run(env, tmp_path).returncode == 0
+    assert not (tmp_path / "state/pkill.jsonl").exists()
+
+
+def test_an_imds_error_is_not_a_spot_notice(env, tmp_path, launch):
+    Imds.status = 503  # throttled, or a token that expired: not an interruption
+    proc = launch(FAKE_BLOCK="gpu_probe", FAKE_BLOCK_RC="0")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    wait_until(lambda: Imds.gets >= 3, "three polls of the metadata service")
+    Path(f"{tmp_path}/state/ctr-gpu_probe.stopped").touch()  # the container then exits 0
+    assert proc.wait(timeout=30) == 0
+    stop = stop_json(tmp_path)
+    assert stop["reason"] == "completed" and stop["spot_notice"] is None
+
+
+def test_a_hanging_imds_does_not_defer_the_deadline(env, tmp_path, launch):
+    Imds.delay = 15  # the service accepts the connection and never answers
+    t0 = time.monotonic()
+    proc = launch("--duration", "2", FAKE_BLOCK="mfu")
+    assert proc.wait(timeout=12) == 143  # curl gives up after 2 s; 15 s of waiting would fail this
+    assert stop_json(tmp_path)["reason"] == "duration" and time.monotonic() - t0 < 12
+
+
+def test_finish_keeps_stderr_after_a_group_signal(env, tmp_path, launch):
+    # The group signal kills tee: what aws or docker print on stderr in finish() must still land
+    # in run.log.
+    mark = "AWS-STDERR-MARK"
+    proc = launch("--upload", "s3://bucket/b300", FAKE_BLOCK="gpu_probe", FAKE_AWS_STDERR=mark)
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    os.killpg(proc.pid, signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    assert mark in run_log(tmp_path)
+
+
+def test_finish_stops_the_watchdog_itself_not_at_its_next_poll(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="gpu_probe", HT_B300_POLL_SECONDS="30")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    pid = watchdog_pid(tmp_path)
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    wait_until(lambda: not alive(pid), "the watchdog to be stopped by finish()", timeout=3)
+
+
+def test_steps_tsv_records_how_long_each_step_took(env, tmp_path):
+    assert run(env, tmp_path).returncode == 0
+    rows = [r.split("\t") for r in (tmp_path / "results/h1/steps.tsv").read_text().splitlines()]
+    assert [r[0] for r in rows] == ["host_probe", "pull", "gpu_probe", "mfu", "miner_test"]
+    assert all(0 <= int(r[2]) < 60 for r in rows)  # seconds, not an epoch timestamp
+
+
+def test_changes_outside_the_mounted_directory_do_not_make_the_tree_dirty(env, tmp_path):
+    # hypertrain/ is a directory of the monorepo: only what the containers can see counts.
+    mono = tmp_path / "mono"
+    shutil.copytree(
+        ROOT / "scripts", mono / "hypertrain/scripts", ignore=shutil.ignore_patterns("__pycache__")
+    )
+    (mono / "docs").mkdir()
+    (mono / "docs/a.md").write_text("x")
+    git(mono, "init", "-q")
+    git(mono, "add", ".")
+    git(mono, "commit", "-q", "-m", "all")
+    (mono / "docs/note.md").write_text("untracked, outside hypertrain/")
+    script = mono / "hypertrain/scripts/b300/run_host.sh"
+    assert run(env, tmp_path, script=script).returncode == 0
+    assert stop_json(tmp_path)["git_dirty"] is False
+    (mono / "hypertrain/scripts/new.py").write_text("x = 1\n")
+    assert run(env, tmp_path, script=script).returncode == 0
+    assert stop_json(tmp_path)["git_dirty"] is True
+
+
+@pytest.mark.parametrize(
+    "fake",
+    [
+        {"FAKE_MFU_PATHS": "flash+expanded-kv"},
+        {"FAKE_MFU_PATHS": "math"},
+        {"FAKE_MFU_BACKEND": "math"},
+    ],
+    ids=["expanded-kv", "math-path", "math-backend"],
+)
+def test_an_mfu_run_off_the_flash_path_fails_the_step(env, tmp_path, fake):
+    p = run({**env, **fake}, tmp_path)
+    assert p.returncode == 6, p.stdout + p.stderr
+    assert runs_of(tmp_path, "miner_test") == []
+
+
+def test_a_results_root_with_every_documented_character_works(env, tmp_path):
+    root = tmp_path / "A@b+c=d,e_f.g-h"  # the whole accepted alphabet, one of each kind
+    p = run(env, tmp_path, "--steps", "host_probe", "--upload", "s3://bucket/b300", root=root)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert (root / "h1/stop.json").exists() and "stop.json" in uploaded(tmp_path)

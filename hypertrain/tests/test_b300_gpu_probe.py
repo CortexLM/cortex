@@ -7,6 +7,7 @@ import importlib.util
 import json
 import re
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -240,3 +241,84 @@ def test_every_repeat_runs_the_whole_smoke() -> None:
     assert ev["repeats"] == 2 and len(runs) == 2
     assert all(f"kimi_micro_{root}" in run for run in runs for root in KIMI_ROOTS)
     assert runs[0] == runs[1] and ev["smoke"]["ok"]
+
+
+def test_probe_runs_the_smoke_once_per_gpu_and_repeat_and_records_each_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No GPU needed: the CUDA branch only asks torch for the device list and properties. A probe
+    # that smoked GPU 0 under every label would give identical digests and a green verdict.
+    props = [
+        types.SimpleNamespace(
+            name=f"B300-{i}",
+            major=10,
+            minor=3,
+            multi_processor_count=148 + i,
+            total_memory=1000 + i,
+        )
+        for i in range(3)
+    ]
+    seen: list[str] = []
+
+    def smoke(device: torch.device) -> dict[str, str]:
+        seen.append(str(device))
+        return {"digest": "same"}
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 3)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda d: props[d.index])
+    monkeypatch.setattr(gpu_probe, "select_backend", lambda d: "math")
+    monkeypatch.setattr(gpu_probe, "workload", smoke)
+    ev = gpu_probe.probe(2, "cuda")
+    assert seen == ["cuda:0"] * 2 + ["cuda:1"] * 2 + ["cuda:2"] * 2
+    assert list(ev["runs"]) == ["cuda:0", "cuda:1", "cuda:2"] and ev["device_count"] == 3
+    assert [(d["index"], d["name"], d["capability"]) for d in ev["devices"]] == [
+        (i, f"B300-{i}", [10, 3]) for i in range(3)
+    ]
+    assert [(d["sm_count"], d["total_memory"]) for d in ev["devices"]] == [
+        (148 + i, 1000 + i) for i in range(3)
+    ]
+
+
+def test_a_programming_error_in_the_matmul_smoke_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Only a RuntimeError (a kernel error) is a device result; anything else is a defect.
+    real_digest, calls = gpu_probe.digest, []
+
+    def broken_once(t: torch.Tensor) -> str:
+        calls.append(1)
+        if len(calls) == 1:  # the first matmul only: the rest of the smoke would not hide a leak
+            raise ValueError("not a kernel error")
+        return real_digest(t)
+
+    monkeypatch.setattr(gpu_probe, "digest", broken_once)
+    with pytest.raises(ValueError, match="not a kernel error"):
+        gpu_probe.workload(torch.device("cpu"))
+
+
+@pytest.mark.parametrize("runs", [{}, {"cuda:0": []}], ids=["no-devices", "no-repeats"])
+def test_a_probe_that_ran_nothing_does_not_pass(runs: dict[str, list[dict[str, str]]]) -> None:
+    verdict = gpu_probe.evaluate(runs)
+    assert verdict["ok"] is False and verdict["mismatches"] == ["no run"]
+
+
+def test_the_smoke_computes_in_the_miners_dtypes(monkeypatch: pytest.MonkeyPatch) -> None:
+    dtypes: list[torch.dtype] = []
+    real_digest, real_attention = gpu_probe.digest, gpu_probe.attention
+
+    def spy_digest(t: torch.Tensor) -> str:
+        dtypes.append(t.dtype)
+        return real_digest(t)
+
+    attention_in: list[torch.dtype] = []
+
+    def spy_attention(
+        q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, backend: str
+    ) -> torch.Tensor:
+        attention_in.append(q.dtype)
+        return real_attention(q, k, v, backend)
+
+    monkeypatch.setattr(gpu_probe, "digest", spy_digest)
+    monkeypatch.setattr(gpu_probe, "attention", spy_attention)
+    gpu_probe.workload(torch.device("cpu"))
+    assert dtypes[:2] == [torch.float32, torch.bfloat16]  # the two matmuls
+    assert attention_in == [torch.bfloat16]
