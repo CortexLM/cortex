@@ -183,8 +183,8 @@
   `TapeError`). The store still raises the bare exceptions; nothing is written by a refused call.
   A fault of the master's own artifacts is not a request's fault and stays a 500: a stored tape
   whose signature or version fails, a replay that differs from the tape it replays, and a repair
-  worker, signing authority or output artifact that fails (`TapeIntegrityError`, a subclass of
-  `TapeError`) answer 500 `TAPE_INTEGRITY: <reason>` on every route, the two rollback routes
+  worker, signing authority or output artifact that fails, or a fresh independent worker that
+  disagrees with the tape the coordinator signed (`TapeIntegrityError`, a subclass of `TapeError`) answer 500 `TAPE_INTEGRITY: <reason>` on every route, the two rollback routes
   included.
   See `docs/adr/0011-audit-integrity.md` at the monorepo root.
 - After a round that finality closed without a reward (an accepted rollback, or an exclusion

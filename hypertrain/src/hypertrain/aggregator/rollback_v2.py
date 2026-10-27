@@ -201,7 +201,9 @@ def execute_repair_context(
     state = load_state(store, computed.arithmetic.out_state)
     if tape is not None:
         if computed != tape.body:
-            raise TapeError("fresh independent repair context replay differs")
+            # The master calls this on the tape its own coordinator key signed a moment before
+            # (store.rollback_v2), so a fresh worker that disagrees means its pipeline diverged.
+            raise TapeIntegrityError("fresh independent repair context replay differs")
     else:
         if key is None or key.ss58 != signer:
             raise TapeIntegrityError("repair context signing authority unavailable")

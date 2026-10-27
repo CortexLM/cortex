@@ -1125,7 +1125,9 @@ the table as covering them.
     answers 500 `TAPE_INTEGRITY` instead (Lens: a 409 would tell the operator that a request was
     wrong when the stored tape or the repair worker is): a stored tape whose signature or version
     fails (`core.replay_tape`), a replay that differs from its tape (`tape_v2.replay`), a repair
-    worker, signing authority or output artifact that fails (`rollback_v2`). A tape or repair
+    worker, signing authority or output artifact that fails, and a fresh independent worker whose
+    recomputation differs from the tape the master's coordinator key signed a moment before
+    (`rollback_v2`; the master is the only caller that passes such a tape on a route). A tape or repair
     context the caller supplied and that does not match stays a 409. The roster floor is documented as the arithmetic (R tolerates R - 4 exclusions: five
     tolerate one, D44's two need six) and enforced in `scripts/ops/live_operator.py open` (`--tolerate`,
     default 1; `--tolerate 0` opens four, explicitly), not in `open_round_v2`: the store keeps the protocol

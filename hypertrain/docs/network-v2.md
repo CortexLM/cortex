@@ -534,7 +534,8 @@ round w+1 exists or while w is unresolved, applying a round whose predecessor is
 settling a round that cannot settle, a tape that fails its own checks). The two rollback routes
 answer a tape error with its bare message, as before. A fault of the master's own artifacts is
 never a conflict: a stored tape that fails its signature or version, a replay that differs from the
-tape it replays, a repair worker, signing authority or output artifact that fails, answers a 500
+tape it replays, a repair worker, signing authority or output artifact that fails, or a fresh
+independent worker that disagrees with the tape the coordinator signed, answers a 500
 `TAPE_INTEGRITY: <reason>` on every route, the rollback routes included.
 `finalize` pays the inputs recorded with the applied tape, whatever the members' standing is
 when it runs, except an admission banned since: `Finalize.included` lists the inputs less the
