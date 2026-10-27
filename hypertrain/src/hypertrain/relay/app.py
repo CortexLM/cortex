@@ -6,6 +6,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import logging
 import os
 import tempfile
 import time
@@ -36,6 +37,9 @@ from hypertrain.protocol.relay_messages import (
 )
 from hypertrain.relay.client import forward_receipt, http_client, settlement_from_master
 from hypertrain.relay.core import Relay, RelayError
+
+# Seconds between two passes that delete released or lapsed custody and prune its records.
+COLLECT_INTERVAL = 300
 
 
 class AcceptRequest(BaseModel):
@@ -284,6 +288,16 @@ def create_app(relay: Relay, drain_token: str) -> FastAPI:
     return app
 
 
+async def collect_forever(relay: Relay) -> None:
+    """Rotate custody out of the journal without an operator; one failed pass ends nothing."""
+    while True:
+        await anyio.sleep(COLLECT_INTERVAL)
+        try:
+            await relay.collect()
+        except (RelayError, StoreError, httpx.HTTPError, OSError) as error:
+            logging.getLogger(__name__).warning("relay collect deferred: %s", type(error).__name__)
+
+
 @asynccontextmanager
 async def runtime(app: FastAPI) -> AsyncIterator[None]:
     config_bytes = await anyio.to_thread.run_sync(
@@ -367,7 +381,10 @@ async def runtime(app: FastAPI) -> AsyncIterator[None]:
         app.mount("/", live_app)
         # Recovery is real and fail-closed; missing L0 receipt route cannot become MASTER_ACCEPTED.
         await relay.recover()
-        yield
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(collect_forever, relay)
+            yield
+            tasks.cancel_scope.cancel()
         relay.draining = True
 
 

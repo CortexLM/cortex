@@ -651,8 +651,10 @@ overlapping old/new keys and drain preserve existing retrieval authority.
 A relay counts the uploads it still holds, not every record it ever accepted. An
 upload is held while it is a reservation (no receipt, service deadline not passed)
 or while one of its custody pins is neither released nor past its signed horizon.
-A released or lapsed upload stops counting; its bytes stay pinned until the
-master-signed release (ADR 0014 Part 6). There is no count cap by default (it was 64
+A released or lapsed upload stops counting. Custody ends at the master-signed
+release, or once its signed horizon plus the epoch grace (100 beacons) is past with no
+dispute referencing it (ADR 0014 Part 6); the relay then owes nothing and rotates it out,
+as described below. There is no count cap by default (it was 64
 for the life of the run). `max_uploads` in `relay.json` is an optional operator limit,
 `R x ceil(retention window / round length)` for `R` miners per round, and an `accept`
 past it answers 400 `retained upload quota exhausted`. `/readyz` does not depend on
@@ -661,12 +663,12 @@ The physical limit is the journal, one JSON blob of at most 16 MiB that every mu
 rewrites. `accept` answers 400 `relay journal capacity exhausted` when the new record
 plus 1,280 B per chunk acknowledgment would take it above 12 MiB, which leaves 4 MiB for
 acknowledgments, receipts, retrievals, extensions and releases of uploads already held.
-A record stays in the journal after its custody is released or lapsed: nothing removes
-one yet. It carries the signed `RoundOpenV2`, so its size grows with the roster: a
+A record leaves the journal when its custody is spent (below). It carries the signed
+`RoundOpenV2`, so its size grows with the roster: a
 completed one-chunk upload adds about 10 KB to the journal at 16 miners (a 9.8 KB record
 plus its index and nonce entry) and 13.8 KB at 32 miners, plus about 1.1 KB per further
 chunk. The 12 MiB budget then holds about 1,200 such uploads, i.e. 75 rounds of 16 miners,
-and about 900, i.e. 28 rounds, at 32 miners.
+and about 900, i.e. 28 rounds, at 32 miners, if none left.
 `tests/relay/test_lifecycle_v2.py::test_journal_budget_when_rounds_carry_a_roster`
 measures the growth of one upload and checks the 1,200 and 900 figures against the real guard.
 
@@ -678,10 +680,30 @@ never refuses a request: only `accept` past the budget does. Custody lives to it
 about 10 hours or 36 rounds of 335 beacons (16.75 minutes), so 36 rounds of 16 miners hold
 16 x 36 x 10 KB = 5.8 MB, 46 % of the budget, and 36 rounds of 32 miners hold 15.9 MB,
 126 % (`test_readyz_when_custody_horizon_of_rounds_has_no_early_release` measures both).
-Runbook for the alarm: the run is larger than this relay's journal. Add a relay to the
-signed registry; the registry must hold more than one relay before any run of 16 miners
-or more (D51 5). Do not raise the 12 MiB budget: above 16 MiB every journal write fails,
-a release included.
+Because records rotate out at their horizon, that is the steady state and not a figure that
+keeps growing; a run of 32 miners exceeds the budget unless custody is released well before
+its horizon.
+Runbook for the alarm: first check that records leave, i.e. that the log shows no
+`relay collect deferred` lines. If they do leave and the fill still rises, the run is larger
+than this relay's journal. Add a relay to the signed registry; the registry must hold more
+than one relay before any run of 16 miners or more (D51 5). Do not raise the 12 MiB budget:
+above 16 MiB every journal write fails, a release included.
+
+Custody is rotated out by age, without an operator. Every 5 minutes a task of the relay runs
+`collect()`. A pin whose signed horizon is past by the epoch grace with nothing released and
+no dispute referencing it is lapsed: a retrieval is only valid until `min(requested + 10,
+horizon)` and an extension only before the horizon, so nothing can use the bytes any more,
+and the relay owes the custody nothing. A pin whose last extension names dispute ids does not
+lapse (ADR 0014 Part 6.4, D54): its expiry is suspended until the master releases the grant
+at the dispute's close, which clears the list. An object is deleted when every pin on it is
+released and past its deletion bound or lapsed, and no live pin, in-flight upload of the same
+bytes or deletion reservation needs it. A record is pruned, with its grant and retrieval
+nonces, once all its pins are in that state and none of its objects still waits to be deleted;
+a reservation that never produced custody is pruned at the horizon of its acknowledgment plus
+the grace. A pass that fails is logged as `relay collect deferred: <ExceptionName>` and
+retried at the next interval; an object whose delete raised keeps its deletion reservation
+until it is fenced, as before. This replaces the earlier rule that bytes stay pinned until a
+release: after the horizon plus the grace, and with no dispute, the relay owes nothing.
 
 A relay learns what the master settled from a public, read-only, coordinator-signed view,
 not from the release message and not with a credential. `GET /v2/runs/{run_id}/relay-settlements/{grant_hash}`

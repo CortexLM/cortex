@@ -19,6 +19,7 @@ from test_transport_v2 import MASTER, MINER, RUN, H, Rig
 
 from hypertrain.beacon.core import BeaconRound, BeaconUnavailable, round_at_or_after
 from hypertrain.beacon.drand import QUICKNET_GENESIS, QUICKNET_PERIOD
+from hypertrain.data.stream_store import StreamStore
 from hypertrain.protocol import relay_envelope
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.relay_envelope import RelayEnvelope
@@ -381,3 +382,67 @@ async def hold_a_receipted_upload(tmp_path: Path) -> tuple[UploadGrant, str]:
         record = (await rig.relay.state()).uploads[grant.digest()]
         assert record.receipt is not None
         return grant, RelayReceipt.model_validate(record.receipt.body).digest()
+
+
+def wall_of(beacon: int) -> float:
+    """A clock that opens drand round `beacon` (see JUST_AFTER_BOUNDARY)."""
+    return QUICKNET_GENESIS + QUICKNET_PERIOD * (beacon - 1) + 1.0
+
+
+async def custody_of(tmp_path: Path):
+    async with httpx.AsyncClient() as backing:
+        return (await Rig(tmp_path / "store", backing).relay.state()).uploads
+
+
+async def collected(tmp_path: Path, grant_hash: str) -> None:
+    """Wait, for at most 15 s, until the journal no longer holds the grant."""
+    for _ in range(300):
+        if grant_hash not in await custody_of(tmp_path):
+            return
+        await anyio.sleep(0.05)
+    raise AssertionError("the grant was never collected")
+
+
+def test_runtime_collects_lapsed_custody_on_its_own_at_the_end_of_the_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The upload was granted to beacon 200; the relay's epoch grace is 100. Nothing calls collect:
+    # the runtime's own task deletes the object and prunes the record once beacon 300 is reached.
+    async def scenario() -> None:
+        grant, _ = await hold_a_receipted_upload(tmp_path)
+        monkeypatch.setattr(relay_app, "COLLECT_INTERVAL", 0.05)
+        async with serving(tmp_path, monkeypatch, wall_of(298)) as (_, _, clock):
+            await anyio.sleep(1.0)  # about twenty passes at beacon 299, one short of the grace
+            assert grant.digest() in await custody_of(tmp_path)
+            assert any((tmp_path / "store").rglob(grant.delta_hash))
+            clock.advance(2 * QUICKNET_PERIOD)
+            await collected(tmp_path, grant.digest())
+        assert not any((tmp_path / "store").rglob(grant.delta_hash))
+
+    anyio.run(scenario)
+
+
+def test_runtime_collect_task_survives_a_failing_delete_and_logs_only_its_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario() -> None:
+        grant, _ = await hold_a_receipted_upload(tmp_path)
+        monkeypatch.setattr(relay_app, "COLLECT_INTERVAL", 0.05)
+        real_delete, refused = StreamStore.delete, []
+
+        async def flaky(self: StreamStore, sha: str) -> None:
+            if not refused:
+                refused.append(sha)
+                raise OSError("backing refused SECRET-OBJECT-KEY")
+            await real_delete(self, sha)
+
+        monkeypatch.setattr(StreamStore, "delete", flaky)
+        async with serving(tmp_path, monkeypatch, wall_of(320)):
+            await collected(tmp_path, grant.digest())
+        # The pass that failed left its deletion reservation (fenced, as before); the next pass
+        # still pruned the record instead of the task dying with the first error.
+        assert refused == [grant.delta_hash]
+        messages = [r.getMessage() for r in caplog.records if "relay collect" in r.getMessage()]
+        assert messages and set(messages) == {"relay collect deferred: OSError"}
+
+    anyio.run(scenario)

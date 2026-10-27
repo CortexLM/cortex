@@ -631,13 +631,14 @@ async def upload_round(rig: Rig, w: int, data: bytes | None = None) -> UploadGra
 
 
 async def release_pins(rig: Rig, grant: UploadGrant, only: list[str] | None = None) -> None:
-    for digest in only or (await rig.relay.state()).uploads[grant.digest()].pins:
+    pins = (await rig.relay.state()).uploads[grant.digest()].pins
+    for digest in only or pins:
         await rig.relay.release(
             rig.seal(
                 CustodyRelease(
                     grant_hash=grant.digest(),
                     custody_hashes=[digest],
-                    retention_hash=digest,
+                    retention_hash=pins[digest].retention_hash,
                     finality_hash=H,
                     vesting_beacon=1,
                     closed_dispute_root=H,
@@ -1002,6 +1003,270 @@ def test_readyz_when_custody_horizon_of_rounds_has_no_early_release(
                     await rig.relay.accept(raw, manifest, assignment, opened)
             else:
                 await rig.relay.accept(raw, manifest, assignment, opened)
+
+    anyio.run(scenario)
+
+
+def stored(rig: Rig, sha: str) -> bool:
+    return rig.store.store._path(sha).exists()
+
+
+def test_collect_when_released_records_are_spent_prunes_only_those(tmp_path: Path) -> None:
+    # Given: five rounds. 1 and 3 are released; 4 only has its receipt released; 2 holds the same
+    # bytes as 1 and 5 the same as 4, both unreleased.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            rig.relay.settlement = settled
+            one = await upload_round(rig, 1, b"abc")
+            two = await upload_round(rig, 2, b"abc")
+            three = await upload_round(rig, 3, b"zzz")
+            four = await upload_round(rig, 4, b"qqq")
+            five = await upload_round(rig, 5, b"qqq")
+            await release_pins(rig, one)
+            await release_pins(rig, three)
+            receipt = RelayReceipt.model_validate(
+                (await rig.relay.state()).uploads[four.digest()].receipt.body
+            ).digest()
+            await release_pins(rig, four, [receipt])
+            # When: collected before and at the deletion bound of the released pins (200).
+            assert await rig.relay.collect() == []
+            assert len((await rig.relay.state()).uploads) == 5
+            rig.clock = 201
+            deleted = await rig.relay.collect()
+            state = await rig.relay.state()
+            # Then: 1 and 3 are spent and leave with their nonces. Only 3's object is deleted: 1
+            # shares "abc" with the live 2. 4 still has a chunk pin and keeps its record.
+            assert deleted == [three.delta_hash]
+            assert set(state.uploads) == {two.digest(), four.digest(), five.digest()}
+            assert not stored(rig, three.delta_hash) and stored(rig, one.delta_hash)
+            assert round_nonce(1) not in state.nonces and round_nonce(3) not in state.nonces
+            assert {round_nonce(2), round_nonce(4), round_nonce(5)} <= set(state.nonces)
+            # 2 released: it was the last holder of "abc".
+            await release_pins(rig, two)
+            assert await rig.relay.collect() == [two.delta_hash]
+            state = await rig.relay.state()
+            assert set(state.uploads) == {four.digest(), five.digest()}
+            assert not stored(rig, one.delta_hash) and stored(rig, four.delta_hash)
+
+    anyio.run(scenario)
+
+
+def test_collect_when_custody_lapsed_deletes_and_prunes_without_a_release(tmp_path: Path) -> None:
+    # ADR 0014 6.4: the horizon (200) plus the epoch grace (10) ends the promise. A round that
+    # never settles is never released, so age is what frees it.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            grant = await upload_round(rig, 1, b"abc")
+            rig.clock = 209
+            assert await rig.relay.collect() == []
+            assert grant.digest() in (await rig.relay.state()).uploads
+            rig.clock = 210
+            assert await rig.relay.collect() == [grant.delta_hash]
+            state = await rig.relay.state()
+            assert not state.uploads and round_nonce(1) not in state.nonces
+            assert not stored(rig, grant.delta_hash)
+
+    anyio.run(scenario)
+
+
+def test_collect_when_an_extension_moves_the_horizon_keeps_the_custody(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            grant = await upload_round(rig, 1, b"abc")
+            record = (await rig.relay.state()).uploads[grant.digest()]
+            receipt = RelayReceipt.model_validate(record.receipt.body).digest()
+            rig.clock = 190
+            await rig.relay.retention(
+                rig.seal(
+                    RetentionExtension(
+                        grant_hash=grant.digest(),
+                        custody_hashes=[receipt],
+                        seq=1,
+                        previous_retention_hash=receipt,
+                        dispute_ids=[],
+                        issued_beacon=190,
+                        retain_until=300,
+                    )
+                )
+            )
+            rig.clock = 299 + 10
+            held = await rig.relay.collect()
+            # The chunk pin was not extended and lapsed at 210; the receipt pin is covered to 310.
+            assert held == [] and stored(rig, grant.delta_hash)
+            assert grant.digest() in (await rig.relay.state()).uploads
+            rig.clock = 310
+            assert await rig.relay.collect() == [grant.delta_hash]
+            assert not (await rig.relay.state()).uploads
+
+    anyio.run(scenario)
+
+
+def test_collect_when_a_dispute_is_open_at_the_horizon_keeps_the_custody_until_its_release(
+    tmp_path: Path,
+) -> None:
+    # D54: no custody is destroyed while a dispute references it. The expiry resumes when the
+    # master releases the grant at the dispute's close, which clears the dispute list.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            rig.relay.settlement = settled
+            grant = await upload_round(rig, 1, b"abc")
+            record = (await rig.relay.state()).uploads[grant.digest()]
+            receipt = RelayReceipt.model_validate(record.receipt.body).digest()
+            rig.clock = 190
+            await rig.relay.retention(
+                rig.seal(
+                    RetentionExtension(
+                        grant_hash=grant.digest(),
+                        custody_hashes=[receipt],
+                        seq=1,
+                        previous_retention_hash=receipt,
+                        dispute_ids=[H],
+                        issued_beacon=190,
+                        retain_until=300,
+                    )
+                )
+            )
+            # Well past the extended horizon (300) and the grace: the dispute is still open.
+            rig.clock = 450
+            assert await rig.relay.collect() == []
+            state = await rig.relay.state()
+            assert grant.digest() in state.uploads and stored(rig, grant.delta_hash)
+            assert state.uploads[grant.digest()].pins[receipt].disputes == [H]
+            # The master releases the grant at the dispute's close.
+            await release_pins(rig, grant, [receipt])
+            assert await rig.relay.collect() == [grant.delta_hash]
+            state = await rig.relay.state()
+            assert not state.uploads and not stored(rig, grant.delta_hash)
+
+    anyio.run(scenario)
+
+
+def test_collect_when_a_spent_record_served_a_retrieval_drops_that_nonce(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            grant = await upload_round(rig, 1, b"abc")
+            chunk = (await rig.relay.state()).uploads[grant.digest()].chunks["0"]
+            await rig.relay.retrieve(rig.retrieval(grant, chunk))
+            assert "45" * 32 in (await rig.relay.state()).nonces
+            rig.clock = 210
+            await rig.relay.collect()
+            state = await rig.relay.state()
+            assert not state.uploads and not state.nonces
+
+    anyio.run(scenario)
+
+
+def test_collect_when_a_live_record_holds_the_same_object_keeps_the_object(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            old = await upload_round(rig, 1, b"abc")
+            late, manifest, raw, assignment, opened = late_upload(rig, b"abc", 2)
+            rig.relay.active_key = "k2"
+            rig.clock = 90
+            await rig.relay.accept(raw, manifest, assignment, opened)
+            await rig.put(late, b"abc")
+            rig.clock = 210  # round 1 is lapsed; round 2 is held to 400
+            assert await rig.relay.collect() == []
+            state = await rig.relay.state()
+            assert set(state.uploads) == {late.digest()} and old.digest() not in state.uploads
+            assert stored(rig, late.delta_hash)
+            rig.clock = 410
+            assert await rig.relay.collect() == [late.delta_hash]
+            assert not (await rig.relay.state()).uploads
+
+    anyio.run(scenario)
+
+
+def test_collect_when_reservation_never_produced_custody_prunes_it_with_its_promise(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            grant, _, _ = await rig.accept(b"abc")  # no bytes ever sent; signed horizon 200
+            rig.clock = 209
+            await rig.relay.collect()
+            assert grant.digest() in (await rig.relay.state()).uploads
+            rig.clock = 210
+            await rig.relay.collect()
+            state = await rig.relay.state()
+            assert not state.uploads and not state.nonces
+
+    anyio.run(scenario)
+
+
+def test_collect_when_object_is_being_published_keeps_the_spent_record(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            one = await upload_round(rig, 1, b"abc")
+            rig.clock = 210
+
+            def publishing(state) -> None:  # another upload of the same bytes is mid-write
+                state.publications[one.delta_hash] = ["generation"]
+
+            await rig.relay._change(publishing)
+            assert await rig.relay.collect() == []
+            assert one.digest() in (await rig.relay.state()).uploads
+
+            def done(state) -> None:
+                del state.publications[one.delta_hash]
+
+            await rig.relay._change(done)
+            assert await rig.relay.collect() == [one.delta_hash]
+            assert not (await rig.relay.state()).uploads
+
+    anyio.run(scenario)
+
+
+def test_journal_when_rounds_rotate_out_at_their_horizon_stays_flat(tmp_path: Path) -> None:
+    # Steady state of ADR 0014 6.2: 16 miners per round, custody held for H rounds, one collect
+    # per round. The journal stops growing at H rounds of records instead of growing for ever.
+    horizon_rounds, miners, round_beacons = 6, 16, 335
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            record, grown = await completed_upload(rig, miners)
+
+            def forget(state) -> None:
+                state.uploads.clear()
+                state.nonces.clear()
+
+            await rig.relay._change(forget)
+            sizes = []
+            for number in range(1, 25):
+                rig.clock = number * round_beacons
+
+                def arrive(state, number: int = number) -> None:
+                    for miner in range(miners):
+                        copy = record.model_copy(deep=True)
+                        for pin in copy.pins.values():
+                            pin.horizon = rig.clock + horizon_rounds * round_beacons
+                        key = f"{number:032x}{miner:032x}"
+                        nonce = key[::-1]  # the copy's own grant nonce, reserved like a real one
+                        copy.grant = copy.grant.model_copy(
+                            update={"body": {**copy.grant.body, "nonce": nonce}}
+                        )
+                        state.uploads[key] = copy
+                        state.nonces[nonce] = key
+
+                await rig.relay._change(arrive)
+                await rig.relay.collect()
+                state = await rig.relay.state()
+                sizes.append(len(state.serialize()))
+            # Records of a round leave one grace (10) after their horizon: H + 1 rounds are live,
+            # each with its nonce, and the journal does not creep.
+            per_round = miners * grown
+            assert len(state.uploads) == len(state.nonces) == (horizon_rounds + 1) * miners
+            assert sizes[-1] == pytest.approx((horizon_rounds + 1) * per_round, rel=0.01)
+            assert sizes[-1] == pytest.approx(sizes[-9], rel=0.002)
 
     anyio.run(scenario)
 

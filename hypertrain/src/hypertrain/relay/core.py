@@ -842,28 +842,81 @@ class Relay:
         record = self._record(await self.state(), grant_hash)
         return [record.chunks[str(i)] for i in sorted(map(int, record.chunks)) if i >= cursor]
 
+    @staticmethod
+    def _custody(record: UploadRecord) -> list[tuple[str, str]]:
+        """(custody hash, object key) of every signed chunk acknowledgment and the receipt."""
+        entries = [
+            (
+                ChunkCustodyAck.model_validate(e.body).digest(),
+                ChunkCustodyAck.model_validate(e.body).chunk_sha256,
+            )
+            for e in record.chunks.values()
+        ]
+        if record.receipt is not None:
+            receipt = RelayReceipt.model_validate(record.receipt.body)
+            entries.append((receipt.digest(), receipt.delta_hash))
+        return entries
+
+    def _lapsed(self, pin: Pin, now: int) -> bool:
+        """The signed promise has ended: nothing released it, the horizon and the epoch grace are
+        past, and no dispute references it. An open dispute suspends the expiry until the master
+        releases the grant at its close (ADR 0014 Part 6.4, D54)."""
+        return (
+            pin.delete_after is None and not pin.disputes and now >= pin.horizon + self.epoch_rounds
+        )
+
+    def _unneeded(self, pin: Pin, now: int) -> bool:
+        """Released and past its deletion bound, or lapsed: the relay owes this custody nothing."""
+        released = pin.delete_after is not None and now >= pin.delete_after and not pin.disputes
+        return released or self._lapsed(pin, now)
+
     def _eligible_deletions(self, state: Journal, now: int) -> list[str]:
-        """Evidence remains pinned without authenticated release, even past horizon."""
+        """An object goes when every pin on it is unneeded; one live pin protects it."""
         candidates: set[str] = set()
         protected: set[str] = set()
         for record in state.uploads.values():
-            entries = [
-                (
-                    ChunkCustodyAck.model_validate(e.body).digest(),
-                    ChunkCustodyAck.model_validate(e.body).chunk_sha256,
-                )
-                for e in record.chunks.values()
-            ]
-            if record.receipt is not None:
-                receipt = RelayReceipt.model_validate(record.receipt.body)
-                entries.append((receipt.digest(), receipt.delta_hash))
-            for digest, sha in entries:
-                pin = record.pins[digest]
-                if pin.delete_after is not None and now >= pin.delete_after and not pin.disputes:
+            for digest, sha in self._custody(record):
+                if self._unneeded(record.pins[digest], now):
                     candidates.add(sha)
                 else:
                     protected.add(sha)
         return sorted(candidates - protected - state.publications.keys() - state.deletions.keys())
+
+    def _spent(self, record: UploadRecord, now: int) -> bool:
+        """Nothing left to serve or protect. A reservation that never produced custody ends with
+        the horizon its acknowledgment was signed for."""
+        if record.pins:
+            return all(self._unneeded(pin, now) for pin in record.pins.values())
+        return now >= UploadGrant.model_validate(record.grant.body).retain_until + self.epoch_rounds
+
+    def _prune(self, state: Journal, now: int, deleted: set[str]) -> None:
+        """Drop spent records whose objects are deleted or still needed by a live record.
+
+        A spent record whose object is still stored, unreserved and not needed elsewhere (an
+        upload of the same bytes is mid-write) stays, so that a later collect() still finds the
+        pin it must delete."""
+        live = {
+            sha
+            for record in state.uploads.values()
+            if not self._spent(record, now)
+            for _, sha in self._custody(record)
+        }
+        for grant_hash, record in list(state.uploads.items()):
+            if not self._spent(record, now):
+                continue
+            if any(
+                sha not in deleted and sha not in live and sha not in state.deletions
+                for _, sha in self._custody(record)
+            ):
+                continue
+            nonce = UploadGrant.model_validate(record.grant.body).nonce
+            if state.nonces.get(nonce) == grant_hash:
+                del state.nonces[nonce]
+            for retrieval in record.retrievals.values():
+                request = RetrievalRequest.model_validate(retrieval.request.body)
+                if state.nonces.get(request.nonce) == request.digest():
+                    del state.nonces[request.nonce]
+            del state.uploads[grant_hash]
 
     async def eligible_deletions(self) -> list[str]:
         return self._eligible_deletions(await self.state(), await self.now())
@@ -888,6 +941,7 @@ class Relay:
                 del state.deletions[sha]
 
             await self._change(finish)
+        await self._change(lambda state: self._prune(state, now, set(eligible)))
         return eligible
 
     async def failure(

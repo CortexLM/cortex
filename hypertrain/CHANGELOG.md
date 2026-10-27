@@ -147,6 +147,13 @@
   beacon, and vesting beacon), and a relay answers `CustodyRelease` from it. Until now `runtime()` never
   configured a settlement source, so a production relay refused every release. No credential enters the
   relay.
+- Relay custody rotation (ADR 0014 Part 6, TRN-02, D53/D54): `collect()` also prunes the records
+  whose custody is spent (released and past the deletion bound, or lapsed) with their nonces,
+  never while a live record, an upload of the same bytes in flight or a deletion reservation
+  still needs the object, and a task of the relay runs it every 5 minutes. A pin whose signed
+  horizon plus the epoch grace is past, with no release and no dispute referencing it, is lapsed
+  and deleted like a released one; a pin whose last extension names a dispute does not lapse until
+  the master releases the grant. Until now nothing removed a record and `collect()` had no caller.
 
 ### Fixed
 - Escrow: the events the service writes (reward finalize, maturity, the payment of `get_weights`,
