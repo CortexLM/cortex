@@ -2088,18 +2088,20 @@ class ChallengeStore:
                 since = max(self.ledger._engine.answers, default=-1) + 1
                 self._set_meta(db, "weights_runs_from", since)
         # Only a run that already finalized a live reward can owe v2 weight. Resolved outside
-        # the transaction: building services may open its own.
-        live = (
-            self._db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='escrow_finalized'"
-            ).fetchone()
-            and self._db.execute("SELECT 1 FROM escrow_finalized LIMIT 1").fetchone()
-        )
-        escrows = [
-            self._services(r[0])[0]
-            for r in self._db.execute("SELECT run_id, manifest FROM runs ORDER BY run_id")
-            if live and json.loads(r[1]).get("manifest_version") == 2
-        ]
+        # the transaction: building services may open its own. The reads still hold the store
+        # lock, since a request on another thread shares this connection.
+        with self._lock:
+            live = (
+                self._db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='escrow_finalized'"
+                ).fetchone()
+                and self._db.execute("SELECT 1 FROM escrow_finalized LIMIT 1").fetchone()
+            )
+            escrows = [
+                self._services(r[0])[0]
+                for r in self._db.execute("SELECT run_id, manifest FROM runs ORDER BY run_id")
+                if live and json.loads(r[1]).get("manifest_version") == 2
+            ]
         with self._tx() as db:
             stored = db.execute(
                 "SELECT answer FROM weights_runs WHERE epoch=?", (epoch,)
@@ -4738,24 +4740,28 @@ class ChallengeStore:
         if roster is None:
             if w is None:
                 raise ChallengeError(400, "ROSTER_ROUND_REQUIRED")
-            record = self._record_v2(run_id, "round", str(w))
+            with self._lock:
+                record = self._record_v2(run_id, "round", str(w))
             roster = record["body"]["roster"]
         n = len(roster)
         if n > self.max_roster:
             raise ChallengeError(409, f"ROSTER_LIMIT_{self.max_roster}")
-        admitted = self._db.execute(
-            "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission' AND id='run'",
-            (run_id,),
-        ).fetchone()
-        if n <= 16 and not admitted:
-            return None
-        if not admitted:
-            raise ChallengeError(409, "ROSTER_LIMIT_16: pause complete roster until qualification")
-        profile, digest = self._service_admission_v2(run_id)
+        with self._lock:
+            admitted = self._db.execute(
+                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission' AND id='run'",
+                (run_id,),
+            ).fetchone()
+            if n <= 16 and not admitted:
+                return None
+            if not admitted:
+                raise ChallengeError(
+                    409, "ROSTER_LIMIT_16: pause complete roster until qualification"
+                )
+            profile, digest = self._service_admission_v2(run_id)
+            manifest = self._run_v2(run_id)
         from hypertrain.trainer.config import TrainConfig
         from hypertrain.trainer.model import param_shapes
 
-        manifest = self._run_v2(run_id)
         shapes = param_shapes(TrainConfig.from_manifest_v2(manifest).model)
         p, t = manifest.training.model.param_count, len(shapes)
         delta_bytes = 20 + sum(
@@ -4868,7 +4874,8 @@ class ChallengeStore:
             "repair_steps": 16 * n,
         }
         if w is not None:
-            reservation = self._record_v2(run_id, "round-resource", str(w))
+            with self._lock:
+                reservation = self._record_v2(run_id, "round-resource", str(w))
             if any(reservation.get(name) != value for name, value in estimate.items()):
                 raise ChallengeError(409, "SERVICE_ROUND_RESOURCE_BINDING")
         return estimate

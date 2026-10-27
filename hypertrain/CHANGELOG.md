@@ -291,6 +291,16 @@
   `exit-sanction` row is `WAIVED`, so there is no strike, seizure or suspension, because only the
   master lacks the leaves and it cannot prove the miner never posted them. See
   `docs/adr/0011-audit-integrity.md` (Part 8, decision 3) at the monorepo root.
+- A request no longer reads the master's shared SQLite connection without the store lock. The
+  roster guard (`require_roster_v2`: the round record, the service-admission mark and, for an
+  admitted run, its profile, manifest and round reservation; run by `aggregate`, the public
+  `GET /rounds/{w}` and the training routes) and `weights` (the probe of finalized escrows between
+  its two transactions) held none, so a request on another thread could interleave with them and
+  answer a spurious 409 or 500. `require_roster_v2` is in the owned set of `implementation_hash`,
+  which changes: a run that already holds a `service-admission` record fails its roster guard with
+  `SERVICE_PROFILE_AUTHORITY`, and that record is immutable (`SERVICE_PROFILE_IMMUTABLE`), so such
+  a run is created again. The lock order of `docs/adr/0011-audit-integrity.md` (Part 7) is
+  unchanged.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

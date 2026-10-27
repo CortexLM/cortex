@@ -515,41 +515,9 @@ def _round_view(world: World) -> Any:
 
 
 UNLOCKED_REQUESTS = [
-    pytest.param(
-        lambda world: fin.aggregate(world, 0),
-        id="aggregate",
-        marks=pytest.mark.xfail(
-            strict=True,
-            raises=AssertionError,
-            reason="FIN-3: aggregate_v2 (store.py:8063, 8137) calls _service_boundary_v2 and "
-            "require_roster_v2 before it takes the store lock, so a second request on the shared "
-            "connection can interleave with it: concurrent aggregate POSTs of one round answer a "
-            "spurious 409 'missing accepted round' or raise sqlite3.InterfaceError",
-        ),
-    ),
-    pytest.param(
-        _round_view,
-        id="round_view",
-        marks=pytest.mark.xfail(
-            strict=True,
-            raises=AssertionError,
-            reason="FIN-3: round_view_v2 (store.py:6086, the public GET /rounds/{w} that every "
-            "miner calls) runs _service_boundary_v2 before its transaction, on the shared "
-            "connection and outside the store lock",
-        ),
-    ),
-    pytest.param(
-        lambda world: fin.ask_weights(world, 5, world.network.now),
-        id="get_weights",
-        marks=pytest.mark.xfail(
-            strict=True,
-            raises=AssertionError,
-            reason="LED-1 (minor): Store.weights reads sqlite_master, escrow_finalized and runs "
-            "between its two transactions (store.py:2064-2074) without the store lock; a failure "
-            "there is a 500 before the answer is persisted, so a retry is safe, and Cortex asks "
-            "once per epoch",
-        ),
-    ),
+    pytest.param(lambda world: fin.aggregate(world, 0), id="aggregate"),
+    pytest.param(_round_view, id="round_view"),
+    pytest.param(lambda world: fin.ask_weights(world, 5, world.network.now), id="get_weights"),
 ]
 
 

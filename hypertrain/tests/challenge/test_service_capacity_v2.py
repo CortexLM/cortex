@@ -444,6 +444,32 @@ def test_original_roster_guard_rejects_before_load_when_reservation_changed(
             getattr(store, method)(manifest.run_id(), 0)
 
 
+def test_roster_guard_of_an_admitted_run_reads_the_store_only_under_its_lock(tiny, monkeypatch):
+    # Given: an admitted run whose round holds a resource reservation, and a connection that notes
+    # each statement issued while the calling thread does not hold the store lock (the master
+    # serves every request on this one connection from a thread pool).
+    store, manifest = reserved(tiny)
+    unlocked = []
+
+    class Audited:
+        def __init__(self, real):
+            self.real = real
+
+        def execute(self, sql, *args):
+            if not store._lock._is_owned():
+                unlocked.append(" ".join(sql.split()))
+            return self.real.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
+    monkeypatch.setattr(store, "_db", Audited(store._db))
+    # When: the guard reads the round, the admission, the manifest and the reservation.
+    store.require_roster_v2(manifest.run_id(), 0)
+    # Then
+    assert unlocked == []
+
+
 def test_heavy32_execution_remains_blocked_when_only_accounting_admitted(tiny, monkeypatch):
     store, manifest = reserved(tiny)
     events = {"allocation": 0, "state_load": 0, "decode": 0, "worker_launch": 0}
