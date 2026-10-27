@@ -41,7 +41,7 @@ for config_path in a.config:
     job = engine.check_inputs(engine.Qualification.model_validate_json(config_path.read_bytes()))
     if job.manifest != manifest:
         sys.exit(f"{config_path}: qualification seed job binds another manifest")
-verdict = engine.compare(list(a.result), manifest)
+verdict = engine.compare(list(a.result), manifest, host_keys=None)
 if verdict != {"two_host_bitwise_match": True, "workload_allowed": False}:
     sys.exit(f"two-host comparison did not match: {verdict}")
 

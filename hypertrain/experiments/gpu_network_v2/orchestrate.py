@@ -2300,7 +2300,10 @@ class NetworkRuntime:
             cfg = engine.Qualification.model_validate_json(cfg_path.read_bytes())
             if engine.check_inputs(cfg).manifest != manifest or cfg.sources != data("sources"):
                 raise Reject("signed_d2_qualification_run_differs")
-        engine.compare(list(results), manifest)
+        # Label-only: a rented Vast container has no host attestation (strict Vast
+        # qualification is a follow-up, docs/adr/0011-audit-integrity.md part 4). Its machine
+        # ids come from the provider listing, which Orchestrator.admit checks distinct.
+        engine.compare(list(results), manifest, host_keys=None)
         sources, bundle_bytes = effective_bundle(
             engine, Path(evidence["tree"]), files["source_profile"]
         )
@@ -3335,8 +3338,11 @@ def reviewed_launch(record_path: Path, owner: str, beacon: int, action: str) -> 
         graph_spec.loader.exec_module(continuation_driver)
         continuation_driver.ContinuationGraph.model_validate_json(artifacts["graph"].read_bytes())
         # Every role's job hashes to env.run_id above, so any job carries the one manifest.
+        # Label-only, as for the qualification verification earlier in this module.
         driver.compare(
-            [artifacts[inputs["qualification_result"]] for inputs in roles.values()], job.manifest
+            [artifacts[inputs["qualification_result"]] for inputs in roles.values()],
+            job.manifest,
+            host_keys=None,
         )
     else:
         planning_snapshot = dict(snapshot)

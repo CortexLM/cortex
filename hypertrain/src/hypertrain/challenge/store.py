@@ -2445,7 +2445,8 @@ class ChallengeStore:
                 or not Path(result.environment.torch_path).is_relative_to("/venv/main")
             ):
                 raise ChallengeError(403, "reviewed CUDA runtime/reference binding differs")
-        engine.compare(list(results), manifest)  # Rehash all rescued rank/round/checkpoint bytes.
+        # Rehash all rescued rank/round/checkpoint bytes.
+        engine.compare(list(results), manifest, host_keys=None)
         summaries = [
             fsha(path.parent / f"round-{round_index}/published/rank-{rank}/summary.json")
             for path in results

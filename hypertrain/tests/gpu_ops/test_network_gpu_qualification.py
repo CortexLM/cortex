@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from hypertrain.gpu_ops import host_attest
 from hypertrain.gpu_ops import network_qualification as driver
 from hypertrain.gpu_ops.journal import fsha
 from hypertrain.gpu_ops.launcher import Reject
@@ -58,6 +63,7 @@ def results(tmp_path: Path, ranks: int = 2, H: int = 30, J: int = 5) -> list[Pat
                 sm_counts=[170] * ranks,
                 capabilities=[RTX_5090] * ranks,
                 image_digest="sha256:" + "44" * 32,
+                gpu_uuids=host_gpus(i)[:ranks],
             ),
             instance_id=i + 1,
             machine_id=i + 10,
@@ -68,8 +74,82 @@ def results(tmp_path: Path, ranks: int = 2, H: int = 30, J: int = 5) -> list[Pat
         )
         path = directory / "result.json"
         path.write_text(result.model_dump_json())
+        attest(path)
         paths.append(path)
     return paths
+
+
+def host_gpus(host: int, count: int = 8) -> list[str]:
+    """Every GPU of one box, in nvidia-smi form; two boxes never share one."""
+    return ["GPU-" + str(uuid.UUID(int=(host + 1) * 1000 + d)) for d in range(count)]
+
+
+def boot_id(host: int) -> str:
+    return str(uuid.UUID(int=0xB007_0000 + host))
+
+
+@functools.cache
+def host_key(index: int) -> tuple[bytes, str]:
+    """A throw-away SSH host key: private file bytes and the `ssh-ed25519 <base64>` form."""
+    with tempfile.TemporaryDirectory(prefix="ht-hostkey-") as scratch:
+        private = Path(scratch, "key")
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(private)],
+            check=True,
+            capture_output=True,
+        )
+        public = " ".join(private.with_suffix(".pub").read_text().split()[:2])
+        return private.read_bytes(), public
+
+
+def key_file(path: Path, index: int) -> Path:
+    """Host `index`'s private key beside the result directories, and its known_hosts file."""
+    private = path.parent.parent / "keys" / f"host-{index}"
+    if not private.exists():
+        private.parent.mkdir(exist_ok=True)
+        material, public = host_key(index)
+        private.write_bytes(material)
+        private.chmod(0o600)
+        private.with_suffix(".known_hosts").write_text(f"host-{index} {public}\n")
+    return private
+
+
+def attest(path: Path, signer: int | None = None, **override: Any) -> None:
+    """Sign, as an SSH host key, what the host would say about the result.json now on disk."""
+    index = host_index(path)
+    result = driver.Result.model_validate_json(path.read_bytes())
+    statement = host_attest.HostStatement.model_validate(
+        {
+            "version": 1,
+            "config_sha256": result.config_sha256,
+            "result_sha256": fsha(path),
+            "image_digest": result.environment.image_digest,
+            "gpu_uuids": sorted(host_gpus(index)),
+            "drivers": sorted(set(result.environment.drivers)),
+            "boot_id": boot_id(index),
+        }
+        | override
+    )
+    raw = host_attest.statement_bytes(statement)
+    key = key_file(path, index if signer is None else signer)
+    signature = subprocess.run(
+        ["ssh-keygen", "-Y", "sign", "-f", str(key), "-n", host_attest.NAMESPACE],
+        input=raw,
+        check=True,
+        capture_output=True,
+    ).stdout
+    (path.parent / host_attest.ATTESTATION).write_bytes(raw)
+    (path.parent / host_attest.SIGNATURE).write_bytes(signature)
+
+
+def host_index(path: Path) -> int:
+    return int(path.parent.name.removeprefix("host-"))
+
+
+def pins(paths: list[Path]) -> list[str]:
+    """The host keys the operator pinned: one `ssh-ed25519` key per host's known_hosts file."""
+    known = [key_file(p, host_index(p)).with_suffix(".known_hosts") for p in paths]
+    return [host_attest.pinned_key(k.read_bytes()) for k in known]
 
 
 def manifest(ranks: int = 2, H: int = 30, J: int = 5) -> RunManifestV2:  # noqa: N803
@@ -105,7 +185,7 @@ def test_bitwise_comparison_preserves_workload_gate(tmp_path: Path) -> None:
     # Given
     paths = results(tmp_path)
     # When
-    result = driver.compare(paths, manifest())
+    result = driver.compare(paths, manifest(), host_keys=pins(paths))
     # Then
     assert result == {"two_host_bitwise_match": True, "workload_allowed": False}
 
@@ -116,7 +196,7 @@ def test_tampered_artifact_rejects_claimed_matching_hashes(tmp_path: Path) -> No
     (paths[1].parent / "round-1/published/rank-0/state.safetensors").write_bytes(b"tampered")
     # When / Then
     with pytest.raises(Reject, match="custody_changed"):
-        driver.compare(paths, manifest())
+        driver.compare(paths, manifest(), host_keys=pins(paths))
 
 
 def test_same_machine_rejects_two_host_claim(tmp_path: Path) -> None:
@@ -127,7 +207,260 @@ def test_same_machine_rejects_two_host_claim(tmp_path: Path) -> None:
     paths[1].write_text(json.dumps(data))
     # When / Then
     with pytest.raises(Reject, match="binding_or_bitwise"):
-        driver.compare(paths, manifest())
+        driver.compare(paths, manifest(), host_keys=pins(paths))
+
+
+def relabel_host_zero_as_host_one(paths: list[Path]) -> None:
+    """The Lens attack: host 1 is a byte copy of host 0 with its three labels rewritten."""
+    one, two = paths
+    shutil.rmtree(two.parent)
+    shutil.copytree(one.parent, two.parent)
+    data = json.loads(two.read_bytes())
+    data.update(machine_id=999, instance_id=998, role="relabelled")
+    two.write_text(json.dumps(data))
+
+
+@pytest.mark.parametrize(
+    "attack,code",
+    [
+        ("copy", "qualification_attestation_signature"),
+        ("copy_resigned_with_a_foreign_key", "qualification_attestation_signature"),
+        ("same_pin_twice", "qualification_hosts_not_distinct:host_key"),
+    ],
+)
+def test_relabelled_copy_of_one_host_is_refused(tmp_path: Path, attack: str, code: str) -> None:
+    # Given: two attested hosts, then one host passed off as both.
+    paths = results(tmp_path)
+    keys = pins(paths)
+    if attack == "same_pin_twice":
+        keys = [keys[0], keys[0]]
+    else:
+        relabel_host_zero_as_host_one(paths)
+        if attack == "copy_resigned_with_a_foreign_key":
+            attest(paths[1], signer=7)
+    # When / Then
+    with pytest.raises(Reject, match=f"^{code}$"):
+        driver.compare(paths, manifest(), host_keys=keys)
+
+
+CHANGES = {
+    "drivers": lambda d: d["environment"].update(drivers=["999.99.99"] * 2),
+    "torch_path": lambda d: d["environment"].update(torch_path="/somewhere/else/torch/x.py"),
+    "config_sha256": lambda d: d.update(config_sha256="ab" * 32),
+    "elapsed_seconds": lambda d: d.update(elapsed_seconds=0.001),
+}
+
+
+@pytest.mark.parametrize("field", list(CHANGES))
+def test_result_fields_changed_after_signing_are_refused(tmp_path: Path, field: str) -> None:
+    # Given: host 1's result edited after its host signed it.
+    paths = results(tmp_path)
+    data = json.loads(paths[1].read_bytes())
+    CHANGES[field](data)
+    paths[1].write_text(json.dumps(data))
+    # When / Then
+    with pytest.raises(Reject, match="^qualification_attestation_unbound$"):
+        driver.compare(paths, manifest(), host_keys=pins(paths))
+
+
+@pytest.mark.parametrize("recorded", ["other_gpus", "none"])
+def test_result_from_other_gpus_is_unbound(tmp_path: Path, recorded: str) -> None:
+    # Given: host 1 honestly re-signs a result that names host 0's GPUs, or names none.
+    paths = results(tmp_path)
+    data = json.loads(paths[1].read_bytes())
+    if recorded == "other_gpus":
+        data["environment"]["gpu_uuids"] = host_gpus(0)[:2]
+    else:
+        del data["environment"]["gpu_uuids"]
+    paths[1].write_text(json.dumps(data))
+    attest(paths[1])
+    # When / Then
+    with pytest.raises(Reject, match="^qualification_attestation_unbound$"):
+        driver.compare(paths, manifest(), host_keys=pins(paths))
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"image_digest": "sha256:" + "55" * 32},
+        {"config_sha256": "ab" * 32},
+        {"drivers": ["595.91"]},
+    ],
+    ids=["image", "config", "driver"],
+)
+def test_attestation_for_another_image_config_or_driver_is_unbound(
+    tmp_path: Path, override: dict[str, Any]
+) -> None:
+    # Given: host 1 signed a statement about another image, another config or another driver.
+    paths = results(tmp_path)
+    attest(paths[1], **override)
+    # When / Then
+    with pytest.raises(Reject, match="^qualification_attestation_unbound$"):
+        driver.compare(paths, manifest(), host_keys=pins(paths))
+
+
+@pytest.mark.parametrize("fault", ["missing", "not_canonical"])
+def test_missing_or_non_canonical_attestation_is_refused(tmp_path: Path, fault: str) -> None:
+    # Given
+    paths = results(tmp_path)
+    statement = paths[1].parent / host_attest.ATTESTATION
+    if fault == "missing":
+        statement.unlink()
+    else:
+        statement.write_text(json.dumps(json.loads(statement.read_bytes()), indent=1))
+    # When / Then
+    with pytest.raises(Reject, match=f"^qualification_attestation_{fault}$"):
+        driver.compare(paths, manifest(), host_keys=pins(paths))
+
+
+@pytest.mark.parametrize("shared", ["gpu_uuid", "boot_id"])
+def test_hosts_sharing_a_gpu_or_a_boot_id_are_refused(tmp_path: Path, shared: str) -> None:
+    # Given: two honestly signed statements that still describe one box.
+    paths = results(tmp_path)
+    if shared == "gpu_uuid":  # One of host 1's eight GPUs is one of host 0's.
+        attest(paths[1], gpu_uuids=sorted([*host_gpus(1)[:7], host_gpus(0)[3]]))
+    else:
+        attest(paths[1], boot_id=boot_id(0))
+    # When / Then
+    with pytest.raises(Reject, match=f"^qualification_hosts_not_distinct:{shared}$"):
+        driver.compare(paths, manifest(), host_keys=pins(paths))
+
+
+def test_label_only_accepts_legacy_results_without_attestation(tmp_path: Path) -> None:
+    # Given: results written before attestations and device UUIDs existed (the Vast lifecycle).
+    paths = results(tmp_path)
+    for path in paths:
+        data = json.loads(path.read_bytes())
+        del data["environment"]["gpu_uuids"]
+        path.write_text(json.dumps(data))
+        (path.parent / host_attest.ATTESTATION).unlink()
+        (path.parent / host_attest.SIGNATURE).unlink()
+    # When
+    result = driver.compare(paths, manifest(), host_keys=None)
+    # Then
+    assert result == {"two_host_bitwise_match": True, "workload_allowed": False}
+
+
+def test_compare_has_no_default_trust_mode(tmp_path: Path) -> None:
+    # Given / When / Then: the bare call that used to pass the relabelled copy is no longer a call.
+    with pytest.raises(TypeError, match="host_keys"):
+        driver.compare(results(tmp_path), manifest())  # type: ignore[call-arg]
+
+
+def test_compare_refuses_one_key_for_two_hosts(tmp_path: Path) -> None:
+    # Given
+    paths = results(tmp_path)
+    # When / Then
+    with pytest.raises(Reject, match="^qualification_requires_two_host_results$"):
+        driver.compare(paths, manifest(), host_keys=pins(paths)[:1])
+
+
+def committed_pins(tmp_path: Path, paths: list[Path]) -> tuple[list[Path], list[driver.HostPin]]:
+    """Per host: a config committing to its known_hosts file, and the pin the owner types."""
+    configs, host_pins = [], []
+    for path in paths:
+        index = host_index(path)
+        known = key_file(path, index).with_suffix(".known_hosts")
+        directory = tmp_path / f"cfg-{index}"
+        directory.mkdir()
+        cfg = seed_config(directory, TREE / "experiments/gpu_network_v2/profile.json")
+        committed = cfg.model_copy(update={"known_hosts_sha256": fsha(known)})
+        config = directory / "config.json"
+        config.write_bytes(committed.model_dump_json().encode())
+        configs.append(config)
+        host_pins.append(driver.HostPin(known, host_attest.fingerprint(pins([path])[0])))
+    return configs, host_pins
+
+
+def test_pinned_keys_accepts_the_committed_known_hosts_and_typed_fingerprint(
+    tmp_path: Path,
+) -> None:
+    # Given
+    paths = results(tmp_path)
+    configs, host_pins = committed_pins(tmp_path, paths)
+    # When
+    keys = driver.pinned_keys([c.read_bytes() for c in configs], host_pins)
+    # Then
+    assert keys == pins(paths)
+
+
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("known_hosts_edited", "qualification_known_hosts_changed"),
+        ("fingerprint_of_the_other_host", "qualification_host_fingerprint_mismatch"),
+        ("one_pin", "qualification_requires_two_host_results"),
+    ],
+)
+def test_pinned_keys_refuses_what_the_owner_did_not_commit_to(
+    tmp_path: Path, fault: str, code: str
+) -> None:
+    # Given
+    paths = results(tmp_path)
+    configs, host_pins = committed_pins(tmp_path, paths)
+    if fault == "known_hosts_edited":
+        host_pins[0].known_hosts.write_text(host_pins[0].known_hosts.read_text() + "# edited\n")
+    elif fault == "fingerprint_of_the_other_host":
+        host_pins[0] = host_pins[0]._replace(fingerprint=host_pins[1].fingerprint)
+    else:
+        host_pins = host_pins[:1]
+    # When / Then
+    with pytest.raises(Reject, match=f"^{code}$"):
+        driver.pinned_keys([c.read_bytes() for c in configs], host_pins)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        [],
+        ["--known-hosts", "a", "b"],
+        ["--host-fingerprint", "x", "y"],
+        ["--label-only", "--known-hosts", "a", "b", "--host-fingerprint", "x", "y"],
+    ],
+    ids=["bare", "no_fingerprints", "no_known_hosts", "both_modes"],
+)
+def test_compare_cli_requires_an_explicit_trust_mode(
+    monkeypatch: pytest.MonkeyPatch, mode: list[str]
+) -> None:
+    # Given: arguments that name no files; the mode is refused before any is read.
+    argv = ["network_qualification", "compare", "c0", "c1", "r0", "r1", *mode]
+    monkeypatch.setattr(sys, "argv", argv)
+    # When / Then
+    with pytest.raises(SystemExit, match="--label-only"):
+        driver.main()
+
+
+def test_compare_cli_runs_in_either_trust_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Given: attested results whose configs commit to the known_hosts files.
+    paths = results(tmp_path)
+    configs, host_pins = committed_pins(tmp_path, paths)
+    for path, config in zip(paths, configs, strict=True):
+        data = json.loads(path.read_bytes())
+        data["config_sha256"] = fsha(config)
+        path.write_text(json.dumps(data))
+        attest(path)
+    monkeypatch.setattr(driver, "check_inputs", lambda cfg: SimpleNamespace(manifest=manifest()))
+    base = ["network_qualification", "compare", *map(str, configs), *map(str, paths)]
+    strict = [
+        "--known-hosts",
+        *(str(p.known_hosts) for p in host_pins),
+        "--host-fingerprint",
+        *(p.fingerprint for p in host_pins),
+    ]
+    expected = {"two_host_bitwise_match": True, "workload_allowed": False}
+    for mode in (["--label-only"], strict):
+        monkeypatch.setattr(sys, "argv", [*base, *mode])
+        # When
+        driver.main()
+        # Then
+        assert json.loads(capsys.readouterr().out) == expected
+    # And a fingerprint typed for the other host is refused.
+    swapped = [*strict[:4], strict[5], strict[4]]
+    monkeypatch.setattr(sys, "argv", [*base, *swapped])
+    with pytest.raises(Reject, match="^qualification_host_fingerprint_mismatch$"):
+        driver.main()
 
 
 def hash_only(paths: list[Path]) -> None:
@@ -151,7 +484,7 @@ def test_hash_only_rescue_compares_from_bound_host_inventories(tmp_path: Path) -
     paths = results(tmp_path)
     hash_only(paths)
     # When
-    result = driver.compare(paths, manifest())
+    result = driver.compare(paths, manifest(), host_keys=pins(paths))
     # Then
     assert result == {"two_host_bitwise_match": True, "workload_allowed": False}
 
@@ -165,7 +498,7 @@ def test_full_rescue_missing_tensor_rejects_despite_inventory(tmp_path: Path) ->
     (root / "round-1/published/rank-0/state.safetensors").unlink()
     # When / Then
     with pytest.raises(Reject, match="custody_changed"):
-        driver.compare(paths, manifest())
+        driver.compare(paths, manifest(), host_keys=pins(paths))
 
 
 @pytest.mark.parametrize(
@@ -203,7 +536,7 @@ def test_hash_only_inventory_faults_reject(tmp_path: Path, fault: str, match: st
         custody.unlink()
     # When / Then
     with pytest.raises(Reject, match=match):
-        driver.compare(paths, manifest())
+        driver.compare(paths, manifest(), host_keys=pins(paths))
 
 
 def test_cross_host_hash_mismatch_rejects_with_hash_only_rescue(tmp_path: Path) -> None:
@@ -215,7 +548,7 @@ def test_cross_host_hash_mismatch_rejects_with_hash_only_rescue(tmp_path: Path) 
     hash_only(paths)
     # When / Then
     with pytest.raises(Reject, match="binding_or_bitwise"):
-        driver.compare(paths, manifest())
+        driver.compare(paths, manifest(), host_keys=pins(paths))
 
 
 @pytest.mark.parametrize(
@@ -274,14 +607,14 @@ def test_partial_round_coverage_rejects_even_identical_results(tmp_path: Path) -
         path.write_text(json.dumps(data))
     # When / Then
     with pytest.raises(Reject, match="coverage_missing"):
-        driver.compare(paths, manifest())
+        driver.compare(paths, manifest(), host_keys=pins(paths))
 
 
 def test_eight_gpu_h4_j2_results_compare_with_full_rank_coverage(tmp_path: Path) -> None:
     # Given
     paths = results(tmp_path, ranks=8, H=4, J=2)
     # When
-    result = driver.compare(paths, manifest(8, 4, 2))
+    result = driver.compare(paths, manifest(8, 4, 2), host_keys=pins(paths))
     # Then: 8 ranks x 5 finals + rank-0 checkpoints 0,2,4 (only rank 0 writes them).
     rounds = json.loads(paths[0].read_bytes())["rounds"]
     assert result == {"two_host_bitwise_match": True, "workload_allowed": False}
@@ -313,7 +646,7 @@ def test_eight_gpu_results_reject_rank_host_custody_and_shape_attacks(
     match = {"missing_rank": "coverage_missing", "tamper": "custody_changed"}
     # When / Then
     with pytest.raises(Reject, match=match.get(attack, "binding_or_bitwise")):
-        driver.compare(paths, manifest(8, 4, 2))
+        driver.compare(paths, manifest(8, 4, 2), host_keys=pins(paths))
 
 
 @pytest.mark.parametrize(
@@ -334,7 +667,7 @@ def test_coordinated_self_consistent_results_cannot_redefine_layout(
             path.write_text(json.dumps(data))
     # When / Then: the manifest, not the results, defines ranks and checkpoints.
     with pytest.raises(Reject, match="binding_or_bitwise|coverage_missing"):
-        driver.compare(paths, manifest(8, 4, 2))
+        driver.compare(paths, manifest(8, 4, 2), host_keys=pins(paths))
 
 
 @pytest.mark.parametrize("shape", [(8, 30, 0), (8, 30, -1), (8, 30, 7), (0, 4, 2)])
