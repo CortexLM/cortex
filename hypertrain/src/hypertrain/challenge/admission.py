@@ -64,6 +64,17 @@ from hypertrain.protocol.messages_v2 import (
 SeizureReason = Literal["TRAINING_FRAUD", "NO_SHOW", "AUDIT_MISMATCH"]
 
 
+@dataclass(frozen=True)
+class _Standing:
+    """What a MATCH settlement of any lock of one admission depends on, apart from the lock."""
+
+    unresolved: bool
+    rounds: list[list[object]]
+    origins: list[str]
+    disputes: list[str]
+    release_beacon: int
+
+
 def _logical(objects: Store, ref: ArtifactRef, code: str) -> tuple[str, int, bool]:
     """(whole sha256, logical size, indexed) of `ref`; ref.size is the stored object length."""
     try:
@@ -1243,7 +1254,7 @@ class Admission:
         """Deterministic for retries, unguessable for an owner who would register it first."""
         return hmac.digest(self.ip_secret, f"ht-bond-{label}-v1|{lock_id}".encode(), "sha256").hex()
 
-    def lock_settlement(self, lock_id: str) -> Settlement:
+    def lock_settlement(self, lock_id: str, standing: _Standing | None = None) -> Settlement:
         """What may happen to one admission lock. Derived, never stored.
 
         FRAUD once the lock was seized (`seize_bond`). Otherwise MATCH, and unresolved until
@@ -1281,6 +1292,21 @@ class Admission:
                 evidence_hash=seized["evidence_hash"],
                 **who,
             )
+        st = standing or self._standing(admission_id)
+        return Settlement(
+            finality_hash=sha256_hex(
+                canonicalize(["ht-bond-final-v1", lock_id, st.rounds, st.origins])
+            ),
+            closed_dispute_root=sha256_hex(canonicalize(["ht-bond-closed-v1", st.disputes])),
+            release_beacon=st.release_beacon,
+            unresolved=st.unresolved,
+            outcome="MATCH",
+            **who,
+        )
+
+    def _standing(self, admission_id: str) -> _Standing:
+        """The admission-level reads of `lock_settlement`: one scan of the run's rounds, however
+        many locks the admission holds."""
         r = self.store.by_id(admission_id)
         unresolved = r.state == "BANNED" or r.pending_dispute
         unresolved = unresolved or self.store.pending_outbox(admission_id)
@@ -1319,27 +1345,24 @@ class Admission:
         release = max((o["mature_at"] for o in origins), default=0)
         if r.state == "ACTIVE" or (r.state == "PROBATION" and r.clean_count >= 4):
             release = max(release, r.screen_until + 1)
-        return Settlement(
-            finality_hash=sha256_hex(
-                canonicalize(["ht-bond-final-v1", lock_id, rounds, [o["origin"] for o in origins]])
-            ),
-            closed_dispute_root=sha256_hex(
-                canonicalize(["ht-bond-closed-v1", [p["dispute_id"] for p in pending]])
-            ),
-            release_beacon=release,
+        return _Standing(
             unresolved=unresolved or unvested is not None,
-            outcome="MATCH",
-            **who,
+            rounds=rounds,
+            origins=[o["origin"] for o in origins],
+            disputes=[p["dispute_id"] for p in pending],
+            release_beacon=release,
         )
 
     def bond(self, admission_id: str, *, now: int) -> dict[str, JsonValue]:
         """The admission's locked bond and what the owner must sign to take it back (status)."""
         locks: list[JsonValue] = []
+        standing = None
         for lock in self._bond_locks(admission_id):
             origins, units = self._residual(lock)
             if not units:
                 continue
-            s = self.lock_settlement(lock.operation_id)
+            standing = standing or self._standing(admission_id)
+            s = self.lock_settlement(lock.operation_id, standing)
             locks.append(
                 {
                     "lock_id": lock.operation_id,
@@ -1365,12 +1388,14 @@ class Admission:
         """
         self._beacon(now)
         receipts: list[EscrowReceipt] = []
+        standing = None
         with self.escrow.tx():
             for lock in self._bond_locks(admission_id):
                 origins, units = self._residual(lock)
                 if not units:
                     continue
-                s = self.lock_settlement(lock.operation_id)
+                standing = standing or self._standing(admission_id)
+                s = self.lock_settlement(lock.operation_id, standing)
                 if s.unresolved or s.outcome == "FRAUD" or now < s.release_beacon:
                     raise AdmissionError("BOND_NOT_RELEASABLE")
                 op = EscrowRelease(
