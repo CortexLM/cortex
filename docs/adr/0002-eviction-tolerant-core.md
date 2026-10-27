@@ -19,7 +19,7 @@
 | Phase | Today | Where |
 | --- | --- | --- |
 | Joined, challenge not yet fetched | After `seed + 100` rounds the challenge answers 409 `CHALLENGE_EXPIRED` and nothing changes. The admission stays `APPLIED` for good: it holds one of the 32 pending places (`PENDING_CAPACITY`), its hotkey is spent, and its coldkey stays blocked by the generic rule below [V] | `src/hypertrain/challenge/admission.py:236-240`, `:166-171`, `:158-166` |
-| During a trial, past its deadline | The trial stays `OPEN` and holds one of the run's 2 trial places (`TRIAL_CAPACITY`), so two vanished miners block every newcomer. That lasts until someone requests that admission's challenge [V code, A review reproduction]. That request suspends the miner (`SUSPENDED`, reason `CHALLENGE_EXPIRED`) and marks the trial `EXPIRED` [V]. `join` refuses any coldkey with a non-`ACTIVE` admission [V]. `resume` needs `resolve_pending`, which needs a pending dispute, and an expiry has none: no route found back [V code, H no other route] | `admission.py:241-246`, `:216-228`, `:162-166`, `:1029-1062` |
+| During a trial, past its deadline | The trial stays `OPEN` and holds one of the run's 2 trial places (`TRIAL_CAPACITY`), so two vanished miners block every newcomer. That lasts until someone requests that admission's challenge [V code, A review reproduction]. That request suspends the miner (`SUSPENDED`, reason `CHALLENGE_EXPIRED`) and marks the trial `EXPIRED` [V]. `join` refuses any coldkey with a non-`ACTIVE` admission [V]. `resume` itself accepts a `SUSPENDED` row with no dispute, but in `src/` only `resolve_pending` calls it, and that needs a pending dispute, which an expiry never creates: no route back found [V code, H no other route]. The challenge request is an unsigned GET, so any caller can trigger the suspension [V] | `admission.py:241-246`, `:216-228`, `:162-166`, `:1029-1091`; `challenge/app.py:449-454` |
 | During island training | `torchrun --max-restarts=0`, no elastic rendezvous; nothing is published [V]. `schedule_audits_v2` reads every roster member's commit, and a missing one raises 409 for the whole round [V]. Nothing excludes a no-show, so the round never applies and `w+2` never opens: the run stalls. The miner itself is not penalised [V] | `src/hypertrain/miner/island_launch.py:402-415`; `src/hypertrain/challenge/store.py:6384-6388`, `:2151-2161`; `src/hypertrain/challenge/finality_v2.py:41-57` |
 | After commit, before the delta | `verified_inputs_v2` needs the delta of every non-excluded member, so aggregate and finalize return 409 [V]. Missing leaves end in audit exhaustion, which excludes the miner (`INFRASTRUCTURE`) and marks the whole round `EXCLUDED`: nobody in it is paid [V] | `store.py:7896-7906`, `:6650-6672` |
 | During an audit | The miner is not needed: the audit replays master-staged inputs [A research of `store.py:6897-7336`] | |
@@ -256,6 +256,11 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
    }
    ```
 
+   The admission side is a successor of `AdmissionPolicyV2` with a re-seed budget and a dormancy
+   delay (placeholder names). Its digest is pinned by `network.admission_policy_hash`
+   (`challenge/admission.py:122-123`), so it changes the run ID too. What P1 does with each v2
+   admission rule is in "P1 and the v2 admission rules" below.
+
    Under P1:
    - A round is a set of S shards held under leases, not a fixed roster that must all commit.
      Roster sizing: the run policy fixes S, and any M ≥ 1 live members make progress. At the
@@ -267,12 +272,41 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
      partition: indistinguishable from honest failure) or a stall. None is penalised, and
      accepted links are credited. A held shard that never progressed earns nothing. Only a link
      that fails the audit is penalised.
-   - A trial becomes one work unit under the same lease and progress deadline, replacing v2's
-     single 100-round (about 297 to 300 s) window. A trial interrupted by an eviction ends
-     `INTERRUPTED`, not `EXPIRED`: its trial place is released, there is no suspension and no
-     coldkey block, and the miner may ask for a new trial within a retry budget [founder]. An
-     `APPLIED` row whose challenge was never fetched expires with that window instead of
-     holding a pending place and blocking its coldkey for the rest of the run.
+   - A trial keeps v2's proof window of 100 rounds (about 300 s from its seed; option E1 below).
+     The lease and the progress deadline release a lost holder's trial place at once; they do
+     not resume the trial, and a replacement host runs a new one, since this ADR's replacement
+     delay (10 minutes, 200 rounds [H arithmetic]) outlasts the window. Replacing the window by
+     lease and progress (E2) would edit `challenge_rounds: Literal[100]`, the
+     `deadline == seed + 100` validator and every user of `deadline_beacon`, so it needs a new
+     policy and a new run [founder].
+   - A trial whose holder leaves, lapses, stalls or is replaced ends `INTERRUPTED`, not
+     `EXPIRED`. The master writes it from a departure it has persisted (the coordinator keeps
+     them in memory), and only while the trial is `OPEN` and unproven: `proof()` and
+     `finalize_trial` never read the trial outcome today, and a late proof for a closed trial is
+     refused only because no reference was committed (`admission.py:678-682`, `:888-890`). It
+     frees the trial place, suspends nobody, leaves `screen_until` and `clean_count` as they are
+     and adds no coldkey block. For a P1 run the lazy branch of `challenge()` (`:222-228`) must
+     close an `OPEN` trial past its deadline as `INTERRUPTED` too, with no suspension: a holder
+     that keeps its lease and never proves would otherwise be suspended with no route back, by
+     any caller of the unsigned GET. A data-plane outage recorded by the coordinator is an
+     excused miss in the same way; ADR 0003 (Decision 10) leaves that to this ADR.
+   - A new trial needs a re-seed. `challenge()` refuses once `now > seed_beacon + 100`, and only
+     `join`, a trial finalization and `resume` set the seed (`:197`, `:891-895`, `:1043-1048`),
+     so an eviction longer than about 300 s after the last finalization strands the miner; this
+     ADR's own replacement delay is 10 minutes and its drought 30. P1 adds a request signed by
+     the admission's hotkey (a new v2 envelope type with a single-use `request_id`); the master
+     sets `seed_beacon` to its own verified round plus one, as `join` does. It applies to
+     `APPLIED`, `PROBATION` and `ACTIVE` rows, so for P1 runs it is the code change that
+     `hypertrain/docs/network-v2.md` asks for before a production admission policy is signed
+     (the idle-miner paragraph).
+   - An `APPLIED` row whose seed window has passed is dormant, not expired: "expires with that
+     window" is withdrawn. `join` refuses any coldkey with a non-`ACTIVE` row
+     (`COLDKEY_PROBATION_EXISTS`, `admission.py:162-166`), and nothing in v2 expires a row by
+     time (a raising `challenge()` rolls its transaction back). The dormant row keeps its
+     pending place, its spent hotkey and its coldkey block, and can be re-seeded. After
+     `dormant_rounds` the master suspends it with reason `APPLIED_EXPIRED`, at the start of
+     every `join` and in the re-seed route; `join` then ignores rows in that state when it
+     applies the coldkey rule, and every other non-`ACTIVE` row still blocks.
    - The audit replays links, which maps to today's anchored replay; disputes bisect inside a
      link (step, layer, op) as today.
    - A dispute turn belongs to the owner, not to the host. The owner's replacement host answers
@@ -288,6 +322,45 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
 8. **Not changed** [V]: `src/hypertrain/protocol/`, the golden leaf roots, the ten
    `implementation_hash` files and the store's hashed methods, the v2 admission, round, audit,
    dispute and escrow code, and the existing CI shards (`tests/elastic/` runs in its own job).
+
+### P1 and the v2 admission rules
+
+Paths are under `src/hypertrain/` and `challenge/admission.py` unless prefixed; the left column is
+[V, read 2026-10-27] unless marked. A round is 3 s: 100 rounds are about 300 s, the 6000-round
+screen epoch about 5 h. A trial does not fit its window if the host is down for more than the
+window minus one trial's duration (about 36 rounds, 108 s, with joinbase-6's 64 [A, arithmetic]).
+
+| v2 rule | What P1 does | Status |
+| --- | --- | --- |
+| `screen_until` is written only at proof acceptance (`:745-754`) and reset by `resume` (`:1045`); eligible needs `now <= screen_until` (`:936-945`); W = 6000 in the example (`ops/manifest_v2.py:189`) | `INTERRUPTED` does not extend it: a screen is hardware evidence and an interrupted trial adds none. An evicted `ACTIVE` miner stays eligible until `screen_until`; after it, one re-seed and one `MATCH` trial restore it without leaving `ACTIVE`, since acceptance rewrites `screen_until` | proposal |
+| `clean_count` +1 at finalization (`:891-893`), reset only by `resume` | `INTERRUPTED` neither adds nor resets; a `PROBATION` miner evicted for longer than W keeps its count | proposal |
+| The renewal window after a finalization is `challenge_rounds` minus a trial; only suspend and `resume` reopen it, at zero (`hypertrain/docs/network-v2.md`, idle-miner paragraphs) | The re-seed is the change that note asks for, for P1 runs. v2 runs keep today's rule; fixing them is a separate admission change | founder |
+| The seed has three writers (`:197`, `:891-895`, `:1043-1048`) | A fourth, the re-seed, never inside the unsigned GET: any caller could otherwise spend a miner's budget and the 2 trial places | proposal |
+| `TRIAL_CAPACITY` counts `OPEN` rows, at most 2 (`:242-246`); a vanished holder keeps one until someone requests the challenge (`:216-228`) | The place is freed when the lease or the progress deadline ends. The outcome `INTERRUPTED` is free text in `admission_trial_results`, no schema change | proposal |
+| `max_pending` 32 counts `APPLIED` and `PROBATION` rows (`:167-171`); the hotkey stays spent (`:158-161`) | `dormant_rounds` covers `APPLIED` only; a dormant `PROBATION` row keeps its place and its count. The locked units of a dormant or `APPLIED_EXPIRED` row are not released by `suspend` (`:1012`); what releases them is open | founder; `PROBATION` and lock [?] |
+| Lapses are not sanctioned, so a miner that takes a trial and vanishes dodges the v2 suspension for the cost of one TTL or progress deadline, and leaves a trial's inputs staged (`challenge/store.py:2752-2796`) | A re-seed budget per coldkey and epoch (`now // work_screen_epoch_rounds`), read through `admission_history.coldkey` so a new hotkey does not reset it. Every trial that closes without `MATCH` or `MISMATCH` counts, because lapses and honest evictions cannot be told apart. Exhausted: re-seed refused until the next epoch, nobody suspended. A flat value is wrong for a regional loss, which hits every host of a coldkey at once. This is a cost on an honest departure (I5) | founder |
+| The screen belongs to the admission (`admission_store.py:47-49`), not to a host | A replacement host of the same owner inherits the live screen; only the periodic re-screen covers hardware that differs between Spot hosts | founder [?] |
+| The admission modules are outside the ten `implementation_hash` paths and the 28 owned names of `challenge/store.py` (`:4249-4260`, `:4283-4312`) | Whether they should join is open; the policy fields and E2 change the policy digest and the run ID either way | [?] |
+
+Rejected for P1: extending `screen_until` by the eviction time (the screen would vouch for
+hardware that was not re-tested), resetting `clean_count` (it penalises an honest departure), an
+automatic re-seed after `INTERRUPTED` (it opens windows for hosts that may not return), a longer
+`challenge_rounds` (it is E2, and only moves the cliff, since a drought has no upper bound),
+deleting the dormant row (it breaks the replay of its `join`, the transition log and the spent
+hotkey), a new `AdmissionState` value (a wire Literal that `RosterEntryV2` also uses,
+`protocol/messages_v2.py:51`), and suspending on a lapse (the v2 outcome: an honest eviction would
+end the identity).
+
+E1 is conditional: ADR 0003 puts the transfer of a trial (about 2 GB up and 2 GB down) at 196 to
+306 Mbit/s for 297 s [H], so E1 holds for a remote Spot host only if its uplink is that fast, and
+the founder should weigh it against E2. Tests P1 needs before it changes any of this: one test
+covers the lazy suspension today (`tests/challenge/test_admission_v2.py:220-235`) and
+`COLDKEY_PROBATION_EXISTS` another (`tests/challenge/test_service_network_v2.py:2467`); none
+covers the refusal at `seed + 100` of a never-fetched `APPLIED` row or its effect on the coldkey
+rule [V grep]. P1 adds: a re-seed refused for a `SUSPENDED` row, a pending dispute or an `OPEN`
+trial; `INTERRUPTED` leaving `screen_until` and `clean_count` alone; `join` ignoring only
+`APPLIED_EXPIRED` rows; the budget counted per coldkey across hotkeys; `proof()` and
+`finalize_trial` refusing a trial that is not `OPEN`.
 
 ## Redundancy options
 
@@ -497,7 +570,19 @@ step timeout and then the mutation check, on a 4-vCPU runner.
 4. Budgets:
    - a lapse or stall budget against a miner that joins, holds shards and vanishes repeatedly
      (harm today bounded by one TTL or one progress deadline per join);
-   - the retry budget for `INTERRUPTED` trials.
+   - the retry budget for trials: decision 5.
+
+5. Admission rules under P1 ("P1 and the v2 admission rules"):
+   - the signed re-seed request, for `APPLIED`, `PROBATION` and `ACTIVE` rows;
+   - the re-seed budget, its window and whether exhaustion only refuses the re-seed (proposed)
+     or is excused after a verified leave or a recorded outage; its value is sized from the
+     measured eviction rate (lot D) [?];
+   - `dormant_rounds` for `APPLIED` rows (proposed: one `work_screen_epoch_rounds`, 6000
+     rounds), and whether it also releases `PROBATION` rows;
+   - E1, keep the 100-round proof window (proposed), or E2, replace it;
+   - whether a replacement host inherits the live screen (proposed) or must re-screen.
+6. Whether v2 production runs get the re-seed too, as a separate admission change, before the
+   first production admission policy is signed.
 
 ## Consequences
 
