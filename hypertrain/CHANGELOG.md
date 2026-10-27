@@ -61,6 +61,10 @@
   (`seed + challenge_rounds`) and holds no stake is suspended as `APPLIED_EXPIRED`: 32 unfunded
   joins can no longer hold every pending place for good (RTA-02). Its coldkey may apply again;
   its hotkey stays spent; a funded row is never touched. ADR 0010.
+- Optional admission policy field `max_unfunded_per_prefix` (1 to 32): `join` refuses a new
+  application with `PREFIX_PENDING_CAPACITY` when its /24 or /64 already holds that many unfunded
+  `APPLIED` rows (RTA-02). Absent by default and omitted from the digest, so no existing policy
+  digest or run id changes. ADR 0010.
 - CUDA network qualification records each device's compute capability with its SM count and
   accepts a device only when the pair is a row of `network_qualification.SM_COUNTS` (RTX 5090
   12.0 = 170, B300 10.3 = 148) and the count equals the signed manifest's

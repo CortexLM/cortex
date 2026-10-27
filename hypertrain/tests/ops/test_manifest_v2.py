@@ -305,3 +305,18 @@ def test_od_large_manifest_screen_epoch_is_the_example_value(tmp_path: Path) -> 
     assert main(["example", "--out", str(tmp_path / "example")]) == 0
     example = json.loads((tmp_path / "example" / "policies.json").read_text())["admission"]
     assert ast.literal_eval(rounds) == example["work_screen_epoch_rounds"]
+
+
+@pytest.mark.parametrize("mode", ["test", "production"])
+def test_example_admission_policy_digest_is_pinned_in_both_ledger_modes(
+    tmp_path: Path, mode: str
+) -> None:
+    # `manifest_v2 example` must keep emitting the policy whose digest every run signed from it
+    # carries: the optional per-prefix cap is not part of it.
+    from hypertrain.protocol.messages_v2 import AdmissionPolicyV2
+
+    assert main(["example", "--ledger-mode", mode, "--out", str(tmp_path / mode)]) == 0
+    raw = json.loads((tmp_path / mode / "policies.json").read_text())["admission"]
+    assert "max_unfunded_per_prefix" not in raw
+    policy = AdmissionPolicyV2.model_validate(raw)
+    assert policy.digest() == "c3fd6d4d47c406fa6add423091f2ae22b38bd9ed8ebe92df472f589672b3e3e3"
