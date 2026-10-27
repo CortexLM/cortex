@@ -15,9 +15,11 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -274,6 +276,7 @@ def test_dispatch_publishes_validated_artifacts_with_accepted_provenance(
         "image": {"requested": pool.image, "repo_digests": [pool.image]},
         "runner_sha256": RUNNER_SHA,
         "result_tar_sha256": run["stdout_sha256"],
+        "compute_cache": True,
         "publication_sha256": publication_digest(published),
     }
 
@@ -329,12 +332,15 @@ def test_container_receives_the_job_inputs_and_the_pinned_environment(
     assert 0 < launched["budget"] <= canned.job.deadline - time.time()
 
 
-@pytest.mark.parametrize("variant", ["plain", "sudo", "network-none"])
-def test_container_is_started_by_digest_without_any_mount(make_pool, canned, tmp_path, variant):
+@pytest.mark.parametrize("variant", ["plain", "sudo", "network-none", "no-cache"])
+def test_container_is_started_by_digest_with_at_most_the_compute_cache_mounted(
+    make_pool, canned, tmp_path, variant
+):
     kwargs = {
         "plain": {},
         "sudo": {"docker": ("sudo", "-n", "docker")},
         "network-none": {"config": {"network": "none"}},
+        "no-cache": {"config": {"compute_cache": False}},
     }[variant]
     pool = make_pool(labels=("a",), **kwargs)
     home = canned.stage(tmp_path / "home")
@@ -353,10 +359,25 @@ def test_container_is_started_by_digest_without_any_mount(make_pool, canned, tmp
     assert options["--label"] == f"io.cortex.cuda-executor={canned.job.digest()[:16]}"
     assert run["source_sha256"] == RUNNER_SHA
     assert options.get("--network") == ("none" if variant == "network-none" else None)
+    # The only mount there can be is the compute cache, in the ssh user's home, one directory per
+    # image digest. No other host path, no volume flag, whatever the variant.
+    leaf = canned.manifest.training.reference_spec.image_digest.removeprefix("sha256:")[:32]
+    cache = pool.home("a") / ".cortex-cuda-executor/compute-cache" / leaf
+    expected = (
+        [] if variant == "no-cache" else [{"type": "bind", "src": str(cache), "dst": "/root/.nv"}]
+    )
+    assert run["mounts"] == expected
+    assert [o[0] for o in run["options"] if o[0] in ("-v", "--volume", "--mount")] == (
+        [] if variant == "no-cache" else ["--mount"]
+    )
     prefix = "sudo -n docker" if variant == "sudo" else "docker"
     assert all(e["via_sudo"] == (variant == "sudo") for e in pool.toolbox.docker_log())
-    docker_calls = [c for c in pool.toolbox.ssh_calls() if c["kind"] != "probe"]
+    docker_calls = [c for c in pool.toolbox.ssh_calls() if c["kind"] not in ("probe", "prepare")]
     assert docker_calls and all(c["command_head"].startswith(prefix + " ") for c in docker_calls)
+    # The directory is made by the ssh user (never through sudo), and only when the cache is on.
+    prepared = pool.toolbox.ssh_calls("prepare")
+    assert len(prepared) == (0 if variant == "no-cache" else 1)
+    assert all(not c["command_head"].startswith("sudo") for c in prepared)
     assert pool.toolbox.events("image_inspect")
 
 
@@ -424,7 +445,7 @@ def test_ssh_is_hardened_and_never_inherits_the_challenge_environment(
     dispatch(pool, canned.stage(tmp_path / "home"))
 
     calls = pool.toolbox.ssh_log()
-    assert {c["kind"] for c in calls} == {"probe", "run"}
+    assert {c["kind"] for c in calls} == {"probe", "prepare", "run"}
     for call in calls:
         argv = call["argv"]
         assert call["env_names"] == ["HOME", "LC_ALL", "PATH"]
@@ -927,6 +948,260 @@ def test_result_that_breaks_one_of_our_parsers_fails_over_to_the_next_host(
             published = home / "published" / source.relative_to(canned.tree)
             assert published.read_bytes() == source.read_bytes()
     assert list(home.glob("attempt-*")) == []
+
+
+def hostile_and_healthy(canned, labels=("a", "b")):
+    """(the host the executor tries first for this job, the other one)."""
+    first = first_host(canned.job, labels)
+    return first, labels[1 - labels.index(first)]
+
+
+# What a hostile host prints in its probe: bytes no daemon or `date` can print and that exhaust a
+# parser of ours. The host is refused on the spot, before any container exists.
+PROBE_BOMBS = {
+    "repo-digests-100000-levels-deep": (
+        lambda image: {"raw_inspect": "[" * 100_000 + "]" * 100_000},
+        "RepoDigests",
+    ),
+    "repo-digests-900000-opening-brackets": (
+        lambda image: {"raw_inspect": "[" * 900_000},
+        "RepoDigests",
+    ),
+    "repo-digests-100000-levels-of-objects": (
+        lambda image: {"raw_inspect": '{"a":' * 100_000},
+        "RepoDigests",
+    ),
+    # json.loads takes the escape, but the provenance record cannot hold the result: it would
+    # fail after a whole container run
+    "repo-digests-lone-surrogate-beside-the-image": (
+        lambda image: {"raw_inspect": json.dumps([image, "x"]).replace('"x"', '"\\ud800"')},
+        "RepoDigests",
+    ),
+    # int - float raises OverflowError once the int has more than 308 digits
+    "clock-of-400-digits": (lambda image: {"clock_skew": 10**400}, "impossible clock"),
+}
+
+
+@pytest.mark.parametrize("bomb", PROBE_BOMBS)
+def test_probe_that_exhausts_a_parser_quarantines_the_host_before_any_container_runs(
+    make_pool, canned, tmp_path, bomb
+):
+    evil, good = hostile_and_healthy(canned)
+    overrides, cause = PROBE_BOMBS[bomb]
+    pool = make_pool(labels=("a", "b"), hosts={evil: overrides(canned.image)})
+    factory = cuda_executor.load(pool.config_path)
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home, factory=factory)
+
+    assert [run["host"] for run in pool.toolbox.runs()] == [pool.address(good)]
+    (refused,) = journal_of(pool, "exec_host_refused")
+    assert refused["label"] == evil and cause in refused["reason"]
+    assert journal_of(pool, "exec_attempt_failed") == []  # a refusal costs no attempt
+    assert record_of(home)["host"]["label"] == good
+
+    calls = len(pool.toolbox.ssh_calls(host=pool.address(evil)))
+    dispatch(pool, canned.stage(tmp_path / "later"), factory=factory)
+    # the quarantined host is never offered a job again
+    assert len(pool.toolbox.ssh_calls(host=pool.address(evil))) == calls
+
+
+# What the store sees when the pool cannot serve a job. The audit route has no handler for it: it
+# books the failure as the executor's by this class and these message heads, never as the miner's
+# or the auditor's. Nothing else may leave `launch` for bytes a host wrote.
+NO_HOST = "cuda executor found no host able to run the job: "
+GAVE_UP = "cuda executor gave up: "
+
+
+def test_a_pool_of_quarantined_hosts_ends_in_a_plain_island_failure(make_pool, canned, tmp_path):
+    bomb = {"raw_inspect": "[" * 100_000 + "]" * 100_000}
+    pool = make_pool(labels=("a", "b"), hosts={"a": bomb, "b": bomb})
+    factory = cuda_executor.load(pool.config_path)
+    home = canned.stage(tmp_path / "home")
+    with pytest.raises(IslandFailure) as caught:
+        dispatch(pool, home, factory=factory)
+
+    assert type(caught.value) is IslandFailure  # not Aborted, not a subclass, not a RuntimeError
+    assert str(caught.value).startswith(NO_HOST)
+    for label in ("a", "b"):
+        assert f"{label} was refused: host probe lists a malformed RepoDigests" in str(caught.value)
+    assert_nothing_published(home)
+    assert sorted(r["label"] for r in journal_of(pool, "exec_host_refused")) == ["a", "b"]
+    assert pool.toolbox.runs() == [] and journal_of(pool, "exec_attempt_failed") == []
+
+    # the next job meets the same verdict without a single call to a host
+    calls = len(pool.toolbox.ssh_log())
+    with pytest.raises(IslandFailure, match=f"^{NO_HOST}no host answered; ") as again:
+        dispatch(pool, canned.stage(tmp_path / "later"), factory=factory)
+    assert type(again.value) is IslandFailure and len(pool.toolbox.ssh_log()) == calls
+
+
+def test_a_pool_that_used_its_attempts_ends_in_a_plain_island_failure(make_pool, canned, tmp_path):
+    flipped = {"mode": "mutate", "name": "flipped-byte"}
+    pool = make_pool(labels=("a", "b"), config={"max_attempts": 2})
+    pool.toolbox.scenario.global_runs(flipped, flipped)
+    home = canned.stage(tmp_path / "home")
+    with pytest.raises(IslandFailure) as caught:
+        dispatch(pool, home)
+
+    assert type(caught.value) is IslandFailure and str(caught.value).startswith(GAVE_UP)
+    assert_nothing_published(home)
+    assert len(journal_of(pool, "exec_attempt_failed")) == 2
+
+
+# Bytes no honest runner can write and that exhaust a parser of ours are an attack, not a failed
+# attempt: the host is quarantined on the spot (it ran once) and the next one serves the job.
+RESULT_BOMBS = {
+    "complete-100000-levels-deep": {"mode": "mutate", "name": "deep-complete", "depth": 100_000},
+    "environment-100000-levels-deep": {
+        "mode": "mutate",
+        "name": "deep-environment",
+        "depth": 100_000,
+    },
+    # tarfile reads the size an extended header claims in one call: MemoryError, then OverflowError
+    "pax-header-claiming-2-to-the-62-bytes": {
+        "mode": "mutate",
+        "name": "extended-header-claim",
+        "type": "x",
+        "claim": 2**62,
+    },
+    "pax-header-claiming-2-to-the-63-bytes": {
+        "mode": "mutate",
+        "name": "extended-header-claim",
+        "type": "x",
+        "claim": 2**63 - 1,
+    },
+    "gnu-longname-claiming-2-to-the-62-bytes": {
+        "mode": "mutate",
+        "name": "extended-header-claim",
+        "type": "L",
+        "claim": 2**62,
+    },
+}
+
+
+@pytest.mark.parametrize("bomb", RESULT_BOMBS)
+def test_result_that_exhausts_a_parser_quarantines_the_host_and_the_next_one_serves(
+    make_pool, canned, tmp_path, bomb
+):
+    evil, good = hostile_and_healthy(canned)
+    pool = make_pool(labels=("a", "b"))
+    pool.toolbox.scenario.global_runs(RESULT_BOMBS[bomb], {"mode": "ok"})
+    factory = cuda_executor.load(pool.config_path)
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home, factory=factory)
+
+    assert [run["host"] for run in pool.toolbox.runs()] == [pool.address(evil), pool.address(good)]
+    (refused,) = journal_of(pool, "exec_host_refused")
+    assert refused["label"] == evil
+    assert journal_of(pool, "exec_attempt_failed") == []  # a refusal costs no attempt
+    assert record_of(home)["host"]["label"] == good
+    assert (home / "published/rank-0/delta.bin").read_bytes() == (
+        canned.tree / "rank-0/delta.bin"
+    ).read_bytes()
+
+    calls = len(pool.toolbox.ssh_calls(host=pool.address(evil)))
+    later = canned.stage(tmp_path / "later")
+    dispatch(pool, later, factory=factory)
+    # the quarantined host is never offered a job again
+    assert len(pool.toolbox.ssh_calls(host=pool.address(evil))) == calls
+    assert record_of(later)["host"]["label"] == good
+
+
+@pytest.mark.parametrize(
+    ("site", "error"),
+    [
+        ("_read_result", RecursionError),
+        ("_read_result", MemoryError),
+        ("_read_result", OverflowError),
+        ("_check_environment", RecursionError),
+    ],
+)
+def test_a_parser_that_runs_out_of_resources_on_result_bytes_fails_the_attempt(
+    make_pool, canned, tmp_path, monkeypatch, site, error
+):
+    # Whatever else a hostile result finds to exhaust, it fails over instead of killing the launch.
+    pool = make_pool(labels=("a", "b"))
+    real, calls = getattr(cuda_executor.Executor, site), []
+
+    def exhausted(self, *args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise error()
+        return real(self, *args)
+
+    monkeypatch.setattr(cuda_executor.Executor, site, exhausted)
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home)
+
+    first, second = pool.toolbox.runs()
+    (failed,) = journal_of(pool, "exec_attempt_failed")
+    assert failed["reason"] == f"result exhausted a parser: {error.__name__}"
+    assert journal_of(pool, "exec_host_refused") == []  # the cause may be ours: nobody is refused
+    assert record_of(home)["result_tar_sha256"] == second["stdout_sha256"]
+    assert first["host"] != second["host"]
+
+
+FLOODS = {
+    # 40 GPUs named by 30,000 characters each: 1.2 MB, over the 1 MiB a probe may print
+    "probe": (
+        lambda index: {"gpus": [{**fake.gpu(index, i), "name": "n" * 30_000} for i in range(40)]},
+        "host probe output exceeds its bound",
+    ),
+    "pull": (
+        lambda index: {"images": [], "pull": {"output": 2 << 20}},
+        "image pull output exceeds its bound",
+    ),
+}
+
+
+@pytest.mark.parametrize("flood", FLOODS)
+def test_host_that_floods_its_probe_or_pull_output_is_quarantined(
+    make_pool, canned, tmp_path, flood
+):
+    evil, good = hostile_and_healthy(canned)
+    overrides, reason = FLOODS[flood]
+    pool = make_pool(labels=("a", "b"), hosts={evil: overrides(("a", "b").index(evil))})
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home)
+
+    assert [run["host"] for run in pool.toolbox.runs()] == [pool.address(good)]
+    (refused,) = journal_of(pool, "exec_host_refused")
+    assert (refused["label"], refused["reason"]) == (evil, reason)
+    assert journal_of(pool, "exec_attempt_failed") == []  # a refusal costs no attempt
+    assert record_of(home)["host"]["label"] == good
+
+
+# A trace.json that parses but that the audit reader (IslandParty, which the store runs on every
+# publication) refuses: the executor must refuse it first, or the job is stuck on a publication
+# that nobody can read and that a second launch hands back without asking a host.
+HOSTILE_TRACES = {
+    "list-of-numbers": ({"name": "trace-content", "text": "[1, 2, 3]"}, "absent or malformed"),
+    "list-of-empty-objects": ({"name": "trace-content", "text": "[{}]"}, "absent or malformed"),
+    "9000-levels-deep": (
+        {"name": "trace-content", "text": "[" * 9000 + "]" * 9000},
+        "absent or malformed",
+    ),
+    "each-rank-carries-the-others-trace": ({"name": "swap-traces"}, "names another rank"),
+}
+
+
+@pytest.mark.parametrize("case", HOSTILE_TRACES)
+def test_a_trace_the_audit_reader_refuses_is_never_published(make_pool, canned, tmp_path, case):
+    from hypertrain.auditor.island_bisect import IslandParty
+
+    mutation, cause = HOSTILE_TRACES[case]
+    evil, good = hostile_and_healthy(canned)
+    pool = make_pool(labels=("a", "b"))
+    pool.toolbox.scenario.global_runs({"mode": "mutate", **mutation}, {"mode": "ok"})
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home, "audit")
+
+    (failed,) = journal_of(pool, "exec_attempt_failed")
+    assert failed["label"] == evil and re.search(cause, failed["reason"])
+    assert journal_of(pool, "exec_host_refused") == []  # a bad result is not a bad host
+    assert record_of(home)["host"]["label"] == good
+    # the oracle: what the store and the audit worker will read the publication with
+    IslandParty.published("5FakeHotkeyForDispatch", canned.job, home / "published")
 
 
 OOM = {"mode": "exit", "code": 1, "stderr": "CUDA out of memory"}
@@ -1600,6 +1875,7 @@ def test_resume_asks_for_a_trace_only_when_the_launch_wants_one(make_pool, canne
     "damage",
     [
         pytest.param(b'{"events": []}', id="json-but-not-a-list"),
+        pytest.param(b"[1, 2, 3]", id="a-list-the-audit-reader-refuses"),
         pytest.param(b"not json", id="not-json"),
         pytest.param(None, id="missing"),
     ],
@@ -2007,3 +2283,223 @@ def test_a_float_or_unsafe_integer_in_the_context_fails_when_the_launch_is_built
     assert pool.toolbox.ssh_log() == []
     context["descriptor"]["claims"][0]["steps"][2] = 3  # the same context without it is accepted
     assert callable(factory("audit", canned.job, canned.stage(tmp_path / "again"), context))
+
+
+# -- compute cache (docs/adr/0012) ------------------------------------------------------------
+# The fake docker checks a bind mount like the real daemon does (the source must exist) and models
+# a persistent CUDA compute cache: a run that mounts /root/.nv is `cold` until some run has left a
+# marker there, then `warm`. That models what S13 measured on a B300 host; it is not GPU evidence.
+
+CACHE_ROOT = ".cortex-cuda-executor/compute-cache"
+
+
+def cache_leaf(canned) -> str:
+    return canned.manifest.training.reference_spec.image_digest.removeprefix("sha256:")[:32]
+
+
+def run_starts(pool):
+    return pool.toolbox.events("run_start")
+
+
+def test_the_first_container_warms_a_cache_that_every_later_one_finds(make_pool, canned, tmp_path):
+    pool = make_pool(labels=("a",))
+    factory = cuda_executor.load(pool.config_path)
+    for number in (1, 2, 3):
+        dispatch(pool, canned.stage(tmp_path / f"home{number}"), factory=factory)
+
+    runs = run_starts(pool)
+    assert [r["cache"] for r in runs] == ["cold", "warm", "warm"]
+    directory = pool.home("a") / CACHE_ROOT / cache_leaf(canned)
+    assert {r["mounts"][0]["src"] for r in runs} == {str(directory)}  # one directory, three runs
+    assert len(pool.toolbox.ssh_calls("prepare")) == 1  # made once, then remembered
+
+    # A restarted challenge builds a new executor: it asks again and finds the same warm cache.
+    dispatch(pool, canned.stage(tmp_path / "home4"))
+    assert run_starts(pool)[-1]["cache"] == "warm"
+    assert len(pool.toolbox.ssh_calls("prepare")) == 2
+
+
+def test_without_the_cache_every_container_starts_cold_and_the_host_is_untouched(
+    make_pool, canned, tmp_path
+):
+    pool = make_pool(labels=("a",), config={"compute_cache": False})
+    factory = cuda_executor.load(pool.config_path)
+    for number in (1, 2):
+        dispatch(pool, canned.stage(tmp_path / f"home{number}"), factory=factory)
+
+    assert [r["cache"] for r in run_starts(pool)] == ["none", "none"]
+    assert all(r["mounts"] == [] for r in run_starts(pool))
+    assert pool.toolbox.ssh_calls("prepare") == []
+    assert list(pool.home("a").iterdir()) == []
+
+
+def test_the_executor_writes_one_private_directory_on_the_host_and_nothing_else(
+    make_pool, canned, tmp_path
+):
+    pool = make_pool(labels=("a",))
+    dispatch(pool, canned.stage(tmp_path / "home"))
+
+    home = pool.home("a")
+    top = ".cortex-cuda-executor"
+    base = f"{top}/compute-cache/{cache_leaf(canned)}"
+    # The last two entries are what the (fake) driver left inside the mount.
+    assert sorted(p.relative_to(home).as_posix() for p in home.rglob("*")) == [
+        top,
+        f"{top}/compute-cache",
+        base,
+        f"{base}/ComputeCache",
+        f"{base}/ComputeCache/index",
+    ]
+    assert stat.S_IMODE((home / base).stat().st_mode) == 0o700
+    # Not the workspace, not the state directory: the job's own files never reach the host.
+    assert not list(pool.toolbox.root.joinpath("host-tmp").iterdir())
+
+
+def test_a_named_root_replaces_the_home_for_that_host(make_pool, canned, tmp_path):
+    pool = make_pool(labels=("a",))
+    root = tmp_path / "nvme" / "ht-cache"
+    data = json.loads(pool.config_path.read_text())
+    data["hosts"][0]["compute_cache_dir"] = str(root)
+    pool.config_path.write_text(json.dumps(data))
+    dispatch(pool, canned.stage(tmp_path / "home"))
+
+    (run,) = run_starts(pool)
+    assert run["mounts"] == [
+        {"type": "bind", "src": str(root / cache_leaf(canned)), "dst": "/root/.nv"}
+    ]
+    assert stat.S_IMODE((root / cache_leaf(canned)).stat().st_mode) == 0o700
+    assert list(pool.home("a").iterdir()) == []
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_the_provenance_and_the_journal_say_whether_a_cache_served_the_result(
+    make_pool, canned, tmp_path, enabled
+):
+    pool = make_pool(labels=("a",), config={"compute_cache": enabled})
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home)
+
+    assert record_of(home)["compute_cache"] is enabled
+    (attempt,) = journal_of(pool, "exec_attempt")
+    assert attempt["compute_cache"] is enabled
+
+
+def test_a_cache_directory_removed_by_hand_costs_one_attempt_not_the_job(
+    make_pool, canned, tmp_path
+):
+    pool = make_pool(labels=("a",))
+    factory = cuda_executor.load(pool.config_path)
+    dispatch(pool, canned.stage(tmp_path / "home1"), factory=factory)
+    shutil.rmtree(pool.home("a") / CACHE_ROOT)
+
+    home = canned.stage(tmp_path / "home2")
+    dispatch(pool, home, factory=factory)  # remembered path is gone: docker refuses, we recreate
+
+    (failed,) = journal_of(pool, "exec_attempt_failed")
+    assert "bind source path does not exist" in failed["reason"]
+    assert journal_kinds(pool).count("exec_published") == 2
+    assert len(pool.toolbox.ssh_calls("prepare")) == 2
+    assert [r["cache"] for r in run_starts(pool)] == ["cold", "cold"]  # a new, empty directory
+    assert (home / "published").is_dir()
+
+
+def test_a_host_that_cannot_make_the_directory_still_runs_the_job_without_the_cache(
+    make_pool, canned, tmp_path
+):
+    pool = make_pool(labels=("a",))
+    shutil.rmtree(pool.home("a"))
+    pool.home("a").write_text("a file where the home directory should be")
+    home = canned.stage(tmp_path / "home")
+
+    dispatch(pool, home)  # a speed-up must not fail a job the host can run
+
+    (run,) = run_starts(pool)
+    assert run["mounts"] == [] and run["cache"] == "none"
+    assert record_of(home)["compute_cache"] is False
+    (attempt,) = journal_of(pool, "exec_attempt")
+    assert attempt["compute_cache"] is False
+    (why,) = journal_of(pool, "exec_cache_unavailable")
+    assert why["label"] == "a" and "cannot prepare the compute cache directory" in why["reason"]
+    assert journal_kinds(pool).count("exec_attempt_failed") == 0
+    assert (home / "published").is_dir()
+
+
+def test_a_link_in_place_of_the_cache_directory_is_refused_and_its_target_left_alone(
+    make_pool, canned, tmp_path
+):
+    pool = make_pool(labels=("a",))
+    target = tmp_path / "somewhere-else"
+    target.mkdir()
+    target.chmod(0o755)  # mkdir(mode=) is masked by the umask; the test needs this exact mode
+    link = pool.home("a") / CACHE_ROOT / cache_leaf(canned)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+    home = canned.stage(tmp_path / "home")
+
+    dispatch(pool, home)
+
+    assert run_starts(pool)[0]["mounts"] == []  # not mounted: the daemon would follow the link
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755 and list(target.iterdir()) == []
+    assert "exec_cache_unavailable" in journal_kinds(pool)
+
+
+def test_each_host_keeps_its_cache_in_its_own_home(make_pool, canned, tmp_path):
+    labels = ("a", "b")
+    pool = make_pool(labels=labels)
+    first = first_host(canned.job, labels)
+    other = labels[1 - labels.index(first)]
+    dispatch(pool, canned.stage(tmp_path / "home1"))
+    pool.toolbox.scenario.update(pool.address(first), down=True)
+    dispatch(pool, canned.stage(tmp_path / "home2"))
+
+    assert [r["mounts"][0]["src"] for r in run_starts(pool)] == [
+        str(pool.home(first) / CACHE_ROOT / cache_leaf(canned)),
+        str(pool.home(other) / CACHE_ROOT / cache_leaf(canned)),
+    ]
+    assert [r["cache"] for r in run_starts(pool)] == ["cold", "cold"]  # not the first host's cache
+
+
+# -- compute cache: what the fake host promises --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("delay", "slow_run"), [("cold_start", 0), ("warm_start", 1)], ids=["cold", "warm"]
+)
+def test_the_fake_host_delays_the_run_whose_cache_has_the_named_temperature(
+    make_pool, canned, tmp_path, delay, slow_run
+):
+    pool = make_pool(labels=("a",), hosts={"a": {delay: 1.5}})
+    factory = cuda_executor.load(pool.config_path)
+    for number in (1, 2):
+        dispatch(pool, canned.stage(tmp_path / f"home{number}"), factory=factory)
+
+    runs = pool.toolbox.runs()
+    assert [r["cache"] for r in runs] == ["cold", "warm"]
+    # `start` is the container's own run_start; the delay is slept after it and before `end`.
+    assert runs[slow_run]["end"] - runs[slow_run]["start"] >= 1.5
+
+
+def test_the_fake_docker_refuses_the_cache_mounts_the_real_daemon_refuses(
+    make_pool, canned, tmp_path
+):
+    pool = make_pool(labels=("a",))
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    name = "ht-exec-0123456789abcdef"
+    command = cuda_executor.run_command(
+        ("docker",), pool.image, name, "d" * 64, uuids(0, 0), "default", str(cache)
+    )
+    argv = shlex.split(command)
+    argv[0] = str(pool.toolbox.host_bin / "docker")  # what the remote shell would find on its PATH
+    at = argv.index("--mount")
+    env = {**os.environ, "FAKE_HOST_ADDRESS": pool.address("a")}
+    refused = [
+        (("-v", f"{cache}:/root/.nv"), "supports --mount only"),
+        (("--mount", f"type=volume,src={cache},dst=/root/.nv"), "invalid mount config"),
+        (("--mount", "type=bind,dst=/root/.nv"), "invalid mount config"),
+    ]
+    for mount, message in refused:
+        done = subprocess.run(
+            [*argv[:at], *mount, *argv[at + 2 :]], input=b"", env=env, capture_output=True
+        )
+        assert done.returncode == 125 and message in done.stderr.decode(), mount

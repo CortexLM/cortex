@@ -131,11 +131,12 @@ replaced by two functions).
    `dispute_id` and requires `turn.lock_id == lock.operation_id`; `settle_lock` asks
    `settlement(turn.dispute_id)`; `ChallengeStore._settlement_v2` matches a dispute by id only
    and a reward origin by `records_v2`.
-2. `EscrowV2.release`, `release_settlement` and `slash` ask `_lock_status(lock_id)`, which picks the
-   resolver by the kind of the lock event (`LOCK_CONTEST` -> `contest_settlement`, fail closed
-   `UNACCEPTED_SETTLEMENT` without one; every other kind -> the generic `settlement`) and requires
-   `status.dispute_id == lock.dispute_id`. The name and shape are those of ADR 0010 Part 6, which
-   adds the `LOCK_ADMISSION` branch; the two merge by inserting one branch.
+2. `EscrowV2.release`, `release_settlement` and `slash` ask `lock_status(lock_id)`, which picks the
+   resolver by the kind of the lock event: `LOCK_CONTEST` -> `contest_settlement` (installed by
+   `DisputesV2`), `LOCK_ADMISSION` -> `admission_settlement` (installed by `Admission`, ADR 0010
+   Part 6); each fails closed `UNACCEPTED_SETTLEMENT` without its resolver, and any other kind or an
+   unknown id is `UNKNOWN_LOCK`. A contest status must also carry `dispute_id == lock.dispute_id`.
+   The generic `settlement` is never asked about a lock.
 3. No query can return two rows (dispute by primary key, lock event by its unique id, origin by
    `(run_id, kind, id)`), so there is nothing to order. This is the intent of D49 ("settlement
    query filtered by type with a deterministic ORDER BY"): the multi-row query is deleted instead

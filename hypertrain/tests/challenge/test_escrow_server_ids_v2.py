@@ -51,6 +51,14 @@ class Notified:
     def notify(self) -> None:
         return None
 
+    def unresolved(self) -> list[object]:
+        return []
+
+
+class Admissions:
+    def reap_expired_trials(self, *, now: int) -> None:
+        return None
+
 
 def transfer(owner: Keypair, recipient: Keypair, origin: str, operation_id: str) -> EscrowTransfer:
     return EscrowTransfer(
@@ -98,7 +106,7 @@ def hosted(tmp_path, actual_reward, monkeypatch):
         (s.manifest.run_id(), s.manifest.model_dump_json(), "{}"),
     )
     monkeypatch.setattr(store, "_services", lambda run_id: (escrow, None, None))
-    store._services_v2[s.manifest.run_id()] = (escrow, None, Notified())
+    store._services_v2[s.manifest.run_id()] = (escrow, Admissions(), Notified())
     shadow = E.sign_actual_shadow(reward, E.reserve_actual_shadow(escrow, evidence))
     escrow.reward_finalize(shadow, replace(evidence, shadow=True))
     escrow.mature(E.H, tuple(shadow.origin_ids), 20)

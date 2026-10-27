@@ -37,6 +37,7 @@ from hypertrain.auditor.bisect import Executor
 from hypertrain.auditor.replay import challenge_hash, pack_state, tensor_root, unpack_state
 from hypertrain.challenge.store import assignment_hash, rerun_message
 from hypertrain.gpu_ops.journal import Journal
+from hypertrain.protocol.env_pins import EnvPinUnhonorable, require_honorable
 from hypertrain.protocol.envelope import body_digest, seal, verify_envelope
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -788,7 +789,23 @@ class NetworkMiner:
     def status(self) -> dict[str, Any]:
         return self.api.call("GET", self.url + "/admission/" + self.kp.ss58)
 
+    def preflight_env_pin(self) -> None:
+        """Tell this host, before any request, that it cannot honor the manifest's environment pin.
+
+        Later the island workers would refuse the round, and a trial left to expire suspends the
+        identity: nothing worth paying admission for."""
+        pin = self.manifest.training.reference_spec.env.pin()
+        if pin is None:
+            return
+        try:
+            require_honorable(pin)
+        except EnvPinUnhonorable as error:
+            raise MinerError(
+                f"this host cannot honor the manifest's environment pin: {error}"
+            ) from error
+
     def join(self, coldfile: Path, request_id: str, expiry: int) -> dict[str, Any]:
+        self.preflight_env_pin()
         from hypertrain.miner.admission import sign_join
         from hypertrain.protocol.messages_v2 import HardwareHint
 
@@ -892,15 +909,22 @@ class NetworkMiner:
 
     def probe_trial(self) -> dict[str, Any]:
         """probe-v2 without --job: this hotkey's open trial, fetched into a private temp folder."""
+        self.preflight_env_pin()
         with tempfile.TemporaryDirectory(prefix="trial-", dir=self.directory) as folder:
             job, challenge = self._fetch_trial(Path(folder).resolve())
             return self.probe(job, challenge)
 
+    def _owner_headers(self, domain: str, admission_id: str) -> dict[str, str]:
+        """This hotkey's signature over `domain|run|admission`, as the owner-only routes check."""
+        message = f"{domain}|{self.run_id}|{admission_id}".encode()
+        return {"X-Hotkey": self.kp.ss58, "X-Trial-Signature": self.kp.sign(message).hex()}
+
     def _fetch_trial(self, root: Path) -> tuple[Path, Path]:
         """The folder trial_export writes, from the miner's own signed job read.
 
-        The challenge GET issues the trial when none is open (else returns the stored one);
-        the job, its inputs and the signed challenge are checked as trial_export checks them."""
+        The signed challenge GET issues the trial when none is open (else returns the stored
+        one); the job, its inputs and the signed challenge are checked as trial_export checks
+        them."""
         from pydantic import TypeAdapter
 
         from hypertrain.protocol import envelope_v2
@@ -908,12 +932,15 @@ class NetworkMiner:
 
         admission_id = self.status()["record"]["admission_id"]
         url = self.url + f"/join/{admission_id}"
-        envelope = self.api.call("GET", url + "/challenge")
-        signature = self.kp.sign(f"hypertrain/trial-job/2|{self.run_id}|{admission_id}".encode())
+        envelope = self.api.call(
+            "GET",
+            url + "/challenge",
+            headers=self._owner_headers("hypertrain/trial-challenge/2", admission_id),
+        )
         data = self.api.call(
             "GET",
             url + "/job",
-            headers={"X-Hotkey": self.kp.ss58, "X-Trial-Signature": signature.hex()},
+            headers=self._owner_headers("hypertrain/trial-job/2", admission_id),
         )
         try:
             job = IslandJobV1.model_validate(data["job"])

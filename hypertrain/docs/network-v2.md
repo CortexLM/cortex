@@ -125,9 +125,19 @@ which includes its nonce; `WorkScreenV2` is reserved by admission and nonce.
 alone. Retry the exact stored signed operation: changing expiry or signature does
 not create a new semantic attempt (`protocol/envelope_v2.py:replay_key`).
 
-After `GET /v2/runs/{run_id}/join/{admission_id}/challenge` issues a challenge,
-the operator exports the matching staged `IslandJobV1`, its inputs and the signed
-challenge into a new or empty folder:
+The challenge is issued by the owner's signed `GET
+/v2/runs/{run_id}/join/{admission_id}/challenge`: headers `X-Hotkey` and
+`X-Trial-Signature`, the hex signature by the admission's current hotkey of
+`hypertrain/trial-challenge/2|{run_id}|{admission_id}`. Opening a trial takes one of
+the run's two trial places, so nobody else may ask for it: unknown run 404, unknown
+admission 409 `UNKNOWN_ADMISSION`, a deregistered or revoked owner 403, any other
+hotkey, another domain, run or admission, or a missing or bad signature 403 `hotkey is
+not current accepted identity`. The admin token is no substitute. The signature is
+static, like the other header-signed routes: it replays only what the owner may ask,
+and an asking never suspends anyone. Once a challenge is issued, the operator exports
+the matching staged `IslandJobV1`, its inputs and the signed challenge (the export
+carries it as `challenge_envelope`; the CLI does not call the route) into a new or
+empty folder:
 
 ```bash
 uv run --frozen python -m hypertrain.challenge.trial_export \
@@ -145,7 +155,7 @@ uv run --frozen hypertrain-miner proof-v2 --config miner.toml --proof proof.json
 
 A joined miner can skip the export: `probe-v2 --config miner.toml > proof.json`
 without `--job`/`--challenge` reads its admission ID (`status-v2`), GETs the
-challenge (which issues the trial when none is open), then
+challenge with its signature (which issues the trial when none is open), then
 `GET /v2/runs/{run_id}/join/{admission_id}/job` with headers `X-Hotkey` and
 `X-Trial-Signature` (hex hotkey signature of
 `hypertrain/trial-job/2|{run_id}|{admission_id}`). The route returns the admin
@@ -174,27 +184,72 @@ lower nominal probation/base rates. Calendar age or a legacy bond flag is not
 graduation. Join quotas, one concurrent non-ACTIVE identity per coldkey, funded
 locks and known-owner caps bound exposure; they do not reveal every Sybil owner.
 
+An application that holds no stake and can no longer progress does not keep its place.
+An `APPLIED` row is dead once more than `challenge_rounds` rounds have passed since its
+seed (`join` sets it one round after the join): `challenge` then refuses it for ever. At
+the start of every `join` the service suspends each dead row that has no locked unit and no
+lock waiting in the outbox, with reason `APPLIED_EXPIRED`. The row, its transitions and its
+spent hotkey stay; the pending place and the coldkey are released, so the miner may apply
+again with a new hotkey. Only `APPLIED_EXPIRED` rows are ignored by the one-non-`ACTIVE`-row
+rule; every other non-`ACTIVE` row still blocks its coldkey. A funded row is never touched.
+
+The policy may also set `max_unfunded_per_prefix` (1 to 32; absent by default and then
+omitted from the digest, so every earlier policy digest and run id is unchanged). `join`
+then answers `PREFIX_PENDING_CAPACITY` when the /24 (IPv4) or /64 (IPv6) of the caller already
+holds that many unfunded `APPLIED` rows; funded rows and later states do not count, so an
+operator who funds right after joining is never refused. The prefix is kept as a tag keyed by
+the coordinator's secret, not bound to the quota epoch, in the table `admission_origin`
+(created on open; a database from before it has no tags and counts nothing). A run that sets
+the field has a new policy digest and a new run id, and an image without the field refuses
+its policy (`extra='forbid'`), so the challenge image ships first. Enable it only once the
+challenge container sees real client addresses: behind a proxy every client may share one
+prefix, and the cap becomes a global cap on unfunded newcomers. A first value to try is
+`join_burst` (4).
+
+Rotation. `POST /v2/runs/{run_id}/admission/{hotkey}/rotate` moves an admission to a new
+hotkey. The coldkey of the admission seals the `RotateRequest` envelope, and the new hotkey
+consents in the body: `new_hot_sig`, its signature of
+`hypertrain/rotate/2|RotateRequest|<sha256 of JCS{coldkey,hotkey,new_hotkey,operation_id}>|<exp>|<run>`
+(`miner.admission.sign_rotation_consent`, then `sign_rotation` with the same expiry). The
+coldkey alone is refused (`ROTATION_CONSENT`, or 409 for the earlier three-field body), so no
+one can rebind an admission onto a registered hotkey that never agreed and spend that hotkey
+for good. A new rotation costs one unit of a budget of `join_burst` per coldkey and per
+`work_screen_epoch_rounds` window (`ROTATION_QUOTA`; a retry of the same `operation_id` costs
+nothing and answers the same admission, whatever its fresh signatures); a `BANNED` admission
+cannot rotate (`TERMINAL_BANNED`); the new hotkey must be unspent (`NEW_HOTKEY_HISTORY`).
+Locks, strikes and a pending dispute follow the admission.
+
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
 rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
 refused (`CHALLENGE_EXPIRED`) once more than `challenge_rounds` rounds have passed since
 the miner's join or its last trial finalization. Only a suspend and resume reopens it,
 and resume restarts probation at zero clean trials. No admin route calls them: `suspend`
-runs when a dispute opens, and `resume` only after a nonfraud dispute settlement. So a
-miner that waits while others run their trials stays eligible until its last proof plus
-`work_screen_epoch_rounds`, for the rest of the run.
+runs when a dispute opens, and `resume` only after a nonfraud dispute settlement. The
+server's own closure of a dispute nobody can decide resumes the miner by itself; every
+other nonfraud settlement needs the miner's signed recovery call (see the dispute
+paragraphs below). So a miner that waits while others run their trials stays eligible
+until its last proof plus `work_screen_epoch_rounds`, for the rest of the run.
 
 The renewal window does not grow with `work_screen_epoch_rounds`. A trial finalization
 sets the next seed one round later, and the next trial must fit in the `challenge_rounds`
 rounds after that seed: always 100, which the policy schema fixes, about 5 min at 3 s
 rounds. The challenge deadline is seed + 100 whenever the challenge is requested, and the
-proof must be accepted by then. A challenge left unproven past its deadline suspends the
-miner (`CHALLENGE_EXPIRED`) at its next challenge request. So a miner that is down for
+proof must be accepted by then. A challenge left unproven past its deadline is closed
+`EXPIRED` by the master at the next beacon push (or at the next challenge request, which
+frees the place first). Nobody is suspended: the miner keeps its state, its clean trials and
+its screen, and a later request answers 409 `CHALLENGE_EXPIRED` until a re-seed exists. The
+deadline round itself still accepts a proof. A trial whose proof was accepted is never expired
+by the clock, and its finalization may follow the deadline: the miner may re-post the exact
+accepted proof and screen after their deadline to run a finalization that failed (the proof
+route commits the proof and the finalization separately). A different proof after the
+deadline is refused. So a miner that is down for
 longer than that window minus one trial's duration cannot renew its screen, whatever
 `work_screen_epoch_rounds` is. At most two trials are open at once across the run (the
 schema fixes `max_trial_replays` at 2). In a run longer than `work_screen_epoch_rounds`
 (about 5 h at 6000), every ACTIVE miner must therefore chain its trials, each one proven
 inside its window, to stay eligible. Otherwise only the suspend and resume above bring it
-back, to PROBATION at zero clean trials.
+back, to PROBATION at zero clean trials; an expired trial changes none of that, it only frees
+its place.
 
 `manifest_v2 example` writes 6000 (about 5 h). In a serial 40-trial campaign
 (3 × 12 ACTIVE + 4 PROBATION), each trial spans at most about `challenge_rounds` + 1
@@ -247,6 +302,23 @@ checks the hash chain, the shape of each server key and that no client event sit
 the server space, not the binding of a key to its receipt. A chain written before the
 split keeps its bare server ids and is read through a fallback that accepts only an
 identical request. See `docs/adr/0014` at the monorepo root.
+
+The bond is the `LOCK_ADMISSION` of the admission. It has its own settlement, derived from
+the admission's records on every call (ADR 0010, Part 6), and `GET /v2/runs/{run_id}/admission/{hotkey}`
+lists it under `bond`: per residual lock its units, whether it is `releasable`, its
+`release_beacon` and the `finality_hash` and `closed_dispute_root` to sign. The owner takes it
+back with the existing signed `EscrowRelease` (`POST .../escrow/release`) carrying those two
+hashes. It is released only when the admission is not `BANNED` and has no pending dispute or
+lock in the outbox, every round whose roster lists it is closed, none of its hotkeys has
+unvested rewards, it is not live (`ACTIVE`, or `PROBATION` with four clean trials, until its
+screen ends), and the last reward origin of its hotkeys has matured. The bond is burned by the
+service and never through a route, in three cases: a referee verdict of fraud against the miner
+(it also burns the coldkey's unvested rewards and bans the admission; `LOCK_BANNED` follows), a
+round-stage audit mismatch that the caller confirmed as the miner's (`reason="AUDIT_MISMATCH"`:
+the admission is suspended with one strike, and its coldkey stays bound as in probation), and a
+roster member that never committed (`reason="NO_SHOW"`). The last two burn the bond alone. An
+uncontested `MISMATCH`, an infrastructure closure and a verdict against the auditor leave it
+intact.
 
 Production funding is one coordinator-signed `ProductionBootstrap`, posted as an
 `ht/2` envelope to `POST /v2/runs/{run_id}/admin/bootstrap` (admin bearer). The
@@ -394,9 +466,41 @@ treats a lock id as a dispute id or the reverse. `POST /dispute` refuses a bond 
 already a dispute or a reward origin (`CONTEST_LOCK_ID_COLLISION`, 409). A contest lock that no
 dispute took as its bond has no settlement and is not released. An admission lock is settled
 by the resolver of admission locks or by nothing: the dispute and origin tables are never
-searched for its name, and the production master wires no resolver yet, so an admission bond is
-neither released nor slashed (ADR 0010 part 6 adds the resolver). See `docs/adr/0014` at the
-monorepo root.
+searched for its name; the admission service installs that resolver (ADR 0010 part 6). See
+`docs/adr/0014` at the monorepo root.
+
+A dispute that nobody can decide is closed by the server on the next verified beacon
+round, not convicted. The resolution is `INFRASTRUCTURE` with no loser: the verdict and
+the audit's own exclusion of the contested miner stand, the contest bond is released in
+full, and nothing is slashed, struck or banned. Three cases close:
+
+- a dispute past its absolute horizon, strictly after the last round `resolution()` still
+  accepts, so a referee's signed resolution in the horizon round itself still decides it;
+- a transcript paused anywhere but on its single final op, which the referee cannot score;
+- an unpaused turn whose expected party has not moved `T.dispute_per_level` rounds after its
+  `turn_deadline`, acknowledged or not. The operator's witnessed `timeout()` keeps exactly
+  that window.
+
+A paused final op stays with the referee until the horizon. The evidence of a closure names
+its cause: `bounded-infrastructure-exclusion` (horizon), `unadjudicable-paused-transcript`
+or `abandoned-turn`. Closing a dispute recounts the round's unresolved disputes to zero; the
+coordinator's `finalize` for that round then settles it, and round `w+2` opens only after
+that. The beacon round is the clock, so after a long beacon outage the first push closes
+every expired dispute at once and the `timeout()` window is skipped for them. A closure that
+fails is rolled back, journaled as a `dispute-exit-failed` record (stage and error class
+only) and retried at the next beacon.
+
+The same closure lifts the contested miner's `PENDING_DISPUTE` suspension to `PROBATION`
+with zero clean trials and its strikes untouched: a fresh probation is the cost of a
+contest, and an infrastructure fault never leaves an honest miner suspended. If that lift
+fails it is journaled with stage `admission` and the closure stands. Any other nonfraud
+settlement (a referee `MATCH`, a witnessed `timeout()` or a failed lift) is lifted by the
+miner with `POST /v2/runs/<run_id>/admission/recover`: a `Receipt` envelope signed by the
+miner's hotkey (a subnet member), with body `{"w": <contest round>, "commit_hash":
+"<dispute_id>", "received_round": <latest beacon round>}` and an expiry of at least the
+latest round. The dispute must be the exact unresolved pending one of that miner and its
+settlement nonfraud, otherwise the route answers 403 "recovery reference differs from exact
+current pending dispute". The result is the same fresh probation.
 
 ## Weights, finality and custody
 
@@ -404,13 +508,61 @@ Flat aggregation retains each miner's original delta: norm preclip, previous
 outer-update CClip, then deterministic integer allocation. Q=16777216; final
 weights sum Q, each miner <=4194304, total probation <=4194304, plus signed
 known-owner group bounds. No post-cap renormalization. Four eligible ACTIVE
-miners can carry exact quarter weights; infeasible cohorts reject. Similarity
-alone is not fraud evidence. Audits replay each miner's own assignment.
+miners can carry exact quarter weights; infeasible cohorts reject. A round of
+four therefore cannot lose a member. Similarity alone is not fraud evidence.
+Audits replay each miner's own assignment.
+
+A miner whose audit could not run (no auditor finished it in two windows of two
+leases each) is left out of that round (`excluded`, reason `INFRASTRUCTURE`) and
+the round is not excluded: the other miners aggregate and settle as after an
+UNVERIFIED verdict. The round cannot be applied with fewer than four verified
+inputs, and an excluded miner has no anchor for the round, so it cannot be on the
+next roster. While an audit is pending the round stays `PENDING`: opening w+2,
+aggregation, rollback and relay settlement wait for it.
 
 At most two speculative rounds may be applied; opening w+2 waits for w to settle
 or be excluded and repaired. Retain original input objects, signed tapes,
 accepted envelopes, carry anchors and full bounded predecessor history. Reward
 `get_weights` is not a model-checkpoint download endpoint.
+
+A round that finality closes without a reward (excluded, or repaired by an accepted rollback)
+is never reward-finalized and never paid, and it does not stop the rounds after it. Reward
+`finalize` accepts round w only if w is the first round that is neither reward-finalized nor
+withdrawn: when a lower round is closed without a reward, the same `finalize` first records it
+once in the escrow journal (event `ROUND_WITHDRAWN`, with the hash that closed it), in the same
+transaction, then pays w. The record moves no unit and sanctions nobody. The ledger refuses the
+evidence of such a round itself with 409 `ROUND_CLOSED_UNPAID` (`finalize` already refuses a
+repaired or an unapplied round before the ledger is asked). A refused `finalize` records
+nothing, and a run that rolled back before this record existed is not stuck: its next
+`finalize` records the closed rounds. A round that is pending, settled, awaiting its rollback,
+or that has an open audit or dispute is not withdrawn and still answers the next round 409
+`FINALIZE_ORDER`.
+
+A roster member that has not committed when audits are scheduled is left out of its
+round: its `excluded` record gets reason `NO_SHOW` (stage `commit`), the audits of the
+other members are created, and the round is aggregated and finalized without it. A member
+that committed and passed its audit but uploaded no delta by `d_upload` is left out the
+same way when the round is aggregated (stage `delta`). Its reward share goes to the
+members that remain, split by tokens as for any exclusion. Nobody is suspended, struck or
+slashed for either. A member left out before its audit has no anchor for that round and
+cannot be rostered again in this run; one left out at the delta stage keeps its anchor.
+The remaining members must still carry the allocation: at least four, more when probation
+or owner-group caps bind, counting `NO_SHOW`, `UNVERIFIED` and `INFRASTRUCTURE`
+exclusions of the round together. Otherwise `audits` or `aggregate` answers 409
+`ROUND_INFEASIBLE`, nothing is written and the run stays blocked until an operator
+decision; there is no void round. Call `audits` once `d_audit` has passed and before
+`absolute` minus one round, `absolute` being the smaller of `d_final` and `d_audit` plus
+twice `lease_rounds`; a later call answers 503 for every roster and the round cannot be
+audited. Open rounds with five or more members when an eviction is plausible.
+
+A request that the allocation caps or the finality rules refuse is a 409 whose detail starts
+with a code, on every route, and writes nothing. `ROUND_INFEASIBLE: <reason>`: the members
+cannot carry one complete update (opening a round with fewer than four eligible members, a
+rollback that would leave fewer, an aggregation over an input set or delta it cannot weigh).
+`ROUND_BLOCKED: <reason>`: finality or the tape refuses the call (opening round w+2 before
+round w+1 exists or while w is unresolved, applying a round whose predecessor is not applied,
+settling a round that cannot settle, a tape that fails its own checks). The two rollback routes
+answer a tape error with its bare message, as before.
 
 Regional relays are transport/cache only, not regional arithmetic aggregators.
 An upload opportunity acknowledgment is not custody. Completion failure requires

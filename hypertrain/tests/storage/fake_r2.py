@@ -39,7 +39,8 @@ def _md5(data: bytes) -> str:
 
 
 class FakeR2:
-    def __init__(self) -> None:
+    def __init__(self, bucket: str = "bkt") -> None:
+        self.bucket = bucket
         self.objects: dict[str, tuple[bytes, dict[str, str]]] = {}
         self.uploads: dict[str, tuple[str, dict[str, str], dict[int, bytes]]] = {}
         self.ops: list[tuple[str, str]] = []  # (operation, key) of every authenticated request
@@ -71,8 +72,8 @@ class FakeR2:
         denied = self._auth(req, raw_path, params)
         if denied is not None:
             return denied
-        assert raw_path == "/bkt" or raw_path.startswith("/bkt/")
-        key = unquote(raw_path[len("/bkt/") :])
+        assert raw_path == f"/{self.bucket}" or raw_path.startswith(f"/{self.bucket}/")
+        key = unquote(raw_path[len(self.bucket) + 2 :])
         op = self._op(req.method, key, params)
         self.ops.append((op, key))
         if op in self.hooks:

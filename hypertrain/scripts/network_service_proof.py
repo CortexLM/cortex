@@ -748,6 +748,12 @@ def decoder_join_lock(
     return admission_id
 
 
+def owner_headers(hot: Keypair, run_id: str, admission_id: str) -> dict[str, str]:
+    """The challenge route answers only the admission's own hotkey, by its signature."""
+    message = f"hypertrain/trial-challenge/2|{run_id}|{admission_id}".encode()
+    return {"x-hotkey": hot.ss58, "x-trial-signature": hot.sign(message).hex()}
+
+
 def decoder_operation(
     client: httpx.Client,
     runtime: NetworkRuntime,
@@ -772,7 +778,10 @@ def decoder_operation(
         raise DriverError("decoder trusted owner/run differs")
     root = f"/v2/runs/{spec.job.run_id}"
     if spec.operation == "probe":
-        challenge_response = client.get(root + "/join/" + spec.binding + "/challenge")
+        challenge_response = client.get(
+            root + "/join/" + spec.binding + "/challenge",
+            headers=owner_headers(hot, spec.job.run_id, spec.binding),
+        )
         challenge_response.raise_for_status()
         signed_challenge = envelope_v2.parse_envelope(challenge_response.json())
         if (
@@ -1968,7 +1977,10 @@ def decoder_continue(
                             (admission,),
                         ).fetchone()
                     advance(row[0])
-                    response = client.get(f"/v2/runs/{graph.run_id}/join/{admission}/challenge")
+                    response = client.get(
+                        f"/v2/runs/{graph.run_id}/join/{admission}/challenge",
+                        headers=owner_headers(hot, graph.run_id, admission),
+                    )
                     response.raise_for_status()
                     signed = response.json()
                     challenge = JoinChallenge.model_validate(

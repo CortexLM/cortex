@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from hypertrain.miner import cli
+from hypertrain.protocol.keys import decode_hotkey, verify
 
 _spec = importlib.util.spec_from_file_location(
     "probe_trial_service_fixture",
@@ -116,6 +117,13 @@ def test_probe_v2_without_job_fetches_own_trial_and_completes(miner, capsys):
     assert n.url + f"/join/{identity}/job" in paths
     assert not any("/admin/" in p for p in paths)
     assert not any("authorization" in r.headers for r in requests)
+    # The challenge GET carries the owner's signature, in its own domain.
+    asked = next(r for r in requests if r.url.path.endswith("/challenge"))
+    message = f"hypertrain/trial-challenge/2|{n.manifest.run_id()}|{identity}".encode()
+    assert asked.headers["x-hotkey"] == HOT.ss58
+    assert verify(
+        decode_hotkey(HOT.ss58), message, bytes.fromhex(asked.headers["x-trial-signature"])
+    )
     assert list(folder.iterdir()) == []
     # The service accepts the probe's proof (it replays the reference itself) ...
     response = n.client.post(n.url + "/join/proof", json=signed)
@@ -152,7 +160,7 @@ def test_probe_v2_refuses_another_admissions_genuine_trial(miner, caplog):
     n, identity, config, folder, requests, fault = miner
     other = n.join(1).json()["admission_id"]
     n.push(n.now + 1)
-    challenge = n.client.get(n.url + f"/join/{other}/challenge")
+    challenge = n.challenge(other)
     assert challenge.status_code == 200, challenge.text
     job = signed_job(n, service.HOT[1], other)
     assert job.status_code == 200, job.text

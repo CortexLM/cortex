@@ -41,7 +41,7 @@ from hypertrain.protocol.messages import Layout, RunManifest
 from hypertrain.protocol.messages_v2 import RunManifestV2
 from hypertrain.trainer.compress import compress, payload_hash, state_hash
 from hypertrain.trainer.config import ModelConfig, TrainConfig
-from hypertrain.trainer.determinism import require_threads
+from hypertrain.trainer.determinism import require_reference_env
 from hypertrain.trainer.loop import (
     Assignment,
     RoundResult,
@@ -986,7 +986,7 @@ def _train_island(
     hook_until: int | None = None,
     steps: tuple[int, int] | None = None,
 ) -> RoundResult:
-    require_threads(cfg.cpu_threads)
+    require_reference_env(cfg)
     H, J = cfg.inner.H, cfg.inner.J
     t0, t1 = steps or (0, H)
     if not 0 <= t0 < t1 <= H or t0 % J or t1 % J:

@@ -24,7 +24,7 @@ from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.protocol.messages import LeafPreimage, StageState, f32hex
 from hypertrain.trainer.compress import compress, payload_hash, state_hash
 from hypertrain.trainer.config import TrainConfig
-from hypertrain.trainer.determinism import require_threads
+from hypertrain.trainer.determinism import require_reference_env
 from hypertrain.trainer.model import forward, param_shapes, stage_of
 from hypertrain.trainer.optim import OptState, init_state, lr_at, step
 from hypertrain.trainer.rng import rng_ctr
@@ -194,7 +194,7 @@ def train_round(
     after_step: StepHook | None = None,
 ) -> RoundResult:
     """Run H inner steps from the public start; ``after_step`` exists only for fault injection."""
-    require_threads(cfg.cpu_threads)
+    require_reference_env(cfg)
     if sorted(theta_start) != sorted(param_shapes(cfg.model)):
         raise ValueError("theta_start does not match the model parameter set")
     if any(x.dtype != torch.float32 for x in theta_start.values()):

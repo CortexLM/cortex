@@ -27,6 +27,20 @@
   `role-dispatch.json` provenance the existing CUDA audit checks accept. Mutually exclusive with
   `HYPERTRAIN_ROLE_DISPATCH`; the Vast dispatcher is unchanged. See `docs/adr/0008` at the
   monorepo root and `docs/cuda-executor.md`.
+- Generic CUDA executor compute cache (`compute_cache`, `hosts[].compute_cache_dir`): every
+  container gets one bind mount of a persistent CUDA compute cache, one directory per image
+  digest created by the executor, so only the first reference per image pays the cold CUDA start
+  of a fresh `--rm` container (S13, through a wrapper: 57-64 s to 12-19 s; not yet run with this
+  implementation). A host that cannot make the directory runs the job without the cache.
+  `compute_cache: false` restores the previous command; `role-dispatch.json` and the journal
+  record whether the mount was requested. See `docs/adr/0012` at the monorepo root and
+  `docs/cuda-executor.md`.
+- Executor results through R2 (`HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS`,
+  `hypertrain.gpu_ops.artifact_transfer`, opt-in): the container hashes the result tar, declares the
+  hashes in R2 and uploads it to presigned part URLs bound to them; the challenge verifies every
+  block and the whole sha256 before the unchanged checks. The host holds URLs only. See
+  `docs/adr/0013` at the monorepo root and `docs/cuda-executor.md`. `R2ObjectStore.fetch_to` takes
+  an optional `check` callback.
 - Docs, CI, image and release workflows, Dockerfiles.
 - Eviction-tolerant core `hypertrain.elastic` (v3, not wired into the v2 challenge): leases with
   fencing tokens, saved before they are granted so that a restart never reissues one, and a
@@ -41,8 +55,64 @@
   8-GPU hosts on a fake clock under seeded notice, hard-kill, host-loss, partition,
   store-partition, regional-loss and drought schedules; every run must end in the uninterrupted
   run's state hash.
+- Opt-in `reference_spec.env.pinned` (`{present: {NAME: VALUE}, absent: [NAME]}`) over the closed,
+  append-only table of `hypertrain.protocol.env_pins`: process-environment variables that change
+  CPU round bytes (`ATEN_CPU_CAPABILITY`, `MKL_CBWR`, `ONEDNN_MAX_CPU_ISA`, `HT_ATTN_BACKEND`,
+  `OMP_DYNAMIC`, and `HT_COMPILE`, `HT_FP8`, `HT_MOE_GROUPED`, `OMP_THREAD_LIMIT` pinned unset).
+  A manifest without the field keeps its bytes and `run_id`; the table is in `docs/protocol.md`
+  section 7 and the decision in `docs/adr/0011` (part 3) at the monorepo root. The island and
+  repair workers and the in-process entry points (`train_round`, `train_island`,
+  `train_unit_order`) refuse a process whose environment, or ATen capability, diverges from the
+  pin, naming the variable; a pinned rank records `env_pin` in `summary.json`.
+  `python -m hypertrain.trainer.env_probe --manifest FILE` reports the environment a manifest pins
+  and checks that this host can honor it (`protocol.env_pins.require_honorable`: a child started
+  under the pinned environment, cached per process).
+  `launch_island`, `launch_window` and `_launch_unbounded` start island ranks under the pins and
+  raise `EnvPinRefused` (an `IslandFailure`) before charging capacity when this host cannot honor
+  them. The rollback repair and history workers get the same pins.
+  `NetworkMiner.join` and `probe_trial` refuse a host that cannot honor the pin before any request,
+  and `bootstrap_service_capacity_v2` answers 409 `SERVICE_PROFILE_ENV_PIN` when the challenge host
+  cannot.
+  The miner's dispute follower answers a pinned CPU publication from its published trace instead
+  of replaying it in the daemon (behavior change for pinned manifests only).
 
 ### Changed
+- A challenge poll after the deadline no longer suspends a miner whose proof was accepted
+  (RTA-05), and the exact accepted proof and screen may be re-posted after their deadline so
+  that a finalization that failed can run. See `docs/adr/0010-admission-hardening.md` at the
+  monorepo root.
+- An unproven challenge past its deadline is closed `EXPIRED` by the master at the next beacon
+  push and no longer suspends the miner (RTA-03); a later request answers 409
+  `CHALLENGE_EXPIRED`. The two trial places can no longer be held for good by identities that
+  never prove. ADR 0010.
+- `GET /v2/runs/{run_id}/join/{admission_id}/challenge` needs the owner's signature
+  (`X-Hotkey`, `X-Trial-Signature` over `hypertrain/trial-challenge/2|run|admission`, as the
+  `/job` route does with its own domain), so a third party can no longer open a rival's trial
+  (RTA-04). The admin export carries the signed challenge as `challenge_envelope` and
+  `trial_export` no longer calls the route; the miner signs the GET. A client built before this
+  change gets 403. ADR 0010.
+- At the start of every `join`, an `APPLIED` row that is past its challenge window
+  (`seed + challenge_rounds`) and holds no stake is suspended as `APPLIED_EXPIRED`: 32 unfunded
+  joins can no longer hold every pending place for good (RTA-02). Its coldkey may apply again;
+  its hotkey stays spent; a funded row is never touched. ADR 0010.
+- Optional admission policy field `max_unfunded_per_prefix` (1 to 32): `join` refuses a new
+  application with `PREFIX_PENDING_CAPACITY` when its /24 or /64 already holds that many unfunded
+  `APPLIED` rows (RTA-02). Absent by default and omitted from the digest, so no existing policy
+  digest or run id changes. ADR 0010.
+- The admission bond can be released and slashed (RTA-06). `EscrowV2` takes an optional
+  `admission_settlement` and settles a `LOCK_ADMISSION` through it, by lock kind; the settlement
+  is derived from the admission's records. `Admission.settle_fraud(dispute_id)` runs with every
+  accepted resolution: a referee verdict of fraud against the miner burns the bond and the
+  coldkey's unvested rewards and bans the admission. `Admission.seize_bond(admission_id,
+  reason, evidence_hash, now)` burns the bond for a no-show (`reason="NO_SHOW"`), a confirmed
+  round-stage audit mismatch (`"AUDIT_MISMATCH"`: also suspends with one strike) or a convicted
+  miner (`"TRAINING_FRAUD"`); `Admission.release_bond` and the status key `bond` serve the
+  owner. `EscrowV2.slash` takes `burn_pending` (default: today's behaviour). ADR 0010.
+- `RotateRequest` needs the new hotkey's signature (`new_hot_sig`, own domain
+  `hypertrain/rotate/2|`; `miner.admission.sign_rotation_consent`): one coldkey signature can no
+  longer burn a registered hotkey that never joined (RTA-01). A new rotation is charged to
+  `join_burst` per coldkey per `work_screen_epoch_rounds` (`ROTATION_QUOTA`); a banned admission
+  cannot rotate. A client that signs the three-field body gets 409. ADR 0010.
 - CUDA network qualification records each device's compute capability with its SM count and
   accepts a device only when the pair is a row of `network_qualification.SM_COUNTS` (RTX 5090
   12.0 = 170, B300 10.3 = 148) and the count equals the signed manifest's
@@ -79,7 +149,7 @@
 - Admission locks are typed too: a lock named like a closed dispute or a settled reward origin was
   released with that object's settlement over `POST /escrow/release`. `EscrowV2.lock_status` asks a
   resolver of admission locks, or nothing (`UNACCEPTED_SETTLEMENT`), and never the dispute or origin
-  tables; `Admission.settle_fraud` uses it (Lens F4 iii).
+  tables (Lens F4 iii). The bond release of `Admission.release_bond` is a server event.
 - Escrow: the funding status of an admission (`EscrowV2.locked`, behind the unauthenticated
   `GET .../admission/{hotkey}`) read every lock of the ledger and ran one unindexed sum per lock under the
   store lock: 1.08 s at 5,000 open locks, 5.4 s at 10,000, 96 s at 40,000 on the real code, enough to
@@ -93,6 +163,50 @@
   savepoint; one that fails for another reason than vesting or an open dispute stays `reward_pending`,
   is journaled as `records_v2 kind='maturity-failed'` and is retried at every round. A conservation
   failure or a SQLite error still aborts the call (Lens F6, SHD-D3).
+- The dispute long poll can no longer deadlock the store. `DisputesV2` has one lock order, the
+  store lock then a leaf condition: `events()` reads the event table outside the condition and parks
+  on a counter, so a mutator that notifies inside its transaction never waits for a poller that
+  waits for the store lock. A debug assertion reports an inverted acquisition. See
+  `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- Generic CUDA executor: bytes a host writes can no longer leave `Executor.launch` as
+  `RecursionError`, `MemoryError` or `OverflowError`. A probe that does not parse or exceeds a bound,
+  a result whose metadata nests deeper than 8 levels and a tar whose extended header asks for more
+  than 1 MiB quarantine the host and the next one serves the job; any other bad result fails the
+  attempt, and a `trace.json` that the audit reader would refuse is no longer published. See
+  `docs/cuda-executor.md` and `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- A dispute that nobody can decide no longer freezes finality and round opening for its whole
+  absolute horizon. On the next beacon push the server closes it as `INFRASTRUCTURE` without a
+  loser (the verdict and its exclusion stand, the contest bond returns in full, nothing is
+  slashed) when it is past the horizon, paused anywhere but on its final op, or abandoned
+  `T.dispute_per_level` rounds after its `turn_deadline`; the contested miner's suspension is
+  lifted to a fresh probation. A failing closure is journaled as `dispute-exit-failed`. See
+  `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- A roster member that never commits no longer stalls its round: audits are scheduled for the
+  members that committed, the absent one is left out (`NO_SHOW`, no sanction), and a member that
+  passed its audit but never uploads its delta is left out when the round is aggregated; a round
+  the remaining members cannot carry is refused with 409 `ROUND_INFEASIBLE`. The new helpers
+  join the owned set of `implementation_hash`, which changes. See
+  `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- A round the caps or the finality rules refuse is a 409, no longer a bare 500: opening a round
+  with a roster the Q/4 caps cannot carry (fewer than four eligible members) or round w+2 without
+  round w+1 answered `Internal Server Error`. `InsufficientEligibleWeight` now answers 409
+  `ROUND_INFEASIBLE: <reason>` and `FinalityError` and `TapeError` 409 `ROUND_BLOCKED: <reason>`
+  on every route of the challenge app (the two rollback routes keep their bare message for a
+  `TapeError`). The store still raises the bare exceptions; nothing is written by a refused call.
+  See `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- After a round that finality closed without a reward (an accepted rollback, or an exclusion
+  before the round was applied) no later round could be reward-finalized: the ledger accepted
+  only the round after the last one it had paid, nothing wrote the row of a closed round, and
+  `finalize` answered 409 `FINALIZE_ORDER` for ever (real HTTP, two-round rollback then a fully
+  audited round 2). The next reward `finalize` now records each such round once, as a
+  `ROUND_WITHDRAWN` event of the escrow journal in its own transaction, then pays: no table, no
+  snapshot change, nothing minted or moved, and a run already stuck this way is released by its
+  next `finalize`. A round that is pending, settled, awaiting its rollback or has an open audit
+  or dispute still blocks. See `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- The ledger no longer pays a round that finality closed without a reward: its reward evidence is
+  refused with `ROUND_CLOSED_UNPAID` (409), before and after the round was recorded as withdrawn.
+  `finalize` already stopped a repaired or an unapplied round upstream; this is the ledger's own
+  rule, so a future caller cannot mint it.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

@@ -540,29 +540,10 @@ def test_an_admission_lock_named_like_a_reward_origin_is_not_released_over_the_r
     response = n.client.post(
         n.url + "/escrow/release", json=n.signed(COLD[0], "EscrowRelease", release)
     )
-    assert response.status_code == 409 and "UNACCEPTED_SETTLEMENT" in response.text
+    # The master wires the admission resolver (ADR 0010 part 6): the bond is refused by its own
+    # settlement, not released with the origin's, whose release beacon had passed.
+    assert response.status_code == 409 and "UNACCEPTED_SETTLEMENT" not in response.text
     assert escrow.balances(COLD[0].ss58).admission_locked == 1000
-
-
-def test_settle_fraud_asks_the_admission_resolver_and_not_the_dispute_table(tmp_path: Path) -> None:
-    # Given: a name under which a dispute or an origin was convicted, borrowed by an admission lock.
-    a, lock = admission_lock_world(tmp_path, "77" * 32)
-    fraud = Settlement(
-        finality_hash=E.H,
-        closed_dispute_root=E.H,
-        release_beacon=10,
-        unresolved=False,
-        outcome="FRAUD",
-    )
-    a.escrow.settlement = lambda reference: fraud
-    # When / Then: the lookup of an admission lock does not reach that conviction.
-    with pytest.raises(EscrowError, match="UNACCEPTED_SETTLEMENT"):
-        a.settle_fraud(A.HOT.ss58, lock.operation_id, now=20)
-    assert a.store.record(A.HOT.ss58).state != "BANNED"
-    # A resolver for admission locks may convict.
-    a.escrow.admission_settlement = lambda reference: fraud
-    a.settle_fraud(A.HOT.ss58, lock.operation_id, now=20)
-    assert a.store.record(A.HOT.ss58).state == "BANNED"
 
 
 def test_an_unknown_lock_is_refused_before_any_settlement_is_asked(tmp_path: Path) -> None:

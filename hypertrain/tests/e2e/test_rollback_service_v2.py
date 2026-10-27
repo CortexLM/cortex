@@ -146,7 +146,7 @@ def active_network(tmp_path_factory):
                 assert response.status_code == 200, response.text
                 for _ in range(12):
                     network.push(network.now + 1)
-                    response = network.client.get(network.url + "/join/" + identity + "/challenge")
+                    response = network.challenge(identity)
                     assert response.status_code == 200, response.text
                     challenge = JoinChallenge.model_validate(response.json()["body"])
                     response = network.client.post(
@@ -218,7 +218,20 @@ def active_network(tmp_path_factory):
         patch.undo()
 
 
-def execute_round(network, w, *, open_only=False):
+def execute_round(
+    network,
+    w,
+    *,
+    open_only=False,
+    hotkeys=None,
+    forge=None,
+    silent=(),
+    skip_delta=(),
+    aggregate=True,
+):
+    """One real round for `hotkeys`; `forge` maps a hotkey to CommitV2 fields it lies about,
+    `silent` members are rostered but never accept or commit, `skip_delta` members commit and
+    never upload their delta; `aggregate=False` returns the RoundOpenV2 after the audits."""
     import anyio
     import httpx
     import torch
@@ -259,7 +272,7 @@ def execute_round(network, w, *, open_only=False):
             for n, x in load_state(network.store.objects, previous["out_state"]).theta.items()
         }
     starts, roster = [], []
-    hotkeys = fixtures.HOT[:4] if w == 2 else fixtures.HOT
+    hotkeys = hotkeys or (fixtures.HOT[:4] if w == 2 else fixtures.HOT)
     for i, hot in enumerate(hotkeys):
         status = network.store._services(manifest.run_id())[1].status(hot.ss58, now=network.now)
         anchor = (
@@ -332,7 +345,9 @@ def execute_round(network, w, *, open_only=False):
     response = network.client.get(network.url + f"/rounds/{w}")
     assert response.status_code == 200, response.text
     payloads = []
-    for i, hot in enumerate(fixtures.HOT):
+    for i, hot in enumerate(hotkeys):
+        if hot in silent:
+            continue
         assignment = next(a for a in response.json()["assignment"] if a["hotkey"] == hot.ss58)
         screen = json.loads(
             network.store._db.execute(
@@ -388,6 +403,9 @@ def execute_round(network, w, *, open_only=False):
                 "delta_bytes": artifacts.delta.stat().st_size,
             }
         )
+        lies = (forge or {}).get(hot.ss58)
+        if lies:
+            commit = commit.model_copy(update=lies)
         accepted = network.client.post(
             network.url + "/commit", json=network.signed(hot, "CommitV2", commit)
         )
@@ -407,7 +425,8 @@ def execute_round(network, w, *, open_only=False):
             network.url + "/leaves", json=network.signed(hot, "WorkProof", proof)
         )
         assert accepted.status_code == 200, accepted.text
-        payloads.append((hot, artifacts.delta))
+        if not lies and hot not in skip_delta:  # a forged commit has no delta manifest to upload
+            payloads.append((hot, artifacts.delta))
 
     async def transport():
         async with httpx.AsyncClient() as backing_http:
@@ -496,7 +515,8 @@ def execute_round(network, w, *, open_only=False):
         network.url + f"/admin/rounds/{w}/audits", headers=fixtures.admin()
     )
     assert accepted.status_code == 200, accepted.text
-    for i in range(5):
+    verdicts = {}
+    for i in range(len(hotkeys) - len(silent)):
         auditor = fixtures.AUDITORS[i % 2]
         accepted = network.client.post(
             network.url + "/worker/lease",
@@ -525,12 +545,19 @@ def execute_round(network, w, *, open_only=False):
             ),
         )
         assert executed.status_code == 200, executed.text
-        assert executed.json()["verdict"]["result"] == "MATCH"
+        verdicts[job["start_state"]["hotkey"]] = executed.json()["verdict"]["result"]
         accepted = network.client.post(
             network.url + "/worker/jobs/" + job["job_id"] + "/complete",
             json=network.signed(auditor, "ReplayVerdict", executed.json()["verdict"]),
         )
         assert accepted.status_code == 200, accepted.text
+    assert verdicts == {
+        hot.ss58: "MISMATCH" if hot.ss58 in (forge or {}) else "MATCH"
+        for hot in hotkeys
+        if hot not in silent
+    }
+    if not aggregate:
+        return opening
     accepted = network.client.post(
         network.url + f"/admin/rounds/{w}/aggregate", headers=fixtures.admin()
     )
@@ -741,7 +768,31 @@ def test_real_service_two_round_rollback_and_checkpoint(active_network, monkeypa
     )
     assert repeated.status_code == 200 and repeated.json() == repaired
     assert escrow.balances() == before
-    assert execute_round(n, 2, open_only=True).status_code == 200
+    # Round 2 (the four honest members) is reward-finalized after the accepted rollback.
+    from hypertrain.protocol.messages import Finalize
+
+    survivors = fixtures.HOT[:4]
+    third = execute_round(n, 2)
+    final = Finalize(
+        w=2,
+        final_theta_hash_w1=third["theta_hash"],
+        included=sorted(k.ss58 for k in survivors),
+        entitlements_root="0" * 64,
+    )
+    finalized = n.client.post(
+        n.url + "/admin/rounds/2/finalize",
+        json=n.signed(fixtures.COORD, "Finalize", final),
+        headers=fixtures.admin(),
+    )
+    assert finalized.status_code == 200, finalized.text
+    withdrawn = [
+        json.loads(r[0])["w"]
+        for r in n.store._db.execute(
+            "SELECT request FROM escrow_events WHERE kind='ROUND_WITHDRAWN' ORDER BY seq"
+        )
+    ]
+    assert withdrawn == [0, 1]
+    escrow.verify()
     rounds = []
     for w in (0, 1):
         applied = n.store._record_v2(n.manifest.run_id(), "applied", str(w))

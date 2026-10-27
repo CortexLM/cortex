@@ -36,8 +36,9 @@ if TYPE_CHECKING:
     from hypertrain.protocol.messages import ReplayEnv
 
 from hypertrain.beacon import BeaconError, BeaconRound
+from hypertrain.challenge import audit_cooldown_v2
 from hypertrain.challenge.admission import Admission
-from hypertrain.challenge.disputes_v2 import Contest, DisputesV2
+from hypertrain.challenge.disputes_v2 import EXCLUSION_ABANDONED, Contest, DisputesV2
 from hypertrain.data.assignment import assign_round
 from hypertrain.data.store import (
     CorruptObjectError,
@@ -723,9 +724,9 @@ class ChallengeStore:
             result = {"round": br.round, "latest": self._now(db)}
         with self.beacon_arrived:
             self.beacon_arrived.notify_all()
-        for guard in self._lease_guards_v2.values():
+        for guard in tuple(self._lease_guards_v2.values()):
             guard.advance(br.round)
-        for run_id, (escrow, _, _) in self._services_v2.items():
+        for run_id, (escrow, admission, _) in self._services_v2.items():
             with self._tx():
                 origins = self._db.execute(
                     "SELECT o.origin FROM escrow_origins o JOIN escrow_units u "
@@ -755,6 +756,9 @@ class ChallengeStore:
                             raise  # the ledger or its store is broken: stop, never skip
                         self._journal_maturity_failure_v2(run_id, origin[0], error)
                 self._expire_leases_v2(run_id, br.round)
+            self._close_blocked_disputes_v2(run_id)
+            with self._tx():  # own transaction: bookkeeping must not undo maturation or leases
+                admission.reap_expired_trials(now=self._now(self._db))
         for _, _, disputes in self._services_v2.values():
             disputes.notify()
         self._notify_processes_v2()
@@ -2648,6 +2652,7 @@ class ChallengeStore:
                 shadow_settlement=lambda origin: self._shadow_settlement_v2(run_id, origin),
                 id_key=self._escrow_id_key_v2(),
                 accepted_at=lambda envelope: self._accepted_beacon_v2(run_id, envelope),
+                round_closure=lambda w: self._round_closure_v2(run_id, w),
             )
             escrow.mutex = self._lock  # One SQLite authority lock, including event acknowledgments.
 
@@ -2856,10 +2861,17 @@ class ChallengeStore:
                 name: self.objects.put((directory / relative).read_bytes())
                 for name, relative in job.object_paths.items()
             }
+            receipt = self._db.execute(
+                "SELECT receipt FROM admission_reservations WHERE reservation=?",
+                (f"challenge|{admission_id}|{challenge.nonce}",),
+            ).fetchone()
+            if receipt is None:
+                raise ChallengeError(409, "MISSING_CHALLENGE_RECEIPT")
             return {
                 "job": job.body(),
                 "objects": objects,
                 "challenge": challenge.body(),
+                "challenge_envelope": envelope_v2.load_json(receipt["receipt"]),
                 "nonce": challenge.nonce,
             }
 
@@ -2896,6 +2908,7 @@ class ChallengeStore:
                         result = admission.challenge(identity, now=now)
                     case "status":
                         result = asdict(admission.status(identity, now=now))
+                        result["bond"] = admission.bond(result["record"]["admission_id"], now=now)
                         screen = self._db.execute(
                             "SELECT screen_json FROM admissions_v2 WHERE hotkey=?", (identity,)
                         ).fetchone()
@@ -2963,18 +2976,10 @@ class ChallengeStore:
                                 evidence_hash=result["contest"]["evidence_hash"],
                             )
                         if action in ("dispute", "resolution"):
-                            w = result["contest"]["w"]
-                            finality = self._record_v2(run_id, "finality", str(w))
-                            pending = self._db.execute(
-                                "SELECT COUNT(*) FROM disputes_v2 "
-                                "WHERE json_extract(turn,'$.contest.w')=? "
-                                "AND json_extract(turn,'$.resolution') IS NULL",
-                                (w,),
-                            ).fetchone()[0]
-                            finality["unresolved_disputes"] = pending
-                            self._put_record_v2(run_id, "finality", str(w), finality)
+                            self._recount_disputes_v2(run_id, result["contest"]["w"])
                         if action == "resolution":
                             disputes.settle_lock(result["dispute_id"], now=now)
+                            admission.settle_fraud(result["dispute_id"], now=now)
                             self._put_record_v2(
                                 run_id,
                                 "resolution",
@@ -4374,6 +4379,11 @@ class ChallengeStore:
             "rollback_preview_v2",
             "_rollback_context_v2",
             "schedule_audits_v2",
+            "_round_ids_v2",
+            "_require_survivors_v2",
+            "_put_no_show_v2",
+            "_exclude_no_shows_v2",
+            "_exclude_missing_deltas_v2",
             "lease_v2",
             "complete_audit_v2",
             "finalize_v2",
@@ -4495,8 +4505,16 @@ class ChallengeStore:
 
     def bootstrap_service_capacity_v2(self, run_id: str, body: bytes, raw: bytes) -> str:
         """Trusted operator bootstrap: owner Receipt signs exact immutable profile."""
+        from hypertrain.protocol.env_pins import EnvPinUnhonorable, require_honorable
         from hypertrain.protocol.messages import Receipt
 
+        with self._lock:
+            pin = self._run_v2(run_id).training.reference_spec.env.pin()
+        if pin is not None:  # a child process of up to two minutes: never inside the transaction
+            try:
+                require_honorable(pin)
+            except EnvPinUnhonorable as error:
+                raise ChallengeError(409, f"SERVICE_PROFILE_ENV_PIN: {error}") from error
         with self._tx():
             try:
                 profile = _ServiceCapacityV1.model_validate(
@@ -5373,11 +5391,10 @@ class ChallengeStore:
                 self._coord().ss58,
             }:
                 raise ChallengeError(403, "independent pinned observer required")
-            if self._db.execute(
-                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='auditor-disabled' AND id=?",
-                (run_id, observer),
-            ).fetchone():
-                raise ChallengeError(403, "disabled observer cannot establish health")
+            self._expire_leases_v2(run_id, now)
+            until = self._cooling_until_v2(run_id, observer, now)
+            if until is not None:
+                raise ChallengeError(403, f"observer in auditor cooldown until round {until}")
             reference = self._db.execute(
                 "SELECT reference FROM admission_trial_results WHERE outcome='MATCH' "
                 "AND reference IS NOT NULL ORDER BY epoch DESC LIMIT 1"
@@ -6111,6 +6128,90 @@ class ChallengeStore:
             )
         ]
 
+    def _recount_disputes_v2(self, run_id: str, w: int) -> None:
+        status = self._record_v2(run_id, "finality", str(w))
+        status["unresolved_disputes"] = self._db.execute(
+            "SELECT COUNT(*) FROM disputes_v2 "
+            "WHERE json_extract(turn,'$.contest.w')=? "
+            "AND json_extract(turn,'$.resolution') IS NULL",
+            (w,),
+        ).fetchone()[0]
+        self._put_record_v2(run_id, "finality", str(w), status)
+
+    def _round_closure_v2(self, run_id: str, w: int) -> str | None:
+        """The hash that closed round w without a reward, else None. Derived, never stored.
+
+        A round is closed without a reward when finality closed it as excluded (an accepted
+        rollback, or an exclusion before it was applied) or as retired; pending, settled,
+        awaiting its rollback, with an open audit or dispute, or without a record, it is not.
+        RETIRED is compared as a string: `finality_v2` does not know the disposition yet, and
+        until `RoundStatus.closed` counts it no record can match.
+        """
+        from hypertrain.challenge.finality_v2 import RoundStatus
+
+        row = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='finality' AND id=?",
+            (run_id, str(w)),
+        ).fetchone()
+        if row is None:
+            return None
+        status = RoundStatus(**json.loads(row[0]))
+        if status.closed and status.disposition in ("EXCLUDED", "RETIRED"):
+            return status.resolution_hash
+        return None
+
+    def _close_blocked_disputes_v2(self, run_id: str) -> None:
+        """Close, without a loser, every dispute no party and no referee can still decide.
+
+        The beacon round is the clock. A closure is INFRASTRUCTURE with loser None: the contest
+        bond is released in full, nothing is slashed and the audit's own exclusion stays. The
+        miner's PENDING_DISPUTE suspension then becomes a fresh probation, never a ban.
+        One savepoint per step and dispute; a failure is journaled and never stops the beacon route.
+        """
+        escrow, admission, disputes = self._services_v2[run_id]
+        with self._tx():
+            now = self._now(self._db)
+            for turn in disputes.unresolved():
+                cause = disputes.blocked_cause(turn, now)
+                if cause is None:
+                    continue
+                try:
+                    with escrow.tx():
+                        if cause == EXCLUSION_ABANDONED:
+                            disputes.pause(turn.dispute_id)  # exclude() is due only when paused
+                        disputes.exclude(turn.dispute_id, now=now, cause=cause)
+                        disputes.settle_lock(turn.dispute_id, now=now)
+                        self._recount_disputes_v2(run_id, turn.contest.w)
+                except Exception as error:  # one poisoned dispute must not stop the beacon
+                    self._journal_dispute_exit_v2(run_id, turn.dispute_id, "close", error)
+                    continue
+                try:
+                    with escrow.tx():
+                        pending = self._db.execute(
+                            "SELECT 1 FROM admission_pending WHERE dispute_id=? AND resolved=0",
+                            (turn.dispute_id,),
+                        ).fetchone()
+                        if pending is not None:
+                            admission.resolve_pending(turn.contest.miner, turn.dispute_id, now=now)
+                except Exception as error:  # the closure above stands
+                    self._journal_dispute_exit_v2(run_id, turn.dispute_id, "admission", error)
+
+    def _journal_dispute_exit_v2(
+        self, run_id: str, dispute_id: str, stage: str, error: Exception
+    ) -> None:
+        """Last failure per dispute, rewritten only on change so the rollback revision holds."""
+        code = getattr(error, "code", None)
+        entry: dict[str, JsonValue] = {
+            "stage": stage,
+            "error": type(error).__name__ + (f":{code}" if isinstance(code, str) else ""),
+        }
+        try:
+            old: dict[str, Any] | None = self._record_v2(run_id, "dispute-exit-failed", dispute_id)
+        except ChallengeError:
+            old = None
+        if old != entry:
+            self._put_record_v2(run_id, "dispute-exit-failed", dispute_id, entry)
+
     def _persist_anchor_v2(self, manifest: RunManifestV2, anchor: Any, cache: Any) -> None:
         from hypertrain.auditor.replay import tensor_root
         from hypertrain.trainer.compress import state_hash
@@ -6360,6 +6461,93 @@ class ChallengeStore:
             )
             return {"leaves_root": commit.leaves_root}
 
+    def _round_ids_v2(self, run_id: str, kind: str, w: int) -> set[str]:
+        return {
+            row[0]
+            for row in self._db.execute(
+                "SELECT id FROM records_v2 WHERE run_id=? AND kind=? AND id LIKE ?",
+                (run_id, kind, f"{w}:%"),
+            )
+        }
+
+    def _require_survivors_v2(self, manifest: RunManifestV2, survivors: list[Any]) -> None:
+        """Refuse a round whose remaining members cannot carry one complete update."""
+        from hypertrain.aggregator.weighted_v2 import (
+            Candidate,
+            InsufficientEligibleWeight,
+            allocate_weights,
+        )
+
+        policy = AggregationPolicyV2.model_validate_json(
+            self.objects.get(manifest.network.aggregation_policy_hash)
+        )
+        try:
+            allocate_weights([Candidate(e, "0" * 64, "0" * 64) for e in survivors], policy)
+        except InsufficientEligibleWeight as error:
+            raise ChallengeError(
+                409, "ROUND_INFEASIBLE: the remaining members cannot carry the round"
+            ) from error
+
+    def _put_no_show_v2(self, run_id: str, w: int, hotkey: str, stage: str) -> None:
+        evidence = f"ht-no-show/1|{run_id}|{w}|{hotkey}|{stage}"
+        self._put_record_v2(
+            run_id,
+            "excluded",
+            f"{w}:{hotkey}",
+            {"reason": "NO_SHOW", "stage": stage, "evidence_hash": sha256_hex(evidence.encode())},
+        )
+
+    def _exclude_no_shows_v2(
+        self, run_id: str, manifest: RunManifestV2, w: int, roster: list[Any]
+    ) -> None:
+        """Leave out the roster members that never committed.
+
+        Commit intake closed at d_commit (training_v2), before audits can be scheduled, so an
+        absence is final. The round stays PENDING: finalize pays the members that were audited.
+        """
+        committed = self._round_ids_v2(run_id, "commit", w)
+        excluded = self._round_ids_v2(run_id, "excluded", w)
+        absent = [e for e in roster if f"{w}:{e.hotkey}" not in committed | excluded]
+        if not absent:
+            return
+        self._require_survivors_v2(
+            manifest,
+            [
+                e
+                for e in roster
+                if f"{w}:{e.hotkey}" in committed and f"{w}:{e.hotkey}" not in excluded
+            ],
+        )
+        for entry in absent:
+            self._put_no_show_v2(run_id, w, entry.hotkey, "commit")
+        finality = self._record_v2(run_id, "finality", str(w))
+        finality["unresolved_audits"] = max(0, int(finality["unresolved_audits"]) - len(absent))
+        self._put_record_v2(run_id, "finality", str(w), finality)
+
+    def _exclude_missing_deltas_v2(self, run_id: str, w: int) -> None:
+        """Leave out an audited member whose delta never arrived.
+
+        Delta intake closes at d_upload (training_v2). The member's audit already resolved and
+        decremented unresolved_audits, so only the record is written.
+        """
+        from hypertrain.protocol.messages_v2 import RoundOpenV2
+
+        body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", str(w))["body"])
+        if self._now(self._db) < body.d_upload:
+            return
+        audited = {
+            row[0]
+            for row in self._db.execute(
+                "SELECT hotkey FROM audit_leases_v2 WHERE run_id=? AND w=? AND state='completed'",
+                (run_id, w),
+            )
+        }
+        excluded = self._round_ids_v2(run_id, "excluded", w)
+        delivered = self._round_ids_v2(run_id, "delta", w)
+        for entry in body.roster:
+            if entry.hotkey in audited and f"{w}:{entry.hotkey}" not in delivered | excluded:
+                self._put_no_show_v2(run_id, w, entry.hotkey, "delta")
+
     def schedule_audits_v2(self, run_id: str, w: int) -> list[str]:
         from hypertrain.protocol.messages_v2 import AuditChallengeV2, CommitV2, RoundOpenV2
 
@@ -6449,9 +6637,13 @@ class ChallengeStore:
             active = self._db.execute(
                 "SELECT COUNT(*) FROM audit_leases_v2 WHERE state IN ('queued','running')"
             ).fetchone()[0]
+            self._exclude_no_shows_v2(run_id, manifest, w, body.roster)
+            excluded = self._round_ids_v2(run_id, "excluded", w)
             missing = []
             for entry in body.roster:
                 identity = f"{w}:{entry.hotkey}"
+                if identity in excluded:
+                    continue
                 commit_env = self._record_v2(run_id, "commit", identity)
                 commit = CommitV2.model_validate(commit_env["body"])
                 job_id = sha256_hex(f"ht-audit-job/2|{run_id}|{w}|{entry.hotkey}".encode())
@@ -6619,11 +6811,9 @@ class ChallengeStore:
             assert isinstance(model, Receipt)
             now = self._fresh_v2(manifest, f"lease:{self._now(self._db)}")
             self._expire_leases_v2(run_id, now)
-            if self._db.execute(
-                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='auditor-disabled' AND id=?",
-                (run_id, env.signer),
-            ).fetchone():
-                raise ChallengeError(403, "silent auditor disabled pending review")
+            until = self._cooling_until_v2(run_id, env.signer, now)
+            if until is not None:
+                raise ChallengeError(403, f"auditor cooldown until round {until}")
             if self._db.execute(
                 "SELECT 1 FROM audit_leases_v2 WHERE auditor=? AND state='running'", (env.signer,)
             ).fetchone():
@@ -6635,19 +6825,41 @@ class ChallengeStore:
                 >= 2
             ):
                 return None
-            rows = self._db.execute(
+            row = None
+            for candidate in self._db.execute(
                 "SELECT * FROM audit_leases_v2 WHERE run_id=? "
                 "AND state='queued' ORDER BY created,id",
                 (run_id,),
-            ).fetchall()
-            row = next(
-                (
-                    r
-                    for r in rows
-                    if env.signer not in json.loads(r["tried"]) and env.signer != r["hotkey"]
-                ),
-                None,
-            )
+            ).fetchall():
+                if (
+                    env.signer in json.loads(candidate["tried"])
+                    or env.signer == candidate["hotkey"]
+                ):
+                    continue
+                identity = f"{candidate['w']}:{candidate['hotkey']}"
+                if (
+                    self._db.execute(
+                        "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='leaves' AND id=?",
+                        (run_id, identity),
+                    ).fetchone()
+                    is None
+                ):
+                    continue  # leaves have no deadline: leasable once posted, never blocking
+                commit_env = self._record_v2(run_id, "commit", identity)
+                leaves_record = self._record_v2(run_id, "leaves", identity)
+                leaves = json.loads(self.objects.get(str(leaves_record["object"])))
+                # A miner-sealed input that AuditJobV2 refuses must not block the jobs behind it.
+                refusal = self._refused_miner_input_v2(commit_env, leaves, now)
+                if refusal is None:
+                    row = candidate
+                    break
+                self._drop_audit_job_v2(
+                    run_id,
+                    candidate,
+                    "UNVERIFIED",
+                    "MINER_INPUT_REFUSED",
+                    sha256_hex(f"ht-audit-refused/1|{candidate['id']}|{refusal}".encode()),
+                )
             if row is None:
                 return None
             nonce = secrets.token_hex(32)
@@ -6655,11 +6867,7 @@ class ChallengeStore:
                 self.objects.get(manifest.network.audit_policy_hash)
             ).lease_rounds
             expires = min(now + lease_rounds, row["absolute"])
-            identity = f"{row['w']}:{row['hotkey']}"
             start = StartStateV2.model_validate(self._record_v2(run_id, "start", identity))
-            commit_env = self._record_v2(run_id, "commit", identity)
-            leaves_record = self._record_v2(run_id, "leaves", identity)
-            leaves = json.loads(self.objects.get(str(leaves_record["object"])))
             ef = self.objects.get(start.ef_object_sha256)
             from hypertrain.auditor.replay import pack_state
 
@@ -6683,7 +6891,7 @@ class ChallengeStore:
                 preimages=leaves,
                 ef_in=ArtifactRef(sha256=start.ef_object_sha256, size=len(ef)),
                 v0=ArtifactRef(sha256=v0_hash, size=len(self.objects.get(v0_hash))),
-                created_beacon=row["created"],
+                created_beacon=now,
             )
             tried = json.loads(row["tried"]) + [env.signer]
             self._db.execute(
@@ -6694,50 +6902,192 @@ class ChallengeStore:
             self._put_record_v2(run_id, "audit-job", row["id"], job.body())
             return envelope_v2.seal(self._coord(), "AuditJobV2", run_id, job, expires)
 
+    @staticmethod
+    def _refused_miner_input_v2(
+        commit_env: dict[str, Any], leaves: list[Any], now: int
+    ) -> str | None:
+        """Why AuditJobV2 would refuse what the miner sealed, or None. Two causes, both the miner's:
+        an expiry sealed below the lease round, and a leaf metric that is not a finite f32."""
+        if envelope_v2.parse_envelope(commit_env).exp_drand < now:
+            return "COMMIT_EXPIRED"
+        if any(
+            not math.isfinite(f32val(leaf[key]))
+            for leaf in leaves
+            for key in ("loss_f32", "norm_f32")
+        ):
+            return "LEAVES_NONFINITE"
+        return None
+
+    def _drop_audit_job_v2(
+        self, run_id: str, row: sqlite3.Row, reason: str, result: str, evidence_hash: str
+    ) -> None:
+        """Close one audit job without a verdict. Its miner leaves the round (`excluded`, no
+        sanction); the round's disposition and the other miners' jobs are untouched."""
+        self._db.execute(
+            "UPDATE audit_leases_v2 SET state='exhausted',result=? WHERE id=?", (result, row["id"])
+        )
+        self._put_record_v2(
+            run_id,
+            "excluded",
+            f"{row['w']}:{row['hotkey']}",
+            {"reason": reason, "evidence_hash": evidence_hash},
+        )
+        finality = self._record_v2(run_id, "finality", str(row["w"]))
+        finality["unresolved_audits"] = max(0, int(str(finality["unresolved_audits"])) - 1)
+        self._put_record_v2(run_id, "finality", str(row["w"]), finality)
+
     def _expire_leases_v2(self, run_id: str, now: int) -> None:
         rows = self._db.execute(
             "SELECT * FROM audit_leases_v2 WHERE run_id=? AND state IN ('running','queued')",
             (run_id,),
         ).fetchall()
         for row in rows:
-            if row["state"] == "exhausted":
-                continue
             if row["state"] == "running" and now >= row["expires"]:
-                self._put_record_v2(
-                    run_id,
-                    "auditor-disabled",
-                    row["auditor"],
-                    {"job_id": row["id"], "reason": "LEASE_EXPIRED"},
-                )
-                state = "exhausted" if row["attempts"] >= 2 or now >= row["absolute"] else "queued"
-                self._db.execute(
-                    "UPDATE audit_leases_v2 SET state=?,result='AUDIT_INFRASTRUCTURE' WHERE id=?",
-                    (state, row["id"]),
-                )
-                if row["id"] in self._lease_guards_v2:
-                    self._lease_guards_v2[row["id"]].revoke()
-            elif now >= row["absolute"]:
+                self._retire_audit_attempt_v2(run_id, row, now, self._expiry_cause_v2(run_id, row))
+            elif row["state"] == "queued" and now >= row["absolute"]:
                 self._db.execute(
                     "UPDATE audit_leases_v2 SET state='exhausted',"
                     "result='AUDIT_INFRASTRUCTURE' WHERE id=?",
                     (row["id"],),
                 )
-            current = self._db.execute(
-                "SELECT state FROM audit_leases_v2 WHERE id=?", (row["id"],)
-            ).fetchone()[0]
-            if current == "exhausted":
-                self._put_record_v2(
-                    run_id,
-                    "excluded",
-                    f"{row['w']}:{row['hotkey']}",
-                    {"reason": "INFRASTRUCTURE", "evidence_hash": sha256_hex(row["id"].encode())},
-                )
-                finality = self._record_v2(run_id, "finality", str(row["w"]))
-                finality["disposition"] = "EXCLUDED"
-                finality["resolution_hash"] = sha256_hex(row["id"].encode())
-                finality["rollback_complete"] = not finality["applied"]
-                finality["unresolved_audits"] = max(0, int(str(finality["unresolved_audits"])) - 1)
-                self._put_record_v2(run_id, "finality", str(row["w"]), finality)
+                self._exhaust_audit_job_v2(run_id, row, now)
+
+    def _expiry_cause_v2(self, run_id: str, row: sqlite3.Row) -> str:
+        """An auditor that asked for the execution is not silent: the master owed the verdict."""
+        marker = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='audit-execution' AND id=?",
+            (run_id, f"{row['id']}:{row['nonce']}"),
+        ).fetchone()
+        if marker is not None and json.loads(marker[0])["state"] == "REQUESTED":
+            return "EXECUTOR_INTERRUPTED"
+        return "AUDITOR_SILENT"
+
+    def _retire_audit_attempt_v2(
+        self, run_id: str, row: sqlite3.Row, now: int, cause: str, error: str | None = None
+    ) -> None:
+        """End the running attempt of a lease: requeue it for the other auditor or exhaust it.
+        Only an AUDITOR_SILENT attempt costs its auditor a cooldown."""
+        state = "exhausted" if row["attempts"] >= 2 or now >= row["absolute"] else "queued"
+        self._db.execute(
+            "UPDATE audit_leases_v2 SET state=?,result='AUDIT_INFRASTRUCTURE' WHERE id=?",
+            (state, row["id"]),
+        )
+        guard = self._lease_guards_v2.pop(row["id"], None)
+        if guard is not None:
+            guard.revoke()
+        failure: dict[str, JsonValue] = {
+            "job_id": row["id"],
+            "attempt": row["attempts"],
+            "auditor": row["auditor"],
+            "cause": cause,
+            "at": now,
+            "state": state,
+        }
+        if error is not None:
+            failure["error"] = error
+        self._put_record_v2(run_id, "audit-attempt-failure", f"{row['id']}:{row['nonce']}", failure)
+        if cause == "AUDITOR_SILENT":
+            self._cool_down_auditor_v2(run_id, row)
+        if state == "exhausted":
+            self._exhaust_audit_job_v2(run_id, row, now)
+
+    def _cooling_until_v2(self, run_id: str, auditor: str, now: int) -> int | None:
+        record = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='auditor-cooldown' AND id=?",
+            (run_id, auditor),
+        ).fetchone()
+        return audit_cooldown_v2.cooling_until(json.loads(record[0]) if record else None, now)
+
+    def _cool_down_auditor_v2(self, run_id: str, row: sqlite3.Row) -> None:
+        """The silence began when the lease ran out, not when somebody noticed: a refusing call
+        rolls its own expiry back (`_tx`), so the round that observes it must not move `until`."""
+        silent_since = row["expires"]
+        manifest = self._run_v2(run_id)
+        policy = AuditPolicyV2.model_validate_json(
+            self.objects.get(manifest.network.audit_policy_hash)
+        )
+        records = {
+            r[0]: json.loads(r[1])
+            for r in self._db.execute(
+                "SELECT id,data FROM records_v2 WHERE run_id=? AND kind='auditor-cooldown'",
+                (run_id,),
+            )
+        }
+        self._put_record_v2(
+            run_id,
+            "auditor-cooldown",
+            row["auditor"],
+            audit_cooldown_v2.next_record(
+                records.get(row["auditor"]),
+                job_id=row["id"],
+                cause="AUDITOR_SILENT",
+                now=silent_since,
+                lease_rounds=policy.lease_rounds,
+                absolute_rounds=policy.absolute_rounds(),
+                free=audit_cooldown_v2.others_free(
+                    manifest.training.auditors, row["auditor"], records, silent_since
+                ),
+            ),
+        )
+
+    def _exhaust_audit_job_v2(self, run_id: str, row: sqlite3.Row, now: int) -> None:
+        """A job that ran out of attempts or time. It gets one more window; after that its miner
+        leaves the round (`excluded` INFRASTRUCTURE, no sanction) and the round goes on."""
+        if not self._rearm_audit_job_v2(run_id, row, now):
+            self._drop_audit_job_v2(
+                run_id,
+                row,
+                "INFRASTRUCTURE",
+                "AUDIT_INFRASTRUCTURE",
+                sha256_hex(row["id"].encode()),
+            )
+
+    def _rearm_audit_job_v2(self, run_id: str, row: sqlite3.Row, now: int) -> bool:
+        """Requeue an exhausted job for a fresh window that starts now: attempts and tried reset, a
+        new coordinator-signed challenge, bounded by the pinned max_attempts windows. The generic
+        path only: a service-admitted run keeps its resource deadline. The window ends where the
+        miner's sealed commit ends (an honest one: `d_final`): AuditJobV2 embeds it live, so a
+        window past that round could only drop the miner for a fault that is not its own."""
+        from hypertrain.protocol.messages_v2 import AuditChallengeV2
+
+        if self._db.execute(
+            "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission' AND id='run'",
+            (run_id,),
+        ).fetchone():
+            return False
+        manifest = self._run_v2(run_id)
+        policy = AuditPolicyV2.model_validate_json(
+            self.objects.get(manifest.network.audit_policy_hash)
+        )
+        previous = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='audit-rearm' AND id=?",
+            (run_id, row["id"]),
+        ).fetchone()
+        windows = json.loads(previous[0])["windows"] if previous else 1
+        if windows >= policy.max_attempts:
+            return False
+        sealed = envelope_v2.parse_envelope(
+            self._record_v2(run_id, "commit", f"{row['w']}:{row['hotkey']}")
+        )
+        absolute = min(now + policy.absolute_rounds(), sealed.exp_drand)
+        if absolute <= now + 1:
+            return False
+        challenge = AuditChallengeV2.model_validate(
+            envelope_v2.parse_envelope(json.loads(row["challenge"])).body
+        ).model_copy(update={"serve_deadline": absolute})
+        signed = envelope_v2.seal(self._coord(), "AuditChallengeV2", run_id, challenge, absolute)
+        self._db.execute(
+            "UPDATE audit_leases_v2 SET state='queued',attempts=0,auditor=NULL,nonce=NULL,"
+            "expires=NULL,tried='[]',created=?,absolute=?,challenge=? WHERE id=?",
+            (now, absolute, _dumps(signed), row["id"]),
+        )
+        self._put_record_v2(
+            run_id,
+            "audit-rearm",
+            row["id"],
+            {"windows": windows + 1, "at": now, "absolute": absolute},
+        )
+        return True
 
     def island_job_v2(self, run_id: str, w: int, hotkey: str) -> dict[str, Any]:
         from hypertrain.auditor.replay import pack_state, unpack_state
@@ -6984,6 +7334,28 @@ class ChallengeStore:
             assert hasattr(request, "commit_hash")
             if request.commit_hash != row["nonce"]:
                 raise ChallengeError(403, "audit lease nonce differs")
+            # Committed on its own, before the preparation below can refuse: from here a missing
+            # verdict is the master's debt, not the auditor's silence (_expiry_cause_v2).
+            marker = f"{job_id}:{row['nonce']}"
+            if (
+                self._db.execute(
+                    "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='audit-execution' AND id=?",
+                    (run_id, marker),
+                ).fetchone()
+                is None
+            ):
+                self._put_record_v2(
+                    run_id,
+                    "audit-execution",
+                    marker,
+                    {"state": "REQUESTED", "at": self._now(self._db)},
+                )
+        with self._tx():
+            row = self._db.execute("SELECT * FROM audit_leases_v2 WHERE id=?", (job_id,)).fetchone()
+            if row["state"] != "running" or row["nonce"] != request.commit_hash:
+                raise ChallengeError(409, "audit lease changed before execution")
+            if job_id in self._lease_guards_v2:
+                raise ChallengeError(409, "audit execution already running for this lease")
             now = self._fresh_v2(manifest, f"audit-execute:{job_id}:{self._now(self._db)}")
             job = AuditJobV2.model_validate(self._record_v2(run_id, "audit-job", job_id))
             job.validate_embedded(now)
@@ -7214,7 +7586,6 @@ class ChallengeStore:
                 + (min(row["expires"], row["absolute"]) - 1) * 3
             )
             guard = LeaseGuard(row["expires"], row["absolute"], deadline)
-            self._lease_guards_v2[job_id] = guard  # Subscribe before triggering execution.
             cache = AnchorCache()
             self._restore_anchor_v2(run_id, row["hotkey"], row["w"] - 1, cache)
             start = job.start_state
@@ -7238,6 +7609,7 @@ class ChallengeStore:
             inputs["sample_proofs"] = canonicalize([proofs[i] for i in job.sample_ids])
             for name, value in inputs.items():
                 durable_write(directory / name, value)
+            self._lease_guards_v2[job_id] = guard  # Subscribe before triggering execution.
         try:
             with guard:
                 from hypertrain.protocol.messages_v2 import IslandJobV1
@@ -7295,51 +7667,52 @@ class ChallengeStore:
                                 ),
                             },
                         )
-                guard.check()
-                outcome, artifacts = execute_island_audit(
-                    job,
-                    directory,
-                    cache,
-                    guard,
-                    now_round=now,
-                    deadline_unix=deadline,
-                    backend=backend,
-                    objects=self.objects.get,  # resolves stored ht-parts-v1 refs
-                    publication_job=geometry_job,
-                    publication_directory=geometry_directory,
-                    launch=(
-                        self._role_launch(
-                            "audit",
-                            geometry_job,
-                            geometry_directory,
-                            {
-                                "run_id": run_id,
-                                "job_id": job_id,
-                                "audit_job": job.body(),
-                                "descriptor_hash": descriptor_hash,
-                                "descriptor": descriptor,
-                                "descriptor_receipt": self._record_v2(
-                                    run_id, "audit-geometry", f"{job_id}:{row['nonce']}"
-                                )["receipt"],
-                                "hotkey": row["hotkey"],
-                                "auditor": row["auditor"],
-                            },
-                        )
-                        if self._role_launch is not None
-                        else None
-                    ),
-                )
-                from hypertrain.auditor.island_bisect import IslandParty
+                with self._booking_executor_failure_v2(run_id, job_id, job.lease_nonce, guard):
+                    guard.check()
+                    outcome, artifacts = execute_island_audit(
+                        job,
+                        directory,
+                        cache,
+                        guard,
+                        now_round=now,
+                        deadline_unix=deadline,
+                        backend=backend,
+                        objects=self.objects.get,  # resolves stored ht-parts-v1 refs
+                        publication_job=geometry_job,
+                        publication_directory=geometry_directory,
+                        launch=(
+                            self._role_launch(
+                                "audit",
+                                geometry_job,
+                                geometry_directory,
+                                {
+                                    "run_id": run_id,
+                                    "job_id": job_id,
+                                    "audit_job": job.body(),
+                                    "descriptor_hash": descriptor_hash,
+                                    "descriptor": descriptor,
+                                    "descriptor_receipt": self._record_v2(
+                                        run_id, "audit-geometry", f"{job_id}:{row['nonce']}"
+                                    )["receipt"],
+                                    "hotkey": row["hotkey"],
+                                    "auditor": row["auditor"],
+                                },
+                            )
+                            if self._role_launch is not None
+                            else None
+                        ),
+                    )
+                    from hypertrain.auditor.island_bisect import IslandParty
 
-                if artifacts.directory != geometry_directory / "published":
-                    raise ChallengeError(409, "independent audit publication directory differs")
-                IslandParty.published(row["hotkey"], geometry_job, artifacts.directory)
-                dispatched = (
-                    self._dispatch_env_v2(manifest, geometry_directory)
-                    if backend == "cuda"
-                    else None
-                )
-                guard.check()
+                    if artifacts.directory != geometry_directory / "published":
+                        raise ChallengeError(409, "independent audit publication directory differs")
+                    IslandParty.published(row["hotkey"], geometry_job, artifacts.directory)
+                    dispatched = (
+                        self._dispatch_env_v2(manifest, geometry_directory)
+                        if backend == "cuda"
+                        else None
+                    )
+                    guard.check()
             with self._tx():
                 current = self._db.execute(
                     "SELECT * FROM audit_leases_v2 WHERE id=?", (job_id,)
@@ -7382,6 +7755,12 @@ class ChallengeStore:
                     run_id, "executed-verdict", job_id, verdict.model_dump(mode="json")
                 )
                 self._put_record_v2(
+                    run_id,
+                    "audit-execution",
+                    f"{job_id}:{job.lease_nonce}",
+                    {"state": "EXECUTED", "at": fresh},
+                )
+                self._put_record_v2(
                     run_id, "audit-artifacts", job_id, {"directory": str(artifacts.directory)}
                 )
                 if outcome.result == "MATCH":
@@ -7401,7 +7780,63 @@ class ChallengeStore:
                     "identity": identity,
                 }
         finally:
-            self._lease_guards_v2.pop(job_id, None)
+            with self._lock:
+                if self._lease_guards_v2.get(job_id) is guard:
+                    del self._lease_guards_v2[job_id]
+
+    @contextmanager
+    def _booking_executor_failure_v2(
+        self, run_id: str, job_id: str, nonce: str, guard: Any
+    ) -> Iterator[None]:
+        """Whatever leaves the executor boundary is booked against the attempt, then re-raised.
+        A cancelled guard (wall timer, revoke) is left to the verified beacon."""
+        try:
+            yield
+        except Exception as error:
+            if not guard.cancelled.is_set():
+                self._fail_audit_attempt_v2(run_id, job_id, nonce, error)
+            raise
+
+    def _fail_audit_attempt_v2(
+        self, run_id: str, job_id: str, nonce: str, error: Exception
+    ) -> None:
+        """Retire the running attempt at once instead of holding the lease to its expiry.
+
+        Circuit breaker: the same error class on a second job within one lease is the signature
+        of a host-wide outage, not of one miner's input. Then the lease is held to its expiry
+        (EXECUTOR_INTERRUPTED, no cooldown) so the outage cannot burn every job's attempts in
+        seconds. The same job failing twice, or another error class, is booked."""
+        with self._tx():
+            row = self._db.execute(
+                "SELECT * FROM audit_leases_v2 WHERE id=? AND run_id=?", (job_id, run_id)
+            ).fetchone()
+            if row is None or row["state"] != "running" or row["nonce"] != nonce:
+                return
+            now = self._now(self._db)
+            if now >= row["expires"]:
+                self._expire_leases_v2(run_id, now)
+                return
+            name = type(error).__name__
+            held = self._db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='audit-failure-latch' "
+                "AND id='run'",
+                (run_id,),
+            ).fetchone()
+            if held is not None:
+                latch = json.loads(held[0])
+                lease_rounds = AuditPolicyV2.model_validate_json(
+                    self.objects.get(self._run_v2(run_id).network.audit_policy_hash)
+                ).lease_rounds
+                if (
+                    latch["error"] == name
+                    and latch["job_id"] != job_id
+                    and now < latch["at"] + lease_rounds
+                ):
+                    return
+            self._put_record_v2(
+                run_id, "audit-failure-latch", "run", {"error": name, "job_id": job_id, "at": now}
+            )
+            self._retire_audit_attempt_v2(run_id, row, now, "EXECUTOR_FAILED", error=name)
 
     def _dispatch_env_v2(
         self, manifest: RunManifestV2, directory: Path
@@ -8233,7 +8668,9 @@ class ChallengeStore:
                 return {"tape": tape.body_json(), **saved}
             history = [s for s in self._history_v2(run_id) if s.w < w]
             require_apply(run_id, w, history)
+            self._exclude_missing_deltas_v2(run_id, w)
             inputs = self.verified_inputs_v2(run_id, w)
+            self._require_survivors_v2(manifest, [x.roster for x in inputs])
             policy = AggregationPolicyV2.model_validate_json(
                 self.objects.get(manifest.network.aggregation_policy_hash)
             )
@@ -9010,15 +9447,7 @@ class ChallengeStore:
             result = disputes.timeout(dispute_id, (proofs[0], proofs[1]), now=self._now(self._db))
             if result.resolution is not None:
                 disputes.settle_lock(dispute_id, now=self._now(self._db))
-                w = result.contest.w
-                status = self._record_v2(run_id, "finality", str(w))
-                status["unresolved_disputes"] = self._db.execute(
-                    "SELECT COUNT(*) FROM disputes_v2 "
-                    "WHERE json_extract(turn,'$.contest.w')=? "
-                    "AND json_extract(turn,'$.resolution') IS NULL",
-                    (w,),
-                ).fetchone()[0]
-                self._put_record_v2(run_id, "finality", str(w), status)
+                self._recount_disputes_v2(run_id, result.contest.w)
         disputes.notify()
         self._notify_processes_v2()
         return result.body()

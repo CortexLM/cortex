@@ -64,15 +64,20 @@ def failure(n, run_id: str, origin: str) -> str | None:
 
 
 def rotate_hotkey(n) -> None:
-    from hypertrain.miner.admission import sign_rotation
-    from hypertrain.protocol.messages_v2 import RotateRequest
+    from hypertrain.miner.admission import sign_rotation, sign_rotation_consent
 
-    request = RotateRequest(
-        hotkey=fixtures.HOT[0].ss58, new_hotkey=fixtures.REFEREE.ss58, operation_id="df" * 32
+    run_id = n.manifest.run_id()
+    consent = sign_rotation_consent(
+        fixtures.REFEREE,
+        run_id=run_id,
+        coldkey=fixtures.COLD[0].ss58,
+        hotkey=fixtures.HOT[0].ss58,
+        operation_id="df" * 32,
+        expires_beacon=1000,
     )
     response = n.client.post(
         n.url + "/admission/" + fixtures.HOT[0].ss58 + "/rotate",
-        json=sign_rotation(fixtures.COLD[0], n.manifest.run_id(), request, 1000),
+        json=sign_rotation(fixtures.COLD[0], run_id, consent, 1000),
     )
     assert response.status_code == 200, response.text
 

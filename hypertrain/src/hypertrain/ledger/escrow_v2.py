@@ -228,6 +228,7 @@ class EscrowV2:
         contest_settlement: Callable[[EscrowLock], Settlement] | None = None,
         accepted_at: Callable[[EnvelopeV2], int] | None = None,
         admission_settlement: Callable[[str], Settlement] | None = None,
+        round_closure: Callable[[int], str | None] | None = None,
     ) -> None:
         if auditor_quorum is not None:
             k, n = auditor_quorum
@@ -248,6 +249,8 @@ class EscrowV2:
         self.shadow_assignment_of, self.shadow_settlement = shadow_assignment_of, shadow_settlement
         self.id_key, self.contest_settlement = id_key, contest_settlement
         self.accepted_at, self.admission_settlement = accepted_at, admission_settlement
+        # Finality's answer for a round: the hash that closed it without a reward, else None.
+        self.round_closure = round_closure
         self.mutex = threading.RLock()
         match database:
             case Path():
@@ -796,13 +799,17 @@ class EscrowV2:
                     last = self.db.execute(
                         "SELECT MAX(ordinal) FROM escrow_shadow_finalized"
                     ).fetchone()[0]
+                    expected = last + 1 if last is not None else 0
                     number = reward.shadow_ordinal
                 case RewardFinalize():
-                    last = self.db.execute("SELECT MAX(w) FROM escrow_finalized").fetchone()[0]
+                    # Whatever the caller checked, finality's closure is the ledger's own rule.
+                    if self.round_closure is not None and self.round_closure(reward.w) is not None:
+                        raise EscrowError("ROUND_CLOSED_UNPAID")
+                    expected = self._first_open_round(below=reward.w)
                     number = reward.w
                 case unreachable:
                     assert_never(unreachable)
-            if number != (last + 1 if last is not None else 0):
+            if number != expected:
                 raise EscrowError("FINALIZE_ORDER")
             pending_units = 0
             match reward:
@@ -881,6 +888,41 @@ class EscrowV2:
                     )
                 case unreachable:
                     assert_never(unreachable)
+
+    def _first_open_round(self, *, below: int) -> int:
+        """First round neither reward-finalized nor withdrawn.
+
+        A round under `below` that finality closed without a reward never reaches
+        `escrow_finalized`, so without a record of it every later round would be refused
+        FINALIZE_ORDER for ever. It is recorded here, once, as a ROUND_WITHDRAWN event: nothing is
+        minted, moved or burned. The id has its own domain and the head of the event chain: an id
+        that was a pure function of the public run and round could be occupied by a client
+        operation, and the failure would be a constraint error on every later finalize.
+        """
+        accounted = {row[0] for row in self.db.execute("SELECT w FROM escrow_finalized")}
+        for row in self.db.execute(
+            "SELECT request FROM escrow_events WHERE kind='ROUND_WITHDRAWN'"
+        ):
+            accounted.add(json.loads(row["request"])["w"])
+        w = 0
+        while True:
+            while w in accounted:
+                w += 1
+            closure = self.round_closure(w) if self.round_closure and w < below else None
+            if closure is None:
+                return w
+            head = self.db.execute(
+                "SELECT event_hash FROM escrow_events ORDER BY seq DESC LIMIT 1"
+            ).fetchone()
+            prev = head["event_hash"] if head else "0" * 64
+            self._event(
+                sha256_hex(f"ht-round-withdraw-v2|{self.run_id}|{w}|{prev}".encode()),
+                "ROUND_WITHDRAWN",
+                canonicalize({"closure_hash": closure, "w": w}).decode(),
+                self.policy.reward_authority,
+                server=True,
+            )
+            accounted.add(w)
 
     def _credit(self, origin: str, owner: str, bucket: str, ref: str, units: int) -> None:
         self.db.execute(
@@ -1087,8 +1129,13 @@ class EscrowV2:
         referee: str | None = None,
         referee_cost: int = 0,
         max_referee_cost: int = 0,
+        burn_pending: bool = True,
     ) -> EscrowReceipt:
-        """Internal proven-fraud settlement, no client slash route; funded cost then burn."""
+        """Internal proven-fraud settlement, no client slash route; funded cost then burn.
+
+        Slashing an admission lock also burns the owner's unvested rewards, unless the caller
+        names a lesser sanction (`burn_pending=False`: the bond alone, e.g. a no-show).
+        """
         if (
             authority != self.policy.reward_authority
             or min(referee_cost, max_referee_cost) < 0
@@ -1096,9 +1143,8 @@ class EscrowV2:
         ):
             raise EscrowError("SLASH_AUTHORITY_OR_COST")
         with self.tx():
-            request = canonicalize(
-                [op.model_dump(mode="json"), referee, referee_cost, max_referee_cost]
-            ).decode()
+            parts = [op.model_dump(mode="json"), referee, referee_cost, max_referee_cost]
+            request = canonicalize(parts if burn_pending else [*parts, False]).decode()
             old = self._existing(op.operation_id, request, server=True)
             if old is not None:
                 return old
@@ -1146,7 +1192,7 @@ class EscrowV2:
                     }
                 )
                 self._move(burn, source, "burned", source_ref=op.lock_id)
-            if original.kind == "LOCK_ADMISSION":
+            if original.kind == "LOCK_ADMISSION" and burn_pending:
                 for row in self.db.execute(
                     "SELECT * FROM escrow_units WHERE owner=? AND "
                     "bucket='reward_pending' AND units>0",
@@ -1215,12 +1261,13 @@ class EscrowV2:
         )
 
     def open_locks(self, admission_id: str, owner: str) -> list[sqlite3.Row]:
-        """Event hash and locked units of the owner's open locks of this admission, oldest first.
+        """Event hash, request and locked units of the owner's open locks of this admission, oldest
+        first.
 
         Its cost is the number of open locks of the owner, not the size of the ledger.
         """
         return self.db.execute(
-            "SELECT e.event_hash AS event_hash, SUM(u.units) AS units "
+            "SELECT e.event_hash AS event_hash, e.request AS request, SUM(u.units) AS units "
             "FROM escrow_units u JOIN escrow_events e "
             "ON e.operation_id=u.ref AND e.kind='LOCK_ADMISSION' "
             "WHERE u.bucket='admission_locked' AND u.units>0 AND u.owner=? "

@@ -228,9 +228,11 @@ class R2ObjectStore:
             )
         raise ValueError("method must be GET or PUT")
 
-    def fetch_to(self, sha: str, dest: Path) -> None:
+    def fetch_to(self, sha: str, dest: Path, *, check: Callable[[], None] | None = None) -> None:
         """Ranged, parallel, verified download into `dest` via same-directory temp + atomic
-        replace. A multipart object is checked block by block against its sidecar block list."""
+        replace. A multipart object is checked block by block against its sidecar block list.
+        `check` runs after each range arrives; whatever it raises stops the download (the queued
+        ranges are dropped, the temporary file is removed)."""
         key = self.key(sha)
         info = self.client.head_object(key)
         if info is None:
@@ -244,6 +246,8 @@ class R2ObjectStore:
             whole = hashlib.sha256()
             with os.fdopen(fd, "wb") as f:
                 for off, data in self._ranges(key, spans):
+                    if check is not None:
+                        check()
                     if blocks is not None:
                         _check_blocks(blocks, off, data)
                     whole.update(data)

@@ -585,6 +585,9 @@ class RotateRequest(WireModel):
     hotkey: SS58
     new_hotkey: SS58
     operation_id: Hex64
+    # The new hotkey's consent (envelope_v2.rotate_signing_message): the coldkey alone cannot
+    # rebind an admission onto a hotkey that never agreed.
+    new_hot_sig: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{128}$")]
 
 
 class AdmissionPolicyV2(WireModel):
@@ -601,6 +604,10 @@ class AdmissionPolicyV2(WireModel):
     ip_prefix_burst: Literal[64]
     challenge_rounds: Literal[100]
     artifact_limits: ArtifactLimits
+    # Omitted when absent so every policy digest (and run ID) predating it is unchanged.
+    max_unfunded_per_prefix: Annotated[StrictInt, Field(ge=1, le=32)] | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
 
 
 class EconomicsPolicyV2(WireModel):

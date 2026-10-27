@@ -91,7 +91,7 @@ def test_registered_hotkey_reaches_active_without_admin(gated, subnet_master, tm
     # When: the miner alone repeats challenge -> own work -> upload -> signed proof.
     for trial in range(12):
         n.push(n.now + 1)
-        response = n.client.get(n.url + "/join/" + identity + "/challenge")
+        response = n.challenge(identity)
         assert response.status_code == 200, response.text
         challenge = JoinChallenge.model_validate(response.json()["body"])
         epoch = n.store._db.execute(
@@ -220,7 +220,22 @@ def _routes(n, hot, cold):
         policy_hash=n.manifest.network.admission_policy_hash,
         hardware_hint=HardwareHint(device_name="cpu", device_count=1, driver="advisory"),
     ).body()
-    rotate = {"hotkey": HOT[0].ss58, "new_hotkey": hot.ss58, "operation_id": H}
+    from hypertrain.miner.admission import sign_rotation_consent
+
+    consent = sign_rotation_consent(
+        hot,
+        run_id=run_id,
+        coldkey=COLD[0].ss58,
+        hotkey=HOT[0].ss58,
+        operation_id=H,
+        expires_beacon=10000,
+    )
+    rotate = {
+        "hotkey": HOT[0].ss58,
+        "new_hotkey": hot.ss58,
+        "operation_id": H,
+        "new_hot_sig": consent.new_hot_sig,
+    }
     watch = hot.sign(f"hypertrain/watch/2|{run_id}|{hot.ss58}".encode()).hex()
     obj = hot.sign(f"hypertrain/object/2|{run_id}|{H}".encode()).hex()
     c, u = n.client, n.url
@@ -301,7 +316,7 @@ def test_deregistered_after_join_refused(gated, subnet_master):
     subnet_master.registered.clear()
     refresh(n)
     # Then: no new trial and no further submissions.
-    assert n.client.get(n.url + "/join/" + identity + "/challenge").status_code == 403
+    assert n.challenge(identity).status_code == 403
     routes = _routes(n, HOT[0], COLD[0])
     for name in ("join/proof", "objects", "accept", "commit", "delta", "leaves", "upload-grant"):
         assert routes[name]().status_code == 403, name
@@ -319,7 +334,7 @@ def test_trial_job_refused_like_challenge_once_owner_deregistered(gated, subnet_
     subnet_master.registered.add(HOT[0].ss58)
     identity = n.join(0).json()["admission_id"]
     n.push(2)
-    assert n.client.get(n.url + "/join/" + identity + "/challenge").status_code == 200
+    assert n.challenge(identity).status_code == 200
     message = f"hypertrain/trial-job/2|{n.manifest.run_id()}|{identity}".encode()
     signed = {"x-hotkey": HOT[0].ss58, "x-trial-signature": HOT[0].sign(message).hex()}
     url = n.url + "/join/" + identity + "/job"
@@ -327,7 +342,7 @@ def test_trial_job_refused_like_challenge_once_owner_deregistered(gated, subnet_
     subnet_master.registered.clear()
     refresh(n)
     # Then: the owner's signature, the admin token, or both get the challenge route's refusal.
-    challenge = n.client.get(n.url + "/join/" + identity + "/challenge")
+    challenge = n.challenge(identity)
     assert challenge.status_code == 403
     assert challenge.json() == {"detail": "the hotkey is not registered on the subnet"}
     for headers in (signed, service.admin(), {**signed, **service.admin()}):

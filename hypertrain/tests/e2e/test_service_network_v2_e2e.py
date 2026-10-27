@@ -72,7 +72,7 @@ def test_actual_shadow_trial_does_not_mutate_production(network):
     )
     assert response.status_code == 200, response.text
     network.push(2)
-    challenge = network.client.get(network.url + "/join/" + identity + "/challenge")
+    challenge = network.challenge(identity)
     assert challenge.status_code == 200, challenge.text
     # When: actual torchrun reference, signed proof, signed exact shadow finality.
     response = network.client.post(
@@ -1297,7 +1297,7 @@ def _graduate_four(network):
             ).fetchone()
             if pending is None or pending["outcome"] != "OPEN":
                 network.push(network.now + 1)
-            response = network.client.get(network.url + "/join/" + identity + "/challenge")
+            response = network.challenge(identity)
             assert response.status_code == 200, response.text
             challenge = JoinChallenge.model_validate(response.json()["body"])
             response = network.client.post(

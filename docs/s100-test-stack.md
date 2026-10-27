@@ -76,7 +76,7 @@ ssh root@s100 "bash -s -- post" < $T/snap.sh
 
 Each change is refused unless the resolved compose config differs in exactly the expected fields:
 - `swap`: `services.challenge.image`;
-- `beacon`: `services.beacon.entrypoint.9` and `.11`.
+- `beacon`: some of `services.beacon.entrypoint.9`, `.11` and `.13` (interval, catch-up, failure budget), and then exactly the cadence below.
 
 `swap` fails unless `/version` answers and the challenge runs the new image ID.
 
@@ -101,14 +101,68 @@ Backups from the first versions of the script list five files and have no `relay
 The test ledger refuses joins, trials and leases with 503 "beacon infrastructure paused" when the
 beacon lags more than 2 rounds (`store.py` `_snapshot_current_v2`).
 
-On s100 each round costs about 2.4 s against the 3 s drand period. The pusher verifies each round
-with py_ecc BLS (about 1.2 s) and the challenge verifies it again on ingest. With the original
-`--interval 3 --catch-up 20` the lag held at 8-9 rounds. `beacon` applies the production twin's
-`--interval 0.2 --catch-up 3`, which gave 1-2 rounds when idle (measured 2026-10-26).
+On s100 each round costs about 2.4 s against the 3 s drand period (S7 measurement [A]): the pusher
+verifies each round with py_ecc BLS (about 1.2 s) and the challenge verifies it again on ingest.
+With the original `--interval 3 --catch-up 20` the lag held at 8-9 rounds; with `--interval 0.2` it
+is 1-2 rounds when idle (measured 2026-10-26).
 
-Under trial load the lag reaches 3 again. Each in-process CPU reference holds the store while the
-pusher waits, and the pusher recovers only 0.6 s per 3 s drand period. So expect 503 "beacon
-infrastructure paused" for 30-40 s after each reference, and retry.
+**A store lock stops the beacon.** A remote or in-process reference holds the lock of the store that
+hosts the run for its whole duration (13-19 s with the CUDA cache, 43-64 s without). The first run
+of a state directory lives in the root store, where `GET /v1/beacon/latest` and
+`POST /v1/admin/beacon` both wait for that lock. A run created while the root already hosts one
+(S13's) lives in a child store with a lock of its own: the root still answers `latest` and keeps the
+round a POST brings, but the POST then waits for the child, so the pusher times out all the same and
+the child, whose table the gate and the seeds read, gets no round. The pusher gets 10 s timeouts (a
+failure each), and when the lock ends it refills the missing rounds oldest first at one round per
+2.4 s while the clock adds one per 3 s. Two things can go wrong, and the cadence decides which:
+
+- `--catch-up N` pushes at most the last N rounds after the highest one the service holds. Rounds
+  older than that are skipped for good, because the service reports only its highest round. The
+  challenge reads exact rounds: after a trial is finalized in round `n` (and after a join or a
+  resume), the identity's seed is round `n + 1`. A seed in a skipped round answers 500
+  `BeaconUnavailable: round N not pushed` until the window is over (100 rounds), then 409
+  `CHALLENGE_EXPIRED`; the identity stays in its state and gets no new seed. Pushing that one round
+  before the window closes recovers it; a range does not (S13's backfill of 36 rounds held the lock
+  for two minutes). This is code reading by a reviewer, not a run.
+- `--max-failures N` consecutive failures end the pusher (the container restarts, and the count
+  restarts from zero). A lock costs one failure per 11.4 s (10 s timeout plus the relay fetch); a
+  refused connection (the challenge restarting) one per 1.4 s.
+
+`beacon` therefore sets `--interval 0.2 --catch-up 60 --max-failures 100`. Sizing, from the model of
+the real pusher: the catch-up must cover `lock / 3 + 10` rounds (60 covers a lock of 150 s; the old
+`3` skipped rounds after any lock over about 9 s, 20 after one over about 50 s), and the budget must
+cover `lock / 11.4` failures for a lock and `outage / 1.4` for a refused connection (100: 140 s). The
+script takes the stock cadence and the one the previous version left on this stack (`0.2 / 3`), raises
+a budget below 100 and keeps a higher one, and refuses (exit 5, nothing changed) any compose file
+where the result is not exactly that. Never start a second pusher, and never backfill a range of
+rounds by hand during trials: S13 lost two identities that way.
+
+The price is time. The model (`tests/ops/s100/test_beacon_lock_tolerance.py`, both store layouts,
+checked against two S13 observations) says the gate stays closed after the lock for up to about
+`4 x lock + 10` s with the run in the root store, about `3 x lock` in a child: 30-40 s after a 13 s
+reference, 1 minute after 19 s, **3 to 4 minutes after a 60 s reference**. That figure is very
+sensitive to the cost of one round: at 2.6 s it doubles, at 2.8 s it is five times larger, and at
+2.9 s the pusher never catches up. Measure the idle lag with a child run present before trusting it.
+Expect 503s in that window and retry them. Hence two rules: keep the CUDA cache (the executor does
+by default), and run the first reference after a new image (43-64 s, cold) alone, before a second
+driver starts. Releasing the lock during the reference (ADR 0012 section 2) or a pusher that pushes
+the newest round first (same ADR, a proposal) is what removes the wait.
+
+Proving it instead of inferring it: `beacon_gaps.py` lists rounds missing from the `beacon` table
+of the store that hosts the run, the identities whose seed is one of them, and whether the pusher
+is behind or dead. It is read-only and takes the run id.
+
+```bash
+ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - 1800 $RID" < $T/beacon_gaps.py
+```
+
+Exit 0: nothing missing in the last 30 minutes. 3: a hole (`missing`, and `stranded` names who waits
+for it: stop the run and report it) or a table that is dead (`stale`). 4: bad arguments or a run the
+stack does not host. A pusher that is only behind exits 0: read `lag` and `gate_open` in the JSON.
+Take a baseline before the retune (without `$RID` until the run is published: the tool reads the
+store that hosts the run and refuses an id it cannot find) and run it again after every ten trials.
+After a challenge restart during a lock, run it on the child store too: rounds the root kept and the
+child never got are invisible to the pusher.
 
 ### Rollback
 
@@ -225,6 +279,13 @@ the miner's state is bitwise equal to the challenge's own CPU replay.
 - The same job matched under `ATEN_CPU_CAPABILITY=avx2`.
 - `cpu_parity_probe.py` compares one exported job on both hosts.
 
+A manifest that sets `reference_spec.env.pinned` (`hypertrain/docs/protocol.md` section 7, item 4a)
+makes the hand-set `ATEN_CPU_CAPABILITY=avx2` below unnecessary: the launcher gives every rank the
+pins, and `bootstrap_service_capacity_v2` answers 409 `SERVICE_PROFILE_ENV_PIN` when the challenge
+host cannot honor them. Unpinned runs keep the manual pin (`cpu_miners.py` is unchanged). The pin
+removes ambient-induced divergence only; `docs/adr/0011-audit-integrity.md` part 3 says what was
+and was not measured.
+
 `setup` reads `SEEDS_DIR/miner<i>-hot.seed` and `miner<i>-cold.seed`. `miner<i>-cold` must be the
 builder's `cold-<i>`: origin i belongs to allocation entry i.
 
@@ -238,12 +299,17 @@ That gives 3 ACTIVE and 1 PROBATION. Rules that decide how identities are spent:
 - **One non-ACTIVE identity per coldkey** (`COLDKEY_PROBATION_EXISTS`). A coldkey funds a second
   hotkey only after its first one is ACTIVE.
 - **The first challenge is due 100 rounds (5 min) after the join.** An identity that misses it
-  stays APPLIED and blocks its coldkey for good (`admission.py` `challenge`). This is why `admit`
-  joins a miner only when its turn starts.
+  can no longer progress (`admission.py` `challenge`). If it holds no stake, the next `join`
+  suspends it as `APPLIED_EXPIRED` and its coldkey may apply again with a new hotkey (ADR 0010);
+  a funded one stays APPLIED and blocks its coldkey. This is why `admit` joins a miner only
+  when its turn starts.
 
 A round opens on a roster of four funded, eligible miners with at most one in PROBATION. The
-operator opens it, the miners upload, and the operator settles it. The operator runs
-`scripts/ops/live_operator.py` inside the TEST challenge:
+operator opens it, the miners upload, and the operator settles it. Open it with five when an
+eviction is plausible: a miner that never commits is left out (`excluded`, reason `NO_SHOW`) and
+the others are audited and paid, while four miners cannot lose anyone (`audits` answers 409
+`ROUND_INFEASIBLE`). `finalize` lists the roster minus the `excluded` records, read after the
+aggregate. The operator runs `scripts/ops/live_operator.py` inside the TEST challenge:
 
 ```bash
 L="docker exec -i hypertrain-test-challenge python -I - --master http://127.0.0.1:8000 \
@@ -251,7 +317,7 @@ L="docker exec -i hypertrain-test-challenge python -I - --master http://127.0.0.
   --admin-token-file /run/secrets/admin.token"
 O=hypertrain/scripts/ops/live_operator.py
 ssh root@s100 "$L open --w 0 --hotkey H0 --hotkey H1 --hotkey H2 --hotkey H3 \
-  --offsets 3,6,80,82,150,180" < $O     # d_final - d_audit = 98 <= 100
+  --offsets 3,6,80,82,150,180" < $O     # gap 98: one lease window; end with 282 (gap 200) to fit a replacement lease
 ATEN_CPU_CAPABILITY=avx2 $PY -I $T/cpu_miners.py round DIR 0 0 1 2 3   # one miner at a time
 ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID 0" < $T/round_status.py
 ssh root@s100 "$L audits --w 0" < $O     # once now >= d_audit
@@ -259,13 +325,22 @@ ssh root@s100 "$L finalize --w 0" < $O   # once every audit lease is complete wi
 ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID" < $T/weights_once.py
 ```
 
-**Keep `d_final - d_audit <= 100` beacon rounds.** Audit jobs are created with
-`created = d_audit` (`store.py:6427`), and each lease gets `expires = min(now + lease_rounds,
-d_final)` (`store.py:6586-6589`). `AuditJobV2` refuses `expires > created + 100` when H <= 30
-(`messages_v2.py:441-444`, `:659-663`). Audits can only be created once `now >= d_audit`, so with
-a wider gap every lease answers 409 "lease exceeds 100 beacon rounds" and the round is never
-audited. `live_operator.py open` refuses a gap above `audit_lease_rounds(H, 16.0)` for the
-manifest's H (100 rounds when H <= 30) and above 200 rounds for any H.
+**`d_final - d_audit` decides how many audit leases fit in a round.** The store dates every lease
+by the round it starts in (`created_beacon = now`), so a lease validates at any round before
+`absolute = min(d_final, d_audit + 2 * lease_rounds)`; `lease_rounds` is 100 for H <= 30. With a
+gap of 100 rounds or less the first lease runs to `d_final`: if its auditor goes silent the job is
+not replaced, because an honest miner seals its commit until `d_final` and an audit job embeds it
+live, so no window can start after that round; the miner is left out of the round (`excluded`,
+`INFRASTRUCTURE`, no sanction). With a gap of 101 to 200 rounds a second auditor can take the job
+inside the same window, and a job whose attempts fail early gets a second window that ends at
+`d_final` (`audit-rearm`).
+`live_operator.py open` accepts any gap from 2 to 200 rounds for every H; 200 is the service
+horizon (`store.py:5109`). A round with a wider gap closes later: 100 more rounds (5 minutes) per
+extra 100.
+
+Run `audits` as soon as `now >= d_audit`: it must be called before beacon round `absolute - 1`
+(`absolute = min(d_final, d_audit + 2 * lease_rounds)`), and a call after that answers 503 for every
+roster.
 
 **Upload one miner at a time.** A relay image built before `BeaconCache` (`relay/app.py`)
 BLS-verifies drand in `now()` on every capability and chunk call; later images share one verified
@@ -456,9 +531,12 @@ reach a round: no `run-v2`, no audit, no `get_weights`.
 - **Cold CUDA start.** Each fresh container pays 25-45 s of CPU for the first use of the CUDA kernels
   (on A: first fp32 matmul 6 s, bf16 matmul 10 s, AdamW 5 s; the second process of the same container
   takes 0.7-2 s). The cache lives in `/root/.nv` of the container. S13 kept it with a wrapper in the
-  `docker` field of `cuda-executor.json` that adds only `-v <host dir>:/root/.nv` to `docker run`; the
-  config is read once, so a change needs `docker restart hypertrain-test-challenge` between two trials.
-  The executor has no option for it yet.
+  `docker` field of `cuda-executor.json` that added only `-v <host dir>:/root/.nv` to `docker run`.
+  The executor now does this itself (`compute_cache`, default on, ADR 0012): one directory per image
+  digest under `~/.cortex-cuda-executor/compute-cache` of the ssh user, mounted with `--mount`. **Remove
+  the wrapper** from the `docker` field (`["sudo","-n","docker"]` again): with both, the container would
+  get two mounts on `/root/.nv`. The first reference after a new image digest is still cold (43-64 s):
+  run it alone, before a second driver starts.
 - **The reference holds the store lock**, so the beacon pusher times out meanwhile and every trial
   waits for it to catch up (503 "beacon infrastructure paused" for 10-70 s). A second driver or a
   second executor host does not shorten the references; two drivers only overlap the miner side.
@@ -468,6 +546,8 @@ reach a round: no `run-v2`, no audit, no `get_weights`.
   that trial could not continue. Backfilling the gap through `/v1/admin/beacon` took 2 minutes of
   store lock, a pause of 5 minutes, and two trials passed their 100-round window: the identity is
   SUSPENDED `CHALLENGE_EXPIRED` at its next challenge request, and `resume` resets `clean_count` to 0.
+  Since ADR 0010 such a trial is closed `EXPIRED` at the next beacon push and the identity keeps
+  its state; its next request answers 409 `CHALLENGE_EXPIRED`.
 - **A validator cycle on A** shows as `exec_host_unavailable` ("0 idle GPUs, 1 needed") and the
   executor waits (`sweeps`); it cost one trial 40 s.
 

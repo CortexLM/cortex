@@ -446,8 +446,14 @@ ALLOWED_CALL_SITES: dict[str, set[tuple[str, str]]] = {
     },
     "transfer": {("challenge/store.py", "admission_v2")},
     "release": {("challenge/store.py", "admission_v2")},
-    "release_settlement": {("challenge/disputes_v2.py", "settle_lock")},
-    "slash": {("challenge/disputes_v2.py", "settle_lock")},
+    "release_settlement": {
+        ("challenge/disputes_v2.py", "settle_lock"),
+        ("challenge/admission.py", "release_bond"),
+    },
+    "slash": {
+        ("challenge/disputes_v2.py", "settle_lock"),
+        ("challenge/admission.py", "seize_bond"),
+    },
     "pay": {("challenge/store.py", "_pay_v2")},
     "mature": {("challenge/store.py", "push_beacon"), ("challenge/store.py", "genesis_v2")},
     "reward_finalize": {

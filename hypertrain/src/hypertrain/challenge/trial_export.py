@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             for name in ("start_state", "ef_in", "v0"):
                 if objects.get(name) != getattr(job, name + "_sha256"):
                     raise ValueError(f"{name} sha256 differs from job")
-            envelope = _checked(client.get(url + f"/join/{admission_id}/challenge")).json()
+            envelope = data["challenge_envelope"]
             signed = envelope_v2.parse_envelope(envelope)
             if (
                 signed.type != "JoinChallenge"
