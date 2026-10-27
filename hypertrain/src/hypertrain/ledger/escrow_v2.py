@@ -213,6 +213,7 @@ class EscrowV2:
         shadow_settlement: Callable[[str], Settlement] | None = None,
         auditor_quorum: tuple[int, int] | None = None,
         id_key: bytes | None = None,
+        contest_settlement: Callable[[EscrowLock], Settlement] | None = None,
     ) -> None:
         if auditor_quorum is not None:
             k, n = auditor_quorum
@@ -231,7 +232,7 @@ class EscrowV2:
         self.auditors, self.replay_finality = auditors, replay_finality
         self.settlement, self.owner_of, self.assignment_of = settlement, owner_of, assignment_of
         self.shadow_assignment_of, self.shadow_settlement = shadow_assignment_of, shadow_settlement
-        self.id_key = id_key
+        self.id_key, self.contest_settlement = id_key, contest_settlement
         self.mutex = threading.RLock()
         match database:
             case Path():
@@ -960,6 +961,25 @@ class EscrowV2:
         """The service's release of a settled lock: its id is derived, so it is a server event."""
         return self._release(op, signer, now_beacon, server=True)
 
+    def _lock_status(self, lock_id: str) -> Settlement:
+        """Settlement that governs a lock, chosen by the kind of the lock event.
+
+        A contest bond is settled by the dispute that took it, found through the lock's own signed
+        dispute id; a lock is never looked up in the dispute or origin tables by its name.
+        """
+        row = self.db.execute(
+            "SELECT request,kind FROM escrow_events WHERE operation_id=?", (lock_id,)
+        ).fetchone()
+        if row is None or row["kind"] != "LOCK_CONTEST":
+            return self.settlement(lock_id)
+        if self.contest_settlement is None:
+            raise EscrowError("UNACCEPTED_SETTLEMENT")
+        lock = EscrowLock.model_validate_json(row["request"])
+        status = self.contest_settlement(lock)
+        if status.dispute_id != lock.dispute_id:
+            raise EscrowError("LOCK_REFERENCE")
+        return status
+
     def _release(
         self, op: EscrowRelease, signer: str, now_beacon: int, *, server: bool
     ) -> EscrowReceipt:
@@ -967,7 +987,7 @@ class EscrowV2:
             old = self._owner_operation(op, signer, server=server)
             if old is not None:
                 return old
-            status = self.settlement(op.lock_id)
+            status = self._lock_status(op.lock_id)
             if (
                 status.unresolved
                 or status.outcome == "FRAUD"
@@ -1018,7 +1038,7 @@ class EscrowV2:
             old = self._existing(op.operation_id, request, server=True)
             if old is not None:
                 return old
-            status = self.settlement(op.lock_id)
+            status = self._lock_status(op.lock_id)
             if (
                 status.unresolved
                 or status.outcome != "FRAUD"

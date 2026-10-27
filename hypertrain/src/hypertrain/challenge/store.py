@@ -2317,14 +2317,13 @@ class ChallengeStore:
         return tuple(int(str(i)) for i in samples)
 
     def _settlement_v2(self, run_id: str, reference: str) -> Settlement:
+        """Settlement of a dispute by its id or of a reward origin by its id, never of a lock."""
         disputes = self._services_v2.get(run_id)
-        if disputes is not None:
-            row = self._db.execute(
-                "SELECT turn FROM disputes_v2 WHERE id=? OR json_extract(turn,'$.lock_id')=?",
-                (reference, reference),
-            ).fetchone()
-            if row:
-                return disputes[2].settlement(reference)
+        if (
+            disputes is not None
+            and self._db.execute("SELECT 1 FROM disputes_v2 WHERE id=?", (reference,)).fetchone()
+        ):
+            return disputes[2].settlement(reference)
         row = self._db.execute(
             "SELECT data FROM records_v2 WHERE run_id=? AND kind='settlement' AND id=?",
             (run_id, reference),

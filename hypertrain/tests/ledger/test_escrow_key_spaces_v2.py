@@ -198,8 +198,10 @@ def locked_ledger(tmp_path: Path, outcome: str = "MATCH", kind: str = "LOCK_ADMI
         release_beacon=10,
         unresolved=False,
         outcome=outcome,  # type: ignore[arg-type]
+        dispute_id=E.H if kind == "LOCK_CONTEST" else None,
     )
     e = E.ledger(E.setup(), tmp_path / "ledger.db", settlement=lambda _: status)
+    e.contest_settlement = lambda _lock: status
     e.id_key = ID_KEY
     cold, other = E.fund(e)
     lock = E.lock(cold, SETTLE_LOCK, 500)

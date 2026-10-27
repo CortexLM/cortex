@@ -356,6 +356,15 @@ Independent referees use their own accepted current execution deadline while
 preserving historical publication descriptors. Losing-party checks, funded
 contests and fixed absolute horizons prevent arbitrary transcript resets.
 
+A contest is funded by an `EscrowLock` of kind `LOCK_CONTEST` that names its dispute and
+whose `operation_id` the miner chooses. The name is only a name: the bond is settled by the
+dispute that took it, found through the lock's own signed `dispute_id` and checked against the
+dispute's recorded bond, and a dispute or a reward origin is found by its own id; no lookup
+treats a lock id as a dispute id or the reverse. `POST /dispute` refuses a bond whose name is
+already a dispute or a reward origin (`CONTEST_LOCK_ID_COLLISION`, 409). A contest lock that no
+dispute took as its bond has no settlement and is not released. See `docs/adr/0014` at the
+monorepo root.
+
 ## Weights, finality and custody
 
 Flat aggregation retains each miner's original delta: norm preclip, previous

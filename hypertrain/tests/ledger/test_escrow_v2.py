@@ -457,9 +457,15 @@ def test_release_rejects_when_disputed_or_unvested(
 def test_contest_cost_and_burn_when_proven_loss(tmp_path: Path) -> None:
     # Given
     status = Settlement(
-        finality_hash=H, closed_dispute_root=H, release_beacon=10, unresolved=False, outcome="FRAUD"
+        finality_hash=H,
+        closed_dispute_root=H,
+        release_beacon=10,
+        unresolved=False,
+        outcome="FRAUD",
+        dispute_id=H,
     )
     e = ledger(setup(), tmp_path / "ledger.db", settlement=lambda _: status)
+    e.contest_settlement = lambda _lock: status
     origin, _ = fund(e)
     op = EscrowLock(
         operation_id="22" * 32,

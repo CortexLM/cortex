@@ -59,6 +59,11 @@
   service needs and freeze finalize, the beacon route, the weights answer or a dispute (Lens F1).
   `EscrowV2.release_settlement` is the service's release; `release` is the owner's. A ledger built
   without the key is a read-only verifier. See `docs/adr/0014` at the monorepo root.
+- Disputes: a contest bond is settled by the dispute that took it, found through the lock's own
+  signed dispute id, and a dispute or reward origin is found by its own id. A bond whose name was an
+  older dispute's id made the new dispute unresolvable (its settlement resolved on the other row) and a
+  lock named like a reward origin got that origin's settlement. `POST /dispute` refuses a bond named
+  like an existing dispute or origin (`CONTEST_LOCK_ID_COLLISION`) (Lens F4).
 
 ### Not yet
 - Quality parity with centralized training is not claimed.
