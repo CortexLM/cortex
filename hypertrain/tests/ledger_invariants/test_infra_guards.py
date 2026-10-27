@@ -3,17 +3,21 @@
 Each later test module of the lot stands on `real_reward`, `bare_escrow`, `hosted_reward`,
 `signed_variant` and `service_world`. A control that is not accepted, a stub that accepts what
 the store refuses, or a run id that changes with the second would make those tests vacuous or
-flaky, so each is pinned here. The hygiene scan keeps the lot's own tests honest.
+flaky, so each is pinned here. The hygiene scan keeps the lot's own tests honest. The mutation
+runner is exercised on a tiny synthetic package, never on hypertrain/src.
 """
 
 from __future__ import annotations
 
 import ast
+import json
+import os
 import re
 import sqlite3
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -553,3 +557,281 @@ def test_every_test_module_of_the_lot_passes_the_hygiene_scan() -> None:
     assert {path.name: hygiene_findings(path.read_text()) for path in modules} == {
         path.name: [] for path in modules
     }
+
+
+RUNNER = ("li_mutant_runner", "../scripts/check_ledger_invariant_mutants.py")
+TINY_SOURCE = (
+    "def add(a: int, b: int) -> int:\n    return a + b\n\n\ndef limit() -> int:\n    return 10\n"
+)
+TINY_TESTS = (
+    "from tinypkg import add, limit\n\n\n"
+    "def test_add():\n    assert add(2, 3) == 5\n\n\n"
+    "def test_limit_is_positive():\n    assert limit() > 0\n"
+)
+
+
+@pytest.fixture(scope="module")
+def runner() -> ModuleType:
+    return load_fixture_module(*RUNNER)
+
+
+def tiny_entry(**changes: object) -> dict[str, object]:
+    return {
+        "id": "add-subtracts",
+        "invariants": ["INV-1"],
+        "path": "src/tinypkg/__init__.py",
+        "old": "return a + b",
+        "new": "return a - b",
+        "tests": ["tests/test_tiny.py::test_add"],
+        "why": "the sum becomes a difference.",
+    } | changes
+
+
+KILLED = tiny_entry()
+SURVIVOR = tiny_entry(
+    id="limit-moves",
+    old="return 10",
+    new="return 11",
+    tests=["tests/test_tiny.py::test_limit_is_positive"],
+    why="the limit changes but its test only checks the sign.",
+)
+BROKEN = tiny_entry(
+    id="import-breaks",
+    old="def add(a: int, b: int) -> int:",
+    new="import zz_not_a_module\n\n\ndef add(a: int, b: int) -> int:",
+    why="the module no longer imports.",
+)
+
+
+def tiny_project(runner: ModuleType, root: Path, entries: list[dict[str, object]]) -> Any:
+    """A throw-away project with the layout of hypertrain/, so the real tree is never a target."""
+    (root / "src/tinypkg").mkdir(parents=True)
+    (root / "src/tinypkg/__init__.py").write_text(TINY_SOURCE)
+    (root / "tests/ledger_invariants").mkdir(parents=True)
+    (root / "tests/test_tiny.py").write_text(TINY_TESTS)
+    (root / "tests/ledger_invariants/mutants_tiny.py").write_text(f"MUTANTS = {entries!r}\n")
+    return runner.Project(root, "tinypkg")
+
+
+def files_of(root: Path) -> dict[str, tuple[bytes, int]]:
+    """Content and modification time of every file: an edit that is restored still shows."""
+    return {
+        str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+
+
+def test_runner_reports_killed_survived_and_error_and_never_edits_the_tree(
+    runner: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tiny_project(runner, tmp_path / "proj", [KILLED, SURVIVOR, BROKEN])
+    before = files_of(project.root)
+    code = runner.main(
+        ["--jobs", "2", "--workdir", str(tmp_path / "work"), "--json", str(tmp_path / "r.json")],
+        project,
+    )
+    printed = capsys.readouterr().out.splitlines()
+    report = json.loads((tmp_path / "r.json").read_text())
+    assert code == 1
+    verdicts = sorted(printed[:-1])
+    # A module that fails to import is pytest exit 2, or 4 once its node id then matches nothing.
+    assert verdicts[0] in {
+        "ERROR import-breaks - pytest exit 2",
+        "ERROR import-breaks - pytest exit 4",
+    }
+    assert verdicts[1:] == [
+        "KILLED add-subtracts tests/test_tiny.py::test_add",
+        "SURVIVED limit-moves",
+    ]
+    assert printed[-1] == "1/3 mutants killed"
+    assert [(m["id"], m["status"]) for m in report["mutants"]] == [
+        ("add-subtracts", "KILLED"),
+        ("limit-moves", "SURVIVED"),
+        ("import-breaks", "ERROR"),
+    ]
+    assert [m["exit_code"] for m in report["mutants"][:2]] == [1, 0]
+    assert report["mutants"][2]["exit_code"] in {2, 4}
+    assert report["mutants"][0]["failed"] == ["tests/test_tiny.py::test_add"]
+    assert report["baseline"]["exit_code"] == 0
+    assert (report["killed"], report["survived"], report["error"]) == (1, 1, 1)
+    assert files_of(project.root) == before
+    assert list((tmp_path / "work").iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("code", "output", "expected"),
+    [
+        (0, "1 passed", ("SURVIVED", [], "")),
+        (1, "FAILED t.py::test_a - assert 1 == 2\n1 failed", ("KILLED", ["t.py::test_a"], "")),
+        (1, "ERROR t.py::test_a - boom\n1 error", ("ERROR", [], "pytest exit 1 without a failed")),
+        (2, "Interrupted: 1 error during collection", ("ERROR", [], "pytest exit 2")),
+        (4, "ERROR: not found", ("ERROR", [], "pytest exit 4")),
+        (5, "no tests ran", ("ERROR", [], "pytest exit 5")),
+        (None, "", ("ERROR", [], "timeout after 9 s")),
+    ],
+)
+def test_only_exit_one_with_a_failed_test_is_a_kill(
+    runner: ModuleType, code: int | None, output: str, expected: tuple[str, list[str], str]
+) -> None:
+    status, failed, detail = runner.classify(code, output, 9)
+    assert (status, failed) == expected[:2]
+    assert detail.startswith(expected[2])
+
+
+def test_a_run_past_its_timeout_is_killed_and_reports_no_exit_code(
+    runner: ModuleType, tmp_path: Path
+) -> None:
+    code, _ = runner.run(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        cwd=tmp_path,
+        env=dict(os.environ),
+        timeout=0.5,
+    )
+    assert code is None
+
+
+def test_runner_selects_mutants_and_exits_zero_when_all_of_them_are_killed(
+    runner: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tiny_project(runner, tmp_path / "proj", [KILLED, SURVIVOR])
+    assert runner.main(["--only", "nope"], project) == 2
+    assert capsys.readouterr().err == "unknown mutant ids: nope\n"
+    work = str(tmp_path / "work")
+    assert runner.main(["--only", "add-subtracts", "--workdir", work], project) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "KILLED add-subtracts tests/test_tiny.py::test_add",
+        "1/1 mutants killed",
+    ]
+
+
+def test_runner_stops_when_the_unmutated_copy_already_fails(
+    runner: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tiny_project(runner, tmp_path / "proj", [KILLED])
+    (project.root / "tests/test_tiny.py").write_text(TINY_TESTS.replace("== 5", "== 6"))
+    assert runner.main(["--workdir", str(tmp_path / "work")], project) == 1
+    printed = capsys.readouterr().out
+    assert printed.startswith("the unmutated copy fails (pytest exit 1):\n")
+    assert "KILLED" not in printed and "SURVIVED" not in printed
+
+
+def test_runner_lists_id_invariants_tests_and_why(
+    runner: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tiny_project(runner, tmp_path / "proj", [KILLED])
+    assert runner.main(["--list"], project) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "add-subtracts",
+        "  invariants: INV-1",
+        "  path: src/tinypkg/__init__.py",
+        "  test: tests/test_tiny.py::test_add",
+        "  why: the sum becomes a difference.",
+        "1 mutants",
+    ]
+
+
+def test_a_snippet_must_occur_exactly_once(
+    runner: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    twice = tiny_entry(id="twice", old="return", new="yield")
+    absent = tiny_entry(id="absent", old="return 99", new="return 100")
+    project = tiny_project(runner, tmp_path / "proj", [KILLED, twice, absent])
+    assert runner.main(["--list"], project) == 2
+    assert capsys.readouterr().err.splitlines() == [
+        "mutants_tiny.py: twice: snippet found 2 times in src/tinypkg/__init__.py",
+        "mutants_tiny.py: absent: snippet found 0 times in src/tinypkg/__init__.py",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("changes", "problem"),
+    [
+        ({"id": "bad id"}, "id must be a non-empty word"),
+        ({"invariants": []}, "invariants must be a non-empty list"),
+        ({"path": "src/other/x.py"}, "path must be a .py file under src/tinypkg/"),
+        ({"path": "src/tinypkg/../x.py"}, "path must be a .py file under src/tinypkg/"),
+        ({"old": ""}, "old must be a non-empty string"),
+        ({"new": "return a + b"}, "old and new are the same"),
+        ({"tests": []}, "tests must be a non-empty list"),
+        ({"tests": ["tests/test_tiny.py"]}, "tests must be a non-empty list"),
+        ({"why": "one\ntwo"}, "why must be one non-empty line"),
+    ],
+)
+def test_a_malformed_entry_is_refused_with_its_reason(
+    runner: ModuleType, tmp_path: Path, changes: dict[str, object], problem: str
+) -> None:
+    mutants, problems = runner.parse_table(
+        [tiny_entry(**changes)], "mutants_tiny.py", runner.Project(tmp_path, "tinypkg")
+    )
+    assert mutants == []
+    assert len(problems) == 1 and problem in problems[0]
+
+
+def test_an_entry_must_have_exactly_the_documented_keys(runner: ModuleType, tmp_path: Path) -> None:
+    project = runner.Project(tmp_path, "tinypkg")
+    missing = {k: v for k, v in tiny_entry().items() if k != "why"}
+    extra = tiny_entry(severity="high")
+    mutants, problems = runner.parse_table([missing, extra, "text"], "mutants_tiny.py", project)
+    assert mutants == []
+    assert problems == [
+        "mutants_tiny.py: add-subtracts: keys differ (missing ['why'], unexpected [])",
+        "mutants_tiny.py: add-subtracts: keys differ (missing [], unexpected ['severity'])",
+        "mutants_tiny.py[2]: not a dict",
+    ]
+
+
+def test_check_project_reports_duplicate_ids_missing_files_and_uncompilable_mutants(
+    runner: ModuleType, tmp_path: Path
+) -> None:
+    project = tiny_project(runner, tmp_path / "proj", [])
+    entries = [
+        tiny_entry(),
+        tiny_entry(),
+        tiny_entry(id="syntax", new="return (a +"),
+        tiny_entry(id="no-test", tests=["tests/missing.py::test_x"]),
+        tiny_entry(id="no-file", path="src/tinypkg/gone.py"),
+    ]
+    mutants, problems = runner.parse_table(entries, "mutants_tiny.py", project)
+    assert problems == []
+    found = runner.check_project(project, mutants)
+    assert found[1].startswith("mutants_tiny.py: syntax: the mutated source does not compile: ")
+    assert found[:1] + found[2:] == [
+        "mutants_tiny.py: add-subtracts: duplicate id",
+        "mutants_tiny.py: no-test: tests/missing.py does not exist",
+        "mutants_tiny.py: no-file: src/tinypkg/gone.py does not exist",
+    ]
+
+
+def test_the_work_directory_may_not_be_inside_the_worktree(
+    runner: ModuleType, tmp_path: Path
+) -> None:
+    (tmp_path / "repo/.git").mkdir(parents=True)
+    project = tiny_project(runner, tmp_path / "repo/pkg", [KILLED])
+    runner.check_workdir(project, tmp_path / "elsewhere")
+    with pytest.raises(runner.RunnerError, match="refusing to work inside the worktree"):
+        runner.check_workdir(project, tmp_path / "repo/scratch")
+
+
+def test_the_probe_refuses_a_copy_that_is_not_the_code_under_test(
+    runner: ModuleType, tmp_path: Path
+) -> None:
+    project = runner.Project()
+    copy = tmp_path / "copy"
+    runner.make_copy(project, copy)
+    runner.probe_package(project, copy)
+    assert runner.child_env(copy).get("TMPDIR") == os.environ.get("TMPDIR")
+    assert (copy / "tests").resolve() == project.root / "tests"
+    assert list((copy / "src").rglob("__pycache__")) == []
+    empty = tmp_path / "empty"
+    (empty / "src").mkdir(parents=True)
+    with pytest.raises(runner.RunnerError, match="expected the private copy"):
+        runner.probe_package(project, empty)
+
+
+def test_every_mutant_table_of_the_lot_is_well_formed_and_matches_the_current_tree(
+    runner: ModuleType,
+) -> None:
+    project = runner.Project()
+    mutants, problems = runner.load_tables(project)
+    assert problems + runner.check_project(project, mutants) == []
