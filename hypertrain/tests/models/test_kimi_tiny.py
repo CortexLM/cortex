@@ -284,6 +284,28 @@ def test_island_refuses_a_second_rank_before_training(dp: int) -> None:
         emulate(2, lambda c: train_island(cfg, lay, c, theta0, a, trained))
 
 
+def test_forward_refuses_an_expert_parallel_moe_override() -> None:
+    cfg = kt.MICRO
+    with pytest.raises(ValueError, match="moe override"):
+        kt.forward(cfg, init_params(cfg), _tokens(cfg, 1, 4), moe=kt._moe)
+
+
+def test_qualify_cli_exits_on_differing_rounds_and_reports_equal_ones(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The B300 qualification reads this exit code: two rounds that differ must not pass."""
+    same = {"run_id": "r", "leaves_root": "1", "delta_hash": "2", "state_root": "3"}
+    monkeypatch.setattr("sys.argv", ["kimi_tiny", "--device", "cpu", "--dtype", "fp32"])
+    monkeypatch.setattr(kt, "qualify", lambda doc, device, rounds: [same, same])
+    kt.main()
+    assert json.loads(capsys.readouterr().out)["rounds"] == [same, same]
+    monkeypatch.setattr(
+        kt, "qualify", lambda doc, device, rounds: [same, {**same, "state_root": "4"}]
+    )
+    with pytest.raises(SystemExit, match="MISMATCH"):
+        kt.main()
+
+
 @pytest.mark.gpu
 @cuda
 def test_profile_two_rounds_bitwise_on_cuda() -> None:
