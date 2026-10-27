@@ -298,6 +298,8 @@ def test_relabelled_copy_of_one_host_is_refused(tmp_path: Path, attack: str, cod
 
 CHANGES = {
     "drivers": lambda d: d["environment"].update(drivers=["999.99.99"] * 2),
+    # Its own two GPUs in the other order: the subset check still holds, only the hash can tell.
+    "gpu_uuids": lambda d: d["environment"]["gpu_uuids"].reverse(),
     "torch_path": lambda d: d["environment"].update(torch_path="/somewhere/else/torch/x.py"),
     "config_sha256": lambda d: d.update(config_sha256="ab" * 32),
     "elapsed_seconds": lambda d: d.update(elapsed_seconds=0.001),
@@ -352,17 +354,32 @@ def test_attestation_for_another_image_config_or_driver_is_unbound(
         driver.compare(paths, manifest(), host_keys=pins(paths))
 
 
-@pytest.mark.parametrize("fault", ["missing", "not_canonical"])
-def test_missing_or_non_canonical_attestation_is_refused(tmp_path: Path, fault: str) -> None:
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("missing", "missing"),
+        ("not_canonical", "not_canonical"),
+        ("gpu_uuids_edited", "signature"),
+    ],
+)
+def test_missing_non_canonical_or_edited_attestation_is_refused(
+    tmp_path: Path, fault: str, code: str
+) -> None:
     # Given
     paths = results(tmp_path)
     statement = paths[1].parent / host_attest.ATTESTATION
     if fault == "missing":
         statement.unlink()
-    else:
+    elif fault == "not_canonical":
         statement.write_text(json.dumps(json.loads(statement.read_bytes()), indent=1))
+    else:  # A canonical statement that still binds the result, under the signature of another.
+        edited = json.loads(statement.read_bytes())
+        edited["gpu_uuids"] = edited["gpu_uuids"][:4]
+        statement.write_bytes(
+            host_attest.statement_bytes(host_attest.HostStatement.model_validate(edited))
+        )
     # When / Then
-    with pytest.raises(Reject, match=f"^qualification_attestation_{fault}$"):
+    with pytest.raises(Reject, match=f"^qualification_attestation_{code}$"):
         driver.compare(paths, manifest(), host_keys=pins(paths))
 
 
