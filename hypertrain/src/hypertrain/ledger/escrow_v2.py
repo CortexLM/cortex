@@ -195,6 +195,7 @@ class EscrowV2:
         shadow_settlement: Callable[[str], Settlement] | None = None,
         auditor_quorum: tuple[int, int] | None = None,
         admission_settlement: Callable[[str], Settlement] | None = None,
+        round_closure: Callable[[int], str | None] | None = None,
     ) -> None:
         if auditor_quorum is not None:
             k, n = auditor_quorum
@@ -217,6 +218,8 @@ class EscrowV2:
         # the lock event: `settlement` is one namespace for lock, dispute and reward-origin ids,
         # and an owner chooses the id of its lock. None keeps the single callback.
         self.admission_settlement = admission_settlement
+        # Finality's answer for a round: the hash that closed it without a reward, else None.
+        self.round_closure = round_closure
         self.mutex = threading.RLock()
         match database:
             case Path():
@@ -707,13 +710,14 @@ class EscrowV2:
                     last = self.db.execute(
                         "SELECT MAX(ordinal) FROM escrow_shadow_finalized"
                     ).fetchone()[0]
+                    expected = last + 1 if last is not None else 0
                     number = reward.shadow_ordinal
                 case RewardFinalize():
-                    last = self.db.execute("SELECT MAX(w) FROM escrow_finalized").fetchone()[0]
+                    expected = self._first_open_round(below=reward.w)
                     number = reward.w
                 case unreachable:
                     assert_never(unreachable)
-            if number != (last + 1 if last is not None else 0):
+            if number != expected:
                 raise EscrowError("FINALIZE_ORDER")
             pending_units = 0
             match reward:
@@ -789,6 +793,40 @@ class EscrowV2:
                     return self._event(operation, "REWARD_FINALIZE", request, origins[0].owner)
                 case unreachable:
                     assert_never(unreachable)
+
+    def _first_open_round(self, *, below: int) -> int:
+        """First round neither reward-finalized nor withdrawn.
+
+        A round under `below` that finality closed without a reward never reaches
+        `escrow_finalized`, so without a record of it every later round would be refused
+        FINALIZE_ORDER for ever. It is recorded here, once, as a ROUND_WITHDRAWN event: nothing is
+        minted, moved or burned. The id has its own domain and the head of the event chain: an id
+        that was a pure function of the public run and round could be occupied by a client
+        operation, and the failure would be a constraint error on every later finalize.
+        """
+        accounted = {row[0] for row in self.db.execute("SELECT w FROM escrow_finalized")}
+        for row in self.db.execute(
+            "SELECT request FROM escrow_events WHERE kind='ROUND_WITHDRAWN'"
+        ):
+            accounted.add(json.loads(row["request"])["w"])
+        w = 0
+        while True:
+            while w in accounted:
+                w += 1
+            closure = self.round_closure(w) if self.round_closure and w < below else None
+            if closure is None:
+                return w
+            head = self.db.execute(
+                "SELECT event_hash FROM escrow_events ORDER BY seq DESC LIMIT 1"
+            ).fetchone()
+            prev = head["event_hash"] if head else "0" * 64
+            self._event(
+                sha256_hex(f"ht-round-withdraw-v2|{self.run_id}|{w}|{prev}".encode()),
+                "ROUND_WITHDRAWN",
+                canonicalize({"closure_hash": closure, "w": w}).decode(),
+                self.policy.reward_authority,
+            )
+            accounted.add(w)
 
     def _credit(self, origin: str, owner: str, bucket: str, ref: str, units: int) -> None:
         self.db.execute(
