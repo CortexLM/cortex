@@ -1120,6 +1120,36 @@ def test_a_parser_that_runs_out_of_resources_on_result_bytes_fails_the_attempt(
     assert first["host"] != second["host"]
 
 
+FLOODS = {
+    # 40 GPUs named by 30,000 characters each: 1.2 MB, over the 1 MiB a probe may print
+    "probe": (
+        lambda index: {"gpus": [{**fake.gpu(index, i), "name": "n" * 30_000} for i in range(40)]},
+        "host probe output exceeds its bound",
+    ),
+    "pull": (
+        lambda index: {"images": [], "pull": {"output": 2 << 20}},
+        "image pull output exceeds its bound",
+    ),
+}
+
+
+@pytest.mark.parametrize("flood", FLOODS)
+def test_host_that_floods_its_probe_or_pull_output_is_quarantined(
+    make_pool, canned, tmp_path, flood
+):
+    evil, good = hostile_and_healthy(canned)
+    overrides, reason = FLOODS[flood]
+    pool = make_pool(labels=("a", "b"), hosts={evil: overrides(("a", "b").index(evil))})
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home)
+
+    assert [run["host"] for run in pool.toolbox.runs()] == [pool.address(good)]
+    (refused,) = journal_of(pool, "exec_host_refused")
+    assert (refused["label"], refused["reason"]) == (evil, reason)
+    assert journal_of(pool, "exec_attempt_failed") == []  # a refusal costs no attempt
+    assert record_of(home)["host"]["label"] == good
+
+
 OOM = {"mode": "exit", "code": 1, "stderr": "CUDA out of memory"}
 
 

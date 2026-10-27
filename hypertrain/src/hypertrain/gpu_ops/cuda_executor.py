@@ -600,9 +600,12 @@ class Executor:
         out, err = work / f"probe-{time.monotonic_ns()}.out", work / "probe.err"
         before = time.time()
         command = snapshot_command(self.hosts[label].docker, image)
-        code = self._remote(
-            label, command, stdout=out, stderr=err, deadline=deadline, cancel=cancel, limit=60
-        )
+        try:
+            code = self._remote(
+                label, command, stdout=out, stderr=err, deadline=deadline, cancel=cancel, limit=60
+            )
+        except AttemptFailed as error:  # the transport's output bounds: no honest probe trips them
+            raise HostRefused("host probe output exceeds its bound") from error
         after = time.time()
         if code:
             raise HostLost(f"host probe exited {code}: {_tail(err)}")
@@ -615,15 +618,18 @@ class Executor:
         self, label: str, image: str, deadline: float, cancel: threading.Event | None, work: Path
     ) -> None:
         err = work / "pull.err"
-        code = self._remote(
-            label,
-            shlex.join([*self.hosts[label].docker, "pull", "--quiet", image]),
-            stdout=work / f"pull-{time.monotonic_ns()}.out",
-            stderr=err,
-            deadline=deadline,
-            cancel=cancel,
-            limit=self.config.pull_timeout_seconds,
-        )
+        try:
+            code = self._remote(
+                label,
+                shlex.join([*self.hosts[label].docker, "pull", "--quiet", image]),
+                stdout=work / f"pull-{time.monotonic_ns()}.out",
+                stderr=err,
+                deadline=deadline,
+                cancel=cancel,
+                limit=self.config.pull_timeout_seconds,
+            )
+        except AttemptFailed as error:  # the transport's output bounds: no honest pull trips them
+            raise HostRefused("image pull output exceeds its bound") from error
         if code:
             raise HostLost(f"image pull exited {code}: {_tail(err)}")
 

@@ -17,7 +17,7 @@ The scenario is one JSON file keyed by host address (`hosts`), plus a `global` s
     hosts[address] = {down, hostkey_ok, port, user, identity, clock_skew,
                       gpus[{uuid,name,driver,cc,mem,sm}], busy[uuid], busy_sequence[[uuid]],
                       smi_fail, images[ref], inspect_reports[ref], raw_inspect,
-                      pull{fails|digest}, runs[run]}
+                      pull{fails|digest|output}, runs[run]}
     global = {canned{job_sha256: tree}, runs[run], rm_hold}  # global runs are consumed first
     run = {mode: ok | vanish | truncate | exit | exit-after | probe-fail | env | hang | oversize |
                  flood | mutate, detached, ...}
@@ -251,6 +251,7 @@ def pull(argv):
         spec = host.get("pull", {})
         if spec.get("fails"):
             return False
+        sys.stdout.write("x" * spec.get("output", 0))
         added = ref.split("@")[0] + "@" + spec["digest"] if spec.get("digest") else ref
         host.setdefault("images", []).append(added)
         return True
