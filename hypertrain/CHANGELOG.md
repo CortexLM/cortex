@@ -67,6 +67,9 @@
   `python -m hypertrain.trainer.env_probe --manifest FILE` reports the environment a manifest pins
   and checks that this host can honor it (`protocol.env_pins.require_honorable`: a child started
   under the pinned environment, cached per process).
+  `launch_island`, `launch_window` and `_launch_unbounded` start island ranks under the pins and
+  raise `EnvPinRefused` (an `IslandFailure`) before charging capacity when this host cannot honor
+  them.
 
 ### Changed
 - A challenge poll after the deadline no longer suspends a miner whose proof was accepted

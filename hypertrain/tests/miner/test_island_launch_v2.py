@@ -15,10 +15,11 @@ import pytest
 import torch
 
 import hypertrain.trainer  # noqa: F401
-from hypertrain.auditor.replay import pack_state, unpack_state
+from hypertrain.auditor.replay import AnchorCache, pack_state, unpack_state
 from hypertrain.miner.island_launch import IslandFailure, launch_argv, launch_island
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.hashing import MerkleTree
+from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import f32hex
 from hypertrain.protocol.messages_v2 import IslandJobV1, RunManifestV2
 from hypertrain.trainer.config import TrainConfig
@@ -28,7 +29,11 @@ from hypertrain.trainer.model import init_params, param_shapes
 
 
 def tiny_manifest(
-    n: int = 2, ep: int = 1, zero1: bool = True, pinned: dict[str, Any] | None = None
+    n: int = 2,
+    ep: int = 1,
+    zero1: bool = True,
+    pinned: dict[str, Any] | None = None,
+    state_policy: str = "reset",
 ) -> RunManifestV2:
     b = example_manifest().body()
     if pinned is not None:
@@ -45,7 +50,9 @@ def tiny_manifest(
         top_k_experts=1,
         compute_dtype="fp32",
     )
-    b["inner"].update(H=2, J=1, micro_batch=1, grad_accum=1, state_policy="reset", rewarmup_steps=0)
+    b["inner"].update(
+        H=2, J=1, micro_batch=1, grad_accum=1, state_policy=state_policy, rewarmup_steps=0
+    )
     b["inner"]["lr_schedule"].update(warmup=0, stable=100, peak_lr=f32hex(0.001))
     b["reference_spec"]["layout"].update(pp=1, n_gpus=n, dp_size=n // ep, ep_size=ep, zero1=zero1)
     b["model"]["param_count"] = sum(
@@ -80,11 +87,20 @@ def tiny_manifest(
 
 
 def staged_job(
-    directory: Path, n: int = 2, ep: int = 1, pinned: dict[str, Any] | None = None
+    directory: Path,
+    n: int = 2,
+    ep: int = 1,
+    pinned: dict[str, Any] | None = None,
+    state_policy: str = "reset",
 ) -> IslandJobV1:
-    w = tiny_manifest(n, ep, pinned=pinned)
+    w = tiny_manifest(n, ep, pinned=pinned, state_policy=state_policy)
     cfg = TrainConfig.from_manifest_v2(w)
     theta = init_params(cfg.model)
+    carried = (
+        AnchorCache().genesis(w, Keypair(bytes([44]) * 32).ss58, theta).state
+        if state_policy == "carry"
+        else None
+    )
     rows = np.arange(16 * 5, dtype=np.uint32).reshape(16, 5) % 16
     tree = MerkleTree([r.astype("<u4").tobytes() for r in rows])
     b = w.body()
@@ -92,7 +108,7 @@ def staged_job(
     w = RunManifestV2.model_validate(b)
     count = w.training.batch_samples()
     inputs = {
-        "start_state": pack_state(theta),
+        "start_state": pack_state(theta, carried),
         "ef_in": pack_state({k: torch.zeros_like(x) for k, x in theta.items()}),
         "v0": pack_state({}),
         "samples": rows[:count].astype("<u4").tobytes(),
