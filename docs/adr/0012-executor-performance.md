@@ -243,15 +243,15 @@ Part A may not change `challenge/store.py` or the pusher's code, so it ships set
 Measured with `network_qualification.sources()`/`bundle()` and `ChallengeStore._service_implementation_v2`
 over a `git archive` of each commit [V], base `33b50656` and this branch's tip:
 
-| Value | Base `33b50656` | This branch (tree of `ee8ee5bd`) |
+| Value | Base `33b50656` | This branch (`src` as of `a4872f92`; later commits are tests and docs) |
 | --- | --- | --- |
 | `implementation_hash` | `02e208a3…0189cc` | unchanged |
 | `store.py` sha256 | `b5bc9904…aaec88` | unchanged |
 | `network_qualification.py` sha256 | `dab7a6ab…7bda15` | unchanged |
 | `cuda_executor_runner.py` sha256 (the `runner_sha256` of every record) | `a4eaa094…60ca5b` | unchanged |
-| `cuda_executor.py` sha256 | `62c9d0df…69bad4` | `8c4cb625…2a9f4e` |
-| `sources()` map: files, canonical sha256 | 151, `e0df98e6…507e8b` | 151, `a4ab9a36…58ce17` |
-| `bundle()` | 2,396,160 bytes, `e78f33d1…eb70ba` | 2,406,400 bytes, `9e4c9c0e…60f8bb` |
+| `cuda_executor.py` sha256 | `62c9d0df…69bad4` | `9154cdd6…4d8238` |
+| `sources()` map: files, canonical sha256 | 151, `e0df98e6…507e8b` | 151, `d3347cce…3451d6` |
+| `bundle()` | 2,396,160 bytes, `e78f33d1…eb70ba` | 2,406,400 bytes, `cfcb9d44…503c86` |
 
 Reading: `implementation_hash` hashes the `owned` functions of `store.py` and ten named files, none touched, so
 it does not move; `cuda_executor_runner.py` is not edited, so `runner_sha256` is unchanged; no run id, golden
