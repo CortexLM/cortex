@@ -70,7 +70,7 @@ Example with `epochs_per_round = 1` and three equal honest miners: each entitlem
 
 ## 5. Escrow, vesting and clawback
 
-Entitlements do not pay immediately. An entitlement of round `w` finalized in ledger round `r` is released at `r + E`. Until then it is escrow, and that escrow is the stake: Cortex has no slashing, so unvested reward is the only collateral.
+Entitlements do not pay immediately. An entitlement of round `w` finalized in ledger round `r` is released at `r + E`. Until then it is escrow, and that escrow is the stake: Cortex has no slashing, so unvested reward is the only collateral. (v1. A v2 run also holds an admission bond that a verdict of fraud burns: `docs/network-v2.md`, ADR 0010.)
 
 **Sizing.** A cheater who saves a fraction `g <= 1` of one round's reward `R` gains `G = g*R`. If caught it loses the escrow `S = E*R` and the round reward, so deterrence needs `q*(S + R) >= G`, which gives `E >= g/q - 1`. The ledger uses `E = ceil(1/q)`, computed exactly on the f32 value of `q`, and the manifest validator rejects a smaller `E_vest_rounds`.
 

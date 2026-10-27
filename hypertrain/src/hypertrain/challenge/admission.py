@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import secrets
 import threading
 from collections.abc import Callable
@@ -10,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 if TYPE_CHECKING:
     from experiments.gpu_network_v2.orchestrate import NetworkRuntime
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
 
 from hypertrain.beacon.core import BeaconRound
 from hypertrain.challenge.admission_store import AdmissionError, AdmissionRecord, AdmissionStore
+from hypertrain.challenge.finality_v2 import RoundStatus
 from hypertrain.challenge.trust_v2 import FundedStatus, nominal_q
 from hypertrain.data.store import (
     Store,
@@ -29,10 +31,11 @@ from hypertrain.data.store import (
 )
 from hypertrain.data.trial_assignment import trial_assignment_hash, trial_samples
 from hypertrain.gpu_ops.work_screen import IslandLaunch, screen_work
-from hypertrain.ledger.escrow_v2 import EscrowV2, digest
+from hypertrain.ledger.escrow_v2 import EscrowError, EscrowV2, Settlement, digest
 from hypertrain.protocol.envelope import body_digest
 from hypertrain.protocol.envelope_v2 import Intake, load_json, parse_envelope, seal, verify_join
 from hypertrain.protocol.hashing import sha256_hex
+from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import Finalize
 from hypertrain.protocol.messages_v2 import (
@@ -40,6 +43,9 @@ from hypertrain.protocol.messages_v2 import (
     AdmissionPolicyV2,
     ArtifactRef,
     EscrowLock,
+    EscrowReceipt,
+    EscrowRelease,
+    Hex64,
     IslandJobV1,
     JoinChallenge,
     JoinRequest,
@@ -47,6 +53,8 @@ from hypertrain.protocol.messages_v2 import (
     WorkProof,
     WorkScreenV2,
 )
+
+SeizureReason = Literal["TRAINING_FRAUD", "NO_SHOW", "AUDIT_MISMATCH"]
 
 
 def _logical(objects: Store, ref: ArtifactRef, code: str) -> tuple[str, int, bool]:
@@ -127,6 +135,7 @@ class Admission:
             raise AdmissionError("CPU_NOT_PRODUCTION_QUALIFICATION")
         self.escrow, self.policy, self.coord = escrow, policy, coordinator
         self.store = AdmissionStore(escrow)
+        escrow.admission_settlement = self.lock_settlement
         self.beacon, self.stage_reference, self.objects = beacon, stage_reference, objects
         self.ip_secret, self.qualified = ip_secret, qualified
         self.conservative_bound, self.backend = conservative_bound, backend
@@ -994,6 +1003,8 @@ class Admission:
             Intake(self.escrow.run_id, {"EscrowLock": lambda s: s == r.coldkey}).accept(raw, now)
             if op.owner != r.coldkey or op.kind != "LOCK_ADMISSION":
                 raise AdmissionError("LOCK_OWNER_OR_KIND")
+            if r.state == "BANNED":
+                raise AdmissionError("LOCK_BANNED")
             self.store.enqueue_lock(op, env.signer)
         return self.store.reconcile_lock(op.operation_id).event_hash
 
@@ -1177,25 +1188,289 @@ class Admission:
             )
             self.resume(hotkey, now=now)
 
-    def settle_fraud(self, hotkey: str, lock_id: str, *, now: int) -> None:
-        """Only an authenticated, finalized proven training-fraud settlement bans."""
+    # The admission bond (ADR 0010, Part 6). A lock is settled by its own resolver, derived from
+    # persisted rows on every call and installed on the ledger (EscrowV2.admission_settlement),
+    # so release and slash agree with the admission state and a lock id cannot borrow the
+    # settlement of a dispute or of a reward origin.
+
+    def _bond_locks(self, admission_id: str) -> list[EscrowLock]:
+        coldkey = self.store.by_id(admission_id).coldkey
+        locks = (
+            EscrowLock.model_validate_json(row["request"])
+            for row in self.store.db.execute(
+                "SELECT request FROM escrow_events WHERE kind='LOCK_ADMISSION' ORDER BY seq"
+            )
+        )
+        return [
+            lock for lock in locks if lock.admission_id == admission_id and lock.owner == coldkey
+        ]
+
+    def _residual(self, lock: EscrowLock) -> tuple[list[str], int]:
+        rows = self.store.db.execute(
+            "SELECT origin,units FROM escrow_units WHERE owner=? AND bucket='admission_locked' "
+            "AND ref=? AND units>0 ORDER BY origin",
+            (lock.owner, lock.operation_id),
+        ).fetchall()
+        return [row["origin"] for row in rows], sum(row["units"] for row in rows)
+
+    def _bond_operation(self, label: str, lock_id: str) -> str:
+        """Deterministic for retries, unguessable for an owner who would register it first."""
+        return hmac.digest(self.ip_secret, f"ht-bond-{label}-v1|{lock_id}".encode(), "sha256").hex()
+
+    def lock_settlement(self, lock_id: str) -> Settlement:
+        """What may happen to one admission lock. Derived, never stored.
+
+        FRAUD once the lock was seized (`seize_bond`). Otherwise MATCH, and unresolved until
+        the admission is not banned and has no pending dispute or lock in the outbox, every
+        round whose roster lists it is closed, none of its hotkeys has unvested rewards, and
+        `release_beacon` is reached: the last maturity of its reward origins, and, while it is
+        live (ACTIVE, or PROBATION with four clean trials), the end of its current screen, since
+        the bond is what makes a live miner eligible.
+        """
+        row = self.store.db.execute(
+            "SELECT request FROM escrow_events WHERE operation_id=? AND kind='LOCK_ADMISSION'",
+            (lock_id,),
+        ).fetchone()
+        if row is None:
+            raise EscrowError("UNKNOWN_LOCK")
+        lock = EscrowLock.model_validate_json(row["request"])
+        assert lock.admission_id is not None
+        admission_id = lock.admission_id
+        who = {"run_id": self.escrow.run_id, "admission_id": admission_id, "coldkey": lock.owner}
+        seized = self.store.db.execute(
+            "SELECT reason,evidence_hash,beacon FROM admission_seizures WHERE lock_id=?",
+            (lock_id,),
+        ).fetchone()
+        if seized is not None:
+            return Settlement(
+                finality_hash=sha256_hex(
+                    canonicalize(
+                        ["ht-bond-seized-v1", lock_id, seized["reason"], seized["evidence_hash"]]
+                    )
+                ),
+                closed_dispute_root=sha256_hex(canonicalize([seized["evidence_hash"]])),
+                release_beacon=seized["beacon"],
+                unresolved=False,
+                outcome="FRAUD",
+                evidence_hash=seized["evidence_hash"],
+                **who,
+            )
+        r = self.store.by_id(admission_id)
+        unresolved = r.state == "BANNED" or r.pending_dispute
+        unresolved = unresolved or self.store.pending_outbox(admission_id)
+        pending = self.store.db.execute(
+            "SELECT dispute_id,resolved FROM admission_pending WHERE admission_id=? "
+            "ORDER BY dispute_id",
+            (admission_id,),
+        ).fetchall()
+        unresolved = unresolved or any(not p["resolved"] for p in pending)
+        rounds: list[list[object]] = []
+        for rostered in self.store.db.execute(
+            "SELECT r.id FROM records_v2 r, json_each(json_extract(r.data,'$.body.roster')) j "
+            "WHERE r.run_id=? AND r.kind='round' AND json_extract(j.value,'$.admission_id')=? "
+            "ORDER BY CAST(r.id AS INTEGER)",
+            (self.escrow.run_id, admission_id),
+        ).fetchall():
+            record = self.store.db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='finality' AND id=?",
+                (self.escrow.run_id, rostered["id"]),
+            ).fetchone()
+            status = RoundStatus(**json.loads(record["data"])) if record else None
+            unresolved = unresolved or status is None or not status.closed
+            if status is not None:
+                rounds.append([status.w, status.disposition, status.resolution_hash])
+        origins = self.store.db.execute(
+            "SELECT origin,mature_at FROM escrow_origins WHERE hotkey IN "
+            "(SELECT hotkey FROM admission_history WHERE admission_id=?) ORDER BY origin",
+            (admission_id,),
+        ).fetchall()
+        unvested = self.store.db.execute(
+            "SELECT 1 FROM escrow_units u JOIN escrow_origins o ON o.origin=u.origin "
+            "WHERE u.bucket='reward_pending' AND u.units>0 AND o.hotkey IN "
+            "(SELECT hotkey FROM admission_history WHERE admission_id=?) LIMIT 1",
+            (admission_id,),
+        ).fetchone()
+        release = max((o["mature_at"] for o in origins), default=0)
+        if r.state == "ACTIVE" or (r.state == "PROBATION" and r.clean_count >= 4):
+            release = max(release, r.screen_until + 1)
+        return Settlement(
+            finality_hash=sha256_hex(
+                canonicalize(["ht-bond-final-v1", lock_id, rounds, [o["origin"] for o in origins]])
+            ),
+            closed_dispute_root=sha256_hex(
+                canonicalize(["ht-bond-closed-v1", [p["dispute_id"] for p in pending]])
+            ),
+            release_beacon=release,
+            unresolved=unresolved or unvested is not None,
+            outcome="MATCH",
+            **who,
+        )
+
+    def bond(self, admission_id: str, *, now: int) -> dict[str, JsonValue]:
+        """The admission's locked bond and what the owner must sign to take it back (status)."""
+        locks: list[JsonValue] = []
+        for lock in self._bond_locks(admission_id):
+            origins, units = self._residual(lock)
+            if not units:
+                continue
+            s = self.lock_settlement(lock.operation_id)
+            locks.append(
+                {
+                    "lock_id": lock.operation_id,
+                    "units": units,
+                    "origin_ids": list(origins),
+                    "outcome": s.outcome,
+                    "releasable": not s.unresolved
+                    and s.outcome != "FRAUD"
+                    and now >= s.release_beacon,
+                    "release_beacon": s.release_beacon,
+                    "finality_hash": s.finality_hash,
+                    "closed_dispute_root": s.closed_dispute_root,
+                }
+            )
+        return {"locks": locks}
+
+    def release_bond(self, admission_id: str, *, now: int) -> list[EscrowReceipt]:
+        """Release every residual lock of the admission to its owner, or none.
+
+        Internal, authenticated service hook; no route calls it. The owner's own way out is the
+        signed `EscrowRelease` of `POST .../escrow/release` against the hashes of `bond`. Refused
+        with BOND_NOT_RELEASABLE unless the derived settlement is MATCH and released.
+        """
+        self._beacon(now)
+        receipts: list[EscrowReceipt] = []
+        with self.escrow.tx():
+            for lock in self._bond_locks(admission_id):
+                origins, units = self._residual(lock)
+                if not units:
+                    continue
+                s = self.lock_settlement(lock.operation_id)
+                if s.unresolved or s.outcome == "FRAUD" or now < s.release_beacon:
+                    raise AdmissionError("BOND_NOT_RELEASABLE")
+                op = EscrowRelease(
+                    operation_id=self._bond_operation("release", lock.operation_id),
+                    owner=lock.owner,
+                    units=units,
+                    origin_ids=origins,
+                    admission_id=admission_id,
+                    dispute_id=None,
+                    lock_id=lock.operation_id,
+                    finality_hash=s.finality_hash,
+                    closed_dispute_root=s.closed_dispute_root,
+                )
+                receipts.append(self.escrow.release(op, signer=lock.owner, now_beacon=now))
+        return receipts
+
+    def seize_bond(
+        self, admission_id: str, *, reason: SeizureReason, evidence_hash: str, now: int
+    ) -> int:
+        """Sanction an admission and burn its residual bond; returns the units burned.
+
+        Internal, authenticated service hook (the coordinator is the ledger's reward authority);
+        no route calls it. `evidence_hash` (64 hex) names what justifies it, and the pair
+        (reason, evidence) is applied once: a retry burns nothing more and adds no strike. Every
+        residual lock is recorded as seized, so its derived settlement is FRAUD (never
+        releasable), and the burn goes through `EscrowV2.slash` under an HMAC operation id.
+        Resolve the admission by id, never by hotkey, which a rotation changes.
+
+        The caller decides whose fault it is. An auditor, infrastructure or referee-side fault
+        never reaches this function: `settle_fraud` returns False for a verdict against the
+        auditor, and the closures of ADR 0011 are not convictions.
+
+        TRAINING_FRAUD (a referee verdict, see settle_fraud): also burns the owner's unvested
+        rewards and bans the admission (terminal; `lock` then answers LOCK_BANNED).
+        AUDIT_MISMATCH (a round-stage audit mismatch the caller has confirmed as the miner's):
+        suspends the admission, reason AUDIT_MISMATCH, adds one strike, and burns the bond alone.
+        The coldkey stays bound by the one-non-ACTIVE-admission rule, as in probation, and the
+        round's reward of the honest peers is not touched. NO_SHOW (a roster member that never
+        committed): the bond alone; the admission stays, ineligible until it is funded again.
+        """
+        TypeAdapter(Hex64).validate_python(evidence_hash)
+        if reason not in ("TRAINING_FRAUD", "NO_SHOW", "AUDIT_MISMATCH"):
+            raise AdmissionError("SEIZURE_REASON")
+        self._beacon(now)
+        burned = 0
+        with self.escrow.tx():
+            r = self.store.by_id(admission_id)
+            first = (
+                self.store.db.execute(
+                    "INSERT OR IGNORE INTO admission_sanctions VALUES(?,?,?,?)",
+                    (admission_id, reason, evidence_hash, now),
+                ).rowcount
+                == 1
+            )
+            for lock in self._bond_locks(admission_id):
+                origins, units = self._residual(lock)
+                if not units:
+                    continue
+                self.store.db.execute(
+                    "INSERT OR IGNORE INTO admission_seizures VALUES(?,?,?,?,?)",
+                    (lock.operation_id, admission_id, reason, evidence_hash, now),
+                )
+                s = self.lock_settlement(lock.operation_id)
+                op = EscrowRelease(
+                    operation_id=self._bond_operation("slash", lock.operation_id),
+                    owner=lock.owner,
+                    units=units,
+                    origin_ids=origins,
+                    admission_id=admission_id,
+                    dispute_id=None,
+                    lock_id=lock.operation_id,
+                    finality_hash=s.finality_hash,
+                    closed_dispute_root=s.closed_dispute_root,
+                )
+                self.escrow.slash(
+                    op,
+                    authority=self.coord.ss58,
+                    now_beacon=now,
+                    burn_pending=reason == "TRAINING_FRAUD",
+                )
+                burned += units
+            if reason == "TRAINING_FRAUD" and r.state != "BANNED":
+                self.store.transition(admission_id, "BANNED", "FINALIZED_TRAINING_FRAUD", now)
+            if reason == "AUDIT_MISMATCH" and first and r.state != "BANNED":
+                self.store.transition(admission_id, "SUSPENDED", "AUDIT_MISMATCH", now)
+                self.store.db.execute(
+                    "UPDATE admissions_v2 SET strikes=strikes+1 WHERE admission_id=?",
+                    (admission_id,),
+                )
+        return burned
+
+    def settle_fraud(self, dispute_id: str, *, now: int) -> bool:
+        """Seize and ban on a referee verdict of training fraud against the miner.
+
+        Called with the dispute id when a resolution is accepted. Only an accepted, resolved
+        dispute settlement whose outcome is FRAUD (reason FRAUD and loser == the miner of the
+        contest) convicts; any other closure returns False and changes nothing. The pending
+        reference bound when the dispute opened must name the same admission, coldkey and
+        evidence.
+        """
         self._beacon(now)
         with self.escrow.tx():
-            r = self.store.record(hotkey)
-            status = self.escrow.settlement(lock_id)
-            lock_row = self.store.db.execute(
-                "SELECT request FROM escrow_events WHERE operation_id=? AND kind='LOCK_ADMISSION'",
-                (lock_id,),
+            pending = self.store.db.execute(
+                "SELECT * FROM admission_pending WHERE dispute_id=?", (dispute_id,)
             ).fetchone()
-            if lock_row is None:
-                raise AdmissionError("UNKNOWN_FRAUD_LOCK")
-            op = EscrowLock.model_validate_json(lock_row["request"])
-            if (
-                op.admission_id != r.admission_id
-                or op.owner != r.coldkey
-                or status.unresolved
-                or status.outcome != "FRAUD"
-                or now < status.release_beacon
-            ):
+            if pending is None:
+                return False
+            s = self.escrow.settlement(dispute_id)
+            if s.unresolved or s.outcome != "FRAUD" or s.admission_id is None:
+                return False
+            r = self.store.by_id(pending["admission_id"])
+            if (s.run_id, s.admission_id, s.coldkey, s.dispute_id, s.evidence_hash) != (
+                self.escrow.run_id,
+                r.admission_id,
+                r.coldkey,
+                pending["dispute_id"],
+                pending["evidence_hash"],
+            ) or now < s.release_beacon:
                 raise AdmissionError("UNPROVEN_TRAINING_FRAUD")
-            self.store.transition(r.admission_id, "BANNED", "FINALIZED_TRAINING_FRAUD", now)
+            self.seize_bond(
+                r.admission_id,
+                reason="TRAINING_FRAUD",
+                evidence_hash=pending["evidence_hash"],
+                now=now,
+            )
+            self.store.db.execute(
+                "UPDATE admission_pending SET resolved=1 WHERE dispute_id=?", (dispute_id,)
+            )
+            return True

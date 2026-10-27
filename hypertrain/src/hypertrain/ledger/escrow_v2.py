@@ -194,6 +194,7 @@ class EscrowV2:
         shadow_assignment_of: Callable[[ShadowReservationV1], tuple[int, ...]] | None = None,
         shadow_settlement: Callable[[str], Settlement] | None = None,
         auditor_quorum: tuple[int, int] | None = None,
+        admission_settlement: Callable[[str], Settlement] | None = None,
     ) -> None:
         if auditor_quorum is not None:
             k, n = auditor_quorum
@@ -212,6 +213,10 @@ class EscrowV2:
         self.auditors, self.replay_finality = auditors, replay_finality
         self.settlement, self.owner_of, self.assignment_of = settlement, owner_of, assignment_of
         self.shadow_assignment_of, self.shadow_settlement = shadow_assignment_of, shadow_settlement
+        # The settlement of an admission lock comes from its own resolver, chosen by the kind of
+        # the lock event: `settlement` is one namespace for lock, dispute and reward-origin ids,
+        # and an owner chooses the id of its lock. None keeps the single callback.
+        self.admission_settlement = admission_settlement
         self.mutex = threading.RLock()
         match database:
             case Path():
@@ -904,12 +909,21 @@ class EscrowV2:
                     self._credit(origin, owner, "available", "", row["units"])
             return self._event(operation_id, "MATURE", request, owner)
 
+    def _lock_status(self, lock_id: str) -> Settlement:
+        """Settlement that governs release or slash of a lock, by the kind of the lock."""
+        row = self.db.execute(
+            "SELECT kind FROM escrow_events WHERE operation_id=?", (lock_id,)
+        ).fetchone()
+        if row is not None and row["kind"] == "LOCK_ADMISSION" and self.admission_settlement:
+            return self.admission_settlement(lock_id)
+        return self.settlement(lock_id)
+
     def release(self, op: EscrowRelease, *, signer: str, now_beacon: int) -> EscrowReceipt:
         with self.tx():
             old = self._owner_operation(op, signer)
             if old is not None:
                 return old
-            status = self.settlement(op.lock_id)
+            status = self._lock_status(op.lock_id)
             if (
                 status.unresolved
                 or status.outcome == "FRAUD"
@@ -943,8 +957,13 @@ class EscrowV2:
         referee: str | None = None,
         referee_cost: int = 0,
         max_referee_cost: int = 0,
+        burn_pending: bool = True,
     ) -> EscrowReceipt:
-        """Internal proven-fraud settlement, no client slash route; funded cost then burn."""
+        """Internal proven-fraud settlement, no client slash route; funded cost then burn.
+
+        Slashing an admission lock also burns the owner's unvested rewards, unless the caller
+        names a lesser sanction (`burn_pending=False`: the bond alone, e.g. a no-show).
+        """
         if (
             authority != self.policy.reward_authority
             or min(referee_cost, max_referee_cost) < 0
@@ -952,13 +971,12 @@ class EscrowV2:
         ):
             raise EscrowError("SLASH_AUTHORITY_OR_COST")
         with self.tx():
-            request = canonicalize(
-                [op.model_dump(mode="json"), referee, referee_cost, max_referee_cost]
-            ).decode()
+            parts = [op.model_dump(mode="json"), referee, referee_cost, max_referee_cost]
+            request = canonicalize(parts if burn_pending else [*parts, False]).decode()
             old = self._existing(op.operation_id, request)
             if old is not None:
                 return old
-            status = self.settlement(op.lock_id)
+            status = self._lock_status(op.lock_id)
             if (
                 status.unresolved
                 or status.outcome != "FRAUD"
@@ -1002,7 +1020,7 @@ class EscrowV2:
                     }
                 )
                 self._move(burn, source, "burned", source_ref=op.lock_id)
-            if original.kind == "LOCK_ADMISSION":
+            if original.kind == "LOCK_ADMISSION" and burn_pending:
                 for row in self.db.execute(
                     "SELECT * FROM escrow_units WHERE owner=? AND "
                     "bucket='reward_pending' AND units>0",
