@@ -205,10 +205,12 @@ step() {
 }
 
 # docker runs in the background: a signal then interrupts `wait` instead of waiting for docker.
+# Container names are global to the host while the flock covers one results directory, so this
+# script never removes a container by name: a name already in use makes `docker run` fail, and
+# only `finish` stops containers, by this run's label.
 container() {
   local name=$PREFIX-$1
   shift
-  dk rm -f "$name" >/dev/null 2>&1 || true
   dk run --rm --init --name "$name" --label "io.cortex.b300-run=$run_id" --gpus all \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
     -v "$HT:/opt/ht:ro" -v "$out:/out" -w /opt/ht/scripts "$@" 9>&- &

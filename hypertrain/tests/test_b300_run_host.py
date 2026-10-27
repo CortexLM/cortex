@@ -30,7 +30,7 @@ SESSION = "fake-imds-session"
 NOTICE = {"action": "terminate", "time": "2026-10-26T14:00:00Z"}
 
 FAKE_DOCKER = r"""
-import json, os, pathlib, sys, time
+import json, os, pathlib, re, sys, time
 argv = sys.argv[1:]
 state = pathlib.Path(os.environ["FAKE_STATE"])
 if os.environ.get("FAKE_NEEDS_SUDO") == "1" and os.environ.get("FAKE_SUDO") != "1":
@@ -38,6 +38,52 @@ if os.environ.get("FAKE_NEEDS_SUDO") == "1" and os.environ.get("FAKE_SUDO") != "
 with (state / "docker.jsonl").open("a") as f:
     f.write(json.dumps(argv) + "\n")
 cmd = argv[0]
+
+
+# Containers are state/ctr-<id> files holding {"name", "labels"}; <file>.stopped and <file>.removed
+# mark a container that exited or was removed. Looked up, filtered and destroyed like docker does.
+def containers():
+    for p in sorted(state.glob("ctr-*")):
+        if p.suffix not in (".stopped", ".removed"):
+            yield p, json.loads(p.read_text())
+
+
+def marker(p, kind):
+    return pathlib.Path(f"{p}.{kind}")
+
+
+def running(p):
+    return not marker(p, "stopped").exists() and not marker(p, "removed").exists()
+
+
+def find(ref):
+    hits = [(p, d) for p, d in containers() if ref in (p.name, d["name"]) and running(p)]
+    return hits[0] if hits else None
+
+
+def matches(doc, flt):
+    key, _, val = flt.partition("=")
+    if key == "label":
+        k, eq, v = val.partition("=")
+        return k in doc["labels"] and (not eq or doc["labels"][k] == v)
+    if key == "name":
+        return bool(re.search(val, doc["name"]) or re.search(val, "/" + doc["name"]))
+    sys.exit(f"Error response from daemon: invalid filter '{key}'")
+
+
+def destroy(ref, kind, rm=False):
+    hit = find(ref)
+    if hit is None:
+        print(f"Error response from daemon: No such container: {ref}", file=sys.stderr)
+        return 1
+    marker(hit[0], kind).touch()
+    if rm:
+        marker(hit[0], "removed").touch()
+    with (state / "destroyed.jsonl").open("a") as f:
+        f.write(json.dumps([kind, hit[0].name, hit[1]["name"]]) + "\n")
+    return 0
+
+
 if cmd == "info":
     print(state)
 elif cmd == "pull":
@@ -45,16 +91,35 @@ elif cmd == "pull":
 elif cmd == "image":
     print(json.dumps([os.environ.get("FAKE_REPO_DIGEST", argv[-1])]))
 elif cmd == "ps":
-    rid = argv[argv.index("--filter") + 1].rsplit("=", 1)[1]
-    for p in state.glob("ctr-*"):
-        if p.read_text() == rid and not p.with_suffix(".stopped").exists():
-            print(p.name)
+    every = any(a in ("-a", "--all", "-aq", "-qa") for a in argv[1:])
+    flts = [argv[i + 1] for i, a in enumerate(argv) if a == "--filter"]
+    for p, doc in containers():
+        if (every or running(p)) and not marker(p, "removed").exists():
+            if all(matches(doc, f) for f in flts):
+                print(p.name)
 elif cmd == "stop":
-    for cid in argv[3:]:
-        (state / cid).with_suffix(".stopped").touch()
+    args, skip = [], False
+    for a in argv[1:]:
+        if skip:
+            skip = False
+        elif a in ("-t", "--time"):
+            skip = True
+        else:
+            args.append(a)
+    sys.exit(max([destroy(ref, "stopped") for ref in args], default=0))
+elif cmd == "rm":
+    force = any(a in ("-f", "--force") for a in argv[1:])
+    refs = [a for a in argv[1:] if not a.startswith("-")]
+    sys.exit(max([destroy(ref, "stopped", rm=True) if force else 1 for ref in refs], default=0))
 elif cmd == "run":
-    name = argv[argv.index("--name") + 1].removeprefix("ht-b300-")
-    label = argv[argv.index("--label") + 1].split("=", 1)[1]
+    full = argv[argv.index("--name") + 1]
+    name = full.removeprefix("ht-b300-")
+    labels = dict(argv[i + 1].split("=", 1) for i, a in enumerate(argv) if a == "--label")
+    if find(full) is not None:
+        print(f'docker: Error response from daemon: Conflict. The container name "/{full}" is '
+              "already in use. You have to remove (or rename) that container to be able to "
+              "reuse that name.", file=sys.stderr)
+        sys.exit(125)
     mounts = dict(a.split(":")[:2] for a in argv if a.count(":") >= 1 and a.startswith("/"))
     out = pathlib.Path(next(h for h, c in mounts.items() if c == "/out"))
     # Resolve the program like python would: relative to -w, through the bind mounts.
@@ -70,8 +135,10 @@ elif cmd == "run":
             sys.exit(f"python: can't open file {path!r}")
     if name == os.environ.get("FAKE_BLOCK"):
         ctr = state / f"ctr-{name}"
-        ctr.write_text(label)
-        while not ctr.with_suffix(".stopped").exists():
+        for kind in ("stopped", "removed"):
+            marker(ctr, kind).unlink(missing_ok=True)
+        ctr.write_text(json.dumps({"name": full, "labels": labels}))
+        while not marker(ctr, "stopped").exists():
             time.sleep(0.05)
         sys.exit(int(os.environ.get("FAKE_BLOCK_RC", "143")))
     if name == "gpu_probe":
@@ -543,3 +610,45 @@ def test_a_dead_watchdog_stops_the_run_before_the_next_step(env, tmp_path, launc
         pytest.fail("the run went on without a watchdog")
     assert rc == 9 and stop_json(tmp_path)["reason"] == "watchdog-died"
     assert runs_of(tmp_path, "mfu") == []
+
+
+# --- containers (B2): a run only ever touches containers it started ------------------------------
+
+LIUM = {"com.docker.compose.service": "executor"}
+OTHER_RUN = {"io.cortex.b300-run": "20261027T000000Z-1"}
+
+
+def seed_container(tmp_path: Path, name: str, labels: dict[str, str]) -> Path:
+    """A container another process started: the fake docker lists, stops and removes it."""
+    ctr = tmp_path / "state" / f"ctr-{name.removeprefix('ht-b300-')}"
+    ctr.write_text(json.dumps({"name": name, "labels": labels}))
+    return ctr
+
+
+def untouched(ctr: Path) -> bool:
+    return not Path(f"{ctr}.stopped").exists() and not Path(f"{ctr}.removed").exists()
+
+
+def test_a_running_container_with_the_same_name_is_not_removed(env, tmp_path):
+    # Another invocation (other results root, same host) owns ht-b300-gpu_probe. The container
+    # names are global to the host and the flock is per results directory: removing by name
+    # SIGKILLed that run's container.
+    theirs = seed_container(tmp_path, "ht-b300-gpu_probe", OTHER_RUN)
+    p = run(env, tmp_path)
+    assert p.returncode == 5 and "already in use" in p.stdout + p.stderr, p.stdout + p.stderr
+    assert untouched(theirs)
+    assert not [c for c in docker_calls(tmp_path) if c[0] == "rm"]
+    assert runs_of(tmp_path, "mfu") == []
+
+
+def test_a_drain_stops_this_runs_containers_only(env, tmp_path, launch):
+    executor = seed_container(tmp_path, "executor-executor-1", LIUM)
+    other = seed_container(tmp_path, "ht-b300-mfu", OTHER_RUN)
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    assert Path(f"{tmp_path}/state/ctr-gpu_probe.stopped").exists()
+    assert untouched(executor) and untouched(other)
+    log = (tmp_path / "state/destroyed.jsonl").read_text().splitlines()
+    assert [json.loads(x)[2] for x in log] == ["ht-b300-gpu_probe"]
