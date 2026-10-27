@@ -9,7 +9,7 @@ import hmac
 import os
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from hypertrain.beacon.core import BeaconError, round_at_or_after
+from hypertrain.beacon.core import BeaconError, BeaconRound, round_at_or_after
 from hypertrain.beacon.drand import QUICKNET_GENESIS, QUICKNET_PERIOD, DrandQuicknet
 from hypertrain.data.store import LocalFSStore, S3Credentials, S3Store, StoreError
 from hypertrain.data.stream_store import StreamStore, blocks, spool
@@ -65,12 +65,86 @@ class RelayConfig(BaseModel):
     local_backing: str | None = None
 
 
+class _Fetch:
+    """One drand fetch in flight, shared by every caller that arrives while it runs."""
+
+    def __init__(self) -> None:
+        self.done = anyio.Event()
+        self.beacon: BeaconRound | None = None
+        self.error: BaseException | None = None
+
+
+class BeaconCache:
+    """Verified drand beacon shared by concurrent callers and held for one drand period.
+
+    The staleness bound is applied on every call, against the wall clock, to the beacon that
+    call would use: a held beacon that no longer passes it is replaced, not served, and a fetch
+    that does not pass it is refused.
+    """
+
+    def __init__(
+        self,
+        latest: Callable[[], BeaconRound],
+        wall: Callable[[], float],
+        monotonic: Callable[[], float],
+    ) -> None:
+        self._latest = latest
+        self._wall = wall
+        self._monotonic = monotonic
+        self._held: tuple[BeaconRound, float] | None = None
+        self._fetch: _Fetch | None = None
+
+    def _usable(self, beacon: BeaconRound) -> bool:
+        expected = round_at_or_after(int(self._wall()), QUICKNET_GENESIS, QUICKNET_PERIOD) - 1
+        return beacon.bls_verified and abs(expected - beacon.round) <= 2
+
+    async def _fetched(self) -> BeaconRound:
+        while (fetch := self._fetch) is not None:
+            await fetch.done.wait()
+            if fetch.error is not None:
+                raise fetch.error
+            if fetch.beacon is not None:
+                return fetch.beacon
+            # The fetching caller was interrupted without an outcome: fetch again.
+        fetch = self._fetch = _Fetch()
+        try:
+            beacon = await anyio.to_thread.run_sync(self._latest)
+            fetch.beacon = beacon
+            # Timed from the end of the fetch: BLS verification can take seconds on a busy host.
+            self._held = (beacon, self._monotonic())
+            return beacon
+        except Exception as error:
+            fetch.error = error
+            raise
+        finally:
+            self._fetch = None
+            fetch.done.set()
+
+    async def now(self) -> int:
+        held = self._held
+        if (
+            held is not None
+            and self._monotonic() - held[1] < QUICKNET_PERIOD
+            and self._usable(held[0])
+        ):
+            return held[0].round
+        beacon = await self._fetched()
+        if not self._usable(beacon):
+            raise RelayError("verified beacon stale; eligibility/deadlines frozen")
+        return beacon.round
+
+
 def create_app(relay: Relay, drain_token: str) -> FastAPI:
     if len(drain_token) < 32:
         raise RelayError("drain credential must contain >=32 characters")
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.exception_handler(RelayError)
+    async def refused(request: Request, error: Exception) -> JSONResponse:
+        # Every RelayError message is a fixed string; ValidationError and EnvelopeError texts can
+        # echo request content, so those two stay name-only.
+        return JSONResponse({"error": type(error).__name__, "detail": str(error)}, status_code=400)
+
     @app.exception_handler(ValidationError)
     @app.exception_handler(EnvelopeError)
     async def rejected(request: Request, error: Exception) -> JSONResponse:
@@ -254,14 +328,7 @@ async def runtime(app: FastAPI) -> AsyncIterator[None]:
             )
         else:
             raise RelayError("durable external object backing not configured")
-        drand = DrandQuicknet()
-
-        async def now() -> int:
-            beacon = await anyio.to_thread.run_sync(drand.latest)
-            expected = round_at_or_after(int(time.time()), QUICKNET_GENESIS, QUICKNET_PERIOD) - 1
-            if not beacon.bls_verified or abs(expected - beacon.round) > 2:
-                raise RelayError("verified beacon stale; eligibility/deadlines frozen")
-            return beacon.round
+        now = BeaconCache(DrandQuicknet().latest, time.time, time.monotonic).now
 
         async def forward(raw: RelayEnvelope) -> RelayEnvelope:
             return await forward_receipt(client, config.master_url, raw)

@@ -228,10 +228,12 @@ a wider gap every lease answers 409 "lease exceeds 100 beacon rounds" and the ro
 audited. `live_operator.py open` refuses a gap above `audit_lease_rounds(H, 16.0)` for the
 manifest's H (100 rounds when H <= 30) and above 200 rounds for any H.
 
-**Upload one miner at a time.** The TEST relay BLS-verifies drand in `now()` on every capability
-and chunk call (`relay/app.py:259-264`). Four concurrent uploads kept it past its own 2-round
-bound, and every chunk got 400. Each sequential upload takes about 12 s. Every miner must finish
-before `d_commit`: `launch_island` checks the job deadline before it reuses a publication.
+**Upload one miner at a time.** A relay image built before `BeaconCache` (`relay/app.py`)
+BLS-verifies drand in `now()` on every capability and chunk call; later images share one verified
+beacon per drand period and put the `RelayError` text in the 400 body as `detail`. Four concurrent
+uploads kept the old relay past its own 2-round bound, and every chunk got 400. Each sequential
+upload takes about 12 s. Every miner must finish before `d_commit`: `launch_island` checks the job
+deadline before it reuses a publication.
 
 Ask `get_weights` once, and only through `weights_once.py`. It refuses (exit 3) until the run has
 a payable reward at `epoch_at` and no matured reward still vesting. The first answer per epoch is
