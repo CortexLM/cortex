@@ -5,9 +5,10 @@
 # Stops on --duration (default 3h), SIGTERM/SIGINT/SIGHUP or an EC2 Spot interruption notice: it
 # stops this run's containers, writes stop.json and uploads the results when --upload is given.
 # An unexpected exit takes the same path (reason unexpected-exit).
-# Idempotent: a step that passed (steps/<name>.rc = 0) is skipped on re-run unless --force; the
-# host probe always runs. Results go to <results-root>/<host>/. Nothing secret is read here: the
-# miner config and key directory are bind-mounted by path and never printed.
+# Idempotent: a step that passed (steps/<name>.rc = "0 <image> <commit>") is skipped on re-run
+# when the image and the clean git commit are the same, unless --force; the host probe always
+# runs. Results go to <results-root>/<host>/. Nothing secret is read here: the miner config and
+# key directory are bind-mounted by path and never printed.
 # shellcheck disable=SC2329  # step functions and on_signal are invoked through step() and trap
 set -euo pipefail
 # The input checks below are regexes: in en_US.UTF-8 [0-9] and [a-z] match thousands of other code

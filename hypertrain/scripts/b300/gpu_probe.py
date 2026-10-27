@@ -12,7 +12,8 @@ A kernel error (a RuntimeError, e.g. no kernel image for the device) is recorded
 value; any other exception is a defect and surfaces.
 
 The image must contain hypertrain.models.kimi_tiny. One built before it (the default pin of
-run_host.sh predates it) fails here with ModuleNotFoundError: pass --image of a newer build.
+run_host.sh predates it) fails here with ImportError (cannot import name 'kimi_tiny'): pass
+--image of a newer build.
 
 Usage (inside the GPU image, HT_* env as the miner runs it):
   python scripts/b300/gpu_probe.py --out /results/gpu_probe.json --expect-gpus 8 --expect-cc 10.3
