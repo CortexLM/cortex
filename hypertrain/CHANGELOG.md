@@ -163,6 +163,13 @@
   round's `d_final` (equal is accepted), and `scripts/ops/live_operator.py open` refuses the same
   entry by name. `open_round_v2` is an owned function: `implementation_hash` changes. See
   `docs/adr/0011-audit-integrity.md` (Part 8, decision 21) at the monorepo root.
+- A rotation is refused with 409 `ROTATION_ROUND_OPEN` while a round that lists the admission is
+  not closed (a round without a finality record counts as open). Rotated after the aggregate, a
+  member made `finalize` answer 403 for ever (the reward looks the owner up by hotkey) and the
+  way back is refused (`NEW_HOTKEY_HISTORY`); rotated before it, the member left the round for
+  free. A retry of an applied rotation is still answered. `Admission.rounds_listing` and `open_rounds` serve `rotate` and
+  `lock_settlement`. Rotate between rounds. See `docs/adr/0011-audit-integrity.md` (Part 8,
+  decision 21) at the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

@@ -1174,7 +1174,9 @@ the table as covering them.
 - An honest evicted miner is sanctioned like a free identity (ADR 0002 I5 and D40 say the opposite; v2 has
   no leave message to tell them apart). The pause witness and the zero-commit rule are the only
   exculpation, and there is no route back from `SUSPENDED` **[sign-off]**.
-- Owners rotate between rounds only. A rollback across a retired round and a checkpoint that spans one are
+- Owners rotate between rounds only. ADR 0010 decision 1.3 (rotation of a `SUSPENDED` row with a
+  pending dispute stays legal) is narrowed: a contest pins its round, so such a row is refused
+  while that round is unclosed. A rollback across a retired round and a checkpoint that spans one are
   refused (fail closed). A rollback whose history holds an exit exclusion fails closed, as after
   `UNVERIFIED`.
 - Existing tests that change deliberately: `test_seize_bond_burns_the_bond_of_a_no_show_and_nothing_else`

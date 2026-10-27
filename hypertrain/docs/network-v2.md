@@ -217,7 +217,12 @@ for good. A new rotation costs one unit of a budget of `join_burst` per coldkey 
 `work_screen_epoch_rounds` window (`ROTATION_QUOTA`; a retry of the same `operation_id` costs
 nothing and answers the same admission, whatever its fresh signatures); a `BANNED` admission
 cannot rotate (`TERMINAL_BANNED`); the new hotkey must be unspent (`NEW_HOTKEY_HISTORY`).
-Locks, strikes and a pending dispute follow the admission.
+Locks, strikes and a pending dispute follow the admission. A rotation is refused with 409
+`ROTATION_ROUND_OPEN` while a round that lists the admission is not closed (no audit or
+dispute pending, and finalized, or excluded with its rollback complete; a round with no
+finality record counts as open), because the roster names the hotkey and the old one is
+refused at intake the moment the admission moves: rotate between rounds. A retry of a rotation that was applied is still
+answered. There is no emergency rotation of a hotkey that a round lists.
 
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
 rounds after its accepted proof. A newer proof needs a new challenge. A challenge is

@@ -1,5 +1,6 @@
-"""R-C2 at the store: why a roster entry no longer matches a live admission, and who is left out."""
-# ruff: noqa: F811  (the `network` fixture parameter shadows the imported fixture)
+"""R-C2 at the store: why a roster entry no longer matches a live admission, who is left out, and
+when an admission may rotate."""
+# ruff: noqa: F811  (the `network` and `world` fixture parameters shadow the imported fixtures)
 
 from __future__ import annotations
 
@@ -16,14 +17,17 @@ from hypertrain.challenge.store import ChallengeStore
 from hypertrain.miner.admission import sign_rotation, sign_rotation_consent
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
+from hypertrain.protocol.keys import Keypair
 
 from . import test_service_network_v2 as fixtures
 from .audit_lease_fixture_v2 import D_AUDIT, seed_round
 from .five_identity_network_v2 import activate_identities
+from .test_admission_bond_v2 import COLD, HOT, OTHER, World, unclosed_round, world  # noqa: F401
 from .test_service_network_v2 import network  # noqa: F401  (pytest fixture import)
 
 EVIDENCE = "ab" * 32
 TREE = Path(__file__).parents[2]
+THIRD = Keypair(b"\x7a" * 32)
 
 
 def seize(reason):
@@ -158,3 +162,45 @@ def test_only_an_audited_member_that_is_not_already_excluded_is_left_out(network
             "evidence_hash": sha256_hex(f"ht-ineligible/1|{run}|0|{keys[i].ss58}|ROTATED".encode()),
         }
     assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 5
+
+
+def rotation(w: World, *, old=HOT, new=OTHER, operation: str = "33" * 32) -> bytes:
+    request = sign_rotation_consent(
+        new,
+        run_id=w.run_id,
+        coldkey=COLD.ss58,
+        hotkey=old.ss58,
+        operation_id=operation,
+        expires_beacon=200,
+    )
+    return canonicalize(sign_rotation(COLD, w.run_id, request, 200))
+
+
+@pytest.mark.parametrize("closed", [False, True], ids=["open-round", "closed-round"])
+def test_a_rostered_admission_cannot_rotate_until_its_round_closes(world: World, closed: bool):
+    # Given: one rotation applied, then a round that lists the admission.
+    first = rotation(world)
+    assert world.a.rotate(first, now=3).hotkey == OTHER.ss58
+    unclosed_round(world, closed=closed)
+    # Then: a retry of the applied rotation is still answered, whatever the round says ...
+    assert world.a.rotate(first, now=4).hotkey == OTHER.ss58
+    # ... and a new rotation is refused while the round is open, accepted once it is closed.
+    second = rotation(world, old=OTHER, new=THIRD, operation="44" * 32)
+    if closed:
+        assert world.a.rotate(second, now=5).hotkey == THIRD.ss58
+        return
+    with pytest.raises(AdmissionError, match="ROTATION_ROUND_OPEN"):
+        world.a.rotate(second, now=5)
+    assert world.a.store.by_id(world.admission).hotkey == OTHER.ss58
+
+
+def test_a_round_without_a_finality_record_keeps_the_rotation_and_the_bond_locked(world: World):
+    # Lens m2: an opening lists the admission and no finality record exists. Nothing writes that
+    # state (both records go in one transaction and none is deleted), so it fails closed.
+    world.bond()
+    unclosed_round(world, closed=False)
+    world.a.store.db.execute("DELETE FROM records_v2 WHERE kind='finality'")
+    with pytest.raises(AdmissionError, match="ROTATION_ROUND_OPEN"):
+        world.a.rotate(rotation(world), now=3)
+    with pytest.raises(AdmissionError, match="BOND_NOT_RELEASABLE"):
+        world.a.release_bond(world.admission, now=500)

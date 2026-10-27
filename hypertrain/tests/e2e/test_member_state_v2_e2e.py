@@ -11,6 +11,7 @@ import pytest
 import test_rollback_service_v2 as rollback
 
 from challenge.five_identity_network_v2 import five_identity_network
+from hypertrain.miner.admission import sign_rotation, sign_rotation_consent
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.messages import Finalize
 
@@ -52,6 +53,28 @@ def set_screen(n, hotkey, until):
         n.store._db.execute(
             "UPDATE admissions_v2 SET screen_until=? WHERE hotkey=?", (until, hotkey)
         )
+
+
+def rotate(n, index):
+    """The owner of identity `index` rotates it to the registered, never-joined referee key."""
+    run, hot, cold = n.manifest.run_id(), fixtures.HOT[index], fixtures.COLD[index]
+    request = sign_rotation_consent(
+        fixtures.REFEREE,
+        run_id=run,
+        coldkey=cold.ss58,
+        hotkey=hot.ss58,
+        operation_id="aa" * 32,
+        expires_beacon=10000,
+    )
+    return n.client.post(
+        n.url + f"/admission/{hot.ss58}/rotate", json=sign_rotation(cold, run, request, 10000)
+    )
+
+
+def hotkey_of(n, identity):
+    return n.store._db.execute(
+        "SELECT hotkey FROM admissions_v2 WHERE admission_id=?", (identity,)
+    ).fetchone()[0]
 
 
 def finalize(n, w, applied, members):
@@ -140,6 +163,26 @@ def test_four_members_cannot_lose_one_but_the_round_waits_for_it(n):
     # ... so the round resumes as soon as the member is eligible again.
     set_screen(n, four[3].ss58, 10**9)
     assert aggregate(n).status_code == 200
+
+
+def test_a_member_cannot_rotate_while_its_round_is_open(n):
+    # Given: round 0 audited, every verdict MATCH, and the fifth member's owner who would rotate.
+    hot = fixtures.HOT[4].ss58
+    identity = admission_id(n, hot)
+    rollback.execute_round(n, 0, aggregate=False)
+    # When / Then: the rotation is refused after the audits, and the aggregate still works ...
+    refused = rotate(n, 4)
+    assert (refused.status_code, "ROTATION_ROUND_OPEN" in refused.text) == (409, True)
+    applied = aggregate(n)
+    assert applied.status_code == 200, applied.text
+    # ... it is refused after the aggregate too, and the round settles with all five ...
+    refused = rotate(n, 4)
+    assert (refused.status_code, "ROTATION_ROUND_OPEN" in refused.text) == (409, True)
+    assert hotkey_of(n, identity) == hot
+    assert finalize(n, 0, applied.json(), fixtures.HOT).status_code == 200
+    # ... after which the owner may rotate.
+    assert rotate(n, 4).status_code == 200
+    assert hotkey_of(n, identity) == fixtures.REFEREE.ss58
 
 
 @pytest.mark.parametrize(("margin", "refused"), [(-1, True), (0, False)], ids=["short", "exact"])
