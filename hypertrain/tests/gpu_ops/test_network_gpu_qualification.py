@@ -8,6 +8,7 @@ import math
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -405,11 +406,20 @@ def test_result_without_capabilities_is_an_rtx_5090_record_only(tmp_path: Path) 
         driver.Result.model_validate_json(json.dumps(data))
 
 
+def torch_uuid(index: int) -> str:
+    """What torch prints for a device UUID: no `GPU-` prefix."""
+    return str(uuid.UUID(int=index + 1))
+
+
 def fake_cuda_host(
-    monkeypatch: pytest.MonkeyPatch, devices: list[tuple[tuple[int, int], int]]
+    monkeypatch: pytest.MonkeyPatch,
+    devices: list[tuple[tuple[int, int], int]],
+    uuids: list[str] | None = None,
 ) -> None:
     """Fake the image's torch/nvidia-smi probes; no GPU or subprocess is touched."""
     import torch  # After hypertrain.trainer configured determinism.
+
+    printed = uuids or [torch_uuid(i) for i in range(len(devices))]
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: len(devices))
@@ -417,7 +427,10 @@ def fake_cuda_host(
         torch.cuda,
         "get_device_properties",
         lambda i: SimpleNamespace(
-            major=devices[i][0][0], minor=devices[i][0][1], multi_processor_count=devices[i][1]
+            major=devices[i][0][0],
+            minor=devices[i][0][1],
+            multi_processor_count=devices[i][1],
+            uuid=printed[i],
         ),
     )
     monkeypatch.setattr(torch, "__file__", "/venv/main/torch/__init__.py")
@@ -443,6 +456,69 @@ def test_inspect_environment_records_capability_with_manifest_sm_count(
     # Then
     assert environment.capabilities == [capability] * 2
     assert environment.sm_counts == [sm_count] * 2
+
+
+def test_inspect_environment_records_one_distinct_uuid_per_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: two devices, torch printing their UUIDs without the nvidia-smi prefix.
+    cfg = seed_config(tmp_path, TREE / "experiments/gpu_network_v2/profile.json")
+    fake_cuda_host(monkeypatch, [(B300, 148)] * 2)
+    # When
+    environment = driver.inspect_environment(cfg, 2, 148)
+    # Then: the nvidia-smi form, in device order.
+    assert environment.gpu_uuids == [
+        "GPU-00000000-0000-0000-0000-000000000001",
+        "GPU-00000000-0000-0000-0000-000000000002",
+    ]
+
+
+@pytest.mark.parametrize("printed", ["not-a-uuid", "0000000g-0000-0000-0000-000000000001"])
+def test_inspect_environment_refuses_a_malformed_device_uuid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, printed: str
+) -> None:
+    # Given: a device whose UUID is not 36 hex digits in the 8-4-4-4-12 layout.
+    cfg = seed_config(tmp_path, TREE / "experiments/gpu_network_v2/profile.json")
+    fake_cuda_host(monkeypatch, [(B300, 148)] * 2, uuids=[torch_uuid(0), printed])
+    # When / Then
+    with pytest.raises(Reject, match="^qualification_gpu_uuid_malformed$"):
+        driver.inspect_environment(cfg, 2, 148)
+
+
+@pytest.mark.parametrize(
+    "gpu_uuids,match",
+    [
+        (["GPU-" + torch_uuid(0)] * 2, "must be distinct"),
+        (["GPU-" + torch_uuid(0)], "one GPU UUID per device"),
+        (["GPU-" + torch_uuid(i) for i in range(3)], "one GPU UUID per device"),
+        (
+            ["GPU-0A1B2C3D-0000-4000-8000-000000000001", "GPU-" + torch_uuid(1)],
+            "lowercase GPU-<uuid>",
+        ),
+        ([torch_uuid(0), torch_uuid(1)], "lowercase GPU-<uuid>"),
+    ],
+    ids=["duplicate", "fewer_than_devices", "more_than_devices", "uppercase", "no_prefix"],
+)
+def test_environment_refuses_duplicate_missing_or_malformed_uuids(
+    tmp_path: Path, gpu_uuids: list[str], match: str
+) -> None:
+    # Given: a two-device environment whose gpu_uuids are wrong.
+    data = json.loads(results(tmp_path)[0].read_bytes())["environment"]
+    data["gpu_uuids"] = gpu_uuids
+    # When / Then
+    with pytest.raises(ValidationError, match=match):
+        driver.Environment.model_validate(data)
+
+
+def test_legacy_result_bytes_are_unchanged(tmp_path: Path) -> None:
+    # Mutant guard, passes before this change: dropping exclude_if on gpu_uuids would add
+    # "gpu_uuids":null to every result written before the field existed and change its bytes.
+    # Given: result.json as written before the field existed.
+    data = json.loads(results(tmp_path)[0].read_bytes())
+    data["environment"].pop("gpu_uuids", None)
+    raw = json.dumps(data, separators=(",", ":")).encode()
+    # When / Then
+    assert driver.Result.model_validate_json(raw).model_dump_json().encode() == raw
 
 
 def test_inspect_environment_refuses_device_off_manifest_sm_count(

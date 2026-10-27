@@ -23,9 +23,16 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
+from hypertrain.gpu_ops.host_attest import GPU_UUID
 from hypertrain.gpu_ops.journal import durable_write, fsha
 from hypertrain.gpu_ops.launcher import Reject
-from hypertrain.miner.island_launch import confined, launch_argv, validate_artifacts
+from hypertrain.miner.island_launch import (
+    IslandFailure,
+    confined,
+    gpu_uuid,
+    launch_argv,
+    validate_artifacts,
+)
 from hypertrain.protocol.messages import Hex64, ImageDigest, Pos
 from hypertrain.protocol.messages_v2 import IslandJobV1, RunManifestV2
 
@@ -152,11 +159,26 @@ class Environment(Boundary):
         None, exclude_if=lambda v: v is None
     )
     image_digest: ImageDigest
+    # One nvidia-smi form UUID per device, in device order. None only in a result written before
+    # the field existed; it is omitted from JSON so such a result.json keeps its bytes.
+    gpu_uuids: list[str] | None = Field(None, exclude_if=lambda v: v is None)
 
     @model_validator(mode="after")
     def _one_driver_per_device(self) -> Environment:
         if len(self.drivers) != len(self.sm_counts):
             raise ValueError("driver/device count mismatch")
+        return self
+
+    @model_validator(mode="after")
+    def _one_distinct_uuid_per_device(self) -> Environment:
+        if self.gpu_uuids is None:
+            return self
+        if len(self.gpu_uuids) != len(self.sm_counts):
+            raise ValueError("gpu_uuids must hold one GPU UUID per device")
+        if not all(GPU_UUID.fullmatch(u) for u in self.gpu_uuids):
+            raise ValueError("gpu_uuids must be lowercase GPU-<uuid> strings")
+        if len(set(self.gpu_uuids)) != len(self.gpu_uuids):
+            raise ValueError("gpu_uuids must be distinct")
         return self
 
     @model_validator(mode="after")
@@ -336,6 +358,10 @@ def inspect_environment(cfg: Qualification, n_gpus: int, sm_count: int) -> Envir
     devices = [torch.cuda.get_device_properties(i) for i in range(n_gpus)]
     sm_counts = [d.multi_processor_count for d in devices]
     capabilities = [(d.major, d.minor) for d in devices]
+    try:
+        uuids = [gpu_uuid(d.uuid) for d in devices]
+    except (IslandFailure, ValueError) as exc:
+        raise Reject("qualification_gpu_uuid_malformed") from exc
     if any(s != sm_count for s in sm_counts):
         raise Reject("qualification_sm_profile_mismatch")
     reason = unqualified_device(capabilities, sm_counts)
@@ -352,6 +378,7 @@ def inspect_environment(cfg: Qualification, n_gpus: int, sm_count: int) -> Envir
             "sm_counts": sm_counts,
             "capabilities": capabilities,
             "image_digest": cfg.image_digest,
+            "gpu_uuids": uuids,
         }
     )
 
