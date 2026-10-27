@@ -8,6 +8,11 @@ Stdlib only, so the launcher, the preflight and the manifest model never import 
 
 from __future__ import annotations
 
+import functools
+import json
+import os
+import subprocess
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final
@@ -76,3 +81,31 @@ def divergence(live: Mapping[str, str], pin: EnvPin) -> dict[str, tuple[str | No
     }
     out.update({k: (None, live[k]) for k in pin.absent if k in live})
     return out
+
+
+class EnvPinUnhonorable(RuntimeError):
+    """This host cannot honor the pin: a process started under it was refused or never ran."""
+
+
+@functools.cache
+def require_honorable(pin: EnvPin) -> str:
+    """Let a child started under the pinned environment check the pin; return ATen's capability.
+
+    ATen reports what it resolved, and ignores a bogus or unsupported value silently, so a static
+    look at ``/proc/cpuinfo`` would duplicate its detection and could disagree. The parent never
+    imports torch. Cached per pin and process; a refusal is not cached.
+    """
+    argv = [sys.executable, "-m", "hypertrain.trainer.env_probe", json.dumps(pin.body())]
+    try:
+        done = subprocess.run(  # noqa: S603 - this interpreter, a fixed module, one JSON argument
+            argv, env=pinned_environ(os.environ, pin), capture_output=True, timeout=120, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise EnvPinUnhonorable(f"environment probe could not run: {error}") from error
+    if done.returncode != 0:
+        raise EnvPinUnhonorable(done.stderr[-1000:].decode(errors="replace").strip())
+    try:
+        return str(json.loads(done.stdout)["cpu_capability"])
+    except (ValueError, KeyError, TypeError) as error:
+        tail = done.stdout[-200:].decode(errors="replace")
+        raise EnvPinUnhonorable(f"environment probe gave no verdict: {tail!r}") from error

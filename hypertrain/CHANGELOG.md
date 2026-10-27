@@ -64,6 +64,9 @@
   repair workers and the in-process entry points (`train_round`, `train_island`,
   `train_unit_order`) refuse a process whose environment, or ATen capability, diverges from the
   pin, naming the variable; a pinned rank records `env_pin` in `summary.json`.
+  `python -m hypertrain.trainer.env_probe --manifest FILE` reports the environment a manifest pins
+  and checks that this host can honor it (`protocol.env_pins.require_honorable`: a child started
+  under the pinned environment, cached per process).
 
 ### Changed
 - A challenge poll after the deadline no longer suspends a miner whose proof was accepted
