@@ -65,8 +65,12 @@ def test_a_truncated_or_malformed_sums_file_is_refused(box, backup, cmd, cut, co
 @pytest.mark.parametrize(
     "unlisted", ["compose.relay.yml", "relay.json", "metagraph.json", "inspect-before.json"]
 )
-def test_rollback_refuses_a_file_it_would_use_that_the_sums_do_not_list(box, backup, unlisted):
-    (backup / unlisted).write_text("forged\n")
+@pytest.mark.parametrize("content", ["forged\n", ""], ids=["forged", "zero-byte"])
+def test_rollback_refuses_a_file_it_would_use_that_the_sums_do_not_list(
+    box, backup, unlisted, content
+):
+    # a zero-byte file is what a cut-short copy leaves: it is still a file the script would use
+    (backup / unlisted).write_text(content)
     (backup / "SHA256SUMS").write_text(without(lines(backup), unlisted))
     before = box.snapshot()
     assert f"{unlisted} is not listed" in box.run("rollback", backup, rc=4).out

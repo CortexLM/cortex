@@ -15,9 +15,11 @@ import pytest
 from .sandbox import (
     API,
     BEACON,
+    BEACON_ID,
     CHALLENGE,
     COMPOSE,
     EPOCH,
+    MASTER,
     NEW_ID,
     NEW_REF,
     OLD_ID,
@@ -41,10 +43,15 @@ DB_FILES = ("challenge.db", "server_keys.db")
 
 @pytest.mark.parametrize(
     "edit",
-    [lambda t: t + "\ncp x /data/other/y\n", lambda t: t.replace("/data/relay", "/relay")],
-    ids=["a new host path", "a path the rewrite expects is gone"],
+    [
+        lambda t: t + "\ncp x /data/other/y\n",
+        lambda t: t.replace("/data/relay", "/relay"),
+        lambda t: t.replace(API, "http://127.0.0.1:8000"),  # the production challenge port
+        lambda t: t.replace(MASTER, "http://127.0.0.1:8080"),
+    ],
+    ids=["a new host path", "a path the rewrite expects is gone", "API moved", "MASTER moved"],
 )
-def test_the_sandbox_refuses_a_script_whose_host_paths_it_does_not_cover(tmp_path, edit):
+def test_the_sandbox_refuses_a_script_whose_paths_or_addresses_it_does_not_pin(tmp_path, edit):
     with pytest.raises(AssertionError):
         sandboxed(edit(SCRIPT_TEXT), tmp_path)
 
@@ -55,6 +62,8 @@ GATE = {  # id: (seal arguments, exit code)
     "age-1800": ({"age": 1800}, 3),
     "age-1801": ({"age": 1801}, 3),
     "age-negative": ({"age": -1}, 3),
+    "age-half-a-second-in-the-future": ({"age": -0.5}, 3),
+    "age-just-over-1800": ({"age": 1800.001}, 3),
     "age-7200": ({"age": 7200}, 3),
     "sealed-false": ({"sealed": False}, 3),
     "sealed-one": ({"sealed": 1}, 3),
@@ -79,7 +88,7 @@ def test_a_closed_gate_refuses_before_any_change(box, backup, cmd, seal, rc):
     assert box.snapshot() == before
 
 
-@pytest.mark.parametrize("age", [0, 1799])
+@pytest.mark.parametrize("age", [0, 1799, 1799.5])
 def test_a_seal_younger_than_30_minutes_for_the_previous_epoch_opens_the_gate(box, backup, age):
     box.pull(NEW_REF)
     box.seal(age=age)
@@ -175,7 +184,7 @@ def test_swap_pins_the_new_image_and_recreates_only_the_challenge(box, backup):
     assert box.f.read_text() == COMPOSE.replace(pin, f"{pin}    image: {NEW_REF}\n")
     assert box.container(CHALLENGE)["Image"] == NEW_ID
     assert box.container(CHALLENGE)["Config"]["Image"] == NEW_REF
-    assert box.container(BEACON)["Image"] == OLD_ID
+    assert box.container(BEACON)["Image"] == BEACON_ID
     assert f"challenge {NEW_REF}" in out and "public runs sha" in out
     assert stat.S_IMODE(box.f.stat().st_mode) == 0o600
     assert not box.new.exists()
@@ -189,6 +198,7 @@ BAD_REFS = {
     "other-registry": f"registry.evil/{NEW_REF}",
     "newline-then-privileged": f"{NEW_REF}\n    privileged: true",
     "command-substitution": f"{NEW_REF}$(touch pwned)",
+    "dot-of-the-registry-is-literal": f"ghcrXio/cortexlm/cortex/hypertrain@{NEW_ID}",
 }
 
 
@@ -271,6 +281,24 @@ def test_beacon_retunes_exactly_the_pusher_and_a_second_run_is_refused(box, back
     assert box.f.read_text() == retuned and not box.new.exists()
 
 
+def test_beacon_refuses_a_compose_where_the_retune_would_change_more_than_the_pusher(box, backup):
+    # the master-stub carries the same two lines the sed rewrites: the diff then has 4 fields, not 2
+    stub = (
+        "    entrypoint:\n"
+        '      [python, -m, stub, --interval, "3",\n'
+        '       --catch-up, "20", --max-failures, "5"]\n'
+    )
+    pin = f"container_name: {STUB}\n"
+    live = COMPOSE.replace(pin, f"{pin}{stub}")
+    assert live != COMPOSE
+    box.f.write_text(live)
+    before = box.snapshot()
+    out = box.run("beacon", backup, rc=5).out
+    assert "unexpected compose change" in out and "services.master-stub.entrypoint" in out
+    assert box.f.read_text() == live
+    assert box.snapshot() == before and not box.new.exists()
+
+
 # --- paper ----------------------------------------------------------------------------------
 
 
@@ -295,6 +323,25 @@ def test_rollback_restores_the_compose_and_both_containers_with_the_gate_closed(
     out = box.run("rollback", backup, mutates={CHALLENGE, BEACON}).out
     assert box.f.read_bytes() == (backup / "compose.test.yml").read_bytes()
     assert box.container(CHALLENGE)["Image"] == OLD_ID and "public runs sha" in out
+
+
+def test_rollback_puts_the_challenge_back_on_the_image_its_own_entry_recorded(box, backup):
+    box.pull(NEW_REF)
+    box.run(*call("swap", backup), mutates={CHALLENGE})
+    recorded = {
+        c["Name"]: c["Image"] for c in json.loads((backup / "inspect-before.json").read_text())
+    }
+    # the two entries differ, so reading the wrong one cannot land on the right id by luck
+    assert (recorded[f"/{CHALLENGE}"], recorded[f"/{BEACON}"]) == (OLD_ID, BEACON_ID)
+    box.run("rollback", backup, mutates={CHALLENGE, BEACON})
+    assert box.container(CHALLENGE)["Image"] == recorded[f"/{CHALLENGE}"]
+
+
+def test_rollback_works_from_a_backup_directory_whose_path_has_a_space(box, golden):
+    spaced = box.seed_backup(golden, "T 1")
+    assert " " in str(spaced)
+    box.run("rollback", spaced, mutates={CHALLENGE, BEACON})
+    assert box.f.read_bytes() == (spaced / "compose.test.yml").read_bytes()
 
 
 @pytest.mark.parametrize(
@@ -356,6 +403,8 @@ def test_restore_db_keeps_the_live_dbs_aside_and_installs_the_backed_up_ones(box
     assert rows(live / "challenge.db") == ["original"]
     assert rows(live / "server_keys.db") == ["key-1"]
     assert sorted(p.name for p in live.iterdir()) == list(DB_FILES)
+    for n in DB_FILES:  # not pinned to a mode: only that group and others cannot write the DBs
+        assert stat.S_IMODE((live / n).stat().st_mode) & 0o022 == 0
     (stop, _, stopped), (start, _, started) = run.mutations
     assert (stop, start) == ("stop", "start")
     assert stopped["db"] == changed and "challenge.db-wal" in stopped["files"]

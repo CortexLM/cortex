@@ -8,10 +8,12 @@ on s100. The sandbox runs a COPY with only those path prefixes rewritten into a 
   with the container name it hit: the tests compare that set with the one the command may touch.
 - `curl`: a URL map (urls.json) for the master gate and the challenge API; unknown URLs fail.
 - `python3`: the real interpreter, with `datetime.now` frozen for the seal-window code.
-- `sleep` (no-op), `install` (without -o/-g, which need root), and tripwires for everything
-  else that could leave the sandbox (ssh, sudo, ...): a call is logged and exits 99. The fake docker
-  and curl log any invocation shape the script does not use the same way.
-No real docker, ssh, sudo or network is involved.
+- `sleep` (no-op), `install` (without -o/-g, which need root), and tripwires for exactly these
+  commands: ssh scp rsync sudo systemctl podman wget nvidia-smi. A call to one is logged and exits
+  99. Any other command that could reach out (nc, git, gh, /dev/tcp, python urllib) is NOT
+  intercepted: the script uses none of them, and a new one must be reviewed, not assumed caught.
+  The fake docker and curl log any invocation shape the script does not use the same way.
+The shims come first on a PATH of /usr/bin:/bin; the real docker and curl are never reached.
 """
 
 from __future__ import annotations
@@ -36,25 +38,23 @@ CHALLENGE, BEACON, STUB, RELAY = (
 TEST_NAMES = frozenset(
     {CHALLENGE, BEACON, STUB, RELAY, *(f"hypertrain-test-auditor-{i}" for i in (0, 1))}
 )
+# Containers the script must never touch: they exist in the fixture so that a call that hits one is
+# recorded, and the census (mutated set <= TEST_NAMES) fails on it. The auditors and the executor
+# are the ones the runbook says never to restart.
 PROD_NAMES = (
-    "hypertrain-beacon cortex-challenge-hypertrain hypertrain-auditor-go-0 cortex-master-1".split()
+    "hypertrain-beacon cortex-challenge-hypertrain hypertrain-auditor-go-0 cortex-master-1 "
+    "hypertrain-auditor-0 hypertrain-auditor-1 executor-executor-1".split()
 )
 REPO = "ghcr.io/cortexlm/cortex/hypertrain"
-OLD_ID, NEW_ID, OTHER_ID = (f"sha256:{c * 32}" for c in ("0a", "1b", "0c"))
+OLD_ID, NEW_ID, OTHER_ID, BEACON_ID = (f"sha256:{c * 32}" for c in ("0a", "1b", "0c", "2d"))
 OLD_REF, NEW_REF = f"{REPO}@{OLD_ID}", f"{REPO}@{NEW_ID}"
 NOW, EPOCH = "2026-10-27T12:00:00+00:00", 1000
 SECRET = "env-value-that-must-never-reach-a-backup"
 SCRIPT_TEXT = SCRIPT.read_text()
-
-
-def _assigned(name: str) -> str:
-    """The URL the script assigns to `name`, so the tests do not repeat the address."""
-    found = re.search(rf"\b{name}=(http://[^\s;]+)", SCRIPT_TEXT)
-    assert found, f"{name}= is gone from the script: update the sandbox"
-    return found[1]
-
-
-MASTER, API = _assigned("MASTER"), _assigned("API")
+# Pinned here, not read from the script: the expected URLs must not follow an edit of the script.
+# API is the TEST challenge port (docs/s100-test-stack.md); MASTER is the production master the
+# gate reads. `sandboxed` fails when the script assigns anything else.
+API, MASTER = "http://127.0.0.1:18996", "http://10.177.245.39:8080"
 
 COMPOSE = f"""\
 name: hypertrain-test
@@ -117,7 +117,10 @@ def services(path):
     import yaml
     if not os.path.isabs(path) or not os.path.exists(path):
         done(1, "no configuration file provided: " + path)
-    svcs = yaml.safe_load(open(path))["services"]
+    try:
+        svcs = yaml.safe_load(open(path))["services"]
+    except (yaml.YAMLError, KeyError, TypeError) as e:
+        done(1, "invalid compose file %s: %s" % (path, str(e).replace("\n", " ")))
     for name, spec in svcs.items():
         if "image" not in spec:
             done(1, "service %s has neither an image nor a build context" % name)
@@ -175,12 +178,13 @@ elif a[:2] == ["image", "inspect"] and len(a) == 5 and a[3:] == ["--format", "{{
         done(1, "Error: No such image: " + a[2])
     print(st["images"][a[2]])
 elif a[0] in ("stop", "start", "restart") and len(a) == 2:
+    mutate(a[0], a[1])  # recorded first: a call that fails is still a call the script made
     if a[1] not in st["containers"]:
+        open(D + "/tripwire.log", "a").write("docker %s: unknown container\n" % " ".join(a))
         done(1, "Error response from daemon: No such container: " + a[1])
-    mutate(a[0], a[1])
     st["containers"][a[1]]["State"]["Status"] = "exited" if a[0] == "stop" else "running"
     print(a[1])
-elif a[:2] == ["logs", "--since"] and len(a) == 4 and a[2] == "25s":
+elif a[:2] == ["logs", "--since"] and len(a) == 4 and a[2:] == ["25s", "hypertrain-test-beacon"]:
     print(st["logs"])
 else:  # logged as well as refused: a script that swallows the exit code is still caught
     open(D + "/tripwire.log", "a").write("docker " + " ".join(a) + "\n")
@@ -270,7 +274,14 @@ SHIMS = {
 
 
 def sandboxed(text: str, root: Path) -> str:
-    """The script with its host paths moved under root; a path it no longer covers fails loudly."""
+    """The script with its host paths moved under root; a path it no longer covers fails loudly,
+    and so does an API or MASTER address other than the pinned ones."""
+    for name, pinned in (("API", API), ("MASTER", MASTER)):
+        found = re.search(rf"\b{name}=(http://[^\s;]+)", text)
+        assert found and found[1] == pinned, (
+            f"the script assigns {name}={found and found[1]}, the sandbox pins {pinned}: "
+            "if the address changed on purpose, update API/MASTER in sandbox.py deliberately"
+        )
     for prefix in ("/root/backups", "/data/hypertrain-test", "/data/relay"):
         assert prefix in text, f"{prefix} is gone from the script: update the sandbox rewrite"
         text = text.replace(prefix, f"{root}{prefix}")
@@ -343,7 +354,9 @@ class Box:
         make_db(self.state_dir / "server_keys.db", ("key-1",))
         self.relay_json.write_text('{"run": "r1"}\n')
         self.stub_json.write_text('{"hotkeys": {}, "netuid": 100}\n')
-        up = {n: OLD_ID for n in (CHALLENGE, BEACON)} | dict.fromkeys(
+        # the beacon runs another image id than the challenge, so a rollback that read the wrong
+        # entry of inspect-before.json is caught
+        up = {CHALLENGE: OLD_ID, BEACON: BEACON_ID} | dict.fromkeys(
             (STUB, RELAY, *PROD_NAMES), OTHER_ID
         )
         self._write(
@@ -414,11 +427,11 @@ class Box:
     def b(self, ts: str = "T1") -> Path:
         return self.t.parent / f"hypertrain-test-s7-{ts}"
 
-    def seed_backup(self, golden: Path) -> Path:
+    def seed_backup(self, golden: Path, ts: str = "T1") -> Path:
         """A backup dir: the files `backup` wrote in the golden sandbox, copied here."""
-        shutil.copytree(golden, self.b(), copy_function=shutil.copy2)
-        self.b().chmod(0o700)
-        return self.b()
+        shutil.copytree(golden, self.b(ts), copy_function=shutil.copy2)
+        self.b(ts).chmod(0o700)
+        return self.b(ts)
 
     def reseal(self, backup: Path) -> None:
         """Rewrite SHA256SUMS for the files now in the backup: a checksum-consistent forgery."""

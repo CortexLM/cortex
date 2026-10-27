@@ -67,6 +67,29 @@ def test_a_compose_naming_a_container_outside_the_test_stack_is_refused(
     assert box.snapshot() == before
 
 
+NEAR_MISSES = ["hypertrain-test-auditor-2", "hypertrain-test-challenge-1", "Hypertrain-Test-Beacon"]
+
+
+@pytest.mark.parametrize("service", ["beacon", "master-stub"])
+@pytest.mark.parametrize("name", NEAR_MISSES)
+def test_a_name_one_token_from_a_test_name_is_refused(box, backup, service, name):
+    # master-stub is checked against the six names only; beacon must also be exactly its own
+    box.f.write_text(named(service, name))
+    before = box.snapshot()
+    out = box.run("beacon", backup, rc=4).out
+    assert f"service {service} names container {name}" in out
+    assert box.snapshot() == before
+
+
+@pytest.mark.parametrize("cmd", ["rollback", "paper"])
+def test_a_backup_compose_that_does_not_parse_is_refused_with_4(box, backup, cmd):
+    (backup / "compose.test.yml").write_text("services:\n  challenge: [unclosed\n")
+    box.reseal(backup)  # the checksums agree: only the compose check can refuse it
+    before = box.snapshot()
+    box.run(cmd, backup, rc=4)
+    assert box.snapshot() == before
+
+
 def test_all_six_test_names_are_accepted(box, backup):
     extra = "".join(
         f"  {n}:\n    <<: *common\n    container_name: hypertrain-test-{n}\n"
