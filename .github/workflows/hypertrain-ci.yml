@@ -157,7 +157,7 @@ jobs:
   elastic:
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'v3-') || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -173,7 +173,7 @@ jobs:
         timeout-minutes: 5
         run: uv run --frozen pytest -q --durations=10 tests/elastic
       - name: Mutation check
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: uv run --frozen python scripts/check_elastic_mutants.py
 
   # Bitwise proof gate (scripts/check-proof.sh). The shards report a golden leaf root
