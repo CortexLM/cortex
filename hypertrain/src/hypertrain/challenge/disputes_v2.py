@@ -37,6 +37,14 @@ class DisputeError(ValueError):
         super().__init__(code)
 
 
+# Evidence tags of a closure without referee; the first one is what exclude() always wrote.
+EXCLUSION_HORIZON = "bounded-infrastructure-exclusion"
+EXCLUSION_FROZEN = "unadjudicable-paused-transcript"
+EXCLUSION_ABANDONED = "abandoned-turn"
+# Multiples of T.dispute_per_level left after turn_deadline to the witnessed timeout().
+ABANDONMENT_GRACE = 1
+
+
 class Contest(WireModel):
     """L0 derives this from an authorized accepted verdict, never an HTTP body."""
 
@@ -87,6 +95,11 @@ class Turn(WireModel):
     reassignments: StrictInt = 0
     resolution: ResolutionV2 | None = None
     resolved_beacon: StrictInt | None = None
+
+    @property
+    def at_final_op(self) -> bool:
+        """A single op is left: the one paused shape on which referee_v2 can convict."""
+        return self.level == "op" and self.interval[1] - self.interval[0] == 1
 
 
 class WatchEvent(WireModel):
@@ -196,6 +209,34 @@ class DisputesV2:
         if row is None:
             raise DisputeError("UNKNOWN_DISPUTE")
         return Turn.model_validate_json(row[0])
+
+    def unresolved(self) -> list[Turn]:
+        return [
+            Turn.model_validate_json(row[0])
+            for row in self.db.execute(
+                "SELECT turn FROM disputes_v2 WHERE json_extract(turn,'$.resolution') IS NULL "
+                "ORDER BY id"
+            )
+        ]
+
+    def blocked_cause(self, turn: Turn, now: int) -> str | None:
+        """Evidence tag when no party and no referee can still decide this open turn.
+
+        Past the horizon (now > absolute_deadline, the last round resolution() accepts) everything
+        is closable. Before it, a paused turn off the final op is a dead end referee_v2 cannot
+        score, and an unpaused turn whose expected party has not moved ABANDONMENT_GRACE times
+        T.dispute_per_level rounds after turn_deadline has only the operator's witnessed
+        timeout() window behind it. A paused turn on the final op stays with the referee until
+        the horizon.
+        """
+        if turn.resolution is not None:
+            return None
+        if now > turn.absolute_deadline:
+            return EXCLUSION_HORIZON
+        if turn.paused:
+            return None if turn.at_final_op else EXCLUSION_FROZEN
+        grace = ABANDONMENT_GRACE * self.escrow.manifest.training.verify.T.dispute_per_level
+        return EXCLUSION_ABANDONED if now > turn.turn_deadline + grace else None
 
     def _save(self, turn: Turn) -> None:
         self.db.execute(
@@ -779,7 +820,7 @@ class DisputesV2:
         self.notify()
         return turn
 
-    def exclude(self, dispute_id: str, *, now: int) -> Turn:
+    def exclude(self, dispute_id: str, *, now: int, cause: str = EXCLUSION_HORIZON) -> Turn:
         """Absolute exhaustion or infrastructure exclusion; no claimant loses collateral."""
         with self.escrow.tx():
             turn = self.get(dispute_id)
@@ -795,7 +836,7 @@ class DisputesV2:
                 predecessor_hash="0" * 64,
                 inputs_hash="0" * 64,
                 output_hash="0" * 64,
-                op_spec="bounded-infrastructure-exclusion",
+                op_spec=cause,
             )
             self.register_evidence(evidence)
             turn = turn.model_copy(
