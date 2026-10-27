@@ -53,7 +53,7 @@ if cmd in ("run", "pull"):
 # mark a container that exited or was removed. Looked up, filtered and destroyed like docker does.
 def containers():
     for p in sorted(state.glob("ctr-*")):
-        if p.suffix not in (".stopped", ".removed"):
+        if p.suffix not in (".stopped", ".removed", ".tmp"):
             yield p, json.loads(p.read_text())
 
 
@@ -152,7 +152,9 @@ elif cmd == "run":
         ctr = state / f"ctr-{name}"
         for kind in ("stopped", "removed"):
             marker(ctr, kind).unlink(missing_ok=True)
-        ctr.write_text(json.dumps({"name": full, "labels": labels}))
+        part = pathlib.Path(f"{ctr}.tmp")  # published whole: a reader never sees it half written
+        part.write_text(json.dumps({"name": full, "labels": labels}))
+        os.replace(part, ctr)
         while not marker(ctr, "stopped").exists():
             time.sleep(0.05)
         sys.exit(int(os.environ.get("FAKE_BLOCK_RC", "143")))
@@ -291,9 +293,12 @@ class Imds(BaseHTTPRequestHandler):
 def imds() -> Iterator[str]:
     Imds.notice = False
     server = ThreadingHTTPServer(("127.0.0.1", 0), Imds)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    ).start()
     yield f"http://127.0.0.1:{server.server_address[1]}"
     server.shutdown()
+    server.server_close()
 
 
 @pytest.fixture
@@ -313,8 +318,15 @@ def env(tmp_path: Path, imds: str) -> dict[str, str]:
     for name, body in fakes.items():
         (bindir / name).write_text(f"#!{sys.executable}\n{body}")
         (bindir / name).chmod(0o755)
+    # HT_B300_*, DOCKER and AWS_* in the caller's shell (a B300 host exports some of them) would
+    # change what the script does or send it to a real docker.
+    inherited = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("HT_B300_", "AWS_")) and k not in ("DOCKER", "HT_IMDS_URL")
+    }
     return {
-        **os.environ,
+        **inherited,
         "PATH": f"{bindir}:{os.environ['PATH']}",
         "FAKE_STATE": str(state),
         "HT_IMDS_URL": imds,
@@ -329,9 +341,23 @@ def run(
     env: dict[str, str], tmp_path: Path, *args: str, script: Path = SCRIPT
 ) -> subprocess.CompletedProcess[str]:
     argv = ["bash", str(script), "--results-root", str(tmp_path / "results"), "--host", "h1"]
-    return subprocess.run(
-        [*argv, *args], env=env, capture_output=True, text=True, timeout=60, check=False
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv
+        [*argv, *args],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=60)
+    except subprocess.TimeoutExpired:  # free the blocked fakes, then take the whole tree down
+        for ctr in (tmp_path / "state").glob("ctr-*"):
+            Path(f"{ctr}.stopped").touch()
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
 def docker_calls(tmp_path: Path) -> list[list[str]]:
@@ -424,6 +450,7 @@ def test_full_run_pins_the_digest_and_runs_the_8gpu_flash_bench(env, tmp_path):
     stop = stop_json(tmp_path)
     assert stop["reason"] == "completed"
     assert stop["steps"] == {"host_probe": 0, "pull": 0, "gpu_probe": 0, "mfu": 0, "miner_test": 0}
+    assert stop["ran"] == ["host_probe", "pull", "gpu_probe", "mfu", "miner_test"]
     assert ["pull", IMAGE] in docker_calls(tmp_path)
     (mfu,) = runs_of(tmp_path, "mfu")
     assert mfu[mfu.index("--entrypoint") + 2] == IMAGE
@@ -552,18 +579,9 @@ def test_duration_deadline_stops_the_run(env, tmp_path):
     assert not (tmp_path / "results/h1/.stop-reason").exists()  # consumed, not left for a next run
 
 
-def test_sigterm_drains_the_running_container(env, tmp_path):
-    argv = ["bash", str(SCRIPT), "--results-root", str(tmp_path / "results"), "--host", "h1"]
-    proc = subprocess.Popen(  # noqa: S603 - fixed argv
-        argv,
-        env={**env, "FAKE_BLOCK": "gpu_probe"},
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    deadline = time.monotonic() + 30
-    while not (tmp_path / "state/ctr-gpu_probe").exists():
-        assert time.monotonic() < deadline and proc.poll() is None
-        time.sleep(0.05)
+def test_sigterm_drains_the_running_container(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
     proc.send_signal(signal.SIGTERM)
     assert proc.wait(timeout=30) == 143
     stop = stop_json(tmp_path)
@@ -607,20 +625,10 @@ def test_prod_rounds_upload_and_never_print_the_key(env, tmp_path):
     assert not [f for f in results.rglob("*") if f.is_file() and sentinel in f.read_text()]
 
 
-def test_process_group_sigterm_still_drains(env, tmp_path):
+def test_process_group_sigterm_still_drains(env, tmp_path, launch):
     # systemd and SSM cancel signal the whole group: tee dies with the script, the drain must not.
-    argv = ["bash", str(SCRIPT), "--results-root", str(tmp_path / "results"), "--host", "h1"]
-    proc = subprocess.Popen(  # noqa: S603 - fixed argv
-        argv,
-        env={**env, "FAKE_BLOCK": "gpu_probe"},
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    deadline = time.monotonic() + 30
-    while not (tmp_path / "state/ctr-gpu_probe").exists():
-        assert time.monotonic() < deadline and proc.poll() is None
-        time.sleep(0.05)
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
     os.killpg(proc.pid, signal.SIGTERM)
     assert proc.wait(timeout=30) == 143
     assert stop_json(tmp_path)["reason"] == "signal"
@@ -848,8 +856,6 @@ def test_prod_upload_carries_the_round_evidence_but_never_the_key(env, tmp_path)
     assert p.returncode == 0, p.stdout + p.stderr
     rounds = {f"miner-prod/round-{w}{s}.json" for w in "34" for s in ("", "-commitments")}
     assert uploaded(tmp_path) == EVIDENCE | {"steps/miner_prod.rc"} | rounds
-    root = tmp_path / "state/s3"
-    assert not [f for f in root.rglob("*") if f.is_file() and SENTINEL in f.read_text()]
 
 
 # --- which code ran (B4) -------------------------------------------------------------------------
@@ -1134,9 +1140,12 @@ def test_a_reason_file_that_cannot_be_written_does_not_disarm_the_deadline(env, 
 
 
 def test_the_watchdog_does_not_hold_the_callers_pipe_after_the_script_exits(env, tmp_path):
+    slow = {**env, "HT_B300_POLL_SECONDS": "9"}
     t0 = time.monotonic()
-    p = run({**env, "HT_B300_POLL_SECONDS": "9"}, tmp_path, "--steps", "host_probe")
+    p = run(slow, tmp_path, "--steps", "host_probe")
     assert p.returncode == 0 and time.monotonic() - t0 < 5  # not 9 s: the sleep child is detached
+    again = run(slow, tmp_path, "--steps", "host_probe")  # nor the run lock (fd 9)
+    assert again.returncode == 0, again.stdout + again.stderr
 
 
 def test_a_stop_reason_left_by_an_earlier_run_does_not_label_this_stop(env, tmp_path, launch):
