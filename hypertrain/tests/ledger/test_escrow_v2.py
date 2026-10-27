@@ -231,7 +231,7 @@ def fund(e: EscrowV2) -> tuple[str, str]:
     ah = genesis_allocation_hash(alloc)
     origins = [
         OriginAllocation(
-            origin_id=genesis_origin_id(e.run_id, ah, i), owner=h, units=u, mature_at=m
+            origin_id=genesis_origin_id(e.run_id, ah, i, ID_KEY), owner=h, units=u, mature_at=m
         )
         for i, (h, u, m) in enumerate(alloc)
     ]
@@ -370,7 +370,7 @@ def test_immature_origin_cannot_lock(tmp_path: Path) -> None:
     assert ah is not None
     origins = [
         OriginAllocation(
-            origin_id=genesis_origin_id(e.run_id, ah, i), owner=h, units=u, mature_at=m
+            origin_id=genesis_origin_id(e.run_id, ah, i, ID_KEY), owner=h, units=u, mature_at=m
         )
         for i, (h, u, m) in enumerate([(COLD.ss58, 20000, 1), (OTHER.ss58, 10000, 1)])
     ]
@@ -399,7 +399,7 @@ def test_genesis_rejects_when_authority_or_mode_wrong(tmp_path: Path, fault: str
     ah = genesis_allocation_hash([(COLD.ss58, 20000, 1), (OTHER.ss58, 10000, 1)])
     origins = [
         OriginAllocation(
-            origin_id=genesis_origin_id(e.run_id, ah, i), owner=h, units=u, mature_at=m
+            origin_id=genesis_origin_id(e.run_id, ah, i, ID_KEY), owner=h, units=u, mature_at=m
         )
         for i, (h, u, m) in enumerate([(COLD.ss58, 20000, 1), (OTHER.ss58, 10000, 1)])
     ]
@@ -551,7 +551,7 @@ def test_second_genesis_rejects_conflicting_allocation(tmp_path: Path) -> None:
     assert ah is not None
     origins = [
         OriginAllocation(
-            origin_id=genesis_origin_id(e.run_id, ah, i), owner=h, units=u, mature_at=m
+            origin_id=genesis_origin_id(e.run_id, ah, i, ID_KEY), owner=h, units=u, mature_at=m
         )
         for i, (h, u, m) in enumerate([(COLD.ss58, 20001, 1), (OTHER.ss58, 9999, 1)])
     ]
@@ -706,7 +706,7 @@ def actual_reward(
     )
     origins = [
         OriginAllocation(
-            origin_id=reward_origin_id(s.manifest.run_id(), 0, HOT.ss58, digest(final)),
+            origin_id=reward_origin_id(s.manifest.run_id(), 0, HOT.ss58, digest(final), ID_KEY),
             owner=COLD.ss58,
             units=1_000_000,
             mature_at=20,
@@ -782,7 +782,7 @@ def sign_actual_shadow(
     reward: RewardFinalize, binding: ShadowReservationV1
 ) -> ShadowRewardFinalizeV1:
     origin = OriginAllocation(
-        origin_id=shadow_origin_id(binding),
+        origin_id=shadow_origin_id(binding, ID_KEY),
         owner=binding.coldkey,
         units=reward.budget_units,
         mature_at=binding.mature_at,

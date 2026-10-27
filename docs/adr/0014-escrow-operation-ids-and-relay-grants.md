@@ -356,8 +356,10 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
 - `implementation_hash`: it **changes**, once, because of Part 1.9 (the reward's origin list is built in
   `finalize_v2`, one of the 28). Everything else in Parts 1 to 7 stays outside the 28 and the 10 files. A
   stored `service-admission` record then fails `SERVICE_PROFILE_AUTHORITY` until the run is re-bootstrapped,
-  the same consequence ADR 0011 states for its own edits of hashed functions; the base value is
-  `02e208a3…89cc`, the new value is measured by the commit that changes it and stated in the report.
+  the same consequence ADR 0011 states for its own edits of hashed functions. Measured with
+  `ChallengeStore._service_implementation_v2`: `02e208a3…89cc` on the base and after the key space and the
+  typed settlement; `20e0333c…53ac` after the keyed origin ids; later commits that touch one of the 28 will
+  say so.
 - Schema: no table, column or key changes. One partial index is created if absent.
 - Compatibility: new server events carry a new key and new hashes, new origins new ids; old chains verify
   unchanged and are forward-only for the first new server event (an older image then fails closed with an

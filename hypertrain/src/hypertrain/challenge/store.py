@@ -8256,7 +8256,7 @@ class ChallengeStore:
 
     def finalize_v2(self, run_id: str, w: int, raw: bytes) -> dict[str, Any]:
         from hypertrain.challenge.finality_v2 import RoundStatus, settle
-        from hypertrain.ledger.escrow_v2 import RewardWork, authority_message, reward_origin_id
+        from hypertrain.ledger.escrow_v2 import RewardWork, authority_message
         from hypertrain.protocol.messages_v2 import RewardFinalize
 
         with self._tx():
@@ -8364,7 +8364,7 @@ class ChallengeStore:
                 units[hot] += 1
             origins = [
                 {
-                    "origin_id": reward_origin_id(run_id, w, h, final_hash),
+                    "origin_id": escrow.reward_origin(w, h, final_hash),
                     "owner": self._owner_v2(run_id, h),
                     "units": units[h],
                     "mature_at": vesting,

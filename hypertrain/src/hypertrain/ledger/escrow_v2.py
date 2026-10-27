@@ -91,25 +91,32 @@ def genesis_allocation_hash(allocations: Sequence[tuple[str, int, int]]) -> str:
     return sha256_hex(canonicalize([list(a) for a in allocations], allow_float=False))
 
 
-def genesis_origin_id(run_id: str, allocation_hash: str, index: int) -> str:
-    return sha256_hex(f"ht-origin-genesis-v2|{run_id}|{allocation_hash}|{index}".encode())
+def derived_id(id_key: bytes, preimage: str) -> str:
+    """An id the service derives from public values, keyed so that nobody else can compute it."""
+    return hmac.digest(id_key, preimage.encode(), "sha256").hex()
 
 
-def bootstrap_origin_id(run_id: str, allocation_hash: str, index: int) -> str:
-    return sha256_hex(f"ht-origin-bootstrap-v1|{run_id}|{allocation_hash}|{index}".encode())
+def genesis_origin_id(run_id: str, allocation_hash: str, index: int, id_key: bytes) -> str:
+    return derived_id(id_key, f"ht-origin-genesis-v2|{run_id}|{allocation_hash}|{index}")
 
 
-def reward_origin_id(run_id: str, w: int, hotkey: str, finalize_hash: str) -> str:
-    return sha256_hex(f"ht-origin-reward-v2|{run_id}|{w}|{hotkey}|{finalize_hash}".encode())
+def bootstrap_origin_id(run_id: str, allocation_hash: str, index: int, id_key: bytes) -> str:
+    return derived_id(id_key, f"ht-origin-bootstrap-v1|{run_id}|{allocation_hash}|{index}")
 
 
-def shadow_origin_id(reservation: ShadowReservationV1) -> str:
-    return sha256_hex(
-        (
-            f"ht-origin-shadow-v1|{reservation.run_id}|{reservation.shadow_ordinal}|"
-            f"{reservation.trial_epoch}|{reservation.hotkey}|{reservation.finalize_hash}"
-        ).encode()
+def reward_origin_id(run_id: str, w: int, hotkey: str, finalize_hash: str, id_key: bytes) -> str:
+    return derived_id(id_key, f"ht-origin-reward-v2|{run_id}|{w}|{hotkey}|{finalize_hash}")
+
+
+def shadow_origin_preimage(reservation: ShadowReservationV1) -> str:
+    return (
+        f"ht-origin-shadow-v1|{reservation.run_id}|{reservation.shadow_ordinal}|"
+        f"{reservation.trial_epoch}|{reservation.hotkey}|{reservation.finalize_hash}"
     )
+
+
+def shadow_origin_id(reservation: ShadowReservationV1, id_key: bytes) -> str:
+    return derived_id(id_key, shadow_origin_preimage(reservation))
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,9 +314,17 @@ class EscrowV2:
             raise EscrowError("ID_KEY_REQUIRED")
         return SERVER_SCOPE + hmac.digest(self.id_key, operation_id.encode(), "sha256").hex()
 
-    def _existing(
-        self, operation_id: str, request: str, *, server: bool = False
-    ) -> EscrowReceipt | None:
+    def _origin_key(self) -> bytes:
+        """Key of the origin ids this ledger issues; a verifier without it issues none."""
+        if self.id_key is None:
+            raise EscrowError("ID_KEY_REQUIRED")
+        return self.id_key
+
+    def reward_origin(self, w: int, hotkey: str, finalize_hash: str) -> str:
+        """Origin id of a live reward as this ledger issues it (keyed)."""
+        return reward_origin_id(self.run_id, w, hotkey, finalize_hash, self._origin_key())
+
+    def _existing(self, operation_id: str, request: str, *, server: bool) -> EscrowReceipt | None:
         row = self.db.execute(
             "SELECT request,receipt FROM escrow_events WHERE operation_id=?",
             (self._key(operation_id, server),),
@@ -328,7 +343,7 @@ class EscrowV2:
         return EscrowReceipt.model_validate_json(row["receipt"])
 
     def _event(
-        self, operation_id: str, kind: str, request: str, owner: str, *, server: bool = False
+        self, operation_id: str, kind: str, request: str, owner: str, *, server: bool
     ) -> EscrowReceipt:
         key = self._key(operation_id, server)
         self._conservation()
@@ -396,7 +411,9 @@ class EscrowV2:
             ):
                 raise EscrowError("GENESIS_ALLOCATION")
             for i, o in enumerate(genesis.origins):
-                if o.origin_id != genesis_origin_id(self.run_id, genesis.allocation_hash, i):
+                if o.origin_id != genesis_origin_id(
+                    self.run_id, genesis.allocation_hash, i, self._origin_key()
+                ):
                     raise EscrowError("GENESIS_ORIGIN_DOMAIN")
                 self._issue(o, None, None)
             return self._event(
@@ -438,7 +455,9 @@ class EscrowV2:
             ):
                 raise EscrowError("TOTAL_ISSUANCE_BUDGET")
             for i, o in enumerate(bootstrap.origins):
-                if o.origin_id != bootstrap_origin_id(self.run_id, bootstrap.allocation_hash, i):
+                if o.origin_id != bootstrap_origin_id(
+                    self.run_id, bootstrap.allocation_hash, i, self._origin_key()
+                ):
                     raise EscrowError("BOOTSTRAP_ORIGIN_DOMAIN")
                 self._issue(o, None, None)  # hotkey NULL: payable() never emits these units
             return self._event(
@@ -578,9 +597,11 @@ class EscrowV2:
         origins = tuple(
             OriginAllocation(
                 origin_id=(
-                    shadow_origin_id(reservation)
+                    shadow_origin_id(reservation, self._origin_key())
                     if reservation is not None
-                    else reward_origin_id(self.run_id, reward.w, h, reward.finalize_hash)
+                    else reward_origin_id(
+                        self.run_id, reward.w, h, reward.finalize_hash, self._origin_key()
+                    )
                 ),
                 owner=work[h][0],
                 units=units[h],
@@ -777,7 +798,7 @@ class EscrowV2:
             match reward:
                 case ShadowRewardFinalizeV1():
                     binding = self._shadow_reservation(reward)
-                    by_origin = {shadow_origin_id(binding): binding.hotkey}
+                    by_origin = {shadow_origin_id(binding, self._origin_key()): binding.hotkey}
                 case RewardFinalize():
                     by_origin = {
                         reward_origin_id(
@@ -785,6 +806,7 @@ class EscrowV2:
                             reward.w,
                             CommitV2.model_validate(item.commit.body).hotkey,
                             reward.finalize_hash,
+                            self._origin_key(),
                         ): CommitV2.model_validate(item.commit.body).hotkey
                         for item in evidence.works
                     }
@@ -870,7 +892,7 @@ class EscrowV2:
             left -= take
 
     def _owner_operation(
-        self, op: EscrowOperation, signer: str, *, server: bool = False
+        self, op: EscrowOperation, signer: str, *, server: bool
     ) -> EscrowReceipt | None:
         if signer != op.owner:
             raise EscrowError("OWNER_AUTHORITY")
@@ -878,20 +900,24 @@ class EscrowV2:
 
     def lock(self, op: EscrowLock, *, signer: str) -> EscrowReceipt:
         with self.tx():
-            old = self._owner_operation(op, signer)
+            old = self._owner_operation(op, signer, server=False)
             if old is not None:
                 return old
             bucket = "admission_locked" if op.kind == "LOCK_ADMISSION" else "dispute_locked"
             self._move(op, "available", bucket, destination_ref=op.operation_id)
-            return self._event(op.operation_id, op.kind, op.model_dump_json(), op.owner)
+            return self._event(
+                op.operation_id, op.kind, op.model_dump_json(), op.owner, server=False
+            )
 
     def transfer(self, op: EscrowTransfer, *, signer: str) -> EscrowReceipt:
         with self.tx():
-            old = self._owner_operation(op, signer)
+            old = self._owner_operation(op, signer, server=False)
             if old is not None:
                 return old
             self._move(op, "available", "available", recipient=op.recipient)
-            return self._event(op.operation_id, "TRANSFER", op.model_dump_json(), op.owner)
+            return self._event(
+                op.operation_id, "TRANSFER", op.model_dump_json(), op.owner, server=False
+            )
 
     def mature(
         self, operation_id: str, origin_ids: tuple[str, ...], now_beacon: int
@@ -1194,7 +1220,7 @@ class EscrowV2:
                 digest(binding) != row["reservation_hash"]
                 or binding.finalize_hash != row["finalize_hash"]
                 or binding.trial_epoch != row["trial_epoch"]
-                or shadow_origin_id(binding) != row["origin"]
+                or not self._shadow_origin_is(binding, row["origin"])
                 or data["accepted"] is None
             ):
                 raise EscrowError("SHADOW_PERSISTED_BINDING")
@@ -1243,6 +1269,17 @@ class EscrowV2:
         if last_state is not None and last_state != self._snapshot():
             raise EscrowError("PERSISTED_STATE_MISMATCH")
         self._conservation()
+
+    def _shadow_origin_is(self, binding: ShadowReservationV1, origin: str) -> bool:
+        """Whether `origin` is this reservation's origin id (keyed, or unkeyed if issued earlier).
+
+        A verifier without the id key can check the shape of a keyed id only.
+        """
+        if origin == sha256_hex(shadow_origin_preimage(binding).encode()):
+            return True
+        if self.id_key is None:
+            return re.fullmatch(r"[0-9a-f]{64}", origin) is not None
+        return origin == shadow_origin_id(binding, self.id_key)
 
     def _binds(self, key: str, kind: str, operation_id: str) -> bool:
         """Whether a stored event key is the key this ledger gives `operation_id`.

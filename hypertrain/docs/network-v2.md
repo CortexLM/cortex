@@ -247,8 +247,12 @@ Production funding is one coordinator-signed `ProductionBootstrap`, posted as an
 run's `EconomicsPolicyV2.bootstrap_allocation_hash` pins its owner/units/maturity
 list (`genesis_allocation_hash` over `[owner, units, mature_at]`); only
 `ledger_mode="production"` may set it, and an unset field is omitted, so earlier
-policy digests and run IDs are unchanged. Origins are
-`ht-origin-bootstrap-v1|run|allocation_hash|index`. The ledger accepts it once per
+policy digests and run IDs are unchanged. Origin `i` is the HMAC under the escrow id key
+(`escrow_id_key(coordinator secret)`) of `ht-origin-bootstrap-v1|run|allocation_hash|index`
+(`bootstrap_origin_id(run, allocation_hash, i, id_key)`), so nobody without the coordinator
+secret can compute one; test genesis, reward and shadow-reward origins are keyed the same way
+(`ht-origin-genesis-v2|run|allocation_hash|index`, `ht-origin-reward-v2|run|w|hotkey|finalize_hash`,
+`ht-origin-shadow-v1|...`). Origins issued before the key existed keep their unkeyed ids. The ledger accepts it once per
 run: the same `operation_id` and body replay the stored receipt, the same
 `operation_id` with other content answers `OPERATION_CONFLICT`, and any second
 bootstrap answers `PRODUCTION_BOOTSTRAP_FORBIDDEN`. It is refused when the inner

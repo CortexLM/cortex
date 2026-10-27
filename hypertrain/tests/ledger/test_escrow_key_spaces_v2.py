@@ -8,6 +8,7 @@ service derives with an ordinary, valid client event and then runs the service o
 from __future__ import annotations
 
 import ast
+import hmac
 import importlib.util
 import inspect
 import json
@@ -281,23 +282,20 @@ def test_every_ledger_operation_writes_its_own_key_space(tmp_path: Path, actual_
 def test_server_keys_are_keyed_deterministic_and_not_derivable_from_the_raw_id(
     tmp_path: Path, actual_reward
 ) -> None:
-    def server_keys(r: Round) -> list[str]:
-        issue_live(r)
-        return [
-            row["operation_id"]
-            for row in r.escrow.db.execute(
-                "SELECT operation_id FROM escrow_events WHERE kind='REWARD_FINALIZE'"
-            )
-        ]
-
-    keyed = server_keys(build_round(tmp_path / "a", actual_reward))
-    again = server_keys(build_round(tmp_path / "b", actual_reward))
-    other = server_keys(build_round(tmp_path / "c", actual_reward, id_key=escrow_id_key(bytes(32))))
-    raw = sha256_hex(f"ht-reward-finalize-v2|{actual_reward[0].manifest.run_id()}|0".encode())
-    assert keyed == again  # deterministic across processes and restarts
-    assert keyed != other  # another secret, another key
-    assert len(keyed) == 1 and keyed[0].startswith(SERVER_SCOPE) and len(keyed[0]) == 4 + 64
-    assert keyed[0] != SERVER_SCOPE + raw  # the public formula does not give the stored key
+    r = build_round(tmp_path / "a", actual_reward)
+    issue_live(r)
+    raw = derived(r)["reward_finalize"]
+    stored = r.escrow.db.execute(
+        "SELECT operation_id FROM escrow_events WHERE kind='REWARD_FINALIZE'"
+    ).fetchone()["operation_id"]
+    # The oracle is written here, not taken from the ledger: srv: + HMAC-SHA256(id key, raw id).
+    assert stored == SERVER_SCOPE + hmac.digest(ID_KEY, raw.encode(), "sha256").hex()
+    assert stored != SERVER_SCOPE + raw  # the public formula does not give the stored key
+    # Deterministic for one key, another for another key.
+    other = escrow_id_key(bytes(32))
+    assert r.escrow._key(raw, True) == stored
+    r.escrow.id_key = other
+    assert r.escrow._key(raw, True) != stored
 
 
 @pytest.mark.parametrize("operation", ["reward_finalize", "mature", "pay"])
@@ -402,14 +400,14 @@ def test_binding_with_the_id_key_is_exact(tmp_path: Path, actual_reward) -> None
 
 
 def test_verify_with_the_id_key_refuses_a_server_key_that_does_not_name_its_receipt(
-    tmp_path: Path, actual_reward
+    tmp_path: Path,
 ) -> None:
-    r = build_round(tmp_path, actual_reward, id_key=ID_KEY)
-    issue_live(r)
-    r.escrow.verify()
-    r.escrow.id_key = escrow_id_key(bytes(32))  # a ledger holding another key cannot bind it
+    e = E.ledger(E.setup(), tmp_path / "ledger.db")
+    E.fund(e)  # a genesis and a maturity, both server events under the id key
+    e.verify()
+    e.id_key = escrow_id_key(bytes(32))  # a ledger holding another key cannot bind them
     with pytest.raises(EscrowError, match="EVENT_CHAIN"):
-        r.escrow.verify()
+        e.verify()
 
 
 def test_verify_without_the_id_key_proves_disjointness_and_shape_of_a_keyed_chain(
@@ -461,28 +459,82 @@ ALLOWED_CALL_SITES: dict[str, set[tuple[str, str]]] = {
 }
 
 
+def escrow_names(function: ast.AST) -> set[str]:
+    """Names that hold the ledger inside one function: `escrow`, its aliases and unpackings."""
+    names = {"escrow"}
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        holds = (
+            isinstance(value, ast.Attribute)
+            and value.attr == "escrow"  # e = self.escrow
+            or isinstance(value, ast.Call)
+            and getattr(value.func, "id", "") == "EscrowV2"  # e = EscrowV2(...)
+            or isinstance(value, ast.Subscript)
+            and isinstance(value.value, ast.Call)
+            and getattr(value.value.func, "attr", "") == "_services"  # e = self._services(r)[0]
+        )
+        unpacks = isinstance(value, ast.Call) and getattr(value.func, "attr", "") == "_services"
+        for target in node.targets:
+            if holds and isinstance(target, ast.Name):
+                names.add(target.id)
+            if unpacks and isinstance(target, ast.Tuple) and isinstance(target.elts[0], ast.Name):
+                names.add(target.elts[0].id)  # escrow, admission, disputes = self._services(r)
+    return names
+
+
+def calls_in(tree: ast.AST, relative: str) -> dict[str, set[tuple[str, str]]]:
+    found: dict[str, set[tuple[str, str]]] = {name: set() for name in LEDGER_METHODS}
+    for function in ast.walk(tree):
+        if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        holders = escrow_names(function)
+        for node in ast.walk(function):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            receiver = node.func.value
+            name = (
+                receiver.attr
+                if isinstance(receiver, ast.Attribute)
+                else getattr(receiver, "id", "")
+            )
+            if node.func.attr in LEDGER_METHODS and name in holders:
+                found[node.func.attr].add((relative, function.name))
+    return found
+
+
 def ledger_call_sites() -> dict[str, set[tuple[str, str]]]:
     found: dict[str, set[tuple[str, str]]] = {name: set() for name in LEDGER_METHODS}
     for path in sorted(SRC.rglob("*.py")):
         relative = path.relative_to(SRC).as_posix()
-        if relative == "ledger/escrow_v2.py":
-            continue
-        tree = ast.parse(path.read_text())
-        for function in ast.walk(tree):
-            if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
-                continue
-            for node in ast.walk(function):
-                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
-                    continue
-                receiver = node.func.value
-                name = (
-                    receiver.attr
-                    if isinstance(receiver, ast.Attribute)
-                    else getattr(receiver, "id", "")
-                )
-                if node.func.attr in LEDGER_METHODS and name == "escrow":
-                    found[node.func.attr].add((relative, function.name))
+        if relative != "ledger/escrow_v2.py":
+            for name, sites in calls_in(ast.parse(path.read_text()), relative).items():
+                found[name] |= sites
     return found
+
+
+def test_the_call_site_walk_sees_a_ledger_held_under_another_name() -> None:
+    source = """
+class Handler:
+    def a(self):
+        e = self.escrow
+        e.release(op, signer=s, now_beacon=1)
+    def b(self, run):
+        ledger, admission, disputes = self._services(run)
+        ledger.slash(op)
+    def c(self, run):
+        held = self._services(run)[0]
+        held.pay(op, signer=s)
+    def d(self):
+        ledger = EscrowV2(db, manifest)
+        ledger.release_settlement(op)
+    def e(self):
+        self.lock.release()
+"""
+    found = calls_in(ast.parse(source), "x.py")
+    assert found["release"] == {("x.py", "a")} and found["slash"] == {("x.py", "b")}
+    assert found["pay"] == {("x.py", "c")} and found["release_settlement"] == {("x.py", "d")}
 
 
 def test_every_call_site_of_a_ledger_operation_is_a_known_one() -> None:
@@ -514,7 +566,16 @@ def test_a_genesis_replay_returns_the_receipt_stored_under_the_server_key(tmp_pa
     assert e.test_genesis(genesis).model_dump_json() == row["receipt"]
 
 
-def test_the_only_dual_use_name_is_gone() -> None:
+def test_no_helper_defaults_to_a_key_space() -> None:
     # `release` is the client's and `release_settlement` the service's: there is no flag to forget.
     assert "server" not in inspect.signature(EscrowV2.release).parameters
     assert "server" not in inspect.signature(EscrowV2.release_settlement).parameters
+    # The private helpers that pick the key space cannot be called without saying which.
+    for helper in (
+        EscrowV2._existing,
+        EscrowV2._event,
+        EscrowV2._owner_operation,
+        EscrowV2._release,
+    ):
+        parameter = inspect.signature(helper).parameters["server"]
+        assert parameter.default is inspect.Parameter.empty, helper.__name__

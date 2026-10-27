@@ -59,6 +59,12 @@
   service needs and freeze finalize, the beacon route, the weights answer or a dispute (Lens F1).
   `EscrowV2.release_settlement` is the service's release; `release` is the owner's. A ledger built
   without the key is a read-only verifier. See `docs/adr/0014` at the monorepo root.
+- Escrow: genesis, bootstrap, reward and shadow-reward origin ids are the HMAC of their preimage under
+  the same id key instead of a sha256 of public values, so a third party who knows the run, the round,
+  the hotkey and the finalize hash cannot compute one. Origins issued earlier keep their ids. Operator
+  tools that build a genesis or bootstrap pass `escrow_id_key(coordinator secret)`. `finalize_v2` builds
+  the reward's origin list through the ledger, so `implementation_hash` changes (service-admission
+  records must be re-bootstrapped).
 - Disputes: a contest bond is settled by the dispute that took it, found through the lock's own
   signed dispute id, and a dispute or reward origin is found by its own id. A bond whose name was an
   older dispute's id made the new dispute unresolvable (its settlement resolved on the other row) and a

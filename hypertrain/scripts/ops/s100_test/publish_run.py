@@ -20,7 +20,7 @@ from pathlib import Path
 import httpx
 
 from hypertrain.data.store import LocalFSStore
-from hypertrain.ledger.escrow_v2 import authority_message, genesis_origin_id
+from hypertrain.ledger.escrow_v2 import authority_message, escrow_id_key, genesis_origin_id
 from hypertrain.miner.core import load_keyfile
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.jcs import canonicalize
@@ -63,7 +63,7 @@ elif step == "genesis":
     ]
     origins = [
         {
-            "origin_id": genesis_origin_id(run_id, alloc_hash, i),
+            "origin_id": genesis_origin_id(run_id, alloc_hash, i, escrow_id_key(coord._secret)),
             "owner": o,
             "units": u,
             "mature_at": m,
