@@ -11,6 +11,7 @@ import ast
 import hashlib
 import hmac
 import json
+import logging
 import math
 import secrets
 import socket
@@ -121,6 +122,10 @@ from hypertrain.protocol.messages_v2 import (
 )
 
 NEVER = 2**53 - 1  # exp_drand of container-signed records
+# Beacons a relay waits after finality, vesting and dispute closure before it honours a release.
+RELAY_EPOCH_GRACE = 100
+# Beacons before the signed horizon at which custody an open dispute pins is extended again.
+RELAY_EXTEND_WITHIN = 720
 LEASE_ROUNDS = 600  # 30 min of 3 s drand rounds
 ZERO_STATE = sha256_hex(b"ht-zero-outer-state")
 NO_HONEYPOT = sha256_hex(b"ht-no-honeypot")
@@ -5529,15 +5534,7 @@ class ChallengeStore:
             if action == "extend" and now >= lineage["horizon"]:
                 raise ChallengeError(409, "custody horizon already expired; rescue required")
             if action == "extend":
-                unresolved = [
-                    r[0]
-                    for r in self._db.execute(
-                        "SELECT id FROM disputes_v2 "
-                        "WHERE json_extract(turn,'$.contest.w')=? "
-                        "AND json_extract(turn,'$.resolution') IS NULL",
-                        (grant.w,),
-                    )
-                ]
+                unresolved = self._unresolved_disputes_v2(grant.w)
                 horizon = max(
                     lineage["horizon"] + 100, now + manifest.training.verify.E_vest_rounds + 1440
                 )
@@ -5561,7 +5558,7 @@ class ChallengeStore:
                         settled["vesting_beacon"],
                         settled["closed_beacon"],
                     )
-                    + 100
+                    + RELAY_EPOCH_GRACE
                 )
                 if now < grace:
                     raise ChallengeError(409, "relay settlement epoch grace has not elapsed")
@@ -9148,6 +9145,105 @@ class ChallengeStore:
             return relay_envelope.seal(
                 self._coord(), "RelaySettlementView", run_id, view, self._now(self._db) + 10
             )
+
+    def _unresolved_disputes_v2(self, w: int) -> list[str]:
+        return [
+            r[0]
+            for r in self._db.execute(
+                "SELECT id FROM disputes_v2 "
+                "WHERE json_extract(turn,'$.contest.w')=? "
+                "AND json_extract(turn,'$.resolution') IS NULL",
+                (w,),
+            )
+        ]
+
+    def _unreleased_grants_v2(self) -> list[tuple[str, str]]:
+        with self._lock:
+            return [
+                (r[0], r[1])
+                for r in self._db.execute(
+                    "SELECT run_id, json_extract(data,'$.body.grant_hash') FROM records_v2 r "
+                    "WHERE kind='relay-receipt' AND NOT EXISTS (SELECT 1 FROM records_v2 x "
+                    "WHERE x.run_id=r.run_id AND x.kind='relay-release' "
+                    "AND x.id=json_extract(r.data,'$.body.grant_hash'))"
+                )
+            ]
+
+    def _relay_due_v2(self, run_id: str, grant_hash: str) -> Literal["release", "extend"] | None:
+        """What the master owes one relay grant now, from read-only records.
+
+        Release once the round settled and the epoch grace passed. Extend while a dispute of the
+        round is open and the horizon is near; relay_control_v2 re-checks both under its own
+        transaction, this only keeps a pass from opening one per grant that is not due."""
+        with self._lock:
+            now = self._now(self._db)
+            try:
+                settled = self.relay_settlement_v2(run_id, grant_hash)
+            except ChallengeError as error:
+                if error.status != 409:
+                    raise
+            else:
+                grace = (
+                    max(
+                        settled["finality_beacon"],
+                        settled["vesting_beacon"],
+                        settled["closed_beacon"],
+                    )
+                    + RELAY_EPOCH_GRACE
+                )
+                return "release" if now >= grace else None
+            receipt = self._db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='relay-receipt' "
+                "AND json_extract(data,'$.body.grant_hash')=?",
+                (run_id, grant_hash),
+            ).fetchone()
+            w = int(self._record_v2(run_id, "grant", grant_hash)["body"]["w"])
+            if receipt is None or not self._unresolved_disputes_v2(w):
+                return None
+            current = self._db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='retention' AND id=?",
+                (run_id, grant_hash),
+            ).fetchone()
+            horizon = (
+                json.loads(current[0])["horizon"]
+                if current
+                else int(json.loads(receipt[0])["body"]["retain_until"])
+            )
+            return "extend" if now < horizon <= now + RELAY_EXTEND_WITHIN else None
+
+    async def release_due_v2(self, client: Any) -> dict[str, list[str]]:
+        """One unattended pass over every run (ADR 0014 Part 6.3, 6.4).
+
+        A grant with a durable relay receipt and no relay-release record is released when
+        settled and past the epoch grace, and extended while a dispute of its round is open and
+        its horizon is near. A grant that is not due is left alone; a relay that cannot be
+        reached is skipped until the next pass. Any other failure is raised after the rest of the
+        pass, so that one bad grant neither starves the others nor goes unseen."""
+        import asyncio
+
+        import httpx
+
+        done: dict[str, list[str]] = {"released": [], "extended": []}
+        failure: Exception | None = None
+        for hosted in self.stores():
+            for run_id, grant_hash in await asyncio.to_thread(hosted._unreleased_grants_v2):
+                try:
+                    action = await asyncio.to_thread(hosted._relay_due_v2, run_id, grant_hash)
+                    if action is not None:
+                        await hosted.relay_control_v2(run_id, grant_hash, action, client)
+                        done["released" if action == "release" else "extended"].append(grant_hash)
+                except ChallengeError as error:
+                    if error.status != 409:  # 409: not due after all, a later pass decides
+                        failure = failure or error
+                except httpx.HTTPError as error:
+                    logging.getLogger(__name__).warning(
+                        "relay lifecycle deferred: %s", type(error).__name__
+                    )
+                except Exception as error:
+                    failure = failure or error
+        if failure is not None:
+            raise failure
+        return done
 
     def dispute_state_v2(self, run_id: str, dispute_id: str, checkpoint: int) -> dict[str, Any]:
         _, _, disputes = self._services(run_id)

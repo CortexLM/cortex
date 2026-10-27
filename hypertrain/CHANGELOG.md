@@ -154,6 +154,11 @@
   horizon plus the epoch grace is past, with no release and no dispute referencing it, is lapsed
   and deleted like a released one; a pin whose last extension names a dispute does not lapse until
   the master releases the grant. Until now nothing removed a record and `collect()` had no caller.
+- Unattended relay custody on the master (ADR 0014 Part 6, TRN-02, D53/D54): a task of the challenge
+  app (`HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL`, default 120 s, `0` off) releases every grant that is
+  settled and past the epoch grace, and extends the custody of a grant whose round has an unresolved
+  dispute before its horizon, repeatedly, through `relay_control_v2`. No operator call is needed any
+  more; the admin routes remain. `ChallengeStore.release_due_v2` is one pass.
 
 ### Fixed
 - Escrow: the events the service writes (reward finalize, maturity, the payment of `get_weights`,

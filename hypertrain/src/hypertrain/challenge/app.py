@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
+import logging
 import os
 import threading
 import time
@@ -143,6 +145,9 @@ class Config:
     netuid: int = 100
     role_dispatch_file: Path | None = None
     cuda_executor_file: Path | None = None
+    # Seconds between two passes that release the relay custody the master owes and extend the
+    # custody an open dispute pins (ADR 0014 Part 6.3, 6.4); 0 runs none. from_env turns it on.
+    relay_lifecycle_interval: float = 0.0
 
     @classmethod
     def from_env(cls) -> Config:
@@ -170,6 +175,7 @@ class Config:
             netuid=int(env("CHALLENGE_NETUID", "100")),
             role_dispatch_file=path("HYPERTRAIN_ROLE_DISPATCH"),
             cuda_executor_file=path("HYPERTRAIN_CUDA_EXECUTOR"),
+            relay_lifecycle_interval=float(env("HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL", "120")),
         )
 
 
@@ -324,6 +330,17 @@ def _dispatcher(config: Config) -> role_dispatch.RoleLaunch | None:
     return None
 
 
+async def relay_lifecycle_forever(store: ChallengeStore, interval: float) -> None:
+    """The master's side of unattended relay custody; a failed pass is logged and tried again."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with httpx.AsyncClient(follow_redirects=False, timeout=30) as client:
+                await store.release_due_v2(client)
+        except Exception:
+            logging.getLogger(__name__).exception("relay lifecycle pass failed")
+
+
 def create_app(
     config: Config,
     *,
@@ -407,6 +424,20 @@ def create_app(
         from hypertrain.protocol.envelope_v2 import parse_envelope
 
         return parse_envelope(raw).signer
+
+    @app.on_event("startup")
+    async def start_relay_lifecycle() -> None:
+        if config.relay_lifecycle_interval > 0:
+            app.state.relay_lifecycle = asyncio.create_task(
+                relay_lifecycle_forever(store, config.relay_lifecycle_interval)
+            )
+
+    @app.on_event("shutdown")
+    async def stop_relay_lifecycle() -> None:
+        if task := getattr(app.state, "relay_lifecycle", None):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     @app.on_event("shutdown")
     def close_notifications() -> None:

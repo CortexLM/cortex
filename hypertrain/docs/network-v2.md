@@ -682,12 +682,15 @@ about 10 hours or 36 rounds of 335 beacons (16.75 minutes), so 36 rounds of 16 m
 126 % (`test_readyz_when_custody_horizon_of_rounds_has_no_early_release` measures both).
 Because records rotate out at their horizon, that is the steady state and not a figure that
 keeps growing; a run of 32 miners exceeds the budget unless custody is released well before
-its horizon.
-Runbook for the alarm: first check that records leave, i.e. that the log shows no
-`relay collect deferred` lines. If they do leave and the fill still rises, the run is larger
-than this relay's journal. Add a relay to the signed registry; the registry must hold more
-than one relay before any run of 16 miners or more (D51 5). Do not raise the 12 MiB budget:
-above 16 MiB every journal write fails, a release included.
+its horizon, which is what the master's lifecycle task does: released one or two rounds after
+finality, three rounds of 32 miners are about 1.3 MB (3 x 32 x 13.8 KB, derived from the
+measured record size).
+Runbook for the alarm: first check that the master's lifecycle task runs, i.e. that
+`relay-release` records appear one or two rounds after finality, and that the relay's log shows
+no `relay collect deferred` lines. If they do and the fill still rises, the run is larger than
+this relay's journal. Add a relay to the signed registry; the registry must hold more than one
+relay before any run of 16 miners or more (D51 5). Do not raise the 12 MiB budget: above
+16 MiB every journal write fails, a release included.
 
 Custody is rotated out by age, without an operator. Every 5 minutes a task of the relay runs
 `collect()`. A pin whose signed horizon is past by the epoch grace with nothing released and
@@ -718,9 +721,22 @@ and refuses a release whose finality, dispute and vesting facts differ from it. 
 therefore needs `master_url` in `relay.json` to reach the master over credential-free HTTPS
 for this route as for `/v2/relay-receipts`. A relay built before this route exists still
 refuses every release, as it did; a master without the route makes a new relay refuse too
-(HTTP 503), so release never succeeds on facts the master did not sign. The release is still
-sent by the master: `POST /v2/runs/{run_id}/admin/relay/{grant_hash}/release` (operator bearer)
-once `now >= max(finality, vesting, closed) + 100`.
+(HTTP 503), so release never succeeds on facts the master did not sign.
+
+The master sends the release and the extensions itself, without an operator. Every 120 seconds
+(`HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL`, `0` turns it off; it is on whenever the app is built from
+the environment) a task of the challenge app makes one pass over every run, outside any store
+transaction. For each grant that has a durable relay receipt and no `relay-release` record:
+once the round is settled and `now >= max(finality, vesting, closed) + 100`, it calls the same
+path as `POST /v2/runs/{run_id}/admin/relay/{grant_hash}/release`; while a dispute of the round
+is unresolved and the signed horizon is less than 720 beacons ahead (about 36 minutes), it calls
+`.../extend`, again before each new horizon, until the dispute closes; any other grant is left
+alone. A relay that cannot be reached is skipped until the next pass, and an answer of 409 (not
+due after all) is not an error. Any other failure is raised after the rest of the pass, so one
+bad grant starves none and nothing goes unseen: the task logs `relay lifecycle pass failed` with
+the traceback and tries again. The operator routes stay for a manual release or extension. A
+dispute that nobody can decide is not closed by this task (ADR 0011's exit does that), and a
+dispute opened after the horizon has passed finds custody that can no longer be extended.
 
 Relay configuration is `RelayConfig` in `src/hypertrain/relay/app.py`:
 `run_id`, `master_public`, `master_url`, signed `registry`/`network_manifest`,
