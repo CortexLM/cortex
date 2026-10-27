@@ -3,7 +3,9 @@
 A member is one host slot of a miner; an 8-GPU host is one unit of membership. A lease is live
 while `now < expires_ms` on the coordinator's clock, and a heartbeat renews it. Every grant
 takes its token from one counter that only grows, so a rejoin or a replacement host fences every
-older holder: the old token is refused from then on, even if its host is still running.
+older holder: the old token is refused from then on, even if its host is still running. The
+counter is saved (TokenLog) before a lease is returned, so it also outlives a restart of the
+coordinator: no token is issued twice, and a signed leave names one lease for ever.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from hypertrain.elastic.clock import Clock
+from hypertrain.elastic.tokens import TokenLog
 
 
 class LeaseError(Exception):
@@ -48,20 +51,23 @@ class Member:
 
 
 class Membership:
-    def __init__(self, clock: Clock, ttl_ms: int) -> None:
+    def __init__(self, clock: Clock, ttl_ms: int, tokens: TokenLog) -> None:
         if ttl_ms <= 0:
             raise ValueError("ttl_ms must be > 0")
         self.clock = clock
         self.ttl_ms = ttl_ms
         self._members: dict[str, Member] = {}
-        self._tokens = 0
+        self._log = tokens
+        self._tokens = tokens.load()
 
     def _live(self, member: Member) -> bool:
         return member.status is Status.ACTIVE and self.clock.now_ms() < member.lease.expires_ms
 
     def _grant(self, member: str) -> Lease:
-        self._tokens += 1
-        return Lease(member, self._tokens, self.clock.now_ms() + self.ttl_ms)
+        token = self._tokens + 1
+        self._tokens = token  # spent even if the save fails: it may have become durable
+        self._log.save(token)  # before the lease exists: a token that was lost is never reissued
+        return Lease(member, token, self.clock.now_ms() + self.ttl_ms)
 
     def join(self, member: str, owner: str, signer: str) -> tuple[Lease, Lease | None]:
         """Grant a fresh lease. Joining an id that is still active (its lease not yet swept by

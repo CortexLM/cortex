@@ -1,9 +1,10 @@
 """Deterministic shard assignment: rendezvous hashing under a per-member capacity.
 
-plan() is a pure function of the round seed, the pending shards and the free capacity of the
-live members, so the coordinator's ordered event log replays to the same assignment and an
-auditor can recompute it. Only pending shards are planned: a departure moves the departed
-member's shards and nothing else.
+plan() is a pure function of the round seed, the shards to place and the free capacity of the
+live members, so an auditor who has recorded the calls with their clock readings can recompute
+it (the library keeps no log). The coordinator plans pending shards, and a hand-over plans one
+held shard among the idle members: a departure moves the departed member's shards and nothing
+else.
 """
 
 from __future__ import annotations

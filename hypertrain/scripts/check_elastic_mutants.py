@@ -34,6 +34,31 @@ class Mutant:
     test: str
 
 
+BINDS = (
+    "        return (self.run_id, self.policy, self.round, self.shard, self.base) == (\n"
+    "            unit.run_id,\n"
+    "            unit.policy,\n"
+    "            unit.round,\n"
+    "            unit.shard,\n"
+    "            unit.base,\n"
+    "        ) and self.step <= unit.steps\n"
+)
+BINDS_TEST = (
+    "test_checkpoint.py::"
+    "test_a_manifest_of_another_run_policy_round_or_base_is_not_a_link_of_the_unit"
+)
+
+
+def binds_without(field: str) -> str:
+    """CheckpointManifest.binds with one field of the unit no longer compared."""
+    left = (
+        BINDS.replace(", self.base", "")
+        if field == "base"
+        else BINDS.replace(f"self.{field}, ", "")
+    )
+    return left.replace(f"            unit.{field},\n", "")
+
+
 MUTANTS = (
     Mutant(
         "checkpoint write not atomic",
@@ -66,9 +91,275 @@ MUTANTS = (
     Mutant(
         "rejoin reuses a token (no fencing)",
         SRC + "membership.py",
-        "self._tokens += 1",
-        "self._tokens = 1",
+        "token = self._tokens + 1",
+        "token = 1",
         "test_membership.py::test_rejoin_fences_every_older_token",
+    ),
+    Mutant(
+        "a restarted coordinator counts tokens from zero",
+        SRC + "membership.py",
+        "self._tokens = tokens.load()",
+        "self._tokens = 0",
+        "test_coordinator.py::test_a_signed_leave_cannot_be_replayed_after_a_restart",
+    ),
+    Mutant(
+        "a granted token is not saved",
+        SRC + "membership.py",
+        "        self._log.save(token)  # before the lease exists: a token that was lost is never"
+        " reissued\n",
+        "",
+        "test_coordinator.py::test_a_signed_leave_cannot_be_replayed_after_a_restart",
+    ),
+    Mutant(
+        "a token that cannot be saved is granted anyway",
+        SRC + "membership.py",
+        "        self._log.save(token)  # before the lease exists: a token that was lost is never"
+        " reissued\n",
+        "        try:\n            self._log.save(token)\n"
+        "        except OSError:\n            pass\n",
+        "test_membership.py::test_no_lease_is_granted_when_its_token_cannot_be_saved",
+    ),
+    Mutant(
+        "a token log that does not parse reads as zero",
+        SRC + "tokens.py",
+        'raise TokenLogError(f"token log {self.path.name} does not hold a token")',
+        "return 0",
+        "test_tokens.py::test_a_log_that_does_not_parse_is_an_error_not_a_reset",
+    ),
+    Mutant(
+        "an unreadable token log starts the count at zero",
+        SRC + "membership.py",
+        "        self._tokens = tokens.load()\n",
+        "        try:\n            self._tokens = tokens.load()\n"
+        "        except Exception:\n            self._tokens = 0\n",
+        "test_coordinator.py::test_a_coordinator_does_not_start_on_a_token_log_it_cannot_read",
+    ),
+    Mutant(
+        "a token is reused after a failed save",
+        SRC + "membership.py",
+        "        self._tokens = token  # spent even if the save fails: it may have become durable\n"
+        "        self._log.save(token)"
+        "  # before the lease exists: a token that was lost is never reissued\n",
+        "        self._log.save(token)"
+        "  # before the lease exists: a token that was lost is never reissued\n"
+        "        self._tokens = token\n",
+        "test_membership.py::test_no_lease_is_granted_when_its_token_cannot_be_saved",
+    ),
+    Mutant(
+        "a missing token log reads as a new run",
+        SRC + "tokens.py",
+        '            raise TokenLogError(f"token log {self.path.name} is missing") from None\n',
+        "            return 0\n",
+        "test_tokens.py::test_a_missing_log_is_an_error_not_a_new_run",
+    ),
+    Mutant(
+        "a log saves over a mark that moved under it",
+        SRC + "tokens.py",
+        "        if self._read() != self._mark:\n",
+        "        if False:\n",
+        "test_tokens.py::test_a_log_refuses_to_save_after_the_stored_mark_moved",
+    ),
+    Mutant(
+        "a log saves a token that does not follow its mark",
+        SRC + "tokens.py",
+        "        if not self._mark < token <= MAX_TOKEN:\n",
+        "        if False:\n",
+        "test_tokens.py::test_a_log_refuses_to_save_a_token_that_does_not_follow_its_mark",
+    ),
+    Mutant(
+        "a memory log lowers its mark",
+        SRC + "tokens.py",
+        "        if not self._token < token <= MAX_TOKEN:\n",
+        "        if False:\n",
+        "test_tokens.py::test_a_log_refuses_to_save_a_token_that_does_not_follow_its_mark",
+    ),
+    Mutant(
+        "a token log can be held by two coordinators",
+        SRC + "tokens.py",
+        "            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n",
+        "            pass\n",
+        "test_tokens.py::test_a_second_coordinator_cannot_hold_a_log_that_is_held",
+    ),
+    Mutant(
+        "the lock on a token log is dropped as soon as it is taken",
+        SRC + "tokens.py",
+        "        self._lock = fd\n",
+        "        self._lock = fd\n        self.close()\n",
+        "test_coordinator.py::test_a_second_coordinator_does_not_start_on_a_token_log_that_is_held",
+    ),
+    Mutant(
+        "a new run overwrites a token log",
+        SRC + "tokens.py",
+        "                try:\n"
+        "                    os.link(tmp, self.path)\n"
+        "                except FileExistsError:\n"
+        '                    raise TokenLogError(f"token log {self.path.name} already exists")'
+        " from None\n"
+        "                tmp.unlink()\n",
+        "                os.replace(tmp, self.path)\n",
+        "test_tokens.py::test_a_missing_log_is_an_error_not_a_new_run",
+    ),
+    Mutant(
+        "a token log is made at a mark it cannot load back",
+        SRC + "tokens.py",
+        "        if not 0 <= mark <= MAX_TOKEN:\n",
+        "        if not mark <= MAX_TOKEN:\n",
+        "test_tokens.py::test_a_missing_log_is_an_error_not_a_new_run",
+    ),
+    Mutant(
+        "a token log of any length is parsed",
+        SRC + "tokens.py",
+        'rb"0|[1-9][0-9]{0,15}"',
+        'rb"0|[1-9][0-9]*"',
+        "test_tokens.py::test_a_log_that_does_not_parse_is_an_error_not_a_reset",
+    ),
+    Mutant(
+        "a token log that cannot be read raises the operating system error",
+        SRC + "tokens.py",
+        "        except OSError as exc:\n"
+        '            raise TokenLogError(f"token log {self.path.name} cannot be read: {exc}")'
+        " from exc\n",
+        "",
+        "test_tokens.py::test_a_log_that_cannot_be_read_is_a_token_log_error",
+    ),
+    Mutant(
+        "a start queues behind the coordinator that holds the log",
+        SRC + "tokens.py",
+        "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+        "fcntl.flock(fd, fcntl.LOCK_EX)",
+        "test_tokens.py::test_a_coordinator_in_another_process_is_refused_at_once_by_a_held_log",
+    ),
+    Mutant(
+        "a filesystem without locks is reported as a held log",
+        SRC + "tokens.py",
+        "        except BlockingIOError:\n",
+        "        except OSError:\n",
+        "test_tokens.py::test_a_filesystem_without_locks_is_not_reported_as_a_held_log",
+    ),
+    Mutant(
+        "a start that cannot take the lock keeps its descriptor",
+        SRC + "tokens.py",
+        "        except BaseException:\n"
+        "            os.close(fd)  # no lock support is not a held lock: let the cause through\n"
+        "            raise\n",
+        "        except BaseException:\n            raise\n",
+        "test_tokens.py::test_a_filesystem_without_locks_is_not_reported_as_a_held_log",
+    ),
+    Mutant(
+        "a refused start keeps its descriptor",
+        SRC + "tokens.py",
+        "        except BlockingIOError:\n            os.close(fd)\n",
+        "        except BlockingIOError:\n",
+        "test_tokens.py::test_a_start_that_is_refused_leaves_no_descriptor_open",
+    ),
+    Mutant(
+        "a log that cannot be read keeps the lock",
+        SRC + "tokens.py",
+        "        except BaseException:\n"
+        "            self.close()  # a log that cannot start must not keep the next attempt out\n"
+        "            raise\n",
+        "        except BaseException:\n            raise\n",
+        "test_tokens.py::test_a_log_that_fails_to_start_does_not_keep_the_lock",
+    ),
+    Mutant(
+        "a new run that fails keeps the lock",
+        SRC + "tokens.py",
+        "        except BaseException:\n            log.close()\n            raise\n",
+        "        except BaseException:\n            raise\n",
+        "test_tokens.py::test_a_log_that_fails_to_start_does_not_keep_the_lock",
+    ),
+    Mutant(
+        "a log that is dropped keeps its lock",
+        SRC + "tokens.py",
+        "    def __del__(self) -> None:\n        self.close()\n\n",
+        "",
+        "test_tokens.py::test_a_log_that_is_dropped_gives_up_its_lock",
+    ),
+    Mutant(
+        "a forked copy of a coordinator saves",
+        SRC + "tokens.py",
+        "        if self._lock is None or self._pid != os.getpid():\n",
+        "        if self._lock is None:\n",
+        "test_tokens.py::test_a_forked_copy_of_a_coordinator_cannot_save",
+    ),
+    Mutant(
+        "a log whose lock file was removed saves",
+        SRC + "tokens.py",
+        "            return os.path.samestat(os.fstat(self._lock), os.stat(self._sidecar))\n",
+        "            return True\n",
+        "test_tokens.py::test_a_log_whose_lock_file_is_gone_refuses_to_save",
+    ),
+    Mutant(
+        "a log whose lock file was replaced saves",
+        SRC + "tokens.py",
+        "            return os.path.samestat(os.fstat(self._lock), os.stat(self._sidecar))\n",
+        "            return os.path.exists(self._sidecar)\n",
+        "test_tokens.py::test_a_log_whose_lock_file_is_gone_refuses_to_save",
+    ),
+    Mutant(
+        "a token log above the wire limit loads",
+        SRC + "tokens.py",
+        "        if not _MARK.fullmatch(raw) or int(raw) > MAX_TOKEN:\n",
+        "        if not _MARK.fullmatch(raw):\n",
+        "test_tokens.py::test_a_log_that_does_not_parse_is_an_error_not_a_reset",
+    ),
+    Mutant(
+        "a token log follows its path instead of where it was made",
+        SRC + "tokens.py",
+        "        self.path = Path(path).resolve()",
+        "        self.path = Path(path)",
+        "test_tokens.py::test_a_log_is_where_it_was_made_whatever_the_path_it_was_given",
+    ),
+    Mutant(
+        "the token file is rewritten in place",
+        SRC + "tokens.py",
+        "os.replace(tmp, self.path)",
+        "self.path.write_bytes(tmp.read_bytes())",
+        "test_tokens.py::test_a_save_that_cannot_replace_the_file_keeps_the_previous_mark",
+    ),
+    Mutant(
+        "the token file is renamed before its buffer is flushed",
+        SRC + "tokens.py",
+        "                out.flush()\n",
+        "",
+        "test_tokens.py::test_a_save_killed_before_fsync_keeps_the_previous_mark",
+    ),
+    Mutant(
+        "the directory is not synced after the token file is renamed",
+        SRC + "tokens.py",
+        "        _fsync_dir(self.path.parent)\n",
+        "",
+        "test_tokens.py::test_a_save_asks_for_the_directory_to_be_synced_after_the_rename",
+    ),
+    Mutant(
+        "the mark is set only after the directory sync",
+        SRC + "tokens.py",
+        "            self._mark = token  # the file holds it now, whether or not the directory"
+        " sync succeeds\n"
+        "        except BaseException:\n"
+        "            tmp.unlink(missing_ok=True)\n"
+        "            raise\n"
+        "        _fsync_dir(self.path.parent)\n",
+        "        except BaseException:\n"
+        "            tmp.unlink(missing_ok=True)\n"
+        "            raise\n"
+        "        _fsync_dir(self.path.parent)\n"
+        "        self._mark = token\n",
+        "test_tokens.py::test_a_directory_sync_that_fails_after_the_rename_leaves_the_log_usable",
+    ),
+    Mutant(
+        "a log at the wire limit does not load",
+        SRC + "tokens.py",
+        "or int(raw) > MAX_TOKEN:\n",
+        "or int(raw) >= MAX_TOKEN:\n",
+        "test_tokens.py::test_a_log_refuses_to_save_a_token_that_does_not_follow_its_mark",
+    ),
+    Mutant(
+        "the token file is not synced before it is renamed",
+        SRC + "tokens.py",
+        "                os.fsync(out.fileno())\n",
+        "",
+        "test_tokens.py::test_a_save_killed_before_fsync_keeps_the_previous_mark",
     ),
     Mutant(
         "double assignment: capacity not consumed",
@@ -168,16 +459,46 @@ MUTANTS = (
     Mutant(
         "a retry after its lease ended is refused",
         SRC + "coordinator.py",
-        "        done = self._accepted.get(key)\n",
-        "        self.membership.check(member, token)\n        done = self._accepted.get(key)\n",
+        "        done = self._accepted.get(key) or self._accepted_before.get(key)\n",
+        "        self.membership.check(member, token)\n"
+        "        done = self._accepted.get(key) or self._accepted_before.get(key)\n",
         "test_coordinator.py::test_a_retried_commit_is_acknowledged_after_its_lease_and_round_ended",
     ),
     Mutant(
         "accepted links forgotten at a round boundary",
         SRC + "coordinator.py",
         "        self._departures = []\n",
-        "        self._departures = []\n        self._accepted.clear()\n",
+        "        self._departures = []\n        self._accepted_before.clear()\n",
         "test_coordinator.py::test_a_retried_commit_is_acknowledged_after_its_lease_and_round_ended",
+    ),
+    Mutant(
+        "accepted links never forgotten",
+        SRC + "coordinator.py",
+        "self._accepted_before, self._accepted = self._accepted, {}",
+        "self._accepted_before, self._accepted = {**self._accepted_before, **self._accepted}, {}",
+        "test_coordinator.py::test_a_retry_is_answered_one_round_later_and_no_longer",
+    ),
+    Mutant(
+        "accepted leaves never forgotten",
+        SRC + "coordinator.py",
+        "self._left_before, self._left = self._left, {}",
+        "self._left_before, self._left = {**self._left_before, **self._left}, {}",
+        "test_coordinator.py::test_a_retry_is_answered_one_round_later_and_no_longer",
+    ),
+    Mutant(
+        "a leave notice is kept for ever beside the ledger",
+        SRC + "coordinator.py",
+        "        self._left[notice.lease] = ((m.id, m.signer), departure)\n",
+        "        self._left[notice.lease] = ((m.id, m.signer), departure)\n"
+        '        self.__dict__.setdefault("_all", []).append(notice)\n',
+        "test_coordinator.py::test_the_leaves_kept_do_not_grow_with_the_rounds",
+    ),
+    Mutant(
+        "a leave is answered only in its own round",
+        SRC + "coordinator.py",
+        "done = self._left.get(notice.lease) or self._left_before.get(notice.lease)",
+        "done = self._left.get(notice.lease)",
+        "test_coordinator.py::test_a_retry_is_answered_one_round_later_and_no_longer",
     ),
     Mutant(
         "accepted work dropped at a departure",
@@ -344,6 +665,566 @@ MUTANTS = (
         "if r.status_code == 401:",
         "if False:",
         "test_notice.py::test_an_expired_session_is_renewed_once",
+    ),
+    Mutant(
+        "a coordinator is built without an audit",
+        SRC + "coordinator.py",
+        "        audit: Audit,\n        capacity: int = 1,\n",
+        "        audit: Audit = lambda *_: True,\n        capacity: int = 1,\n",
+        "test_coordinator.py::test_a_coordinator_cannot_be_built_without_an_audit",
+    ),
+    Mutant(
+        "a withdrawn link keeps its credit",
+        SRC + "coordinator.py",
+        "        del s.links[first:]\n",
+        "",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "a withdrawal voids only the invalid link, not the links built on it",
+        SRC + "coordinator.py",
+        "        del s.links[first:]\n",
+        "        del s.links[first : first + 1]\n",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "a withdrawal leaves the shard head on the voided link",
+        SRC + "coordinator.py",
+        "        s.head = s.links[-1].key if s.links else None\n"
+        "        s.step = sum(link.steps for link in s.links)\n",
+        "",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "a voided link is still acknowledged as accepted",
+        SRC + "coordinator.py",
+        "        for link in voided:\n            del self._accepted[link.key]\n",
+        "",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "the producer of a withdrawn link is not penalised",
+        SRC + "coordinator.py",
+        "        self._penalties[producer.owner] += 1\n",
+        "",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "the producer of a withdrawn link is not revoked",
+        SRC + "coordinator.py",
+        "        self.membership.revoke(m.id)\n",
+        "",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "a live producer of a withdrawn link keeps its shards",
+        SRC + "coordinator.py",
+        "        if live:\n            self._depart(m, Exit.REVOKED, assign=False)\n",
+        "",
+        "test_coordinator.py::test_withdrawing_a_link_of_a_live_holder_revokes_it_and_frees_its_shard",
+    ),
+    Mutant(
+        "a completed shard is not planned again after a withdrawal",
+        SRC + "coordinator.py",
+        "        self._assign()  # a shard that was complete is pending again\n",
+        "",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "a withdrawal does not lapse the expired first",
+        SRC + "coordinator.py",
+        "        self._sweep()\n        done = self._accepted.get(key)\n",
+        "        done = self._accepted.get(key)\n",
+        "test_coordinator.py::test_withdraw_lapses_the_expired_before_it_revokes",
+    ),
+    Mutant(
+        "the honest holder of a rewound shard keeps its old window",
+        SRC + "coordinator.py",
+        "        if s.holder is not None:"
+        "  # the honest holder resumes from the link before: fresh clocks\n"
+        "            self._progress[s.holder.member] = (self.clock.now_ms(), False)\n"
+        "            s.since_ms = self.clock.now_ms()\n",
+        "",
+        "test_coordinator.py::test_withdrawing_gives_the_honest_holder_a_fresh_window",
+    ),
+    Mutant(
+        "a link of a closed round can be withdrawn",
+        SRC + "coordinator.py",
+        '"ROUND_CLOSED" if key in self._accepted_before else "UNKNOWN_LINK"',
+        '"UNKNOWN_LINK"',
+        "test_coordinator.py::test_only_an_accepted_link_of_the_open_round_can_be_withdrawn",
+    ),
+    Mutant(
+        "a link of another run is accepted",
+        SRC + "checkpoint.py",
+        BINDS,
+        binds_without("run_id"),
+        BINDS_TEST,
+    ),
+    Mutant(
+        "a link of another policy is accepted",
+        SRC + "checkpoint.py",
+        BINDS,
+        binds_without("policy"),
+        BINDS_TEST,
+    ),
+    Mutant(
+        "a link of another round is accepted",
+        SRC + "checkpoint.py",
+        BINDS,
+        binds_without("round"),
+        BINDS_TEST,
+    ),
+    Mutant(
+        "a link built on another base state is accepted",
+        SRC + "checkpoint.py",
+        BINDS,
+        binds_without("base"),
+        BINDS_TEST,
+    ),
+    Mutant(
+        "an accepted link leaves the progress window already renewed",
+        SRC + "coordinator.py",
+        "self._progress[member] = (self.clock.now_ms(), False)  # an accepted link restarts it",
+        "self._progress[member] = (self.clock.now_ms(), True)  # an accepted link restarts it",
+        "test_coordinator.py::test_a_replacement_after_a_link_restarts_the_window_once",
+    ),
+    Mutant(
+        "a leave replay is answered to any member and key",
+        SRC + "coordinator.py",
+        "if done is not None and done[0] == (notice.member, notice.signer):",
+        "if done is not None:",
+        "test_coordinator.py::test_a_leave_replay_is_answered_only_to_the_member_and_key_that_left",
+    ),
+    Mutant(
+        "a round number can be opened twice",
+        SRC + "coordinator.py",
+        "rounds.pop() <= self.round",
+        "rounds.pop() < self.round",
+        "test_coordinator.py::test_a_round_number_is_opened_once",
+    ),
+    Mutant(
+        "stalled members end in set order",
+        SRC + "coordinator.py",
+        "            for member in sorted(late)\n",
+        "            for member in late\n",
+        "test_coordinator.py::test_stalled_members_end_in_id_order",
+    ),
+    Mutant(
+        "expired leases lapse in join order",
+        SRC + "membership.py",
+        "            for _, m in sorted(self._members.items())\n"
+        "            if m.status is Status.ACTIVE and not self._live(m)\n",
+        "            for m in self._members.values()\n"
+        "            if m.status is Status.ACTIVE and not self._live(m)\n",
+        "test_coordinator.py::test_expired_leases_lapse_in_id_order",
+    ),
+    Mutant(
+        "settle reports before it lapses the expired",
+        SRC + "coordinator.py",
+        "    def settle(self) -> Settlement:\n        self._sweep()\n",
+        "    def settle(self) -> Settlement:\n",
+        "test_coordinator.py::test_settle_lapses_the_expired_before_it_reports",
+    ),
+    Mutant(
+        "a live member extends a shard nobody holds",
+        SRC + "coordinator.py",
+        "        if s.holder != Holder(member, token):\n"
+        '            raise CoordinatorError("NOT_HOLDER"',
+        "        if s.holder is not None and s.holder != Holder(member, token):\n"
+        '            raise CoordinatorError("NOT_HOLDER"',
+        "test_coordinator.py::test_a_live_member_cannot_extend_a_shard_nobody_holds",
+    ),
+    Mutant(
+        "the rendezvous score ignores the member",
+        SRC + "assignment.py",
+        ' + struct.pack(">Q", shard) + member.encode()',
+        ' + struct.pack(">Q", shard)',
+        "test_assignment.py::test_every_member_gets_a_share_of_the_shards",
+    ),
+    Mutant(
+        "the rendezvous score ignores the shard",
+        SRC + "assignment.py",
+        ' + struct.pack(">Q", shard) + member.encode()',
+        " + member.encode()",
+        "test_assignment.py::test_the_score_is_the_documented_formula",
+    ),
+    Mutant(
+        "a shard its busy holder never works stays with it",
+        SRC + "coordinator.py",
+        "        self._hand_over_idle_shards()\n        return out\n",
+        "        return out\n",
+        "test_coordinator.py::test_a_shard_its_busy_holder_never_works_goes_to_a_member_that_holds_nothing",
+    ),
+    Mutant(
+        "a shard is handed over before its window is over",
+        SRC + "coordinator.py",
+        "            if not idle or holder is None or now - s.since_ms < self.progress_ms:\n",
+        "            if not idle or holder is None:\n",
+        "test_coordinator.py::test_a_member_that_advances_both_its_shards_keeps_them",
+    ),
+    Mutant(
+        "a link does not restart the clock of its shard",
+        SRC + "coordinator.py",
+        "        s.since_ms = s.linked_ms = self.clock.now_ms()\n",
+        "        s.linked_ms = self.clock.now_ms()\n",
+        "test_coordinator.py::test_a_member_that_advances_both_its_shards_keeps_them",
+    ),
+    Mutant(
+        "a shard's clock starts when the round opens, not when it is assigned",
+        SRC + "coordinator.py",
+        "            self._shards[shard].since_ms = self.clock.now_ms()\n",
+        "",
+        "test_coordinator.py::test_a_member_that_advances_both_its_shards_keeps_them",
+    ),
+    Mutant(
+        "a shard passes to a member that is busy",
+        SRC + "coordinator.py",
+        "        idle = {m.id: m.lease.token for m in self.membership.active()"
+        " if m.lease.token not in held}\n",
+        "        idle = {m.id: m.lease.token for m in self.membership.active()}\n",
+        "test_coordinator.py::test_shards_do_not_pass_between_busy_members",
+    ),
+    Mutant(
+        "an idle member is handed every stale shard at once",
+        SRC + "coordinator.py",
+        "Holder(to, idle.pop(to))",
+        "Holder(to, idle[to])",
+        "test_coordinator.py::test_a_member_that_holds_nothing_is_handed_one_shard_at_a_time",
+    ),
+    Mutant(
+        "the member that receives a shard has no progress window",
+        SRC + "coordinator.py",
+        "            self._progress[to] = (now, False)"
+        "  # it starts holding work: its progress window opens\n",
+        "",
+        "test_coordinator.py::test_a_shard_its_busy_holder_never_works_goes_to_a_member_that_holds_nothing",
+    ),
+    Mutant(
+        "a hand-over is not recorded",
+        SRC + "coordinator.py",
+        "            self._moves.append(Move(shard, holder.member, holder.token, to, now))\n",
+        "",
+        "test_coordinator.py::test_a_shard_its_busy_holder_never_works_goes_to_a_member_that_holds_nothing",
+    ),
+    Mutant(
+        "a replacement host restarts the clock of the shards it inherits",
+        SRC + "coordinator.py",
+        "                self._progress[member] = (self.clock.now_ms(), True)\n",
+        "                self._progress[member] = (self.clock.now_ms(), True)\n"
+        "                for s in self._held(lease.token):\n"
+        "                    s.since_ms = self.clock.now_ms()\n",
+        "test_coordinator.py::test_a_rejoin_does_not_refresh_the_clock_of_a_shard_nobody_works",
+    ),
+    Mutant(
+        "a leave names as many heads as it likes",
+        SRC + "coordinator.py",
+        "        if len(notice.heads) > len(self._shards):"
+        "  # the notice is kept as evidence\n"
+        '            raise NoticeError("leave notice names more heads than the round has'
+        ' shards")\n',
+        "",
+        "test_coordinator.py::test_a_leave_names_no_more_heads_than_the_round_has_shards",
+    ),
+    Mutant(
+        "the package imports one more name from the rest of hypertrain",
+        SRC + "checkpoint.py",
+        "from hypertrain.data.store import CorruptObjectError, ObjectNotFound\n",
+        "from hypertrain.data.store import CorruptObjectError, ObjectNotFound, StoreError\n",
+        "test_imports.py::"
+        "test_the_package_imports_from_the_rest_of_hypertrain_only_what_the_adr_lists",
+    ),
+    Mutant(
+        "the package imports a sibling by a relative path",
+        SRC + "coordinator.py",
+        "from hypertrain.elastic.clock import Clock\n",
+        "from .clock import Clock\n",
+        "test_imports.py::"
+        "test_the_package_imports_from_the_rest_of_hypertrain_only_what_the_adr_lists",
+    ),
+    Mutant(
+        "a v2 module imports the library",
+        "src/hypertrain/storage/offer.py",
+        "from hypertrain.data.store import StoreError, _check_key\n",
+        "import hypertrain.elastic.clock\n"
+        "from hypertrain.data.store import StoreError, _check_key\n",
+        "test_imports.py::test_nothing_in_the_rest_of_hypertrain_imports_the_package",
+    ),
+    Mutant(
+        "the heads bound refuses the retry of an accepted leave",
+        SRC + "coordinator.py",
+        "        notice = verify_leave(signed)\n"
+        "        done = self._left.get(notice.lease) or self._left_before.get(notice.lease)\n"
+        "        if done is not None and done[0] == (notice.member, notice.signer):\n"
+        "            return done[1]\n"
+        "        if len(notice.heads) > len(self._shards):",
+        "        notice = verify_leave(signed)\n        if len(notice.heads) > len(self._shards):",
+        "test_coordinator.py::test_a_retried_leave_is_answered_even_when_the_next_round_is_smaller",
+    ),
+    Mutant(
+        "the rendezvous plan gives a shard to the lowest score",
+        SRC + "assignment.py",
+        "member = max(left, key=lambda m: (score(seed, shard, m), m))",
+        "member = min(left, key=lambda m: (score(seed, shard, m), m))",
+        "test_assignment.py::test_the_score_is_the_documented_formula",
+    ),
+    Mutant(
+        "the rendezvous plan depends on how many members are left",
+        SRC + "assignment.py",
+        "member = max(left, key=lambda m: (score(seed, shard, m), m))",
+        "member = max(left, key=lambda m: (score(seed + bytes([len(left)]), shard, m), m))",
+        "test_assignment.py::test_a_departure_moves_only_the_shards_of_the_member_that_left",
+    ),
+    Mutant(
+        "a commit refused because its shard was handed over counts as a refusal",
+        SRC + "sim.py",
+        "            elif self._handed_over(w.unit.shard, self.lease.token):\n"
+        '                self._lose("handed over")'
+        "  # the commit was on its way when the shard moved\n",
+        "",
+        "test_sim.py::test_work_in_flight_when_its_shard_is_handed_over_is_not_a_refusal",
+    ),
+    Mutant(
+        "a hand-over takes the shard its holder works first",
+        SRC + "coordinator.py",
+        "            if s is mine[0] and not any("
+        "t.linked_ms > s.since_ms for t in mine if t is not s):\n"
+        "                continue  # it works its first shard first, and has advanced no other\n",
+        "",
+        "test_coordinator.py::test_a_hand_over_takes_a_queued_shard_never_the_one_its_holder_works",
+    ),
+    Mutant(
+        "a hand-over goes to the last idle member",
+        SRC + "coordinator.py",
+        "to = plan(self._seed(), [shard], dict.fromkeys(idle, 1))[shard]",
+        "to = sorted(idle)[-1]",
+        "test_coordinator.py::test_a_hand_over_goes_to_the_rendezvous_winner_among_the_idle",
+    ),
+    Mutant(
+        "a hand-over goes to the idle member with the newest lease",
+        SRC + "coordinator.py",
+        "to = plan(self._seed(), [shard], dict.fromkeys(idle, 1))[shard]",
+        "to = max(idle, key=lambda m: idle[m])",
+        "test_coordinator.py::test_a_hand_over_goes_to_the_rendezvous_winner_among_the_idle",
+    ),
+    Mutant(
+        "a hand-over plans with the run seed alone",
+        SRC + "coordinator.py",
+        "to = plan(self._seed(), [shard], dict.fromkeys(idle, 1))[shard]",
+        "to = plan(self.seed, [shard], dict.fromkeys(idle, 1))[shard]",
+        "test_coordinator.py::test_a_hand_over_goes_to_the_rendezvous_winner_among_the_idle",
+    ),
+    Mutant(
+        "a hand-over target is opened with a window that is over at once",
+        SRC + "coordinator.py",
+        "            self._progress[to] = (now, False)  # it starts holding work: its progress"
+        " window opens\n",
+        "            self._progress[to] = (0, False)\n",
+        "test_coordinator.py::"
+        "test_a_shard_its_busy_holder_never_works_goes_to_a_member_that_holds_nothing",
+    ),
+    Mutant(
+        "another member's retry of a key is acknowledged",
+        SRC + "coordinator.py",
+        "        if done is not None and (done[0], done[2]) == (shard, member):\n",
+        "        if done is not None and done[0] == shard:\n",
+        "test_coordinator.py::test_another_member_cannot_have_a_link_it_did_not_produce_acknowledged",
+    ),
+    Mutant(
+        "a round keeps the hand-overs of the one before",
+        SRC + "coordinator.py",
+        "        self._moves = []\n        self._penalties = Counter()\n",
+        "        self._penalties = Counter()\n",
+        "test_coordinator.py::test_a_round_reports_only_its_own_hand_overs",
+    ),
+    Mutant(
+        "the host that loses a shard to a hand-over keeps its old window",
+        SRC + "coordinator.py",
+        "            self._progress[holder.member] = (now, True)"
+        "  # it lost work through no fault of its own\n",
+        "",
+        "test_coordinator.py::test_a_host_that_loses_a_shard_to_a_hand_over_gets_a_fresh_window",
+    ),
+    Mutant(
+        "a recorded hand-over excuses every later move of its shard",
+        SRC + "sim.py",
+        "                    self.handed.discard((shard, before.token))"
+        "  # one Move explains one move\n",
+        "                    pass\n",
+        "test_sim.py::test_a_hand_over_explains_one_move_of_its_shard_and_no_other",
+    ),
+    Mutant(
+        "the host that loses a shard to a hand-over keeps its old window, in the simulator",
+        SRC + "coordinator.py",
+        "            self._progress[holder.member] = (now, True)"
+        "  # it lost work through no fault of its own\n",
+        "",
+        "test_sim.py::test_a_host_that_loses_work_to_a_hand_over_is_not_stalled_for_it",
+    ),
+    Mutant(
+        "a hand-over leaves its holder with nothing",
+        SRC + "coordinator.py",
+        "            mine.remove(s)\n",
+        "",
+        "test_coordinator.py::test_a_host_never_loses_its_last_shard_to_the_hand_overs_of_one_sweep",
+    ),
+    Mutant(
+        "an advance in the millisecond a shard was got frees it",
+        SRC + "coordinator.py",
+        "t.linked_ms > s.since_ms",
+        "t.linked_ms >= s.since_ms",
+        "test_coordinator.py::test_an_advance_in_the_millisecond_a_shard_was_got_does_not_free_it",
+    ),
+    Mutant(
+        "idle shards are handed over before the freed ones are planned",
+        SRC + "coordinator.py",
+        "        if out:\n            self._assign()\n        self._hand_over_idle_shards()\n",
+        "        self._hand_over_idle_shards()\n        if out:\n            self._assign()\n",
+        "test_coordinator.py::"
+        "test_a_shard_a_stall_frees_goes_to_the_idle_member_not_to_a_hand_over",
+    ),
+    Mutant(
+        "a hand-over leaves its source a window a replacement may renew",
+        SRC + "coordinator.py",
+        "self._progress[holder.member] = (now, True)",
+        "self._progress[holder.member] = (now, False)",
+        "test_coordinator.py::test_the_window_a_hand_over_gives_is_not_renewed_by_a_replacement",
+    ),
+    Mutant(
+        "a hand-over leaves its target a window a replacement cannot renew",
+        SRC + "coordinator.py",
+        "self._progress[to] = (now, False)",
+        "self._progress[to] = (now, True)",
+        "test_coordinator.py::test_the_window_a_hand_over_gives_is_not_renewed_by_a_replacement",
+    ),
+    Mutant(
+        "a link after a hand-over keeps the window flag of the hand-over",
+        SRC + "coordinator.py",
+        "        self._progress[member] = (self.clock.now_ms(), False)"
+        "  # an accepted link restarts it\n",
+        "        self._progress[member] = (self.clock.now_ms(), self._progress[member][1])\n",
+        "test_coordinator.py::test_the_window_a_hand_over_gives_is_not_renewed_by_a_replacement",
+    ),
+    Mutant(
+        "a withdrawn link stays an advance of its shard",
+        SRC + "coordinator.py",
+        "        s.linked_ms = -1\n        if s.holder is not None:",
+        "        if s.holder is not None:",
+        "test_coordinator.py::"
+        "test_a_withdrawn_link_is_no_advance_for_the_hand_over_rule_or_the_clock",
+    ),
+    Mutant(
+        "a shard whose link was withdrawn keeps its old clock",
+        SRC + "coordinator.py",
+        "            s.since_ms = self.clock.now_ms()\n",
+        "",
+        "test_coordinator.py::"
+        "test_a_withdrawn_link_is_no_advance_for_the_hand_over_rule_or_the_clock",
+    ),
+    Mutant(
+        "a shard keeps the link time of the host that released it",
+        SRC + "coordinator.py",
+        "            self._shards[shard].linked_ms = -1\n",
+        "",
+        "test_coordinator.py::"
+        "test_a_shard_released_by_another_host_does_not_carry_that_hosts_link_time",
+    ),
+    Mutant(
+        "a hand-over takes the shard a host trains in turn",
+        SRC + "coordinator.py",
+        "            if s is mine[0] and not any("
+        "t.linked_ms > s.since_ms for t in mine if t is not s):\n"
+        "                continue  # it works its first shard first, and has advanced no other\n",
+        "",
+        "test_sim.py::test_a_host_that_trains_three_shards_in_turn_is_not_robbed_by_a_hand_over",
+    ),
+    Mutant(
+        "a host that works its second shard first keeps the first for ever",
+        SRC + "coordinator.py",
+        "            if s is mine[0] and not any("
+        "t.linked_ms > s.since_ms for t in mine if t is not s):\n",
+        "            if s is mine[0]:\n",
+        "test_coordinator.py::test_a_host_that_works_its_second_shard_first_loses_the_first",
+    ),
+    Mutant(
+        "a link does not say that its host advanced the shard",
+        SRC + "coordinator.py",
+        "        s.since_ms = s.linked_ms = self.clock.now_ms()\n",
+        "        s.since_ms = self.clock.now_ms()\n",
+        "test_coordinator.py::test_a_host_that_works_its_second_shard_first_loses_the_first",
+    ),
+    Mutant(
+        "a hand-over is recorded with another token",
+        SRC + "coordinator.py",
+        "Move(shard, holder.member, holder.token, to, now)",
+        "Move(shard, holder.member, holder.token + 1, to, now)",
+        "test_coordinator.py::test_a_shard_its_busy_holder_never_works_goes_to_a_member_that_holds_nothing",
+    ),
+    Mutant(
+        "a hand-over is fined",
+        SRC + "coordinator.py",
+        "            self._moves.append(Move(shard, holder.member, holder.token, to, now))\n",
+        "            self._penalties[holder.member] += 1\n"
+        "            self._moves.append(Move(shard, holder.member, holder.token, to, now))\n",
+        "test_coordinator.py::test_a_shard_its_busy_holder_never_works_goes_to_a_member_that_holds_nothing",
+    ),
+    Mutant(
+        "a hand-over goes to the first idle member, not the rendezvous winner",
+        SRC + "coordinator.py",
+        "to = plan(self._seed(), [shard], dict.fromkeys(idle, 1))[shard]",
+        "to = sorted(idle)[0]",
+        "test_coordinator.py::test_a_hand_over_goes_to_the_rendezvous_winner_among_the_idle",
+    ),
+    Mutant(
+        "the simulator does not label a hand-over",
+        SRC + "sim.py",
+        '            self._lose("handed over" if handed else "displaced")\n',
+        '            self._lose("displaced")\n',
+        "test_sim.py::test_work_in_flight_when_its_shard_is_handed_over_is_not_a_refusal",
+    ),
+    Mutant(
+        "the simulator's oracle forgets recorded hand-overs",
+        SRC + "sim.py",
+        "                if (shard, before.token) in self.handed:\n",
+        "                if False:\n",
+        "test_sim.py::test_work_in_flight_when_its_shard_is_handed_over_is_not_a_refusal",
+    ),
+    Mutant(
+        "the simulator's oracle allows any move of a shard",
+        SRC + "sim.py",
+        "                elif before.token not in self.departed:\n",
+        "                elif False:\n",
+        "test_sim.py::test_the_oracle_still_flags_a_hand_over_the_coordinator_did_not_record",
+    ),
+    Mutant(
+        "a handed-over shard keeps its old clock",
+        SRC + "coordinator.py",
+        "            s.holder, s.since_ms, s.linked_ms = Holder(to, idle.pop(to)), now, -1\n",
+        "            s.holder, s.linked_ms = Holder(to, idle.pop(to)), -1\n",
+        "test_coordinator.py::test_a_handed_over_shard_gets_a_fresh_clock",
+    ),
+    Mutant(
+        "a hand-over goes to a busy member that has room",
+        SRC + "coordinator.py",
+        "        idle = {m.id: m.lease.token for m in self.membership.active()"
+        " if m.lease.token not in held}\n",
+        "        idle = {m.id: m.lease.token for m in self.membership.active()"
+        " if len(held.get(m.lease.token, ())) < self.capacity}\n",
+        "test_sim.py::test_runs_with_hand_overs_keep_every_invariant",
+    ),
+    Mutant(
+        "the simulator's oracle lets a hand-over go to a member that held a shard",
+        SRC + "sim.py",
+        "            if kept:\n",
+        "            if False:\n",
+        "test_sim.py::test_the_oracle_flags_a_hand_over_to_a_member_that_held_a_shard",
+    ),
+    Mutant(
+        "the simulator's hand-over excuses outlive their round",
+        SRC + "sim.py",
+        "        self.handed.clear()  # a hand-over excuses a move of its own round only\n",
+        "",
+        "test_sim.py::test_a_hand_over_excuses_a_move_of_its_own_round_only",
     ),
     Mutant(
         "a lapse is penalised",

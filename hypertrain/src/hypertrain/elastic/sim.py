@@ -6,9 +6,9 @@ schedules take hosts away: a provider notice then a kill, a hard kill (the proce
 restarts on the same host), a host loss (the machine is gone and a replacement is provisioned),
 a network partition, a partition from the store only, a correlated regional loss and a capacity
 drought. A run must end in the state hash of the run without faults, with every accepted link in
-the final chains, no step credited twice, no live work refused or moved, no forged link
-accepted, no holder stalled without a fault, every loss of progress within one checkpoint
-interval and no penalty for an honest host.
+the final chains, no step credited twice, no live work refused or moved (bar a shard handed to
+an idle member), no forged link accepted, no holder stalled without a fault, every loss of
+progress within one checkpoint interval and no penalty for an honest host.
 
     uv run --frozen python -m hypertrain.elastic.sim table
     uv run --frozen python -m hypertrain.elastic.sim aggregate --seeds 200
@@ -42,6 +42,7 @@ from hypertrain.elastic.coordinator import (
     Exit,
     Grant,
     Holder,
+    Move,
 )
 from hypertrain.elastic.drain import DrainHandler
 from hypertrain.elastic.membership import Lease, LeaseError
@@ -53,6 +54,7 @@ from hypertrain.elastic.notice import (
     sign_leave,
 )
 from hypertrain.elastic.store import MemoryCheckpointStore
+from hypertrain.elastic.tokens import MemoryTokenLog
 from hypertrain.protocol.keys import Keypair
 
 SIM_TAG = b"ht-elastic-sim-v1|"
@@ -414,9 +416,15 @@ class _Host:
     def _take(self, grant: Grant) -> None:
         held = {a.unit.shard: a for a in grant.assignments}
         if self.work is not None and self.work.unit.shard not in held and self.unacked is None:
-            self._lose("displaced")
+            handed = self._handed_over(self.work.unit.shard, grant.lease.token)
+            self._lose("handed over" if handed else "displaced")
         if self.work is None and held and not self.busy_until and self.leaving is None:
             self._restore(held[min(held)])
+
+    def _handed_over(self, shard: int, token: int) -> bool:
+        """The coordinator handed `shard` over from this lease: a recorded Move."""
+        moves = self.sim.coord.settle().moves
+        return any(m.shard == shard and m.from_token == token for m in moves)
 
     def _restore(self, a: Assignment) -> None:
         def resumed() -> None:
@@ -441,14 +449,13 @@ class _Host:
         except LeaseError:
             self._drop("fenced")
             return
-        except CoordinatorError as e:
-            if e.code == "AUDIT_FAILED":
+        except (CoordinatorError, CheckpointError) as e:
+            if isinstance(e, CoordinatorError) and e.code == "AUDIT_FAILED":
                 self.die("revoked")
+            elif self._handed_over(w.unit.shard, self.lease.token):
+                self._lose("handed over")  # the commit was on its way when the shard moved
             else:
                 self._lose(f"refused:{e.code}")
-            return
-        except CheckpointError as e:
-            self._lose(f"refused:{e.code}")
             return
         if self.sim.rng.randrange(1_000_000) < self.sim.cfg.ack_loss_ppm:
             self.unacked = (key, step)
@@ -606,6 +613,7 @@ class Simulation:
             progress_ms=cfg.progress_ms,
             seed=SIM_TAG + struct.pack(">Q", seed),
             admit=self._admit,
+            tokens=MemoryTokenLog(),
             capacity=cfg.capacity,
             audit=self._audit,
         )
@@ -632,6 +640,8 @@ class Simulation:
         self.noticed: set[tuple[int, int]] = set()  # (slot, incarnation) given a notice
         self.dead_leases: dict[int, int] = {}
         self.departed: set[int] = set()
+        self.handed: set[tuple[int, int]] = set()  # (shard, token) of a Move no displacement used
+        self.moves_seen: set[Move] = set()
         self.state = genesis()
         self._holders: dict[int, Holder | None] = {}
 
@@ -682,6 +692,8 @@ class Simulation:
         ]
         self.coord.open_round(units)
         self._holders = {}
+        self.handed.clear()  # a hand-over excuses a move of its own round only
+        self.moves_seen.clear()
 
     def _fault(self, f: Fault) -> None:
         host = self.hosts[f.slot]
@@ -726,14 +738,33 @@ class Simulation:
     def _check(self) -> None:
         """Per-tick invariants of the coordinator's view."""
         cfg, now = self.cfg, self.clock.now_ms()
-        self.departed.update(d.token for d in self.coord.settle().departures)
+        settled = self.coord.settle()
+        self.departed.update(d.token for d in settled.departures)
+        for move in settled.moves:  # a hand-over goes to a member that held nothing
+            if move in self.moves_seen:
+                continue
+            self.moves_seen.add(move)
+            self.handed.add((move.shard, move.from_token))
+            kept = [
+                shard
+                for shard, before in self._holders.items()
+                if before is not None
+                and before.member == move.to_member
+                and getattr(self.coord.holder(shard), "member", None) == move.to_member
+            ]
+            if kept:
+                self.violations.append(
+                    f"shard {move.shard} handed to a busy member: {move}, {kept}"
+                )
         load: Counter[int] = Counter()
         for shard in range(cfg.shards):
             holder, before = self.coord.holder(shard), self._holders.get(shard)
             if holder is not None:
                 load[holder.token] += 1
             if before is not None and holder is not None and holder.member != before.member:
-                if before.token not in self.departed:
+                if (shard, before.token) in self.handed:
+                    self.handed.discard((shard, before.token))  # one Move explains one move
+                elif before.token not in self.departed:
                     self.violations.append(f"shard {shard} moved from a live holder {before}")
             self._holders[shard] = holder
         for token, n in load.items():
