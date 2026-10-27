@@ -103,6 +103,9 @@
   `src/hypertrain/**/*.py`. Results written before the field still compare label-only.
   The generic CUDA executor's runner makes the same measurement before each island starts
   (exit 9 if it fails) and `role-dispatch.json` carries it as `environment.image_sources_sha256`.
+  `_dispatch_env_v2` compares it with the qualification record's: 409
+  `ROLE_DISPATCH_PROVENANCE_MISMATCH` for another build, 503 when the container reported none; a
+  record without the field (a stand-in, or one signed before it) adds no check.
 - A challenge poll after the deadline no longer suspends a miner whose proof was accepted
   (RTA-05), and the exact accepted proof and screen may be re-posted after their deadline so
   that a finalization that failed can run. See `docs/adr/0010-admission-hardening.md` at the

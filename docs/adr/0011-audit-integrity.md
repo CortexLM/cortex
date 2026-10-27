@@ -504,6 +504,9 @@ breaker bounds the attempt-based one).
 - `sources()` changes in six files, so older qualification configs no longer validate against the tree and
   dispatch source pins must be recomputed (ADR 0007 and ADR 0008 precedent). Run ids and installed records
   do not change.
+- A run whose qualification record carries `image_sources_sha256` can be served only by a dispatcher that
+  reports it: the generic CUDA executor does, the Vast dispatcher (`role_dispatch.provenance`) does not and
+  is refused with 503 for such a run. Runs qualified before the field, and the TEST stand-ins, are unchanged.
 - A production run no longer starts from a label-only or legacy qualification record, whatever the owner
   signed; installed legacy records stay valid for test-ledger runs.
 - Cost: one SSH round trip per host and about 6 ms of `ssh-keygen`.

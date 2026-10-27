@@ -111,7 +111,9 @@ host keys, the requested image reference and the daemon's `RepoDigests`, the has
 program, the hash of the received tar and the hash of the published files. Two labels that
 resolve to one machine, or a label whose GPU set changes, are refused. The challenge recomputes
 the artifact commitments itself (`validate_artifacts`) and checks the environment against the
-signed manifest and the ADR 0007 table before it publishes; a host that returns a partial,
+signed manifest, the ADR 0007 table and, when the qualification record has one, its
+`image_sources_sha256` (409 on another build, 503 when the container reported none) before it
+publishes; a host that returns a partial,
 tampered or unverifiable result produces nothing, and the job moves to another host or fails.
 
 ## A hostile or broken host
