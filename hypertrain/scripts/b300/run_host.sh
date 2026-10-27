@@ -25,6 +25,14 @@ SMOKE_BUDGET=${HT_B300_SMOKE_BUDGET:-900}
 PEAK=${HT_B300_PEAK_FLOPS:-}
 PREFIX=${HT_B300_CONTAINER_PREFIX:-ht-b300}
 ALL_STEPS="host_probe pull gpu_probe mfu miner_test miner_prod"
+# What --upload copies out of the results directory. Everything else there (the lock, the IMDS
+# scratch file, anything a miner or an operator left behind) stays on the host.
+UPLOAD_INCLUDE=(
+  run.log steps.tsv stop.json spot-instance-action.json
+  nvidia-smi.csv nvidia-smi.txt efa-devices.txt fi_info.txt df.txt host_probe.json
+  pull.log pull-digests.json gpu_probe.json 'mfu-dp*-flash.json'
+  mine-smoke-v2.json mine-smoke-v2.stdout 'steps/*.rc' 'miner-prod/round-*.json'
+)
 
 usage() {
   cat <<'EOF'
@@ -74,16 +82,22 @@ seconds=$((10#${BASH_REMATCH[1]} * unit))
 STOP_GRACE=$((10#$STOP_GRACE))
 [[ $PREFIX =~ ^ht-[a-z0-9][a-z0-9_.-]*$ ]] || die "HT_B300_CONTAINER_PREFIX must start with ht-: $PREFIX"
 for s in $steps; do [[ " $ALL_STEPS " == *" $s "* ]] || die "unknown step: $s"; done
+out=$results_root/$host
 if [ "$prod" = 1 ]; then
   [ -n "${HT_B300_PROD_ENDPOINT:-}" ] || die "--prod needs HT_B300_PROD_ENDPOINT"
   [ -f "${HT_B300_MINER_CONFIG:-}" ] || die "--prod needs HT_B300_MINER_CONFIG (a miner.toml path)"
   [[ ${HT_B300_PROD_ROUNDS:-} =~ ^[0-9]+( [0-9]+)*$ ]] || die "--prod needs HT_B300_PROD_ROUNDS"
+  # The results directory is mounted at /out and uploaded: the miner directory (miner.toml, key
+  # file, workdir) must be neither inside it nor above it.
+  miner_dir=$(realpath -m -- "$(dirname -- "$HT_B300_MINER_CONFIG")")
+  out_real=$(realpath -m -- "$out")
+  case $miner_dir/ in "$out_real"/*) die "HT_B300_MINER_CONFIG is inside the results directory $out" ;; esac
+  case $out_real/ in "$miner_dir"/*) die "HT_B300_MINER_CONFIG is above the results directory $out" ;; esac
 else
   steps=${steps/miner_prod/}
 fi
 [ -z "$upload" ] || [[ $upload =~ ^s3://[a-z0-9.-]+(/[A-Za-z0-9._/-]*)?$ ]] || die "bad --upload: $upload"
 
-out=$results_root/$host
 mkdir -p "$out/steps"
 exec > >(tee -a "$out/run.log") 2>&1
 exec 9>"$out/.lock"
@@ -132,10 +146,12 @@ watchdog_pid=$!
 log "watchdog pid $watchdog_pid"
 
 upload_results() {
+  local filters=(--exclude '*') f
   [ -n "$upload" ] || return 0
+  for f in "${UPLOAD_INCLUDE[@]}"; do filters+=(--include "$f"); done
   if ! command -v aws >/dev/null; then
     log "upload skipped: aws CLI not found"
-  elif aws s3 cp --recursive --only-show-errors "$out" "${upload%/}/$host/"; then
+  elif aws s3 cp --recursive --only-show-errors "${filters[@]}" "$out" "${upload%/}/$host/"; then
     log "uploaded to ${upload%/}/$host/"
   else
     log "upload FAILED"

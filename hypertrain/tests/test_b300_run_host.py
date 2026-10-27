@@ -193,11 +193,38 @@ if args[:1] == ["-n"]:
 os.execvpe(args[0], args, {**os.environ, "FAKE_SUDO": "1"})
 """
 
+# aws s3 cp --recursive SRC s3://DST with the CLI's filters: --exclude/--include are tried in order
+# on SRC/<relative path>, the last match wins, everything is included by default. The files that
+# pass are copied under state/s3/<bucket and key>.
 FAKE_AWS = r"""
-import json, os, pathlib, sys
-with (pathlib.Path(os.environ["FAKE_STATE"]) / "aws.jsonl").open("a") as f:
-    f.write(json.dumps(sys.argv[1:]) + "\n")
+import fnmatch, json, os, pathlib, shutil, sys
+state = pathlib.Path(os.environ["FAKE_STATE"])
+args = sys.argv[1:]
+with (state / "aws.jsonl").open("a") as f:
+    f.write(json.dumps(args) + "\n")
+filters, paths, i = [], [], 2
+while i < len(args):
+    if args[i] in ("--exclude", "--include"):
+        filters.append((args[i][2:], args[i + 1]))
+        i += 2
+    else:
+        if not args[i].startswith("--"):
+            paths.append(args[i])
+        i += 1
+src, dst = pathlib.Path(paths[0]), paths[1].removeprefix("s3://")
+for f in sorted(src.rglob("*")):
+    if f.is_file():
+        keep = True
+        for kind, pattern in filters:
+            if fnmatch.fnmatchcase(str(f), f"{src}/{pattern}"):
+                keep = kind == "include"
+        if keep:
+            target = state / "s3" / dst / f.relative_to(src)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(f, target)
 """
+
+FAKE_FI_INFO = "print('fake fi_info')\n"
 
 
 class Imds(BaseHTTPRequestHandler):
@@ -240,7 +267,13 @@ def env(tmp_path: Path, imds: str) -> dict[str, str]:
     for d in (bindir, state, efa, tmp_path / "results"):
         d.mkdir()
     (efa / "rdmap0s0").mkdir()
-    fakes = {"docker": FAKE_DOCKER, "nvidia-smi": FAKE_SMI, "aws": FAKE_AWS, "sudo": FAKE_SUDO}
+    fakes = {
+        "docker": FAKE_DOCKER,
+        "nvidia-smi": FAKE_SMI,
+        "aws": FAKE_AWS,
+        "sudo": FAKE_SUDO,
+        "fi_info": FAKE_FI_INFO,
+    }
     for name, body in fakes.items():
         (bindir / name).write_text(f"#!{sys.executable}\n{body}")
         (bindir / name).chmod(0o755)
@@ -269,6 +302,12 @@ def docker_calls(tmp_path: Path) -> list[list[str]]:
 
 def runs_of(tmp_path: Path, name: str) -> list[list[str]]:
     return [c for c in docker_calls(tmp_path) if c[0] == "run" and f"ht-b300-{name}" in c]
+
+
+def uploaded(tmp_path: Path, dest: str = "bucket/b300/h1") -> set[str]:
+    """Relative paths the fake aws copied to s3://<dest>."""
+    root = tmp_path / "state/s3" / dest
+    return {str(f.relative_to(root)) for f in root.rglob("*") if f.is_file()}
 
 
 def stop_json(tmp_path: Path) -> dict[str, Any]:
@@ -424,17 +463,8 @@ def test_spot_notice_stops_containers_and_uploads(env, tmp_path):
     stop = stop_json(tmp_path)
     assert stop["reason"] == "spot-interruption" and stop["spot_notice"] == NOTICE
     assert ["stop", "--time", "60", "ctr-miner_test"] in docker_calls(tmp_path)
-    aws = [json.loads(x) for x in (tmp_path / "state/aws.jsonl").read_text().splitlines()]
-    assert aws == [
-        [
-            "s3",
-            "cp",
-            "--recursive",
-            "--only-show-errors",
-            str(tmp_path / "results/h1"),
-            "s3://bucket/b300/h1/",
-        ]
-    ]
+    assert len((tmp_path / "state/aws.jsonl").read_text().splitlines()) == 1
+    assert {"stop.json", "spot-instance-action.json", "run.log"} <= uploaded(tmp_path)
 
 
 def test_duration_deadline_stops_the_run(env, tmp_path):
@@ -652,3 +682,76 @@ def test_a_drain_stops_this_runs_containers_only(env, tmp_path, launch):
     assert untouched(executor) and untouched(other)
     log = (tmp_path / "state/destroyed.jsonl").read_text().splitlines()
     assert [json.loads(x)[2] for x in log] == ["ht-b300-gpu_probe"]
+
+
+# --- upload (B3): the key must not leave the host ------------------------------------------------
+
+SENTINEL = "do-not-upload-this-sentinel"
+EVIDENCE = {
+    "run.log",
+    "steps.tsv",
+    "stop.json",
+    "nvidia-smi.csv",
+    "nvidia-smi.txt",
+    "efa-devices.txt",
+    "fi_info.txt",
+    "df.txt",
+    "host_probe.json",
+    "pull.log",
+    "pull-digests.json",
+    "gpu_probe.json",
+    "mfu-dp8-flash.json",
+    "mine-smoke-v2.json",
+    "mine-smoke-v2.stdout",
+    *(f"steps/{s}.rc" for s in ("host_probe", "pull", "gpu_probe", "mfu", "miner_test")),
+}
+
+
+def prod_env(cfg_dir: Path, rounds: str = "3") -> dict[str, str]:
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "miner.toml").write_text('keyfile = "hk.bin"\nworkdir = "work"\n')
+    (cfg_dir / "hk.bin").write_text(SENTINEL)
+    return {
+        "HT_B300_PROD_ENDPOINT": "https://master.example/challenge/hypertrain",
+        "HT_B300_MINER_CONFIG": str(cfg_dir / "miner.toml"),
+        "HT_B300_PROD_ROUNDS": rounds,
+    }
+
+
+def test_upload_ships_the_evidence_and_nothing_else(env, tmp_path):
+    out = tmp_path / "results/h1"
+    (out / "miner").mkdir(parents=True)
+    (out / "miner/miner.toml").write_text('keyfile = "hk.bin"\n')
+    (out / "hk.bin").write_text(SENTINEL)
+    (out / "notes.txt").write_text("stray")
+    p = run(env, tmp_path, "--upload", "s3://bucket/b300")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert uploaded(tmp_path) == EVIDENCE
+
+
+@pytest.mark.parametrize("where", ["inside", "parent", "symlink", "same"])
+def test_a_miner_config_next_to_the_results_is_refused(env, tmp_path, where):
+    out = tmp_path / "results/h1"
+    cfg_dir = {
+        "inside": out / "miner",
+        "parent": tmp_path / "results",
+        "symlink": tmp_path / "link",
+        "same": out,
+    }[where]
+    if where == "symlink":
+        (out / "miner").mkdir(parents=True)
+        cfg_dir.symlink_to(out / "miner")
+    prod = prod_env(cfg_dir)
+    p = run({**env, **prod}, tmp_path, "--prod", "--upload", "s3://bucket/b300")
+    assert p.returncode == 2 and "HT_B300_MINER_CONFIG" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == [] and not (tmp_path / "state/aws.jsonl").exists()
+
+
+def test_prod_upload_carries_the_round_evidence_but_never_the_key(env, tmp_path):
+    prod = prod_env(tmp_path / "miner", rounds="3 4")
+    p = run({**env, **prod}, tmp_path, "--prod", "--upload", "s3://bucket/b300")
+    assert p.returncode == 0, p.stdout + p.stderr
+    rounds = {f"miner-prod/round-{w}{s}.json" for w in "34" for s in ("", "-commitments")}
+    assert uploaded(tmp_path) == EVIDENCE | {"steps/miner_prod.rc"} | rounds
+    root = tmp_path / "state/s3"
+    assert not [f for f in root.rglob("*") if f.is_file() and SENTINEL in f.read_text()]
