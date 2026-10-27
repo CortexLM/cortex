@@ -483,6 +483,11 @@ decision; there is no void round. Call `audits` once `d_audit` has passed and be
 twice `lease_rounds`; a later call answers 503 for every roster and the round cannot be
 audited. Open rounds with five or more members when an eviction is plausible.
 
+`finalize` pays exactly the inputs recorded with the applied tape, whatever the members'
+standing is when it runs: `Finalize.included` must list them. A member suspended, struck or
+with a burned bond between the aggregate and the finalize is still paid for the round it was
+verified in; the finalize used to re-derive the live set and answer 403 for ever.
+
 Regional relays are transport/cache only, not regional arithmetic aggregators.
 An upload opportunity acknowledgment is not custody. Completion failure requires
 an exact complete receipt or full original chunk coverage, authenticated healthy

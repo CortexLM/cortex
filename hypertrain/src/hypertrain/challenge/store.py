@@ -8703,7 +8703,11 @@ class ChallengeStore:
                     409, "repair evidence is model-only; cannot mint miner rewards"
                 )
             status = RoundStatus(**self._record_v2(run_id, "finality", str(w)))
-            included = sorted(x.roster.hotkey for x in self.verified_inputs_v2(run_id, w))
+            # The applied tape is the commitment: pay exactly its inputs, however they stand now.
+            included = sorted(
+                item["roster"]["hotkey"]
+                for item in self._record_v2(run_id, "tape-inputs", str(w))["inputs"]
+            )
             if model.w != w or model.included != included:
                 raise ChallengeError(
                     422, "finalized included set differs from full accepted authority"
