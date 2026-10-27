@@ -535,7 +535,8 @@ reach a round: no `run-v2`, no audit, no `get_weights`.
   second executor host does not shorten the references; two drivers only overlap the miner side.
 - **Do not push beacon rounds out of order.** The challenge reads exact rounds (a trial's seed round,
   `d_audit`). A second pusher with `--catch-up 1` moved `known` past rounds the first one would have
-  filled; `GET /join/<id>/challenge` then answered 500 `BeaconUnavailable: round N not pushed` and
+  filled; the challenge request (then an unsigned `GET /join/<id>/challenge`, an owner-signed
+  `POST` since ADR 0010) answered 500 `BeaconUnavailable: round N not pushed` and
   that trial could not continue. Backfilling the gap through `/v1/admin/beacon` took 2 minutes of
   store lock, a pause of 5 minutes, and two trials passed their 100-round window: the identity is
   SUSPENDED `CHALLENGE_EXPIRED` at its next challenge request, and `resume` resets `clean_count` to 0.

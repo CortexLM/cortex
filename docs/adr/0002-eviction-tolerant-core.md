@@ -341,7 +341,8 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
      and adds no coldkey block. For a P1 run the lazy branch of `challenge()` (`:222-228`) must
      close an `OPEN` trial past its deadline as `INTERRUPTED` too, with no suspension: a holder
      that keeps its lease and never proves would otherwise be suspended with no route back, by
-     any caller of the unsigned GET. A data-plane outage recorded by the coordinator is an
+     any caller of the then unsigned GET (an owner-signed POST since ADR 0010, and no lapse
+     suspends). A data-plane outage recorded by the coordinator is an
      excused miss in the same way; ADR 0003 (Decision 10) leaves that to this ADR.
    - A new trial needs a re-seed. `challenge()` refuses once `now > seed_beacon + 100`, and only
      `join`, a trial finalization and `resume` set the seed (`:197`, `:891-895`, `:1043-1048`),

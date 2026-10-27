@@ -299,7 +299,8 @@ reasons exist as internal hooks, `Admission.seize_bond(reason="AUDIT_MISMATCH")`
 round-stage audit mismatch that its caller confirmed as the miner's (the admission is suspended
 with one strike, and its coldkey stays bound as in probation) and `reason="NO_SHOW"` for a
 roster member that never committed; both burn the bond alone, and nothing in this tree calls
-them yet: they wait for the audit lot. An uncontested `MISMATCH`, an infrastructure closure and
+them: the audit leaves a member that never commits unsanctioned (ADR 0011 part 5) and confirms
+no round-stage mismatch. An uncontested `MISMATCH`, an infrastructure closure and
 a verdict against the auditor leave the bond intact. The status route reads the run's rounds
 once per call for an admission that holds a bond.
 
