@@ -2416,9 +2416,11 @@ class ChallengeStore:
 
         `keys` are the two pinned SSH host keys of a strict bootstrap. None is the explicit
         label-only mode: the seven keys signed before attestations existed plus a mark that says
-        so, which a production run refuses (_unattested_production_v2)."""
+        so, which a production run refuses (_unattested_production_v2). The digest of the sources
+        both hosts measured in their image is one more key when the results carry it."""
         from hypertrain.gpu_ops import host_attest
         from hypertrain.gpu_ops.journal import fsha
+        from hypertrain.gpu_ops.network_qualification import Result
 
         ref = manifest.training.reference_spec
         evidence: dict[str, JsonValue] = {
@@ -2435,6 +2437,14 @@ class ChallengeStore:
                 for rank in range(ref.layout.n_gpus)
             ],
         }
+        # Both hosts measured the same image sources (compare checks it); a result from before the
+        # field adds nothing, so its evidence is the one signed then.
+        measured = {
+            Result.model_validate_json(data).environment.image_sources_sha256
+            for data in result_bytes
+        }
+        if len(measured) == 1 and None not in measured:
+            evidence["image_sources_sha256"] = measured.pop()
         if keys is None:
             evidence["qualification_mode"] = "label-only"
         else:

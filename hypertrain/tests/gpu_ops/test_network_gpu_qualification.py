@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -33,6 +34,15 @@ from hypertrain.trainer.model import param_shapes
 TREE = Path(__file__).parents[2]
 # Compute capabilities (major, minor) of the measured device classes.
 RTX_5090, B300 = (12, 0), (10, 3)
+# What a result's `sources` holds in these fixtures: one package file and one that is not.
+SOURCES = {"src/hypertrain/x.py": "33" * 32, "scripts/network_gpu_qualification.py": "44" * 32}
+
+
+def image_sources_digest(sources: dict[str, str]) -> str:
+    """What the image's measurement of exactly these package files digests to, written out here
+    from the definition (JCS of the `src/hypertrain/**/*.py` entries), not from the engine."""
+    package = {k: v for k, v in sources.items() if k.startswith("src/hypertrain/")}
+    return sha256_hex(canonicalize({k: v for k, v in package.items() if k.endswith(".py")}))
 
 
 def results(tmp_path: Path, ranks: int = 2, H: int = 30, J: int = 5) -> list[Path]:  # noqa: N803
@@ -54,7 +64,7 @@ def results(tmp_path: Path, ranks: int = 2, H: int = 30, J: int = 5) -> list[Pat
             status="CUDA_ROUNDS_CAPTURED_NOT_WORKLOAD_PASS",
             config_sha256="11" * 32,
             profile_sha256="22" * 32,
-            sources={"src/x.py": "33" * 32},
+            sources=SOURCES,
             environment=driver.Environment(
                 backend="cuda",
                 torch="2.14.0+cu130",
@@ -66,6 +76,7 @@ def results(tmp_path: Path, ranks: int = 2, H: int = 30, J: int = 5) -> list[Pat
                 capabilities=[RTX_5090] * ranks,
                 image_digest="sha256:" + "44" * 32,
                 gpu_uuids=host_gpus(i)[:ranks],
+                image_sources_sha256=image_sources_digest(SOURCES),
             ),
             instance_id=i + 1,
             machine_id=i + 10,
@@ -194,6 +205,11 @@ def evidence_for(
             for rank in range(reference.layout.n_gpus)
         ],
     }
+    carried = {
+        json.loads(p.read_bytes())["environment"].get("image_sources_sha256") for p in results
+    }
+    if len(carried) == 1 and None not in carried:
+        evidence["image_sources_sha256"] = carried.pop()
     if label_only:
         evidence["qualification_mode"] = "label-only"
     else:
@@ -397,11 +413,12 @@ def test_hosts_sharing_a_gpu_or_a_boot_id_are_refused(tmp_path: Path, shared: st
 
 
 def test_label_only_accepts_legacy_results_without_attestation(tmp_path: Path) -> None:
-    # Given: results written before attestations and device UUIDs existed (the Vast lifecycle).
+    # Given: results written before attestations, device UUIDs and image sources existed.
     paths = results(tmp_path)
     for path in paths:
         data = json.loads(path.read_bytes())
         del data["environment"]["gpu_uuids"]
+        del data["environment"]["image_sources_sha256"]
         path.write_text(json.dumps(data))
         (path.parent / host_attest.ATTESTATION).unlink()
         (path.parent / host_attest.SIGNATURE).unlink()
@@ -409,6 +426,142 @@ def test_label_only_accepts_legacy_results_without_attestation(tmp_path: Path) -
     result = driver.compare(paths, manifest(), host_keys=None)
     # Then
     assert result == {"two_host_bitwise_match": True, "workload_allowed": False}
+
+
+def reattested(path: Path, edit: Any) -> None:
+    """Edit result.json the way an honest host that then signs it would have written it."""
+    data = json.loads(path.read_bytes())
+    edit(data)
+    path.write_text(json.dumps(data))
+    attest(path)
+
+
+@pytest.mark.parametrize(
+    "fault,named",
+    [
+        ("missing", "src/hypertrain/b.py"),
+        ("extra", "src/hypertrain/a.py"),
+        ("different", "src/hypertrain/c.py"),
+    ],
+)
+def test_bind_image_names_the_first_file_the_image_does_not_have_as_the_tree_does(
+    fault: str, named: str
+) -> None:
+    # Given: a tree map, and the map the image measured with one fault.
+    tree = {"src/hypertrain/b.py": "22" * 32, "src/hypertrain/c.py": "33" * 32}
+    tree["src/hypertrain/a.py"] = "11" * 32
+    measured = driver.package_sources(tree)
+    if fault == "missing":
+        del measured["src/hypertrain/b.py"]
+    elif fault == "extra":
+        del tree["src/hypertrain/a.py"]
+    else:
+        measured["src/hypertrain/c.py"] = "ff" * 32
+    # When / Then
+    with pytest.raises(Reject, match=f"^qualification_tree_is_not_the_image:{named}$"):
+        driver.bind_image(tree, measured)
+
+
+def test_bind_image_accepts_the_package_files_and_ignores_the_rest_of_the_tree() -> None:
+    # Given: a tree map with files that are not part of the installed package.
+    tree = {**SOURCES, "pyproject.toml": "55" * 32, "experiments/gpu_network_v2/run.py": "66" * 32}
+    # When / Then: only src/hypertrain/**/*.py is compared, and nothing is returned or raised.
+    assert driver.package_sources(tree) == {"src/hypertrain/x.py": "33" * 32}
+    driver.bind_image(tree, {"src/hypertrain/x.py": "33" * 32})
+
+
+def run_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, measure: Callable[[], dict[str, str]]
+) -> tuple[Path, driver.Qualification]:
+    """A config that reaches run()'s measurement on a faked two-GPU host that measures `measure`."""
+    cfg = seed_config(tmp_path, TREE / "experiments/gpu_network_v2/profile.json")
+    config = tmp_path / "config.json"
+    config.write_bytes(cfg.model_dump_json().encode())
+    fake_cuda_host(monkeypatch, [(RTX_5090, 170)] * 2)
+    monkeypatch.setattr(driver, "measure_image_sources", measure)
+    monkeypatch.setattr(os, "environ", {**os.environ, "HT_IMAGE_DIGEST": cfg.image_digest})
+    return config, cfg
+
+
+def test_run_refuses_a_tree_that_is_not_the_image_before_any_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: the installed package differs from the tree by one file's bytes.
+    measured = driver.package_sources(driver.sources(TREE))
+    first = sorted(measured)[0]
+    measured[first] = "ee" * 32
+    config, cfg = run_config(tmp_path, monkeypatch, lambda: measured)
+    # When / Then: refused before the genesis state is read and before anything is written.
+    with pytest.raises(Reject, match=f"^qualification_tree_is_not_the_image:{first}$"):
+        driver.run(config)
+    assert not cfg.output.exists()
+
+
+def test_run_gets_past_the_image_check_when_the_installed_package_is_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: the same run with an installed package equal to the tree.
+    installed = driver.package_sources(driver.sources(TREE))
+    config, _ = run_config(tmp_path, monkeypatch, lambda: installed)
+    # When / Then: it goes on to the next step, the seed state, which this fixture does not hold.
+    with pytest.raises(FileNotFoundError):
+        driver.run(config)
+
+
+def test_run_reports_an_unmeasurable_image_as_a_qualification_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: the in-image measurement fails.
+
+    def fails() -> dict[str, str]:
+        raise driver.Refused(9, "image sources could not be measured")
+
+    config, cfg = run_config(tmp_path, monkeypatch, fails)
+    # When / Then
+    with pytest.raises(Reject, match="^qualification_image_sources_unmeasurable$"):
+        driver.run(config)
+    assert not cfg.output.exists()
+
+
+@pytest.mark.parametrize(
+    "mode,fault,code",
+    [
+        ("strict", "not_the_tree", "qualification_image_sources_mismatch"),
+        ("label_only", "not_the_tree", "qualification_image_sources_mismatch"),
+        ("label_only", "absent_on_one_host", "qualification_image_sources_mismatch"),
+        ("strict", "absent_on_one_host", "qualification_image_sources_missing"),
+    ],
+)
+def test_compare_refuses_image_sources_that_differ_from_the_tree_or_between_hosts(
+    tmp_path: Path, mode: str, fault: str, code: str
+) -> None:
+    # Given: both hosts honestly sign a result that claims the same measurement, which their
+    # sources do not give; or host 1 claims none while host 0 claims one.
+    paths = results(tmp_path)
+
+    def edit(data: dict[str, Any]) -> None:
+        if fault == "absent_on_one_host":
+            del data["environment"]["image_sources_sha256"]
+        else:
+            data["environment"]["image_sources_sha256"] = "ab" * 32
+
+    for path in paths if fault == "not_the_tree" else paths[1:]:
+        reattested(path, edit)
+    keys = pins(paths) if mode == "strict" else None
+    # When / Then
+    with pytest.raises(Reject, match=f"^{code}$"):
+        driver.compare(paths, manifest(), host_keys=keys)
+
+
+def test_strict_compare_requires_the_image_sources_label_only_does_not(tmp_path: Path) -> None:
+    # Given: two attested hosts whose results carry no image measurement (an image built before).
+    paths = results(tmp_path)
+    for path in paths:
+        reattested(path, lambda d: d["environment"].pop("image_sources_sha256"))
+    # When / Then: strict refuses them, label-only accepts them as it did.
+    with pytest.raises(Reject, match="^qualification_image_sources_missing$"):
+        driver.compare(paths, manifest(), host_keys=pins(paths))
+    assert driver.compare(paths, manifest(), host_keys=None)["two_host_bitwise_match"] is True
 
 
 def test_compare_has_no_default_trust_mode(tmp_path: Path) -> None:

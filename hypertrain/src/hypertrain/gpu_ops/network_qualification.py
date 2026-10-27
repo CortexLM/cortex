@@ -19,13 +19,14 @@ import subprocess
 import sys
 import tarfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Annotated, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from hypertrain.gpu_ops import host_attest
+from hypertrain.gpu_ops.cuda_executor_runner import Refused, measure_image_sources, sources_digest
 from hypertrain.gpu_ops.journal import durable_write, fsha
 from hypertrain.gpu_ops.launcher import Reject
 from hypertrain.miner.island_launch import (
@@ -164,6 +165,9 @@ class Environment(Boundary):
     # One nvidia-smi form UUID per device, in device order. None only in a result written before
     # the field existed; it is omitted from JSON so such a result.json keeps its bytes.
     gpu_uuids: list[str] | None = Field(None, exclude_if=lambda v: v is None)
+    # sha256 of the package files the image itself holds (cuda_executor_runner.sources_digest). None
+    # only in a result written before the field existed, omitted from JSON like the two above.
+    image_sources_sha256: Hex64 | None = Field(None, exclude_if=lambda v: v is None)
 
     @model_validator(mode="after")
     def _one_driver_per_device(self) -> Environment:
@@ -266,6 +270,23 @@ def sources(tree: Path) -> dict[str, str]:
     if any(p.is_symlink() for p in paths):
         raise Reject("qualification_source_symlink")
     return {str(p.relative_to(tree)): fsha(p) for p in paths}
+
+
+def package_sources(tree_sources: Mapping[str, str]) -> dict[str, str]:
+    """The `src/hypertrain/**/*.py` entries of `sources()`: what the installed image must hold."""
+    return {
+        name: digest
+        for name, digest in tree_sources.items()
+        if name.startswith("src/hypertrain/") and name.endswith(".py")
+    }
+
+
+def bind_image(tree_sources: Mapping[str, str], measured: Mapping[str, str]) -> None:
+    """The package the image runs must be the package the tree holds, file for file."""
+    wanted = package_sources(tree_sources)
+    for name in sorted(wanted.keys() | measured.keys()):
+        if wanted.get(name) != measured.get(name):
+            raise Reject(f"qualification_tree_is_not_the_image:{name}")
 
 
 def bundle(tree: Path) -> bytes:
@@ -413,6 +434,13 @@ def run(config_path: Path) -> Result:
         raise Reject("qualification_actual_image_receipt_missing")
     ref = job.manifest.training.reference_spec
     environment = inspect_environment(cfg, ref.layout.n_gpus, ref.sm_count)
+    # The tree is what runs here (PYTHONPATH) and the image is what audits run: they must be one.
+    try:
+        measured = measure_image_sources()
+    except Refused as error:
+        raise Reject("qualification_image_sources_unmeasurable") from error
+    bind_image(cfg.sources, measured)
+    environment = environment.model_copy(update={"image_sources_sha256": sources_digest(measured)})
     inner = job.manifest.training.inner
     from hypertrain.auditor.replay import AnchorCache, pack_state, unpack_state
 
@@ -587,6 +615,19 @@ def _attested(
         raise Reject("qualification_hosts_not_distinct:boot_id")
 
 
+def _image_sources(results: tuple[Result, Result], *, strict: bool) -> None:
+    """Each result's image measurement is the digest of its own `sources`, and the hosts agree.
+    A result from before the field passes only label-only, as a whole pair."""
+    claimed = [r.environment.image_sources_sha256 for r in results]
+    if strict and None in claimed:
+        raise Reject("qualification_image_sources_missing")
+    for result, digest in zip(results, claimed, strict=True):
+        if digest is not None and digest != sources_digest(package_sources(result.sources)):
+            raise Reject("qualification_image_sources_mismatch")
+    if claimed[0] != claimed[1]:
+        raise Reject("qualification_image_sources_mismatch")
+
+
 def compare(
     paths: list[Path], manifest: RunManifestV2, *, host_keys: Sequence[str] | None
 ) -> dict[str, bool]:
@@ -644,6 +685,7 @@ def compare(
                     actual = None
                 if actual != want:
                     raise Reject("qualification_artifact_custody_changed")
+    _image_sources((a, b), strict=host_keys is not None)
     if host_keys is not None:
         _attested(paths, raw, (a, b), host_keys)
     return {"two_host_bitwise_match": True, "workload_allowed": False}

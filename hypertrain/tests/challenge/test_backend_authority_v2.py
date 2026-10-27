@@ -217,6 +217,7 @@ def authority(tmp_path, monkeypatch, request):
         result["environment"].update(
             image_digest=manifest.training.reference_spec.image_digest,
             torch_path="/venv/main/lib/torch/__init__.py",
+            image_sources_sha256=gpu.image_sources_digest(cfg.sources),
         )
         if host is not None:
             result["environment"].update(
@@ -657,9 +658,11 @@ def test_label_only_installs_the_evidence_its_receipt_names_and_is_idempotent(au
     )
     held = envelope_v2.load_json(store.objects.get(record["authority_hash"]))
     assert held == evidence and "host_attestation" not in held
-    seven = [
+    # The seven keys signed before attestations existed, and the image measurement of the results.
+    plain = [
         "backend",
         "configs",
+        "image_sources_sha256",
         "layout_hash",
         "reference_hash",
         "results",
@@ -668,9 +671,9 @@ def test_label_only_installs_the_evidence_its_receipt_names_and_is_idempotent(au
     ]
     if receipt == "marked":
         assert held["qualification_mode"] == record["qualification_mode"] == "label-only"
-        assert sorted(held) == sorted([*seven, "qualification_mode"])
+        assert sorted(held) == sorted([*plain, "qualification_mode"])
     else:
-        assert sorted(held) == seven and "qualification_mode" not in record
+        assert sorted(held) == plain and "qualification_mode" not in record
     assert qualification_records(store) == 1
     # And a test run stands on either record.
     register(store, manifest)

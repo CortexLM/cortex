@@ -92,6 +92,15 @@
   a production launch needs `QUAL_KNOWN_HOSTS_H0/H1` and `QUAL_FINGERPRINT_H0/H1`, and
   `--label-only` needs `QUAL_LABEL_ONLY=1` on a test ledger, so the Vast lifecycle can no longer
   launch a production run. See `docs/adr/0011-audit-integrity.md` (part 4) at the monorepo root.
+- CUDA qualification is bound to the image that runs it. `network_gpu_qualification.py run`
+  measures the `src/hypertrain/**/*.py` of the package installed in the image (in isolated
+  mode, so `PYTHONPATH` and the working directory cannot substitute it), refuses to start when
+  they differ from the qualified tree (`qualification_tree_is_not_the_image:<first path>`) and
+  records the digest as `environment.image_sources_sha256`; `compare` re-checks it against the
+  result's `sources` and between the hosts, strict mode requires it, and it enters the owner-signed
+  evidence as `image_sources_sha256`. The GPU image must be rebuilt from a tree that contains the
+  runner measurement before it can be qualified, and again after every change to
+  `src/hypertrain/**/*.py`. Results written before the field still compare label-only.
 - A challenge poll after the deadline no longer suspends a miner whose proof was accepted
   (RTA-05), and the exact accepted proof and screen may be re-posted after their deadline so
   that a finalization that failed can run. See `docs/adr/0010-admission-hardening.md` at the

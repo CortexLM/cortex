@@ -458,8 +458,11 @@ breaker bounds the attempt-based one).
    image with `python -I` (so `PYTHONPATH` and the cwd cannot substitute it): sha256 of the compact sorted
    JSON of `{"src/hypertrain/<rel>": sha256}` over every `*.py`, equal to the JCS form for the ASCII names
    the program enforces. `Environment.image_sources_sha256` records it. `run()` refuses to start when the
-   `*.py` of `sources(tree)` differ from the measurement (`qualification_tree_is_not_the_image`), `compare`
-   re-checks it against `result.sources`, and the value enters the evidence.
+   `*.py` of `sources(tree)` differ from the measurement (`qualification_tree_is_not_the_image:<first path>`;
+   a failed measurement is `qualification_image_sources_unmeasurable`), `compare` re-checks it against
+   `result.sources` and between the hosts (`qualification_image_sources_mismatch`; strict mode also requires
+   the field, `qualification_image_sources_missing`), and the value enters the evidence as
+   `image_sources_sha256` when the results carry it.
 6. **Audit-time check.** `_dispatch_env_v2` compares the dispatch record's `image_sources_sha256` with the
    qualification record's (409 on a difference, 503 when absent); a record without the field adds no check.
    The executor reports the measurement, and an optional pin in `ExecutorConfig` refuses a host that reports
