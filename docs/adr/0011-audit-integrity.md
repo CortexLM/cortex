@@ -17,6 +17,7 @@
 ## Parts
 
 1. DSP-01: disputes that nobody can decide.
+2. AUD-01: audit liveness (lease expiry, executor failure, exhaustion).
 
 ## Part 1: disputes that nobody can decide (DSP-01)
 
@@ -110,7 +111,7 @@
 - Residual: serial contests. `open()` has no round-age check, a contest pins `w+2` for any
   unclosed round, and the auto-lift removes the manual `recover` between two contests. One identity
   can stall the run about `2T` per contestable verdict at the cost of its own probation. RTA-06 prices
-  contests; until then this is accepted (Q4). [V for the mechanics, H for the economics]
+  contests; until then this is accepted (open question for Forge in the lot report). [V for the mechanics, H for the economics]
 - The honest miner of a false rejection (DET-01b) keeps its bond but loses the round reward and
   restarts probation. That cost belongs to DET-01b. [V]
 - A referee run that overlaps a closure may finish and register evidence that no resolution can use
@@ -142,3 +143,109 @@
   first route that calls `_services` re-arms it, as for lease expiry [?].
 - A DET-01b contest end to end, and a contest with an auditor-side responder (none exists) [H].
 - The `ABANDONMENT_GRACE` multiplier; the e2e in CI (the `test-slow` job is skipped on `v3-*` PRs).
+
+## Part 2: audit liveness (AUD-01)
+
+- Lens red team B finding AUD-01 (IMPORTANT) with Principal D38 ter ("the finality must distinguish
+  auditor/host fault from miner fault: an audit failure must not exclude a miner by default").
+  No manifest, policy value, wire format or run id changes. Decision 8 is isolated in one commit.
+  `implementation_hash` changes (`lease_v2` and `execute_audit_v2` are owned names).
+
+### Context
+
+- Mechanics. `schedule_audits_v2` (`challenge/store.py:6295`) queues one lease per roster miner with
+  `absolute = min(d_final, d_audit + 2 * lease_rounds)` (`:6396`). `lease_v2` (`:6448`) gives a queued job to an allowlisted
+  auditor: one running lease per auditor (`:6562`), at most two running, never the same auditor twice on a job,
+  `expires = min(now + lease_rounds, absolute)`. Time is the verified beacon (`_now`, `:612`). [V]
+- Permanent disable. `_expire_leases_v2` (`:6629`) writes `auditor-disabled` at every expiry (`:6640`); `lease_v2` then
+  answers 403 (`:6554-6558`) and `relay_observer_v2` refuses the observer (`:5308-5312`). Three references in the repository,
+  no deleter, no test, no document. The manifest requires >= 2 auditors, so two events end audit liveness. [V]
+- Exhaustion poisons the round. With `attempts >= 2` or `now >= absolute` the lease is `exhausted`, the miner gets
+  `excluded/INFRASTRUCTURE` and the round's finality becomes `EXCLUDED` (`:6652-6672`). `finality_v2.settle` refuses
+  `EXCLUDED` (`finality_v2.py:74`), relay settlement needs `SETTLED` (`:8486-8492`), and `rollback_v2` repairs only referee-signed
+  causes (`:9226`). A MISMATCH, by contrast, drops only its miner (`excluded/UNVERIFIED`, `:7600-7606`). [V]
+- Executor exceptions. `execute_audit_v2` (`:6897`) has `finally` only (`:7335-7336`): an exception leaves the lease `running`
+  until expiry. The auditor client exits 2 on a 500 (`auditor/__main__.py:101,178`) and its restart meets
+  `409 one live lease per auditor` until then. Lens S3 reproduces: 1 passed in 152 s; `RecursionError`, lease `running`,
+  later `exhausted`, one `auditor-disabled`, one `excluded`, finality `EXCLUDED`. [V]
+- Single window. `lease_v2` dates a job `created_beacon = row["created"]` (`:6618`) and `AuditJobV2` caps
+  `lease_expires <= created_beacon + 100` for H <= 30 (`protocol/messages_v2.py:450`). `scripts/ops/live_operator.py:123-133`
+  therefore refuses `d_final - d_audit > 100`, and every lease of an operator-built round runs to `absolute` (lease 21 -> 120):
+  a crashed or hung auditor is never replaced in that shape. A lease requested after `d_audit` gets 409 for wider gaps. [V]
+- Head of line. A miner seals its `CommitV2` with any `exp_drand` (intake checks only the commit window, `:6162`) and its leaves
+  with any finite-or-not f32 metric (`leaves_v2` checks root and count, `:6255-6288`). Either makes `AuditJobV2` raise inside
+  `lease_v2` for the first queued row, which is never skipped: both auditors get 409 on every poll while valid jobs wait
+  until `absolute`. Reproduced for the expiry (adversarial review) and for a NaN loss (this design). [V]
+- Concurrency. Two `execute_audit_v2` calls for one lease: the second registers its guard (`:7149`), then dies with
+  `FileExistsError` outside the `try`, leaving an orphan guard that replaces the running one; and `finally: pop(job_id)` can
+  release the next attempt's guard. [V by reproduction]
+- Stranding. `open_round_v2` restores the w-1 anchor of every roster entry (`:5155`); anchors come from genesis, a MATCH
+  replay (`:7319`) and rollback repair, so a miner left out of round w cannot be in round w+1. A round needs >= 4 verified
+  inputs (Q/4 cap; `tape_v2.py:88`, `messages_v2.py:728,735`). The generic `verified_inputs_v2` skips `excluded` miners and
+  demands a `replay` record from the others (`:7875-7906`); the service branch demands the complete roster. [V by reading]
+- `anchor_age`. `AuditJobV2.anchor_age <= 1`, `max_anchor_age_rounds = 1` and `audit_island_chain` (`auditor/replay.py:519-560`)
+  replay one missing predecessor under a 2H budget, but only tests call it and `lease_v2` hard-codes `anchor_age=0` (`:6609`). [V]
+
+### Decision
+
+1. Cooldown, not a ban: `auditor-cooldown` record, one lease then two, strike forgotten after a quiet lease, never refuses the
+   last configured auditor outside a cooldown; legacy `auditor-disabled` rows are inert.
+2. Cause per attempt: `AUDITOR_SILENT` (cooldown), `EXECUTOR_INTERRUPTED`, `EXECUTOR_FAILED` (no cooldown). The auditor is
+   silent only if it never asked for the execution: `audit-execution` is committed `REQUESTED` before the preparation can refuse.
+3. One retire path; today's exhaustion block moves verbatim into `_exhaust_audit_job_v2`, the only place Decision 8 touches.
+4. An exception leaving the executor boundary fails the attempt at once (re-raised, class name only) unless the guard is
+   cancelled. Circuit breaker: the same error class on a second job within `lease_rounds` is held to the lease expiry.
+5. Execution is single-flight (409), the guard is registered last and released by identity.
+6. `created_beacon = now`; `live_operator` accepts any gap up to the 200-round cap (A1 option a).
+7. A job whose miner-sealed inputs cannot be leased (`COMMIT_EXPIRED`, `LEAVES_NONFINITE`) is dropped as the miner's fault
+   (`excluded/UNVERIFIED`) and the queue moves on. Other validation errors stay loud.
+8. An exhausted job is re-armed once (option O2 of the open question on exhaustion, chosen by the lead
+   because D38 ter says an audit failure must not exclude a miner by default; isolated in one commit so
+   Forge can swap it for dropping at once or for today's behaviour); a second exhaustion drops its miner from that round (`excluded/INFRASTRUCTURE`,
+   `unresolved_audits - 1`). The round disposition is never touched. Service-admitted runs skip the re-arm.
+9. INFRASTRUCTURE is never a round disposition. No sanction, strike or suspension is added.
+
+### Consequences
+
+- One failing host or auditor costs one lease of one auditor; after a second failed window it costs one miner one round.
+  It no longer silences the auditors for good or voids the round for everybody.
+- Total audit time per job doubles: a job nobody audits holds its round (verified inputs, w+2 opening, rollback, relay
+  settlement) for up to `2 * lease_rounds` more beacon rounds (H <= 30: 200 rounds, 10 min; policy lease at H = 512: 2932
+  rounds, 2.4 h) before it is resolved. Nothing needs an operator.
+- A miner dropped after two windows is stranded for the rest of the run (`open_round_v2` needs its anchor). This lot does not change
+  that. Recovery would need the `anchor_age = 1` chain (`audit_island_chain`) wired into `open_round_v2`, `lease_v2` and the
+  worker: a protocol-level change, not part of this lot (option O3 of the exhaustion question).
+- The public view labels a dropped miner `EXCLUDED_V2`, a fault (`public_api/views.py:15,118`), as MISMATCH drops already are (open question for the frontend owner).
+- A 4-miner roster cannot absorb any drop (>= 4 inputs); a service-admitted run cannot lease today (heavy gate) and needs its complete roster.
+- The auditor process exits 2 on the cooldown 403 and on a 500; its supervisor should restart it with a delay.
+- The first lease of an operator-built round with a gap of 100 is still the only lease of that window; gap 101-200 gives a
+  replacement inside the window, and Decision 8 gives one more window in every shape.
+
+### Rejected alternatives
+
+An operator re-enable route (no automatic liveness, the 403 text promises a review nobody implements); a column or table
+(`store.py` has no migration facility; `records_v2` is the idiom); a wall-clock timeout (the store is beacon-time); a new
+`AuditPolicyV2` field for the lengths (manifest-covered, derived values suffice); catching only `IslandFailure` (S3 raises
+`RecursionError`); wrapping all of `execute_audit_v2` or wrapping it outside (would discard a good verdict on a beacon pause,
+bypassable); refunding the attempt (`max_attempts` is `Literal[2]`); relaxing `AuditJobV2._bounds` (protocol model change);
+clamping `absolute` at scheduling (kills the second lease of every H <= 30 round); a round-wide `EXCLUDED` for
+infrastructure (O4: one poison job or one outage voids everybody's reward and the chain stalls); including the unaudited miner
+(pays a cheater who causes an outage); re-arming without a limit (the literal reading of D38 ter: a poison job would hold the
+round and block w+2 for ever); a pause before the re-arm (the window itself is the pause for time-based exhaustion, the
+breaker bounds the attempt-based one).
+
+### Not verified
+
+- No real executor host, GPU or auditor process: executor failures are injected by replacing `worker.launch_island`. [?]
+- No round of five or more miners was aggregated and settled with one dropped miner; the generic path is argued from
+  `verified_inputs_v2` skipping `excluded` records and from `live_operator.included`. [?]
+- Service-admitted runs: neither the re-arm (skipped by construction) nor the lease path were exercised. [?]
+- `complete_audit_v2` with the stale nonce of a re-armed lease (argued from the nonce check, not run). [?]
+- A deployed run's `service-admission` records; the frontend schema for miner statuses; supervisor restart behaviour on exit 2. [?]
+- `leaves_v2` end to end with a NaN metric (the records are written directly by the harness; the code path is read). [?]
+
+### Sources
+
+`hypertrain/src/hypertrain/challenge/{store,finality_v2}.py`, `protocol/messages_v2.py`, `auditor/{replay,__main__}.py`,
+`scripts/ops/live_operator.py`, `docs/s100-test-stack.md`, 2026-10-27. Lens red team B `rtB_audit_store_attacks.py::test_S3_*`,
+2026-10-27 [A]. Adversarial review of the first AUD-01 design, 2026-10-27 [A]. S7 s100 TEST notes [A].
