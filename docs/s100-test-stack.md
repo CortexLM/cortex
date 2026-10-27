@@ -258,9 +258,12 @@ ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID" < $T/w
 **`d_final - d_audit` decides how many audit leases fit in a round.** The store dates every lease
 by the round it starts in (`created_beacon = now`), so a lease validates at any round before
 `absolute = min(d_final, d_audit + 2 * lease_rounds)`; `lease_rounds` is 100 for H <= 30. With a
-gap of 100 rounds or less the first lease runs to `d_final`: if its auditor goes silent it is
-replaced only in the second window the store opens for an exhausted job (`audit-rearm`). With a gap
-of 101 to 200 rounds a second auditor can take the job inside the same window.
+gap of 100 rounds or less the first lease runs to `d_final`: if its auditor goes silent the job is
+not replaced, because an honest miner seals its commit until `d_final` and an audit job embeds it
+live, so no window can start after that round; the miner is left out of the round (`excluded`,
+`INFRASTRUCTURE`, no sanction). With a gap of 101 to 200 rounds a second auditor can take the job
+inside the same window, and a job whose attempts fail early gets a second window that ends at
+`d_final` (`audit-rearm`).
 `live_operator.py open` accepts any gap from 2 to 200 rounds for every H; 200 is the service
 horizon (`store.py:5109`). A round with a wider gap closes later: 100 more rounds (5 minutes) per
 extra 100.

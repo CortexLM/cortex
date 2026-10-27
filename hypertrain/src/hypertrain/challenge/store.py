@@ -6935,7 +6935,9 @@ class ChallengeStore:
     def _rearm_audit_job_v2(self, run_id: str, row: sqlite3.Row, now: int) -> bool:
         """Requeue an exhausted job for a fresh window that starts now: attempts and tried reset, a
         new coordinator-signed challenge, bounded by the pinned max_attempts windows. The generic
-        path only: a service-admitted run keeps its resource deadline."""
+        path only: a service-admitted run keeps its resource deadline. The window ends where the
+        miner's sealed commit ends (an honest one: `d_final`): AuditJobV2 embeds it live, so a
+        window past that round could only drop the miner for a fault that is not its own."""
         from hypertrain.protocol.messages_v2 import AuditChallengeV2
 
         if self._db.execute(
@@ -6954,7 +6956,12 @@ class ChallengeStore:
         windows = json.loads(previous[0])["windows"] if previous else 1
         if windows >= policy.max_attempts:
             return False
-        absolute = now + policy.absolute_rounds()
+        sealed = envelope_v2.parse_envelope(
+            self._record_v2(run_id, "commit", f"{row['w']}:{row['hotkey']}")
+        )
+        absolute = min(now + policy.absolute_rounds(), sealed.exp_drand)
+        if absolute <= now + 1:
+            return False
         challenge = AuditChallengeV2.model_validate(
             envelope_v2.parse_envelope(json.loads(row["challenge"])).body
         ).model_copy(update={"serve_deadline": absolute})

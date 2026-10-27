@@ -490,6 +490,51 @@ def test_a_job_nobody_audits_in_two_windows_drops_its_miner_and_nothing_else(net
     ) == ("PENDING", 0, None)
 
 
+def test_a_commit_that_ends_with_the_round_is_not_blamed_for_a_window_nobody_can_serve(network):
+    """An honest miner seals its CommitV2 until `d_final` (`miner/core.py`) and an audit job embeds
+    it live, so no lease can start after that round. The Lens AUD-07 probe: gap 100, nobody audits,
+    five honest miners; the second window used to be opened at `d_final` and the first poll
+    after it dropped everybody as `MINER_INPUT_REFUSED`, the miners' own fault."""
+    store, run = network.store, network.manifest.run_id()
+    d_final = D_AUDIT + 100
+    seed_round(network, n=5, gap=100, commit_exp=d_final)
+    schedule(network)
+    network.push(d_final)  # window 1 ends without a single lease
+    expire_leases(network)
+    network.push(d_final + 1)
+    assert lease(network, A, 1).status_code == 204
+    rows = store._db.execute("SELECT state,result FROM audit_leases_v2").fetchall()
+    assert {(r["state"], r["result"]) for r in rows} == {("exhausted", "AUDIT_INFRASTRUCTURE")}
+    for key in miners(5):
+        assert store._record_v2(run, "excluded", f"0:{key.ss58}")["reason"] == "INFRASTRUCTURE"
+    assert (
+        store._db.execute("SELECT COUNT(*) FROM records_v2 WHERE kind='audit-rearm'").fetchone()[0]
+        == 0
+    )
+    finality = store._record_v2(run, "finality", "0")
+    assert (finality["disposition"], finality["unresolved_audits"]) == ("PENDING", 0)
+
+
+def test_a_second_window_stops_where_the_sealed_commit_stops(network):
+    """A host that fails early leaves the miner's commit most of its life: the window that re-arms
+    is real, and it ends at the round the commit expires, not 2 * lease_rounds later."""
+    store, run = network.store, network.manifest.run_id()
+    d_final = D_AUDIT + 100
+    seed_round(network, n=5, gap=100, commit_exp=d_final)
+    schedule(network)
+    network.push(D_AUDIT + 30)
+    ids = set()
+    for number, auditor in enumerate((A, B), 1):  # both attempts of window 1 fail at once
+        job = lease(network, auditor, number).json()["body"]
+        ids.add(job["job_id"])
+        store._fail_audit_attempt_v2(run, job["job_id"], job["lease_nonce"], RuntimeError("host"))
+    assert len(ids) == 1
+    row = lease_row(store, job["job_id"])
+    assert (row["state"], row["created"], row["absolute"]) == ("queued", D_AUDIT + 30, d_final)
+    served = lease(network, A, 3).json()["body"]  # and the window can still be leased
+    assert (served["created_beacon"], served["absolute_deadline"]) == (D_AUDIT + 30, d_final)
+
+
 def test_s3_one_poisoned_job_costs_its_miner_not_the_round(network, monkeypatch):
     store, run = network.store, network.manifest.run_id()
     seed_round(network, n=5, executable=True, gap=100)

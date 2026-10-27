@@ -209,6 +209,11 @@
    because D38 ter says an audit failure must not exclude a miner by default; isolated in one commit so
    Forge can swap it for dropping at once or for today's behaviour); a second exhaustion drops its miner from that round (`excluded/INFRASTRUCTURE`,
    `unresolved_audits - 1`). The round disposition is never touched. Service-admitted runs skip the re-arm.
+   The second window ends where the miner's sealed commit ends: `absolute = min(now + 2 * lease_rounds,
+   exp_drand)`, and no window is opened when that leaves fewer than two rounds (AUD-07, Lens verdict
+   2026-10-27 16:05Z). `AuditJobV2` embeds the commit live (`validate_embedded`) and an honest miner
+   seals it until `d_final` (`miner/core.py:1274`), so a window opened at `d_final` could only end in
+   `COMMIT_EXPIRED`, a drop booked as the miner's fault (`UNVERIFIED`) for the silence of the auditors.
 9. INFRASTRUCTURE is never a round disposition. No sanction, strike or suspension is added.
 
 ### Consequences
@@ -225,7 +230,10 @@
 - A 4-miner roster cannot absorb any drop (>= 4 inputs); a service-admitted run cannot lease today (heavy gate) and needs its complete roster.
 - The auditor process exits 2 on the cooldown 403 and on a 500; its supervisor should restart it with a delay.
 - The first lease of an operator-built round with a gap of 100 is still the only lease of that window; gap 101-200 gives a
-  replacement inside the window, and Decision 8 gives one more window in every shape.
+  replacement inside the window. Decision 8 gives a second window only to a job that is exhausted before the
+  miner's commit expires (attempts that fail early, window shorter than the round). In the operated shape, where the first
+  window ends at `d_final`, a job nobody finished costs its miner the round at once, as `INFRASTRUCTURE`. Making that
+  window real would need miners to seal commits past `d_final` (`miner/core.py`), a miner-side change this lot does not make.
 
 ### Rejected alternatives
 
