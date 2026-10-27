@@ -21,6 +21,7 @@
 3. DET-01, DET-01b: process-environment pin of island workers.
 4. QUAL-01, QUAL-02: host and image binding of the CUDA qualification.
 5. AUD-06: a roster member that never commits.
+6. EXE-01: host-controlled bytes cannot crash the CUDA executor.
 
 ## Part 1: disputes that nobody can decide (DSP-01)
 
@@ -644,3 +645,141 @@ breaker bounds the attempt-based one).
 - A leaves-less job whose member posts leaves after `absolute`; the NO_SHOW naming of leaves
   exhaustion (needs AUD-01's code, absent from this tree).
 - The `implementation_hash` of the final tree and a rollback after a `NO_SHOW` round (reading only).
+
+## Part 6: host-controlled bytes cannot crash the CUDA executor (EXE-01)
+
+- Lens red team B finding EXE-01 (IMPORTANT) with Principal D36 bis ("catch RecursionError and any
+  parse error on host-controlled JSON and quarantine the host exactly as ADR 0008 section 4
+  promises"). Amends ADR 0008 section 4 (rows "host refused" and "attempt failed") and nothing else
+  of it. Edits `gpu_ops/cuda_executor.py` only: no manifest, schema, wire format, protocol constant
+  or run id changes, and `implementation_hash` does not change (it hashes ten other files and the
+  owned names of `store.py`, measured). No code of this part ran on a GPU host.
+
+### Context
+
+- ADR 0008 section 4 promises that "host-reported fields that do not parse or exceed their bounds"
+  refuse the host (quarantined until the challenge restarts, next host tried), and that a result
+  failing validation is a failed attempt with nothing published (`docs/adr/0008:121,123`). [V]
+- `Executor.launch` handles `HostRefused`, `(HostLost, HostBusy)` and `AttemptFailed` only
+  (`gpu_ops/cuda_executor.py:960,965,969`). Anything else leaves through the `finally` (`:974`): no
+  journal row, no quarantine, no failover, and `_order` (`:477-480`, a function of the job digest)
+  puts the same host first again for the same job. [V]
+- Four escapes reproduce at `65be1962`. (1) The RepoDigests line goes through `json.loads` (`:240`,
+  handler `:242`): 100,000 nested `[` raise `RecursionError` (Lens X2). (2) `COMPLETE` goes through
+  `json.loads` under `except ValueError` (`:711-714`): same (Lens X1). (3) `tarfile` reads the size
+  an extended header claims in one `fileobj.read` (PAX `x`, `g`, GNU `L`, `K`): 2**40 to 2**62 raise
+  `MemoryError`, 2**63-1 and more `OverflowError`; the handler at `:706` lists neither. (4) The
+  probe clock is an unbounded int and `abs(snapshot.epoch - (before + after) / 2)` (`:566`) raises
+  `OverflowError` for a 400-digit `date +%s`. (3) and (4) are not in the Lens report. [V]
+- Three gaps do not escape but defeat section 4. `_check_rank` accepts any JSON list as
+  `trace.json` (`:1023`): `[1, 2, 3]`, `[{}]`, a 9,000-level list and a rank-swapped trace were
+  published by the hostile host, `IslandParty.published` (`store.py:7268`, `auditor/worker.py:194`)
+  then raised a pydantic `ValidationError`, and the resume path (`published()`, `:899-926`) returned
+  the same publication with no host call: the job is stuck. A probe or pull that prints more than
+  1 MiB is an attempt failure worded "result exceeds max_result_bytes" (`:401-405`) and burns a
+  slot of `max_attempts`. A RepoDigests entry with a lone surrogate passes the probe and fails in
+  `canonicalize` (`protocol/jcs.py:23`) after a whole container run. [V]
+- The recursion limit protects nothing: the `json` C scanner of CPython 3.12.15 stops at 9,997
+  levels whatever `sys.setrecursionlimit` says, and importing `hypertrain.challenge.store` raises
+  the limit to 100,000 (`py_ecc`). Already defended: pydantic's own parser, the `except Exception`
+  of `_publish` (`:776`), tar header chains (`RecursionError` in the tuple at `:706`). 20,000
+  random probe and 6,000 random tar mutations find only the clock overflow; targeted bombs find
+  the rest. [V]
+- Existing tests pin malformed result metadata as a failed attempt, "a bad result is not a bad
+  host" (`tests/gpu_ops/test_cuda_executor_dispatch.py:810,921`). `miner/island_launch.py` is one
+  of the ten `implementation_hash` files, so validation fixes stay in the executor. [V]
+- `execute_audit_v2` ends in `try/finally` and no handler (`store.py:6897-7336`); Part 2 books
+  whatever leaves the executor boundary. This part decides what that is. [V]
+
+### Decision
+
+1. Classification, resolving the overlap of rows 3 and 5. What the host says about itself outside
+   the container result (the probe, the pull) is row 3: anything that does not parse or exceeds a
+   bound is `HostRefused`. Inside the result, what an honest but broken environment can produce
+   stays row 5, `AttemptFailed` (malformed JSON, schema violation, hash mismatch, unsafe member,
+   size over a cap, unreadable trace). Two inputs only an attack on our parsers explains are
+   promoted to `HostRefused`: a metadata document nested deeper than 8 levels (the runner writes 2
+   in `COMPLETE` and 3 in `environment.json`) and a tar read above `SMALL` (1 MiB).
+2. The RepoDigests line is read by a closed grammar, not by JSON: at most 32 double-quoted
+   references of 1 to 256 printable ASCII characters without space, quote or backslash. No parser
+   recurses, no escape, no surrogate, no big integer.
+3. The probe clock must be a `time_t` (`-2**63 <= epoch < 2**63`); the comparison with the
+   challenge clock then cannot overflow.
+4. `shallow(raw)` decodes `COMPLETE` and `environment.json` strictly as UTF-8 and counts nesting in
+   one linear loop that skips strings; a document deeper than `HOST_JSON_DEPTH = 8` is refused
+   before any parser sees it. Sizes are bounded first (members over `SMALL` are refused at `:688`).
+5. The result tar is read through `_CappedReader`: a single `read` above `SMALL` is `HostRefused`.
+   Members are streamed in 1 MiB chunks, so the bound is inclusive.
+6. `Executor._attempt` turns `RecursionError`, `MemoryError` and `OverflowError` raised by
+   `_read_result` or `_check_environment` into `AttemptFailed`. No quarantine: for a site nobody
+   foresaw the cause may be ours, and quarantining on it could take every host out.
+7. A probe or pull whose output passes the transport bound is `HostRefused` ("host probe output
+   exceeds its bound", "image pull output exceeds its bound"); the container run keeps
+   `AttemptFailed`.
+8. A trace is published only if `IslandParty.read_trace`, the reader of the store, the audit
+   worker and a dispute, accepts it and each entry carries the rank of its directory; otherwise
+   `IslandFailure`, which `_publish` turns into `AttemptFailed`. The resume path applies the same
+   gate. A rank's `summary.json`, `leaves.json` and `trace.json` may not exceed 64 MiB (the
+   reader's own `TRACE_BYTES`): refused as an unacceptable member before staging.
+9. `Executor.launch` is not edited. What it raises when no host can serve the job is plain
+   `IslandFailure` (never a subclass): "cuda executor found no host able to run the job: ..." when
+   every host is quarantined or unavailable (at once, with no pause between sweeps), "cuda
+   executor gave up: ..." after `max_attempts` failed attempts. `Aborted`, a subclass, only for a
+   deadline or a cancelled lease. Part 2 books what leaves the executor boundary as the
+   executor's failure, unless the lease guard is already cancelled.
+
+### Consequences
+
+- A hostile host costs at most one container run (a bomb in the result) or none (a probe), is
+  quarantined until the challenge restarts, and the next host serves the same job. After this part
+  the only exceptions that bytes of a host can raise out of `launch` are `IslandFailure` and
+  `Aborted`: 26,000 random mutations and 68 targeted inputs raise nothing else.
+- Stricter than JSON means fail closed: a daemon that prints the image list with an escape or a
+  space after the bracket is refused, with a journaled reason, until the host or the grammar is
+  fixed [H on real docker output]. `cuda_executor_check.py` shows it before any job.
+- The executor and the audit reader can no longer disagree about a trace. Each trace is parsed
+  twice (executor gate, then store), and again when a finished job is returned.
+- The validation fixes are in the executor, so `miner/island_launch.py` and `implementation_hash`
+  are untouched. `sources()` and the bundle change in one file; the runner is unchanged, so
+  `runner_sha256` and the GPU image stay valid.
+- Not changed: a host that accepts the job and then hangs, or trickles bytes, holds it until the
+  job deadline (`Aborted`); `max_result_bytes` still bounds the binary files that
+  `validate_artifacts` reads whole.
+
+### Rejected alternatives
+
+1. Add `RecursionError` and `MemoryError` to the two `except` tuples: passes the reproducers, keeps
+   a 10,000-frame C recursion on host bytes and leaves the late surrogate failure, the tar claims,
+   the clock overflow and the deep trace.
+2. A blanket `except Exception` in `launch` that quarantines: it cannot tell the probe from the
+   result from our own journal and lock code, hides programmer bugs, and a `MemoryError` of our
+   own would quarantine every host in turn.
+3. `envelope_v2.load_json` for `COMPLETE`: its object bound (4,096 keys) is below `MAX_MEMBERS`
+   (16,384) and it cannot read a list. Its depth scan is reused, copied as `shallow()`.
+4. A regex string-skipping depth scan: quadratic (1.8 s at 16,000 escaped quotes, x4 per doubling).
+5. Every result-side failure stays `AttemptFailed`: smallest diff and literally row 5, but a hostile
+   first host then costs a container run per job and `max_attempts` slots (three hostile hosts and
+   one healthy: the job gives up before reaching it).
+6. Quarantine every parse or schema failure of the result: contradicts row 5 and about ten pinned
+   tests, and one deployment bug (a `torch_path` over 256 characters) would take every host out.
+
+### Not verified
+
+- Real `docker image inspect --format {{json .RepoDigests}}` output (the grammar assumes Go's
+  compact encoding of ASCII references), a GPU run, a live SSH host: the fake host replaces the
+  daemon and the training step. [H]
+- Other CPython 3.12 patch releases: the 9,997-level `json` limit and the tar chain threshold
+  (33,000 chained empty PAX headers parse at the production limit of 100,000 and cost 0.5 s) were
+  measured on 3.12.15 only. [H]
+- Production sizes of `leaves.json`, `summary.json` and `trace.json`; 64 MiB is the largest bound a
+  reader accepts, not a measured need. [?]
+- The store side of the chain (500 from `/execute`, the booked attempt) is Part 2; here only the
+  class and message that reach `execute_audit_v2` are pinned, over the fake host. [A]
+
+### Sources
+
+`hypertrain/src/hypertrain/gpu_ops/cuda_executor.py:212-252,401-405,477-480,553-584,651-723,754-791,
+793-884,899-984,1018-1024`; `auditor/island_bisect.py:111,159-171`; `auditor/worker.py:185-198`;
+`challenge/store.py:4249-4262,6897-7336`; `protocol/jcs.py:23`; CPython 3.12.15 `tarfile.py:1461`;
+`docs/adr/0008-generic-cuda-executor.md` section 4; Lens red team B `rtB_executor_host_attacks.py`
+X1-X3 (5 passed in 2.55 s: they assert the bug), 2026-10-27 [A].
