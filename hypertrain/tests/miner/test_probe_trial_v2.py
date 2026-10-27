@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from hypertrain.miner import cli
-from hypertrain.protocol.keys import decode_hotkey, verify
+from hypertrain.protocol import envelope_v2
 
 _spec = importlib.util.spec_from_file_location(
     "probe_trial_service_fixture",
@@ -27,10 +27,8 @@ HOT = service.HOT[0]
 
 
 def signed_job(n, key, identity):
-    message = f"hypertrain/trial-job/2|{n.manifest.run_id()}|{identity}".encode()
-    return n.client.get(
-        n.url + f"/join/{identity}/job",
-        headers={"x-hotkey": key.ss58, "x-trial-signature": key.sign(message).hex()},
+    return n.client.post(
+        n.url + f"/join/{identity}/job", json=n.owner_request("JobRequest", identity, key)
     )
 
 
@@ -117,13 +115,19 @@ def test_probe_v2_without_job_fetches_own_trial_and_completes(miner, capsys):
     assert n.url + f"/join/{identity}/job" in paths
     assert not any("/admin/" in p for p in paths)
     assert not any("authorization" in r.headers for r in requests)
-    # The challenge GET carries the owner's signature, in its own domain.
-    asked = next(r for r in requests if r.url.path.endswith("/challenge"))
-    message = f"hypertrain/trial-challenge/2|{n.manifest.run_id()}|{identity}".encode()
-    assert asked.headers["x-hotkey"] == HOT.ss58
-    assert verify(
-        decode_hotkey(HOT.ss58), message, bytes.fromhex(asked.headers["x-trial-signature"])
-    )
+    # Both owner requests are POSTs whose body is the owner's signed envelope: no signature
+    # travels in a header (the master proxy forwards none).
+    for suffix, message in (("/challenge", "ChallengeRequest"), ("/job", "JobRequest")):
+        asked = next(r for r in requests if r.url.path.endswith(suffix))
+        assert asked.method == "POST", suffix
+        assert not {"x-hotkey", "x-trial-signature"} & set(asked.headers), suffix
+        envelope = envelope_v2.parse_envelope(asked.content)
+        assert (envelope.type, envelope.signer, envelope.body) == (
+            message,
+            HOT.ss58,
+            {"admission_id": identity},
+        )
+        assert envelope_v2.verify_envelope(asked.content)
     assert list(folder.iterdir()) == []
     # The service accepts the probe's proof (it replays the reference itself) ...
     response = n.client.post(n.url + "/join/proof", json=signed)

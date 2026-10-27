@@ -40,7 +40,7 @@ from ac_world import Shape, record
 
 from hypertrain.gpu_ops import work_screen
 from hypertrain.gpu_ops.work_screen import WorkScreenError
-from hypertrain.miner.core import ChallengeHTTPError, NetworkMiner
+from hypertrain.miner.core import OWNER_REQUEST_ROUNDS, ChallengeHTTPError, NetworkMiner
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.messages_v2 import IslandJobV1
@@ -191,11 +191,14 @@ def standing(miner: NetworkMiner) -> dict[str, Any]:
 
 def next_trial(miner: NetworkMiner) -> dict[str, Any]:
     admission_id = miner.status()["record"]["admission_id"]
-    return miner.api.call(
-        "GET",
-        miner.url + f"/join/{admission_id}/challenge",
-        headers=miner._owner_headers("hypertrain/trial-challenge/2", admission_id),
+    asked = envelope_v2.seal(
+        miner.kp,
+        "ChallengeRequest",
+        miner.run_id,
+        {"admission_id": admission_id},
+        miner.api.call("GET", miner.url)["now_round"] + OWNER_REQUEST_ROUNDS,
     )
+    return miner.api.call("POST", miner.url + f"/join/{admission_id}/challenge", json=asked)
 
 
 def pending_reference(world: Any, miner: NetworkMiner) -> str:

@@ -125,19 +125,23 @@ which includes its nonce; `WorkScreenV2` is reserved by admission and nonce.
 alone. Retry the exact stored signed operation: changing expiry or signature does
 not create a new semantic attempt (`protocol/envelope_v2.py:replay_key`).
 
-The challenge is issued by the owner's signed `GET
-/v2/runs/{run_id}/join/{admission_id}/challenge`: headers `X-Hotkey` and
-`X-Trial-Signature`, the hex signature by the admission's current hotkey of
-`hypertrain/trial-challenge/2|{run_id}|{admission_id}`. Opening a trial takes one of
-the run's two trial places, so nobody else may ask for it: unknown run 404, unknown
-admission 409 `UNKNOWN_ADMISSION`, a deregistered or revoked owner 403, any other
-hotkey, another domain, run or admission, or a missing or bad signature 403 `hotkey is
-not current accepted identity`. The admin token is no substitute. The signature is
-static, like the other header-signed routes: it replays only what the owner may ask,
-and an asking never suspends anyone. Once a challenge is issued, the operator exports
-the matching staged `IslandJobV1`, its inputs and the signed challenge (the export
-carries it as `challenge_envelope`; the CLI does not call the route) into a new or
-empty folder:
+The challenge is issued by the owner's signed request: `POST
+/v2/runs/{run_id}/join/{admission_id}/challenge` with, as its body, an `ht/2` envelope of the
+message `ChallengeRequest{admission_id}` signed by the admission's current hotkey
+(`envelope_v2.seal(hotkey, "ChallengeRequest", run_id, {"admission_id": ...}, expiry)`). The proof
+is in the body, never in a header: the master proxy is the only miner entry path and forwards
+only `content-type`, `accept` and `authorization`. Opening a trial takes one of the run's two
+trial places, so nobody else may ask for it: unknown run 404, unknown admission 409, a
+deregistered or revoked owner 403, and any body that is not an unexpired `ChallengeRequest`
+of this run, for this admission, signed by the current hotkey (empty, not JSON, another
+message, run, admission or signer, a bad signature, an expired envelope, an expiry more than
+100 rounds ahead of the service's current round) 403 `hotkey is not current accepted identity`.
+The admin token is no substitute, and the earlier unsigned `GET` answers 405. The envelope's
+expiry bounds a replay of a capture (the miner client signs 20 rounds ahead, a minute; the
+service refuses more than 100, five minutes); the request is idempotent, so asking again returns
+the stored challenge, and an asking never suspends anyone. Once a challenge is issued, the operator exports
+the matching staged `IslandJobV1`, its inputs and the signed challenge (the export carries it as
+`challenge_envelope`; the CLI does not call the route) into a new or empty folder:
 
 ```bash
 uv run --frozen python -m hypertrain.challenge.trial_export \
@@ -154,17 +158,17 @@ uv run --frozen hypertrain-miner proof-v2 --config miner.toml --proof proof.json
 ```
 
 A joined miner can skip the export: `probe-v2 --config miner.toml > proof.json`
-without `--job`/`--challenge` reads its admission ID (`status-v2`), GETs the
-challenge with its signature (which issues the trial when none is open), then
-`GET /v2/runs/{run_id}/join/{admission_id}/job` with headers `X-Hotkey` and
-`X-Trial-Signature` (hex hotkey signature of
-`hypertrain/trial-job/2|{run_id}|{admission_id}`). The route returns the admin
+without `--job`/`--challenge` reads its admission ID (`status-v2`), POSTs its signed challenge
+request (which issues the trial when none is open), then
+`POST /v2/runs/{run_id}/join/{admission_id}/job`, whose body is an `ht/2` envelope of the
+message `JobRequest{admission_id}` signed by the admission's current hotkey, like the challenge
+request (a header carries no signature; `GET` answers 405). The route returns the admin
 export's JSON only to the currently registered hotkey that owns the admission:
 unknown run 404, unknown admission 409 `UNKNOWN_ADMISSION`, a deregistered or
-revoked owner 403 like the challenge route, any other hotkey or a missing or bad
-signature 403 (the admin token is no substitute), then the export's own refusals
-(409 `NO_CHALLENGE`, 409 `REFERENCE_TRIAL_CLOSED` once the trial is finalized,
-503 on a beacon pause). The miner checks the job, objects and signed challenge as
+revoked owner 403 like the challenge route, any body that is not the owner's unexpired
+`JobRequest` (a `ChallengeRequest` is not one) 403 (the admin token is no substitute), then the
+export's own refusals (409 `NO_CHALLENGE`, 409 `REFERENCE_TRIAL_CLOSED` once the trial is
+finalized, 503 on a beacon pause). The miner checks the job, objects and signed challenge as
 `trial_export` does, streams each input (one uncompressed, sha256-verified
 object; about 4 bytes per parameter for a `reset` start state, more under
 `carry`) into a private temporary folder under its workdir, probes, and deletes
@@ -288,13 +292,16 @@ hashes. It is released only when the admission is not `BANNED` and has no pendin
 lock in the outbox, every round whose roster lists it is closed, none of its hotkeys has
 unvested rewards, it is not live (`ACTIVE`, or `PROBATION` with four clean trials, until its
 screen ends), and the last reward origin of its hotkeys has matured. The bond is burned by the
-service and never through a route, in three cases: a referee verdict of fraud against the miner
-(it also burns the coldkey's unvested rewards and bans the admission; `LOCK_BANNED` follows), a
-round-stage audit mismatch that the caller confirmed as the miner's (`reason="AUDIT_MISMATCH"`:
-the admission is suspended with one strike, and its coldkey stays bound as in probation), and a
-roster member that never committed (`reason="NO_SHOW"`). The last two burn the bond alone. An
-uncontested `MISMATCH`, an infrastructure closure and a verdict against the auditor leave it
-intact.
+service and never through a route. Today one case is wired: a referee verdict of fraud against
+the miner, which burns the bond, bans the admission (`LOCK_BANNED` follows) and, while the
+admission still holds a residual lock, burns the coldkey's unvested rewards with it. Two more
+reasons exist as internal hooks, `Admission.seize_bond(reason="AUDIT_MISMATCH")` for a
+round-stage audit mismatch that its caller confirmed as the miner's (the admission is suspended
+with one strike, and its coldkey stays bound as in probation) and `reason="NO_SHOW"` for a
+roster member that never committed; both burn the bond alone, and nothing in this tree calls
+them yet: they wait for the audit lot. An uncontested `MISMATCH`, an infrastructure closure and
+a verdict against the auditor leave the bond intact. The status route reads the run's rounds
+once per call for an admission that holds a bond.
 
 Production funding is one coordinator-signed `ProductionBootstrap`, posted as an
 `ht/2` envelope to `POST /v2/runs/{run_id}/admin/bootstrap` (admin bearer). The

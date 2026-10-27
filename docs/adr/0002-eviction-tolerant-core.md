@@ -108,7 +108,26 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
      - a save refuses a token that does not follow the mark the log last saw, which catches a
        second writer, or a store rolled back, while this coordinator runs. It detects a write
        that has happened; it is not mutual exclusion, which is the lock's work. A log restored
-       from an older copy before a restart reopens the hole.
+       from an older copy before a restart hands the same tokens out again, and nothing inside
+       the log can tell, since a restore brings the mark back with the file. The leave therefore
+       does not rest on the token alone (ADR 0010): each start of a coordinator draws an epoch
+       of 32 random bytes that is never written to or read from the log; every lease carries
+       it, the signed leave names it, and a leave of another epoch is refused with
+       `STALE_EPOCH` before its signature, the retry answers or any lease is looked at. The old
+       leave that a restore would have revived names the epoch of an earlier start, so it
+       releases nothing whatever token the restored mark re-issues [V
+       `test_a_leave_signed_before_a_token_log_was_restored_cannot_release_the_lease_it_reissues`].
+       A copy or a hard link of the log has a lock of its own, so two coordinators can run on
+       copies and issue the same tokens; each has its own epoch, so a leave signed under one
+       releases no lease of the other [V
+       `test_a_leave_signed_under_one_coordinator_cannot_release_a_lease_of_a_copy_of_its_log`].
+       An epoch kept in the log would come back with it, so none is stored. What this does not
+       do: it does not fence heartbeats and commits (a stale host that holds a re-issued token is
+       refused by the wiring's signature check, not here), it does not stop two coordinators
+       from running (that is the lock's work, and a copy defeats it), and it does not survive a
+       restore of the whole process, which brings back its epoch with its mark [H]. A restore
+       call that the wiring adds must draw a new epoch and never persist one. The complete
+       answer is a single writer on a compare-and-swap row (ADR 0003), which is the wiring's.
 
      The library persists nothing else: a restarted coordinator has forgotten everything but
      the mark (heads, credits, owners, revocations, retry answers, progress windows, penalties),
@@ -231,7 +250,7 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
      checkpoint at the current step, then sends the leave; otherwise it leaves at once.
    - The leave goes out even when the flush fails. A failed leave is retried alone, with the
      notice and the flush decision already taken.
-   - The leave is `JCS(LeaveNotice{version, run_id, member, signer, lease, reason,
+   - The leave is `JCS(LeaveNotice{version, run_id, member, signer, lease, epoch, reason,
      provider_time, heads})` under domain `hypertrain/elastic-leave/1|`, signed by the host key
      the member registered at join (`protocol.server_keys.check_sig`). `heads` (at most 1,024,
      and no more than the round has shards) and `provider_time` are evidence: the verified
@@ -624,9 +643,9 @@ run was flagged [V]. Its configurations draw at random:
 
 ### Mutation check
 
-`scripts/check_elastic_mutants.py` applies 165 single-snippet mutants and requires each named
+`scripts/check_elastic_mutants.py` applies 170 single-snippet mutants and requires each named
 test to fail (pytest exit 1; a collection error does not count). The child writes no bytecode
-and SIGTERM restores the file. Result: 165/165 killed [V, 2026-10-27]. Among them:
+and SIGTERM restores the file. Result: 170/170 killed [V, 2026-10-27]. Among them:
 
 | Mutant | Caught by (`tests/elastic/`) |
 | --- | --- |
@@ -638,6 +657,7 @@ and SIGTERM restores the file. Result: 165/165 killed [V, 2026-10-27]. Among the
 | an unadmitted key joins and replaces the live holder | `test_coordinator.py::test_only_an_admitted_key_joins_or_replaces_a_member` |
 | double assignment: capacity not consumed | `test_assignment.py::test_plan_gives_each_pending_shard_to_one_member_within_its_capacity` (hypothesis) |
 | double assignment: a held shard planned again | `test_coordinator.py::test_a_departure_moves_only_the_departed_members_shards` |
+| a leave of another coordinator epoch is accepted | `test_coordinator.py::test_a_leave_signed_under_one_coordinator_cannot_release_a_lease_of_a_copy_of_its_log` |
 | head not compare-and-set | `test_coordinator.py::test_a_commit_must_extend_the_accepted_head` |
 | a retry after its lease ended is refused | `test_coordinator.py::test_a_retried_commit_is_acknowledged_after_its_lease_and_round_ended` |
 | retried commit credited twice | `test_coordinator.py::test_a_retried_commit_is_acknowledged_again_without_new_credit` |

@@ -35,8 +35,8 @@ with the victim's signed challenge, and a second one after the deadline suspende
 | RTA-06 | The admission bond can neither be released nor slashed | `challenge/store.py:2318-2333`, `admission.py:1093` |
 | EB-01 | An elastic token log restored from a copy, or copied or hard-linked, re-issues a token, so an old signed leave releases a new lease | `elastic/tokens.py`, `elastic/coordinator.py:285-304` |
 
-`implementation_hash` is the hash of the AST of 28 named functions of `challenge/store.py` and of
-ten files (`challenge/store.py:4279-4322`). `admission.py`, `admission_store.py`, `app.py`,
+`implementation_hash` is the hash of the AST of 28 named definitions of `challenge/store.py` (27
+functions and the class `_ServiceCapacityV1`) and of ten files (`challenge/store.py:4279-4322`). `admission.py`, `admission_store.py`, `app.py`,
 `elastic/*`, `protocol/messages_v2.py`, `protocol/envelope_v2.py`, `miner/*` and the dispatcher
 `admission_v2`, `_settlement_v2`, `_services`, `push_beacon` are not in it [V]. Every decision
 below stays outside it.
@@ -116,36 +116,58 @@ Residual: two fresh identities timed to a victim's join can still hold both plac
 window, because `max_trial_replays` is `Literal[2]`; a funded-only place would need a new
 policy field and is left to Forge.
 
-### 3. The challenge GET is signed by the owner (RTA-04)
+### 3. The owner asks for its trial and reads its job in a signed body (RTA-04)
 
-1. `GET /v2/runs/{run_id}/join/{admission_id}/challenge` requires the headers `X-Hotkey` and
-   `X-Trial-Signature`: the admission's current hotkey signs
-   `hypertrain/trial-challenge/2|{run_id}|{admission_id}` (the pattern of the `/job` route, with
-   its own domain so that a challenge signature cannot open `/job`). One helper serves both
-   routes. Order of refusals, as `/job`: unknown run 404, unknown admission 409, deregistered or
-   revoked owner 403, any other hotkey or a missing or bad signature 403 `hotkey is not current
-   accepted identity`. The admin bearer is not a credential for this route.
-2. The check lives in the route, not in `Admission.challenge`, which stays the trusted
+Decided (Principal SN100 D51 to D54): the master proxy is the only entry path of a miner. It
+forwards `content-type`, `accept` and `authorization` and nothing else
+(`src/cortex/challenges/proxy.py:14`, `docs/CHALLENGES.md`), so **no signature travels in an HTTP
+header**. A miner request whose authority is a hotkey's signature carries that signature as a
+signed `ht/2` envelope in the body of the request, checked by `envelope_v2.Intake` (run id, signer,
+signature, expiry). This part applies the rule to the two routes of the trial that only its owner
+may call: the challenge request and the job read. One helper serves both.
+
+1. `POST /v2/runs/{run_id}/join/{admission_id}/challenge` replaces the unsigned `GET` (now 405).
+   The body is the envelope of the new message `ChallengeRequest{admission_id}`, signed by the
+   admission's current hotkey. Order of refusals: unknown run 404, unknown admission 409, a
+   deregistered or revoked owner 403, then any body that is not an unexpired `ChallengeRequest`
+   of this run, for this admission, signed by that hotkey (empty, not JSON, another message, run,
+   admission or signer, a bad signature, an expired envelope, an expiry beyond the bound of point
+   3) 403 `hotkey is not current accepted identity`. The admin bearer is not a credential.
+2. `POST /v2/runs/{run_id}/join/{admission_id}/job` replaces `GET` with the headers `X-Hotkey` and
+   `X-Trial-Signature` (now 405). The body is the envelope of the new message
+   `JobRequest{admission_id}`, signed by the admission's current hotkey, with the same order of
+   refusals. A distinct message type, so that a captured challenge request does not read a job
+   and a captured job request does not open a trial.
+3. The expiry is the signer's choice, so the service bounds it: an envelope that expires more
+   than `OWNER_REQUEST_MAX_ROUNDS` = 100 rounds (five minutes at 3 s per round) after the
+   service's current round is refused like any other forgery. The constant is a route constant of
+   `challenge/app.py`, outside `implementation_hash`; no manifest field carries a request window
+   and a new one would change the run id. The miner signs 20 rounds ahead
+   (`OWNER_REQUEST_ROUNDS`, a client-side choice, a minute), from the round the service reports.
+4. The check lives in the routes, not in `Admission.challenge`, which stays the trusted
    in-process API ("not routes"). The regression is therefore an HTTP test, which also closes
    the Lens caveat that the HTTP path was not run.
-3. The admin export (`export_trial_v2`) returns the stored coordinator-signed envelope as
+5. The admin export (`export_trial_v2`) returns the stored coordinator-signed envelope as
    `challenge_envelope`, and `challenge/trial_export.py` stops calling the route. The miner
-   (`NetworkMiner._fetch_trial`) signs the GET. Scripts and tests that fetched the challenge
-   unsigned sign it.
+   (`NetworkMiner._fetch_trial`) signs both requests. Scripts and tests sign through
+   `Network.challenge` and `Network.owner_request`.
 
-Consequences. The signature is static, like the `/job`, `PUT /objects` and `GET /disputes`
-signatures: a header pair captured on the wire (TLS is the protection) replays only what the
-owner may ask. With decision 2 a replay no longer suspends anyone. Rejected: a beacon-round
-freshness field (a client round source, a new server constant, pause handling in five call
-paths); a single-use nonce (a lost response locks the miner out); enforcing inside
-`Admission.challenge` (22 direct callers, a conflict with decision 2, and a caller identity the
-service cannot verify); accepting the admin bearer (contradicts `network-v2.md`). **Risk for Forge:**
-the Cortex public proxy forwards only `content-type`, `accept` and `authorization`
-(`src/cortex/challenges/proxy.py:14`, `docs/CHALLENGES.md`). Behind it, every signed-header
-route loses its headers: this one, `/job`, `PUT /objects` and `GET /disputes` [V by reading, the
-production topology is not verified]. The s100 TEST miners call the container directly. This
-ADR keeps the `/job` style; moving the four routes to an `authorization` scheme is a separate,
-coordinated change.
+Consequences. The envelope's expiry, bounded by the service, limits a replay of a capture; there
+is no nonce store. Both requests are idempotent (asking again returns the stored challenge or
+job), and with decision 2 an asking never suspends anyone. A third party who captures the owner's
+request on the wire (TLS is the protection) can ask for the trial or read the job only until the
+envelope expires, at most five minutes, and learns nothing new. Rejected: a signature in a header,
+which the proxy drops; a single-use nonce (a lost response locks the miner out, and it adds a
+write per request); enforcing inside `Admission.challenge` (22 direct callers, a conflict with
+decision 2, and a caller identity the service cannot verify); accepting the admin bearer
+(contradicts `network-v2.md`).
+
+The same rule covers the two other routes that sign in a header today and that are not part of
+admission. `PUT /v2/runs/{run_id}/objects/{sha256}` (`X-Hotkey` and `X-Object-Signature`) is
+converted by the lot `escrow-relay-fixes`, and `GET /v2/runs/{run_id}/disputes`
+(`x-dispute-signature`) by the lot `audit-integrity-2`. Each becomes a request whose signed
+envelope is in the body. This series does not convert them: until those lots land they do not
+work through the proxy.
 
 ### 4. Dead unfunded joins release their places; an optional per-prefix cap (RTA-02)
 
@@ -154,12 +176,12 @@ coordinated change.
    and `resume` [V]. The time to live is therefore the challenge window, derived from a policy
    value that exists. No constant is added.
 2. At the start of every `join` (inside its transaction, after the idempotent replay, before the
-   history, coldkey, capacity and quota checks), each dead `APPLIED` row with **no locked unit**,
-   no pending lock in the outbox and no `OPEN` trial becomes `SUSPENDED` with reason
-   `APPLIED_EXPIRED`, as ADR 0002 names it. The row, its transition log and its spent hotkey
-   stay. A funded row is never touched: its release belongs to Part 6. A row with an `OPEN`
-   trial is left to decision 2.3. The reaper cannot live in `challenge()` or `status()`: a
-   raising operation rolls its transaction back, and a GET must not write.
+   history, coldkey, capacity and quota checks), the expired trials are closed (decision 2.3),
+   then each dead `APPLIED` row with **no locked unit** and no pending lock in the outbox
+   becomes `SUSPENDED` with reason `APPLIED_EXPIRED`, as ADR 0002 names it. The row, its
+   transition log and its spent hotkey stay. A funded row is never touched: its release belongs
+   to Part 6. The reaper cannot live in `challenge()` or `status()`: a raising operation rolls
+   its transaction back, and a GET must not write.
 3. `join` ignores `SUSPENDED / APPLIED_EXPIRED` rows when it applies the one-non-`ACTIVE`-row-
    per-coldkey rule, so an honest miner whose application lapsed can apply again with a new
    hotkey. Every other non-`ACTIVE` row still blocks.
@@ -173,10 +195,11 @@ coordinated change.
    funds right after joining is not counted and a prefix cannot be pinned for good. Recommended
    first value when used: `join_burst` = 4.
 
-Why the cap is opt-in. If the challenge container sees only the address of the master proxy,
-every client shares one prefix and a derived cap becomes a global cap that four sybil joins fill
-[A: `src/cortex/challenges/proxy.py:51` sets `x-forwarded-for` but nothing makes `uvicorn` trust
-it; the image runs plain `uvicorn`]. Enabling it needs real client addresses first (RTA-10).
+Why the cap is opt-in. The master proxy is the only entry path, so the challenge container sees
+the address of the proxy unless it trusts the forwarded header: every client then shares one
+prefix and a derived cap becomes a global cap that four sybil joins fill [A:
+`src/cortex/challenges/proxy.py:51` sets `x-forwarded-for` but nothing makes `uvicorn` trust it;
+the image runs plain `uvicorn`]. Enabling it needs real client addresses first (RTA-10).
 Hash consequence of setting it: a new policy digest, hence a new `admission_policy_hash` and a
 new run id, by design. An image without the field refuses a policy that carries it
 (`extra='forbid'`), so the challenge image ships first.
@@ -199,7 +222,8 @@ not reaped).
    (backup at 1, start 2 signs under 2, restore, start 3 reuses 2), and a stored random value is
    redundant once a fresh one is drawn at every start. A mark-derived epoch is killed by a
    mutant (`f"{mark:064x}"`). The epoch is also independent of the log format, so it protects the
-   database-row log of ADR 0003 too, and `tokens.py` and its 35 anchored mutants do not change.
+   database-row log of ADR 0003 too, and `tokens.py` (a docstring only) and the 29 mutants anchored
+   on it do not change.
 3. A copy or hard link of the log still gets its own lock, so two coordinators can run and issue
    the same tokens. Each has its own epoch, so a leave signed under one releases no lease of the
    other. Not covered: a restore of the whole process (a VM snapshot brings back the epoch with
@@ -257,7 +281,8 @@ Decision.
    live (`ACTIVE`, or `PROBATION` with four clean trials), the end of its current screen plus
    one: a live miner keeps its bond, which is what makes it eligible. `finality_hash` and
    `closed_dispute_root` are hashes of what was read (rounds and origins, dispute ids), so the
-   owner signs the state it saw. No constant is added.
+   owner signs the state it saw. No new constant is added: the four clean trials of the live phase
+   are the literal that `status()` already uses.
 3. **Seizure.** `Admission.seize_bond(admission_id, *, reason, evidence_hash, now)` is an
    internal, authenticated service hook (the coordinator is the ledger's reward authority); no
    route calls it. It records each residual lock in `admission_seizures`, which makes its
@@ -266,8 +291,9 @@ Decision.
    `ip_secret`: deterministic for retries, unguessable for a squatter. A second call finds
    nothing left. The admission is resolved by id, never by hotkey, which a rotation changes.
    Reasons: `TRAINING_FRAUD` also burns the owner's unvested rewards (the ledger's rule for a
-   slashed admission lock) and bans the admission (`BANNED`, terminal; `Admission.lock` then
-   answers `LOCK_BANNED`); `AUDIT_MISMATCH`, a round-stage audit mismatch that the caller has
+   slashed admission lock, so only while the admission still holds a residual lock: after an
+   earlier bond-only seizure a conviction bans and burns no reward, see Decisions for Forge 4)
+   and bans the admission (`BANNED`, terminal; `Admission.lock` then answers `LOCK_BANNED`); `AUDIT_MISMATCH`, a round-stage audit mismatch that the caller has
    confirmed as the miner's (D47), suspends the admission (reason `AUDIT_MISMATCH`), adds one
    strike and burns the bond alone, and the coldkey stays bound by the one-non-`ACTIVE`-row rule
    as in probation; `NO_SHOW` burns the bond alone (`EscrowV2.slash(burn_pending=False)`) and
@@ -281,7 +307,10 @@ Decision.
    `DisputesV2.settle_lock`. Only an accepted, resolved dispute settlement with outcome `FRAUD`
    (reason `FRAUD`, loser == the miner of the contest) convicts, and only if the pending
    reference bound when the dispute opened names the same admission, coldkey and evidence and the
-   verdict's release beacon is reached; any other closure returns `False` and changes nothing.
+   verdict's release beacon is reached. It returns `False` and changes nothing when there is no
+   pending reference, the dispute is unresolved, or the outcome is not `FRAUD` against the miner
+   (a verdict against the auditor). A `FRAUD` verdict that does not match the pending reference,
+   or whose release beacon is not reached, raises `UNPROVEN_TRAINING_FRAUD`.
    Conviction calls `seize_bond(reason="TRAINING_FRAUD")`. Because it shares the transaction, a
    failure of the hook rolls back the resolution (fail closed).
 5. **Release.** The owner signs the existing `EscrowRelease`; the route is unchanged.
@@ -307,12 +336,15 @@ closed and its rewards vested; the wait is `E_vest_rounds` beacon rounds after t
 finalization unless a dispute is open. The bound `q * s_lower * beta * (R + S) >= G` becomes true
 for contested detections and for no-shows; a cheater who never contests is excluded and keeps
 its bond until the Forge question on a contest window is answered. Contesting now risks the
-whole admission bond, the coldkey's unvested rewards and a ban instead of the contest bond:
+whole admission bond (and, while a residual lock exists, the coldkey's unvested rewards) and a
+ban instead of the contest bond:
 with DET-01b open an honest, falsely `MISMATCH`ed miner should not contest (the cure is DET-01b,
 not this part). A round that never closes pins the bonds of its roster until DSP-01 and AUD-06
 close it. Other `ACTIVE` admissions of a convicted coldkey keep their state but lose their
 unvested rewards to the ledger's burn. An admission-trial `MISMATCH` binds a pending reference
-that nothing settles, so that bond stays held (left open below).
+that nothing settles, so that bond stays held (left open below). A round that lists the
+admission but has no finality record (which `open_round_v2` always writes with it) is treated as
+open: the bond is held, fail closed.
 
 Rejected: a persisted `settlement` row per lock (stale, allows release while rostered, needs a
 writer in `finalize_v2` or `complete_audit_v2`, which are in `implementation_hash`); a service
@@ -327,17 +359,17 @@ withdrawing the bond just before a round opens does not arise); hooks in `comple
 ## Hash consequences
 
 Baseline measured on `33b50656` with `ChallengeStore._service_implementation_v2`,
-`network_qualification.sources()` and `bundle()`, and `manifest_v2 example`. The "after" column
-is filled by the last commit of the lot.
+`network_qualification.sources()` and `bundle()`, and `manifest_v2 example`, before the lot and at its last commit.
 
-| Value | Before | After |
+| Value | Before (`33b50656`) | After (this branch) |
 | --- | --- | --- |
-| `implementation_hash` | `02e208a3…0189cc` | to measure (expected unchanged) |
-| `challenge/store.py` sha256 | `b5bc9904…aaec88` | to measure (changes: `push_beacon`, `admission_v2`, `export_trial_v2`) |
-| `AdmissionPolicyV2` digest of the `manifest_v2 example` (test and production) | `c3fd6d4d…b3e3e3` | to measure (expected unchanged) |
-| pure-JSON wrapper run id (`tests/protocol/test_network_v2.py`) | `4efbc85d…8cc43f97` | to measure (expected unchanged) |
-| `sources()` map (151 files), canonical sha256 | `e0df98e6…507e8b` | to measure |
-| `bundle` (2,396,160 bytes) sha256 | `e78f33d1…70ba` | to measure |
+| `implementation_hash` | `02e208a3…0189cc` | unchanged |
+| `challenge/store.py` sha256 | `b5bc9904…aaec88` | `0fba21a9…cb7863` (`push_beacon`, `admission_v2`, `export_trial_v2`) |
+| `AdmissionPolicyV2` digest of the `manifest_v2 example` (test and production) | `c3fd6d4d…b3e3e3` | unchanged |
+| `manifest_v2 example` + `build` run id, test / production | `87b08906…952485` / `54ee4c87…e263` | unchanged |
+| pure-JSON wrapper run id (`tests/protocol/test_network_v2.py`) | `4efbc85d…8cc43f97` | unchanged (pinned by a test) |
+| `sources()` map (151 files), canonical sha256 | `e0df98e6…507e8b` | `270207d9…333180` |
+| `bundle` sha256 | 2,396,160 bytes, `e78f33d1…70ba` | 2,426,880 bytes, `53f7e1a4…b29d` |
 
 - No run id, `admission_policy_hash`, golden root or `reference_hash` changes for a policy that
   does not set `max_unfunded_per_prefix`: the field is omitted from the canonical body when
@@ -350,15 +382,17 @@ is filled by the last commit of the lot.
   still validates against its own frozen tree; installed qualification records stay valid.
 - The server image gets a new digest at rebuild. A manifest that enables the optional cap pins
   nothing else.
-- Wire: `RotateRequest` gains `new_hot_sig`; `LeaveNotice` gains `epoch`; the export payload gains
-  `challenge_envelope`; `GET .../challenge` needs two headers; `GET .../admission/{hotkey}`
-  gains `bond` in Part 6. None is a manifest or SCALE wire message; `docs/BUNDLE_SPEC.md` and the
+- Wire: `RotateRequest` gains `new_hot_sig`; `LeaveNotice` gains `epoch`; two new message types
+  `ChallengeRequest` and `JobRequest`; the export payload gains `challenge_envelope`; the unsigned
+  `GET .../challenge` and the header-signed `GET .../job` become `POST` with a signed body;
+  `GET .../admission/{hotkey}` gains `bond` in Part 6. None is a manifest or SCALE wire message; `docs/BUNDLE_SPEC.md` and the
   frozen vectors are untouched.
 
 ## Decisions for Forge
 
 1. **Bond burn (Part 6).** Implemented as recommended: a referee `FRAUD` against the miner burns
-   the admission bond and the coldkey's unvested rewards and bans the admission; a no-show
+   the admission bond and, while a residual lock exists, the coldkey's unvested rewards, and bans
+   the admission; a no-show
    seizure burns the bond alone. ADR 0002 "Penalties" makes any slash for a failed audit
    founder-only: the order of D36 bis and Forge's request of 2026-10-27 are taken as that
    decision for these two cases. To withhold the burn, `seize_bond` keeps recording the seizure
@@ -368,12 +402,35 @@ is filled by the last commit of the lot.
    `MISMATCH` needs a window W that no manifest field provides (`E_vest_rounds` is 10 beacon
    rounds in the example, `dispute_per_level` is a per-turn timeout), and should wait for the
    DET-01b fix. Give W, or confirm that it waits.
-3. **Proxy headers.** Is the public miner path through the Cortex proxy (Part 3)?
-4. **Residuals left open:** targeted trial squatting needs a funded-only trial place (policy
+3. **Residuals left open:** targeted trial squatting needs a funded-only trial place (policy
    field); the route back for a stranded miner is ADR 0002 P1 / ADR 0011 D40; an admission-trial
    `MISMATCH` binds a pending reference that nothing settles (the bond and the coldkey stay
    locked); `PROBATION` rows are not reaped; `DisputesV2.settle_lock` derives its operation id
-   from public data and can be squatted (audit-integrity lot).
+   from public data and can be squatted (audit-integrity lot), as can any server-derived
+   operation id that is not an HMAC, since the escrow operation ids share one namespace that any
+   holder of one unit can write (it predates this series). Found by the independent review and
+   not changed here:
+   - a lock of one unit counts as funding, so a dead `APPLIED` row that holds it is neither
+     reaped nor counted by the optional cap; counting only locks of at least `S_min_units`
+     (the manifest's own value, 1000 in the example) would close it, and changes what "a funded
+     row is never touched" means;
+   - a proven trial whose holder is later suspended or banned is not reaped (`proof_digest` is
+     set) and keeps one of the two places until `resume`;
+   - the `rotate:` quota rows are never purged, one per coldkey and window in which it rotated;
+   - an IPv4-mapped IPv6 address falls into one `/64` prefix for the join quota and the cap
+     (`join_v2` does not unmap it; it predates this series);
+   - the status route scans the run's round records once per call for an admission that holds a
+     bond, inside the store's write transaction (about 30 ms at 1000 rounds of 32, 150 ms at 4000
+     in the review's measure); an admission-to-round table or a rate limit at the proxy removes
+     it.
+4. **Unvested rewards after an earlier seizure.** The burn of the unvested rewards is part of
+   slashing an admission lock, so a conviction that arrives after a `NO_SHOW` or `AUDIT_MISMATCH`
+   seizure has emptied the lock bans the admission and burns no reward. That makes the deterrent
+   of contesting weaker than the text of Part 6 says, in exactly the D47 flow (mismatch, contest,
+   referee verdict). Closing it needs a ledger operation that burns a coldkey's `reward_pending`
+   without a lock (a new event kind under an HMAC operation id, with its conservation test),
+   which this series does not add. Decide whether to add it, or to accept that the reward
+   survives.
 
 ## Not verified
 

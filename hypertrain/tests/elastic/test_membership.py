@@ -1,5 +1,7 @@
 """Leases: a member is live only while its newest token is renewed in time."""
 
+import re
+
 import pytest
 
 from hypertrain.elastic.clock import FakeClock
@@ -65,3 +67,13 @@ def test_no_lease_is_granted_when_its_token_cannot_be_saved() -> None:
     log.broken = False
     lease, _ = members.join("a", "owner-a", "host-1")
     assert lease.token == 2 and log.load() == 2  # token 1 may have become durable: never reused
+
+
+def test_every_start_draws_its_own_epoch_and_every_lease_carries_it() -> None:
+    log = MemoryTokenLog()  # one log, two starts: the mark continues, the epoch does not
+    first = Membership(FakeClock(), ttl_ms=1_000, tokens=log)
+    lease, _ = first.join("a", "owner-a", "host-1")
+    second = Membership(FakeClock(), ttl_ms=1_000, tokens=log)
+    assert first.epoch != second.epoch and re.fullmatch(r"[0-9a-f]{64}", first.epoch)
+    assert (lease.epoch, first.renew("a", lease.token).epoch) == (first.epoch, first.epoch)
+    assert second.join("a", "owner-a", "host-1")[0].epoch == second.epoch

@@ -534,7 +534,7 @@ def test_prefix_cap_survives_restart_and_epoch_rollover_then_frees_with_the_wind
         beacon=a.beacon,
         stage_reference=a.stage_reference,
         objects=a.objects,
-        ip_secret=b"second-prefix-key",
+        ip_secret=a.ip_secret[::-1],
         qualified=a.qualified,
         conservative_bound=a.conservative_bound,
         backend="cpu",
@@ -597,6 +597,32 @@ def test_poll_after_deadline_keeps_miner_whose_proof_is_accepted(tmp_path: Path)
     other = WorkProof.model_validate({**proof.body(), "delta_hash": H})
     with pytest.raises(ValueError):
         a.proof(canonicalize(sign_proof(HOT, a.escrow.run_id, other, 102)), screen_raw, now=103)
+
+
+def test_a_join_after_the_window_does_not_retire_a_proven_unfunded_miner(tmp_path: Path) -> None:
+    # Given: an unfunded miner whose proof was accepted on the last round of its window; the
+    # finalization has not run yet
+    from hypertrain.protocol.keys import Keypair
+
+    s = setup()
+    a = service(s, tmp_path)
+    admission = apply(a, s)
+    a.challenge(admission, now=2)
+    a.prepare_reference(admission, now=2)
+    proof, screen = current_proof(a, admission, 2)
+    raw = canonicalize(sign_proof(HOT, a.escrow.run_id, proof, 102))
+    screen_raw = canonicalize(seal(HOT, "WorkScreenV2", a.escrow.run_id, screen, 102))
+    assert a.proof(raw, screen_raw, now=102).state == "PROBATION"
+    # When: an unrelated application arrives once its window is over; every join looks for dead
+    # applications
+    newcomer = request(s, "55" * 32, Keypair(b"\x35" * 32), Keypair(b"\x36" * 32))
+    a.join(canonicalize(newcomer.body()), now=103, ip_prefix="later")
+    # Then: the miner is in PROBATION and unfunded, which is no dead application
+    assert a.store.record(HOT.ss58).state == "PROBATION"
+    final = a.trial_finality(admission, now=103)
+    assert final is not None
+    status = a.finalize_trial(admission, final, now=103)
+    assert (status.record.state, status.record.clean_count) == ("PROBATION", 1)
 
 
 @pytest.mark.parametrize("boundary", ["before_ledger", "after_ledger", "after_receipt"])

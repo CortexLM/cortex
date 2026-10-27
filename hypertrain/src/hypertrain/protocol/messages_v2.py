@@ -573,6 +573,21 @@ class JoinChallenge(WireModel):
         return self
 
 
+class ChallengeRequest(WireModel):
+    """The owner of an admission asks for its trial: signed by the admission's hotkey, in the
+    body of the request, since the master proxy forwards no signature header. The expiry of the
+    envelope bounds a replay of a capture."""
+
+    admission_id: Hex64
+
+
+class JobRequest(WireModel):
+    """The owner of an admission reads the job of its open trial, signed like ChallengeRequest.
+    A distinct type, so that neither request opens the other route."""
+
+    admission_id: Hex64
+
+
 class WorkProof(WireModel):
     admission_id: Hex64
     challenge_hash: Hex64
@@ -996,6 +1011,8 @@ MESSAGE_TYPES_V2: dict[str, type[BaseModel]] = {
         WorkScreenV2,
         JoinRequest,
         JoinChallenge,
+        ChallengeRequest,
+        JobRequest,
         WorkProof,
         RotateRequest,
         AdmissionPolicyV2,

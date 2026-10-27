@@ -88,11 +88,10 @@ def rotate_to(
 
 
 def stranger_challenge(n, admission_id: str):
-    """GET the challenge of an admission without any proof of owning it: the RTA-04 caller.
-
-    It stays unsigned when RTA-04 is fixed; the route must then refuse it.
-    """
-    return n.client.get(n.url + "/join/" + admission_id + "/challenge")
+    """Ask for the challenge of an admission with the signature of another hotkey: the RTA-04
+    caller. The route takes a request signed in its body by the admission's own hotkey, so this
+    one must be refused."""
+    return n.challenge(admission_id, svc.HOT[3])
 
 
 def owner_challenge(n, admission_id: str, owner: Keypair):
