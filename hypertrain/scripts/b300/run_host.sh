@@ -244,8 +244,21 @@ trap on_signal TERM INT HUP
 trap on_exit EXIT
 
 # --- step runner -------------------------------------------------------------------------------
+# What a step writes under $out, except the files its own shell redirection truncates when it
+# starts. It is removed before the step runs: a step that dies before it writes must not leave the
+# file of an earlier run (a gpu_probe.json with ok:true) beside its rc.
+step_evidence() {
+  case $1 in
+    host_probe) echo nvidia-smi.txt efa-devices.txt fi_info.txt df.txt host_probe.json ;;
+    pull) echo pull-digests.json ;;
+    gpu_probe) echo gpu_probe.json ;;
+    mfu) echo "mfu-dp$EXPECT_GPUS-flash.json" ;;
+    miner_test) echo mine-smoke-v2.json ;;
+    miner_prod) echo 'miner-prod/round-*.json' ;;
+  esac
+}
 step() {
-  local name=$1 t0 rc=0
+  local name=$1 t0 rc=0 f
   shift
   [[ " $steps " == *" $name "* ]] || return 0
   if [ "$force" = 0 ] && [ "$name" != host_probe ] && [ "$dirty" = 0 ] &&
@@ -259,6 +272,8 @@ step() {
     log "the watchdog died: nothing would stop this run at --duration or a Spot notice"
     finish watchdog-died 9
   fi
+  # shellcheck disable=SC2086  # the patterns are globs
+  for f in $(step_evidence "$name"); do rm -f -- "$out"/$f; done
   log "step $name"
   t0=$(date +%s)
   "$@" || rc=$?

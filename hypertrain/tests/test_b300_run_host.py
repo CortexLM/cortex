@@ -137,6 +137,9 @@ elif cmd == "run":
         host = next((h + path[len(c):] for h, c in mounts.items() if path.startswith(c + "/")), "")
         if not pathlib.Path(host).is_file():
             sys.exit(f"python: can't open file {path!r}")
+    crash = os.environ.get("FAKE_CRASH", "")
+    if crash and (name == crash or (crash == "miner_prod" and name.startswith("miner-prod-"))):
+        sys.exit(1)  # dies before it writes any evidence
     if name == os.environ.get("FAKE_BLOCK"):
         ctr = state / f"ctr-{name}"
         for kind in ("stopped", "removed"):
@@ -179,6 +182,8 @@ elif cmd == "run":
 FAKE_SMI = r"""
 import os, sys
 if any(a.startswith("--query-gpu") for a in sys.argv):
+    if os.environ.get("FAKE_SMI_FAIL"):
+        sys.exit("NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver")
     n, drv, cc = (os.environ.get(k, d) for k, d in
                   (("FAKE_GPUS", "8"), ("FAKE_DRIVER", "595.91.07"), ("FAKE_CC", "10.3")))
     for i in range(int(n)):
@@ -908,3 +913,39 @@ def test_the_upload_runs_even_when_stop_json_cannot_be_written(env, tmp_path):
     assert p.returncode == 0, p.stdout + p.stderr
     assert {"run.log", "steps.tsv"} <= uploaded(tmp_path)
     assert "stop.json was not written" in (tmp_path / "results/h1/run.log").read_text()
+
+
+# --- stale evidence (B6): a step removes what an earlier run left before it starts ---------------
+
+STALE = json.dumps({"ok": True, "stale": True})
+
+
+@pytest.mark.parametrize(
+    "crash,rc,files,extra",
+    [
+        (
+            {"FAKE_SMI_FAIL": "1"},
+            3,
+            ["host_probe.json", "df.txt", "efa-devices.txt", "fi_info.txt", "nvidia-smi.txt"],
+            [],
+        ),
+        ({"FAKE_PULL_RC": "1"}, 4, ["pull-digests.json"], []),
+        ({"FAKE_CRASH": "gpu_probe"}, 5, ["gpu_probe.json"], []),
+        ({"FAKE_CRASH": "mfu"}, 6, ["mfu-dp8-flash.json"], []),
+        ({"FAKE_CRASH": "miner_test"}, 7, ["mine-smoke-v2.json"], []),
+        ({"FAKE_CRASH": "miner_prod"}, 8, ["miner-prod/round-3-commitments.json"], ["--prod"]),
+    ],
+    ids=["host_probe", "pull", "gpu_probe", "mfu", "miner_test", "miner_prod"],
+)
+def test_a_step_that_dies_early_leaves_no_evidence_of_an_earlier_run(
+    env, tmp_path, crash, rc, files, extra
+):
+    out = tmp_path / "results/h1"
+    (out / "miner-prod").mkdir(parents=True)
+    for name in files:
+        (out / name).write_text(STALE)
+    prod = prod_env(tmp_path / "miner") if extra else {}
+    p = run({**env, **crash, **prod}, tmp_path, *extra)
+    assert p.returncode == rc, p.stdout + p.stderr
+    stale = [n for n in files if (out / n).exists() and "stale" in (out / n).read_text()]
+    assert stale == []
