@@ -902,8 +902,15 @@ class Executor:
             if code:
                 raise AttemptFailed(f"container exited {code}: {_tail(log)}")
             staging = work / "staging"
-            written, environment = self._read_result(result_tar, staging / "published", n, request)
-            observed = self._check_environment(environment, ref, chosen)
+            try:
+                written, environment = self._read_result(
+                    result_tar, staging / "published", n, request
+                )
+                observed = self._check_environment(environment, ref, chosen)
+            except (RecursionError, MemoryError, OverflowError) as error:
+                # Host bytes exhausted a parser nobody foresaw. The cause may be ours (memory), so
+                # the attempt fails and the next host is tried, but nobody is quarantined.
+                raise AttemptFailed(f"result exhausted a parser: {type(error).__name__}") from error
             record = {
                 "executor": EXECUTOR,
                 "operation": operation,

@@ -82,6 +82,9 @@ Everything a host sends is bytes to check, never a statement to believe
   writes it. Both documents are read as UTF-8 only.
 - A result tar whose extended (PAX or GNU long name) header asks for more than 1 MiB refuses the
   host the same way: the size is the host's claim, and `tarfile` would allocate it in one call.
+- Whatever else a parser of ours raises on a host's bytes (`RecursionError`, `MemoryError`,
+  `OverflowError`) fails the attempt and the next host runs the job again; nobody is quarantined for
+  a cause that may be ours.
 - When no host can serve the job, `launch` raises a plain `IslandFailure`: "cuda executor found
   no host able to run the job: ..." when every host is quarantined or unavailable, "cuda executor
   gave up: ..." after `max_attempts` failed attempts, and `Aborted` (a subclass) when the job

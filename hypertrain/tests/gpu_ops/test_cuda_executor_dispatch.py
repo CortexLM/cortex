@@ -1086,6 +1086,40 @@ def test_result_that_exhausts_a_parser_quarantines_the_host_and_the_next_one_ser
     assert record_of(later)["host"]["label"] == good
 
 
+@pytest.mark.parametrize(
+    ("site", "error"),
+    [
+        ("_read_result", RecursionError),
+        ("_read_result", MemoryError),
+        ("_read_result", OverflowError),
+        ("_check_environment", RecursionError),
+    ],
+)
+def test_a_parser_that_runs_out_of_resources_on_result_bytes_fails_the_attempt(
+    make_pool, canned, tmp_path, monkeypatch, site, error
+):
+    # Whatever else a hostile result finds to exhaust, it fails over instead of killing the launch.
+    pool = make_pool(labels=("a", "b"))
+    real, calls = getattr(cuda_executor.Executor, site), []
+
+    def exhausted(self, *args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise error()
+        return real(self, *args)
+
+    monkeypatch.setattr(cuda_executor.Executor, site, exhausted)
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home)
+
+    first, second = pool.toolbox.runs()
+    (failed,) = journal_of(pool, "exec_attempt_failed")
+    assert failed["reason"] == f"result exhausted a parser: {error.__name__}"
+    assert journal_of(pool, "exec_host_refused") == []  # the cause may be ours: nobody is refused
+    assert record_of(home)["result_tar_sha256"] == second["stdout_sha256"]
+    assert first["host"] != second["host"]
+
+
 OOM = {"mode": "exit", "code": 1, "stderr": "CUDA out of memory"}
 
 
