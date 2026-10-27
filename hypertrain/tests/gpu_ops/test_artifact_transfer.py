@@ -15,6 +15,7 @@ import re
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -27,6 +28,7 @@ from hypertrain.gpu_ops.cuda_executor import Aborted, AttemptFailed, HostRefused
 from hypertrain.gpu_ops.journal import Journal
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.storage.cas import BLOCK_BYTES, BlockList, PartPlan, scan
+from hypertrain.storage.r2 import ObjectInfo
 
 from .artifact_fakes import (
     BUCKET,
@@ -541,6 +543,47 @@ def test_a_download_stops_when_the_lease_is_cancelled_and_leaves_no_file(
 
     assert status.read_bytes() == pair.out  # the status line was not replaced by half a tar
     assert sorted(os.listdir(tmp_path)) == sorted(["status.out", "r2-exec.env", "state", "tmp"])
+    pair.session.close()
+
+
+def test_an_object_that_is_not_the_one_declared_is_not_fetched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    pair = run_pair(broker, fake, monkeypatch)
+    status = tmp_path / "status.out"
+    status.write_bytes(pair.out)
+    real = broker.client.head_object
+
+    def other_blocks(key: str) -> ObjectInfo | None:
+        info = real(key)
+        return info and ObjectInfo(info.size, info.sha256, {**info.meta, "blocks": "0" * 64})
+
+    monkeypatch.setattr(broker.client, "head_object", other_blocks)
+    with pytest.raises(AttemptFailed, match="not the one that was declared"):
+        pair.session.collect(status, lambda: None, lost=False)
+    assert [
+        r for r in fake.served("GetObject") if r[1].endswith(pair.session.declared.sha256)
+    ] == []  # type: ignore[union-attr]
+    pair.session.close()
+
+
+def test_a_disk_too_small_for_the_artifact_is_found_out_before_the_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    pair = run_pair(broker, fake, monkeypatch)
+    status = tmp_path / "status.out"
+    status.write_bytes(pair.out)
+    monkeypatch.setattr(at.shutil, "disk_usage", lambda path: SimpleNamespace(free=1 << 20))
+
+    with pytest.raises(AttemptFailed, match="not enough disk"):
+        pair.session.collect(status, lambda: None, lost=False)
+    assert [
+        r for r in fake.served("GetObject") if r[1].endswith(pair.session.declared.sha256)
+    ] == []  # type: ignore[union-attr]
     pair.session.close()
 
 

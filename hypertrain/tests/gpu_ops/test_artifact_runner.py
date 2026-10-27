@@ -220,11 +220,16 @@ def test_serve_gives_the_island_the_budget_minus_the_transfer_reserve(
     assert 600 - 200 - 30 < seen[0] <= 600 - 200  # request budget_seconds is 600
 
 
+@pytest.mark.parametrize(
+    ("faults", "said"),
+    [((503, 503, 503), "HTTP 503"), ((403,), "HTTP 403")],
+    ids=["store-down", "url-refused"],
+)
 def test_serve_checks_the_store_before_it_spends_the_island_budget(
-    monkeypatch: pytest.MonkeyPatch, fast_clock: Clock
+    monkeypatch: pytest.MonkeyPatch, fast_clock: Clock, faults: tuple[int, ...], said: str
 ) -> None:
     fake = TimedFakeR2()
-    fake.fault_key("GetObject", "offer.json", 503, 503, 503)
+    fake.fault_key("GetObject", "offer.json", *faults)
     launched: list[int] = []
 
     def never(*args: Any) -> int:
@@ -233,7 +238,7 @@ def test_serve_checks_the_store_before_it_spends_the_island_budget(
 
     run = drive(fake, monkeypatch, launch=never, answering=False)
     assert (run.code, launched) == (11, [])
-    assert "artifact store unreachable" in run.err and CANARY not in run.err
+    assert f"artifact store unreachable: {said}" in run.err and CANARY not in run.err
 
 
 @pytest.mark.parametrize(
@@ -393,15 +398,82 @@ def test_serve_refuses_a_request_with_a_url_it_would_not_print_and_prints_none(
     assert run.code == 2 and CANARY not in run.err
 
 
+@pytest.mark.parametrize(("stage", "code"), [("preflight", 11), ("transfer", 10)])
 def test_serve_prints_no_url_when_the_http_layer_raises_one_in_its_message(
+    monkeypatch: pytest.MonkeyPatch, stage: str, code: int
+) -> None:
+    fake = TimedFakeR2()
+    inner = bridge(fake)
+
+    def seam(method: str, url: str, *rest: Any) -> Any:
+        if stage == "preflight" or method == "PUT":
+            raise ValueError(f"cannot reach {url}")  # what a stdlib error puts in its text
+        return inner(method, url, *rest)
+
+    run = drive(fake, monkeypatch, seam=seam, answering=False)
+    assert run.code == code and "ValueError" in run.err
+    assert "X-Amz-" not in run.err and "r2.test" not in run.err
+
+
+def test_serve_does_not_use_urls_after_the_lifetime_the_offer_announced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def seam(method: str, url: str, *rest: Any) -> Any:
-        raise ValueError(f"cannot reach {url}")  # what a stdlib error would put in its text
+    fake = TimedFakeR2()
+    run = drive(fake, monkeypatch, answer={"edit": lambda offer: offer.update(ttl_s=1)})
+    assert run.code == 10 and "url expired" in run.err
+    assert fake.served("UploadPart") == []
 
-    for answering in (False,):
-        run = drive(TimedFakeR2(), monkeypatch, seam=seam, answering=answering)
-        assert run.code == 11 and "X-Amz-" not in run.err and "r2.test" not in run.err
+
+def test_serve_sends_nothing_of_a_file_that_changed_after_it_was_hashed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = TimedFakeR2()
+    inner = bridge(fake)
+    attempts: list[Path] = []
+
+    def launch(request: dict[str, Any], attempt: Path, budget: float, log: Path) -> int:
+        attempts.append(attempt)
+        return launch_tree(request, attempt, budget, log)
+
+    def seam(method: str, url: str, headers: Any, *rest: Any) -> Any:
+        reply = inner(method, url, headers, *rest)
+        if method == "PUT" and "declare.json" in url:  # the declaration is out: now alter the file
+            path = attempts[0] / "rank-0" / "state.safetensors"
+            data = bytearray(path.read_bytes())
+            data[100] ^= 1
+            path.write_bytes(bytes(data))
+        return reply
+
+    run = drive(fake, monkeypatch, launch=launch, seam=seam)
+    assert run.code == 10 and "changed while it was being sent" in run.err
+    _, offer = run.challenge.upload
+    assert 1 not in fake.uploads[offer.upload_id][2]  # the part with the altered byte never left
+
+
+def test_throttling_is_waited_out_as_the_store_asks(
+    monkeypatch: pytest.MonkeyPatch, fast_clock: Clock
+) -> None:
+    replies = iter(
+        [
+            (429, {"retry-after": "3"}, b""),  # the store names a delay
+            (429, {"retry-after": ""}, b""),  # none named: a throttle waits at least a second
+            (503, {"retry-after": "9999"}, b""),  # an absurd delay is capped
+            (503, {"retry-after": ""}, b""),  # a plain server error backs off briefly
+            (200, {}, b"ok"),
+        ]
+    )
+    monkeypatch.setattr(runner, "http_send", lambda *args: next(replies))
+    waits: list[float] = []
+    monkeypatch.setattr(runner, "_sleep", waits.append)
+    block = Challenge(TimedFakeR2(), client_for(TimedFakeR2())).request_block(
+        retry_attempts=5, retry_base_ms=1
+    )
+    spec = runner.Transfer(block, deadline=fast_clock.time() + 600)
+
+    assert runner._call(spec, "PUT", "https://r2.test/x") == (200, b"ok")
+
+    assert 3 <= waits[0] <= 16 and 1 <= waits[1] < 3
+    assert waits[2] == runner.RETRY_CAP and waits[3] < 1
 
 
 # -- the real client on a real socket ------------------------------------------------------------
