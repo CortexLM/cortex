@@ -11,17 +11,32 @@ AUDITOR, MINER = "auditor", "miner"
 
 
 @pytest.mark.parametrize(
-    ("first_bad_leaf", "recomputed", "expected"),
+    ("result", "first_bad_leaf", "recomputed", "expected"),
     [
-        (1, OTHER, "LOCATED"),
-        (0, ROOT, "LOCATED"),
-        (None, ROOT, "COMMIT_CONTRADICTS_LEAVES"),
-        (None, OTHER, None),
+        ("MISMATCH", 1, OTHER, "LOCATED"),
+        ("MISMATCH", 0, ROOT, "LOCATED"),
+        ("MISMATCH", None, ROOT, "COMMIT_CONTRADICTS_LEAVES"),
+        ("MISMATCH", None, OTHER, None),
+        ("MATCH", None, ROOT, None),
+        ("WITHHELD", None, ROOT, None),
+        ("BAD_PROOF", None, ROOT, None),
+        ("ASSIGNMENT_VIOLATION", None, ROOT, None),
+        ("WITHHELD", 2, OTHER, None),
     ],
-    ids=["located", "located-at-zero", "leaves-agree-commit-lies", "audit-anomaly"],
+    ids=[
+        "located",
+        "located-at-zero",
+        "leaves-agree-commit-lies",
+        "audit-anomaly",
+        "match-proves-nothing",
+        "withheld-with-the-committed-root",
+        "bad-proof-with-the-committed-root",
+        "assignment-violation-with-the-committed-root",
+        "withheld-with-a-leaf",
+    ],
 )
-def test_grade_names_what_the_verdict_proves(first_bad_leaf, recomputed, expected):
-    assert grade(first_bad_leaf, recomputed, ROOT) == expected
+def test_grade_names_what_the_verdict_proves(result, first_bad_leaf, recomputed, expected):
+    assert grade(result, first_bad_leaf, recomputed, ROOT) == expected
 
 
 def test_the_sanction_waits_inside_the_window_and_applies_at_its_end():

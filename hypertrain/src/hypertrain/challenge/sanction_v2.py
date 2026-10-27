@@ -39,16 +39,22 @@ class DisputeView:
 
 
 def grade(
-    first_bad_leaf: int | None, recomputed_leaves_root: str, committed_leaves_root: str
+    result: str,
+    first_bad_leaf: int | None,
+    recomputed_leaves_root: str,
+    committed_leaves_root: str,
 ) -> Grade | None:
     """What the verdict proves about the miner, or None when it proves nothing sanctionable.
 
-    LOCATED: the replay names the first published leaf that differs. COMMIT_CONTRADICTS_LEAVES:
-    every published leaf equals the replay (so the leaves root does too) yet a signed commit hash
-    does not: the miner's artifacts contradict its own leaves, which no environment produces.
-    Anything else (no leaf named and the roots differ) is an anomaly of the audit, never the
-    miner's fault.
+    Only a MISMATCH is graded: WITHHELD, BAD_PROOF and ASSIGNMENT_VIOLATION carry no leaf and a
+    root that says nothing about the commit, and a MATCH proves the opposite. LOCATED: the replay
+    names the first published leaf that differs. COMMIT_CONTRADICTS_LEAVES: every published leaf
+    equals the replay (so the leaves root does too) yet a signed commit hash does not: the miner's
+    artifacts contradict its own leaves, which no environment produces. Anything else (no leaf
+    named and the roots differ) is an anomaly of the audit, never the miner's fault.
     """
+    if result != "MISMATCH":
+        return None
     if first_bad_leaf is not None:
         return "LOCATED"
     if recomputed_leaves_root == committed_leaves_root:
