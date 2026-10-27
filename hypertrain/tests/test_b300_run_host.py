@@ -88,6 +88,9 @@ def destroy(ref, kind, rm=False):
 if cmd == "info":
     print(state)
 elif cmd == "pull":
+    if os.environ.get("FAKE_PULL_SLEEP"):
+        (state / "pull.pid").write_text(str(os.getpid()))
+        time.sleep(float(os.environ["FAKE_PULL_SLEEP"]))
     sys.exit(int(os.environ.get("FAKE_PULL_RC", "0")))
 elif cmd == "image":
     print(json.dumps([os.environ.get("FAKE_REPO_DIGEST", argv[-1])]))
@@ -335,6 +338,19 @@ def uploaded(tmp_path: Path, dest: str = "bucket/b300/h1") -> set[str]:
 
 def stop_json(tmp_path: Path) -> dict[str, Any]:
     return json.loads((tmp_path / "results/h1/stop.json").read_text())
+
+
+def alive(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
+
+
+def watchdog_pid(tmp_path: Path) -> int:
+    match = re.search(r"watchdog pid (\d+)", (tmp_path / "results/h1/run.log").read_text())
+    assert match
+    return int(match.group(1))
 
 
 def wait_until(cond: Callable[[], object], what: str, timeout: float = 30) -> None:
@@ -653,10 +669,7 @@ def test_host_name_cannot_leave_the_results_root(env, tmp_path, host):
 def test_a_dead_watchdog_stops_the_run_before_the_next_step(env, tmp_path, launch):
     proc = launch(FAKE_BLOCK="gpu_probe", FAKE_BLOCK_RC="0")
     wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
-    log = (tmp_path / "results/h1/run.log").read_text()
-    match = re.search(r"watchdog pid (\d+)", log)
-    assert match, log
-    os.kill(int(match.group(1)), signal.SIGKILL)
+    os.kill(watchdog_pid(tmp_path), signal.SIGKILL)
     (tmp_path / "state/ctr-gpu_probe.stopped").touch()  # the container then exits 0
     try:
         rc = proc.wait(timeout=30)
@@ -825,3 +838,73 @@ def test_a_tree_without_git_is_unknown_and_never_skipped(env, tmp_path):
         stop = stop_json(tmp_path)
         assert stop["git_rev"] == "unknown" and stop["git_dirty"] is None
         assert len(runs_of(tmp_path, "gpu_probe")) == n
+
+
+# --- shutdown paths: every way out drains, writes stop.json and uploads --------------------------
+
+
+def test_sighup_drains_like_sigterm_and_leaves_no_watchdog(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    pid = watchdog_pid(tmp_path)
+    proc.send_signal(signal.SIGHUP)
+    assert proc.wait(timeout=30) == 143
+    assert stop_json(tmp_path)["reason"] == "signal"
+    assert ["stop", "--time", "60", "ctr-gpu_probe"] in docker_calls(tmp_path)
+    wait_until(lambda: not alive(pid), "the watchdog to be gone")
+
+
+def test_an_unexpected_exit_still_drains_uploads_and_stops_the_watchdog(env, tmp_path, launch):
+    # The second miner_prod survives the removal of the first one without --prod, and its unbound
+    # HT_B300_MINER_CONFIG kills the shell mid-run; any other unexpected exit takes the same path.
+    proc = launch("--steps", "miner_prod miner_prod", "--upload", "s3://bucket/b300")
+    assert proc.wait(timeout=30) == 1
+    stop = stop_json(tmp_path)
+    assert stop["reason"] == "unexpected-exit" and stop["rc"] == 1
+    assert "stop.json" in uploaded(tmp_path)
+    pid = watchdog_pid(tmp_path)
+    wait_until(lambda: not alive(pid), "the watchdog to be gone")
+
+
+def test_a_stop_during_the_pull_ends_the_pull(env, tmp_path, launch):
+    proc = launch(FAKE_PULL_SLEEP="300")  # far longer than the wait below: it must be killed
+    pidfile = tmp_path / "state/pull.pid"
+    wait_until(lambda: pidfile.exists() and pidfile.read_text(), "the docker pull")
+    pid = int(pidfile.read_text())
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    wait_until(lambda: not alive(pid), "the docker pull client to be gone", timeout=10)
+
+
+def test_a_corrupt_rc_file_does_not_stop_the_stop_json_or_the_upload(env, tmp_path):
+    (tmp_path / "results/h1/steps").mkdir(parents=True)
+    (tmp_path / "results/h1/steps/stray.rc").write_text("")
+    p = run(env, tmp_path, "--upload", "s3://bucket/b300")
+    assert p.returncode == 0, p.stdout + p.stderr
+    stop = stop_json(tmp_path)
+    assert "stray" not in stop["steps"] and any("stray.rc" in e for e in stop["errors"])
+    assert "stop.json" in uploaded(tmp_path)
+
+
+def test_a_spot_answer_that_is_not_json_is_kept_as_text(env, tmp_path, monkeypatch):
+    def get(self: BaseHTTPRequestHandler) -> None:
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"<html>ok</html>")
+
+    monkeypatch.setattr(Imds, "do_GET", get)
+    p = run({**env, "FAKE_BLOCK": "gpu_probe"}, tmp_path, "--upload", "s3://bucket/b300")
+    assert p.returncode == 143, p.stdout + p.stderr
+    stop = stop_json(tmp_path)
+    assert stop["reason"] == "spot-interruption"
+    assert stop["spot_notice"] == {"unparsed": "<html>ok</html>"}
+    assert any("spot-instance-action.json" in e for e in stop["errors"])
+    assert "stop.json" in uploaded(tmp_path)
+
+
+def test_the_upload_runs_even_when_stop_json_cannot_be_written(env, tmp_path):
+    (tmp_path / "results/h1/stop.json").mkdir(parents=True)
+    p = run(env, tmp_path, "--upload", "s3://bucket/b300")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert {"run.log", "steps.tsv"} <= uploaded(tmp_path)
+    assert "stop.json was not written" in (tmp_path / "results/h1/run.log").read_text()

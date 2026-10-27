@@ -2,8 +2,9 @@
 # One B300 host run (docs/b300-run.md at the monorepo root): host probe, digest-pinned pull,
 # in-container GPU probe, 8-GPU MFU bench with bitwise replay, the miner flow against the test
 # challenge, and production rounds with --prod.
-# Stops on --duration (default 3h), SIGTERM/SIGINT or an EC2 Spot interruption notice: it stops
-# this run's containers, writes stop.json and uploads the results when --upload is given.
+# Stops on --duration (default 3h), SIGTERM/SIGINT/SIGHUP or an EC2 Spot interruption notice: it
+# stops this run's containers, writes stop.json and uploads the results when --upload is given.
+# An unexpected exit takes the same path (reason unexpected-exit).
 # Idempotent: a step that passed (steps/<name>.rc = 0) is skipped on re-run unless --force; the
 # host probe always runs. Results go to <results-root>/<host>/. Nothing secret is read here: the
 # miner config and key directory are bind-mounted by path and never printed.
@@ -158,6 +159,7 @@ watchdog() {
 watchdog $$ 9>&- &
 watchdog_pid=$!
 log "watchdog pid $watchdog_pid"
+bg_pid= # the docker client of the step that is running, killed by finish
 
 upload_results() {
   local filters=(--exclude '*') f
@@ -173,8 +175,11 @@ upload_results() {
 }
 finish() {
   local reason=$1 rc=$2 ids
+  # Last thing the script does, whatever called it: no later signal or EXIT trap may interrupt it,
+  # and every command below has its own fallback so that a failing one cannot skip the next.
   # A group signal (systemd stop, SSM cancel) also kills tee: log straight to the file from here.
-  trap '' TERM INT PIPE
+  trap '' TERM INT HUP PIPE
+  trap - EXIT
   exec >>"$out/run.log" 2>&1
   kill "$watchdog_pid" 2>/dev/null || true
   ids=$(dk ps -q --filter "label=io.cortex.b300-run=$run_id" 2>/dev/null || true)
@@ -183,23 +188,48 @@ finish() {
     # shellcheck disable=SC2086  # one container id per word
     dk stop --time "$STOP_GRACE" $ids >/dev/null || true
   fi
-  python3 - "$out" "$reason" "$rc" "$run_id" "$image" "$rev" "$dirty" <<'PY'
+  if [ -n "$bg_pid" ]; then # a docker pull has no container to stop
+    pkill -TERM -P "$bg_pid" 2>/dev/null || true
+    kill -TERM "$bg_pid" 2>/dev/null || true
+  fi
+  # A file that cannot be read goes to "errors" in stop.json; it never stops the file or the upload.
+  python3 - "$out" "$reason" "$rc" "$run_id" "$image" "$rev" "$dirty" <<'PY' ||
 import json, sys
 from pathlib import Path
 out, reason, rc, run_id, image, rev, dirty = Path(sys.argv[1]), *sys.argv[2:]
-tsv = out / "steps.tsv"
-rows = [r.split("\t") for r in tsv.read_text().splitlines() if r] if tsv.exists() else []
-notice = out / "spot-instance-action.json"
+errors, steps, rows, notice = [], {}, [], None
+for p in sorted((out / "steps").glob("*.rc")):
+    try:
+        steps[p.stem] = int(p.read_text().split()[0])
+    except (OSError, ValueError, IndexError) as e:
+        errors.append(f"steps/{p.name}: {type(e).__name__}")
+try:
+    rows = [r.split("\t") for r in (out / "steps.tsv").read_text().splitlines() if r]
+except FileNotFoundError:
+    pass
+except (OSError, ValueError) as e:
+    errors.append(f"steps.tsv: {type(e).__name__}")
+try:
+    text = (out / "spot-instance-action.json").read_text()
+    try:
+        notice = json.loads(text)
+    except ValueError as e:
+        errors.append(f"spot-instance-action.json: {type(e).__name__}")
+        notice = {"unparsed": text[:200]}
+except FileNotFoundError:
+    pass
+except (OSError, ValueError) as e:
+    errors.append(f"spot-instance-action.json: {type(e).__name__}")
 stop = {
     "run_id": run_id, "reason": reason, "rc": int(rc), "image": image,
     "git_rev": rev, "git_dirty": {"0": False, "1": True}.get(dirty),
-    "steps": {p.stem: int(p.read_text().split()[0]) for p in sorted((out / "steps").glob("*.rc"))},
-    "ran": [r[0] for r in rows if r[3:4] == [run_id]],
-    "spot_notice": json.loads(notice.read_text()) if notice.exists() else None,
+    "steps": steps, "ran": [r[0] for r in rows if r[3:4] == [run_id]],
+    "spot_notice": notice, "errors": errors,
 }
 (out / "stop.json").write_text(json.dumps(stop, indent=1, sort_keys=True))
 print("STOP", json.dumps({k: stop[k] for k in ("reason", "rc", "steps")}, sort_keys=True))
 PY
+    log "stop.json was not written"
   upload_results
   exit "$rc"
 }
@@ -209,7 +239,9 @@ on_signal() {
   rm -f "$out/.stop-reason"
   finish "$reason" 143
 }
-trap on_signal TERM INT
+on_exit() { finish unexpected-exit $?; }
+trap on_signal TERM INT HUP
+trap on_exit EXIT
 
 # --- step runner -------------------------------------------------------------------------------
 step() {
@@ -241,12 +273,15 @@ step() {
 # script never removes a container by name: a name already in use makes `docker run` fail, and
 # only `finish` stops containers, by this run's label.
 container() {
-  local name=$PREFIX-$1
+  local name=$PREFIX-$1 rc=0
   shift
   dk run --rm --init --name "$name" --label "io.cortex.b300-run=$run_id" --gpus all \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
     -v "$HT:/opt/ht:ro" -v "$out:/out" -w /opt/ht/scripts "$@" 9>&- &
-  wait $!
+  bg_pid=$!
+  wait "$bg_pid" || rc=$?
+  bg_pid=
+  return "$rc"
 }
 PY=/opt/hypertrain/venv/bin/python
 
@@ -267,7 +302,9 @@ host_probe() {
 pull() {
   local got
   dk pull "$image" >"$out/pull.log" 2>&1 9>&- &
-  wait $! || { tail -n 20 "$out/pull.log"; return 1; }
+  bg_pid=$!
+  wait "$bg_pid" || { bg_pid=; tail -n 20 "$out/pull.log"; return 1; }
+  bg_pid=
   got=$(dk image inspect --format '{{json .RepoDigests}}' "$image") || return
   echo "$got" >"$out/pull-digests.json"
   [[ $got == *"${image#*@}"* ]] || { log "pulled digests $got lack ${image#*@}"; return 1; }
