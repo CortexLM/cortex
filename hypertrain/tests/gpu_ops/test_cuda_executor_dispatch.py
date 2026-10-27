@@ -929,6 +929,102 @@ def test_result_that_breaks_one_of_our_parsers_fails_over_to_the_next_host(
     assert list(home.glob("attempt-*")) == []
 
 
+def hostile_and_healthy(canned, labels=("a", "b")):
+    """(the host the executor tries first for this job, the other one)."""
+    first = first_host(canned.job, labels)
+    return first, labels[1 - labels.index(first)]
+
+
+# What a hostile host prints in its probe: bytes no daemon or `date` can print and that exhaust a
+# parser of ours. The host is refused on the spot, before any container exists.
+PROBE_BOMBS = {
+    "repo-digests-100000-levels-deep": (
+        lambda image: {"raw_inspect": "[" * 100_000 + "]" * 100_000},
+        "RepoDigests",
+    ),
+    "repo-digests-900000-opening-brackets": (
+        lambda image: {"raw_inspect": "[" * 900_000},
+        "RepoDigests",
+    ),
+    "repo-digests-100000-levels-of-objects": (
+        lambda image: {"raw_inspect": '{"a":' * 100_000},
+        "RepoDigests",
+    ),
+    # json.loads takes the escape, but the provenance record cannot hold the result: it would
+    # fail after a whole container run
+    "repo-digests-lone-surrogate-beside-the-image": (
+        lambda image: {"raw_inspect": json.dumps([image, "x"]).replace('"x"', '"\\ud800"')},
+        "RepoDigests",
+    ),
+}
+
+
+@pytest.mark.parametrize("bomb", PROBE_BOMBS)
+def test_probe_that_exhausts_a_parser_quarantines_the_host_before_any_container_runs(
+    make_pool, canned, tmp_path, bomb
+):
+    evil, good = hostile_and_healthy(canned)
+    overrides, cause = PROBE_BOMBS[bomb]
+    pool = make_pool(labels=("a", "b"), hosts={evil: overrides(canned.image)})
+    factory = cuda_executor.load(pool.config_path)
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home, factory=factory)
+
+    assert [run["host"] for run in pool.toolbox.runs()] == [pool.address(good)]
+    (refused,) = journal_of(pool, "exec_host_refused")
+    assert refused["label"] == evil and cause in refused["reason"]
+    assert journal_of(pool, "exec_attempt_failed") == []  # a refusal costs no attempt
+    assert record_of(home)["host"]["label"] == good
+
+    calls = len(pool.toolbox.ssh_calls(host=pool.address(evil)))
+    dispatch(pool, canned.stage(tmp_path / "later"), factory=factory)
+    # the quarantined host is never offered a job again
+    assert len(pool.toolbox.ssh_calls(host=pool.address(evil))) == calls
+
+
+# What the store sees when the pool cannot serve a job. The audit route has no handler for it: it
+# books the failure as the executor's by this class and these message heads, never as the miner's
+# or the auditor's. Nothing else may leave `launch` for bytes a host wrote.
+NO_HOST = "cuda executor found no host able to run the job: "
+GAVE_UP = "cuda executor gave up: "
+
+
+def test_a_pool_of_quarantined_hosts_ends_in_a_plain_island_failure(make_pool, canned, tmp_path):
+    bomb = {"raw_inspect": "[" * 100_000 + "]" * 100_000}
+    pool = make_pool(labels=("a", "b"), hosts={"a": bomb, "b": bomb})
+    factory = cuda_executor.load(pool.config_path)
+    home = canned.stage(tmp_path / "home")
+    with pytest.raises(IslandFailure) as caught:
+        dispatch(pool, home, factory=factory)
+
+    assert type(caught.value) is IslandFailure  # not Aborted, not a subclass, not a RuntimeError
+    assert str(caught.value).startswith(NO_HOST)
+    for label in ("a", "b"):
+        assert f"{label} was refused: host probe lists a malformed RepoDigests" in str(caught.value)
+    assert_nothing_published(home)
+    assert sorted(r["label"] for r in journal_of(pool, "exec_host_refused")) == ["a", "b"]
+    assert pool.toolbox.runs() == [] and journal_of(pool, "exec_attempt_failed") == []
+
+    # the next job meets the same verdict without a single call to a host
+    calls = len(pool.toolbox.ssh_log())
+    with pytest.raises(IslandFailure, match=f"^{NO_HOST}no host answered; ") as again:
+        dispatch(pool, canned.stage(tmp_path / "later"), factory=factory)
+    assert type(again.value) is IslandFailure and len(pool.toolbox.ssh_log()) == calls
+
+
+def test_a_pool_that_used_its_attempts_ends_in_a_plain_island_failure(make_pool, canned, tmp_path):
+    flipped = {"mode": "mutate", "name": "flipped-byte"}
+    pool = make_pool(labels=("a", "b"), config={"max_attempts": 2})
+    pool.toolbox.scenario.global_runs(flipped, flipped)
+    home = canned.stage(tmp_path / "home")
+    with pytest.raises(IslandFailure) as caught:
+        dispatch(pool, home)
+
+    assert type(caught.value) is IslandFailure and str(caught.value).startswith(GAVE_UP)
+    assert_nothing_published(home)
+    assert len(journal_of(pool, "exec_attempt_failed")) == 2
+
+
 OOM = {"mode": "exit", "code": 1, "stderr": "CUDA out of memory"}
 
 

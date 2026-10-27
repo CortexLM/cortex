@@ -16,12 +16,14 @@ The scenario is one JSON file keyed by host address (`hosts`), plus a `global` s
 
     hosts[address] = {down, hostkey_ok, port, user, identity, clock_skew,
                       gpus[{uuid,name,driver,cc,mem,sm}], busy[uuid], busy_sequence[[uuid]],
-                      smi_fail, images[ref], inspect_reports[ref], pull{fails|digest}, runs[run]}
+                      smi_fail, images[ref], inspect_reports[ref], raw_inspect,
+                      pull{fails|digest}, runs[run]}
     global = {canned{job_sha256: tree}, runs[run], rm_hold}  # global runs are consumed first
     run = {mode: ok | vanish | truncate | exit | exit-after | probe-fail | env | hang | oversize |
                  flood | mutate, detached, ...}
 
 `smi_fail` is `query-gpu` or `query-compute-apps`: that nvidia-smi query prints nothing and exits 3.
+`raw_inspect` is the text `docker image inspect` prints, whatever the image list is.
 `port`, `user` and `identity` are what the host's sshd accepts: any other `-p`, user or `-i` file is
 refused, and the destination must be pinned in the `UserKnownHostsFile` the caller names, as
 `address` for port 22 and `[address]:port` otherwise (StrictHostKeyChecking=yes).
@@ -232,7 +234,10 @@ def inspect(argv):
     host = host_of(scenario())
     if ref not in host.get("images", []):
         usage("Error response from daemon: No such image: %s" % ref, 1)
-    print(json.dumps(host.get("inspect_reports", host["images"])))
+    if "raw_inspect" in host:
+        print(host["raw_inspect"])
+    else:
+        print(json.dumps(host.get("inspect_reports", host["images"])))
 
 
 def pull(argv):

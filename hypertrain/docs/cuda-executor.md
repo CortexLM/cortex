@@ -66,6 +66,21 @@ the artifact commitments itself (`validate_artifacts`) and checks the environmen
 signed manifest and the ADR 0007 table before it publishes; a host that returns a partial,
 tampered or unverifiable result produces nothing, and the job moves to another host or fails.
 
+## A hostile or broken host
+
+Everything a host sends is bytes to check, never a statement to believe
+([ADR 0011](../../docs/adr/0011-audit-integrity.md), which amends section 4 of ADR 0008).
+
+- A probe whose `RepoDigests` line is not a plain list of at most 32 references (printable ASCII
+  without space, quote or backslash, at most 256 characters each) refuses the host: it is
+  quarantined until the challenge restarts and the next host serves the job, with no container
+  run on it. The line is read by a grammar, not by a JSON parser.
+- When no host can serve the job, `launch` raises a plain `IslandFailure`: "cuda executor found
+  no host able to run the job: ..." when every host is quarantined or unavailable, "cuda executor
+  gave up: ..." after `max_attempts` failed attempts, and `Aborted` (a subclass) when the job
+  deadline passed or the lease was cancelled. The audit route must book all three as the
+  executor's failure, not as a verdict about the miner or the auditor.
+
 ## Install on the `hypertrain-test` stack only (not run)
 
 Preconditions: a TEST manifest for the hardware (`sm_count`, `driver_allowlist`, GPU image digest)

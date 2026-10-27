@@ -335,6 +335,15 @@ REFUSED_PROBES = [
     pytest.param(probe_text(epoch=""), id="epoch-empty"),
     pytest.param(probe_text(epoch=None), id="no-epoch-section"),
     pytest.param(probe_text(image="not json"), id="digests-not-json"),
+    pytest.param(probe_text(image="[" * 100_000 + "]" * 100_000), id="digests-100000-levels"),
+    pytest.param(probe_text(image="[" * 900_000), id="digests-900000-opening-brackets"),
+    pytest.param(probe_text(image='{"a":' * 100_000), id="digests-100000-levels-of-objects"),
+    pytest.param(probe_text(image=json.dumps([IMAGE, "\ud800"])), id="digest-lone-surrogate"),
+    pytest.param(
+        probe_text(image=json.dumps([IMAGE, "café"], ensure_ascii=False)), id="digest-non-ascii"
+    ),
+    pytest.param(probe_text(image=json.dumps([IMAGE, 'a"b'])), id="digest-with-an-escaped-quote"),
+    pytest.param(probe_text(image='["\\u0072"]'), id="digest-with-an-escape"),
     pytest.param(probe_text(image="[1, 2]"), id="digests-not-strings"),
     pytest.param(probe_text(image="null"), id="digests-null"),
     pytest.param(probe_text(image=None), id="no-image-section"),
@@ -350,6 +359,13 @@ def test_parse_snapshot_refuses_the_host_on_anything_unexpected(text: str) -> No
 def test_parse_snapshot_accepts_repo_digests_exactly_at_their_bounds() -> None:
     listed = [f"{'r' * 252}{i:04d}" for i in range(32)]  # 32 entries of 256 characters
     assert ce.parse_snapshot(probe_text(image=json.dumps(listed))).repo_digests == tuple(listed)
+
+
+def test_parse_snapshot_reads_the_compact_list_the_daemon_prints() -> None:
+    # `{{json .RepoDigests}}` is Go's json.Marshal: no space after the comma.
+    listed = [IMAGE, f"{REPOSITORY}@sha256:{'cd' * 32}"]
+    text = probe_text(image=json.dumps(listed, separators=(",", ":")))
+    assert ce.parse_snapshot(text).repo_digests == tuple(listed)
 
 
 @pytest.mark.parametrize("image", ['"abc"', '{"a": 1}'])

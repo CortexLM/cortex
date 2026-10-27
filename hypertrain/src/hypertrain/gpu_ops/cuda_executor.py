@@ -83,6 +83,7 @@ SMALL = 1 << 20
 POLL = 0.25
 MARGIN = 5
 LOG_TAIL = 600
+MAX_DIGESTS = 32  # RepoDigests entries kept from a host probe
 
 
 class HostLost(IslandFailure):
@@ -198,6 +199,12 @@ class Snapshot:
     repo_digests: tuple[str, ...] | None  # None: the image is absent on the host
 
 
+# `docker image inspect --format {{json .RepoDigests}}` prints a list of references: printable ASCII
+# with no space, quote or backslash, so the line needs no JSON parser and carries no escape.
+_REFERENCE = rf'"[\x21\x23-\x5b\x5d-\x7e]{{1,{FIELD}}}"'
+_REPO_DIGESTS = re.compile(rf"\[(?:{_REFERENCE}(?:, ?{_REFERENCE}){{0,{MAX_DIGESTS - 1}}})?\]")
+
+
 def snapshot_command(docker: Sequence[str], image: str) -> str:
     inspect = shlex.join([*docker, "image", "inspect", "--format", "{{json .RepoDigests}}", image])
     return (
@@ -237,19 +244,15 @@ def parse_snapshot(text: str) -> Snapshot:
         )
         digests = sections["image"][0].strip()
         absent = digests == "ABSENT"
-        listed = [] if absent else json.loads(digests)
         epoch = int(sections["epoch"][0])
     except (IndexError, KeyError, ValueError, TypeError, csv.Error, IslandFailure) as error:
         raise HostRefused(f"unparseable host probe: {type(error).__name__}") from error
     if not gpus or len({g.uuid for g in gpus}) != len(gpus):
         raise HostRefused("host probe lists no GPU or a duplicate GPU")
-    if not (
-        isinstance(listed, list)
-        and len(listed) <= 32
-        and all(isinstance(d, str) and len(d) <= FIELD for d in listed)
-    ):
+    if not absent and not _REPO_DIGESTS.fullmatch(digests):
         raise HostRefused("host probe lists a malformed RepoDigests")
-    return Snapshot(tuple(gpus), busy, epoch, None if absent else tuple(listed))
+    listed = () if absent else tuple(re.findall(r'"([^"]*)"', digests))
+    return Snapshot(tuple(gpus), busy, epoch, None if absent else listed)
 
 
 def run_command(
