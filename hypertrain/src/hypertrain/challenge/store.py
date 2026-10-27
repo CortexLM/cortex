@@ -2584,6 +2584,7 @@ class ChallengeStore:
                 assignment_of=lambda w, hot: self._assignment_v2(run_id, w, hot),
                 shadow_assignment_of=lambda binding: self._shadow_assignment_v2(run_id, binding),
                 shadow_settlement=lambda origin: self._shadow_settlement_v2(run_id, origin),
+                round_closure=lambda w: self._round_closure_v2(run_id, w),
             )
             escrow.mutex = self._lock  # One SQLite authority lock, including event acknowledgments.
 
@@ -6068,6 +6069,28 @@ class ChallengeStore:
             (w,),
         ).fetchone()[0]
         self._put_record_v2(run_id, "finality", str(w), status)
+
+    def _round_closure_v2(self, run_id: str, w: int) -> str | None:
+        """The hash that closed round w without a reward, else None. Derived, never stored.
+
+        A round is closed without a reward when finality closed it as excluded (an accepted
+        rollback, or an exclusion before it was applied) or as retired; pending, settled,
+        awaiting its rollback, with an open audit or dispute, or without a record, it is not.
+        RETIRED is compared as a string: `finality_v2` does not know the disposition yet, and
+        until `RoundStatus.closed` counts it no record can match.
+        """
+        from hypertrain.challenge.finality_v2 import RoundStatus
+
+        row = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='finality' AND id=?",
+            (run_id, str(w)),
+        ).fetchone()
+        if row is None:
+            return None
+        status = RoundStatus(**json.loads(row[0]))
+        if status.closed and status.disposition in ("EXCLUDED", "RETIRED"):
+            return status.resolution_hash
+        return None
 
     def _close_blocked_disputes_v2(self, run_id: str) -> None:
         """Close, without a loser, every dispute no party and no referee can still decide.

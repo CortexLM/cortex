@@ -466,6 +466,17 @@ or be excluded and repaired. Retain original input objects, signed tapes,
 accepted envelopes, carry anchors and full bounded predecessor history. Reward
 `get_weights` is not a model-checkpoint download endpoint.
 
+A round that finality closes without a reward (excluded, or repaired by an accepted rollback)
+is never reward-finalized and never paid, and it does not stop the rounds after it. Reward
+`finalize` accepts round w only if w is the first round that is neither reward-finalized nor
+withdrawn: when a lower round is closed without a reward, the same `finalize` first records it
+once in the escrow journal (event `ROUND_WITHDRAWN`, with the hash that closed it), in the same
+transaction, then pays w. The record moves no unit and sanctions nobody. A refused `finalize`
+records nothing, and a run that rolled back before this record existed is not stuck: its next
+`finalize` records the closed rounds. A round that is pending, settled, awaiting its rollback,
+or that has an open audit or dispute is not withdrawn and still answers the next round 409
+`FINALIZE_ORDER`.
+
 A roster member that has not committed when audits are scheduled is left out of its
 round: its `excluded` record gets reason `NO_SHOW` (stage `commit`), the audits of the
 other members are created, and the round is aggregated and finalized without it. A member

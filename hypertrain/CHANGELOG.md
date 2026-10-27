@@ -154,6 +154,15 @@
   on every route of the challenge app (the two rollback routes keep their bare message for a
   `TapeError`). The store still raises the bare exceptions; nothing is written by a refused call.
   See `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- After a round that finality closed without a reward (an accepted rollback, or an exclusion
+  before the round was applied) no later round could be reward-finalized: the ledger accepted
+  only the round after the last one it had paid, nothing wrote the row of a closed round, and
+  `finalize` answered 409 `FINALIZE_ORDER` for ever (real HTTP, two-round rollback then a fully
+  audited round 2). The next reward `finalize` now records each such round once, as a
+  `ROUND_WITHDRAWN` event of the escrow journal in its own transaction, then pays: no table, no
+  snapshot change, nothing minted or moved, and a run already stuck this way is released by its
+  next `finalize`. A round that is pending, settled, awaiting its rollback or has an open audit
+  or dispute still blocks. See `docs/adr/0011-audit-integrity.md` at the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.
