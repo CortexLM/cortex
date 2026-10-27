@@ -955,9 +955,9 @@ in this order and without the peer:
 | 5 | audit job, lease (Part 2, done) | an auditor, an executor host, a miner whose sealed input cannot be leased | attempt `L`; two windows of `A`; the second ends where the sealed commit ends | cooldown, requeue, re-arm once, drop only the miner (`INFRASTRUCTURE`); `MINER_INPUT_REFUSED` dropped at once | infrastructure; miner only for an input it sealed short | none | `test_audit_liveness_v2` |
 | 6 | audit window missed | the operator who never calls `audits` | `absolute - 1` | the round is retired (`AUDIT_WINDOW_MISSED`) | infrastructure | none | `test_exit_audit_window` |
 | 7 | round infeasible (AC-CLIFF) | nobody in particular: the Q/4 caps after any exclusion above | the push that first sees the survivors cannot carry | blame booked per member; the round is retired (`INFEASIBLE`); the next opening answers 409 until four anchored members are eligible | per member (rows 2 to 4) | per member | `test_exit_infeasible` |
-| 8 | roster member changes state (R-C2, DSP-04) | the member: rotation, contest of its own MATCH, a lapsing screen; our own sanction | refused at the source (rotation, MATCH contest, screen at open); judged at `aggregate` otherwise | `ROTATION_ROUND_OPEN` / `NOTHING_TO_CONTEST` 409; `excluded INELIGIBLE` with its cause | the member's own state; never a second sanction | none | `test_member_state` |
+| 8 | roster member changes state (R-C2, DSP-04) | the member: rotation, contest of its own MATCH, a lapsing screen; our own sanction | refused at the door (rotation, MATCH contest, screen at open); judged at `aggregate`; if too few remain, retired at `d_final` | `ROTATION_ROUND_OPEN` / `NOTHING_TO_CONTEST` 409; `excluded INELIGIBLE` with its cause; `finalize` pays the applied tape | the member's own state; never a second sanction | none | `test_member_state` |
 | 9 | `FINALIZE_ORDER` without a withdrawal record (R-D) | nobody: a round closed without reward has no ledger row | the next reward finalize | `ROUND_WITHDRAWN` event for every closed-unpaid round below it | none | none | `test_round_withdrawal` |
-| 10 | a round that never closes pins the bonds (Lens m2) | a round record without a finality record (a defect, not a peer) | `d_final + 1` | fail closed; healed by retirement only when neither `applied` nor `finalize` exists | none | none | `test_exit_orphan_round` |
+| 10 | a round with no finality record (Lens m2) | nobody: both writers write the `round` and `finality` records in one transaction and nothing deletes either | n/a | fail closed: `rounds_listing` is `None`, so the bond stays held and the rotation refused; the real pin, a round that never closes, is removed by retirement | none | none | `test_member_state` (pinned) |
 
 Not rows: a run that lacks four anchored ACTIVE members for the next round (capacity, answered by a 409 at
 open), and an operator that stops calling `aggregate`, `finalize` or `open`. Both are named so nobody reads
@@ -981,7 +981,9 @@ the table as covering them.
 3. **Eager exits.** The first push with `now >= d_commit` excludes every member with no commit, the first
    with `now >= d_upload` every audited member with no delta. The records are byte-identical to the lazy
    writers' (`_exclude_no_shows_v2`, `_exclude_missing_deltas_v2`), which stay as a backstop. A queued job
-   whose miner never posted leaves is dropped at `absolute` as `NO_SHOW/leaves`.
+   whose miner never posted leaves is dropped at `absolute` as `NO_SHOW/leaves`, with the miner's blame
+   and no re-arm: only the master lacks the leaves, no auditor ever touched the job, and a second window
+   cannot help. This amends Part 2 decisions 8 and 9 for this one case.
 4. **Liveness before accountability.** The exit is committed first and never depends on the sanction. The
    sanction is a row of its own (`records_v2 exit-sanction`, id `{w}:{hotkey}`: PENDING, APPLIED, WAIVED
    or CANCELLED) applied by a sweeper that retries on every push. ADR 0010 and Part 5 asked for one
@@ -1003,12 +1005,15 @@ the table as covering them.
    `finality[w]` has the new closed disposition `RETIRED`, `retired[w]` holds the evidence
    `{v: "ht-round-retired-v1", run_id, w, cause, roster_hash, survivors, theta_hash}` whose sha256 is the
    evidence hash. `open_round_v2` is unchanged: it reads `applied[w]` and the anchors of round `w`.
-8. **Causes, each re-derived by the primitive** (`_retire_round_v2`, called by the reaper; idempotent,
-   it cannot void a healthy round): `INFEASIBLE` (`now >= d_commit` and `allocate_weights` over the
-   survivors raises; every term only shrinks), `AUDIT_WINDOW_MISSED` (no lease row and `now >= absolute - 1`),
-   `NO_FINALITY_RECORD` (a `round` record, no `finality`, no `applied`, `now >= d_final`: Lens m2). All
-   require every earlier round closed, so no rollback window contains a retired round, an unapplied
-   `PENDING` status and no `service-admission` record.
+8. **Causes, each re-derived by the primitive** (`_retire_round_v2`, called by the reaper's per-round
+   savepoint and by nothing else; idempotent, it cannot void a healthy round): `INFEASIBLE` (`now >= d_commit`
+   and `allocate_weights` over the survivors raises; every term only shrinks) and `AUDIT_WINDOW_MISSED` (no
+   lease row and `now >= absolute - 1`). Both require every earlier round closed (so no rollback window
+   contains a retired round; an open predecessor delays the retirement and the state is recorded in
+   `round-exit`), an unapplied `PENDING` status and no `service-admission` record. The one definition of
+   "survivors" is the planner's: the roster minus the excluded, minus the members with no commit from
+   `d_commit`, minus the committed members with no delta from `d_upload`. A round whose audited members
+   became ineligible (decision 22) is retired at `d_final` if too few remain.
 9. **Anchors carried, nothing recomputed.** Every roster member's anchor `w` is its anchor `w - 1` under new
    hashes (`ht-carried-proof/1`, `ht-carried-anchor/1`): the tensor files are linked and only the metadata
    is rewritten, `state_root` and `ef_hash` are unchanged. Survivors restart `w + 1` from the optimizer
@@ -1032,10 +1037,12 @@ the table as covering them.
     strike and burns the bond (unvested rewards spared, the coldkey stays bound by the one-non-ACTIVE-row
     rule); a one-tuple change in `admission.py`. It resolves by the admission id of the roster entry, so a
     rotation cannot dodge it, and is idempotent per (reason, evidence).
-13. **The gate.** A PENDING sanction is applied only when no earlier round that is not closed lists the
-    member's admission as an included roster entry. Otherwise the ineligibility it creates makes
-    `finalize` of that round refuse the member for ever. While it waits the row is PENDING and the bond and
-    the coldkey stay held (`lock_settlement` and `join` read the row).
+13. **No gate: `finalize` pays the applied tape (decision 23).** An earlier design made the sweeper wait
+    for the member's earlier unclosed rounds, because a sanction makes the member ineligible and `finalize`
+    of an applied round re-checks eligibility. A gate cannot hold `settle_fraud` (it runs inside a referee's
+    resolution), a lapse or a rotation; decision 23 cures every path and lands before the first caller of
+    the hook. The gate (about 25 lines: a PENDING row until no earlier unclosed round lists the member) is
+    the documented fallback if decision 23 is refused.
 14. **`SanctionHook`.** The sweeper calls the hook through a Protocol of one method
     (`seize_bond(admission_id, *, reason, evidence_hash, now)`), bound to `Admission` in production and to a
     fake in tests. It never calls `TRAINING_FRAUD`: that stays `settle_fraud`'s. The evidence hash is the
@@ -1121,7 +1128,7 @@ the table as covering them.
 | infeasible (AC-CLIFF) | `tests/e2e/test_retired_round_v2.py` | 4 rostered, 1 silent: 409 `ROUND_INFEASIBLE` (not 500), retired, honest bonds released; round 1 opens with four anchored eligible members; 5 rostered, 1 silent: settles with four | retire on any exclusion |
 | member state | `tests/challenge/test_member_state_v2.py` | rotation refused while rostered; MATCH contest refused; lapsed screen excluded `INELIGIBLE`; sanctioned member of an applied round is paid by `finalize` | each guard |
 | finalize order | `tests/challenge/test_round_withdrawal_v2.py` | accepted rollback then a paid round: `FINALIZE_ORDER` before, 200 after, `escrow.verify()` passes | the callback |
-| orphan round | `tests/challenge/test_retire_round_v2.py` | a `round` record without finality: bond held, then retired and released | the cause |
+| no finality record | `tests/challenge/test_member_state_v2.py` | a round without a finality record keeps the rotation refused and the bond held (pinned, with the rotation case red) | `rounds_listing` returns closed |
 | sanction | `tests/challenge/test_sanction_v2.py`, the cheaters suite | confirmed MISMATCH sanctioned after the window; auditor/host failures never reach the hook | grade, gate, cancel |
 
 ### P1 to P8 of ADR 0009 section 4 (D47)
@@ -1204,6 +1211,19 @@ the table as covering them.
 6. The late-join anchor (Q3), which would make "a fifth miner becomes ACTIVE" literal.
 7. D51 (2): the merged `GET .../challenge` of ADR 0010 is signed in headers; the `GET /disputes` route too.
    Both are converted to a signed body envelope in separate commits (D52).
+8. A `TRAINING_FRAUD` ban that lands between the aggregate and the finalize of a round leaves that round's
+   reward with the convicted coldkey (decision 23); the clean rule ("a banned coldkey's later origins
+   mint into `burned`") belongs to the ledger lot.
+9. The contest window counts beacon rounds, so a beacon outage consumes it; extend `due` by the pause
+   length before production.
+10. A retirement costs every roster member a round of work and reward, and a free identity in a roster of
+    exactly four can void each round it is in until it is sanctioned: the bond prices it; document it in
+    the operator guide.
+11. A correlated honest outage (a region loss silencing several honest miners while the master is up) is
+    sanctioned for all; no threshold is proposed, a majority attacker would use it.
+12. Order with F1 (`v3-escrow-relay-fixes`): F1 first, as the Principal ordered. Whoever lands second
+    resolves one-line conflicts in `escrow_v2.py`; with F1 present the withdrawal id uses the server key
+    space and the chain-head term is redundant.
 
 ### Not verified
 
