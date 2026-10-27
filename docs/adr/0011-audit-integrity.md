@@ -1081,7 +1081,13 @@ the table as covering them.
     auditor-side responder exists, so the Part 1 closure ends it `INFRASTRUCTURE` and the verdict stands.
 18. **Order.** The `AUDIT_MISMATCH` rows are enforced only after Part 3 is in the code. Until then they run in
     `record` mode (the sweeper journals `WOULD_APPLY` and calls no hook; a constructor keyword, not a
-    manifest field). `NO_SHOW` rows have no such dependency.
+    manifest field). `NO_SHOW` rows have no such dependency. The reason is a case the code proves
+    (`tests/auditor/test_auditor.py`): a signed `delta_hash` that alone differs from the replay is a
+    `MISMATCH` with no leaf and the committed root, hence `COMMIT_CONTRADICTS_LEAVES`, and the delta
+    codec depends on the ATen capability of the host (Part 3), so an honest miner on another ISA is
+    graded like a liar until the pin is required. A stale or wrong `ef_in` on the audit side is not
+    that case: `_ef_in` demands `commit.ef_in_hash`, and the audit is `BAD_PROOF`, which `grade()`
+    never names.
 19. **No route back [sign-off].** A round-stage sanction binds no pending reference; the only exoneration is
     decision 17. The re-seed of ADR 0002 (P5) and any amnesty belong to the admission lot and need policy
     fields.
