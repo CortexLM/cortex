@@ -373,6 +373,10 @@ Tokens derive from assigned samples times sequence length, not self-reported GPU
 count. Rerunning a round that is already `UPLOADED` exits 0 with `UPLOADED`: the
 master returns its first acceptance for the same receipt without a new relay
 retrieval, and answers 409 `RELAY_RECEIPT_CONFLICT` for a different receipt.
+The delta submission must name the master acceptance minted for its own miner, round and grant:
+the acceptance's `w` and `hotkey` must be the signer's round and hotkey and the receipt it names
+must carry the delta's `grant_hash`, otherwise the master answers 422. A commit whose leaf count,
+token count or assignment size differs from the manifest is also 422 with the reason.
 `UPLOADED` is not audit success, settlement or payment. Unlike v1 `run`,
 `run-v2` has no `--rounds`/`--start` option. Preserve the work directory; do not
 claim the CLI is a complete unattended production scheduler.

@@ -3,8 +3,7 @@
 Every strict xfail below is a hole of the v2 protocol path: its body is the minimal reproducer and
 its failing assertion is the DESIRED defence (it flips to a failure the day the hole is closed, so
 the marker must then be removed). Nothing here asserts today's behaviour as if it were the
-contract; what the master does instead is recorded as evidence (record()) for the ADR. The one
-test without a marker pins a layer that holds today (the audit behind an intake hole) and says so.
+contract; what the master does instead is recorded as evidence (record()) for the ADR.
 
 The five-miner roster is the default shape of ac_world.py; the cheater is identity 4. A step that
 must hold today (the cheat is caught, the honest miners settle) is a precondition: it raises
@@ -35,7 +34,6 @@ from ac_sanctions import (
 from ac_world import MinerOutcome, Observation, Settlement, World, record
 
 from hypertrain.challenge.store import ChallengeError
-from hypertrain.protocol.hashing import sha256_hex
 
 slow = pytest.mark.slow
 
@@ -408,14 +406,6 @@ def borrow_peer_acceptance(world: World) -> tuple[MinerOutcome, MinerOutcome, st
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="AC-ACCEPTANCE-BINDING (MINEUR, defence in depth): DeltaManifestV2 intake "
-    "(store.py:6192-6200) looks the acceptance up by its digest run-wide and compares only its "
-    "delta_hash with the commit; the acceptance's w and hotkey and the manifest's grant_hash are "
-    "never read. The audit still catches the miner (see the passing sibling test)",
-)
 def test_a_delta_cannot_borrow_the_acceptance_of_another_miner(ac_clone: World) -> None:
     """Desired defence: a /delta that references the master acceptance minted for another miner's
     upload is refused with 409 or 422, whoever signed it. Without the check the miner skips its
@@ -439,54 +429,6 @@ def test_a_delta_cannot_borrow_the_acceptance_of_another_miner(ac_clone: World) 
 
 
 @slow
-def test_a_delta_that_borrowed_an_acceptance_still_earns_nothing_at_the_audit(
-    ac_clone: World,
-) -> None:
-    """The layer behind AC-ACCEPTANCE-BINDING holds today: the borrowed /delta is accepted, yet the
-    replay of the copier's job does not match its commit, the copier is excluded as UNVERIFIED,
-    the four others settle and the master holds bytes whose sha256 is the committed delta hash.
-
-    Obsolete the day /delta refuses the borrow: the precondition then fails and this test goes."""
-    world = ac_clone
-    _, copier_outcome, copier, delta_hash, response = borrow_peer_acceptance(world)
-    precondition(
-        response.status_code == 200,
-        f"the borrow is refused now ({response.status_code}): retire this test",
-    )
-    honest = [world.hotkey(i) for i in ROSTER if world.hotkey(i) != copier]
-    run_miners = [i for i in ROSTER if i not in (PEER, COPIER)]
-    for index in run_miners:
-        precondition(world.run_miner(index, None).uploaded, f"miner {index} did not upload")
-
-    settlement = world.settle(0)
-    seen = world.observe()
-    evidence(
-        "delta-borrows-a-peer-acceptance-audit",
-        world,
-        COPIED_PEER_WITHOUT_UPLOAD,
-        COPIER,
-        [copier_outcome],
-        settlement,
-        seen,
-        "AC-ACCEPTANCE-BINDING",
-        delta_status=response.status_code,
-    )
-
-    assert settlement.results == {**dict.fromkeys(honest, "MATCH"), copier: "MISMATCH"}
-    assert seen.excluded[f"0:{copier}"]["reason"] == "UNVERIFIED"
-    assert settlement.settled, settlement.stalled_at
-    held = world.network.store.objects.get(delta_hash)
-    assert sha256_hex(held) == delta_hash
-
-
-@slow
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="AC-ACCEPTANCE-BINDING (MINEUR, defence in depth): same intake check as for a peer's "
-    "acceptance (store.py:6192-6200); an acceptance of round w-1 with the same delta_hash is "
-    "accepted for round w because its w is never read. The audit still returns MISMATCH",
-)
 def test_a_delta_cannot_borrow_the_acceptance_of_an_earlier_round_of_the_same_miner(
     ac_clone: World,
 ) -> None:

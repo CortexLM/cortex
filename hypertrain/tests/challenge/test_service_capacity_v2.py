@@ -598,8 +598,27 @@ def test_finalization_cannot_reset_charges_and_nested_failure_cannot_erase_debit
         store._service_charge_v2(run_id, 0, "next", 1, kind="audit", units=1)
 
 
+# The one field in which a borrowed acceptance (or the receipt it names) differs from the delta's
+# own miner, round and grant.
+BORROWED_ACCEPTANCE = {
+    "acceptance-of-another-miner": {"hotkey": service.HOT[1].ss58},
+    "acceptance-of-another-round": {"w": 1},
+    "receipt-of-another-grant": {"grant_hash": "0a" * 32},
+}
+
+
 @pytest.mark.parametrize(
-    "case", ["valid", "later-shape", "codec", "format", "oversize", "stored-oversize", "legacy"]
+    "case",
+    [
+        "valid",
+        "later-shape",
+        "codec",
+        "format",
+        "oversize",
+        "stored-oversize",
+        "legacy",
+        *BORROWED_ACCEPTANCE,
+    ],
 )
 def test_delta_intake_checks_trusted_geometry_before_durable_acceptance(tiny, monkeypatch, case):
     import torch
@@ -692,11 +711,28 @@ def test_delta_intake_checks_trusted_geometry_before_durable_acceptance(tiny, mo
             f"0:{miner.ss58}",
             envelope_v2.seal(miner, "CommitV2", run_id, commit, 100),
         )
+        stored = {
+            "w": 0,
+            "hotkey": miner.ss58,
+            "grant_hash": delta.grant_hash,
+            **BORROWED_ACCEPTANCE.get(case, {}),
+        }
+        receipt_hash = "09" * 32
         store._put_record_v2(
             run_id,
             "master-acceptance",
             delta.master_acceptance_hash,
-            {"body": {"delta_hash": payload_hash}},
+            {
+                "body": {
+                    "w": stored["w"],
+                    "hotkey": stored["hotkey"],
+                    "delta_hash": payload_hash,
+                    "receipt_hash": receipt_hash,
+                }
+            },
+        )
+        store._put_record_v2(
+            run_id, "relay-receipt", receipt_hash, {"body": {"grant_hash": stored["grant_hash"]}}
         )
     raw = canonicalize(envelope_v2.seal(miner, "DeltaManifestV2", run_id, delta, 100))
     if case == "stored-oversize":
@@ -755,6 +791,7 @@ def test_delta_intake_checks_trusted_geometry_before_durable_acceptance(tiny, mo
             "format": "SERVICE_DELTA_CODEC",
             "oversize": "SERVICE_OBJECT_BYTES",
             "stored-oversize": "original payload chunks mismatch",
+            **dict.fromkeys(BORROWED_ACCEPTANCE, "master acceptance is not this miner's"),
         }[case]
         with pytest.raises(ChallengeError, match=error):
             store.training_v2(run_id, "delta", raw)
@@ -768,7 +805,55 @@ def test_delta_intake_checks_trusted_geometry_before_durable_acceptance(tiny, mo
             sha256_hex(canonicalize(delta.model_dump(mode="json")))
         ).exists()
     assert events == {"decode": 0, "allocation": 0, "unbounded_get": int(case == "legacy")}
-    assert reads == ([] if case in ("oversize", "legacy") else [delta.size + 1])
+    assert reads == (
+        [] if case in ("oversize", "legacy", *BORROWED_ACCEPTANCE) else [delta.size + 1]
+    )
+
+
+def test_commit_with_a_truncated_step_count_is_a_422_that_records_nothing(tiny):
+    from hypertrain.protocol.messages_v2 import CommitV2
+
+    # Given: an accepted miner of a reserved round, inside the commit window.
+    store, manifest = reserved(tiny)
+    run_id, miner = manifest.run_id(), service.HOT[0]
+    store._services(run_id)
+    store.push_beacon(service.fixture_beacon(3))
+    store.clock = lambda: manifest.training.beacon.genesis_time
+    with store._tx():
+        store._db.execute(
+            "INSERT INTO admissions_v2(admission_id,run_id,hotkey,coldkey,state) VALUES(?,?,?,?,?)",
+            ("08" * 32, run_id, miner.ss58, service.OWNER.ss58, "ACTIVE"),
+        )
+        store._put_record_v2(run_id, "assignment", f"0:{miner.ss58}", {"samples": [0, 1]})
+        store._put_record_v2(run_id, "accept", f"0:{miner.ss58}", {})
+        store._put_record_v2(run_id, "start", f"0:{miner.ss58}", {"ef_hash": "06" * 32})
+
+    def commit(n_leaves):
+        body = CommitV2(
+            w=0,
+            hotkey=miner.ss58,
+            leaf_scheme="ht-leaf-v1",
+            n_leaves=n_leaves,
+            leaves_root="03" * 32,
+            metrics_root="04" * 32,
+            final_theta_hash="05" * 32,
+            ef_in_hash="06" * 32,
+            ef_out_hash="07" * 32,
+            delta_hash="08" * 32,
+            delta_bytes=1,
+            tokens=4,
+        )
+        return canonicalize(envelope_v2.seal(miner, "CommitV2", run_id, body, 100))
+
+    # When: the miner commits one leaf fewer than H // J + 1 = 3.
+    with pytest.raises(ChallengeError) as refused:
+        store.training_v2(run_id, "commit", commit(2))
+    # Then: a client error with the reason, nothing recorded, and the honest commit still lands.
+    assert (refused.value.status, refused.value.detail) == (422, "leaf count differs from manifest")
+    assert not store._db.execute(
+        "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='commit'", (run_id,)
+    ).fetchone()
+    assert store.training_v2(run_id, "commit", commit(3))["body"]["w"] == 0
 
 
 def test_changed_codec_source_invalidates_prior_admission_without_requalification(

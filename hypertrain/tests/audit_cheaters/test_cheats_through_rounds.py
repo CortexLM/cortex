@@ -368,8 +368,7 @@ def test_a_lie_the_master_can_check_at_intake_is_refused_and_leaves_no_trace(
 def test_a_truncated_step_count_records_nothing_at_commit(ac_clone: World) -> None:
     """Defence: a commit with one leaf fewer than the manifest's H//J + 1 is not accepted: the
     miner stays at its accept, no commit record and no commit reservation exist, the honest
-    four are untouched. The answer is recorded as a client sees it (see real_server_errors);
-    that it is a bare 500 today is the xfail below."""
+    four are untouched. The answer is recorded as a client sees it (see real_server_errors)."""
     world = ac_clone
     cheater = world.hotkey(CHEATER)
     world.open_round(0)
@@ -406,14 +405,6 @@ def test_a_truncated_step_count_records_nothing_at_commit(ac_clone: World) -> No
     assert_no_sanction_state_change(world, honest + [cheater])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="AC-COMMIT-500 (MINEUR): CommitV2.validate_assignment raises a bare ValueError "
-    "('leaf count differs from manifest', store.py:6183) that app.py:425-432 does not map, so a "
-    "malformed commit is a bare 500 'Internal Server Error' instead of a 4xx with a reason. The "
-    "rollback leaves no record and the nonce free, so only the answer is wrong",
-)
 def test_a_truncated_step_count_is_refused_with_a_client_error_at_commit(ac_clone: World) -> None:
     """Defence (desired): the commit of a miner that claims fewer leaves than the manifest is
     refused at POST /commit with a 4xx and a reason, like every other refused commit (409

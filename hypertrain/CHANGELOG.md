@@ -301,6 +301,16 @@
   `SERVICE_PROFILE_AUTHORITY`, and that record is immutable (`SERVICE_PROFILE_IMMUTABLE`), so such
   a run is created again. The lock order of `docs/adr/0011-audit-integrity.md` (Part 7) is
   unchanged.
+- A `/delta` can no longer borrow a master acceptance. The acceptance was looked up by its digest
+  across the whole run and only its `delta_hash` was compared with the commit, so a miner could
+  skip its own grant and relay upload by naming another miner's acceptance, or its own acceptance
+  of an earlier round. The route now also requires the acceptance's `w` and `hotkey` to be the
+  signer's round and hotkey and the relay receipt it names to carry the delta's `grant_hash`
+  (422 `master acceptance is not this miner's for this round and grant`). A `/commit` whose leaf
+  count, token count or assignment size differs from the manifest is a 422 with the reason, no
+  longer a bare 500; nothing is recorded and the nonce stays free. `training_v2` is in the owned
+  set of `implementation_hash`, which changes (same consequence as the entry above). See
+  `docs/network-v2.md`.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

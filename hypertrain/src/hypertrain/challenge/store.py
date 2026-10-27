@@ -6873,7 +6873,11 @@ class ChallengeStore:
             elif action == "commit":
                 assert isinstance(model, CommitV2)
                 self._record_v2(run_id, "accept", f"{w}:{env.signer}")
-                model.validate_assignment(manifest, len(self._assignment_v2(run_id, w, env.signer)))
+                samples = len(self._assignment_v2(run_id, w, env.signer))
+                try:
+                    model.validate_assignment(manifest, samples)
+                except ValueError as exc:
+                    raise ChallengeError(422, str(exc)) from exc
                 start = self._record_v2(run_id, "start", f"{w}:{env.signer}")
                 if model.ef_in_hash != start["ef_hash"]:
                     raise ChallengeError(422, "commit EF differs from authenticated anchor")
@@ -6891,6 +6895,19 @@ class ChallengeStore:
                     commit.delta_hash,
                 ):
                     raise ChallengeError(422, "delta/master acceptance differs from commit")
+                # The acceptance is looked up by its digest run-wide: it must be the one minted
+                # for this miner, this round and this grant, not another miner's or round's.
+                receipt = self._record_v2(
+                    run_id, "relay-receipt", acceptance["body"]["receipt_hash"]
+                )
+                if (
+                    acceptance["body"]["w"],
+                    acceptance["body"]["hotkey"],
+                    receipt["body"]["grant_hash"],
+                ) != (w, env.signer, model.grant_hash):
+                    raise ChallengeError(
+                        422, "master acceptance is not this miner's for this round and grant"
+                    )
                 resource = self._service_boundary_v2(run_id, w)
                 if resource is not None:
                     from hypertrain.data.store import LocalFSStore
