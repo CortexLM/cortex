@@ -51,15 +51,21 @@ backup_names() { # backup_names BACKUP: its compose file, which rollback copies 
   cfg=$(compose "$f" config --format json) && test_names "$f" <<< "$cfg" || exit 4; }
 gate() { # readyz 200, no seal backlog, and a sealed seal younger than 30 min (first half of the
   # 72-min window; a seal delayed by unfinished work would make "young" mean "late", so the
-  # sealed epoch must also be the one just before the master's current epoch)
-  local ready; ready=$(curl -sf -m 10 "$MASTER/readyz") || { echo "GATE readyz not 200"; exit 2; }
+  # sealed epoch must also be the one just before the master's current epoch).
+  # HT_GATE_MAX_AGE_S replaces only the 30-min limit (1..4320 s, one epoch), for a change the
+  # founder approved outside the first half of the window; it is printed whenever it is set.
+  local max=${HT_GATE_MAX_AGE_S:-1800} ready
+  [[ $max =~ ^[1-9][0-9]{0,3}$ && $max -le 4320 ]] \
+    || { echo "GATE HT_GATE_MAX_AGE_S must be 1..4320 seconds"; exit 4; }
+  [ "$max" -eq 1800 ] || echo "GATE age limit overridden: HT_GATE_MAX_AGE_S=$max (default 1800)"
+  ready=$(curl -sf -m 10 "$MASTER/readyz") || { echo "GATE readyz not 200"; exit 2; }
   curl -s -m 10 "$MASTER/v1/weights/latest" | python3 -I -c '
 import json,sys,datetime
 d=json.load(sys.stdin); c=datetime.datetime.fromisoformat(d["computed_at"].replace("Z","+00:00"))
 age=(datetime.datetime.now(datetime.timezone.utc)-c).total_seconds(); now=json.loads(sys.argv[1])["epoch"]
 print("gate seal epoch",d["epoch"],"master epoch",now,"sealed",d.get("sealed"),"age_s",int(age))
-sys.exit(0 if d.get("sealed") is True and 0<=age<1800 and d["epoch"]==now-1 else 3)' "$ready" \
-    || { echo "GATE seal not sealed, older than 30 min, or behind"; exit 3; }; }
+sys.exit(0 if d.get("sealed") is True and 0<=age<int(sys.argv[2]) and d["epoch"]==now-1 else 3)' \
+    "$ready" "$max" || { echo "GATE seal not sealed, older than ${max}s, or behind"; exit 3; }; }
 live() { # live IMAGE_ID: the challenge answers /version and runs exactly IMAGE_ID
   local i; for i in $(seq 1 30); do curl -sf -m 5 -o /dev/null "$API/version" && break; sleep 1; done
   curl -sf -m 5 -o /dev/null "$API/version" || { echo "challenge /version not 2xx"; exit 7; }

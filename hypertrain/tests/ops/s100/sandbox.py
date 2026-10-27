@@ -466,6 +466,7 @@ class Box:
         rc: int = 0,
         mutates: frozenset[str] | set[str] = frozenset(),
         now: str = NOW,
+        env: dict[str, str] | None = None,
     ) -> Run:
         """Run the script copy with `args`; assert its exit code, the containers it mutated, and
         that nothing escaped the sandbox. Only the mutations of this run are recorded."""
@@ -478,6 +479,7 @@ class Box:
             "FAKE_DIR": str(self.fake),
             "FAKE_NOW": now,
             "LC_ALL": "C",
+            **(env or {}),
         }
         with self.script.open() as script:  # as over ssh: `bash -s -- CMD ARGS < script`
             p = subprocess.run(
