@@ -34,6 +34,31 @@ class Mutant:
     test: str
 
 
+BINDS = (
+    "        return (self.run_id, self.policy, self.round, self.shard, self.base) == (\n"
+    "            unit.run_id,\n"
+    "            unit.policy,\n"
+    "            unit.round,\n"
+    "            unit.shard,\n"
+    "            unit.base,\n"
+    "        ) and self.step <= unit.steps\n"
+)
+BINDS_TEST = (
+    "test_checkpoint.py::"
+    "test_a_manifest_of_another_run_policy_round_or_base_is_not_a_link_of_the_unit"
+)
+
+
+def binds_without(field: str) -> str:
+    """CheckpointManifest.binds with one field of the unit no longer compared."""
+    left = (
+        BINDS.replace(", self.base", "")
+        if field == "base"
+        else BINDS.replace(f"self.{field}, ", "")
+    )
+    return left.replace(f"            unit.{field},\n", "")
+
+
 MUTANTS = (
     Mutant(
         "checkpoint write not atomic",
@@ -729,6 +754,101 @@ MUTANTS = (
         "test_coordinator.py::test_only_an_accepted_link_of_the_open_round_can_be_withdrawn",
     ),
     Mutant(
+        "a link of another run is accepted",
+        SRC + "checkpoint.py",
+        BINDS,
+        binds_without("run_id"),
+        BINDS_TEST,
+    ),
+    Mutant(
+        "a link of another policy is accepted",
+        SRC + "checkpoint.py",
+        BINDS,
+        binds_without("policy"),
+        BINDS_TEST,
+    ),
+    Mutant(
+        "a link of another round is accepted",
+        SRC + "checkpoint.py",
+        BINDS,
+        binds_without("round"),
+        BINDS_TEST,
+    ),
+    Mutant(
+        "a link built on another base state is accepted",
+        SRC + "checkpoint.py",
+        BINDS,
+        binds_without("base"),
+        BINDS_TEST,
+    ),
+    Mutant(
+        "an accepted link leaves the progress window already renewed",
+        SRC + "coordinator.py",
+        "self._progress[member] = (self.clock.now_ms(), False)  # an accepted link restarts it",
+        "self._progress[member] = (self.clock.now_ms(), True)  # an accepted link restarts it",
+        "test_coordinator.py::test_a_replacement_after_a_link_restarts_the_window_once",
+    ),
+    Mutant(
+        "a leave replay is answered to any member and key",
+        SRC + "coordinator.py",
+        "if done is not None and done[0] == (notice.member, notice.signer):",
+        "if done is not None:",
+        "test_coordinator.py::test_a_leave_replay_is_answered_only_to_the_member_and_key_that_left",
+    ),
+    Mutant(
+        "a round number can be opened twice",
+        SRC + "coordinator.py",
+        "rounds.pop() <= self.round",
+        "rounds.pop() < self.round",
+        "test_coordinator.py::test_a_round_number_is_opened_once",
+    ),
+    Mutant(
+        "stalled members end in set order",
+        SRC + "coordinator.py",
+        "            for member in sorted(late)\n",
+        "            for member in late\n",
+        "test_coordinator.py::test_stalled_members_end_in_id_order",
+    ),
+    Mutant(
+        "expired leases lapse in join order",
+        SRC + "membership.py",
+        "            for _, m in sorted(self._members.items())\n"
+        "            if m.status is Status.ACTIVE and not self._live(m)\n",
+        "            for m in self._members.values()\n"
+        "            if m.status is Status.ACTIVE and not self._live(m)\n",
+        "test_coordinator.py::test_expired_leases_lapse_in_id_order",
+    ),
+    Mutant(
+        "settle reports before it lapses the expired",
+        SRC + "coordinator.py",
+        "    def settle(self) -> Settlement:\n        self._sweep()\n",
+        "    def settle(self) -> Settlement:\n",
+        "test_coordinator.py::test_settle_lapses_the_expired_before_it_reports",
+    ),
+    Mutant(
+        "a live member extends a shard nobody holds",
+        SRC + "coordinator.py",
+        "        if s.holder != Holder(member, token):\n"
+        '            raise CoordinatorError("NOT_HOLDER"',
+        "        if s.holder is not None and s.holder != Holder(member, token):\n"
+        '            raise CoordinatorError("NOT_HOLDER"',
+        "test_coordinator.py::test_a_live_member_cannot_extend_a_shard_nobody_holds",
+    ),
+    Mutant(
+        "the rendezvous score ignores the member",
+        SRC + "assignment.py",
+        ' + struct.pack(">Q", shard) + member.encode()',
+        ' + struct.pack(">Q", shard)',
+        "test_assignment.py::test_every_member_gets_a_share_of_the_shards",
+    ),
+    Mutant(
+        "the rendezvous score ignores the shard",
+        SRC + "assignment.py",
+        ' + struct.pack(">Q", shard) + member.encode()',
+        " + member.encode()",
+        "test_assignment.py::test_the_score_is_the_documented_formula",
+    ),
+    Mutant(
         "a leave names as many heads as it likes",
         SRC + "coordinator.py",
         "        if len(notice.heads) > len(self._shards):"
@@ -748,6 +868,20 @@ MUTANTS = (
         "        if len(notice.heads) > len(self._shards):",
         "        notice = verify_leave(signed)\n        if len(notice.heads) > len(self._shards):",
         "test_coordinator.py::test_a_retried_leave_is_answered_even_when_the_next_round_is_smaller",
+    ),
+    Mutant(
+        "the rendezvous plan gives a shard to the lowest score",
+        SRC + "assignment.py",
+        "member = max(left, key=lambda m: (score(seed, shard, m), m))",
+        "member = min(left, key=lambda m: (score(seed, shard, m), m))",
+        "test_assignment.py::test_the_score_is_the_documented_formula",
+    ),
+    Mutant(
+        "the rendezvous plan depends on how many members are left",
+        SRC + "assignment.py",
+        "member = max(left, key=lambda m: (score(seed, shard, m), m))",
+        "member = max(left, key=lambda m: (score(seed + bytes([len(left)]), shard, m), m))",
+        "test_assignment.py::test_a_departure_moves_only_the_shards_of_the_member_that_left",
     ),
     Mutant(
         "another member's retry of a key is acknowledged",

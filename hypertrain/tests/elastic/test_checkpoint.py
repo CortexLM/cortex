@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -123,3 +124,28 @@ def test_a_torn_state_is_a_checkpoint_error(tmp_path: Path) -> None:
     with pytest.raises(CheckpointError) as e:
         cp.resume(unit, head)
     assert e.value.code == "CORRUPT_OBJECT"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"run_id": "run-2"},
+        {"policy": hashlib.sha256(b"another policy").hexdigest()},
+        {"round": 1},
+        {"base": hashlib.sha256(b"another base").hexdigest()},
+    ],
+    ids=lambda change: next(iter(change)),
+)
+def test_a_manifest_of_another_run_policy_round_or_base_is_not_a_link_of_the_unit(
+    change: dict[str, object],
+) -> None:
+    store = MemoryCheckpointStore()
+    cp = CheckpointManager(store)
+    unit = unit_for(store)
+    other = replace(unit, **change)  # type: ignore[arg-type]
+    store.put(b"another base")
+    foreign = cp.link(other, None, 4, store.put(b"s4"), "m1", 1)  # well formed, for that unit
+    for check in (lambda: cp.check_link(unit, None, foreign), lambda: cp.chain(unit, foreign)):
+        with pytest.raises(CheckpointError) as e:
+            check()
+        assert e.value.code == "WRONG_UNIT"

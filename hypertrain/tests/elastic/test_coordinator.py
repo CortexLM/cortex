@@ -668,6 +668,94 @@ def test_only_an_accepted_link_of_the_open_round_can_be_withdrawn() -> None:
     assert coord.settle().penalties == {}
 
 
+def test_a_replacement_after_a_link_restarts_the_window_once() -> None:
+    clock, coord, (unit,) = setup()
+    leases = {"a": join(coord, "a"), "b": join(coord, "b")}
+    keep_alive(clock, coord, leases, 500)
+    coord.commit("a", leases["a"].token, 0, link(coord, unit, None, 3, leases["a"]))  # t = 500
+    keep_alive(clock, coord, leases, PROGRESS - 1_000)
+    leases["a"] = coord.join("a", "owner-a", KEYS["c"].ss58).lease  # a new host at t = 3_500
+    keep_alive(clock, coord, leases, PROGRESS - 500)  # t = 7_000, inside the window it opened
+    assert coord.holder(0) == Holder("a", leases["a"].token)
+    keep_alive(clock, coord, leases, 500)  # t = 7_500: that window is over
+    assert [d.kind for d in coord.settle().departures if d.member == "a"] == [
+        Exit.REPLACED,
+        Exit.STALLED,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("member", "signer", "code"), [("b", "b", "STALE_TOKEN"), ("a", "c", "LEFT")]
+)
+def test_a_leave_replay_is_answered_only_to_the_member_and_key_that_left(
+    member: str, signer: str, code: str
+) -> None:
+    _, coord, _ = setup()
+    a, b = join(coord, "a"), join(coord, "b")
+    coord.leave(sign_leave(notice(a, KEYS["a"]), KEYS["a"]))
+    claim = notice(a, KEYS[signer]).model_copy(update={"member": member})  # a's lease, others' name
+    with pytest.raises(LeaseError) as e:
+        coord.leave(sign_leave(claim, KEYS[signer]))
+    assert e.value.code == code
+    assert coord.holder(0) == Holder("b", b.token)
+
+
+def test_a_round_number_is_opened_once() -> None:
+    _, coord, (unit,) = setup()
+    a = join(coord, "a")
+    coord.commit("a", a.token, 0, link(coord, unit, None, 6, a))
+    with pytest.raises(ValueError):
+        coord.open_round([WorkUnit(RUN, POLICY, 0, 0, unit.base, 6)])  # round 0 again
+    coord.open_round([WorkUnit(RUN, POLICY, 1, 0, unit.base, 6)])
+    coord.commit(
+        "a", a.token, 0, link(coord, WorkUnit(RUN, POLICY, 1, 0, unit.base, 6), None, 6, a)
+    )
+    for again in (0, 1):
+        with pytest.raises(ValueError):
+            coord.open_round([WorkUnit(RUN, POLICY, again, 0, unit.base, 6)])
+    assert coord.round == 1
+
+
+def test_stalled_members_end_in_id_order() -> None:
+    clock, coord, _ = setup(shards=12)
+    names = [f"m{i:02d}" for i in range(11, -1, -1)]  # joined in the reverse of id order
+    leases = {n: coord.join(n, "owner", KEYS["a"].ss58).lease for n in names}
+    assert len({coord.holder(s).member for s in range(12)}) == 12  # one shard each
+    keep_alive(clock, coord, leases, PROGRESS)  # nobody ever commits
+    ended = [d.member for d in coord.settle().departures if d.kind is Exit.STALLED]
+    assert ended == sorted(names)  # a set of 12 ids almost never iterates in id order
+
+
+def test_expired_leases_lapse_in_id_order() -> None:
+    clock, coord, _ = setup(shards=3)
+    for name in "cab":  # joined in the reverse of id order
+        join(coord, name)
+    clock.advance(TTL)
+    coord.tick()
+    assert [(d.member, d.kind) for d in coord.settle().departures] == [
+        ("a", Exit.LAPSE),
+        ("b", Exit.LAPSE),
+        ("c", Exit.LAPSE),
+    ]
+
+
+def test_settle_lapses_the_expired_before_it_reports() -> None:
+    clock, coord, _ = setup()
+    join(coord, "a")
+    clock.advance(TTL)  # no other call: settle() alone has to notice
+    assert [(d.member, d.kind) for d in coord.settle().departures] == [("a", Exit.LAPSE)]
+
+
+def test_a_live_member_cannot_extend_a_shard_nobody_holds() -> None:
+    _, coord, units = setup(shards=2)
+    a = join(coord, "a")  # capacity 1: it holds one shard and the other waits for a member
+    waiting = next(s for s in (0, 1) if coord.holder(s) is None)
+    with pytest.raises(CoordinatorError) as e:
+        coord.commit("a", a.token, waiting, link(coord, units[waiting], None, 3, a))
+    assert e.value.code == "NOT_HOLDER"
+    assert coord.settle().credits == {} and coord.holder(waiting) is None
+
+
 def test_another_member_cannot_have_a_link_it_did_not_produce_acknowledged() -> None:
     _, coord, (unit,) = setup()
     a, b = join(coord, "a"), join(coord, "b")
