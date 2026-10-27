@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import stat
-from pathlib import Path
 
 import pytest
 
@@ -29,6 +28,7 @@ from .sandbox import (
     SECRET,
     STUB,
     Box,
+    call,
     digest_of,
     rows,
     sandboxed,
@@ -37,10 +37,6 @@ from .sandbox import (
 
 CMDS = ("swap", "beacon", "paper", "rollback", "restore-db")
 DB_FILES = ("challenge.db", "server_keys.db")
-
-
-def call(cmd: str, backup: Path) -> tuple[str, ...]:
-    return ("swap", NEW_REF, str(backup)) if cmd == "swap" else (cmd, str(backup))
 
 
 @pytest.mark.parametrize(
@@ -210,9 +206,15 @@ def test_swap_refuses_an_image_that_was_not_pulled(box, backup):
     assert box.snapshot() == before
 
 
-def test_swap_refuses_a_challenge_that_is_not_the_test_container(box, backup):
+@pytest.mark.parametrize(
+    "name",
+    ["cortex-challenge-hypertrain", "hypertrain-test-auditor-0"],
+    ids=["production", "another-test-name"],
+)
+def test_swap_refuses_a_challenge_that_is_not_the_test_container(box, backup, name):
+    # the second name passes the six-name check, so only the anchor (exit 4, not 5) refuses it
     box.pull(NEW_REF)
-    box.f.write_text(COMPOSE.replace(f"name: {CHALLENGE}", "name: cortex-challenge-hypertrain"))
+    box.f.write_text(COMPOSE.replace(f"name: {CHALLENGE}", f"name: {name}"))
     before = box.snapshot()
     assert "anchor" in box.run(*call("swap", backup), rc=4).out
     assert box.snapshot() == before

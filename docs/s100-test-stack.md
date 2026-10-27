@@ -46,6 +46,14 @@ these hold:
 
 `rollback` and `restore-db` are not gated: they are the way back.
 
+`swap`, `beacon`, `paper` and `rollback` also refuse (exit 4, before anything changes) a compose file
+in which any service has no `container_name` or one that is not a TEST container
+(`hypertrain-test-challenge`, `-beacon`, `-master-stub`, `-relay`, `-auditor-0`, `-auditor-1`).
+`docker compose up` acts on the names the file declares, so a file naming `hypertrain-beacon` would
+otherwise recreate the production twin. `swap` and `beacon` check the live file and the edited
+copy; `paper` and `rollback` check the backup's `compose.test.yml` before it can replace the live
+one. `restore-db` runs no compose and is not checked.
+
 ```bash
 ssh root@s100 "docker pull -q $NEW"
 ssh root@s100 "bash -s -- pre" < $T/snap.sh

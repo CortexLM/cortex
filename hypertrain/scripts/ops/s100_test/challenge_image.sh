@@ -13,6 +13,8 @@
 #                        put back relay.json / metagraph.json (restarting relay / stub) if changed
 #   restore-db BACKUP    keep the live DBs aside, stop the challenge, put the backed-up DBs back
 # rollback and restore-db are not gated: they are the way back from a bad change.
+# swap, beacon, paper and rollback refuse (exit 4) a compose file with a service whose container_name
+# is missing or is not one of the six TEST names; restore-db runs no compose.
 set -euo pipefail
 T=/root/backups/hypertrain-test; F=$T/compose.test.yml; C=hypertrain-test-challenge
 STATE=/data/hypertrain-test/state; API=http://127.0.0.1:18996; MASTER=http://10.177.245.39:8080
@@ -22,6 +24,22 @@ images() { # service -> image as compose resolves it
   compose "$1" config --format json | python3 -I -c '
 import json,sys
 for n,s in sorted(json.load(sys.stdin)["services"].items()): print(n, s["image"])'; }
+# compose up acts on the container_name values of the file, so every service of a file about to be
+# brought up must declare one of these: a name one token away is a production container
+TEST_NAMES="hypertrain-test-challenge hypertrain-test-beacon hypertrain-test-master-stub
+  hypertrain-test-relay hypertrain-test-auditor-0 hypertrain-test-auditor-1"
+test_names() { # test_names FILE < compose config JSON of FILE
+  python3 -I -c '
+import json,sys
+ok=sys.argv[2].split(); bad=0
+for n,s in sorted(json.load(sys.stdin)["services"].items()):
+    c=s.get("container_name")
+    if c not in ok:
+        bad=1; print("REFUSED %s: service %s %s" % (sys.argv[1], n, "names container "+c if c else "declares no container_name"))
+sys.exit(bad)' "$1" "$TEST_NAMES"; }
+backup_names() { # backup_names BACKUP: its compose file, which rollback copies over the live one
+  local cfg; cfg=$(compose "$1/compose.test.yml" config --format json) \
+    && test_names "$1/compose.test.yml" <<< "$cfg" || exit 4; }
 gate() { # readyz 200, no seal backlog, and a sealed seal younger than 30 min (first half of the
   # 72-min window; a seal delayed by unfinished work would make "young" mean "late", so the
   # sealed epoch must also be the one just before the master's current epoch)
@@ -46,6 +64,8 @@ apply() { # apply STEP BACKUP PATH..: $F.new must differ from $F in exactly PATH
   local step=$1 B=$2; shift 2
   compose "$F" config --format json > "$B/config-before-$step.json"
   compose "$F.new" config --format json > "$B/config-after-$step.json"
+  { test_names "$F" < "$B/config-before-$step.json" && test_names "$F.new" < "$B/config-after-$step.json"; } \
+    || { rm -f "$F.new"; exit 4; }
   diff "$F" "$F.new" || true
   python3 -I - "$B/config-before-$step.json" "$B/config-after-$step.json" "$@" <<'EOF' \
     || { rm -f "$F.new"; echo "unexpected compose change"; exit 5; }
@@ -113,11 +133,11 @@ beacon)
 import json,sys,time
 r=json.load(sys.stdin)["round"]; print("lag", (int(time.time())-1692803367)//3+1-r)';;
 paper)
-  B=${2:?BACKUP}; backup_dir "$B"; images "$B/compose.test.yml"
+  B=${2:?BACKUP}; backup_dir "$B"; backup_names "$B"; images "$B/compose.test.yml"
   echo "live: $(docker inspect "$C" --format '{{.Config.Image}}')"
   echo "would run: cp -p $B/compose.test.yml $F && docker compose -f $F up -d --no-deps challenge beacon";;
 rollback)
-  B=${2:?BACKUP}; backup_dir "$B"; date -u +%FT%TZ
+  B=${2:?BACKUP}; backup_dir "$B"; backup_names "$B"; date -u +%FT%TZ
   OLD=$(python3 -I -c 'import json,sys;print(next(c["Image"] for c in json.load(open(sys.argv[1]))
     if c["Name"]=="/hypertrain-test-challenge"))' "$B/inspect-before.json")
   cp -p "$B/compose.test.yml" "$F"; compose "$F" up -d --no-deps challenge beacon 2>&1 | tail -3

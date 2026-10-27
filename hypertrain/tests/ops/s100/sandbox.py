@@ -277,6 +277,11 @@ def sandboxed(text: str, root: Path) -> str:
     return text
 
 
+def call(cmd: str, backup: Path) -> tuple[str, ...]:
+    """The arguments of `cmd` for a backup directory (swap also takes the new image)."""
+    return ("swap", NEW_REF, str(backup)) if cmd == "swap" else (cmd, str(backup))
+
+
 def make_db(path: Path, rows: tuple[str, ...]) -> None:
     db = sqlite3.connect(path)
     db.execute("create table runs(id integer primary key, v text)")
@@ -412,6 +417,15 @@ class Box:
         shutil.copytree(golden, self.b(), copy_function=shutil.copy2)
         self.b().chmod(0o700)
         return self.b()
+
+    def reseal(self, backup: Path) -> None:
+        """Rewrite SHA256SUMS for the files now in the backup: a checksum-consistent forgery."""
+        names = [
+            line.split("  ", 1)[1] for line in (backup / "SHA256SUMS").read_text().splitlines()
+        ]
+        (backup / "SHA256SUMS").write_text(
+            "".join(f"{digest_of(backup / n)}  {n}\n" for n in names)
+        )
 
     def container(self, name: str) -> dict:
         return self.docker()["containers"][name]
