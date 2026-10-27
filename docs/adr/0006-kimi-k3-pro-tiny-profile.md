@@ -126,7 +126,9 @@ sources above.
 ## Tests
 
 `hypertrain/tests/models/test_kimi_tiny.py` has one named test per behaviour. Each test
-fails under the mutation listed below (CPU run, 2026-10-26 [V]):
+fails under the mutation listed below (CPU run, 2026-10-26 [V]). Several of them compared the
+code with itself, though, and 20 of 45 realistic mutants survived the suite (S8 K1); the
+[S10 amendment](#s10-amendment-review-fixes-2026-10-26) adds the tests that kill them:
 
 | Behaviour | Test | Mutation that it catches |
 | --- | --- | --- |
@@ -295,3 +297,73 @@ serves an owner-signed v2 kimi manifest. The torchrun worker is a fresh interpre
   hash.
 - Kimi on v1: frozen v1 has no per-arch rule.
 - Island DP for kimi: it would need an all-reduce of the expert loads.
+
+## S10 amendment: review fixes (2026-10-26)
+
+Session S10 applied the independent review S8 (finding ids K1-K5 and M-K*; labels as above). The
+code of `kimi_tiny.py` was found correct: four per-token references agree with `_moe` and `_mla`
+to 1e-9 and the parameter count recomputes. The weakness was the suite, which let 20 of 45
+realistic mutants of `kimi_tiny.py` survive. Nothing was run on a GPU.
+
+### Decisions
+
+1. **K4: Muon is refused** by `kimi_tiny.train_config` and by the v2 rule (see Limits). Mapping the
+   names was rejected.
+2. **M-K4: `top_k_experts >= 2`** in `dims()` and in the v2 rule (see Limits).
+3. **K5: the balance-loss indicator stays on the routed (biased) selection**, and is now called
+   that. DeepSeek-V3 eq. 18 counts `1(s_{i,t} in Topk(s_{.,t}))` on the unbiased affinities; the
+   bias appears only in the routing of eq. 16 [A arXiv 2412.19437v2, section 2.1.2]. Megatron-LM
+   recomputes an unbiased map for the loss, torchtitan counts the routed map as this code does [A,
+   sources fetched by S8]. The effect of the choice is a relative 3.7e-3 on `aux` with a bias of
+   +-0.05 and 1.1e-2 with +-0.2, at alpha = 1e-4 [V S8]. Rejected: eq. 18. It changes every kimi
+   `leaves_root`, so the two-host B300 qualification, the S9 `run-v2` chains and the CPU hashes
+   above would all have to be produced again on GPUs, which this session could not do. To switch
+   later: count `topk_experts(scores, zero bias)` in `_moe`, change the reference line in
+   `test_kimi_oracle.py` and the aux test, and regenerate the goldens and the qualification.
+4. **M-K6: the router bias and the outer step** [V mechanism, H impact]. The bias is a
+   parameter-dict tensor, so a round delta goes through the codec of the run and through the outer
+   optimiser like any other tensor, while the DeepSeek-V3 rule is a per-step +-gamma nudge that
+   holds only within a round:
+   - `sparseloco` keeps `topk_frac` of the entries per round: a delta of +-H*gamma on 8 entries
+     arrived on one entry and the rest stayed in the error feedback. `dense-int8` keeps every entry.
+   - Outer Nesterov amplifies a constant input: the global bias moved 0.76x the inner move after
+     round 1, 1.08x after round 2, 2.7x after round 10 and 3.85x after round 30 (example manifest
+     outer lr and momentum).
+
+   Whether the expert load stays balanced across the rounds of a networked run is [?]: it was not
+   measured. A decision is needed before any multi-round network run of this arch: aggregate
+   `router_bias` outside the codec and the outer momentum, or accept this. Nothing changes here,
+   because either option edits `aggregator/core.py` or `trainer/compress.py`, which
+   `implementation_hash` covers.
+
+### Tests added
+
+All run on CPU. The mutants are the 45 of S8 plus 30 more written in S10, 75 in all, each applied to
+`kimi_tiny.py` in turn and run against the whole kimi suite: 25 of the 45 were killed before. In one
+run on the dev host 73 of the 75 are killed; the other two (the `moe` override accepted, `main()`
+never reporting `MISMATCH`) are killed by the two tests of the last row but one, each checked on
+its own [V]. The equivalent mutant "expert i runs with the weights of expert E-1-i", a consistent
+relabelling, is not in the matrix.
+
+| Behaviour | Test | Mutants killed (examples) |
+| --- | --- | --- |
+| routed MoE output, gradients and balance loss against a per-token float64 reference, three cases (MICRO, two starved experts, 32 experts top 4) | `models/test_kimi_oracle.py::test_moe_matches_the_per_token_float64_reference` | combine weights token-major; every expert uses expert 0; shared expert times `ROUTED_SCALE`; aux detached; gate not applied; a tap that scales the gradient; a k-sum over two of four ranks |
+| MLA gradients against a float64 reference | `models/test_kimi_oracle.py::test_mla_gradients_match_the_float64_reference` | detach on the rope key, the kv latent or the value path |
+| whole forward composed from the references: residuals, norms, head, shifted target, aux summed over the layers | `models/test_kimi_oracle.py::test_forward_matches_the_float64_composition` | target not shifted; aux of the last layer only; flipped residual sign; halved head logits; swapped norm weights |
+| compute dtype | `models/test_kimi_oracle.py::test_activations_follow_the_compute_dtype` | bf16 config computed in fp32 and the reverse; gate not cast |
+| dispute replay: trace parity, every `(layer, op)` point, a skewed router bias | `auditor/test_kimi_bisect.py` | hooks dropped; a hook result discarded; the update digest without `router_bias` |
+| init digest (seeds 7 and 8, hard) | `models/test_kimi_golden.py::test_init_params_digest_is_pinned_per_seed_and_std` | seed ignored; one Philox stream for every tensor; hard-coded `init_std` |
+| MICRO round roots, fp32 and bf16 (xfail on an unknown CPU class, in the `check-proof` gate) | `models/test_kimi_golden.py::test_micro_round_roots_unchanged` | any numeric change, on a known CPU class only |
+| dispatch order is the stable argsort of the expert ids | `models/test_kimi_golden.py::test_dispatch_permutation_is_the_stable_argsort_of_the_expert_ids` | unstable dispatch sort |
+| tie order at 32 experts, top 4 | `models/test_kimi_routing.py` | `torch.topk`; an unstable descending sort; ties to the highest index |
+| no `topk`, `index_add_`, `scatter_add_`, `scatter_reduce`, accumulating `index_put_` under `src/hypertrain/models/` | `trainer/test_trainer_core.py::test_forbidden_constructs_absent` | `torch.topk` or an `index_add_` k-sum in `kimi_tiny.py` |
+| `moe` override refused; qualify command line exits on differing rounds | `models/test_kimi_tiny.py` | override accepted; `MISMATCH` never reported |
+| Muon and one routed expert refused | `models/test_kimi_tiny.py`, `protocol/test_model_arch.py` | either parser accepting them |
+
+Pinned numbers: the init digests and the MICRO round roots of `test_kimi_golden.py` were taken on
+the AMD EPYC 9575F dev host, once with the AVX2-bound dispatch CI uses and once with the default
+dispatch; the roots differ between the two. The GitHub runner CPU class is not pinned [?]. Not
+covered: bf16 numerics against the oracle (dtype only), the PROFILE shape and `ROUTED_SCALE` and
+`BIAS_GAMMA` as constants (the oracle holds the K2 literal for the scale), and everything on GPU
+(CUDA tie order of `sort`, bf16 cuBLAS reproducibility across hosts, `nll_loss` under deterministic
+mode, the kimi v2 `run-v2` path on a GPU).
