@@ -21,6 +21,12 @@
   relay-identical block lists, resumable uploads and block-verified downloads; `storage.offer`
   hands credential-free hosts presigned UploadPart URLs bound to each part's sha256.
   `data.store.sigv4_presign` now signs the URL query and extra headers.
+- Generic CUDA executor (`HYPERTRAIN_CUDA_EXECUTOR`, `hypertrain.gpu_ops.cuda_executor`): the
+  challenge sends references, audit replays and referee runs to any SSH + Docker GPU host, with
+  the container started by the manifest's image digest, nothing persisted on the host and a
+  `role-dispatch.json` provenance the existing CUDA audit checks accept. Mutually exclusive with
+  `HYPERTRAIN_ROLE_DISPATCH`; the Vast dispatcher is unchanged. See `docs/adr/0008` at the
+  monorepo root and `docs/cuda-executor.md`.
 - Docs, CI, image and release workflows, Dockerfiles.
 - Eviction-tolerant core `hypertrain.elastic` (v3, not wired into the v2 challenge): leases with
   fencing tokens, saved before they are granted so that a restart never reissues one, and a

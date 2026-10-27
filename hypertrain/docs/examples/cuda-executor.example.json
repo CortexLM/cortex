@@ -1,0 +1,34 @@
+{
+  "run_id": "<64 hex: the manifest run_id this executor may serve on CUDA>",
+  "image_repository": "ghcr.io/cortexlm/cortex/hypertrain-gpu",
+  "state_dir": "<container path of a 0700 directory for the journal and remote stderr logs>",
+  "hosts": [
+    {
+      "label": "gpu-a",
+      "address": "<ssh host name or IP>",
+      "port": 22,
+      "user": "ubuntu",
+      "identity_file": "<container path of the SSH private key, 0600, owned by uid 65532>",
+      "known_hosts_file": "<container path of the pinned host keys for this host>",
+      "docker": ["sudo", "-n", "docker"]
+    },
+    {
+      "label": "gpu-b",
+      "address": "<second ssh host name or IP>",
+      "port": 22,
+      "user": "ubuntu",
+      "identity_file": "<container path of the SSH private key, 0600, owned by uid 65532>",
+      "known_hosts_file": "<container path of the pinned host keys for this host>",
+      "docker": ["sudo", "-n", "docker"]
+    }
+  ],
+  "network": "default",
+  "max_attempts": 3,
+  "sweeps": 3,
+  "sweep_pause_seconds": 15,
+  "idle_gpu_memory_mib": 2048,
+  "max_clock_skew_seconds": 5,
+  "max_result_bytes": 17179869184,
+  "pull_timeout_seconds": 900,
+  "ssh_connect_timeout_seconds": 15
+}

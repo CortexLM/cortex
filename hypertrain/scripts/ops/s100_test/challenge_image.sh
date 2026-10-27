@@ -12,13 +12,16 @@
 #   rollback BACKUP      restore the compose file, recreate challenge and beacon as they were, and
 #                        put back relay.json / metagraph.json (restarting relay / stub) if changed
 #   restore-db BACKUP    keep the live DBs aside, stop the challenge, put the backed-up DBs back
+#   executor BACKUP PATH  gate, add HYPERTRAIN_CUDA_EXECUTOR=PATH (a container path) to the challenge
+#                        through a compose override file; only that variable may change
+#   executor-off BACKUP  drop the override and recreate the challenge without the variable
 # rollback and restore-db are not gated: they are the way back from a bad change.
 # swap, beacon, paper and rollback refuse (exit 4) a compose file with a service whose container_name
 # is missing or is not one of the six TEST names; restore-db runs no compose.
 set -euo pipefail
 T=/root/backups/hypertrain-test; F=$T/compose.test.yml; C=hypertrain-test-challenge
 STATE=/data/hypertrain-test/state; API=http://127.0.0.1:18996; MASTER=http://10.177.245.39:8080
-cmd=${1:?backup|swap|paper|rollback|restore-db}
+cmd=${1:?backup|swap|paper|rollback|restore-db|executor|executor-off}
 compose() { (cd "$T" && docker compose -f "$1" "${@:2}"); }
 images() { # service -> image as compose resolves it
   compose "$1" config --format json | python3 -I -c '
@@ -170,5 +173,34 @@ restore-db)
   for n in challenge.db server_keys.db; do
     rm -f "$STATE/$n-wal" "$STATE/$n-shm"; install -m 0644 -o 65532 -g 65532 "$B/$n" "$STATE/$n"; done
   docker start "$C"; sleep 6; check;;
+executor)
+  B=${2:?BACKUP}; P=${3:?CONTAINER_CONFIG_PATH}; backup_dir "$B"; gate
+  [[ $P =~ ^/data/[A-Za-z0-9._/-]+\.json$ ]] || { echo "PATH must be /data/....json in the container"; exit 4; }
+  O=$T/compose.executor.yml; umask 077
+  printf 'services:\n  challenge:\n    environment:\n      HYPERTRAIN_CUDA_EXECUTOR: %s\n' "$P" > "$O.new"
+  compose "$F" config --format json > "$B/config-before-executor.json"
+  (cd "$T" && docker compose -f "$F" -f "$O.new" config --format json) > "$B/config-after-executor.json"
+  python3 -I - "$B/config-before-executor.json" "$B/config-after-executor.json" \
+      services.challenge.environment.HYPERTRAIN_CUDA_EXECUTOR <<'EOF' \
+    || { rm -f "$O.new"; echo "unexpected compose change"; exit 5; }
+import json, sys
+def flat(x, p=""):
+    if isinstance(x, dict):
+        return {k: v for n, c in x.items() for k, v in flat(c, f"{p}.{n}" if p else n).items()}
+    if isinstance(x, list):
+        return {k: v for i, c in enumerate(x) for k, v in flat(c, f"{p}.{i}").items()}
+    return {p: x}
+a, b = (flat(json.load(open(f))) for f in sys.argv[1:3])
+changed = sorted(k for k in a.keys() | b.keys() if a.get(k) != b.get(k))
+print("changed", changed)
+sys.exit(0 if changed == sorted(sys.argv[3:]) else 5)
+EOF
+  mv "$O.new" "$O"; date -u +%FT%TZ
+  (cd "$T" && docker compose -f "$F" -f "$O" up -d --no-deps challenge 2>&1 | tail -3)
+  live "$(docker inspect "$C" --format '{{.Image}}')"; sleep 6; check;;
+executor-off)
+  B=${2:?BACKUP}; backup_dir "$B"; date -u +%FT%TZ
+  rm -f "$T/compose.executor.yml"; compose "$F" up -d --no-deps challenge 2>&1 | tail -3
+  live "$(docker inspect "$C" --format '{{.Image}}')"; sleep 6; check;;
 *) echo "unknown $cmd"; exit 2;;
 esac

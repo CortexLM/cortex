@@ -140,6 +140,7 @@ class Config:
     params: Params
     netuid: int = 100
     role_dispatch_file: Path | None = None
+    cuda_executor_file: Path | None = None
 
     @classmethod
     def from_env(cls) -> Config:
@@ -166,6 +167,7 @@ class Config:
             ),
             netuid=int(env("CHALLENGE_NETUID", "100")),
             role_dispatch_file=path("HYPERTRAIN_ROLE_DISPATCH"),
+            cuda_executor_file=path("HYPERTRAIN_CUDA_EXECUTOR"),
         )
 
 
@@ -279,7 +281,19 @@ async def read_model[M: BaseModel](request: Request, model: type[M]) -> M:
         raise ChallengeError(422, f"{where}: {first.get('msg', 'invalid')}") from None
 
 
-def _lazy_role_launch(path: Path) -> role_dispatch.RoleLaunch:
+def _load_cuda_executor(path: Path) -> role_dispatch.RoleLaunch:
+    from hypertrain.gpu_ops import cuda_executor
+
+    return cuda_executor.load(path)
+
+
+def _load_role_dispatch(path: Path) -> role_dispatch.RoleLaunch:
+    return role_dispatch.load(path)
+
+
+def _lazy_role_launch(
+    path: Path, load: Callable[[Path], role_dispatch.RoleLaunch] = _load_role_dispatch
+) -> role_dispatch.RoleLaunch:
     """Load on first use: the supervisor canary boots with an empty /data and must answer."""
     lock, loaded = threading.Lock(), list[role_dispatch.RoleLaunch]()
 
@@ -287,12 +301,25 @@ def _lazy_role_launch(path: Path) -> role_dispatch.RoleLaunch:
         with lock:
             if not loaded:
                 try:
-                    loaded.append(role_dispatch.load(path))
+                    loaded.append(load(path))
                 except (OSError, ValueError) as error:  # pydantic ValidationError is a ValueError
                     raise ChallengeError(503, "ROLE_DISPATCH_UNAVAILABLE") from error
         return loaded[0](*args)
 
     return launch
+
+
+def _dispatcher(config: Config) -> role_dispatch.RoleLaunch | None:
+    """At most one dispatch target: the Vast lifecycle file or the generic CUDA executor."""
+    if config.role_dispatch_file is not None and config.cuda_executor_file is not None:
+        raise ValueError(
+            "HYPERTRAIN_ROLE_DISPATCH and HYPERTRAIN_CUDA_EXECUTOR are mutually exclusive"
+        )
+    if config.role_dispatch_file is not None:
+        return _lazy_role_launch(config.role_dispatch_file)
+    if config.cuda_executor_file is not None:
+        return _lazy_role_launch(config.cuda_executor_file, _load_cuda_executor)
+    return None
 
 
 def create_app(
@@ -326,11 +353,7 @@ def create_app(
             config.owner_hotkey,
             verify_beacon,
             objects or LocalFSStore(config.state_dir / "objects"),
-            _role_launch=(
-                _lazy_role_launch(config.role_dispatch_file)
-                if config.role_dispatch_file is not None
-                else None
-            ),
+            _role_launch=_dispatcher(config),
         )
     )
     store.clock = clock

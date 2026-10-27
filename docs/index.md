@@ -22,6 +22,7 @@ Start here: [Cortex ecosystem](ecosystem.md) and [Validator quickstart](validato
 - [ADR 0003: Cloudflare R2 data plane](adr/0003-cloudflare-data-plane.md): direct host-to-R2 bulk transfer, 4 MiB-block multipart, content-addressed keys, presigned part offers, cost model, the [multi-region measurement plan](dataplane/measurement-plan.md) and the [test resources](dataplane/resources.md).
 - [ADR 0006: `kimi-k3-pro-tiny` test profile](adr/0006-kimi-k3-pro-tiny-profile.md): Kimi K2-family MLA + MoE test architecture, gap table, B300 qualification commands, and the D18 permanent registry entry and per-run `arch`.
 - [ADR 0007: SM counts per CUDA architecture](adr/0007-sm-counts-per-arch.md): the (capability, SM count) table for CUDA qualification, hash consequences and the TEST-stack image swap.
+- [ADR 0008: generic CUDA executor](adr/0008-generic-cuda-executor.md): references and audit replays on any SSH + Docker GPU host, host contract, provenance record, failure model, hash consequences.
 - [Hypertrain import provenance](provenance/hypertrain-import.md): commit map, byte-identity and `git log --follow` checks.
 - [Hypertrain](../hypertrain/README.md): the imported project, with its own documentation in `hypertrain/docs/`.
 - [B300 host run](b300-run.md): `run_host.sh` on an AWS p6-b300 host: steps, exit codes, results, auto-stop and the two-host comparison.

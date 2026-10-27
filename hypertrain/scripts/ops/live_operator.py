@@ -25,11 +25,13 @@ from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize, f32hex
 from hypertrain.protocol.messages_v2 import (
+    MAX_STEP_SECONDS_BOUND,
     PolicyHashes,
     RosterEntryV2,
     RoundOpenV2,
     RunManifestV2,
     StartStateV2,
+    audit_lease_rounds,
 )
 from hypertrain.protocol.relay_messages import RelayRegistryV1
 from hypertrain.trainer.compress import state_hash
@@ -105,7 +107,7 @@ def refuse_service_run(m: Master) -> None:
         raise SystemExit("run has a service-admission record; this helper refuses it")
 
 
-def check_open_args(w: int, hotkeys: list[str], offsets: list[int]) -> None:
+def check_open_shape(w: int, hotkeys: list[str], offsets: list[int]) -> None:
     if w < 0 or not hotkeys or len(set(hotkeys)) != len(hotkeys):
         raise SystemExit("need w >= 0 and unique hotkeys")
     if (
@@ -118,11 +120,24 @@ def check_open_args(w: int, hotkeys: list[str], offsets: list[int]) -> None:
         raise SystemExit("offsets: need 2 <= d_final-d_audit <= 200 and d_upload > d_commit")
 
 
+def check_open_args(w: int, hotkeys: list[str], offsets: list[int], h: int) -> None:
+    """Refuse an opening the store cannot audit; `h` is the manifest's inner H."""
+    check_open_shape(w, hotkeys, offsets)
+    # Audit jobs are created at d_audit and each lease ends at d_final at the latest; AuditJobV2
+    # refuses a longer lease, so a wider gap leaves the round unauditable (S7 run 42f68b45).
+    lease = audit_lease_rounds(h, MAX_STEP_SECONDS_BOUND)
+    if offsets[5] - offsets[3] > lease:
+        raise SystemExit(
+            f"offsets: d_final-d_audit is {offsets[5] - offsets[3]} rounds but an audit lease "
+            f"lasts at most {lease} beacon rounds for H={h}"
+        )
+
+
 def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dict:
     """RoundOpenV2 rebuilt the way open_round_v2 recomputes it (store.py:4892-4939)."""
-    check_open_args(w, hotkeys, offsets)
     refuse_service_run(m)
     manifest = m.manifest()
+    check_open_args(w, hotkeys, offsets, manifest.training.inner.H)
     cfg = TrainConfig.from_manifest_v2(manifest)
     now = m.call("GET", "")["now_round"]
     theta, prev_final = init_params(cfg.model), "0" * 64
@@ -276,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
             offsets = [int(x) for x in args.offsets.split(",")]
         except ValueError:
             raise SystemExit("offsets must be integers") from None
-        check_open_args(args.w, args.hotkey, offsets)
+        check_open_shape(args.w, args.hotkey, offsets)
     m = Master(args)
     if args.command == "open":
         out = open_round(m, args.w, args.hotkey, offsets)
