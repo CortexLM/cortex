@@ -71,7 +71,8 @@ RUNNER_SOURCE = Path(cuda_executor_runner.__file__).read_text()
 ENV_BASE = {"PYTHONHASHSEED": "0", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
 OPERATIONS = ("reference", "audit", "referee")
 SSH_EXIT = 255
-RANK = re.compile(r"rank-(0|[1-9][0-9]*)")
+RANK = re.compile(r"rank-(0|[1-9][0-9]{0,2})")
+MAX_GPUS = 8
 TRANSPORT_NAMES = ("job.json", "request.json")
 FIELD = 256  # longest host-reported string the provenance record keeps
 RUNNER_PROBE_FAILED = 9
@@ -439,11 +440,11 @@ class ObservedEnvironment(Boundary):
     torch: Text
     torch_path: Text
     cuda: Text | None
-    gpu_uuids: Annotated[list[Text], Field(max_length=8)]
-    gpu_names: Annotated[list[Text], Field(max_length=8)]
-    sm_counts: Annotated[list[StrictInt], Field(max_length=8)]
-    capabilities: Annotated[list[tuple[StrictInt, StrictInt]], Field(max_length=8)]
-    drivers: Annotated[list[Text], Field(max_length=8)]
+    gpu_uuids: Annotated[list[Text], Field(max_length=MAX_GPUS)]
+    gpu_names: Annotated[list[Text], Field(max_length=MAX_GPUS)]
+    sm_counts: Annotated[list[StrictInt], Field(max_length=MAX_GPUS)]
+    capabilities: Annotated[list[tuple[StrictInt, StrictInt]], Field(max_length=MAX_GPUS)]
+    drivers: Annotated[list[Text], Field(max_length=MAX_GPUS)]
 
 
 class Executor:
@@ -664,12 +665,15 @@ class Executor:
                         and rank is not None
                         and int(rank[1]) < n
                         and all(p not in ("", ".", "..") for p in parts)
+                        and parts[1] != "windows"  # dispute traces are the challenge's to write
+                        and "\0" not in member.name
                     )
                     members += 1
                     total += member.size + tarfile.BLOCKSIZE  # header blocks are bytes too
                     if (
                         complete
                         or member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE)
+                        or any(key.startswith("GNU.sparse") for key in member.pax_headers)
                         or total > self.config.max_result_bytes
                         or members > MAX_MEMBERS
                         or member.name in written
@@ -699,8 +703,8 @@ class Executor:
                             f"cannot stage result member {member.name!r}: {type(error).__name__}"
                         ) from error
                     written[member.name] = digest.hexdigest()
-        except tarfile.TarError as error:
-            raise AttemptFailed(f"result tar unreadable: {error}") from error
+        except (tarfile.TarError, ValueError, RecursionError) as error:
+            raise AttemptFailed(f"result tar unreadable: {type(error).__name__}") from error
         if not complete or "environment.json" not in small:
             raise AttemptFailed("result is missing environment.json or the COMPLETE member")
         try:
@@ -931,6 +935,8 @@ class Executor:
         trace: bool,
         cancel: threading.Event | None,
     ) -> IslandArtifacts:
+        if job.manifest.training.reference_spec.layout.n_gpus > MAX_GPUS:
+            raise IslandFailure(f"the executor carries layouts of at most {MAX_GPUS} GPUs")
         directory = directory.resolve()
         directory.mkdir(parents=True, exist_ok=True)
         with flock(directory / "launch.lock"):

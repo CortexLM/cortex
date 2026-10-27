@@ -798,6 +798,9 @@ MEMBERS = [
     pytest.param(with_member("rank-x/summary.json", b"x"), id="rank-not-a-number"),
     pytest.param(with_member("rank-00/summary.json", b"x"), id="rank-not-canonical"),
     pytest.param(with_member("rank-0", b"x"), id="rank-as-a-file"),
+    # a host must not seed the dispute traces that launch_window treats as already computed
+    pytest.param(with_member("rank-0/windows/1.json", b"[]"), id="dispute-window-trace"),
+    pytest.param(with_member("rank-" + "9" * 5000 + "/x", b"x"), id="rank-with-5000-digits"),
     pytest.param(with_member("other/summary.json", b"x"), id="foreign-directory"),
     pytest.param(with_member("extra.json", b"x"), id="foreign-top-level-file"),
     pytest.param(with_member("rank-0/summary.json", b"again"), id="duplicate-rank-file"),
@@ -816,6 +819,83 @@ def test_read_result_refuses_an_unacceptable_member(
     with pytest.raises(ce.AttemptFailed, match="unacceptable result member"):
         read(executor, tmp_path, tar_of(entries))
     assert list(tmp_path.rglob("escape")) == []
+
+
+def test_read_result_refuses_a_name_with_a_nul_that_only_a_pax_path_can_carry(
+    executor: ce.Executor, tmp_path: Path
+) -> None:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        info = tarfile.TarInfo("rank-0/placeholder")
+        info.size = 1
+        info.pax_headers = {"path": "rank-0/na\0me"}
+        archive.addfile(info, io.BytesIO(b"x"))
+        for name, raw, _ in result_entries():
+            info = tarfile.TarInfo(name)
+            info.size = len(raw)
+            archive.addfile(info, io.BytesIO(raw))
+    with pytest.raises(ce.AttemptFailed, match="unacceptable result member 'rank-0/na"):
+        read(executor, tmp_path, buffer.getvalue())
+
+
+def pax_sparse_result(payload: bytes, realsize: int) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        info = tarfile.TarInfo("rank-0/big.bin")
+        info.size = len(payload)
+        info.pax_headers = {
+            "GNU.sparse.major": "1",
+            "GNU.sparse.minor": "0",
+            "GNU.sparse.realsize": str(realsize),
+            "GNU.sparse.name": "rank-0/big.bin",
+        }
+        archive.addfile(info, io.BytesIO(payload))
+        for name, raw, _ in result_entries():
+            info = tarfile.TarInfo(name)
+            info.size = len(raw)
+            archive.addfile(info, io.BytesIO(raw))
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("payload", "realsize", "message"),
+    [
+        # a well-formed PAX 1.0 sparse map whose logical size is small: tarfile reports a plain
+        # regular file; only its pax header tells that it is sparse.
+        (b"1\n0\n4\n".ljust(512, b"\0") + b"abcd", 4, "unacceptable result member"),
+        # the same with a terabyte of logical size: the byte cap refuses it as well
+        (b"1\n0\n4\n".ljust(512, b"\0") + b"abcd", 1 << 40, "unacceptable result member"),
+        # a map tarfile itself cannot read raises ValueError from the iterator
+        (b"not a sparse map", 4, "result tar unreadable"),
+    ],
+    ids=["well-formed", "terabyte", "malformed"],
+)
+def test_read_result_refuses_a_pax_sparse_member_whatever_tarfile_makes_of_it(
+    executor: ce.Executor, tmp_path: Path, payload: bytes, realsize: int, message: str
+) -> None:
+    with pytest.raises(ce.AttemptFailed, match=message):
+        read(executor, tmp_path, pax_sparse_result(payload, realsize))
+    assert not (tmp_path / "sandbox" / "stage" / "rank-0" / "big.bin").exists()
+
+
+def test_launch_refuses_a_layout_wider_than_the_provenance_can_record_before_any_host(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    job = island_job(tmp_path / "job")
+    reference = job.manifest.training.reference_spec
+    layout = reference.layout.model_copy(update={"n_gpus": ce.MAX_GPUS + 1, "dp_size": 9})
+    training = job.manifest.training.model_copy(
+        update={"reference_spec": reference.model_copy(update={"layout": layout})}
+    )
+    wide = job.model_copy(
+        update={"manifest": job.manifest.model_copy(update={"training": training})}
+    )
+    order: list[str] = []
+    executor = executor_with(tmp_path, pinned, {"h1": Down("h1", order)}, sweeps=1)
+    with pytest.raises(ce.IslandFailure, match="at most 8 GPUs") as caught:
+        executor.launch("audit", "b" * 64, wide, tmp_path / "job", trace=False, cancel=None)
+    assert order == [] and not isinstance(caught.value, ce.Aborted)
+    assert not executor.journal.path.exists()
 
 
 def test_read_result_still_accepts_old_style_regular_members(
