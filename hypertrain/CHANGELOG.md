@@ -70,6 +70,9 @@
   `launch_island`, `launch_window` and `_launch_unbounded` start island ranks under the pins and
   raise `EnvPinRefused` (an `IslandFailure`) before charging capacity when this host cannot honor
   them. The rollback repair and history workers get the same pins.
+  `NetworkMiner.join` and `probe_trial` refuse a host that cannot honor the pin before any request,
+  and `bootstrap_service_capacity_v2` answers 409 `SERVICE_PROFILE_ENV_PIN` when the challenge host
+  cannot.
   The miner's dispute follower answers a pinned CPU publication from its published trace instead
   of replaying it in the daemon (behavior change for pinned manifests only).
 

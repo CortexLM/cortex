@@ -4436,8 +4436,16 @@ class ChallengeStore:
 
     def bootstrap_service_capacity_v2(self, run_id: str, body: bytes, raw: bytes) -> str:
         """Trusted operator bootstrap: owner Receipt signs exact immutable profile."""
+        from hypertrain.protocol.env_pins import EnvPinUnhonorable, require_honorable
         from hypertrain.protocol.messages import Receipt
 
+        with self._lock:
+            pin = self._run_v2(run_id).training.reference_spec.env.pin()
+        if pin is not None:  # a child process of up to two minutes: never inside the transaction
+            try:
+                require_honorable(pin)
+            except EnvPinUnhonorable as error:
+                raise ChallengeError(409, f"SERVICE_PROFILE_ENV_PIN: {error}") from error
         with self._tx():
             try:
                 profile = _ServiceCapacityV1.model_validate(
