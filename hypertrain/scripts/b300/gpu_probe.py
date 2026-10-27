@@ -2,8 +2,10 @@
 
 Records the torch build (version, CUDA, compiled arch list), every visible device (name,
 capability, SM count, memory) and a bitwise determinism smoke. The smoke runs a fixed fp32 and
-bf16 matmul and the production flash-SDPA geometry (bf16, 16 q heads, 8 kv heads, head dim 128,
-forward and backward) on each device, several times. It passes only when every repeat on every
+bf16 matmul and the production attention geometry (bf16, 16 q heads, 8 kv heads, head dim 128,
+forward and backward) on each device, several times. The attention backend is the one
+select_backend() picks for that device, HT_ATTN_BACKEND included: "math" on sm_103 until a
+backend is qualified there, flash-SDPA on RTX 5090. It passes only when every repeat on every
 device yields the same digests. Inputs are generated on the CPU, so all devices see the same bytes.
 A kernel error (e.g. no kernel image for the device) is recorded as the digest value.
 
@@ -52,7 +54,9 @@ def workload(device: torch.device) -> dict[str, str]:
         out["matmul_bf16"] = digest(a.to(device, torch.bfloat16) @ b.to(device, torch.bfloat16))
     except RuntimeError as e:
         out["matmul"] = f"error: {e}"
-    backend: Backend = "sdpa-flash" if device.type == "cuda" else "math"
+    # The backend production training takes on this device (HT_ATTN_BACKEND included), not a
+    # fixed one: on sm_103 that is "math", the numerics the later steps will actually run.
+    backend: Backend = select_backend(device)
     try:
         qkv = [x.to(device, torch.bfloat16).requires_grad_() for x in (q, k, v)]
         o = attention(qkv[0], qkv[1], qkv[2], backend)

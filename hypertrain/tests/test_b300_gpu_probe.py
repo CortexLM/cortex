@@ -15,6 +15,7 @@ assert spec is not None and spec.loader is not None
 gpu_probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gpu_probe)  # imports hypertrain.trainer before torch
 torch = gpu_probe.torch
+import hypertrain.trainer.attention as attn  # noqa: E402  (after gpu_probe: determinism before torch)
 
 
 def test_cpu_smoke_is_bitwise_stable_and_one_flipped_digest_fails():
@@ -63,3 +64,32 @@ def test_any_failure_replaces_a_stale_ok_json_and_still_propagates(
     doc = json.loads(out.read_text())
     assert doc["ok"] is False and "stale" not in doc
     assert doc["error"] == f"{type(exc).__name__}: {exc}"
+
+
+@pytest.mark.parametrize(
+    ("forced", "backend"), [(None, "math"), ("sdpa-flash", "sdpa-flash")], ids=["default", "forced"]
+)
+def test_the_attention_smoke_runs_the_backend_select_backend_picks(
+    forced: str | None, backend: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(attn, "_PATHS", {})  # the CPU flash probe must not leak into other tests
+    if forced is None:
+        monkeypatch.delenv("HT_ATTN_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("HT_ATTN_BACKEND", forced)
+    out = gpu_probe.workload(torch.device("cpu"))
+    keys = sorted(k for k in out if k.endswith(("_out", "_dq", "_dk", "_dv")))
+    assert keys == sorted(f"{backend}_{s}" for s in ("out", "dq", "dk", "dv"))
+
+
+def test_a_kernel_error_is_recorded_under_the_selected_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_kernel(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("no kernel image is available")
+
+    monkeypatch.setenv("HT_ATTN_BACKEND", "sdpa-flash")
+    monkeypatch.setattr(gpu_probe, "attention", no_kernel)
+    out = gpu_probe.workload(torch.device("cpu"))
+    assert out["sdpa-flash"] == "error: no kernel image is available"
+    assert not any(k.startswith(("math", "sdpa-flash_")) for k in out)
