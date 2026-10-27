@@ -424,3 +424,118 @@ def test_a_store_side_failure_before_the_executor_boundary_keeps_the_lease(netwo
         store.execute_audit_v2(run, job["job_id"], execute_request(network, A, job))
     row = lease_row(store, job["job_id"])
     assert (row["state"], row["attempts"]) == ("running", 1)
+
+
+def excluded_count(store):
+    return store._db.execute("SELECT COUNT(*) FROM records_v2 WHERE kind='excluded'").fetchone()[0]
+
+
+def expire_leases(network):
+    """What push_beacon does for a service run: reap whatever the verified beacon has overtaken."""
+    with network.store._tx():
+        network.store._expire_leases_v2(network.manifest.run_id(), network.now)
+
+
+def test_a_single_window_round_gives_a_silent_auditors_job_a_second_window(network):
+    """The supported shape (gap 100): the first lease runs to the absolute deadline."""
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, n=5, gap=100)
+    schedule(network)
+    network.push(D_AUDIT + 1)
+    job = lease(network, A, 1).json()["body"]
+    assert job["lease_expires"] == job["absolute_deadline"] == D_AUDIT + 100
+    now, window = D_AUDIT + 100, 2 * lease_rounds(network)
+    network.push(now)  # A never answered and nobody else asked
+    cooldown_until(lease(network, A, 2))
+    row = lease_row(store, job["job_id"])
+    assert (row["state"], row["attempts"], row["created"], row["absolute"]) == (
+        "queued",
+        0,
+        now,
+        now + window,
+    )
+    assert json.loads(row["tried"]) == []
+    assert excluded_count(store) == 0
+    finality = store._record_v2(run, "finality", "0")
+    assert (finality["disposition"], finality["unresolved_audits"]) == ("PENDING", 5)
+    body = lease(network, B, 3).json()["body"]  # the other auditor serves the new window at once
+    assert (body["created_beacon"], body["lease_expires"], body["absolute_deadline"]) == (
+        now,
+        now + lease_rounds(network),
+        now + window,
+    )
+
+
+def test_a_job_nobody_audits_in_two_windows_drops_its_miner_and_nothing_else(network):
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, n=5, gap=100)
+    schedule(network)
+    first_end = D_AUDIT + 100
+    network.push(first_end)  # window 1 ends without a single lease
+    expire_leases(network)
+    states = {r["state"] for r in store._db.execute("SELECT state FROM audit_leases_v2")}
+    assert states == {"queued"}
+    assert excluded_count(store) == 0
+    network.push(first_end + 2 * lease_rounds(network))  # window 2 ends the same way
+    expire_leases(network)
+    states = {r["state"] for r in store._db.execute("SELECT state FROM audit_leases_v2")}
+    assert states == {"exhausted"}
+    for key in miners(5):
+        assert store._record_v2(run, "excluded", f"0:{key.ss58}")["reason"] == "INFRASTRUCTURE"
+    finality = store._record_v2(run, "finality", "0")
+    assert (
+        finality["disposition"],
+        finality["unresolved_audits"],
+        finality["resolution_hash"],
+    ) == ("PENDING", 0, None)
+
+
+def test_s3_one_poisoned_job_costs_its_miner_not_the_round(network, monkeypatch):
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, n=5, executable=True, gap=100)
+    schedule(network)
+    hostile_launch(monkeypatch)
+
+    def attempt(auditor, n):
+        response = lease(network, auditor, n)
+        assert response.status_code == 200, response.text
+        job = response.json()["body"]
+        with pytest.raises(RecursionError):
+            store.execute_audit_v2(run, job["job_id"], execute_request(network, auditor, job))
+        return job
+
+    first = attempt(A, 1)
+    assert attempt(B, 2)["job_id"] == first["job_id"]  # attempt 2 by the other auditor
+    row = lease_row(store, first["job_id"])
+    assert (row["state"], row["attempts"], row["absolute"]) == (
+        "queued",
+        0,
+        network.now + 2 * lease_rounds(network),
+    )  # a second window opened at once
+    assert attempt(A, 3)["job_id"] == first["job_id"]  # the same poison fails twice more
+    assert attempt(B, 4)["job_id"] == first["job_id"]
+    row = lease_row(store, first["job_id"])
+    assert (row["state"], row["result"]) == ("exhausted", "AUDIT_INFRASTRUCTURE")
+    assert store._record_v2(run, "excluded", f"0:{row['hotkey']}")["reason"] == "INFRASTRUCTURE"
+    assert excluded_count(store) == 1
+    finality = store._record_v2(run, "finality", "0")
+    assert (finality["disposition"], finality["unresolved_audits"]) == ("PENDING", 4)
+    assert lease(network, A, 5).status_code == 200  # the other four jobs are still leaseable
+
+
+def test_a_service_admitted_run_drops_a_job_at_once_instead_of_re_arming_it(network):
+    """Its resource reservation carries d_final as the deadline: no second window is opened."""
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, n=5, gap=100)
+    schedule(network)
+    with store._tx():
+        store._put_record_v2(run, "service-admission", "run", {})
+    network.push(D_AUDIT + 100)
+    expire_leases(network)
+    states = {r["state"] for r in store._db.execute("SELECT state FROM audit_leases_v2")}
+    assert states == {"exhausted"}
+    rearmed = store._db.execute("SELECT COUNT(*) FROM records_v2 WHERE kind='audit-rearm'")
+    assert rearmed.fetchone()[0] == 0
+    assert excluded_count(store) == 5
+    finality = store._record_v2(run, "finality", "0")
+    assert (finality["disposition"], finality["unresolved_audits"]) == ("PENDING", 0)

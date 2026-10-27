@@ -382,6 +382,14 @@ known-owner group bounds. No post-cap renormalization. Four eligible ACTIVE
 miners can carry exact quarter weights; infeasible cohorts reject. Similarity
 alone is not fraud evidence. Audits replay each miner's own assignment.
 
+A miner whose audit could not run (no auditor finished it in two windows of two
+leases each) is left out of that round (`excluded`, reason `INFRASTRUCTURE`) and
+the round is not excluded: the other miners aggregate and settle as after an
+UNVERIFIED verdict. The round cannot be applied with fewer than four verified
+inputs, and an excluded miner has no anchor for the round, so it cannot be on the
+next roster. While an audit is pending the round stays `PENDING`: opening w+2,
+aggregation, rollback and relay settlement wait for it.
+
 At most two speculative rounds may be applied; opening w+2 waits for w to settle
 or be excluded and repaired. Retain original input objects, signed tapes,
 accepted envelopes, carry anchors and full bounded predecessor history. Reward

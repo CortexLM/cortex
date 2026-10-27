@@ -6736,7 +6736,7 @@ class ChallengeStore:
                     "result='AUDIT_INFRASTRUCTURE' WHERE id=?",
                     (row["id"],),
                 )
-                self._exhaust_audit_job_v2(run_id, row)
+                self._exhaust_audit_job_v2(run_id, row, now)
 
     def _expiry_cause_v2(self, run_id: str, row: sqlite3.Row) -> str:
         """An auditor that asked for the execution is not silent: the master owed the verdict."""
@@ -6775,7 +6775,7 @@ class ChallengeStore:
         if cause == "AUDITOR_SILENT":
             self._cool_down_auditor_v2(run_id, row)
         if state == "exhausted":
-            self._exhaust_audit_job_v2(run_id, row)
+            self._exhaust_audit_job_v2(run_id, row, now)
 
     def _cooling_until_v2(self, run_id: str, auditor: str, now: int) -> int | None:
         record = self._db.execute(
@@ -6816,20 +6816,57 @@ class ChallengeStore:
             ),
         )
 
-    def _exhaust_audit_job_v2(self, run_id: str, row: sqlite3.Row) -> None:
-        """A job that ran out of attempts or time: today the miner and the whole round pay."""
+    def _exhaust_audit_job_v2(self, run_id: str, row: sqlite3.Row, now: int) -> None:
+        """A job that ran out of attempts or time. It gets one more window; after that its miner
+        leaves the round (`excluded` INFRASTRUCTURE, no sanction) and the round goes on."""
+        if not self._rearm_audit_job_v2(run_id, row, now):
+            self._drop_audit_job_v2(
+                run_id,
+                row,
+                "INFRASTRUCTURE",
+                "AUDIT_INFRASTRUCTURE",
+                sha256_hex(row["id"].encode()),
+            )
+
+    def _rearm_audit_job_v2(self, run_id: str, row: sqlite3.Row, now: int) -> bool:
+        """Requeue an exhausted job for a fresh window that starts now: attempts and tried reset, a
+        new coordinator-signed challenge, bounded by the pinned max_attempts windows. The generic
+        path only: a service-admitted run keeps its resource deadline."""
+        from hypertrain.protocol.messages_v2 import AuditChallengeV2
+
+        if self._db.execute(
+            "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission' AND id='run'",
+            (run_id,),
+        ).fetchone():
+            return False
+        manifest = self._run_v2(run_id)
+        policy = AuditPolicyV2.model_validate_json(
+            self.objects.get(manifest.network.audit_policy_hash)
+        )
+        previous = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='audit-rearm' AND id=?",
+            (run_id, row["id"]),
+        ).fetchone()
+        windows = json.loads(previous[0])["windows"] if previous else 1
+        if windows >= policy.max_attempts:
+            return False
+        absolute = now + policy.absolute_rounds()
+        challenge = AuditChallengeV2.model_validate(
+            envelope_v2.parse_envelope(json.loads(row["challenge"])).body
+        ).model_copy(update={"serve_deadline": absolute})
+        signed = envelope_v2.seal(self._coord(), "AuditChallengeV2", run_id, challenge, absolute)
+        self._db.execute(
+            "UPDATE audit_leases_v2 SET state='queued',attempts=0,auditor=NULL,nonce=NULL,"
+            "expires=NULL,tried='[]',created=?,absolute=?,challenge=? WHERE id=?",
+            (now, absolute, _dumps(signed), row["id"]),
+        )
         self._put_record_v2(
             run_id,
-            "excluded",
-            f"{row['w']}:{row['hotkey']}",
-            {"reason": "INFRASTRUCTURE", "evidence_hash": sha256_hex(row["id"].encode())},
+            "audit-rearm",
+            row["id"],
+            {"windows": windows + 1, "at": now, "absolute": absolute},
         )
-        finality = self._record_v2(run_id, "finality", str(row["w"]))
-        finality["disposition"] = "EXCLUDED"
-        finality["resolution_hash"] = sha256_hex(row["id"].encode())
-        finality["rollback_complete"] = not finality["applied"]
-        finality["unresolved_audits"] = max(0, int(str(finality["unresolved_audits"])) - 1)
-        self._put_record_v2(run_id, "finality", str(row["w"]), finality)
+        return True
 
     def island_job_v2(self, run_id: str, w: int, hotkey: str) -> dict[str, Any]:
         from hypertrain.auditor.replay import pack_state, unpack_state
