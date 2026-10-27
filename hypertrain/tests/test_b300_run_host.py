@@ -1068,3 +1068,57 @@ def test_the_expected_gpu_count_is_a_plain_number(env, tmp_path, gpus):
     p = run({**env, "HT_B300_EXPECT_GPUS": gpus}, tmp_path)
     assert p.returncode == 2 and "HT_B300_EXPECT_GPUS" in p.stderr, p.stdout + p.stderr
     assert docker_calls(tmp_path) == []
+
+
+# --- the watchdog stays honest while a step runs --------------------------------------------------
+
+
+def test_a_watchdog_that_dies_during_a_step_is_noticed_before_the_step_ends(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="mfu")
+    wait_until(lambda: (tmp_path / "state/ctr-mfu").exists(), "the mfu container")
+    os.kill(watchdog_pid(tmp_path), signal.SIGKILL)
+    try:  # the container still runs: only the missing watchdog can end this
+        rc = proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        pytest.fail("the run kept going for the whole step without a watchdog")
+    assert rc == 9 and stop_json(tmp_path)["reason"] == "watchdog-died"
+    assert Path(f"{tmp_path}/state/ctr-mfu.stopped").exists()  # and it was drained
+
+
+def test_a_watchdog_does_not_outlive_the_script_that_started_it(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    pid = watchdog_pid(tmp_path)
+    proc.send_signal(signal.SIGKILL)  # no trap runs: nothing tells the watchdog to stop
+    proc.wait(timeout=10)
+    wait_until(lambda: not alive(pid), "the orphan watchdog to notice and leave", timeout=10)
+
+
+def test_a_reason_file_that_cannot_be_written_does_not_disarm_the_deadline(env, tmp_path, launch):
+    (tmp_path / "results/h1/.stop-reason").mkdir(parents=True)  # echo > it fails
+    proc = launch("--duration", "2", FAKE_BLOCK="mfu")
+    wait_until(lambda: (tmp_path / "state/ctr-mfu").exists(), "the mfu container")
+    try:
+        rc = proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        pytest.fail("the watchdog died on its reason file and the deadline never fired")
+    assert rc == 143 and Path(f"{tmp_path}/state/ctr-mfu.stopped").exists()
+
+
+def test_the_watchdog_does_not_hold_the_callers_pipe_after_the_script_exits(env, tmp_path):
+    t0 = time.monotonic()
+    p = run({**env, "HT_B300_POLL_SECONDS": "9"}, tmp_path, "--steps", "host_probe")
+    assert p.returncode == 0 and time.monotonic() - t0 < 5  # not 9 s: the sleep child is detached
+
+
+def test_a_stop_reason_left_by_an_earlier_run_does_not_label_this_stop(env, tmp_path, launch):
+    out = tmp_path / "results/h1"
+    out.mkdir(parents=True)
+    (out / ".stop-reason").write_text("spot-interruption\n")
+    (out / "spot-instance-action.json").write_text(json.dumps(NOTICE))
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    proc.send_signal(signal.SIGTERM)  # an operator stop
+    assert proc.wait(timeout=30) == 143
+    stop = stop_json(tmp_path)
+    assert stop["reason"] == "signal" and stop["spot_notice"] is None

@@ -63,6 +63,8 @@ while [ $# -gt 0 ]; do
 done
 
 die() { echo "run_host: $*" >&2; exit 2; }
+((BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1))) ||
+  die "bash 5.1 or newer is needed (wait -n -p): $BASH_VERSION"
 # Operator text is matched against a regex before it reaches arithmetic or a command line: bash
 # reads 08 as an invalid octal number and evaluates $(...) inside $(( )), so a number is never
 # computed from an unchecked string and every conversion is forced to base 10 (10#).
@@ -104,6 +106,8 @@ mkdir -p "$out/steps"
 exec > >(tee -a "$out/run.log") 2>&1
 exec 9>"$out/.lock"
 flock -n 9 || die "another run_host.sh holds $out/.lock"
+# State of an earlier run that this run would otherwise report as its own.
+rm -f -- "$out/.stop-reason" "$out/.instance-action" "$out/spot-instance-action.json" 2>/dev/null || true
 # The ubuntu user of the AWS hosts is not in the docker group: fall back to passwordless sudo.
 if [ -n "${DOCKER:-}" ]; then
   docker_cmd=("$DOCKER")
@@ -146,10 +150,13 @@ spot_notice() {
 }
 watchdog() {
   while sleep "$POLL"; do
+    # Left behind by a SIGKILLed script, it would write into a results directory that a newer
+    # run may own and TERM a pid that may have been reused.
+    kill -0 "$1" 2>/dev/null || return
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      echo duration >"$out/.stop-reason"
+      echo duration >"$out/.stop-reason" || true
     elif spot_notice; then
-      echo spot-interruption >"$out/.stop-reason"
+      echo spot-interruption >"$out/.stop-reason" || true
     else
       continue
     fi
@@ -157,7 +164,8 @@ watchdog() {
     return
   done
 }
-watchdog $$ 9>&- &
+# Its output goes nowhere: a sleep that outlives the script must not hold the caller's pipe.
+watchdog $$ 9>&- >/dev/null 2>&1 &
 watchdog_pid=$!
 log "watchdog pid $watchdog_pid"
 bg_pid= # the docker client of the step that is running, killed by finish
@@ -237,7 +245,7 @@ PY
 on_signal() {
   local reason
   reason=$(cat "$out/.stop-reason" 2>/dev/null || echo signal)
-  rm -f "$out/.stop-reason"
+  rm -f "$out/.stop-reason" 2>/dev/null || true
   finish "$reason" 143
 }
 on_exit() { finish unexpected-exit $?; }
@@ -288,6 +296,19 @@ step() {
 # Container names are global to the host while the flock covers one results directory, so this
 # script never removes a container by name: a name already in use makes `docker run` fail, and
 # only `finish` stops containers, by this run's label.
+# Waits for the docker client in bg_pid and returns its status. The watchdog is waited on with it:
+# if it dies, neither --duration nor a Spot notice can stop the step, so stop the run now rather
+# than at the next step. (A watchdog that has sent its TERM never gets here: the trap runs first.)
+wait_client() {
+  local done_pid='' rc=0
+  wait -n -p done_pid "$bg_pid" "$watchdog_pid" || rc=$?
+  if [ "$done_pid" = "$watchdog_pid" ]; then
+    log "the watchdog died during a step: nothing would stop this run at --duration or a Spot notice"
+    finish watchdog-died 9
+  fi
+  bg_pid=
+  return "$rc"
+}
 container() {
   local name=$PREFIX-$1 rc=0
   shift
@@ -295,8 +316,7 @@ container() {
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
     -v "$HT:/opt/ht:ro" -v "$out:/out" -w /opt/ht/scripts "$@" 9>&- &
   bg_pid=$!
-  wait "$bg_pid" || rc=$?
-  bg_pid=
+  wait_client || rc=$?
   return "$rc"
 }
 PY=/opt/hypertrain/venv/bin/python
@@ -319,8 +339,7 @@ pull() {
   local got
   dk pull "$image" >"$out/pull.log" 2>&1 9>&- &
   bg_pid=$!
-  wait "$bg_pid" || { bg_pid=; tail -n 20 "$out/pull.log"; return 1; }
-  bg_pid=
+  wait_client || { tail -n 20 "$out/pull.log"; return 1; }
   got=$(dk image inspect --format '{{json .RepoDigests}}' "$image") || return
   echo "$got" >"$out/pull-digests.json"
   [[ $got == *"${image#*@}"* ]] || { log "pulled digests $got lack ${image#*@}"; return 1; }
