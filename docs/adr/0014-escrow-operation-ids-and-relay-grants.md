@@ -213,13 +213,17 @@ F7a (liveness, conditional blocker):
    never apply. They are sized from the real roster, not from the pending queue (D52 m1, D53 2): the
    roster ceiling is 1,024 miners [V `store.py` `max_roster`], a coldkey that owns a whole roster needs
    one lock and one top-up per miner, so **2,048 per coldkey** (`OPEN_LOCK_CAP`) and **4,096 in the
-   ledger** (`LEDGER_LOCK_CAP`, twice the honest worst case). The per-coldkey cap bounds the cost of
+   ledger** (`LEDGER_LOCK_CAP`, twice the honest worst case; a lever of capital, see below). The per-coldkey cap bounds the cost of
    `locked()` (about 4 µs per open lock, 8 ms at the cap [V]); the ledger cap bounds the state that many
    funded coldkeys can create, because "40,006 unreachable locks" holds per coldkey only. **A minimum
    amount per lock** of `max(1, S_min_units // 10)` (100 units in the example policy, HTTP 409
    `LOCK_BELOW_MINIMUM`) makes the ledger cap costly to exhaust: filling it needs 4,096 locks of at
    least a tenth of the funding floor each, held by funded coldkeys, instead of 4,096 dust locks. The
-   floor is a code constant derived from the policy value, not a policy field. Contest locks are not
+   floor is a code constant derived from the policy value, not a policy field. The ledger cap remains a
+   liveness lever for funded accounts: two coldkeys that hold 409,600 units can fill it with 4,096 locks of
+   100 units, and those locks are not releasable until ADR 0010 Part 6 lands. It is a capital cost (the
+   attacker's units are locked for as long as the locks stay), not a free denial; if Forge prefers no such
+   lever the ledger cap is dropped and only the per-coldkey cap stays (Decisions for Forge 3). Contest locks are not
    capped (33 contests by one owner is a pinned case).
 3. `GET /admission/{hotkey}` stays public and gets cheap, not authenticated or cached: four
    in-repo clients (the miner, the coldkey CLI, the operator tool, the proof script) call it unsigned
@@ -279,8 +283,8 @@ needs an operator. Four mechanisms, each in its own commit, in this order.
    is about 4.2 KB fixed plus 0.234 KB per roster entry plus 1.1 KB per chunk plus 1.0 KB for the receipt,
    so about 10 KB at 16 miners and 13 KB at 32 miners with one-chunk deltas; a round is 335 beacons, about
    16.75 minutes; custody lives to its horizon, about 10 hours or 36 rounds. **With the rotation of point 4
-   (records leave at their horizon) the steady state is 16 miners × 36 rounds × 10 KB = 5.8 MB, 48 % of the
-   budget; at 32 miners it is 15 MB, 125 %, so a run of 32 miners needs the early release of point 3.** A
+   (records leave at their horizon) the steady state is 16 miners × 36 rounds × 10 KB = 5.8 MB, 46 % of the
+   12 MiB budget; at 32 miners it is 15 MB, 119 %, so a run of 32 miners needs the early release of point 3.** A
    2 GiB delta (512 chunks) is about 580 KB per record.
 3. **Release is automatic (B, D).** The relay learns what the master settled from a public, read-only,
    coordinator-signed `RelaySettlementView` (B) and feeds the existing `settlement` callback; no admin
@@ -293,14 +297,21 @@ needs an operator. Four mechanisms, each in its own commit, in this order.
    refuses before vesting, dispute closure and the epoch grace) for each that is due. A grant is thus
    released a round or two after its finality instead of at its horizon, and the steady state at 32 miners
    is about three rounds of records (1.2 MB). `POST .../admin/relay/{grant}/release` stays for the operator.
-4. **Rotation by age, and pruning (C).** `collect()` runs from a periodic task in the relay. A pin whose
-   horizon is past by the epoch grace (100 beacons) with no extension is **lapsed**: the signed promise
-   has ended (a retrieval is only valid until `min(requested + 10, horizon)` and an extension only before the
-   horizon, so nothing can use the bytes any more), and the object is deleted and the record pruned like a
-   released one, with no release. A round that closes without a reward never settles, so its grants are
-   never released; age is what frees them. Spent records are pruned only when no live record or in-flight
-   publication needs the same object. This changes the earlier rule "bytes stay pinned until a release":
-   after the signed horizon plus the grace the relay owes nothing.
+4. **Rotation by age, and pruning (C), never under an open dispute (D54).** `collect()` runs from a
+   periodic task in the relay. A pin whose horizon is past by the epoch grace (100 beacons) with no
+   extension is **lapsed**: the signed promise has ended (a retrieval is only valid until `min(requested +
+   10, horizon)` and an extension only before the horizon), and the object is deleted and the record pruned
+   like a released one, with no release. **No custody is destroyed or rotated while a dispute references it:**
+   a pin whose last extension names dispute ids (`pin.disputes` not empty) does not lapse; its expiry is
+   suspended and resumes when the master releases the grant at the dispute's close (which clears the list).
+   The master keeps such custody alive: its lifecycle task (point 3) **extends** a grant whose round has an
+   unresolved dispute before the horizon, repeatedly, until the dispute closes by resolution or by the general
+   exclusion exit of ADR 0011; this ADR does not define that exit. A round that closes without a reward never
+   settles, so its grants are never released; age frees them once no dispute references them. Spent records are
+   pruned only when no live record or in-flight publication needs the same object. This changes the earlier
+   rule "bytes stay pinned until a release": after the signed horizon plus the grace, and with no dispute
+   referencing it, the relay owes nothing. Test: a dispute open at the horizon keeps the custody; the release at
+   its close deletes it.
 5. **Runbook (docs).** Alarm: `journal_fill > 0.8` on `/readyz` or the log line. First check that the
    master's release task runs (`relay-release` records appear one or two rounds after finality). If it
    does and the fill still rises, the run is larger than the journal: add a relay to the signed registry
@@ -310,9 +321,7 @@ needs an operator. Four mechanisms, each in its own commit, in this order.
    meaning); spreading assignments (production has one relay [A], and `assignment_policy` is a literal
    pinned in nine places); embedding the settlement fields in `CustodyRelease` (smaller, but removes the
    cross-check against the master's current record); keeping lapsed bytes pinned for ever (it is what makes
-   an unattended relay fill up). Not done: automatic **extension** of custody while a dispute is open
-   (still an operator action, `POST .../admin/relay/{grant}/extend`); an unattended run that has an open
-   dispute at the horizon loses that custody.
+   an unattended relay fill up). Not done: a closure for a dispute nobody can decide (ADR 0011's exit).
 
 ### Part 7. Shadow maturity is failure-isolated (F6, CL-14)
 
