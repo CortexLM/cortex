@@ -389,6 +389,14 @@ def mutated(genuine, entry):
     elif name == "extended-header-claim":  # a header of `type` that claims `claim` bytes of records
         claim = b"\x80" + entry["claim"].to_bytes(11, "big")
         return header("claim", entry["type"].encode(), claim) + genuine
+    elif name == "trace-content":
+        body = edit(body, "trace.json", lambda d: entry["text"].encode())
+        recompute = True
+    elif name == "swap-traces":  # each rank carries the other rank's (valid) trace
+        traces = {n: d for n, d, k in body if n.endswith("trace.json")}
+        other = {"rank-0/trace.json": "rank-1/trace.json", "rank-1/trace.json": "rank-0/trace.json"}
+        body = [(n, traces[other[n]] if n in other else d, k) for n, d, k in body]
+        recompute = True
     elif name == "deep-complete":
         return encode(body + [("COMPLETE", nested(entry["depth"]), "file")])
     elif name == "deep-environment":

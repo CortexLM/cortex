@@ -86,6 +86,8 @@ Everything a host sends is bytes to check, never a statement to believe
   `OverflowError`) fails the attempt and the next host runs the job again; nobody is quarantined for
   a cause that may be ours.
 - A probe or an image pull that prints more than 1 MiB refuses the host the same way.
+- A `trace.json` that the audit reader would refuse (not a list of trace entries, nested too deep, or
+  an entry that names another rank) is no trace: the attempt fails and nothing is published.
 - When no host can serve the job, `launch` raises a plain `IslandFailure`: "cuda executor found
   no host able to run the job: ..." when every host is quarantined or unavailable, "cuda executor
   gave up: ..." after `max_attempts` failed attempts, and `Aborted` (a subclass) when the job

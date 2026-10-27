@@ -1180,6 +1180,20 @@ def test_read_result_never_accepts_a_cut_or_foreign_stream(
             read(executor, tmp_path / name, raw)
 
 
+def test_check_rank_refuses_a_trace_over_the_budget_of_the_audit_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hypertrain.auditor import island_bisect
+
+    monkeypatch.setattr(island_bisect, "TRACE_BYTES", 8)
+    rank = tmp_path / "rank-0"
+    rank.mkdir()
+    (rank / "summary.json").write_bytes(b'{"backend": "cuda"}')
+    (rank / "trace.json").write_bytes(b"[" + b" " * 16 + b"]")  # a JSON list, over the budget
+    with pytest.raises(ce.IslandFailure, match="requested trace is absent or malformed"):
+        ce._check_rank(rank, trace=True)
+
+
 # -- documents a host wrote --------------------------------------------------------------------
 
 

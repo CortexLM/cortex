@@ -53,6 +53,12 @@
   See `docs/adr/0007-sm-counts-per-arch.md` at the monorepo root.
 
 ### Fixed
+- Generic CUDA executor: bytes a host writes can no longer leave `Executor.launch` as
+  `RecursionError`, `MemoryError` or `OverflowError`. A probe that does not parse or exceeds a bound,
+  a result whose metadata nests deeper than 8 levels and a tar whose extended header asks for more
+  than 1 MiB quarantine the host and the next one serves the job; any other bad result fails the
+  attempt, and a `trace.json` that the audit reader would refuse is no longer published. See
+  `docs/cuda-executor.md` and `docs/adr/0011-audit-integrity.md` at the monorepo root.
 - A dispute that nobody can decide no longer freezes finality and round opening for its whole
   absolute horizon. On the next beacon push the server closes it as `INFRASTRUCTURE` without a
   loser (the verdict and its exclusion stand, the contest bond returns in full, nothing is

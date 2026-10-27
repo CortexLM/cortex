@@ -1081,9 +1081,22 @@ def _check_rank(rank: Path, trace: bool) -> None:
     if json.loads((rank / "summary.json").read_bytes())["backend"] != "cuda":
         raise IslandFailure("rank summary is not a CUDA publication")
     if trace:
-        recorded = rank / "trace.json"
-        if not recorded.is_file() or not isinstance(json.loads(recorded.read_bytes()), list):
-            raise IslandFailure("requested trace is absent or malformed")
+        _check_trace(rank)
+
+
+def _check_trace(rank: Path) -> None:
+    """Accept a trace only if the reader that the audit, the store and a dispute run on it does."""
+    from hypertrain.auditor.bisect import RefereeError
+    from hypertrain.auditor.island_bisect import IslandParty
+
+    if not (rank / "trace.json").is_file():
+        raise IslandFailure("requested trace is absent or malformed")
+    try:
+        entries = IslandParty.read_trace(rank.parent, f"{rank.name}/trace.json")
+    except (RefereeError, ValueError) as error:
+        raise IslandFailure("requested trace is absent or malformed") from error
+    if any(entry.rank != int(rank.name.removeprefix("rank-")) for entry in entries):
+        raise IslandFailure("requested trace names another rank")
 
 
 def _sync_tree(root: Path) -> None:

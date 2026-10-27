@@ -1150,6 +1150,39 @@ def test_host_that_floods_its_probe_or_pull_output_is_quarantined(
     assert record_of(home)["host"]["label"] == good
 
 
+# A trace.json that parses but that the audit reader (IslandParty, which the store runs on every
+# publication) refuses: the executor must refuse it first, or the job is stuck on a publication
+# that nobody can read and that a second launch hands back without asking a host.
+HOSTILE_TRACES = {
+    "list-of-numbers": ({"name": "trace-content", "text": "[1, 2, 3]"}, "absent or malformed"),
+    "list-of-empty-objects": ({"name": "trace-content", "text": "[{}]"}, "absent or malformed"),
+    "9000-levels-deep": (
+        {"name": "trace-content", "text": "[" * 9000 + "]" * 9000},
+        "absent or malformed",
+    ),
+    "each-rank-carries-the-others-trace": ({"name": "swap-traces"}, "names another rank"),
+}
+
+
+@pytest.mark.parametrize("case", HOSTILE_TRACES)
+def test_a_trace_the_audit_reader_refuses_is_never_published(make_pool, canned, tmp_path, case):
+    from hypertrain.auditor.island_bisect import IslandParty
+
+    mutation, cause = HOSTILE_TRACES[case]
+    evil, good = hostile_and_healthy(canned)
+    pool = make_pool(labels=("a", "b"))
+    pool.toolbox.scenario.global_runs({"mode": "mutate", **mutation}, {"mode": "ok"})
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home, "audit")
+
+    (failed,) = journal_of(pool, "exec_attempt_failed")
+    assert failed["label"] == evil and re.search(cause, failed["reason"])
+    assert journal_of(pool, "exec_host_refused") == []  # a bad result is not a bad host
+    assert record_of(home)["host"]["label"] == good
+    # the oracle: what the store and the audit worker will read the publication with
+    IslandParty.published("5FakeHotkeyForDispatch", canned.job, home / "published")
+
+
 OOM = {"mode": "exit", "code": 1, "stderr": "CUDA out of memory"}
 
 
@@ -1821,6 +1854,7 @@ def test_resume_asks_for_a_trace_only_when_the_launch_wants_one(make_pool, canne
     "damage",
     [
         pytest.param(b'{"events": []}', id="json-but-not-a-list"),
+        pytest.param(b"[1, 2, 3]", id="a-list-the-audit-reader-refuses"),
         pytest.param(b"not json", id="not-json"),
         pytest.param(None, id="missing"),
     ],
