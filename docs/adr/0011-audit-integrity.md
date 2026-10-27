@@ -22,6 +22,7 @@
 4. QUAL-01, QUAL-02: host and image binding of the CUDA qualification.
 5. AUD-06: a roster member that never commits.
 6. EXE-01: host-controlled bytes cannot crash the CUDA executor.
+7. DSP-03: one lock order for the dispute long poll.
 
 ## Part 1: disputes that nobody can decide (DSP-01)
 
@@ -783,3 +784,78 @@ breaker bounds the attempt-based one).
 `challenge/store.py:4249-4262,6897-7336`; `protocol/jcs.py:23`; CPython 3.12.15 `tarfile.py:1461`;
 `docs/adr/0008-generic-cuda-executor.md` section 4; Lens red team B `rtB_executor_host_attacks.py`
 X1-X3 (5 passed in 2.55 s: they assert the bug), 2026-10-27 [A].
+
+## Part 7: one lock order for the dispute long poll (DSP-03, F5)
+
+- Lens C2 finding DSP-03 (BLOQUANT) and Lens C1 v3d F5, with Principal D49. Nothing here changes a
+  manifest, a wire format, a protocol constant, a stored record or `implementation_hash`
+  (`disputes_v2.py` is not one of its inputs). Edits `challenge/disputes_v2.py` only.
+
+### Context
+
+- Two locks meet in `DisputesV2`: the escrow mutex, which is `ChallengeStore._lock` once hosted
+  (`store.py:2586`), and `self.condition`, the long-poll condition. [V]
+- `events()` took the condition and, inside it, the mutex: `wait_for(lambda: bool(available()))`
+  evaluates `available()` with the condition held, and `available()` reads the event table under
+  the mutex. Every mutator takes the mutex first (`escrow.tx()`, or the store's `_tx` around it)
+  and calls `notify()` before it commits (`open`, `post`, `state_request`, `reassign`, `timeout`,
+  `exclude`, `resolve`), which takes the condition. Condition then mutex on one side, mutex then
+  condition on the other: a classic ABBA. [V]
+- The hosted callers already call `notify()` again after their own commit (`push_beacon`, the
+  accept route, the referee and rollback routes), but that cannot help: the first notification of
+  the same mutator is the one that blocks, with the store lock held, and every other route of the
+  store waits behind that lock. [V]
+- Reproduced on the tree before this change: a mutator inside a transaction waits for the condition that a
+  long poll holds while it waits for the mutator's lock; both threads were still alive after
+  10 s (`test_a_mutator_that_notifies_under_the_store_lock_does_not_deadlock_a_parked_poller`). [V]
+
+### Decision
+
+1. **One order, outermost first: the store lock (`escrow.mutex`), then `DisputesV2.condition`.**
+   The condition is a leaf: it guards one integer (`_beats`) and nothing is taken while it is held.
+   The order is written in the class docstring.
+2. **`events()` does not read inside the condition.** It reads `_beats`, reads the event table under
+   the mutex alone, and parks on the condition until `_beats` moves; the counter is read before the
+   table so that a notification between the two is not lost. `notify()` bumps `_beats` under the
+   condition. A long poll is therefore never between the two locks, and a mutator may notify while
+   it holds the store lock: the notification takes the leaf and never waits for anybody.
+3. **Notifying under the store lock is allowed, not required.** Hosted callers keep notifying after
+   their commit (a woken poller then finds the committed row at once, and the other processes
+   are told through `_notify_processes_v2`); a poller woken early finds the mutex taken, waits
+   for the commit and reads the committed table. A rolled-back transaction costs one spurious
+   wake-up.
+4. **A debug assertion detects an inversion.** Under `__debug__` the mutex of the escrow is wrapped
+   (`_OrderChecked`): a thread that holds the condition (`_leaf()` is the only way in) and asks for
+   the mutex fails with `AssertionError("lock order inverted ...")` instead of deadlocking against
+   the next mutator. It sees every acquisition made through `escrow.mutex` (`escrow.tx()` and
+   `events()`); it cannot see the store taking `_lock` directly, which is not a place that holds the
+   condition.
+
+### Consequences
+
+- The long poll can no longer block the store: a store route that waits for `_lock` waits for
+  another route's transaction, never for a poller.
+- A poller that wakes finds `_beats` moved and reads the table once more; a poller that times out
+  returns what the table holds, as before. `timeout=0` reads once.
+- The assertion is a development aid: `python -O` removes it. The structure (leaf condition) is
+  what prevents the deadlock; the assertion is what tells the next editor who breaks it.
+
+### Rejected alternatives
+
+1. **Deferring every `notify()` to after the outermost commit** (D49 as first worded): needs a
+   commit hook in the store's `_tx` and in standalone use of `EscrowV2.tx`; the hosted callers
+   already re-notify after commit, and the leaf order makes an early notification harmless.
+2. **Holding the store lock for the whole wait in `events()`:** blocks every route for up to
+   30 s per poller.
+3. **Releasing the condition around `available()` inside `wait_for`:** the predicate runs with the
+   lock held by construction; releasing it from the predicate is the lost-wakeup bug again.
+4. **Polling the table on a timer:** wall-clock decides when an event is seen; the counter keeps
+   the wake-up exact and costs one integer.
+5. **A global lock hierarchy checker:** two locks in one class do not justify a framework.
+
+### Not verified
+
+- A process-level run of several long pollers against a busy store; only two threads and the
+  fixture's locks were exercised. [?]
+- F4 (a lock id named like a dispute id) is the escrow-relay lot's and was not touched. Both lots
+  edit `disputes_v2.py`; this change keeps to the constructor, `notify`, `events` and one class.
