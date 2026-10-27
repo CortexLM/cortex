@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import getpass
 import json
 import os
@@ -485,6 +486,35 @@ def test_write_files_writes_private_files(tmp_path: Path) -> None:
     modes = {p.name: p.stat().st_mode & 0o777 for p in path.parent.glob("attestation.*")}
     assert modes == {host_attest.ATTESTATION: 0o600, host_attest.SIGNATURE: 0o600}
     assert (path.parent / host_attest.SIGNATURE).read_bytes() == b"signature"
+
+
+@pytest.mark.parametrize("failing", ["create", "publish"])
+def test_write_files_leaves_nothing_when_the_second_file_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    # Given: a rescue directory, and a disk that refuses the second of the two files.
+    [path, _] = unattested(tmp_path)
+    before = sorted(p.name for p in path.parent.iterdir())
+    real_open, real_link = os.open, os.link
+
+    def full_disk_for_the_signature(file: Any, *args: Any, **kwargs: Any) -> int:
+        if failing == "create" and host_attest.SIGNATURE in os.fspath(file):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_open(file, *args, **kwargs)
+
+    def no_link_for_the_signature(source: Any, destination: Any, **kwargs: Any) -> None:
+        if failing == "publish" and os.fspath(destination).endswith(host_attest.SIGNATURE):
+            raise OSError(errno.EPERM, "Operation not permitted")
+        real_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "open", full_disk_for_the_signature)
+    monkeypatch.setattr(os, "link", no_link_for_the_signature)
+    # When
+    with pytest.raises(OSError) as refused:
+        host_attest.write_files(path, b"statement", b"signature")
+    # Then: neither file exists and no temporary file is left; the error is the disk's own.
+    assert refused.value.errno in (errno.ENOSPC, errno.EPERM)
+    assert sorted(p.name for p in path.parent.iterdir()) == before
 
 
 GOOD_ROWS = f"{GPU_A}, 595.84\n{GPU_B}, 595.84\n"

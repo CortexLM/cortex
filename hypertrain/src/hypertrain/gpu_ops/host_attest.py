@@ -257,15 +257,30 @@ def attest(
 
 def write_files(result: Path, raw: bytes, signature: bytes) -> None:
     """Create both files beside result.json, never replacing one: a container can plant either
-    in its output directory, and a planted file is a reason to investigate, not to overwrite."""
-    created: list[Path] = []
+    in its output directory, and a planted file is a reason to investigate, not to overwrite.
+
+    Each file is written under a temporary name and then linked to its own: link() refuses an
+    existing name, a symlink included. If anything fails, what this call created is removed, so
+    either both files exist or the directory is as it was. Only a crash between the two links
+    can leave the statement without its signature."""
+    staged: list[tuple[Path, Path]] = []
+    published: list[Path] = []
     try:
         for name, data in ((ATTESTATION, raw), (SIGNATURE, signature)):
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-            with os.fdopen(os.open(result.parent / name, flags, 0o600), "wb") as file:
-                created.append(result.parent / name)
+            descriptor, temporary = tempfile.mkstemp(prefix=f".{name}.", dir=result.parent)
+            staged.append((Path(temporary), result.parent / name))
+            with os.fdopen(descriptor, "wb") as file:
                 file.write(data)
-    except FileExistsError as exc:
-        for path in created:
-            path.unlink()
-        raise Reject("qualification_attestation_exists") from exc
+        for temporary_path, final in staged:
+            try:
+                os.link(temporary_path, final)
+            except FileExistsError as exc:
+                raise Reject("qualification_attestation_exists") from exc
+            published.append(final)
+    except BaseException:
+        for final in published:
+            final.unlink(missing_ok=True)
+        raise
+    finally:
+        for temporary_path, _ in staged:
+            temporary_path.unlink(missing_ok=True)
