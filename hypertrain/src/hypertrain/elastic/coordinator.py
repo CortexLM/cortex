@@ -168,8 +168,12 @@ class Coordinator:
         self._shards: dict[int, _Shard] = {}
         self._departures: list[Departure] = []
         self._penalties: Counter[str] = Counter()
+        # Retry answers, kept for the round they were given in and the round after it, so the
+        # memory of a long run stays bounded by two rounds.
         self._left: dict[int, tuple[tuple[str, str], Departure]] = {}
+        self._left_before: dict[int, tuple[tuple[str, str], Departure]] = {}
         self._accepted: dict[str, tuple[int, int, str]] = {}  # key -> (shard, step, member)
+        self._accepted_before: dict[str, tuple[int, int, str]] = {}
         self._progress: dict[str, tuple[int, bool]] = {}  # member -> (window start, renewed)
 
     # ---- rounds ----
@@ -209,6 +213,8 @@ class Coordinator:
         closed = self.settle() if self._shards else None
         self.round = units[0].round
         self._shards = {u.shard: _Shard(u) for u in sorted(units, key=lambda u: u.shard)}
+        self._left_before, self._left = self._left, {}
+        self._accepted_before, self._accepted = self._accepted, {}
         self._departures = []
         self._penalties = Counter()
         self._sweep()
@@ -246,14 +252,17 @@ class Coordinator:
 
     def leave(self, signed: SignedLeave) -> Departure:
         """Release the member's shards now. A leave already accepted under the same lease is
-        answered again with its departure, so a retry after a lost answer is safe."""
+        answered again with its departure, in its own round and the next, so a retry after a
+        lost answer is safe."""
         self._sweep()
         if signed.notice.run_id != self.run_id:  # cheap checks before the signature
             raise NoticeError(f"leave notice for run {signed.notice.run_id}")
         notice = verify_leave(signed)
-        done = self._left.get(notice.lease)
+        done = self._left.get(notice.lease) or self._left_before.get(notice.lease)
         if done is not None and done[0] == (notice.member, notice.signer):
             return done[1]
+        if len(notice.heads) > len(self._shards):  # the notice is kept as evidence
+            raise NoticeError("leave notice names more heads than the round has shards")
         m = self.membership.check(notice.member, notice.lease)
         if notice.signer != m.signer:
             raise NoticeError("leave notice signed by a key the member did not register")
@@ -269,10 +278,10 @@ class Coordinator:
 
     def commit(self, member: str, token: int, shard: int, key: str) -> Accepted:
         """Accept `key` as the new head of `shard`. A link its member had accepted before is
-        acknowledged again without new credit, even after that lease or round ended, so a
-        retry after a lost answer is safe."""
+        acknowledged again without new credit, even after that lease ended or its round closed
+        (for one more round), so a retry after a lost answer is safe."""
         self._sweep()
-        done = self._accepted.get(key)
+        done = self._accepted.get(key) or self._accepted_before.get(key)
         if done is not None and (done[0], done[2]) == (shard, member):
             return Accepted(shard, key, done[1], True)
         m = self.membership.check(member, token)

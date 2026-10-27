@@ -162,9 +162,10 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
      notice and the flush decision already taken.
    - The leave is `JCS(LeaveNotice{version, run_id, member, signer, lease, reason,
      provider_time, heads})` under domain `hypertrain/elastic-leave/1|`, signed by the host key
-     the member registered at join (`protocol.server_keys.check_sig`). `heads` (at most 1,024)
-     and `provider_time` are evidence: the verified notice is kept on the member's `NOTICE`
-     departure and never trusted over the coordinator's own heads.
+     the member registered at join (`protocol.server_keys.check_sig`). `heads` (at most 1,024,
+     and no more than the round has shards) and `provider_time` are evidence: the verified
+     notice is kept on the member's `NOTICE` departure and never trusted over the coordinator's
+     own heads.
    - A host without a notice is detected by lease expiry or by the progress deadline.
 6. **Coordinator and settlement** (`coordinator.py`).
    - Every mutating entry point (`open_round`, `join`, `heartbeat`, `leave`, `tick`, `commit`)
@@ -172,9 +173,11 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
      reads.
    - A shard has at most one holder, a (member, token) pair.
    - Retries are idempotent. A commit of a link its member had accepted is answered again
-     without new credit, before any lease check and across round boundaries, and a leave
-     already accepted under the same lease is answered with its departure. A retry after a lost
-     answer is therefore safe.
+     without new credit, before any lease check, and a leave already accepted under the same
+     lease is answered with its departure. A retry after a lost answer is therefore safe. Both
+     answers are kept for the round they were given in and the round after it, then dropped:
+     the memory of a long run is bounded by two rounds, and a retry two rounds late meets the
+     lease checks and is refused.
    - Credit is the steps each accepted link adds, paid to the owner of the member that produced
      it, so an evicted miner keeps all it had accepted.
    - Only a link that fails the audit penalises its producer, whose member is revoked.
@@ -456,6 +459,13 @@ step timeout and then the mutation check, on a 4-vCPU runner.
     covered by review only;
   - a member killed repeatedly before it completes a link loses its shard within about two
     progress windows, by design and without penalty;
+  - within a round the coordinator keeps one departure per exit, with the leave notice it
+    carried, and it does not rate-limit joins; a flood of joins and leaves by an admitted key
+    is bounded by the wiring's request limits, not by this library. A notice names at most as
+    many heads as the round has shards (Lens measured 520 kB for one at 1,024 heads), and what
+    is kept across rounds is bounded by two rounds [V
+    `test_a_leave_names_no_more_heads_than_the_round_has_shards`,
+    `test_the_leaves_kept_do_not_grow_with_the_rounds`];
   - the coordinator's heads, credits, links, owners and revocations live in memory: only the
     token mark survives a restart, and rebuilding the rest is the wiring batch's work, for
     which the API has no restore call yet;

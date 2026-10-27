@@ -434,16 +434,46 @@ MUTANTS = (
     Mutant(
         "a retry after its lease ended is refused",
         SRC + "coordinator.py",
-        "        done = self._accepted.get(key)\n",
-        "        self.membership.check(member, token)\n        done = self._accepted.get(key)\n",
+        "        done = self._accepted.get(key) or self._accepted_before.get(key)\n",
+        "        self.membership.check(member, token)\n"
+        "        done = self._accepted.get(key) or self._accepted_before.get(key)\n",
         "test_coordinator.py::test_a_retried_commit_is_acknowledged_after_its_lease_and_round_ended",
     ),
     Mutant(
         "accepted links forgotten at a round boundary",
         SRC + "coordinator.py",
         "        self._departures = []\n",
-        "        self._departures = []\n        self._accepted.clear()\n",
+        "        self._departures = []\n        self._accepted_before.clear()\n",
         "test_coordinator.py::test_a_retried_commit_is_acknowledged_after_its_lease_and_round_ended",
+    ),
+    Mutant(
+        "accepted links never forgotten",
+        SRC + "coordinator.py",
+        "self._accepted_before, self._accepted = self._accepted, {}",
+        "self._accepted_before, self._accepted = {**self._accepted_before, **self._accepted}, {}",
+        "test_coordinator.py::test_a_retry_is_answered_one_round_later_and_no_longer",
+    ),
+    Mutant(
+        "accepted leaves never forgotten",
+        SRC + "coordinator.py",
+        "self._left_before, self._left = self._left, {}",
+        "self._left_before, self._left = {**self._left_before, **self._left}, {}",
+        "test_coordinator.py::test_a_retry_is_answered_one_round_later_and_no_longer",
+    ),
+    Mutant(
+        "a leave notice is kept for ever beside the ledger",
+        SRC + "coordinator.py",
+        "        self._left[notice.lease] = ((m.id, m.signer), departure)\n",
+        "        self._left[notice.lease] = ((m.id, m.signer), departure)\n"
+        '        self.__dict__.setdefault("_all", []).append(notice)\n',
+        "test_coordinator.py::test_the_leaves_kept_do_not_grow_with_the_rounds",
+    ),
+    Mutant(
+        "a leave is answered only in its own round",
+        SRC + "coordinator.py",
+        "done = self._left.get(notice.lease) or self._left_before.get(notice.lease)",
+        "done = self._left.get(notice.lease)",
+        "test_coordinator.py::test_a_retry_is_answered_one_round_later_and_no_longer",
     ),
     Mutant(
         "accepted work dropped at a departure",
@@ -610,6 +640,34 @@ MUTANTS = (
         "if r.status_code == 401:",
         "if False:",
         "test_notice.py::test_an_expired_session_is_renewed_once",
+    ),
+    Mutant(
+        "a leave names as many heads as it likes",
+        SRC + "coordinator.py",
+        "        if len(notice.heads) > len(self._shards):"
+        "  # the notice is kept as evidence\n"
+        '            raise NoticeError("leave notice names more heads than the round has'
+        ' shards")\n',
+        "",
+        "test_coordinator.py::test_a_leave_names_no_more_heads_than_the_round_has_shards",
+    ),
+    Mutant(
+        "the heads bound refuses the retry of an accepted leave",
+        SRC + "coordinator.py",
+        "        notice = verify_leave(signed)\n"
+        "        done = self._left.get(notice.lease) or self._left_before.get(notice.lease)\n"
+        "        if done is not None and done[0] == (notice.member, notice.signer):\n"
+        "            return done[1]\n"
+        "        if len(notice.heads) > len(self._shards):",
+        "        notice = verify_leave(signed)\n        if len(notice.heads) > len(self._shards):",
+        "test_coordinator.py::test_a_retried_leave_is_answered_even_when_the_next_round_is_smaller",
+    ),
+    Mutant(
+        "another member's retry of a key is acknowledged",
+        SRC + "coordinator.py",
+        "        if done is not None and (done[0], done[2]) == (shard, member):\n",
+        "        if done is not None and done[0] == shard:\n",
+        "test_coordinator.py::test_another_member_cannot_have_a_link_it_did_not_produce_acknowledged",
     ),
     Mutant(
         "a lapse is penalised",

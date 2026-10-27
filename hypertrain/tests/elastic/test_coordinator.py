@@ -1,5 +1,6 @@
 """Coordinator: fenced holders, compare-and-set heads, idempotent retries, credit and penalties."""
 
+import gc
 import hashlib
 from collections.abc import Callable
 from pathlib import Path
@@ -10,7 +11,13 @@ from hypertrain.elastic.checkpoint import CheckpointError, CheckpointManifest, W
 from hypertrain.elastic.clock import FakeClock
 from hypertrain.elastic.coordinator import Coordinator, CoordinatorError, Exit, Holder
 from hypertrain.elastic.membership import Lease, LeaseError
-from hypertrain.elastic.notice import LeaveNotice, NoticeError, SignedLeave, sign_leave
+from hypertrain.elastic.notice import (
+    LeaveNotice,
+    NoticeError,
+    ShardHead,
+    SignedLeave,
+    sign_leave,
+)
 from hypertrain.elastic.store import MemoryCheckpointStore
 from hypertrain.elastic.tokens import LocalTokenLog, MemoryTokenLog, TokenLog, TokenLogError
 from hypertrain.protocol.keys import Keypair
@@ -486,3 +493,75 @@ def test_a_second_coordinator_does_not_start_on_a_token_log_that_is_held(tmp_pat
     assert first.membership.get("a") is None  # the first one is untouched and still grants
     first.join("a", "owner-a", KEYS["a"].ss58)
     assert LocalTokenLog.read(path) == 1
+
+
+def test_a_retry_is_answered_one_round_later_and_no_longer() -> None:
+    _, coord, (unit,) = setup()
+    a = join(coord, "a")
+    k6 = link(coord, unit, None, 6, a)
+    coord.commit("a", a.token, 0, k6)
+    signed = sign_leave(notice(a, KEYS["a"]), KEYS["a"])
+    departure = coord.leave(signed)
+    b = join(coord, "b")
+    next_unit = WorkUnit(RUN, POLICY, 1, 0, unit.base, 6)
+    coord.open_round([next_unit])
+    assert coord.commit("a", a.token, 0, k6).duplicate  # the round after: still answered
+    assert coord.leave(signed) == departure
+    coord.commit("b", b.token, 0, link(coord, next_unit, None, 6, b))
+    coord.open_round([WorkUnit(RUN, POLICY, 2, 0, unit.base, 6)])
+    for retry in (lambda: coord.commit("a", a.token, 0, k6), lambda: coord.leave(signed)):
+        with pytest.raises(LeaseError) as e:  # two rounds later: the ledgers have moved on
+            retry()
+        assert e.value.code == "LEFT"
+
+
+def test_the_leaves_kept_do_not_grow_with_the_rounds() -> None:
+    _, coord, (unit,) = setup()
+    for r in range(20):  # one leave notice a round, each carrying its evidence
+        this = WorkUnit(RUN, POLICY, r, 0, unit.base, 6)
+        if r:
+            coord.open_round([this])
+        a = join(coord, "a")
+        coord.commit("a", a.token, 0, link(coord, this, None, 6, a))
+        coord.leave(sign_leave(notice(a, KEYS["a"]), KEYS["a"]))
+    gc.collect()
+    kept = sum(isinstance(o, LeaveNotice) for o in gc.get_objects())
+    assert kept <= 3  # the last two rounds' (the second is the retry window) and the loop's own
+
+
+def test_a_leave_names_no_more_heads_than_the_round_has_shards() -> None:
+    _, coord, _ = setup(shards=2)
+    a = join(coord, "a")
+    head = ShardHead(shard=0, head=None)
+    flood = notice(a, KEYS["a"]).model_copy(update={"heads": [head] * 3})
+    with pytest.raises(NoticeError):
+        coord.leave(sign_leave(flood, KEYS["a"]))
+    assert coord.holder(0) == Holder("a", a.token)  # refused before it released anything
+    full = notice(a, KEYS["a"]).model_copy(update={"heads": [head, head]})
+    assert coord.leave(sign_leave(full, KEYS["a"])).notice == full
+
+
+def test_a_retried_leave_is_answered_even_when_the_next_round_is_smaller() -> None:
+    _, coord, units = setup(shards=2)
+    leases = {"a": join(coord, "a"), "b": join(coord, "b")}
+    for shard in (0, 1):  # each member completes the shard it holds
+        owner = coord.holder(shard)
+        lease = leases[owner.member]
+        coord.commit(owner.member, lease.token, shard, link(coord, units[shard], None, 6, lease))
+    heads = [ShardHead(shard=0, head=None), ShardHead(shard=1, head=None)]
+    signed = sign_leave(
+        notice(leases["a"], KEYS["a"]).model_copy(update={"heads": heads}), KEYS["a"]
+    )
+    departure = coord.leave(signed)  # two heads in a round of two shards
+    coord.open_round([WorkUnit(RUN, POLICY, 1, 0, units[0].base, 6)])  # a round of one shard
+    assert coord.leave(signed) == departure  # the retry of an accepted leave is not a new notice
+
+
+def test_another_member_cannot_have_a_link_it_did_not_produce_acknowledged() -> None:
+    _, coord, (unit,) = setup()
+    a, b = join(coord, "a"), join(coord, "b")
+    k3 = link(coord, unit, None, 3, a)
+    coord.commit("a", a.token, 0, k3)
+    with pytest.raises(CoordinatorError) as e:
+        coord.commit("b", b.token, 0, k3)  # b retries a's key: that is no retry of b's
+    assert e.value.code == "NOT_HOLDER"
