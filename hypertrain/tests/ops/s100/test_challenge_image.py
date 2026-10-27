@@ -9,8 +9,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import stat
+import sys
 
 import pytest
+
+from hypertrain.beacon.drand import QUICKNET_GENESIS, QUICKNET_PERIOD
 
 from .sandbox import (
     API,
@@ -459,6 +462,57 @@ def test_beacon_refuses_a_compose_whose_failure_budget_it_cannot_read(box, backu
     out = box.run("beacon", backup, rc=5).out
     assert "beacon cadence not reached" in out
     assert box.f.read_text() == live and box.snapshot() == before and not box.new.exists()
+
+
+UNRECOGNISED = {  # id: (the text of the deployed compose, what another file has there)
+    "interval": ('--interval, "3"', '--interval, "1"'),
+    "catch-up": ('--catch-up, "20"', '--catch-up, "7"'),
+    "interval-not-last-on-its-line": ('"3",\n       --catch-up', '"3", --catch-up'),
+}
+
+
+@pytest.mark.parametrize(("deployed", "other"), UNRECOGNISED.values(), ids=UNRECOGNISED)
+def test_beacon_refuses_a_compose_whose_cadence_it_does_not_recognise(box, backup, deployed, other):
+    # the sed knows the intervals 3 and 0.2 and the catch-ups 20, 3 and 60, each in its place: it
+    # must not overwrite another number (an operator's own) or rewrite half of a file it does not
+    # recognise; the cadence that results is checked and the file is left as it was
+    live = COMPOSE.replace(deployed, other)
+    assert live != COMPOSE
+    box.f.write_text(live)
+    before = box.snapshot()
+    out = box.run("beacon", backup, rc=5).out
+    assert "beacon cadence not reached" in out
+    assert box.f.read_text() == live and box.snapshot() == before and not box.new.exists()
+
+
+@pytest.mark.parametrize("second_of_the_round", [0, 2], ids=["first-second", "last-second"])
+def test_beacon_reports_how_many_drand_rounds_the_service_is_behind(
+    box, backup, second_of_the_round
+):
+    # a clock stopped inside drand round 1001 (QUICKNET_PERIOD s per round), the service on 994
+    stopped = QUICKNET_GENESIS + 1000 * QUICKNET_PERIOD + second_of_the_round
+    shim = box.fake / "bin" / "python3"
+    real = shim.rename(shim.with_name("python3.real"))
+    shim.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        "a = sys.argv[1:]\n"
+        'if a[:2] == ["-I", "-c"] and "time.time()" in a[2]:\n'
+        f"    time.time = lambda: {stopped}\n"
+        '    sys.argv = ["-c", *a[3:]]\n'
+        '    exec(compile(a[2], "<string>", "exec"), {"__name__": "__main__"})\n'
+        "else:\n"
+        f'    os.execv("{real}", ["{real}", *a])\n'
+    )
+    shim.chmod(0o755)
+    box.url(f"{API}/v1/beacon/latest", body='{"round": 994}')
+    assert "lag 7" in box.run("beacon", backup, mutates={BEACON}).out.splitlines()
+
+
+def test_beacon_reads_the_service_answer_with_an_isolated_interpreter(box, backup):
+    # the script runs in the directory ssh gives it: a file there must not shadow the stdlib
+    (box.root / "json.py").write_text("raise SystemExit('json.py of the working directory')\n")
+    box.run("beacon", backup, mutates={BEACON})
 
 
 # --- paper ----------------------------------------------------------------------------------

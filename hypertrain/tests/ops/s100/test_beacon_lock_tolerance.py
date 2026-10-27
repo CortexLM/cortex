@@ -10,9 +10,20 @@ the run in the root store, and the run in a child store with a lock of its own.
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
-from .beacon_model import Costs, HeadFirstPusher, simulate
+import hypertrain.beacon.push as push
+
+from .beacon_model import (
+    MEASURED,
+    TIMEOUT,
+    Costs,
+    HeadFirstPusher,
+    Relays,
+    World,
+    simulate,
+)
 from .sandbox import BEACON
 
 OFFSETS = (0.0, 0.7, 1.4, 2.1, 2.8, 3.5, 5.0, 7.0)  # where in a drand period the lock begins
@@ -97,3 +108,55 @@ def test_a_pusher_that_pushes_the_head_first_would_reopen_the_gate_within_second
         got = simulate(lock, offset=offset, layout=layout, pusher=HeadFirstPusher, **shipped)
         assert (got.exit_code, got.holes) == (0, 0), (lock, offset, got)
         assert got.final_lag <= 2 and got.gate_closed_after_lock <= 10, (lock, offset, got)
+
+
+# Imports to have in the file: `import re`, `import httpx`, `import hypertrain.beacon.push as push`,
+# `from .beacon_model import MEASURED, TIMEOUT, Costs, Relays, World, simulate`,
+# `from .sandbox import BEACON, SCRIPT_TEXT`. The `shipped` fixture is the one already in the file.
+
+POST = "/v1/admin/beacon"
+ROUND_7 = {"round": 7, "signature": "aa", "randomness": "bb"}
+
+
+@pytest.mark.parametrize(
+    "started", [9.5, 11.0], ids=["verify-ends-in-the-lock", "arrives-in-the-lock"]
+)
+def test_a_post_that_times_out_is_applied_once_the_lock_is_freed_and_the_next_get_sees_it(started):
+    # push_beacon verifies the signature before it takes the lock: a request whose verify is done
+    # while the lock is held waits for the lock, not for the lock plus a second verify. The service
+    # goes on with a request whose client gave up.
+    world = World((10.0, 28.0), MEASURED, 1e9, "root")
+    before = world.known(0.0)
+    world.now = started
+    with pytest.raises(httpx.ReadTimeout):
+        world.post(POST, ROUND_7, {})
+    assert world.now == pytest.approx(started + TIMEOUT)
+    assert world.known(27.9) == before  # the lock is still held: nothing is applied yet
+    got = world.get("/v1/beacon/latest")  # waits for the lock, then reads what it holds
+    assert got.json() == {"round": 7}
+    assert world.now == pytest.approx(28.01)
+
+
+def test_the_pusher_is_charged_for_each_relay_fetch_and_the_service_for_each_post():
+    # the latest round is fetched once and reused, each older one costs a fetch of its own, the
+    # GET is nearly free and every POST costs the service's verify
+    world = World(None, Costs(pusher=5.0, service=2.0), 1e9, "root")
+    world.now = 30.0
+    done = push.Pusher(world, Relays(world), "token", 3).tick()  # type: ignore[arg-type]
+    assert len(done["pushed"]) == 3
+    assert world.now == pytest.approx(30.0 + 5.0 + 0.01 + 2 * 5.0 + 3 * (2.0 + 0.01))
+    assert world.known(world.now) == done["latest"]  # the last POST is applied when answered
+
+
+def test_in_a_child_store_the_root_keeps_the_round_at_once_and_the_child_gets_it_after_the_lock():
+    # the run's store holds the lock: the root answers GET during it and applies a POST's round
+    # when its own verify is done, but the store that hosts the run (the gate, the seeds) waits
+    world = World((10.0, 28.0), MEASURED, 1e9, "child")
+    world.now = 11.0
+    with pytest.raises(httpx.ReadTimeout):
+        world.post(POST, ROUND_7, {})
+    assert world.known(12.3) == 7  # the root has it
+    assert world.timeline()(27.9) == world.emitted(0.0) and world.timeline()(28.0) == 7
+    world.now = 20.0
+    assert world.get("/v1/beacon/latest").json() == {"round": 7}  # not blocked by the lock
+    assert world.now == pytest.approx(20.01)

@@ -12,6 +12,7 @@ import shlex
 import stat
 import subprocess
 import tarfile
+import threading
 import time
 import uuid as uuidlib
 from pathlib import Path
@@ -2051,13 +2052,12 @@ def test_cache_directory_is_created_once_per_host_and_image(
     assert len(transport.calls) == 3
 
 
-def test_cache_directory_command_runs_for_the_ssh_user_with_a_short_limit(
+def test_cache_directory_command_runs_for_the_ssh_user_and_never_through_sudo(
     tmp_path: Path, pinned: tuple[Path, Path]
 ) -> None:
     transport = PrepareTransport()
     ask_cache(cache_executor(tmp_path, pinned, transport), tmp_path)
     assert not transport.calls[0].startswith(("sudo", "docker"))  # never root, never the daemon
-    assert 0 < transport.deadlines[0] - time.time() <= 30  # not the whole job deadline
 
 
 def test_a_named_root_is_used_as_given(tmp_path: Path, pinned: tuple[Path, Path]) -> None:
@@ -2166,9 +2166,6 @@ def test_the_directory_is_asked_for_again_only_after_an_attempt_that_failed(
     failing = attempt_twice(tmp_path / "oom", pinned, monkeypatch, {"run": ["oom"]})
     # The first container died: the directory may be what failed, so the next attempt checks it.
     assert len(failing.prepared) == 2
-    # The same when the transport gives up on the container instead of the container failing.
-    lost = attempt_twice(tmp_path / "lost", pinned, monkeypatch, {"run": ["timeout"]})
-    assert len(lost.prepared) == 2
 
 
 def test_a_cache_command_that_times_out_inside_an_attempt_loses_the_host_instead_of_falling_back(
@@ -2250,3 +2247,236 @@ def test_the_attempt_names_the_directory_in_the_container_the_record_and_the_jou
         (attempt,) = journal_of(executor, "exec_attempt")
         assert attempt["compute_cache"] is flag and records[-1]["compute_cache"] is flag
         assert (f"src={DEFAULT_DIR}" in commands[-1]) is flag
+
+
+# -- compute cache: behaviours the mutation pass found unpinned ---------------------------
+
+
+def shell_prepare(command: str, home: Path, first_on_path: Path | None = None) -> Any:
+    path = os.environ["PATH"]
+    if first_on_path is not None:
+        path = f"{first_on_path}{os.pathsep}{path}"
+    return subprocess.run(
+        ["sh", "-c", command], env={"HOME": str(home), "PATH": path}, capture_output=True, text=True
+    )
+
+
+def test_prepare_command_does_not_report_a_cache_path_that_is_a_file(tmp_path: Path) -> None:
+    leaf = tmp_path / ".cortex-cuda-executor/compute-cache" / LEAF
+    leaf.parent.mkdir(parents=True)
+    leaf.write_text("a file where the cache directory should be")
+    leaf.chmod(0o644)
+    assignment, _ = ce.cache_location(None, DIGEST)
+    done = shell_prepare(ce.prepare_command(assignment), tmp_path)
+    assert done.returncode != 0 and done.stdout == ""
+    assert stat.S_IMODE(leaf.stat().st_mode) == 0o644  # nothing was done to it after mkdir failed
+
+
+def test_prepare_command_fails_when_the_directory_cannot_be_made_private(tmp_path: Path) -> None:
+    shim, home = tmp_path / "shim", tmp_path / "home"
+    shim.mkdir()
+    home.mkdir()
+    (shim / "chmod").write_text("#!/bin/sh\necho 'chmod: Operation not permitted' >&2\nexit 1\n")
+    (shim / "chmod").chmod(0o755)
+    assignment, _ = ce.cache_location(None, DIGEST)
+    done = shell_prepare(ce.prepare_command(assignment), home, shim)
+    assert done.returncode != 0 and done.stdout == ""
+
+
+def two_hosts(
+    tmp_path: Path, pinned: tuple[Path, Path], first: Any, second: Any, root: str | None = None
+) -> ce.Executor:
+    hosts = [
+        host_data(pinned, "h1"),
+        host_data(pinned, "h2", address="gpu-2.example.com", compute_cache_dir=root),
+    ]
+    config = load_config(config_data(tmp_path, pinned, hosts=hosts))
+    return ce.Executor(config, transports={"h1": first, "h2": second})
+
+
+def ask_label(executor: ce.Executor, tmp_path: Path, label: str) -> str | None:
+    ref = SimpleNamespace(image_digest=DIGEST)
+    work = tmp_path / f"work-{label}-{time.monotonic_ns()}"
+    work.mkdir()
+    return executor._cache(label, ref, time.time() + 600, None, work)  # type: ignore[arg-type]
+
+
+def test_the_directory_is_created_on_every_host_not_only_the_first(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    first, second = PrepareTransport(), PrepareTransport()
+    executor = two_hosts(tmp_path, pinned, first, second)
+    assert ask_label(executor, tmp_path, "h1") == DEFAULT_DIR
+    assert ask_label(executor, tmp_path, "h2") == DEFAULT_DIR
+    assert (len(first.calls), len(second.calls)) == (1, 1)  # same image, two hosts, two mkdir
+
+
+def test_each_host_uses_the_cache_root_of_its_own_entry(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    named = f"/mnt/nvme/ht-cache/{LEAF}"
+    first, second = PrepareTransport(), PrepareTransport(named + "\n")
+    executor = two_hosts(tmp_path, pinned, first, second, root="/mnt/nvme/ht-cache")
+    assert ask_label(executor, tmp_path, "h1") == DEFAULT_DIR
+    assert ask_label(executor, tmp_path, "h2") == named
+    assert first.calls[0].startswith('D="$HOME/') and second.calls[0].startswith(f"D={named};")
+
+
+class FailsFirstRun(ScriptedHost):
+    """The first `docker run` raises `failure` (an exception) or exits with it (an integer).
+    Every other command is answered as by ScriptedHost."""
+
+    def __init__(self, failure: Exception | int, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.failure: Exception | int | None = failure
+
+    def run(self, command: str, **kwargs: Any) -> int:
+        if kind_of(command) == "run" and self.failure is not None:
+            failure, self.failure = self.failure, None
+            if isinstance(failure, int):
+                kwargs["stderr"].write_text("the container died\n")
+                return failure
+            raise failure
+        return super().run(command, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ce.RemoteTimeout("remote command timed out"),
+        ce.Aborted("lease cancelled"),
+        ce.AttemptFailed("result stream too large"),
+        ce.RUNNER_PROBE_FAILED,
+    ],
+    ids=["host-lost", "aborted", "attempt-failed", "probe-failed-exit"],
+)
+def test_the_directory_is_asked_for_again_after_any_run_that_failed(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, failure: Any
+) -> None:
+    stub_publication(monkeypatch)
+    host = FailsFirstRun(failure, "h1", [], [gpu(0)])
+    executor = executor_with(tmp_path, pinned, {"h1": host})
+    job = island_job(tmp_path / "job")
+    with pytest.raises(ce.IslandFailure):
+        executor._attempt("h1", 1, "audit", "b" * 64, job, tmp_path / "job", False, None)
+    assert len(host.prepared) == 1
+    executor._attempt("h1", 2, "audit", "b" * 64, job, tmp_path / "job", False, None)
+    assert len(host.prepared) == 2  # the first container died: the directory is checked again
+
+
+def test_a_failed_attempt_forgets_only_the_directory_of_its_own_host(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub_publication(monkeypatch)
+    log: list[tuple[str, str]] = []
+    first = ScriptedHost("h1", log, [gpu(0)], script={"run": ["ok", "oom"]})
+    second = ScriptedHost("h2", log, [gpu(1)])
+    executor = executor_with(tmp_path, pinned, {"h1": first, "h2": second})
+    job = island_job(tmp_path / "job")
+
+    def attempt(label: str, number: int) -> None:
+        executor._attempt(label, number, "audit", "b" * 64, job, tmp_path / "job", False, None)
+
+    attempt("h1", 1)
+    attempt("h2", 1)
+    with pytest.raises(ce.AttemptFailed, match="out of memory"):
+        attempt("h1", 2)
+    attempt("h2", 2)
+    attempt("h1", 3)
+    assert (len(first.prepared), len(second.prepared)) == (2, 1)
+
+
+def test_the_cache_directory_command_gets_exactly_thirty_seconds(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    transport = PrepareTransport()
+    executor = cache_executor(tmp_path, pinned, transport)
+    before = time.time()
+    ask_cache(executor, tmp_path)
+    after = time.time()
+    assert before + 30 <= transport.deadlines[0] <= after + 30
+
+
+def test_a_cache_directory_of_400_characters_is_mounted_and_one_more_is_refused() -> None:
+    args = (("docker",), IMAGE, NAME, "d" * 64, [uid(0)], "default")
+    longest = "/" + "a" * 399
+    assert f"type=bind,src={longest},dst=/root/.nv" in shlex.split(ce.run_command(*args, longest))
+    with pytest.raises(ValueError, match="plain words"):
+        ce.run_command(*args, longest + "a")
+
+
+@pytest.mark.parametrize("word", ["caché", "٣", "日本"], ids=["latin", "arabic-digit", "cjk"])
+def test_cache_directory_words_are_ascii(
+    tmp_path: Path, pinned: tuple[Path, Path], word: str
+) -> None:
+    with pytest.raises(ValueError, match="plain words"):
+        ce.run_command(("docker",), IMAGE, NAME, "d" * 64, [uid(0)], "default", f"/mnt/{word}")
+    with pytest.raises(ValidationError, match="plain words"):
+        load_config(
+            config_data(
+                tmp_path, pinned, hosts=[host_data(pinned, compute_cache_dir=f"/mnt/{word}")]
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        f"/home/ubuntu/{LEAF}\n",
+        f"/home/ubuntu/.cortex-cuda-executor/{LEAF}\n",
+        f"/home/ubuntu/compute-cache/{LEAF}\n",
+    ],
+    ids=["no-root", "no-compute-cache", "no-executor-directory"],
+)
+def test_a_report_of_the_right_leaf_in_the_wrong_place_is_refused(
+    tmp_path: Path, pinned: tuple[Path, Path], answer: str
+) -> None:
+    executor = cache_executor(tmp_path, pinned, PrepareTransport(answer))
+    with pytest.raises(ce.AttemptFailed, match="unexpected compute cache directory"):
+        ask_cache(executor, tmp_path)
+    assert executor._cache_dirs == {}
+
+
+def test_a_report_that_is_not_text_is_refused_like_any_other_wrong_report(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    class Binary(PrepareTransport):
+        def run(self, command: str, *, stdout: Path, stderr: Path, **_: Any) -> int:
+            stdout.write_bytes(b"\xff\xfe" + DEFAULT_DIR.encode() + b"\n")
+            stderr.write_text("")
+            return 0
+
+    executor = cache_executor(tmp_path, pinned, Binary())
+    with pytest.raises(ce.AttemptFailed, match="unexpected compute cache directory"):
+        ask_cache(executor, tmp_path)
+
+
+def test_a_cancelled_job_does_not_wait_for_the_cache_directory(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    class Watching(PrepareTransport):
+        """Stops like SshTransport does once the job's cancel event is set."""
+
+        def run(
+            self,
+            command: str,
+            *,
+            stdout: Path,
+            stderr: Path,
+            deadline: float,
+            cancel: threading.Event | None = None,
+            **_: Any,
+        ) -> int:
+            if cancel is not None and cancel.is_set():
+                raise ce.Aborted("lease cancelled")
+            return super().run(command, stdout=stdout, stderr=stderr, deadline=deadline)
+
+    cancel = threading.Event()
+    cancel.set()
+    executor = cache_executor(tmp_path, pinned, Watching())
+    work = tmp_path / "work"
+    work.mkdir()
+    ref = SimpleNamespace(image_digest=DIGEST)
+    with pytest.raises(ce.Aborted, match="lease cancelled"):
+        executor._cache("h1", ref, time.time() + 600, cancel, work)  # type: ignore[arg-type]
+    assert executor._cache_dirs == {}

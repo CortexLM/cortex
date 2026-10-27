@@ -15,9 +15,11 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -2199,3 +2201,49 @@ def test_each_host_keeps_its_cache_in_its_own_home(make_pool, canned, tmp_path):
         str(pool.home(other) / CACHE_ROOT / cache_leaf(canned)),
     ]
     assert [r["cache"] for r in run_starts(pool)] == ["cold", "cold"]  # not the first host's cache
+
+
+# -- compute cache: what the fake host promises --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("delay", "slow_run"), [("cold_start", 0), ("warm_start", 1)], ids=["cold", "warm"]
+)
+def test_the_fake_host_delays_the_run_whose_cache_has_the_named_temperature(
+    make_pool, canned, tmp_path, delay, slow_run
+):
+    pool = make_pool(labels=("a",), hosts={"a": {delay: 1.5}})
+    factory = cuda_executor.load(pool.config_path)
+    for number in (1, 2):
+        dispatch(pool, canned.stage(tmp_path / f"home{number}"), factory=factory)
+
+    runs = pool.toolbox.runs()
+    assert [r["cache"] for r in runs] == ["cold", "warm"]
+    # `start` is the container's own run_start; the delay is slept after it and before `end`.
+    assert runs[slow_run]["end"] - runs[slow_run]["start"] >= 1.5
+
+
+def test_the_fake_docker_refuses_the_cache_mounts_the_real_daemon_refuses(
+    make_pool, canned, tmp_path
+):
+    pool = make_pool(labels=("a",))
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    name = "ht-exec-0123456789abcdef"
+    command = cuda_executor.run_command(
+        ("docker",), pool.image, name, "d" * 64, uuids(0, 0), "default", str(cache)
+    )
+    argv = shlex.split(command)
+    argv[0] = str(pool.toolbox.host_bin / "docker")  # what the remote shell would find on its PATH
+    at = argv.index("--mount")
+    env = {**os.environ, "FAKE_HOST_ADDRESS": pool.address("a")}
+    refused = [
+        (("-v", f"{cache}:/root/.nv"), "supports --mount only"),
+        (("--mount", f"type=volume,src={cache},dst=/root/.nv"), "invalid mount config"),
+        (("--mount", "type=bind,dst=/root/.nv"), "invalid mount config"),
+    ]
+    for mount, message in refused:
+        done = subprocess.run(
+            [*argv[:at], *mount, *argv[at + 2 :]], input=b"", env=env, capture_output=True
+        )
+        assert done.returncode == 125 and message in done.stderr.decode(), mount

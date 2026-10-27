@@ -12,6 +12,8 @@ from __future__ import annotations
 import importlib.util
 import sys
 import threading
+import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -124,3 +126,46 @@ def test_a_beacon_round_is_accepted_while_a_remote_reference_runs(network):
 
     payload = fixture_beacon(network.now + 2)
     assert served_while_the_reference_runs(network, lambda: network.store.push_beacon(payload))
+
+
+# --- the harness itself: it must be able to pass, and a broken setup must not pass as an xfail ---
+
+
+def test_a_probe_that_does_not_need_the_lock_is_reported_served(network, monkeypatch):
+    monkeypatch.setitem(globals(), "WAIT", 5)  # an executor that is never released ends early
+    assert served_while_the_reference_runs(network, lambda: time.sleep(0.3)) is True
+    assert network.store._role_launch.release.is_set()
+
+
+def test_a_reference_that_never_reaches_the_executor_is_a_setup_error(network, monkeypatch):
+    class StopsBeforeTheLaunch(SlowExecutor):
+        def __call__(self, kind: str, job: Any, directory: Path, context: Any) -> Any:
+            def launch(job: Any, directory: Path, **options: Any) -> Any:
+                raise IslandFailure("the fake executor stops before it says it was reached")
+
+            return launch
+
+    monkeypatch.setitem(globals(), "WAIT", 2)
+    monkeypatch.setitem(globals(), "SlowExecutor", StopsBeforeTheLaunch)
+    with pytest.raises(RuntimeError) as error:
+        served_while_the_reference_runs(network, lambda: None)
+    assert "RuntimeError: the reference never reached the executor" in "".join(
+        traceback.format_exception(error.value)
+    )
+
+
+def test_the_reference_reaches_the_executor_as_a_cuda_run(network, monkeypatch):
+    seen: list[str] = []
+
+    class RecordsTheBackend(SlowExecutor):
+        def __call__(self, kind: str, job: Any, directory: Path, context: Any) -> Any:
+            def launch(job: Any, directory: Path, *, backend: str, **options: Any) -> Any:
+                seen.append(backend)
+                self.reached.set()
+                raise IslandFailure("the fake executor stops at once")
+
+            return launch
+
+    monkeypatch.setitem(globals(), "SlowExecutor", RecordsTheBackend)
+    served_while_the_reference_runs(network, lambda: None)
+    assert seen == ["cuda"]
