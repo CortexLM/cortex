@@ -331,6 +331,21 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
 8. **Not changed** [V]: `src/hypertrain/protocol/`, the golden leaf roots, the ten
    `implementation_hash` files and the store's hashed methods, the v2 admission, round, audit,
    dispute and escrow code, and the existing CI shards (`tests/elastic/` runs in its own job).
+   Nothing under `src/hypertrain` outside `elastic/` imports the package. The package imports
+   from the rest of hypertrain 18 names in 8 modules: from `data.store` `CorruptObjectError`,
+   `ObjectNotFound` and the private helpers `_check_key` and `_verified` (`storage/cas.py`,
+   `storage/offer.py` and `data/stream_store.py` import them the same way); from `protocol`
+   `envelope.EnvelopeError`, `envelope_v2.load_json`, `jcs.canonicalize`, `keys.Keypair`,
+   `keys.KeyError_`, `keys.decode_hotkey`, `messages.Hex64`, `messages.SS58`,
+   `messages_v2.U64`, `messages_v2.Identifier`, `messages_v2.Positive`, `messages_v2.WireModel`,
+   `server_keys.Sig` and `server_keys.check_sig`; and `httpx` and `pydantic` from outside
+   [V `tests/elastic/test_imports.py`]. A change to one of them can change what the package
+   accepts. The protocol goldens guard `canonicalize` (`tests/protocol`), but the manifest bytes
+   (hence every checkpoint key) and the leave message have no known-answer vector of their own,
+   and a relaxed `Identifier` passed every suite in Lens' measurement [A, review F16, not
+   addressed here]. Public wrappers for the two private helpers were not added: three other
+   modules import them as they are, and renaming them is a change to `data/store.py` outside
+   this batch.
 
 ### P1 and the v2 admission rules
 

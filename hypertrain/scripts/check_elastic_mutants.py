@@ -927,6 +927,30 @@ MUTANTS = (
         "test_coordinator.py::test_a_leave_names_no_more_heads_than_the_round_has_shards",
     ),
     Mutant(
+        "the package imports one more name from the rest of hypertrain",
+        SRC + "checkpoint.py",
+        "from hypertrain.data.store import CorruptObjectError, ObjectNotFound\n",
+        "from hypertrain.data.store import CorruptObjectError, ObjectNotFound, StoreError\n",
+        "test_imports.py::"
+        "test_the_package_imports_from_the_rest_of_hypertrain_only_what_the_adr_lists",
+    ),
+    Mutant(
+        "the package imports a sibling by a relative path",
+        SRC + "coordinator.py",
+        "from hypertrain.elastic.clock import Clock\n",
+        "from .clock import Clock\n",
+        "test_imports.py::"
+        "test_the_package_imports_from_the_rest_of_hypertrain_only_what_the_adr_lists",
+    ),
+    Mutant(
+        "a v2 module imports the library",
+        "src/hypertrain/storage/offer.py",
+        "from hypertrain.data.store import StoreError, _check_key\n",
+        "import hypertrain.elastic.clock\n"
+        "from hypertrain.data.store import StoreError, _check_key\n",
+        "test_imports.py::test_nothing_in_the_rest_of_hypertrain_imports_the_package",
+    ),
+    Mutant(
         "the heads bound refuses the retry of an accepted leave",
         SRC + "coordinator.py",
         "        notice = verify_leave(signed)\n"
