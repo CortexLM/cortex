@@ -6669,7 +6669,7 @@ class ChallengeStore:
                 preimages=leaves,
                 ef_in=ArtifactRef(sha256=start.ef_object_sha256, size=len(ef)),
                 v0=ArtifactRef(sha256=v0_hash, size=len(self.objects.get(v0_hash))),
-                created_beacon=row["created"],
+                created_beacon=now,
             )
             tried = json.loads(row["tried"]) + [env.signer]
             self._db.execute(
