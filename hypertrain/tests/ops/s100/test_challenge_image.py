@@ -355,25 +355,83 @@ def test_swap_gives_the_challenge_the_whole_30_attempt_loop_to_answer(box, backu
 # --- beacon ---------------------------------------------------------------------------------
 
 
+TARGET = ("0.2", "60", "100")  # interval, catch-up, failure budget (ADR 0012)
+
+
+def cadence(box):
+    entrypoint = box.live_yaml()["services"]["beacon"]["entrypoint"]
+    return entrypoint[9], entrypoint[11], entrypoint[13]
+
+
+def with_cadence(interval, catch_up, budget):
+    return (
+        COMPOSE.replace('--interval, "3"', f'--interval, "{interval}"')
+        .replace('--catch-up, "20"', f'--catch-up, "{catch_up}"')
+        .replace('--max-failures, "5"', f"--max-failures, {budget}")
+    )
+
+
 def test_beacon_retunes_exactly_the_pusher_and_a_second_run_is_refused(box, backup):
     out = box.run("beacon", backup, mutates={BEACON}).out
     assert "beacon: pushed round 1" in out and "lag" in out
-    retuned = (
-        COMPOSE.replace('--interval, "3"', '--interval, "0.2"')
-        .replace('--catch-up, "20"', '--catch-up, "40"')
-        .replace('--max-failures, "5"', '--max-failures, "30"')
-    )
+    retuned = with_cadence("0.2", "60", '"100"')
     assert box.f.read_text() == retuned
-    entrypoint = box.live_yaml()["services"]["beacon"]["entrypoint"]
-    assert (entrypoint[9], entrypoint[11], entrypoint[13]) == ("0.2", "40", "30")
+    assert cadence(box) == TARGET
     assert stat.S_IMODE(box.f.stat().st_mode) == 0o600
     out = box.run("beacon", backup, rc=5).out
     assert "unexpected compose change" in out
     assert box.f.read_text() == retuned and not box.new.exists()
 
 
+@pytest.mark.parametrize(
+    ("live", "changed"),
+    [
+        (("0.2", "3", '"5"'), [".11", ".13"]),
+        (("0.2", "3", '"10"'), [".11", ".13"]),  # what the previous script left on the TEST stack
+        (("0.2", "3", '"99"'), [".11", ".13"]),
+        (("0.2", "3", '"100"'), [".11"]),  # a budget at the target is not touched
+        (("0.2", "3", '"150"'), [".11"]),  # nor a higher one
+        (("0.2", "60", '"10"'), [".13"]),  # only the budget is short
+        (("3", "20", '"10"'), [".9", ".11", ".13"]),
+        (("3", "60", '"100"'), [".9"]),
+    ],
+    ids=[
+        "old-5",
+        "old-10",
+        "old-99",
+        "budget-100",
+        "budget-150",
+        "budget-only",
+        "stock-10",
+        "interval-only",
+    ],
+)
+def test_beacon_moves_a_compose_the_previous_version_or_an_operator_left_anywhere_on_the_path(
+    box, backup, live, changed
+):
+    box.f.write_text(with_cadence(*live))
+    out = box.run("beacon", backup, mutates={BEACON}).out
+    assert f"changed {sorted(f'services.beacon.entrypoint{c}' for c in changed)}" in out
+    interval, catch_up, budget = cadence(box)
+    assert (interval, catch_up) == TARGET[:2]
+    assert int(budget) == max(100, int(live[2].strip('"')))  # raised to the target, never lowered
+
+
+def test_beacon_refuses_a_compose_it_can_only_half_rewrite(box, backup):
+    # the catch-up is only rewritten where the failure budget follows it; here it does not
+    live = with_cadence("3", "20", '"5"').replace(
+        '"20", --max-failures', '"20",\n       --max-failures'
+    )
+    assert live != COMPOSE
+    box.f.write_text(live)
+    before = box.snapshot()
+    out = box.run("beacon", backup, rc=5).out
+    assert "beacon cadence not reached" in out
+    assert box.f.read_text() == live and box.snapshot() == before and not box.new.exists()
+
+
 def test_beacon_refuses_a_compose_where_the_retune_would_change_more_than_the_pusher(box, backup):
-    # the master-stub carries the same lines the sed rewrites: the diff then has 6 fields, not 3
+    # the master-stub carries the same lines the sed rewrites: the diff then has fields outside
     stub = (
         "    entrypoint:\n"
         '      [python, -m, stub, --interval, "3",\n'
@@ -390,25 +448,17 @@ def test_beacon_refuses_a_compose_where_the_retune_would_change_more_than_the_pu
     assert box.snapshot() == before and not box.new.exists()
 
 
-@pytest.mark.parametrize("failures", ['"ten"', "10", '""'], ids=["word", "bare-number", "empty"])
-def test_beacon_refuses_a_compose_whose_failure_budget_it_cannot_rewrite(box, backup, failures):
-    # the catch-up and the failure budget are rewritten as one pair: if the budget is not a quoted
-    # number the pair does not match, only the interval changes, and the diff check stops it
-    live = COMPOSE.replace('"5"]', f"{failures}]")
-    assert live != COMPOSE
+@pytest.mark.parametrize(
+    "budget", ['"ten"', "10", '""', '"1e2"'], ids=["word", "bare", "empty", "float"]
+)
+def test_beacon_refuses_a_compose_whose_failure_budget_it_cannot_read(box, backup, budget):
+    # a budget that is not a quoted whole number is not rewritten, so the target is not reached
+    live = with_cadence("3", "20", budget)
     box.f.write_text(live)
     before = box.snapshot()
     out = box.run("beacon", backup, rc=5).out
-    assert "unexpected compose change" in out
+    assert "beacon cadence not reached" in out
     assert box.f.read_text() == live and box.snapshot() == before and not box.new.exists()
-
-
-def test_beacon_raises_a_failure_budget_that_was_set_higher_than_the_pair_it_rewrites(box, backup):
-    # an operator's own budget of 12 becomes 30; the catch-up it sat next to becomes 40
-    box.f.write_text(COMPOSE.replace('"5"]', '"12"]'))
-    box.run("beacon", backup, mutates={BEACON})
-    entrypoint = box.live_yaml()["services"]["beacon"]["entrypoint"]
-    assert (entrypoint[9], entrypoint[11], entrypoint[13]) == ("0.2", "40", "30")
 
 
 # --- paper ----------------------------------------------------------------------------------

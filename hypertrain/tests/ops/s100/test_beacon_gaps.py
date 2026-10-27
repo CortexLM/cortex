@@ -13,10 +13,12 @@ WALL = beacon_gaps.GENESIS + 3 * 999 + 1  # the drand clock is at round 1000
 RUN = "ab" * 32
 
 
-def database(path: Path, rounds, admissions=()) -> Path:
+def database(path: Path, rounds, admissions=(), runs=()) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path)
     db.execute("CREATE TABLE beacon(round INTEGER PRIMARY KEY, signature TEXT, randomness TEXT)")
+    db.execute("CREATE TABLE runs(run_id TEXT PRIMARY KEY)")
+    db.executemany("INSERT INTO runs VALUES(?)", [(r,) for r in runs])
     db.executemany("INSERT INTO beacon VALUES(?, 'aa', 'bb')", [(r,) for r in rounds])
     if admissions:
         db.execute(
@@ -40,9 +42,18 @@ def test_a_complete_window_is_reported_without_gaps(tmp_path, capsys):
     code, out = run(capsys, tmp_path)
     assert code == 0
     assert out == {
-        "now": 999, "emitted": 1000, "lag": 1, "since": 1800, "first": 900,
-        "missing": [], "missing_count": 0, "stranded": [],
-    }  # fmt: skip
+        "now": 999,
+        "emitted": 1000,
+        "lag": 1,
+        "gate_open": True,
+        "since": 1800,
+        "window_start": 400,
+        "first": 900,
+        "missing": [],
+        "missing_count": 0,
+        "stale": False,
+        "stranded": [],
+    }
 
 
 def test_rounds_the_pusher_skipped_are_listed_and_the_identity_waiting_for_one_is_named(
@@ -75,18 +86,50 @@ def test_only_the_window_asked_for_counts(tmp_path, capsys):
 
 
 def test_a_child_store_is_read_when_the_run_lives_in_one(tmp_path, capsys):
-    database(tmp_path / "challenge.db", range(900, 1000))
+    database(tmp_path / "challenge.db", range(900, 1000), runs=[RUN])
     database(tmp_path / "runs" / RUN / "challenge.db", [*range(900, 950), *range(960, 1000)])
     assert run(capsys, tmp_path)[0] == 0
     code, out = run(capsys, tmp_path, "1800", RUN)
     assert code == 3 and out["missing_count"] == 10
-    assert run(capsys, tmp_path, "1800", "cd" * 32)[0] == 0  # no such child: the root store
+
+
+def test_a_run_the_root_hosts_is_read_from_the_root_and_an_unknown_one_is_refused(tmp_path, capsys):
+    database(tmp_path / "challenge.db", [*range(900, 950), *range(960, 1000)], runs=[RUN])
+    code, out = run(capsys, tmp_path, "1800", RUN)  # no child store: the root hosts it
+    assert code == 3 and out["missing_count"] == 10
+    code, err = run(capsys, tmp_path, "1800", "cd" * 32)  # a mistyped id is not read from the root
+    assert code == 4 and "does not know it" in err
+
+
+def test_a_hole_at_the_start_of_the_window_counts_when_older_rounds_exist(tmp_path, capsys):
+    # the window is rounds 900..999 (300 s); the table holds 850..899 too, then nothing until 910
+    database(tmp_path / "challenge.db", [*range(850, 900), *range(910, 1000)])
+    code, out = run(capsys, tmp_path, "300")
+    assert code == 3 and out["window_start"] == 900
+    assert out["missing"] == list(range(900, 910)) and out["first"] == 910
+    # on a database that never held older rounds the same start is just where it began
+    database(tmp_path / "fresh" / "challenge.db", range(910, 1000))
+    assert run(capsys, tmp_path / "fresh", "300")[0] == 0
+
+
+def test_a_dead_pusher_is_stale_and_a_late_one_has_the_gate_closed(tmp_path, capsys):
+    database(tmp_path / "challenge.db", range(100, 200))  # nothing for the last 800 rounds
+    code, out = run(capsys, tmp_path)
+    assert code == 3 and out["stale"] is True and out["gate_open"] is False and out["lag"] == 801
+    database(tmp_path / "late" / "challenge.db", range(900, 996))  # complete, 5 rounds behind
+    code, out = run(capsys, tmp_path / "late")
+    assert code == 0 and out["gate_open"] is False and out["lag"] == 5 and out["stale"] is False
+    database(tmp_path / "three" / "challenge.db", range(900, 998))  # lag 3: past the bound of 2
+    assert run(capsys, tmp_path / "three")[1]["gate_open"] is False
+    database(tmp_path / "edge" / "challenge.db", range(900, 999))  # lag 2: still open
+    assert run(capsys, tmp_path / "edge")[1]["gate_open"] is True
 
 
 def test_an_empty_beacon_table_is_not_a_gap(tmp_path, capsys):
     database(tmp_path / "challenge.db", [])
     code, out = run(capsys, tmp_path)
     assert code == 0 and out["first"] is None and out["now"] == 0 and out["missing_count"] == 0
+    assert out["stale"] is False
 
 
 def test_the_database_is_opened_read_only(tmp_path, capsys):
