@@ -334,6 +334,9 @@ def test_release_bond_waits_for_the_last_reward_to_vest_and_for_a_live_screen_to
     reward(world, vested=True, mature_at=50)
     with pytest.raises(AdmissionError, match="BOND_NOT_RELEASABLE"):
         world.a.release_bond(world.admission, now=49)
+    # the status says the same on both sides of the boundary
+    assert world.a.bond(world.admission, now=49)["locks"][0]["releasable"] is False  # type: ignore[index]
+    assert world.a.bond(world.admission, now=50)["locks"][0]["releasable"] is True  # type: ignore[index]
     world.a.store.db.execute(
         "UPDATE admissions_v2 SET state='ACTIVE',screen_until=200 WHERE admission_id=?",
         (world.admission,),
@@ -520,6 +523,8 @@ def test_seize_bond_suspends_strikes_and_burns_the_bond_of_a_no_show(world: Worl
     world.bond(200, operation="24" * 32)
     reward(world, vested=True, mature_at=1)  # the unvested reward the burn spared has vested
     assert world.a.bond(world.admission, now=1000)["locks"][0]["releasable"] is True  # type: ignore[index]
+    seized = world.a.lock_settlement("22" * 32)
+    assert seized.outcome == "FRAUD"
     release = EscrowRelease(
         operation_id="67" * 32,
         owner=COLD.ss58,
@@ -528,8 +533,8 @@ def test_seize_bond_suspends_strikes_and_burns_the_bond_of_a_no_show(world: Worl
         admission_id=world.admission,
         dispute_id=None,
         lock_id="22" * 32,
-        finality_hash=H,
-        closed_dispute_root=H,
+        finality_hash=seized.finality_hash,
+        closed_dispute_root=seized.closed_dispute_root,
     )
     with pytest.raises(EscrowError, match="DISPUTED_OR_UNVESTED"):
         world.a.escrow.release(release, signer=COLD.ss58, now_beacon=100)
@@ -702,10 +707,15 @@ def test_a_verdict_that_does_not_convict_the_miner_leaves_the_bond_alone(
     assert world.a.store.by_id(world.admission).state != "BANNED"
 
 
-def test_settle_fraud_refuses_a_verdict_bound_to_another_admission(world: World) -> None:
-    # Given: the pending reference names this admission but the verdict's evidence differs
+@pytest.mark.parametrize("differs", ["evidence", "coldkey"])
+def test_settle_fraud_refuses_a_verdict_bound_to_another_admission(
+    world: World, differs: str
+) -> None:
+    # Given: the pending reference names this admission but the verdict's evidence differs, or
+    # the verdict was settled for another coldkey than the admission's
     world.bond()
-    world.contest = world.contest.model_copy(update={"evidence_hash": "66" * 32})
+    if differs == "evidence":
+        world.contest = world.contest.model_copy(update={"evidence_hash": "66" * 32})
     world.a.suspend(
         HOT.ss58,
         reason="PENDING_DISPUTE",
@@ -715,6 +725,10 @@ def test_settle_fraud_refuses_a_verdict_bound_to_another_admission(world: World)
         evidence_hash="55" * 32,
     )
     world.convict(bind=False)
+    if differs == "coldkey":
+        world.a.store.db.execute(
+            "UPDATE admissions_v2 SET coldkey=? WHERE admission_id=?", (OTHER.ss58, world.admission)
+        )
     # When / Then
     with pytest.raises(AdmissionError, match="UNPROVEN_TRAINING_FRAUD"):
         world.a.settle_fraud(world.dispute_id, now=3)

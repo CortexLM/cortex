@@ -24,6 +24,8 @@ Start here: [Cortex ecosystem](ecosystem.md) and [Validator quickstart](validato
 - [ADR 0007: SM counts per CUDA architecture](adr/0007-sm-counts-per-arch.md): the (capability, SM count) table for CUDA qualification, hash consequences and the TEST-stack image swap.
 - [ADR 0008: generic CUDA executor](adr/0008-generic-cuda-executor.md): references and audit replays on any SSH + Docker GPU host, host contract, provenance record, failure model, hash consequences.
 - [ADR 0010: admission hardening](adr/0010-admission-hardening.md): rotation consent, trial expiry, the owner-signed challenge and job requests in a body envelope, dead unfunded joins and the optional per-prefix cap, the admission bond (release, seizure), the elastic epoch, hash consequences.
+- [ADR 0012: executor performance](adr/0012-executor-performance.md): the CUDA compute cache mount, the TEST beacon cadence (model, shipped values, pusher proposal) and the design for releasing the store lock during a remote reference.
+- [ADR 0013: executor results through R2](adr/0013-executor-artifacts-via-r2.md): the result tar goes to presigned part URLs instead of the ssh stream, declare/offer exchange, per-attempt keys, failure model, which result sizes fit which windows, the 8 GiB object ceiling.
 - [Hypertrain import provenance](provenance/hypertrain-import.md): commit map, byte-identity and `git log --follow` checks.
 - [Hypertrain](../hypertrain/README.md): the imported project, with its own documentation in `hypertrain/docs/`.
 - [B300 host run](b300-run.md): `run_host.sh` on an AWS p6-b300 host: steps, exit codes, results, auto-stop and the two-host comparison.

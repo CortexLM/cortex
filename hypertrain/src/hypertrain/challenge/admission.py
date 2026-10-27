@@ -1452,7 +1452,9 @@ class Admission:
         auditor, and the closures of ADR 0011 are not convictions.
 
         TRAINING_FRAUD (a referee verdict, see settle_fraud): also burns the owner's unvested
-        rewards and bans the admission (terminal; `lock` then answers LOCK_BANNED).
+        rewards, as part of slashing a residual lock (after an earlier bond-only seizure there
+        is none, and the rewards survive), and bans the admission (terminal; `lock` then
+        answers LOCK_BANNED).
         AUDIT_MISMATCH (a round-stage audit mismatch the caller has confirmed as the miner's) and
         NO_SHOW (a roster member excluded for its silence, ADR 0011 Part 8): suspend the
         admission with the seizure reason as the state reason, add one strike, and burn the bond

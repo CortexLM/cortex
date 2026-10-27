@@ -112,8 +112,9 @@
   `Admission.seize_bond(admission_id, reason, evidence_hash, now)` is the internal hook for a
   no-show (`reason="NO_SHOW"`), a confirmed round-stage audit mismatch (`"AUDIT_MISMATCH"`: also
   suspends with one strike) or a convicted miner (`"TRAINING_FRAUD"`, the only one called in this
-  tree; the other two wait for the audit lot); `Admission.release_bond` and the status key `bond`
-  serve the owner. `EscrowV2.slash` takes `burn_pending` (default: today's behaviour). ADR 0010.
+  tree by `settle_fraud`; ADR 0011 Part 8 calls the other two from the exit sweeper);
+  `Admission.release_bond` and the status key `bond` serve the owner. `EscrowV2.slash` takes
+  `burn_pending` (default: today's behaviour). ADR 0010.
 - `RotateRequest` needs the new hotkey's signature (`new_hot_sig`, own domain
   `hypertrain/rotate/2|`; `miner.admission.sign_rotation_consent`): one coldkey signature can no
   longer burn a registered hotkey that never joined (RTA-01). A new rotation is charged to
