@@ -7,6 +7,7 @@ reservation makes its effect exactly once; networks cannot promise one send.
 from __future__ import annotations
 
 import argparse
+import math
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -38,6 +39,9 @@ if TYPE_CHECKING:
     from hypertrain.miner.core import MinerConfig
 
 
+REQUEST_ROUNDS = 20  # a signed event poll lives about a minute at 3 s rounds
+
+
 class DisputeTransport(Protocol):
     def events(self, party: str, cursor: int, *, timeout: float) -> list[WatchEvent]: ...
     def acknowledge(self, ack: EventAck) -> None: ...
@@ -47,21 +51,36 @@ class DisputeTransport(Protocol):
 class HttpDisputeTransport:
     """L0 routes own role authorization. Client bounds response bytes before parsing."""
 
-    def __init__(self, client: httpx.Client, run_url: str) -> None:
-        self.client, self.url = client, run_url.rstrip("/")
+    def __init__(
+        self,
+        client: httpx.Client,
+        run_url: str,
+        key: Keypair,
+        run_id: str,
+        now: Callable[[], int],
+    ) -> None:
+        self.client, self.url, self.key, self.run_id, self.now = (
+            client,
+            run_url.rstrip("/"),
+            key,
+            run_id,
+            now,
+        )
 
     def events(self, party: str, cursor: int, *, timeout: float) -> list[WatchEvent]:
         if not 0 <= timeout <= 30:
             raise DisputeError("LONG_POLL_BOUND")
+        # The proof of being `party` is the envelope in the body: the master proxy forwards no
+        # signature header. It expires a minute (20 rounds) after the round the caller reports.
+        request = seal(
+            self.key,
+            "WatchRequest",
+            self.run_id,
+            {"party": party, "cursor": cursor, "wait_seconds": math.ceil(timeout)},
+            self.now() + REQUEST_ROUNDS,
+        )
         with self.client.stream(
-            "GET",
-            self.url + "/disputes",
-            params={
-                "party": party,
-                "cursor": cursor,
-                "timeout": timeout,
-            },
-            timeout=timeout + 5,
+            "POST", self.url + "/disputes", json=request, timeout=timeout + 5
         ) as response:
             response.raise_for_status()
             data = bytearray()

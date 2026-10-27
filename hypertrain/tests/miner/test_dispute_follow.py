@@ -186,14 +186,14 @@ def open_contest(net: Any, miner: NetworkMiner) -> str:
 def auditor_turn(net: Any, cursor: int) -> WatchEvent:
     assert ANSWERED.wait(60), "miner follower did not answer within 60s"
     ANSWERED.clear()
-    run_id = net.manifest.run_id()
-    signature = AUDITOR.sign(f"hypertrain/watch/2|{run_id}|{AUDITOR.ss58}".encode()).hex()
+    request = net.signed(
+        AUDITOR,
+        "WatchRequest",
+        {"party": AUDITOR.ss58, "cursor": cursor, "wait_seconds": 0},
+        net.now + 20,
+    )
     with SERIAL:
-        response = net.client.get(
-            net.url + "/disputes",
-            params={"party": AUDITOR.ss58, "cursor": cursor, "timeout": 0},
-            headers={"X-Dispute-Signature": signature},
-        )
+        response = net.client.post(net.url + "/disputes", json=request)
     assert response.status_code == 200, response.text
     events = [WatchEvent.model_validate(e) for e in response.json()]
     assert len(events) == 1

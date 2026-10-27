@@ -41,7 +41,7 @@ from hypertrain.protocol.envelope_v2 import load_json
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import KeyError_, Keypair, decode_hotkey
 from hypertrain.protocol.messages import QUICKNET_GENESIS
-from hypertrain.protocol.messages_v2 import ChallengeRequest, JobRequest
+from hypertrain.protocol.messages_v2 import ChallengeRequest, JobRequest, WatchRequest
 from hypertrain.protocol.server_keys import SignedGrant, SignedRevoke
 from hypertrain.public_api import create_public_app
 
@@ -867,31 +867,30 @@ def create_app(
         admin(authorization)
         return await run(store.for_run(run_id).relay_drain_v2, run_id, relay_id)
 
-    @app.get("/v2/runs/{run_id}/disputes")
-    async def events_v2(
-        run_id: str,
-        party: str,
-        cursor: int = 0,
-        wait_seconds: Annotated[float, Query(alias="timeout")] = 0,
-        x_dispute_signature: Annotated[str | None, Header()] = None,
-    ) -> Any:
-        from hypertrain.protocol.keys import verify
+    @app.post("/v2/runs/{run_id}/disputes")
+    async def events_v2(run_id: str, request: Request) -> Any:
+        """The party's events. The request is the party's own signed envelope in the BODY (the
+        master proxy forwards no signature header): its expiry is bounded like an owner request
+        and the signed body names the party, the cursor and the wait."""
+        from hypertrain.protocol import envelope_v2
 
-        if cursor < 0 or not 0 <= wait_seconds <= 30:
-            raise ChallengeError(422, "invalid event cursor or wait")
         try:
-            valid = verify(
-                decode_hotkey(party),
-                f"hypertrain/watch/2|{run_id}|{party}".encode(),
-                bytes.fromhex(x_dispute_signature or ""),
-            )
-        except (ValueError, KeyError_):
+            raw = await v2_raw(request)
+            now = await run(locked_now)
+            if envelope_v2.parse_envelope(raw).exp_drand > now + OWNER_REQUEST_MAX_ROUNDS:
+                raise ExpiredError("expiry too far ahead")
+            asked = envelope_v2.Intake(run_id, {"WatchRequest": lambda _: True}).accept(raw, now)
+            valid = isinstance(asked, WatchRequest) and asked.party == signer(raw)
+        except EnvelopeError:
             valid = False
         if not valid:
-            raise ChallengeError(403, "party event access requires signature")
-        await party_member(run_id, party)
+            raise ChallengeError(403, "party event access requires its signed request")
+        assert isinstance(asked, WatchRequest)
+        await party_member(run_id, asked.party)
         _, _, disputes = await run(store.for_run(run_id)._services, run_id)
-        events = await run(lambda: disputes.events(party, cursor, timeout=wait_seconds))
+        events = await run(
+            lambda: disputes.events(asked.party, asked.cursor, timeout=asked.wait_seconds)
+        )
         return [e.model_dump(mode="json") for e in events]
 
     @app.post("/v2/runs/{run_id}/disputes/ack")

@@ -1388,19 +1388,21 @@ class NetworkMiner:
         published = job_path.parent / "published"
         states = PublishedStates(job, published, LocalFSStore(self.directory / "state-objects"))
         party = IslandParty.published(self.kp.ss58, job, published)
-        client = self.api.c
-        client.headers["X-Dispute-Signature"] = self.kp.sign(
-            f"hypertrain/watch/2|{self.run_id}|{self.kp.ss58}".encode()
-        ).hex()
+
+        def now_round() -> int:
+            return int(self.api.call("GET", self.url)["now_round"])
+
         watcher = DisputeWatch(
             self.directory / "watch",
             self.kp,
-            HttpDisputeTransport(client, self.api.base + self.url),
+            HttpDisputeTransport(
+                self.api.c, self.api.base + self.url, self.kp, self.run_id, now_round
+            ),
             run_id=self.run_id,
             coordinator=self.manifest.training.coord_pubkey,
             party=lambda _: party,
             state_serve=states.serve,
-            beacon=lambda: self.api.call("GET", self.url)["now_round"],
+            beacon=now_round,
             job=job,
         )
         try:

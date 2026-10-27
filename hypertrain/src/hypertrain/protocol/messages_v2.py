@@ -588,6 +588,16 @@ class JobRequest(WireModel):
     admission_id: Hex64
 
 
+class WatchRequest(WireModel):
+    """A dispute party polls its events, signed by that party in the body of the request: the
+    master proxy forwards no signature header. The envelope expiry bounds a replay of a capture;
+    the wait is whole seconds so that the canonical body carries no float."""
+
+    party: SS58
+    cursor: Annotated[StrictInt, Field(ge=0, le=2**53 - 1)]
+    wait_seconds: Annotated[StrictInt, Field(ge=0, le=30)]
+
+
 class WorkProof(WireModel):
     admission_id: Hex64
     challenge_hash: Hex64
@@ -1013,6 +1023,7 @@ MESSAGE_TYPES_V2: dict[str, type[BaseModel]] = {
         JoinChallenge,
         ChallengeRequest,
         JobRequest,
+        WatchRequest,
         WorkProof,
         RotateRequest,
         AdmissionPolicyV2,

@@ -133,6 +133,11 @@
   See `docs/adr/0007-sm-counts-per-arch.md` at the monorepo root.
 
 ### Fixed
+- The dispute event poll is a request signed in its body, as the other owner routes: `POST
+  /v2/runs/{run_id}/disputes` takes the party's `WatchRequest{party, cursor, wait_seconds}` envelope
+  and `GET` with `X-Dispute-Signature` answers 405 (D51: the master proxy forwards no signature
+  header). The miner's watch and follow clients sign it; a client built before this change gets 405.
+  See `docs/network-v2.md`.
 - The dispute long poll can no longer deadlock the store. `DisputesV2` has one lock order, the
   store lock then a leaf condition: `events()` reads the event table outside the condition and parks
   on a counter, so a mutator that notifies inside its transaction never waits for a poller that

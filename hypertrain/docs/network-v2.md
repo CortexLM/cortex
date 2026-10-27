@@ -369,6 +369,14 @@ retrieval, and answers 409 `RELAY_RECEIPT_CONFLICT` for a different receipt.
 `run-v2` has no `--rounds`/`--start` option. Preserve the work directory; do not
 claim the CLI is a complete unattended production scheduler.
 
+A dispute party reads its events with `POST /v2/runs/{run_id}/disputes`. The body is the party's own
+signed envelope `WatchRequest{party, cursor, wait_seconds}` (whole seconds, 0 to 30): the master
+proxy forwards no signature header, so nothing is signed in a header. The envelope expires at most
+100 rounds after the service's current round (`hypertrain-miner watch` signs 20 ahead), the signer
+must be `party`, and `party` must be a pinned auditor, referee or coordinator or a subnet member;
+anything else answers 403. `GET /v2/runs/{run_id}/disputes` with `X-Dispute-Signature` is gone (405):
+a client built before this change must be upgraded.
+
 The decoder operation driver has an executable original four-message
 AcceptV2/CommitV2/WorkProof/DeltaManifestV2 consumer. Capture records ordered
 original requests, bounded responses and only the successful-response accepted
