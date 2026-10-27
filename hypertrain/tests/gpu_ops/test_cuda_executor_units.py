@@ -968,6 +968,37 @@ def test_read_result_bounds_the_sum_of_all_members_not_each_member(
     assert not (stage / "rank-1/b.bin").exists()  # ... and nothing past the member that did not
 
 
+@pytest.mark.parametrize("name", ["summary.json", "leaves.json", "trace.json"])
+@pytest.mark.parametrize(("extra", "fits"), [(0, True), (1, False)], ids=["at-the-cap", "over"])
+def test_read_result_bounds_the_json_members_of_a_rank_before_anything_parses_them(
+    executor: ce.Executor,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    extra: int,
+    fits: bool,
+) -> None:
+    # json.loads grows a 14 MiB file of "[]," items by 365 MiB: the bound is on the bytes parsed
+    monkeypatch.setattr(ce, "RANK_JSON_BYTES", 4096)
+    member = f"rank-0/{name}"
+    files = {member: b"x" * (4096 + extra)}
+    if fits:
+        written = read(executor, tmp_path, tar_of(entries_for(files)))[0]
+        assert written == {member: sha(files[member])}
+    else:
+        with pytest.raises(ce.AttemptFailed, match=f"unacceptable result member '{member}'"):
+            read(executor, tmp_path, tar_of(entries_for(files)))
+        assert not (tmp_path / "sandbox" / "stage" / member).exists()
+
+
+def test_read_result_json_cap_is_for_the_json_members_of_a_rank_only(
+    executor: ce.Executor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ce, "RANK_JSON_BYTES", 4096)
+    files = {"rank-0/state.safetensors": b"x" * 5000, "rank-0/checkpoints/trace.json": b"x" * 5000}
+    assert sorted(read(executor, tmp_path, tar_of(entries_for(files)))[0]) == sorted(files)
+
+
 def test_read_result_cap_is_inclusive_of_the_metadata_members(
     tmp_path: Path, pinned: tuple[Path, Path]
 ) -> None:

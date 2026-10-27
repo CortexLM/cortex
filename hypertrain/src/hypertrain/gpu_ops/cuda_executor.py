@@ -85,6 +85,8 @@ MARGIN = 5
 LOG_TAIL = 600
 MAX_DIGESTS = 32  # RepoDigests entries kept from a host probe
 HOST_JSON_DEPTH = 8  # COMPLETE nests two levels and environment.json three: deeper is a bomb
+RANK_JSON = ("summary.json", "leaves.json", "trace.json")
+RANK_JSON_BYTES = 64 << 20  # auditor.island_bisect.TRACE_BYTES: the largest JSON a reader accepts
 
 
 class HostLost(IslandFailure):
@@ -728,6 +730,11 @@ class Executor:
                         or member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE)
                         or any(key.startswith("GNU.sparse") for key in member.pax_headers)
                         or total > self.config.max_result_bytes
+                        or (
+                            len(parts) == 2
+                            and parts[1] in RANK_JSON
+                            and member.size > RANK_JSON_BYTES
+                        )
                         or members > MAX_MEMBERS
                         or member.name in written
                         or member.name in small
