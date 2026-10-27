@@ -19,6 +19,8 @@ from .sandbox import (
     CHALLENGE,
     COMPOSE,
     EPOCH,
+    EXECUTOR_PATH,
+    EXECUTOR_VAR,
     MASTER,
     NEW_ID,
     NEW_REF,
@@ -37,7 +39,7 @@ from .sandbox import (
     tree,
 )
 
-CMDS = ("swap", "beacon", "paper", "rollback", "restore-db")
+CMDS = ("swap", "beacon", "paper", "rollback", "restore-db", "executor", "executor-off")
 DB_FILES = ("challenge.db", "server_keys.db")
 
 
@@ -56,7 +58,24 @@ def test_the_sandbox_refuses_a_script_whose_paths_or_addresses_it_does_not_pin(t
         sandboxed(edit(SCRIPT_TEXT), tmp_path)
 
 
-# --- seal window: swap and beacon go through the gate ---------------------------------------
+def test_the_snapshot_notices_a_change_to_each_file_a_refusal_must_leave_alone(box, backup):
+    # every refusal test ends on snapshot == before: a field it ignores hides a script that writes
+    box.run(*call("executor", backup), mutates={CHALLENGE})  # an override is in place
+    pending = box.override.with_name(box.override.name + ".new")
+    tracked = [box.f, box.new, box.override, pending, box.relay_json, box.stub_json]
+    for path in [*tracked, *sorted(box.state_dir.glob("*.db"))]:
+        before = box.snapshot()
+        original = path.read_bytes() if path.exists() else None
+        path.write_bytes(b"changed" if original is None else original + b"x")
+        assert box.snapshot() != before, path.name
+        if original is None:
+            path.unlink()
+        else:
+            path.write_bytes(original)
+        assert box.snapshot() == before, path.name
+
+
+# --- seal window: swap, beacon and executor go through the gate -----------------------------------
 
 GATE = {  # id: (seal arguments, exit code)
     "age-1800": ({"age": 1800}, 3),
@@ -78,7 +97,7 @@ GATE = {  # id: (seal arguments, exit code)
 }
 
 
-@pytest.mark.parametrize("cmd", ["swap", "beacon"])
+@pytest.mark.parametrize("cmd", ["swap", "beacon", "executor"])
 @pytest.mark.parametrize(("seal", "rc"), GATE.values(), ids=GATE)
 def test_a_closed_gate_refuses_before_any_change(box, backup, cmd, seal, rc):
     box.pull(NEW_REF)
@@ -378,6 +397,86 @@ def test_rollback_fails_unless_the_challenge_is_back_on_the_old_image(
     box.run(*call("swap", backup), mutates={CHALLENGE})
     box.docker(**{fault: True})
     assert message in box.run("rollback", backup, rc=rc, mutates=mutates).out
+
+
+# --- executor, executor-off -----------------------------------------------------------------
+
+
+def test_executor_adds_the_variable_to_the_challenge_alone_and_executor_off_drops_it(box, backup):
+    original = tree(backup)
+    out = box.run(*call("executor", backup), mutates={CHALLENGE}).out
+    assert box.env(CHALLENGE)[EXECUTOR_VAR] == EXECUTOR_PATH
+    assert box.env(CHALLENGE)["TZ"] == "UTC"  # the rest of its environment is kept
+    assert EXECUTOR_VAR not in box.env(BEACON)
+    assert f"changed ['services.challenge.environment.{EXECUTOR_VAR}']" in out
+    assert box.override.read_text() == (
+        f"services:\n  challenge:\n    environment:\n      {EXECUTOR_VAR}: {EXECUTOR_PATH}\n"
+    )
+    assert stat.S_IMODE(box.override.stat().st_mode) == 0o600
+    assert box.f.read_text() == COMPOSE  # the base file is never edited
+    assert not box.override.with_name("compose.executor.yml.new").exists()
+    assert {k: v for k, v in tree(backup).items() if k in original} == original
+
+    box.run("executor-off", backup, mutates={CHALLENGE})
+    assert not box.override.exists()
+    assert EXECUTOR_VAR not in box.env(CHALLENGE) and box.env(CHALLENGE)["TZ"] == "UTC"
+    assert box.f.read_text() == COMPOSE
+
+
+def test_executor_and_executor_off_bring_up_the_live_compose_not_the_backed_up_one(box, backup):
+    box.pull(NEW_REF)
+    box.run(*call("swap", backup), mutates={CHALLENGE})  # the live file now pins the new image
+    box.run(*call("executor", backup), mutates={CHALLENGE})
+    assert box.container(CHALLENGE)["Image"] == NEW_ID and EXECUTOR_VAR in box.env(CHALLENGE)
+    box.run("executor-off", backup, mutates={CHALLENGE})
+    assert box.container(CHALLENGE)["Image"] == NEW_ID and EXECUTOR_VAR not in box.env(CHALLENGE)
+
+
+SET_BY_FILE = ("TZ=Europe/Paris", "KEEP=keepme", f"{EXECUTOR_VAR}=/data/old.json")
+ALREADY_SET = {  # id: the environment of the live challenge service, which sets the variable
+    "mapping": "".join("      " + e.replace("=", ": ") + "\n" for e in SET_BY_FILE),
+    "list": "".join(f"      - {e}\n" for e in SET_BY_FILE),
+}
+
+
+@pytest.mark.parametrize("environment", ALREADY_SET.values(), ids=ALREADY_SET)
+def test_the_override_wins_over_a_value_the_live_file_already_sets(box, backup, environment):
+    pin = f"container_name: {CHALLENGE}\n"
+    box.f.write_text(COMPOSE.replace(pin, f"{pin}    environment:\n{environment}"))
+    box.run(*call("executor", backup), mutates={CHALLENGE})
+    env = box.env(CHALLENGE)
+    # the later file wins the variable, compose beats the image environment, the rest is kept
+    assert (env[EXECUTOR_VAR], env["TZ"], env["KEEP"]) == (EXECUTOR_PATH, "Europe/Paris", "keepme")
+
+
+def test_executor_refuses_a_merge_that_changes_more_than_the_variable(box, backup):
+    # the names pass, so only the check that the merge differs in the variable alone can refuse
+    box.docker(merge_patch={"challenge": {"privileged": True}})
+    before = box.snapshot()
+    out = box.run(*call("executor", backup), rc=5).out
+    assert "unexpected compose change" in out and "services.challenge.privileged" in out
+    assert box.snapshot() == before
+
+
+BAD_PATHS = {
+    "relative": "data/x.json",
+    "outside-data": "/etc/x.json",
+    "under-another-root": "/etc/data/x.json",
+    "not-json": "/data/x.txt",
+    "json-in-the-middle": "/data/x.json.txt",
+    "the-dot-is-literal": "/data/x_json",
+    "space": "/data/x y.json",
+    "quote": '/data/x".json',
+    "yaml-injection": "/data/x.json\n    privileged: true\n#.json",
+}
+
+
+@pytest.mark.parametrize("path", BAD_PATHS.values(), ids=BAD_PATHS)
+def test_executor_refuses_a_path_that_is_not_a_json_file_under_data(box, backup, path):
+    before = box.snapshot()
+    out = box.run("executor", backup, path, rc=4).out
+    assert "PATH must be /data/....json" in out
+    assert box.snapshot() == before
 
 
 # --- restore-db -----------------------------------------------------------------------------

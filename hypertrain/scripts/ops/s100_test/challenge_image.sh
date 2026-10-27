@@ -16,8 +16,9 @@
 #                        through a compose override file; only that variable may change
 #   executor-off BACKUP  drop the override and recreate the challenge without the variable
 # rollback and restore-db are not gated: they are the way back from a bad change.
-# swap, beacon, paper and rollback refuse (exit 4) a compose file with a service whose container_name
-# is missing or is not one of the six TEST names; restore-db runs no compose.
+# swap, beacon, paper, rollback, executor and executor-off refuse (exit 4) a compose file with a
+# service whose container_name is missing or is not one of the six TEST names; executor checks the
+# live file and the live file merged with its override. restore-db runs no compose.
 set -euo pipefail
 T=/root/backups/hypertrain-test; F=$T/compose.test.yml; C=hypertrain-test-challenge
 STATE=/data/hypertrain-test/state; API=http://127.0.0.1:18996; MASTER=http://10.177.245.39:8080
@@ -178,8 +179,12 @@ executor)
   [[ $P =~ ^/data/[A-Za-z0-9._/-]+\.json$ ]] || { echo "PATH must be /data/....json in the container"; exit 4; }
   O=$T/compose.executor.yml; umask 077
   printf 'services:\n  challenge:\n    environment:\n      HYPERTRAIN_CUDA_EXECUTOR: %s\n' "$P" > "$O.new"
-  compose "$F" config --format json > "$B/config-before-executor.json"
-  (cd "$T" && docker compose -f "$F" -f "$O.new" config --format json) > "$B/config-after-executor.json"
+  { compose "$F" config --format json > "$B/config-before-executor.json" \
+    && (cd "$T" && docker compose -f "$F" -f "$O.new" config --format json) > "$B/config-after-executor.json"; } \
+    || { rm -f "$O.new"; echo "REFUSED $F: compose cannot resolve it with the override"; exit 4; }
+  # the file alone is what swap, rollback and executor-off bring up later; the pair is what up gets now
+  { test_names "$F" < "$B/config-before-executor.json" \
+    && test_names "$F -f $O.new" < "$B/config-after-executor.json"; } || { rm -f "$O.new"; exit 4; }
   python3 -I - "$B/config-before-executor.json" "$B/config-after-executor.json" \
       services.challenge.environment.HYPERTRAIN_CUDA_EXECUTOR <<'EOF' \
     || { rm -f "$O.new"; echo "unexpected compose change"; exit 5; }
@@ -199,7 +204,9 @@ EOF
   (cd "$T" && docker compose -f "$F" -f "$O" up -d --no-deps challenge 2>&1 | tail -3)
   live "$(docker inspect "$C" --format '{{.Image}}')"; sleep 6; check;;
 executor-off)
-  B=${2:?BACKUP}; backup_dir "$B"; date -u +%FT%TZ
+  B=${2:?BACKUP}; backup_dir "$B"
+  cfg=$(compose "$F" config --format json) && test_names "$F" <<< "$cfg" || exit 4
+  date -u +%FT%TZ
   rm -f "$T/compose.executor.yml"; compose "$F" up -d --no-deps challenge 2>&1 | tail -3
   live "$(docker inspect "$C" --format '{{.Image}}')"; sleep 6; check;;
 *) echo "unknown $cmd"; exit 2;;
