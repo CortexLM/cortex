@@ -154,12 +154,12 @@ coordinated change.
    and `resume` [V]. The time to live is therefore the challenge window, derived from a policy
    value that exists. No constant is added.
 2. At the start of every `join` (inside its transaction, after the idempotent replay, before the
-   history, coldkey, capacity and quota checks), each dead `APPLIED` row with **no locked unit**,
-   no pending lock in the outbox and no `OPEN` trial becomes `SUSPENDED` with reason
-   `APPLIED_EXPIRED`, as ADR 0002 names it. The row, its transition log and its spent hotkey
-   stay. A funded row is never touched: its release belongs to Part 6. A row with an `OPEN`
-   trial is left to decision 2.3. The reaper cannot live in `challenge()` or `status()`: a
-   raising operation rolls its transaction back, and a GET must not write.
+   history, coldkey, capacity and quota checks), the expired trials are closed (decision 2.3),
+   then each dead `APPLIED` row with **no locked unit** and no pending lock in the outbox
+   becomes `SUSPENDED` with reason `APPLIED_EXPIRED`, as ADR 0002 names it. The row, its
+   transition log and its spent hotkey stay. A funded row is never touched: its release belongs
+   to Part 6. The reaper cannot live in `challenge()` or `status()`: a raising operation rolls
+   its transaction back, and a GET must not write.
 3. `join` ignores `SUSPENDED / APPLIED_EXPIRED` rows when it applies the one-non-`ACTIVE`-row-
    per-coldkey rule, so an honest miner whose application lapsed can apply again with a new
    hotkey. Every other non-`ACTIVE` row still blocks.
@@ -312,7 +312,9 @@ with DET-01b open an honest, falsely `MISMATCH`ed miner should not contest (the 
 not this part). A round that never closes pins the bonds of its roster until DSP-01 and AUD-06
 close it. Other `ACTIVE` admissions of a convicted coldkey keep their state but lose their
 unvested rewards to the ledger's burn. An admission-trial `MISMATCH` binds a pending reference
-that nothing settles, so that bond stays held (left open below).
+that nothing settles, so that bond stays held (left open below). A round that lists the
+admission but has no finality record (which `open_round_v2` always writes with it) is treated as
+open: the bond is held, fail closed.
 
 Rejected: a persisted `settlement` row per lock (stale, allows release while rostered, needs a
 writer in `finalize_v2` or `complete_audit_v2`, which are in `implementation_hash`); a service
@@ -327,17 +329,17 @@ withdrawing the bond just before a round opens does not arise); hooks in `comple
 ## Hash consequences
 
 Baseline measured on `33b50656` with `ChallengeStore._service_implementation_v2`,
-`network_qualification.sources()` and `bundle()`, and `manifest_v2 example`. The "after" column
-is filled by the last commit of the lot.
+`network_qualification.sources()` and `bundle()`, and `manifest_v2 example`, before the lot and at its last commit.
 
-| Value | Before | After |
+| Value | Before (`33b50656`) | After (this branch) |
 | --- | --- | --- |
-| `implementation_hash` | `02e208a3…0189cc` | to measure (expected unchanged) |
-| `challenge/store.py` sha256 | `b5bc9904…aaec88` | to measure (changes: `push_beacon`, `admission_v2`, `export_trial_v2`) |
-| `AdmissionPolicyV2` digest of the `manifest_v2 example` (test and production) | `c3fd6d4d…b3e3e3` | to measure (expected unchanged) |
-| pure-JSON wrapper run id (`tests/protocol/test_network_v2.py`) | `4efbc85d…8cc43f97` | to measure (expected unchanged) |
-| `sources()` map (151 files), canonical sha256 | `e0df98e6…507e8b` | to measure |
-| `bundle` (2,396,160 bytes) sha256 | `e78f33d1…70ba` | to measure |
+| `implementation_hash` | `02e208a3…0189cc` | unchanged |
+| `challenge/store.py` sha256 | `b5bc9904…aaec88` | `0fba21a9…cb7863` (`push_beacon`, `admission_v2`, `export_trial_v2`) |
+| `AdmissionPolicyV2` digest of the `manifest_v2 example` (test and production) | `c3fd6d4d…b3e3e3` | unchanged |
+| `manifest_v2 example` + `build` run id, test / production | `87b08906…952485` / `54ee4c87…e263` | unchanged |
+| pure-JSON wrapper run id (`tests/protocol/test_network_v2.py`) | `4efbc85d…8cc43f97` | unchanged (pinned by a test) |
+| `sources()` map (151 files), canonical sha256 | `e0df98e6…507e8b` | `270207d9…333180` |
+| `bundle` sha256 | 2,396,160 bytes, `e78f33d1…70ba` | 2,426,880 bytes, `53f7e1a4…b29d` |
 
 - No run id, `admission_policy_hash`, golden root or `reference_hash` changes for a policy that
   does not set `max_unfunded_per_prefix`: the field is omitted from the canonical body when
