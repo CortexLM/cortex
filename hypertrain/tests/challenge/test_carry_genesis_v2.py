@@ -49,7 +49,7 @@ def test_trial_stages_pinned_complete_carry_genesis(od_carry_network):
     )
     assert response.status_code == 200, response.text
     network.push(2)
-    response = network.client.get(network.url + "/join/" + identity + "/challenge")
+    response = network.challenge(identity)
     assert response.status_code == 200, response.text
     challenge = JoinChallenge.model_validate(response.json()["body"])
     samples = tuple(

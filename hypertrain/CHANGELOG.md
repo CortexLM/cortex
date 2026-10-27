@@ -51,6 +51,12 @@
   push and no longer suspends the miner (RTA-03); a later request answers 409
   `CHALLENGE_EXPIRED`. The two trial places can no longer be held for good by identities that
   never prove. ADR 0010.
+- `GET /v2/runs/{run_id}/join/{admission_id}/challenge` needs the owner's signature
+  (`X-Hotkey`, `X-Trial-Signature` over `hypertrain/trial-challenge/2|run|admission`, as the
+  `/job` route does with its own domain), so a third party can no longer open a rival's trial
+  (RTA-04). The admin export carries the signed challenge as `challenge_envelope` and
+  `trial_export` no longer calls the route; the miner signs the GET. A client built before this
+  change gets 403. ADR 0010.
 - CUDA network qualification records each device's compute capability with its SM count and
   accepts a device only when the pair is a row of `network_qualification.SM_COUNTS` (RTX 5090
   12.0 = 170, B300 10.3 = 148) and the count equals the signed manifest's

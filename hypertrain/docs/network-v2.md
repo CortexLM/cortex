@@ -125,9 +125,19 @@ which includes its nonce; `WorkScreenV2` is reserved by admission and nonce.
 alone. Retry the exact stored signed operation: changing expiry or signature does
 not create a new semantic attempt (`protocol/envelope_v2.py:replay_key`).
 
-After `GET /v2/runs/{run_id}/join/{admission_id}/challenge` issues a challenge,
-the operator exports the matching staged `IslandJobV1`, its inputs and the signed
-challenge into a new or empty folder:
+The challenge is issued by the owner's signed `GET
+/v2/runs/{run_id}/join/{admission_id}/challenge`: headers `X-Hotkey` and
+`X-Trial-Signature`, the hex signature by the admission's current hotkey of
+`hypertrain/trial-challenge/2|{run_id}|{admission_id}`. Opening a trial takes one of
+the run's two trial places, so nobody else may ask for it: unknown run 404, unknown
+admission 409 `UNKNOWN_ADMISSION`, a deregistered or revoked owner 403, any other
+hotkey, another domain, run or admission, or a missing or bad signature 403 `hotkey is
+not current accepted identity`. The admin token is no substitute. The signature is
+static, like the other header-signed routes: it replays only what the owner may ask,
+and an asking never suspends anyone. Once a challenge is issued, the operator exports
+the matching staged `IslandJobV1`, its inputs and the signed challenge (the export
+carries it as `challenge_envelope`; the CLI does not call the route) into a new or
+empty folder:
 
 ```bash
 uv run --frozen python -m hypertrain.challenge.trial_export \
@@ -145,7 +155,7 @@ uv run --frozen hypertrain-miner proof-v2 --config miner.toml --proof proof.json
 
 A joined miner can skip the export: `probe-v2 --config miner.toml > proof.json`
 without `--job`/`--challenge` reads its admission ID (`status-v2`), GETs the
-challenge (which issues the trial when none is open), then
+challenge with its signature (which issues the trial when none is open), then
 `GET /v2/runs/{run_id}/join/{admission_id}/job` with headers `X-Hotkey` and
 `X-Trial-Signature` (hex hotkey signature of
 `hypertrain/trial-job/2|{run_id}|{admission_id}`). The route returns the admin
@@ -188,7 +198,7 @@ sets the next seed one round later, and the next trial must fit in the `challeng
 rounds after that seed: always 100, which the policy schema fixes, about 5 min at 3 s
 rounds. The challenge deadline is seed + 100 whenever the challenge is requested, and the
 proof must be accepted by then. A challenge left unproven past its deadline is closed
-`EXPIRED` by the master at the next beacon push (or at anyone's next challenge request, which
+`EXPIRED` by the master at the next beacon push (or at the next challenge request, which
 frees the place first). Nobody is suspended: the miner keeps its state, its clean trials and
 its screen, and a later request answers 409 `CHALLENGE_EXPIRED` until a re-seed exists. The
 deadline round itself still accepts a proof. A trial whose proof was accepted is never expired

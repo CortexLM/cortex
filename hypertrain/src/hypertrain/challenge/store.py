@@ -2790,10 +2790,17 @@ class ChallengeStore:
                 name: self.objects.put((directory / relative).read_bytes())
                 for name, relative in job.object_paths.items()
             }
+            receipt = self._db.execute(
+                "SELECT receipt FROM admission_reservations WHERE reservation=?",
+                (f"challenge|{admission_id}|{challenge.nonce}",),
+            ).fetchone()
+            if receipt is None:
+                raise ChallengeError(409, "MISSING_CHALLENGE_RECEIPT")
             return {
                 "job": job.body(),
                 "objects": objects,
                 "challenge": challenge.body(),
+                "challenge_envelope": envelope_v2.load_json(receipt["receipt"]),
                 "nonce": challenge.nonce,
             }
 

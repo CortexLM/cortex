@@ -27,7 +27,7 @@ def test_beacon_push_frees_the_places_of_unproven_challenges(network):
     ids = [network.join(i).json()["admission_id"] for i in (0, 1)]
     network.push(2)
     for identity in ids:
-        response = network.client.get(network.url + f"/join/{identity}/challenge")
+        response = network.challenge(identity)
         assert response.status_code == 200, response.text
     assert open_trials(network) == 2
     # When: the beacon passes the deadline and nobody asks for anything
@@ -39,5 +39,5 @@ def test_beacon_push_frees_the_places_of_unproven_challenges(network):
     # and a newcomer gets its trial instead of TRIAL_CAPACITY
     newcomer = network.join(2).json()["admission_id"]
     network.push(104)
-    response = network.client.get(network.url + f"/join/{newcomer}/challenge")
+    response = network.challenge(newcomer)
     assert response.status_code == 200, response.text

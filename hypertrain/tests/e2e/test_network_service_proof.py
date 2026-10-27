@@ -541,7 +541,7 @@ def test_decoder_probe_consumer_real_routes_receipt_and_debit_metadata(tmp_path,
             n.client, n.manifest, hot, cold, origins, 1000, "61" * 32, "62" * 32, 10000
         )
         n.push(2)
-        signed = n.client.get(n.url + "/join/" + admission_id + "/challenge").json()
+        signed = n.challenge(admission_id).json()
         challenge = driver.JoinChallenge.model_validate(envelope_v2.parse_envelope(signed).body)
         with n.store._lock:
             epoch = n.store._db.execute(
