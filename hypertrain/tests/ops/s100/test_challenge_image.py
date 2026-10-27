@@ -1,0 +1,362 @@
+"""s100_test/challenge_image.sh through fake docker, curl and python3 (see sandbox.py).
+
+Every run asserts the exit code, the exact set of containers that received a mutating docker call
+(always a subset of the TEST stack) and that no ssh, sudo or unknown URL was touched.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import stat
+from pathlib import Path
+
+import pytest
+
+from .sandbox import (
+    API,
+    BEACON,
+    CHALLENGE,
+    COMPOSE,
+    EPOCH,
+    NEW_ID,
+    NEW_REF,
+    OLD_ID,
+    OLD_REF,
+    RELAY,
+    REPO,
+    SCRIPT_TEXT,
+    SECRET,
+    STUB,
+    Box,
+    digest_of,
+    rows,
+    sandboxed,
+    tree,
+)
+
+CMDS = ("swap", "beacon", "paper", "rollback", "restore-db")
+DB_FILES = ("challenge.db", "server_keys.db")
+
+
+def call(cmd: str, backup: Path) -> tuple[str, ...]:
+    return ("swap", NEW_REF, str(backup)) if cmd == "swap" else (cmd, str(backup))
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [lambda t: t + "\ncp x /data/other/y\n", lambda t: t.replace("/data/relay", "/relay")],
+    ids=["a new host path", "a path the rewrite expects is gone"],
+)
+def test_the_sandbox_refuses_a_script_whose_host_paths_it_does_not_cover(tmp_path, edit):
+    with pytest.raises(AssertionError):
+        sandboxed(edit(SCRIPT_TEXT), tmp_path)
+
+
+# --- seal window: swap and beacon go through the gate ---------------------------------------
+
+GATE = {  # id: (seal arguments, exit code)
+    "age-1800": ({"age": 1800}, 3),
+    "age-1801": ({"age": 1801}, 3),
+    "age-negative": ({"age": -1}, 3),
+    "age-7200": ({"age": 7200}, 3),
+    "sealed-false": ({"sealed": False}, 3),
+    "sealed-one": ({"sealed": 1}, 3),
+    "sealed-string": ({"sealed": "true"}, 3),
+    "sealed-null": ({"sealed": None}, 3),
+    "epoch-is-now": ({"epoch": EPOCH}, 3),
+    "epoch-two-behind": ({"epoch": EPOCH - 2}, 3),
+    "epoch-ahead": ({"epoch": EPOCH + 1}, 3),
+    "weights-garbage": ({"weights": "not json"}, 3),
+    "weights-unreachable": ({"weights": False}, 3),
+    "readyz-503": ({"ready": 503}, 2),
+}
+
+
+@pytest.mark.parametrize("cmd", ["swap", "beacon"])
+@pytest.mark.parametrize(("seal", "rc"), GATE.values(), ids=GATE)
+def test_a_closed_gate_refuses_before_any_change(box, backup, cmd, seal, rc):
+    box.pull(NEW_REF)
+    box.seal(**seal)
+    before = box.snapshot()
+    box.run(*call(cmd, backup), rc=rc)
+    assert box.snapshot() == before
+
+
+@pytest.mark.parametrize("age", [0, 1799])
+def test_a_seal_younger_than_30_minutes_for_the_previous_epoch_opens_the_gate(box, backup, age):
+    box.pull(NEW_REF)
+    box.seal(age=age)
+    box.run(*call("swap", backup), mutates={CHALLENGE})
+
+
+# --- backup validity ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("cmd", CMDS)
+@pytest.mark.parametrize("missing", ["compose.test.yml", *DB_FILES, "SHA256SUMS"])
+def test_a_backup_missing_a_required_file_is_refused(box, backup, cmd, missing):
+    box.pull(NEW_REF)
+    (backup / missing).unlink()
+    before = box.snapshot()
+    out = box.run(*call(cmd, backup), rc=4).out
+    assert f"not a backup dir: {backup} (no {missing})" in out
+    assert box.snapshot() == before
+
+
+@pytest.mark.parametrize("cmd", CMDS)
+@pytest.mark.parametrize("altered", ["compose.test.yml", "challenge.db"])
+def test_a_backup_that_fails_its_checksums_is_refused(box, backup, cmd, altered):
+    box.pull(NEW_REF)
+    with (backup / altered).open("ab") as f:
+        f.write(b"\n# altered\n")
+    before = box.snapshot()
+    assert "fails SHA256SUMS" in box.run(*call(cmd, backup), rc=4).out
+    assert box.snapshot() == before
+
+
+# --- backup ---------------------------------------------------------------------------------
+
+
+def test_backup_writes_a_verified_snapshot_without_env_values(box: Box) -> None:
+    out = box.run("backup", "T1").out
+    b = box.b()
+    listed = dict(line.split("  ", 1)[::-1] for line in (b / "SHA256SUMS").read_text().splitlines())
+    assert sorted(listed) == [
+        "challenge.db",
+        "compose.relay.yml",
+        "compose.test.yml",
+        "inspect-before.json",
+        "metagraph.json",
+        "relay.json",
+        "server_keys.db",
+    ]
+    assert all(digest_of(b / name) == digest for name, digest in listed.items())
+    assert stat.S_IMODE(b.stat().st_mode) == 0o700
+    for name in DB_FILES:
+        assert stat.S_IMODE((b / name).stat().st_mode) == 0o600
+        db = sqlite3.connect(b / name)
+        assert db.execute("pragma integrity_check").fetchone() == ("ok",)
+        db.close()
+    assert rows(b / "challenge.db") == ["original"] and rows(b / "server_keys.db") == ["key-1"]
+    assert (b / "relay.json").read_bytes() == box.relay_json.read_bytes()
+    assert (b / "metagraph.json").read_bytes() == box.stub_json.read_bytes()
+    inspected = json.loads((b / "inspect-before.json").read_text())
+    assert [c["Name"] for c in inspected] == [f"/{n}" for n in (CHALLENGE, BEACON, STUB, RELAY)]
+    assert all(c["Config"]["Env"] == ["HYPERTRAIN_ADMIN_TOKEN", "TZ"] for c in inspected)
+    assert SECRET not in out
+    assert not any(SECRET in p.read_text(errors="ignore") for p in b.iterdir())
+
+
+def test_backup_never_overwrites_an_existing_backup(box: Box) -> None:
+    box.run("backup", "T1")
+    before = tree(box.b())
+    assert "exists:" in box.run("backup", "T1", rc=4).out
+    assert tree(box.b()) == before
+
+
+def test_backup_fails_when_a_database_copy_fails_its_integrity_check(box: Box) -> None:
+    db = sqlite3.connect(box.state_dir / "challenge.db")
+    db.executemany("insert into runs(v) values (?)", [(f"r{i}",) for i in range(20)])
+    db.execute("create index runs_v on runs(v)")
+    db.commit()
+    db.execute("pragma writable_schema=on")  # orphan the index pages: readable, but not "ok"
+    db.execute("delete from sqlite_master where name='runs_v'")
+    db.commit()
+    db.close()
+    out = box.run("backup", "T1", rc=6).out
+    assert "DB backup not ok" in out and "never used" in out
+
+
+# --- swap -----------------------------------------------------------------------------------
+
+
+def test_swap_pins_the_new_image_and_recreates_only_the_challenge(box, backup):
+    box.pull(NEW_REF)
+    original = tree(backup)
+    out = box.run(*call("swap", backup), mutates={CHALLENGE}).out
+    pin = f"container_name: {CHALLENGE}\n"
+    assert box.f.read_text() == COMPOSE.replace(pin, f"{pin}    image: {NEW_REF}\n")
+    assert box.container(CHALLENGE)["Image"] == NEW_ID
+    assert box.container(CHALLENGE)["Config"]["Image"] == NEW_REF
+    assert box.container(BEACON)["Image"] == OLD_ID
+    assert f"challenge {NEW_REF}" in out and "public runs sha" in out
+    assert stat.S_IMODE(box.f.stat().st_mode) == 0o600
+    assert not box.new.exists()
+    assert (backup / "compose.test.yml.before-challenge").read_text() == COMPOSE
+    assert {k: v for k, v in tree(backup).items() if k in original} == original
+
+
+BAD_REFS = {
+    "tag": f"{REPO}:latest",
+    "other-repository": f"ghcr.io/evil/hypertrain@{NEW_ID}",
+    "other-registry": f"registry.evil/{NEW_REF}",
+    "newline-then-privileged": f"{NEW_REF}\n    privileged: true",
+    "command-substitution": f"{NEW_REF}$(touch pwned)",
+}
+
+
+@pytest.mark.parametrize("ref", BAD_REFS.values(), ids=BAD_REFS)
+def test_swap_refuses_a_ref_that_is_not_a_digest_of_our_repository(box, backup, ref):
+    box.pull(ref)  # present locally, so only the ref check can refuse it
+    before = box.snapshot()
+    assert "bad ref" in box.run("swap", ref, backup, rc=4).out
+    assert box.snapshot() == before
+
+
+def test_swap_refuses_an_image_that_was_not_pulled(box, backup):
+    before = box.snapshot()
+    assert "image not pulled" in box.run(*call("swap", backup), rc=4).out
+    assert box.snapshot() == before
+
+
+def test_swap_refuses_a_challenge_that_is_not_the_test_container(box, backup):
+    box.pull(NEW_REF)
+    box.f.write_text(COMPOSE.replace(f"name: {CHALLENGE}", "name: cortex-challenge-hypertrain"))
+    before = box.snapshot()
+    assert "anchor" in box.run(*call("swap", backup), rc=4).out
+    assert box.snapshot() == before
+
+
+def test_a_failed_compose_up_exits_nonzero_and_rollback_recovers(box, backup):
+    box.pull(NEW_REF)
+    original = tree(backup)
+    box.docker(fail_up=True)
+    box.run(*call("swap", backup), rc=1, mutates={CHALLENGE})
+    assert {k: v for k, v in tree(backup).items() if k in original} == original
+    box.docker(fail_up=False)
+    box.run("rollback", backup, mutates={CHALLENGE, BEACON})
+    assert box.container(CHALLENGE)["Image"] == OLD_ID
+    assert box.f.read_bytes() == (backup / "compose.test.yml").read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("fault", "message"), [("version-503", "/version not 2xx"), ("not-recreated", "not on")]
+)
+def test_swap_fails_unless_the_challenge_answers_and_runs_the_new_image(
+    box, backup, fault, message
+):
+    box.pull(NEW_REF)
+    if fault == "version-503":
+        box.url(f"{API}/version", 503)
+    else:
+        box.docker(stale_up=True)
+    assert message in box.run(*call("swap", backup), rc=7, mutates={CHALLENGE}).out
+
+
+def test_swap_gives_the_challenge_the_whole_30_attempt_loop_to_answer(box, backup):
+    box.pull(NEW_REF)
+    box.url(f"{API}/version", body="{}", down_first=30)
+    box.run(*call("swap", backup), mutates={CHALLENGE})
+    assert box.polls(f"{API}/version") > 30
+
+
+# --- beacon ---------------------------------------------------------------------------------
+
+
+def test_beacon_retunes_exactly_the_pusher_and_a_second_run_is_refused(box, backup):
+    out = box.run("beacon", backup, mutates={BEACON}).out
+    assert "beacon: pushed round 1" in out and "lag" in out
+    retuned = COMPOSE.replace('--interval, "3"', '--interval, "0.2"').replace(
+        '--catch-up, "20"', '--catch-up, "3"'
+    )
+    assert box.f.read_text() == retuned
+    entrypoint = box.live_yaml()["services"]["beacon"]["entrypoint"]
+    assert (entrypoint[9], entrypoint[11]) == ("0.2", "3")
+    assert stat.S_IMODE(box.f.stat().st_mode) == 0o600
+    out = box.run("beacon", backup, rc=5).out
+    assert "unexpected compose change" in out
+    assert box.f.read_text() == retuned and not box.new.exists()
+
+
+# --- paper ----------------------------------------------------------------------------------
+
+
+def test_paper_prints_the_backed_up_image_and_changes_nothing(box, backup):
+    box.pull(NEW_REF)
+    box.run(*call("swap", backup), mutates={CHALLENGE})
+    before = box.snapshot()
+    out = box.run("paper", backup).out
+    assert f"challenge {OLD_REF}" in out and f"live: {NEW_REF}" in out
+    assert f"challenge {NEW_REF}" not in out
+    assert box.snapshot() == before
+
+
+# --- rollback -------------------------------------------------------------------------------
+
+
+def test_rollback_restores_the_compose_and_both_containers_with_the_gate_closed(box, backup):
+    box.pull(NEW_REF)
+    box.run(*call("swap", backup), mutates={CHALLENGE})
+    box.run("beacon", backup, mutates={BEACON})
+    box.seal(age=7200, ready=503)  # rollback and restore-db are the way back: never gated
+    out = box.run("rollback", backup, mutates={CHALLENGE, BEACON}).out
+    assert box.f.read_bytes() == (backup / "compose.test.yml").read_bytes()
+    assert box.container(CHALLENGE)["Image"] == OLD_ID and "public runs sha" in out
+
+
+@pytest.mark.parametrize(
+    ("relay", "stub"),
+    [(True, False), (False, True), (True, True)],
+    ids=["relay-only", "stub-only", "both"],
+)
+def test_rollback_restores_a_changed_relay_or_stub_file_and_restarts_only_that_container(
+    box, backup, relay, stub
+):
+    changed = {}
+    if relay:
+        box.relay_json.write_text("changed\n")
+        changed[RELAY] = (box.relay_json, backup / "relay.json")
+    if stub:
+        box.stub_json.write_text("changed\n")
+        changed[STUB] = (box.stub_json, backup / "metagraph.json")
+    box.run("rollback", backup, mutates={CHALLENGE, BEACON, *changed})
+    for live, saved in changed.values():
+        assert live.read_bytes() == saved.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("fault", "rc", "mutates", "message"),
+    [
+        ("fail_up", 1, {CHALLENGE}, "cannot start"),
+        ("stale_up", 7, {CHALLENGE, BEACON}, f"challenge not on {OLD_ID}"),
+    ],
+)
+def test_rollback_fails_unless_the_challenge_is_back_on_the_old_image(
+    box, backup, fault, rc, mutates, message
+):
+    box.pull(NEW_REF)
+    box.run(*call("swap", backup), mutates={CHALLENGE})
+    box.docker(**{fault: True})
+    assert message in box.run("rollback", backup, rc=rc, mutates=mutates).out
+
+
+# --- restore-db -----------------------------------------------------------------------------
+
+
+def test_restore_db_keeps_the_live_dbs_aside_and_installs_the_backed_up_ones(box, backup):
+    live = box.state_dir
+    db = sqlite3.connect(live / "challenge.db")
+    db.execute("insert into runs(v) values ('late')")
+    db.commit()
+    db.close()
+    for n in DB_FILES:
+        (live / f"{n}-wal").write_bytes(b"stale wal")
+        (live / f"{n}-shm").write_bytes(b"stale shm")
+    box.seal(age=7200, ready=503)
+    changed = digest_of(live / "challenge.db")
+    run = box.run("restore-db", backup, mutates={CHALLENGE})
+    assert "public runs sha" in run.out
+    (aside,) = backup.glob("restore-db-aside-*")
+    assert stat.S_IMODE(aside.stat().st_mode) == 0o700
+    assert rows(aside / "challenge.db") == ["original", "late"]
+    assert (aside / "challenge.db-wal").read_bytes() == b"stale wal"
+    assert rows(live / "challenge.db") == ["original"]
+    assert rows(live / "server_keys.db") == ["key-1"]
+    assert sorted(p.name for p in live.iterdir()) == list(DB_FILES)
+    (stop, _, stopped), (start, _, started) = run.mutations
+    assert (stop, start) == ("stop", "start")
+    assert stopped["db"] == changed and "challenge.db-wal" in stopped["files"]
+    assert started["db"] == digest_of(backup / "challenge.db")
+    assert started["files"] == list(DB_FILES)
+    assert box.container(CHALLENGE)["State"]["Status"] == "running"
