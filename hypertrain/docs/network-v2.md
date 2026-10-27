@@ -529,10 +529,13 @@ rollback that would leave fewer, an aggregation over an input set or delta it ca
 round w+1 exists or while w is unresolved, applying a round whose predecessor is not applied,
 settling a round that cannot settle, a tape that fails its own checks). The two rollback routes
 answer a tape error with its bare message, as before.
-`finalize` pays exactly the inputs recorded with the applied tape, whatever the members'
-standing is when it runs: `Finalize.included` must list them. A member suspended, struck or
-with a burned bond between the aggregate and the finalize is still paid for the round it was
-verified in; the finalize used to re-derive the live set and answer 403 for ever.
+`finalize` pays the inputs recorded with the applied tape, whatever the members' standing is
+when it runs, except an admission banned since: `Finalize.included` lists the inputs less the
+banned ones, and the ledger refuses (`BANNED_WORK`) a reward for a banned admission. A member
+suspended, struck or with a burned bond between the aggregate and the finalize is still paid for
+the round it was verified in (the finalize used to re-derive the live set and answer 403 for
+ever); a member convicted of training fraud in that window is paid nothing, and its share goes to
+the others by tokens, so the whole round budget is still minted.
 
 An audited member whose admission no longer qualifies it when the round is aggregated is left
 out of the round too: `excluded`, reason `INELIGIBLE`, stage `aggregate`, with a `cause`

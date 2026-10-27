@@ -1095,8 +1095,13 @@ the table as covering them.
     hotkey names one admission for good, since `join` and `rotate` both refuse a hotkey in
     `admission_history`, so no `REASSIGNED` cause exists). The survivors check that follows answers 409
     `ROUND_INFEASIBLE` and persists nothing when the rest cannot carry Q (then the reaper retires).
-23. `finalize_v2` pays exactly the inputs recorded with the applied tape and no longer re-derives the live
-    set. This is a prerequisite of every sanction: it must land before the first commit that calls the hook.
+23. `finalize_v2` pays the inputs recorded with the applied tape and no longer re-derives the live set,
+    except an admission that is BANNED when the round is finalized (D59, D62): its share goes to the
+    others by tokens, the signed `Finalize.included` lists the others, and the ledger refuses the work of
+    a banned admission (`BANNED_WORK`, a callback `banned` of `EscrowV2` that searches the hotkey
+    history). A member that is suspended or has a burned bond but is not banned is paid for the round it
+    was verified in. This is a prerequisite of every sanction: it must land before the first commit that
+    calls the hook.
 24. No sanction for `INELIGIBLE`: its cause is the member's own state or the effect of a sanction already
     applied. A sanction is not booked for an absent member whose admission is already unfit.
 
@@ -1222,9 +1227,7 @@ the table as covering them.
 6. The late-join anchor (Q3), which would make "a fifth miner becomes ACTIVE" literal.
 7. D51 (2): the merged `GET .../challenge` of ADR 0010 is signed in headers; the `GET /disputes` route too.
    Both are converted to a signed body envelope in separate commits (D52).
-8. A `TRAINING_FRAUD` ban that lands between the aggregate and the finalize of a round leaves that round's
-   reward with the convicted coldkey (decision 23); the clean rule ("a banned coldkey's later origins
-   mint into `burned`") belongs to the ledger lot.
+8. (Settled by D59: a banned admission is not paid, decision 23.)
 9. The contest window counts beacon rounds, so a beacon outage consumes it; extend `due` by the pause
    length before production.
 10. A retirement costs every roster member a round of work and reward, and a free identity in a roster of

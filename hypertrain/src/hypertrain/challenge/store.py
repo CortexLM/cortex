@@ -2628,6 +2628,7 @@ class ChallengeStore:
                 shadow_assignment_of=lambda binding: self._shadow_assignment_v2(run_id, binding),
                 shadow_settlement=lambda origin: self._shadow_settlement_v2(run_id, origin),
                 round_closure=lambda w: self._round_closure_v2(run_id, w),
+                banned=self._banned_v2,
             )
             escrow.mutex = self._lock  # One SQLite authority lock, including event acknowledgments.
 
@@ -6133,14 +6134,27 @@ class ChallengeStore:
         ).fetchone()[0]
         self._put_record_v2(run_id, "finality", str(w), status)
 
+    def _banned_v2(self, hotkey: str) -> bool:
+        """Whether the admission that ever held `hotkey` was convicted of training fraud.
+
+        Read by the ledger before it mints a round's work: a convicted admission is paid nothing,
+        however the Finalize that lists it came to be signed. The hotkey history is searched too,
+        since a rotation changes the hotkey and not the admission."""
+        return (
+            self._db.execute(
+                "SELECT 1 FROM admissions_v2 WHERE state='BANNED' AND (hotkey=? OR admission_id IN "
+                "(SELECT admission_id FROM admission_history WHERE hotkey=?)) LIMIT 1",
+                (hotkey, hotkey),
+            ).fetchone()
+            is not None
+        )
+
     def _round_closure_v2(self, run_id: str, w: int) -> str | None:
         """The hash that closed round w without a reward, else None. Derived, never stored.
 
         A round is closed without a reward when finality closed it as excluded (an accepted
         rollback, or an exclusion before it was applied) or as retired; pending, settled,
         awaiting its rollback, with an open audit or dispute, or without a record, it is not.
-        RETIRED is compared as a string: `finality_v2` does not know the disposition yet, and
-        until `RoundStatus.closed` counts it no record can match.
         """
         from hypertrain.challenge.finality_v2 import RoundStatus
 
@@ -8851,10 +8865,14 @@ class ChallengeStore:
                     409, "repair evidence is model-only; cannot mint miner rewards"
                 )
             status = RoundStatus(**self._record_v2(run_id, "finality", str(w)))
-            # The applied tape is the commitment: pay exactly its inputs, however they stand now.
+            # The applied tape is the commitment: pay its inputs however they stand now, except an
+            # admission convicted since (BANNED), whose share the others take by tokens. The state
+            # is read by admission id: a rotation changes the hotkey.
+            store = self._services(run_id)[1].store
             included = sorted(
                 item["roster"]["hotkey"]
                 for item in self._record_v2(run_id, "tape-inputs", str(w))["inputs"]
+                if store.by_id(item["roster"]["admission_id"]).state != "BANNED"
             )
             if model.w != w or model.included != included:
                 raise ChallengeError(

@@ -309,8 +309,8 @@ a screen that lasts to the round's `d_final` (`open` refuses a hotkey whose scre
 names the round). The operator opens it, the miners upload, and the operator settles it. Open it with five when an
 eviction is plausible: a miner that never commits is left out (`excluded`, reason `NO_SHOW`) and
 the others are audited and paid, while four miners cannot lose anyone (`audits` answers 409
-`ROUND_INFEASIBLE`). `finalize` lists the roster minus the `excluded` records, read after the
-aggregate. The operator runs `scripts/ops/live_operator.py` inside the TEST challenge:
+`ROUND_INFEASIBLE`). `finalize` lists the inputs of the applied tape (read after the aggregate), less any admission
+banned since. The operator runs `scripts/ops/live_operator.py` inside the TEST challenge:
 
 ```bash
 L="docker exec -i hypertrain-test-challenge python -I - --master http://127.0.0.1:8000 \

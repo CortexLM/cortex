@@ -196,6 +196,7 @@ class EscrowV2:
         auditor_quorum: tuple[int, int] | None = None,
         admission_settlement: Callable[[str], Settlement] | None = None,
         round_closure: Callable[[int], str | None] | None = None,
+        banned: Callable[[str], bool] | None = None,
     ) -> None:
         if auditor_quorum is not None:
             k, n = auditor_quorum
@@ -212,6 +213,7 @@ class EscrowV2:
         ):
             raise EscrowError("PINNED_AUTHORITIES")
         self.auditors, self.replay_finality = auditors, replay_finality
+        self.banned = banned  # hotkey -> whether its admission was convicted of training fraud
         self.settlement, self.owner_of, self.assignment_of = settlement, owner_of, assignment_of
         self.shadow_assignment_of, self.shadow_settlement = shadow_assignment_of, shadow_settlement
         # The settlement of an admission lock comes from its own resolver, chosen by the kind of
@@ -494,6 +496,8 @@ class EscrowV2:
                 if len(cold) != len(envs) or len(envs) < self.auditor_quorum[0]:
                     raise EscrowError("QUORUM_UNMET")
             c.validate_assignment(self.manifest, len(item.sample_ids))
+            if self.banned is not None and self.banned(c.hotkey):
+                raise EscrowError("BANNED_WORK")  # a convicted admission's round is never minted
             if (
                 c.w != final.w
                 or c.hotkey in work

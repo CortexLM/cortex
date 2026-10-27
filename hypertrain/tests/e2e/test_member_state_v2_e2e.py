@@ -170,6 +170,33 @@ def test_a_member_cannot_suspend_itself_by_contesting_its_own_match(n):
     assert finalize(n, 0, applied.json(), fixtures.HOT).status_code == 200
 
 
+def test_a_member_convicted_between_the_aggregate_and_the_finalize_is_not_paid(n):
+    # Given: round 0 applied with five inputs, then one member convicted of training fraud
+    # (TRAINING_FRAUD: banned, bond and unvested rewards burned) before the round is finalized.
+    run = n.manifest.run_id()
+    convicted = fixtures.HOT[0]
+    others = fixtures.HOT[1:]
+    applied = rollback.execute_round(n, 0)
+    escrow, admission, _ = n.store._services(run)
+    admission.seize_bond(
+        admission_id(n, convicted.ss58), reason="TRAINING_FRAUD", evidence_hash="ab" * 32, now=n.now
+    )
+    assert standing(n, convicted.ss58)[0] == "BANNED"
+    assert len(n.store._record_v2(run, "tape-inputs", "0")["inputs"]) == 5
+    # When: a Finalize that still lists the convicted member is refused, and the one without
+    # it settles.
+    stale = finalize(n, 0, applied, fixtures.HOT)
+    settled = finalize(n, 0, applied, others)
+    # Then: the convicted member gets nothing, its share goes to the four by tokens and the whole
+    # round budget is still minted.
+    assert stale.status_code == 422, stale.text
+    assert settled.status_code == 200, settled.text
+    budget = escrow.policy.round_reward_units
+    assert paid(n, 0) == [(h, budget // 4) for h in sorted(k.ss58 for k in others)]
+    assert sum(units for _, units in paid(n, 0)) == budget
+    assert escrow.balances().conserved()
+
+
 def test_a_member_whose_screen_lapsed_is_left_out_and_the_run_goes_on(n):
     # Given: round 0 audited; the screen of the fifth member ends before the aggregate.
     run = n.manifest.run_id()

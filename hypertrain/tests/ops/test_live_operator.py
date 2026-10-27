@@ -170,11 +170,18 @@ def test_open_refuses_a_hotkey_whose_screen_ends_before_the_round_does(
         assert message in str(raised.value)
 
 
-def test_finalize_lists_the_members_the_aggregate_step_left_out(
-    master_args: list[str], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("banned", "paid"),
+    [(None, [0, 1]), (0, [1])],
+    ids=["nobody-banned", "first-input-banned"],
+)
+def test_finalize_lists_the_inputs_of_the_applied_tape_minus_a_banned_admission(
+    master_args: list[str], monkeypatch: pytest.MonkeyPatch, banned: int | None, paid: list[int]
 ) -> None:
     """A member whose delta never arrived is excluded while the master aggregates, so the
-    Finalize the operator signs must be built after that call, not before."""
+    Finalize the operator signs must be built after that call, not before. It lists the inputs
+    of the tape that call applied, less an admission convicted since (state read by admission
+    id: a rotation changes the hotkey)."""
     args = live_operator.argparse.Namespace(
         master=master_args[1],
         run_id=master_args[3],
@@ -231,14 +238,18 @@ def test_finalize_lists_the_members_the_aggregate_step_left_out(
             )
 
     put("round", "0", envelope)
-    for key in keys:
-        put("commit", f"0:{key.ss58}", {"body": {}})
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("CREATE TABLE admissions_v2(admission_id TEXT, state TEXT)")
+        for slot, entry in enumerate(roster):
+            state = "BANNED" if slot == banned else "ACTIVE"
+            db.execute("INSERT INTO admissions_v2 VALUES(?,?)", (entry["admission_id"], state))
     sent: list[tuple[str, dict]] = []
 
     def call(self: Any, method: str, path: str, body: Any = None, admin: bool = False) -> Any:
         sent.append((path, body))
         if path.endswith("/aggregate"):
             put("excluded", f"0:{keys[2].ss58}", {"reason": "NO_SHOW", "stage": "delta"})
+            put("tape-inputs", "0", {"inputs": [{"roster": roster[slot]} for slot in (0, 1)]})
             return {"theta_hash": "33" * 32}
         return {}
 
@@ -247,4 +258,4 @@ def test_finalize_lists_the_members_the_aggregate_step_left_out(
     live_operator.finalize(master, 0)
 
     assert [path for path, _ in sent] == ["/admin/rounds/0/aggregate", "/admin/rounds/0/finalize"]
-    assert sent[1][1]["body"]["included"] == sorted(key.ss58 for key in keys[:2])
+    assert sent[1][1]["body"]["included"] == sorted(keys[slot].ss58 for slot in paid)

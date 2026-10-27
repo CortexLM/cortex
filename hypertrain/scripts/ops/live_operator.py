@@ -231,19 +231,19 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
     return m.call("POST", "/admin/rounds", signed, True)
 
 
-def included(m: Master, w: int, opening: RoundOpenV2) -> list[str]:
-    """Same set verified_inputs_v2 yields: roster minus 'excluded' records (store.py:7574-7581)."""
+def included(m: Master, w: int) -> list[str]:
+    """What finalize_v2 pays: the inputs of the applied tape, less an admission banned since.
+
+    The state is read by the roster entry's admission id, which a rotation does not change.
+    """
     out = []
-    for entry in opening.roster:
-        identity = f"{w}:{entry.hotkey}"
-        if m.query(
-            "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='excluded' AND id=?",
-            m.run_id,
-            identity,
+    for item in m.record("tape-inputs", str(w))["inputs"]:
+        entry = item["roster"]
+        if not m.query(
+            "SELECT 1 FROM admissions_v2 WHERE admission_id=? AND state='BANNED'",
+            entry["admission_id"],
         ):
-            continue
-        m.record("commit", identity)  # verified_inputs_v2 requires it; refuse before POST
-        out.append(entry.hotkey)
+            out.append(entry["hotkey"])
     return sorted(out)
 
 
@@ -252,7 +252,7 @@ def finalize(m: Master, w: int) -> dict:
     refuse_service_run(m)
     opening = RoundOpenV2.model_validate(m.record("round", str(w))["body"])
     applied = m.call("POST", f"/admin/rounds/{w}/aggregate", admin=True)
-    keep = included(m, w, opening)  # after the aggregate: it may leave out a member without a delta
+    keep = included(m, w)  # after the aggregate: it may leave out a member without a delta
     final = Finalize(
         w=w,
         final_theta_hash_w1=applied["theta_hash"],

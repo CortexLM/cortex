@@ -138,6 +138,13 @@
   Part 6, ADR 0011 Part 8 decision 12.
 
 ### Fixed
+- A member convicted of training fraud between the aggregate and the finalize of a round is no
+  longer paid for it: `finalize` leaves an admission that is `BANNED` out of the paid set (read by
+  admission id, a rotation changes the hotkey), the coordinator-signed `Finalize.included` lists
+  the others, their tokens split the whole round budget, and the ledger refuses a reward for a banned
+  admission (`BANNED_WORK`). `scripts/ops/live_operator.py finalize` lists the same set. A member
+  that is only suspended or has a burned bond is still paid for the round it was verified in. See
+  `docs/adr/0011-audit-integrity.md` (Part 8, decision 23).
 - The dispute event poll is a request signed in its body, as the other owner routes: `POST
   /v2/runs/{run_id}/disputes` takes the party's `WatchRequest{party, cursor, wait_seconds}` envelope
   and `GET` with `X-Dispute-Signature` answers 405 (D51: the master proxy forwards no signature
