@@ -218,8 +218,9 @@ def active_network(tmp_path_factory):
         patch.undo()
 
 
-def execute_round(network, w, *, open_only=False, hotkeys=None, forge=None):
-    """One real round for `hotkeys`; `forge` maps a hotkey to CommitV2 fields it lies about."""
+def execute_round(network, w, *, open_only=False, hotkeys=None, forge=None, silent=()):
+    """One real round for `hotkeys`; `forge` maps a hotkey to CommitV2 fields it lies about,
+    `silent` members are rostered but never accept or commit."""
     import anyio
     import httpx
     import torch
@@ -334,6 +335,8 @@ def execute_round(network, w, *, open_only=False, hotkeys=None, forge=None):
     assert response.status_code == 200, response.text
     payloads = []
     for i, hot in enumerate(hotkeys):
+        if hot in silent:
+            continue
         assignment = next(a for a in response.json()["assignment"] if a["hotkey"] == hot.ss58)
         screen = json.loads(
             network.store._db.execute(
@@ -502,7 +505,7 @@ def execute_round(network, w, *, open_only=False, hotkeys=None, forge=None):
     )
     assert accepted.status_code == 200, accepted.text
     verdicts = {}
-    for i in range(len(hotkeys)):
+    for i in range(len(hotkeys) - len(silent)):
         auditor = fixtures.AUDITORS[i % 2]
         accepted = network.client.post(
             network.url + "/worker/lease",
@@ -538,7 +541,9 @@ def execute_round(network, w, *, open_only=False, hotkeys=None, forge=None):
         )
         assert accepted.status_code == 200, accepted.text
     assert verdicts == {
-        hot.ss58: "MISMATCH" if hot.ss58 in (forge or {}) else "MATCH" for hot in hotkeys
+        hot.ss58: "MISMATCH" if hot.ss58 in (forge or {}) else "MATCH"
+        for hot in hotkeys
+        if hot not in silent
     }
     accepted = network.client.post(
         network.url + f"/admin/rounds/{w}/aggregate", headers=fixtures.admin()

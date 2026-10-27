@@ -4299,6 +4299,10 @@ class ChallengeStore:
             "rollback_preview_v2",
             "_rollback_context_v2",
             "schedule_audits_v2",
+            "_round_ids_v2",
+            "_require_survivors_v2",
+            "_put_no_show_v2",
+            "_exclude_no_shows_v2",
             "lease_v2",
             "complete_audit_v2",
             "finalize_v2",
@@ -6346,6 +6350,69 @@ class ChallengeStore:
             )
             return {"leaves_root": commit.leaves_root}
 
+    def _round_ids_v2(self, run_id: str, kind: str, w: int) -> set[str]:
+        return {
+            row[0]
+            for row in self._db.execute(
+                "SELECT id FROM records_v2 WHERE run_id=? AND kind=? AND id LIKE ?",
+                (run_id, kind, f"{w}:%"),
+            )
+        }
+
+    def _require_survivors_v2(self, manifest: RunManifestV2, survivors: list[Any]) -> None:
+        """Refuse a round whose remaining members cannot carry one complete update."""
+        from hypertrain.aggregator.weighted_v2 import (
+            Candidate,
+            InsufficientEligibleWeight,
+            allocate_weights,
+        )
+
+        policy = AggregationPolicyV2.model_validate_json(
+            self.objects.get(manifest.network.aggregation_policy_hash)
+        )
+        try:
+            allocate_weights([Candidate(e, "0" * 64, "0" * 64) for e in survivors], policy)
+        except InsufficientEligibleWeight as error:
+            raise ChallengeError(
+                409, "ROUND_INFEASIBLE: the remaining members cannot carry the round"
+            ) from error
+
+    def _put_no_show_v2(self, run_id: str, w: int, hotkey: str, stage: str) -> None:
+        evidence = f"ht-no-show/1|{run_id}|{w}|{hotkey}|{stage}"
+        self._put_record_v2(
+            run_id,
+            "excluded",
+            f"{w}:{hotkey}",
+            {"reason": "NO_SHOW", "stage": stage, "evidence_hash": sha256_hex(evidence.encode())},
+        )
+
+    def _exclude_no_shows_v2(
+        self, run_id: str, manifest: RunManifestV2, w: int, roster: list[Any]
+    ) -> None:
+        """Leave out the roster members that never committed.
+
+        Commit intake closed at d_commit (training_v2), before audits can be scheduled, so an
+        absence is final. The round stays PENDING: finalize pays the members that were audited.
+        """
+        committed = self._round_ids_v2(run_id, "commit", w)
+        excluded = self._round_ids_v2(run_id, "excluded", w)
+        absent = [e for e in roster if f"{w}:{e.hotkey}" not in committed | excluded]
+        if not absent:
+            return
+        self._require_survivors_v2(
+            manifest,
+            [
+                e
+                for e in roster
+                if f"{w}:{e.hotkey}" in committed and f"{w}:{e.hotkey}" not in excluded
+            ],
+        )
+        for entry in absent:
+            self._put_no_show_v2(run_id, w, entry.hotkey, "commit")
+        finality = self._record_v2(run_id, "finality", str(w))
+        finality["unresolved_audits"] = max(0, int(finality["unresolved_audits"]) - len(absent))
+        self._put_record_v2(run_id, "finality", str(w), finality)
+
     def schedule_audits_v2(self, run_id: str, w: int) -> list[str]:
         from hypertrain.protocol.messages_v2 import AuditChallengeV2, CommitV2, RoundOpenV2
 
@@ -6435,9 +6502,13 @@ class ChallengeStore:
             active = self._db.execute(
                 "SELECT COUNT(*) FROM audit_leases_v2 WHERE state IN ('queued','running')"
             ).fetchone()[0]
+            self._exclude_no_shows_v2(run_id, manifest, w, body.roster)
+            excluded = self._round_ids_v2(run_id, "excluded", w)
             missing = []
             for entry in body.roster:
                 identity = f"{w}:{entry.hotkey}"
+                if identity in excluded:
+                    continue
                 commit_env = self._record_v2(run_id, "commit", identity)
                 commit = CommitV2.model_validate(commit_env["body"])
                 job_id = sha256_hex(f"ht-audit-job/2|{run_id}|{w}|{entry.hotkey}".encode())

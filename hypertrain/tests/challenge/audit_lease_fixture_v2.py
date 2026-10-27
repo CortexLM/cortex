@@ -40,13 +40,14 @@ def lease_rounds(net) -> int:
     return policy.lease_rounds
 
 
-def seed_round(net, n=4, *, executable=False, gap=200, commit_exp=None, nan_leaf=None):
+def seed_round(net, n=4, *, executable=False, gap=200, commit_exp=None, nan_leaf=None, silent=()):
     """Write round 0 (opening, starts, commits, leaves, finality) straight into `records_v2`.
 
     `executable` also persists the genesis anchors and writes the island inputs, so that
     `execute_audit_v2` reaches the executor boundary. `gap` is `d_final - d_audit`: 100 leaves
     one lease window, 200 two full ones. `commit_exp` / `nan_leaf` ({miner index: value})
-    poison one miner's sealed inputs."""
+    poison one miner's sealed inputs. `silent`: indexes of roster members that get a start record
+    and nothing else (opened, started, never committed)."""
     commit_exp, nan_leaf = commit_exp or {}, nan_leaf or {}
     store, manifest = net.store, net.manifest
     run = manifest.run_id()
@@ -119,6 +120,9 @@ def seed_round(net, n=4, *, executable=False, gap=200, commit_exp=None, nan_leaf
         store._put_record_v2(run, "round", "0", net.signed(fixtures.COORD, "RoundOpenV2", opening))
         for index, (key, anchor, start) in enumerate(per):
             ident = f"0:{key.ss58}"
+            if index in silent:
+                store._put_record_v2(run, "start", ident, start.body())
+                continue
             if executable:
                 store._persist_anchor_v2(manifest, anchor, cache)
                 inputs = {
