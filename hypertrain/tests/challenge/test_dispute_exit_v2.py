@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from hypertrain.auditor.island_bisect import RefereeEvidence
+from hypertrain.challenge.admission import Admission
+from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import DisputesV2, Turn
 from hypertrain.ledger.escrow_v2 import EscrowError
 from hypertrain.protocol.hashing import sha256_hex
@@ -345,3 +347,59 @@ def test_failing_close_is_journaled_once_and_keeps_the_revision(
     closed = disputes(network).get(dispute_id)
     assert closed.resolution is not None and closed.resolution.reason == "INFRASTRUCTURE"
     assert escrow.balances().dispute_locked == 0
+
+
+def status(net) -> tuple[str, int, int, str]:
+    """State, pending dispute flag, clean trials and last transition reason of miner 0."""
+    row = net.store._db.execute(
+        "SELECT admission_id,state,pending_dispute,clean_count FROM admissions_v2 WHERE hotkey=?",
+        (HOT[0].ss58,),
+    ).fetchone()
+    reason = net.store._db.execute(
+        "SELECT reason FROM admission_transitions WHERE admission_id=? ORDER BY seq DESC LIMIT 1",
+        (row["admission_id"],),
+    ).fetchone()[0]
+    return row["state"], row["pending_dispute"], row["clean_count"], reason
+
+
+def test_closed_contest_lifts_the_suspension(network) -> None:
+    # Given: opening the contest suspended the contested miner until a settlement resumes it.
+    admission = network.store._services(network.manifest.run_id())[1]
+    dispute_id = open_dispute(network)
+    assert status(network) == ("SUSPENDED", 1, 0, "PENDING_DISPUTE")
+    strikes = admission.store.record(HOT[0].ss58).strikes
+    opened = disputes(network).get(dispute_id)
+    T = admission.escrow.manifest.training.verify.T.dispute_per_level
+    # When: the server closes the silent contest.
+    network.push(opened.turn_deadline + T + 1)
+    # Then: an infrastructure fault leaves the miner on a fresh probation, strikes untouched.
+    assert status(network) == ("PROBATION", 0, 0, "RESUME_FRESH_PROBATION")
+    assert admission.store.record(HOT[0].ss58).strikes == strikes
+    assert (
+        network.store._db.execute(
+            "SELECT COUNT(*) FROM admission_pending WHERE resolved=0"
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_failing_lift_keeps_the_closure_and_is_journaled(network, monkeypatch) -> None:
+    # Given: a contest whose miner cannot be resumed.
+    def failing_lift(self, *args, **kwargs):
+        raise AdmissionError("PENDING_SETTLEMENT")
+
+    monkeypatch.setattr(Admission, "resolve_pending", failing_lift)
+    run_id = network.manifest.run_id()
+    dispute_id = open_dispute(network)
+    opened = disputes(network).get(dispute_id)
+    T = network.store._services(run_id)[0].manifest.training.verify.T.dispute_per_level
+    # When: the server closes the silent contest.
+    network.push(opened.turn_deadline + T + 1)
+    # Then: the closure stands, the suspension too, and the failure is journaled apart.
+    closed = disputes(network).get(dispute_id)
+    assert closed.resolution is not None and closed.resolution.reason == "INFRASTRUCTURE"
+    assert status(network)[:2] == ("SUSPENDED", 1)
+    assert network.store._record_v2(run_id, "dispute-exit-failed", dispute_id) == {
+        "stage": "admission",
+        "error": "AdmissionError:PENDING_SETTLEMENT",
+    }

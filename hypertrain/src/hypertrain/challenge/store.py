@@ -6049,10 +6049,11 @@ class ChallengeStore:
         """Close, without a loser, every dispute no party and no referee can still decide.
 
         The beacon round is the clock. A closure is INFRASTRUCTURE with loser None: the contest
-        bond is released in full, nothing is slashed and the audit's own exclusion stays.
-        One savepoint per dispute; a failure is journaled and never stops the beacon route.
+        bond is released in full, nothing is slashed and the audit's own exclusion stays. The
+        miner's PENDING_DISPUTE suspension then becomes a fresh probation, never a ban.
+        One savepoint per step and dispute; a failure is journaled and never stops the beacon route.
         """
-        escrow, _, disputes = self._services_v2[run_id]
+        escrow, admission, disputes = self._services_v2[run_id]
         with self._tx():
             now = self._now(self._db)
             for turn in disputes.unresolved():
@@ -6068,6 +6069,17 @@ class ChallengeStore:
                         self._recount_disputes_v2(run_id, turn.contest.w)
                 except Exception as error:  # one poisoned dispute must not stop the beacon
                     self._journal_dispute_exit_v2(run_id, turn.dispute_id, "close", error)
+                    continue
+                try:
+                    with escrow.tx():
+                        pending = self._db.execute(
+                            "SELECT 1 FROM admission_pending WHERE dispute_id=? AND resolved=0",
+                            (turn.dispute_id,),
+                        ).fetchone()
+                        if pending is not None:
+                            admission.resolve_pending(turn.contest.miner, turn.dispute_id, now=now)
+                except Exception as error:  # the closure above stands
+                    self._journal_dispute_exit_v2(run_id, turn.dispute_id, "admission", error)
 
     def _journal_dispute_exit_v2(
         self, run_id: str, dispute_id: str, stage: str, error: Exception
