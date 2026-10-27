@@ -98,7 +98,7 @@ if [ "$prod" = 1 ]; then
   case $miner_dir/ in "$out_real"/*) die "HT_B300_MINER_CONFIG is inside the results directory $out" ;; esac
   case $out_real/ in "$miner_dir"/*) die "HT_B300_MINER_CONFIG is above the results directory $out" ;; esac
 else
-  steps=${steps/miner_prod/}
+  steps=${steps//miner_prod/}
 fi
 [ -z "$upload" ] || [[ $upload =~ ^s3://[a-z0-9.-]+(/[A-Za-z0-9._/-]*)?$ ]] || die "bad --upload: $upload"
 
@@ -184,18 +184,21 @@ upload_results() {
 }
 finish() {
   local reason=$1 rc=$2 ids
-  # Last thing the script does, whatever called it: no later signal or EXIT trap may interrupt it,
-  # and every command below has its own fallback so that a failing one cannot skip the next.
-  # A group signal (systemd stop, SSM cancel) also kills tee: log straight to the file from here.
+  # Last thing the script does, whatever called it: no later signal or EXIT trap may interrupt it
+  # and no failing command (a run.log that cannot be written, a docker that does not answer) may
+  # skip the next one. A group signal (systemd stop, SSM cancel) also kills tee: log straight to
+  # the file from here.
   trap '' TERM INT HUP PIPE
   trap - EXIT
+  set +e
   exec >>"$out/run.log" 2>&1
   kill "$watchdog_pid" 2>/dev/null || true
-  ids=$(dk ps -q --filter "label=io.cortex.b300-run=$run_id" 2>/dev/null || true)
+  ids=$(dk ps -q --filter "label=io.cortex.b300-run=$run_id" 2>/dev/null) ||
+    log "could not list this run's containers: docker ps failed"
   if [ -n "$ids" ]; then
     log "stopping containers ($reason): $(echo "$ids" | tr '\n' ' ')"
     # shellcheck disable=SC2086  # one container id per word
-    dk stop --time "$STOP_GRACE" $ids >/dev/null || true
+    dk stop --time "$STOP_GRACE" $ids >/dev/null || log "docker stop failed"
   fi
   if [ -n "$bg_pid" ]; then # a docker pull has no container to stop
     pkill -TERM -P "$bg_pid" 2>/dev/null || true
@@ -248,7 +251,12 @@ on_signal() {
   rm -f "$out/.stop-reason" 2>/dev/null || true
   finish "$reason" 143
 }
-on_exit() { finish unexpected-exit $?; }
+# $? is 0 when bash runs this for a fatal signal (SIGPIPE from a dead tee, SIGUSR1...): a stop.json
+# that says unexpected-exit must not say rc 0.
+on_exit() {
+  local rc=$?
+  finish unexpected-exit "$((rc == 0 ? 1 : rc))"
+}
 trap on_signal TERM INT HUP
 trap on_exit EXIT
 

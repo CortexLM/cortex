@@ -39,6 +39,8 @@ if os.environ.get("FAKE_NEEDS_SUDO") == "1" and os.environ.get("FAKE_SUDO") != "
 with (state / "docker.jsonl").open("a") as f:
     f.write(json.dumps(argv) + "\n")
 cmd = argv[0]
+if cmd in os.environ.get("FAKE_DOCKER_FAIL", "").split(","):
+    sys.exit(f"Error response from daemon: {cmd} failed")
 if cmd in ("run", "pull"):
     try:  # fd 9 is the flock of the results directory: a long-lived child must not hold it
         os.fstat(9)
@@ -227,11 +229,14 @@ os.execvpe(args[0], args, {**os.environ, "FAKE_SUDO": "1"})
 # on SRC/<relative path>, the last match wins, everything is included by default. The files that
 # pass are copied under state/s3/<bucket and key>.
 FAKE_AWS = r"""
-import fnmatch, json, os, pathlib, shutil, sys
+import fnmatch, json, os, pathlib, shutil, sys, time
 state = pathlib.Path(os.environ["FAKE_STATE"])
 args = sys.argv[1:]
 with (state / "aws.jsonl").open("a") as f:
     f.write(json.dumps(args) + "\n")
+time.sleep(float(os.environ.get("FAKE_AWS_SLEEP", "0")))
+if args[:2] != ["s3", "cp"] or "--recursive" not in args:  # a directory is one object otherwise
+    sys.exit("fake aws: only 's3 cp --recursive' is modelled")
 filters, paths, i = [], [], 2
 while i < len(args):
     if args[i] in ("--exclude", "--include"):
@@ -544,6 +549,7 @@ def test_duration_deadline_stops_the_run(env, tmp_path):
     p = run({**env, "FAKE_BLOCK": "mfu"}, tmp_path, "--duration", "2")
     assert p.returncode == 143 and stop_json(tmp_path)["reason"] == "duration"
     assert time.monotonic() - t0 < 30
+    assert not (tmp_path / "results/h1/.stop-reason").exists()  # consumed, not left for a next run
 
 
 def test_sigterm_drains_the_running_container(env, tmp_path):
@@ -887,14 +893,16 @@ def test_sighup_drains_like_sigterm_and_leaves_no_watchdog(env, tmp_path, launch
 
 
 def test_an_unexpected_exit_still_drains_uploads_and_stops_the_watchdog(env, tmp_path, launch):
-    # The second miner_prod survives the removal of the first one without --prod, and its unbound
-    # HT_B300_MINER_CONFIG kills the shell mid-run; any other unexpected exit takes the same path.
-    proc = launch("--steps", "miner_prod miner_prod", "--upload", "s3://bucket/b300")
-    assert proc.wait(timeout=30) == 1
-    stop = stop_json(tmp_path)
-    assert stop["reason"] == "unexpected-exit" and stop["rc"] == 1
-    assert "stop.json" in uploaded(tmp_path)
+    # SIGUSR1 kills the shell without the TERM/INT/HUP handler; bash runs the EXIT trap for it.
+    proc = launch("--upload", "s3://bucket/b300", FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
     pid = watchdog_pid(tmp_path)
+    proc.send_signal(signal.SIGUSR1)
+    assert proc.wait(timeout=30) != 0
+    stop = stop_json(tmp_path)
+    assert stop["reason"] == "unexpected-exit" and stop["rc"] != 0  # never a clean-looking 0
+    assert ["stop", "--time", "60", "ctr-gpu_probe"] in docker_calls(tmp_path)
+    assert "stop.json" in uploaded(tmp_path)
     wait_until(lambda: not alive(pid), "the watchdog to be gone")
 
 
@@ -1122,3 +1130,65 @@ def test_a_stop_reason_left_by_an_earlier_run_does_not_label_this_stop(env, tmp_
     assert proc.wait(timeout=30) == 143
     stop = stop_json(tmp_path)
     assert stop["reason"] == "signal" and stop["spot_notice"] is None
+
+
+# --- finish() runs to the end whatever fails inside it -------------------------------------------
+
+
+def test_a_log_that_cannot_be_written_does_not_stop_the_drain(env, tmp_path, launch):
+    proc = launch("--upload", "s3://bucket/b300", FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    out = tmp_path / "results/h1"
+    (out / "run.log").rename(out / "run.log.moved")
+    (out / "run.log").mkdir()  # the append in finish() now fails, as on a full or read-only disk
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    assert ["stop", "--time", "60", "ctr-gpu_probe"] in docker_calls(tmp_path)
+    assert stop_json(tmp_path)["reason"] == "signal" and "stop.json" in uploaded(tmp_path)
+
+
+@pytest.mark.parametrize("failing", ["ps", "stop"])
+def test_a_failing_docker_does_not_stop_the_drain_and_is_logged(env, tmp_path, launch, failing):
+    proc = launch("--upload", "s3://bucket/b300", FAKE_BLOCK="gpu_probe", FAKE_DOCKER_FAIL=failing)
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    assert stop_json(tmp_path)["reason"] == "signal" and "stop.json" in uploaded(tmp_path)
+    log = (tmp_path / "results/h1/run.log").read_text()
+    assert ("could not list" if failing == "ps" else "docker stop failed") in log
+
+
+def test_sigint_drains_like_sigterm(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="gpu_probe")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    proc.send_signal(signal.SIGINT)
+    assert proc.wait(timeout=30) == 143 and stop_json(tmp_path)["reason"] == "signal"
+
+
+def test_signals_during_the_upload_do_not_start_a_second_drain(env, tmp_path, launch):
+    # The host probe fails, so finish() runs outside any trap; a slow upload gives time to signal.
+    proc = launch("--upload", "s3://bucket/b300", FAKE_SMI_FAIL="1", FAKE_AWS_SLEEP="3")
+    aws = tmp_path / "state/aws.jsonl"
+    wait_until(lambda: aws.exists() and aws.read_text(), "the upload to start")
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        proc.send_signal(sig)
+    assert proc.wait(timeout=30) == 3  # the host-probe verdict, not 143
+    assert len(aws.read_text().splitlines()) == 1
+    assert (tmp_path / "results/h1/run.log").read_text().count("\nSTOP ") == 1
+
+
+def test_a_repeated_miner_prod_does_not_run_without_prod(env, tmp_path):
+    # Only the first occurrence used to be dropped: the second ran production rounds with none of
+    # the --prod checks (here: a miner directory inside the results directory).
+    prod = prod_env(tmp_path / "results/h1/miner")
+    p = run({**env, **prod}, tmp_path, "--steps", "miner_prod miner_prod")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert runs_of(tmp_path, "miner-prod-3") == [] and runs_of(tmp_path, "gpu_probe") == []
+    assert stop_json(tmp_path)["steps"] == {}
+
+
+def test_a_custom_container_prefix_names_the_containers(env, tmp_path):
+    p = run({**env, "HT_B300_CONTAINER_PREFIX": "ht-other"}, tmp_path, "--steps", "gpu_probe")
+    assert p.returncode == 0, p.stdout + p.stderr
+    (probe,) = [c for c in docker_calls(tmp_path) if c[0] == "run"]
+    assert probe[probe.index("--name") + 1] == "ht-other-gpu_probe"
