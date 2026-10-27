@@ -95,6 +95,69 @@ def test_a_500_is_retried_only_for_a_cuda_run(monkeypatch, device, retried):
     assert not m.transient("", "ChallengeHTTPError: 409 CHALLENGE_EXPIRED")
 
 
+EXHAUSTED_404 = "ChallengeHTTPError: 404: trial input object unavailable"
+
+
+@pytest.mark.parametrize("device", ["cuda", None], ids=["cuda", "cpu"])
+def test_only_the_404_of_a_trial_input_the_miner_gave_up_on_is_transient(monkeypatch, device):
+    m = load(monkeypatch, device)
+    assert m.transient("", "INFO ...\n2026-10-27 22:26:42,001 ERROR " + EXHAUSTED_404)
+    for refused in (
+        "ChallengeHTTPError: 404: unknown admission",
+        "ChallengeHTTPError: 404: ",
+        "ChallengeHTTPError: 403: trial input object unavailable",
+        "ChallengeHTTPError: 409 CHALLENGE_EXPIRED",
+    ):
+        assert not m.transient("", refused)
+
+
+def scripted_cli(m, monkeypatch, answers: list[tuple[int, str, str]]) -> list[str]:
+    """A miner CLI that answers `answers` in order, the last one for ever; the stages it ran."""
+    stages: list[str] = []
+
+    def fake(root, i, name, args, **extra):
+        stages.append(name)
+        assert len(stages) < 200, "driver retried without bound"
+        return answers[min(len(stages), len(answers)) - 1]
+
+    monkeypatch.setattr(m, "cli", fake)
+    monkeypatch.setattr(m.time, "sleep", lambda _: None)
+    return stages
+
+
+def test_a_trial_whose_input_404_outlasted_the_miner_gets_another_driver_pass(
+    monkeypatch, tmp_path
+):
+    m = load(monkeypatch, None)
+    (tmp_path / "m0").mkdir()
+    stages = scripted_cli(
+        m,
+        monkeypatch,
+        [(2, "", "ERROR " + EXHAUSTED_404), (0, '{"proof": 1}', ""), (0, "{}", "")],
+    )
+    m.trial(tmp_path, 0, 5)
+    assert stages == ["probe-v2", "probe-v2", "proof-v2"]
+    assert (tmp_path / "m0/proof-5.json").read_text() == '{"proof": 1}'
+
+
+def test_a_404_that_never_clears_stops_the_driver_after_its_40_passes(monkeypatch, tmp_path):
+    m = load(monkeypatch, None)
+    (tmp_path / "m0").mkdir()
+    stages = scripted_cli(m, monkeypatch, [(2, "", "ERROR " + EXHAUSTED_404)])
+    with pytest.raises(SystemExit, match="probe-v2 miner 0 trial 5: retries exhausted"):
+        m.trial(tmp_path, 0, 5)
+    assert stages == ["probe-v2"] * 40
+
+
+def test_any_other_404_stops_the_driver_at_once(monkeypatch, tmp_path):
+    m = load(monkeypatch, None)
+    (tmp_path / "m0").mkdir()
+    stages = scripted_cli(m, monkeypatch, [(2, "", "ERROR ChallengeHTTPError: 404: unknown run")])
+    with pytest.raises(SystemExit, match="unknown run"):
+        m.trial(tmp_path, 0, 5)
+    assert stages == ["probe-v2"]
+
+
 def fake_smi(tmp_path: Path, monkeypatch, readings: list[str]) -> Path:
     """nvidia-smi that prints the next reading on each call (the last one repeats)."""
     bindir, state = tmp_path / "bin", tmp_path / "calls"

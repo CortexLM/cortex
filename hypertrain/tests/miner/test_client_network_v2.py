@@ -522,6 +522,150 @@ def test_object_get_and_api_get_retry_5xx_but_signed_post_is_never_replayed(
     assert hits == ["POST"]
 
 
+def _answer_object_gets(miner, status: int, times: int | None):
+    """Answer the first `times` object GETs (every one when None) with `status`; count them.
+
+    The route is the miner's real one, so an object GET past that point is served as stored. An
+    unbounded retry loop fails the test instead of hanging it."""
+    route, gets = miner.api.c._transport.handler, []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method != "GET" or "/objects/" not in request.url.path:
+            return route(request)
+        gets.append(request.url.path)
+        assert len(gets) < 60, "object GET retried without bound"
+        if times is not None and len(gets) > times:
+            return route(request)
+        return httpx.Response(status, json={"detail": "object not found"})
+
+    miner.api.c._transport.handler = handler
+    return gets
+
+
+def _journaled_retries(miner) -> list[dict]:
+    path = miner.directory / "journal.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_trial_input_get_retries_a_transient_404_and_journals_each_retry(
+    tmp_path: Path, monkeypatch
+):
+    import hypertrain.miner.core as core
+
+    # Given: a trial input that answers 404 twice before it is served (RELAY-02: one read miss,
+    # the object intact on the server).
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0, 0))
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"trial input")
+    gets = _answer_object_gets(miner, 404, 2)
+    # When
+    miner._get_whole(sha, tmp_path / "input")
+    # Then: the verified object is on disk and each retry is one journal line a replay can count.
+    assert (tmp_path / "input").read_bytes() == b"trial input" and len(gets) == 3
+    retries = _journaled_retries(miner)
+    assert [(r["kind"], r["route"], r["status"], r["attempt"]) for r in retries] == [
+        ("retry", f"GET object {sha}", 404, 1),
+        ("retry", f"GET object {sha}", 404, 2),
+    ]
+    assert all(set(r) >= {"utc", "route", "status", "attempt", "delay"} for r in retries)
+    assert all(r["utc"].endswith("Z") for r in retries)
+
+
+def test_trial_input_get_gives_up_on_a_404_that_stays_after_bounded_jittered_retries(
+    tmp_path: Path, monkeypatch
+):
+    import hypertrain.miner.core as core
+    from hypertrain.miner.core import ChallengeHTTPError
+
+    # Given: an object that is never there and a retry budget of 20 waits of one second.
+    monkeypatch.setattr(core, "RETRY_DELAYS", (1.0,) * 20)
+    slept: list[float] = []
+    monkeypatch.setattr(core.time, "sleep", slept.append)
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"trial input")
+    gets = _answer_object_gets(miner, 404, None)
+    # When / Then: the same typed error as before, after exactly the budget, and no file.
+    with pytest.raises(ChallengeHTTPError, match="^404: trial input object unavailable$"):
+        miner._get_whole(sha, tmp_path / "input")
+    assert len(gets) == 21 and not (tmp_path / "input").exists()
+    # And: the waits are what the journal says, within 50% of the schedule and not all equal,
+    # so miners that failed together do not retry together.
+    delays = [r["delay"] for r in _journaled_retries(miner)]
+    assert delays == slept and [r["attempt"] for r in _journaled_retries(miner)] == list(
+        range(1, 21)
+    )
+    assert all(0.5 <= d <= 1.5 for d in delays) and len(set(delays)) > 1
+
+
+def test_part_get_retries_a_transient_404_and_fails_with_the_http_error_when_it_stays(
+    tmp_path: Path, monkeypatch
+):
+    import hypertrain.miner.core as core
+
+    # Given: a part that answers 404 once, then forever.
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0))
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"part")
+    gets = _answer_object_gets(miner, 404, 1)
+    # When / Then: served on the second try, with one journaled retry.
+    assert miner._get_object(sha) == b"part" and len(gets) == 2
+    assert [(r["status"], r["attempt"]) for r in _journaled_retries(miner)] == [(404, 1)]
+    # And: a part that stays missing ends in the error it ended in before.
+    miner.api.c._transport.handler = lambda request: httpx.Response(404)
+    with pytest.raises(httpx.HTTPStatusError) as stays:
+        miner._get_object(sha)
+    assert stays.value.response.status_code == 404
+    assert len(_journaled_retries(miner)) == 1 + 2
+
+
+def test_a_404_is_retried_only_by_object_gets_and_no_other_4xx_is(tmp_path: Path, monkeypatch):
+    import hypertrain.miner.core as core
+    from hypertrain.miner.core import ChallengeHTTPError
+
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0, 0))
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"x")
+    # An API read keeps its answer: 404 means "not there yet" to its callers.
+    calls: list[str] = []
+
+    def not_found(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(404, json={"detail": "unknown admission"})
+
+    miner.api.c._transport.handler = not_found
+    with pytest.raises(ChallengeHTTPError, match="^404: unknown admission$"):
+        miner.api.call("GET", "/v2/runs/x/admission/y")
+    assert len(calls) == 1
+    # An object read that is refused (not missing) is not retried either.
+    gets = _answer_object_gets(miner, 403, None)
+    with pytest.raises(ChallengeHTTPError, match="^403:"):
+        miner._get_whole(sha, tmp_path / "input")
+    with pytest.raises(httpx.HTTPStatusError):
+        miner._get_object(sha)
+    assert len(gets) == 2 and _journaled_retries(miner) == []
+
+
+def test_trial_input_that_is_served_after_a_retry_is_still_verified(tmp_path: Path, monkeypatch):
+    import hypertrain.miner.core as core
+    from hypertrain.miner.core import MinerError
+
+    # Given: a 404, then bytes that do not hash to the pinned digest.
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0, 0))
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"trial input")
+    gets: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        gets.append(request.url.path)
+        return httpx.Response(404) if len(gets) == 1 else httpx.Response(200, content=b"forged")
+
+    miner.api.c._transport.handler = handler
+    # When / Then: refused, and a digest mismatch is a verdict, not a transient: no third GET.
+    with pytest.raises(MinerError, match="sha256 mismatch"):
+        miner._get_whole(sha, tmp_path / "input")
+    assert len(gets) == 2
+
+
 def test_fetch_inputs_reuses_own_carry_and_downloads_only_theta(tmp_path: Path):
     import hashlib
     from types import SimpleNamespace

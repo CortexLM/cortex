@@ -296,6 +296,14 @@ That gives 3 ACTIVE and 1 PROBATION. Rules that decide how identities are spent:
   suspends it as `APPLIED_EXPIRED` and its coldkey may apply again with a new hotkey (ADR 0010);
   a funded one stays APPLIED and blocks its coldkey. This is why `admit` joins a miner only
   when its turn starts.
+- **A trial is retried only on what the challenge documents as transient:** a 503,
+  `SEED_NOT_READY`, `TRIAL_CAPACITY`, a transport error, and the 404 `trial input object
+  unavailable` that `probe-v2` reports once its own retries are spent (it retries an input GET that
+  meets a 404, a 5xx or a transport error five times, 1 to 16 s apiece, each wait jittered, and
+  appends one `kind: retry` line per retry to `journal.jsonl` in `work/<run id>/<hotkey>/`). The
+  driver gives those up to 40 passes. Any other error stops the plan: a trial that misses its 100
+  rounds strands the identity (409 `CHALLENGE_EXPIRED`), and a restarted driver cannot get a new
+  challenge for it, because no route re-seeds an identity (ADR 0010 part 2).
 
 A round opens on a roster of four funded, eligible miners with at most one in PROBATION. The
 operator opens it, the miners upload, and the operator settles it. Open it with five when an

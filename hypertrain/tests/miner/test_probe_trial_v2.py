@@ -91,6 +91,10 @@ def miner(network, tmp_path, monkeypatch):
         if name == "signature" and path.endswith("/challenge"):
             return httpx.Response(200, json={**response.json(), "sig": "00" * 64})
         if "/objects/" in path and request.method == "GET":
+            missed = fault.setdefault("missed", {})
+            if missed.get(path, 0) < fault.get("miss", 0):
+                missed[path] = missed.get(path, 0) + 1
+                return httpx.Response(404, json={"detail": "object not found"})
             if name == "corrupt":
                 return httpx.Response(200, content=b"corrupt object")
             if name == "gzip":
@@ -186,3 +190,53 @@ def test_probe_v2_refuses_job_or_challenge_alone(miner, caplog, tmp_path, given)
     assert cli.main(["probe-v2", "--config", str(config), given, str(stray)]) == 2
     assert "takes --job and --challenge, or neither" in caplog.text
     assert not any(r.url.path.endswith(("/challenge", "/job")) for r in requests)
+
+
+def test_probe_v2_completes_when_each_trial_input_misses_once(miner, monkeypatch, capsys):
+    import hypertrain.miner.core as core
+
+    # Given: RELAY-02, a read miss on a trial input that is intact on the server
+    n, _, config, folder, _, fault = miner
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0,))
+    fault["miss"] = 1
+    # When
+    assert cli.main(["probe-v2", "--config", str(config)]) == 0
+    signed = json.loads(capsys.readouterr().out)
+    # Then: every miss was retried once and journaled, and the retried inputs were verified
+    # like any other: the service accepts the proof it replays.
+    retries = [json.loads(x) for x in (folder / "journal.jsonl").read_text().splitlines()]
+    assert len(retries) == len(fault["missed"]) >= 1
+    assert {(r["kind"], r["status"], r["attempt"]) for r in retries} == {("retry", 404, 1)}
+    response = n.client.post(n.url + "/join/proof", json=signed)
+    assert response.status_code == 200, response.text
+    assert response.json()["clean_count"] == 1
+
+
+def test_probe_v2_ends_on_the_line_the_s100_driver_retries_when_an_input_stays_missing(
+    miner, monkeypatch, caplog
+):
+    import hypertrain.miner.core as core
+
+    # Given: a trial input that never arrives
+    _, _, config, folder, requests, fault = miner
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0))
+    fault["miss"] = 99
+    # When
+    assert cli.main(["probe-v2", "--config", str(config)]) == 2
+    # Then: it fails after its own retries, with nothing probed, uploaded or left in the folder
+    last = caplog.records[-1]
+    assert last.getMessage() == "ChallengeHTTPError: 404: trial input object unavailable"
+    retries = [json.loads(x) for x in (folder / "journal.jsonl").read_text().splitlines()]
+    assert [r["attempt"] for r in retries] == [1, 2]
+    assert not any(r.method == "PUT" for r in requests)
+    assert {p.name for p in folder.iterdir()} <= {"journal.jsonl", "journal.lock"}
+    # And: the driver takes that final stderr line, as the CLI wrote it, for a transient
+    monkeypatch.delenv("HT_MINER_DEVICE", raising=False)
+    spec = importlib.util.spec_from_file_location(
+        "cpu_miners_probe_contract",
+        Path(__file__).parents[2] / "scripts/ops/s100_test/cpu_miners.py",
+    )
+    assert spec is not None and spec.loader is not None
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+    assert driver.transient("", f"{last.levelname} {last.getMessage()}")

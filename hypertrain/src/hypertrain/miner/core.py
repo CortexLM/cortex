@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import shutil
 import stat
 import tempfile
@@ -51,27 +52,43 @@ from hypertrain.trainer.optim import OptState, init_state
 log = logging.getLogger("hypertrain.miner")
 EXP_ROUNDS = 2**40  # envelope expiry far beyond any round; replay protection is per (w, type)
 # Backoff between attempts of an idempotent request (object PUT/GET, API GET) that hit a
-# transport error or a 5xx; the last failure propagates. ~31 s worst case per request.
+# transport error or a 5xx; the last failure propagates. ~31 s worst case per request, each wait
+# jittered by +-50%.
 RETRY_DELAYS: tuple[float, ...] = (1, 2, 4, 8, 16)
+# An object GET also retries a 404: the digest comes from a job the server just signed, so a
+# miss is a read that lost a race, not an answer (s100 TEST replay, 2026-10-27, RELAY-02).
+OBJECT_MISS = frozenset({404})
 OWNER_REQUEST_ROUNDS = 20  # a signed owner request lives about a minute at 3 s rounds
 FETCH_WORKERS = 16  # concurrent 1 MiB part GETs per job input (bounded window, ordered sink)
 UPLOAD_WORKERS = 16  # concurrent 1 MiB part PUTs per artifact (bounded window, index last)
 
 
-def _retrying[T](what: str, fn: Callable[[], T]) -> T:
-    """Run an idempotent request, retrying transport errors and 5xx responses only."""
-    for delay in (*RETRY_DELAYS, None):
+def _retrying[T](
+    what: str,
+    fn: Callable[[], T],
+    *,
+    also: frozenset[int] = frozenset(),
+    noted: Callable[[str, int | None, int, float], None] | None = None,
+) -> T:
+    """Run an idempotent request, retrying transport errors, 5xx responses and the `also` statuses.
+
+    `noted(what, status, attempt, delay)` sees each retry before its wait; status is None for a
+    transport error."""
+    for attempt, delay in enumerate((*RETRY_DELAYS, None), 1):
         try:
             return fn()
         except (httpx.TransportError, httpx.HTTPStatusError, ChallengeHTTPError) as error:
             status = getattr(getattr(error, "response", None), "status_code", None)
             status = getattr(error, "status", status)
-            if delay is None or (status is not None and status < 500):
+            if delay is None or (status is not None and status < 500 and status not in also):
                 raise
+            delay *= random.uniform(0.5, 1.5)
             # Type + status only: request URLs can carry the proxy token.
             log.warning(
-                "%s failed (%s %s); retry in %ss", what, type(error).__name__, status, delay
+                "%s failed (%s %s); retry in %.1fs", what, type(error).__name__, status, delay
             )
+            if noted is not None:
+                noted(what, status, attempt, delay)
             time.sleep(delay)
     raise AssertionError("unreachable")
 
@@ -789,6 +806,20 @@ class NetworkMiner:
     def status(self) -> dict[str, Any]:
         return self.api.call("GET", self.url + "/admission/" + self.kp.ss58)
 
+    def _note_retry(self, route: str, status: int | None, attempt: int, delay: float) -> None:
+        """One journal line per object retry, so a replay can count them."""
+        Journal(self.directory).append(
+            "retry",
+            utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            route=route,
+            status=status,
+            attempt=attempt,
+            delay=delay,
+        )
+
+    def _retry[T](self, what: str, fn: Callable[[], T], *, also: frozenset[int] = frozenset()) -> T:
+        return _retrying(what, fn, also=also, noted=self._note_retry)
+
     def join(self, coldfile: Path, request_id: str, expiry: int) -> dict[str, Any]:
         from hypertrain.miner.admission import sign_join
         from hypertrain.protocol.messages_v2 import HardwareHint
@@ -999,7 +1030,7 @@ class NetworkMiner:
             if hasher.hexdigest() != digest:
                 raise MinerError(f"trial input {target.name} sha256 mismatch")
 
-        _retrying("GET object " + digest, get)
+        self._retry("GET object " + digest, get, also=OBJECT_MISS)
 
     def _bounded_put(
         self, deadline: float, cancel: threading.Event | None
@@ -1033,7 +1064,7 @@ class NetworkMiner:
             response.raise_for_status()
             return digest
 
-        return _retrying("PUT object " + digest, put)
+        return self._retry("PUT object " + digest, put)
 
     def _fetch_inputs(
         self,
@@ -1137,7 +1168,7 @@ class NetworkMiner:
                     body.extend(chunk)
                 return bytes(body)
 
-        return _retrying("GET object " + digest, get)
+        return self._retry("GET object " + digest, get, also=OBJECT_MISS)
 
     def proof(self, document: Path) -> dict[str, Any]:
         from hypertrain.protocol.envelope_v2 import load_json

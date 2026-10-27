@@ -172,7 +172,12 @@ finalized, 503 on a beacon pause). The miner checks the job, objects and signed 
 `trial_export` does, streams each input (one uncompressed, sha256-verified
 object; about 4 bytes per parameter for a `reset` start state, more under
 `carry`) into a private temporary folder under its workdir, probes, and deletes
-the folder, also on failure: a re-run downloads and probes again.
+the folder, also on failure: a re-run downloads and probes again. An object GET or PUT of the miner
+that meets a transport error or a 5xx, and an object GET that meets a 404 (a read that lost a race
+on an object the server just listed), waits and retries up to five times (1, 2, 4, 8, 16 s, each
+wait jittered by 50%) before it fails with the error it met; a digest mismatch is never retried.
+Each retry is one JSON line (`kind: retry`, `utc`, `route`, `status`, `attempt`, `delay`) appended
+to `journal.jsonl` in `<workdir>/<run_id>/<hotkey>/`, so a replay can count them.
 
 `probe-v2` executes the screen and uploads original rank-0 state/EF/delta/leaves;
 stdout contains the signed proof/screen pair. The operator independently prepares
