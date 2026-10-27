@@ -224,6 +224,24 @@ Funding uses signed `EscrowLock` via `POST /v2/runs/{run_id}/escrow/lock`, not a
 CLI `--bond` flag. Test genesis has pinned nonfinancial origins; production mode
 has separate reward authority/issuance bounds and no test-genesis conversion.
 
+The ledger keeps two key spaces for its events. A client event (`escrow/lock`,
+`escrow/transfer`, `escrow/release`) is stored under the `operation_id` its owner
+signed, a 64-hex string. An event the service writes itself (test genesis,
+production bootstrap, reward and shadow-reward finalize, maturity, the payment of
+`get_weights`, the release or slash that settles a dispute) is stored under
+`srv:` plus the HMAC of its derived id under a key that the master derives from
+the coordinator secret, so a signed owner event can never occupy an id the service
+needs and nobody can compute a server key from public values. Receipts still name
+the derived id. The master pins the key's namespace in its `meta` table
+(`escrow-id-namespace-v2`) and refuses to serve (503 `escrow id namespace differs`)
+if the coordinator secret later yields another key; the key is not rotated in place,
+a new coordinator key is a new run. A ledger opened without the key (the read-only
+authority snapshot) refuses every server operation (`ID_KEY_REQUIRED`); its `verify()`
+checks the hash chain, the shape of each server key and that no client event sits in
+the server space, not the binding of a key to its receipt. A chain written before the
+split keeps its bare server ids and is read through a fallback that accepts only an
+identical request. See `docs/adr/0014` at the monorepo root.
+
 Production funding is one coordinator-signed `ProductionBootstrap`, posted as an
 `ht/2` envelope to `POST /v2/runs/{run_id}/admin/bootstrap` (admin bearer). The
 run's `EconomicsPolicyV2.bootstrap_allocation_hash` pins its owner/units/maturity

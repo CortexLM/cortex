@@ -7,7 +7,9 @@ The service supplies authenticated finality/replay and settlement from its own r
 
 from __future__ import annotations
 
+import hmac
 import json
+import re
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator, Sequence
@@ -55,6 +57,19 @@ class EscrowError(ValueError):
 
 def digest(model: BaseModel) -> str:
     return body_digest(model.model_dump(mode="json"))
+
+
+# Event key space of the operations the service writes itself (ADR 0014 part 1). A client
+# operation_id is a Hex64, so a key that starts with "srv:" can never equal one: no signed owner
+# event can occupy an id the service later needs.
+SERVER_SCOPE = "srv:"
+CLIENT_ONLY_KINDS = frozenset({"LOCK_ADMISSION", "LOCK_CONTEST", "TRANSFER"})
+_SERVER_KEY = re.compile(r"srv:[0-9a-f]{64}")
+
+
+def escrow_id_key(coordinator_secret: bytes) -> bytes:
+    """Key under which the service derives the ids a third party must not be able to compute."""
+    return hmac.digest(coordinator_secret, b"hypertrain/escrow-id/2", "sha256")
 
 
 def authority_message(
@@ -178,6 +193,9 @@ class EscrowV2:
 
     Pass the service SQLite connection to share eligibility/rotation transactions.
     Independent replay and settlement callbacks are mandatory authority boundaries.
+    `id_key` keys the ids the service derives. Without it the ledger is a read-only verifier (the
+    authority snapshot): every server operation refuses `ID_KEY_REQUIRED`, and `verify()` checks the
+    shape and the key space of a server key, not its binding to the receipt.
     """
 
     def __init__(
@@ -194,6 +212,7 @@ class EscrowV2:
         shadow_assignment_of: Callable[[ShadowReservationV1], tuple[int, ...]] | None = None,
         shadow_settlement: Callable[[str], Settlement] | None = None,
         auditor_quorum: tuple[int, int] | None = None,
+        id_key: bytes | None = None,
     ) -> None:
         if auditor_quorum is not None:
             k, n = auditor_quorum
@@ -212,6 +231,7 @@ class EscrowV2:
         self.auditors, self.replay_finality = auditors, replay_finality
         self.settlement, self.owner_of, self.assignment_of = settlement, owner_of, assignment_of
         self.shadow_assignment_of, self.shadow_settlement = shadow_assignment_of, shadow_settlement
+        self.id_key = id_key
         self.mutex = threading.RLock()
         match database:
             case Path():
@@ -278,26 +298,45 @@ class EscrowV2:
                 else:
                     self.db.execute("ROLLBACK" if failed else "COMMIT")
 
-    def _existing(self, operation_id: str, request: str) -> EscrowReceipt | None:
+    def _key(self, operation_id: str, server: bool) -> str:
+        """Event key: the client's own id, or the keyed key of an id the service derived."""
+        if not server:
+            return operation_id
+        if self.id_key is None:
+            raise EscrowError("ID_KEY_REQUIRED")
+        return SERVER_SCOPE + hmac.digest(self.id_key, operation_id.encode(), "sha256").hex()
+
+    def _existing(
+        self, operation_id: str, request: str, *, server: bool = False
+    ) -> EscrowReceipt | None:
         row = self.db.execute(
-            "SELECT request,receipt FROM escrow_events WHERE operation_id=?", (operation_id,)
+            "SELECT request,receipt FROM escrow_events WHERE operation_id=?",
+            (self._key(operation_id, server),),
         ).fetchone()
+        if row is None and server:
+            # A chain written before the server key space kept these events under the bare id.
+            # Only the identical request counts: a client event on that id is not this operation.
+            row = self.db.execute(
+                "SELECT request,receipt FROM escrow_events WHERE operation_id=? AND request=?",
+                (operation_id, request),
+            ).fetchone()
         if row is None:
             return None
         if row["request"] != request:
             raise EscrowError("OPERATION_CONFLICT")
         return EscrowReceipt.model_validate_json(row["receipt"])
 
-    def _event(self, operation_id: str, kind: str, request: str, owner: str) -> EscrowReceipt:
+    def _event(
+        self, operation_id: str, kind: str, request: str, owner: str, *, server: bool = False
+    ) -> EscrowReceipt:
+        key = self._key(operation_id, server)
         self._conservation()
         last = self.db.execute(
             "SELECT seq,event_hash FROM escrow_events ORDER BY seq DESC LIMIT 1"
         ).fetchone()
         seq, prev = (last["seq"] + 1, last["event_hash"]) if last else (0, "0" * 64)
         state = self._snapshot()
-        event_hash = sha256_hex(
-            canonicalize([self.run_id, seq, prev, operation_id, kind, request, state])
-        )
+        event_hash = sha256_hex(canonicalize([self.run_id, seq, prev, key, kind, request, state]))
         b = self.balances(owner)
         receipt = EscrowReceipt(
             operation_id=operation_id,
@@ -309,9 +348,9 @@ class EscrowV2:
         )
         self.db.execute(
             "INSERT INTO escrow_events VALUES(?,?,?,?,?,?,?)",
-            (seq, operation_id, kind, request, prev, event_hash, receipt.model_dump_json()),
+            (seq, key, kind, request, prev, event_hash, receipt.model_dump_json()),
         )
-        self.db.execute("INSERT INTO escrow_snapshots VALUES(?,?)", (operation_id, state))
+        self.db.execute("INSERT INTO escrow_snapshots VALUES(?,?)", (key, state))
         return receipt
 
     def _authority(
@@ -340,7 +379,7 @@ class EscrowV2:
         with self.tx():
             request = genesis.model_dump_json(exclude={"authority_sig"})
             operation = sha256_hex(f"ht-genesis-v2|{self.run_id}".encode())
-            old = self._existing(operation, request)
+            old = self._existing(operation, request, server=True)
             if old is not None:
                 return old
             if (
@@ -359,14 +398,16 @@ class EscrowV2:
                 if o.origin_id != genesis_origin_id(self.run_id, genesis.allocation_hash, i):
                     raise EscrowError("GENESIS_ORIGIN_DOMAIN")
                 self._issue(o, None, None)
-            return self._event(operation, "TEST_GENESIS", request, genesis.origins[0].owner)
+            return self._event(
+                operation, "TEST_GENESIS", request, genesis.origins[0].owner, server=True
+            )
 
     def production_bootstrap(self, bootstrap: ProductionBootstrap) -> EscrowReceipt:
         """One pinned production issuance per run; collateral like genesis, never emission."""
         self._authority(bootstrap)
         with self.tx():
             request = bootstrap.model_dump_json(exclude={"authority_sig"})
-            old = self._existing(bootstrap.operation_id, request)
+            old = self._existing(bootstrap.operation_id, request, server=True)
             if old is not None:
                 return old
             if (
@@ -404,6 +445,7 @@ class EscrowV2:
                 "PRODUCTION_BOOTSTRAP",
                 request,
                 bootstrap.origins[0].owner,
+                server=True,
             )
 
     def reward_allocations(
@@ -692,7 +734,7 @@ class EscrowV2:
                     origins = self.reward_allocations(reward, evidence)
                 case unreachable:
                     assert_never(unreachable)
-            old = self._existing(operation, request)
+            old = self._existing(operation, request, server=True)
             if old is not None:
                 return old
             if origins is None:
@@ -762,7 +804,7 @@ class EscrowV2:
                         ),
                     )
                     receipt = self._event(
-                        operation, "SHADOW_REWARD_FINALIZE", request, origins[0].owner
+                        operation, "SHADOW_REWARD_FINALIZE", request, origins[0].owner, server=True
                     )
                     binding = self._shadow_reservation(reward)
                     self.db.execute(
@@ -781,7 +823,9 @@ class EscrowV2:
                     self.db.execute(
                         "INSERT INTO escrow_finalized VALUES(?,?)", (reward.w, reward.finalize_hash)
                     )
-                    return self._event(operation, "REWARD_FINALIZE", request, origins[0].owner)
+                    return self._event(
+                        operation, "REWARD_FINALIZE", request, origins[0].owner, server=True
+                    )
                 case unreachable:
                     assert_never(unreachable)
 
@@ -824,10 +868,12 @@ class EscrowV2:
             self._credit(row["origin"], recipient or op.owner, destination, destination_ref, take)
             left -= take
 
-    def _owner_operation(self, op: EscrowOperation, signer: str) -> EscrowReceipt | None:
+    def _owner_operation(
+        self, op: EscrowOperation, signer: str, *, server: bool = False
+    ) -> EscrowReceipt | None:
         if signer != op.owner:
             raise EscrowError("OWNER_AUTHORITY")
-        return self._existing(op.operation_id, op.model_dump_json())
+        return self._existing(op.operation_id, op.model_dump_json(), server=server)
 
     def lock(self, op: EscrowLock, *, signer: str) -> EscrowReceipt:
         with self.tx():
@@ -854,7 +900,7 @@ class EscrowV2:
             raise EscrowError("MATURITY_INPUT")
         request = canonicalize(list(origin_ids)).decode()
         with self.tx():
-            old = self._existing(operation_id, request)
+            old = self._existing(operation_id, request, server=True)
             if old is not None:
                 return old
             owner = ""
@@ -902,11 +948,23 @@ class EscrowV2:
                         (origin, owner),
                     )
                     self._credit(origin, owner, "available", "", row["units"])
-            return self._event(operation_id, "MATURE", request, owner)
+            return self._event(operation_id, "MATURE", request, owner, server=True)
 
     def release(self, op: EscrowRelease, *, signer: str, now_beacon: int) -> EscrowReceipt:
+        """The owner's own release of a settled lock: a client event, keyed by the owner's id."""
+        return self._release(op, signer, now_beacon, server=False)
+
+    def release_settlement(
+        self, op: EscrowRelease, *, signer: str, now_beacon: int
+    ) -> EscrowReceipt:
+        """The service's release of a settled lock: its id is derived, so it is a server event."""
+        return self._release(op, signer, now_beacon, server=True)
+
+    def _release(
+        self, op: EscrowRelease, signer: str, now_beacon: int, *, server: bool
+    ) -> EscrowReceipt:
         with self.tx():
-            old = self._owner_operation(op, signer)
+            old = self._owner_operation(op, signer, server=server)
             if old is not None:
                 return old
             status = self.settlement(op.lock_id)
@@ -932,7 +990,9 @@ class EscrowV2:
                 raise EscrowError("LOCK_REFERENCE")
             source = "admission_locked" if original.kind == "LOCK_ADMISSION" else "dispute_locked"
             self._move(op, source, "available", source_ref=op.lock_id)
-            return self._event(op.operation_id, "RELEASE", op.model_dump_json(), op.owner)
+            return self._event(
+                op.operation_id, "RELEASE", op.model_dump_json(), op.owner, server=server
+            )
 
     def slash(
         self,
@@ -955,7 +1015,7 @@ class EscrowV2:
             request = canonicalize(
                 [op.model_dump(mode="json"), referee, referee_cost, max_referee_cost]
             ).decode()
-            old = self._existing(op.operation_id, request)
+            old = self._existing(op.operation_id, request, server=True)
             if old is not None:
                 return old
             status = self.settlement(op.lock_id)
@@ -1014,16 +1074,16 @@ class EscrowV2:
                         (row["origin"], op.owner),
                     )
                     self._credit(row["origin"], op.owner, "burned", "", row["units"])
-            return self._event(op.operation_id, "SLASH", request, op.owner)
+            return self._event(op.operation_id, "SLASH", request, op.owner, server=True)
 
     def pay(self, op: EscrowOperation, *, signer: str) -> EscrowReceipt:
         """Terminal unit sink, not a cash payout or redemption adapter."""
         with self.tx():
-            old = self._owner_operation(op, signer)
+            old = self._owner_operation(op, signer, server=True)
             if old is not None:
                 return old
             self._move(op, "available", "paid")
-            return self._event(op.operation_id, "PAY", op.model_dump_json(), op.owner)
+            return self._event(op.operation_id, "PAY", op.model_dump_json(), op.owner, server=True)
 
     def payable(self, now_beacon: int) -> list[sqlite3.Row]:
         """Free units of live reward origins matured by now_beacon, oldest maturity first.
@@ -1118,11 +1178,12 @@ class EscrowV2:
                 or data["accepted"] is None
             ):
                 raise EscrowError("SHADOW_PERSISTED_BINDING")
-            operation = sha256_hex(
-                f"ht-shadow-finalize-v1|{self.run_id}|{expected}|{digest(binding)}".encode()
-            )
+            # Found by its request, not by a derived id: a verifier without the id key finds it too.
             event = self.db.execute(
-                "SELECT receipt FROM escrow_events WHERE operation_id=?", (operation,)
+                "SELECT receipt FROM escrow_events WHERE kind='SHADOW_REWARD_FINALIZE' "
+                "AND json_extract(request,'$.shadow_ordinal')=? "
+                "AND json_extract(request,'$.reservation_hash')=?",
+                (expected, digest(binding)),
             ).fetchone()
             if event is None or json.loads(event["receipt"]) != data["accepted"]:
                 raise EscrowError("SHADOW_PERSISTED_RECEIPT")
@@ -1154,7 +1215,7 @@ class EscrowV2:
                 or row["prev_hash"] != prev
                 or row["event_hash"] != actual
                 or receipt.event_hash != actual
-                or receipt.operation_id != row["operation_id"]
+                or not self._binds(row["operation_id"], row["kind"], receipt.operation_id)
                 or receipt.ledger_mode != self.policy.ledger_mode
             ):
                 raise EscrowError("EVENT_CHAIN")
@@ -1162,6 +1223,21 @@ class EscrowV2:
         if last_state is not None and last_state != self._snapshot():
             raise EscrowError("PERSISTED_STATE_MISMATCH")
         self._conservation()
+
+    def _binds(self, key: str, kind: str, operation_id: str) -> bool:
+        """Whether a stored event key is the key this ledger gives `operation_id`.
+
+        A client event, or a server event written before the server key space, is stored under the
+        bare id. A server event is stored under `srv:`; without the id key only its shape and its
+        disjointness from the client kinds can be checked, with the key the binding is exact.
+        """
+        if not key.startswith(SERVER_SCOPE):
+            return key == operation_id
+        if kind in CLIENT_ONLY_KINDS:
+            return False
+        if self.id_key is None:
+            return _SERVER_KEY.fullmatch(key) is not None
+        return key == self._key(operation_id, True)
 
     def _snapshot(self) -> str:
         origins = [list(r) for r in self.db.execute("SELECT * FROM escrow_origins ORDER BY origin")]

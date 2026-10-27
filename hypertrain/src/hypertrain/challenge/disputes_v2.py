@@ -898,4 +898,4 @@ class DisputesV2:
                     max_referee_cost=self.policy.max_referee_cost_units,
                 )
             else:
-                self.escrow.release(release, signer=lock.owner, now_beacon=now)
+                self.escrow.release_settlement(release, signer=lock.owner, now_beacon=now)

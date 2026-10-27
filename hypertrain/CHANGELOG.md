@@ -52,5 +52,13 @@
   `result.json` written before capabilities were recorded still qualifies 170-SM devices only.
   See `docs/adr/0007-sm-counts-per-arch.md` at the monorepo root.
 
+### Fixed
+- Escrow: the events the service writes (reward finalize, maturity, the payment of `get_weights`,
+  the settlement of a dispute) live in a key space of their own, `srv:` plus an HMAC under a key
+  derived from the coordinator secret, so a signed client event can no longer occupy an id the
+  service needs and freeze finalize, the beacon route, the weights answer or a dispute (Lens F1).
+  `EscrowV2.release_settlement` is the service's release; `release` is the owner's. A ledger built
+  without the key is a read-only verifier. See `docs/adr/0014` at the monorepo root.
+
 ### Not yet
 - Quality parity with centralized training is not claimed.

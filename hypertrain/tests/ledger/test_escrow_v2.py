@@ -26,6 +26,7 @@ from hypertrain.ledger.escrow_v2 import (
     ShadowReservationEvidence,
     authority_message,
     digest,
+    escrow_id_key,
     genesis_allocation_hash,
     genesis_origin_id,
     reward_origin_id,
@@ -64,6 +65,7 @@ from hypertrain.trainer.model import init_params, param_shapes
 torch = importlib.import_module("torch")
 
 COORD = Keypair(bytes(range(32)))
+ID_KEY = escrow_id_key(bytes(range(32)))
 AUDITOR = Keypair(bytes(31) + b"\x01")
 HOT = Keypair(b"\x07" * 32)
 COLD = Keypair(b"\x08" * 32)
@@ -195,6 +197,7 @@ def ledger(
     database: Path | sqlite3.Connection,
     settlement: Callable[[str], Settlement] | None = None,
     replay: Callable[[FinalityEvidence], str] | None = None,
+    id_key: bytes | None = ID_KEY,
 ) -> EscrowV2:
     def no_unverified_finality(evidence: FinalityEvidence) -> str:
         raise EscrowError("NO_REPLAY_ACCEPTANCE")
@@ -219,6 +222,7 @@ def ledger(
         assignment_of=lambda w, h: (0,),
         shadow_assignment_of=lambda binding: (0,),
         shadow_settlement=settlement,
+        id_key=id_key,
     )
 
 

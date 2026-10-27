@@ -59,6 +59,7 @@ from hypertrain.ledger.escrow_v2 import (
     RewardWork,
     Settlement,
     ShadowReservationEvidence,
+    escrow_id_key,
 )
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.envelope import (
@@ -2559,6 +2560,18 @@ class ChallengeStore:
                 )
         return secret
 
+    def _escrow_id_key_v2(self) -> bytes:
+        """Key of the ids the service derives; a changed coordinator secret fails closed."""
+        key = escrow_id_key(self._coord()._secret)
+        namespace = sha256_hex(key)
+        with self._tx() as db:
+            row = db.execute("SELECT value FROM meta WHERE key='escrow-id-namespace-v2'").fetchone()
+            if row is None:
+                db.execute("INSERT INTO meta VALUES('escrow-id-namespace-v2', ?)", (namespace,))
+            elif row["value"] != namespace:
+                raise ChallengeError(503, "escrow id namespace differs")
+        return key
+
     def _services(self, run_id: str) -> tuple[EscrowV2, Admission, DisputesV2]:
         with self._lock:
             existing = self._services_v2.get(run_id)
@@ -2580,6 +2593,7 @@ class ChallengeStore:
                 assignment_of=lambda w, hot: self._assignment_v2(run_id, w, hot),
                 shadow_assignment_of=lambda binding: self._shadow_assignment_v2(run_id, binding),
                 shadow_settlement=lambda origin: self._shadow_settlement_v2(run_id, origin),
+                id_key=self._escrow_id_key_v2(),
             )
             escrow.mutex = self._lock  # One SQLite authority lock, including event acknowledgments.
 
