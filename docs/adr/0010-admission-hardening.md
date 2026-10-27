@@ -368,8 +368,8 @@ Baseline measured on `33b50656` with `ChallengeStore._service_implementation_v2`
 | `AdmissionPolicyV2` digest of the `manifest_v2 example` (test and production) | `c3fd6d4d…b3e3e3` | unchanged |
 | `manifest_v2 example` + `build` run id, test / production | `87b08906…952485` / `54ee4c87…e263` | unchanged |
 | pure-JSON wrapper run id (`tests/protocol/test_network_v2.py`) | `4efbc85d…8cc43f97` | unchanged (pinned by a test) |
-| `sources()` map (151 files), canonical sha256 | `e0df98e6…507e8b` | `270207d9…333180` |
-| `bundle` sha256 | 2,396,160 bytes, `e78f33d1…70ba` | 2,426,880 bytes, `53f7e1a4…b29d` |
+| `sources()` map (151 files), canonical sha256 | `e0df98e6…507e8b` | `3769663b…63a7fe` |
+| `bundle` sha256 | 2,396,160 bytes, `e78f33d1…70ba` | 2,426,880 bytes, `2231e901…a7d7` |
 
 - No run id, `admission_policy_hash`, golden root or `reference_hash` changes for a policy that
   does not set `max_unfunded_per_prefix`: the field is omitted from the canonical body when
@@ -385,8 +385,8 @@ Baseline measured on `33b50656` with `ChallengeStore._service_implementation_v2`
 - Wire: `RotateRequest` gains `new_hot_sig`; `LeaveNotice` gains `epoch`; two new message types
   `ChallengeRequest` and `JobRequest`; the export payload gains `challenge_envelope`; the unsigned
   `GET .../challenge` and the header-signed `GET .../job` become `POST` with a signed body;
-  `GET .../admission/{hotkey}` gains `bond` in Part 6. None is a manifest or SCALE wire message; `docs/BUNDLE_SPEC.md` and the
-  frozen vectors are untouched.
+  `GET .../admission/{hotkey}` gains `bond` in Part 6. None is a manifest or SCALE wire message;
+  `docs/BUNDLE_SPEC.md` and the frozen vectors are untouched.
 
 ## Decisions for Forge
 
