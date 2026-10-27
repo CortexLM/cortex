@@ -411,6 +411,7 @@ def test_actual_publisher_selector_preserves_public_excludes_private(tmp_path: P
         "deploy/challenge-profile-row.example.toml",
         "deploy/k8s/local/fixtures.yaml",
         "scripts/network_authority_snapshot.py",
+        "scripts/ops/live_operator.py",
         "experiments/gpu_network_v2/profile.json",
     }
     private = {
@@ -457,6 +458,9 @@ def test_actual_publisher_selector_preserves_public_excludes_private(tmp_path: P
         "local/id_ed25519",
         "local/known_hosts",
         "data/raw/public-but-not-publishable",
+        "scripts/ops/s100_test/challenge_image.sh",
+        "scripts/ops/s100_test/weights_once.py",
+        "tests/ops/s100/test_challenge_image.py",
     }
     for relative in (public | private) - {".publishignore", ".secretscan-allow"}:
         path = tmp_path / relative

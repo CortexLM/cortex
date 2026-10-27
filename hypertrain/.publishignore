@@ -17,3 +17,5 @@ id_(ed25519|rsa)
 (^|/)(private|secrets|roles|private-roles|role-keys|private-keys|authority|authority-state|portable-authority|portable-bundle|portable-bundles|snapshots|preserved-snapshots|evidence|\.evidence|service-export|integration-root|rescue)/
 \.(seed|priv|p12|pfx|pkcs8)$
 (^|/)(private[-_]key|admin\.token|drain\.token|challenge\.db(-wal|-shm)?|bundle\.json)$
+# s100 operator tools and their tests: the private master address, the host alias and the backup paths.
+^(scripts/ops/s100_test|tests/ops/s100)/
