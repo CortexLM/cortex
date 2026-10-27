@@ -153,40 +153,61 @@ def extra(name: str | None) -> str:
     return f"{COMPOSE}  extra:\n    <<: *common\n{line}"
 
 
-LIVE = {  # id: (live compose, the service refused, its container_name)
+def behind_a_profile(service: str) -> str:
+    """COMPOSE with the service under its own right name but in a profile that is off."""
+    line = f"    container_name: {NAME[service]}\n"
+    return COMPOSE.replace(line, f"{line}    profiles: [debug]\n")
+
+
+def names(service: str, name: str) -> str:
+    return f"service {service} names container {name}"
+
+
+def unnamed(service: str) -> str:
+    return f"service {service} declares no container_name"
+
+
+def must_be(service: str) -> str:
+    return f"service {service} must be {NAME[service]}"
+
+
+LIVE = {  # id: (live compose, the line the refusal prints)
     "challenge-is-production": (
         named("challenge", "cortex-challenge-hypertrain"),
-        "challenge",
-        "cortex-challenge-hypertrain",
+        names("challenge", "cortex-challenge-hypertrain"),
     ),
-    "challenge-has-no-name": (named("challenge", None), "challenge", None),
+    "challenge-has-no-name": (named("challenge", None), unnamed("challenge")),
+    # a TEST name, but not the container this `up` recreates
+    "challenge-wears-the-relay-name": (
+        named("challenge", "hypertrain-test-relay"),
+        must_be("challenge"),
+    ),
+    # compose config leaves it out, up -d --no-deps challenge would still start it
+    "challenge-is-behind-a-profile": (behind_a_profile("challenge"), must_be("challenge")),
     "beacon-is-the-production-twin": (
         named("beacon", "hypertrain-beacon"),
-        "beacon",
-        "hypertrain-beacon",
+        names("beacon", "hypertrain-beacon"),
     ),
-    "stub-has-no-name": (named("master-stub", None), "master-stub", None),
+    "stub-has-no-name": (named("master-stub", None), unnamed("master-stub")),
     "extra-service-is-a-production-container": (
         extra("hypertrain-auditor-0"),
-        "extra",
-        "hypertrain-auditor-0",
+        names("extra", "hypertrain-auditor-0"),
     ),
-    "extra-service-has-no-name": (extra(None), "extra", None),
+    "extra-service-has-no-name": (extra(None), unnamed("extra")),
 }
 
 
 @pytest.mark.parametrize("cmd", ["executor", "executor-off"])
-@pytest.mark.parametrize(("text", "service", "name"), LIVE.values(), ids=LIVE)
+@pytest.mark.parametrize(("text", "refusal"), LIVE.values(), ids=LIVE)
 def test_the_executor_commands_refuse_a_live_compose_naming_a_container_outside_the_test_stack(
-    box, backup, cmd, text, service, name
+    box, backup, cmd, text, refusal
 ):
-    if cmd == "executor-off":
-        box.run(*call("executor", backup), mutates={CHALLENGE})  # leaves the override in place
+    box.run(*call("executor", backup), mutates={CHALLENGE})  # leaves an override in place
     box.f.write_text(text)
     before = box.snapshot()
+    assert before["override"] is not None
     out = box.run(*call(cmd, backup), rc=4).out
-    detail = f"names container {name}" if name else "declares no container_name"
-    assert f"REFUSED {box.f}: service {service} {detail}" in out
+    assert f"REFUSED {box.f}: {refusal}" in out
     assert box.snapshot() == before  # no file written or removed, the override still in place
 
 
@@ -203,16 +224,18 @@ def test_executor_refuses_when_only_the_merged_config_names_another_container(bo
     box.docker(merge_patch={"challenge": {"container_name": "cortex-challenge-hypertrain"}})
     before = box.snapshot()
     out = box.run(*call("executor", backup), rc=4).out
-    refused = "service challenge names container cortex-challenge-hypertrain"
+    refused = names("challenge", "cortex-challenge-hypertrain")
     assert f"REFUSED {box.f} -f {box.override}.new: {refused}" in out
     assert box.snapshot() == before
 
 
-def test_executor_refuses_a_live_file_that_the_merged_config_would_hide(box, backup):
-    # `swap`, `rollback` and `executor-off` bring up the file alone, whatever the pair resolves to
+@pytest.mark.parametrize("cmd", ["executor", "executor-off"])
+def test_the_live_file_is_checked_on_its_own_even_when_a_merge_would_hide_it(box, backup, cmd):
+    # swap, rollback and executor-off bring the file up alone, whatever the pair resolves to
+    box.run(*call("executor", backup), mutates={CHALLENGE})
     box.f.write_text(named("beacon", "hypertrain-beacon"))
     box.docker(merge_patch={"beacon": {"container_name": BEACON}})
     before = box.snapshot()
-    out = box.run(*call("executor", backup), rc=4).out
-    assert f"REFUSED {box.f}: service beacon names container hypertrain-beacon" in out
+    out = box.run(*call(cmd, backup), rc=4).out
+    assert f"REFUSED {box.f}: {names('beacon', 'hypertrain-beacon')}" in out
     assert box.snapshot() == before
