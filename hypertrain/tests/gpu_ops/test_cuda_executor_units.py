@@ -2917,3 +2917,116 @@ def test_prepare_command_refuses_a_directory_the_user_does_not_own_before_it_tou
     assert done.returncode == 1 and done.stdout == ""
     assert "not owned by this user" in done.stderr
     assert Path("/usr").stat().st_mode == before
+
+
+class PrepareRaises(FakeHost):
+    """The directory command raises `failure` the way a transport does; nothing else changes."""
+
+    def __init__(self, failure: Exception, gpus: list[ce.Gpu]) -> None:
+        super().__init__(gpus)
+        self.failure = failure
+
+    def run(self, command: str, **kwargs: Any) -> int:
+        if command.startswith("D="):
+            raise self.failure
+        return super().run(command, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [ce.Aborted("lease cancelled"), ce.HostRefused("same machine as host h2")],
+    ids=["aborted", "host-refused"],
+)
+def test_only_a_failed_cache_command_is_survived_a_cancelled_or_refused_one_ends_the_attempt(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    stub_publication(monkeypatch)
+    host = PrepareRaises(failure, [gpu(0)])
+    executor = executor_with(tmp_path, pinned, {"h1": host})
+    job = island_job(tmp_path / "job")
+    with pytest.raises(type(failure), match=str(failure)):
+        executor._attempt("h1", 1, "audit", "b" * 64, job, tmp_path / "job", False, None)
+    assert host.sent == []  # no container was started
+    journal = executor.journal.path
+    assert "exec_cache_unavailable" not in (journal.read_text() if journal.exists() else "")
+
+
+class CacheBroken(FakeHost):
+    """The directory command exits 1 while `broken`; every ask for it is counted."""
+
+    def __init__(self, gpus: list[ce.Gpu], *, broken: bool = True) -> None:
+        super().__init__(gpus)
+        self.broken, self.asked = broken, 0
+
+    def run(self, command: str, **kwargs: Any) -> int:
+        if command.startswith("D="):
+            self.asked += 1
+            if self.broken:
+                kwargs["stdout"].write_text("")
+                kwargs["stderr"].write_text(
+                    "mkdir: cannot create directory: Read-only file system\n"
+                )
+                return 1
+        return super().run(command, **kwargs)
+
+
+def test_a_directory_the_host_could_not_make_is_asked_for_again_by_the_next_attempt(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records: list[dict[str, Any]] = []
+
+    def capture(
+        self: ce.Executor, job: Any, directory: Path, staging: Path, record: dict, trace: bool
+    ) -> str:
+        records.append(record)
+        return "published"
+
+    monkeypatch.setattr(ce.Executor, "_publish", capture)
+    host = CacheBroken([gpu(0)])
+    executor = executor_with(tmp_path, pinned, {"h1": host})
+    job = island_job(tmp_path / "job")
+    executor._attempt("h1", 1, "audit", "b" * 64, job, tmp_path / "job", False, None)
+    host.broken = False  # the read-only home was repaired between the two attempts
+    executor._attempt("h1", 2, "audit", "b" * 64, job, tmp_path / "job", False, None)
+    assert [record["compute_cache"] for record in records] == [False, True]
+    assert host.asked == 2
+
+
+def test_a_fallback_on_one_host_leaves_the_directory_remembered_for_the_others(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub_publication(monkeypatch)
+    good, broken = CacheBroken([gpu(0)], broken=False), CacheBroken([gpu(1)])
+    executor = executor_with(tmp_path, pinned, {"h1": good, "h2": broken})
+    job = island_job(tmp_path / "job")
+
+    def attempt(label: str, number: int) -> None:
+        executor._attempt(label, number, "audit", "b" * 64, job, tmp_path / "job", False, None)
+
+    attempt("h1", 1)
+    attempt("h2", 1)  # no directory here: this attempt runs without the cache
+    attempt("h1", 2)
+    assert (good.asked, broken.asked) == (1, 1)
+
+
+def test_prepare_command_refuses_a_link_that_appears_while_the_directory_is_being_made(
+    tmp_path: Path,
+) -> None:
+    import shutil
+
+    shim, home, target = tmp_path / "shim", tmp_path / "home", tmp_path / "elsewhere"
+    shim.mkdir()
+    home.mkdir()
+    target.mkdir()
+    target.chmod(0o755)  # mkdir(mode=) is masked by the umask
+    leaf = home / ".cortex-cuda-executor/compute-cache" / LEAF
+    real = shutil.which("mkdir")
+    # An mkdir that loses a race: the link is planted just before the real mkdir looks at the leaf.
+    (shim / "mkdir").write_text(
+        f'#!/bin/sh\n{real} -p -- "{leaf.parent}" && ln -s "{target}" "{leaf}"\nexec {real} "$@"\n'
+    )
+    (shim / "mkdir").chmod(0o755)
+    assignment, _ = ce.cache_location(None, DIGEST)
+    done = shell_prepare(ce.prepare_command(assignment), home, shim)
+    assert done.returncode != 0 and done.stdout == ""
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755  # chmod never followed the link
