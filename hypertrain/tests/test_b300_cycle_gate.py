@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -87,29 +89,59 @@ case $1 in
         >>"$state/executor-log"
     fi
     exit "${FAKE_RUN_RC:-0}" ;;
+  *) echo "unexpected docker call: $*" >&2; echo "docker $*" >>"$state/tripwire"; exit 127 ;;
 esac
+"""
+
+# `date +%s` and `date -u +%s` answer $FAKE_NOW when it is set, so an age is exact; every other call
+# (the marker stamps, the log lines) is the real date.
+FAKE_DATE = r"""#!/usr/bin/env bash
+if [ -n "${FAKE_NOW:-}" ]; then
+  case "$*" in "+%s" | "-u +%s") echo "$FAKE_NOW"; exit 0 ;; esac
+fi
+exec "$FAKE_REAL_DATE" "$@"
+"""
+
+# Anything that would leave the host or escalate. The scripts under test never call these.
+TRIPWIRE = r"""#!/usr/bin/env bash
+echo "$(basename "$0") $*" >>"$FAKE_STATE/tripwire"
+echo "unexpected call: $(basename "$0") $*" >&2
+exit 127
 """
 
 
 @pytest.fixture
-def host(tmp_path: Path) -> dict[str, str]:
-    """A fake host: PATH shims plus FAKE_STATE files the tests rewrite between runs."""
+def host(tmp_path: Path) -> Iterator[dict[str, str]]:
+    """A fake host: PATH shims plus FAKE_STATE files the tests rewrite between runs.
+
+    No test may call anything outside the shims: the tripwire log must be empty at teardown.
+    """
     bin_dir, state = tmp_path / "bin", tmp_path / "state"
     bin_dir.mkdir()
     state.mkdir()
-    for name, body in (("nvidia-smi", FAKE_SMI), ("docker", FAKE_DOCKER)):
+    shims = {"nvidia-smi": FAKE_SMI, "docker": FAKE_DOCKER, "date": FAKE_DATE}
+    shims.update(
+        dict.fromkeys(("sudo", "ssh", "scp", "rsync", "curl", "wget", "systemctl"), TRIPWIRE)
+    )
+    for name, body in shims.items():
         shim = bin_dir / name
         shim.write_text(body)
         shim.chmod(0o755)
     (state / "uuids").write_text("\n".join(UUIDS) + "\n")
     (state / "apps").write_text("")
     (state / "executor-log").write_text("")
-    return {"PATH": f"{bin_dir}:{os.environ['PATH']}", "FAKE_STATE": str(state)}
+    yield {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_STATE": str(state),
+        "FAKE_REAL_DATE": shutil.which("date") or "/usr/bin/date",
+    }
+    tripwire = state / "tripwire"
+    assert not tripwire.exists(), tripwire.read_text()
 
 
-def marker(kind: str, age_s: float, status: str = "200 OK") -> str:
-    """One `docker logs -t` line of the executor for an SSH-key call `age_s` seconds ago."""
-    at = datetime.now(UTC) - timedelta(seconds=age_s)
+def marker(kind: str, age_s: float, status: str = "200 OK", now: datetime | None = None) -> str:
+    """One `docker logs -t` line of the executor for an SSH-key call `age_s` s before `now`."""
+    at = (now or datetime.now(UTC)) - timedelta(seconds=age_s)
     stamp = at.strftime("%Y-%m-%dT%H:%M:%S.%f") + "000Z"
     return f'{stamp} INFO:     13.223.237.157:4384 - "POST /{kind}_ssh_key HTTP/1.1" {status}\n'
 
@@ -162,6 +194,18 @@ def test_default_cycle_max_covers_the_longest_cycle_observed(host):
     set_state(host, executor_log=marker("upload", 1000))
     rc, out = gate(host)
     assert rc == 0 and out["stale_upload"] is True
+
+
+def test_a_marker_exactly_cycle_max_old_has_ended_and_one_second_younger_has_not(host):
+    # The clock is frozen, so the ages are exact: the cut is "younger than --cycle-max seconds".
+    now = datetime(2026, 10, 27, 12, 0, 0, tzinfo=UTC)
+    host["FAKE_NOW"] = str(int(now.timestamp()))
+    set_state(host, executor_log=marker("upload", 720, now=now))
+    rc, out = gate(host, "--cycle-max", "720")
+    assert (rc, out["marker_age_s"], out["stale_upload"], out["open_cycles"]) == (0, 720, True, 0)
+    set_state(host, executor_log=marker("upload", 719, now=now))
+    rc, out = gate(host, "--cycle-max", "720")
+    assert (rc, out["marker_age_s"], out["stale_upload"], out["open_cycles"]) == (1, 719, False, 1)
 
 
 def test_nested_uploads_need_as_many_removes(host):
@@ -361,6 +405,22 @@ def test_runner_passes_the_container_status_on_and_records_the_overlap(host, tmp
     assert f"HT_IMAGE_DIGEST={DIGEST}" in argv and f"{out}:/out" in argv
     removed = (Path(host["FAKE_STATE"]) / "docker.rm").read_text().split()
     assert set(removed) <= {"rm", "-f", "ht-s9-job-kimi-gpu5"}
+
+
+def test_runner_container_is_removed_at_exit_and_only_the_out_dir_is_writable(host, tmp_path):
+    out = tmp_path / "out"
+    assert runner(host, out, "--no-gate", "--mode", "smoke").returncode == 0
+    argv = (Path(host["FAKE_STATE"]) / "docker-run.argv").read_text().splitlines()
+    assert "--rm" in argv
+    assert argv[argv.index("--name") + 1] == "ht-s9-smoke-gpu5"
+    # The checkout (which the container runs code from) is read-only; the out dir is not.
+    mounts = [argv[i + 1] for i, arg in enumerate(argv) if arg == "-v"]
+    assert mounts == [f"{ROOT}:/opt/ht:ro", f"{out}:/out"]
+    joined = " ".join(argv)
+    for host_access in ("--privileged", "--pid=host", "--pid host", "docker.sock"):
+        assert host_access not in joined
+    for host_network in ("--net=host", "--net host", "--network=host", "--network host"):
+        assert host_network not in joined
 
 
 def test_runner_says_so_when_the_executor_log_cannot_be_read(host, tmp_path):
