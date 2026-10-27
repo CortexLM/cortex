@@ -281,7 +281,7 @@ final, so an early call freezes that epoch unpaid.
 The challenge on s100 has no GPU. With `HYPERTRAIN_CUDA_EXECUTOR` it sends every CUDA reference and
 audit replay of ONE run to an ssh-reachable GPU host X and starts `repo@<manifest image digest>`
 there with `docker run --rm --gpus ...` (ADR 0008, `hypertrain/docs/cuda-executor.md`). Nothing is
-installed on X; X is never a server. Nothing in this section has run on a GPU host yet.
+installed on X; X is never a server. First run: S13, 2026-10-27, with the measured numbers in 6.8.
 
 What is **TEST-only** here, exactly:
 - `cuda_qualification.py` installs the CUDA backend record with stand-in evidence signed by the
@@ -293,7 +293,7 @@ The paths below use the state volume that is `/data` in the container:
 
 ```bash
 X=/data/hypertrain-test/state/executor        # /data/executor inside hypertrain-test-challenge
-HOST=<ssh host of X>; PORT=22; GUSER=ubuntu; KEY=<path on s100 of the private key for X>
+HOST=<ssh host of X>; PORT=22; GUSER=ubuntu; KEY=<path of the private key for X on YOUR machine>
 GPU=sha256:<gpu image digest the TEST manifest pins>     # the image digest, not a tag
 ```
 
@@ -301,7 +301,7 @@ GPU=sha256:<gpu image digest the TEST manifest pins>     # the image digest, not
 
 ```bash
 ssh root@s100 "install -d -o 65532 -g 65532 -m 0700 $X $X/state"
-ssh root@s100 "install -o 65532 -g 65532 -m 0600 $KEY $X/id_ed25519"
+ssh root@s100 "umask 077; cat > $X/id_ed25519; chown 65532:65532 $X/id_ed25519" < $KEY  # stdin: the key is not on s100
 ssh root@s100 "ssh-keyscan -p $PORT -t ed25519 $HOST > $X/known_hosts && \
   chown 65532:65532 $X/known_hosts && chmod 0600 $X/known_hosts && ssh-keygen -lf $X/known_hosts"
 ```
@@ -322,8 +322,9 @@ ssh root@s100 "umask 077; cat > $X/cuda-executor.json; chown 65532:65532 $X/cuda
 EOF
 ```
 
-`RID` is the run_id of the manifest built in 6.3 (it is in `OUT/out/manifest-envelope.json`);
-the executor serves CUDA jobs of that run only, every other job still runs in the challenge.
+`RID` is the run_id of the manifest built in 6.3 (it is in `OUT/out/index.json`), so build first and
+write this file afterwards; the executor serves CUDA jobs of that run only, every other job still
+runs in the challenge. Only the probe in 6.2 can run before: it never reads `run_id`, any 64 hex will do.
 
 ### 6.2 Probe X before touching the challenge
 
@@ -333,8 +334,9 @@ would see: GPUs, the ones a compute app holds, the idle ones, whether the image 
 machine id. It runs nothing on X.
 
 ```bash
-ssh root@s100 "docker run --rm -i --user 65532:65532 -v $X:/data/executor --entrypoint python \
-  $NEW -I - /data/executor/cuda-executor.json $GPU" < $T/cuda_executor_check.py
+ssh root@s100 "docker run --rm -i --user 65532:65532 --network hypertrain-test_test \
+  -v $X:/data/executor --entrypoint python $NEW -I - /data/executor/cuda-executor.json $GPU" \
+  < $T/cuda_executor_check.py
 ```
 
 Expect `"status": "ok"`, `"driver": "595.91.07"`, `"capability": [10, 3]`, as many idle GPUs as the
@@ -352,7 +354,7 @@ HT_D20_GEOMETRY=tiny-cpu HT_D20_COLDKEYS=4 HT_D20_RELAY_PUBKEY=<relay k1 ss58> \
 $PY -I $T/cuda_qualification.py build $OUT/out $OUT/secrets/owner.seed
 ```
 
-Use the `tiny-cpu` geometry (728 parameters, `n_gpus=1`, H=1) for the first CUDA run, the model S5
+Use the `tiny-cpu` geometry (824 parameters, `n_gpus=1`, H=1) for the first CUDA run, the model S5
 already ran on a B300: its publication is a few kilobytes, so a reference or audit fits in its lease
 whatever the link to X. The `dense-1b` geometry (889M parameters, `n_gpus=2`) returns every
 checkpoint, final state and error-feedback tensor of both ranks through ssh: by arithmetic from the
@@ -433,3 +435,39 @@ sudo -n docker run --rm --init --gpus device=5 --ipc=host --ulimit memlock=-1 --
 drivers on different GPUs with disjoint plans overlap one miner's probe with the other's reference, but
 the challenge computes references one at a time under its store lock. Gate the node with
 `hypertrain/scripts/b300/cycle_gate.sh --gpus 5` before each driver.
+
+### 6.8 Measured on 2026-10-27 (S13, one executor host, tiny-cpu)
+
+Node A (8x B300, `sudo -n docker`) ran the references; the miners ran on node B in the GPU image. 28
+trials of 3 miners were `FULL_REFERENCE_MATCH` (0 mismatch): the miner's GPU result on B equals the
+executor's on A bit for bit, and one miner reached ACTIVE (`GRADUATED_FULL_REPLAY`). The run did not
+reach a round: no `run-v2`, no audit, no `get_weights`.
+
+| Step | Seconds |
+| --- | --- |
+| `probe-v2` on the miner GPU, fresh container / same container | 60-80 / 15-19 |
+| remote reference, fresh `--rm` container on A | 57-64 |
+| same, with the CUDA compute cache kept between containers | 13 (first one 43) |
+| one trial, probe to accepted proof, one driver | about 125 without the cache, 70-90 with it |
+| two drivers, with the cache | 40-50 per trial |
+
+- **Cold CUDA start.** Each fresh container pays 25-45 s of CPU for the first use of the CUDA kernels
+  (on A: first fp32 matmul 6 s, bf16 matmul 10 s, AdamW 5 s; the second process of the same container
+  takes 0.7-2 s). The cache lives in `/root/.nv` of the container. S13 kept it with a wrapper in the
+  `docker` field of `cuda-executor.json` that adds only `-v <host dir>:/root/.nv` to `docker run`; the
+  config is read once, so a change needs `docker restart hypertrain-test-challenge` between two trials.
+  The executor has no option for it yet.
+- **The reference holds the store lock**, so the beacon pusher times out meanwhile and every trial
+  waits for it to catch up (503 "beacon infrastructure paused" for 10-70 s). A second driver or a
+  second executor host does not shorten the references; two drivers only overlap the miner side.
+- **Do not push beacon rounds out of order.** The challenge reads exact rounds (a trial's seed round,
+  `d_audit`). A second pusher with `--catch-up 1` moved `known` past rounds the first one would have
+  filled; `GET /join/<id>/challenge` then answered 500 `BeaconUnavailable: round N not pushed` and
+  that trial could not continue. Backfilling the gap through `/v1/admin/beacon` took 2 minutes of
+  store lock, a pause of 5 minutes, and two trials passed their 100-round window: the identity is
+  SUSPENDED `CHALLENGE_EXPIRED` at its next challenge request, and `resume` resets `clean_count` to 0.
+- **A validator cycle on A** shows as `exec_host_unavailable` ("0 idle GPUs, 1 needed") and the
+  executor waits (`sweeps`); it cost one trial 40 s.
+
+Plan 40 trials (3 ACTIVE x 12 + 1 PROBATION x 4) at 40-50 s each with the cache, so about 30 minutes,
+then the round (about 6 minutes). Without the cache, plan 85 minutes.
