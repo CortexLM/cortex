@@ -199,7 +199,7 @@
 6. `created_beacon = now`; `live_operator` accepts any gap up to the 200-round cap (A1 option a).
 7. A job whose miner-sealed inputs cannot be leased (`COMMIT_EXPIRED`, `LEAVES_NONFINITE`) is dropped as the miner's fault
    (`excluded/UNVERIFIED`) and the queue moves on. Other validation errors stay loud.
-8. An exhausted job is re-armed once (option O2 of the open question on exhaustion, chosen by the lead
+8. An exhausted job is re-armed once (option O2 of the open question on exhaustion, chosen for this lot
    because D38 ter says an audit failure must not exclude a miner by default; isolated in one commit so
    Forge can swap it for dropping at once or for today's behaviour); a second exhaustion drops its miner from that round (`excluded/INFRASTRUCTURE`,
    `unresolved_audits - 1`). The round disposition is never touched. Service-admitted runs skip the re-arm.
