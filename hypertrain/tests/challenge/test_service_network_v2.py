@@ -2634,23 +2634,27 @@ def test_unfunded_lock_cannot_create_collateral(network):
 def test_cross_run_signed_rotation_rejects(network):
     from hypertrain.miner.admission import sign_rotation_consent
 
-    # Given
+    # Given: a rotation whose consent is valid for this run, under an envelope of another run
     network.join()
     request = sign_rotation_consent(
         REFEREE,
-        run_id="ff" * 32,
+        run_id=network.manifest.run_id(),
         coldkey=COLD[0].ss58,
         hotkey=HOT[0].ss58,
         operation_id="ae" * 32,
         expires_beacon=100,
     )
+    url = network.url + "/admission/" + HOT[0].ss58 + "/rotate"
     # When
     response = network.client.post(
-        network.url + "/admission/" + HOT[0].ss58 + "/rotate",
-        json=seal(COLD[0], "RotateRequest", "ff" * 32, request, 100),
+        url, json=seal(COLD[0], "RotateRequest", "ff" * 32, request, 100)
     )
-    # Then
+    # Then: only the envelope's run is wrong, and that is refused
     assert response.status_code == 409
+    accepted = network.client.post(
+        url, json=seal(COLD[0], "RotateRequest", network.manifest.run_id(), request, 100)
+    )
+    assert accepted.status_code == 200, accepted.text
 
 
 def test_second_run_cannot_mix_shared_state_directory(network):
