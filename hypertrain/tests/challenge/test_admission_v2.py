@@ -316,6 +316,21 @@ def test_challenge_issued_when_two_unproven_trials_are_past_their_deadline(
         assert [a.store.by_id(h).state for h in holders] == [state, state]
 
 
+def test_a_challenge_alone_frees_the_places_of_lapsed_trials(tmp_path: Path) -> None:
+    # Given: two identities hold both places with trials that lapse at round 102, and a
+    # newcomer joined at round 90, before they did
+    s = setup()
+    a = service(s, tmp_path)
+    for holder in [applied(a, s, i, 1) for i in range(2)]:
+        a.challenge(holder, now=2)
+    newcomer = applied(a, s, 2, 90)
+    # When: the newcomer asks once the trials lapsed, and nothing else happened since (no join,
+    # no beacon push: the challenge is the only caller that can free the places)
+    envelope = a.challenge(newcomer, now=105)
+    # Then
+    assert envelope["type"] == "JoinChallenge"
+
+
 def sybil_join(a: Admission, s: Setup, index: int, now: int, prefix: str = "203.0.113.0/24"):
     """A registered identity with keys of its own that never funds its application."""
     from hypertrain.protocol.keys import Keypair
@@ -567,17 +582,21 @@ def test_database_without_origin_table_gets_it_and_counts_nothing(tmp_path: Path
         join_from(restored, s, 3, 2, "203.0.113.0/24")
 
 
-def test_poll_after_deadline_keeps_miner_whose_proof_is_accepted(tmp_path: Path) -> None:
+@pytest.mark.parametrize("proof_exp,screen_exp", [(102, 102), (105, 102), (102, 105)])
+def test_poll_after_deadline_keeps_miner_whose_proof_is_accepted(
+    tmp_path: Path, proof_exp: int, screen_exp: int
+) -> None:
     # Given: a proof accepted on the last round of the window; its finalization has not run
-    # (the proof route commits the proof and the finalization in two transactions).
+    # (the proof route commits the proof and the finalization in two transactions). Either of
+    # its two envelopes may be the one that expired first.
     s = setup()
     a = service(s, tmp_path)
     admission = apply(a, s)
     a.challenge(admission, now=2)
     a.prepare_reference(admission, now=2)
     proof, screen = current_proof(a, admission, 2)
-    raw = canonicalize(sign_proof(HOT, a.escrow.run_id, proof, 102))
-    screen_raw = canonicalize(seal(HOT, "WorkScreenV2", a.escrow.run_id, screen, 102))
+    raw = canonicalize(sign_proof(HOT, a.escrow.run_id, proof, proof_exp))
+    screen_raw = canonicalize(seal(HOT, "WorkScreenV2", a.escrow.run_id, screen, screen_exp))
     assert a.proof(raw, screen_raw, now=102).state == "PROBATION"
     # When: any caller polls after the deadline
     a.challenge(admission, now=103)
@@ -596,7 +615,9 @@ def test_poll_after_deadline_keeps_miner_whose_proof_is_accepted(tmp_path: Path)
     # A different proof after the deadline is still refused.
     other = WorkProof.model_validate({**proof.body(), "delta_hash": H})
     with pytest.raises(ValueError):
-        a.proof(canonicalize(sign_proof(HOT, a.escrow.run_id, other, 102)), screen_raw, now=103)
+        a.proof(
+            canonicalize(sign_proof(HOT, a.escrow.run_id, other, proof_exp)), screen_raw, now=103
+        )
 
 
 def test_a_join_after_the_window_does_not_retire_a_proven_unfunded_miner(tmp_path: Path) -> None:
