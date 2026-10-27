@@ -16,7 +16,7 @@ from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.data.store import LocalFSStore, get_large
 from hypertrain.ledger.escrow_v2 import Settlement, digest
 from hypertrain.miner.admission import sign_join, sign_proof, sign_rotation
-from hypertrain.protocol.envelope_v2 import seal
+from hypertrain.protocol.envelope_v2 import seal, signing_message
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize
 from hypertrain.protocol.messages_v2 import (
@@ -110,6 +110,37 @@ def submit(a: Admission, proof: WorkProof, screen: WorkScreenV2, now: int = 2):
         canonicalize(seal(HOT, "WorkScreenV2", a.escrow.run_id, screen, 500)),
         now=now,
     )
+
+
+def rotation(a: Admission, old, new, operation_id: str, *, expires: int = 200) -> bytes:
+    """A rotation as its owner signs it: the coldkey's envelope around the new hotkey's consent."""
+    from hypertrain.miner.admission import sign_rotation_consent
+
+    request = sign_rotation_consent(
+        new,
+        run_id=a.escrow.run_id,
+        coldkey=COLD.ss58,
+        hotkey=old.ss58,
+        operation_id=operation_id,
+        expires_beacon=expires,
+    )
+    return canonicalize(sign_rotation(COLD, a.escrow.run_id, request, expires))
+
+
+def coldkey_only_rotation(a: Admission, hotkey: str, new_hotkey: str, operation_id: str) -> bytes:
+    """The earlier wire: the three-field body under the coldkey's signature alone."""
+    body = {"hotkey": hotkey, "new_hotkey": new_hotkey, "operation_id": operation_id}
+    exp = 200
+    envelope = {
+        "v": "ht/2",
+        "type": "RotateRequest",
+        "run_id": a.escrow.run_id,
+        "body": body,
+        "signer": COLD.ss58,
+        "exp_drand": exp,
+        "sig": COLD.sign(signing_message("RotateRequest", body, exp, a.escrow.run_id)).hex(),
+    }
+    return canonicalize(envelope)
 
 
 def test_join_is_idempotent_when_restart(tmp_path: Path) -> None:
@@ -618,9 +649,8 @@ def test_rotation_carries_locks_strikes_dispute_and_history(tmp_path: Path) -> N
     a.store.reconcile_lock(op.operation_id)
     a.suspend(HOT.ss58, reason="pending", now=2, pending_dispute=True)
     a.store.db.execute("UPDATE admissions_v2 SET strikes=2 WHERE admission_id=?", (admission,))
-    rotate = RotateRequest(hotkey=HOT.ss58, new_hotkey=OTHER.ss58, operation_id="33" * 32)
     # When
-    r = a.rotate(canonicalize(sign_rotation(COLD, a.escrow.run_id, rotate, 200)), now=2)
+    r = a.rotate(rotation(a, HOT, OTHER, "33" * 32), now=2)
     # Then
     assert r.admission_id == admission and r.pending_dispute and r.strikes == 2
     assert a.status(OTHER.ss58, now=2).funding.locked_units == 1000
@@ -635,11 +665,151 @@ def test_rotation_rejects_hotkey_instead_of_coldkey(tmp_path: Path) -> None:
     s = setup()
     a = service(s, tmp_path)
     apply(a, s)
-    op = RotateRequest(hotkey=HOT.ss58, new_hotkey=OTHER.ss58, operation_id="33" * 32)
+    from hypertrain.miner.admission import sign_rotation_consent
+
+    op = sign_rotation_consent(
+        OTHER,
+        run_id=a.escrow.run_id,
+        coldkey=HOT.ss58,
+        hotkey=HOT.ss58,
+        operation_id="33" * 32,
+        expires_beacon=200,
+    )
     # When / Then
     with pytest.raises(ValueError):
         a.rotate(canonicalize(sign_rotation(HOT, a.escrow.run_id, op, 200)), now=2)
     assert a.store.record(HOT.ss58).state == "APPLIED"
+
+
+def test_coldkey_alone_cannot_burn_a_registered_unjoined_hotkey(tmp_path: Path) -> None:
+    # Given: HOT/COLD applied; OTHER is a registered hotkey that has not joined yet (the Lens
+    # squat: one coldkey signature rebinds its admission onto the victim's hotkey)
+    from hypertrain.protocol.keys import Keypair
+
+    s = setup()
+    a = service(s, tmp_path)
+    apply(a, s)
+    # When / Then: the coldkey's signature alone is no longer a rotation
+    with pytest.raises(ValueError):
+        a.rotate(coldkey_only_rotation(a, HOT.ss58, OTHER.ss58, "33" * 32), now=2)
+    assert a.store.record(HOT.ss58).state == "APPLIED"
+    # and the victim joins with its own two keys
+    joined = a.join(
+        canonicalize(request(s, "55" * 32, OTHER, Keypair(b"\x0a" * 32)).body()),
+        now=3,
+        ip_prefix="elsewhere",
+    )
+    assert joined.hotkey == OTHER.ss58
+
+
+@pytest.mark.parametrize("forger", ["cold", "old_hot", "stranger", "zeros", "envelope_domain"])
+def test_rotation_consent_must_be_signed_by_the_new_hotkey(tmp_path: Path, forger: str) -> None:
+    # Given: a rotation whose consent was not made by the key it binds
+    from hypertrain.miner.admission import sign_rotation_consent
+    from hypertrain.protocol.keys import Keypair
+
+    s = setup()
+    a = service(s, tmp_path)
+    apply(a, s)
+    good = sign_rotation_consent(
+        OTHER,
+        run_id=a.escrow.run_id,
+        coldkey=COLD.ss58,
+        hotkey=HOT.ss58,
+        operation_id="33" * 32,
+        expires_beacon=200,
+    )
+    body = {k: v for k, v in good.body().items() if k != "new_hot_sig"}
+    message = signing_message("RotateRequest", {**body, "coldkey": COLD.ss58}, 200, a.escrow.run_id)
+    forged = {
+        "cold": COLD.sign(message).hex(),
+        "old_hot": HOT.sign(message).hex(),
+        "stranger": Keypair(b"\x0b" * 32).sign(message).hex(),
+        "zeros": "0" * 128,
+        "envelope_domain": OTHER.sign(message).hex(),
+    }[forger]
+    bad = RotateRequest.model_validate({**good.body(), "new_hot_sig": forged})
+    # When / Then
+    with pytest.raises(AdmissionError) as refused:
+        a.rotate(canonicalize(sign_rotation(COLD, a.escrow.run_id, bad, 200)), now=2)
+    assert refused.value.code == "ROTATION_CONSENT"
+    assert a.store.record(HOT.ss58).state == "APPLIED"
+
+
+def test_resigned_rotation_retry_is_idempotent_and_spends_no_quota(tmp_path: Path) -> None:
+    # Given: one rotation, then the same logical rotation signed again several times (sr25519
+    # signatures are randomized, so no two bodies are equal)
+    from hypertrain.protocol.keys import Keypair
+
+    s = setup()
+    a = service(s, tmp_path)
+    apply(a, s)
+    burst = a.policy.join_burst
+    chain = [HOT, *[Keypair(bytes([0x20 + i]) * 32) for i in range(burst + 2)]]
+    first = a.rotate(rotation(a, HOT, chain[1], f"{1:064x}", expires=5000), now=2)
+    for _ in range(burst + 1):
+        again = a.rotate(rotation(a, HOT, chain[1], f"{1:064x}", expires=5000), now=2)
+        assert again.admission_id == first.admission_id and again.hotkey == chain[1].ss58
+    # When: the chain goes on with new operations in the same round
+    for i in range(1, burst):
+        a.rotate(rotation(a, chain[i], chain[i + 1], f"{i + 1:064x}", expires=5000), now=2)
+    # Then: the replays spent nothing, the real rotations spent all: burst in total
+    with pytest.raises(AdmissionError) as refused:
+        a.rotate(
+            rotation(a, chain[burst], chain[burst + 1], f"{burst + 1:064x}", expires=5000), now=2
+        )
+    assert refused.value.code == "ROTATION_QUOTA"
+
+
+def test_rotation_chain_is_bounded_per_coldkey_and_window(tmp_path: Path) -> None:
+    # Given: the Lens chain, with hotkeys the attacker really controls (consent is required now,
+    # so the quota is the only brake): one coldkey rotates as fast as it can
+    from hypertrain.miner.admission import sign_rotation_consent
+    from hypertrain.protocol.keys import Keypair
+
+    s = setup()
+    a = service(s, tmp_path)
+    apply(a, s)
+    burst, window = a.policy.join_burst, a.policy.work_screen_epoch_rounds
+    chain = [HOT, *[Keypair(bytes([0x20 + i]) * 32) for i in range(burst + 2)]]
+
+    def rotate(i: int, now: int):
+        return a.rotate(rotation(a, chain[i], chain[i + 1], f"{i + 1:064x}", expires=5000), now=now)
+
+    for i in range(burst):
+        rotate(i, 2)
+    # When / Then: the next one is refused in this window, even a round later
+    for now in (2, 3):
+        with pytest.raises(AdmissionError) as refused:
+            rotate(burst, now)
+        assert refused.value.code == "ROTATION_QUOTA"
+    assert a.store.record(chain[burst].ss58).state == "APPLIED"
+    # another coldkey is not affected by it
+    other_hot, other_new = Keypair(b"\x50" * 32), Keypair(b"\x51" * 32)
+    a.join(canonicalize(request(s, "9a" * 32, other_hot, OTHER).body()), now=2, ip_prefix="o")
+    request_other = sign_rotation_consent(
+        other_new,
+        run_id=a.escrow.run_id,
+        coldkey=OTHER.ss58,
+        hotkey=other_hot.ss58,
+        operation_id="9b" * 32,
+        expires_beacon=5000,
+    )
+    assert a.rotate(canonicalize(sign_rotation(OTHER, a.escrow.run_id, request_other, 5000)), now=3)
+    # and the next window refills the budget
+    rotate(burst, window)
+    assert a.store.record(chain[burst + 1].ss58).state == "APPLIED"
+
+
+def test_banned_admission_cannot_rotate(tmp_path: Path) -> None:
+    s = setup()
+    a = service(s, tmp_path)
+    admission = apply(a, s)
+    a.store.transition(admission, "BANNED", "FINALIZED_TRAINING_FRAUD", 2)
+    with pytest.raises(AdmissionError) as refused:
+        a.rotate(rotation(a, HOT, OTHER, "33" * 32), now=2)
+    assert refused.value.code == "TERMINAL_BANNED"
+    assert a.store.record(HOT.ss58).state == "BANNED"
 
 
 def accepted_settlement(
@@ -802,8 +972,7 @@ def test_rotation_preserves_exact_pending_reference_across_restart(tmp_path: Pat
         dispute_id="33" * 32,
         evidence_hash="44" * 32,
     )
-    rotate = RotateRequest(hotkey=HOT.ss58, new_hotkey=OTHER.ss58, operation_id="77" * 32)
-    a.rotate(canonicalize(sign_rotation(COLD, a.escrow.run_id, rotate, 200)), now=2)
+    a.rotate(rotation(a, HOT, OTHER, "77" * 32), now=2)
     restored = service(s, tmp_path)
     accepted_settlement(restored, admission, COLD.ss58, "33" * 32, "44" * 32)
     before = recovery_snapshot(restored, OTHER.ss58)

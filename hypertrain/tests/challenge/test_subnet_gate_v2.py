@@ -220,7 +220,22 @@ def _routes(n, hot, cold):
         policy_hash=n.manifest.network.admission_policy_hash,
         hardware_hint=HardwareHint(device_name="cpu", device_count=1, driver="advisory"),
     ).body()
-    rotate = {"hotkey": HOT[0].ss58, "new_hotkey": hot.ss58, "operation_id": H}
+    from hypertrain.miner.admission import sign_rotation_consent
+
+    consent = sign_rotation_consent(
+        hot,
+        run_id=run_id,
+        coldkey=COLD[0].ss58,
+        hotkey=HOT[0].ss58,
+        operation_id=H,
+        expires_beacon=10000,
+    )
+    rotate = {
+        "hotkey": HOT[0].ss58,
+        "new_hotkey": hot.ss58,
+        "operation_id": H,
+        "new_hot_sig": consent.new_hot_sig,
+    }
     watch = hot.sign(f"hypertrain/watch/2|{run_id}|{hot.ss58}".encode()).hex()
     obj = hot.sign(f"hypertrain/object/2|{run_id}|{H}".encode()).hex()
     c, u = n.client, n.url
