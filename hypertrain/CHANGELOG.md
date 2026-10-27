@@ -47,6 +47,10 @@
   (RTA-05), and the exact accepted proof and screen may be re-posted after their deadline so
   that a finalization that failed can run. See `docs/adr/0010-admission-hardening.md` at the
   monorepo root.
+- An unproven challenge past its deadline is closed `EXPIRED` by the master at the next beacon
+  push and no longer suspends the miner (RTA-03); a later request answers 409
+  `CHALLENGE_EXPIRED`. The two trial places can no longer be held for good by identities that
+  never prove. ADR 0010.
 - CUDA network qualification records each device's compute capability with its SM count and
   accepts a device only when the pair is a row of `network_qualification.SM_COUNTS` (RTX 5090
   12.0 = 170, B300 10.3 = 148) and the count equals the signed manifest's

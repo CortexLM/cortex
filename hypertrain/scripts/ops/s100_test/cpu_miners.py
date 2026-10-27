@@ -10,7 +10,8 @@ Each stage is timed into DIR/stages.tsv; seeds stay 0600 in DIR/m<i>/ and are ne
   admit DIR PLAN       PLAN "1:12,2:12,3:12,0:4": miner:target clean trials, in order
   round DIR W I [I..]  run-v2 --round W for the listed miners, in parallel
 A trial is retried only on the transient refusals the challenge documents (503, SEED_NOT_READY,
-TRIAL_CAPACITY); any other failure stops the plan, since a missed trial suspends the identity.
+TRIAL_CAPACITY); any other failure stops the plan, since a missed trial strands the identity
+(409 CHALLENGE_EXPIRED).
 
 ATEN_CPU_CAPABILITY must name the challenge host's ATen CPU capability (avx2 for s100, a Zen 3).
 Trials and audits score only on bitwise equality with the challenge's own CPU replay, and the

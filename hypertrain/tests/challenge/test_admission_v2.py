@@ -217,23 +217,67 @@ def test_resume_requires_fresh_challenge_without_erasing_history(tmp_path: Path)
     assert a.store.record(HOT.ss58).clean_count == 0
 
 
-def test_trial_capacity_released_when_challenge_expires(tmp_path: Path) -> None:
-    # Given
+def applied(a: Admission, s: Setup, index: int, now: int) -> str:
+    """An APPLIED identity of its own keys (hot == cold), as the capacity tests use."""
+    from hypertrain.protocol.keys import Keypair
+
+    key = Keypair(bytes([30 + index]) * 32)
+    request_id = f"{index + 1:02x}" * 32
+    joined = a.join(canonicalize(request(s, request_id, key, key).body()), now=now, ip_prefix="x")
+    return joined.admission_id
+
+
+def open_trials(a: Admission) -> int:
+    return a.store.db.execute(
+        "SELECT COUNT(*) FROM admission_trial_results WHERE outcome='OPEN'"
+    ).fetchone()[0]
+
+
+def test_reaper_closes_only_unproven_trials_past_deadline_and_penalises_nobody(
+    tmp_path: Path,
+) -> None:
+    # Given: two trials issued at round 2 (deadline 102) and never proved
     s = setup()
     a = service(s, tmp_path)
-    admission = apply(a, s)
-    a.challenge(admission, now=2)
-    # When
-    a.challenge(admission, now=103)
-    # Then: expiry is infrastructure suspension, not a fabricated clean result.
-    assert a.store.record(HOT.ss58).state == "SUSPENDED"
-    assert (
-        a.store.db.execute(
-            "SELECT COUNT(*) FROM admission_trial_results WHERE outcome='OPEN'"
-        ).fetchone()[0]
-        == 0
-    )
-    assert a.store.record(HOT.ss58).clean_count == 0
+    holders = [applied(a, s, i, 1) for i in range(2)]
+    for holder in holders:
+        a.challenge(holder, now=2)
+    # When / Then: the deadline round still accepts a proof, so nothing closes at 102
+    assert a.reap_expired_trials(now=102) == [] and open_trials(a) == 2
+    assert a.reap_expired_trials(now=103) == [0, 1] and open_trials(a) == 0
+    assert [
+        row[0]
+        for row in a.store.db.execute("SELECT outcome FROM admission_trial_results ORDER BY epoch")
+    ] == ["EXPIRED", "EXPIRED"]
+    # Expiry is bookkeeping, not a sanction: state, strikes and seed are untouched, and the
+    # closed trial is not taken again (one trial per seed).
+    for holder in holders:
+        record = a.store.by_id(holder)
+        assert (record.state, record.strikes, record.clean_count) == ("APPLIED", 0, 0)
+    assert a.store.db.execute("SELECT seed_beacon FROM admissions_v2").fetchall()[0][0] == 2
+    with pytest.raises(AdmissionError, match="CHALLENGE_EXPIRED"):
+        a.challenge(holders[0], now=104)
+    assert a.store.db.execute("SELECT COUNT(*) FROM admission_trials").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("state", ["APPLIED", "ACTIVE"])
+def test_challenge_issued_when_two_unproven_trials_are_past_their_deadline(
+    tmp_path: Path, state: str
+) -> None:
+    # Given: two registered identities open a trial each and never prove it. The Lens
+    # starvation: they are still holding both places thousands of rounds later.
+    s = setup()
+    a = service(s, tmp_path)
+    holders = [applied(a, s, i, 1) for i in range(2)]
+    for holder in holders:
+        a.challenge(holder, now=2)
+        a.store.transition(holder, state, "TEST", 2)  # a lapsed re-screen of an ACTIVE miner
+    newcomer = applied(a, s, 2, 5000)
+    # When: the newcomer asks inside its own window
+    envelope = a.challenge(newcomer, now=5001)
+    # Then: it is served, and nobody was suspended to make room
+    assert envelope["type"] == "JoinChallenge"
+    assert [a.store.by_id(h).state for h in holders] == [state, state]
 
 
 def test_poll_after_deadline_keeps_miner_whose_proof_is_accepted(tmp_path: Path) -> None:
@@ -256,6 +300,8 @@ def test_poll_after_deadline_keeps_miner_whose_proof_is_accepted(tmp_path: Path)
     # the exact replay is answered, so the finalization that failed can run.
     assert a.reference_due(raw, now=103) is None
     assert a.proof(raw, screen_raw, now=103).state == "PROBATION"
+    # The clock does not expire a proven trial either: it waits for its finalization.
+    assert a.reap_expired_trials(now=103) == [] and open_trials(a) == 1
     final = a.trial_finality(admission, now=103)
     assert final is not None
     status = a.finalize_trial(admission, final, now=103)

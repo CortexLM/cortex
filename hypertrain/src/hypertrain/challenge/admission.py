@@ -204,6 +204,32 @@ class Admission:
             self.store.reserve(key, request_hash, admission_id)
             return self.store.by_id(admission_id)
 
+    def reap_expired_trials(self, *, now: int) -> list[int]:
+        """Close every OPEN trial with no accepted proof whose deadline has passed.
+
+        Bookkeeping, not a sanction: nobody is suspended, no strike is added and no seed moves,
+        so an honest miner that lost its window to an eviction or a beacon pause keeps its state.
+        The deadline round itself still accepts a proof. A proven trial waits for its
+        finalization, which may follow the deadline. The admission's state is ignored on purpose:
+        a suspended, banned or deregistered holder keeps a trial place that no request can free.
+        """
+        with self.escrow.tx():
+            epochs = [
+                row[0]
+                for row in self.store.db.execute(
+                    "SELECT r.epoch FROM admission_trial_results r "
+                    "JOIN admissions_v2 a ON a.trial_epoch=r.epoch "
+                    "WHERE r.outcome='OPEN' AND a.proof_digest IS NULL "
+                    "AND json_extract(r.challenge,'$.deadline_beacon')<? ORDER BY r.epoch",
+                    (now,),
+                )
+            ]
+            for epoch in epochs:
+                self.store.db.execute(
+                    "UPDATE admission_trial_results SET outcome='EXPIRED' WHERE epoch=?", (epoch,)
+                )
+            return epochs
+
     def challenge(self, admission_id: str, *, now: int) -> dict[str, JsonValue]:
         self._beacon(now)
         with self.escrow.tx():
@@ -213,6 +239,7 @@ class Admission:
             ).fetchone()
             if r.state not in ("APPLIED", "PROBATION", "ACTIVE") or r.pending_dispute:
                 raise AdmissionError("CHALLENGE_STATE")
+            self.reap_expired_trials(now=now)
             if row["challenge"]:
                 c = JoinChallenge.model_validate_json(row["challenge"])
                 trial = self.store.db.execute(
@@ -220,12 +247,6 @@ class Admission:
                     (row["trial_epoch"],),
                 ).fetchone()
                 if trial and trial["outcome"] == "OPEN":
-                    if now > c.deadline_beacon and row["proof_digest"] is None:
-                        self.store.transition(admission_id, "SUSPENDED", "CHALLENGE_EXPIRED", now)
-                        self.store.db.execute(
-                            "UPDATE admission_trial_results SET outcome='EXPIRED' WHERE epoch=?",
-                            (row["trial_epoch"],),
-                        )
                     reservation = self.store.db.execute(
                         "SELECT receipt FROM admission_reservations WHERE reservation=?",
                         (f"challenge|{admission_id}|{c.nonce}",),
