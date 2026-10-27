@@ -143,7 +143,9 @@ swap)
   [[ $NEW =~ ^ghcr\.io/cortexlm/cortex/hypertrain@sha256:[0-9a-f]{64}$ ]] || { echo "bad ref"; exit 4; }
   [ "$(docker image inspect "$NEW" --format '{{.Id}}')" = "${NEW#*@}" ] || { echo "image not pulled"; exit 4; }
   grep -c '^    container_name: hypertrain-test-challenge$' "$F" | grep -qx 1 || { echo "anchor"; exit 4; }
-  umask 077; sed "/^    container_name: hypertrain-test-challenge\$/a\\    image: $NEW" "$F" > "$F.new"
+  # a second swap finds the image line the first one added: drop it, or the key would be defined twice
+  umask 077; sed '/^    container_name: hypertrain-test-challenge$/{n;/^    image: /d}' "$F" \
+    | sed "/^    container_name: hypertrain-test-challenge\$/a\\    image: $NEW" > "$F.new"
   apply challenge "$B" services.challenge.image
   images "$F"; live "${NEW#*@}"; sleep 6; date -u +%FT%TZ; check;;
 beacon)

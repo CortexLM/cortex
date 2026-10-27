@@ -24,6 +24,7 @@ from .sandbox import (
     NEW_REF,
     OLD_ID,
     OLD_REF,
+    OTHER_ID,
     RELAY,
     REPO,
     SCRIPT_TEXT,
@@ -93,6 +94,18 @@ def test_a_seal_younger_than_30_minutes_for_the_previous_epoch_opens_the_gate(bo
     box.pull(NEW_REF)
     box.seal(age=age)
     box.run(*call("swap", backup), mutates={CHALLENGE})
+
+
+def test_a_second_swap_replaces_the_image_line_of_the_first_instead_of_adding_one(box, backup):
+    other = f"{REPO}@{OTHER_ID}"
+    box.pull(NEW_REF)
+    box.pull(other)
+    box.seal(age=60)
+    box.run(*call("swap", backup), mutates={CHALLENGE})
+    box.run("swap", other, str(backup), mutates={CHALLENGE})
+    lines = [x for x in box.f.read_text().splitlines() if x.startswith("    image: ")]
+    assert lines == [f"    image: {other}"]  # a key defined twice is a compose parse error
+    assert box.container(CHALLENGE)["Config"]["Image"] == other
 
 
 # HT_GATE_MAX_AGE_S replaces the 30-min limit and nothing else of the gate.
