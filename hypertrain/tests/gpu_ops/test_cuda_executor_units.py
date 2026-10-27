@@ -1976,7 +1976,8 @@ def test_prepare_command_makes_every_directory_it_creates_private_whatever_the_u
 def test_prepare_command_refuses_a_link_and_leaves_its_target_alone(tmp_path: Path) -> None:
     assignment, _ = ce.cache_location(None, DIGEST)
     target = tmp_path / "elsewhere"
-    target.mkdir(mode=0o755)
+    target.mkdir()
+    target.chmod(0o755)  # mkdir(mode=) is masked by the umask; the test needs this exact mode
     leaf = tmp_path / ".cortex-cuda-executor/compute-cache" / LEAF
     leaf.parent.mkdir(parents=True)
     leaf.symlink_to(target)
