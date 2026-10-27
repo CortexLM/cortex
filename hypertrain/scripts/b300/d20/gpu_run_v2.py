@@ -14,7 +14,11 @@ admission, audits and get_weights are the repository's own code. The harness cha
    This is a STAND-IN. No engine Result backs it, and S3's qualification (889M dense, one GPU
    per host) does not cover this tiny n_gpus=1 fixture model. Because it replaces
    `_bootstrap_backend_v2`, the only in-process user of gpu_ops/network_qualification.py, the
-   PASS does not exercise the 8a90d9bc fix.
+   PASS does not exercise the 8a90d9bc fix. A real qualification needs two results from two
+   distinct machines (`compare` refuses equal machine_id, instance_id or role), so one host cannot
+   replace this stand-in. The harness does run the repository's own device-class check
+   (`network_qualification.unqualified_device`, ADR 0007) on the (capability, SM count) pairs that
+   torch reports for the visible GPUs and logs it as a `device_class` event.
 3. After each CUDA audit replay, and before `_dispatch_env_v2` reads it, the harness writes
    role-dispatch.json from this challenge process's GPU: nvidia-smi driver and UUID, plus the
    torch SM count. It is not a dispatcher and it is not bound to the publication. Its
@@ -23,6 +27,13 @@ admission, audits and get_weights are the repository's own code. The harness cha
 
 The miner device comes from HYPERTRAIN_MINER_DEVICE=cuda (MinerConfig env override). This is not
 proof of production qualification, of the s100 TEST stack or of any on-chain payment.
+
+Modes: `smoke`, `multi` (dense fixture model), and for kimi-k3-pro-tiny (ADR 0006, D18)
+`smoke-kimi`, `multi-kimi` and `job-kimi`. The kimi modes swap the fixture model for the MICRO
+geometry of tests/miner/test_client_network_v2.py (the fixture admission policy caps one object at
+1,000,000 bytes, so the 77M-parameter PROFILE cannot ride this challenge). `job-kimi` is that
+test on CUDA: join-v2 then `run-v2 --job`, and the miner's torchrun worker must equal an
+in-process CUDA `train_round` bit for bit.
 """
 
 from __future__ import annotations
@@ -33,6 +44,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +57,8 @@ IMAGE = os.environ["HT_IMAGE_DIGEST"]
 DRIVER = os.environ.get("HT_D20_DRIVER", "595.91.07")
 SM_COUNT = int(os.environ.get("HT_D20_SM_COUNT", "148"))
 STANDIN = "s5-d20 harness stand-in: fixture-owner signed, no engine Result"
+MODEL = "dense"  # "kimi" in the *-kimi modes
+KIMI_DTYPE = os.environ.get("HT_D20_KIMI_DTYPE", "bf16")  # the dtype S3 qualified for kimi
 
 
 def _local_gpus(n: int) -> dict[str, Any]:
@@ -80,6 +94,229 @@ def _event(**fields: Any) -> None:
     if path:
         with open(path, "a") as out:
             out.write(json.dumps(fields, sort_keys=True, default=str) + "\n")
+
+
+DEVICE_CLASS: dict[str, Any] = {}
+
+
+def _device_class() -> None:
+    """Record the repository's device-class verdict for the GPUs this process sees (real values) and
+    stop when there is no GPU or the verdict refuses the pair: a run there would prove nothing."""
+    import torch
+
+    from hypertrain.gpu_ops.network_qualification import unqualified_device
+
+    props = [torch.cuda.get_device_properties(i) for i in range(torch.cuda.device_count())]
+    capabilities = [(p.major, p.minor) for p in props]
+    sm_counts = [p.multi_processor_count for p in props]
+    reason = unqualified_device(capabilities, sm_counts)
+    DEVICE_CLASS.update(capabilities=capabilities, sm_counts=sm_counts, unqualified=reason)
+    _event(event="device_class", **DEVICE_CLASS)
+    if not props:
+        raise SystemExit("no CUDA device is visible to the harness")
+    if reason is not None:
+        raise SystemExit(f"the repository refuses this device class: {reason}")
+
+
+def _kimi_setup(fixture: Any, s: Any) -> Any:
+    """The fixture Setup with the kimi-k3-pro-tiny MICRO model, as in
+    tests/miner/test_client_network_v2.py::test_kimi_manifest_joins_and_runs_v2_through_the_cli."""
+    import math
+
+    import numpy as np
+
+    import hypertrain.models.kimi_tiny as kt
+    from hypertrain.protocol.hashing import MerkleTree
+    from hypertrain.protocol.messages import f32hex
+    from hypertrain.protocol.messages_v2 import RunManifestV2
+    from hypertrain.trainer.compress import state_hash
+    from hypertrain.trainer.config import TrainConfig
+    from hypertrain.trainer.model import init_params
+
+    geom = kt.MICRO
+    body = s.manifest.body()
+    training = body["training"]
+    training["model"].update(
+        arch=kt.ARCH,
+        n_layers=geom.n_layers,
+        d_model=geom.d_model,
+        n_heads=geom.n_heads,
+        n_kv_heads=geom.n_kv_heads,
+        d_ff=geom.d_ff,
+        vocab=geom.vocab,
+        seq_len=geom.seq_len,
+        n_experts=geom.n_experts,
+        top_k_experts=geom.top_k_experts,
+        rope_theta=50000,
+        init_seed=7,
+        capacity_factor=f32hex(1.0),
+        aux_loss_coef=f32hex(1e-4),
+        compute_dtype=KIMI_DTYPE,
+        param_count=sum(math.prod(x) for x in kt.param_shapes(geom).values()),
+    )
+    training["inner"].update(H=2, J=1, micro_batch=2)
+    rows = (
+        (np.arange(16 * (geom.seq_len + 1)) * 7919 + 3).reshape(16, geom.seq_len + 1) % geom.vocab
+    ).astype("<u4")
+    tree = MerkleTree([row.tobytes() for row in rows])
+    training["dataset"].update(merkle_root=tree.root.hex(), n_samples=16, depth=4)
+    cfg = TrainConfig.from_manifest_v2(RunManifestV2.model_validate(body))
+    training["init_state_hash"] = state_hash(init_params(cfg.model))
+    return fixture.Setup(
+        RunManifestV2.model_validate(body), s.policy, s.admission_policy, rows, tree
+    )
+
+
+def _job_kimi() -> int:
+    """join-v2 then `run-v2 --job` for kimi-k3-pro-tiny on this GPU (the D18 CLI test, on CUDA).
+
+    The miner's torchrun worker (device cuda, a fresh interpreter) must equal an in-process CUDA
+    `train_round` on the same samples: same leaves_root, final_theta_hash, delta_hash and delta
+    bytes, and the router bias must move. The staged job's deadline is the fixture's 120 s, which
+    covers join-v2 and the run (65.8 s on the B300). Writes $HT_D20_EVIDENCE and prints the same
+    JSON; a failing join or run is written as FAIL with the exit codes, not as a crash.
+    """
+    import tempfile
+
+    import httpx
+    import numpy as np
+    import torch
+
+    import hypertrain.models.kimi_tiny as kt
+    from hypertrain.auditor.replay import unpack_state
+    from hypertrain.miner import cli
+    from hypertrain.protocol.envelope_v2 import seal
+    from hypertrain.trainer.config import TrainConfig
+    from hypertrain.trainer.loop import Assignment, train_round
+    from hypertrain.trainer.model import init_params, param_shapes
+
+    fixture = smoke._load_service().fixture
+    s = fixture.setup()
+    manifest = s.manifest
+    run = manifest.run_id()
+    cfg = TrainConfig.from_manifest_v2(manifest)
+    with tempfile.TemporaryDirectory(prefix="d20-kimi-job-") as work:
+        tmp = Path(work)
+        job = fixture.stage(s, tmp / "attempt", (0, 1, 2, 3), 0)
+        (tmp / "attempt/job.json").write_text(job.model_dump_json())
+        for name, seed in (("hot.key", b"b"), ("cold.key", b"c")):
+            (tmp / name).write_bytes(seed * 32)
+            (tmp / name).chmod(0o600)
+        config = tmp / "miner.toml"
+        config.write_text(
+            f'api = "https://service.test"\nkeyfile = "{tmp / "hot.key"}"\n'
+            f'workdir = "{tmp / "work"}"\nstate_source = "unused"\n'
+            f'image_digest = "{manifest.training.reference_spec.image_digest}"\n'
+            f'run_id = "{run}"\nowner_hotkey = "{fixture.COORD.ss58}"\ndevice = "cuda"\n'
+        )
+        envelope = seal(fixture.COORD, "RunManifestV2", run, manifest, 1000)
+        joins: list[dict[str, Any]] = []
+
+        def master(request: httpx.Request) -> httpx.Response:
+            if (request.method, request.url.path) == ("GET", f"/v2/runs/{run}"):
+                return httpx.Response(200, json={"manifest_envelope": envelope})
+            if (request.method, request.url.path) == ("POST", f"/v2/runs/{run}/join"):
+                joins.append(json.loads(request.content))
+                return httpx.Response(200, json={"state": "APPLIED"})
+            return httpx.Response(404, json={"detail": "unexpected route"})
+
+        client_type = httpx.Client
+        cli.httpx.Client = lambda **kwargs: client_type(
+            transport=httpx.MockTransport(master), **kwargs
+        )  # type: ignore[assignment,misc]
+        try:
+            args = ["--config", str(config)]
+            started = time.monotonic()
+            joined = cli.main(
+                [
+                    "join-v2",
+                    *args,
+                    "--coldkey",
+                    str(tmp / "cold.key"),
+                    "--request-id",
+                    "ab" * 32,
+                    "--expiry",
+                    "100",
+                ]
+            )
+            ran = cli.main(["run-v2", *args, "--job", str(tmp / "attempt/job.json")])
+            elapsed = time.monotonic() - started
+        finally:
+            cli.httpx.Client = client_type  # type: ignore[misc]
+        published = tmp / "attempt/published/rank-0"
+        base: dict[str, Any] = {
+            "mode": "job-kimi",
+            "run_id": run,
+            "dtype": KIMI_DTYPE,
+            "gpu": torch.cuda.get_device_name(0),
+            "device_class": DEVICE_CLASS,
+            "join_v2_plus_run_v2_job_elapsed_seconds": round(elapsed, 1),
+        }
+        if joined != 0 or ran != 0 or not (published / "summary.json").exists():
+            return _finish_job(
+                {
+                    **base,
+                    "result": "FAIL",
+                    "checks": {
+                        "join_rc0": joined == 0,
+                        "run_rc0": ran == 0,
+                        "summary_written": (published / "summary.json").exists(),
+                    },
+                }
+            )
+        commitments = json.loads((published / "summary.json").read_bytes())["commitments"]
+        backend = json.loads((published / "summary.json").read_bytes()).get("backend")
+        theta0 = init_params(cfg.model)
+        ref = train_round(
+            cfg,
+            {k: v.to("cuda") for k, v in theta0.items()},
+            Assignment(run, 0, (0, 1, 2, 3), 0),
+            lambda i: s.rows[i].astype(np.uint32),
+        )
+        theta, _ = unpack_state((published / "state.safetensors").read_bytes())
+        bias = "layers.001.router_bias"
+        checks = {
+            "join_rc0": True,
+            "run_rc0": True,
+            "join_binds_run_and_policy": [(j["run_id"], j["policy_hash"]) for j in joins]
+            == [(run, manifest.network.admission_policy_hash)],
+            "summary_backend_cuda": backend == "cuda",
+            "commitments_equal_cuda_reference": (
+                commitments["leaves_root"],
+                commitments["final_theta_hash"],
+                commitments["delta_hash"],
+            )
+            == (ref.leaves_root, ref.final_theta_hash, ref.delta_hash),
+            "delta_bytes_equal": (published / "delta.bin").read_bytes() == ref.delta_payload,
+            "parameter_set": sorted(theta)
+            == sorted(param_shapes(cfg.model))
+            == sorted(kt.param_shapes(cfg.model)),
+            "router_bias_moved": not np.array_equal(theta[bias].numpy(), theta0[bias].numpy()),
+        }
+        return _finish_job(
+            {
+                **base,
+                "result": "PASS" if all(checks.values()) else "FAIL",
+                "checks": checks,
+                "commitments": {
+                    k: commitments[k] for k in ("leaves_root", "final_theta_hash", "delta_hash")
+                },
+                "reference": {
+                    "leaves_root": ref.leaves_root,
+                    "final_theta_hash": ref.final_theta_hash,
+                    "delta_hash": ref.delta_hash,
+                },
+            }
+        )
+
+
+def _finish_job(result: dict[str, Any]) -> int:
+    """Write the job-kimi evidence ($HT_D20_EVIDENCE), print it, and return the exit code."""
+    text = json.dumps(result, indent=1, sort_keys=True, default=str)
+    if os.environ.get("HT_D20_EVIDENCE"):
+        Path(os.environ["HT_D20_EVIDENCE"]).write_text(text)
+    print(text)
+    return 0 if result["result"] == "PASS" else 1
 
 
 def _patch_store(owner: Any) -> None:
@@ -172,6 +409,8 @@ def _load_service() -> Any:
 
     def b300_setup(mode: str = "test") -> Any:
         s = setup(mode)
+        if MODEL == "kimi":
+            s = _kimi_setup(fixture, s)
         body = s.manifest.body()
         body["training"]["reference_spec"].update(
             image_digest=IMAGE, driver_allowlist=[DRIVER], sm_count=SM_COUNT
@@ -180,6 +419,7 @@ def _load_service() -> Any:
 
     fixture.setup = b300_setup
     _patch_store(svc.OWNER)
+    _device_class()
     return svc
 
 
@@ -189,15 +429,22 @@ smoke._load_service = _load_service
 def main() -> int:
     if os.environ.get("HYPERTRAIN_MINER_DEVICE") != "cuda":
         raise SystemExit("set HYPERTRAIN_MINER_DEVICE=cuda")
+    global MODEL
+    mode = sys.argv[1:]
     print(json.dumps({"image": IMAGE, "driver": DRIVER, "sm_count": SM_COUNT}), flush=True)
-    match sys.argv[1:]:
-        case ["smoke"]:
+    if mode and mode[0].endswith("-kimi"):
+        MODEL = "kimi"
+        _event(event="model", arch="kimi-k3-pro-tiny", dtype=KIMI_DTYPE, geometry="MICRO")
+    match mode:
+        case ["smoke"] | ["smoke-kimi"]:
             return smoke.main()
-        case ["multi"]:
+        case ["multi"] | ["multi-kimi"]:
             import mine_multi_round_v2 as multi
 
             return multi.main()
-    raise SystemExit("usage: gpu_run_v2.py smoke|multi")
+        case ["job-kimi"]:
+            return _job_kimi()
+    raise SystemExit("usage: gpu_run_v2.py smoke|multi|smoke-kimi|multi-kimi|job-kimi")
 
 
 if __name__ == "__main__":
