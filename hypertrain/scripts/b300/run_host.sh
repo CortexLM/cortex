@@ -54,14 +54,25 @@ while [ $# -gt 0 ]; do
 done
 
 die() { echo "run_host: $*" >&2; exit 2; }
+# Operator text is matched against a regex before it reaches arithmetic or a command line: bash
+# reads 08 as an invalid octal number and evaluates $(...) inside $(( )), so a number is never
+# computed from an unchecked string and every conversion is forced to base 10 (10#).
 [[ $image =~ ^[a-z0-9][a-z0-9./_-]*@sha256:[0-9a-f]{64}$ ]] || die "image must be REPO@sha256:<64 hex>: $image"
-[[ $host =~ ^[A-Za-z0-9._-]+$ ]] || die "bad host name: $host"
-case $duration in
-  *h) seconds=${duration%h}; seconds=$((seconds * 3600)) ;;
-  *m) seconds=${duration%m}; seconds=$((seconds * 60)) ;;
-  *) seconds=$duration ;;
+[[ $host =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "bad host name: $host"
+[[ $duration =~ ^([0-9]{1,6})([hm]?)$ ]] || die "bad --duration (3h, 90m or seconds): $duration"
+case ${BASH_REMATCH[2]} in
+  h) unit=3600 ;;
+  m) unit=60 ;;
+  *) unit=1 ;;
 esac
-[[ $seconds =~ ^[0-9]+$ ]] && [ "$seconds" -gt 0 ] || die "bad --duration: $duration"
+seconds=$((10#${BASH_REMATCH[1]} * unit))
+[ "$seconds" -gt 0 ] || die "bad --duration (not positive): $duration"
+# The poll interval is 0.001 to 59.999 s: it must stay well inside the 2-minute Spot notice.
+[[ $POLL =~ ^([0-9]|[1-5][0-9])(\.[0-9]{1,3})?$ && $POLL =~ [1-9] ]] ||
+  die "HT_B300_POLL_SECONDS must be 0.001 to 59.999 seconds: $POLL"
+[[ $STOP_GRACE =~ ^[0-9]{1,4}$ ]] || die "HT_B300_STOP_GRACE must be whole seconds, at most 9999: $STOP_GRACE"
+STOP_GRACE=$((10#$STOP_GRACE))
+[[ $PREFIX =~ ^ht-[a-z0-9][a-z0-9_.-]*$ ]] || die "HT_B300_CONTAINER_PREFIX must start with ht-: $PREFIX"
 for s in $steps; do [[ " $ALL_STEPS " == *" $s "* ]] || die "unknown step: $s"; done
 if [ "$prod" = 1 ]; then
   [ -n "${HT_B300_PROD_ENDPOINT:-}" ] || die "--prod needs HT_B300_PROD_ENDPOINT"
@@ -118,6 +129,7 @@ watchdog() {
 }
 watchdog $$ 9>&- &
 watchdog_pid=$!
+log "watchdog pid $watchdog_pid"
 
 upload_results() {
   [ -n "$upload" ] || return 0
@@ -176,6 +188,12 @@ step() {
   if [ "$force" = 0 ] && [ "$name" != host_probe ] && [ "$(cat "$out/steps/$name.rc" 2>/dev/null)" = "0 $image" ]; then
     log "skip $name: passed in an earlier run with this image"
     return 0
+  fi
+  # Without the watchdog neither --duration nor a Spot notice can stop the run. (A watchdog that
+  # already sent its TERM is not seen here: the trap runs before the next command.)
+  if ! kill -0 "$watchdog_pid" 2>/dev/null; then
+    log "the watchdog died: nothing would stop this run at --duration or a Spot notice"
+    finish watchdog-died 9
   fi
   log "step $name"
   t0=$(date +%s)

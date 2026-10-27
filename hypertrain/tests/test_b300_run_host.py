@@ -6,14 +6,16 @@ EC2 instance metadata over HTTP (session PUT, then spot/instance-action). No GPU
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -71,7 +73,7 @@ elif cmd == "run":
         ctr.write_text(label)
         while not ctr.with_suffix(".stopped").exists():
             time.sleep(0.05)
-        sys.exit(143)
+        sys.exit(int(os.environ.get("FAKE_BLOCK_RC", "143")))
     if name == "gpu_probe":
         ok = os.environ.get("FAKE_GPU_OK", "1") == "1"
         (out / "gpu_probe.json").write_text(json.dumps({"ok": ok}))
@@ -204,6 +206,39 @@ def runs_of(tmp_path: Path, name: str) -> list[list[str]]:
 
 def stop_json(tmp_path: Path) -> dict[str, Any]:
     return json.loads((tmp_path / "results/h1/stop.json").read_text())
+
+
+def wait_until(cond: Callable[[], object], what: str, timeout: float = 30) -> None:
+    end = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < end, f"timed out waiting for {what}"
+        time.sleep(0.05)
+
+
+@pytest.fixture
+def launch(env: dict[str, str], tmp_path: Path) -> Iterator[Callable[..., subprocess.Popen[bytes]]]:
+    """Start run_host.sh in its own process group; teardown frees fake containers and kills it."""
+    procs: list[subprocess.Popen[bytes]] = []
+
+    def start(*args: str, **extra_env: str) -> subprocess.Popen[bytes]:
+        argv = ["bash", str(SCRIPT), "--results-root", str(tmp_path / "results"), "--host", "h1"]
+        proc = subprocess.Popen(  # noqa: S603 - fixed argv
+            [*argv, *args],
+            env={**env, **extra_env},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        procs.append(proc)
+        return proc
+
+    yield start
+    for ctr in (tmp_path / "state").glob("ctr-*"):
+        ctr.with_suffix(".stopped").touch()
+    for proc in procs:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
 
 
 def test_full_run_pins_the_digest_and_runs_the_8gpu_flash_bench(env, tmp_path):
@@ -415,3 +450,96 @@ def test_process_group_sigterm_still_drains(env, tmp_path):
     assert proc.wait(timeout=30) == 143
     assert stop_json(tmp_path)["reason"] == "signal"
     assert ["stop", "--time", "60", "ctr-gpu_probe"] in docker_calls(tmp_path)
+
+
+# --- input validation (B1): text is checked before it reaches arithmetic or a command line ------
+
+
+def test_duration_injection_is_refused_before_it_is_evaluated(env, tmp_path):
+    marker = tmp_path / "pwned"
+    p = run(env, tmp_path, "--duration", f"image[$(touch {marker})]h")
+    assert p.returncode == 2 and "--duration" in p.stderr, p.stdout + p.stderr
+    assert not marker.exists()
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize("bad", ["1.5h", "h", "3d", "1h30m", "0", "0h", "-5"])
+def test_malformed_duration_is_refused_before_docker(env, tmp_path, bad):
+    p = run(env, tmp_path, "--duration", bad)
+    assert p.returncode == 2 and "--duration" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "duration,seconds", [("08h", 8 * 3600), ("09", 9), ("010h", 10 * 3600), ("090m", 90 * 60)]
+)
+def test_leading_zeros_are_decimal(env, tmp_path, duration, seconds):
+    p = run(env, tmp_path, "--duration", duration, "--steps", "host_probe")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert f"duration={seconds}s" in (tmp_path / "results/h1/run.log").read_text()
+
+
+def test_a_leading_zero_duration_still_arms_the_spot_watchdog(env, tmp_path, launch):
+    # bash read 08h as an invalid octal number: the deadline stayed unset and the watchdog died on
+    # set -u, taking the Spot drain with it while the run went on.
+    proc = launch("--duration", "08h", FAKE_BLOCK="mfu")
+    wait_until(lambda: (tmp_path / "state/ctr-mfu").exists(), "the mfu container")
+    Imds.notice = True
+    try:
+        rc = proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        pytest.fail("the run ignored the Spot notice: its watchdog is dead")
+    assert rc == 143 and stop_json(tmp_path)["reason"] == "spot-interruption"
+
+
+@pytest.mark.parametrize("poll", ["abc", "0", "0.0", "-1", "60", "5s"])
+def test_malformed_poll_interval_is_refused_before_docker(env, tmp_path, poll):
+    p = run({**env, "HT_B300_POLL_SECONDS": poll}, tmp_path)
+    assert p.returncode == 2 and "HT_B300_POLL_SECONDS" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize("grace", ["60s", "-1", "1e3", "0x10", "99999"])
+def test_malformed_stop_grace_is_refused_before_docker(env, tmp_path, grace):
+    p = run({**env, "HT_B300_STOP_GRACE": grace}, tmp_path)
+    assert p.returncode == 2 and "HT_B300_STOP_GRACE" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+def test_stop_grace_with_leading_zeros_reaches_docker_as_decimal(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="gpu_probe", HT_B300_STOP_GRACE="060")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=30) == 143
+    assert ["stop", "--time", "60", "ctr-gpu_probe"] in docker_calls(tmp_path)
+
+
+@pytest.mark.parametrize("prefix", ["executor", "pod_x", "ht b300", "ht-", "../ht-x", "HT-b300"])
+def test_container_prefix_must_stay_in_the_ht_namespace(env, tmp_path, prefix):
+    p = run({**env, "HT_B300_CONTAINER_PREFIX": prefix}, tmp_path)
+    assert p.returncode == 2 and "HT_B300_CONTAINER_PREFIX" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+
+
+@pytest.mark.parametrize("host", ["..", ".", ".hidden", "a/b", "-x"])
+def test_host_name_cannot_leave_the_results_root(env, tmp_path, host):
+    p = run(env, tmp_path, "--host", host)
+    assert p.returncode == 2 and "bad host name" in p.stderr, p.stdout + p.stderr
+    assert docker_calls(tmp_path) == []
+    assert not (tmp_path / "steps").exists()  # no directory was made above the results root
+
+
+def test_a_dead_watchdog_stops_the_run_before_the_next_step(env, tmp_path, launch):
+    proc = launch(FAKE_BLOCK="gpu_probe", FAKE_BLOCK_RC="0")
+    wait_until(lambda: (tmp_path / "state/ctr-gpu_probe").exists(), "the gpu_probe container")
+    log = (tmp_path / "results/h1/run.log").read_text()
+    match = re.search(r"watchdog pid (\d+)", log)
+    assert match, log
+    os.kill(int(match.group(1)), signal.SIGKILL)
+    (tmp_path / "state/ctr-gpu_probe.stopped").touch()  # the container then exits 0
+    try:
+        rc = proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        pytest.fail("the run went on without a watchdog")
+    assert rc == 9 and stop_json(tmp_path)["reason"] == "watchdog-died"
+    assert runs_of(tmp_path, "mfu") == []
