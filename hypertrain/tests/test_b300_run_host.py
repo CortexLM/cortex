@@ -39,6 +39,12 @@ if os.environ.get("FAKE_NEEDS_SUDO") == "1" and os.environ.get("FAKE_SUDO") != "
 with (state / "docker.jsonl").open("a") as f:
     f.write(json.dumps(argv) + "\n")
 cmd = argv[0]
+if cmd in ("run", "pull"):
+    try:  # fd 9 is the flock of the results directory: a long-lived child must not hold it
+        os.fstat(9)
+        (state / "fd9-leaked").touch()
+    except OSError:
+        pass
 
 
 # Containers are state/ctr-<id> files holding {"name", "labels"}; <file>.stopped and <file>.removed
@@ -187,9 +193,24 @@ if any(a.startswith("--query-gpu") for a in sys.argv):
     n, drv, cc = (os.environ.get(k, d) for k, d in
                   (("FAKE_GPUS", "8"), ("FAKE_DRIVER", "595.91.07"), ("FAKE_CC", "10.3")))
     for i in range(int(n)):
-        print(f"{i}, NVIDIA B300 SXM6 AC, {drv}, {cc}, 275040 MiB, 00000000:{i:02X}:00.0")
+        last = i == int(n) - 1  # FAKE_DRIVER_LAST / FAKE_CC_LAST: the last GPU differs
+        d = os.environ.get("FAKE_DRIVER_LAST", drv) if last else drv
+        c = os.environ.get("FAKE_CC_LAST", cc) if last else cc
+        print(f"{i}, NVIDIA B300 SXM6 AC, {d}, {c}, 275040 MiB, 00000000:{i:02X}:00.0")
 else:
     print("fake nvidia-smi table")
+"""
+
+# df -P -B1G PATH...: one row per path, Used from FAKE_DF_USED, Available from FAKE_DF_AVAIL
+# (comma separated, in path order; 500 when absent). Used is large on purpose.
+FAKE_DF = r"""
+import os, sys
+paths = [a for a in sys.argv[1:] if not a.startswith("-")]
+avail = os.environ.get("FAKE_DF_AVAIL", "").split(",")
+print("Filesystem 1G-blocks Used Available Capacity Mounted on")
+for i, _ in enumerate(paths):
+    free = int(avail[i]) if i < len(avail) and avail[i] else 500
+    print(f"/dev/fake{i} 1000G {os.environ.get('FAKE_DF_USED', '900')}G {free}G 50% /mnt/fake{i}")
 """
 
 FAKE_SUDO = r"""
@@ -282,6 +303,7 @@ def env(tmp_path: Path, imds: str) -> dict[str, str]:
         "aws": FAKE_AWS,
         "sudo": FAKE_SUDO,
         "fi_info": FAKE_FI_INFO,
+        "df": FAKE_DF,
     }
     for name, body in fakes.items():
         (bindir / name).write_text(f"#!{sys.executable}\n{body}")
@@ -423,6 +445,9 @@ def test_docker_without_group_membership_goes_through_sudo(env, tmp_path):
         ({"FAKE_DRIVER": "580.95.05"}, "driver"),
         ({"FAKE_GPUS": "7"}, "gpu_count"),
         ({"FAKE_CC": "12.0"}, "compute_cap"),
+        ({"FAKE_GPUS": "9"}, "gpu_count"),  # more than expected is a different host too
+        ({"FAKE_DRIVER_LAST": "580.95.05"}, "driver"),  # one GPU on another driver
+        ({"FAKE_CC_LAST": "10.0"}, "compute_cap"),  # one GPU of another capability
     ],
 )
 def test_wrong_host_stops_before_any_pull(env, tmp_path, fake, check):
@@ -949,3 +974,44 @@ def test_a_step_that_dies_early_leaves_no_evidence_of_an_earlier_run(
     assert p.returncode == rc, p.stdout + p.stderr
     stale = [n for n in files if (out / n).exists() and "stale" in (out / n).read_text()]
     assert stale == []
+
+
+# --- the gates (B7): each one stops the run, and a mutant that opens it is caught -----------------
+
+
+def test_a_failed_gpu_probe_stops_the_run_before_mfu(env, tmp_path):
+    p = run({**env, "FAKE_GPU_OK": "0"}, tmp_path)
+    assert p.returncode == 5, p.stdout + p.stderr
+    stop = stop_json(tmp_path)
+    assert stop["reason"] == "gpu-probe-failed" and stop["steps"]["gpu_probe"] != 0
+    assert runs_of(tmp_path, "mfu") == [] and runs_of(tmp_path, "miner_test") == []
+
+
+@pytest.mark.parametrize(
+    "avail,passes",
+    [("500,500", True), ("100,100", True), ("500,99", False), ("99,500", False)],
+)
+def test_the_results_and_the_docker_root_each_need_the_free_space(env, tmp_path, avail, passes):
+    # Used is 900 GiB on both: reading that column, or the larger of the two, would pass.
+    fake = {"HT_B300_MIN_DISK_GB": "100", "FAKE_DF_AVAIL": avail}
+    p = run({**env, **fake}, tmp_path, "--steps", "host_probe")
+    probe = json.loads((tmp_path / "results/h1/host_probe.json").read_text())
+    assert probe["checks"]["disk"] is passes and probe["free_gb"] != {}
+    assert p.returncode == (0 if passes else 3), p.stdout + p.stderr
+
+
+def test_containers_stay_isolated_and_do_not_inherit_the_lock(env, tmp_path):
+    prod = prod_env(tmp_path / "miner")
+    p = run({**env, **prod}, tmp_path, "--prod")
+    assert p.returncode == 0, p.stdout + p.stderr
+    runs = [c for c in docker_calls(tmp_path) if c[0] == "run"]
+    assert len(runs) == 4  # gpu_probe, mfu, miner_test and one production round
+    for c in runs:
+        assert {"--rm", "--init"} <= set(c)
+        assert c[c.index("--label") + 1].startswith("io.cortex.b300-run=")
+    (probe,) = runs_of(tmp_path, "gpu_probe")
+    assert probe[probe.index("--network") + 1] == "none"
+    for name in ("miner_test", "miner-prod-3"):  # the key file must belong to the invoking user
+        (c,) = runs_of(tmp_path, name)
+        assert c[c.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
+    assert not (tmp_path / "state/fd9-leaked").exists()
