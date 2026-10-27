@@ -6621,19 +6621,33 @@ class ChallengeStore:
                 >= 2
             ):
                 return None
-            rows = self._db.execute(
+            row = None
+            for candidate in self._db.execute(
                 "SELECT * FROM audit_leases_v2 WHERE run_id=? "
                 "AND state='queued' ORDER BY created,id",
                 (run_id,),
-            ).fetchall()
-            row = next(
-                (
-                    r
-                    for r in rows
-                    if env.signer not in json.loads(r["tried"]) and env.signer != r["hotkey"]
-                ),
-                None,
-            )
+            ).fetchall():
+                if (
+                    env.signer in json.loads(candidate["tried"])
+                    or env.signer == candidate["hotkey"]
+                ):
+                    continue
+                identity = f"{candidate['w']}:{candidate['hotkey']}"
+                commit_env = self._record_v2(run_id, "commit", identity)
+                leaves_record = self._record_v2(run_id, "leaves", identity)
+                leaves = json.loads(self.objects.get(str(leaves_record["object"])))
+                # A miner-sealed input that AuditJobV2 refuses must not block the jobs behind it.
+                refusal = self._refused_miner_input_v2(commit_env, leaves, now)
+                if refusal is None:
+                    row = candidate
+                    break
+                self._drop_audit_job_v2(
+                    run_id,
+                    candidate,
+                    "UNVERIFIED",
+                    "MINER_INPUT_REFUSED",
+                    sha256_hex(f"ht-audit-refused/1|{candidate['id']}|{refusal}".encode()),
+                )
             if row is None:
                 return None
             nonce = secrets.token_hex(32)
@@ -6641,11 +6655,7 @@ class ChallengeStore:
                 self.objects.get(manifest.network.audit_policy_hash)
             ).lease_rounds
             expires = min(now + lease_rounds, row["absolute"])
-            identity = f"{row['w']}:{row['hotkey']}"
             start = StartStateV2.model_validate(self._record_v2(run_id, "start", identity))
-            commit_env = self._record_v2(run_id, "commit", identity)
-            leaves_record = self._record_v2(run_id, "leaves", identity)
-            leaves = json.loads(self.objects.get(str(leaves_record["object"])))
             ef = self.objects.get(start.ef_object_sha256)
             from hypertrain.auditor.replay import pack_state
 
@@ -6679,6 +6689,40 @@ class ChallengeStore:
             )
             self._put_record_v2(run_id, "audit-job", row["id"], job.body())
             return envelope_v2.seal(self._coord(), "AuditJobV2", run_id, job, expires)
+
+    @staticmethod
+    def _refused_miner_input_v2(
+        commit_env: dict[str, Any], leaves: list[Any], now: int
+    ) -> str | None:
+        """Why AuditJobV2 would refuse what the miner sealed, or None. Two causes, both the miner's:
+        an expiry sealed below the lease round, and a leaf metric that is not a finite f32."""
+        if envelope_v2.parse_envelope(commit_env).exp_drand < now:
+            return "COMMIT_EXPIRED"
+        if any(
+            not math.isfinite(f32val(leaf[key]))
+            for leaf in leaves
+            for key in ("loss_f32", "norm_f32")
+        ):
+            return "LEAVES_NONFINITE"
+        return None
+
+    def _drop_audit_job_v2(
+        self, run_id: str, row: sqlite3.Row, reason: str, result: str, evidence_hash: str
+    ) -> None:
+        """Close one audit job without a verdict. Its miner leaves the round (`excluded`, no
+        sanction); the round's disposition and the other miners' jobs are untouched."""
+        self._db.execute(
+            "UPDATE audit_leases_v2 SET state='exhausted',result=? WHERE id=?", (result, row["id"])
+        )
+        self._put_record_v2(
+            run_id,
+            "excluded",
+            f"{row['w']}:{row['hotkey']}",
+            {"reason": reason, "evidence_hash": evidence_hash},
+        )
+        finality = self._record_v2(run_id, "finality", str(row["w"]))
+        finality["unresolved_audits"] = max(0, int(str(finality["unresolved_audits"])) - 1)
+        self._put_record_v2(run_id, "finality", str(row["w"]), finality)
 
     def _expire_leases_v2(self, run_id: str, now: int) -> None:
         rows = self._db.execute(

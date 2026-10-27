@@ -37,10 +37,12 @@ def lease_rounds(net) -> int:
     return policy.lease_rounds
 
 
-def seed_round(net, n=4, *, gap=200):
+def seed_round(net, n=4, *, gap=200, commit_exp=None, nan_leaf=None):
     """Write round 0 (opening, starts, commits, leaves, finality) straight into `records_v2`.
 
-    `gap` is `d_final - d_audit`: 100 leaves one lease window, 200 two full ones."""
+    `gap` is `d_final - d_audit`: 100 leaves one lease window, 200 two full ones.
+    `commit_exp` / `nan_leaf` ({miner index: value}) poison one miner's sealed inputs."""
+    commit_exp, nan_leaf = commit_exp or {}, nan_leaf or {}
     store, manifest = net.store, net.manifest
     run = manifest.run_id()
     cfg = TrainConfig.from_manifest_v2(manifest)
@@ -106,7 +108,7 @@ def seed_round(net, n=4, *, gap=200):
     )
     with store._tx():
         store._put_record_v2(run, "round", "0", net.signed(fixtures.COORD, "RoundOpenV2", opening))
-        for key, anchor, start in per:
+        for index, (key, anchor, start) in enumerate(per):
             ident = f"0:{key.ss58}"
             leaves = [
                 LeafPreimage(
@@ -116,7 +118,7 @@ def seed_round(net, n=4, *, gap=200):
                     stages=[StageState(theta="77" * 32, m="88" * 32, v="99" * 32)],
                     batch_ids_sha256="aa" * 32,
                     rng_ctr=0,
-                    loss_f32="0000803f",
+                    loss_f32="0000c07f" if nan_leaf.get(index) == i else "0000803f",
                     norm_f32="0000803f",
                 )
                 for i in range(H // J + 1)
@@ -137,7 +139,12 @@ def seed_round(net, n=4, *, gap=200):
                 tokens=batch * t.model.seq_len,
             )
             store._put_record_v2(run, "start", ident, start.body())
-            store._put_record_v2(run, "commit", ident, net.signed(key, "CommitV2", commit))
+            store._put_record_v2(
+                run,
+                "commit",
+                ident,
+                net.signed(key, "CommitV2", commit, expiry=commit_exp.get(index, 10000)),
+            )
             store._put_record_v2(
                 run, "assignment", ident, {"samples": sample_ids, "assignment_hash": "12" * 32}
             )
