@@ -80,6 +80,8 @@ Everything a host sends is bytes to check, never a statement to believe
 - A result whose `COMPLETE` or `environment.json` nests deeper than 8 levels (the container
   program writes 2 and 3) refuses the host, after one container run: no honest container program
   writes it. Both documents are read as UTF-8 only.
+- A result tar whose extended (PAX or GNU long name) header asks for more than 1 MiB refuses the
+  host the same way: the size is the host's claim, and `tarfile` would allocate it in one call.
 - When no host can serve the job, `launch` raises a plain `IslandFailure`: "cuda executor found
   no host able to run the job: ..." when every host is quarantined or unavailable, "cuda executor
   gave up: ..." after `max_attempts` failed attempts, and `Aborted` (a subclass) when the job

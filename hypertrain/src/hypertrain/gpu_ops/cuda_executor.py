@@ -445,6 +445,15 @@ def shallow(raw: bytes) -> str:
     return text
 
 
+class _CappedReader(io.BufferedReader):
+    """tarfile reads the size an extended header claims in one call, and a host may claim 2**63."""
+
+    def read(self, size: int | None = -1) -> bytes:
+        if size is None or not 0 <= size <= SMALL:
+            raise HostRefused("result tar asks for a read beyond the metadata bound")
+        return super().read(size)
+
+
 def _file_sha(path: Path) -> str:
     with open(path, "rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -691,7 +700,10 @@ class Executor:
         small: dict[str, bytes] = {}
         complete, total, members = False, 0, 0
         try:
-            with tarfile.open(tar_path, "r:") as archive:
+            with (
+                _CappedReader(io.FileIO(tar_path)) as source,
+                tarfile.open(fileobj=source, mode="r:") as archive,
+            ):
                 for member in archive:
                     parts = member.name.split("/")
                     rank = RANK.fullmatch(parts[0])

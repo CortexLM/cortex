@@ -1243,6 +1243,16 @@ def test_read_result_takes_the_metadata_as_utf8_and_nothing_else(
         read(executor, tmp_path, tar_of(entries))
 
 
+def test_the_tar_reader_serves_a_metadata_sized_read_and_nothing_larger(tmp_path: Path) -> None:
+    path = tmp_path / "x"
+    path.write_bytes(b"a" * 10)
+    with ce._CappedReader(io.FileIO(path)) as reader:
+        assert reader.read(ce.SMALL) == b"a" * 10  # members are streamed in chunks of this size
+        for size in (ce.SMALL + 1, 1 << 62, -1, None):
+            with pytest.raises(ce.HostRefused, match="beyond the metadata bound"):
+                reader.read(size)
+
+
 # -- provenance identity -----------------------------------------------------------------------
 
 

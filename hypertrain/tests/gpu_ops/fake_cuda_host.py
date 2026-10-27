@@ -327,6 +327,17 @@ def nested(depth):
     return b"[" * depth + b"]" * depth
 
 
+def header(name, typeflag, size_field):
+    # One 512-byte tar header whose size field is written as given; the checksum is recomputed.
+    info = tarfile.TarInfo(name)
+    info.type = typeflag
+    block = bytearray(info.tobuf(tarfile.GNU_FORMAT, "utf-8", "surrogateescape")[:512])
+    block[124:136] = size_field
+    block[148:156] = b" " * 8
+    block[148:156] = ("%06o\0 " % sum(block)).encode()
+    return bytes(block)
+
+
 def mutated(genuine, entry):
     members = decode(genuine)
     body = [m for m in members if m[0] != "COMPLETE"]
@@ -374,6 +385,9 @@ def mutated(genuine, entry):
     elif name == "environment":
         body = edit(body, "environment.json", lambda d: dumps(dict(json.loads(d), **entry["set"])))
         recompute = True
+    elif name == "extended-header-claim":  # a header of `type` that claims `claim` bytes of records
+        claim = b"\x80" + entry["claim"].to_bytes(11, "big")
+        return header("claim", entry["type"].encode(), claim) + genuine
     elif name == "deep-complete":
         return encode(body + [("COMPLETE", nested(entry["depth"]), "file")])
     elif name == "deep-environment":

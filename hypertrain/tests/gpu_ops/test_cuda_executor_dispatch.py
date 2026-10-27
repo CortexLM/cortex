@@ -1036,6 +1036,25 @@ RESULT_BOMBS = {
         "name": "deep-environment",
         "depth": 100_000,
     },
+    # tarfile reads the size an extended header claims in one call: MemoryError, then OverflowError
+    "pax-header-claiming-2-to-the-62-bytes": {
+        "mode": "mutate",
+        "name": "extended-header-claim",
+        "type": "x",
+        "claim": 2**62,
+    },
+    "pax-header-claiming-2-to-the-63-bytes": {
+        "mode": "mutate",
+        "name": "extended-header-claim",
+        "type": "x",
+        "claim": 2**63 - 1,
+    },
+    "gnu-longname-claiming-2-to-the-62-bytes": {
+        "mode": "mutate",
+        "name": "extended-header-claim",
+        "type": "L",
+        "claim": 2**62,
+    },
 }
 
 
