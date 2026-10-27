@@ -228,9 +228,11 @@ rounds after its accepted proof. A newer proof needs a new challenge. A challeng
 refused (`CHALLENGE_EXPIRED`) once more than `challenge_rounds` rounds have passed since
 the miner's join or its last trial finalization. Only a suspend and resume reopens it,
 and resume restarts probation at zero clean trials. No admin route calls them: `suspend`
-runs when a dispute opens, and `resume` only after a nonfraud dispute settlement. So a
-miner that waits while others run their trials stays eligible until its last proof plus
-`work_screen_epoch_rounds`, for the rest of the run.
+runs when a dispute opens, and `resume` only after a nonfraud dispute settlement. The
+server's own closure of a dispute nobody can decide resumes the miner by itself; every
+other nonfraud settlement needs the miner's signed recovery call (see the dispute
+paragraphs below). So a miner that waits while others run their trials stays eligible
+until its last proof plus `work_screen_epoch_rounds`, for the rest of the run.
 
 The renewal window does not grow with `work_screen_epoch_rounds`. A trial finalization
 sets the next seed one round later, and the next trial must fit in the `challenge_rounds`
@@ -415,19 +417,78 @@ Independent referees use their own accepted current execution deadline while
 preserving historical publication descriptors. Losing-party checks, funded
 contests and fixed absolute horizons prevent arbitrary transcript resets.
 
+A dispute that nobody can decide is closed by the server on the next verified beacon
+round, not convicted. The resolution is `INFRASTRUCTURE` with no loser: the verdict and
+the audit's own exclusion of the contested miner stand, the contest bond is released in
+full, and nothing is slashed, struck or banned. Three cases close:
+
+- a dispute past its absolute horizon, strictly after the last round `resolution()` still
+  accepts, so a referee's signed resolution in the horizon round itself still decides it;
+- a transcript paused anywhere but on its single final op, which the referee cannot score;
+- an unpaused turn whose expected party has not moved `T.dispute_per_level` rounds after its
+  `turn_deadline`, acknowledged or not. The operator's witnessed `timeout()` keeps exactly
+  that window.
+
+A paused final op stays with the referee until the horizon. The evidence of a closure names
+its cause: `bounded-infrastructure-exclusion` (horizon), `unadjudicable-paused-transcript`
+or `abandoned-turn`. Closing a dispute recounts the round's unresolved disputes to zero; the
+coordinator's `finalize` for that round then settles it, and round `w+2` opens only after
+that. The beacon round is the clock, so after a long beacon outage the first push closes
+every expired dispute at once and the `timeout()` window is skipped for them. A closure that
+fails is rolled back, journaled as a `dispute-exit-failed` record (stage and error class
+only) and retried at the next beacon.
+
+The same closure lifts the contested miner's `PENDING_DISPUTE` suspension to `PROBATION`
+with zero clean trials and its strikes untouched: a fresh probation is the cost of a
+contest, and an infrastructure fault never leaves an honest miner suspended. If that lift
+fails it is journaled with stage `admission` and the closure stands. Any other nonfraud
+settlement (a referee `MATCH`, a witnessed `timeout()` or a failed lift) is lifted by the
+miner with `POST /v2/runs/<run_id>/admission/recover`: a `Receipt` envelope signed by the
+miner's hotkey (a subnet member), with body `{"w": <contest round>, "commit_hash":
+"<dispute_id>", "received_round": <latest beacon round>}` and an expiry of at least the
+latest round. The dispute must be the exact unresolved pending one of that miner and its
+settlement nonfraud, otherwise the route answers 403 "recovery reference differs from exact
+current pending dispute". The result is the same fresh probation.
+
 ## Weights, finality and custody
 
 Flat aggregation retains each miner's original delta: norm preclip, previous
 outer-update CClip, then deterministic integer allocation. Q=16777216; final
 weights sum Q, each miner <=4194304, total probation <=4194304, plus signed
 known-owner group bounds. No post-cap renormalization. Four eligible ACTIVE
-miners can carry exact quarter weights; infeasible cohorts reject. Similarity
-alone is not fraud evidence. Audits replay each miner's own assignment.
+miners can carry exact quarter weights; infeasible cohorts reject. A round of
+four therefore cannot lose a member. Similarity alone is not fraud evidence.
+Audits replay each miner's own assignment.
+
+A miner whose audit could not run (no auditor finished it in two windows of two
+leases each) is left out of that round (`excluded`, reason `INFRASTRUCTURE`) and
+the round is not excluded: the other miners aggregate and settle as after an
+UNVERIFIED verdict. The round cannot be applied with fewer than four verified
+inputs, and an excluded miner has no anchor for the round, so it cannot be on the
+next roster. While an audit is pending the round stays `PENDING`: opening w+2,
+aggregation, rollback and relay settlement wait for it.
 
 At most two speculative rounds may be applied; opening w+2 waits for w to settle
 or be excluded and repaired. Retain original input objects, signed tapes,
 accepted envelopes, carry anchors and full bounded predecessor history. Reward
 `get_weights` is not a model-checkpoint download endpoint.
+
+A roster member that has not committed when audits are scheduled is left out of its
+round: its `excluded` record gets reason `NO_SHOW` (stage `commit`), the audits of the
+other members are created, and the round is aggregated and finalized without it. A member
+that committed and passed its audit but uploaded no delta by `d_upload` is left out the
+same way when the round is aggregated (stage `delta`). Its reward share goes to the
+members that remain, split by tokens as for any exclusion. Nobody is suspended, struck or
+slashed for either. A member left out before its audit has no anchor for that round and
+cannot be rostered again in this run; one left out at the delta stage keeps its anchor.
+The remaining members must still carry the allocation: at least four, more when probation
+or owner-group caps bind, counting `NO_SHOW`, `UNVERIFIED` and `INFRASTRUCTURE`
+exclusions of the round together. Otherwise `audits` or `aggregate` answers 409
+`ROUND_INFEASIBLE`, nothing is written and the run stays blocked until an operator
+decision; there is no void round. Call `audits` once `d_audit` has passed and before
+`absolute` minus one round, `absolute` being the smaller of `d_final` and `d_audit` plus
+twice `lease_rounds`; a later call answers 503 for every roster and the round cannot be
+audited. Open rounds with five or more members when an eviction is plausible.
 
 Regional relays are transport/cache only, not regional arithmetic aggregators.
 An upload opportunity acknowledgment is not custody. Completion failure requires

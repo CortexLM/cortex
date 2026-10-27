@@ -27,6 +27,20 @@
   `role-dispatch.json` provenance the existing CUDA audit checks accept. Mutually exclusive with
   `HYPERTRAIN_ROLE_DISPATCH`; the Vast dispatcher is unchanged. See `docs/adr/0008` at the
   monorepo root and `docs/cuda-executor.md`.
+- Generic CUDA executor compute cache (`compute_cache`, `hosts[].compute_cache_dir`): every
+  container gets one bind mount of a persistent CUDA compute cache, one directory per image
+  digest created by the executor, so only the first reference per image pays the cold CUDA start
+  of a fresh `--rm` container (S13, through a wrapper: 57-64 s to 12-19 s; not yet run with this
+  implementation). A host that cannot make the directory runs the job without the cache.
+  `compute_cache: false` restores the previous command; `role-dispatch.json` and the journal
+  record whether the mount was requested. See `docs/adr/0012` at the monorepo root and
+  `docs/cuda-executor.md`.
+- Executor results through R2 (`HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS`,
+  `hypertrain.gpu_ops.artifact_transfer`, opt-in): the container hashes the result tar, declares the
+  hashes in R2 and uploads it to presigned part URLs bound to them; the challenge verifies every
+  block and the whole sha256 before the unchanged checks. The host holds URLs only. See
+  `docs/adr/0013` at the monorepo root and `docs/cuda-executor.md`. `R2ObjectStore.fetch_to` takes
+  an optional `check` callback.
 - Docs, CI, image and release workflows, Dockerfiles.
 - Eviction-tolerant core `hypertrain.elastic` (v3, not wired into the v2 challenge): leases with
   fencing tokens, saved before they are granted so that a restart never reissues one, and a
@@ -97,6 +111,32 @@
   `qualification_sm_profile_unqualified`; the challenge refuses both at bootstrap. A
   `result.json` written before capabilities were recorded still qualifies 170-SM devices only.
   See `docs/adr/0007-sm-counts-per-arch.md` at the monorepo root.
+
+### Fixed
+- The dispute long poll can no longer deadlock the store. `DisputesV2` has one lock order, the
+  store lock then a leaf condition: `events()` reads the event table outside the condition and parks
+  on a counter, so a mutator that notifies inside its transaction never waits for a poller that
+  waits for the store lock. A debug assertion reports an inverted acquisition. See
+  `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- Generic CUDA executor: bytes a host writes can no longer leave `Executor.launch` as
+  `RecursionError`, `MemoryError` or `OverflowError`. A probe that does not parse or exceeds a bound,
+  a result whose metadata nests deeper than 8 levels and a tar whose extended header asks for more
+  than 1 MiB quarantine the host and the next one serves the job; any other bad result fails the
+  attempt, and a `trace.json` that the audit reader would refuse is no longer published. See
+  `docs/cuda-executor.md` and `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- A dispute that nobody can decide no longer freezes finality and round opening for its whole
+  absolute horizon. On the next beacon push the server closes it as `INFRASTRUCTURE` without a
+  loser (the verdict and its exclusion stand, the contest bond returns in full, nothing is
+  slashed) when it is past the horizon, paused anywhere but on its final op, or abandoned
+  `T.dispute_per_level` rounds after its `turn_deadline`; the contested miner's suspension is
+  lifted to a fresh probation. A failing closure is journaled as `dispute-exit-failed`. See
+  `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- A roster member that never commits no longer stalls its round: audits are scheduled for the
+  members that committed, the absent one is left out (`NO_SHOW`, no sanction), and a member that
+  passed its audit but never uploads its delta is left out when the round is aggregated; a round
+  the remaining members cannot carry is refused with 409 `ROUND_INFEASIBLE`. The new helpers
+  join the owned set of `implementation_hash`, which changes. See
+  `docs/adr/0011-audit-integrity.md` at the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

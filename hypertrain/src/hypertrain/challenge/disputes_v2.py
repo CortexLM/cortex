@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import math
 import threading
-from collections.abc import Callable
-from typing import Literal
+import time
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
+from typing import Any, Literal, cast
 
 from pydantic import Field, JsonValue, StrictBool, StrictInt
 
@@ -35,6 +37,14 @@ class DisputeError(ValueError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+# Evidence tags of a closure without referee; the first one is what exclude() always wrote.
+EXCLUSION_HORIZON = "bounded-infrastructure-exclusion"
+EXCLUSION_FROZEN = "unadjudicable-paused-transcript"
+EXCLUSION_ABANDONED = "abandoned-turn"
+# Multiples of T.dispute_per_level left after turn_deadline to the witnessed timeout().
+ABANDONMENT_GRACE = 1
 
 
 class Contest(WireModel):
@@ -87,6 +97,11 @@ class Turn(WireModel):
     reassignments: StrictInt = 0
     resolution: ResolutionV2 | None = None
     resolved_beacon: StrictInt | None = None
+
+    @property
+    def at_final_op(self) -> bool:
+        """A single op is left: the one paused shape on which referee_v2 can convict."""
+        return self.level == "op" and self.interval[1] - self.interval[0] == 1
 
 
 class WatchEvent(WireModel):
@@ -143,12 +158,39 @@ def authentic(model: WatchEvent | EventAck | Availability) -> bool:
     return verify(decode_hotkey(signer), signed_message(model), signature)
 
 
+class _OrderChecked:
+    """`__debug__` only: the escrow mutex is outer to the dispute condition (see `DisputesV2`).
+    A thread that holds the condition and asks for the mutex is the inversion that deadlocks
+    against a mutator calling `notify()` inside its transaction."""
+
+    def __init__(self, inner: AbstractContextManager[Any], in_leaf: Callable[[], bool]) -> None:
+        self._inner, self._in_leaf = inner, in_leaf
+
+    def __enter__(self) -> Any:
+        assert not self._in_leaf(), "lock order inverted: store lock requested under the condition"
+        return self._inner.__enter__()
+
+    def __exit__(self, *exc: Any) -> bool | None:
+        return self._inner.__exit__(*exc)
+
+
 class DisputesV2:
     """Mutable service; shared SQLite plus condition subscription, no training dependency.
 
     L0 supplies authoritative verdict/identity lookup, qualified span bounds and
     independent local replay evidence. Cross-process route notification calls
     notify() after the shared transaction commits; the durable event table is truth.
+
+    Lock order, outermost first (ADR 0011, DSP-03):
+
+        1. the store lock: `escrow.mutex`, which is `ChallengeStore._lock` once hosted;
+        2. `self.condition`, a LEAF.
+
+    A thread may take the condition while it holds the store lock (every mutator does, through
+    `notify()`), and takes nothing while it holds the condition: the condition guards the `_beats`
+    counter and nothing else. So `events()` never reads the database inside it: it reads `_beats`,
+    reads the event table under the store lock alone, then parks until `_beats` moves. Under
+    `__debug__` the mutex refuses a thread that holds the condition (`_OrderChecked`).
     """
 
     def __init__(
@@ -169,6 +211,13 @@ class DisputesV2:
         self.run_id, self.db = escrow.run_id, escrow.db
         self.contest_of, self.owner_of, self.span = contest_of, owner_of, span
         self.condition = threading.Condition()
+        self._beats = 0  # bumped under the condition by every notify(); waiters park on it
+        self._leaf_depth = threading.local()
+        if __debug__:
+            escrow.mutex = cast(
+                Any,
+                _OrderChecked(escrow.mutex, lambda: getattr(self._leaf_depth, "n", 0) > 0),
+            )
         with escrow.tx():
             for sql in (
                 "CREATE TABLE IF NOT EXISTS disputes_v2(id TEXT PRIMARY KEY,verdict TEXT UNIQUE,"
@@ -187,8 +236,19 @@ class DisputesV2:
             ):
                 self.db.execute(sql)
 
-    def notify(self) -> None:
+    @contextmanager
+    def _leaf(self) -> Iterator[None]:
+        """The only way in to the condition: while it is held, no other lock may be taken."""
         with self.condition:
+            self._leaf_depth.n = getattr(self._leaf_depth, "n", 0) + 1
+            try:
+                yield
+            finally:
+                self._leaf_depth.n -= 1
+
+    def notify(self) -> None:
+        with self._leaf():
+            self._beats += 1
             self.condition.notify_all()
 
     def get(self, dispute_id: str) -> Turn:
@@ -196,6 +256,34 @@ class DisputesV2:
         if row is None:
             raise DisputeError("UNKNOWN_DISPUTE")
         return Turn.model_validate_json(row[0])
+
+    def unresolved(self) -> list[Turn]:
+        return [
+            Turn.model_validate_json(row[0])
+            for row in self.db.execute(
+                "SELECT turn FROM disputes_v2 WHERE json_extract(turn,'$.resolution') IS NULL "
+                "ORDER BY id"
+            )
+        ]
+
+    def blocked_cause(self, turn: Turn, now: int) -> str | None:
+        """Evidence tag when no party and no referee can still decide this open turn.
+
+        Past the horizon (now > absolute_deadline, the last round resolution() accepts) everything
+        is closable. Before it, a paused turn off the final op is a dead end referee_v2 cannot
+        score, and an unpaused turn whose expected party has not moved ABANDONMENT_GRACE times
+        T.dispute_per_level rounds after turn_deadline has only the operator's witnessed
+        timeout() window behind it. A paused turn on the final op stays with the referee until
+        the horizon.
+        """
+        if turn.resolution is not None:
+            return None
+        if now > turn.absolute_deadline:
+            return EXCLUSION_HORIZON
+        if turn.paused:
+            return None if turn.at_final_op else EXCLUSION_FROZEN
+        grace = ABANDONMENT_GRACE * self.escrow.manifest.training.verify.T.dispute_per_level
+        return EXCLUSION_ABANDONED if now > turn.turn_deadline + grace else None
 
     def _save(self, turn: Turn) -> None:
         self.db.execute(
@@ -499,9 +587,20 @@ class DisputesV2:
                     )
                 ]
 
-        with self.condition:
-            self.condition.wait_for(lambda: bool(available()), timeout=timeout)
-            return available()
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._leaf():
+                seen = self._beats  # read before the table: a wake-up in between is not lost
+            found = available()
+            left = deadline - time.monotonic()
+            if found or left <= 0:
+                return found
+
+            def moved(beat: int = seen) -> bool:
+                return self._beats != beat
+
+            with self._leaf():
+                self.condition.wait_for(moved, timeout=left)
 
     def acknowledge(self, ack: EventAck, *, now: int) -> None:
         if not authentic(ack) or ack.run_id != self.run_id or ack.received_beacon > now:
@@ -779,7 +878,7 @@ class DisputesV2:
         self.notify()
         return turn
 
-    def exclude(self, dispute_id: str, *, now: int) -> Turn:
+    def exclude(self, dispute_id: str, *, now: int, cause: str = EXCLUSION_HORIZON) -> Turn:
         """Absolute exhaustion or infrastructure exclusion; no claimant loses collateral."""
         with self.escrow.tx():
             turn = self.get(dispute_id)
@@ -795,7 +894,7 @@ class DisputesV2:
                 predecessor_hash="0" * 64,
                 inputs_hash="0" * 64,
                 output_hash="0" * 64,
-                op_spec="bounded-infrastructure-exclusion",
+                op_spec=cause,
             )
             self.register_evidence(evidence)
             turn = turn.model_copy(
