@@ -70,7 +70,40 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
    - Every grant takes a token from one counter that only grows. A rejoin under the same id
      *replaces* the holder: the old token is fenced, and its shards move to the new token. The
      replacement restarts the member's progress window once per link, not at every rejoin.
-   - An id belongs to one owner, and a revoked id never rejoins.
+   - The counter's mark is saved before the lease is returned (`tokens.py`: the `TokenLog`
+     protocol, with `LocalTokenLog`, an atomic local file, and `MemoryTokenLog` for tests; the
+     production log is a row of the coordinator's database, where ADR 0003 keeps lease state,
+     written by the wiring to the same single-writer contract and not built here), so a
+     restarted coordinator continues above every token ever delivered, and a token whose save
+     failed is not reissued by the process that spent it (after a restart the number can come
+     again only if its save never became durable, and then it was never delivered). A signed
+     leave therefore names one lease for ever and cannot release a later one, and a host of the
+     old process is fenced [V
+     `test_a_signed_leave_cannot_be_replayed_after_a_restart`]. The log fails rather than
+     guesses:
+     - a missing or unreadable log is an error; a new run makes its own with
+       `LocalTokenLog.create`, which refuses a path that holds a log, and an operator who
+       restores a lost one removes the old file and gives the new one a mark above every token
+       ever delivered, with a margin: the library keeps no other record of it, and a mark at
+       `MAX_TOKEN` can never grant;
+     - the file is locked for as long as a coordinator holds it, so a second coordinator, in
+       this process or another, fails to start (`flock`, local filesystems with hard links
+       only) [V `test_a_second_coordinator_does_not_start_on_a_token_log_that_is_held`,
+       `test_a_coordinator_in_another_process_is_refused_at_once_by_a_held_log`]. Only the
+       process that took the lock saves: a forked copy shares the descriptor, and so the lock,
+       and a lock file that was removed or replaced excludes nobody, so both refuse [V
+       `test_a_forked_copy_of_a_coordinator_cannot_save`,
+       `test_a_log_whose_lock_file_is_gone_refuses_to_save`];
+     - a save refuses a token that does not follow the mark the log last saw, which catches a
+       second writer, or a store rolled back, while this coordinator runs. It detects a write
+       that has happened; it is not mutual exclusion, which is the lock's work. A log restored
+       from an older copy before a restart reopens the hole.
+
+     The library persists nothing else: a restarted coordinator has forgotten its heads,
+     credits, revocations and member owners, and nothing in the API restores them yet; the
+     wiring rebuilds them, and every host joins again.
+   - An id belongs to one owner, and a revoked id never rejoins, within one process: the
+     wiring persists owners and revocations.
    - `join` admits a host key only if the injected `admit(member, owner, signer)` authority
      agrees. In production that is a server key the owner's coldkey granted for this run
      (`protocol.server_keys.SignedGrant`).
@@ -416,10 +449,16 @@ step timeout and then the mutation check, on a 4-vCPU runner.
   the next image [V].
 - Known limits [V]:
   - a put killed before its rename leaves its temporary file (`.<sha>.<uuid>.tmp`) under the
-    store root until the host's owner removes it;
-  - no test injects a power loss, so the directory fsyncs are covered by review only;
+    store root until the host's owner removes it, and a token log made or saved by a process
+    killed at the wrong moment leaves `.<name>.<uuid>.tmp` next to the log, a copy of an old
+    mark that nothing reads;
+  - no test injects a power loss, so the directory fsyncs, also those of the token log, are
+    covered by review only;
   - a member killed repeatedly before it completes a link loses its shard within about two
     progress windows, by design and without penalty;
+  - the coordinator's heads, credits, links, owners and revocations live in memory: only the
+    token mark survives a restart, and rebuilding the rest is the wiring batch's work, for
+    which the API has no restore call yet;
   - the progress deadline is a run parameter and must exceed the slowest honest link, which the
     simulator checks for its own configurations.
 

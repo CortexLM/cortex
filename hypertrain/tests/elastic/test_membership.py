@@ -4,11 +4,12 @@ import pytest
 
 from hypertrain.elastic.clock import FakeClock
 from hypertrain.elastic.membership import LeaseError, Membership, Status
+from hypertrain.elastic.tokens import MemoryTokenLog
 
 
 def test_lease_lapses_without_a_heartbeat() -> None:
     clock = FakeClock()
-    members = Membership(clock, ttl_ms=1_000)
+    members = Membership(clock, ttl_ms=1_000, tokens=MemoryTokenLog())
     lease, _ = members.join("a", "owner-a", "signer-a")
     clock.advance(999)
     assert members.renew("a", lease.token).expires_ms == 1_999
@@ -23,7 +24,7 @@ def test_lease_lapses_without_a_heartbeat() -> None:
 
 def test_rejoin_fences_every_older_token() -> None:
     clock = FakeClock()
-    members = Membership(clock, ttl_ms=1_000)
+    members = Membership(clock, ttl_ms=1_000, tokens=MemoryTokenLog())
     first, _ = members.join("a", "owner-a", "host-1")
     second, replaced = members.join("a", "owner-a", "host-2")
     other, _ = members.join("b", "owner-b", "host-3")
@@ -36,7 +37,7 @@ def test_rejoin_fences_every_older_token() -> None:
 
 
 def test_a_member_id_has_one_owner_and_a_revoked_one_never_returns() -> None:
-    members = Membership(FakeClock(), ttl_ms=1_000)
+    members = Membership(FakeClock(), ttl_ms=1_000, tokens=MemoryTokenLog())
     members.join("a", "owner-a", "host-1")
     with pytest.raises(LeaseError) as e:
         members.join("a", "owner-b", "host-2")
@@ -45,3 +46,22 @@ def test_a_member_id_has_one_owner_and_a_revoked_one_never_returns() -> None:
     with pytest.raises(LeaseError) as e:
         members.join("a", "owner-a", "host-1")
     assert e.value.code == "REVOKED"
+
+
+def test_no_lease_is_granted_when_its_token_cannot_be_saved() -> None:
+    class FullDisk(MemoryTokenLog):
+        broken = True
+
+        def save(self, token: int) -> None:
+            if self.broken:
+                raise OSError("disk full")
+            super().save(token)
+
+    log = FullDisk()
+    members = Membership(FakeClock(), ttl_ms=1_000, tokens=log)
+    with pytest.raises(OSError):
+        members.join("a", "owner-a", "host-1")
+    assert members.get("a") is None and members.active() == []
+    log.broken = False
+    lease, _ = members.join("a", "owner-a", "host-1")
+    assert lease.token == 2 and log.load() == 2  # token 1 may have become durable: never reused

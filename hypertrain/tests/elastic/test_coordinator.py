@@ -2,6 +2,7 @@
 
 import hashlib
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,7 @@ from hypertrain.elastic.coordinator import Coordinator, CoordinatorError, Exit, 
 from hypertrain.elastic.membership import Lease, LeaseError
 from hypertrain.elastic.notice import LeaveNotice, NoticeError, SignedLeave, sign_leave
 from hypertrain.elastic.store import MemoryCheckpointStore
+from hypertrain.elastic.tokens import LocalTokenLog, MemoryTokenLog, TokenLog, TokenLogError
 from hypertrain.protocol.keys import Keypair
 
 RUN = "run-1"
@@ -20,14 +22,14 @@ PROGRESS = 4_000
 KEYS = {name: Keypair(bytes([i + 1]) * 32) for i, name in enumerate("abcdz")}
 
 
-def setup(
-    shards: int = 1,
+def coordinator(
+    clock: FakeClock,
+    store: MemoryCheckpointStore,
+    tokens: TokenLog,
     audit: Callable[[WorkUnit, CheckpointManifest], bool] | None = None,
     capacity: int = 1,
-) -> tuple[FakeClock, Coordinator, list[WorkUnit]]:
-    clock = FakeClock()
-    store = MemoryCheckpointStore()
-    coord = Coordinator(
+) -> Coordinator:
+    return Coordinator(
         run_id=RUN,
         clock=clock,
         store=store,
@@ -35,9 +37,20 @@ def setup(
         progress_ms=PROGRESS,
         seed=b"s",
         admit=lambda _member, _owner, signer: signer != KEYS["z"].ss58,  # z holds no grant
+        tokens=tokens,
         audit=audit,
         capacity=capacity,
     )
+
+
+def setup(
+    shards: int = 1,
+    audit: Callable[[WorkUnit, CheckpointManifest], bool] | None = None,
+    capacity: int = 1,
+) -> tuple[FakeClock, Coordinator, list[WorkUnit]]:
+    clock = FakeClock()
+    store = MemoryCheckpointStore()
+    coord = coordinator(clock, store, MemoryTokenLog(), audit, capacity)
     base = store.put(b"base")
     units = [WorkUnit(RUN, POLICY, 0, shard, base, 6) for shard in range(shards)]
     coord.open_round(units)
@@ -406,6 +419,7 @@ def test_open_round_refuses_units_no_manifest_can_bind() -> None:
             progress_ms=PROGRESS,
             seed=b"s",
             admit=lambda *_: True,
+            tokens=MemoryTokenLog(),
         )
 
 
@@ -426,3 +440,49 @@ def test_a_round_opens_only_once_every_shard_is_complete() -> None:
     with pytest.raises(CoordinatorError) as e:
         coord.open_round([WorkUnit(RUN, POLICY, 1, 0, unit.base, 6)])
     assert e.value.code == "ROUND_OPEN"
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_a_signed_leave_cannot_be_replayed_after_a_restart(tmp_path: Path, durable: bool) -> None:
+    clock, store = FakeClock(), MemoryCheckpointStore()
+    tokens: TokenLog = LocalTokenLog.create(tmp_path / "tokens") if durable else MemoryTokenLog()
+    units = [WorkUnit(RUN, POLICY, 0, 0, store.put(b"base"), 6)]
+    first = coordinator(clock, store, tokens)
+    first.open_round(units)
+    old = first.join("a", "owner-a", KEYS["a"].ss58).lease
+    signed = sign_leave(notice(old, KEYS["a"]), KEYS["a"])
+    first.leave(signed)
+    if isinstance(tokens, LocalTokenLog):
+        tokens.close()  # the master dies, and the system drops its lock on the log
+        tokens = LocalTokenLog(tmp_path / "tokens")
+    restarted = coordinator(clock, store, tokens)  # it restarts: only the mark stays
+    restarted.open_round(units)
+    new = restarted.join("a", "owner-a", KEYS["a"].ss58).lease
+    assert new.token > old.token
+    for replay in (
+        lambda: restarted.leave(signed),
+        lambda: restarted.heartbeat("a", old.token),  # a host of the old process is fenced too
+    ):
+        with pytest.raises(LeaseError) as e:
+            replay()
+        assert e.value.code == "STALE_TOKEN"
+    assert restarted.holder(0) == Holder("a", new.token)
+
+
+def test_a_coordinator_does_not_start_on_a_token_log_it_cannot_read(tmp_path: Path) -> None:
+    path = tmp_path / "tokens"
+    with pytest.raises(TokenLogError):  # missing: a lost volume is not a new run
+        coordinator(FakeClock(), MemoryCheckpointStore(), LocalTokenLog(path))
+    path.write_bytes(b"garbage")
+    with pytest.raises(TokenLogError):
+        coordinator(FakeClock(), MemoryCheckpointStore(), LocalTokenLog(path))
+
+
+def test_a_second_coordinator_does_not_start_on_a_token_log_that_is_held(tmp_path: Path) -> None:
+    path = tmp_path / "tokens"
+    first = coordinator(FakeClock(), MemoryCheckpointStore(), LocalTokenLog.create(path))
+    with pytest.raises(TokenLogError):
+        coordinator(FakeClock(), MemoryCheckpointStore(), LocalTokenLog(path))
+    assert first.membership.get("a") is None  # the first one is untouched and still grants
+    first.join("a", "owner-a", KEYS["a"].ss58)
+    assert LocalTokenLog.read(path) == 1

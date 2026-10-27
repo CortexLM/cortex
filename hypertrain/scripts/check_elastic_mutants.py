@@ -66,9 +66,275 @@ MUTANTS = (
     Mutant(
         "rejoin reuses a token (no fencing)",
         SRC + "membership.py",
-        "self._tokens += 1",
-        "self._tokens = 1",
+        "token = self._tokens + 1",
+        "token = 1",
         "test_membership.py::test_rejoin_fences_every_older_token",
+    ),
+    Mutant(
+        "a restarted coordinator counts tokens from zero",
+        SRC + "membership.py",
+        "self._tokens = tokens.load()",
+        "self._tokens = 0",
+        "test_coordinator.py::test_a_signed_leave_cannot_be_replayed_after_a_restart",
+    ),
+    Mutant(
+        "a granted token is not saved",
+        SRC + "membership.py",
+        "        self._log.save(token)  # before the lease exists: a token that was lost is never"
+        " reissued\n",
+        "",
+        "test_coordinator.py::test_a_signed_leave_cannot_be_replayed_after_a_restart",
+    ),
+    Mutant(
+        "a token that cannot be saved is granted anyway",
+        SRC + "membership.py",
+        "        self._log.save(token)  # before the lease exists: a token that was lost is never"
+        " reissued\n",
+        "        try:\n            self._log.save(token)\n"
+        "        except OSError:\n            pass\n",
+        "test_membership.py::test_no_lease_is_granted_when_its_token_cannot_be_saved",
+    ),
+    Mutant(
+        "a token log that does not parse reads as zero",
+        SRC + "tokens.py",
+        'raise TokenLogError(f"token log {self.path.name} does not hold a token")',
+        "return 0",
+        "test_tokens.py::test_a_log_that_does_not_parse_is_an_error_not_a_reset",
+    ),
+    Mutant(
+        "an unreadable token log starts the count at zero",
+        SRC + "membership.py",
+        "        self._tokens = tokens.load()\n",
+        "        try:\n            self._tokens = tokens.load()\n"
+        "        except Exception:\n            self._tokens = 0\n",
+        "test_coordinator.py::test_a_coordinator_does_not_start_on_a_token_log_it_cannot_read",
+    ),
+    Mutant(
+        "a token is reused after a failed save",
+        SRC + "membership.py",
+        "        self._tokens = token  # spent even if the save fails: it may have become durable\n"
+        "        self._log.save(token)"
+        "  # before the lease exists: a token that was lost is never reissued\n",
+        "        self._log.save(token)"
+        "  # before the lease exists: a token that was lost is never reissued\n"
+        "        self._tokens = token\n",
+        "test_membership.py::test_no_lease_is_granted_when_its_token_cannot_be_saved",
+    ),
+    Mutant(
+        "a missing token log reads as a new run",
+        SRC + "tokens.py",
+        '            raise TokenLogError(f"token log {self.path.name} is missing") from None\n',
+        "            return 0\n",
+        "test_tokens.py::test_a_missing_log_is_an_error_not_a_new_run",
+    ),
+    Mutant(
+        "a log saves over a mark that moved under it",
+        SRC + "tokens.py",
+        "        if self._read() != self._mark:\n",
+        "        if False:\n",
+        "test_tokens.py::test_a_log_refuses_to_save_after_the_stored_mark_moved",
+    ),
+    Mutant(
+        "a log saves a token that does not follow its mark",
+        SRC + "tokens.py",
+        "        if not self._mark < token <= MAX_TOKEN:\n",
+        "        if False:\n",
+        "test_tokens.py::test_a_log_refuses_to_save_a_token_that_does_not_follow_its_mark",
+    ),
+    Mutant(
+        "a memory log lowers its mark",
+        SRC + "tokens.py",
+        "        if not self._token < token <= MAX_TOKEN:\n",
+        "        if False:\n",
+        "test_tokens.py::test_a_log_refuses_to_save_a_token_that_does_not_follow_its_mark",
+    ),
+    Mutant(
+        "a token log can be held by two coordinators",
+        SRC + "tokens.py",
+        "            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n",
+        "            pass\n",
+        "test_tokens.py::test_a_second_coordinator_cannot_hold_a_log_that_is_held",
+    ),
+    Mutant(
+        "the lock on a token log is dropped as soon as it is taken",
+        SRC + "tokens.py",
+        "        self._lock = fd\n",
+        "        self._lock = fd\n        self.close()\n",
+        "test_coordinator.py::test_a_second_coordinator_does_not_start_on_a_token_log_that_is_held",
+    ),
+    Mutant(
+        "a new run overwrites a token log",
+        SRC + "tokens.py",
+        "                try:\n"
+        "                    os.link(tmp, self.path)\n"
+        "                except FileExistsError:\n"
+        '                    raise TokenLogError(f"token log {self.path.name} already exists")'
+        " from None\n"
+        "                tmp.unlink()\n",
+        "                os.replace(tmp, self.path)\n",
+        "test_tokens.py::test_a_missing_log_is_an_error_not_a_new_run",
+    ),
+    Mutant(
+        "a token log is made at a mark it cannot load back",
+        SRC + "tokens.py",
+        "        if not 0 <= mark <= MAX_TOKEN:\n",
+        "        if not mark <= MAX_TOKEN:\n",
+        "test_tokens.py::test_a_missing_log_is_an_error_not_a_new_run",
+    ),
+    Mutant(
+        "a token log of any length is parsed",
+        SRC + "tokens.py",
+        'rb"0|[1-9][0-9]{0,15}"',
+        'rb"0|[1-9][0-9]*"',
+        "test_tokens.py::test_a_log_that_does_not_parse_is_an_error_not_a_reset",
+    ),
+    Mutant(
+        "a token log that cannot be read raises the operating system error",
+        SRC + "tokens.py",
+        "        except OSError as exc:\n"
+        '            raise TokenLogError(f"token log {self.path.name} cannot be read: {exc}")'
+        " from exc\n",
+        "",
+        "test_tokens.py::test_a_log_that_cannot_be_read_is_a_token_log_error",
+    ),
+    Mutant(
+        "a start queues behind the coordinator that holds the log",
+        SRC + "tokens.py",
+        "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+        "fcntl.flock(fd, fcntl.LOCK_EX)",
+        "test_tokens.py::test_a_coordinator_in_another_process_is_refused_at_once_by_a_held_log",
+    ),
+    Mutant(
+        "a filesystem without locks is reported as a held log",
+        SRC + "tokens.py",
+        "        except BlockingIOError:\n",
+        "        except OSError:\n",
+        "test_tokens.py::test_a_filesystem_without_locks_is_not_reported_as_a_held_log",
+    ),
+    Mutant(
+        "a start that cannot take the lock keeps its descriptor",
+        SRC + "tokens.py",
+        "        except BaseException:\n"
+        "            os.close(fd)  # no lock support is not a held lock: let the cause through\n"
+        "            raise\n",
+        "        except BaseException:\n            raise\n",
+        "test_tokens.py::test_a_filesystem_without_locks_is_not_reported_as_a_held_log",
+    ),
+    Mutant(
+        "a refused start keeps its descriptor",
+        SRC + "tokens.py",
+        "        except BlockingIOError:\n            os.close(fd)\n",
+        "        except BlockingIOError:\n",
+        "test_tokens.py::test_a_start_that_is_refused_leaves_no_descriptor_open",
+    ),
+    Mutant(
+        "a log that cannot be read keeps the lock",
+        SRC + "tokens.py",
+        "        except BaseException:\n"
+        "            self.close()  # a log that cannot start must not keep the next attempt out\n"
+        "            raise\n",
+        "        except BaseException:\n            raise\n",
+        "test_tokens.py::test_a_log_that_fails_to_start_does_not_keep_the_lock",
+    ),
+    Mutant(
+        "a new run that fails keeps the lock",
+        SRC + "tokens.py",
+        "        except BaseException:\n            log.close()\n            raise\n",
+        "        except BaseException:\n            raise\n",
+        "test_tokens.py::test_a_log_that_fails_to_start_does_not_keep_the_lock",
+    ),
+    Mutant(
+        "a log that is dropped keeps its lock",
+        SRC + "tokens.py",
+        "    def __del__(self) -> None:\n        self.close()\n\n",
+        "",
+        "test_tokens.py::test_a_log_that_is_dropped_gives_up_its_lock",
+    ),
+    Mutant(
+        "a forked copy of a coordinator saves",
+        SRC + "tokens.py",
+        "        if self._lock is None or self._pid != os.getpid():\n",
+        "        if self._lock is None:\n",
+        "test_tokens.py::test_a_forked_copy_of_a_coordinator_cannot_save",
+    ),
+    Mutant(
+        "a log whose lock file was removed saves",
+        SRC + "tokens.py",
+        "            return os.path.samestat(os.fstat(self._lock), os.stat(self._sidecar))\n",
+        "            return True\n",
+        "test_tokens.py::test_a_log_whose_lock_file_is_gone_refuses_to_save",
+    ),
+    Mutant(
+        "a log whose lock file was replaced saves",
+        SRC + "tokens.py",
+        "            return os.path.samestat(os.fstat(self._lock), os.stat(self._sidecar))\n",
+        "            return os.path.exists(self._sidecar)\n",
+        "test_tokens.py::test_a_log_whose_lock_file_is_gone_refuses_to_save",
+    ),
+    Mutant(
+        "a token log above the wire limit loads",
+        SRC + "tokens.py",
+        "        if not _MARK.fullmatch(raw) or int(raw) > MAX_TOKEN:\n",
+        "        if not _MARK.fullmatch(raw):\n",
+        "test_tokens.py::test_a_log_that_does_not_parse_is_an_error_not_a_reset",
+    ),
+    Mutant(
+        "a token log follows its path instead of where it was made",
+        SRC + "tokens.py",
+        "        self.path = Path(path).resolve()",
+        "        self.path = Path(path)",
+        "test_tokens.py::test_a_log_is_where_it_was_made_whatever_the_path_it_was_given",
+    ),
+    Mutant(
+        "the token file is rewritten in place",
+        SRC + "tokens.py",
+        "os.replace(tmp, self.path)",
+        "self.path.write_bytes(tmp.read_bytes())",
+        "test_tokens.py::test_a_save_that_cannot_replace_the_file_keeps_the_previous_mark",
+    ),
+    Mutant(
+        "the token file is renamed before its buffer is flushed",
+        SRC + "tokens.py",
+        "                out.flush()\n",
+        "",
+        "test_tokens.py::test_a_save_killed_before_fsync_keeps_the_previous_mark",
+    ),
+    Mutant(
+        "the directory is not synced after the token file is renamed",
+        SRC + "tokens.py",
+        "        _fsync_dir(self.path.parent)\n",
+        "",
+        "test_tokens.py::test_a_save_asks_for_the_directory_to_be_synced_after_the_rename",
+    ),
+    Mutant(
+        "the mark is set only after the directory sync",
+        SRC + "tokens.py",
+        "            self._mark = token  # the file holds it now, whether or not the directory"
+        " sync succeeds\n"
+        "        except BaseException:\n"
+        "            tmp.unlink(missing_ok=True)\n"
+        "            raise\n"
+        "        _fsync_dir(self.path.parent)\n",
+        "        except BaseException:\n"
+        "            tmp.unlink(missing_ok=True)\n"
+        "            raise\n"
+        "        _fsync_dir(self.path.parent)\n"
+        "        self._mark = token\n",
+        "test_tokens.py::test_a_directory_sync_that_fails_after_the_rename_leaves_the_log_usable",
+    ),
+    Mutant(
+        "a log at the wire limit does not load",
+        SRC + "tokens.py",
+        "or int(raw) > MAX_TOKEN:\n",
+        "or int(raw) >= MAX_TOKEN:\n",
+        "test_tokens.py::test_a_log_refuses_to_save_a_token_that_does_not_follow_its_mark",
+    ),
+    Mutant(
+        "the token file is not synced before it is renamed",
+        SRC + "tokens.py",
+        "                os.fsync(out.fileno())\n",
+        "",
+        "test_tokens.py::test_a_save_killed_before_fsync_keeps_the_previous_mark",
     ),
     Mutant(
         "double assignment: capacity not consumed",

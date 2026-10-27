@@ -53,6 +53,7 @@ from hypertrain.elastic.notice import (
     sign_leave,
 )
 from hypertrain.elastic.store import MemoryCheckpointStore
+from hypertrain.elastic.tokens import MemoryTokenLog
 from hypertrain.protocol.keys import Keypair
 
 SIM_TAG = b"ht-elastic-sim-v1|"
@@ -606,6 +607,7 @@ class Simulation:
             progress_ms=cfg.progress_ms,
             seed=SIM_TAG + struct.pack(">Q", seed),
             admit=self._admit,
+            tokens=MemoryTokenLog(),
             capacity=cfg.capacity,
             audit=self._audit,
         )

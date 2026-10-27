@@ -17,8 +17,11 @@ owner's coldkey granted for this run, `protocol.server_keys.SignedGrant`). The c
 authenticate every heartbeat and commit as signed by that member's registered key; tokens fence,
 they are not credentials. The leave is verified here because it is kept as evidence.
 
-The coordinator is single-threaded state: production serialises calls (the master's store or a
-Durable Object, ADR 0003) and persists the ordered calls, which replay to the same state.
+The coordinator is single-threaded state: production serialises calls (the master's database,
+ADR 0003, which rejects a Durable Object for it). This library persists only the token mark
+(`tokens`): a restarted coordinator never reissues a token, so a signed leave or a stale host of
+the old process names no live lease, and every host joins again. Rebuilding the heads, credits
+and revocations is the wiring's job.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from hypertrain.elastic.clock import Clock
 from hypertrain.elastic.membership import Lease, LeaseError, Member, Membership
 from hypertrain.elastic.notice import LeaveNotice, NoticeError, SignedLeave, verify_leave
 from hypertrain.elastic.store import CheckpointStore
+from hypertrain.elastic.tokens import TokenLog
 from hypertrain.protocol.keys import KeyError_, decode_hotkey
 
 Audit = Callable[[WorkUnit, CheckpointManifest], bool]
@@ -141,6 +145,7 @@ class Coordinator:
         progress_ms: int,
         seed: bytes,
         admit: Admit,
+        tokens: TokenLog,
         capacity: int = 1,
         audit: Audit | None = None,
     ) -> None:
@@ -154,7 +159,7 @@ class Coordinator:
         self.admit = admit
         self.run_id = run_id
         self.clock = clock
-        self.membership = Membership(clock, ttl_ms)
+        self.membership = Membership(clock, ttl_ms, tokens)
         self.checkpoints = CheckpointManager(store)
         self.seed = seed
         self.capacity = capacity
