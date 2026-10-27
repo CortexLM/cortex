@@ -52,5 +52,14 @@
   `result.json` written before capabilities were recorded still qualifies 170-SM devices only.
   See `docs/adr/0007-sm-counts-per-arch.md` at the monorepo root.
 
+### Fixed
+- A dispute that nobody can decide no longer freezes finality and round opening for its whole
+  absolute horizon. On the next beacon push the server closes it as `INFRASTRUCTURE` without a
+  loser (the verdict and its exclusion stand, the contest bond returns in full, nothing is
+  slashed) when it is past the horizon, paused anywhere but on its final op, or abandoned
+  `T.dispute_per_level` rounds after its `turn_deadline`; the contested miner's suspension is
+  lifted to a fresh probation. A failing closure is journaled as `dispute-exit-failed`. See
+  `docs/adr/0011-audit-integrity.md` at the monorepo root.
+
 ### Not yet
 - Quality parity with centralized training is not claimed.
