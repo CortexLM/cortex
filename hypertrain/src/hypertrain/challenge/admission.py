@@ -1116,6 +1116,8 @@ class Admission:
                 raise AdmissionError("NEW_HOTKEY_HISTORY")
             if r.state == "BANNED":
                 raise AdmissionError("TERMINAL_BANNED")
+            if self.open_rounds(r.admission_id):
+                raise AdmissionError("ROTATION_ROUND_OPEN")
             self.store.quota(
                 f"rotate:{r.coldkey}:{now // self.policy.work_screen_epoch_rounds}",
                 now,
@@ -1254,6 +1256,31 @@ class Admission:
         """Deterministic for retries, unguessable for an owner who would register it first."""
         return hmac.digest(self.ip_secret, f"ht-bond-{label}-v1|{lock_id}".encode(), "sha256").hex()
 
+    def rounds_listing(self, admission_id: str) -> list[tuple[int, RoundStatus | None]]:
+        """Every round whose opening lists the admission, with its finality record or None."""
+        listing = []
+        for rostered in self.store.db.execute(
+            "SELECT r.id FROM records_v2 r, json_each(json_extract(r.data,'$.body.roster')) j "
+            "WHERE r.run_id=? AND r.kind='round' AND json_extract(j.value,'$.admission_id')=? "
+            "ORDER BY CAST(r.id AS INTEGER)",
+            (self.escrow.run_id, admission_id),
+        ).fetchall():
+            record = self.store.db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='finality' AND id=?",
+                (self.escrow.run_id, rostered["id"]),
+            ).fetchone()
+            status = RoundStatus(**json.loads(record["data"])) if record else None
+            listing.append((int(rostered["id"]), status))
+        return listing
+
+    def open_rounds(self, admission_id: str) -> list[int]:
+        """Rounds that list the admission and are not closed. One without a record counts."""
+        return [
+            w
+            for w, status in self.rounds_listing(admission_id)
+            if status is None or not status.closed
+        ]
+
     def lock_settlement(self, lock_id: str, standing: _Standing | None = None) -> Settlement:
         """What may happen to one admission lock. Derived, never stored.
 
@@ -1317,17 +1344,7 @@ class Admission:
         ).fetchall()
         unresolved = unresolved or any(not p["resolved"] for p in pending)
         rounds: list[list[object]] = []
-        for rostered in self.store.db.execute(
-            "SELECT r.id FROM records_v2 r, json_each(json_extract(r.data,'$.body.roster')) j "
-            "WHERE r.run_id=? AND r.kind='round' AND json_extract(j.value,'$.admission_id')=? "
-            "ORDER BY CAST(r.id AS INTEGER)",
-            (self.escrow.run_id, admission_id),
-        ).fetchall():
-            record = self.store.db.execute(
-                "SELECT data FROM records_v2 WHERE run_id=? AND kind='finality' AND id=?",
-                (self.escrow.run_id, rostered["id"]),
-            ).fetchone()
-            status = RoundStatus(**json.loads(record["data"])) if record else None
+        for _, status in self.rounds_listing(admission_id):
             unresolved = unresolved or status is None or not status.closed
             if status is not None:
                 rounds.append([status.w, status.disposition, status.resolution_hash])

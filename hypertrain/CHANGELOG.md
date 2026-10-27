@@ -187,6 +187,29 @@
   refused with `ROUND_CLOSED_UNPAID` (409), before and after the round was recorded as withdrawn.
   `finalize` already stopped a repaired or an unapplied round upstream; this is the ledger's own
   rule, so a future caller cannot mint it.
+- `finalize` pays the inputs recorded with the applied tape instead of re-deriving the live set,
+  so a sanction that lands between the aggregate and the finalize (a suspension, a burned bond)
+  no longer answers 403 for ever. `finalize_v2` is an owned function: `implementation_hash`
+  changes. See `docs/adr/0011-audit-integrity.md` (Part 8, decision 23) at the monorepo root.
+- An audited roster member whose admission no longer qualifies it when the round is aggregated
+  (hotkey rotated, banned, suspended, back on probation, screen ended, bond gone) no longer
+  makes `aggregate` answer 403 for the whole round for ever: it is left out (`excluded`, reason
+  `INELIGIBLE`, with a `cause`, no sanction) and the others are paid. A roster that the rest
+  cannot carry answers 409 `ROUND_INFEASIBLE` and writes nothing. The new helpers join the owned
+  set of `implementation_hash`, which changes. See `docs/adr/0011-audit-integrity.md` (Part 8,
+  decision 22) at the monorepo root.
+- A round opens only with roster members whose screen covers it: `open` answers 403 "roster
+  screen ends before the round's audit window" for an entry whose `screen_until` is before the
+  round's `d_final` (equal is accepted), and `scripts/ops/live_operator.py open` refuses the same
+  entry by name. `open_round_v2` is an owned function: `implementation_hash` changes. See
+  `docs/adr/0011-audit-integrity.md` (Part 8, decision 21) at the monorepo root.
+- A rotation is refused with 409 `ROTATION_ROUND_OPEN` while a round that lists the admission is
+  not closed (a round without a finality record counts as open). Rotated after the aggregate, a
+  member made `finalize` answer 403 for ever (the reward looks the owner up by hotkey) and the
+  way back is refused (`NEW_HOTKEY_HISTORY`); rotated before it, the member left the round for
+  free. A retry of an applied rotation is still answered. `Admission.rounds_listing` and `open_rounds` serve `rotate` and
+  `lock_settlement`. Rotate between rounds. See `docs/adr/0011-audit-integrity.md` (Part 8,
+  decision 21) at the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.
