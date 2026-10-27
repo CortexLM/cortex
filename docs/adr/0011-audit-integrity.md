@@ -192,7 +192,10 @@
 ### Decision
 
 1. Cooldown, not a ban: `auditor-cooldown` record, one lease then two, strike forgotten after a quiet lease, never refuses the
-   last configured auditor outside a cooldown; legacy `auditor-disabled` rows are inert.
+   last configured auditor outside a cooldown; legacy `auditor-disabled` rows are inert. The cooldown starts at the
+   `expires` of the lease that lapsed, not at the round that observes the lapse: `lease_v2` and `relay_observer_v2`
+   refuse by raising, which rolls back their own lazy expiry, so anchoring on the observing round would let a polling
+   auditor push its own release date forward at every poll.
 2. Cause per attempt: `AUDITOR_SILENT` (cooldown), `EXECUTOR_INTERRUPTED`, `EXECUTOR_FAILED` (no cooldown). The auditor is
    silent only if it never asked for the execution: `audit-execution` is committed `REQUESTED` before the preparation can refuse.
 3. One retire path; today's exhaustion block moves verbatim into `_exhaust_audit_job_v2`, the only place Decision 8 touches.
