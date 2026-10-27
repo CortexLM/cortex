@@ -82,8 +82,8 @@ def parts_sent(store: TimedFakeR2) -> int:
     return len([row for row in store.served("UploadPart") if row[2] == 200])
 
 
-def mailbox_only(store: TimedFakeR2) -> list[str]:
-    return sorted(key.rsplit("/", 1)[1] for key in store.objects)
+def objects_left(store: TimedFakeR2) -> list[str]:
+    return sorted(store.objects)
 
 
 # -- the result of the job ----------------------------------------------------------------------
@@ -116,7 +116,7 @@ def test_the_result_comes_through_r2_and_publishes_what_the_classic_path_publish
     r2_run = [e for e in pool.toolbox.events("run_end") if e["name"] != classic_run["name"]][0]
     assert classic_run["stdout_bytes"] > 20 * MiB and r2_run["stdout_bytes"] < 1024
     assert parts_sent(store) == 3 and store.uploads == {}
-    assert mailbox_only(store) == ["declare.json", "offer.json"]
+    assert objects_left(store) == []  # object, block list and mailbox: all deleted
     kinds = journal_kinds(pool)
     assert kinds.count("exec_artifact_begin") == kinds.count("exec_artifact_end") == 1
     since = kinds[kinds.index("exec_artifact_begin") :]
@@ -214,7 +214,7 @@ def test_a_store_that_fails_during_the_upload_fails_the_attempt_with_nothing_lef
         dispatch(pool, home, "audit")
 
     assert_nothing_published(home)
-    assert store.uploads == {} and mailbox_only(store) == ["declare.json", "offer.json"]
+    assert store.uploads == {} and objects_left(store) == []
     assert len(journal_of(pool, "exec_attempt_failed")) == 1
 
 
@@ -222,9 +222,11 @@ def test_an_answering_thread_that_dies_ends_the_attempt_and_removes_the_containe
     make_pool, canned, tmp_path, monkeypatch, r2
 ):
     store, front = r2
-    store.fault_key("HeadObject", "declare.json", None, *([503] * 40))  # the probe passes
+    store.fault_key("HeadObject", "declare.json", None, *([503] * 2000))  # the probe passes
     pool = make_pool(labels=("a",), config={"max_attempts": 1})
-    enable(tmp_path, monkeypatch, front, retry_attempts=2, offer_wait_seconds=60)
+    enable(
+        tmp_path, monkeypatch, front, retry_attempts=2, offer_wait_seconds=60, store_blip_seconds=1
+    )
     home = canned.stage(tmp_path / "home")
     started = time.monotonic()
     with pytest.raises(IslandFailure, match="offer thread: R2Error"):
@@ -268,6 +270,34 @@ def test_one_executor_serves_an_r2_job_and_then_a_classic_one_without_carrying_a
     second = canned.stage(tmp_path / "second")
     dispatch(pool, second, "audit", factory=factory)
     assert "artifact" not in record_of(second)
+
+
+def test_a_host_lost_when_the_store_cannot_say_what_it_holds_is_still_a_lost_host(
+    make_pool, canned, tmp_path, monkeypatch, r2
+):
+    store, front = r2
+    pool = make_pool(labels=("a",))
+    pad(pool, tmp_path, 20)
+    pool.toolbox.scenario.global_runs({"mode": "vanish"}, {"mode": "ok"})
+    # the container's own listing passes; the challenge's answer to "are all parts there?" does not
+    store.fault_key("ListParts", "", None, 503, 503, 503, 503)
+    enable(tmp_path, monkeypatch, front)
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home, "audit")
+
+    assert len(journal_of(pool, "exec_host_unavailable")) == 1  # not an escaped storage error
+    assert pool.toolbox.events("rm")  # the lost host's container was removed by name
+    assert len(journal_of(pool, "exec_attempt")) == 2 and (home / "published").is_dir()
+
+
+def test_artifacts_refuse_a_cap_above_what_the_result_reader_accepts(
+    make_pool, tmp_path, monkeypatch, r2
+):
+    _, front = r2
+    pool = make_pool(labels=("a",), config={"max_result_bytes": 2 * MiB})
+    enable(tmp_path, monkeypatch, front, max_artifact_bytes=64 * MiB)
+    with pytest.raises(ValueError, match="max_result_bytes"):
+        cuda_executor.load(pool.config_path)  # _read_result would refuse the tar after the transfer
 
 
 def test_a_host_that_floods_stdout_in_r2_mode_is_cut_at_a_status_line_not_at_16_gib(

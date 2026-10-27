@@ -265,7 +265,7 @@ class Challenge:
         fake: TimedFakeR2,
         client: R2Client,
         *,
-        prefix: str = "runs/r/exec/j/n/",
+        prefix: str = "exec/r/j/n/",
         ttl: int = 600,
         part_bytes: int = 8 << 20,
     ) -> None:

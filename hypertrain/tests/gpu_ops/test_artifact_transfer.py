@@ -14,6 +14,7 @@ import random
 import re
 import threading
 import time
+import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -186,7 +187,11 @@ def test_the_runner_and_the_broker_hand_over_the_tar_the_classic_path_streams(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = TimedFakeR2()
-    sentinel = ("runs/other/exec/" + "c" * 64 + "/x/r/" + "d" * 64, "runs/other/keep")
+    sentinel = (
+        "exec/other/" + "c" * 64 + "/x/r/" + "d" * 64,  # another job's attempt
+        "exec/" + "a" * 64 + "/" + "c" * 64 + "/n/declare.json",  # another job of this run
+        "runs/keep",
+    )
     for key in sentinel:
         fake.objects[key] = (b"someone else's", {})
     broker, settings = make_broker(tmp_path, fake)
@@ -208,13 +213,10 @@ def test_the_runner_and_the_broker_hand_over_the_tar_the_classic_path_streams(
     assert all(type(v) in (int, str) for v in record.values())  # no float reaches the provenance
     canonicalize(record)
 
+    assert session.store.workers == settings.workers  # the download uses what was configured
     session.close()
     assert fake.uploads == {}
-    # the object and its block list are gone; the two mailbox objects wait for the lifecycle rule
-    assert leftovers(fake, session) == [
-        session.prefix + "declare.json",
-        session.prefix + "offer.json",
-    ]
+    assert leftovers(fake, session) == []  # object, block list and both mailbox objects are gone
     assert all(key in fake.objects for key in sentinel)
     assert kinds(broker) == [
         "exec_artifact_begin",
@@ -241,7 +243,7 @@ def test_each_attempt_gets_keys_nobody_else_has_and_the_journal_knows_them_first
     first, second = open_session(broker), open_session(broker)
     assert seen[0] == ["exec_artifact_begin"]
     assert first.prefix != second.prefix
-    pattern = r"runs/a{64}/exec/b{64}/[0-9a-f]{32}/"
+    pattern = r"exec/a{64}/b{64}/[0-9a-f]{32}/"
     assert re.fullmatch(pattern, first.prefix) and re.fullmatch(pattern, second.prefix)
 
 
@@ -402,19 +404,37 @@ def test_the_control_plane_scales_to_the_artifact_sizes_of_the_adr(
 # -- the answering thread cannot fail silently -------------------------------------------------
 
 
-def test_a_store_that_breaks_while_waiting_ends_the_attempt_with_a_class_name(
+def test_a_store_that_stays_broken_while_waiting_ends_the_attempt_with_a_class_name(
     tmp_path: Path,
 ) -> None:
     fake = TimedFakeR2()
-    broker, _ = make_broker(tmp_path, fake)
+    broker, _ = make_broker(tmp_path, fake, store_blip_seconds=1)
     session = open_session(broker)
-    fake.fault_key("HeadObject", "declare.json", 503, 503, 503, 503, 503, 503)
+    fake.fault_key("HeadObject", "declare.json", *([503] * 5000))
     session.start()
-    assert session.failed.wait(10)
+    assert session.failed.wait(15)
     assert session.failure == "offer thread: R2Error"
     assert session.thread is not None
     session.thread.join(10)
     assert not session.thread.is_alive()
+
+
+def test_a_blip_of_the_store_while_the_island_runs_does_not_cost_the_attempt(
+    tmp_path: Path,
+) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)  # retry_attempts 3: six faults are two failed rounds
+    session = open_session(broker, request=b"r")
+    fake.fault_key("HeadObject", "declare.json", *([503] * 6))
+    session.start()
+    time.sleep(0.2)  # the island is still running
+    body = encode(synthetic(sha(b"r"), 9 * MiB + 3))
+    client_for(fake).http.put(
+        session.block["declare_put"], content=body, headers={"if-none-match": "*"}
+    )
+    assert wait_for(lambda: session.state == "offered")
+    assert not session.failed.is_set()
+    session.close()
 
 
 def test_a_refusal_that_cannot_be_written_also_ends_the_attempt(tmp_path: Path) -> None:
@@ -449,6 +469,25 @@ def test_closing_while_the_upload_is_being_opened_leaves_no_open_upload(tmp_path
         session.thread.join(10)
 
     assert fake.uploads == {}  # the upload the thread opened after the close was aborted by it
+    assert leftovers(fake, session) == []  # and its block list and the mailbox went with it
+
+
+def test_an_upload_the_session_does_not_know_about_is_found_by_its_key_and_aborted(
+    tmp_path: Path,
+) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    session = open_session(broker, request=b"r")
+    data = random.Random(9).randbytes(9 * MiB)
+    plan = PartPlan(len(data), 8 * MiB)
+    s = scan(len(data), lambda off, n: data[off : off + n], plan)
+    session.declared = at.Declared(len(data), s.sha256, s.blocks.blocks, s.part_sha256)
+    # offer_upload failed after CreateMultipartUpload: nothing recorded the upload id
+    broker.client.create_multipart(session.store.key(s.sha256))
+    assert len(fake.uploads) == 1
+
+    session.close()
+    assert fake.uploads == {}
 
 
 # -- what the host uploaded is checked before it is believed --------------------------------
@@ -506,10 +545,7 @@ def test_a_host_that_declares_other_bytes_than_it_uploads_is_refused_and_leaves_
 
     assert sorted(os.listdir(tmp_path)) == sorted(["status.out", "r2-exec.env", "state", "tmp"])
     session.close()
-    assert fake.uploads == {} and leftovers(fake, session) == [
-        session.prefix + "declare.json",
-        session.prefix + "offer.json",
-    ]
+    assert fake.uploads == {} and leftovers(fake, session) == []
 
 
 def test_a_part_that_is_held_but_short_is_not_a_delivered_part(tmp_path: Path) -> None:
@@ -652,6 +688,19 @@ def test_an_object_that_is_not_the_one_declared_is_not_fetched(
     pair.session.close()
 
 
+def test_two_downloads_at_once_do_not_both_count_on_the_same_free_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    monkeypatch.setattr(at.shutil, "disk_usage", lambda path: SimpleNamespace(free=5 << 30))
+    first = broker.reserve(3 << 30, tmp_path)  # one attempt has set 3 GiB aside
+    with pytest.raises(AttemptFailed, match="not enough disk"):
+        broker.reserve(3 << 30, tmp_path)  # 5 GiB free is enough for one, not for both
+    broker.release(first)
+    assert broker.reserve(3 << 30, tmp_path) == 3 << 30
+
+
 def test_a_disk_too_small_for_the_artifact_is_found_out_before_the_download(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -668,6 +717,27 @@ def test_a_disk_too_small_for_the_artifact_is_found_out_before_the_download(
         r for r in fake.served("GetObject") if r[1].endswith(pair.session.declared.sha256)
     ] == []  # type: ignore[union-attr]
     pair.session.close()
+
+
+def test_a_store_that_cannot_answer_about_the_parts_is_a_no_and_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    pair = run_pair(broker, fake, monkeypatch)
+    session = pair.session
+    assert session.parts_held()
+
+    def garbled(*args: Any, **kwargs: Any) -> Any:
+        raise ET.ParseError("not xml")
+
+    monkeypatch.setattr(broker.client, "list_parts", garbled)
+    assert not session.parts_held()  # the host stays lost
+    status = tmp_path / "status.out"
+    status.write_bytes(pair.out)
+    with pytest.raises(AttemptFailed, match="artifact upload failed: ParseError"):
+        session.collect(status, lambda: None, lost=False)  # finish_upload lists the parts too
+    session.close()
 
 
 def test_a_host_lost_after_its_last_part_is_salvaged_from_what_the_store_holds(
@@ -693,9 +763,9 @@ def test_a_host_lost_after_its_last_part_is_salvaged_from_what_the_store_holds(
 
 
 @pytest.mark.parametrize(
-    ("left", "ttl"), [(30, 60), (100, 130), (3570, 3600), (100_000, 3600)], ids=str
+    ("left", "ttl"), [(30, 60), (100, 130), (3570, 3600), (100_000, 100_030)], ids=str
 )
-def test_urls_live_as_long_as_the_lease_plus_a_margin_and_never_past_the_cap(
+def test_the_mailbox_urls_live_as_long_as_the_lease_plus_a_margin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, left: int, ttl: int
 ) -> None:
     fake = TimedFakeR2()
@@ -708,6 +778,16 @@ def test_urls_live_as_long_as_the_lease_plus_a_margin_and_never_past_the_cap(
     assert session is not None
     for name in ("declare_put", "offer_get"):
         assert parse_qs(urlsplit(session.block[name]).query)["X-Amz-Expires"] == [str(ttl)]
+
+
+def test_part_urls_never_live_past_the_cap_though_the_lease_is_longer(tmp_path: Path) -> None:
+    fake = TimedFakeR2()
+    broker, _ = make_broker(tmp_path, fake)
+    session = open_session(broker, Job(seconds=100_000), request=b"r")
+    offer = json.loads(declare(session, fake, encode(synthetic(sha(b"r"), 9 * MiB + 3))))
+    for url in (offer["parts"][0], offer["list"][0]):
+        assert parse_qs(urlsplit(url).query)["X-Amz-Expires"] == ["3600"]
+    assert offer["ttl_s"] < 3600  # and the container is told less than that
 
 
 def test_the_lifetime_announced_to_the_container_is_shorter_than_the_urls_have_left(
@@ -807,12 +887,38 @@ def test_the_credential_file_must_be_private_small_and_for_a_cortex_bucket(
     for name, text in {
         "bucket": good.read_text().replace(BUCKET, "hypertrain-data"),
         "http": good.read_text().replace("https://r2.test", "http://r2.test"),
+        "loopback-lookalike": good.read_text().replace(
+            "https://r2.test", "http://127.0.0.1.evil.example"
+        ),
+        "loopback-user-info": good.read_text().replace(
+            "https://r2.test", "http://127.0.0.1@evil.example"
+        ),
+        "a-name-that-resolves-to-loopback": good.read_text().replace(
+            "https://r2.test", "http://localhost:9000"
+        ),
+        "no-host": good.read_text().replace("https://r2.test", "https://"),
     }.items():
         other = tmp_path / f"{name}.env"
         other.write_text(text)
         other.chmod(0o600)
         with pytest.raises(ValueError):
             at.load_credentials(other)
+
+
+def test_plain_http_is_for_a_literal_loopback_address_only(tmp_path: Path) -> None:
+    good = credentials_file(tmp_path, "http://127.0.0.1:9000")
+    assert at.load_credentials(good).url == "http://127.0.0.1:9000"
+    six = credentials_file(tmp_path, "http://[::1]:9000")
+    assert at.load_credentials(six).url == "http://[::1]:9000"
+
+
+def test_the_process_environment_does_not_steer_the_traffic_to_the_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "other-ca.pem"))
+    broker, _ = make_broker(tmp_path, TimedFakeR2())
+    assert broker.client.http.trust_env is False and broker._cleanup.http.trust_env is False
 
 
 def test_settings_refuse_what_r2_would_refuse(tmp_path: Path) -> None:

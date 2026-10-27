@@ -70,6 +70,7 @@ LIST_PAGE = 1000
 OFFER_LIMIT = 32 << 20
 STATUS_LIMIT = 1 << 10
 SLICE_BYTES = 1 << 20
+PREFLIGHT_TIMEOUT = 10
 RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 RETRY_CAP = 16.0
 EXPIRY_SLACK = 2  # seconds taken off the lifetime the challenge announced for its URLs
@@ -587,8 +588,10 @@ def _call(
 def preflight(block: dict[str, Any]) -> None:
     """Before the island spends its budget: can this host reach the store at all? The offer does
     not exist yet, so a reachable store answers 404."""
+    spec = Transfer(block, _monotonic() + 60)
+    spec.timeout = min(spec.timeout, PREFLIGHT_TIMEOUT)  # a host without a route must not hang
     try:
-        _call(Transfer(block, _monotonic() + 60), "GET", block["offer_get"], ok=(404,))
+        _call(spec, "GET", block["offer_get"], ok=(404,))
     except TransferError as error:
         raise Refused(ARTIFACT_UNREACHABLE, f"artifact store unreachable: {error.reason}") from None
     except Exception as error:  # noqa: BLE001 - nothing of a library message may reach stderr

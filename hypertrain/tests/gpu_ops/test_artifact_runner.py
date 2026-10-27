@@ -399,17 +399,17 @@ def test_serve_refuses_a_request_with_a_url_it_would_not_print_and_prints_none(
 
 
 @pytest.mark.parametrize(
-    ("field", "url"),
+    ("declare", "offer"),
     [
-        ("declare_put", "http://r2.test/bkt/declare.json?a=b"),
-        ("declare_put", "http://10.0.0.5/bkt/declare.json?a=b"),
-        ("declare_put", "ftp://r2.test/bkt/declare.json"),
-        ("declare_put", "https://user:pass@r2.test/bkt/declare.json?a=b"),
-        ("declare_put", "https://r2.test/bkt/declare.json?a=b#fragment"),
-        ("declare_put", "/bkt/declare.json?a=b"),
-        ("offer_get", "https://elsewhere.test/bkt/offer.json?a=b"),
-        ("offer_get", "https://r2.test:8443/bkt/offer.json?a=b"),
-        ("offer_get", 7),
+        ("http://r2.test/bkt/declare.json?a=b", "http://r2.test/bkt/offer.json?a=b"),
+        ("http://10.0.0.5/bkt/declare.json?a=b", "http://10.0.0.5/bkt/offer.json?a=b"),
+        ("ftp://r2.test/bkt/declare.json", "ftp://r2.test/bkt/offer.json"),
+        ("https://user:pass@r2.test/bkt/declare.json?a=b", "https://user:pass@r2.test/bkt/o?a=b"),
+        ("https://r2.test/bkt/declare.json?a=b#fragment", "https://r2.test/bkt/offer.json?a=b"),
+        ("/bkt/declare.json?a=b", "/bkt/offer.json?a=b"),
+        ("https://r2.test/bkt/declare.json?a=b", "https://elsewhere.test/bkt/offer.json?a=b"),
+        ("https://r2.test/bkt/declare.json?a=b", "https://r2.test:8443/bkt/offer.json?a=b"),
+        ("https://r2.test/bkt/declare.json?a=b", 7),
     ],
     ids=[
         "plain-http",
@@ -424,15 +424,18 @@ def test_serve_refuses_a_request_with_a_url_it_would_not_print_and_prints_none(
     ],
 )
 def test_serve_refuses_urls_that_are_not_https_on_one_origin(
-    monkeypatch: pytest.MonkeyPatch, field: str, url: Any
+    monkeypatch: pytest.MonkeyPatch, declare: str, offer: Any
 ) -> None:
+    """Each flaw is in a URL of its own; the other one is on the same origin, so that the origin
+    pin cannot be what refuses it."""
     launched: list[int] = []
 
     def never(*args: Any) -> int:
         launched.append(1)
         return 0
 
-    run = drive(TimedFakeR2(), monkeypatch, block={field: url}, answering=False, launch=never)
+    block = {"declare_put": declare, "offer_get": offer}
+    run = drive(TimedFakeR2(), monkeypatch, block=block, answering=False, launch=never)
     assert (run.code, launched) == (2, []) and "not acceptable" in run.err
 
 
@@ -494,6 +497,19 @@ def test_serve_prints_no_url_when_the_http_layer_raises_one_in_its_message(
     run = drive(fake, monkeypatch, seam=seam, answering=False)
     assert run.code == code and "ValueError" in run.err
     assert "X-Amz-" not in run.err and "r2.test" not in run.err
+
+
+def test_the_preflight_does_not_wait_out_a_long_request_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeouts: list[float] = []
+
+    def seam(method: str, url: str, headers: Any, body: Any, timeout: float, limit: int) -> Any:
+        timeouts.append(timeout)
+        return 404, {}, b""
+
+    drive(TimedFakeR2(), monkeypatch, block={"timeout_s": 600}, seam=seam, answering=False)
+    assert timeouts[0] == runner.PREFLIGHT_TIMEOUT  # a host without a route must fail in seconds
 
 
 def test_serve_does_not_use_urls_after_the_lifetime_the_offer_announced(

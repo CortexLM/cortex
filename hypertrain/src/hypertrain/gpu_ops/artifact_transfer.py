@@ -14,6 +14,7 @@ later attempt cannot adopt the upload of an earlier one, and a stale object cann
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import os
@@ -23,6 +24,8 @@ import shutil
 import stat
 import threading
 import time
+import urllib.parse
+import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -71,7 +74,8 @@ CREDENTIAL_NAMES = frozenset(
 )
 BUCKET_PREFIX = "cortex-v3-"
 DISK_RESERVE = 1 << 30
-JOIN_SECONDS = 15
+JOIN_SECONDS = 10
+MAILBOX_TTL_CAP = 604800  # seconds: the longest a presigned URL can live
 MIN_ISLAND_SECONDS = 30  # a lease with less than this left after the reserve runs the ssh way
 OFFER_SLACK = 5  # seconds taken off the lifetime announced to the container
 
@@ -86,6 +90,7 @@ class ArtifactSettings(Boundary):
     url_margin_seconds: StrictInt = Field(30, ge=0, le=600)
     url_ttl_cap_seconds: StrictInt = Field(3600, ge=60, le=86400)
     poll_ms: StrictInt = Field(500, ge=10, le=10_000)
+    store_blip_seconds: StrictInt = Field(30, ge=1, le=600)
     offer_wait_seconds: StrictInt = Field(120, ge=1, le=3600)
     request_timeout_seconds: StrictInt = Field(30, ge=1, le=600)
     retry_attempts: StrictInt = Field(4, ge=1, le=10)
@@ -122,10 +127,16 @@ def load_credentials(path: Path) -> R2Config:
         raise ValueError(str(error)) from None
     if not config.bucket.startswith(BUCKET_PREFIX):
         raise ValueError(f"the artifact bucket must be a {BUCKET_PREFIX}* bucket")
-    secure = config.url.startswith("https://")
-    loopback = config.url.startswith("http://127.0.0.1")  # the tests' own fake server
-    if not (secure or loopback):
-        raise ValueError("the R2 endpoint must be https")
+    endpoint = urllib.parse.urlsplit(config.url)
+    try:
+        loopback = (
+            endpoint.hostname is not None and ipaddress.ip_address(endpoint.hostname).is_loopback
+        )
+    except ValueError:
+        loopback = False
+    plain = endpoint.scheme == "http" and loopback  # the tests' own fake server, nothing else
+    if "@" in endpoint.netloc or not (endpoint.scheme == "https" and endpoint.hostname or plain):
+        raise ValueError("the R2 endpoint must be https (plain http only to a loopback address)")
     return config
 
 
@@ -190,7 +201,10 @@ class Session:
     def __init__(self, broker: Broker, job: IslandJobV1, prefix: str, nonce: str) -> None:
         self.broker, self.job, self.prefix, self.nonce = broker, job, prefix, nonce
         self.store = R2ObjectStore(
-            broker.client, prefix + "r/", part_bytes=broker.settings.part_bytes
+            broker.client,
+            prefix + "r/",
+            part_bytes=broker.settings.part_bytes,
+            workers=broker.settings.workers,
         )
         self.request_sha256 = ""
         self.declared: Declared | None = None
@@ -202,20 +216,21 @@ class Session:
         self.state = "waiting"
         self.lock = threading.RLock()
         self.thread: threading.Thread | None = None
-        self.offered_at = self.upload_ms = self.download_ms = 0
+        self.offered_at = self.upload_ms = self.download_ms = self.reserved = 0
         self.block = self._block()
 
     # -- what the container is given ------------------------------------------------------
 
-    def _ttl(self) -> int:
-        settings = self.broker.settings
+    def _ttl(self, cap: int) -> int:
         left = int(self.job.deadline - time.time())
         if left <= 0:
             raise Aborted("job deadline expired")
-        return max(1, min(left + settings.url_margin_seconds, settings.url_ttl_cap_seconds))
+        return max(1, min(left + self.broker.settings.url_margin_seconds, cap))
 
     def _block(self) -> dict[str, Any]:
-        settings, client, ttl = self.broker.settings, self.broker.client, self._ttl()
+        # the mailbox URLs are used after the island has run: they live as long as the lease, not
+        # as long as the cap on the part URLs, which are made after it
+        settings, client, ttl = self.broker.settings, self.broker.client, self._ttl(MAILBOX_TTL_CAP)
         return {
             "version": 1,
             "part_bytes": settings.part_bytes,
@@ -243,7 +258,7 @@ class Session:
 
     def stop_thread(self) -> None:
         self.stop.set()
-        if self.thread is not None:
+        if self.thread is not None and self.thread.is_alive():
             self.thread.join(JOIN_SECONDS)
 
     def _answer(self) -> None:
@@ -265,15 +280,23 @@ class Session:
         self.failed.set()
 
     def _wait_for_declaration(self) -> bytes | None:
+        """The declaration, read once. A store that fails is waited out for `store_blip_seconds`:
+        the island runs for minutes and nothing can be declared before it ends."""
         client, key = self.broker.client, self.prefix + "declare.json"
-        settings = self.broker.settings
-        cap = self.broker.declaration_cap
+        settings, cap = self.broker.settings, self.broker.declaration_cap
+        failing: float | None = None
         while not self.stop.is_set():
-            info = client.head_object(key)
-            if info is not None:
-                if not 0 < info.size <= cap:
-                    raise Refusal("too_large" if info.size else "malformed")
-                return client.get_range(key, 0, info.size)  # read once; never re-read
+            try:
+                info = client.head_object(key)
+                if info is not None:
+                    if not 0 < info.size <= cap:
+                        raise Refusal("too_large" if info.size else "malformed")
+                    return client.get_range(key, 0, info.size)  # by range, whatever HEAD said
+                failing = None
+            except R2Error:
+                failing = failing or time.monotonic()
+                if time.monotonic() - failing >= settings.store_blip_seconds:
+                    raise
             self.stop.wait(settings.poll_ms / 1000)
         return None
 
@@ -291,15 +314,17 @@ class Session:
         with self.lock:
             if self.closed:
                 return
+            self.declared = declared  # from here on close() knows what there is to clean up
         blocks = BlockList(declared.size, declared.blocks)
-        ttl, made = self._ttl(), time.monotonic()
+        ttl, made = self._ttl(self.broker.settings.url_ttl_cap_seconds), time.monotonic()
         offer = offer_upload(self.store, declared.sha256, blocks, declared.parts, expires=ttl)
         with self.lock:
-            if self.closed:
-                self.broker.abort(self.store.key(declared.sha256), offer.upload_id)
-                return
-            self.declared, self.upload = declared, offer
-        self.broker.journal.append(
+            closed = self.closed
+            self.upload = offer
+        if closed:  # close() came while the upload was being opened: it may have missed it
+            self._discard(declared)
+            return
+        self.broker.note(
             "exec_artifact_offered", nonce=self.nonce, size=declared.size, parts=len(declared.parts)
         )
         # the container counts the lifetime from the moment it reads the offer, the URLs have been
@@ -328,7 +353,10 @@ class Session:
         if self.upload is None:
             return False
         plan = self.upload.plan
-        listed = self.broker.client.list_parts(self.upload.object_key, self.upload.upload_id)
+        try:
+            listed = self.broker.client.list_parts(self.upload.object_key, self.upload.upload_id)
+        except (R2Error, ET.ParseError, ValueError):
+            return False  # a question that cannot be answered is a no: the host stays lost
         held = {p.number: p.size for p in listed or ()}
         return all(held.get(n) == plan.span(n)[1] for n in range(1, plan.count + 1))
 
@@ -354,8 +382,10 @@ class Session:
             or info.meta.get("blocks") != blocks.digest()
         ):
             raise AttemptFailed("the stored object is not the one that was declared")
-        if shutil.disk_usage(status.parent).free < 2.2 * declared.size + DISK_RESERVE:
-            raise AttemptFailed("not enough disk for the artifact")
+        with _storage("disk check"):
+            self.reserved = self.broker.reserve(
+                int(2.2 * declared.size) + DISK_RESERVE, status.parent
+            )
         try:
             with _storage("artifact download"):
                 self.store.fetch_to(declared.sha256, status, check=stop)
@@ -364,7 +394,7 @@ class Session:
                 "the uploaded bytes differ from the hashes the host declared"
             ) from None
         self.download_ms = (time.monotonic_ns() - started) // 1_000_000
-        self.broker.journal.append(
+        self.broker.note(
             "exec_artifact_done",
             nonce=self.nonce,
             sha256=declared.sha256,
@@ -387,21 +417,32 @@ class Session:
             "download_ms": self.download_ms,
         }
 
+    def _discard(self, declared: Declared) -> None:
+        """Abort every open upload on this attempt's object key (the one it opened, and one a
+        failed or raced offer left), delete the object and its block list. Idempotent."""
+        broker, key = self.broker, self.store.key(declared.sha256)
+        uploads = {self.upload.upload_id} if self.upload is not None else set()
+        uploads |= {upload for k, upload in broker.uploads(key) if k == key}
+        for upload in uploads:
+            broker.abort(key, upload)
+        broker.delete(key)
+        broker.delete(self.store.key(BlockList(declared.size, declared.blocks).digest()))
+
     def close(self) -> None:
-        """End of the attempt: no more offers, the open upload aborted, the object and its block
-        list deleted. Never raises; the mailbox objects stay for the bucket's lifecycle rule."""
+        """End of the attempt: no more offers, every upload aborted, the object, its block list
+        and the two mailbox objects deleted. Never raises. A host that still holds a URL could
+        write a mailbox object again; the bucket's lifecycle rule expires those."""
         with self.lock:
             self.closed = True
-            declared, offer = self.declared, self.upload
+            declared = self.declared
         self.stop_thread()
         broker = self.broker
-        if offer is not None and declared is not None:
-            key = offer.object_key
-            broker.abort(key, offer.upload_id)
-            blocks = BlockList(declared.size, declared.blocks)
-            broker.delete(key)
-            broker.delete(self.store.key(blocks.digest()))
-        broker.journal.append("exec_artifact_end", nonce=self.nonce)
+        if declared is not None:
+            self._discard(declared)
+        broker.delete(self.prefix + "declare.json")
+        broker.delete(self.prefix + "offer.json")
+        broker.release(self.reserved)
+        broker.note("exec_artifact_end", nonce=self.nonce)
 
 
 def _check_status(status: Path, declared: Declared) -> None:
@@ -428,7 +469,16 @@ def _storage(what: str) -> Iterator[None]:
         yield
     except CorruptObjectError:
         raise
-    except (R2Error, StoreError, ObjectNotFound, UploadGone, ObjectConflict, OSError) as error:
+    except (
+        R2Error,
+        StoreError,
+        ObjectNotFound,
+        UploadGone,
+        ObjectConflict,
+        OSError,
+        ET.ParseError,
+        ValueError,
+    ) as error:
         raise AttemptFailed(f"{what} failed: {type(error).__name__}") from None
 
 
@@ -451,17 +501,20 @@ class Broker:
             cap=8.0,
             sleep=sleep,
         )
-        http = httpx.Client(timeout=settings.request_timeout_seconds, transport=transport)
-        self.client = R2Client(credentials, client=http, retry=retry)
-        self._probe = R2Client(
-            credentials, client=http, retry=Retry(attempts=2, cap=2.0, sleep=sleep)
+        # the process environment (proxy variables, CA paths) is not for this channel
+        http = httpx.Client(
+            timeout=settings.request_timeout_seconds, transport=transport, trust_env=False
         )
-        quick = httpx.Client(timeout=5, transport=transport)
+        self.client = R2Client(credentials, client=http, retry=retry)
+        quick = httpx.Client(timeout=5, transport=transport, trust_env=False)
+        self._probe = R2Client(credentials, client=quick)  # one shot
         self._cleanup = R2Client(
             credentials, client=quick, retry=Retry(attempts=2, cap=1.0, sleep=sleep)
         )
         size, part = settings.max_artifact_bytes, settings.part_bytes
         self.declaration_cap = 4096 + 72 * (-(-size // BLOCK_BYTES) + -(-size // part))
+        self._reserved = 0
+        self._reserve_lock = threading.Lock()
 
     def begin(self, job: IslandJobV1, operation: str | None) -> Session | None:
         """A session for this attempt, or None when the attempt runs the classic way."""
@@ -469,24 +522,38 @@ class Broker:
             return None
         left = job.deadline - time.time()
         if left < self.settings.reserve_seconds + MIN_ISLAND_SECONDS:
-            self.journal.append("exec_artifact_skipped", reason="lease too short for the reserve")
+            self.note("exec_artifact_skipped", reason="lease too short for the reserve")
             return None
         nonce = secrets.token_hex(16)
-        prefix = f"runs/{job.run_id}/exec/{job.digest()}/{nonce}/"
+        prefix = f"exec/{job.run_id}/{job.digest()}/{nonce}/"
         try:
             self._probe.head_object(prefix + "declare.json")
         except R2Error as error:
-            self.journal.append("exec_artifact_unavailable", reason=type(error).__name__)
+            self.note("exec_artifact_unavailable", reason=type(error).__name__)
             if self.settings.fallback == "classic":
                 return None
             raise AttemptFailed("the artifact store is unavailable") from None
-        self.journal.append(  # before any URL exists, so a crash leaves a record to sweep by
+        self.note(  # before any URL exists, so a crash leaves a record to sweep by
             "exec_artifact_begin",
             nonce=nonce,
             prefix=prefix,
             expires_unix=int(job.deadline) + self.settings.url_margin_seconds,
         )
         return Session(self, job, prefix, nonce)
+
+    def note(self, kind: str, **fields: Any) -> None:
+        """A journal record that must never be the reason an attempt ends differently."""
+        try:
+            self.journal.append(kind, **fields)
+        except OSError:
+            pass
+
+    def uploads(self, key: str) -> list[tuple[str, str]]:
+        try:
+            return self._cleanup.list_uploads(key)
+        except Exception as error:  # noqa: BLE001 - cleanup must not mask the attempt's outcome
+            self.note("exec_artifact_cleanup_failed", error=type(error).__name__)
+            return []
 
     def abort(self, key: str, upload_id: str) -> None:
         self._best_effort(lambda: self._cleanup.abort_multipart(key, upload_id))
@@ -498,7 +565,20 @@ class Broker:
         try:
             call()
         except Exception as error:  # noqa: BLE001 - cleanup must not mask the attempt's outcome
-            self.journal.append("exec_artifact_cleanup_failed", error=type(error).__name__)
+            self.note("exec_artifact_cleanup_failed", error=type(error).__name__)
+
+    def reserve(self, need: int, where: Path) -> int:
+        """Set `need` bytes of the disk aside for one download, against the other attempts that
+        are downloading now; AttemptFailed if the disk does not have them."""
+        with self._reserve_lock:
+            if shutil.disk_usage(where).free - self._reserved < need:
+                raise AttemptFailed("not enough disk for the artifact")
+            self._reserved += need
+        return need
+
+    def release(self, amount: int) -> None:
+        with self._reserve_lock:
+            self._reserved -= amount
 
 
 class _Either(threading.Event):
@@ -524,6 +604,9 @@ class ArtifactExecutor(Executor):
     ) -> None:
         if config.network != "default":
             raise ValueError("artifacts need network 'default': the container must reach R2")
+        if settings.max_artifact_bytes > config.max_result_bytes:
+            # _read_result still bounds the tar by max_result_bytes: raise both or neither
+            raise ValueError("max_artifact_bytes is above the executor's max_result_bytes")
         super().__init__(config, **kwargs)
         self.broker = Broker(
             settings, credentials, self.journal, transport=artifact_transport, sleep=self.sleep

@@ -4,7 +4,7 @@ One body, two backends. `fake` runs on every CI run against tests/storage/fake_r
 loopback server, so the fake's rules stay the ones this transfer relies on. `live` is opt-in: it
 needs HT_R2_EXEC_TOKEN_FILE (a 0600 env file with the R2 names of a bucket-scoped token, never the
 Cloudflare account token) and HT_R2_TEST_BUCKET (a `cortex-v3-test-` bucket), writes only under
-`live/<random>/` and `runs/<run of this test>/`, and deletes what it wrote. With
+`live/<random>/` and `exec/<run of this test>/`, and deletes what it wrote. With
 HT_R2_ARTIFACT_MIB (default 256) it moves a real artifact through the real runner and challenge side
 and, if HT_R2_ARTIFACT_EVIDENCE names a file outside the repository, writes sizes, workers and
 seconds there. It never runs in CI and nothing it prints is a credential or a URL."""
@@ -218,7 +218,7 @@ def test_a_real_artifact_goes_through_the_runner_and_the_challenge_side(
     finally:
         session.close()
         client = R2Client(creds, retry=Retry())
-        root = f"runs/{job.run_id}/exec/"
+        root = f"exec/{job.run_id}/"
         for object_key, upload in client.list_uploads(root):
             client.abort_multipart(object_key, upload)
         for object_key, _ in client.list_prefix(root):
