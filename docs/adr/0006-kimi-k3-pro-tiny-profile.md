@@ -60,7 +60,7 @@ post-trained version of Kimi K3" [A]. This profile therefore follows the **K2 fa
 | Dense layers | first 1 | first 1 | all or none | first 1, ff = (top_k + shared) x expert ff (K2 ratio 18432 = 9 x 2048) |
 | Router | sigmoid, noaux_tc, 1 group, normalised top-k, scale 2.827 | sigmoid, noaux_tc, renormalise, scale 1.0 | softmax over selected, capacity drops | sigmoid, bias for selection only, normalised, scale 2.827, no drops |
 | Balancing | aux-free bias (`noaux_tc`); the K2 update rule and gamma are **unknown** | Quantile Balancing bias | Switch aux loss | DeepSeek-V3 sign rule, gamma 0.001 [A DeepSeek-V3] |
-| Seq aux loss | config `aux_loss_alpha` 0.001, `seq_aux` true; training value **unknown** | **unknown** | Switch aux | DeepSeek-V3 seq-wise loss, coefficient 1e-4 [A DeepSeek-V3] |
+| Seq aux loss | config `aux_loss_alpha` 0.001, `seq_aux` true; training value **unknown** | **unknown** | Switch aux | DeepSeek-V3 seq-wise loss, coefficient 1e-4, f_i counted on the routed (biased) selection [A DeepSeek-V3; deviation, S10 K5] |
 | Activation | SwiGLU | SiTU-GLU | SwiGLU | SwiGLU |
 | Depth mixing | residual | Block Attention Residuals | residual | residual |
 | MTP | 1 layer in K3 report, 0 in released config (contradiction) | same contradiction | none | none |
@@ -135,7 +135,7 @@ fails under the mutation listed below (CPU run, 2026-10-26 [V]):
 | bias update | `test_bias_update_sign_rule_applies_after_backward_only` | sign of the rule flipped |
 | determinism | `test_two_passes_same_seed_are_bitwise_identical` | unseeded noise on the router logits |
 | selection-only bias | `test_uniform_bias_shift_keeps_selection_and_mixture_weights` | gate computed from biased scores |
-| seq-wise balance loss | `test_sequence_balance_loss_matches_deepseek_v3_formula` | wrong sequence axis; no score normalisation; batch-wise loss |
+| seq-wise balance loss | `test_sequence_balance_loss_counts_the_routed_selection` | wrong sequence axis; no score normalisation; batch-wise loss |
 | MLA RoPE | `test_mla_matches_independent_reference` | no RoPE on the key; no RoPE on the query; theta doubled |
 
 The last three rows were added after an independent review found that those mutations passed the

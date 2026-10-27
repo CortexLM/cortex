@@ -131,8 +131,11 @@ def test_uniform_bias_shift_keeps_selection_and_mixture_weights() -> None:
     assert torch.equal(base, moved)
 
 
-def test_sequence_balance_loss_matches_deepseek_v3_formula() -> None:
-    """aux = mean over sequences of sum_i f_i P_i, f_i = E/(K T) * count_i, P_i = mean_t s'_i."""
+def test_sequence_balance_loss_counts_the_routed_selection() -> None:
+    """aux = mean over sequences of sum_i f_i P_i, f_i = E/(K T) * count_i of the routed (biased)
+    selection, P_i = mean_t s'_i of the unbiased normalised scores. DeepSeek-V3 eq. 18 counts the
+    unbiased top-k instead: the bias below makes the two differ, so this pins the documented
+    deviation (ADR 0006, S10 K5)."""
     cfg = kt.MICRO
     theta = init_params(cfg)
     theta[MOE + "router_bias"] = torch.linspace(-0.05, 0.05, cfg.n_experts)
