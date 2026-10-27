@@ -722,7 +722,7 @@ class ChallengeStore:
             result = {"round": br.round, "latest": self._now(db)}
         with self.beacon_arrived:
             self.beacon_arrived.notify_all()
-        for guard in self._lease_guards_v2.values():
+        for guard in tuple(self._lease_guards_v2.values()):
             guard.advance(br.round)
         for run_id, (escrow, _, _) in self._services_v2.items():
             with self._tx():
@@ -6744,8 +6744,9 @@ class ChallengeStore:
                     "UPDATE audit_leases_v2 SET state=?,result='AUDIT_INFRASTRUCTURE' WHERE id=?",
                     (state, row["id"]),
                 )
-                if row["id"] in self._lease_guards_v2:
-                    self._lease_guards_v2[row["id"]].revoke()
+                expired_guard = self._lease_guards_v2.pop(row["id"], None)
+                if expired_guard is not None:
+                    expired_guard.revoke()
             elif now >= row["absolute"]:
                 self._db.execute(
                     "UPDATE audit_leases_v2 SET state='exhausted',"
@@ -7014,6 +7015,8 @@ class ChallengeStore:
             assert hasattr(request, "commit_hash")
             if request.commit_hash != row["nonce"]:
                 raise ChallengeError(403, "audit lease nonce differs")
+            if job_id in self._lease_guards_v2:
+                raise ChallengeError(409, "audit execution already running for this lease")
             now = self._fresh_v2(manifest, f"audit-execute:{job_id}:{self._now(self._db)}")
             job = AuditJobV2.model_validate(self._record_v2(run_id, "audit-job", job_id))
             job.validate_embedded(now)
@@ -7244,7 +7247,6 @@ class ChallengeStore:
                 + (min(row["expires"], row["absolute"]) - 1) * 3
             )
             guard = LeaseGuard(row["expires"], row["absolute"], deadline)
-            self._lease_guards_v2[job_id] = guard  # Subscribe before triggering execution.
             cache = AnchorCache()
             self._restore_anchor_v2(run_id, row["hotkey"], row["w"] - 1, cache)
             start = job.start_state
@@ -7268,6 +7270,7 @@ class ChallengeStore:
             inputs["sample_proofs"] = canonicalize([proofs[i] for i in job.sample_ids])
             for name, value in inputs.items():
                 durable_write(directory / name, value)
+            self._lease_guards_v2[job_id] = guard  # Subscribe before triggering execution.
         try:
             with guard:
                 from hypertrain.protocol.messages_v2 import IslandJobV1
@@ -7431,7 +7434,9 @@ class ChallengeStore:
                     "identity": identity,
                 }
         finally:
-            self._lease_guards_v2.pop(job_id, None)
+            with self._lock:
+                if self._lease_guards_v2.get(job_id) is guard:
+                    del self._lease_guards_v2[job_id]
 
     def _dispatch_env_v2(
         self, manifest: RunManifestV2, directory: Path

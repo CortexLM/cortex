@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import pytest
 
+from hypertrain.challenge.store import ChallengeError
+from hypertrain.miner.island_launch import IslandFailure
 from hypertrain.protocol.hashing import sha256_hex
 
 from .audit_lease_fixture_v2 import (
     AUDITOR_A,
     AUDITOR_B,
     D_AUDIT,
+    execute_request,
     lease,
     lease_rounds,
     miners,
@@ -84,3 +87,63 @@ def test_a_coordinator_side_refusal_is_not_attributed_to_the_miner(network, monk
         "SELECT COUNT(*) FROM records_v2 WHERE kind='excluded'"
     ).fetchone()[0]
     assert (queued, excluded) == (4, 0)
+
+
+def test_a_second_execution_of_one_lease_is_refused_and_keeps_the_running_guard(
+    network, monkeypatch
+):
+    from hypertrain.auditor import worker
+
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, executable=True)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+    seen = {}
+
+    def launch(job_, directory, **kwargs):
+        guard = store._lease_guards_v2[job["job_id"]]
+        with pytest.raises(ChallengeError) as again:  # the same lease asks again mid-replay
+            store.execute_audit_v2(run, job["job_id"], execute_request(network, A, job))
+        seen["status"] = again.value.status
+        seen["kept"] = store._lease_guards_v2[job["job_id"]] is guard
+        raise IslandFailure("stop")
+
+    monkeypatch.setattr(worker, "launch_island", launch)
+    with pytest.raises(IslandFailure):
+        store.execute_audit_v2(run, job["job_id"], execute_request(network, A, job))
+    assert seen == {"status": 409, "kept": True}
+    assert job["job_id"] not in store._lease_guards_v2
+
+
+def test_a_preparation_failure_leaves_no_guard_behind(network, monkeypatch):
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, executable=True)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+
+    def missing_anchor(*args, **kwargs):
+        raise ChallengeError(409, "missing accepted anchor")
+
+    monkeypatch.setattr(store, "_restore_anchor_v2", missing_anchor)
+    with pytest.raises(ChallengeError, match="missing accepted anchor"):
+        store.execute_audit_v2(run, job["job_id"], execute_request(network, A, job))
+    assert job["job_id"] not in store._lease_guards_v2
+
+
+def test_an_unwinding_attempt_does_not_release_the_guard_of_the_next_one(network, monkeypatch):
+    from hypertrain.auditor import worker
+
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, executable=True)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+    sentinel = object()
+
+    def launch(job_, directory, **kwargs):
+        store._lease_guards_v2[job["job_id"]] = sentinel  # attempt 2 registered while we unwind
+        raise IslandFailure("stop")
+
+    monkeypatch.setattr(worker, "launch_island", launch)
+    with pytest.raises(IslandFailure):
+        store.execute_audit_v2(run, job["job_id"], execute_request(network, A, job))
+    assert store._lease_guards_v2[job["job_id"]] is sentinel

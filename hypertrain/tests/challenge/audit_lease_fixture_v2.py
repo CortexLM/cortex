@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from hypertrain.auditor.replay import AnchorCache, optimizer_hash, pack_state
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -10,6 +12,7 @@ from hypertrain.protocol.messages import LeafPreimage, Receipt, StageState
 from hypertrain.protocol.messages_v2 import (
     AuditPolicyV2,
     CommitV2,
+    IslandJobV1,
     PolicyHashes,
     RoundOpenV2,
     StartStateV2,
@@ -37,11 +40,13 @@ def lease_rounds(net) -> int:
     return policy.lease_rounds
 
 
-def seed_round(net, n=4, *, gap=200, commit_exp=None, nan_leaf=None):
+def seed_round(net, n=4, *, executable=False, gap=200, commit_exp=None, nan_leaf=None):
     """Write round 0 (opening, starts, commits, leaves, finality) straight into `records_v2`.
 
-    `gap` is `d_final - d_audit`: 100 leaves one lease window, 200 two full ones.
-    `commit_exp` / `nan_leaf` ({miner index: value}) poison one miner's sealed inputs."""
+    `executable` also persists the genesis anchors and writes the island inputs, so that
+    `execute_audit_v2` reaches the executor boundary. `gap` is `d_final - d_audit`: 100 leaves
+    one lease window, 200 two full ones. `commit_exp` / `nan_leaf` ({miner index: value})
+    poison one miner's sealed inputs."""
     commit_exp, nan_leaf = commit_exp or {}, nan_leaf or {}
     store, manifest = net.store, net.manifest
     run = manifest.run_id()
@@ -50,6 +55,10 @@ def seed_round(net, n=4, *, gap=200, commit_exp=None, nan_leaf=None):
     theta = init_params(cfg.model)
     batch, H, J = t.batch_samples(), t.inner.H, t.inner.J
     sample_ids = list(range(batch))
+    dataset = store._record_v2(run, "dataset", "inputs")
+    width = (cfg.model.seq_len + 1) * (2 if t.dataset.sample_format.startswith("u16") else 4)
+    raw_samples = store.objects.get(dataset["samples_hash"])
+    proofs = json.loads(store.objects.get(dataset["proofs_hash"]))
     keys = miners(n)
     cache = AnchorCache()
     roster, starts, per = [], [], []
@@ -110,6 +119,41 @@ def seed_round(net, n=4, *, gap=200, commit_exp=None, nan_leaf=None):
         store._put_record_v2(run, "round", "0", net.signed(fixtures.COORD, "RoundOpenV2", opening))
         for index, (key, anchor, start) in enumerate(per):
             ident = f"0:{key.ss58}"
+            if executable:
+                store._persist_anchor_v2(manifest, anchor, cache)
+                inputs = {
+                    "start_state": pack_state(theta),
+                    "ef_in": pack_state(anchor.ef),
+                    "v0": pack_state({}),
+                    "samples": b"".join(
+                        raw_samples[i * width : (i + 1) * width] for i in sample_ids
+                    ),
+                    "sample_proofs": canonicalize([proofs[i] for i in sample_ids]),
+                }
+                source = store.state_dir / "jobs-v2/0" / key.ss58
+                source.mkdir(parents=True, exist_ok=True)
+                hashes = {}
+                for name, raw in inputs.items():
+                    (source / name).write_bytes(raw)
+                    hashes[name] = store.objects.put(raw)
+                store._put_record_v2(
+                    run,
+                    "island-job",
+                    ident,
+                    IslandJobV1(
+                        job_version=1,
+                        run_id=run,
+                        w=0,
+                        manifest=manifest,
+                        sample_ids=sample_ids,
+                        global_step0=0,
+                        start_state_sha256=hashes["start_state"],
+                        ef_in_sha256=hashes["ef_in"],
+                        v0_sha256=hashes["v0"],
+                        object_paths={k: k for k in inputs},
+                        deadline=1,
+                    ).body(),
+                )
             leaves = [
                 LeafPreimage(
                     run_id=run,
@@ -187,3 +231,11 @@ def schedule(net):
 def lease(net, auditor, nonce):
     body = Receipt(w=0, commit_hash=f"{nonce:064x}", received_round=net.now)
     return net.client.post(net.url + "/worker/lease", json=net.signed(auditor, "Receipt", body))
+
+
+def execute_request(net, auditor, job):
+    return canonicalize(
+        net.signed(
+            auditor, "Receipt", Receipt(w=0, commit_hash=job["lease_nonce"], received_round=net.now)
+        )
+    )
