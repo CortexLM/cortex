@@ -59,28 +59,44 @@ ssh-keygen -lf known_hosts.<label>                          # with the provider'
 A fresh `--rm` container pays 25-45 s of CPU for the first use of the CUDA kernels; the driver's
 compute cache (`/root/.nv` in the image, which runs as root) removes most of it. S13 measured a
 reference at 57-64 s without a persistent cache and 12-19 s with one, on a B300 host, through a
-`docker` wrapper that added the mount (the first reference after a new image still took 43 s). The
-executor now does it by default ([ADR 0012](../../docs/adr/0012-executor-performance.md)):
+`docker` wrapper that added a `-v` mount (the first reference after a new image still took 43 s).
+The executor now does it by default ([ADR 0012](../../docs/adr/0012-executor-performance.md)). It
+has not run on a GPU host: the tests model the mount and the warm/cold difference on the fake host.
 
-- Before each container it runs, as the ssh user and never through `sudo`, `mkdir -p` and
-  `chmod 0700` on `<root>/<first 32 hex of the manifest image digest>` and reads back the path. The
-  root is `$HOME/.cortex-cuda-executor/compute-cache`, or `hosts[].compute_cache_dir`, an
-  absolute path of letters, digits and `._-` only (use it when the home directory is small, or its
-  path holds a space or a comma; `/mnt/nvme/...` on Lium hosts). A report that is not the path asked
-  for fails the attempt. The call is remembered per host and image until an attempt fails.
+- Before each container it runs, as the ssh user and never through `sudo`, `umask 077`, `mkdir -p`,
+  a refusal of a link and `chmod 0700` on `<root>/<first 32 hex of the manifest image digest>`, and
+  reads back the path. The root is `$HOME/.cortex-cuda-executor/compute-cache`, or
+  `hosts[].compute_cache_dir`, an absolute path of letters, digits and `._-` only (use it when the
+  home directory is small, or its path holds a space or a comma; `/mnt/nvme/...` on Lium hosts).
+  `mkdir -p` also creates the parents of a named root, with the same umask. A report that is not
+  the path asked for is refused. The call is remembered per host and image until an attempt fails.
+- If the directory cannot be prepared (read-only home, odd `$HOME`, a link in the way) the attempt
+  goes on **without** the cache: `compute_cache` is false in its provenance and journal entry, and
+  the journal gets an `exec_cache_unavailable` line with the host's reason. A lost host (ssh down,
+  timeout) is still a lost host. Look for `exec_cache_unavailable` after the first job: a job that
+  is slow and has no cache is not an error.
 - The container gets exactly one more flag, `--mount type=bind,src=<that directory>,dst=/root/.nv`
   (`--mount`, because `-v` would create a missing source as root). Nothing else changes: no
   `--privileged`, no capability, no device, no `-e`.
-- One directory per image digest, so a cache made by another image never serves this one. A new
-  image pays one cold start. The driver bounds each directory (`CUDA_CACHE_MAXSIZE`, default set by
-  the driver, not by the executor).
-- `role-dispatch.json` records `compute_cache: true|false` and the journal's `exec_attempt` the same,
-  so "did a persistent cache serve this result" has an answer. The cache holds binaries the driver
-  built; whether it can change a result is not proven (S13's 28 matches ran with and without it).
-- Removal is the operator's: the files are root's, so `sudo rm -rf ~/.cortex-cuda-executor`
-  (or the named root). `compute_cache: false` restores the previous command exactly.
-- Nothing below ran on a GPU in this repository's tests: they model the mount and the warm/cold
-  difference on the fake host.
+- One directory per image digest, so a cache made by another image never serves this one (it does
+  not make results independent of the driver and the history of the host: whether the cache can
+  change a result is not proven, S13's 28 matches ran with and without it). A new image pays one
+  cold start. The driver bounds what it writes (`CUDA_CACHE_MAXSIZE`, its default, not set by the
+  executor); nothing prunes old image directories.
+- `role-dispatch.json` records `compute_cache: true|false` and the journal's `exec_attempt` the same:
+  it says the mount was requested for that attempt, not that it was warm or effective (the first job
+  in an empty directory records true).
+- Files made by the container belong to root, in a directory owned by the ssh user. Removal is the
+  operator's: `sudo rm -rf ~/.cortex-cuda-executor` (or the named root). Do it while no job runs: a
+  directory removed under a running executor costs one failed attempt (and the sweep pause).
+  `compute_cache: false` restores the previous command exactly.
+- **An old `docker` wrapper that adds `-v ...:/root/.nv` (S13) must go**: with the default two
+  mounts target `/root/.nv`, which docker is expected to refuse, and every container fails. Put
+  `["sudo","-n","docker"]` back in `hosts[].docker`. `cuda_executor_check.py` runs nothing and does
+  not exercise this step.
+- On a shared host the ssh user is root-equivalent anyway (`docker`, `sudo -n docker`); on a host
+  where it is not, a container root can leave root-owned files, including setuid ones, in the cache
+  directory.
 
 ## What a job produces
 

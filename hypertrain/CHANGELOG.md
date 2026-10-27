@@ -29,10 +29,12 @@
   monorepo root and `docs/cuda-executor.md`.
 - Generic CUDA executor compute cache (`compute_cache`, `hosts[].compute_cache_dir`): every
   container gets one bind mount of a persistent CUDA compute cache, one directory per image
-  digest created by the executor, so a reference no longer pays the cold CUDA start of a fresh
-  `--rm` container (S13: 57-64 s to 12-19 s). `compute_cache: false` restores the previous command;
-  `role-dispatch.json` and the journal record whether it was on. See `docs/adr/0012` at the
-  monorepo root and `docs/cuda-executor.md`.
+  digest created by the executor, so only the first reference per image pays the cold CUDA start
+  of a fresh `--rm` container (S13, through a wrapper: 57-64 s to 12-19 s; not yet run with this
+  implementation). A host that cannot make the directory runs the job without the cache.
+  `compute_cache: false` restores the previous command; `role-dispatch.json` and the journal
+  record whether the mount was requested. See `docs/adr/0012` at the monorepo root and
+  `docs/cuda-executor.md`.
 - Docs, CI, image and release workflows, Dockerfiles.
 - Eviction-tolerant core `hypertrain.elastic` (v3, not wired into the v2 challenge): leases with
   fencing tokens, saved before they are granted so that a restart never reissues one, and a

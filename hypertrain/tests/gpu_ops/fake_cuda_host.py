@@ -25,8 +25,9 @@ The scenario is one JSON file keyed by host address (`hosts`), plus a `global` s
 `smi_fail` is `query-gpu` or `query-compute-apps`: that nvidia-smi query prints nothing and exits 3.
 `home` is the ssh user's home (`$HOME` of the remote shell). A `--mount type=bind` must name an
 existing directory, as with the real daemon. A run that mounts `/root/.nv` is `cold` until a run
-has left a marker in that directory, then `warm`: it sleeps `cold_start` or `warm_start` seconds
-(default 0) and leaves the marker when it succeeds, so a persistent cache can be timed.
+has left a marker in that directory, then `warm`; a run without the mount is `none` (the cache dies
+with the container, so it costs what a cold one does). It sleeps `cold_start` or `warm_start`
+seconds (default 0) and leaves the marker when it succeeds, so a persistent cache can be timed.
 `port`, `user` and `identity` are what the host's sshd accepts: any other `-p`, user or `-i` file is
 refused, and the destination must be pinned in the `UserKnownHostsFile` the caller names, as
 `address` for port 22 and `[address]:port` otherwise (StrictHostKeyChecking=yes).
@@ -125,7 +126,7 @@ def kind(command):
     words = command.split()
     if words[:1] == ["nvidia-smi"]:
         return "probe"
-    if "mkdir" in words:
+    if command.startswith("D="):  # the compute cache directory command
         return "prepare"
     return next((w for w in words if w in ("run", "pull", "rm")), "other")
 
@@ -499,8 +500,8 @@ def run(argv):
         while started() < entry.get("rendezvous", 0) and time.monotonic() < give_up:
             time.sleep(0.05)  # holds this run until that many runs are in flight at once
         time.sleep(entry.get("delay", 0))
-        if temperature != "none":
-            time.sleep(host.get("warm_start" if temperature == "warm" else "cold_start", 0))
+        # a container without the mount keeps its cache in its own layer, which --rm throws away
+        time.sleep(host.get("warm_start" if temperature == "warm" else "cold_start", 0))
         if mode == "hang":
             time.sleep(60)
         for source_rank in sorted(Path(canned[request["job_sha256"]]).glob("rank-*")):

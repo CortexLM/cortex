@@ -339,9 +339,16 @@ def cache_location(root: Path | None, image_digest: str) -> tuple[str, re.Patter
 
 
 def prepare_command(assignment: str) -> str:
-    """Create the directory for the ssh user (0700, so no other user of the host can seed it) and
-    print the absolute path. `chmod` fails on a directory that belongs to somebody else."""
-    return f'{assignment}; mkdir -p -- "$D" && chmod 0700 -- "$D" && printf \'%s\\n\' "$D"'
+    """Create the directory for the ssh user and print the absolute path.
+
+    `umask 077` makes every directory it creates private, so no other user of the host can seed
+    the cache; a leaf that is a link is refused (the daemon would resolve it as root), and `chmod`
+    fails on a directory that belongs to somebody else.
+    """
+    return (
+        f'{assignment}; umask 077; mkdir -p -- "$D" && [ ! -L "$D" ] '
+        f'&& chmod 0700 -- "$D" && printf \'%s\\n\' "$D"'
+    )
 
 
 class Transport(Protocol):
@@ -918,7 +925,12 @@ class Executor:
             machine = self._admit(label, snapshot)
             chosen = self._select(snapshot, ref, image)
             n = len(chosen)
-            cache = self._cache(label, ref, job.deadline, cancel, work)
+            try:
+                cache = self._cache(label, ref, job.deadline, cancel, work)
+            except AttemptFailed as error:
+                # A speed-up must not fail a job the host can run: go on without it, on the record.
+                self.journal.append("exec_cache_unavailable", label=label, reason=str(error))
+                cache = None
             self.journal.append(
                 "exec_attempt",
                 label=label,

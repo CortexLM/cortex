@@ -2146,18 +2146,43 @@ def test_a_cache_directory_removed_by_hand_costs_one_attempt_not_the_job(
     assert (home / "published").is_dir()
 
 
-def test_a_host_that_cannot_make_the_directory_runs_no_container(make_pool, canned, tmp_path):
+def test_a_host_that_cannot_make_the_directory_still_runs_the_job_without_the_cache(
+    make_pool, canned, tmp_path
+):
     pool = make_pool(labels=("a",))
     shutil.rmtree(pool.home("a"))
     pool.home("a").write_text("a file where the home directory should be")
     home = canned.stage(tmp_path / "home")
 
-    with pytest.raises(IslandFailure, match="cannot prepare the compute cache directory"):
-        dispatch(pool, home)
+    dispatch(pool, home)  # a speed-up must not fail a job the host can run
 
-    assert pool.toolbox.runs() == [] and "exec_attempt" not in journal_kinds(pool)
-    assert journal_kinds(pool).count("exec_attempt_failed") == 3  # max_attempts, each one spent
-    assert_nothing_published(home)
+    (run,) = run_starts(pool)
+    assert run["mounts"] == [] and run["cache"] == "none"
+    assert record_of(home)["compute_cache"] is False
+    (attempt,) = journal_of(pool, "exec_attempt")
+    assert attempt["compute_cache"] is False
+    (why,) = journal_of(pool, "exec_cache_unavailable")
+    assert why["label"] == "a" and "cannot prepare the compute cache directory" in why["reason"]
+    assert journal_kinds(pool).count("exec_attempt_failed") == 0
+    assert (home / "published").is_dir()
+
+
+def test_a_link_in_place_of_the_cache_directory_is_refused_and_its_target_left_alone(
+    make_pool, canned, tmp_path
+):
+    pool = make_pool(labels=("a",))
+    target = tmp_path / "somewhere-else"
+    target.mkdir(mode=0o755)
+    link = pool.home("a") / CACHE_ROOT / cache_leaf(canned)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+    home = canned.stage(tmp_path / "home")
+
+    dispatch(pool, home)
+
+    assert run_starts(pool)[0]["mounts"] == []  # not mounted: the daemon would follow the link
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755 and list(target.iterdir()) == []
+    assert "exec_cache_unavailable" in journal_kinds(pool)
 
 
 def test_each_host_keeps_its_cache_in_its_own_home(make_pool, canned, tmp_path):

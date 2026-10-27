@@ -1190,7 +1190,7 @@ class FakeHost:
         self.gpus, self.busy, self.sent, self.prepared = gpus, busy, [], []
 
     def run(self, command: str, *, stdin: Path | None, stdout: Path, **kwargs: Any) -> int:
-        if "mkdir -p" in command:
+        if command.startswith("D="):
             self.prepared.append(command)
             asked = shlex.split(command.split(";")[0])[0].removeprefix("D=")
             stdout.write_text(asked.replace("$HOME", "/home/ubuntu") + "\n")
@@ -1435,7 +1435,7 @@ class Down:
 def kind_of(command: str) -> str:
     if command.startswith("nvidia-smi"):
         return "probe"
-    return "prepare" if "mkdir -p" in command else shlex.split(command)[1]
+    return "prepare" if command.startswith("D=") else shlex.split(command)[1]
 
 
 class ScriptedHost(FakeHost):
@@ -1957,6 +1957,38 @@ def test_prepare_command_in_a_real_shell_creates_the_private_directory_and_names
     assert (pattern.fullmatch(answer.strip()) is not None) is (" " not in home_name)
 
 
+def test_prepare_command_makes_every_directory_it_creates_private_whatever_the_umask(
+    tmp_path: Path,
+) -> None:
+    assignment, _ = ce.cache_location(None, DIGEST)
+    done = subprocess.run(
+        ["sh", "-c", "umask 000; " + ce.prepare_command(assignment)],
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]},
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    walked = [tmp_path / ".cortex-cuda-executor", tmp_path / ".cortex-cuda-executor/compute-cache"]
+    assert [stat.S_IMODE(p.stat().st_mode) for p in walked] == [0o700, 0o700]
+
+
+def test_prepare_command_refuses_a_link_and_leaves_its_target_alone(tmp_path: Path) -> None:
+    assignment, _ = ce.cache_location(None, DIGEST)
+    target = tmp_path / "elsewhere"
+    target.mkdir(mode=0o755)
+    leaf = tmp_path / ".cortex-cuda-executor/compute-cache" / LEAF
+    leaf.parent.mkdir(parents=True)
+    leaf.symlink_to(target)
+    done = subprocess.run(
+        ["sh", "-c", ce.prepare_command(assignment)],
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]},
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode != 0 and done.stdout == ""
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+
+
 def test_prepare_command_fails_instead_of_using_a_directory_it_cannot_secure(
     tmp_path: Path,
 ) -> None:
@@ -2121,7 +2153,7 @@ def attempt_twice(
     for number in (1, 2):
         try:
             executor._attempt("h1", number, "audit", "b" * 64, job, tmp_path / "job", False, None)
-        except ce.AttemptFailed:
+        except ce.IslandFailure:
             pass
     return host
 
@@ -2134,6 +2166,59 @@ def test_the_directory_is_asked_for_again_only_after_an_attempt_that_failed(
     failing = attempt_twice(tmp_path / "oom", pinned, monkeypatch, {"run": ["oom"]})
     # The first container died: the directory may be what failed, so the next attempt checks it.
     assert len(failing.prepared) == 2
+    # The same when the transport gives up on the container instead of the container failing.
+    lost = attempt_twice(tmp_path / "lost", pinned, monkeypatch, {"run": ["timeout"]})
+    assert len(lost.prepared) == 2
+
+
+def test_a_cache_command_that_times_out_inside_an_attempt_loses_the_host_instead_of_falling_back(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub_publication(monkeypatch)
+    log: list[tuple[str, str]] = []
+    host = ScriptedHost("h1", log, [gpu(0)], script={"prepare": ["timeout"]})
+    executor = executor_with(tmp_path, pinned, {"h1": host})
+    job = island_job(tmp_path / "job")
+    with pytest.raises(ce.HostLost, match="timed out"):
+        executor._attempt("h1", 1, "audit", "b" * 64, job, tmp_path / "job", False, None)
+    assert [kind for _, kind in log] == ["probe", "prepare"]  # no container was started
+    journal = executor.journal.path
+    assert "exec_cache_unavailable" not in (journal.read_text() if journal.exists() else "")
+
+
+def test_a_cache_directory_the_host_cannot_make_runs_the_attempt_without_the_cache(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records: list[dict[str, Any]] = []
+
+    def capture(
+        self: ce.Executor, job: Any, directory: Path, staging: Path, record: dict, trace: bool
+    ) -> str:
+        records.append(record)
+        return "published"
+
+    monkeypatch.setattr(ce.Executor, "_publish", capture)
+    commands: list[str] = []
+    real = ce.run_command
+    monkeypatch.setattr(
+        ce, "run_command", lambda *a, **k: commands.append(real(*a, **k)) or commands[-1]
+    )
+
+    class Refusing(FakeHost):
+        def run(self, command: str, **kwargs: Any) -> int:
+            if command.startswith("D="):
+                kwargs["stdout"].write_text("")
+                return 1
+            return super().run(command, **kwargs)
+
+    executor = executor_with(tmp_path, pinned, {"h1": Refusing([gpu(0)])})
+    job = island_job(tmp_path / "job")
+    executor._attempt("h1", 1, "audit", "b" * 64, job, tmp_path / "job", False, None)
+    assert records[0]["compute_cache"] is False and "--mount" not in commands[0]
+    (why,) = journal_of(executor, "exec_cache_unavailable")
+    assert why["label"] == "h1" and "cannot prepare" in why["reason"]
+    (attempt,) = journal_of(executor, "exec_attempt")
+    assert attempt["compute_cache"] is False
 
 
 def test_the_attempt_names_the_directory_in_the_container_the_record_and_the_journal(
