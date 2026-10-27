@@ -1,0 +1,17 @@
+{
+  "credentials_file": "<container path of the R2 token file: mode 0600, owned by uid 65532, only R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET (a cortex-v3-* bucket), optional R2_ENDPOINT>",
+  "operations": ["audit", "referee"],
+  "part_bytes": 16777216,
+  "max_artifact_bytes": 17179869184,
+  "workers": 8,
+  "reserve_seconds": 60,
+  "url_margin_seconds": 30,
+  "url_ttl_cap_seconds": 3600,
+  "poll_ms": 500,
+  "store_blip_seconds": 30,
+  "offer_wait_seconds": 120,
+  "request_timeout_seconds": 30,
+  "retry_attempts": 4,
+  "retry_base_ms": 500,
+  "fallback": "classic"
+}

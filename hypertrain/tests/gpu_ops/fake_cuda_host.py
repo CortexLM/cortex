@@ -14,16 +14,21 @@ No network, no GPU, no real ssh or docker. `Toolbox` generates, under a temporar
 
 The scenario is one JSON file keyed by host address (`hosts`), plus a `global` section:
 
-    hosts[address] = {down, hostkey_ok, port, user, identity, clock_skew,
+    hosts[address] = {down, hostkey_ok, port, user, identity, home, clock_skew,
                       gpus[{uuid,name,driver,cc,mem,sm}], busy[uuid], busy_sequence[[uuid]],
                       smi_fail, images[ref], inspect_reports[ref], raw_inspect,
-                      pull{fails|digest|output}, runs[run]}
+                      pull{fails|digest|output}, runs[run], cold_start, warm_start}
     global = {canned{job_sha256: tree}, runs[run], rm_hold}  # global runs are consumed first
     run = {mode: ok | vanish | truncate | exit | exit-after | probe-fail | env | hang | oversize |
-                 flood | mutate, detached, ...}
+                 flood | mutate, detached, die_after_puts, ...}
 
 `smi_fail` is `query-gpu` or `query-compute-apps`: that nvidia-smi query prints nothing and exits 3.
 `raw_inspect` is the text `docker image inspect` prints, whatever the image list is.
+`home` is the ssh user's home (`$HOME` of the remote shell). A `--mount type=bind` must name an
+existing directory, as with the real daemon. A run that mounts `/root/.nv` is `cold` until a run
+has left a marker in that directory, then `warm`; a run without the mount is `none` (the cache dies
+with the container, so it costs what a cold one does). It sleeps `cold_start` or `warm_start`
+seconds (default 0) and leaves the marker when it succeeds, so a persistent cache can be timed.
 `port`, `user` and `identity` are what the host's sshd accepts: any other `-p`, user or `-i` file is
 refused, and the destination must be pinned in the `UserKnownHostsFile` the caller names, as
 `address` for port 22 and `[address]:port` otherwise (StrictHostKeyChecking=yes).
@@ -31,6 +36,8 @@ refused, and the destination must be pinned in the `UserKnownHostsFile` the call
 `mutate`: the genuine result with one hostile change, named by `name`; the other keys of the run
 size a bomb (`depth`, `claim`) or give a member its bytes (`text`).
 `probe-fail`: the runner's device probe fails (the real runner then exits 9).
+`die_after_puts`: with the result going to R2 (docs/adr/0013), the host vanishes (as `vanish`)
+when the runner starts its n+1th part upload.
 `detached`: the container runs in a session of its own, so killing the local ssh does not stop it;
 only `docker rm -f NAME` does, and it waits while the global `rm_hold` flag is set.
 
@@ -124,6 +131,8 @@ def kind(command):
     words = command.split()
     if words[:1] == ["nvidia-smi"]:
         return "probe"
+    if command.startswith("D="):  # the compute cache directory command
+        return "prepare"
     return next((w for w in words if w in ("run", "pull", "rm")), "other")
 
 
@@ -180,7 +189,7 @@ def main():
         fail("%s@%s: Permission denied (publickey)." % (user, address))
     env = {
         "PATH": HOST_BIN + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": os.environ.get("HOME", ""),
+        "HOME": host.get("home") or os.environ.get("HOME", ""),
         "LC_ALL": "C",
         "TMPDIR": HOST_TMP,
         "FAKE_HOST_ADDRESS": address,
@@ -198,6 +207,7 @@ import io
 import shutil
 import signal
 import tarfile
+import threading
 from pathlib import Path
 
 ADDRESS = os.environ["FAKE_HOST_ADDRESS"]
@@ -433,6 +443,23 @@ def run(argv):
         usage("invalid --gpus value %s" % gpus)
     devices = [d for f in fields if f.startswith("device=") for d in f[7:].split(",")]
     name = given.get("--name", "")
+    mounts = []
+    for flag in options:
+        if flag[0] in ("-v", "--volume"):
+            usage("this fake host supports --mount only, got %r" % flag)
+        if flag[0] == "--mount" and len(flag) == 2:
+            mount = dict(part.partition("=")[::2] for part in flag[1].split(","))
+            if mount.get("type") != "bind" or not mount.get("src") or not mount.get("dst"):
+                usage("invalid mount config %r" % flag[1])
+            if not os.path.isdir(mount["src"]):
+                usage(
+                    'invalid mount config for type "bind": bind source path does not exist: %s'
+                    % mount["src"]
+                )
+            mounts.append(mount)
+    cache_dir = next((m["src"] for m in mounts if m["dst"] == "/root/.nv"), None)
+    marker = Path(cache_dir) / "ComputeCache" / "index" if cache_dir else None
+    temperature = "none" if marker is None else "warm" if marker.exists() else "cold"
     log(
         "run_start",
         name=name,
@@ -440,6 +467,8 @@ def run(argv):
         devices=devices,
         network=given.get("--network", "default"),
         options=options,
+        mounts=mounts,
+        cache=temperature,
         image=image,
         tail_flags=tail[:2],
         source_sha256=sha(source.encode()),
@@ -474,6 +503,21 @@ def run(argv):
     canned = data["global"]["canned"]
     namespace = {"__name__": "cuda_executor_runner_under_test"}
     exec(compile(source, "<runner>", "exec"), namespace)
+    if entry.get("die_after_puts") is not None:
+        real, counted = namespace["http_send"], threading.Lock()
+        puts = [0]
+
+        def dying(method, url, headers, body, timeout, limit):
+            if method == "PUT" and "partNumber=" in url:
+                with counted:
+                    puts[0] += 1
+                    gone = puts[0] > entry["die_after_puts"]
+                if gone:
+                    log("run_end", name=name, code=199)
+                    os._exit(199)
+            return real(method, url, headers, body, timeout, limit)
+
+        namespace["http_send"] = dying
 
     def probe(request):
         if mode == "probe-fail":
@@ -512,6 +556,8 @@ def run(argv):
         while started() < entry.get("rendezvous", 0) and time.monotonic() < give_up:
             time.sleep(0.05)  # holds this run until that many runs are in flight at once
         time.sleep(entry.get("delay", 0))
+        # a container without the mount keeps its cache in its own layer, which --rm throws away
+        time.sleep(host.get("warm_start" if temperature == "warm" else "cold_start", 0))
         if mode == "hang":
             time.sleep(60)
         for source_rank in sorted(Path(canned[request["job_sha256"]]).glob("rank-*")):
@@ -519,6 +565,9 @@ def run(argv):
         if not tracing:  # the island writes trace.json only when asked to
             for trace in attempt.glob("rank-*/trace.json"):
                 trace.unlink()
+        if marker is not None:  # what the driver leaves in /root/.nv after compiling kernels
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_bytes(b"compiled")
         return 0
 
     captured = io.BytesIO()
@@ -856,6 +905,10 @@ class Pool:
     def address(self, label: str) -> str:
         return self.addresses[label]
 
+    def home(self, label: str) -> Path:
+        """The ssh user's home on that host: where `$HOME` points for its remote shell."""
+        return self.toolbox.root / "home" / label
+
 
 def make_pool(
     root: Path,
@@ -895,10 +948,13 @@ def make_pool(
         pinned.write_text(f"{name} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5{label * 8}\n")
         known_hosts[label] = pinned
         machine = 0 if same_machine else number
+        home = toolbox.root / "home" / label
+        home.mkdir(parents=True)
         scenario_hosts[address] = {
             "port": port,
             "user": user,
             "identity": str(identity),
+            "home": str(home),
             "gpus": [
                 gpu(machine, i, cc="10.3", sm=ref.sm_count, driver=ref.driver_allowlist[0])
                 for i in range(gpus)

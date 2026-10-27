@@ -10,10 +10,13 @@ import json
 import os
 import shlex
 import stat
+import subprocess
 import tarfile
+import threading
 import time
 import uuid as uuidlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -151,6 +154,22 @@ REFUSED_FIELDS = [
     pytest.param(("image_repository",), "Repo", id="image-uppercase"),
     pytest.param(("image_repository",), "-repo", id="image-leading-dash"),
     pytest.param(("network",), "host", id="network-host"),
+    pytest.param(("compute_cache",), "yes", id="cache-string"),
+    pytest.param(("compute_cache",), 1, id="cache-integer"),
+    pytest.param(("compute_cache",), None, id="cache-null"),
+    pytest.param(H + ("compute_cache_dir",), "cache", id="cache-dir-relative"),
+    pytest.param(H + ("compute_cache_dir",), "", id="cache-dir-empty"),
+    pytest.param(H + ("compute_cache_dir",), "/", id="cache-dir-root"),
+    pytest.param(H + ("compute_cache_dir",), "/mnt/../etc", id="cache-dir-dotdot"),
+    pytest.param(H + ("compute_cache_dir",), "/mnt/a b", id="cache-dir-space"),
+    pytest.param(H + ("compute_cache_dir",), "/mnt/a,dst=/etc", id="cache-dir-mount-option"),
+    pytest.param(H + ("compute_cache_dir",), "/mnt/a=b", id="cache-dir-equals"),
+    pytest.param(H + ("compute_cache_dir",), "/mnt/$HOME", id="cache-dir-variable"),
+    pytest.param(H + ("compute_cache_dir",), "~/cache", id="cache-dir-tilde"),
+    pytest.param(H + ("compute_cache_dir",), "/mnt/a;rm", id="cache-dir-semicolon"),
+    pytest.param(H + ("compute_cache_dir",), "/mnt/cache\n", id="cache-dir-newline"),
+    pytest.param(H + ("compute_cache_dir",), "/" + "a" * 200, id="cache-dir-201-characters"),
+    pytest.param(H + ("compute_cache_dir",), 7, id="cache-dir-integer"),
     pytest.param(("hosts",), [], id="no-host"),
     pytest.param(("max_attempts",), 0, id="attempts-zero"),
     pytest.param(("max_attempts",), 11, id="attempts-over"),
@@ -1302,13 +1321,19 @@ def test_the_tar_reader_serves_a_metadata_sized_read_and_nothing_larger(tmp_path
 
 
 class FakeHost:
-    """The two remote commands of an attempt: the host probe, and the container (a runner that
-    answers with the right COMPLETE for the request it received)."""
+    """The remote commands of an attempt: the host probe, the compute cache directory (answered
+    with the path it was asked for, below a home of /home/ubuntu), and the container (a runner
+    that answers with the right COMPLETE for the request it received)."""
 
     def __init__(self, gpus: list[ce.Gpu], busy: tuple[ce.Gpu, ...] = ()) -> None:
-        self.gpus, self.busy, self.sent = gpus, busy, []
+        self.gpus, self.busy, self.sent, self.prepared = gpus, busy, [], []
 
     def run(self, command: str, *, stdin: Path | None, stdout: Path, **kwargs: Any) -> int:
+        if command.startswith("D="):
+            self.prepared.append(command)
+            asked = shlex.split(command.split(";")[0])[0].removeprefix("D=")
+            stdout.write_text(asked.replace("$HOME", "/home/ubuntu") + "\n")
+            return 0
         if "##apps" in command:
             rows = [
                 f"{g.uuid}, {g.name}, {g.driver}, {g.capability[0]}.{g.capability[1]}, 810"
@@ -1547,7 +1572,9 @@ class Down:
 
 
 def kind_of(command: str) -> str:
-    return "probe" if command.startswith("nvidia-smi") else shlex.split(command)[1]
+    if command.startswith("nvidia-smi"):
+        return "probe"
+    return "prepare" if command.startswith("D=") else shlex.split(command)[1]
 
 
 class ScriptedHost(FakeHost):
@@ -1961,7 +1988,660 @@ def test_probe_or_pull_that_outlives_its_limit_loses_the_host_not_the_job(
 
     assert published == "published"
     tried = [("h1", "probe")] + ([("h1", "pull")] if kind == "pull" else [])
-    assert log == [*tried, ("h2", "probe"), ("h2", "run")]
+    assert log == [*tried, ("h2", "probe"), ("h2", "prepare"), ("h2", "run")]
     (lost,) = journal_of(executor, "exec_host_unavailable")
     assert (lost["label"], lost["reason"]) == ("h1", "remote command timed out")
     assert journal_of(executor, "exec_host_refused") == []  # lost, not quarantined
+
+
+# -- compute cache (docs/adr/0012) --------------------------------------------------------------
+
+LEAF = DIGEST.removeprefix("sha256:")[: ce.CACHE_LEAF]
+DEFAULT_DIR = f"/home/ubuntu/.cortex-cuda-executor/compute-cache/{LEAF}"
+
+
+def test_cache_is_on_by_default_and_a_host_may_name_its_root(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    config = load_config(config_data(tmp_path, pinned))
+    assert config.compute_cache is True and config.hosts[0].compute_cache_dir is None
+    named = load_config(
+        config_data(
+            tmp_path,
+            pinned,
+            compute_cache=False,
+            hosts=[host_data(pinned, compute_cache_dir="/mnt/nvme/ht-cache")],
+        )
+    )
+    assert named.compute_cache is False
+    assert named.hosts[0].compute_cache_dir == Path("/mnt/nvme/ht-cache")
+    longest = "/" + "a" * 199  # 200 characters is the limit
+    load_config(config_data(tmp_path, pinned, hosts=[host_data(pinned, compute_cache_dir=longest)]))
+
+
+def test_run_command_with_the_cache_differs_by_exactly_one_mount() -> None:
+    args = (("sudo", "-n", "docker"), IMAGE, NAME, "d" * 64, [uid(0)], "default")
+    plain = shlex.split(ce.run_command(*args))
+    cached = shlex.split(ce.run_command(*args, DEFAULT_DIR))
+    at = cached.index("--mount")
+    # docker parses the spec itself: a plain `-v` would create a missing source as root.
+    assert cached[at : at + 2] == ["--mount", f"type=bind,src={DEFAULT_DIR},dst=/root/.nv"]
+    assert cached[:at] + cached[at + 2 :] == plain
+    assert cached.count("--mount") == 1
+    assert not {"-v", "--volume", "-e", "--env", "--env-file", "--privileged", "-p"} & set(cached)
+    assert not any(t.startswith(("--cap-add", "--device", "--pid", "--net=")) for t in cached)
+    assert [t for t in cached if t.startswith("/")] == ["/opt/hypertrain/venv/bin/python"]
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "",
+        "relative/dir",
+        "/a,dst=/etc",
+        "/a b",
+        "/a\n",
+        "/a;id",
+        "/a$(id)",
+        "/a/../b",
+        "/a/./b",
+        "/" + "a" * ce.CACHE_PATH_MAX,
+    ],
+)
+def test_run_command_refuses_a_cache_directory_that_is_not_plain(hostile: str) -> None:
+    with pytest.raises(ValueError, match="plain words"):
+        ce.run_command(("docker",), IMAGE, NAME, "d" * 64, [uid(0)], "default", hostile)
+
+
+def test_cache_location_names_one_directory_per_image_digest() -> None:
+    other = "sha256:" + "cd" * 32
+    default, pattern = ce.cache_location(None, DIGEST)
+    assert default == f'D="$HOME/.cortex-cuda-executor/compute-cache/{LEAF}"'
+    assert pattern.fullmatch(DEFAULT_DIR) and pattern.fullmatch(
+        DEFAULT_DIR.replace("ubuntu", "u.1")
+    )
+    assert not pattern.fullmatch(DEFAULT_DIR.replace(LEAF, "cd" * 16))  # another image's directory
+    assert not pattern.fullmatch(DEFAULT_DIR + "/x") and not pattern.fullmatch(LEAF)
+    assert not pattern.fullmatch("/etc/passwd") and not pattern.fullmatch("")
+    assert ce.cache_location(None, other)[0] != default
+    named, exact = ce.cache_location(Path("/mnt/nvme/ht-cache"), DIGEST)
+    assert named == f"D=/mnt/nvme/ht-cache/{LEAF}"
+    assert exact.fullmatch(f"/mnt/nvme/ht-cache/{LEAF}")
+    assert not exact.fullmatch(f"/mnt/nvme/ht-cache/{LEAF}/x") and not exact.fullmatch(DEFAULT_DIR)
+
+
+@pytest.mark.parametrize("home_name", ["home", "ho me"])
+def test_prepare_command_in_a_real_shell_creates_the_private_directory_and_names_it(
+    tmp_path: Path, home_name: str
+) -> None:
+    home = tmp_path / home_name
+    home.mkdir()
+    assignment, pattern = ce.cache_location(None, DIGEST)
+    command = ce.prepare_command(assignment)
+    env = {"HOME": str(home), "PATH": os.environ["PATH"]}
+
+    def prepare() -> str:
+        done = subprocess.run(["sh", "-c", command], env=env, capture_output=True, text=True)
+        assert (done.returncode, done.stderr) == (0, "")
+        return done.stdout
+
+    answer = prepare()
+    directory = home / ".cortex-cuda-executor/compute-cache" / LEAF
+    assert answer == f"{directory}\n"
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700 and directory.is_dir()
+    assert [p.name for p in home.iterdir()] == [".cortex-cuda-executor"]  # nothing else is written
+    directory.chmod(0o755)
+    assert prepare() == answer and stat.S_IMODE(directory.stat().st_mode) == 0o700  # idempotent
+    # A home with a space is created correctly but its path is not one the executor will mount.
+    assert (pattern.fullmatch(answer.strip()) is not None) is (" " not in home_name)
+
+
+def test_prepare_command_makes_every_directory_it_creates_private_whatever_the_umask(
+    tmp_path: Path,
+) -> None:
+    assignment, _ = ce.cache_location(None, DIGEST)
+    done = subprocess.run(
+        ["sh", "-c", "umask 000; " + ce.prepare_command(assignment)],
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]},
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    walked = [tmp_path / ".cortex-cuda-executor", tmp_path / ".cortex-cuda-executor/compute-cache"]
+    assert [stat.S_IMODE(p.stat().st_mode) for p in walked] == [0o700, 0o700]
+
+
+def test_prepare_command_refuses_a_link_and_leaves_its_target_alone(tmp_path: Path) -> None:
+    assignment, _ = ce.cache_location(None, DIGEST)
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    target.chmod(0o755)  # mkdir(mode=) is masked by the umask; the test needs this exact mode
+    leaf = tmp_path / ".cortex-cuda-executor/compute-cache" / LEAF
+    leaf.parent.mkdir(parents=True)
+    leaf.symlink_to(target)
+    done = subprocess.run(
+        ["sh", "-c", ce.prepare_command(assignment)],
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]},
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode != 0 and done.stdout == ""
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+
+
+def test_prepare_command_fails_instead_of_using_a_directory_it_cannot_secure(
+    tmp_path: Path,
+) -> None:
+    blocker = tmp_path / ".cortex-cuda-executor"
+    blocker.write_text("a file where the cache root should be")
+    assignment, _ = ce.cache_location(None, DIGEST)
+    done = subprocess.run(
+        ["sh", "-c", ce.prepare_command(assignment)],
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]},
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode != 0 and done.stdout == ""
+
+
+class PrepareTransport:
+    """Answers the compute cache command with `answer` and records every command it was given."""
+
+    def __init__(self, answer: str = DEFAULT_DIR + "\n", code: int = 0) -> None:
+        self.answer, self.code, self.calls, self.deadlines = answer, code, [], []
+
+    def run(self, command: str, *, stdout: Path, stderr: Path, deadline: float, **_: Any) -> int:
+        self.calls.append(command)
+        self.deadlines.append(deadline)
+        stdout.write_text(self.answer)
+        stderr.write_text("mkdir: cannot create directory: Permission denied\n")
+        return self.code
+
+
+def cache_executor(
+    tmp_path: Path, pinned: tuple[Path, Path], transport: Any, **over: Any
+) -> ce.Executor:
+    config = load_config(config_data(tmp_path, pinned, **over))
+    return ce.Executor(config, transports={"h1": transport})
+
+
+def ask_cache(executor: ce.Executor, tmp_path: Path, digest: str = DIGEST) -> str | None:
+    ref = SimpleNamespace(image_digest=digest)
+    work = tmp_path / f"work-{time.monotonic_ns()}"
+    work.mkdir()
+    return executor._cache("h1", ref, time.time() + 600, None, work)  # type: ignore[arg-type]
+
+
+def test_cache_directory_is_created_once_per_host_and_image(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    transport = PrepareTransport()
+    executor = cache_executor(tmp_path, pinned, transport)
+    assert ask_cache(executor, tmp_path) == DEFAULT_DIR
+    assert ask_cache(executor, tmp_path) == DEFAULT_DIR
+    assert len(transport.calls) == 1  # remembered: no second ssh call
+    assert transport.calls[0] == ce.prepare_command(ce.cache_location(None, DIGEST)[0])
+    other = "sha256:" + "cd" * 32
+    transport.answer = DEFAULT_DIR.replace(LEAF, "cd" * 16) + "\n"
+    assert ask_cache(executor, tmp_path, other) == transport.answer.strip()
+    assert len(transport.calls) == 2  # another image: another directory
+    # A new executor (a restarted challenge) asks again and finds the same directory.
+    transport.answer = DEFAULT_DIR + "\n"
+    assert ask_cache(cache_executor(tmp_path, pinned, transport), tmp_path) == DEFAULT_DIR
+    assert len(transport.calls) == 3
+
+
+def test_cache_directory_command_runs_for_the_ssh_user_and_never_through_sudo(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    transport = PrepareTransport()
+    ask_cache(cache_executor(tmp_path, pinned, transport), tmp_path)
+    assert not transport.calls[0].startswith(("sudo", "docker"))  # never root, never the daemon
+
+
+def test_a_named_root_is_used_as_given(tmp_path: Path, pinned: tuple[Path, Path]) -> None:
+    where = f"/mnt/nvme/ht-cache/{LEAF}"
+    transport = PrepareTransport(where + "\n")
+    hosts = [host_data(pinned, compute_cache_dir="/mnt/nvme/ht-cache")]
+    executor = cache_executor(tmp_path, pinned, transport, hosts=hosts)
+    assert ask_cache(executor, tmp_path) == where
+    assert transport.calls[0].startswith(f"D=/mnt/nvme/ht-cache/{LEAF};")
+    transport.answer = DEFAULT_DIR + "\n"  # the home directory is not the root that was named
+    executor = cache_executor(tmp_path, pinned, transport, hosts=hosts)
+    with pytest.raises(ce.AttemptFailed, match="unexpected compute cache directory"):
+        ask_cache(executor, tmp_path)
+
+
+def test_no_cache_means_no_ssh_call(tmp_path: Path, pinned: tuple[Path, Path]) -> None:
+    transport = PrepareTransport()
+    executor = cache_executor(tmp_path, pinned, transport, compute_cache=False)
+    assert ask_cache(executor, tmp_path) is None and transport.calls == []
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "",
+        "\n",
+        DEFAULT_DIR + "\n" + DEFAULT_DIR + "\n",
+        DEFAULT_DIR + "\nextra\n",
+        "/etc/passwd\n",
+        DEFAULT_DIR.replace(LEAF, "cd" * 16) + "\n",  # another image's directory
+        DEFAULT_DIR + "/sub\n",
+        DEFAULT_DIR.replace("/home/ubuntu", "/home/ubuntu/../root") + "\n",
+        DEFAULT_DIR.replace("/home/ubuntu", "//home/ubuntu") + "\n",
+        DEFAULT_DIR.replace("ubuntu", "ubu ntu") + "\n",
+        DEFAULT_DIR.replace("ubuntu", "ub,ntu") + "\n",
+        "relative/" + DEFAULT_DIR.lstrip("/") + "\n",
+    ],
+    ids=[
+        "empty",
+        "blank-line",
+        "same-path-twice",
+        "second-line",
+        "other-path",
+        "other-image",
+        "below-the-directory",
+        "dotdot",
+        "double-slash",
+        "space",
+        "comma",
+        "relative",
+    ],
+)
+def test_a_cache_directory_report_that_is_not_the_one_asked_for_is_refused(
+    tmp_path: Path, pinned: tuple[Path, Path], answer: str
+) -> None:
+    transport = PrepareTransport(answer)
+    executor = cache_executor(tmp_path, pinned, transport)
+    with pytest.raises(ce.AttemptFailed, match="unexpected compute cache directory"):
+        ask_cache(executor, tmp_path)
+    transport.answer = DEFAULT_DIR + "\n"
+    assert ask_cache(executor, tmp_path) == DEFAULT_DIR  # the refusal was not remembered
+    assert len(transport.calls) == 2
+
+
+def test_a_failing_cache_command_costs_an_attempt_and_shows_the_host_reason(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    transport = PrepareTransport(code=1)
+    executor = cache_executor(tmp_path, pinned, transport)
+    with pytest.raises(ce.AttemptFailed, match="cannot prepare.*Permission denied"):
+        ask_cache(executor, tmp_path)
+    assert executor._cache_dirs == {}
+
+
+def test_a_cache_command_that_outlives_its_limit_loses_the_host(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    class Slow(PrepareTransport):
+        def run(self, command: str, **kwargs: Any) -> int:
+            raise ce.RemoteTimeout("remote command timed out")
+
+    with pytest.raises(ce.HostLost, match="timed out"):
+        ask_cache(cache_executor(tmp_path, pinned, Slow()), tmp_path)
+
+
+def attempt_twice(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, script: dict
+) -> ScriptedHost:
+    stub_publication(monkeypatch)
+    host = ScriptedHost("h1", [], [gpu(0)], script=script)
+    executor = executor_with(tmp_path, pinned, {"h1": host})
+    job = island_job(tmp_path / "job")
+    for number in (1, 2):
+        try:
+            executor._attempt("h1", number, "audit", "b" * 64, job, tmp_path / "job", False, None)
+        except ce.IslandFailure:
+            pass
+    return host
+
+
+def test_the_directory_is_asked_for_again_only_after_an_attempt_that_failed(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steady = attempt_twice(tmp_path / "ok", pinned, monkeypatch, {})
+    assert len(steady.prepared) == 1  # two good attempts, one ssh call for the directory
+    failing = attempt_twice(tmp_path / "oom", pinned, monkeypatch, {"run": ["oom"]})
+    # The first container died: the directory may be what failed, so the next attempt checks it.
+    assert len(failing.prepared) == 2
+
+
+def test_a_cache_command_that_times_out_inside_an_attempt_loses_the_host_instead_of_falling_back(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub_publication(monkeypatch)
+    log: list[tuple[str, str]] = []
+    host = ScriptedHost("h1", log, [gpu(0)], script={"prepare": ["timeout"]})
+    executor = executor_with(tmp_path, pinned, {"h1": host})
+    job = island_job(tmp_path / "job")
+    with pytest.raises(ce.HostLost, match="timed out"):
+        executor._attempt("h1", 1, "audit", "b" * 64, job, tmp_path / "job", False, None)
+    assert [kind for _, kind in log] == ["probe", "prepare"]  # no container was started
+    journal = executor.journal.path
+    assert "exec_cache_unavailable" not in (journal.read_text() if journal.exists() else "")
+
+
+def test_a_cache_directory_the_host_cannot_make_runs_the_attempt_without_the_cache(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records: list[dict[str, Any]] = []
+
+    def capture(
+        self: ce.Executor, job: Any, directory: Path, staging: Path, record: dict, trace: bool
+    ) -> str:
+        records.append(record)
+        return "published"
+
+    monkeypatch.setattr(ce.Executor, "_publish", capture)
+    commands: list[str] = []
+    real = ce.run_command
+    monkeypatch.setattr(
+        ce, "run_command", lambda *a, **k: commands.append(real(*a, **k)) or commands[-1]
+    )
+
+    class Refusing(FakeHost):
+        def run(self, command: str, **kwargs: Any) -> int:
+            if command.startswith("D="):
+                kwargs["stdout"].write_text("")
+                return 1
+            return super().run(command, **kwargs)
+
+    executor = executor_with(tmp_path, pinned, {"h1": Refusing([gpu(0)])})
+    job = island_job(tmp_path / "job")
+    executor._attempt("h1", 1, "audit", "b" * 64, job, tmp_path / "job", False, None)
+    assert records[0]["compute_cache"] is False and "--mount" not in commands[0]
+    (why,) = journal_of(executor, "exec_cache_unavailable")
+    assert why["label"] == "h1" and "cannot prepare" in why["reason"]
+    (attempt,) = journal_of(executor, "exec_attempt")
+    assert attempt["compute_cache"] is False
+
+
+def test_the_attempt_names_the_directory_in_the_container_the_record_and_the_journal(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records: list[dict[str, Any]] = []
+
+    def capture(
+        self: ce.Executor, job: Any, directory: Path, staging: Path, record: dict, trace: bool
+    ) -> str:
+        records.append(record)
+        return "published"
+
+    monkeypatch.setattr(ce.Executor, "_publish", capture)
+    commands: list[str] = []
+    real = ce.run_command
+
+    def spy(*args: Any, **kwargs: Any) -> str:
+        commands.append(real(*args, **kwargs))
+        return commands[-1]
+
+    monkeypatch.setattr(ce, "run_command", spy)
+    job = island_job(tmp_path / "job")
+    for flag in (True, False):
+        executor = executor_with(
+            tmp_path / str(flag), pinned, {"h1": FakeHost([gpu(0)])}, compute_cache=flag
+        )
+        executor._attempt("h1", 1, "audit", "b" * 64, job, tmp_path / "job", False, None)
+        (attempt,) = journal_of(executor, "exec_attempt")
+        assert attempt["compute_cache"] is flag and records[-1]["compute_cache"] is flag
+        assert (f"src={DEFAULT_DIR}" in commands[-1]) is flag
+
+
+# -- compute cache: behaviours the mutation pass found unpinned ---------------------------
+
+
+def shell_prepare(command: str, home: Path, first_on_path: Path | None = None) -> Any:
+    path = os.environ["PATH"]
+    if first_on_path is not None:
+        path = f"{first_on_path}{os.pathsep}{path}"
+    return subprocess.run(
+        ["sh", "-c", command], env={"HOME": str(home), "PATH": path}, capture_output=True, text=True
+    )
+
+
+def test_prepare_command_does_not_report_a_cache_path_that_is_a_file(tmp_path: Path) -> None:
+    leaf = tmp_path / ".cortex-cuda-executor/compute-cache" / LEAF
+    leaf.parent.mkdir(parents=True)
+    leaf.write_text("a file where the cache directory should be")
+    leaf.chmod(0o644)
+    assignment, _ = ce.cache_location(None, DIGEST)
+    done = shell_prepare(ce.prepare_command(assignment), tmp_path)
+    assert done.returncode != 0 and done.stdout == ""
+    assert stat.S_IMODE(leaf.stat().st_mode) == 0o644  # nothing was done to it after mkdir failed
+
+
+def test_prepare_command_fails_when_the_directory_cannot_be_made_private(tmp_path: Path) -> None:
+    shim, home = tmp_path / "shim", tmp_path / "home"
+    shim.mkdir()
+    home.mkdir()
+    (shim / "chmod").write_text("#!/bin/sh\necho 'chmod: Operation not permitted' >&2\nexit 1\n")
+    (shim / "chmod").chmod(0o755)
+    assignment, _ = ce.cache_location(None, DIGEST)
+    done = shell_prepare(ce.prepare_command(assignment), home, shim)
+    assert done.returncode != 0 and done.stdout == ""
+
+
+def two_hosts(
+    tmp_path: Path, pinned: tuple[Path, Path], first: Any, second: Any, root: str | None = None
+) -> ce.Executor:
+    hosts = [
+        host_data(pinned, "h1"),
+        host_data(pinned, "h2", address="gpu-2.example.com", compute_cache_dir=root),
+    ]
+    config = load_config(config_data(tmp_path, pinned, hosts=hosts))
+    return ce.Executor(config, transports={"h1": first, "h2": second})
+
+
+def ask_label(executor: ce.Executor, tmp_path: Path, label: str) -> str | None:
+    ref = SimpleNamespace(image_digest=DIGEST)
+    work = tmp_path / f"work-{label}-{time.monotonic_ns()}"
+    work.mkdir()
+    return executor._cache(label, ref, time.time() + 600, None, work)  # type: ignore[arg-type]
+
+
+def test_the_directory_is_created_on_every_host_not_only_the_first(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    first, second = PrepareTransport(), PrepareTransport()
+    executor = two_hosts(tmp_path, pinned, first, second)
+    assert ask_label(executor, tmp_path, "h1") == DEFAULT_DIR
+    assert ask_label(executor, tmp_path, "h2") == DEFAULT_DIR
+    assert (len(first.calls), len(second.calls)) == (1, 1)  # same image, two hosts, two mkdir
+
+
+def test_each_host_uses_the_cache_root_of_its_own_entry(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    named = f"/mnt/nvme/ht-cache/{LEAF}"
+    first, second = PrepareTransport(), PrepareTransport(named + "\n")
+    executor = two_hosts(tmp_path, pinned, first, second, root="/mnt/nvme/ht-cache")
+    assert ask_label(executor, tmp_path, "h1") == DEFAULT_DIR
+    assert ask_label(executor, tmp_path, "h2") == named
+    assert first.calls[0].startswith('D="$HOME/') and second.calls[0].startswith(f"D={named};")
+
+
+class FailsFirstRun(ScriptedHost):
+    """The first `docker run` raises `failure` (an exception) or exits with it (an integer).
+    Every other command is answered as by ScriptedHost."""
+
+    def __init__(self, failure: Exception | int, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.failure: Exception | int | None = failure
+
+    def run(self, command: str, **kwargs: Any) -> int:
+        if kind_of(command) == "run" and self.failure is not None:
+            failure, self.failure = self.failure, None
+            if isinstance(failure, int):
+                kwargs["stderr"].write_text("the container died\n")
+                return failure
+            raise failure
+        return super().run(command, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ce.RemoteTimeout("remote command timed out"),
+        ce.Aborted("lease cancelled"),
+        ce.AttemptFailed("result stream too large"),
+        ce.RUNNER_PROBE_FAILED,
+    ],
+    ids=["host-lost", "aborted", "attempt-failed", "probe-failed-exit"],
+)
+def test_the_directory_is_asked_for_again_after_any_run_that_failed(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, failure: Any
+) -> None:
+    stub_publication(monkeypatch)
+    host = FailsFirstRun(failure, "h1", [], [gpu(0)])
+    executor = executor_with(tmp_path, pinned, {"h1": host})
+    job = island_job(tmp_path / "job")
+    with pytest.raises(ce.IslandFailure):
+        executor._attempt("h1", 1, "audit", "b" * 64, job, tmp_path / "job", False, None)
+    assert len(host.prepared) == 1
+    executor._attempt("h1", 2, "audit", "b" * 64, job, tmp_path / "job", False, None)
+    assert len(host.prepared) == 2  # the first container died: the directory is checked again
+
+
+def test_a_failed_attempt_forgets_only_the_directory_of_its_own_host(
+    tmp_path: Path, pinned: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub_publication(monkeypatch)
+    log: list[tuple[str, str]] = []
+    first = ScriptedHost("h1", log, [gpu(0)], script={"run": ["ok", "oom"]})
+    second = ScriptedHost("h2", log, [gpu(1)])
+    executor = executor_with(tmp_path, pinned, {"h1": first, "h2": second})
+    job = island_job(tmp_path / "job")
+
+    def attempt(label: str, number: int) -> None:
+        executor._attempt(label, number, "audit", "b" * 64, job, tmp_path / "job", False, None)
+
+    attempt("h1", 1)
+    attempt("h2", 1)
+    with pytest.raises(ce.AttemptFailed, match="out of memory"):
+        attempt("h1", 2)
+    attempt("h2", 2)
+    attempt("h1", 3)
+    assert (len(first.prepared), len(second.prepared)) == (2, 1)
+
+
+def test_the_cache_directory_command_gets_exactly_thirty_seconds(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    transport = PrepareTransport()
+    executor = cache_executor(tmp_path, pinned, transport)
+    before = time.time()
+    ask_cache(executor, tmp_path)
+    after = time.time()
+    assert before + 30 <= transport.deadlines[0] <= after + 30
+
+
+def test_a_cache_directory_of_400_characters_is_mounted_and_one_more_is_refused() -> None:
+    args = (("docker",), IMAGE, NAME, "d" * 64, [uid(0)], "default")
+    longest = "/" + "a" * 399
+    assert f"type=bind,src={longest},dst=/root/.nv" in shlex.split(ce.run_command(*args, longest))
+    with pytest.raises(ValueError, match="plain words"):
+        ce.run_command(*args, longest + "a")
+
+
+@pytest.mark.parametrize("word", ["caché", "٣", "日本"], ids=["latin", "arabic-digit", "cjk"])
+def test_cache_directory_words_are_ascii(
+    tmp_path: Path, pinned: tuple[Path, Path], word: str
+) -> None:
+    with pytest.raises(ValueError, match="plain words"):
+        ce.run_command(("docker",), IMAGE, NAME, "d" * 64, [uid(0)], "default", f"/mnt/{word}")
+    with pytest.raises(ValidationError, match="plain words"):
+        load_config(
+            config_data(
+                tmp_path, pinned, hosts=[host_data(pinned, compute_cache_dir=f"/mnt/{word}")]
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        f"/home/ubuntu/{LEAF}\n",
+        f"/home/ubuntu/.cortex-cuda-executor/{LEAF}\n",
+        f"/home/ubuntu/compute-cache/{LEAF}\n",
+    ],
+    ids=["no-root", "no-compute-cache", "no-executor-directory"],
+)
+def test_a_report_of_the_right_leaf_in_the_wrong_place_is_refused(
+    tmp_path: Path, pinned: tuple[Path, Path], answer: str
+) -> None:
+    executor = cache_executor(tmp_path, pinned, PrepareTransport(answer))
+    with pytest.raises(ce.AttemptFailed, match="unexpected compute cache directory"):
+        ask_cache(executor, tmp_path)
+    assert executor._cache_dirs == {}
+
+
+def test_a_report_that_is_not_text_is_refused_like_any_other_wrong_report(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    class Binary(PrepareTransport):
+        def run(self, command: str, *, stdout: Path, stderr: Path, **_: Any) -> int:
+            stdout.write_bytes(b"\xff\xfe" + DEFAULT_DIR.encode() + b"\n")
+            stderr.write_text("")
+            return 0
+
+    executor = cache_executor(tmp_path, pinned, Binary())
+    with pytest.raises(ce.AttemptFailed, match="unexpected compute cache directory"):
+        ask_cache(executor, tmp_path)
+
+
+def test_a_cancelled_job_does_not_wait_for_the_cache_directory(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    class Watching(PrepareTransport):
+        """Stops like SshTransport does once the job's cancel event is set."""
+
+        def run(
+            self,
+            command: str,
+            *,
+            stdout: Path,
+            stderr: Path,
+            deadline: float,
+            cancel: threading.Event | None = None,
+            **_: Any,
+        ) -> int:
+            if cancel is not None and cancel.is_set():
+                raise ce.Aborted("lease cancelled")
+            return super().run(command, stdout=stdout, stderr=stderr, deadline=deadline)
+
+    cancel = threading.Event()
+    cancel.set()
+    executor = cache_executor(tmp_path, pinned, Watching())
+    work = tmp_path / "work"
+    work.mkdir()
+    ref = SimpleNamespace(image_digest=DIGEST)
+    with pytest.raises(ce.Aborted, match="lease cancelled"):
+        executor._cache("h1", ref, time.time() + 600, cancel, work)  # type: ignore[arg-type]
+    assert executor._cache_dirs == {}
+
+
+def test_prepare_command_says_why_it_refuses_a_link(tmp_path: Path) -> None:
+    assignment, _ = ce.cache_location(None, DIGEST)
+    leaf = tmp_path / ".cortex-cuda-executor/compute-cache" / LEAF
+    leaf.parent.mkdir(parents=True)
+    leaf.symlink_to(tmp_path)
+    done = shell_prepare(ce.prepare_command(assignment), tmp_path)
+    assert done.returncode == 1 and done.stdout == ""
+    assert "compute cache directory is a link" in done.stderr  # it reaches the journal
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root owns /usr: nothing would be refused")
+def test_prepare_command_refuses_a_directory_the_user_does_not_own_before_it_touches_it() -> None:
+    # /usr belongs to root; as root, chmod would succeed on a directory someone else can still
+    # write to, so the owner is checked first and the mode is never changed
+    before = Path("/usr").stat().st_mode
+    done = subprocess.run(
+        ["sh", "-c", ce.prepare_command("D=/usr")],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"]},
+    )
+    assert done.returncode == 1 and done.stdout == ""
+    assert "not owned by this user" in done.stderr
+    assert Path("/usr").stat().st_mode == before

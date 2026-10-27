@@ -256,6 +256,35 @@ def test_fetch_refuses_a_missing_or_wrong_block_list(tmp_path: Path) -> None:
     assert os.listdir(tmp_path) == []
 
 
+class _Stop(Exception):
+    pass
+
+
+def test_fetch_stops_between_ranges_when_the_caller_says_so(tmp_path: Path) -> None:
+    fake, client, _ = make()
+    store = R2ObjectStore(client, workers=1)
+    data = _data(5 * DEFAULT_PART_BYTES + 1)  # six ranges of the default window
+    sha = store.put(data)
+    full, before = tmp_path / "full.bin", fake.count("GetObject")
+    store.fetch_to(sha, full, check=lambda: None)
+    assert full.read_bytes() == data
+    whole = fake.count("GetObject") - before
+
+    calls: list[int] = []
+
+    def stop_at_the_second_range() -> None:
+        calls.append(1)
+        if len(calls) == 2:
+            raise _Stop
+
+    out, before = tmp_path / "out.bin", fake.count("GetObject")
+    with pytest.raises(_Stop):
+        store.fetch_to(sha, out, check=stop_at_the_second_range)
+    assert len(calls) == 2  # called once per range received, never again after it raised
+    assert fake.count("GetObject") - before < whole  # the rest of the object was not requested
+    assert sorted(os.listdir(tmp_path)) == ["full.bin"]  # no target, no temporary file
+
+
 def test_missing_object_is_object_not_found(tmp_path: Path) -> None:
     store = R2ObjectStore(make()[1])
     with pytest.raises(ObjectNotFound):
