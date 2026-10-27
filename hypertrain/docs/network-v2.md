@@ -529,6 +529,11 @@ and before `absolute` minus one round, `absolute` being the smaller of `d_final`
 `d_audit` plus twice `lease_rounds`; a later call answers 503 for every roster and the round
 cannot be audited. Open rounds with five or more members when an eviction is plausible.
 
+A member that committed and never posted its leaves has no audit: its queued job is dropped at
+the first `absolute` (`excluded`, reason `NO_SHOW`, stage `leaves`), without a second window, and
+the round goes on without it. It is not sanctioned: only the master lacks the leaves, and it
+cannot prove that the miner never posted them.
+
 A member left out for its silence is sanctioned in the same push, unless the master cannot
 show that it could have been heard. The push books the blame (`exit-sanction`, id
 `<w>:<hotkey>`) and applies it: the admission is suspended (reason `NO_SHOW`) with one

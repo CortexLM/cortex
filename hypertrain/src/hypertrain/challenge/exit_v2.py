@@ -161,7 +161,9 @@ def classify(
         return "MINER" if served and committed_any else "INFRASTRUCTURE"
     if stage == "delta":
         return "MINER" if served and delivered_any and not uploaded else "INFRASTRUCTURE"
-    return "MINER"  # leaves: the master holds neither the leaves nor an auditor's fault
+    # leaves: only the master lacks them, and it cannot prove that the miner never posted them
+    # (a post that failed on the master or storage side leaves no record)
+    return "INFRASTRUCTURE"
 
 
 def plan_round(s: RoundSnapshot) -> RoundPlan:

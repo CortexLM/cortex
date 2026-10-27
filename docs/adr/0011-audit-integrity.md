@@ -214,6 +214,8 @@
    because D38 ter says an audit failure must not exclude a miner by default; isolated in one commit so
    Forge can swap it for dropping at once or for today's behaviour); a second exhaustion drops its miner from that round (`excluded/INFRASTRUCTURE`,
    `unresolved_audits - 1`). The round disposition is never touched. Service-admitted runs skip the re-arm.
+   Amended by Part 8 decision 3: a job whose member has no leaves record is dropped at the first
+   `absolute` as `NO_SHOW/leaves`, without a re-arm.
    The second window ends where the miner's sealed commit ends: `absolute = min(now + 2 * lease_rounds,
    exp_drand)`, and no window is opened when that leaves fewer than two rounds (AUD-07, Lens verdict
    2026-10-27 16:05Z). `AuditJobV2` embeds the commit live (`validate_embedded`) and an honest miner
@@ -950,7 +952,7 @@ in this order and without the peer:
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | dispute (Part 1, done) | a funded contestant that cannot win; a silent auditor or referee | dead end: next push; abandoned: `turn_deadline + T + 1`; paused final op: `absolute_deadline + 1` | pause, `exclude` (loser None), `settle_lock`, `resolve_pending` | infrastructure | none; a referee `FRAUD` goes through `settle_fraud` | `test_dispute_exit_v2` |
 | 2 | roster commit (Part 5) | a roster member that never commits | `d_commit` (was: the first `audits` call) | `excluded NO_SHOW/commit`, `unresolved_audits - 1`; if the rest cannot carry: row 7 | miner, unless the assignment window was paused or nobody committed | D44 (decision 12) | `test_exit_reaper_v2` |
-| 3 | leaves never posted | a member that committed and never posts `/leaves` | `absolute` (<= `d_final`) | the queued job is dropped as `NO_SHOW/leaves`, no re-arm | miner (no auditor ever touched the job) | as 2 | `test_exit_leaves` |
+| 3 | leaves never posted | a member that committed and never posts `/leaves`, or whose leaves the master lost | `absolute` (<= `d_final`) | the queued job is dropped as `NO_SHOW/leaves`, no re-arm | infrastructure (only the master lacks the leaves; it cannot prove the miner never posted them) | none (`WAIVED`) | `test_exit_reaper_v2` |
 | 4 | delta never uploaded | an audited member, or the relay | `d_upload` | `excluded NO_SHOW/delta` | miner, unless nobody delivered, the upload window was paused or the master holds a receipt or an acceptance of its upload | as 2 | `test_exit_reaper_v2` |
 | 5 | audit job, lease (Part 2, done) | an auditor, an executor host, a miner whose sealed input cannot be leased | attempt `L`; two windows of `A`; the second ends where the sealed commit ends | cooldown, requeue, re-arm once, drop only the miner (`INFRASTRUCTURE`); `MINER_INPUT_REFUSED` dropped at once | infrastructure; miner only for an input it sealed short | none | `test_audit_liveness_v2` |
 | 6 | audit window missed | the operator who never calls `audits` | `absolute - 1` | the round is retired (`AUDIT_WINDOW_MISSED`) | infrastructure | none | `test_exit_audit_window` |
@@ -991,9 +993,11 @@ the table as covering them.
    rest cannot carry the round the reaper writes no exclusion at all, so that `schedule_audits_v2` keeps
    answering 409 `ROUND_INFEASIBLE` with nothing persisted (Part 5); the plan is only the `round-exit`
    marker (`INFEASIBLE` or `AUDIT_WINDOW_MISSED`) until decision 8 retires the round. A queued job
-   whose miner never posted leaves is dropped at `absolute` as `NO_SHOW/leaves`, with the miner's blame
-   and no re-arm: only the master lacks the leaves, no auditor ever touched the job, and a second window
-   cannot help. This amends Part 2 decisions 8 and 9 for this one case.
+   whose member has no leaves record is dropped at the first `absolute` as `NO_SHOW/leaves`, without a
+   re-arm: no auditor ever touched the job and a second window cannot help. The blame is infrastructure's
+   and its sanction row is `WAIVED` (no strike, no seizure, no suspension): only the master lacks the
+   leaves, and it cannot prove that the miner never posted them, since a post that failed on the master
+   or storage side leaves no record. This amends Part 2 decisions 8 and 9 for this one case.
 4. **Liveness before accountability.** The exit is committed first and never depends on the sanction. The
    sanction is a row of its own (`records_v2 exit-sanction`, id `{w}:{hotkey}`: PENDING, APPLIED, WAIVED
    or CANCELLED) applied by a sweeper that retries on every push. ADR 0010 and Part 5 asked for one
@@ -1007,13 +1011,13 @@ the table as covering them.
    (`emitted - 3`), every view in between being refused whenever it is held. A commit-stage absence is
    infrastructure if a refused view lies in the assignment window `[d_assign, d_commit)` or if nobody
    committed; a delta-stage absence is infrastructure if one lies in `[d_commit, d_upload)`, if nobody
-   delivered a delta, or if the master holds a `relay-receipt` or its own `master-acceptance` for that
-   member and round (the bytes reached custody and the relay or the storage lost what the master lacks,
-   D59). No other waiver is one a miner can pick (an `accept` or an upload grant costs a free identity
-   nothing). A receipt costs the upload of the bytes the member committed to, which a free identity can
-   also make: a member that uploads and then withholds its delta manifest is waived, and the round goes on
-   without it all the same. The wall clock never decides when an exit happens, only whether the miner is
-   blamed.
+   delivered a delta, or if the master holds a `relay-receipt` or its own `master-acceptance` for that member
+   and round (the bytes reached custody and the relay or the storage lost what the master lacks, D59); a
+   leaves-stage absence is always infrastructure (decision 3). No other waiver is one a miner can pick (an
+   `accept` or an upload grant costs a free identity nothing). A receipt costs the upload of the bytes the member committed to,
+   which a free identity can also make: a member that uploads and then withholds its delta manifest is
+   waived, and the round goes on without it all the same. The wall clock never decides when an exit happens,
+   only whether the miner is blamed.
 6. **Not automated.** The master does not open the next round, draw its roster or lower the quorum: a
    `RoundOpenV2` is the operator's signed schedule and the caps are pinned by the schema.
 
@@ -1189,7 +1193,7 @@ the table as covering them.
 | --- | --- | --- | --- |
 | dispute | `tests/challenge/test_dispute_exit_v2.py` (exists) + the e2e | forged delta + contest: the run restarts, `w + 2` opens | the closure removed |
 | commit | `tests/challenge/test_exit_reaper_v2.py`, `tests/e2e/test_exit_states_v2_e2e.py` | 6 rostered, 2 silent: both excluded at `d_commit`, sanctioned, 4 audited and paid, round 1 opens | eager exit removed; the sweeper removed |
-| leaves | same file | a member commits and never posts leaves: dropped at `absolute` as `NO_SHOW/leaves`, the others settle | stage naming |
+| leaves | `tests/challenge/test_exit_reaper_v2.py` | a member's leaves are missing: dropped at the first `absolute` as `NO_SHOW/leaves`, no re-arm, no sanction, bond and standing intact, the others settle | the leaves branch; the blame |
 | delta | `tests/challenge/test_exit_reaper_v2.py`, `tests/e2e/test_no_show_resume_v2.py` | an audited member never uploads: excluded at `d_upload`, the round settles | the delta exit |
 | audit job | `test_audit_liveness_v2.py` (exists) | one poisoned job costs its miner, not the round | exhaustion drop |
 | audit window | same file | nobody calls `audits`: retired at `absolute - 1`, round 1 opens | the cause |

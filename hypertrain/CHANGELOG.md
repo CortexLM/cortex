@@ -280,6 +280,12 @@
   answered 409 "pinned by unresolved finality" for ever because it knew only a `SETTLED` round.
   Its finality hash is now the evidence hash of the retirement and its vesting ends
   `E_vest_rounds` after the retirement beacon; an open dispute still pins it.
+- A job whose member has no leaves record (the miner never posted them, or the master lost them)
+  is dropped at the first `absolute` as `excluded` `NO_SHOW` (stage `leaves`) instead of being
+  re-armed for a second audit window nobody could use. The blame is infrastructure's: its
+  `exit-sanction` row is `WAIVED`, so there is no strike, seizure or suspension, because only the
+  master lacks the leaves and it cannot prove the miner never posted them. See
+  `docs/adr/0011-audit-integrity.md` (Part 8, decision 3) at the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

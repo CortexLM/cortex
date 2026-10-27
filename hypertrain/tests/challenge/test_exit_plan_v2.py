@@ -107,8 +107,8 @@ def test_an_earlier_exclusion_counts_against_the_survivors():
         ("delta", False, True, True, False, "INFRASTRUCTURE"),
         ("delta", True, True, False, False, "INFRASTRUCTURE"),
         ("delta", True, True, True, True, "INFRASTRUCTURE"),
-        ("leaves", True, True, True, False, "MINER"),
-        ("leaves", False, False, False, False, "MINER"),
+        ("leaves", True, True, True, False, "INFRASTRUCTURE"),
+        ("leaves", False, False, False, False, "INFRASTRUCTURE"),
     ],
     ids=[
         "commit-served",
@@ -118,7 +118,7 @@ def test_an_earlier_exclusion_counts_against_the_survivors():
         "delta-paused",
         "delta-nobody-delivered",
         "delta-the-master-holds-an-upload-receipt",
-        "leaves-served",
+        "leaves-the-master-lost-them",
         "leaves-whatever-the-window",
     ],
 )

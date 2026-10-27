@@ -3,10 +3,10 @@
 Every round below rosters five graduated miners, four honest and one absent in one of the ways
 `ac_absence.CLASSES` lists, and goes through the real path (run-v2, audit, aggregate, finalize,
 get_weights) on CPU. The non-sanction contract is asserted for each class. The liveness defence
-(the four honest miners still settle without the absent one) does not hold today: the classes that
-stall on a different master branch each have an `xfail(strict=True, raises=AssertionError)`
-reproducer whose assertions are the desired defence (a late commit leaves the master in the
-state of a no-show, so it shares that reproducer). The trial-stage absence of an applicant is
+(the four honest miners still settle without the absent one) holds once the master knows the
+absence, which is `d_upload` for a missing commit or delta and the end of the first audit window
+for a commit whose leaves never came; a late commit leaves the master in the state of a no-show,
+so it shares that class. The trial-stage absence of an applicant is
 driven over HTTP on the same fixture network without graduating anybody.
 """
 
@@ -132,13 +132,13 @@ def test_an_evicted_miner_that_reruns_before_d_commit_is_uploaded_matched_and_pa
     )
 
 
-def test_an_exhausted_audit_lease_excludes_the_miner_as_infrastructure_not_as_a_mismatch(
+def test_a_job_whose_miner_never_published_its_leaves_is_dropped_without_a_sanction(
     ac_clone: World,
 ) -> None:
-    """Defence: a miner that committed but never published its leaves is excluded when its audit
-    lease is exhausted with reason INFRASTRUCTURE and result AUDIT_INFRASTRUCTURE, never as
-    UNVERIFIED or MISMATCH, and the standing of the five miners is unchanged. Which honest rows
-    are exhausted with it is the liveness question of the xfail below, not asserted here."""
+    """Defence: a miner that committed but never published its leaves has its audit job dropped
+    where the first window ends, as NO_SHOW at the leaves stage (lease result NO_LEAVES), never as
+    UNVERIFIED or MISMATCH, and the standing of the five miners is unchanged: only the master
+    lacks the leaves and it cannot prove the miner never posted them (ADR 0011 Part 8)."""
     world = ac_clone
     absent = world.hotkey(A.ABSENT)
     before = {i: A.standing(world, i) for i in A.ROSTER}
@@ -150,18 +150,36 @@ def test_an_exhausted_audit_lease_excludes_the_miner_as_infrastructure_not_as_a_
     ).fetchone()[0]
     assert world.observe().excluded == {}
 
-    # The window ends at d_final, where the commit expires too: AUD-07 opens no second window that
-    # nobody could lease, so the job is dropped as INFRASTRUCTURE at once (ADR 0011 Part 2).
+    # Nobody can lease a job without leaves and a second window cannot help: it is dropped where
+    # its first window ends (ADR 0011 Part 8).
     world.advance_beacon(absolute)
     seen = world.observe()
     lease = next(row for row in seen.leases if row["hotkey"] == absent)
 
-    assert lease["state"] == "exhausted" and lease["result"] == "AUDIT_INFRASTRUCTURE"
-    assert seen.excluded[f"0:{absent}"]["reason"] == "INFRASTRUCTURE"
+    assert lease["state"] == "exhausted" and lease["result"] == "NO_LEAVES"
+    dropped = seen.excluded[f"0:{absent}"]
+    assert (dropped["reason"], dropped["stage"]) == ("NO_SHOW", "leaves")
     assert "MISMATCH" not in {row["result"] for row in seen.leases}
     assert "UNVERIFIED" not in {e["reason"] for e in seen.excluded.values()}
     assert {i: A.standing(world, i) for i in A.ROSTER} == before
-    record(A.evidence(world, "lease-exhausted-is-infrastructure", A.NO_LEAVES, run, settlement))
+    record(
+        A.evidence(
+            world, "leaves-missing-is-dropped-without-sanction", A.NO_LEAVES, run, settlement
+        )
+    )
+
+
+def absence_certain_at(world: World, run: A.Run, name: str) -> int:
+    """The beacon round from which the master knows the absence: `d_upload` for a missing commit
+    or delta, the end of the first audit window for a commit whose leaves never came."""
+    if name != A.NO_LEAVES:
+        return run.opening.d_upload + 1
+    return int(
+        world.network.store._db.execute(
+            "SELECT absolute FROM audit_leases_v2 WHERE run_id=? AND hotkey=?",
+            (world.run_id, world.hotkey(A.ABSENT)),
+        ).fetchone()[0]
+    )
 
 
 def liveness_defence(world: World, name: str) -> None:
@@ -174,9 +192,9 @@ def liveness_defence(world: World, name: str) -> None:
     )
     settlement = world.settle(0)
     if not settlement.settled:
-        # Commit, leaves and delta are all due before d_upload; the audit challenges expire at
-        # the lease horizon, so the master has no reason to wait longer than that.
-        world.advance_beacon(run.opening.d_upload + 1)
+        # Commit and delta are due at d_commit and d_upload; leaves, where the first audit window
+        # ends. The master has no reason to wait longer than that.
+        world.advance_beacon(absence_certain_at(world, run, name))
         settlement = A.finish_round(world, settlement)
     honest = sorted(world.hotkey(i) for i in A.HONEST)
     absent = world.hotkey(A.ABSENT)
@@ -222,9 +240,9 @@ STALLS = {
     A.NO_LEAVES: (
         "aggregate",
         "missing accepted delta",
-        "lease_v2 skips a job without leaves (the honest rows are audited), but the member is "
-        "dropped as INFRASTRUCTURE only when its job is exhausted after two audit windows, so "
-        "aggregate answers 409 'missing accepted delta' until then",
+        "lease_v2 skips a job without leaves (the honest rows are audited), and the member is "
+        "dropped only where the first audit window ends, so aggregate answers 409 'missing "
+        "accepted delta' until then",
     ),
     A.NO_DELTA: (
         "aggregate",
@@ -234,22 +252,7 @@ STALLS = {
 }
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(
-            name,
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=AssertionError,
-                reason=f"AC-LIVENESS-{name}: {why}",
-            ),
-        )
-        if name == A.NO_LEAVES
-        else name
-        for name, (_, _, why) in STALLS.items()
-    ],
-)
+@pytest.mark.parametrize("name", list(STALLS))
 def test_the_honest_round_settles_without_the_absent_miner(ac_clone: World, name: str) -> None:
     """Defence: a rostered miner's absence must not stop the four honest miners' round. Once the
     deadline has passed the round audits, aggregates and finalizes without it, excludes only the

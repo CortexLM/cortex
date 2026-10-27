@@ -7504,7 +7504,13 @@ class ChallengeStore:
         return None
 
     def _drop_audit_job_v2(
-        self, run_id: str, row: sqlite3.Row, reason: str, result: str, evidence_hash: str
+        self,
+        run_id: str,
+        row: sqlite3.Row,
+        reason: str,
+        result: str,
+        evidence_hash: str,
+        stage: str | None = None,
     ) -> None:
         """Close one audit job without a verdict. Its miner leaves the round (`excluded`, no
         sanction); the round's disposition and the other miners' jobs are untouched."""
@@ -7515,7 +7521,8 @@ class ChallengeStore:
             run_id,
             "excluded",
             f"{row['w']}:{row['hotkey']}",
-            {"reason": reason, "evidence_hash": evidence_hash},
+            {"reason": reason, "evidence_hash": evidence_hash}
+            | ({} if stage is None else {"stage": stage}),
         )
         finality = self._record_v2(run_id, "finality", str(row["w"]))
         finality["unresolved_audits"] = max(0, int(str(finality["unresolved_audits"])) - 1)
@@ -7617,7 +7624,25 @@ class ChallengeStore:
 
     def _exhaust_audit_job_v2(self, run_id: str, row: sqlite3.Row, now: int) -> None:
         """A job that ran out of attempts or time. It gets one more window; after that its miner
-        leaves the round (`excluded` INFRASTRUCTURE, no sanction) and the round goes on."""
+        leaves the round (`excluded` INFRASTRUCTURE, no sanction) and the round goes on. A job
+        whose member has no leaves record was never leased and cannot be: a second window would
+        change nothing, so it is dropped at once as a NO_SHOW (ADR 0011 Part 8, decision 3)."""
+        if (
+            self._db.execute(
+                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='leaves' AND id=?",
+                (run_id, f"{row['w']}:{row['hotkey']}"),
+            ).fetchone()
+            is None
+        ):
+            self._drop_audit_job_v2(
+                run_id,
+                row,
+                "NO_SHOW",
+                "NO_LEAVES",
+                no_show_evidence(run_id, row["w"], row["hotkey"], "leaves"),
+                stage="leaves",
+            )
+            return
         if not self._rearm_audit_job_v2(run_id, row, now):
             self._drop_audit_job_v2(
                 run_id,

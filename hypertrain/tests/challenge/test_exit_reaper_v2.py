@@ -356,6 +356,64 @@ def test_a_delta_a_lazy_writer_left_out_is_adopted_with_the_upload_evidence(
     assert len(hook.calls) == (row[1] == "APPLIED")
 
 
+def test_a_job_without_leaves_is_dropped_at_the_first_absolute_and_nobody_is_sanctioned(
+    network, hook
+):
+    # The commits outlive d_final, so a second audit window is possible: it must not be opened for
+    # a job nobody can lease.
+    store, run = network.store, network.manifest.run_id()
+    keys = seed_round(network, n=5)
+    lost = keys[4].ss58
+    push_through(network, D_AUDIT)
+    store.schedule_audits_v2(run, 0)
+    with store._tx():
+        store._db.execute("UPDATE audit_leases_v2 SET state='completed' WHERE hotkey!=?", (lost,))
+        store._db.execute(
+            "DELETE FROM records_v2 WHERE run_id=? AND kind='leaves' AND id=?", (run, f"0:{lost}")
+        )
+    absolute = store._db.execute(
+        "SELECT absolute FROM audit_leases_v2 WHERE hotkey=?", (lost,)
+    ).fetchone()[0]
+    network.push(absolute - 1)
+    assert records(network, "excluded") == {}
+
+    network.push(absolute)
+
+    assert excluded_as(network) == {f"0:{lost}": no_show(run, lost, "leaves")}
+    lease = store._db.execute("SELECT state,result FROM audit_leases_v2 WHERE hotkey=?", (lost,))
+    assert tuple(lease.fetchone()) == ("exhausted", "NO_LEAVES")
+    assert records(network, "audit-rearm") == {}
+    assert records(network, "finality")["0"]["unresolved_audits"] == 4
+    assert rows_of(network) == {f"0:{lost}": ("INFRASTRUCTURE", "WAIVED")}
+    assert hook.calls == []
+
+
+def test_a_member_whose_leaves_the_master_lost_keeps_its_bond_and_its_standing(six_network):
+    n = six_network
+    run = n.manifest.run_id()
+    escrow = n.store._services(run)[0]
+    opening = round_zero(n, fixtures.HOT)
+    assert open_round(n, opening, n.client).status_code == 200
+    lost = fixtures.HOT[5].ss58
+    with n.store._tx():
+        for hot in fixtures.HOT:  # all committed and delivered; only the lost member has no leaves
+            for kind in ("commit", "delta") + (() if hot.ss58 == lost else ("leaves",)):
+                n.store._put_record_v2(run, kind, f"0:{hot.ss58}", {"s": 1})
+        n.store._db.execute(
+            "INSERT INTO audit_leases_v2(id,run_id,w,hotkey,challenge,created,absolute,state) "
+            "VALUES(?,?,0,?,'{}',?,?,'queued')",
+            (sha256_hex(b"job"), run, lost, opening.d_audit, opening.d_audit + 100),
+        )
+    before, burned = standing(n, lost), escrow.balances().burned
+
+    n.push(opening.d_audit + 100)
+
+    assert excluded_as(n) == {f"0:{lost}": no_show(run, lost, "leaves")}
+    assert rows_of(n) == {f"0:{lost}": ("INFRASTRUCTURE", "WAIVED")}
+    assert standing(n, lost) == before
+    assert escrow.balances().burned == burned and escrow.balances().conserved()
+
+
 def test_a_lagging_pusher_leaves_one_witness_per_pause(network):
     push_through(network, 10)
     for number in range(11, 20):  # the wall clock is at round 20 for the whole catch-up
