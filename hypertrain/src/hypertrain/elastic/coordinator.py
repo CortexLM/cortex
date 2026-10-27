@@ -7,10 +7,16 @@ replacement host restarts that window once per link, not at every rejoin): a hos
 heartbeats but cannot upload, or restarts in a loop, never stalls a round. holder() and links()
 are pure reads and may show a lapsed holder until the next such call. A shard has
 at most one holder, a (member, token) pair, and only that holder extends the shard's head, by a
-link whose parent is the head (compare-and-set). Accepted links are never undone. Credit is the
-number of steps each accepted link adds, paid to the owner of the member that produced it.
-Leaving, lapsing, stalling or being replaced costs a member nothing it had accepted; only a link
-that fails the audit is penalised, and its member is revoked.
+link whose parent is the head (compare-and-set). Credit is the number of steps each accepted
+link adds, paid to the owner of the member that produced it. Leaving, lapsing, stalling or being
+replaced costs a member nothing it had accepted; only a link that fails the audit is penalised,
+and its member is revoked.
+
+No link is credited without an audit: `audit` is required and runs inside commit(). A replay of
+a whole link may be too slow for that call, so the audit can be a cheap check and the full replay
+a later job; when it finds the link invalid, withdraw() voids the link and every link built on
+it, within the round, and the shard resumes from the link before. Otherwise accepted links are
+never undone.
 
 Trust: `admit` decides which host key may join as a member (in production, a server key that the
 owner's coldkey granted for this run, `protocol.server_keys.SignedGrant`). The caller must
@@ -38,12 +44,16 @@ from pydantic import ValidationError
 from hypertrain.elastic.assignment import plan
 from hypertrain.elastic.checkpoint import CheckpointManager, CheckpointManifest, WorkUnit
 from hypertrain.elastic.clock import Clock
-from hypertrain.elastic.membership import Lease, LeaseError, Member, Membership
+from hypertrain.elastic.membership import Lease, LeaseError, Member, Membership, Status
 from hypertrain.elastic.notice import LeaveNotice, NoticeError, SignedLeave, verify_leave
 from hypertrain.elastic.store import CheckpointStore
 from hypertrain.elastic.tokens import TokenLog
 from hypertrain.protocol.keys import KeyError_, decode_hotkey
 
+# An audit returns False only for a verified forgery, and raises when it cannot decide, so that
+# nothing changes and nobody is penalised. It runs in the serialised section with `admit` and the
+# store reads of check_link: all three must finish well under ttl_ms minus the heartbeat
+# interval, or every lease lapses while they run. A slower check belongs to withdraw().
 Audit = Callable[[WorkUnit, CheckpointManifest], bool]
 Admit = Callable[[str, str, str], bool]  # (member, owner, signer) -> may join
 MEMBER_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
@@ -60,7 +70,7 @@ class Exit(StrEnum):
     LAPSE = "lapse"  # lease ran out: hard kill, host loss or partition
     STALLED = "stalled"  # no accepted link within progress_ms; its lease is ended
     REPLACED = "replaced"  # the same member id joined from another host
-    REVOKED = "revoked"  # one of its links failed the audit
+    REVOKED = "revoked"  # one of its links failed the audit, or was withdrawn after it
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,8 +156,8 @@ class Coordinator:
         seed: bytes,
         admit: Admit,
         tokens: TokenLog,
+        audit: Audit,
         capacity: int = 1,
-        audit: Audit | None = None,
     ) -> None:
         if capacity < 1:
             raise ValueError("capacity must be >= 1")
@@ -293,7 +303,7 @@ class Coordinator:
         manifest = self.checkpoints.check_link(s.unit, s.head, key)
         if manifest.producer != member or manifest.lease != token:
             raise CoordinatorError("WRONG_PRODUCER", key)
-        if self.audit is not None and not self.audit(s.unit, manifest):
+        if not self.audit(s.unit, manifest):
             self._penalties[m.owner] += 1
             self.membership.revoke(member)
             self._depart(m, Exit.REVOKED)
@@ -306,6 +316,45 @@ class Coordinator:
             s.holder = None
             self._assign()
         return Accepted(shard, key, s.step, False)
+
+    def withdraw(self, key: str) -> tuple[Link, ...]:
+        """Void the accepted link `key` and every link built on it, because an audit that ran
+        after commit() found it invalid; returns them, `key` first. Their credit goes with them
+        and the shard's head goes back to the link before `key`, so the next holder resumes from
+        a state that was not forged. The producer of `key` is penalised and revoked as for a
+        failed audit; the producers of the links built on it are not, they were honest, and an
+        honest holder of the shard gets a fresh window to restore. With a deferred audit an
+        honest host that resumed from an unaudited head loses every link above a forged one, so
+        the wiring either audits inside commit() or bounds how deep it lets work build on an
+        unaudited link. Only a link of the open round can be withdrawn: a closed round's
+        settlement was returned, and UNKNOWN_LINK also answers a link accepted two rounds ago,
+        which the wiring must treat as too late, not as never accepted."""
+        self._sweep()
+        done = self._accepted.get(key)
+        if done is None:
+            raise CoordinatorError(
+                "ROUND_CLOSED" if key in self._accepted_before else "UNKNOWN_LINK", key
+            )
+        s = self._shards[done[0]]
+        first = next(i for i, link in enumerate(s.links) if link.key == key)
+        voided = tuple(s.links[first:])
+        del s.links[first:]
+        for link in voided:
+            del self._accepted[link.key]
+        s.head = s.links[-1].key if s.links else None
+        s.step = sum(link.steps for link in s.links)
+        producer = voided[0]
+        self._penalties[producer.owner] += 1
+        m = self.membership.get(producer.member)
+        assert m is not None  # it produced an accepted link
+        live = m.status is Status.ACTIVE
+        self.membership.revoke(m.id)
+        if live:
+            self._depart(m, Exit.REVOKED, assign=False)
+        if s.holder is not None:  # the honest holder resumes from the link before: fresh clocks
+            self._progress[s.holder.member] = (self.clock.now_ms(), False)
+        self._assign()  # a shard that was complete is pending again
+        return voided
 
     def settle(self) -> Settlement:
         self._sweep()

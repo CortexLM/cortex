@@ -26,8 +26,9 @@
   fencing tokens, saved before they are granted so that a restart never reissues one, and a
   progress deadline, joins admitted by the run's authority, deterministic
   shard reassignment, content-addressed checkpoint chains checked back to the round's base,
-  idempotent commit and leave retries (answered for two rounds, so memory stays bounded), the
-  AWS IMDSv2 spot notice, a signed leave and a drain
+  idempotent commit and leave retries (answered for two rounds, so memory stays bounded), a
+  required audit before any credit and `withdraw` of a link found invalid later, the AWS IMDSv2
+  spot notice, a signed leave and a drain
   that flushes only when it fits before the deadline; see `docs/adr/0002` at the monorepo root.
 - GPU-less eviction simulator `python -m hypertrain.elastic.sim` (`table`, `aggregate`, `soak`):
   8-GPU hosts on a fake clock under seeded notice, hard-kill, host-loss, partition,

@@ -29,11 +29,16 @@ PROGRESS = 4_000
 KEYS = {name: Keypair(bytes([i + 1]) * 32) for i, name in enumerate("abcdz")}
 
 
+def trusting(_unit: WorkUnit, _manifest: CheckpointManifest) -> bool:
+    """The audit of tests about something else: it accepts what check_link accepted."""
+    return True
+
+
 def coordinator(
     clock: FakeClock,
     store: MemoryCheckpointStore,
     tokens: TokenLog,
-    audit: Callable[[WorkUnit, CheckpointManifest], bool] | None = None,
+    audit: Callable[[WorkUnit, CheckpointManifest], bool] = trusting,
     capacity: int = 1,
 ) -> Coordinator:
     return Coordinator(
@@ -52,7 +57,7 @@ def coordinator(
 
 def setup(
     shards: int = 1,
-    audit: Callable[[WorkUnit, CheckpointManifest], bool] | None = None,
+    audit: Callable[[WorkUnit, CheckpointManifest], bool] = trusting,
     capacity: int = 1,
 ) -> tuple[FakeClock, Coordinator, list[WorkUnit]]:
     clock = FakeClock()
@@ -427,6 +432,7 @@ def test_open_round_refuses_units_no_manifest_can_bind() -> None:
             seed=b"s",
             admit=lambda *_: True,
             tokens=MemoryTokenLog(),
+            audit=trusting,
         )
 
 
@@ -555,6 +561,111 @@ def test_a_retried_leave_is_answered_even_when_the_next_round_is_smaller() -> No
     departure = coord.leave(signed)  # two heads in a round of two shards
     coord.open_round([WorkUnit(RUN, POLICY, 1, 0, units[0].base, 6)])  # a round of one shard
     assert coord.leave(signed) == departure  # the retry of an accepted leave is not a new notice
+
+
+def test_a_coordinator_cannot_be_built_without_an_audit() -> None:
+    with pytest.raises(TypeError, match="audit"):
+        Coordinator(  # type: ignore[call-arg]
+            run_id=RUN,
+            clock=FakeClock(),
+            store=MemoryCheckpointStore(),
+            ttl_ms=TTL,
+            progress_ms=PROGRESS,
+            seed=b"s",
+            admit=lambda *_: True,
+            tokens=MemoryTokenLog(),
+        )
+
+
+def test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it() -> None:
+    _, coord, (unit,) = setup()
+    a, b = join(coord, "a"), join(coord, "b")
+    k2 = link(coord, unit, None, 2, a)
+    coord.commit("a", a.token, 0, k2)
+    k4 = link(coord, unit, k2, 4, a, state=b"forged")  # accepted: only a later replay catches it
+    coord.commit("a", a.token, 0, k4)
+    coord.leave(sign_leave(notice(a, KEYS["a"]), KEYS["a"]))
+    k6 = link(coord, unit, k4, 6, b)  # b resumed from the forged state in good faith
+    coord.commit("b", b.token, 0, k6)
+    assert coord.settle().complete
+    assert coord.settle().credits == {"owner-a": 4, "owner-b": 2}
+
+    voided = coord.withdraw(k4)
+
+    assert [(v.key, v.member, v.steps) for v in voided] == [(k4, "a", 2), (k6, "b", 2)]
+    settlement = coord.settle()
+    assert (settlement.heads, settlement.credits) == ({0: k2}, {"owner-a": 2})
+    assert not settlement.complete and settlement.penalties == {"owner-a": 1}
+    assert [x.kind for x in settlement.departures] == [Exit.NOTICE]  # a had left already
+    resumed = coord.heartbeat("b", b.token).assignments  # honest b is not penalised, nor revoked
+    assert [(x.head, x.step) for x in resumed] == [(k2, 2)]
+    with pytest.raises(LeaseError) as e:
+        coord.join("a", "owner-a", KEYS["a"].ss58)
+    assert e.value.code == "REVOKED"
+    with pytest.raises(CheckpointError) as refused:  # a retry of a voided link is not an ack
+        coord.commit("b", b.token, 0, k6)
+    assert refused.value.code == "NOT_HEAD_CHILD"
+    coord.commit("b", b.token, 0, link(coord, unit, k2, 6, b, state=b"replayed"))
+    assert coord.settle().credits == {"owner-a": 2, "owner-b": 4} and coord.settle().complete
+
+
+def test_withdrawing_a_link_of_a_live_holder_revokes_it_and_frees_its_shard() -> None:
+    _, coord, (unit,) = setup()
+    a, b = join(coord, "a"), join(coord, "b")
+    k3 = link(coord, unit, None, 3, a)
+    coord.commit("a", a.token, 0, k3)
+    coord.withdraw(k3)
+    with pytest.raises(LeaseError) as e:
+        coord.heartbeat("a", a.token)
+    assert e.value.code == "REVOKED"
+    assert coord.holder(0) == Holder("b", b.token)
+    assert [(x.head, x.step) for x in coord.heartbeat("b", b.token).assignments] == [(None, 0)]
+    settlement = coord.settle()
+    assert [(d.member, d.kind, d.released) for d in settlement.departures] == [
+        ("a", Exit.REVOKED, (0,))
+    ]
+    assert settlement.credits == {} and settlement.penalties == {"owner-a": 1}
+
+
+def test_withdrawing_gives_the_honest_holder_a_fresh_window() -> None:
+    clock, coord, (unit,) = setup()
+    a, b = join(coord, "a"), join(coord, "b")
+    k2 = link(coord, unit, None, 2, a, state=b"forged")
+    coord.commit("a", a.token, 0, k2)
+    coord.leave(sign_leave(notice(a, KEYS["a"]), KEYS["a"]))  # b takes the shard over
+    keep_alive(clock, coord, {"b": b}, 500)
+    coord.commit("b", b.token, 0, link(coord, unit, k2, 4, b))  # t = 500; its window ends at 4_500
+    keep_alive(clock, coord, {"b": b}, PROGRESS - 500)
+    coord.withdraw(k2)  # t = 4_000, long after the forged link: b has to restore from the base
+    keep_alive(clock, coord, {"b": b}, PROGRESS - 500)  # t = 7_500, inside the fresh window
+    assert coord.holder(0) == Holder("b", b.token)
+    assert [d.kind for d in coord.settle().departures] == [Exit.NOTICE]
+
+
+def test_withdraw_lapses_the_expired_before_it_revokes() -> None:
+    clock, coord, (unit,) = setup()
+    a = join(coord, "a")
+    k3 = link(coord, unit, None, 3, a)
+    coord.commit("a", a.token, 0, k3)
+    clock.advance(TTL)  # a's lease ran out and nothing has swept it yet
+    coord.withdraw(k3)
+    assert [(d.member, d.kind) for d in coord.settle().departures] == [("a", Exit.LAPSE)]
+    assert coord.settle().penalties == {"owner-a": 1}
+
+
+def test_only_an_accepted_link_of_the_open_round_can_be_withdrawn() -> None:
+    _, coord, (unit,) = setup()
+    a = join(coord, "a")
+    k6 = link(coord, unit, None, 6, a)
+    coord.commit("a", a.token, 0, k6)
+    with pytest.raises(CoordinatorError) as unknown:
+        coord.withdraw(hashlib.sha256(b"never accepted").hexdigest())
+    assert unknown.value.code == "UNKNOWN_LINK"
+    coord.open_round([WorkUnit(RUN, POLICY, 1, 0, unit.base, 6)])
+    with pytest.raises(CoordinatorError) as closed:
+        coord.withdraw(k6)
+    assert closed.value.code == "ROUND_CLOSED"
+    assert coord.settle().penalties == {}
 
 
 def test_another_member_cannot_have_a_link_it_did_not_produce_acknowledged() -> None:

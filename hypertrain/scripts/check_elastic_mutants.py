@@ -642,6 +642,93 @@ MUTANTS = (
         "test_notice.py::test_an_expired_session_is_renewed_once",
     ),
     Mutant(
+        "a coordinator is built without an audit",
+        SRC + "coordinator.py",
+        "        audit: Audit,\n        capacity: int = 1,\n",
+        "        audit: Audit = lambda *_: True,\n        capacity: int = 1,\n",
+        "test_coordinator.py::test_a_coordinator_cannot_be_built_without_an_audit",
+    ),
+    Mutant(
+        "a withdrawn link keeps its credit",
+        SRC + "coordinator.py",
+        "        del s.links[first:]\n",
+        "",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "a withdrawal voids only the invalid link, not the links built on it",
+        SRC + "coordinator.py",
+        "        del s.links[first:]\n",
+        "        del s.links[first : first + 1]\n",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "a withdrawal leaves the shard head on the voided link",
+        SRC + "coordinator.py",
+        "        s.head = s.links[-1].key if s.links else None\n"
+        "        s.step = sum(link.steps for link in s.links)\n",
+        "",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "a voided link is still acknowledged as accepted",
+        SRC + "coordinator.py",
+        "        for link in voided:\n            del self._accepted[link.key]\n",
+        "",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "the producer of a withdrawn link is not penalised",
+        SRC + "coordinator.py",
+        "        self._penalties[producer.owner] += 1\n",
+        "",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "the producer of a withdrawn link is not revoked",
+        SRC + "coordinator.py",
+        "        self.membership.revoke(m.id)\n",
+        "",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "a live producer of a withdrawn link keeps its shards",
+        SRC + "coordinator.py",
+        "        if live:\n            self._depart(m, Exit.REVOKED, assign=False)\n",
+        "",
+        "test_coordinator.py::test_withdrawing_a_link_of_a_live_holder_revokes_it_and_frees_its_shard",
+    ),
+    Mutant(
+        "a completed shard is not planned again after a withdrawal",
+        SRC + "coordinator.py",
+        "        self._assign()  # a shard that was complete is pending again\n",
+        "",
+        "test_coordinator.py::test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it",
+    ),
+    Mutant(
+        "a withdrawal does not lapse the expired first",
+        SRC + "coordinator.py",
+        "        self._sweep()\n        done = self._accepted.get(key)\n",
+        "        done = self._accepted.get(key)\n",
+        "test_coordinator.py::test_withdraw_lapses_the_expired_before_it_revokes",
+    ),
+    Mutant(
+        "the honest holder of a rewound shard keeps its old window",
+        SRC + "coordinator.py",
+        "        if s.holder is not None:"
+        "  # the honest holder resumes from the link before: fresh clocks\n"
+        "            self._progress[s.holder.member] = (self.clock.now_ms(), False)\n",
+        "",
+        "test_coordinator.py::test_withdrawing_gives_the_honest_holder_a_fresh_window",
+    ),
+    Mutant(
+        "a link of a closed round can be withdrawn",
+        SRC + "coordinator.py",
+        '"ROUND_CLOSED" if key in self._accepted_before else "UNKNOWN_LINK"',
+        '"UNKNOWN_LINK"',
+        "test_coordinator.py::test_only_an_accepted_link_of_the_open_round_can_be_withdrawn",
+    ),
+    Mutant(
         "a leave names as many heads as it likes",
         SRC + "coordinator.py",
         "        if len(notice.heads) > len(self._shards):"

@@ -182,6 +182,17 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
      it, so an evicted miner keeps all it had accepted.
    - Only a link that fails the audit penalises its producer, whose member is revoked.
      Departures (`NOTICE`, `LAPSE`, `STALLED`, `REPLACED`) are never penalised.
+   - `audit` is a required argument of the coordinator: no link is credited without a verdict,
+     and `check_link` alone only proves that the state object exists. The audit runs inside
+     `commit`. A replay of a whole link may be too slow for that call (a GPU-scale replay), so
+     it can be a cheap check, and the full replay a later job that calls `withdraw(key)` when
+     it finds the link invalid. `withdraw` voids the link and every link built on it in the
+     open round, with their credit; moves the shard's head back to the link before it, so the
+     next holder resumes from a state that was not forged; penalises and revokes the producer
+     of `key` as a failed audit does, and not the producers of the links built on it, who were
+     honest; and plans the shard again. A closed round's settlement was returned and is not
+     reopened: the audit must finish before the wiring opens the next round [V
+     `test_a_withdrawn_link_takes_its_credit_and_the_links_built_on_it`].
    - A round opens only once every shard of the previous one is complete. `open_round` checks
      each unit with the manifest's own types before changing any state, and returns the closed
      round's final settlement, departures up to that call included.
@@ -429,6 +440,8 @@ step timeout and then the mutation check, on a 4-vCPU runner.
 2. Reward rules for partial participation:
    - credit per accepted step to the producer's owner;
    - whether a revoked member keeps credit for its earlier audited links (the code keeps it);
+   - whether the honest producers of links built on a withdrawn link keep partial credit (the
+     code voids it, since their work started from a forged state);
    - how the v2 per-miner cap (Q/4, at least 4 verified miners) applies;
    - whether idle hot spares are paid.
 3. Penalties: none for notices, lapses, stalls or replacements (proposed). Any slash or burn for
