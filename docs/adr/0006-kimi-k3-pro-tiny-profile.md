@@ -110,6 +110,15 @@ sources above.
   unit order with world 2 gave two ranks with different roots and nothing raised [V].
 - `grad_accum > 1` would apply the rule once per micro-batch. TEST run documents and v2
   manifests therefore require `grad_accum == 1`.
+- `inner.opt == "adamw"` only (S10 K4): `optim.MUON_SUFFIXES` names the decoder tensors
+  (`.wq .wk .wv .wo .w1 .w2 .w3`), so Muon on this arch would orthogonalise only `wo`, `w1`, `w2`
+  and `w3` (34,013,184 of 77,001,376 parameters on PROFILE) and leave `wq_a`, `wq_b`, `wkv_a`,
+  `wkv_b` and the shared expert on AdamW at the Muon learning rate. Both parsers refuse it. Mapping
+  the names was rejected: which tensors K2's MuonClip orthogonalises, and QK-Clip, are not
+  implemented here (see the gap table).
+- `top_k_experts >= 2` (S10 M-K4): with one routed expert the normalised gate is the constant
+  `ROUTED_SCALE`, so the router gets no gradient from the LM loss (6.8e-11 against 3.1e-4 at
+  k=2 [V]). K2 normalises only when k > 1 [A]. `dims()` and the v2 rule refuse k=1.
 - `HT_COMPILE`, `HT_ACT_CKPT`, `HT_MOE_GROUPED` and FP8 apply to `decoder` only; this arch
   ignores them.
 - GPU determinism on B300 is [?] until the qualification below runs.
@@ -204,8 +213,9 @@ under the D2/D14 guards (provenance proof, canary, next seal accepted).
    manifest_version 2"); `docs/schemas/RunManifest.json` keeps its v1 bytes. The v2 rule for
    `kimi-k3-pro-tiny` (`protocol/messages_v2.py`) requires: no reference profile,
    `grad_accum == 1`, `n_kv_heads == n_heads`, head dim divisible by 4, `n_experts > 1`,
-   `n_layers > 1`, capacity 1, default precision, and `param_count` equal to the shape-only
-   count of `kimi_tiny.param_shapes`.
+   `n_layers > 1`, capacity 1, default precision, `inner.opt == "adamw"`, `top_k_experts >= 2`
+   (both added by S10, see the [S10 amendment](#s10-amendment-review-fixes-2026-10-26)), and
+   `param_count` equal to the shape-only count of `kimi_tiny.param_shapes`.
 3. **One rank, rank order.** Each `Arch` carries `max_ranks` (kimi: 1) and `reduction_orders`
    (kimi and `od-encoder`: `("rank",)`; `decoder`: `("rank", "unit")`). `max_ranks` is checked
    by `TrainingManifestV2` and by `train_island` before training. `check_reduction_order` is

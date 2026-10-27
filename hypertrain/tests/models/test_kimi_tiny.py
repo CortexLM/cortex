@@ -232,6 +232,10 @@ def test_run_manifest_is_unsigned_strict_and_trains() -> None:
         kt.train_config({**doc, "model": {**doc["model"], "arch": "decoder"}})
     with pytest.raises(ValueError, match="grad_accum == 1"):
         kt.train_config({**doc, "inner": {**doc["inner"], "grad_accum": 2}})
+    with pytest.raises(ValueError, match="inner.opt == adamw"):
+        kt.train_config({**doc, "inner": {**doc["inner"], "opt": "muon"}})
+    with pytest.raises(ValueError, match="top_k_experts >= 2"):
+        kt.train_config({**doc, "model": {**doc["model"], "top_k_experts": 1}})
     other = {**doc, "model": {**doc["model"], "init_seed": 8}}
     assert kt.run_manifest_id(other) != kt.run_manifest_id(doc)
     n = cfg.inner.H * cfg.inner.micro_batch

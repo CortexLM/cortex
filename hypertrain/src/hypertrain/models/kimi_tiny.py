@@ -116,6 +116,8 @@ def dims(cfg: ModelConfig) -> Dims:
         raise ValueError("MLA needs n_kv_heads == n_heads and a head dim divisible by 4")
     if not cfg.is_moe or cfg.n_layers <= FIRST_DENSE:
         raise ValueError(f"{ARCH} needs n_experts > 1 and n_layers > {FIRST_DENSE}")
+    if cfg.top_k_experts < 2:  # the gate of a single expert is the constant ROUTED_SCALE
+        raise ValueError(f"{ARCH} needs top_k_experts >= 2")
     return Dims(head, head // 2, 12 * head, 4 * head, (cfg.top_k_experts + N_SHARED) * cfg.d_ff)
 
 
@@ -352,6 +354,8 @@ def train_config(doc: dict[str, Any]) -> TrainConfig:
     inner = InnerConfig(**doc["inner"])
     if inner.grad_accum != 1:  # the bias rule runs per backward pass = per step only at ga 1
         raise ValueError(f"{ARCH} TEST runs need grad_accum == 1")
+    if inner.opt != "adamw":  # optim.MUON_SUFFIXES names decoder tensors, not wq_a/shared_*
+        raise ValueError(f"{ARCH} TEST runs need inner.opt == adamw")
     return TrainConfig(model, inner, CompressConfig(**doc["compress"]))
 
 
