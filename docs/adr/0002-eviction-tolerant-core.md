@@ -54,7 +54,9 @@ the time left when the challenge is fetched one round after its seed [H]. There 
 - Invariants:
   - I1: no accepted work is lost.
   - I2: no step is credited twice.
-  - I3: every accepted result is verifiable: a link replays from a stored parent state.
+  - I3: every accepted result is verifiable: a link replays from a stored parent state. That
+    state stays stored until the link is audited and out of dispute ("Retention of checkpoint
+    objects").
   - I4: wasted GPU time is bounded: one checkpoint interval per departure, plus the drain.
   - I5: an honest departure is never penalised.
 
@@ -179,13 +181,18 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
    - Format: a content-addressed state object, and a content-addressed manifest
      `ht-elastic-checkpoint-v1\n || JCS{version, run_id, policy, round, shard, base, parent,
      step, state, producer, lease}`. A manifest is written only after its state exists.
-   - Where: the `CheckpointStore` protocol (`put`, `get`, `exists`). Local filesystem now;
-     next, the R2 store of v3-dataplane (`hypertrain.storage.cas.R2ObjectStore`, unmerged
-     branch [A], ADR 0003). Nothing in the store is mutable: the chain head lives in the
-     coordinator, so R2 never needs a compare-and-swap or more than one write per key.
-     `exists` means "a put of this key completed"; only `get` proves the bytes, so the store's
-     root belongs to the store alone.
-   - Who reads: the coordinator (manifests only), the next holder and the auditor.
+   - Where: the `CheckpointStore` protocol (`put`, `get`, `exists`; no delete, no list). Local
+     filesystem now; next, the R2 store of v3-dataplane (`hypertrain.storage.cas.R2ObjectStore`,
+     in this tree and wired into no challenge path, ADR 0003). Nothing in the store is
+     mutable: the chain head lives in the coordinator, so R2 never needs a compare-and-swap or
+     more than one write per key. `exists` means "a put of this key completed"; only `get`
+     proves the bytes, so the store's root belongs to the store alone. ADR 0003 (Decision 3)
+     holds the key layout and the lifecycle; which objects may be deleted, and when, is fixed in
+     "Retention of checkpoint objects" below.
+   - Who reads: the coordinator reads manifests and checks that a new state exists; the next
+     holder reads every manifest back to the base and the head's state; the auditor reads the
+     parent state of the link it replays [H, P1 is not built]. The table in "Retention of
+     checkpoint objects" gives the reader of each object.
    - Cadence: every `ckpt_every` inner steps and at the end of the unit, plus a flush on
      notice.
    - The local store fsyncs the bytes under a unique temporary name, renames, then fsyncs the
@@ -198,7 +205,9 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
    its parent is the head it holds, its step is higher, its state exists, and its producer and
    lease are the committer's (compare-and-set). The hash link is the proof that a replacement
    resumed from the right state, and each link (parent step to step) is one replayable audit
-   segment.
+   segment. The walk reads every manifest, so no manifest of a live chain may be deleted, and an
+   object missing from it ends the resume with a fail-closed error that the coordinator, not the
+   resumer, resolves ("Retention of checkpoint objects").
 5. **Detection and the signed leave** (`notice.py`, `drain.py`).
    - `AwsSpotNotice` reads IMDSv2 and renews an expired session once, never through an HTTP
      proxy. Any other answer, and an unreachable or silent IMDS, raises `NoticeError`; the
@@ -361,6 +370,74 @@ rule [V grep]. P1 adds: a re-seed refused for a `SUSPENDED` row, a pending dispu
 trial; `INTERRUPTED` leaving `screen_until` and `clean_count` alone; `join` ignoring only
 `APPLIED_EXPIRED` rows; the budget counted per coldkey across hotkeys; `proof()` and
 `finalize_trial` refusing a trial that is not `OPEN`.
+
+### Retention of checkpoint objects
+
+ADR 0003 (Decision 3) stores these objects and lets the coordinator delete them; this is what the
+deletion may not break. It is a constraint, not a description, because nothing deletes yet:
+`CheckpointStore` has no delete or list, nor has `R2ObjectStore` (its `R2Client` has both), no
+module outside `elastic/` builds a coordinator or a checkpoint store, and the v3 audit, the dispute
+path and the outer step belong to P1 [V, reading and grep]. The audit, dispute and round-close
+columns are [H] constraints on the future auditor, taken from I3, Decisions 4, 6 and 7, the
+simulator's audit (`Simulation._audit`) and the v2 readers (`auditor/replay.py`,
+`auditor/island_bisect.py`, `challenge/disputes_v2.py`).
+
+A shard has a base state B(r) (a key per unit; the simulator gives all units one), a state S_j and a
+manifest M_j per link, and a head, the key of its newest accepted manifest. The head is coordinator
+state, not a store object. "Release of link k" means: its audit is final (a failed audit withdraws
+it first, so its parent becomes the head again), every dispute and penalty naming it is closed,
+and a grace has elapsed. With the audit inside `commit` the audit part is zero; the audit must
+finish before the next round opens (Decision 6), and after a round closes only a dispute can void
+a link.
+
+| Object | resume | check at `commit` | audit replay of link k | dispute inside link k | round close | Deletable after |
+| --- | --- | --- | --- | --- | --- | --- |
+| B(r) | only if the shard has no link | `open_round` needs it stored | parent of link 1 | parent of link 1 | B(r+1) is built from the heads [?] | release of link 1 of every unit that names it, and B(r+1) stored |
+| S_j | S_head only | `exists` of the new state, no bytes | S_(k-1) bytes; S_k by hash | both ends of the contested link may be asked for [H] | the heads' states build B(r+1) | the release of link j and of link j+1; the last state of a shard: round settled and B(r+1) stored |
+| M_j | every M from the head to M_1 | M_new and M_head | M_k and M_(k-1) | the chain, as evidence | the chain of each shard | never before the round's retention ends |
+| head | where the walk starts | must equal M_new.parent | names link k | names the contested link | `Settlement.heads` | as long as the manifests |
+
+1. **Invariant.** An object is never deleted while it is (a) a manifest on `chain()` from the head
+   of a shard of any round whose retention has not ended, (b) the state of such a head, or B(r) of
+   a shard with no link, (c) the state of a link that is not released, or the parent state of one,
+   or (d) needed under (a) to (c) by another link, round or evidence, since equal bytes share one
+   key. The `base` and `state` fields of a retained manifest do not pin an object by themselves.
+2. **When.** "Superseded by a newer head" releases nothing. v2 gates custody on finality, vesting,
+   closed disputes and an epoch grace (`protocol/relay_messages.py:466-489`,
+   `challenge/store.py:5415-5438`) and extends the horizon only by an explicit control action issued
+   before it expires (`challenge/store.py:5390-5413`) [V]. Proposed [H]: the same release for
+   checkpoints. With the audit inside `commit` and no dispute, two states per shard suffice only if
+   the dispute window plus the grace is at most one checkpoint interval [?]; a sampled or later
+   audit needs the parent state of every unreleased link, and a link that is never sampled becomes
+   final when the sampling decision closes, or its parent is never deletable.
+3. **Manifests** are about 400 to 720 bytes [H, canonical encoding emulated]: deleting one saves
+   nothing and breaks `resume`, a rollback and the keys that notices and penalties name. They go
+   when their round's retention ends.
+4. **Record.** The `CheckpointStore` protocol has no list (`R2Client.list_prefix` exists, but cannot
+   tell accepted links from orphans), so the wiring persists each round's heads and each link's
+   audit and dispute status until the round's retention ends. Without that record no delete is
+   safe and none is made. Objects no head reaches (a flush killed after its state, a link refused
+   by the compare-and-set) are not deleted one by one; they leave with the run-level expiry.
+5. **Mechanics** [H]. A multipart state has a sidecar block list in the same prefix
+   (`storage/cas.py:277-279`, `:329-339`): delete the state, then the sidecar. Only the
+   coordinator's credential deletes. An R2 lifecycle rule counts object age and prefix, not run
+   state [A, `r2/buckets/object-lifecycles`, read 2026-10-27], so on `ckpt/` only a run-level rule
+   created after the run is settled and its disputes are closed is allowed, or the coordinator
+   lists and deletes the prefix then: a rule installed at run start would expire the head state of
+   a stalled round.
+6. **A missing object is a fail-closed error** [V code]: `MISSING_MANIFEST`, `MISSING_STATE` or
+   `CORRUPT_OBJECT` (`elastic/checkpoint.py`); a store outage is a different error. `resume` never
+   falls back to the base or to an older link, which `check_link` would refuse as `NOT_HEAD_CHILD`.
+   Every commit on the shard then fails, since `check_link` reads the head manifest, and each
+   holder is stalled in turn [H]. The coordinator decides the fallback [H]: (i) check the store and
+   any mirror, since bytes verify by hash anywhere (ADR 0003, Decision 10); (ii) roll the shard back
+   to the newest intact link by withdrawing the links above it (`withdraw` penalises the producer
+   of the key it voids, and a rollback caused by lost objects needs a variant without penalty
+   that does not exist [V]; the credit of the voided links is founder decision 2); (iii) if no
+   link is intact, restart from B(r) when it is intact; (iv) otherwise the round stays open and an
+   operator acts. An audit that cannot read its parent state must fail the audit job with no
+   verdict against the producer, as v2's `AuditInputError` does (`auditor/replay.py:77-79`):
+   returning False would revoke and penalise an honest member.
 
 ## Redundancy options
 
@@ -583,6 +660,10 @@ step timeout and then the mutation check, on a 4-vCPU runner.
    - whether a replacement host inherits the live screen (proposed) or must re-screen.
 6. Whether v2 production runs get the re-seed too, as a separate admission change, before the
    first production admission policy is signed.
+7. Checkpoint retention ("Retention of checkpoint objects"): the release event after which a
+   parent state may be deleted (proposed: v2's custody release, that is finality, vesting, closed
+   disputes and an epoch grace) and the delay T_hold from a link's acceptance to that release. It
+   sets how many states ADR 0003's cost model holds per shard.
 
 ## Consequences
 
@@ -596,6 +677,17 @@ step timeout and then the mutation check, on a 4-vCPU runner.
   `scripts/relay_kind_smoke.py` hash every file under `src/hypertrain`. Their frozen source
   manifests are made stale by these new files, as by any source change: regenerate them with
   the next image [V].
+- Nothing deletes a checkpoint object yet [V]: the store protocol has no delete, and the coordinator
+  keeps no record of past rounds' heads or of audit and dispute status. Until "Retention of
+  checkpoint objects" is built, storage only grows, and the cost model of ADR 0003, which assumes
+  deletes, is a lower bound.
+- The flush on a Spot host has no implementation in either branch [V]. `DrainHandler` calls an
+  injected `flush`; the only non-test one is the simulator's, which saves into the coordinator's
+  in-memory store. ADR 0003 (Decision 5) says that the offer-client adapter a host without an S3
+  credential needs is not built, and it depends on coordinator routes that no document defines
+  yet. A flush on notice has therefore never reached a real store, and the flush time of a real
+  state stays [?] until lot D. `R2ObjectStore` holds the S3 credential, so it runs only on the
+  coordinator and on trusted operator hosts.
 - Known limits [V]:
   - a put killed before its rename leaves its temporary file (`.<sha>.<uuid>.tmp`) under the
     store root until the host's owner removes it, and a token log made or saved by a process
