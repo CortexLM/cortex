@@ -546,3 +546,38 @@ reach a round: no `run-v2`, no audit, no `get_weights`.
 
 Plan 40 trials (3 ACTIVE x 12 + 1 PROBATION x 4) at 40-50 s each with the cache, so about 30 minutes,
 then the round (about 6 minutes). Without the cache, plan 85 minutes.
+
+### 6.9 Measured on 2026-10-27 (S15, the whole chain, tiny-cpu, one executor host)
+
+The chain closed: five identities (miners 1, 2, 3 and 0 ACTIVE, miner 4 PROBATION with 4 clean trials) opened
+round 0, all five run-v2 uploads, five audits executed on node A through the executor (13.8-14.6 s each, all
+`MATCH`), `SETTLED`, and `get_weights` answered 200 with five hotkeys at 200000.0 (`units_paid` 1,000,000). The
+answer merges every run of the store (`runs` 5, `full_share_mass` 5,000,000), so judge it by the five hotkeys.
+This is a TEST run: the CUDA record is TEST-only, and the header-signed routes passed because
+`relay.joinbase.ai/test-master` forwards headers, which the Cortex public proxy does not.
+
+| Step | Measured |
+| --- | --- |
+| remote reference, warm compute cache (`exec_attempt` to `exec_published`, 52 of them) | 12.8-13.7 s |
+| remote reference, first one after a new image digest | 57.3 s |
+| one trial, one driver (probe 15 s, then the 503 wait, 100-150 s) | 145 s on average, 52 trials in 2 h 14 min |
+| round 0: open, five run-v2 (about 24 s each), `audits`, all MATCH, `SETTLED` | 23:05:25Z, 23:07:47Z, 23:12:05Z, 23:14Z |
+| `get_weights` (vesting needs 10 pushed rounds after finalize) | 23:14:44Z |
+
+- **What the 503 on `join/proof` waits for.** The freshness gate (`beacon infrastructure paused`): the reference
+  holds the store lock for 13 s, the pusher cannot push meanwhile, and it then recovers only 21-26 rounds/min
+  against 20 rounds/min of real time (two BLS verifications in series, about 2.5-2.7 s per round). A second driver
+  gains the probe overlap at most (about 10 %), `max_trial_replays` is the `Literal[2]` of the admission policy,
+  and two references in one opening double the lag and so the closure.
+- **The first reference after a new image digest is the trap.** It took 57 s, the gate stayed closed about 8
+  minutes, and the 100 pushed rounds of that trial ran out (`409 envelope expired`): that identity is stranded for
+  good (no re-seed route). Do not let an identity you need make the first cold reference.
+- **A stopped driver loses its window in 5 minutes.** A single `404` on a trial input object (the object existed,
+  it was not reproducible) made `cpu_miners.py` exit, and the identity's open challenge lapsed before anyone
+  relaunched: `CHALLENGE_EXPIRED` for ever. Poll every 2 minutes or less, or relaunch the same `admit` command
+  at once after a non-fatal exit (it is idempotent while the challenge is open).
+- **Roster.** `allocate_weights` needs at least 4 members and 3 ACTIVE: 3 ACTIVE + 2 PROBATION is valid but
+  tolerates only a PROBATION loss, 4 ACTIVE + 1 PROBATION tolerates any one loss. Round offsets
+  `5,8,130,132,160,332` were enough for five sequential uploads (2 minutes) and five audits (1 minute 40).
+- **The gate of `challenge_image.sh` guards compose changes only** (`swap`, `beacon`, `executor`). Opening a round,
+  `audits`, `finalize` and `get_weights` are calls into the TEST challenge and do not need it.
