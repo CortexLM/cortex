@@ -238,3 +238,131 @@ deadline before it reuses a publication.
 Ask `get_weights` once, and only through `weights_once.py`. It refuses (exit 3) until the run has
 a payable reward at `epoch_at` and no matured reward still vesting. The first answer per epoch is
 final, so an early call freezes that epoch unpaid.
+
+## 6. CUDA TEST run: references and audits on one ssh GPU host
+
+The challenge on s100 has no GPU. With `HYPERTRAIN_CUDA_EXECUTOR` it sends every CUDA reference and
+audit replay of ONE run to an ssh-reachable GPU host X and starts `repo@<manifest image digest>`
+there with `docker run --rm --gpus ...` (ADR 0008, `hypertrain/docs/cuda-executor.md`). Nothing is
+installed on X; X is never a server. Nothing in this section has run on a GPU host yet.
+
+What is **TEST-only** here, exactly:
+- `cuda_qualification.py` installs the CUDA backend record with stand-in evidence signed by the
+  TEST owner. It replaces the two-host Vast qualification (`_bootstrap_backend_v2`, `compare`) and
+  proves nothing about bitwise reproduction on X. It refuses a non-`test` ledger.
+- Production still needs the two-host qualification, which stays Vast-shaped.
+
+The paths below use the state volume that is `/data` in the container:
+
+```bash
+X=/data/hypertrain-test/state/executor        # /data/executor inside hypertrain-test-challenge
+HOST=<ssh host of X>; PORT=22; GUSER=ubuntu; KEY=<path on s100 of the private key for X>
+GPU=sha256:<gpu image digest the TEST manifest pins>     # the image digest, not a tag
+```
+
+### 6.1 Host files (key by path, nothing printed)
+
+```bash
+ssh root@s100 "install -d -o 65532 -g 65532 -m 0700 $X $X/state"
+ssh root@s100 "install -o 65532 -g 65532 -m 0600 $KEY $X/id_ed25519"
+ssh root@s100 "ssh-keyscan -p $PORT -t ed25519 $HOST > $X/known_hosts && \
+  chown 65532:65532 $X/known_hosts && chmod 0600 $X/known_hosts && ssh-keygen -lf $X/known_hosts"
+```
+
+Compare the fingerprint with the provider's console before going on: the file is the only host
+key the challenge will accept (no trust on first use). Then the config (use `HOST` exactly as in
+`known_hosts`; `docker` is `["sudo","-n","docker"]` on Lium and AWS hosts, `["docker"]` otherwise;
+raise `max_clock_skew_seconds` if the probe below says the clocks differ):
+
+```bash
+ssh root@s100 "umask 077; cat > $X/cuda-executor.json; chown 65532:65532 $X/cuda-executor.json" <<EOF
+{"run_id": "$RID", "image_repository": "ghcr.io/cortexlm/cortex/hypertrain-gpu",
+ "state_dir": "/data/executor/state", "max_clock_skew_seconds": 15,
+ "hosts": [{"label": "x", "address": "$HOST", "port": $PORT, "user": "$GUSER",
+            "identity_file": "/data/executor/id_ed25519",
+            "known_hosts_file": "/data/executor/known_hosts",
+            "docker": ["sudo", "-n", "docker"]}]}
+EOF
+```
+
+`RID` is the run_id of the manifest built in 6.3 (it is in `OUT/out/manifest-envelope.json`);
+the executor serves CUDA jobs of that run only, every other job still runs in the challenge.
+
+### 6.2 Probe X before touching the challenge
+
+A throwaway container of the new server image `$NEW` (it already contains the executor) opens the
+same ssh transport, with the same key, `known_hosts` and `sudo -n docker`, and prints what a job
+would see: GPUs, the ones a compute app holds, the idle ones, whether the image is on X, the
+machine id. It runs nothing on X.
+
+```bash
+ssh root@s100 "docker run --rm -i --user 65532:65532 -v $X:/data/executor --entrypoint python \
+  $NEW -I - /data/executor/cuda-executor.json $GPU" < $T/cuda_executor_check.py
+```
+
+Expect `"status": "ok"`, `"driver": "595.91.07"`, `"capability": [10, 3]`, as many idle GPUs as the
+manifest's layout (`n_gpus`, 2 for `dense-1b`) and `"image_present": true` (the first job pulls
+the image by digest if it is absent). `unreachable` carries the ssh error: wrong key, wrong host
+key, port, user or `sudo -n docker`. Nothing secret is printed.
+
+### 6.3 Build the CUDA manifest and its TEST backend record
+
+```bash
+HT_D20_GEOMETRY=dense-1b HT_D20_COLDKEYS=4 HT_D20_RELAY_PUBKEY=<relay k1 ss58> \
+  hypertrain/scripts/b300/d20/build_test_manifest.sh $GPU 595.91.07 148 $OUT
+$PY -I $T/cuda_qualification.py build $OUT/out $OUT/secrets/owner.seed
+```
+
+Copy the public outputs to `/data/hypertrain-test/state/<stage>/` as in section 2 and add
+`qualification-test.json` (it holds the stand-in evidence and the owner's Receipt, no secret).
+
+### 6.4 Point the TEST challenge at X
+
+Back up first (section 1: `snap.sh pre`, `challenge_image.sh backup $TS`). The new variable goes
+in through a compose override, gated like the image swap (master `readyz`, a young sealed seal,
+and the resolved compose config must differ only in that variable):
+
+```bash
+ssh root@s100 "bash -s -- executor $B /data/executor/cuda-executor.json" < $T/challenge_image.sh
+```
+
+The challenge must run an image that contains the executor (`$NEW`, section 1). Setting it together with
+`HYPERTRAIN_ROLE_DISPATCH` stops the challenge at start. A later
+`swap` or `rollback` uses `compose.test.yml` alone and drops the variable: rerun `executor`. Undo
+with `bash -s -- executor-off $B`.
+
+### 6.5 Publish the run with the backend record in place, then run it
+
+```bash
+ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - install /data/<stage>" \
+  < $T/cuda_qualification.py
+for s in objects run dataset genesis status; do
+  ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - /data/<stage> $s" \
+    < $T/publish_run.py
+done
+```
+
+`install` must print `"test_only": true` BEFORE `run`; `status` must then show the
+`execution-backend` record `{"backend": "cuda", "authority_hash": "<64 hex>"}`. A `cpu` record
+means the run was POSTed first: it is frozen, build a new manifest.
+
+Then re-bind the relay (section 3) and start the TEST auditors on `$RID` (section 4). Auditors
+lease and ask the challenge to execute; the challenge sends the replay to X. Miners for a CUDA run
+run on the GPU host with the GPU image (`docs/b300-run.md`, `miner_prod`), not with `cpu_miners.py`.
+
+### 6.6 What to look at
+
+- `status` of `round_status.py`, as in section 5, and the audit verdicts `MATCH`.
+- `/data/hypertrain-test/state/executor/state/journal.jsonl`: `exec_attempt`, `exec_published`,
+  `exec_host_unavailable`, `exec_host_refused`, `exec_attempt_failed` (no secret in it).
+- `logs/<container name>.stderr` in the same directory: the island's stderr, 0600.
+- The `audit-dispatch` record of each audit job (`records_v2`): the full `role-dispatch.json` with
+  host label, `machine_id`, image reference and `RepoDigests`, driver, capability, SM count, GPU
+  UUIDs, tar and publication hashes.
+- On X: `docker ps` shows `ht-exec-*` only while a job runs; `docker ps -a` shows none after.
+
+Failure behaviour: a lost host is retried (other hosts first, then the same one after a pause), a
+host whose driver, capability, SM count, image digest or GPU set contradicts the manifest is
+quarantined until the challenge restarts, a deadline or a cancelled lease is never retried, and a
+partial or tampered result is never published. With one host, one failure costs one attempt of
+`max_attempts` (3).
