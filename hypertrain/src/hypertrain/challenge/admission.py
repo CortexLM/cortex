@@ -1429,7 +1429,9 @@ class Admission:
         auditor, and the closures of ADR 0011 are not convictions.
 
         TRAINING_FRAUD (a referee verdict, see settle_fraud): also burns the owner's unvested
-        rewards and bans the admission (terminal; `lock` then answers LOCK_BANNED).
+        rewards, as part of slashing a residual lock (after an earlier bond-only seizure there
+        is none, and the rewards survive), and bans the admission (terminal; `lock` then
+        answers LOCK_BANNED).
         AUDIT_MISMATCH (a round-stage audit mismatch the caller has confirmed as the miner's):
         suspends the admission, reason AUDIT_MISMATCH, adds one strike, and burns the bond alone.
         The coldkey stays bound by the one-non-ACTIVE-admission rule, as in probation, and the
@@ -1492,9 +1494,11 @@ class Admission:
 
         Called with the dispute id when a resolution is accepted. Only an accepted, resolved
         dispute settlement whose outcome is FRAUD (reason FRAUD and loser == the miner of the
-        contest) convicts; any other closure returns False and changes nothing. The pending
-        reference bound when the dispute opened must name the same admission, coldkey and
-        evidence.
+        contest) convicts. It returns False and changes nothing when there is no pending
+        reference, the dispute is unresolved or the outcome is not FRAUD. The pending reference
+        bound when the dispute opened must name the same admission, coldkey and evidence, and the
+        release beacon must be reached, or UNPROVEN_TRAINING_FRAUD is raised and the resolution
+        that called it is rolled back.
         """
         self._beacon(now)
         with self.escrow.tx():

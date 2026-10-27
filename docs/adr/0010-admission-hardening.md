@@ -35,8 +35,8 @@ with the victim's signed challenge, and a second one after the deadline suspende
 | RTA-06 | The admission bond can neither be released nor slashed | `challenge/store.py:2318-2333`, `admission.py:1093` |
 | EB-01 | An elastic token log restored from a copy, or copied or hard-linked, re-issues a token, so an old signed leave releases a new lease | `elastic/tokens.py`, `elastic/coordinator.py:285-304` |
 
-`implementation_hash` is the hash of the AST of 28 named functions of `challenge/store.py` and of
-ten files (`challenge/store.py:4279-4322`). `admission.py`, `admission_store.py`, `app.py`,
+`implementation_hash` is the hash of the AST of 28 named definitions of `challenge/store.py` (27
+functions and the class `_ServiceCapacityV1`) and of ten files (`challenge/store.py:4279-4322`). `admission.py`, `admission_store.py`, `app.py`,
 `elastic/*`, `protocol/messages_v2.py`, `protocol/envelope_v2.py`, `miner/*` and the dispatcher
 `admission_v2`, `_settlement_v2`, `_services`, `push_beacon` are not in it [V]. Every decision
 below stays outside it.
@@ -222,7 +222,8 @@ not reaped).
    (backup at 1, start 2 signs under 2, restore, start 3 reuses 2), and a stored random value is
    redundant once a fresh one is drawn at every start. A mark-derived epoch is killed by a
    mutant (`f"{mark:064x}"`). The epoch is also independent of the log format, so it protects the
-   database-row log of ADR 0003 too, and `tokens.py` and its 35 anchored mutants do not change.
+   database-row log of ADR 0003 too, and `tokens.py` (a docstring only) and the 29 mutants anchored
+   on it do not change.
 3. A copy or hard link of the log still gets its own lock, so two coordinators can run and issue
    the same tokens. Each has its own epoch, so a leave signed under one releases no lease of the
    other. Not covered: a restore of the whole process (a VM snapshot brings back the epoch with
@@ -280,7 +281,8 @@ Decision.
    live (`ACTIVE`, or `PROBATION` with four clean trials), the end of its current screen plus
    one: a live miner keeps its bond, which is what makes it eligible. `finality_hash` and
    `closed_dispute_root` are hashes of what was read (rounds and origins, dispute ids), so the
-   owner signs the state it saw. No constant is added.
+   owner signs the state it saw. No new constant is added: the four clean trials of the live phase
+   are the literal that `status()` already uses.
 3. **Seizure.** `Admission.seize_bond(admission_id, *, reason, evidence_hash, now)` is an
    internal, authenticated service hook (the coordinator is the ledger's reward authority); no
    route calls it. It records each residual lock in `admission_seizures`, which makes its
@@ -289,8 +291,9 @@ Decision.
    `ip_secret`: deterministic for retries, unguessable for a squatter. A second call finds
    nothing left. The admission is resolved by id, never by hotkey, which a rotation changes.
    Reasons: `TRAINING_FRAUD` also burns the owner's unvested rewards (the ledger's rule for a
-   slashed admission lock) and bans the admission (`BANNED`, terminal; `Admission.lock` then
-   answers `LOCK_BANNED`); `AUDIT_MISMATCH`, a round-stage audit mismatch that the caller has
+   slashed admission lock, so only while the admission still holds a residual lock: after an
+   earlier bond-only seizure a conviction bans and burns no reward, see Decisions for Forge 4)
+   and bans the admission (`BANNED`, terminal; `Admission.lock` then answers `LOCK_BANNED`); `AUDIT_MISMATCH`, a round-stage audit mismatch that the caller has
    confirmed as the miner's (D47), suspends the admission (reason `AUDIT_MISMATCH`), adds one
    strike and burns the bond alone, and the coldkey stays bound by the one-non-`ACTIVE`-row rule
    as in probation; `NO_SHOW` burns the bond alone (`EscrowV2.slash(burn_pending=False)`) and
@@ -304,7 +307,10 @@ Decision.
    `DisputesV2.settle_lock`. Only an accepted, resolved dispute settlement with outcome `FRAUD`
    (reason `FRAUD`, loser == the miner of the contest) convicts, and only if the pending
    reference bound when the dispute opened names the same admission, coldkey and evidence and the
-   verdict's release beacon is reached; any other closure returns `False` and changes nothing.
+   verdict's release beacon is reached. It returns `False` and changes nothing when there is no
+   pending reference, the dispute is unresolved, or the outcome is not `FRAUD` against the miner
+   (a verdict against the auditor). A `FRAUD` verdict that does not match the pending reference,
+   or whose release beacon is not reached, raises `UNPROVEN_TRAINING_FRAUD`.
    Conviction calls `seize_bond(reason="TRAINING_FRAUD")`. Because it shares the transaction, a
    failure of the hook rolls back the resolution (fail closed).
 5. **Release.** The owner signs the existing `EscrowRelease`; the route is unchanged.
@@ -330,7 +336,8 @@ closed and its rewards vested; the wait is `E_vest_rounds` beacon rounds after t
 finalization unless a dispute is open. The bound `q * s_lower * beta * (R + S) >= G` becomes true
 for contested detections and for no-shows; a cheater who never contests is excluded and keeps
 its bond until the Forge question on a contest window is answered. Contesting now risks the
-whole admission bond, the coldkey's unvested rewards and a ban instead of the contest bond:
+whole admission bond (and, while a residual lock exists, the coldkey's unvested rewards) and a
+ban instead of the contest bond:
 with DET-01b open an honest, falsely `MISMATCH`ed miner should not contest (the cure is DET-01b,
 not this part). A round that never closes pins the bonds of its roster until DSP-01 and AUD-06
 close it. Other `ACTIVE` admissions of a convicted coldkey keep their state but lose their
@@ -384,7 +391,8 @@ Baseline measured on `33b50656` with `ChallengeStore._service_implementation_v2`
 ## Decisions for Forge
 
 1. **Bond burn (Part 6).** Implemented as recommended: a referee `FRAUD` against the miner burns
-   the admission bond and the coldkey's unvested rewards and bans the admission; a no-show
+   the admission bond and, while a residual lock exists, the coldkey's unvested rewards, and bans
+   the admission; a no-show
    seizure burns the bond alone. ADR 0002 "Penalties" makes any slash for a failed audit
    founder-only: the order of D36 bis and Forge's request of 2026-10-27 are taken as that
    decision for these two cases. To withhold the burn, `seize_bond` keeps recording the seizure
@@ -398,7 +406,31 @@ Baseline measured on `33b50656` with `ChallengeStore._service_implementation_v2`
    field); the route back for a stranded miner is ADR 0002 P1 / ADR 0011 D40; an admission-trial
    `MISMATCH` binds a pending reference that nothing settles (the bond and the coldkey stay
    locked); `PROBATION` rows are not reaped; `DisputesV2.settle_lock` derives its operation id
-   from public data and can be squatted (audit-integrity lot).
+   from public data and can be squatted (audit-integrity lot), as can any server-derived
+   operation id that is not an HMAC, since the escrow operation ids share one namespace that any
+   holder of one unit can write (it predates this series). Found by the independent review and
+   not changed here:
+   - a lock of one unit counts as funding, so a dead `APPLIED` row that holds it is neither
+     reaped nor counted by the optional cap; counting only locks of at least `S_min_units`
+     (the manifest's own value, 1000 in the example) would close it, and changes what "a funded
+     row is never touched" means;
+   - a proven trial whose holder is later suspended or banned is not reaped (`proof_digest` is
+     set) and keeps one of the two places until `resume`;
+   - the `rotate:` quota rows are never purged, one per coldkey and window in which it rotated;
+   - an IPv4-mapped IPv6 address falls into one `/64` prefix for the join quota and the cap
+     (`join_v2` does not unmap it; it predates this series);
+   - the status route scans the run's round records once per call for an admission that holds a
+     bond, inside the store's write transaction (about 30 ms at 1000 rounds of 32, 150 ms at 4000
+     in the review's measure); an admission-to-round table or a rate limit at the proxy removes
+     it.
+4. **Unvested rewards after an earlier seizure.** The burn of the unvested rewards is part of
+   slashing an admission lock, so a conviction that arrives after a `NO_SHOW` or `AUDIT_MISMATCH`
+   seizure has emptied the lock bans the admission and burns no reward. That makes the deterrent
+   of contesting weaker than the text of Part 6 says, in exactly the D47 flow (mismatch, contest,
+   referee verdict). Closing it needs a ledger operation that burns a coldkey's `reward_pending`
+   without a lock (a new event kind under an HMAC operation id, with its conservation test),
+   which this series does not add. Decide whether to add it, or to accept that the reward
+   survives.
 
 ## Not verified
 

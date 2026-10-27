@@ -73,12 +73,13 @@
 - The admission bond can be released and slashed (RTA-06). `EscrowV2` takes an optional
   `admission_settlement` and settles a `LOCK_ADMISSION` through it, by lock kind; the settlement
   is derived from the admission's records. `Admission.settle_fraud(dispute_id)` runs with every
-  accepted resolution: a referee verdict of fraud against the miner burns the bond and the
-  coldkey's unvested rewards and bans the admission. `Admission.seize_bond(admission_id,
-  reason, evidence_hash, now)` burns the bond for a no-show (`reason="NO_SHOW"`), a confirmed
-  round-stage audit mismatch (`"AUDIT_MISMATCH"`: also suspends with one strike) or a convicted
-  miner (`"TRAINING_FRAUD"`); `Admission.release_bond` and the status key `bond` serve the
-  owner. `EscrowV2.slash` takes `burn_pending` (default: today's behaviour). ADR 0010.
+  accepted resolution: a referee verdict of fraud against the miner burns the bond, bans the
+  admission and, while it still holds a residual lock, burns the coldkey's unvested rewards.
+  `Admission.seize_bond(admission_id, reason, evidence_hash, now)` is the internal hook for a
+  no-show (`reason="NO_SHOW"`), a confirmed round-stage audit mismatch (`"AUDIT_MISMATCH"`: also
+  suspends with one strike) or a convicted miner (`"TRAINING_FRAUD"`, the only one called in this
+  tree; the other two wait for the audit lot); `Admission.release_bond` and the status key `bond`
+  serve the owner. `EscrowV2.slash` takes `burn_pending` (default: today's behaviour). ADR 0010.
 - `RotateRequest` needs the new hotkey's signature (`new_hot_sig`, own domain
   `hypertrain/rotate/2|`; `miner.admission.sign_rotation_consent`): one coldkey signature can no
   longer burn a registered hotkey that never joined (RTA-01). A new rotation is charged to
