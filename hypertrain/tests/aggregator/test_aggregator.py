@@ -37,6 +37,7 @@ from hypertrain.aggregator.core import (
     OuterState,
     ReplayMismatch,
     TapeError,
+    TapeIntegrityError,
     aggregate,
     load_delta,
     load_state,
@@ -193,7 +194,7 @@ def test_event_tape_replay_reproduces_theta(tmp_path: Path) -> None:
     forged = json.loads(json.dumps(sc["t1"]))
     forged["body"]["inputs"] = forged["body"]["inputs"][:2]
     assert not verify_tape(forged)
-    with pytest.raises(TapeError):
+    with pytest.raises(TapeIntegrityError):
         replay_tape(store, forged)
     resigned = sign_tape(COORD, forged["body"])
     with pytest.raises(ReplayMismatch):

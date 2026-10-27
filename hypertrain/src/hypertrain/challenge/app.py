@@ -433,7 +433,7 @@ def create_app(
     ):
         app.add_exception_handler(cls, v2_error)
 
-    from hypertrain.aggregator.core import FinalityError, TapeError
+    from hypertrain.aggregator.core import FinalityError, TapeError, TapeIntegrityError
     from hypertrain.aggregator.weighted_v2 import InsufficientEligibleWeight
 
     async def round_refused(_: Request, error: Exception) -> JSONResponse:
@@ -445,6 +445,12 @@ def create_app(
 
     for refusal in (InsufficientEligibleWeight, FinalityError, TapeError):
         app.add_exception_handler(refusal, round_refused)
+
+    async def tape_integrity(_: Request, error: Exception) -> JSONResponse:
+        """The master's own artifact failed: a server fault the operator must see, never a 409."""
+        return JSONResponse({"detail": f"TAPE_INTEGRITY: {error}"}, status_code=500)
+
+    app.add_exception_handler(TapeIntegrityError, tape_integrity)
 
     @app.post("/v2/server-keys", status_code=201)
     async def grant_server_key(request: Request) -> Any:
@@ -801,23 +807,23 @@ def create_app(
 
     @app.post("/v2/runs/{run_id}/admin/rollback")
     async def rollback_v2(run_id: str, request: Request, authorization: Auth = None) -> Any:
-        from hypertrain.aggregator.core import TapeError
-
         admin(authorization)
         try:
             return await run(store.for_run(run_id).rollback_v2, run_id, await v2_raw(request))
+        except TapeIntegrityError:
+            raise
         except TapeError as error:
             raise ChallengeError(409, str(error)) from error
 
     @app.post("/v2/runs/{run_id}/admin/rollback-preview")
     async def rollback_preview_v2(run_id: str, request: Request, authorization: Auth = None) -> Any:
-        from hypertrain.aggregator.core import TapeError
-
         admin(authorization)
         try:
             return await run(
                 store.for_run(run_id).rollback_preview_v2, run_id, await v2_raw(request)
             )
+        except TapeIntegrityError:
+            raise
         except TapeError as error:
             raise ChallengeError(409, str(error)) from error
 

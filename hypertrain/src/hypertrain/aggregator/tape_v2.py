@@ -13,6 +13,7 @@ from hypertrain.aggregator.core import (
     OuterParams,
     OuterState,
     TapeError,
+    TapeIntegrityError,
     get_object,
     load_delta,
     load_state,
@@ -377,7 +378,9 @@ def replay_tape(
         reference_reward_units=reference_reward_units,
     )
     if body.body() != tape.body.body():
-        raise TapeError("tape replay differs from original inputs/weights/policy/predecessor")
+        raise TapeIntegrityError(
+            "tape replay differs from original inputs/weights/policy/predecessor"
+        )
     if get_object(store, body.out_state) != state.to_bytes():
-        raise TapeError("output object differs")
+        raise TapeIntegrityError("output object differs")
     return state

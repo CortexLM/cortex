@@ -14,7 +14,7 @@ from test_weighted_v2 import KEY, H, economics, policy, roster
 
 from env_pin_fixtures import CPU_FP32, HOSTILE, ambient
 from hypertrain.aggregator import rollback_v2
-from hypertrain.aggregator.core import OuterState, TapeError, load_state
+from hypertrain.aggregator.core import OuterState, TapeError, TapeIntegrityError, load_state
 from hypertrain.aggregator.rollback_v2 import (
     RepairAuthority,
     RepairResult,
@@ -526,7 +526,7 @@ def test_nonfinite_authenticated_anchor_rejects_before_publication(
 
     monkeypatch.setattr(s.store, "put", no_publication)
     # When / Then: authentic signature never authorizes nonfinite state.
-    with pytest.raises(TapeError, match="nonfinite repair"):
+    with pytest.raises(TapeIntegrityError, match="nonfinite repair"):
         if replay:
             accept(
                 s,
@@ -663,7 +663,7 @@ def test_history_worker_is_started_under_the_manifest_pins(
     manifest, key, seen = pinned_manifest(), Keypair(bytes([7]) * 32), {}
     context = signed_context(key, {"manifest": manifest.body(), "timeout_seconds": 5})
     monkeypatch.setattr(rollback_v2.subprocess, "run", record_environment_then_fail(seen))
-    with pytest.raises(TapeError, match="history replay failed: stopped after reading"):
+    with pytest.raises(TapeIntegrityError, match="history replay failed: stopped after reading"):
         rollback_v2.replay_history_context(LocalFSStore(tmp_path), manifest, context, key.ss58)
     assert_pinned_worker_environment(seen)
 
@@ -702,6 +702,6 @@ def test_repair_worker_is_started_under_the_manifest_pins(
         },
     )
     monkeypatch.setattr(rollback_v2.subprocess, "run", record_environment_then_fail(seen))
-    with pytest.raises(TapeError, match="repair worker failed: stopped after reading"):
+    with pytest.raises(TapeIntegrityError, match="repair worker failed: stopped after reading"):
         rollback_v2.execute_repair_context(store, manifest, context, key.ss58)
     assert_pinned_worker_environment(seen)

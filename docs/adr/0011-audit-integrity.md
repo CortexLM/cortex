@@ -1121,7 +1121,12 @@ the table as covering them.
 
 27. `InsufficientEligibleWeight` maps to 409 `ROUND_INFEASIBLE`, `FinalityError` and `TapeError` to 409
     `ROUND_BLOCKED`, on every route (three handlers in `app.py`); the store keeps raising the bare
-    exceptions. The roster floor is documented as the arithmetic (R tolerates R - 4 exclusions: five
+    exceptions. `TapeIntegrityError(TapeError)` marks the faults of the master's own artifacts and
+    answers 500 `TAPE_INTEGRITY` instead (Lens: a 409 would tell the operator that a request was
+    wrong when the stored tape or the repair worker is): a stored tape whose signature or version
+    fails (`core.replay_tape`), a replay that differs from its tape (`tape_v2.replay`), a repair
+    worker, signing authority or output artifact that fails (`rollback_v2`). A tape or repair
+    context the caller supplied and that does not match stays a 409. The roster floor is documented as the arithmetic (R tolerates R - 4 exclusions: five
     tolerate one, D44's two need six) and enforced in `scripts/ops/live_operator.py open` (`--tolerate`,
     default 1; `--tolerate 0` opens four, explicitly), not in `open_round_v2`: the store keeps the protocol
     minimum of four, the protected-service open stays at exactly four, and a store floor of five would be a
