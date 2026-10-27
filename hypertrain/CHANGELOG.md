@@ -147,6 +147,13 @@
   the remaining members cannot carry is refused with 409 `ROUND_INFEASIBLE`. The new helpers
   join the owned set of `implementation_hash`, which changes. See
   `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- A round the caps or the finality rules refuse is a 409, no longer a bare 500: opening a round
+  with a roster the Q/4 caps cannot carry (fewer than four eligible members) or round w+2 without
+  round w+1 answered `Internal Server Error`. `InsufficientEligibleWeight` now answers 409
+  `ROUND_INFEASIBLE: <reason>` and `FinalityError` and `TapeError` 409 `ROUND_BLOCKED: <reason>`
+  on every route of the challenge app (the two rollback routes keep their bare message for a
+  `TapeError`). The store still raises the bare exceptions; nothing is written by a refused call.
+  See `docs/adr/0011-audit-integrity.md` at the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

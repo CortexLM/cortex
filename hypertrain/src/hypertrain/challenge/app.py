@@ -431,6 +431,19 @@ def create_app(
     ):
         app.add_exception_handler(cls, v2_error)
 
+    from hypertrain.aggregator.core import FinalityError, TapeError
+    from hypertrain.aggregator.weighted_v2 import InsufficientEligibleWeight
+
+    async def round_refused(_: Request, error: Exception) -> JSONResponse:
+        """A round the caps or the finality rules refuse is a conflict, never a crash."""
+        code = (
+            "ROUND_INFEASIBLE" if isinstance(error, InsufficientEligibleWeight) else "ROUND_BLOCKED"
+        )
+        return JSONResponse({"detail": f"{code}: {error}"}, status_code=409)
+
+    for refusal in (InsufficientEligibleWeight, FinalityError, TapeError):
+        app.add_exception_handler(refusal, round_refused)
+
     @app.post("/v2/server-keys", status_code=201)
     async def grant_server_key(request: Request) -> Any:
         return await run(server_keys.grant, await read_model(request, SignedGrant))
