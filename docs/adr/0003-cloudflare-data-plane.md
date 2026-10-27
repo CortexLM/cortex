@@ -3,6 +3,9 @@
 - Status: draft for branch `v3-dataplane-cloudflare`, 2026-10-26 (Principal SN100 D13). Forge
   decides promotion to `v3`. Nothing here changes a production run, master, relay, profile,
   pin, DNS record or emission. The challenge still stores objects on local disk by default.
+  Amended 2026-10-27 by the branch `v3-core-eviction-fixes`: checkpoint retention (Decisions 3
+  and 5, Consequences, cost model, founder decision 1), after finding F7 of the Lens review of
+  `v3-core-eviction` (see ADR 0002, Sources).
 - Order: brief `v3-dataplane-cloudflare` and checklist `C-cloudflare-data-plane`. The part size
   rule in Decision 2 is Forge's answer to the session question on 2026-10-26 (option A: parts
   are 4 MiB multiples, 8 MiB by default).
@@ -110,19 +113,34 @@
      re-publish, which happens rarely and far below 1 write/s.
    - `runs/<run_id>/objects/<sha256>`: written by the coordinator.
    - `runs/<run_id>/up/<hotkey>/<sha256>`: host uploads.
-   - `runs/<run_id>/ckpt/<sha256>`: eviction checkpoints, chained by ADR 0002.
+   - `runs/<run_id>/ckpt/<sha256>`: eviction checkpoints, chained by ADR 0002: state objects and
+     their manifests of 344 to 720 bytes. A chain is read from its head back to its base and a
+     link replays from its parent state, so which of them may be deleted, and when, is ADR 0002's
+     rule ("Retention of checkpoint objects"), not a per-prefix choice.
    - A multipart object carries `x-amz-meta-sha256` and `x-amz-meta-blocks`. The second names a
      sidecar object under the same prefix holding the block list.
    - No key under `runs/` is ever rewritten. Chain heads, leases and grant state live in the
      coordinator database, never in a mutable R2 key, which also avoids the per-key write limit.
    - Lifecycle:
      - abort incomplete uploads after 1 day under `runs/`;
-     - the coordinator deletes settled deltas and superseded checkpoints as it goes
-       (DeleteObject is free);
-     - expire `runs/<run_id>/` after settlement and the dispute window (founder decision);
+     - the coordinator deletes settled deltas as it goes (DeleteObject is free). It deletes
+       checkpoint objects only by the rule of ADR 0002 ("Retention of checkpoint objects"): a
+       state once the link it ends and the link built on it are both released (audited, out of
+       dispute, grace elapsed; the last state of a shard: once the round is settled and the next
+       base is stored), a manifest never before its round's retention ends. "Superseded by a
+       newer head" is not enough, because a resumer reads every manifest back to the base and a
+       link replays from its parent state;
+     - expire `runs/<run_id>/` after settlement and the dispute window (founder decision). R2
+       counts object age, not run state [A, r2/buckets/object-lifecycles], so on `ckpt/` this
+       rule is created only once the run is settled and its disputes are closed (or the
+       coordinator lists and deletes the prefix then): a rule installed at run start would
+       expire the head state of a stalled round;
      - never expire `datasets/`.
 
-     The cost model's retention figures assume these deletes; none is built here.
+     The cost model's retention figures assume these deletes and keep K = 2 states per host
+     (see the cost model); ADR 0002's rule can need more. None is built here: neither the
+     checkpoint store of ADR 0002 nor `R2ObjectStore` has a delete, and the coordinator keeps no
+     record of past rounds' heads or of each link's audit and dispute status.
 4. **Signed grants become presigned part offers** (`offer.py`). The coordinator first checks
    the grant (subnet member, admission owner, commit, deadline), as `upload-grant` does
    (`store.py:9820-9989`). Then it:
@@ -167,11 +185,19 @@
        coordinator runs `finish_upload`;
      - `get` reads through a presigned GET.
 
-     That adapter needs the coordinator routes of ADR 0002 and is not built here. The
+     That adapter needs coordinator routes that no document defines yet (ADR 0002 has none)
+     and is not built here, so the flush that ADR 0002's drain runs on a Spot host has no
+     implementation in either branch (ADR 0002, Consequences). The
      alternative is R2 temporary credentials scoped to the host's checkpoint prefix and lease
      (TTL up to 7 days; per-action scope needs local JWT signing) [V, r2/api/s3/temporary-
      credentials, updated 2026-10-16]. They would let the host run `R2ObjectStore` itself, but
      they bind no content hash.
+
+     In both models a host must not be able to delete under `ckpt/`: `R2ObjectStore.presign`
+     signs GET and PUT only, and a temporary-credential scope must exclude DeleteObject. A host
+     that could delete a parent state would make the next link unreplayable, and a manifest a
+     broken resume (ADR 0002, "Retention of checkpoint objects") [H]. Only the coordinator's
+     credential deletes.
 6. **Retry** (`r2.py:50`): full-jitter exponential backoff on 429, 5xx and transport errors.
    A numeric `Retry-After` is a floor up to the cap (16 s by default), and a 429 waits at least
    1 s. Five attempts by default.
@@ -259,7 +285,11 @@
 - **Not built here**:
   - wiring the store into the challenge (`Config` reads no R2 setting);
   - a versioned `UploadGrant` that carries offer URLs and signs the part-hash list;
-  - the host-side checkpoint adapter, and the coordinator's deletes;
+  - the host-side checkpoint adapter;
+  - the coordinator's deletes of settled deltas and round inputs;
+  - the coordinator's deletes of checkpoint objects: they need a delete on the checkpoint store,
+    a persisted record of every round's shard heads and of each link's audit and dispute status,
+    and the audit and dispute readers of P1 (ADR 0002, "Retention of checkpoint objects");
   - Local Uploads;
   - regional read buckets;
   - a lifecycle rule, a production bucket or a production token.
@@ -283,7 +313,14 @@ Assumptions [H, every one a placeholder until ADR 0002 and the founder fix them]
 - 144 rounds/day (10 min);
 - a 126 MB delta per host-round, which the coordinator reads back once;
 - 1.98 GB of round inputs published once per round and read by every host;
-- 24 checkpoints of 1.485 GB per host per day, the last 2 kept;
+- 24 checkpoints of 1.485 GB per host per day, K states held per shard at any time (one shard
+  per host at the default capacity of 1), with K = 2 (the last two kept) in the rows below.
+  ADR 0002's rule keeps a state until its link is released, so K = 2 holds only if T_hold, the
+  time from a link's acceptance to its release, is at most one checkpoint interval [?]. The
+  rows are a lower bound for checkpoint storage: the extra cost is hosts x (K - 2) x 1.485 GB x
+  $0.015 per GB-month [H, arithmetic]. The 24 per day also disagree with ADR 0002's example
+  interval of 10 minutes and with a link at the end of each unit, which write and read more
+  checkpoints than the rows count [?];
 - one 2.1 GB admission trial per host per day, kept 1 day;
 - deltas kept 10.1 h (the TEST `retain_until`) and round inputs 1 day, which needs the
   coordinator deletes of Decision 3;
@@ -334,6 +371,9 @@ Billable operations are rounded up to the next million after the free tier.
 ## Founder decisions
 
 1. Retention per prefix (uploads, checkpoints, round inputs): it drives most of the storage cost.
+   For checkpoints the founder fixes T_hold within ADR 0002's rule ("Retention of checkpoint
+   objects"): a parent state outlives its link's audit and dispute window, and manifests outlive
+   their round's retention.
 2. Production bucket creation, location hint and token scopes. Recommended: one bucket per
    environment, a bucket-scoped `Object Read & Write` token for the coordinator only, and
    rotation of today's account-wide token and key.

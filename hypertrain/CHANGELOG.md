@@ -23,10 +23,14 @@
   `data.store.sigv4_presign` now signs the URL query and extra headers.
 - Docs, CI, image and release workflows, Dockerfiles.
 - Eviction-tolerant core `hypertrain.elastic` (v3, not wired into the v2 challenge): leases with
-  fencing tokens and a progress deadline, joins admitted by the run's authority, deterministic
-  shard reassignment, content-addressed checkpoint chains checked back to the round's base,
-  idempotent commit and leave retries, the AWS IMDSv2 spot notice, a signed leave and a drain
-  that flushes only when it fits before the deadline; see `docs/adr/0002` at the monorepo root.
+  fencing tokens, saved before they are granted so that a restart never reissues one, and a
+  progress deadline, joins admitted by the run's authority, deterministic shard reassignment
+  (a shard a busy host never works goes to a member that holds nothing), content-addressed
+  checkpoint chains checked back to the round's base, idempotent commit and leave retries
+  (answered for two rounds, so the retry memory stays bounded), a required audit before any credit and
+  `withdraw` of a link found invalid later, the AWS IMDSv2 spot notice, a signed leave and a
+  drain that flushes only when it fits before the deadline; see `docs/adr/0002` at the monorepo
+  root.
 - GPU-less eviction simulator `python -m hypertrain.elastic.sim` (`table`, `aggregate`, `soak`):
   8-GPU hosts on a fake clock under seeded notice, hard-kill, host-loss, partition,
   store-partition, regional-loss and drought schedules; every run must end in the uninterrupted
