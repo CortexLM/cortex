@@ -189,18 +189,22 @@ The renewal window does not grow with `work_screen_epoch_rounds`. A trial finali
 sets the next seed one round later, and the next trial must fit in the `challenge_rounds`
 rounds after that seed: always 100, which the policy schema fixes, about 5 min at 3 s
 rounds. The challenge deadline is seed + 100 whenever the challenge is requested, and the
-proof must be accepted by then. A challenge left unproven past its deadline suspends the
-miner (`CHALLENGE_EXPIRED`) at its next challenge request. A trial whose proof was accepted
-is never expired by a later request, and its finalization may follow the deadline: the miner
-may re-post the exact accepted proof and screen after their deadline to run a finalization
-that failed (the proof route commits the proof and the finalization separately). A different
-proof after the deadline is refused. So a miner that is down for
+proof must be accepted by then. A challenge left unproven past its deadline is closed
+`EXPIRED` by the master at the next beacon push (or at anyone's next challenge request, which
+frees the place first). Nobody is suspended: the miner keeps its state, its clean trials and
+its screen, and a later request answers 409 `CHALLENGE_EXPIRED` until a re-seed exists. The
+deadline round itself still accepts a proof. A trial whose proof was accepted is never expired
+by the clock, and its finalization may follow the deadline: the miner may re-post the exact
+accepted proof and screen after their deadline to run a finalization that failed (the proof
+route commits the proof and the finalization separately). A different proof after the
+deadline is refused. So a miner that is down for
 longer than that window minus one trial's duration cannot renew its screen, whatever
 `work_screen_epoch_rounds` is. At most two trials are open at once across the run (the
 schema fixes `max_trial_replays` at 2). In a run longer than `work_screen_epoch_rounds`
 (about 5 h at 6000), every ACTIVE miner must therefore chain its trials, each one proven
 inside its window, to stay eligible. Otherwise only the suspend and resume above bring it
-back, to PROBATION at zero clean trials.
+back, to PROBATION at zero clean trials; an expired trial changes none of that, it only frees
+its place.
 
 `manifest_v2 example` writes 6000 (about 5 h). In a serial 40-trial campaign
 (3 × 12 ACTIVE + 4 PROBATION), each trial spans at most about `challenge_rounds` + 1

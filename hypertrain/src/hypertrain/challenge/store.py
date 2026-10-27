@@ -724,7 +724,7 @@ class ChallengeStore:
             self.beacon_arrived.notify_all()
         for guard in self._lease_guards_v2.values():
             guard.advance(br.round)
-        for run_id, (escrow, _, _) in self._services_v2.items():
+        for run_id, (escrow, admission, _) in self._services_v2.items():
             with self._tx():
                 origins = self._db.execute(
                     "SELECT o.origin FROM escrow_origins o JOIN escrow_units u "
@@ -748,6 +748,8 @@ class ChallengeStore:
                             raise
                 self._expire_leases_v2(run_id, br.round)
             self._close_blocked_disputes_v2(run_id)
+            with self._tx():  # own transaction: bookkeeping must not undo maturation or leases
+                admission.reap_expired_trials(now=self._now(self._db))
         for _, _, disputes in self._services_v2.values():
             disputes.notify()
         self._notify_processes_v2()

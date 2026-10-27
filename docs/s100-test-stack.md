@@ -468,6 +468,8 @@ reach a round: no `run-v2`, no audit, no `get_weights`.
   that trial could not continue. Backfilling the gap through `/v1/admin/beacon` took 2 minutes of
   store lock, a pause of 5 minutes, and two trials passed their 100-round window: the identity is
   SUSPENDED `CHALLENGE_EXPIRED` at its next challenge request, and `resume` resets `clean_count` to 0.
+  Since ADR 0010 such a trial is closed `EXPIRED` at the next beacon push and the identity keeps
+  its state; its next request answers 409 `CHALLENGE_EXPIRED`.
 - **A validator cycle on A** shows as `exec_host_unavailable` ("0 idle GPUs, 1 needed") and the
   executor waits (`sweeps`); it cost one trial 40 s.
 
