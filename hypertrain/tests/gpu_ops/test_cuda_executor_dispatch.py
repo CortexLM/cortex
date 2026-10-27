@@ -2248,3 +2248,21 @@ def test_the_fake_docker_refuses_the_cache_mounts_the_real_daemon_refuses(
             [*argv[:at], *mount, *argv[at + 2 :]], input=b"", env=env, capture_output=True
         )
         assert done.returncode == 125 and message in done.stderr.decode(), mount
+
+
+def test_the_fake_host_charges_a_run_without_the_mount_the_cold_start_every_time(
+    make_pool, canned, tmp_path
+):
+    # no mount: the cache dies with the container (--rm), so the run costs what a cold cache costs
+    pool = make_pool(
+        labels=("a",),
+        config={"compute_cache": False},
+        hosts={"a": {"cold_start": 1.5, "warm_start": 0}},
+    )
+    factory = cuda_executor.load(pool.config_path)
+    for number in (1, 2):
+        dispatch(pool, canned.stage(tmp_path / f"home{number}"), factory=factory)
+
+    runs = pool.toolbox.runs()
+    assert [r["cache"] for r in runs] == ["none", "none"]
+    assert all(r["end"] - r["start"] >= 1.5 for r in runs)
