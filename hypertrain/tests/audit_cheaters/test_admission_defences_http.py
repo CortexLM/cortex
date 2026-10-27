@@ -1,10 +1,17 @@
 """Admission defences over the signed HTTP routes of the real in-process service.
 
 RTA-01..RTA-05 and RTA-10 come from the red-team report (Lens, 2026-10-27), which proved them
-against the in-process `Admission` API only. Each hole below is an xfail(strict) test whose body
-asserts the DESIRED defence; its control passes today (RTA-04's control is the existing
-tests/challenge/test_trial_export.py::test_job_route_refuses_another_miners_admission). The
-reference trial is run once per module and cloned per test.
+against the in-process `Admission` API only. Each hole below is an xfail(strict, raises=
+AssertionError) test whose body asserts the DESIRED defence; its control passes today (RTA-04's
+control is the existing tests/challenge/test_trial_export.py::
+test_job_route_refuses_another_miners_admission). A broken scenario step raises
+PreconditionError, which is not an AssertionError, so it cannot hide behind an expected failure.
+The reference trial is run once per module and cloned per test.
+
+The fixes for RTA-01..05 and RTA-10 are not on this base (`65be1962`): the lot that carries them
+is the branch `v3-admission-hardening` (Forge, 2026-10-27). Until it is merged these strict xfails
+XFAIL; on the day it is, each XPASS(strict) fails the run and the marker is removed, which turns
+the test into a normal regression test (RTA-04: `owner_challenge` must then sign as the owner).
 """
 
 from __future__ import annotations
@@ -18,6 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from ac_precondition import precondition
 from fastapi.testclient import TestClient
 
 from hypertrain.miner.admission import sign_join
@@ -68,10 +76,25 @@ def rotate_to(n, cold: Keypair, hot: Keypair, new_hot: Keypair, label: str):
     )
 
 
-def challenge_of(n, admission_id: str):
-    # Unauthenticated today (RTA-04): once the route needs the owner's signature this is the
-    # one place that has to sign for the owner.
+def stranger_challenge(n, admission_id: str):
+    """GET the challenge of an admission without any proof of owning it: the RTA-04 caller.
+
+    It stays unsigned when RTA-04 is fixed; the route must then refuse it.
+    """
     return n.client.get(n.url + "/join/" + admission_id + "/challenge")
+
+
+def owner_challenge(n, admission_id: str, owner: Keypair):
+    """GET the challenge as the admission's owner: every honest poll of this module goes here.
+
+    RTA-04: the route only checks that the admission's hotkey is registered, so `owner` is not
+    used yet. Once the route needs the owner's signature this is the one place that signs: follow
+    the miner-facing /job route, which takes the headers x-hotkey and x-trial-signature (the
+    hotkey's signature over a per-route domain, the run id and the admission id; see `job()` in
+    tests/challenge/test_trial_export.py), with whatever scheme the fix defines. A key other than
+    the owner's, registered on the subnet, must be refused too.
+    """
+    return stranger_challenge(n, admission_id)
 
 
 def record_of(n, hotkey: Keypair) -> dict:
@@ -107,6 +130,7 @@ def test_rotation_signed_by_a_foreign_coldkey_is_refused(net) -> None:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="RTA-01: RotateRequest is signed by the coldkey only; a registered hotkey that never "
     "consented is burned (HOTKEY_HISTORY_EXISTS) and its owner can no longer join",
 )
@@ -117,12 +141,13 @@ def test_rotation_to_a_hotkey_that_did_not_consent_is_refused(net) -> None:
     # When: someone else's coldkey rotates its admission onto the victim hotkey
     response = rotate_to(net, svc.COLD[0], svc.HOT[0], victim_hot, "squat")
     # Then: refused, and the victim can still apply with its own keys
-    assert response.status_code != 200, response.text
+    assert 400 <= response.status_code < 500, response.text
     assert apply_to_join(net, victim_hot, victim_cold, "victim-join").status_code == 200
 
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="RTA-01: a rotation chain has no quota; every rotation is accepted in the same beacon",
 )
 def test_rotation_chain_is_bounded_per_beacon(net) -> None:
@@ -143,7 +168,7 @@ def test_rotation_chain_is_bounded_per_beacon(net) -> None:
 def apply_many(n, places: int) -> None:
     for i in range(places):
         response = apply_to_join(n, EXTRA_HOT[i], EXTRA_COLD[i], f"unfunded-{i}")
-        assert response.status_code == 200, response.text
+        precondition(response.status_code == 200, f"application {i} refused: {response.text}")
 
 
 def test_pending_places_are_bounded_and_a_refusal_changes_nothing(net) -> None:
@@ -159,6 +184,7 @@ def test_pending_places_are_bounded_and_a_refusal_changes_nothing(net) -> None:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="RTA-02: join takes no stake and an APPLIED row never expires, so unfunded "
     "applications hold every pending place for good (PENDING_CAPACITY)",
 )
@@ -175,44 +201,48 @@ def test_idle_unfunded_applications_do_not_hold_the_pending_places_forever(net) 
 
 def test_trial_places_are_bounded_and_the_owners_own_poll_frees_one(net) -> None:
     # Given: two applicants hold the whole trial capacity with unproved trials
-    ids = [net.join(i).json()["admission_id"] for i in (1, 2)]
+    holders = [(net.join(i).json()["admission_id"], svc.HOT[i]) for i in (1, 2)]
     net.push(2)
-    assert [challenge_of(net, i).status_code for i in ids] == [200, 200]
+    assert [owner_challenge(net, *holder).status_code for holder in holders] == [200, 200]
     third = net.join(3).json()["admission_id"]
     net.push(3)
     # When / Then: a third trial is refused and leaves no row behind
-    refused = challenge_of(net, third)
+    refused = owner_challenge(net, third, svc.HOT[3])
     assert refused.status_code == 409 and "TRIAL_CAPACITY" in refused.text
     assert count(net, "admission_trials") == 2
-    # When: past its deadline the first holder polls its own trial
+    # When: past its deadline the first holder polls its own trial (the answer to that poll is
+    # not part of the contract here: only the place it frees is)
     deadline = net.setup.admission_policy.challenge_rounds + 2
     net.push(deadline + 1)
-    assert challenge_of(net, ids[0]).status_code == 200
+    owner_challenge(net, *holders[0])
     # Then: the freed place goes to the third applicant
-    assert challenge_of(net, third).status_code == 200
+    assert owner_challenge(net, third, svc.HOT[3]).status_code == 200
 
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="RTA-03: an OPEN trial is closed only by a later GET of its own admission; two "
     "never-proved trials block every trial of the run (TRIAL_CAPACITY) with nobody polling",
 )
 def test_unproved_trials_release_their_places_at_the_deadline(net) -> None:
     # Given: two applicants open a trial and never prove it
-    ids = [net.join(i).json()["admission_id"] for i in (1, 2)]
+    holders = [(net.join(i).json()["admission_id"], svc.HOT[i]) for i in (1, 2)]
     net.push(2)
-    assert [challenge_of(net, i).status_code for i in ids] == [200, 200]
+    opened = [owner_challenge(net, *holder).status_code for holder in holders]
+    precondition(opened == [200, 200], f"the two trials did not open: {opened}")
     # When: the deadline passes with nobody polling those admissions, and an honest one applies
     net.push(net.setup.admission_policy.challenge_rounds + 3)
     honest = net.join(0).json()["admission_id"]
     net.push(net.now + 1)
     # Then: the honest hotkey can open a trial
-    response = challenge_of(net, honest)
+    response = owner_challenge(net, honest, svc.HOT[0])
     assert response.status_code == 200, response.text
 
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="RTA-04: GET /join/{id}/challenge checks only that the admission's hotkey is "
     "registered, so any caller opens a rival's trial and uses up replay capacity",
 )
@@ -221,7 +251,7 @@ def test_a_non_owner_cannot_open_a_rivals_trial(net) -> None:
     rival = net.join(1).json()["admission_id"]
     net.push(2)
     # When: a caller holding no key of the applicant requests the challenge
-    response = challenge_of(net, rival)
+    response = stranger_challenge(net, rival)
     # Then: refused, as the signed /job route refuses it, and no trial slot is consumed
     assert response.status_code in (401, 403), response.text
     assert count(net, "admission_trials") == 0
@@ -229,6 +259,7 @@ def test_a_non_owner_cannot_open_a_rivals_trial(net) -> None:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="RTA-04: a challenge GET after seed+100 by anyone suspends the rival "
     "(CHALLENGE_EXPIRED) and nothing in src resumes it",
 )
@@ -237,22 +268,32 @@ def test_a_non_owner_cannot_expire_a_rivals_trial(net) -> None:
     victim = svc.HOT[1]
     rival = net.join(1).json()["admission_id"]
     net.push(2)
-    assert challenge_of(net, rival).status_code == 200
+    opened = owner_challenge(net, rival, victim).status_code
+    precondition(opened == 200, f"the rival's own trial did not open: {opened}")
     net.push(net.setup.admission_policy.challenge_rounds + 3)
     # When: a caller holding no key of the applicant requests the challenge again
-    challenge_of(net, rival)
+    stranger_challenge(net, rival)
     # Then: the applicant's standing is untouched
     assert record_of(net, victim)["state"] == "APPLIED"
 
 
 @pytest.mark.xfail(
     strict=True,
-    reason="RTA-10: ip_prefix_burst (64) exceeds max_pending (32), so the prefix quota cannot "
-    "protect the pending places",
+    raises=AssertionError,
+    reason="RTA-10: ip_prefix_burst (64) exceeds max_pending (32), so the per-prefix quota "
+    "cannot stop one source prefix from taking every pending place (Lens recommends "
+    "ip_prefix_burst below max_pending; both are policy literals, so a fix is a policy change)",
 )
-def test_default_prefix_burst_stays_within_the_pending_places() -> None:
-    policy = svc.fixture.setup().admission_policy
-    assert policy.ip_prefix_burst <= policy.max_pending
+def test_one_source_prefix_cannot_take_every_pending_place(net) -> None:
+    # Given: applications of distinct registered identities, all from one client address
+    places = net.setup.admission_policy.max_pending
+    accepted = 0
+    for i in range(places):
+        response = apply_to_join(net, EXTRA_HOT[i], EXTRA_COLD[i], f"one-prefix-{i}")
+        precondition(response.status_code < 500, f"application {i} failed: {response.text}")
+        accepted += response.status_code == 200
+    # Then: some place is left for applicants from other prefixes
+    assert accepted < places
 
 
 H = "ab" * 32
@@ -278,7 +319,9 @@ def reference(tmp_path_factory):
     try:
         identity = n.join(0).json()["admission_id"]
         n.push(2)
-        challenge = JoinChallenge.model_validate(challenge_of(n, identity).json()["body"])
+        challenge = JoinChallenge.model_validate(
+            owner_challenge(n, identity, svc.HOT[0]).json()["body"]
+        )
         response = n.client.post(
             n.url + "/admin/join/" + identity + "/reference", headers=svc.admin()
         )
@@ -415,6 +458,9 @@ def test_a_proof_differing_from_the_reference_suspends_with_a_strike_and_binds_t
     assert record["strikes"] == 1 and record["pending_dispute"]
     outcome = n.store._db.execute("SELECT outcome FROM admission_trial_results").fetchone()[0]
     assert outcome == "MISMATCH"
+    # And: it cannot open another trial
+    closed = owner_challenge(n, trial.identity, svc.HOT[0])
+    assert closed.status_code == 409 and "CHALLENGE_STATE" in closed.text
     # And: the coldkey cannot start over with a fresh hotkey
     again = apply_to_join(n, svc.HOT[2], svc.COLD[0], "fresh-hotkey")
     assert again.status_code == 409 and "COLDKEY_PROBATION_EXISTS" in again.text
@@ -424,6 +470,7 @@ def test_a_proof_differing_from_the_reference_suspends_with_a_strike_and_binds_t
     "fault,code",
     [
         ("challenge", "WORK_SCREEN_BINDING"),
+        ("screen-challenge", "WORK_SCREEN_BINDING"),
         ("nonce", "WORK_SCREEN_BINDING"),
         ("layout", "WORK_SCREEN_BINDING"),
         ("artifact", "WORK_SCREEN_BINDING"),
@@ -437,6 +484,8 @@ def test_a_proof_not_bound_to_the_open_trial_is_refused_without_state_change(
     n, proof, screen = trial.n, trial.proof, trial.screen
     if fault == "challenge":
         proof = WorkProof.model_validate({**proof.body(), "challenge_hash": H})
+    if fault == "screen-challenge":
+        screen = WorkScreenV2.model_validate({**screen.body(), "challenge_hash": H})
     if fault == "nonce":
         screen = WorkScreenV2.model_validate({**screen.body(), "nonce": H})
     if fault == "layout":
@@ -505,7 +554,7 @@ def test_a_finalized_proof_is_not_suspended_by_a_challenge_poll_after_its_deadli
     assert response.json()["clean_count"] == 1
     # When: the deadline has passed and the admission is polled again
     n.push(trial.deadline + 1)
-    poll = challenge_of(n, trial.identity)
+    poll = owner_challenge(n, trial.identity, svc.HOT[0])
     # Then: the miner keeps its standing and gets its next trial
     assert poll.status_code == 200, poll.text
     record = record_of(n, svc.HOT[0])
@@ -514,6 +563,7 @@ def test_a_finalized_proof_is_not_suspended_by_a_challenge_poll_after_its_deadli
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="RTA-05: the lazy CHALLENGE_EXPIRED branch ignores proof_digest, so a challenge GET "
     "after the deadline suspends a miner whose accepted proof was not yet finalized",
 )
@@ -533,11 +583,15 @@ def test_an_accepted_proof_is_not_suspended_before_its_trial_is_finalized(
 
     monkeypatch.setattr(n.store, "trial_proof_v2", accept_then_stall_beacons)
     response = post_proof(n, trial.proof, trial.screen)
-    assert response.status_code == 503, response.text
+    precondition(response.status_code == 503, f"finalization was not stalled: {response.text}")
     row = n.store._db.execute("SELECT proof_digest, state FROM admissions_v2").fetchone()
-    assert row["proof_digest"] is not None and row["state"] == "PROBATION"
-    # When: the feed recovers after the deadline and the admission is polled
+    precondition(
+        row["proof_digest"] is not None and row["state"] == "PROBATION",
+        f"the proof was not accepted before the stall: {tuple(row)}",
+    )
+    # When: the feed recovers after the deadline and its owner polls the admission (RTA-04 or not,
+    # the owner's own poll must not suspend an accepted proof)
     n.push(trial.deadline + 1)
-    challenge_of(n, trial.identity)
+    owner_challenge(n, trial.identity, svc.HOT[0])
     # Then: the accepted proof still stands
     assert record_of(n, svc.HOT[0])["state"] == "PROBATION"

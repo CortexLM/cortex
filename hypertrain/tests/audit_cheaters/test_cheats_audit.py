@@ -26,7 +26,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -42,11 +42,13 @@ from ac_cheats import (
     HONEST,
     SEAMS,
     Cheat,
+    ForgedRngCtr,
     Withdrawn,
     WorkerCheat,
     artifacts_of,
     lie,
 )
+from ac_world import record
 from pydantic import ValidationError
 
 from hypertrain.auditor.replay import (
@@ -462,16 +464,35 @@ def round1(table: SimpleNamespace) -> SimpleNamespace:
 
 # --- the cheat table: the production audit detects every self-consistent cheat ---------------
 
-# name -> first_bad_leaf. Leaves are t=0, 2, 4 (J=2): step 1-2 -> leaf 1, step 3-4 -> leaf 2.
-# Leaf 0 binds the start state, so only a different start shows there. Every row is MISMATCH.
+
+def window_of(step: int | None) -> int:
+    """The leaf a defect of inner step ``step`` (None: the last step) first shows in. Leaf k binds
+    the state after step k*J, so a step-level defect first shows in leaf ceil(step / J)."""
+    g = Geometry()
+    return math.ceil((g.H if step is None else step) / g.J)
+
+
+def double_of[T: Cheat](name: str, kind: type[T]) -> T:
+    double = BY_NAME[name]
+    assert isinstance(double, kind)
+    return double
+
+
+# name -> first_bad_leaf, every row MISMATCH. The leaf of a worker double follows from its step
+# (Geometry: H=4, J=2, leaves at t=0, 2, 4) and the forged rng_ctr from its leaf. Leaf 0 binds the
+# start state and has no batch, so a copied peer (same round-0 start) and another shard first
+# differ in leaf 1, and only a different start state shows in leaf 0. A defect that leaves every
+# leaf honest (a forged delta, a lie in a committed hash) has no bad leaf: None.
 TABLE: dict[str, int | None] = {
-    "altered-weights-one-ulp": 2,
-    "altered-weights-one-ulp-first-step": 1,
+    "altered-weights-one-ulp": window_of(double_of("altered-weights-one-ulp", WorkerCheat).step),
+    "altered-weights-one-ulp-first-step": window_of(
+        double_of("altered-weights-one-ulp-first-step", WorkerCheat).step
+    ),
     "forged-delta-valid-hash": None,
     "copied-peer-upload-resigned": 1,
-    "skipped-optimizer-step": 1,
+    "skipped-optimizer-step": window_of(double_of("skipped-optimizer-step", WorkerCheat).step),
     "wrong-data-shard": 1,
-    "wrong-seed-forged-rng-ctr": 1,
+    "wrong-seed-forged-rng-ctr": double_of("wrong-seed-forged-rng-ctr", ForgedRngCtr).leaf,
     "wrong-initial-theta": 0,
     "commit-lie-final-theta-hash": None,
     "commit-lie-ef-out-hash": None,
@@ -493,6 +514,25 @@ def test_cheat_is_mismatch_at_the_expected_leaf(table: SimpleNamespace, name: st
     assert judge(world, base, product, table.root, name) == ("MISMATCH", TABLE[name])
 
 
+@pytest.mark.parametrize(
+    "name,neutral",
+    [("forged-delta-valid-hash", {"scale": 1.0}), ("wrong-data-shard", {"shift": 0})],
+    ids=["forged-delta-scale-1", "wrong-shard-shift-0"],
+)
+def test_a_double_with_its_alteration_switched_off_is_an_honest_miner(
+    table: SimpleNamespace, name: str, neutral: dict[str, Any]
+) -> None:
+    """Control of the table: these two doubles rebuild a payload or a job by hand (a codec delta,
+    shifted rows and Merkle proofs). With the alteration set to nothing (scale 1, shift 0) the
+    rebuilt product is the honest one, byte for byte, and the audit MATCHes it, so the MISMATCH
+    of the table is caused by the alteration and not by how the double builds its inputs."""
+    base, world = table.base["a"], table.world
+    control = replace(BY_NAME[name], name=name + "-neutral", **neutral)
+    product = mine(world, base, control, table.root, control.name)
+    assert product == world.product(base.start, base.art)
+    assert judge(world, base, product, table.root, control.name) == table.honest["a"]
+
+
 def _step_cheat(kind: str, step: int) -> Cheat:
     return WorkerCheat(
         cheat=1 if kind == "ulp" else 5,
@@ -505,18 +545,16 @@ def _step_cheat(kind: str, step: int) -> Cheat:
     )
 
 
-@pytest.mark.parametrize(
-    "kind,step,leaf", [("ulp", 3, 2), ("skip", 3, 2), ("skip", 4, 2), ("skip", 2, 1)]
-)
+@pytest.mark.parametrize("kind,step", [("ulp", 3), ("skip", 3), ("skip", 4), ("skip", 2)])
 def test_the_first_bad_leaf_is_the_window_of_the_altered_step(
-    table: SimpleNamespace, kind: str, step: int, leaf: int
+    table: SimpleNamespace, kind: str, step: int
 ) -> None:
     """Defence: the audit localises a step-level cheat to the window that contains the step
     (J=2: steps 1-2 are leaf 1, steps 3-4 are leaf 2), not just somewhere in the round."""
     base, world = table.base["a"], table.world
     cheat = _step_cheat(kind, step)
     product = mine(world, base, cheat, table.root, cheat.name)
-    assert judge(world, base, product, table.root, cheat.name) == ("MISMATCH", leaf)
+    assert judge(world, base, product, table.root, cheat.name) == ("MISMATCH", window_of(step))
 
 
 def test_state_file_only_edit_changes_nothing_the_network_consumes(table: SimpleNamespace) -> None:
@@ -547,11 +585,14 @@ def test_truncated_step_count_is_refused_by_commit_validation(table: SimpleNames
 def test_replayed_round_is_mismatch_at_the_start_state(
     table: SimpleNamespace, round1: SimpleNamespace
 ) -> None:
-    """Defence: round w-1 leaves relabelled to round w, with a recomputed root and the old delta,
-    fail the replay at leaf 0, because the round-w start state differs from round w-1's."""
+    """Defence: round w-1 leaves relabelled to round w (w and rng_ctr rewritten, root recomputed,
+    old delta) fail the replay at leaf 0, because the round-w start state differs from round
+    w-1's: the relabelled leaf 0 differs from the honest round-w leaf 0 in its stages only."""
     world, base, label = table.world, round1.base, "replay-previous-round-relabelled"
     assert round1.honest == ("MATCH", None)
     product = mine(world, base, BY_NAME[label], table.root, label)
+    relabelled, honest = product.preimages[0], json.loads(base.art.leaves.read_bytes())[0]
+    assert {k for k in relabelled if relabelled[k] != honest[k]} == {"stages"}
     assert judge(world, base, product, table.root, label) == ("MISMATCH", 0)
 
 
@@ -559,7 +600,8 @@ def test_verbatim_replay_carries_leaves_of_the_wrong_round(
     table: SimpleNamespace, round1: SimpleNamespace
 ) -> None:
     """Defence: leaves still labelled round w-1 cannot be built into a round-w audit job
-    (AuditJobV2 refuses a preimage of another round); POST /leaves refuses them earlier."""
+    (AuditJobV2 refuses a preimage of another round); POST /leaves refuses them earlier
+    (store.py:6282), so the master never reaches this build for such a miner."""
     world, base, label = table.world, round1.base, "replay-previous-round-verbatim"
     product = mine(world, base, BY_NAME[label], table.root, label)
     assert {p["w"] for p in product.preimages} == {0}
@@ -569,19 +611,22 @@ def test_verbatim_replay_carries_leaves_of_the_wrong_round(
 
 @pytest.mark.xfail(
     strict=True,
-    reason="AC-METRICS-ROOT: CommitV2.metrics_root is signed but never compared. The audit "
-    "checks leaves_root, delta_hash, final_theta_hash, ef_out_hash and ef_in_hash "
-    "(auditor/worker.py:202-209); no intake route reads it (grep: miner/core.py and the "
-    "trial path admission.py:575 only)",
+    raises=AssertionError,
+    reason="AC-METRICS-ROOT (MINEUR, inert): CommitV2.metrics_root is signed but the live audit "
+    "never compares it (auditor/worker.py:202-209 checks leaves_root, delta_hash, "
+    "final_theta_hash, ef_out_hash and ef_in_hash) and no round route reads it; only the trial "
+    "publication custody checks it (admission.py:575-578). Loss and norm are verified through "
+    "leaves_root, so a lie earns nothing today; it would mislead a future consumer of the field",
 )
 def test_a_lie_in_metrics_root_is_refused(table: SimpleNamespace) -> None:
     """Desired defence: a commit whose metrics_root is not the Merkle root over the loss and
-    norm of its own leaves is not MATCH. Today it is: the field is free to forge."""
+    norm of its own leaves (the equation admission.py:575-578 already enforces, and the honest
+    commit satisfies) is not MATCH. Today it is: the field is free to forge."""
     base, world, label = table.base["a"], table.world, "commit-lie-metrics-root"
     product = mine(world, base, BY_NAME[label], table.root, label)
-    assert (
-        product.commit["metrics_root"] != world.product(base.start, base.art).commit["metrics_root"]
-    )
+    honest = world.product(base.start, base.art).commit
+    if product.commit["metrics_root"] == honest["metrics_root"]:
+        pytest.fail("setup: the commit-lie-metrics-root double did not change metrics_root")
     assert judge(world, base, product, table.root, label)[0] != "MATCH"
 
 
@@ -660,6 +705,25 @@ def test_late_commit_moves_the_clock_to_d_commit_just_before_the_commit() -> Non
 
 
 # --- false-positive control: honest miners are never flagged ------------------------------------
+#
+# Scope of this control. Miner and master replay run on ONE host, in one process family, with the
+# environment this suite inherits: CI pins ATEN_CPU_CAPABILITY=avx2, MKL_CBWR=AVX2 and
+# ONEDNN_MAX_CPU_ISA=AVX2 (hypertrain-ci.yml), this suite pins nothing, and each sweep records
+# the values it ran under. The sweeps prove that honest products replay bitwise across slots,
+# rounds, state policies, geometries, seeds, work directories and hash seeds. They do not prove
+# cross-host, cross-ISA, driver or CUDA stability (finding DET-01: honest miners on another CPU
+# class can get a MISMATCH), and the tiny model does not exhibit the AVX2 versus AVX-512
+# divergence measured elsewhere. Power: if the audits were independent, zero flags in N bounds
+# the false-positive rate below about 3/N (95%): 0.6% for the 540 fast audits, 25% for the 12
+# real ones. A mutation of audit_island that flags 1 audit in 200 fails the fast sweep; the real
+# sweep is a smoke test of the launch path, not a rate estimate.
+
+CPU_ENV = ("ATEN_CPU_CAPABILITY", "MKL_CBWR", "ONEDNN_MAX_CPU_ISA")
+
+
+def cpu_env() -> dict[str, str | None]:
+    return {name: os.environ.get(name) for name in CPU_ENV}
+
 
 FAST_POLICIES = ("reset", "carry", "derived")
 FAST_GEOMETRIES = ((2, 1, 1), (2, 1, 2), (4, 2, 2), (4, 1, 2), (4, 4, 1), (8, 2, 1))  # H, J, ranks
@@ -672,7 +736,8 @@ FAST_SWEEP_N = len(FAST_POLICIES) * len(FAST_GEOMETRIES) * len(FAST_SEEDS) * FAS
 @pytest.mark.parametrize("H,J,n_gpus", FAST_GEOMETRIES)
 def test_fast_sweep_never_flags_an_honest_miner(policy: str, H: int, J: int, n_gpus: int) -> None:
     """Defence: across slots, rounds, policies, geometries and seeds the production replay
-    (audit_island under emulate, FAST_SWEEP_N audits over all parametrizations) says MATCH."""
+    (audit_island under emulate; this case audits 30, FAST_SWEEP_N = 540 over all cases) says
+    MATCH for an honest product. Single host and environment: see the scope note above."""
     flagged, audited = [], 0
     for seed in FAST_SEEDS:
         world = World(Geometry(H, J, n_gpus, policy, init_seed=seed), seed)
@@ -684,6 +749,16 @@ def test_fast_sweep_never_flags_an_honest_miner(policy: str, H: int, J: int, n_g
                 if verdict != ("MATCH", None):
                     flagged.append((seed, w, who, verdict))
     assert audited == len(FAST_SEEDS) * FAST_ROUNDS * 2
+    record(
+        {
+            "test": "honest-sweep-fast",
+            "policy": policy,
+            "geometry": [H, J, n_gpus],
+            "audited": audited,
+            "flagged": len(flagged),
+            "cpu_env": cpu_env(),
+        }
+    )
     assert flagged == []
 
 
@@ -715,15 +790,29 @@ def test_real_torchrun_sweep_never_flags_an_honest_miner(
     tmp_path: Path, policy: str, geometry: tuple[int, int, int], rounds: int
 ) -> None:
     """Defence: a real torchrun miner launch is MATCHed by the real torchrun audit, for every
-    state policy and geometry, in the first round and (chained) in the next
-    (REAL_SWEEP_N audits over all parametrizations)."""
+    state policy and geometry, in the first round and (chained) in the next (this case audits
+    `rounds`, REAL_SWEEP_N = 12 over all cases). A smoke test of the launch path on one host and
+    environment, one seed per case: see the scope note above."""
     H, J, n_gpus = geometry
     world = World(Geometry(H, J, n_gpus, policy, init_seed=H + n_gpus), seed=H + J + n_gpus)
+    verdicts = []
     for w in range(rounds):
         s, directory = world.start(0, w), tmp_path / str(w)
         art = launch_island(world.stage(directory, s), directory, backend="cpu", trace=True)
-        verdict = judge(world, Base(s, art), world.product(s, art), tmp_path, str(w))
-        assert verdict == ("MATCH", None)
+        verdicts.append(judge(world, Base(s, art), world.product(s, art), tmp_path, str(w)))
+        if verdicts[-1] != ("MATCH", None):
+            break  # the next round would start from an anchor that was never verified
+    record(
+        {
+            "test": "honest-sweep-real",
+            "policy": policy,
+            "geometry": [H, J, n_gpus],
+            "audited": len(verdicts),
+            "flagged": sum(v != ("MATCH", None) for v in verdicts),
+            "cpu_env": cpu_env(),
+        }
+    )
+    assert verdicts == [("MATCH", None)] * rounds
 
 
 def _fingerprint(art: IslandArtifacts) -> dict[str, Any]:
@@ -742,12 +831,14 @@ def test_benign_variations_do_not_change_the_product(
     table: SimpleNamespace, tmp_path: Path
 ) -> None:
     """Defence against false positives: the same job gives byte-identical artifacts in another
-    work directory, after a restart that reuses published/, and in a second interpreter with a
-    different hash seed; the master's audit MATCHes the second interpreter's product."""
+    work directory, in a second interpreter with a different hash seed, and a restart is served
+    the validated publication unchanged (launch_island does not recompute it); the master's
+    audit MATCHes the second interpreter's product."""
     world, base = table.world, table.base["a"]
     s, honest = base.start, _fingerprint(base.art)
     elsewhere = tmp_path / "deeper" / "elsewhere"
     moved = launch_island(world.stage(elsewhere, s), elsewhere, backend="cpu", trace=True)
+    before_restart = _fingerprint(moved)
     restarted = launch_island(world.stage(elsewhere, s), elsewhere, backend="cpu", trace=True)
     other = tmp_path / "second-process"
     job = world.stage(other, s)
@@ -759,12 +850,14 @@ def test_benign_variations_do_not_change_the_product(
         "launch_island(job, Path(sys.argv[2]), backend='cpu', trace=True)\n"
     )
     (tmp_path / "job.json").write_text(job.model_dump_json())
+    hash_seed = "321" if os.environ.get("PYTHONHASHSEED") == "123" else "123"
     subprocess.run(
         [sys.executable, "-c", script, str(tmp_path / "job.json"), str(other)],
         check=True,
-        env={**os.environ, "PYTHONHASHSEED": "123"},
+        timeout=600,
+        env={**os.environ, "PYTHONHASHSEED": hash_seed},
     )
-    assert _fingerprint(moved) == _fingerprint(restarted) == honest
+    assert before_restart == _fingerprint(restarted) == honest
     second = artifacts_of(other / "published")
     assert _fingerprint(second) == honest
     assert judge(world, Base(s, second), world.product(s, second), tmp_path, "second") == (

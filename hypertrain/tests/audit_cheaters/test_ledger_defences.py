@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import HealthCheck, given, settings
+from ac_precondition import precondition
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from hypertrain.auditor.island_bisect import RefereeEvidence
@@ -252,7 +253,7 @@ def test_second_finalize_of_a_round_with_other_content_is_refused(
 @pytest.mark.parametrize(
     "stale_set,code",
     [
-        # A recorded exclusion removed a hotkey from the audited work; the finalize still lists it.
+        # The finalize lists a hotkey that has no audited work (the slice of an excluded miner).
         ("lists_unaudited_hotkey", "NO_VERIFIED_WORK_OR_EXCLUSIONS"),
         # The finalize drops a hotkey whose audited work is presented.
         ("omits_audited_hotkey", "UNVERIFIED_REWARD_WORK"),
@@ -447,8 +448,10 @@ def test_concurrent_get_weights_for_one_epoch_persist_and_pay_once(hosted: Hoste
 
     Four callers are parked in service resolution, between the two transactions of
     Store.weights, so each has already seen 'no stored answer' before any of them writes. They
-    are parked one at a time because Store.weights reads the shared connection unlocked before
-    that point (store.py:2064-2074); see finding LED-1 in the report."""
+    are parked one at a time because Store.weights reads the shared connection outside the store
+    lock before that point (store.py:2064-2074, LED-1, MINEUR): the lock audit that pins that
+    hole is test_requests_use_the_shared_connection_only_under_the_store_lock[get_weights] in
+    test_finalize_and_epoch_service.py."""
     # Given: a matured unit and 4 callers parked between the two transactions.
     h = hosted
     finalize(h)
@@ -500,9 +503,9 @@ def test_finalize_maturity_and_weights_in_any_order_pay_each_unit_once(
     unit twice, in any of their six orders: the epoch answered in between pays what had matured by
     then, and the units left are paid once by the next epoch.
 
-    Each actor is one atomic transaction under the store lock, so every concurrent outcome equals
-    one of these serial orders; the windows inside a get_weights call are raced by the two tests
-    around this one."""
+    Finalize and maturity are each one atomic transaction; get_weights is two, and the window
+    between them is raced by the two tests around this one. The six serial orders are what the
+    actors can produce when they do not interleave inside a get_weights call."""
     # Given
     h = hosted
     outcome: dict[str, Any] = {}
@@ -540,9 +543,10 @@ def test_finalize_maturity_and_weights_in_any_order_pay_each_unit_once(
 def test_maturity_landing_between_the_two_transactions_of_get_weights_pays_once(
     hosted: Hosted,
 ) -> None:
-    """Defence: payable units are read inside the transaction that pays and persists the epoch, so
-    a maturity that lands after get_weights resolved its services but before it pays is neither
-    lost for that epoch nor paid twice."""
+    """Defence: get_weights holds no store lock while it resolves its services and reads the payable
+    units inside the transaction that pays and persists the epoch, so a maturity that lands in
+    that window is neither lost for that epoch nor paid twice (the same end state as the order
+    finalize, mature, ask above, reached through a call that was already under way)."""
     # Given: a finalized, not yet matured round and a get_weights call parked between its
     # transactions.
     h = hosted
@@ -557,7 +561,15 @@ def test_maturity_landing_between_the_two_transactions_of_get_weights_pays_once(
 
     h.store._services = gated
     result: list[bytes] = []
-    caller = threading.Thread(target=lambda: result.append(h.store.weights(0, at(h.escrow, 20), 1)))
+    failures: list[BaseException] = []
+
+    def call() -> None:
+        try:
+            result.append(h.store.weights(0, at(h.escrow, 20), 1))
+        except BaseException as error:  # reported to the test thread, never swallowed
+            failures.append(error)
+
+    caller = threading.Thread(target=call)
     caller.start()
     assert parked.wait(timeout=10)
     # When: the maturity lands in the window, then the call resumes.
@@ -566,6 +578,7 @@ def test_maturity_landing_between_the_two_transactions_of_get_weights_pays_once(
     caller.join(timeout=30)
     assert not caller.is_alive()
     # Then
+    assert not failures, failures
     assert json.loads(result[0])["weights"] == {HOT: 1_000_000.0}
     later = json.loads(h.store.weights(1, at(h.escrow, 21), 2))
     assert later["weights"] == {} and pays(h.escrow) == 1 and h.escrow.balances().conserved()
@@ -588,11 +601,24 @@ def op_id(counter: int) -> str:
     return sha256_hex(f"ac-ledger-op|{counter}".encode())
 
 
-@settings(
-    max_examples=40,
-    deadline=None,
-    suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
+# derandomize: CI explores the same 40 sequences on every run, and the explicit examples pin the
+# orderings the invariants exist for (units sent away or locked before a pay, a release, a replay),
+# so a mutation of those paths is caught by every run and not by the luck of a seed.
+@settings(max_examples=40, deadline=None, derandomize=True)
+@example(
+    operations=[("mature", 0), ("send", 400_000), ("weights", 0), ("back", 400_000), ("weights", 0)]
 )
+@example(
+    operations=[
+        ("mature", 0),
+        ("lock", 300_000),
+        ("weights", 0),
+        ("release", 0),
+        ("weights", 0),
+        ("again", 0),
+    ]
+)
+@example(operations=[("weights", 0), ("mature", 0), ("lock", 600_000), ("lock", 600_000)])
 @given(operations=st.lists(OPERATIONS, max_size=14))
 def test_random_operations_conserve_units_and_never_pay_a_unit_twice(
     tmp_path_factory: pytest.TempPathFactory, actual_reward: Any, operations: list[tuple[str, int]]
@@ -737,9 +763,13 @@ def test_admission_lock_cannot_be_released_after_the_miner_was_rewarded(hosted: 
 
 @pytest.mark.xfail(
     strict=True,
-    reason="RTA-06: DisputesV2.settle_lock slashes only the contest bond and "
-    "Admission.settle_fraud has no caller, so a miner that lost a FRAUD contest keeps its "
-    "admission stake locked and recoverable",
+    raises=AssertionError,
+    reason="RTA-06: a lost FRAUD contest burns only the contest bond (DisputesV2.settle_lock, "
+    "LOCK_CONTEST). Nothing writes an accepted settlement for the miner's LOCK_ADMISSION lock "
+    "(Store._settlement_v2 finds no dispute or settlement record for it) and "
+    "Admission.settle_fraud has no caller, so the admission stake stays locked: neither burned "
+    "nor releasable (see test_admission_lock_cannot_be_released_after_the_miner_was_rewarded). "
+    "The BANNED half is test_a_lost_fraud_contest_ends_in_a_banned_admission",
 )
 def test_lost_fraud_contest_burns_the_miners_admission_lock(tmp_path: Path) -> None:
     """Desired defence: when the referee proves FRAUD against a miner, the miner's admission stake
@@ -781,24 +811,50 @@ def test_lost_fraud_contest_burns_the_miners_admission_lock(tmp_path: Path) -> N
         evidence_hash=proof.digest(),
     )
     d.resolution(canonicalize(seal(ref, "ResolutionV2", d.run_id, resolution, 100000)), now=3)
+    precondition(d.escrow.balances(COLD).admission_locked == 200, "admission lock not held")
     # When: the dispute is settled against the miner.
     d.settle_lock(turn.dispute_id, now=3, referee_cost=10)
+    precondition(d.escrow.balances().burned >= 90, "the contest bond did not burn")
     # Then: the contest bond burned (90 after the referee's 10) and, desired, the stake with it.
     assert d.escrow.balances().burned >= 90 + 200
     assert d.escrow.balances(COLD).admission_locked == 0
 
 
+FAR = 2**62
+
+
 @pytest.mark.xfail(
     strict=True,
-    reason="RTA-09: epoch_at is unbounded; one internal-bearer call with a far-future epoch_at "
-    "makes every later honest epoch answer out_of_order (all mass burned) until wall clock "
-    "catches up",
+    raises=AssertionError,
+    reason="RTA-09 (MINEUR, needs the internal bearer): epoch_at is bounded only by 2**63. One "
+    "call with a far-future epoch_at is journaled as the newest answer time (ledger.py:313, "
+    "368-371), so every later honest epoch answers out_of_order (all mass burned) for good: no "
+    "wall-clock epoch_at is ever accepted again",
 )
 def test_far_future_epoch_at_does_not_freeze_later_honest_epochs(http: Any) -> None:
     """Desired defence: a far-future epoch_at is refused, or at least does not turn every later
     honest epoch into an out_of_order answer."""
     # When: one call with an absurd epoch_at, then the next epoch at wall-clock time.
-    far = http_weights(http, 1, 2**62)
+    far = http_weights(http, 1, FAR)
+    precondition(far.status_code < 500, f"far call crashed: {far.text}")
     honest = http_weights(http, 2, 1_800_000_000)
     # Then
-    assert far.status_code >= 400 or honest.json()["metadata"]["reason"] == "ok"
+    assert 400 <= far.status_code < 500 or honest.json()["metadata"]["reason"] == "ok"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="RTA-09 (MINEUR, needs the internal bearer): epoch is bounded only by 2**63; one call "
+    "with a far epoch is journaled as the newest epoch (ledger.py:313, 368-371), so every later "
+    "honest epoch answers out_of_order for good",
+)
+def test_far_future_epoch_does_not_freeze_later_honest_epochs(http: Any) -> None:
+    """Desired defence: a far-future epoch number is refused, or at least does not turn every later
+    honest epoch into an out_of_order answer."""
+    # When: one call with an absurd epoch, then the next epoch at wall-clock time.
+    far = http_weights(http, FAR, 1_800_000_000)
+    precondition(far.status_code < 500, f"far call crashed: {far.text}")
+    honest = http_weights(http, 2, 1_800_000_000)
+    # Then
+    assert 400 <= far.status_code < 500 or honest.json()["metadata"]["reason"] == "ok"

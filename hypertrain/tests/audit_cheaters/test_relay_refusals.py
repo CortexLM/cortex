@@ -30,6 +30,7 @@ import pytest
 
 from hypertrain.beacon.core import BeaconRound, round_at_or_after
 from hypertrain.beacon.drand import QUICKNET_GENESIS, QUICKNET_PERIOD
+from hypertrain.data.stream_store import MetadataConflict, StreamStore
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.envelope import SignatureError
 from hypertrain.protocol.messages_v2 import RoundOpenV2
@@ -137,6 +138,40 @@ async def put(
         content=data,
         headers={"X-Upload-Grant": capability or upload.capability},
     )
+
+
+class Overlap:
+    """Makes the first journal writes of concurrent replicas genuinely overlap.
+
+    On one event loop the replicas would otherwise run one after the other, never contend on the
+    journal's compare-and-swap, and a store that ignored the etag would pass a race test. Each of
+    the first `callers` writes waits until all of them have read the journal, so exactly one wins
+    the swap and the others retry against the winner's state. `conflicts` counts the swaps lost.
+    """
+
+    def __init__(self, store: StreamStore, callers: int = 2) -> None:
+        self.swap_of = store.compare_swap
+        self.callers, self.arrived, self.conflicts = callers, 0, 0
+        self.ready = anyio.Event()
+
+    async def compare_swap(self, name: str, data: bytes, etag: str | None) -> None:
+        if self.arrived < self.callers:
+            self.arrived += 1
+            if self.arrived == self.callers:
+                self.ready.set()
+            with anyio.fail_after(10):
+                await self.ready.wait()
+        try:
+            await self.swap_of(name, data, etag)
+        except MetadataConflict:
+            self.conflicts += 1
+            raise
+
+
+def overlapping(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> Overlap:
+    overlap = Overlap(rig.store)
+    monkeypatch.setattr(rig.store, "compare_swap", overlap.compare_swap)
+    return overlap
 
 
 def stored(rig: Rig, sha: str) -> bool:
@@ -270,9 +305,22 @@ def _forged_inputs(rig: Rig, upload: Upload) -> dict[str, dict[str, object]]:
             1000,
         )
     )
+    other_registry = envelope_v2.parse_envelope(
+        envelope_v2.seal(
+            MASTER,
+            "RoundOpenV2",
+            RUN,
+            RoundOpenV2.model_validate({**upload.opened.body, "registry_epoch": 1}),
+            50,
+        )
+    )
     return {
         "round-open-of-another-round": {"round_open": other_round.opened.model_dump(mode="json")},
+        "round-open-of-another-registry-epoch": {
+            "round_open": other_registry.model_dump(mode="json")
+        },
         "assignment-of-another-miner": assignment_with(hotkey=NEXT.ss58),
+        "assignment-of-another-epoch": assignment_with(assignment_epoch=1),
         "assignment-of-another-round": {
             "assignment": other_round.assignment.model_dump(mode="json")
         },
@@ -288,7 +336,9 @@ def _forged_inputs(rig: Rig, upload: Upload) -> dict[str, dict[str, object]]:
 
 BOUND_REFUSALS = {
     "round-open-of-another-round": BOUND,
+    "round-open-of-another-registry-epoch": BOUND,
     "assignment-of-another-miner": BOUND,
+    "assignment-of-another-epoch": BOUND,
     "assignment-of-another-round": BOUND,
     "assignment-to-another-relay": BOUND,
     "assignment-of-another-network": BOUND,
@@ -329,7 +379,11 @@ async def accept_with_swapped_manifest(wire: httpx.AsyncClient, upload: Upload) 
 def test_grant_with_a_chunk_manifest_that_is_not_the_signed_one_opens_nothing(
     tmp_path: Path,
 ) -> None:
-    """A manifest naming other chunk hashes than the grant commits to is never accepted."""
+    """A manifest naming other chunk hashes than the grant commits to is never accepted.
+
+    Holds whatever the status of the refusal (today an unhandled 500, see the xfail below): the
+    no-custody guarantee does not depend on how the refusal is worded.
+    """
 
     async def scenario() -> None:
         async with serving(tmp_path) as (rig, wire, _):
@@ -344,8 +398,11 @@ def test_grant_with_a_chunk_manifest_that_is_not_the_signed_one_opens_nothing(
 
 @pytest.mark.xfail(
     strict=True,
-    reason="RELAY-01: UploadChunkManifest.validate_grant raises a bare ValueError that "
-    "create_app has no handler for, so the refusal is an unhandled 500 with no reason",
+    raises=AssertionError,
+    reason="RELAY-01 (MINEUR): UploadChunkManifest.validate_grant (relay_messages.py) raises a "
+    "bare ValueError that create_app has no handler for, so the refusal is an unhandled 500 with "
+    "no reason; nothing is stored and the relay stays live (the test above), and an honest miner "
+    "never sends it because relay/client.py runs the same check locally",
 )
 def test_grant_with_a_swapped_chunk_manifest_is_refused_with_a_reason(tmp_path: Path) -> None:
     """Every refusal of a grant is a 400 that names its reason, as the other grant checks are."""
@@ -544,11 +601,15 @@ def test_chunk_put_needs_the_master_signed_grant_of_its_own_path(
     anyio.run(scenario)
 
 
-def test_replicas_racing_conflicting_grants_reserve_exactly_one(tmp_path: Path) -> None:
-    """Two replicas on shared storage cannot both grant the same miner and round."""
+def test_replicas_racing_conflicting_grants_reserve_exactly_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two replicas on shared storage cannot both grant the same miner and round, even when both
+    read the journal before either writes (one loses the compare-and-swap and retries)."""
 
     async def scenario() -> None:
         async with serving(tmp_path, peers=1) as (rig, first_wire, (second_wire,)):
+            overlap = overlapping(rig, monkeypatch)
             first = Upload(rig, b"abc")
             second = Upload(rig, b"abd", nonce=OTHER_NONCE)
             answers: dict[str, httpx.Response] = {}
@@ -560,6 +621,7 @@ def test_replicas_racing_conflicting_grants_reserve_exactly_one(tmp_path: Path) 
                 tasks.start_soon(race, "first", first_wire, first)
                 tasks.start_soon(race, "second", second_wire, second)
 
+            assert overlap.conflicts == 1
             assert sorted(a.status_code for a in answers.values()) == [200, 400]
             winner, loser = (
                 (first, second) if answers["first"].status_code == 200 else (second, first)
@@ -573,13 +635,17 @@ def test_replicas_racing_conflicting_grants_reserve_exactly_one(tmp_path: Path) 
     anyio.run(scenario)
 
 
-def test_replicas_racing_the_same_chunk_keep_one_custody_ack(tmp_path: Path) -> None:
-    """The same chunk sent to two replicas at once yields one signed ack and one pin."""
+def test_replicas_racing_the_same_chunk_keep_one_custody_ack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same chunk sent to two replicas at once yields one signed ack and one pin, even when
+    both read the journal before either writes."""
 
     async def scenario() -> None:
         async with serving(tmp_path, peers=1) as (rig, first_wire, (second_wire,)):
             upload = Upload(rig, b"a" * CHUNK + b"suffix")
             assert (await accept(first_wire, upload)).status_code == 200
+            overlap = overlapping(rig, monkeypatch)
             answers: list[httpx.Response] = []
 
             async def race(wire: httpx.AsyncClient) -> None:
@@ -589,6 +655,7 @@ def test_replicas_racing_the_same_chunk_keep_one_custody_ack(tmp_path: Path) -> 
                 tasks.start_soon(race, first_wire)
                 tasks.start_soon(race, second_wire)
 
+            assert overlap.conflicts >= 1
             assert [a.status_code for a in answers] == [200, 200]
             assert answers[0].json() == answers[1].json()
             record = (await rig.relay.state()).uploads[upload.hash]

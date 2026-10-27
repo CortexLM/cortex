@@ -205,6 +205,12 @@ class Settlement:
         return {v.hotkey: v.result for v in self.verdicts}
 
     @property
+    def audits_done(self) -> bool:
+        """The audits were scheduled and every lease, execute and complete call went through."""
+        audits = self.step("audits")
+        return audits is not None and audits.ok and all(s.ok or s.status == 204 for s in self.steps)
+
+    @property
     def settled(self) -> bool:
         finalize = self.step("finalize")
         return finalize is not None and finalize.ok and finalize.body.get("status") == "SETTLED"
@@ -340,7 +346,9 @@ class World:
                 "time.time=lambda:_real()-_offset\n"
             )
             patch.setenv("HT_FIXTURE_CLOCK_OFFSET", str(offset))
-            patch.setenv("PYTHONPATH", str(clock) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+            # No empty entry: an empty PYTHONPATH item puts the child's cwd on its sys.path.
+            inherited = os.environ.get("PYTHONPATH")
+            patch.setenv("PYTHONPATH", os.pathsep.join(p for p in (str(clock), inherited) if p))
             # The relay app must exist before httpx.AsyncClient is replaced: its own backing
             # client is a real one.
             app = smoke._relay_app(self.svc, self.network, self._stack)
@@ -397,7 +405,8 @@ class World:
         body = self.network.store._record_v2(self.run_id, "finalize", str(w))["body"]
         return sha256_hex(canonicalize(body))
 
-    def _miner(self, index: int) -> NetworkMiner:
+    def miner(self, index: int) -> NetworkMiner:
+        """A configured NetworkMiner for identity `index`, talking to this world's master."""
         keys = self.scratch / "keys"
         keys.mkdir(exist_ok=True)
         keyfile = keys / f"miner-{index}.key"
@@ -415,6 +424,8 @@ class World:
             device=self.device,
         )
         return NetworkMiner(config, n.client)
+
+    _miner = miner  # the name other files of the suite still use
 
     def run_miner(self, index: int, cheat: CheatLike | None = None, w: int = 0) -> MinerOutcome:
         """Run miner `index` through round `w`; never raises on a refusal or a withdrawal."""
@@ -436,7 +447,7 @@ class World:
         launch = recording if cheat is None else cheat.launch(recording, ctx)
         patch.setattr(island_launch, "launch_island", launch)
         try:
-            miner = self._miner(index)
+            miner = self.miner(index)
             if cheat is not None:
                 cheat.wire(miner, ctx)
             api_call = miner.api.call
@@ -491,9 +502,22 @@ class World:
         """Push d_audit, schedule and execute every audit, aggregate and finalize round `w`.
 
         Every step's answer is recorded; the first failing gate (audits, aggregate) ends the run.
+        A scenario that must act between the audits and the aggregate calls `audit_round` and
+        then `finish_round` itself.
+        """
+        audited = self.audit_round(w)
+        if audited.audits_done:
+            return self.finish_round(audited)
+        return audited
+
+    def audit_round(self, w: int = 0) -> Settlement:
+        """First half of settle(): push d_audit, schedule and execute every audit of round `w`.
+
+        The Settlement it returns has no aggregate or finalize step yet; `audits_done` tells
+        whether the audits all went through.
         """
         started = time.monotonic()
-        n, svc, rid = self.network, self.svc, self.run_id
+        n, svc = self.network, self.svc
         opening = self.opening(w)
         if opening.d_audit > n.now:
             n.push(opening.d_audit)
@@ -550,40 +574,88 @@ class World:
                 )
                 if not complete.ok:
                     break
-        excluded = {
-            row[0]
-            for row in n.store._db.execute(
-                "SELECT id FROM records_v2 WHERE run_id=? AND kind='excluded'", (rid,)
-            )
-        }
-        included = sorted(e.hotkey for e in opening.roster if f"{w}:{e.hotkey}" not in excluded)
-        finalize_hash = None
-        if audits.ok and all(s.ok or s.status == 204 for s in steps):
-            aggregate = self._step("aggregate", post(f"/admin/rounds/{w}/aggregate", admin=True))
-            steps.append(aggregate)
-            if aggregate.ok:
-                final = Finalize(
-                    w=w,
-                    final_theta_hash_w1=aggregate.body["theta_hash"],
-                    included=included,
-                    entitlements_root="0" * 64,
-                )
-                finalize = self._step(
-                    "finalize",
-                    post(
-                        f"/admin/rounds/{w}/finalize", n.signed(svc.COORD, "Finalize", final), True
-                    ),
-                )
-                steps.append(finalize)
-                if finalize.ok and finalize.body.get("status") == "SETTLED":
-                    finalize_hash = self.finalize_hash(w)
         return Settlement(
             w,
             tuple(steps),
             tuple(verdicts),
-            tuple(included),
-            finalize_hash,
+            self._included(opening),
+            None,
             time.monotonic() - started,
+        )
+
+    def finish_round(self, audited: Settlement) -> Settlement:
+        """Second half of settle(): aggregate and finalize the round of `audited` through the
+        admin routes, without scheduling audits again.
+
+        It aggregates whatever the audit steps answered, so a scenario can finish a round whose
+        audits the master refused to schedule (an absence that only becomes certain later).
+        """
+        started = time.monotonic()
+        n, svc, w = self.network, self.svc, audited.w
+        steps = list(audited.steps)
+
+        def post(path: str, body: Any = None) -> Step:
+            return self._step(
+                path.rsplit("/", 1)[1],
+                lambda: n.client.post(n.url + path, json=body, headers=svc.admin()),
+            )
+
+        aggregate = post(f"/admin/rounds/{w}/aggregate")
+        steps.append(aggregate)
+        # Read the exclusions after the aggregate, which is what finalize must agree with.
+        included = self._included(self.opening(w))
+        finalize_hash = None
+        if aggregate.ok:
+            final = Finalize(
+                w=w,
+                final_theta_hash_w1=aggregate.body["theta_hash"],
+                included=list(included),
+                entitlements_root="0" * 64,
+            )
+            finalize = post(f"/admin/rounds/{w}/finalize", n.signed(svc.COORD, "Finalize", final))
+            steps.append(finalize)
+            if finalize.ok and finalize.body.get("status") == "SETTLED":
+                finalize_hash = self.finalize_hash(w)
+        return Settlement(
+            w,
+            tuple(steps),
+            audited.verdicts,
+            included,
+            finalize_hash,
+            audited.seconds + time.monotonic() - started,
+        )
+
+    def _included(self, opening: RoundOpenV2) -> tuple[str, ...]:
+        """Roster members of `opening` without an `excluded` record, sorted."""
+        excluded = {
+            row[0]
+            for row in self.network.store._db.execute(
+                "SELECT id FROM records_v2 WHERE run_id=? AND kind='excluded'", (self.run_id,)
+            )
+        }
+        return tuple(
+            sorted(e.hotkey for e in opening.roster if f"{opening.w}:{e.hotkey}" not in excluded)
+        )
+
+    def ask_weights(self, epoch: int, epoch_at: int) -> httpx.Response:
+        """GET /internal/v1/get_weights for `epoch` as of unix time `epoch_at`; the raw answer."""
+        n = self.network
+        route = next(
+            r for r in n.client.app.routes if getattr(r, "path", "") == "/internal/v1/get_weights"
+        )
+        code = route.endpoint.__code__
+        config = route.endpoint.__closure__[code.co_freevars.index("config")].cell_contents
+        # No production hook sets the internal token file in-process: point the closure at a
+        # throwaway random token, as scripts/mine_multi_round_v2.py does.
+        token = os.urandom(16).hex()
+        token_file = self.scratch / "internal"
+        token_file.write_text(token)
+        token_file.chmod(0o600)
+        config.internal_token_file = token_file
+        return n.client.get(
+            "/internal/v1/get_weights",
+            params={"epoch": epoch, "epoch_at": epoch_at},
+            headers={"Authorization": f"Bearer {token}", "x-platform-challenge-slug": config.slug},
         )
 
     def weights(self, mature: bool = True) -> Weights:
@@ -597,25 +669,9 @@ class World:
             ).fetchone()[0]
             if latest is not None:
                 n.push(max(n.now, latest) + 1)
-        route = next(
-            r for r in n.client.app.routes if getattr(r, "path", "") == "/internal/v1/get_weights"
-        )
-        code = route.endpoint.__code__
-        config = route.endpoint.__closure__[code.co_freevars.index("config")].cell_contents
-        # No production hook sets the internal token file in-process: point the closure at a
-        # throwaway random token, as scripts/mine_multi_round_v2.py does.
-        token = os.urandom(16).hex()
-        token_file = self.scratch / "internal"
-        token_file.write_text(token)
-        token_file.chmod(0o600)
-        config.internal_token_file = token_file
         epoch_at = int(n.store.clock())
         epoch = (epoch_at - n.store.params.genesis_unix) // n.store.params.epoch_seconds
-        response = n.client.get(
-            "/internal/v1/get_weights",
-            params={"epoch": epoch, "epoch_at": epoch_at},
-            headers={"Authorization": f"Bearer {token}", "x-platform-challenge-slug": config.slug},
-        )
+        response = self.ask_weights(epoch, epoch_at)
         answer = response.json()
         self._weights = Weights(
             response.status_code,
@@ -725,6 +781,7 @@ def ensure_snapshot(
     svc = load_service(shape.identities)
     generator, n = _build_network(svc, scratch / "origin-net")
     origin = World(svc, n, generator, scratch / "origin-run", shape, device)
+    partial = root / f".{shape.key}.partial-{os.getpid()}"
     try:
         graduate_seconds = []
         for i in range(shape.graduated):
@@ -733,7 +790,6 @@ def ensure_snapshot(
             graduate_seconds.append(time.monotonic() - started)
         started = time.monotonic()
         root.mkdir(parents=True, exist_ok=True)
-        partial = root / f".{shape.key}.partial-{os.getpid()}"
         shutil.rmtree(partial, ignore_errors=True)
         partial.mkdir()
         with sqlite3.connect(partial / "challenge.db") as copy:
@@ -754,9 +810,16 @@ def ensure_snapshot(
         try:
             os.rename(partial, target)
         except OSError:
-            # A parallel process published the same shape first; both are equivalent.
-            shutil.rmtree(partial, ignore_errors=True)
+            if not meta_file.is_file():
+                raise
+            # A parallel process published this shape first. Each fixture network stamps its own
+            # genesis, hence its own run_id, so the winner's snapshot is not ours: use its meta
+            # and drop our live network, which no longer matches what is on disk.
+            origin.close()
+            return GraduatedSnapshot(target, shape, json.loads(meta_file.read_text()), None, device)
     except BaseException:
         origin.close()
         raise
+    finally:
+        shutil.rmtree(partial, ignore_errors=True)
     return GraduatedSnapshot(target, shape, meta, origin, device)

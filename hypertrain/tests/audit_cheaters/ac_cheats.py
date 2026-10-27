@@ -55,6 +55,7 @@ from hypertrain.protocol.messages_v2 import IslandJobV1, RankWorkResult
 from hypertrain.trainer.compress import compress
 from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.model import init_params
+from hypertrain.trainer.rng import rng_ctr
 
 HERE = Path(__file__).resolve().parent
 SEAMS = frozenset({"worker", "artifacts", "job", "wire", "stage", "time", "none"})
@@ -153,11 +154,11 @@ def _write_summary(published: Path, summary: dict[str, Any]) -> None:
     (published / "rank-0/summary.json").write_bytes(canonicalize(summary))
 
 
-def _leaves(published: Path) -> list[dict[str, Any]]:
+def leaves_of(published: Path) -> list[dict[str, Any]]:
     return json.loads((published / "rank-0/leaves.json").read_bytes())
 
 
-def _write_leaves(published: Path, leaves: list[dict[str, Any]]) -> None:
+def write_leaves(published: Path, leaves: list[dict[str, Any]]) -> None:
     """Rewrite rank-0/leaves.json and keep summary.json's leaf commitments self-consistent."""
     (published / "rank-0/leaves.json").write_bytes(canonicalize(leaves))
     digests = [LeafPreimage.model_validate(x).digest() for x in leaves]
@@ -291,8 +292,10 @@ class CopiedPeer(ArtifactCheat):
 @dataclass(frozen=True, kw_only=True)
 class ReplayedRound(ArtifactCheat):
     """The miner's own tree of round w-1 is published again for round w. ``relabel`` rewrites
-    every leaf to round w and recomputes the leaves root (the delta stays the old one); without
-    it the tree is verbatim and its leaves still say round w-1."""
+    every leaf to round w, with the round-w ``rng_ctr`` (a public function of run, round and
+    step), and recomputes the leaves root, so only the state the leaves bind can give the copy
+    away; the delta stays the old one. Without it the tree is verbatim and its leaves still
+    say round w-1."""
 
     relabel: bool
 
@@ -307,7 +310,13 @@ class ReplayedRound(ArtifactCheat):
 
     def tamper(self, directory: Path, published: Path, job: IslandJobV1, ctx: CheatContext) -> None:
         if self.relabel:
-            _write_leaves(published, [{**x, "w": ctx.w} for x in _leaves(published)])
+            write_leaves(
+                published,
+                [
+                    {**x, "w": ctx.w, "rng_ctr": rng_ctr(x["run_id"], ctx.w, x["t"], -1)}
+                    for x in leaves_of(published)
+                ],
+            )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -315,7 +324,7 @@ class TruncatedLeaves(ArtifactCheat):
     """The last leaf is dropped: the miner claims one window fewer than the manifest's H."""
 
     def tamper(self, directory: Path, published: Path, job: IslandJobV1, ctx: CheatContext) -> None:
-        _write_leaves(published, _leaves(published)[:-1])
+        write_leaves(published, leaves_of(published)[:-1])
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -325,9 +334,9 @@ class ForgedRngCtr(ArtifactCheat):
     leaf: int
 
     def tamper(self, directory: Path, published: Path, job: IslandJobV1, ctx: CheatContext) -> None:
-        leaves = _leaves(published)
+        leaves = leaves_of(published)
         leaves[self.leaf]["rng_ctr"] += 1
-        _write_leaves(published, leaves)
+        write_leaves(published, leaves)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -400,7 +409,7 @@ class WrongInitialTheta(JobCheat):
 # --- wire seam: cheats 7 (delta_bytes, metrics_root) and 8 ---------------------------------------
 
 
-def _stage(path: str) -> str:
+def stage_of(path: str) -> str:
     return path.partition("?")[0].rstrip("/").rsplit("/", 1)[-1]
 
 
@@ -414,7 +423,7 @@ class WireRule:
         return None
 
 
-class _WireApi(Api):
+class WireApi(Api):
     def __init__(self, inner: Api, rule: WireRule) -> None:
         super().__init__(inner.c, inner.base)
         self.inner, self.rule = inner, rule
@@ -426,12 +435,12 @@ class _WireApi(Api):
         return result
 
 
-class _Withdraw(WireRule):
+class Withdraw(WireRule):
     def __init__(self, stage: str) -> None:
         self.stage = stage
 
     def before(self, method: str, path: str, kw: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        if method == "POST" and _stage(path) == self.stage:
+        if method == "POST" and stage_of(path) == self.stage:
             raise Withdrawn(self.stage)
         return path, kw
 
@@ -445,7 +454,7 @@ class _LateCommit(WireRule):
             self.d_commit = int(result["round_open"]["body"]["d_commit"])
 
     def before(self, method: str, path: str, kw: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        if method == "POST" and _stage(path) == "commit":
+        if method == "POST" and stage_of(path) == "commit":
             if self.d_commit is None:
                 raise RuntimeError("late-commit saw no RoundOpen before the commit")
             self.ctx.advance_beacon(self.d_commit)
@@ -466,7 +475,7 @@ class _CommitLie(WireRule):
     def before(self, method: str, path: str, kw: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if method != "POST":
             return path, kw
-        stage, original, lied = _stage(path), *self.digests
+        stage, original, lied = stage_of(path), *self.digests
         if stage == "commit":
             env = kw["json"]
             body = dict(env["body"])
@@ -497,7 +506,7 @@ class WireCheat(Cheat):
     def rule(self, miner: Any, ctx: CheatContext) -> WireRule:
         match self.kind:
             case "stage":
-                return _Withdraw(self.target)
+                return Withdraw(self.target)
             case "late":
                 return _LateCommit(ctx)
             case "commit":
@@ -505,7 +514,7 @@ class WireCheat(Cheat):
         raise ValueError(self.kind)
 
     def wire(self, miner: Any, ctx: CheatContext) -> None:
-        miner.api = _WireApi(miner.api, self.rule(miner, ctx))
+        miner.api = WireApi(miner.api, self.rule(miner, ctx))
 
 
 # --- the registry ------------------------------------------------------------------------------
@@ -553,7 +562,7 @@ ALL: tuple[Cheat, ...] = (
     ReplayedRound(
         cheat=2,
         name="replay-previous-round-relabelled",
-        summary="round w-1 leaves relabelled to round w with a recomputed root, old delta",
+        summary="round w-1 leaves relabelled to round w (w, rng_ctr, root), old delta",
         seam="artifacts",
         expected="audit",
         needs_previous_round=True,
@@ -667,3 +676,13 @@ ALL: tuple[Cheat, ...] = (
 )
 
 BY_NAME = {c.name: c for c in ALL}
+
+# The helpers other files build doubles from are public; ac_sanctions.py still imports the old
+# private names, which stay as aliases until that file moves to the public ones.
+_leaves, _write_leaves, _stage, _WireApi, _Withdraw = (
+    leaves_of,
+    write_leaves,
+    stage_of,
+    WireApi,
+    Withdraw,
+)
