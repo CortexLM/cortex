@@ -559,7 +559,9 @@ ssh root@s100 "bash -s -- r2-check --node x $GPU" < $T/challenge_image.sh
 The challenge hands two presigned URLs of that object (HEAD and GET, 120 s) to a `--rm` container
 of the GPU image that the executor's own ssh transport starts on the host (its key, its pinned
 `known_hosts`, its `docker` words), with the URLs on the container's stdin: they are in no argument,
-no file and no log. The container prints the paths Python's `ssl` looks for CA certificates in, then
+no file and no log. The container holds them on a rented machine, so it runs with
+`--cap-drop=ALL --read-only --pids-limit=64 --memory=256m --security-opt=no-new-privileges`, no
+mount and no environment variable, and the default network (it has to reach the endpoint). The container prints the paths Python's `ssl` looks for CA certificates in, then
 makes a HEAD and a one-byte ranged GET to the endpoint with the default TLS context, the one the
 runner uses. The image must already be on the host: the command passes `--pull never`, and exit 125
 (`r2-check node x exit_125`) means docker refused, usually because it is not there

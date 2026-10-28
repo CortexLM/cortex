@@ -260,6 +260,16 @@ except BaseException as error:
     out["error"] = type(error).__name__
 print(json.dumps(out, sort_keys=True))
 """
+# The container holds two presigned URLs on a rented machine and needs only to open one https
+# connection: no capability, no writable file system, no extra process or memory. The network stays
+# the default bridge, which is how it reaches the endpoint (the runner's container does too).
+CONFINE = (
+    "--cap-drop=ALL",
+    "--read-only",
+    "--pids-limit=64",
+    "--memory=256m",
+    "--security-opt=no-new-privileges",
+)
 VERIFY = {9: "not_yet_valid", 10: "expired", 18: "self_signed", 19: "self_signed_in_chain",
           20: "unknown_issuer", 21: "unknown_issuer", 62: "hostname_mismatch", 64: "ip_mismatch"}
 WORD = re.compile(r"[A-Za-z]{1,40}")
@@ -316,8 +326,8 @@ def probe(client, key, label, digest):
     if host is None or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise Said("no executor host has this label, or the image digest is not sha256:<64 hex>")
     command = shlex.join(
-        [*host.docker, "run", "--rm", "-i", "--pull", "never", "--entrypoint", ce.IMAGE_PYTHON]
-        + [f"{config.image_repository}@{digest}", "-I", "-c", NODE_PY]
+        [*host.docker, "run", "--rm", "-i", "--pull", "never", *CONFINE]
+        + ["--entrypoint", ce.IMAGE_PYTHON, f"{config.image_repository}@{digest}", "-I", "-c", NODE_PY]
     )
     urls = "".join(client.presign(m, key, expires=120) + "\n" for m in ("HEAD", "GET"))
     fd = os.memfd_create("r2-check")  # the URLs are the remote stdin and live in no file

@@ -465,6 +465,13 @@ def test_a_round_trip_refuses_the_token_the_loader_refuses(store):
 # --- the host's side ------------------------------------------------------------------------------
 
 DIGEST = "sha256:" + "ab" * 32
+CONFINE = {
+    "--cap-drop=ALL",
+    "--read-only",
+    "--pids-limit=64",
+    "--memory=256m",
+    "--security-opt=no-new-privileges",
+}
 KEY = "exec/_r2-check/0123456789abcdef0123456789abcdef"
 SIGNATURE = re.compile(r"X-Amz-Signature=[0-9a-f]{64}")
 
@@ -530,10 +537,19 @@ def test_the_host_gets_the_urls_on_its_stdin_and_a_command_that_has_none(world, 
     line, ok = probe(world)
     (run,) = host.runs
     argv = shlex.split(run["command"])
-    assert argv[:5] == ["docker", "run", "--rm", "-i", "--pull"] and argv[5] == "never"
-    assert argv[6:8] == ["--entrypoint", ce.IMAGE_PYTHON]
-    assert argv[8] == f"ghcr.io/cortexlm/cortex/hypertrain-gpu@{DIGEST}"
-    assert argv[9:11] == ["-I", "-c"] and argv[11] == functions()["NODE_PY"] and len(argv) == 12
+    image = f"ghcr.io/cortexlm/cortex/hypertrain-gpu@{DIGEST}"
+    assert argv[:2] == ["docker", "run"] and argv.index(image) == len(argv) - 4
+    assert argv[-3:-1] == ["-I", "-c"] and argv[-1] == functions()["NODE_PY"]
+    options = argv[2 : argv.index(image)]  # everything after the image is the program's
+    assert options[:4] == ["--rm", "-i", "--pull", "never"]
+    assert options[options.index("--entrypoint") :] == ["--entrypoint", ce.IMAGE_PYTHON]
+    # it holds two presigned URLs on a rented machine: nothing it does not need
+    assert CONFINE <= set(options)
+    assert not {"--privileged", "-v", "--volume", "--mount", "-e", "--env", "--env-file"} & set(
+        options
+    )
+    widening = ("--network", "--cap-add", "--device", "--pid=", "--ipc", "--user", "-u")
+    assert not [o for o in options if o.startswith(widening) or o.startswith("--security-opt=sec")]
     for secret in (KEY, "X-Amz", "sentinel-endpoint", SECRET, CFG.access_key_id):
         assert secret not in run["command"]
     head, get = run["stdin"].splitlines()
