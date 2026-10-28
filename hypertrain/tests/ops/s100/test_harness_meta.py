@@ -103,7 +103,7 @@ def test_box_run_wants_the_exact_exit_code(box, backup):
         'older than ${max}s, or behind"; exit 3; }',
         'older than ${max}s, or behind"; exit 5; }',
     )
-    box.seal(age=1800)
+    box.seal(age=4500)
     with pytest.raises(AssertionError, match="exit 5, wanted 3"):
         box.run(*call("executor", backup), rc=3)
 
@@ -246,7 +246,7 @@ def test_refused_sees_a_refusal_that_writes(box, backup):
 
 def test_refused_sees_a_refusal_that_asked_the_challenge_first(box, backup):
     box.token()
-    box.seal(age=1800)
+    box.seal(age=4500)
     gate = "  if [ $dry = 1 ]; then (gate) || gate_rc=$?; else gate; fi # a dry run reports"
     patched(
         box,

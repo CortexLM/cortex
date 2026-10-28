@@ -601,6 +601,32 @@ breaker bounds the attempt-based one).
   only the golden run ids and training hashes were regenerated (`tests/protocol/test_model_arch.py`,
   `test_od_fields.py`, `test_network_v2.py`, `tests/trainer/test_config_v2.py`).
 
+  **On the integrated tree** (`v3-integration-final`: this part merged with audit-integrity-2, the lock-free
+  trial reference and the lock-free aggregate; `hypertrain/src` tree `a2d157e8…`, measured 2026-10-28 on a
+  `git diff`-clean worktree and on a `git archive` of the commit `3ce5b031`, with `hash_consequences.py`, the
+  commands above; valid for every later commit that touches nothing under `hypertrain/src`) [V]:
+
+  | Value | Measured on the integrated tree |
+  | --- | --- |
+  | `implementation_hash`, example pin (`avx2`/`none`) | `d61bd2b8…71bdc4` |
+  | same code, `avx512`/`none` | `cbbb0465…59af17` |
+  | same code, `avx2`/`sm_103`/`math` | `8004daae…243582` |
+  | same code, `avx2`/`sm_103`/`sdpa-flash` | `2969e4a7…f07ea6` |
+  | same code, `avx2`/`sm_120`/`sdpa-flash` | `f3c351b3…af21f2` |
+  | owned names / hashed files of `implementation_hash` | 48 / 12 |
+  | `challenge/store.py` sha256 | `9379bdb4…cf31c1` |
+  | `challenge/admission.py` sha256 | `8b812e46…25b51b` |
+  | `gpu_ops/network_qualification.py` sha256 | `2206486f…319688` |
+  | `sources()` map: files, canonical sha256 | 158, `1de8e396…74c8cc` |
+  | `sources` listing, `sha256sum` of the CLI output | `8ff83ee2…532a2a` |
+  | `bundle()` | 2,734,080 bytes, `88918dd5…795525` |
+  | example `run_id` / `reference_hash` | `aa39197d…ec8abd` / `2dd4eadc…d6cc5d` (as in the DET-01 column: the integration edits no manifest field) |
+
+  The value is neither parent's: `implementation_hash` hashes the 12 files, the pin body and the owned
+  names of both lots (this part adds `_capacity_env_v2`; the lock lots add the aggregate and finality
+  replay helpers and the integration the verdict-age helper). The 12 files are the ones of this part;
+  `executor-lock-release` and `aggregate-lock-release` change none of them.
+
 ### Rejected alternatives
 
 1. `reference_spec.env.numerics`, 8 required keys: cannot say "unset"; scrubs whole prefix families
@@ -1401,18 +1427,26 @@ the table as covering them.
     of that verdict answers 409 `SANCTION_APPLIED`. The verdict hash is published to the miner in the audit
     result it can read (D51: it needs it to contest). What a contest buys today is postponement: no
     auditor-side responder exists, so the Part 1 closure ends it `INFRASTRUCTURE` and the verdict stands.
-18. **Order.** The `AUDIT_MISMATCH` rows are enforced only after Part 3 is in the code. Until then they run in
-    `record` mode (the sweeper journals `WOULD_APPLY` and calls no hook; a constructor keyword, not a
-    manifest field: `ChallengeStore(enforce_audit_mismatch=...)`, default off, and the switch the
-    environment-pin lot flips). `NO_SHOW` rows have no such dependency. The sweeper is wired: the beacon
+18. **Order and the switch (D81).** The `AUDIT_MISMATCH` rows were to be enforced only after Part 3 is in the
+    code, and until then to run in `record` mode. Part 3 is in the code (the environment pin is required) and the
+    Principal's D81 switched the sanction on: `ChallengeStore(enforce_audit_mismatch=True)` is the default, the
+    app builds its store from `Config.enforce_audit_mismatch` (default `True`, `create_app`, `challenge/app.py`;
+    no environment variable) and a child store takes its parent's. `record` mode stays as the explicit
+    non-enforcing setting (`enforce_audit_mismatch=False`, a keyword and a Config field, never a manifest field):
+    the sweeper then journals `WOULD_APPLY` and calls no hook. The guards of D47 are unchanged by the switch:
+    a sanction is booked for a `MISMATCH` the master's own grade names (`LOCATED`, or
+    `COMMIT_CONTRADICTS_LEAVES`) and for nothing else, a fault of the auditor or its host is waived, and the
+    one free contest of decision 17 stays. `NO_SHOW` rows have no such dependency. The sweeper is wired: the beacon
     push books the row of every `excluded UNVERIFIED` (a graded `MISMATCH` lease: `PENDING` with `first_seen`
     and the lease's auditor; anything else `WAIVED`), applies `decide` to the pending ones (WAIT, CANCELLED
-    by a referee finding against the auditor, WOULD_APPLY in record mode, else the hook), and a contest of a
+    by a referee finding against the auditor, WOULD_APPLY in the explicit record mode, else the hook), and a contest of a
     verdict whose sanction is `APPLIED` answers 409 `SANCTION_APPLIED`. The reason is a case the code proves
     (`tests/auditor/test_auditor.py`): a signed `delta_hash` that alone differs from the replay is a
     `MISMATCH` with no leaf and the committed root, hence `COMMIT_CONTRADICTS_LEAVES`, and the delta
-    codec depends on the ATen capability of the host (Part 3), so an honest miner on another ISA is
-    graded like a liar until the pin is required. A stale or wrong `ef_in` on the audit side is not
+    codec depends on the ATen capability of the host (Part 3), so an honest miner on another ISA was
+    graded like a liar before the pin was required. The pin is required now, which narrows the case to a
+    host that declares its class and does not honor it (the declaration is self-declared, Part 3
+    decision 13). A stale or wrong `ef_in` on the audit side is not
     that case: `_ef_in` demands `commit.ef_in_hash`, and the audit is `BAD_PROOF`, which `grade()`
     never names.
 19. **No route back [sign-off].** A round-stage sanction binds no pending reference; the only exoneration is
@@ -1548,6 +1582,12 @@ so a qualification record made on a parent tree no longer validates against this
 on the tree that is released. The tip differs from the merge `ebd0098e` by a docstring of `store.py` (the function
 is not owned, so `implementation_hash` does not move); the commits after `ae7ddf70` touch tests and documents only,
 so the values hold for them.
+
+On the integrated tree of `v3-integration-final` (DET-01, the lock-free reference and the lock-free aggregate
+merged; measured on `3ce5b031`, see Part 3 for the full table) `implementation_hash` is `d61bd2b8…71bdc4` for the
+example pin, `challenge/store.py` is `9379bdb4…cf31c1`, `sources()` is 158 files with canonical sha256
+`1de8e396…74c8cc` and `bundle()` is 2,734,080 bytes, `88918dd5…795525`. The tables above stay as the values of
+the parents.
 
 ### Consequences
 

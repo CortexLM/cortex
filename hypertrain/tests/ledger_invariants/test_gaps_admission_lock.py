@@ -241,34 +241,32 @@ def test_one_stake_backs_exactly_one_admission_of_a_coldkey(tmp_path: Path) -> N
 # --- CL-30: the store lock is not held while the service computes or hashes a trial -----------
 
 
+# Closed by executor-perf ADR0012-P2 (a30de344): trial_reference_v2 runs the launch unlocked.
 def test_the_store_lock_is_free_while_the_public_proof_route_computes_the_reference(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """CL-30+LV-01: no request holds the store lock while the trusted reference replays,
-    whichever route asks for it; a miner's POST /join/proof asks for it with no operator
-    credential (reference_due, then trial_reference_v2)."""
-    # Given: an admission with an open trial, and a replay of the reference that stalls
+    # Given: an admission with an open trial, and a reference computation that stalls
     miner = rig.join(0)
     rig.net.push(2)
     opened = rig.open_trial(miner)
     precondition(opened.status_code == 200, f"the trial was not opened: {opened.text}")
     hosted = rig.world.store.for_run(rig.run_id)
     started, resume = threading.Event(), threading.Event()
+    admission = hosted._services(rig.run_id)[1]
+    run_reference = admission.run_reference
 
-    def replaying(*args: object, **kwargs: object) -> object:
+    def computing(*args: Any, **kwargs: Any) -> Any:
         started.set()
         resume.wait(timeout=60)
-        raise AdmissionError("REFERENCE_TRIAL_CLOSED")
+        return run_reference(*args, **kwargs)
 
-    # run_reference is the step that stages the inputs and replays the job: the only step of
-    # trial_reference_v2 that may run without the lock, and the one a regression would wrap in it
-    monkeypatch.setattr(hosted._services(rig.run_id)[1], "run_reference", replaying)
+    monkeypatch.setattr(admission, "run_reference", computing)
     body, replies = proof_request(rig, miner), []
     caller = threading.Thread(
         target=lambda: replies.append(rig.net.client.post(f"{rig.net.url}/join/proof", json=body))
     )
     precondition(lock_is_free(hosted), "the lock is held while the service is idle")
-    # When: the miner posts its proof and the reference is being replayed
+    # When: the miner posts its proof and the reference is being computed
     caller.start()
     try:
         precondition(started.wait(timeout=60), "the reference computation never started")
@@ -278,19 +276,17 @@ def test_the_store_lock_is_free_while_the_public_proof_route_computes_the_refere
         caller.join(timeout=60)
     precondition(not caller.is_alive(), "the proof route never answered")
     precondition(
-        (replies[0].status_code, detail(replies[0])) == (409, "REFERENCE_TRIAL_CLOSED"),
+        (replies[0].status_code, detail(replies[0])) == (409, "WORK_SCREEN_BINDING"),
         f"the route did not run past the stalled reference: {replies[0].text}",
     )
     # Then: another thread could have taken the store lock meanwhile
     assert free, "the store lock is held for as long as the reference computes"
 
 
+# Closed by f2fdf603: export_trial_v2 stages and puts the inputs after it let go of the lock.
 def test_the_store_lock_is_free_while_the_staged_inputs_of_a_trial_are_hashed(
     rig: Rig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """CL-30+LV-01: no request holds the store lock while the staged inputs of a trial are
-    hashed into the object store; export_trial_v2 plans the staging under the lock and stages
-    and puts after it let go."""
     # Given: an open trial whose staging is a stand-in (one staged input) and whose object store
     # stalls while it hashes that input
     miner = rig.join(0)
@@ -306,7 +302,7 @@ def test_the_store_lock_is_free_while_the_staged_inputs_of_a_trial_are_hashed(
         model_dump_json=lambda: '{"job":1}',
         body=lambda: {"job": 1},
     )
-    monkeypatch.setattr(hosted, "plan_trial_v2", lambda *args, **kwargs: lambda: (job, staged))
+    monkeypatch.setattr(hosted, "stage_trial_v2", lambda *args, **kwargs: (job, staged))
     started, resume = threading.Event(), threading.Event()
     put = hosted.objects.put
 

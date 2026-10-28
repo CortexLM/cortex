@@ -862,10 +862,8 @@ def test_a_miner_commits_once_per_round_a_replay_returns_the_receipt_and_another
 
 
 def test_the_first_finalize_after_a_restart_is_accepted(audited_round: AuditedRound) -> None:
-    """CRD-05+CRD-D03: the v2 services of a restarted store are built by the first handler that
-    needs them. Finalize must not be the one that builds them inside its transaction, where
-    EscrowV2.__init__ changes PRAGMA synchronous and fails: the first Finalize after a restart is
-    accepted without another route having run."""
+    # CRD-05+CRD-D03: closed by aggregate-lock-release (6d623b0d); the finality replay it primes
+    # before the transaction builds the services of a restarted store, outside it.
     round_ = audited_round
     round_.restore()
     assert round_.finalize().status_code == 200  # control: the services are warm

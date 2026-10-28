@@ -533,7 +533,7 @@ def install_qualification(run: Any, signer: Any, **evidence_changes: Any) -> dic
 def test_production_services_exist_only_behind_an_owner_signed_cuda_qualification(
     tmp_path: Path,
 ) -> None:
-    with production_run(tmp_path, cuda=False) as run:
+    with production_run(tmp_path, cuda=False, gpu="sm_103") as run:
         service = load_fixture_module(*SERVICE_FIXTURE)
         owner = service.OWNER
         with pytest.raises(ChallengeError, match="production CUDA qualification required"):
@@ -557,7 +557,7 @@ def test_production_services_exist_only_behind_an_owner_signed_cuda_qualificatio
 
 
 def test_the_execution_backend_of_a_run_is_frozen_once_chosen(tmp_path: Path) -> None:
-    with production_run(tmp_path, cuda=False) as run:
+    with production_run(tmp_path, cuda=False, gpu="sm_103") as run:
         service = load_fixture_module(*SERVICE_FIXTURE)
         run.store.owner_hotkey = service.OWNER.ss58
         first = install_qualification(run, service.OWNER)

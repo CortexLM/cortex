@@ -162,6 +162,10 @@ class Config:
     # Seconds between two passes that release the relay custody the master owes and extend the
     # custody an open dispute pins (ADR 0014 Part 6.3, 6.4); 0 runs none. from_env turns it on.
     relay_lifecycle_interval: float = 0.0
+    # A confirmed audit mismatch sanctions the miner (D81, ADR 0011 Part 8 decision 18). False is
+    # the explicit record-only mode, for a deployment that has to stop enforcing; there is no
+    # environment variable for it.
+    enforce_audit_mismatch: bool = True
 
     @classmethod
     def from_env(cls) -> Config:
@@ -387,6 +391,7 @@ def create_app(
             verify_beacon,
             objects or LocalFSStore(config.state_dir / "objects"),
             _role_launch=_dispatcher(config),
+            enforce_audit_mismatch=config.enforce_audit_mismatch,
         )
     )
     store.clock = clock

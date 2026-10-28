@@ -142,6 +142,7 @@ def activate(world: World, index: int) -> str:
     )
     assert response.status_code == 200, response.text
     screen = WorkScreenV2(
+        env=honest_env(),
         evidence_kind="work-proof-v1",
         admission_id=admission_id,
         nonce=sha256_hex(b"nonce"),
@@ -161,7 +162,6 @@ def activate(world: World, index: int) -> str:
             for rank in range(spec.layout.n_gpus)
         ],
         artifact_hashes=[sha256_hex(b"artifact")],
-        env=honest_env(spec.env.pin()),
     )
     with world.store._tx():
         world.store._db.execute(

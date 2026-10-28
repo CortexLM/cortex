@@ -37,7 +37,7 @@ from hypertrain.ledger.escrow_v2 import (
     genesis_allocation_hash,
 )
 from hypertrain.protocol import envelope_v2
-from hypertrain.protocol.env_pins import class_pin
+from hypertrain.protocol.env_pins import GPU_CLASSES, class_pin
 from hypertrain.protocol.envelope_v2 import EnvelopeV2, seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -487,18 +487,6 @@ def host_attestation() -> dict[str, list[str]]:
 
 ECONOMICS_FIXTURE = ("li_economics_fixture", "challenge/test_production_economics_v2.py")
 CAPACITY_FIXTURE = ("li_capacity_fixture", "challenge/test_service_capacity_v2.py")
-# The device class of a CUDA run: 170 SMs, the sm_count every fixture manifest already carries.
-CUDA_GPU_CLASS = "sm_120"
-
-
-def cuda_class(manifest: RunManifestV2) -> RunManifestV2:
-    """`manifest` pinned to a CUDA device class, keeping its CPU class. Since DET-01 the store
-    refuses a qualified CUDA backend for a manifest whose pin names no device (ENV_CLASS_BACKEND),
-    so a production run is built on a manifest of this kind."""
-    body: dict[str, Any] = manifest.body()
-    env = body["training"]["reference_spec"]["env"]
-    env["pinned"] = class_pin(env["pinned"]["cpu"], CUDA_GPU_CLASS)
-    return RunManifestV2.model_validate(body)
 
 
 @dataclass
@@ -630,22 +618,32 @@ class Production:
         self.escrow.lock(lock, signer=E.COLD.ss58)
 
 
+def gpu_manifest(setup_of: Callable[[str], Any], gpu: str) -> Callable[[str], Any]:
+    """`setup_of` with the manifest pinned to the GPU class `gpu`: a run on the CUDA backend names
+    the device it runs on, and the store refuses one of class none (ENV_CLASS_BACKEND)."""
+
+    def setup(mode: str = "test") -> Any:
+        built = setup_of(mode)
+        body = built.manifest.body()
+        reference = body["training"]["reference_spec"]
+        reference["env"]["pinned"] = class_pin(reference["env"]["pinned"]["cpu"], gpu)
+        reference["sm_count"] = min(GPU_CLASSES[gpu].sm_counts)
+        return replace(built, manifest=RunManifestV2.model_validate(body))
+
+    return setup
+
+
 @contextmanager
-def production_run(root: Path, *, cuda: bool = True, **economics: Any) -> Iterator[Production]:
+def production_run(
+    root: Path, *, cuda: bool = True, gpu: str = "none", **economics: Any
+) -> Iterator[Production]:
+    """`cuda=False` leaves the backend to the store's own choice; a run that installs a CUDA
+    qualification then names a device class with `gpu`."""
     eco = load_fixture_module(*ECONOMICS_FIXTURE)
     patch = pytest.MonkeyPatch()
-    setup_of = eco.E.setup
-
-    def cuda_setup(mode: str = "test") -> Any:
-        setup = setup_of(mode)
-        return replace(setup, manifest=cuda_class(setup.manifest))
-
-    # `hosted` takes its manifest from `E.setup`: a production run is a CUDA run, whether or not
-    # its qualification is stood in for, so the manifest it hosts names a device class. The
-    # fixture module is shared by the process, hence the patch lives for this call only.
-    with pytest.MonkeyPatch.context() as manifest_patch:
-        manifest_patch.setattr(eco.E, "setup", cuda_setup)
-        store, run_id = eco.hosted(root, patch, cuda=cuda, **economics)
+    if gpu != "none":
+        patch.setattr(eco.E, "setup", gpu_manifest(eco.E.setup, gpu))
+    store, run_id = eco.hosted(root, patch, cuda=cuda, **economics)
     try:
         yield Production(eco, store, run_id)
     finally:
@@ -700,19 +698,21 @@ def creation(
     economics: EconomicsPolicyV2 | None,
     *,
     pinned: str | None = None,
-    cuda: bool = False,
+    gpu: str = "none",
 ) -> Iterator[Creation]:
     """Run creation on an empty store for the service world's manifest with another economics
     policy: `economics` (stored with the other policy objects) or the bare hash `pinned`, whose
-    object does not exist. With `cuda` the manifest names a device class (`cuda_class`), as a run
-    that has a CUDA qualification must."""
+    object does not exist. A run that stands on a CUDA qualification names the device class it
+    runs on with `gpu`: the store refuses a CUDA run of class none (ENV_CLASS_BACKEND)."""
     service = load_fixture_module(*SERVICE_FIXTURE)
     network = world.network
     body = network.manifest.body()
     body["network"]["economics_policy_hash"] = pinned or economics.digest()  # type: ignore[union-attr]
+    if gpu != "none":
+        reference = body["training"]["reference_spec"]
+        reference["env"]["pinned"] = class_pin(reference["env"]["pinned"]["cpu"], gpu)
+        reference["sm_count"] = min(GPU_CLASSES[gpu].sm_counts)
     manifest = RunManifestV2.model_validate(body)
-    if cuda:
-        manifest = cuda_class(manifest)
     objects = LocalFSStore(root / "objects")
     for name in (*PolicyHashes.model_fields, "relay_registry_hash"):
         if name != "economics_policy_hash":
@@ -776,6 +776,7 @@ def activate_identity(world: Any, index: int = 0) -> str:
     assert locked.status_code == 200, locked.text
     reference = network.manifest.training.reference_spec
     screen = WorkScreenV2(
+        env=honest_env(),
         evidence_kind="work-proof-v1",
         admission_id=identity,
         nonce=sha256_hex(b"nonce"),
@@ -795,7 +796,6 @@ def activate_identity(world: Any, index: int = 0) -> str:
             for rank in range(reference.layout.n_gpus)
         ],
         artifact_hashes=[sha256_hex(b"artifact")],
-        env=honest_env(reference.env.pin()),
     )
     with network.store._tx():
         network.store._db.execute(

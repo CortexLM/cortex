@@ -237,7 +237,7 @@ def test_executor_r2_refuses_a_live_file_that_already_sets_one_of_the_two(box, b
 
 GATES = {
     "readyz-503": ({"ready": 503}, 2, "GATE readyz not 200"),
-    "age-1800": ({"age": 1800}, 3, "GATE seal not sealed, older than 1800s, or behind"),
+    "age-4500": ({"age": 4500}, 3, "GATE seal not sealed, older than 4500s, or behind"),
 }
 
 

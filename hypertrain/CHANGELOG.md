@@ -472,8 +472,10 @@
   equal the replay under a commit that does not; anything else is waived), applies `decide` after
   `verify.T.dispute_per_level` rounds and while no contest is open, cancels it when a referee finds
   against the lease's auditor, and calls `Admission.seize_bond(AUDIT_MISMATCH)` (suspended, one
-  strike, the bond burned). Until the environment pin is required it is only recorded
-  (`WOULD_APPLY`): `ChallengeStore(enforce_audit_mismatch=True)` enforces it. A contest of a verdict
+  strike, the bond burned). It is enforced by default (D81, after the environment pin became
+  required): `ChallengeStore(enforce_audit_mismatch=True)` is the default and
+  `Config.enforce_audit_mismatch` (default `True`, no environment variable) is what the app passes;
+  `False` is the explicit record-only mode (`WOULD_APPLY`). A contest of a verdict
   whose sanction is applied answers 409 `SANCTION_APPLIED`. ADR 0011 Part 8, decisions 14 to 18.
 - A production run refuses a qualification record without `image_sources_sha256` when an audit is
   dispatched (409 `QUALIFICATION_IMAGE_SOURCES_MISSING`): before, a record without the digest meant
@@ -592,7 +594,8 @@
   177-223 s of one lock hold at the 100.7 M profile (five deltas of 102,253,376 bytes), during
   which `push_beacon` and `latest_beacon` waited and the TEST freshness gate closed. `aggregate`
   is now a claim, a computation without the lock and a settlement that writes only if the round
-  is still what the claim read (else 409 `AGGREGATE_STALE`, nothing written); the claim and
+  is still what the claim read (else 409 `AGGREGATE_STALE`, nothing written, or 409
+  `ROUND_RETIRED` when the round was retired meanwhile); the claim and
   every time-dependent decision of the plan are made at the beacon round the freshness gate
   passed at. A second `aggregate` of a round that is computing waits for it (two waiters per
   process, 600 s, then 503). `finalize` replays the applied tape before its transaction and the

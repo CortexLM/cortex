@@ -97,8 +97,8 @@ def test_the_tape_refuses_an_input_whose_replay_is_not_a_full_match_of_its_commi
         assert sa.digest_of(store, without=GATE_PINS) == before
         assert ("applied", "0") not in sa.records(store)
         # The claim commits before the tape is computed, and with it the pin of the freshness gate
-        # (`_aggregate_claim_v2`, docs/network-v2.md: aggregate computes without the store lock):
-        # the one row the refused attempt keeps.
+        # (`_aggregate_claim_v2`, CHANGELOG: aggregate without the store lock): the one row the
+        # refused attempt keeps.
         assert gate_pins(store) - pinned == {f"aggregate:0:{n.now}"}
 
 
@@ -106,7 +106,7 @@ def test_the_tape_refuses_an_input_whose_replay_is_not_a_full_match_of_its_commi
 
 
 def test_a_round_with_an_unaudited_member_cannot_be_aggregated(world: sa.World) -> None:
-    # Given: two audits done (the forger's, excluded, and the other executed miner's); the other
+    # Given: two audits done (the forger's, excluded, and the allowlisted miner's); the other
     # three members have a job but no verdict.
     with world.at("s2") as (n, cast):
         store, run = n.store, n.manifest.run_id()
@@ -370,48 +370,40 @@ def rollback_request(n: Any, cast: sa.Cast) -> dict[str, Any]:
 
 
 def test_a_settled_round_is_untouched_by_late_audit_events(world: sa.World) -> None:
-    keep = ("finality", "finalize", "finalize-result", "replayed-finality", "settlement")
-
-    def minted(n: Any) -> tuple[int, int]:
-        balances = n.store._services(n.manifest.run_id())[0].balances()
-        return balances.issued, balances.burned
-
-    # Given: the finalized round, and the bond the forger still has locked: the sanction of its
-    # mismatch is pending and waits for the end of the contest window.
+    # Given: the finalized round.
     with world.at("s5") as (n, cast):
         store, run = n.store, n.manifest.run_id()
-        forger_cold = cast.cold[cast.hot.index(cast.forger)]
-        bond = store._services(run)[0].balances(forger_cold.ss58).admission_locked
-        assert bond > 0
-        before = (settled_state(store), sa.records(store, *keep), minted(n))
+        escrow = store._services(run)[0]
+        keep = ("finality", "finalize", "finalize-result", "replayed-finality", "settlement")
+
+        def applied() -> int:
+            """The exit sanctions the beacon has applied (D81: a refuted forgery costs its bond)."""
+            rows = sa.records(store, "exit-sanction").values()
+            return sum(json.loads(row)["state"] == "APPLIED" for row in rows)
+
+        before = (settled_state(store), sa.records(store, *keep), escrow.balances().issued)
+        burned, sanctioned = escrow.balances().burned, applied()
         assert store._record_v2(run, "finality", "0")["disposition"] == "SETTLED"
-        # When: auditors ask for work, the audits are scheduled and completed again.
+        # When: auditors ask for work, the audits are scheduled and completed again, the clock
+        # runs far past every deadline and the coordinator asks to roll the round back.
         assert all(sa.lease(n, key).status_code == 204 for key in cast.auditors)
         assert sa.schedule(n).json() == {"jobs": []}
         for row in sa.lease_rows(store).values():
             stored = store._record_v2(run, "executed-verdict", row["id"])
             done = sa.complete(n, cast.keys[row["auditor"]], row["id"], stored)
             assert done.json() == {"result": row["result"]}
-        # Then: no clock has moved, so no sweeper has run and nothing changed, money included.
-        assert (settled_state(store), sa.records(store, *keep), minted(n)) == before
-        # When: the clock runs far past every deadline. This push is the one step that may move
-        # money: past the contest window it applies the sanction of the forger's earlier
-        # mismatch (ADR 0011 part 8), which burns its bond and issues nothing.
         n.push(n.now + 1000)
-        swept = minted(n)
-        assert swept == (before[2][0], before[2][1] + bond)
-        # And: the coordinator asks to roll the round back.
         refused = n.client.post(
             n.url + "/admin/rollback", json=rollback_request(n, cast), headers=sa.admin()
         )
-        # Then: money-only, and not one record or job moved; the rollback request issued and
-        # burned nothing more.
+        # Then: money-only, and not one record or job moved; the reward vested with time as it
+        # would anyway, nothing was issued on account of the audits, and the only unit burned is
+        # the bond of a sanction the beacon applied after its contest window (the round is not
+        # touched by it).
         assert detail(refused) == (409, "finalized late fraud is money-only")
-        assert (settled_state(store), sa.records(store, *keep), minted(n)) == (
-            before[0],
-            before[1],
-            swept,
-        )
+        after = (settled_state(store), sa.records(store, *keep), escrow.balances().issued)
+        assert after == before
+        assert escrow.balances().burned - burned == 1000 * (applied() - sanctioned)
 
 
 def test_after_the_last_window_nothing_late_can_change_the_dropped_round(world: sa.World) -> None:

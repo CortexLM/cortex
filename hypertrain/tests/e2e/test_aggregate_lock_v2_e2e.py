@@ -579,6 +579,22 @@ def test_a_round_retired_while_its_tape_computes_gets_no_tape(
     leader = scene.aggregate("leader")
     computation.wait_reached(leader)
     with store._tx():
+        # the two records _retire_round_v2 writes for it (tests/challenge/test_retire_round_v2.py)
+        evidence = canonicalize({"v": "ht-round-retired-v1", "w": 0})
+        state = sha256_hex(b"retired-state")
+        store._put_record_v2(
+            restored.run,
+            "applied",
+            "0",
+            {
+                "kind": "null",
+                "tape_hash": store.objects.put(evidence),
+                "out_state": state,
+                "prev_state": state,
+                "theta_hash": sha256_hex(b"retired-theta"),
+                "predecessor_tape_hash": "0" * 64,
+            },
+        )
         store._put_record_v2(restored.run, "retired", "0", {"v": "ht-round-retired-v1", "w": 0})
     after_retirement = records(store)
     computation.go.set()

@@ -242,8 +242,9 @@ numbers: the line numbers of the Context are those of the Part A tree.
    files, 800 MB of states at 100 M parameters: it now reads and plans under the lock and stages, writes
    `job.json` and puts after it. Three things keep that safe. (1) The lock used to make the stagings of a store
    run one at a time, which bounded the memory they take to one model per store (1.5 to 1.7 GB at 101 M, 2.1 to
-   2.7 GB at 162 M, measured below); `_staging`, a plain lock, keeps a bound, and no code takes the store lock while
-   it holds `_staging`, so there is no order to invert. It is stricter than what it replaces: the root and its child
+   2.7 GB at 162 M, measured below); `_staging`, a re-entrant lock (the same thread may nest a staging, another thread
+   waits), keeps a bound, and no code takes the store lock while it holds `_staging`, so there is no order
+   to invert. It is stricter than what it replaces: the root and its child
    stores share one, as they share the waiter budget and the thread pool, so the stagings of two runs wait for
    each other where each store's lock used to let them overlap; the requests parked on it are bounded by the pool
    only. The bound covers the stagings. The puts of an export (five objects, up to 400 MB each at 101 M, 1.2 GB for
@@ -492,6 +493,38 @@ before this work.) `sources()` and `bundle()` hash every `src/hypertrain/**/*.py
 consequences described above for qualification configs and dispatch source pins; the server image digest changes
 with any build. The GPU image is not read by anything here; a rebuilt one has a new digest, as before. The ADR text
 is not hashed.
+
+### Part C, the integrated tree (D75)
+
+Measured as Part B (`hash_consequences.py` over the worktree and over a `git archive` of `3ce5b031`, 2026-10-28)
+[V], on the tree where `v3-executor-lock-release` (Part B), `v3-aggregate-lock-release`, `v3-audit-integrity-2`
+and `v3-det01-env-pin-required` are merged (`hypertrain/src` tree `a2d157e8…`; it holds for every later commit
+that touches nothing under `hypertrain/src`):
+
+| Value | Measured on the integrated tree |
+| --- | --- |
+| `implementation_hash`, example pin (`avx2`/`none`) | `d61bd2b8…71bdc4` |
+| same code, `avx512`/`none` | `cbbb0465…59af17` |
+| same code, `avx2`/`sm_103`/`math` | `8004daae…243582` |
+| same code, `avx2`/`sm_103`/`sdpa-flash` | `2969e4a7…f07ea6` |
+| same code, `avx2`/`sm_120`/`sdpa-flash` | `f3c351b3…af21f2` |
+| owned names / hashed files of `implementation_hash` | 48 / 12 |
+| `challenge/store.py` sha256 | `9379bdb4…cf31c1` |
+| `challenge/admission.py` sha256 | `8b812e46…25b51b` |
+| `gpu_ops/network_qualification.py` sha256 | `2206486f…319688` |
+| `sources()` map: files, canonical sha256 | 158, `1de8e396…74c8cc` |
+| `sources` listing, `sha256sum` of the CLI output | `8ff83ee2…532a2a` |
+| `bundle()` | 2,734,080 bytes, `88918dd5…795525` |
+| example `run_id` / `reference_hash` | `aa39197d…ec8abd` / `2dd4eadc…d6cc5d` (as in the DET-01 column: the integration edits no manifest field) |
+
+Reading: Part B's prediction that the lock release does not move `implementation_hash` holds for the reference
+(none of its functions is owned) but not for the aggregate: `aggregate_v2` now delegates to `_aggregate_flight_v2`
+and its helpers and `finalize_v2` to the replay helpers, so those joined the owned names (48 in all), and the
+environment pin and its two files joined the hash (DET-01). The value is therefore neither Part B's `fc9e87b0…`
+nor any parent's. `cuda_executor_runner.py` changed (the pin check, the image measurement), so the
+`runner_sha256` of every record moves too, and a GPU image rebuilt from this tree has a new digest: the statement
+of Part A that the existing GPU image works unchanged no longer holds for a run qualified on this tree
+(`qualification_tree_is_not_the_image` compares the image's sources with the tree's).
 
 ## Consequences
 

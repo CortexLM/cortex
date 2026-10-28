@@ -732,10 +732,12 @@ verdict without a located leaf) is waived and nothing reaches the admission. The
 verdict is open. A referee finding of `FRAUD` or `AUDITOR_FAULT` against the lease's auditor
 cancels it (`CANCELLED`); a contest that ends without one (`INFRASTRUCTURE`, a lapsed turn) clears
 nobody. At the end of the window the sanction is applied through the same hook as a no-show
-(suspended, reason `AUDIT_MISMATCH`, one strike, the bond burned), or, while the environment pin
-of ADR 0011 Part 3 is not required, only recorded (`WOULD_APPLY`, nothing touched):
-`ChallengeStore(enforce_audit_mismatch=True)` is the switch. Once it is applied, a contest of the
-verdict answers 409 `SANCTION_APPLIED`.
+(suspended, reason `AUDIT_MISMATCH`, one strike, the bond burned). That is the default (D81): the
+store enforces, and `Config.enforce_audit_mismatch=False` (a keyword of the store, no environment
+variable) is the explicit record-only mode, in which the row ends `WOULD_APPLY` and nothing is
+touched. A verdict that does not locate a leaf and whose recomputed root is not the committed one
+is the audit's anomaly and sanctions nobody in either mode. Once a sanction is applied, a contest
+of the verdict answers 409 `SANCTION_APPLIED`.
 
 A round that cannot reach a tape can be retired (ADR 0011 part 8, decisions 7 to 11) instead of
 blocking the run for good. Two causes, each re-derived by the master from the facts: the members
@@ -812,7 +814,9 @@ and the round aggregates as soon as the member is eligible again. Call `aggregat
 joins and audits are served while it runs (minutes at 100 M parameters). It writes the round only
 if what it read when it started still holds when it ends; otherwise it answers 409
 `AGGREGATE_STALE` and writes nothing, and the same call made again reads the round as it is. A
-second `aggregate` of a round that is computing waits for it and gets its answer or its error. At
+round that is retired while its tape computes (an `applied` record of kind `null`, ADR 0011 Part
+8) takes no tape: the call answers 409 `ROUND_RETIRED`, as a call made after the retirement does,
+and writes nothing. A second `aggregate` of a round that is computing waits for it and gets its answer or its error. At
 most two such calls wait per process: a third answers 503 `aggregate already running for this
 round; retry`, and a waiter gives up after 600 s with 503 `aggregate still running for this
 round; retry`. `finalize` replays the applied tape before it takes the lock, and uses that replay

@@ -185,6 +185,7 @@ def activate(world: World, count: int) -> None:
         )
         control(response.status_code == 200, f"lock {i}: {response.text}")
         screen = WorkScreenV2(
+            env=honest_env(),
             evidence_kind="work-proof-v1",
             admission_id=identity,
             nonce=sha256_hex(b"nonce"),
@@ -204,7 +205,6 @@ def activate(world: World, count: int) -> None:
                 for rank in range(spec.layout.n_gpus)
             ],
             artifact_hashes=[sha256_hex(b"artifact")],
-            env=honest_env(spec.env.pin()),
         )
         with world.store._tx():
             world.store._db.execute(

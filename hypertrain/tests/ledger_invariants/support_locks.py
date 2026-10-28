@@ -216,6 +216,7 @@ class Rig:
         """The work screen a graduated miner holds: only its digest is read by an accept."""
         spec = self.net.manifest.training.reference_spec
         return WorkScreenV2(
+            env=honest_env(),
             evidence_kind="work-proof-v1",
             admission_id=miner.admission_id,
             nonce=sha256_hex(b"locks-nonce"),
@@ -235,7 +236,6 @@ class Rig:
                 for rank in range(spec.layout.n_gpus)
             ],
             artifact_hashes=[sha256_hex(b"artifact")],
-            env=honest_env(spec.env.pin()),
         )
 
     def activate(self, miner: Miner) -> None:

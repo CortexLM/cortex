@@ -247,6 +247,7 @@ def activate_identities(network: Any, cast: Cast) -> None:
         )
         assert response.status_code == 200, response.text
         screen = WorkScreenV2(
+            env=honest_env(),
             evidence_kind="work-proof-v1",
             admission_id=identity,
             nonce=sha256_hex(b"nonce"),
@@ -266,7 +267,6 @@ def activate_identities(network: Any, cast: Cast) -> None:
                 for rank in range(spec.layout.n_gpus)
             ],
             artifact_hashes=[sha256_hex(b"artifact")],
-            env=honest_env(spec.env.pin()),
         )
         with network.store._tx():
             network.store._db.execute(

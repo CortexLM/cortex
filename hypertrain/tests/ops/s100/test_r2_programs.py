@@ -683,8 +683,17 @@ def test_a_word_in_place_of_a_status_is_a_word_and_nothing_else(world):
         ("openssl", "SENTKEYIDzzqq92" + "0" * 25),
         ("openssl", "OpenSSL 3.0.13 \u0663 Jan 2024"),
         ("openssl", "OpenSSL 3.0.13 30 Jan 2024 " + HOSTILE_URL),
+        ("openssl", "SENTKEYIDzzqq92 3.0.13"),  # any word in front of a version
     ],
-    ids=["unicode-digits", "long-python", "newline", "alphanumeric-echo", "unicode-date", "url"],
+    ids=[
+        "unicode-digits",
+        "long-python",
+        "newline",
+        "alphanumeric-echo",
+        "unicode-date",
+        "url",
+        "word",
+    ],
 )
 def test_the_version_fields_take_only_what_a_version_looks_like(field, value):
     line = functions()["shown"](good_reply() | {field: value})

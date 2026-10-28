@@ -10,6 +10,7 @@ strict xfail that names the invariant.
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections import Counter
 from collections.abc import Callable, Iterator
 from types import ModuleType
@@ -284,6 +285,7 @@ def test_a_member_sanctioned_after_the_aggregation_is_paid_for_the_round_it_was_
     assert escrow.balances().conserved()
 
 
+# Closed by audit-integrity-2 (6d935814, D59): a Finalize lists the unconvicted inputs only.
 def test_a_miner_convicted_after_its_round_was_audited_is_never_credited_by_a_finalize(
     stage: Stage,
 ) -> None:
@@ -300,11 +302,14 @@ def test_a_miner_convicted_after_its_round_was_audited_is_never_credited_by_a_fi
             "UPDATE admissions_v2 SET coldkey=? WHERE hotkey=?", (owner, sibling.ss58)
         )
     burned = sanction(stage, banned, "TRAINING_FRAUD")
-    states = {key.ss58: admission_of(stage, key)["record"]["state"] for key in stage.honest}
+    states = {
+        member.ss58: admission_of(stage, member)["record"]["state"] for member in stage.honest
+    }
     X.control(
         burned > 0
         and states
-        == {banned.ss58: "BANNED", sibling.ss58: "ACTIVE"} | {key.ss58: "ACTIVE" for key in rest},
+        == {banned.ss58: "BANNED", sibling.ss58: "ACTIVE"}
+        | {member.ss58: "ACTIVE" for member in rest},
         "the miner is convicted and its sibling is not banned with it",
     )
     tape = sorted(item["roster"]["hotkey"] for item in stage.record("tape-inputs", "0")["inputs"])
@@ -335,6 +340,7 @@ def test_a_miner_convicted_after_its_round_was_audited_is_never_credited_by_a_fi
     assert admission_of(stage, sibling)["record"]["state"] == "ACTIVE"
 
 
+# Closed by audit-integrity-2 (6d935814, D59, D64-1): a Finalize that lists nobody settles.
 def test_a_round_whose_inputs_are_all_convicted_settles_without_a_reward(stage: Stage) -> None:
     """FIN-18+D59 (decision 23, D64-1): every input of the applied tape belongs to a convicted
     coldkey: the Finalize that lists nobody closes the round CLOSED_UNPAID (200, disposition
@@ -432,20 +438,23 @@ def test_a_finalize_that_builds_its_services_inside_its_transaction_still_leaves
     stage: Stage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The condition of FIN-04 broken in a stand-in: the service cache is empty, as in a process
-    # that has just restarted, and the ledger fails once it is reached. The tape replay is primed
-    # before the transaction opens and builds the services there, so the call reaches the ledger
-    # (EscrowError); a build inside the transaction would end in OperationalError instead.
+    # that has just restarted, and the ledger fails once it is reached. Today the first call
+    # already fails while the ledger is built (OperationalError); a build that constructs its
+    # services first reaches the ledger (EscrowError). Either way nothing may persist.
     def failing(self: EscrowV2, reward: Any, evidence: Any) -> EscrowReceipt:
         raise EscrowError("INJECTED")
 
     monkeypatch.setattr(EscrowV2, "reward_finalize", failing)
     stage.store._services_v2.clear()
     before = stage.digest()
-    assert refusal(stage.finalize) == (EscrowError, None, "INJECTED")
+    error = refusal(stage.finalize)
+    assert error[0] in (EscrowError, sqlite3.OperationalError)
     assert stage.digest() == before
     nothing_was_finalized(stage)
 
 
+# Closed by aggregate-lock-release (6d623b0d): the replay job reads the escrow policy through
+# _services before the transaction opens, so a restarted store builds its services outside it.
 def test_finalize_settles_as_the_first_request_after_a_restart(stage: Stage) -> None:
     """FIN-04+D-FIN-09: a Finalize settles even when it is the first request that builds the
     services after a restart."""

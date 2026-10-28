@@ -524,7 +524,7 @@ class ChallengeStore:
             Callable[[str, IslandJobV1, Path, Mapping[str, Any]], IslandLaunch] | None
         ) = None,
         max_roster: int = 32,
-        enforce_audit_mismatch: bool = False,
+        enforce_audit_mismatch: bool = True,
     ) -> None:
         if type(max_roster) is not int or not 32 <= max_roster <= MAX_ROSTER_CEILING:
             raise ValueError(f"max_roster must be an int in [32, {MAX_ROSTER_CEILING}]")
@@ -550,8 +550,10 @@ class ChallengeStore:
         self.clock: Callable[[], float] = time.time
         # What applies an exit sanction; None is the run's own `Admission`. A test binds a fake.
         self.sanction_hook: SanctionHook | None = None
-        # ADR 0011 Part 8 decision 18: until the environment pin is required (ADR Part 3), a
-        # confirmed audit mismatch is journaled as WOULD_APPLY and the hook is not called.
+        # ADR 0011 Part 8 decision 18 (D81): a confirmed audit mismatch is applied through the
+        # hook once its contest window is over. False is the explicit record-only mode: the row
+        # ends WOULD_APPLY and the hook is not called. It is a keyword, never a manifest field,
+        # and a child store takes its parent's.
         self.enforce_audit_mismatch = enforce_audit_mismatch
         self._services_v2: dict[str, tuple[Any, Any, Any]] = {}
         self.beacon_arrived = threading.Condition()
@@ -671,6 +673,7 @@ class ChallengeStore:
             self.verify_beacon,
             LocalFSStore(directory / "objects"),
             _role_launch=self._role_launch,
+            enforce_audit_mismatch=self.enforce_audit_mismatch,
         )
         child.clock = lambda: self.clock()
         child._reference_waiters = self._reference_waiters  # one budget for the one thread pool
@@ -7360,7 +7363,7 @@ class ChallengeStore:
         """What a pending mismatch sanction does at this push (ADR 0011 Part 8, decisions 16-18):
         None when it applies (the hook is called), else the state it takes: WAIT inside the
         contest window and while a contest is open, CANCELLED once a referee clears the miner,
-        WOULD_APPLY while the sanction is only recorded."""
+        WOULD_APPLY in the explicit record-only mode (`enforce_audit_mismatch=False`)."""
         per_level = self._run_v2(run_id).training.verify.T.dispute_per_level
         action = decide(
             now=now,
