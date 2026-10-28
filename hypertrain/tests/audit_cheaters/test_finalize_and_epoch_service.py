@@ -211,8 +211,9 @@ def test_round_without_a_finalize_pays_nothing_after_d_final(
 ) -> None:
     """Defence: a round that was never finalized earns nothing, however far its work got. With the
     beacon past d_final, get_weights answers 200 with an empty map and the whole mass burned, the
-    answer is final, and no reward origin exists. An UPLOADED round that was never audited cannot
-    even be aggregated (no replay)."""
+    answer is final, and no reward origin exists. An UPLOADED round that was never audited is
+    retired by the master at the first beacon past d_final (nothing was scheduled in its audit
+    window), so it takes no work at all."""
     # Given: round 0 only UPLOADED, or fully audited and aggregated, and the beacon past d_final.
     audited = state == "audited_and_aggregated"
     world = fork(stages.audited if audited else stages.uploaded)
@@ -238,7 +239,7 @@ def test_round_without_a_finalize_pays_nothing_after_d_final(
     else:
         audits = fin.post(world, "/admin/rounds/0/audits", admin=True)
         aggregate = fin.aggregate(world, 0)
-        assert aggregate.status_code == 409 and MISSING_REPLAY in detail(aggregate)
+        assert aggregate.status_code == 409 and "ROUND_RETIRED" in detail(aggregate)
         note(
             "unaudited-round-after-d-final",
             stages,
