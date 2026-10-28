@@ -33,7 +33,7 @@ from typing import Any
 import pytest
 
 from hypertrain.challenge.store import ChallengeStore
-from hypertrain.ledger.escrow_v2 import authority_message, genesis_origin_id
+from hypertrain.ledger.escrow_v2 import authority_message, escrow_id_key, genesis_origin_id
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages_v2 import (
@@ -102,7 +102,9 @@ def hosted_in_child(occupant: Network) -> ChildNetwork:
     ).genesis_allocation_hash
     origins = [
         OriginAllocation(
-            origin_id=genesis_origin_id(manifest.run_id(), allocation, i),
+            origin_id=genesis_origin_id(
+                manifest.run_id(), allocation, i, escrow_id_key(COORD._secret)
+            ),
             owner=key.ss58,
             units=10000,
             mature_at=1,
