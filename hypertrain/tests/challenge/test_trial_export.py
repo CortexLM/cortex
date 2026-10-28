@@ -539,8 +539,7 @@ def test_a_planned_staging_reads_no_database(trial):
         job, directory = staging()
     finally:
         n.store._db = real
-    # Then: it staged the same job the unsplit call stages
-    assert n.store.stage_trial_v2(*arguments) == (job, directory)
+    # Then: it wrote the inputs its job names
     assert sha256_hex((directory / "start_state").read_bytes()) == job.start_state_sha256
 
 

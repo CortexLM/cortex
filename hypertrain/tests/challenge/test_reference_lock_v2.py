@@ -311,8 +311,8 @@ def test_a_five_second_reference_holds_the_store_lock_for_less_than_a_second(hos
     assert value["reference_commitment"] == row_of(hosted, admission_id)["reference_commitment"]
 
 
-# Parameters of the models the CPU staging of a trial has to carry: 8 layers d=512, the 101 M
-# profile of D68 (docs/adr/0015), 12 layers d=768.
+# Parameter counts of the models the CPU staging of a trial has to carry: 8 layers d=512; the 101 M
+# profile Forge chose for D68 (8 layers d=768, 12/4 heads, d_ff 2048, vocab 32768); 12 layers d=768.
 MODELS = {"66M": 66_331_136, "101M": 100_676_352, "162M": 162_417_408}
 SECONDS_PER_PARAMETER = 2e-8  # staging on the CPU: about one second per 50 M parameters
 
@@ -322,19 +322,21 @@ class SizedStaging:
 
     The real `init_params` and `pack_state` still run (the job, its hashes and the reference stay
     the fixture's own); each then takes the time a model of that size takes: half the total in the
-    parameter initialisation, a quarter in each of the two state serialisations. `peak` is the most
-    stagings seen running at once."""
+    parameter initialisation, a quarter in each of the two state serialisations. `runs` counts the
+    stagings that went through the stand-in (a test that never sees one would pass on code that
+    stages elsewhere) and `peak` is the most seen running at once."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, parameters: int) -> None:
         from hypertrain.auditor import replay
         from hypertrain.trainer import model
 
         self.seconds = parameters * SECONDS_PER_PARAMETER
-        self.peak, self._active, self._mutex = 0, 0, threading.Lock()
+        self.runs, self.peak, self._active, self._mutex = 0, 0, 0, threading.Lock()
         init, pack = model.init_params, replay.pack_state
 
         def slow_init(cfg: Any) -> Any:
             with self._mutex:
+                self.runs += 1
                 self._active += 1
                 self.peak = max(self.peak, self._active)
             try:
@@ -366,7 +368,8 @@ def test_a_reference_of_a_large_model_holds_the_store_lock_for_less_than_a_secon
     began = time.perf_counter()
     with LockWatch(store) as watch:
         value = store.trial_reference_v2(run_id, admission_id)
-    assert time.perf_counter() - began >= staging.seconds  # the model's work ran inside the call
+    assert staging.runs == 1  # the stand-in is what staged the model
+    assert time.perf_counter() - began >= staging.seconds
     assert len(watch.waits) > staging.seconds * 5  # the lock was asked for all along
     assert max(watch.waits) < 1.0, f"the lock was unavailable for {max(watch.waits):.2f} s"
     assert value["reference_commitment"] == row_of(hosted, admission_id)["reference_commitment"]
@@ -382,7 +385,7 @@ def test_two_references_of_a_large_model_stage_one_at_a_time_and_leave_the_lock_
     with LockWatch(store) as watch:
         calls = [Call(store, run_id, first), Call(store, run_id, second)]
         values = [call.result() for call in calls]
-    assert staging.peak == 1  # as the store lock made it: one model in memory at a time
+    assert staging.runs == 2 and staging.peak == 1  # one model in memory at a time, as before
     assert max(watch.waits) < 1.0, f"the lock was unavailable for {max(watch.waits):.2f} s"
     assert [v["reference_commitment"] for v in values] == [
         row_of(hosted, first)["reference_commitment"],
@@ -406,13 +409,14 @@ def test_exporting_a_trial_of_a_large_model_holds_the_store_lock_for_less_than_a
     began = time.perf_counter()
     with LockWatch(store) as watch:
         exported = store.export_trial_v2(run_id, admission_id)
+    assert staging.runs == 1
     assert time.perf_counter() - began >= 2 * staging.seconds  # staging, then the five puts
     assert max(watch.waits) < 1.0, f"the lock was unavailable for {max(watch.waits):.2f} s"
     assert set(exported["objects"]) == {"start_state", "ef_in", "v0", "samples", "sample_proofs"}
 
 
 class GuardedDb:
-    """The store's connection, which notes every statement a thread runs without the store lock."""
+    """The shared connection, which notes every statement a thread runs without the store lock."""
 
     def __init__(self, real: Any, lock: Any) -> None:
         self.real, self.unlocked, self._lock = real, [], lock
@@ -433,12 +437,14 @@ def test_a_trial_call_reads_the_store_connection_only_under_the_store_lock(hoste
     run_id, store = hosted.manifest.run_id(), hosted.store
     store._role_launch = Executor(delay=0)
     admission_id = pending_reference(hosted)
+    _, admission, _ = store._services(run_id)
     guarded = GuardedDb(store._db, store._lock)
-    store._db = guarded
+    # the store, the escrow and the admission store each hold the connection under their own name
+    store._db = admission.escrow.db = admission.store.db = guarded
     try:
         getattr(store, call)(run_id, admission_id)
     finally:
-        store._db = guarded.real
+        store._db = admission.escrow.db = admission.store.db = guarded.real
     assert guarded.unlocked == []
 
 
@@ -561,6 +567,43 @@ def test_a_failed_launch_fails_its_waiters_alike_frees_the_flight_and_a_retry_la
     retried = store.trial_reference_v2(run_id, admission_id)
     assert retried["reference_commitment"] == row_of(hosted, admission_id)["reference_commitment"]
     assert len(executor.launches) == 2
+
+
+def test_a_failed_staging_fails_its_waiters_alike_frees_the_flight_and_a_retry_stages_again(
+    hosted, monkeypatch
+):
+    monkeypatch.setattr(store_module, "REFERENCE_WAIT_SECONDS", 3.0)  # a stuck flight fails fast
+    run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor(delay=0)
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    reached, release = threading.Event(), threading.Event()
+    real = store._stage_inputs_v2
+
+    def failing(*args: Any) -> Any:
+        reached.set()
+        release.wait(WAIT)
+        raise ChallengeError(422, "dataset object dimensions differ from signed manifest")
+
+    monkeypatch.setattr(store, "_stage_inputs_v2", failing)
+    first = Call(store, run_id, admission_id)
+    try:
+        assert reached.wait(WAIT)
+        second = Call(store, run_id, admission_id)
+        until(lambda: waiting(store) == 1)
+        assert not second.done
+    finally:
+        release.set()
+    with pytest.raises(ChallengeError) as lost:
+        first.result()
+    with pytest.raises(ChallengeError) as alike:
+        second.result()  # the waiter gets the leader's failure
+    assert alike.value is lost.value and lost.value.status == 422
+    assert store._reference_flights_v2 == {} and store._lease_guards_v2 == {}
+    assert executor.launches == [] and not committed(hosted, admission_id)
+    monkeypatch.setattr(store, "_stage_inputs_v2", real)
+    retried = store.trial_reference_v2(run_id, admission_id)
+    assert retried["reference_commitment"] == row_of(hosted, admission_id)["reference_commitment"]
+    assert len(executor.launches) == 1
 
 
 def test_a_launch_that_dies_between_claim_and_settle_leaves_no_commitment_and_a_retry_works(hosted):
