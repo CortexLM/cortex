@@ -522,6 +522,54 @@ def test_the_commitment_is_made_at_the_round_of_the_settlement_not_of_the_claim(
     assert row_of(hosted, admission_id)["reference_beacon"] == claimed + 3
 
 
+def test_a_beacon_that_went_stale_during_the_launch_commits_nothing_and_the_retry_does(hosted):
+    # The pusher stops while the executor works: the drand clock goes on, the store gets no round.
+    # The settlement passes the freshness gate again, so the commitment is not made on a round
+    # that is stale (nor tested against the deadline with it); the retry finds the publication.
+    run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor()
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    behind = hosted.now + 7
+    call = Call(store, run_id, admission_id)
+    try:
+        assert executor.reached.wait(WAIT)
+        genesis = hosted.manifest.training.beacon.genesis_time
+        store.clock = lambda: genesis + (behind - 1) * 3
+    finally:
+        executor.release.set()
+    with pytest.raises(ChallengeError) as stale:
+        call.result()
+    assert (stale.value.status, stale.value.detail) == (503, "beacon infrastructure paused")
+    assert not committed(hosted, admission_id)
+    assert store._reference_flights_v2 == {} and store._lease_guards_v2 == {}
+    hosted.push(behind)  # the pusher is back
+    retried = store.trial_reference_v2(run_id, admission_id)
+    assert retried["reference_commitment"] == row_of(hosted, admission_id)["reference_commitment"]
+    assert row_of(hosted, admission_id)["reference_beacon"] == behind
+    assert len(executor.launches) == 2  # the second finds the publication of the first
+
+
+def test_a_request_for_custody_beside_one_without_has_its_own_flight_and_retains_it(hosted):
+    run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor()
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    _, admission, _ = store._services(run_id)
+    admission.backend = "cpu"  # custody is retained for the CPU backend of the test ledger only
+    plain = Call(store, run_id, admission_id)
+    try:
+        assert executor.reached.wait(WAIT)
+        custody = Call(store, run_id, admission_id, retain_shadow_custody=True)
+        # it is not a waiter of the first call (which is held): the flag is part of the flight
+        assert custody.result(20)["reference_commitment"]
+        assert waiting(store) == 0 and not plain.done
+    finally:
+        executor.release.set()
+    assert plain.result() == custody.result()
+    assert len(executor.launches) == 2  # one trial, two launches: the docstring says so
+    kept = store._db.execute("SELECT COUNT(*) FROM records_v2 WHERE kind='shadow-execution'")
+    assert kept.fetchone()[0] == 1
+
+
 def test_a_caller_that_holds_the_store_lock_is_refused(hosted):
     run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor()
     store._role_launch = executor

@@ -2993,10 +2993,12 @@ class ChallengeStore:
         Claim, under the lock: the freshness gate, everything the launch reads from the database,
         and a flight keyed (admission, challenge nonce, custody flag). A second call for the same
         key waits for the flight and gets its commitment, or its failure, without staging the job
-        again; it never starts a second launch. Run, without the lock: the launch and the object
-        puts, under a lease guard the verified beacon cancels. Settle, under the lock again: the
-        commitment is written only into the row state the claim read. The lock is therefore free
-        while a remote executor works.
+        again or launching again. A call with the other custody flag (test mode only) has a flight
+        of its own: the same trial can then launch twice, and the executor, which finds the
+        first publication, answers the second without a host. Run, without the lock: the launch
+        and the object puts, under a lease guard the verified beacon cancels. Settle, under the
+        lock again, after the freshness gate: the commitment is written only into the row state the
+        claim read. The lock is therefore free while a remote executor works.
         """
         from hypertrain.auditor.worker import LeaseGuard
 
@@ -3083,15 +3085,16 @@ class ChallengeStore:
                 if guard is not None:
                     guard.check()
             with self._lock:
-                # The gate was passed at the claim; the settlement only re-validates (a closed
-                # gate here would throw a finished reference away for no protection).
+                # The gate again, outside a `_tx`: a beacon that went stale during the launch must
+                # not carry the commitment (its round and the deadline test would be stale too). The
+                # finished result is lost on a 503, but the retry finds the published directory.
+                settled = self._fresh_v2(
+                    manifest, f"reference-settle:{admission_id}:{self._now(self._db)}"
+                )
                 if guard is not None:
                     guard.check()
                 value = admission.settle_reference(
-                    claim,
-                    result,
-                    now=self._now(self._db),
-                    retain_shadow_custody=retain_shadow_custody,
+                    claim, result, now=settled, retain_shadow_custody=retain_shadow_custody
                 )
         except BaseException as error:
             failure = error

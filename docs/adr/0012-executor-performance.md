@@ -155,7 +155,8 @@ numbers: the line numbers of the Context are those of the Part A tree.
      answers 503 at once and holds no worker; a waiter that gives up answers 503. `cpu_miners.py` retries a
      503 and stops on an unknown 409, which is why neither case is a 409. A waiter never relaunches: N
      retries of a failing reference would otherwise cost N launches. A request for custody
-     (`retain_shadow_custody`, test mode only) has a flight of its own;
+     (`retain_shadow_custody`, test mode only) has a flight of its own, so one trial can launch twice then and
+     the executor answers the second from the first publication;
    - none: this call is the leader. It reads the open trial, the stored commitment (returned as it is when
      there is one), `trial_samples`, `stage_trial_v2`, the challenge receipt and the hotkey of the executor's
      context into plain values (`ReferenceClaim`, and the `trusted` closure), makes a
@@ -169,11 +170,13 @@ numbers: the line numbers of the Context are those of the Part A tree.
    `reference:<admission>:<nonce>`, `advance`d by every pushed round, and cancels the launch at the deadline
    round or at the wall cutoff. A reference without a role launch (the CPU path) registers none and cannot be
    cancelled, as before.
-3. **Settle, under `self._lock`.** No second gate: the gate was passed at the claim, and a closed gate here
-   would throw a finished reference away while the settlement's own checks already protect the write (the
-   review of 2026-10-28; a retry finds the executor's published directory, `Executor.published`, and costs a
-   revalidation rather than a launch [V by reading, not run]). The guard is checked **before** the write, then
-   `settle_reference` runs in one `escrow.tx()` with the round read under the lock: the result is bound to the
+3. **Settle, under `self._lock`.** The gate again (`_fresh_v2`, outside a `_tx`, so a 503 keeps its pause): a
+   beacon that went stale during the launch must not carry the commitment, whose round and deadline test would
+   be stale with it. A 503 loses the finished result, but the retry finds the executor's published directory
+   (`Executor.published` for the CUDA executor, the restart rule of `launch_island` on the CPU path) and costs a
+   revalidation and the puts, not a launch [V by reading, not run on a host]. A reviewer proposed dropping the
+   gate to keep the result; Forge's Lens asked for it, and it is the safe side. Then the guard is checked
+   **before** the write, then `settle_reference` runs in one `escrow.tx()`: the result is bound to the
    claimed challenge (proof and screen name the admission, the challenge hash and the nonce; on the production
    path this holds by construction and is kept so that a later change of the run cannot commit another
    challenge's result); the row is what the claim read (challenge, trial epoch, admission state, dispute flag,
@@ -186,7 +189,7 @@ numbers: the line numbers of the Context are those of the Part A tree.
    already holds it would keep it through the launch, so `trial_reference_v2` raises `RuntimeError` when
    `_is_owned()`. (b) `push_beacon` snapshots `_lease_guards_v2` under the lock, as the IPC thread does.
    (c) `now`: the claim's `now` serves the gate, the guard and `screen_work`'s window check; the
-   settlement's own `now` (`MAX(round)` read under the lock) is `reference_beacon` (the round the commitment is
+   settlement's own `now` (what its gate returns, `MAX(round)`) is `reference_beacon` (the round the commitment is
    made at, which `proof()` compares with), the window check and `retain_trial_publication`. The lock no longer freezes `MAX(round)`, so they
    differ by the rounds that passed during the launch. (d) A child store's guard gets its rounds through
    `root.push_beacon` then `child.push_beacon`; the tests run both layouts (`child_network` hosts the run in a
@@ -225,6 +228,8 @@ numbers: the line numbers of the Context are those of the Part A tree.
 | executor error, then retry | flight dropped, waiters get the failure, a retry launches | `a_failed_launch_fails_its_waiters_alike…` |
 | result for a stale claim | row compared at settlement, nonce in the key | `a_result_for_a_stale_claim_is_dropped…`, `test_reference_settle_v2.py` |
 | two puts of one content | one temporary file per thread | `two_threads_putting_the_same_content_at_once_both_succeed` (`tests/data/test_store.py`) |
+| beacon stale at the settlement | the gate again before the write | `a_beacon_that_went_stale_during_the_launch_commits_nothing_and_the_retry_does` |
+| custody and no custody for one trial | the flag is part of the flight key; a second launch finds the first publication | `a_request_for_custody_beside_one_without_has_its_own_flight_and_retains_it` |
 | `now` frozen by the lock | settlement's own round | `the_commitment_is_made_at_the_round_of_the_settlement…` |
 | the real route | `POST /join/proof` runs the reference through `trial_reference_v2` | `the_proof_route_runs_the_reference_while_the_beacon_goes_on_and_accepts_the_proof` (a beacon round is pushed over HTTP during the launch and answers in under a second; the proof is then accepted, `clean_count` 1) |
 | lock already held by the caller; guards read unlocked; inputs rewritten | `_is_owned` check; snapshot under the lock; atomic staging | `a_caller_that_holds_the_store_lock_is_refused`, `a_beacon_push_reads_the_registered_guards…`, `exporting_a_trial_never_rewrites…`, `test_trial_export.py` |
