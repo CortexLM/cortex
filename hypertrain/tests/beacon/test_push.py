@@ -140,7 +140,7 @@ def test_tick_pushes_the_head_then_the_older_round_with_bearer(wire: Any, cli: A
         (payload(V0), f"Bearer {ADMIN_TOKEN}"),
     ]
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"pushed": [R1["round"], V0["round"]], "latest": R1["round"], "known": 0}
+        {"pushed": [R1["round"], V0["round"]], "latest": R1["round"], "known": 0, "pending": 0}
     ]
 
 
@@ -176,7 +176,7 @@ def test_only_consecutive_failures_count(wire: Any, cli: Any) -> None:
     assert (rc, slept) == (1, [0.25] * 5)
     assert svc.seen == ["GET /v1/beacon/latest"] * 6
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"pushed": [], "latest": R1["round"], "known": R1["round"]}
+        {"pushed": [], "latest": R1["round"], "known": R1["round"], "pending": 0}
     ]
     assert "failure 3/3" in err
 
@@ -319,6 +319,8 @@ class Ledger:
         self.held = set(held)
         self.posted: list[int] = []  # every POST received, answered or not
         self.refuse: dict[int, int | Exception] = {}  # round -> answer to its next POST only
+        # round -> failure the client sees after the service has applied the round
+        self.applied_then_lost: dict[int, Exception] = {}
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         if req.method == "GET":
@@ -331,6 +333,9 @@ class Ledger:
         if refused is not None:
             return httpx.Response(refused, text="busy")
         self.held.add(number)
+        lost = self.applied_then_lost.pop(number, None)
+        if lost is not None:
+            raise lost
         return httpx.Response(200, json={"round": number})
 
 
@@ -362,9 +367,9 @@ def pusher_for(ledger: Ledger, chain: Chain, catch_up: int) -> Pusher:
 def test_head_goes_first_and_each_tick_adds_only_the_oldest_older_round() -> None:
     ledger, chain = Ledger(), Chain(20)
     pusher = pusher_for(ledger, chain, 6)
-    assert pusher.tick() == {"pushed": [20, 15], "latest": 20, "known": 0}
+    assert pusher.tick() == {"pushed": [20, 15], "latest": 20, "known": 0, "pending": 4}
     chain.head = 21  # a new head goes before the backlog, which keeps its own order
-    assert pusher.tick() == {"pushed": [21, 16], "latest": 21, "known": 20}
+    assert pusher.tick() == {"pushed": [21, 16], "latest": 21, "known": 20, "pending": 3}
     chain.head = 22
     assert pusher.tick()["pushed"] == [22, 17]
     assert ledger.posted == [20, 15, 21, 16, 22, 17]
@@ -378,15 +383,50 @@ def test_a_backlog_is_refilled_one_round_per_tick_and_every_round_once() -> None
     assert sorted(ledger.posted) == list(range(15, 21))  # none skipped, none pushed twice
 
 
-def test_a_pending_round_older_than_the_catch_up_window_is_dropped() -> None:
+def test_a_round_that_was_due_is_never_dropped_while_the_window_slides() -> None:
     ledger, chain = Ledger(), Chain(20)
     pusher = pusher_for(ledger, chain, 3)
     assert pusher.tick()["pushed"] == [20, 18]  # 19 is left pending
-    chain.head = 23  # window is now 21..23
-    assert pusher.tick()["pushed"] == [23, 21]
-    assert pusher.tick()["pushed"] == [22]
-    assert pusher.tick()["pushed"] == []
-    assert 19 not in ledger.posted
+    chain.head = 23  # the window of the last 3 rounds is now 21..23, and 19 is outside it
+    assert pusher.tick()["pushed"] == [23, 19]
+    assert [pusher.tick()["pushed"] for _ in range(3)] == [[21], [22], []]
+    assert sorted(ledger.posted) == list(range(18, 24))  # none skipped, none pushed twice
+
+
+def test_a_round_older_than_the_first_plan_is_not_pushed() -> None:
+    # `--catch-up` bounds what the first plan finds: the last 3 rounds, not the ones before them
+    ledger = Ledger()
+    pusher = pusher_for(ledger, Chain(20), 3)
+    assert [pusher.tick()["pushed"] for _ in range(3)] == [[20, 18], [19], []]
+    assert min(ledger.posted) == 18
+
+
+def test_once_pushes_every_round_that_is_due_because_it_has_no_next_tick(capsys: Any) -> None:
+    ledger = Ledger()
+    code = pusher_for(ledger, Chain(20), 6).run(0.2, True, 3)
+    assert code == 0
+    assert ledger.posted == [20, 15, 16, 17, 18, 19]  # the head first, then oldest first
+    assert json.loads(capsys.readouterr().out)["pending"] == 0
+
+
+def test_cron_runs_with_a_fresh_pusher_each_leave_no_round_missing() -> None:
+    # a new process per run keeps no list: every run must push what it found in one tick
+    ledger, chain = Ledger(), Chain(20)
+    for head in (20, 40, 60):
+        chain.head = head
+        assert pusher_for(ledger, chain, 20).run(0.2, True, 3) == 0
+    assert ledger.held == set(range(1, 61))
+
+
+def test_a_post_the_service_applied_but_the_client_gave_up_on_is_posted_again_harmlessly() -> None:
+    ledger = Ledger()
+    ledger.applied_then_lost[9] = httpx.ReadTimeout("store lock held")
+    pusher = pusher_for(ledger, Chain(9), 3)
+    with pytest.raises(httpx.ReadTimeout):
+        pusher.tick()
+    assert ledger.held == {9}  # the service has the head although the pusher never saw the answer
+    assert [pusher.tick()["pushed"] for _ in range(3)] == [[9, 7], [8], []]
+    assert ledger.posted.count(9) == 2 and ledger.held == {7, 8, 9}
 
 
 def post_503(chain: Chain, ledger: Ledger) -> None:

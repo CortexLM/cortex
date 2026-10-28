@@ -2,8 +2,9 @@
 
 Every round comes from >= 2 agreeing relays and is BLS-verified (DrandQuicknet) before it is
 posted to `/v1/admin/beacon`; the service verifies it again on ingest. Per tick it posts the latest
-round first, then at most one older missing round, the oldest. A missing round stays in memory until
-the service answers 2xx. Per post:
+round first, then one older missing round, the oldest (all of them with `--once`, which has no next
+tick). A missing round stays in memory until the service answers 2xx; only a restart loses the list.
+Per post:
 - service 2xx: next round;
 - service 401/403: exit 2 (token);
 - service 408/429/5xx, network error, relays unavailable or failing verification: one failure,
@@ -74,7 +75,8 @@ class Pusher:
         self.catch_up = catch_up
         self._token = token
         # Rounds still to push, ascending. Kept across ticks: the service reports only its highest
-        # round, so once the head is in nothing else says an older round is missing.
+        # round, so once the head is in nothing else says an older round is missing. A round leaves
+        # the list on a 2xx and never otherwise.
         self.pending: list[int] = []
 
     def _body(self, r: httpx.Response) -> str:
@@ -96,21 +98,21 @@ class Pusher:
             raise ServiceError(r.status_code, f"GET /v1/beacon/latest: bad body {self._body(r)}")
         return known
 
-    def tick(self) -> dict[str, Any]:
+    def tick(self, drain: bool = False) -> dict[str, Any]:
         latest = self.relays.latest()
         known = self._known()
-        # A pending round older than the last `--catch-up` rounds is dropped: the bound `plan`
-        # documents, not a new skip.
-        window = latest.round - self.catch_up + 1
-        due = {*self.pending, *plan(known, latest.round, self.catch_up)}
-        self.pending = sorted(rnd for rnd in due if rnd >= window)
+        # `plan` bounds what is due when the gap is first seen (the last `--catch-up` rounds after
+        # the highest the service holds); what it returned stays due until the service has it.
+        self.pending = sorted({*self.pending, *plan(known, latest.round, self.catch_up)})
         # Head first: the freshness gate reads the newest round, so it reopens as soon as that one
         # is in. Then the oldest pending round, one per tick, so refilling a backlog (after a store
-        # lock) does not close the gate again. The service reports only its highest round, so a
-        # pusher restarted during a backfill loses `pending` and a hole can remain:
-        # scripts/ops/s100_test/beacon_gaps.py finds it.
+        # lock) does not close the gate again; `drain` (--once, no next tick) pushes all of them.
+        # The service reports only its highest round, so a pusher restarted before the list is
+        # empty loses it and the rounds still on it stay missing: scripts/ops/s100_test/
+        # beacon_gaps.py finds them.
         order = [latest.round] if latest.round in self.pending else []
-        order += [rnd for rnd in self.pending if rnd != latest.round][:1]
+        older = [rnd for rnd in self.pending if rnd != latest.round]
+        order += older if drain else older[:1]
         pushed: list[int] = []
         for rnd in order:
             br = latest if rnd == latest.round else self.relays.get(rnd)
@@ -122,7 +124,12 @@ class Pusher:
             self._check(r, f"round {rnd}")
             self.pending.remove(rnd)
             pushed.append(rnd)
-        return {"pushed": pushed, "latest": latest.round, "known": known}
+        return {
+            "pushed": pushed,
+            "latest": latest.round,
+            "known": known,
+            "pending": len(self.pending),
+        }
 
     def run(self, interval: float, once: bool, max_failures: int) -> int:
         """Tick until stopped: 0 on SIGTERM/Ctrl-C or after `once`, 1 protocol, 2 token."""
@@ -131,7 +138,7 @@ class Pusher:
         try:
             while True:
                 try:
-                    print(json.dumps(self.tick()), flush=True)
+                    print(json.dumps(self.tick(drain=once)), flush=True)
                     failures = 0
                 # DrandQuicknet lets ValueError (relay body without an int round) and
                 # RecursionError (absurdly nested relay JSON) through.

@@ -224,8 +224,7 @@ describe the ascending pusher of Part A, which the model keeps as `AscendingPush
   changed, a compose file where the result is not exactly that. Sizing rules, from the model:
   - `--catch-up` must cover every round a lock can hide: about `lock / 3 + 10`. 60 covers 150 s; the old `3`
     skipped rounds after any lock over about 9 s, the stock `20` after one over about 50 s. A challenge
-    restart of the same length is covered the same way. (For the ascending pusher. With head first the same 60
-    reaches about 100 s: see "Reach" below.)
+    restart of the same length is covered the same way. (Head first keeps this cover: see "Coverage" below.)
   - `--max-failures` must outlast the failures of the longest outage: one per 11.4 s for a lock (10 s timeout
     plus the relay fetch), one per 1.4 s for a refused connection. 100 covers 140 s of refusals and over 1,100
     s of lock timeouts. At the budget S13 reported (10) the pusher exits in a lock over about 110 s; the
@@ -257,33 +256,46 @@ describe the ascending pusher of Part A, which the model keeps as `AscendingPush
   cost of one round.** With the shipped cadence and a 19 s lock the gate stays closed for 58 s at 2.4 s a round,
   103 s at 2.6 s, 266 s at 2.8 s, and at 2.9 s the pusher never catches up (a test pins the 2.6 s and 2.9 s
   cases). 2.4 s is one S7 measurement; the idle lag with a child run present has not been measured [?]. The head-first
-  column does not depend on it up to 2.6 s a round (gate closed 9-14 s); at 2.9 s neither pusher keeps up and head first
-  leaves holes. With the cache (T <= 19 s) the window of the ascending pusher is about a minute; **without it a 60 s
+  column moves with it much less (see "Cost of a round" below). With the cache (T <= 19 s) the window of the ascending pusher is about a minute; **without it a 60 s
   reference closes the gate for about four minutes (three in a child), close to the 100-round (300 s) trial
   window.** The cache was therefore a precondition of the shipped profile, and the first (cold, 43-64 s)
   reference of a new image had to run alone, before any second driver started; with Part B and head first neither
   rule is needed for the gate any more (the replay must show it [?]).
 - **Head first, implemented by D68 (`beacon/push.py`; the production twin runs the same code, so the promotion
-  carries it).** `Pusher.tick` keeps a sorted list of the rounds still to push and posts the latest round first,
-  then at most one older pending round, the oldest, per tick. A round leaves the list only on a 2xx; a failed tick
-  keeps the rest. Verification is unchanged: `DrandQuicknet` verifies every round before it is posted, the service
-  verifies it again on ingest. `plan()` still says which rounds are due, after the highest the service holds and at
-  most the last `--catch-up`; a pending round that falls out of that window while the backlog drains is dropped, the
-  same bound, now sliding. A naive "newest first, then the whole backlog" closes the gate again during the backfill;
-  one older round per tick does not. Last column of the table: no hole in any cell and a gate that reopens within
-  a few seconds of the lock (model [H], the costs of the other columns).
-  - **Reach of `--catch-up`.** A tick costs about 5 s and the clock adds 1.7 rounds, so the backlog drains at about a
-    third of a round per tick and the window slides faster than the oldest rounds leave it. Model [H], root layout,
-    shipped cadence: `--catch-up 60` leaves no hole in a lock of up to 100 s, 1 at 110 s, 4 at 120 s, 14 at 150 s
-    (11 in a child store); 80 holds to 130 s; **100 holds to 150 s**. The ascending pusher kept 150 s at 60 but
-    closed the gate for about `4T + 10` s. `challenge_image.sh beacon` still writes 60: it is the gated TEST
-    profile and its test file pins it, so this change leaves it alone; raising it to 100 restores the 150 s cover and
-    is Forge's to decide. With Part B no reference holds the lock; what is left is a challenge restart and a stuck
-    request.
-  - **Restart.** A pusher restarted before it has refilled the list loses the list; the rounds still missing stay
-    missing, and `beacon_gaps.py` finds them. The oldest missing round, `known + 1` of the moment the lock began, is
-    refilled first, and a seed set just before the lock points at it [H]. A fix would add the missing rounds to
-    `GET /v1/beacon/latest` (a `store.py` change) or keep the list in a file.
+  carries it).** `Pusher.tick` keeps a sorted list of the rounds still to push (`pending`) and posts the latest
+  round first, then one older pending round, the oldest, per tick; with `--once`, which has no next tick, all of
+  them. A round leaves the list on a 2xx and never otherwise. `plan()` is unchanged and still bounds what is due
+  when a gap is first seen (after the highest round the service holds, at most the last `--catch-up`); what it
+  returned stays due until the service has it, so nothing is dropped while the process lives. Verification is
+  unchanged: `DrandQuicknet` verifies every round before it is posted, the service verifies it again on ingest.
+  The tick's JSON line gains `pending`, the number of rounds still on the list. A naive "newest first, then the
+  whole backlog" closes the gate again during the backfill; one older round per tick does not. Last column of the
+  table: no hole in any cell and a gate that reopens within 7 s of the lock (model [H], the costs of the other
+  columns). An earlier version of this change dropped a pending round when the window slid past it; the review of
+  2026-10-28 showed that skips rounds the ascending pusher pushed, silently, and it was removed.
+  - **Coverage.** The cut is the plan window, `--catch-up` rounds: 60 rounds are 180 s. Model [H], shipped
+    cadence: no hole in a lock of 13 to 150 s in either layout, the gate closed for at most 7.7 s after it; a
+    lock of 200 s leaves 5 holes in the root store at `--catch-up 60` and none at 100. So `challenge_image.sh
+    beacon` writing 60 keeps its 150 s cover.
+  - **Draining takes minutes.** A tick that pushes the head and one older round costs about 5 s while the clock
+    adds 1.7 rounds, so the list shrinks by about a third of a round per tick: roughly 15 s per round, 12 minutes
+    for the 50 rounds of a 150 s lock [H]. The gate is open meanwhile and the holes are the rounds still on the
+    list: `beacon_gaps.py` shows them (exit 3) and they close by themselves; a pusher restarted in that time
+    loses the list and the rest stay missing.
+  - **Cost of a round.** The gate-closed time after a 19 s lock is 5.3 s at 2.0 s a round, 6.2 s at 2.4 s, 8.7 s
+    at 2.6 s; at 2.9 s neither pusher keeps up (head first: 48 s and rounds still on the list at the horizon;
+    ascending: 676 s). A long `--interval` lets the list grow for good; head first is meant for the 0.2 s of the
+    TEST cadence.
+  - **Gate predicate.** The model uses the test ledger's gate (`now >= emitted - 2`, the highest round held).
+    The production gate (`FreshnessGate.refresh`) also reads the exact round `emitted - 2`, which head first may
+    not have pushed yet, since the rounds between two heads are refilled oldest first and the newest holes last:
+    there head first does not shorten the closed gate, and it is not worse than the ascending pusher either [H].
+    The stack the replay runs on is the test ledger.
+  - **Restart; an unfetchable round.** The oldest missing round, `known + 1` of the moment the lock began, is
+    refilled first, and a seed set just before the lock points at it [H]; a round inside the lock is read only by
+    a draw that falls in it. An old pending round the relays cannot serve stops the refill, each tick then fails,
+    and `--max-failures` ends the process (the ascending pusher stalled on it in the same way). A fix would add
+    the missing rounds to `GET /v1/beacon/latest` (a `store.py` change) or keep the list in a file.
 - **Freshness bound:** the bound of 2 rounds is hard-coded in the store (`store.py:2185,2207,2238`). A TEST-only
   larger bound needs a `store.py` edit and is not proposed: it would only hide the lock. Part B removes the cause for references.
 

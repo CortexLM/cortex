@@ -137,8 +137,8 @@ lock.) Two things can go wrong, and the cadence decides which:
 `beacon` therefore sets `--interval 0.2 --catch-up 60 --max-failures 100`. Sizing, from the model of
 the real pusher: the catch-up must cover `lock / 3 + 10` rounds for the ascending pusher (60 covers a
 lock of 150 s; the old `3` skipped rounds after any lock over about 9 s, 20 after one over about 50 s);
-head first drains slower than the clock slides, so there 60 covers about 100 s and 100 covers 150 s (ADR
-0012 section 3; this script still writes 60). The budget must
+head first keeps that cover, though the older rounds then arrive one per tick, about 15 s each (ADR 0012
+section 3). The budget must
 cover `lock / 11.4` failures for a lock and `outage / 1.4` for a refused connection (100: 140 s). The
 script takes the stock cadence and the one the previous version left on this stack (`0.2 / 3`), raises
 a budget below 100 and keeps a higher one, and refuses (exit 5, nothing changed) any compose file
@@ -167,7 +167,9 @@ ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - 1800 $RID" <
 ```
 
 Exit 0: nothing missing in the last 30 minutes. 3: a hole (`missing`, and `stranded` names who waits
-for it: stop the run and report it) or a table that is dead (`stale`). 4: bad arguments or a run the
+for it) or a table that is dead (`stale`). A hole the live head-first pusher still has in its list
+closes by itself, about 15 s per missing round: look again after that before you stop the run; one
+that stays, or a `stranded` name, is a real loss and is reported. 4: bad arguments or a run the
 stack does not host. A pusher that is only behind exits 0: read `lag` and `gate_open` in the JSON.
 Take a baseline before the retune (without `$RID` until the run is published: the tool reads the
 store that hosts the run and refuses an id it cannot find) and run it again after every ten trials.
@@ -545,7 +547,9 @@ reach a round: no `run-v2`, no audit, no `get_weights`.
   waits for it to catch up (503 "beacon infrastructure paused" for 10-70 s). A second driver or a
   second executor host does not shorten the references; two drivers only overlap the miner side.
   (ADR 0012 Part B releases the lock during the reference; this measurement predates it.)
-- **Do not push beacon rounds out of order.** The challenge reads exact rounds (a trial's seed round,
+- **Never add a second pusher, and never backfill by hand.** (The pusher itself now pushes the latest
+  round first and the older ones after, from its own list: ADR 0012 section 3. What S13 broke was a
+  second writer.) The challenge reads exact rounds (a trial's seed round,
   `d_audit`). A second pusher with `--catch-up 1` moved `known` past rounds the first one would have
   filled; the challenge request (then an unsigned `GET /join/<id>/challenge`, an owner-signed
   `POST` since ADR 0010) answered 500 `BeaconUnavailable: round N not pushed` and

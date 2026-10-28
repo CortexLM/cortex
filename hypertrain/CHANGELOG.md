@@ -112,13 +112,17 @@
   `qualification_sm_profile_unqualified`; the challenge refuses both at bootstrap. A
   `result.json` written before capabilities were recorded still qualifies 170-SM devices only.
   See `docs/adr/0007-sm-counts-per-arch.md` at the monorepo root.
-- The beacon pusher (`python -m hypertrain.beacon push`) posts the latest round first and then at
-  most one older missing round per tick, the oldest, from a list it keeps in memory, instead of
-  refilling every missing round oldest first. After a long store lock or a challenge restart the
-  freshness gate reopens within seconds instead of after about four times the outage. Rounds older
-  than the last `--catch-up` are still never pushed, and a pusher restarted before its list is empty
-  leaves those rounds missing (`scripts/ops/s100_test/beacon_gaps.py` finds them). The verification
-  of every round is unchanged. See `docs/adr/0012` at the monorepo root.
+- The beacon pusher (`python -m hypertrain.beacon push`) posts the latest round first and then
+  one older missing round per tick, the oldest (`--once`: all of them), from a list it keeps in
+  memory, instead of refilling every missing round oldest first. After a long store lock or a
+  challenge restart the freshness gate of the test ledger should reopen within seconds instead of
+  after about four times the outage (a model result, not yet run against a relay or s100; the
+  production gate also needs the exact round `emitted - 2`). The older rounds then arrive one per
+  tick, about 15 s each, and a pusher restarted before its list is empty leaves the rest missing
+  (`scripts/ops/s100_test/beacon_gaps.py` finds them). Rounds older than the last `--catch-up` when
+  the gap is first seen are still never pushed; no round of that window is dropped later. The tick's
+  JSON line gains `pending`. The verification of every round is unchanged. See `docs/adr/0012` at
+  the monorepo root.
 - A remote reference no longer holds the challenge's store lock while the executor works
   (`ChallengeStore.trial_reference_v2`: claim under the lock, launch without it under a lease guard,
   settle under it again; `Admission.prepare_reference` is now `claim_reference`, `run_reference` and

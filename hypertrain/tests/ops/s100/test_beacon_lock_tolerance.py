@@ -109,7 +109,7 @@ def test_the_shipped_cadence_keeps_no_hole_when_a_round_costs_more_but_not_when_
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)
-@pytest.mark.parametrize("lock", [13, 19, 43, 60])
+@pytest.mark.parametrize("lock", [13, 19, 43, 60, 100, 150])
 def test_the_production_pusher_reopens_the_gate_within_seconds_and_skips_no_round(
     shipped, lock, layout
 ):
@@ -121,21 +121,21 @@ def test_the_production_pusher_reopens_the_gate_within_seconds_and_skips_no_roun
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)
-def test_the_production_pusher_refills_one_round_per_tick_so_catch_up_must_cover_the_backlog(
-    shipped, layout
-):
-    """A tick that pushes the head and one older round takes about 5 s while the clock adds 1.7
-    rounds: the backlog shrinks by a third of a round per tick, and a round older than the last
-    `--catch-up` rounds is dropped. The shipped 60 reaches a lock of 100 s, not 150 s (which needs
-    100, the trial window). The ascending pusher refilled faster but kept the gate closed longer."""
+def test_the_production_pusher_covers_the_plan_window_and_no_more(shipped, layout):
+    """The plan window is the one cut: a tick that pushes the head and one older round takes about
+    5 s while the clock adds 1.7 rounds, so a backlog clears slowly (minutes), but what the first
+    plan found is kept until pushed. `--catch-up` bounds what that first plan finds: 60 rounds
+    are 180 s, so a lock of 150 s is covered and one of 200 s is not (ADR 0012 section 3)."""
 
     def holes(lock: int, catch_up: int) -> int:
         cadence = {**shipped, "catch_up": catch_up}
         return max(simulate(lock, offset=o, layout=layout, **cadence).holes for o in OFFSETS)
 
-    assert holes(100, 60) == 0
+    assert holes(150, 60) == 0
     assert holes(150, 100) == 0
-    assert holes(150, 60) > 0
+    if layout == "root":  # the child store's own table is fed by the root's rounds as they come
+        assert holes(200, 60) > 0
+        assert holes(200, 100) == 0
 
 
 POST = "/v1/admin/beacon"

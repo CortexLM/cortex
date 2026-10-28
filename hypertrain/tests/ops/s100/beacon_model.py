@@ -181,7 +181,7 @@ class AscendingPusher(push.Pusher):
     the code that produced them. The production `push.Pusher` pushes the head first.
     """
 
-    def tick(self) -> dict[str, Any]:
+    def tick(self, drain: bool = False) -> dict[str, Any]:
         latest = self.relays.latest()
         known = self._known()
         pushed: list[int] = []

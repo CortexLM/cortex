@@ -10,8 +10,7 @@
 #                        A store lock hides rounds from the pusher; it then pushes the latest round
 #                        first and refills the older ones, one per tick, at most catch-up of them
 #                        (a skipped round can be a trial's seed): 60 skips none up to a lock of
-#                        about 100 s, 100 up to 150 s. 100 failures outlast 140 s of refused
-#                        connections. Takes the stock cadence (3 / 20) and the one the previous
+#                        150 s. 100 failures outlast 140 s of refused connections. Takes the stock cadence (3 / 20) and the one the previous
 #                        version of this script left behind (0.2 / 3); a budget of 100 or more
 #                        is kept. docs/adr/0012 section 3
 #   paper BACKUP         dry rollback: the backed-up compose file must parse and resolve the old image
