@@ -263,3 +263,19 @@ def test_finalize_envelope_outlives_a_finalize_posted_after_d_final(
     # The operator may finalize at d_final + N; the envelope must not expire before the post.
     assert finalize_expiry(d_final, now) == expected
     assert finalize_expiry(d_final, now) > now
+
+
+def test_reseed_posts_the_admin_route_of_that_admission_and_nothing_else(
+    master_args: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """RELAY-03: the operator step a stranded miner is told to ask for."""
+    calls: list[tuple[str, str, object, bool]] = []
+
+    def call(self: Any, method: str, path: str, body: object = None, admin: bool = False) -> Any:
+        calls.append((method, path, body, admin))
+        return {"seed_beacon": 1226}
+
+    monkeypatch.setattr(live_operator.Master, "call", call)
+    assert live_operator.main([*master_args, "reseed", "--admission-id", "ab" * 32]) == 0
+    assert calls == [("POST", "/admin/join/" + "ab" * 32 + "/reseed", None, True)]
+    assert json.loads(capsys.readouterr().out) == {"seed_beacon": 1226}
