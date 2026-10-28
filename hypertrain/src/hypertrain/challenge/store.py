@@ -2566,8 +2566,13 @@ class ChallengeStore:
         inputs = network_inputs(stored["inputs"])
         tape = TapeV2.from_bytes(self.objects.get(tape_hash))
         signer = self._coord().ss58
+        reference_reward_units = self._services(run_id)[0].policy.R_collectible_units
         return _FinalityReplay(
-            sha256_hex(canonicalize([run_id, w, tape_hash, applied, stored, signer])),
+            sha256_hex(
+                canonicalize(
+                    [run_id, w, tape_hash, applied, stored, signer, reference_reward_units]
+                )
+            ),
             manifest,
             AggregationPolicyV2.model_validate_json(
                 self.objects.get(manifest.network.aggregation_policy_hash)
@@ -2578,7 +2583,7 @@ class ChallengeStore:
             str(applied["prev_state"]),
             str(applied["predecessor_tape_hash"]),
             inputs,
-            self._services(run_id)[0].policy.R_collectible_units,
+            reference_reward_units,
             signer,
         )
 
@@ -4873,6 +4878,9 @@ class ChallengeStore:
             "_aggregate_plan_v2",
             "_aggregate_compute_v2",
             "_aggregate_settle_v2",
+            "_FinalityReplay",
+            "_finality_replay_job_v2",
+            "_run_finality_replay_v2",
             "_prime_finality_replay_v2",
             "_capacity_outer_v2",
             "_prepare_capacity_genesis_v2",

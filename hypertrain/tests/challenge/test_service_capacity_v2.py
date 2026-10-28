@@ -569,6 +569,42 @@ def test_source_binding_ignores_unrelated_methods_but_rejects_capacity_changes(t
         assert ChallengeStore._service_implementation_v2(source, paths) != original
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "_AggregatePlan",
+        "_aggregate_flight_v2",
+        "_aggregate_answer_v2",
+        "_aggregate_claim_v2",
+        "_aggregate_plan_v2",
+        "_aggregate_compute_v2",
+        "_aggregate_settle_v2",
+        "_FinalityReplay",
+        "_finality_replay_job_v2",
+        "_run_finality_replay_v2",
+        "_prime_finality_replay_v2",
+    ],
+)
+def test_the_aggregate_and_finality_replay_helpers_are_bound_to_the_implementation(name):
+    # aggregate_v2 and the replay of finalize_v2 live in these helpers since the store lock is no
+    # longer held while they compute; a run that holds a service-admission record must see the
+    # implementation change when one of them does (the owned set of `_service_implementation_v2`).
+    source = TREE / "src/hypertrain"
+    paths = ("aggregator/core.py", "aggregator/tape_v2.py")
+    original = ChallengeStore._service_implementation_v2(source, paths)
+    tree = ast.parse((source / "challenge/store.py").read_text())
+    node = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name == name
+    )
+    node.body.append(ast.Pass())
+    import unittest.mock
+
+    with unittest.mock.patch("hypertrain.challenge.store.ast.parse", return_value=tree):
+        assert ChallengeStore._service_implementation_v2(source, paths) != original
+
+
 def test_capacity_profile_binds_the_arch_registry(tiny, monkeypatch):
     # Given: the profile of a real owner-signed run.
     store, manifest = tiny

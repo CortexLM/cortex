@@ -324,6 +324,25 @@ def test_a_verdict_is_not_trusted_for_a_round_whose_record_changed_after_the_rep
     assert paid(primed) == []
 
 
+def test_the_key_of_a_verdict_names_the_reward_unit_the_replay_computes_from(
+    restored: Restored,
+) -> None:
+    # Given: the job of the replay of round 0, and the same job once the policy's collectible
+    # reward is another number (the replay reads it as `reference_reward_units`)
+    applied, _ = aggregated(restored)
+    store, run = restored.store, restored.run
+    escrow = store._services(run)[0]
+    with store._lock:
+        job = store._finality_replay_job_v2(run, 0, applied["tape_hash"])
+        escrow.policy = escrow.policy.model_copy(
+            update={"R_collectible_units": job.reference_reward_units + 1}
+        )
+        other = store._finality_replay_job_v2(run, 0, applied["tape_hash"])
+    # Then: a verdict kept under the first key is not the verdict of the second replay
+    assert other.reference_reward_units == job.reference_reward_units + 1
+    assert other.key != job.key
+
+
 def test_a_replay_that_fails_once_before_the_transaction_is_made_again_by_the_transaction(
     restored: Restored, monkeypatch: pytest.MonkeyPatch
 ) -> None:
