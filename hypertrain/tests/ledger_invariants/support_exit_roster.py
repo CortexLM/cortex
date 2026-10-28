@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from env_pin_fixtures import honest_env
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.miner import admission as miner_admission
 from hypertrain.miner.island_launch import launch_island
@@ -56,7 +57,7 @@ from hypertrain.protocol.messages_v2 import (
 )
 from hypertrain.protocol.relay_messages import MasterAcceptanceV2
 
-from .support import World, load_fixture_module
+from .support import World, enforce_mismatch_sanction, load_fixture_module
 
 ROLLBACK_FIXTURE = ("li_exit_roster_rollback_fixture", "e2e/test_rollback_service_v2.py")
 LAUNCH_SECONDS = 300  # a bound on a tiny CPU launch, never a threshold of a test
@@ -141,6 +142,7 @@ def activated_network(root: Path) -> Iterator[Any]:
     generator = fixtures.network.__wrapped__(root, type("Request", (), {"param": None})())
     try:
         network = next(generator)
+        enforce_mismatch_sanction(network.store)
         for index in range(MINERS):
             if index:
                 network.push(network.now + 101)
@@ -190,6 +192,7 @@ def activate(network: Any, index: int) -> str:
             for rank in range(spec.layout.n_gpus)
         ],
         artifact_hashes=[sha256_hex(b"artifact")],
+        env=honest_env(spec.env.pin()),
     )
     with network.store._tx():
         network.store._db.execute(

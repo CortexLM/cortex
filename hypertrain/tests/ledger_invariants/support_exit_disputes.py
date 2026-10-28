@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from env_pin_fixtures import honest_env
 from hypertrain.aggregator.core import FinalityError
 from hypertrain.auditor.island_bisect import RefereeEvidence
 from hypertrain.challenge.disputes_v2 import (
@@ -160,6 +161,7 @@ def activate(world: World, index: int) -> str:
             for rank in range(spec.layout.n_gpus)
         ],
         artifact_hashes=[sha256_hex(b"artifact")],
+        env=honest_env(spec.env.pin()),
     )
     with world.store._tx():
         world.store._db.execute(

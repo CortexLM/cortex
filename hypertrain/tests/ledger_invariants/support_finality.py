@@ -50,7 +50,7 @@ from hypertrain.protocol.messages_v2 import (
     RunManifestV2,
 )
 
-from .support import Real, bare_escrow, load_fixture_module
+from .support import Real, bare_escrow, enforce_mismatch_sanction, load_fixture_module
 
 ROLLBACK_FIXTURE = ("test_rollback_service_v2", "e2e/test_rollback_service_v2.py")
 DISPUTE_EXIT_FIXTURE = ("test_dispute_exit_v2_e2e", "e2e/test_dispute_exit_v2_e2e.py")
@@ -301,6 +301,7 @@ def build_stage(tmp_path_factory: Any) -> Iterator[Stage]:
     fixtures = rollback.fixtures
     generator = dispute.activated_network.__wrapped__(tmp_path_factory)
     network = next(generator)
+    enforce_mismatch_sanction(network.store)
     run_id = network.manifest.run_id()
     snapshot = sqlite3.connect(":memory:", check_same_thread=False)
     try:

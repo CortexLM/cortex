@@ -10,7 +10,6 @@ strict xfail that names the invariant.
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections import Counter
 from collections.abc import Callable, Iterator
 from types import ModuleType
@@ -433,27 +432,20 @@ def test_a_finalize_that_builds_its_services_inside_its_transaction_still_leaves
     stage: Stage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The condition of FIN-04 broken in a stand-in: the service cache is empty, as in a process
-    # that has just restarted, and the ledger fails once it is reached. Today the first call
-    # already fails while the ledger is built (OperationalError); a build that constructs its
-    # services first reaches the ledger (EscrowError). Either way nothing may persist.
+    # that has just restarted, and the ledger fails once it is reached. The tape replay is primed
+    # before the transaction opens and builds the services there, so the call reaches the ledger
+    # (EscrowError); a build inside the transaction would end in OperationalError instead.
     def failing(self: EscrowV2, reward: Any, evidence: Any) -> EscrowReceipt:
         raise EscrowError("INJECTED")
 
     monkeypatch.setattr(EscrowV2, "reward_finalize", failing)
     stage.store._services_v2.clear()
     before = stage.digest()
-    error = refusal(stage.finalize)
-    assert error[0] in (EscrowError, sqlite3.OperationalError)
+    assert refusal(stage.finalize) == (EscrowError, None, "INJECTED")
     assert stage.digest() == before
     nothing_was_finalized(stage)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=sqlite3.OperationalError,
-    reason="FIN-04+D-FIN-09: finalize settles even as the first service-touching request "
-    "after a restart [fix-lot: none (no design yet)]",
-)
 def test_finalize_settles_as_the_first_request_after_a_restart(stage: Stage) -> None:
     """FIN-04+D-FIN-09: a Finalize settles even when it is the first request that builds the
     services after a restart."""

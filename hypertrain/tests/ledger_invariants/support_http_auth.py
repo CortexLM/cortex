@@ -23,6 +23,7 @@ from typing import Any, NamedTuple
 import httpx
 from fastapi.testclient import TestClient
 
+from env_pin_fixtures import honest_env
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import REQUEST_HORIZON
 from hypertrain.protocol.server_keys import (
@@ -608,6 +609,7 @@ def open_round(world: World, count: int = 4) -> list[Keypair]:
                 for rank in range(spec.layout.n_gpus)
             ],
             artifact_hashes=[sha256_hex(b"artifact")],
+            env=honest_env(spec.env.pin()),
         )
         with network.store._tx():
             network.store._db.execute(

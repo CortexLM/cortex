@@ -28,6 +28,7 @@ from typing import Any
 import httpx
 import pytest
 
+from env_pin_fixtures import honest_env
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.ledger.escrow_v2 import reward_origin_id
 from hypertrain.protocol import envelope_v2
@@ -43,7 +44,13 @@ from hypertrain.protocol.messages_v2 import (
 )
 from hypertrain.protocol.messages_v2 import RankWorkResult as Rank
 
-from .support import FROZEN_UNIX, frozen_time, load_fixture_module, table_names
+from .support import (
+    FROZEN_UNIX,
+    enforce_mismatch_sanction,
+    frozen_time,
+    load_fixture_module,
+    table_names,
+)
 
 ROLLBACK = ("li_audit_rollback_fixture", "e2e/test_rollback_service_v2.py")
 LIVE_ONLY = ("challenge.db", "challenge.db-wal", "challenge.db-shm")
@@ -167,6 +174,7 @@ def activated_network(root: Path) -> Iterator[tuple[Any, Cast]]:
     try:
         with frozen_time(FROZEN_UNIX):
             network = next(generator)
+        enforce_mismatch_sanction(network.store)
         run = network.manifest.run_id()
         # The forger's job is the first of the queue, so the first lease is its audit.
         forger = min(
@@ -258,6 +266,7 @@ def activate_identities(network: Any, cast: Cast) -> None:
                 for rank in range(spec.layout.n_gpus)
             ],
             artifact_hashes=[sha256_hex(b"artifact")],
+            env=honest_env(spec.env.pin()),
         )
         with network.store._tx():
             network.store._db.execute(
@@ -351,12 +360,15 @@ def records(store: ChallengeStore, *kinds: str) -> dict[tuple[str, str], str]:
     return {(r[0], r[1]): r[2] for r in rows if not kinds or r[0] in kinds}
 
 
-def digest_of(store: ChallengeStore) -> str:
-    """Hash of every row of every table of the store and its run sub-stores."""
+def digest_of(store: ChallengeStore, *, without: tuple[str, ...] = ()) -> str:
+    """Hash of every row of every table of the store and its run sub-stores, less the tables
+    named in `without`."""
     hasher = hashlib.sha256()
     for part in store.stores():
         with part._lock:
             for name in table_names(part._db):
+                if name in without:
+                    continue
                 rows = sorted(
                     repr(tuple(row)) for row in part._db.execute(f'SELECT * FROM "{name}"')
                 )
@@ -577,6 +589,14 @@ def audit_kinds(store: ChallengeStore) -> dict[tuple[str, str], str]:
 
 def running(store: ChallengeStore) -> dict[str, dict[str, Any]]:
     return {h: r for h, r in lease_rows(store).items() if r["state"] == "running"}
+
+
+def honest_lease(store: ChallengeStore, cast: Cast) -> dict[str, Any]:
+    """The executed lease of stage s2 that is not the forger's. The queue is ordered by job id, a
+    hash of the run id, so which honest miner it belongs to changes with the manifest: a test
+    reads the row and takes the miner from its hotkey."""
+    (row,) = (r for h, r in running(store).items() if h != cast.forger.ss58)
+    return row
 
 
 def open_rows(store: ChallengeStore) -> list[dict[str, Any]]:

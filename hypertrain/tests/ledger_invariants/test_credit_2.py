@@ -20,6 +20,7 @@ import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+from env_pin_fixtures import honest_env
 from hypertrain.aggregator.core import FinalityError
 from hypertrain.challenge.finality_v2 import RoundStatus, settle
 from hypertrain.challenge.store import ChallengeError
@@ -498,13 +499,16 @@ OPERATIONS = st.one_of(
         ("restart", 0),
     ]
 )
+# S_min_units is 1000 here, so a lock holds at least 100 (ADR 0014 part 4.2): 99 is refused.
+@example(operations=[("lock", 99), ("lock", 100)])
 def test_units_are_conserved_by_every_sequence_of_ledger_operations(
     li_escrow: ModuleType, operations: list[tuple[str, int]]
 ) -> None:
     """CRD-24: transfers, locks, releases, pays and restarts, accepted or refused for want of
-    funds, keep issued equal to the sum of the buckets and to what each owner holds, and every
-    restart re-verifies the event chain."""
+    funds or because a lock is below the minimum, keep issued equal to the sum of the buckets and
+    to what each owner holds, and every restart re-verifies the event chain."""
     setup = li_escrow.setup("test")
+    minimum_lock = max(1, setup.policy.S_min_units // 10)
     database = memory_db()
     escrow = reopen(li_escrow, setup, database)
     cold_origin, _ = li_escrow.fund(escrow)
@@ -520,6 +524,7 @@ def test_units_are_conserved_by_every_sequence_of_ledger_operations(
             "dispute_id": None,
         }
         affordable = amount <= (abroad if kind == "back" else free)
+        dust = kind == "lock" and amount < minimum_lock
         call: Callable[[], object] | None = None
         if kind == "send":
             op = EscrowTransfer(owner=cold, recipient=other, **fields)
@@ -546,7 +551,7 @@ def test_units_are_conserved_by_every_sequence_of_ledger_operations(
             free += units
         elif kind == "restart":
             escrow = reopen(li_escrow, setup, database)
-        if call is not None and affordable:
+        if call is not None and affordable and not dust:
             call()
             if kind == "send":
                 free, abroad = free - amount, abroad + amount
@@ -558,7 +563,7 @@ def test_units_are_conserved_by_every_sequence_of_ledger_operations(
             else:
                 free, paid = free - amount, paid + amount
         elif call is not None:
-            assert refusal(call) == "UNFUNDED_OR_UNKNOWN_ORIGIN"
+            assert refusal(call) == ("LOCK_BELOW_MINIMUM" if dust else "UNFUNDED_OR_UNKNOWN_ORIGIN")
         balances = escrow.balances()
         assert balances.conserved() and balances.issued == 30000
         assert (balances.paid, balances.admission_locked) == (paid, sum(u for _, u in locks))
@@ -649,6 +654,7 @@ def join_request(world: Any, hot: Any, cold: Any, tag: str) -> Any:
         expires_beacon=10000,
         policy_hash=network.manifest.network.admission_policy_hash,
         hardware_hint=HardwareHint(device_name="cpu", device_count=999, driver="advisory"),
+        env=honest_env(),
     )
     return network.client.post(network.url + "/join", content=canonicalize(request.body()))
 

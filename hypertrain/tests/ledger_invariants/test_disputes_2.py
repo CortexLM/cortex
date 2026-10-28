@@ -28,7 +28,7 @@ from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import BisectV2, DisputeV2, ResolutionV2
 
-from .support import service_world
+from .support import enforce_mismatch_sanction, service_world
 from .support_disputes import (
     AGREE,
     BOND,
@@ -774,6 +774,7 @@ def forged(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Forged]:
     rollback, exit_e2e = heavy_modules()
     generator = exit_e2e.activated_network.__wrapped__(tmp_path_factory)
     network = next(generator)
+    enforce_mismatch_sanction(network.store)
     try:
         fixtures = rollback.fixtures
         forger = fixtures.HOT[4]

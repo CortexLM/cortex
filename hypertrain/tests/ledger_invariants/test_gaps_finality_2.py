@@ -246,25 +246,13 @@ def standing(stage: Stage, hotkey: str, coldkey: str) -> tuple[str, int, int]:
     return str(row[0]), int(row[1]), escrow.balances(coldkey).admission_locked
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="GAP-01 [decision: when the penalty is enforced]: a miner whose forged commit the "
-    "master replay refuted, and who opens no contest, keeps an ACTIVE admission, zero strikes and "
-    "its full stake: the only consequence is that its own round is not paid, so repeating the "
-    "forgery in every round costs it nothing. The sanction is designed and merged (ADR 0011 part "
-    "8, decisions 15-18: suspension, one strike, the bond burned) but runs AUDIT_MISMATCH in "
-    "record mode: the row ends WOULD_APPLY and the hook is not called, because "
-    "enforce_audit_mismatch is off by default until the environment-pin lot flips it (with it on, "
-    "this stage ends SUSPENDED with one strike and no stake), so the standing does not change "
-    "[fix-lot: decision (product choice pending)]",
-)
 def test_a_detected_cheat_that_is_not_contested_has_a_consequence_beyond_the_round(
     stage: Stage,
 ) -> None:
     """GAP-01: a miner whose forged commit the master replay refuted and who opens no contest
-    ends with a standing that differs from its honest peers once the window of a contest is over,
-    not only with an unpaid round."""
+    ends, once the window of a contest is over, suspended with one strike and its bond burned (ADR
+    0011 part 8, decisions 15-18), where its honest peers stay as they were, not only with an
+    unpaid round."""
     forger, cold = stage.forger.ss58, stage.fixtures.COLD
     verdict = stage.record("verdict", f"0:{forger}")["body"]["result"]
     X.control(
@@ -281,7 +269,9 @@ def test_a_detected_cheat_that_is_not_contested_has_a_consequence_beyond_the_rou
     forged = standing(stage, forger, cold[4].ss58)
 
     assert honest[0][:2] == ("ACTIVE", 0)  # nobody else is touched
-    assert forged != honest[0], f"the cheat left no trace in its standing: {forged}"
+    assert forged == ("SUSPENDED", 1, 0), (
+        f"the cheat was not suspended, struck and burned: {forged}"
+    )
 
 
 # --- T-FIN-18 (CRD-04, FIN-08, DIB-21): the round after two repaired rounds is minted -----------

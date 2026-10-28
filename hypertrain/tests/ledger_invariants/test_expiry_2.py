@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from env_pin_fixtures import honest_env
 from hypertrain.miner.admission import sign_join, sign_rotation
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
@@ -518,6 +519,7 @@ def far_join(world: World) -> Any:
             expires_beacon=expires,
             policy_hash=network.manifest.network.admission_policy_hash,
             hardware_hint=HardwareHint(device_name="cpu", device_count=1, driver="cpu"),
+            env=honest_env(),
         )
         return network.client.post(network.url + "/join", content=canonicalize(request.body()))
 

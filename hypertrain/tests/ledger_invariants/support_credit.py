@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from env_pin_fixtures import honest_env
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.ledger.escrow_v2 import (
     EscrowError,
@@ -665,6 +666,7 @@ def build_audited_round(
                     for rank in range(spec.layout.n_gpus)
                 ],
                 artifact_hashes=[sha256_hex(b"artifact")],
+                env=honest_env(spec.env.pin()),
             )
             with network.store._tx():
                 network.store._db.execute(

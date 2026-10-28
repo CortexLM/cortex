@@ -720,7 +720,7 @@ def test_a_changed_capacity_implementation_voids_the_admitted_profile_and_cannot
         monkeypatch.setattr(
             ChallengeStore,
             "_service_implementation_v2",
-            staticmethod(lambda source, paths: "ef" * 32),
+            staticmethod(lambda source, paths, pin: "ef" * 32),
         )
         with pytest.raises(ChallengeError, match="SERVICE_PROFILE_AUTHORITY"):
             store.require_roster_v2(run_id, roster=roster)

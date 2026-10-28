@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import ast
 import json
-import sqlite3
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -862,16 +861,11 @@ def test_a_miner_commits_once_per_round_a_replay_returns_the_receipt_and_another
     assert store._record_v2(round_.run_id, "commit", f"0:{hot.ss58}") == stored
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=sqlite3.OperationalError,
-    reason="CRD-05+CRD-D03: the v2 services of a restarted store are built by the first handler "
-    "that needs them; finalize_v2 is one, and builds them inside its transaction, where "
-    "EscrowV2.__init__ changes PRAGMA synchronous and fails, so the first Finalize after a "
-    "restart is a server error until another route has built the services "
-    "[fix-lot: none (no design yet)]",
-)
 def test_the_first_finalize_after_a_restart_is_accepted(audited_round: AuditedRound) -> None:
+    """CRD-05+CRD-D03: the v2 services of a restarted store are built by the first handler that
+    needs them. Finalize must not be the one that builds them inside its transaction, where
+    EscrowV2.__init__ changes PRAGMA synchronous and fails: the first Finalize after a restart is
+    accepted without another route having run."""
     round_ = audited_round
     round_.restore()
     assert round_.finalize().status_code == 200  # control: the services are warm

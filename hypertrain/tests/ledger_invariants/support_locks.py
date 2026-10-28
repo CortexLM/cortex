@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 from pydantic import JsonValue
 
+from env_pin_fixtures import honest_env
 from hypertrain.auditor.island_bisect import RefereeEvidence
 from hypertrain.auditor.replay import AnchorCache, optimizer_hash, pack_state
 from hypertrain.challenge.admission import Admission, AdmissionStatus
@@ -172,6 +173,7 @@ class Rig:
             expires_beacon=10000,
             policy_hash=self.net.manifest.network.admission_policy_hash,
             hardware_hint=HardwareHint(device_name="cpu", device_count=999, driver="advisory"),
+            env=honest_env(),
         )
         return self.net.client.post(self.net.url + "/join", content=canonicalize(signed.body()))
 
@@ -233,6 +235,7 @@ class Rig:
                 for rank in range(spec.layout.n_gpus)
             ],
             artifact_hashes=[sha256_hex(b"artifact")],
+            env=honest_env(spec.env.pin()),
         )
 
     def activate(self, miner: Miner) -> None:
