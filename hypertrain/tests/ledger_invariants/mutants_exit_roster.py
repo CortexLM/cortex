@@ -60,6 +60,16 @@ BOOKED = (
     f'            run_id, {MEMBER}, admission, "leaves", "MINER", "0" * 64\n'
     "        )\n"
 )
+SAME_OBJECT = (
+    '            if self._record_v2(run_id, "leaves", identity)["object"] != record["object"]:\n'
+    "                continue\n"
+)
+UNGUARDED = "\"WHERE id=? AND state='exhausted' AND result='LEAF_OBJECT_LOST'\","
+COUNTED = (
+    '        finality = self._record_v2(run_id, "finality", str(row["w"]))\n'
+    '        finality["unresolved_audits"] = max(0, int(finality["unresolved_audits"]) - 1)\n'
+    '        self._put_record_v2(run_id, "finality", str(row["w"]), finality)\n'
+)
 FORGOTTEN = (
     "                lost_leaves=bool(lost)\n"
     "                and self._db.execute(\n"
@@ -77,6 +87,8 @@ NOBODY = T2 + "test_the_retirement_for_a_lost_leaf_object_sanctions_nobody_and_m
 NEXT = T2 + "test_the_round_after_one_with_a_lost_leaf_object_opens_and_its_audits_lease"
 RESTORED = T2 + "test_a_restored_leaf_object_puts_its_job_back_and_the_round_goes_on"
 UNREAD = T2 + "test_a_leaf_object_that_reads_back_corrupt_is_not_a_loss_and_pins_no_round"
+REPUBLISHED = T2 + "test_a_leaf_object_republished_after_the_loss_is_not_the_one_that_was_lost"
+KEPT = T2 + "test_a_lease_refused_for_another_reason_commits_nothing"
 REVIVED = T2 + "test_a_restored_leaf_object_does_not_revive_a_job_of_a_retired_round"
 WAITS = (
     T2 + "test_a_lost_leaf_object_waits_for_the_round_before_it_and_is_retired_when_that_one_closes"
@@ -302,6 +314,46 @@ MUTANTS = [
         "new": "            pass\n",
         "tests": [RESTORED],
         "why": "A job parked for an object that reads again stays parked and pins its round.",
+    },
+    {
+        "id": "nsh03-lost-leaf-republished-object-still-counts-as-lost",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": SAME_OBJECT,
+        "new": "",
+        "tests": [REPUBLISHED],
+        "why": "A member that published its leaves again keeps a retired round for an object its "
+        "audit would not read.",
+    },
+    {
+        "id": "nsh03-lost-leaf-requeue-resets-a-leased-job",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": UNGUARDED,
+        "new": '"WHERE id=?",',
+        "tests": [RESTORED],
+        "why": "The record of a healed loss puts a job that was leased since back in the queue at "
+        "every push.",
+    },
+    {
+        "id": "nsh03-lost-leaf-park-counts-the-audit-as-settled",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": LOST_FAULT,
+        "new": COUNTED + LOST_FAULT,
+        "tests": [REFUSED],
+        "why": "A parked job counts as an audit nobody owes, so the round could finish with one "
+        "outstanding.",
+    },
+    {
+        "id": "nsh03-lease-tx-commits-every-refusal",
+        "invariants": ["NSH-03", "ES-08"],
+        "path": STORE,
+        "old": "            except CommittedRefusal as error:\n                refusal = error\n",
+        "new": "            except ChallengeError as error:\n                refusal = error\n",
+        "tests": [KEPT],
+        "why": "Any refusal of a lease request keeps the writes of its transaction, the Receipt of "
+        "a refused ask included.",
     },
     {
         "id": "nsh03-lost-leaf-retired-round-takes-its-job-back",

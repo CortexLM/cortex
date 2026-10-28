@@ -232,6 +232,9 @@ def test_a_leaf_object_the_master_lost_is_refused_by_name_and_the_audits_behind_
     assert jobs(rnd)[rnd.hotkey(head)] == ("exhausted", LOST)
     books = X.books(rnd)
     assert (books["excluded"], books["exit-sanction"], books["exit-failed"]) == ({}, [], [])
+    # the retirement zeroes the count; a park that counted the job as settled would let the round
+    # finish with an audit outstanding if the object came back
+    assert rnd.finality()["unresolved_audits"] == len(rnd.members)
     assert served.status_code == 200, served.text[:200]
     assert served.json()["body"]["start_state"]["hotkey"] == rnd.hotkey(behind)
 
@@ -336,6 +339,62 @@ def test_a_restored_leaf_object_puts_its_job_back_and_the_round_goes_on(queue: X
     again = ask_a_lease(rnd, 2)
     assert again.status_code == 200, again.text[:200]
     assert again.json()["body"]["start_state"]["hotkey"] == rnd.hotkey(head)
+
+    # the record of the loss stays, and every push asks about it: it must not undo the lease
+    X.walk(rnd, rnd.network.now + 1)
+
+    assert rnd.finality()["disposition"] == "PENDING"
+    assert jobs(rnd)[rnd.hotkey(head)][0] == "running"
+
+
+def test_a_leaf_object_republished_after_the_loss_is_not_the_one_that_was_lost(
+    queue: X.Round,
+) -> None:
+    """NSH-03 (D83): the record of the loss names the object the member's leaves record named when
+    the lease ran into it. The member publishes the same leaves again as another object (the lot's
+    A2W-15: nothing refuses it while the proof carries another admission id), so the object that
+    is gone is no longer the one an audit would read: the job is queued again, the round is not
+    retired and the audit is served from the new object."""
+    rnd = queue
+    head = rnd.queue_order()[0]
+    lost = rnd.record("leaves", rnd.identity(head))["object"]
+    X.lose_leaves(rnd, head)
+    X.control(ask_a_lease(rnd, 1).status_code == 503, "the first ask finds the loss")
+    again = X.publish_leaves(
+        rnd,
+        head,
+        X.forged_leaves(rnd, head),
+        X.forged_commit(rnd, head),
+        indent=2,
+        admission_id="ab" * 32,
+    )
+    X.control(again.status_code == 200, "A2W-15 is open: " + again.text[:200])
+    X.control(rnd.record("leaves", rnd.identity(head))["object"] != lost, "another object")
+
+    X.walk(rnd, rnd.network.now + 1)
+
+    assert rnd.finality()["disposition"] == "PENDING"
+    assert jobs(rnd)[rnd.hotkey(head)] == ("queued", None)
+    served = ask_a_lease(rnd, 2)
+    assert served.status_code == 200, served.text[:200]
+    assert served.json()["body"]["start_state"]["hotkey"] == rnd.hotkey(head)
+
+
+def test_a_lease_refused_for_another_reason_commits_nothing(queue: X.Round) -> None:
+    """NSH-03 (D83): the refusal for a lost leaf object is the one that keeps what its transaction
+    wrote (ADR 0011 decision 28). Every other refusal still rolls back (ES-08): an auditor that
+    holds a lease and asks again is refused 409, and the store, which took the ask's signed
+    Receipt on its way, is what it was before the ask."""
+    rnd = queue
+    X.control(ask_a_lease(rnd, 1).status_code == 200, "the auditor holds a lease")
+    world = X.world_of(rnd.network)
+    before = world.db_digest()
+
+    refused = ask_a_lease(rnd, 2)
+
+    assert refused.status_code == 409, refused.text[:200]
+    assert refused.json()["detail"] == "one live lease per auditor"
+    assert world.db_digest() == before
 
 
 def test_a_leaf_object_that_reads_back_corrupt_is_not_a_loss_and_pins_no_round(

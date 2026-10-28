@@ -396,13 +396,26 @@ def post_commit(rnd: Round, index: int, commit: CommitV2, *, expiry: int | None 
     return rnd.post("/commit", envelope)
 
 
-def publish_leaves(rnd: Round, index: int, leaves: list[LeafPreimage], commit: CommitV2) -> Any:
-    """POST /leaves: the signed descriptor of the leaf object the commit's root commits to."""
+def publish_leaves(
+    rnd: Round,
+    index: int,
+    leaves: list[LeafPreimage],
+    commit: CommitV2,
+    *,
+    indent: int | None = None,
+    admission_id: str | None = None,
+) -> Any:
+    """POST /leaves: the signed descriptor of the leaf object the commit's root commits to. An
+    `indent` encodes the same leaves another way (another object); `admission_id` is the one the
+    proof carries, the member's own by default."""
     net = rnd.network
-    raw = json.dumps([p.model_dump(mode="json") for p in leaves]).encode()
-    admission = net.store._db.execute(
-        "SELECT admission_id FROM admissions_v2 WHERE hotkey=?", (rnd.hotkey(index),)
-    ).fetchone()[0]
+    raw = json.dumps([p.model_dump(mode="json") for p in leaves], indent=indent).encode()
+    admission = (
+        admission_id
+        or net.store._db.execute(
+            "SELECT admission_id FROM admissions_v2 WHERE hotkey=?", (rnd.hotkey(index),)
+        ).fetchone()[0]
+    )
     proof = WorkProof(
         admission_id=admission,
         challenge_hash=sha256_hex(canonicalize(commit.model_dump(mode="json"))),
