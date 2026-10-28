@@ -51,7 +51,7 @@ from hypertrain.protocol.envelope import body_digest
 from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import LeafPreimage
-from hypertrain.protocol.messages_v2 import IslandJobV1, RankWorkResult
+from hypertrain.protocol.messages_v2 import EnvObservation, IslandJobV1, RankWorkResult
 from hypertrain.trainer.compress import compress
 from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.model import init_params
@@ -143,6 +143,7 @@ def artifacts_of(published: Path) -> IslandArtifacts:
         d / "delta.bin",
         d / "leaves.json",
         work,
+        EnvObservation.model_validate(json.loads((d / "summary.json").read_bytes())["env"]),
     )
 
 

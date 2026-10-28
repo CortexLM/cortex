@@ -615,6 +615,9 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=WORKERS)
     ap.add_argument("--out-dir", type=Path, default=ROOT / "experiments" / "results")
     args = ap.parse_args()
+    from sim_pin import pin_process
+
+    pin_process()  # this process and the workers it starts, before torch loads
     doc = design_doc()
     if args.write_prereg:
         if PREREG.exists():

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -16,15 +17,19 @@ from test_network_v2 import wrapper
 from test_od_fields import od_body
 
 import hypertrain.models.kimi_tiny as kt
+from hypertrain.protocol.env_pins import class_pin
 from hypertrain.protocol.example import example_manifest
+from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import RunManifest, f32hex
 from hypertrain.protocol.messages_v2 import RunManifestV2
 
-# Real values captured at f45064de, before arch became a registry name (REPORT.md, ADR 0006).
-GOLDEN_V1 = "ad8beb30084a2e53f817c45f1cbfdf1491162575f10f2c3d190645081b2ba2ff"  # published
-GOLDEN_V1_OD = "0a32bc442fb217c4548ac8978075211c935d59e66d38b512decd2221ee9ffbf0"
-GOLDEN_V2_RUN = "d0725eb4558afbd1b98e76f8b66910b21b78c2a977f84df3ad979074fc599aed"
-GOLDEN_V2_TRAINING = "d7a864ceda214b127755ea7caee3768a1a8fb244643ed2a8d2365ed6f1fdb1cd"
+# Captured at f45064de, before arch became a registry name (REPORT.md, ADR 0006), and recaptured
+# when the environment pin became required (ADR 0011 part 3): the only change is the pin's bytes.
+GOLDEN_V1 = "aa39197d5816cd041826d1d967215901b0fe74ccf14d238f319892095aec8abd"
+GOLDEN_V1_OD = "fe70985a36ea082c071d313eb626177a502e6c3581a45e36e53c3a05fbf13a79"
+GOLDEN_V2_RUN = "a3c9eddbad44a271f4833fa608430009859016ec45ed1274cfda01daa22d49fe"
+GOLDEN_V2_TRAINING = "7f854ec04653eaefd89dd96e4da47b7433c687b64d23fbb1d1ff6a8d794056ce"
+PUBLISHED_V1 = "ad8beb30084a2e53f817c45f1cbfdf1491162575f10f2c3d190645081b2ba2ff"
 MICRO = {
     "n_layers": 3,
     "d_model": 32,
@@ -64,10 +69,16 @@ def kimi_training(**geometry: Any) -> dict[str, Any]:
     return body
 
 
-def test_existing_manifests_hash_as_before_and_omitted_arch_is_the_decoder() -> None:
+def test_manifests_hash_as_recorded_and_omitted_arch_is_the_decoder() -> None:
     fixture = json.loads((Path(__file__).parent / "fixtures/network_v1_baseline.json").read_bytes())
     published = json.loads(bytes.fromhex(fixture["messages"][0]["body_hex"]))
-    for body in (published, _without_arch(published)):
+    # The published v1 baseline has no environment pin: it is now refused, not read as ambient.
+    with pytest.raises(ValidationError, match=r"reference_spec\.env\.pinned"):
+        RunManifest.model_validate(published)
+    pinned = copy.deepcopy(published)
+    pinned["reference_spec"]["env"]["pinned"] = class_pin("avx2", "none")
+    assert hashlib.sha256(canonicalize(published)).hexdigest() == PUBLISHED_V1
+    for body in (pinned, _without_arch(pinned)):
         assert RunManifest.model_validate(body).run_id() == GOLDEN_V1
     assert RunManifest.model_validate(od_body()).run_id() == GOLDEN_V1_OD
     v2 = wrapper().body()

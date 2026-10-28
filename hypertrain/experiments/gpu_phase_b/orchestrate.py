@@ -28,7 +28,7 @@ from typing import Any
 
 from hypertrain.gpu_ops import budget, launcher, provider, supervisor
 from hypertrain.gpu_ops.journal import Journal, Record, durable_write, flock, fsha
-from hypertrain.gpu_ops.launcher import Orchestrator, Reject, shard_path
+from hypertrain.gpu_ops.launcher import Orchestrator, Reject, shard_path, worker_pin
 
 HERE = Path(__file__).resolve().parent
 REMOTE_SHARD = "data/phase-b/shard.u32"
@@ -256,8 +256,12 @@ class PhaseBOrchestrator(Orchestrator):
         if done := self.j.last("job_done", role=role, name=name):
             return str(done["exit"])
         self._guard()
+        pin = worker_pin(self.cfg.get("device", "cuda"))
+        unset = [word for var in pin.absent for word in ("-u", var)]  # env(1) options come first
         full = [
             "env",
+            *unset,
+            *(f"{k}={v}" for k, v in pin.present),
             "CUBLAS_WORKSPACE_CONFIG=:4096:8",
             "CUDA_DISABLE_PTX_JIT=1",
             "PYTHONPATH=src",
@@ -266,7 +270,9 @@ class PhaseBOrchestrator(Orchestrator):
             "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
             *argv,
         ]
-        full[1:1] = [f"{k}={v}" for k, v in sorted(self.cfg.get("remote_env", {}).items())]
+        full[1 + len(unset) : 1 + len(unset)] = [
+            f"{k}={v}" for k, v in sorted(self.cfg.get("remote_env", {}).items())
+        ]
         self.j.append("job_started", role=role, name=name, argv=full)
         q = shlex.quote
         log = f"out/{name}.log"

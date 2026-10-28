@@ -29,7 +29,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, JsonValue, StrictInt
+from pydantic import BaseModel, ConfigDict, JsonValue, StrictInt, ValidationError
 
 if TYPE_CHECKING:
     from experiments.gpu_network_v2.orchestrate import NetworkRuntime
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from hypertrain.gpu_ops.host_attest import Attestation
     from hypertrain.gpu_ops.network_qualification import HostPin
     from hypertrain.gpu_ops.work_screen import IslandLaunch
+    from hypertrain.protocol.env_pins import EnvPin
     from hypertrain.protocol.messages import ReplayEnv
 
 from hypertrain.beacon import BeaconError, BeaconRound
@@ -360,6 +361,28 @@ class ChallengeError(Exception):
         super().__init__(detail)
         self.status = status
         self.detail = detail
+
+
+class RunRetired(ChallengeError):
+    """The stored manifest is one the current model refuses: the run answers 409 and stays idle."""
+
+
+def _unprocessable(error: EnvelopeError) -> ChallengeError | None:
+    """A manifest body the model refuses is unprocessable (422), and says where."""
+    cause = error.__cause__
+    if not isinstance(cause, ValidationError):
+        return None
+    first = cause.errors()[0]
+    where = ".".join(str(p) for p in first.get("loc", ()))
+    return ChallengeError(422, f"{where}: {first.get('msg', 'invalid')}")
+
+
+def _retired(error: ValidationError) -> RunRetired:
+    """A stored run whose manifest the model now refuses (ADR 0011 part 3: the pin is required)."""
+    where = sorted({".".join(map(str, e["loc"])) for e in error.errors()})
+    return RunRetired(
+        409, "RUN_MANIFEST_RETIRED: the stored manifest is refused at " + ", ".join(where)
+    )
 
 
 _ENVELOPE_STATUS: list[tuple[type[EnvelopeError], int]] = [
@@ -729,7 +752,10 @@ class ChallengeStore:
             raise ChallengeError(404, "unknown run")
         if json.loads(row["manifest"]).get("manifest_version") == 2:
             raise ChallengeError(409, "route and stored contract version differ")
-        return row, RunManifest.model_validate_json(row["manifest"])
+        try:
+            return row, RunManifest.model_validate_json(row["manifest"])
+        except ValidationError as error:
+            raise _retired(error) from error
 
     def _round(self, db: sqlite3.Connection, run_id: str, w: int) -> tuple[sqlite3.Row, RoundOpen]:
         row = db.execute("SELECT * FROM rounds WHERE run_id=? AND w=?", (run_id, w)).fetchone()
@@ -912,6 +938,8 @@ class ChallengeStore:
             try:
                 manifest = intake.accept(env, self._now(db))
             except EnvelopeError as error:
+                if (unprocessable := _unprocessable(error)) is not None:
+                    raise unprocessable from None
                 status = next(s for cls, s in _ENVELOPE_STATUS if isinstance(error, cls))
                 raise ChallengeError(status, str(error)) from None
             assert isinstance(manifest, RunManifest)
@@ -1199,7 +1227,10 @@ class ChallengeStore:
             ).fetchone()
             if sig is None:
                 continue
-            self._select(db, row, body, bytes.fromhex(sig["signature"]))
+            try:
+                self._select(db, row, body, bytes.fromhex(sig["signature"]))
+            except RunRetired:
+                continue  # its draw stays pending; it must not stop the beacon of the other runs
 
     def _select(
         self, db: sqlite3.Connection, row: sqlite3.Row, body: RoundOpen, sig: bytes
@@ -1613,6 +1644,10 @@ class ChallengeStore:
         return job
 
     def _replayable(self, db: sqlite3.Connection, job: sqlite3.Row) -> bool:
+        try:
+            self._run(db, job["run_id"])
+        except RunRetired:
+            return False  # its jobs wait; they must not starve the auditors of the other runs
         round_row, _ = self._round(db, job["run_id"], job["w"])
         miner = self._miner(db, job["run_id"], job["w"], job["target"])
         return round_row["theta_start"] is not None and miner["preimages"] is not None
@@ -2303,7 +2338,10 @@ class ChallengeStore:
         data = envelope_v2.load_json(row[0])
         if not isinstance(data, dict) or data.get("manifest_version") != 2:
             raise ChallengeError(409, "route and stored contract version differ")
-        return RunManifestV2.model_validate(data)
+        try:
+            return RunManifestV2.model_validate(data)
+        except ValidationError as error:
+            raise _retired(error) from error
 
     def _record_v2(self, run_id: str, kind: str, identity: str) -> dict[str, Any]:
         row = self._db.execute(
@@ -2407,7 +2445,12 @@ class ChallengeStore:
     def _create_run_v2(self, raw: bytes) -> dict[str, JsonValue]:
         if self.owner_hotkey is None:
             raise ChallengeError(503, "owner hotkey is not configured")
-        env = envelope_v2.parse_envelope(raw)
+        try:
+            env = envelope_v2.parse_envelope(raw)
+        except EnvelopeError as error:
+            if (unprocessable := _unprocessable(error)) is not None:
+                raise unprocessable from None
+            raise
         if env.type != "RunManifestV2":
             raise ChallengeError(400, "expected RunManifestV2")
         hosted = False
@@ -2745,9 +2788,11 @@ class ChallengeStore:
         from hypertrain.gpu_ops import host_attest
         from hypertrain.gpu_ops import network_qualification as engine
         from hypertrain.gpu_ops.journal import fsha
+        from hypertrain.protocol.env_pins import observation_divergence
         from hypertrain.protocol.messages import Receipt
 
         ref = manifest.training.reference_spec
+        env_pin = ref.env.pin()  # the environment class; `pins` are the hosts' SSH keys
         config_bytes = tuple(p.read_bytes() for p in configs)
         result_bytes = tuple(p.read_bytes() for p in results)
         if pins is None:
@@ -2801,6 +2846,11 @@ class ChallengeStore:
                     )
                     if summary.get("backend") != "cuda":
                         raise ChallengeError(403, "CPU artifacts cannot qualify CUDA execution")
+                    declared = summary.get("env")
+                    if not isinstance(declared, dict) or observation_divergence(env_pin, declared):
+                        raise ChallengeError(
+                            403, "CUDA qualification ran under another environment than the pin"
+                        )
             if (
                 job.manifest != manifest
                 or result.config_sha256 != fsha(config_path)
@@ -2897,6 +2947,11 @@ class ChallengeStore:
                 if econ.ledger_mode != "test":
                     raise ChallengeError(409, "production CUDA qualification required")
                 backend = "cpu"
+            # A manifest that names no device cannot run on the CUDA backend. The reverse is not
+            # refused: a CUDA-class run may exist in a CPU test state (the conserved genesis store
+            # of the GPU prepare tool); no CPU party can join it, since each declares gpu "none".
+            if backend == "cuda" and ref.env.pin().gpu == "none":
+                raise ChallengeError(409, "ENV_CLASS_BACKEND: gpu class none")
             selection: dict[str, JsonValue] = {"backend": backend, "authority_hash": authority}
             frozen = self._db.execute(
                 "SELECT data FROM records_v2 WHERE run_id=? "
@@ -4831,9 +4886,13 @@ class ChallengeStore:
             "miner/island_launch.py",
             "aggregator/capacity_worker.py",
             "auditor/replay.py",
+            "protocol/env_pins.py",
+            "trainer/determinism.py",
         )
         source = Path(__file__).resolve().parents[1]
-        implementation = self._service_implementation_v2(source, paths)
+        implementation = self._service_implementation_v2(
+            source, paths, manifest.training.reference_spec.env.pin()
+        )
         backend = self._record_v2(run_id, "execution-backend", "run")
         return _ServiceCapacityV1(
             version=1,
@@ -4851,8 +4910,12 @@ class ChallengeStore:
         )
 
     @staticmethod
-    def _service_implementation_v2(source: Path, paths: tuple[str, ...]) -> str:
-        """Bind capacity semantics, not unrelated shared-store methods or line numbers."""
+    def _service_implementation_v2(source: Path, paths: tuple[str, ...], pin: EnvPin) -> str:
+        """Bind capacity semantics, not unrelated shared-store methods or line numbers.
+
+        The manifest's environment pin is part of the implementation: the same code under another
+        pin computes other bytes, and the files that give the pin its meaning are in ``paths``.
+        """
         tree = ast.parse((source / "challenge/store.py").read_text())
         owned = {
             "_ServiceCapacityV1",
@@ -4882,6 +4945,7 @@ class ChallengeStore:
             "_finality_replay_job_v2",
             "_run_finality_replay_v2",
             "_prime_finality_replay_v2",
+            "_capacity_env_v2",
             "_capacity_outer_v2",
             "_prepare_capacity_genesis_v2",
             "island_job_v2",
@@ -4911,6 +4975,7 @@ class ChallengeStore:
         if set(code) != owned:
             raise ChallengeError(409, "SERVICE_CAPACITY_IMPLEMENTATION")
         code.update({path: sha256_hex((source / path).read_bytes()) for path in paths})
+        code["env_pin"] = sha256_hex(canonicalize(pin.body()))
         return sha256_hex(canonicalize(code))
 
     def _service_boundary_v2(
@@ -5024,11 +5089,10 @@ class ChallengeStore:
 
         with self._lock:
             pin = self._run_v2(run_id).training.reference_spec.env.pin()
-        if pin is not None:  # a child process of up to two minutes: never inside the transaction
-            try:
-                require_honorable(pin)
-            except EnvPinUnhonorable as error:
-                raise ChallengeError(409, f"SERVICE_PROFILE_ENV_PIN: {error}") from error
+        try:  # a child process of up to two minutes: never inside the transaction
+            require_honorable(pin, "cpu")
+        except EnvPinUnhonorable as error:
+            raise ChallengeError(409, f"SERVICE_PROFILE_ENV_PIN: {error}") from error
         with self._tx():
             try:
                 profile = _ServiceCapacityV1.model_validate(
@@ -5178,12 +5242,7 @@ class ChallengeStore:
             directory / "runtime",
             deadline,
             capacity,
-            env=dict(
-                PATH=os.defpath,
-                OMP_NUM_THREADS="1",
-                MKL_NUM_THREADS="1",
-                CUBLAS_WORKSPACE_CONFIG=":4096:8",
-            ),
+            env=self._capacity_env_v2(manifest, {"PATH": os.defpath}),
             cancel=cancel,
         )
         result, objects = collect_genesis(directory, request)
@@ -5525,13 +5584,7 @@ class ChallengeStore:
                         "hypertrain.aggregator.capacity_worker",
                         str(directory.absolute()),
                     ]
-                    or execution["env"]
-                    != {
-                        "PATH": os.defpath,
-                        "OMP_NUM_THREADS": "1",
-                        "MKL_NUM_THREADS": "1",
-                        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-                    }
+                    or execution["env"] != self._capacity_env_v2(manifest, {"PATH": os.defpath})
                     or kernel["memory.max"] != str(1 << 30)
                     or kernel["memory.swap.max"] != "0"
                     or kernel["cpu.max"] != "50000 100000"
@@ -9757,6 +9810,23 @@ class ChallengeStore:
             )
         return works
 
+    @staticmethod
+    def _capacity_env_v2(manifest: RunManifestV2, base: Mapping[str, str]) -> dict[str, str]:
+        """The one environment a capacity worker runs under and its attestation must show.
+
+        ATen, MKL and oneDNN read their variables at first use, so the worker has them from its
+        first instruction or refuses (``apply_reference_env``): the manifest's pin is applied
+        over ``base`` and the fixed thread and cuBLAS keys.
+        """
+        from hypertrain.protocol.env_pins import pinned_environ
+
+        fixed = {
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+        }
+        return pinned_environ({**base, **fixed}, manifest.training.reference_spec.env.pin())
+
     def _capacity_outer_v2(self, run_id: str, w: int) -> dict[str, Any]:
         """Internal bounded adapter; public heavy gate remains independently closed."""
         import os
@@ -9844,9 +9914,7 @@ class ChallengeStore:
                 run_id, w, "outer", 1, kind="outer", units=int(resource["outer_work_units"])
             ),
         )
-        env = dict(
-            os.environ, OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", CUBLAS_WORKSPACE_CONFIG=":4096:8"
-        )
+        env = self._capacity_env_v2(manifest, os.environ)
         run_capacity_argv(
             [
                 sys.executable,

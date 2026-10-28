@@ -11,7 +11,7 @@ On a Vast host, through the guarded harness (one instance, deleted and confirmed
 ```bash
 uv run --frozen python scripts/vast_e2e.py --profile mfu --num-gpus 2 --min-pcie-bw 50 \
   --key-file ~/.config/vast.key --max-usd 3 --max-minutes 50 \
-  --remote-env HT_MFU_WORLDS=2 --remote-env HT_MFU_COMPILE=1 --remote-env HT_MFU_MB=8
+  --remote-env HT_MFU_WORLDS=2 --remote-env HT_MFU_MB=8
 ```
 
 `scripts/vast_mfu_remote.sh` sweeps `HT_MFU_WORLDS` x `HT_MFU_MB` x `HT_MFU_COMPILE` x
@@ -19,13 +19,20 @@ uv run --frozen python scripts/vast_e2e.py --profile mfu --num-gpus 2 --min-pcie
 
 ```bash
 torchrun --standalone --nproc-per-node 2 scripts/run_mfu_dist.py --profile mfu-dense-1b-dp2 \
-  --device cuda --reduction zero2o --act-ckpt --nccl-pcie --compile --micro-batch 8 \
+  --device cuda --reduction zero2o --act-ckpt --nccl-pcie --micro-batch 8 \
   --out mfu-dp2.json
 ```
 
 Profiles live in `scripts/mfu_profiles.json`. The JSON records MFU against the vendor bf16 dense
 peak, tokens/s, per-step times, `rank_peak_mem_gib` (whole round), `rank_step_peak_mem_gib`
 (inside training steps only), the NCCL environment and the `HT_*` engine flags.
+
+Every run trains under the environment pin of its manifest (`docs/protocol.md`): CPU class `avx2`,
+the GPU class of the device and the attention backend of the run (`HT_ATTN_BACKEND` when set,
+else the qualified one). Each rank restarts itself under that environment, so it need not be
+exported. A caller that sets a pinned name to another value is refused, never overridden. No class
+holds `HT_COMPILE`, `HT_FP8`, `HT_MOE_GROUPED` or `OMP_THREAD_LIMIT` set, so `--compile` (and the
+`HT_MFU_COMPILE=1` sweeps of `vast_mfu_remote.sh`) exit with that message.
 
 ## Knobs
 
@@ -34,7 +41,7 @@ peak, tokens/s, per-step times, `rank_peak_mem_gib` (whole round), `rank_step_pe
 | `--reduction zero2o` | Gradients reduced to their ZeRO-2 owner in buckets issued from post-accumulate grad hooks, so communication overlaps the rest of backward. | Bitwise equal to `zero2` (same adds, same order). |
 | `--act-ckpt` (`HT_ACT_CKPT=1`) | Per-layer activation checkpointing. | Same kernels on recompute: bitwise equal. |
 | sdpa-flash | Selected on (sm_120, torch 2.14.0+cu130) from the qualification record in `tests/trainer/data/attn_qualify_sm120.json`. When the flash kernel rejects `enable_gqa`, the first accepting path of `attention.PATHS` is probed once per (device, dtype, group, head dim) and logged as `attention backend: <path>`; a dtype or head dim no path accepts (e.g. fp32) stops the run (set `HT_ATTN_BACKEND=math` for such models); inputs whose layout the chosen kernel still rejects stop the run with the kernel error (no math fallback). | Qualified by cross-process equality (flash path only). A fallback path is a function of hardware, torch and geometry, so ranks agree, but it is not qualified. |
-| `--compile` (`HT_COMPILE=1`) | One Inductor graph per layer. | Leaves differ from eager (fusion changes rounding), so a compiled run replays only under the same flag. Both modes replay bitwise. |
+| `--compile` (`HT_COMPILE=1`) | One Inductor graph per layer. Refused since the environment pin: no class holds `HT_COMPILE` set. | Leaves differ from eager (fusion changes rounding), so a compiled run replays only under the same flag. Both modes replay bitwise. |
 | `--micro-batch N` | Overrides the profile's per-rank micro_batch. | Part of the run; recorded as `HT_MFU_MICRO_BATCH`. |
 | `--nccl-pcie` | setdefaults `NCCL_P2P_DISABLE=1`, Ring, Simple, 4-8 channels, 8 MiB buffers. | Collectives are copies: no numeric effect. |
 | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | Set by default in `run_mfu_dist.py`; avoided a fragmentation OOM at 29.9 GiB on a 31.36 GiB card. | Allocator layout only. |
@@ -57,7 +64,8 @@ The bytes are identical, so leaves are unchanged.
 | dp4, compile, micro_batch 4 | 24.02 % | 32,778 | 0.990 s | 18.81 GiB |
 | dp2 before this work | 7.40 % | | | |
 
-Recommended: dp2, `zero2o`, activation checkpointing, `--compile`, micro_batch 8 to 12, on a
+The compile rows were measured before the environment pin and cannot be reproduced under it.
+Recommended under the pin: dp2, `zero2o`, activation checkpointing, micro_batch 8 to 12, on a
 host with `pcie_bw` >= 50.
 
 ## What limits it

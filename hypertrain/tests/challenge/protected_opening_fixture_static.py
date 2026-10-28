@@ -277,8 +277,10 @@ def preadmission_collector_regression() -> None:
                 "auditor/replay.py",
                 "miner/island_launch.py",
                 "models/registry.py",
+                "protocol/env_pins.py",
                 "trainer/compress.py",
                 "trainer/config.py",
+                "trainer/determinism.py",
                 "trainer/model.py",
             )
         }

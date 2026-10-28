@@ -8,12 +8,20 @@ MLA and the MoE sort). The attention backend is the one select_backend() picks f
 HT_ATTN_BACKEND included: "math" on sm_103 until a backend is qualified there, flash-SDPA on
 RTX 5090. It passes only when every repeat on every device yields the same digests, the three
 MICRO roots included. Inputs are generated on the CPU, so all devices see the same bytes.
+A manifest pins its environment and a trainer refuses a process that does not honor the pin, so
+the kimi round runs in a child process started under the pin of the device's class (CPU class
+avx2; GPU class sm_103, sm_120 or none, from the device's compute capability). This process stays
+unpinned: pinning HT_ATTN_BACKEND here would make every device answer "math" to the smoke above.
+A device whose compute capability has no row in hypertrain.protocol.env_pins.GPU_CLASSES cannot
+be pinned and fails the probe with that error.
 A kernel error (a RuntimeError, e.g. no kernel image for the device) is recorded as the digest
 value; any other exception is a defect and surfaces.
 
-The image must contain hypertrain.models.kimi_tiny. One built before it (the default pin of
-run_host.sh predates it) fails here with ImportError (cannot import name 'kimi_tiny'): pass
---image of a newer build.
+The image must contain hypertrain.protocol.env_pins.class_pin and hypertrain.models.kimi_tiny.
+One built before them (the default pin of run_host.sh predates both) fails here: without
+class_pin the script does not load, without kimi_tiny the child dies with ImportError (cannot
+import name 'kimi_tiny') and the probe ends with a ChildProcessError that says so. Pass --image of
+a newer build.
 
 Usage (inside the GPU image, HT_* env as the miner runs it):
   python scripts/b300/gpu_probe.py --out /results/gpu_probe.json --expect-gpus 8 --expect-cc 10.3
@@ -29,6 +37,8 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -38,13 +48,67 @@ from hypertrain.trainer import DETERMINISM  # must precede torch
 # isort: split
 import torch
 
+from hypertrain.protocol.env_pins import EnvPin, class_pin, gpu_label, pinned_environ
 from hypertrain.trainer.attention import Backend, attention, chosen_paths, select_backend
 
 GEOMETRY = {"batch": 1, "heads": 16, "kv_heads": 8, "seq": 256, "head_dim": 128}
+KIMI_CPU_CLASS = "avx2"
+KIMI_ROUND_FLAG = "--kimi-round"  # the child form of this script, see kimi_round()
+KIMI_ROUND_TIMEOUT = 1200  # seconds: a MICRO round takes seconds, the bound only ends a hang
 
 
 def digest(t: torch.Tensor) -> str:
     return hashlib.sha256(t.detach().contiguous().cpu().view(torch.uint8).numpy()).hexdigest()
+
+
+def kimi_pin(device: torch.device) -> EnvPin:
+    """The pin of the device's class: its compute capability for CUDA, none for cpu and meta."""
+    capability = torch.cuda.get_device_capability(device) if device.type == "cuda" else None
+    return EnvPin.from_body(class_pin(KIMI_CPU_CLASS, gpu_label(capability)))
+
+
+def kimi_round(device: torch.device) -> dict[str, str]:
+    """The roots of one kimi-k3-pro-tiny MICRO round (bf16) on ``device``, run by a child.
+
+    The child is this script (``KIMI_ROUND_FLAG``) started under ``pinned_environ`` of the
+    device's pin, which its trainer verifies. A RuntimeError of the round (a kernel error) is a
+    device result and is raised here as one; a child that dies otherwise is a defect.
+    """
+    pin = kimi_pin(device)
+    argv = [sys.executable, __file__, KIMI_ROUND_FLAG, str(device), json.dumps(pin.body())]
+    done = subprocess.run(  # noqa: S603 - this interpreter and this script, arguments built here
+        argv,
+        env=pinned_environ(os.environ, pin),
+        capture_output=True,
+        text=True,
+        timeout=KIMI_ROUND_TIMEOUT,
+        check=False,
+    )
+    if done.returncode != 0:
+        raise ChildProcessError(
+            f"kimi round on {device} exited {done.returncode}: {done.stderr[-1000:].strip()}"
+        )
+    reply = json.loads(done.stdout)
+    if "error" in reply:
+        raise RuntimeError(reply["error"])
+    roots: dict[str, str] = reply["round"]
+    return roots
+
+
+def kimi_child(device: str, pin_body: str) -> int:
+    """The child of kimi_round: run the round here, in a process that honors the pin it is given."""
+    # Imported here: an image without the module must fail through main()'s JSON, not while this
+    # script loads.
+    from hypertrain.models import kimi_tiny
+
+    doc = kimi_tiny.run_manifest(dataclasses.replace(kimi_tiny.MICRO, compute_dtype="bf16"))
+    try:
+        (res,) = kimi_tiny.qualify(doc, device, 1, EnvPin.from_body(json.loads(pin_body)))
+    except RuntimeError as e:
+        print(json.dumps({"error": str(e)}))
+    else:
+        print(json.dumps({"round": res}))
+    return 0
 
 
 def workload(device: torch.device) -> dict[str, str]:
@@ -77,12 +141,7 @@ def workload(device: torch.device) -> dict[str, str]:
     try:
         # One kimi-k3-pro-tiny MICRO round in the miner's dtype: eager MLA and the MoE sort, which
         # the attention smoke above never touches. Its roots must agree across repeats and devices.
-        # Imported here: an image without the module must fail through main()'s JSON, not while
-        # this script loads.
-        from hypertrain.models import kimi_tiny
-
-        doc = kimi_tiny.run_manifest(dataclasses.replace(kimi_tiny.MICRO, compute_dtype="bf16"))
-        (res,) = kimi_tiny.qualify(doc, str(device), 1)
+        res = kimi_round(device)
         for root in ("leaves_root", "delta_hash", "state_root"):
             out[f"kimi_micro_{root}"] = res[root]
     except RuntimeError as e:
@@ -193,4 +252,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(kimi_child(*sys.argv[2:]) if sys.argv[1:2] == [KIMI_ROUND_FLAG] else main())

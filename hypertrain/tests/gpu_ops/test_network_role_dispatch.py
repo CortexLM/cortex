@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from env_pin_fixtures import honest_observation
 from hypertrain.gpu_ops.journal import Journal, fsha, sha256
 from hypertrain.gpu_ops.launcher import Orchestrator, Reject
 from hypertrain.gpu_ops.provider import Provider
@@ -752,6 +753,9 @@ def test_actual_probe_inflight_cancel_reaps_process_retains_custody(
         "s.connect(sys.argv[1]);s.sendall(b'R');signal.pause()"
     )
     monkeypatch.setattr(island, "launch_argv", lambda *args: [sys.executable, "-c", child, address])
+    # The pin probe is a child process of its own and this host has no CUDA device: the case
+    # counts the launcher's one process, so the probe answers as an honoring host would.
+    monkeypatch.setattr(island, "require_honorable", lambda pin, backend: honest_observation(pin))
     original = subprocess.Popen
 
     def spawn(*args, **kwargs):

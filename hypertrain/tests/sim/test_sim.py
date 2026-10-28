@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SIM = ROOT / "experiments" / "sim"
 sys.path.insert(0, str(SIM))
 
+from batched import train_many  # noqa: E402
 from diloco import (  # noqa: E402
     ARMS,
     ChunkedShards,
@@ -25,8 +26,15 @@ from diloco import (  # noqa: E402
     dp_ids,
     round_ids,
     simulate,
+    train_round,
 )
 from state_policy import base_cfg  # noqa: E402
+
+from env_pin_fixtures import HOSTILE, clean_env  # noqa: E402
+from hypertrain.trainer.determinism import EnvPinMismatch  # noqa: E402
+from hypertrain.trainer.loop import Assignment  # noqa: E402
+from hypertrain.trainer.model import init_params  # noqa: E402
+from hypertrain.trainer.optim import init_state  # noqa: E402
 
 STEPS = 12
 
@@ -96,12 +104,33 @@ def _sparse() -> object:
     return CompressConfig("sparseloco", topk_frac=0.05, bits=2, ef_beta=1.0)
 
 
+def test_inner_rounds_refuse_a_process_off_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Both inner-round paths train under cfg.env_pin like trainer.loop.train_round: a process
+    # whose environment differs computes other bytes, and must not feed a result.
+    from dataclasses import replace
+
+    cfg, tr = _setup()
+    cfg = replace(cfg, inner=replace(cfg.inner, H=cfg.inner.J))
+    theta = init_params(cfg.model)
+    a = Assignment("sim", 0, tuple(range(cfg.inner.H * cfg.inner.micro_batch)))
+    state = init_state(replace(cfg.inner, state_policy="reset"), theta)
+    train_round(cfg, theta, a, tr, carry=state)
+    train_many(cfg, [theta], [a], tr, [state])
+    monkeypatch.setenv("OMP_DYNAMIC", "TRUE")
+    with pytest.raises(EnvPinMismatch, match="OMP_DYNAMIC"):
+        train_round(cfg, theta, a, tr, carry=state)
+    with pytest.raises(EnvPinMismatch, match="OMP_DYNAMIC"):
+        train_many(cfg, [theta], [a], tr, [state])
+
+
 def _smoke(tmp: Path, *extra: str) -> tuple[int, dict]:  # type: ignore[type-arg]
+    # The entry point pins its own process and its workers, whatever the caller exported.
     p = subprocess.run(
         [sys.executable, str(SIM / "state_policy.py"), "--smoke", "--out-dir", str(tmp), *extra],
         capture_output=True,
         text=True,
         timeout=1800,
+        env={**clean_env(), **HOSTILE},
     )
     assert p.returncode == 0, p.stdout[-3000:] + p.stderr[-3000:]
     return p.returncode, json.loads((tmp / "decision_smoke.json").read_text())

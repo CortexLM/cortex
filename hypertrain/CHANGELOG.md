@@ -55,26 +55,54 @@
   8-GPU hosts on a fake clock under seeded notice, hard-kill, host-loss, partition,
   store-partition, regional-loss and drought schedules; every run must end in the uninterrupted
   run's state hash.
-- Opt-in `reference_spec.env.pinned` (`{present: {NAME: VALUE}, absent: [NAME]}`) over the closed,
-  append-only table of `hypertrain.protocol.env_pins`: process-environment variables that change
-  CPU round bytes (`ATEN_CPU_CAPABILITY`, `MKL_CBWR`, `ONEDNN_MAX_CPU_ISA`, `HT_ATTN_BACKEND`,
-  `OMP_DYNAMIC`, and `HT_COMPILE`, `HT_FP8`, `HT_MOE_GROUPED`, `OMP_THREAD_LIMIT` pinned unset).
-  A manifest without the field keeps its bytes and `run_id`; the table is in `docs/protocol.md`
-  section 7 and the decision in `docs/adr/0011` (part 3) at the monorepo root. The island and
-  repair workers and the in-process entry points (`train_round`, `train_island`,
+- Required `reference_spec.env.pinned` (`{cpu, gpu, present, absent}`): every manifest names a CPU
+  class (`avx2`, `avx512`) and a GPU class (`none`, `sm_103`, `sm_120`) from the closed, append-only
+  tables of `hypertrain.protocol.env_pins` and carries the process environment they imply
+  (`ATEN_CPU_CAPABILITY`, `MKL_CBWR`, `ONEDNN_MAX_CPU_ISA`, `OMP_DYNAMIC`, `HT_ATTN_BACKEND`, and
+  `HT_COMPILE`, `HT_FP8`, `HT_MOE_GROUPED`, `OMP_THREAD_LIMIT` pinned unset). A CPU-only run says
+  `"gpu": "none"`. A manifest without the field, with `null`, or with only one of the two parts is
+  refused wherever it is parsed (`create_run` and `create_run_v2` answer 422 naming the field;
+  a stored run that no longer parses answers 409 `RUN_MANIFEST_RETIRED`). The tables are in
+  `docs/protocol.md` section 7 and the decision in `docs/adr/0011` (part 3) at the monorepo root.
+  The island and repair workers and the in-process entry points (`train_round`, `train_island`,
   `train_unit_order`) refuse a process whose environment, or ATen capability, diverges from the
-  pin, naming the variable; a pinned rank records `env_pin` in `summary.json`.
+  pin, naming the variable; the island worker also refuses a device outside the GPU class and
+  records what it observed in `summary.json["env"]`. `TrainConfig.env_pin` is required.
   `python -m hypertrain.trainer.env_probe --manifest FILE` reports the environment a manifest pins
   and checks that this host can honor it (`protocol.env_pins.require_honorable`: a child started
-  under the pinned environment, cached per process).
-  `launch_island`, `launch_window` and `_launch_unbounded` start island ranks under the pins and
+  under the pinned environment, cached per process and backend).
+  `launch_island`, `launch_window` and `_launch_unbounded` start island ranks under the pin and
   raise `EnvPinRefused` (an `IslandFailure`) before charging capacity when this host cannot honor
-  them. The rollback repair and history workers get the same pins.
+  it. The rollback repair and history workers get the same pin.
   `NetworkMiner.join` and `probe_trial` refuse a host that cannot honor the pin before any request,
-  and `bootstrap_service_capacity_v2` answers 409 `SERVICE_PROFILE_ENV_PIN` when the challenge host
-  cannot.
-  The miner's dispute follower answers a pinned CPU publication from its published trace instead
-  of replaying it in the daemon (behavior change for pinned manifests only).
+  and `bootstrap_service_capacity_v2` always asks whether the challenge host can (409
+  `SERVICE_PROFILE_ENV_PIN`).
+  The miner's dispute follower answers every publication from its published trace instead of
+  replaying it in the daemon (the in-process replay of an unpinned CPU publication is gone).
+  The generic CUDA executor sends the pin to the container (`request.json` gains `unset` and
+  `gpu`, `env` the names the pin sets); the container program applies it and refuses with exit 4,
+  before the island starts, a host whose probe shows another environment, ATen capability or device
+  class, and the executor judges the same report (`pinned_env`, `cpu_capability` in
+  `environment.json` and `role-dispatch.json`) and quarantines that host. See
+  `docs/cuda-executor.md`.
+  The CUDA network qualification starts its island under the pin (`child_environment`), and the
+  owner-reviewed backend bootstrap answers 403 when a rescued rank summary does not declare it.
+  `ChallengeStore._backend_v2` answers 409 `ENV_CLASS_BACKEND: gpu class none` for a manifest that
+  names no device on the CUDA backend: CUDA manifest builders must name `sm_103` or `sm_120`.
+  Breaking: every `run_id`, `reference_hash` and `training_hash` changes; existing runs are
+  recreated. `kimi_tiny.train_config` and `qualify` take the `EnvPin` the caller's process honors.
+  The miner declares its probed environment in bodies it signs: `JoinRequest.env` and
+  `WorkScreenV2.env` (`EnvObservation`: pinned variables as seen, ATen's resolved capability,
+  device class) are required, and the server answers 409 `ENV_PIN_DIVERGES: NAME, NAME` at join,
+  in the proof route before the reference is paid and in `Admission.proof`, before anything is
+  written (no strike, no suspension, the trial stays open). `sign_join` takes `env=`;
+  `IslandArtifacts.env` is what the ranks observed; the worker writes `summary.json["env"]`.
+  The CPU service profile's `implementation_hash` covers the manifest's whole pin body and the files
+  `protocol/env_pins.py` and `trainer/determinism.py` (twelve files; `_service_implementation_v2`
+  takes the `EnvPin`), so it differs per pin and an installed profile no longer matches.
+  The capacity workers (genesis and outer step) are started under the manifest's pin
+  (`ChallengeStore._capacity_env_v2`), the genesis attestation must show that same environment, and
+  `python -m hypertrain.aggregator.capacity_worker` refuses a process that does not honor the pin.
 
 ### Changed
 - A production run no longer stands on a CUDA qualification without host attestation.

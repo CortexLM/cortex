@@ -8,7 +8,7 @@ import hypertrain.trainer  # noqa: F401  (determinism before torch)
 
 # isort: split
 import torch
-from trainer_fixtures import assignment, make_cfg, sample
+from trainer_fixtures import assignment, make_cfg, sample, without_pin_check
 
 from hypertrain.trainer.loop import train_round
 from hypertrain.trainer.model import _moe, _moe_grouped, init_params
@@ -33,6 +33,7 @@ def test_grouped_matches_reference_value_and_grad(cf: float) -> None:
 
 
 def test_grouped_round_trains_repeatably(monkeypatch: pytest.MonkeyPatch) -> None:
+    without_pin_check(monkeypatch)
     monkeypatch.setenv("HT_MOE_GROUPED", "1")
     cfg = make_cfg(moe=True)
     roots = {

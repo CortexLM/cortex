@@ -41,6 +41,8 @@ from hypertrain.storage.cas import BlockList, R2ObjectStore
 from hypertrain.storage.offer import offer_upload
 from hypertrain.storage.r2 import R2Client, R2Config
 
+from .pin_wire import honest_report, request_pin
+
 BUCKET = "cortex-v3-test-fake"
 AMZ = "%Y%m%dT%H%M%SZ"
 
@@ -416,7 +418,12 @@ def launch_tree(request: dict[str, Any], attempt: Path, budget: float, log: Path
 
 
 def probe_ok(request: dict[str, Any]) -> dict[str, Any]:
-    return {"backend": "cuda", "gpu_uuids": list(request["uuids"]), "sm_counts": [148]}
+    return {
+        "backend": "cuda",
+        "gpu_uuids": list(request["uuids"]),
+        "sm_counts": [148],
+        **honest_report(len(request["uuids"])),
+    }
 
 
 # The package files the fake container's image holds. serve reports their digest in
@@ -437,7 +444,14 @@ def request_bytes(files: dict[str, bytes], artifact: dict[str, Any] | None) -> b
         "job_sha256": sha(files["job.json"]),
         "budget_seconds": 600,
         "inputs": {name: sha(raw) for name, raw in files.items()},
-        "env": {"PYTHONHASHSEED": "0", "HT_GPU_UUIDS": U0, "CUDA_VISIBLE_DEVICES": U0},
+        "env": {
+            "PYTHONHASHSEED": "0",
+            "HT_GPU_UUIDS": U0,
+            "CUDA_VISIBLE_DEVICES": U0,
+            **request_pin()["env"],
+        },
+        "unset": request_pin()["unset"],
+        "gpu": request_pin()["gpu"],
     }
     if artifact is not None:
         body["artifact"] = artifact

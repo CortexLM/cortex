@@ -512,6 +512,19 @@ class RankWorkResult(WireModel):
         return self
 
 
+class EnvObservation(WireModel):
+    """The environment a process declares, checked against the manifest's pin by the server.
+
+    ``env`` has one entry per name the pin speaks about (None: unset), ``cpu_capability`` is what
+    ATen resolved, ``gpu`` the class of the device it runs on (``none`` for a CPU-only run).
+    Self-reported by the party being checked: it refuses early, the bit-exact verdict decides.
+    """
+
+    env: Annotated[dict[Text, Text | None], Field(max_length=32)]
+    cpu_capability: Text
+    gpu: Text
+
+
 class WorkScreenV2(WireModel):
     evidence_kind: Literal["work-proof-v1"]
     admission_id: Hex64
@@ -522,6 +535,7 @@ class WorkScreenV2(WireModel):
     challenge_hash: Hex64
     rank_results: Annotated[list[RankWorkResult], Field(min_length=1, max_length=1024)]
     artifact_hashes: Hashes
+    env: EnvObservation
 
     @model_validator(mode="after")
     def _ranks(self) -> WorkScreenV2:
@@ -544,6 +558,7 @@ class JoinRequest(WireModel):
     expires_beacon: Positive
     policy_hash: Hex64
     hardware_hint: HardwareHint
+    env: EnvObservation
     hot_sig: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{128}$")]
     cold_sig: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{128}$")]
 

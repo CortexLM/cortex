@@ -30,6 +30,7 @@ from hypertrain.gpu_ops.journal import Journal, Record, durable_write, flock, fs
 from hypertrain.gpu_ops.provider import Provider, Response, list_rows, loopback, read_api_key
 from hypertrain.gpu_ops.remote import Ssh, ensure_identity
 from hypertrain.gpu_ops.verdict import compute_verdict
+from hypertrain.protocol.env_pins import EnvPin, class_pin
 
 # Exact Vast reply when this key is already on the instance; any other false reply rejects.
 SSH_ALREADY_ASSOCIATED = {"success": False, "msg": "SSH key already associated with instance."}
@@ -560,8 +561,11 @@ class Orchestrator:
         if self.cleanup_started():
             raise Reject("supervisor_cleanup_started")
         root, q = self.remote_root(role), shlex.quote
+        pin = worker_pin(self.cfg.get("device", "cuda"))
         argv = [
             "env",
+            *(word for name in pin.absent for word in ("-u", name)),  # env(1) options come first
+            *(f"{name}={value}" for name, value in pin.present),
             "CUBLAS_WORKSPACE_CONFIG=:4096:8",
             "CUDA_DISABLE_PTX_JIT=1",
             "PYTHONPATH=src",
@@ -904,6 +908,14 @@ class Orchestrator:
             "inventory": inv,
             "journal": str(self.j.path),
         }
+
+
+def worker_pin(device: str) -> EnvPin:
+    """The pin of the manifest a phase A/B worker builds for this device (RTX 5090 or CPU).
+
+    The worker refuses any other process environment, and the remote shell hands it the one the
+    launcher composes: both sides name this pin."""
+    return EnvPin.from_body(class_pin("avx2", "sm_120" if device == "cuda" else "none"))
 
 
 def shard_path(cfg: dict[str, Any]) -> Path:

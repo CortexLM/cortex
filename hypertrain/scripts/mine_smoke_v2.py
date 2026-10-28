@@ -119,6 +119,7 @@ def _budget_exceeded(signum: int, frame: Any) -> None:
 
 
 def _load_service() -> Any:
+    sys.path.insert(0, str(ROOT / "tests"))  # the test module imports env_pin_fixtures
     spec = importlib.util.spec_from_file_location(
         "mine_smoke_v2_service", ROOT / "tests/challenge/test_service_network_v2.py"
     )
@@ -220,6 +221,7 @@ def _graduate(svc: Any, n: Any, i: int) -> None:
             challenge_hash=challenge.digest(),
             rank_results=list(artifacts.ranks),
             artifact_hashes=[r.sha256 for r in proof.artifact_refs],
+            env=artifacts.env,
         )
         signed = {
             "proof": n.signed(svc.HOT[i], "WorkProof", proof),

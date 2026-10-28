@@ -8,10 +8,19 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from env_pin_fixtures import CPU_FP32, ambient, clean_env, needs_avx2
+from env_pin_fixtures import (
+    CPU_AVX2,
+    CPU_AVX512,
+    ambient,
+    clean_env,
+    honest_observation,
+    needs_avx2,
+    needs_avx512,
+)
 from hypertrain.protocol.env_pins import (
     EnvPin,
     EnvPinUnhonorable,
@@ -20,7 +29,7 @@ from hypertrain.protocol.env_pins import (
 )
 from hypertrain.protocol.example import example_manifest
 
-PIN = EnvPin.from_body(CPU_FP32)
+PIN = EnvPin.from_body(CPU_AVX2)
 
 
 @pytest.fixture(autouse=True)
@@ -37,8 +46,13 @@ def fake_python(tmp_path: Path, script: str) -> Path:
 
 
 @needs_avx2
-def test_probe_accepts_a_honorable_pin() -> None:
-    assert require_honorable(PIN) == "AVX2"
+def test_probe_accepts_a_honorable_pin_and_returns_what_it_observed() -> None:
+    assert require_honorable(PIN) == honest_observation(CPU_AVX2)
+
+
+@needs_avx512
+def test_probe_accepts_the_avx512_class() -> None:
+    assert require_honorable(EnvPin.from_body(CPU_AVX512)) == honest_observation(CPU_AVX512)
 
 
 @needs_avx2
@@ -46,7 +60,7 @@ def test_probe_asks_the_pinned_environment_not_the_ambient(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ambient(monkeypatch, ATEN_CPU_CAPABILITY="default", MKL_CBWR="COMPATIBLE", HT_FP8="1")
-    assert require_honorable(PIN) == "AVX2"
+    assert require_honorable(PIN) == honest_observation(CPU_AVX2)
 
 
 @pytest.mark.parametrize(
@@ -62,6 +76,7 @@ def test_probe_asks_the_pinned_environment_not_the_ambient(
             "echo 'no json here'\n", r"gave no verdict: 'no json here\\n'", id="no-verdict"
         ),
         pytest.param("echo '{\"cpu\": 1}'\n", r"gave no verdict", id="wrong-verdict"),
+        pytest.param("echo '[1]'\n", r"gave no verdict", id="not-an-object"),
     ],
 )
 def test_unhonorable_pin_carries_the_child_message(
@@ -75,10 +90,18 @@ def test_unhonorable_pin_carries_the_child_message(
 
 def test_probe_child_refuses_a_process_that_diverges() -> None:
     env = pinned_environ(clean_env(), PIN) | {"ATEN_CPU_CAPABILITY": "default"}
-    done = run_probe(json.dumps(CPU_FP32), env=env)
+    done = run_probe(json.dumps(CPU_AVX2), env=env)
     assert done.returncode == 1
     assert done.stdout == ""
     assert done.stderr.strip().endswith("ATen CPU capability: manifest 'AVX2', live 'DEFAULT'")
+
+
+def test_probe_child_refuses_a_device_outside_the_gpu_class() -> None:
+    gpu = EnvPin.from_body({**CPU_AVX2, "gpu": "none"})
+    env = pinned_environ(clean_env(), gpu)
+    done = run_probe(json.dumps(CPU_AVX2), "cuda", env=env)  # no CUDA device on this host
+    assert done.returncode == 1
+    assert "no CUDA device is visible" in done.stderr
 
 
 def test_probe_that_cannot_start_is_unhonorable(
@@ -99,9 +122,10 @@ def test_probe_runs_once_per_pin_and_a_refusal_is_not_remembered(
         with pytest.raises(EnvPinUnhonorable):
             require_honorable(PIN)
     assert runs.read_text().count("run") == 2
-    ok = script + 'echo \'{"cpu_capability": "AVX2"}\'\n'
+    observed = honest_observation(PIN)
+    ok = script + f"echo '{json.dumps(observed)}'\n"
     monkeypatch.setattr(sys, "executable", str(fake_python(tmp_path, ok)))
-    assert [require_honorable(PIN), require_honorable(PIN)] == ["AVX2", "AVX2"]
+    assert [require_honorable(PIN), require_honorable(PIN)] == [observed, observed]
     assert runs.read_text().count("run") == 3
 
 
@@ -123,7 +147,6 @@ def run_cli(path: Path) -> subprocess.CompletedProcess[str]:
 @needs_avx2
 def test_cli_reports_the_environment_of_a_manifest(tmp_path: Path) -> None:
     body = example_manifest().body()
-    body["reference_spec"]["env"]["pinned"] = CPU_FP32
     for name, document in (
         ("v1.json", body),
         ("v2.json", {"manifest_version": 2, "training": body}),
@@ -134,21 +157,34 @@ def test_cli_reports_the_environment_of_a_manifest(tmp_path: Path) -> None:
         assert done.returncode == 0, done.stderr
         assert json.loads(done.stdout) == {
             "honorable": True,
+            "cpu": "avx2",
+            "gpu": "none",
             "cpu_capability": "AVX2",
-            "env": CPU_FP32["present"],
-            "unset": CPU_FP32["absent"],
+            "env": CPU_AVX2["present"],
+            "unset": CPU_AVX2["absent"],
         }
 
 
-def test_cli_without_a_pin_and_with_a_bad_pin(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("edit", "message"),
+    [
+        pytest.param(
+            lambda env: env.pop("pinned"), "the manifest has no environment pin", id="no-pin"
+        ),
+        pytest.param(
+            lambda env: env["pinned"]["present"].__setitem__("LD_PRELOAD", "/x"),
+            "differs from the classes avx2/none: LD_PRELOAD",
+            id="bad-pin",
+        ),
+    ],
+)
+def test_cli_refuses_a_manifest_without_a_usable_pin(
+    tmp_path: Path, edit: Any, message: str
+) -> None:
     body = example_manifest().body()
-    plain = tmp_path / "plain.json"
-    plain.write_text(json.dumps(body))
-    done = run_cli(plain)
-    assert (done.returncode, json.loads(done.stdout)) == (0, {"honorable": True, "pinned": False})
-    body["reference_spec"]["env"]["pinned"] = {"present": {"LD_PRELOAD": "/x"}, "absent": []}
-    bad = tmp_path / "bad.json"
-    bad.write_text(json.dumps(body))
-    done = run_cli(bad)
+    edit(body["reference_spec"]["env"])
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(body))
+    done = run_cli(path)
     assert done.returncode == 1
-    assert "LD_PRELOAD='/x' is not an allowed pin" in done.stderr
+    assert message in done.stderr

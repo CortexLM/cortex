@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 import hypertrain.trainer  # noqa: F401
+from env_pin_fixtures import honest_env
 from hypertrain.auditor.replay import AnchorCache, pack_state, unpack_state
 from hypertrain.data.trial_assignment import trial_samples
 from hypertrain.gpu_ops.work_screen import artifact_ref
@@ -20,6 +21,7 @@ from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize
 from hypertrain.protocol.messages_v2 import (
+    EnvObservation,
     EscrowLock,
     RankWorkResult,
     RunManifestV2,
@@ -78,6 +80,7 @@ def metadata_artifacts(job, directory):
             for name in ("state.safetensors", "ef.safetensors", "delta.bin", "leaves.json")
         ),
         tuple(RankWorkResult.model_validate(r) for r in record["ranks"]),
+        EnvObservation.model_validate(record["env"]),
     )
 
 
@@ -118,10 +121,11 @@ def _screen(job, directory, challenge, *, now_beacon, backend):
                 "job_hash": job.digest(),
                 "files": {name: sha256_hex(raw) for name, raw in values.items()},
                 "ranks": [r.body() for r in ranks],
+                "env": honest_env(job.manifest.training.reference_spec.env.pin()).body(),
             }
         )
     )
-    metadata_artifacts(job, published)
+    artifacts = metadata_artifacts(job, published)
     proof = WorkProof(
         admission_id=challenge.admission_id,
         challenge_hash=challenge.digest(),
@@ -139,6 +143,7 @@ def _screen(job, directory, challenge, *, now_beacon, backend):
         challenge_hash=challenge.digest(),
         rank_results=ranks,
         artifact_hashes=[r["sha256"] for r in refs],
+        env=artifacts.env,
     )
     return screen, proof
 
@@ -217,6 +222,7 @@ def build_authority(source: Path) -> tuple[str, dict[str, bytes]]:
                         challenge_hash=c.digest(),
                         rank_results=list(artifacts.ranks),
                         artifact_hashes=[a.sha256 for a in proof.artifact_refs],
+                        env=artifacts.env,
                     )
                     admission.proof(
                         canonicalize(network.signed(service.HOT[i], "WorkProof", proof)),

@@ -7,7 +7,12 @@ a fixture beacon whose verifier accepts any signature. The TLS relay, the miner 
 admission, audits and get_weights are the repository's own code. The harness changes this:
 
 1. The fixture manifest's reference_spec pins the B300 values: HT_IMAGE_DIGEST, driver
-   HT_D20_DRIVER and sm_count HT_D20_SM_COUNT. The run_id changes accordingly.
+   HT_D20_DRIVER and sm_count HT_D20_SM_COUNT, and its environment pin (ADR 0011 part 3) is the
+   CPU class avx2 and the GPU class measured on that SM count (148: sm_103, 170: sm_120; any other
+   count is refused) with HT_ATTN_BACKEND = HT_D20_ATTN_BACKEND (math, the default, or
+   sdpa-flash). main() applies the same pin to this process before any torch import, because
+   job-kimi runs a reference round in it and a trainer refuses a process that does not honor the
+   pin. The run_id changes accordingly.
 2. Before any run is created, the harness installs a CUDA qualification record signed by the
    fixture owner, for every manifest posted (with no prior signature check). It carries only
    the fields `_backend_v2` checks; the bootstrap's configs, results and summaries are absent.
@@ -55,7 +60,10 @@ import sys
 import time
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from hypertrain.protocol.env_pins import EnvPin
 
 SCRIPTS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SCRIPTS))
@@ -65,6 +73,8 @@ import mine_smoke_v2 as smoke  # noqa: E402
 IMAGE = os.environ["HT_IMAGE_DIGEST"]
 DRIVER = os.environ.get("HT_D20_DRIVER", "595.91.07")
 SM_COUNT = int(os.environ.get("HT_D20_SM_COUNT", "148"))
+CPU_CLASS = "avx2"
+ATTENTION = os.environ.get("HT_D20_ATTN_BACKEND", "math")  # HT_ATTN_BACKEND of the pin
 STANDIN = "s5-d20 harness stand-in: fixture-owner signed, no engine Result"
 MODEL = "dense"  # "kimi" in the *-kimi modes
 KIMI_DTYPE = os.environ.get("HT_D20_KIMI_DTYPE", "bf16")  # the dtype S3 qualified for kimi
@@ -103,6 +113,35 @@ def _event(**fields: Any) -> None:
     if path:
         with open(path, "a") as out:
             out.write(json.dumps(fields, sort_keys=True, default=str) + "\n")
+
+
+def reference_pin() -> EnvPin:
+    """The environment pin of the manifests this run builds: the CPU class avx2 and the GPU class
+    measured on SM_COUNT, with ATTENTION as HT_ATTN_BACKEND. A count or a backend no class was
+    measured with stops the run."""
+    from hypertrain.protocol.env_pins import GPU_CLASSES, EnvPin, class_pin
+
+    gpu = next((name for name, row in GPU_CLASSES.items() if SM_COUNT in row.sm_counts), None)
+    if gpu is None:
+        known = ", ".join(
+            f"{n}: {name}" for name, row in GPU_CLASSES.items() for n in row.sm_counts
+        )
+        raise SystemExit(f"HT_D20_SM_COUNT={SM_COUNT}: no GPU class is measured on it ({known})")
+    try:
+        return EnvPin.from_body(class_pin(CPU_CLASS, gpu, ATTENTION))
+    except ValueError as error:
+        raise SystemExit(f"HT_D20_ATTN_BACKEND={ATTENTION}: {error}") from error
+
+
+def _pin_process() -> None:
+    """Make this process honor reference_pin(). ATen, MKL and oneDNN read their variables at first
+    use, so this runs before anything imports torch (this module and mine_smoke_v2 import none)."""
+    from hypertrain.protocol.env_pins import pinned_environ
+
+    pinned = pinned_environ(os.environ, reference_pin())
+    for name in set(os.environ) - set(pinned):
+        del os.environ[name]
+    os.environ.update(pinned)
 
 
 DEVICE_CLASS: dict[str, Any] = {}
@@ -460,9 +499,9 @@ def _load_service() -> Any:
         if MODEL == "kimi":
             s = _kimi_setup(fixture, s)
         body = s.manifest.body()
-        body["training"]["reference_spec"].update(
-            image_digest=IMAGE, driver_allowlist=[DRIVER], sm_count=SM_COUNT
-        )
+        reference = body["training"]["reference_spec"]
+        reference.update(image_digest=IMAGE, driver_allowlist=[DRIVER], sm_count=SM_COUNT)
+        reference["env"]["pinned"] = reference_pin().body()
         return dataclasses.replace(s, manifest=RunManifestV2.model_validate(body))
 
     fixture.setup = b300_setup
@@ -477,6 +516,7 @@ smoke._load_service = _load_service
 def main() -> int:
     if os.environ.get("HYPERTRAIN_MINER_DEVICE") != "cuda":
         raise SystemExit("set HYPERTRAIN_MINER_DEVICE=cuda")
+    _pin_process()
     global MODEL
     mode = sys.argv[1:]
     print(json.dumps({"image": IMAGE, "driver": DRIVER, "sm_count": SM_COUNT}), flush=True)

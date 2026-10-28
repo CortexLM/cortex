@@ -119,6 +119,10 @@ Applications/proofs are bound to the exact signed manifest, admission, nonce,
 image, layout and epoch. A decoder/reset/other-objective admission cache cannot
 authorize a carry run. Hardware hints are advisory; a fresh full-round work screen
 and independent same-layout replay establish work, not physical GPU ownership.
+The environment is not advisory: `JoinRequest.env` and `WorkScreenV2.env` declare the
+CPU instruction set, pinned variables and device class the party's process saw, and the
+server answers 409 `ENV_PIN_DIVERGES: NAME, NAME` before any write when they differ from
+the manifest's `reference_spec.env.pinned` (protocol.md section 7, item 4a).
 Trial `WorkProof.challenge_hash` is the canonical `JoinChallenge` body digest,
 which includes its nonce; `WorkScreenV2` is reserved by admission and nonce.
 `WorkProof` reservations include admission and `challenge_hash`, not delta bytes

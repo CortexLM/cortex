@@ -141,9 +141,10 @@ def context(
 ) -> dict[str, Any]:
     sys.path[:0] = [str(tree / "src")]
     from hypertrain.miner.admission import sign_join
+    from hypertrain.protocol.env_pins import EnvPinUnhonorable, require_honorable
     from hypertrain.protocol.envelope_v2 import verify_join
     from hypertrain.protocol.keys import Keypair
-    from hypertrain.protocol.messages_v2 import HardwareHint, IslandJobV1
+    from hypertrain.protocol.messages_v2 import EnvObservation, HardwareHint, IslandJobV1
 
     job = IslandJobV1.model_validate_json(job_path.read_bytes())
     profile = json.loads((out / "profile.json").read_bytes())
@@ -151,6 +152,14 @@ def context(
     if hot.ss58 != json.loads((out / "index.json").read_bytes())["hotkey"]:
         raise SystemExit("hotkey seed is not the manifest index hotkey")
     request_id = hashlib.sha256(f"task8-qualification|{job.run_id}|{hot.ss58}".encode()).hexdigest()
+    # The join declares the environment of the host that signs it: this one has to honor the pin.
+    pin = job.manifest.training.reference_spec.env.pin()
+    try:
+        observed = require_honorable(pin, "cpu" if pin.gpu == "none" else "cuda")
+    except EnvPinUnhonorable as error:
+        raise SystemExit(
+            f"this host cannot honor the manifest's environment pin: {error}"
+        ) from error
     join = sign_join(
         hot,
         cold,
@@ -163,6 +172,7 @@ def context(
             device_count=profile["layout"]["n_gpus"],
             driver=profile["runtime"]["driver_allowlist"][0],
         ),
+        env=EnvObservation.model_validate(observed),
     )
     if not verify_join(join, job.run_id, 1):
         raise SystemExit("join does not verify")

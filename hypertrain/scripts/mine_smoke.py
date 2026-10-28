@@ -23,6 +23,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests" / "e2e"))
 sys.path.insert(0, str(ROOT / "tests" / "trainer"))
 
+from hypertrain.protocol.env_pins import pinned_environ  # noqa: E402
+from hypertrain.protocol.example import example_manifest  # noqa: E402
+
+# The round's miner, aggregator and auditor processes inherit this environment. ATen, MKL and
+# oneDNN read their variables at first use, so the process takes the pin of the harness manifest
+# (the example's) before torch loads, whatever the caller exported.
+_pinned = pinned_environ(os.environ, example_manifest().reference_spec.env.pin())
+os.environ.clear()
+os.environ.update(_pinned)
+
 import common  # type: ignore[import-not-found]  # noqa: E402,F401  (determinism before torch)
 from common import manifest  # noqa: E402
 from harness import World, key  # type: ignore[import-not-found]  # noqa: E402

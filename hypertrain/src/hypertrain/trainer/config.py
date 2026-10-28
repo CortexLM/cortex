@@ -131,9 +131,9 @@ class TrainConfig:
     model: ModelConfig
     inner: InnerConfig
     compress: CompressConfig
+    env_pin: EnvPin
     n_stages: int = 1
     cpu_threads: int = 1
-    env_pin: EnvPin | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= self.n_stages <= self.model.n_layers:

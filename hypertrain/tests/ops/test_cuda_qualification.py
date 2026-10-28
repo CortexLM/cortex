@@ -15,6 +15,7 @@ from hypertrain.beacon import parse_round
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.ledger import Params
 from hypertrain.ops.manifest_v2 import main as manifest_main
+from hypertrain.protocol.env_pins import class_pin
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import QUICKNET_GENESIS
 from hypertrain.protocol.messages_v2 import RunManifestV2
@@ -29,6 +30,7 @@ def build_stage(root: Path) -> tuple[Path, Path]:
     assert manifest_main(["example", "--out", str(inputs)]) == 0
     training = json.loads((inputs / "training.json").read_text())
     training["coord_pubkey"] = COORD.ss58
+    training["reference_spec"]["env"]["pinned"] = class_pin("avx2", "sm_120")  # a CUDA run
     (inputs / "training.json").write_text(json.dumps(training))
     policies = json.loads((inputs / "policies.json").read_text())
     policies["economics"]["reward_authority"] = COORD.ss58

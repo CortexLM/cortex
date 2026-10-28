@@ -40,6 +40,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from hypertrain.protocol.env_pins import CPU_CLASSES, EnvPin, class_pin, gpu_label
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.trainer.config import CompressConfig, InnerConfig, ModelConfig, TrainConfig
 from hypertrain.trainer.model import (
@@ -347,8 +348,10 @@ def run_manifest_id(doc: dict[str, Any]) -> str:
     return hashlib.sha256(canonicalize(doc)).hexdigest()
 
 
-def train_config(doc: dict[str, Any]) -> TrainConfig:
-    """Strict parse of a TEST run document (exact keys, this arch, single stage and device)."""
+def train_config(doc: dict[str, Any], pin: EnvPin) -> TrainConfig:
+    """Strict parse of a TEST run document (exact keys, this arch, single stage and device).
+
+    The document carries no environment: the caller names the pin its process honors."""
     if set(doc) != {"kind", "model", "inner", "compress"} or doc["kind"] != TEST_RUN_KIND:
         raise ValueError("not a hypertrain TEST run document")
     model = ModelConfig(**doc["model"])
@@ -358,7 +361,7 @@ def train_config(doc: dict[str, Any]) -> TrainConfig:
         raise ValueError(f"{ARCH} TEST runs need grad_accum == 1")
     if inner.opt != "adamw":  # optim.MUON_SUFFIXES names decoder tensors, not wq_a/shared_*
         raise ValueError(f"{ARCH} TEST runs need inner.opt == adamw")
-    return TrainConfig(model, inner, CompressConfig(**doc["compress"]))
+    return TrainConfig(model, inner, CompressConfig(**doc["compress"]), pin)
 
 
 def synthetic_sample(cfg: TrainConfig) -> Callable[[int], npt.NDArray[np.uint32]]:
@@ -371,12 +374,12 @@ def synthetic_sample(cfg: TrainConfig) -> Callable[[int], npt.NDArray[np.uint32]
     return get
 
 
-def qualify(doc: dict[str, Any], device: str, rounds: int) -> list[dict[str, str]]:
-    """Run ``rounds`` identical rounds on ``device``; the B300 qualification compares the hashes
-    within a host (bitwise) and across hosts."""
+def qualify(doc: dict[str, Any], device: str, rounds: int, pin: EnvPin) -> list[dict[str, str]]:
+    """Run ``rounds`` identical rounds on ``device`` under ``pin``, which this process must honor;
+    the B300 qualification compares the hashes within a host (bitwise) and across hosts."""
     from hypertrain.trainer.loop import Assignment, train_round
 
-    cfg = train_config(doc)
+    cfg = train_config(doc, pin)
     run_id = run_manifest_id(doc)
     n = cfg.inner.H * cfg.inner.micro_batch * cfg.inner.grad_accum
     a = Assignment(run_id=run_id, w=0, sample_ids=tuple(range(n)))
@@ -400,9 +403,13 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--dtype", choices=("bf16", "fp32"), default=PROFILE.compute_dtype)
+    ap.add_argument("--cpu-class", choices=sorted(CPU_CLASSES), default="avx2")
     args = ap.parse_args()
     doc = run_manifest(dataclasses.replace(PROFILE, compute_dtype=args.dtype))
-    results = qualify(doc, args.device, args.rounds)
+    device = torch.device(args.device)
+    capability = torch.cuda.get_device_capability(device) if device.type == "cuda" else None
+    pin = EnvPin.from_body(class_pin(args.cpu_class, gpu_label(capability)))
+    results = qualify(doc, args.device, args.rounds, pin)
     info: dict[str, Any] = {"device": args.device, "dtype": args.dtype, "torch": torch.__version__}
     if torch.device(args.device).type == "cuda":  # B300 = capability [10, 3] (sm_103)
         i = torch.cuda.current_device()

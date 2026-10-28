@@ -25,6 +25,7 @@ from hypertrain.trainer import DETERMINISM  # must precede torch (sets CUBLAS_WO
 import numpy as np
 import torch
 
+from hypertrain.protocol.env_pins import class_pin
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.messages import RunManifest
 from hypertrain.trainer.config import TrainConfig
@@ -37,11 +38,16 @@ EXPECTED_TORCH = "2.14.0+cu130"
 NVIDIA_SMI = ["nvidia-smi", "--query-gpu=driver_version,uuid,pci.bus_id", "--format=csv,noheader"]
 
 
-def manifest_for(profile: dict[str, Any], image_digest: str | None) -> RunManifest:
+def manifest_for(profile: dict[str, Any], image_digest: str | None, device: str) -> RunManifest:
     body: dict[str, Any] = dict(example_manifest().body())
     model = {**body["model"], **profile["model"]}
     inner = {**body["inner"], **profile["inner"]}
     body["model"], body["inner"] = model, inner
+    # Phase A ran on RTX 5090 (sm_120, EXPECTED_SM_COUNT) before sdpa-flash was qualified there,
+    # so its evidence is the math domain. The launcher must export the same pin.
+    body["reference_spec"]["env"]["pinned"] = class_pin(
+        "avx2", "sm_120" if device == "cuda" else "none"
+    )
     if image_digest:
         body["reference_spec"] = {**body["reference_spec"], "image_digest": image_digest}
     cfg0 = TrainConfig.from_manifest(dict(body, model=dict(model, param_count=1)))
@@ -106,7 +112,7 @@ def main() -> int:
             a.out.write_text(json.dumps({"error": "hardware_or_torch_gate", "env": env}))
             return 3
         torch.set_default_device("cuda")
-    manifest = manifest_for(spec, a.image_digest)
+    manifest = manifest_for(spec, a.image_digest, a.device)
     cfg = TrainConfig.from_manifest(manifest.body())
     get, n_rows = shard_reader(a.shard, a.shard_sha256, cfg.model.seq_len)
     n = cfg.inner.H * cfg.inner.micro_batch * cfg.inner.grad_accum

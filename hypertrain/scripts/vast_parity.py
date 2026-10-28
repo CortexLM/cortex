@@ -60,6 +60,8 @@ echo $? >"$OUT/EXIT"
 BENCH = r"""
 import sys, time
 sys.path.insert(0, "experiments/sim")
+from sim_pin import pin_process
+pin_process()
 import parity_grid as pg
 from diloco import ARMS, ChunkedShards, SimSpec, simulate
 
@@ -189,6 +191,8 @@ class ParityHarness(vast.Harness):
 GPU_BENCH = r"""
 import sys, time
 sys.path.insert(0, "experiments/sim")
+from sim_pin import pin_process
+pin_process()
 import parity_grid as pg
 from diloco import ARMS, ChunkedShards, SimSpec, simulate
 import torch

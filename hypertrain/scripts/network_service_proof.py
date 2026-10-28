@@ -44,6 +44,7 @@ from hypertrain.miner.admission import sign_join
 from hypertrain.miner.core import OWNER_REQUEST_ROUNDS, load_keyfile
 from hypertrain.miner.island_launch import IslandArtifacts
 from hypertrain.protocol import envelope_v2, relay_envelope
+from hypertrain.protocol.env_pins import EnvPin, observed_environ, pinned_environ
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
@@ -51,6 +52,7 @@ from hypertrain.protocol.messages import Finalize, f32hex
 from hypertrain.protocol.messages_v2 import (
     AggregationPolicyV2,
     CommitV2,
+    EnvObservation,
     EscrowLock,
     HardwareHint,
     IslandJobV1,
@@ -702,6 +704,21 @@ def finalize_evidence(settings: Settings, completed: bool, failure: str | None) 
         raise DriverError("incomplete evidence export: " + "; ".join(errors))
 
 
+def pinned_observation(pin: EnvPin) -> EnvObservation:
+    """What a host that honors ``pin`` declares at join.
+
+    The identities this driver signs for are local keyfiles whose work runs in children or on
+    remote GPU hosts, not in this process: it declares the environment the manifest requires and
+    does not probe the controller. The server's comparison is an early refusal; the bit-exact
+    comparison with the reference remains the verdict.
+    """
+    return EnvObservation(
+        env=observed_environ(pinned_environ({}, pin), pin),
+        cpu_capability=pin.capability,
+        gpu=pin.gpu,
+    )
+
+
 def decoder_join_lock(
     client: httpx.Client,
     manifest: RunManifestV2,
@@ -727,6 +744,7 @@ def decoder_join_lock(
             device_count=manifest.training.reference_spec.layout.n_gpus,
             driver="not-qualification",
         ),
+        env=pinned_observation(manifest.training.reference_spec.env.pin()),
     )
     response = client.post(root + "/join", content=canonicalize(request.body()))
     response.raise_for_status()

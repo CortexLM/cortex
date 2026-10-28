@@ -311,12 +311,13 @@ the miner's state is bitwise equal to the challenge's own CPU replay.
 - The same job matched under `ATEN_CPU_CAPABILITY=avx2`.
 - `cpu_parity_probe.py` compares one exported job on both hosts.
 
-A manifest that sets `reference_spec.env.pinned` (`hypertrain/docs/protocol.md` section 7, item 4a)
-makes the hand-set `ATEN_CPU_CAPABILITY=avx2` below unnecessary: the launcher gives every rank the
-pins, and `bootstrap_service_capacity_v2` answers 409 `SERVICE_PROFILE_ENV_PIN` when the challenge
-host cannot honor them. Unpinned runs keep the manual pin (`cpu_miners.py` is unchanged). The pin
-removes ambient-induced divergence only; `docs/adr/0011-audit-integrity.md` part 3 says what was
-and was not measured.
+Every manifest pins its environment (`reference_spec.env.pinned`, `hypertrain/docs/protocol.md`
+section 7, item 4a), so the hand-set `ATEN_CPU_CAPABILITY=avx2` below is unnecessary for the
+miners: the launcher gives every rank the pin, and `bootstrap_service_capacity_v2` always asks
+whether the challenge host can honor it (409 `SERVICE_PROFILE_ENV_PIN`). A TEST run made before
+the pin was required no longer parses: it answers 409 `RUN_MANIFEST_RETIRED` and is recreated.
+The pin removes ambient-induced divergence only; `docs/adr/0011-audit-integrity.md` part 3 says
+what was and was not measured.
 
 `setup` reads `SEEDS_DIR/miner<i>-hot.seed` and `miner<i>-cold.seed`. `miner<i>-cold` must be the
 builder's `cold-<i>`: origin i belongs to allocation entry i.

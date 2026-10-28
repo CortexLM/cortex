@@ -18,9 +18,11 @@ from typing import Literal
 import pytest
 
 import hypertrain
+from env_pin_fixtures import honest_env
 from hypertrain.gpu_ops.journal import Journal, fsha, sha256
 from hypertrain.gpu_ops.launcher import Reject
 from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.env_pins import class_pin
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
@@ -775,6 +777,7 @@ def contract(tmp_path: Path):
     body["inner"].update({k: v for k, v in profile["inner"].items() if k != "lr_schedule"})
     body["inner"]["lr_schedule"].update(profile["inner"]["lr_schedule"])
     body["reference_spec"].update(image_digest=image, driver_allowlist=["595.84"], sm_count=170)
+    body["reference_spec"]["env"]["pinned"] = class_pin("avx2", "sm_120", "sdpa-flash")
     body["reference_spec"]["layout"].update(profile["layout"])
     rows = [bytes([i % 64, 0]) * 17 for i in range(4096)]
     merkle = MerkleTree(rows)
@@ -955,6 +958,7 @@ def contract(tmp_path: Path):
         expires_beacon=20,
         policy_hash=wrapper.network.admission_policy_hash,
         hardware_hint=HardwareHint(device_name="test", device_count=2, driver="595.84"),
+        env=honest_env(wrapper.training.reference_spec.env.pin()),
     )
     put("join", join.model_dump(mode="json"))
     put(
@@ -1072,6 +1076,7 @@ def test_approved_generated_seed_consumed_without_provider(contract, tmp_path, m
         hardware_hint=HardwareHint(
             device_name="synthetic-functional", device_count=2, driver="595.84"
         ),
+        env=honest_env(job.manifest.training.reference_spec.env.pin()),
     )
     join_path = tmp_path / "generated-join.json"
     join_path.write_bytes(canonicalize(join.body()))
@@ -2266,6 +2271,7 @@ def test_continue_reviewed_launch_authentic_store_private_identity(
             expires_beacon=20,
             policy_hash=manifest.network.admission_policy_hash,
             hardware_hint=HardwareHint(device_name="test", device_count=2, driver="595.84"),
+            env=honest_env(manifest.training.reference_spec.env.pin()),
         )
         join_path = put("join-" + role, join.model_dump(mode="json"))
         context_name = "seed-context-" + role

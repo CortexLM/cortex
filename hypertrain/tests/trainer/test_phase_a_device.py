@@ -66,11 +66,26 @@ def _as_cuda_host(monkeypatch: pytest.MonkeyPatch, rp: Any) -> None:
     )
 
 
+@pytest.mark.parametrize(("device", "gpu"), [("cpu", "none"), ("cuda", "sm_120")])
+def test_manifest_declares_the_class_of_its_device(device: str, gpu: str) -> None:
+    rp = _load()
+    profiles = json.loads((ROOT / "experiments/gpu_phase_a/phase_a.json").read_text())["profiles"]
+    spec = profiles["tiny"]
+    pin = rp.manifest_for(spec, None, device).reference_spec.env.pin()
+    assert (pin.cpu, pin.gpu) == ("avx2", gpu)
+    assert dict(pin.present)["HT_ATTN_BACKEND"] == "math"
+
+
 @pytest.mark.parametrize("negative", [False, True], ids=["honest", "negative"])
 def test_run_phase_a_cuda_path_on_proxy_matches_cpu(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, negative: bool
 ) -> None:
     rp = _load()
+    for_device = rp.manifest_for
+    # The leaves bind the manifest: the CPU runs take the manifest of the CUDA host they stand for.
+    monkeypatch.setattr(
+        rp, "manifest_for", lambda spec, digest, _: for_device(spec, digest, "cuda")
+    )
     cpu = _main(rp, monkeypatch, tmp_path, "cpu", negative)
     honest = _main(rp, monkeypatch, tmp_path, "cpu", False)
     _as_cuda_host(monkeypatch, rp)

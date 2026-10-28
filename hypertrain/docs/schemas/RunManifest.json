@@ -190,7 +190,7 @@
     },
     "EnvPins": {
       "additionalProperties": false,
-      "description": "Process-environment pins over the closed table of ``protocol/env_pins.py``.",
+      "description": "The environment pin: one CPU class, one GPU class and the environment they imply.\n\n``gpu`` is ``none`` for a run that uses no GPU; it is never omitted. The closed tables are in\n``protocol/env_pins.py``; ``present`` and ``absent`` must equal the named rows exactly.",
       "properties": {
         "absent": {
           "items": {
@@ -198,6 +198,23 @@
           },
           "title": "Absent",
           "type": "array"
+        },
+        "cpu": {
+          "enum": [
+            "avx2",
+            "avx512"
+          ],
+          "title": "Cpu",
+          "type": "string"
+        },
+        "gpu": {
+          "enum": [
+            "none",
+            "sm_103",
+            "sm_120"
+          ],
+          "title": "Gpu",
+          "type": "string"
         },
         "present": {
           "additionalProperties": {
@@ -208,6 +225,8 @@
         }
       },
       "required": [
+        "cpu",
+        "gpu",
         "present",
         "absent"
       ],
@@ -884,21 +903,14 @@
           "type": "integer"
         },
         "pinned": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EnvPins"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+          "$ref": "#/$defs/EnvPins"
         }
       },
       "required": [
         "CUBLAS_WORKSPACE_CONFIG",
         "CUDA_DISABLE_PTX_JIT",
-        "cpu_threads"
+        "cpu_threads",
+        "pinned"
       ],
       "title": "ReferenceEnv",
       "type": "object"

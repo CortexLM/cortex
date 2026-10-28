@@ -7,11 +7,34 @@ from pathlib import Path
 
 import pytest
 
+from env_pin_fixtures import HOSTILE, child, clean_env
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("mine_smoke", ROOT / "scripts" / "mine_smoke.py")
 assert spec is not None and spec.loader is not None
 mine_smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mine_smoke)
+
+
+def test_the_script_pins_its_process_and_its_actors_whatever_the_caller_exported() -> None:
+    # The miner, aggregator and auditor processes of the round inherit the script's environment
+    # and train in-process: a shell that exports none of the pin, or the wrong values, must not
+    # decide what they compute.
+    code = (
+        "import importlib.util, os, sys\n"
+        "spec = importlib.util.spec_from_file_location('mine_smoke', sys.argv[1])\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        "from hypertrain.protocol.example import example_manifest\n"
+        "from hypertrain.trainer.determinism import require_env_pin\n"
+        "require_env_pin(example_manifest().reference_spec.env.pin())\n"
+        "from harness import ONE_THREAD\n"
+        "pin = example_manifest().reference_spec.env.pin()\n"
+        "assert all(ONE_THREAD.get(k) == v for k, v in pin.present), ONE_THREAD\n"
+        "assert not any(k in ONE_THREAD for k in pin.absent), ONE_THREAD\n"
+    )
+    done = child(code, {**clean_env(), **HOSTILE}, str(ROOT / "scripts" / "mine_smoke.py"))
+    assert done.returncode == 0, done.stderr
 
 
 def test_default_evidence_is_a_fresh_private_file_per_run(

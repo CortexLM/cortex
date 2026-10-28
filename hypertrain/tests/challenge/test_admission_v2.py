@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from env_pin_fixtures import honest_env
 from hypertrain.beacon.core import FixtureBeacon
 from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.admission_store import AdmissionError
@@ -73,6 +74,7 @@ def request(s: Setup, request_id: str = H, hot=HOT, cold=COLD) -> JoinRequest:
         expires_beacon=10000,
         policy_hash=digest(s.admission_policy),
         hardware_hint=HardwareHint(device_name="advisory", device_count=999, driver="cpu-test"),
+        env=honest_env(s.manifest.training.reference_spec.env.pin()),
     )
 
 

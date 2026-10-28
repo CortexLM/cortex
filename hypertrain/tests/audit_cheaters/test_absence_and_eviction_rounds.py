@@ -21,6 +21,7 @@ import pytest
 from ac_precondition import precondition
 from ac_world import World, load_service, record
 
+from env_pin_fixtures import honest_env
 from hypertrain.miner.admission import sign_join
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -292,6 +293,7 @@ def join_with(n: Any, svc: Any, hot: int, cold: int) -> Any:
         expires_beacon=10000,
         policy_hash=n.manifest.network.admission_policy_hash,
         hardware_hint=HardwareHint(device_name="cpu", device_count=1, driver="cpu"),
+        env=honest_env(),
     )
     return n.client.post(n.url + "/join", content=canonicalize(request.body()))
 

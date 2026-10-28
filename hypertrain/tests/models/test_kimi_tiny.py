@@ -11,6 +11,8 @@ import pytest
 import torch
 
 import hypertrain.models.kimi_tiny as kt
+from env_pin_fixtures import TEST_PIN
+from hypertrain.protocol.env_pins import EnvPin, class_pin, gpu_label
 from hypertrain.protocol.messages import Layout
 from hypertrain.trainer.config import ModelConfig
 from hypertrain.trainer.island import emulate, train_island
@@ -225,20 +227,20 @@ def test_two_passes_same_seed_are_bitwise_identical(cfg: ModelConfig) -> None:
 
 def test_run_manifest_is_unsigned_strict_and_trains() -> None:
     doc = json.loads(json.dumps(kt.run_manifest(kt.MICRO)))
-    cfg = kt.train_config(doc)
+    cfg = kt.train_config(doc, TEST_PIN)
     assert cfg.model == kt.MICRO
     assert set(doc) == {"kind", "model", "inner", "compress"}  # no key, signature or run secret
     for bad in ({**doc, "signature": "00" * 64}, {**doc, "kind": "RunManifest"}):
         with pytest.raises(ValueError, match="TEST run"):
-            kt.train_config(bad)
+            kt.train_config(bad, TEST_PIN)
     with pytest.raises(ValueError, match="not a kimi"):
-        kt.train_config({**doc, "model": {**doc["model"], "arch": "decoder"}})
+        kt.train_config({**doc, "model": {**doc["model"], "arch": "decoder"}}, TEST_PIN)
     with pytest.raises(ValueError, match="grad_accum == 1"):
-        kt.train_config({**doc, "inner": {**doc["inner"], "grad_accum": 2}})
+        kt.train_config({**doc, "inner": {**doc["inner"], "grad_accum": 2}}, TEST_PIN)
     with pytest.raises(ValueError, match="inner.opt == adamw"):
-        kt.train_config({**doc, "inner": {**doc["inner"], "opt": "muon"}})
+        kt.train_config({**doc, "inner": {**doc["inner"], "opt": "muon"}}, TEST_PIN)
     with pytest.raises(ValueError, match="top_k_experts >= 2"):
-        kt.train_config({**doc, "model": {**doc["model"], "top_k_experts": 1}})
+        kt.train_config({**doc, "model": {**doc["model"], "top_k_experts": 1}}, TEST_PIN)
     other = {**doc, "model": {**doc["model"], "init_seed": 8}}
     assert kt.run_manifest_id(other) != kt.run_manifest_id(doc)
     n = cfg.inner.H * cfg.inner.micro_batch
@@ -256,7 +258,7 @@ def test_one_rank_island_equals_the_reference_loop(reduction: str) -> None:
     # run-v2 trains with train_island; on one rank it must be the loop.train_round reference,
     # whatever the reduction (the router bias never has a gradient).
     doc = kt.run_manifest(kt.MICRO)
-    cfg = kt.train_config(doc)
+    cfg = kt.train_config(doc, TEST_PIN)
     a = Assignment(kt.run_manifest_id(doc), 0, tuple(range(cfg.inner.H * cfg.inner.micro_batch)))
     get, theta0 = kt.synthetic_sample(cfg), init_params(cfg.model)
     ref = train_round(cfg, theta0, a, get)
@@ -272,7 +274,7 @@ def test_one_rank_island_equals_the_reference_loop(reduction: str) -> None:
 
 @pytest.mark.parametrize("dp", [1, 2])
 def test_island_refuses_a_second_rank_before_training(dp: int) -> None:
-    cfg = kt.train_config(kt.run_manifest(kt.MICRO))
+    cfg = kt.train_config(kt.run_manifest(kt.MICRO), TEST_PIN)
     lay = Layout(pp=1, n_gpus=2, dp_size=dp, ep_size=2 // dp, zero1=False)
     a = Assignment("ab" * 32, 0, tuple(range(2 * cfg.inner.H * cfg.inner.micro_batch)))
 
@@ -296,11 +298,11 @@ def test_qualify_cli_exits_on_differing_rounds_and_reports_equal_ones(
     """The B300 qualification reads this exit code: two rounds that differ must not pass."""
     same = {"run_id": "r", "leaves_root": "1", "delta_hash": "2", "state_root": "3"}
     monkeypatch.setattr("sys.argv", ["kimi_tiny", "--device", "cpu", "--dtype", "fp32"])
-    monkeypatch.setattr(kt, "qualify", lambda doc, device, rounds: [same, same])
+    monkeypatch.setattr(kt, "qualify", lambda doc, device, rounds, pin: [same, same])
     kt.main()
     assert json.loads(capsys.readouterr().out)["rounds"] == [same, same]
     monkeypatch.setattr(
-        kt, "qualify", lambda doc, device, rounds: [same, {**same, "state_root": "4"}]
+        kt, "qualify", lambda doc, device, rounds, pin: [same, {**same, "state_root": "4"}]
     )
     with pytest.raises(SystemExit, match="MISMATCH"):
         kt.main()
@@ -309,6 +311,7 @@ def test_qualify_cli_exits_on_differing_rounds_and_reports_equal_ones(
 @pytest.mark.gpu
 @cuda
 def test_profile_two_rounds_bitwise_on_cuda() -> None:
-    rounds = kt.qualify(kt.run_manifest(), "cuda", 2)
+    pin = EnvPin.from_body(class_pin("avx2", gpu_label(torch.cuda.get_device_capability())))
+    rounds = kt.qualify(kt.run_manifest(), "cuda", 2, pin)
     print(json.dumps(rounds))
     assert rounds[0] == rounds[1]

@@ -425,6 +425,20 @@ def test_runner_container_is_removed_at_exit_and_only_the_out_dir_is_writable(ho
         assert host_network not in joined
 
 
+@pytest.mark.parametrize(
+    ("env", "passed"),
+    [({}, "math"), ({"HT_D20_ATTN_BACKEND": "sdpa-flash"}, "sdpa-flash")],
+    ids=["default", "forced"],
+)
+def test_runner_hands_the_attention_backend_of_the_manifest_pin_to_the_container(
+    host, tmp_path, env, passed
+):
+    out = tmp_path / "out"
+    assert runner(host, out, "--no-gate", "--mode", "smoke", env=env).returncode == 0
+    argv = (Path(host["FAKE_STATE"]) / "docker-run.argv").read_text().splitlines()
+    assert f"HT_D20_ATTN_BACKEND={passed}" in argv
+
+
 def test_runner_says_so_when_the_executor_log_cannot_be_read(host, tmp_path):
     set_state(host, docker_fail="")
     out = tmp_path / "out"

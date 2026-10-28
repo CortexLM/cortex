@@ -217,9 +217,10 @@ def run(a: argparse.Namespace) -> int:
     from hypertrain.gpu_ops.provider import Provider, list_rows, read_api_key
     from hypertrain.miner.admission import sign_join
     from hypertrain.protocol import envelope_v2
+    from hypertrain.protocol.env_pins import observed_environ, pinned_environ
     from hypertrain.protocol.jcs import canonicalize
     from hypertrain.protocol.messages import Receipt
-    from hypertrain.protocol.messages_v2 import HardwareHint, IslandJobV1
+    from hypertrain.protocol.messages_v2 import EnvObservation, HardwareHint, IslandJobV1
 
     out = a.out.resolve()
     if (out / "runtime/journal.jsonl").exists():
@@ -287,6 +288,15 @@ def run(a: argparse.Namespace) -> int:
     for name, rel in job.object_paths.items():
         bind(name, public / rel)
     hot, cold = keys["hot-0"], keys["cold-0"]
+    # The controller signs for the rented hosts and cannot probe them: it declares the environment
+    # the manifest requires. Their island workers refuse a host that differs, and the qualification
+    # runs the real work.
+    pin = job.manifest.training.reference_spec.env.pin()
+    declared = EnvObservation(
+        env=observed_environ(pinned_environ({}, pin), pin),
+        cpu_capability=pin.capability,
+        gpu=pin.gpu,
+    )
     for role in ("h0", "h1"):
         join = sign_join(
             hot,
@@ -296,6 +306,7 @@ def run(a: argparse.Namespace) -> int:
             expires_beacon=10**7,
             policy_hash=job.manifest.network.admission_policy_hash,
             hardware_hint=HardwareHint(device_name="RTX 5090", device_count=2, driver="advisory"),
+            env=declared,
         )
         join_path = save(f"join-{role}.json", join.model_dump(mode="json"))
         context = {

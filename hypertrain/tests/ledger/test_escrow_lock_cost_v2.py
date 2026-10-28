@@ -184,8 +184,9 @@ def test_locked_returns_exactly_what_the_scan_returned(funded) -> None:
 
 
 # The hash over the event hashes of COLD's two open locks on admission H, in the order they were
-# made. It is also what the scan returned on the parent commit (see the differential above).
-GOLDEN_HASH = "179fa83559685abd3528ed5a39993e47b9803529834878f39f0ac38ae08c9c07"
+# made. It is also what the scan returned on the parent commit (see the differential above). The
+# origin ids come from the example manifest's run_id, so this literal moves with that run_id.
+GOLDEN_HASH = "7d8f8b93bb50a0f4cb71ff54d1a4c5729839d135af53a6cd995e97593d445a9a"
 
 
 def test_the_open_lock_statement_uses_the_partial_index(funded) -> None:

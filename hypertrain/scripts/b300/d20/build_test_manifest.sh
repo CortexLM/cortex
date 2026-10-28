@@ -30,6 +30,12 @@
 # HT_D20_GEOMETRY=tiny-cpu: the CPU mechanism model of tests/ledger/test_escrow_v2.py setup()
 # (1 layer, d_model 8, vocab 16, seq 4, H=1 J=1, 16 samples), layout n_gpus=1, for a cpu-backend
 # TEST run whose references and audits the challenge replays on CPU.
+# The manifest pins its environment (reference_spec.env.pinned, ADR 0011 part 3): CPU class avx2
+# and a GPU class. dense-1b runs on GPUs, so its class is the one measured on SM_COUNT in
+# hypertrain.protocol.env_pins (148: sm_103, 170: sm_120); any other count stops the first stage,
+# which removes what it created. tiny-cpu is a CPU-backend run and says gpu none; its SM_COUNT is
+# only carried. HT_D20_ATTN_BACKEND (default math, or sdpa-flash on a GPU class) is the pin's
+# HT_ATTN_BACKEND. The dry run reports the pin and checks it against SM_COUNT.
 # HT_D20_COLDKEYS=N (default 2) seeds cold-0..cold-N-1, each with 20000 genesis units.
 # HT_D20_RELAY_PUBKEY (required): SS58 of the relay key k1 that relay-joinbase signs with; the
 # current value is the `pubkey` of /data/relay/config/relay.json on s100 (k1).
@@ -94,6 +100,7 @@ EXP_ROUND=${5:-}
 RELAY_URL=${HT_D20_RELAY_URL:-https://relay.joinbase.ai}
 RELAY_PUBKEY=${HT_D20_RELAY_PUBKEY:?set HT_D20_RELAY_PUBKEY to the SS58 of the TEST relay key k1}
 GEOMETRY=${HT_D20_GEOMETRY:-dense-1b}
+ATTENTION=${HT_D20_ATTN_BACKEND:-math}
 COLDKEYS=${HT_D20_COLDKEYS:-2}
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
@@ -157,7 +164,7 @@ mkdir "$OUT/inputs"
 
 cd "$HT"
 uv run --no-sync python -I - "$IMAGE" "$DRIVER" "$SM_COUNT" "$OUT" "$EXP_ROUND" \
-    "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" <<'PY'
+    "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" "$ATTENTION" <<'PY'
 import json
 import os
 import secrets
@@ -169,6 +176,7 @@ import numpy as np
 
 from hypertrain.ledger.escrow_v2 import genesis_allocation_hash
 from hypertrain.miner.core import load_keyfile
+from hypertrain.protocol.env_pins import GPU_CLASSES, class_pin
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -176,7 +184,20 @@ from hypertrain.protocol.messages import f32hex
 from hypertrain.protocol.messages import drand_round_at
 from hypertrain.trainer.rng import rng_ctr, uniform_f64
 
-image, driver, sm_count, out, exp_round, relay_url, relay_pubkey, geometry, coldkeys = sys.argv[1:]
+(image, driver, sm_count, out, exp_round, relay_url, relay_pubkey, geometry, coldkeys,
+ attention) = sys.argv[1:]
+# The pin first: a count or a backend no GPU class was measured with stops the build before
+# anything is written. A tiny-cpu run uses no GPU (its sm_count is only carried).
+gpu = "none" if geometry == "tiny-cpu" else next(
+    (n for n, c in GPU_CLASSES.items() if int(sm_count) in c.sm_counts), None
+)
+if gpu is None:
+    known = ", ".join(f"{n}: {name}" for name, c in GPU_CLASSES.items() for n in c.sm_counts)
+    sys.exit(f"SM_COUNT {sm_count}: no GPU class is measured on it ({known})")
+try:
+    pinned = class_pin("avx2", gpu, attention)
+except ValueError as error:
+    sys.exit(f"HT_D20_ATTN_BACKEND={attention}: {error}")
 out_dir = Path(out)
 secret_dir, inputs = out_dir / "secrets", out_dir / "inputs"
 COLD = tuple(f"cold-{i}" for i in range(int(coldkeys)))
@@ -276,6 +297,7 @@ body["reference_spec"].update(
     spec_doc_sha256=sha256_hex(reference),
     layout=layout,
 )
+body["reference_spec"]["env"]["pinned"] = pinned
 del body["init_state_hash"]
 (inputs / "training.json").write_bytes(canonicalize(body, allow_float=False))
 
@@ -346,7 +368,7 @@ uv run --no-sync python -I -m hypertrain.ops.manifest_v2 build \
     --relays "$OUT/inputs/relays.json" --owner-seed "$OUT/secrets/owner.seed" \
     --exp-round "$(cat "$OUT/inputs/exp-round.txt")" --state-dir "$OUT/state" --out "$OUT/out"
 
-uv run --no-sync python -I - "$OUT" "$IMAGE" "$DRIVER" "$SM_COUNT" "$GEOMETRY" <<'PY'
+uv run --no-sync python -I - "$OUT" "$IMAGE" "$DRIVER" "$SM_COUNT" "$GEOMETRY" "$ATTENTION" <<'PY'
 """Dry-run: the checks POST /v2/admin/runs (store._create_run_v2) runs, minus the database."""
 import json
 import sys
@@ -354,6 +376,7 @@ from pathlib import Path
 
 from hypertrain.data.store import LocalFSStore
 from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.env_pins import GPU_CLASSES
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.messages_v2 import (
     AdmissionPolicyV2, AggregationPolicyV2, AuditPolicyV2, DisputePolicyV2,
@@ -363,6 +386,11 @@ from hypertrain.protocol.relay_messages import RelayRegistryV1
 
 out, image, driver, sm_count = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
 n_gpus = 2 if sys.argv[5] == "dense-1b" else 1
+attention = sys.argv[6]
+# What the builder meant, from the table: a GPU class measured on sm_count, or none for a CPU run.
+gpu = "none" if sys.argv[5] == "tiny-cpu" else next(
+    (n for n, c in GPU_CLASSES.items() if sm_count in c.sm_counts), None
+)
 keys = json.loads((out / "inputs/public-keys.json").read_bytes())
 raw = (out / "out/manifest-envelope.json").read_bytes()
 index = json.loads((out / "out/index.json").read_bytes())
@@ -404,6 +432,8 @@ checks.update(
     image_digest=ref.image_digest == image,
     driver_allowlist=ref.driver_allowlist == [driver],
     sm_count=ref.sm_count == sm_count,
+    pin_cpu_class_avx2=ref.env.pinned.cpu == "avx2",
+    pin_attention_backend=ref.env.pinned.present["HT_ATTN_BACKEND"] == attention,
     ledger_mode_test=economics.ledger_mode == "test",
     work_screen_epoch_rounds_6000=admission.work_screen_epoch_rounds == 6000,
     relay=len(registry.specs) == 1 and spec.mode == "transport"
@@ -411,12 +441,18 @@ checks.update(
     coord_is_reward_authority=economics.reward_authority == t.coord_pubkey == keys["coord"],
     two_auditors=len(set(t.auditors)) == 2,
 )
+checks[f"pin_gpu_class_{gpu}"] = ref.env.pinned.gpu == gpu
 print(json.dumps({
     "run_id": env.run_id,
     "envelope_sha256": sha256_hex(raw),
     "exp_drand": env.exp_drand,
     "param_count": t.model.param_count,
     "init_state_hash": t.init_state_hash,
+    "pin": {
+        "cpu": ref.env.pinned.cpu,
+        "gpu": ref.env.pinned.gpu,
+        "attention": ref.env.pinned.present["HT_ATTN_BACKEND"],
+    },
     "checks": checks,
 }, sort_keys=True, indent=1))
 if not all(checks.values()):

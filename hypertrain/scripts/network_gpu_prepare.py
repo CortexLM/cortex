@@ -415,7 +415,9 @@ def prepare(
     job = seed.validate(public / "seed", seed_hash)
     from hypertrain.beacon.core import FixtureBeacon
     from hypertrain.miner.core import MinerConfig
+    from hypertrain.protocol.env_pins import observed_environ, pinned_environ
     from hypertrain.protocol.keys import Keypair
+    from hypertrain.protocol.messages_v2 import EnvObservation
 
     owner = Keypair((private / "roles/owner.seed").read_bytes())
     for role in seed.ROLES:
@@ -500,6 +502,15 @@ def prepare(
             "genesis_unix": genesis,
         },
     )
+    # The controller signs for the hosts it will rent and cannot probe them: it declares the
+    # environment the manifest requires. Their island workers refuse a host that differs and the
+    # server compares the declaration again at the trial; the qualification runs the real work.
+    pin = job.manifest.training.reference_spec.env.pin()
+    observed = EnvObservation(
+        env=observed_environ(pinned_environ({}, pin), pin),
+        cpu_capability=pin.capability,
+        gpu=pin.gpu,
+    )
     joins = []
     for i in range(4):
         hot, cold = (
@@ -516,6 +527,7 @@ def prepare(
             hardware_hint=driver.HardwareHint(
                 device_name="advisory", device_count=2, driver="not-qualification"
             ),
+            env=observed,
         )
         save(public / f"join-{i}.json", driver.canonicalize(join.body()))
         joins.append(

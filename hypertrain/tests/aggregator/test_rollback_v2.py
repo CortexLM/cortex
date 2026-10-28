@@ -12,7 +12,7 @@ import pytest
 import torch
 from test_weighted_v2 import KEY, H, economics, policy, roster
 
-from env_pin_fixtures import CPU_FP32, HOSTILE, ambient
+from env_pin_fixtures import CPU_AVX2, HOSTILE, ambient
 from hypertrain.aggregator import rollback_v2
 from hypertrain.aggregator.core import OuterState, TapeError, TapeIntegrityError, load_state
 from hypertrain.aggregator.rollback_v2 import (
@@ -600,7 +600,7 @@ def test_finite_input_terminal_overflow_rejects_before_publication(
 
 def pinned_manifest() -> RunManifestV2:
     body = tiny_manifest().body()
-    body["training"]["reference_spec"]["env"]["pinned"] = CPU_FP32
+    body["training"]["reference_spec"]["env"]["pinned"] = CPU_AVX2
     return RunManifestV2.model_validate(body)
 
 
@@ -609,7 +609,7 @@ PINNED_WORKER_ENV = {
     "HT_ATTN_BACKEND": "math",
     "MKL_CBWR": "AVX2",
     "OMP_DYNAMIC": "FALSE",
-    "ONEDNN_MAX_CPU_ISA": "ALL",  # CPU_FP32 does not name it: the ambient stays
+    "ONEDNN_MAX_CPU_ISA": "AVX2",
     "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
     "OMP_NUM_THREADS": "1",
 }
@@ -626,12 +626,6 @@ def test_worker_env_follows_the_manifest_pins(monkeypatch: pytest.MonkeyPatch) -
         "OMP_THREAD_LIMIT": None,
     }
     assert os.environ == ambient_env
-    unpinned = rollback_v2._worker_env(tiny_manifest())
-    assert unpinned == {
-        **ambient_env,
-        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-        "OMP_NUM_THREADS": "1",
-    }
 
 
 def record_environment_then_fail(seen: dict[str, str]) -> Any:

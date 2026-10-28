@@ -26,11 +26,9 @@ from hypertrain.challenge.disputes_v2 import DisputeError, WatchEvent
 from hypertrain.data.store import LocalFSStore
 from hypertrain.miner.dispute_watch import DisputeWatch, HttpDisputeTransport, PublishedStates
 from hypertrain.miner.island_launch import confined, validate_artifacts
-from hypertrain.protocol.envelope_v2 import load_json
 from hypertrain.protocol.messages import StateServe
 from hypertrain.protocol.messages_v2 import IslandJobV1
 from hypertrain.trainer.config import TrainConfig
-from hypertrain.trainer.island import emulate
 from hypertrain.trainer.loop import Assignment
 
 if TYPE_CHECKING:
@@ -69,26 +67,14 @@ def committed_execution(job: IslandJobV1, published: Path) -> IslandExecution:
 
 
 def replay_party(hotkey: str, job: IslandJobV1, published: Path) -> IslandParty:
-    """Replay every hook; replayed checkpoints must equal the committed bytes exactly."""
-    summary = load_json(confined(published, "rank-0/summary.json").read_bytes())
-    if not isinstance(summary, dict):
-        raise DisputeError("REPLAY_SUMMARY_TYPE")
-    if summary.get("backend") != "cpu":
-        # ponytail: CPU emulation cannot reproduce CUDA bits, so CUDA publications answer from
-        # their actual-path training trace. Upgrade: replay on the pinned GPUs before answering.
-        return IslandParty.published(hotkey, job, published)
-    if job.manifest.training.reference_spec.env.pinned is not None:
-        # The ranks ran in a child under the manifest's pins (ADR 0011), which this daemon's
-        # environment need not honor: an in-process replay would refuse or mismatch. The referee
-        # side re-runs windows through the same launcher, so both sides stay actual-path.
-        return IslandParty.published(hotkey, job, published)
-    run = committed_execution(job, published)
-    captures = [c for _, c in emulate(run.layout.n_gpus, run.trace)]
-    party = IslandParty(hotkey, captures, J=run.cfg.inner.J)
-    for t, state in party.states.items():
-        if confined(published, f"rank-0/checkpoints/{t}.safetensors").read_bytes() != state:
-            raise DisputeError("REPLAY_COMMITMENT_MISMATCH")
-    return party
+    """Answer from the publication's actual-path trace.
+
+    The ranks ran in a child under the manifest's pin (ADR 0011, part 3), which this daemon's
+    environment need not honor, and CPU emulation cannot reproduce CUDA bits: an in-process
+    replay would refuse or mismatch. The referee side re-runs windows through the same launcher,
+    so both sides stay actual-path.
+    """
+    return IslandParty.published(hotkey, job, published)
 
 
 class Publications:

@@ -21,6 +21,7 @@ from hypertrain.ledger.escrow_v2 import (
     genesis_origin_id,
 )
 from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.env_pins import class_pin
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -199,6 +200,8 @@ def generate(
     body["coord_pubkey"] = keys["coord"].ss58
     body["auditors"] = [keys[f"auditor-{i}"].ss58 for i in range(2)]
     body["reference_spec"].update(image_digest=image, driver_allowlist=drivers, sm_count=170)
+    # 170 SMs is the RTX 5090 (sm_120); its bf16 runs replay on the qualified flash kernel.
+    body["reference_spec"]["env"]["pinned"] = class_pin("avx2", "sm_120", "sdpa-flash")
     body["reference_spec"]["layout"] = profile["layout"]
     reference_raw = canonicalize(
         {
