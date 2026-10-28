@@ -753,7 +753,12 @@ class AuditPolicyV2(WireModel):
         Field(default=None, exclude_if=lambda v: v is None)
     )
 
-    def validate_training(self, training: TrainingManifestV2) -> None:
+    def validate_training(
+        self, training: TrainingManifestV2, *, ledger_mode: str | None = None
+    ) -> None:
+        """`ledger_mode` is the economics policy's, for the callers that create or build a run. It
+        is None where an accepted run is checked again (the schedule of the audits): the TEST-only
+        rule on the gap cap below is enforced once, at the door."""
         if self.max_steps_per_attempt != 2 * training.inner.H:
             raise ValueError("audit policy budget must equal 2H")
         if self.lease_rounds != audit_lease_rounds(training.inner.H, self.step_bound()):
@@ -766,6 +771,10 @@ class AuditPolicyV2(WireModel):
         # latest bound the exit table has.
         if self.gap_cap() > 2 * self.absolute_rounds() + self.reaudit_window():
             raise ValueError("audit gap cap must not pass the end of the last audit wait")
+        if self.gap_cap() > DEFAULT_GAP_CAP_ROUNDS and ledger_mode not in (None, "test"):
+            raise ValueError(
+                f"audit gap_cap_rounds above {DEFAULT_GAP_CAP_ROUNDS} is for a TEST manifest only"
+            )
 
     def step_bound(self) -> float:
         bound = f32val(self.step_seconds_bound)

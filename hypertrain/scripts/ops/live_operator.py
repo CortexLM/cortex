@@ -156,8 +156,9 @@ def check_open_shape(
 
 
 def check_gap_cap(audit: AuditPolicyV2, ledger_mode: str) -> None:
-    """A cap above the default is for a TEST manifest: a production manifest that raises it is
-    refused at publication (ADR 0011 Part 9, D88)."""
+    """A cap above the default is for a TEST manifest. The builder and the master refuse a
+    production manifest that raises it when they create the run (`validate_training`); this is the
+    operator tool's check for a run that predates that rule (ADR 0011 Part 9, D88)."""
     if audit.gap_cap() > DEFAULT_GAP_CAP_ROUNDS and ledger_mode != "test":
         raise SystemExit(
             f"the audit policy raises gap_cap_rounds to {audit.gap_cap()}, above the default "

@@ -2120,9 +2120,13 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
       its `policies.json` (the builder of the 101 M run sets `reaudit_rounds` and `gap_cap_rounds` together).
       Bounds that remain: `validate_training` refuses a cap above `4 * lease_rounds + reaudit_window()` (571 for
       the 256 s policy), the end of the last audit wait of the exit table, so that `d_final`, the bound of
-      `Wait.MEMBER_STATE`, never lies past the bound every other wait of Part 8 has; and `live_operator` accepts a
-      cap above 200 only when the economics policy of the manifest has `ledger_mode == "test"` (a production
-      manifest that sets it is refused at publication, naming the parameter). The general exclusion exit is what
+      `Wait.MEMBER_STATE`, never lies past the bound every other wait of Part 8 has; and a cap above 200 is for a
+      TEST ledger only: `validate_training(training, ledger_mode=...)` refuses it for a production economics
+      policy, naming `gap_cap_rounds`, in the manifest builder (`ops/manifest_v2.py build`) and in the master when
+      the run is created (HTTP 422, `_create_run_v2`), so a manifest signed by hand is refused too. The re-check
+      of an accepted run in `schedule_audits_v2`, an owned name that is not edited, passes no ledger mode: the
+      rule is enforced once, at the door, and the policy hash in `run_id` binds the value. `live_operator open`
+      keeps its own check (`check_gap_cap`) for a run created before this rule. The general exclusion exit is what
       bounds every wait of the round whatever the gap, as before.
 
     | Replay | R | `T_reaudit` | D at x = 0 | gap needed (guard) | slack of x + p at that gap | gap with a 20 s poll (x = p = 7) |

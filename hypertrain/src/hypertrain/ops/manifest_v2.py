@@ -85,13 +85,13 @@ def _build(args: argparse.Namespace) -> dict[str, JsonValue]:
     validated = TrainingManifestV2.model_validate(training)
     audit = objects["audit"]
     assert isinstance(audit, AuditPolicyV2)
-    audit.validate_training(validated)
+    economics = objects["economics"]
+    assert isinstance(economics, EconomicsPolicyV2)
+    audit.validate_training(validated, ledger_mode=economics.ledger_mode)
     if len(set(validated.auditors)) < 2:
         raise ValueError("two distinct audit reference identities required")
     if validated.inner.state_policy == "derived":
         raise ValueError("v2 derived-state influence requires authenticated v0 integration")
-    economics = objects["economics"]
-    assert isinstance(economics, EconomicsPolicyV2)
     if economics.round_reward_units != validated.budget.epochs_per_round * 1_000_000:
         raise ValueError("MANIFEST_REWARD_BUDGET")
     if economics.reward_authority != validated.coord_pubkey:

@@ -2503,6 +2503,7 @@ class ChallengeStore:
             )
             return child_result
         with self._tx():
+            ledger_mode = None
             for name, cls in (
                 ("admission_policy_hash", AdmissionPolicyV2),
                 ("economics_policy_hash", EconomicsPolicyV2),
@@ -2511,9 +2512,14 @@ class ChallengeStore:
                 ("dispute_policy_hash", DisputePolicyV2),
             ):
                 policy = cls.model_validate_json(self.objects.get(getattr(model.network, name)))
+                if isinstance(policy, EconomicsPolicyV2):
+                    ledger_mode = policy.ledger_mode
                 if name == "audit_policy_hash":
                     assert isinstance(policy, AuditPolicyV2)
-                    policy.validate_training(model.training)
+                    try:
+                        policy.validate_training(model.training, ledger_mode=ledger_mode)
+                    except ValueError as error:
+                        raise ChallengeError(422, str(error)) from None
             from hypertrain.protocol.relay_messages import RelayRegistryV1
 
             RelayRegistryV1.model_validate_json(self.objects.get(model.network.relay_registry_hash))
