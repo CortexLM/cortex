@@ -370,8 +370,11 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
   stored `service-admission` record then fails `SERVICE_PROFILE_AUTHORITY` until the run is re-bootstrapped,
   the same consequence ADR 0011 states for its own edits of hashed functions. Measured with
   `ChallengeStore._service_implementation_v2`: `02e208a3…89cc` on the base and after the key space and the
-  typed settlement; `20e0333c…53ac` after the keyed origin ids; later commits that touch one of the 28 will
-  say so.
+  typed settlement; `20e0333c…53ac` after the keyed origin ids; no later commit of this lot touches one of the
+  28 or the 10 files (F6, D66, F7b, the relay and the two body envelopes included). On the tree merged with
+  `origin/v3`, `v3-ledger-refusals` and `v3-roster-contract-b` the value is `fc9e87b0…c8fe`; it differs from each
+  of those refs alone (`941247f8…88d1`, `02405ab1…dfff`, `bfdd776a…03fe`) because it combines the edits of
+  `finalize_v2` and of the owned helpers that came with them.
 - Schema: no table, column or key changes. One partial index is created if absent.
 - Compatibility: new server events carry a new key and new hashes, new origins new ids; old chains verify
   unchanged and are forward-only for the first new server event (an older image then fails closed with an
