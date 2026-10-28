@@ -9100,20 +9100,36 @@ class ChallengeStore:
             }
 
     def relay_settlement_v2(self, run_id: str, grant_hash: str) -> dict[str, Any]:
-        """Authenticated control-plane adapter for L4 retention release, not client facts."""
+        """Authenticated control-plane adapter for L4 retention release, not client facts.
+
+        A relay holds a receipted upload until the master writes finality for its round or closes
+        the round without a reward (ADR 0014 Part 6.4, D72); any other state is a 409."""
         from hypertrain.relay.core import Settlement as RelaySettlement
 
         with self._lock:
             grant = self._record_v2(run_id, "grant", grant_hash)["body"]
             w = int(grant["w"])
             status = self._record_v2(run_id, "finality", str(w))
+            vesting: int
             if (
-                status["disposition"] != "SETTLED"
-                or status["unresolved_audits"]
-                or status["unresolved_disputes"]
+                status["disposition"] == "SETTLED"
+                and not status["unresolved_audits"]
+                and not status["unresolved_disputes"]
             ):
+                accepted = self._record_v2(run_id, "replayed-finality", str(w))
+                finality_hash = str(accepted["finalize_hash"])
+                finalized = int(accepted["finalized_beacon"])
+                vesting = finalized + self._run_v2(run_id).training.verify.E_vest_rounds
+            elif (closure := self._round_closure_v2(run_id, w)) is not None:
+                # No finality was written and nothing vests. The custody horizon stands in for both
+                # beacons, so the release comes where age used to free the bytes (horizon plus the
+                # epoch grace), and now only because the master says the round is closed.
+                horizon = self._custody_horizon_v2(run_id, grant_hash)
+                if horizon is None:
+                    raise ChallengeError(409, "no accepted durable receipt custody to release")
+                finality_hash, finalized, vesting = closure, horizon, horizon
+            else:
                 raise ChallengeError(409, "relay custody remains pinned by unresolved finality")
-            accepted = self._record_v2(run_id, "replayed-finality", str(w))
             turns = [
                 json.loads(r[0])
                 for r in self._db.execute(
@@ -9124,12 +9140,11 @@ class ChallengeStore:
                 raise ChallengeError(409, "relay custody remains dispute pinned")
             closed = [t["resolution"] for t in turns]
             settled = RelaySettlement(
-                str(accepted["finalize_hash"]),
-                int(accepted["finalized_beacon"]),
+                finality_hash,
+                finalized,
                 sha256_hex(canonicalize(closed)),
-                max([int(accepted["finalized_beacon"]), *[t["resolved_beacon"] for t in turns]]),
-                int(accepted["finalized_beacon"])
-                + self._run_v2(run_id).training.verify.E_vest_rounds,
+                max([finalized, *[t["resolved_beacon"] for t in turns]]),
+                vesting,
             )
             return asdict(settled)
 
@@ -9169,6 +9184,24 @@ class ChallengeStore:
                 )
             ]
 
+    def _custody_horizon_v2(self, run_id: str, grant_hash: str) -> int | None:
+        """The beacon the relay's custody of a grant is signed to: the last retention extension,
+        else the receipt. None while the master holds no receipt for it."""
+        receipt = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='relay-receipt' "
+            "AND json_extract(data,'$.body.grant_hash')=?",
+            (run_id, grant_hash),
+        ).fetchone()
+        if receipt is None:
+            return None
+        current = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='retention' AND id=?",
+            (run_id, grant_hash),
+        ).fetchone()
+        if current:
+            return int(json.loads(current[0])["horizon"])
+        return int(json.loads(receipt[0])["body"]["retain_until"])
+
     def _relay_due_v2(self, run_id: str, grant_hash: str) -> Literal["release", "extend"] | None:
         """What the master owes one relay grant now, from read-only records.
 
@@ -9192,23 +9225,10 @@ class ChallengeStore:
                     + RELAY_EPOCH_GRACE
                 )
                 return "release" if now >= grace else None
-            receipt = self._db.execute(
-                "SELECT data FROM records_v2 WHERE run_id=? AND kind='relay-receipt' "
-                "AND json_extract(data,'$.body.grant_hash')=?",
-                (run_id, grant_hash),
-            ).fetchone()
             w = int(self._record_v2(run_id, "grant", grant_hash)["body"]["w"])
-            if receipt is None or not self._unresolved_disputes_v2(w):
+            horizon = self._custody_horizon_v2(run_id, grant_hash)
+            if horizon is None or not self._unresolved_disputes_v2(w):
                 return None
-            current = self._db.execute(
-                "SELECT data FROM records_v2 WHERE run_id=? AND kind='retention' AND id=?",
-                (run_id, grant_hash),
-            ).fetchone()
-            horizon = (
-                json.loads(current[0])["horizon"]
-                if current
-                else int(json.loads(receipt[0])["body"]["retain_until"])
-            )
             return "extend" if now < horizon <= now + RELAY_EXTEND_WITHIN else None
 
     async def release_due_v2(self, client: Any) -> dict[str, list[str]]:

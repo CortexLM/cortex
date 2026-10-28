@@ -3017,6 +3017,27 @@ def test_relay_settlement_view_route_is_public_and_writes_nothing_for_an_unknown
     assert network.store._db.total_changes == before
 
 
+def finality_status(run_id, w, disposition, *, unresolved_disputes=0, rollback_complete=False):
+    """A finality record as the service stores it: every field of RoundStatus, none left out."""
+    from dataclasses import asdict
+
+    from hypertrain.challenge.finality_v2 import RoundStatus
+
+    return asdict(
+        RoundStatus(
+            run_id=run_id,
+            w=w,
+            applied=True,
+            disposition=disposition,
+            unresolved_disputes=unresolved_disputes,
+            unresolved_audits=0,
+            rollback_complete=rollback_complete,
+            state_hash="11" * 32,
+            resolution_hash="ee" * 32 if disposition == "EXCLUDED" else None,
+        )
+    )
+
+
 def test_relay_settlement_view_serves_exactly_the_six_signed_facts_of_a_settled_grant(network):
     from hypertrain.protocol import relay_envelope
 
@@ -3031,11 +3052,7 @@ def test_relay_settlement_view_serves_exactly_the_six_signed_facts_of_a_settled_
                 run_id,
                 "finality",
                 "3",
-                {
-                    "disposition": disposition,
-                    "unresolved_audits": 0,
-                    "unresolved_disputes": unresolved_disputes,
-                },
+                finality_status(run_id, 3, disposition, unresolved_disputes=unresolved_disputes),
             )
             network.store._put_record_v2(
                 run_id,
@@ -3083,11 +3100,14 @@ def seed_relay_grant(
     open_disputes=0,
     closed_disputes=0,
     other_round_disputes=0,
+    excluded=False,
     retain_until=1000,
     extended_to=None,
     released=False,
 ):
-    """Master-side records of one relay grant, as relay_receipt_v2 and finalize leave them."""
+    """Master-side records of one relay grant, as relay_receipt_v2 and finalize leave them.
+
+    The round is settled or pending; excluded means closed without a reward (rolled back)."""
     run_id = network.manifest.run_id()
     put = network.store._put_record_v2
     with network.store._tx():
@@ -3102,11 +3122,12 @@ def seed_relay_grant(
             run_id,
             "finality",
             str(w),
-            {
-                "disposition": "SETTLED" if settled else "PENDING",
-                "unresolved_audits": 0,
-                "unresolved_disputes": 0,
-            },
+            finality_status(
+                run_id,
+                w,
+                "EXCLUDED" if excluded else "SETTLED" if settled else "PENDING",
+                rollback_complete=excluded,
+            ),
         )
         put(
             run_id,
@@ -3270,6 +3291,127 @@ def test_release_due_leaves_an_unsettled_grant_without_a_dispute_of_its_round_al
     network.push(1000 - 100)  # inside the extension window
     assert lifecycle_pass(network) == {"released": [], "extended": []}
     assert attempts == []
+
+
+def test_release_due_releases_a_round_closed_without_a_reward_once_horizon_and_grace_passed(
+    network, monkeypatch
+):
+    # D72: a relay holds a receipted upload until the master writes finality or closes the round.
+    # An excluded, rolled-back round writes no finality and pays nothing: its closure is the
+    # signal, the custody horizon (1000) stands in for the beacon, the grace (100) follows.
+    from hypertrain.challenge.store import RELAY_EPOCH_GRACE
+
+    seed_relay_grant(network, excluded=True, retain_until=1000)
+    attempts = stub_relay_control(network, monkeypatch)
+    network.push(1000 + RELAY_EPOCH_GRACE - 1)
+    assert lifecycle_pass(network) == {"released": [], "extended": []}
+    network.push(1000 + RELAY_EPOCH_GRACE)
+    assert lifecycle_pass(network) == {"released": [GRANT], "extended": []}
+    assert attempts == [(GRANT, "release")]
+
+
+def test_release_due_never_releases_a_round_that_is_neither_settled_nor_closed(
+    network, monkeypatch
+):
+    # Pending, or excluded with its rollback still to do: however late, the proof stays.
+    run_id = network.manifest.run_id()
+    seed_relay_grant(network, GRANT, w=0, settled=False)
+    other = "ce" * 32
+    seed_relay_grant(network, other, w=1, excluded=True)
+    with network.store._tx():
+        network.store._put_record_v2(
+            run_id, "finality", "1", finality_status(run_id, 1, "EXCLUDED", rollback_complete=False)
+        )
+    attempts = stub_relay_control(network, monkeypatch)
+    network.push(5000)
+    assert lifecycle_pass(network) == {"released": [], "extended": []}
+    assert attempts == []
+
+
+def test_release_due_extends_and_does_not_release_a_closed_round_whose_dispute_is_open(
+    network, monkeypatch
+):
+    # The finality record says closed, the dispute table says otherwise: the table decides.
+    seed_relay_grant(network, excluded=True, open_disputes=1, retain_until=1000)
+    attempts = stub_relay_control(network, monkeypatch)
+    network.push(1000 - 720)
+    assert lifecycle_pass(network) == {"released": [], "extended": [GRANT]}
+    network.push(1000 + 100)
+    assert lifecycle_pass(network) == {"released": [], "extended": []}
+    assert attempts == [(GRANT, "extend")]
+
+
+def test_relay_settlement_view_of_a_closed_round_is_what_the_relay_accepts_for_a_release(network):
+    # The relay releases only a CustodyRelease that validate_release accepts for the view it
+    # fetched, with its own epoch grace: the closure view must make the same boundary as the
+    # master's grace, and the two graces must be one number.
+    import inspect
+
+    from hypertrain.challenge.store import RELAY_EPOCH_GRACE
+    from hypertrain.protocol import relay_envelope
+    from hypertrain.protocol.relay_messages import (
+        CustodyRelease,
+        RelaySettlementView,
+        validate_release,
+    )
+    from hypertrain.relay.core import Relay
+
+    relay_grace = inspect.signature(Relay.__init__).parameters["epoch_rounds"].default
+    assert relay_grace == RELAY_EPOCH_GRACE
+    run_id = network.manifest.run_id()
+    seed_relay_grant(network, excluded=True, retain_until=1000)
+    network.push(50)
+    response = network.client.get(network.url + "/relay-settlements/" + GRANT)
+    assert response.status_code == 200, response.text
+    assert relay_envelope.verify_envelope(response.json())
+    view = RelaySettlementView.model_validate(relay_envelope.parse_envelope(response.json()).body)
+    assert view.model_dump() == {
+        "grant_hash": GRANT,
+        "finality_hash": "ee" * 32,
+        "finality_beacon": 1000,
+        "closed_dispute_root": sha256_hex(canonicalize([])),
+        "closed_beacon": 1000,
+        "vesting_beacon": 1000,
+    }
+
+    def release_at(beacon: int) -> int:
+        release = CustodyRelease(
+            grant_hash=GRANT,
+            custody_hashes=["12" * 32],
+            retention_hash="12" * 32,
+            finality_hash=view.finality_hash,
+            vesting_beacon=view.vesting_beacon,
+            closed_dispute_root=view.closed_dispute_root,
+            release_beacon=beacon,
+        )
+        return validate_release(
+            release,
+            grant_hash=GRANT,
+            custody_hashes=["12" * 32],
+            retention_hash="12" * 32,
+            retain_until=1000,
+            finality_beacon=view.finality_beacon,
+            disputes_closed_beacon=view.closed_beacon,
+            epoch_rounds=relay_grace,
+            retrieval_deadlines=[],
+        )
+
+    with pytest.raises(ValueError, match="epoch grace"):
+        release_at(1000 + relay_grace - 1)
+    assert release_at(1000 + relay_grace) == 1000 + relay_grace
+    assert network.store.relay_settlement_v2(run_id, GRANT)["finality_hash"] == "ee" * 32
+
+
+def test_relay_settlement_view_of_a_closed_round_needs_a_receipt_to_stand_on(network):
+    # The custody horizon stands in for the closure beacon, so a grant the master never received
+    # a receipt for has none: 409, nothing signed.
+    seed_relay_grant(network, excluded=True)
+    with network.store._tx():
+        network.store._db.execute("DELETE FROM records_v2 WHERE kind='relay-receipt'")
+    network.push(50)
+    response = network.client.get(network.url + "/relay-settlements/" + GRANT)
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": "no accepted durable receipt custody to release"}
 
 
 def test_release_due_goes_on_past_a_relay_that_fails_and_raises_what_it_does_not_expect(
