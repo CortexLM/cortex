@@ -7,6 +7,7 @@ import test_rollback_service_v2 as rollback
 from test_no_show_resume_v2 import aggregate, audit_results, excluded, finalize
 
 from challenge.five_identity_network_v2 import five_identity_network
+from hypertrain.challenge.store import ChallengeError
 
 fixtures = rollback.fixtures
 
@@ -60,3 +61,19 @@ def test_two_silent_of_six_the_next_round_runs_with_the_four(six_network, monkey
 
     second = rollback.execute_round(n, 1, hotkeys=survivors)
     assert finalize(n, 1, second, survivors)["status"] == "SETTLED"
+
+
+def test_a_member_that_has_no_anchor_of_the_round_before_cannot_be_rostered(six_network):
+    # Given: round 0 settled with four of the six ACTIVE identities; the fifth never held an anchor
+    # (a member that comes in later is the unsolved Q3 of ADR 0011)
+    n = six_network
+    four, late = fixtures.HOT[:4], fixtures.HOT[4]
+    first = rollback.execute_round(n, 0, hotkeys=four)
+    assert finalize(n, 0, first, four)["status"] == "SETTLED"
+
+    # When / Then: it cannot be on the roster of round 1 (the opening restores the anchor of the
+    # round before for every entry), so a retirement, which carries exactly those anchors, never
+    # meets a member without one; the run goes on with the four
+    with pytest.raises(ChallengeError, match="missing accepted anchor"):
+        rollback.execute_round(n, 1, hotkeys=[*four, late], open_only=True)
+    assert rollback.execute_round(n, 1, hotkeys=four, open_only=True).status_code == 200

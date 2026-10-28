@@ -57,6 +57,7 @@ from hypertrain.challenge.exit_v2 import (
     pause_span,
     plan_round,
     served,
+    survivors_of,
 )
 from hypertrain.challenge.sanction_v2 import SanctionHook
 from hypertrain.data.assignment import assign_round
@@ -6469,6 +6470,22 @@ class ChallengeStore:
                 raise refuse("audits were scheduled")
             if now < min(body.d_final, body.d_audit + audit.absolute_rounds()) - 1:
                 raise refuse("the audit window is still open")
+
+        def hotkeys_of(kind: str) -> list[str]:
+            return [i.split(":", 1)[1] for i in self._round_ids_v2(run_id, kind, w)]
+
+        if names != sorted(
+            survivors_of(
+                list(roster),
+                now=now,
+                d_commit=body.d_commit,
+                d_upload=body.d_upload,
+                committed=hotkeys_of("commit"),
+                excluded=hotkeys_of("excluded"),
+                delivered=hotkeys_of("delta"),
+            )
+        ):
+            raise refuse("the survivors differ from the facts of the round")
         if w:
             previous = self._record_v2(run_id, "applied", str(w - 1))
             prev_state, theta_hash = str(previous["out_state"]), str(previous["theta_hash"])
@@ -6669,7 +6686,30 @@ class ChallengeStore:
         for exclusion in plan.exclusions:
             self._exclude_v2(run_id, w, exclusion)
         if plan.retire is not None:
-            self._put_changed_v2(run_id, "round-exit", str(w), {"state": plan.retire})
+            self._retire_or_wait_v2(run_id, w, plan.retire, plan.survivors)
+
+    def _retire_or_wait_v2(
+        self, run_id: str, w: int, cause: Retire, survivors: tuple[str, ...]
+    ) -> None:
+        """Retire a round the planner says cannot go on (ADR 0011 Part 8, decision 8), in a
+        savepoint of its own so that the blame booked for the round survives a refusal. A refusal
+        (an earlier round still open, say) is the reaper waiting: `round-exit` says for what, and
+        the next push asks again. Any other failure is journaled (`exit-failed`, `<w>:retire`) and
+        the round stays as it was; the exclusions and blame of the round are kept either way."""
+        escrow = self._services_v2[run_id][0]
+        self._put_changed_v2(run_id, "round-exit", str(w), {"state": cause})
+        try:
+            with escrow.tx():
+                self._retire_round_v2(run_id, w, cause, survivors)
+        except ChallengeError as error:
+            if not str(error).startswith("ROUND_RETIRE_REFUSED"):
+                self._journal_exit_v2(run_id, str(w), "retire", error)
+                return
+            self._put_changed_v2(
+                run_id, "round-exit", str(w), {"state": cause, "waiting": str(error)}
+            )
+        except Exception as error:  # a failing carry (a full disk) leaves the round as it was
+            self._journal_exit_v2(run_id, str(w), "retire", error)
 
     def _exclude_v2(self, run_id: str, w: int, exclusion: Exclusion) -> None:
         """The one writer of an exit exclusion: the record, the audit count and the blame row.

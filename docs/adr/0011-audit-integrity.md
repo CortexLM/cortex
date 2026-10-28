@@ -1058,7 +1058,14 @@ the table as covering them.
    `now >= absolute - 1`). Both require every earlier round closed (so no rollback window contains a
    retired round), an unapplied `PENDING` status and no `service-admission` record. The survivors (hotkeys
    of the roster) are an argument and the primitive never calls the planner: it derives the cause from
-   them and from the facts, so a caller cannot void a round that can still carry. A refusal is
+   them and from the facts, so a caller cannot void a round that can still carry. It also checks the
+   argument against `exit_v2.survivors_of` (the planner's definition, read from the commit, delta and
+   exclusion records): survivors that differ are refused, so a caller cannot name fewer of them to make
+   a viable round infeasible. The reaper is the caller: `_reap_round_v2` hands the planner's survivors
+   to `_retire_or_wait_v2`, in a savepoint of its own, after the exclusions and the blame of the round
+   are booked, so that a refusal or a failure never takes them back (a refusal is recorded in
+   `round-exit` as `waiting`, any other failure is journaled `exit-failed`, `<w>:retire`, and the round
+   stays as it was). A refusal is
    `ROUND_RETIRE_REFUSED: <reason>` and writes nothing; an open predecessor is one, the reaper waits and
    records the state in `round-exit`. The primitive also writes nothing until every anchor is carried, so
    a failing carry (a full disk) leaves the round `PENDING`. The one definition of "survivors" is the

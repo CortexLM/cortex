@@ -9,7 +9,7 @@ database and no clock.
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Literal
 
@@ -126,6 +126,8 @@ class Exclusion:
 class RoundPlan:
     exclusions: tuple[Exclusion, ...]
     retire: Retire | None
+    # The members the round can still count on (`survivors_of`): what a retirement is given.
+    survivors: tuple[str, ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True)
@@ -166,6 +168,29 @@ def classify(
     return "INFRASTRUCTURE"
 
 
+def survivors_of(
+    roster: Collection[str],
+    *,
+    now: int,
+    d_commit: int,
+    d_upload: int,
+    committed: Collection[str],
+    excluded: Collection[str],
+    delivered: Collection[str],
+) -> list[str]:
+    """The members a round can still count on, in roster order: not excluded, a commit from
+    `d_commit` on, a delta from `d_upload` on. Every term only shrinks: once delta intake closed, a
+    member that committed and delivered nothing is gone for this round whether or not its audit
+    has finished. The one definition: the planner decides with it and the retirement checks the
+    survivors it is given against it, so that a caller cannot void a round that can still carry."""
+    gone = set(excluded)
+    if now >= d_commit:
+        gone |= {hotkey for hotkey in roster if hotkey not in committed}
+    if now >= d_upload:
+        gone |= set(committed) - set(delivered)
+    return [hotkey for hotkey in roster if hotkey not in gone]
+
+
 def plan_round(s: RoundSnapshot) -> RoundPlan:
     if s.applied:
         return RoundPlan((), None)
@@ -201,17 +226,20 @@ def plan_round(s: RoundSnapshot) -> RoundPlan:
             for m in roster
             if m.hotkey in s.audited and m.hotkey not in s.delivered and m.hotkey not in s.excluded
         ]
-    # Every term only shrinks: once delta intake closed, a member that committed and delivered
-    # nothing is gone for this round whether or not its audit has finished.
-    gone = s.excluded | {e.hotkey for e in out}
-    if now >= s.schedule.d_upload:
-        gone |= s.committed - s.delivered
-    survivors = [m.hotkey for m in roster if m.hotkey not in gone]
+    survivors = survivors_of(
+        [m.hotkey for m in roster],
+        now=now,
+        d_commit=s.schedule.d_commit,
+        d_upload=s.schedule.d_upload,
+        committed=s.committed,
+        excluded=s.excluded,
+        delivered=s.delivered,
+    )
     retire: Retire | None = None
-    if now >= s.schedule.d_commit and gone and not s.carries(survivors):
+    if now >= s.schedule.d_commit and len(survivors) < len(roster) and not s.carries(survivors):
         retire = "INFEASIBLE"
     elif not s.has_leases and now >= s.schedule.absolute - 1:
         retire = "AUDIT_WINDOW_MISSED"  # schedule_audits_v2 answers 503 from here on
     if retire:  # a round that cannot go on keeps its membership facts: only the blame is booked
         out = [replace(e, record=False) for e in out]
-    return RoundPlan(tuple(out), retire)
+    return RoundPlan(tuple(out), retire, tuple(survivors))

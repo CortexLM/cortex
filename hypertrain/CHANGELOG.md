@@ -313,6 +313,17 @@
   and `rollback_v2` are owned functions: `implementation_hash` changes. See
   `docs/adr/0011-audit-integrity.md` (Part 8, decisions 7 to 11) at the monorepo root and
   `docs/network-v2.md`.
+- The exit reaper retires a round that cannot go on (the caller the retire primitive lacked): when the
+  planner finds that the members left cannot carry one update after the commit window, or that nobody
+  scheduled audits by the end of the audit window, the beacon push that sees it retires the round (a
+  null tape, the anchors carried, new work answering 409 `ROUND_RETIRED`), after booking the exclusions
+  and the blame of the round. A round whose predecessor is still open is marked `waiting` in
+  `round-exit` and asked again at the next push; a failing retirement (a full disk) leaves the round
+  as it was, is journaled, and does not take the sanctions back. `_retire_round_v2` now checks the
+  survivors it is given against the records of the round (`exit_v2.survivors_of`) and refuses others,
+  so a caller cannot retire a viable round by naming fewer of them. A member that joined after round
+  `w - 1` has no anchor for it and cannot be on the roster of `w` (409 `missing accepted anchor` at
+  the opening), so a retirement never carries a missing anchor. ADR 0011 Part 8 decisions 8 and 11.
 - A production run refuses a qualification record without `image_sources_sha256` when an audit is
   dispatched (409 `QUALIFICATION_IMAGE_SOURCES_MISSING`): before, a record without the digest meant
   no check, so a production audit could stand on code nobody measured. A TEST run keeps accepting

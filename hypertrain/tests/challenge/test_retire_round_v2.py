@@ -45,6 +45,13 @@ from .test_round_withdrawal_v2 import (  # noqa: F401  (pytest fixture import: l
 H = "00" * 32
 
 
+@pytest.fixture(autouse=True)
+def no_reaper(monkeypatch):
+    """These tests drive the primitive by hand, round by round; the reaper that calls it on every
+    beacon push has its own tests (test_exit_reaper_v2.py, the e2e)."""
+    monkeypatch.setattr(ChallengeStore, "_reap_exits_v2", lambda *args, **kwargs: None)
+
+
 def seeded(network, size, silent=()):
     """Round 0 as an open run holds it: every roster member has its genesis anchor (an honest
     silent member too, the fixture gives it none), the `silent` ones never committed."""
@@ -290,7 +297,16 @@ def test_retiring_cancels_the_open_audits_and_keeps_the_verdicts(network):
             "UPDATE audit_leases_v2 SET state='completed',result='MATCH' WHERE id=?", (done,)
         )
 
-    # the round is dead before any audit finishes: three survivors cannot carry it
+    # the round is dead before any audit finishes: two members never delivered their delta, and
+    # the three that did cannot carry it
+    run = network.manifest.run_id()
+    with store._tx():
+        for key in keys[3:]:
+            store._db.execute(
+                "DELETE FROM records_v2 WHERE run_id=? AND kind='delta' AND id=?",
+                (run, f"0:{key.ss58}"),
+            )
+    network.push(D_AUDIT + 1)
     retire(network, [k.ss58 for k in keys[:3]])
 
     rows = {
@@ -329,6 +345,20 @@ def test_a_failing_carry_leaves_the_round_as_it_was(network, monkeypatch):
     # and the next push retires it
     monkeypatch.undo()
     assert retire(network, survivors)["cause"] == "INFEASIBLE"
+
+
+def test_a_caller_cannot_void_a_viable_round_by_naming_fewer_survivors(network):
+    # Given: five members that all committed and delivered, the commit window over: the round can
+    # carry, whatever survivors a caller names
+    store, run = network.store, network.manifest.run_id()
+    keys = seeded(network, 5)
+    network.push(D_AUDIT + 1)
+    before = snapshot(store, run)
+    # When / Then: three named survivors are not the survivors of the round
+    with pytest.raises(ChallengeError, match="ROUND_RETIRE_REFUSED: the survivors differ") as no:
+        retire(network, [k.ss58 for k in keys[:3]])
+    assert no.value.status == 409
+    assert snapshot(store, run) == before
 
 
 @pytest.mark.parametrize(
@@ -385,7 +415,7 @@ def test_a_round_is_retired_only_once_every_round_before_it_is_closed(network, p
             retire(network, survivors, w=1)
         assert snapshot(store, run) == before
     else:
-        second = retire(network, survivors, w=1)
+        second = retire(network, [], w=1)  # nobody committed to round 1
         # the second null round continues the first: same model, the lineage hash chains
         applied = store._record_v2(run, "applied", "1")
         assert applied["predecessor_tape_hash"] == first["evidence_hash"]

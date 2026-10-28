@@ -11,11 +11,13 @@ import pytest
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.protocol import relay_envelope
 from hypertrain.protocol.hashing import sha256_hex
+from hypertrain.protocol.messages_v2 import AuditPolicyV2
 from hypertrain.protocol.relay_messages import MasterAcceptanceV2, RelayReceipt
 
 from . import test_service_network_v2 as fixtures
 from .audit_lease_fixture_v2 import D_AUDIT, network, seed_round  # noqa: F401  (fixture import)
 from .five_identity_network_v2 import five_identity_network, push_late, push_through
+from .test_retire_round_v2 import second_round, seeded
 from .test_round_refusals_v2 import open_round, round_zero
 
 
@@ -213,9 +215,9 @@ def test_the_push_at_d_upload_leaves_out_an_audited_member_without_a_delta(
     network, hook, deltas, undelivered, late, evidence, excluded, marker, booked, applied
 ):
     # A round nobody delivered a delta to is an upload path that failed for everybody: no member
-    # is left out for it, and the survivors that cannot carry the round are only marked.
+    # is left out for it, nobody is blamed, and the round that no survivor can carry is retired.
     store, run = network.store, network.manifest.run_id()
-    keys = seed_round(network, n=6, deltas=deltas)
+    keys = seed_round(network, n=6, deltas=deltas, executable=not deltas)
     push_through(network, D_AUDIT)
     store.schedule_audits_v2(run, 0)
     with store._tx():
@@ -240,26 +242,48 @@ def test_the_push_at_d_upload_leaves_out_an_audited_member_without_a_delta(
         f"0:{keys[i].ss58}": no_show(run, keys[i].ss58, "delta") for i in excluded
     }
     assert records(network, "round-exit") == marker
-    assert records(network, "finality")["0"]["unresolved_audits"] == 6
+    status = records(network, "finality")["0"]
+    assert (status["disposition"], status["unresolved_audits"]) == (
+        ("RETIRED", 0) if marker else ("PENDING", 6)
+    )
+    assert set(records(network, "retired")) == ({"0"} if marker else set())
     assert rows_of(network) == {f"0:{keys[i].ss58}": row for i, row in booked.items()}
     assert hook.calls == [
         (admission_id(i), "NO_SHOW", no_show(run, keys[i].ss58, "delta")[2]) for i in applied
     ]
 
 
-def test_a_round_the_survivors_cannot_carry_still_sanctions_its_silent_members(network, hook):
+def test_a_round_the_survivors_cannot_carry_is_retired_and_still_sanctions_its_silent_members(
+    network, hook
+):
     store, run = network.store, network.manifest.run_id()
-    keys = seed_round(network, n=5, silent=(3, 4))
+    keys = seeded(network, 5, silent=(3, 4))
     push_through(network, D_AUDIT)
     push_through(network, D_AUDIT + 3)
 
     assert records(network, "excluded") == {}
     assert records(network, "round-exit") == {"0": {"state": "INFEASIBLE"}}
+    retired = records(network, "retired")["0"]
+    assert (retired["cause"], retired["survivors"]) == (
+        "INFEASIBLE",
+        sorted(k.ss58 for k in keys[:3]),
+    )
+    assert records(network, "finality")["0"]["disposition"] == "RETIRED"
+    assert set(records(network, "anchor")) >= {f"0:{k.ss58}" for k in keys}  # carried, all five
+    # the route that asks for new work on the round says why it takes none
+    late = network.client.post(network.url + "/admin/rounds/0/audits", headers=fixtures.admin())
+    assert (late.status_code, "ROUND_RETIRED" in late.text) == (409, True)
     assert rows_of(network) == {f"0:{keys[i].ss58}": ("MINER", "APPLIED") for i in (3, 4)}
     assert sorted(hook.calls) == sorted(
         (admission_id(i), "NO_SHOW", no_show(run, keys[i].ss58, "commit")[2]) for i in (3, 4)
     )
-    assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 5
+    assert (
+        store._record_v2(run, "finality", "0")["unresolved_audits"] == 0
+    )  # retired: no audit left
+    # a later push finds the round closed and touches nothing
+    settled = every_record(network)
+    push_through(network, D_AUDIT + 6)
+    assert every_record(network) == settled
 
 
 def test_a_sanction_that_fails_never_removes_the_exclusion_or_stops_the_beacon(network, hook):
@@ -460,3 +484,72 @@ def test_a_reaper_that_fails_never_stops_the_beacon_or_the_other_reaper(
 
     assert set(excluded_as(network)) == silent
     assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 4
+
+
+def test_a_round_nobody_scheduled_audits_for_is_retired_without_blaming_anyone(network, hook):
+    # Given: five members that all committed and delivered, and an audit window nobody used
+    store, run = network.store, network.manifest.run_id()
+    keys = seeded(network, 5)
+    opening = store._record_v2(run, "round", "0")["body"]
+    audit = AuditPolicyV2.model_validate_json(
+        store.objects.get(network.manifest.network.audit_policy_hash)
+    )
+    absolute = min(opening["d_final"], opening["d_audit"] + audit.absolute_rounds())
+    push_through(network, absolute - 2)
+    assert records(network, "retired") == {}
+
+    # When: the push that ends the window
+    push_through(network, absolute - 1)
+
+    # Then: the round is retired for the window it missed; the master could not hear anybody, so
+    # nobody is excluded, sanctioned or struck
+    retired = records(network, "retired")["0"]
+    assert (retired["cause"], len(retired["survivors"])) == ("AUDIT_WINDOW_MISSED", 5)
+    assert records(network, "finality")["0"]["disposition"] == "RETIRED"
+    assert records(network, "excluded") == {} and rows_of(network) == {} and hook.calls == []
+    assert set(records(network, "anchor")) >= {f"0:{k.ss58}" for k in keys}
+
+
+def test_a_retirement_the_run_is_not_ready_for_is_the_reaper_waiting(network, hook):
+    # Given: round 0 applied and not finalized, and round 1 opened with a roster nobody committed to
+    store, run = network.store, network.manifest.run_id()
+    keys = seeded(network, 5)
+    with store._tx():
+        status = store._record_v2(run, "finality", "0")
+        store._put_record_v2(run, "finality", "0", {**status, "applied": True})
+    second_round(network)
+
+    # When: the push that ends the commit window of round 1
+    push_through(network, D_AUDIT + 1)
+
+    # Then: round 1 cannot go on, but an earlier round is open, so it is marked and not retired;
+    # the member blame is booked all the same and the beacon went on
+    waiting = records(network, "round-exit")["1"]
+    assert waiting == {
+        "state": "INFEASIBLE",
+        "waiting": "ROUND_RETIRE_REFUSED: an earlier round is not closed",
+    }
+    assert records(network, "retired") == {}
+    assert {k for k in rows_of(network) if k.startswith("1:")} == {f"1:{k.ss58}" for k in keys}
+
+
+def test_a_retirement_that_fails_keeps_the_blame_and_is_journaled(network, hook, monkeypatch):
+    # Given: a round the survivors cannot carry, and a disk that is full when anchors are carried
+    keys = seeded(network, 5, silent=(3, 4))
+
+    def full_disk(self, *args):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(ChallengeStore, "_carry_anchor_v2", full_disk)
+
+    # When
+    push_through(network, D_AUDIT)
+    push_through(network, D_AUDIT + 3)
+
+    # Then: the round stays as it was, the failure is journaled once, and the silent members are
+    # sanctioned all the same
+    assert records(network, "retired") == {}
+    assert records(network, "finality")["0"]["disposition"] == "PENDING"
+    assert records(network, "exit-failed") == {"0:retire": {"error": "OSError", "stage": "retire"}}
+    assert rows_of(network) == {f"0:{keys[i].ss58}": ("MINER", "APPLIED") for i in (3, 4)}
+    assert len(hook.calls) == 2
