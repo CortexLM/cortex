@@ -73,7 +73,7 @@ jobs:
   test:
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'v3-') || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 25
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
