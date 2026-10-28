@@ -472,7 +472,9 @@ def test_ad05_a_coldkey_has_one_non_active_admission_and_an_active_one_may_apply
     strict=True,
     raises=AssertionError,
     reason="RL-01+ESC-02: one key can add ledger events through the escrow routes without any "
-    "bound per beacon [candidate] [fix-lot: escrow-relay-fixes ADR0014-P5]",
+    "bound per beacon (the lot designed a quota of 2,048 per coldkey and window, ADR 0014 5.1, "
+    "and did not land it; its size awaits Forge and is above the bound asked here) [candidate] "
+    "[fix-lot: decision (product choice pending)]",
 )
 def test_rl01_the_escrow_transfers_of_one_key_are_bounded_in_one_beacon(
     gate: Gate,

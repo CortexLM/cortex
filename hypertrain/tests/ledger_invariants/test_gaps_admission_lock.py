@@ -490,7 +490,8 @@ def test_a_reservation_names_the_accepted_execution_it_cannot_find(
 
 # SHD-19+SHD-21+CL-14+CL-36 (F6): a beacon push matures every due origin, expires the leases,
 # closes the blocked disputes and reaps the trials whatever one shadow origin's custody or
-# identity has become; the origin whose re-validation raises is journaled and retried.
+# identity has become, and the next push is no different. The journal row of the origin whose
+# re-validation raises is pinned by tests/challenge/test_beacon_maturity_v2.py, not here.
 POISONS = [
     "none",
     "the shadow-custody record is missing",

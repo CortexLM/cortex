@@ -10,6 +10,7 @@ import asyncio
 import base64
 import hashlib
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from hypertrain.protocol.messages_v2 import WorkProof
 from hypertrain.protocol.relay_messages import (
     ChunkCustodyAck,
     CustodyRelease,
+    RelayReceipt,
     UploadGrant,
 )
 from hypertrain.relay import app as relay_app
@@ -65,6 +67,7 @@ RELAY_FIXTURE = ("li_relay_fixture", "relay/test_transport_v2.py")
     ),
 )
 def test_a_dispute_watch_captured_in_an_earlier_round_is_refused_later(tmp_path: Path) -> None:
+    """SG-05+HTP-03: a dispute watch signed in an earlier round is refused later."""
     party = sibling_service().HOT[0]
     with service_world(tmp_path) as world:
         n = world.network
@@ -136,7 +139,8 @@ def observer_answer(world: Any, scenario: Any, challenge: dict[str, Any]) -> dic
     raises=AssertionError,
     reason=(
         "GT-04+HTP-07: an anonymous second GET of a relay-observer challenge does not void the "
-        "pending one [fix-lot: escrow-relay-fixes ADR0014-P8]"
+        "pending one (the lot wrote the fix and left it out of its merge, D58; Forge decides to "
+        "integrate or drop it) [fix-lot: decision (product choice pending)]"
     ),
 )
 def test_a_second_anonymous_observer_challenge_does_not_void_the_pending_one(
@@ -163,7 +167,8 @@ def test_a_second_anonymous_observer_challenge_does_not_void_the_pending_one(
     raises=AssertionError,
     reason=(
         "GT-04+HTP-07: a relay-observer challenge asked for in a later round is never a 500 "
-        "[fix-lot: escrow-relay-fixes ADR0014-P8]"
+        "(the lot wrote the fix and left it out of its merge, D58; Forge decides to integrate or "
+        "drop it) [fix-lot: decision (product choice pending)]"
     ),
 )
 def test_an_observer_challenge_asked_for_in_a_later_round_is_a_mapped_answer(
@@ -320,12 +325,12 @@ def test_the_shipped_relay_does_not_refuse_a_release_for_want_of_a_settlement_jo
     assert "settlement journal not configured" not in answer, answer
 
 
-def sealed_release(rig: Any, grant: UploadGrant, custody: ChunkCustodyAck) -> Any:
+def sealed_release(rig: Any, grant: UploadGrant, custody_hash: str) -> Any:
     return rig.seal(
         CustodyRelease(
             grant_hash=grant.digest(),
-            custody_hashes=[custody.digest()],
-            retention_hash=custody.digest(),
+            custody_hashes=[custody_hash],
+            retention_hash=custody_hash,
             finality_hash=HASH,
             vesting_beacon=1,
             closed_dispute_root=HASH,
@@ -334,15 +339,11 @@ def sealed_release(rig: Any, grant: UploadGrant, custody: ChunkCustodyAck) -> An
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "LV-03+TRN-02: a released upload frees its slot in the retained-upload cap "
-        "[fix-lot: escrow-relay-fixes ADR0014-P6]"
-    ),
-)
-def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: Path) -> None:
+def released_rounds_leave_the_cap(
+    tmp_path: Path, released: Callable[[ChunkCustodyAck, RelayReceipt], list[str]]
+) -> None:
+    """Fill a cap of two with two served rounds, release `released` of the custody of each (a
+    chunk acknowledgment and the receipt are one pin each), and ask for a third grant."""
     fixture = load_fixture_module(*RELAY_FIXTURE)
     capacity = 2  # the cap is a constant; the property is that finished uploads leave it
 
@@ -360,22 +361,39 @@ def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: P
                 data = f"round {w}".encode()
                 grant, manifest, raw, assignment, opened = rig.upload(data, nonce=f"{w:064x}", w=w)
                 await rig.relay.accept(raw, manifest, assignment, opened)
-                served.append(
-                    (grant, ChunkCustodyAck.model_validate((await rig.put(grant, data)).body))
+                custody = ChunkCustodyAck.model_validate((await rig.put(grant, data)).body)
+                receipt = RelayReceipt.model_validate(
+                    (await rig.relay.complete(grant.digest())).body
                 )
+                served.append((grant, custody, receipt))
             # Control: the cap is what stops the next round's grant while nothing is released.
             grant, manifest, raw, assignment, opened = rig.upload(b"next", nonce="ee" * 32, w=9)
             with pytest.raises(RelayError, match="retained upload quota exhausted"):
                 await rig.relay.accept(raw, manifest, assignment, opened)
             # Finality releases custody of both served rounds.
-            for earlier, custody in served:
-                await rig.relay.release(sealed_release(rig, earlier, custody))
+            for earlier, custody, receipt in served:
+                for digest in released(custody, receipt):
+                    await rig.relay.release(sealed_release(rig, earlier, digest))
             try:
                 await rig.relay.accept(raw, manifest, assignment, opened)
             except RelayError as error:
                 assert "retained upload quota" not in str(error), "released uploads still count"
 
     asyncio.run(scenario())
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "LV-03+TRN-02: a released upload frees its slot in the retained-upload cap "
+        "[fix-lot: escrow-relay-fixes ADR0014-P6]"
+    ),
+)
+def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: Path) -> None:
+    released_rounds_leave_the_cap(
+        tmp_path, lambda chunk, receipt: [chunk.digest(), receipt.digest()]
+    )
 
 
 # LV-07 ------------------------------------------------------------------------------------
@@ -385,8 +403,9 @@ def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: P
     strict=True,
     raises=AssertionError,
     reason=(
-        "LV-07+TRN-05: one hotkey cannot store more objects than any proof may reference "
-        "[fix-lot: escrow-relay-fixes ADR0014-P8 (TRN-05)]"
+        "LV-07+TRN-05: one hotkey cannot store more objects than any proof may reference (the lot "
+        "defers TRN-05 with the rest of its open list; Forge decides whether another batch takes "
+        "it) [fix-lot: decision (product choice pending)]"
     ),
 )
 def test_one_hotkey_cannot_store_more_objects_than_a_proof_can_reference(tmp_path: Path) -> None:

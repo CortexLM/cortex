@@ -801,9 +801,10 @@ def test_random_operation_sequences_conserve_units_and_follow_a_bucket_model(
     strict=True,
     raises=AssertionError,
     reason=(
-        "ESC-23: the storage one escrow event adds does not grow with the ledger's unit rows (ADR "
-        "0014 4.6, an event hash over a digest with checkpoints, awaits Forge's approval) "
-        "[fix-lot: escrow-relay-fixes ADR0014-P4]"
+        "ESC-23: the storage one escrow event adds does not grow with the ledger's unit rows (the "
+        "lot encodes the state faster but still stores a full snapshot per event; ADR 0014 4.6, an "
+        "event hash over a digest with checkpoints, awaits maintainer approval) "
+        "[fix-lot: decision (product choice pending)]"
     ),
 )
 def test_the_storage_one_event_adds_does_not_grow_with_the_ledger(li_escrow: ModuleType) -> None:
@@ -824,11 +825,10 @@ def test_the_storage_one_event_adds_does_not_grow_with_the_ledger(li_escrow: Mod
             return int(pages * size)
 
         before, count = stored(), events(escrow)
-        for index in range(transfers):  # a transfer to oneself moves nothing, yet is an event
+        for index in range(transfers):  # to another owner: SELF_TRANSFER refuses oneself
             operation = f"ab{index:062x}"
             escrow.transfer(
-                transfer_op(li_escrow, fx.cold, operation=operation, units=1, recipient=cold),
-                signer=cold,
+                transfer_op(li_escrow, fx.cold, operation=operation, units=1), signer=cold
             )
         assert events(escrow) == count + transfers  # the scenario reaches the point under test
         rows = escrow.db.execute("SELECT COUNT(*) FROM escrow_units").fetchone()[0]
@@ -890,8 +890,10 @@ def test_the_database_work_of_a_stake_lookup_does_not_grow_with_the_locks_of_oth
     raises=AssertionError,
     reason=(
         "ESC-23: the database work of a stake lookup does not grow with the locks the same owner "
-        "holds for other admissions (ADR 0014 4.1 indexes by owner and bounds it by the "
-        "per-coldkey cap) [fix-lot: escrow-relay-fixes ADR0014-P4]"
+        "holds for other admissions (ADR 0014 4.1 indexes the lookup by owner and bounds it by the "
+        "cap of 2,048 open locks per coldkey, so its cost grows with the owner's open locks up to "
+        "that cap; a flat cost is more than the ADR promises and no lot designs it) "
+        "[fix-lot: none (no design yet)]"
     ),
 )
 def test_the_database_work_of_a_stake_lookup_does_not_grow_with_other_admissions_locks(
@@ -911,9 +913,10 @@ UNDECODABLE = "5" * 48
     strict=True,
     raises=AssertionError,
     reason=(
-        "ES-07: a transfer to a well-formed recipient that is no decodable key is refused (ADR "
-        "0014 5.2 asks for a recipient the ledger already knows) "
-        "[fix-lot: escrow-relay-fixes ADR0014-P5]"
+        "ES-07: a transfer to a well-formed recipient that is no decodable key is refused (the lot "
+        "defers ADR 0014 5.2, a recipient the ledger already knows, with the rest of the escrow "
+        "ingress rules of ESC-02: a product rule that awaits Forge) "
+        "[fix-lot: decision (product choice pending)]"
     ),
 )
 def test_a_transfer_to_a_recipient_that_is_no_decodable_key_is_refused(

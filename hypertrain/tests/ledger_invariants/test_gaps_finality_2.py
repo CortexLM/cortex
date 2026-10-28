@@ -252,7 +252,11 @@ def standing(stage: Stage, hotkey: str, coldkey: str) -> tuple[str, int, int]:
     reason="GAP-01 [decision: what the penalty is]: a miner whose forged commit the master replay "
     "refuted, and who opens no contest, keeps an ACTIVE admission, zero strikes and its full "
     "stake: the only consequence is that its own round is not paid, so repeating the forgery in "
-    "every round costs it nothing [fix-lot: audit-integrity-2 ADR0011-P8 D47]",
+    "every round costs it nothing. audit-integrity-2 books the sanction (ADR 0011 part 8, "
+    "decisions 15-18) but runs AUDIT_MISMATCH in record mode: the row ends WOULD_APPLY and the "
+    "hook is not called, because enforce_audit_mismatch is off by default until the "
+    "environment-pin lot flips it, so the standing does not change "
+    "[fix-lot: decision (product choice pending)]",
 )
 def test_a_detected_cheat_that_is_not_contested_has_a_consequence_beyond_the_round(
     stage: Stage,

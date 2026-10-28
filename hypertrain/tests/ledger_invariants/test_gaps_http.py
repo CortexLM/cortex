@@ -827,7 +827,9 @@ def test_an_aggregation_refused_by_tape_or_finality_rules_is_a_4xx_with_its_reas
         )
         refusing(error)
         answer = client.post(url, headers=world.admin)
-        assert 400 <= answer.status_code < 500 and str(error) in answer.text
+        # A conflict, not a 4xx of another kind: ADR 0011 part 8 (decision 27) fixes the status the
+        # operator reads for a refusal that a request can trigger.
+        assert answer.status_code == 409 and str(error) in answer.text
 
 
 # --- T-AU-03: a weak or shared secret is refused for every bearer class, not only two ----------

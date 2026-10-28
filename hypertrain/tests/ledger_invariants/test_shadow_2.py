@@ -777,7 +777,7 @@ def test_a_test_ledger_reservation_binds_the_policy_digest_not_an_operator_recor
     assert reservation["economic_admission_hash"] == escrow_of(n).policy.digest()
 
 
-# --- SHD-19, SHD-21, SHD-20: candidates of the Lens report ------------------------------------
+# --- SHD-19, SHD-21, SHD-20: a poisoned origin, a hotkey rotation, a next trial ---------------
 
 
 def rotate(n: Any) -> httpx.Response:
