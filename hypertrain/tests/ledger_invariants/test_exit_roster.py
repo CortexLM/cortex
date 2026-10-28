@@ -47,32 +47,6 @@ def complete(rnd: X.Round, job_id: str) -> None:
         rnd.store._db.execute("UPDATE audit_leases_v2 SET state='completed' WHERE id=?", (job_id,))
 
 
-def deliver_deltas(rnd: X.Round, members: list[int]) -> None:
-    """The delta manifest of each member, stored as an accepted upload is. A member that committed
-    and delivered nothing by d_upload has left the round (ADR 0011 Part 8), so a test about the
-    audit windows of members that did deliver needs these records."""
-    for index in members:
-        commit = rnd.record("commit", rnd.identity(index))["body"]
-        manifest = {
-            "w": rnd.w,
-            "hotkey": rnd.hotkey(index),
-            "delta_hash": commit["delta_hash"],
-            "size": commit["delta_bytes"],
-            "uri": "sha256:" + commit["delta_hash"],
-            "format": "ht-sparse-v1",
-            "chunks": [{"off": 0, "len": commit["delta_bytes"], "sha256": commit["delta_hash"]}],
-            "grant_hash": "0" * 64,
-            "master_acceptance_hash": "0" * 64,
-        }
-        with rnd.store._tx():
-            rnd.store._put_record_v2(
-                rnd.run_id,
-                "delta",
-                rnd.identity(index),
-                rnd.network.signed(X.hot(index), "DeltaManifestV2", manifest),
-            )
-
-
 # Worlds of one round of four members, built on the routes (about 0.3 s each)
 
 
@@ -106,7 +80,8 @@ def test_every_roster_member_is_in_a_terminal_audit_state_once_the_horizon_has_p
         "four members committed, the fifth did not",
     )
     X.schedule(rnd)  # the operator's call, at d_audit
-    deliver_deltas(rnd, committed)  # they are left out for the audit nobody serves, not for silence
+    # they are left out for the audit nobody serves, not for silence
+    X.deliver_deltas(rnd, committed)
 
     X.run_out_audit_windows(rnd)
 

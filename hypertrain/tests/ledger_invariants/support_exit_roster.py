@@ -519,6 +519,32 @@ def deliver_delta(rnd: Round, index: int, delta: bytes) -> None:
     control(response.status_code == 200, response.text)
 
 
+def deliver_deltas(rnd: Round, members: Sequence[int]) -> None:
+    """The delta manifest of each member, stored as an accepted upload is. A member that committed
+    and delivered nothing by d_upload has left the round (ADR 0011 Part 8), so a test about the
+    audit windows of members that did deliver needs these records."""
+    for index in members:
+        commit = rnd.record("commit", rnd.identity(index))["body"]
+        manifest = {
+            "w": rnd.w,
+            "hotkey": rnd.hotkey(index),
+            "delta_hash": commit["delta_hash"],
+            "size": commit["delta_bytes"],
+            "uri": "sha256:" + commit["delta_hash"],
+            "format": "ht-sparse-v1",
+            "chunks": [{"off": 0, "len": commit["delta_bytes"], "sha256": commit["delta_hash"]}],
+            "grant_hash": "0" * 64,
+            "master_acceptance_hash": "0" * 64,
+        }
+        with rnd.store._tx():
+            rnd.store._put_record_v2(
+                rnd.run_id,
+                "delta",
+                rnd.identity(index),
+                rnd.network.signed(hot(index), "DeltaManifestV2", manifest),
+            )
+
+
 def schedule(rnd: Round) -> Any:
     """Move to d_audit and POST the operator's audits route; returns the response unchecked."""
     rnd.network.push(rnd.opening.d_audit)

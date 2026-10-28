@@ -152,8 +152,9 @@ def test_a_loss_of_leaves_on_the_master_sanctions_nobody(queue: X.Round) -> None
     auditor can be given its job; the member did what it owed (the master holds the record of its
     publication) and every window ends without a verdict. The job is given up, nobody is struck,
     nobody loses a bond, and whatever the exit records for the members it drops blames the
-    infrastructure, never a silence or a failed audit. How the round then closes (each member
-    excluded, or the round retired as a whole when nobody is left to carry it) is not under test."""
+    infrastructure, never a silence or a failed audit. The members deliver their deltas first, so
+    the exit has no silence to blame them for and drops each of them for its job; how the round
+    then closes (retired as a whole when nobody is left to carry it) is not under test."""
     rnd = queue
     head = rnd.queue_order()[0]
     X.lose_leaves(rnd, head)
@@ -162,12 +163,16 @@ def test_a_loss_of_leaves_on_the_master_sanctions_nobody(queue: X.Round) -> None
         "the master still holds the record of the publication and nobody is out of the round",
     )
 
+    # they are left out for the audit nobody serves, not for silence
+    X.deliver_deltas(rnd, rnd.members)
+
     X.run_out_audit_windows(rnd)
     X.walk(rnd, rnd.network.now + 1)  # whatever retries a sanction gets another turn
 
     assert [row["state"] for row in rnd.lease_rows() if row["hotkey"] == rnd.hotkey(head)] == [
         "exhausted"
     ]
+    assert set(rnd.excluded()) == {rnd.hotkey(i) for i in rnd.members}
     assert set(rnd.excluded().values()) <= {"INFRASTRUCTURE"}
     assert [X.standing(rnd, i) for i in rnd.members] == [FUNDED] * len(rnd.members)
 
