@@ -481,6 +481,49 @@ def test_a_round_nobody_audited_is_retired_when_its_audit_window_is_gone(
         assert snapshot(store, run) == before
 
 
+@pytest.mark.parametrize(
+    ("state", "retired"),
+    [("lost", True), ("restored", False), ("not found yet", False)],
+)
+def test_a_round_is_retired_for_a_leaf_object_only_while_the_master_has_lost_it(
+    network, state, retired
+):
+    # Given: audits are scheduled and the master's store lost the leaf object the head of the
+    # queue published; for "not found yet" no lease has run into the loss
+    store, run = network.store, network.manifest.run_id()
+    keys = seeded(network, 4)
+    survivors = [k.ss58 for k in keys]
+    network.push(D_AUDIT)
+    store.schedule_audits_v2(run, 0)
+    head = min(
+        survivors,
+        key=lambda hotkey: sha256_hex(f"ht-audit-job/2|{run}|0|{hotkey}".encode()),
+    )
+    key = store._record_v2(run, "leaves", f"0:{head}")["object"]
+    data = store.objects.get(key)
+    store.objects._path(key).unlink()
+    if state != "not found yet":
+        assert lease(network, AUDITOR_A, 1).status_code == 503
+    if state == "restored":
+        store.objects.put(data)
+    before = snapshot(store, run)
+
+    if retired:
+        # When: the reaper asks for the retirement that the 503 called for
+        done = retire(network, survivors, cause="LEAF_OBJECT_LOST")
+        # Then: the audits were scheduled and their window is open, and it is retired all the same
+        assert (done["cause"], done["survivors"]) == ("LEAF_OBJECT_LOST", sorted(survivors))
+        assert store._record_v2(run, "finality", "0")["disposition"] == "RETIRED"
+    else:
+        # When / Then: a caller cannot name a loss the facts do not show
+        with pytest.raises(
+            ChallengeError, match="ROUND_RETIRE_REFUSED: no leaf object of the round is lost"
+        ) as refused:
+            retire(network, survivors, cause="LEAF_OBJECT_LOST")
+        assert refused.value.status == 409
+        assert snapshot(store, run) == before
+
+
 def test_the_round_after_a_retired_one_is_reward_finalized(network, ledger):
     # Given: round 0 retired by the store, round 1 applied and offered to the ledger
     store, run = network.store, network.manifest.run_id()

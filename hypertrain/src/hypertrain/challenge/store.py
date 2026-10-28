@@ -370,6 +370,11 @@ class RunRetired(ChallengeError):
     """The stored manifest is one the current model refuses: the run answers 409 and stays idle."""
 
 
+class CommittedRefusal(ChallengeError):
+    """A refusal that keeps what its transaction wrote. For a fault of the master's own that has
+    to be booked and still answered (a leaf object it lost); only `_tx_booking_refusal` keeps it."""
+
+
 def _unprocessable(error: EnvelopeError) -> ChallengeError | None:
     """A manifest body the model refuses is unprocessable (422), and says where."""
     cause = error.__cause__
@@ -608,6 +613,20 @@ class ChallengeStore:
             self._db.execute("COMMIT")
         if notify:
             self._notify_processes_v2()
+
+    @contextmanager
+    def _tx_booking_refusal(self) -> Iterator[sqlite3.Connection]:
+        """`_tx` for a request that may book a fault and still refuse: a `CommittedRefusal` raised
+        in the block commits what the block wrote and is raised once the transaction is closed.
+        Any other exception rolls back as in `_tx`, which stays the one place that does."""
+        refusal: CommittedRefusal | None = None
+        with self._tx() as db:
+            try:
+                yield db
+            except CommittedRefusal as error:
+                refusal = error
+        if refusal is not None:
+            raise refusal
 
     def healthy(self) -> bool:
         try:
@@ -6921,7 +6940,9 @@ class ChallengeStore:
         planner owns that definition), so a caller cannot void a round that can still carry:
 
         - INFEASIBLE: the commit window is over and the survivors cannot carry one update;
-        - AUDIT_WINDOW_MISSED: nobody scheduled audits and `audits` answers 503 from now on.
+        - AUDIT_WINDOW_MISSED: nobody scheduled audits and `audits` answers 503 from now on;
+        - LEAF_OBJECT_LOST: a lease found the leaf object of a member lost and the store still
+          cannot read it (decision 28): the round cannot be audited whole, and nobody is blamed.
 
         It also needs every earlier round closed (no rollback window may hold a retired round), a
         pending unapplied round and a run that is not service-admitted. Nothing is written before
@@ -6971,6 +6992,9 @@ class ChallengeStore:
                 carries = True
             if carries:
                 raise refuse("the survivors can carry the round")
+        elif cause == "LEAF_OBJECT_LOST":
+            if not self._lost_leaf_hotkeys_v2(run_id, w):
+                raise refuse("no leaf object of the round is lost")
         else:
             audit = AuditPolicyV2.model_validate_json(
                 self.objects.get(manifest.network.audit_policy_hash)
@@ -7169,6 +7193,10 @@ class ChallengeStore:
         def hotkeys_of(kind: str) -> frozenset[str]:
             return frozenset(i.split(":", 1)[1] for i in self._round_ids_v2(run_id, kind, w))
 
+        lost: list[str] = []
+        if not status.applied:  # a retired round takes no parked job back
+            lost = self._lost_leaf_hotkeys_v2(run_id, w)
+            self._requeue_restored_leaves_v2(run_id, w, lost)
         leases = self._db.execute(
             "SELECT hotkey,state FROM audit_leases_v2 WHERE run_id=? AND w=?", (run_id, w)
         ).fetchall()
@@ -7194,6 +7222,7 @@ class ChallengeStore:
                 served_upload=served(pauses, body.d_commit, body.d_upload),
                 has_leases=bool(leases),
                 carries=carries,
+                lost_leaves=bool(lost),
             )
         )
         for exclusion in plan.exclusions:
@@ -8079,7 +8108,7 @@ class ChallengeStore:
         from hypertrain.protocol.messages_v2 import ArtifactRef, AuditJobV2, StartStateV2
 
         env = envelope_v2.parse_envelope(raw)
-        with self._tx():
+        with self._tx_booking_refusal():
             manifest = self._run_v2(run_id)
             if env.signer not in manifest.training.auditors:
                 raise ChallengeError(403, "auditor not allowlisted")
@@ -8216,7 +8245,10 @@ class ChallengeStore:
                     continue  # leaves have no deadline: leasable once posted, never blocking
                 commit_env = self._record_v2(run_id, "commit", identity)
                 leaves_record = self._record_v2(run_id, "leaves", identity)
-                leaves = json.loads(self.objects.get(str(leaves_record["object"])))
+                try:
+                    leaves = json.loads(self.objects.get(str(leaves_record["object"])))
+                except ObjectNotFound:
+                    raise self._park_lost_leaves_v2(run_id, candidate, leaves_record, now) from None
                 # A miner-sealed input that AuditJobV2 refuses must not block the jobs behind it.
                 refusal = self._refused_miner_input_v2(commit_env, leaves, now)
                 if refusal is None:
@@ -8286,6 +8318,53 @@ class ChallengeStore:
         ):
             return "LEAVES_NONFINITE"
         return None
+
+    def _park_lost_leaves_v2(
+        self, run_id: str, row: sqlite3.Row, leaves_record: dict[str, Any], now: int
+    ) -> CommittedRefusal:
+        """The master's store lost the leaf object of a queued job: a fault of the master, not of
+        the miner (ADR 0011 Part 8, decision 28). The job leaves the queue, so that the jobs behind
+        it keep leasing, without a verdict and without an `excluded` record, so nobody is blamed.
+        The record is what the reaper retires the round on. Returns the refusal the caller raises:
+        `_tx_booking_refusal` commits for it."""
+        self._db.execute(
+            "UPDATE audit_leases_v2 SET state='exhausted',result='LEAF_OBJECT_LOST' WHERE id=?",
+            (row["id"],),
+        )
+        self._put_record_v2(
+            run_id,
+            "leaf-object-lost",
+            f"{row['w']}:{row['hotkey']}",
+            {"job_id": row["id"], "object": leaves_record["object"], "at": now},
+        )
+        return CommittedRefusal(503, f"LEAF_OBJECT_LOST: round {row['w']} job {row['id']}")
+
+    def _lost_leaf_hotkeys_v2(self, run_id: str, w: int) -> list[str]:
+        """The members of round `w` whose leaf object a lease found lost and the store still cannot
+        read: the record names the object the member published, and a fresh read of it fails (any
+        other outcome is not a loss)."""
+        lost = []
+        for identity in sorted(self._round_ids_v2(run_id, "leaf-object-lost", w)):
+            record = self._record_v2(run_id, "leaf-object-lost", identity)
+            if self._record_v2(run_id, "leaves", identity)["object"] != record["object"]:
+                continue
+            try:
+                self.objects.get(str(record["object"]))
+            except ObjectNotFound:
+                lost.append(identity.split(":", 1)[1])
+        return lost
+
+    def _requeue_restored_leaves_v2(self, run_id: str, w: int, lost: Collection[str]) -> None:
+        """A job parked for a leaf object that reads again goes back to the queue: the fault that
+        parked it is gone, and a round must not stay pinned by a job nothing will serve. `lost`
+        are the members still missing their object."""
+        for identity in self._round_ids_v2(run_id, "leaf-object-lost", w):
+            if identity.split(":", 1)[1] not in lost:
+                self._db.execute(
+                    "UPDATE audit_leases_v2 SET state='queued',result=NULL "
+                    "WHERE id=? AND state='exhausted' AND result='LEAF_OBJECT_LOST'",
+                    (self._record_v2(run_id, "leaf-object-lost", identity)["job_id"],),
+                )
 
     def _drop_audit_job_v2(
         self,

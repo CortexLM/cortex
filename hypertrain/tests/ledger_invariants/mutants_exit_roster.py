@@ -25,6 +25,67 @@ STRIKE = (
     "\n        )"
 )
 
+# NSH-03 (D83): the lines of lease_v2 that find a leaf object the master lost, the helpers behind
+# them and the reaper that retires the round. Each `old` occurs once in its file.
+EXIT = "src/hypertrain/challenge/exit_v2.py"
+PARK = "raise self._park_lost_leaves_v2(run_id, candidate, leaves_record, now) from None\n"
+HANDLER = "                except ObjectNotFound:\n                    "
+FRESH_READ = (
+    "            try:\n"
+    '                self.objects.get(str(record["object"]))\n'
+    "            except ObjectNotFound:\n"
+    '                lost.append(identity.split(":", 1)[1])\n'
+)
+REQUEUE = "            self._requeue_restored_leaves_v2(run_id, w, lost)\n"
+LOST_FAULT = "        return CommittedRefusal(503,"
+MEMBER = "f\"{row['w']}:{row['hotkey']}\""  # the identity of the member in the park
+EXCLUDED = (
+    "        self._put_record_v2(\n"
+    f'            run_id, "excluded", {MEMBER}, {{"reason": "INFRASTRUCTURE"}}\n'
+    "        )\n"
+)
+STRUCK = (
+    "        self._db.execute(\n"
+    "            \"UPDATE admissions_v2 SET strikes=strikes+1 WHERE hotkey=?\", (row['hotkey'],)\n"
+    "        )\n"
+)
+BOOKED = (
+    "        admission = self._db.execute(\n"
+    "            \"SELECT admission_id FROM admissions_v2 WHERE hotkey=?\", (row['hotkey'],)\n"
+    "        ).fetchone()[0]\n"
+    "        self._book_sanction_v2(\n"
+    f'            run_id, {MEMBER}, admission, "leaves", "MINER", "0" * 64\n'
+    "        )\n"
+)
+FORGOTTEN = (
+    "                lost_leaves=bool(lost)\n"
+    "                and self._db.execute(\n"
+    '                    "SELECT 1 FROM records_v2 "\n'
+    "                    \"WHERE run_id=? AND kind='round-exit' AND id=?\",\n"
+    "                    (run_id, str(w)),\n"
+    "                ).fetchone()\n"
+    "                is None,\n"
+)
+REFUSED = (
+    T2 + "test_a_leaf_object_the_master_lost_is_refused_by_name_and_the_audits_behind_it_lease"
+)
+RETIRED = T2 + "test_a_lost_leaf_object_retires_the_round_at_the_next_push"
+NOBODY = T2 + "test_the_retirement_for_a_lost_leaf_object_sanctions_nobody_and_moves_no_unit"
+NEXT = T2 + "test_the_round_after_one_with_a_lost_leaf_object_opens_and_its_audits_lease"
+RESTORED = T2 + "test_a_restored_leaf_object_puts_its_job_back_and_the_round_goes_on"
+REVIVED = T2 + "test_a_restored_leaf_object_does_not_revive_a_job_of_a_retired_round"
+WAITS = (
+    T2 + "test_a_lost_leaf_object_waits_for_the_round_before_it_and_is_retired_when_that_one_closes"
+)
+PLAN = (
+    "tests/challenge/test_exit_plan_v2.py::"
+    "test_a_lost_leaf_object_retires_a_round_that_can_still_carry_unless_it_cannot"
+)
+PRIMITIVE = (
+    "tests/challenge/test_retire_round_v2.py::"
+    "test_a_round_is_retired_for_a_leaf_object_only_while_the_master_has_lost_it"
+)
+
 MUTANTS = [
     {
         "id": "exit-roster-queue-served-backwards",
@@ -125,6 +186,126 @@ MUTANTS = [
         "tests": [T2 + "test_a_loss_of_leaves_on_the_master_sanctions_nobody"],
         "why": "A job the master could not serve ends in a strike for its miner, as if the silence "
         "were the miner's.",
+    },
+    {
+        "id": "nsh03-lost-leaf-object-is-a-bare-500",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": HANDLER + PARK,
+        "new": HANDLER.replace("ObjectNotFound", "KeyError") + PARK,
+        "tests": [REFUSED],
+        "why": "A leaf object the master lost escapes lease_v2 as ObjectNotFound: a bare 500.",
+    },
+    {
+        "id": "nsh03-lost-leaf-object-is-a-silent-skip",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": HANDLER + PARK,
+        "new": HANDLER
+        + "self._park_lost_leaves_v2(run_id, candidate, leaves_record, now)\n"
+        + "                    continue\n",
+        "tests": [REFUSED],
+        "why": "The job is parked and the ask is served the next one: the loss is never named.",
+    },
+    {
+        "id": "nsh03-lost-leaf-refusal-rolls-back-its-journal",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": "            except CommittedRefusal as error:\n                refusal = error\n",
+        "new": "            except CommittedRefusal:\n                raise\n",
+        "tests": [REFUSED],
+        "why": "The 503 is raised inside the transaction that wrote the journal and the parking.",
+    },
+    {
+        "id": "nsh03-lost-leaf-job-is-not-parked",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": "SET state='exhausted',result='LEAF_OBJECT_LOST' WHERE id=?",
+        "new": "SET result='LEAF_OBJECT_LOST' WHERE id=?",
+        "tests": [REFUSED],
+        "why": "The job whose object is gone stays queued and the queue behind it starves.",
+    },
+    {
+        "id": "nsh03-lost-leaf-member-is-excluded",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": LOST_FAULT,
+        "new": EXCLUDED + LOST_FAULT,
+        "tests": [REFUSED, RETIRED, NOBODY],
+        "why": "The member whose object the master lost is left out of the round it did serve.",
+    },
+    {
+        "id": "nsh03-lost-leaf-member-is-struck",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": LOST_FAULT,
+        "new": STRUCK + LOST_FAULT,
+        "tests": [NOBODY],
+        "why": "The member whose object the master lost is struck as if it had not published it.",
+    },
+    {
+        "id": "nsh03-lost-leaf-member-is-booked-a-no-show",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": LOST_FAULT,
+        "new": BOOKED + LOST_FAULT,
+        "tests": [NOBODY],
+        "why": "The missing object is booked as the member's no-show: the sweeper seizes its bond.",
+    },
+    {
+        "id": "nsh03-lost-leaf-round-is-not-retired",
+        "invariants": ["NSH-03"],
+        "path": EXIT,
+        "old": "    elif s.lost_leaves:\n",
+        "new": "    elif False:\n",
+        "tests": [RETIRED, NOBODY, NEXT, PLAN],
+        "why": "The planner never asks to retire a round that lost a leaf object: it starves.",
+    },
+    {
+        "id": "nsh03-lost-leaf-retirement-is-refused-as-an-audit-window",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": '        elif cause == "LEAF_OBJECT_LOST":\n',
+        "new": "        elif False:\n",
+        "tests": [RETIRED, PRIMITIVE],
+        "why": "The retirement falls into the audit-window branch and is refused: audits were "
+        "scheduled.",
+    },
+    {
+        "id": "nsh03-lost-leaf-retirement-without-a-fresh-read",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": FRESH_READ,
+        "new": '            lost.append(identity.split(":", 1)[1])\n',
+        "tests": [RESTORED, PRIMITIVE],
+        "why": "A record of a loss outlives it: an object that reads again retires the round.",
+    },
+    {
+        "id": "nsh03-lost-leaf-restored-job-is-not-queued-again",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": REQUEUE,
+        "new": "            pass\n",
+        "tests": [RESTORED],
+        "why": "A job parked for an object that reads again stays parked and pins its round.",
+    },
+    {
+        "id": "nsh03-lost-leaf-retired-round-takes-its-job-back",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": "        if not status.applied:  # a retired round takes no parked job back\n",
+        "new": "        if True:  # a retired round takes no parked job back\n",
+        "tests": [REVIVED],
+        "why": "A retired round that an open dispute keeps open gets its parked job back to lease.",
+    },
+    {
+        "id": "nsh03-lost-leaf-retirement-is-forgotten-once-asked",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": "                lost_leaves=bool(lost),\n",
+        "new": FORGOTTEN,
+        "tests": [WAITS],
+        "why": "A retirement the exit had to postpone is forgotten: the round starves on.",
     },
     {
         "id": "exit-roster-ledger-demands-a-round-nobody-finalized",

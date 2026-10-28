@@ -18,7 +18,7 @@ from hypertrain.protocol.hashing import sha256_hex
 
 Blame = Literal["MINER", "INFRASTRUCTURE"]
 Stage = Literal["commit", "leaves", "delta"]
-Retire = Literal["INFEASIBLE", "AUDIT_WINDOW_MISSED"]
+Retire = Literal["INFEASIBLE", "AUDIT_WINDOW_MISSED", "LEAF_OBJECT_LOST"]
 
 # The master refuses its callers once the wall clock is more than this many rounds ahead of the
 # last round it holds: the beacon is paused, and a pause is never a miner's silence.
@@ -146,6 +146,7 @@ class RoundSnapshot:
     served_upload: bool
     has_leases: bool
     carries: Callable[[Collection[str]], bool]
+    lost_leaves: bool = False  # a leaf object the master lost is on record and still unreadable
 
 
 def classify(
@@ -239,6 +240,8 @@ def plan_round(s: RoundSnapshot) -> RoundPlan:
     retire: Retire | None = None
     if now >= s.schedule.d_commit and len(survivors) < len(roster) and not s.carries(survivors):
         retire = "INFEASIBLE"
+    elif s.lost_leaves:
+        retire = "LEAF_OBJECT_LOST"  # the master's fault: the round cannot be audited whole
     elif not s.has_leases and now >= s.schedule.absolute - 1:
         retire = "AUDIT_WINDOW_MISSED"  # schedule_audits_v2 answers 503 from here on
     if retire:  # a round that cannot go on keeps its membership facts: only the blame is booked

@@ -525,6 +525,32 @@ def deliver_delta(rnd: Round, index: int, delta: bytes) -> None:
     control(response.status_code == 200, response.text)
 
 
+def deliver_deltas(rnd: Round, members: Sequence[int]) -> None:
+    """The delta manifest of each member, stored as an accepted upload is. A member that committed
+    and delivered nothing by d_upload has left the round (ADR 0011 Part 8), so a test about the
+    audit windows of members that did deliver needs these records."""
+    for index in members:
+        commit = rnd.record("commit", rnd.identity(index))["body"]
+        manifest = {
+            "w": rnd.w,
+            "hotkey": rnd.hotkey(index),
+            "delta_hash": commit["delta_hash"],
+            "size": commit["delta_bytes"],
+            "uri": "sha256:" + commit["delta_hash"],
+            "format": "ht-sparse-v1",
+            "chunks": [{"off": 0, "len": commit["delta_bytes"], "sha256": commit["delta_hash"]}],
+            "grant_hash": "0" * 64,
+            "master_acceptance_hash": "0" * 64,
+        }
+        with rnd.store._tx():
+            rnd.store._put_record_v2(
+                rnd.run_id,
+                "delta",
+                rnd.identity(index),
+                rnd.network.signed(hot(index), "DeltaManifestV2", manifest),
+            )
+
+
 def schedule(rnd: Round) -> Any:
     """Move to d_audit and POST the operator's audits route; returns the response unchecked."""
     rnd.network.push(rnd.opening.d_audit)
@@ -882,6 +908,43 @@ def post_lease_quietly(rnd: Round, raw: bytes) -> Any:
     (the test client of the fixtures re-raises it instead)."""
     client = TestClient(rnd.network.client.app, raise_server_exceptions=False)
     return client.post(rnd.network.url + "/worker/lease", content=raw)
+
+
+def receipt_of(rnd: Round, grant_hash: str, horizon: int) -> None:
+    """A grant of the round and the receipt of its upload, whose custody the relay holds until
+    `horizon`: what `relay_settlement_v2` answers for (as test_retire_round_v2.py builds it)."""
+    with rnd.store._tx():
+        rnd.store._put_record_v2(rnd.run_id, "grant", grant_hash, {"body": {"w": rnd.w}})
+        rnd.store._put_record_v2(
+            rnd.run_id,
+            "relay-receipt",
+            grant_hash,
+            {"body": {"grant_hash": grant_hash, "retain_until": horizon}},
+        )
+
+
+def books(rnd: Round) -> dict[str, Any]:
+    """Everything a sanction, an exclusion or a failed step of the exit leaves behind, and what
+    the ledger holds: the members' standings, their exclusions, the exit's sanction rows and its
+    failures, the sanction rows of the admission side and the ledger's events and balances."""
+    db = rnd.store._db
+
+    def ids(kind: str) -> list[str]:
+        rows = db.execute(
+            "SELECT id FROM records_v2 WHERE run_id=? AND kind=? ORDER BY id", (rnd.run_id, kind)
+        )
+        return [row["id"] for row in rows]
+
+    escrow = rnd.store._services(rnd.run_id)[0]
+    return {
+        "standing": [standing(rnd, i) for i in rnd.members],
+        "excluded": rnd.excluded(),
+        "exit-sanction": ids("exit-sanction"),
+        "exit-failed": ids("exit-failed"),
+        "admission_sanctions": db.execute("SELECT COUNT(*) FROM admission_sanctions").fetchone()[0],
+        "escrow_events": db.execute("SELECT COUNT(*) FROM escrow_events").fetchone()[0],
+        "balances": escrow.balances(),
+    }
 
 
 def contest(rnd: Round, index: int) -> Any:
