@@ -46,6 +46,7 @@ from .support import (
     memory_db,
 )
 from .support_opids import (
+    RECIPIENT,
     DefenceMissing,
     client_event,
     collateral_escrow,
@@ -55,8 +56,8 @@ from .support_opids import (
     must_refuse,
     refused,
     seed_reward_origin,
-    self_transfer,
     service_step,
+    transfer_to_recipient,
 )
 
 
@@ -446,7 +447,7 @@ def test_an_operation_that_fails_before_its_event_commits_changes_nothing(
     origin, _ = li_escrow.fund(escrow)
     cold, other = li_escrow.COLD.ss58, li_escrow.OTHER.ss58
     lock = li_escrow.lock(origin, fresh_id("lock"), 1000)
-    send = self_transfer(cold, fresh_id("send"), origin, 40)
+    send = transfer_to_recipient(cold, fresh_id("send"), origin, 40)
     before = ledger_state(escrow)
 
     # Given: the storage fails at the end of every operation.
@@ -468,7 +469,8 @@ def test_an_operation_that_fails_before_its_event_commits_changes_nothing(
     assert escrow.lock(lock, signer=cold) == receipt
     reopened = li_escrow.ledger(setup, path)
     assert reopened.balances(cold).admission_locked == 1000
-    assert reopened.balances(cold).available == 20000 - 1000
+    assert reopened.balances(cold).available == 20000 - 1000 - 40
+    assert reopened.balances(RECIPIENT.ss58).available == 40
     assert reopened.balances(other).available == 10000
     assert len(ledger_state(reopened)[1]) == len(before[1]) + 2
 

@@ -22,7 +22,14 @@ from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import EscrowLock, EscrowTransfer
 
 from .support import SERVICE_FIXTURE, World, load_fixture_module, service_world
-from .support_opids import StepRefused, client_model, contest_lock, fresh_id, refused, self_transfer
+from .support_opids import (
+    StepRefused,
+    client_model,
+    contest_lock,
+    fresh_id,
+    refused,
+    transfer_to_recipient,
+)
 
 # The outbox refuses a second body under a queued lock id. A ledger that reads the replay before
 # the lock is queued (`require_lock_capacity`, ADR 0014 part 4) refuses it first with its own code.
@@ -45,7 +52,7 @@ def client_event_over_http(
 ) -> Any:
     """What a funded coldkey sends to the public escrow routes, under an id of its choice."""
     if kind == "transfer":
-        event = client_model(lambda: self_transfer(key.ss58, operation_id, origin))
+        event = client_model(lambda: transfer_to_recipient(key.ss58, operation_id, origin))
         return signed_post(world, "transfer", key, "EscrowTransfer", event)
     event = client_model(lambda: contest_lock(key.ss58, operation_id, origin))
     return signed_post(world, "lock", key, "EscrowLock", event)
@@ -391,7 +398,9 @@ def test_the_ledger_waits_for_a_store_transaction_only_while_they_share_the_lock
         escrow, store = escrow_of(world), world.store
         if not shared:
             escrow.mutex = threading.RLock()  # stand-in: a user of the connection outside the lock
-        operation = self_transfer(cold[1].ss58, fresh_id("mutex"), world.network.origin_ids[1])
+        operation = transfer_to_recipient(
+            cold[1].ss58, fresh_id("mutex"), world.network.origin_ids[1]
+        )
         holding, release, applied = threading.Event(), threading.Event(), threading.Event()
 
         def holder() -> None:
