@@ -44,6 +44,7 @@ from .support_gaps_finality import (
     delta_post,
     finalize_post,
     leaves_post,
+    record_deltas,
     resealed,
 )
 
@@ -459,6 +460,7 @@ def test_a_round_wider_than_one_lease_is_refused_at_opening_or_stays_auditable(
             assert world.count("records_v2", "kind IN ('round','finality')") == 0
             return
         E.commit_all(rnd)
+        record_deltas(rnd)  # the members delivered: only the width of the round is under test
         world.network.push(rnd.d_audit)
         scheduled = E.audits_request(world)
         E.control(scheduled.status_code == 200, f"audits: {scheduled.text}")
