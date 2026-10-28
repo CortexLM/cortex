@@ -174,7 +174,7 @@ def signed_variant(
     final = Finalize.model_validate({**evidence.finalize.body, **final_changes})
     envelope = EnvelopeV2.model_validate(seal(E.COORD, "Finalize", run_id, final, 200))
     origin = OriginAllocation(
-        origin_id=reward_origin_id(run_id, 0, HOT, digest(final)),
+        origin_id=reward_origin_id(run_id, 0, HOT, digest(final), E.ID_KEY),
         owner=COLD,
         units=reward.budget_units,
         mature_at=reward.mature_at,
@@ -610,6 +610,7 @@ def op_id(counter: int) -> str:
     ]
 )
 @example(operations=[("weights", 0), ("mature", 0), ("lock", 600_000), ("lock", 600_000)])
+@example(operations=[("mature", 0), ("lock", 50), ("lock", 100), ("weights", 0)])
 @given(operations=st.lists(OPERATIONS, max_size=14))
 def test_random_operations_conserve_units_and_never_pay_a_unit_twice(
     tmp_path_factory: pytest.TempPathFactory, actual_reward: Any, operations: list[tuple[str, int]]
@@ -648,7 +649,8 @@ def test_random_operations_conserve_units_and_never_pay_a_unit_twice(
                     dispute_id=None,
                     kind="LOCK_ADMISSION",
                 )
-                if units <= free:
+                # a new admission lock below a tenth of the funding floor is refused as dust
+                if max(1, h.escrow.policy.S_min_units // 10) <= units <= free:
                     h.escrow.lock(lock, signer=COLD)
                     free -= units
                     locks.append((lock.operation_id, units))

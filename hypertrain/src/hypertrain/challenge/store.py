@@ -81,6 +81,7 @@ from hypertrain.ledger.escrow_v2 import (
     RewardWork,
     Settlement,
     ShadowReservationEvidence,
+    escrow_id_key,
 )
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.envelope import (
@@ -291,6 +292,10 @@ class _ServiceCapacityV1(BaseModel):
 
 # Signed-profile roster cap ceiling (plan 4.3); RoundOpenV2.roster max_length is the same bound.
 MAX_ROSTER_CEILING = 1024
+
+
+# The meta row that pins which coordinator secret the escrow ids were derived from.
+ESCROW_ID_NAMESPACE_META = "escrow-id-namespace-v2"
 
 
 class ChallengeError(Exception):
@@ -768,13 +773,20 @@ class ChallengeStore:
                             (origin[0],),
                             br.round,
                         )
-                    except EscrowError as error:
-                        if error.code not in (
+                    except Exception as error:  # one stuck origin must not stop the beacon
+                        code = error.code if isinstance(error, EscrowError) else None
+                        if code in (
                             "DISPUTED_OR_UNVESTED",
                             "IMMATURE_OR_UNKNOWN_ORIGIN",
                             "ALREADY_MATURED",
                         ):
-                            raise
+                            continue
+                        if isinstance(error, sqlite3.Error) or code in (
+                            "CONSERVATION",
+                            "ORIGIN_CONSERVATION",
+                        ):
+                            raise  # the ledger or its store is broken: stop, never skip
+                        self._journal_maturity_failure_v2(run_id, origin[0], error)
                 self._expire_leases_v2(run_id, br.round)
             self._reap_v2(run_id, "dispute", self._close_blocked_disputes_v2)
             self._reap_v2(run_id, "exit", partial(self._reap_exits_v2, previous=previous_now))
@@ -786,6 +798,24 @@ class ChallengeStore:
         for child in self._children.values():
             child.push_beacon(payload)
         return result
+
+    def _journal_maturity_failure_v2(self, run_id: str, origin: str, error: Exception) -> None:
+        """Last unexpected maturity failure per origin, rewritten only on change.
+
+        No beacon field: `_rollback_snapshot_v2` hashes every record and must stay stable under a
+        persistent failure.
+        """
+        code = error.code if isinstance(error, EscrowError) else None
+        entry: dict[str, JsonValue] = {
+            "error": type(error).__name__ + (f":{code}" if code else ""),
+            "detail": str(error)[:200],
+        }
+        try:
+            old: dict[str, Any] | None = self._record_v2(run_id, "maturity-failed", origin)
+        except ChallengeError:
+            old = None
+        if old != entry:
+            self._put_record_v2(run_id, "maturity-failed", origin, entry)
 
     def latest_beacon(self) -> dict[str, Any]:
         with self._lock:
@@ -2350,15 +2380,43 @@ class ChallengeStore:
         assert isinstance(samples, list) and all(type(i) is int for i in samples)
         return tuple(int(str(i)) for i in samples)
 
-    def _settlement_v2(self, run_id: str, reference: str) -> Settlement:
-        disputes = self._services_v2.get(run_id)
-        if disputes is not None:
+    def _accepted_beacon_v2(self, run_id: str, envelope: envelope_v2.EnvelopeV2) -> int:
+        """Beacon at which this master accepted exactly this stored envelope.
+
+        The reward ledger judges stored evidence there, not at the finalize beacon. A commit or
+        a verdict is judged at the beacon of its accepted_v2 row; the coordinator's own audit
+        challenge has no row, its lease holds the first beacon at which it can have been sealed.
+        """
+        if envelope.type == "AuditChallengeV2":
+            body = envelope.body
             row = self._db.execute(
-                "SELECT turn FROM disputes_v2 WHERE id=? OR json_extract(turn,'$.lock_id')=?",
-                (reference, reference),
+                "SELECT created, challenge FROM audit_leases_v2 "
+                "WHERE run_id=? AND w=? AND hotkey=?",
+                (run_id, body["w"], body["target"]),
             ).fetchone()
-            if row:
-                return disputes[2].settlement(reference)
+            stored = json.loads(row["challenge"]) if row is not None else None
+            if stored == envelope.model_dump(mode="json"):
+                return int(row["created"])
+        else:
+            model = envelope_v2.MESSAGE_TYPES_V2[envelope.type].model_validate(envelope.body)
+            slot = "auth:" + _dumps(
+                list(envelope_v2.replay_key(envelope.type, run_id, envelope.signer, model))
+            )
+            row = self._db.execute(
+                "SELECT envelope, accepted_beacon FROM accepted_v2 WHERE key=?", (slot,)
+            ).fetchone()
+            if row is not None and envelope_v2.parse_envelope(row["envelope"]) == envelope:
+                return int(row["accepted_beacon"])
+        raise ChallengeError(409, "reward evidence was not accepted by this master")
+
+    def _settlement_v2(self, run_id: str, reference: str) -> Settlement:
+        """Settlement of a dispute by its id or of a reward origin by its id, never of a lock."""
+        disputes = self._services_v2.get(run_id)
+        if (
+            disputes is not None
+            and self._db.execute("SELECT 1 FROM disputes_v2 WHERE id=?", (reference,)).fetchone()
+        ):
+            return disputes[2].settlement(reference)
         row = self._db.execute(
             "SELECT data FROM records_v2 WHERE run_id=? AND kind='settlement' AND id=?",
             (run_id, reference),
@@ -2678,6 +2736,20 @@ class ChallengeStore:
                 )
         return secret
 
+    def _escrow_id_key_v2(self) -> bytes:
+        """Key of the ids the service derives; a changed coordinator secret fails closed."""
+        key = escrow_id_key(self._coord()._secret)
+        namespace = sha256_hex(key)
+        with self._tx() as db:
+            row = db.execute(
+                "SELECT value FROM meta WHERE key=?", (ESCROW_ID_NAMESPACE_META,)
+            ).fetchone()
+            if row is None:
+                db.execute("INSERT INTO meta VALUES(?, ?)", (ESCROW_ID_NAMESPACE_META, namespace))
+            elif row["value"] != namespace:
+                raise ChallengeError(503, "escrow id namespace differs")
+        return key
+
     def _services(self, run_id: str) -> tuple[EscrowV2, Admission, DisputesV2]:
         with self._lock:
             existing = self._services_v2.get(run_id)
@@ -2707,6 +2779,8 @@ class ChallengeStore:
                 assignment_of=lambda w, hot: self._assignment_v2(run_id, w, hot),
                 shadow_assignment_of=lambda binding: self._shadow_assignment_v2(run_id, binding),
                 shadow_settlement=lambda origin: self._shadow_settlement_v2(run_id, origin),
+                id_key=self._escrow_id_key_v2(),
+                accepted_at=lambda envelope: self._accepted_beacon_v2(run_id, envelope),
                 round_closure=lambda w: self._round_closure_v2(run_id, w),
                 banned=self._banned_v2,
             )
@@ -2986,6 +3060,8 @@ class ChallengeStore:
                         result = asdict(admission.join(raw, now=now, ip_prefix=ip_prefix))
                     case "challenge":
                         result = admission.challenge(identity, now=now)
+                    case "reseed":
+                        result = admission.reseed(identity, now=now)
                     case "status":
                         result = asdict(admission.status(identity, now=now))
                         result["bond"] = admission.bond(result["record"]["admission_id"], now=now)
@@ -9667,7 +9743,7 @@ class ChallengeStore:
 
     def finalize_v2(self, run_id: str, w: int, raw: bytes) -> dict[str, Any]:
         from hypertrain.challenge.finality_v2 import RoundStatus, settle
-        from hypertrain.ledger.escrow_v2 import RewardWork, authority_message, reward_origin_id
+        from hypertrain.ledger.escrow_v2 import RewardWork, authority_message
         from hypertrain.protocol.messages_v2 import RewardFinalize
 
         with self._tx():
@@ -9789,7 +9865,7 @@ class ChallengeStore:
                 units[hot] += 1
             origins = [
                 {
-                    "origin_id": reward_origin_id(run_id, w, h, final_hash),
+                    "origin_id": escrow.reward_origin(w, h, final_hash),
                     "owner": self._owner_v2(run_id, h),
                     "units": units[h],
                     "mature_at": vesting,

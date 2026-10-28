@@ -13,6 +13,7 @@ from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.ledger import Params
+from hypertrain.ledger.escrow_v2 import escrow_id_key
 from hypertrain.protocol.envelope_v2 import UnauthorizedSigner, seal, verify_envelope
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages_v2 import DisputePolicyV2, RunManifestV2
@@ -76,7 +77,9 @@ def beacon(store, number: int, *, bls: bool) -> None:
 
 
 def signed(run_id: str, signer=E.COORD) -> bytes:
-    return canonicalize(seal(signer, "ProductionBootstrap", run_id, B.bootstrap(run_id), 10000))
+    # The store derives the id key from the coordinator's secret, not from the ledger fixture's.
+    bootstrap = B.bootstrap(run_id, id_key=escrow_id_key(E.COORD._secret))
+    return canonicalize(seal(signer, "ProductionBootstrap", run_id, bootstrap, 10000))
 
 
 @pytest.fixture

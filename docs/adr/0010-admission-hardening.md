@@ -3,7 +3,8 @@
 - Status: draft for branch `v3-admission-hardening`, 2026-10-27 (Principal SN100 D36 and D36 bis).
   Forge decides promotion to `v3`. Nothing here changes a production run, master, profile,
   emission, pin or digest. Part 6 (the admission bond) follows the recommended option; the
-  questions that remain are in "Decisions for Forge".
+  questions that remain are in "Decisions for Forge". Amended 2026-10-28 (branch
+  `v3-miner-driver-resilience`, RELAY-03): decision 2 gains point 5, the operator's reseed.
 - Order: brief `v3-admission-hardening.md`. Findings come from the Lens red team A
   (`livrables/lens/redteam-live/rtA.md`, RTA-01 to RTA-06) and B (`rtB.md`, EB-01), tree
   `65be1962`. This ADR is written before any code, as the brief requires.
@@ -95,7 +96,28 @@ refill two rotations every three seconds).
    frees the places held by suspended, banned and deregistered squatters that no request can
    reach. The strict `<` keeps the deadline round open, because `proof` accepts `now == deadline`.
 4. The lazy suspension `CHALLENGE_EXPIRED` is removed. A request after the closure answers 409
-   `CHALLENGE_EXPIRED` and changes nothing.
+   `CHALLENGE_EXPIRED` and changes nothing, until the operator reseeds the admission (point 5).
+5. The operator's reseed (2026-10-28, RELAY-03; decided by Forge as the smallest change, option
+   ADMIN). The s100 TEST replay stranded a PROBATION miner this way: its driver died on a read
+   miss, came back 11 minutes (about 220 rounds) after its trial's deadline, and every request
+   answered 409 `CHALLENGE_EXPIRED` while the identity kept its state, with no route to a new seed
+   [A, brief `v3-miner-driver-resilience.md`, replay of 2026-10-27, run `fea7e44f`; the refusal is
+   reproduced on the real `Admission` by the tests of this point]. `Admission.reseed(admission_id, now)`, behind
+   `POST /v2/runs/{run_id}/admin/join/{admission_id}/reseed` (admin bearer only, also
+   `live_operator.py reseed --admission-id`), writes `seed_beacon = now + 1` and nothing else, so
+   the expiry rule is unchanged for every miner and the honest-versus-late distinction is the
+   operator's, not the code's. It is refused with `RESEED_STATE` unless the state is `APPLIED`,
+   `PROBATION` or `ACTIVE` with no pending dispute, with `RESEED_TRIAL_OPEN` while the admission's
+   trial is `OPEN` after the reaper ran (live, or proven and waiting for its finalization), and
+   with `RESEED_NOT_NEEDED` unless `now > seed_beacon + challenge_rounds`: one lapse buys one
+   reseed, and a healthy identity cannot re-draw its trial. State, `clean_count`, strikes, screen
+   and the closed trial are untouched, so there is no second identity and no strike, and each use
+   leaves a reservation row (`reseed|<admission>|<previous seed>`) with the receipt. The miner
+   still asks with its own signed `ChallengeRequest`; the next round answers `SEED_NOT_READY`.
+   No constant, policy field, message type or run id changes, and `implementation_hash` does not
+   (`challenge/admission.py` is outside its paths). It is not the signed re-seed of ADR 0002 P1,
+   which removes the operator and needs a budget: that stays a proposal for founder decisions 5
+   and 6 of that ADR, and this route is the TEST-stack and operations stopgap until then.
 
 Why not suspend. The suspension has no route back (`resume` is reachable only from
 `resolve_pending`) [V], so a reaper that suspends turns the first catch-up beacon push after a
@@ -111,8 +133,9 @@ by the pending places and, with decision 4, by their expiry.
 
 Consequences. The documented v2 rule "a challenge left unproven past its deadline suspends the
 miner" (`hypertrain/docs/network-v2.md`) changes for every run: the miner keeps its state, its
-`clean_count` and its screen, and is stranded the way an idle miner already is until a re-seed
-exists (ADR 0002 P1). The dead end predates this change; only its penalty goes.
+`clean_count` and its screen, and is stranded the way an idle miner already is until the operator
+reseeds it (point 5) or the signed re-seed of ADR 0002 P1 exists. The dead end predates this
+change; only its penalty goes.
 Residual: two fresh identities timed to a victim's join can still hold both places for one
 window, because `max_trial_replays` is `Literal[2]`; a funded-only place would need a new
 policy field and is left to Forge.
@@ -470,7 +493,8 @@ exists.
    locked); `PROBATION` rows are not reaped; `DisputesV2.settle_lock` derives its operation id
    from public data and can be squatted (audit-integrity lot), as can any server-derived
    operation id that is not an HMAC, since the escrow operation ids share one namespace that any
-   holder of one unit can write (it predates this series). Found by the independent review and
+   holder of one unit can write (it predates this series; ADR 0014 Parts 1 and 2 close it: the
+   service's ids live in their own `srv:` key space). Found by the independent review and
    not changed here:
    - a lock of one unit counts as funding, so a dead `APPLIED` row that holds it is neither
      reaped nor counted by the optional cap; counting only locks of at least `S_min_units`

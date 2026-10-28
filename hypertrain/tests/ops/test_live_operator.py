@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 from scripts.ops import live_operator
-from scripts.ops.live_operator import check_open_shape
+from scripts.ops.live_operator import check_open_shape, finalize_expiry
 
 from hypertrain.aggregator.core import OuterState
 from hypertrain.auditor.replay import AnchorCache, tensor_root
@@ -309,7 +309,11 @@ def test_finalize_lists_the_inputs_of_the_applied_tape_minus_a_banned_coldkey(
             )
     sent: list[tuple[str, dict]] = []
 
+    late = 700  # the master is far past d_final (9) when the operator finalizes
+
     def call(self: Any, method: str, path: str, body: Any = None, admin: bool = False) -> Any:
+        if method == "GET":
+            return {"now_round": late}
         sent.append((path, body))
         if path.endswith("/aggregate"):
             put("excluded", f"0:{keys[2].ss58}", {"reason": "NO_SHOW", "stage": "delta"})
@@ -323,6 +327,8 @@ def test_finalize_lists_the_inputs_of_the_applied_tape_minus_a_banned_coldkey(
 
     assert [path for path, _ in sent] == ["/admin/rounds/0/aggregate", "/admin/rounds/0/finalize"]
     assert sent[1][1]["body"]["included"] == sorted(keys[slot].ss58 for slot in paid)
+    # The Finalize is a fresh request: it must still be live when it reaches the master.
+    assert sent[1][1]["exp_drand"] == finalize_expiry(9, late) > late
 
 
 @pytest.mark.parametrize("closure", ["finalized", "retired", "neither"])
@@ -404,3 +410,28 @@ def test_open_chains_to_the_finalize_of_the_round_before_or_to_the_evidence_of_i
             sha256_hex(canonicalize(finalize_body)) if closure == "finalized" else evidence_hash
         )
         assert [s["body"]["prev_final_hash"] for s in sent] == [expected]
+
+
+@pytest.mark.parametrize(("d_final", "now", "expected"), [(500, 100, 1500), (500, 900, 1900)])
+def test_finalize_envelope_outlives_a_finalize_posted_after_d_final(
+    d_final: int, now: int, expected: int
+) -> None:
+    # The operator may finalize at d_final + N; the envelope must not expire before the post.
+    assert finalize_expiry(d_final, now) == expected
+    assert finalize_expiry(d_final, now) > now
+
+
+def test_reseed_posts_the_admin_route_of_that_admission_and_nothing_else(
+    master_args: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """RELAY-03: the operator step a stranded miner is told to ask for."""
+    calls: list[tuple[str, str, object, bool]] = []
+
+    def call(self: Any, method: str, path: str, body: object = None, admin: bool = False) -> Any:
+        calls.append((method, path, body, admin))
+        return {"seed_beacon": 1226}
+
+    monkeypatch.setattr(live_operator.Master, "call", call)
+    assert live_operator.main([*master_args, "reseed", "--admission-id", "ab" * 32]) == 0
+    assert calls == [("POST", "/admin/join/" + "ab" * 32 + "/reseed", None, True)]
+    assert json.loads(capsys.readouterr().out) == {"seed_beacon": 1226}

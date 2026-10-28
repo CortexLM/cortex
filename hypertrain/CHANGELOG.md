@@ -214,6 +214,46 @@
   and `GET` with `X-Dispute-Signature` answers 405 (D51: the master proxy forwards no signature
   header). The miner's watch and follow clients sign it; a client built before this change gets 405.
   See `docs/network-v2.md`.
+- Escrow: the events the service writes (reward finalize, maturity, the payment of `get_weights`,
+  the settlement of a dispute) live in a key space of their own, `srv:` plus an HMAC under a key
+  derived from the coordinator secret, so a signed client event can no longer occupy an id the
+  service needs and freeze finalize, the beacon route, the weights answer or a dispute (Lens F1).
+  `EscrowV2.release_settlement` is the service's release; `release` is the owner's. A ledger built
+  without the key is a read-only verifier. See `docs/adr/0014` at the monorepo root.
+- Escrow: genesis, bootstrap, reward and shadow-reward origin ids are the HMAC of their preimage under
+  the same id key instead of a sha256 of public values, so a third party who knows the run, the round,
+  the hotkey and the finalize hash cannot compute one. Origins issued earlier keep their ids. Operator
+  tools that build a genesis or bootstrap pass `escrow_id_key(coordinator secret)`. `finalize_v2` builds
+  the reward's origin list through the ledger, so `implementation_hash` changes (service-admission
+  records must be re-bootstrapped).
+- Reward finalize judges the stored commit, verdicts and audit challenge at the beacon where this
+  master accepted each of them, not at the finalize beacon. Honest envelopes expire at or before
+  `d_final`, so any delayed finalize (an open contest, a beacon pause, an operator that waited) used
+  to fail for ever with `envelope expired` and freeze the next rounds (Lens F3, mechanism M2). A
+  ledger without the acceptance callback refuses to finalize. `live_operator finalize` seals its
+  `Finalize` until `max(d_final, now) + 1000`.
+- Disputes: a contest bond is settled by the dispute that took it, found through the lock's own
+  signed dispute id, and a dispute or reward origin is found by its own id. A bond whose name was an
+  older dispute's id made the new dispute unresolvable (its settlement resolved on the other row) and a
+  lock named like a reward origin got that origin's settlement. `POST /dispute` refuses a bond named
+  like an existing dispute or origin (`CONTEST_LOCK_ID_COLLISION`) (Lens F4).
+- Admission locks are typed too: a lock named like a closed dispute or a settled reward origin was
+  released with that object's settlement over `POST /escrow/release`. `EscrowV2.lock_status` asks a
+  resolver of admission locks, or nothing (`UNACCEPTED_SETTLEMENT`), and never the dispute or origin
+  tables (Lens F4 iii). The bond release of `Admission.release_bond` is a server event.
+- Escrow: the funding status of an admission (`EscrowV2.locked`, behind the unauthenticated
+  `GET .../admission/{hotkey}`) read every lock of the ledger and ran one unindexed sum per lock under the
+  store lock: 1.08 s at 5,000 open locks, 5.4 s at 10,000, 96 s at 40,000 on the real code, enough to
+  make every v2 operation answer 503 once the beacon lagged 6 s. It now reads the owner's open locks
+  through a partial index (the same value, bit for bit). New admission locks must hold a tenth of the
+  funding floor and are capped at 2,048 per coldkey and 4,096 in the ledger (Lens F7a).
+- The beacon route no longer stops at one escrow origin that cannot mature. A shadow reward whose
+  hotkey rotated after acceptance (`signer is not authorized for message role`) or whose job object
+  went missing (`ObjectNotFound`) rolled back the whole round's maturity and lease expiry and made
+  `POST /v1/admin/beacon` answer 409 or 500 at every later round. Each origin now matures in its own
+  savepoint; one that fails for another reason than vesting or an open dispute stays `reward_pending`,
+  is journaled as `records_v2 kind='maturity-failed'` and is retried at every round. A conservation
+  failure or a SQLite error still aborts the call (Lens F6, SHD-D3).
 - The dispute long poll can no longer deadlock the store. `DisputesV2` has one lock order, the
   store lock then a leaf condition: `events()` reads the event table outside the condition and parks
   on a counter, so a mutator that notifies inside its transaction never waits for a poller that
@@ -378,6 +418,19 @@
   longer a bare 500; nothing is recorded and the nonce stays free. `training_v2` is in the owned
   set of `implementation_hash`, which changes (same consequence as the entry above). See
   `docs/network-v2.md`.
+- A miner no longer dies on one lost read of a trial or job input. `probe-v2` and
+  `run-v2` retry an object GET that meets a 404 like one that meets a 5xx (five retries, 1 to
+  16 s, each wait jittered, as every retry of the miner now is), fail with the same error when it
+  stays, and append one `kind: retry` line per object GET retry to `journal.jsonl` of the miner
+  directory. The s100 TEST driver gives the exhausted `trial input object unavailable` 404 another
+  pass. See `docs/network-v2.md`.
+- A miner whose trial window lapsed (409 `CHALLENGE_EXPIRED`, state kept) can be given a new one:
+  `POST /v2/runs/{run_id}/admin/join/{admission_id}/reseed` (admin bearer; `live_operator.py
+  reseed`) writes `seed_beacon = now + 1` and nothing else, refused while its trial is open, while
+  the window lives, or for a suspended, banned or disputed admission. `probe-v2` waits for it, asking
+  again with the same hotkey every 10 s for 10 minutes, journals the `resume`, and exits with
+  status 3 naming the route if nobody reseeds. No constant, policy field or message changes.
+  See ADR 0010 decision 2 point 5 at the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

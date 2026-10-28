@@ -16,7 +16,6 @@ from hypertrain.ledger.escrow_v2 import (
     RewardWork,
     authority_message,
     digest,
-    reward_origin_id,
 )
 from hypertrain.protocol.envelope_v2 import EnvelopeV2, seal
 from hypertrain.protocol.hashing import sha256_hex
@@ -104,7 +103,7 @@ def signed_round(n, escrow: EscrowV2, w: int) -> tuple[Finalize, RewardFinalize,
     )
     budget = escrow.policy.round_reward_units
     origin = OriginAllocation(
-        origin_id=reward_origin_id(run, w, hot.ss58, digest(final)),
+        origin_id=escrow.reward_origin(w, hot.ss58, digest(final)),
         owner=cold.ss58,
         units=budget,
         mature_at=20,
@@ -143,6 +142,7 @@ def ledger(network, monkeypatch) -> EscrowV2:
     escrow = network.store._services(network.manifest.run_id())[0]
     samples = tuple(range(network.manifest.training.batch_samples()))
     monkeypatch.setattr(escrow, "replay_finality", lambda _: THETA)
+    monkeypatch.setattr(escrow, "accepted_at", lambda _: 1)  # the evidence is synthetic
     monkeypatch.setattr(escrow, "owner_of", lambda _: N.COLD[0].ss58)
     monkeypatch.setattr(escrow, "assignment_of", lambda _w, _hotkey: samples)
     return escrow
@@ -357,7 +357,7 @@ def test_a_client_event_cannot_occupy_the_withdrawal_id(network, ledger: EscrowV
             origin_ids=[held["origin"]],
             admission_id=None,
             dispute_id=None,
-            recipient=owner,
+            recipient=N.COLD[1].ss58,
         ),
         signer=owner,
     )

@@ -172,7 +172,26 @@ finalized, 503 on a beacon pause). The miner checks the job, objects and signed 
 `trial_export` does, streams each input (one uncompressed, sha256-verified
 object; about 4 bytes per parameter for a `reset` start state, more under
 `carry`) into a private temporary folder under its workdir, probes, and deletes
-the folder, also on failure: a re-run downloads and probes again.
+the folder, also on failure: a re-run downloads and probes again. An object GET or PUT of the miner that meets a transport error or a 5xx, and an object GET that
+meets a 404 (a read miss on an object the server just listed; the cause of the one seen on s100
+is not established), waits and retries up to five times (1, 2, 4, 8, 16 s nominal, each wait
+jittered by 50%, so up to about 46 s in all) before it fails with the error it met; a digest
+mismatch is never retried. Each object GET retry is one JSON line (`kind: retry`, `utc`, `route`
+such as `GET object <sha256>`, `status` or null for a transport error, `attempt` of the try that
+failed, `delay` slept, and the journal's own `unix` and `pid`) appended to `journal.jsonl` in
+`<workdir>/<run_id>/<hotkey>/`, so a replay can count them (the try that finally fails is not a
+retry and has no line). A line that cannot be written is logged and never replaces the error of the
+request. A PUT retry is logged, not journaled, and the economics-policy GET of a CPU `run-v2` is
+not retried. A theta rebuild whose object stays 404 now spends up to about 46 s before the
+documented fallback to the full pinned object (more when its parts are the ones missing).
+
+If the challenge request answers 409 `CHALLENGE_EXPIRED` (the trial window lapsed), `probe-v2` asks
+again, with a fresh request signed by the same hotkey, every 10 s for up to 10 minutes (61 asks): the
+operator's reseed (below) turns the answer into 409 `SEED_NOT_READY` for one round, then into the
+new challenge. It creates no identity and sends nothing but that request. The resume is one
+`kind: resume` line in the same journal (`utc`, `admission_id`, `trial`, `old_challenge`,
+`new_challenge`, `asks`). If nobody reseeds in time it exits with status 3 and an error that names the
+operator's route; every other 409 keeps its answer.
 
 `probe-v2` executes the screen and uploads original rank-0 state/EF/delta/leaves;
 stdout contains the signed proof/screen pair. The operator independently prepares
@@ -231,9 +250,10 @@ answered. There is no emergency rotation of a hotkey that a round lists.
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
 rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
 refused (`CHALLENGE_EXPIRED`) once more than `challenge_rounds` rounds have passed since
-the miner's join or its last trial finalization. Only a suspend and resume reopens it,
-and resume restarts probation at zero clean trials. No admin route calls them: `suspend`
+the miner's join or its last trial finalization. A suspend and resume reopens it, and
+resume restarts probation at zero clean trials. No admin route calls them: `suspend`
 runs when a dispute opens, and `resume` only after a nonfraud dispute settlement. The
+operator's reseed (below) reopens it without touching the state. The
 server's own closure of a dispute nobody can decide resumes the miner by itself; every
 other nonfraud settlement needs the miner's signed recovery call (see the dispute
 paragraphs below). So a miner that waits while others run their trials stays eligible
@@ -246,8 +266,8 @@ rounds. The challenge deadline is seed + 100 whenever the challenge is requested
 proof must be accepted by then. A challenge left unproven past its deadline is closed
 `EXPIRED` by the master at the next beacon push (or at the next challenge request, which
 frees the place first). Nobody is suspended: the miner keeps its state, its clean trials and
-its screen, and a later request answers 409 `CHALLENGE_EXPIRED` until a re-seed exists. A
-beacon pusher that was down or slowed (an operator changed the cadence during a trial, the S13
+its screen, and a later request answers 409 `CHALLENGE_EXPIRED` until the operator reseeds
+the admission. A beacon pusher that was down or slowed (an operator changed the cadence during a trial, the S13
 incident) is the same case: its catch-up carries the beacon past the deadline, and the miner is
 refused, not suspended. The
 deadline round itself still accepts a proof. A trial whose proof was accepted is never expired
@@ -260,8 +280,20 @@ longer than that window minus one trial's duration cannot renew its screen, what
 schema fixes `max_trial_replays` at 2). In a run longer than `work_screen_epoch_rounds`
 (about 5 h at 6000), every ACTIVE miner must therefore chain its trials, each one proven
 inside its window, to stay eligible. Otherwise only the suspend and resume above bring it
-back, to PROBATION at zero clean trials; an expired trial changes none of that, it only frees
-its place.
+back, to PROBATION at zero clean trials, or the operator's reseed, which keeps the state; an
+expired trial changes none of that, it only frees its place.
+
+**Reseed.** `POST /v2/runs/{run_id}/admin/join/{admission_id}/reseed` (admin bearer only;
+`scripts/ops/live_operator.py reseed --admission-id ID` inside the challenge container) gives an
+identity whose window lapsed a new one: it writes `seed_beacon = now + 1` and nothing else, so the
+state, clean trials, strikes and screen stay and no second identity exists. It answers 409
+`RESEED_STATE` unless the admission is `APPLIED`, `PROBATION` or `ACTIVE` with no pending dispute,
+`RESEED_TRIAL_OPEN` while its trial is open (live, or proven and waiting for its finalization), and
+`RESEED_NOT_NEEDED` unless `now > seed_beacon + challenge_rounds`; one lapse buys one reseed, and each
+use leaves an audit row. The owner then asks for its challenge with its own signed
+`ChallengeRequest` as before; the round before the new seed answers 409 `SEED_NOT_READY`, and the
+new trial has a new nonce and a fresh 100-round window. This is the operator's step, not the miner's
+right: ADR 0010 decision 2 point 5.
 
 `manifest_v2 example` writes 6000 (about 5 h). In a serial 40-trial campaign
 (3 × 12 ACTIVE + 4 PROBATION), each trial spans at most about `challenge_rounds` + 1
@@ -288,8 +320,32 @@ a coordinator namespace mismatch, fails with HTTP 503 without resetting quotas.
 No automatic migration is provided; separate operator resolution is required.
 
 Funding uses signed `EscrowLock` via `POST /v2/runs/{run_id}/escrow/lock`, not a
-CLI `--bond` flag. Test genesis has pinned nonfinancial origins; production mode
+CLI `--bond` flag. A new admission lock must hold at least a tenth of `S_min_units`
+(`LOCK_BELOW_MINIMUM`); a coldkey holds at most 2,048 open admission locks (`OPEN_LOCK_CAP`,
+twice the roster ceiling of 1,024) and the ledger at most 4,096 (`LEDGER_LOCK_CAP`). A cap
+refuses a new lock only, so replaying an accepted lock returns its receipt, and closing a lock
+makes room. The funding status of an admission (`GET .../admission/{hotkey}`, public) reads
+the owner's open locks through a partial index, so its cost grows with those locks and not
+with the ledger (it was quadratic in the number of locks: 96 s at 40,000). Test genesis has pinned nonfinancial origins; production mode
 has separate reward authority/issuance bounds and no test-genesis conversion.
+
+The ledger keeps two key spaces for its events. A client event (`escrow/lock`,
+`escrow/transfer`, `escrow/release`) is stored under the `operation_id` its owner
+signed, a 64-hex string. An event the service writes itself (test genesis,
+production bootstrap, reward and shadow-reward finalize, maturity, the payment of
+`get_weights`, the release or slash that settles a dispute) is stored under
+`srv:` plus the HMAC of its derived id under a key that the master derives from
+the coordinator secret, so a signed owner event can never occupy an id the service
+needs and nobody can compute a server key from public values. Receipts still name
+the derived id. The master pins the key's namespace in its `meta` table
+(`escrow-id-namespace-v2`) and refuses to serve (503 `escrow id namespace differs`)
+if the coordinator secret later yields another key; the key is not rotated in place,
+a new coordinator key is a new run. A ledger opened without the key (the read-only
+authority snapshot) refuses every server operation (`ID_KEY_REQUIRED`); its `verify()`
+checks the hash chain, the shape of each server key and that no client event sits in
+the server space, not the binding of a key to its receipt. A chain written before the
+split keeps its bare server ids and is read through a fallback that accepts only an
+identical request. See `docs/adr/0014` at the monorepo root.
 
 The bond is the `LOCK_ADMISSION` of the admission. It has its own settlement, derived from
 the admission's records on every call (ADR 0010, Part 6), and `GET /v2/runs/{run_id}/admission/{hotkey}`
@@ -316,8 +372,12 @@ Production funding is one coordinator-signed `ProductionBootstrap`, posted as an
 run's `EconomicsPolicyV2.bootstrap_allocation_hash` pins its owner/units/maturity
 list (`genesis_allocation_hash` over `[owner, units, mature_at]`); only
 `ledger_mode="production"` may set it, and an unset field is omitted, so earlier
-policy digests and run IDs are unchanged. Origins are
-`ht-origin-bootstrap-v1|run|allocation_hash|index`. The ledger accepts it once per
+policy digests and run IDs are unchanged. Origin `i` is the HMAC under the escrow id key
+(`escrow_id_key(coordinator secret)`) of `ht-origin-bootstrap-v1|run|allocation_hash|index`
+(`bootstrap_origin_id(run, allocation_hash, i, id_key)`), so nobody without the coordinator
+secret can compute one; test genesis, reward and shadow-reward origins are keyed the same way
+(`ht-origin-genesis-v2|run|allocation_hash|index`, `ht-origin-reward-v2|run|w|hotkey|finalize_hash`,
+`ht-origin-shadow-v1|...`). Origins issued before the key existed keep their unkeyed ids. The ledger accepts it once per
 run: the same `operation_id` and body replay the stored receipt, the same
 `operation_id` with other content answers `OPERATION_CONFLICT`, and any second
 bootstrap answers `PRODUCTION_BOOTSTRAP_FORBIDDEN`. It is refused when the inner
@@ -349,6 +409,26 @@ then mature after vesting/dispute conditions. Transfers preserve origin units;
 fraud burns collectible exposure rather than redistributing it. Shadow work does
 not influence global theta; authorized production bootstrap issuance is a
 separate policy, not proof of market-backed collateral.
+
+Each due origin matures in its own savepoint when a beacon round is pushed. An origin that cannot
+(a shadow reward whose original custody no longer revalidates, because its hotkey rotated or a job
+object is missing) stays `reward_pending` and is retried at every round; it does not stop the
+round's other origins, the lease expiry or the beacon route. The last such failure is journaled in
+`records_v2` with `kind='maturity-failed'` (`{error, detail}`, rewritten only when it changes, never
+deleted). List the origins still stuck, on `challenge.db`:
+`SELECT m.id, m.data FROM records_v2 m JOIN escrow_units u ON u.origin=m.id AND u.bucket='reward_pending' AND u.units>0 WHERE m.kind='maturity-failed';`.
+A conservation failure or a SQLite error is not isolated: the push fails.
+
+When a round is finalized, the stored commit, the verdicts and the audit challenge are
+verified at the beacon at which this master accepted each of them (the `accepted_v2` row of
+the commit and of the verdict, the lease of the challenge), never at the finalize beacon. An
+envelope that was valid when it was accepted therefore stays valid for the finalisation of its
+round: a finalize that comes late (an open contest, a beacon pause, an operator that waited)
+settles. The ledger refuses an acceptance beacon outside `[1, finalize beacon]`, and a ledger
+without the acceptance callback refuses to finalize (`ACCEPTANCE_AUTHORITY_UNAVAILABLE`). The
+operator's `Finalize` is a fresh request and must be unexpired when it is posted;
+`live_operator finalize` seals it until `max(d_final, now) + 1000`. Work screens still bound how
+late a round can be finalized: members whose screen has lapsed are no longer eligible.
 
 Matured live rewards become weight in `GET /internal/v1/get_weights`. Each epoch answer first
 pays v1 entitlements, then fills the rest of its 10^6 mass with `available` units of live
@@ -445,6 +525,17 @@ and, once the server closes the dispute, leave it on a fresh probation that is n
 way out of the round, since the contest bond comes back. A MISMATCH, a false one included, is
 contested as before.
 
+A contest is funded by an `EscrowLock` of kind `LOCK_CONTEST` that names its dispute and
+whose `operation_id` the miner chooses. The name is only a name: the bond is settled by the
+dispute that took it, found through the lock's own signed `dispute_id` and checked against the
+dispute's recorded bond, and a dispute or a reward origin is found by its own id; no lookup
+treats a lock id as a dispute id or the reverse. `POST /dispute` refuses a bond whose name is
+already a dispute or a reward origin (`CONTEST_LOCK_ID_COLLISION`, 409). A contest lock that no
+dispute took as its bond has no settlement and is not released. An admission lock is settled
+by the resolver of admission locks or by nothing: the dispute and origin tables are never
+searched for its name; the admission service installs that resolver (ADR 0010 part 6). See
+`docs/adr/0014` at the monorepo root.
+
 A dispute that nobody can decide is closed by the server on the next verified beacon
 round, not convicted. The resolution is `INFRASTRUCTURE` with no loser: the verdict and
 the audit's own exclusion of the contested miner stand, the contest bond is released in
@@ -501,8 +592,8 @@ or be excluded and repaired. Retain original input objects, signed tapes,
 accepted envelopes, carry anchors and full bounded predecessor history. Reward
 `get_weights` is not a model-checkpoint download endpoint.
 
-A round that finality closes without a reward (excluded, or repaired by an accepted rollback)
-is never reward-finalized and never paid, and it does not stop the rounds after it. Reward
+A round that finality closes without a reward (excluded, or repaired by an accepted rollback;
+retired; or settled with a Finalize that lists nobody) is never reward-finalized and never paid, and it does not stop the rounds after it. Reward
 `finalize` accepts round w only if w is the first round that is neither reward-finalized nor
 withdrawn: when a lower round is closed without a reward, the same `finalize` first records it
 once in the escrow journal (event `ROUND_WITHDRAWN`, with the hash that closed it), in the same
@@ -557,8 +648,9 @@ than two rounds ahead of the last round the master held), when nobody committed 
 stage), when nobody delivered a delta, or when the master holds a relay receipt or its own
 acceptance of the member's upload (delta stage: the relay or the storage lost it). A
 sanction that fails is journaled (`exit-failed`) and retried on the next push; the member is
-out of its round all the same. The way back from a probation is its trials; there is no route
-back from a suspension (ADR 0011 Part 8, decision 12 and Decisions for Forge 1).
+out of its round all the same. The way back from a probation is its trials; a trial window that
+lapsed while the miner was away is reopened by the operator's reseed (Reseed, above). There is no
+route back from a suspension (ADR 0011 Part 8, decision 12 and Decisions for Forge 1).
 
 A member whose audit verdict is a `MISMATCH` is sanctioned once, a contest window later (ADR 0011
 Part 8, decisions 15 to 18). At the first push after the verdict the master grades it: a mismatch

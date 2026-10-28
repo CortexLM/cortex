@@ -38,16 +38,31 @@ The TEST auditors are `hypertrain-test-auditor-0/1`. Their disposable seeds are 
 Only the challenge service changes image. The beacon and relay code is the same in the deployed
 images and in `e435ee8f`, and the store schema did not change.
 
-Do not change anything while a seal is due. `swap` and `beacon` refuse to run unless all of
-these hold:
+Do not change anything while a seal is due. `swap`, `beacon` and `executor` refuse to run unless all
+of these hold:
 - master `readyz` answers 200;
-- the latest seal is sealed and less than 30 minutes old (the first half of the 72-minute window);
+- the latest seal is sealed and younger than `HT_GATE_MAX_AGE_S` seconds (default 4500, 75 minutes);
 - the latest seal is for the epoch just before the master's current one.
 
-`HT_GATE_MAX_AGE_S` replaces only the 30-minute limit (1..4320 seconds, one epoch), for a change the
-founder approved outside the first half of the window. Readyz 200, a sealed seal and the previous
-epoch are still required, the script prints the value whenever it is set, and a malformed value
-exits 4 before any call: `ssh root@s100 "HT_GATE_MAX_AGE_S=4000 bash -s -- swap $NEW $B" < $T/challenge_image.sh`.
+The age limit is a TEST-stack parameter (D67), not a protocol constant, and it lives in one place:
+`gate()` in `challenge_image.sh`. It was 1800 seconds (the first half of the 72-minute window). An
+epoch is 72 minutes of chain blocks and the seal-to-seal gaps on record run from 4320 to 4655 s; the
+master seals an epoch only once it is over. So in the normal case a seal for the previous epoch is
+younger than one epoch and the age rarely closes the gate, which then follows `readyz`, sealed and
+the epoch. It still can: after an operator's early seal (`POST /v1/admin/seal`), in an epoch longer
+than 75 minutes, or when `readyz` lags the chain; the gate then fails closed (exit 3) for the end
+of that epoch. The script goes to s100 over stdin with each command, so the next invocation uses the
+default and nothing on s100 is edited. The beacon pusher has no seal-age limit: its 503 "beacon
+infrastructure paused" is a lag of more than 2 rounds or a round not yet pushed (see "Beacon
+lag"), and the `beacon` command only shares this gate.
+
+`HT_GATE_MAX_AGE_S` (1..4500 seconds) can only tighten the limit, for a change that must keep clear
+of the next seal: `1800` restores the old margin. `readyz` 200, a sealed seal and the previous epoch
+are still required, the script prints the value whenever it differs from 4500, and a malformed value
+exits 4 before any call:
+`ssh root@s100 "HT_GATE_MAX_AGE_S=1800 bash -s -- swap $NEW $B" < $T/challenge_image.sh`.
+A runbook or tool that mirrors the gate must use the same 4500 (the S13 tools pin
+`HT_GATE_MAX_AGE_S=4000`, which still works and now prints "overridden").
 
 `rollback` and `restore-db` are not gated: they are the way back.
 
@@ -121,7 +136,8 @@ failure each), and when the lock ends it refills the missing rounds oldest first
   challenge reads exact rounds: after a trial is finalized in round `n` (and after a join or a
   resume), the identity's seed is round `n + 1`. A seed in a skipped round answers 500
   `BeaconUnavailable: round N not pushed` until the window is over (100 rounds), then 409
-  `CHALLENGE_EXPIRED`; the identity stays in its state and gets no new seed. Pushing that one round
+  `CHALLENGE_EXPIRED`; the identity stays in its state and gets no new seed until the operator's
+  `reseed` (section 5). Pushing that one round
   before the window closes recovers it; a range does not (S13's backfill of 36 rounds held the lock
   for two minutes). This is code reading by a reviewer, not a run.
 - `--max-failures N` consecutive failures end the pusher (the container restarts, and the count
@@ -303,6 +319,16 @@ That gives 3 ACTIVE and 1 PROBATION. Rules that decide how identities are spent:
   suspends it as `APPLIED_EXPIRED` and its coldkey may apply again with a new hotkey (ADR 0010);
   a funded one stays APPLIED and blocks its coldkey. This is why `admit` joins a miner only
   when its turn starts.
+- **A trial is retried only on what the challenge documents as transient:** a 502, 503 or 504,
+  `SEED_NOT_READY`, `TRIAL_CAPACITY`, a beacon pause, a transport error, and the 404 `trial input
+  object unavailable` that `probe-v2` reports once its own retries are spent (it retries an input
+  GET that meets a 404, a 5xx or a transport error five times, 1 to 16 s apiece, each wait
+  jittered, and appends one `kind: retry` line per retry to `journal.jsonl` in `work/<run
+  id>/<hotkey>/`). The driver makes up to 40 passes in all; in practice the trial's 100 rounds end
+  first and the answer becomes 409 `CHALLENGE_EXPIRED`. Any other error stops the plan. A trial that misses its 100
+  rounds strands the identity (409 `CHALLENGE_EXPIRED`) until the operator reseeds it: `probe-v2`
+  asks again every 10 s for 10 minutes, then exits with status 3 and the route to call; run
+  `$L reseed --admission-id <id>` (below) and start the driver again (ADR 0010 decision 2 point 5).
 
 A round opens on a roster of four funded, eligible miners with at most one in PROBATION, each with
 a screen that lasts to the round's `d_final` (`open` refuses a hotkey whose screen ends earlier and
@@ -327,7 +353,8 @@ ssh root@s100 "$L open --w 0 --hotkey H0 --hotkey H1 --hotkey H2 --hotkey H3 --t
 ATEN_CPU_CAPABILITY=avx2 $PY -I $T/cpu_miners.py round DIR 0 0 1 2 3   # one miner at a time
 ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID 0" < $T/round_status.py
 ssh root@s100 "$L audits --w 0" < $O     # once now >= d_audit
-ssh root@s100 "$L finalize --w 0" < $O   # once every audit lease is complete with MATCH
+ssh root@s100 "$L finalize --w 0" < $O   # once every audit lease is complete with MATCH (a late one settles too)
+ssh root@s100 "$L reseed --admission-id <id>" < $O   # a lapsed miner (probe-v2 exit 3): new window
 ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID" < $T/weights_once.py
 ```
 
@@ -562,7 +589,7 @@ reach a round: no `run-v2`, no audit, no `get_weights`.
   store lock, a pause of 5 minutes, and two trials passed their 100-round window: the identity is
   SUSPENDED `CHALLENGE_EXPIRED` at its next challenge request, and `resume` resets `clean_count` to 0.
   Since ADR 0010 such a trial is closed `EXPIRED` at the next beacon push and the identity keeps
-  its state; its next request answers 409 `CHALLENGE_EXPIRED`.
+  its state; its next request answers 409 `CHALLENGE_EXPIRED` until the operator reseeds it.
 - **A validator cycle on A** shows as `exec_host_unavailable` ("0 idle GPUs, 1 needed") and the
   executor waits (`sweeps`); it cost one trial 40 s.
 

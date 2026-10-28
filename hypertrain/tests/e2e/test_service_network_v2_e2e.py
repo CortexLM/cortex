@@ -1151,7 +1151,7 @@ def _funded_auditor_fraud(network):
             json=network.signed(fixtures.REFEREE, "ResolutionV2", resolution),
         )
         assert response.status_code == 200, response.text
-    accepted = disputes.settlement(lock.operation_id)
+    accepted = disputes.settlement(dispute_id)
     assert (
         accepted.loser,
         accepted.lock_id,

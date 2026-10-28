@@ -1101,7 +1101,8 @@ the table as covering them.
     `seize_bond(NO_SHOW)` adds one strike and burns the bond (unvested rewards spared, the coldkey stays
     bound by the one-non-ACTIVE-row rule). The first one puts the admission back on a fresh probation
     (`PROBATION`, reason `NO_SHOW`, new trials from `clean_count` 0, the open trial void): the way back is
-    the trials, no operator. A second one for other evidence inside `NO_SHOW_STRIKE_WINDOW_SCREENS` (4) work
+    the trials, and the operator's reseed (ADR 0010 decision 2 point 5) when the 100-round window the
+    sanction opens has lapsed before the miner is back. A second one for other evidence inside `NO_SHOW_STRIKE_WINDOW_SCREENS` (4) work
     screens of an earlier no-show of the same admission suspends it like an `AUDIT_MISMATCH`. The window is
     the one constant this decision adds (`admission.py`, not a policy field: a policy field changes every
     run id) and is Forge's to retune; it is measured in beacons from the beacon of the earlier sanction row.
@@ -1158,8 +1159,8 @@ the table as covering them.
     that case: `_ef_in` demands `commit.ef_in_hash`, and the audit is `BAD_PROOF`, which `grade()`
     never names.
 19. **No route back [sign-off].** A round-stage sanction binds no pending reference; the only exoneration is
-    decision 17. The re-seed of ADR 0002 (P5) and any amnesty belong to the admission lot and need policy
-    fields.
+    decision 17. The operator's reseed exists (ADR 0010 decision 2 point 5) and serves a probation only; the
+    signed re-seed of ADR 0002 (P1) and any amnesty belong to the admission lot and need policy fields.
 
 **D. A roster member that changes after the round opened (R-C2, DSP-04)**
 
@@ -1199,7 +1200,8 @@ the table as covering them.
     appended to the existing hash chain: no table, no snapshot element, no issuance. The order rule becomes
     "the first round that is neither reward-finalized nor withdrawn". `EscrowV2` takes an optional
     `round_closure(w)`; the store answers with the round's resolution hash iff its finality record is
-    closed and was closed without reward (`EXCLUDED` after its rollback, or `RETIRED`).
+    closed and was closed without reward (`EXCLUDED` after its rollback, `RETIRED`, or `SETTLED` by a
+    Finalize that lists nobody, decision 23).
 26. **Written at the point of need**, inside the reward finalize that needs it, after its checks (a refused
     finalize records nothing). The id is `sha256("ht-round-withdraw-v2|run|w|<head of the chain>")`, a
     server-derived id in its own domain, never client-chosen (F1 compatible). A round finality closed
@@ -1248,7 +1250,7 @@ the table as covering them.
 | P2 AC-CLIFF | decisions 7 to 11 and 27 |
 | P3 wedges | done in Part 2 (`lease_v2` skips a job it cannot lease); refusing `exp_drand < d_audit` at `/commit` is optional; refusing a non-finite leaf at `/leaves` is **deferred: harmful** (it turns a fast `UNVERIFIED` drop into a commit without leaves that exits after two audit windows) |
 | P4 liveness | decisions 2 to 5 |
-| P5 trial route back | (a) done by ADR 0010; (b) re-seed and (c) route back after a trial mismatch **deferred to the admission lot**: policy fields, a new policy digest |
+| P5 trial route back | (a) done by ADR 0010; (b) the operator's reseed is built (ADR 0010 decision 2 point 5); the signed re-seed and (c) the route back after a trial mismatch are **deferred to the admission lot**: policy fields, a new policy digest |
 | P6 lease cap, refuse at open | (a) done (Part 2); (b) refuse `d_final` beyond the audit horizon at open **deferred**: fixtures and scripts open rounds with gap 269 and must move first |
 | P7 store lock before shared-connection reads | implemented: `require_roster_v2` (owned) and `weights` take the lock |
 | P8 acceptance binding, commit 500, metrics_root | acceptance binding and commit 500 implemented in `training_v2`; `metrics_root` **deferred**: a comparator clause in the code the 22-cheat / 552-audit evidence pins; inert, bound through the leaves root; `RELAY-01` belongs to the escrow-relay lot |

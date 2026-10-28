@@ -1,4 +1,4 @@
-"""One-shot coordinator/admin commands (open, audits, finalize) on the production master.
+"""One-shot coordinator/admin commands (open, audits, finalize, reseed) on the production master.
 
 Runs inside the master container. Every value it sends is rebuilt from accepted master state
 with the same models, hashes and seals the store validates; nothing here relaxes a guard.
@@ -279,6 +279,18 @@ def included(m: Master, w: int) -> list[str]:
     return sorted(out)
 
 
+FINALIZE_EXPIRY_MARGIN = 1000  # the margin the trial Finalize of the store already uses
+
+
+def finalize_expiry(d_final: int, now: int) -> int:
+    """Last round of the Finalize envelope: a finalize after d_final must still be accepted.
+
+    The stored commit, verdicts and challenge are judged at their acceptance beacon, so a late
+    finalize can settle; the Finalize itself is a fresh request and has to be unexpired when posted.
+    """
+    return max(d_final, now) + FINALIZE_EXPIRY_MARGIN
+
+
 def finalize(m: Master, w: int) -> dict:
     """One aggregate, then Finalize bound to the applied theta (store.py:7994-7998)."""
     refuse_service_run(m)
@@ -291,7 +303,8 @@ def finalize(m: Master, w: int) -> dict:
         included=keep,
         entitlements_root="0" * 64,
     )
-    signed = envelope_v2.seal(m.coord, "Finalize", m.run_id, final, opening.d_final)
+    expiry = finalize_expiry(opening.d_final, m.call("GET", "")["now_round"])
+    signed = envelope_v2.seal(m.coord, "Finalize", m.run_id, final, expiry)
     return m.call("POST", f"/admin/rounds/{w}/finalize", signed, True)
 
 
@@ -316,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub.add_parser("audits").add_argument("--w", type=int, required=True)
     sub.add_parser("finalize").add_argument("--w", type=int, required=True)
+    sub.add_parser("reseed").add_argument("--admission-id", required=True)
     args = parser.parse_args(argv)
     if args.command == "open":
         try:
@@ -329,6 +343,8 @@ def main(argv: list[str] | None = None) -> int:
         out = open_round(m, args.w, args.hotkey, offsets)
     elif args.command == "audits":
         out = m.call("POST", f"/admin/rounds/{args.w}/audits", admin=True)
+    elif args.command == "reseed":
+        out = m.call("POST", f"/admin/join/{args.admission_id}/reseed", admin=True)
     else:
         out = finalize(m, args.w)
     print(json.dumps(out, sort_keys=True)[:4000])
