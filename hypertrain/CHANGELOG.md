@@ -472,8 +472,9 @@
   `leaf-object-lost` and answers 503 `LEAF_OBJECT_LOST: round <w> job <job_id>` in a transaction that
   commits for that one refusal (`CommittedRefusal`, `ChallengeStore._tx_booking_refusal`; `_tx` is
   unchanged). The next beacon push retires the round with a third cause, `LEAF_OBJECT_LOST`, re-derived
-  from the record and a fresh read of the object, with every member as survivor and nobody sanctioned;
-  an object that reads again before that push puts the job back in the queue. `lease_v2` is an owned
+  from the record and a fresh read of the object. Nobody is sanctioned for the loss, and the members
+  that committed and delivered are the survivors; an object that reads again before that push puts the
+  job back in the queue, and one that is there and unreadable is no loss. `lease_v2` is an owned
   function: `implementation_hash` changes. See `docs/adr/0011-audit-integrity.md` (Part 8, decision 28)
   at the monorepo root, `docs/network-v2.md` and `docs/operator.md`.
 - A confirmed audit mismatch sanctions the miner, once, a contest window later (the caller

@@ -1301,12 +1301,13 @@ so it has no `Wait` and no entry in `BOUNDS` (`test_every_wait_has_a_bound` is u
    writers' (`_exclude_no_shows_v2`, `_exclude_missing_deltas_v2`), which stay as a backstop. When the
    rest cannot carry the round the reaper writes no exclusion at all, so that `schedule_audits_v2` keeps
    answering 409 `ROUND_INFEASIBLE` with nothing persisted (Part 5); the plan is only the `round-exit`
-   marker (`INFEASIBLE` or `AUDIT_WINDOW_MISSED`) until decision 8 retires the round. A queued job
-   whose member has no leaves record is dropped at the first `absolute` as `NO_SHOW/leaves`, without a
-   re-arm: no auditor ever touched the job and a second window cannot help. The blame is infrastructure's
-   and its sanction row is `WAIVED` (no strike, no seizure, no suspension): only the master lacks the
-   leaves, and it cannot prove that the miner never posted them, since a post that failed on the master
-   or storage side leaves no record. This amends Part 2 decisions 8 and 9 for this one case.
+   marker (`INFEASIBLE`, `AUDIT_WINDOW_MISSED` or, since decision 28, `LEAF_OBJECT_LOST`) until decision 8
+   retires the round. A queued job whose member has no leaves record is dropped at the first `absolute` as
+   `NO_SHOW/leaves`, without a re-arm: no auditor ever touched the job and a second window cannot help.
+   The blame is infrastructure's and its sanction row is `WAIVED` (no strike, no seizure, no suspension):
+   only the master lacks the leaves, and it cannot prove that the miner never posted them, since a post
+   that failed on the master or storage side leaves no record. This amends Part 2 decisions 8 and 9 for
+   this one case.
 4. **Liveness before accountability.** The exit is committed first and never depends on the sanction. The
    sanction is a row of its own (`records_v2 exit-sanction`, id `{w}:{hotkey}`: PENDING, APPLIED, WAIVED
    or CANCELLED) applied by a sweeper that retries on every push. ADR 0010 and Part 5 asked for one
@@ -1340,27 +1341,26 @@ so it has no `Wait` and no entry in `BOUNDS` (`test_every_wait_has_a_bound` is u
 8. **Causes, each re-derived by the primitive** (`_retire_round_v2(run_id, w, cause, survivors)`, called
    by the reaper's per-round savepoint and by nothing else; inside the caller's transaction, idempotent: a
    retired round answers its record): `INFEASIBLE` (`now >= d_commit` and `allocate_weights` over the
-   survivors raises; every term only shrinks), `AUDIT_WINDOW_MISSED` (no lease row and
-   `now >= absolute - 1`) and `LEAF_OBJECT_LOST` (decision 28: a `leaf-object-lost` record of the round
-   names the object of the member's leaves record and a fresh read of it still raises `ObjectNotFound`;
-   audits are scheduled by premise and their window need not be over). Each requires every earlier round
-   closed (so no rollback window contains a retired round), an unapplied `PENDING` status and no
-   `service-admission` record. The survivors (hotkeys
-   of the roster) are an argument and the primitive never calls the planner: it derives the cause from
-   them and from the facts, so a caller cannot void a round that can still carry. It also checks the
-   argument against `exit_v2.survivors_of` (the planner's definition, read from the commit, delta and
-   exclusion records): survivors that differ are refused, so a caller cannot name fewer of them to make
-   a viable round infeasible. The reaper is the caller: `_reap_round_v2` hands the planner's survivors
-   to `_retire_or_wait_v2`, in a savepoint of its own, after the exclusions and the blame of the round
-   are booked, so that a refusal or a failure never takes them back (a refusal is recorded in
-   `round-exit` as `waiting`, any other failure is journaled `exit-failed`, `<w>:retire`, and the round
-   stays as it was). A refusal is
-   `ROUND_RETIRE_REFUSED: <reason>` and writes nothing; an open predecessor is one, the reaper waits and
-   records the state in `round-exit`. The primitive also writes nothing until every anchor is carried, so
-   a failing carry (a full disk) leaves the round `PENDING`. The one definition of "survivors" is the
-   planner's: the roster minus the excluded, minus the members with no commit from
-   `d_commit`, minus the committed members with no delta from `d_upload`. A round whose audited members
-   became ineligible (decision 22) is retired at `d_final` if too few remain.
+   survivors raises; every term only shrinks), `AUDIT_WINDOW_MISSED` (no lease row and `now >= absolute -
+   1`) and `LEAF_OBJECT_LOST` (decision 28: a `leaf-object-lost` record of the round names the object of
+   the member's leaves record and a fresh read of it still raises `ObjectNotFound`; audits are scheduled
+   by premise and their window need not be over). Each requires every earlier round closed (so no rollback
+   window contains a retired round), an unapplied `PENDING` status and no `service-admission` record. The
+   survivors (hotkeys of the roster) are an argument and the primitive never calls the planner: it derives
+   the cause from them and from the facts, so a caller cannot void a round the facts do not condemn (a
+   round that can still carry is retired only for a loss the master recorded itself, `LEAF_OBJECT_LOST`).
+   It also checks the argument against `exit_v2.survivors_of` (the planner's definition, read from the
+   commit, delta and exclusion records): survivors that differ are refused, so a caller cannot name fewer
+   of them to make a viable round infeasible. The reaper is the caller: `_reap_round_v2` hands the
+   planner's survivors to `_retire_or_wait_v2`, in a savepoint of its own, after the exclusions and the
+   blame of the round are booked, so that a refusal or a failure never takes them back (a refusal is
+   recorded in `round-exit` as `waiting`, any other failure is journaled `exit-failed`, `<w>:retire`, and
+   the round stays as it was). A refusal is `ROUND_RETIRE_REFUSED: <reason>` and writes nothing; an open
+   predecessor is one, the reaper waits and records the state in `round-exit`. The primitive also writes
+   nothing until every anchor is carried, so a failing carry (a full disk) leaves the round `PENDING`. The
+   one definition of "survivors" is the planner's: the roster minus the excluded, minus the members with
+   no commit from `d_commit`, minus the committed members with no delta from `d_upload`. A round whose
+   audited members became ineligible (decision 22) is retired at `d_final` if too few remain.
 9. **Anchors carried, nothing recomputed.** Every roster member's anchor `w` is its anchor `w - 1` under new
    hashes (`ht-carried-proof/1`, `ht-carried-anchor/1`): the tensor files are linked and only the metadata
    is rewritten, `state_root` and `ef_hash` are unchanged. Survivors restart `w + 1` from the optimizer
@@ -1371,15 +1371,15 @@ so it has no `Wait` and no entry in `BOUNDS` (`test_every_wait_has_a_bound` is u
    record says `carried_from`. A miner needs no action: its start state is pinned by hash (`IslandJobV1`)
    and a commit with another `ef_in_hash` is refused.
 10. **Audits, disputes, locks, grants.** Open leases become `exhausted/ROUND_RETIRED` and their guards are
-    revoked (a job parked by decision 28 keeps its result `LEAF_OBJECT_LOST`); new work on the round answers 409 `ROUND_RETIRED` (`schedule_audits_v2`, `aggregate_v2`,
-    `finalize_v2`, `rollback_v2` for either round of its window; owned names), and `_persist_anchor_v2`
-    refuses an anchor for a retired round, so a late MATCH cannot replace a carried one; completed
-    verdicts stay as evidence. A dispute is not waited for: an open one leaves the round retired but not closed until Part 1 closes it.
+    revoked (a job parked by decision 28 keeps its result `LEAF_OBJECT_LOST`); new work on the round
+    answers 409 `ROUND_RETIRED` (`schedule_audits_v2`, `aggregate_v2`, `finalize_v2`, `rollback_v2` for
+    either round of its window; owned names), and `_persist_anchor_v2` refuses an anchor for a retired
+    round, so a late MATCH cannot replace a carried one; completed verdicts stay as evidence. A dispute is
+    not waited for: an open one leaves the round retired but not closed until Part 1 closes it.
     `relay_settlement_v2` answers for the grants of a retired round (its finality hash is the evidence
-    hash; no finality was written and nothing vests, so the custody horizon stands in for the beacons,
-    ADR 0014 Part 6.4; an open dispute still pins it, and a grant with no receipt has no custody to
-    release). The honest bonds are released by
-    `lock_settlement` as soon as the round is closed.
+    hash; no finality was written and nothing vests, so the custody horizon stands in for the beacons, ADR
+    0014 Part 6.4; an open dispute still pins it, and a grant with no receipt has no custody to release).
+    The honest bonds are released by `lock_settlement` as soon as the round is closed.
 11. **The next round.** The operator opens `w + 1` with `prev_final_hash = retired[w].evidence_hash`
     (`live_operator open` reads it when round `w` has no `finalize`). It needs four eligible members that
     hold an anchor for `w`; fewer answers
@@ -1549,10 +1549,11 @@ so it has no `Wait` and no entry in `BOUNDS` (`test_every_wait_has_a_bound` is u
     - **A committed refusal.** `_tx` rolls back on any exception, which would undo the park. `lease_v2`
       runs in `_tx_booking_refusal`, a wrapper of `_tx`: a `CommittedRefusal` (a `ChallengeError`, raised by
       the park and by nothing else) is caught inside the transaction, which commits, and is raised again
-      once it is closed. `_tx` itself is byte-identical, so ES-08 ("a failed request commits nothing") holds
-      for every other refusal, and the one exception is typed and visible at the call site. On this path the
-      transaction's other writes commit too, as they do for a granted lease: the expiry of other leases, the
-      ask's signed Receipt and its beacon pin.
+      once it is closed. `_tx` itself is byte-identical, so ES-08 of the ledger-invariants lot (a refused
+      escrow request leaves nothing behind) holds for every other refusal of `lease_v2`, and the one
+      exception is typed and visible at the call site. On this path the transaction's other writes commit
+      too, as they do for a granted lease: the expiry of other leases, the ask's signed Receipt and its
+      beacon pin.
     - **The round is retired at the next push.** The reaper reads the `leaf-object-lost` records of a round
       that is not applied (`_lost_leaf_hotkeys_v2`: the record names the object of the member's current
       leaves record and a fresh read of it raises `ObjectNotFound`; bytes, or any other error, is not a
@@ -1582,6 +1583,12 @@ so it has no `Wait` and no entry in `BOUNDS` (`test_every_wait_has_a_bound` is u
       of `execute_audit_v2` (an exception there is booked as a failed attempt and, after two windows, ends
       as the exclusion of that member, never a retirement). A service-admitted run reads the leaves another
       way (`bounded_bytes`) and its retirement is refused (decision 8): that path is not changed.
+    - **Only a missing object is a loss.** Any `StoreError` other than `ObjectNotFound` on the reaper's fresh
+      read (an object that is there and no longer hashes to its key, an error of a remote store) is no loss:
+      a job parked while the object was missing goes back to the queue, the reaper's turn does not fail, and
+      the round goes the way it went before the park (its audit windows end). Were that read allowed to
+      raise, the turn would fail (`exit-failed`, `<w>:reap`) at every push and the round would stay pending
+      behind a parked job that nothing serves or expires.
 
 ### The tests: one per waiting state, each proves the run continues
 
@@ -1598,7 +1605,7 @@ so it has no `Wait` and no entry in `BOUNDS` (`test_every_wait_has_a_bound` is u
 | finalize order | `tests/challenge/test_round_withdrawal_v2.py` | accepted rollback then a paid round: `FINALIZE_ORDER` before, 200 after, `escrow.verify()` passes | the callback |
 | no finality record | `tests/challenge/test_member_state_v2.py` | a round without a finality record keeps the rotation refused and the bond held (pinned, with the rotation case red) | `rounds_listing` returns closed |
 | sanction | `tests/challenge/test_sanction_v2.py`, the cheaters suite | confirmed MISMATCH sanctioned after the window; auditor/host failures never reach the hook | grade, gate, cancel |
-| leaf object lost | `tests/ledger_invariants/test_exit_roster_2.py`, `tests/challenge/test_retire_round_v2.py`, `tests/challenge/test_exit_plan_v2.py` | the head job's object is gone: 503 `LEAF_OBJECT_LOST` and the next ask is served; the next push retires the round with every member as survivor; nobody's standing, bond or unit moves; round 1 opens and leases; a restored object puts the job back; a retired round takes none back; the retirement waits for an earlier round and happens when it closes | the 13 `nsh03-*` rows of `mutants_exit_roster.py` (bare 500, silent skip, rolled-back journal, job not parked, member excluded, struck or booked, round not retired, cause refused, no fresh read, no requeue, retired round revived, retirement forgotten) |
+| leaf object lost | `tests/ledger_invariants/test_exit_roster_2.py`, `tests/challenge/test_retire_round_v2.py`, `tests/challenge/test_exit_plan_v2.py` | the head job's object is gone: 503 `LEAF_OBJECT_LOST` and the next ask is served; the next push retires the round with every member as survivor; nobody's standing, bond or unit moves; round 1 opens and leases; a restored object puts the job back and a push does not undo the lease; a republished object is not the lost one; an unreadable one is no loss and pins no round; any other refused ask leaves the store untouched (ES-08); a retired round takes none back; the retirement waits for an earlier round and happens when it closes | the 18 `nsh03-*` rows of `mutants_exit_roster.py` (bare 500, silent skip, rolled-back journal, job not parked, member excluded, struck or booked, round not retired, cause refused, no fresh read, an unreadable object, a republished object, no requeue, a requeue that resets a leased job, a park that counts the audit as settled, every refusal committed, retired round revived, retirement forgotten) |
 
 ### P1 to P8 of ADR 0009 section 4 (D47)
 
@@ -1617,7 +1624,8 @@ so it has no `Wait` and no entry in `BOUNDS` (`test_every_wait_has_a_bound` is u
 
 - `implementation_hash` changes (it already changed in Parts 2, 3, 5): owned names edited are
   `schedule_audits_v2`, `aggregate_v2`, `finalize_v2`, `rollback_v2`, `open_round_v2`, `training_v2`,
-  `require_roster_v2`; owned names added are `_exclude_unfit_members_v2`, `_unfit_cause_v2`. The reaper,
+  `require_roster_v2`, and `lease_v2` through decision 28 (below); owned names added are
+  `_exclude_unfit_members_v2`, `_unfit_cause_v2`. The reaper,
   the sweeper, the retirement, the withdrawal, the hook and the HTTP mapping are outside it. One final
   value for the lot is in the report. Runs holding a `service-admission` record then fail
   `SERVICE_PROFILE_AUTHORITY` and cannot be re-bootstrapped after a round opened (as in Parts 2, 3, 5).
@@ -1669,9 +1677,9 @@ the tree of decision 28 (same tool, same pins) [V]:
 | `avx2/sm_103/sdpa-flash` | `2969e4a7…f07ea6` | `9bcf9bdd…2c2dd5` |
 | `avx2/sm_120/sdpa-flash` | `f3c351b3…af21f2` | `c8af2ae7…68891f` |
 | `avx512/none` | `cbbb0465…59af17` | `c509dfd1…83a920` |
-| `challenge/store.py` sha256 | `5cd7d7f5…4c318b` | `6d2a25df…321cb3` |
-| `sources()` map, 158 files, canonical sha256 | `1cb3027a…bc7fe3` | `f80d0053…a0cb03` |
-| `bundle()`, 2,734,080 bytes | `aa5f3f2f…df3bf3` | `6c437336…9a7a6e` |
+| `challenge/store.py` sha256 | `5cd7d7f5…4c318b` | `c2d527b5…23e123` |
+| `sources()` map, 158 files, canonical sha256 | `1cb3027a…bc7fe3` | `9e8b240b…126785` |
+| `bundle()`, 2,734,080 bytes | `aa5f3f2f…df3bf3` | `1146fb7c…523cec` |
 
 A run that holds a `service-admission` record made on the parent therefore fails `SERVICE_PROFILE_AUTHORITY`
 and is created again, as after every edit of an owned name in this ADR. New persisted shapes, with no
@@ -1766,7 +1774,8 @@ the round as retired and does not know the cause).
     window; it is a product decision and is not implemented.
 14. Whether a leaf object that is present and no longer hashes to its key (`CorruptObjectError`) is
     treated like a lost one: it is the same fault of the master's store, on the same line, and still a bare
-    500 (one more exception class in the handler and in `_lost_leaf_hotkeys_v2`).
+    500 (one more exception class in the handler and in `_lost_leaf_hotkeys_v2`, which reads it as no loss
+    today).
 
 ### Not verified
 
@@ -1776,7 +1785,9 @@ the round as retired and does not know the cause).
 - `AUDIT_MISMATCH` against a CUDA host class; a hostile host that returns well-formed false leaves.
 - Concurrency of the reaper with a long poll (read: it takes the store lock only).
 - Decision 28 on a real object store: the loss is simulated by unlinking the file of a `LocalFSStore`; a
-  remote store that answers 404 for a moment is read as a loss for one push. Not covered, still a bare 500:
+  remote store that answers 404 for a moment is read as a loss for one push, and one that answers another
+  error on the reaper's read is read as no loss (the job is queued again; the next ask parks it if the
+  object is still missing). Not covered, still a bare 500:
   `CorruptObjectError` on the leaf object, the `ef` and policy objects read after the loop, the reads of
   `execute_audit_v2`, and a service-admitted run. The real auditor CLI against a 503 was not run: it ends
   with exit code 2 like on any HTTP error (read, `auditor/__main__.py`).

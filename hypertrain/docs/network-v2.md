@@ -664,10 +664,12 @@ the object a member's leaves record names is gone from the master's store, the m
 booked in the transaction that found it: the job is parked (`exhausted`, result `LEAF_OBJECT_LOST`; no
 `excluded` record, no cooldown, no sanction), the record `leaf-object-lost` (`{job_id, object, at}`) is
 written and the lease answers 503 `LEAF_OBJECT_LOST: round <w> job <job_id>`. The next ask is served the
-job behind it. The first beacon push after the loss retires the round for it (see below), with every
-member as survivor and nobody sanctioned or struck: it costs the other members a round, and a
-cheater's in-flight audit of that round is cancelled with it. An object that reads again before that
-push puts the job back in the queue and nothing is retired.
+job behind it. The first beacon push after the loss retires the round for it (see below). Nobody is
+sanctioned or struck for the loss, the member whose object is gone included; the members that committed
+and delivered are the survivors, and a silence unrelated to the loss is booked as for any retirement.
+Retiring costs the other members a round, and a cheater's in-flight audit of that round is cancelled
+with it. An object that reads again before that push puts the job back in the queue and nothing is
+retired.
 
 At most two speculative rounds may be applied; opening w+2 waits for w to settle
 or be excluded and repaired. Retain original input objects, signed tapes,
