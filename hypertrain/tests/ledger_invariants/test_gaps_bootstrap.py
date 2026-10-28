@@ -411,13 +411,13 @@ def test_a_production_policy_that_fails_the_economic_bound_creates_no_run(tmp_pa
         assert economic_bound(holds) and not economic_bound(
             production_economics(world, G_max_units=1101, **shape)
         )
-        with creation(world, tmp_path / "holds", holds) as ok:
+        with creation(world, tmp_path / "holds", holds, gpu="sm_103") as ok:
             install_production_qualification(ok)
             assert ok.store.create_run_v2(ok.raw)["status"] == "created"
             assert ok.run_rows() == 1
         # One more unit of goal cannot be collateralised: no run, and the bound is the reason.
         fails = production_economics(world, G_max_units=1101, **shape)
-        with creation(world, tmp_path / "fails", fails) as bad:
+        with creation(world, tmp_path / "fails", fails, gpu="sm_103") as bad:
             install_production_qualification(bad)
             refusal = challenge_refusal(lambda: bad.store.create_run_v2(bad.raw))
             assert refusal is not None, "the run was created"

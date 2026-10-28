@@ -693,15 +693,25 @@ class Creation:
 
 @contextmanager
 def creation(
-    world: Any, root: Path, economics: EconomicsPolicyV2 | None, *, pinned: str | None = None
+    world: Any,
+    root: Path,
+    economics: EconomicsPolicyV2 | None,
+    *,
+    pinned: str | None = None,
+    gpu: str = "none",
 ) -> Iterator[Creation]:
     """Run creation on an empty store for the service world's manifest with another economics
     policy: `economics` (stored with the other policy objects) or the bare hash `pinned`, whose
-    object does not exist."""
+    object does not exist. A run that stands on a CUDA qualification names the device class it
+    runs on with `gpu`: the store refuses a CUDA run of class none (ENV_CLASS_BACKEND)."""
     service = load_fixture_module(*SERVICE_FIXTURE)
     network = world.network
     body = network.manifest.body()
     body["network"]["economics_policy_hash"] = pinned or economics.digest()  # type: ignore[union-attr]
+    if gpu != "none":
+        reference = body["training"]["reference_spec"]
+        reference["env"]["pinned"] = class_pin(reference["env"]["pinned"]["cpu"], gpu)
+        reference["sm_count"] = min(GPU_CLASSES[gpu].sm_counts)
     manifest = RunManifestV2.model_validate(body)
     objects = LocalFSStore(root / "objects")
     for name in (*PolicyHashes.model_fields, "relay_registry_hash"):
