@@ -244,6 +244,11 @@ RESUME_ANY_STATE = """\
 """
 CHALLENGE_STATE = """\
             if r.state not in ("APPLIED", "PROBATION", "ACTIVE") or r.pending_dispute:
+                raise AdmissionError("CHALLENGE_STATE")
+"""
+CHALLENGE_ANY_STATE = """\
+            if r.pending_dispute:
+                raise AdmissionError("CHALLENGE_STATE")
 """
 COLDKEY_GROUP = """\
                     entry.coldkey_group,
@@ -701,7 +706,7 @@ MUTANTS = [
         "invariants": ["AD-09", "DIB-09"],
         "path": ADMISSION,
         "old": CHALLENGE_STATE,
-        "new": RESUME_ANY_STATE,
+        "new": CHALLENGE_ANY_STATE,
         "tests": [BANNED],
         "why": "a BANNED admission is served a new trial.",
     },
