@@ -341,12 +341,15 @@ def records(store: ChallengeStore, *kinds: str) -> dict[tuple[str, str], str]:
     return {(r[0], r[1]): r[2] for r in rows if not kinds or r[0] in kinds}
 
 
-def digest_of(store: ChallengeStore) -> str:
-    """Hash of every row of every table of the store and its run sub-stores."""
+def digest_of(store: ChallengeStore, *, without: tuple[str, ...] = ()) -> str:
+    """Hash of every row of every table of the store and its run sub-stores, less the tables
+    named in `without`."""
     hasher = hashlib.sha256()
     for part in store.stores():
         with part._lock:
             for name in table_names(part._db):
+                if name in without:
+                    continue
                 rows = sorted(
                     repr(tuple(row)) for row in part._db.execute(f'SELECT * FROM "{name}"')
                 )
