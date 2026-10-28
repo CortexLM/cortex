@@ -22,6 +22,7 @@ import pytest
 from pydantic import ValidationError
 
 from hypertrain.challenge.admission import Admission
+from hypertrain.challenge.admission_store import AdmissionStore
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.challenge.trust_v2 import FundedStatus, audit_floor
 from hypertrain.data.store import LocalFSStore
@@ -535,6 +536,7 @@ def hosting(
             "INSERT INTO runs VALUES(?,?,?,'created',NULL)",
             (run_id, setup.manifest.model_dump_json(), "{}"),
         )
+        AdmissionStore(escrow)  # the tables a payout reads: admission_history
         store._services = lambda _run_id: (escrow, None, None)  # type: ignore[method-assign,assignment]
         yield Hosting(store, escrow, run_id)
     finally:

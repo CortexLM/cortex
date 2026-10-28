@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx
 
+from hypertrain.challenge.admission_store import AdmissionStore
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.ledger import FULL_SHARE_MASS, Params
@@ -141,6 +142,7 @@ def reward_store(root: Path, fixture: ModuleType, real: Real, hosted: Hosted) ->
             settlement=lambda ref: store._settlement_v2(run_id, ref),
         )
         escrow.mutex = store._lock
+        AdmissionStore(escrow)  # the tables a payout reads: admission_history
         store._services = lambda _run_id: (escrow, None, None)
         yield Hosted(store, escrow, reward, evidence, run_id, set(), True)
     finally:
@@ -203,6 +205,7 @@ def mode_store(
                 "INSERT INTO runs VALUES(?,?,?,'created',NULL)",
                 (setup.manifest.run_id(), setup.manifest.model_dump_json(), "{}"),
             )
+            AdmissionStore(escrow)  # the tables a payout reads: admission_history
             store._services = lambda _run_id: (escrow, None, None)
             if gate:
                 live_gate(store._db)
