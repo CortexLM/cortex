@@ -222,11 +222,12 @@ def test_a_signed_lease_ask_grants_at_most_one_lease(queue: X.Round) -> None:
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="FIN-22: a round whose every audit job ran out of both windows has no exit: its members "
-    "left it, aggregate_v2 answers 409 ROUND_INFEASIBLE, the opening of the next round reads the "
+    reason="FIN-22: a round whose every audit job ran out of both windows has no exit on this "
+    "tree: aggregate_v2 answers 409 ROUND_INFEASIBLE, the opening of the next round reads the "
     "applied state of this one, which never exists, so the master answers 409 'missing accepted "
-    "applied: 0' and no operation voids or skips the round, and no later round is ever credited "
-    "[candidate] [fix-lot: audit-integrity-2 ADR0011-P8 D43/D46 decisions 7-11, 25-26]",
+    "applied: 0', no code of this tree retires, voids or skips such a round, and no later round is "
+    "ever credited; the exit reaper retires it at the beacon "
+    "[fix-lot: audit-integrity-2 ADR0011-P8 D70 exit reaper]",
 )
 def test_a_round_after_a_round_nobody_audited_is_opened_and_credited(queue: X.Round) -> None:
     rnd = queue
@@ -235,8 +236,8 @@ def test_a_round_after_a_round_nobody_audited_is_opened_and_credited(queue: X.Ro
     status = rnd.finality()
     X.control(
         (status["unresolved_audits"], status["unresolved_disputes"]) == (0, 0)
-        and set(rnd.excluded()) == {rnd.hotkey(i) for i in rnd.members},
-        "nothing is outstanding in round 0: both windows ended and every member left it",
+        and [row["state"] for row in rnd.lease_rows()] == ["exhausted"] * len(rnd.members),
+        "nothing is outstanding in round 0: both windows ended and every audit job is given up",
     )
 
     response, following = X.open_after(rnd, rnd.members)

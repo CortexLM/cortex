@@ -61,6 +61,7 @@ ROLLBACK_FIXTURE = ("li_exit_roster_rollback_fixture", "e2e/test_rollback_servic
 LAUNCH_SECONDS = 300  # a bound on a tiny CPU launch, never a threshold of a test
 MINERS = 6  # five real members and one that goes quiet
 SPARE = MINERS  # a registered hotkey that never joined: the only legal rotation target
+UNROSTERED = MINERS - 1  # funded and ACTIVE, and listed by none of the rounds the scenarios open
 
 
 class ScenarioError(Exception):
@@ -477,9 +478,11 @@ def train(rnd: Round, indices: Sequence[int]) -> None:
 
 def deliver_delta(rnd: Round, index: int, delta: bytes) -> None:
     """POST /delta. The relay upload is not under test: the master's acceptance record, which the
-    relay receipt route would write, is written here with the same sealed type."""
+    relay receipt route would write, is written here with the same sealed type, and next to it the
+    receipt it names, reduced to the fields a delta is checked against (round, hotkey, grant)."""
     net, store = rnd.network, rnd.store
     delta_hash = sha256_hex(delta)
+    grant_hash = sha256_hex(b"exit-roster-grant|" + rnd.identity(index).encode())
     acceptance = MasterAcceptanceV2(
         w=rnd.w,
         hotkey=rnd.hotkey(index),
@@ -493,6 +496,12 @@ def deliver_delta(rnd: Round, index: int, delta: bytes) -> None:
     with store._tx():
         store.objects.put(delta)
         store._put_record_v2(rnd.run_id, "master-acceptance", acceptance.digest(), signed)
+        store._put_record_v2(
+            rnd.run_id,
+            "relay-receipt",
+            acceptance.receipt_hash,
+            {"body": {"w": rnd.w, "hotkey": rnd.hotkey(index), "grant_hash": grant_hash}},
+        )
     body = {
         "w": rnd.w,
         "hotkey": rnd.hotkey(index),
@@ -501,7 +510,7 @@ def deliver_delta(rnd: Round, index: int, delta: bytes) -> None:
         "uri": "sha256:" + delta_hash,
         "format": "ht-sparse-v1",
         "chunks": [{"off": 0, "len": len(delta), "sha256": delta_hash}],
-        "grant_hash": sha256_hex(b"exit-roster-grant|" + rnd.identity(index).encode()),
+        "grant_hash": grant_hash,
         "master_acceptance_hash": acceptance.digest(),
     }
     response = rnd.post("/delta", net.signed(hot(index), "DeltaManifestV2", body))
@@ -776,13 +785,19 @@ def admission_service(rnd: Round) -> Any:
     return rnd.store._services(rnd.run_id)[1]
 
 
-def standing(rnd: Round, index: int) -> tuple[str, int, int, int]:
-    """(state, strikes, bond units still locked, units burned) of the admission of member `index`,
-    read from the public admission route and the owner's balances."""
+def admission_record(rnd: Round, index: int) -> dict[str, Any]:
+    """The public record (state, reason, strikes, trial counters) of the admission of `index`."""
     net = rnd.network
     answer = net.client.get(net.url + "/admission/" + rnd.hotkey(index))
     control(answer.status_code == 200, answer.text)
-    record = answer.json()["record"]
+    record: dict[str, Any] = answer.json()["record"]
+    return record
+
+
+def standing(rnd: Round, index: int) -> tuple[str, int, int, int]:
+    """(state, strikes, bond units still locked, units burned) of the admission of member `index`,
+    read from the public admission route and the owner's balances."""
+    record = admission_record(rnd, index)
     balances = rnd.store._services(rnd.run_id)[0].balances(cold(index).ss58)
     return (
         str(record["state"]),
@@ -801,6 +816,20 @@ def seize(rnd: Round, index: int, reason: str, evidence: bytes) -> int:
         identity, reason=reason, evidence_hash=sha256_hex(evidence), now=rnd.network.now
     )
     return burned
+
+
+def back_on_a_roster(rnd: Round, index: int) -> None:
+    """Member `index` is ACTIVE again, as the trials of a probation would make it (the 12-trial
+    ladder has its own e2e). Its bond and its counters stay as the sanction left them."""
+    with rnd.store._tx():
+        rnd.store._db.execute(
+            "UPDATE admissions_v2 SET state='ACTIVE' WHERE hotkey=?", (rnd.hotkey(index),)
+        )
+
+
+def screen_rounds(rnd: Round) -> int:
+    """The length of a work screen of the run's admission policy, in beacon rounds."""
+    return int(admission_service(rnd).policy.work_screen_epoch_rounds)
 
 
 def lose_leaves(rnd: Round, index: int) -> None:

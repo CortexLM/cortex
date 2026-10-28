@@ -4,8 +4,11 @@ Package exit_roster, second module. The first module pins that no member can fre
 one pins the accounts the exit settles once a member is out: the admission of a member that never
 showed is struck and its bond burned, a fault of the master's own sanctions nobody, a member that
 changes after the round opened cannot take the round with it, and a convicted member is not paid
-while the others are. The rules are those of ADR 0011 Part 8 (audit-integrity-2) and of Forge's
-decisions D47, D59 and D63; most of them are not in v3 yet.
+while the others are. The rules are those of ADR 0011 Part 8 and of Forge's decisions D47, D59 and
+D63. The roster contract (a rotation while a round lists the admission, a lapsed screen, a
+rotated hotkey) is in v3; the sanction of a no-show, the refusal of the contest of a verdict that
+upholds the work and the payment of the others when a member is convicted are not yet
+(audit-integrity-2).
 
 Every test states what happens to the standing of an admission (state, strikes, bond locked and
 burned), to a status code or to who is paid, never how the master gets there: the sanction may be
@@ -55,13 +58,30 @@ def silence_of_one_member(rnd: X.Round) -> list[int]:
     return [i for i in rnd.members if i != rnd.quiet]
 
 
+FIRST_NO_SHOW = b"exit-roster|no-show|round 0"
+
+
+def second_no_show(rnd: X.Round, member: int, screens: int) -> None:
+    """`member` is silent a second time, for the evidence of another round, `screens` work screens
+    after the first one, having been put back on a roster in between (its trials are not under
+    test here)."""
+    X.seize(rnd, member, "NO_SHOW", FIRST_NO_SHOW)
+    X.control(
+        X.standing(rnd, member)[2:] == (0, 1000), "the first no-show burned the bond of the member"
+    )
+    X.back_on_a_roster(rnd, member)
+    rnd.network.push(rnd.network.now + screens * X.screen_rounds(rnd))
+    X.seize(rnd, member, "NO_SHOW", b"exit-roster|no-show|round 1")
+
+
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="NSH-01: a roster member that never committed is only left out of its round: its "
-    "admission keeps its standing, its strikes and its bond (ADR 0011 Part 5, sanction S0), so an "
-    "identity can idle in every round at no cost "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 D47 decision 12]",
+    reason="NSH-01: a roster member that never committed is only left out of its round on this "
+    "tree (ADR 0011 Part 5, sanction S0): its admission keeps its state, its strikes and its bond, "
+    "so an identity can idle in every round at no cost; D63 makes the first no-show of an "
+    "admission cost it one strike and its bond [fix-lot: audit-integrity-2 ADR0011-P8 D63 "
+    "decision 12]",
 )
 def test_the_first_no_show_of_an_admission_costs_it_a_strike_and_its_bond(silent: X.Round) -> None:
     rnd = silent
@@ -78,35 +98,89 @@ def test_the_first_no_show_of_an_admission_costs_it_a_strike_and_its_bond(silent
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="NSH-05: the first no-show of an admission is a probation and not a suspension (Forge "
-    "D63); the sanction the audit-integrity-2 code books suspends at the first one, with no way "
-    "back (ADR 0011 decision 12) [fix-lot: audit-integrity-2 ADR0011-P8 D63 decision 12]",
+    reason="NSH-05: a first no-show changes no standing on this tree, so the member stays ACTIVE "
+    "on the work screen it had; D63 puts it back on a fresh probation (PROBATION, reason NO_SHOW, "
+    "new trials from clean_count 0), and its way back is the trials, no operator "
+    "[fix-lot: audit-integrity-2 ADR0011-P8 D63 decision 12]",
 )
 def test_the_first_no_show_of_an_admission_puts_it_on_probation(silent: X.Round) -> None:
     rnd = silent
-    X.control(X.standing(rnd, rnd.quiet) == FUNDED, "the quiet member is a funded ACTIVE admission")
+    record = X.admission_record(rnd, rnd.quiet)
+    X.control(
+        (record["state"], record["clean_count"]) == ("ACTIVE", 12) and record["screen_until"] > 0,
+        "the quiet member is an ACTIVE admission with a work screen",
+    )
 
     silence_of_one_member(rnd)
 
-    assert X.standing(rnd, rnd.quiet) == ("PROBATION", 1, 0, 1000)
+    record = X.admission_record(rnd, rnd.quiet)
+    assert (record["state"], record["reason"]) == ("PROBATION", "NO_SHOW")
+    assert (record["clean_count"], record["screen_until"]) == (0, 0)
 
 
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="NSH-02: the sanction of a no-show does not grow with the repeat: the bond of an "
-    "admission is burned and nothing else changes, whatever the number of no-shows booked against "
-    "it [fix-lot: audit-integrity-2 ADR0011-P8 D47/D63 decision 12]",
+    reason="NSH-02: the sanction of a no-show does not grow with the repeat on this tree: the "
+    "bond hook burns the bond of an admission and nothing else changes, whatever the number of "
+    "no-shows booked against it; D63 adds a strike and suspends the admission at a second "
+    "no-show, for other evidence, inside the strike window (at least two PROBATION -> ACTIVE "
+    "cycles) [fix-lot: audit-integrity-2 ADR0011-P8 D63 decision 12]",
 )
 def test_a_second_no_show_inside_the_window_suspends_the_admission(silent: X.Round) -> None:
-    rnd, member = silent, silent.quiet
+    rnd, member = silent, X.UNROSTERED
     X.control(X.standing(rnd, member) == FUNDED, "the member is a funded ACTIVE admission")
 
-    X.seize(rnd, member, "NO_SHOW", b"exit-roster|no-show|round 0")
-    X.seize(rnd, member, "NO_SHOW", b"exit-roster|no-show|round 1")
-    X.seize(rnd, member, "NO_SHOW", b"exit-roster|no-show|round 0")  # a retry books nothing
+    second_no_show(rnd, member, screens=1)
+    X.seize(rnd, member, "NO_SHOW", FIRST_NO_SHOW)  # a retry books nothing
 
     assert X.standing(rnd, member) == ("SUSPENDED", 2, 0, 1000)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="NSH-06: a no-show books no strike on this tree, so a suspended admission is not "
+    "struck again; D63 adds the strike and keeps the state and the reason the member was "
+    "suspended for, which a silence neither lifts nor renames "
+    "[fix-lot: audit-integrity-2 ADR0011-P8 D63 decision 12]",
+)
+def test_a_no_show_adds_its_strike_to_a_suspension_and_keeps_its_reason(silent: X.Round) -> None:
+    rnd, member = silent, X.UNROSTERED
+    X.seize(rnd, member, "AUDIT_MISMATCH", b"exit-roster|mismatch|round 0")
+    record = X.admission_record(rnd, member)
+    X.control(
+        (record["state"], record["reason"], record["strikes"])
+        == ("SUSPENDED", "AUDIT_MISMATCH", 1),
+        "the member is suspended for an audit mismatch, with one strike",
+    )
+
+    X.seize(rnd, member, "NO_SHOW", b"exit-roster|no-show|round 1")
+
+    record = X.admission_record(rnd, member)
+    assert (record["state"], record["reason"], record["strikes"]) == (
+        "SUSPENDED",
+        "AUDIT_MISMATCH",
+        2,
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="NSH-07: a no-show books no strike and changes no state on this tree, whatever its "
+    "age; D63 counts a no-show only inside the strike window, so one long after the earlier "
+    "one is a first again: a strike and a fresh probation, not a suspension "
+    "[fix-lot: audit-integrity-2 ADR0011-P8 D63 decision 12]",
+)
+def test_a_no_show_long_after_the_last_one_is_a_first_one_again(silent: X.Round) -> None:
+    rnd, member = silent, X.UNROSTERED
+    X.control(X.standing(rnd, member) == FUNDED, "the member is a funded ACTIVE admission")
+
+    second_no_show(rnd, member, screens=100)
+
+    assert X.standing(rnd, member) == ("PROBATION", 2, 0, 1000)
+    assert X.admission_record(rnd, member)["reason"] == "NO_SHOW"
 
 
 # A fault of the master's own is nobody's strike (D47, D63)
@@ -115,8 +189,10 @@ def test_a_second_no_show_inside_the_window_suspends_the_admission(silent: X.Rou
 def test_a_loss_of_leaves_on_the_master_sanctions_nobody(queue: X.Round) -> None:
     """NSH-04: the leaf object member `head` published is gone from the master's store, so no
     auditor can be given its job; the member did what it owed (the master holds the record of its
-    publication) and every window ends without a verdict. Nobody is struck, nobody loses a bond,
-    and the member leaves the round as an infrastructure drop, not as a no-show."""
+    publication) and every window ends without a verdict. The job is given up, nobody is struck,
+    nobody loses a bond, and whatever the exit records for the members it drops blames the
+    infrastructure, never a silence or a failed audit. How the round then closes (each member
+    excluded, or the round retired as a whole when nobody is left to carry it) is not under test."""
     rnd = queue
     head = rnd.queue_order()[0]
     X.lose_leaves(rnd, head)
@@ -128,8 +204,10 @@ def test_a_loss_of_leaves_on_the_master_sanctions_nobody(queue: X.Round) -> None
     X.run_out_audit_windows(rnd)
     X.walk(rnd, rnd.network.now + 1)  # whatever retries a sanction gets another turn
 
-    assert rnd.excluded()[rnd.hotkey(head)] == "INFRASTRUCTURE"
-    assert "NO_SHOW" not in rnd.excluded().values()
+    assert [row["state"] for row in rnd.lease_rows() if row["hotkey"] == rnd.hotkey(head)] == [
+        "exhausted"
+    ]
+    assert set(rnd.excluded().values()) <= {"INFRASTRUCTURE"}
     assert [X.standing(rnd, i) for i in rnd.members] == [FUNDED] * len(rnd.members)
 
 
@@ -158,13 +236,6 @@ def test_a_leaf_object_the_master_lost_does_not_starve_the_audits_behind_it(queu
 # A roster is a contract until its round is closed (D47)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="ROS-01: Admission.rotate has no roster check: an admission an open round lists "
-    "changes its hotkey and the opening names a hotkey the master no longer knows "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 D47 decision 21]",
-)
 def test_an_admission_an_open_round_lists_cannot_rotate(queue: X.Round) -> None:
     rnd, member = queue, 0
     net = rnd.network
@@ -236,14 +307,6 @@ def test_a_banned_admission_is_not_paid_and_the_others_are(tmp_path: Path) -> No
         assert rnd.finality()["disposition"] == "SETTLED"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="AD-07+A2W-21+LCK-18: verified_inputs_v2 raises 403 'no longer eligible' for a member "
-    "whose work screen lapsed after its accept, so the aggregation of the four other audited "
-    "members stops instead of excluding that member with a recorded cause "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 D47 decision 22]",
-)
 def test_a_member_whose_screen_lapsed_is_excluded_and_the_round_goes_on(tmp_path: Path) -> None:
     with X.audited_round(tmp_path, 5) as rnd:
         member = 1
@@ -260,14 +323,6 @@ def test_a_member_whose_screen_lapsed_is_excluded_and_the_round_goes_on(tmp_path
             assert rnd.hotkey(member) in rnd.excluded()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="CRD-13+LCK-18: Admission.rotate has no roster check, even with the new hotkey's "
-    "consent (RTA-01), and the aggregation asks admission.status for the hotkey the round was "
-    "opened with, so a member that rotates after its audit stalls the aggregation of everybody "
-    "else [fix-lot: audit-integrity-2 ADR0011-P8 D47 decisions 21-22]",
-)
 def test_a_hotkey_rotated_after_the_audits_does_not_stall_the_round(tmp_path: Path) -> None:
     with X.audited_round(tmp_path, 5) as rnd:
         member, others = 1, [0, 2, 3, 4]
