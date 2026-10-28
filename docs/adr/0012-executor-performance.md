@@ -531,7 +531,9 @@ The digest rows of this table hold for `389c45b4` and every commit up to it. `v3
 `a07d99fa…e0a661`, `challenge/admission.py` `49318eb1…970ebd`, `sources()` `12109c14…85feea` and the bundle
 2,744,320 bytes `a5ccb6e0…813ff4` (ADR 0011 Part 3 has the table). The `sha256sum` row above
 (`8ff83ee2…532a2a`) is the hash of the listing without its trailing newline; `sha256sum` of the CLI output is
-`084c2381…124a2a` on `389c45b4`.
+`084c2381…124a2a` on `389c45b4`. On the d82 tip (`v3-d82-burn-pending-reaudit`) `lease_v2` moves, so
+`implementation_hash` becomes `7af135ca…70be62`, `challenge/store.py` `22fb5dcd…c56676`, `sources()` `97e3c592…5f1be3`
+and the bundle 2,775,040 bytes `2c064435…0b8196` (ADR 0011 Part 3 has the table).
 
 ## Consequences
 
