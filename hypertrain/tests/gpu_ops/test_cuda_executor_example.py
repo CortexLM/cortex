@@ -15,12 +15,14 @@ def _filled(tmp_path: Path) -> dict[str, Any]:
     key = tmp_path / "id_ed25519"
     key.write_text("not a real key\n")
     key.chmod(0o600)
-    known = tmp_path / "known_hosts"
-    known.write_text("[gpu.example.net]:22 ssh-ed25519 AAAA\n")
     raw = json.loads(EXAMPLE.read_text())
     raw["run_id"] = "ab" * 32
     raw["state_dir"] = str(tmp_path / "state")
     for index, host in enumerate(raw["hosts"]):
+        known = (
+            tmp_path / f"known_hosts_{index}"
+        )  # one box, one key: the config refuses a shared one
+        known.write_text(f"gpu{index}.example.net ssh-ed25519 AAAA{index}\n")
         host.update(
             address=f"gpu{index}.example.net",
             identity_file=str(key),

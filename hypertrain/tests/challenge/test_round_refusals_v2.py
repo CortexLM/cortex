@@ -1,4 +1,6 @@
-"""A round the arithmetic or the finality rules refuse is a 409 with a code, never a 500."""
+"""A round the arithmetic or the finality rules refuse is a 409 with a code, never a 500.
+
+A fault of the master's own artifacts is the opposite: a 500 that names itself."""
 # ruff: noqa: F811  (the `network` fixture parameter shadows the imported fixture)
 
 from __future__ import annotations
@@ -6,7 +8,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from hypertrain.aggregator.core import FinalityError, TapeError
+from hypertrain.aggregator.core import FinalityError, TapeError, TapeIntegrityError
 from hypertrain.aggregator.weighted_v2 import InsufficientEligibleWeight
 from hypertrain.auditor.replay import AnchorCache, optimizer_hash, pack_state
 from hypertrain.challenge.store import ChallengeStore
@@ -174,3 +176,17 @@ def test_a_refusal_raised_by_a_store_method_is_a_409_with_its_code(
     refused = refusing(network).post(network.url + path, json={}, headers=fixtures.admin())
 
     assert answer(refused) == (409, {"detail": f"{CODES[error]}: the reason"})
+
+
+@pytest.mark.parametrize("site", list(ROUTES))
+def test_a_fault_of_the_masters_own_tape_is_a_500_that_names_itself(network, monkeypatch, site):
+    path, method, _ = ROUTES[site]
+
+    def raiser(*_args, **_kwargs):
+        raise TapeIntegrityError("the reason")
+
+    monkeypatch.setattr(ChallengeStore, method, raiser)
+
+    refused = refusing(network).post(network.url + path, json={}, headers=fixtures.admin())
+
+    assert answer(refused) == (500, {"detail": "TAPE_INTEGRITY: the reason"})

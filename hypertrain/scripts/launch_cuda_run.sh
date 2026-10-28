@@ -87,6 +87,30 @@ for f in "$T"/{prepare_record.py,task8-deps.py,hf_seed.py,rescue_parallel.py,res
   "$RD/keys/vast.key" "$RD/keys/owner.seed" "$HOTKEY_SEED" "$PROXY_TOKEN" "$COORD_KEY" "$RD/dispatch.json"; do
   [ -e "$f" ] || die "missing $f"
 done
+# Qualification trust is settled here, before any spend. The store refuses a production run whose
+# CUDA qualification is not on attested hosts (docs/adr/0011, part 4), so a production launch needs
+# the strict inputs: each host's known_hosts file and the SHA256: fingerprint typed from the
+# provider console, both visible to the master container, and attestation.json/.sig beside each
+# result.json (scripts/ops/qualification_attest.py). --label-only is for a test-ledger run that
+# says so with QUAL_LABEL_ONLY=1.
+ECON=$(J "$OUT/manifest.json" "d['network']['economics_policy_hash']")
+LEDGER=
+for f in "$OUT"/policy-*.json; do
+  if [ "$(sha256sum "$f" | cut -c1-64)" = "$ECON" ]; then LEDGER=$(J "$f" "d['ledger_mode']"); fi
+done
+case "$LEDGER" in production | test) ;; *) die "no $OUT/policy-*.json is the manifest's economics policy" ;; esac
+STRICT_INPUTS=("${QUAL_KNOWN_HOSTS_H0:-}" "${QUAL_KNOWN_HOSTS_H1:-}" "${QUAL_FINGERPRINT_H0:-}" "${QUAL_FINGERPRINT_H1:-}")
+GIVEN=$(printf '%s' "${STRICT_INPUTS[@]}" | wc -c)
+if [ "$GIVEN" -gt 0 ]; then
+  for v in "${STRICT_INPUTS[@]}"; do [ -n "$v" ] || die "set all four of QUAL_KNOWN_HOSTS_H0/H1 and QUAL_FINGERPRINT_H0/H1"; done
+  TRUST=(--known-hosts "${STRICT_INPUTS[0]}" "${STRICT_INPUTS[1]}" --host-fingerprint "${STRICT_INPUTS[2]}" "${STRICT_INPUTS[3]}")
+elif [ "${QUAL_LABEL_ONLY:-}" = 1 ]; then
+  [ "$LEDGER" = test ] || die "QUAL_LABEL_ONLY=1 is for a test-ledger run; this run is $LEDGER"
+  TRUST=(--label-only)
+else
+  die "the bootstrap is strict: set QUAL_KNOWN_HOSTS_H0/H1 and QUAL_FINGERPRINT_H0/H1 (or QUAL_LABEL_ONLY=1 for a test-ledger run)"
+fi
+log "QUALIFICATION_TRUST mode=$([ "${TRUST[0]}" = --label-only ] && echo label-only || echo strict) ledger=$LEDGER"
 # materialize refuses existing roots: fail here, before any spend, not an hour into the run.
 [ -e "$STATE/roots.done" ] || for r in h0 h1; do
   [ ! -e "/data/hypertrain-$r" ] || die "/data/hypertrain-$r exists: archive it after checking no run reads it"
@@ -213,8 +237,9 @@ fi
 if stage bootstrap; then
   RES=()
   for r in h0 h1; do RES+=("$(J "/data/hypertrain-$r/qualification.json" "d['output']")/result.json"); done
+  # The trust mode was settled in preflight: strict, or label-only for an explicit test-ledger run.
   mexec python -B "$T/backend_bootstrap.py" --manifest-envelope "$OUT/manifest-envelope.json" \
-    --owner-seed "$RD/keys/owner.seed" \
+    --owner-seed "$RD/keys/owner.seed" "${TRUST[@]}" \
     --config /data/hypertrain-h0/qualification.json /data/hypertrain-h1/qualification.json \
     --result "${RES[@]}" > "$STATE/bootstrap.out" 2>&1 || die "see $STATE/bootstrap.out"
   done_

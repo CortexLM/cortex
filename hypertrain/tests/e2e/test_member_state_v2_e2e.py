@@ -13,7 +13,9 @@ import test_rollback_service_v2 as rollback
 from challenge.five_identity_network_v2 import five_identity_network
 from hypertrain.miner.admission import sign_rotation, sign_rotation_consent
 from hypertrain.protocol.hashing import sha256_hex
+from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize
+from hypertrain.protocol.messages_v2 import DisputeV2, EscrowLock
 
 fixtures = rollback.fixtures
 
@@ -91,6 +93,18 @@ def finalize(n, w, applied, members):
     )
 
 
+def custody_settles(n, w):
+    """The relay custody of an upload of round `w` settles: the round pins nothing (D70)."""
+    run, grant = n.manifest.run_id(), sha256_hex(f"grant:{w}".encode())
+    with n.store._tx():
+        n.store._put_record_v2(run, "grant", grant, {"body": {"w": w}})
+    settled = n.store.relay_settlement_v2(run, grant)
+    assert (
+        settled["finality_hash"] == n.store._record_v2(run, "finality", str(w))["resolution_hash"]
+    )
+    return settled
+
+
 def paid(n, w):
     rows = n.store._db.execute(
         "SELECT hotkey,issued FROM escrow_origins WHERE reward_round=? ORDER BY hotkey", (w,)
@@ -119,6 +133,135 @@ def test_a_sanction_after_the_aggregate_does_not_stop_the_finalize(n):
     inputs = sorted(item["roster"]["hotkey"] for item in tape_inputs)
     assert inputs == sorted(k.ss58 for k in members)
     assert paid(n, 0) == [(h, 250000) for h in inputs]
+
+
+def open_contest(n, hot, cold):
+    """Fund a contest bond and open the member's contest of its own round 0 verdict."""
+    contest = json.loads(
+        n.store._db.execute(
+            "SELECT data FROM records_v2 WHERE kind='contest' AND json_extract(data,'$.miner')=? "
+            "AND json_extract(data,'$.w')=0",
+            (hot.ss58,),
+        ).fetchone()[0]
+    )
+    dispute_id = sha256_hex(canonicalize([n.manifest.run_id(), contest["verdict_hash"], hot.ss58]))
+    origin = n.store._db.execute(
+        "SELECT origin FROM escrow_units WHERE owner=? AND bucket='available' AND units>=100",
+        (cold.ss58,),
+    ).fetchone()[0]
+    lock = EscrowLock(
+        operation_id="df" * 32,
+        owner=cold.ss58,
+        units=100,
+        origin_ids=[origin],
+        admission_id=None,
+        dispute_id=dispute_id,
+        kind="LOCK_CONTEST",
+    )
+    assert n.client.post(n.url + "/escrow/lock", json=n.signed(cold, "EscrowLock", lock)).is_success
+    body = DisputeV2(
+        hotkey=hot.ss58,
+        verdict_hash=contest["verdict_hash"],
+        action="contest",
+        bond_lock=lock.operation_id,
+    )
+    return n.client.post(n.url + "/dispute", json=n.signed(hot, "DisputeV2", body))
+
+
+def test_a_member_cannot_suspend_itself_by_contesting_its_own_match(n):
+    # Given: round 0 audited, the verdict of the fifth member is MATCH.
+    rollback.execute_round(n, 0, aggregate=False)
+    hot, cold = fixtures.HOT[4], fixtures.COLD[4]
+    # When: it funds and opens a contest of that verdict.
+    contest = open_contest(n, hot, cold)
+    # Then: refused before anything is written, and the round goes on with all five.
+    assert (contest.status_code, "NOTHING_TO_CONTEST" in contest.text) == (409, True)
+    assert standing(n, hot.ss58) == ("ACTIVE", 0, 0)
+    applied = aggregate(n)
+    assert applied.status_code == 200, applied.text
+    assert finalize(n, 0, applied.json(), fixtures.HOT).status_code == 200
+
+
+def test_a_member_convicted_between_the_aggregate_and_the_finalize_is_not_paid(n):
+    # Given: round 0 applied with five inputs, then one member convicted of training fraud
+    # (TRAINING_FRAUD: banned, bond and unvested rewards burned) before the round is finalized.
+    run = n.manifest.run_id()
+    convicted = fixtures.HOT[0]
+    others = fixtures.HOT[1:]
+    applied = rollback.execute_round(n, 0)
+    escrow, admission, _ = n.store._services(run)
+    admission.seize_bond(
+        admission_id(n, convicted.ss58), reason="TRAINING_FRAUD", evidence_hash="ab" * 32, now=n.now
+    )
+    assert standing(n, convicted.ss58)[0] == "BANNED"
+    assert len(n.store._record_v2(run, "tape-inputs", "0")["inputs"]) == 5
+    # When: a Finalize that still lists the convicted member is refused, and the one without
+    # it settles.
+    stale = finalize(n, 0, applied, fixtures.HOT)
+    settled = finalize(n, 0, applied, others)
+    # Then: the convicted member gets nothing, its share goes to the four by tokens and the whole
+    # round budget is still minted.
+    assert stale.status_code == 422, stale.text
+    assert settled.status_code == 200, settled.text
+    custody_settles(n, 0)
+    budget = escrow.policy.round_reward_units
+    assert paid(n, 0) == [(h, budget // 4) for h in sorted(k.ss58 for k in others)]
+    assert sum(units for _, units in paid(n, 0)) == budget
+    assert escrow.balances().conserved()
+
+
+def test_a_sibling_of_a_convicted_coldkey_is_not_paid(n):
+    # Given: round 0 applied with five inputs, and the second hotkey run by the owner of the
+    # first (several admissions may share a coldkey once the first is ACTIVE); the first one is
+    # then convicted of training fraud, which burns that coldkey's bond and unvested rewards.
+    run = n.manifest.run_id()
+    convicted, sibling = fixtures.HOT[0], fixtures.HOT[1]
+    others = fixtures.HOT[2:]
+    applied = rollback.execute_round(n, 0)
+    with n.store._tx():
+        n.store._db.execute(
+            "UPDATE admissions_v2 SET coldkey=? WHERE hotkey=?",
+            (fixtures.COLD[0].ss58, sibling.ss58),
+        )
+    escrow, admission, _ = n.store._services(run)
+    admission.seize_bond(
+        admission_id(n, convicted.ss58), reason="TRAINING_FRAUD", evidence_hash="ab" * 32, now=n.now
+    )
+    assert (standing(n, convicted.ss58)[0], standing(n, sibling.ss58)[0]) == ("BANNED", "ACTIVE")
+    # When: a Finalize that still lists the sibling is refused, and the one without it settles.
+    stale = finalize(n, 0, applied, fixtures.HOT[1:])
+    settled = finalize(n, 0, applied, others)
+    # Then: neither the convicted member nor its coldkey's other admission is paid; the three
+    # others share the whole round budget.
+    assert stale.status_code == 422, stale.text
+    assert settled.status_code == 200, settled.text
+    budget = escrow.policy.round_reward_units
+    assert [h for h, _ in paid(n, 0)] == sorted(k.ss58 for k in others)
+    assert sum(units for _, units in paid(n, 0)) == budget
+    assert escrow.balances().conserved()
+
+
+def test_a_round_whose_inputs_are_all_banned_closes_unpaid(n):
+    # Given: round 0 applied with five inputs, every one convicted before the finalize.
+    run = n.manifest.run_id()
+    applied = rollback.execute_round(n, 0)
+    escrow, admission, _ = n.store._services(run)
+    for key in fixtures.HOT:
+        admission.seize_bond(
+            admission_id(n, key.ss58), reason="TRAINING_FRAUD", evidence_hash="ab" * 32, now=n.now
+        )
+    assert {standing(n, k.ss58)[0] for k in fixtures.HOT} == {"BANNED"}
+    issued = escrow.balances().issued
+    # When: the Finalize lists nobody.
+    closed = finalize(n, 0, applied, [])
+    # Then: the round is settled with no reward (a named answer, not a 4xx the operator cannot
+    # leave), nothing is minted, and the ledger passes over the round for the next one.
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["status"] == "CLOSED_UNPAID"
+    custody_settles(n, 0)
+    assert paid(n, 0) == [] and escrow.balances().issued == issued
+    assert n.store._round_closure_v2(run, 0) is not None
+    assert finalize(n, 0, applied, []).json() == closed.json()
 
 
 def test_a_member_whose_screen_lapsed_is_left_out_and_the_run_goes_on(n):

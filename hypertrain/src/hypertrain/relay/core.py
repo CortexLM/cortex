@@ -49,13 +49,50 @@ from hypertrain.protocol.relay_messages import (
     validate_release,
 )
 
+# StreamStore refuses a journal above 16 MiB on every write, release included. Accepting a new
+# upload stops at this budget so that the acknowledgments, receipts, retrievals, extensions and
+# releases of uploads already held still fit.
+JOURNAL_BUDGET = 12 << 20
+# Journal bytes one chunk acknowledgment and its pin add after accept (measured 985 B, 30% margin).
+ACK_BYTES = 1280
+# /readyz and the log report the journal fill and raise an alarm above this share of the budget.
+ALARM_FILL = 0.8
+# forward_error of a receipt the master answered with a 4xx (late, conflicting, unknown): it will
+# never hold a release for it. A transport error, a 5xx, 408 and 429 may be answered later.
+FORWARD_REFUSED = "ForwardRefused"
+
 
 class RelayError(ValueError):
     """Authenticated contract, authorization, quota or lifecycle rejection."""
 
 
+def _forward_failure(error: httpx.HTTPError) -> str:
+    """What `forward_error` records for a failed forward: FORWARD_REFUSED or the exception name."""
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        if 400 <= status < 500 and status not in (408, 429):
+            return FORWARD_REFUSED
+    return type(error).__name__
+
+
 class AssemblyMismatch(RelayError):
     """Granted chunks are held but their concatenation is not the granted delta."""
+
+
+@dataclass(frozen=True, slots=True)
+class JournalFill:
+    """Stored journal bytes against the accept budget; the alarm never makes a replica unready."""
+
+    used: int
+    budget: int
+
+    @property
+    def ratio(self) -> float:
+        return self.used / self.budget
+
+    @property
+    def alarm(self) -> bool:
+        return self.ratio > ALARM_FILL
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +178,8 @@ class Relay:
         forward: Callable[[RelayEnvelope], Awaitable[RelayEnvelope]] | None = None,
         settlement: Callable[[str], Awaitable[Settlement]] | None = None,
         epoch_rounds: int = 100,
-        max_uploads: int = 64,
+        max_uploads: int | None = None,
+        journal_budget: int = JOURNAL_BUDGET,
     ) -> None:
         specs = [s for s in registry.specs if s.id == relay_id and s.region == region]
         if len(specs) != 1 or active_key not in keys:
@@ -154,6 +192,7 @@ class Relay:
         self.now, self.forward = now, forward
         self.settlement = settlement
         self.epoch_rounds, self.max_uploads = epoch_rounds, max_uploads
+        self.journal_budget = journal_budget
         self.draining = False
         self.inflight = 0
         self.changed = anyio.Event()
@@ -207,6 +246,14 @@ class Relay:
         ):
             raise RelayError("active key revoked or outside signed validity interval")
         return key_id
+
+    @staticmethod
+    def held(record: UploadRecord, now: int) -> bool:
+        """Still owed by this relay: a live reservation, or custody neither released nor past its
+        horizon. Past it the promise has ended, but a receipted upload is kept until released."""
+        if record.pins:
+            return any(p.delete_after is None and p.horizon >= now for p in record.pins.values())
+        return AcceptedUploadAck.model_validate(record.opportunity.body).service_deadline >= now
 
     async def accept(
         self,
@@ -272,7 +319,9 @@ class Relay:
                 if state.nonces.get(old.nonce) == grant.replaces:
                     del state.nonces[old.nonce]
             key_id = self._key(now, state)
-            if len(state.uploads) >= self.max_uploads:
+            if self.max_uploads is not None and (
+                sum(self.held(u, now) for u in state.uploads.values()) >= self.max_uploads
+            ):
                 raise RelayError("retained upload quota exhausted")
             reserved = sum(
                 UploadGrant.model_validate(u.grant.body).size
@@ -313,6 +362,8 @@ class Relay:
                 opportunity=self._seal(ack, key_id, grant.retain_until),
                 key_public=self.keys[key_id].ss58,
             )
+            if len(state.serialize()) + len(manifest.chunks) * ACK_BYTES > self.journal_budget:
+                raise RelayError("relay journal capacity exhausted")
 
         state = await self._change(commit)
         return state.uploads[grant_hash].opportunity
@@ -469,7 +520,7 @@ class Relay:
             try:
                 acceptance_raw = await self.forward(record.receipt)
             except httpx.HTTPError as error:
-                failure_name = type(error).__name__
+                failure_name = _forward_failure(error)
 
                 def pending(state: Journal) -> None:
                     self._record(state, grant_hash).forward_error = failure_name
@@ -504,7 +555,7 @@ class Relay:
                 and record.master_acceptance is None
                 # Deterministic failures: retrying the same held bytes cannot succeed.
                 and record.forward_error
-                not in (AssemblyMismatch.__name__, CorruptObjectError.__name__)
+                not in (AssemblyMismatch.__name__, CorruptObjectError.__name__, FORWARD_REFUSED)
             ):
                 try:
                     await self.complete(grant_hash)
@@ -776,7 +827,7 @@ class Relay:
             if record.receipt is None
             and AcceptedUploadAck.model_validate(record.opportunity.body).service_deadline >= now
         )
-        if len(state.uploads) >= self.max_uploads or reserved >= self.spec.max_inflight_bytes:
+        if reserved >= self.spec.max_inflight_bytes:
             return False
         # Persisted CAS proves write privilege; independent object probe proves backing readability.
         await self._change(lambda state: None)
@@ -788,32 +839,107 @@ class Relay:
             await self.backing.get(sha, 22, file)
         return True
 
+    async def journal_fill(self) -> JournalFill:
+        data, _ = await self.backing.journal(self.journal_key)
+        fill = JournalFill(len(data), self.journal_budget)
+        if fill.alarm:
+            logging.getLogger(__name__).warning(
+                "relay journal fill %.0f%% (%d of %d bytes)",
+                fill.ratio * 100,
+                fill.used,
+                fill.budget,
+            )
+        return fill
+
     async def acks(self, grant_hash: str, cursor: int = 0) -> list[RelayEnvelope]:
         record = self._record(await self.state(), grant_hash)
         return [record.chunks[str(i)] for i in sorted(map(int, record.chunks)) if i >= cursor]
 
+    @staticmethod
+    def _custody(record: UploadRecord) -> list[tuple[str, str]]:
+        """(custody hash, object key) of every signed chunk acknowledgment and the receipt."""
+        entries = [
+            (
+                ChunkCustodyAck.model_validate(e.body).digest(),
+                ChunkCustodyAck.model_validate(e.body).chunk_sha256,
+            )
+            for e in record.chunks.values()
+        ]
+        if record.receipt is not None:
+            receipt = RelayReceipt.model_validate(record.receipt.body)
+            entries.append((receipt.digest(), receipt.delta_hash))
+        return entries
+
+    def _lapsed(self, record: UploadRecord, pin: Pin, now: int) -> bool:
+        """The signed promise has ended and the master cannot need the bytes: nothing released
+        them, the horizon and the epoch grace are past, no dispute references them, and the master
+        holds no receipt for the upload (it never reached one, or the master refused it).
+
+        An upload with a receipt the master may have accepted is held until the master releases
+        it, whatever its age: a dispute can open after the last extension and the relay cannot see
+        that, and a master that is away past the horizon cannot extend. The release comes once
+        finality is written or the round is closed without a reward (ADR 0014 Part 6.4, D54, D72).
+        A forward that failed in transport or with a 5xx may still have been accepted, so it is
+        held too; only a 4xx answer says the master has nothing to release."""
+        return (
+            (record.receipt is None or record.forward_error == FORWARD_REFUSED)
+            and pin.delete_after is None
+            and not pin.disputes
+            and now >= pin.horizon + self.epoch_rounds
+        )
+
+    def _unneeded(self, record: UploadRecord, pin: Pin, now: int) -> bool:
+        """Released and past its deletion bound, or lapsed: the relay owes this custody nothing."""
+        released = pin.delete_after is not None and now >= pin.delete_after and not pin.disputes
+        return released or self._lapsed(record, pin, now)
+
     def _eligible_deletions(self, state: Journal, now: int) -> list[str]:
-        """Evidence remains pinned without authenticated release, even past horizon."""
+        """An object goes when every pin on it is unneeded; one live pin protects it."""
         candidates: set[str] = set()
         protected: set[str] = set()
         for record in state.uploads.values():
-            entries = [
-                (
-                    ChunkCustodyAck.model_validate(e.body).digest(),
-                    ChunkCustodyAck.model_validate(e.body).chunk_sha256,
-                )
-                for e in record.chunks.values()
-            ]
-            if record.receipt is not None:
-                receipt = RelayReceipt.model_validate(record.receipt.body)
-                entries.append((receipt.digest(), receipt.delta_hash))
-            for digest, sha in entries:
-                pin = record.pins[digest]
-                if pin.delete_after is not None and now >= pin.delete_after and not pin.disputes:
+            for digest, sha in self._custody(record):
+                if self._unneeded(record, record.pins[digest], now):
                     candidates.add(sha)
                 else:
                     protected.add(sha)
         return sorted(candidates - protected - state.publications.keys() - state.deletions.keys())
+
+    def _spent(self, record: UploadRecord, now: int) -> bool:
+        """Nothing left to serve or protect. A reservation that never produced custody ends with
+        the horizon its acknowledgment was signed for."""
+        if record.pins:
+            return all(self._unneeded(record, pin, now) for pin in record.pins.values())
+        return now >= UploadGrant.model_validate(record.grant.body).retain_until + self.epoch_rounds
+
+    def _prune(self, state: Journal, now: int, deleted: set[str]) -> None:
+        """Drop spent records whose objects are deleted or still needed by a live record.
+
+        A spent record whose object is still stored, unreserved and not needed elsewhere (an
+        upload of the same bytes is mid-write) stays, so that a later collect() still finds the
+        pin it must delete."""
+        live = {
+            sha
+            for record in state.uploads.values()
+            if not self._spent(record, now)
+            for _, sha in self._custody(record)
+        }
+        for grant_hash, record in list(state.uploads.items()):
+            if not self._spent(record, now):
+                continue
+            if any(
+                sha not in deleted and sha not in live and sha not in state.deletions
+                for _, sha in self._custody(record)
+            ):
+                continue
+            nonce = UploadGrant.model_validate(record.grant.body).nonce
+            if state.nonces.get(nonce) == grant_hash:
+                del state.nonces[nonce]
+            for retrieval in record.retrievals.values():
+                request = RetrievalRequest.model_validate(retrieval.request.body)
+                if state.nonces.get(request.nonce) == request.digest():
+                    del state.nonces[request.nonce]
+            del state.uploads[grant_hash]
 
     async def eligible_deletions(self) -> list[str]:
         return self._eligible_deletions(await self.state(), await self.now())
@@ -838,6 +964,7 @@ class Relay:
                 del state.deletions[sha]
 
             await self._change(finish)
+        await self._change(lambda state: self._prune(state, now, set(eligible)))
         return eligible
 
     async def failure(

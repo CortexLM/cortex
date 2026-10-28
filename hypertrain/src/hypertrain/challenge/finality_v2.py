@@ -19,7 +19,7 @@ class RoundStatus:
     run_id: str
     w: int
     applied: bool
-    disposition: Literal["PENDING", "SETTLED", "EXCLUDED"]
+    disposition: Literal["PENDING", "SETTLED", "EXCLUDED", "RETIRED"]
     unresolved_disputes: int
     unresolved_audits: int
     rollback_complete: bool
@@ -32,7 +32,7 @@ class RoundStatus:
             self.unresolved_disputes == 0
             and self.unresolved_audits == 0
             and (
-                self.disposition == "SETTLED"
+                self.disposition in ("SETTLED", "RETIRED")
                 or (self.disposition == "EXCLUDED" and self.rollback_complete)
             )
         )
@@ -71,7 +71,7 @@ def settle(status: RoundStatus, final: Finalize, finality_hash: str) -> RoundSta
         not status.applied
         or status.unresolved_audits
         or status.unresolved_disputes
-        or status.disposition == "EXCLUDED"
+        or status.disposition in ("EXCLUDED", "RETIRED")
     ):
         raise FinalityError("round cannot settle")
     if status.resolution_hash is not None and status.resolution_hash != finality_hash:
@@ -79,8 +79,22 @@ def settle(status: RoundStatus, final: Finalize, finality_hash: str) -> RoundSta
     return replace(status, disposition="SETTLED", resolution_hash=finality_hash)
 
 
+def retire(status: RoundStatus, theta_hash: str, evidence_hash: str) -> RoundStatus:
+    """A round that can no longer reach a tape is closed with the model unchanged."""
+    if status.disposition != "PENDING" or status.applied:
+        raise FinalityError("only a pending, unapplied round can be retired")
+    return replace(
+        status,
+        applied=True,
+        disposition="RETIRED",
+        unresolved_audits=0,
+        state_hash=theta_hash,
+        resolution_hash=evidence_hash,
+    )
+
+
 def exclude(status: RoundStatus, evidence_hash: str) -> RoundStatus:
-    if status.disposition == "SETTLED":
+    if status.disposition in ("SETTLED", "RETIRED"):
         raise FinalityError("finalized late fraud cannot rewrite model history")
     if status.resolution_hash is not None and status.resolution_hash != evidence_hash:
         raise FinalityError("conflicting exclusion")

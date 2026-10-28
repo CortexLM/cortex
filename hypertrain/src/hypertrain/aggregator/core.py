@@ -77,6 +77,10 @@ class TapeError(AggregatorError):
     pass
 
 
+class TapeIntegrityError(TapeError):
+    """The master's own artifact or computation is wrong, not a request's fault: a 500."""
+
+
 class SequenceError(AggregatorError):
     """Round out of order, prev state not the last applied output, or stale/duplicate rollback."""
 
@@ -546,10 +550,10 @@ def tape_inputs(body: Mapping[str, Any]) -> list[Input]:
 def replay_tape(store: Store, tape: Mapping[str, Any], signer: str | None = None) -> OuterState:
     """Recompute a merge from its tape + stored artifacts; raise unless every hash matches."""
     if not verify_tape(tape, signer):
-        raise TapeError("event tape signature does not verify")
+        raise TapeIntegrityError("event tape signature does not verify")
     b = tape["body"]
     if b.get("v") != TAPE_V:
-        raise TapeError("unsupported tape version")
+        raise TapeIntegrityError("unsupported tape version")
     prev = load_state(store, b["prev_state"])
     if th(prev.theta) != b["prev_theta_hash"]:
         raise ReplayMismatch("prev_state theta hash differs from the tape")

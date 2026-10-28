@@ -194,19 +194,21 @@ def network_watch(
         LocalFSStore(miner.directory / "state-objects"),
         party or replay_party,
     )
-    client = miner.api.c
-    client.headers["X-Dispute-Signature"] = miner.kp.sign(
-        f"hypertrain/watch/2|{miner.run_id}|{miner.kp.ss58}".encode()
-    ).hex()
+
+    def beacon() -> int:
+        return int(miner.api.call("GET", miner.url)["now_round"])
+
     return DisputeWatch(
         miner.directory / "watch",
         miner.kp,
-        HttpDisputeTransport(client, miner.api.base + miner.url),
+        HttpDisputeTransport(
+            miner.api.c, miner.api.base + miner.url, miner.kp, miner.run_id, beacon
+        ),
         run_id=miner.run_id,
         coordinator=miner.manifest.training.coord_pubkey,
         party=pubs.party,
         state_serve=pubs.serve,
-        beacon=lambda: int(miner.api.call("GET", miner.url)["now_round"]),
+        beacon=beacon,
         jobs=pubs.job,
     )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -136,8 +137,9 @@ def disputes(net) -> DisputesV2:
     return net.store._services(net.manifest.run_id())[2]
 
 
-def open_dispute(net) -> str:
-    """Admitted miner 0, accepted contest record, funded LOCK_CONTEST, signed /dispute."""
+def post_dispute(net) -> tuple[str, Any]:
+    """Admitted miner 0, accepted contest record, funded LOCK_CONTEST, signed /dispute: the
+    dispute id and the response, whatever it is."""
     assert net.join(0).status_code == 200
     run_id, store, inner = net.manifest.run_id(), net.store, net.manifest.training.inner
     admission_id = store._db.execute(
@@ -184,6 +186,12 @@ def open_dispute(net) -> str:
         hotkey=HOT[0].ss58, verdict_hash=VERDICT, action="contest", bond_lock=lock.operation_id
     )
     response = net.client.post(net.url + "/dispute", json=net.signed(HOT[0], "DisputeV2", body))
+    return dispute_id, response
+
+
+def open_dispute(net) -> str:
+    """post_dispute, which the store must accept."""
+    dispute_id, response = post_dispute(net)
     assert response.status_code == 200, response.text
     return dispute_id
 

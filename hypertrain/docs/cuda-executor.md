@@ -37,12 +37,13 @@ reads it from `HYPERTRAIN_CUDA_EXECUTOR` on first use; a missing or invalid file
 | `run_id` | The one run whose CUDA jobs are served. A CUDA job of another run raises before any SSH call. CPU jobs (any run) still run in-process. |
 | `image_repository` | Repository part of the image reference; the digest always comes from the signed manifest. |
 | `state_dir` | Journal (`journal.jsonl`) and remote stderr logs (`logs/`), mode 0700. Evidence only. |
-| `hosts[]` | `label` (unique), `address`, `port`, `user`, `identity_file`, `known_hosts_file`, `docker` (argv prefix, default `["docker"]`), `compute_cache_dir` (optional absolute root of the cache on that host). 1 to 8 hosts. |
+| `hosts[]` | `label` (unique), `address`, `port`, `user`, `identity_file`, `known_hosts_file`, `docker` (argv prefix, default `["docker"]`), `compute_cache_dir` (optional absolute root of the cache on that host). 1 to 8 hosts. Two hosts may not share an address and port, nor pin a host key in common: a key line in two `known_hosts_file`s refuses the config (`@cert-authority` and `@revoked` lines are not host keys), so give each host a file of its own. |
 | `network` | `default`, or `none` for `--network none`. Whether a multi-rank torchrun starts under `none` is unverified; keep `default` until a GPU run shows otherwise. |
 | `compute_cache` | `true` (default): bind-mount a persistent CUDA compute cache into every container ([below](#compute-cache)). `false`: no mount, the ADR 0008 command. |
 | `max_attempts`, `sweeps`, `sweep_pause_seconds` | Container runs per job (default 3), passes over the host list (3) and the pause between passes (15 s). |
 | `idle_gpu_memory_mib`, `max_clock_skew_seconds` | Idle threshold per GPU (2048 MiB) and the largest accepted difference between host and challenge clocks (5 s). |
 | `max_result_bytes`, `pull_timeout_seconds`, `ssh_connect_timeout_seconds` | Result size cap (16 GiB), image pull bound, SSH connect bound. |
+| `image_sources_sha256` | Optional pin (`null` by default) of the package files the GPU image holds: the digest a qualification records as `environment.image_sources_sha256`. A container that reports another one, or none, refuses its host like any other contradiction, so reference and referee runs, which the store does not compare, are covered. |
 
 The key is a path, never a value. `identity_file` must be a regular file owned by the challenge
 process user with mode 0600 (uid 65532 in the server image, which already ships `openssh-client`);
@@ -53,6 +54,13 @@ yourself; there is no trust on first use, so a replaced machine fails the key ch
 ssh-keyscan -p 22 -t ed25519 <host> > known_hosts.<label>   # then compare the fingerprint
 ssh-keygen -lf known_hosts.<label>                          # with the provider's console
 ```
+
+The executor does not run or write a qualification. `scripts/ops/qualification_attest.py
+--executor-config <this file> --host <label> --result <result.json>` reads the same file (address,
+user, key, pinned `known_hosts`) to have a host's own SSH key sign a statement about the
+`result.json` of its qualification, which a production run needs
+([ADR 0011](../../docs/adr/0011-audit-integrity.md), part 4). It needs the single `ssh-ed25519` key
+of that host's `known_hosts_file`.
 
 ## Compute cache
 
@@ -103,13 +111,19 @@ has not run on a GPU host: the tests model the mount and the warm/cold differenc
 
 Next to the usual `published/` directory the executor writes `role-dispatch.json`, which
 `ChallengeStore._dispatch_env_v2` reads for a CUDA audit. Besides `environment` (backend, image
-digest, drivers, SM counts, capabilities, GPU UUIDs and names) it records the host label, a
+digest, drivers, SM counts, capabilities, GPU UUIDs and names, and `image_sources_sha256`, the
+digest of the `src/hypertrain/**/*.py` files the container's own image holds, listed by the runner
+with `python -I` before the island starts: a measurement failure is exit 9) it records the host label, a
 `machine_id` derived from every GPU UUID of the host and an `instance_id` derived from the pinned
 host keys, the requested image reference and the daemon's `RepoDigests`, the hash of the container
 program, the hash of the received tar and the hash of the published files. Two labels that
-resolve to one machine, or a label whose GPU set changes, are refused. The challenge recomputes
+resolve to one machine, a label whose GPU set changes, or a label that lists a GPU of
+another label (the machine id follows the whole set, so a partial overlap is a second chance to
+list the same hardware) are refused. The challenge recomputes
 the artifact commitments itself (`validate_artifacts`) and checks the environment against the
-signed manifest and the ADR 0007 table before it publishes; a host that returns a partial,
+signed manifest, the ADR 0007 table and, when the qualification record has one, its
+`image_sources_sha256` (409 on another build, 503 when the container reported none) before it
+publishes; a host that returns a partial,
 tampered or unverifiable result produces nothing, and the job moves to another host or fails.
 
 ## A hostile or broken host

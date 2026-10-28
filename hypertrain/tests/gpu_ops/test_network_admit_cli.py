@@ -2076,7 +2076,7 @@ def test_continue_authentic_flat_store_intake(continuation_authority, tmp_path):
     import network_service_proof as driver
 
     store, manifest, configs, results, raw = continuation_authority
-    store._bootstrap_backend_v2(manifest, configs, results, raw)
+    backend_fixture.bootstrap(store, manifest, configs, results, raw)
     backend_fixture.register(store, manifest)
     accepted = store._record_v2(
         manifest.run_id(),
@@ -2313,27 +2313,13 @@ def test_continue_reviewed_launch_authentic_store_private_identity(
         result.update(config_sha256=fsha(config_path), profile_sha256=fsha(profile_path))
         result["environment"]["image_digest"] = profile["runtime"]["image_digest"]
         result_path.write_bytes(canonicalize(result))
+        backend_fixture.gpu.attest(result_path)
         files["result-" + role] = {
             "path": str(result_path),
             "sha256": fsha(result_path),
         }
         j.append("receipt", role=role, instance_id=i + 1)
-    accepted_evidence = {
-        "run_id": manifest.run_id(),
-        "backend": "cuda",
-        "reference_hash": sha256(
-            canonicalize(manifest.training.reference_spec.model_dump(mode="json"))
-        ),
-        "layout_hash": manifest.training.reference_spec.layout.model_dump_json(),
-        "configs": [fsha(p) for p in configs],
-        "results": [fsha(p) for p in results],
-        "summaries": [
-            fsha(p.parent / f"round-{w}/published/rank-{r}/summary.json")
-            for p in results
-            for w in range(2)
-            for r in range(2)
-        ],
-    }
+    accepted_evidence = backend_fixture.gpu.evidence_for(manifest, configs, results)
     accepted_receipt = envelope_v2.seal(
         owner,
         "Receipt",
@@ -2345,7 +2331,7 @@ def test_continue_reviewed_launch_authentic_store_private_identity(
         },
         100,
     )
-    store._bootstrap_backend_v2(manifest, configs, results, canonicalize(accepted_receipt))
+    backend_fixture.bootstrap(store, manifest, configs, results, canonicalize(accepted_receipt))
     backend_fixture.register(store, manifest)
     assert "evidence" not in store._record_v2(
         manifest.run_id(),

@@ -20,7 +20,7 @@ The scenario is one JSON file keyed by host address (`hosts`), plus a `global` s
                       pull{fails|digest|output}, runs[run], cold_start, warm_start}
     global = {canned{job_sha256: tree}, runs[run], rm_hold}  # global runs are consumed first
     run = {mode: ok | vanish | truncate | exit | exit-after | probe-fail | env | hang | oversize |
-                 flood | mutate, detached, die_after_puts, ...}
+                 flood | mutate, detached, die_after_puts, sources, ...}
 
 `smi_fail` is `query-gpu` or `query-compute-apps`: that nvidia-smi query prints nothing and exits 3.
 `raw_inspect` is the text `docker image inspect` prints, whatever the image list is.
@@ -36,6 +36,7 @@ refused, and the destination must be pinned in the `UserKnownHostsFile` the call
 `mutate`: the genuine result with one hostile change, named by `name`; the other keys of the run
 size a bomb (`depth`, `claim`) or give a member its bytes (`text`).
 `probe-fail`: the runner's device probe fails (the real runner then exits 9).
+`sources`: the package map the container measures in its image (default `IMAGE_SOURCES`).
 `die_after_puts`: with the result going to R2 (docs/adr/0013), the host vanishes (as `vanish`)
 when the runner starts its n+1th part upload.
 `detached`: the container runs in a session of its own, so killing the local ssh does not stop it;
@@ -62,6 +63,9 @@ CANARY = "canary-ssh-key-3f9a1c7e5b2d4086"
 PEM = "-" * 5  # the dashes of a PEM line, kept apart from BEGIN so the secret scan reads a fixture
 DRIVER = "595.71.05"
 OTHER_DRIVER = "595.71.06"
+# What the container's image measures as its package (a run's `sources` replaces it); the script
+# below writes the same literal.
+IMAGE_SOURCES = {"src/hypertrain/fake.py": "ab" * 32}
 # Device classes of docs/adr/0007: (capability) -> SM count, written down here on purpose so the
 # fake host does not read the table the executor is checked against.
 SM_COUNTS = {"10.3": 148, "12.0": 170}
@@ -570,8 +574,13 @@ def run(argv):
             marker.write_bytes(b"compiled")
         return 0
 
+    def measure():
+        return entry.get("sources", {"src/hypertrain/fake.py": "ab" * 32})
+
     captured = io.BytesIO()
-    code = namespace["serve"](io.BytesIO(stdin), captured, sys.stderr, probe=probe, launch=launch)
+    code = namespace["serve"](
+        io.BytesIO(stdin), captured, sys.stderr, probe=probe, launch=launch, measure=measure
+    )
     genuine = captured.getvalue()
     out = sys.stdout.buffer
     if code:

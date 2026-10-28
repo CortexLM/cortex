@@ -43,6 +43,7 @@ from hypertrain.auditor.replay import (
     select_segments,
 )
 from hypertrain.auditor.worker import Auditor, HttpApi
+from hypertrain.challenge.sanction_v2 import grade
 from hypertrain.protocol.envelope import verify_envelope
 from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.trainer.loop import LeafRecord, RoundResult, train_round
@@ -113,6 +114,34 @@ def test_bad_proof_root_and_preimage(full) -> None:  # type: ignore[no-untyped-d
     pres[1] = pres[1].model_copy(update={"loss_f32": "00000001"})
     out = audit_full(replace(x, preimages=pres), get_sample(w))
     assert (out.result, out.first_bad_leaf) == ("BAD_PROOF", 1)
+
+
+def test_a_delta_hash_alone_that_differs_is_a_mismatch_the_sanction_names(full) -> None:  # type: ignore[no-untyped-def]
+    # Given: every leaf is honest, but the signed commit carries another delta hash
+    w, res = full
+    c = make_commit(w, res).model_copy(update={"delta_hash": "ee" * 32})
+    # When
+    out = audit_full(inputs(w, res, commit_=c), get_sample(w))
+    # Then: a MISMATCH without a leaf, whose root is the committed one: the commit contradicts
+    # its own leaves, the one shape the sanction takes without a located leaf
+    assert (out.result, out.first_bad_leaf) == ("MISMATCH", None)
+    assert out.recomputed_leaves_root == c.leaves_root
+    assert (
+        grade(out.result, out.first_bad_leaf, out.recomputed_leaves_root, c.leaves_root)
+        == "COMMIT_CONTRADICTS_LEAVES"
+    )
+
+
+def test_an_ef_in_the_commit_does_not_commit_to_is_a_bad_proof_no_sanction_grades(full) -> None:  # type: ignore[no-untyped-def]
+    # Given: the error feedback the auditor holds is not the one the commit hashes (a stale or
+    # wrong input on the audit side): the delta would differ, so a replay must not be tried
+    w, res = full
+    c = make_commit(w, res).model_copy(update={"ef_in_hash": "dd" * 32})
+    # When
+    out = audit_full(inputs(w, res, commit_=c), get_sample(w))
+    # Then: BAD_PROOF, which grade() never turns into a sanction
+    assert out.result == "BAD_PROOF"
+    assert grade(out.result, out.first_bad_leaf, out.recomputed_leaves_root, c.leaves_root) is None
 
 
 def test_assignment_violation_without_replay(full) -> None:  # type: ignore[no-untyped-def]

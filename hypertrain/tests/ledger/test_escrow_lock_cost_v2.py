@@ -363,6 +363,9 @@ def test_the_status_route_costs_the_same_in_a_ledger_full_of_other_locks(served)
         assert posted.status_code == 200, posted.text
     url = n.url + "/admission/" + N.HOT[0].ss58
     db = n.store._db
+    # Both measures are of a warm request: whether the first one also builds the run's services
+    # depends on what ran before it (a beacon push does), and that moves the ratio by itself.
+    n.client.get(url)
     alone = ops(db, lambda: n.client.get(url))
     escrow = n.store._services(n.manifest.run_id())[0]
     add_foreign_locks(escrow, n.origin_ids[1], 3000)

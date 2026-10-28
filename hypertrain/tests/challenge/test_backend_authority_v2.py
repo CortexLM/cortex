@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +16,7 @@ import pytest
 
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
 from hypertrain.data.store import LocalFSStore
+from hypertrain.gpu_ops import host_attest
 from hypertrain.gpu_ops.journal import fsha
 from hypertrain.gpu_ops.launcher import Reject
 from hypertrain.protocol import envelope_v2
@@ -161,25 +165,41 @@ def authority(tmp_path, monkeypatch, request):
         body["training"]["reference_spec"].update(
             sm_count=host["sm_count"], driver_allowlist=[host["driver"]]
         )
+    production_policy = None
+    if host is not None and host.get("ledger_mode") == "production":
+        # The same run on the production ledger: only the economics policy differs.
+        econ = EconomicsPolicyV2.model_validate_json(
+            network.store.objects.get(network.manifest.network.economics_policy_hash)
+        )
+        changed = {"ledger_mode": "production", "genesis_allocation_hash": None}
+        production_policy = canonicalize(econ.model_copy(update=changed).body())
+        body["network"]["economics_policy_hash"] = sha256_hex(production_policy)
     manifest = RunManifestV2.model_validate(body)
     job = job.model_copy(update={"manifest": manifest, "run_id": manifest.run_id()})
     original.seed_job.write_text(job.model_dump_json())
     results = gpu.results(tmp_path / "rescued")
     configs = []
     for index, path in enumerate(results):
+        known_hosts = fsha(gpu.known_hosts_of(path))
         for round_index in range(2):
             for rank in range(2):
                 summary = path.parent / f"round-{round_index}/published/rank-{rank}/summary.json"
                 summary.write_text(json.dumps({"backend": "cuda"}))
         receipts = seed_dir / f"receipt-{index}.json"
         data = json.loads(original.lifecycle_receipts.read_bytes())
-        data.update(instance_id=index + 1, machine_id=index + 10, role=f"h{index}")
+        data.update(
+            instance_id=index + 1,
+            machine_id=index + 10,
+            role=f"h{index}",
+            known_hosts_sha256=known_hosts,
+        )
         receipts.write_text(json.dumps(data))
         cfg = original.model_copy(
             update={
                 "instance_id": index + 1,
                 "machine_id": index + 10,
                 "role": f"h{index}",
+                "known_hosts_sha256": known_hosts,
                 "lifecycle_receipts": receipts,
                 "lifecycle_receipts_sha256": fsha(receipts),
                 "driver_allowlist": manifest.training.reference_spec.driver_allowlist,
@@ -197,6 +217,7 @@ def authority(tmp_path, monkeypatch, request):
         result["environment"].update(
             image_digest=manifest.training.reference_spec.image_digest,
             torch_path="/venv/main/lib/torch/__init__.py",
+            image_sources_sha256=gpu.image_sources_digest(cfg.sources),
         )
         if host is not None:
             result["environment"].update(
@@ -207,6 +228,7 @@ def authority(tmp_path, monkeypatch, request):
             if host["capability"] is None:  # result.json written before capabilities existed
                 del result["environment"]["capabilities"]
         path.write_text(json.dumps(result))
+        gpu.attest(path)
     objects = LocalFSStore(tmp_path / "objects")
     for field in (
         "economics_policy_hash",
@@ -216,6 +238,8 @@ def authority(tmp_path, monkeypatch, request):
         "relay_registry_hash",
     ):
         objects.put(network.store.objects.get(getattr(network.manifest.network, field)))
+    if production_policy is not None:
+        objects.put(production_policy)
     store = ChallengeStore(
         tmp_path / "authority-store",
         network.store.params,
@@ -227,28 +251,25 @@ def authority(tmp_path, monkeypatch, request):
     # Existing verified fixture beacon, copied as authority input rather than a timer.
     for row in network.store._db.execute("SELECT * FROM beacon"):
         store._db.execute("INSERT INTO beacon VALUES(?,?,?,?)", tuple(row))
-    evidence = {
-        "run_id": manifest.run_id(),
-        "backend": "cuda",
-        "reference_hash": sha256_hex(
-            canonicalize(manifest.training.reference_spec.model_dump(mode="json"))
-        ),
-        "layout_hash": manifest.training.reference_spec.layout.model_dump_json(),
-        "configs": [fsha(p) for p in configs],
-        "results": [fsha(p) for p in results],
-        "summaries": [
-            fsha(path.parent / f"round-{round_index}/published/rank-{rank}/summary.json")
-            for path in results
-            for round_index in range(2)
-            for rank in range(2)
-        ],
-    }
+    evidence = gpu.evidence_for(manifest, configs, results)
     receipt = Receipt(w=0, commit_hash=sha256_hex(canonicalize(evidence)), received_round=1)
     raw = canonicalize(envelope_v2.seal(service.OWNER, "Receipt", manifest.run_id(), receipt, 100))
     store._cpu_network = network
     yield store, manifest, tuple(configs), tuple(results), raw
     store.close_v2_notifications()
     store._db.close()
+
+
+def bootstrap(store, manifest, configs, results, raw):
+    """The reviewed bootstrap with the pins the owner types from the host keys. A historical run
+    from the private genuine index predates attestations and is installed label-only."""
+    pins = None if hasattr(store, "_genuine_index") else gpu.typed_pins(list(results))
+    store._bootstrap_backend_v2(manifest, configs, results, raw, pins=pins)
+
+
+def reviewed(manifest, evidence):
+    receipt = Receipt(w=0, commit_hash=sha256_hex(canonicalize(evidence)), received_round=1)
+    return canonicalize(envelope_v2.seal(service.OWNER, "Receipt", manifest.run_id(), receipt, 100))
 
 
 def register(store, manifest):
@@ -388,12 +409,12 @@ def saved_geometry(manifest, hotkey, directory, *, published=False):
 
 def test_reviewed_cuda_overrides_test_economics_and_freezes(authority):
     store, manifest, configs, results, raw = authority
-    store._bootstrap_backend_v2(manifest, configs, results, raw)
+    bootstrap(store, manifest, configs, results, raw)
     register(store, manifest)
     escrow, admission, _ = store._services(manifest.run_id())
     assert admission.backend == "cuda" and escrow.policy.ledger_mode == "test"
     before = escrow.balances()
-    store._bootstrap_backend_v2(manifest, configs, results, raw)
+    bootstrap(store, manifest, configs, results, raw)
     assert escrow.balances() == before
     store._services_v2.clear()
     assert store._services(manifest.run_id())[1].backend == "cuda"
@@ -406,7 +427,7 @@ def test_existing_cpu_contract_cannot_promote_after_services(network, authority)
     assert store._services(manifest.run_id())[1].backend == "cpu"
     store._services_v2.clear()
     with pytest.raises(ChallengeError, match="precede"):
-        store._bootstrap_backend_v2(manifest, configs, results, raw)
+        bootstrap(store, manifest, configs, results, raw)
 
 
 @pytest.mark.parametrize("fault", ["owner", "runtime", "artifact", "config", "cpu_summary"])
@@ -421,6 +442,7 @@ def test_invalid_reviewed_authority_rejects_without_install(authority, fault):
         data = json.loads(results[0].read_bytes())
         data["environment"]["drivers"] = ["wrong", "wrong"]
         results[0].write_text(json.dumps(data))
+        gpu.attest(results[0])  # The host signs what it reports; the runtime is what is wrong.
     elif fault == "artifact":
         (results[0].parent / "round-1/published/rank-0/state.safetensors").write_bytes(b"changed")
     elif fault == "cpu_summary":
@@ -431,28 +453,9 @@ def test_invalid_reviewed_authority_rejects_without_install(authority, fault):
         configs[0].write_bytes(b"{}")
     if fault in ("runtime", "cpu_summary", "config"):
         # Even owner-reviewed bytes must pass runtime/config validation.
-        evidence = {
-            "run_id": manifest.run_id(),
-            "backend": "cuda",
-            "reference_hash": sha256_hex(
-                canonicalize(manifest.training.reference_spec.model_dump(mode="json"))
-            ),
-            "layout_hash": manifest.training.reference_spec.layout.model_dump_json(),
-            "configs": [fsha(p) for p in configs],
-            "results": [fsha(p) for p in results],
-            "summaries": [
-                fsha(path.parent / f"round-{w}/published/rank-{rank}/summary.json")
-                for path in results
-                for w in range(2)
-                for rank in range(2)
-            ],
-        }
-        receipt = Receipt(w=0, commit_hash=sha256_hex(canonicalize(evidence)), received_round=1)
-        raw = canonicalize(
-            envelope_v2.seal(service.OWNER, "Receipt", manifest.run_id(), receipt, 100)
-        )
+        raw = reviewed(manifest, gpu.evidence_for(manifest, configs, results))
     with pytest.raises((ChallengeError, ValueError, Reject)):
-        store._bootstrap_backend_v2(manifest, configs, results, raw)
+        bootstrap(store, manifest, configs, results, raw)
     assert (
         store._db.execute("SELECT COUNT(*) FROM records_v2 WHERE kind='qualification'").fetchone()[
             0
@@ -464,6 +467,7 @@ def test_invalid_reviewed_authority_rejects_without_install(authority, fault):
 # Manifest reference (sm_count, driver) and the host devices' recorded (capability, SM count).
 RTX_5090 = {"sm_count": 170, "driver": "595.84", "capability": [12, 0], "devices": 170}
 B300 = {"sm_count": 148, "driver": "595.91.07", "capability": [10, 3], "devices": 148}
+PRODUCTION = {**RTX_5090, "ledger_mode": "production"}
 
 
 @pytest.mark.parametrize(
@@ -474,7 +478,7 @@ B300 = {"sm_count": 148, "driver": "595.91.07", "capability": [10, 3], "devices"
 )
 def test_qualified_device_class_installs_cuda_backend(authority):
     store, manifest, configs, results, raw = authority
-    store._bootstrap_backend_v2(manifest, configs, results, raw)
+    bootstrap(store, manifest, configs, results, raw)
     register(store, manifest)
     assert store._backend_v2(manifest) == "cuda"
 
@@ -498,7 +502,7 @@ def test_qualified_device_class_installs_cuda_backend(authority):
 def test_unqualified_or_off_reference_device_installs_nothing(authority, error):
     store, manifest, configs, results, raw = authority
     with pytest.raises((ChallengeError, ValueError), match=error):
-        store._bootstrap_backend_v2(manifest, configs, results, raw)
+        bootstrap(store, manifest, configs, results, raw)
     assert (
         store._db.execute("SELECT COUNT(*) FROM records_v2 WHERE kind='qualification'").fetchone()[
             0
@@ -509,21 +513,19 @@ def test_unqualified_or_off_reference_device_installs_nothing(authority, error):
 
 def test_conflicting_reviewed_record_rejects(authority):
     store, manifest, configs, results, raw = authority
-    store._bootstrap_backend_v2(manifest, configs, results, raw)
+    bootstrap(store, manifest, configs, results, raw)
     data = json.loads(results[0].read_bytes())
     data["elapsed_seconds"] = 2
     results[0].write_text(json.dumps(data))
+    gpu.attest(results[0])  # Host 0 honestly signs the edited result: only the record conflicts.
     record = store._record_v2(
         manifest.run_id(),
         "qualification",
         manifest.training.reference_spec.image_digest,
     )
-    evidence = envelope_v2.load_json(store.objects.get(record["authority_hash"]))
-    evidence["results"] = [fsha(p) for p in results]
-    receipt = Receipt(w=0, commit_hash=sha256_hex(canonicalize(evidence)), received_round=1)
-    raw = canonicalize(envelope_v2.seal(service.OWNER, "Receipt", manifest.run_id(), receipt, 100))
+    raw = reviewed(manifest, gpu.evidence_for(manifest, configs, results))
     with pytest.raises(ChallengeError, match="conflicts"):
-        store._bootstrap_backend_v2(manifest, configs, results, raw)
+        bootstrap(store, manifest, configs, results, raw)
     assert (
         store._record_v2(
             manifest.run_id(),
@@ -534,13 +536,308 @@ def test_conflicting_reviewed_record_rejects(authority):
     )
 
 
+def qualification_records(store):
+    row = store._db.execute("SELECT COUNT(*) FROM records_v2 WHERE kind='qualification'")
+    return row.fetchone()[0]
+
+
+def test_relabelled_copy_is_refused_at_the_gate_and_installs_nothing(authority):
+    # Given: the owner is handed host 1 as a byte copy of host 0 whose labels, and config hash,
+    # were rewritten to pass every per-host check. Lens red team B, Q1, through the real store.
+    store, manifest, configs, results, _ = authority
+    one, two = results
+    shutil.rmtree(two.parent)
+    shutil.copytree(one.parent, two.parent)
+    data = json.loads(two.read_bytes())
+    data.update(machine_id=11, instance_id=2, role="h1", config_sha256=fsha(configs[1]))
+    two.write_text(json.dumps(data))
+    raw = reviewed(manifest, gpu.evidence_for(manifest, configs, results))
+    # When / Then: host 1's pinned key never signed that statement.
+    with pytest.raises(Reject, match="^qualification_attestation_signature$"):
+        bootstrap(store, manifest, configs, results, raw)
+    assert qualification_records(store) == 0
+
+
+def test_strict_record_carries_host_attestation_and_resolves_cuda(authority):
+    # Given
+    store, manifest, configs, results, raw = authority
+    # When
+    bootstrap(store, manifest, configs, results, raw)
+    register(store, manifest)
+    # Then: the record holds the fingerprints and file digests the owner signed...
+    record = store._record_v2(
+        manifest.run_id(), "qualification", manifest.training.reference_spec.image_digest
+    )
+    expected = gpu.evidence_for(manifest, configs, results)["host_attestation"]
+    assert record["host_attestation"] == expected
+    assert store._backend_v2(manifest) == "cuda"
+    # ...and the object store holds the four files those digests name.
+    for path in results:
+        for name in (host_attest.ATTESTATION, host_attest.SIGNATURE):
+            assert store.objects.get(fsha(path.parent / name)) == (path.parent / name).read_bytes()
+
+
+def install_unattested(store, manifest, configs, results, *, record):
+    """A qualification record whose evidence holds no host_attestation, put in the store the way
+    bootstrap does: `label_only`, with its mark, or `legacy`, the seven keys signed before
+    attestations existed (a store installed long ago holds such a record)."""
+    evidence = gpu.evidence_for(manifest, configs, results, label_only=True)
+    if record == "legacy":
+        del evidence["qualification_mode"]
+    receipt = envelope_v2.parse_envelope(reviewed(manifest, evidence)).model_dump(mode="json")
+    held = {**evidence, "authority_hash": store.objects.put(canonicalize(evidence))}
+    held["receipt"] = receipt
+    image = manifest.training.reference_spec.image_digest
+    store._put_record_v2(manifest.run_id(), "qualification", image, held)
+
+
+@pytest.mark.parametrize(
+    "authority",
+    [None, PRODUCTION],
+    indirect=True,
+    ids=["test_ledger", "production_ledger"],
+)
+@pytest.mark.parametrize("record", ["strict", "label_only", "legacy"])
+def test_only_a_test_run_may_stand_on_a_qualification_without_attested_hosts(authority, record):
+    # Given: a run qualified on attested hosts, by label only, or by a record installed before
+    # attestations existed.
+    store, manifest, configs, results, raw = authority
+    if record == "strict":
+        bootstrap(store, manifest, configs, results, raw)
+    else:
+        install_unattested(store, manifest, configs, results, record=record)
+    register(store, manifest)
+    production = (
+        EconomicsPolicyV2.model_validate_json(
+            store.objects.get(manifest.network.economics_policy_hash)
+        ).ledger_mode
+        == "production"
+    )
+    # When / Then: a production run refuses to build its services on the unattested record, and
+    # says what the record is; a test run keeps every record it has.
+    if production and record != "strict":
+        kind = record.replace("_", "-")
+        with pytest.raises(ChallengeError, match=rf"attested hosts.*{kind}") as refused:
+            store._services(manifest.run_id())
+        assert refused.value.status == 409
+        assert manifest.run_id() not in store._services_v2
+    else:
+        escrow, admission, _ = store._services(manifest.run_id())
+        assert admission.backend == "cuda" and (escrow.policy.ledger_mode == "production") == (
+            production
+        )
+
+
+@pytest.mark.parametrize("authority", [PRODUCTION], indirect=True, ids=["production_ledger"])
+def test_label_only_bootstrap_of_a_production_manifest_installs_nothing(authority):
+    # Given: the production economics policy is already in the object store, so the store can tell.
+    store, manifest, configs, results, _ = authority
+    raw = reviewed(manifest, gpu.evidence_for(manifest, configs, results, label_only=True))
+    # When / Then: refused before a record that no production run could use is installed.
+    with pytest.raises(ChallengeError, match="attested hosts") as refused:
+        store._bootstrap_backend_v2(manifest, configs, results, raw, pins=None)
+    assert refused.value.status == 409
+    assert qualification_records(store) == 0
+
+
+@pytest.mark.parametrize("receipt", ["marked", "signed_before_the_mark"])
+def test_label_only_installs_the_evidence_its_receipt_names_and_is_idempotent(authority, receipt):
+    # Given: results of the Vast lifecycle, signed by an owner who named the label-only mode,
+    # over the evidence with its mark, or (a receipt from before the mark) over the seven keys.
+    store, manifest, configs, results, _ = authority
+    evidence = gpu.evidence_for(manifest, configs, results, label_only=True)
+    if receipt == "signed_before_the_mark":
+        del evidence["qualification_mode"]
+    raw = reviewed(manifest, evidence)
+    # When
+    store._bootstrap_backend_v2(manifest, configs, results, raw, pins=None)
+    store._bootstrap_backend_v2(manifest, configs, results, raw, pins=None)
+    # Then: the record is the evidence that was signed, and a re-bootstrap is the same record.
+    record = store._record_v2(
+        manifest.run_id(), "qualification", manifest.training.reference_spec.image_digest
+    )
+    held = envelope_v2.load_json(store.objects.get(record["authority_hash"]))
+    assert held == evidence and "host_attestation" not in held
+    # The seven keys signed before attestations existed, and the image measurement of the results.
+    plain = [
+        "backend",
+        "configs",
+        "image_sources_sha256",
+        "layout_hash",
+        "reference_hash",
+        "results",
+        "run_id",
+        "summaries",
+    ]
+    if receipt == "marked":
+        assert held["qualification_mode"] == record["qualification_mode"] == "label-only"
+        assert sorted(held) == sorted([*plain, "qualification_mode"])
+    else:
+        assert sorted(held) == plain and "qualification_mode" not in record
+    assert qualification_records(store) == 1
+    # And a test run stands on either record.
+    register(store, manifest)
+    assert store._services(manifest.run_id())[1].backend == "cuda"
+
+
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("fingerprint_of_the_other_host", "qualification_host_fingerprint_mismatch"),
+        ("unrelated_known_hosts", "qualification_known_hosts_changed"),
+    ],
+)
+def test_wrong_typed_fingerprint_or_unrelated_known_hosts_is_refused(
+    authority, tmp_path, fault, code
+):
+    # Given: the pins the owner typed, with one wrong.
+    store, manifest, configs, results, raw = authority
+    pins = gpu.typed_pins(list(results))
+    if fault == "fingerprint_of_the_other_host":
+        pins[0] = pins[0]._replace(fingerprint=pins[1].fingerprint)
+    else:
+        unrelated = tmp_path / "unrelated_known_hosts"
+        unrelated.write_text(f"host-0 {gpu.host_key(5)[1]}\n")
+        pins[0] = pins[0]._replace(known_hosts=unrelated)
+    # When / Then
+    with pytest.raises(Reject, match=f"^{code}$"):
+        store._bootstrap_backend_v2(manifest, configs, results, raw, pins=pins)
+    assert qualification_records(store) == 0
+
+
+@pytest.mark.parametrize(
+    "swapped,message",
+    [
+        (host_attest.SIGNATURE, "^qualification custody changed during bootstrap$"),
+        ("round-0/published/rank-0/summary.json", "^qualification summary custody changed"),
+    ],
+    ids=["attestation_signature", "summary"],
+)
+def test_evidence_files_changed_during_bootstrap_are_a_409(
+    authority, monkeypatch, swapped, message
+):
+    # Given: a file replaced after compare() verified it and before the evidence is stored.
+    store, manifest, configs, results, raw = authority
+    verify = gpu.driver.compare
+
+    def compare_then_swap(*args, **kwargs):
+        verdict = verify(*args, **kwargs)
+        (results[1].parent / swapped).write_text('{"backend": "cuda", "swapped": true}')
+        return verdict
+
+    monkeypatch.setattr(gpu.driver, "compare", compare_then_swap)
+    # When / Then
+    with pytest.raises(ChallengeError, match=message):
+        bootstrap(store, manifest, configs, results, raw)
+    assert qualification_records(store) == 0
+
+
+@pytest.mark.parametrize("label_only", [False, True], ids=["strict", "label_only"])
+def test_builder_equals_the_independent_mirror(authority, label_only):
+    # Given: the store's builder and the test mirror, which does not import it.
+    store, manifest, configs, results, _ = authority
+    keys = None if label_only else gpu.pins(list(results))
+    attestations = [] if label_only else [host_attest.load(p) for p in results]
+    # When
+    built = ChallengeStore._qualification_evidence_v2(
+        manifest,
+        [p.read_bytes() for p in configs],
+        [p.read_bytes() for p in results],
+        results,
+        keys,
+        attestations,
+    )
+    # Then: any drift between the two is a failing digest here instead of a 403 in production.
+    assert built == gpu.evidence_for(manifest, configs, results, label_only=label_only)
+
+
+BOOTSTRAP_SCRIPT = TREE / "scripts/ops/backend_bootstrap.py"
+
+
+def test_backend_bootstrap_script_calls_the_store_builder():
+    # Given: the script is top-level code with no test of its own; a hand-built copy of the
+    # evidence would drift from the store's and fail only in production, as a 403.
+    tree = ast.parse(BOOTSTRAP_SCRIPT.read_text())
+    strings = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)}
+    attributes = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    # When / Then
+    assert "reference_hash" not in strings
+    assert "_qualification_evidence_v2" in attributes
+
+
+def test_backend_bootstrap_script_requires_an_explicit_trust_mode():
+    # Given / When: neither --label-only nor --known-hosts; argparse refuses before any file.
+    done = subprocess.run(
+        [sys.executable, str(BOOTSTRAP_SCRIPT)]
+        + ["--manifest-envelope", "m", "--owner-seed", "s", "--config", "c0", "c1"]
+        + ["--result", "r0", "r1"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    # Then
+    assert done.returncode == 2
+    assert "--known-hosts" in done.stderr and "required" in done.stderr
+
+
+@pytest.mark.parametrize("mode", ["strict", "label_only"])
+def test_backend_bootstrap_script_installs_the_evidence_the_owner_signs(authority, tmp_path, mode):
+    # Given: the production tool run as the owner runs it, over the fixture's rescued files.
+    store, manifest, configs, results, _ = authority
+    state = store.state_dir  # The fixture's store holds the beacon rounds the receipt is sealed at.
+    seed = tmp_path / "owner.seed"
+    seed.write_bytes(b"\x71" * 32)
+    seed.chmod(0o600)
+    envelope = tmp_path / "manifest-envelope.json"
+    signed = envelope_v2.seal(service.OWNER, "RunManifestV2", manifest.run_id(), manifest, 100)
+    envelope.write_bytes(canonicalize(signed))
+    typed = gpu.typed_pins(list(results))
+    trust = ["--label-only"]
+    if mode == "strict":
+        trust = ["--known-hosts", *(str(p.known_hosts) for p in typed)]
+        trust += ["--host-fingerprint", *(p.fingerprint for p in typed)]
+    command = [sys.executable, str(BOOTSTRAP_SCRIPT), "--manifest-envelope", str(envelope)]
+    command += ["--owner-seed", str(seed), "--config", *map(str, configs)]
+    command += ["--result", *map(str, results), *trust]
+    params = store.params
+    environment = {
+        "CHALLENGE_STATE_DIR": str(state),
+        "CHALLENGE_SLUG": params.challenge_slug,
+        "HYPERTRAIN_OWNER_HOTKEY": service.OWNER.ss58,
+        "HYPERTRAIN_GENESIS_UNIX": str(params.genesis_unix),
+        "HYPERTRAIN_EPOCH_SECONDS": str(params.epoch_seconds),
+        "HYPERTRAIN_EPOCHS_PER_ROUND": str(params.epochs_per_round),
+        "HYPERTRAIN_VEST_ROUNDS": str(params.vest_rounds),
+    }
+    # When
+    done = subprocess.run(
+        command,
+        env=os.environ | environment,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    # Then: the store accepted the receipt over the digest the script computed, and that digest
+    # is the independent mirror's.
+    assert done.returncode == 0, done.stderr
+    printed = json.loads(done.stdout.splitlines()[-1])
+    evidence = gpu.evidence_for(manifest, configs, results, label_only=mode == "label_only")
+    assert printed["authority_hash"] == sha256_hex(canonicalize(evidence))
+    assert printed["mode"] == ("strict" if mode == "strict" else "label-only")
+    assert printed["host_keys"] == (
+        evidence["host_attestation"]["host_keys"] if mode == "strict" else []
+    )
+
+
 def test_changed_authority_and_cpu_anchor_reject(authority):
     from hypertrain.auditor.replay import AnchorCache
     from hypertrain.trainer.config import TrainConfig
     from hypertrain.trainer.model import init_params
 
     store, manifest, configs, results, raw = authority
-    store._bootstrap_backend_v2(manifest, configs, results, raw)
+    bootstrap(store, manifest, configs, results, raw)
     register(store, manifest)
     assert store._backend_v2(manifest) == "cuda"
     cache = AnchorCache()
@@ -585,7 +882,7 @@ def test_production_requires_qualification(authority):
 
 def test_cuda_dispatch_rejects_missing_accepted_round(authority):
     store, manifest, configs, results, raw = authority
-    store._bootstrap_backend_v2(manifest, configs, results, raw)
+    bootstrap(store, manifest, configs, results, raw)
     register(store, manifest)
     before = store._db.total_changes
     with pytest.raises(ChallengeError, match="missing accepted round: 0"):
@@ -683,7 +980,7 @@ def test_cuda_dispatch_at_admission_audit_and_geometry(authority, monkeypatch, l
             expected.append(("geometry", "cuda"))
         assert calls == expected and not store._lease_guards_v2
         return
-    store._bootstrap_backend_v2(manifest, configs, results, raw)
+    bootstrap(store, manifest, configs, results, raw)
     register(store, manifest)
     admission = store._services(manifest.run_id())[1]
     assert admission.backend == "cuda"
@@ -963,6 +1260,7 @@ def test_referee_uses_frozen_backend_before_evidence(authority, monkeypatch, mod
                 (run, hot.ss58),
             ).fetchone()
             contest = Contest.model_validate_json(row[0])
+            current.mark_verdict_mismatch(hot.ss58, contest.w)
             h = sha256_hex(canonicalize([run, contest.verdict_hash, hot.ss58]))
             origin = store._db.execute(
                 "SELECT origin FROM escrow_units WHERE owner=? AND bucket='available' "
@@ -1087,7 +1385,7 @@ def test_referee_uses_frozen_backend_before_evidence(authority, monkeypatch, mod
         assert not store._lease_guards_v2
         return
     if mode != "cpu":
-        store._bootstrap_backend_v2(manifest, configs, results, raw)
+        bootstrap(store, manifest, configs, results, raw)
     register(store, manifest)
     _, _, disputes = store._services(manifest.run_id())
     cache = AnchorCache()

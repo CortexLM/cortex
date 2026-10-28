@@ -63,6 +63,18 @@ from hypertrain.protocol.messages_v2 import (
 
 SeizureReason = Literal["TRAINING_FRAUD", "NO_SHOW", "AUDIT_MISMATCH"]
 
+# A no-show is a strike for this many work screens (D63): a second one inside the window
+# suspends the admission like a fraud, a later one is a first again. The window has to outlast two
+# full PROBATION -> ACTIVE ladders (D70), or a miner that comes back as fast as it can would
+# always meet a window that has closed and the suspension tier could never be reached; ADR 0010
+# (Strike window) works the numbers out for the TEST and production policies.
+NO_SHOW_STRIKE_WINDOW_SCREENS = 4
+
+
+def no_show_strike_window(work_screen_epoch_rounds: int) -> int:
+    """The strike window, in beacon rounds, of a policy with that screen length."""
+    return NO_SHOW_STRIKE_WINDOW_SCREENS * work_screen_epoch_rounds
+
 
 @dataclass(frozen=True)
 class _Standing:
@@ -1027,19 +1039,25 @@ class Admission:
             self.store.enqueue_lock(op, env.signer)
         return self.store.reconcile_lock(op.operation_id).event_hash
 
+    def bond_required(self, locked: int) -> int:
+        """The locked units an admission needs to be eligible (`locked` only matters when the
+        policy has no collectible bound: then no amount is enough)."""
+        p = self.escrow.policy
+        denominator = p.s_lower_ppm * p.beta_ppm * 1_000_000
+        return max(
+            p.S_min_units,
+            self.escrow.manifest.training.verify.s_min_units(p.R_collectible_units),
+            (p.G_max_units * 10**18 + denominator - 1) // denominator
+            if denominator
+            else p.G_max_units + locked + 1,
+        )
+
     def status(self, hotkey: str, *, now: int) -> AdmissionStatus:
         self._beacon(now)
         r = self.store.record(hotkey)
         units, receipt = self.escrow.locked(r.admission_id, r.coldkey)
         p = self.escrow.policy
-        denominator = p.s_lower_ppm * p.beta_ppm * 1_000_000
-        required = max(
-            p.S_min_units,
-            self.escrow.manifest.training.verify.s_min_units(p.R_collectible_units),
-            (p.G_max_units * 10**18 + denominator - 1) // denominator
-            if denominator
-            else p.G_max_units + units + 1,
-        )
+        required = self.bond_required(units)
         funding = FundedStatus(
             self.escrow.run_id,
             hotkey,
@@ -1170,20 +1188,24 @@ class Admission:
             r = self.store.record(hotkey)
             if r.state != "SUSPENDED" or r.pending_dispute:
                 raise AdmissionError("RESUME_STATE")
-            self.store.transition(r.admission_id, "PROBATION", "RESUME_FRESH_PROBATION", now)
-            self.store.db.execute(
-                "UPDATE admission_trial_results SET outcome='INFRASTRUCTURE' "
-                "WHERE epoch=(SELECT trial_epoch FROM admissions_v2 WHERE admission_id=?) "
-                "AND outcome='OPEN'",
-                (r.admission_id,),
-            )
-            self.store.db.execute(
-                "UPDATE admissions_v2 SET challenge=NULL,proof_digest=NULL,reference_json=NULL,"
-                "reference_commitment=NULL,screen_json=NULL,"
-                "clean_count=0,canary_blocks='',screen_until=0,seed_beacon=? WHERE "
-                "admission_id=?",
-                (now + 1, r.admission_id),
-            )
+            self._fresh_probation(r.admission_id, "RESUME_FRESH_PROBATION", now)
+
+    def _fresh_probation(self, admission_id: str, reason: str, now: int) -> None:
+        """New trials from nothing: the open trial is void, the clean count and screen restart."""
+        self.store.transition(admission_id, "PROBATION", reason, now)
+        self.store.db.execute(
+            "UPDATE admission_trial_results SET outcome='INFRASTRUCTURE' "
+            "WHERE epoch=(SELECT trial_epoch FROM admissions_v2 WHERE admission_id=?) "
+            "AND outcome='OPEN'",
+            (admission_id,),
+        )
+        self.store.db.execute(
+            "UPDATE admissions_v2 SET challenge=NULL,proof_digest=NULL,reference_json=NULL,"
+            "reference_commitment=NULL,screen_json=NULL,"
+            "clean_count=0,canary_blocks='',screen_until=0,seed_beacon=? WHERE "
+            "admission_id=?",
+            (now + 1, admission_id),
+        )
 
     def reseed(self, admission_id: str, *, now: int) -> dict[str, JsonValue]:
         """Give an identity whose trial window is dead a new one: write `seed_beacon = now + 1`.
@@ -1494,11 +1516,14 @@ class Admission:
         rewards, as part of slashing a residual lock (after an earlier bond-only seizure there
         is none, and the rewards survive), and bans the admission (terminal; `lock` then
         answers LOCK_BANNED).
-        AUDIT_MISMATCH (a round-stage audit mismatch the caller has confirmed as the miner's):
-        suspends the admission, reason AUDIT_MISMATCH, adds one strike, and burns the bond alone.
+        AUDIT_MISMATCH (a round-stage audit mismatch the caller has confirmed as the miner's)
+        suspends the admission with the seizure reason as the state reason, adds one strike and
+        burns the bond alone. NO_SHOW (a roster member excluded for its silence, ADR 0011 Part 8,
+        D63) adds one strike and burns the bond alone too, but the first one puts the admission
+        back on a fresh probation (new trials, no suspension); a second one inside
+        `NO_SHOW_STRIKE_WINDOW_SCREENS` work screens of an earlier one suspends it like a fraud.
         The coldkey stays bound by the one-non-ACTIVE-admission rule, as in probation, and the
-        round's reward of the honest peers is not touched. NO_SHOW (a roster member that never
-        committed): the bond alone; the admission stays, ineligible until it is funded again.
+        round's reward of the honest peers is not touched.
         """
         TypeAdapter(Hex64).validate_python(evidence_hash)
         if reason not in ("TRAINING_FRAUD", "NO_SHOW", "AUDIT_MISMATCH"):
@@ -1545,13 +1570,32 @@ class Admission:
                 burned += units
             if reason == "TRAINING_FRAUD" and r.state != "BANNED":
                 self.store.transition(admission_id, "BANNED", "FINALIZED_TRAINING_FRAUD", now)
-            if reason == "AUDIT_MISMATCH" and first and r.state != "BANNED":
-                self.store.transition(admission_id, "SUSPENDED", "AUDIT_MISMATCH", now)
+            if reason in ("AUDIT_MISMATCH", "NO_SHOW") and first and r.state != "BANNED":
+                if reason == "NO_SHOW" and r.state == "SUSPENDED":
+                    pass  # it keeps the state and the reason it was suspended for, and a strike
+                elif reason == "NO_SHOW" and not self._repeat_no_show(
+                    admission_id, evidence_hash, now
+                ):
+                    self._fresh_probation(admission_id, reason, now)
+                else:
+                    self.store.transition(admission_id, "SUSPENDED", reason, now)
                 self.store.db.execute(
                     "UPDATE admissions_v2 SET strikes=strikes+1 WHERE admission_id=?",
                     (admission_id,),
                 )
         return burned
+
+    def _repeat_no_show(self, admission_id: str, evidence_hash: str, now: int) -> bool:
+        """Whether an earlier no-show of the admission, for other evidence, is still a strike."""
+        window = no_show_strike_window(self.policy.work_screen_epoch_rounds)
+        return (
+            self.store.db.execute(
+                "SELECT 1 FROM admission_sanctions WHERE admission_id=? AND reason='NO_SHOW' "
+                "AND evidence_hash!=? AND beacon>? LIMIT 1",
+                (admission_id, evidence_hash, now - window),
+            ).fetchone()
+            is not None
+        )
 
     def settle_fraud(self, dispute_id: str, *, now: int) -> bool:
         """Seize and ban on a referee verdict of training fraud against the miner.

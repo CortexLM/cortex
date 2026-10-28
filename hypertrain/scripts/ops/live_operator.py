@@ -105,6 +105,24 @@ def refuse_service_run(m: Master) -> None:
         raise SystemExit("run has a service-admission record; this helper refuses it")
 
 
+# The Q/4 caps of the aggregation policy are protocol constants: a round needs four members.
+MIN_MEMBERS = 4
+
+
+def check_roster_floor(hotkeys: list[str], tolerate: int) -> None:
+    """A roster of R members tolerates R - 4 silent ones (ADR 0011 Part 8): refuse a roster that
+    tolerates fewer than asked, with the arithmetic. `--tolerate 0` opens four on purpose."""
+    if tolerate < 0:
+        raise SystemExit("--tolerate must be >= 0")
+    if len(hotkeys) < MIN_MEMBERS + tolerate:
+        raise SystemExit(
+            f"{len(hotkeys)} hotkeys tolerate {max(len(hotkeys) - MIN_MEMBERS, 0)} silent "
+            f"members (a round needs {MIN_MEMBERS}, so R tolerates R - {MIN_MEMBERS}) and "
+            f"--tolerate {tolerate} asks for {tolerate}: open at least {MIN_MEMBERS + tolerate} "
+            "hotkeys, or lower --tolerate"
+        )
+
+
 def check_open_shape(w: int, hotkeys: list[str], offsets: list[int]) -> None:
     if w < 0 or not hotkeys or len(set(hotkeys)) != len(hotkeys):
         raise SystemExit("need w >= 0 and unique hotkeys")
@@ -116,6 +134,18 @@ def check_open_shape(w: int, hotkeys: list[str], offsets: list[int]) -> None:
         raise SystemExit("offsets: six strictly increasing positive beacon offsets")
     if not 2 <= offsets[5] - offsets[3] <= 200 or offsets[4] <= offsets[2]:
         raise SystemExit("offsets: need 2 <= d_final-d_audit <= 200 and d_upload > d_commit")
+
+
+def previous_final_hash(m: Master, w: int) -> str:
+    """What the opening of round w + 1 chains to: the finalize of round w, or the evidence of
+    its retirement when the round reached no tape (ADR 0011 Part 8, decision 11)."""
+    exists = "SELECT 1 FROM records_v2 WHERE run_id=? AND kind=? AND id=?"
+    if (
+        m.query(exists, m.run_id, "finalize", str(w)) is None
+        and m.query(exists, m.run_id, "retired", str(w)) is not None
+    ):
+        return str(m.record("retired", str(w))["evidence_hash"])
+    return sha256_hex(canonicalize(m.record("finalize", str(w))["body"]))
 
 
 def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dict:
@@ -135,7 +165,7 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
             k: torch.from_numpy(v.copy())
             for k, v in load_state(m.objects, applied["out_state"]).theta.items()
         }
-        prev_final = sha256_hex(canonicalize(m.record("finalize", str(w - 1))["body"]))
+        prev_final = previous_final_hash(m, w - 1)
     starts, roster = [], []
     for slot, hot in enumerate(hotkeys):
         status = m.call("GET", "/admission/" + hot)
@@ -231,19 +261,21 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
     return m.call("POST", "/admin/rounds", signed, True)
 
 
-def included(m: Master, w: int, opening: RoundOpenV2) -> list[str]:
-    """Same set verified_inputs_v2 yields: roster minus 'excluded' records (store.py:7574-7581)."""
+def included(m: Master, w: int) -> list[str]:
+    """What finalize_v2 pays: the inputs of the applied tape, less every admission of a coldkey
+    convicted since.
+
+    The coldkey is read by the roster entry's admission id, which a rotation does not change.
+    """
     out = []
-    for entry in opening.roster:
-        identity = f"{w}:{entry.hotkey}"
-        if m.query(
-            "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='excluded' AND id=?",
-            m.run_id,
-            identity,
+    for item in m.record("tape-inputs", str(w))["inputs"]:
+        entry = item["roster"]
+        if not m.query(
+            "SELECT 1 FROM admissions_v2 b WHERE b.state='BANNED' AND b.coldkey="
+            "(SELECT coldkey FROM admissions_v2 WHERE admission_id=?)",
+            entry["admission_id"],
         ):
-            continue
-        m.record("commit", identity)  # verified_inputs_v2 requires it; refuse before POST
-        out.append(entry.hotkey)
+            out.append(entry["hotkey"])
     return sorted(out)
 
 
@@ -264,7 +296,7 @@ def finalize(m: Master, w: int) -> dict:
     refuse_service_run(m)
     opening = RoundOpenV2.model_validate(m.record("round", str(w))["body"])
     applied = m.call("POST", f"/admin/rounds/{w}/aggregate", admin=True)
-    keep = included(m, w, opening)  # after the aggregate: it may leave out a member without a delta
+    keep = included(m, w)  # after the aggregate: it may leave out a member without a delta
     final = Finalize(
         w=w,
         final_theta_hash_w1=applied["theta_hash"],
@@ -288,6 +320,13 @@ def main(argv: list[str] | None = None) -> int:
     o.add_argument("--w", type=int, required=True)
     o.add_argument("--hotkey", action="append", required=True)
     o.add_argument("--offsets", required=True, help="d_open..d_final beacon offsets, 6 ints")
+    o.add_argument(
+        "--tolerate",
+        type=int,
+        default=1,
+        help="silent members the roster must survive (default 1: open at least 5 hotkeys); "
+        "0 opens four",
+    )
     sub.add_parser("audits").add_argument("--w", type=int, required=True)
     sub.add_parser("finalize").add_argument("--w", type=int, required=True)
     sub.add_parser("reseed").add_argument("--admission-id", required=True)
@@ -298,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError:
             raise SystemExit("offsets must be integers") from None
         check_open_shape(args.w, args.hotkey, offsets)
+        check_roster_floor(args.hotkey, args.tolerate)
     m = Master(args)
     if args.command == "open":
         out = open_round(m, args.w, args.hotkey, offsets)

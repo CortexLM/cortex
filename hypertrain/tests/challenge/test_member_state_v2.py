@@ -19,6 +19,7 @@ from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 
+from . import test_dispute_exit_v2 as disputes
 from . import test_service_network_v2 as fixtures
 from .audit_lease_fixture_v2 import D_AUDIT, seed_round
 from .five_identity_network_v2 import activate_identities
@@ -35,6 +36,16 @@ def seize(reason):
         admission.seize_bond(identity, reason=reason, evidence_hash=EVIDENCE, now=n.now)
 
     return apply
+
+
+def seize_a_no_show_twice(n, admission, hotkey, identity):
+    """The member is back in a roster (ACTIVE) when it stays silent a second time."""
+    seize("NO_SHOW")(n, admission, hotkey, identity)
+    with n.store._tx():
+        n.store._db.execute(
+            "UPDATE admissions_v2 SET state='ACTIVE' WHERE admission_id=?", (identity,)
+        )
+    admission.seize_bond(identity, reason="NO_SHOW", evidence_hash="cd" * 32, now=n.now)
 
 
 def rotate(n, admission, hotkey, identity):
@@ -66,6 +77,13 @@ def resume_on_fresh_probation(n, admission, hotkey, identity):
     admission.resume(hotkey, now=n.now)
 
 
+def lose_the_bond(n, admission, hotkey, identity):
+    """The bond leaves the ledger without a state change of the admission (a ledger fault: every
+    seizure of the product suspends)."""
+    with n.store._tx():
+        n.store._db.execute("UPDATE escrow_units SET units=0 WHERE bucket='admission_locked'")
+
+
 def end_the_screen(n, admission, hotkey, identity):
     with n.store._tx():
         n.store._db.execute(
@@ -83,7 +101,9 @@ def end_the_screen(n, admission, hotkey, identity):
         (suspend_for_a_dispute, "SUSPENDED"),
         (resume_on_fresh_probation, "NOT_LIVE"),
         (end_the_screen, "SCREEN_LAPSED"),
-        (seize("NO_SHOW"), "UNFUNDED"),
+        (seize("NO_SHOW"), "NOT_LIVE"),
+        (seize_a_no_show_twice, "SUSPENDED"),
+        (lose_the_bond, "UNFUNDED"),
     ],
     ids=[
         "fit",
@@ -93,6 +113,8 @@ def end_the_screen(n, admission, hotkey, identity):
         "pending-dispute",
         "fresh-probation",
         "screen-lapsed",
+        "first-no-show-is-probation",
+        "second-no-show-is-suspended",
         "unfunded",
     ],
 )
@@ -106,6 +128,29 @@ def test_the_cause_of_an_unfit_entry_is_named(network, change, cause):
     change(network, admission, hotkey, identity)
     # Then
     assert network.store._unfit_cause_v2(admission, hotkey, network.now) == cause
+
+
+def test_a_finalize_lists_nobody_of_a_convicted_coldkey(network):
+    # Given: three admissions, the second run by the owner of the first (several admissions may
+    # share a coldkey once the first is ACTIVE)
+    run = network.manifest.run_id()
+    first, second, third = activate_identities(network, fixtures, range(3))
+    with network.store._tx():
+        network.store._db.execute(
+            "UPDATE admissions_v2 SET coldkey=? WHERE admission_id=?",
+            (fixtures.COLD[0].ss58, second),
+        )
+    hotkeys = [key.ss58 for key in fixtures.HOT[:3]]
+    assert network.store._unconvicted_v2(reversed(hotkeys)) == sorted(hotkeys)
+    # When: the first is convicted of training fraud
+    network.store._services(run)[1].seize_bond(
+        first, reason="TRAINING_FRAUD", evidence_hash=EVIDENCE, now=network.now
+    )
+    # Then: its coldkey's other admission is left out with it; the unrelated one stays, and the
+    # second admission itself is not banned
+    assert network.store._unconvicted_v2(hotkeys) == [fixtures.HOT[2].ss58]
+    assert network.store._services(run)[1].store.by_id(second).state == "ACTIVE"
+    assert network.store._services(run)[1].store.by_id(third).state == "ACTIVE"
 
 
 @pytest.mark.parametrize("name", ["_unfit_cause_v2", "_exclude_unfit_members_v2"])
@@ -162,6 +207,42 @@ def test_only_an_audited_member_that_is_not_already_excluded_is_left_out(network
             "evidence_hash": sha256_hex(f"ht-ineligible/1|{run}|0|{keys[i].ss58}|ROTATED".encode()),
         }
     assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 5
+
+
+@pytest.mark.parametrize(
+    ("result", "status"),
+    [("MATCH", 409), ("MISMATCH", 200), (None, 200)],
+    ids=["match", "mismatch", "no-lease-row"],
+)
+def test_a_miner_cannot_contest_a_verdict_that_upholds_its_work(network, result, status):
+    # Given: the audit lease of the contesting miner says `result` (no row at all for None).
+    if result is not None:
+        with network.store._tx():
+            network.store._db.execute(
+                "INSERT INTO audit_leases_v2(id,run_id,w,hotkey,state,result) VALUES(?,?,?,?,?,?)",
+                (
+                    sha256_hex(b"lease"),
+                    network.manifest.run_id(),
+                    disputes.W,
+                    disputes.HOT[0].ss58,
+                    "completed",
+                    result,
+                ),
+            )
+    # When: it funds and opens a contest of that verdict.
+    _, response = disputes.post_dispute(network)
+    # Then: a MATCH has nothing to contest, so nothing is written; a MISMATCH, and a verdict
+    # with no lease row to look at, are contested as before.
+    assert response.status_code == status, response.text
+    miner = network.store._db.execute(
+        "SELECT state,pending_dispute FROM admissions_v2 WHERE hotkey=?", (disputes.HOT[0].ss58,)
+    ).fetchone()
+    opened = network.store._db.execute("SELECT COUNT(*) FROM disputes_v2").fetchone()[0]
+    if status == 409:
+        assert "NOTHING_TO_CONTEST" in response.text
+        assert (tuple(miner), opened) == (("APPLIED", 0), 0)
+    else:
+        assert (tuple(miner), opened) == (("SUSPENDED", 1), 1)
 
 
 def rotation(w: World, *, old=HOT, new=OTHER, operation: str = "33" * 32) -> bytes:

@@ -8,7 +8,7 @@ from dataclasses import asdict, replace
 
 import pytest
 
-from hypertrain.challenge.finality_v2 import RoundStatus, exclude, require_open
+from hypertrain.challenge.finality_v2 import RoundStatus, exclude, require_open, retire
 from hypertrain.ledger.escrow_v2 import (
     EscrowError,
     EscrowV2,
@@ -174,9 +174,15 @@ def withdrawals(ledger: EscrowV2) -> list[dict]:
 
 # Rounds 0..n-1 as finality holds them, round n is offered to the ledger. A round that cannot be
 # paid or repaired any more is recorded and passed over; every other state keeps blocking.
+def retired(run: str, w: int) -> RoundStatus:
+    """A round that could not reach a tape, closed with the model unchanged (ADR 0011 Part 8)."""
+    return retire(replace(unresolved(run, w), applied=False), "00" * 32, H)
+
+
 CLOSURES = {
     "whole-round-exclusion": ((closed_unpaid, closed_unpaid), [0, 1]),
     "accepted-rollback": ((rolled_back, rolled_back), [0, 1]),
+    "retired": ((retired, retired), [0, 1]),
     "pending": ((unresolved,), []),
     "settled": (
         (lambda run, w: replace(unresolved(run, w), disposition="SETTLED", resolution_hash=H),),
@@ -217,6 +223,37 @@ def test_next_round_mints_only_when_the_previous_rounds_closed_without_reward(
         with pytest.raises(EscrowError, match="FINALIZE_ORDER"):
             ledger.reward_finalize(reward, evidence)
         assert (withdrawals(ledger), minted_since(ledger, issued)) == ([], 0)
+
+
+@pytest.mark.parametrize("paid_inputs", [0, 1], ids=["nobody-paid", "one-input-paid"])
+def test_a_round_finalized_with_no_paid_input_is_passed_over_and_a_paid_one_is_not(
+    network, ledger: EscrowV2, paid_inputs: int
+) -> None:
+    # Given: round 0 settled by a Finalize that lists `paid_inputs` hotkeys (none when every
+    # input of its tape was banned), and round 1 applied.
+    store, run = network.store, network.manifest.run_id()
+    final0, _, _ = signed_round(network, ledger, 0)
+    _, reward1, evidence1 = signed_round(network, ledger, 1)
+    final0 = final0.model_copy(update={"included": final0.included[:paid_inputs]})
+    settled = replace(unresolved(run, 0), disposition="SETTLED", resolution_hash=H)
+    put_finality(store, settled)
+    with store._tx():
+        envelope = EnvelopeV2.model_validate(seal(N.COORD, "Finalize", run, final0, 200))
+        store._put_record_v2(run, "finalize", "0", envelope.model_dump(mode="json"))
+    put_finality(store, unresolved(run, 1))
+    issued = ledger.balances().issued
+    # When: round 1 is finalized.
+    if paid_inputs:
+        # Then: a settled round that did pay somebody is never passed over.
+        with pytest.raises(EscrowError, match="FINALIZE_ORDER"):
+            ledger.reward_finalize(reward1, evidence1)
+        assert (withdrawals(ledger), minted_since(ledger, issued)) == ([], 0)
+    else:
+        # Then: the round nobody was paid in is recorded once and round 1 mints.
+        ledger.reward_finalize(reward1, evidence1)
+        assert [(w["w"], w["closure_hash"]) for w in withdrawals(ledger)] == [(0, H)]
+        assert minted_since(ledger, issued) == ledger.policy.round_reward_units
+        ledger.verify()
 
 
 def test_rounds_closed_without_reward_are_recorded_in_gaps_only_and_order_still_holds(

@@ -176,18 +176,18 @@ def test_the_model_stands_for_the_client_timeout_and_the_gate_bound_of_the_code(
 ):
     """The model copies two constants of the code; a change of either must reach this file."""
     import inspect
-    import re
     from types import SimpleNamespace
 
     import hypertrain.beacon.__main__ as beacon_cli
+    from hypertrain.challenge.exit_v2 import MAX_LAG_ROUNDS
     from hypertrain.challenge.store import ChallengeStore
 
     from .beacon_model import LAG_BOUND
 
-    gate = re.search(
-        r"now < emitted - (\d+)", inspect.getsource(ChallengeStore._snapshot_current_v2)
+    assert "now < emitted - MAX_LAG_ROUNDS" in inspect.getsource(
+        ChallengeStore._snapshot_current_v2
     )
-    assert gate and int(gate[1]) == LAG_BOUND
+    assert MAX_LAG_ROUNDS == LAG_BOUND
 
     seen: dict[str, object] = {}
 

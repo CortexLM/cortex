@@ -198,6 +198,24 @@ stdout contains the signed proof/screen pair. The operator independently prepare
 and finalizes references through authenticated admin routes; miners cannot
 self-finalize or turn a successful probe into ACTIVE status.
 
+Every object a miner uploads (an artifact, a part, a part index) is
+`POST /v2/runs/{run_id}/objects/{sha256}`. No header carries a signature; the
+body is a frame: 4 bytes (big endian) giving the length of a signed ht/2
+envelope of type `ObjectUploadRequest {sha256, size}`, that envelope, then
+exactly `size` bytes of the object. The envelope is signed by the admitted
+hotkey and binds the uploader, the sha256 and the length, so the master checks
+the signature, the uploader's admission and the pinned object limit before it
+reads the object. Its expiry is at most 20 rounds (about a minute) past the
+master's current round: the miner signs the round it read (reused for at most
+15 seconds) plus 20, and signs again for every retry. Refusals: an envelope
+longer than 4096 bytes or cut short, a bad signature, another run, another
+sha256 than the path's, an expired or too distant envelope, an unregistered
+hotkey, or a hotkey that is not admitted answer 403; a signed size above the
+pinned object limit, or more bytes than the signed size, 413; fewer bytes, or
+bytes that do not hash to the sha256, 422. The old `PUT` with `X-Hotkey` and
+`X-Object-Signature` headers is removed (405). Uploads are content-addressed,
+so repeating one is harmless; the miner retries transport errors and 5xx.
+
 Current admission policy fixes E=4 and requires 12 clean finalized participations
 plus canary blocks 1,2,3. The first four are shadow-only. Later PROBATION influence
 also requires funded eligibility; ACTIVE requires current screening, sufficient
@@ -247,6 +265,12 @@ finality record counts as open), because the roster names the hotkey and the old
 refused at intake the moment the admission moves: rotate between rounds. A retry of a rotation that was applied is still
 answered. There is no emergency rotation of a hotkey that a round lists.
 
+A reward follows its coldkey, not the hotkey that signed the work. A reward earned before a
+rotation (live, or a shadow reward whose original custody was signed by an earlier hotkey of the
+admission) is still validated, matured and paid: `get_weights` credits the admission's current
+hotkey, never the retired one. A banned coldkey is not paid whatever hotkey it holds: its
+matured units stay in its free balance and the epoch mass burns as unpaid.
+
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
 rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
 refused (`CHALLENGE_EXPIRED`) once more than `challenge_rounds` rounds have passed since
@@ -267,7 +291,10 @@ proof must be accepted by then. A challenge left unproven past its deadline is c
 `EXPIRED` by the master at the next beacon push (or at the next challenge request, which
 frees the place first). Nobody is suspended: the miner keeps its state, its clean trials and
 its screen, and a later request answers 409 `CHALLENGE_EXPIRED` until the operator reseeds
-the admission. The deadline round itself still accepts a proof. A trial whose proof was accepted is never expired
+the admission. A beacon pusher that was down or slowed (an operator changed the cadence during a trial, the S13
+incident) is the same case: its catch-up carries the beacon past the deadline, and the miner is
+refused, not suspended. The
+deadline round itself still accepts a proof. A trial whose proof was accepted is never expired
 by the clock, and its finalization may follow the deadline: the miner may re-post the exact
 accepted proof and screen after their deadline to run a finalization that failed (the proof
 route commits the proof and the finalization separately). A different proof after the
@@ -323,7 +350,19 @@ twice the roster ceiling of 1,024) and the ledger at most 4,096 (`LEDGER_LOCK_CA
 refuses a new lock only, so replaying an accepted lock returns its receipt, and closing a lock
 makes room. The funding status of an admission (`GET .../admission/{hotkey}`, public) reads
 the owner's open locks through a partial index, so its cost grows with those locks and not
-with the ledger (it was quadratic in the number of locks: 96 s at 40,000). Test genesis has pinned nonfinancial origins; production mode
+with the ledger (it was quadratic in the number of locks: 96 s at 40,000).
+
+Every ledger event hashes the whole state, and a transfer cannot make that state grow for
+nothing. The state and the event preimage are encoded with the standard JSON encoder, which gives
+the bytes of the canonical encoder for these values (a test compares them), 7 to 20 times faster:
+an event at 5,000 unit rows costs 17 ms instead of 124 ms and `verify()` of 21 events 59 ms
+instead of 909 ms. A value beyond 2^53-1 in the state, or a number that is not an integer
+(SQLite lets an INTEGER column hold a REAL), refuses the event (`STATE_RANGE`) for every numeric
+column the state serialises, not only the units and the issued amount, because the standard
+encoder would write where the canonical one raises. A transfer to oneself is refused (`SELF_TRANSFER`; a transfer that was recorded earlier
+still replays), and a transfer writes a row at the recipient only for the origins it takes
+units from; a lock still writes one for every origin it lists, because its release lists them
+again. Test genesis has pinned nonfinancial origins; production mode
 has separate reward authority/issuance bounds and no test-genesis conversion.
 
 The ledger keeps two key spaces for its events. A client event (`escrow/lock`,
@@ -353,17 +392,16 @@ hashes. It is released only when the admission is not `BANNED` and has no pendin
 lock in the outbox, every round whose roster lists it is closed, none of its hotkeys has
 unvested rewards, it is not live (`ACTIVE`, or `PROBATION` with four clean trials, until its
 screen ends), and the last reward origin of its hotkeys has matured. The bond is burned by the
-service and never through a route. Today one case is wired: a referee verdict of fraud against
-the miner, which burns the bond, bans the admission (`LOCK_BANNED` follows) and, while the
-admission still holds a residual lock, burns the coldkey's unvested rewards with it. Two more
-reasons exist as internal hooks, `Admission.seize_bond(reason="AUDIT_MISMATCH")` for a
-round-stage audit mismatch that its caller confirmed as the miner's (the admission is suspended
-with one strike, and its coldkey stays bound as in probation) and `reason="NO_SHOW"` for a
-roster member that never committed; both burn the bond alone, and nothing in this tree calls
-them: the audit leaves a member that never commits unsanctioned (ADR 0011 part 5) and confirms
-no round-stage mismatch. An uncontested `MISMATCH`, an infrastructure closure and
-a verdict against the auditor leave the bond intact. The status route reads the run's rounds
-once per call for an admission that holds a bond.
+service and never through a route, in three cases: a referee verdict of fraud against the miner
+(it bans the admission, `LOCK_BANNED` follows, and, while the admission still holds a residual lock,
+burns the coldkey's unvested rewards with it), a round-stage audit mismatch that the caller
+confirmed as the miner's (`reason="AUDIT_MISMATCH"`), and a roster member excluded for its silence
+(`reason="NO_SHOW"`). In the last two the bond alone burns, one strike is added and the coldkey
+stays bound as in probation; an audit mismatch suspends the admission, a first no-show puts it back
+on a fresh probation (new trials, no suspension) and a second one inside four work screens suspends
+it like a mismatch. An uncontested `MISMATCH`, an infrastructure
+closure and a verdict against the auditor leave the bond intact. The status route reads the run's
+rounds once per call for an admission that holds a bond.
 
 Production funding is one coordinator-signed `ProductionBootstrap`, posted as an
 `ht/2` envelope to `POST /v2/runs/{run_id}/admin/bootstrap` (admin bearer). The
@@ -409,8 +447,7 @@ not influence global theta; authorized production bootstrap issuance is a
 separate policy, not proof of market-backed collateral.
 
 Each due origin matures in its own savepoint when a beacon round is pushed. An origin that cannot
-(a shadow reward whose original custody no longer revalidates, because its hotkey rotated or a job
-object is missing) stays `reward_pending` and is retried at every round; it does not stop the
+(a shadow reward whose original custody no longer revalidates, because a job object is missing) stays `reward_pending` and is retried at every round; it does not stop the
 round's other origins, the lease expiry or the beacon route. The last such failure is journaled in
 `records_v2` with `kind='maturity-failed'` (`{error, detail}`, rewritten only when it changes, never
 deleted). List the origins still stuck, on `challenge.db`:
@@ -451,6 +488,10 @@ Tokens derive from assigned samples times sequence length, not self-reported GPU
 count. Rerunning a round that is already `UPLOADED` exits 0 with `UPLOADED`: the
 master returns its first acceptance for the same receipt without a new relay
 retrieval, and answers 409 `RELAY_RECEIPT_CONFLICT` for a different receipt.
+The delta submission must name the master acceptance minted for its own miner, round and grant:
+the acceptance's `w` and `hotkey` must be the signer's round and hotkey and the receipt it names
+must carry the delta's `grant_hash`, otherwise the master answers 422. A commit whose leaf count,
+token count or assignment size differs from the manifest is also 422 with the reason.
 `UPLOADED` is not audit success, settlement or payment. Unlike v1 `run`,
 `run-v2` has no `--rounds`/`--start` option. Preserve the work directory; do not
 claim the CLI is a complete unattended production scheduler.
@@ -487,6 +528,26 @@ uv run --frozen hypertrain-miner watch --config miner.toml \
 
 This command performs one bounded long-poll pass, then exits with a processed
 count; repeat under an operator supervisor. Timeout range is 0..30 seconds.
+Each poll is `POST /v2/runs/{run}/disputes/watch` and its body is a signed ht/2 envelope of
+type `DisputeWatchRequest {party, cursor, wait}`, signed by the party itself; `wait` is whole
+seconds, so a fractional `--timeout` is rounded up. The old `GET .../disputes` with an
+`X-Dispute-Signature` header is removed: a header does not cross the master proxy, and that
+signature never expired. The master accepts a poll whose `exp_drand` is at most 20 rounds
+(about a minute) past its current round, and the miner signs the current round plus 20, so a
+captured request is replayable for that long and no longer. A poll reserves nothing: the
+identical bytes may be sent again until they expire. A body that is not an unexpired
+`DisputeWatchRequest` of this run signed by its own party (empty, not JSON, another message,
+run or signer, a bad signature, an expired envelope, a request signed further ahead than 20
+rounds) answers 403, as does a party that is neither a pinned role nor on the subnet; a master
+that has verified no beacon round yet answers 503.
+The master allows each party two polls at a time and 128 in all, and the polls held by parties
+that are not pinned roles (an auditor, a referee or the coordinator of the manifest; any other
+registered hotkey may poll) share 64 of those 128, so that registered hotkeys cannot keep the
+roles out; a further poll is refused at once with 429, and `watch --follow` retries it with its
+normal backoff. The retired `GET .../disputes` answers 405. A wait runs on its own
+threads, so parked polls do not slow `/health` or any other route. A poll whose client has left
+still holds its slot until its wait ends (30 seconds at most), so a restarted watcher may
+overlap the last poll of the one it replaces.
 STEP/LAYER/OP answers and requested `StateServe` proofs come from validated
 published traces/checkpoints. The coordinator signature covers the event's
 `Turn.contest.w`; the watcher requires that round to match the original validated
@@ -502,6 +563,14 @@ watch directory across identities or discard it on restart. The CLI has no
 Independent referees use their own accepted current execution deadline while
 preserving historical publication descriptors. Losing-party checks, funded
 contests and fixed absolute horizons prevent arbitrary transcript resets.
+
+A contest needs a verdict to contest. A miner cannot contest a verdict that upholds its work:
+`POST .../dispute` answers 409 `NOTHING_TO_CONTEST`, and nothing is written, when the audit
+lease of the contesting miner in the contest's round says MATCH. Only the miner itself can open
+the contest of its verdict, so a MATCH contest could only suspend the contestant, pin its round
+and, once the server closes the dispute, leave it on a fresh probation that is not live: a free
+way out of the round, since the contest bond comes back. A MISMATCH, a false one included, is
+contested as before.
 
 A contest is funded by an `EscrowLock` of kind `LOCK_CONTEST` that names its dispute and
 whose `operation_id` the miner chooses. The name is only a name: the bond is settled by the
@@ -570,8 +639,8 @@ or be excluded and repaired. Retain original input objects, signed tapes,
 accepted envelopes, carry anchors and full bounded predecessor history. Reward
 `get_weights` is not a model-checkpoint download endpoint.
 
-A round that finality closes without a reward (excluded, or repaired by an accepted rollback)
-is never reward-finalized and never paid, and it does not stop the rounds after it. Reward
+A round that finality closes without a reward (excluded, or repaired by an accepted rollback;
+retired; or settled with a Finalize that lists nobody) is never reward-finalized and never paid, and it does not stop the rounds after it. Reward
 `finalize` accepts round w only if w is the first round that is neither reward-finalized nor
 withdrawn: when a lower round is closed without a reward, the same `finalize` first records it
 once in the escrow journal (event `ROUND_WITHDRAWN`, with the hash that closed it), in the same
@@ -583,22 +652,104 @@ nothing, and a run that rolled back before this record existed is not stuck: its
 or that has an open audit or dispute is not withdrawn and still answers the next round 409
 `FINALIZE_ORDER`.
 
-A roster member that has not committed when audits are scheduled is left out of its
-round: its `excluded` record gets reason `NO_SHOW` (stage `commit`), the audits of the
-other members are created, and the round is aggregated and finalized without it. A member
-that committed and passed its audit but uploaded no delta by `d_upload` is left out the
-same way when the round is aggregated (stage `delta`). Its reward share goes to the
-members that remain, split by tokens as for any exclusion. Nobody is suspended, struck or
-slashed for either. A member left out before its audit has no anchor for that round and
-cannot be rostered again in this run; one left out at the delta stage keeps its anchor.
-The remaining members must still carry the allocation: at least four, more when probation
-or owner-group caps bind, counting `NO_SHOW`, `UNVERIFIED` and `INFRASTRUCTURE`
-exclusions of the round together. Otherwise `audits` or `aggregate` answers 409
-`ROUND_INFEASIBLE`, nothing is written and the run stays blocked until an operator
-decision; there is no void round. Call `audits` once `d_audit` has passed and before
-`absolute` minus one round, `absolute` being the smaller of `d_final` and `d_audit` plus
-twice `lease_rounds`; a later call answers 503 for every roster and the round cannot be
-audited. Open rounds with five or more members when an eviction is plausible.
+A roster member that has not committed when the commit window closes is left out of its
+round by the first beacon push at or after `d_commit`: its `excluded` record gets reason
+`NO_SHOW` (stage `commit`), the audits of the other members are created when `audits` is
+called, and the round is aggregated and finalized without it. A member that committed and
+passed its audit but uploaded no delta by `d_upload` is left out the same way by the first
+push at or after `d_upload` (stage `delta`). `audits` and `aggregate` write the same records
+for a member the beacon route did not see (a challenge restarted before the run was served
+again). Its reward share goes to the members that remain, split by tokens as for any
+exclusion. A member left out before its audit has no anchor for that round and cannot be
+rostered again in this run; one left out at the delta stage keeps its anchor. The remaining
+members must still carry the allocation: at least four, more when probation or owner-group
+caps bind, counting `NO_SHOW`, `UNVERIFIED` and `INFRASTRUCTURE` exclusions of the round
+together. Otherwise `audits` or `aggregate` answers 409 `ROUND_INFEASIBLE`, no member is
+left out, a `round-exit` record names the reason (`INFEASIBLE`) and the run stays blocked
+until an operator decision; there is no void round. Call `audits` once `d_audit` has passed
+and before `absolute` minus one round, `absolute` being the smaller of `d_final` and
+`d_audit` plus twice `lease_rounds`; a later call answers 503 for every roster and the round
+cannot be audited.
+
+The minimum roster is arithmetic: the caps of the aggregation policy are protocol constants and
+a round needs four members, so a roster of R members tolerates R - 4 left out. Four tolerate
+none, five tolerate one, six tolerate two. `scripts/ops/live_operator.py open --tolerate K`
+(default 1) refuses a roster of fewer than 4 + K hotkeys and names the arithmetic; `--tolerate 0`
+opens four on purpose. The store itself keeps the protocol minimum of four.
+
+A member that committed and never posted its leaves has no audit: its queued job is dropped at
+the first `absolute` (`excluded`, reason `NO_SHOW`, stage `leaves`), without a second window, and
+the round goes on without it. It is not sanctioned: only the master lacks the leaves, and it
+cannot prove that the miner never posted them.
+
+A member left out for its silence is sanctioned in the same push, unless the master cannot
+show that it could have been heard. The push books the blame (`exit-sanction`, id
+`<w>:<hotkey>`) and applies it: the bond is burned and the admission takes one strike (D63): the
+first one puts it back on a fresh probation (reason `NO_SHOW`), a second one for other evidence
+inside the strike window suspends it, as a confirmed audit mismatch does. That holds for a round the
+rest cannot carry too: its silent members are sanctioned although none is left out. The
+blame is the miner's only if the window it missed was served and somebody used it. It is the
+infrastructure's, the row is `WAIVED` and nothing happens to the admission, when the master
+was refusing its callers while the window was open (`beacon-pause`: the wall clock was more
+than two rounds ahead of the last round the master held), when nobody committed (commit
+stage), when nobody delivered a delta, or when the master holds a relay receipt or its own
+acceptance of the member's upload (delta stage: the relay or the storage lost it). A
+sanction that fails is journaled (`exit-failed`) and retried on the next push; the member is
+out of its round all the same. The way back from a probation is its trials; a trial window that
+lapsed while the miner was away is reopened by the operator's reseed (Reseed, above). There is no
+route back from a suspension (ADR 0011 Part 8, decision 12 and Decisions for Forge 1).
+
+A member whose audit verdict is a `MISMATCH` is sanctioned once, a contest window later (ADR 0011
+Part 8, decisions 15 to 18). At the first push after the verdict the master grades it: a mismatch
+that names a leaf (`LOCATED`), or whose leaves all equal the replay under a signed commit that
+does not (`COMMIT_CONTRADICTS_LEAVES`), is the miner's and books the row `exit-sanction`
+(`stage: audit`, `PENDING`, `first_seen`); anything else (a dropped job, an executor fault, a
+verdict without a located leaf) is waived and nothing reaches the admission. The row waits
+`verify.T.dispute_per_level` rounds from `first_seen`, and as long as the miner's contest of that
+verdict is open. A referee finding of `FRAUD` or `AUDITOR_FAULT` against the lease's auditor
+cancels it (`CANCELLED`); a contest that ends without one (`INFRASTRUCTURE`, a lapsed turn) clears
+nobody. At the end of the window the sanction is applied through the same hook as a no-show
+(suspended, reason `AUDIT_MISMATCH`, one strike, the bond burned), or, while the environment pin
+of ADR 0011 Part 3 is not required, only recorded (`WOULD_APPLY`, nothing touched):
+`ChallengeStore(enforce_audit_mismatch=True)` is the switch. Once it is applied, a contest of the
+verdict answers 409 `SANCTION_APPLIED`.
+
+A round that cannot reach a tape can be retired (ADR 0011 part 8, decisions 7 to 11) instead of
+blocking the run for good. Two causes, each re-derived by the master from the facts: the members
+that can still deliver (committed, not left out, and with their delta once `d_upload` has passed)
+cannot carry one complete update (`INFEASIBLE`, from `d_commit`), or nobody scheduled audits and
+`audits` answers 503 from `absolute` minus one round (`AUDIT_WINDOW_MISSED`). It also waits until
+every earlier round is closed and is refused for a service-admitted run (`ROUND_RETIRE_REFUSED:
+<reason>`, nothing written). The beacon push that sees the round cannot go on asks for it (after
+booking the exclusions and the blame of the round, in a savepoint of its own: a refusal is recorded
+in `round-exit` and asked again at the next push, a failing retirement is journaled and leaves
+the round as it was); no route asks for it. The survivors it is given must be the ones the records
+of the round give (`exit_v2.survivors_of`). The master closes the
+round as a null round: `applied` is a record of kind `null` whose output state is its input state
+(the model, the outer momentum and the centre do not move, the data window is consumed), `finality`
+is `RETIRED` (closed), and `retired` holds the evidence `{v: ht-round-retired-v1, run_id, w,
+cause, roster_hash, survivors, theta_hash}`, whose sha256 is the evidence hash, with
+`retired_beacon`. Every roster member, the ones that never committed too, gets for round `w` the
+anchor it held for `w - 1` under new hashes (`ht-carried-proof/1`, `ht-carried-anchor/1`; the two
+tensor files are linked and only the metadata is rewritten, `state_root` and `ef_hash` stay), so
+round `w + 1` restarts from the optimizer state and the error feedback round `w` started from.
+The open audit leases of the round end `exhausted` with result `ROUND_RETIRED` and their guards
+are revoked; a finished verdict stays as evidence. From then on `audits`, `aggregate`, `finalize`
+and `rollback` of that round answer 409 `ROUND_RETIRED`, and no late audit result can replace a
+carried anchor. Nothing is minted for it and the escrow is not called at retirement: the next
+reward `finalize` records the round as withdrawn, as for any round closed without a reward.
+The relay custody of its uploads is settled by the retirement, as by every closure of a round
+without a reward (retired, excluded and repaired; a round settled with nobody paid is released as a
+settled one): one writer stores the finality row and the closure record, the finality hash is the
+hash that closed the round (here the evidence hash), and the custody horizon stands in for the
+finality and vesting beacons, since nothing vests (an open audit or dispute against the round still
+pins the custody). The bond of every roster member is released
+as soon as the round is closed.
+Round `w + 1` is opened by the operator with `prev_final_hash` set to the evidence hash
+(`scripts/ops/live_operator.py open` reads `retired/w` when round `w` has no `finalize`, and
+still refuses by name a round that has neither). It needs four eligible members that hold an anchor for `w`, which are the members of the retired roster
+(a member that was never rostered has none: 409 `missing accepted anchor`); fewer answer 409
+`ROUND_INFEASIBLE`. A retirement costs every roster member a round of work and reward.
 
 A request that the allocation caps or the finality rules refuse is a 409 whose detail starts
 with a code, on every route, and writes nothing. `ROUND_INFEASIBLE: <reason>`: the members
@@ -607,12 +758,20 @@ rollback that would leave fewer, an aggregation over an input set or delta it ca
 `ROUND_BLOCKED: <reason>`: finality or the tape refuses the call (opening round w+2 before
 round w+1 exists or while w is unresolved, applying a round whose predecessor is not applied,
 settling a round that cannot settle, a tape that fails its own checks). The two rollback routes
-answer a tape error with its bare message, as before.
-
-`finalize` pays exactly the inputs recorded with the applied tape, whatever the members'
-standing is when it runs: `Finalize.included` must list them. A member suspended, struck or
-with a burned bond between the aggregate and the finalize is still paid for the round it was
-verified in; the finalize used to re-derive the live set and answer 403 for ever.
+answer a tape error with its bare message, as before. A fault of the master's own artifacts is
+never a conflict: a stored tape that fails its signature or version, a replay that differs from the
+tape it replays, a repair worker, signing authority or output artifact that fails, or a fresh
+independent worker that disagrees with the tape the coordinator signed, answers a 500
+`TAPE_INTEGRITY: <reason>` on every route, the rollback routes included.
+`finalize` pays the inputs recorded with the applied tape, whatever the members' standing is
+when it runs, except a coldkey convicted since: `Finalize.included` lists the inputs less every
+admission of a coldkey that has a banned one, and the ledger refuses (`BANNED_WORK`) a reward for
+it. When no input is left, the Finalize lists nobody, the round settles with no reward (the answer
+is `{"status": "CLOSED_UNPAID"}`) and the ledger passes over it when the next round is finalized. A member
+suspended, struck or with a burned bond between the aggregate and the finalize is still paid for
+the round it was verified in (the finalize used to re-derive the live set and answer 403 for
+ever); a member convicted of training fraud in that window is paid nothing, and its share goes to
+the others by tokens, so the whole round budget is still minted.
 
 An audited member whose admission no longer qualifies it when the round is aggregated is left
 out of the round too: `excluded`, reason `INELIGIBLE`, stage `aggregate`, with a `cause`
@@ -665,10 +824,113 @@ A relay whose granted chunks do not assemble to `delta_hash` answers 400
 Retention release waits for finality, disputes and vesting; signed extensions,
 overlapping old/new keys and drain preserve existing retrieval authority.
 
+A relay counts the uploads it still holds, not every record it ever accepted. An
+upload is held while it is a reservation (no receipt, service deadline not passed)
+or while one of its custody pins is neither released nor past its signed horizon.
+A released or lapsed upload stops counting. Custody ends at the master-signed
+release, or once its signed horizon plus the epoch grace (100 beacons) is past with no
+dispute referencing it (ADR 0014 Part 6); the relay then owes nothing and rotates it out,
+as described below. There is no count cap by default (it was 64
+for the life of the run). `max_uploads` in `relay.json` is an optional operator limit,
+`R x ceil(retention window / round length)` for `R` miners per round, and an `accept`
+past it answers 400 `retained upload quota exhausted`. `/readyz` does not depend on
+the count: the chunk PUTs, retention and release that free a place use the same Service.
+The physical limit is the journal, one JSON blob of at most 16 MiB that every mutation
+rewrites. `accept` answers 400 `relay journal capacity exhausted` when the new record
+plus 1,280 B per chunk acknowledgment would take it above 12 MiB, which leaves 4 MiB for
+acknowledgments, receipts, retrievals, extensions and releases of uploads already held.
+A record leaves the journal when its custody is spent (below). It carries the signed
+`RoundOpenV2`, so its size grows with the roster: a
+completed one-chunk upload adds about 10 KB to the journal at 16 miners (a 9.8 KB record
+plus its index and nonce entry) and 13.8 KB at 32 miners, plus about 1.1 KB per further
+chunk. The 12 MiB budget then holds about 1,200 such uploads, i.e. 75 rounds of 16 miners,
+and about 900, i.e. 28 rounds, at 32 miners, if none left.
+`tests/relay/test_lifecycle_v2.py::test_journal_budget_when_rounds_carry_a_roster`
+measures the growth of one upload and checks the 1,200 and 900 figures against the real guard.
+
+The journal fill is reported, not only enforced. `/readyz` answers
+`{"ready", "journal_bytes", "journal_budget", "journal_fill", "alarm"}` (503 with `"ready": false`
+when the replica is not ready, the four fill fields `null` when the journal cannot be read, a
+storage failure logged as `relay readiness probe failed: <ExceptionName>`) and `alarm` turns
+true above 80 % of the budget (9.6 MiB); while it is true each probe also writes a warning
+`relay journal fill NN% (B of BUDGET bytes)`. The alarm never makes the replica unready and
+never refuses a request: only `accept` past the budget does. Custody lives to its horizon,
+about 10 hours or 36 rounds of 335 beacons (16.75 minutes), so 36 rounds of 16 miners hold
+16 x 36 x 10 KB = 5.8 MB, 46 % of the budget, and 36 rounds of 32 miners hold 15.9 MB,
+126 % (`test_readyz_when_custody_horizon_of_rounds_has_no_early_release` measures both).
+Because records rotate out when the master releases them, about at their horizon, that is the
+steady state and not a figure that keeps growing; a run of 32 miners exceeds the budget unless
+custody is released well before its horizon, which is what the master's lifecycle task does:
+released one or two rounds after finality, three rounds of 32 miners are about 1.3 MB
+(3 x 32 x 13.8 KB, derived from the measured record size). A master that is away stops the
+releases and the records pile up to the budget, which then refuses new reservations: that is the
+alarm above, not a reason to delete a proof.
+Runbook for the alarm: first check that the master's lifecycle task runs, i.e. that
+`relay-release` records appear one or two rounds after finality, and that the relay's log shows
+no `relay collect deferred` lines. If they do and the fill still rises, the run is larger than
+this relay's journal. Add a relay to the signed registry; the registry must hold more than one
+relay before any run of 16 miners or more (D51 5). Do not raise the 12 MiB budget: above
+16 MiB every journal write fails, a release included.
+
+Custody is freed by the master's release, without an operator. Every 5 minutes a task of the
+relay runs `collect()`. An upload that reached a receipt stays until the master has released
+it, however old: the master writes the release when finality is written for the round or the
+round is closed without a reward, and a master that is away past the horizon can neither
+extend nor release, while a dispute may have opened after the last extension (ADR 0014
+Part 6.4, D54, D72). Past the horizon such a pin serves no signed retrieval and takes no
+extension; the relay keeps its bytes for the operator's rescue. An upload the master holds no
+receipt for (the chunks of a partial upload, or a receipt the master refused with a 4xx when it
+came after `d_upload` or conflicted: the relay records that as `forward_error` `ForwardRefused`
+and does not forward it again) is lapsed once its signed horizon is past by the epoch grace
+with nothing released and no dispute referencing it. A forward that failed in transport or with
+a 5xx, 408 or 429 may still have been accepted, so its upload is kept and `recover()` forwards
+it again. A pin whose last extension names dispute ids does not lapse until the master
+releases the grant. An
+object is deleted when every pin on it is released and past its deletion bound or lapsed, and
+no live pin, in-flight upload of the same bytes or deletion reservation needs it. A record is pruned, with its grant and retrieval
+nonces, once all its pins are in that state and none of its objects still waits to be deleted;
+a reservation that never produced custody is pruned at the horizon of its acknowledgment plus
+the grace. A pass that fails is logged as `relay collect deferred: <ExceptionName>` and
+retried at the next interval; an object whose delete raised keeps its deletion reservation
+until it is fenced, as before. Spent records that
+age used to prune (a receipted upload nobody released) now wait for the release.
+
+A relay learns what the master settled from a public, read-only, coordinator-signed view,
+not from the release message and not with a credential. `GET /v2/runs/{run_id}/relay-settlements/{grant_hash}`
+needs no bearer and writes nothing. It answers a relay envelope of type `RelaySettlementView`
+that expires 10 beacons after the master's newest beacon and carries exactly `grant_hash`,
+`finality_hash`, `finality_beacon`, `closed_dispute_root`, `closed_beacon` and
+`vesting_beacon`: no hotkey, coldkey, origin id or roster. It answers 409 until the round is
+settled and every dispute of the round is resolved, and for a grant the master never issued.
+A relay answering `POST /v1/uploads/{grant_hash}/release` fetches the view with a bare GET,
+verifies the pinned master key, run, type and expiry, checks that it names the same grant,
+and refuses a release whose finality, dispute and vesting facts differ from it. The relay
+therefore needs `master_url` in `relay.json` to reach the master over credential-free HTTPS
+for this route as for `/v2/relay-receipts`. A relay built before this route exists still
+refuses every release, as it did; a master without the route makes a new relay refuse too
+(HTTP 503), so release never succeeds on facts the master did not sign.
+
+The master sends the release and the extensions itself, without an operator. Every 120 seconds
+(`HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL`, `0` turns it off; it is on whenever the app is built from
+the environment) a task of the challenge app makes one pass over every run, outside any store
+transaction. For each grant that has a durable relay receipt and no `relay-release` record:
+once the round is settled and `now >= max(finality, vesting, closed) + 100`, it calls the same
+path as `POST /v2/runs/{run_id}/admin/relay/{grant_hash}/release`; while a dispute of the round
+is unresolved and the signed horizon is less than 720 beacons ahead (about 36 minutes), it calls
+`.../extend`, again before each new horizon, until the dispute closes; any other grant is left
+alone. A relay that cannot be reached is skipped until the next pass, and an answer of 409 (not
+due after all) is not an error. Any other failure is raised after the rest of the pass, so one
+bad grant starves none and nothing goes unseen: the task logs `relay lifecycle pass failed` with
+the traceback and tries again. The operator routes stay for a manual release or extension. A
+dispute that nobody can decide is not closed by this task (ADR 0011's exit does that), and a
+dispute opened after the horizon has passed finds custody that can no longer be extended.
+
 Relay configuration is `RelayConfig` in `src/hypertrain/relay/app.py`:
 `run_id`, `master_public`, `master_url`, signed `registry`/`network_manifest`,
 `relay_id`, `region`, `active_key`, `signing_files`, `observer_public_keys`, plus
-`s3_endpoint`/`s3_bucket`/`s3_prefix`/`s3_region` or `local_backing`.
+`s3_endpoint`/`s3_bucket`/`s3_prefix`/`s3_region` or `local_backing`, and optionally
+`max_uploads` (a positive integer, omitted from the file when unset so that an older
+relay image still loads it).
 `RELAY_CONFIG` selects its JSON; `RELAY_SECRETS` selects mounted signing files,
 `drain.token` and S3 `object.json`. Do not mount coordinator/admin keys into relays.
 Authoritative external backing is separate from disposable pod cache.

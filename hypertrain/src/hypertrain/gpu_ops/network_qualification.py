@@ -1,7 +1,8 @@
 """Existing-host CUDA carry qualification; no provider actions or workload promotion.
 
 Run with the existing project environment: python scripts/network_gpu_qualification.py
-sources TREE | run CONFIG.json | compare HOST_A/result.json HOST_B/result.json.
+sources TREE | run CONFIG.json | compare CFG_A CFG_B HOST_A/result.json HOST_B/result.json
+(--label-only | --known-hosts KH_A KH_B --host-fingerprint FP_A FP_B).
 """
 
 from __future__ import annotations
@@ -18,14 +19,23 @@ import subprocess
 import sys
 import tarfile
 import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
+from hypertrain.gpu_ops import host_attest
+from hypertrain.gpu_ops.cuda_executor_runner import Refused, measure_image_sources, sources_digest
 from hypertrain.gpu_ops.journal import durable_write, fsha
 from hypertrain.gpu_ops.launcher import Reject
-from hypertrain.miner.island_launch import confined, launch_argv, validate_artifacts
+from hypertrain.miner.island_launch import (
+    IslandFailure,
+    confined,
+    gpu_uuid,
+    launch_argv,
+    validate_artifacts,
+)
 from hypertrain.protocol.messages import Hex64, ImageDigest, Pos
 from hypertrain.protocol.messages_v2 import IslandJobV1, RunManifestV2
 
@@ -152,11 +162,29 @@ class Environment(Boundary):
         None, exclude_if=lambda v: v is None
     )
     image_digest: ImageDigest
+    # One nvidia-smi form UUID per device, in device order. None only in a result written before
+    # the field existed; it is omitted from JSON so such a result.json keeps its bytes.
+    gpu_uuids: list[str] | None = Field(None, exclude_if=lambda v: v is None)
+    # sha256 of the package files the image itself holds (cuda_executor_runner.sources_digest). None
+    # only in a result written before the field existed, omitted from JSON like the two above.
+    image_sources_sha256: Hex64 | None = Field(None, exclude_if=lambda v: v is None)
 
     @model_validator(mode="after")
     def _one_driver_per_device(self) -> Environment:
         if len(self.drivers) != len(self.sm_counts):
             raise ValueError("driver/device count mismatch")
+        return self
+
+    @model_validator(mode="after")
+    def _one_distinct_uuid_per_device(self) -> Environment:
+        if self.gpu_uuids is None:
+            return self
+        if len(self.gpu_uuids) != len(self.sm_counts):
+            raise ValueError("gpu_uuids must hold one GPU UUID per device")
+        if not all(host_attest.GPU_UUID.fullmatch(u) for u in self.gpu_uuids):
+            raise ValueError("gpu_uuids must be lowercase GPU-<uuid> strings")
+        if len(set(self.gpu_uuids)) != len(self.gpu_uuids):
+            raise ValueError("gpu_uuids must be distinct")
         return self
 
     @model_validator(mode="after")
@@ -242,6 +270,23 @@ def sources(tree: Path) -> dict[str, str]:
     if any(p.is_symlink() for p in paths):
         raise Reject("qualification_source_symlink")
     return {str(p.relative_to(tree)): fsha(p) for p in paths}
+
+
+def package_sources(tree_sources: Mapping[str, str]) -> dict[str, str]:
+    """The `src/hypertrain/**/*.py` entries of `sources()`: what the installed image must hold."""
+    return {
+        name: digest
+        for name, digest in tree_sources.items()
+        if name.startswith("src/hypertrain/") and name.endswith(".py")
+    }
+
+
+def bind_image(tree_sources: Mapping[str, str], measured: Mapping[str, str]) -> None:
+    """The package the image runs must be the package the tree holds, file for file."""
+    wanted = package_sources(tree_sources)
+    for name in sorted(wanted.keys() | measured.keys()):
+        if wanted.get(name) != measured.get(name):
+            raise Reject(f"qualification_tree_is_not_the_image:{name}")
 
 
 def bundle(tree: Path) -> bytes:
@@ -336,6 +381,10 @@ def inspect_environment(cfg: Qualification, n_gpus: int, sm_count: int) -> Envir
     devices = [torch.cuda.get_device_properties(i) for i in range(n_gpus)]
     sm_counts = [d.multi_processor_count for d in devices]
     capabilities = [(d.major, d.minor) for d in devices]
+    try:
+        uuids = [gpu_uuid(d.uuid) for d in devices]
+    except (IslandFailure, ValueError) as exc:
+        raise Reject("qualification_gpu_uuid_malformed") from exc
     if any(s != sm_count for s in sm_counts):
         raise Reject("qualification_sm_profile_mismatch")
     reason = unqualified_device(capabilities, sm_counts)
@@ -352,6 +401,7 @@ def inspect_environment(cfg: Qualification, n_gpus: int, sm_count: int) -> Envir
             "sm_counts": sm_counts,
             "capabilities": capabilities,
             "image_digest": cfg.image_digest,
+            "gpu_uuids": uuids,
         }
     )
 
@@ -384,6 +434,13 @@ def run(config_path: Path) -> Result:
         raise Reject("qualification_actual_image_receipt_missing")
     ref = job.manifest.training.reference_spec
     environment = inspect_environment(cfg, ref.layout.n_gpus, ref.sm_count)
+    # The tree is what runs here (PYTHONPATH) and the image is what audits run: they must be one.
+    try:
+        measured = measure_image_sources()
+    except Refused as error:
+        raise Reject("qualification_image_sources_unmeasurable") from error
+    bind_image(cfg.sources, measured)
+    environment = environment.model_copy(update={"image_sources_sha256": sources_digest(measured)})
     inner = job.manifest.training.inner
     from hypertrain.auditor.replay import AnchorCache, pack_state, unpack_state
 
@@ -504,16 +561,92 @@ def host_inventory(result_path: Path) -> dict[str, str]:
     return claimed
 
 
-def compare(paths: list[Path], manifest: RunManifestV2) -> dict[str, bool]:
+class HostPin(NamedTuple):
+    """What the owner commits to for one host: its known_hosts file and the SHA256: fingerprint
+    typed from the provider console, outside the repository."""
+
+    known_hosts: Path
+    fingerprint: str
+
+
+def pinned_keys(configs: Sequence[bytes], pins: Sequence[HostPin]) -> list[str]:
+    """Each host's SSH key: the one in the known_hosts file its config hashes, and the one the
+    owner typed the fingerprint of."""
+    if len(configs) != 2 or len(pins) != 2:
+        raise Reject("qualification_requires_two_host_results")
+    keys = []
+    for config, pin in zip(configs, pins, strict=True):
+        known_hosts = pin.known_hosts.read_bytes()
+        committed = Qualification.model_validate_json(config).known_hosts_sha256
+        if hashlib.sha256(known_hosts).hexdigest() != committed:
+            raise Reject("qualification_known_hosts_changed")
+        key = host_attest.pinned_key(known_hosts)
+        if host_attest.fingerprint(key) != pin.fingerprint:
+            raise Reject("qualification_host_fingerprint_mismatch")
+        keys.append(key)
+    return keys
+
+
+def _attested(
+    paths: list[Path], raw: list[bytes], results: tuple[Result, Result], keys: Sequence[str]
+) -> None:
+    """Each host signed, with its pinned key, a statement that says what its result.json says."""
+    if keys[0] == keys[1]:
+        raise Reject("qualification_hosts_not_distinct:host_key")
+    statements = []
+    for path, data, result, key in zip(paths, raw, results, keys, strict=True):
+        attestation = host_attest.load(path)
+        host_attest.verify(attestation.raw, attestation.signature, key)
+        statement, environment = attestation.statement, result.environment
+        if (
+            statement.result_sha256 != hashlib.sha256(data).hexdigest()
+            or statement.config_sha256 != result.config_sha256
+            or statement.image_digest != environment.image_digest
+            or environment.gpu_uuids is None
+            or not set(environment.gpu_uuids) <= set(statement.gpu_uuids)
+            or not set(environment.drivers) <= set(statement.drivers)
+        ):
+            raise Reject("qualification_attestation_unbound")
+        statements.append(statement)
+    first, second = statements
+    if set(first.gpu_uuids) & set(second.gpu_uuids):
+        raise Reject("qualification_hosts_not_distinct:gpu_uuid")
+    if first.boot_id == second.boot_id:
+        raise Reject("qualification_hosts_not_distinct:boot_id")
+
+
+def _image_sources(results: tuple[Result, Result], *, strict: bool) -> None:
+    """Each result's image measurement is the digest of its own `sources`, and the hosts agree.
+    A result from before the field passes only label-only, as a whole pair."""
+    claimed = [r.environment.image_sources_sha256 for r in results]
+    if strict and None in claimed:
+        raise Reject("qualification_image_sources_missing")
+    for result, digest in zip(results, claimed, strict=True):
+        if digest is not None and digest != sources_digest(package_sources(result.sources)):
+            raise Reject("qualification_image_sources_mismatch")
+    if claimed[0] != claimed[1]:
+        raise Reject("qualification_image_sources_mismatch")
+
+
+def compare(
+    paths: list[Path], manifest: RunManifestV2, *, host_keys: Sequence[str] | None
+) -> dict[str, bool]:
     """Ranks/H/J/image come from the caller's validated manifest, never from a Result.
 
     A full rescue proves every round file by its rescued bytes. A hash-only rescue (no round
     file rescued at all) proves them by the host inventory: host-computed hashes, bound to
     result.json and cross-checked between the two hosts. A partial tree is never accepted.
+
+    Machine ids, instance ids and roles are labels the result's writer chooses. `host_keys`, the
+    SSH host keys pinned for the two hosts in the order of `paths`, make each host sign a
+    statement about its own result (host_attest). None is the explicit label-only mode: nothing
+    then proves two machines, so only a caller whose machine ids come from a provider listing
+    (the Vast lifecycle) may use it.
     """
-    if len(paths) != 2:
+    if len(paths) != 2 or (host_keys is not None and len(host_keys) != 2):
         raise Reject("qualification_requires_two_host_results")
-    a, b = [Result.model_validate_json(p.read_bytes()) for p in paths]
+    raw = [p.read_bytes() for p in paths]
+    a, b = [Result.model_validate_json(data) for data in raw]
     ref, inner = manifest.training.reference_spec, manifest.training.inner
     if (
         a.machine_id == b.machine_id
@@ -552,7 +685,16 @@ def compare(paths: list[Path], manifest: RunManifestV2) -> dict[str, bool]:
                     actual = None
                 if actual != want:
                     raise Reject("qualification_artifact_custody_changed")
+    _image_sources((a, b), strict=host_keys is not None)
+    if host_keys is not None:
+        _attested(paths, raw, (a, b), host_keys)
     return {"two_host_bitwise_match": True, "workload_allowed": False}
+
+
+USAGE = (
+    "usage: sources TREE | run CONFIG | compare CFG_A CFG_B A/result.json B/result.json "
+    "(--label-only | --known-hosts KH_A KH_B --host-fingerprint FP_A FP_B)"
+)
 
 
 def main() -> None:
@@ -567,7 +709,15 @@ def main() -> None:
             durable_write(Path(destination), bundle(Path(tree)))
         case ["run", config]:
             print(run(Path(config)).model_dump_json())
-        case ["compare", config_a, config_b, a, b]:
+        case ["compare", config_a, config_b, a, b, *mode]:
+            pins: list[HostPin] | None
+            match mode:
+                case ["--label-only"]:
+                    pins = None
+                case ["--known-hosts", hosts_a, hosts_b, "--host-fingerprint", fp_a, fp_b]:
+                    pins = [HostPin(Path(hosts_a), fp_a), HostPin(Path(hosts_b), fp_b)]
+                case _:
+                    raise SystemExit(USAGE)
             jobs = []
             for config_path, result in ((Path(config_a), Path(a)), (Path(config_b), Path(b))):
                 if Result.model_validate_json(result.read_bytes()).config_sha256 != fsha(
@@ -579,8 +729,9 @@ def main() -> None:
                 )
             if jobs[0].manifest != jobs[1].manifest:
                 raise Reject("qualification_two_host_manifest_mismatch")
-            print(json.dumps(compare([Path(a), Path(b)], jobs[0].manifest)))
+            keys = None
+            if pins is not None:
+                keys = pinned_keys([Path(config_a).read_bytes(), Path(config_b).read_bytes()], pins)
+            print(json.dumps(compare([Path(a), Path(b)], jobs[0].manifest, host_keys=keys)))
         case _:
-            raise SystemExit(
-                "usage: sources TREE | run CONFIG | compare CFG_A CFG_B A/result.json B/result.json"
-            )
+            raise SystemExit(USAGE)

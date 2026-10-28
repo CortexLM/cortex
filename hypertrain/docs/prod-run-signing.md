@@ -31,7 +31,8 @@ The runbook order is 1 → 2 → 3 → 4 → 5 → 6 → 7. The code forces one 
 record (step 5) must be installed **before** the run is POSTed: `backend_bootstrap.py` runs
 "before run POST" and the store refuses it once the run exists (`backend qualification must
 precede run services`). A production run with no qualification record is refused with 409
-`production CUDA qualification required`. [V] `scripts/ops/backend_bootstrap.py:2`,
+`production CUDA qualification required`, and one whose record has no host attestation (label-only
+or installed before attestations) with 409 `production CUDA qualification needs attested hosts`. [V] `scripts/ops/backend_bootstrap.py:2`,
 `challenge/store.py:2462-2472`, `:2517-2522`. So "the run_id is listed in
 `/challenge/hypertrain/public/v1/runs`" is evidence for the end of step 5, not step 2.
 
@@ -137,17 +138,28 @@ Record the printed `run_id`: S3-S7 all bind it.
    --run-id <run_id> --beacon <round> --base <review.json> --file <name=/abs/path> --parent-pid <pid>
    --cutoff-unix <t> --output <record>`. It reads the seed as **32 raw bytes** (not hex). [V]
    `scripts/prepare_record.py:190`, `:227-243`
-2. Inside the challenge container, before the POST:
+2. Inside the challenge container, before the POST, in the strict mode a production run needs:
    `python scripts/ops/backend_bootstrap.py --manifest-envelope <out>/manifest-envelope.json
-   --owner-seed <owner seed> --config <h0 config.json> <h1 config.json> --result <h0 result.json> <h1 result.json>`.
+   --owner-seed <owner seed> --config <h0 config.json> <h1 config.json> --result <h0 result.json> <h1 result.json>
+   --known-hosts <h0 known_hosts> <h1 known_hosts> --host-fingerprint <SHA256:... h0> <SHA256:... h1>`.
+   Each `known_hosts` file must hash to its config's `known_hosts_sha256` and hold the host's one
+   `ssh-ed25519` key; the fingerprints are typed from the provider console, never copied from
+   those files. `attestation.json` and `attestation.sig` (written by
+   `scripts/ops/qualification_attest.py` against the live host) must sit beside each `result.json`.
    The owner seed must be `HYPERTRAIN_OWNER_HOTKEY`. It seals an owner `Receipt` with
    `received_round` = the store's **current** round, so it cannot be signed in advance. It writes
-   the `qualification` record keyed by the image digest. [V] `scripts/ops/backend_bootstrap.py:34-82`,
-   `challenge/store.py:2406-2415`, `:2474-2485`
+   the `qualification` record keyed by the image digest. `--label-only` replaces the three
+   attestation inputs for a **test-ledger** run only: the record is marked `label-only`, and a
+   production run refuses it (and any record installed before attestations existed) with 409
+   `production CUDA qualification needs attested hosts`. `launch_cuda_run.sh` takes the same
+   inputs as `QUAL_KNOWN_HOSTS_H0/H1` and `QUAL_FINGERPRINT_H0/H1`, and refuses a production launch
+   without them in preflight, before any spend; the Vast lifecycle yields no attestation, so it
+   cannot launch a production run. [V] `scripts/ops/backend_bootstrap.py`,
+   `scripts/launch_cuda_run.sh`, `challenge/store.py` (`_bootstrap_backend_v2`, `_services`)
 3. Stage `<out>/policy-*.json` **and** `<out>/relay-registry.json` in the challenge object store,
    then POST `<out>/manifest-envelope.json` to `/v2/admin/runs` with the operator bearer.
    `launch_cuda_run.sh` copies only `policy-*.json` and would miss the registry. [V]
-   `challenge/store.py:2276-2289`, `scripts/launch_cuda_run.sh:219-223`
+   `challenge/store.py:2276-2289`, `scripts/launch_cuda_run.sh:248-251`
 
 Check: `GET /challenge/hypertrain/v2/runs/<run_id>` returns the envelope; the run's
 `execution-backend` record says `cuda`; `hypertrain-miner status-v2` with `run_id` and
@@ -185,7 +197,11 @@ eligible. [V] `challenge/store.py:4159-4194`, `:2618-2627`
 K_coord envelopes for that run: the `RelayRegistryV1` (S1's `relay-registry.json`) and a
 `RelayNetworkManifest {run_id, base_manifest_hash, registry_hash, specs_hash,
 assignment_policy "master-observed-median3-v1"}`. Plus `relay_id`, `region`, `active_key`,
-`signing_files`, `observer_public_keys` and the backing store. [V] `relay/app.py:49-65`,
+`signing_files`, `observer_public_keys` and the backing store, and optionally `max_uploads`
+(positive integer, default absent: the count of held uploads is unbounded and only the journal
+budget of 12 MiB limits a relay; `docs/network-v2.md`). `master_url` must be reachable from the relay over
+credential-free HTTPS for `/v2/relay-receipts` and for the public, read-only
+`GET /v2/runs/<run_id>/relay-settlements/<grant_hash>` that a release is checked against. [V] `relay/app.py:49-67`,
 `protocol/relay_messages.py:88-93`
 
 `base_manifest_hash` must be `training_hash()` of the manifest, **not** the run_id: the master
@@ -196,7 +212,8 @@ the run_id and is not usable for production. The tools used for the TEST relays
 
 Check: the relay starts only if both envelopes are signed by `master_public` for `run_id`, the
 registry digest and specs hash match, and neither envelope has expired. Then
-`curl -fsS https://<relay host>/readyz` returns 200. [V] `relay/app.py:201-231`
+`curl -fsS https://<relay host>/readyz` returns 200; its body reports `journal_fill` and
+`alarm` (`docs/network-v2.md`). [V] `relay/app.py:201-231`
 
 ## S7 `dispatch.json` (runbook step 6)
 

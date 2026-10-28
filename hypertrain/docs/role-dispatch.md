@@ -30,7 +30,7 @@ dispatched result (`role_dispatch.py:55-79`) and checked by CUDA audits (`store.
   same-host harness (`serve_challenge.py`, dispatch unset) instead.
 - **Any od-base run** (`training.model.arch` `od-encoder`), TEST or production: needs the file
   **and** the issue #25 fix (workload promotion for od-encoder, a host field). The file alone
-  is not enough. `roles` already maps several hotkeys; only `launch_cuda_run.sh:245` rewrites it
+  is not enough. `roles` already maps several hotkeys; only `launch_cuda_run.sh:273` rewrites it
   to one.
 
 ## The TEST run file
@@ -72,6 +72,13 @@ If the TEST manifest is rebuilt (another GPU image digest, other coldkeys, anoth
   (`challenge/store.py:2586-2602`).
 - A CUDA qualification needs every host driver in the allowlist and `sm_count` equal
   (`store.py:2439-2440`).
+- When the qualification record carries `image_sources_sha256` (the digest of the
+  `src/hypertrain/**/*.py` files the qualified image holds, ADR 0011 part 4), `_dispatch_env_v2`
+  requires `role-dispatch.json` to report the same value in `environment.image_sources_sha256`:
+  another value is 409 `ROLE_DISPATCH_PROVENANCE_MISMATCH`, a missing or non-string one is 503
+  `ROLE_DISPATCH_PROVENANCE_UNAVAILABLE`. A record without the field (a stand-in, or one signed
+  before it existed) adds no check. The Vast dispatcher does not write the field, so a run
+  qualified with it cannot be served by that dispatcher.
 - The dispatcher drives only Vast lifecycle hosts: `run_dir/config.json` names a Vast `base_url`
   and key file (`role_dispatch.py:102-107`, `gpu_ops/provider.py:1`).
 

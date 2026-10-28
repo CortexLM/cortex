@@ -106,25 +106,35 @@ def test_a_member_that_commits_but_never_uploads_a_delta_is_left_out(activated_n
     assert excluded(n) == {}
 
     n.push(opening.d_upload)
+    # The push left it out: nobody has called aggregate yet.
+    assert {k: (v["reason"], v["stage"]) for k, v in excluded(n).items()} == {
+        f"0:{lazy.ss58}": ("NO_SHOW", "delta")
+    }
     applied = aggregate(n, 0)
     assert applied.status_code == 200, applied.text
 
     assert audit_results(n) == ["MATCH"] * 5
-    seen = excluded(n)
-    assert {k: (v["reason"], v["stage"]) for k, v in seen.items()} == {
-        f"0:{lazy.ss58}": ("NO_SHOW", "delta")
-    }
     assert n.store._record_v2(n.manifest.run_id(), "finality", "0")["unresolved_audits"] == 0
     assert finalize(n, 0, applied.json(), survivors)["status"] == "SETTLED"
     assert standing(n, lazy.ss58) == before
 
 
-def test_a_round_the_remaining_members_cannot_carry_is_refused_by_name(activated_network):
+def test_a_round_the_remaining_members_cannot_carry_is_retired_and_refused_by_name(
+    activated_network,
+):
     n = activated_network
+    before = [standing(n, h.ss58) for h in fixtures.HOT[3:]]
     opening = rollback.execute_round(n, 0, skip_delta=fixtures.HOT[3:], aggregate=False)
-    n.push(opening.d_upload)
 
+    # When: the push that ends delta intake finds three members left, which cannot carry a round
+    n.push(opening.d_upload)
     refused = aggregate(n, 0)
 
-    assert (refused.status_code, "ROUND_INFEASIBLE" in refused.text) == (409, True)
+    # Then: the reaper retired the round (nothing is left out of a round that cannot go on), the
+    # route says so by name; the two members are booked as the infrastructure's (the master holds
+    # the evidence of their upload, as in the test above), so nobody is struck
+    assert (refused.status_code, "ROUND_RETIRED" in refused.text) == (409, True)
     assert excluded(n) == {}
+    retired = n.store._record_v2(n.manifest.run_id(), "retired", "0")
+    assert (retired["cause"], len(retired["survivors"])) == ("INFEASIBLE", 3)
+    assert [standing(n, h.ss58) for h in fixtures.HOT[3:]] == before

@@ -20,7 +20,14 @@ import hypertrain.trainer  # noqa: F401 - determinism before torch in fresh repa
 import torch
 from pydantic import BaseModel, ConfigDict, Field
 
-from hypertrain.aggregator.core import OuterState, TapeError, get_object, load_delta, load_state
+from hypertrain.aggregator.core import (
+    OuterState,
+    TapeError,
+    TapeIntegrityError,
+    get_object,
+    load_delta,
+    load_state,
+)
 from hypertrain.aggregator.tape_v2 import (
     Exclusion,
     TapeBodyV2,
@@ -187,17 +194,19 @@ def execute_repair_context(
                 timeout=body["timeout_seconds"],
             )
         except subprocess.CalledProcessError as error:
-            raise TapeError(
+            raise TapeIntegrityError(
                 "qualified repair worker failed: " + error.stderr.decode()[-6000:]
             ) from error
         computed = RepairBody.model_validate_json((Path(tmp) / "body.json").read_bytes())
     state = load_state(store, computed.arithmetic.out_state)
     if tape is not None:
         if computed != tape.body:
-            raise TapeError("fresh independent repair context replay differs")
+            # The master calls this on the tape its own coordinator key signed a moment before
+            # (store.rollback_v2), so a fresh worker that disagrees means its pipeline diverged.
+            raise TapeIntegrityError("fresh independent repair context replay differs")
     else:
         if key is None or key.ss58 != signer:
-            raise TapeError("repair context signing authority unavailable")
+            raise TapeIntegrityError("repair context signing authority unavailable")
         tape = RepairTape(
             body=computed, signer=signer, sig=key.sign(repair_message(computed)).hex()
         )
@@ -231,19 +240,19 @@ def context_anchors(store: Store, body: RepairBody) -> tuple[VerifiedAnchor, ...
         theta, state = unpack_state(get_object(store, e.final_state_object))
         ef, _ = unpack_state(get_object(store, e.final_ef_object))
         if state is None:
-            raise TapeError("repair output optimizer absent")
+            raise TapeIntegrityError("repair output optimizer absent")
         if any(
             not bool(torch.isfinite(x).all())
             for values in (theta, state.m, state.v, ef)
             for x in values.values()
         ):
-            raise TapeError("nonfinite repair output artifact")
+            raise TapeIntegrityError("nonfinite repair output artifact")
         if (
             optimizer_hash(state) != e.final_optimizer_hash
             or state_hash(theta) != e.final_theta_hash
             or state_hash(ef) != e.ef_out_hash
         ):
-            raise TapeError("repair output artifact commitments differ")
+            raise TapeIntegrityError("repair output artifact commitments differ")
         proof = sha256_hex(
             canonicalize(
                 [
@@ -316,7 +325,9 @@ def replay_history_context(
             timeout=context["body"]["timeout_seconds"],
         )
         if process.returncode:
-            raise TapeError("predecessor history replay failed: " + process.stderr.decode()[-6000:])
+            raise TapeIntegrityError(
+                "predecessor history replay failed: " + process.stderr.decode()[-6000:]
+            )
         records = json.loads((Path(tmp) / "anchors.json").read_bytes())
     from hypertrain.auditor.replay import unpack_state
 
@@ -851,7 +862,7 @@ def _finite_state(
     )
     flag = torch.tensor([int(finite)], dtype=torch.int64, device=next(iter(theta.values())).device)
     if any(int(x[0]) != 1 for x in comm.all_gather(flag)):
-        raise TapeError("nonfinite repair theta/optimizer/EF")
+        raise TapeIntegrityError("nonfinite repair theta/optimizer/EF")
 
 
 def _compute_repair(

@@ -36,8 +36,8 @@ with the victim's signed challenge, and a second one after the deadline suspende
 | RTA-06 | The admission bond can neither be released nor slashed | `challenge/store.py:2318-2333`, `admission.py:1093` |
 | EB-01 | An elastic token log restored from a copy, or copied or hard-linked, re-issues a token, so an old signed leave releases a new lease | `elastic/tokens.py`, `elastic/coordinator.py:285-304` |
 
-`implementation_hash` is the hash of the AST of 33 named definitions of `challenge/store.py` (32
-functions and the class `_ServiceCapacityV1`) and of ten files (`challenge/store.py:4284-4331`). `admission.py`, `admission_store.py`, `app.py`,
+`implementation_hash` is the hash of the AST of 35 named definitions of `challenge/store.py` (34
+functions and the class `_ServiceCapacityV1`) and of ten files (`challenge/store.py:4345-4394`). `admission.py`, `admission_store.py`, `app.py`,
 `elastic/*`, `protocol/messages_v2.py`, `protocol/envelope_v2.py`, `miner/*` and the dispatcher
 `admission_v2`, `_settlement_v2`, `_services`, `push_beacon` are not in it [V]. Every decision
 below stays outside it.
@@ -188,13 +188,12 @@ decision 2, and a caller identity the service cannot verify); accepting the admi
 
 The same rule covers the two other routes that sign in a header and that are not part of
 admission. `PUT /v2/runs/{run_id}/objects/{sha256}` (`X-Hotkey` and `X-Object-Signature`,
-`challenge/app.py:658`, sent by `miner/core.py:1024`) was assigned to the lot
-`escrow-relay-fixes`; `GET /v2/runs/{run_id}/disputes` (`x-dispute-signature`,
-`challenge/app.py:876`, sent by `miner/core.py:1374` and `miner/dispute_follow.py:193`) was
-assigned to the lot `audit-integrity-2`. At the merge with `origin/v3` (`e0969448`, which holds
-`audit-integrity-2`) neither is converted: the disputes route has no owner any more. Each would
-become a request whose signed envelope is in the body. This series does not convert them: they
-do not work through the proxy.
+`miner/core.py:1042`) was assigned to the lot `escrow-relay-fixes` and is converted there: a `POST`
+whose body is a signed `ObjectUploadRequest` (ADR 0014 Part 8). `GET /v2/runs/{run_id}/disputes`
+(`x-dispute-signature`) was assigned to the lot `audit-integrity-2`, which converted it; the lot
+`escrow-relay-fixes` converted it as well (ADR 0014 Part 8) and its version is the one kept: it is
+now `POST /v2/runs/{run_id}/disputes/watch` with a `DisputeWatchRequest` signed in the body (the
+`GET` answers 405 whatever the method), like the challenge and job requests of this series.
 
 ### 4. Dead unfunded joins release their places; an optional per-prefix cap (RTA-02)
 
@@ -323,15 +322,40 @@ Decision.
    earlier bond-only seizure a conviction bans and burns no reward, see Decisions for Forge 4)
    and bans the admission (`BANNED`, terminal; `Admission.lock` then answers `LOCK_BANNED`); `AUDIT_MISMATCH`, a round-stage audit mismatch that the caller has
    confirmed as the miner's (D47), suspends the admission (reason `AUDIT_MISMATCH`), adds one
-   strike and burns the bond alone, and the coldkey stays bound by the one-non-`ACTIVE`-row rule
-   as in probation; `NO_SHOW` burns the bond alone (`EscrowV2.slash(burn_pending=False)`) and
-   leaves the admission as it is, ineligible until it is funded again. A (reason, evidence)
+   strike and burns the bond alone (`EscrowV2.slash(burn_pending=False)`), and the coldkey stays
+   bound by the one-non-`ACTIVE`-row rule as in probation; `NO_SHOW` burns the bond and adds a
+   strike too, but the first one puts the admission back on a fresh probation and only a second
+   one inside `NO_SHOW_STRIKE_WINDOW_SCREENS` work screens suspends it, as ADR 0011 Part 8
+   decision 12 (D63) amends it (it first burned the bond and left the admission as it was,
+   ineligible until funded again). A (reason, evidence)
    pair is applied once, recorded in `admission_sanctions`: a retry adds no strike. The ledger
    keeps its existing meaning of a slash; the new keyword defaults to it, so no earlier event
    changes. The caller decides whose fault it is: a verdict against the auditor reaches
    `settle_fraud`, which returns `False` for it, and the closures of ADR 0011
    (`_close_blocked_disputes_v2`) call `settle_lock` and `resolve_pending`, never `settle_fraud`
    or `seize_bond`.
+
+   **Strike window of a no-show (D63, D70).** The window is `no_show_strike_window(epoch) =
+   NO_SHOW_STRIKE_WINDOW_SCREENS (4) * work_screen_epoch_rounds`, measured in beacon rounds from the
+   beacon of the earlier sanction. It has to outlast two full PROBATION -> ACTIVE ladders, or a
+   miner that comes back as fast as it can would always meet a closed window and the suspension
+   tier would be dead. Inputs: a beacon round is 3 s (20 per minute); the ladder is
+   `clean_finalizations` = 12 clean trials (the policy field is a literal); the TEST replay ran
+   twelve clean trials in about 29 minutes [A: D70]; a production training round takes about
+   10 minutes [A: D70]; `work_screen_epoch_rounds` is 6000 in the TEST and production builders
+   (`build_test_manifest.sh`, `ops/manifest_v2.py`, `od_large_manifest.py`, `network_gpu_seed.py`).
+   Formula: `ladder = trials * seconds per trial / 3 s`, `window = 4 * 6000`, and the rule is
+   `window >= 2 * ladder`.
+
+   | Policy | Ladder | Two ladders | Window | Margin |
+   | --- | --- | --- | --- | --- |
+   | TEST | 29 min = 1740 s = 580 rounds | 1160 rounds = 58 min | 24000 rounds = 20 h | 20.7x |
+   | production | 12 * 10 min = 120 min = 2400 rounds | 4800 rounds = 4 h | 24000 rounds = 20 h | 5x |
+
+   Four screens is therefore not the minimum (one screen, 6000 rounds, would pass too); it keeps a
+   miner that rests between trials inside the window. `tests/challenge/test_strike_window_v2.py`
+   asserts `window >= 2 * ladder` for both policies from the builders' own literals, and pins the
+   numbers above. A policy with a shorter screen must restate the calculation.
 4. **Conviction.** `Admission.settle_fraud(dispute_id, *, now)` replaces the old function (no
    caller, no test). The `resolution` branch of `admission_v2` calls it in the transaction of
    `DisputesV2.settle_lock`. Only an accepted, resolved dispute settlement with outcome `FRAUD`
@@ -361,10 +385,11 @@ confirmed as the miner's. If Forge still wants a no-show's bond burned, the call
 `Admission.seize_bond(admission_id, *,
 reason, evidence_hash, now)` with `reason="NO_SHOW"` for a roster member that never committed and
 `reason="AUDIT_MISMATCH"` for a confirmed round-stage mismatch; `evidence_hash` is 64 hex naming
-the round and what confirmed it; call it inside the transaction that excludes the member. To
-give a bond back on the owner's authenticated request, `Admission.release_bond(admission_id,
-now=...)`. Both resolve everything by admission id, nest in `escrow.tx()`, are idempotent and
-write nothing when there is no residual bond.
+the round and what confirmed it; call it from a step that retries, not inside the transaction
+that excludes the member (ADR 0011 Part 8 decision 4: a sanction that raises would keep the
+member in the round). To give a bond back on the owner's authenticated request,
+`Admission.release_bond(admission_id, now=...)`. Both resolve everything by admission id, nest in
+`escrow.tx()`, are idempotent and write nothing when there is no residual bond.
 
 Consequences. An honest miner leaves with its bond after its screen lapsed, its last round
 closed and its rewards vested; the wait is `E_vest_rounds` beacon rounds after the last
@@ -452,8 +477,9 @@ exists.
 
 1. **Bond burn (Part 6).** Implemented as recommended: a referee `FRAUD` against the miner burns
    the admission bond and, while a residual lock exists, the coldkey's unvested rewards, and bans
-   the admission; a no-show
-   seizure burns the bond alone. ADR 0002 "Penalties" makes any slash for a failed audit
+   the admission; a no-show seizure burns the bond and adds a strike, and puts the admission on a
+   fresh probation the first time and suspends it the second time inside four work screens (ADR 0011
+   Part 8 decision 12, D63; the alternative was bond-only). ADR 0002 "Penalties" makes any slash for a failed audit
    founder-only: the order of D36 bis and Forge's request of 2026-10-27 are taken as that
    decision for these two cases. To withhold the burn, `seize_bond` keeps recording the seizure
    and the ban and only the `slash` call goes.
@@ -463,12 +489,13 @@ exists.
    rounds in the example, `dispute_per_level` is a per-turn timeout), and should wait for the
    DET-01b fix. Give W, or confirm that it waits.
 3. **Residuals left open:** targeted trial squatting needs a funded-only trial place (policy
-   field); the route back for a stranded miner is ADR 0002 P1; an admission-trial
+   field); the route back for a stranded miner is ADR 0002 P1 / ADR 0011 D40; an admission-trial
    `MISMATCH` binds a pending reference that nothing settles (the bond and the coldkey stay
    locked); `PROBATION` rows are not reaped; `DisputesV2.settle_lock` derives its operation id
    from public data and can be squatted (audit-integrity lot), as can any server-derived
    operation id that is not an HMAC, since the escrow operation ids share one namespace that any
-   holder of one unit can write (it predates this series). Found by the independent review and
+   holder of one unit can write (it predates this series; ADR 0014 Parts 1 and 2 close it: the
+   service's ids live in their own `srv:` key space). Found by the independent review and
    not changed here:
    - a lock of one unit counts as funding, so a dead `APPLIED` row that holds it is neither
      reaped nor counted by the optional cap; counting only locks of at least `S_min_units`

@@ -77,6 +77,39 @@
   of replaying it in the daemon (behavior change for pinned manifests only).
 
 ### Changed
+- A production run no longer stands on a CUDA qualification without host attestation.
+  `network_qualification.compare` takes its trust mode as a required keyword (`host_keys`: the two
+  pinned SSH host keys, or `None` for label-only) and, with keys, requires each host's signed
+  statement about its own `result.json` (`attestation.json` and `attestation.sig`, written by
+  `scripts/ops/qualification_attest.py`), distinct keys, GPU sets and boot ids, and device UUIDs
+  in the result. `scripts/ops/backend_bootstrap.py` needs `--known-hosts` with
+  `--host-fingerprint`, or `--label-only`. A label-only record carries `qualification_mode:
+  "label-only"` in its owner-signed evidence; a production run refuses it, and any record
+  installed before attestations existed, with 409 `production CUDA qualification needs attested
+  hosts` (`_bootstrap_backend_v2` refuses it earlier when the economics policy is already
+  stored). Test-ledger runs and installed legacy records keep working; a receipt signed over the
+  seven legacy keys still installs. `scripts/launch_cuda_run.sh` settles the mode in preflight:
+  a production launch needs `QUAL_KNOWN_HOSTS_H0/H1` and `QUAL_FINGERPRINT_H0/H1`, and
+  `--label-only` needs `QUAL_LABEL_ONLY=1` on a test ledger, so the Vast lifecycle can no longer
+  launch a production run. See `docs/adr/0011-audit-integrity.md` (part 4) at the monorepo root.
+- CUDA qualification is bound to the image that runs it. `network_gpu_qualification.py run`
+  measures the `src/hypertrain/**/*.py` of the package installed in the image (in isolated
+  mode, so `PYTHONPATH` and the working directory cannot substitute it), refuses to start when
+  they differ from the qualified tree (`qualification_tree_is_not_the_image:<first path>`) and
+  records the digest as `environment.image_sources_sha256`; `compare` re-checks it against the
+  result's `sources` and between the hosts, strict mode requires it, and it enters the owner-signed
+  evidence as `image_sources_sha256`. The GPU image must be rebuilt from a tree that contains the
+  runner measurement before it can be qualified, and again after every change to
+  `src/hypertrain/**/*.py`. Results written before the field still compare label-only.
+  The generic CUDA executor's runner makes the same measurement before each island starts
+  (exit 9 if it fails) and `role-dispatch.json` carries it as `environment.image_sources_sha256`.
+  `_dispatch_env_v2` compares it with the qualification record's: 409
+  `ROLE_DISPATCH_PROVENANCE_MISMATCH` for another build, 503 when the container reported none; a
+  record without the field (a stand-in, or one signed before it) adds no check.
+  The executor config refuses two hosts that share an address and port or pin a host key in
+  common (one box under two labels), `Executor` refuses a label that lists a GPU of another
+  label, and the new optional `image_sources_sha256` pin refuses a host whose container reports
+  another image or none. Give each host a `known_hosts_file` of its own.
 - A challenge poll after the deadline no longer suspends a miner whose proof was accepted
   (RTA-05), and the exact accepted proof and screen may be re-posted after their deadline so
   that a finalization that failed can run. See `docs/adr/0010-admission-hardening.md` at the
@@ -112,9 +145,9 @@
   `Admission.seize_bond(admission_id, reason, evidence_hash, now)` is the internal hook for a
   no-show (`reason="NO_SHOW"`), a confirmed round-stage audit mismatch (`"AUDIT_MISMATCH"`: also
   suspends with one strike) or a convicted miner (`"TRAINING_FRAUD"`, the only one called in this
-  tree: the audit gives a no-show no sanction, ADR 0011); `Admission.release_bond` and the
-  status key `bond` serve the owner. `EscrowV2.slash` takes `burn_pending` (default: today's
-  behaviour). ADR 0010.
+  tree by `settle_fraud`; ADR 0011 Part 8 calls the other two from the exit sweeper);
+  `Admission.release_bond` and the status key `bond` serve the owner. `EscrowV2.slash` takes
+  `burn_pending` (default: today's behaviour). ADR 0010.
 - `RotateRequest` needs the new hotkey's signature (`new_hot_sig`, own domain
   `hypertrain/rotate/2|`; `miner.admission.sign_rotation_consent`): one coldkey signature can no
   longer burn a registered hotkey that never joined (RTA-01). A new rotation is charged to
@@ -132,8 +165,78 @@
   `qualification_sm_profile_unqualified`; the challenge refuses both at bootstrap. A
   `result.json` written before capabilities were recorded still qualifies 170-SM devices only.
   See `docs/adr/0007-sm-counts-per-arch.md` at the monorepo root.
+- `Admission.seize_bond(reason="NO_SHOW")` adds one strike and burns the bond. The first no-show
+  puts the admission back on a fresh probation (state reason `NO_SHOW`, new trials, no
+  suspension); a second one for other evidence inside `NO_SHOW_STRIKE_WINDOW_SCREENS` (4) work
+  screens (`no_show_strike_window`: 24000 rounds, 20 h, against two ladders of 1160 rounds in
+  the TEST replay and 4800 in production, ADR 0010) suspends it, as `"AUDIT_MISMATCH"` does at once (D63). A banned admission stays banned,
+  a suspended one keeps its state and the reason it was suspended for (and takes the strike),
+  unvested rewards are spared and the coldkey stays bound as in probation. The exit reaper of the
+  beacon route calls it. ADR 0010 Part 6, ADR 0011 Part 8 decision 12.
+- A roster member left out for its silence is sanctioned in the same beacon push: its bond is
+  burned and it gets one strike (a probation the first time, a suspension the second time inside
+  the window, D63), through the new row `exit-sanction` (`PENDING`, `APPLIED` or `WAIVED`, id
+  `<w>:<hotkey>`) that a sweeper applies and retries, so that a failing sanction never keeps the
+  member in the round. The blame is the miner's only when the window it missed was served and
+  somebody used it: the master records `beacon-pause` (once per pause) when its wall clock was
+  more than two rounds ahead of the last round it held, and a silence in a round where nobody
+  committed, or a missing delta in a round nobody delivered to, is waived. A NO_SHOW that a lazy
+  writer recorded is adopted on the next push. `ChallengeStore.sanction_hook` (None: the run's
+  `Admission`) is the seam a test binds. A suspension has no route back. See
+  `docs/adr/0011-audit-integrity.md` (Part 8) at the monorepo root.
+- A delta the master never received is not the miner's fault when the master holds evidence of the
+  member's upload for that round: a relay receipt (`relay-receipt`) or its own acceptance
+  (`master-acceptance`). The member is still left out of the round, its `exit-sanction` row is
+  `WAIVED` and nothing happens to its admission. A member that uploads and then withholds its
+  delta manifest is waived the same way (D59). ADR 0011 Part 8, decision 5.
+- `scripts/ops/live_operator.py open` takes `--tolerate K` (default 1) and refuses a roster of
+  fewer than 4 + K hotkeys, naming the arithmetic: a roster of R members tolerates R - 4 left out
+  (the Q/4 caps need four), so five tolerate one and six tolerate two. `--tolerate 0` opens four
+  on purpose, as the TEST runbook does. The store keeps the protocol minimum of four. A script
+  that opens fewer than five hotkeys must pass `--tolerate 0`. ADR 0011 Part 8, decision 27.
+- Relay upload quota (ADR 0014 Part 6, TRN-02): a relay counts the uploads it still holds
+  (a live reservation, or custody with a pin neither released nor past its horizon) instead of
+  every record it ever accepted, and has no default count cap (it was 64 for the life of the
+  run, after which every miner assigned to it was refused and `/readyz` turned false).
+  `relay.json` gains an optional `max_uploads`, omitted from the file when unset. `accept`
+  refuses with `relay journal capacity exhausted` before the journal passes 12 MiB (the
+  metadata limit is 16 MiB), and `/readyz` no longer depends on the count. `/readyz` also reports
+  `journal_bytes`, `journal_budget`, `journal_fill` and `alarm` (above 80 % of the budget, with a
+  warning in the log); the alarm never makes a replica unready.
+- Relay release path (ADR 0014 Part 6, TRN-02): the master serves a public, read-only,
+  coordinator-signed `RelaySettlementView` at `GET /v2/runs/{run_id}/relay-settlements/{grant_hash}`
+  (new relay message type; exactly the grant hash, finality hash and beacon, closed dispute root and
+  beacon, and vesting beacon), and a relay answers `CustodyRelease` from it. Until now `runtime()` never
+  configured a settlement source, so a production relay refused every release. No credential enters the
+  relay.
+- Relay custody rotation (ADR 0014 Part 6, TRN-02, D53/D54): `collect()` also prunes the records
+  whose custody is spent (released and past the deletion bound, or lapsed) with their nonces,
+  never while a live record, an upload of the same bytes in flight or a deletion reservation
+  still needs the object, and a task of the relay runs it every 5 minutes. A pin whose signed
+  horizon plus the epoch grace is past, with no release and no dispute referencing it, is lapsed
+  and deleted like a released one if its upload never reached a receipt; a receipted upload stays
+  until the master releases it, however old, because a master that is away past the horizon cannot
+  extend or release (D54, D72). Until now nothing removed a record and `collect()` had no caller.
+- Unattended relay custody on the master (ADR 0014 Part 6, TRN-02, D53/D54): a task of the challenge
+  app (`HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL`, default 120 s, `0` off) releases every grant that is
+  settled or closed without a reward and past the epoch grace, and extends the custody of a grant
+  whose round has an unresolved dispute before its horizon, repeatedly, through `relay_control_v2`. No operator call is needed any
+  more; the admin routes remain. `ChallengeStore.release_due_v2` is one pass.
 
 ### Fixed
+- A member convicted of training fraud between the aggregate and the finalize of a round is no
+  longer paid for it, nor is any other admission of its coldkey (D64): `finalize` leaves out an
+  input whose coldkey has a `BANNED` admission (read through the admission's hotkey history, a
+  rotation changes the hotkey), the coordinator-signed `Finalize.included` lists the others, their
+  tokens split the whole round budget, and the ledger refuses a reward for a convicted coldkey
+  (`BANNED_WORK`). A round whose inputs all belong to convicted coldkeys settles with an empty
+  `Finalize.included` and answers `CLOSED_UNPAID`: nothing is minted, and the ledger records the
+  round as withdrawn when the next one is finalized, so a convicted round no longer blocks the
+  reward order of the rounds after it. The service-admitted path compares `included` with the
+  roster less the convicted coldkeys instead of the whole roster.
+  `scripts/ops/live_operator.py finalize` lists the same set. A member that is only suspended or
+  has a burned bond is still paid for the round it was verified in. See
+  `docs/adr/0011-audit-integrity.md` (Part 8, decision 23).
 - Escrow: the events the service writes (reward finalize, maturity, the payment of `get_weights`,
   the settlement of a dispute) live in a key space of their own, `srv:` plus an HMAC under a key
   derived from the coordinator secret, so a signed client event can no longer occupy an id the
@@ -167,6 +270,13 @@
   make every v2 operation answer 503 once the beacon lagged 6 s. It now reads the owner's open locks
   through a partial index (the same value, bit for bit). New admission locks must hold a tenth of the
   funding floor and are capped at 2,048 per coldkey and 4,096 in the ledger (Lens F7a).
+- Escrow: an event hashed and stored the whole ledger state through the pure-Python canonical encoder,
+  one interpreter step per character, twice, and `verify()` did it again for every stored snapshot:
+  124 ms per event and 909 ms to verify 21 events at 5,000 unit rows (restart cost grew with the square
+  of the ledger). They use the standard encoder, whose bytes are the same (a test compares them on
+  arbitrary strings, and every stored event hash still verifies): 17 ms and 59 ms. A transfer to oneself
+  is refused (`SELF_TRANSFER`, an old one replays) and a transfer adds a recipient row only for the
+  origins it spends (Lens F7b).
 - The beacon route no longer stops at one escrow origin that cannot mature. A shadow reward whose
   hotkey rotated after acceptance (`signer is not authorized for message role`) or whose job object
   went missing (`ObjectNotFound`) rolled back the whole round's maturity and lease expiry and made
@@ -174,6 +284,12 @@
   savepoint; one that fails for another reason than vesting or an open dispute stays `reward_pending`,
   is journaled as `records_v2 kind='maturity-failed'` and is retried at every round. A conservation
   failure or a SQLite error still aborts the call (Lens F6, SHD-D3).
+- A reward follows its coldkey through a hotkey rotation (D66). The shadow reward of an admission that
+  rotated no longer sticks: its custody is revalidated against the hotkey that signed it, which the
+  admission held then, and the ledger resolves a retired hotkey of an admission to its coldkey when it
+  validates stored evidence (the intake gate stays strict). `get_weights` pays a live reward to the
+  admission's current hotkey, and pays nothing to a banned coldkey (its units stay free and the
+  epoch mass burns).
 - The dispute long poll can no longer deadlock the store. `DisputesV2` has one lock order, the
   store lock then a leaf condition: `events()` reads the event table outside the condition and parks
   on a counter, so a mutator that notifies inside its transaction never waits for a poller that
@@ -198,12 +314,25 @@
   the remaining members cannot carry is refused with 409 `ROUND_INFEASIBLE`. The new helpers
   join the owned set of `implementation_hash`, which changes. See
   `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- A silent roster member is left out at the bound of its wait, no longer when somebody next calls
+  the round: the first beacon push at or after `d_commit` records `excluded` `NO_SHOW` (stage
+  `commit`) for every member with no commit, and the first at or after `d_upload` for every audited
+  member with no delta. The records are those of the lazy writers, which stay as a backstop. A round
+  the rest cannot carry keeps its membership facts and gets a `round-exit` marker. The reaper skips a
+  service run, and a failure of it, or of the dispute reaper, is journaled as `exit-failed` and
+  stops neither the beacon push nor the other reaper. No one is sanctioned yet. See
+  `docs/adr/0011-audit-integrity.md` (Part 8) at the monorepo root.
 - A round the caps or the finality rules refuse is a 409, no longer a bare 500: opening a round
   with a roster the Q/4 caps cannot carry (fewer than four eligible members) or round w+2 without
   round w+1 answered `Internal Server Error`. `InsufficientEligibleWeight` now answers 409
   `ROUND_INFEASIBLE: <reason>` and `FinalityError` and `TapeError` 409 `ROUND_BLOCKED: <reason>`
   on every route of the challenge app (the two rollback routes keep their bare message for a
   `TapeError`). The store still raises the bare exceptions; nothing is written by a refused call.
+  A fault of the master's own artifacts is not a request's fault and stays a 500: a stored tape
+  whose signature or version fails, a replay that differs from the tape it replays, and a repair
+  worker, signing authority or output artifact that fails, or a fresh independent worker that
+  disagrees with the tape the coordinator signed (`TapeIntegrityError`, a subclass of `TapeError`) answer 500 `TAPE_INTEGRITY: <reason>` on every route, the two rollback routes
+  included.
   See `docs/adr/0011-audit-integrity.md` at the monorepo root.
 - After a round that finality closed without a reward (an accepted rollback, or an exclusion
   before the round was applied) no later round could be reward-finalized: the ledger accepted
@@ -241,6 +370,144 @@
   free. A retry of an applied rotation is still answered. `Admission.rounds_listing` and `open_rounds` serve `rotate` and
   `lock_settlement`. Rotate between rounds. See `docs/adr/0011-audit-integrity.md` (Part 8,
   decision 21) at the monorepo root.
+- A miner can no longer contest a verdict that upholds its work: `POST .../dispute` answers 409
+  `NOTHING_TO_CONTEST` when the audit lease of the contesting miner in that round says MATCH. A
+  funded contest of its own MATCH suspended the contestant (`PENDING_DISPUTE`), pinned its round
+  and, once the server closed it, left the contestant on a fresh probation that is not live; the
+  contest bond came back, so leaving the round that way was free. A MISMATCH is contested as
+  before. The store's `contest_of` callback refuses, so
+  `disputes_v2.py` is unchanged. See `docs/adr/0011-audit-integrity.md` (Part 8, decision 21) at
+  the monorepo root.
+- A round that cannot reach a tape can be closed as a retired round instead of blocking the run
+  and the bond of every honest member for ever: the store records a null tape (the model does not
+  move), `finality` `RETIRED` and the evidence, carries every roster member's anchor `w - 1` as
+  its anchor `w` under new hashes (the tensor files are linked, nothing is loaded), cancels the
+  open audit leases, and `audits`, `aggregate`, `finalize` and `rollback` of that round answer 409
+  `ROUND_RETIRED`; no late audit result can replace a carried anchor. The causes (`INFEASIBLE`,
+  `AUDIT_WINDOW_MISSED`) are re-derived from the facts, the escrow is not called (the next reward
+  `finalize` records the round as withdrawn). `schedule_audits_v2`, `aggregate_v2`, `finalize_v2`
+  and `rollback_v2` are owned functions: `implementation_hash` changes. See
+  `docs/adr/0011-audit-integrity.md` (Part 8, decisions 7 to 11) at the monorepo root and
+  `docs/network-v2.md`.
+- The exit reaper retires a round that cannot go on (the caller the retire primitive lacked): when the
+  planner finds that the members left cannot carry one update after the commit window, or that nobody
+  scheduled audits by the end of the audit window, the beacon push that sees it retires the round (a
+  null tape, the anchors carried, new work answering 409 `ROUND_RETIRED`), after booking the exclusions
+  and the blame of the round. A round whose predecessor is still open is marked `waiting` in
+  `round-exit` and asked again at the next push; a failing retirement (a full disk) leaves the round
+  as it was, is journaled, and does not take the sanctions back. `_retire_round_v2` now checks the
+  survivors it is given against the records of the round (`exit_v2.survivors_of`) and refuses others,
+  so a caller cannot retire a viable round by naming fewer of them. A member that joined after round
+  `w - 1` has no anchor for it and cannot be on the roster of `w` (409 `missing accepted anchor` at
+  the opening), so a retirement never carries a missing anchor. ADR 0011 Part 8 decisions 8 and 11.
+- A confirmed audit mismatch sanctions the miner, once, a contest window later (the caller
+  `sanction_v2` lacked): the beacon push books a row for every verdict that excluded a member as
+  `UNVERIFIED` (`exit-sanction`, `stage: audit`), graded by `grade` (a located leaf, or leaves that
+  equal the replay under a commit that does not; anything else is waived), applies `decide` after
+  `verify.T.dispute_per_level` rounds and while no contest is open, cancels it when a referee finds
+  against the lease's auditor, and calls `Admission.seize_bond(AUDIT_MISMATCH)` (suspended, one
+  strike, the bond burned). Until the environment pin is required it is only recorded
+  (`WOULD_APPLY`): `ChallengeStore(enforce_audit_mismatch=True)` enforces it. A contest of a verdict
+  whose sanction is applied answers 409 `SANCTION_APPLIED`. ADR 0011 Part 8, decisions 14 to 18.
+- A production run refuses a qualification record without `image_sources_sha256` when an audit is
+  dispatched (409 `QUALIFICATION_IMAGE_SOURCES_MISSING`): before, a record without the digest meant
+  no check, so a production audit could stand on code nobody measured. A TEST run keeps accepting
+  it. The two runner tests that listed the installed package against this tree now list the
+  installed package itself, and the comparison with the tree is skipped when another tree is
+  installed.
+- `scripts/ops/live_operator.py open` opens the round that follows a retired one: when round
+  `w - 1` has no `finalize`, `prev_final_hash` is the evidence hash of its `retired` record instead
+  of the tool stopping with "missing accepted finalize" (a round that is neither is still refused).
+- The relay custody of the uploads of a round is released whatever way the round closed (D70):
+  settled with a reward, settled with nobody paid (every input of a convicted coldkey,
+  `CLOSED_UNPAID`), retired, or excluded and repaired by a rollback. The settlement answered 409
+  "pinned by unresolved finality" for ever for the last three, or "missing accepted
+  replayed-finality" for the second. One writer, `ChallengeStore._close_round_v2`, stores the
+  finality row and the closure record next to it (the hash that closed the round and the beacon)
+  and every closing path calls it. A round settled with a reward or with nobody paid is released
+  from that record; a round retired or excluded and repaired is released as ADR 0014 Part 6.4
+  says (its finality hash is the hash that closed it, and the custody horizon stands in for the
+  beacons, since nothing vests); an open audit or dispute still pins the custody.
+- A job whose member has no leaves record (the miner never posted them, or the master lost them)
+  is dropped at the first `absolute` as `excluded` `NO_SHOW` (stage `leaves`) instead of being
+  re-armed for a second audit window nobody could use. The blame is infrastructure's: its
+  `exit-sanction` row is `WAIVED`, so there is no strike, seizure or suspension, because only the
+  master lacks the leaves and it cannot prove the miner never posted them. See
+  `docs/adr/0011-audit-integrity.md` (Part 8, decision 3) at the monorepo root.
+- A request no longer reads the master's shared SQLite connection without the store lock. The
+  roster guard (`require_roster_v2`: the round record, the service-admission mark and, for an
+  admitted run, its profile, manifest and round reservation; run by `aggregate`, the public
+  `GET /rounds/{w}` and the training routes) and `weights` (the probe of finalized escrows between
+  its two transactions) held none, so a request on another thread could interleave with them and
+  answer a spurious 409 or 500. `require_roster_v2` is in the owned set of `implementation_hash`,
+  which changes: a run that already holds a `service-admission` record fails its roster guard with
+  `SERVICE_PROFILE_AUTHORITY`, and that record is immutable (`SERVICE_PROFILE_IMMUTABLE`), so such
+  a run is created again. The lock order of `docs/adr/0011-audit-integrity.md` (Part 7) is
+  unchanged.
+- A `/delta` can no longer borrow a master acceptance. The acceptance was looked up by its digest
+  across the whole run and only its `delta_hash` was compared with the commit, so a miner could
+  skip its own grant and relay upload by naming another miner's acceptance, or its own acceptance
+  of an earlier round. The route now also requires the acceptance's `w` and `hotkey` to be the
+  signer's round and hotkey and the relay receipt it names to carry the delta's `grant_hash`
+  (422 `master acceptance is not this miner's for this round and grant`). A `/commit` whose leaf
+  count, token count or assignment size differs from the manifest is a 422 with the reason, no
+  longer a bare 500; nothing is recorded and the nonce stays free. `training_v2` is in the owned
+  set of `implementation_hash`, which changes (same consequence as the entry above). See
+  `docs/network-v2.md`.
+- `GET /v2/runs/{run}/relay-observers/{grant}/{observer}` hands back the pending challenge until
+  the observer answers it or it lapses (it used to replace it on every call, so any caller
+  could invalidate the observer's response), and no longer reads the accepted reference bytes
+  to do so. Its beacon pin carries the round: an exchange that straddled a beacon round used to
+  end in HTTP 500 for ever (`docs/adr/0014`, Part 8).
+- `PUT /v2/runs/{run}/objects/{sha256}` checks the object signature before it touches the store,
+  and the store work of that route, of `GET .../objects/{sha256}` and of `POST /v2/relay-receipts`
+  runs in the worker pool instead of on the event loop. A request that waits for the store lock
+  (a long operation, or a stranger who only knows a registered hotkey, or an anonymous receipt)
+  used to stop the whole process, `/version` included. A bad signature now answers 403 before
+  404 (unknown run) or 403 (hotkey not admitted); nothing else changes (`docs/adr/0014`, Part 8).
+- The dispute watch poll is `POST /v2/runs/{run}/disputes/watch` with a signed ht/2 body
+  (`DisputeWatchRequest {party, cursor, wait}`, expiry at most 20 rounds ahead of the master's
+  round) instead of `GET .../disputes` with an `X-Dispute-Signature` header. The header route is
+  removed with no shim: the master proxy drops custom headers, the signature never expired, and
+  nothing outside this repository runs on it. `HttpDisputeTransport` takes the party's key, the
+  run id and a beacon reader; the miner no longer puts the static signature on its HTTP client.
+  Every refused poll answers 403, as the header route did (`docs/adr/0014`, Part 8).
+- Dispute watch polls run on their own thread pool and are bounded: two at a time per party and
+  128 in all, a further poll answers 429 at once (`watch --follow` already backs off on 429). A
+  wait used to occupy a thread of the pool every other route shares, so 32 waiting watchers
+  stopped the master from answering anything else. The role lookup of the watch and ack routes
+  now holds the store lock like every other use of the shared connection (`docs/adr/0014`,
+  Part 8).
+- The miner's trial job read is `POST /v2/runs/{run}/join/{admission}/job` with a signed ht/2
+  body (`TrialJobRequest {admission_id}`, signed by the admission's hotkey, expiry at most 20
+  rounds ahead of the master's round) instead of a `GET` with `X-Hotkey` and `X-Trial-Signature`
+  headers. The header route is removed (405) with no shim, for the reasons of the dispute watch
+  above; a refused request answers 403 as before (`docs/adr/0014`, Part 8).
+- Object uploads are `POST /v2/runs/{run}/objects/{sha256}` instead of `PUT` with `X-Hotkey` and
+  `X-Object-Signature` headers (removed, 405, no shim, for the reasons above). The body is the
+  uploader's signed `ObjectUploadRequest {sha256, size}` envelope behind a 4-byte length, then the
+  object: one stateless request, no multipart dependency, and the signed length gives the pinned
+  per-object limit an early 413. The envelope expires at most 20 rounds past the master's round;
+  the miner reads that round at most every 15 seconds and signs again for each retry. The master
+  verifies the signature, then the uploader's admission, before it reads the object
+  (`docs/adr/0014`, Part 8).
+- The relay keeps an upload that reached a receipt until the master releases it, however old, and
+  the master releases a round closed without a reward as well as a settled one (ADR 0014 Part 6.4,
+  D54, D72): a master that is away past the custody horizon can neither extend nor release, and a
+  dispute may have opened after the last extension. An upload the master holds no receipt for (a
+  partial upload, or a receipt it refused with a 4xx, recorded as `ForwardRefused`) still lapses.
+- `GET /readyz` of the relay answers 503 `{"ready": false, ...}` when its storage fails (it was a
+  bare 500, or 503/400 with another body), with the journal fill fields `null` when the journal
+  cannot be read.
+- The dispute watch holds at most 64 of its 128 slots for parties that are not pinned roles, so that
+  registered hotkeys cannot lock the auditors, referees and coordinator out; the retired
+  `GET /v2/runs/{run}/disputes` answers 405 (it was 404).
+- Escrow `STATE_RANGE` covers every numeric column of the state (`mature_at`, `reward_round`,
+  `escrow_finalized.w`, `ordinal`, `trial_epoch`), not only `units` and `issued`; `-2**63` no
+  longer escapes as an SQLite overflow.
+- `scripts/launch_cuda_run.sh` accepts the object-upload retry of the signed POST (`_retrying("POST
+  object`) as well as the older PUT in the miner bundle, through one check used twice; its bundle
+  checks are tested against `miner/core.py`.
 - A miner no longer dies on one lost read of a trial or job input. `probe-v2` and
   `run-v2` retry an object GET that meets a 404 like one that meets a 5xx (five retries, 1 to
   16 s, each wait jittered, as every retry of the miner now is), fail with the same error when it

@@ -14,17 +14,25 @@ import anyio
 import httpx
 import pytest
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from test_transport_v2 import MASTER, MINER, RUN, H, Rig
 
 from hypertrain.beacon.core import BeaconRound, BeaconUnavailable, round_at_or_after
 from hypertrain.beacon.drand import QUICKNET_GENESIS, QUICKNET_PERIOD
+from hypertrain.data.stream_store import StreamStore
 from hypertrain.protocol import relay_envelope
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.relay_envelope import RelayEnvelope
-from hypertrain.protocol.relay_messages import RelayNetworkManifest
+from hypertrain.protocol.relay_messages import (
+    CustodyRelease,
+    RelayAssignment,
+    RelayNetworkManifest,
+    RelayReceipt,
+    UploadGrant,
+)
 from hypertrain.relay import app as relay_app
-from hypertrain.relay.app import RelayConfig, create_app
+from hypertrain.relay.app import AcceptRequest, RelayConfig, create_app
+from hypertrain.relay.core import Settlement
 
 STALE = "verified beacon stale; eligibility/deadlines frozen"
 # With d the seconds since drand genesis the expected round is ceil(d / 3), so a round starts
@@ -89,7 +97,7 @@ async def burst(client: httpx.AsyncClient, count: int) -> list[httpx.Response]:
 
 @asynccontextmanager
 async def serving(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start: float
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start: float, max_uploads: int | None = None
 ) -> AsyncIterator[tuple[httpx.AsyncClient, Drand, Clock]]:
     """The real runtime() lifespan on a local backing; only drand and the clock are injected."""
     clock = Clock(start)
@@ -130,6 +138,7 @@ async def serving(
         signing_files={"k1": "k1.key", "k2": "k2.key"},
         observer_public_keys=[MASTER.ss58, MINER.ss58],
         local_backing=str(tmp_path / "store"),
+        **({} if max_uploads is None else {"max_uploads": max_uploads}),
     )
     (tmp_path / "relay.json").write_text(json.dumps(config.model_dump(mode="json")))
     monkeypatch.setenv("RELAY_CONFIG", str(tmp_path / "relay.json"))
@@ -308,5 +317,159 @@ def test_relay_error_text_is_returned_and_other_rejections_stay_opaque(tmp_path:
                 assert validation.json() == {"error": "ValidationError"}
                 assert envelope.json() == {"error": "MalformedEnvelope"}
                 assert "SENTINEL-INPUT" not in validation.text + envelope.text
+
+    anyio.run(scenario)
+
+
+async def accept_request(tmp_path: Path, w: int) -> tuple[str, bytes]:
+    """Path and body accepting round w, bound to the network manifest the served relay pinned."""
+    config = RelayConfig.model_validate_json((tmp_path / "relay.json").read_bytes())
+    pinned = RelayNetworkManifest.model_validate(config.network_manifest.body).digest()
+    async with httpx.AsyncClient() as backing:
+        rig = Rig(tmp_path / "rig", backing)
+    grant, manifest, raw, assignment, opened = rig.upload(b"round-%d" % w, nonce=f"{w:064x}", w=w)
+    bound = RelayAssignment.model_validate({**assignment.body, "manifest_hash": pinned})
+    body = AcceptRequest(
+        grant=raw, manifest=manifest, assignment=rig.seal(bound), round_open=opened
+    )
+    return f"/v1/uploads/{grant.digest()}/accept", body.model_dump_json().encode()
+
+
+@pytest.mark.parametrize("max_uploads", [None, 1])
+def test_relay_json_max_uploads_bounds_the_held_uploads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, max_uploads: int | None
+) -> None:
+    # The optional key is written only when set (an older relay image rejects unknown keys);
+    # unset leaves the count unbounded, set bounds it, and the pod stays ready either way.
+    async def scenario() -> None:
+        async with serving(tmp_path, monkeypatch, JUST_AFTER_BOUNDARY, max_uploads) as (
+            client,
+            _,
+            _,
+        ):
+            written = json.loads((tmp_path / "relay.json").read_text())
+            assert ("max_uploads" in written) == (max_uploads is not None)
+            answers = []
+            for w in (1, 2):
+                path, body = await accept_request(tmp_path, w)
+                answers.append(await client.post(path, content=body))
+            assert [a.status_code for a in answers] == [200, 200 if max_uploads is None else 400]
+            if max_uploads is not None:
+                assert answers[1].json()["detail"] == "retained upload quota exhausted"
+            assert (await client.get("/readyz")).status_code == 200
+
+    anyio.run(scenario)
+
+
+def test_relay_json_refuses_a_max_uploads_that_admits_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A zero limit would refuse every grant while /readyz stays green.
+    async def scenario() -> None:
+        with pytest.raises(ValidationError, match="greater than or equal to 1"):
+            async with serving(tmp_path, monkeypatch, JUST_AFTER_BOUNDARY, 0):
+                pass
+
+    anyio.run(scenario)
+
+
+async def hold_a_receipted_upload(
+    tmp_path: Path, bound: int | None = None
+) -> tuple[UploadGrant, str]:
+    """A complete upload in the journal the served relay reads; returns the grant, receipt pin.
+
+    With `bound` the master has released it, and it can be deleted from beacon `bound` on."""
+    async with httpx.AsyncClient() as client:
+        rig = Rig(tmp_path / "store", client)
+        data = b"round-1"
+        grant, manifest, raw, assignment, opened = rig.upload(data, nonce="01" * 32)
+        await rig.relay.accept(raw, manifest, assignment, opened)
+        await rig.put(grant, data)
+        record = (await rig.relay.state()).uploads[grant.digest()]
+        assert record.receipt is not None
+        if bound is not None:
+
+            async def settlement(grant_hash: str) -> Settlement:
+                return Settlement(H, 100, H, 100, 100)
+
+            rig.relay.settlement, rig.clock = settlement, bound
+            for digest, pin in record.pins.items():
+                await rig.relay.release(
+                    rig.seal(
+                        CustodyRelease(
+                            grant_hash=grant.digest(),
+                            custody_hashes=[digest],
+                            retention_hash=pin.retention_hash,
+                            finality_hash=H,
+                            vesting_beacon=100,
+                            closed_dispute_root=H,
+                            release_beacon=bound,
+                        ),
+                        exp=bound + 10,
+                    )
+                )
+        return grant, RelayReceipt.model_validate(record.receipt.body).digest()
+
+
+def wall_of(beacon: int) -> float:
+    """A clock that opens drand round `beacon` (see JUST_AFTER_BOUNDARY)."""
+    return QUICKNET_GENESIS + QUICKNET_PERIOD * (beacon - 1) + 1.0
+
+
+async def custody_of(tmp_path: Path):
+    async with httpx.AsyncClient() as backing:
+        return (await Rig(tmp_path / "store", backing).relay.state()).uploads
+
+
+async def collected(tmp_path: Path, grant_hash: str) -> None:
+    """Wait, for at most 15 s, until the journal no longer holds the grant."""
+    for _ in range(300):
+        if grant_hash not in await custody_of(tmp_path):
+            return
+        await anyio.sleep(0.05)
+    raise AssertionError("the grant was never collected")
+
+
+def test_runtime_collects_released_custody_on_its_own_at_its_deletion_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The master released the upload with a deletion bound of beacon 300. Nothing calls collect:
+    # the runtime's own task deletes the object and prunes the record once beacon 300 is reached.
+    async def scenario() -> None:
+        grant, _ = await hold_a_receipted_upload(tmp_path, 300)
+        monkeypatch.setattr(relay_app, "COLLECT_INTERVAL", 0.05)
+        async with serving(tmp_path, monkeypatch, wall_of(298)) as (_, _, clock):
+            await anyio.sleep(1.0)  # about twenty passes at beacon 299, one short of the bound
+            assert grant.digest() in await custody_of(tmp_path)
+            assert any((tmp_path / "store").rglob(grant.delta_hash))
+            clock.advance(2 * QUICKNET_PERIOD)
+            await collected(tmp_path, grant.digest())
+        assert not any((tmp_path / "store").rglob(grant.delta_hash))
+
+    anyio.run(scenario)
+
+
+def test_runtime_collect_task_survives_a_failing_delete_and_logs_only_its_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario() -> None:
+        grant, _ = await hold_a_receipted_upload(tmp_path, 300)
+        monkeypatch.setattr(relay_app, "COLLECT_INTERVAL", 0.05)
+        real_delete, refused = StreamStore.delete, []
+
+        async def flaky(self: StreamStore, sha: str) -> None:
+            if not refused:
+                refused.append(sha)
+                raise OSError("backing refused SECRET-OBJECT-KEY")
+            await real_delete(self, sha)
+
+        monkeypatch.setattr(StreamStore, "delete", flaky)
+        async with serving(tmp_path, monkeypatch, wall_of(320)):
+            await collected(tmp_path, grant.digest())
+        # The pass that failed left its deletion reservation (fenced, as before); the next pass
+        # still pruned the record instead of the task dying with the first error.
+        assert refused == [grant.delta_hash]
+        messages = [r.getMessage() for r in caplog.records if "relay collect" in r.getMessage()]
+        assert messages and set(messages) == {"relay collect deferred: OSError"}
 
     anyio.run(scenario)

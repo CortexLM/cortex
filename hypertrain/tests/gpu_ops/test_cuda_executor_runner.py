@@ -6,6 +6,7 @@ and the shipped `python -I -c` entry run for real with a fake torch, a fake nvid
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import json
@@ -25,13 +26,17 @@ from typing import Any
 
 import pytest
 
+import hypertrain
 import hypertrain.trainer  # noqa: F401 - pins determinism before any test imports torch
 from hypertrain.gpu_ops import cuda_executor as ce
 from hypertrain.gpu_ops import cuda_executor_runner as runner
+from hypertrain.gpu_ops import network_qualification as qualification
 from hypertrain.miner.island_launch import launch_argv
+from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages_v2 import IslandJobV1
 
 REG = tarfile.REGTYPE
+TREE = Path(__file__).parents[2]
 MISSING = object()
 DIGEST = "sha256:" + "ab" * 32
 BUDGET = 600
@@ -132,7 +137,13 @@ class Outcome:
     stderr: str
 
 
+# What a container whose image holds two package files measures; serve takes it as an argument so
+# that no test depends on the package installed next to it.
+MEASURED = {"src/hypertrain/a.py": "11" * 32, "src/hypertrain/b.py": "22" * 32}
+
+
 def run(stdin: bytes, **kwargs: Any) -> Outcome:
+    kwargs.setdefault("measure", lambda: MEASURED)
     out, err = io.BytesIO(), io.StringIO()
     code = runner.serve(io.BytesIO(stdin), out, err, **kwargs)
     leftovers = list(Path(tempfile.gettempdir()).iterdir())
@@ -201,7 +212,8 @@ def test_serve_ships_the_rank_files_environment_and_a_closing_complete() -> None
     ]
     assert names[-2:] == ["environment.json", "COMPLETE"]  # COMPLETE closes the stream
     body = dict(members)
-    assert json.loads(body["environment.json"]) == probe({})
+    measured = {"image_sources_sha256": sha(canonicalize(MEASURED))}
+    assert json.loads(body["environment.json"]) == {**probe({}), **measured}
     assert json.loads(body["COMPLETE"]) == {
         "version": 1,
         "files": {name: sha(body[name]) for name in names[:-1]},
@@ -400,7 +412,12 @@ class Gone(io.BytesIO):
 def test_serve_exits_8_when_the_reader_is_gone(when: str) -> None:
     stdin = io.BytesIO(package(input_files()))
     err = io.StringIO()
-    assert runner.serve(stdin, Gone(when), err, probe=probe_ok, launch=write_ranks) == 8
+    assert (
+        runner.serve(
+            stdin, Gone(when), err, probe=probe_ok, launch=write_ranks, measure=lambda: MEASURED
+        )
+        == 8
+    )
 
 
 def test_serve_gives_the_island_the_budget_minus_the_time_already_spent(
@@ -416,6 +433,44 @@ def test_serve_gives_the_island_the_budget_minus_the_time_already_spent(
 
     assert run(package(input_files()), probe=probe_ok, launch=launch).code == 0
     assert BUDGET - 300 < seen[0] <= BUDGET - 100  # probe and input transfer eat the wall budget
+
+
+def test_serve_reports_the_measured_sources_in_environment_json() -> None:
+    # Given: a container whose image holds the two package files of MEASURED.
+    out = run(package(input_files()), probe=probe_ok, launch=write_ranks)
+    # When
+    environment = json.loads(dict(read_tar(out.stdout))["environment.json"])
+    # Then: the digest of the whole map is reported next to what the probe saw, and nothing else
+    # of the probe's answer was touched.
+    assert out.code == 0
+    assert environment["image_sources_sha256"] == sha(canonicalize(MEASURED))
+    assert environment["gpu_uuids"] == [U0] and environment["sm_counts"] == [148]
+
+
+def test_serve_exits_9_and_ships_nothing_when_the_image_cannot_be_measured() -> None:
+    # Given: the in-image measurement fails.
+    def unmeasurable() -> dict[str, str]:
+        raise runner.Refused(9, "image sources could not be measured: boom")
+
+    # When
+    out = run(
+        package(input_files()), probe=probe_ok, launch=never("the island"), measure=unmeasurable
+    )
+    # Then: no island started and no byte of a result left.
+    assert out.code == 9 and out.stdout == b""
+    assert "image sources could not be measured: boom" in out.stderr
+
+
+def test_serve_measures_only_after_it_has_seen_the_requested_devices() -> None:
+    # Given: a container that sees other devices than the ones requested.
+    def probe(request: dict[str, Any]) -> dict[str, Any]:
+        return {"backend": "cuda", "gpu_uuids": [U1], "sm_counts": [148]}
+
+    # When / Then: exit 4 first; the measurement (a subprocess) is not spent on it.
+    out = run(
+        package(input_files()), probe=probe, launch=never("the island"), measure=never("measure")
+    )
+    assert out.code == 4
 
 
 # -- torchrun: the island process -------------------------------------------------------------
@@ -699,6 +754,165 @@ def test_probe_takes_its_answer_from_the_last_line_whatever_torch_printed_before
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=printed, stderr=""),
     )
     assert runner.probe_environment({}) == {"backend": "cuda"}
+
+
+# -- the sources of the installed image -----------------------------------------------------------
+
+
+INSTALLED = Path(hypertrain.__file__).resolve().parent
+
+
+def package_files_of_the_tree() -> dict[str, str]:
+    """The `src/hypertrain/**/*.py` entries of the qualification's own map of a tree."""
+    return {
+        name: digest
+        for name, digest in qualification.sources(TREE).items()
+        if name.startswith("src/hypertrain/") and name.endswith(".py")
+    }
+
+
+def package_files_of_the_install() -> dict[str, str]:
+    """The same entries, listed from the package the interpreter imports, wherever it is installed
+    (an editable install of this tree, or of another tree in a shared environment)."""
+    return {
+        "src/hypertrain/" + path.relative_to(INSTALLED).as_posix(): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in sorted(INSTALLED.rglob("*.py"))
+    }
+
+
+def test_image_sources_digest_is_the_jcs_digest_of_the_package_files_of_the_install() -> None:
+    # Given: the installed package, listed here by the test itself.
+    expected = package_files_of_the_install()
+    # When
+    measured = runner.measure_image_sources()
+    # Then: the in-image program names the same files, and its digest is the JCS one.
+    assert measured == expected
+    assert runner.sources_digest(measured) == sha(canonicalize(expected))
+
+
+@pytest.mark.skipif(
+    INSTALLED != (TREE / "src/hypertrain").resolve(),
+    reason="the installed hypertrain is not an editable install of this tree",
+)
+def test_the_install_is_named_as_sources_of_the_qualification_names_this_tree() -> None:
+    # The challenge side computes the digest from `sources()` of a tree alone: for an install of
+    # this very tree the two maps are one.
+    assert package_files_of_the_install() == package_files_of_the_tree()
+
+
+def test_measure_ignores_pythonpath_and_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a package named hypertrain in the working directory and on PYTHONPATH.
+    decoy = tmp_path / "decoy"
+    (decoy / "hypertrain").mkdir(parents=True)
+    (decoy / "hypertrain/__init__.py").write_text("DECOY = True\n")
+    (decoy / "hypertrain/stolen.py").write_text("x = 1\n")
+    monkeypatch.setenv("PYTHONPATH", str(decoy))
+    monkeypatch.chdir(decoy)
+    # When
+    measured = runner.measure_image_sources()
+    # Then: the installed package was measured, not the one a caller put in front of it.
+    assert measured == package_files_of_the_install()
+    assert "src/hypertrain/stolen.py" not in measured
+
+
+def test_image_sources_program_imports_only_stdlib() -> None:
+    # The program runs in the image's own interpreter before anything of hypertrain is trusted.
+    nodes = list(ast.walk(ast.parse(runner.IMAGE_SOURCES)))
+    imported = {a.name.split(".")[0] for n in nodes if isinstance(n, ast.Import) for a in n.names}
+    imported |= {
+        n.module.split(".")[0] for n in nodes if isinstance(n, ast.ImportFrom) and n.module
+    }
+    assert imported and imported <= sys.stdlib_module_names
+
+
+def measure_fake_package(directory: Path, name: str, content: bytes = b"x = 1\n") -> Any:
+    """Run the measuring program against a hypertrain package built in `directory`."""
+    (directory / "hypertrain").mkdir(exist_ok=True)
+    (directory / "hypertrain/__init__.py").write_bytes(b"")
+    target = directory / "hypertrain" / name
+    if name == "link.py":
+        target.symlink_to(directory / "hypertrain/__init__.py")
+    else:
+        target.write_bytes(content)
+    code = f"import sys; sys.path.insert(0, {str(directory)!r})\n{runner.IMAGE_SOURCES}"
+    return subprocess.run(
+        [sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60, check=False
+    )
+
+
+@pytest.mark.parametrize("name", ["link.py", "caf\u00e9.py"], ids=["symlink", "non-ascii"])
+def test_image_sources_program_refuses_a_link_and_a_non_ascii_name(
+    tmp_path: Path, name: str
+) -> None:
+    done = measure_fake_package(tmp_path, name)
+    assert done.returncode != 0 and done.stdout == ""
+    assert "refused" in done.stderr
+
+
+def test_image_sources_program_lists_a_plain_package_in_sorted_compact_json(
+    tmp_path: Path,
+) -> None:
+    done = measure_fake_package(tmp_path, "b.py", b"y = 2\n")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == (
+        "{"
+        f'"src/hypertrain/__init__.py":"{sha(b"")}",'
+        f'"src/hypertrain/b.py":"{sha(b"y = 2" + chr(10).encode())}"'
+        "}\n"
+    )
+
+
+GOOD_PATH = b'"src/hypertrain/x.py"'
+
+
+@pytest.mark.parametrize(
+    "outcome,why",
+    [
+        (SimpleNamespace(returncode=1, stdout=b"", stderr=b"boom"), "could not be measured"),
+        (SimpleNamespace(returncode=0, stdout=b"not json", stderr=b""), "are not a package map"),
+        (SimpleNamespace(returncode=0, stdout=b"[]", stderr=b""), "are not a package map"),
+        (SimpleNamespace(returncode=0, stdout=b"{}", stderr=b""), "are not a package map"),
+        (
+            SimpleNamespace(
+                returncode=0, stdout=b'{"other/x.py":"' + b"a" * 64 + b'"}', stderr=b""
+            ),
+            "are not a package map",
+        ),
+        (
+            SimpleNamespace(returncode=0, stdout=b"{" + GOOD_PATH + b':"abc"}', stderr=b""),
+            "are not a package map",
+        ),
+        (SimpleNamespace(returncode=0, stdout=b" " * ((1 << 20) + 1), stderr=b""), "are too large"),
+        (subprocess.TimeoutExpired(["measure"], 60), "could not be measured"),
+    ],
+    ids=[
+        "failed",
+        "not-json",
+        "list",
+        "empty",
+        "foreign-key",
+        "short-digest",
+        "oversized",
+        "timeout",
+    ],
+)
+def test_measure_refuses_an_answer_that_is_not_a_map_of_package_files_with_exit_9(
+    monkeypatch: pytest.MonkeyPatch, outcome: Any, why: str
+) -> None:
+    def fake_run(*args: Any, **kwargs: Any) -> Any:
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    with pytest.raises(runner.Refused) as refusal:
+        runner.measure_image_sources()
+    assert refusal.value.code == 9
+    assert f"image sources {why}" in str(refusal.value)
 
 
 def test_shipped_source_runs_under_isolated_python_and_refuses_a_host_without_cuda(

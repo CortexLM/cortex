@@ -31,5 +31,6 @@
   "max_clock_skew_seconds": 5,
   "max_result_bytes": 17179869184,
   "pull_timeout_seconds": 900,
-  "ssh_connect_timeout_seconds": 15
+  "ssh_connect_timeout_seconds": 15,
+  "image_sources_sha256": null
 }

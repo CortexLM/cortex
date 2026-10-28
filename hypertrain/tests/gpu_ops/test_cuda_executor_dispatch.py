@@ -157,6 +157,12 @@ def canned(tmp_path_factory):
     )
 
 
+def registered(network, manifest):
+    """The canned manifest under the policies the network registered: a run on this store has them
+    (the dispatch check reads the ledger mode of the economics policy)."""
+    return manifest.model_copy(update={"network": network.manifest.network})
+
+
 @pytest.fixture
 def make_pool(tmp_path, monkeypatch, canned):
     def build(**kwargs):
@@ -266,6 +272,7 @@ def test_dispatch_publishes_validated_artifacts_with_accepted_provenance(
         "capabilities": [[10, 3]] * 2,
         "gpu_uuids": selected,
         "gpu_names": ["NVIDIA B300 SXM6 AC"] * 2,
+        "image_sources_sha256": sha256_hex(canonicalize(fake.IMAGE_SOURCES)),
     }
     assert record == {
         "executor": "cuda-executor-v1",
@@ -280,7 +287,7 @@ def test_dispatch_publishes_validated_artifacts_with_accepted_provenance(
         "publication_sha256": publication_digest(published),
     }
 
-    replay, _ = network.store._dispatch_env_v2(canned.manifest, home)
+    replay, _ = network.store._dispatch_env_v2(registered(network, canned.manifest), home)
     assert (replay.driver, replay.sm_count) == (fake.DRIVER, 148)
     assert replay.image_digest == ref.image_digest
     assert replay.gpu_uuid_sha256 == sha256_hex(",".join(selected).encode())
@@ -668,7 +675,7 @@ def test_a_host_on_the_second_allowlisted_driver_is_accepted_end_to_end(
     dispatch(pool, home)
 
     assert record_of(home)["environment"]["drivers"] == [fake.OTHER_DRIVER] * 2
-    replay, _ = network.store._dispatch_env_v2(canned.manifest, home)
+    replay, _ = network.store._dispatch_env_v2(registered(network, canned.manifest), home)
     assert replay.driver == fake.OTHER_DRIVER
 
 
@@ -730,6 +737,65 @@ def test_the_same_machine_behind_a_second_label_is_never_used(make_pool, canned,
     (refusal,) = journal_of(pool, "exec_host_refused")
     assert (refusal["label"], refusal["reason"]) == (twin, f"same machine as host {used}")
     assert len(pool.toolbox.runs()) == 1  # the duplicate never got a container
+
+
+def test_two_labels_sharing_only_some_gpus_never_both_serve(make_pool, canned, tmp_path):
+    # Given: b prints one of a's GPUs among others, so its machine id is not a's.
+    pool = make_pool(labels=("a", "b"))
+    factory = cuda_executor.load(pool.config_path)
+    first = canned.stage(tmp_path / "first")
+    dispatch(pool, first, factory=factory)
+    used = record_of(first)["host"]["label"]
+    twin = "b" if used == "a" else "a"
+    pool.toolbox.scenario.update(
+        pool.address(twin), gpus=[fake.gpu(0 if used == "a" else 1, 1), fake.gpu(7, 0)]
+    )
+    pool.toolbox.scenario.update(pool.address(used), down=True)
+    # When / Then
+    second = canned.stage(tmp_path / "second")
+    with pytest.raises(IslandFailure, match="no host able to run the job"):
+        dispatch(pool, second, factory=factory)
+    assert_nothing_published(second)
+    (refusal,) = journal_of(pool, "exec_host_refused")
+    assert (refusal["label"], refusal["reason"]) == (twin, f"shares a GPU with host {used}")
+    assert len(pool.toolbox.runs()) == 1
+
+
+def pinned_sources():
+    return sha256_hex(canonicalize(fake.IMAGE_SOURCES))
+
+
+def test_container_reporting_other_image_sources_refuses_the_host_and_fails_over(
+    make_pool, canned, tmp_path
+):
+    # Given: the operator pinned the image sources, and the first container holds another build.
+    pool = make_pool(labels=("a", "b"), config={"image_sources_sha256": pinned_sources()})
+    other = {"mode": "ok", "sources": {"src/hypertrain/other.py": "cd" * 32}}
+    pool.toolbox.scenario.global_runs(other, {"mode": "ok"})
+    home = canned.stage(tmp_path / "home")
+    # When
+    dispatch(pool, home)
+    # Then: the host that served the other build is refused, the next one's result is published.
+    refused, served = pool.toolbox.runs()
+    label_of = {address: label for label, address in pool.addresses.items()}
+    assert refused["host"] != served["host"]
+    (refusal,) = journal_of(pool, "exec_host_refused")
+    assert refusal["label"] == label_of[refused["host"]]
+    assert "image sources differ from the pinned image" in refusal["reason"]
+    record = record_of(home)
+    assert record["host"]["label"] == label_of[served["host"]]
+    assert record["result_tar_sha256"] == served["stdout_sha256"]
+    assert record["environment"]["image_sources_sha256"] == pinned_sources()
+
+
+def test_an_unset_pin_accepts_a_container_with_other_image_sources(make_pool, canned, tmp_path):
+    pool = make_pool(labels=("a",))
+    other = {"src/hypertrain/other.py": "cd" * 32}
+    pool.toolbox.scenario.global_runs({"mode": "ok", "sources": other})
+    home = canned.stage(tmp_path / "home")
+    dispatch(pool, home)
+    assert record_of(home)["environment"]["image_sources_sha256"] == sha256_hex(canonicalize(other))
+    assert journal_of(pool, "exec_host_refused") == []
 
 
 def test_a_machine_swapped_behind_the_same_label_is_refused(make_pool, canned, tmp_path):
@@ -1923,7 +1989,7 @@ def test_stale_provenance_without_a_publication_is_replaced(
     assert (decoy.read_bytes() if decoy.exists() else None) == (
         None if stale == "dangling-symlink" else b'{"decoy": true}'
     )
-    network.store._dispatch_env_v2(canned.manifest, home)
+    network.store._dispatch_env_v2(registered(network, canned.manifest), home)
 
 
 def test_cuda_job_of_another_run_is_refused_before_any_ssh_call(make_pool, canned, tmp_path):

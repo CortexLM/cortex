@@ -128,8 +128,9 @@ def test_round_continues_after_forged_delta_contest(activated_network):
         "json": n.signed(fixtures.COORD, "Finalize", finalize),
         "headers": fixtures.admin(),
     }
-    refused = n.client.post(**finalize_request)  # a round finality refuses is a 409, not a 500
-    assert refused.status_code == 409 and "ROUND_BLOCKED: round cannot settle" in refused.text
+    blocked = n.client.post(**finalize_request)
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json() == {"detail": "ROUND_BLOCKED: round cannot settle"}
     # When: the next verified beacon round arrives.
     n.push(n.now + 1)
     # Then: the dispute is closed without a loser and the audit's exclusion stands.

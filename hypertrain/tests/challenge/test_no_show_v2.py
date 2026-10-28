@@ -106,6 +106,10 @@ def test_the_delta_stage_leaves_out_only_audited_members_that_are_not_excluded(n
             (keys[0].ss58, keys[1].ss58),
         )
         store._put_record_v2(run, "excluded", f"0:{keys[1].ss58}", unverified)
+        store._db.execute(  # seeded with every delta: these two never delivered theirs
+            "DELETE FROM records_v2 WHERE run_id=? AND kind='delta' AND id IN (?,?)",
+            (run, f"0:{keys[0].ss58}", f"0:{keys[1].ss58}"),
+        )
     network.push(D_AUDIT + 1)
 
     with store._tx():

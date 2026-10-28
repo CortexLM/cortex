@@ -270,6 +270,21 @@ class CustodyRelease(WireModel):
         return self
 
 
+class RelaySettlementView(WireModel):
+    """Public, coordinator-signed finality facts a relay needs to honour a CustodyRelease.
+
+    Served without a credential, so it carries only these six values: no hotkey, coldkey,
+    origin id or roster may be added.
+    """
+
+    grant_hash: Hex64
+    finality_hash: Hex64
+    finality_beacon: Positive
+    closed_dispute_root: Hex64
+    closed_beacon: Positive
+    vesting_beacon: Positive
+
+
 class RetrievalRequest(WireModel):
     request_id: Hex64
     nonce: Hex64
@@ -504,6 +519,7 @@ RELAY_MESSAGE_TYPES: dict[str, type[WireModel]] = {
         RetentionExtension,
         RetentionExtensionAck,
         CustodyRelease,
+        RelaySettlementView,
         RetrievalRequest,
         RetrievalResponse,
         RelayFailureEvidence,
