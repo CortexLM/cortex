@@ -20,7 +20,8 @@ UPLOAD_CALL_SITES = ('_retrying("POST object', '_retrying("PUT object')
 # The bundle step of the launcher: from the line that makes $BUNDLE to its last check.
 BUNDLE_STEP_FIRST = "BUNDLE=$STATE/bundle"
 BUNDLE_STEP_LAST = 'die "bundle data/store.py differs from the working tree"'
-GIT_CONFIG = ("-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false")
+# The throwaway repo's own settings: no global or system config, hook or signing key can reach it.
+REPO_CONFIG = (("user.name", "t"), ("user.email", "t@t"), ("commit.gpgsign", "false"))
 
 
 def _run(
@@ -279,9 +280,24 @@ def _bundle_step(
         for name, content in files.items():
             (root / name).parent.mkdir(parents=True, exist_ok=True)
             (root / name).write_text(content)
-    git = ["git", "-C", str(repo), *GIT_CONFIG]
-    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "base"]):
-        subprocess.run([*git, *args], check=True, capture_output=True)
+    # A git environment of the test's own: no inherited GIT_* (a hook's GIT_DIR would redirect -C),
+    # no global or system config, a HOME of its own. The bash step below runs git under it too.
+    home = tmp_path / "home"
+    home.mkdir()
+    git_env = {
+        **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "HOME": str(home),
+    }
+    git = ["git", "-C", str(repo)]
+    for args in (
+        ["init", "-q"],
+        *(["config", key, value] for key, value in REPO_CONFIG),
+        ["add", "-A"],
+        ["commit", "-q", "-m", "base"],
+    ):
+        subprocess.run([*git, *args], check=True, capture_output=True, env=git_env)
     for name, content in working.items():
         (repo / "src/hypertrain" / name).write_text(content)
     script = (
@@ -289,7 +305,7 @@ def _bundle_step(
         'FIX_BASE=$(git -C "$REPO" rev-parse HEAD)\n' + "\n".join(lines[first : last + 1]) + "\n"
     )
     env = {
-        **os.environ,
+        **git_env,
         "STATE": str(tmp_path / "state"),
         "MINER_SRC": str(tmp_path / "miner_src"),
         "REPO": str(repo),
