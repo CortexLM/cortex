@@ -165,16 +165,6 @@ def test_a_commit_whose_tokens_are_not_the_servers_entitlement_is_refused_on_bot
 # --- T-FIN-23 (A2W-17, CRD-15): the coordinator's own audit challenge expires too ---------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ExpiredError,
-    reason=(
-        "A2W-17+CRD-15: the coordinator seals each AuditChallengeV2 to expire at the absolute "
-        "audit round and the ledger accepts it again at the finalize beacon, so a finalize that "
-        "comes one beacon after the challenge lapsed freezes the reward of a round whose audit "
-        "was done in time [fix-lot: escrow-relay-fixes ADR0014-P3]"
-    ),
-)
 def test_a_challenge_that_lapsed_after_the_audit_cannot_block_the_reward(
     li_escrow: ModuleType, real_reward: Real
 ) -> None:
@@ -415,17 +405,17 @@ def test_a_finalize_for_a_round_whose_audits_are_not_done_is_refused_for_its_mis
     assert rnd.finality() == status
 
 
-# --- T-FIN-26 (FIN-22) [D-1]: a round with a member that never committed can be left behind ------
+# --- T-FIN-26 (FIN-22) [D70]: a round with a member that never committed can be left behind ------
 
 
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="FIN-22 [D-1 decision]: a roster member that accepted and never committed leaves the "
-    "round without a job for anybody (three survivors cannot carry a round), nothing voids it at "
-    "the horizon and the opening of the next round reads the applied state of this one, which "
-    "never exists: 409 'missing accepted applied: 0' and no operation voids or skips the round "
-    "[fix-lot: decision (product choice pending)]",
+    reason="FIN-22: a roster member that accepted and never committed leaves the round without a "
+    "job for anybody (three survivors cannot carry a round), nothing retires a round whose members "
+    "all left it, and the opening of the next round reads the applied state of this one, which "
+    "never exists: 409 'missing accepted applied: 0' "
+    "[fix-lot: audit-integrity-2 ADR0011-P8 D70 exit reaper]",
 )
 def test_a_round_with_a_member_that_never_committed_can_be_left_behind(tmp_path: Path) -> None:
     with X.activated_network(tmp_path) as network:
@@ -442,13 +432,20 @@ def test_a_round_with_a_member_that_never_committed_can_be_left_behind(tmp_path:
         network.push(rnd.absolute)
         status = rnd.finality()
         X.control(
-            status["disposition"] in ("PENDING", "RETIRED")
-            and status["applied"] is False
-            and not rnd.has_record("applied", "0"),
-            "round 0 was not applied by the horizon: it is pending, or retired by the base",
+            (
+                status["disposition"] == "PENDING"
+                and status["applied"] is False
+                and not rnd.has_record("applied", "0")
+            )
+            or (
+                status["disposition"] == "RETIRED" and rnd.record("applied", "0")["kind"] == "null"
+            ),
+            "round 0 was not applied by a tape at the horizon: it is pending, or retired as a null "
+            "round",
         )
 
-        response = X.next_opening(rnd, rnd.members)
+        # open_after builds the opening on the state round 0 applied, when it applied one.
+        response, _ = X.open_after(rnd, rnd.members)
 
         assert response.status_code == 200, response.text
 

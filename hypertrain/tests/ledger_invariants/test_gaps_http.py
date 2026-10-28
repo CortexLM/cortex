@@ -798,19 +798,6 @@ def test_a_refused_finalize_mints_nothing_and_every_epoch_answers_the_defined_bu
 # --- CL-48: the aggregation route maps the refusals of the tape and finality rules -------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "CL-48: the aggregate route maps ChallengeError only, while the rollback routes map "
-        "TapeError to 409; a TapeError or FinalityError raised by the aggregation (an included "
-        "member with an open contest, a round that may not settle) answers an unhandled 500 with "
-        "no reason; reproduced by raising the error at the store boundary, because no stored "
-        "state that reaches TapeError from this route was found (an open contest suspends its "
-        "member and the aggregation then meets a 403 first) "
-        "[fix-lot: audit-integrity-2 ADR0011-P8 (decision 27, 6fe37f23)]"
-    ),
-)
 @pytest.mark.parametrize(
     "error",
     [TapeError("input unsettled/excluded"), FinalityError("round cannot settle")],
@@ -820,6 +807,8 @@ def test_an_aggregation_refused_by_tape_or_finality_rules_is_a_4xx_with_its_reas
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
     with service_world(tmp_path) as world:
+        # The error is raised at the store boundary: no stored state reaches a TapeError from this
+        # route (an open contest suspends its member, and the aggregation then meets a 403 first).
         hosted = world.store.for_run(world.run_id)
         client = quiet_client(world.app)
         url = f"/v2/runs/{world.run_id}/admin/rounds/0/aggregate"

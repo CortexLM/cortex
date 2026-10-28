@@ -12,12 +12,12 @@ and a test that presumes one remedy says so below. The reason of every xfail end
 [fix-lot: <tag>]: the lot whose merge flips it (the marker is then removed and nothing else
 changes), or "none (no design yet)" / "decision (product choice pending)".
 
-CRD-15, A2W-17: the finalize re-reads the stored commit and verdict envelopes at the
-finalize-time beacon; a miner or an auditor that sealed a short expiry freezes the round. The
-ledger-level test shows the mechanism in milliseconds and turns green with a ledger-side fix;
-the end-to-end test (four members really trained and audited, 30 s) turns green with any fix
-that lets the round finalize. A fix that refuses the short commit at intake makes its control
-fail (ControlFailed), which is the signal to rewrite it. The audit queue half of A2W-17 (a
+CRD-15, A2W-17: the finalize judges the stored commit and verdict envelopes at the beacon where
+the service accepted them (ADR 0014 part 3), so a miner or an auditor that sealed a short expiry
+cannot freeze the round. The ledger-level test shows the rule in milliseconds; the end-to-end
+test (four members really trained and audited, 30 s) holds for any change that lets the round
+finalize. A change that refuses the short commit at intake makes its control fail
+(ControlFailed), which is the signal to rewrite it. The audit queue half of A2W-17 (a
 commit that expired before the lease must not stop the other members' audits) is closed on v3
 by ADR 0011 part 2 and pinned by tests/challenge/test_audit_liveness_v2.py.
 A2W-16: a round wider than one audit lease stays auditable to its last beacon (closed on v3 by
@@ -101,35 +101,7 @@ def reseal(fixture: ModuleType, real: Real, which: str, expiry: int) -> Finality
     return replace(evidence, works=(replace(item, **{which: envelope}),))
 
 
-@pytest.mark.parametrize(
-    "which",
-    [
-        pytest.param(
-            "commit",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=ExpiredError,
-                reason=(
-                    "CRD-15+CRD-D02: a commit sealed to expire one round before the finalize "
-                    "beacon, valid at every beacon the store accepted it at, freezes the reward "
-                    "[fix-lot: escrow-relay-fixes ADR0014-P3]"
-                ),
-            ),
-        ),
-        pytest.param(
-            "verdict",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=ExpiredError,
-                reason=(
-                    "A2W-17+A2W-D10: an auditor verdict sealed to expire one round before the "
-                    "finalize beacon, live when it was accepted, freezes the reward "
-                    "[fix-lot: escrow-relay-fixes ADR0014-P3]"
-                ),
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("which", ["commit", "verdict"])
 def test_an_expiry_that_lapsed_after_acceptance_cannot_block_the_reward(
     li_escrow: ModuleType, real_reward: Real, which: str
 ) -> None:
@@ -139,7 +111,7 @@ def test_an_expiry_that_lapsed_after_acceptance_cannot_block_the_reward(
     live = bare_escrow(li_escrow, setup)
     try:
         live.reward_finalize(reward, reseal(li_escrow, real_reward, which, finalized))
-    except ExpiredError as error:  # the xfail expects ExpiredError from the lapsed call alone
+    except ExpiredError as error:  # a refusal here is a changed scenario, not the call under test
         raise ControlFailed("an expiry equal to the finalize beacon is already refused") from error
     control(live.balances().issued == ISSUED, "the reward is not issued with a live expiry")
     # One round shorter: every beacon the store could have taken the envelope at is earlier.
@@ -148,16 +120,6 @@ def test_an_expiry_that_lapsed_after_acceptance_cannot_block_the_reward(
     assert lapsed.balances().issued == ISSUED
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "CRD-15+CRD-D02: one miner's commit, sealed to expire at the audit round, is accepted "
-        "and audited, and the coordinator's finalize of the aggregated round then answers 409 "
-        "'envelope expired' for ever "
-        "[fix-lot: escrow-relay-fixes ADR0014-P3]"
-    ),
-)
 def test_a_round_whose_only_fault_is_one_short_lived_commit_still_finalizes(
     tmp_path: Path,
 ) -> None:

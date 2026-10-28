@@ -359,21 +359,13 @@ def test_the_store_vests_each_reward_origin_a_fixed_span_after_the_beacon_it_fin
     assert {row["mature_at"] for row in origins} == {finalized + span}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="CRD-15+CL-10: a Finalize sent after d_final is refused 'envelope expired' on every "
-    "retry, because the coordinator-signed audit challenge of each member expires at "
-    "min(d_final, ...) and the ledger re-validates it at the finalize beacon; the round stays "
-    "PENDING for ever. Late-finalize policy to confirm: settle it, or retire the round "
-    "[fix-lot: escrow-relay-fixes ADR0014-P3]",
-)
 def test_a_finalize_after_d_final_settles_the_round_or_retires_it_but_does_not_freeze_it(
     audited: Frozen,
 ) -> None:
     """T-CRD-16 (b, CRD-15): control, a Finalize at beacon d_final settles. A Finalize one beacon
-    later, freshly signed, is either accepted or ends the round some other way; what it must not
-    do is leave the round PENDING with every retry refused (the policy is the maintainers')."""
+    later, freshly signed, is either accepted or ends the round some other way (the audit
+    challenge is judged at the beacon it was accepted at, ADR 0014 part 3); what it must not do is
+    leave the round PENDING with every retry refused."""
     round_ = audited.fresh()
     d_final = int(round_body(round_)["d_final"])
     round_.network.push(d_final)
@@ -566,15 +558,6 @@ def test_a_repeated_audit_completion_neither_decrements_the_counter_again_nor_ch
 # --- T-CRD-13 / CL-04: the first round after a rollback is credited ----------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="CRD-04+CL-04: after a rollback closed rounds 0 and 1 without any reward, the "
-    "coordinator's valid Finalize of the next round is answered 409 FINALIZE_ORDER (the ledger "
-    "expects round 0), the transaction rolls back and no later round can ever be credited; on the "
-    "real service, with the rollback's leftovers written as rollback_v2 writes them "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 R-D]",
-)
 def test_the_first_round_after_a_rollback_is_credited_through_the_finalize_route(
     audited: Frozen,
 ) -> None:
