@@ -15,6 +15,7 @@ import os
 import re
 import stat
 import tempfile
+import threading
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -83,7 +84,8 @@ class LocalFSStore:
         p = self._path(sha)
         if not p.exists():
             p.parent.mkdir(exist_ok=True)
-            tmp = p.with_suffix(f".tmp{os.getpid()}")
+            # One file per writer: two threads putting the same content must not share a temporary.
+            tmp = p.with_suffix(f".tmp{os.getpid()}-{threading.get_ident()}")
             tmp.write_bytes(data)
             tmp.replace(p)
         return sha
