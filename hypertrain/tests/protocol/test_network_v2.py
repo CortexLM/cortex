@@ -44,6 +44,7 @@ from hypertrain.protocol.messages_v2 import (
     ArtifactRef,
     AuditChallengeV2,
     AuditJobV2,
+    AuditPolicyV2,
     BisectV2,
     CommitV2,
     DisputeV2,
@@ -1201,6 +1202,82 @@ def test_v1_when_opaque_published_baseline_is_replayed(tmp_path: Path) -> None:
     )
     assert tape_bytes(tape) == bytes.fromhex(tape_fixture["signed_hex"])
     assert sha256_hex(result.to_bytes()) == tape["body"]["out_state"]
+
+
+EXAMPLE_AUDIT_DIGEST = "8243bd06f2a002f63e8f4c5adf0baf6214885e7bded8c6c4ee8602034b983eb7"
+EXAMPLE_AUDIT_RUN_ID = "e0f4c68d67b3e4f47191813d87821efeb718bc2c8bceae81d243ae0144865a86"
+
+
+def example_audit_policy(steps: int = 2, **extra: JsonValue) -> AuditPolicyV2:
+    """The policy `manifest_v2 example` writes, field by field (H = 1: two replay steps)."""
+    return AuditPolicyV2(
+        lease_rounds=100,
+        max_attempts=2,
+        max_concurrent_per_auditor=1,
+        max_running_jobs=2,
+        max_queued_jobs=32,
+        max_anchor_age_rounds=1,
+        max_steps_per_attempt=steps,
+        **extra,
+    )
+
+
+def audit_run_id_of(policy: AuditPolicyV2) -> str:
+    body = wrapper().body()
+    body["network"]["audit_policy_hash"] = policy.digest()
+    return RunManifestV2.model_validate(body).run_id()
+
+
+def test_audit_policy_without_the_reaudit_window_keeps_its_digest_and_run_id() -> None:
+    # The pins were measured on the base tree (ffca9ce4), before the field existed: a policy that
+    # does not set it is byte-for-byte the policy of every run signed so far. They hold on both
+    # sides of the change by design: they guard the omission (`exclude_if`), and the mutant that
+    # drops it turns them red.
+    policy = example_audit_policy()
+    assert "reaudit_rounds" not in policy.body()
+    assert policy.digest() == EXAMPLE_AUDIT_DIGEST
+    assert audit_run_id_of(policy) == EXAMPLE_AUDIT_RUN_ID
+    assert AuditPolicyV2.model_validate(policy.body()) == policy
+
+
+def test_a_measured_reaudit_window_changes_the_digest_and_run_id_only_when_set() -> None:
+    measured = example_audit_policy(reaudit_rounds=171)
+    assert measured.body()["reaudit_rounds"] == 171
+    assert measured.digest() != EXAMPLE_AUDIT_DIGEST
+    assert audit_run_id_of(measured) != EXAMPLE_AUDIT_RUN_ID
+    assert AuditPolicyV2.model_validate(measured.body()) == measured
+    # whole rounds, at least 2: a re-arm refuses a window of fewer rounds
+    for bad in (0, 1, -1, True, 1.5):
+        with pytest.raises(ValidationError):
+            example_audit_policy(reaudit_rounds=bad)
+
+
+def test_the_reaudit_window_defaults_to_one_lease_and_stays_inside_the_absolute_one() -> None:
+    training = wrapper().training
+    steps = 2 * training.inner.H  # H <= 30: the lease is the fixed 100 rounds
+    default = example_audit_policy(steps)
+    default.validate_training(training)
+    assert default.reaudit_window() == default.lease_rounds == 100
+    for window in (100, 171, 200):
+        pinned = example_audit_policy(steps, reaudit_rounds=window)
+        pinned.validate_training(training)
+        assert pinned.reaudit_window() == window
+    # below a lease a full lease would be truncated; above 2 x lease AuditJobV2 refuses the job
+    for window in (99, 201):
+        with pytest.raises(ValueError, match="re-audit window"):
+            example_audit_policy(steps, reaudit_rounds=window).validate_training(training)
+
+
+@pytest.mark.parametrize(
+    ("replay_seconds", "rounds"), [(144, 100), (200, 134), (256, 171), (300, 200), (301, 201)]
+)
+def test_the_published_reaudit_window_is_twice_the_measured_replay_in_beacon_rounds(
+    replay_seconds: int, rounds: int
+) -> None:
+    from hypertrain.protocol.messages_v2 import reaudit_rounds_for
+
+    # 3 s per round, rounded up, never below one lease; 301 s is past the cap the verifier enforces
+    assert reaudit_rounds_for(replay_seconds, 100) == rounds
 
 
 def test_audit_lease_when_h_scales_with_step_bound() -> None:

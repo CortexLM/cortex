@@ -26,8 +26,8 @@
 7. DSP-03: one lock order for the dispute long poll.
 8. The general exclusion exit: every wait on a peer is bounded; exclusion, sanction, retired round,
    withdrawal record, roster member state (D43, D44, D46, D47, D51, AC-CLIFF, R-C2, R-D, DSP-04).
-9. A2W-23 (D82): a withheld auditor signature is re-audited by another auditor, and its withholder takes
-   a strike.
+9. A2W-23 (D82, D84): a withheld auditor signature is re-audited by another auditor, and its withholder takes
+   a strike; the length of the re-audit is the policy field `reaudit_rounds`.
 
 ## Part 1: disputes that nobody can decide (DSP-01)
 
@@ -249,7 +249,7 @@
 
 An operator re-enable route (no automatic liveness, the 403 text promises a review nobody implements); a column or table
 (`store.py` has no migration facility; `records_v2` is the idiom); a wall-clock timeout (the store is beacon-time); a new
-`AuditPolicyV2` field for the lengths (manifest-covered, derived values suffice); catching only `IslandFailure` (S3 raises
+`AuditPolicyV2` field for the lengths (manifest-covered, derived values suffice; reversed for the re-audit window by Part 9 decision 9); catching only `IslandFailure` (S3 raises
 `RecursionError`); wrapping all of `execute_audit_v2` or wrapping it outside (would discard a good verdict on a beacon pause,
 bypassable); refunding the attempt (`max_attempts` is `Literal[2]`); relaxing `AuditJobV2._bounds` (protocol model change);
 clamping `absolute` at scheduling (kills the second lease of every H <= 30 round); a round-wide `EXCLUDED` for
@@ -1675,10 +1675,12 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
   the master detected and whose auditor signature is withheld stays an INFRASTRUCTURE exclusion without a
   strike on the miner (decisions 9 and 15 above); this part adds the mandatory re-audit of that miner by
   another auditor and a strike for the auditor that withholds.
-- No manifest, policy value, wire message or run id changes. `implementation_hash` does not change: every
+- No wire message changes, and no existing manifest, policy digest or run id (decision 9: the one new policy
+  field is omitted from the canonical body when absent). `implementation_hash` does not change: every
   function edited is outside the owned set. New persisted shapes without a migration: an optional `withheld`
   key on `audit-attempt-failure` rows, the cooldown reason `AUDITOR_WITHHELD`, and a `tried` list that is not
-  empty after a re-arm. An older binary ignores the key and the reason, and reads the same `until`.
+  empty after a re-arm. An older binary ignores the key and the reason, and reads the same `until`; it refuses
+  a policy that carries the new field (`extra_forbidden`).
 
 ### Context
 
@@ -1770,6 +1772,40 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
    - The revocation never sanctions the miner, writes no `excluded` and no sanction row, and only a withheld
      MISMATCH feeds the strike; a revoked `MATCH` is a cooldown. A late signature of the holder after the
      revocation is refused (409) and writes no verdict.
+9. **The length of the re-audit is a policy field, not a derived value (D84, Principal SN100 relayed by
+   Forge).** `AuditPolicyV2.reaudit_rounds` is an optional integer, in beacon rounds (`BEACON_PERIOD_SECONDS`
+   = 3 s each, like `lease_rounds`), at least 2, and is omitted from the canonical body when absent, as
+   `max_unfunded_per_prefix` and `bootstrap_allocation_hash` are: every audit policy digest, `run_id` and
+   in-flight run that predates it is unchanged. Serialising it always, even as `null`, would re-key every
+   run and make an older binary refuse every new policy. `reaudit_window()` is the field, or `lease_rounds`
+   when it is absent.
+   - **Formula.** The publisher computes `reaudit_rounds_for(replay_seconds, lease_rounds) = max(lease_rounds,
+     ceil(2 * replay_seconds / 3))`: the second auditor replays the same model, so twice the replay, 3 s a
+     round, rounded up, never below one lease. `replay_seconds` is the largest of N replays of the run's model
+     size measured on the host that will audit it. With `lease_rounds` = 100: 144 s gives 100 (the formula
+     gives 96, the lease floors it), 200 s gives 134, 256 s gives 171, 300 s gives 200. The tiny-cpu run
+     omits the field: a replay of a few seconds gives `lease_rounds` by the same formula.
+   - **Verifier.** `validate_training` requires `lease_rounds <= reaudit_window() <= absolute_rounds()`. Below
+     one lease a full lease would be truncated. Above two, `AuditJobV2._bounds` refuses the job
+     (`absolute_deadline <= created_beacon + 2 * audit_lease_rounds(h, 16.0)`). A replay longer than a lease
+     can never finish, so the ceiling never refuses an auditable measurement. A measured value cannot be
+     derived from `H`, so the verifier checks the range and the owner's signature binds the value into
+     `run_id`: a window cannot be retuned on a live run, a new value is a new run.
+   - **Why Part 2's rejected alternative is reversed.** Part 2 rejected "a new `AuditPolicyV2` field for the
+     lengths (manifest-covered, derived values suffice)". For the 101 M run (`H` = 4, step bound 4 s) the
+     derived value is `2H * step bound` = 32 s, 11 rounds, against a replay of 144 to 256 s (48 to 86 rounds
+     [A]): the step bound understates it 4.5 to 8 times, so nothing derived from the manifest fits it.
+   - **Hash consequences, measured at `ffca9ce4` and after [V].** With the field absent the example audit
+     policy digest (`8243bd06…3eb7`), the run id of the example wrapper built on it (`e0f4c68d…5a86`), the
+     run id of the example `RunManifestV2` (`352f290d…9178`) and the sha256 of its `policies.json`
+     (`9589fefd…bb9f`) do not move, and `tests/protocol/test_network_v2.py` pins the first two. Only a run
+     that sets the field gets another `run_id` (171: digest `45b425b9…921a15`, example `RunManifestV2` run id
+     `148ef688…f5220`). No audit golden exists, so no golden root moves; `wire_v2.json`, `rust_wire.json`,
+     `docs/BUNDLE_SPEC.md` and `FROZEN_SPECS` are not touched (`gen_wire_vector.py` regenerates `wire_v2.json`
+     byte for byte, `check_repo.py --final` passes). `messages_v2.py` is not in the hashed `paths` of
+     `implementation_hash`, so the field alone does not move it; `sources()` and `bundle()` move.
+   - **Deployment.** Ship the image before any manifest that sets the field, as for
+     `max_unfunded_per_prefix`; do not roll the image back below it while a run that carries the field is alive.
 
 | Event | Rule |
 | --- | --- |

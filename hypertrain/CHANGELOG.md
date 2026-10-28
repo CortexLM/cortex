@@ -303,6 +303,13 @@
   at the round the lease was taken back. The miner is never blamed for it. A separate commit, so it
   can be reverted alone; `implementation_hash` does not change. See
   `docs/adr/0011-audit-integrity.md` (Part 9, decision 8) at the monorepo root.
+- `AuditPolicyV2.reaudit_rounds` (D84): the length, in beacon rounds, of the window in which a withheld
+  `MISMATCH` is re-audited, pinned by the manifest. Optional and omitted from the canonical body when
+  absent, so every audit policy digest, `run_id` and in-flight run is unchanged (pinned by test); then
+  the window is one lease. The verifier requires one to two leases; the publisher computes it with
+  `reaudit_rounds_for(replay_seconds, lease_rounds)` = `max(lease_rounds, ceil(2 * replay_seconds / 3))`.
+  An older image refuses a policy that sets it: ship the image first. `implementation_hash` does not
+  change. See `docs/adr/0011-audit-integrity.md` (Part 9, decision 9) at the monorepo root.
 
 ### Fixed
 - A member convicted of training fraud between the aggregate and the finalize of a round is no

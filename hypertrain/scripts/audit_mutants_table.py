@@ -12,6 +12,7 @@ from __future__ import annotations
 
 WORKER = "src/hypertrain/auditor/worker.py"
 STORE = "src/hypertrain/challenge/store.py"
+MESSAGES = "src/hypertrain/protocol/messages_v2.py"
 COOLDOWN = "src/hypertrain/challenge/audit_cooldown_v2.py"
 CHEATS = "tests/audit_cheaters/test_cheats_audit.py::test_cheat_is_mismatch_at_the_expected_leaf"
 WITHHELD = "tests/challenge/test_audit_withheld_signature_v2.py::"
@@ -69,6 +70,20 @@ FORGET_TRIED = (
 LAST_FREE = (
     "tests/challenge/test_audit_cooldown_v2.py::"
     "test_the_last_free_auditor_is_not_barred_whatever_it_withheld"
+)
+POLICY = "tests/protocol/test_network_v2.py::"
+OMITTED = POLICY + "test_audit_policy_without_the_reaudit_window_keeps_its_digest_and_run_id"
+WINDOW_RANGE = (
+    POLICY + "test_the_reaudit_window_defaults_to_one_lease_and_stays_inside_the_absolute_one"
+)
+WINDOW_FORMULA = (
+    POLICY + "test_the_published_reaudit_window_is_twice_the_measured_replay_in_beacon_rounds"
+)
+SERVICE_ACCEPTS = "tests/ops/test_manifest_v2.py::test_build_then_service_accepts"
+BUILD_REFUSES = "tests/ops/test_manifest_v2.py::test_build_refuses_invalid_inputs"
+REAUDIT_FIELD = (
+    "    reaudit_rounds: Annotated[StrictInt, Field(ge=2, le=2**53 - 1)] | None = Field(\n"
+    "        default=None, exclude_if=lambda v: v is None\n    )\n"
 )
 
 TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
@@ -261,5 +276,50 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         "silent_since = self._lease_end_v2(run_id, row)",
         'silent_since = row["expires"]',
         (REVOKED, COOLS_FROM, LATE_POLL),
+    ),
+    (
+        "reaudit_rounds always serialised: the exclusion is dropped and every run id moves",
+        MESSAGES,
+        REAUDIT_FIELD,
+        REAUDIT_FIELD.replace("default=None, exclude_if=lambda v: v is None", "default=None"),
+        (OMITTED, SERVICE_ACCEPTS + "[None]"),
+    ),
+    (
+        "re-audit window ceiling removed: a window past two leases is accepted",
+        MESSAGES,
+        "self.lease_rounds <= self.reaudit_window() <= self.absolute_rounds()",
+        "self.lease_rounds <= self.reaudit_window()",
+        (
+            WINDOW_RANGE,
+            BUILD_REFUSES + "[reaudit-audit re-audit window must be between one and two leases]",
+        ),
+    ),
+    (
+        "re-audit window floor removed: a window shorter than a lease is accepted",
+        MESSAGES,
+        "self.lease_rounds <= self.reaudit_window() <= self.absolute_rounds()",
+        "self.reaudit_window() <= self.absolute_rounds()",
+        (WINDOW_RANGE,),
+    ),
+    (
+        "an absent re-audit window means two leases instead of one",
+        MESSAGES,
+        "return self.lease_rounds if self.reaudit_rounds is None else self.reaudit_rounds",
+        "return self.absolute_rounds() if self.reaudit_rounds is None else self.reaudit_rounds",
+        (WINDOW_RANGE,),
+    ),
+    (
+        "published re-audit window without the one-lease floor",
+        MESSAGES,
+        "return max(lease_rounds, -(-2 * replay_seconds // BEACON_PERIOD_SECONDS))",
+        "return -(-2 * replay_seconds // BEACON_PERIOD_SECONDS)",
+        (WINDOW_FORMULA + "[144-100]",),
+    ),
+    (
+        "published re-audit window rounded down instead of up",
+        MESSAGES,
+        "return max(lease_rounds, -(-2 * replay_seconds // BEACON_PERIOD_SECONDS))",
+        "return max(lease_rounds, 2 * replay_seconds // BEACON_PERIOD_SECONDS)",
+        (WINDOW_FORMULA + "[200-134]", WINDOW_FORMULA + "[256-171]"),
     ),
 )
