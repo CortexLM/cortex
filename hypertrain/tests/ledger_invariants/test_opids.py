@@ -12,6 +12,7 @@ id and a reward origin id, and the escrow engine's own id, atomicity and replay 
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import sqlite3
 from pathlib import Path
 from types import ModuleType
@@ -69,7 +70,8 @@ def reward_effect(escrow) -> tuple[int, int]:
     strict=True,
     raises=StepRefused,
     reason="ESC-04+BND-24+SG-11: a client event cannot take the id the service derives for the "
-    "finalize of a round, so that round can always be finalized",
+    "finalize of a round, so that round can always be finalized "
+    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
 )
 def test_a_client_event_never_blocks_the_reward_finalize_id(
     li_escrow: ModuleType, real_reward: Real, kind: str
@@ -100,7 +102,8 @@ def test_a_client_event_never_blocks_the_reward_finalize_id(
     raises=StepRefused,
     reason="ESC-04+BND-24+SG-11: a client event cannot take the id the service derives for the "
     "shadow finalize of a trial, so a trial reward can always be issued; the id embeds the "
-    "reservation hash, which no unauthenticated route serves [candidate]",
+    "reservation hash, which no unauthenticated route serves [candidate] "
+    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
 )
 def test_a_client_event_never_blocks_the_shadow_finalize_id(
     li_escrow: ModuleType, real_reward: Real, kind: str
@@ -179,7 +182,8 @@ def matured_with_a_bystander(hosted, fixture) -> str:
     strict=True,
     raises=StepRefused,
     reason="ESC-04+BND-24+SG-11: a client event cannot take the id the service derives for the "
-    "payout of an origin in an epoch, so every epoch can always be answered",
+    "payout of an origin in an epoch, so every epoch can always be answered "
+    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
 )
 def test_a_client_event_never_blocks_the_weights_payout_id(
     li_escrow: ModuleType, real_reward: Real, tmp_path: Path, kind: str
@@ -211,7 +215,8 @@ def test_a_client_event_never_blocks_the_weights_payout_id(
     strict=True,
     raises=StepRefused,
     reason="ESC-04+DS-07+SG-11: a client event cannot take the id the service derives for the "
-    "settlement of a dispute, so a resolved dispute can always release its bond",
+    "settlement of a dispute, so a resolved dispute can always release its bond "
+    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
 )
 def test_a_client_event_never_blocks_the_dispute_settlement_id(
     li_escrow: ModuleType, tmp_path: Path, kind: str
@@ -284,7 +289,7 @@ def borrowing_dispute(world, li_escrow):
     strict=True,
     raises=DefenceMissing,
     reason="DIA-11+DIB-17+LCK-08: the bond of an open dispute cannot be released by quoting the "
-    "closed dispute whose id it borrows",
+    "closed dispute whose id it borrows [fix-lot: escrow-relay-fixes ADR0014-P2]",
 )
 def test_a_bond_borrowing_a_closed_disputes_id_cannot_be_released_while_its_dispute_is_open(
     li_escrow: ModuleType, tmp_path: Path
@@ -304,50 +309,59 @@ def test_a_bond_borrowing_a_closed_disputes_id_cannot_be_released_while_its_disp
         assert world.escrow.balances(other.ss58).dispute_locked == 100
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DefenceMissing,
-    reason="LCK-08+DIB-17: an admission lock whose id is a closed dispute's id cannot be released "
-    "with the settlement of that dispute",
-)
-def test_an_admission_lock_borrowing_a_closed_disputes_id_cannot_be_released(
+def test_a_bystander_event_under_a_plain_id_of_the_lock_does_not_keep_the_owner_from_its_bond(
     li_escrow: ModuleType, tmp_path: Path
 ) -> None:
-    other = li_escrow.OTHER
-    with dispute_world(tmp_path, li_escrow) as world:
-        first_id = world.add_contest(FIRST_VERDICT, li_escrow.HOT)
-        bond = world.bond(li_escrow.COLD, "44" * 32, first_id, world.origins[0])
-        first = world.resolve_match(
-            world.open(li_escrow.HOT, FIRST_VERDICT, bond.operation_id, now=1), now=3
+    other, bystander = li_escrow.OTHER, li_escrow.COLD
+    with dispute_world(tmp_path, li_escrow, admission=True) as world:
+        assert world.admission is not None
+        admission_id = world.join(world.miner_two, other, fresh_id("join"))
+        lock = EscrowLock(
+            operation_id=fresh_id("bond"),
+            owner=other.ss58,
+            units=1000,
+            origin_ids=[world.origins[1]],
+            admission_id=admission_id,
+            dispute_id=None,
+            kind="LOCK_ADMISSION",
         )
-        world.disputes.settle_lock(first_id, now=3)
-
-        # Given: an ordinary admission lock has no settlement of its own, so it cannot be released.
-        ordinary = li_escrow.lock(world.origins[1], fresh_id("ordinary-lock"), 100)
-        ordinary = ordinary.model_copy(update={"owner": other.ss58})
-        world.escrow.lock(ordinary, signer=other.ss58)
-        release = world.release_of(other, ordinary, first, fresh_id("ordinary"), world.origins[1])
-        refusal = error_code(lambda: world.escrow.release(release, signer=other.ss58, now_beacon=5))
-        assert refusal == "UNACCEPTED_SETTLEMENT"
-
-        # When: the owner locks under the id of the closed dispute and quotes its resolution.
-        borrowed = ordinary.model_copy(update={"operation_id": first_id})
-        if refused(lambda: world.escrow.lock(borrowed, signer=other.ss58)):
-            return
-
-        # Then: that lock is no more releasable than the ordinary one.
-        release = world.release_of(other, borrowed, first, fresh_id("borrowed"), world.origins[1])
-        must_refuse(
-            lambda: world.escrow.release(release, signer=other.ss58, now_beacon=5),
-            "an admission lock was released with the settlement of a closed dispute",
+        world.admission.lock(
+            canonicalize(seal(other, "EscrowLock", world.run_id, lock, 500)), now=2
         )
+
+        def event_of(operation_id: str) -> EscrowTransfer:
+            return EscrowTransfer(
+                operation_id=operation_id,
+                owner=bystander.ss58,
+                recipient=other.ss58,
+                units=1,
+                origin_ids=[world.origins[0]],
+                admission_id=None,
+                dispute_id=None,
+            )
+
+        # Given: a funded bystander can sign an event (control).
+        world.escrow.transfer(event_of(fresh_id("neutral")), signer=bystander.ss58)
+
+        # When: it signs events under the ids a plain derivation from the lock id would give.
+        for word in ("settle", "release"):
+            plain = sha256_hex(canonicalize([lock.operation_id, word]))
+            refused(
+                lambda plain=plain: world.escrow.transfer(event_of(plain), signer=bystander.ss58)
+            )
+
+        # Then: the owner still takes its bond back, once.
+        receipts = service_step(lambda: world.admission.release_bond(admission_id, now=5))
+        assert len(receipts) == 1
+        assert world.escrow.balances(other.ss58).admission_locked == 0
+        assert world.admission.release_bond(admission_id, now=6) == []
 
 
 @pytest.mark.xfail(
     strict=True,
     raises=StepRefused,
     reason="DIA-11+DIB-17+LCK-08: a dispute whose bond lock id is the id of a closed dispute "
-    "can still be resolved and settled",
+    "can still be resolved and settled [fix-lot: escrow-relay-fixes ADR0014-P2]",
 )
 def test_a_dispute_whose_bond_borrows_a_closed_disputes_id_can_still_be_settled(
     li_escrow: ModuleType, tmp_path: Path
@@ -367,7 +381,7 @@ def test_a_dispute_whose_bond_borrows_a_closed_disputes_id_can_still_be_settled(
     strict=True,
     raises=StepRefused,
     reason="DIB-17+LCK-08+DIA-11: a dispute bond whose lock id is a reward origin id cannot "
-    "keep that origin from vesting",
+    "keep that origin from vesting [fix-lot: escrow-relay-fixes ADR0014-P2]",
 )
 def test_a_bond_borrowing_a_reward_origins_id_cannot_keep_that_origin_from_vesting(
     li_escrow: ModuleType, tmp_path: Path
@@ -398,55 +412,6 @@ def test_a_bond_borrowing_a_reward_origins_id_cannot_keep_that_origin_from_vesti
         assert world.escrow.balances(cold) == effect
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DefenceMissing,
-    reason="LCK-08+DIB-17: an admission lock whose id is a settled reward origin id cannot be "
-    "released with the settlement of that origin",
-)
-def test_an_admission_lock_borrowing_a_reward_origins_id_cannot_be_released(
-    li_escrow: ModuleType, real_reward: Real, tmp_path: Path
-) -> None:
-    cold = li_escrow.COLD.ss58
-    with hosted_reward(tmp_path, li_escrow, real_reward, real_settlement=True) as run:
-        run.finalize()
-        mature(run.escrow, run.reward)
-        origin = run.reward.origin_ids[0]
-
-        def release_of(lock: EscrowLock) -> EscrowRelease:
-            return EscrowRelease(
-                operation_id=fresh_id("release-" + lock.operation_id),
-                owner=cold,
-                units=lock.units,
-                origin_ids=[origin],
-                admission_id=lock.admission_id,
-                dispute_id=None,
-                lock_id=lock.operation_id,
-                finality_hash=run.reward.finalize_hash,
-                closed_dispute_root=sha256_hex(canonicalize([])),
-            )
-
-        # Given: an ordinary admission lock has no settlement of its own, so it cannot be released.
-        ordinary = li_escrow.lock(origin, fresh_id("ordinary-lock"), 1000)
-        run.escrow.lock(ordinary, signer=cold)
-        refusal = error_code(
-            lambda: run.escrow.release(release_of(ordinary), signer=cold, now_beacon=20)
-        )
-        assert refusal == "UNACCEPTED_SETTLEMENT"
-
-        # When: the owner locks under the id of the settled reward origin and quotes its record.
-        borrowed = li_escrow.lock(origin, origin, 1000)
-        if refused(lambda: run.escrow.lock(borrowed, signer=cold)):
-            return
-
-        # Then: that lock is no more releasable than the ordinary one.
-        must_refuse(
-            lambda: run.escrow.release(release_of(borrowed), signer=cold, now_beacon=20),
-            "an admission lock was released with the settlement of a reward origin",
-        )
-        assert run.escrow.balances(cold).admission_locked == 2000
-
-
 # --- ESC-19: an operation is committed or rolled back by its own outcome -----------------------
 
 
@@ -454,7 +419,8 @@ def test_an_admission_lock_borrowing_a_reward_origins_id_cannot_be_released(
     strict=True,
     raises=DefenceMissing,
     reason="ESC-19: an escrow operation that completes while its caller is handling an unrelated "
-    "exception is committed, not rolled back behind a receipt [candidate]",
+    "exception is committed, not rolled back behind a receipt [candidate] "
+    "[fix-lot: none (no design yet)]",
 )
 def test_an_operation_completed_inside_an_except_block_is_committed(
     li_escrow: ModuleType, tmp_path: Path
@@ -639,6 +605,13 @@ def test_the_engine_refuses_to_be_built_inside_an_open_transaction(li_escrow: Mo
 
 POOL = [fresh_id(f"pool-{index}") for index in range(3)]
 KINDS = ("lock", "transfer", "pay")
+# A ledger that takes an id key keeps the ids a server derives (`pay` is one) in a key space no
+# client id can name (ADR 0014, part 1); before it, every operation shares one space.
+SERVER_KEY_SPACE = "id_key" in inspect.signature(EscrowV2).parameters
+
+
+def id_space(kind: str) -> str:
+    return "server" if SERVER_KEY_SPACE and kind == "pay" else "client"
 
 
 def operation_of(fixture: ModuleType, kind: str, operation_id: str, units: int, origin: str):
@@ -696,7 +669,8 @@ def test_an_operation_id_names_one_body_and_one_movement(
     origin, _ = li_escrow.fund(escrow)
     cold, other = li_escrow.COLD.ss58, li_escrow.OTHER.ss58
     genesis_events = len(ledger_state(escrow)[1])
-    stored: dict[str, tuple[str, int, EscrowReceipt]] = {}
+    unit = max(1, escrow_setup.policy.S_min_units // 10)  # a smaller admission lock is dust
+    stored: dict[tuple[str, str], tuple[str, int, EscrowReceipt]] = {}
     moved = {"lock": 0, "transfer": 0, "pay": 0}
 
     def check(engine: EscrowV2) -> None:
@@ -709,15 +683,16 @@ def test_an_operation_id_names_one_body_and_one_movement(
         assert engine.balances().conserved()
 
     # When: random operations over three ids, so ids collide with other bodies and other kinds.
-    for kind, operation_id, units in steps:
-        operation = operation_of(li_escrow, kind, operation_id, units, origin)
-        known = stored.get(operation_id)
+    for kind, operation_id, count in steps:
+        amount = count * unit
+        operation = operation_of(li_escrow, kind, operation_id, amount, origin)
+        known = stored.get((id_space(kind), operation_id))
         if known is None:
             receipt = apply(escrow, kind, operation)
             assert receipt.operation_id == operation_id
-            stored[operation_id] = (kind, units, receipt)
-            moved[kind] += units
-        elif known[:2] == (kind, units):
+            stored[(id_space(kind), operation_id)] = (kind, amount, receipt)
+            moved[kind] += amount
+        elif known[:2] == (kind, amount):
             assert apply(escrow, kind, operation) == known[2]  # same body: same receipt
         else:
             code = error_code(lambda kind=kind, operation=operation: apply(escrow, kind, operation))
@@ -726,8 +701,8 @@ def test_an_operation_id_names_one_body_and_one_movement(
 
     # Then: a restarted engine on the same ledger answers every id as the first one did.
     restarted = li_escrow.ledger(escrow_setup, escrow.db)
-    for operation_id, (kind, units, receipt) in stored.items():
-        operation = operation_of(li_escrow, kind, operation_id, units, origin)
+    for (_, operation_id), (kind, amount, receipt) in stored.items():
+        operation = operation_of(li_escrow, kind, operation_id, amount, origin)
         assert apply(restarted, kind, operation) == receipt
     check(restarted)
 

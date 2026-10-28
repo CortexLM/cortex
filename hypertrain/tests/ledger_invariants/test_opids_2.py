@@ -14,14 +14,20 @@ from typing import Any
 import httpx
 import pytest
 
-from hypertrain.ledger.escrow_v2 import EscrowError
+from hypertrain.ledger.escrow_v2 import EscrowError, EscrowV2
 from hypertrain.miner.coldkey_ops import escrow_lock
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import EscrowLock, EscrowTransfer
 
 from .support import SERVICE_FIXTURE, World, load_fixture_module, service_world
-from .support_opids import StepRefused, contest_lock, fresh_id, self_transfer
+from .support_opids import StepRefused, client_model, contest_lock, fresh_id, refused, self_transfer
+
+# The outbox refuses a second body under a queued lock id. A ledger that reads the replay before
+# the lock is queued (`require_lock_capacity`, ADR 0014 part 4) refuses it first with its own code.
+LOCK_CONFLICTS = ("OUTBOX_CONFLICT",) + (
+    ("OPERATION_CONFLICT",) if hasattr(EscrowV2, "require_lock_capacity") else ()
+)
 
 
 def escrow_of(world: World) -> Any:
@@ -38,12 +44,10 @@ def client_event_over_http(
 ) -> Any:
     """What a funded coldkey sends to the public escrow routes, under an id of its choice."""
     if kind == "transfer":
-        return signed_post(
-            world, "transfer", key, "EscrowTransfer", self_transfer(key.ss58, operation_id, origin)
-        )
-    return signed_post(
-        world, "lock", key, "EscrowLock", contest_lock(key.ss58, operation_id, origin)
-    )
+        event = client_model(lambda: self_transfer(key.ss58, operation_id, origin))
+        return signed_post(world, "transfer", key, "EscrowTransfer", event)
+    event = client_model(lambda: contest_lock(key.ss58, operation_id, origin))
+    return signed_post(world, "lock", key, "EscrowLock", event)
 
 
 def seed_pending_origin(world: World, origin: str, owner: str, units: int, mature_at: int) -> None:
@@ -82,7 +86,8 @@ def maturity_ids(world: World) -> dict[str, str]:
     strict=True,
     raises=StepRefused,
     reason="ESC-04+BND-24+SG-11: a client event cannot take the id the service derives for the "
-    "maturity of an origin, so the beacon route always matures what is due",
+    "maturity of an origin, so the beacon route always matures what is due "
+    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
 )
 def test_a_client_event_never_blocks_the_maturity_id_over_http(tmp_path: Path, kind: str) -> None:
     cold = load_fixture_module(*SERVICE_FIXTURE).COLD
@@ -105,7 +110,7 @@ def test_a_client_event_never_blocks_the_maturity_id_over_http(tmp_path: Path, k
         origin = world.network.origin_ids[1]
         neutral = client_event_over_http(world, kind, cold[1], fresh_id("neutral"), origin)
         assert neutral.status_code == 200, neutral.text  # control: the route takes its events
-        client_event_over_http(world, kind, cold[1], maturity_id, origin)
+        refused(lambda: client_event_over_http(world, kind, cold[1], maturity_id, origin))
 
         # Then: the beacon route still answers 200 and the origin is available as in the control.
         push_round(world, 5)
@@ -124,7 +129,9 @@ def owner_keyfile(directory: Path, key_seed: bytes) -> Path:
     strict=True,
     raises=StepRefused,
     reason="ESC-05+LCK-13: an event of another key cannot make the admission lock of the owner "
-    "fail, although the id of the lock command is a function of public values",
+    "fail, although the id of the lock command is a function of public values; ADR 0014 "
+    "part 1.10 (ESC-D5) leaves the client key space shared until Forge decides "
+    "[fix-lot: decision (product choice pending)]",
 )
 def test_a_third_party_event_never_makes_the_owner_lock_command_fail(
     tmp_path: Path, kind: str
@@ -336,7 +343,8 @@ def test_an_admission_lock_is_applied_once_and_a_refused_one_leaves_no_outbox_ro
         # Then: one lock was applied; the replay returned its event; the refusals added nothing,
         # not even an unacknowledged outbox row that would block the admission.
         assert (again.status_code, again.json()) == (200, first.json())
-        assert (other_body.status_code, other_body.json()["detail"]) == (409, "OUTBOX_CONFLICT")
+        assert other_body.status_code == 409
+        assert other_body.json()["detail"] in LOCK_CONFLICTS
         assert (unfunded.status_code, unfunded.json()["detail"]) == (
             409,
             "UNFUNDED_OR_UNKNOWN_ORIGIN",
@@ -354,26 +362,20 @@ def test_an_unacknowledged_outbox_row_survives_a_refusal_only_outside_the_servic
         admission_id = world.network.join().json()["admission_id"]
         world.network.push(2)
         escrow, admission = world.store._services(world.run_id)[:2]
-        taken = [fresh_id("lck-12-taken-1"), fresh_id("lck-12-taken-2")]
-        for operation_id in taken:  # another key's event holds the id, so the ledger refuses
-            held = client_event_over_http(
-                world, "transfer", cold[1], operation_id, world.network.origin_ids[1]
-            )
-            assert held.status_code == 200, held.text
 
-        def raw_lock(operation_id: str) -> bytes:
+        def unfunded_lock(label: str) -> bytes:
             operation = admission_lock(
-                cold[0], admission_id, operation_id, world.network.origin_ids[0], 1000
+                cold[0], admission_id, fresh_id(label), world.network.origin_ids[0], 10**6
             )
             return canonicalize(world.network.signed(cold[0], "EscrowLock", operation))
 
-        # When: the refusal happens inside the transaction the service opens for every request
-        # (the stand-in for admission_v2), then outside any transaction.
-        with pytest.raises(EscrowError, match="OPERATION_CONFLICT"), world.store._tx():
-            admission.lock(raw_lock(taken[0]), now=2)
+        # When: the ledger refuses a lock it cannot fund, inside the transaction the service opens
+        # for every request (the stand-in for admission_v2), then outside any transaction.
+        with pytest.raises(EscrowError, match="UNFUNDED_OR_UNKNOWN_ORIGIN"), world.store._tx():
+            admission.lock(unfunded_lock("lck-12-inside"), now=2)
         inside = world.count("admission_outbox")
-        with pytest.raises(EscrowError, match="OPERATION_CONFLICT"):
-            admission.lock(raw_lock(taken[1]), now=2)
+        with pytest.raises(EscrowError, match="UNFUNDED_OR_UNKNOWN_ORIGIN"):
+            admission.lock(unfunded_lock("lck-12-outside"), now=2)
 
         # Then: inside, the outbox row is rolled back with the request; outside, the row is
         # committed before the ledger refuses and the admission is left with a pending lock.

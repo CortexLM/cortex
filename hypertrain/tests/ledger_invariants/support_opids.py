@@ -10,12 +10,18 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from pydantic import ValidationError
+
 from hypertrain.auditor.island_bisect import RefereeEvidence
+from hypertrain.beacon.core import FixtureBeacon
+from hypertrain.challenge.admission import Admission
+from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import Contest, DisputeError, DisputesV2, Turn
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.ledger import Params
-from hypertrain.ledger.escrow_v2 import EscrowError, EscrowReceipt, EscrowV2, Settlement
+from hypertrain.ledger.escrow_v2 import EscrowError, EscrowReceipt, EscrowV2, Settlement, digest
+from hypertrain.miner.admission import sign_join
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -26,6 +32,7 @@ from hypertrain.protocol.messages_v2 import (
     EscrowLock,
     EscrowRelease,
     EscrowTransfer,
+    HardwareHint,
     ResolutionV2,
     RunManifestV2,
 )
@@ -70,13 +77,32 @@ def dispute_code(call: Callable[[], object]) -> str:
     raise AssertionError("expected a DisputeError, nothing was raised")
 
 
+class ModelRefused(Exception):
+    """The client event model refused the operation id before any ledger saw the event.
+
+    The ids a server derives may live in a key space no client id can name (ADR 0014, part 1: the
+    prefix `srv:` is not a Hex64), so signing one is refused by validation: still a refusal."""
+
+
 def refused(call: Callable[[], object]) -> bool:
-    """True when the ledger or the dispute service refuses `call`, False when it is accepted."""
+    """True when the ledger, the dispute or admission service or the event model refuses `call`,
+    False when it is accepted."""
     try:
         call()
-    except (EscrowError, DisputeError):
+    except (EscrowError, DisputeError, AdmissionError, ModelRefused):
         return True
     return False
+
+
+def client_model[T](build: Callable[[], T]) -> T:
+    """Build a client event; a refusal of its operation id by the model is `ModelRefused`, any
+    other invalid field is a bug of the test and stays a ValidationError."""
+    try:
+        return build()
+    except ValidationError as error:
+        if {issue["loc"] for issue in error.errors()} != {("operation_id",)}:
+            raise
+        raise ModelRefused(str(error)) from error
 
 
 def must_refuse(call: Callable[[], object], what: str) -> None:
@@ -117,9 +143,12 @@ def client_event(
 ) -> EscrowReceipt:
     """What a funded key can sign on the escrow routes, under an id of its choice."""
     if kind == "transfer":
-        return escrow.transfer(self_transfer(key.ss58, operation_id, origin), signer=key.ss58)
+        event = client_model(lambda: self_transfer(key.ss58, operation_id, origin))
+        return escrow.transfer(event, signer=key.ss58)
     assert kind == "lock"
-    return escrow.lock(contest_lock(key.ss58, operation_id, origin), signer=key.ss58)
+    return escrow.lock(
+        client_model(lambda: contest_lock(key.ss58, operation_id, origin)), signer=key.ss58
+    )
 
 
 def seed_available(escrow: EscrowV2, origin: str, owner: str, units: int) -> None:
@@ -157,6 +186,24 @@ class DisputeWorld:
     run_id: str
     origins: tuple[str, str]  # genesis origins of COLD and OTHER
     contests: dict[str, Contest]
+    admission: Admission | None = None  # the production resolver of admission locks, when asked
+
+    def join(self, hotkey: Keypair, coldkey: Keypair, request_id: str) -> str:
+        """Admit `hotkey` under `coldkey` through the service (needs `admission=True`);
+        returns the admission id."""
+        assert self.admission is not None, "dispute_world(..., admission=True) installs it"
+        policy = self.admission.policy
+        request = sign_join(
+            hotkey,
+            coldkey,
+            run_id=self.run_id,
+            request_id=request_id,
+            expires_beacon=10000,
+            policy_hash=digest(policy),
+            hardware_hint=HardwareHint(device_name="advisory", device_count=1, driver="cpu-test"),
+        )
+        record = self.admission.join(canonicalize(request.body()), now=1, ip_prefix="loopback")
+        return record.admission_id
 
     def add_contest(self, verdict_hash: str, miner: Keypair) -> str:
         """Register the accepted verdict `disputes.open` reads; returns the dispute id."""
@@ -228,9 +275,18 @@ class DisputeWorld:
         )
 
 
+def no_trial_staged(*_: object) -> Any:
+    raise AssertionError("no trial is staged in this world")
+
+
 @contextmanager
-def dispute_world(root: Path, fixture: ModuleType) -> Iterator[DisputeWorld]:
-    """`fixture` is the lot's tests/ledger/test_escrow_v2.py module (the `li_escrow` fixture)."""
+def dispute_world(
+    root: Path, fixture: ModuleType, *, admission: bool = False
+) -> Iterator[DisputeWorld]:
+    """`fixture` is the lot's tests/ledger/test_escrow_v2.py module (the `li_escrow` fixture).
+
+    `admission=True` also builds the `Admission` service on the same ledger, as the store does:
+    it installs the resolver that settles an admission lock (ADR 0010, part 6)."""
     referee, next_referee = Keypair(b"\x71" * 32), Keypair(b"\x72" * 32)
     policy = DisputePolicyV2(
         referees=[referee.ss58, next_referee.ss58],
@@ -271,6 +327,22 @@ def dispute_world(root: Path, fixture: ModuleType) -> Iterator[DisputeWorld]:
             (run_id, setup.manifest.model_dump_json(), "{}"),
         )
         origins = fixture.fund(escrow)
+        service = (
+            Admission(
+                escrow,
+                setup.admission_policy,
+                fixture.COORD,
+                beacon=FixtureBeacon(current=100000).get,
+                stage_reference=no_trial_staged,
+                objects=LocalFSStore(root / "admission-objects"),
+                ip_secret=b"li-opids-prefix-key",
+                qualified=lambda _: True,
+                conservative_bound=lambda: True,
+                backend="cpu",
+            )
+            if admission
+            else None
+        )
         disputes = DisputesV2(
             escrow,
             policy,
@@ -291,6 +363,7 @@ def dispute_world(root: Path, fixture: ModuleType) -> Iterator[DisputeWorld]:
             run_id,
             origins,
             contests,
+            service,
         )
     finally:
         store.close()

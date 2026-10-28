@@ -9,6 +9,7 @@ LEDGER = "src/hypertrain/ledger/escrow_v2.py"
 STORE = "src/hypertrain/challenge/store.py"
 OUTBOX = "src/hypertrain/challenge/admission_store.py"
 DISPUTES = "src/hypertrain/challenge/disputes_v2.py"
+ADMISSION = "src/hypertrain/challenge/admission.py"
 
 ENGINE = "tests/ledger_invariants/test_opids.py::"
 HTTP = "tests/ledger_invariants/test_opids_2.py::"
@@ -32,8 +33,85 @@ OUTBOX_ROW = (
     + "test_an_unacknowledged_outbox_row_survives_a_refusal_only_outside_the_services_transaction"
 )
 SHARED_LOCK = HTTP + "test_the_ledger_waits_for_a_store_transaction_only_while_they_share_the_lock"
+# Pins that the base tests already hold (PIN_EXISTING): the runner proves they kill the mutant.
+BASE_HARDENING = "tests/challenge/test_admission_hardening_v2.py::"
+BORROWED_DISPUTE_ID = (
+    BASE_HARDENING + "test_a_lock_named_after_a_dispute_is_not_released_by_that_dispute"
+)
+BASE_BOND = "tests/challenge/test_admission_bond_v2.py::"
+BORROWED_ORIGIN_ID = BASE_BOND + "test_a_lock_cannot_borrow_the_settlement_of_another_id"
+SEIZURE_ID = BASE_BOND + "test_seizure_cannot_be_blocked_by_registering_its_operation_id"
+BOND_RELEASE_ID = (
+    ENGINE
+    + "test_a_bystander_event_under_a_plain_id_of_the_lock_does_not_keep_the_owner_from_its_bond"
+)
 
 MUTANTS = [
+    {
+        "id": "opids-admission-lock-settled-by-the-generic-callback",
+        "invariants": ["LCK-08", "DIB-17"],
+        "path": LEDGER,
+        "old": (
+            '        if row is not None and row["kind"] == "LOCK_ADMISSION"'
+            " and self.admission_settlement:\n"
+        ),
+        "new": "        if False:\n",
+        "tests": [BORROWED_DISPUTE_ID],
+        "why": (
+            "an admission lock is settled by the generic callback, which finds a closed dispute"
+            " by the id the owner gave the lock."
+        ),
+    },
+    {
+        "id": "opids-admission-lock-borrows-a-reward-origins-settlement",
+        "invariants": ["LCK-08", "DIB-17"],
+        "path": LEDGER,
+        "old": (
+            '        if row is not None and row["kind"] == "LOCK_ADMISSION"'
+            " and self.admission_settlement:\n"
+        ),
+        "new": "        if False:\n",
+        "tests": [BORROWED_ORIGIN_ID],
+        "why": (
+            "an admission lock named like a settled reward origin is released with that origin's"
+            " settlement while its admission still has an open round."
+        ),
+    },
+    {
+        "id": "opids-bond-operation-id-is-predictable",
+        "invariants": ["ESC-04"],
+        "path": ADMISSION,
+        "old": (
+            '        return hmac.digest(self.ip_secret, f"ht-bond-{label}-v1|{lock_id}".encode(),'
+            ' "sha256").hex()\n'
+        ),
+        "new": '        return sha256_hex(canonicalize([lock_id, "settle"]))\n',
+        "tests": [SEIZURE_ID],
+        "why": (
+            "the id of a bond seizure is a public function of the lock, so its owner registers"
+            " it first and the seizure is refused."
+        ),
+    },
+    {
+        "id": "opids-bond-release-id-is-predictable",
+        "invariants": ["ESC-04"],
+        "path": ADMISSION,
+        "old": (
+            '        return hmac.digest(self.ip_secret, f"ht-bond-{label}-v1|{lock_id}".encode(),'
+            ' "sha256").hex()\n'
+        ),
+        "new": (
+            '        if label == "release":\n'
+            '            return sha256_hex(canonicalize([lock_id, "settle"]))\n'
+            '        return hmac.digest(self.ip_secret, f"ht-bond-{label}-v1|{lock_id}".encode(),'
+            ' "sha256").hex()\n'
+        ),
+        "tests": [BOND_RELEASE_ID],
+        "why": (
+            "the id of a bond release is a public function of the lock, so any funded key registers"
+            " it first and the owner cannot take its bond back."
+        ),
+    },
     {
         "id": "opids-existing-ignores-the-body",
         "invariants": ["ESC-03"],
