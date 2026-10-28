@@ -191,22 +191,16 @@ MUTANTS: list[dict[str, Any]] = [
         "why": "Paying an origin re-keys its units from the coldkey that earned them to the "
         "hotkey the weights name, the shape of a naive fix for the rotated payee.",
     },
-    # --- fix proofs: each closes a hole recorded by a strict xfail of the wave -----------------
     {
-        "id": "fixproof-the-units-of-a-rotated-miner-follow-its-admission",
+        "id": "gapledger-the-units-of-a-rotated-miner-are-paid-to-the-hotkey-that-signed-the-work",
         "invariants": ["CRD-12", "WGT-13", "CL-29"],
         "path": STORE,
-        "old": '                weights[row["hotkey"]] = weights.get(row["hotkey"], 0.0) + take\n',
-        "new": "                held = escrow.db.execute(\n"
-        '                    "SELECT a.hotkey FROM admission_history h JOIN admissions_v2 a "\n'
-        '                    "ON a.admission_id=h.admission_id WHERE h.hotkey=?",\n'
-        '                    (row["hotkey"],),\n'
-        "                ).fetchone()\n"
-        '                payee = held[0] if held else row["hotkey"]\n'
-        "                weights[payee] = weights.get(payee, 0.0) + take\n",
+        "old": '        return None if row["banned"] else str(row["hotkey"])\n',
+        "new": '        return None if row["banned"] else hotkey\n',
         "tests": [ROTATED],
-        "why": "FIX PROOF: the weight of a matured origin goes to the hotkey the admission holds "
-        "now.",
+        "why": "The weight of a matured origin goes to the hotkey that signed the work, not to "
+        "the one its admission holds now, so a rotated miner's quarter is emitted to a key it no "
+        "longer runs.",
     },
     # --- T-CRD-04 and T-CRD-12 -----------------------------------------------------------------
     {
