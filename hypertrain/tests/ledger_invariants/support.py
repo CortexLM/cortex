@@ -366,6 +366,16 @@ def unverified_beacon(data: Mapping[str, Any]) -> BeaconRound:
     return BeaconRound(data["round"], data["signature"], data["randomness"], False)
 
 
+def enforce_mismatch_sanction(store: ChallengeStore) -> None:
+    """Make the sanction of a confirmed audit mismatch active in a world that books one (ADR 0011
+    part 8, decision 18: the first beacon past the contest window suspends the admission, adds a
+    strike and burns the bond), whatever the default of the store: the tests of the lot state the
+    consequence of a forged commit, not the setting that switches it on. The attribute is read by
+    the store that hosts the run, which is the root store in the worlds that call this; a store
+    opened by `_open_child` takes the constructor default instead."""
+    store.enforce_audit_mismatch = True
+
+
 def table_names(db: sqlite3.Connection) -> list[str]:
     return [
         row[0]

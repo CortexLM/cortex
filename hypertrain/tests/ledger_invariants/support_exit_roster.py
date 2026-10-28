@@ -57,7 +57,7 @@ from hypertrain.protocol.messages_v2 import (
 )
 from hypertrain.protocol.relay_messages import MasterAcceptanceV2
 
-from .support import World, load_fixture_module
+from .support import World, enforce_mismatch_sanction, load_fixture_module
 
 ROLLBACK_FIXTURE = ("li_exit_roster_rollback_fixture", "e2e/test_rollback_service_v2.py")
 LAUNCH_SECONDS = 300  # a bound on a tiny CPU launch, never a threshold of a test
@@ -142,6 +142,7 @@ def activated_network(root: Path) -> Iterator[Any]:
     generator = fixtures.network.__wrapped__(root, type("Request", (), {"param": None})())
     try:
         network = next(generator)
+        enforce_mismatch_sanction(network.store)
         for index in range(MINERS):
             if index:
                 network.push(network.now + 101)

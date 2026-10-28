@@ -499,14 +499,16 @@ OPERATIONS = st.one_of(
         ("restart", 0),
     ]
 )
-@example(operations=[("lock", 1), ("lock", 99), ("lock", 100), ("lock", 19900), ("lock", 1)])
+# S_min_units is 1000 here, so a lock holds at least 100 (ADR 0014 part 4.2): 99 is refused.
+@example(operations=[("lock", 99), ("lock", 100)])
 def test_units_are_conserved_by_every_sequence_of_ledger_operations(
     li_escrow: ModuleType, operations: list[tuple[str, int]]
 ) -> None:
-    """CRD-24: transfers, locks, releases, pays and restarts, accepted or refused (for want of
-    funds, or as dust for a lock below the minimum), keep issued equal to the sum of the buckets
-    and to what each owner holds, and every restart re-verifies the event chain."""
+    """CRD-24: transfers, locks, releases, pays and restarts, accepted or refused for want of
+    funds or because a lock is below the minimum, keep issued equal to the sum of the buckets and
+    to what each owner holds, and every restart re-verifies the event chain."""
     setup = li_escrow.setup("test")
+    minimum_lock = max(1, setup.policy.S_min_units // 10)
     database = memory_db()
     escrow = reopen(li_escrow, setup, database)
     cold_origin, _ = li_escrow.fund(escrow)
@@ -522,9 +524,7 @@ def test_units_are_conserved_by_every_sequence_of_ledger_operations(
             "dispute_id": None,
         }
         affordable = amount <= (abroad if kind == "back" else free)
-        # a new admission lock below a tenth of the funding floor is dust and is refused before
-        # anything is checked against the funds (escrow-relay-fixes, ADR 0014)
-        dust = kind == "lock" and amount < max(1, escrow.policy.S_min_units // 10)
+        dust = kind == "lock" and amount < minimum_lock
         call: Callable[[], object] | None = None
         if kind == "send":
             op = EscrowTransfer(owner=cold, recipient=other, **fields)
@@ -551,9 +551,7 @@ def test_units_are_conserved_by_every_sequence_of_ledger_operations(
             free += units
         elif kind == "restart":
             escrow = reopen(li_escrow, setup, database)
-        if dust:
-            assert refusal(call) == "LOCK_BELOW_MINIMUM"
-        elif call is not None and affordable:
+        if call is not None and affordable and not dust:
             call()
             if kind == "send":
                 free, abroad = free - amount, abroad + amount
@@ -565,7 +563,7 @@ def test_units_are_conserved_by_every_sequence_of_ledger_operations(
             else:
                 free, paid = free - amount, paid + amount
         elif call is not None:
-            assert refusal(call) == "UNFUNDED_OR_UNKNOWN_ORIGIN"
+            assert refusal(call) == ("LOCK_BELOW_MINIMUM" if dust else "UNFUNDED_OR_UNKNOWN_ORIGIN")
         balances = escrow.balances()
         assert balances.conserved() and balances.issued == 30000
         assert (balances.paid, balances.admission_locked) == (paid, sum(u for _, u in locks))
