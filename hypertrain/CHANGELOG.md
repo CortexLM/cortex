@@ -167,6 +167,13 @@
   make every v2 operation answer 503 once the beacon lagged 6 s. It now reads the owner's open locks
   through a partial index (the same value, bit for bit). New admission locks must hold a tenth of the
   funding floor and are capped at 2,048 per coldkey and 4,096 in the ledger (Lens F7a).
+- Escrow: an event hashed and stored the whole ledger state through the pure-Python canonical encoder,
+  one interpreter step per character, twice, and `verify()` did it again for every stored snapshot:
+  124 ms per event and 909 ms to verify 21 events at 5,000 unit rows (restart cost grew with the square
+  of the ledger). They use the standard encoder, whose bytes are the same (a test compares them on
+  arbitrary strings, and every stored event hash still verifies): 17 ms and 59 ms. A transfer to oneself
+  is refused (`SELF_TRANSFER`, an old one replays) and a transfer adds a recipient row only for the
+  origins it spends (Lens F7b).
 - The beacon route no longer stops at one escrow origin that cannot mature. A shadow reward whose
   hotkey rotated after acceptance (`signer is not authorized for message role`) or whose job object
   went missing (`ObjectNotFound`) rolled back the whole round's maturity and lease expiry and made

@@ -297,7 +297,17 @@ twice the roster ceiling of 1,024) and the ledger at most 4,096 (`LEDGER_LOCK_CA
 refuses a new lock only, so replaying an accepted lock returns its receipt, and closing a lock
 makes room. The funding status of an admission (`GET .../admission/{hotkey}`, public) reads
 the owner's open locks through a partial index, so its cost grows with those locks and not
-with the ledger (it was quadratic in the number of locks: 96 s at 40,000). Test genesis has pinned nonfinancial origins; production mode
+with the ledger (it was quadratic in the number of locks: 96 s at 40,000).
+
+Every ledger event hashes the whole state, and a transfer cannot make that state grow for
+nothing. The state and the event preimage are encoded with the standard JSON encoder, which gives
+the bytes of the canonical encoder for these values (a test compares them), 7 to 20 times faster:
+an event at 5,000 unit rows costs 17 ms instead of 124 ms and `verify()` of 21 events 59 ms
+instead of 909 ms. A value beyond 2^53-1 in the state refuses the event (`STATE_RANGE`) as
+before. A transfer to oneself is refused (`SELF_TRANSFER`; a transfer that was recorded earlier
+still replays), and a transfer writes a row at the recipient only for the origins it takes
+units from; a lock still writes one for every origin it lists, because its release lists them
+again. Test genesis has pinned nonfinancial origins; production mode
 has separate reward authority/issuance bounds and no test-genesis conversion.
 
 The ledger keeps two key spaces for its events. A client event (`escrow/lock`,

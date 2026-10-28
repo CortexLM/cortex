@@ -101,6 +101,21 @@ def derived_id(id_key: bytes, preimage: str) -> str:
     return hmac.digest(id_key, preimage.encode(), "sha256").hex()
 
 
+STATE_INT_LIMIT = 2**53 - 1  # the I-JSON range canonicalize() enforces
+
+
+def _jcs(value: list[object]) -> str:
+    """The text `canonicalize(value)` gives for lists of str, int and None, at C speed.
+
+    The ledger hashes its whole state with every event, and the pure-Python encoder spends one
+    interpreter step per character, twice per event and again for every stored snapshot in
+    `verify()`. JCS escapes `"`, `\\` and the C0 controls and nothing else, which is what the
+    standard encoder does without `ensure_ascii`; a test compares the two on arbitrary strings.
+    Integers beyond the I-JSON range are refused by `_snapshot` before they reach it.
+    """
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+
 def genesis_origin_id(run_id: str, allocation_hash: str, index: int, id_key: bytes) -> str:
     return derived_id(id_key, f"ht-origin-genesis-v2|{run_id}|{allocation_hash}|{index}")
 
@@ -367,7 +382,7 @@ class EscrowV2:
         ).fetchone()
         seq, prev = (last["seq"] + 1, last["event_hash"]) if last else (0, "0" * 64)
         state = self._snapshot()
-        event_hash = sha256_hex(canonicalize([self.run_id, seq, prev, key, kind, request, state]))
+        event_hash = sha256_hex(_jcs([self.run_id, seq, prev, key, kind, request, state]).encode())
         b = self.balances(owner)
         receipt = EscrowReceipt(
             operation_id=operation_id,
@@ -940,7 +955,14 @@ class EscrowV2:
         source_ref: str = "",
         destination_ref: str = "",
         recipient: str | None = None,
+        skip_empty: bool = False,
     ) -> None:
+        """Move `op.units` out of the owner's rows of `op.origin_ids`, lowest origin id first.
+
+        Every listed origin must be held. A listed origin that takes nothing still gets a row at
+        the destination, because a lock is later released with the same list and `_move` demands
+        a row for each; only a transfer, whose destination row is never read again, may skip it.
+        """
         rows = self.db.execute(
             "SELECT * FROM escrow_units WHERE owner=? AND bucket=? AND ref=?",
             (op.owner, source, source_ref),
@@ -955,6 +977,8 @@ class EscrowV2:
         left = op.units
         for row in selected:
             take = min(left, row["units"])
+            if take == 0 and skip_empty:
+                continue
             self.db.execute(
                 "UPDATE escrow_units SET units=units-? WHERE origin=? AND owner=? "
                 "AND bucket=? AND ref=?",
@@ -987,7 +1011,9 @@ class EscrowV2:
             old = self._owner_operation(op, signer, server=False)
             if old is not None:
                 return old
-            self._move(op, "available", "available", recipient=op.recipient)
+            if op.recipient == op.owner:
+                raise EscrowError("SELF_TRANSFER")  # moves nothing; one more row and one more event
+            self._move(op, "available", "available", recipient=op.recipient, skip_empty=True)
             return self._event(
                 op.operation_id, "TRANSFER", op.model_dump_json(), op.owner, server=False
             )
@@ -1358,7 +1384,7 @@ class EscrowV2:
                 raise EscrowError("MISSING_EVENT_SNAPSHOT")
             last_state = snap["state"]
             actual = sha256_hex(
-                canonicalize(
+                _jcs(
                     [
                         self.run_id,
                         i,
@@ -1368,7 +1394,7 @@ class EscrowV2:
                         row["request"],
                         last_state,
                     ]
-                )
+                ).encode()
             )
             receipt = EscrowReceipt.model_validate_json(row["receipt"])
             if (
@@ -1422,6 +1448,13 @@ class EscrowV2:
             list(r)
             for r in self.db.execute("SELECT * FROM escrow_shadow_finalized ORDER BY ordinal")
         ]
+        if self.db.execute(
+            "SELECT 1 FROM escrow_units WHERE typeof(units)<>'integer' OR units>? "
+            "UNION ALL SELECT 1 FROM escrow_origins WHERE typeof(issued)<>'integer' "
+            "OR abs(issued)>? LIMIT 1",
+            (STATE_INT_LIMIT, STATE_INT_LIMIT),
+        ).fetchone():
+            raise EscrowError("STATE_RANGE")
         if shadow:
-            return canonicalize([origins, units, finals, shadow]).decode()
-        return canonicalize([origins, units, finals]).decode()
+            return _jcs([origins, units, finals, shadow])
+        return _jcs([origins, units, finals])
