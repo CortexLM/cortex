@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 from starlette.routing import BaseRoute, Mount
 
 from hypertrain.beacon.core import BeaconRound
+from hypertrain.challenge.admission_store import AdmissionStore
 from hypertrain.challenge.app import Config, create_app
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
 from hypertrain.data.store import LocalFSStore
@@ -317,6 +318,7 @@ def hosted_reward(
             settlement=(lambda ref: store._settlement_v2(run_id, ref)) if real_settlement else stub,
         )
         escrow.mutex = store._lock
+        AdmissionStore(escrow)  # the tables the real services create; weights() reads them
         store._db.execute(
             "INSERT INTO runs VALUES(?,?,?,'created',NULL)",
             (run_id, setup.manifest.model_dump_json(), "{}"),

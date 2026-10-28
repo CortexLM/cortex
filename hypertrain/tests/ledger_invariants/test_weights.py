@@ -27,6 +27,7 @@ from hypertrain.ledger import FULL_SHARE_MASS
 from hypertrain.ledger.escrow_v2 import EscrowError, Settlement
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
+from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import (
     EscrowLock,
     EscrowOperation,
@@ -654,8 +655,10 @@ def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
     host = finalized
     mature(host.escrow, host.reward)
     origin, cold, other = host.reward.origin_ids[0], li_escrow.COLD.ss58, li_escrow.OTHER.ss58
+    third = Keypair(b"\x0a" * 32).ss58
 
     def transfer(operation: str, owner: str, units: int) -> EscrowTransfer:
+        # A transfer to oneself is refused (SELF_TRANSFER), so the other owner sends to a third.
         return EscrowTransfer(
             operation_id=operation,
             owner=owner,
@@ -663,11 +666,12 @@ def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
             origin_ids=[origin],
             admission_id=None,
             dispute_id=None,
-            recipient=other,
+            recipient=third if owner == other else other,
         )
 
-    # Given: another owner holds one free unit, received by an ordinary owner-signed transfer.
-    host.escrow.transfer(transfer("66" * 32, cold, 1), signer=cold)
+    # Given: another owner holds two free units (one per event it signs below), received by an
+    # ordinary owner-signed transfer.
+    host.escrow.transfer(transfer("66" * 32, cold, 2), signer=cold)
     # When: that owner signs an event whose id is the one the service derives for the payout of
     # epoch 0 (the control signs nothing).
     if preempt:
@@ -680,7 +684,7 @@ def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
             )
     # Then: either way the epoch pays the earner its free units, in one PAY event.
     answer = ask(host, 0)
-    assert answer["weights"] == {li_escrow.HOT.ss58: float(ISSUED - 1)}
+    assert answer["weights"] == {li_escrow.HOT.ss58: float(ISSUED - 2)}
     assert pays(host.escrow) == 1
 
 
