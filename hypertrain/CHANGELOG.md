@@ -138,11 +138,12 @@
   the remaining members cannot carry is refused with 409 `ROUND_INFEASIBLE`. The new helpers
   join the owned set of `implementation_hash`, which changes. See
   `docs/adr/0011-audit-integrity.md` at the monorepo root.
-- A miner no longer dies on one lost read of an object the server just listed. `probe-v2` and
+- A miner no longer dies on one lost read of a trial or job input. `probe-v2` and
   `run-v2` retry an object GET that meets a 404 like one that meets a 5xx (five retries, 1 to
-  16 s, each wait jittered), fail with the same error when it stays, and append one `kind: retry`
-  line per object retry to `journal.jsonl` of the miner directory. The s100 TEST driver gives the
-  exhausted `trial input object unavailable` 404 another pass. See `docs/network-v2.md`.
+  16 s, each wait jittered, as every retry of the miner now is), fail with the same error when it
+  stays, and append one `kind: retry` line per object GET retry to `journal.jsonl` of the miner
+  directory. The s100 TEST driver gives the exhausted `trial input object unavailable` 404 another
+  pass. See `docs/network-v2.md`.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

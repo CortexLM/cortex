@@ -8,10 +8,20 @@ from pathlib import Path
 import httpx
 import pytest
 
+import hypertrain.miner.core as core
 from hypertrain.miner.core import MinerConfig, MinerError, NetworkMiner
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import RunManifestV2
+
+SHIPPED_RETRY_DELAYS = core.RETRY_DELAYS
+
+
+@pytest.fixture(autouse=True)
+def no_real_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An object GET that meets a 404 now sleeps through the retry schedule (about 31 s): the
+    tests of an object that is simply absent must not."""
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0))
 
 
 def test_client_requires_owner_authority_when_manifest_signed_by_other(tmp_path: Path):
@@ -661,7 +671,7 @@ def test_a_404_is_retried_only_by_object_gets_and_no_other_4xx_is(tmp_path: Path
     monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0, 0))
     miner, store, _ = _parts_miner(tmp_path)
     sha = store.put(b"x")
-    # An API read keeps its answer: 404 means "not there yet" to its callers.
+    # An API read keeps its answer: an unknown run, admission or round is a real 404.
     calls: list[str] = []
 
     def not_found(request: httpx.Request) -> httpx.Response:
@@ -672,13 +682,70 @@ def test_a_404_is_retried_only_by_object_gets_and_no_other_4xx_is(tmp_path: Path
     with pytest.raises(ChallengeHTTPError, match="^404: unknown admission$"):
         miner.api.call("GET", "/v2/runs/x/admission/y")
     assert len(calls) == 1
-    # An object read that is refused (not missing) is not retried either.
-    gets = _answer_object_gets(miner, 403, None)
-    with pytest.raises(ChallengeHTTPError, match="^403:"):
-        miner._get_whole(sha, tmp_path / "input")
+    # An object read refused for any other 4xx is not retried either, and an object PUT that
+    # meets a 404 is not a read miss.
+    for status in (s for s in range(400, 500) if s != 404):
+        gets = _answer_object_gets(miner, status, None)
+        with pytest.raises(ChallengeHTTPError, match=f"^{status}:"):
+            miner._get_whole(sha, tmp_path / "input")
+        with pytest.raises(httpx.HTTPStatusError):
+            miner._get_object(sha)
+        assert len(gets) == 2, status
+    assert _journaled_retries(miner) == []
+    puts: list[int] = []
+
+    def no_such_route(request: httpx.Request) -> httpx.Response:
+        puts.append(1)
+        return httpx.Response(404)
+
+    miner.api.c._transport.handler = no_such_route
     with pytest.raises(httpx.HTTPStatusError):
-        miner._get_object(sha)
-    assert len(gets) == 2 and _journaled_retries(miner) == []
+        miner._put_object(b"x")
+    assert puts == [1]
+
+
+class _CutBody(httpx.SyncByteStream):
+    def __init__(self, head: bytes) -> None:
+        self.head = head
+
+    def __iter__(self):
+        yield self.head
+        raise httpx.ReadError("connection reset")
+
+
+def test_a_trial_input_cut_mid_stream_is_fetched_again_from_the_start(tmp_path: Path):
+    import hashlib
+
+    # Given: 128 KiB of which the connection delivers the first 64 KiB, once
+    miner, _, _ = _parts_miner(tmp_path)
+    body = bytes(range(256)) * 512
+    gets: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        gets.append(1)
+        if len(gets) == 1:
+            return httpx.Response(200, stream=_CutBody(body[: 64 << 10]))
+        return httpx.Response(200, content=body)
+
+    miner.api.c._transport.handler = handler
+    # When / Then: the file holds the whole object, not the cut one followed by more
+    miner._get_whole(hashlib.sha256(body).hexdigest(), tmp_path / "input")
+    assert (tmp_path / "input").read_bytes() == body and len(gets) == 2
+
+
+def test_the_shipped_schedule_is_five_retries_from_1_to_16_seconds(tmp_path: Path, monkeypatch):
+    # Given: the schedule the docs state, with the jitter pinned to none
+    monkeypatch.setattr(core, "RETRY_DELAYS", SHIPPED_RETRY_DELAYS)
+    slept: list[float] = []
+    monkeypatch.setattr(core.time, "sleep", slept.append)
+    monkeypatch.setattr(core.random, "uniform", lambda low, high: 1.0)
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"x")
+    _answer_object_gets(miner, 404, None)
+    # When / Then: a 404 that stays waits 1, 2, 4, 8, 16 s, then ends in the error it met
+    with pytest.raises(core.ChallengeHTTPError):
+        miner._get_whole(sha, tmp_path / "input")
+    assert slept == [1, 2, 4, 8, 16]
 
 
 def test_trial_input_that_is_served_after_a_retry_is_still_verified(tmp_path: Path, monkeypatch):
@@ -826,3 +893,4 @@ def test_fetch_inputs_falls_back_to_full_download_on_bad_theta_ref(tmp_path: Pat
     assert (directory / "start_state").read_bytes() == start
     assert full["start_state"] in gets
     assert sorted(p.name for p in directory.iterdir()) == ["start_state"]
+

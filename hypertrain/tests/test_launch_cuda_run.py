@@ -35,3 +35,26 @@ def test_preflight_names_the_first_missing_input_and_spends_nothing(tmp_path: Pa
     assert result.returncode == 1
     assert "FAIL preflight: missing " + str(tmp_path / "tools/prepare_record.py") in result.stdout
     assert not (tmp_path / "state" / "window").exists()
+
+
+def test_the_bundle_checks_of_the_launcher_still_find_what_they_look_for_in_the_miner() -> None:
+    """Preflight greps the miner source for fixed strings and dies when one is gone: a rename in
+    miner/core.py (the PUT retry call, 2026-10-28) blocked every launch and no test noticed."""
+    import re
+
+    core = (Path(__file__).parents[1] / "src/hypertrain/miner/core.py").read_text()
+    checks = re.findall(
+        r"grep -q '([^']+)' \"\$BUNDLE/hypertrain/miner/core\.py\" \|\| die", SCRIPT.read_text()
+    )
+    assert len(checks) >= 3  # the PUT retry, the parallel part PUT, the theta-only input reuse
+    # grep -q takes a basic regex: every character is literal here but a leading ^
+    missing = [
+        pattern
+        for pattern in checks
+        if not re.search(
+            ("^" if pattern.startswith("^") else "") + re.escape(pattern.removeprefix("^")),
+            core,
+            re.MULTILINE,
+        )
+    ]
+    assert missing == []

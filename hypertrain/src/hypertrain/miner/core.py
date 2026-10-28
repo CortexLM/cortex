@@ -52,11 +52,11 @@ from hypertrain.trainer.optim import OptState, init_state
 log = logging.getLogger("hypertrain.miner")
 EXP_ROUNDS = 2**40  # envelope expiry far beyond any round; replay protection is per (w, type)
 # Backoff between attempts of an idempotent request (object PUT/GET, API GET) that hit a
-# transport error or a 5xx; the last failure propagates. ~31 s worst case per request, each wait
-# jittered by +-50%.
+# transport error or a 5xx; the last failure propagates. ~31 s nominal per request, each wait
+# jittered by +-50% (up to ~46 s).
 RETRY_DELAYS: tuple[float, ...] = (1, 2, 4, 8, 16)
-# An object GET also retries a 404: the digest comes from a job the server just signed, so a
-# miss is a read that lost a race, not an answer (s100 TEST replay, 2026-10-27, RELAY-02).
+# An object GET also retries a 404: the digest was just listed by the server, so a miss is more
+# likely a lost read than an answer (s100 TEST replay, 2026-10-27, RELAY-02; cause not established).
 OBJECT_MISS = frozenset({404})
 OWNER_REQUEST_ROUNDS = 20  # a signed owner request lives about a minute at 3 s rounds
 FETCH_WORKERS = 16  # concurrent 1 MiB part GETs per job input (bounded window, ordered sink)
@@ -814,7 +814,7 @@ class NetworkMiner:
         return self.api.call("GET", self.url + "/admission/" + self.kp.ss58)
 
     def _note_retry(self, route: str, status: int | None, attempt: int, delay: float) -> None:
-        """One journal line per object retry, so a replay can count them."""
+        """One journal line per object GET retry, so a replay can count them."""
         Journal(self.directory).append(
             "retry",
             utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1071,7 +1071,7 @@ class NetworkMiner:
             response.raise_for_status()
             return digest
 
-        return self._retry("PUT object " + digest, put)
+        return _retrying("PUT object " + digest, put)
 
     def _fetch_inputs(
         self,

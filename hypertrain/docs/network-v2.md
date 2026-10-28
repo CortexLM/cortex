@@ -172,12 +172,18 @@ finalized, 503 on a beacon pause). The miner checks the job, objects and signed 
 `trial_export` does, streams each input (one uncompressed, sha256-verified
 object; about 4 bytes per parameter for a `reset` start state, more under
 `carry`) into a private temporary folder under its workdir, probes, and deletes
-the folder, also on failure: a re-run downloads and probes again. An object GET or PUT of the miner
-that meets a transport error or a 5xx, and an object GET that meets a 404 (a read that lost a race
-on an object the server just listed), waits and retries up to five times (1, 2, 4, 8, 16 s, each
-wait jittered by 50%) before it fails with the error it met; a digest mismatch is never retried.
-Each retry is one JSON line (`kind: retry`, `utc`, `route`, `status`, `attempt`, `delay`) appended
-to `journal.jsonl` in `<workdir>/<run_id>/<hotkey>/`, so a replay can count them.
+the folder, also on failure: a re-run downloads and probes again. An object GET or PUT of the miner that meets a transport error or a 5xx, and an object GET that
+meets a 404 (a read miss on an object the server just listed; the cause of the one seen on s100
+is not established), waits and retries up to five times (1, 2, 4, 8, 16 s nominal, each wait
+jittered by 50%, so up to about 46 s in all) before it fails with the error it met; a digest
+mismatch is never retried. Each object GET retry is one JSON line (`kind: retry`, `utc`, `route`
+such as `GET object <sha256>`, `status` or null for a transport error, `attempt` of the try that
+failed, `delay` slept, and the journal's own `unix` and `pid`) appended to `journal.jsonl` in
+`<workdir>/<run_id>/<hotkey>/`, so a replay can count them (the try that finally fails is not a
+retry and has no line). A line that cannot be written is logged and never replaces the error of the
+request. A PUT retry is logged, not journaled, and the economics-policy GET of a CPU `run-v2` is
+not retried. A theta rebuild whose object stays 404 now spends up to about 46 s before the
+documented fallback to the full pinned object (more when its parts are the ones missing).
 
 `probe-v2` executes the screen and uploads original rank-0 state/EF/delta/leaves;
 stdout contains the signed proof/screen pair. The operator independently prepares
