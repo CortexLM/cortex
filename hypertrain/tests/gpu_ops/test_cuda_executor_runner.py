@@ -866,7 +866,7 @@ def test_image_sources_program_lists_a_plain_package_in_sorted_compact_json(
     )
 
 
-GOOD_KEY = b'"src/hypertrain/x.py"'
+GOOD_PATH = b'"src/hypertrain/x.py"'
 
 
 @pytest.mark.parametrize(
@@ -883,7 +883,7 @@ GOOD_KEY = b'"src/hypertrain/x.py"'
             "are not a package map",
         ),
         (
-            SimpleNamespace(returncode=0, stdout=b"{" + GOOD_KEY + b':"abc"}', stderr=b""),
+            SimpleNamespace(returncode=0, stdout=b"{" + GOOD_PATH + b':"abc"}', stderr=b""),
             "are not a package map",
         ),
         (SimpleNamespace(returncode=0, stdout=b" " * ((1 << 20) + 1), stderr=b""), "are too large"),
