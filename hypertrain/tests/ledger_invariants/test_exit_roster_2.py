@@ -20,13 +20,21 @@ control the current code satisfies; each reason ends with the lot that will flip
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 import pytest
+
+from hypertrain.challenge.store import ChallengeError
+from hypertrain.protocol.hashing import sha256_hex
+from hypertrain.protocol.jcs import canonicalize
+from hypertrain.relay.core import Settlement
 
 from . import support_exit_roster as X
 
 FUNDED = ("ACTIVE", 0, 1000, 0)  # state, strikes, bond locked, units burned
+LOST = "LEAF_OBJECT_LOST"  # the code of the 503 and the result of the job it parks (D83)
 
 
 @pytest.fixture
@@ -177,26 +185,213 @@ def test_a_loss_of_leaves_on_the_master_sanctions_nobody(queue: X.Round) -> None
     assert [X.standing(rnd, i) for i in rnd.members] == [FUNDED] * len(rnd.members)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="NSH-03: lease_v2 reads the leaf object of the job at the head of the queue and a "
-    "store that lost it raises ObjectNotFound there, so every auditor's ask is a 500 and the jobs "
-    "behind it wait for their windows to end [fix-lot: none (no design yet)]",
-)
-def test_a_leaf_object_the_master_lost_does_not_starve_the_audits_behind_it(queue: X.Round) -> None:
+def ask_a_lease(rnd: X.Round, tag: int, auditor: int = 0) -> Any:
+    return X.post_lease_quietly(rnd, X.lease_ask(rnd, X.service().AUDITORS[auditor], tag))
+
+
+def jobs(rnd: X.Round) -> dict[str, tuple[str, str | None]]:
+    """hotkey -> (state, result) of the audit job of every member."""
+    return {row["hotkey"]: (row["state"], row["result"]) for row in rnd.lease_rows()}
+
+
+def lose_and_keep(rnd: X.Round, index: int) -> bytes:
+    """The master's store loses the leaf object of member `index`; returns its bytes."""
+    key = rnd.record("leaves", rnd.identity(index))["object"]
+    data: bytes = rnd.store.objects.get(key)
+    X.lose_leaves(rnd, index)
+    return data
+
+
+# Closed by v3-d82-burn-pending-reaudit (D83): a leaf object the master lost is a named 503.
+def test_a_leaf_object_the_master_lost_is_refused_by_name_and_the_audits_behind_it_lease(
+    queue: X.Round,
+) -> None:
+    """NSH-03 (D83): the leaf object of the job at the head of the queue is gone from the master's
+    store. That is the master's fault: the ask is refused 503 with a code of its own, never a bare
+    500; the refusal is journaled and is not undone with the transaction that refuses it; the job
+    is given up without a verdict and without blaming its member, so the next ask is served the
+    job behind it."""
     rnd = queue
-    head = rnd.queue_order()[0]
+    head, behind = rnd.queue_order()[:2]
     X.lose_leaves(rnd, head)
     X.control(
         [row["state"] for row in rnd.lease_rows()] == ["queued"] * len(rnd.members),
         "nobody leased anything: the lost object is at the head of a full queue",
     )
 
-    response = X.post_lease_quietly(rnd, X.lease_ask(rnd, X.service().AUDITORS[0], 1))
+    refused = ask_a_lease(rnd, 1)
+    served = ask_a_lease(rnd, 2)
 
-    assert response.status_code == 200, response.text[:200]
-    assert response.json()["body"]["start_state"]["hotkey"] != rnd.hotkey(head)
+    assert refused.status_code == 503, refused.text[:200]
+    assert refused.json()["detail"] == f"{LOST}: round {rnd.w} job {rnd.job_id(head)}"
+    assert rnd.record("leaf-object-lost", rnd.identity(head)) == {
+        "job_id": rnd.job_id(head),
+        "object": rnd.record("leaves", rnd.identity(head))["object"],
+        "at": rnd.network.now,
+    }
+    assert jobs(rnd)[rnd.hotkey(head)] == ("exhausted", LOST)
+    books = X.books(rnd)
+    assert (books["excluded"], books["exit-sanction"], books["exit-failed"]) == ({}, [], [])
+    assert served.status_code == 200, served.text[:200]
+    assert served.json()["body"]["start_state"]["hotkey"] == rnd.hotkey(behind)
+
+
+def test_a_lost_leaf_object_retires_the_round_at_the_next_push(queue: X.Round) -> None:
+    """NSH-03 (D83): the round cannot be audited whole, so it is retired as a null round at the
+    first push after the loss was found, not left to starve until its audit windows end. Its
+    survivors are every member (the master lost the object, the members did what they owed), the
+    lease that was running and the jobs that were not served are cancelled, the job that was
+    refused keeps its cause, and the relay's custody of an upload of the round is released."""
+    rnd = queue
+    first, lost = rnd.queue_order()[:2]
+    grant, horizon = "cd" * 32, 900
+    X.lose_leaves(rnd, lost)
+    X.receipt_of(rnd, grant, horizon)
+    with pytest.raises(ChallengeError, match="pinned by unresolved finality"):
+        rnd.store.relay_settlement_v2(rnd.run_id, grant)
+    X.control(ask_a_lease(rnd, 1).status_code == 200, "the job ahead of the lost one is leased")
+    X.control(rnd.finality()["disposition"] == "PENDING", "the round is pending before the loss")
+    ask_a_lease(rnd, 2, auditor=1)  # the second auditor reaches the lost job
+
+    X.walk(rnd, rnd.network.now + 1)  # one push, not a jump
+
+    status = rnd.finality()
+    assert (status["disposition"], status["unresolved_audits"]) == ("RETIRED", 0)
+    retired = rnd.record("retired", str(rnd.w))
+    assert retired["cause"] == LOST
+    assert retired["survivors"] == sorted(rnd.hotkey(i) for i in rnd.members)
+    assert rnd.store._round_closure_v2(rnd.run_id, rnd.w) == retired["evidence_hash"]
+    assert jobs(rnd) == {
+        rnd.hotkey(i): ("exhausted", LOST if i == lost else "ROUND_RETIRED") for i in rnd.members
+    }
+    closed = Settlement(
+        retired["evidence_hash"], horizon, sha256_hex(canonicalize([])), horizon, horizon
+    )
+    assert rnd.store.relay_settlement_v2(rnd.run_id, grant) == asdict(closed)
+
+
+def test_the_retirement_for_a_lost_leaf_object_sanctions_nobody_and_moves_no_unit(
+    queue: X.Round,
+) -> None:
+    """NSH-03 (D83): the member whose object is gone, and the others, keep their standing, their
+    strikes and their bond once the round is retired; no member is excluded, no sanction is
+    booked, no step fails silently and the ledger writes no event. The exit then gets two more
+    turns, the way a sanction that only the beacon books would."""
+    rnd = queue
+    head = rnd.queue_order()[0]
+    clean = X.books(rnd)
+    X.control(
+        clean["standing"] == [FUNDED] * len(rnd.members) and clean["excluded"] == {},
+        "four funded ACTIVE members and nobody out of the round",
+    )
+    X.lose_leaves(rnd, head)
+
+    ask_a_lease(rnd, 1)
+    X.walk(rnd, rnd.network.now + 1)
+    assert rnd.finality()["disposition"] == "RETIRED"  # without it nothing below could be booked
+    X.walk(rnd, rnd.network.now + 2)
+
+    assert X.books(rnd) == clean
+    escrow = rnd.store._services(rnd.run_id)[0]
+    assert escrow.balances().conserved()
+    escrow.verify()
+
+
+def test_the_round_after_one_with_a_lost_leaf_object_opens_and_its_audits_lease(
+    queue: X.Round,
+) -> None:
+    """NSH-03 (D83): other rounds keep leasing. The retirement carries the roster's anchors, so
+    the next round opens on them, and nothing of the retired round stands in the way of the jobs
+    of the next one."""
+    rnd = queue
+    X.lose_leaves(rnd, rnd.queue_order()[0])
+    ask_a_lease(rnd, 1)
+    X.walk(rnd, rnd.network.now + 1)
+
+    answer, following = X.open_after(rnd, rnd.members)
+
+    assert answer.status_code == 200, answer.text[:200]
+    assert following is not None
+    for index in following.members:
+        X.join_forged(following, index)
+    X.control(X.schedule(following).status_code == 200, "the audits of the next round are queued")
+    served = ask_a_lease(following, 1)
+    assert served.status_code == 200, served.text[:200]
+
+
+def test_a_restored_leaf_object_puts_its_job_back_and_the_round_goes_on(queue: X.Round) -> None:
+    """NSH-03 (D83): the loss may be healed before the push that would retire the round (an
+    operator restores the object, or the miner publishes it again): the job is queued again,
+    nothing is retired and the audit of the member is served."""
+    rnd = queue
+    head = rnd.queue_order()[0]
+    data = lose_and_keep(rnd, head)
+    X.control(ask_a_lease(rnd, 1).status_code == 503, "the first ask finds the loss")
+    assert rnd.store.objects.put(data) == rnd.record("leaves", rnd.identity(head))["object"]
+
+    X.walk(rnd, rnd.network.now + 1)
+
+    assert rnd.finality()["disposition"] == "PENDING"
+    assert jobs(rnd)[rnd.hotkey(head)] == ("queued", None)
+    again = ask_a_lease(rnd, 2)
+    assert again.status_code == 200, again.text[:200]
+    assert again.json()["body"]["start_state"]["hotkey"] == rnd.hotkey(head)
+
+
+def test_a_restored_leaf_object_does_not_revive_a_job_of_a_retired_round(queue: X.Round) -> None:
+    """NSH-03 (D83): a retired round that an open dispute keeps in the reaper's sight takes no
+    job back: nothing of it may be leased any more."""
+    rnd = queue
+    head = rnd.queue_order()[0]
+    data = lose_and_keep(rnd, head)
+    ask_a_lease(rnd, 1)
+    X.walk(rnd, rnd.network.now + 1)
+    X.control(rnd.finality()["disposition"] == "RETIRED", "the loss retired the round")
+    with rnd.store._tx():
+        status = rnd.finality()
+        status["unresolved_disputes"] = 1
+        rnd.store._put_record_v2(rnd.run_id, "finality", str(rnd.w), status)
+    rnd.store.objects.put(data)
+
+    X.walk(rnd, rnd.network.now + 1)
+
+    assert jobs(rnd)[rnd.hotkey(head)] == ("exhausted", LOST)
+
+
+def test_a_lost_leaf_object_waits_for_the_round_before_it_and_is_retired_when_that_one_closes(
+    tmp_path: Path,
+) -> None:
+    """NSH-03 (D83): a round is retired only once every round before it is closed (ADR 0011
+    Part 8). The refusal is the exit waiting, not forgetting: the loss stays on record, the
+    jobs of the round that were not lost keep leasing meanwhile, and the first push after the
+    round before settles retires it."""
+    with X.audited_round(tmp_path, 5) as before:
+        theta = str(X.aggregate(before).json()["theta_hash"])
+        answer, rnd = X.open_after(before, before.members)
+        X.control(answer.status_code == 200 and rnd is not None, answer.text[:200])
+        assert rnd is not None
+        for index in rnd.members:
+            X.join_forged(rnd, index)
+        X.control(X.schedule(rnd).status_code == 200, "the audits of the next round are queued")
+        X.control(
+            before.finality()["disposition"] == "PENDING" and before.finality()["applied"],
+            "the round before is applied and not settled: it is still open",
+        )
+        X.lose_leaves(rnd, rnd.queue_order()[0])
+
+        refused = ask_a_lease(rnd, 1)
+        X.walk(rnd, rnd.network.now + 1)
+
+        assert refused.status_code == 503, refused.text[:200]
+        assert rnd.finality()["disposition"] == "PENDING"
+        assert "an earlier round is not closed" in rnd.record("round-exit", str(rnd.w))["waiting"]
+        assert ask_a_lease(rnd, 2).status_code == 200
+        settled = before.network.client.post(**X.finalize_request(before, before.members, theta))
+        X.control(settled.status_code == 200, settled.text[:200])
+
+        X.walk(rnd, rnd.network.now + 1)
+
+        assert rnd.finality()["disposition"] == "RETIRED"
 
 
 # A roster is a contract until its round is closed (D47)

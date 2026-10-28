@@ -466,6 +466,16 @@
   so a caller cannot retire a viable round by naming fewer of them. A member that joined after round
   `w - 1` has no anchor for it and cannot be on the roster of `w` (409 `missing accepted anchor` at
   the opening), so a retirement never carries a missing anchor. ADR 0011 Part 8 decisions 8 and 11.
+- A leaf object the master lost is an infrastructure fault, not a bare 500 and not a silent skip (NSH-03,
+  D83 of Principal SN100 through Forge): `lease_v2` parks the job whose object it cannot read
+  (`exhausted`, result `LEAF_OBJECT_LOST`, no `excluded` record, no sanction), writes the record
+  `leaf-object-lost` and answers 503 `LEAF_OBJECT_LOST: round <w> job <job_id>` in a transaction that
+  commits for that one refusal (`CommittedRefusal`, `ChallengeStore._tx_booking_refusal`; `_tx` is
+  unchanged). The next beacon push retires the round with a third cause, `LEAF_OBJECT_LOST`, re-derived
+  from the record and a fresh read of the object, with every member as survivor and nobody sanctioned;
+  an object that reads again before that push puts the job back in the queue. `lease_v2` is an owned
+  function: `implementation_hash` changes. See `docs/adr/0011-audit-integrity.md` (Part 8, decision 28)
+  at the monorepo root, `docs/network-v2.md` and `docs/operator.md`.
 - A confirmed audit mismatch sanctions the miner, once, a contest window later (the caller
   `sanction_v2` lacked): the beacon push books a row for every verdict that excluded a member as
   `UNVERIFIED` (`exit-sanction`, `stage: audit`), graded by `grade` (a located leaf, or leaves that

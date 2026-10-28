@@ -876,6 +876,43 @@ def post_lease_quietly(rnd: Round, raw: bytes) -> Any:
     return client.post(rnd.network.url + "/worker/lease", content=raw)
 
 
+def receipt_of(rnd: Round, grant_hash: str, horizon: int) -> None:
+    """A grant of the round and the receipt of its upload, whose custody the relay holds until
+    `horizon`: what `relay_settlement_v2` answers for (as test_retire_round_v2.py builds it)."""
+    with rnd.store._tx():
+        rnd.store._put_record_v2(rnd.run_id, "grant", grant_hash, {"body": {"w": rnd.w}})
+        rnd.store._put_record_v2(
+            rnd.run_id,
+            "relay-receipt",
+            grant_hash,
+            {"body": {"grant_hash": grant_hash, "retain_until": horizon}},
+        )
+
+
+def books(rnd: Round) -> dict[str, Any]:
+    """Everything a sanction, an exclusion or a failed step of the exit leaves behind, and what
+    the ledger holds: the members' standings, their exclusions, the exit's sanction rows and its
+    failures, the sanction rows of the admission side and the ledger's events and balances."""
+    db = rnd.store._db
+
+    def ids(kind: str) -> list[str]:
+        rows = db.execute(
+            "SELECT id FROM records_v2 WHERE run_id=? AND kind=? ORDER BY id", (rnd.run_id, kind)
+        )
+        return [row["id"] for row in rows]
+
+    escrow = rnd.store._services(rnd.run_id)[0]
+    return {
+        "standing": [standing(rnd, i) for i in rnd.members],
+        "excluded": rnd.excluded(),
+        "exit-sanction": ids("exit-sanction"),
+        "exit-failed": ids("exit-failed"),
+        "admission_sanctions": db.execute("SELECT COUNT(*) FROM admission_sanctions").fetchone()[0],
+        "escrow_events": db.execute("SELECT COUNT(*) FROM escrow_events").fetchone()[0],
+        "balances": escrow.balances(),
+    }
+
+
 def contest(rnd: Round, index: int) -> Any:
     """Member `index` funds a contest bond and contests its own audit verdict; returns the
     response of POST /dispute unchecked."""

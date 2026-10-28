@@ -269,3 +269,14 @@ def test_the_survivors_of_a_round_shrink_with_each_bound_and_are_what_the_plan_h
     # and the planner hands on the very same list
     snapshot = snap(at=150, audited=keys(1, 2, 3, 4), **facts)
     assert list(x.plan_round(snapshot).survivors) == left(150)
+
+
+def test_a_lost_leaf_object_retires_a_round_that_can_still_carry_unless_it_cannot():
+    lost = snap(at=40, committed=keys(0, 1, 2, 3, 4, 5), lost_leaves=True)
+    plan = x.plan_round(lost)
+    assert (plan.retire, plan.exclusions) == ("LEAF_OBJECT_LOST", ())
+    assert list(plan.survivors) == [m.hotkey for m in ROSTER]
+    assert x.plan_round(replace(lost, lost_leaves=False)).retire is None
+    assert x.plan_round(replace(lost, applied=True)).retire is None
+    cannot_carry = replace(lost, committed=keys(0, 1, 2), carries=lambda hotkeys: False)
+    assert x.plan_round(cannot_carry).retire == "INFEASIBLE"

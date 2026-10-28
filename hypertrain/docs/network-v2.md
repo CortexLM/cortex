@@ -657,6 +657,16 @@ inputs, and an excluded miner has no anchor for the round, so it cannot be on th
 next roster. While an audit is pending the round stays `PENDING`: opening w+2,
 aggregation, rollback and relay settlement wait for it.
 
+A leaf object the master lost is not that case (ADR 0011 Part 8, decision 28). When a lease finds that
+the object a member's leaves record names is gone from the master's store, the master's own fault is
+booked in the transaction that found it: the job is parked (`exhausted`, result `LEAF_OBJECT_LOST`; no
+`excluded` record, no cooldown, no sanction), the record `leaf-object-lost` (`{job_id, object, at}`) is
+written and the lease answers 503 `LEAF_OBJECT_LOST: round <w> job <job_id>`. The next ask is served the
+job behind it. The first beacon push after the loss retires the round for it (see below), with every
+member as survivor and nobody sanctioned or struck: it costs the other members a round, and a
+cheater's in-flight audit of that round is cancelled with it. An object that reads again before that
+push puts the job back in the queue and nothing is retired.
+
 At most two speculative rounds may be applied; opening w+2 waits for w to settle
 or be excluded and repaired. Retain original input objects, signed tapes,
 accepted envelopes, carry anchors and full bounded predecessor history. Reward
@@ -738,10 +748,11 @@ of ADR 0011 Part 3 is not required, only recorded (`WOULD_APPLY`, nothing touche
 verdict answers 409 `SANCTION_APPLIED`.
 
 A round that cannot reach a tape can be retired (ADR 0011 part 8, decisions 7 to 11) instead of
-blocking the run for good. Two causes, each re-derived by the master from the facts: the members
+blocking the run for good. Three causes, each re-derived by the master from the facts: the members
 that can still deliver (committed, not left out, and with their delta once `d_upload` has passed)
-cannot carry one complete update (`INFEASIBLE`, from `d_commit`), or nobody scheduled audits and
-`audits` answers 503 from `absolute` minus one round (`AUDIT_WINDOW_MISSED`). It also waits until
+cannot carry one complete update (`INFEASIBLE`, from `d_commit`), nobody scheduled audits and
+`audits` answers 503 from `absolute` minus one round (`AUDIT_WINDOW_MISSED`), or a lease found a leaf
+object of the round lost and the store still cannot read it (`LEAF_OBJECT_LOST`, above). It also waits until
 every earlier round is closed and is refused for a service-admitted run (`ROUND_RETIRE_REFUSED:
 <reason>`, nothing written). The beacon push that sees the round cannot go on asks for it (after
 booking the exclusions and the blame of the round, in a savepoint of its own: a refusal is recorded
