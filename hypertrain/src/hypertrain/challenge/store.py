@@ -8315,7 +8315,7 @@ class ChallengeStore:
             (run_id,),
         ).fetchall()
         for row in rows:
-            if row["state"] == "running" and now >= row["expires"]:
+            if row["state"] == "running" and now >= self._lease_end_v2(run_id, row):
                 self._retire_audit_attempt_v2(run_id, row, now, self._expiry_cause_v2(run_id, row))
             elif row["state"] == "queued" and now >= row["absolute"]:
                 self._db.execute(
@@ -8324,6 +8324,20 @@ class ChallengeStore:
                     (row["id"],),
                 )
                 self._exhaust_audit_job_v2(run_id, row, now)
+
+    def _execution_marker_v2(self, run_id: str, row: sqlite3.Row) -> dict[str, Any] | None:
+        stored = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='audit-execution' AND id=?",
+            (run_id, f"{row['id']}:{row['nonce']}"),
+        ).fetchone()
+        return None if stored is None else json.loads(stored[0])
+
+    def _lease_end_v2(self, run_id: str, row: sqlite3.Row) -> int:
+        """The round a running lease ends at: its expiry, or `SIGN_WINDOW_ROUNDS` after the master
+        stored the verdict it replayed for the holder if that comes first. The window counts from
+        the storing, never from the claim: an attempt that is still replaying has no date."""
+        signed_by = audit_cooldown_v2.sign_deadline(self._execution_marker_v2(run_id, row))
+        return int(row["expires"]) if signed_by is None else min(int(row["expires"]), signed_by)
 
     def _expiry_cause_v2(self, run_id: str, row: sqlite3.Row) -> str:
         """An auditor that asked for the execution is not silent: the master owed the verdict."""
@@ -8379,15 +8393,12 @@ class ChallengeStore:
         """The result the master stored for an attempt whose auditor never signed it, or None. The
         verdict is replaced by the next attempt's execution, so it is frozen on the failure row.
         A marker without a verdict (a lease that was never executed) is not a withheld one."""
-        marker = self._db.execute(
-            "SELECT data FROM records_v2 WHERE run_id=? AND kind='audit-execution' AND id=?",
-            (run_id, f"{row['id']}:{row['nonce']}"),
-        ).fetchone()
+        marker = self._execution_marker_v2(run_id, row)
         stored = self._db.execute(
             "SELECT data FROM records_v2 WHERE run_id=? AND kind='executed-verdict' AND id=?",
             (run_id, row["id"]),
         ).fetchone()
-        if marker is None or json.loads(marker[0])["state"] != "EXECUTED" or stored is None:
+        if marker is None or marker["state"] != "EXECUTED" or stored is None:
             return None
         return str(json.loads(stored[0])["result"])
 
@@ -8418,11 +8429,11 @@ class ChallengeStore:
     def _cool_down_auditor_v2(
         self, run_id: str, row: sqlite3.Row, *, withheld: bool = False
     ) -> None:
-        """The silence began when the lease ran out, not when somebody noticed: a refusing call
+        """The silence began when the lease ended, not when somebody noticed: a refusing call
         rolls its own expiry back (`_tx`), so the round that observes it must not move `until`.
         `withheld`: this lapse left a MISMATCH unsigned; only then are the auditor's earlier
         ones counted, the row just written included, so an ordinary silence is never a bar."""
-        silent_since = row["expires"]
+        silent_since = self._lease_end_v2(run_id, row)
         manifest = self._run_v2(run_id)
         policy = AuditPolicyV2.model_validate_json(
             self.objects.get(manifest.network.audit_policy_hash)

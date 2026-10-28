@@ -5,7 +5,8 @@ returned record as records_v2(kind='auditor-cooldown', id=<auditor hotkey>) and 
 whether it still refuses the auditor. The schedule is one lease, then two leases (the absolute
 window), then stays at two; a strike is forgotten after one quiet lease. An auditor that has
 withheld `WITHHELD_STRIKES` signatures of a verdict the master stored as a MISMATCH is barred
-for `STRIKE_BAR_ABSOLUTE_WINDOWS` absolute windows instead (ADR 0011 Part 9).
+for `STRIKE_BAR_ABSOLUTE_WINDOWS` absolute windows instead, and a lease whose stored verdict is
+not signed within `SIGN_WINDOW_ROUNDS` ends there (ADR 0011 Part 9).
 """
 
 from __future__ import annotations
@@ -22,6 +23,9 @@ WITHHELD_STRIKES = 3
 STRIKE_BAR_ABSOLUTE_WINDOWS = 2
 # A job whose MISMATCH was withheld may open one window beyond the pinned `max_attempts`.
 WITHHELD_EXTRA_WINDOWS = 1
+# What the holder of a lease owes once the master has stored its verdict is a signature, which the
+# auditor client posts in the same breath: its post timeout is 60 s, 20 rounds of 3 s.
+SIGN_WINDOW_ROUNDS = 20
 
 
 def cooling_until(record: Mapping[str, Any] | None, now: int) -> int | None:
@@ -29,6 +33,15 @@ def cooling_until(record: Mapping[str, Any] | None, now: int) -> int | None:
     if record is None or now >= record["until"]:
         return None
     return int(record["until"])
+
+
+def sign_deadline(marker: Mapping[str, Any] | None) -> int | None:
+    """The round a stored verdict must be signed by, or None while no verdict is stored: a lease
+    that was never executed has no marker, and a `REQUESTED` one is still being replayed by the
+    master, which is never the holder's silence."""
+    if marker is None or marker["state"] != "EXECUTED":
+        return None
+    return int(marker["at"]) + SIGN_WINDOW_ROUNDS
 
 
 def others_free(

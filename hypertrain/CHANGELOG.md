@@ -295,6 +295,14 @@
   windows (`WITHHELD_STRIKES`, `STRIKE_BAR_ABSOLUTE_WINDOWS`, `WITHHELD_EXTRA_WINDOWS` in
   `challenge/audit_cooldown_v2.py`). No wire message changes; `implementation_hash` does not change. See
   `docs/adr/0011-audit-integrity.md` (Part 9) at the monorepo root.
+- A lease whose verdict the master stored and whose holder did not sign it within
+  `SIGN_WINDOW_ROUNDS` (20, 60 s) of the storing is taken back at that round instead of at its
+  expiry, so that the second auditor has the rest of the window (D82, Forge). The window counts from
+  the storing, never from the claim: a holder whose replay is still running is not taken back, and a
+  signature at the 19th round after the storing is still accepted. The cooldown of the holder starts
+  at the round the lease was taken back. The miner is never blamed for it. A separate commit, so it
+  can be reverted alone; `implementation_hash` does not change. See
+  `docs/adr/0011-audit-integrity.md` (Part 9, decision 8) at the monorepo root.
 
 ### Fixed
 - A member convicted of training fraud between the aggregate and the finalize of a round is no

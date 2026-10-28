@@ -408,6 +408,13 @@ def test_a_result_at_the_lease_expiry_round_is_refused_even_before_the_sweep(
         forger, honest = rows[cast.forger.ss58], sa.honest_lease(store, cast)
         assert forger["expires"] == honest["expires"]
         stored = {h: store._record_v2(run, "executed-verdict", r["id"]) for h, r in rows.items()}
+        # The master stored both verdicts in the last round before the expiry (a test-owned
+        # stand-in): the sign window of a tree that revokes (ADR 0011 Part 9) cannot end the
+        # leases first, and this test is about the expiry round.
+        with store._tx():
+            for r in rows.values():
+                marker = {"state": "EXECUTED", "at": r["expires"] - 1}
+                store._put_record_v2(run, "audit-execution", f"{r['id']}:{r['nonce']}", marker)
         # When: one round before expiry the honest holder completes.
         n.push(honest["expires"] - 1)
         done = sa.complete(n, cast.keys[honest["auditor"]], honest["id"], stored[honest["hotkey"]])

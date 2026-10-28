@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from hypertrain.challenge.audit_cooldown_v2 import cooling_until, next_record, others_free
+from hypertrain.challenge.audit_cooldown_v2 import (
+    cooling_until,
+    next_record,
+    others_free,
+    sign_deadline,
+)
 
 
 def record(previous, now, *, free=True, withheld=0):
@@ -66,3 +71,9 @@ def test_the_last_free_auditor_is_not_barred_whatever_it_withheld():
     last = record(None, 1000, free=False, withheld=7)
     assert (last["reason"], cooling_until(last, 1000)) == ("AUDITOR_WITHHELD", None)
     assert cooling_until(record(None, 1000, withheld=7), 1399) == 1400
+
+
+def test_a_stored_verdict_is_due_twenty_rounds_after_it_was_stored_and_a_replay_never_is():
+    assert sign_deadline({"state": "EXECUTED", "at": 50}) == 70
+    assert sign_deadline({"state": "REQUESTED", "at": 50}) is None  # the master is still replaying
+    assert sign_deadline(None) is None  # the lease was never executed

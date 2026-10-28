@@ -33,6 +33,39 @@ BAR_LENGTHS = (
     "tests/challenge/test_audit_cooldown_v2.py::"
     "test_the_third_withheld_mismatch_bars_for_two_absolute_windows"
 )
+REVOKING = "tests/challenge/test_audit_revocation_v2.py::"
+REVOKED = (
+    REVOKING
+    + "test_an_unsigned_verdict_is_revoked_when_the_sign_window_ends_and_goes_to_the_other_auditor"
+)
+FROM_STORED = (
+    REVOKING
+    + "test_the_sign_window_counts_from_the_stored_verdict_and_never_revokes_a_replay_in_progress"
+)
+COOLS_FROM = REVOKING + "test_a_revocation_cools_the_auditor_down_from_the_revocation_round"
+LATE_POLL = (
+    REVOKING + "test_a_poll_that_notices_the_revocation_late_does_not_push_the_cooldown_further"
+)
+NOT_AGAIN = (
+    REVOKING
+    + "test_the_holder_of_a_revoked_lease_is_not_handed_the_job_again_when_its_cooldown_ends"
+)
+REAL_SIGNATURE = (
+    REVOKING + "test_a_signature_inside_the_sign_window_is_untouched_and_a_later_one_is_refused"
+)
+SIGN_DEADLINE = (
+    "tests/challenge/test_audit_cooldown_v2.py::"
+    "test_a_stored_verdict_is_due_twenty_rounds_after_it_was_stored_and_a_replay_never_is"
+)
+RETIRE_EXPIRED = (
+    "                self._retire_audit_attempt_v2("
+    "run_id, row, now, self._expiry_cause_v2(run_id, row))\n"
+)
+FORGET_TRIED = (
+    "                self._db.execute(\n"
+    "                    \"UPDATE audit_leases_v2 SET tried='[]' WHERE id=?\", (row['id'],)\n"
+    "                )\n"
+)
 LAST_FREE = (
     "tests/challenge/test_audit_cooldown_v2.py::"
     "test_the_last_free_auditor_is_not_barred_whatever_it_withheld"
@@ -171,5 +204,62 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         "            return False\n",
         "",
         (BOTH_WITHHOLD,),
+    ),
+    (
+        "sign window counted from the claim, not from the stored verdict",
+        STORE,
+        "audit_cooldown_v2.sign_deadline(self._execution_marker_v2(run_id, row))",
+        "audit_cooldown_v2.sign_deadline(\n"
+        "            (m := self._execution_marker_v2(run_id, row))\n"
+        '            and {**m, "at": row["created"]}\n'
+        "        )",
+        (FROM_STORED, REVOKED),
+    ),
+    (
+        "revocation sanctions the miner: the revoked lease books an exclusion",
+        STORE,
+        RETIRE_EXPIRED,
+        RETIRE_EXPIRED + '                if now < row["expires"]:\n'
+        "                    self._put_record_v2(\n"
+        '                        run_id,\n                        "excluded",\n'
+        "                        f\"{row['w']}:{row['hotkey']}\",\n"
+        '                        {"reason": "UNVERIFIED", "evidence_hash": row["id"]},\n'
+        "                    )\n",
+        (REVOKED,),
+    ),
+    (
+        "same auditor re-picked after the revocation: tried is forgotten",
+        STORE,
+        RETIRE_EXPIRED,
+        RETIRE_EXPIRED + FORGET_TRIED,
+        (NOT_AGAIN,),
+    ),
+    (
+        "sign window one round short: an honest signature on the last round is refused",
+        COOLDOWN,
+        'return int(marker["at"]) + SIGN_WINDOW_ROUNDS',
+        'return int(marker["at"]) + SIGN_WINDOW_ROUNDS - 1',
+        (SIGN_DEADLINE, REVOKED, REAL_SIGNATURE + "[inside-the-window]"),
+    ),
+    (
+        "sign window one round long: the revocation comes a round late",
+        COOLDOWN,
+        'return int(marker["at"]) + SIGN_WINDOW_ROUNDS',
+        'return int(marker["at"]) + SIGN_WINDOW_ROUNDS + 1',
+        (SIGN_DEADLINE, REVOKED, REAL_SIGNATURE + "[after-the-window]"),
+    ),
+    (
+        "revocation of a REQUESTED marker: a replay in progress loses its lease",
+        COOLDOWN,
+        'if marker is None or marker["state"] != "EXECUTED":',
+        "if marker is None:",
+        (SIGN_DEADLINE, FROM_STORED),
+    ),
+    (
+        "the cooldown starts at the expiry, not at the revocation",
+        STORE,
+        "silent_since = self._lease_end_v2(run_id, row)",
+        'silent_since = row["expires"]',
+        (REVOKED, COOLS_FROM, LATE_POLL),
     ),
 )

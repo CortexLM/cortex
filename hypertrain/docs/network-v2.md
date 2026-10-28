@@ -743,8 +743,13 @@ to another auditor: the withholders stay in the job's `tried` list through the r
 handed it again, and such a job may open a third window (at most three), bounded by the commit's
 expiry. Only that second lease completing as `MISMATCH` takes the sanction path above; a `MATCH`
 clears the miner. When no other auditor, no time or no live commit is left, the job ends as an
-`INFRASTRUCTURE` exclusion, as before; in the operated shape (a gap of 100 rounds, commit sealed
-until `d_final`) the first lease runs to `d_final` and leaves no room for a second. The auditor
+`INFRASTRUCTURE` exclusion, as before. A lease whose verdict the master stored and its holder
+did not sign within 20 rounds (`SIGN_WINDOW_ROUNDS`, 60 s) of the storing is taken back at that
+round, not at its expiry, so that the other auditor has the rest of the window; a holder whose
+replay is still running is never taken back. Whether the second auditor has time depends on the
+gap and on the replay: the job must be leased, replayed and signed again before `d_final`, so a
+gap of 100 rounds fits a replay of 38 rounds (114 s) at best and a gap of 200 a replay of 88
+rounds (264 s) (ADR 0011 Part 9). The auditor
 that withheld the signature of a `MISMATCH` for the third time in a run (and each time after) is
 refused new leases, and as a relay observer, for two absolute audit windows (`4 * lease_rounds`; 20
 minutes at H <= 30), unless it is the last configured auditor outside a cooldown. A withheld

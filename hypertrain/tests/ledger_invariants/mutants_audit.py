@@ -255,7 +255,7 @@ MUTANTS: list[dict[str, object]] = [
         "            (run_id,),\n"
         "        ).fetchall()\n"
         "        for row in rows:\n"
-        '            if row["state"] == "running" and now >= row["expires"]:\n'
+        '            if row["state"] == "running" and now >= self._lease_end_v2(run_id, row):\n'
         "                self._retire_audit_attempt_v2(run_id, row, now, "
         "self._expiry_cause_v2(run_id, row))\n"
         '            elif row["state"] == "queued" and now >= row["absolute"]:',
@@ -263,7 +263,7 @@ MUTANTS: list[dict[str, object]] = [
         "            (run_id,),\n"
         "        ).fetchall()\n"
         "        for row in rows:\n"
-        '            if row["state"] == "running" and now >= row["expires"]:\n'
+        '            if row["state"] == "running" and now >= self._lease_end_v2(run_id, row):\n'
         "                self._retire_audit_attempt_v2(run_id, row, now, "
         "self._expiry_cause_v2(run_id, row))\n"
         '            elif row["state"] != "running" and now >= row["absolute"]:',

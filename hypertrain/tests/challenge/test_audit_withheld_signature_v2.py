@@ -33,9 +33,9 @@ from .audit_lease_fixture_v2 import (
 A, B = AUDITOR_A, AUDITOR_B
 
 
-def withhold(network, job, result="MISMATCH"):
-    """What the master leaves behind when it replayed `job` for its lease holder: the verdict it
-    stored and the EXECUTED marker. The holder never signs it."""
+def store_verdict(network, job, result="MISMATCH"):
+    """What the master leaves behind when it replayed `job` for its lease holder, in the current
+    round: the verdict it stored and the EXECUTED marker. The holder never signs it."""
     store, run = network.store, network.manifest.run_id()
     verdict = ReplayVerdict(
         challenge_hash="11" * 32,
@@ -56,6 +56,14 @@ def withhold(network, job, result="MISMATCH"):
             f"{job['job_id']}:{job['lease_nonce']}",
             {"state": "EXECUTED", "at": network.now},
         )
+
+
+def withhold(network, job, result="MISMATCH"):
+    """The master's replay ends in the last round of the lease, so that the sign window cannot end
+    before the lease does: these tests are about the expiry, test_audit_revocation_v2.py is
+    about the window."""
+    network.push(job["lease_expires"] - 1)
+    store_verdict(network, job, result)
 
 
 def prior_withholds(network, auditor, count):

@@ -1699,7 +1699,8 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
   audits (`absolute = min(now + 2 * lease_rounds, exp_drand)`, Part 2 decision 8). In the operated shape
   (`d_final - d_audit = 100`, the lease runs to `d_final`) the first lease of a job is also its last
   chance: no window exists after it. A gap of 200 leaves room for a replacement only when the first lease
-  was early (`docs/s100-test-stack.md`: "end with 282 (gap 200) to fit a replacement lease"). [V]
+  was early (`docs/s100-test-stack.md`: "end with 282 (gap 200) to fit a replacement lease"). [V] Decision 8
+  is the lever on that: it takes the lease back before its expiry.
 
 ### Decision
 
@@ -1753,10 +1754,26 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
    only a forgery, a place where a client crash or a beacon lag counts: the false positives would scale with the
    jobs per round, N would have to rise to about five and the accomplice's free withholds with it. A withheld
    `MATCH` stays on the cooldown of Part 2. The price is stated below.
+8. **A verdict nobody signs is taken back after the sign window (Forge's decision, in its own commit so that it
+   can be reverted alone).** A running lease whose marker `audit-execution/<job>:<nonce>` is `EXECUTED` ends
+   `SIGN_WINDOW_ROUNDS = 20` rounds after the marker's `at`, the round the verdict was stored, when its expiry
+   is later: it is retired exactly as an expired lease (cause `AUDITOR_SILENT`, `withheld` frozen), so that an
+   attempt below the second requeues for the other auditor inside the same window. Twenty rounds are 60 s, the
+   post timeout of the auditor client, which signs and posts in one breath [A].
+   - The window counts from the storing, never from the claim, the `created` round or the start of the lease.
+     A holder whose replay is still running has a `REQUESTED` marker, no verdict and no date: an honest slow
+     auditor (a replay of 144 to 256 s at 101 M parameters, 48 to 85 rounds [A]) is never revoked while it
+     computes, and one that signs inside the window is untouched (`complete_audit_v2` accepts the signature at
+     `at + 19`).
+   - The cooldown starts at `min(expires, at + 20)`: a date the store derives, not one it observes, so that a
+     refusing poll, which rolls its own lazy expiry back, cannot move `until`.
+   - The revocation never sanctions the miner, writes no `excluded` and no sanction row, and only a withheld
+     MISMATCH feeds the strike; a revoked `MATCH` is a cooldown. A late signature of the holder after the
+     revocation is refused (409) and writes no verdict.
 
 | Event | Rule |
 | --- | --- |
-| a running attempt expires, marker `EXECUTED`, stored result `MISMATCH` | failure row `withheld: MISMATCH`; the holder is cooled down as before and counted (decision 5); no `excluded`, no sanction row, no finality change |
+| a running attempt expires, or `SIGN_WINDOW_ROUNDS` after its marker became `EXECUTED` if that is sooner, stored result `MISMATCH` | failure row `withheld: MISMATCH`; the holder is cooled down as before and counted (decision 5); no `excluded`, no sanction row, no finality change |
 | any attempt is retired | `exhausted` iff `attempts >= 2`, or `now >= absolute`, or no configured auditor outside `tried` and the miner; else `queued` |
 | a job is `exhausted` | unchanged: no leaves, `NO_SHOW`; else a re-arm; else the `INFRASTRUCTURE` drop |
 | re-arm | refused for a service-admitted run; refused when the job has a withholder and nobody else is left; refused after two windows (three with a withholder); the window ends at `min(now + 2L, exp_drand)` and is refused when that is `<= now + 1`; `tried` becomes the withholders |
@@ -1768,19 +1785,20 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
 - `implementation_hash` is unchanged by this part: the AST digest of each of the 48 owned names is identical
   before and after, for the five environment pins of the example manifest (`d61bd2b8…71bdc4` for
   `avx2/none`). The functions edited are `_retire_audit_attempt_v2`, `_cool_down_auditor_v2` and
-  `_rearm_audit_job_v2`; added are `_withheld_verdict_v2`, `_withholders_v2` and `_auditors_left_v2`; none is
-  owned, and `audit_cooldown_v2.py` is not in the hashed paths. Runs holding a `service-admission` record are
-  therefore not affected by this part.
+  `_rearm_audit_job_v2`, and by decision 8 `_expire_leases_v2`; added are `_withheld_verdict_v2`,
+  `_withholders_v2`, `_auditors_left_v2`, `_execution_marker_v2` and `_lease_end_v2`; none is owned, and
+  `audit_cooldown_v2.py` is not in the hashed paths. Runs holding a `service-admission` record are therefore
+  not affected by this part.
 - `run_id`, manifest, policy hashes, `wire_v2.json`, `rust_wire.json`: unchanged. `sources()` and `bundle()` move
   with every edit of `src/hypertrain`. Measured with `network_qualification.sources()`/`bundle()` and
   `ChallengeStore._service_implementation_v2` over a `git archive` of each tree [V]:
 
-  | Value | Before (`1b8e7a5b`) | After this part |
-  | --- | --- | --- |
-  | `challenge/store.py` sha256 | `5cd7d7f5…4c318b` | `cd79080e…1d9566` |
-  | `sources()` map, 158 files, canonical sha256 | `1cb3027a…bc7fe3` | `d31fbfd4…e726b1` |
-  | `sources()` map, default separators | `0c58a13e…c902e6` | `842839b3…598d80` |
-  | `bundle()`, 2,734,080 bytes | `aa5f3f2f…df3bf3` | `4537c70f…d4f15d` |
+  | Value | Before (`1b8e7a5b`) | After decisions 1 to 7 | After decision 8 |
+  | --- | --- | --- | --- |
+  | `challenge/store.py` sha256 | `5cd7d7f5…4c318b` | `cd79080e…1d9566` | `8541ed73…6038da` |
+  | `sources()` map, 158 files, canonical sha256 | `1cb3027a…bc7fe3` | `d31fbfd4…e726b1` | `bba7383b…2ab6b2` |
+  | `sources()` map, default separators | `0c58a13e…c902e6` | `842839b3…598d80` | `cda80dbe…80491e` |
+  | `bundle()` | 2,734,080 bytes, `aa5f3f2f…df3bf3` | 2,734,080 bytes, `4537c70f…d4f15d` | 2,744,320 bytes, `bb32f965…cb4781` |
 
   A qualification record made on the parent tree no longer validates against this one; the values are measured
   again on the tree that is released.
@@ -1792,11 +1810,17 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
   of Part 8 decision 1 (`exit_v2.py`) name the end of the second audit window as the outer bound of a wait on an
   auditor; a job with a withheld MISMATCH is the one exception, by one window. The reaper acts on facts, not on
   that table, so nothing in code changes.
-- The re-audit is obligatory only while time, an eligible auditor and a live commit remain. In the operated
-  shape (gap 100, commit sealed until `d_final`) the withholder's lease runs to `d_final` and no window is
-  left: the job is dropped as an `INFRASTRUCTURE` exclusion exactly as before this part, no strike on the
-  miner. The re-audit is real for a gap of 200 with an early first lease, and for a commit sealed past the
-  second window.
+- The re-audit is obligatory only while time, an eligible auditor and a live commit remain. It stays impossible
+  when no configured auditor outside `tried` and the miner is left, when the commit's expiry is reached, and
+  when the second replay cannot finish: the second auditor needs a lease, a full replay and a signature before
+  the commit ends. With T the master's replay in rounds, r0 the round of the first lease and m about 2 rounds
+  for the signature, a job can be decided if `r0 + T + SIGN_WINDOW_ROUNDS + T + m <= d_final` (an honest
+  miner's commit ends at `d_final`). For a lease taken at once (`r0 = d_audit + 1`) a gap of 100 allows
+  T <= 38 rounds (114 s) and a gap of 200 allows T <= 88 rounds (264 s). A replay of 144 to 256 s at 101 M
+  parameters (48 to 85 rounds [A]) therefore does not fit a gap of 100, not even for the first lease of the
+  window, and fits a gap of 200 only for an early one (for 85 rounds, `r0 - d_audit <= 8`). Where it does not
+  fit, the job is dropped as an `INFRASTRUCTURE` exclusion exactly as before this part, with no strike on the
+  miner (pinned: a verdict stored 70 rounds into a lease of a gap of 100 is taken back with 10 rounds left).
 - The re-audit is the master's own executor run again: the independence is that of the signature and of the
   attempt, not of the replay. A transient host fault is cleared by it; a systematic one is reproduced for the
   second auditor, which signs the same false MISMATCH. An honest signing auditor is never helped or hurt by
@@ -1819,6 +1843,9 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
   `AUDITOR_SILENT`, no marker, one ordinary cooldown) or by asking late (the `REQUESTED` marker is committed
   before any check and excuses the holder: `EXECUTOR_INTERRUPTED`, no cooldown). One accomplice that wins the
   lease race sinks one forger's job per cooldown, saving that forger's bond. Not closed here.
+- A holder that asks for the execution again before its window ends renews the marker's `at`: the window
+  slides, each time at the price of a full replay on the master, and the lease expiry still bounds it, as
+  before this part.
 - Both live auditors colluding withhold, `tried` holds both, the job is dropped; the second record is
   zero-length because of `others_free`.
 - A ghost auditor defeats `others_free`: the manifest allows up to 128 auditors and requires two distinct
@@ -1844,6 +1871,9 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
    accident. 7. A modulo count.
    8. Counting every executed-and-unsigned verdict (decision 7). 9. Liveness tracking of the auditors to defeat
    the ghost: not in this lot.
+   10. Counting the sign window from the claim: an honest slow replay would be revoked while it computes.
+   11. Revoking a lease whose marker is `REQUESTED`. 12. A window shorter than the client's post timeout (an
+   honest signature in flight would be refused).
 
 ### Decisions for Forge
 
@@ -1851,7 +1881,9 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
    decision 6 gives the numbers and the arithmetic to change them.
 2. Whether a withheld MATCH should count too (decision 7): it would deter an auditor that withholds a MATCH to
    push an honest miner out, at the price of N near five.
-3. Whether the cheaper evasions of the residuals should be closed (a late `REQUESTED` marker, a lease that
+3. The length of the sign window (decision 8): 20 rounds is the client's post timeout, a default. Early
+   revocation itself is Forge's decision of 2026-10-28.
+4. Whether the cheaper evasions of the residuals should be closed (a late `REQUESTED` marker, a lease that
    never asks for its execution), which would change decisions 1 and 2 of Part 2.
 
 ### Not verified
@@ -1863,7 +1895,10 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
 - The Nth occurrence of the strike is tested with N - 1 failure rows written by the test: one run reaches two
   withholds per auditor per round on the test network.
 - Service-admitted runs: neither the re-arm nor the lease path is exercised (skipped by construction).
-- The probabilities and the replay durations are [A], not measured.
+- The probabilities and the replay durations are [A], not measured; the feasibility inequality is arithmetic over
+  assumed durations, and no replay of the operated shape was timed.
+- The revocation was exercised with verdicts written by the test and with real CPU replays of the seeded round;
+  an honest signature at `at + 19` and its refusal at `at + 20` are tested on a real verdict.
 
 ### Sources
 
