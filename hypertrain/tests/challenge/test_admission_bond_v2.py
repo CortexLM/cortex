@@ -622,13 +622,14 @@ def test_audit_mismatch_does_not_lift_a_ban(world: World) -> None:
     [
         (None, ("PROBATION", "NO_SHOW", 1)),
         ("TRAINING_FRAUD", ("BANNED", "FINALIZED_TRAINING_FRAUD", 0)),
+        ("AUDIT_MISMATCH", ("SUSPENDED", "AUDIT_MISMATCH", 2)),
     ],
-    ids=["unfunded", "banned"],
+    ids=["unfunded", "banned", "suspended"],
 )
-def test_a_first_no_show_puts_an_unfunded_admission_on_probation_and_does_not_lift_a_ban(
+def test_a_first_no_show_puts_an_unfunded_admission_on_probation_and_lifts_no_sanction(
     world: World, prior: SeizureReason | None, expected: tuple[str, str, int]
 ) -> None:
-    # Given: an ACTIVE admission with no bond to burn, or one already banned for fraud
+    # Given: an ACTIVE admission with no bond to burn, or one already suspended or banned
     world.a.store.db.execute(
         "UPDATE admissions_v2 SET state='ACTIVE' WHERE admission_id=?", (world.admission,)
     )

@@ -1098,8 +1098,10 @@ the table as covering them.
     screens of an earlier no-show of the same admission suspends it like an `AUDIT_MISMATCH`. The window is
     the one constant this decision adds (`admission.py`, not a policy field: a policy field changes every
     run id) and is Forge's to retune; it is measured in beacons from the beacon of the earlier sanction row.
-    It resolves by the admission id of the roster entry, so a rotation cannot dodge it, and is idempotent per
-    (reason, evidence). Tests: one per tier, plus the boundary of the window.
+    An admission that is already SUSPENDED keeps its state and the reason it was suspended for and takes the
+    strike (a mismatch is not turned into a probation by a later silence). It resolves by the admission id of
+    the roster entry, so a rotation cannot dodge it, and is idempotent per (reason, evidence). Tests: one per
+    tier, plus the boundary of the window and a suspension that a no-show follows.
 13. **No gate: `finalize` pays the applied tape (decision 23).** An earlier design made the sweeper wait
     for the member's earlier unclosed rounds, because a sanction makes the member ineligible and `finalize`
     of an applied round re-checks eligibility. A gate cannot hold `settle_fraud` (it runs inside a referee's

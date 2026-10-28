@@ -1516,10 +1516,10 @@ class Admission:
             if reason == "TRAINING_FRAUD" and r.state != "BANNED":
                 self.store.transition(admission_id, "BANNED", "FINALIZED_TRAINING_FRAUD", now)
             if reason in ("AUDIT_MISMATCH", "NO_SHOW") and first and r.state != "BANNED":
-                if (
-                    reason == "NO_SHOW"
-                    and r.state != "SUSPENDED"
-                    and not self._repeat_no_show(admission_id, evidence_hash, now)
+                if reason == "NO_SHOW" and r.state == "SUSPENDED":
+                    pass  # it keeps the state and the reason it was suspended for, and a strike
+                elif reason == "NO_SHOW" and not self._repeat_no_show(
+                    admission_id, evidence_hash, now
                 ):
                     self._fresh_probation(admission_id, reason, now)
                 else:
