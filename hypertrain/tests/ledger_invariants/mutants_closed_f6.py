@@ -31,7 +31,7 @@ BROKEN_LEDGER = " " * 24 + "if isinstance(error, sqlite3.Error) or code in (\n"
 JOURNAL = " " * 24 + "self._journal_maturity_failure_v2(run_id, origin[0], error)\n"
 # The three steps of the push that follow the loop over the due origins.
 EXPIRE_LEASES = " " * 16 + "self._expire_leases_v2(run_id, br.round)\n"
-CLOSE_DISPUTES = " " * 12 + "self._close_blocked_disputes_v2(run_id)\n"
+CLOSE_DISPUTES = " " * 12 + 'self._reap_v2(run_id, "dispute", self._close_blocked_disputes_v2)\n'
 REAP_TRIALS = " " * 16 + "admission.reap_expired_trials(now=self._now(self._db))\n"
 
 
