@@ -23,6 +23,7 @@ from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import (
     EconomicsPolicyV2,
     EscrowLock,
+    EscrowTransfer,
     RankWorkResult,
     RunManifestV2,
     WorkScreenV2,
@@ -30,7 +31,7 @@ from hypertrain.protocol.messages_v2 import (
 
 from .support import SERVICE_FIXTURE, World, load_fixture_module
 from .support_credit import ROLLBACK_FIXTURE, AuditedRound
-from .support_opids import StepRefused, contest_lock, self_transfer
+from .support_opids import StepRefused, contest_lock
 
 # --- the beacon route and the ids the service derives (T-BOOTSTRAP-02) --------------------------
 
@@ -42,7 +43,9 @@ def escrow_of(world: World) -> Any:
 def client_event_over_http(
     world: World, kind: str, key: Keypair, operation_id: str, origin: str
 ) -> Any:
-    """What a funded coldkey sends to the public escrow routes, under an id of its choice.
+    """What a funded coldkey sends to the public escrow routes, under an id of its choice. A
+    transfer moves one unit to the fourth coldkey of the fixture, which no test reads: the ledger
+    refuses a transfer to oneself (SELF_TRANSFER).
 
     The ids a server derives may live in a key space no client id can name (ADR 0014 part 1: the
     prefix `srv:` is not a Hex64). The event model then refuses the id before anything is signed
@@ -51,7 +54,15 @@ def client_event_over_http(
     try:
         if kind == "transfer":
             route, name = "transfer", "EscrowTransfer"
-            body: Any = self_transfer(key.ss58, operation_id, origin)
+            body: Any = EscrowTransfer(
+                operation_id=operation_id,
+                owner=key.ss58,
+                recipient=load_fixture_module(*SERVICE_FIXTURE).COLD[3].ss58,
+                units=1,
+                origin_ids=[origin],
+                admission_id=None,
+                dispute_id=None,
+            )
         else:
             route, name = "lock", "EscrowLock"
             body = contest_lock(key.ss58, operation_id, origin)
