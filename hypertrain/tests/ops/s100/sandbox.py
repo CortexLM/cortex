@@ -144,6 +144,7 @@ FAKE_DOCKER = r"""#!@PY@
 import hashlib, json, os, re, sys
 
 D = os.environ["FAKE_DIR"]
+TEST = set(@TEST_NAMES@)
 st = json.load(open(D + "/docker.json"))
 a = sys.argv[1:]
 st["calls"].append(a)
@@ -159,6 +160,12 @@ def done(rc=0, msg=""):
     if msg:
         print(msg, file=sys.stderr)
     sys.exit(rc)
+
+
+def outside(names):  # a read of a production container is as wrong as a touch of it
+    for n in names:
+        if n not in TEST:
+            open(D + "/tripwire.log", "a").write("docker inspect %s: outside the TEST stack\n" % n)
 
 
 def mutate(op, name):  # what the live DB looked like when the container was touched
@@ -300,10 +307,12 @@ elif files and rest[:3] == ["up", "-d", "--no-deps"] and len(rest) > 3:
 elif a[0] == "exec":
     run_program(a[1:])
 elif a[0] == "inspect" and len(a) == 4 and a[2] == "--format" and a[3] in FORMATS:
+    outside(a[1:2])
     if a[1] not in st["containers"]:
         done(1, "Error: No such object: " + a[1])
     print(render(a[3], st["containers"][a[1]]))
 elif a[0] == "inspect" and len(a) == 5 and not any(x.startswith("-") for x in a[1:]):
+    outside(a[1:])
     print(json.dumps([st["containers"][n] for n in a[1:] if n in st["containers"]]))
 elif a[:2] == ["image", "inspect"] and len(a) == 5 and a[3:] == ["--format", "{{.Id}}"]:
     if a[2] not in st["images"]:
@@ -532,7 +541,9 @@ class Box:
         for name, body in SHIMS.items():
             shim = self.fake / "bin" / name
             shim.write_text(
-                body.replace("@PY@", sys.executable).replace("@ROUNDTRIP@", ROUNDTRIP_LINE)
+                body.replace("@PY@", sys.executable)
+                .replace("@ROUNDTRIP@", ROUNDTRIP_LINE)
+                .replace("@TEST_NAMES@", json.dumps(sorted(TEST_NAMES)))
             )
             shim.chmod(0o755)
         self.script = root / "challenge_image.sh"
@@ -697,6 +708,22 @@ class Box:
                 )
                 for p in sorted(executor.rglob("*"))
             },
+            # everything else the script could reach: the host paths and the working directory, but
+            # not the backup directories (a refusal still leaves config-*.json there):
+            # name, content, mode
+            "sandbox": {
+                str(p.relative_to(self.root)): (
+                    "link" if p.is_symlink() else digest_of(p) if p.is_file() else "dir",
+                    stat.S_IMODE(p.lstat().st_mode),
+                )
+                for p in sorted(
+                    [
+                        *(q for top in ("root", "data") for q in (self.root / top).rglob("*")),
+                        *(q for q in self.root.iterdir() if q.is_file() and q != self.script),
+                    ]
+                )
+                if not any(part.startswith("hypertrain-test-s7-") for part in p.parts)
+            },
         }
 
     def run(
@@ -709,6 +736,7 @@ class Box:
     ) -> Run:
         """Run the script copy with `args`; assert its exit code, the containers it mutated, and
         that nothing escaped the sandbox. Only the mutations of this run are recorded."""
+        guarded = self.guarded()
         self.docker(mutations=[], calls=[])
         for log in ("curl.log", "tripwire.log", "unknown-url.log", "install.log"):
             (self.fake / log).unlink(missing_ok=True)
@@ -739,10 +767,29 @@ class Box:
         for log in ("tripwire.log", "unknown-url.log"):
             assert not (self.fake / log).exists(), f"{log} is not empty{report}"
         self.no_token_values(out, st)
+        assert self.guarded() == guarded, f"a token file or the executor directory changed{report}"
         assert hit <= TEST_NAMES, f"outside the TEST stack: {hit - TEST_NAMES}{report}"
         assert p.returncode == rc, f"exit {p.returncode}, wanted {rc}{report}"
         assert hit == set(mutates), f"mutated {sorted(hit)}, wanted {sorted(mutates)}{report}"
         return Run(out, st["mutations"])
+
+    def guarded(self) -> dict[str, object]:
+        """What no command may change: each token file (content, mode, inode, mtime and ctime, so
+        that a touch, a chmod or a rewrite of the same bytes shows) and the directory's mode."""
+
+        def stamp(p: Path) -> tuple:
+            s = p.lstat()
+            return digest_of(p), stat.S_IMODE(s.st_mode), s.st_ino, s.st_mtime_ns, s.st_ctime_ns
+
+        tokens = {
+            str(p): stamp(p) for p in sorted(self.tokens) if p.is_file() and not p.is_symlink()
+        }
+        directory = self.executor_dir
+        return tokens | {
+            "executor directory": stat.S_IMODE(directory.stat().st_mode)
+            if directory.exists()
+            else None
+        }
 
     def no_token_values(self, out: str, st: dict) -> None:
         """No value of the token file, nor a piece of one, in the output, in what docker or python3

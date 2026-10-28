@@ -54,8 +54,19 @@ DB_FILES = ("challenge.db", "server_keys.db")
         lambda t: t.replace("/data/relay", "/relay"),
         lambda t: t.replace(API, "http://127.0.0.1:8000"),  # the production challenge port
         lambda t: t.replace(MASTER, "http://127.0.0.1:8080"),
+        lambda t: t + "\ncp x /root/other/y\n",
+        lambda t: t.replace("\nCUID=65532\n", "\nCUID=$(id -u)\n"),
+        lambda t: t.replace("\nCUID=65532\n", "\nCUID=1000\n"),
     ],
-    ids=["a new host path", "a path the rewrite expects is gone", "API moved", "MASTER moved"],
+    ids=[
+        "a new host path",
+        "a path the rewrite expects is gone",
+        "API moved",
+        "MASTER moved",
+        "a new path under /root",
+        "CUID is whoever runs the script",
+        "CUID moved",
+    ],
 )
 def test_the_sandbox_refuses_a_script_whose_paths_or_addresses_it_does_not_pin(tmp_path, edit):
     with pytest.raises(AssertionError):
