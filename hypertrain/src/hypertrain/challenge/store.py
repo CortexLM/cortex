@@ -8638,9 +8638,12 @@ class ChallengeStore:
             ).fetchone()
         qualified = None if held is None else json.loads(held[0]).get("image_sources_sha256")
         if qualified is None:
-            economics = EconomicsPolicyV2.model_validate_json(
-                self.objects.get(manifest.network.economics_policy_hash)
-            )
+            try:
+                economics = EconomicsPolicyV2.model_validate_json(
+                    self.objects.get(manifest.network.economics_policy_hash)
+                )
+            except ObjectNotFound as error:
+                raise ChallengeError(503, "ROLE_DISPATCH_PROVENANCE_UNAVAILABLE") from error
             if economics.ledger_mode == "production":
                 raise ChallengeError(409, "QUALIFICATION_IMAGE_SOURCES_MISSING")
         else:

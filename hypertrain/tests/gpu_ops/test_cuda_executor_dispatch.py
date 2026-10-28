@@ -157,6 +157,12 @@ def canned(tmp_path_factory):
     )
 
 
+def registered(network, manifest):
+    """The canned manifest under the policies the network registered: a run on this store has them
+    (the dispatch check reads the ledger mode of the economics policy)."""
+    return manifest.model_copy(update={"network": network.manifest.network})
+
+
 @pytest.fixture
 def make_pool(tmp_path, monkeypatch, canned):
     def build(**kwargs):
@@ -281,7 +287,7 @@ def test_dispatch_publishes_validated_artifacts_with_accepted_provenance(
         "publication_sha256": publication_digest(published),
     }
 
-    replay, _ = network.store._dispatch_env_v2(canned.manifest, home)
+    replay, _ = network.store._dispatch_env_v2(registered(network, canned.manifest), home)
     assert (replay.driver, replay.sm_count) == (fake.DRIVER, 148)
     assert replay.image_digest == ref.image_digest
     assert replay.gpu_uuid_sha256 == sha256_hex(",".join(selected).encode())
@@ -669,7 +675,7 @@ def test_a_host_on_the_second_allowlisted_driver_is_accepted_end_to_end(
     dispatch(pool, home)
 
     assert record_of(home)["environment"]["drivers"] == [fake.OTHER_DRIVER] * 2
-    replay, _ = network.store._dispatch_env_v2(canned.manifest, home)
+    replay, _ = network.store._dispatch_env_v2(registered(network, canned.manifest), home)
     assert replay.driver == fake.OTHER_DRIVER
 
 
@@ -1983,7 +1989,7 @@ def test_stale_provenance_without_a_publication_is_replaced(
     assert (decoy.read_bytes() if decoy.exists() else None) == (
         None if stale == "dangling-symlink" else b'{"decoy": true}'
     )
-    network.store._dispatch_env_v2(canned.manifest, home)
+    network.store._dispatch_env_v2(registered(network, canned.manifest), home)
 
 
 def test_cuda_job_of_another_run_is_refused_before_any_ssh_call(make_pool, canned, tmp_path):

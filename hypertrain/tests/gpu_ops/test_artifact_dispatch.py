@@ -122,7 +122,9 @@ def test_the_result_comes_through_r2_and_publishes_what_the_classic_path_publish
     assert artifact["transport"] == "r2" and artifact["sha256"] == record["result_tar_sha256"]
     assert artifact["parts"] == 3 and artifact["part_bytes"] == 8 * MiB
     assert all(type(v) in (int, str) for v in artifact.values())
-    network.store._dispatch_env_v2(canned.manifest, home)  # the store still accepts the record
+    # the store still accepts the record (the canned manifest names the network's own policies)
+    registered = canned.manifest.model_copy(update={"network": network.manifest.network})
+    network.store._dispatch_env_v2(registered, home)
 
     # nothing but a status line came back on ssh; the tar went to R2 in 3 parts and is gone again
     r2_run = [e for e in pool.toolbox.events("run_end") if e["name"] != classic_run["name"]][0]
