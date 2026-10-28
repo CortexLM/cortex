@@ -646,7 +646,11 @@ def test_a_verdict_that_answers_another_challenge_mints_nothing(
     raises=AssertionError,
     reason="A2W-23: a mismatch the master replayed itself ends as an UNVERIFIED exclusion with a "
     "contest record even when no auditor ever signs it in any window, not as an "
-    "INFRASTRUCTURE one [fix-lot: none (no design yet)]",
+    "INFRASTRUCTURE one; today it ends as INFRASTRUCTURE because ADR 0011 decisions 9 and 15 "
+    "sanction only a COMPLETED mismatch lease: a master-detected MISMATCH whose auditor "
+    "signature is withheld is an INFRASTRUCTURE exclusion with no strike, which is the opposite "
+    "default, and whether the master's own replay may sanction is a founder / Principal call "
+    "[fix-lot: decision (product choice pending)]",
 )
 def test_a_mismatch_the_master_replayed_is_not_turned_into_an_infrastructure_exclusion(
     world: sa.World,

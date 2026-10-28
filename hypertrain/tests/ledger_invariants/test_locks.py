@@ -247,9 +247,11 @@ def test_fraud_proven_against_a_staked_miner_burns_the_reward_origin_it_never_ve
     strict=True,
     raises=AssertionError,
     reason="CRD-22+LCK-09: fraud proven against a miner burns the reward origin it never vested, "
-    "but that burn belongs to slashing an admission lock, so a verdict that follows the seizure "
-    "of the bond for a confirmed mismatch bans the miner and its origin still vests "
-    "[fix-lot: decision (product choice pending)]",
+    "but a conviction that follows a bond-only seizure finds no admission lock to slash, and the "
+    "burn of the unvested reward is part of slashing a lock (ADR 0010 Decisions for Forge 4): "
+    "the miner is banned and its origin still vests. Closing it needs a ledger operation that "
+    "burns reward_pending without a lock; adding it or accepting that the reward survives is a "
+    "founder / Principal call [fix-lot: decision (product choice pending)]",
 )
 def test_fraud_proven_after_the_bond_was_seized_still_burns_the_unvested_reward(rig: Rig) -> None:
     # Given: a staked miner with a reward origin pending, whose bond the service burned for a
