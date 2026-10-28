@@ -75,6 +75,20 @@ def client_event_over_http(
     )
 
 
+def as_attested_cuda(created: Any, patch: pytest.MonkeyPatch) -> None:
+    """Make the run of `created` a production CUDA run: its backend is cuda and the store holds a
+    qualification with a host attestation, the only record a production run builds its services
+    on (D60: a label-only qualification is not a way into production)."""
+    patch.setattr(created.store, "_backend_v2", lambda manifest: "cuda")
+    attested = {"host_keys": [], "statements": [], "signatures": []}
+    created.store._put_record_v2(
+        created.manifest.run_id(),
+        "qualification",
+        created.manifest.training.reference_spec.image_digest,
+        {"host_attestation": attested},
+    )
+
+
 def seed_pending_origin(world: World, origin: str, owner: str, units: int, mature_at: int) -> None:
     """A bootstrap-like origin that vests at `mature_at` (the genesis origins of the fixture all
     vest at the first beacon, so a later maturity needs one more origin)."""

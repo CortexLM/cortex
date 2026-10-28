@@ -57,6 +57,7 @@ from .support_bounds import (
 from .support_credit import credited
 from .support_gaps_bootstrap import (
     SmallAuditedRound,
+    as_attested_cuda,
     build_small_audited_round,
     challenge_refusal,
     client_event_over_http,
@@ -401,13 +402,13 @@ def test_a_production_policy_that_fails_the_economic_bound_creates_no_run(
             production_economics(world, G_max_units=1101, **shape)
         )
         with creation(world, tmp_path / "holds", holds) as ok:
-            monkeypatch.setattr(ok.store, "_backend_v2", lambda manifest: "cuda")
+            as_attested_cuda(ok, monkeypatch)
             assert ok.store.create_run_v2(ok.raw)["status"] == "created"
             assert ok.run_rows() == 1
         # One more unit of goal cannot be collateralised: no run, and the bound is the reason.
         fails = production_economics(world, G_max_units=1101, **shape)
         with creation(world, tmp_path / "fails", fails) as bad:
-            monkeypatch.setattr(bad.store, "_backend_v2", lambda manifest: "cuda")
+            as_attested_cuda(bad, monkeypatch)
             refusal = challenge_refusal(lambda: bad.store.create_run_v2(bad.raw))
             assert refusal is not None, "the run was created"
             assert (refusal.status, "economic bound" in refusal.detail) == (409, True)
