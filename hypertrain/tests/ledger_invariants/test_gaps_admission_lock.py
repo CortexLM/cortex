@@ -241,14 +241,7 @@ def test_one_stake_backs_exactly_one_admission_of_a_coldkey(tmp_path: Path) -> N
 # --- CL-30: the store lock is not held while the service computes or hashes a trial -----------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="CL-30+LV-01: no request holds the store lock while the trusted reference replays, "
-    "whichever route asks for it, but a miner's POST /join/proof (reference_due, then "
-    "trial_reference_v2) holds it for the whole replay with no operator credential "
-    "[fix-lot: executor-perf ADR0012-P2]",
-)
+# Closed by executor-perf ADR0012-P2 (a30de344): trial_reference_v2 runs the launch unlocked.
 def test_the_store_lock_is_free_while_the_public_proof_route_computes_the_reference(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -259,13 +252,15 @@ def test_the_store_lock_is_free_while_the_public_proof_route_computes_the_refere
     precondition(opened.status_code == 200, f"the trial was not opened: {opened.text}")
     hosted = rig.world.store.for_run(rig.run_id)
     started, resume = threading.Event(), threading.Event()
+    admission = hosted._services(rig.run_id)[1]
+    run_reference = admission.run_reference
 
-    def computing(*args: object, **kwargs: object) -> str:
+    def computing(*args: Any, **kwargs: Any) -> Any:
         started.set()
         resume.wait(timeout=60)
-        return ident("gap-reference")
+        return run_reference(*args, **kwargs)
 
-    monkeypatch.setattr(hosted._services(rig.run_id)[1], "prepare_reference", computing)
+    monkeypatch.setattr(admission, "run_reference", computing)
     body, replies = proof_request(rig, miner), []
     caller = threading.Thread(
         target=lambda: replies.append(rig.net.client.post(f"{rig.net.url}/join/proof", json=body))
@@ -281,20 +276,14 @@ def test_the_store_lock_is_free_while_the_public_proof_route_computes_the_refere
         caller.join(timeout=60)
     precondition(not caller.is_alive(), "the proof route never answered")
     precondition(
-        (replies[0].status_code, detail(replies[0])) == (409, "REFERENCE_NOT_COMMITTED"),
+        (replies[0].status_code, detail(replies[0])) == (409, "WORK_SCREEN_BINDING"),
         f"the route did not run past the stalled reference: {replies[0].text}",
     )
     # Then: another thread could have taken the store lock meanwhile
     assert free, "the store lock is held for as long as the reference computes"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="CL-30+LV-01: no request holds the store lock while the staged inputs of a trial are "
-    "hashed, but export_trial_v2 puts every staged input into the object store inside "
-    "`with self._lock` [fix-lot: none (no design yet)]",
-)
+# Closed by f2fdf603: export_trial_v2 stages and puts the inputs after it let go of the lock.
 def test_the_store_lock_is_free_while_the_staged_inputs_of_a_trial_are_hashed(
     rig: Rig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
