@@ -45,13 +45,14 @@ def test_preflight_names_the_first_missing_input_and_spends_nothing(tmp_path: Pa
     assert not (tmp_path / "state" / "window").exists()
 
 
-def _bundle_exits(root: Path, core: str) -> dict[str, int]:
-    """Each bundle check of the launcher, run by bash and the system grep on a bundle holding this
-    tree's data/store.py and the given miner/core.py: the exit status of every grep call."""
+def _bundle_exits(root: Path, core: str, store: str | None = None) -> dict[str, int]:
+    """Each bundle check of the launcher, run by bash and the system grep on a bundle holding the
+    given miner/core.py and data/store.py (this tree's by default): the exit status of every grep
+    call."""
     bundle = root / "bundle"
     for name, text in (
         ("miner/core.py", core),
-        ("data/store.py", (SOURCE / "data/store.py").read_text()),
+        ("data/store.py", (SOURCE / "data/store.py").read_text() if store is None else store),
     ):
         (bundle / "hypertrain" / name).parent.mkdir(parents=True, exist_ok=True)
         (bundle / "hypertrain" / name).write_text(text)
@@ -92,7 +93,76 @@ def test_the_upload_check_follows_the_retried_upload_call_site_of_the_miner(
         core = core.replace(literal, '_retrying("UPLOAD object')
     exits = _bundle_exits(tmp_path, core + f"\n    return {call_site}\n")
     upload = {call: code for call, code in exits.items() if "_retrying(" in call}
-    # Every spot that tests the upload retry must answer alike: a decision and a final check that
-    # diverged would patch a bundle that is then refused, or the reverse.
+    # The decision and the final check ask one function, so the script holds one such grep; the
+    # block test below runs them both.
     assert upload
     assert set(upload.values()) == {0 if accepted else 1}, upload
+
+
+def test_every_bundle_check_fails_on_a_bundle_without_the_fixes(tmp_path: Path) -> None:
+    # A line of text, not empty files: an empty pattern matches every line, so it only shows on a
+    # file that has one. 1 is "not found"; 2 would be a missing file or a bad option.
+    exits = _bundle_exits(tmp_path, "x = 1\n", "x = 1\n")
+    assert exits and set(exits.values()) == {1}
+
+
+BLOCK = re.compile(
+    r"^BUNDLE=\$STATE/bundle$.*?\|\| die \"bundle data/store\.py differs from the working tree\"$",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+def _run_bundle_block(root: Path, core: str) -> tuple[subprocess.CompletedProcess[str], str]:
+    """The launcher's own bundle block, from `BUNDLE=` to its last check, run by bash on a
+    `$MINER_SRC` holding this tree's data/store.py and the given miner/core.py. git and patch are
+    stubs that record the call and change nothing; returns the result and what git was asked."""
+    block = BLOCK.search(SCRIPT.read_text())
+    assert block, "the bundle block of the launcher moved out of this test's sight"
+    miner_src = root / "miner_src"
+    for name, text in (
+        ("miner/core.py", core),
+        ("data/store.py", (SOURCE / "data/store.py").read_text()),
+    ):
+        (miner_src / name).parent.mkdir(parents=True, exist_ok=True)
+        (miner_src / name).write_text(text)
+    trace = root / "git.trace"
+    trace.touch()
+    prelude = (
+        'die() { echo "DIE: $*"; exit 1; }\n'
+        'git() { echo "git $*" >> "$TRACE"; }\n'
+        "patch() { cat > /dev/null; }\n"
+    )
+    result = subprocess.run(
+        ["bash", "-eu", "-c", prelude + block.group(0)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "STATE": str(root / "state"),
+            "MINER_SRC": str(miner_src),
+            "REPO": str(SCRIPT.parents[1]),
+            "FIX_BASE": "base",
+            "TRACE": str(trace),
+        },
+        timeout=30,
+        check=False,
+    )
+    return result, trace.read_text()
+
+
+def test_the_bundle_block_patches_only_a_bundle_that_lacks_the_upload_retry(tmp_path: Path) -> None:
+    # The launcher's control flow, not only its greps: a decision that took the patch route for a
+    # bundle that has the retry (or skipped it for one that lacks it), or a final check that let a
+    # bundle without it through, is invisible to a test that runs the greps alone.
+    core = (SOURCE / "miner/core.py").read_text()
+    post, put = UPLOAD_CALL_SITES
+    for name, text in (("ours", core), ("older", core.replace(post, put))):
+        kept, trace = _run_bundle_block(tmp_path / name, text)
+        assert (kept.returncode, kept.stdout, trace) == (0, "", ""), (name, kept.stdout)
+    renamed = core.replace(post, '_retrying("UPLOAD object')
+    refused, trace = _run_bundle_block(tmp_path / "renamed", renamed)
+    assert "git -C" in trace and "diff base" in trace  # the decision took the patch route
+    assert (refused.returncode, refused.stdout.strip()) == (
+        1,
+        "DIE: bundle lacks the upload retry fix",
+    )
