@@ -17,14 +17,13 @@ from typing import Any
 import httpx
 
 from hypertrain.challenge.store import ChallengeStore
-from hypertrain.miner.admission import sign_rotation
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.keys import Keypair
-from hypertrain.protocol.messages_v2 import ArtifactRef, RotateRequest, WorkProof
+from hypertrain.protocol.messages_v2 import ArtifactRef, WorkProof
 
 from .support import SERVICE_FIXTURE, World, load_fixture_module
 from .support_admission_http import precondition
-from .support_locks import STAKE, Miner, Rig, ident
+from .support_locks import STAKE, Miner, Rig, ident, rotation_envelope
 from .support_weights import parse
 
 
@@ -41,13 +40,10 @@ def rotate_admission(
     n: Any, old: Keypair, cold: Keypair, new_hot: Keypair, label: str = "gap-rotation"
 ) -> httpx.Response:
     """The coldkey moves the admission of hotkey `old` to `new_hot`, through the public route."""
-    request = RotateRequest(
-        hotkey=old.ss58, new_hotkey=new_hot.ss58, operation_id=sha256_hex(label.encode())
+    envelope = rotation_envelope(
+        n.manifest.run_id(), cold, old.ss58, new_hot, sha256_hex(label.encode())
     )
-    return n.client.post(
-        f"{n.url}/admission/{old.ss58}/rotate",
-        json=sign_rotation(cold, n.manifest.run_id(), request, 10_000),
-    )
+    return n.client.post(f"{n.url}/admission/{old.ss58}/rotate", json=envelope)
 
 
 def rotate(rig: Rig, miner: Miner, new_hot: Keypair, label: str = "gap-rotation") -> httpx.Response:
@@ -147,12 +143,6 @@ def proof_request(rig: Rig, miner: Miner) -> dict[str, Any]:
         "proof": rig.net.signed(miner.hot, "WorkProof", proof),
         "screen": rig.net.signed(miner.hot, "WorkScreenV2", rig.screen(miner)),
     }
-
-
-def job_headers(rig: Rig, miner: Miner) -> dict[str, str]:
-    """The owner's signed header pair of the trial /job route."""
-    message = f"hypertrain/trial-job/2|{rig.run_id}|{miner.admission_id}".encode()
-    return {"x-hotkey": miner.hotkey, "x-trial-signature": miner.hot.sign(message).hex()}
 
 
 def funded_cohort(rig: Rig) -> list[Miner]:

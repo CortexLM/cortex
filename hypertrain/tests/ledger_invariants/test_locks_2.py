@@ -15,17 +15,12 @@ import pytest
 
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.ledger.escrow_v2 import digest
-from hypertrain.miner.admission import sign_join, sign_rotation
+from hypertrain.miner.admission import sign_join
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
-from hypertrain.protocol.messages_v2 import (
-    EconomicsPolicyV2,
-    HardwareHint,
-    RotateRequest,
-    RunManifestV2,
-)
+from hypertrain.protocol.messages_v2 import EconomicsPolicyV2, HardwareHint, RunManifestV2
 
-from .support_locks import STAKE, Lab
+from .support_locks import STAKE, Lab, rotation_envelope
 
 
 def code(call: Callable[[], object]) -> str:
@@ -110,7 +105,17 @@ def test_eligibility_needs_current_stake_standing_and_screen(
 
 
 @pytest.mark.parametrize("role", ["coordinator", "auditor"])
-def test_no_role_key_is_exempt_from_the_stake(tmp_path: Path, role: str) -> None:
+@pytest.mark.parametrize(
+    ("held", "eligible"),
+    [
+        pytest.param(0, False, id="no-stake"),
+        pytest.param(STAKE - 1, False, id="one-unit-short"),
+        pytest.param(STAKE, True, id="the-required-stake"),
+    ],
+)
+def test_no_role_key_is_exempt_from_the_stake(
+    tmp_path: Path, role: str, held: int, eligible: bool
+) -> None:
     # Given: an ACTIVE admission on a key this bare ledger pins to a role (the coordinator by the
     # manifest, the auditor by the ledger's auditor set). The referee is pinned only by the
     # service fixture: its case is the roster test of test_locks.
@@ -118,18 +123,12 @@ def test_no_role_key_is_exempt_from_the_stake(tmp_path: Path, role: str) -> None
     key = {"coordinator": lab.A.COORD, "auditor": lab.A.fixtures.AUDITOR}[role]
     admission = lab.join(hot=key)
     lab.live(admission)
-
-    def standing() -> tuple[bool, int]:
-        status = lab.a.status(key.ss58, now=5)
-        return status.eligible, status.funding.locked_units
-
+    if held:
+        lab.stake(admission, held)
     # When / Then: it is as ineligible as anyone with no stake or too little, and eligible at
     # exactly the required stake
-    assert standing() == (False, 0)
-    lab.stake(admission, STAKE - 1)
-    assert standing() == (False, STAKE - 1)
-    lab.stake(admission, 1, operation="23" * 32)
-    assert standing() == (True, STAKE)
+    status = lab.a.status(key.ss58, now=5)
+    assert (status.eligible, status.funding.locked_units) == (eligible, held)
 
 
 def with_policy(setup: Any, **terms: int) -> Any:
@@ -140,6 +139,7 @@ def with_policy(setup: Any, **terms: int) -> Any:
     return replace(setup, manifest=RunManifestV2.model_validate(body), policy=policy)
 
 
+@pytest.mark.parametrize("exact", [False, True], ids=["one-unit-short", "the-required-stake"])
 @pytest.mark.parametrize(
     ("terms", "required"),
     [
@@ -151,23 +151,19 @@ def with_policy(setup: Any, **terms: int) -> Any:
     ],
 )
 def test_the_required_stake_is_the_largest_of_its_three_terms(
-    tmp_path: Path, terms: dict[str, int], required: int
+    tmp_path: Path, terms: dict[str, int], required: int, exact: bool
 ) -> None:
     # Given: an ACTIVE admission under a policy in which one stake term alone is the largest
     base = Lab(tmp_path / "base")
     lab = Lab(tmp_path / "policy", setup=with_policy(base.s, **terms))
     admission = lab.join()
     lab.live(admission)
-
-    def standing() -> tuple[bool, int]:
-        status = lab.a.status(lab.A.HOT.ss58, now=5)
-        return status.eligible, status.funding.locked_units
-
-    # When / Then: one unit short of that term is not enough and exactly the term is
-    lab.stake(admission, required - 1)
-    assert standing() == (False, required - 1)
-    lab.stake(admission, 1, operation="23" * 32)
-    assert standing() == (True, required)
+    # When: it holds one unit less than that term, or exactly the term
+    held = required if exact else required - 1
+    lab.stake(admission, held)
+    # Then: one unit short is not enough and exactly the term is
+    status = lab.a.status(lab.A.HOT.ss58, now=5)
+    assert (status.eligible, status.funding.locked_units) == (exact, held)
 
 
 def test_the_stake_gate_is_the_policy_a_run_that_requires_nothing_gates_nothing(
@@ -242,8 +238,8 @@ def test_graduation_needs_funding_clean_finalizations_and_every_canary_block(
 
 
 def rotate(lab: Lab, old: Keypair, new: Keypair, operation: str) -> None:
-    request = RotateRequest(hotkey=old.ss58, new_hotkey=new.ss58, operation_id=operation)
-    lab.a.rotate(canonicalize(sign_rotation(lab.A.COLD, lab.a.escrow.run_id, request, 200)), now=2)
+    envelope = rotation_envelope(lab.a.escrow.run_id, lab.A.COLD, old.ss58, new, operation, 200)
+    lab.a.rotate(canonicalize(envelope), now=2)
 
 
 def test_rotation_keeps_the_standing_and_the_history_of_both_keys(tmp_path: Path) -> None:
@@ -426,7 +422,7 @@ def test_recovery_needs_a_resolved_nonfraud_record_at_or_past_its_release_round(
 def test_a_banned_admission_cannot_be_resumed_suspended_challenged_or_graduated_or_reapplied(
     tmp_path: Path,
 ) -> None:
-    # Given: an admission BANNED for proven fraud (the state the missing wiring would write)
+    # Given: an admission BANNED for proven fraud (the state a FRAUD verdict against it writes)
     lab = Lab(tmp_path)
     admission = lab.join()
     lab.stake(admission, STAKE)

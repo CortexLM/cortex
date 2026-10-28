@@ -58,6 +58,21 @@ FRAUD_CLOSED = (
     ROUTES + "test_a_miner_who_lost_a_fraud_contest_has_no_route_back_and_no_new_application"
 )
 LAPSE = ROUTES + "test_a_lapsed_challenge_window_suspends_nobody_and_frees_the_trial_place"
+NAMED_AFTER = (
+    ROUTES + "test_a_live_admission_keeps_its_stake_when_the_lock_is_named_after_a_settled_object"
+)
+LIVE_STAKE = (
+    ROUTES + "test_the_stake_of_a_live_admission_is_released_only_once_it_is_no_longer_live"
+)
+FRAUD_BURNS_REWARD = (
+    ROUTES + "test_fraud_proven_against_a_staked_miner_burns_the_reward_origin_it_never_vested"
+)
+ROSTERED_STAKE = ROUTES + "test_the_stake_of_a_rostered_member_is_held_until_its_round_closes"
+HARDENING = "tests/challenge/test_admission_hardening_v2.py::"
+BOND_ROUTES = HARDENING + "test_owner_takes_the_bond_back_through_the_routes"
+BOND_UNITS = "tests/challenge/test_admission_bond_v2.py::"
+BORROWED_SETTLEMENT = BOND_UNITS + "test_a_lock_cannot_borrow_the_settlement_of_another_id"
+FRAUD_ROUTES = HARDENING + "test_referee_fraud_against_the_miner_seizes_the_bond_through_the_routes"
 
 STAKE_TERM = """\
             and units >= required
@@ -161,13 +176,13 @@ COLDKEY_REFUSAL = """\
 PASS = """\
                 pass
 """
-COLDKEY_QUERY = "\"SELECT 1 FROM admissions_v2 WHERE coldkey=? AND state!='ACTIVE'\""
-COLDKEY_QUERY_ANY = '"SELECT 1 FROM admissions_v2 WHERE coldkey=?"'
+COLDKEY_QUERY = "\"SELECT 1 FROM admissions_v2 WHERE coldkey=? AND state!='ACTIVE' \"\n"
+COLDKEY_QUERY_ANY = '"SELECT 1 FROM admissions_v2 WHERE coldkey=? "\n'
 COLDKEY_QUERY_NOT_SUSPENDED = (
-    "\"SELECT 1 FROM admissions_v2 WHERE coldkey=? AND state NOT IN ('ACTIVE','SUSPENDED')\""
+    "\"SELECT 1 FROM admissions_v2 WHERE coldkey=? AND state NOT IN ('ACTIVE','SUSPENDED') \"\n"
 )
 COLDKEY_QUERY_NOT_PROBATION = (
-    "\"SELECT 1 FROM admissions_v2 WHERE coldkey=? AND state NOT IN ('ACTIVE','PROBATION')\""
+    "\"SELECT 1 FROM admissions_v2 WHERE coldkey=? AND state NOT IN ('ACTIVE','PROBATION') \"\n"
 )
 COLD_SIGNATURE = (
     ") and verify(decode_hotkey(request.coldkey), msg, bytes.fromhex(request.cold_sig))"
@@ -208,8 +223,19 @@ RECOVER_UNBOUND = """\
                         if row is None:
 """
 BANNED_GUARD = """\
+            r = self.store.record(hotkey)
+            if r.state == "BANNED":
                 raise AdmissionError("TERMINAL_BANNED")
 """
+BANNED_GUARD_GONE = """\
+            r = self.store.record(hotkey)
+            if r.state == "BANNED":
+                pass
+"""
+YOUNG_PROBATION = (
+    '        live_phase = r.state == "ACTIVE" or (r.state == "PROBATION" and r.clean_count >= 4)\n'
+)
+YOUNG_PROBATION_LIVE = '        live_phase = r.state == "ACTIVE" or (r.state == "PROBATION")\n'
 RESUME_STATE = """\
             if r.state != "SUSPENDED" or r.pending_dispute:
 """
@@ -306,6 +332,17 @@ SLASH_ON_FRAUD = """\
 SLASH_NEVER = """\
                 and status.loser == turn.contest.auditor
 """
+LOCK_KIND_RESOLVER = (
+    '        if row is not None and row["kind"] == "LOCK_ADMISSION"'
+    " and self.admission_settlement:\n"
+)
+LIVE_HOLD = "            release = max(release, r.screen_until + 1)\n"
+OPEN_ROUND_HOLD = "            unresolved = unresolved or status is None or not status.closed\n"
+OPEN_ROUND_IGNORED = "            unresolved = unresolved or status is None\n"
+CONVICTION = '                            admission.settle_fraud(result["dispute_id"], now=now)\n'
+BAN_ON_FRAUD = '            if reason == "TRAINING_FRAUD" and r.state != "BANNED":\n'
+BURN_PENDING = '            if original.kind == "LOCK_ADMISSION" and burn_pending:\n'
+RELEASABLE_WHEN_QUIET = "            unresolved=unresolved or unvested is not None,\n"
 EXPIRE = """\
                 self.store.db.execute(
                     "UPDATE admission_trial_results SET outcome='EXPIRED' WHERE epoch=?", (epoch,)
@@ -338,7 +375,7 @@ MUTANTS = [
         "path": ADMISSION,
         "old": STAKE_TERM,
         "new": STAKE_TERM_EXEMPT,
-        "tests": [ROLE_KEYS + "[coordinator]"],
+        "tests": [ROLE_KEYS + "[no-stake-coordinator]", ROLE_KEYS + "[one-unit-short-coordinator]"],
         "why": "the coordinator key is eligible without any stake.",
     },
     {
@@ -363,8 +400,8 @@ MUTANTS = [
         "id": "locks-eligibility-counts-a-young-probation",
         "invariants": ["LCK-01"],
         "path": ADMISSION,
-        "old": '(r.state == "PROBATION" and r.clean_count >= 4)',
-        "new": '(r.state == "PROBATION")',
+        "old": YOUNG_PROBATION,
+        "new": YOUNG_PROBATION_LIVE,
         "tests": [ELIGIBILITY + "[probation-below-four]"],
         "why": "a PROBATION miner with fewer than four clean finalizations is live.",
     },
@@ -392,7 +429,7 @@ MUTANTS = [
         "path": ADMISSION,
         "old": GOAL_TERM,
         "new": "            0,\n",
-        "tests": [REQUIRED_STAKE + "[goal-over-the-stake-fraction]"],
+        "tests": [REQUIRED_STAKE + "[goal-over-the-stake-fraction-one-unit-short]"],
         "why": "the stake that covers the run's goal is not required: a smaller stake is eligible.",
     },
     {
@@ -401,7 +438,7 @@ MUTANTS = [
         "path": ADMISSION,
         "old": COLLECTIBLE_TERM,
         "new": "            0,\n",
-        "tests": [REQUIRED_STAKE + "[collectible-reward-multiple]"],
+        "tests": [REQUIRED_STAKE + "[collectible-reward-multiple-one-unit-short]"],
         "why": "the multiple of the collectible reward is not required: a smaller stake counts.",
     },
     {
@@ -648,7 +685,7 @@ MUTANTS = [
         "invariants": ["AD-09", "DIB-09"],
         "path": ADMISSION,
         "old": BANNED_GUARD,
-        "new": PASS,
+        "new": BANNED_GUARD_GONE,
         "tests": [BANNED],
         "why": "a dispute hook turns a BANNED admission into a recoverable SUSPENDED one.",
     },
@@ -761,6 +798,79 @@ MUTANTS = [
         "new": SLASH_NEVER,
         "tests": [FRAUD_CLOSED],
         "why": "a FRAUD ruling against the miner releases its contest bond instead of burning it.",
+    },
+    # --- ESC-10, ES-05, LCK-04, LCK-06, ESC-12: the admission bond (ADR 0010 part 6) ---------
+    {
+        "id": "locks-an-admission-lock-takes-the-single-settlement",
+        "invariants": ["ESC-10", "ES-05", "LCK-04"],
+        "path": LEDGER,
+        "old": LOCK_KIND_RESOLVER,
+        "new": "        if False:\n",
+        "tests": [NAMED_AFTER + "[a settled reward origin]", BORROWED_SETTLEMENT],
+        "why": "an admission lock is settled by the callback that answers by id for every object.",
+    },
+    {
+        "id": "locks-an-admission-lock-takes-the-settlement-of-a-closed-dispute",
+        "invariants": ["ES-05", "LCK-04"],
+        "path": LEDGER,
+        "old": LOCK_KIND_RESOLVER,
+        "new": "        if False:\n",
+        "tests": [NAMED_AFTER + "[a closed dispute]"],
+        "why": "a live admission's stake named like a closed dispute is released by that dispute.",
+    },
+    {
+        "id": "locks-a-live-admission-releases-its-stake",
+        "invariants": ["ES-05", "LCK-04"],
+        "path": ADMISSION,
+        "old": LIVE_HOLD,
+        "new": "            release = release\n",
+        "tests": [LIVE_STAKE],
+        "why": "the stake that makes a live miner eligible is releasable before its screen ends.",
+    },
+    {
+        "id": "locks-a-rostered-member-releases-its-stake-before-its-round-closes",
+        "invariants": ["ES-05", "LCK-04", "T-LOCK-04"],
+        "path": ADMISSION,
+        "old": OPEN_ROUND_HOLD,
+        "new": OPEN_ROUND_IGNORED,
+        "tests": [ROSTERED_STAKE],
+        "why": "the stake of a member of an open round is releasable once its screen has lapsed.",
+    },
+    {
+        "id": "locks-the-stake-of-a-quiet-admission-is-never-releasable",
+        "invariants": ["ESC-12", "CRD-21", "ES-04", "BND-19"],
+        "path": ADMISSION,
+        "old": RELEASABLE_WHEN_QUIET,
+        "new": "            unresolved=True,\n",
+        "tests": [BOND_ROUTES, LIVE_STAKE],
+        "why": "an admission with no open obligation can never take its stake back.",
+    },
+    {
+        "id": "locks-a-fraud-resolution-convicts-no-admission",
+        "invariants": ["LCK-06", "AD-09", "DIA-23", "DIB-08", "BND-19", "ES-04"],
+        "path": STORE,
+        "old": CONVICTION,
+        "new": "",
+        "tests": [FRAUD_ROUTES + "[True]", FRAUD_BURNS_REWARD],
+        "why": "a referee verdict of fraud burns the contest bond and leaves the admission whole.",
+    },
+    {
+        "id": "locks-a-convicted-admission-is-not-banned",
+        "invariants": ["LCK-06", "AD-09", "DIA-23"],
+        "path": ADMISSION,
+        "old": BAN_ON_FRAUD,
+        "new": "            if False:\n",
+        "tests": [FRAUD_ROUTES + "[True]"],
+        "why": "a miner convicted of training fraud is burned but stays free to train.",
+    },
+    {
+        "id": "locks-a-convicted-miner-keeps-its-unvested-reward",
+        "invariants": ["CRD-22", "LCK-09", "DIB-07"],
+        "path": LEDGER,
+        "old": BURN_PENDING,
+        "new": "            if False:\n",
+        "tests": [FRAUD_BURNS_REWARD],
+        "why": "proven fraud leaves the reward origin of the miner to vest.",
     },
     # --- AD-06: an expired challenge window suspends nobody ----------------------------------
     {

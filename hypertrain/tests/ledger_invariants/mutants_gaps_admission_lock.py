@@ -70,6 +70,19 @@ EXECUTION_OR_RUNTIME_CUSTODY = """\
                     accepted = self._record_v2(run_id, "runtime-custody", operation_hash)
 """
 
+MISSING_RECORD = """\
+        if row is None:
+            raise ChallengeError(409, f"missing accepted {kind}: {identity}")
+"""
+RUNTIME_CUSTODY_FALLBACK = """\
+        if row is None and kind == "shadow-execution":
+            row = self._db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='runtime-custody' AND id=?",
+                (run_id, identity),
+            ).fetchone()
+        if row is None:
+            raise ChallengeError(409, f"missing accepted {kind}: {identity}")
+"""
 LEASE_EXPIRY = "                self._expire_leases_v2(run_id, br.round)\n"
 DISPUTE_EXIT = "            self._close_blocked_disputes_v2(run_id)\n"
 TRIAL_REAPER = "                admission.reap_expired_trials(now=self._now(self._db))\n"
@@ -128,8 +141,17 @@ MUTANTS = [
         "path": STORE,
         "old": EXECUTION_RECORD,
         "new": EXECUTION_OR_RUNTIME_CUSTODY,
-        "tests": [RESERVATION + "[unknown-hashes]", RESERVATION + "[private-runtime-custody]"],
-        "why": "a reservation takes private runtime custody for an accepted execution.",
+        "tests": [RESERVATION + "[unknown-hashes]"],
+        "why": "a reservation that misses an accepted execution names runtime custody instead.",
+    },
+    {
+        "id": "gal-an-accepted-execution-lookup-falls-back-to-runtime-custody",
+        "invariants": ["SHD-06", "SHD-11", "T-LOCK-24"],
+        "path": STORE,
+        "old": MISSING_RECORD,
+        "new": RUNTIME_CUSTODY_FALLBACK,
+        "tests": [RESERVATION + "[private-runtime-custody]"],
+        "why": "every lookup of an accepted execution takes private runtime custody for one.",
     },
     {
         "id": "gal-a-beacon-expires-no-lease",

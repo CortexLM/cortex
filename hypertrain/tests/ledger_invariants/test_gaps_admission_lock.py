@@ -21,10 +21,8 @@ from typing import Any
 import pytest
 
 from hypertrain.challenge.admission_store import AdmissionError
-from hypertrain.miner.admission import sign_rotation
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
-from hypertrain.protocol.messages_v2 import RotateRequest
 
 from .support import SERVICE_FIXTURE, load_fixture_module, service_world
 from .support_admission_http import detail, precondition
@@ -34,7 +32,6 @@ from .support_gaps_admission_lock import (
     buckets_of,
     funded_cohort,
     holder,
-    job_headers,
     lock_is_free,
     poison_shadow_origin,
     proof_request,
@@ -50,6 +47,7 @@ from .support_locks import (
     Lab,
     Rig,
     ident,
+    rotation_envelope,
     seed_live_origin,
     vested,
 )
@@ -76,7 +74,8 @@ def rig(tmp_path: Path) -> Iterator[Rig]:
     raises=AssertionError,
     reason="CL-29+M-05: units that matured for an admission are emitted to the hotkey that holds "
     "it, but the origin keeps the hotkey it was issued to and the coldkey's rotation neither "
-    "moves it nor is refused while it is pending, so the weight goes to the retired hotkey",
+    "moves it nor is refused while it is pending, so the weight goes to the retired hotkey "
+    "[fix-lot: none (no design yet)]",
 )
 def test_matured_reward_units_are_emitted_to_the_hotkey_that_holds_the_admission(rig: Rig) -> None:
     # Given: an origin issued to the miner's hotkey and still pending, then its coldkey moves the
@@ -118,7 +117,8 @@ def test_matured_reward_units_are_emitted_to_the_hotkey_that_holds_the_admission
                 raises=AssertionError,
                 reason="GAP-07: a beacon pushed to a restarted store matures what is due at "
                 "once, but push_beacon walks only the services already built, and nothing "
-                "builds them until a request asks, so units stay pending and no lease expires",
+                "builds them until a request asks, so units stay pending and no lease expires "
+                "[fix-lot: none (no design yet)]",
             ),
         ),
     ],
@@ -157,7 +157,8 @@ def test_a_beacon_pushed_to_a_restarted_store_matures_what_is_due(
     raises=AssertionError,
     reason="GAP-08: a read of the admission row on the shared connection never observes another "
     "thread's uncommitted transaction, but AdmissionStore.by_id takes no lock and the "
-    "connection's transaction state is shared by every thread",
+    "connection's transaction state is shared by every thread "
+    "[fix-lot: none (no design yet)]",
 )
 def test_an_admission_read_never_sees_the_uncommitted_state_of_another_thread(rig: Rig) -> None:
     # Given: a writer holds a transaction on the shared connection that suspends the admission
@@ -251,7 +252,8 @@ def test_one_stake_backs_exactly_one_admission_of_a_coldkey(tmp_path: Path) -> N
     raises=AssertionError,
     reason="CL-30+LV-01: no request holds the store lock while the trusted reference replays, "
     "whichever route asks for it, but a miner's POST /join/proof (reference_due, then "
-    "trial_reference_v2) holds it for the whole replay with no operator credential",
+    "trial_reference_v2) holds it for the whole replay with no operator credential "
+    "[fix-lot: executor-perf ADR0012-P2]",
 )
 def test_the_store_lock_is_free_while_the_public_proof_route_computes_the_reference(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
@@ -259,7 +261,7 @@ def test_the_store_lock_is_free_while_the_public_proof_route_computes_the_refere
     # Given: an admission with an open trial, and a reference computation that stalls
     miner = rig.join(0)
     rig.net.push(2)
-    opened = rig.net.client.get(f"{rig.net.url}/join/{miner.admission_id}/challenge")
+    opened = rig.open_trial(miner)
     precondition(opened.status_code == 200, f"the trial was not opened: {opened.text}")
     hosted = rig.world.store.for_run(rig.run_id)
     started, resume = threading.Event(), threading.Event()
@@ -297,7 +299,7 @@ def test_the_store_lock_is_free_while_the_public_proof_route_computes_the_refere
     raises=AssertionError,
     reason="CL-30+LV-01: no request holds the store lock while the staged inputs of a trial are "
     "hashed, but export_trial_v2 puts every staged input into the object store inside "
-    "`with self._lock`",
+    "`with self._lock` [fix-lot: none (no design yet)]",
 )
 def test_the_store_lock_is_free_while_the_staged_inputs_of_a_trial_are_hashed(
     rig: Rig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -306,7 +308,7 @@ def test_the_store_lock_is_free_while_the_staged_inputs_of_a_trial_are_hashed(
     # stalls while it hashes that input
     miner = rig.join(0)
     rig.net.push(2)
-    opened = rig.net.client.get(f"{rig.net.url}/join/{miner.admission_id}/challenge")
+    opened = rig.open_trial(miner)
     precondition(opened.status_code == 200, f"the trial was not opened: {opened.text}")
     hosted = rig.world.store.for_run(rig.run_id)
     staged = tmp_path / "staged"
@@ -328,13 +330,7 @@ def test_the_store_lock_is_free_while_the_staged_inputs_of_a_trial_are_hashed(
 
     monkeypatch.setattr(hosted.objects, "put", hashing)
     replies = []
-    caller = threading.Thread(
-        target=lambda: replies.append(
-            rig.net.client.get(
-                f"{rig.net.url}/join/{miner.admission_id}/job", headers=job_headers(rig, miner)
-            )
-        )
-    )
+    caller = threading.Thread(target=lambda: replies.append(rig.read_job(miner)))
     precondition(lock_is_free(hosted), "the lock is held while the service is idle")
     # When: the owner asks for its trial inputs and the hashing of the staged input stalls
     caller.start()
@@ -407,8 +403,10 @@ def test_a_reward_origin_vests_after_a_dispute_the_miner_won(rig: Rig) -> None:
 
 
 def rotation_of(lab: Lab, stranger: Keypair, target: Keypair) -> bytes:
-    request = RotateRequest(hotkey=stranger.ss58, new_hotkey=target.ss58, operation_id="7a" * 32)
-    return canonicalize(sign_rotation(lab.A.COLD, lab.a.escrow.run_id, request, 200))
+    run_id = lab.a.escrow.run_id
+    return canonicalize(
+        rotation_envelope(run_id, lab.A.COLD, stranger.ss58, target, "7a" * 32, 200)
+    )
 
 
 def test_a_hotkey_without_an_admission_history_cannot_be_rotated(tmp_path: Path) -> None:
@@ -431,17 +429,13 @@ def test_the_rotation_route_answers_409_for_a_hotkey_without_an_admission_histor
     # Given: an admitted miner, and its coldkey naming a registered hotkey that never joined as
     # the one to rotate away from
     miner = rig.join(0)
-    request = RotateRequest(
-        hotkey=rig.service.HOT[2].ss58,
-        new_hotkey=spare_hotkey().ss58,
-        operation_id=ident("unknown-history"),
+    stranger = rig.service.HOT[2]
+    envelope = rotation_envelope(
+        rig.run_id, miner.cold, stranger.ss58, spare_hotkey(), ident("unknown-history")
     )
     before = rig.world.db_digest()
     # When
-    response = rig.net.client.post(
-        f"{rig.net.url}/admission/{request.hotkey}/rotate",
-        json=sign_rotation(miner.cold, rig.run_id, request, 10_000),
-    )
+    response = rig.net.client.post(f"{rig.net.url}/admission/{stranger.ss58}/rotate", json=envelope)
     # Then: the route refuses it and writes nothing; the admitted miner keeps its hotkey
     assert (response.status_code, detail(response)) == (409, "UNKNOWN_ROTATION_HISTORY")
     assert rig.world.db_digest() == before
@@ -500,7 +494,8 @@ POISONED = pytest.mark.xfail(
     reason="SHD-19+SHD-21+CL-14+CL-36: a beacon push matures every due origin, expires the leases, "
     "closes the blocked disputes and reaps the trials whatever one shadow origin's custody or "
     "identity has become, but its re-validation raises out of the run's maturity transaction, "
-    "the push answers 409 at every later beacon and nothing after that transaction runs",
+    "the push answers 409 at every later beacon and nothing after that transaction runs "
+    "[fix-lot: escrow-relay-fixes ADR0014-P7]",
 )
 POISONS = {
     "none": None,

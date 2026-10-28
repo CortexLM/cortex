@@ -14,13 +14,15 @@ from types import ModuleType
 from typing import Any
 
 import httpx
+from pydantic import JsonValue
 
 from hypertrain.auditor.island_bisect import RefereeEvidence
 from hypertrain.auditor.replay import AnchorCache, optimizer_hash, pack_state
 from hypertrain.challenge.admission import Admission, AdmissionStatus
 from hypertrain.challenge.disputes_v2 import DisputesV2
 from hypertrain.ledger.escrow_v2 import EscrowError, EscrowV2, Settlement
-from hypertrain.miner.admission import sign_join
+from hypertrain.miner import admission as miner_admission
+from hypertrain.miner.admission import sign_join, sign_rotation
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -33,6 +35,7 @@ from hypertrain.protocol.messages_v2 import (
     PolicyHashes,
     RankWorkResult,
     ResolutionV2,
+    RotateRequest,
     RoundOpenV2,
     StartStateV2,
     WorkScreenV2,
@@ -56,6 +59,54 @@ def service_module() -> ModuleType:
 def ident(label: str) -> str:
     """A 64-hex operation id derived from a label."""
     return sha256_hex(label.encode())
+
+
+def rotation_envelope(
+    run_id: str,
+    cold: Keypair,
+    old_hotkey: str,
+    new_hot: Keypair,
+    operation_id: str,
+    expires_beacon: int = 10_000,
+) -> dict[str, JsonValue]:
+    """The coldkey's sealed request to move the admission of `old_hotkey` to `new_hot`.
+
+    ADR 0010 part 1 asks the new hotkey's consent in the body (`new_hot_sig`); the signature is
+    added when the tree has it, so the one request is valid on a tree without it too.
+    """
+    consent = getattr(miner_admission, "sign_rotation_consent", None)
+    if consent is None:
+        request = RotateRequest.model_validate(
+            {"hotkey": old_hotkey, "new_hotkey": new_hot.ss58, "operation_id": operation_id}
+        )
+    else:
+        request = consent(
+            new_hot,
+            run_id=run_id,
+            coldkey=cold.ss58,
+            hotkey=old_hotkey,
+            operation_id=operation_id,
+            expires_beacon=expires_beacon,
+        )
+    return sign_rotation(cold, run_id, request, expires_beacon)
+
+
+def ask_as_owner(net: Any, miner: Miner, route: str) -> httpx.Response:
+    """The owner of `miner`'s admission asks for its trial `route` ("challenge" or "job").
+
+    ADR 0010 part 3: the request is a POST whose body is the envelope of `ChallengeRequest` or
+    `JobRequest`, signed by the admission's hotkey; the unsigned GET answers 405. A tree before
+    that part has no `owner_request` in its fixture and answers the plain GET.
+    """
+    url = net.url + f"/join/{miner.admission_id}/{route}"
+    sign = getattr(net, "owner_request", None)
+    response: httpx.Response
+    if sign is None:
+        response = net.client.get(url)
+    else:
+        message = {"challenge": "ChallengeRequest", "job": "JobRequest"}[route]
+        response = net.client.post(url, json=sign(message, miner.admission_id, miner.hot))
+    return response
 
 
 @dataclass(frozen=True)
@@ -134,11 +185,11 @@ class Rig:
     def status(self, miner: Miner) -> AdmissionStatus:
         return self.admission.status(miner.hotkey, now=self.net.now)
 
-    def lock_stake(
+    def stake_lock(
         self, miner: Miner, *, units: int = STAKE, operation: str | None = None
     ) -> EscrowLock:
-        """The miner's coldkey locks `units` of its own origin as admission stake, over HTTP."""
-        lock = EscrowLock(
+        """The lock event with which the miner's coldkey stakes `units` of its own origin."""
+        return EscrowLock(
             operation_id=operation or ident(f"stake-{miner.index}"),
             owner=miner.coldkey,
             units=units,
@@ -147,6 +198,12 @@ class Rig:
             dispute_id=None,
             kind="LOCK_ADMISSION",
         )
+
+    def lock_stake(
+        self, miner: Miner, *, units: int = STAKE, operation: str | None = None
+    ) -> EscrowLock:
+        """The miner's coldkey locks `units` of its own origin as admission stake, over HTTP."""
+        lock = self.stake_lock(miner, units=units, operation=operation)
         response = self.net.client.post(
             self.net.url + "/escrow/lock", json=self.net.signed(miner.cold, "EscrowLock", lock)
         )
@@ -249,18 +306,20 @@ class Rig:
             json=self.net.signed(miner.cold, "EscrowRelease", release),
         )
 
-    def bond_terms(self, miner: Miner, lock_id: str) -> tuple[str, str]:
-        """(finality_hash, closed_dispute_root) the owner signs to release the lock `lock_id`.
+    def open_trial(self, miner: Miner) -> httpx.Response:
+        """The owner's signed request for the challenge of its admission: opens its trial."""
+        return ask_as_owner(self.net, miner, "challenge")
 
-        ADR 0010 part 6.4 publishes them in the `bond` key of GET /admission/{hotkey}; until that
-        part exists the only source is the settlement the store gives the ledger for the id.
-        """
+    def read_job(self, miner: Miner) -> httpx.Response:
+        """The owner's signed request for the job of its open trial."""
+        return ask_as_owner(self.net, miner, "job")
+
+    def bond_entry(self, miner: Miner, lock_id: str) -> dict[str, Any]:
+        """What GET /admission/{hotkey} tells the owner about its lock `lock_id` (ADR 0010 6.5):
+        whether it is releasable and the finality hash and closed-dispute root to sign."""
         status = self.net.client.get(self.net.url + "/admission/" + miner.hotkey).json()
-        bond = status.get("bond")
-        if isinstance(bond, dict):
-            return str(bond["finality_hash"]), str(bond["closed_dispute_root"])
-        settled = self.world.store._settlement_v2(self.run_id, lock_id)
-        return settled.finality_hash, settled.closed_dispute_root
+        entry: dict[str, Any] = next(e for e in status["bond"]["locks"] if e["lock_id"] == lock_id)
+        return entry
 
     def open_contest(self, miner: Miner, *, verdict: str = VERDICT) -> Contest:
         """The audit's contest record is seeded; the funding and the dispute go through the

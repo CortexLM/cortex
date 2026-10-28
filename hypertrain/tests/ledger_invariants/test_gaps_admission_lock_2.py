@@ -14,10 +14,8 @@ from typing import Any
 
 import pytest
 
-from hypertrain.miner.admission import sign_rotation
-from hypertrain.protocol.messages_v2 import RotateRequest
-
 from . import support_exit_roster as X
+from .support_locks import rotation_envelope
 
 
 @dataclass
@@ -68,7 +66,8 @@ LOST_STANDING = pytest.mark.xfail(
     reason="LCK-18+LCK-17+CL-06+CL-28 (T-LOCK-16): a roster member that loses its screen or its "
     "hotkey after its audit is excluded with a recorded cause and the round is aggregated and "
     "finalized for the others, but verified_inputs_v2, which aggregate_v2 and finalize_v2 "
-    "share, raises for it (403 'no longer eligible', 409 UNKNOWN_HOTKEY) and every retry fails",
+    "share, raises for it (403 'no longer eligible', 409 UNKNOWN_HOTKEY) and every retry fails "
+    "[fix-lot: audit-integrity-2 ADR0011-P8 decisions 21-22]",
 )
 CAUSES = {"none": None, "screen-lapse": LOST_STANDING, "rotation": LOST_STANDING}
 
@@ -83,12 +82,11 @@ def lose_standing(rnd: X.Round, member: int, cause: str) -> bool:
         X.control(X.eligible(rnd, member) is False, "its work screen lapsed")
         return True
     if cause == "rotation":
-        request = RotateRequest(
-            hotkey=rnd.hotkey(member), new_hotkey=X.hot(X.SPARE).ss58, operation_id="df" * 32
+        envelope = rotation_envelope(
+            rnd.run_id, X.cold(member), rnd.hotkey(member), X.hot(X.SPARE), "df" * 32
         )
         rotated = rnd.network.client.post(
-            f"{rnd.network.url}/admission/{rnd.hotkey(member)}/rotate",
-            json=sign_rotation(X.cold(member), rnd.run_id, request, 10_000),
+            f"{rnd.network.url}/admission/{rnd.hotkey(member)}/rotate", json=envelope
         )
         X.control(
             rotated.status_code == 200 or 400 <= rotated.status_code < 500,

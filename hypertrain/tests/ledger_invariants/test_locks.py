@@ -12,17 +12,17 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from types import ModuleType
 
 import httpx
 import pytest
 
 from hypertrain.challenge.store import ChallengeError
-from hypertrain.ledger.escrow_v2 import EscrowError
+from hypertrain.ledger.escrow_v2 import Settlement
 from hypertrain.protocol.messages import Finalize
-from hypertrain.protocol.messages_v2 import EscrowLock, EscrowRelease
+from hypertrain.protocol.messages_v2 import EscrowLock
 
-from .support import H, Real, error_code, hosted_reward, mature, service_world
+from .support import H, service_world
+from .support_admission_http import precondition
 from .support_locks import (
     BOND,
     STAKE,
@@ -90,108 +90,63 @@ def test_the_owner_releases_a_contest_bond_only_with_the_terms_of_its_own_closed
 # --- ESC-10, ES-05, LCK-04: a release is bound to the lock it names ---------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="ESC-10: a release is authorised by the settlement of the lock it names, but one "
-    "callback answers for reward origins, disputes and locks alike, so a lock whose id is a "
-    "settled reward origin is released by that origin's settlement",
-)
-def test_a_lock_named_like_a_settled_reward_origin_is_not_released_by_that_origin(
-    li_escrow: ModuleType, real_reward: Real, tmp_path: Path
-) -> None:
-    reward, cold = real_reward[2], li_escrow.COLD.ss58
-    with hosted_reward(tmp_path, li_escrow, real_reward, real_settlement=True) as hosted:
-        # Given: round 0 finalized and vested, and its owner locks part of the vested units as
-        # admission stake under an id of its own choosing: the id of the reward origin
-        hosted.finalize()
-        mature(hosted.escrow, reward)
-        origin = reward.origin_ids[0]
-        stake = EscrowLock(
-            operation_id=origin,
-            owner=cold,
-            units=400_000,
-            origin_ids=[origin],
-            admission_id=H,
-            dispute_id=None,
-            kind="LOCK_ADMISSION",
-        )
-        hosted.escrow.lock(stake, signer=cold)
-        settled = hosted.store._settlement_v2(hosted.run_id, origin)
-        assert (settled.outcome, settled.finality_hash) == ("MATCH", reward.finalize_hash)
-        locked = hosted.escrow.balances()
-        assert locked.admission_locked == 400_000
-        release = EscrowRelease(
-            operation_id=ident("release-by-origin"),
-            owner=cold,
-            units=400_000,
-            origin_ids=[origin],
-            admission_id=H,
-            dispute_id=None,
-            lock_id=origin,
-            finality_hash=settled.finality_hash,
-            closed_dispute_root=settled.closed_dispute_root,
-        )
-        # When / Then: the origin's record is not the settlement of the stake
-        error_code(
-            lambda: hosted.escrow.release(release, signer=cold, now_beacon=settled.release_beacon)
-        )
-        assert hosted.escrow.balances() == locked
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="ES-05+LCK-04: an admission lock is released only by a settlement bound to that lock "
-    "and never while its admission is live, but the callback answers by id and the owner "
-    "chooses the lock id, so a lock named like a closed dispute is released by that dispute's "
-    "settlement while its admission is ACTIVE",
-)
-def test_a_live_admission_keeps_its_stake_when_the_lock_is_named_like_a_closed_dispute(
-    rig: Rig,
-) -> None:
-    # Given: a contest that the beacon closed without a loser, then an ACTIVE admission whose
-    # only stake is a lock the owner named with that dispute's id
-    miner = rig.join(0)
-    contest = rig.open_contest(miner)
-    rig.net.push(rig.disputes.get(contest.dispute_id).absolute_deadline + 1)
-    closed = rig.disputes.settlement(contest.dispute_id)
-    assert (closed.unresolved, closed.outcome) == (False, "MATCH")
-    rig.activate(miner)
-    stake = rig.lock_stake(miner, operation=contest.dispute_id)
-    assert rig.status(miner).eligible
+def refused_release(rig: Rig, miner: Miner, stake: EscrowLock, finality: str, closed: str) -> None:
+    """The owner's release of `stake` with these terms is refused, nothing changes and the stake
+    still backs the live admission."""
     digest, locked = rig.world.db_digest(), units_of(rig.escrow, miner.coldkey)
-    # When: the owner releases it with the terms of that dispute
-    response = rig.release(miner, stake, closed.finality_hash, closed.closed_dispute_root)
-    # Then: refused, the stake still backs the live admission
-    assert response.status_code == 409, response.text
+    assert rig.status(miner).eligible
+    response = rig.release(miner, stake, finality, closed)
+    assert (response.status_code, response.json()["detail"]) == (409, "DISPUTED_OR_UNVESTED")
     assert rig.world.db_digest() == digest
     assert units_of(rig.escrow, miner.coldkey) == locked
     assert rig.status(miner).eligible
 
 
-# --- ESC-12, CRD-21, ES-04, BND-19: the stake of an admission has a settlement ----------------
+@pytest.mark.parametrize("named_after", ["a closed dispute", "a settled reward origin"])
+def test_a_live_admission_keeps_its_stake_when_the_lock_is_named_after_a_settled_object(
+    rig: Rig, named_after: str
+) -> None:
+    # Given: an object the service settled as MATCH, with the beacon past its release round
+    miner = rig.join(0)
+    settled: Settlement
+    if named_after == "a closed dispute":
+        contest = rig.open_contest(miner)
+        rig.net.push(rig.disputes.get(contest.dispute_id).absolute_deadline + 1)
+        object_id, settled = contest.dispute_id, rig.disputes.settlement(contest.dispute_id)
+    else:
+        object_id = seed_live_origin(rig, miner)
+        rig.net.push(5)
+        settled = rig.world.store._settlement_v2(rig.run_id, object_id)
+        assert vested(rig, object_id) == 500
+    assert (settled.unresolved, settled.outcome) == (False, "MATCH")
+    assert rig.net.now >= settled.release_beacon
+    # and an ACTIVE admission whose only stake is a lock the owner named with that object's id
+    rig.activate(miner)
+    stake = rig.lock_stake(miner, operation=object_id)
+    # When / Then: the terms of that object do not release it
+    refused_release(rig, miner, stake, settled.finality_hash, settled.closed_dispute_root)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=EscrowError,
-    reason="ESC-12+CRD-21+ES-04+BND-19: the owner of an admission with no open obligation can "
-    "release its stake (the unlock condition is a pending product decision: this is the weakest "
-    "one), but the store has no settlement for an admission lock (no dispute row, no settlement "
-    "record), so every honest release is UNACCEPTED_SETTLEMENT",
-)
-def test_the_owner_releases_the_stake_of_an_admission_with_no_open_obligation(rig: Rig) -> None:
-    # Given: an application that never reached a trial, a roster, a dispute or a reward
+def test_the_stake_of_a_live_admission_is_released_only_once_it_is_no_longer_live(
+    rig: Rig,
+) -> None:
+    # Given: an ACTIVE, funded admission and the terms the service derives for its stake
     miner = rig.join(0)
     stake = rig.lock_stake(miner)
-    rig.net.push(300)
-    before = units_of(rig.escrow, miner.coldkey)
-    assert before["admission_locked"] == STAKE
-    # When: the owner asks the service for the terms of the release and signs it
-    finality, closed = rig.bond_terms(miner, stake.operation_id)
-    response = rig.release(miner, stake, finality, closed)
-    # Then: the stake is back in the owner's free balance
+    rig.activate(miner)
+    live = rig.bond_entry(miner, stake.operation_id)
+    # When / Then: the service does not offer the release, and refuses it with its own terms
+    assert live["releasable"] is False
+    refused_release(rig, miner, stake, live["finality_hash"], live["closed_dispute_root"])
+    # and once its work screen has lapsed the same stake is the owner's to take back
+    with rig.world.store._tx():
+        rig.world.store._db.execute(
+            "UPDATE admissions_v2 SET screen_until=? WHERE admission_id=?",
+            (rig.net.now - 1, miner.admission_id),
+        )
+    quiet, before = rig.bond_entry(miner, stake.operation_id), units_of(rig.escrow, miner.coldkey)
+    assert quiet["releasable"] is True
+    response = rig.release(miner, stake, quiet["finality_hash"], quiet["closed_dispute_root"])
     assert response.status_code == 200, response.text
     after = units_of(rig.escrow, miner.coldkey)
     assert (after["admission_locked"], after["available"]) == (0, before["available"] + STAKE)
@@ -199,11 +154,13 @@ def test_the_owner_releases_the_stake_of_an_admission_with_no_open_obligation(ri
 
 
 # --- LCK-06, DIB-08, DIA-23, AD-09, BND-19, ES-04: proven fraud costs the admission -----------
+# The ban and the burn of the stake of a miner who lost its contest are pinned over HTTP by
+# tests/challenge/test_admission_hardening_v2.py (a referee verdict against the miner).
 
 
 def lose_the_contest(rig: Rig) -> tuple[Miner, EscrowLock, Contest]:
     """A staked miner opens a contest and the referee rules FRAUD against it; the contest bond
-    is burned by the real settle_lock, which is the control of the two tests below."""
+    is burned by the real settle_lock."""
     miner = rig.join(0)
     stake = rig.lock_stake(miner)
     contest = rig.open_contest(miner)
@@ -213,33 +170,6 @@ def lose_the_contest(rig: Rig) -> tuple[Miner, EscrowLock, Contest]:
     held = units_of(rig.escrow, miner.coldkey)
     assert held["dispute_locked"] == 0 and held["burned"] >= BOND
     return miner, stake, contest
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="LCK-06+AD-09+DIA-23: an admission whose miner lost a finalized FRAUD resolution is "
-    "banned, but Admission.settle_fraud has no caller, so the miner stays SUSPENDED with its "
-    "pending dispute for ever",
-)
-def test_a_lost_fraud_contest_bans_the_admission(rig: Rig) -> None:
-    miner, _, _ = lose_the_contest(rig)
-    assert rig.admission.store.record(miner.hotkey).state == "BANNED"
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="LCK-06+DIB-08+ES-04+BND-19: the admission stake of a miner who lost a FRAUD contest "
-    "is burned with the contest bond (burn rather than freeze is a pending founder decision), "
-    "but the store has no settlement for the admission lock, so the stake stays locked, neither "
-    "burned nor releasable",
-)
-def test_a_lost_fraud_contest_burns_the_admission_stake(rig: Rig) -> None:
-    miner, _, _ = lose_the_contest(rig)
-    held = units_of(rig.escrow, miner.coldkey)
-    assert (held["admission_locked"], held["burned"]) == (0, BOND + STAKE)
-    assert rig.escrow.balances().conserved()
 
 
 # --- LCK-09, DIB-07, CRD-22: a reward does not vest under a dispute ---------------------------
@@ -273,47 +203,76 @@ def test_a_reward_origin_vests_only_as_its_settlement_record_allows(
     assert rig.escrow.balances().conserved()
 
 
-@pytest.mark.parametrize(
-    "ruling",
-    [
-        pytest.param(
-            None,
-            id="dispute-open",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=AssertionError,
-                reason="LCK-09+DIB-07: a reward origin does not vest while a dispute naming its "
-                "miner and round is unresolved, but the origin's settlement is a record written "
-                "at finalize that no dispute ever touches",
-            ),
-        ),
-        pytest.param(
-            "FRAUD",
-            id="dispute-lost",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=AssertionError,
-                reason="CRD-22+LCK-09+DIB-07: fraud proven after finality leaves the miner's "
-                "reward origin unspendable, but the origin's settlement stays the MATCH record "
-                "written at finalize",
-            ),
-        ),
-    ],
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="LCK-09+DIB-07: a reward origin does not vest while a dispute naming its miner and "
+    "round is unresolved, but the origin's settlement is a record written at finalize that no "
+    "dispute ever touches [fix-lot: none (no design yet)]",
 )
-def test_a_reward_origin_does_not_vest_while_a_dispute_on_its_round_is_open_or_lost(
-    rig: Rig, ruling: str | None
-) -> None:
-    # Given: round 0 issued the miner an origin maturing at round 5, then the miner's contest
-    # of round 0 is opened (and lost, when `ruling` says so)
+def test_a_reward_origin_does_not_vest_while_a_dispute_on_its_round_is_open(rig: Rig) -> None:
+    # Given: round 0 issued the staked miner an origin maturing at round 5, then the miner's
+    # contest of round 0 is opened and stays unresolved
     miner = rig.join(0)
+    rig.lock_stake(miner)
     origin = seed_live_origin(rig, miner)
     contest = rig.open_contest(miner)
-    if ruling is not None:
-        assert rig.refereed(contest.dispute_id, ruling, miner.hotkey).status_code == 200
     # When: the beacon passes the origin's release round, inside the dispute's horizon
     rig.net.push(10)
-    assert (rig.disputes.get(contest.dispute_id).resolution is None) == (ruling is None)
+    assert rig.disputes.get(contest.dispute_id).resolution is None
     # Then: the units are still pending
+    assert vested(rig, origin) == 0
+
+
+def test_fraud_proven_against_a_staked_miner_burns_the_reward_origin_it_never_vested(
+    rig: Rig,
+) -> None:
+    # Given: round 0 issued the staked miner an origin maturing at round 5, then the miner's
+    # contest of round 0 is lost: the referee rules FRAUD against it
+    miner = rig.join(0)
+    rig.lock_stake(miner)
+    origin = seed_live_origin(rig, miner)
+    contest = rig.open_contest(miner)
+    assert rig.refereed(contest.dispute_id, "FRAUD", miner.hotkey).status_code == 200
+    # When: the beacon passes the origin's release round, inside the dispute's horizon
+    rig.net.push(10)
+    # Then: the origin never vested; its units burned with the contest bond and the stake
+    assert vested(rig, origin) == 0
+    held = units_of(rig.escrow, miner.coldkey)
+    assert (held["reward_pending"], held["burned"]) == (0, BOND + STAKE + 500)
+    assert rig.escrow.balances().conserved()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="CRD-22+LCK-09: fraud proven against a miner burns the reward origin it never vested, "
+    "but that burn belongs to slashing an admission lock, so a verdict that follows the seizure "
+    "of the bond for a confirmed mismatch bans the miner and its origin still vests "
+    "[fix-lot: decision (product choice pending)]",
+)
+def test_fraud_proven_after_the_bond_was_seized_still_burns_the_unvested_reward(rig: Rig) -> None:
+    # Given: a staked miner with a reward origin pending, whose bond the service burned for a
+    # confirmed audit mismatch
+    miner = rig.join(0)
+    rig.lock_stake(miner)
+    origin = seed_live_origin(rig, miner)
+    seized = rig.admission.seize_bond(
+        miner.admission_id, reason="AUDIT_MISMATCH", evidence_hash=ident("mismatch"), now=1
+    )
+    held = units_of(rig.escrow, miner.coldkey)
+    precondition(
+        (seized, held["admission_locked"], held["reward_pending"]) == (STAKE, 0, 500),
+        f"the bond was not burned alone: {seized} {held}",
+    )
+    # and the miner then loses its contest of that round: the referee rules FRAUD against it
+    contest = rig.open_contest(miner)
+    ruled = rig.refereed(contest.dispute_id, "FRAUD", miner.hotkey)
+    precondition(ruled.status_code == 200, f"the resolution was refused: {ruled.text}")
+    precondition(rig.admission.store.record(miner.hotkey).state == "BANNED", "no conviction")
+    # When: the beacon passes the release round of the origin
+    rig.net.push(10)
+    # Then: the origin never vested
     assert vested(rig, origin) == 0
 
 
@@ -399,7 +358,8 @@ def test_a_miner_who_lost_a_fraud_contest_has_no_route_back_and_no_new_applicati
     reason="AD-06: a miner suspended by a replay mismatch has a signed route back to PROBATION "
     "(or the docs name that suspension terminal: a pending product decision), but the pending "
     "dispute of a trial mismatch is an id no dispute row or settlement record carries, so the "
-    "recovery route can only answer UNACCEPTED_SETTLEMENT",
+    "recovery route can only answer UNACCEPTED_SETTLEMENT "
+    "[fix-lot: decision (product choice pending)]",
 )
 def test_a_miner_suspended_by_a_replay_mismatch_has_a_signed_route_back(rig: Rig) -> None:
     # Given: the state Admission.proof leaves on a trial whose proof differs from the reference:
@@ -456,9 +416,9 @@ def test_a_round_opens_only_when_every_roster_member_is_currently_funded(
     refused = rig.open_round(rig.opening(miners))
     assert (refused.status_code, refused.json()["detail"]) == (403, NOT_FUNDED)
     assert rig.world.db_digest() == digest
-    # the member funds the shortfall and the very same opening is accepted
-    shortfall = 1 if last == "underfunded" else STAKE
-    rig.lock_stake(miners[3], units=shortfall, operation=ident("top-up"))
+    # the member tops its stake up (by a whole lock: a ledger may refuse a lock below its floor)
+    # and the very same opening is accepted
+    rig.lock_stake(miners[3], units=STAKE, operation=ident("top-up"))
     opened = rig.open_round(rig.opening(miners))
     assert opened.status_code == 200, opened.text
 
@@ -561,12 +521,54 @@ def test_a_finalize_input_is_refused_for_a_member_who_lost_standing_after_the_op
     )
 
 
+def close_round(rig: Rig, w: int) -> None:
+    """Round `w` is settled with nothing open, as the finality record of a finalized round says
+    (a real settlement needs a whole audited round)."""
+    store = rig.world.store
+    settled = {
+        **store._record_v2(rig.run_id, "finality", str(w)),
+        "applied": True,
+        "disposition": "SETTLED",
+        "unresolved_audits": 0,
+        "unresolved_disputes": 0,
+    }
+    with store._tx():
+        store._put_record_v2(rig.run_id, "finality", str(w), settled)
+
+
+def test_the_stake_of_a_rostered_member_is_held_until_its_round_closes(rig: Rig) -> None:
+    # Given: an opened round of four funded members, and the work screen of the first one lapsed
+    # afterwards, so that only the open round still holds its stake
+    miners = cohort(rig, "funded")
+    assert rig.open_round(rig.opening(miners)).status_code == 200
+    member, stake = miners[0], rig.stake_lock(miners[0])
+    with rig.world.store._tx():
+        rig.world.store._db.execute(
+            "UPDATE admissions_v2 SET screen_until=0 WHERE admission_id=?", (member.admission_id,)
+        )
+    held = rig.bond_entry(member, stake.operation_id)
+    # When / Then: the service does not offer the release, and refuses it with its own terms
+    assert held["releasable"] is False
+    digest, locked = rig.world.db_digest(), units_of(rig.escrow, member.coldkey)
+    refused = rig.release(member, stake, held["finality_hash"], held["closed_dispute_root"])
+    assert (refused.status_code, refused.json()["detail"]) == (409, "DISPUTED_OR_UNVESTED")
+    assert rig.world.db_digest() == digest
+    assert units_of(rig.escrow, member.coldkey) == locked
+    # and once the round is closed the same stake is the owner's to take back
+    close_round(rig, 0)
+    closed = rig.bond_entry(member, stake.operation_id)
+    assert closed["releasable"] is True
+    response = rig.release(member, stake, closed["finality_hash"], closed["closed_dispute_root"])
+    assert response.status_code == 200, response.text
+    assert units_of(rig.escrow, member.coldkey)["admission_locked"] == 0
+    assert rig.escrow.balances().conserved()
+
+
 def test_a_lapsed_challenge_window_suspends_nobody_and_frees_the_trial_place(rig: Rig) -> None:
     # Given: an application whose trial was opened at round 2 and never proved
     miner = rig.join(0)
     rig.net.push(2)
-    challenge = rig.net.url + f"/join/{miner.admission_id}/challenge"
-    assert rig.net.client.get(challenge).status_code == 200
+    assert rig.open_trial(miner).status_code == 200
     # When: the beacon passes the deadline of that trial (round 102)
     rig.net.push(103)
     # Then: the place is free and the miner is where it was: no suspension to find a way back from
@@ -576,7 +578,7 @@ def test_a_lapsed_challenge_window_suspends_nobody_and_frees_the_trial_place(rig
     assert [row[0] for row in trials] == ["EXPIRED"]
     transitions = rig.admission.store.db.execute("SELECT state FROM admission_transitions")
     assert [row[0] for row in transitions] == []
-    again = rig.net.client.get(challenge)
+    again = rig.open_trial(miner)
     assert (again.status_code, again.json()["detail"]) == (409, "CHALLENGE_EXPIRED")
 
 
