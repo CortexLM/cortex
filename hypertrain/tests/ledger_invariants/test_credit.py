@@ -27,14 +27,12 @@ from pydantic import ValidationError
 import hypertrain
 from hypertrain.challenge.store import ChallengeError
 from hypertrain.ledger.escrow_v2 import EscrowError, EscrowReceipt, EscrowV2, digest
-from hypertrain.miner.admission import sign_rotation
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.messages import Finalize
 from hypertrain.protocol.messages_v2 import (
     OriginAllocation,
     RewardFinalize,
-    RotateRequest,
 )
 
 from .support import H, memory_db
@@ -58,6 +56,7 @@ from .support_credit import (
     refusal,
     repin,
     reward_origins,
+    rotation_envelope,
     split_units,
 )
 
@@ -217,7 +216,8 @@ def test_an_identical_finalize_after_a_restart_returns_the_stored_receipt_and_mo
     reason="CRD-06+CRD-D08: an identical live finalize is re-authenticated by the current owner, "
     "replay and signature callbacks before the stored receipt is looked up, so a retry after "
     "the owner mapping changed or a callback became unavailable is refused instead of "
-    "answered from the immutable event (the store's finalize-result cache hides it) [candidate]",
+    "answered from the immutable event (the store's finalize-result cache hides it) [candidate] "
+    "[fix-lot: none (no design yet)]",
 )
 def test_an_identical_finalize_is_answered_from_the_stored_event_when_a_callback_fails(
     li_escrow: ModuleType, setup: Any
@@ -376,9 +376,12 @@ REFUSALS: dict[str, tuple[Callable[[Plan], None], str]] = {
     ),
     "samples_differ_from_the_assignment": (set_attr(sample_ids=(1,)), "UNVERIFIED_REWARD_WORK"),
     "finalize_signed_by_a_stranger": (set_attr(finalize_signer=STRANGER), "FINALITY_AUTHORITY"),
-    "finalized_before_the_commit_expiry": (set_attr(commit_exp=5), "ExpiredError"),
-    "finalized_after_the_verdict_expiry": (set_attr(verdict_exp=5), "ExpiredError"),
-    "finalized_after_the_challenge_expiry": (set_attr(challenge_exp=5), "ExpiredError"),
+    # Expired before any beacon the evidence could have been accepted or finalized at (the
+    # fixtures take acceptance at beacon 5 and the finalize at 10): refused whichever of the two
+    # the ledger judges stored evidence at.
+    "commit_expired_before_acceptance": (set_attr(commit_exp=3), "ExpiredError"),
+    "verdict_expired_before_acceptance": (set_attr(verdict_exp=3), "ExpiredError"),
+    "challenge_expired_before_acceptance": (set_attr(challenge_exp=3), "ExpiredError"),
     "finalized_after_the_finalize_expiry": (set_attr(finalize_exp=5), "ExpiredError"),
 }
 
@@ -719,10 +722,13 @@ def test_a_stored_verdict_that_no_pinned_auditor_signed_mints_nothing(
         store._put_record_v2(run, "verdict", identity, forged)
     before = database_digest(store)
     refused = round_.finalize()
-    assert (refused.status_code, refused.json()["detail"]) == (
-        409,
+    # The record is refused either for its signer or, once stored evidence is judged as the master
+    # accepted it, for not being that acceptance: both leave the round unsettled.
+    assert refused.status_code == 409
+    assert refused.json()["detail"] in {
         "signer is not authorized for message role",
-    )
+        "reward evidence was not accepted by this master",
+    }
     assert database_digest(store) == before and credited(round_) == []
 
 
@@ -736,12 +742,15 @@ def test_a_rotation_after_the_credit_does_not_move_the_credit_to_another_identit
     assert round_.finalize().status_code == 200
     before = credited(round_)
     first = round_.fixtures.HOT[0]
-    request = RotateRequest(
-        hotkey=first.ss58, new_hotkey=round_.fixtures.REFEREE.ss58, operation_id="df" * 32
-    )
     rotated = round_.network.client.post(
         round_.network.url + "/admission/" + first.ss58 + "/rotate",
-        json=sign_rotation(round_.fixtures.COLD[0], round_.run_id, request, 10_000),
+        json=rotation_envelope(
+            round_.run_id,
+            round_.fixtures.COLD[0],
+            first.ss58,
+            round_.fixtures.REFEREE,
+            "df" * 32,
+        ),
     )
     assert rotated.status_code == 200, rotated.text
     assert credited(round_) == before
@@ -859,7 +868,8 @@ def test_a_miner_commits_once_per_round_a_replay_returns_the_receipt_and_another
     reason="CRD-05+CRD-D03: the v2 services of a restarted store are built by the first handler "
     "that needs them; finalize_v2 is one, and builds them inside its transaction, where "
     "EscrowV2.__init__ changes PRAGMA synchronous and fails, so the first Finalize after a "
-    "restart is a server error until another route has built the services",
+    "restart is a server error until another route has built the services "
+    "[fix-lot: none (no design yet)]",
 )
 def test_the_first_finalize_after_a_restart_is_accepted(audited_round: AuditedRound) -> None:
     round_ = audited_round
@@ -875,7 +885,7 @@ def test_the_first_finalize_after_a_restart_is_accepted(audited_round: AuditedRo
     raises=AssertionError,
     reason="CRD-25+CRD-D07: Finalize.entitlements_root is never read for a live round, so a "
     "coordinator-signed Finalize whose root commits to nothing that is credited is accepted "
-    "and minted [candidate]",
+    "and minted [candidate] [fix-lot: none (no design yet)]",
 )
 def test_a_finalize_whose_entitlements_root_commits_to_nothing_credited_is_refused(
     audited_round: AuditedRound,

@@ -298,7 +298,7 @@ MUTANTS = [
         "src/hypertrain/protocol/envelope_v2.py",
         "if now_round > env.exp_drand:",
         "if False:",
-        [MATRIX + "[finalized_before_the_commit_expiry]"],
+        [MATRIX + "[commit_expired_before_acceptance]"],
         "an expired signature is accepted as evidence at the finalize beacon.",
     ),
     mutant(

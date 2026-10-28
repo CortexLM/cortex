@@ -31,7 +31,7 @@ from hypertrain.ledger.escrow_v2 import (
     genesis_allocation_hash,
     genesis_origin_id,
 )
-from hypertrain.miner.admission import sign_join, sign_rotation
+from hypertrain.miner.admission import sign_join
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize
@@ -41,7 +41,6 @@ from hypertrain.protocol.messages_v2 import (
     EscrowRelease,
     EscrowTransfer,
     HardwareHint,
-    RotateRequest,
 )
 
 from .support import (
@@ -62,6 +61,7 @@ from .support_credit import (
     build_plan,
     database_digest,
     event_count,
+    issued_id,
     ledger_for,
     ledger_rows,
     make_bootstrap,
@@ -72,6 +72,7 @@ from .support_credit import (
     repin,
     reserve_shadow_round,
     reward_origins,
+    rotation_envelope,
     split_units,
 )
 
@@ -271,7 +272,7 @@ def test_origins_that_do_not_hash_to_the_pinned_allocation_are_refused(
             escrow.run_id,
             allocation=other,
             pinned_hash=pin,
-            origin_ids={0: genesis_origin_id(escrow.run_id, pin, 0)},
+            origin_ids={0: issued_id(li_escrow, genesis_origin_id, escrow.run_id, pin, 0)},
         )
         issue: Callable[[], object] = partial(escrow.test_genesis, forged)
         code = "GENESIS_ALLOCATION"
@@ -285,7 +286,7 @@ def test_origins_that_do_not_hash_to_the_pinned_allocation_are_refused(
             other,
             operation=BOOT_OP,
             pinned_hash=pin,
-            origin_ids={0: bootstrap_origin_id(escrow.run_id, pin, 0)},
+            origin_ids={0: issued_id(li_escrow, bootstrap_origin_id, escrow.run_id, pin, 0)},
         )
         issue = partial(escrow.production_bootstrap, forged_bootstrap)
         code = "BOOTSTRAP_ALLOCATION"
@@ -665,17 +666,18 @@ def test_a_rotation_moves_the_admission_but_never_the_coldkey_that_is_credited(
         assert store._owner_v2(run, hot[0].ss58) == cold[0].ss58
 
         def rotation(signer: Any, operation: str) -> Any:
-            body = RotateRequest(
-                hotkey=hot[0].ss58, new_hotkey=referee.ss58, operation_id=operation
-            )
             return network.client.post(
                 network.url + "/admission/" + hot[0].ss58 + "/rotate",
-                json=sign_rotation(signer, run, body, 1000),
+                json=rotation_envelope(run, signer, hot[0].ss58, referee, operation, 1000),
             )
 
         before = world.db_digest()
         stranger = rotation(cold[1], "de" * 32)
-        assert stranger.status_code == 409 and world.db_digest() == before
+        assert (stranger.status_code, stranger.json()["detail"]) == (
+            409,
+            "signer is not authorized for message role",
+        )
+        assert world.db_digest() == before
         assert rotation(cold[0], "df" * 32).status_code == 200
         assert store._owner_v2(run, referee.ss58) == cold[0].ss58
         with pytest.raises(ChallengeError) as retired:

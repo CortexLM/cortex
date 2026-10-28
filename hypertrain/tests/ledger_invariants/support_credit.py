@@ -10,6 +10,7 @@ the training replay, which `real_reward` covers.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import sqlite3
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -33,6 +34,7 @@ from hypertrain.ledger.escrow_v2 import (
     genesis_origin_id,
     reward_origin_id,
 )
+from hypertrain.miner import admission as miner_admission
 from hypertrain.protocol.envelope_v2 import EnvelopeV2, seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -47,6 +49,7 @@ from hypertrain.protocol.messages_v2 import (
     ProductionBootstrap,
     RankWorkResult,
     RewardFinalize,
+    RotateRequest,
     RunManifestV2,
     ShadowReservationRequestV1,
     ShadowReservationV1,
@@ -77,6 +80,17 @@ def repin(setup: Any, **policy_changes: Any) -> Any:
     body = setup.manifest.body()
     body["network"]["economics_policy_hash"] = digest(policy)
     return replace(setup, policy=policy, manifest=RunManifestV2.model_validate(body))
+
+
+def issued_id(fixture: ModuleType, derive: Callable[..., str], *parts: Any) -> str:
+    """The origin id the ledger of `fixture` derives with `derive` (genesis, bootstrap or reward).
+
+    Where the derivation is keyed (`id_key`, ADR 0014 part 1) the fixture's own key is passed, the
+    one its ledgers are built with; an earlier tree derives it from the public values alone.
+    """
+    if "id_key" in inspect.signature(derive).parameters:
+        return derive(*parts, fixture.ID_KEY)
+    return derive(*parts)
 
 
 def split_units(budget: int, hotkeys: Sequence[str]) -> dict[str, int]:
@@ -204,7 +218,9 @@ class Plan:
         mature_at = changes.get("mature_at", self.mature_at)
         origins = [
             OriginAllocation(
-                origin_id=reward_origin_id(self.run_id, self.w, hotkey, final_hash),
+                origin_id=issued_id(
+                    self.fixture, reward_origin_id, self.run_id, self.w, hotkey, final_hash
+                ),
                 owner=owners[hotkey],
                 units=split[hotkey],
                 mature_at=mature_at,
@@ -385,7 +401,9 @@ def make_genesis(
     allocation_hash = genesis_allocation_hash(allocation)
     origins = [
         OriginAllocation(
-            origin_id=(origin_ids or {}).get(i, genesis_origin_id(run_id, allocation_hash, i)),
+            origin_id=(origin_ids or {}).get(
+                i, issued_id(fixture, genesis_origin_id, run_id, allocation_hash, i)
+            ),
             owner=holder,
             units=units,
             mature_at=mature_at,
@@ -419,7 +437,9 @@ def make_bootstrap(
     allocation_hash = genesis_allocation_hash(allocation)
     origins = [
         OriginAllocation(
-            origin_id=(origin_ids or {}).get(i, bootstrap_origin_id(run_id, allocation_hash, i)),
+            origin_id=(origin_ids or {}).get(
+                i, issued_id(fixture, bootstrap_origin_id, run_id, allocation_hash, i)
+            ),
             owner=holder,
             units=units,
             mature_at=mature_at,
@@ -668,3 +688,34 @@ def credited(round_: AuditedRound) -> list[tuple[str, int, int, str]]:
         "JOIN escrow_units u ON u.origin=o.origin WHERE o.hotkey IS NOT NULL ORDER BY o.hotkey"
     ).fetchall()
     return [(r["hotkey"], r["issued"], r["reward_round"], r["owner"]) for r in rows]
+
+
+def rotation_envelope(
+    run_id: str,
+    cold: Keypair,
+    old_hotkey: str,
+    new_hot: Keypair,
+    operation_id: str,
+    expires_beacon: int = 10_000,
+) -> dict[str, Any]:
+    """The coldkey's sealed request to move the admission of `old_hotkey` to `new_hot`.
+
+    Where the model carries the new hotkey's consent (`new_hot_sig`, ADR 0010 part 1) it is given
+    by `new_hot` for exactly this coldkey, run and expiry; an earlier tree takes the three fields.
+    """
+    consent = getattr(miner_admission, "sign_rotation_consent", None)
+    if consent is None or "new_hot_sig" not in RotateRequest.model_fields:
+        request = RotateRequest.model_validate(
+            {"hotkey": old_hotkey, "new_hotkey": new_hot.ss58, "operation_id": operation_id}
+        )
+    else:
+        request = consent(
+            new_hot,
+            run_id=run_id,
+            coldkey=cold.ss58,
+            hotkey=old_hotkey,
+            operation_id=operation_id,
+            expires_beacon=expires_beacon,
+        )
+    sealed: dict[str, Any] = miner_admission.sign_rotation(cold, run_id, request, expires_beacon)
+    return sealed
