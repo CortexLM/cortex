@@ -532,7 +532,7 @@ class ChallengeStore:
         self._lease_guards_v2: dict[str, Any] = {}
         self._reference_flights_v2: dict[tuple[str, str, bool], Future[str]] = {}
         self._reference_waiters = threading.BoundedSemaphore(REFERENCE_WAITERS)
-        self._staging = threading.Lock()
+        self._staging = threading.RLock()  # a staging asked from a staging must not wait
         self._aggregate_flights_v2: dict[tuple[str, int], Future[dict[str, Any]]] = {}
         self._aggregate_waiters = threading.BoundedSemaphore(AGGREGATE_WAITERS)
         self._finality_verdicts_v2: dict[str, str] = {}

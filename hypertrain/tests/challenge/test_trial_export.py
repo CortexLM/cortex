@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -540,6 +541,33 @@ def test_a_planned_staging_reads_no_database(trial):
     finally:
         n.store._db = real
     # Then: it wrote the inputs its job names
+    assert sha256_hex((directory / "start_state").read_bytes()) == job.start_state_sha256
+
+
+def test_a_staging_asked_from_inside_a_staging_does_not_wait_for_itself(trial, monkeypatch):
+    # Given: a staging that, in the middle of its work, asks for another one in the same thread
+    n, identity, _ = trial
+    arguments = staged_inputs(n, identity)
+    real = n.store._stage_inputs_v2
+    asked: list[int] = []
+
+    def staging_that_stages(*args):
+        if not asked:
+            asked.append(1)
+            n.store.stage_trial_v2(*arguments)
+        return real(*args)
+
+    monkeypatch.setattr(n.store, "_stage_inputs_v2", staging_that_stages)
+    outcome: list[object] = []
+    thread = threading.Thread(
+        target=lambda: outcome.append(n.store.stage_trial_v2(*arguments)), daemon=True
+    )
+    # When
+    thread.start()
+    thread.join(30)
+    # Then: it came back with the job of the inputs, instead of waiting for the lock it holds
+    assert not thread.is_alive(), "the staging is waiting for the staging it was asked from"
+    job, directory = outcome[0]  # type: ignore[misc]
     assert sha256_hex((directory / "start_state").read_bytes()) == job.start_state_sha256
 
 
