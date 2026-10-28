@@ -376,10 +376,13 @@ def test_a_settled_round_is_untouched_by_late_audit_events(world: sa.World) -> N
         escrow = store._services(run)[0]
         keep = ("finality", "finalize", "finalize-result", "replayed-finality", "settlement")
 
-        def minted() -> tuple[int, int]:
-            return escrow.balances().issued, escrow.balances().burned
+        def applied() -> int:
+            """The exit sanctions the beacon has applied (D81: a refuted forgery costs its bond)."""
+            rows = sa.records(store, "exit-sanction").values()
+            return sum(json.loads(row)["state"] == "APPLIED" for row in rows)
 
-        before = (settled_state(store), sa.records(store, *keep), minted())
+        before = (settled_state(store), sa.records(store, *keep), escrow.balances().issued)
+        burned, sanctioned = escrow.balances().burned, applied()
         assert store._record_v2(run, "finality", "0")["disposition"] == "SETTLED"
         # When: auditors ask for work, the audits are scheduled and completed again, the clock
         # runs far past every deadline and the coordinator asks to roll the round back.
@@ -394,9 +397,13 @@ def test_a_settled_round_is_untouched_by_late_audit_events(world: sa.World) -> N
             n.url + "/admin/rollback", json=rollback_request(n, cast), headers=sa.admin()
         )
         # Then: money-only, and not one record or job moved; the reward vested with time as it
-        # would anyway, and nothing was issued or burned on account of the audits.
+        # would anyway, nothing was issued on account of the audits, and the only unit burned is
+        # the bond of a sanction the beacon applied after its contest window (the round is not
+        # touched by it).
         assert detail(refused) == (409, "finalized late fraud is money-only")
-        assert (settled_state(store), sa.records(store, *keep), minted()) == before
+        after = (settled_state(store), sa.records(store, *keep), escrow.balances().issued)
+        assert after == before
+        assert escrow.balances().burned - burned == 1000 * (applied() - sanctioned)
 
 
 def test_after_the_last_window_nothing_late_can_change_the_dropped_round(world: sa.World) -> None:

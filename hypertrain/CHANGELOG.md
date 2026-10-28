@@ -472,8 +472,10 @@
   equal the replay under a commit that does not; anything else is waived), applies `decide` after
   `verify.T.dispute_per_level` rounds and while no contest is open, cancels it when a referee finds
   against the lease's auditor, and calls `Admission.seize_bond(AUDIT_MISMATCH)` (suspended, one
-  strike, the bond burned). Until the environment pin is required it is only recorded
-  (`WOULD_APPLY`): `ChallengeStore(enforce_audit_mismatch=True)` enforces it. A contest of a verdict
+  strike, the bond burned). It is enforced by default (D81, after the environment pin became
+  required): `ChallengeStore(enforce_audit_mismatch=True)` is the default and
+  `Config.enforce_audit_mismatch` (default `True`, no environment variable) is what the app passes;
+  `False` is the explicit record-only mode (`WOULD_APPLY`). A contest of a verdict
   whose sanction is applied answers 409 `SANCTION_APPLIED`. ADR 0011 Part 8, decisions 14 to 18.
 - A production run refuses a qualification record without `image_sources_sha256` when an audit is
   dispatched (409 `QUALIFICATION_IMAGE_SOURCES_MISSING`): before, a record without the digest meant

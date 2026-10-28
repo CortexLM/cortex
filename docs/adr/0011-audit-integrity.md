@@ -1427,18 +1427,26 @@ the table as covering them.
     of that verdict answers 409 `SANCTION_APPLIED`. The verdict hash is published to the miner in the audit
     result it can read (D51: it needs it to contest). What a contest buys today is postponement: no
     auditor-side responder exists, so the Part 1 closure ends it `INFRASTRUCTURE` and the verdict stands.
-18. **Order.** The `AUDIT_MISMATCH` rows are enforced only after Part 3 is in the code. Until then they run in
-    `record` mode (the sweeper journals `WOULD_APPLY` and calls no hook; a constructor keyword, not a
-    manifest field: `ChallengeStore(enforce_audit_mismatch=...)`, default off, and the switch the
-    environment-pin lot flips). `NO_SHOW` rows have no such dependency. The sweeper is wired: the beacon
+18. **Order and the switch (D81).** The `AUDIT_MISMATCH` rows were to be enforced only after Part 3 is in the
+    code, and until then to run in `record` mode. Part 3 is in the code (the environment pin is required) and the
+    Principal's D81 switched the sanction on: `ChallengeStore(enforce_audit_mismatch=True)` is the default, the
+    app builds its store from `Config.enforce_audit_mismatch` (default `True`, `create_app`, `challenge/app.py`;
+    no environment variable) and a child store takes its parent's. `record` mode stays as the explicit
+    non-enforcing setting (`enforce_audit_mismatch=False`, a keyword and a Config field, never a manifest field):
+    the sweeper then journals `WOULD_APPLY` and calls no hook. The guards of D47 are unchanged by the switch:
+    a sanction is booked for a `MISMATCH` the master's own grade names (`LOCATED`, or
+    `COMMIT_CONTRADICTS_LEAVES`) and for nothing else, a fault of the auditor or its host is waived, and the
+    one free contest of decision 17 stays. `NO_SHOW` rows have no such dependency. The sweeper is wired: the beacon
     push books the row of every `excluded UNVERIFIED` (a graded `MISMATCH` lease: `PENDING` with `first_seen`
     and the lease's auditor; anything else `WAIVED`), applies `decide` to the pending ones (WAIT, CANCELLED
-    by a referee finding against the auditor, WOULD_APPLY in record mode, else the hook), and a contest of a
+    by a referee finding against the auditor, WOULD_APPLY in the explicit record mode, else the hook), and a contest of a
     verdict whose sanction is `APPLIED` answers 409 `SANCTION_APPLIED`. The reason is a case the code proves
     (`tests/auditor/test_auditor.py`): a signed `delta_hash` that alone differs from the replay is a
     `MISMATCH` with no leaf and the committed root, hence `COMMIT_CONTRADICTS_LEAVES`, and the delta
-    codec depends on the ATen capability of the host (Part 3), so an honest miner on another ISA is
-    graded like a liar until the pin is required. A stale or wrong `ef_in` on the audit side is not
+    codec depends on the ATen capability of the host (Part 3), so an honest miner on another ISA was
+    graded like a liar before the pin was required. The pin is required now, which narrows the case to a
+    host that declares its class and does not honor it (the declaration is self-declared, Part 3
+    decision 13). A stale or wrong `ef_in` on the audit side is not
     that case: `_ef_in` demands `commit.ef_in_hash`, and the audit is `BAD_PROOF`, which `grade()`
     never names.
 19. **No route back [sign-off].** A round-stage sanction binds no pending reference; the only exoneration is

@@ -246,19 +246,8 @@ def standing(stage: Stage, hotkey: str, coldkey: str) -> tuple[str, int, int]:
     return str(row[0]), int(row[1]), escrow.balances(coldkey).admission_locked
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="GAP-01 [decision: when the penalty is enforced]: a miner whose forged commit the "
-    "master replay refuted, and who opens no contest, keeps an ACTIVE admission, zero strikes and "
-    "its full stake: the only consequence is that its own round is not paid, so repeating the "
-    "forgery in every round costs it nothing. The sanction is designed and merged (ADR 0011 part "
-    "8, decisions 15-18: suspension, one strike, the bond burned) but runs AUDIT_MISMATCH in "
-    "record mode: the row ends WOULD_APPLY and the hook is not called, because "
-    "enforce_audit_mismatch is off by default until the environment-pin lot flips it (with it on, "
-    "this stage ends SUSPENDED with one strike and no stake), so the standing does not change "
-    "[fix-lot: decision (product choice pending)]",
-)
+# Closed by D81 (a confirmed mismatch is sanctioned by default, ADR 0011 Part 8 decision 18): the
+# stage ends SUSPENDED with one strike and no stake.
 def test_a_detected_cheat_that_is_not_contested_has_a_consequence_beyond_the_round(
     stage: Stage,
 ) -> None:
