@@ -168,7 +168,8 @@
 - `Admission.seize_bond(reason="NO_SHOW")` adds one strike and burns the bond. The first no-show
   puts the admission back on a fresh probation (state reason `NO_SHOW`, new trials, no
   suspension); a second one for other evidence inside `NO_SHOW_STRIKE_WINDOW_SCREENS` (4) work
-  screens suspends it, as `"AUDIT_MISMATCH"` does at once (D63). A banned admission stays banned,
+  screens (`no_show_strike_window`: 24000 rounds, 20 h, against two ladders of 1160 rounds in
+  the TEST replay and 4800 in production, ADR 0010) suspends it, as `"AUDIT_MISMATCH"` does at once (D63). A banned admission stays banned,
   a suspended one keeps its state and the reason it was suspended for (and takes the strike),
   unvested rewards are spared and the coldkey stays bound as in probation. The exit reaper of the
   beacon route calls it. ADR 0010 Part 6, ADR 0011 Part 8 decision 12.

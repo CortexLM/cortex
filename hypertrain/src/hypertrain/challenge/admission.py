@@ -64,8 +64,16 @@ from hypertrain.protocol.messages_v2 import (
 SeizureReason = Literal["TRAINING_FRAUD", "NO_SHOW", "AUDIT_MISMATCH"]
 
 # A no-show is a strike for this many work screens (D63): a second one inside the window
-# suspends the admission like a fraud, a later one is a first again.
+# suspends the admission like a fraud, a later one is a first again. The window has to outlast two
+# full PROBATION -> ACTIVE ladders (D70), or a miner that comes back as fast as it can would
+# always meet a window that has closed and the suspension tier could never be reached; ADR 0010
+# (Strike window) works the numbers out for the TEST and production policies.
 NO_SHOW_STRIKE_WINDOW_SCREENS = 4
+
+
+def no_show_strike_window(work_screen_epoch_rounds: int) -> int:
+    """The strike window, in beacon rounds, of a policy with that screen length."""
+    return NO_SHOW_STRIKE_WINDOW_SCREENS * work_screen_epoch_rounds
 
 
 @dataclass(frozen=True)
@@ -1532,7 +1540,7 @@ class Admission:
 
     def _repeat_no_show(self, admission_id: str, evidence_hash: str, now: int) -> bool:
         """Whether an earlier no-show of the admission, for other evidence, is still a strike."""
-        window = NO_SHOW_STRIKE_WINDOW_SCREENS * self.policy.work_screen_epoch_rounds
+        window = no_show_strike_window(self.policy.work_screen_epoch_rounds)
         return (
             self.store.db.execute(
                 "SELECT 1 FROM admission_sanctions WHERE admission_id=? AND reason='NO_SHOW' "

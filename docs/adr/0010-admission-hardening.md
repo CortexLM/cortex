@@ -310,6 +310,28 @@ Decision.
    `settle_fraud`, which returns `False` for it, and the closures of ADR 0011
    (`_close_blocked_disputes_v2`) call `settle_lock` and `resolve_pending`, never `settle_fraud`
    or `seize_bond`.
+
+   **Strike window of a no-show (D63, D70).** The window is `no_show_strike_window(epoch) =
+   NO_SHOW_STRIKE_WINDOW_SCREENS (4) * work_screen_epoch_rounds`, measured in beacon rounds from the
+   beacon of the earlier sanction. It has to outlast two full PROBATION -> ACTIVE ladders, or a
+   miner that comes back as fast as it can would always meet a closed window and the suspension
+   tier would be dead. Inputs: a beacon round is 3 s (20 per minute); the ladder is
+   `clean_finalizations` = 12 clean trials (the policy field is a literal); the TEST replay ran
+   twelve clean trials in about 29 minutes [A: D70]; a production training round takes about
+   10 minutes [A: D70]; `work_screen_epoch_rounds` is 6000 in the TEST and production builders
+   (`build_test_manifest.sh`, `ops/manifest_v2.py`, `od_large_manifest.py`, `network_gpu_seed.py`).
+   Formula: `ladder = trials * seconds per trial / 3 s`, `window = 4 * 6000`, and the rule is
+   `window >= 2 * ladder`.
+
+   | Policy | Ladder | Two ladders | Window | Margin |
+   | --- | --- | --- | --- | --- |
+   | TEST | 29 min = 1740 s = 580 rounds | 1160 rounds = 58 min | 24000 rounds = 20 h | 20.7x |
+   | production | 12 * 10 min = 120 min = 2400 rounds | 4800 rounds = 4 h | 24000 rounds = 20 h | 5x |
+
+   Four screens is therefore not the minimum (one screen, 6000 rounds, would pass too); it keeps a
+   miner that rests between trials inside the window. `tests/challenge/test_strike_window_v2.py`
+   asserts `window >= 2 * ladder` for both policies from the builders' own literals, and pins the
+   numbers above. A policy with a shorter screen must restate the calculation.
 4. **Conviction.** `Admission.settle_fraud(dispute_id, *, now)` replaces the old function (no
    caller, no test). The `resolution` branch of `admission_v2` calls it in the transaction of
    `DisputesV2.settle_lock`. Only an accepted, resolved dispute settlement with outcome `FRAUD`
