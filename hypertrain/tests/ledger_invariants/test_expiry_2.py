@@ -9,7 +9,6 @@ header of test_expiry.py for the control convention.
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -346,13 +345,7 @@ def test_a_stale_beacon_refuses_a_trial_proof_before_its_signature_is_read(
 
 
 def object_put(world: World, data: bytes) -> Any:
-    sha = hashlib.sha256(data).hexdigest()
-    message = f"hypertrain/object/2|{world.run_id}|{sha}".encode()
-    return world.network.client.put(
-        world.network.url + f"/objects/{sha}",
-        content=data,
-        headers={"x-hotkey": hot(0).ss58, "x-object-signature": hot(0).sign(message).hex()},
-    )
+    return world.network.put_object(hot(0), data)
 
 
 def stale_object_put(tmp_path: Path) -> None:

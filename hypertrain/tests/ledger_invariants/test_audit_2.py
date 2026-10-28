@@ -62,6 +62,15 @@ def test_a_mismatch_completes_as_an_exclusion_and_leaves_no_successor_state(
         assert {work.replay.result for work in inputs} == {"MATCH"}
 
 
+GATE_PINS = ("beacon_pins_v2",)
+
+
+def gate_pins(store: Any) -> set[str]:
+    """The operations the freshness gate holds a pinned beacon round for."""
+    with store._lock:
+        return {r[0] for r in store._db.execute("SELECT operation_id FROM beacon_pins_v2")}
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -81,12 +90,16 @@ def test_the_tape_refuses_an_input_whose_replay_is_not_a_full_match_of_its_commi
         record = store._record_v2(run, "replay", identity)
         with store._tx():
             store._put_record_v2(run, "replay", identity, {**record, field: value})
-        before = sa.digest_of(store)
+        before, pinned = sa.digest_of(store, without=GATE_PINS), gate_pins(store)
         # When / Then: the tape is not built, whatever the store let through.
         with pytest.raises(TapeError, match="own-assignment full replay not VERIFIED"):
             store.aggregate_v2(run, 0)
-        assert sa.digest_of(store) == before
+        assert sa.digest_of(store, without=GATE_PINS) == before
         assert ("applied", "0") not in sa.records(store)
+        # The claim commits before the tape is computed, and with it the pin of the freshness gate
+        # (`_aggregate_claim_v2`, CHANGELOG: aggregate without the store lock): the one row the
+        # refused attempt keeps.
+        assert gate_pins(store) - pinned == {f"aggregate:0:{n.now}"}
 
 
 # --- A2W-10: a partly audited round does not aggregate or finalize -----------------------------
@@ -267,11 +280,12 @@ def test_the_audit_counter_equals_the_jobs_not_yet_terminal(
 
 
 def test_each_job_decrements_the_counter_once_whether_it_completes_or_is_exhausted(
-    world: sa.World,
+    world: sa.World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Given: two executed leases, three jobs still queued.
     with world.at("s2") as (n, cast):
         store, run = n.store, n.manifest.run_id()
+        sa.without_reaper(monkeypatch, store)
 
         def counter() -> int:
             return int(store._record_v2(run, "finality", "0")["unresolved_audits"])
@@ -314,11 +328,12 @@ def test_each_job_decrements_the_counter_once_whether_it_completes_or_is_exhaust
 
 
 def test_without_scheduled_audits_the_counter_stays_at_the_roster_and_the_round_waits(
-    world: sa.World,
+    world: sa.World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Given: round 0 committed, and nobody scheduled its audits (the condition of A2W-12 broken).
     with world.at("committed") as (n, cast):
         store, run = n.store, n.manifest.run_id()
+        sa.without_reaper(monkeypatch, store)
         assert not sa.lease_rows(store)
         # When: time passes; there is no job to exhaust.
         n.push(n.now + 1000)
@@ -377,10 +392,13 @@ def test_a_settled_round_is_untouched_by_late_audit_events(world: sa.World) -> N
         assert (settled_state(store), sa.records(store, *keep), minted()) == before
 
 
-def test_after_the_last_window_nothing_late_can_change_the_dropped_round(world: sa.World) -> None:
+def test_after_the_last_window_nothing_late_can_change_the_dropped_round(
+    world: sa.World, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Given: two executed leases and three queued jobs when the last audit window passes.
     with world.at("s2") as (n, cast):
         store, run = n.store, n.manifest.run_id()
+        sa.without_reaper(monkeypatch, store)
         held = running(store)
         stored = {h: store._record_v2(run, "executed-verdict", r["id"]) for h, r in held.items()}
         sa.run_out_the_windows(n, store)
@@ -431,10 +449,13 @@ def test_a_rollback_waits_for_every_audit_of_both_rounds(world: sa.World) -> Non
         assert detail(later) == (409, "missing accepted applied: 1")
 
 
-def test_audits_cannot_be_scheduled_once_the_horizon_is_one_round_away(world: sa.World) -> None:
+def test_audits_cannot_be_scheduled_once_the_horizon_is_one_round_away(
+    world: sa.World, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Given: a committed round whose audits were never scheduled, one round before the horizon.
     with world.at("committed") as (n, cast):
         store = n.store
+        sa.without_reaper(monkeypatch, store)
         horizon = store._record_v2(n.manifest.run_id(), "round", "0")["body"]["d_final"]
         n.push(horizon - 1)
         before = sa.digest_of(store)
@@ -747,11 +768,11 @@ def test_a_delta_manifest_must_carry_the_hash_and_size_of_the_commit(world: sa.W
 
 
 def test_the_audit_decision_is_bound_to_every_committed_hash(world: sa.World) -> None:
-    # Given: the honest allowlisted miner's audit, replayed by the master (a MATCH), and the same
-    # audit re-run by the comparator with one committed hash altered at a time.
+    # Given: an honest miner's audit, replayed by the master (a MATCH), and the same audit
+    # re-run by the comparator with one committed hash altered at a time.
     with world.at("s2") as (n, cast):
-        row = running(n.store)[cast.hot[3].ss58]
-        comparator = sa.Comparator(n, cast.hot[3], row)
+        row = sa.honest_lease(n.store, cast)
+        comparator = sa.Comparator(n, cast.keys[row["hotkey"]], row)
         control = comparator.outcome()
         assert (control.result, control.first_bad_leaf) == ("MATCH", None)
         assert control.recomputed_leaves_root == comparator.commit["leaves_root"]

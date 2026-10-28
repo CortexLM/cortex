@@ -341,12 +341,15 @@ def records(store: ChallengeStore, *kinds: str) -> dict[tuple[str, str], str]:
     return {(r[0], r[1]): r[2] for r in rows if not kinds or r[0] in kinds}
 
 
-def digest_of(store: ChallengeStore) -> str:
-    """Hash of every row of every table of the store and its run sub-stores."""
+def digest_of(store: ChallengeStore, *, without: tuple[str, ...] = ()) -> str:
+    """Hash of every row of every table of the store and its run sub-stores, less the tables
+    named in `without`."""
     hasher = hashlib.sha256()
     for part in store.stores():
         with part._lock:
             for name in table_names(part._db):
+                if name in without:
+                    continue
                 rows = sorted(
                     repr(tuple(row)) for row in part._db.execute(f'SELECT * FROM "{name}"')
                 )
@@ -569,9 +572,29 @@ def running(store: ChallengeStore) -> dict[str, dict[str, Any]]:
     return {h: r for h, r in lease_rows(store).items() if r["state"] == "running"}
 
 
+def honest_lease(store: ChallengeStore, cast: Cast) -> dict[str, Any]:
+    """The executed lease of stage s2 that is not the forger's. The queue is ordered by job id, a
+    hash of the run id, so which honest miner it belongs to changes with the manifest: a test
+    reads the row and takes the miner from its hotkey."""
+    (row,) = (r for h, r in running(store).items() if h != cast.forger.ss58)
+    return row
+
+
 def open_rows(store: ChallengeStore) -> list[dict[str, Any]]:
     """The jobs that are neither completed nor exhausted."""
     return [r for r in lease_rows(store).values() if r["state"] in ("queued", "running")]
+
+
+def without_reaper(patch: pytest.MonkeyPatch, store: ChallengeStore) -> None:
+    """Let the beacon route of `store` pass the exit reaper by. On the push that passes its bound
+    the reaper retires a round that its survivors cannot carry, or whose audits nobody scheduled
+    (ADR 0011 part 8), and the jobs of such a round close as ROUND_RETIRED instead of running out.
+    A test of the audit layer beneath it, which is all a round has when its retirement is refused
+    (an earlier round is still open) or fails, calls this once it is inside its world. It is not
+    a fixture: a stage is built on the first use of the world, and the snapshot every other test
+    restores must be built with the reaper on. The reaper has its own tests
+    (tests/challenge/test_exit_reaper_v2.py, tests/challenge/test_retire_round_v2.py)."""
+    patch.setattr(store, "_reap_exits_v2", lambda *args, **kwargs: None)
 
 
 def run_out_the_windows(network: Any, store: ChallengeStore) -> int:

@@ -81,8 +81,10 @@ from .support_expiry import (
 )
 
 ISSUED = 1_000_000
-NARROW = (1, 2, 10, 11, 12, 111)  # d_final - d_audit = 100, one lease of a tiny model (H <= 30)
-WIDE = (1, 2, 10, 11, 12, 150)  # d_final - d_audit = 139
+# d_upload is d_final: no member delivers a delta here, and from d_upload on the exit reaper
+# retires a round whose members have none (ADR 0011 part 8), which would end the audits early.
+NARROW = (1, 2, 10, 11, 111, 111)  # d_final - d_audit = 100, one lease of a tiny model (H <= 30)
+WIDE = (1, 2, 10, 11, 150, 150)  # d_final - d_audit = 139
 
 
 # --- CRD-15, A2W-17: an expiry a signer chose after admission -----------------------------------
