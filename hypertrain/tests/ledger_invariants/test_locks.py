@@ -264,8 +264,11 @@ def test_fraud_proven_after_the_bond_was_seized_still_burns_the_unvested_reward(
     precondition(rig.admission.store.record(miner.hotkey).state == "BANNED", "no conviction")
     # When: the beacon passes the release round of the origin
     rig.net.push(10)
-    # Then: the origin never vested
+    # Then: the origin never vested; its units burned with the contest bond and the stake
     assert vested(rig, origin) == 0
+    held = units_of(rig.escrow, miner.coldkey)
+    assert (held["reward_pending"], held["burned"]) == (0, BOND + STAKE + 500)
+    assert rig.escrow.balances().conserved()
 
 
 # --- AD-06, AD-08, DIB-09: the route back from a suspension, and its limits -------------------

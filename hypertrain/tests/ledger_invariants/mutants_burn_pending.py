@@ -46,6 +46,9 @@ NO_SHOW = (
     BOND_TESTS
     + "test_seize_bond_puts_a_first_no_show_on_probation_with_a_strike_and_burns_the_bond"
 )
+REPOSTED = (
+    BOND_TESTS + "test_a_verdict_posted_again_burns_the_origin_the_coldkey_gained_unvested_since"
+)
 LOT_DISPUTES = (
     "tests/ledger_invariants/test_gaps_disputes.py::"
     "test_only_the_origin_of_the_disputed_miner_is_held_and_nothing_is_paid_for_it"
@@ -71,6 +74,11 @@ EMPTIED_ROW = (
     "                \"AND bucket='reward_pending'\",\n"
     "                (origin, owner),\n"
     "            )\n"
+)
+PENDING_ORIGINS = '                "AND units>0 ORDER BY origin",\n'
+HOTKEYLESS_SKIPPED = (
+    '                "AND units>0 AND origin IN (SELECT origin FROM escrow_origins "\n'
+    '                "WHERE hotkey IS NOT NULL) ORDER BY origin",\n'
 )
 REPLAY = (
     "            old = self._existing(operation, request, server=True)\n"
@@ -180,6 +188,26 @@ MUTANTS = [
         "new": SELECT.replace("AND owner=? ", "AND (owner=? OR 1) "),
         "tests": [BURNS_ONLY_THE_OWNERS_PENDING],
         "why": "the burn reaches the pending units of an owner that is not the convicted one.",
+    },
+    {
+        "id": "burn-pending-not-after-the-ban",
+        "invariants": ["DIB-07", "DIB-17"],
+        "path": ADMISSION,
+        "old": CALL,
+        "new": (
+            '            if reason == "TRAINING_FRAUD" and not burned and r.state != "BANNED":\n'
+        ),
+        "tests": [REPOSTED],
+        "why": "a resolution posted again leaves the reward the coldkey gained since the ban.",
+    },
+    {
+        "id": "burn-pending-skips-hotkeyless-origins",
+        "invariants": ["DIB-07", "DIB-17"],
+        "path": LEDGER,
+        "old": PENDING_ORIGINS,
+        "new": HOTKEYLESS_SKIPPED,
+        "tests": [NO_BOND_LEFT],
+        "why": "the genesis or bootstrap collateral of a convicted coldkey vests, unburned.",
     },
     {
         "id": "burn-pending-deletes-the-emptied-row",

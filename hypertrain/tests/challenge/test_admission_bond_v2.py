@@ -247,7 +247,7 @@ def reward(
     *,
     vested: bool,
     mature_at: int = 50,
-    hotkey: str = HOT.ss58,
+    hotkey: str | None = HOT.ss58,
     origin: str = "aa" * 32,
     owner: Keypair = COLD,
 ) -> None:
@@ -781,11 +781,14 @@ def test_a_referee_verdict_against_the_miner_seizes_the_bond_and_bans(world: Wor
 def test_a_verdict_against_the_miner_burns_its_coldkeys_unvested_rewards_with_no_bond_to_slash(
     world: World, earlier: SeizureReason | None
 ) -> None:
-    # Given: the miner's pending origin, another hotkey's of the same coldkey, an origin that
-    # vested already, and another coldkey's pending origin; the bond, if any, was seized alone
+    # Given: the miner's pending origin, another hotkey's of the same coldkey, a hotkey-less one
+    # (genesis or bootstrap collateral), an origin that vested already, and another coldkey's
+    # pending origin; the bond, if any, was seized alone
     pending, sibling, vested, bystander = "aa" * 32, "bb" * 32, "cc" * 32, "dd" * 32
+    collateral = "ee" * 32
     reward(world, vested=False, origin=pending)
     reward(world, vested=False, origin=sibling, hotkey=NEW_HOT.ss58)
+    reward(world, vested=False, origin=collateral, hotkey=None)
     reward(world, vested=True, origin=vested)
     reward(world, vested=False, origin=bystander, owner=OTHER)
     bond = 1000 if earlier else 0
@@ -793,7 +796,7 @@ def test_a_verdict_against_the_miner_burns_its_coldkeys_unvested_rewards_with_no
         world.bond(bond)
         world.a.seize_bond(world.admission, reason=earlier, evidence_hash=H, now=1)
     b = balances(world)
-    assert (b.burned, b.admission_locked, b.reward_pending) == (bond, 0, 1500)
+    assert (b.burned, b.admission_locked, b.reward_pending) == (bond, 0, 2000)
     world.convict(loser=HOT.ss58)
     # When: the referee's verdict against the miner is settled
     assert world.a.settle_fraud(world.dispute_id, now=3) is True
@@ -801,16 +804,44 @@ def test_a_verdict_against_the_miner_burns_its_coldkeys_unvested_rewards_with_no
     # the other coldkey's stay; the contest bond (100) burned as for any verdict
     assert held(world, pending) == {"reward_pending": 0, "burned": 500}
     assert held(world, sibling) == {"reward_pending": 0, "burned": 500}
+    assert held(world, collateral) == {"reward_pending": 0, "burned": 500}
     assert held(world, vested) == {"available": 500}
     assert held(world, bystander) == {"reward_pending": 500}
     b = balances(world)
-    assert (b.burned, b.reward_pending) == (bond + 100 + 1000, 500) and b.conserved()
+    assert (b.burned, b.reward_pending) == (bond + 100 + 1500, 500) and b.conserved()
     assert world.a.store.by_id(world.admission).state == "BANNED"
     world.a.escrow.verify()
     # the resolution may be posted again: nothing is burned twice
     before = events(world)
     assert world.a.settle_fraud(world.dispute_id, now=4) is True
     assert events(world) == before
+
+
+@pytest.mark.parametrize("bonded", [False, True], ids=["no-bond-to-slash", "bond-slashed-with-it"])
+def test_a_verdict_posted_again_burns_the_origin_the_coldkey_gained_unvested_since(
+    world: World, bonded: bool
+) -> None:
+    # Given: a miner convicted with one unvested origin (and a bond, which the verdict slashes)
+    first, later = "aa" * 32, "bb" * 32
+    if bonded:
+        world.bond(1000)
+    reward(world, vested=False, origin=first)
+    world.convict(loser=HOT.ss58)
+    assert world.a.settle_fraud(world.dispute_id, now=3) is True
+    assert held(world, first) == {"reward_pending": 0, "burned": 500}
+    # When: an origin of the same coldkey appears unvested after the ban (a round that was
+    # still open finalized), and the resolution is posted again
+    reward(world, vested=False, origin=later)
+    before = events(world)
+    assert world.a.settle_fraud(world.dispute_id, now=4) is True
+    # Then: it burned too, by one event of its own, and the first origin is untouched
+    assert held(world, later) == {"reward_pending": 0, "burned": 500}
+    assert held(world, first) == {"reward_pending": 0, "burned": 500}
+    assert events(world) == before + 1
+    b = balances(world)
+    assert (b.burned, b.reward_pending) == ((1000 if bonded else 0) + 100 + 1000, 0)
+    assert b.conserved()
+    world.a.escrow.verify()
 
 
 @pytest.mark.parametrize("loser", ["auditor", "no-pending"])
