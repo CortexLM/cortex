@@ -6,15 +6,25 @@ showed is struck and its bond burned, a fault of the master's own sanctions nobo
 changes after the round opened cannot take the round with it, and a convicted member is not paid
 while the others are. The rules are those of ADR 0011 Part 8 and of Forge's decisions D47, D59 and
 D63. The roster contract (a rotation while a round lists the admission, a lapsed screen, a
-rotated hotkey) is in v3; the sanction of a no-show, the refusal of the contest of a verdict that
-upholds the work and the payment of the others when a member is convicted are not yet
-(audit-integrity-2).
+rotated hotkey) is pinned plainly; the sanction of a no-show, the refusal of the contest of a
+verdict that upholds the work and the payment of the others when a member is convicted are
+strict xfails tagged with the lot that implements them (audit-integrity-2).
 
 Every test states what happens to the standing of an admission (state, strikes, bond locked and
 burned), to a status code or to who is paid, never how the master gets there: the sanction may be
 booked by the first call that sees the silence or by the beacon, a refusal may come from the
 admission or from the store. A hole is a strict xfail that asserts the desired defence after a
 control the current code satisfies; each reason ends with the lot that will flip it.
+
+The strike window of a no-show is a rule of D63 that these tests use and do not measure: they ask
+only that a second silence one beacon round after the first is inside it and that one a hundred
+work screens after is outside it, which any window of a few screens that covers two
+PROBATION -> ACTIVE ladders satisfies. Where the window ends is pinned on audit-integrity-2 by
+tests/challenge/test_admission_bond_v2.py (a second no-show one round before the end of the
+window suspends, one at its end is a fresh probation) and tests/challenge/test_strike_window_v2.py
+(the window outlasts two ladders of the TEST and production policies); the lot does not mirror
+them. The second silence finds the bond already burned by the first, so what the second tier
+burns is not under test either.
 """
 
 from __future__ import annotations
@@ -26,7 +36,7 @@ import pytest
 
 from . import support_exit_roster as X
 
-FUNDED = ("ACTIVE", 0, 1000, 0)  # state, strikes, bond locked, units burned
+FUNDED = X.FUNDED
 
 
 @pytest.fixture
@@ -61,8 +71,8 @@ def silence_of_one_member(rnd: X.Round) -> list[int]:
 FIRST_NO_SHOW = b"exit-roster|no-show|round 0"
 
 
-def second_no_show(rnd: X.Round, member: int, screens: int) -> None:
-    """`member` is silent a second time, for the evidence of another round, `screens` work screens
+def second_no_show(rnd: X.Round, member: int, after: int) -> None:
+    """`member` is silent a second time, for the evidence of another round, `after` beacon rounds
     after the first one, having been put back on a roster in between (its trials are not under
     test here)."""
     X.seize(rnd, member, "NO_SHOW", FIRST_NO_SHOW)
@@ -70,7 +80,7 @@ def second_no_show(rnd: X.Round, member: int, screens: int) -> None:
         X.standing(rnd, member)[2:] == (0, 1000), "the first no-show burned the bond of the member"
     )
     X.back_on_a_roster(rnd, member)
-    rnd.network.push(rnd.network.now + screens * X.screen_rounds(rnd))
+    rnd.network.push(rnd.network.now + after)
     X.seize(rnd, member, "NO_SHOW", b"exit-roster|no-show|round 1")
 
 
@@ -84,6 +94,8 @@ def second_no_show(rnd: X.Round, member: int, screens: int) -> None:
     "decision 12]",
 )
 def test_the_first_no_show_of_an_admission_costs_it_a_strike_and_its_bond(silent: X.Round) -> None:
+    """NSH-01 (D63): the first no-show of an admission costs it one strike and its bond, and leaves
+    the standing of the other members untouched."""
     rnd = silent
     X.control(X.standing(rnd, rnd.quiet) == FUNDED, "the quiet member is a funded ACTIVE admission")
 
@@ -104,6 +116,8 @@ def test_the_first_no_show_of_an_admission_costs_it_a_strike_and_its_bond(silent
     "[fix-lot: audit-integrity-2 ADR0011-P8 D63 decision 12]",
 )
 def test_the_first_no_show_of_an_admission_puts_it_on_probation(silent: X.Round) -> None:
+    """NSH-05 (D63): the first no-show of an admission puts it on a fresh probation (reason NO_SHOW,
+    trials from clean_count 0); its way back is the trials."""
     rnd = silent
     record = X.admission_record(rnd, rnd.quiet)
     X.control(
@@ -128,10 +142,12 @@ def test_the_first_no_show_of_an_admission_puts_it_on_probation(silent: X.Round)
     "cycles) [fix-lot: audit-integrity-2 ADR0011-P8 D63 decision 12]",
 )
 def test_a_second_no_show_inside_the_window_suspends_the_admission(silent: X.Round) -> None:
+    """NSH-02: the second silence comes one beacon round after the first, which is inside any
+    window the rule of D63 allows; where the window ends is not asserted here (module docstring)."""
     rnd, member = silent, X.UNROSTERED
     X.control(X.standing(rnd, member) == FUNDED, "the member is a funded ACTIVE admission")
 
-    second_no_show(rnd, member, screens=1)
+    second_no_show(rnd, member, after=1)
     X.seize(rnd, member, "NO_SHOW", FIRST_NO_SHOW)  # a retry books nothing
 
     assert X.standing(rnd, member) == ("SUSPENDED", 2, 0, 1000)
@@ -146,6 +162,8 @@ def test_a_second_no_show_inside_the_window_suspends_the_admission(silent: X.Rou
     "[fix-lot: audit-integrity-2 ADR0011-P8 D63 decision 12]",
 )
 def test_a_no_show_adds_its_strike_to_a_suspension_and_keeps_its_reason(silent: X.Round) -> None:
+    """NSH-06 (D63): a no-show on a suspended admission adds its strike and keeps the state and the
+    reason it was suspended for."""
     rnd, member = silent, X.UNROSTERED
     X.seize(rnd, member, "AUDIT_MISMATCH", b"exit-roster|mismatch|round 0")
     record = X.admission_record(rnd, member)
@@ -174,10 +192,12 @@ def test_a_no_show_adds_its_strike_to_a_suspension_and_keeps_its_reason(silent: 
     "[fix-lot: audit-integrity-2 ADR0011-P8 D63 decision 12]",
 )
 def test_a_no_show_long_after_the_last_one_is_a_first_one_again(silent: X.Round) -> None:
+    """NSH-07 (D63): a no-show long after the last one is a first one again: another strike and a
+    fresh probation, not a suspension."""
     rnd, member = silent, X.UNROSTERED
     X.control(X.standing(rnd, member) == FUNDED, "the member is a funded ACTIVE admission")
 
-    second_no_show(rnd, member, screens=100)
+    second_no_show(rnd, member, after=100 * X.screen_rounds(rnd))
 
     assert X.standing(rnd, member) == ("PROBATION", 2, 0, 1000)
     assert X.admission_record(rnd, member)["reason"] == "NO_SHOW"
@@ -190,9 +210,10 @@ def test_a_loss_of_leaves_on_the_master_sanctions_nobody(queue: X.Round) -> None
     """NSH-04: the leaf object member `head` published is gone from the master's store, so no
     auditor can be given its job; the member did what it owed (the master holds the record of its
     publication) and every window ends without a verdict. The job is given up, nobody is struck,
-    nobody loses a bond, and whatever the exit records for the members it drops blames the
-    infrastructure, never a silence or a failed audit. How the round then closes (each member
-    excluded, or the round retired as a whole when nobody is left to carry it) is not under test."""
+    nobody loses a bond, and no book of the run holds a fault against anybody: no exclusion for a
+    silence or a failed audit, no exit sanction that blames a miner, no sanction applied by the
+    admission service. How the round then closes (each member excluded, or the round retired as a
+    whole when nobody is left to carry it) is not under test."""
     rnd = queue
     head = rnd.queue_order()[0]
     X.lose_leaves(rnd, head)
@@ -207,7 +228,7 @@ def test_a_loss_of_leaves_on_the_master_sanctions_nobody(queue: X.Round) -> None
     assert [row["state"] for row in rnd.lease_rows() if row["hotkey"] == rnd.hotkey(head)] == [
         "exhausted"
     ]
-    assert set(rnd.excluded().values()) <= {"INFRASTRUCTURE"}
+    assert X.faults_booked(rnd) == []
     assert [X.standing(rnd, i) for i in rnd.members] == [FUNDED] * len(rnd.members)
 
 
@@ -260,6 +281,8 @@ def test_an_admission_an_open_round_lists_cannot_rotate(queue: X.Round) -> None:
     "[fix-lot: audit-integrity-2 ADR0011-P8 D47 decision 21]",
 )
 def test_a_miner_cannot_contest_a_verdict_that_upholds_its_work(tmp_path: Path) -> None:
+    """ROS-02: a miner cannot contest a verdict that upholds its work: the contest is refused, and
+    it neither suspends the miner nor pins the round."""
     with X.audited_head(tmp_path) as (rnd, head):
         results = [row["result"] for row in rnd.lease_rows() if row["hotkey"] == rnd.hotkey(head)]
         X.control(
@@ -279,12 +302,18 @@ def test_a_miner_cannot_contest_a_verdict_that_upholds_its_work(tmp_path: Path) 
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="ROS-03: finalize re-derives who may be paid from the live admissions, so the "
-    "conviction of one audited member between the aggregation and the finalize refuses the "
-    "Finalize of the four others instead of paying them without it "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 D59 decision 23]",
+    reason="ROS-03: finalize pays exactly the inputs of the applied tape, so after the conviction "
+    "of one of its five members the Finalize of the four others is refused 422 'finalized "
+    "included set differs from full accepted authority': it has to list the convicted member "
+    "too; D59 withholds a convicted coldkey from the pay of the round and accepts the Finalize "
+    "of the others [fix-lot: audit-integrity-2 ADR0011-P8 D59 decision 23]",
 )
 def test_a_banned_admission_is_not_paid_and_the_others_are(tmp_path: Path) -> None:
+    """ROS-03: the rule of the FIN-18+D59 test of test_finality_2.py, on a round of the roster
+    fixtures whose five members really trained and were audited. That test is the stronger one: it
+    also pins the ban by coldkey, the refusal of a Finalize that still lists the convicted, the
+    split of the whole budget between the unconvicted and conservation. This one shows the rule
+    holds end to end on a round nobody staged."""
     with X.audited_round(tmp_path, 5) as rnd:
         banned, others = 2, [0, 1, 3, 4]
         response = X.aggregate(rnd)
