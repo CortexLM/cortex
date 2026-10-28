@@ -390,6 +390,27 @@ def test_two_references_of_a_large_model_stage_one_at_a_time_and_leave_the_lock_
     ]
 
 
+def test_exporting_a_trial_of_a_large_model_holds_the_store_lock_for_less_than_a_second(
+    hosted, monkeypatch
+):
+    run_id, store = hosted.manifest.run_id(), hosted.store
+    admission_id = pending_reference(hosted)
+    staging = SizedStaging(monkeypatch, MODELS["101M"])
+    put = store.objects.put
+
+    def slow_put(data: bytes) -> str:  # five objects, the two states are the large ones
+        time.sleep(staging.seconds / 5)
+        return put(data)
+
+    monkeypatch.setattr(store.objects, "put", slow_put)
+    began = time.perf_counter()
+    with LockWatch(store) as watch:
+        exported = store.export_trial_v2(run_id, admission_id)
+    assert time.perf_counter() - began >= 2 * staging.seconds  # staging, then the five puts
+    assert max(watch.waits) < 1.0, f"the lock was unavailable for {max(watch.waits):.2f} s"
+    assert set(exported["objects"]) == {"start_state", "ef_in", "v0", "samples", "sample_proofs"}
+
+
 class GuardedDb:
     """The store's connection, which notes every statement a thread runs without the store lock."""
 
@@ -405,7 +426,8 @@ class GuardedDb:
         return getattr(self.real, name)
 
 
-def test_a_reference_reads_the_store_connection_only_under_the_store_lock(hosted):
+@pytest.mark.parametrize("call", ["trial_reference_v2", "export_trial_v2"])
+def test_a_trial_call_reads_the_store_connection_only_under_the_store_lock(hosted, call):
     # The connection is shared: a read from the unlocked staging, launch or puts could see another
     # thread's uncommitted rows, so what they need is read before the lock is let go.
     run_id, store = hosted.manifest.run_id(), hosted.store
@@ -414,7 +436,7 @@ def test_a_reference_reads_the_store_connection_only_under_the_store_lock(hosted
     guarded = GuardedDb(store._db, store._lock)
     store._db = guarded
     try:
-        store.trial_reference_v2(run_id, admission_id)
+        getattr(store, call)(run_id, admission_id)
     finally:
         store._db = guarded.real
     assert guarded.unlocked == []

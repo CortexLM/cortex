@@ -2932,6 +2932,8 @@ class ChallengeStore:
         ), directory
 
     def export_trial_v2(self, run_id: str, admission_id: str) -> dict[str, Any]:
+        """The trial's job and its objects. The store lock covers the reads and the planning of
+        the staging; the staging and the puts, O(model) both, run after it let go."""
         from hypertrain.data.trial_assignment import trial_samples
 
         self._services(run_id)
@@ -2955,34 +2957,36 @@ class ChallengeStore:
             except BeaconError:
                 raise ChallengeError(503, "beacon infrastructure paused") from None
             samples = trial_samples(manifest, admission_id, challenge.nonce, beacon)
-            job, directory = self.stage_trial_v2(run_id, challenge, samples, row["trial_epoch"])
-            path = directory / "job.json"
-            raw = job.model_dump_json().encode()
-            if path.exists():
-                if path.read_bytes() != raw:
-                    raise ChallengeError(409, "immutable trial job changed")
-            else:
-                with tempfile.TemporaryDirectory(dir=directory) as temporary:
-                    staged = Path(temporary) / "job.json"
-                    staged.write_bytes(raw)
-                    staged.replace(path)
-            objects = {
-                name: self.objects.put((directory / relative).read_bytes())
-                for name, relative in job.object_paths.items()
-            }
+            stage = self.plan_trial_v2(run_id, challenge, samples, row["trial_epoch"])
             receipt = self._db.execute(
                 "SELECT receipt FROM admission_reservations WHERE reservation=?",
                 (f"challenge|{admission_id}|{challenge.nonce}",),
             ).fetchone()
             if receipt is None:
                 raise ChallengeError(409, "MISSING_CHALLENGE_RECEIPT")
-            return {
-                "job": job.body(),
-                "objects": objects,
-                "challenge": challenge.body(),
-                "challenge_envelope": envelope_v2.load_json(receipt["receipt"]),
-                "nonce": challenge.nonce,
-            }
+            envelope = envelope_v2.load_json(receipt["receipt"])
+        job, directory = stage()
+        path = directory / "job.json"
+        raw = job.model_dump_json().encode()
+        if path.exists():
+            if path.read_bytes() != raw:
+                raise ChallengeError(409, "immutable trial job changed")
+        else:
+            with tempfile.TemporaryDirectory(dir=directory) as temporary:
+                staged = Path(temporary) / "job.json"
+                staged.write_bytes(raw)
+                staged.replace(path)
+        objects = {
+            name: self.objects.put((directory / relative).read_bytes())
+            for name, relative in job.object_paths.items()
+        }
+        return {
+            "job": job.body(),
+            "objects": objects,
+            "challenge": challenge.body(),
+            "challenge_envelope": envelope,
+            "nonce": challenge.nonce,
+        }
 
     def _dispute_span_v2(
         self, run_id: str, contest: Contest, level: Any, ctx: tuple[int, ...]
