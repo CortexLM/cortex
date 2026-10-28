@@ -812,7 +812,9 @@ and the round aggregates as soon as the member is eligible again. Call `aggregat
 joins and audits are served while it runs (minutes at 100 M parameters). It writes the round only
 if what it read when it started still holds when it ends; otherwise it answers 409
 `AGGREGATE_STALE` and writes nothing, and the same call made again reads the round as it is. A
-second `aggregate` of a round that is computing waits for it and gets its answer or its error. At
+round that is retired while its tape computes (an `applied` record of kind `null`, ADR 0011 Part
+8) takes no tape: the call answers 409 `ROUND_RETIRED`, as a call made after the retirement does,
+and writes nothing. A second `aggregate` of a round that is computing waits for it and gets its answer or its error. At
 most two such calls wait per process: a third answers 503 `aggregate already running for this
 round; retry`, and a waiter gives up after 600 s with 503 `aggregate still running for this
 round; retry`. `finalize` replays the applied tape before it takes the lock, and uses that replay

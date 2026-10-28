@@ -592,7 +592,8 @@
   177-223 s of one lock hold at the 100.7 M profile (five deltas of 102,253,376 bytes), during
   which `push_beacon` and `latest_beacon` waited and the TEST freshness gate closed. `aggregate`
   is now a claim, a computation without the lock and a settlement that writes only if the round
-  is still what the claim read (else 409 `AGGREGATE_STALE`, nothing written); the claim and
+  is still what the claim read (else 409 `AGGREGATE_STALE`, nothing written, or 409
+  `ROUND_RETIRED` when the round was retired meanwhile); the claim and
   every time-dependent decision of the plan are made at the beacon round the freshness gate
   passed at. A second `aggregate` of a round that is computing waits for it (two waiters per
   process, 600 s, then 503). `finalize` replays the applied tape before its transaction and the

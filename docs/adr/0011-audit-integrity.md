@@ -601,6 +601,32 @@ breaker bounds the attempt-based one).
   only the golden run ids and training hashes were regenerated (`tests/protocol/test_model_arch.py`,
   `test_od_fields.py`, `test_network_v2.py`, `tests/trainer/test_config_v2.py`).
 
+  **On the integrated tree** (`v3-integration-final`: this part merged with audit-integrity-2, the lock-free
+  trial reference and the lock-free aggregate; `hypertrain/src` tree `f29b41f2…`, measured 2026-10-28 on a
+  `git diff`-clean worktree and on a `git archive` of the commit `b4a92966`, with `hash_consequences.py`, the
+  commands above; valid for every later commit that touches nothing under `hypertrain/src`) [V]:
+
+  | Value | Measured on the integrated tree |
+  | --- | --- |
+  | `implementation_hash`, example pin (`avx2`/`none`) | `d61bd2b8…71bdc4` |
+  | same code, `avx512`/`none` | `cbbb0465…59af17` |
+  | same code, `avx2`/`sm_103`/`math` | `8004daae…243582` |
+  | same code, `avx2`/`sm_103`/`sdpa-flash` | `2969e4a7…f07ea6` |
+  | same code, `avx2`/`sm_120`/`sdpa-flash` | `f3c351b3…af21f2` |
+  | owned names / hashed files of `implementation_hash` | 48 / 12 |
+  | `challenge/store.py` sha256 | `5cd7d7f5…4c318b` |
+  | `challenge/admission.py` sha256 | `8b812e46…25b51b` |
+  | `gpu_ops/network_qualification.py` sha256 | `2206486f…319688` |
+  | `sources()` map: files, canonical sha256 | 158, `1cb3027a…bc7fe3` |
+  | `sources` listing, `sha256sum` of the CLI output | `0c58a13e…c902e6` |
+  | `bundle()` | 2,734,080 bytes, `aa5f3f2f…df3bf3` |
+  | example `run_id` / `reference_hash` | `aa39197d…ec8abd` / `2dd4eadc…d6cc5d` (as in the DET-01 column: the integration edits no manifest field) |
+
+  The value is neither parent's: `implementation_hash` hashes the 12 files, the pin body and the owned
+  names of both lots (this part adds `_capacity_env_v2`; the lock lots add the aggregate and finality
+  replay helpers and the integration the verdict-age helper). The 12 files are the ones of this part;
+  `executor-lock-release` and `aggregate-lock-release` change none of them.
+
 ### Rejected alternatives
 
 1. `reference_spec.env.numerics`, 8 required keys: cannot say "unset"; scrubs whole prefix families
@@ -1548,6 +1574,12 @@ so a qualification record made on a parent tree no longer validates against this
 on the tree that is released. The tip differs from the merge `ebd0098e` by a docstring of `store.py` (the function
 is not owned, so `implementation_hash` does not move); the commits after `ae7ddf70` touch tests and documents only,
 so the values hold for them.
+
+On the integrated tree of `v3-integration-final` (DET-01, the lock-free reference and the lock-free aggregate
+merged; measured on `b4a92966`, see Part 3 for the full table) `implementation_hash` is `d61bd2b8…71bdc4` for the
+example pin, `challenge/store.py` is `5cd7d7f5…4c318b`, `sources()` is 158 files with canonical sha256
+`1cb3027a…bc7fe3` and `bundle()` is 2,734,080 bytes, `aa5f3f2f…df3bf3`. The tables above stay as the values of
+the parents.
 
 ### Consequences
 

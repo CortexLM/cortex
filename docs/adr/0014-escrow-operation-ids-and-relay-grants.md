@@ -392,7 +392,10 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
   28 or the 10 files (F6, D66, F7b, the relay and the two body envelopes included). On the tree merged with
   `origin/v3`, `v3-ledger-refusals` and `v3-roster-contract-b` the value is `fc9e87b0…c8fe`; it differs from each
   of those refs alone (`941247f8…88d1`, `02405ab1…dfff`, `bfdd776a…03fe`) because it combines the edits of
-  `finalize_v2` and of the owned helpers that came with them.
+  `finalize_v2` and of the owned helpers that came with them. On the integrated tree of `v3-integration-final`
+  (this lot, audit-integrity-2, DET-01 and the two lock releases; `b4a92966`) it is `d61bd2b8…71bdc4` for the
+  example pin (ADR 0011 Part 3 has the full table), `challenge/store.py` is `5cd7d7f5…4c318b`, `sources()` 158 files
+  `1cb3027a…bc7fe3`, `bundle()` 2,734,080 bytes `aa5f3f2f…df3bf3`.
 - Schema: no table, column or key changes. One partial index is created if absent.
 - Compatibility: new server events carry a new key and new hashes, new origins new ids; old chains verify
   unchanged and are forward-only for the first new server event (an older image then fails closed with an
