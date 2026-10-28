@@ -14,6 +14,12 @@ test_a_member_that_loses_its_standing_after_its_audit_never_freezes_the_round ar
 mutant here. The opening check of 20b177ac (a roster screen that ends before the audit window) is
 pinned by no test of the lot: every fixture of the lot sets a screen far in the future.
 
+Since DSP-04 (b0ac0ab5) the contest of a MATCH verdict is refused, so the two pins that file one
+(a member contesting its own MATCH verdict, a member back from a closed contest) only reach their
+refusal branch and cannot tell a suspended or a probationary member from a fit one. The two mutants
+that revert the cause named for such a member name the test of the base suite that holds it
+(test_member_state_v2, which puts the admission in each state through the real hooks).
+
 Run from hypertrain/: .venv/bin/python scripts/check_ledger_invariant_mutants.py --only <ids>
 """
 
@@ -23,6 +29,7 @@ ADMISSION = "src/hypertrain/challenge/admission.py"
 STORE = "src/hypertrain/challenge/store.py"
 
 ROSTER = "tests/ledger_invariants/test_exit_roster_2.py::"
+MEMBER_STATE = "tests/challenge/test_member_state_v2.py::test_the_cause_of_an_unfit_entry_is_named"
 LOCK = "tests/ledger_invariants/test_gaps_admission_lock_2.py::"
 DISPUTES = "tests/ledger_invariants/test_gaps_disputes.py::"
 FINALITY = "tests/ledger_invariants/test_gaps_finality_2.py::"
@@ -111,7 +118,7 @@ MUTANTS = [
             '        if record.state in ("BANNED", "SUSPENDED"):\n            return record.state\n'
         ),
         "new": ('        if record.state in ("BANNED", "SUSPENDED"):\n            return None\n'),
-        "tests": [OWN_CONTEST],
+        "tests": [MEMBER_STATE + "[banned]", MEMBER_STATE + "[suspended-and-unfunded]"],
         "why": (
             "A member suspended by its own contest is judged fit, stays in the roster and the"
             " aggregation of the four others answers 403 until a verdict the contest cannot win."
@@ -123,7 +130,7 @@ MUTANTS = [
         "path": STORE,
         "old": '            return "NOT_LIVE"\n',
         "new": "            return None\n",
-        "tests": [CLOSED_CONTEST],
+        "tests": [MEMBER_STATE + "[fresh-probation]"],
         "why": (
             "A member that came back from a closed contest on probation without a clean trial is"
             " judged fit, so the aggregation of the four others answers 403 for it."
@@ -149,9 +156,8 @@ MUTANTS = [
             "            )\n"
         ),
         "new": (
-            "            included = self._unconvicted_v2(\n"
-            "                x.roster.hotkey for x in self.verified_inputs_v2(run_id, w)\n"
-            "            )\n"
+            "            included = self._unconvicted_v2("
+            "x.roster.hotkey for x in self.verified_inputs_v2(run_id, w))\n"
         ),
         "tests": [LAPSED_AT_FINALIZE, STAKE_FELL, SANCTIONED_AT_FINALIZE],
         "why": (

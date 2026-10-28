@@ -187,8 +187,10 @@ MUTANTS = [
         "id": "exp-aggregate-skips-freshness",
         "invariants": ["FIN-23"],
         "path": STORE,
-        "old": 'now = self._fresh_v2(manifest, f"aggregate:{w}:{self._now(self._db)}")',
-        "new": "now = self._now(self._db)",
+        "old": (
+            '            now = self._fresh_v2(manifest, f"aggregate:{w}:{self._now(self._db)}")\n'
+        ),
+        "new": "            now = self._now(self._db)\n",
         "tests": [WRITE + "[aggregate]"],
         "why": "a round is aggregated while the beacon is stale.",
     },

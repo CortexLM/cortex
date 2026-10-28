@@ -610,8 +610,11 @@ MUTANTS = [
         "id": "dsp-beacon-push-walks-the-live-guard-registry",
         "invariants": ["DIB-24", "DIB-D12"],
         "path": S,
-        "old": "            guards = tuple(self._lease_guards_v2.values())\n",
-        "new": "            guards = self._lease_guards_v2.values()\n",
+        "old": "        with self._lock:  # a reference registers and drops its guard from another thread\n"
+        "            guards = tuple(self._lease_guards_v2.values())\n"
+        "        for guard in guards:\n"
+        "            guard.advance(br.round)\n",
+        "new": "        for guard in self._lease_guards_v2.values():\n            guard.advance(br.round)\n",
         "tests": [PUSH_SNAPSHOT],
         "why": "The beacon push iterates the live guard registry, so a lease execution that registers its guard meanwhile breaks the push (RuntimeError).",
     },

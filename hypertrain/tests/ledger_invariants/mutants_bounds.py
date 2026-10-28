@@ -632,8 +632,22 @@ MUTANTS += [
         "id": "bnd-cpu-summary-qualifies",
         "invariants": ["BND-18"],
         "path": STORE,
-        "old": 'if summary.get("backend") != "cuda":',
-        "new": "if False:",
+        # The summary of a CPU run is refused twice, by its backend and, since DET-01, by the
+        # absence of the environment it declares: this reverts the first and lets a missing
+        # declaration pass.
+        "old": (
+            '                    if summary.get("backend") != "cuda":\n'
+            "                        raise ChallengeError("
+            '403, "CPU artifacts cannot qualify CUDA execution")\n'
+            '                    declared = summary.get("env")\n'
+            "                    if not isinstance(declared, dict) or "
+            "observation_divergence(env_pin, declared):\n"
+        ),
+        "new": (
+            '                    declared = summary.get("env")\n'
+            "                    if isinstance(declared, dict) and "
+            "observation_divergence(env_pin, declared):\n"
+        ),
         "tests": [
             "tests/challenge/test_backend_authority_v2.py::"
             "test_invalid_reviewed_authority_rejects_without_install[cpu_summary]"

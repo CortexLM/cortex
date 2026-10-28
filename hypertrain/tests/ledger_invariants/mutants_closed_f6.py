@@ -1,14 +1,20 @@
 """Mutants of the closed hole F6: one origin that cannot mature stops the beacon.
 
 The fix (escrow lot, 4a7a1bea, ADR 0014 part 7) lets `ChallengeStore.push_beacon` catch the failure
-of one origin, journal it and go on. The two pins below were strict xfails until it landed. The ten
-entries are not all reverts of the fix.
+of one origin, journal it and go on. The two pins below were strict xfails until it landed. The
+nine entries are not all reverts of the fix.
 
-Seven undo a behaviour of the fix or the guarantee it adds, in a private copy of src, so that the
-runner proves the pins fail without it: the old handler, the handler narrowed to EscrowError or to
-an allowlist of classes (the alternative the commit rejected), the custody refusals treated as a
-broken ledger, the failure re-raised after its journal, the journal that cannot record a first
-failure, and the loop that ends at the first stuck origin.
+Six undo a behaviour of the fix or the guarantee it adds, in a private copy of src, so that the
+runner proves the pins fail without it: the old handler, the handler narrowed to EscrowError, the
+custody refusals treated as a broken ledger, the failure re-raised after its journal, the journal
+that cannot record a first failure, and the loop that ends at the first stuck origin.
+
+The [rotated] variant of each pin is named by no mutant. It was the case of a failure that is
+neither an EscrowError nor a ChallengeError (an UnauthorizedSigner), which a handler narrowed to an
+allowlist of classes let through. Since 3d6129d3 (D66) a rotated custody revalidates, so nothing is
+raised for the handler to isolate there, and the variant is held by two guards at once, the
+revalidation and the breadth of the handler: no single snippet reverts both. The D66 table holds the
+revalidation.
 
 Three are regressions the pin must survive and are not part of 4a7a1bea: they model a stuck origin
 that makes the push skip a later step (the lease expiry, the closing of blocked disputes, the
@@ -54,14 +60,11 @@ LEDGER_UNVALIDATABLE = (
     "test_an_origin_with_unvalidatable_custody_does_not_stop_the_other_due_origins"
 )
 
-# One id per variant of each pin: the first two fail with a ChallengeError, the third with an
-# UnauthorizedSigner (the admission's hotkey was rotated after the credit).
+# One id per variant of each pin that the handler isolates: both fail with a ChallengeError.
 PUSH_MISSING = PUSH + PUSH_POISONED + "[the shadow-custody record is missing]"
 PUSH_CHANGED = PUSH + PUSH_POISONED + "[a retained publication changed]"
-PUSH_ROTATED = PUSH + PUSH_POISONED + "[the admission was rotated to a spare hotkey]"
 LEDGER_MISSING = LEDGER + LEDGER_UNVALIDATABLE + "[the shadow-custody record is missing]"
 LEDGER_CHANGED = LEDGER + LEDGER_UNVALIDATABLE + "[a retained publication changed]"
-LEDGER_ROTATED = LEDGER + LEDGER_UNVALIDATABLE + "[the admission's hotkey was rotated]"
 
 MUTANTS = [
     {
@@ -88,10 +91,8 @@ MUTANTS = [
         "tests": [
             PUSH_MISSING,
             PUSH_CHANGED,
-            PUSH_ROTATED,
             LEDGER_MISSING,
             LEDGER_CHANGED,
-            LEDGER_ROTATED,
         ],
         "why": (
             "The per-origin handler is the old one again, which re-raises every failure but the "
@@ -111,19 +112,6 @@ MUTANTS = [
             "The handler is narrowed to EscrowError while it keeps the journal, so the custody "
             "failures that are not ledger errors still escape the loop, roll back the maturity "
             "of the other origins and fail the push."
-        ),
-    },
-    {
-        "id": "closed-f6-handler-allowlist-spares-the-rotation-failure",
-        "invariants": ["SHD-19", "SHD-D3", "SHD-21"],
-        "path": STORE,
-        "old": HANDLER,
-        "new": HANDLER.replace("Exception", "(EscrowError, ChallengeError)"),
-        "tests": [PUSH_ROTATED, LEDGER_ROTATED],
-        "why": (
-            "The handler names the classes seen so far, so the signer error that a hotkey "
-            "rotation raises while the original custody is revalidated escapes it and stops "
-            "the maturity of every other origin."
         ),
     },
     {

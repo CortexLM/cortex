@@ -64,14 +64,14 @@ EPOCH_AT = "        epoch_at: Annotated[int | None, Query(ge=0, lt=2**63)] = Non
 
 
 def settle_clause(
-    name: str, clause: str, case: str, why: str, replacement: str = ""
+    name: str, clause: str, case: str, why: str, narrowed: str = ""
 ) -> dict[str, object]:
     return mutant(
         f"gw-settle-ignores-{name}",
         ["FIN-02", "WGT-02"],
         FINALITY,
         clause,
-        replacement,
+        narrowed,
         [REFUSED + f"[{case}]"],
         why,
     )

@@ -34,8 +34,12 @@ RESOLUTION_ROUTE = FILE + (
     "test_a_resolution_route_refuses_a_signed_envelope_that_names_no_dispute"
 )
 SQUAT = FILE + "test_a_client_event_cannot_stop_the_beacon_from_closing_a_stuck_contest"
-OWN_MATCH = FILE + (
-    "test_a_member_contesting_its_own_matching_verdict_does_not_stop_the_round_of_the_others"
+# Since DSP-04 refuses the contest of a MATCH verdict, the pin of the lot (a member contesting its
+# own MATCH) only reaches its refusal branch and cannot tell a suspended member from a fit one; the
+# base test that names the cause of every unfit entry holds the defence.
+SUSPENDED_IS_UNFIT = (
+    "tests/challenge/test_member_state_v2.py::"
+    "test_the_cause_of_an_unfit_entry_is_named[pending-dispute]"
 )
 ROLLBACK_PAID = FILE + "test_a_round_opened_after_a_two_round_rollback_is_credited"
 ORIGIN_HELD = FILE + (
@@ -282,7 +286,7 @@ MUTANTS = [
         "path": STORE,
         "old": UNFIT_SUSPENDED,
         "new": UNFIT_SUSPENDED_IS_FIT,
-        "tests": [OWN_MATCH],
+        "tests": [SUSPENDED_IS_UNFIT],
         "why": "A member suspended by its own contest is not named unfit, so the real round of "
         "the four others is refused for it.",
     },

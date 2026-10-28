@@ -146,9 +146,7 @@ MUTANTS = [
         "id": "el-transfer-draws-reward-pending",
         "invariants": ["ESC-07"],
         "path": ESCROW,
-        "old": (
-            'self._move(op, "available", "available", recipient=op.recipient, skip_empty=True)'
-        ),
+        "old": 'self._move(op, "available", "available", recipient=op.recipient, skip_empty=True)',
         "new": (
             'self._move(op, "reward_pending", "available", recipient=op.recipient, skip_empty=True)'
         ),

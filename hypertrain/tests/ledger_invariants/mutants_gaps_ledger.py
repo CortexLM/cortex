@@ -38,9 +38,6 @@ VESTING = (
 OWNERSHIP = G + (
     "test_a_rotation_between_the_credit_and_the_pay_keeps_every_unit_with_the_coldkey_that_earned_it"
 )
-ROTATED = G + (
-    "test_the_units_of_a_rotated_miner_are_emitted_to_the_hotkey_its_admission_holds_now"
-)
 
 REPEATED_COMPLETION = G + (
     "test_a_repeated_audit_completion_neither_decrements_the_counter_again_nor_changes_anything"
@@ -190,17 +187,6 @@ MUTANTS: list[dict[str, Any]] = [
         "tests": [OWNERSHIP],
         "why": "Paying an origin re-keys its units from the coldkey that earned them to the "
         "hotkey the weights name, the shape of a naive fix for the rotated payee.",
-    },
-    {
-        "id": "gapledger-the-units-of-a-rotated-miner-are-paid-to-the-hotkey-that-signed-the-work",
-        "invariants": ["CRD-12", "WGT-13", "CL-29"],
-        "path": STORE,
-        "old": '        return None if row["banned"] else str(row["hotkey"])\n',
-        "new": '        return None if row["banned"] else hotkey\n',
-        "tests": [ROTATED],
-        "why": "The weight of a matured origin goes to the hotkey that signed the work, not to "
-        "the one its admission holds now, so a rotated miner's quarter is emitted to a key it no "
-        "longer runs.",
     },
     # --- T-CRD-04 and T-CRD-12 -----------------------------------------------------------------
     {

@@ -374,11 +374,13 @@ MUTANTS = [
         "finalize-commits-before-the-ledger",
         ["FIN-04"],
         STORE,
-        '                    "theta_hash": str(applied["theta_hash"]),\n'
-        "                },\n"
+        "            self._put_record_v2(\n"
+        '                run_id, "finalize", str(w), '
+        'envelope_v2.parse_envelope(raw).model_dump(mode="json")\n'
         "            )\n",
-        '                    "theta_hash": str(applied["theta_hash"]),\n'
-        "                },\n"
+        "            self._put_record_v2(\n"
+        '                run_id, "finalize", str(w), '
+        'envelope_v2.parse_envelope(raw).model_dump(mode="json")\n'
         "            )\n"
         '            self._db.execute("COMMIT")\n'
         '            self._db.execute("BEGIN IMMEDIATE")\n',
