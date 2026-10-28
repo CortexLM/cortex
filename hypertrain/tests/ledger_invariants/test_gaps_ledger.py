@@ -154,6 +154,7 @@ def test_the_scrub_removes_every_name_the_service_reads_and_leaves_its_defaults(
         config.role_dispatch_file,
         config.cuda_executor_file,
     ) == (None,) * 7
+    assert config.relay_lifecycle_interval == 120.0
 
 
 def test_a_service_the_lot_builds_ignores_a_polluted_environment(
@@ -446,15 +447,7 @@ def test_a_rotation_between_the_credit_and_the_pay_keeps_every_unit_with_the_col
     assert escrow.balances().conserved()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="CRD-12+WGT-13+CL-29: the units a rotated admission earned are emitted to the hotkey "
-    "recorded at issuance, not to the hotkey the admission holds now (nor is the rotation refused "
-    "while origins are owed); on the real finalize path of four miners the rotated miner's "
-    "quarter goes to the key it gave up. Rule to confirm: pay the current hotkey, or refuse "
-    "[fix-lot: decision (product choice pending)]",
-)
+# Closed by escrow-relay-fixes D66 (3d6129d3): get_weights pays the hotkey the admission holds now.
 def test_the_units_of_a_rotated_miner_are_emitted_to_the_hotkey_its_admission_holds_now(
     audited: Frozen,
 ) -> None:
@@ -533,7 +526,7 @@ def test_a_repeated_audit_completion_neither_decrements_the_counter_again_nor_ch
         def counter() -> int:
             return int(store._record_v2(run, "finality", "0")["unresolved_audits"])
 
-        honest = sa.running(store)[cast.hot[3].ss58]
+        honest = next(r for h, r in sa.running(store).items() if h != cast.forger.ss58)
         key = cast.keys[honest["auditor"]]
         stored = store._record_v2(run, "executed-verdict", honest["id"])
         assert stored["result"] == "MATCH" and counter() == 5  # control: five open, ours executed
@@ -541,7 +534,7 @@ def test_a_repeated_audit_completion_neither_decrements_the_counter_again_nor_ch
         first = sa.complete(n, key, honest["id"], stored)
 
         assert (first.status_code, first.json()) == (200, {"result": "MATCH"})
-        assert counter() == 4 and sa.lease_rows(store)[cast.hot[3].ss58]["state"] == "completed"
+        assert counter() == 4 and sa.lease_rows(store)[honest["hotkey"]]["state"] == "completed"
         completed = (settled_state(store), sa.digest_of(store))
         repeated = sa.complete(n, key, honest["id"], stored)
         assert (repeated.status_code, repeated.json()) == (200, {"result": "MATCH"})

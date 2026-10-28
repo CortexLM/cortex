@@ -24,7 +24,6 @@ from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Receipt
 from hypertrain.protocol.messages_v2 import WorkProof
 from hypertrain.protocol.relay_messages import (
-    ChunkCustodyAck,
     CustodyRelease,
     UploadGrant,
 )
@@ -56,14 +55,8 @@ RELAY_FIXTURE = ("li_relay_fixture", "relay/test_transport_v2.py")
 # SG-05 ------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "SG-05+HTP-03: a dispute watch signed in an earlier round is refused later "
-        "[fix-lot: audit-integrity-2 ADR0010-P3 (b018d425)]"
-    ),
-)
+# Closed by audit-integrity-2 ADR0010-P3 (b018d425, the shape of 5bd7537f): the poll is signed in
+# its body with an expiry.
 def test_a_dispute_watch_captured_in_an_earlier_round_is_refused_later(tmp_path: Path) -> None:
     party = sibling_service().HOT[0]
     with service_world(tmp_path) as world:
@@ -234,14 +227,7 @@ def test_a_repeated_anonymous_round_view_rewrites_no_stored_record(tmp_path: Pat
 # LV-02 ------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "LV-02+ADM-04: a signed object upload never takes the store lock on the event loop "
-        "[fix-lot: escrow-relay-fixes ADR0014-P8]"
-    ),
-)
+# Closed by escrow-relay-fixes ADR0014-P8 (b61c6389): the admission lookup runs on a worker thread.
 def test_a_signed_object_upload_never_takes_the_store_lock_on_the_event_loop(
     tmp_path: Path,
 ) -> None:
@@ -266,14 +252,7 @@ def test_a_signed_object_upload_never_takes_the_store_lock_on_the_event_loop(
 # LV-03 ------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "LV-03+TRN-02: the shipped relay can act on a master release of a retained upload "
-        "[fix-lot: escrow-relay-fixes ADR0014-P6]"
-    ),
-)
+# Closed by escrow-relay-fixes ADR0014-P6 (dae84220): the shipped relay wires the master's view.
 def test_the_shipped_relay_does_not_refuse_a_release_for_want_of_a_settlement_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -320,12 +299,12 @@ def test_the_shipped_relay_does_not_refuse_a_release_for_want_of_a_settlement_jo
     assert "settlement journal not configured" not in answer, answer
 
 
-def sealed_release(rig: Any, grant: UploadGrant, custody: ChunkCustodyAck) -> Any:
+def sealed_release(rig: Any, grant: UploadGrant, digest: str, pin: Any) -> Any:
     return rig.seal(
         CustodyRelease(
             grant_hash=grant.digest(),
-            custody_hashes=[custody.digest()],
-            retention_hash=custody.digest(),
+            custody_hashes=[digest],
+            retention_hash=pin.retention_hash,
             finality_hash=HASH,
             vesting_beacon=1,
             closed_dispute_root=HASH,
@@ -334,14 +313,7 @@ def sealed_release(rig: Any, grant: UploadGrant, custody: ChunkCustodyAck) -> An
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "LV-03+TRN-02: a released upload frees its slot in the retained-upload cap "
-        "[fix-lot: escrow-relay-fixes ADR0014-P6]"
-    ),
-)
+# Closed by escrow-relay-fixes ADR0014-P6 (4c32f0b1): the cap counts the custody still owed.
 def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: Path) -> None:
     fixture = load_fixture_module(*RELAY_FIXTURE)
     capacity = 2  # the cap is a constant; the property is that finished uploads leave it
@@ -360,16 +332,16 @@ def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: P
                 data = f"round {w}".encode()
                 grant, manifest, raw, assignment, opened = rig.upload(data, nonce=f"{w:064x}", w=w)
                 await rig.relay.accept(raw, manifest, assignment, opened)
-                served.append(
-                    (grant, ChunkCustodyAck.model_validate((await rig.put(grant, data)).body))
-                )
+                await rig.put(grant, data)
+                served.append(grant)
             # Control: the cap is what stops the next round's grant while nothing is released.
             grant, manifest, raw, assignment, opened = rig.upload(b"next", nonce="ee" * 32, w=9)
             with pytest.raises(RelayError, match="retained upload quota exhausted"):
                 await rig.relay.accept(raw, manifest, assignment, opened)
-            # Finality releases custody of both served rounds.
-            for earlier, custody in served:
-                await rig.relay.release(sealed_release(rig, earlier, custody))
+            # Finality releases custody of both served rounds: the receipt and each chunk.
+            for earlier in served:
+                for digest, pin in (await rig.relay.state()).uploads[earlier.digest()].pins.items():
+                    await rig.relay.release(sealed_release(rig, earlier, digest, pin))
             try:
                 await rig.relay.accept(raw, manifest, assignment, opened)
             except RelayError as error:

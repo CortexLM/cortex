@@ -353,20 +353,13 @@ def resolve(world: World, dispute_id: str, *, reason: str, loser: str | None) ->
 def watch_poll(client: Any, world: World, party: Keypair, *, timeout: int) -> Any:
     """One long poll of the dispute watch as `party`, returned unchecked.
 
-    The one place that knows how the watch authenticates: a signature over run and party in an
-    HTTP header of a GET where the service reads it there (SIG-01), and a signed `WatchRequest`
-    in the body of a POST where it reads it there (ADR 0014 part 8, audit-integrity-2)."""
+    The one place that knows how the watch authenticates: a signed `DisputeWatchRequest` in the
+    body of a POST (ADR 0014 part 8); the header-signed GET is retired and answers 405."""
     net = world.network
-    if hasattr(messages_v2, "WatchRequest"):
-        asked = messages_v2.WatchRequest(party=party.ss58, cursor=0, wait_seconds=timeout)
-        return client.post(
-            net.url + "/disputes", json=net.signed(party, "WatchRequest", asked, net.now + 20)
-        )
-    signature = party.sign(f"hypertrain/watch/2|{world.run_id}|{party.ss58}".encode()).hex()
-    return client.get(
-        net.url + "/disputes",
-        params={"party": party.ss58, "timeout": timeout},
-        headers={"x-dispute-signature": signature},
+    asked = messages_v2.DisputeWatchRequest(party=party.ss58, cursor=0, wait=timeout)
+    return client.post(
+        net.url + "/disputes/watch",
+        json=net.signed(party, "DisputeWatchRequest", asked, net.now + messages_v2.REQUEST_HORIZON),
     )
 
 
