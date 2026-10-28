@@ -221,7 +221,7 @@ def paid_after(world: World) -> dict[str, float]:
 def test_matured_units_are_emitted_to_the_hotkey_that_earned_them_while_it_is_the_current_one(
     tmp_path: Path,
 ) -> None:
-    # Control of the hole below: the origin of the first hotkey pays that hotkey, once.
+    # Control of the rotation test below: the origin of the first hotkey pays that hotkey, once.
     service = load_fixture_module(*SERVICE_FIXTURE)
     hot, cold = service.HOT[0].ss58, service.COLD[0]
     origins = [(fresh_id("cl-29"), hot, cold.ss58, PAID)]
@@ -231,16 +231,7 @@ def test_matured_units_are_emitted_to_the_hotkey_that_earned_them_while_it_is_th
         assert paid_after(world) == {hot: float(PAID)}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DefenceMissing,
-    reason=(
-        "CRD-12+WGT-13+CL-29: the units a rotated admission earned are emitted to the hotkey the "
-        "admission holds now (or the rotation is refused while origins are owed), but payable() "
-        "answers the hotkey recorded at issuance, so the weight goes to the key that was given up "
-        "[fix-lot: decision (product choice pending)]"
-    ),
-)
+# CRD-12+WGT-13+CL-29 closed by escrow-relay-fixes (3d6129d3): _payee_v2 pays the current hotkey.
 def test_matured_units_of_a_rotated_admission_are_emitted_to_its_current_hotkey(
     tmp_path: Path,
 ) -> None:
