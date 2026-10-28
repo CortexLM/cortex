@@ -287,6 +287,13 @@
   more; the admin routes remain. `ChallengeStore.release_due_v2` is one pass.
 
 ### Fixed
+- `GET /v2/runs/{run_id}/admission/{hotkey}` no longer tells anyone the lock id, the origin ids or
+  the `finality_hash`/`closed_dispute_root` of an admission bond (D51, D52 I2, ADR 0014 point 9,
+  which was untrue for this route); it keeps `units`, `outcome`, `releasable` and
+  `release_beacon`. The holder reads the terms with `POST /v2/runs/{run_id}/join/{admission_id}/bond`
+  (a `BondRequest` signed by the admission's coldkey in the body, GET is 405, expiry within 20
+  rounds, no subnet gate) or, as the operator, `GET .../admin/join/{admission_id}/bond` with the
+  admin bearer; `hypertrain-miner escrow-bond` signs and posts the request (IMP-3, D86).
 - The anonymous object read `GET /v2/runs/{run_id}/objects/{sha256}` streams the stored file in
   blocks of 1 MiB instead of reading the whole object into memory and hashing it again for every
   caller (a 0.8 GB trial input at the 101M profile, 300 MiB measured +300 MiB of RAM per reader). It

@@ -603,6 +603,16 @@ class JobRequest(WireModel):
     admission_id: Hex64
 
 
+class BondRequest(WireModel):
+    """The holder of an admission asks for the terms of its bond, signed by the admission's
+    coldkey, in the body of the request. The answer names the locks and the origin ids a release
+    needs, which no anonymous reader may learn (D51); the coldkey is the one that owns the lock and
+    signs its release, so a hotkey that left the subnet does not strand its own bond. A distinct
+    type, so that no other request opens the route."""
+
+    admission_id: Hex64
+
+
 class WorkProof(WireModel):
     admission_id: Hex64
     challenge_hash: Hex64
@@ -1049,6 +1059,7 @@ MESSAGE_TYPES_V2: dict[str, type[BaseModel]] = {
         JoinChallenge,
         ChallengeRequest,
         JobRequest,
+        BondRequest,
         WorkProof,
         RotateRequest,
         AdmissionPolicyV2,

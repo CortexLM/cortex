@@ -416,10 +416,19 @@ identical request. See `docs/adr/0014` at the monorepo root.
 
 The bond is the `LOCK_ADMISSION` of the admission. It has its own settlement, derived from
 the admission's records on every call (ADR 0010, Part 6), and `GET /v2/runs/{run_id}/admission/{hotkey}`
-lists it under `bond`: per residual lock its units, whether it is `releasable`, its
-`release_beacon` and the `finality_hash` and `closed_dispute_root` to sign. The owner takes it
-back with the existing signed `EscrowRelease` (`POST .../escrow/release`) carrying those two
-hashes. It is released only when the admission is not `BANNED` and has no pending dispute or
+lists it under `bond`: per residual lock its `units`, `outcome`, whether it is `releasable` and its
+`release_beacon`, and nothing that names the lock. The lock id, the `origin_ids` and the
+`finality_hash` and `closed_dispute_root` that a release signs are the holder's: the coldkey of the
+admission asks for them with `POST /v2/runs/{run_id}/join/{admission_id}/bond`, whose body is a
+signed ht/2 envelope of type `BondRequest {admission_id}` (no header carries a signature; a GET is
+405). The coldkey owns the lock and signs its release, and the route has no subnet gate, so a hotkey
+that left the subnet does not strand its bond. The expiry is at most 20 rounds past the master's
+current round; the admission's hotkey, another coldkey, another admission or run, another message
+type, an expired or too distant envelope all answer 403, an unknown admission 409. The operator
+reads the same answer with `GET /v2/runs/{run_id}/admin/join/{admission_id}/bond` (admin bearer),
+and `hypertrain-miner escrow-bond` signs and posts the request from the operator machine. The owner
+takes the bond back with the existing signed `EscrowRelease` (`POST .../escrow/release`) carrying
+the two hashes. It is released only when the admission is not `BANNED` and has no pending dispute or
 lock in the outbox, every round whose roster lists it is closed, none of its hotkeys has
 unvested rewards, it is not live (`ACTIVE`, or `PROBATION` with four clean trials, until its
 screen ends), and the last reward origin of its hotkeys has matured. The bond is burned by the

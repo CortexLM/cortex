@@ -623,6 +623,42 @@ def create_app(
         await owner_request(run_id, admission_id, request, JobRequest)
         return await run(store.for_run(run_id).export_trial_v2, run_id, admission_id)
 
+    @app.post("/v2/runs/{run_id}/join/{admission_id}/bond")
+    async def bond_terms_v2(run_id: str, admission_id: str, request: Request) -> Any:
+        """The terms of an admission's bond (lock ids, origin ids, settlement hashes) for its
+        holder: the coldkey of the admission signs a `BondRequest` in the BODY, since the master
+        proxy forwards no signature header. The coldkey owns the lock and signs its release, and
+        no subnet gate applies to it, so a hotkey that left the subnet does not strand its bond.
+        The expiry is bounded like a dispute poll's: the answer is the key to a release."""
+        from hypertrain.protocol.envelope_v2 import Intake, parse_envelope
+        from hypertrain.protocol.messages_v2 import REQUEST_HORIZON, BondRequest
+
+        hosted = store.for_run(run_id)
+        _, admissions, _ = await run(hosted._services, run_id)
+        holder = (await run(admissions.store.by_id, admission_id)).coldkey
+        now = await run(locked_now)
+        try:
+            raw = await v2_raw(request)
+            envelope = parse_envelope(raw)
+            asked = Intake(run_id, {"BondRequest": holder.__eq__}).accept(raw, now)
+            valid = (
+                isinstance(asked, BondRequest)
+                and admission_id == asked.admission_id
+                and envelope.exp_drand <= now + REQUEST_HORIZON
+            )
+        except (EnvelopeError, ValidationError):
+            valid = False
+        if not valid:
+            raise ChallengeError(403, "the bond terms are the holder's: sign a BondRequest")
+        return await run(hosted.admission_v2, run_id, "bond", b"", admission_id)
+
+    @app.get("/v2/runs/{run_id}/admin/join/{admission_id}/bond")
+    async def bond_terms_admin_v2(
+        run_id: str, admission_id: str, authorization: Auth = None
+    ) -> Any:
+        admin(authorization)
+        return await run(store.for_run(run_id).admission_v2, run_id, "bond", b"", admission_id)
+
     @app.get("/v2/runs/{run_id}/admission/{hotkey}")
     async def admission_status_v2(run_id: str, hotkey: str) -> Any:
         return await run(store.for_run(run_id).admission_v2, run_id, "status", b"", hotkey)

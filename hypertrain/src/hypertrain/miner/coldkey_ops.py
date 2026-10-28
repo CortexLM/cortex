@@ -15,7 +15,9 @@ from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.keys import decode_hotkey, verify
 from hypertrain.protocol.messages import Hex64
 from hypertrain.protocol.messages_v2 import (
+    REQUEST_HORIZON,
     U64,
+    BondRequest,
     EconomicsPolicyV2,
     EnvObservation,
     EscrowLock,
@@ -182,3 +184,31 @@ def escrow_lock(
         "required_units": required_units(policy, manifest, locked),
         "eligible": status["eligible"],
     }
+
+
+def bond_terms(
+    client: httpx.Client, api: str, run_id: str, coldfile: Path, hotkey_ss58: str
+) -> dict[str, Any]:
+    """The terms of the admission's bond (lock ids, origin ids, settlement hashes) that a release
+    names. The anonymous status carries none of them: the coldkey of the admission signs a
+    `BondRequest` in the body, valid for `REQUEST_HORIZON` rounds past the master's current one."""
+    TypeAdapter(Hex64).validate_python(run_id)
+    decode_hotkey(hotkey_ss58)
+    coldkey = load_keyfile(coldfile)
+    root = f"/v2/runs/{run_id}"
+    record = _request(client, api, "GET", f"{root}/admission/{hotkey_ss58}").json()["record"]
+    if record["coldkey"] != coldkey.ss58:
+        raise MinerError("admission coldkey differs from keyfile owner")
+    admission_id = TypeAdapter(Hex64).validate_python(record["admission_id"])
+    now = TypeAdapter(U64).validate_python(_request(client, api, "GET", root).json()["now_round"])
+    envelope = envelope_v2.seal(
+        coldkey,
+        "BondRequest",
+        run_id,
+        BondRequest(admission_id=admission_id),
+        now + REQUEST_HORIZON,
+    )
+    terms: dict[str, Any] = _request(
+        client, api, "POST", f"{root}/join/{admission_id}/bond", content=canonical(envelope)
+    ).json()
+    return terms

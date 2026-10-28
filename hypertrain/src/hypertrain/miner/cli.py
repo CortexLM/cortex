@@ -30,7 +30,7 @@ from hypertrain.datasets.shards16 import (
     shard_name16,
     verify_shards16,
 )
-from hypertrain.miner.coldkey_ops import cosign_join, escrow_lock, prepare_join
+from hypertrain.miner.coldkey_ops import bond_terms, cosign_join, escrow_lock, prepare_join
 from hypertrain.miner.core import (
     ChallengeExpired,
     Miner,
@@ -381,6 +381,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--origin", action="append", required=True)
     s.add_argument("--expiry", type=int)
     s.add_argument("--dry-run", action="store_true")
+    s = sub.add_parser("escrow-bond", help="operator machine: read the terms of the admission bond")
+    s.add_argument("--api", required=True)
+    s.add_argument("--run-id", required=True)
+    s.add_argument("--coldkey", type=Path, required=True)
+    s.add_argument("--hotkey-ss58", required=True)
     for name in ("join-v2", "status-v2", "probe-v2", "proof-v2", "run-v2", "watch"):
         s = sub.add_parser(name)
         s.add_argument("--config", type=Path)
@@ -406,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
-        if args.command in ("join-v2-cosign", "escrow-lock") or (
+        if args.command in ("join-v2-cosign", "escrow-lock", "escrow-bond") or (
             args.command == "join-v2" and args.prepare is not None
         ):
             try:
@@ -424,6 +429,10 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     elif args.command == "join-v2-cosign":
                         result = cosign_join(client, args.api, args.request, args.coldkey)
+                    elif args.command == "escrow-bond":
+                        result = bond_terms(
+                            client, args.api, args.run_id, args.coldkey, args.hotkey_ss58
+                        )
                     else:
                         result = escrow_lock(
                             client,

@@ -3385,7 +3385,9 @@ class ChallengeStore:
                         result = admission.reseed(identity, now=now)
                     case "status":
                         result = asdict(admission.status(identity, now=now))
-                        result["bond"] = admission.bond(result["record"]["admission_id"], now=now)
+                        result["bond"] = admission.public_bond(
+                            result["record"]["admission_id"], now=now
+                        )
                         screen = self._db.execute(
                             "SELECT screen_json FROM admissions_v2 WHERE hotkey=?", (identity,)
                         ).fetchone()
@@ -3394,6 +3396,8 @@ class ChallengeStore:
                             if screen and screen[0]
                             else None
                         )
+                    case "bond":
+                        result = admission.bond(identity, now=now)
                     case "rotate":
                         result = asdict(admission.rotate(raw, now=now))
                     case "recover":

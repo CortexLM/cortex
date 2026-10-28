@@ -29,8 +29,10 @@ from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair, verify
 from hypertrain.protocol.messages_v2 import (
+    REQUEST_HORIZON,
     AdmissionPolicyV2,
     ArtifactLimits,
+    BondRequest,
     EconomicsPolicyV2,
     EscrowLock,
     HardwareHint,
@@ -46,6 +48,7 @@ ADMISSION_ID = "44" * 32
 EVENT_HASH = "55" * 32
 ORIGINS = ["33" * 32, "22" * 32]
 NOW = 37
+BOND_TERMS = {"locks": [{"lock_id": "66" * 32, "origin_ids": ORIGINS, "units": 1000}]}
 EXPIRY = 5000
 UNITS = 1250
 
@@ -219,6 +222,8 @@ def _service(op, monkeypatch, *, post_status=200, owner=None, post_content=None)
                     )
                 ),
             )
+        if request.method == "POST" and request.url.path == root + f"/join/{ADMISSION_ID}/bond":
+            return httpx.Response(200, json=BOND_TERMS)
         if request.method == "POST" and request.url.path in (root + "/join", root + "/escrow/lock"):
             if not 200 <= post_status < 300:
                 return httpx.Response(post_status, text="blocked-by-service")
@@ -537,4 +542,49 @@ def test_invalid_input_returns_miner_error_without_raw_validation_input(
     assert code == 2
     assert "MinerError" in diagnostic
     assert marker not in out + diagnostic
+    assert not any(r.method == "POST" for r in requests)
+
+
+def _bond_args(op):
+    return [
+        "escrow-bond",
+        "--api",
+        API,
+        "--run-id",
+        op.run_id,
+        "--coldkey",
+        str(op.coldfile),
+        "--hotkey-ss58",
+        op.hot.ss58,
+    ]
+
+
+def test_escrow_bond_signs_a_bond_request_with_the_coldkey_and_prints_the_terms(
+    operator, monkeypatch, invoke
+):
+    op = operator
+    requests = _service(op, monkeypatch)
+
+    code, out, _ = invoke(_bond_args(op))
+
+    assert code == 0 and json.loads(out) == BOND_TERMS
+    (post,) = [r for r in requests if r.method == "POST"]
+    assert post.url.path == f"/v2/runs/{op.run_id}/join/{ADMISSION_ID}/bond"
+    assert verify_envelope(post.content)
+    envelope = parse_envelope(post.content)
+    assert (envelope.type, envelope.run_id, envelope.signer, envelope.exp_drand) == (
+        "BondRequest",
+        op.run_id,
+        op.cold.ss58,  # the coldkey owns the lock, not the hotkey
+        NOW + REQUEST_HORIZON,
+    )
+    assert BondRequest.model_validate(envelope.body).admission_id == ADMISSION_ID
+
+
+def test_escrow_bond_refuses_another_admission_owner_without_posting(operator, monkeypatch, invoke):
+    requests = _service(operator, monkeypatch, owner=operator.other.ss58)
+
+    code, _, _ = invoke(_bond_args(operator))
+
+    assert code == 2
     assert not any(r.method == "POST" for r in requests)

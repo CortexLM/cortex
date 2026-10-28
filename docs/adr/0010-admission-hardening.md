@@ -369,7 +369,10 @@ Decision.
    failure of the hook rolls back the resolution (fail closed).
 5. **Release.** The owner signs the existing `EscrowRelease`; the route is unchanged.
    `GET .../admission/{hotkey}` gains a response-only `bond` key listing the residual locks with
-   `releasable`, `release_beacon` and the `finality_hash` and `closed_dispute_root` to sign.
+   `units`, `outcome`, `releasable` and `release_beacon`. *Amended 2026-10-28 (D86, ADR 0014 point 9):*
+   the `finality_hash` and `closed_dispute_root` to sign, with the lock id and the origin ids, are no
+   longer in this anonymous answer: the coldkey of the admission asks for them with a signed
+   `BondRequest` (`POST .../join/{admission_id}/bond`), the operator with the admin bearer.
    `Admission.release_bond(admission_id, *, now)` is the internal equivalent for an authenticated
    request of the owner: all residual locks or none (`BOND_NOT_RELEASABLE`).
 6. **Not sanctioned.** An uncontested `MISMATCH`, an `INFRASTRUCTURE` close (ADR 0011),
@@ -468,7 +471,7 @@ exists.
 - The server image gets a new digest at rebuild. A manifest that enables the optional cap pins
   nothing else.
 - Wire: `RotateRequest` gains `new_hot_sig`; `LeaveNotice` gains `epoch`; two new message types
-  `ChallengeRequest` and `JobRequest`; the export payload gains `challenge_envelope`; the unsigned
+  `ChallengeRequest` and `JobRequest` (and, from D86, `BondRequest`); the export payload gains `challenge_envelope`; the unsigned
   `GET .../challenge` and the header-signed `GET .../job` become `POST` with a signed body;
   `GET .../admission/{hotkey}` gains `bond` in Part 6. None is a manifest or SCALE wire message;
   `docs/BUNDLE_SPEC.md` and the frozen vectors are untouched.

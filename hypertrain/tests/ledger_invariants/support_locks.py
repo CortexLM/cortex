@@ -318,10 +318,11 @@ class Rig:
         return ask_as_owner(self.net, miner, "job")
 
     def bond_entry(self, miner: Miner, lock_id: str) -> dict[str, Any]:
-        """What GET /admission/{hotkey} tells the owner about its lock `lock_id` (ADR 0010 6.5):
-        whether it is releasable and the finality hash and closed-dispute root to sign."""
-        status = self.net.client.get(self.net.url + "/admission/" + miner.hotkey).json()
-        entry: dict[str, Any] = next(e for e in status["bond"]["locks"] if e["lock_id"] == lock_id)
+        """What the holder's signed request tells the owner about its lock `lock_id` (ADR 0010
+        6.5, D86): whether it is releasable and the finality hash and closed-dispute root to sign.
+        The public status keeps the amounts only."""
+        terms = self.net.bond(miner.admission_id, miner.cold).json()
+        entry: dict[str, Any] = next(e for e in terms["locks"] if e["lock_id"] == lock_id)
         return entry
 
     def open_contest(self, miner: Miner, *, verdict: str = VERDICT) -> Contest:
