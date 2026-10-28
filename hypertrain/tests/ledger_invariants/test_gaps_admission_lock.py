@@ -69,14 +69,7 @@ def rig(tmp_path: Path) -> Iterator[Rig]:
 # --- M-05 / CL-29: the payee of a matured reward is the hotkey that holds the admission --------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="CL-29+M-05: units that matured for an admission are emitted to the hotkey that holds "
-    "it, but the origin keeps the hotkey it was issued to and the coldkey's rotation neither "
-    "moves it nor is refused while it is pending, so the weight goes to the retired hotkey "
-    "[fix-lot: none (no design yet)]",
-)
+# Closed by escrow-relay-fixes D66 (3d6129d3): get_weights pays the hotkey the admission holds now.
 def test_matured_reward_units_are_emitted_to_the_hotkey_that_holds_the_admission(rig: Rig) -> None:
     # Given: an origin issued to the miner's hotkey and still pending, then its coldkey moves the
     # admission to another registered hotkey (a service that refuses that rotation is also right)

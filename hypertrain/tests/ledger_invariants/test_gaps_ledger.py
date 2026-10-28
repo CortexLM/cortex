@@ -447,15 +447,7 @@ def test_a_rotation_between_the_credit_and_the_pay_keeps_every_unit_with_the_col
     assert escrow.balances().conserved()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="CRD-12+WGT-13+CL-29: the units a rotated admission earned are emitted to the hotkey "
-    "recorded at issuance, not to the hotkey the admission holds now (nor is the rotation refused "
-    "while origins are owed); on the real finalize path of four miners the rotated miner's "
-    "quarter goes to the key it gave up. Rule to confirm: pay the current hotkey, or refuse "
-    "[fix-lot: decision (product choice pending)]",
-)
+# Closed by escrow-relay-fixes D66 (3d6129d3): get_weights pays the hotkey the admission holds now.
 def test_the_units_of_a_rotated_miner_are_emitted_to_the_hotkey_its_admission_holds_now(
     audited: Frozen,
 ) -> None:
