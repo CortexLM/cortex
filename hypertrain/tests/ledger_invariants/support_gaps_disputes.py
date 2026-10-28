@@ -47,7 +47,7 @@ from .support import H, World
 from .support_disputes import Rig as DisputeRig
 from .support_disputes import refusal, reward_origin_of
 from .support_locks import Lab, Miner, Rig, settled_status
-from .support_opids import DefenceMissing, fresh_id, self_transfer
+from .support_opids import DefenceMissing, fresh_id
 
 AGREED = "11" * 32  # what both parties say at the lower end of every interval
 MINER_CLAIM = "22" * 32
@@ -80,16 +80,6 @@ def settlement_id(dispute_id: str) -> str:
     """The operation id under which the service releases the bond of `dispute_id` when the
     dispute is closed: derived from the public dispute id alone."""
     return sha256_hex(canonicalize([dispute_id, "settle"]))
-
-
-def client_transfer(world: World, signer: Keypair, operation_id: str, origin: str) -> Any:
-    """POST /escrow/transfer: a funded coldkey moves one unit of `origin` to itself under an
-    operation id of its own choice. Returns the response unchecked."""
-    net = world.network
-    body = self_transfer(signer.ss58, operation_id, origin)
-    return world.client.post(
-        net.url + "/escrow/transfer", json=net.signed(signer, "EscrowTransfer", body)
-    )
 
 
 def closing_round(world: World, dispute_id: str) -> int:

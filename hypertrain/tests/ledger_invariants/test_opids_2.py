@@ -7,7 +7,6 @@ service derives are the same in the control world and in the world a bystander w
 from __future__ import annotations
 
 import contextlib
-import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -22,7 +21,16 @@ from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import EscrowLock, EscrowTransfer
 
 from .support import SERVICE_FIXTURE, World, load_fixture_module, service_world
-from .support_opids import StepRefused, client_model, contest_lock, fresh_id, refused, self_transfer
+from .support_opids import (
+    StepRefused,
+    client_event_over_http,
+    contest_lock,
+    fresh_id,
+    receipt_ids,
+    self_transfer,
+    sender_over_http,
+    squat_id,
+)
 
 # The outbox refuses a second body under a queued lock id. A ledger that reads the replay before
 # the lock is queued (`require_lock_capacity`, ADR 0014 part 4) refuses it first with its own code.
@@ -33,22 +41,6 @@ LOCK_CONFLICTS = ("OUTBOX_CONFLICT",) + (
 
 def escrow_of(world: World) -> Any:
     return world.store._services(world.run_id)[0]
-
-
-def signed_post(world: World, route: str, key: Keypair, kind: str, body: Any) -> Any:
-    envelope = world.network.signed(key, kind, body)
-    return world.client.post(world.network.url + "/escrow/" + route, json=envelope)
-
-
-def client_event_over_http(
-    world: World, kind: str, key: Keypair, operation_id: str, origin: str
-) -> Any:
-    """What a funded coldkey sends to the public escrow routes, under an id of its choice."""
-    if kind == "transfer":
-        event = client_model(lambda: self_transfer(key.ss58, operation_id, origin))
-        return signed_post(world, "transfer", key, "EscrowTransfer", event)
-    event = client_model(lambda: contest_lock(key.ss58, operation_id, origin))
-    return signed_post(world, "lock", key, "EscrowLock", event)
 
 
 def seed_pending_origin(world: World, origin: str, owner: str, units: int, mature_at: int) -> None:
@@ -72,15 +64,6 @@ def push_round(world: World, number: int) -> None:
         raise StepRefused(f"the beacon route refused round {number}: {error}") from error
 
 
-def maturity_ids(world: World) -> dict[str, str]:
-    """operation id of each MATURE event, by the origins it vested (its request). The id is the
-    one its receipt carries: the key the event is stored under cannot be signed by a client."""
-    escrow = escrow_of(world)
-    with world.store._lock:
-        rows = escrow.db.execute("SELECT receipt, request FROM escrow_events WHERE kind='MATURE'")
-        return {row[1]: json.loads(row[0])["operation_id"] for row in rows}
-
-
 @pytest.mark.parametrize("kind", ["transfer", "lock"])
 def test_a_client_event_never_blocks_the_maturity_id_over_http(tmp_path: Path, kind: str) -> None:
     cold = load_fixture_module(*SERVICE_FIXTURE).COLD
@@ -92,7 +75,7 @@ def test_a_client_event_never_blocks_the_maturity_id_over_http(tmp_path: Path, k
         world.network.push(2)
         seed_pending_origin(world, pending, cold[0].ss58, 500, mature_at=5)
         world.network.push(5)
-        maturity_id = maturity_ids(world)[request]
+        (maturity_id,) = receipt_ids(escrow_of(world), "MATURE", request=request)
         effect = escrow_of(world).balances(cold[0].ss58)
     assert (effect.available, effect.reward_pending) == (10500, 0)
 
@@ -103,7 +86,9 @@ def test_a_client_event_never_blocks_the_maturity_id_over_http(tmp_path: Path, k
         origin = world.network.origin_ids[1]
         neutral = client_event_over_http(world, kind, cold[1], fresh_id("neutral"), origin)
         assert neutral.status_code == 200, neutral.text  # control: the route takes its events
-        refused(lambda: client_event_over_http(world, kind, cold[1], maturity_id, origin))
+        squat_id(
+            escrow_of(world), kind, maturity_id, sender_over_http(world, kind, cold[1], origin)
+        )
 
         # Then: the beacon route still answers 200 and the origin is available as in the control.
         push_round(world, 5)
@@ -161,7 +146,9 @@ def test_a_third_party_event_never_makes_the_owner_lock_command_fail(
         origin = world.network.origin_ids[1]
         neutral = client_event_over_http(world, kind, bystander, fresh_id("neutral"), origin)
         assert neutral.status_code == 200, neutral.text
-        client_event_over_http(world, kind, bystander, command_id, origin)
+        squat_id(
+            escrow_of(world), kind, command_id, sender_over_http(world, kind, bystander, origin)
+        )
 
         # Then: the owner's command succeeds as in the control. The event hash chains every event
         # before it, so it differs between the two worlds by construction and is not compared.

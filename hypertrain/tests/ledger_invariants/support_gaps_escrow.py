@@ -15,7 +15,6 @@ from types import ModuleType
 from typing import Any
 
 import httpx
-from pydantic import ValidationError
 
 import hypertrain
 from hypertrain.auditor.island_bisect import RefereeEvidence
@@ -33,7 +32,7 @@ from hypertrain.protocol.messages_v2 import EscrowLock, EscrowRelease, Resolutio
 from .support import World, service_world
 from .support_escrow_laws import Funded, funded, lock_op, release_op
 from .support_locks import Lab, Miner, Rig, ident, settled_status
-from .support_opids import DisputeWorld, contest_lock, fresh_id, refused, self_transfer
+from .support_opids import DisputeWorld, fresh_id, self_transfer
 from .support_weights import Metagraph, add_origin, live_gate
 
 SOURCE = Path(hypertrain.__file__).parent
@@ -46,6 +45,10 @@ WRITE = re.compile(
 )
 
 Site = tuple[str, str, str, str]  # (module, function, verb, table)
+
+# What stores a record by kind: the writer itself and the one that stores a derived fact only when
+# it changed (a pass-through: its callers name the kind, so they are scanned as record stores).
+RECORD_STORES = frozenset({"_put_record_v2", "_put_changed_v2"})
 
 
 def statements(tree: ast.AST) -> Iterator[tuple[str, str]]:
@@ -66,6 +69,35 @@ def statements(tree: ast.AST) -> Iterator[tuple[str, str]]:
     yield from walk(tree)
 
 
+def calls(tree: ast.AST) -> Iterator[tuple[str, ast.Call]]:
+    """(innermost function name, call) of every call in a module."""
+    stack: list[str] = []
+
+    def walk(node: ast.AST) -> Iterator[tuple[str, ast.Call]]:
+        named = isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        if named:
+            stack.append(node.name)  # type: ignore[union-attr]
+        if isinstance(node, ast.Call):
+            yield (stack[-1] if stack else "<module>"), node
+        for child in ast.iter_child_nodes(node):
+            yield from walk(child)
+        if named:
+            stack.pop()
+
+    yield from walk(tree)
+
+
+def callers_of(name: str) -> set[tuple[str, str]]:
+    """(module, function) of every call to a function or method called `name` in the package."""
+    found: set[tuple[str, str]] = set()
+    for path in sorted(SOURCE.rglob("*.py")):
+        module = path.relative_to(SOURCE).as_posix()
+        for function, call in calls(ast.parse(path.read_text())):
+            if getattr(call.func, "attr", getattr(call.func, "id", "")) == name:
+                found.add((module, function))
+    return found
+
+
 def sql_writers(tables: frozenset[str]) -> set[Site]:
     """Every (module, function, verb, table) of an SQL write to one of `tables` in the package."""
     found: set[Site] = set()
@@ -81,7 +113,7 @@ def sql_writers(tables: frozenset[str]) -> set[Site]:
 
 
 def record_writers(kinds: frozenset[str]) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]]]:
-    """Who stores a record of one of `kinds` through `_put_record_v2`.
+    """Who stores a record of one of `kinds` through one of the `RECORD_STORES`.
 
     Returns the (module, function, kind) of every call whose kind is a literal in `kinds`, and
     the (module, function) of every call whose kind is not a literal at all.
@@ -96,7 +128,7 @@ def record_writers(kinds: frozenset[str]) -> tuple[set[tuple[str, str, str]], se
             for call in ast.walk(function):
                 if not (
                     isinstance(call, ast.Call)
-                    and getattr(call.func, "attr", getattr(call.func, "id", "")) == "_put_record_v2"
+                    and getattr(call.func, "attr", getattr(call.func, "id", "")) in RECORD_STORES
                     and len(call.args) >= 2
                 ):
                     continue
@@ -238,43 +270,6 @@ def ask_for_the_challenge(world: World, key: Keypair, admission_id: str) -> http
         world.network.url + f"/join/{admission_id}/challenge",
         headers={"x-hotkey": key.ss58, "x-trial-signature": key.sign(message).hex()},
     )
-
-
-def signed_post(world: World, route: str, key: Keypair, kind: str, body: Any) -> httpx.Response:
-    """A signed body posted to a public escrow route of the run."""
-    envelope = world.network.signed(key, kind, body)
-    return world.client.post(world.network.url + "/escrow/" + route, json=envelope)
-
-
-def client_event_over_http(
-    world: World, kind: str, key: Keypair, operation_id: str, origin: str
-) -> httpx.Response:
-    """What a funded coldkey sends to the public escrow routes, under an id of its choice."""
-    if kind == "transfer":
-        return signed_post(
-            world, "transfer", key, "EscrowTransfer", self_transfer(key.ss58, operation_id, origin)
-        )
-    return signed_post(
-        world, "lock", key, "EscrowLock", contest_lock(key.ss58, operation_id, origin)
-    )
-
-
-def squat_refused(call: Callable[[], object]) -> bool:
-    """True when the event a client signs under a service id is refused: by the ledger, the dispute
-    service, or the wire model itself (a base that keeps the service's ids in a key space of their
-    own, outside the 64-hex ids of a client, cannot even build the event)."""
-    try:
-        return refused(call)
-    except ValidationError as error:
-        return "operation_id" in str(error)
-
-
-def settlement_ids(escrow: EscrowV2) -> list[str]:
-    """Operation id of each release or slash of a lock, oldest first."""
-    rows = escrow.db.execute(
-        "SELECT operation_id FROM escrow_events WHERE kind IN ('RELEASE','SLASH') ORDER BY seq"
-    )
-    return [row[0] for row in rows]
 
 
 def resolve_fraud(world: DisputeWorld, turn: Turn, now: int) -> Turn:

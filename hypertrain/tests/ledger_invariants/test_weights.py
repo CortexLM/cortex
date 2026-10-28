@@ -14,7 +14,6 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 from collections.abc import Iterator
-from contextlib import suppress
 from pathlib import Path
 from types import ModuleType
 
@@ -673,11 +672,20 @@ def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
     if preempt:
         # The same event under an ordinary id is accepted, so a refusal below is about its id.
         host.escrow.transfer(transfer("67" * 32, other, 1), signer=other)
-        # A ledger may refuse this event or keep it apart from the key of the payout.
-        with suppress(EscrowError):
-            host.escrow.transfer(
-                transfer(pay_id(host.run_id, 0, origin, cold), other, 1), signer=other
-            )
+        squat = pay_id(host.run_id, 0, origin, cold)
+        # The event model takes the id, so only the ledger can rule on it. It may refuse the event
+        # or keep it apart from the key of the payout, but it must have seen it.
+        event = transfer(squat, other, 1)
+        try:
+            host.escrow.transfer(event, signer=other)
+            accepted = 1
+        except EscrowError:
+            accepted = 0
+        named = host.escrow.db.execute(
+            "SELECT COUNT(*) FROM escrow_events WHERE json_extract(receipt, '$.operation_id') = ?",
+            (squat,),
+        ).fetchone()[0]
+        assert named == accepted
     # Then: either way the epoch pays the earner its free units, in one PAY event.
     answer = ask(host, 0)
     assert answer["weights"] == {li_escrow.HOT.ss58: float(ISSUED - 1)}
@@ -769,8 +777,9 @@ def bytes_stored_by_one_payout(li_escrow: ModuleType, origins: int) -> int:
     strict=True,
     raises=AssertionError,
     reason="WGT-21+WGT-D4: the bytes one payout adds to the store do not grow with the number of "
-    "origins the escrow holds (every escrow event stores a full snapshot; ADR 0014 part 4.6 "
-    "defers the cure to a maintainer decision) [fix-lot: escrow-relay-fixes ADR0014-P4]",
+    "origins the escrow holds (every escrow event stores a full snapshot; the lot encodes it "
+    "faster but ADR 0014 part 4.6, a digest in the event hash with checkpoints, awaits a "
+    "maintainer decision) [fix-lot: decision (product choice pending)]",
 )
 def test_the_storage_cost_of_one_payout_does_not_grow_with_the_number_of_origins(
     li_escrow: ModuleType,
