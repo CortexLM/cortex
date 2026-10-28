@@ -496,9 +496,9 @@ is not hashed.
 
 ### Part C, the integrated tree (D75)
 
-Measured as Part B (`hash_consequences.py` over the worktree and over a `git archive` of `b4a92966`, 2026-10-28)
+Measured as Part B (`hash_consequences.py` over the worktree and over a `git archive` of `3ce5b031`, 2026-10-28)
 [V], on the tree where `v3-executor-lock-release` (Part B), `v3-aggregate-lock-release`, `v3-audit-integrity-2`
-and `v3-det01-env-pin-required` are merged (`hypertrain/src` tree `f29b41f2…`; it holds for every later commit
+and `v3-det01-env-pin-required` are merged (`hypertrain/src` tree `a2d157e8…`; it holds for every later commit
 that touches nothing under `hypertrain/src`):
 
 | Value | Measured on the integrated tree |
@@ -509,12 +509,12 @@ that touches nothing under `hypertrain/src`):
 | same code, `avx2`/`sm_103`/`sdpa-flash` | `2969e4a7…f07ea6` |
 | same code, `avx2`/`sm_120`/`sdpa-flash` | `f3c351b3…af21f2` |
 | owned names / hashed files of `implementation_hash` | 48 / 12 |
-| `challenge/store.py` sha256 | `5cd7d7f5…4c318b` |
+| `challenge/store.py` sha256 | `9379bdb4…cf31c1` |
 | `challenge/admission.py` sha256 | `8b812e46…25b51b` |
 | `gpu_ops/network_qualification.py` sha256 | `2206486f…319688` |
-| `sources()` map: files, canonical sha256 | 158, `1cb3027a…bc7fe3` |
-| `sources` listing, `sha256sum` of the CLI output | `0c58a13e…c902e6` |
-| `bundle()` | 2,734,080 bytes, `aa5f3f2f…df3bf3` |
+| `sources()` map: files, canonical sha256 | 158, `1de8e396…74c8cc` |
+| `sources` listing, `sha256sum` of the CLI output | `8ff83ee2…532a2a` |
+| `bundle()` | 2,734,080 bytes, `88918dd5…795525` |
 | example `run_id` / `reference_hash` | `aa39197d…ec8abd` / `2dd4eadc…d6cc5d` (as in the DET-01 column: the integration edits no manifest field) |
 
 Reading: Part B's prediction that the lock release does not move `implementation_hash` holds for the reference
