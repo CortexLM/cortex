@@ -10,7 +10,7 @@ import httpx
 import pytest
 from test_transport_v2 import MASTER, MINER, NEXT, H, Rig
 
-from hypertrain.data.store import CorruptObjectError, ObjectNotFound
+from hypertrain.data.store import CorruptObjectError, ObjectNotFound, StoreError
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
@@ -1008,6 +1008,148 @@ def test_readyz_when_custody_horizon_of_rounds_has_no_early_release(
                     await rig.relay.accept(raw, manifest, assignment, opened)
             else:
                 await rig.relay.accept(raw, manifest, assignment, opened)
+
+    anyio.run(scenario)
+
+
+def storage_down(rig: Rig, step: str, error: Exception) -> None:
+    """Make one StreamStore step fail; "fill" lets the readiness probe finish and fails the
+    journal read that follows it."""
+    if step == "fill":
+        get, journal = rig.store.get, rig.store.journal
+        probed = False
+
+        async def probe_get(sha, size, file):
+            nonlocal probed
+            await get(sha, size, file)
+            probed = True
+
+        async def journal_after_probe(name):
+            if probed:
+                raise error
+            return await journal(name)
+
+        rig.store.get = probe_get  # type: ignore[method-assign]
+        rig.store.journal = journal_after_probe  # type: ignore[method-assign]
+        return
+
+    async def fail(*args, **kwargs):
+        raise error
+
+    setattr(rig.store, step, fail)
+
+
+@pytest.mark.parametrize(
+    ("step", "error", "fill_readable"),
+    [
+        ("journal", OSError("input/output error"), False),
+        ("journal", StoreError("journal exceeds metadata quota"), False),
+        ("journal", httpx.ConnectError("backing unreachable"), False),
+        ("fill", OSError("input/output error"), False),
+        ("compare_swap", OSError("no space left on device"), True),
+        ("put", OSError("read-only file system"), True),
+        ("get", CorruptObjectError("probe object rotten"), True),
+    ],
+    ids=[
+        "journal-oserror",
+        "journal-storeerror",
+        "journal-http",
+        "fill-read-after-probe",
+        "cas-write",
+        "probe-put",
+        "probe-get",
+    ],
+)
+def test_readyz_when_storage_fails_answers_503_not_ready_with_the_fill_it_can_read(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    step: str,
+    error: Exception,
+    fill_readable: bool,
+) -> None:
+    # An orchestrator treats 5xx alike, but the 503 body is what an operator reads: a replica
+    # whose storage is down says "ready": false and keeps the journal fill it still can report.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            budget = rig.relay.journal_budget = 1000
+            await rig.relay._change(lambda state: state.nonces.update(filler="x" * 300))
+            used = len((await rig.relay.state()).serialize())
+            storage_down(rig, step, error)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(
+                    app=create_app(rig.relay, "t" * 32), raise_app_exceptions=False
+                ),
+                base_url="https://relay.test",
+            ) as wire:
+                answer = await wire.get("/readyz")
+            assert answer.status_code == 503, answer.text
+            assert answer.json() == {
+                "ready": False,
+                "journal_bytes": used if fill_readable else None,
+                "journal_budget": budget if fill_readable else None,
+                "journal_fill": pytest.approx(used / budget, abs=1e-4) if fill_readable else None,
+                "alarm": False if fill_readable else None,
+            }
+            # The type name tells an operator what failed; the message may carry paths or URLs.
+            logged = [
+                r.getMessage()
+                for r in caplog.records
+                if r.levelname == "WARNING" and r.name == "hypertrain.relay.app"
+            ]
+            assert logged, "a down replica must be visible in the logs"
+            assert all(type(error).__name__ in line and str(error) not in line for line in logged)
+
+    anyio.run(scenario)
+
+
+def test_readyz_when_journal_is_corrupt_answers_503_and_still_reports_its_size(
+    tmp_path: Path,
+) -> None:
+    # The fill is the stored byte count; it needs no parse, so it stays readable for the operator.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            budget = rig.relay.journal_budget = 1000
+            await rig.relay._change(lambda state: None)
+            garbage = b'{"uploads": [not a journal'
+            (rig.store.store.root / "metadata" / rig.relay.journal_key).write_bytes(garbage)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(
+                    app=create_app(rig.relay, "t" * 32), raise_app_exceptions=False
+                ),
+                base_url="https://relay.test",
+            ) as wire:
+                answer = await wire.get("/readyz")
+            assert answer.status_code == 503, answer.text
+            assert answer.json() == {
+                "ready": False,
+                "journal_bytes": len(garbage),
+                "journal_budget": budget,
+                "journal_fill": pytest.approx(len(garbage) / budget, abs=1e-4),
+                "alarm": False,
+            }
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("step", ["put", "fill"])
+def test_readyz_when_the_probe_has_a_programming_error_stays_a_server_error(
+    tmp_path: Path, step: str
+) -> None:
+    # Only storage failures mean "not ready"; a bug must stay loud instead of hiding as 503. One
+    # case per guard of the handler: "put" fails inside ready(), "fill" in the journal read after.
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            rig = Rig(tmp_path, client)
+            storage_down(rig, step, RuntimeError("bug"))
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(
+                    app=create_app(rig.relay, "t" * 32), raise_app_exceptions=False
+                ),
+                base_url="https://relay.test",
+            ) as wire:
+                assert (await wire.get("/readyz")).status_code == 500
 
     anyio.run(scenario)
 

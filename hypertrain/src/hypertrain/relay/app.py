@@ -40,6 +40,8 @@ from hypertrain.relay.core import Relay, RelayError
 
 # Seconds between two passes that delete released or lapsed custody and prune its records.
 COLLECT_INTERVAL = 300
+# Storage faults only: disk I/O or timeout, store refusal, S3 transport, an unparseable journal.
+_STORAGE_DOWN = (OSError, StoreError, httpx.HTTPError, ValidationError)
 
 
 class AcceptRequest(BaseModel):
@@ -188,21 +190,31 @@ def create_app(relay: Relay, drain_token: str) -> FastAPI:
 
     @app.get("/readyz")
     async def ready() -> JSONResponse:
+        log = logging.getLogger(__name__)
         try:
             value = await relay.ready()
         except RelayError:
             value = False
-        fill = await relay.journal_fill()
-        return JSONResponse(
-            {
-                "ready": value,
-                "journal_bytes": fill.used,
-                "journal_budget": fill.budget,
-                "journal_fill": round(fill.ratio, 4),
-                "alarm": fill.alarm,
-            },
-            status_code=200 if value else 503,
-        )
+        except _STORAGE_DOWN as error:
+            log.warning("relay readiness probe failed: %s", type(error).__name__)
+            value = False
+        # The fill fields stay in the answer, null when the journal cannot be read, so a client
+        # that parses them sees one shape whether or not storage is up.
+        fill: dict[str, object]
+        try:
+            report = await relay.journal_fill()
+        except _STORAGE_DOWN as error:
+            log.warning("relay journal fill unreadable: %s", type(error).__name__)
+            value = False
+            fill = dict.fromkeys(("journal_bytes", "journal_budget", "journal_fill", "alarm"))
+        else:
+            fill = {
+                "journal_bytes": report.used,
+                "journal_budget": report.budget,
+                "journal_fill": round(report.ratio, 4),
+                "alarm": report.alarm,
+            }
+        return JSONResponse({"ready": value, **fill}, status_code=200 if value else 503)
 
     @app.get("/probe")
     async def probe() -> JSONResponse:
