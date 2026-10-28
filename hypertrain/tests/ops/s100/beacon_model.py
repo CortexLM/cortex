@@ -1,9 +1,11 @@
 """Virtual-time model of the real `hypertrain.beacon.push.Pusher` against a held store lock.
 
-A remote reference holds the lock of the challenge store that hosts the run
-(`challenge/store.py` `trial_reference_v2`). This drives the unmodified `Pusher.run` through such an
+A store lock that is held for a long time (a challenge restart, a stuck request, and until ADR 0012
+Part B a remote reference in `challenge/store.py` `trial_reference_v2`) keeps the pusher from
+delivering. This drives the unmodified `Pusher.run` through such an
 outage on a clock that only moves when the pusher or the model says so, so a lock of minutes runs
-in milliseconds and the result does not depend on the machine.
+in milliseconds and the result does not depend on the machine. `simulate` runs the production
+`Pusher` (head first) unless told otherwise; `AscendingPusher` is the one it replaced.
 
 Two layouts, because the challenge has two (`ChallengeStore._children`):
 
@@ -173,34 +175,26 @@ class Relays:
         return _Round(number)
 
 
-class HeadFirstPusher(push.Pusher):
-    """PROPOSAL (ADR 0012), not shipped: the head round first, then one skipped round per tick.
+class AscendingPusher(push.Pusher):
+    """Model only: the pusher before ADR 0012 section 3, all missing rounds per tick, oldest first.
 
-    The rounds the pusher skipped are kept in memory and refilled one per tick after the head, so
-    the freshness gate reopens as soon as the head is in and no round stays missing. A pusher
-    restarted during an outage loses the list.
+    Kept so that the S13 reproductions and the table of what that cadence cost still run against
+    the code that produced them. The production `push.Pusher` pushes the head first.
     """
 
-    pending: list[int]
-
-    def tick(self) -> dict[str, Any]:
-        self.pending = getattr(self, "pending", [])
+    def tick(self, drain: bool = False) -> dict[str, Any]:
         latest = self.relays.latest()
         known = self._known()
-        self.pending = sorted({*self.pending, *push.plan(known, latest.round, self.catch_up)})
-        older = [number for number in self.pending if number != latest.round][:1]
-        order = ([latest.round] if latest.round in self.pending else []) + older
-        pushed = []
-        for number in order:
-            rnd = latest if number == latest.round else self.relays.get(number)
-            response = self.service.post(
+        pushed: list[int] = []
+        for rnd in push.plan(known, latest.round, self.catch_up):
+            br = latest if rnd == latest.round else self.relays.get(rnd)
+            r = self.service.post(
                 "/v1/admin/beacon",
-                json={"round": rnd.round, "signature": rnd.signature, "randomness": rnd.randomness},
-                headers={},
+                json={"round": br.round, "signature": br.signature, "randomness": br.randomness},
+                headers={"Authorization": f"Bearer {self._token}"},
             )
-            self._check(response, f"round {number}")
-            self.pending.remove(number)
-            pushed.append(number)
+            self._check(r, f"round {rnd}")
+            pushed.append(rnd)
         return {"pushed": pushed, "latest": latest.round, "known": known}
 
 

@@ -161,3 +161,38 @@ def test_secret_file_mode_enforced(tmp_path: Path) -> None:
     with pytest.raises(StoreError) as e:
         S3Credentials.from_secret_file(p)
     assert "S3CR3T" not in str(e.value)
+
+
+def test_two_threads_putting_the_same_content_at_once_both_succeed(tmp_path, monkeypatch):
+    # Both have written their temporary file before either renames it into place. With one
+    # temporary per process the second rename finds the file gone.
+    import threading
+
+    store = LocalFSStore(tmp_path / "objects")
+    data = b"the same object, put by two references at once" * 100
+    meeting = threading.Barrier(2, timeout=10)
+    replace = Path.replace
+
+    def meets_before_replacing(self: Path, target: Path) -> Path:
+        if ".tmp" in self.name:
+            meeting.wait()
+        return replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", meets_before_replacing)
+    shas: list[str] = []
+    errors: list[BaseException] = []
+
+    def put() -> None:
+        try:
+            shas.append(store.put(data))
+        except BaseException as error:  # noqa: BLE001 - the test reads the failure back
+            errors.append(error)
+
+    threads = [threading.Thread(target=put) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(20)
+    assert errors == [] and shas == [hashlib.sha256(data).hexdigest()] * 2
+    assert store.get(shas[0]) == data
+    assert list((tmp_path / "objects").rglob("*.tmp*")) == []

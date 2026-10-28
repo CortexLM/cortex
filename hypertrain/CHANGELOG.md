@@ -194,6 +194,41 @@
   (the Q/4 caps need four), so five tolerate one and six tolerate two. `--tolerate 0` opens four
   on purpose, as the TEST runbook does. The store keeps the protocol minimum of four. A script
   that opens fewer than five hotkeys must pass `--tolerate 0`. ADR 0011 Part 8, decision 27.
+- The beacon pusher (`python -m hypertrain.beacon push`) posts the latest round first and then
+  one older missing round per tick, the oldest (`--once`: all of them), from a list it keeps in
+  memory, instead of refilling every missing round oldest first. After a long store lock or a
+  challenge restart the freshness gate of the test ledger should reopen within seconds instead of
+  after about four times the outage (a model result, not yet run against a relay or s100; the
+  production gate also needs the exact round `emitted - 2`). The older rounds then arrive one per
+  tick, about 15 s each, and a pusher restarted before its list is empty leaves the rest missing
+  (`scripts/ops/s100_test/beacon_gaps.py` finds them). Rounds older than the last `--catch-up` when
+  the gap is first seen are still never pushed; no round of that window is dropped later. The tick's
+  JSON line gains `pending`. The verification of every round is unchanged. See `docs/adr/0012` at
+  the monorepo root.
+- A remote reference no longer holds the challenge's store lock while the executor works
+  (`ChallengeStore.trial_reference_v2`: claim under the lock, launch without it under a lease guard,
+  settle under it again; `Admission.prepare_reference` is now `claim_reference`, `run_reference` and
+  `settle_reference`). The beacon pusher, `latest` and every other request are served during the launch,
+  so a cold 57 s reference should no longer close the freshness gate and cause the 503 "beacon
+  infrastructure paused" storm after it (tested with a fake executor; not yet replayed on s100). A repeated request for the same trial waits for the running reference
+  (at most two waiters in the process, then 503) instead of launching a second one; a result for a
+  challenge that was replaced, expired or closed while the launch ran is dropped; `reference_beacon` is
+  the round of the commitment. No wire format, manifest field or constant changes. See `docs/adr/0012` at
+  the monorepo root.
+- Staging a trial's inputs no longer holds the challenge's store lock, for a reference and for
+  `POST /v2/runs/{run_id}/join/{admission_id}/job` (and the admin export) alike. Staging is O(model):
+  it initialises the parameters, packs the start state and the error feedback, hashes and writes them,
+  and the export then puts five objects; on the claim of a reference it held the lock 2.2 to 2.5 s at
+  66 M parameters, 4.6 to 5.1 s at 101 M and 5.4 to 7.6 s at 162 M (the export 2.4 to 7.3 s). The freshness
+  gate closes when the pusher is more than 2 rounds (6 s) behind and the idle lag is 1 to 2 rounds, so a hold
+  of that size can bring the 503 "beacon infrastructure paused" storm back at the claim (not replayed). The
+  lock now covers the database reads (`ChallengeStore.plan_trial_v2`): 3 to 33 ms for a reference and
+  1 to 5 ms for an export at those sizes, measured on a loaded host. Stagings run one at a time, across the
+  root and its child stores (about 1.7 GB of resident set at 101 M); the puts of an export are not limited.
+  `stage_trial_v2` keeps its signature; `ReferenceClaim` carries the staging instead of a staged job and
+  `ReferenceResult` carries the job. A staging that fails (422 dataset dimensions, 409 changed inputs) now
+  fails inside the reference's single flight, so a repeated request gets the same error. No wire format,
+  manifest field or constant changes. See `docs/adr/0012` at the monorepo root.
 - Relay upload quota (ADR 0014 Part 6, TRN-02): a relay counts the uploads it still holds
   (a live reservation, or custody with a pin neither released nor past its horizon) instead of
   every record it ever accepted, and has no default count cap (it was 64 for the life of the
@@ -322,6 +357,9 @@
   service run, and a failure of it, or of the dispute reaper, is journaled as `exit-failed` and
   stops neither the beacon push nor the other reaper. No one is sanctioned yet. See
   `docs/adr/0011-audit-integrity.md` (Part 8) at the monorepo root.
+- A trial's inputs are staged once and renamed into place: a launch that reads `start_state` no
+  longer sees it rewritten in place by an export, and a write that died halfway no longer leaves a
+  torn file that every later call refused as "immutable trial inputs changed".
 - A round the caps or the finality rules refuse is a 409, no longer a bare 500: opening a round
   with a roster the Q/4 caps cannot carry (fewer than four eligible members) or round w+2 without
   round w+1 answered `Internal Server Error`. `InsufficientEligibleWeight` now answers 409

@@ -3,7 +3,9 @@
 - Status: draft for branch `v3-artifact-r2`, 2026-10-27 (Principal SN100 D41). Forge decides
   promotion to `v3`. Opt-in, off by default; nothing here changes a production run, master, relay,
   profile, pin or emission, and no code of this batch ran on a GPU host or against the real R2
-  service (see "Not verified").
+  service (see "Not verified"). Amended 2026-10-28 by ADR 0012 Part B: a reference no longer holds the store
+  lock, so the reason below for leaving `reference` out of the default `operations` is gone; the default is
+  unchanged and `reference` stays opt-in until someone measures it.
 - Order: brief `v3-artifact-r2`. Builds on ADR 0003 (R2 data plane: `hypertrain/src/hypertrain/storage/
   {r2,cas,offer}.py`) and ADR 0008 (generic CUDA executor).
 - Labels: **[V]** verified in code or by a command on the date above, **[A]** reported by a cited
@@ -29,7 +31,7 @@
   gave 70.03 P of rank bytes, equal to the formula below [A]. Size:
   `S = (17.016 g + 12 (H/J + 1)) P` for `g` ranks.
 - **Windows** [V]. A trial reference: 297 s from the seed round (`admission.py:256`,
-  `store.py:2987-2990`), after the miner's proof, under the store lock (`store.py:2972`), and the
+  `store.py:2987-2990`), after the miner's proof, under the store lock (`store.py:2972`; before ADR 0012 Part B), and the
   in-tree miner client times that POST out at 120 s [A]. An audit lease: `audit_lease_rounds`
   (`protocol/messages_v2.py:666-673`) is 100 rounds = 300 s for `H <= 30`, else
   `ceil(2 H 4.0 / 3) + 100` rounds: 549 s at H = 31, 813 s at H = 64, 4,398 s at H = 512. A lease is
@@ -62,7 +64,7 @@
    builds `ArtifactExecutor` (new module, subclass of `Executor`); without it nothing changes. The
    settings list the `operations` served (default `audit`, `referee`: the reference holds the store
    lock for the whole launch, and a 60 GB transfer under it would re-create the beacon 503 storms
-   of S13 until executor-perf Part B lands) and must keep `max_artifact_bytes` at or below the
+   of S13 until executor-perf Part B lands; it has, ADR 0012) and must keep `max_artifact_bytes` at or below the
    executor's `max_result_bytes`, because `_read_result` still bounds the downloaded tar by the
    latter (raise both or neither; the executor refuses to load otherwise). There is no
    `ExecutorConfig` field: `v3-executor-perf` and `v3-audit-integrity` edit that class, `_attempt`

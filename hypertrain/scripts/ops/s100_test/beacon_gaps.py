@@ -2,10 +2,13 @@
 
     docker exec -i hypertrain-test-challenge python -I - [SINCE_SECONDS [RUN_ID]] < beacon_gaps.py
 
-The pusher can only refill rounds after the highest one the service holds, so a round skipped while
-a remote reference holds the store lock stays missing. The challenge reads exact rounds: the seed of
-a trial is the round after the one the previous trial was finalized in, and an identity whose seed
-is missing cannot get its challenge until its window has passed (docs/adr/0012).
+The service reports only the highest round it holds, so a round below it that the pusher did not
+push stays missing unless the pusher still has it in its list. The head-first pusher (docs/adr/0012
+section 3) refills such rounds from that list, one per tick, oldest first: right after a long store
+lock or a challenge restart a hole is normal and closes tick by tick (about 15 s per missing round),
+and a pusher restarted before its list is empty leaves the rest missing for good. The challenge
+reads exact rounds: the seed of a trial is the round after the one the previous trial was finalized
+in, and an identity whose seed is missing cannot get its challenge until its window has passed.
 
 Reads the `beacon` table of /data/challenge.db, or of /data/runs/<run id>/challenge.db when a run
 lives in a child store, with mode=ro. Prints one JSON line and nothing secret:
@@ -25,7 +28,8 @@ lives in a child store, with mode=ro. Prints one JSON line and nothing secret:
 
 Exit 0: nothing missing in the window. 3: a round is missing, or the table is stale. 4: bad
 arguments, unknown run or no beacon table. The exit code is about holes and a dead pusher: a pusher
-that is only behind exits 0 with `gate_open` false, so read `lag` and `gate_open` from the JSON.
+that is only behind exits 0 with `gate_open` false, so read `lag` and `gate_open` from the JSON. A
+hole the live pusher still has in its list closes by itself: look again before you call it lost.
 With a RUN_ID the store that is read (the child's, or the root's when there is none) must have a
 `runs` row for it: a mistyped or half-created id is not read from the wrong database.
 """

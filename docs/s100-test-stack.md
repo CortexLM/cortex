@@ -121,18 +121,28 @@ verifies each round with py_ecc BLS (about 1.2 s) and the challenge verifies it 
 With the original `--interval 3 --catch-up 20` the lag held at 8-9 rounds; with `--interval 0.2` it
 is 1-2 rounds when idle (measured 2026-10-26).
 
-**A store lock stops the beacon.** A remote or in-process reference holds the lock of the store that
-hosts the run for its whole duration (13-19 s with the CUDA cache, 43-64 s without). The first run
+**A store lock stops the beacon.** Until ADR 0012 Part B a remote or in-process reference held the lock
+of the store that hosts the run for its whole duration (13-19 s with the CUDA cache, 43-64 s without),
+and a challenge image from before Part B still does. Since Part B a reference holds it for its claim and
+its settlement only (a few milliseconds, measured with a fake executor); the claim and `POST /join/<id>/job`
+staged the trial's inputs under the lock until the follow-up of ADR 0012 point 4 (h) and held it 2 to 8 s at 66 M to
+162 M parameters (5 s at the 101 M profile), which is enough to close the gate (it closes at a lag of more than 2
+rounds, the idle lag is 1-2), so an image from before that follow-up can still bring the 503 storm back for a model of
+that size; any other long lock, a challenge
+restart or a stuck request, stops the beacon the same way. The first run
 of a state directory lives in the root store, where `GET /v1/beacon/latest` and
 `POST /v1/admin/beacon` both wait for that lock. A run created while the root already hosts one
 (S13's) lives in a child store with a lock of its own: the root still answers `latest` and keeps the
 round a POST brings, but the POST then waits for the child, so the pusher times out all the same and
 the child, whose table the gate and the seeds read, gets no round. The pusher gets 10 s timeouts (a
-failure each), and when the lock ends it refills the missing rounds oldest first at one round per
-2.4 s while the clock adds one per 3 s. Two things can go wrong, and the cadence decides which:
+failure each), and when the lock ends it pushes the latest round first, so the gate reopens, then one
+older missing round per tick, the oldest. (The pusher before ADR 0012 D68 refilled oldest first at one
+round per 2.4 s while the clock adds one per 3 s, which kept the gate closed for about four times the
+lock.) Two things can go wrong, and the cadence decides which:
 
-- `--catch-up N` pushes at most the last N rounds after the highest one the service holds. Rounds
-  older than that are skipped for good, because the service reports only its highest round. The
+- `--catch-up N` pushes at most the last N rounds after the highest one the service holds; with head
+  first the window also slides while the list of older rounds drains. Rounds older than that are
+  skipped for good, because the service reports only its highest round. The
   challenge reads exact rounds: after a trial is finalized in round `n` (and after a join or a
   resume), the identity's seed is round `n + 1`. A seed in a skipped round answers 500
   `BeaconUnavailable: round N not pushed` until the window is over (100 rounds), then 409
@@ -145,24 +155,28 @@ failure each), and when the lock ends it refills the missing rounds oldest first
   refused connection (the challenge restarting) one per 1.4 s.
 
 `beacon` therefore sets `--interval 0.2 --catch-up 60 --max-failures 100`. Sizing, from the model of
-the real pusher: the catch-up must cover `lock / 3 + 10` rounds (60 covers a lock of 150 s; the old
-`3` skipped rounds after any lock over about 9 s, 20 after one over about 50 s), and the budget must
+the real pusher: the catch-up must cover `lock / 3 + 10` rounds for the ascending pusher (60 covers a
+lock of 150 s; the old `3` skipped rounds after any lock over about 9 s, 20 after one over about 50 s);
+head first keeps that cover, though the older rounds then arrive one per tick, about 15 s each (ADR 0012
+section 3). The budget must
 cover `lock / 11.4` failures for a lock and `outage / 1.4` for a refused connection (100: 140 s). The
 script takes the stock cadence and the one the previous version left on this stack (`0.2 / 3`), raises
 a budget below 100 and keeps a higher one, and refuses (exit 5, nothing changed) any compose file
 where the result is not exactly that. Never start a second pusher, and never backfill a range of
 rounds by hand during trials: S13 lost two identities that way.
 
-The price is time. The model (`tests/ops/s100/test_beacon_lock_tolerance.py`, both store layouts,
-checked against two S13 observations) says the gate stays closed after the lock for up to about
-`4 x lock + 10` s with the run in the root store, about `3 x lock` in a child: 30-40 s after a 13 s
-reference, 1 minute after 19 s, **3 to 4 minutes after a 60 s reference**. That figure is very
-sensitive to the cost of one round: at 2.6 s it doubles, at 2.8 s it is five times larger, and at
-2.9 s the pusher never catches up. Measure the idle lag with a child run present before trusting it.
-Expect 503s in that window and retry them. Hence two rules: keep the CUDA cache (the executor does
-by default), and run the first reference after a new image (43-64 s, cold) alone, before a second
-driver starts. Releasing the lock during the reference (ADR 0012 section 2) or a pusher that pushes
-the newest round first (same ADR, a proposal) is what removes the wait.
+The price of the ascending pusher was time. The model (`tests/ops/s100/test_beacon_lock_tolerance.py`,
+both store layouts, checked against two S13 observations) says the gate stayed closed after the lock
+for up to about `4 x lock + 10` s with the run in the root store, about `3 x lock` in a child: 30-40 s
+after a 13 s reference, 1 minute after 19 s, **3 to 4 minutes after a 60 s reference**. That figure is
+very sensitive to the cost of one round: at 2.6 s it doubles, at 2.8 s it is five times larger, and at
+2.9 s the pusher never catches up. With head first the model says the gate reopens within 7 s of a lock
+of 13 to 60 s, in either layout, and holds up to 2.6 s a round. Both fixes are in the code (ADR 0012
+section 2, the lock released during the reference, and section 3, head first) but have not run on s100:
+the stack runs the older challenge image and pusher until Forge swaps them. Until then keep the two
+rules: keep the CUDA cache (the executor does by default), and run the first reference after a new image
+(43-64 s, cold) alone, before a second driver starts. Expect 503s in that window and retry them. Measure
+the idle lag with a child run present before trusting any of these numbers.
 
 Proving it instead of inferring it: `beacon_gaps.py` lists rounds missing from the `beacon` table
 of the store that hosts the run, the identities whose seed is one of them, and whether the pusher
@@ -173,7 +187,9 @@ ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - 1800 $RID" <
 ```
 
 Exit 0: nothing missing in the last 30 minutes. 3: a hole (`missing`, and `stranded` names who waits
-for it: stop the run and report it) or a table that is dead (`stale`). 4: bad arguments or a run the
+for it) or a table that is dead (`stale`). A hole the live head-first pusher still has in its list
+closes by itself, about 15 s per missing round: look again after that before you stop the run; one
+that stays, or a `stranded` name, is a real loss and is reported. 4: bad arguments or a run the
 stack does not host. A pusher that is only behind exits 0: read `lag` and `gate_open` in the JSON.
 Take a baseline before the retune (without `$RID` until the run is published: the tool reads the
 store that hosts the run and refuses an id it cannot find) and run it again after every ten trials.
@@ -550,8 +566,9 @@ sudo -n docker run --rm --init --gpus device=5 --ipc=host --ulimit memlock=-1 --
 ```
 
 `setup` takes no `--gpus`; `$D` holds `scripts/cpu_miners.py`, `seeds/` and the miner directories. Two
-drivers on different GPUs with disjoint plans overlap one miner's probe with the other's reference, but
-the challenge computes references one at a time under its store lock. Gate the node with
+drivers on different GPUs with disjoint plans overlap one miner's probe with the other's reference;
+before ADR 0012 Part B the challenge computed references one at a time under its store lock, since then
+two references may overlap, each on an executor host (one job per host). Gate the node with
 `hypertrain/scripts/b300/cycle_gate.sh --gpus 5` before each driver.
 
 ### 6.8 Measured on 2026-10-27 (S13, one executor host, tiny-cpu)
@@ -581,7 +598,10 @@ reach a round: no `run-v2`, no audit, no `get_weights`.
 - **The reference holds the store lock**, so the beacon pusher times out meanwhile and every trial
   waits for it to catch up (503 "beacon infrastructure paused" for 10-70 s). A second driver or a
   second executor host does not shorten the references; two drivers only overlap the miner side.
-- **Do not push beacon rounds out of order.** The challenge reads exact rounds (a trial's seed round,
+  (ADR 0012 Part B releases the lock during the reference; this measurement predates it.)
+- **Never add a second pusher, and never backfill by hand.** (The pusher itself now pushes the latest
+  round first and the older ones after, from its own list: ADR 0012 section 3. What S13 broke was a
+  second writer.) The challenge reads exact rounds (a trial's seed round,
   `d_audit`). A second pusher with `--catch-up 1` moved `known` past rounds the first one would have
   filled; the challenge request (then an unsigned `GET /join/<id>/challenge`, an owner-signed
   `POST` since ADR 0010) answered 500 `BeaconUnavailable: round N not pushed` and

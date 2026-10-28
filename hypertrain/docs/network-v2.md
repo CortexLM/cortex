@@ -168,7 +168,8 @@ unknown run 404, unknown admission 409 `UNKNOWN_ADMISSION`, a deregistered or
 revoked owner 403 like the challenge route, any body that is not the owner's unexpired
 `JobRequest` (a `ChallengeRequest` is not one) 403 (the admin token is no substitute), then the
 export's own refusals (409 `NO_CHALLENGE`, 409 `REFERENCE_TRIAL_CLOSED` once the trial is
-finalized, 503 on a beacon pause). The miner checks the job, objects and signed challenge as
+finalized, 503 on a beacon pause). The route holds the store lock to read, not to stage the inputs or
+to put the objects. The miner checks the job, objects and signed challenge as
 `trial_export` does, streams each input (one uncompressed, sha256-verified
 object; about 4 bytes per parameter for a `reset` start state, more under
 `carry`) into a private temporary folder under its workdir, probes, and deletes
@@ -197,6 +198,24 @@ operator's route; every other 409 keeps its answer.
 stdout contains the signed proof/screen pair. The operator independently prepares
 and finalizes references through authenticated admin routes; miners cannot
 self-finalize or turn a successful probe into ACTIVE status.
+
+The service computes the reference itself when the signed proof arrives
+(`POST /v2/runs/{run_id}/join/proof`; `.../admin/join/{admission_id}/reference` is the override).
+On a remote executor it takes 13 to 64 s. The service holds its store lock only to read what the
+staging and the launch need and to commit the result, not while the trial's inputs are written
+(seconds for a model of 100 M parameters) nor while the executor works (ADR 0012), so every other
+request, the beacon pusher included, is served meanwhile. A second request for the same trial that
+arrives while the reference runs (a retry after a client timeout) waits for it and gets the same
+answer, or the same failure. At most two such requests wait in the process: the next answers 503
+`reference already running for this trial; retry`, and a waiter that has waited 330 s answers 503
+`reference still running for this trial; retry`. Both are transient: retry. A reference whose trial
+was closed, expired or replaced while it ran is dropped and nothing is committed: 409
+`REFERENCE_STATE_CHANGED` or `REFERENCE_TRIAL_CLOSED`. A reference that is
+not done by the deadline round of the trial is not committed either: the launch is cancelled there and the
+answer is 409 `REFERENCE_TRIAL_CLOSED`, whatever the launch raised; the trial is closed `EXPIRED` and the miner's state,
+strikes and dispute flag are untouched. Its next challenge request is refused as 409
+`CHALLENGE_EXPIRED` until the operator reseeds the identity (below); the reseed refuses a trial that is
+still open, so it never meets a reference that is running.
 
 Every object a miner uploads (an artifact, a part, a part index) is
 `POST /v2/runs/{run_id}/objects/{sha256}`. No header carries a signature; the

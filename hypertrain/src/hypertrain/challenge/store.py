@@ -21,7 +21,8 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from concurrent.futures import Future, wait
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from fractions import Fraction
 from functools import partial
@@ -298,6 +299,13 @@ class _ServiceCapacityV1(BaseModel):
 # Signed-profile roster cap ceiling (plan 4.3); RoundOpenV2.roster max_length is the same bound.
 MAX_ROSTER_CEILING = 1024
 
+# A repeated request for a reference that is already running waits for it, on a worker of the
+# asyncio.to_thread pool (min(32, cpu + 4)). Past this many waiters in the process the request is
+# refused with 503 at once; a waiter gives up after REFERENCE_WAIT_SECONDS (the 100-round trial
+# window is 300 s).
+REFERENCE_WAITERS = 2
+REFERENCE_WAIT_SECONDS = 330.0
+
 
 # The meta row that pins which coordinator secret the escrow ids were derived from.
 ESCROW_ID_NAMESPACE_META = "escrow-id-namespace-v2"
@@ -478,6 +486,9 @@ class ChallengeStore:
         self._services_v2: dict[str, tuple[Any, Any, Any]] = {}
         self.beacon_arrived = threading.Condition()
         self._lease_guards_v2: dict[str, Any] = {}
+        self._reference_flights_v2: dict[tuple[str, str, bool], Future[str]] = {}
+        self._reference_waiters = threading.BoundedSemaphore(REFERENCE_WAITERS)
+        self._staging = threading.Lock()
         self._ipc_v2: socket.socket | None = None
         self._ipc_path_v2: Path | None = None
         self._ipc_thread_v2: threading.Thread | None = None
@@ -588,6 +599,8 @@ class ChallengeStore:
             _role_launch=self._role_launch,
         )
         child.clock = lambda: self.clock()
+        child._reference_waiters = self._reference_waiters  # one budget for the one thread pool
+        child._staging = self._staging  # one model in memory at a time, whichever store hosts it
         lock = directory / "capacity-runtime.lock"
         if not lock.is_symlink():  # one host-wide capacity lock across all hosted runs
             lock.unlink(missing_ok=True)
@@ -761,7 +774,9 @@ class ChallengeStore:
             result = {"round": br.round, "latest": self._now(db)}
         with self.beacon_arrived:
             self.beacon_arrived.notify_all()
-        for guard in tuple(self._lease_guards_v2.values()):
+        with self._lock:  # a reference registers and drops its guard from another thread
+            guards = tuple(self._lease_guards_v2.values())
+        for guard in guards:
             guard.advance(br.round)
         for run_id, (escrow, admission, _) in self._services_v2.items():
             with self._tx():
@@ -2938,6 +2953,46 @@ class ChallengeStore:
     def stage_trial_v2(
         self, run_id: str, challenge: JoinChallenge, samples: tuple[int, ...], epoch: int
     ) -> tuple[IslandJobV1, Path]:
+        return self.plan_trial_v2(run_id, challenge, samples, epoch)()
+
+    def plan_trial_v2(
+        self, run_id: str, challenge: JoinChallenge, samples: tuple[int, ...], epoch: int
+    ) -> Callable[[], tuple[IslandJobV1, Path]]:
+        """Read what staging needs from the database now; the staging it returns reads none.
+
+        Staging is O(model): the parameters are initialised, serialised twice, hashed and written,
+        seconds at 100 M parameters, more than the freshness gate lets the beacon pusher wait. A
+        caller that holds the store lock plans under it, which costs a few reads, and stages
+        after it let go. Stagings run one at a time (`_staging`), as the lock made them, so the
+        memory is that of one model.
+        """
+        from hypertrain.trainer.config import TrainConfig
+
+        manifest = self._run_v2(run_id)
+        hotkey = None  # only a carried start state is keyed by the admission's hotkey
+        if TrainConfig.from_manifest_v2(manifest).inner.state_policy == "carry":
+            hotkey = self._services(run_id)[1].store.by_id(challenge.admission_id).hotkey
+        dataset = self._record_v2(run_id, "dataset", "inputs")
+        stage = partial(
+            self._stage_inputs_v2, run_id, manifest, hotkey, dataset, challenge, samples, epoch
+        )
+
+        def staged() -> tuple[IslandJobV1, Path]:
+            with self._staging:
+                return stage()
+
+        return staged
+
+    def _stage_inputs_v2(
+        self,
+        run_id: str,
+        manifest: RunManifestV2,
+        hotkey: str | None,
+        dataset: Mapping[str, JsonValue],
+        challenge: JoinChallenge,
+        samples: tuple[int, ...],
+        epoch: int,
+    ) -> tuple[IslandJobV1, Path]:
         import torch
 
         import hypertrain.trainer  # noqa: F401
@@ -2945,19 +3000,16 @@ class ChallengeStore:
         from hypertrain.trainer.config import TrainConfig
         from hypertrain.trainer.model import init_params
 
-        manifest = self._run_v2(run_id)
         cfg = TrainConfig.from_manifest_v2(manifest)
         theta = init_params(cfg.model)
         start_state = pack_state(theta)
         ef_in = pack_state({k: torch.zeros_like(v) for k, v in theta.items()})
-        if cfg.inner.state_policy == "carry":
-            admission = self._services(run_id)[1].store.by_id(challenge.admission_id)
-            genesis = AnchorCache().genesis(manifest, admission.hotkey, theta)
+        if hotkey is not None:
+            genesis = AnchorCache().genesis(manifest, hotkey, theta)
             start_state = pack_state(genesis.theta, genesis.state)
             ef_in = pack_state(genesis.ef)
         directory = self.state_dir / "trials-v2" / challenge.nonce
         directory.mkdir(parents=True, exist_ok=True)
-        dataset = self._record_v2(run_id, "dataset", "inputs")
         raw = self.objects.get(str(dataset["samples_hash"]))
         proofs = json.loads(self.objects.get(str(dataset["proofs_hash"])))
         assert isinstance(proofs, list)
@@ -2978,9 +3030,14 @@ class ChallengeStore:
         }
         for name, value in inputs.items():
             path = directory / name
-            if path.exists() and path.read_bytes() != value:
-                raise ChallengeError(409, "immutable trial inputs changed")
-            path.write_bytes(value)
+            if path.exists():
+                if path.read_bytes() != value:
+                    raise ChallengeError(409, "immutable trial inputs changed")
+                continue  # a launch may be reading it: staged once, never rewritten in place
+            with tempfile.TemporaryDirectory(dir=directory) as temporary:
+                staged = Path(temporary) / name
+                staged.write_bytes(value)
+                staged.replace(path)
         deadline = manifest.training.beacon.genesis_time + (challenge.deadline_beacon - 1) * 3
         return IslandJobV1(
             job_version=1,
@@ -2997,6 +3054,8 @@ class ChallengeStore:
         ), directory
 
     def export_trial_v2(self, run_id: str, admission_id: str) -> dict[str, Any]:
+        """The trial's job and its objects. The store lock covers the reads and the planning of
+        the staging; the staging and the puts, O(model) both, run after it let go."""
         from hypertrain.data.trial_assignment import trial_samples
 
         self._services(run_id)
@@ -3020,34 +3079,36 @@ class ChallengeStore:
             except BeaconError:
                 raise ChallengeError(503, "beacon infrastructure paused") from None
             samples = trial_samples(manifest, admission_id, challenge.nonce, beacon)
-            job, directory = self.stage_trial_v2(run_id, challenge, samples, row["trial_epoch"])
-            path = directory / "job.json"
-            raw = job.model_dump_json().encode()
-            if path.exists():
-                if path.read_bytes() != raw:
-                    raise ChallengeError(409, "immutable trial job changed")
-            else:
-                with tempfile.TemporaryDirectory(dir=directory) as temporary:
-                    staged = Path(temporary) / "job.json"
-                    staged.write_bytes(raw)
-                    staged.replace(path)
-            objects = {
-                name: self.objects.put((directory / relative).read_bytes())
-                for name, relative in job.object_paths.items()
-            }
+            stage = self.plan_trial_v2(run_id, challenge, samples, row["trial_epoch"])
             receipt = self._db.execute(
                 "SELECT receipt FROM admission_reservations WHERE reservation=?",
                 (f"challenge|{admission_id}|{challenge.nonce}",),
             ).fetchone()
             if receipt is None:
                 raise ChallengeError(409, "MISSING_CHALLENGE_RECEIPT")
-            return {
-                "job": job.body(),
-                "objects": objects,
-                "challenge": challenge.body(),
-                "challenge_envelope": envelope_v2.load_json(receipt["receipt"]),
-                "nonce": challenge.nonce,
-            }
+            envelope = envelope_v2.load_json(receipt["receipt"])
+        job, directory = stage()
+        path = directory / "job.json"
+        raw = job.model_dump_json().encode()
+        if path.exists():
+            if path.read_bytes() != raw:
+                raise ChallengeError(409, "immutable trial job changed")
+        else:
+            with tempfile.TemporaryDirectory(dir=directory) as temporary:
+                staged = Path(temporary) / "job.json"
+                staged.write_bytes(raw)
+                staged.replace(path)
+        objects = {
+            name: self.objects.put((directory / relative).read_bytes())
+            for name, relative in job.object_paths.items()
+        }
+        return {
+            "job": job.body(),
+            "objects": objects,
+            "challenge": challenge.body(),
+            "challenge_envelope": envelope,
+            "nonce": challenge.nonce,
+        }
 
     def _contest_v2(self, run_id: str, verdict_hash: str) -> Contest:
         """The accepted contest record. A verdict that upholds the work has nothing to contest.
@@ -3239,74 +3300,170 @@ class ChallengeStore:
     def trial_reference_v2(
         self, run_id: str, admission_id: str, *, retain_shadow_custody: bool = False
     ) -> dict[str, str]:
+        """The trusted reference of an open trial, in three steps (docs/adr/0012 section 2).
+
+        Claim, under the lock: the freshness gate, everything the launch and the staging of its
+        inputs read from the database, and a flight keyed (admission, challenge nonce, custody
+        flag). A second call for the same key waits for the flight and gets its commitment, or its
+        failure, without staging the job again or launching again. A call with the other custody
+        flag (test mode only) has a flight of its own: the same trial can then launch twice, and
+        the executor, which finds the first publication, answers the second without a host. Run,
+        without the lock: the staging (O(model)), the launch and the object puts, under a lease
+        guard the verified beacon cancels. Settle, under the lock again, after the freshness gate:
+        the commitment is written only into the row state the claim read. The lock is therefore
+        free while the inputs of a large model are written and while a remote executor works.
+        """
         from hypertrain.auditor.worker import LeaseGuard
 
+        if self._lock._is_owned():  # type: ignore[attr-defined]
+            raise RuntimeError("trial_reference_v2 would keep the store lock through the launch")
         _, admission, _ = self._services(run_id)
+        guard: LeaseGuard | None = None
+        guard_key = ""
+        trusted: Callable[[IslandJobV1, Path, JoinChallenge, int], IslandLaunch] | None = None
+        value: str | None = None
+        failure: BaseException | None = None
+        key = (admission_id, "", retain_shadow_custody)
+        cutoff = 0.0
         with self._lock:
-            now = self._fresh_v2(
-                self._run_v2(run_id), f"reference:{admission_id}:{self._now(self._db)}"
-            )
-            if self._role_launch is None:
-                value = admission.prepare_reference(
-                    admission_id, now=now, retain_shadow_custody=retain_shadow_custody
+            manifest = self._run_v2(run_id)
+            now = self._fresh_v2(manifest, f"reference:{admission_id}:{self._now(self._db)}")
+            launch = self._role_launch
+            current = admission.store.db.execute(
+                "SELECT * FROM admissions_v2 WHERE admission_id=?", (admission_id,)
+            ).fetchone()
+            if launch is not None and (current is None or current["challenge"] is None):
+                raise ChallengeError(409, "reference lacks accepted challenge")
+            flight = None
+            if current is not None and current["challenge"] is not None:
+                nonce = JoinChallenge.model_validate_json(current["challenge"]).nonce
+                key = (admission_id, nonce, retain_shadow_custody)
+                flight = self._reference_flights_v2.get(key)
+            leader = flight is None
+            if leader:
+                claim = admission.claim_reference(
+                    admission_id,
+                    now=now,
+                    plan=lambda c, samples, epoch: self.plan_trial_v2(run_id, c, samples, epoch),
                 )
-            else:
-                current = admission.store.db.execute(
-                    "SELECT * FROM admissions_v2 WHERE admission_id=?", (admission_id,)
-                ).fetchone()
-                if current is None or current["challenge"] is None:
-                    raise ChallengeError(409, "reference lacks accepted challenge")
-                challenge = JoinChallenge.model_validate_json(current["challenge"])
-                cutoff = (
-                    self._run_v2(run_id).training.beacon.genesis_time
-                    + (challenge.deadline_beacon - 1) * 3
-                )
-                guard = LeaseGuard(challenge.deadline_beacon, challenge.deadline_beacon, cutoff)
-                key = f"reference:{admission_id}:{challenge.nonce}"
+                if isinstance(claim, str):
+                    return {"reference_commitment": claim}
+                nonce = claim.challenge.nonce
+                key = (admission_id, nonce, retain_shadow_custody)
+                if launch is not None:
+                    deadline = claim.challenge.deadline_beacon
+                    cutoff = manifest.training.beacon.genesis_time + (deadline - 1) * 3
+                    receipt = admission.store.db.execute(
+                        "SELECT receipt FROM admission_reservations WHERE reservation=?",
+                        (f"challenge|{admission_id}|{nonce}",),
+                    ).fetchone()
+                    if receipt is None:
+                        raise ChallengeError(409, "MISSING_CHALLENGE_RECEIPT")
+                    envelope, hotkey = json.loads(receipt[0]), current["hotkey"]
 
-                def trusted(
-                    job: IslandJobV1, directory: Path, c: JoinChallenge, epoch: int
-                ) -> IslandLaunch:
-                    assert self._role_launch is not None
-                    if c != challenge or job.deadline != cutoff:
-                        raise ChallengeError(409, "reference launch subject changed")
-                    return self._role_launch(
-                        "reference",
-                        job,
-                        directory,
-                        {
-                            "run_id": run_id,
-                            "admission_id": admission_id,
-                            "epoch": epoch,
-                            "challenge": c.body(),
-                            "challenge_hash": c.digest(),
-                            "challenge_envelope": json.loads(
-                                admission.store.db.execute(
-                                    "SELECT receipt FROM admission_reservations "
-                                    "WHERE reservation=?",
-                                    (f"challenge|{admission_id}|{c.nonce}",),
-                                ).fetchone()[0]
-                            ),
-                            "hotkey": current["hotkey"],
-                        },
-                    )
-
-                self._lease_guards_v2[key] = guard
-                try:
-                    with guard:
-                        guard.advance(now)
-                        guard.check()
-                        value = admission.prepare_reference(
-                            admission_id,
-                            now=now,
-                            trusted_launch=trusted,
-                            cancel=guard.cancelled,
-                            retain_shadow_custody=retain_shadow_custody,
+                    def trusted(
+                        job: IslandJobV1, directory: Path, c: JoinChallenge, epoch: int
+                    ) -> IslandLaunch:
+                        if job.deadline != cutoff:
+                            raise ChallengeError(409, "reference launch subject changed")
+                        return launch(
+                            "reference",
+                            job,
+                            directory,
+                            {
+                                "run_id": run_id,
+                                "admission_id": admission_id,
+                                "epoch": epoch,
+                                "challenge": c.body(),
+                                "challenge_hash": c.digest(),
+                                "challenge_envelope": envelope,
+                                "hotkey": hotkey,
+                            },
                         )
-                        guard.check()
-                finally:
-                    self._lease_guards_v2.pop(key, None)
+
+                    guard = LeaseGuard(deadline, deadline, cutoff)
+                    guard_key = f"reference:{admission_id}:{nonce}"
+                    self._lease_guards_v2[guard_key] = guard
+                flight = self._reference_flights_v2[key] = Future()
+        assert flight is not None
+        if not leader:
+            return self._follow_reference_v2(flight)
+        assert not isinstance(claim, str)
+        try:
+            with guard if guard is not None else nullcontext():
+                if guard is not None:
+                    guard.advance(now)
+                    guard.check()
+                result = admission.run_reference(
+                    claim,
+                    now=now,
+                    trusted_launch=trusted,
+                    cancel=None if guard is None else guard.cancelled,
+                )
+                if guard is not None:
+                    guard.check()
+            with self._lock:
+                # The gate again, outside a `_tx`: a beacon that went stale during the launch must
+                # not carry the commitment (its round and the deadline test would be stale too). The
+                # finished result is lost on a 503, but the retry finds the published directory.
+                settled = self._fresh_v2(
+                    manifest, f"reference-settle:{admission_id}:{self._now(self._db)}"
+                )
+                if guard is not None:
+                    guard.check()
+                value = admission.settle_reference(
+                    claim, result, now=settled, retain_shadow_custody=retain_shadow_custody
+                )
+        except BaseException as error:
+            failure = error
+            if (
+                guard is not None
+                and isinstance(error, Exception)
+                and not isinstance(error, ChallengeError | AdmissionError)
+                and (guard.cancelled.is_set() or time.time() >= cutoff)
+            ):
+                # The lease is over: whatever the launch or the guard raised, the answer is the
+                # window's (a client must not retry a 500 for a trial that is closed).
+                failure = ChallengeError(409, "REFERENCE_TRIAL_CLOSED")
+                raise failure from error
+            raise
+        finally:
+            self._end_reference_v2(key, flight, guard_key, guard, value=value, error=failure)
         return {"reference_commitment": value}
+
+    def _follow_reference_v2(self, flight: Future[str]) -> dict[str, str]:
+        """A repeated request waits for the running reference, on one of a few places."""
+        if not self._reference_waiters.acquire(blocking=False):
+            raise ChallengeError(503, "reference already running for this trial; retry")
+        try:
+            finished, _ = wait([flight], timeout=REFERENCE_WAIT_SECONDS)
+        finally:
+            self._reference_waiters.release()
+        if not finished:
+            raise ChallengeError(503, "reference still running for this trial; retry")
+        return {"reference_commitment": flight.result()}
+
+    def _end_reference_v2(
+        self,
+        key: tuple[str, str, bool],
+        flight: Future[str],
+        guard_key: str,
+        guard: Any,
+        *,
+        value: str | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        """Forget the flight and its guard, each by identity, then tell the waiters how it ended."""
+        with self._lock:
+            if self._reference_flights_v2.get(key) is flight:
+                del self._reference_flights_v2[key]
+            if guard is not None and self._lease_guards_v2.get(guard_key) is guard:
+                del self._lease_guards_v2[guard_key]
+        if error is not None:
+            flight.set_exception(error)
+        else:
+            assert value is not None
+            flight.set_result(value)
 
     def trial_finalize_v2(self, run_id: str, admission_id: str, raw: bytes) -> dict[str, Any]:
         with self._tx():
