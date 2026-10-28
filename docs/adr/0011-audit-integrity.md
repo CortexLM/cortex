@@ -1,7 +1,7 @@
 # ADR 0011: audit integrity (settlement of blockages, numerics pin, host and image binding)
 
 - Status: draft for branch `v3-audit-integrity`, 2026-10-27 (Principal SN100 D35, D36 bis, D38, D38 ter,
-  D38 quater, D40, D43, D44, D46, D47, D49, D51; Lens red team B findings DSP-01, AUD-01, AUD-06, DET-01,
+  D38 quater, D40, D43, D44, D46, D47, D49, D51, D82; Lens red team B findings DSP-01, AUD-01, AUD-06, DET-01,
   DET-01b, QUAL-01, QUAL-02, EXE-01; Lens C1/C2 and final synthesis F2 R-C2/R-D, F5, DSP-04). Part 8 is
   the one rule ("general exclusion exit") of which Parts 1, 2 and 5 are rows. Forge decides promotion to `v3`. This file grows one part per finding; each part is
   committed before the code it justifies. Parts present so far are listed under "Parts".
@@ -218,6 +218,8 @@
    `unresolved_audits - 1`). The round disposition is never touched. Service-admitted runs skip the re-arm.
    Amended by Part 8 decision 3: a job whose member has no leaves record is dropped at the first
    `absolute` as `NO_SHOW/leaves`, without a re-arm.
+   Amended by Part 9 decisions 2 and 3: the re-arm keeps the auditors that left a MISMATCH unsigned in
+   `tried`, and a job that holds one may open a third window.
    The second window ends where the miner's sealed commit ends: `absolute = min(now + 2 * lease_rounds,
    exp_drand)`, and no window is opened when that leaves fewer than two rounds (AUD-07, Lens verdict
    2026-10-27 16:05Z). `AuditJobV2` embeds the commit live (`validate_embedded`) and an honest miner
@@ -228,7 +230,8 @@
 
 ### Consequences
 
-- One failing host or auditor costs one lease of one auditor; after a second failed window it costs one miner one round.
+- One failing host or auditor costs one lease of one auditor; after a second failed window it costs one miner one round
+  (a third window for a job that holds a MISMATCH nobody signed: Part 9).
   It no longer silences the auditors for good or voids the round for everybody.
 - Total audit time per job doubles: a job nobody audits holds its round (verified inputs, w+2 opening, rollback, relay
   settlement) for up to `2 * lease_rounds` more beacon rounds (H <= 30: 200 rounds, 10 min; policy lease at H = 512: 2932
@@ -1667,7 +1670,6 @@ the parents.
 2026-10-27. Lens C1 report (F2: R-C2, R-D; Lens m2), Lens synthesis (DSP-04), ADR 0009 section 4, ADR 0010
 Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not Git.
 
-
 ## Part 9: a withheld auditor signature (A2W-23, D82)
 
 - Principal SN100 D82 (option A) and the decisions Forge took through the relay question tool on
@@ -1863,14 +1865,17 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
    master's host is not an auditor, and a host fault would sanction an honest miner (decisions 9 and 15).
 2. A second record kind for the strike: `_cooling_until_v2` would read two records on the hot path,
    `others_free` would need a merged map, and an older binary would ignore the new kind and lift every bar,
-   where it still honours `until` in the same record. 3. A counter stored in the cooldown record: it forgets a
-   strike after a quiet lease. 4. Writing the result into the `EXECUTED` marker or the verdict: that edits
-   `execute_audit_v2`, an owned function, and moves `implementation_hash`. 5. A third attempt in a window: a
-   wire change (`AuditJobV2.attempt` is bounded to 2 and `max_attempts` is `Literal[2]`). 6. A strike on the
-   first withheld MISMATCH: it adds only `K - L` to a cooldown that already applies and punishes an honest
-   accident. 7. A modulo count.
-   8. Counting every executed-and-unsigned verdict (decision 7). 9. Liveness tracking of the auditors to defeat
-   the ghost: not in this lot.
+   where it still honours `until` in the same record.
+3. A counter stored in the cooldown record: it forgets a strike after a quiet lease.
+4. Writing the result into the `EXECUTED` marker or the verdict: that edits `execute_audit_v2`, an owned
+   function, and moves `implementation_hash`.
+5. A third attempt in a window: a wire change (`AuditJobV2.attempt` is bounded to 2 and `max_attempts` is
+   `Literal[2]`).
+6. A strike on the first withheld MISMATCH: it adds only `K - L` to a cooldown that already applies and
+   punishes an honest accident.
+7. A modulo count.
+8. Counting every executed-and-unsigned verdict (decision 7).
+9. Liveness tracking of the auditors to defeat the ghost: not in this lot.
    10. Counting the sign window from the claim: an honest slow replay would be revoked while it computes.
    11. Revoking a lease whose marker is `REQUESTED`. 12. A window shorter than the client's post timeout (an
    honest signature in flight would be refused).

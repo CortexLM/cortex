@@ -383,7 +383,8 @@ not replaced, because an honest miner seals its commit until `d_final` and an au
 live, so no window can start after that round; the miner is left out of the round (`excluded`,
 `INFRASTRUCTURE`, no sanction). With a gap of 101 to 200 rounds a second auditor can take the job
 inside the same window, and a job whose attempts fail early gets a second window that ends at
-`d_final` (`audit-rearm`).
+`d_final` (`audit-rearm`). A job whose master-replayed `MISMATCH` its auditor never signed may get a
+third window, and is never handed back to that auditor (ADR 0011 Part 9).
 `live_operator.py open` accepts any gap from 2 to 200 rounds for every H; 200 is the service
 horizon (`store.py:5109`). A round with a wider gap closes later: 100 more rounds (5 minutes) per
 extra 100.
