@@ -297,6 +297,28 @@ class _AggregatePlan:
     reference_reward_units: int
 
 
+@dataclass(frozen=True, slots=True)
+class _FinalityReplay:
+    """Everything the replay of a finalized round computes from. `key` names exactly these values,
+    so a verdict kept under it is the verdict of a replay of them and of no other."""
+
+    key: str
+    manifest: RunManifestV2
+    policy: AggregationPolicyV2
+    economics: bytes
+    tape: Any
+    w: int
+    prev_state: str
+    predecessor: str
+    inputs: list[Any]
+    reference_reward_units: int
+    signer: str
+
+
+# Replay verdicts kept for the transactions that will ask for them; a verdict is 64 hex characters.
+FINALITY_VERDICTS = 8
+
+
 # The meta row that pins which coordinator secret the escrow ids were derived from.
 ESCROW_ID_NAMESPACE_META = "escrow-id-namespace-v2"
 
@@ -472,6 +494,8 @@ class ChallengeStore:
         self._lease_guards_v2: dict[str, Any] = {}
         self._aggregate_flights_v2: dict[tuple[str, int], Future[dict[str, Any]]] = {}
         self._aggregate_waiters = threading.BoundedSemaphore(AGGREGATE_WAITERS)
+        self._finality_verdicts_v2: dict[str, str] = {}
+        self._finality_prime_v2 = threading.Lock()
         self._ipc_v2: socket.socket | None = None
         self._ipc_path_v2: Path | None = None
         self._ipc_thread_v2: threading.Thread | None = None
@@ -2432,35 +2456,121 @@ class ChallengeStore:
             or record["shadow"] != evidence.shadow
         ):
             raise EscrowError("FINALITY_ACCEPTANCE_LINKAGE")
+        job = self._finality_replay_job_v2(
+            run_id, int(str(evidence.finalize.body["w"])), evidence.tape_hash
+        )
+        # A verdict kept under this key is that of a replay, made before the transaction, of these
+        # very values; without one the replay is made here, as it always was.
+        theta_hash = self._finality_verdicts_v2.get(job.key) or self._run_finality_replay_v2(job)
+        if theta_hash != record["theta_hash"]:
+            raise EscrowError("FINALITY_TAPE_REPLAY_MISMATCH")
+        return str(record["theta_hash"])
+
+    def _finality_replay_job_v2(self, run_id: str, w: int, tape_hash: str) -> _FinalityReplay:
+        """The values the replay of round w computes from, read in a transaction."""
         from hypertrain.aggregator.checkpoint import network_inputs
-        from hypertrain.aggregator.tape_v2 import TapeV2, replay_tape
+        from hypertrain.aggregator.tape_v2 import TapeV2
 
         manifest = self._run_v2(run_id)
-        w = int(str(evidence.finalize.body["w"]))
         self.require_roster_v2(run_id, w)
         applied = self._record_v2(run_id, "applied", str(w))
-        inputs = network_inputs(self._record_v2(run_id, "tape-inputs", str(w))["inputs"])
-        tape = TapeV2.from_bytes(self.objects.get(evidence.tape_hash))
-        replayed = replay_tape(
-            self.objects,
-            tape,
+        stored = self._record_v2(run_id, "tape-inputs", str(w))
+        inputs = network_inputs(stored["inputs"])
+        tape = TapeV2.from_bytes(self.objects.get(tape_hash))
+        signer = self._coord().ss58
+        return _FinalityReplay(
+            sha256_hex(canonicalize([run_id, w, tape_hash, applied, stored, signer])),
             manifest,
             AggregationPolicyV2.model_validate_json(
                 self.objects.get(manifest.network.aggregation_policy_hash)
             ),
             self.objects.get(manifest.network.economics_policy_hash),
-            signer=self._coord().ss58,
-            w=w,
-            prev_state=str(applied["prev_state"]),
-            predecessor_tape_hash=str(applied["predecessor_tape_hash"]),
-            inputs=inputs,
-            reference_reward_units=self._services_v2[run_id][0].policy.R_collectible_units,
+            tape,
+            w,
+            str(applied["prev_state"]),
+            str(applied["predecessor_tape_hash"]),
+            inputs,
+            self._services(run_id)[0].policy.R_collectible_units,
+            signer,
         )
-        from hypertrain.aggregator.core import th
 
-        if th(replayed.theta) != record["theta_hash"]:
-            raise EscrowError("FINALITY_TAPE_REPLAY_MISMATCH")
-        return str(record["theta_hash"])
+    def _run_finality_replay_v2(self, job: _FinalityReplay) -> str:
+        """Replay the tape of the job from its original objects; no lock, no database row."""
+        from hypertrain.aggregator.core import th
+        from hypertrain.aggregator.tape_v2 import replay_tape
+
+        replayed = replay_tape(
+            self.objects,
+            job.tape,
+            job.manifest,
+            job.policy,
+            job.economics,
+            signer=job.signer,
+            w=job.w,
+            prev_state=job.prev_state,
+            predecessor_tape_hash=job.predecessor,
+            inputs=job.inputs,
+            reference_reward_units=job.reference_reward_units,
+        )
+        return th(replayed.theta)
+
+    def _prime_finality_replay_v2(self, run_id: str, w: int, raw: bytes) -> None:
+        """Replay the applied tape of round w before finalize_v2's transaction, without the lock.
+
+        Nothing is written. It runs only for a finalize that will reach the replay: a stored
+        Finalize result, a repair, a missing record or a request that is not the coordinator's
+        signed list of the tape's own inputs is left to the transaction, which refuses it as it
+        always did. So is anything that fails here, a record or the tape object that cannot be
+        read, or the replay itself: the transaction reads and replays the same way and raises
+        where it always raised, after the checks that come before it. One replay at a time, as
+        the store lock used to allow; a finalize that waits longer than a waiter of an
+        aggregate does replays under the lock, as before.
+        """
+        if self._lock._is_owned():  # type: ignore[attr-defined]
+            return
+        with self._lock:
+            try:
+                manifest = self._run_v2(run_id)
+                if (
+                    self._service_boundary_v2(run_id, w) is not None
+                    or self._db.execute(
+                        "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='finalize' AND id=?",
+                        (run_id, str(w)),
+                    ).fetchone()
+                ):
+                    return
+                request = envelope_v2.Intake(
+                    run_id, {"Finalize": manifest.training.coord_pubkey.__eq__}
+                ).accept(raw, self._now(self._db))
+                applied = self._record_v2(run_id, "applied", str(w))
+                stored = self._record_v2(run_id, "tape-inputs", str(w))
+                if (
+                    not isinstance(request, Finalize)
+                    or request.w != w
+                    or request.included
+                    != sorted(item["roster"]["hotkey"] for item in stored["inputs"])
+                    or applied.get("kind") == "repair"
+                ):
+                    return
+                job = self._finality_replay_job_v2(run_id, w, str(applied["tape_hash"]))
+            except Exception:  # deferred, not dropped: the transaction reads the same rows
+                return
+        if not self._finality_prime_v2.acquire(timeout=AGGREGATE_WAIT_SECONDS):
+            return
+        try:
+            with self._lock:
+                if job.key in self._finality_verdicts_v2:
+                    return
+            try:
+                theta_hash = self._run_finality_replay_v2(job)
+            except Exception:  # deferred, not dropped: the transaction replays and raises it
+                return
+            with self._lock:
+                self._finality_verdicts_v2[job.key] = theta_hash
+                while len(self._finality_verdicts_v2) > FINALITY_VERDICTS:
+                    del self._finality_verdicts_v2[next(iter(self._finality_verdicts_v2))]
+        finally:
+            self._finality_prime_v2.release()
 
     def _bootstrap_backend_v2(
         self,
@@ -4412,6 +4522,7 @@ class ChallengeStore:
             "_aggregate_plan_v2",
             "_aggregate_compute_v2",
             "_aggregate_settle_v2",
+            "_prime_finality_replay_v2",
             "_capacity_outer_v2",
             "_prepare_capacity_genesis_v2",
             "island_job_v2",
@@ -8988,6 +9099,7 @@ class ChallengeStore:
         from hypertrain.ledger.escrow_v2 import RewardWork, authority_message
         from hypertrain.protocol.messages_v2 import RewardFinalize
 
+        self._prime_finality_replay_v2(run_id, w, raw)
         with self._tx():
             manifest = self._run_v2(run_id)
             if self._service_boundary_v2(run_id, w) is not None:
