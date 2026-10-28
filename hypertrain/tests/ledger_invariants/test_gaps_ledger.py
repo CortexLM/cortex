@@ -154,6 +154,7 @@ def test_the_scrub_removes_every_name_the_service_reads_and_leaves_its_defaults(
         config.role_dispatch_file,
         config.cuda_executor_file,
     ) == (None,) * 7
+    assert config.relay_lifecycle_interval == 120.0
 
 
 def test_a_service_the_lot_builds_ignores_a_polluted_environment(
