@@ -147,7 +147,7 @@ Record the printed `run_id`: S3-S7 all bind it.
 3. Stage `<out>/policy-*.json` **and** `<out>/relay-registry.json` in the challenge object store,
    then POST `<out>/manifest-envelope.json` to `/v2/admin/runs` with the operator bearer.
    `launch_cuda_run.sh` copies only `policy-*.json` and would miss the registry. [V]
-   `challenge/store.py:2276-2289`, `scripts/launch_cuda_run.sh:221-225`
+   `challenge/store.py:2276-2289`, `scripts/launch_cuda_run.sh:222-226`
 
 Check: `GET /challenge/hypertrain/v2/runs/<run_id>` returns the envelope; the run's
 `execution-backend` record says `cuda`; `hypertrain-miner status-v2` with `run_id` and
