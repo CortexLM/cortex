@@ -88,12 +88,14 @@ CREDIT_WRITERS = {
     (ESCROW, "_issue", "INSERT INTO", "escrow_origins"),
     (ESCROW, "reward_finalize", "INSERT INTO", "escrow_finalized"),
     (ESCROW, "reward_finalize", "INSERT INTO", "escrow_shadow_finalized"),
-    # escrow_units: the upsert of a credit, the decrement every move takes first, and the two
-    # zeroings of reward_pending (maturity, and the slash of an admission stake).
+    # escrow_units: the upsert of a credit, the decrement every move takes first, and the three
+    # zeroings of reward_pending (maturity, the slash of an admission stake, and the lockless burn
+    # of a convicted coldkey's unvested rewards).
     (ESCROW, "_credit", "INSERT INTO", "escrow_units"),
     (ESCROW, "_move", "UPDATE", "escrow_units"),
     (ESCROW, "mature", "UPDATE", "escrow_units"),
     (ESCROW, "slash", "UPDATE", "escrow_units"),
+    (ESCROW, "burn_pending", "UPDATE", "escrow_units"),
     ("challenge/store.py", "weights", "INSERT INTO", "weights_runs"),
     ("challenge/app.py", "registered_weights", "INSERT INTO", "weights_registered"),
 }

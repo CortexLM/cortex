@@ -317,10 +317,9 @@ Decision.
    under an operation id that is an HMAC of the lock id with the coordinator-private
    `ip_secret`: deterministic for retries, unguessable for a squatter. A second call finds
    nothing left. The admission is resolved by id, never by hotkey, which a rotation changes.
-   Reasons: `TRAINING_FRAUD` also burns the owner's unvested rewards (the ledger's rule for a
-   slashed admission lock, so only while the admission still holds a residual lock: after an
-   earlier bond-only seizure a conviction bans and burns no reward, see Decisions for Forge 4)
-   and bans the admission (`BANNED`, terminal; `Admission.lock` then answers `LOCK_BANNED`); `AUDIT_MISMATCH`, a round-stage audit mismatch that the caller has
+   Reasons: `TRAINING_FRAUD` also burns the owner's unvested rewards (with the slashed lock, or
+   alone through `EscrowV2.burn_pending` when no residual lock is left, see the paragraph
+   below) and bans the admission (`BANNED`, terminal; `Admission.lock` then answers `LOCK_BANNED`); `AUDIT_MISMATCH`, a round-stage audit mismatch that the caller has
    confirmed as the miner's (D47), suspends the admission (reason `AUDIT_MISMATCH`), adds one
    strike and burns the bond alone (`EscrowV2.slash(burn_pending=False)`), and the coldkey stays
    bound by the one-non-`ACTIVE`-row rule as in probation; `NO_SHOW` burns the bond and adds a
@@ -334,6 +333,40 @@ Decision.
    `settle_fraud`, which returns `False` for it, and the closures of ADR 0011
    (`_close_blocked_disputes_v2`) call `settle_lock` and `resolve_pending`, never `settle_fraud`
    or `seize_bond`.
+
+   **Unvested rewards of a conviction without a residual lock (DIB-07, DIB-17, D82).** The burn of
+   the unvested rewards was part of slashing an admission lock, so a `TRAINING_FRAUD` that
+   followed an `AUDIT_MISMATCH` or `NO_SHOW` seizure (the D47 flow: mismatch, contest, referee
+   verdict), or hit an admission that never funded a bond, banned the miner and burned no reward:
+   its origin vested into `available`, stayed in `payable()` and could be transferred. The weight
+   was never paid, since `_payee_v2` withholds a banned coldkey; the leak is the vested balance.
+   `seize_bond` now calls, for each origin of which the admission's coldkey still holds
+   `reward_pending` units, the server operation `EscrowV2.burn_pending(origin, *, owner,
+   authority)`, but only when the slash of a lock burned nothing (`not burned`: the rewards went
+   with the bond, and each path stays testable on its own). The operation moves the owner's
+   `reward_pending` units of that origin to `burned` (the origin and its conservation do not
+   change, the emptied row stays) and needs no lock. Its authority must be the ledger's reward
+   authority (`BURN_AUTHORITY`), but unlike `slash` the ledger cannot re-derive the fraud from a
+   settled lock: the discipline is the call site, which `ALLOWED_CALL_SITES` pins to `seize_bond`.
+   The event is a new kind, `BURN_PENDING`, in the server key space of ADR 0014 Part 1: the id is
+   `sha256("ht-burn-pending/1|" run_id "|" origin)`, keyed under the id key, and the request is
+   `{origin, owner}` with no unit count and no evidence. One event per origin, not one for a list,
+   because a replayed referee resolution re-runs `settle_fraud` inside the resolution's
+   transaction: a request that differed on retry would raise `OPERATION_CONFLICT` and roll the
+   resolution back, and an id from the owner alone would swallow an origin that appears later.
+   The cost is one chain event and one snapshot per pending origin, bounded by the hotkeys of the
+   coldkey times the rounds of the vesting window; an origin with nothing pending writes none.
+   The scope is the coldkey, as for the slash of a lock (ADR 0011 Part 8 decision 23: the ban is
+   by coldkey): every `reward_pending` row of the coldkey burns, whatever its hotkey, including
+   shadow, genesis and bootstrap collateral that has not vested, and including the unvested
+   rewards of an honest sibling admission of the same coldkey. Another coldkey's origins and every
+   vested unit stay: a conviction after an origin vested leaves its `available` units in place
+   (unpaid, as on the lock path). A reward origin whose miner has a dispute still open is not
+   held by this change (the `[open]` case of DIB-07 stays a separate gap). The effect is
+   retroactive: posting again an identical resolution of an admission convicted before this
+   change burns the rewards that survived. No function of the `implementation_hash` owned set
+   changes, so that hash and the run ids do not move (measured); the `sources()` map and the
+   bundle do, as for any edit under `src/`. Decided by Forge on 2026-10-28 within D82 (option A).
 
    **Strike window of a no-show (D63, D70).** The window is `no_show_strike_window(epoch) =
    NO_SHOW_STRIKE_WINDOW_SCREENS (4) * work_screen_epoch_rounds`, measured in beacon rounds from the
@@ -397,7 +430,7 @@ finalization unless a dispute is open. The bound `q * s_lower * beta * (R + S) >
 for contested detections (a no-show keeps its bond, see the note after point 6); a cheater who
 never contests is excluded and keeps
 its bond until the Forge question on a contest window is answered. Contesting now risks the
-whole admission bond (and, while a residual lock exists, the coldkey's unvested rewards) and a
+whole admission bond, the coldkey's unvested rewards and a
 ban instead of the contest bond:
 with DET-01b open an honest, falsely `MISMATCH`ed miner should not contest (the cure is DET-01b,
 not this part). A round that never closes pins the bonds of its roster. ADR 0011 closes the
@@ -476,7 +509,7 @@ exists.
 ## Decisions for Forge
 
 1. **Bond burn (Part 6).** Implemented as recommended: a referee `FRAUD` against the miner burns
-   the admission bond and, while a residual lock exists, the coldkey's unvested rewards, and bans
+   the admission bond and the coldkey's unvested rewards, and bans
    the admission; a no-show seizure burns the bond and adds a strike, and puts the admission on a
    fresh probation the first time and suspends it the second time inside four work screens (ADR 0011
    Part 8 decision 12, D63; the alternative was bond-only). ADR 0002 "Penalties" makes any slash for a failed audit
@@ -510,14 +543,11 @@ exists.
      bond, inside the store's write transaction (about 30 ms at 1000 rounds of 32, 150 ms at 4000
      in the review's measure); an admission-to-round table or a rate limit at the proxy removes
      it.
-4. **Unvested rewards after an earlier seizure.** The burn of the unvested rewards is part of
-   slashing an admission lock, so a conviction that arrives after a `NO_SHOW` or `AUDIT_MISMATCH`
-   seizure has emptied the lock bans the admission and burns no reward. That makes the deterrent
-   of contesting weaker than the text of Part 6 says, in exactly the D47 flow (mismatch, contest,
-   referee verdict). Closing it needs a ledger operation that burns a coldkey's `reward_pending`
-   without a lock (a new event kind under an HMAC operation id, with its conservation test),
-   which this series does not add. Decide whether to add it, or to accept that the reward
-   survives.
+4. **Unvested rewards after an earlier seizure.** Decided by Forge on 2026-10-28 within D82
+   (option A): added. A conviction that follows a `NO_SHOW` or `AUDIT_MISMATCH` seizure burns the
+   coldkey's unvested rewards through the lockless `EscrowV2.burn_pending` (Part 6 point 3,
+   "Unvested rewards of a conviction without a residual lock"), so contesting is as costly in the
+   D47 flow as the text of Part 6 says.
 
 ## Not verified
 

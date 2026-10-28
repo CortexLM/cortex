@@ -169,7 +169,7 @@
   `admission_settlement` and settles a `LOCK_ADMISSION` through it, by lock kind; the settlement
   is derived from the admission's records. `Admission.settle_fraud(dispute_id)` runs with every
   accepted resolution: a referee verdict of fraud against the miner burns the bond, bans the
-  admission and, while it still holds a residual lock, burns the coldkey's unvested rewards.
+  admission and burns the coldkey's unvested rewards.
   `Admission.seize_bond(admission_id, reason, evidence_hash, now)` is the internal hook for a
   no-show (`reason="NO_SHOW"`), a confirmed round-stage audit mismatch (`"AUDIT_MISMATCH"`: also
   suspends with one strike) or a convicted miner (`"TRAINING_FRAUD"`, the only one called in this
@@ -602,6 +602,15 @@
   are those of the single transaction. The new helpers join the owned set of
   `implementation_hash`, which changes (as for any edit of `aggregate_v2` or `finalize_v2`); the
   freshness gate is not asked again at the settlement. See `docs/network-v2.md`.
+- A referee verdict of fraud against a miner whose bond was already burned for an
+  `AUDIT_MISMATCH` or a `NO_SHOW` (or who never funded one) now burns the coldkey's unvested
+  rewards too (DIB-07, DIB-17, D82): the burn used to be part of slashing a residual lock, so the
+  convicted miner's origin vested and stayed in `payable()`. `Admission.seize_bond` calls the new
+  server operation `EscrowV2.burn_pending(origin, *, owner, authority)` once per pending origin of
+  the coldkey, only when no lock was slashed. It writes one `BURN_PENDING` event under a keyed
+  `srv:` id of the origin, none when nothing is pending, and leaves vested units alone. Posting
+  again the resolution of an admission convicted before this change burns the rewards that
+  survived. See `docs/adr/0010` Part 6 at the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

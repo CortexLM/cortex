@@ -1236,6 +1236,48 @@ class EscrowV2:
                     self._credit(row["origin"], op.owner, "burned", "", row["units"])
             return self._event(op.operation_id, "SLASH", request, op.owner, server=True)
 
+    def pending_origins(self, owner: str) -> list[str]:
+        """Origins of which `owner` still holds unvested units, lowest id first."""
+        return [
+            row["origin"]
+            for row in self.db.execute(
+                "SELECT origin FROM escrow_units WHERE owner=? AND bucket='reward_pending' "
+                "AND units>0 ORDER BY origin",
+                (owner,),
+            )
+        ]
+
+    def burn_pending(self, origin: str, *, owner: str, authority: str) -> EscrowReceipt | None:
+        """Internal conviction sanction: burn what `owner` still holds unvested of `origin`.
+
+        It needs no lock, unlike the burn inside `slash`. The id is the origin's own, so a retry
+        of the conviction finds the same event, and an origin with nothing pending writes none
+        (None). Vested units are never touched.
+        """
+        if authority != self.policy.reward_authority:
+            raise EscrowError("BURN_AUTHORITY")
+        operation = sha256_hex(f"ht-burn-pending/1|{self.run_id}|{origin}".encode())
+        request = canonicalize({"origin": origin, "owner": owner}).decode()
+        with self.tx():
+            old = self._existing(operation, request, server=True)
+            if old is not None:
+                return old
+            row = self.db.execute(
+                "SELECT units FROM escrow_units WHERE origin=? AND owner=? "
+                "AND bucket='reward_pending' AND units>0",
+                (origin, owner),
+            ).fetchone()
+            if row is None:
+                return None
+            # The emptied row stays: `payable` reads it as the mark of a live reward origin.
+            self.db.execute(
+                "UPDATE escrow_units SET units=0 WHERE origin=? AND owner=? "
+                "AND bucket='reward_pending'",
+                (origin, owner),
+            )
+            self._credit(origin, owner, "burned", "", row["units"])
+            return self._event(operation, "BURN_PENDING", request, owner, server=True)
+
     def pay(self, op: EscrowOperation, *, signer: str) -> EscrowReceipt:
         """Terminal unit sink, not a cash payout or redemption adapter."""
         with self.tx():

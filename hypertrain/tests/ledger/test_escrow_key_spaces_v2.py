@@ -431,6 +431,7 @@ LEDGER_METHODS = {
     "release",
     "release_settlement",
     "slash",
+    "burn_pending",
     "pay",
     "mature",
     "reward_finalize",
@@ -454,6 +455,7 @@ ALLOWED_CALL_SITES: dict[str, set[tuple[str, str]]] = {
         ("challenge/disputes_v2.py", "settle_lock"),
         ("challenge/admission.py", "seize_bond"),
     },
+    "burn_pending": {("challenge/admission.py", "seize_bond")},
     "pay": {("challenge/store.py", "_pay_v2")},
     "mature": {("challenge/store.py", "push_beacon"), ("challenge/store.py", "genesis_v2")},
     "reward_finalize": {

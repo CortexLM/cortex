@@ -1664,9 +1664,10 @@ class Admission:
         auditor, and the closures of ADR 0011 are not convictions.
 
         TRAINING_FRAUD (a referee verdict, see settle_fraud): also burns the owner's unvested
-        rewards, as part of slashing a residual lock (after an earlier bond-only seizure there
-        is none, and the rewards survive), and bans the admission (terminal; `lock` then
-        answers LOCK_BANNED).
+        rewards and bans the admission (terminal; `lock` then answers LOCK_BANNED). The rewards
+        burn with the residual lock when there is one, else (after an earlier bond-only
+        seizure, or with no bond ever funded) one `burn_pending` per pending origin of the
+        coldkey. Vested units stay.
         AUDIT_MISMATCH (a round-stage audit mismatch the caller has confirmed as the miner's)
         suspends the admission with the seizure reason as the state reason, adds one strike and
         burns the bond alone. NO_SHOW (a roster member excluded for its silence, ADR 0011 Part 8,
@@ -1719,6 +1720,10 @@ class Admission:
                     burn_pending=reason == "TRAINING_FRAUD",
                 )
                 burned += units
+            if reason == "TRAINING_FRAUD" and not burned:
+                # The slash of a residual lock burned them with it; with none left they burn alone.
+                for origin in self.escrow.pending_origins(r.coldkey):
+                    self.escrow.burn_pending(origin, owner=r.coldkey, authority=self.coord.ss58)
             if reason == "TRAINING_FRAUD" and r.state != "BANNED":
                 self.store.transition(admission_id, "BANNED", "FINALIZED_TRAINING_FRAUD", now)
             if reason in ("AUDIT_MISMATCH", "NO_SHOW") and first and r.state != "BANNED":
