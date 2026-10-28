@@ -6231,6 +6231,36 @@ class ChallengeStore:
             is not None
         )
 
+    def _close_round_v2(
+        self,
+        run_id: str,
+        w: int,
+        status: RoundStatus,
+        *,
+        closure_hash: str,
+        beacon: int,
+        facts: Mapping[str, JsonValue] | None = None,
+    ) -> None:
+        """The one writer of a round's closure, whatever state closes it (D70).
+
+        It stores the finality row and, next to it, the closure record `replayed-finality`: the
+        hash that closed the round and the beacon it closed at, which the ledger's replay reads
+        for a paid round and `relay_settlement_v2` reads for every round, so that the relay
+        custody of an upload is never pinned by a round that has no reward to show for it
+        (SETTLED with a reward, SETTLED with nobody paid, RETIRED, EXCLUDED by a rollback)."""
+        self._put_record_v2(run_id, "finality", str(w), asdict(status))
+        self._put_record_v2(
+            run_id,
+            "replayed-finality",
+            str(w),
+            {
+                "finalize_hash": closure_hash,
+                "finalized_beacon": beacon,
+                "shadow": False,
+                **(facts or {}),
+            },
+        )
+
     def _unconvicted_v2(self, hotkeys: Iterable[str]) -> list[str]:
         """The hotkeys, sorted, less those of a convicted coldkey: what a Finalize may list."""
         return sorted(hotkey for hotkey in hotkeys if not self._banned_v2(hotkey))
@@ -6484,7 +6514,7 @@ class ChallengeStore:
             },
         )
         self._put_record_v2(run_id, "retired", str(w), record)
-        self._put_record_v2(run_id, "finality", str(w), asdict(closed))
+        self._close_round_v2(run_id, w, closed, closure_hash=evidence_hash, beacon=now)
         for hotkey, anchor in carried.items():
             self._put_record_v2(run_id, "anchor", f"{w}:{hotkey}", anchor)
         # Nothing of this round may finish after the retirement; a finished audit stays evidence.
@@ -9511,7 +9541,17 @@ class ChallengeStore:
             now = self._fresh_v2(manifest, f"finalize:{w}:{self._now(self._db)}")
             final_hash = body_digest(model.model_dump(mode="json"))
             settled = settle(status, model, final_hash)
-            self._put_record_v2(run_id, "finality", str(w), asdict(settled))
+            self._close_round_v2(
+                run_id,
+                w,
+                settled,
+                closure_hash=final_hash,
+                beacon=now,
+                facts={
+                    "tape_hash": str(applied["tape_hash"]),
+                    "theta_hash": str(applied["theta_hash"]),
+                },
+            )
             self._put_record_v2(
                 run_id, "finalize", str(w), envelope_v2.parse_envelope(raw).model_dump(mode="json")
             )
@@ -9525,18 +9565,6 @@ class ChallengeStore:
                 }
                 self._put_record_v2(run_id, "finalize-result", str(w), closed)
                 return closed
-            self._put_record_v2(
-                run_id,
-                "replayed-finality",
-                str(w),
-                {
-                    "finalize_hash": final_hash,
-                    "tape_hash": str(applied["tape_hash"]),
-                    "finalized_beacon": now,
-                    "shadow": False,
-                    "theta_hash": str(applied["theta_hash"]),
-                },
-            )
             works = []
             for hotkey in included:
                 identity = f"{w}:{hotkey}"
@@ -9703,28 +9731,17 @@ class ChallengeStore:
 
     def relay_settlement_v2(self, run_id: str, grant_hash: str) -> dict[str, Any]:
         """Authenticated control-plane adapter for L4 retention release, not client facts."""
+        from hypertrain.challenge.finality_v2 import RoundStatus
         from hypertrain.relay.core import Settlement as RelaySettlement
 
         with self._lock:
             grant = self._record_v2(run_id, "grant", grant_hash)["body"]
             w = int(grant["w"])
-            status = self._record_v2(run_id, "finality", str(w))
-            if (
-                status["disposition"] not in ("SETTLED", "RETIRED")
-                or status["unresolved_audits"]
-                or status["unresolved_disputes"]
-            ):
+            # RoundStatus.closed is the one definition of a round that no longer pins its custody:
+            # settled, retired, or excluded and repaired, with no open audit or dispute.
+            if not RoundStatus(**self._record_v2(run_id, "finality", str(w))).closed:
                 raise ChallengeError(409, "relay custody remains pinned by unresolved finality")
-            if status["disposition"] == "RETIRED":
-                # No finalize exists: the evidence of the retirement is the finality of the round.
-                accepted = {
-                    "finalize_hash": status["resolution_hash"],
-                    "finalized_beacon": self._record_v2(run_id, "retired", str(w))[
-                        "retired_beacon"
-                    ],
-                }
-            else:
-                accepted = self._record_v2(run_id, "replayed-finality", str(w))
+            accepted = self._record_v2(run_id, "replayed-finality", str(w))
             turns = [
                 json.loads(r[0])
                 for r in self._db.execute(
@@ -10398,7 +10415,13 @@ class ChallengeStore:
                         resolution_hash=model.cause_hashes[0],
                         state_hash=body.out_hashes["theta_hash"],
                     )
-                self._put_record_v2(run_id, "finality", str(body.w), asdict(repaired))
+                self._close_round_v2(
+                    run_id,
+                    body.w,
+                    repaired,
+                    closure_hash=model.cause_hashes[0],
+                    beacon=self._now(self._db),
+                )
             result_data: dict[str, Any] = {
                 "status": "REPAIRED",
                 "tape_hashes": [first_hash, second_hash],

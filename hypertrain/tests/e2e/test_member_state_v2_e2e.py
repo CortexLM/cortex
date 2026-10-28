@@ -93,6 +93,18 @@ def finalize(n, w, applied, members):
     )
 
 
+def custody_settles(n, w):
+    """The relay custody of an upload of round `w` settles: the round pins nothing (D70)."""
+    run, grant = n.manifest.run_id(), sha256_hex(f"grant:{w}".encode())
+    with n.store._tx():
+        n.store._put_record_v2(run, "grant", grant, {"body": {"w": w}})
+    settled = n.store.relay_settlement_v2(run, grant)
+    assert (
+        settled["finality_hash"] == n.store._record_v2(run, "finality", str(w))["resolution_hash"]
+    )
+    return settled
+
+
 def paid(n, w):
     rows = n.store._db.execute(
         "SELECT hotkey,issued FROM escrow_origins WHERE reward_round=? ORDER BY hotkey", (w,)
@@ -191,6 +203,7 @@ def test_a_member_convicted_between_the_aggregate_and_the_finalize_is_not_paid(n
     # round budget is still minted.
     assert stale.status_code == 422, stale.text
     assert settled.status_code == 200, settled.text
+    custody_settles(n, 0)
     budget = escrow.policy.round_reward_units
     assert paid(n, 0) == [(h, budget // 4) for h in sorted(k.ss58 for k in others)]
     assert sum(units for _, units in paid(n, 0)) == budget
@@ -245,6 +258,7 @@ def test_a_round_whose_inputs_are_all_banned_closes_unpaid(n):
     # leave), nothing is minted, and the ledger passes over the round for the next one.
     assert closed.status_code == 200, closed.text
     assert closed.json()["status"] == "CLOSED_UNPAID"
+    custody_settles(n, 0)
     assert paid(n, 0) == [] and escrow.balances().issued == issued
     assert n.store._round_closure_v2(run, 0) is not None
     assert finalize(n, 0, applied, []).json() == closed.json()

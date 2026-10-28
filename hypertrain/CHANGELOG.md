@@ -314,10 +314,16 @@
 - `scripts/ops/live_operator.py open` opens the round that follows a retired one: when round
   `w - 1` has no `finalize`, `prev_final_hash` is the evidence hash of its `retired` record instead
   of the tool stopping with "missing accepted finalize" (a round that is neither is still refused).
-- The relay custody of the uploads of a retired round can be settled and released: the settlement
-  answered 409 "pinned by unresolved finality" for ever because it knew only a `SETTLED` round.
-  Its finality hash is now the evidence hash of the retirement and its vesting ends
-  `E_vest_rounds` after the retirement beacon; an open dispute still pins it.
+- The relay custody of the uploads of a round is released whatever way the round closed (D70):
+  settled with a reward, settled with nobody paid (every input of a convicted coldkey,
+  `CLOSED_UNPAID`), retired, or excluded and repaired by a rollback. The settlement answered 409
+  "pinned by unresolved finality" for ever for the last three, or "missing accepted
+  replayed-finality" for the second. One writer, `ChallengeStore._close_round_v2`, stores the
+  finality row and the closure record next to it (the hash that closed the round and the beacon),
+  every closing path calls it, and `relay_settlement_v2` reads `RoundStatus.closed` and that
+  record for all of them. The finality hash of a retired round is the evidence hash of the
+  retirement and its vesting ends `E_vest_rounds` after the retirement beacon; an open audit or
+  dispute still pins the custody.
 - A job whose member has no leaves record (the miner never posted them, or the master lost them)
   is dropped at the first `absolute` as `excluded` `NO_SHOW` (stage `leaves`) instead of being
   re-armed for a second audit window nobody could use. The blame is infrastructure's: its

@@ -13,7 +13,6 @@ from hypertrain.aggregator.core import OuterState
 from hypertrain.auditor.replay import AnchorCache, optimizer_hash
 from hypertrain.auditor.worker import LeaseGuard
 from hypertrain.challenge.finality_v2 import RoundStatus
-from hypertrain.challenge.finality_v2 import retire as close_retired
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -478,29 +477,28 @@ def test_the_round_after_a_retired_one_is_reward_finalized(network, ledger):
     [("retired", False), ("retired-with-a-dispute", True), ("pending", True)],
 )
 def test_relay_custody_of_a_retired_round_can_be_settled(network, state, pinned):
-    # Given: a grant of round 0, whose finality is as `state` says
-    store, run = network.store, network.manifest.run_id()
-    evidence_hash, grant_hash, beacon = "ab" * 32, "cd" * 32, 77
-    status = unresolved(run, 0, applied=False)
+    # Given: a grant of round 0, which the reaper retired (or not yet) through the real primitive
+    store, run, grant_hash = network.store, network.manifest.run_id(), "cd" * 32
+    keys = seeded(network, 5, silent=(3, 4))
+    network.push(D_AUDIT)
     if state != "pending":
-        status = close_retired(status, state_hash(genesis_theta(network)), evidence_hash)
+        done = retire(network, [k.ss58 for k in keys[:3]])
     if state == "retired-with-a-dispute":
-        status = replace(status, unresolved_disputes=1)
+        status = {**store._record_v2(run, "finality", "0"), "unresolved_disputes": 1}
+        with store._tx():
+            store._put_record_v2(run, "finality", "0", status)
     with store._tx():
         store._put_record_v2(run, "grant", grant_hash, {"body": {"w": 0}})
-        store._put_record_v2(run, "finality", "0", asdict(status))
-        store._put_record_v2(
-            run, "retired", "0", {"evidence_hash": evidence_hash, "retired_beacon": beacon}
-        )
 
-    # When / Then: the retirement is the finality of the custody, and an open dispute or an
-    # unfinished round still pins it
+    # When / Then: the closure of the retirement is the finality of the custody, and an open
+    # dispute or an unfinished round still pins it
     if pinned:
         with pytest.raises(ChallengeError, match="pinned by unresolved finality") as refused:
             store.relay_settlement_v2(run, grant_hash)
         assert refused.value.status == 409
     else:
+        beacon = done["retired_beacon"]
         vesting = beacon + network.manifest.training.verify.E_vest_rounds
         assert store.relay_settlement_v2(run, grant_hash) == asdict(
-            Settlement(evidence_hash, beacon, sha256_hex(canonicalize([])), beacon, vesting)
+            Settlement(done["evidence_hash"], beacon, sha256_hex(canonicalize([])), beacon, vesting)
         )

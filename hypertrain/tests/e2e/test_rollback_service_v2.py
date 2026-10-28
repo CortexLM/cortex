@@ -750,6 +750,15 @@ def test_real_service_two_round_rollback_and_checkpoint(active_network, monkeypa
     assert response.status_code == 200, response.text
     repaired = response.json()
     assert repaired["status"] == "REPAIRED" and repaired["reward_units"] == 0
+    # Both repaired rounds are closed without a reward, and their relay custody settles (D70).
+    for w in (0, 1):
+        grant = sha256_hex(f"grant:{w}".encode())
+        with n.store._tx():
+            n.store._put_record_v2(n.manifest.run_id(), "grant", grant, {"body": {"w": w}})
+        closed = n.store._record_v2(n.manifest.run_id(), "finality", str(w))
+        assert closed["disposition"] == "EXCLUDED" and closed["rollback_complete"]
+        settled = n.store.relay_settlement_v2(n.manifest.run_id(), grant)
+        assert settled["finality_hash"] == closed["resolution_hash"]
     assert escrow.balances() == before
     assert original == [
         tuple(row)
