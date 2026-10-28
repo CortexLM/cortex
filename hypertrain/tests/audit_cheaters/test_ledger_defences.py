@@ -441,28 +441,19 @@ def test_concurrent_conflicting_finalizes_of_one_round_let_exactly_one_win(
 
 
 def test_concurrent_get_weights_for_one_epoch_persist_and_pay_once(hosted: Hosted) -> None:
-    """Defence: callers racing on one epoch are serialized by the answer's re-check inside the
-    second transaction; every caller receives the first persisted answer and the epoch pays once.
+    """Defence: callers racing on one epoch are serialized by the store lock and by the answer's
+    re-check inside the second transaction; every caller receives the first persisted answer and
+    the epoch pays once.
 
-    Four callers are parked in service resolution, between the two transactions of
-    Store.weights, so each has already seen 'no stored answer' before any of them writes. They
-    are parked one at a time because Store.weights reads the shared connection outside the store
-    lock before that point (store.py:2064-2074, LED-1, MINEUR): the lock audit that pins that
-    hole is test_requests_use_the_shared_connection_only_under_the_store_lock[get_weights] in
-    test_finalize_and_epoch_service.py."""
-    # Given: a matured unit and 4 callers parked between the two transactions.
+    Store.weights used to read the shared connection outside the store lock between its two
+    transactions (LED-1), so four callers could all see 'no stored answer' before any of them wrote
+    and the test parked them there. The probe is under the lock now (the lock audit that pins it is
+    test_requests_use_the_shared_connection_only_under_the_store_lock[get_weights]), so the callers
+    are started together and the end state is what is asserted."""
+    # Given: a matured unit and 4 callers.
     h = hosted
     finalize(h)
     mature(h)
-    parked, resume = threading.Semaphore(0), threading.Event()
-    services = h.store._services
-
-    def parked_services(run_id: str) -> Any:
-        parked.release()
-        assert resume.wait(timeout=10)
-        return services(run_id)
-
-    h.store._services = parked_services
     answers: list[bytes] = []
     failures: list[BaseException] = []
 
@@ -473,11 +464,9 @@ def test_concurrent_get_weights_for_one_epoch_persist_and_pay_once(hosted: Hoste
             failures.append(error)
 
     threads = [threading.Thread(target=call) for _ in range(4)]
+    # When: they all ask together.
     for t in threads:
         t.start()
-        assert parked.acquire(timeout=10)
-    # When: all four resume together.
-    resume.set()
     for t in threads:
         t.join(timeout=30)
         assert not t.is_alive()
@@ -538,15 +527,15 @@ def test_finalize_maturity_and_weights_in_any_order_pay_each_unit_once(
     assert pays(h.escrow) == 1 and reward_rows(h.escrow) == (1, 1, 1)
 
 
-def test_maturity_landing_between_the_two_transactions_of_get_weights_pays_once(
+def test_a_maturity_landing_during_get_weights_waits_for_it_and_pays_once(
     hosted: Hosted,
 ) -> None:
-    """Defence: get_weights holds no store lock while it resolves its services and reads the payable
-    units inside the transaction that pays and persists the epoch, so a maturity that lands in
-    that window is neither lost for that epoch nor paid twice (the same end state as the order
-    finalize, mature, ask above, reached through a call that was already under way)."""
-    # Given: a finalized, not yet matured round and a get_weights call parked between its
-    # transactions.
+    """Defence: get_weights resolves its services under the store lock (it used to hold none
+    between its two transactions, LED-1), so a maturity that lands while a call is under way waits
+    for the lock and can only land after it, between the call's two lock regions: it is neither lost
+    for that epoch nor paid twice, the end state of the order finalize, mature, ask above."""
+    # Given: a finalized, not yet matured round and a get_weights call parked in the middle of its
+    # lock.
     h = hosted
     finalize(h)
     parked, resume = threading.Event(), threading.Event()
@@ -570,12 +559,16 @@ def test_maturity_landing_between_the_two_transactions_of_get_weights_pays_once(
     caller = threading.Thread(target=call)
     caller.start()
     assert parked.wait(timeout=10)
-    # When: the maturity lands in the window, then the call resumes.
-    mature(h)
+    # When: the maturity tries to land meanwhile, then the call resumes.
+    lander = threading.Thread(target=mature, args=(h,))
+    lander.start()
+    lander.join(timeout=1)
+    assert lander.is_alive()  # it cannot: the call holds the store lock
     resume.set()
     caller.join(timeout=30)
-    assert not caller.is_alive()
-    # Then
+    lander.join(timeout=30)
+    assert not caller.is_alive() and not lander.is_alive()
+    # Then: the unit is paid by that call, once
     assert not failures, failures
     assert json.loads(result[0])["weights"] == {HOT: 1_000_000.0}
     later = json.loads(h.store.weights(1, at(h.escrow, 21), 2))
