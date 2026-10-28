@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx
 
+from hypertrain.challenge.admission_store import AdmissionStore
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.ledger import FULL_SHARE_MASS, Params
@@ -199,6 +200,7 @@ def mode_store(
         try:
             escrow: EscrowV2 = fixture.ledger(setup, store._db, replay=known_replay(fixture))
             escrow.mutex = store._lock
+            AdmissionStore(escrow)  # the tables the real services create; weights() reads them
             store._db.execute(
                 "INSERT INTO runs VALUES(?,?,?,'created',NULL)",
                 (setup.manifest.run_id(), setup.manifest.model_dump_json(), "{}"),
