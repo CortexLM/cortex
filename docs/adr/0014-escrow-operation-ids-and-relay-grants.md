@@ -283,8 +283,9 @@ needs an operator. Four mechanisms, each in its own commit, in this order.
    **alarm above 80 %** (9.6 MiB); the runbook says what to do (below). **Sizing, measured [V]:** a record
    is about 4.2 KB fixed plus 0.234 KB per roster entry plus 1.1 KB per chunk plus 1.0 KB for the receipt,
    so about 10 KB at 16 miners and 13 KB at 32 miners with one-chunk deltas; a round is 335 beacons, about
-   16.75 minutes; custody lives to its horizon, about 10 hours or 36 rounds. **With the rotation of point 4
-   (records leave at their horizon) the steady state is 16 miners × 36 rounds × 10 KB = 5.8 MB, 46 % of the
+   16.75 minutes; custody lives to its horizon, about 10 hours or 36 rounds. **With the
+   release of point 3 and the rotation of point 4 (records leave when released, at about their horizon) the
+   steady state is 16 miners × 36 rounds × 10 KB = 5.8 MB, 46 % of the
    12 MiB budget; at 32 miners it is 1,152 records of 13.8 KB, 16 MB, 126 %, so a run of 32 miners needs the early release of point 3.** A
    2 GiB delta (512 chunks) is about 580 KB per record.
 3. **Release is automatic (B, D).** The relay learns what the master settled from a public, read-only,
@@ -298,21 +299,35 @@ needs an operator. Four mechanisms, each in its own commit, in this order.
    refuses before vesting, dispute closure and the epoch grace) for each that is due. A grant is thus
    released a round or two after its finality instead of at its horizon, and the steady state at 32 miners
    is about three rounds of records (1.2 MB). `POST .../admin/relay/{grant}/release` stays for the operator.
-4. **Rotation by age, and pruning (C), never under an open dispute (D54).** `collect()` runs from a
-   periodic task in the relay. A pin whose horizon is past by the epoch grace (100 beacons) with no
-   extension is **lapsed**: the signed promise has ended (a retrieval is only valid until `min(requested +
-   10, horizon)` and an extension only before the horizon), and the object is deleted and the record pruned
-   like a released one, with no release. **No custody is destroyed or rotated while a dispute references it:**
-   a pin whose last extension names dispute ids (`pin.disputes` not empty) does not lapse; its expiry is
-   suspended and resumes when the master releases the grant at the dispute's close (which clears the list).
-   The master keeps such custody alive: its lifecycle task (point 3) **extends** a grant whose round has an
-   unresolved dispute before the horizon, repeatedly, until the dispute closes by resolution or by the general
-   exclusion exit of ADR 0011; this ADR does not define that exit. A round that closes without a reward never
-   settles, so its grants are never released; age frees them once no dispute references them. Spent records are
-   pruned only when no live record or in-flight publication needs the same object. This changes the earlier
-   rule "bytes stay pinned until a release": after the signed horizon plus the grace, and with no dispute
-   referencing it, the relay owes nothing. Test: a dispute open at the horizon keeps the custody; the release at
-   its close deletes it.
+4. **Pruning (C), and a proof freed by the master, never by age (D54, D72).** `collect()` runs from a
+   periodic task in the relay. **An upload that reached a receipt stays until the master releases it,
+   whatever its age.** The first version of this point freed a pin at its horizon plus the epoch grace
+   (100 beacons) unless the last extension named a dispute. That broke D54: a dispute that opens after the
+   last extension is invisible to the relay, and a master that is away (about 41 minutes: the 720-beacon
+   extension window, the horizon, the grace) can neither extend nor release, so the relay deleted the proof
+   the dispute needs. The master releases when finality is written for the round (`replayed-finality`) or
+   when the round is closed without a reward (an excluded, rolled-back round writes no finality: its
+   settlement is the closure hash, with the custody horizon standing in for the finality and vesting
+   beacons, so that the release comes at the horizon plus the grace). Its lifecycle task (point 3) also
+   **extends** a grant whose round has an unresolved dispute before the horizon, repeatedly, until the
+   dispute closes by resolution or by the general exclusion exit of ADR 0011; this ADR does not define that
+   exit. An upload the master **holds no receipt for** keeps the age rule, because no proof can be owed
+   and no release can come: the chunks of a partial upload, and a receipt the master refused. The relay
+   issues the receipt before it forwards it, and the master answers 4xx when it came after `d_upload`,
+   conflicts or names an unknown grant; the relay records that answer (`forward_error = ForwardRefused`)
+   and `recover()` no longer forwards it. A forward that failed in transport or with a 5xx, 408 or 429
+   stays held and is retried by `recover()`: the master may have accepted it and lost the answer. A pin
+   that a dispute names is kept while the dispute is listed, receipt or not. Spent records are pruned
+   only when no live record or in-flight publication needs the same object. What age used to free and now
+   stays: a round that never settles, and a forward the master has not answered for good (the journal
+   budget and the `/readyz` alarm bound both). Past its horizon a pin serves no signed retrieval and takes
+   no extension (`extend_retention` wants the acknowledgment before the prior horizon), so for a master
+   that returns late the rule keeps the bytes for the operator's rescue, which `relay_control_v2` names
+   ("custody horizon already expired; rescue required"); letting an expired pin be extended is a
+   relay-contract change and is not made here. Tests: the master away past horizon and grace with no
+   dispute keeps the custody, and the release after its return deletes it; a refused forward frees the
+   upload and a failed one keeps it; a dispute open at the horizon keeps the custody; a partial upload
+   still lapses.
 5. **Runbook (docs).** Alarm: `journal_fill > 0.8` on `/readyz` or the log line. First check that the
    master's release task runs (`relay-release` records appear one or two rounds after finality). If it
    does and the fill still rises, the run is larger than the journal: add a relay to the signed registry
@@ -321,8 +336,9 @@ needs an operator. Four mechanisms, each in its own commit, in this order.
 6. Rejected: renewal of the 64 grants (a new wire message that refreshes a number with no physical
    meaning); spreading assignments (production has one relay [A], and `assignment_policy` is a literal
    pinned in nine places); embedding the settlement fields in `CustodyRelease` (smaller, but removes the
-   cross-check against the master's current record); keeping lapsed bytes pinned for ever (it is what makes
-   an unattended relay fill up). Not done: a closure for a dispute nobody can decide (ADR 0011's exit).
+   cross-check against the master's current record); keeping lapsed bytes pinned for ever (it fills an
+   unattended relay up, and was rejected until D72: it is now the rule for a receipted upload, whose release
+   the master owes once the round settles or closes). Not done: a closure for a dispute nobody can decide (ADR 0011's exit).
 
 ### Part 7. Shadow maturity is failure-isolated (F6, CL-14)
 
@@ -356,7 +372,9 @@ the dispute watch (`POST .../disputes/watch`, `DisputeWatchRequest`) and the obj
 and removes the header routes with no shim (405). ADR 0010 decision 3 and its open proxy question are
 amended by their own lot. This ADR keeps only the rule and this
 cross-reference. The dispute watch also gets a per-party and a total bound on concurrent long polls, on its own
-thread pool. Other IMPORTANT items follow in their own commits and are recorded in the report with their sibling
+thread pool; the polls held by parties that are not pinned roles (any registered hotkey may poll) share half of
+it (64 of 128), so that registered hotkeys cannot lock the auditors, referees and coordinator out of their own
+disputes. The retired `GET .../disputes` answers 405, like the retired object `PUT`. Other IMPORTANT items follow in their own commits and are recorded in the report with their sibling
 status: HTP-07 (the observer challenge is handed back until answered; the pin id carries the round; written,
 not integrated, D58), ADM-04 (no store lock on the event loop before the signature check; the anonymous
 relay-receipt route too; integrated, the object and watch tests import its fixtures),
@@ -382,8 +400,11 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
   `docs/OPERATOR_SECURITY.md` already say). HTTP gains `OPEN_LOCK_CAP`, `LEDGER_LOCK_CAP`, `SELF_TRANSFER`,
   `ESCROW_QUOTA`, `UNKNOWN_RECIPIENT`, `CONTEST_LOCK_ID_COLLISION` (all 409) and 429 on the dispute watch;
   the watch, trial job and object upload change from header-signed requests to body envelopes. The relay
-  gains one message type and one public GET, a periodic collect task and a fill report on `/readyz`; the
-  master gains a periodic release task; an old relay still fails `release` closed.
+  gains one message type and one public GET, a periodic collect task and a fill report on `/readyz`, which
+  answers 503 `{"ready": false}` with null fill fields when its storage fails instead of a bare 500; the
+  master gains a periodic release task, which also releases a round closed without a reward; an old relay
+  still fails `release` closed. A receipted upload is no longer freed by age (Part 6.4, D72): a relay whose
+  master never returns keeps it, bounded by the journal budget.
 - `sources()` of `network_qualification` changes like for any source edit; stored qualification
   configs validate against their own frozen tree.
 - A chain that already holds an early release of an open dispute's bond (the F4 evasion happened)
@@ -399,10 +420,11 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
    tenth of the funding floor, escrow burst 2,048 per window; the `UNKNOWN_RECIPIENT` rule.
 4. **Early-release chain** (Context): is a repair needed for a chain that already released a bond?
 
-Decided by the Principal SN100 (D52, D53) and applied above, not asked: no header signatures, origin ids not
+Decided by the Principal SN100 (D52, D53, D72) and applied above, not asked: no header signatures, origin ids not
 enumerable, continuity pin and fail-closed, the server key space enforced by type, no unkeyed mode, one rule
 for `FINALIZE_ORDER` in ADR 0011, caps with a minimum amount and a burst sized from the roster, an automatic
-release with an alarm and a runbook, the journal estimate.
+release with an alarm and a runbook, the journal estimate, a proof freed by the master's release and not
+by age (D72).
 
 ## Not verified
 

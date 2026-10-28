@@ -321,8 +321,10 @@ Every ledger event hashes the whole state, and a transfer cannot make that state
 nothing. The state and the event preimage are encoded with the standard JSON encoder, which gives
 the bytes of the canonical encoder for these values (a test compares them), 7 to 20 times faster:
 an event at 5,000 unit rows costs 17 ms instead of 124 ms and `verify()` of 21 events 59 ms
-instead of 909 ms. A value beyond 2^53-1 in the state refuses the event (`STATE_RANGE`) as
-before. A transfer to oneself is refused (`SELF_TRANSFER`; a transfer that was recorded earlier
+instead of 909 ms. A value beyond 2^53-1 in the state, or a number that is not an integer
+(SQLite lets an INTEGER column hold a REAL), refuses the event (`STATE_RANGE`) for every numeric
+column the state serialises, not only the units and the issued amount, because the standard
+encoder would write where the canonical one raises. A transfer to oneself is refused (`SELF_TRANSFER`; a transfer that was recorded earlier
 still replays), and a transfer writes a row at the recipient only for the origins it takes
 units from; a lock still writes one for every origin it lists, because its release lists them
 again. Test genesis has pinned nonfinancial origins; production mode
@@ -500,8 +502,11 @@ identical bytes may be sent again until they expire. A body that is not an unexp
 run or signer, a bad signature, an expired envelope, a request signed further ahead than 20
 rounds) answers 403, as does a party that is neither a pinned role nor on the subnet; a master
 that has verified no beacon round yet answers 503.
-The master allows each party two polls at a time and 128 in all; a further poll is refused at
-once with 429, and `watch --follow` retries it with its normal backoff. A wait runs on its own
+The master allows each party two polls at a time and 128 in all, and the polls held by parties
+that are not pinned roles (an auditor, a referee or the coordinator of the manifest; any other
+registered hotkey may poll) share 64 of those 128, so that registered hotkeys cannot keep the
+roles out; a further poll is refused at once with 429, and `watch --follow` retries it with its
+normal backoff. The retired `GET .../disputes` answers 405. A wait runs on its own
 threads, so parked polls do not slow `/health` or any other route. A poll whose client has left
 still holds its slot until its wait ends (30 seconds at most), so a restarted watcher may
 overlap the last poll of the one it replaces.
@@ -708,18 +713,22 @@ and about 900, i.e. 28 rounds, at 32 miners, if none left.
 measures the growth of one upload and checks the 1,200 and 900 figures against the real guard.
 
 The journal fill is reported, not only enforced. `/readyz` answers
-`{"ready", "journal_bytes", "journal_budget", "journal_fill", "alarm"}` and `alarm` turns
+`{"ready", "journal_bytes", "journal_budget", "journal_fill", "alarm"}` (503 with `"ready": false`
+when the replica is not ready, the four fill fields `null` when the journal cannot be read, a
+storage failure logged as `relay readiness probe failed: <ExceptionName>`) and `alarm` turns
 true above 80 % of the budget (9.6 MiB); while it is true each probe also writes a warning
 `relay journal fill NN% (B of BUDGET bytes)`. The alarm never makes the replica unready and
 never refuses a request: only `accept` past the budget does. Custody lives to its horizon,
 about 10 hours or 36 rounds of 335 beacons (16.75 minutes), so 36 rounds of 16 miners hold
 16 x 36 x 10 KB = 5.8 MB, 46 % of the budget, and 36 rounds of 32 miners hold 15.9 MB,
 126 % (`test_readyz_when_custody_horizon_of_rounds_has_no_early_release` measures both).
-Because records rotate out at their horizon, that is the steady state and not a figure that
-keeps growing; a run of 32 miners exceeds the budget unless custody is released well before
-its horizon, which is what the master's lifecycle task does: released one or two rounds after
-finality, three rounds of 32 miners are about 1.3 MB (3 x 32 x 13.8 KB, derived from the
-measured record size).
+Because records rotate out when the master releases them, about at their horizon, that is the
+steady state and not a figure that keeps growing; a run of 32 miners exceeds the budget unless
+custody is released well before its horizon, which is what the master's lifecycle task does:
+released one or two rounds after finality, three rounds of 32 miners are about 1.3 MB
+(3 x 32 x 13.8 KB, derived from the measured record size). A master that is away stops the
+releases and the records pile up to the budget, which then refuses new reservations: that is the
+alarm above, not a reason to delete a proof.
 Runbook for the alarm: first check that the master's lifecycle task runs, i.e. that
 `relay-release` records appear one or two rounds after finality, and that the relay's log shows
 no `relay collect deferred` lines. If they do and the fill still rises, the run is larger than
@@ -727,21 +736,28 @@ this relay's journal. Add a relay to the signed registry; the registry must hold
 relay before any run of 16 miners or more (D51 5). Do not raise the 12 MiB budget: above
 16 MiB every journal write fails, a release included.
 
-Custody is rotated out by age, without an operator. Every 5 minutes a task of the relay runs
-`collect()`. A pin whose signed horizon is past by the epoch grace with nothing released and
-no dispute referencing it is lapsed: a retrieval is only valid until `min(requested + 10,
-horizon)` and an extension only before the horizon, so nothing can use the bytes any more,
-and the relay owes the custody nothing. A pin whose last extension names dispute ids does not
-lapse (ADR 0014 Part 6.4, D54): its expiry is suspended until the master releases the grant
-at the dispute's close, which clears the list. An object is deleted when every pin on it is
-released and past its deletion bound or lapsed, and no live pin, in-flight upload of the same
-bytes or deletion reservation needs it. A record is pruned, with its grant and retrieval
+Custody is freed by the master's release, without an operator. Every 5 minutes a task of the
+relay runs `collect()`. An upload that reached a receipt stays until the master has released
+it, however old: the master writes the release when finality is written for the round or the
+round is closed without a reward, and a master that is away past the horizon can neither
+extend nor release, while a dispute may have opened after the last extension (ADR 0014
+Part 6.4, D54, D72). Past the horizon such a pin serves no signed retrieval and takes no
+extension; the relay keeps its bytes for the operator's rescue. An upload the master holds no
+receipt for (the chunks of a partial upload, or a receipt the master refused with a 4xx when it
+came after `d_upload` or conflicted: the relay records that as `forward_error` `ForwardRefused`
+and does not forward it again) is lapsed once its signed horizon is past by the epoch grace
+with nothing released and no dispute referencing it. A forward that failed in transport or with
+a 5xx, 408 or 429 may still have been accepted, so its upload is kept and `recover()` forwards
+it again. A pin whose last extension names dispute ids does not lapse until the master
+releases the grant. An
+object is deleted when every pin on it is released and past its deletion bound or lapsed, and
+no live pin, in-flight upload of the same bytes or deletion reservation needs it. A record is pruned, with its grant and retrieval
 nonces, once all its pins are in that state and none of its objects still waits to be deleted;
 a reservation that never produced custody is pruned at the horizon of its acknowledgment plus
 the grace. A pass that fails is logged as `relay collect deferred: <ExceptionName>` and
 retried at the next interval; an object whose delete raised keeps its deletion reservation
-until it is fenced, as before. This replaces the earlier rule that bytes stay pinned until a
-release: after the horizon plus the grace, and with no dispute, the relay owes nothing.
+until it is fenced, as before. Spent records that
+age used to prune (a receipted upload nobody released) now wait for the release.
 
 A relay learns what the master settled from a public, read-only, coordinator-signed view,
 not from the release message and not with a credential. `GET /v2/runs/{run_id}/relay-settlements/{grant_hash}`

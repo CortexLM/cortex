@@ -152,12 +152,13 @@
   never while a live record, an upload of the same bytes in flight or a deletion reservation
   still needs the object, and a task of the relay runs it every 5 minutes. A pin whose signed
   horizon plus the epoch grace is past, with no release and no dispute referencing it, is lapsed
-  and deleted like a released one; a pin whose last extension names a dispute does not lapse until
-  the master releases the grant. Until now nothing removed a record and `collect()` had no caller.
+  and deleted like a released one if its upload never reached a receipt; a receipted upload stays
+  until the master releases it, however old, because a master that is away past the horizon cannot
+  extend or release (D54, D72). Until now nothing removed a record and `collect()` had no caller.
 - Unattended relay custody on the master (ADR 0014 Part 6, TRN-02, D53/D54): a task of the challenge
   app (`HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL`, default 120 s, `0` off) releases every grant that is
-  settled and past the epoch grace, and extends the custody of a grant whose round has an unresolved
-  dispute before its horizon, repeatedly, through `relay_control_v2`. No operator call is needed any
+  settled or closed without a reward and past the epoch grace, and extends the custody of a grant
+  whose round has an unresolved dispute before its horizon, repeatedly, through `relay_control_v2`. No operator call is needed any
   more; the admin routes remain. `ChallengeStore.release_due_v2` is one pass.
 
 ### Fixed
@@ -318,6 +319,23 @@
   the miner reads that round at most every 15 seconds and signs again for each retry. The master
   verifies the signature, then the uploader's admission, before it reads the object
   (`docs/adr/0014`, Part 8).
+- The relay keeps an upload that reached a receipt until the master releases it, however old, and
+  the master releases a round closed without a reward as well as a settled one (ADR 0014 Part 6.4,
+  D54, D72): a master that is away past the custody horizon can neither extend nor release, and a
+  dispute may have opened after the last extension. An upload the master holds no receipt for (a
+  partial upload, or a receipt it refused with a 4xx, recorded as `ForwardRefused`) still lapses.
+- `GET /readyz` of the relay answers 503 `{"ready": false, ...}` when its storage fails (it was a
+  bare 500, or 503/400 with another body), with the journal fill fields `null` when the journal
+  cannot be read.
+- The dispute watch holds at most 64 of its 128 slots for parties that are not pinned roles, so that
+  registered hotkeys cannot lock the auditors, referees and coordinator out; the retired
+  `GET /v2/runs/{run}/disputes` answers 405 (it was 404).
+- Escrow `STATE_RANGE` covers every numeric column of the state (`mature_at`, `reward_round`,
+  `escrow_finalized.w`, `ordinal`, `trial_epoch`), not only `units` and `issued`; `-2**63` no
+  longer escapes as an SQLite overflow.
+- `scripts/launch_cuda_run.sh` accepts the object-upload retry of the signed POST (`_retrying("POST
+  object`) as well as the older PUT in the miner bundle, through one check used twice; its bundle
+  checks are tested against `miner/core.py`.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.
