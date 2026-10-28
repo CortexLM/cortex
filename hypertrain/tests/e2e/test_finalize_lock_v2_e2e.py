@@ -28,7 +28,7 @@ import pytest
 from aggregate_lock_fixture_v2 import Restored, Template, build_template, fixtures
 
 from hypertrain.aggregator import tape_v2
-from hypertrain.aggregator.core import TapeError
+from hypertrain.aggregator.core import TapeError, TapeIntegrityError
 from hypertrain.challenge.store import FINALITY_VERDICTS, ChallengeStore
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize
@@ -320,7 +320,7 @@ def test_a_verdict_is_not_trusted_for_a_round_whose_record_changed_after_the_rep
     # with the lock and fails as the parent does; nothing was settled.
     assert [owned for owned, _ in spy_calls] == [False, True]
     assert error == parent_error
-    assert error[0] is TapeError
+    assert error[0] is TapeIntegrityError  # the stored tape no longer replays: the master's fault
     assert paid(primed) == []
 
 
