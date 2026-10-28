@@ -588,26 +588,23 @@ def rollback_raw(world: World, excluded: list[str], cause_hashes: list[str]) -> 
     return canonicalize(seal(service.COORD, "Rollback", world.run_id, body, 10_000))
 
 
-# The refusal of a watch request that the party did not sign, by where the service asks for it.
-WATCH_NEEDS_SIGNATURE = (
-    "party event access requires its signed request"
-    if hasattr(messages_v2, "WatchRequest")
-    else "party event access requires signature"
-)
+# The refusal of a watch request that the party did not sign.
+WATCH_NEEDS_SIGNATURE = "party event access requires signature"
 
 
 def watch_feed(world: World, party: Keypair, signer: Keypair | None) -> Any:
     """The dispute events of `party`, asked for with the signature of `signer` (none: unsigned).
 
     The signature rides in the X-Dispute-Signature header of a GET where the service reads it
-    there, and in the body of a signed WatchRequest where the service reads it there."""
+    there, and in the body of a signed DisputeWatchRequest where the service reads it there."""
     net = world.network
-    if hasattr(messages_v2, "WatchRequest"):
+    if hasattr(messages_v2, "DisputeWatchRequest"):
+        url = net.url + "/disputes/watch"
         if signer is None:
-            return world.client.post(net.url + "/disputes", json={})
-        asked = messages_v2.WatchRequest(party=party.ss58, cursor=0, wait_seconds=0)
-        signed = net.signed(signer, "WatchRequest", asked, expiry=net.now + 20)
-        return world.client.post(net.url + "/disputes", json=signed)
+            return world.client.post(url, json={})
+        asked = {"party": party.ss58, "cursor": 0, "wait": 0}
+        signed = net.signed(signer, "DisputeWatchRequest", asked, expiry=net.now + 20)
+        return world.client.post(url, json=signed)
     feed = net.url + "/disputes?party=" + party.ss58
     if signer is None:
         return world.client.get(feed)
