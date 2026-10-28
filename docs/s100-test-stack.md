@@ -38,16 +38,31 @@ The TEST auditors are `hypertrain-test-auditor-0/1`. Their disposable seeds are 
 Only the challenge service changes image. The beacon and relay code is the same in the deployed
 images and in `e435ee8f`, and the store schema did not change.
 
-Do not change anything while a seal is due. `swap` and `beacon` refuse to run unless all of
-these hold:
+Do not change anything while a seal is due. `swap`, `beacon` and `executor` refuse to run unless all
+of these hold:
 - master `readyz` answers 200;
-- the latest seal is sealed and less than 30 minutes old (the first half of the 72-minute window);
+- the latest seal is sealed and younger than `HT_GATE_MAX_AGE_S` seconds (default 4500, 75 minutes);
 - the latest seal is for the epoch just before the master's current one.
 
-`HT_GATE_MAX_AGE_S` replaces only the 30-minute limit (1..4320 seconds, one epoch), for a change the
-founder approved outside the first half of the window. Readyz 200, a sealed seal and the previous
-epoch are still required, the script prints the value whenever it is set, and a malformed value
-exits 4 before any call: `ssh root@s100 "HT_GATE_MAX_AGE_S=4000 bash -s -- swap $NEW $B" < $T/challenge_image.sh`.
+The age limit is a TEST-stack parameter (D67), not a protocol constant, and it lives in one place:
+`gate()` in `challenge_image.sh`. It was 1800 seconds (the first half of the 72-minute window). An
+epoch is 72 minutes of chain blocks and the seal-to-seal gaps on record run from 4320 to 4655 s; the
+master seals an epoch only once it is over. So in the normal case a seal for the previous epoch is
+younger than one epoch and the age rarely closes the gate, which then follows `readyz`, sealed and
+the epoch. It still can: after an operator's early seal (`POST /v1/admin/seal`), in an epoch longer
+than 75 minutes, or when `readyz` lags the chain; the gate then fails closed (exit 3) for the end
+of that epoch. The script goes to s100 over stdin with each command, so the next invocation uses the
+default and nothing on s100 is edited. The beacon pusher has no seal-age limit: its 503 "beacon
+infrastructure paused" is a lag of more than 2 rounds or a round not yet pushed (see "Beacon
+lag"), and the `beacon` command only shares this gate.
+
+`HT_GATE_MAX_AGE_S` (1..4500 seconds) can only tighten the limit, for a change that must keep clear
+of the next seal: `1800` restores the old margin. `readyz` 200, a sealed seal and the previous epoch
+are still required, the script prints the value whenever it differs from 4500, and a malformed value
+exits 4 before any call:
+`ssh root@s100 "HT_GATE_MAX_AGE_S=1800 bash -s -- swap $NEW $B" < $T/challenge_image.sh`.
+A runbook or tool that mirrors the gate must use the same 4500 (the S13 tools pin
+`HT_GATE_MAX_AGE_S=4000`, which still works and now prints "overridden").
 
 `rollback` and `restore-db` are not gated: they are the way back.
 
