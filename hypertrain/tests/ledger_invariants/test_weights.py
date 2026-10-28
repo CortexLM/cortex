@@ -647,16 +647,7 @@ def test_each_stored_answer_is_the_sum_of_the_pay_events_that_carry_its_epoch(
         assert accounted == set(by_id) and sum(by_id.values()) == 2_200_000
 
 
-FROZEN_PREEMPTED = pytest.mark.xfail(
-    strict=True,
-    raises=EscrowError,
-    reason="WGT-13+ESC-04: a client escrow event that carries the service pay id never makes "
-    "get_weights fail (one operation_id namespace: the payout raises OPERATION_CONFLICT) "
-    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
-)
-
-
-@pytest.mark.parametrize("preempt", [False, pytest.param(True, marks=FROZEN_PREEMPTED)])
+@pytest.mark.parametrize("preempt", [False, True])
 def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
     finalized: Hosted, li_escrow: ModuleType, preempt: bool
 ) -> None:
@@ -682,7 +673,7 @@ def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
     if preempt:
         # The same event under an ordinary id is accepted, so a refusal below is about its id.
         host.escrow.transfer(transfer("67" * 32, other, 1), signer=other)
-        # An escrow that reserves service ids and refuses this event is a correct fix.
+        # A ledger may refuse this event or keep it apart from the key of the payout.
         with suppress(EscrowError):
             host.escrow.transfer(
                 transfer(pay_id(host.run_id, 0, origin, cold), other, 1), signer=other

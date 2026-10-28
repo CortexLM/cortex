@@ -1,18 +1,19 @@
 """Operation ids: a client event never takes an id the service derives for its own events.
 
-The escrow keeps one namespace of operation ids (escrow_events.operation_id UNIQUE) and a client
-may sign any 64-hex id. Every id the service derives for itself (reward finalize, shadow finalize,
-maturity, payout, dispute settlement) is a function of values that are public or shared with the
-miner, so each test takes the id from the control run of the service step, lets a funded bystander
-sign an event with exactly that id, and requires the step to succeed with the effect it has
-without the bystander. The same module pins the lookups that must not confuse a lock id, a dispute
-id and a reward origin id, and the escrow engine's own id, atomicity and replay laws.
+A client may sign any 64-hex id, and every id the service derives for itself (reward finalize,
+shadow finalize, maturity, payout, dispute settlement) is a function of values that are public or
+shared with the miner. The escrow stores such a service event under a key no client id can name,
+so each test takes the id from the receipt of the control run of the service step, lets a funded
+bystander sign an event with exactly that id, and requires the step to succeed with the effect it
+has without the bystander. The same module pins the lookups that must not confuse a lock id, a
+dispute id and a reward origin id, and the escrow engine's own id, atomicity and replay laws.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import inspect
+import json
 import sqlite3
 from pathlib import Path
 from types import ModuleType
@@ -46,7 +47,6 @@ from .support import (
 )
 from .support_opids import (
     DefenceMissing,
-    StepRefused,
     client_event,
     collateral_escrow,
     dispute_code,
@@ -66,13 +66,6 @@ def reward_effect(escrow) -> tuple[int, int]:
 
 
 @pytest.mark.parametrize("kind", ["transfer", "lock"])
-@pytest.mark.xfail(
-    strict=True,
-    raises=StepRefused,
-    reason="ESC-04+BND-24+SG-11: a client event cannot take the id the service derives for the "
-    "finalize of a round, so that round can always be finalized "
-    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
-)
 def test_a_client_event_never_blocks_the_reward_finalize_id(
     li_escrow: ModuleType, real_reward: Real, kind: str
 ) -> None:
@@ -97,14 +90,6 @@ def test_a_client_event_never_blocks_the_reward_finalize_id(
 
 
 @pytest.mark.parametrize("kind", ["transfer", "lock"])
-@pytest.mark.xfail(
-    strict=True,
-    raises=StepRefused,
-    reason="ESC-04+BND-24+SG-11: a client event cannot take the id the service derives for the "
-    "shadow finalize of a trial, so a trial reward can always be issued; the id embeds the "
-    "reservation hash, which no unauthenticated route serves [candidate] "
-    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
-)
 def test_a_client_event_never_blocks_the_shadow_finalize_id(
     li_escrow: ModuleType, real_reward: Real, kind: str
 ) -> None:
@@ -134,16 +119,20 @@ def test_a_client_event_never_blocks_the_shadow_finalize_id(
     assert reward_effect(escrow) == effect
 
 
+def named_ids(escrow, kind: str) -> list[str]:
+    """The ids the service named for its events of `kind`, as their receipts carry them. The key
+    an event is stored under is a keyed derivative that no client can sign, so it is not the id a
+    bystander would take."""
+    rows = escrow.db.execute("SELECT receipt FROM escrow_events WHERE kind=? ORDER BY seq", (kind,))
+    return [json.loads(row[0])["operation_id"] for row in rows]
+
+
 def pay_ids(escrow) -> list[str]:
-    rows = escrow.db.execute("SELECT operation_id FROM escrow_events WHERE kind='PAY' ORDER BY seq")
-    return [row[0] for row in rows]
+    return named_ids(escrow, "PAY")
 
 
 def release_ids(escrow) -> list[str]:
-    rows = escrow.db.execute(
-        "SELECT operation_id FROM escrow_events WHERE kind='RELEASE' ORDER BY seq"
-    )
-    return [row[0] for row in rows]
+    return named_ids(escrow, "RELEASE")
 
 
 def resolved_and_settled(world, turn, settle=lambda step: step()):
@@ -178,13 +167,6 @@ def matured_with_a_bystander(hosted, fixture) -> str:
 
 
 @pytest.mark.parametrize("kind", ["transfer", "lock"])
-@pytest.mark.xfail(
-    strict=True,
-    raises=StepRefused,
-    reason="ESC-04+BND-24+SG-11: a client event cannot take the id the service derives for the "
-    "payout of an origin in an epoch, so every epoch can always be answered "
-    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
-)
 def test_a_client_event_never_blocks_the_weights_payout_id(
     li_escrow: ModuleType, real_reward: Real, tmp_path: Path, kind: str
 ) -> None:
@@ -211,13 +193,6 @@ def test_a_client_event_never_blocks_the_weights_payout_id(
 
 
 @pytest.mark.parametrize("kind", ["transfer", "lock"])
-@pytest.mark.xfail(
-    strict=True,
-    raises=StepRefused,
-    reason="ESC-04+DS-07+SG-11: a client event cannot take the id the service derives for the "
-    "settlement of a dispute, so a resolved dispute can always release its bond "
-    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
-)
 def test_a_client_event_never_blocks_the_dispute_settlement_id(
     li_escrow: ModuleType, tmp_path: Path, kind: str
 ) -> None:
@@ -285,12 +260,6 @@ def borrowing_dispute(world, li_escrow):
     return first, second_id, bond, second
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DefenceMissing,
-    reason="DIA-11+DIB-17+LCK-08: the bond of an open dispute cannot be released by quoting the "
-    "closed dispute whose id it borrows [fix-lot: escrow-relay-fixes ADR0014-P2]",
-)
 def test_a_bond_borrowing_a_closed_disputes_id_cannot_be_released_while_its_dispute_is_open(
     li_escrow: ModuleType, tmp_path: Path
 ) -> None:
@@ -357,12 +326,6 @@ def test_a_bystander_event_under_a_plain_id_of_the_lock_does_not_keep_the_owner_
         assert world.admission.release_bond(admission_id, now=6) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=StepRefused,
-    reason="DIA-11+DIB-17+LCK-08: a dispute whose bond lock id is the id of a closed dispute "
-    "can still be resolved and settled [fix-lot: escrow-relay-fixes ADR0014-P2]",
-)
 def test_a_dispute_whose_bond_borrows_a_closed_disputes_id_can_still_be_settled(
     li_escrow: ModuleType, tmp_path: Path
 ) -> None:
@@ -377,14 +340,9 @@ def test_a_dispute_whose_bond_borrows_a_closed_disputes_id_can_still_be_settled(
         assert world.escrow.balances(li_escrow.OTHER.ss58).dispute_locked == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=StepRefused,
-    reason="DIB-17+LCK-08+DIA-11: a dispute bond whose lock id is a reward origin id cannot "
-    "keep that origin from vesting [fix-lot: escrow-relay-fixes ADR0014-P2]",
-)
+@pytest.mark.parametrize("bond_first", [False, True], ids=["origin-first", "bond-first"])
 def test_a_bond_borrowing_a_reward_origins_id_cannot_keep_that_origin_from_vesting(
-    li_escrow: ModuleType, tmp_path: Path
+    li_escrow: ModuleType, tmp_path: Path, bond_first: bool
 ) -> None:
     reward_origin, finalize_hash = fresh_id("reward-origin"), fresh_id("finalize")
     cold = li_escrow.COLD.ss58
@@ -396,16 +354,21 @@ def test_a_bond_borrowing_a_reward_origins_id_cannot_keep_that_origin_from_vesti
         effect = world.escrow.balances(cold)
     assert (effect.available, effect.reward_pending) == (20500, 0)
 
-    # When: OTHER's miner opens a dispute whose bond lock carries the origin id.
+    # When: OTHER's miner opens a dispute whose bond lock carries the origin id, once the origin
+    # exists (the dispute is then refused) or before it exists (the name is then free).
     with dispute_world(tmp_path / "contended", li_escrow) as world:
-        seed_reward_origin(world, reward_origin, cold, 500, 5, finalize_hash)
         dispute_id = world.add_contest(SECOND_VERDICT, world.miner_two)
-        refused(
-            lambda: (
-                world.bond(li_escrow.OTHER, reward_origin, dispute_id, world.origins[1]),
-                world.open(world.miner_two, SECOND_VERDICT, reward_origin, now=1),
-            )
-        )
+
+        def borrow() -> None:
+            world.bond(li_escrow.OTHER, reward_origin, dispute_id, world.origins[1])
+            world.open(world.miner_two, SECOND_VERDICT, reward_origin, now=1)
+
+        if bond_first:
+            borrow()
+            seed_reward_origin(world, reward_origin, cold, 500, 5, finalize_hash)
+        else:
+            seed_reward_origin(world, reward_origin, cold, 500, 5, finalize_hash)
+            refused(borrow)
 
         # Then: the origin vests at round 5 as in the control.
         service_step(lambda: world.escrow.mature(fresh_id("mature"), (reward_origin,), 5))

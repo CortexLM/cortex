@@ -7,6 +7,7 @@ service derives are the same in the control world and in the world a bystander w
 from __future__ import annotations
 
 import contextlib
+import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -72,23 +73,15 @@ def push_round(world: World, number: int) -> None:
 
 
 def maturity_ids(world: World) -> dict[str, str]:
-    """operation id of each MATURE event, by the origins it vested (its request)."""
+    """operation id of each MATURE event, by the origins it vested (its request). The id is the
+    one its receipt carries: the key the event is stored under cannot be signed by a client."""
     escrow = escrow_of(world)
     with world.store._lock:
-        rows = escrow.db.execute(
-            "SELECT operation_id, request FROM escrow_events WHERE kind='MATURE'"
-        )
-        return {row[1]: row[0] for row in rows}
+        rows = escrow.db.execute("SELECT receipt, request FROM escrow_events WHERE kind='MATURE'")
+        return {row[1]: json.loads(row[0])["operation_id"] for row in rows}
 
 
 @pytest.mark.parametrize("kind", ["transfer", "lock"])
-@pytest.mark.xfail(
-    strict=True,
-    raises=StepRefused,
-    reason="ESC-04+BND-24+SG-11: a client event cannot take the id the service derives for the "
-    "maturity of an origin, so the beacon route always matures what is due "
-    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
-)
 def test_a_client_event_never_blocks_the_maturity_id_over_http(tmp_path: Path, kind: str) -> None:
     cold = load_fixture_module(*SERVICE_FIXTURE).COLD
     pending = fresh_id("pending-origin")
