@@ -90,7 +90,7 @@ def scrubbed_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "HTP-R03 (catalogue R-03): _token catches OSError only, so a bearer file whose bytes are "
         "not UTF-8 raises UnicodeDecodeError out of _require and every route of that class "
         "answers 500 where an unreadable or empty file answers 503; the file was damaged by the "
-        "test, the service reproduces the 500"
+        "test, the service reproduces the 500 [fix-lot: none (no design yet)]"
     ),
 )
 @pytest.mark.parametrize("principal", [OP, WK, INT])
@@ -228,7 +228,7 @@ def test_a_drain_credential_under_32_characters_never_builds_the_relay_app(
         "HTP-R17 (catalogue R-17): the drain route compares the Authorization header with "
         "hmac.compare_digest on two str, which raises TypeError for a non-ASCII character, so a "
         "header with such a byte answers 500 where every other wrong credential answers 403; "
-        "reproduced with a latin-1 byte"
+        "reproduced with a latin-1 byte [fix-lot: none (no design yet)]"
     ),
 )
 def test_a_drain_credential_with_a_non_ascii_byte_is_a_403_not_a_crash(
@@ -258,7 +258,7 @@ def test_a_drain_credential_with_a_non_ascii_byte_is_a_403_not_a_crash(
         "HTP-R17 (catalogue R-17): upload_capability decodes X-Upload-Grant with "
         "base64.b64decode and maps only binascii.Error, so a header with a non-ASCII character "
         "raises ValueError and the chunk route answers 500 where a malformed ASCII capability "
-        "answers 400; reproduced with a latin-1 byte"
+        "answers 400; reproduced with a latin-1 byte [fix-lot: none (no design yet)]"
     ),
 )
 def test_an_upload_capability_with_a_non_ascii_byte_is_a_400_not_a_crash(
@@ -421,7 +421,8 @@ def test_a_relay_pinned_on_another_base_hash_refuses_the_master_grants(
         "3-second drand rounds (10 here, 30 seconds), while the shortest contest the dispute "
         "policy allows lasts 2 x dispute_per_level x 3 = 3600 drand rounds; the unit mechanism.md "
         "section 5 sizes the escrow in is the training round, so the stake can be paid out long "
-        "before any contest could end; whether the unit is the defect is a Forge decision"
+        "before any contest could end; whether the unit is the defect is a Forge decision "
+        "[fix-lot: decision (product choice pending)]"
     ),
 )
 def test_the_vesting_of_a_reward_outlasts_the_shortest_contest_the_run_allows(
@@ -571,7 +572,8 @@ def anonymous_round_urls(world: Any, hotkey: str) -> dict[str, str]:
         "GT-06+HTP-02: the round view, the island job and the relay assignment of a round that "
         "was opened are anonymous GETs that read their objects again on every call: 19 repeats "
         "cost 19 times the object reads of the first call, so nothing is derived once; "
-        "reproduced by counting the reads of the hosted object store"
+        "reproduced by counting the reads of the hosted object store "
+        "[fix-lot: none (no design yet)]"
     ),
 )
 @pytest.mark.parametrize("read", ["round view", "island job", "relay assignment"])
@@ -627,7 +629,7 @@ def lock_is_free(hosted: Any) -> bool:
         "GT-06+HTP-02: the anonymous round view reads the dataset and proof objects of the round "
         "while it holds the store lock and its write transaction, so one slow object read stops "
         "every other request of the run; reproduced by trying the lock from another thread "
-        "inside the object read"
+        "inside the object read [fix-lot: none (no design yet)]"
     ),
 )
 @pytest.mark.parametrize("read", ["round view", "island job", "relay assignment"])
@@ -705,20 +707,13 @@ def test_every_pure_read_get_writes_nothing_durable_on_its_success_path_too(tmp_
 # --- T-DS-01: the other writers of a dispute never wait for a long-poll ------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "DS-04+DIA-22: events() holds the dispute condition and asks for the store lock while a "
-        "writer holds the store lock and notify()s inside its transaction; bisect, resolution, "
-        "state request and timeout all call notify() there, as open and the beacon exit do, so "
-        "the poller and the writer wait for each other"
-    ),
-)
 @pytest.mark.parametrize("write", ["bisect", "resolution", "state-request", "timeout"])
 def test_a_dispute_poll_never_waits_for_the_other_writers_of_a_dispute(
     tmp_path: Path, write: str
 ) -> None:
+    """DS-04 (ADR 0011 part 7, DSP-03). A writer notifies inside its store transaction while a
+    long-poll is asking for the store lock: the poll holds nothing else while it asks, so the two
+    never wait for each other. Each write reaches the engine through the hosted store."""
     with service_world(tmp_path) as world:
         store, hot = world.store, X.service().HOT[0]
         dispute_id, target = dispute_write(world, write)
@@ -812,7 +807,8 @@ def test_a_refused_finalize_mints_nothing_and_every_epoch_answers_the_defined_bu
         "member with an open contest, a round that may not settle) answers an unhandled 500 with "
         "no reason; reproduced by raising the error at the store boundary, because no stored "
         "state that reaches TapeError from this route was found (an open contest suspends its "
-        "member and the aggregation then meets a 403 first)"
+        "member and the aggregation then meets a 403 first) "
+        "[fix-lot: audit-integrity-2 ADR0011-P8 (decision 27, 6fe37f23)]"
     ),
 )
 @pytest.mark.parametrize(
@@ -853,7 +849,8 @@ def test_an_aggregation_refused_by_tape_or_finality_rules_is_a_4xx_with_its_reas
     raises=AssertionError,
     reason=(
         "AU-02+HTP-01: the worker and internal bearers accept a one-character secret like the "
-        "operator bearer does; the first wave pins the operator class only"
+        "operator bearer does; the first wave pins the operator class only "
+        "[fix-lot: none (no design yet)]"
     ),
 )
 @pytest.mark.parametrize("cls", ["worker", "internal"])
@@ -871,7 +868,7 @@ def test_a_secret_shorter_than_32_bytes_is_never_honoured_for_the_worker_and_int
     raises=AssertionError,
     reason=(
         "AU-02+HTP-01: one secret serves the internal class and the operator or worker class; "
-        "the first wave pins the operator and worker pair only"
+        "the first wave pins the operator and worker pair only [fix-lot: none (no design yet)]"
     ),
 )
 @pytest.mark.parametrize("other", ["admin", "worker"])

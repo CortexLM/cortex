@@ -34,6 +34,7 @@ from hypertrain.protocol.server_keys import signing_message as server_key_messag
 from hypertrain.relay.app import create_app as create_relay_app
 
 from .support import SLUG, load_fixture_module, routes, service_world
+from .support_gaps_http import expect
 from .support_http_auth import (
     CHALLENGE_ROUTES,
     GATE_TEXT,
@@ -46,6 +47,8 @@ from .support_http_auth import (
     OP,
     RELAY_ROUTES,
     REVOKED_TEXT,
+    WATCH_IN_BODY,
+    WATCH_KEY,
     WK,
     bearer,
     call,
@@ -55,6 +58,7 @@ from .support_http_auth import (
     endpoints,
     gated_v1_calls,
     gated_v2_calls,
+    owner_post,
     quiet_client,
     relay_receipt,
     seed_audit_lease,
@@ -302,11 +306,14 @@ STRONG = {"admin": "a" * 40, "worker": "b" * 40, "internal": "c" * 40}
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="AU-02+HTP-01: an operator bearer shorter than 32 bytes is never accepted",
+    reason=(
+        "AU-02+HTP-01: an operator bearer shorter than 32 bytes is never accepted "
+        "[fix-lot: none (no design yet)]"
+    ),
 )
 def test_a_bearer_shorter_than_32_bytes_never_opens_a_route(tmp_path: Path) -> None:
     # Control: 32+ byte, pairwise different secrets open the operator route.
-    assert reaches_the_gate(tmp_path / "strong", STRONG, STRONG["admin"])
+    expect(reaches_the_gate(tmp_path / "strong", STRONG, STRONG["admin"]), "a strong secret")
     # The weak operator secret must be refused (no start, or no access), not honoured.
     weak = {**STRONG, "admin": "a"}
     assert not reaches_the_gate(tmp_path / "weak", weak, "a")
@@ -315,12 +322,14 @@ def test_a_bearer_shorter_than_32_bytes_never_opens_a_route(tmp_path: Path) -> N
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="AU-02+HTP-01: one secret never serves two bearer classes",
+    reason=(
+        "AU-02+HTP-01: one secret never serves two bearer classes [fix-lot: none (no design yet)]"
+    ),
 )
 def test_one_secret_never_serves_two_bearer_classes(tmp_path: Path) -> None:
     # Control: pairwise different secrets, each opens the routes of its own class.
-    assert reaches_the_gate(tmp_path / "distinct", STRONG, STRONG["admin"])
-    assert reaches_the_gate(tmp_path / "own", STRONG, STRONG["worker"], WORKER_PROBE)
+    expect(reaches_the_gate(tmp_path / "distinct", STRONG, STRONG["admin"]), "the operator")
+    expect(reaches_the_gate(tmp_path / "own", STRONG, STRONG["worker"], WORKER_PROBE), "the worker")
     shared = {**STRONG, "worker": STRONG["admin"]}
     opens = [
         reaches_the_gate(tmp_path / "shared", shared, STRONG["admin"], probe)
@@ -365,17 +374,15 @@ def test_a_revoked_server_key_is_refused_403_on_every_gated_route_though_still_o
         grant = server_key_grant(server, cold)
         assert client.post("/v2/server-keys", json=grant.model_dump(mode="json")).status_code == 201
         calls = {**gated_v2_calls(world, server, cold), **gated_v1_calls(client, server)}
-        # The two GETs that gate on the hotkey of the admission they name.
-        job_text = f"hypertrain/trial-job/2|{world.run_id}|{identity}".encode()
+        # The two owner requests that gate on the hotkey of the admission they name: the server
+        # key is that hotkey, and each call is a valid request of that owner (the challenge
+        # first, which issues the trial the job exports).
         owner_calls = {
-            "trial challenge": lambda: client.get(n.url + f"/join/{identity}/challenge"),
-            "trial job": lambda: client.get(
-                n.url + f"/join/{identity}/job",
-                headers={"x-hotkey": server.ss58, "x-trial-signature": server.sign(job_text).hex()},
-            ),
+            "trial challenge": lambda: owner_post(n, "challenge", identity),
+            "trial job": lambda: owner_post(n, "job", identity),
         }
         # Control: granted and not revoked, the server key still passes every gate.
-        assert detail(calls[("GET", "/v2/runs/{run_id}/disputes")]()) == (200, [])
+        assert detail(calls[WATCH_KEY]()) == (200, [])
         assert {name: fn().status_code for name, fn in owner_calls.items()} == {
             "trial challenge": 200,
             "trial job": 200,
@@ -494,9 +501,9 @@ SIGNING_DOMAINS = frozenset(
         "hypertrain/rollback/context/1|",
         "hypertrain/rollback/replay/1|",
         "hypertrain/server-key/1|",
+        "hypertrain/rotate/2|",
         "hypertrain/tape/2|",
-        "hypertrain/trial-job/2|",
-        "hypertrain/watch/2|",
+        *([] if WATCH_IN_BODY else ["hypertrain/watch/2|"]),
     }
 )
 
@@ -531,7 +538,7 @@ def test_every_signature_preimage_opens_with_exactly_its_own_domain() -> None:
     """SG-02. A signature made for one purpose covers bytes no other purpose accepts."""
     from hypertrain.ledger.escrow_v2 import authority_message
     from hypertrain.miner.admission import sign_join
-    from hypertrain.protocol.messages_v2 import HardwareHint, OriginAllocation
+    from hypertrain.protocol.messages_v2 import HardwareHint, OriginAllocation, RotateRequest
     from hypertrain.protocol.messages_v2 import TestGenesis as Genesis
 
     run = "ab" * 32
@@ -554,6 +561,9 @@ def test_every_signature_preimage_opens_with_exactly_its_own_domain() -> None:
         authority_sig="0" * 128,
     )
     grant = server_key_grant(hot, cold).grant
+    rotation = RotateRequest(
+        hotkey=hot.ss58, new_hotkey=cold.ss58, operation_id=HASH, new_hot_sig="0" * 128
+    )
     preimages = {
         "hypertrain/2|": envelope_v2.signing_message("Receipt", body, 9, run),
         "hypertrain/relay/1|": relay_envelope.signing_message("Receipt", body, 9, run),
@@ -561,6 +571,7 @@ def test_every_signature_preimage_opens_with_exactly_its_own_domain() -> None:
         "hypertrain/tape/2|": envelope_v2.tape_signing_message(body, run),
         "hypertrain/server-key/1|": server_key_message("grant", grant),
         "hypertrain/origin/2|": authority_message(genesis),
+        "hypertrain/rotate/2|": envelope_v2.rotate_signing_message(rotation, cold.ss58, run, 9),
     }
     opened_by = {
         own: sorted(d.encode() for d in SIGNING_DOMAINS if message.startswith(d.encode()))
@@ -785,9 +796,7 @@ def test_nobody_but_the_key_holder_can_censor_a_hotkey_through_a_server_key_gran
     victim, stranger = service.HOT[2], service.COLD[2]
     with service_world(tmp_path) as world:
         client = world.client
-        watch = gated_v2_calls(world, victim, service.COLD[3])[
-            ("GET", "/v2/runs/{run_id}/disputes")
-        ]
+        watch = gated_v2_calls(world, victim, service.COLD[3])[WATCH_KEY]
         assert detail(watch()) == (200, [])  # control: registered, no grant, no refusal
         # The stranger signs the grant of the victim's hotkey with its own keys only.
         grant = server_key_grant(stranger, stranger).grant.model_copy(

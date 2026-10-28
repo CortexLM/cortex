@@ -29,6 +29,7 @@ REFUSED_FINALIZE = (
 )
 PURE_READS = G + "test_every_pure_read_get_writes_nothing_durable_on_its_success_path_too"
 ACK = G + "test_an_event_ack_made_for_another_run_is_refused_and_stores_no_ack"
+POLL_ORDER = G + "test_a_dispute_poll_never_waits_for_the_other_writers_of_a_dispute"
 RECEIPT = G + "test_a_relay_receipt_of_another_run_is_not_applied_and_a_relabeled_one_fails"
 
 
@@ -385,5 +386,26 @@ MUTANTS += [
         "A replay of a finalized round goes on to the ledger at a later beacon, where it carries "
         "another maturity and ends in an operation conflict or an expired envelope instead of the "
         "stored result.",
+    ),
+]
+
+
+MUTANTS += [
+    mutant(
+        "gh-dispute-poll-reads-its-table-inside-the-condition",
+        ["DS-04", "DSP-03"],
+        DISPUTES,
+        "            with self._leaf():\n"
+        "                seen = self._beats  # read before the table:"
+        " a wake-up in between is not lost\n"
+        "            found = available()\n",
+        "            with self._leaf():\n"
+        "                seen = self._beats  # read before the table:"
+        " a wake-up in between is not lost\n"
+        "                found = available()\n",
+        [POLL_ORDER],
+        "The long poll asks for the store lock while it holds the dispute condition, as before "
+        "ADR 0011 part 7, so a writer that notifies inside its transaction and the poller wait "
+        "for each other.",
     ),
 ]

@@ -34,6 +34,13 @@ REVOKED = (
 FORGED = A + "test_a_forged_signer_is_refused_on_the_signed_routes_that_have_no_membership_gate"
 PREFIX = A + "test_no_signing_domain_is_a_byte_prefix_of_another"
 PREIMAGE = A + "test_every_signature_preimage_opens_with_exactly_its_own_domain"
+# The owner requests of the trial routes (ADR 0010 decision 3) are pinned by the base tests of
+# tests/challenge/test_trial_export.py: who may ask, the other route's request, the expiry and its
+# bound. This package adds the revoked server key (AU-05) and the route table.
+T = "tests/challenge/test_trial_export.py::"
+CHALLENGE_OWNER_ONLY = T + "test_challenge_route_refuses_everyone_but_the_owner"
+JOB_OWNER_ONLY = T + "test_job_route_refuses_everyone_but_the_owner"
+EXPIRY_BOUND = T + "test_an_owner_request_may_expire_only_so_far_ahead"
 SITES = A + "test_every_production_intake_names_a_signer_predicate_for_a_real_message_type"
 PREDICATE = A + "test_an_intake_refuses_a_valid_signature_from_a_signer_its_predicate_rejects"
 KEY_LIFECYCLE = (
@@ -492,20 +499,60 @@ MUTANTS: list[dict[str, Any]] = [
         "http-auth-trial-challenge-without-owner-gate",
         ["AU-05"],
         APP,
-        "        await subnet_member((await run(admission.store.by_id, admission_id)).hotkey)\n",
+        "        await owner_request(run_id, admission_id, request, ChallengeRequest)\n",
         "",
-        [REVOKED],
-        "the trial challenge GET stops checking the hotkey of the admission it opens a trial for.",
+        [REVOKED, CHALLENGE_OWNER_ONLY],
+        "the trial challenge stops asking for the owner's signed request and subnet membership.",
     ),
     mutant(
         "http-auth-trial-job-without-owner-gate",
+        ["AU-05"],
+        APP,
+        "        await owner_request(run_id, admission_id, request, JobRequest)\n",
+        "",
+        [REVOKED, JOB_OWNER_ONLY],
+        "the trial job export stops asking for the owner's signed request and subnet membership.",
+    ),
+    mutant(
+        "http-auth-trial-owner-helper-skips-the-subnet-gate",
         ["AU-05"],
         APP,
         "        hotkey = (await run(admission.store.by_id, admission_id)).hotkey\n"
         "        await subnet_member(hotkey)\n",
         "        hotkey = (await run(admission.store.by_id, admission_id)).hotkey\n",
         [REVOKED],
-        "the trial job GET stops checking the hotkey of the admission it exports for.",
+        "the owner helper of the trial challenge and job routes forgets the subnet and "
+        "revocation gate on the owner's hotkey.",
+    ),
+    mutant(
+        "http-auth-trial-owner-request-of-another-message-type-is-accepted",
+        ["SG-02", "AU-05"],
+        APP,
+        "            valid = isinstance(asked, message) and asked.admission_id == admission_id\n",
+        "            valid = asked.admission_id == admission_id\n",
+        [CHALLENGE_OWNER_ONLY, JOB_OWNER_ONLY],
+        "a request of the other owner route passes the check of this one, though the signer "
+        "predicate only watches the message type this route names.",
+    ),
+    mutant(
+        "http-auth-trial-owner-request-expiry-is-unbounded",
+        ["SG-05"],
+        APP,
+        "            if envelope_v2.parse_envelope(raw).exp_drand"
+        " > now + OWNER_REQUEST_MAX_ROUNDS:\n"
+        '                raise ExpiredError("expiry too far ahead")\n',
+        "",
+        [EXPIRY_BOUND],
+        "an owner request may carry any expiry, so a capture of it replays for as long as it says.",
+    ),
+    mutant(
+        "http-auth-rotation-consent-domain-equals-envelope-domain",
+        ["SG-02"],
+        "src/hypertrain/protocol/envelope_v2.py",
+        'b"hypertrain/rotate/2|", "RotateRequest"',
+        'b"hypertrain/2|", "RotateRequest"',
+        [PREIMAGE, PREFIX],
+        "the new hotkey's rotation consent becomes a valid envelope signature over the same bytes.",
     ),
     mutant(
         "http-auth-get-weights-without-bearer",

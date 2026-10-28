@@ -33,6 +33,7 @@ from hypertrain.relay.app import create_app as create_relay_app
 from hypertrain.relay.core import RelayError, Settlement
 
 from .support import load_fixture_module, service_world
+from .support_gaps_http import expect
 from .support_http_auth import (
     HASH,
     LockSpy,
@@ -41,10 +42,12 @@ from .support_http_auth import (
     durable_state,
     log_record_writes,
     open_round,
+    put_object,
     quiet_client,
     seed_relay_scenario,
     sibling_runtime,
     sibling_service,
+    watch_capture,
 )
 
 RELAY_FIXTURE = ("li_relay_fixture", "relay/test_transport_v2.py")
@@ -56,49 +59,21 @@ RELAY_FIXTURE = ("li_relay_fixture", "relay/test_transport_v2.py")
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="SG-05+HTP-03: a dispute-watch header signed in an earlier round is refused later",
+    reason=(
+        "SG-05+HTP-03: a dispute watch signed in an earlier round is refused later "
+        "[fix-lot: audit-integrity-2 ADR0010-P3 (b018d425)]"
+    ),
 )
-def test_a_dispute_watch_header_captured_in_an_earlier_round_is_refused_later(
-    tmp_path: Path,
-) -> None:
-    service = sibling_service()
-    party = service.HOT[0]
+def test_a_dispute_watch_captured_in_an_earlier_round_is_refused_later(tmp_path: Path) -> None:
+    party = sibling_service().HOT[0]
     with service_world(tmp_path) as world:
         n = world.network
-        # The control signs the preimage the service accepts today: a fix that adds a round or a
-        # nonce to it changes this line with the service.
-        text = f"hypertrain/watch/2|{n.manifest.run_id()}|{party.ss58}".encode()
-        headers = {"x-dispute-signature": party.sign(text).hex()}
-        url = n.url + "/disputes"
-        # Control: in the round it was made the header lets the party watch.
-        assert detail(n.client.get(url, params={"party": party.ss58}, headers=headers)) == (200, [])
+        replay = watch_capture(n, party)
+        # Control: in the round it was made the capture lets the party watch.
+        watch = detail(replay())
+        expect(watch == (200, []), f"the capture does not open the watch in its own round: {watch}")
         n.push(300)
-        later = n.client.get(url, params={"party": party.ss58}, headers=headers)
-        assert later.status_code == 403, "the same header still opens the watch 299 rounds on"
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="SG-05+HTP-03: a trial-job header signed in an earlier round is refused later",
-)
-def test_a_trial_job_header_captured_in_an_earlier_round_is_refused_later(tmp_path: Path) -> None:
-    service = sibling_service()
-    owner = service.HOT[0]
-    with service_world(tmp_path) as world:
-        n = world.network
-        identity = n.join(0).json()["admission_id"]
-        n.push(2)
-        assert n.client.get(n.url + f"/join/{identity}/challenge").status_code == 200
-        # As above: the preimage is the one the service accepts today.
-        text = f"hypertrain/trial-job/2|{n.manifest.run_id()}|{identity}".encode()
-        headers = {"x-hotkey": owner.ss58, "x-trial-signature": owner.sign(text).hex()}
-        url = n.url + f"/join/{identity}/job"
-        # Control: in the round it was made the header exports the trial job.
-        assert n.client.get(url, headers=headers).status_code == 200
-        n.push(50)  # still inside the 100-round trial, 48 rounds after the signature
-        later = n.client.get(url, headers=headers)
-        assert later.status_code == 403, "the same header still exports the job 48 rounds on"
+        assert replay().status_code == 403, "the same capture still opens the watch 299 rounds on"
 
 
 # SG-13 ------------------------------------------------------------------------------------
@@ -107,15 +82,17 @@ def test_a_trial_job_header_captured_in_an_earlier_round_is_refused_later(tmp_pa
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="SG-13+HTP-10: the beacon pin table does not grow by a row for every round that an "
-    "anonymous status read touches",
+    reason=(
+        "SG-13+HTP-10: the beacon pin table does not grow by a row for every round that an "
+        "anonymous status read touches [fix-lot: none (no design yet)]"
+    ),
 )
 def test_pin_rows_do_not_pile_up_one_per_round_of_anonymous_status_reads(tmp_path: Path) -> None:
     service = sibling_service()
     rounds = 120
     with service_world(tmp_path) as world:
         n = world.network
-        assert n.join(0).status_code == 200
+        expect(n.join(0).status_code == 200, "the miner did not join")
         client = quiet_client(world.app)
         status = f"/v2/runs/{world.run_id}/admission/{service.HOT[0].ss58}"
         hosted = world.store.for_run(world.run_id)
@@ -127,7 +104,7 @@ def test_pin_rows_do_not_pile_up_one_per_round_of_anonymous_status_reads(tmp_pat
         def read_each_round(first: int) -> None:
             for number in range(first, first + rounds):
                 n.push(number)
-                assert client.get(status).status_code == 200
+                expect(client.get(status).status_code == 200, "the status read is not served")
 
         read_each_round(2)
         middle = pins()
@@ -142,7 +119,7 @@ def test_pin_rows_do_not_pile_up_one_per_round_of_anonymous_status_reads(tmp_pat
 
 def observer_challenge(client: TestClient, url: str) -> dict[str, Any]:
     response = client.get(url)
-    assert response.status_code == 200, response.text
+    expect(response.status_code == 200, f"the observer challenge is not issued: {response.text}")
     body: dict[str, Any] = response.json()
     return body
 
@@ -157,8 +134,10 @@ def observer_answer(world: Any, scenario: Any, challenge: dict[str, Any]) -> dic
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="GT-04+HTP-07: an anonymous second GET of a relay-observer challenge does not "
-    "void the pending one",
+    reason=(
+        "GT-04+HTP-07: an anonymous second GET of a relay-observer challenge does not void the "
+        "pending one [fix-lot: escrow-relay-fixes ADR0014-P8]"
+    ),
 )
 def test_a_second_anonymous_observer_challenge_does_not_void_the_pending_one(
     tmp_path: Path,
@@ -170,7 +149,7 @@ def test_a_second_anonymous_observer_challenge_does_not_void_the_pending_one(
         # Control: one challenge, answered by the observer, is accepted.
         first = observer_challenge(client, url)
         accepted = client.post(url, json=observer_answer(world, scenario, first))
-        assert accepted.status_code == 200, accepted.text
+        expect(accepted.status_code == 200, f"the observer's answer is refused: {accepted.text}")
         # A stranger who knows the grant and the observer asks again before the observer answers;
         # what that second ask is told does not matter, only that the pending challenge survives.
         pending = observer_challenge(client, url)
@@ -182,7 +161,10 @@ def test_a_second_anonymous_observer_challenge_does_not_void_the_pending_one(
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="GT-04+HTP-07: a relay-observer challenge asked for in a later round is never a 500",
+    reason=(
+        "GT-04+HTP-07: a relay-observer challenge asked for in a later round is never a 500 "
+        "[fix-lot: escrow-relay-fixes ADR0014-P8]"
+    ),
 )
 def test_an_observer_challenge_asked_for_in_a_later_round_is_a_mapped_answer(
     tmp_path: Path,
@@ -191,7 +173,8 @@ def test_an_observer_challenge_asked_for_in_a_later_round_is_a_mapped_answer(
         scenario = seed_relay_scenario(world)
         client = quiet_client(world.app)
         url = world.network.url + f"/relay-observers/{scenario.grant_hash}/{scenario.observer.ss58}"
-        assert client.get(url).status_code == 200  # control: the first round issues a challenge
+        issued = client.get(url).status_code
+        expect(issued == 200, f"the first round does not issue a challenge: {issued}")
         world.network.push(5)
         later = client.get(url)
         assert later.status_code != 500, "an unmapped error answers the ask of the next round"
@@ -228,7 +211,10 @@ def test_repeated_anonymous_reads_of_a_round_leave_the_stored_state_as_the_first
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="GT-05+HTP-02: a repeated anonymous read of the round view rewrites no stored record",
+    reason=(
+        "GT-05+HTP-02: a repeated anonymous read of the round view rewrites no stored record "
+        "[fix-lot: none (no design yet)]"
+    ),
 )
 def test_a_repeated_anonymous_round_view_rewrites_no_stored_record(tmp_path: Path) -> None:
     with service_world(tmp_path) as world:
@@ -236,66 +222,25 @@ def test_a_repeated_anonymous_round_view_rewrites_no_stored_record(tmp_path: Pat
         client = quiet_client(world.app)
         url = f"/v2/runs/{world.run_id}/rounds/0"
         hosted = world.store.for_run(world.run_id)
-        assert client.get(url).status_code == 200
+        expect(client.get(url).status_code == 200, "the round view is not served")
         with hosted._lock:
             written = log_record_writes(hosted._db)
-        assert client.get(url).status_code == 200
+        expect(client.get(url).status_code == 200, "the repeated round view is not served")
         with hosted._lock:
             rewritten = written()
     assert rewritten == [], f"{len(rewritten)} stored records rewritten by the second read"
 
 
-# LV-01 / LV-02 ----------------------------------------------------------------------------
+# LV-02 ------------------------------------------------------------------------------------
 
 
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="LV-01+ADM-03: no request holds the store lock while a trial reference is computed",
-)
-def test_the_store_lock_is_free_while_a_trial_reference_is_being_computed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    with service_world(tmp_path) as world:
-        n, run = world.network, world.run_id
-        hosted = world.store.for_run(run)
-        admission = hosted._services(run)[1]
-        started, resume = threading.Event(), threading.Event()
-
-        def computing(*args: Any, **kwargs: Any) -> str:
-            # Stand-in for the trusted reference run, which takes minutes on a real model.
-            started.set()
-            assert resume.wait(timeout=60)
-            return HASH
-
-        monkeypatch.setattr(admission, "prepare_reference", computing)
-        reply: list[httpx.Response] = []
-        caller = threading.Thread(
-            target=lambda: reply.append(
-                n.client.post(
-                    n.url + f"/admin/join/{HASH}/reference", headers=sibling_service().admin()
-                )
-            )
-        )
-        assert hosted._lock.acquire(blocking=False)  # control: idle, the lock is there to take
-        hosted._lock.release()
-        caller.start()
-        try:
-            assert started.wait(timeout=60), "the reference computation never started"
-            free = hosted._lock.acquire(blocking=False)
-            if free:
-                hosted._lock.release()
-            assert free, "the store lock is held for as long as the reference computes"
-        finally:
-            resume.set()
-            caller.join(timeout=60)
-        assert not caller.is_alive() and reply[0].status_code == 200
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="LV-02+ADM-04: a signed object upload never takes the store lock on the event loop",
+    reason=(
+        "LV-02+ADM-04: a signed object upload never takes the store lock on the event loop "
+        "[fix-lot: escrow-relay-fixes ADR0014-P8]"
+    ),
 )
 def test_a_signed_object_upload_never_takes_the_store_lock_on_the_event_loop(
     tmp_path: Path,
@@ -304,24 +249,17 @@ def test_a_signed_object_upload_never_takes_the_store_lock_on_the_event_loop(
     miner = service.HOT[0]
     with service_world(tmp_path) as world:
         n = world.network
-        assert n.join(0).status_code == 200
+        expect(n.join(0).status_code == 200, "the miner did not join")
         hosted = world.store.for_run(world.run_id)
         loop_thread = n.client.portal.call(threading.get_ident)
         spy = LockSpy(hosted._lock)
         hosted._lock = spy
         try:
-            body = b"an admission artifact"
-            sha = hashlib.sha256(body).hexdigest()
-            signature = miner.sign(f"hypertrain/object/2|{world.run_id}|{sha}".encode()).hex()
-            stored = n.client.put(
-                n.url + "/objects/" + sha,
-                content=body,
-                headers={"x-hotkey": miner.ss58, "x-object-signature": signature},
-            )
+            stored = put_object(n, miner, b"an admission artifact")
         finally:
             hosted._lock = spy.inner
-        assert stored.status_code == 200, stored.text  # control: the upload is served
-        assert spy.holders, "the upload never touched the store lock"
+        expect(stored.status_code == 200, f"the upload is not served: {stored.text}")
+        expect(spy.holders, "the upload never touched the store lock")
         assert loop_thread not in spy.holders, "the event loop thread waited on the store lock"
 
 
@@ -331,7 +269,10 @@ def test_a_signed_object_upload_never_takes_the_store_lock_on_the_event_loop(
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="LV-03+TRN-02: the shipped relay can act on a master release of a retained upload",
+    reason=(
+        "LV-03+TRN-02: the shipped relay can act on a master release of a retained upload "
+        "[fix-lot: escrow-relay-fixes ADR0014-P6]"
+    ),
 )
 def test_the_shipped_relay_does_not_refuse_a_release_for_want_of_a_settlement_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -365,7 +306,7 @@ def test_the_shipped_relay_does_not_refuse_a_release_for_want_of_a_settlement_jo
 
     async def scenario() -> str:
         async with runtime.serving(tmp_path, monkeypatch, runtime.JUST_AFTER_BOUNDARY):
-            assert len(built) == 1  # control: this is the relay the entry point builds
+            expect(len(built) == 1, "the entry point did not build exactly one relay")
             sealed = relay_envelope.seal(
                 runtime.MASTER, "CustodyRelease", runtime.RUN, release, 10_000
             )
@@ -396,7 +337,10 @@ def sealed_release(rig: Any, grant: UploadGrant, custody: ChunkCustodyAck) -> An
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="LV-03+TRN-02: a released upload frees its slot in the retained-upload cap",
+    reason=(
+        "LV-03+TRN-02: a released upload frees its slot in the retained-upload cap "
+        "[fix-lot: escrow-relay-fixes ADR0014-P6]"
+    ),
 )
 def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: Path) -> None:
     fixture = load_fixture_module(*RELAY_FIXTURE)
@@ -440,7 +384,10 @@ def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: P
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="LV-07+TRN-05: one hotkey cannot store more objects than any proof may reference",
+    reason=(
+        "LV-07+TRN-05: one hotkey cannot store more objects than any proof may reference "
+        "[fix-lot: escrow-relay-fixes ADR0014-P8 (TRN-05)]"
+    ),
 )
 def test_one_hotkey_cannot_store_more_objects_than_a_proof_can_reference(tmp_path: Path) -> None:
     limit = next(
@@ -452,20 +399,13 @@ def test_one_hotkey_cannot_store_more_objects_than_a_proof_can_reference(tmp_pat
     miner = service.HOT[0]
     with service_world(tmp_path) as world:
         n = world.network
-        assert n.join(0).status_code == 200
+        expect(n.join(0).status_code == 200, "the miner did not join")
 
         def store(i: int) -> int:
-            body = f"artifact {i}".encode()
-            sha = hashlib.sha256(body).hexdigest()
-            signature = miner.sign(f"hypertrain/object/2|{world.run_id}|{sha}".encode()).hex()
-            return n.client.put(
-                n.url + "/objects/" + sha,
-                content=body,
-                headers={"x-hotkey": miner.ss58, "x-object-signature": signature},
-            ).status_code
+            return put_object(n, miner, f"artifact {i}".encode()).status_code
 
         statuses = [store(i) for i in range(limit + 1)]
-        assert statuses[0] == 200  # control: a signed upload of an admitted miner is served
+        expect(statuses[0] == 200, "a signed upload of an admitted miner is not served")
         accepted = statuses.count(200)
         assert accepted == limit, (
             f"{accepted} objects stored for one hotkey; {limit} is the most a proof lists"
