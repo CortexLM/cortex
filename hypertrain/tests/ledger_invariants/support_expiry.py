@@ -7,9 +7,11 @@ expiry tests exercise never open the delta. Not collected: no test_ prefix.
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 from hypertrain.auditor.replay import AnchorCache, optimizer_hash, pack_state
@@ -61,6 +63,95 @@ def cold(index: int) -> Keypair:
     return keys[index]
 
 
+def rotate_request(
+    new_hotkey: Keypair,
+    *,
+    run_id: str,
+    coldkey: str,
+    hotkey: str,
+    operation_id: str,
+    expires_beacon: int,
+) -> Any:
+    """The RotateRequest that moves `hotkey` to `new_hotkey` under `coldkey`, in whatever shape
+    the tree has: the new hotkey's consent (`new_hot_sig`, ADR 0010 RTA-01) where the model
+    asks for it, sealed for the same run and expiry as the coldkey's envelope will be."""
+    from hypertrain.protocol.messages_v2 import RotateRequest
+
+    body = {"hotkey": hotkey, "new_hotkey": new_hotkey.ss58, "operation_id": operation_id}
+    if "new_hot_sig" not in RotateRequest.model_fields:
+        return RotateRequest.model_validate(body)
+    from hypertrain.miner.admission import sign_rotation_consent
+
+    return sign_rotation_consent(
+        new_hotkey,
+        run_id=run_id,
+        coldkey=coldkey,
+        hotkey=hotkey,
+        operation_id=operation_id,
+        expires_beacon=expires_beacon,
+    )
+
+
+def keyed_id(derive: Callable[..., str], escrow: Any, *parts: Any) -> str:
+    """The id `derive` (genesis_origin_id, bootstrap_origin_id...) gives `parts` in `escrow`: under
+    the ledger's own id key where the derivation is keyed (ADR 0014 part 1), as the public
+    function of its inputs where it is not. Never derive an origin id by hand in a test."""
+    if "id_key" in inspect.signature(derive).parameters:
+        return derive(*parts, escrow.id_key)
+    return derive(*parts)
+
+
+def signed_bootstrap(economics: ModuleType, store: Any, run_id: str) -> bytes:
+    """`economics.signed(run_id)` with its origin ids under the id key of the hosted `store`.
+
+    A fixture whose own key is not the store's cannot get even its own run's bootstrap issued,
+    which is no business of the run check the caller is about."""
+    from hypertrain.ledger.escrow_v2 import authority_message, bootstrap_origin_id
+    from hypertrain.protocol.envelope_v2 import seal
+
+    template = economics.B.bootstrap(run_id)
+    key = store._escrow_id_key_v2() if hasattr(store, "_escrow_id_key_v2") else None
+    holder = SimpleNamespace(id_key=key)
+    origins = [
+        origin.model_copy(
+            update={
+                "origin_id": keyed_id(
+                    bootstrap_origin_id, holder, run_id, template.allocation_hash, index
+                )
+            }
+        )
+        for index, origin in enumerate(template.origins)
+    ]
+    unsigned = template.model_copy(update={"origins": origins, "authority_sig": "0" * 128})
+    coord = economics.E.COORD
+    signature = coord.sign(authority_message(unsigned)).hex()
+    bootstrap = unsigned.model_copy(update={"authority_sig": signature})
+    return canonicalize(seal(coord, "ProductionBootstrap", run_id, bootstrap, 10000))
+
+
+def lock_units(network: Any) -> int:
+    """The admission lock a funded identity of the hosted run holds: the funding floor its
+    pinned economics policy names, not a number of this module (a ledger that sets a minimum
+    lock reads the same policy)."""
+    raw = network.store.objects.get(network.manifest.network.economics_policy_hash)
+    return int(json.loads(raw)["S_min_units"])
+
+
+def challenge_get(world: World, identity: str, client: Any = None) -> Any:
+    """The trial challenge GET, sent as the admission's own hotkey where the route asks for its
+    signature (RTA-04) and bare where it does not. The signing is the fixture's own, so a later
+    change of the route's shape is a change of one place."""
+    network = world.network
+    if not hasattr(network, "challenge"):
+        return (client or network.client).get(network.url + f"/join/{identity}/challenge")
+    held = network.client
+    network.client = client or held
+    try:
+        return network.challenge(identity)
+    finally:
+        network.client = held
+
+
 def activate(world: World, count: int) -> None:
     """`count` identities ACTIVE by SQL after a real join and a real funded lock.
 
@@ -78,7 +169,7 @@ def activate(world: World, count: int) -> None:
         lock = EscrowLock(
             operation_id=f"{i + 1:064x}",
             owner=cold(i).ss58,
-            units=1000,
+            units=lock_units(network),
             origin_ids=[network.origin_ids[i]],
             admission_id=identity,
             dispute_id=None,
@@ -391,7 +482,6 @@ def signed_requests(
         EscrowTransfer,
         OriginAllocation,
         ResolutionV2,
-        RotateRequest,
         TestGenesis,
     )
 
@@ -401,7 +491,8 @@ def signed_requests(
     h0, c0, c1 = hot(0), cold(0), cold(1)
     coord = fixture.COORD
     auditor = fixture.AUDITORS[0]
-    admission = network.store._services(world.run_id)[1].status(h0.ss58, now=network.now)
+    ledger, admissions, _ = network.store._services(world.run_id)
+    admission = admissions.status(h0.ss58, now=network.now)
     one, two, three = "11" * 32, "22" * 32, "33" * 32
 
     def sealed(key: Keypair, kind: str, body: Any) -> dict[str, Any]:
@@ -411,7 +502,7 @@ def signed_requests(
     lock = EscrowLock(
         operation_id=one,
         owner=c0.ss58,
-        units=1,
+        units=lock_units(network),
         origin_ids=[network.origin_ids[0]],
         admission_id=admission.record.admission_id,
         dispute_id=None,
@@ -437,7 +528,14 @@ def signed_requests(
         finality_hash=two,
         closed_dispute_root=three,
     )
-    rotate = RotateRequest(hotkey=h0.ss58, new_hotkey=fixture.REFEREE.ss58, operation_id=two)
+    rotate = rotate_request(
+        fixture.REFEREE,
+        run_id=run_id,
+        coldkey=c0.ss58,
+        hotkey=h0.ss58,
+        operation_id=two,
+        expires_beacon=expiry,
+    )
     dispute = DisputeV2(hotkey=h0.ss58, verdict_hash=one, action="accept", bond_lock=None)
     bisect = BisectV2(
         dispute_id=one,
@@ -511,7 +609,7 @@ def signed_requests(
         total_units=40_000,
         origins=[
             OriginAllocation(
-                origin_id=genesis_origin_id(named, genesis_hash, i),
+                origin_id=keyed_id(genesis_origin_id, ledger, named, genesis_hash, i),
                 owner=owner,
                 units=units,
                 mature_at=at,

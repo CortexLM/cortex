@@ -21,12 +21,13 @@ from hypertrain.miner.admission import sign_join, sign_rotation
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
-from hypertrain.protocol.messages_v2 import EscrowTransfer, HardwareHint, RotateRequest
+from hypertrain.protocol.messages_v2 import EscrowTransfer, HardwareHint
 
 from .support import World, service_world
 from .support_expiry import (
     activate,
     audited,
+    challenge_get,
     cold,
     control,
     files,
@@ -36,6 +37,7 @@ from .support_expiry import (
     open_round,
     post_commit,
     publish_leaves,
+    rotate_request,
     service,
     signed_requests,
     stale,
@@ -323,7 +325,8 @@ def test_a_stale_beacon_refuses_a_resolution_before_the_dispute_it_names_is_read
     raises=AssertionError,
     reason=(
         "CK-02: a trial proof is read for its signature before the freshness gate, so a forged "
-        "proof under a stale beacon is a 409 about the signature, not a 503 [candidate]"
+        "proof under a stale beacon is a 409 about the signature, not a 503 [candidate] "
+        "[fix-lot: none (no design yet)]"
     ),
 )
 def test_a_stale_beacon_refuses_a_trial_proof_before_its_signature_is_read(
@@ -400,7 +403,8 @@ def stale_export(tmp_path: Path) -> None:
                 raises=AssertionError,
                 reason=(
                     "CK-02: the object PUT is not behind the freshness gate, so it stores while "
-                    "the beacon is stale instead of answering 503 [candidate]"
+                    "the beacon is stale instead of answering 503 [candidate] "
+                    "[fix-lot: none (no design yet)]"
                 ),
             ),
         ),
@@ -412,7 +416,8 @@ def stale_export(tmp_path: Path) -> None:
                 raises=AssertionError,
                 reason=(
                     "CK-02: the leaf publication is not behind the freshness gate, so it records "
-                    "while the beacon is stale instead of answering 503 [candidate]"
+                    "while the beacon is stale instead of answering 503 [candidate] "
+                    "[fix-lot: none (no design yet)]"
                 ),
             ),
         ),
@@ -424,7 +429,8 @@ def stale_export(tmp_path: Path) -> None:
                 raises=AssertionError,
                 reason=(
                     "CK-02: the trial export is not behind the freshness gate, so it answers its "
-                    "own state while the beacon is stale instead of 503 [candidate]"
+                    "own state while the beacon is stale instead of 503 [candidate] "
+                    "[fix-lot: none (no design yet)]"
                 ),
             ),
         ),
@@ -444,7 +450,8 @@ def test_a_stale_beacon_refuses_an_object_put_a_leaf_publication_and_a_trial_exp
     raises=AssertionError,
     reason=(
         "CK-03: the round that seeds a trial challenge was never pushed and the request dies "
-        "with an unhandled BeaconUnavailable (HTTP 500) instead of a handled refusal"
+        "with an unhandled BeaconUnavailable (HTTP 500) instead of a handled refusal "
+        "[fix-lot: none (no design yet)]"
     ),
 )
 def test_a_challenge_request_for_a_seed_round_that_was_not_pushed_is_a_handled_refusal(
@@ -455,14 +462,16 @@ def test_a_challenge_request_for_a_seed_round_that_was_not_pushed_is_a_handled_r
         seed = world.store._db.execute("SELECT seed_beacon FROM admissions_v2").fetchone()[0]
         world.network.push(seed + 1)  # the seed round itself is skipped
         quiet = TestClient(world.app, raise_server_exceptions=False)
-        url = world.network.url + f"/join/{identity}/challenge"
-        refused = quiet.get(url)
+        refused = challenge_get(world, identity, quiet)
         # Control: pushing the missing round later lets the very same request through.
         backfill = world.network.client.post(
             "/v1/admin/beacon", json=service().fixture_beacon(seed), headers=world.admin
         )
         control(backfill.status_code == 200, f"backfill: {backfill.text}")
-        control(quiet.get(url).status_code == 200, "the challenge is not served after backfill")
+        served = challenge_get(world, identity, quiet)
+        control(
+            served.status_code == 200, f"the challenge is not served after backfill: {served.text}"
+        )
         # The app answers a paused beacon with 503 and an admission refusal with 409.
         assert refused.status_code in (409, 503), refused.text
 
@@ -477,16 +486,29 @@ def far_transfer(world: World) -> Any:
     return lambda: transfer_request(world, "e2" * 32, 1, expiry=FAR)
 
 
+def rotation(world: World, index: int, new_key: Any, operation: str, expiry: int) -> Any:
+    network = world.network
+    request = rotate_request(
+        new_key,
+        run_id=world.run_id,
+        coldkey=cold(index).ss58,
+        hotkey=hot(index).ss58,
+        operation_id=operation,
+        expires_beacon=expiry,
+    )
+    return network.client.post(
+        network.url + "/admission/" + hot(index).ss58 + "/rotate",
+        json=sign_rotation(cold(index), world.run_id, request, expiry),
+    )
+
+
 def far_rotation(world: World) -> Any:
     network = world.network
-    control(network.join(0).status_code == 200, "join")
-    request = RotateRequest(
-        hotkey=hot(0).ss58, new_hotkey=service().REFEREE.ss58, operation_id="e3" * 32
-    )
-    return lambda: network.client.post(
-        network.url + "/admission/" + hot(0).ss58 + "/rotate",
-        json=sign_rotation(cold(0), world.run_id, request, FAR),
-    )
+    control(network.join(0).status_code == 200, "join 0")
+    control(network.join(1).status_code == 200, "join 1")
+    near = rotation(world, 1, hot(2), "e4" * 32, 50)
+    control(near.status_code == 200, f"near rotation: {near.text}")
+    return lambda: rotation(world, 0, service().REFEREE, "e3" * 32, FAR)
 
 
 def far_join(world: World) -> Any:
@@ -519,7 +541,8 @@ def far_join(world: World) -> Any:
                 raises=AssertionError,
                 reason=(
                     "SG-04: an escrow transfer whose expiry is the largest canonical integer is "
-                    "accepted: no horizon bounds a client-signed expiry [candidate]"
+                    "accepted: no horizon bounds a client-signed expiry [candidate] "
+                    "[fix-lot: none (no design yet)]"
                 ),
             ),
         ),
@@ -531,7 +554,8 @@ def far_join(world: World) -> Any:
                 raises=AssertionError,
                 reason=(
                     "SG-04: a rotation whose expiry is the largest canonical integer is accepted: "
-                    "no horizon bounds a client-signed expiry [candidate]"
+                    "no horizon bounds a client-signed expiry [candidate] "
+                    "[fix-lot: none (no design yet)]"
                 ),
             ),
         ),
@@ -543,7 +567,8 @@ def far_join(world: World) -> Any:
                 raises=AssertionError,
                 reason=(
                     "SG-04: a join whose expiry is the largest canonical integer is accepted: "
-                    "no horizon bounds a client-signed expiry [candidate]"
+                    "no horizon bounds a client-signed expiry [candidate] "
+                    "[fix-lot: none (no design yet)]"
                 ),
             ),
         ),

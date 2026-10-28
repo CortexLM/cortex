@@ -8,15 +8,20 @@ neither a pass nor the expected failure.
 
 A "[candidate]" in a reason marks a hole whose desired behaviour is the Lens' reading or one of
 several valid remedies; the other holes are reproduced defects asserted on an observable outcome,
-and a test that presumes one remedy says so below.
+and a test that presumes one remedy says so below. The reason of every xfail ends with
+[fix-lot: <tag>]: the lot whose merge flips it (the marker is then removed and nothing else
+changes), or "none (no design yet)" / "decision (product choice pending)".
 
 CRD-15, A2W-17: the finalize re-reads the stored commit and verdict envelopes at the
 finalize-time beacon; a miner or an auditor that sealed a short expiry freezes the round. The
 ledger-level test shows the mechanism in milliseconds and turns green with a ledger-side fix;
 the end-to-end test (four members really trained and audited, 30 s) turns green with any fix
 that lets the round finalize. A fix that refuses the short commit at intake makes its control
-fail (ControlFailed), which is the signal to rewrite it.
-A2W-16: a round wider than one audit lease cannot be audited late. FIN-05: a replay of a
+fail (ControlFailed), which is the signal to rewrite it. The audit queue half of A2W-17 (a
+commit that expired before the lease must not stop the other members' audits) is closed on v3
+by ADR 0011 part 2 and pinned by tests/challenge/test_audit_liveness_v2.py.
+A2W-16: a round wider than one audit lease stays auditable to its last beacon (closed on v3 by
+ADR 0011 part 2, decision 6: an attempt is dated by the round it starts in). FIN-05: a replay of a
 finalize returns the stored result while its envelope is live. FIN-23: a stale beacon refuses
 a round write with 503 and leaves nothing behind. BND-16: signed genesis, bootstrap and reward
 bodies belong to one run.
@@ -61,7 +66,7 @@ from .support_expiry import (
     control,
     files,
     hot,
-    job_id_of,
+    keyed_id,
     last_audit_beacon,
     lease_request,
     open_round,
@@ -69,6 +74,7 @@ from .support_expiry import (
     post_commit,
     prepared_write,
     service,
+    signed_bootstrap,
     stale,
     tables,
     touched,
@@ -105,7 +111,8 @@ def reseal(fixture: ModuleType, real: Real, which: str, expiry: int) -> Finality
                 raises=ExpiredError,
                 reason=(
                     "CRD-15+CRD-D02: a commit sealed to expire one round before the finalize "
-                    "beacon, valid at every beacon the store accepted it at, freezes the reward"
+                    "beacon, valid at every beacon the store accepted it at, freezes the reward "
+                    "[fix-lot: escrow-relay-fixes ADR0014-P3]"
                 ),
             ),
         ),
@@ -116,7 +123,8 @@ def reseal(fixture: ModuleType, real: Real, which: str, expiry: int) -> Finality
                 raises=ExpiredError,
                 reason=(
                     "A2W-17+A2W-D10: an auditor verdict sealed to expire one round before the "
-                    "finalize beacon, live when it was accepted, freezes the reward"
+                    "finalize beacon, live when it was accepted, freezes the reward "
+                    "[fix-lot: escrow-relay-fixes ADR0014-P3]"
                 ),
             ),
         ),
@@ -146,7 +154,8 @@ def test_an_expiry_that_lapsed_after_acceptance_cannot_block_the_reward(
     reason=(
         "CRD-15+CRD-D02: one miner's commit, sealed to expire at the audit round, is accepted "
         "and audited, and the coordinator's finalize of the aggregated round then answers 409 "
-        "'envelope expired' for ever"
+        "'envelope expired' for ever "
+        "[fix-lot: escrow-relay-fixes ADR0014-P3]"
     ),
 )
 def test_a_round_whose_only_fault_is_one_short_lived_commit_still_finalizes(
@@ -204,8 +213,9 @@ def test_a_round_whose_only_fault_is_one_short_lived_commit_still_finalizes(
     raises=AssertionError,
     reason=(
         "CRD-15+CRD-D02: the store accepts a commit whose expiry is before d_final, which no "
-        "finalize at or after d_final can re-read; refusing it at intake is the Lens "
-        "remedy [candidate]"
+        "finalize at or after d_final could re-read; refusing it at intake is the Lens "
+        "remedy that ADR 0014 part 3 declines once evidence is judged at acceptance [candidate] "
+        "[fix-lot: decision (product choice pending)]"
     ),
 )
 def test_a_commit_that_cannot_outlive_the_round_is_refused_at_intake(tmp_path: Path) -> None:
@@ -222,24 +232,6 @@ def test_a_commit_that_cannot_outlive_the_round_is_refused_at_intake(tmp_path: P
         assert touched(before, tables(world)) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "A2W-17+CRD-D02: a commit that expires before d_audit is accepted and its audit job "
-        "can never be built, so the queue stops serving every member behind it"
-    ),
-)
-def test_one_members_commit_expiry_cannot_stop_the_other_members_audits(tmp_path: Path) -> None:
-    with service_world(tmp_path) as world:
-        # The queue serves jobs ordered by (created, id), all created at d_audit: by id.
-        first = min(range(4), key=lambda i: job_id_of(world, 0, i))
-        audited(world, early=first)  # control: every commit is accepted, every job scheduled
-        auditors = service().AUDITORS
-        leased = [lease_request(world, auditor, n) for n, auditor in enumerate(auditors, 1)]
-        assert [r.status_code for r in leased] == [200, 200], [r.text for r in leased]
-
-
 # --- A2W-16: a round the store opened must be auditable -----------------------------------------
 
 
@@ -252,25 +244,19 @@ def test_a_round_whose_window_fits_one_lease_is_auditable_up_to_its_last_beacon(
         world.network.push(last)
         leased = lease_request(world, service().AUDITORS[0])
         assert leased.status_code == 200, leased.text
-        job = leased.json()["body"]
-        assert (job["created_beacon"], job["lease_expires"]) == (rnd.d_audit, last + 1)
-        assert last + 1 == rnd.d_final
+        assert leased.json()["body"]["lease_expires"] == last + 1 == rnd.d_final
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "A2W-16: the store opens a round whose window is wider than one audit lease, then "
-        "cannot build any lease after d_audit (the operator tool alone refuses such an opening)"
-    ),
-)
 def test_a_round_wider_than_one_lease_is_not_left_unauditable(tmp_path: Path) -> None:
     with service_world(tmp_path) as world:
         audited(world, WIDE)  # control: the narrow twin above leases at its last beacon
-        world.network.push(last_audit_beacon(world))
+        last = last_audit_beacon(world)
+        world.network.push(last)
         leased = lease_request(world, service().AUDITORS[0])
         assert leased.status_code == 200, leased.text
+        job = leased.json()["body"]
+        # An attempt is dated by the round it starts in (ADR 0011 part 2), not by its row.
+        assert (job["created_beacon"], job["lease_expires"]) == (last, last + 1)
 
 
 # --- FIN-23: a stale beacon refuses a round write and leaves nothing behind -----------------------
@@ -426,7 +412,8 @@ def test_a_signed_reward_of_one_run_is_refused_by_the_ledger_of_another(
     assert (other.balances().issued, other.balances().reward_pending) == (0, 0)
 
 
-def signed_genesis(fixture: ModuleType, run_id: str) -> TestGenesis:
+def signed_genesis(fixture: ModuleType, escrow: Any) -> TestGenesis:
+    run_id = escrow.run_id
     allocation = [(fixture.COLD.ss58, 20000, 1), (fixture.OTHER.ss58, 10000, 1)]
     digest = genesis_allocation_hash(allocation)
     unsigned = TestGenesis(
@@ -435,7 +422,10 @@ def signed_genesis(fixture: ModuleType, run_id: str) -> TestGenesis:
         total_units=30000,
         origins=[
             OriginAllocation(
-                origin_id=genesis_origin_id(run_id, digest, i), owner=h, units=u, mature_at=m
+                origin_id=keyed_id(genesis_origin_id, escrow, run_id, digest, i),
+                owner=h,
+                units=u,
+                mature_at=m,
             )
             for i, (h, u, m) in enumerate(allocation)
         ],
@@ -450,7 +440,7 @@ def test_a_signed_genesis_of_one_run_is_refused_by_the_ledger_of_another(
 ) -> None:
     setup = li_escrow.setup()
     own, other = bare_escrow(li_escrow, setup), bare_escrow(li_escrow, moved_run(setup))
-    genesis = signed_genesis(li_escrow, own.run_id)
+    genesis = signed_genesis(li_escrow, own)
     own.test_genesis(genesis)
     control(own.balances().issued == 30000, "the run's own genesis is not issued")
     assert error_code(lambda: other.test_genesis(genesis)) == "ORIGIN_AUTHORITY"
@@ -500,13 +490,12 @@ def test_a_production_bootstrap_envelope_of_one_run_is_refused_by_the_store_of_a
         hosted_stores(store)
         economics.beacon(store, 1, bls=True)
     control(run_one != run_two, "the two hosted runs share a run id")
-    raw_one = economics.signed(run_one)
+    raw_one = signed_bootstrap(economics, one, run_one)
     with pytest.raises(RunMismatchError, match="another run"):
         two.production_bootstrap_v2(run_two, raw_one)
     assert (issued(one), issued(two)) == (0, 0)
     # Control: each store issues its own bootstrap once.
-    assert two.production_bootstrap_v2(run_two, economics.signed(run_two))["ledger_mode"] == (
-        "production"
-    )
+    own_two = two.production_bootstrap_v2(run_two, signed_bootstrap(economics, two, run_two))
+    assert own_two["ledger_mode"] == "production"
     assert one.production_bootstrap_v2(run_one, raw_one)["ledger_mode"] == "production"
     assert (issued(one), issued(two)) == (30000, 30000)

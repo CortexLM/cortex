@@ -16,6 +16,13 @@ NARROW = ONE + "test_a_round_whose_window_fits_one_lease_is_auditable_up_to_its_
 BOOTSTRAP = (
     ONE + "test_a_production_bootstrap_envelope_of_one_run_is_refused_by_the_store_of_another"
 )
+WIDE = ONE + "test_a_round_wider_than_one_lease_is_not_left_unauditable"
+# Closed on v3 by ADR 0011 part 2 and pinned by the lot that closed it (PIN_EXISTING).
+LIVENESS = "tests/challenge/test_audit_liveness_v2.py::"
+RE_LEASE = LIVENESS + "test_a_re_lease_after_the_first_window_validates"
+POISONED_HEAD = (
+    LIVENESS + "test_a_miner_sealed_input_that_cannot_be_leased_does_not_block_the_queue"
+)
 
 PAIR = TWO + "test_a_trial_pair_with_one_unfit_envelope_is_refused_whichever_one_it_is"
 
@@ -245,6 +252,24 @@ MUTANTS = [
         "new": "absolute = body.d_audit + policy.absolute_rounds()",
         "tests": [NARROW],
         "why": "the audit window of a round outlasts its d_final.",
+    },
+    {
+        "id": "exp-attempt-dated-by-its-creation-round",
+        "invariants": ["A2W-16"],
+        "path": STORE,
+        "old": "created_beacon=now,",
+        "new": 'created_beacon=row["created"],',
+        "tests": [WIDE, RE_LEASE],
+        "why": "a lease granted after d_audit is dated by its queue row and fails the lease bound.",
+    },
+    {
+        "id": "exp-expired-commit-blocks-the-audit-queue",
+        "invariants": ["A2W-17"],
+        "path": STORE,
+        "old": "if envelope_v2.parse_envelope(commit_env).exp_drand < now:",
+        "new": "if False:",
+        "tests": [POISONED_HEAD + "[commit_exp]"],
+        "why": "the job of a miner whose commit expired is built, fails, and stops every lease.",
     },
     {
         "id": "exp-authority-drops-the-run-check",
