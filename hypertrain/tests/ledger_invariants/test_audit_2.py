@@ -280,11 +280,12 @@ def test_the_audit_counter_equals_the_jobs_not_yet_terminal(
 
 
 def test_each_job_decrements_the_counter_once_whether_it_completes_or_is_exhausted(
-    world: sa.World,
+    world: sa.World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Given: two executed leases, three jobs still queued.
     with world.at("s2") as (n, cast):
         store, run = n.store, n.manifest.run_id()
+        sa.without_reaper(monkeypatch, store)
 
         def counter() -> int:
             return int(store._record_v2(run, "finality", "0")["unresolved_audits"])
@@ -327,11 +328,12 @@ def test_each_job_decrements_the_counter_once_whether_it_completes_or_is_exhaust
 
 
 def test_without_scheduled_audits_the_counter_stays_at_the_roster_and_the_round_waits(
-    world: sa.World,
+    world: sa.World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Given: round 0 committed, and nobody scheduled its audits (the condition of A2W-12 broken).
     with world.at("committed") as (n, cast):
         store, run = n.store, n.manifest.run_id()
+        sa.without_reaper(monkeypatch, store)
         assert not sa.lease_rows(store)
         # When: time passes; there is no job to exhaust.
         n.push(n.now + 1000)
@@ -390,10 +392,13 @@ def test_a_settled_round_is_untouched_by_late_audit_events(world: sa.World) -> N
         assert (settled_state(store), sa.records(store, *keep), minted()) == before
 
 
-def test_after_the_last_window_nothing_late_can_change_the_dropped_round(world: sa.World) -> None:
+def test_after_the_last_window_nothing_late_can_change_the_dropped_round(
+    world: sa.World, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Given: two executed leases and three queued jobs when the last audit window passes.
     with world.at("s2") as (n, cast):
         store, run = n.store, n.manifest.run_id()
+        sa.without_reaper(monkeypatch, store)
         held = running(store)
         stored = {h: store._record_v2(run, "executed-verdict", r["id"]) for h, r in held.items()}
         sa.run_out_the_windows(n, store)
@@ -444,10 +449,13 @@ def test_a_rollback_waits_for_every_audit_of_both_rounds(world: sa.World) -> Non
         assert detail(later) == (409, "missing accepted applied: 1")
 
 
-def test_audits_cannot_be_scheduled_once_the_horizon_is_one_round_away(world: sa.World) -> None:
+def test_audits_cannot_be_scheduled_once_the_horizon_is_one_round_away(
+    world: sa.World, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Given: a committed round whose audits were never scheduled, one round before the horizon.
     with world.at("committed") as (n, cast):
         store = n.store
+        sa.without_reaper(monkeypatch, store)
         horizon = store._record_v2(n.manifest.run_id(), "round", "0")["body"]["d_final"]
         n.push(horizon - 1)
         before = sa.digest_of(store)
