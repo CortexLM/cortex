@@ -649,7 +649,27 @@ def test_every_production_intake_names_a_signer_predicate_for_a_real_message_typ
     }
     sites = intake_sites()
     assert len(sites) >= 50  # the scan finds the sites: 66 on this tree
-    assert unpinned_sites(sites, known) == []
+    assert [p for p in unpinned_sites(sites, known) if not deliberate(p)] == []
+
+
+# An Intake without a predicate on purpose: the object upload (put_object_v2) names no role. The
+# signer is the only identity in the request, and the admission lookup that runs before the Intake
+# (`_owner_v2`) binds it to a miner of the run; the Intake carries the signature, the run and the
+# expiry (miner-driver-resilience fad3023c, which moved the upload into a signed body, D52 I1).
+DELIBERATE = {("challenge/app.py", "put_object_v2")}
+
+
+def deliberate(problem: str) -> bool:
+    """Whether a flagged site is inside one of the functions that DELIBERATE names."""
+    file, line, _ = problem.split(":", 2)
+    for node in ast.walk(ast.parse((SOURCE / file).read_text())):
+        if (
+            isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+            and (file, node.name) in DELIBERATE
+        ):
+            if node.lineno <= int(line) <= (node.end_lineno or node.lineno):
+                return True
+    return False
 
 
 def test_the_site_scan_flags_an_intake_that_would_accept_any_signer() -> None:
