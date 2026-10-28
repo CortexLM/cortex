@@ -8,8 +8,11 @@ a few seconds; the relay key is a throwaway public address made here.
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import secrets
+import shutil
 import signal
 import stat
 import subprocess
@@ -18,13 +21,34 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.keys import Keypair
+from hypertrain.protocol.messages import f32hex
+from hypertrain.trainer.config import ModelConfig
+from hypertrain.trainer.model import param_shapes
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER = ROOT / "scripts/b300/d20/build_test_manifest.sh"
 DIGEST = "sha256:" + "cd" * 32
+
+# The training.json model fields the dense-0.1b build takes from its registry row.
+ROW_FIELDS = (
+    "arch",
+    "n_layers",
+    "d_model",
+    "n_heads",
+    "n_kv_heads",
+    "d_ff",
+    "n_experts",
+    "top_k_experts",
+    "vocab",
+    "seq_len",
+    "compute_dtype",
+    "param_count",
+)
 
 # `uv run --no-sync python ARGS` is the only call the builder makes; the Nth can be made to fail.
 FAKE_UV = r"""#!/usr/bin/env bash
@@ -86,10 +110,11 @@ def build(
     sm_count: str = "170",
     exp_round: str | None = None,
     env: dict[str, str] | None = None,
+    builder: Path = BUILDER,
 ) -> subprocess.CompletedProcess[str]:
     args = [image, driver, sm_count, str(out), *([exp_round] if exp_round is not None else [])]
     return subprocess.run(
-        [str(BUILDER), *args],
+        [str(builder), *args],
         env={**host, **(env or {})},
         capture_output=True,
         text=True,
@@ -245,6 +270,8 @@ def test_a_good_build_keeps_private_seeds_and_the_outputs_and_prints_no_seed(hos
         out / "out/manifest-envelope.json"
     ).is_file()
     assert (out / "state").is_dir()
+    admission = json.loads((out / "inputs/policies.json").read_text())["admission"]
+    assert admission["work_screen_epoch_rounds"] == 6000  # only dense-0.1b widens the window
     written = [
         p.read_bytes()
         for d in ("inputs", "out", "state")
@@ -255,6 +282,144 @@ def test_a_good_build_keeps_private_seeds_and_the_outputs_and_prints_no_seed(hos
         value = seed.read_text()
         assert value not in run.stdout + run.stderr
         assert not any(value.encode() in content for content in written)
+
+
+def test_a_dense_0_1b_build_writes_the_registry_row_and_a_wide_screen_window(host, tmp_path):
+    out = tmp_path / "out"
+
+    run = build(
+        host, out, driver="595.91.07", sm_count="148", env={"HT_D20_GEOMETRY": "dense-0.1b"}
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert uv_calls(host) == 3
+    training = json.loads((out / "inputs/training.json").read_text())
+    assert {k: v for k, v in training["model"].items() if k in ROW_FIELDS} == {
+        "arch": "decoder",
+        "n_layers": 8,
+        "d_model": 768,
+        "n_heads": 12,
+        "n_kv_heads": 4,
+        "d_ff": 2048,
+        "n_experts": 1,
+        "top_k_experts": 1,
+        "vocab": 32768,
+        "seq_len": 2048,
+        "compute_dtype": "bf16",
+        "param_count": 100_676_352,
+    }
+    inner = training["inner"]
+    assert {k: inner[k] for k in ("H", "J", "micro_batch", "grad_accum", "opt")} == {
+        "H": 4,
+        "J": 4,
+        "micro_batch": 2,
+        "grad_accum": 1,
+        "opt": "adamw",
+    }
+    assert (inner["state_policy"], inner["rewarmup_steps"]) == ("reset", 0)  # the 8 P job inputs
+    assert inner["lr_schedule"] == {
+        "type": "wsd",
+        "peak_lr": f32hex(3e-3),
+        "warmup": 2,
+        "stable": 100000,
+        "decay": 0,
+    }
+    outer = training["outer"]  # dense-int8 at full density: the 1.016 P delta of the budget
+    assert (outer["opt"], outer["bits"], outer["topk_frac"], outer["ef_beta"]) == (
+        "nesterov",
+        8,
+        f32hex(1.0),
+        f32hex(0.0),
+    )
+    dataset = training["dataset"]
+    samples = (out / "inputs/samples.u32").read_bytes()
+    rows = np.frombuffer(samples, dtype="<u4").reshape(4096, 2049)
+    assert dataset["n_samples"] == 4096 and dataset["depth"] == 12
+    assert rows.max() < 32768  # every id is inside the vocab
+    assert dataset["merkle_root"] == MerkleTree([r.tobytes() for r in rows]).root.hex()
+    assert (
+        dataset["shard_sha256_root"] == MerkleTree([bytes.fromhex(sha256_hex(samples))]).root.hex()
+    )
+    assert training["reference_spec"]["layout"]["n_gpus"] == 1
+    assert training["reference_spec"]["driver_allowlist"] == ["595.91.07"]
+    policies = json.loads((out / "inputs/policies.json").read_text())
+    assert policies["admission"]["work_screen_epoch_rounds"] == 20000
+    assert (
+        policies["audit"]["lease_rounds"] == 100 and policies["audit"]["max_steps_per_attempt"] == 8
+    )
+    assert '"param_count": 100676352' in run.stdout
+
+
+def row_with_count(count: int) -> dict[str, object]:
+    """A one-layer decoder row, two wide, whose shape-only parameter count is exactly `count`.
+
+    It has 4 * vocab + 22 + 6 * d_ff parameters, so d_ff 1..4 settles the residue of the vocab."""
+    for d_ff in range(1, 5):
+        rest = count - 22 - 6 * d_ff
+        if rest % 4 == 0:
+            row: dict[str, object] = {
+                "n_layers": 1,
+                "d_model": 2,
+                "n_heads": 1,
+                "n_kv_heads": 1,
+                "d_ff": d_ff,
+                "n_experts": 1,
+                "top_k_experts": 1,
+                "seq_len": 2,
+                "vocab": rest // 4,
+                "compute_dtype": "bf16",
+            }
+            shapes = param_shapes(ModelConfig(**row))  # type: ignore[arg-type]
+            assert sum(math.prod(shape) for shape in shapes.values()) == count
+            return row
+    raise AssertionError(f"no row with {count} parameters")
+
+
+@pytest.mark.parametrize(
+    ("count", "accepted"),
+    [
+        (99_999_998, False),
+        (100_000_000, True),
+        (300_000_000, True),
+        (300_000_002, False),
+    ],
+    ids=["just_below", "lower_bound", "upper_bound", "just_above"],
+)
+def test_the_dense_0_1b_row_must_stay_inside_the_inclusive_100_to_300_million_band(
+    host, tmp_path, count, accepted
+):
+    # The row is read from the checkout the builder sits in, so the builder runs from a copy
+    # whose scripts/mfu_profiles.json holds the row under test. Call 2 of uv (the manifest build,
+    # which would initialise the model) is made to fail: reaching it means the band let the row in.
+    root = tmp_path / "checkout"
+    builder = root / "scripts/b300/d20/build_test_manifest.sh"
+    builder.parent.mkdir(parents=True)
+    shutil.copy(BUILDER, builder)
+    row = row_with_count(count)
+    (root / "scripts/mfu_profiles.json").write_text(
+        json.dumps({"profiles": {"mfu-dense-0.1b": {"model": row}}})
+    )
+    out = tmp_path / "out"
+
+    run = build(
+        host, out, env={"HT_D20_GEOMETRY": "dense-0.1b", "FAKE_UV_FAIL_ON": "2"}, builder=builder
+    )
+
+    if accepted:
+        assert run.returncode == 9 and uv_calls(host) == 2, run.stderr
+    else:
+        assert run.returncode not in (0, 9) and uv_calls(host) == 1
+        assert f"has {count} parameters, outside the band 100000000..300000000" in run.stderr
+        assert not out.exists()
+
+
+def test_an_unknown_geometry_is_refused_and_the_known_ones_are_named(host, tmp_path):
+    out = tmp_path / "out"
+
+    run = build(host, out, env={"HT_D20_GEOMETRY": "dense-0.2b"})
+
+    assert run.returncode == 2 and "dense-1b, dense-0.1b or tiny-cpu" in run.stderr
+    assert not out.exists() and uv_calls(host) == 0
 
 
 def fake_output(out: Path, layout: str = "full") -> list[str]:

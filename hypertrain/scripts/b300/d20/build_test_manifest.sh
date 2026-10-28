@@ -27,6 +27,11 @@
 # HT_D20_GEOMETRY=dense-1b (default): the dense-1b-bf16 qualification geometry
 # (scripts/mfu_profiles.json mfu-dense-1b, H=8 J=4 micro_batch=2 warmup=2 lr=3e-3, dense-int8),
 # layout pp=1 ep=1 dp=2 n_gpus=2, a synthetic 4096-sample u32 fixture (no quality claim).
+# HT_D20_GEOMETRY=dense-0.1b: the intermediate TEST model of D68 (ADR 0015), 100,676,352 parameters,
+# read from the row mfu-dense-0.1b of scripts/mfu_profiles.json (8 layers, d_model 768, seq 2048,
+# bf16), layout n_gpus=1, H=J=4 micro_batch=2 (two checkpoints per result), the dense-1b fixture
+# of 4096 samples and work_screen_epoch_rounds 20000 (the other geometries keep 6000). The build
+# refuses a row whose shape-only parameter count leaves the band 100,000,000..300,000,000.
 # HT_D20_GEOMETRY=tiny-cpu: the CPU mechanism model of tests/ledger/test_escrow_v2.py setup()
 # (1 layer, d_model 8, vocab 16, seq 4, H=1 J=1, 16 samples), layout n_gpus=1, for a cpu-backend
 # TEST run whose references and audits the challenge replays on CPU.
@@ -97,7 +102,7 @@ GEOMETRY=${HT_D20_GEOMETRY:-dense-1b}
 COLDKEYS=${HT_D20_COLDKEYS:-2}
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
-case $GEOMETRY in dense-1b|tiny-cpu) ;; *) echo "HT_D20_GEOMETRY: dense-1b or tiny-cpu" >&2; exit 2 ;; esac
+case $GEOMETRY in dense-1b|dense-0.1b|tiny-cpu) ;; *) echo "HT_D20_GEOMETRY: dense-1b, dense-0.1b or tiny-cpu" >&2; exit 2 ;; esac
 case $COLDKEYS in [1-9]) ;; *) echo "HT_D20_COLDKEYS must be 1..9" >&2; exit 2 ;; esac
 [[ $IMAGE =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "IMAGE_DIGEST must be sha256:<64 lowercase hex>" >&2; exit 2; }
 [[ $DRIVER =~ ^([0-9][0-9.]*|cpu-test)$ ]] || { echo "DRIVER must be digits and dots (or cpu-test)" >&2; exit 2; }
@@ -157,8 +162,9 @@ mkdir "$OUT/inputs"
 
 cd "$HT"
 uv run --no-sync python -I - "$IMAGE" "$DRIVER" "$SM_COUNT" "$OUT" "$EXP_ROUND" \
-    "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" <<'PY'
+    "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" "$HT" <<'PY'
 import json
+import math
 import os
 import secrets
 import sys
@@ -176,7 +182,9 @@ from hypertrain.protocol.messages import f32hex
 from hypertrain.protocol.messages import drand_round_at
 from hypertrain.trainer.rng import rng_ctr, uniform_f64
 
-image, driver, sm_count, out, exp_round, relay_url, relay_pubkey, geometry, coldkeys = sys.argv[1:]
+image, driver, sm_count, out, exp_round, relay_url, relay_pubkey, geometry, coldkeys, ht_root = (
+    sys.argv[1:]
+)
 out_dir = Path(out)
 secret_dir, inputs = out_dir / "secrets", out_dir / "inputs"
 COLD = tuple(f"cold-{i}" for i in range(int(coldkeys)))
@@ -233,6 +241,56 @@ if geometry == "dense-1b":
         holdout_commit=sha256_hex(b"D20 synthetic B300 test fixture: no quality holdout"),
     )
     layout = {"pp": 1, "n_gpus": 2, "dp_size": 2, "ep_size": 1, "zero1": False}
+elif geometry == "dense-0.1b":
+    from hypertrain.trainer.config import TrainConfig
+    from hypertrain.trainer.model import param_shapes
+
+    # ADR 0015: the model block is the registry row; the fixture, the inner loop and the band are here.
+    profiles = json.loads((Path(ht_root) / "scripts/mfu_profiles.json").read_bytes())["profiles"]
+    row = profiles["mfu-dense-0.1b"]["model"]
+    SEQ, VOCAB, N = row["seq_len"], row["vocab"], 4096
+    BAND = (100_000_000, 300_000_000)
+    body["model"].update(arch="decoder", **row)
+    count = sum(math.prod(s) for s in param_shapes(TrainConfig.from_manifest(body).model).values())
+    if not BAND[0] <= count <= BAND[1]:
+        sys.exit(f"mfu-dense-0.1b has {count} parameters, outside the band {BAND[0]}..{BAND[1]}")
+    rows = np.empty((N, SEQ + 1), dtype="<u4")
+    for i in range(N):
+        u = uniform_f64(SEQ + 1, rng_ctr("d20-dense-test-data", 0, i, 0))
+        rows[i] = np.floor(u * VOCAB).astype("<u4")
+    tree = MerkleTree([r.tobytes() for r in rows])
+    reference = canonicalize(
+        {
+            "purpose": "S100_TEST_CUDA_RUN_NOT_PUBLIC_QUALITY",
+            "qualification_profile": "dense-0.1b-bf16",
+            "geometry_source": "scripts/mfu_profiles.json mfu-dense-0.1b; ADR 0015",
+            "image_digest": image,
+            "driver_allowlist": [driver],
+            "sm_count": int(sm_count),
+            "dataset": f"synthetic philox u32 ids, label d20-dense-test-data, {N} x {SEQ + 1}",
+        }
+    )
+    body["model"]["param_count"] = count
+    # J = H: the executor result keeps two checkpoints (12 P bytes each), the fewest the artifact
+    # validation accepts; H = 4 stays under the 30 steps of the 100-round audit lease.
+    body["inner"].update(
+        H=4, J=4, micro_batch=2, grad_accum=1, state_policy="reset", rewarmup_steps=0
+    )
+    body["inner"]["lr_schedule"].update(peak_lr=f32hex(3e-3), warmup=2, stable=100000, decay=0)
+    body["tokenizer"] = {
+        "name": f"ht-synthetic-ids-{VOCAB}",
+        "sha256": sha256_hex(f"d20 synthetic token ids: no tokenizer, vocab {VOCAB}".encode()),
+    }
+    body["dataset"].update(
+        merkle_root=tree.root.hex(),
+        depth=(N - 1).bit_length(),
+        n_samples=N,
+        sample_format="u32[seq_len+1] token ids",
+        shard_uri_template="samples.u32",
+        shard_sha256_root=MerkleTree([bytes.fromhex(sha256_hex(rows.tobytes()))]).root.hex(),
+        holdout_commit=sha256_hex(b"D20 synthetic B300 test fixture: no quality holdout"),
+    )
+    layout = {"pp": 1, "n_gpus": 1, "dp_size": 1, "ep_size": 1, "zero1": False}
 else:
     from hypertrain.trainer.config import TrainConfig
     from hypertrain.trainer.model import param_shapes
@@ -282,10 +340,14 @@ del body["init_state_hash"]
 outer = body["outer"]
 allocation = [(ss58[c], 20000, 1) for c in COLD]
 (inputs / "genesis-allocation.json").write_bytes(canonicalize(allocation))
+# docs/network-v2.md (admission): the first screen must cover the whole serial campaign. For the
+# 100 M model that is 52 trials of 83..130 rounds (250..390 s) plus about 470 rounds to the
+# d_final of round 0, i.e. 4800..7200 rounds: 6000 holds only on the fastest link.
+screen_rounds = 20000 if geometry == "dense-0.1b" else 6000
 policies = {
     "admission": {
         "q_base": "0000803e", "E": 4, "clean_finalizations": 12,
-        "work_screen_epoch_rounds": 6000, "max_pending": 32, "max_trial_replays": 2,
+        "work_screen_epoch_rounds": screen_rounds, "max_pending": 32, "max_trial_replays": 2,
         "max_trials_per_beacon": 2, "join_per_beacon": 2, "join_burst": 4,
         "ip_prefix_per_beacon": 32, "ip_prefix_burst": 64, "challenge_rounds": 100,
         "artifact_limits": {
@@ -405,7 +467,8 @@ checks.update(
     driver_allowlist=ref.driver_allowlist == [driver],
     sm_count=ref.sm_count == sm_count,
     ledger_mode_test=economics.ledger_mode == "test",
-    work_screen_epoch_rounds_6000=admission.work_screen_epoch_rounds == 6000,
+    work_screen_epoch_rounds=admission.work_screen_epoch_rounds
+    == (20000 if sys.argv[5] == "dense-0.1b" else 6000),
     relay=len(registry.specs) == 1 and spec.mode == "transport"
     and str(spec.https_url).rstrip("/") == "https://relay.joinbase.ai",
     coord_is_reward_authority=economics.reward_authority == t.coord_pubkey == keys["coord"],
