@@ -27,7 +27,9 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
+from hypertrain.miner import admission as miner_admission
 from hypertrain.miner.island_launch import launch_island
 from hypertrain.protocol import relay_envelope
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
@@ -39,10 +41,13 @@ from hypertrain.protocol.messages import (
     StageState,
 )
 from hypertrain.protocol.messages_v2 import (
+    AuditPolicyV2,
     CommitV2,
+    DisputeV2,
     EscrowLock,
     IslandJobV1,
     RankWorkResult,
+    RotateRequest,
     RoundOpenV2,
     RunManifestV2,
     WorkProof,
@@ -263,8 +268,19 @@ class Round:
         ).fetchall()
         return {row["id"].split(":", 1)[1]: json.loads(row["data"])["reason"] for row in rows}
 
+    def paid(self) -> dict[str, int]:
+        """hotkey -> units issued as the reward of this round."""
+        rows = self.store._db.execute(
+            "SELECT hotkey,issued FROM escrow_origins WHERE reward_round=?", (self.w,)
+        ).fetchall()
+        return {row["hotkey"]: int(row["issued"]) for row in rows}
+
     def disabled(self, auditor: Keypair) -> bool:
-        return self.has_record("auditor-disabled", auditor.ss58)
+        """The master refuses to lease to `auditor`: the permanent record of the old audit path or
+        the bounded cooldown record that replaced it (ADR 0011 part 2)."""
+        return self.has_record("auditor-disabled", auditor.ss58) or self.has_record(
+            "auditor-cooldown", auditor.ss58
+        )
 
 
 def open_round(network: Any, w: int, members: Sequence[int]) -> Round:
@@ -273,6 +289,11 @@ def open_round(network: Any, w: int, members: Sequence[int]) -> Round:
         network, w, open_only=True, hotkeys=[hot(i) for i in members]
     )
     control(response.status_code == 200, response.text)
+    return enter_round(network, w, members)
+
+
+def enter_round(network: Any, w: int, members: Sequence[int]) -> Round:
+    """Move to d_assign of the round the master just accepted and read the members' assignments."""
     opening = RoundOpenV2.model_validate(
         network.store._record_v2(network.manifest.run_id(), "round", str(w))["body"]
     )
@@ -282,6 +303,22 @@ def open_round(network: Any, w: int, members: Sequence[int]) -> Round:
     rnd = Round(network, w, list(members), opening)
     rnd.assignments = {a["hotkey"]: a["assignment_hash"] for a in answer.json()["assignment"]}
     return rnd
+
+
+def open_after(rnd: Round, members: Sequence[int]) -> tuple[Any, Round | None]:
+    """Open round w+1 for `members` once round w is behind, as the operator does: the master's
+    answer, and the opened round when it is 200. An opening is built on the state round w applied;
+    when none exists the master's verdict on the missing state is asked of an opening that repeats
+    round w (nothing but the schedule and the signature can be right in it)."""
+    net = rnd.network
+    if not rnd.has_record("applied", str(rnd.w)):
+        return next_opening(rnd, members), None
+    response = rollback().execute_round(
+        net, rnd.w + 1, open_only=True, hotkeys=[hot(i) for i in members]
+    )
+    if response.status_code != 200:
+        return response, None
+    return response, enter_round(net, rnd.w + 1, members)
 
 
 def accept(rnd: Round, index: int) -> Any:
@@ -347,8 +384,13 @@ def forged_commit(rnd: Round, index: int) -> CommitV2:
     )
 
 
-def post_commit(rnd: Round, index: int, commit: CommitV2) -> Any:
-    return rnd.post("/commit", rnd.network.signed(hot(index), "CommitV2", commit))
+def post_commit(rnd: Round, index: int, commit: CommitV2, *, expiry: int | None = None) -> Any:
+    """POST /commit. `expiry` is the round the member seals its commit to (an honest miner seals
+    d_final); the default is the far expiry of the shared fixture."""
+    envelope = rnd.network.signed(
+        hot(index), "CommitV2", commit, **({} if expiry is None else {"expiry": expiry})
+    )
+    return rnd.post("/commit", envelope)
 
 
 def publish_leaves(rnd: Round, index: int, leaves: list[LeafPreimage], commit: CommitV2) -> Any:
@@ -368,13 +410,15 @@ def publish_leaves(rnd: Round, index: int, leaves: list[LeafPreimage], commit: C
     return rnd.post("/leaves", net.signed(hot(index), "WorkProof", proof))
 
 
-def join_forged(rnd: Round, index: int, *, leaves: bool = True) -> CommitV2:
+def join_forged(
+    rnd: Round, index: int, *, leaves: bool = True, commit_expiry: int | None = None
+) -> CommitV2:
     """Accept, commit and (unless `leaves` is False) publish leaves for a member that did not
     train. Every step is checked: the member is a well behaved participant of the scenario."""
     response = accept(rnd, index)
     control(response.status_code == 200, response.text)
     commit = forged_commit(rnd, index)
-    response = post_commit(rnd, index, commit)
+    response = post_commit(rnd, index, commit, expiry=commit_expiry)
     control(response.status_code == 200, response.text)
     if leaves:
         response = publish_leaves(rnd, index, forged_leaves(rnd, index), commit)
@@ -621,6 +665,201 @@ def next_opening(rnd: Round, members: Sequence[int]) -> Any:
     )
 
 
+def lease_rounds(rnd: Round) -> int:
+    """The lease length of the run's audit policy, in beacon rounds."""
+    policy = AuditPolicyV2.model_validate_json(
+        rnd.store.objects.get(rnd.network.manifest.network.audit_policy_hash)
+    )
+    return int(policy.lease_rounds)
+
+
+def run_out_audit_windows(rnd: Round) -> None:
+    """Move the beacon past every audit window of the round: the first one, and the second one
+    that a job nobody served is given before its member leaves the round (ADR 0011 part 2). On a
+    base without the second window the first push settles everything and the second is skipped."""
+    rnd.network.push(rnd.absolute)
+    waiting = [row["absolute"] for row in rnd.lease_rows() if row["state"] == "queued"]
+    if waiting:
+        rnd.network.push(max(waiting))
+
+
+def rotation_request(rnd: Round, member: int, target: int, *, expires: int = 10_000) -> Any:
+    """The coldkey-signed rotation of `member` onto the hotkey `target`, in the shape of the
+    base: the new hotkey signs its consent first where the request has a field for it (RTA-01)."""
+    request = RotateRequest.model_fields
+    if "new_hot_sig" in request:
+        body = miner_admission.sign_rotation_consent(
+            hot(target),
+            run_id=rnd.run_id,
+            coldkey=cold(member).ss58,
+            hotkey=rnd.hotkey(member),
+            operation_id="df" * 32,
+            expires_beacon=expires,
+        )
+    else:
+        body = RotateRequest.model_validate(
+            {
+                "hotkey": rnd.hotkey(member),
+                "new_hotkey": hot(target).ss58,
+                "operation_id": "df" * 32,
+            }
+        )
+    return miner_admission.sign_rotation(cold(member), rnd.run_id, body, expires)
+
+
+def walk(rnd: Round, number: int) -> None:
+    """Push every beacon round up to `number`, one by one, as the real pusher does. A jump is not
+    a silence: a master that reads a gap in its beacon as its own pause blames nobody for it."""
+    for round_number in range(rnd.network.now + 1, number + 1):
+        rnd.network.push(round_number)
+
+
+@contextmanager
+def silent_round(root: Path) -> Iterator[Round]:
+    """Round 0 of five members: four committed and published their leaves, the fifth accepted its
+    assignment and went quiet. Four members are what an aggregation needs."""
+    with activated_network(root) as network:
+        rnd = open_round(network, 0, [0, 1, 2, 3, 4])
+        rnd.quiet = 4
+        for index in (0, 1, 2, 3):
+            join_forged(rnd, index)
+        control(accept(rnd, rnd.quiet).status_code == 200, "the quiet member accepts")
+        yield rnd
+
+
+@contextmanager
+def queued_round(root: Path) -> Iterator[Round]:
+    """Round 0 of four members who all committed and published, audits scheduled at d_audit:
+    four queued jobs, nobody has leased any."""
+    with activated_network(root) as network:
+        rnd = open_round(network, 0, [0, 1, 2, 3])
+        for index in rnd.members:
+            join_forged(rnd, index)
+        response = schedule(rnd)
+        control(response.status_code == 200, response.text)
+        yield rnd
+
+
+@contextmanager
+def audited_head(root: Path) -> Iterator[tuple[Round, int]]:
+    """Round 0 of four members; the one whose job is first in the queue trained for real and its
+    audit says MATCH, the other three committed forged leaves and their jobs wait. Returns the
+    round and the index of the audited member."""
+    with activated_network(root) as network:
+        rnd = open_round(network, 0, [0, 1, 2, 3])
+        head = rnd.queue_order()[0]
+        train(rnd, [head])
+        for index in rnd.members:
+            if index != head:
+                join_forged(rnd, index)
+        response = schedule(rnd)
+        control(response.status_code == 200, response.text)
+        audit_queue(rnd, 1)
+        yield rnd, head
+
+
+@contextmanager
+def audited_round(root: Path, size: int = 5) -> Iterator[Round]:
+    """Round 0 of `size` members who all trained for real and whose audits say MATCH, before its
+    aggregation. Four members are what an aggregation needs; a fifth lets one of them go."""
+    with activated_network(root) as network:
+        rnd = open_round(network, 0, range(size))
+        train(rnd, rnd.members)
+        response = schedule(rnd)
+        control(response.status_code == 200, response.text)
+        audit_queue(rnd, size)
+        yield rnd
+
+
+def admission_service(rnd: Round) -> Any:
+    """The master's admission service of the run: the hooks its audit side calls."""
+    return rnd.store._services(rnd.run_id)[1]
+
+
+def standing(rnd: Round, index: int) -> tuple[str, int, int, int]:
+    """(state, strikes, bond units still locked, units burned) of the admission of member `index`,
+    read from the public admission route and the owner's balances."""
+    net = rnd.network
+    answer = net.client.get(net.url + "/admission/" + rnd.hotkey(index))
+    control(answer.status_code == 200, answer.text)
+    record = answer.json()["record"]
+    balances = rnd.store._services(rnd.run_id)[0].balances(cold(index).ss58)
+    return (
+        str(record["state"]),
+        int(record["strikes"]),
+        balances.admission_locked,
+        balances.burned,
+    )
+
+
+def seize(rnd: Round, index: int, reason: str, evidence: bytes) -> int:
+    """What the audit side asks of the admission side when it has a fault to book: sanction the
+    admission of member `index` and burn its bond. Returns the units burned."""
+    admission = admission_service(rnd)
+    identity = admission.store.record(rnd.hotkey(index)).admission_id
+    burned: int = admission.seize_bond(
+        identity, reason=reason, evidence_hash=sha256_hex(evidence), now=rnd.network.now
+    )
+    return burned
+
+
+def lose_leaves(rnd: Round, index: int) -> None:
+    """The master's object store loses the leaf object member `index` published; the record of
+    the publication, which the master wrote when it answered 200, stays."""
+    key = rnd.record("leaves", rnd.identity(index))["object"]
+    path = rnd.store.objects._path(key)
+    control(path.is_file(), "the leaf object is in the store before it is lost")
+    path.unlink()
+
+
+def post_lease_quietly(rnd: Round, raw: bytes) -> Any:
+    """POST /worker/lease, answering 500 for a fault that escapes the route as a server does
+    (the test client of the fixtures re-raises it instead)."""
+    client = TestClient(rnd.network.client.app, raise_server_exceptions=False)
+    return client.post(rnd.network.url + "/worker/lease", content=raw)
+
+
+def contest(rnd: Round, index: int) -> Any:
+    """Member `index` funds a contest bond and contests its own audit verdict; returns the
+    response of POST /dispute unchecked."""
+    net = rnd.network
+    verdicts = [
+        (row["id"], json.loads(row["data"]))
+        for row in rnd.store._db.execute(
+            "SELECT id,data FROM records_v2 WHERE run_id=? AND kind='contest'", (rnd.run_id,)
+        )
+    ]
+    ours = [verdict for verdict, data in verdicts if data["miner"] == rnd.hotkey(index)]
+    control(len(ours) == 1, "the audit of the member left one verdict it can contest")
+    dispute_id = sha256_hex(canonicalize([rnd.run_id, ours[0], rnd.hotkey(index)]))
+    origin = rnd.store._db.execute(
+        "SELECT origin FROM escrow_units WHERE owner=? AND bucket='available' AND units>=100",
+        (cold(index).ss58,),
+    ).fetchone()[0]
+    lock = EscrowLock(
+        operation_id="ce" * 32,
+        owner=cold(index).ss58,
+        units=100,
+        origin_ids=[origin],
+        admission_id=None,
+        dispute_id=dispute_id,
+        kind="LOCK_CONTEST",
+    )
+    funded = rnd.post("/escrow/lock", net.signed(cold(index), "EscrowLock", lock))
+    control(funded.status_code == 200, funded.text)
+    body = DisputeV2(
+        hotkey=rnd.hotkey(index),
+        verdict_hash=ours[0],
+        action="contest",
+        bond_lock=lock.operation_id,
+    )
+    return rnd.post("/dispute", net.signed(hot(index), "DisputeV2", body))
+
+
+def disputes_opened(rnd: Round) -> int:
+    return int(rnd.store._db.execute("SELECT COUNT(*) FROM disputes_v2").fetchone()[0])
+
+
 def outage(rnd: Round, until: int) -> None:
     """The beacon pusher is down while the wall clock reaches the time of round `until`."""
     genesis = rnd.network.manifest.training.beacon.genesis_time
@@ -632,11 +871,14 @@ class Chain:
 
     Round 0 has six members: five train and one commits and goes quiet without publishing its
     leaves, whose job sorts last in the queue. The five audits complete; the quiet member's job
-    cannot be leased and is exhausted when the beacon reaches its horizon. Round 1 is opened on
-    four of the five survivors (the quiet member has no anchor to start from). The tests are
-    ordered by phase: a test of an earlier phase reads a state a later phase has consumed. An
-    aggregation attempt that a fix lets succeed (A2W-21) applies round 0 inside its own test, so
-    the controls and pins that follow it are re-derived when that marker is lifted.
+    cannot be leased, its commit is sealed to d_final as an honest miner seals it, so the job gets
+    no second window and its member leaves the round when the beacon reaches d_final. The audits
+    are leased as late as a lease can be, so that their verdicts expire at that same horizon: the
+    operator settles round 0 at the horizon, the way a round with a lost member is settled when it
+    is on time (a finalize after the verdicts expired is pinned by test_expiry.py, not here).
+    Round 1 is opened on four of the five survivors (the quiet member has no anchor to start from).
+    The tests are ordered by phase: a test of an earlier phase reads a state a later phase has
+    consumed.
     """
 
     def __init__(self, network: Any):
@@ -644,21 +886,23 @@ class Chain:
         self._r0: Round | None = None
         self._theta0: str | None = None
         self.tape0_inputs: list[str] = []
+        self._finalize0: Any = None
         self._r1: Round | None = None
         self._theta1: str | None = None
 
     @property
     def r0(self) -> Round:
-        """Round 0 at the horizon of its audit jobs: five audited, the quiet member exhausted."""
+        """Round 0 at the horizon of its audit jobs: five audited, the quiet member left out."""
         if self._r0 is None:
             rnd = open_round(self.network, 0, range(MINERS))
             rnd.quiet = rnd.queue_order()[-1]
-            join_forged(rnd, rnd.quiet, leaves=False)
+            join_forged(rnd, rnd.quiet, leaves=False, commit_expiry=rnd.opening.d_final)
             train(rnd, [i for i in rnd.members if i != rnd.quiet])
             response = schedule(rnd)
             control(response.status_code == 200, response.text)
+            self.network.push(rnd.absolute - lease_rounds(rnd))
             audit_queue(rnd, MINERS - 1)
-            self.network.push(rnd.absolute)
+            run_out_audit_windows(rnd)
             self._r0 = rnd
         return self._r0
 
@@ -677,10 +921,20 @@ class Chain:
             )
         return self.r0, self._theta0
 
+    def settled0(self) -> Any:
+        """The answer to the operator's Finalize of round 0 for the survivors, posted once at the
+        horizon (round 1 opens after it, and a later beacon would expire the audit verdicts)."""
+        if self._finalize0 is None:
+            rnd, theta = self.applied0()
+            self._finalize0 = self.network.client.post(
+                **finalize_request(rnd, self.survivors, theta)
+            )
+        return self._finalize0
+
     def applied1(self) -> tuple[Round, str]:
         """Round 1 (four survivors) opened, trained, audited and aggregated."""
         if self._theta1 is None:
-            self.applied0()
+            self.settled0()
             rnd = open_round(self.network, 1, self.survivors[:4])
             train(rnd, rnd.members)
             response = schedule(rnd)
