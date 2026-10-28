@@ -179,15 +179,6 @@ def test_a_refused_round_adds_no_weight_to_the_epoch_answer_of_a_settled_one(
 # --- T-FIN-24 (A2W-21, AD-07, CL-06): a member that lost eligibility does not freeze finalize ----
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="AD-07+A2W-21+LCK-18 [D-3 decision]: verified_inputs_v2 raises 403 'current admission "
-    "funding/identity no longer eligible' for a member whose work screen lapsed after the tape "
-    "was applied, so the Finalize of a round that was fully audited and aggregated answers 403 "
-    "for ever; whether the lapsed member is paid is undecided, that the round settles is not "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 D59]",
-)
 def test_a_member_whose_screen_lapsed_after_the_aggregation_does_not_freeze_the_finalize(
     stage: Stage,
 ) -> None:
@@ -197,17 +188,18 @@ def test_a_member_whose_screen_lapsed_after_the_aggregation_does_not_freeze_the_
     )
     X.control(applied == honest_hotkeys(stage), "the tape applied the four audited members")
     lapse_screen(stage, lapsed)
+    admission = stage.network.client.get(f"{stage.network.url}/admission/{lapsed}")
+    X.control(
+        admission.status_code == 200 and admission.json()["eligible"] is False,
+        "the work screen of the member lapsed",
+    )
     escrow = stage.store._services(stage.run_id)[0]
     issued = escrow.balances().issued
 
     response = stage.post_finalize(0, stage.signed_finalize(included=applied))
-    if response.status_code == 422:  # the master withholds the lapsed member: it names the rest
-        response = stage.post_finalize(
-            0, stage.signed_finalize(included=sorted(set(applied) - {lapsed}))
-        )
 
     assert (response.status_code, response.json().get("status")) == (200, "SETTLED"), response.text
-    assert set(hotkey for _, hotkey in credits(stage)) <= set(applied)
+    assert credits(stage) == Counter({(0, hotkey): 1 for hotkey in applied})
     assert escrow.balances().issued == issued + escrow.policy.round_reward_units
 
 
@@ -216,15 +208,6 @@ def test_a_member_whose_screen_lapsed_after_the_aggregation_does_not_freeze_the_
 INCLUDED_DIFFERS = "finalized included set differs from full accepted authority"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="FIN-26+D-FIN-10: finalize_v2 and open_round_v2 raise FinalityError, which the v2 "
-    "error handler does not register, so a refused finalize or opening is an unhandled 500 "
-    "without the reason; the 409 and its text ('round cannot settle', 'w+2 blocked until "
-    "settlement or exclusion plus rollback') are what an operator needs "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 AC-CLIFF]",
-)
 def test_a_refused_finalize_and_a_refused_opening_answer_409_with_their_reason(
     stage: Stage,
 ) -> None:
@@ -314,15 +297,6 @@ def repaired(stage: Stage, w: int) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="CRD-04+FIN-08+DIB-21 [D-2 decision]: a repaired round is model history and never "
-    "mints, and reward_finalize credits round w only when round w-1 has an escrow_finalized "
-    "row, so after a rollback of rounds 0 and 1 the Finalize of round 2 is refused 409 "
-    "FINALIZE_ORDER and no later round can ever be paid "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 R-D]",
-)
 def test_the_round_after_two_repaired_rounds_is_minted_and_the_repaired_ones_never_are(
     stage: Stage,
 ) -> None:

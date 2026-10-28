@@ -21,9 +21,11 @@ from hypertrain.aggregator.core import FinalityError
 from hypertrain.challenge.store import ChallengeError
 from hypertrain.ledger.escrow_v2 import EscrowError, EscrowReceipt, EscrowV2
 from hypertrain.protocol.envelope import ExpiredError, UnauthorizedSigner, body_digest
+from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 
+from . import support_exit_roster as X
 from .support_finality import ANOTHER, FINAL, Stage, build_stage, refusal
 
 # -- the staged service ---------------------------------------------------------------------------
@@ -213,34 +215,157 @@ def test_finalize_pays_the_four_audited_miners_and_nobody_excluded(stage: Stage)
     assert stage.record("finalize-result", "0")["status"] == "SETTLED"
 
 
+def admission_of(stage: Stage, key: Keypair) -> dict[str, Any]:
+    """The public admission route's answer for `key`: its record and whether it is eligible."""
+    answer = stage.network.client.get(f"{stage.network.url}/admission/{key.ss58}")
+    X.control(answer.status_code == 200, answer.text)
+    body: dict[str, Any] = answer.json()
+    return body
+
+
+def sanction(stage: Stage, key: Keypair, reason: str) -> int:
+    """Book `reason` against the admission of `key` through the hook the audit side and the
+    referee call (the units burned): the real seizure, not an edit of the admission row."""
+    admission = stage.store._services(stage.run_id)[1]
+    burned: int = admission.seize_bond(
+        admission.store.record(key.ss58).admission_id,
+        reason=reason,
+        evidence_hash=sha256_hex(f"finality-2|{reason}|{key.ss58}".encode()),
+        now=stage.network.now,
+    )
+    return burned
+
+
+SANCTIONS = [
+    pytest.param("NO_SHOW", id="the bond is burned"),
+    pytest.param("AUDIT_MISMATCH", id="the admission is suspended"),
+]
+
+
+@pytest.mark.parametrize("reason", SANCTIONS)
+def test_a_member_sanctioned_after_the_aggregation_is_paid_for_the_round_it_was_verified_in(
+    stage: Stage, reason: str
+) -> None:
+    """The applied tape is the commitment: a member that was verified and is suspended, or loses
+    its bond, between the aggregation and the finalize is paid for that round, because the
+    sanction acts afterwards (ADR 0011 part 8, decision 23). Only a convicted coldkey is not."""
+    member, cold = stage.honest[0], stage.fixtures.COLD[0].ss58
+    escrow = stage.store._services(stage.run_id)[0]
+    locked = escrow.balances(cold).admission_locked
+    X.control(
+        locked > 0 and admission_of(stage, member)["eligible"] is True,
+        "the member is funded and eligible when the tape is applied",
+    )
+    burned = sanction(stage, member, reason)
+    admission = admission_of(stage, member)
+    X.control(
+        burned > 0
+        and escrow.balances(cold).admission_locked == 0
+        and admission["eligible"] is False
+        and admission["record"]["state"] != "BANNED",
+        "the bond is burned and the member is no longer eligible, but not convicted",
+    )
+    X.control(
+        reason != "AUDIT_MISMATCH" or admission["record"]["state"] == "SUSPENDED",
+        "a confirmed audit mismatch suspends the admission",
+    )
+    issued = escrow.balances().issued
+
+    response = stage.post_finalize(0, stage.signed_finalize())
+
+    assert (response.status_code, response.json().get("status")) == (200, "SETTLED"), response.text
+    units = escrow.policy.round_reward_units
+    assert credits(stage) == Counter({(0, hotkey): 1 for hotkey in honest_hotkeys(stage)})
+    assert escrow.balances(cold).reward_pending == units // 4
+    assert escrow.balances().issued == issued + units
+    assert escrow.balances().conserved()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="FIN-18+D59: finalize pays every input of the applied tape, so the coldkey of a miner "
+    "convicted of training fraud between the aggregation and the finalize is paid for that round, "
+    "and so is every other admission it runs, instead of the Finalize listing only the "
+    "unconvicted inputs and the ledger refusing BANNED_WORK for the rest "
+    "[fix-lot: audit-integrity-2 ADR0011-P8 D59 decision 23]",
+)
 def test_a_miner_convicted_after_its_round_was_audited_is_never_credited_by_a_finalize(
     stage: Stage,
 ) -> None:
-    """The conviction (BANNED) is the one admission state no finalize may pay, whichever way the
-    master reads it: refused for the whole round (a live eligibility check) or settled without
-    the convicted miner (the applied tape paid as recorded, minus the banned). A suspended or
-    lapsed miner is deliberately not pinned: whether it is paid for a round it was verified in is
-    a decision of the audit-integrity line, not an invariant of this ledger."""
-    banned, cold = stage.honest[0], stage.fixtures.COLD[0].ss58
-    others = [hotkey for hotkey in honest_hotkeys(stage) if hotkey != banned.ss58]
+    """The ban is by coldkey: the convicted miner and every other admission of its coldkey are
+    unpaid (the others are not banned), and the unconvicted inputs share the whole budget."""
+    banned, sibling, *rest = stage.honest
+    owner, sibling_owner = stage.fixtures.COLD[0].ss58, stage.fixtures.COLD[1].ss58
+    # The sibling is run by the owner of the convicted miner: several admissions may share a
+    # coldkey once the first is ACTIVE, and no cheap route joins one on the staged network.
     with stage.store._tx():
         stage.store._db.execute(
-            "UPDATE admissions_v2 SET state='BANNED' WHERE hotkey=?", (banned.ss58,)
+            "UPDATE admissions_v2 SET coldkey=? WHERE hotkey=?", (owner, sibling.ss58)
         )
+    burned = sanction(stage, banned, "TRAINING_FRAUD")
+    states = {key.ss58: admission_of(stage, key)["record"]["state"] for key in stage.honest}
+    X.control(
+        burned > 0
+        and states
+        == {banned.ss58: "BANNED", sibling.ss58: "ACTIVE"} | {key.ss58: "ACTIVE" for key in rest},
+        "the miner is convicted and its sibling is not banned with it",
+    )
+    tape = sorted(item["roster"]["hotkey"] for item in stage.record("tape-inputs", "0")["inputs"])
+    X.control(tape == honest_hotkeys(stage), "the tape applied the four audited miners")
     escrow = stage.store._services(stage.run_id)[0]
+    issued, units = escrow.balances().issued, escrow.policy.round_reward_units
+    unconvicted = sorted(key.ss58 for key in rest)
 
-    for included in (honest_hotkeys(stage), others):
-        before = stage.digest()
-        try:
-            stage.finalize(included=included)
-        except ChallengeError as error:
-            assert error.status in (403, 422), error
-            assert stage.digest() == before, "a refused finalize left something behind"
+    # A Finalize that still lists the convicted miner or its sibling is refused, writing nothing.
+    before = stage.digest()
+    for listed in (tape, sorted([sibling.ss58, *unconvicted])):
+        stale = stage.post_finalize(0, stage.signed_finalize(included=listed))
+        detail = stale.json().get("detail")
+        assert (stale.status_code, detail) == (422, INCLUDED_DIFFERS), stale.text
+        assert stage.digest() == before
+    settled = stage.post_finalize(0, stage.signed_finalize(included=unconvicted))
 
-    # Nothing was minted, or the whole round went to the other three, once each.
-    settled = Counter({(0, hotkey): 1 for hotkey in others})
-    assert credits(stage) in (Counter(), settled)
-    assert escrow.balances(cold).reward_pending == 0
+    assert (settled.status_code, settled.json().get("status")) == (200, "SETTLED"), settled.text
+    assert credits(stage) == Counter({(0, hotkey): 1 for hotkey in unconvicted})
+    assert dict(stage.rows("SELECT hotkey, issued FROM escrow_origins WHERE reward_round=0")) == {
+        hotkey: units // 2 for hotkey in unconvicted
+    }
+    for coldkey in (owner, sibling_owner):
+        assert escrow.balances(coldkey).reward_pending == 0
+    assert escrow.balances().issued == issued + units
+    assert escrow.balances().conserved()
+    assert admission_of(stage, banned)["record"]["state"] == "BANNED"
+    assert admission_of(stage, sibling)["record"]["state"] == "ACTIVE"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="FIN-18+D59: when every input of the applied tape belongs to a convicted coldkey the "
+    "Finalize that lists nobody is refused 422 and the one that lists them pays them, so the round "
+    "can neither settle without a reward nor be passed over by the next one "
+    "[fix-lot: audit-integrity-2 ADR0011-P8 D59 decision 23 D64-1]",
+)
+def test_a_round_whose_inputs_are_all_convicted_settles_without_a_reward(stage: Stage) -> None:
+    for key in stage.honest:
+        sanction(stage, key, "TRAINING_FRAUD")
+    X.control(
+        {admission_of(stage, key)["record"]["state"] for key in stage.honest} == {"BANNED"},
+        "every input of the applied tape is convicted",
+    )
+    escrow = stage.store._services(stage.run_id)[0]
+    issued = escrow.balances().issued
+
+    closed = stage.post_finalize(0, stage.signed_finalize(included=[]))
+
+    assert (closed.status_code, closed.json().get("status")) == (200, "CLOSED_UNPAID"), closed.text
+    assert stage.record("finality", "0")["disposition"] == "SETTLED"
+    assert credits(stage) == Counter()
+    assert stage.rows("SELECT COUNT(*) FROM escrow_finalized") == [(0,)]
+    assert escrow.balances().issued == issued
+    again = stage.post_finalize(0, stage.signed_finalize(included=[]))
+    assert (again.status_code, again.json()) == (200, closed.json())
 
 
 # -- FIN-04: finalize is one atomic unit ----------------------------------------------------------
