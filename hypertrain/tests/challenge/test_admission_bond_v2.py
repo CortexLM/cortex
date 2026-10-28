@@ -849,6 +849,7 @@ def test_a_verdict_that_does_not_convict_the_miner_leaves_the_bond_alone(
     world: World, loser: str
 ) -> None:
     world.bond()
+    reward(world, vested=False)
     if loser == "auditor":
         world.convict(loser=T.fixtures.AUDITOR.ss58)
         dispute_id = world.dispute_id
@@ -856,6 +857,8 @@ def test_a_verdict_that_does_not_convict_the_miner_leaves_the_bond_alone(
         dispute_id = "ab" * 32  # no pending reference was ever bound to it
     assert world.a.settle_fraud(dispute_id, now=3) is False
     assert balances(world).admission_locked == 1000
+    # the unvested reward is not burned either: only a verdict against the miner does that
+    assert held(world, "aa" * 32) == {"reward_pending": 500}
     # a fault of the auditor is no strike either
     assert world.a.store.by_id(world.admission).strikes == 0
     assert world.a.store.by_id(world.admission).state != "BANNED"

@@ -46,6 +46,7 @@ NO_SHOW = (
     BOND_TESTS
     + "test_seize_bond_puts_a_first_no_show_on_probation_with_a_strike_and_burns_the_bond"
 )
+AUDITOR_LOSES = BOND_TESTS + "test_a_verdict_that_does_not_convict_the_miner_leaves_the_bond_alone"
 REPOSTED = (
     BOND_TESTS + "test_a_verdict_posted_again_burns_the_origin_the_coldkey_gained_unvested_since"
 )
@@ -74,6 +75,20 @@ EMPTIED_ROW = (
     "                \"AND bucket='reward_pending'\",\n"
     "                (origin, owner),\n"
     "            )\n"
+)
+NOT_A_CONVICTION = (
+    '            if s.unresolved or s.outcome != "FRAUD" or s.admission_id is None:\n'
+    "                return False\n"
+)
+BURNS_FOR_ANY_VERDICT = (
+    '            if s.unresolved or s.outcome != "FRAUD" or s.admission_id is None:\n'
+    "                if not s.unresolved:\n"
+    '                    coldkey = self.store.by_id(pending["admission_id"]).coldkey\n'
+    "                    for origin in self.escrow.pending_origins(coldkey):\n"
+    "                        self.escrow.burn_pending(\n"
+    "                            origin, owner=coldkey, authority=self.coord.ss58\n"
+    "                        )\n"
+    "                return False\n"
 )
 PENDING_ORIGINS = '                "AND units>0 ORDER BY origin",\n'
 HOTKEYLESS_SKIPPED = (
@@ -199,6 +214,15 @@ MUTANTS = [
         ),
         "tests": [REPOSTED],
         "why": "a resolution posted again leaves the reward the coldkey gained since the ban.",
+    },
+    {
+        "id": "burn-pending-on-any-verdict",
+        "invariants": ["DIB-07", "DIB-17"],
+        "path": ADMISSION,
+        "old": NOT_A_CONVICTION,
+        "new": BURNS_FOR_ANY_VERDICT,
+        "tests": [AUDITOR_LOSES],
+        "why": "a verdict that does not convict the miner burns its coldkey's unvested rewards.",
     },
     {
         "id": "burn-pending-skips-hotkeyless-origins",
