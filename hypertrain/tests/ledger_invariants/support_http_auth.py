@@ -94,6 +94,7 @@ CHALLENGE_ROUTES: dict[Key, Auth] = {
     ("POST", ADMIN_V2 + "/rounds/{w}/aggregate"): Auth(OP),
     ("POST", ADMIN_V2 + "/rounds/{w}/finalize"): Auth(OP),
     ("POST", ADMIN_V2 + "/join/{admission_id}/reference"): Auth(OP),
+    ("POST", ADMIN_V2 + "/join/{admission_id}/reseed"): Auth(OP),
     ("POST", ADMIN_V2 + "/join/{admission_id}/finalize"): Auth(OP),
     ("POST", ADMIN_V2 + "/join/{admission_id}/shadow-reservation"): Auth(OP),
     ("POST", ADMIN_V2 + "/join/{admission_id}/shadow-reward"): Auth(OP),
