@@ -8,11 +8,12 @@ import sys
 import urllib.response
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from hypertrain.gpu_ops import budget, provider
+from hypertrain.gpu_ops import budget, launcher, provider
 from hypertrain.gpu_ops.journal import Journal
 from hypertrain.gpu_ops.provider import KeyFileError, Provider, RefusedWrite, read_api_key, redact
 
@@ -402,3 +403,45 @@ def test_journal_torn_tail_quarantined(tmp_path: Path) -> None:
     j2.append("c")
     assert [r["kind"] for r in j2.records()] == ["a", "journal_repaired", "c"]
     assert list(tmp_path.glob("journal.torn-*.bin"))
+
+
+def test_phase_a_job_starts_under_the_pin_of_its_worker_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The remote worker refuses any environment but its manifest's: the launcher composes it."""
+    started: list[list[str]] = []
+
+    class Shell:
+        def run(self, command: str, tag: str, logs: Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(command, 0, stdout="EXIT=0", stderr="")
+
+    def record(kind: str, **fields: Any) -> None:
+        if "argv" in fields:
+            started.append(fields["argv"])
+
+    host = SimpleNamespace(
+        cfg={"profile": "tiny", "image": "repo@sha256:" + "ab" * 32, "device": "cuda"},
+        j=SimpleNamespace(
+            last=lambda *a, **k: None,
+            append=lambda kind, **fields: (
+                started.append(fields["argv"]) if "argv" in fields else None
+            ),
+        ),
+        deadline=lambda: 2**40,
+        cleanup_started=lambda: False,
+        remote_root=lambda role: str(tmp_path),
+        ssh=lambda role: Shell(),
+        dir=tmp_path,
+    )
+    monkeypatch.setattr(launcher, "shard_path", lambda cfg: tmp_path / "shard")
+    monkeypatch.setattr(launcher, "fsha", lambda path: "00" * 32)
+    launcher.Orchestrator.run_job(host, "h0", "run1", False)
+    (argv,) = started
+    pin = launcher.worker_pin("cuda")
+    assert (pin.cpu, pin.gpu) == ("avx2", "sm_120")
+    head = argv[1 : argv.index("CUBLAS_WORKSPACE_CONFIG=:4096:8")]
+    assert head == [
+        *(word for name in pin.absent for word in ("-u", name)),
+        *(f"{name}={value}" for name, value in pin.present),
+    ]
+    assert launcher.worker_pin("cpu").gpu == "none"

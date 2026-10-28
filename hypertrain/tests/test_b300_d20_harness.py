@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import os
 import shlex
 import sys
 from collections.abc import Callable, Iterator
@@ -19,6 +20,8 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
+
+from env_pin_fixtures import HOSTILE, ambient
 
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS = ROOT / "scripts/b300/d20/gpu_run_v2.py"
@@ -179,15 +182,20 @@ def test_load_service_stops_instead_of_returning_when_the_device_class_is_refuse
 
 
 @pytest.mark.parametrize(
-    ("model", "arch"),
-    [("dense", "decoder"), ("kimi", "kimi-k3-pro-tiny")],
-    ids=["dense", "kimi"],
+    ("model", "arch", "dtype"),
+    [
+        ("dense", "decoder", "bf16"),
+        ("kimi", "kimi-k3-pro-tiny", "bf16"),
+        ("kimi", "kimi-k3-pro-tiny", "fp32"),
+    ],
+    ids=["dense", "kimi", "kimi-fp32"],
 )
 def test_load_service_returns_the_service_with_its_setup_pinned_to_the_b300(
-    harness: ModuleType, monkeypatch: pytest.MonkeyPatch, model: str, arch: str
+    harness: ModuleType, monkeypatch: pytest.MonkeyPatch, model: str, arch: str, dtype: str
 ) -> None:
     svc, patched = service_on_the_escrow_fixture(harness, monkeypatch)
     monkeypatch.setattr(harness, "MODEL", model)
+    monkeypatch.setattr(harness, "KIMI_DTYPE", dtype)
     fake_cuda(monkeypatch, [(10, 3, 148)])
 
     assert harness._load_service() is svc
@@ -198,6 +206,101 @@ def test_load_service_returns_the_service_with_its_setup_pinned_to_the_b300(
     assert reference.image_digest == "sha256:" + "ab" * 32
     assert (reference.driver_allowlist, reference.sm_count) == (["595.91.07"], 148)
     assert manifest.training.model.arch == arch
+    # The environment pin follows the device the manifest names, whichever model it carries.
+    pinned = reference.env.pinned
+    assert (pinned.cpu, pinned.gpu, pinned.present["HT_ATTN_BACKEND"]) == ("avx2", "sm_103", "math")
+    if model == "kimi":
+        assert manifest.training.model.compute_dtype == dtype
+
+
+@pytest.mark.parametrize(
+    ("sm_count", "capability", "gpu"), [(148, (10, 3), "sm_103"), (170, (12, 0), "sm_120")]
+)
+def test_the_setup_is_pinned_to_the_gpu_class_of_the_sm_count(
+    harness: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    sm_count: int,
+    capability: tuple[int, int],
+    gpu: str,
+) -> None:
+    svc, _ = service_on_the_escrow_fixture(harness, monkeypatch)
+    monkeypatch.setattr(harness, "SM_COUNT", sm_count)
+    fake_cuda(monkeypatch, [(*capability, sm_count)])
+
+    harness._load_service()
+
+    reference = svc.fixture.setup().manifest.training.reference_spec
+    assert (reference.sm_count, reference.env.pinned.gpu) == (sm_count, gpu)
+
+
+@pytest.mark.parametrize(
+    ("sm_count", "attention", "gpu"),
+    [
+        (148, "math", "sm_103"),
+        (148, "sdpa-flash", "sm_103"),
+        (170, "math", "sm_120"),
+        (170, "sdpa-flash", "sm_120"),
+    ],
+)
+def test_the_reference_pin_is_the_class_of_the_sm_count_with_the_attention_knob(
+    harness: ModuleType, monkeypatch: pytest.MonkeyPatch, sm_count: int, attention: str, gpu: str
+) -> None:
+    monkeypatch.setattr(harness, "SM_COUNT", sm_count)
+    monkeypatch.setattr(harness, "ATTENTION", attention)
+
+    pin = harness.reference_pin()
+
+    assert (pin.cpu, pin.gpu, dict(pin.present)["HT_ATTN_BACKEND"]) == ("avx2", gpu, attention)
+
+
+@pytest.mark.parametrize(
+    ("sm_count", "attention", "message"),
+    [
+        (132, "math", r"HT_D20_SM_COUNT=132: .* \(148: sm_103, 170: sm_120\)"),
+        (0, "math", "HT_D20_SM_COUNT=0"),
+        (148, "flash-attn", "HT_D20_ATTN_BACKEND=flash-attn: .*sm_103"),
+    ],
+    ids=["unknown_sm_count", "zero_sm_count", "unmeasured_backend"],
+)
+def test_main_refuses_a_pin_no_gpu_class_supports_before_it_runs_anything(
+    harness: ModuleType,
+    entry_points: list[tuple[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+    sm_count: int,
+    attention: str,
+    message: str,
+) -> None:
+    monkeypatch.setattr(harness, "SM_COUNT", sm_count)
+    monkeypatch.setattr(harness, "ATTENTION", attention)
+    monkeypatch.setattr(sys, "argv", ["gpu_run_v2.py", "smoke"])
+
+    with pytest.raises(SystemExit, match=message):
+        harness.main()
+
+    assert entry_points == []
+
+
+def test_main_makes_this_process_honor_the_pin_before_it_runs_anything(
+    harness: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # job-kimi trains in this process, and a trainer refuses one that does not honor the pin.
+    from hypertrain.protocol.env_pins import EnvPin, class_pin, divergence
+
+    ambient(monkeypatch, **HOSTILE)
+    monkeypatch.setenv("HYPERTRAIN_MINER_DEVICE", "cuda")
+    seen: dict[str, str] = {}
+
+    def run() -> int:
+        seen.update(os.environ)
+        return 0
+
+    monkeypatch.setattr(harness.smoke, "main", run)
+    monkeypatch.setattr(sys, "argv", ["gpu_run_v2.py", "smoke"])
+
+    assert harness.main() == 0
+
+    assert divergence(seen, EnvPin.from_body(class_pin("avx2", "sm_103"))) == {}
+    assert "HT_FP8" not in seen and seen["HT_ATTN_BACKEND"] == "math"
 
 
 @pytest.fixture

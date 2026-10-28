@@ -20,6 +20,7 @@ from hypertrain.aggregator.core import (
 from hypertrain.data.store import LocalFSStore
 from hypertrain.protocol import envelope as envelope_v1
 from hypertrain.protocol import envelope_v2, relay_envelope
+from hypertrain.protocol.env_pins import class_pin
 from hypertrain.protocol.envelope import (
     ExpiredError,
     MalformedEnvelope,
@@ -133,7 +134,7 @@ def example_admission_policy(**extra: JsonValue) -> AdmissionPolicyV2:
 
 
 EXAMPLE_ADMISSION_DIGEST = "c3fd6d4d47c406fa6add423091f2ae22b38bd9ed8ebe92df472f589672b3e3e3"
-EXAMPLE_ADMISSION_RUN_ID = "4efbc85d9f5014d7f62a9dca644cc0bde7c98bb733bae9f2e5a456878cc43f97"
+EXAMPLE_ADMISSION_RUN_ID = "c9dbd3322a103bc989b61f1551050babc45498a83631cd16f6abc3868f0b5a9f"
 
 
 def run_id_of(policy: AdmissionPolicyV2) -> str:
@@ -1161,16 +1162,23 @@ def test_v1_when_opaque_published_baseline_is_replayed(tmp_path: Path) -> None:
         envelope_bytes = bytes.fromhex(message["envelope_hex"])
         body, envelope = json.loads(body_bytes), json.loads(envelope_bytes)
         # When / Then: parse the stored signature, compare the entire body/preimage/envelope.
-        model = envelope_v1.Intake(message["run_id"]).accept(envelope, 50)
-        assert canonicalize(model.model_dump(mode="json"), allow_float=False) == body_bytes
+        if message["type"] == "RunManifest":
+            # The published manifest has no environment pin: signed bytes that are now refused.
+            with pytest.raises(envelope_v1.MalformedEnvelope):
+                envelope_v1.Intake(message["run_id"]).accept(envelope, 50)
+        else:
+            model = envelope_v1.Intake(message["run_id"]).accept(envelope, 50)
+            assert canonicalize(model.model_dump(mode="json"), allow_float=False) == body_bytes
         assert envelope_v1.signing_message(
             message["type"], body, message["exp_drand"], message["run_id"]
         ) == bytes.fromhex(message["preimage_hex"])
         assert canonicalize(envelope, allow_float=False) == envelope_bytes
         assert envelope_v1.verify_envelope(envelope)
         assert not envelope_v1.verify_envelope({**envelope, "sig": "0" * 128})
-    assert canonicalize(example_manifest().body(), allow_float=False) == bytes.fromhex(
-        fixture["messages"][0]["body_hex"]
+    published = json.loads(bytes.fromhex(fixture["messages"][0]["body_hex"]))
+    published["reference_spec"]["env"]["pinned"] = class_pin("avx2", "none")
+    assert canonicalize(example_manifest().body(), allow_float=False) == canonicalize(
+        published, allow_float=False
     )
     leaf_bytes = bytes.fromhex(fixture["leaf"]["body_hex"])
     leaf = LeafPreimage.model_validate_json(leaf_bytes)

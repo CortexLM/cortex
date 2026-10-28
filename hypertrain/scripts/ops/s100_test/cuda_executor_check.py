@@ -8,8 +8,8 @@ Per host it opens the real ssh transport (the pinned host key, the key file by p
 line: reachable or why not, the GPUs (uuid, name, driver, capability, MiB used), the GPUs a
 compute app holds, whether the image is present, and the machine identity the executor would
 record. Nothing secret is read or printed. Exit 0 only if every host answered with at least one
-GPU. The driver and capability it prints are what the TEST manifest's driver_allowlist and
-sm_count must match (B300: 595.91.07, 10.3, 148 SMs).
+GPU. The driver and capability it prints are what the TEST manifest's driver_allowlist, sm_count
+and pinned gpu class must match (B300: 595.91.07, 10.3 = sm_103, 148 SMs).
 """
 
 from __future__ import annotations

@@ -27,7 +27,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, JsonValue, StrictInt
+from pydantic import BaseModel, ConfigDict, JsonValue, StrictInt, ValidationError
 
 if TYPE_CHECKING:
     from experiments.gpu_network_v2.orchestrate import NetworkRuntime
@@ -288,6 +288,28 @@ class ChallengeError(Exception):
         super().__init__(detail)
         self.status = status
         self.detail = detail
+
+
+class RunRetired(ChallengeError):
+    """The stored manifest is one the current model refuses: the run answers 409 and stays idle."""
+
+
+def _unprocessable(error: EnvelopeError) -> ChallengeError | None:
+    """A manifest body the model refuses is unprocessable (422), and says where."""
+    cause = error.__cause__
+    if not isinstance(cause, ValidationError):
+        return None
+    first = cause.errors()[0]
+    where = ".".join(str(p) for p in first.get("loc", ()))
+    return ChallengeError(422, f"{where}: {first.get('msg', 'invalid')}")
+
+
+def _retired(error: ValidationError) -> RunRetired:
+    """A stored run whose manifest the model now refuses (ADR 0011 part 3: the pin is required)."""
+    where = sorted({".".join(map(str, e["loc"])) for e in error.errors()})
+    return RunRetired(
+        409, "RUN_MANIFEST_RETIRED: the stored manifest is refused at " + ", ".join(where)
+    )
 
 
 _ENVELOPE_STATUS: list[tuple[type[EnvelopeError], int]] = [
@@ -641,7 +663,10 @@ class ChallengeStore:
             raise ChallengeError(404, "unknown run")
         if json.loads(row["manifest"]).get("manifest_version") == 2:
             raise ChallengeError(409, "route and stored contract version differ")
-        return row, RunManifest.model_validate_json(row["manifest"])
+        try:
+            return row, RunManifest.model_validate_json(row["manifest"])
+        except ValidationError as error:
+            raise _retired(error) from error
 
     def _round(self, db: sqlite3.Connection, run_id: str, w: int) -> tuple[sqlite3.Row, RoundOpen]:
         row = db.execute("SELECT * FROM rounds WHERE run_id=? AND w=?", (run_id, w)).fetchone()
@@ -820,6 +845,8 @@ class ChallengeStore:
             try:
                 manifest = intake.accept(env, self._now(db))
             except EnvelopeError as error:
+                if (unprocessable := _unprocessable(error)) is not None:
+                    raise unprocessable from None
                 status = next(s for cls, s in _ENVELOPE_STATUS if isinstance(error, cls))
                 raise ChallengeError(status, str(error)) from None
             assert isinstance(manifest, RunManifest)
@@ -1107,7 +1134,10 @@ class ChallengeStore:
             ).fetchone()
             if sig is None:
                 continue
-            self._select(db, row, body, bytes.fromhex(sig["signature"]))
+            try:
+                self._select(db, row, body, bytes.fromhex(sig["signature"]))
+            except RunRetired:
+                continue  # its draw stays pending; it must not stop the beacon of the other runs
 
     def _select(
         self, db: sqlite3.Connection, row: sqlite3.Row, body: RoundOpen, sig: bytes
@@ -1521,6 +1551,10 @@ class ChallengeStore:
         return job
 
     def _replayable(self, db: sqlite3.Connection, job: sqlite3.Row) -> bool:
+        try:
+            self._run(db, job["run_id"])
+        except RunRetired:
+            return False  # its jobs wait; they must not starve the auditors of the other runs
         round_row, _ = self._round(db, job["run_id"], job["w"])
         miner = self._miner(db, job["run_id"], job["w"], job["target"])
         return round_row["theta_start"] is not None and miner["preimages"] is not None
@@ -2209,7 +2243,10 @@ class ChallengeStore:
         data = envelope_v2.load_json(row[0])
         if not isinstance(data, dict) or data.get("manifest_version") != 2:
             raise ChallengeError(409, "route and stored contract version differ")
-        return RunManifestV2.model_validate(data)
+        try:
+            return RunManifestV2.model_validate(data)
+        except ValidationError as error:
+            raise _retired(error) from error
 
     def _record_v2(self, run_id: str, kind: str, identity: str) -> dict[str, Any]:
         row = self._db.execute(
@@ -2313,7 +2350,12 @@ class ChallengeStore:
     def _create_run_v2(self, raw: bytes) -> dict[str, JsonValue]:
         if self.owner_hotkey is None:
             raise ChallengeError(503, "owner hotkey is not configured")
-        env = envelope_v2.parse_envelope(raw)
+        try:
+            env = envelope_v2.parse_envelope(raw)
+        except EnvelopeError as error:
+            if (unprocessable := _unprocessable(error)) is not None:
+                raise unprocessable from None
+            raise
         if env.type != "RunManifestV2":
             raise ChallengeError(400, "expected RunManifestV2")
         hosted = False
@@ -4569,11 +4611,10 @@ class ChallengeStore:
 
         with self._lock:
             pin = self._run_v2(run_id).training.reference_spec.env.pin()
-        if pin is not None:  # a child process of up to two minutes: never inside the transaction
-            try:
-                require_honorable(pin)
-            except EnvPinUnhonorable as error:
-                raise ChallengeError(409, f"SERVICE_PROFILE_ENV_PIN: {error}") from error
+        try:  # a child process of up to two minutes: never inside the transaction
+            require_honorable(pin, "cpu")
+        except EnvPinUnhonorable as error:
+            raise ChallengeError(409, f"SERVICE_PROFILE_ENV_PIN: {error}") from error
         with self._tx():
             try:
                 profile = _ServiceCapacityV1.model_validate(

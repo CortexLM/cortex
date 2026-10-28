@@ -103,7 +103,24 @@
       "env": {
         "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
         "CUDA_DISABLE_PTX_JIT": "1",
-        "cpu_threads": 1
+        "cpu_threads": 1,
+        "pinned": {
+          "absent": [
+            "HT_COMPILE",
+            "HT_FP8",
+            "HT_MOE_GROUPED",
+            "OMP_THREAD_LIMIT"
+          ],
+          "cpu": "avx2",
+          "gpu": "none",
+          "present": {
+            "ATEN_CPU_CAPABILITY": "avx2",
+            "HT_ATTN_BACKEND": "math",
+            "MKL_CBWR": "AVX2",
+            "OMP_DYNAMIC": "FALSE",
+            "ONEDNN_MAX_CPU_ISA": "AVX2"
+          }
+        }
       },
       "image_digest": "sha256:a49fbc36d67c6a71b8e04b43ccfb3dee36863aa17110bcac5507e30af71b372a",
       "layout": {
@@ -160,5 +177,5 @@
     "verify.forgive_per_epoch=1": "ultrabrain section 4 (verif SYNTH section 6)",
     "verify.q_base=0.1": "ultrabrain section 3a default q"
   },
-  "run_id": "ad8beb30084a2e53f817c45f1cbfdf1491162575f10f2c3d190645081b2ba2ff"
+  "run_id": "aa39197d5816cd041826d1d967215901b0fe74ccf14d238f319892095aec8abd"
 }

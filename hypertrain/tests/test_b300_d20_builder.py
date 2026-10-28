@@ -2,12 +2,15 @@
 
 The builder runs its Python stages as `uv run --no-sync python -I ...`. A uv shim on PATH runs them
 with this venv's python (no uv, no network) and can fail on the Nth call, so a failure after the
-first stage is injected without touching the builder. HT_D20_GEOMETRY=tiny-cpu keeps a full build to
-a few seconds; the relay key is a throwaway public address made here.
+first stage is injected without touching the builder; it also keeps the training body that the
+manifest stage is given. HT_D20_GEOMETRY=tiny-cpu keeps a full build to a few seconds; the relay key
+is a throwaway public address made here. The dense-1b geometry is built only up to its first stage:
+its manifest stage would initialise 889M parameters.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import signal
@@ -17,9 +20,11 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from hypertrain.protocol.env_pins import EnvPin
 from hypertrain.protocol.keys import Keypair
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +38,12 @@ n=$(($(cat "$state/uv.calls" 2>/dev/null || echo 0) + 1)); echo "$n" >"$state/uv
 if [ "$1 $2 $3" != "run --no-sync python" ]; then
   echo "uv $*" >>"$state/tripwire"; echo "unexpected uv call: $*" >&2; exit 125
 fi
+prev=
+for arg in "$@"; do
+  # A failed build removes its inputs: keep the training body of the manifest stage to read.
+  if [ "$prev" = --training ]; then cp -- "$arg" "$state/training.json"; fi
+  prev=$arg
+done
 if [ "$n" = "${FAKE_UV_FAIL_ON:-0}" ]; then echo "injected uv failure" >&2; exit 9; fi
 if [ "$n" = "${FAKE_UV_HANG_ON:-0}" ]; then echo $$ >"$state/uv.pid"; exec sleep 60; fi
 shift 3
@@ -255,6 +266,89 @@ def test_a_good_build_keeps_private_seeds_and_the_outputs_and_prints_no_seed(hos
         value = seed.read_text()
         assert value not in run.stdout + run.stderr
         assert not any(value.encode() in content for content in written)
+
+
+def stage_one_training(
+    host: dict[str, str], out: Path, sm_count: str, env: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """The training body the first stage of a dense-1b build hands to the manifest stage."""
+    run = build(
+        host,
+        out,
+        driver="595.91.07",
+        sm_count=sm_count,
+        env={"HT_D20_GEOMETRY": "dense-1b", "FAKE_UV_FAIL_ON": "2", **(env or {})},
+    )
+    assert uv_calls(host) == 2 and run.returncode == 9, run.stderr
+    body = json.loads((Path(host["FAKE_STATE"]) / "training.json").read_bytes())
+    assert isinstance(body, dict)
+    return body
+
+
+@pytest.mark.parametrize(
+    ("sm_count", "attention", "gpu"),
+    [
+        ("148", None, "sm_103"),
+        ("170", None, "sm_120"),
+        ("148", "sdpa-flash", "sm_103"),
+    ],
+    ids=["sm_103", "sm_120", "sm_103_flash"],
+)
+def test_a_gpu_manifest_pins_the_class_measured_on_its_sm_count(
+    host, tmp_path, sm_count, attention, gpu
+):
+    env = {} if attention is None else {"HT_D20_ATTN_BACKEND": attention}
+    spec = stage_one_training(host, tmp_path / "o", sm_count, env)["reference_spec"]
+
+    pin = EnvPin.from_body(spec["env"]["pinned"])  # a valid pin: exactly the table's rows
+    assert spec["sm_count"] == int(sm_count)
+    assert (pin.cpu, pin.gpu) == ("avx2", gpu)
+    assert dict(pin.present)["HT_ATTN_BACKEND"] == (attention or "math")
+
+
+@pytest.mark.parametrize(
+    ("env", "sm_count", "named"),
+    [
+        ({"HT_D20_GEOMETRY": "dense-1b"}, "132", "SM_COUNT 132: no GPU class is measured on it"),
+        ({"HT_D20_GEOMETRY": "dense-1b"}, "0", "SM_COUNT 0: no GPU class is measured on it"),
+        ({"HT_D20_ATTN_BACKEND": "flash-attn"}, "148", "HT_D20_ATTN_BACKEND=flash-attn"),
+        # A CPU run states "no GPU": the table has no flash backend for it.
+        ({"HT_D20_ATTN_BACKEND": "sdpa-flash"}, "170", "HT_D20_ATTN_BACKEND=sdpa-flash"),
+    ],
+    ids=["unknown_sm_count", "zero_sm_count", "unmeasured_backend", "cpu_run_with_flash"],
+)
+def test_a_pin_no_gpu_class_supports_stops_the_first_stage_and_leaves_nothing(
+    host, tmp_path, env, sm_count, named
+):
+    out = tmp_path / "campaign" / "o"
+
+    run = build(host, out, sm_count=sm_count, env=env)
+
+    assert run.returncode == 1 and named in run.stderr
+    assert "removed what this run created" in run.stderr
+    assert uv_calls(host) == 1 and not (tmp_path / "campaign").exists()
+
+
+def test_a_cpu_build_pins_gpu_none_and_the_dry_run_reports_the_pin(host, tmp_path):
+    out = tmp_path / "out"
+
+    run = build(host, out)  # tiny-cpu, with the SM count of the RTX 5090 carried unmeasured
+
+    assert run.returncode == 0, run.stderr
+    pinned = json.loads((out / "inputs/training.json").read_bytes())["reference_spec"]["env"][
+        "pinned"
+    ]
+    assert (pinned["cpu"], pinned["gpu"]) == ("avx2", "none")
+    report = json.loads(run.stdout[run.stdout.rindex("\n{\n") + 1 :])
+    assert report["pin"] == {"cpu": "avx2", "gpu": "none", "attention": "math"}
+    checks = report["checks"]
+    assert [
+        checks[k] for k in ("pin_cpu_class_avx2", "pin_gpu_class_none", "pin_attention_backend")
+    ] == [
+        True,
+        True,
+        True,
+    ]
 
 
 def fake_output(out: Path, layout: str = "full") -> list[str]:

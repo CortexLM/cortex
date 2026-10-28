@@ -6,11 +6,13 @@ reductions stay blocked (forbid_reductions), every collective is all_gather / al
 --reduction maps to the S6 paths: zero1 = bucketed reduce-scatter + ZeRO-1 optimizer shards,
 zero2 = + gradient shards, zero3 = + parameter shards. Step time is the max over ranks.
 Usage: torchrun --standalone --nproc-per-node N scripts/run_mfu_dist.py --profile mfu-dense-1b-dp8 \
-       --device cuda --reduction zero2 --act-ckpt [--compile] [--trace DIR] [--nccl-pcie] \\
+       --device cuda --reduction zero2 --act-ckpt [--trace DIR] [--nccl-pcie] \\
        --out OUT.json
 --trace profiles 3 steps after warmup of the first round (never the replay) into DIR/rank{r}.json
 plus DIR/summary.json (per-rank CUDA/CPU time buckets, step times, memory).
 --nccl-pcie setdefaults PCIe-only NCCL knobs; collectives are copies, so numerics are unaffected.
+Each rank pins its environment as run_mfu.py does (honor_pin): --compile (HT_COMPILE=1) is refused,
+because no environment class holds it.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from run_mfu import PROFILES, manifest_body, summarize  # isort: skip
+from run_mfu import PROFILES, honor_pin, manifest_body, summarize  # isort: skip
 
 from hypertrain.trainer.attention import chosen_paths, select_backend
 from hypertrain.trainer.island import DistComm, check_launch, island_from_manifest, train_island
@@ -205,7 +207,9 @@ def main() -> int:
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--measured-peak", type=float)
     ap.add_argument("--act-ckpt", action="store_true", help="sets HT_ACT_CKPT=1")
-    ap.add_argument("--compile", action="store_true", help="sets HT_COMPILE=1")
+    ap.add_argument(
+        "--compile", action="store_true", help="sets HT_COMPILE=1, which the run's pin refuses"
+    )
     ap.add_argument("--trace", type=Path, help="profile 3 steps of round 1 into this dir")
     ap.add_argument("--nccl-pcie", action="store_true", help="setdefault PCIe-only NCCL knobs")
     ap.add_argument("--micro-batch", type=int, help="override the profile's per-rank micro_batch")
@@ -230,9 +234,10 @@ def main() -> int:
         device = torch.device("cuda", local)
     else:
         device = torch.device("cpu")
+    pin = honor_pin(device)  # restarts this rank under the pin, so before any process group
     dist.init_process_group("nccl" if a.device == "cuda" else "gloo")
     try:
-        body = manifest_body(spec)
+        body = manifest_body(spec, pin, device)
         run = one_round(body, device, a.reduction, a.trace, a.warmup)
         replay = one_round(body, device, a.reduction)
         if dist.get_rank() != 0:

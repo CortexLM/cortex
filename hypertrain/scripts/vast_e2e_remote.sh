@@ -74,6 +74,7 @@ import uvicorn
 import hypertrain.trainer  # noqa: F401
 from hypertrain.auditor.replay import pack_state, unpack_state
 from hypertrain.miner.island_launch import launch_island, validate_artifacts
+from hypertrain.protocol.env_pins import class_pin, gpu_label
 from hypertrain.protocol.messages_v2 import RunManifestV2
 
 spec = importlib.util.spec_from_file_location("svc", root / "tests/challenge/test_service_network_v2.py")
@@ -87,8 +88,9 @@ if backend == "cuda":
     sm = torch.cuda.get_device_properties(0).multi_processor_count
     assert torch.cuda.device_count() % N == 0, (torch.cuda.device_count(), N)
     result.update(driver=driver, sm_count=sm, gpus=[torch.cuda.get_device_name(i) for i in range(N)])
+    gpu = gpu_label(torch.cuda.get_device_capability(0))
 else:
-    driver, sm = ["cpu-test"], 170
+    driver, sm, gpu = ["cpu-test"], 170, "none"
 
 base_setup = esc.setup
 def setup(mode="test"):
@@ -98,6 +100,8 @@ def setup(mode="test"):
     ref["layout"].update(pp=1, n_gpus=N, dp_size=N, ep_size=1, zero1=False)
     ref.update(image_digest=os.environ["HT_IMAGE_DIGEST"], driver_allowlist=sorted(set(driver)),
                sm_count=sm)
+    # The device class of the host; math attention like HT_ATTN_BACKEND above (fp32, head_dim 4).
+    ref["env"]["pinned"] = class_pin("avx2", gpu)
     b["training"]["inner"].update(H=2, J=1)
     return esc.Setup(RunManifestV2.model_validate(b), s.policy, s.admission_policy, s.rows, s.tree)
 esc.setup = setup

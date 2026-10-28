@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+from env_pin_fixtures import TEST_PIN
 from hypertrain.aggregator.core import OuterParams, OuterState, TapeError, preclip, sqnorm
 from hypertrain.aggregator.tape_v2 import TapeV2, VerifiedInput, make_tape, replay_tape
 from hypertrain.aggregator.weighted_v2 import (
@@ -167,6 +168,7 @@ def test_rescaled_copy_rejected_when_norm_screen_passes_own_assignment_replay() 
         ),
         inner=InnerConfig(lr=0.003, H=2, J=1, micro_batch=1, state_policy="reset"),
         compress=CompressConfig("dense-int8", ef_beta=0),
+        env_pin=TEST_PIN,
         n_stages=1,
     )
     theta = init_params(cfg.model)

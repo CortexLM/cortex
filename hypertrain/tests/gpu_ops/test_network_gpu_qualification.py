@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from hypertrain.gpu_ops import network_qualification as driver
 from hypertrain.gpu_ops.journal import fsha
 from hypertrain.gpu_ops.launcher import Reject
+from hypertrain.protocol.env_pins import class_pin
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.messages_v2 import IslandJobV1, RunManifestV2
 from hypertrain.trainer.config import TrainConfig
@@ -71,6 +72,10 @@ def results(tmp_path: Path, ranks: int = 2, H: int = 30, J: int = 5) -> list[Pat
     return paths
 
 
+# The example's 170 SMs are the RTX 5090: its CUDA manifests pin that device class.
+RTX_5090_PIN = class_pin("avx2", "sm_120", "sdpa-flash")
+
+
 def manifest(ranks: int = 2, H: int = 30, J: int = 5) -> RunManifestV2:  # noqa: N803
     """Caller-validated authority for compare(); results never supply their own shape."""
     body = example_manifest().body()
@@ -78,6 +83,7 @@ def manifest(ranks: int = 2, H: int = 30, J: int = 5) -> RunManifestV2:  # noqa:
     body["model"]["param_count"] = sum(math.prod(s) for s in shapes.values())
     body["inner"].update(H=H, J=J)
     body["reference_spec"].update(image_digest="sha256:" + "44" * 32)
+    body["reference_spec"]["env"]["pinned"] = RTX_5090_PIN
     body["reference_spec"]["layout"].update(n_gpus=ranks, dp_size=ranks, ep_size=1)
     network = {
         **{
@@ -513,6 +519,7 @@ def seed_config(tmp_path: Path, profile_path: Path) -> driver.Qualification:
     registry.write_bytes(b'{"schemaVersion":2,"layers":[{"size":42}]}')
     image = "sha256:" + fsha(registry)
     body["reference_spec"].update(image_digest=image, driver_allowlist=["595.84"], sm_count=170)
+    body["reference_spec"]["env"]["pinned"] = RTX_5090_PIN
     body["reference_spec"]["layout"].update(profile["layout"])
     wrapper = RunManifestV2.model_validate(
         {

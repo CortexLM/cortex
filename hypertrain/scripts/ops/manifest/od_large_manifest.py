@@ -34,6 +34,7 @@ from hypertrain.datasets.shards16 import (
 from hypertrain.gpu_ops.network_qualification import sources
 from hypertrain.ledger.escrow_v2 import genesis_allocation_hash
 from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.env_pins import class_pin
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -57,6 +58,9 @@ from hypertrain.trainer.model import init_params
 
 D, LAYERS, HEADS, HEAD_LAYERS, VOCAB, SEQ = 1024, 24, 16, 4, 50432, 1024
 N_GPUS, GPU_NAME, SM_COUNT = 8, "RTX 5090", 170
+# 170 SMs is sm_120. The OD encoder calls torch SDPA itself and never reads trainer.attention,
+# so HT_ATTN_BACKEND is pinned to the neutral value.
+ENV_PIN = class_pin("avx2", "sm_120", "math")
 PARAMS = 353861632
 # Inner shape: H=512 (owner asked for 500; 512 * mb1 * ga1 * 8 GPUs = 4096 = 8 units of 512).
 H, J, MICRO_BATCH, GRAD_ACCUM = 512, 64, 1, 1
@@ -462,6 +466,7 @@ def main() -> None:
         profile="od-bf16-det-eager-v1",
         sm_count=SM_COUNT,
     )
+    ref["env"]["pinned"] = ENV_PIN
     ref["layout"] = {"pp": 1, "n_gpus": N_GPUS, "dp_size": N_GPUS, "ep_size": 1, "zero1": False}
     profile = profile_for(
         a.tree, body, image, a.driver, a.host_disk_bytes, custody, dry_run=a.dry_run

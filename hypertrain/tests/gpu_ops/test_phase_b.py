@@ -10,12 +10,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
 
 import hypertrain.trainer  # noqa: F401  (determinism pin must precede any torch import)
+from env_pin_fixtures import HOSTILE
 
 from .conftest import ACCOUNT, DIGEST, KEY, TREE, journal
 
@@ -109,6 +111,48 @@ def run_b(cfg: Path, run_dir: Path) -> subprocess.CompletedProcess[str]:
 
 def checker(path: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run([sys.executable, str(CHECKER), str(path)], capture_output=True, text=True)
+
+
+@pytest.mark.parametrize(("device", "gpu"), [("cpu", "none"), ("cuda", "sm_120")])
+def test_orchestrator_exports_the_pin_of_the_worker_manifest(device: str, gpu: str) -> None:
+    """The remote worker refuses any environment but its manifest's: both sides name one pin."""
+    spec = json.loads((B / "phase_b.json").read_text())["profiles"]["tiny"]
+    manifest = _load("run_phase_b").manifest_body(spec, None, device)
+    pin = _load("orchestrate").worker_pin(device)
+    assert pin.body() == manifest["reference_spec"]["env"]["pinned"]
+    assert (pin.cpu, pin.gpu) == ("avx2", gpu)
+    assert dict(pin.present)["HT_ATTN_BACKEND"] == "math"
+
+
+def test_remote_job_starts_under_the_pin_whatever_the_remote_ambient(tmp_path: Path) -> None:
+    """The command the orchestrator composes, run by a shell whose ambient is hostile."""
+    orch = _load("orchestrate")
+    orch.WATCH_SECONDS = 0
+    pin = orch.worker_pin("cuda")
+    root = tmp_path / "remote"
+    (root / "out").mkdir(parents=True)
+
+    class Shell:
+        def run(self, command: str, tag: str, logs: Path) -> subprocess.CompletedProcess[str]:
+            env = {**os.environ, **HOSTILE, "HT_COMPILE": "1"}
+            return subprocess.run(
+                ["bash", "-c", command], env=env, capture_output=True, text=True, check=False
+            )
+
+    host = SimpleNamespace(
+        cfg={"device": "cuda", "remote_env": {"HT_PHASE_B_FAULT": "kept"}},
+        j=SimpleNamespace(last=lambda *a, **k: None, append=lambda *a, **k: None),
+        _guard=lambda: None,
+        remote_root=lambda role: str(root),
+        ssh=lambda role: Shell(),
+        dir=tmp_path,
+    )
+    dump = [sys.executable, "-c", "import json, os; print(json.dumps(dict(os.environ)))"]
+    assert orch.PhaseBOrchestrator._remote(host, "h0", "dump", dump) == "0"
+    seen = json.loads((root / "out/dump.log").read_text())
+    assert {name: seen.get(name) for name, _ in pin.present} == dict(pin.present)
+    assert not set(pin.absent) & seen.keys()
+    assert seen["HT_PHASE_B_FAULT"] == "kept"
 
 
 def test_phase_b_e2e_mock_two_hosts(mock_factory: Any, tmp_path: Path) -> None:

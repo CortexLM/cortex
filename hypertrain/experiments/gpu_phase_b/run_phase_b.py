@@ -39,6 +39,7 @@ import torch.distributed as dist
 from torch import Tensor
 
 import hypertrain
+from hypertrain.protocol.env_pins import class_pin
 from hypertrain.protocol.example import example_manifest
 from hypertrain.trainer import island
 from hypertrain.trainer.compress import decompress
@@ -56,11 +57,16 @@ NVIDIA_SMI = ["nvidia-smi", "--query-gpu=driver_version,uuid,pci.bus_id", "--for
 Getter = Callable[[int], Any]
 
 
-def manifest_body(profile: dict[str, Any], image_digest: str | None) -> dict[str, Any]:
+def manifest_body(profile: dict[str, Any], image_digest: str | None, device: str) -> dict[str, Any]:
     body: dict[str, Any] = json.loads(json.dumps(example_manifest().body()))
     for k in ("model", "inner", "outer"):
         body[k].update(profile[k])
     body["reference_spec"]["layout"] = dict(profile["layout"])
+    # Phase B ran on RTX 5090 (sm_120, EXPECTED_SM_COUNT) before sdpa-flash was qualified there,
+    # so its evidence is the math domain. orchestrate.py exports the same pin (worker_pin).
+    body["reference_spec"]["env"]["pinned"] = class_pin(
+        "avx2", "sm_120" if device == "cuda" else "none"
+    )
     if image_digest:
         body["reference_spec"]["image_digest"] = image_digest
     cfg0 = TrainConfig.from_manifest(dict(body, model=dict(body["model"], param_count=1)))
@@ -173,10 +179,11 @@ def run_round(
     place: Callable[[Tensor], Tensor],
     get: Getter,
     n_rows: int,
+    device: str,
     image_digest: str | None = None,
 ) -> dict[str, Any]:
     """One H-step island round on this rank; every rank returns the same hashes."""
-    body = manifest_body(spec, image_digest)
+    body = manifest_body(spec, image_digest, device)
     cfg, lay, run_id = island_from_manifest(body)
     n = cfg.inner.H * cfg.inner.micro_batch * cfg.inner.grad_accum * lay.n_gpus
     if n > n_rows:
@@ -286,7 +293,7 @@ def main() -> int:
         ctx = baseline_mode() if a.arm == "base" else contextlib.nullcontext()
         with ctx:
             comm: Comm = OpenComm(dcomm) if a.arm == "base" else dcomm
-            res = run_round(spec, comm, lambda t: t.to(dev), get, n_rows, a.image_digest)
+            res = run_round(spec, comm, lambda t: t.to(dev), get, n_rows, a.device, a.image_digest)
         keys = ("leaves_root", "delta_hash", "final_theta_hash", "seconds")
         mem: dict[str, Any] = {}
         if a.device == "cuda":

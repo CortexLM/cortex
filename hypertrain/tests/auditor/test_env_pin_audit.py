@@ -1,21 +1,21 @@
 """ADR 0011 part 3 (DET-01b): the production audit comparator, over a claim minted by the real
 launcher in one ambient and replayed by the real launcher in another.
 
-Without a pin, an honest AVX-512 miner audited on AVX2, or the reverse, is a MISMATCH at leaf 1
-(the Lens reproducer: tests/auditor/test_island_replay_v2.py fixture, real torchrun). With the
-manifest's pin both sides run the same environment whatever their own ambient is."""
+Without a pin, an honest AVX-512 miner audited on AVX2, or the reverse, was a MISMATCH at leaf 1
+(the Lens reproducer: tests/auditor/test_island_replay_v2.py fixture, real torchrun). Every
+manifest now pins the environment, so both sides run the same one whatever their own ambient is:
+a launcher that stopped applying the pin would run the hostile ambient, which the worker refuses."""
 
 from __future__ import annotations
 
 import json
 import time
 from pathlib import Path
-from typing import Any
 
 import pytest
 from test_island_replay_v2 import fixture
 
-from env_pin_fixtures import CPU_FP32, HOSTILE, ambient, needs_avx2
+from env_pin_fixtures import HOSTILE, ambient, needs_avx2
 from hypertrain.auditor.replay import AnchorCache, Outcome
 from hypertrain.auditor.worker import LeaseGuard, execute_island_audit
 from hypertrain.miner.island_launch import launch_island
@@ -27,9 +27,7 @@ from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.model import init_params
 
 
-def audit_of_a_minted_claim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pinned: dict[str, Any] | None
-) -> Outcome:
+def audit_of_a_minted_claim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Outcome:
     """Mint under a clean ambient with launch_island, audit under HOSTILE with the same code."""
     job, _, blobs, get, _, key = fixture(state_policy="carry")
     rows = [get(i).astype("<u4").tobytes() for i in job.sample_ids]
@@ -38,8 +36,6 @@ def audit_of_a_minted_claim(
     document["training"]["dataset"].update(
         merkle_root=tree.root.hex(), n_samples=len(rows), depth=2
     )
-    if pinned is not None:
-        document["training"]["reference_spec"]["env"]["pinned"] = pinned
     wrapper = RunManifestV2.model_validate(document)
     theta = init_params(TrainConfig.from_manifest_v2(wrapper).model)
     cache = AnchorCache()
@@ -118,11 +114,8 @@ def audit_of_a_minted_claim(
 
 
 @needs_avx2
-def test_a_pinned_claim_audits_to_a_match_in_another_ambient(
+def test_a_claim_audits_to_a_match_in_another_ambient(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    unpinned = audit_of_a_minted_claim(tmp_path / "unpinned", monkeypatch, None)
-    if unpinned.result == "MATCH":
-        pytest.skip("this host's roots do not depend on the ambient: nothing to pin")
-    pinned = audit_of_a_minted_claim(tmp_path / "pinned", monkeypatch, CPU_FP32)
-    assert (pinned.result, pinned.first_bad_leaf) == ("MATCH", None)
+    outcome = audit_of_a_minted_claim(tmp_path, monkeypatch)
+    assert (outcome.result, outcome.first_bad_leaf) == ("MATCH", None)

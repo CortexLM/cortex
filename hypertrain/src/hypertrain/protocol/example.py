@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from hypertrain.protocol.env_pins import class_pin
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import (
@@ -141,6 +142,7 @@ def example_manifest() -> RunManifest:
                 "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
                 "CUDA_DISABLE_PTX_JIT": "1",
                 "cpu_threads": 1,
+                "pinned": class_pin("avx2", "none"),
             },
             "layout": {"pp": 1, "n_gpus": 1, "dp_size": 1, "ep_size": 1, "zero1": False},
         },

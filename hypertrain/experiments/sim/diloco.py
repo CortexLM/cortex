@@ -44,7 +44,7 @@ from torch import Tensor
 from hypertrain.data.assignment import assign_round
 from hypertrain.trainer.compress import compress, decompress, state_hash
 from hypertrain.trainer.config import CompressConfig, TrainConfig
-from hypertrain.trainer.determinism import require_threads
+from hypertrain.trainer.determinism import require_reference_env
 from hypertrain.trainer.loop import Assignment, _train_step
 from hypertrain.trainer.model import forward, init_params, param_shapes
 from hypertrain.trainer.optim import OptState, derive_v0, init_state
@@ -171,7 +171,7 @@ def train_round(
     """trainer.loop.train_round minus its verification artifacts (leaves, delta codec, hashes),
     which the simulator never reads; same _train_step and init_state, so theta is bitwise equal
     (tests/parity test_sim_inner_matches_trainer)."""
-    require_threads(cfg.cpu_threads)
+    require_reference_env(cfg)
     if len(a.sample_ids) != cfg.inner.H * cfg.inner.micro_batch * cfg.inner.grad_accum:
         raise ValueError("assignment length must equal H * micro_batch * grad_accum")
     theta = {n: x.clone() for n, x in theta_start.items()}

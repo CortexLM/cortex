@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.messages import RunManifest, f32hex
 
-GOLDEN = "ad8beb30084a2e53f817c45f1cbfdf1491162575f10f2c3d190645081b2ba2ff"
+GOLDEN = "aa39197d5816cd041826d1d967215901b0fe74ccf14d238f319892095aec8abd"
 NEW_KEYS = {"od", "source", "assign_unit", "unit_sha256_root", "profile"}
 
 

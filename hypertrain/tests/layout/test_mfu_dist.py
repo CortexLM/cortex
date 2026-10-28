@@ -13,6 +13,9 @@ import pytest
 import hypertrain.trainer  # noqa: F401  (determinism before torch)
 
 # isort: split
+import torch
+
+from env_pin_fixtures import TEST_PIN, clean_env
 from hypertrain.trainer.island import Comm, emulate, island_from_manifest, train_island
 from hypertrain.trainer.loop import Assignment, RoundResult
 from hypertrain.trainer.model import init_params
@@ -30,7 +33,7 @@ def _tiny_with_layout(world: int) -> dict[str, object]:
     profiles = json.loads(PROFILES.read_text())["profiles"]
     spec = dict(profiles["tiny-cpu"])
     spec["layout"] = dict(profiles["mfu-dense-1b-dp8"]["layout"], n_gpus=world, dp_size=world)
-    return manifest_body(spec)
+    return manifest_body(spec, TEST_PIN, torch.device("cpu"))
 
 
 @pytest.mark.parametrize("world", [2, 4, 8])
@@ -58,7 +61,7 @@ def test_torchrun_cpu_smoke(tmp_path: Path, reduction: str) -> None:
     cmd = [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nproc-per-node", "2"]
     cmd += [str(ROOT / "scripts/run_mfu_dist.py"), "--profile", "tiny-cpu-dp2", "--device", "cpu"]
     cmd += ["--reduction", reduction, "--warmup", "1", "--act-ckpt", "--out", str(out)]
-    subprocess.run(cmd, check=True, cwd=ROOT, timeout=600)  # noqa: S603
+    subprocess.run(cmd, check=True, cwd=ROOT, timeout=600, env=clean_env())  # noqa: S603
     ev = json.loads(out.read_text())
     assert (ev["n_gpus"], ev["dp_size"], ev["replay_match"]) == (2, 2, True)
     assert ev["engine_flags"]["HT_ACT_CKPT"] == "1"
@@ -74,7 +77,7 @@ def test_torchrun_cpu_trace_writes_bucketed_summary(tmp_path: Path) -> None:
     cmd = [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nproc-per-node", "2"]
     cmd += [str(ROOT / "scripts/run_mfu_dist.py"), "--profile", "tiny-cpu-dp2", "--device", "cpu"]
     cmd += ["--warmup", "1", "--trace", str(trace), "--out", str(out)]
-    subprocess.run(cmd, check=True, cwd=ROOT, timeout=600)  # noqa: S603
+    subprocess.run(cmd, check=True, cwd=ROOT, timeout=600, env=clean_env())  # noqa: S603
     summ = json.loads((trace / "summary.json").read_text())
     assert sorted(summ) == ["rank0", "rank1"]
     for r in range(2):
@@ -84,3 +87,15 @@ def test_torchrun_cpu_trace_writes_bucketed_summary(tmp_path: Path) -> None:
         assert len(s["step_seconds"]) == 3 and s["host_us_per_step"] > 0
     ev = json.loads(out.read_text())
     assert ev["replay_match"] and "trace" not in ev and "nccl_env" in ev and ev["mfu"] > 0
+
+
+def test_compile_is_refused_before_any_process_group(tmp_path: Path) -> None:
+    # No environment class holds HT_COMPILE=1: the rank must not run with it silently dropped.
+    out = tmp_path / "ev.json"
+    cmd = [sys.executable, str(ROOT / "scripts/run_mfu_dist.py"), "--profile", "tiny-cpu-dp2"]
+    cmd += ["--device", "cpu", "--compile", "--out", str(out)]
+    r = subprocess.run(  # noqa: S603
+        cmd, capture_output=True, text=True, cwd=ROOT, timeout=600, env=clean_env(), check=False
+    )
+    assert r.returncode != 0 and "HT_COMPILE" in r.stderr and "Traceback" not in r.stderr, r.stderr
+    assert not out.exists()

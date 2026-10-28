@@ -850,10 +850,8 @@ class NetworkMiner:
         Later the island workers would refuse the round, and a trial left to expire suspends the
         identity: nothing worth paying admission for."""
         pin = self.manifest.training.reference_spec.env.pin()
-        if pin is None:
-            return
         try:
-            require_honorable(pin)
+            require_honorable(pin, "cpu" if self.cfg.device == "cpu" else "cuda")
         except EnvPinUnhonorable as error:
             raise MinerError(
                 f"this host cannot honor the manifest's environment pin: {error}"

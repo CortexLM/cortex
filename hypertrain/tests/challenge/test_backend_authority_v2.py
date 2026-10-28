@@ -16,6 +16,7 @@ from hypertrain.data.store import LocalFSStore
 from hypertrain.gpu_ops.journal import fsha
 from hypertrain.gpu_ops.launcher import Reject
 from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.env_pins import class_pin
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Receipt
@@ -160,6 +161,10 @@ def authority(tmp_path, monkeypatch, request):
     if host is not None:
         body["training"]["reference_spec"].update(
             sm_count=host["sm_count"], driver_allowlist=[host["driver"]]
+        )
+        device = GPU_CLASS_OF_SM.get(host["sm_count"], "none")  # the manifest pins its own device
+        body["training"]["reference_spec"]["env"]["pinned"] = class_pin(
+            "avx2", device, "sdpa-flash" if device == "sm_120" else "math"
         )
     manifest = RunManifestV2.model_validate(body)
     job = job.model_copy(update={"manifest": manifest, "run_id": manifest.run_id()})
@@ -464,6 +469,7 @@ def test_invalid_reviewed_authority_rejects_without_install(authority, fault):
 # Manifest reference (sm_count, driver) and the host devices' recorded (capability, SM count).
 RTX_5090 = {"sm_count": 170, "driver": "595.84", "capability": [12, 0], "devices": 170}
 B300 = {"sm_count": 148, "driver": "595.91.07", "capability": [10, 3], "devices": 148}
+GPU_CLASS_OF_SM = {170: "sm_120", 148: "sm_103"}  # any other count is no measured device
 
 
 @pytest.mark.parametrize(

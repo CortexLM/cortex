@@ -29,7 +29,7 @@ from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages_v2 import IslandJobV1, RankWorkResult
 from hypertrain.trainer.compress import state_hash
-from hypertrain.trainer.determinism import apply_reference_env, env_pin_evidence
+from hypertrain.trainer.determinism import apply_reference_env, env_observation, require_gpu_class
 from hypertrain.trainer.island import DistComm, TraceContext, island_from_manifest, train_island
 from hypertrain.trainer.loop import Assignment
 from hypertrain.trainer.optim import OptState
@@ -39,6 +39,8 @@ def execute(directory: Path, backend: str) -> None:
     job = IslandJobV1.model_validate(load_json((directory / "job.json").read_bytes()))
     cfg, lay, run_id = island_from_manifest(job.manifest.body())
     local_rank = int(os.environ["LOCAL_RANK"])
+    pin = job.manifest.training.reference_spec.env.pin()
+    capability: tuple[int, int] | None = None
     match backend:
         case "cuda":
             if not torch.cuda.is_available() or torch.cuda.device_count() != lay.n_gpus:
@@ -68,6 +70,7 @@ def execute(directory: Path, backend: str) -> None:
                 raise IslandFailure("unqualified CUDA driver")
             if torch.cuda.get_device_properties(local_rank).multi_processor_count != ref.sm_count:
                 raise IslandFailure("unqualified CUDA SM profile")
+            capability = torch.cuda.get_device_capability(local_rank)
             device = torch.device("cuda", local_rank)
             torch.set_default_device(device)
             torch.cuda.reset_peak_memory_stats(device)
@@ -78,7 +81,7 @@ def execute(directory: Path, backend: str) -> None:
         case _:
             raise IslandFailure("unsupported execution backend")
     apply_reference_env(job.manifest.training.reference_spec.env.model_dump())
-    evidence = env_pin_evidence(job.manifest.training.reference_spec.env.pin())
+    require_gpu_class(pin, capability)
     dist.init_process_group(engine, timeout=timedelta(minutes=5))
     try:
 
@@ -257,7 +260,7 @@ def execute(directory: Path, backend: str) -> None:
                     "backend": backend,
                     "work": work.model_dump(mode="json"),
                     "optimizer_step": result.final_state.step,
-                    **evidence,
+                    "env": env_observation(pin, capability),
                     "commitments": {
                         "leaves_root": result.leaves_root,
                         "final_theta_hash": result.final_theta_hash,

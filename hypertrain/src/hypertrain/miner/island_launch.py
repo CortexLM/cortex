@@ -575,7 +575,7 @@ def island_env(
     base: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """The environment of an island worker: ``base`` (default: this process) under the manifest's
-    pins, then the fixed keys. A job without pins gets exactly ``base`` plus the fixed keys."""
+    pins, then the fixed keys."""
     ref = job.manifest.training.reference_spec
     env = pinned_environ(os.environ if base is None else base, ref.env.pin())
     env.update(
@@ -589,12 +589,10 @@ def island_env(
     return env
 
 
-def _require_honorable(job: IslandJobV1) -> None:
+def _require_honorable(job: IslandJobV1, backend: str) -> None:
     pin = job.manifest.training.reference_spec.env.pin()
-    if pin is None:
-        return
     try:
-        require_honorable(pin)
+        require_honorable(pin, backend)
     except EnvPinUnhonorable as error:
         raise EnvPinRefused(f"environment pin cannot be honored on this host: {error}") from error
 
@@ -638,7 +636,7 @@ def launch_island(
             if time.time() >= job.deadline or cancel is not None and cancel.is_set():
                 raise IslandFailure("job expired during publication validation")
             return artifacts
-        _require_honorable(job)
+        _require_honorable(job, backend)
         with tempfile.TemporaryDirectory(prefix="attempt-", dir=directory) as tmp:
             attempt = Path(tmp)
             for relative in job.object_paths.values():
@@ -694,7 +692,7 @@ def launch_window(job: IslandJobV1, published: Path, leaf: int, *, timeout: floa
     with flock(published.parent / "launch.lock"):
         if all(p.is_file() for p in outputs):
             return
-        _require_honorable(job)
+        _require_honorable(job, backend)
         proc = subprocess.Popen(  # noqa: S603 - fixed interpreter/package, typed layout
             launch_argv(job, published, backend),
             env=env,
@@ -727,7 +725,7 @@ def _launch_unbounded(
 
     The manifest's pins are applied here too (idempotent), so a direct caller that passes its own
     environment, such as the GPU operation script, cannot forget them."""
-    _require_honorable(job)
+    _require_honorable(job, backend)
     env = pinned_environ(env, job.manifest.training.reference_spec.env.pin())
     with (
         open(attempt / "stdout.log", "xb", buffering=0) as stdout,

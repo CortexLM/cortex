@@ -21,6 +21,7 @@ import hypertrain
 from hypertrain.gpu_ops.journal import Journal, fsha, sha256
 from hypertrain.gpu_ops.launcher import Reject
 from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.env_pins import class_pin
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
@@ -775,6 +776,7 @@ def contract(tmp_path: Path):
     body["inner"].update({k: v for k, v in profile["inner"].items() if k != "lr_schedule"})
     body["inner"]["lr_schedule"].update(profile["inner"]["lr_schedule"])
     body["reference_spec"].update(image_digest=image, driver_allowlist=["595.84"], sm_count=170)
+    body["reference_spec"]["env"]["pinned"] = class_pin("avx2", "sm_120", "sdpa-flash")
     body["reference_spec"]["layout"].update(profile["layout"])
     rows = [bytes([i % 64, 0]) * 17 for i in range(4096)]
     merkle = MerkleTree(rows)

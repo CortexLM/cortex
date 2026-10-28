@@ -365,7 +365,10 @@ def test_exact_decoder_four_identity_legacy_bootstrap_without_capacity_receipt(t
             )
             with pytest.raises(ChallengeError) as error:
                 store.bootstrap_service_capacity_v2(job.run_id, body, receipt)
-            assert error.value.status == 409 and error.value.detail == "SERVICE_PROFILE_GEOMETRY"
+            # The CPU service profile cannot serve the seed's sm_120 pin, read before its geometry.
+            assert error.value.status == 409
+            assert error.value.detail.startswith("SERVICE_PROFILE_ENV_PIN: ")
+            assert "GPU class: manifest 'sm_120'" in error.value.detail
             assert store._backend_v2(job.manifest) == "cpu"
             assert store._db.execute("SELECT COUNT(*) FROM admissions_v2").fetchone()[0] == 4
             assert store._db.execute("SELECT COUNT(*) FROM admission_trials").fetchone()[0] == 0

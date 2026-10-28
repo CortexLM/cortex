@@ -11,6 +11,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StrictBool,
     StrictInt,
     StrictStr,
@@ -265,15 +266,25 @@ def default_verify(
     return VerifySpec.model_validate(fields)
 
 
-class EnvPins(_M):
-    """Process-environment pins over the closed table of ``protocol/env_pins.py``."""
+_CPU_NAMES: list[JsonValue] = [*env_pins.CPU_CLASSES]
+_GPU_NAMES: list[JsonValue] = [*env_pins.GPU_CLASSES]
 
+
+class EnvPins(_M):
+    """The environment pin: one CPU class, one GPU class and the environment they imply.
+
+    ``gpu`` is ``none`` for a run that uses no GPU; it is never omitted. The closed tables are in
+    ``protocol/env_pins.py``; ``present`` and ``absent`` must equal the named rows exactly.
+    """
+
+    cpu: StrictStr = Field(json_schema_extra={"enum": _CPU_NAMES})
+    gpu: StrictStr = Field(json_schema_extra={"enum": _GPU_NAMES})
     present: dict[StrictStr, StrictStr]
     absent: list[StrictStr]
 
     @model_validator(mode="after")
     def _in_table(self) -> EnvPins:
-        env_pins.check(self.present, self.absent)
+        env_pins.check(self.cpu, self.gpu, self.present, self.absent)
         return self
 
 
@@ -281,11 +292,10 @@ class ReferenceEnv(_M):
     CUBLAS_WORKSPACE_CONFIG: Literal[":4096:8"]
     CUDA_DISABLE_PTX_JIT: Literal["1"]
     cpu_threads: Pos
-    # Omitted = ambient environment, as before: existing run_ids are unchanged.
-    pinned: EnvPins | None = Field(None, exclude_if=_omit_none)
+    pinned: EnvPins
 
-    def pin(self) -> env_pins.EnvPin | None:
-        return None if self.pinned is None else env_pins.EnvPin.from_body(self.pinned.model_dump())
+    def pin(self) -> env_pins.EnvPin:
+        return env_pins.EnvPin.from_body(self.pinned.model_dump())
 
 
 class Layout(_M):
@@ -314,6 +324,15 @@ class ReferenceSpec(_M):
     profile: Literal["od-bf16-det-eager-v1", "od-fp32-ref-v1"] | None = Field(
         None, exclude_if=_omit_none
     )
+
+    @model_validator(mode="after")
+    def _device_of_the_gpu_class(self) -> ReferenceSpec:
+        counts = env_pins.GPU_CLASSES[self.env.pinned.gpu].sm_counts
+        if counts and self.sm_count not in counts:
+            raise ValueError(
+                f"sm_count {self.sm_count} is not measured on gpu class {self.env.pinned.gpu}"
+            )
+        return self
 
 
 class BeaconSpec(_M):

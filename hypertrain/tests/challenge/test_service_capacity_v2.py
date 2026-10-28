@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from env_pin_fixtures import CPU_FP32
+from env_pin_fixtures import CPU_AVX2, honest_observation
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.protocol import envelope_v2
@@ -175,14 +175,14 @@ def test_owner_admission_accepts_real32_metadata_when_profile_exact(tiny, monkey
     assert store.bootstrap_service_capacity_v2(manifest.run_id(), body, raw) == digest
 
 
-@pytest.mark.parametrize("tiny", [CPU_FP32], indirect=True)
+@pytest.mark.parametrize("tiny", [CPU_AVX2], indirect=True)
 def test_bootstrap_refuses_a_pin_the_host_cannot_honor(tiny, monkeypatch):
     # The probe is a child process of up to two minutes: it must not run inside the transaction.
     store, manifest = tiny
     body, raw = signed_profile(store, manifest)
 
-    def refuse(pin):
-        assert not store._db.in_transaction
+    def refuse(pin, backend):
+        assert backend == "cpu" and not store._db.in_transaction
         raise EnvPinUnhonorable("ATen CPU capability: manifest 'AVX2', live 'DEFAULT'")
 
     monkeypatch.setattr("hypertrain.protocol.env_pins.require_honorable", refuse)
@@ -191,19 +191,26 @@ def test_bootstrap_refuses_a_pin_the_host_cannot_honor(tiny, monkeypatch):
     assert not store._db.execute(
         "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission'", (manifest.run_id(),)
     ).fetchone()
-    monkeypatch.setattr("hypertrain.protocol.env_pins.require_honorable", lambda pin: "AVX2")
+    monkeypatch.setattr(
+        "hypertrain.protocol.env_pins.require_honorable",
+        lambda pin, backend: honest_observation(pin),
+    )
     assert store.bootstrap_service_capacity_v2(manifest.run_id(), body, raw) == sha256_hex(body)
 
 
-def test_unpinned_bootstrap_never_probes_the_host(tiny, monkeypatch):
+def test_every_bootstrap_asks_the_host_whether_it_can_honor_the_pin(tiny, monkeypatch):
+    # No manifest escapes the probe: there is no "unpinned run" to skip it for.
     store, manifest = tiny
     body, raw = signed_profile(store, manifest)
+    asked = []
 
-    def forbidden(pin):
-        raise AssertionError("an unpinned run must never probe the host")
+    def honorable(pin, backend):
+        asked.append((pin, backend))
+        return honest_observation(pin)
 
-    monkeypatch.setattr("hypertrain.protocol.env_pins.require_honorable", forbidden)
+    monkeypatch.setattr("hypertrain.protocol.env_pins.require_honorable", honorable)
     assert store.bootstrap_service_capacity_v2(manifest.run_id(), body, raw) == sha256_hex(body)
+    assert asked == [(manifest.training.reference_spec.env.pin(), "cpu")]
 
 
 @pytest.mark.parametrize("signer", [service.COORD, service.HOT[0]])

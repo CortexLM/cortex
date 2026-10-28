@@ -1,8 +1,7 @@
-"""Pin bodies for tests of ``reference_spec.env.pinned`` (ADR 0011, part 3).
+"""Pin bodies and observations for tests of ``reference_spec.env.pinned`` (ADR 0011, part 3).
 
-The presets are measured per compute dtype on kimi MICRO (docs/protocol.md section 7): fp32 roots
-depend on ``ATEN_CPU_CAPABILITY`` and ``MKL_CBWR``, bf16 roots on ``ONEDNN_MAX_CPU_ISA``.
-Production code reads only the manifest, so the presets live here and in the docs.
+Production code reads only the manifest and the class tables of ``protocol/env_pins.py``; the
+tests name the classes through ``class_pin``.
 """
 
 from __future__ import annotations
@@ -17,19 +16,22 @@ from typing import Any
 
 import pytest
 
-CPU_FP32: dict[str, Any] = {
-    "present": {
-        "ATEN_CPU_CAPABILITY": "avx2",
-        "HT_ATTN_BACKEND": "math",
-        "MKL_CBWR": "AVX2",
-        "OMP_DYNAMIC": "FALSE",
-    },
-    "absent": ["HT_COMPILE", "HT_FP8", "HT_MOE_GROUPED", "OMP_THREAD_LIMIT"],
-}
-CPU_BF16: dict[str, Any] = {
-    "present": {**CPU_FP32["present"], "ONEDNN_MAX_CPU_ISA": "AVX2"},
-    "absent": list(CPU_FP32["absent"]),
-}
+from hypertrain.protocol.env_pins import EnvPin, class_pin, observed_environ, pinned_environ
+
+CPU_AVX2: dict[str, Any] = class_pin("avx2", "none")
+CPU_AVX512: dict[str, Any] = class_pin("avx512", "none")
+# The pin the suite's manifests name and the test process honors (tests/process_pin.py).
+TEST_PIN = EnvPin.from_body(CPU_AVX2)
+
+
+def honest_observation(pin: dict[str, Any] | EnvPin) -> dict[str, Any]:
+    """What a process that honors ``pin`` declares: the observation of an honest host."""
+    p = pin if isinstance(pin, EnvPin) else EnvPin.from_body(pin)
+    return {
+        "env": observed_environ(pinned_environ({}, p), p),
+        "cpu_capability": p.capability,
+        "gpu": p.gpu,
+    }
 
 
 # Every pinned name set to the value that changes bytes, the way a careless host might export them.
@@ -45,18 +47,21 @@ HOSTILE: dict[str, str] = {
 }
 
 
-def _has_avx2() -> bool:
+def _has_flag(flag: str) -> bool:
     if platform.machine() not in ("x86_64", "AMD64"):
         return False
     try:
         flags = Path("/proc/cpuinfo").read_text()
     except OSError:
         return False
-    return re.search(r"\bavx2\b", flags) is not None
+    return re.search(rf"\b{flag}\b", flags) is not None
 
 
 # A pinned CPU manifest is refused by design on a host that cannot honor it.
-needs_avx2 = pytest.mark.skipif(not _has_avx2(), reason="the CPU pins need an AVX2 host")
+needs_avx2 = pytest.mark.skipif(not _has_flag("avx2"), reason="the CPU pins need an AVX2 host")
+needs_avx512 = pytest.mark.skipif(
+    not _has_flag("avx512f"), reason="the avx512 class needs an AVX-512 host"
+)
 
 
 def clean_env() -> dict[str, str]:
