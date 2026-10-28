@@ -26,14 +26,6 @@ SERVED_WITHIN = 3.0  # seconds a beacon call is given to return while an aggrega
 COMPUTE_SECONDS = 2.0  # seconds the slow compute takes in the lock-hold test
 MAX_HOLD_SECONDS = 1.0
 
-# Only "the lock was held" may count as the expected failure: a broken setup raises RuntimeError.
-HOLDS_THE_LOCK = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="aggregate_v2 holds the store lock for the whole computation (parent behaviour); "
-    "removed by the fix",
-)
-
 
 @pytest.fixture(scope="module")
 def template(tmp_path_factory: pytest.TempPathFactory) -> Template:
@@ -87,7 +79,6 @@ def slow_copy_flags(monkeypatch: pytest.MonkeyPatch, pause: Callable[[], None]) 
     monkeypatch.setattr(weighted_v2, "copy_flags", slow)
 
 
-@HOLDS_THE_LOCK
 def test_a_beacon_round_is_accepted_while_an_aggregate_computes(
     restored: Restored, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -132,7 +123,6 @@ def test_a_beacon_round_is_accepted_while_an_aggregate_computes(
     assert {"tape", "theta_hash", "out_state"} <= aggregate.result.keys()
 
 
-@HOLDS_THE_LOCK
 def test_the_store_lock_is_held_for_less_than_a_second_by_an_aggregate_that_computes_for_longer(
     restored: Restored, monkeypatch: pytest.MonkeyPatch
 ) -> None:
