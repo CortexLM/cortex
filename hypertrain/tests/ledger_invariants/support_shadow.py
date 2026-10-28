@@ -29,6 +29,7 @@ from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages_v2 import (
     RewardFinalize,
+    RotateRequest,
     ShadowRewardFinalizeV1,
 )
 from hypertrain.protocol.messages_v2 import (
@@ -75,6 +76,14 @@ class Engine:
 
     def reward(self, binding: Reservation) -> ShadowRewardFinalizeV1:
         return self.fixture.sign_actual_shadow(self.live, binding)
+
+    def origin(self, binding: Reservation) -> str:
+        """The origin id the ledger issues for `binding`, as the reward authority signs it.
+
+        The ledger refuses a reward whose origin ids differ from its own derivation, so the id of
+        a signed reward is that derivation whatever key space the ledger derives it in.
+        """
+        return self.reward(binding).origin_ids[0]
 
     def accept(self, binding: Reservation) -> EscrowReceipt:
         return self.escrow.reward_finalize(self.reward(binding), self.facts)
@@ -222,6 +231,42 @@ def push_round(n: Any, number: int) -> httpx.Response:
     n.store.clock = lambda: n.manifest.training.beacon.genesis_time + (number - 1) * 3
     return n.client.post(
         "/v1/admin/beacon", json=service.fixture_beacon(number), headers=service.admin()
+    )
+
+
+def open_challenge(n: Any, identity: str) -> httpx.Response:
+    """GET the trial challenge of `identity` as its own hotkey.
+
+    The route asks the admission's hotkey for a signature (RTA-04, ADR 0010); an older service
+    answered an unsigned request, so a network fixture without `challenge` is asked that way.
+    """
+    if hasattr(n, "challenge"):
+        return n.challenge(identity)
+    return n.client.get(n.url + f"/join/{identity}/challenge")
+
+
+def rotate_admission(n: Any, cold: Any, old: Any, new: Any, operation_id: str = "df" * 32) -> Any:
+    """POST the rotation of `old` to `new` sealed by `cold`, with the new hotkey's consent when
+    the service asks for it (RTA-01, ADR 0010), and return the answer."""
+    from hypertrain.miner import admission as client
+
+    run_id, expires = n.manifest.run_id(), 1000
+    if "new_hot_sig" in RotateRequest.model_fields:
+        request = client.sign_rotation_consent(
+            new,
+            run_id=run_id,
+            coldkey=cold.ss58,
+            hotkey=old.ss58,
+            operation_id=operation_id,
+            expires_beacon=expires,
+        )
+    else:
+        request = RotateRequest.model_validate(
+            {"hotkey": old.ss58, "new_hotkey": new.ss58, "operation_id": operation_id}
+        )
+    return n.client.post(
+        n.url + f"/admission/{old.ss58}/rotate",
+        json=client.sign_rotation(cold, run_id, request, expires),
     )
 
 

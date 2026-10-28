@@ -20,12 +20,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from hypertrain.ledger.escrow_v2 import (
-    EscrowError,
-    EscrowReceipt,
-    Settlement,
-    shadow_origin_id,
-)
+from hypertrain.ledger.escrow_v2 import EscrowError, EscrowReceipt, Settlement
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages_v2 import OriginAllocation
@@ -175,7 +170,7 @@ def apply_step(
             assert receipts.setdefault(targets[0], receipt) == receipt
     elif kind == "mature":
         for i in list(receipts):
-            origin = shadow_origin_id(reserved[i])
+            origin = built.origin(reserved[i])
             built.escrow.mature(format(0x40 + i, "02x") * 32, (origin,), MATURE_AT)
     else:
         built.escrow.reward_finalize(built.live, built.evidence)
@@ -297,7 +292,7 @@ def test_an_over_budget_reward_is_refused_even_when_its_allocation_agrees_with_i
     binding = built.reserve()
     reward = built.reward(binding)
     origin = OriginAllocation(
-        origin_id=shadow_origin_id(binding),
+        origin_id=built.origin(binding),
         owner=binding.coldkey,
         units=UNIT + 1,
         mature_at=binding.mature_at,
@@ -388,13 +383,13 @@ def test_an_accepted_shadow_reward_is_one_origin_of_one_round_budget_owned_by_th
     # Then: exactly the origin the ledger derived, pending until the reserved maturity
     origins = issued_origins(built)
     assert [tuple(row) for row in origins] == [
-        (shadow_origin_id(binding), UNIT, binding.mature_at, binding.trial_epoch, binding.hotkey)
+        (built.origin(binding), UNIT, binding.mature_at, binding.trial_epoch, binding.hotkey)
     ]
     units = built.escrow.db.execute(
         "SELECT origin,owner,bucket,ref,units FROM escrow_units"
     ).fetchall()
     assert [tuple(row) for row in units] == [
-        (shadow_origin_id(binding), binding.coldkey, "reward_pending", "", UNIT)
+        (built.origin(binding), binding.coldkey, "reward_pending", "", UNIT)
     ]
     assert binding.coldkey == li_escrow.COLD.ss58
 
@@ -542,7 +537,7 @@ def test_a_matured_shadow_origin_is_never_payable_while_a_live_origin_of_the_sam
     binding = built.reserve()
     built.accept(binding)
     built.escrow.reward_finalize(built.live, built.evidence)
-    built.escrow.mature("44" * 32, (shadow_origin_id(binding),), MATURE_AT)
+    built.escrow.mature("44" * 32, (built.origin(binding),), MATURE_AT)
     mature(built.escrow, built.live)
     assert built.escrow.balances().available == 2 * UNIT
 
@@ -589,7 +584,7 @@ def test_shadow_units_stay_pending_unless_the_shadow_settlement_is_clean_and_due
     changes, now, code = SETTLEMENT_FAULTS[fault]
     finality = built.live.finalize_hash
     built.escrow.shadow_settlement = lambda _origin: clean(**{"finality_hash": finality, **changes})
-    origin = shadow_origin_id(binding)
+    origin = built.origin(binding)
     before = built.marker()
 
     # When / Then: the units are neither spendable nor burned
@@ -616,6 +611,6 @@ def test_a_ledger_without_a_shadow_settlement_matures_nothing(
 
     # When / Then: the live settlement is never a substitute
     assert refusal_code(
-        lambda: built.escrow.mature("44" * 32, (shadow_origin_id(binding),), MATURE_AT)
+        lambda: built.escrow.mature("44" * 32, (built.origin(binding),), MATURE_AT)
     ) == ("SHADOW_AUTHORITY_UNAVAILABLE")
     assert built.marker() == before

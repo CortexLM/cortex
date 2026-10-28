@@ -25,12 +25,10 @@ from fastapi.testclient import TestClient
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.app import Config, create_app
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
-from hypertrain.miner.admission import sign_rotation
 from hypertrain.protocol.envelope_v2 import parse_envelope
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages_v2 import (
     IslandJobV1,
-    RotateRequest,
     WorkProof,
     WorkScreenV2,
 )
@@ -40,8 +38,10 @@ from .support_shadow import (
     UNIT,
     add_due_origin,
     db_digest,
+    open_challenge,
     push_round,
     reauthenticate,
+    rotate_admission,
 )
 
 service = load_fixture_module(*SERVICE_FIXTURE)
@@ -55,14 +55,16 @@ HOT, COLD, REFEREE, AUDITORS = service.HOT, service.COLD, service.REFEREE, servi
 SETTLED = "shadow new reservation requires settled first trial"
 BINDING = "shadow authenticated evidence binding differs"
 
-# Lens-declared defects not yet verified by the Lens skeptic pass: strict xfails, each with the
-# passing control beside it.
+# Findings of the Lens report that the code still has: strict xfails, each with the passing
+# control beside it. The reason ends with the fix lot that closes it, so that the lot flips the
+# marker mechanically: remove the marker of every test the lot makes XPASS.
 CUSTODY_DRIFT = pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
     reason=(
         "SHD-19+SHD-D3: one origin whose original custody no longer validates never rolls "
-        "back the maturity of the run's other origins [candidate]"
+        "back the maturity of the run's other origins "
+        "[fix-lot: escrow-relay-fixes ADR0014-P7]"
     ),
 )
 LOST_RESERVATION_STRANDED = pytest.mark.xfail(
@@ -70,7 +72,7 @@ LOST_RESERVATION_STRANDED = pytest.mark.xfail(
     raises=AssertionError,
     reason=(
         "SHD-02+SHD-13+CRD-D02: a lost reservation reply is recovered by an identical retry "
-        "whatever expiry the miner chose for its commit [candidate]"
+        "whatever expiry the miner chose for its commit [fix-lot: none (no design yet)]"
     ),
 )
 ROTATION_STRANDS = pytest.mark.xfail(
@@ -78,15 +80,17 @@ ROTATION_STRANDS = pytest.mark.xfail(
     raises=AssertionError,
     reason=(
         "SHD-21+SHD-D4: rotating an admission's hotkey never strands the evidence frozen "
-        "under its old hotkey [candidate]"
+        "under its old hotkey [fix-lot: none (no design yet)]"
     ),
 )
+# The Lens property is "credited or released". No release operation exists to assert, so the
+# test pins the credited half; a fix that releases the reservation instead must rewrite it.
 NEXT_TRIAL_STRANDS = pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
     reason=(
         "SHD-20+SHD-D2: a reservation whose trial is still the admission's first finalized "
-        "MATCH can always be credited [candidate]"
+        "MATCH can always be credited [fix-lot: decision (product choice pending)]"
     ),
 )
 
@@ -786,11 +790,7 @@ def test_a_test_ledger_reservation_binds_the_policy_digest_not_an_operator_recor
 
 
 def rotate(n: Any) -> httpx.Response:
-    request = RotateRequest(hotkey=HOT[0].ss58, new_hotkey=REFEREE.ss58, operation_id="df" * 32)
-    return n.client.post(
-        n.url + f"/admission/{HOT[0].ss58}/rotate",
-        json=sign_rotation(COLD[0], n.manifest.run_id(), request, 1000),
-    )
+    return rotate_admission(n, COLD[0], HOT[0], REFEREE)
 
 
 DRIFT = {
@@ -946,7 +946,7 @@ def trial(network: Any) -> tuple[Any, str]:
     assert joined.status_code == 200, joined.text
     identity = joined.json()["admission_id"]
     network.push(network.now + 1)
-    opened = network.client.get(network.url + f"/join/{identity}/challenge")
+    opened = open_challenge(network, identity)
     assert opened.status_code == 200, opened.text
     return network, identity
 
