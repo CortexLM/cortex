@@ -3358,9 +3358,12 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
         AcceptedUploadAck,
         AvailabilityContext,
         ChunkCustodyAck,
+        RelayAssignment,
         RelayFailureEvidence,
         RelayReceipt,
         RelayRegistryV1,
+        RetrievalRequest,
+        RetrievalResponse,
         UploadGrant,
     )
     from hypertrain.relay.app import create_app as relay_app
@@ -3589,6 +3592,38 @@ def test_integrated_relay_lifecycle_original_custody_gate(network, monkeypatch, 
             assert set(receipt_pin.disputes) == {d for d, _ in disputes}
         # The horizon moved far ahead: a second pass finds nothing to do.
         assert anyio.run(lifecycle) == {"released": [], "extended": []}
+
+    # The proof is still there: well past the original horizon and its grace, a collect pass of the
+    # relay leaves the receipt's object alone and the relay serves its bytes against the master's
+    # signed retrieval of the extended lineage.
+    lineage = network.store._record_v2(run_id, "retention", grant.digest())
+    assert network.now >= receipt.retain_until + 100 and lineage["seq"] == 3
+    assert grant.delta_hash not in anyio.run(relay.collect)
+
+    async def read_proof():
+        record = (await relay.state()).uploads[grant.digest()]
+        stamp = network.now
+        request = RetrievalRequest(
+            request_id="5e" * 32,
+            nonce="5e" * 32,
+            relay_id="local",
+            key_id=receipt.key_id,
+            assignment_hash=RelayAssignment.model_validate(record.assignment.body).digest(),
+            grant_hash=grant.digest(),
+            custody_ack_hashes=[],
+            receipt_hash=receipt.digest(),
+            retention_hash=lineage["hash"],
+            object_or_chunk_hash=grant.delta_hash,
+            size=grant.size,
+            requested_beacon=stamp,
+            deadline_beacon=min(stamp + 10, lineage["horizon"]),
+        )
+        signed = relay_envelope.parse_envelope(
+            relay_envelope.seal(COORD, "RetrievalRequest", run_id, request, stamp + 10)
+        )
+        return RetrievalResponse.model_validate((await relay.retrieve(signed)).body)
+
+    assert anyio.run(read_proof).status == "SERVED"
 
     # The dispute closes. The pass releases what is due without the operator route, a relay that
     # cannot be reached stops nothing, and the grant it missed is released by the next pass.
