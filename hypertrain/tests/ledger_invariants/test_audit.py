@@ -263,7 +263,7 @@ LAPSES = [
     pytest.param(
         2, 2, "rearmed" if sa.REAUDITS else "dropped", id="second-attempt-of-the-second-window"
     ),
-    pytest.param(2, sa.WINDOWS, "dropped", id="second-attempt-of-the-last-window"),
+    pytest.param(2, sa.WITHHELD_WINDOWS, "dropped", id="second-attempt-of-the-last-window"),
 ]
 
 

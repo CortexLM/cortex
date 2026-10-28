@@ -401,7 +401,7 @@ def test_after_the_last_window_nothing_late_can_change_the_dropped_round(
         sa.without_reaper(monkeypatch, store)
         held = running(store)
         stored = {h: store._record_v2(run, "executed-verdict", r["id"]) for h, r in held.items()}
-        sa.run_out_the_windows(n, store)
+        sa.run_out_the_windows(n, store, sa.WITHHELD_WINDOWS)  # the forger's MISMATCH is unsigned
         # Then: every job is exhausted with no audit open, and the round is no more settled than
         # before (a tree that voided the round for everybody says so in its disposition).
         assert {r["state"] for r in sa.lease_rows(store).values()} == {"exhausted"}
@@ -685,7 +685,7 @@ def test_a_mismatch_the_master_replayed_and_no_auditor_signed_costs_its_miner_th
 
         before = standing()
         # When: the lease runs out and every window of the job passes with nobody signing anything.
-        sa.drop_job(n, store, forger)
+        sa.drop_job(n, store, forger, sa.WITHHELD_WINDOWS)
         # Control: the job is over.
         assert sa.lease_rows(store)[forger]["state"] == "exhausted"
         # Then: the forger leaves the round for the infrastructure, without a contest record, a

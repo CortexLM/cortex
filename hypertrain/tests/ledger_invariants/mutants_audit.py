@@ -695,4 +695,14 @@ MUTANTS: list[dict[str, object]] = [
         "why": "a job nobody signed ends in a strike for its miner, as if the silence were the "
         "miner's.",
     },
+    {
+        "id": "aud-a-third-window-for-every-job",
+        "invariants": ["A2W-12", "A2W-13"],
+        "path": STORE,
+        "old": "extra = audit_cooldown_v2.WITHHELD_EXTRA_WINDOWS if withholders else 0",
+        "new": "extra = audit_cooldown_v2.WITHHELD_EXTRA_WINDOWS",
+        "tests": [DECREMENTS],
+        "why": "a job whose MISMATCH nobody withheld is given a third window, so a dropped miner "
+        "waits for a window the pinned two never promised.",
+    },
 ]

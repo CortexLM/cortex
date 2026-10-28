@@ -56,13 +56,14 @@ REQUESTS = itertools.count(1)
 # job that ran out of attempts gets a second window before its miner is dropped, and an
 # aggregation whose survivors cannot carry the round is refused by name. ADR 0011 Part 9 (D82): a
 # job whose MISMATCH the master replayed and no auditor signed may open a third window, so that
-# another auditor decides it.
+# another auditor decides it; every other job keeps its two.
 COOLS_DOWN = hasattr(ChallengeStore, "_cooling_until_v2")
 REARMS = hasattr(ChallengeStore, "_rearm_audit_job_v2")
 CHECKS_SURVIVORS = hasattr(ChallengeStore, "_require_survivors_v2")
 REAUDITS = hasattr(ChallengeStore, "_withholders_v2")
 SIGN_WINDOW = getattr(audit_cooldown_v2, "SIGN_WINDOW_ROUNDS", None)
-WINDOWS = (3 if REAUDITS else 2) if REARMS else 1
+WINDOWS = 2 if REARMS else 1
+WITHHELD_WINDOWS = WINDOWS + 1 if REAUDITS else WINDOWS
 # A job nobody audited leaves the round without being a verdict on the round: the disposition of
 # a round whose job was dropped is untouched, where an older tree voided the round for everybody.
 DROP_DISPOSITION = "PENDING" if REARMS else "EXCLUDED"
@@ -603,22 +604,22 @@ def without_reaper(patch: pytest.MonkeyPatch, store: ChallengeStore) -> None:
     patch.setattr(store, "_reap_exits_v2", lambda *args, **kwargs: None)
 
 
-def run_out_the_windows(network: Any, store: ChallengeStore) -> int:
+def run_out_the_windows(network: Any, store: ChallengeStore, budget: int = WINDOWS) -> int:
     """Push the beacon to the end of the window of the open jobs until none is open; returns how
-    many windows that took (one, or two on a tree that re-arms an exhausted job once, or three
-    when a job holds a MISMATCH nobody signed)."""
+    many windows that took (one, or two on a tree that re-arms an exhausted job once). `budget` is
+    the most a job may take: `WITHHELD_WINDOWS` for one that holds a MISMATCH nobody signed."""
     windows = 0
     while open_rows(store):
-        assert windows < WINDOWS, "an audit job is still open after its last window"
+        assert windows < budget, "an audit job is still open after its last window"
         network.push(max(r["absolute"] for r in open_rows(store)))
         windows += 1
     return windows
 
 
-def drop_job(network: Any, store: ChallengeStore, hotkey: str) -> None:
+def drop_job(network: Any, store: ChallengeStore, hotkey: str, budget: int = WINDOWS) -> None:
     """Push the beacon to the end of every window of one job, whatever the others do, until it
-    is exhausted."""
-    for _ in range(WINDOWS):
+    is exhausted (`budget` as in `run_out_the_windows`)."""
+    for _ in range(budget):
         row = lease_rows(store)[hotkey]
         if row["state"] == "exhausted":
             return
