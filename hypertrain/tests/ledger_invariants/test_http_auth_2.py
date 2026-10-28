@@ -56,14 +56,8 @@ RELAY_FIXTURE = ("li_relay_fixture", "relay/test_transport_v2.py")
 # SG-05 ------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "SG-05+HTP-03: a dispute watch signed in an earlier round is refused later "
-        "[fix-lot: audit-integrity-2 ADR0010-P3 (b018d425)]"
-    ),
-)
+# Closed by audit-integrity-2 ADR0010-P3 (b018d425, the shape of 5bd7537f): the poll is signed in
+# its body with an expiry.
 def test_a_dispute_watch_captured_in_an_earlier_round_is_refused_later(tmp_path: Path) -> None:
     party = sibling_service().HOT[0]
     with service_world(tmp_path) as world:
@@ -234,14 +228,7 @@ def test_a_repeated_anonymous_round_view_rewrites_no_stored_record(tmp_path: Pat
 # LV-02 ------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "LV-02+ADM-04: a signed object upload never takes the store lock on the event loop "
-        "[fix-lot: escrow-relay-fixes ADR0014-P8]"
-    ),
-)
+# Closed by escrow-relay-fixes ADR0014-P8 (b61c6389): the admission lookup runs on a worker thread.
 def test_a_signed_object_upload_never_takes_the_store_lock_on_the_event_loop(
     tmp_path: Path,
 ) -> None:
@@ -266,14 +253,7 @@ def test_a_signed_object_upload_never_takes_the_store_lock_on_the_event_loop(
 # LV-03 ------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "LV-03+TRN-02: the shipped relay can act on a master release of a retained upload "
-        "[fix-lot: escrow-relay-fixes ADR0014-P6]"
-    ),
-)
+# Closed by escrow-relay-fixes ADR0014-P6 (dae84220): the shipped relay wires the master's view.
 def test_the_shipped_relay_does_not_refuse_a_release_for_want_of_a_settlement_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

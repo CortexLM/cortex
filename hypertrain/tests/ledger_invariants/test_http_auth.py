@@ -48,7 +48,6 @@ from .support_http_auth import (
     OP,
     RELAY_ROUTES,
     REVOKED_TEXT,
-    WATCH_IN_BODY,
     WATCH_KEY,
     WK,
     bearer,
@@ -494,7 +493,6 @@ SIGNING_DOMAINS = frozenset(
         "hypertrain/dispute/2|",
         "hypertrain/elastic-leave/1|",
         "hypertrain/join/2|",
-        "hypertrain/object/2|",
         "hypertrain/origin/2|",
         "hypertrain/relay/1|",
         "hypertrain/release-manifest/v1\n",
@@ -504,7 +502,6 @@ SIGNING_DOMAINS = frozenset(
         "hypertrain/server-key/1|",
         "hypertrain/rotate/2|",
         "hypertrain/tape/2|",
-        *([] if WATCH_IN_BODY else ["hypertrain/watch/2|"]),
     }
 )
 
