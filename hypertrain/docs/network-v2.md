@@ -618,12 +618,24 @@ An audited member whose admission no longer qualifies it when the round is aggre
 out of the round too: `excluded`, reason `INELIGIBLE`, stage `aggregate`, with a `cause`
 (`ROTATED`: its hotkey no longer names an admission; `BANNED`; `SUSPENDED`, also while a contest
 is pending; `NOT_LIVE`: back on a fresh probation; `SCREEN_LAPSED`; `UNFUNDED`: its bond is gone,
-burned for instance). The admission is read at the `aggregate` call, so a member that is fit
-then is kept. Nobody is sanctioned for it: the cause is the member's own state or the effect of
+burned for instance). The admission is read at the beacon round the `aggregate` call passes the
+freshness gate at, so a member that is fit then is kept, even if its screen ends while the tape
+computes. Nobody is sanctioned for it: the cause is the member's own state or the effect of
 a sanction already applied. The remaining members must still carry the allocation; with four
 rostered, one unfit member makes `aggregate` answer 409 `ROUND_INFEASIBLE` and writes nothing,
 and the round aggregates as soon as the member is eligible again. Call `aggregate` before
 `d_final`: the later the call, the more screens have ended.
+
+`aggregate` computes the tape without holding the challenge's store lock, so beacon rounds,
+joins and audits are served while it runs (minutes at 100 M parameters). It writes the round only
+if what it read when it started still holds when it ends; otherwise it answers 409
+`AGGREGATE_STALE` and writes nothing, and the same call made again reads the round as it is. A
+second `aggregate` of a round that is computing waits for it and gets its answer or its error. At
+most two such calls wait per process: a third answers 503 `aggregate already running for this
+round; retry`, and a waiter gives up after 600 s with 503 `aggregate still running for this
+round; retry`. `finalize` replays the applied tape before it takes the lock, and uses that replay
+only if the records it replayed are unchanged when it runs. A `finalize` made while the
+`aggregate` of its round is still computing answers 409 `missing accepted applied` at once.
 
 A round opens only with members whose screen covers it. `open` answers 403 "roster screen ends
 before the round's audit window" for an entry whose `screen_until` is before the round's
