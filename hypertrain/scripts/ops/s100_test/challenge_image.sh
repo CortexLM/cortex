@@ -56,15 +56,19 @@ backup_names() { # backup_names BACKUP: its compose file, which rollback copies 
   # compose() runs in $T, so a relative BACKUP must be made absolute first
   local cfg f; f=$(cd "$1" && pwd)/compose.test.yml
   cfg=$(compose "$f" config --format json) && test_names "$f" <<< "$cfg" || exit 4; }
-gate() { # readyz 200, no seal backlog, and a sealed seal younger than 30 min (first half of the
-  # 72-min window; a seal delayed by unfinished work would make "young" mean "late", so the
-  # sealed epoch must also be the one just before the master's current epoch).
-  # HT_GATE_MAX_AGE_S replaces only the 30-min limit (1..4320 s, one epoch), for a change the
-  # founder approved outside the first half of the window; it is printed whenever it is set.
-  local max=${HT_GATE_MAX_AGE_S:-1800} ready
-  [[ $max =~ ^[1-9][0-9]{0,3}$ && $max -le 4320 ]] \
-    || { echo "GATE HT_GATE_MAX_AGE_S must be 1..4320 seconds"; exit 4; }
-  [ "$max" -eq 1800 ] || echo "GATE age limit overridden: HT_GATE_MAX_AGE_S=$max (default 1800)"
+gate() { # readyz 200, no seal backlog, and a sealed seal younger than HT_GATE_MAX_AGE_S. The limit
+  # is 4500 s (75 min) by default (D67): an epoch is 72 min of chain blocks, seal-to-seal gaps on
+  # record run from 4320 to 4655 s, and the master seals an epoch only once it is over. The sealed
+  # epoch must also be the one just before the master's current epoch. In the normal case such a
+  # seal is younger than one epoch, so the age rarely closes the gate; it still can after an
+  # operator's early seal or in a long epoch, and then it fails closed (exit 3).
+  # HT_GATE_MAX_AGE_S (1..4500 s) tightens it, e.g. 1800 to stay in the first half of the old
+  # window; it is printed whenever it differs from the default. A TEST parameter: the gate only
+  # reads the master's seal.
+  local max=${HT_GATE_MAX_AGE_S:-4500} ready
+  [[ $max =~ ^[1-9][0-9]{0,3}$ && $max -le 4500 ]] \
+    || { echo "GATE HT_GATE_MAX_AGE_S must be 1..4500 seconds"; exit 4; }
+  [ "$max" -eq 4500 ] || echo "GATE age limit overridden: HT_GATE_MAX_AGE_S=$max (default 4500)"
   ready=$(curl -sf -m 10 "$MASTER/readyz") || { echo "GATE readyz not 200"; exit 2; }
   curl -s -m 10 "$MASTER/v1/weights/latest" | python3 -I -c '
 import json,sys,datetime

@@ -2957,6 +2957,8 @@ class ChallengeStore:
                         result = asdict(admission.join(raw, now=now, ip_prefix=ip_prefix))
                     case "challenge":
                         result = admission.challenge(identity, now=now)
+                    case "reseed":
+                        result = admission.reseed(identity, now=now)
                     case "status":
                         result = asdict(admission.status(identity, now=now))
                         result["bond"] = admission.bond(result["record"]["admission_id"], now=now)

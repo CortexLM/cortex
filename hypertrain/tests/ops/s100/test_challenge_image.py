@@ -82,11 +82,9 @@ def test_the_snapshot_notices_a_change_to_each_file_a_refusal_must_leave_alone(b
 # --- seal window: swap, beacon and executor go through the gate -----------------------------------
 
 GATE = {  # id: (seal arguments, exit code)
-    "age-1800": ({"age": 1800}, 3),
-    "age-1801": ({"age": 1801}, 3),
+    "age-75-minutes": ({"age": 4500}, 3),
     "age-negative": ({"age": -1}, 3),
     "age-half-a-second-in-the-future": ({"age": -0.5}, 3),
-    "age-just-over-1800": ({"age": 1800.001}, 3),
     "age-7200": ({"age": 7200}, 3),
     "sealed-false": ({"sealed": False}, 3),
     "sealed-one": ({"sealed": 1}, 3),
@@ -111,11 +109,15 @@ def test_a_closed_gate_refuses_before_any_change(box, backup, cmd, seal, rc):
     assert box.snapshot() == before
 
 
-@pytest.mark.parametrize("age", [0, 1799, 1799.5])
-def test_a_seal_younger_than_30_minutes_for_the_previous_epoch_opens_the_gate(box, backup, age):
+@pytest.mark.parametrize("cmd", ["swap", "beacon", "executor"])
+@pytest.mark.parametrize("age", [0, 1800, 3000, 4320, 4499.5])
+def test_a_seal_younger_than_75_minutes_for_the_previous_epoch_opens_the_gate(
+    box, backup, cmd, age
+):
+    # D67: the TEST gate used to close 30 minutes into the 72-minute window (4320 s is one epoch).
     box.pull(NEW_REF)
     box.seal(age=age)
-    box.run(*call("swap", backup), mutates={CHALLENGE})
+    box.run(*call(cmd, backup), mutates={CHALLENGE if cmd != "beacon" else BEACON})
 
 
 def test_a_second_swap_replaces_the_image_line_of_the_first_instead_of_adding_one(box, backup):
@@ -130,25 +132,33 @@ def test_a_second_swap_replaces_the_image_line_of_the_first_instead_of_adding_on
     assert box.container(CHALLENGE)["Config"]["Image"] == other
 
 
-# HT_GATE_MAX_AGE_S replaces the 30-min limit and nothing else of the gate.
-LIMIT = {"HT_GATE_MAX_AGE_S": "4000"}
+# HT_GATE_MAX_AGE_S replaces the 75-minute limit and nothing else of the gate.
+LIMIT = {"HT_GATE_MAX_AGE_S": "1800"}
 
 
-@pytest.mark.parametrize("cmd", ["swap", "beacon"])
-@pytest.mark.parametrize("age", [1800, 3000, 3999.5])
-def test_the_age_override_opens_a_gate_that_only_the_age_closed(box, backup, cmd, age):
+@pytest.mark.parametrize("cmd", ["swap", "beacon", "executor"])
+@pytest.mark.parametrize("age", [1800, 3000, 4499.5])
+def test_the_age_override_closes_a_gate_that_only_the_age_opened(box, backup, cmd, age):
     box.pull(NEW_REF)
     box.seal(age=age)
     before = box.snapshot()
-    box.run(*call(cmd, backup), rc=3)  # without the setting the gate is closed
+    out = box.run(*call(cmd, backup), rc=3, env=LIMIT).out
     assert box.snapshot() == before
+    assert "age limit overridden: HT_GATE_MAX_AGE_S=1800 (default 4500)" in out
+    box.run(*call(cmd, backup), mutates={BEACON if cmd == "beacon" else CHALLENGE})  # no setting
+
+
+@pytest.mark.parametrize("cmd", ["swap", "beacon"])
+def test_a_seal_younger_than_the_override_still_opens_the_gate(box, backup, cmd):
+    box.pull(NEW_REF)
+    box.seal(age=1799.5)
     out = box.run(*call(cmd, backup), mutates={CHALLENGE if cmd == "swap" else BEACON}, env=LIMIT)
-    assert "age limit overridden: HT_GATE_MAX_AGE_S=4000 (default 1800)" in out.out
+    assert "age limit overridden: HT_GATE_MAX_AGE_S=1800 (default 4500)" in out.out
 
 
 OVERRIDDEN = {  # what the override must still refuse
-    "age-at-the-new-limit": ({"age": 4000}, 3),
-    "age-over-the-new-limit": ({"age": 4000.5}, 3),
+    "age-at-the-new-limit": ({"age": 1800}, 3),
+    "age-over-the-new-limit": ({"age": 1800.5}, 3),
     "age-negative": ({"age": -1}, 3),
     "sealed-false": ({"sealed": False}, 3),
     "sealed-string": ({"sealed": "true"}, 3),
@@ -164,27 +174,29 @@ OVERRIDDEN = {  # what the override must still refuse
 @pytest.mark.parametrize(("seal", "rc"), OVERRIDDEN.values(), ids=OVERRIDDEN)
 def test_the_age_override_keeps_readyz_sealed_and_previous_epoch(box, backup, cmd, seal, rc):
     box.pull(NEW_REF)
-    box.seal(**{"age": 3000, **seal})
+    box.seal(**{"age": 1000, **seal})
     before = box.snapshot()
     box.run(*call(cmd, backup), rc=rc, env=LIMIT)
     assert box.snapshot() == before
 
 
-@pytest.mark.parametrize("value", ["abc", "0", "-5", "4321", "99999", "1e3", "1800 ", "07", "1.5"])
+@pytest.mark.parametrize("value", ["abc", "0", "-5", "4501", "99999", "1e3", "1800 ", "07", "1.5"])
 def test_a_malformed_age_override_is_refused_before_any_call(box, backup, value):
     box.pull(NEW_REF)
     box.seal(age=60)
     before = box.snapshot()
     out = box.run(*call("swap", backup), rc=4, env={"HT_GATE_MAX_AGE_S": value}).out
-    assert "HT_GATE_MAX_AGE_S must be 1..4320 seconds" in out
+    assert "HT_GATE_MAX_AGE_S must be 1..4500 seconds" in out
     assert box.snapshot() == before
     assert box.polls(f"{MASTER}/readyz") == 0
 
 
-def test_the_default_gate_does_not_mention_an_override(box, backup):
+@pytest.mark.parametrize("env", [None, {"HT_GATE_MAX_AGE_S": "4500"}], ids=["unset", "4500"])
+def test_the_default_gate_does_not_mention_an_override(box, backup, env):
+    # 4500 is the default as well as the largest value the variable takes
     box.pull(NEW_REF)
-    box.seal(age=60)
-    assert "overridden" not in box.run(*call("swap", backup), mutates={CHALLENGE}).out
+    box.seal(age=4499.5)
+    assert "overridden" not in box.run(*call("swap", backup), mutates={CHALLENGE}, env=env).out
 
 
 # --- backup validity ------------------------------------------------------------------------

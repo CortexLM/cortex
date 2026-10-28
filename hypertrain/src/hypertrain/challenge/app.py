@@ -641,6 +641,12 @@ def create_app(
         admin(authorization)
         return await run(store.for_run(run_id).trial_reference_v2, run_id, admission_id)
 
+    @app.post("/v2/runs/{run_id}/admin/join/{admission_id}/reseed")
+    async def reseed_v2(run_id: str, admission_id: str, authorization: Auth = None) -> Any:
+        """The operator's way back for an identity whose trial window lapsed (ADR 0010)."""
+        admin(authorization)
+        return await run(store.for_run(run_id).admission_v2, run_id, "reseed", b"", admission_id)
+
     @app.post("/v2/runs/{run_id}/admin/join/{admission_id}/finalize")
     async def trial_final_v2(
         run_id: str, admission_id: str, request: Request, authorization: Auth = None
