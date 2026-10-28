@@ -105,12 +105,15 @@ MUTANTS = [
         "id": "gap-bootstrap-origin-id-any-valid-id",
         "invariants": ["BND-10", "BND-13"],
         "path": ESCROW,
-        "old": "if o.origin_id != bootstrap_origin_id(self.run_id, bootstrap.allocation_hash, i):",
+        "old": 'raise EscrowError("BOOTSTRAP_ORIGIN_DOMAIN")',
         "new": (
-            "if o.origin_id not in {\n"
-            "                    bootstrap_origin_id(self.run_id, bootstrap.allocation_hash, j)\n"
-            "                    for j in range(len(bootstrap.origins))\n"
-            "                }:"
+            "keys = [self._origin_key()] if hasattr(self, '_origin_key') else []\n"
+            "                    pin = bootstrap.allocation_hash\n"
+            "                    if o.origin_id not in {\n"
+            "                        bootstrap_origin_id(self.run_id, pin, j, *keys)\n"
+            "                        for j in range(len(bootstrap.origins))\n"
+            "                    }:\n"
+            "                        raise EscrowError('BOOTSTRAP_ORIGIN_DOMAIN')"
         ),
         "tests": [BOOTSTRAP_ORDER],
         "why": "a bootstrap origin may carry the id of another index of the same pinned list.",
@@ -119,12 +122,15 @@ MUTANTS = [
         "id": "gap-genesis-origin-id-any-valid-id",
         "invariants": ["BND-10", "BND-14"],
         "path": ESCROW,
-        "old": "if o.origin_id != genesis_origin_id(self.run_id, genesis.allocation_hash, i):",
+        "old": 'raise EscrowError("GENESIS_ORIGIN_DOMAIN")',
         "new": (
-            "if o.origin_id not in {\n"
-            "                    genesis_origin_id(self.run_id, genesis.allocation_hash, j)\n"
-            "                    for j in range(len(genesis.origins))\n"
-            "                }:"
+            "keys = [self._origin_key()] if hasattr(self, '_origin_key') else []\n"
+            "                    pin = genesis.allocation_hash\n"
+            "                    if o.origin_id not in {\n"
+            "                        genesis_origin_id(self.run_id, pin, j, *keys)\n"
+            "                        for j in range(len(genesis.origins))\n"
+            "                    }:\n"
+            "                        raise EscrowError('GENESIS_ORIGIN_DOMAIN')"
         ),
         "tests": [GENESIS_ORDER],
         "why": "a genesis origin may carry the id of another index of the same pinned list.",

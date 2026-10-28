@@ -9,6 +9,7 @@ budget, issuance cap) is checked by the real `EscrowV2`.
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -24,17 +25,14 @@ from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.challenge.trust_v2 import FundedStatus, audit_floor
 from hypertrain.data.store import LocalFSStore
-from hypertrain.ledger import Params
+from hypertrain.ledger import Params, escrow_v2
 from hypertrain.ledger.escrow_v2 import (
     EscrowV2,
     FinalityEvidence,
     RewardWork,
     authority_message,
-    bootstrap_origin_id,
     digest,
     genesis_allocation_hash,
-    genesis_origin_id,
-    reward_origin_id,
 )
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.envelope_v2 import EnvelopeV2, seal
@@ -96,6 +94,22 @@ BASE_POLICY: dict[str, Any] = {
 
 def econ(**fields: Any) -> EconomicsPolicyV2:
     return EconomicsPolicyV2.model_validate({**BASE_POLICY, **fields})
+
+
+def id_key_of(holder: Any) -> bytes | None:
+    """The key under which a ledger derives the ids of its origins, read from the ledger itself or
+    from the fixture module whose `ledger()` builds it. None where the ids are not keyed."""
+    return getattr(holder, "id_key", None) or getattr(holder, "ID_KEY", None)
+
+
+def origin_id_of(holder: Any, kind: str, *parts: Any) -> str:
+    """The documented origin id `<kind>_origin_id(*parts)` ('genesis', 'bootstrap' or 'reward') as
+    the ledger `holder` derives it. The derivation takes the key of the ledger when it has one
+    (escrow-relay-fixes, ADR 0014 part 1), so no test names a key or a derivation of its own."""
+    derive = getattr(escrow_v2, f"{kind}_origin_id")
+    if "id_key" in inspect.signature(derive).parameters:
+        return str(derive(*parts, id_key_of(holder)))
+    return str(derive(*parts))
 
 
 def refuses(call: Callable[[], object]) -> bool:
@@ -240,7 +254,7 @@ def synthetic_round(
     cold_of = {hot.ss58: cold.ss58 for hot, cold in workers}
     origins = [
         OriginAllocation(
-            origin_id=reward_origin_id(run_id, w, hotkey, digest(final)),
+            origin_id=origin_id_of(fixture, "reward", run_id, w, hotkey, digest(final)),
             owner=cold_of[hotkey],
             units=paid[hotkey],
             mature_at=MATURE_AT,
@@ -296,13 +310,16 @@ def pinned_bootstrap(
     signer: Keypair | None = None,
     pin: str | None = None,
     origin_ids: Sequence[str] | None = None,
+    ledger: Any = None,
 ) -> ProductionBootstrap:
     """A ProductionBootstrap for `allocation` [(owner, units, mature_at)], signed by `signer`
     (default: the coordinator). `pin` overrides the allocation_hash it states and `origin_ids`
-    the ids of its origins (default: the documented bootstrap origin ids)."""
+    the ids of its origins (default: the documented bootstrap origin ids, derived as `ledger`
+    does when the ledger is not the one `fixture` builds)."""
     allocation_hash = pin or genesis_allocation_hash(allocation)
     ids = origin_ids or [
-        bootstrap_origin_id(run_id, allocation_hash, i) for i in range(len(allocation))
+        origin_id_of(fixture if ledger is None else ledger, "bootstrap", run_id, allocation_hash, i)
+        for i in range(len(allocation))
     ]
     unsigned = ProductionBootstrap(
         run_id=run_id,
@@ -346,8 +363,10 @@ def genesis_request(
     alloc: Sequence[tuple[str, int, int]],
     *,
     pin: str | None = None,
+    origin_ids: Mapping[int, str] | None = None,
 ) -> TestGenesis:
-    """A coordinator-signed TestGenesis of `alloc` (default pin: the hash of `alloc` itself)."""
+    """A coordinator-signed TestGenesis of `alloc` (default pin: the hash of `alloc` itself);
+    `origin_ids` replaces the id of the origins it names, by index."""
     allocation_hash = pin or genesis_allocation_hash(alloc)
     unsigned = TestGenesis(
         run_id=run_id,
@@ -355,7 +374,9 @@ def genesis_request(
         total_units=sum(units for _, units, _ in alloc),
         origins=[
             OriginAllocation(
-                origin_id=genesis_origin_id(run_id, allocation_hash, i),
+                origin_id=(origin_ids or {}).get(
+                    i, origin_id_of(fixture, "genesis", run_id, allocation_hash, i)
+                ),
                 owner=owner,
                 units=units,
                 mature_at=mature_at,
@@ -526,20 +547,41 @@ class Production:
     def status(self) -> Any:
         return self.admission.status(self.eco.E.HOT.ss58, now=self.store._now(self.store._db))
 
+    def bootstrap_body(
+        self, *, signer: Keypair | None = None, operation: str | None = None
+    ) -> ProductionBootstrap:
+        """The fixture's pinned 30,000-unit bootstrap, its origin ids derived by the ledger of this
+        run (the store keys them with its own coordinator secret, the fixture module cannot)."""
+        return pinned_bootstrap(
+            self.eco.E,
+            self.run_id,
+            self.eco.B.ALLOC,
+            operation=operation or self.eco.B.OP,
+            signer=signer,
+            ledger=self.escrow,
+        )
+
+    def signed_bootstrap(
+        self, *, signer: Keypair | None = None, operation: str | None = None
+    ) -> bytes:
+        """`bootstrap_body` in the coordinator's envelope, as the route takes it."""
+        body = self.bootstrap_body(signer=signer, operation=operation)
+        return canonicalize(seal(self.eco.E.COORD, "ProductionBootstrap", self.run_id, body, 10000))
+
     def bootstrap(self) -> dict[str, Any]:
         """Beacon 1 (BLS-verified), the coordinator-signed bootstrap, and its maturity."""
         self.eco.beacon(self.store, 1, bls=True)
         receipt: dict[str, Any] = self.store.production_bootstrap_v2(
-            self.run_id, self.eco.signed(self.run_id)
+            self.run_id, self.signed_bootstrap()
         )
-        origins = tuple(o.origin_id for o in self.eco.B.bootstrap(self.run_id).origins)
+        origins = tuple(o.origin_id for o in self.bootstrap_body().origins)
         self.escrow.mature("55" * 32, origins, 1)
         return receipt
 
     def admit_and_lock(self, units: int) -> None:
         """The fixture hotkey as an ACTIVE admission holding `units` locked of its coldkey's."""
         E = self.eco.E
-        origin = self.eco.B.bootstrap(self.run_id).origins[0].origin_id
+        origin = self.bootstrap_body().origins[0].origin_id
         self.store._db.execute(
             "INSERT INTO admissions_v2(admission_id, run_id, hotkey, coldkey, state, clean_count, "
             "canary_blocks, strikes, pending_dispute, reason, policy_hash, received_beacon, "
@@ -582,7 +624,13 @@ def capacity_run(root: Path, *, reserve: bool) -> Iterator[tuple[ModuleType, Cha
         root / "net", SimpleNamespace(param=None)
     )
     network = next(network_generator)
-    run_generator = capacity.tiny.__wrapped__(network, root / "run")
+    # The fixture takes the pytest `request` where it builds the environment-pinned variant
+    # (audit-integrity-2); the unpinned run asks for no parameter.
+    tiny = capacity.tiny.__wrapped__
+    extra = (
+        (SimpleNamespace(param=None),) if "request" in inspect.signature(tiny).parameters else ()
+    )
+    run_generator = tiny(network, root / "run", *extra)
     try:
         run = next(run_generator)
         store, manifest = capacity.reserved(run) if reserve else run

@@ -29,11 +29,7 @@ from hypertrain.challenge.trust_v2 import (
     select_audit,
 )
 from hypertrain.data.store import LocalFSStore
-from hypertrain.ledger.escrow_v2 import (
-    bootstrap_origin_id,
-    genesis_allocation_hash,
-    genesis_origin_id,
-)
+from hypertrain.ledger.escrow_v2 import genesis_allocation_hash
 from hypertrain.miner.coldkey_ops import required_units
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.keys import Keypair
@@ -56,6 +52,7 @@ from .support_bounds import (
     genesis_request,
     ledger_for,
     nothing_issued,
+    origin_id_of,
     pinned_bootstrap,
     pinned_production,
     refuses,
@@ -126,7 +123,8 @@ def test_the_run_bound_edges_zero_detection_zero_goal_and_every_field_at_its_max
     strict=True,
     raises=AssertionError,
     reason="BND-02+BND-D04: no factor of the bound may exceed the fraction one (beta_ppm <= 10^6) "
-    "so a single policy field cannot make the inequality vacuous [candidate]",
+    "so a single policy field cannot make the inequality vacuous [candidate] "
+    "[fix-lot: decision (product choice pending)]",
 )
 def test_beta_cannot_exceed_one_so_one_field_cannot_make_the_bound_vacuous() -> None:
     # Control: with every fraction at one, a goal a billion times the stake is out of reach.
@@ -407,13 +405,16 @@ def test_a_bootstrap_other_than_the_owner_pinned_allocation_is_refused_and_issue
             fixture,
             run,
             allocation,
-            origin_ids=[bootstrap_origin_id(run, pin, 0), genesis_origin_id(run, pin, 1)],
+            origin_ids=[
+                origin_id_of(escrow, "bootstrap", run, pin, 0),
+                origin_id_of(escrow, "genesis", run, pin, 1),
+            ],
         ),
         "an origin id of another run": lambda: pinned_bootstrap(
             fixture,
             run,
             allocation,
-            origin_ids=[bootstrap_origin_id("ab" * 32, pin, i) for i in range(2)],
+            origin_ids=[origin_id_of(escrow, "bootstrap", "ab" * 32, pin, i) for i in range(2)],
         ),
         "an authority signature by another key": lambda: pinned_bootstrap(
             fixture, run, allocation, signer=fixture.OTHER

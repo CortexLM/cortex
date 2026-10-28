@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from hypertrain.challenge.store import ChallengeError
 from hypertrain.ledger.escrow_v2 import EscrowError
@@ -40,13 +41,23 @@ def escrow_of(world: World) -> Any:
 def client_event_over_http(
     world: World, kind: str, key: Keypair, operation_id: str, origin: str
 ) -> Any:
-    """What a funded coldkey sends to the public escrow routes, under an id of its choice."""
-    if kind == "transfer":
-        route, name = "transfer", "EscrowTransfer"
-        body: Any = self_transfer(key.ss58, operation_id, origin)
-    else:
-        route, name = "lock", "EscrowLock"
-        body = contest_lock(key.ss58, operation_id, origin)
+    """What a funded coldkey sends to the public escrow routes, under an id of its choice.
+
+    The ids a server derives may live in a key space no client id can name (ADR 0014 part 1: the
+    prefix `srv:` is not a Hex64). The event model then refuses the id before anything is signed
+    or sent, which is a refusal of the client event: it is answered like the route answers a
+    body that fails validation (422)."""
+    try:
+        if kind == "transfer":
+            route, name = "transfer", "EscrowTransfer"
+            body: Any = self_transfer(key.ss58, operation_id, origin)
+        else:
+            route, name = "lock", "EscrowLock"
+            body = contest_lock(key.ss58, operation_id, origin)
+    except ValidationError as error:
+        if {issue["loc"] for issue in error.errors()} != {("operation_id",)}:
+            raise
+        return SimpleNamespace(status_code=422, text=str(error))
     return world.client.post(
         world.network.url + "/escrow/" + route, json=world.network.signed(key, name, body)
     )

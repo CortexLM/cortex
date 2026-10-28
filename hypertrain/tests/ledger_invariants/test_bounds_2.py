@@ -106,7 +106,8 @@ def test_a_test_mode_run_has_no_economic_bound_record_to_write(tmp_path: Path) -
     strict=True,
     raises=AssertionError,
     reason="BND-03+BND-D06: the economic-bound gate must reject a record bound to another policy "
-    "or without a coordinator receipt, not accept any row of that kind [candidate]",
+    "or without a coordinator receipt, not accept any row of that kind [candidate] "
+    "[fix-lot: none (no design yet)]",
 )
 def test_a_forged_economic_bound_row_does_not_open_production_influence(tmp_path: Path) -> None:
     with production_run(tmp_path, G_max_units=1100) as run:
@@ -215,9 +216,9 @@ def test_a_production_bootstrap_whose_authority_signature_is_not_the_coordinator
     tmp_path: Path,
 ) -> None:
     with production_run(tmp_path) as run:
-        E, B = run.eco.E, run.eco.B
+        E = run.eco.E
         run.eco.beacon(run.store, 1, bls=True)
-        forged = B.bootstrap(run.run_id, signer=E.OTHER)  # the envelope below is the coordinator's
+        forged = run.bootstrap_body(signer=E.OTHER)  # the envelope below is the coordinator's
         raw = canonicalize(seal(E.COORD, "ProductionBootstrap", run.run_id, forged, 10_000))
         assert error_code(lambda: run.store.production_bootstrap_v2(run.run_id, raw)) == (
             "ORIGIN_AUTHORITY"
@@ -225,7 +226,7 @@ def test_a_production_bootstrap_whose_authority_signature_is_not_the_coordinator
         assert run.eco.issued(run.store) == 0
         nonces = run.store._db.execute("SELECT COUNT(*) FROM accepted_v2").fetchone()[0]
         assert nonces == 0  # the refused body did not reserve the nonce
-        run.store.production_bootstrap_v2(run.run_id, run.eco.signed(run.run_id))
+        run.store.production_bootstrap_v2(run.run_id, run.signed_bootstrap())
         assert run.eco.issued(run.store) == 30_000
 
 
@@ -236,13 +237,11 @@ def test_a_second_signed_bootstrap_is_refused_by_the_store_and_the_first_replays
     tmp_path: Path,
 ) -> None:
     with production_run(tmp_path) as run:
-        E, B = run.eco.E, run.eco.B
         run.eco.beacon(run.store, 1, bls=True)
-        raw = run.eco.signed(run.run_id)
+        raw = run.signed_bootstrap()
         first = run.store.production_bootstrap_v2(run.run_id, raw)
         assert run.store.production_bootstrap_v2(run.run_id, raw) == first
-        again = B.bootstrap(run.run_id, operation="55" * 32)
-        second = canonicalize(seal(E.COORD, "ProductionBootstrap", run.run_id, again, 10_000))
+        second = run.signed_bootstrap(operation="55" * 32)
         with pytest.raises(ChallengeError) as refused:
             run.store.production_bootstrap_v2(run.run_id, second)
         assert (refused.value.status, refused.value.detail) == (
@@ -280,7 +279,8 @@ def test_a_policy_object_edited_in_the_object_store_cannot_become_the_policy_of_
     strict=True,
     raises=AssertionError,
     reason="BND-04+BND-D07: the dataset linkage of a run must be fixed once a round exists; the "
-    "operator route replaces it at any time [candidate]",
+    "operator route replaces it at any time [candidate] "
+    "[fix-lot: decision (product choice pending)]",
 )
 def test_the_dataset_linkage_cannot_be_replaced_once_a_round_exists(tmp_path: Path) -> None:
     with service_world(tmp_path) as world:
@@ -418,7 +418,7 @@ def test_test_genesis_units_are_collateral_and_never_payable(li_escrow: ModuleTy
     raises=AssertionError,
     reason="BND-15+BND-D02: a test-ledger run must never emit real weight through get_weights; its "
     "matured live reward is paid like a production one today (documented in network-v2.md) "
-    "[candidate]",
+    "[candidate] [fix-lot: decision (product choice pending)]",
 )
 def test_a_test_ledger_reward_never_reaches_the_epoch_weights(
     li_escrow: ModuleType, tmp_path: Path
@@ -469,7 +469,8 @@ def test_a_manifest_whose_economics_policy_object_is_missing_creates_no_run(
     strict=True,
     raises=AssertionError,
     reason="BND-25+BND-D05: a refused run creation must leave no run row, so the same envelope can "
-    "be posted again once the cause is fixed; the row is committed before the services are built",
+    "be posted again once the cause is fixed; the row is committed before the services are built "
+    "[fix-lot: none (no design yet)]",
 )
 def test_a_production_run_without_a_cuda_qualification_is_refused_and_leaves_no_run_row(
     tmp_path: Path,

@@ -19,7 +19,6 @@ import pytest
 from pydantic import ValidationError
 
 from hypertrain.challenge.trust_v2 import economic_bound
-from hypertrain.ledger.escrow_v2 import bootstrap_origin_id, genesis_origin_id
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -42,8 +41,10 @@ from .support_bounds import (
     capacity_run,
     creation,
     econ,
+    genesis_request,
     ledger_for,
     nothing_issued,
+    origin_id_of,
     pinned_bootstrap,
     pinned_production,
     production_run,
@@ -51,7 +52,7 @@ from .support_bounds import (
     synthetic_round,
     worker,
 )
-from .support_credit import credited, make_genesis
+from .support_credit import credited
 from .support_gaps_bootstrap import (
     SmallAuditedRound,
     build_small_audited_round,
@@ -78,7 +79,8 @@ from .support_opids import StepRefused, fresh_id
     strict=True,
     raises=StepRefused,
     reason="BND-24+T-BOOTSTRAP-02+CL-01: a client event under the maturity id of one origin must "
-    "not stop another owner's origin due at the same round, nor the next beacon push",
+    "not stop another owner's origin due at the same round, nor the next beacon push "
+    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
 )
 def test_a_squatted_maturity_id_never_blocks_another_owners_origin_or_the_next_push(
     tmp_path: Path, kind: str
@@ -140,7 +142,10 @@ def test_a_bootstrap_with_the_pinned_origin_ids_in_the_wrong_order_is_refused_an
         li_escrow,
         run,
         allocation,
-        origin_ids=[bootstrap_origin_id(run, pin, 1), bootstrap_origin_id(run, pin, 0)],
+        origin_ids=[
+            origin_id_of(escrow, "bootstrap", run, pin, 1),
+            origin_id_of(escrow, "bootstrap", run, pin, 0),
+        ],
     )
     assert [o.units for o in swapped.origins] == [20_000, 10_000]
     assert error_code(lambda: escrow.production_bootstrap(swapped)) == "BOOTSTRAP_ORIGIN_DOMAIN"
@@ -157,15 +162,20 @@ def test_a_test_genesis_with_the_pinned_origin_ids_in_the_wrong_order_is_refused
     run = escrow.run_id
     pin = escrow.policy.genesis_allocation_hash
     assert pin is not None
-    swapped = make_genesis(
+    allocation = [(li_escrow.COLD.ss58, 20000, 1), (li_escrow.OTHER.ss58, 10000, 1)]
+    swapped = genesis_request(
         li_escrow,
         run,
-        origin_ids={0: genesis_origin_id(run, pin, 1), 1: genesis_origin_id(run, pin, 0)},
+        allocation,
+        origin_ids={
+            0: origin_id_of(escrow, "genesis", run, pin, 1),
+            1: origin_id_of(escrow, "genesis", run, pin, 0),
+        },
     )
     assert swapped.allocation_hash == pin
     assert error_code(lambda: escrow.test_genesis(swapped)) == "GENESIS_ORIGIN_DOMAIN"
     assert nothing_issued(escrow)
-    escrow.test_genesis(make_genesis(li_escrow, run))
+    escrow.test_genesis(genesis_request(li_escrow, run, allocation))
     assert escrow.balances().issued == 30_000
 
 
@@ -362,7 +372,7 @@ def test_a_policy_amount_may_reach_two_to_the_53_minus_one_and_not_one_unit_more
     raises=AssertionError,
     reason="BND-02+T-BOOTSTRAP-10+CL-23: a production run whose policy fails q*s*beta*(R+S)>=G "
     "is created, burns its run id and is refused first at the economic-bound route, possibly "
-    "after units were issued",
+    "after units were issued [fix-lot: none (no design yet)]",
 )
 def test_a_production_policy_that_fails_the_economic_bound_creates_no_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -426,7 +436,7 @@ def forged_bound_record(run: Any, forgery: str) -> dict[str, Any]:
     raises=AssertionError,
     reason="BND-03+T-BOOTSTRAP-16+BND-04: the closure behind production eligibility accepts any "
     "row of kind economic-bound, whoever wrote it; defence in depth, a row needs database write "
-    "access",
+    "access [fix-lot: none (no design yet)]",
 )
 def test_a_stored_bound_row_that_economic_bound_v2_did_not_write_opens_no_influence(
     tmp_path: Path, forgery: str
@@ -462,7 +472,8 @@ CREATION_REFUSALS = {
     strict=True,
     raises=AssertionError,
     reason="BND-25+T-BOOTSTRAP-18+CL-40: the run row is committed before its services are built, "
-    "so a refused creation leaves a run that the same envelope can no longer create",
+    "so a refused creation leaves a run that the same envelope can no longer create "
+    "[fix-lot: none (no design yet)]",
 )
 def test_a_refused_run_creation_leaves_no_run_row_and_is_refused_the_same_way_again(
     tmp_path: Path, case: str
