@@ -774,7 +774,8 @@ def bytes_stored_by_one_payout(li_escrow: ModuleType, origins: int) -> int:
     raises=AssertionError,
     reason="WGT-21+WGT-D4: the bytes one payout adds to the store do not grow with the number of "
     "origins the escrow holds (every escrow event stores a full snapshot; ADR 0014 part 4.6 "
-    "defers the cure to a maintainer decision) [fix-lot: escrow-relay-fixes ADR0014-P4]",
+    "landed without the digest-in-preimage cure, which needs a maintainer decision) "
+    "[fix-lot: decision (product choice pending)]",
 )
 def test_the_storage_cost_of_one_payout_does_not_grow_with_the_number_of_origins(
     li_escrow: ModuleType,
