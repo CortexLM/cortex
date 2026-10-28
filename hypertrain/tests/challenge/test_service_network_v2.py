@@ -20,6 +20,7 @@ from hypertrain.challenge.app import Config, create_app
 from hypertrain.ledger import Params
 from hypertrain.ledger.escrow_v2 import (
     authority_message,
+    escrow_id_key,
     genesis_allocation_hash,
     genesis_origin_id,
 )
@@ -716,7 +717,9 @@ def network(tmp_path: Path, request):
         assert response.status_code == 200, response.text
         origins = [
             OriginAllocation(
-                origin_id=genesis_origin_id(manifest.run_id(), econ.genesis_allocation_hash, i),
+                origin_id=genesis_origin_id(
+                    manifest.run_id(), econ.genesis_allocation_hash, i, escrow_id_key(COORD._secret)
+                ),
                 owner=k.ss58,
                 units=10000,
                 mature_at=1,
@@ -1889,7 +1892,7 @@ def shadow_acceptance(reserved_trial):
     )
     signed_receipt = n.signed(AUDITORS[0], "ShadowReplayReceiptV1", receipt)
     origin = OriginAllocation(
-        origin_id=shadow_origin_id(binding),
+        origin_id=shadow_origin_id(binding, n.store._services(n.manifest.run_id())[0].id_key),
         owner=binding.coldkey,
         units=escrow.policy.round_reward_units,
         mature_at=binding.mature_at,

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Literal
 
 from hypertrain.gpu_ops.journal import durable_write, flock
+from hypertrain.protocol.env_pins import EnvPinUnhonorable, pinned_environ, require_honorable
 from hypertrain.protocol.envelope_v2 import load_json
 from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.protocol.jcs import canonicalize
@@ -31,6 +32,14 @@ from hypertrain.protocol.messages_v2 import IslandJobV1, RankWorkResult
 
 class IslandFailure(RuntimeError):
     """No artifact may be committed after this failure."""
+
+
+class EnvPinRefused(IslandFailure):
+    """The manifest's environment pin cannot be honored on this host.
+
+    Raised by the parent before any capacity is charged or rank started. It is a fault of the
+    host, never evidence about the miner's work.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -558,6 +567,38 @@ def validate_artifacts(job: IslandJobV1, directory: Path) -> IslandArtifacts:
     )
 
 
+def island_env(
+    job: IslandJobV1,
+    *,
+    trace: bool,
+    window: int | None = None,
+    base: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """The environment of an island worker: ``base`` (default: this process) under the manifest's
+    pins, then the fixed keys. A job without pins gets exactly ``base`` plus the fixed keys."""
+    ref = job.manifest.training.reference_spec
+    env = pinned_environ(os.environ if base is None else base, ref.env.pin())
+    env.update(
+        CUBLAS_WORKSPACE_CONFIG=ref.env.CUBLAS_WORKSPACE_CONFIG,
+        OMP_NUM_THREADS="1",
+        CUDA_DISABLE_PTX_JIT=ref.env.CUDA_DISABLE_PTX_JIT,
+        HT_ISLAND_TRACE="1" if trace else "0",
+    )
+    if window is not None:
+        env["HT_ISLAND_WINDOW"] = str(window)
+    return env
+
+
+def _require_honorable(job: IslandJobV1) -> None:
+    pin = job.manifest.training.reference_spec.env.pin()
+    if pin is None:
+        return
+    try:
+        require_honorable(pin)
+    except EnvPinUnhonorable as error:
+        raise EnvPinRefused(f"environment pin cannot be honored on this host: {error}") from error
+
+
 def launch_island(
     job: IslandJobV1,
     directory: Path,
@@ -597,6 +638,7 @@ def launch_island(
             if time.time() >= job.deadline or cancel is not None and cancel.is_set():
                 raise IslandFailure("job expired during publication validation")
             return artifacts
+        _require_honorable(job)
         with tempfile.TemporaryDirectory(prefix="attempt-", dir=directory) as tmp:
             attempt = Path(tmp)
             for relative in job.object_paths.values():
@@ -605,14 +647,7 @@ def launch_island(
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
             durable_write(attempt / "job.json", canonicalize(job.model_dump(mode="json")))
-            ref = job.manifest.training.reference_spec
-            env = dict(
-                os.environ,
-                CUBLAS_WORKSPACE_CONFIG=ref.env.CUBLAS_WORKSPACE_CONFIG,
-                OMP_NUM_THREADS="1",
-                CUDA_DISABLE_PTX_JIT=ref.env.CUDA_DISABLE_PTX_JIT,
-                HT_ISLAND_TRACE="1" if trace else "0",
-            )
+            env = island_env(job, trace=trace)
             if devices is not None:
                 env.update(CUDA_VISIBLE_DEVICES=",".join(devices), HT_GPU_UUIDS=",".join(devices))
             if capacity is not None:
@@ -655,18 +690,11 @@ def launch_window(job: IslandJobV1, published: Path, leaf: int, *, timeout: floa
             backend = "cuda"
         case _:
             raise IslandFailure("publication backend missing")
-    ref = job.manifest.training.reference_spec
-    env = dict(
-        os.environ,
-        CUBLAS_WORKSPACE_CONFIG=ref.env.CUBLAS_WORKSPACE_CONFIG,
-        OMP_NUM_THREADS="1",
-        CUDA_DISABLE_PTX_JIT=ref.env.CUDA_DISABLE_PTX_JIT,
-        HT_ISLAND_TRACE="1",
-        HT_ISLAND_WINDOW=str(leaf),
-    )
+    env = island_env(job, trace=True, window=leaf)
     with flock(published.parent / "launch.lock"):
         if all(p.is_file() for p in outputs):
             return
+        _require_honorable(job)
         proc = subprocess.Popen(  # noqa: S603 - fixed interpreter/package, typed layout
             launch_argv(job, published, backend),
             env=env,
@@ -695,7 +723,12 @@ def _launch_unbounded(
     env: dict[str, str],
     cancel: threading.Event | None,
 ) -> None:
-    """Original ordinary launcher lifecycle; no new resource policy for legacy callers."""
+    """Original ordinary launcher lifecycle; no new resource policy for legacy callers.
+
+    The manifest's pins are applied here too (idempotent), so a direct caller that passes its own
+    environment, such as the GPU operation script, cannot forget them."""
+    _require_honorable(job)
+    env = pinned_environ(env, job.manifest.training.reference_spec.env.pin())
     with (
         open(attempt / "stdout.log", "xb", buffering=0) as stdout,
         open(attempt / "stderr.log", "xb+", buffering=0) as stderr,

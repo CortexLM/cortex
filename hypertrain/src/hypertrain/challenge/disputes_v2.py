@@ -16,7 +16,7 @@ from typing import Any, Literal, cast
 from pydantic import Field, JsonValue, StrictBool, StrictInt
 
 from hypertrain.auditor.island_bisect import RefereeEvidence
-from hypertrain.ledger.escrow_v2 import EscrowV2, Settlement
+from hypertrain.ledger.escrow_v2 import EscrowError, EscrowV2, Settlement
 from hypertrain.protocol.envelope_v2 import Intake, parse_envelope
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -208,6 +208,7 @@ class DisputesV2:
         if policy.digest() != escrow.manifest.network.dispute_policy_hash:
             raise DisputeError("DISPUTE_POLICY_HASH")
         self.escrow, self.policy, self.key = escrow, policy, coordinator
+        escrow.contest_settlement = self.contest_settlement
         self.run_id, self.db = escrow.run_id, escrow.db
         self.contest_of, self.owner_of, self.span = contest_of, owner_of, span
         self.condition = threading.Condition()
@@ -383,6 +384,13 @@ class DisputesV2:
             ).fetchone()
             if lockrow is None or lockrow[0] != "LOCK_CONTEST":
                 raise DisputeError("UNFUNDED_CONTEST")
+            # A bond is named by its owner; refuse a name that is already a dispute or an origin.
+            if self.db.execute(
+                "SELECT 1 FROM disputes_v2 WHERE id=? UNION ALL "
+                "SELECT 1 FROM escrow_origins WHERE origin=?",
+                (model.bond_lock, model.bond_lock),
+            ).fetchone():
+                raise DisputeError("CONTEST_LOCK_ID_COLLISION")
             lock = EscrowLock.model_validate_json(lockrow[1])
             amount = self.db.execute(
                 "SELECT COALESCE(SUM(units),0) FROM escrow_units WHERE "
@@ -913,14 +921,20 @@ class DisputesV2:
         self.notify()
         return turn
 
-    def settlement(self, lock_id: str) -> DisputeSettlement:
+    def contest_settlement(self, lock: EscrowLock) -> DisputeSettlement:
+        """Settlement of the dispute that took `lock` as its bond, found by its dispute id."""
+        if lock.dispute_id is None:
+            raise EscrowError("UNACCEPTED_SETTLEMENT")
         row = self.db.execute(
-            "SELECT turn FROM disputes_v2 WHERE id=? OR json_extract(turn,'$.lock_id')=?",
-            (lock_id, lock_id),
+            "SELECT turn FROM disputes_v2 WHERE id=?", (lock.dispute_id,)
         ).fetchone()
-        if row is None:
-            raise DisputeError("UNKNOWN_CONTEST_LOCK")
-        turn = Turn.model_validate_json(row[0])
+        if row is None or Turn.model_validate_json(row[0]).lock_id != lock.operation_id:
+            raise EscrowError("UNACCEPTED_SETTLEMENT")
+        return self.settlement(lock.dispute_id)
+
+    def settlement(self, dispute_id: str) -> DisputeSettlement:
+        """Settlement of one dispute, found by its id and nothing else."""
+        turn = self.get(dispute_id)
         lockrow = self.db.execute(
             "SELECT request,kind FROM escrow_events WHERE operation_id=?", (turn.lock_id,)
         ).fetchone()
@@ -962,7 +976,7 @@ class DisputesV2:
     def settle_lock(self, dispute_id: str, *, now: int, referee_cost: int = 0) -> None:
         with self.escrow.tx():
             turn = self.get(dispute_id)
-            status = self.settlement(turn.lock_id)
+            status = self.settlement(turn.dispute_id)
             if status.unresolved:
                 raise DisputeError("UNRESOLVED_CONTEST")
             row = self.db.execute(
@@ -997,4 +1011,4 @@ class DisputesV2:
                     max_referee_cost=self.policy.max_referee_cost_units,
                 )
             else:
-                self.escrow.release(release, signer=lock.owner, now_beacon=now)
+                self.escrow.release_settlement(release, signer=lock.owner, now_beacon=now)

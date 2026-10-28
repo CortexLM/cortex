@@ -77,6 +77,11 @@ def replay_party(hotkey: str, job: IslandJobV1, published: Path) -> IslandParty:
         # ponytail: CPU emulation cannot reproduce CUDA bits, so CUDA publications answer from
         # their actual-path training trace. Upgrade: replay on the pinned GPUs before answering.
         return IslandParty.published(hotkey, job, published)
+    if job.manifest.training.reference_spec.env.pinned is not None:
+        # The ranks ran in a child under the manifest's pins (ADR 0011), which this daemon's
+        # environment need not honor: an in-process replay would refuse or mismatch. The referee
+        # side re-runs windows through the same launcher, so both sides stay actual-path.
+        return IslandParty.published(hotkey, job, published)
     run = committed_execution(job, published)
     captures = [c for _, c in emulate(run.layout.n_gpus, run.trace)]
     party = IslandParty(hotkey, captures, J=run.cfg.inner.J)

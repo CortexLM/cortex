@@ -16,6 +16,7 @@ from hypertrain.data.store import LocalFSStore
 from hypertrain.data.tokenizer import HFTokenizer
 from hypertrain.ledger.escrow_v2 import (
     authority_message,
+    escrow_id_key,
     genesis_allocation_hash,
     genesis_origin_id,
 )
@@ -283,7 +284,9 @@ def generate(
         total_units=40000,
         origins=[
             OriginAllocation(
-                origin_id=genesis_origin_id(manifest.run_id(), allocation_hash, i),
+                origin_id=genesis_origin_id(
+                    manifest.run_id(), allocation_hash, i, escrow_id_key(keys["coord"]._secret)
+                ),
                 owner=owner,
                 units=units,
                 mature_at=mature,

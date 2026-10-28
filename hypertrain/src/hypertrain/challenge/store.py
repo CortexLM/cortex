@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 from hypertrain.beacon import BeaconError, BeaconRound
 from hypertrain.challenge import audit_cooldown_v2
 from hypertrain.challenge.admission import Admission
+from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import EXCLUSION_ABANDONED, Contest, DisputesV2
 from hypertrain.data.assignment import assign_round
 from hypertrain.data.store import (
@@ -60,6 +61,7 @@ from hypertrain.ledger.escrow_v2 import (
     RewardWork,
     Settlement,
     ShadowReservationEvidence,
+    escrow_id_key,
 )
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.envelope import (
@@ -270,6 +272,10 @@ class _ServiceCapacityV1(BaseModel):
 
 # Signed-profile roster cap ceiling (plan 4.3); RoundOpenV2.roster max_length is the same bound.
 MAX_ROSTER_CEILING = 1024
+
+
+# The meta row that pins which coordinator secret the escrow ids were derived from.
+ESCROW_ID_NAMESPACE_META = "escrow-id-namespace-v2"
 
 
 class ChallengeError(Exception):
@@ -740,13 +746,20 @@ class ChallengeStore:
                             (origin[0],),
                             br.round,
                         )
-                    except EscrowError as error:
-                        if error.code not in (
+                    except Exception as error:  # one stuck origin must not stop the beacon
+                        code = error.code if isinstance(error, EscrowError) else None
+                        if code in (
                             "DISPUTED_OR_UNVESTED",
                             "IMMATURE_OR_UNKNOWN_ORIGIN",
                             "ALREADY_MATURED",
                         ):
-                            raise
+                            continue
+                        if isinstance(error, sqlite3.Error) or code in (
+                            "CONSERVATION",
+                            "ORIGIN_CONSERVATION",
+                        ):
+                            raise  # the ledger or its store is broken: stop, never skip
+                        self._journal_maturity_failure_v2(run_id, origin[0], error)
                 self._expire_leases_v2(run_id, br.round)
             self._close_blocked_disputes_v2(run_id)
             with self._tx():  # own transaction: bookkeeping must not undo maturation or leases
@@ -757,6 +770,24 @@ class ChallengeStore:
         for child in self._children.values():
             child.push_beacon(payload)
         return result
+
+    def _journal_maturity_failure_v2(self, run_id: str, origin: str, error: Exception) -> None:
+        """Last unexpected maturity failure per origin, rewritten only on change.
+
+        No beacon field: `_rollback_snapshot_v2` hashes every record and must stay stable under a
+        persistent failure.
+        """
+        code = error.code if isinstance(error, EscrowError) else None
+        entry: dict[str, JsonValue] = {
+            "error": type(error).__name__ + (f":{code}" if code else ""),
+            "detail": str(error)[:200],
+        }
+        try:
+            old: dict[str, Any] | None = self._record_v2(run_id, "maturity-failed", origin)
+        except ChallengeError:
+            old = None
+        if old != entry:
+            self._put_record_v2(run_id, "maturity-failed", origin, entry)
 
     def latest_beacon(self) -> dict[str, Any]:
         with self._lock:
@@ -2319,15 +2350,43 @@ class ChallengeStore:
         assert isinstance(samples, list) and all(type(i) is int for i in samples)
         return tuple(int(str(i)) for i in samples)
 
-    def _settlement_v2(self, run_id: str, reference: str) -> Settlement:
-        disputes = self._services_v2.get(run_id)
-        if disputes is not None:
+    def _accepted_beacon_v2(self, run_id: str, envelope: envelope_v2.EnvelopeV2) -> int:
+        """Beacon at which this master accepted exactly this stored envelope.
+
+        The reward ledger judges stored evidence there, not at the finalize beacon. A commit or
+        a verdict is judged at the beacon of its accepted_v2 row; the coordinator's own audit
+        challenge has no row, its lease holds the first beacon at which it can have been sealed.
+        """
+        if envelope.type == "AuditChallengeV2":
+            body = envelope.body
             row = self._db.execute(
-                "SELECT turn FROM disputes_v2 WHERE id=? OR json_extract(turn,'$.lock_id')=?",
-                (reference, reference),
+                "SELECT created, challenge FROM audit_leases_v2 "
+                "WHERE run_id=? AND w=? AND hotkey=?",
+                (run_id, body["w"], body["target"]),
             ).fetchone()
-            if row:
-                return disputes[2].settlement(reference)
+            stored = json.loads(row["challenge"]) if row is not None else None
+            if stored == envelope.model_dump(mode="json"):
+                return int(row["created"])
+        else:
+            model = envelope_v2.MESSAGE_TYPES_V2[envelope.type].model_validate(envelope.body)
+            slot = "auth:" + _dumps(
+                list(envelope_v2.replay_key(envelope.type, run_id, envelope.signer, model))
+            )
+            row = self._db.execute(
+                "SELECT envelope, accepted_beacon FROM accepted_v2 WHERE key=?", (slot,)
+            ).fetchone()
+            if row is not None and envelope_v2.parse_envelope(row["envelope"]) == envelope:
+                return int(row["accepted_beacon"])
+        raise ChallengeError(409, "reward evidence was not accepted by this master")
+
+    def _settlement_v2(self, run_id: str, reference: str) -> Settlement:
+        """Settlement of a dispute by its id or of a reward origin by its id, never of a lock."""
+        disputes = self._services_v2.get(run_id)
+        if (
+            disputes is not None
+            and self._db.execute("SELECT 1 FROM disputes_v2 WHERE id=?", (reference,)).fetchone()
+        ):
+            return disputes[2].settlement(reference)
         row = self._db.execute(
             "SELECT data FROM records_v2 WHERE run_id=? AND kind='settlement' AND id=?",
             (run_id, reference),
@@ -2563,6 +2622,20 @@ class ChallengeStore:
                 )
         return secret
 
+    def _escrow_id_key_v2(self) -> bytes:
+        """Key of the ids the service derives; a changed coordinator secret fails closed."""
+        key = escrow_id_key(self._coord()._secret)
+        namespace = sha256_hex(key)
+        with self._tx() as db:
+            row = db.execute(
+                "SELECT value FROM meta WHERE key=?", (ESCROW_ID_NAMESPACE_META,)
+            ).fetchone()
+            if row is None:
+                db.execute("INSERT INTO meta VALUES(?, ?)", (ESCROW_ID_NAMESPACE_META, namespace))
+            elif row["value"] != namespace:
+                raise ChallengeError(503, "escrow id namespace differs")
+        return key
+
     def _services(self, run_id: str) -> tuple[EscrowV2, Admission, DisputesV2]:
         with self._lock:
             existing = self._services_v2.get(run_id)
@@ -2584,6 +2657,9 @@ class ChallengeStore:
                 assignment_of=lambda w, hot: self._assignment_v2(run_id, w, hot),
                 shadow_assignment_of=lambda binding: self._shadow_assignment_v2(run_id, binding),
                 shadow_settlement=lambda origin: self._shadow_settlement_v2(run_id, origin),
+                id_key=self._escrow_id_key_v2(),
+                accepted_at=lambda envelope: self._accepted_beacon_v2(run_id, envelope),
+                round_closure=lambda w: self._round_closure_v2(run_id, w),
             )
             escrow.mutex = self._lock  # One SQLite authority lock, including event acknowledgments.
 
@@ -4315,6 +4391,8 @@ class ChallengeStore:
             "_put_no_show_v2",
             "_exclude_no_shows_v2",
             "_exclude_missing_deltas_v2",
+            "_unfit_cause_v2",
+            "_exclude_unfit_members_v2",
             "lease_v2",
             "complete_audit_v2",
             "finalize_v2",
@@ -4436,8 +4514,16 @@ class ChallengeStore:
 
     def bootstrap_service_capacity_v2(self, run_id: str, body: bytes, raw: bytes) -> str:
         """Trusted operator bootstrap: owner Receipt signs exact immutable profile."""
+        from hypertrain.protocol.env_pins import EnvPinUnhonorable, require_honorable
         from hypertrain.protocol.messages import Receipt
 
+        with self._lock:
+            pin = self._run_v2(run_id).training.reference_spec.env.pin()
+        if pin is not None:  # a child process of up to two minutes: never inside the transaction
+            try:
+                require_honorable(pin)
+            except EnvPinUnhonorable as error:
+                raise ChallengeError(409, f"SERVICE_PROFILE_ENV_PIN: {error}") from error
         with self._tx():
             try:
                 profile = _ServiceCapacityV1.model_validate(
@@ -5158,6 +5244,8 @@ class ChallengeStore:
                     raise ChallengeError(403, "roster lacks current funded admission authority")
                 if entry.eligible_weight != 4194304:
                     raise ChallengeError(422, "live eligible ceiling must be Q/4")
+                if r.screen_until < body.d_final:
+                    raise ChallengeError(403, "roster screen ends before the round's audit window")
                 if body.w == 0:
                     anchor = cache.genesis(manifest, entry.hotkey, theta)
                 else:
@@ -6061,6 +6149,28 @@ class ChallengeStore:
         ).fetchone()[0]
         self._put_record_v2(run_id, "finality", str(w), status)
 
+    def _round_closure_v2(self, run_id: str, w: int) -> str | None:
+        """The hash that closed round w without a reward, else None. Derived, never stored.
+
+        A round is closed without a reward when finality closed it as excluded (an accepted
+        rollback, or an exclusion before it was applied) or as retired; pending, settled,
+        awaiting its rollback, with an open audit or dispute, or without a record, it is not.
+        RETIRED is compared as a string: `finality_v2` does not know the disposition yet, and
+        until `RoundStatus.closed` counts it no record can match.
+        """
+        from hypertrain.challenge.finality_v2 import RoundStatus
+
+        row = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='finality' AND id=?",
+            (run_id, str(w)),
+        ).fetchone()
+        if row is None:
+            return None
+        status = RoundStatus(**json.loads(row[0]))
+        if status.closed and status.disposition in ("EXCLUDED", "RETIRED"):
+            return status.resolution_hash
+        return None
+
     def _close_blocked_disputes_v2(self, run_id: str) -> None:
         """Close, without a loser, every dispute no party and no referee can still decide.
 
@@ -6448,6 +6558,67 @@ class ChallengeStore:
         for entry in body.roster:
             if entry.hotkey in audited and f"{w}:{entry.hotkey}" not in delivered | excluded:
                 self._put_no_show_v2(run_id, w, entry.hotkey, "delta")
+
+    def _unfit_cause_v2(self, admission: Any, hotkey: str, now: int) -> str | None:
+        """Why a roster member's admission no longer qualifies it, or None while it does.
+
+        The terms follow `Admission.status().eligible`, first match wins. Any other
+        AdmissionError (an unverifiable beacon, say) is a fault of ours and propagates.
+        """
+        try:
+            status = admission.status(hotkey, now=now)
+        except AdmissionError as error:
+            if error.code != "UNKNOWN_HOTKEY":
+                raise
+            return "ROTATED"
+        if status.eligible:
+            return None
+        record = status.record
+        if record.state in ("BANNED", "SUSPENDED"):
+            return record.state
+        if record.state != "ACTIVE" and (record.state != "PROBATION" or record.clean_count < 4):
+            return "NOT_LIVE"
+        return "SCREEN_LAPSED" if now > record.screen_until else "UNFUNDED"
+
+    def _exclude_unfit_members_v2(self, run_id: str, w: int) -> None:
+        """Leave out an audited member whose admission no longer qualifies it for this round.
+
+        The wait is on the member, not on the round: aggregate refused for everybody until the
+        member recovered, and a lapsed screen never does. The cause is judged here, as late as
+        possible, inside the transaction that aggregates, so a member that is fit at the call
+        is kept and the ROUND_INFEASIBLE of the survivors check rolls the exclusions back. No
+        sanction: the cause is the member's own state or the effect of one already applied.
+        """
+        from hypertrain.protocol.messages_v2 import RoundOpenV2
+
+        admission = self._services(run_id)[1]
+        body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", str(w))["body"])
+        now = self._now(self._db)
+        audited = {
+            row[0]
+            for row in self._db.execute(
+                "SELECT hotkey FROM audit_leases_v2 WHERE run_id=? AND w=? AND state='completed'",
+                (run_id, w),
+            )
+        }
+        excluded = self._round_ids_v2(run_id, "excluded", w)
+        for entry in body.roster:
+            if entry.hotkey not in audited or f"{w}:{entry.hotkey}" in excluded:
+                continue
+            cause = self._unfit_cause_v2(admission, entry.hotkey, now)
+            if cause is not None:
+                evidence = f"ht-ineligible/1|{run_id}|{w}|{entry.hotkey}|{cause}"
+                self._put_record_v2(
+                    run_id,
+                    "excluded",
+                    f"{w}:{entry.hotkey}",
+                    {
+                        "reason": "INELIGIBLE",
+                        "stage": "aggregate",
+                        "cause": cause,
+                        "evidence_hash": sha256_hex(evidence.encode()),
+                    },
+                )
 
     def schedule_audits_v2(self, run_id: str, w: int) -> list[str]:
         from hypertrain.protocol.messages_v2 import AuditChallengeV2, CommitV2, RoundOpenV2
@@ -8570,6 +8741,7 @@ class ChallengeStore:
             history = [s for s in self._history_v2(run_id) if s.w < w]
             require_apply(run_id, w, history)
             self._exclude_missing_deltas_v2(run_id, w)
+            self._exclude_unfit_members_v2(run_id, w)
             inputs = self.verified_inputs_v2(run_id, w)
             self._require_survivors_v2(manifest, [x.roster for x in inputs])
             policy = AggregationPolicyV2.model_validate_json(
@@ -8649,7 +8821,7 @@ class ChallengeStore:
 
     def finalize_v2(self, run_id: str, w: int, raw: bytes) -> dict[str, Any]:
         from hypertrain.challenge.finality_v2 import RoundStatus, settle
-        from hypertrain.ledger.escrow_v2 import RewardWork, authority_message, reward_origin_id
+        from hypertrain.ledger.escrow_v2 import RewardWork, authority_message
         from hypertrain.protocol.messages_v2 import RewardFinalize
 
         with self._tx():
@@ -8695,7 +8867,11 @@ class ChallengeStore:
                     409, "repair evidence is model-only; cannot mint miner rewards"
                 )
             status = RoundStatus(**self._record_v2(run_id, "finality", str(w)))
-            included = sorted(x.roster.hotkey for x in self.verified_inputs_v2(run_id, w))
+            # The applied tape is the commitment: pay exactly its inputs, however they stand now.
+            included = sorted(
+                item["roster"]["hotkey"]
+                for item in self._record_v2(run_id, "tape-inputs", str(w))["inputs"]
+            )
             if model.w != w or model.included != included:
                 raise ChallengeError(
                     422, "finalized included set differs from full accepted authority"
@@ -8757,7 +8933,7 @@ class ChallengeStore:
                 units[hot] += 1
             origins = [
                 {
-                    "origin_id": reward_origin_id(run_id, w, h, final_hash),
+                    "origin_id": escrow.reward_origin(w, h, final_hash),
                     "owner": self._owner_v2(run_id, h),
                     "units": units[h],
                     "mature_at": vesting,

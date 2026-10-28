@@ -20,6 +20,7 @@ from pydantic import (
 )
 
 from hypertrain.models.registry import ARCH_REGISTRY
+from hypertrain.protocol import env_pins
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 
@@ -264,10 +265,27 @@ def default_verify(
     return VerifySpec.model_validate(fields)
 
 
+class EnvPins(_M):
+    """Process-environment pins over the closed table of ``protocol/env_pins.py``."""
+
+    present: dict[StrictStr, StrictStr]
+    absent: list[StrictStr]
+
+    @model_validator(mode="after")
+    def _in_table(self) -> EnvPins:
+        env_pins.check(self.present, self.absent)
+        return self
+
+
 class ReferenceEnv(_M):
     CUBLAS_WORKSPACE_CONFIG: Literal[":4096:8"]
     CUDA_DISABLE_PTX_JIT: Literal["1"]
     cpu_threads: Pos
+    # Omitted = ambient environment, as before: existing run_ids are unchanged.
+    pinned: EnvPins | None = Field(None, exclude_if=_omit_none)
+
+    def pin(self) -> env_pins.EnvPin | None:
+        return None if self.pinned is None else env_pins.EnvPin.from_body(self.pinned.model_dump())
 
 
 class Layout(_M):
