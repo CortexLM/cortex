@@ -243,16 +243,6 @@ def test_fraud_proven_against_a_staked_miner_burns_the_reward_origin_it_never_ve
     assert rig.escrow.balances().conserved()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="CRD-22+LCK-09: fraud proven against a miner burns the reward origin it never vested, "
-    "but a conviction that follows a bond-only seizure finds no admission lock to slash, and the "
-    "burn of the unvested reward is part of slashing a lock (ADR 0010 Decisions for Forge 4): "
-    "the miner is banned and its origin still vests. Closing it needs a ledger operation that "
-    "burns reward_pending without a lock; adding it or accepting that the reward survives is a "
-    "founder / Principal call [fix-lot: decision (product choice pending)]",
-)
 def test_fraud_proven_after_the_bond_was_seized_still_burns_the_unvested_reward(rig: Rig) -> None:
     # Given: a staked miner with a reward origin pending, whose bond the service burned for a
     # confirmed audit mismatch
@@ -274,8 +264,11 @@ def test_fraud_proven_after_the_bond_was_seized_still_burns_the_unvested_reward(
     precondition(rig.admission.store.record(miner.hotkey).state == "BANNED", "no conviction")
     # When: the beacon passes the release round of the origin
     rig.net.push(10)
-    # Then: the origin never vested
+    # Then: the origin never vested; its units burned with the contest bond and the stake
     assert vested(rig, origin) == 0
+    held = units_of(rig.escrow, miner.coldkey)
+    assert (held["reward_pending"], held["burned"]) == (0, BOND + STAKE + 500)
+    assert rig.escrow.balances().conserved()
 
 
 # --- AD-06, AD-08, DIB-09: the route back from a suspension, and its limits -------------------

@@ -48,8 +48,9 @@ All findings were reproduced in-process on `33b50656` by at least one design ana
    bootstrap). The preimages are today's strings, which already carry the type tag, the run, the
    round and the subject (D52: `HMAC(secret, (run, round, type, subject))`). **There is no unkeyed
    mode (D53).** A ledger built without a key is a read-only verifier: every server operation
-   (`test_genesis`, `production_bootstrap`, `reward_finalize`, `mature`, `slash`, `pay`,
-   `release_settlement`) refuses with `ID_KEY_REQUIRED`, so no run can silently keep predictable ids;
+   (`test_genesis`, `production_bootstrap`, `reward_finalize`, `mature`, `slash`, `burn_pending`,
+   `pay`, `release_settlement`) refuses with `ID_KEY_REQUIRED`, so no run can silently keep
+   predictable ids;
    the unit-test helper passes a fixed test key, the store always passes the coordinator key, and a
    test builds the production store and asserts the key reaches the ledger. The unkeyed derivation
    survives only to **verify** origin rows that were issued before the key existed (point 6).
@@ -69,11 +70,13 @@ All findings were reproduced in-process on `33b50656` by at least one design ana
    and the `JOIN` of `verified_inputs_v2` (`store.py:7788`, hashed) keep reading bare ids.
 4. **The server API is separate by type (I4).** `lock`, `transfer` and `release` are the client
    operations and can only write the client key space. The server operations are `test_genesis`,
-   `production_bootstrap`, `reward_finalize`, `mature`, `slash`, `pay` and a new
+   `production_bootstrap`, `reward_finalize`, `mature`, `slash`, `burn_pending`, `pay` and a new
    `release_settlement` (the service's release of a lock, called by `DisputesV2.settle_lock`;
    `release` and `release_settlement` share one private implementation that takes the key space as a
    mandatory argument). There is no default and no flag a caller can forget. `Admission.release_bond`
-   and `Admission.seize_bond` of ADR 0010 Part 6 must call `release_settlement` and `slash`; a test
+   and `Admission.seize_bond` of ADR 0010 Part 6 must call `release_settlement` and `slash`
+   (`seize_bond` also calls `burn_pending`, a server operation added by D82 for a conviction that
+   finds no lock to slash, ADR 0010 Part 6 point 3); a test
    walks the abstract syntax tree of the whole source and fails if any call site of a client
    operation is outside the client route (`ChallengeStore.admission_v2`, `AdmissionStore.reconcile_lock`)
    or if a server operation is reached from a request handler, and a second test runs every public

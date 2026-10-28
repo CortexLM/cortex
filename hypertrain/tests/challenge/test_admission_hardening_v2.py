@@ -321,6 +321,43 @@ def test_referee_fraud_against_the_miner_seizes_the_bond_through_the_routes(netw
         assert state["state"] == "SUSPENDED"
 
 
+def test_a_verdict_after_a_bond_only_seizure_burns_the_unvested_reward_once_through_the_routes(
+    network,
+):
+    # Given: a funded miner with an unvested reward, whose bond a confirmed audit mismatch
+    # burned alone; it contests its verdict and the referee rules against it
+    identity, _ = lock_bond(network)
+    escrow, admission, _ = network.store._services(network.manifest.run_id())
+    with network.store._tx():
+        network.store._db.execute(
+            "INSERT INTO escrow_origins VALUES(?,?,?,?,?)",
+            ("aa" * 32, 500, 50, 0, service.HOT[0].ss58),
+        )
+        network.store._db.execute(
+            "INSERT INTO escrow_units VALUES(?,?,?,?,?)",
+            ("aa" * 32, service.COLD[0].ss58, "reward_pending", "", 500),
+        )
+        admission.seize_bond(
+            identity, reason="AUDIT_MISMATCH", evidence_hash="77" * 32, now=network.now
+        )
+    b = balances(network)
+    assert (b.burned, b.reward_pending, b.admission_locked) == (1000, 500, 0)
+    verdict = convict_through_the_routes(network, identity, service.HOT[0].ss58)
+    # When: the verdict is posted, and posted again
+    for _ in range(2):
+        response = network.client.post(network.url + "/resolution", json=verdict)
+        assert response.status_code == 200, response.text
+    # Then: the unvested reward burned with the contest bond (100), by one ledger event
+    b = balances(network)
+    assert (b.burned, b.reward_pending, b.admission_locked) == (1000 + 100 + 500, 0, 0)
+    assert b.conserved()
+    burns = network.store._db.execute(
+        "SELECT COUNT(*) FROM escrow_events WHERE kind='BURN_PENDING'"
+    ).fetchone()[0]
+    assert burns == 1
+    escrow.verify()
+
+
 def test_coldkey_alone_cannot_burn_a_registered_unjoined_hotkey_over_http(network):
     # Given: HOT[0] joined; HOT[1] is registered on the subnet but has not joined
     assert network.join(0).status_code == 200

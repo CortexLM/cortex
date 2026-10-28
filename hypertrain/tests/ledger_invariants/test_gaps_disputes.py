@@ -469,19 +469,7 @@ def test_a_reward_origin_vests_at_its_maturity_once_its_miners_contest_is_closed
             ),
         ),
         pytest.param("lost", id="lost"),
-        pytest.param(
-            "lost-after-a-bond-only-seizure",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=DefenceMissing,
-                reason="DIB-07+DIB-17: a conviction that follows a bond-only seizure "
-                "(AUDIT_MISMATCH or NO_SHOW burned the stake) finds no admission lock to slash, "
-                "and the burn of the unvested reward is part of slashing a lock (ADR 0010 "
-                "Decisions for Forge 4), so the convicted miner's origin vests and is paid; "
-                "closing it needs a ledger operation that burns reward_pending without a lock, "
-                "a founder / Principal call [fix-lot: decision (product choice pending)]",
-            ),
-        ),
+        "lost-after-a-bond-only-seizure",
     ],
 )
 def test_only_the_origin_of_the_disputed_miner_is_held_and_nothing_is_paid_for_it(
