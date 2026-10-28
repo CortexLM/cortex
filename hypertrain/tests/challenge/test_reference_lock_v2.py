@@ -593,7 +593,7 @@ def test_a_request_for_custody_beside_one_without_has_its_own_flight_and_retains
         assert executor.reached.wait(WAIT)
         custody = Call(store, run_id, admission_id, retain_shadow_custody=True)
         # it is not a waiter of the first call (which is held): the flag is part of the flight
-        assert custody.result(20)["reference_commitment"]
+        assert custody.result()["reference_commitment"]
         assert waiting(store) == 0 and not plain.done
     finally:
         executor.release.set()

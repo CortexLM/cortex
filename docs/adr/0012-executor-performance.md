@@ -243,16 +243,21 @@ CPU, 4.5 s; the whole call takes about 11 s]. On the parent a thread asking for 
 11.05 s (run in the root store) and 10.31 s (child store), and `push_beacon` returned after 9.57 s and 8.83 s.
 With Part B, 537 and 534 requests for the lock, one every 20 ms, never waited as much as a millisecond, the
 longest hold taken by the reference was 5.9 ms (root) and 4.1 ms (child) and `push_beacon` returned in
-0.7 ms and 1.2 ms. (A scratch script took these numbers and is not in the tree; the tree pins `< 1 s` in
+0.7 ms and 1.2 ms (after the merge of `v3` the longest hold by the reference on the fixture was 7 ms in the root
+layout). (A scratch script took these numbers and is not in the tree; the tree pins `< 1 s` in
 `a_five_second_reference_holds_the_store_lock_for_less_than_a_second`.) This is the lock, not the gate: the pusher
 also needs its rounds verified (2.4 s of BLS in all) and the replay must show the gate staying open [?].
 
 **Limits found by the review** (2026-10-28), not removed here:
-- The claim stages the job under the lock, and staging is O(model). A reviewer patched a larger model in [A]:
-  the longest wait for the lock was 0.00 s at 2 layers and d=32, 0.88 s at about 66 M parameters and 3.30 s at
-  about 162 M. The admitted shape is the tiny one (`_service_profile_v2`); a larger one needs the staging moved
-  out of the lock (read the database under it, compute without). `export_trial_v2` costs the same, and a waiter
-  no longer pays it.
+- The claim stages the job under the lock, and staging is O(model). Measured here [V, 2026-10-28, a timing
+  proxy on the store lock, `TrainConfig.from_manifest_v2` patched to a larger model, the call then fails fast
+  at the screening so only the claim is timed; a scratch script, not in the tree]: the longest hold of the lock
+  by the call was 7 ms at the 824-parameter fixture, 10 ms at 24.7 k parameters, **2.1 s at 66.3 M (8 layers,
+  d=512) and 4.9 s at 162.4 M (12 layers, d=768)**; a reviewer measured 0.9 s and 3.3 s on a less loaded host.
+  So "milliseconds" holds for the admitted tiny shape only. For a larger model the claim is the lock hold that
+  is left (the launch itself, 57 s cold, is out of the lock either way), and the pusher's 10 s timeout and the
+  6 s freshness bound survive it only up to a few seconds: the fix is to read the database under the lock and
+  stage without it, which is not done here. `export_trial_v2` costs the same, and a waiter no longer pays it.
 - A resume, a suspension or a new challenge does not cancel a stale launch: audit leases revoke their guard
   when they are retired, this guard is cancelled only at the deadline round or the wall cutoff. The stale result
   is dropped at the settlement, but the launch keeps its host until then.
