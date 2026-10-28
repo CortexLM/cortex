@@ -66,7 +66,10 @@ def test_the_snapshot_notices_a_change_to_each_file_a_refusal_must_leave_alone(b
     # every refusal test ends on snapshot == before: a field it ignores hides a script that writes
     box.run(*call("executor", backup), mutates={CHALLENGE})  # an override is in place
     pending = box.override.with_name(box.override.name + ".new")
-    tracked = [box.f, box.new, box.override, pending, box.relay_json, box.stub_json]
+    dry = box.override.with_name(box.override.name + ".dry")
+    box.token()  # the executor directory and what is in it
+    tracked = [box.f, box.new, box.override, pending, dry, box.relay_json, box.stub_json]
+    tracked += [box.executor_dir / "r2.env", box.executor_dir / "r2-artifacts.json"]
     for path in [*tracked, *sorted(box.state_dir.glob("*.db"))]:
         before = box.snapshot()
         original = path.read_bytes() if path.exists() else None
@@ -77,6 +80,14 @@ def test_the_snapshot_notices_a_change_to_each_file_a_refusal_must_leave_alone(b
         else:
             path.write_bytes(original)
         assert box.snapshot() == before, path.name
+    before = box.snapshot()
+    (box.t / "dry.leftover").mkdir()  # the temporary directory of a dry run
+    assert box.snapshot() != before
+    (box.t / "dry.leftover").rmdir()
+    (box.executor_dir / "r2.env").chmod(0o640)  # a mode is part of what a refusal must not change
+    assert box.snapshot() != before
+    (box.executor_dir / "r2.env").chmod(0o600)
+    assert box.snapshot() == before
 
 
 # --- seal window: swap, beacon and executor go through the gate -----------------------------------

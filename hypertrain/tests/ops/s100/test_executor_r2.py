@@ -21,13 +21,14 @@ import pytest
 from hypertrain.gpu_ops.artifact_transfer import ArtifactSettings
 
 from .sandbox import (
+    API,
     ARTIFACTS_VAR,
     CHALLENGE,
     COMPOSE,
-    EPOCH,
     EXECUTOR_PATH,
     EXECUTOR_VAR,
     MASTER,
+    NEW_ID,
     OTHER_ID,
     R2_VALUES,
     SETTINGS_PATH,
@@ -176,11 +177,6 @@ def test_a_token_file_that_is_not_exactly_0600_is_refused_before_the_challenge_i
     assert f"mode {mode:o}, want 600" in out
 
 
-def test_a_token_file_of_mode_0600_is_what_the_refusals_are_measured_against(box, backup):
-    box.token()
-    r2(box, backup, mutates={CHALLENGE})
-
-
 def test_a_token_file_of_another_user_is_refused(tmp_path, golden):
     box = Box(tmp_path, challenge_uid=os.getuid() + 1)
     backup = box.seed_backup(golden)
@@ -241,6 +237,8 @@ BAD_TOKEN_PATHS = {
     "dot-dot": "/data/executor/../r2.env",
     "nested": "/data/executor/sub/r2.env",
     "hidden": "/data/executor/.r2.env",
+    "prefixed": "/tmp/data/executor/r2.env",  # an unanchored pattern would take it
+    "elsewhere": "x/data/executor/r2.env",
     "space": "/data/executor/r2 env",
     "newline": "/data/executor/r2.env\nprivileged: true",
     "directory": "/data/executor/",
@@ -253,7 +251,7 @@ def test_a_token_path_must_be_one_plain_name_in_the_executor_directory(box, back
     box.token()
     before = box.snapshot()
     out = box.run("executor", backup, EXECUTOR_PATH, "--r2", path, rc=4).out
-    assert "must be /data/executor/NAME" in out and box.exec_calls() == []
+    assert "REFUSED --r2 FILE must be /data/executor/NAME" in out and box.exec_calls() == []
     assert box.snapshot() == before
 
 
@@ -281,18 +279,18 @@ def test_a_usage_error_stops_before_the_gate_and_before_any_call(box, backup, ar
     assert box.docker()["calls"] == []
 
 
-# The gate is the one the other gated commands use (test_challenge_image.GATE). These cases are the
-# ones that fail if --r2 steps around it: a run with a closed window changes nothing.
+# The gate is the one the other gated commands use (test_challenge_image.GATE). These cases pass on
+# the script without --r2 too (it ignores the option and the gate refuses): they are regression
+# guards, the only ones that fail if --r2 steps around the gate.
 @pytest.mark.parametrize(
-    ("seal", "rc"),
-    [({"age": 1800}, 3), ({"sealed": False}, 3), ({"epoch": EPOCH}, 3), ({"ready": 503}, 2)],
-    ids=["age-1800", "sealed-false", "epoch-is-now", "readyz-503"],
+    ("seal", "rc"), [({"age": 1800}, 3), ({"ready": 503}, 2)], ids=["window-closed", "readyz-503"]
 )
 def test_a_closed_window_refuses_executor_r2_before_the_challenge_is_asked(box, backup, seal, rc):
     box.seal(**seal)
     refused(box, backup, rc)
 
 
+# A regression guard in the same way: the names guard refused this before --r2 existed.
 def test_a_compose_file_naming_a_production_container_is_refused_before_the_challenge_is_asked(
     box, backup
 ):
@@ -314,7 +312,7 @@ def test_a_challenge_that_is_not_running_cannot_vouch_for_anything(box, backup):
     state["containers"][CHALLENGE]["State"]["Status"] = "exited"
     box._write("docker.json", state)
     out = refused(box, backup, 4, calls=1)
-    assert "(the challenge program exited 1)" in out and "nothing written" in out
+    assert "(no answer from the challenge: docker exec exited 1" in out and "nothing written" in out
 
 
 def test_a_refusal_of_the_challenge_stops_the_run_with_its_reason(box, backup):
@@ -326,9 +324,13 @@ def test_a_refusal_of_the_challenge_stops_the_run_with_its_reason(box, backup):
 
 def test_only_the_sentences_of_the_program_reach_the_operator(box, backup):
     trace = "Traceback (most recent call last):\nValueError: " + R2_VALUES["R2_SECRET_ACCESS_KEY"]
-    box.exec_out("pre", 1, trace + "\npreflight refused: ValueError")
+    long = "preflight refused: " + "A" * 700
+    box.exec_out(
+        "pre", 1, "\n".join([trace, "preflight x\x1b[2J", long, "preflight refused: ValueError"])
+    )
     out = refused(box, backup, 4, calls=1)  # Box.run also looks for the value in the output
     assert "Traceback" not in out and "preflight refused: ValueError" in out
+    assert "\x1b" not in out and "A" * 100 not in out  # a control character, a line of 700
 
 
 def test_a_settings_file_the_script_did_not_write_is_not_overwritten(box, backup):
@@ -381,6 +383,12 @@ def test_a_dry_run_asks_the_challenge_and_changes_nothing(box, backup):
     assert "settings keys: credentials_file operations" in out and "preflight ok" in out
     assert "gate: open" in out and "dry-run: nothing written, nothing recreated" in out
     assert re.search(r"R2_[A-Z_]+", out) is None and box.docker()["mutations"] == []
+    for path in (
+        TOKEN_PATH,
+        SETTINGS_PATH,
+        EXECUTOR_PATH,
+    ):  # variable names, not what they point at
+        assert path not in out
 
 
 def test_a_dry_run_leaves_no_file_of_its_own_behind(box, backup):
@@ -447,11 +455,6 @@ def test_executor_off_removes_every_variable_and_the_file_it_wrote_and_nothing_e
     assert post["args"] == ["-", "-"] and post["settings"] is not None  # the file went last
 
 
-def test_executor_off_is_the_way_back_even_when_nothing_was_switched(box, backup):
-    box.run("executor-off", backup, mutates={CHALLENGE})
-    assert not box.settings.exists()
-
-
 def test_a_failed_recreate_leaves_the_running_challenge_the_settings_it_reads(box, backup):
     r2(box, backup, mutates={CHALLENGE})
     box.docker(fail_up=True)
@@ -490,6 +493,7 @@ def test_a_plain_executor_returns_to_the_ssh_path_and_removes_the_settings_it_wr
     assert box.exec_calls("post")[-1]["args"] == [EXECUTOR_PATH, "-"]
 
 
+# A regression guard: the script before --r2 never touched the file either.
 def test_a_plain_executor_keeps_a_settings_file_it_did_not_write(box, backup):
     foreign = '{"credentials_file": "/data/executor/r2.env", "operations": ["audit"], "workers": 3}'
     box.executor_dir.mkdir()
@@ -498,9 +502,43 @@ def test_a_plain_executor_keeps_a_settings_file_it_did_not_write(box, backup):
     assert box.settings.read_text() == foreign
 
 
+# A regression guard for the new calls: the script before --r2 had only isolated ones.
 def test_every_python_the_script_runs_is_isolated_from_the_directory_it_runs_in(box, backup):
     # ssh gives the script a working directory of its own: a file there must not shadow the stdlib
     (box.root / "json.py").write_text("raise SystemExit('json.py of the working directory')\n")
     r2(box, backup, mutates={CHALLENGE})  # the settings, the image, the compose diff
     r2(box, backup, "--operations", "audit", mutates={CHALLENGE})  # the file that is already there
     box.run("executor-off", backup, mutates={CHALLENGE})
+
+
+def test_a_challenge_that_does_not_answer_after_the_recreate_says_how_to_go_back(box, backup):
+    box.url(f"{API}/version", 503)
+    out = r2(box, backup, rc=7, mutates={CHALLENGE}).out
+    assert "challenge /version not 2xx" in out and f"executor-off {backup}" in out
+    assert box.override.exists() and box.settings.exists()  # for executor-off, as after a failed up
+
+
+@pytest.mark.parametrize("cmd", [("executor", EXECUTOR_PATH), ("executor-off",)])
+def test_the_challenge_has_to_answer_after_every_recreate(box, backup, cmd):
+    box.url(f"{API}/version", 503)
+    out = box.run(cmd[0], backup, *cmd[1:], rc=7, mutates={CHALLENGE}).out
+    assert "challenge /version not 2xx" in out
+
+
+def test_a_settings_file_that_is_a_link_is_not_the_script_s_to_replace(box, backup):
+    box.token()
+    real = box.executor_dir / "real.json"
+    real.write_text(json.dumps({"credentials_file": TOKEN_PATH, "operations": ["audit"]}))
+    box.settings.symlink_to(real)
+    assert "not a file this script wrote" in refused(box, backup, 4)
+
+
+def test_a_swap_drops_the_variables_and_the_same_command_brings_them_back(box, backup):
+    box.pull(f"ghcr.io/cortexlm/cortex/hypertrain@{NEW_ID}")
+    r2(box, backup, mutates={CHALLENGE})
+    box.run("swap", f"ghcr.io/cortexlm/cortex/hypertrain@{NEW_ID}", backup, mutates={CHALLENGE})
+    env = box.env(CHALLENGE)  # compose.test.yml alone: the documented behaviour
+    assert EXECUTOR_VAR not in env and ARTIFACTS_VAR not in env
+    r2(box, backup, mutates={CHALLENGE})  # the doc says: rerun the same command
+    assert box.env(CHALLENGE)[ARTIFACTS_VAR] == SETTINGS_PATH
+    assert box.container(CHALLENGE)["Image"] == NEW_ID

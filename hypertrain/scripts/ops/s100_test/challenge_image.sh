@@ -34,10 +34,12 @@
 #   r2-check [--file FILE] [--node LABEL sha256:DIGEST]
 #                        not gated, changes nothing in the stack: put, get and delete a 1 MiB object
 #                        in the bucket through the token the challenge is configured with (or FILE,
-#                        which is checked like --r2's). With --node, between get and delete, also a
-#                        HEAD and a ranged GET of it from that executor host, by presigned URLs on
-#                        the stdin of a --rm container of the GPU image DIGEST that checks its CA
-#                        paths and TLS. Prints HTTP statuses, byte counts and seconds, no URL.
+#                        which is checked like --r2's), then asks for the absent key, as the transfer
+#                        does before each attempt. With --node, between get and delete, also a HEAD
+#                        and a ranged GET of the object and a GET of an absent key from that executor
+#                        host, by presigned URLs on the stdin of a confined --rm container of the GPU
+#                        image DIGEST that reports its CA paths and does the TLS handshakes. Prints
+#                        HTTP statuses, byte counts and seconds, no URL.
 # rollback and restore-db are not gated: they are the way back from a bad change.
 # swap, beacon, paper, rollback, executor and executor-off refuse (exit 4) a compose file with a
 # service whose container_name is missing or is not one of the six TEST names; executor checks the
@@ -149,9 +151,10 @@ sys.exit(0 if flags and (e[9],e[11])==("0.2","60") and int(e[13])>=100 else 5)' 
 #                        put, get and delete 1 MiB in the bucket with the token FILE, or with the one
 #                        the settings of this process name ("-"), through the client the transfer uses;
 #                        with LABEL and DIGEST also, between get and delete, a HEAD and a ranged GET of
-#                        that object from the executor host LABEL, by presigned URLs on its stdin, in a
-#                        --rm container of the GPU image DIGEST (the host is a rented machine: only
-#                        what it answers in a closed shape is printed, never its stderr)
+#                        that object and a GET of a key that is not there, from the executor host
+#                        LABEL, by presigned URLs on its stdin, in a confined --rm container of the GPU
+#                        image DIGEST (the host is a rented machine: only what it answers in a closed
+#                        shape is printed, never its stderr). After the delete, the key is asked for.
 CHALLENGE_PY=$(cat <<'PY_CHALLENGE'
 import os
 import re
@@ -169,11 +172,23 @@ KNOWN = (
     "the R2 endpoint must be https (plain http only to a loopback address)",
     "artifacts need network 'default': the container must reach R2",
     "max_artifact_bytes is above the executor's max_result_bytes",
+    "invalid bucket name",
 )
 
 
 class Said(Exception):
     """Its message is a sentence written in this program."""
+
+
+def printable(text):
+    return re.sub(r"[^ -~]", "?", str(text))[:120]
+
+
+def where(found):
+    loc = [str(part) for part in found["loc"]]
+    if loc and found["type"] == "extra_forbidden":
+        loc[-1] = "?"  # the name of a key of the document, which can be anything
+    return ".".join(loc) + ": " if loc else ""
 
 
 def why(error):
@@ -184,11 +199,12 @@ def why(error):
     text = str(error)
     if isinstance(error, Said):
         return text
-    if isinstance(error, ValidationError):
-        found = error.errors()  # where and why; its "input" is never read
-        return "; ".join(".".join(map(str, e["loc"])) + ": " + e["msg"] for e in found)
+    if isinstance(error, ValidationError):  # where and why; its "input" is never read
+        return "; ".join(where(e) + printable(e["msg"]) for e in error.errors())
     if text in KNOWN or re.fullmatch(r"missing R2 settings: [A-Z0-9_, ]+", text):
         return text
+    if isinstance(error, OSError) and error.filename is not None:  # a path, never file content
+        return f"{type(error).__name__}: {printable(error.filename)}"
     return type(error).__name__
 
 
@@ -238,7 +254,8 @@ try:
     )
     context = ssl.create_default_context()
     urls = sys.stdin.read().split()
-    for name, method, headers, url in zip(("head", "get"), ("HEAD", "GET"), ({}, {"Range": "bytes=0-0"}), urls):
+    asked = zip(("head", "get", "absent"), ("HEAD", "GET", "GET"), ({}, {"Range": "bytes=0-0"}, {}), urls)
+    for name, method, headers, url in asked:
         start, answer = time.monotonic(), {}
         try:
             parts = urllib.parse.urlsplit(url)
@@ -270,8 +287,8 @@ CONFINE = (
     "--memory=256m",
     "--security-opt=no-new-privileges",
 )
-VERIFY = {9: "not_yet_valid", 10: "expired", 18: "self_signed", 19: "self_signed_in_chain",
-          20: "unknown_issuer", 21: "unknown_issuer", 62: "hostname_mismatch", 64: "ip_mismatch"}
+# OpenSSL's X509_V_ERR_* codes a first run can meet; any other is printed as its number
+VERIFY = {18: "self_signed", 20: "unknown_issuer", 62: "hostname_mismatch", 64: "ip_mismatch"}
 WORD = re.compile(r"[A-Za-z]{1,40}")
 
 
@@ -283,7 +300,9 @@ def shown(reply):
     """What a rented host said, rebuilt in a closed shape: a host can print anything, including the
     URL it was handed, so nothing it wrote is passed on as it is."""
     words = []
-    for key, pattern in (("python", r"\d+\.\d+\.\d+"), ("openssl", r"[A-Za-z0-9 .-]{1,40}")):
+    version = r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}"
+    library = rf"(OpenSSL|LibreSSL) {version}[a-z]?( {{1,2}}[0-9]{{1,2}} [A-Z][a-z]{{2}} [0-9]{{4}})?"
+    for key, pattern in (("python", version), ("openssl", library)):
         if isinstance(reply.get(key), str) and re.fullmatch(pattern, reply[key]):
             words.append(f"{key}={reply[key].replace(' ', '_')}")
     for key in ("cafile", "openssl_cafile", "ssl_env"):
@@ -293,7 +312,7 @@ def shown(reply):
         words.append(f"capath_entries={reply['capath_entries']}")
     if isinstance(reply.get("error"), str) and WORD.fullmatch(reply["error"]):
         words.append(f"error={reply['error']}")
-    for name in ("head", "get"):
+    for name in ("head", "get", "absent"):
         answer = reply.get(name)
         if not isinstance(answer, dict):
             continue
@@ -310,13 +329,8 @@ def shown(reply):
     return " ".join(words)
 
 
-def probe(client, key, label, digest):
-    """HEAD and a ranged GET of `key` from executor host `label`: (what to print, whether it worked)."""
-    import json
-    import shlex
-    import tempfile
-    import time
-
+def resolve(label, digest):
+    """The executor host `label` of the config this process runs with: asked before the bucket is."""
     from hypertrain.gpu_ops import cuda_executor as ce
 
     if CONFIG_ENV not in os.environ:
@@ -325,11 +339,27 @@ def probe(client, key, label, digest):
     host = next((h for h in config.hosts if h.label == label), None)
     if host is None or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise Said("no executor host has this label, or the image digest is not sha256:<64 hex>")
+    return config, host, digest
+
+
+def probe(client, key, target):
+    """From the host: HEAD and a ranged GET of `key`, and a GET of a key that is not there, the
+    request the runner opens every transfer with. Returns (what to print, whether it worked)."""
+    import json
+    import shlex
+    import tempfile
+    import time
+
+    from hypertrain.gpu_ops import cuda_executor as ce
+
+    config, host, digest = target
+    label = host.label
     command = shlex.join(
         [*host.docker, "run", "--rm", "-i", "--pull", "never", *CONFINE]
         + ["--entrypoint", ce.IMAGE_PYTHON, f"{config.image_repository}@{digest}", "-I", "-c", NODE_PY]
     )
-    urls = "".join(client.presign(m, key, expires=120) + "\n" for m in ("HEAD", "GET"))
+    asked = (("HEAD", key), ("GET", key), ("GET", f"{key}-absent"))
+    urls = "".join(client.presign(method, name, expires=120) + "\n" for method, name in asked)
     fd = os.memfd_create("r2-check")  # the URLs are the remote stdin and live in no file
     try:
         os.write(fd, urls.encode())
@@ -357,12 +387,14 @@ def probe(client, key, label, digest):
         reply = None
     if not isinstance(reply, dict):
         return f"{label} no_reply", False
-    head, get = reply.get("head"), reply.get("get")
+    head, get, absent = (reply.get(name) for name in ("head", "get", "absent"))
     ok = (
         isinstance(head, dict) and head.get("status") == 200 and head.get("bytes") == SIZE
         and isinstance(get, dict) and get.get("status") in (200, 206)
-    )
-    return f"{label} {shown(reply)}", ok
+        and isinstance(absent, dict) and absent.get("status") == 404
+    )  # fmt: skip
+    line = f"{label} {shown(reply)}"
+    return (line, ok) if re.fullmatch(r"[ -~]{1,300}", line) else (f"{label} unprintable", False)
 
 
 def roundtrip(file, node):
@@ -375,6 +407,7 @@ def roundtrip(file, node):
     from hypertrain.gpu_ops import artifact_transfer as at
     from hypertrain.storage.r2 import R2Client
 
+    target = resolve(*node) if node else None  # a host that is not there costs no bucket call
     if file == "-":
         if SETTINGS_ENV not in os.environ:
             raise Said(f"{SETTINGS_ENV} is not set")
@@ -391,10 +424,10 @@ def roundtrip(file, node):
     def step(name, call):
         start = time.monotonic()
         try:
-            value, shown, ok = call(), str(seen[-1]), True
+            value, code, ok = call(), str(seen[-1]), True
         except Exception as error:
-            value, shown, ok = None, status(error), False
-        row[name] = [shown, time.monotonic() - start, ok]
+            value, code, ok = None, status(error), False
+        row[name] = [code, time.monotonic() - start, ok]
         return value
 
     far, far_ok = "", True
@@ -404,15 +437,20 @@ def roundtrip(file, node):
             got = step("get", lambda: client.get_object(key))
             if row["get"][2] and hashlib.sha256(got).digest() != hashlib.sha256(data).digest():
                 row["get"][0], row["get"][2] = "mismatch", False
-            if node and row["get"][2]:  # the object is there for the host to look at
-                far, far_ok = probe(client, key, *node)
+            if target and row["get"][2]:  # the object is there for the host to look at
+                far, far_ok = probe(client, key, target)
                 far = f"\nr2-check node {far}"
     finally:
         step("delete", lambda: client.delete_object(key))
+        # what Broker.begin asks before every attempt, of a key that is not there: any answer but
+        # "absent" (a 403, say) sends the attempt down the ssh path without a word
+        if step("absent", lambda: client.head_object(key)) is not None:
+            row["absent"][0], row["absent"][2] = "present", False
         http.close()
-    said = " ".join(f"{n}={row[n][0] if n in row else 'skipped'}" for n in ("put", "get", "delete"))
-    took = " ".join(f"{n}_s={row[n][1]:.3f}" for n in ("put", "get", "delete") if n in row)
-    complete = len(row) == 3 and all(r[2] for r in row.values()) and far_ok and (far or not node)
+    names = ("put", "get", "delete", "absent")
+    said = " ".join(f"{n}={row[n][0] if n in row else 'skipped'}" for n in names)
+    took = " ".join(f"{n}_s={row[n][1]:.3f}" for n in names[:3] if n in row)
+    complete = len(row) == 4 and all(r[2] for r in row.values()) and far_ok
     return f"challenge {said} bytes={SIZE} {took}{far}", bool(complete)
 
 
@@ -456,18 +494,21 @@ backup_dir() { local f listed; for f in compose.test.yml challenge.db server_key
       echo "backup $1: $f is not listed in SHA256SUMS"; exit 4; fi; done; }
 usage() { echo "usage: $1"; exit 2; }
 run_py() { # run_py [-i] MODE ARGS..: CHALLENGE_PY in the running challenge; only its sentences come out
-  local i=() out rc=0
+  local i=() out rc=0 said
   if [ "${1:-}" = -i ]; then i=(-i); shift; fi
   out=$(docker exec ${i[@]+"${i[@]}"} "$C" python -I -c "$CHALLENGE_PY" "$@" 2>&1) || rc=$?
-  printf '%s\n' "$out" | grep -E '^(preflight|postflight|r2-check) [ -~]{1,300}$' || true
-  [ "$rc" -eq 0 ] || echo "(the challenge program exited $rc)"
+  said=$(printf '%s\n' "$out" | grep -E '^(preflight|postflight|r2-check) [ -~]{1,600}$') || true
+  [ -z "$said" ] || printf '%s\n' "$said"
+  if [ "$rc" -ne 0 ] && [ -z "$said" ]; then
+    echo "(no answer from the challenge: docker exec exited $rc; is $C running?)"
+  fi
   return "$rc"
 }
-r2_file() { # r2_file CONTAINER_PATH: exit 4 unless it is a token file the challenge can load.
+r2_file() { # r2_file CONTAINER_PATH FLAG: exit 4 unless it is a token file the challenge can load.
   # Metadata only. The content is read by the challenge's own loader (run_py pre), never here.
   local d m H
   [[ $1 =~ ^$CDATA/executor/[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] \
-    || { echo "REFUSED --r2 FILE must be $CDATA/executor/NAME"; exit 4; }
+    || { echo "REFUSED $2 FILE must be $CDATA/executor/NAME"; exit 4; }
   H=$XD/${1##*/}
   { [ ! -L "$H" ] && [ -f "$H" ]; } || { echo "REFUSED $1: missing, a link or not a plain file"; exit 4; }
   m=$(stat -c '%a %u' -- "$H") || { echo "REFUSED $1: cannot stat"; exit 4; }
@@ -582,7 +623,7 @@ executor)
   trap 'rm -f "$ON"; [ "$W" = "$B" ] || rm -rf "$W"' EXIT
   vars=(services.challenge.environment.HYPERTRAIN_CUDA_EXECUTOR)
   if [ -n "$r2" ]; then
-    r2_file "$r2"
+    r2_file "$r2" --r2
     if [ -e "$R2F" ] || [ -L "$R2F" ]; then
       ours "$R2F" || { echo "REFUSED $R2S: not a file this script wrote; move it away"; exit 4; }
     fi
@@ -607,7 +648,8 @@ print(json.dumps({"credentials_file": sys.argv[1], "operations": sys.argv[2].spl
 print(json.load(open(sys.argv[1]))["services"]["challenge"]["image"])' "$W/config-before-executor.json")
     [ "$(docker image inspect "$ref" --format '{{.Id}}')" = "$(docker inspect "$C" --format '{{.Image}}')" ] \
       || { echo "REFUSED: the running challenge is not on the image $F resolves; swap or rollback first"; exit 4; }
-    run_py -i pre "$P" <<< "$json" || { echo "REFUSED: the challenge cannot load these settings; nothing written"; exit 4; }
+    run_py -i pre "$P" <<< "$json" \
+      || { echo "REFUSED: the challenge did not accept these settings, or could not be asked; nothing written"; exit 4; }
   fi
   python3 -I - "$W/config-before-executor.json" "$W/config-after-executor.json" "${vars[@]}" <<'EOF' \
     || { echo "unexpected compose change"; exit 5; }
@@ -642,7 +684,8 @@ EOF
   mv "$ON" "$O"; date -u +%FT%TZ
   (cd "$T" && docker compose -f "$F" -f "$O" up -d --no-deps ${force:+"$force"} challenge 2>&1 | tail -3) \
     || { echo "up failed after the files were written: bash -s -- executor-off $B"; exit 7; }
-  live "$(docker inspect "$C" --format '{{.Image}}')"
+  (live "$(docker inspect "$C" --format '{{.Image}}')") \
+    || { echo "the challenge is not up as asked: bash -s -- executor-off $B"; exit 7; }
   want=-; [ -z "$r2" ] || want=$R2S
   run_py post "$P" "$want" \
     || { echo "the recreated challenge does not carry the settings: bash -s -- executor-off $B"; exit 7; }
@@ -672,7 +715,7 @@ r2-check)
     *) usage "r2-check [--file FILE] [--node LABEL sha256:DIGEST]";;
     esac
   done
-  [ -z "$file" ] || r2_file "$file"
+  [ -z "$file" ] || r2_file "$file" --file
   run_py roundtrip "${file:--}" ${node[@]+"${node[@]}"} || { echo "r2-check did not complete"; exit 8; };;
 *) echo "unknown $cmd"; exit 2;;
 esac

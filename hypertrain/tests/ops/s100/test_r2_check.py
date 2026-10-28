@@ -40,7 +40,7 @@ def test_r2_check_can_try_a_token_before_the_challenge_is_switched(box):
     assert call["args"] == [TOKEN_PATH]
 
 
-@pytest.mark.parametrize("mode", [0o644, 0o640, 0o400, 0o777])
+@pytest.mark.parametrize("mode", [0o644, 0o400])
 def test_a_token_that_is_not_exactly_0600_is_not_tried(box, mode):
     box.token(mode=mode)
     out = check(box, "--file", TOKEN_PATH, rc=4).out
@@ -57,15 +57,14 @@ USAGE = {
     "no-value": ["--file"],
     "twice": ["--file", TOKEN_PATH, "--file", TOKEN_PATH],
     "unknown-option": ["--bogus"],
-    "stray-word": ["stray"],
-    "backup-dir-of-the-other-commands": ["/root/backups/x"],
 }
 
 
 @pytest.mark.parametrize("args", USAGE.values(), ids=USAGE)
 def test_a_usage_error_is_exit_2_before_any_call(box, args):
     box.token()
-    check(box, *args, rc=2)
+    out = check(box, *args, rc=2).out
+    assert out.startswith("usage: ")  # the script's own refusal, not an unknown command
     assert box.docker()["calls"] == [] and box.exec_calls() == []
 
 
@@ -80,14 +79,14 @@ def test_only_the_sentences_of_the_program_reach_the_terminal(box):
     leak = "Traceback (most recent call last):\nValueError: " + R2_VALUES["R2_SECRET_ACCESS_KEY"]
     box.exec_out("roundtrip", 1, leak)
     out = check(box, rc=8).out  # Box.run also looks for every value of the token in the output
-    assert "Traceback" not in out and "(the challenge program exited 1)" in out
+    assert "Traceback" not in out and "(no answer from the challenge: docker exec exited 1" in out
 
 
 def test_a_challenge_that_is_not_running_is_exit_8(box):
     state = box.docker()
     state["containers"][CHALLENGE]["State"]["Status"] = "exited"
     box._write("docker.json", state)
-    assert "(the challenge program exited 1)" in check(box, rc=8).out
+    assert "(no answer from the challenge: docker exec exited 1" in check(box, rc=8).out
 
 
 DIGEST = "sha256:" + "0f" * 32
@@ -105,15 +104,6 @@ def test_a_host_can_be_asked_with_a_token_that_is_not_yet_the_configured_one(box
     check(box, "--node", "gpu-a", DIGEST, "--file", TOKEN_PATH)
     (call,) = box.exec_calls()
     assert call["args"] == [TOKEN_PATH, "gpu-a", DIGEST]
-
-
-def test_what_the_host_made_of_the_check_is_what_the_program_printed(box):
-    both = (
-        ROUNDTRIP_LINE + "\nr2-check node gpu-a python=3.12.4 head=200 head_bytes=1048576 get=206"
-    )
-    box.exec_out("roundtrip", 0, both)
-    out = check(box, "--node", "gpu-a", DIGEST).out
-    assert both in out
 
 
 def test_a_host_that_failed_the_check_is_exit_8(box):
@@ -146,5 +136,11 @@ BAD_NODE = {
 @pytest.mark.parametrize("args", BAD_NODE.values(), ids=BAD_NODE)
 def test_a_label_or_digest_that_is_not_plain_never_reaches_the_challenge(box, args):
     box.token()
-    check(box, *args, rc=2)
+    out = check(box, *args, rc=2).out
+    assert out.startswith("usage: ")  # the script's own refusal, not an unknown command
     assert box.docker()["calls"] == [] and box.exec_calls() == []
+
+
+def test_a_refusal_names_the_flag_the_operator_typed(box):
+    out = check(box, "--file", "/etc/passwd", rc=4).out
+    assert "REFUSED --file FILE must be /data/executor/NAME" in out

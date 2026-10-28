@@ -164,9 +164,10 @@ which windows. Nothing here has run against a GPU host or the real R2 service.
 | `request_timeout_seconds`, `retry_attempts`, `retry_base_ms` | Per request and backoff, on both sides. |
 | `fallback` | `classic` (default): if R2 is unreachable when an attempt starts, that attempt uses the SSH way; `fail`: it fails. |
 
-The challenge builds the executor, settings and token included, on the first CUDA job and keeps it
-for the life of the process: a token or settings file it cannot load is a 503
-`ROLE_DISPATCH_UNAVAILABLE` there, and a changed file is read again only by a restarted challenge.
+The challenge builds the executor, settings and token included, on the first CUDA job, and once it
+has loaded it keeps it for the life of the process: a changed file is read again only by a restarted
+challenge. A token or settings file it cannot load is a 503 `ROLE_DISPATCH_UNAVAILABLE` for that job,
+and the next job tries again.
 
 Requirements: `network` must be `default` (the container reaches R2 over HTTPS; the image needs a CA
 bundle). The attempt's objects live under the bucket prefix `exec/<run>/<job>/<nonce>/`; give the
