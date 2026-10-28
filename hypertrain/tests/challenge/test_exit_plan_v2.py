@@ -201,7 +201,12 @@ def test_every_exit_the_planner_or_the_lease_expiry_books_has_a_seizure_reason()
     delta = x.plan_round(
         snap(at=150, committed=everyone, audited=everyone, delivered=keys(0, 1, 2, 3, 4))
     ).exclusions
-    booked = {(e.reason, e.stage) for e in commit + delta} | {("NO_SHOW", "leaves")}
+    # the planner books the commit and delta stages; the lease expiry books `leaves`, and the
+    # store books the `audit` row of a graded mismatch
+    booked = {(e.reason, e.stage) for e in commit + delta} | {
+        ("NO_SHOW", "leaves"),
+        ("AUDIT_MISMATCH", "audit"),
+    }
     assert booked == set(x.SANCTION)
     assert set(x.SANCTION.values()) <= set(get_args(SeizureReason))
 
@@ -241,3 +246,26 @@ def test_a_push_shows_a_pause_only_when_the_master_refused_its_callers(previous,
 )
 def test_a_window_is_served_unless_a_refused_view_falls_inside_it(spans, is_served):
     assert x.served(spans, 100, 130) is is_served
+
+
+def test_the_survivors_of_a_round_shrink_with_each_bound_and_are_what_the_plan_hands_on():
+    # Given: six members, five committed, four delivered, one excluded earlier
+    roster = [m.hotkey for m in ROSTER]
+    facts = {
+        "committed": keys(0, 1, 2, 3, 4),
+        "delivered": keys(0, 1, 2, 3),
+        "excluded": keys(0),
+    }
+    window = {"d_commit": 30, "d_upload": 150}
+
+    def left(now: int) -> list[str]:
+        return x.survivors_of(roster, now=now, **window, **facts)
+
+    # Then: before d_commit only the excluded one is gone; from d_commit the silent one; from
+    # d_upload the one that committed and delivered nothing
+    assert left(29) == ["h1", "h2", "h3", "h4", "h5"]
+    assert left(30) == ["h1", "h2", "h3", "h4"]
+    assert left(150) == ["h1", "h2", "h3"]
+    # and the planner hands on the very same list
+    snapshot = snap(at=150, audited=keys(1, 2, 3, 4), **facts)
+    assert list(x.plan_round(snapshot).survivors) == left(150)
