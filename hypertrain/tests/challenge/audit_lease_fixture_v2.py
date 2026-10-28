@@ -51,6 +51,7 @@ def seed_round(
     silent=(),
     deltas=True,
     admission_ids=None,
+    keys=None,
 ):
     """Write round 0 (opening, starts, commits, leaves, deltas, finality) into `records_v2`.
 
@@ -63,7 +64,8 @@ def seed_round(
     `deltas`: every member that committed also delivered its delta manifest; a round nobody
     delivered to reads, to the exit reaper, as an upload path that failed for everybody.
     `admission_ids`: {miner index: the real admission id} of a member the test activated, so that a
-    sanction of that member reaches its bond; the others carry a synthetic id."""
+    sanction of that member reaches its bond; the others carry a synthetic id. `keys`: the n keys of
+    the members, where `miners(n)` is not wanted (an auditor of the manifest that is also one)."""
     nan_leaf = nan_leaf or {}
     expiry = commit_exp if isinstance(commit_exp, dict) else dict.fromkeys(range(n), commit_exp)
     store, manifest = net.store, net.manifest
@@ -77,7 +79,7 @@ def seed_round(
     width = (cfg.model.seq_len + 1) * (2 if t.dataset.sample_format.startswith("u16") else 4)
     raw_samples = store.objects.get(dataset["samples_hash"])
     proofs = json.loads(store.objects.get(dataset["proofs_hash"]))
-    keys = miners(n)
+    keys = keys or miners(n)
     cache = AnchorCache()
     roster, starts, per = [], [], []
     for slot, key in enumerate(keys):

@@ -27,6 +27,15 @@ NOBODY_LEFT = WITHHELD + "test_a_third_window_ends_the_job_as_soon_as_no_auditor
 BOTH_WITHHOLD = (
     WITHHELD + "test_when_both_auditors_withhold_the_miner_is_dropped_once_and_never_sanctioned"
 )
+NO_THIRD_WINDOW = (
+    WITHHELD + "test_a_match_withheld_in_the_last_window_is_dropped_without_a_third_window"
+)
+OTHER_JOB = (
+    WITHHELD + "test_a_withhold_on_another_job_does_not_make_its_auditor_a_withholder_of_this_one"
+)
+MINER_AUDITOR = (
+    WITHHELD + "test_a_job_whose_only_other_auditor_is_its_miner_is_re_armed_when_the_first_lapses"
+)
 NTH_BARS = WITHHELD + "test_the_nth_withheld_mismatch_bars_the_auditor_and_the_one_before_does_not"
 ONLY_MISMATCH = WITHHELD + "test_only_a_withheld_mismatch_counts_toward_the_bar"
 BAR_LENGTHS = (
@@ -196,6 +205,41 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         '            or not self._auditors_left_v2(run_id, row, json.loads(row["tried"]))\n',
         "",
         (NOBODY_LEFT,),
+    ),
+    (
+        "a stale verdict is attributed to a holder that never asked for the execution",
+        STORE,
+        '        if marker is None or marker["state"] != "EXECUTED" or stored is None:\n',
+        "        if stored is None:\n",
+        (NOBODY_LEFT,),
+    ),
+    (
+        "a withheld MATCH makes its holder a withholder of the job",
+        STORE,
+        "='MISMATCH'\",\n                (run_id, f\"{job_id}",
+        ' IS NOT NULL",\n                (run_id, f"{job_id}',
+        (NO_THIRD_WINDOW,),
+    ),
+    (
+        "the withholders of a job include those of the jobs that sort after it",
+        STORE,
+        '(run_id, f"{job_id}:", f"{job_id};"),',
+        '(run_id, f"{job_id}:", "\\U0010ffff"),',
+        (OTHER_JOB + "[above]",),
+    ),
+    (
+        "the withholders of a job include those of the jobs that sort before it",
+        STORE,
+        '(run_id, f"{job_id}:", f"{job_id};"),',
+        '(run_id, "", f"{job_id};"),',
+        (OTHER_JOB + "[below]",),
+    ),
+    (
+        "the miner counts as an auditor left to try its own job",
+        STORE,
+        'return any(a not in taken and a != row["hotkey"] for a in auditors)',
+        "return any(a not in taken for a in auditors)",
+        (MINER_AUDITOR,),
     ),
     (
         "re-arm with nobody left to try the job",
