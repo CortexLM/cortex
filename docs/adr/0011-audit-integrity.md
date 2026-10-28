@@ -1275,12 +1275,12 @@ merged at `2cfc2a2b` plus miner-driver-resilience, and `a6f9884a`, the escrow-re
 commits). `network_qualification.sources()`/`bundle()` and `ChallengeStore._service_implementation_v2`, over a
 `git archive` of each commit [V]:
 
-| Value | Base `8c2b24e8` | Ours `b260fa80` | v3 `4234e8ff` | Merge 1 `f9bf3dd4` | v3 `a6f9884a` | Merge 2 `ebd0098e` |
+| Value | Base `8c2b24e8` | Ours `b260fa80` | v3 `4234e8ff` | Merge 1 `f9bf3dd4` | v3 `a6f9884a` | Tip `ae7ddf70` (merge 2 `ebd0098e`) |
 | --- | --- | --- | --- | --- | --- | --- |
 | `implementation_hash` | `941247f8…a688d1` | `6aaea4bc…18eee7` | `fc9e87b0…e4c8fe` | `90bf49e7…d4c3d8` | `fc9e87b0…e4c8fe` | `90bf49e7…d4c3d8` |
-| `challenge/store.py` sha256 | `6eadf5bb…1e3972` | `cacf6c59…43b5d9` | `0ef3d258…93ff42` | `4ff561a3…5d607d` | `7fb1c56b…38688c` | `d20c6fb7…c0bdd2` |
-| `sources()` map: files, canonical sha256 | 153, `0d989cd1…987bf9` | 158, `aae62f35…934641` | 155, `2443f974…30feea` | 158, `e26df7d7…8251f3` | 155, `ea84fff1…a9bfe4` | 158, `9bbcf033…24e7c7` |
-| `bundle()` | 2,519,040 bytes, `0fbf1c09…280721` | 2,631,680 bytes, `0cc89a5e…e8f975` | 2,560,000 bytes, `cd4e5285…5d0ee2` | 2,652,160 bytes, `3e91412d…c82f4e` | 2,600,960 bytes, `fb3cca4a…01f438` | 2,682,880 bytes, `63b4a8a0…87e77e` |
+| `challenge/store.py` sha256 | `6eadf5bb…1e3972` | `cacf6c59…43b5d9` | `0ef3d258…93ff42` | `4ff561a3…5d607d` | `7fb1c56b…38688c` | `01cbcbdf…071375` |
+| `sources()` map: files, canonical sha256 | 153, `0d989cd1…987bf9` | 158, `aae62f35…934641` | 155, `2443f974…30feea` | 158, `e26df7d7…8251f3` | 155, `ea84fff1…a9bfe4` | 158, `5577ad43…e22dfa` |
+| `bundle()` | 2,519,040 bytes, `0fbf1c09…280721` | 2,631,680 bytes, `0cc89a5e…e8f975` | 2,560,000 bytes, `cd4e5285…5d0ee2` | 2,652,160 bytes, `3e91412d…c82f4e` | 2,600,960 bytes, `fb3cca4a…01f438` | 2,682,880 bytes, `81a77889…4d377f` |
 
 Reading: the merged `implementation_hash` is neither parent's, because `finalize_v2` is owned and carries the
 edits of both: ours (the applied tape's inputs less a convicted coldkey, the one closure writer) and theirs
@@ -1289,8 +1289,9 @@ again: the 31 commits of the escrow lot touch none of the owned names (`v3` keep
 that holds a `service-admission` record from either parent fails `SERVICE_PROFILE_AUTHORITY` and is created
 again, as in Parts 2, 3, 5 and ADR 0014. `sources()` and the bundle move with every edit of `src/hypertrain`,
 so a qualification record made on a parent tree no longer validates against this one; they are measured again
-on the tree that is released. The commits after `ebd0098e` touch tests and documents only, so the values hold
-for them.
+on the tree that is released. The tip differs from the merge `ebd0098e` by a docstring of `store.py` (the function
+is not owned, so `implementation_hash` does not move); the commits after `ae7ddf70` touch tests and documents only,
+so the values hold for them.
 
 ### Consequences
 
