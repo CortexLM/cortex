@@ -62,7 +62,7 @@ Exact rounds are read, so a hole is a defect, not a cosmetic gap. `Admission.cha
 trial is finalized (:895) and after a resume (:1047) [V]. A seed that falls in a hole answers 500
 `BeaconUnavailable: round N not pushed` until the window (100 rounds) is over, then 409
 `CHALLENGE_EXPIRED` with the identity still in its state and no way to a new seed (nothing but join,
-finalize and resume moves `seed_beacon`) [V by a reviewer's reading]. That is not the S13 suspension:
+finalize and resume moves `seed_beacon`; since 2026-10-28 the operator's reseed does too, ADR 0010 point 5) [V by a reviewer's reading]. That is not the S13 suspension:
 `SUSPENDED / CHALLENGE_EXPIRED` is written only for a trial already OPEN whose deadline passed
 (`admission.py:222-224`), which is what the five-minute backfill pause did to miner 3. The two S13 losses
 had two causes, both traced to the beacon. That a hole strands an identity without a second pusher is

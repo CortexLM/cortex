@@ -185,6 +185,14 @@ request. A PUT retry is logged, not journaled, and the economics-policy GET of a
 not retried. A theta rebuild whose object stays 404 now spends up to about 46 s before the
 documented fallback to the full pinned object (more when its parts are the ones missing).
 
+If the challenge request answers 409 `CHALLENGE_EXPIRED` (the trial window lapsed), `probe-v2` asks
+again, with a fresh request signed by the same hotkey, every 10 s for up to 10 minutes (61 asks): the
+operator's reseed (below) turns the answer into 409 `SEED_NOT_READY` for one round, then into the
+new challenge. It creates no identity and sends nothing but that request. The resume is one
+`kind: resume` line in the same journal (`utc`, `admission_id`, `trial`, `old_challenge`,
+`new_challenge`, `asks`). If nobody reseeds in time it exits with status 3 and an error that names the
+operator's route; every other 409 keeps its answer.
+
 `probe-v2` executes the screen and uploads original rank-0 state/EF/delta/leaves;
 stdout contains the signed proof/screen pair. The operator independently prepares
 and finalizes references through authenticated admin routes; miners cannot
@@ -237,9 +245,10 @@ Locks, strikes and a pending dispute follow the admission.
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
 rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
 refused (`CHALLENGE_EXPIRED`) once more than `challenge_rounds` rounds have passed since
-the miner's join or its last trial finalization. Only a suspend and resume reopens it,
-and resume restarts probation at zero clean trials. No admin route calls them: `suspend`
+the miner's join or its last trial finalization. A suspend and resume reopens it, and
+resume restarts probation at zero clean trials. No admin route calls them: `suspend`
 runs when a dispute opens, and `resume` only after a nonfraud dispute settlement. The
+operator's reseed (below) reopens it without touching the state. The
 server's own closure of a dispute nobody can decide resumes the miner by itself; every
 other nonfraud settlement needs the miner's signed recovery call (see the dispute
 paragraphs below). So a miner that waits while others run their trials stays eligible
@@ -252,8 +261,8 @@ rounds. The challenge deadline is seed + 100 whenever the challenge is requested
 proof must be accepted by then. A challenge left unproven past its deadline is closed
 `EXPIRED` by the master at the next beacon push (or at the next challenge request, which
 frees the place first). Nobody is suspended: the miner keeps its state, its clean trials and
-its screen, and a later request answers 409 `CHALLENGE_EXPIRED` until a re-seed exists. The
-deadline round itself still accepts a proof. A trial whose proof was accepted is never expired
+its screen, and a later request answers 409 `CHALLENGE_EXPIRED` until the operator reseeds
+the admission. The deadline round itself still accepts a proof. A trial whose proof was accepted is never expired
 by the clock, and its finalization may follow the deadline: the miner may re-post the exact
 accepted proof and screen after their deadline to run a finalization that failed (the proof
 route commits the proof and the finalization separately). A different proof after the
@@ -263,8 +272,20 @@ longer than that window minus one trial's duration cannot renew its screen, what
 schema fixes `max_trial_replays` at 2). In a run longer than `work_screen_epoch_rounds`
 (about 5 h at 6000), every ACTIVE miner must therefore chain its trials, each one proven
 inside its window, to stay eligible. Otherwise only the suspend and resume above bring it
-back, to PROBATION at zero clean trials; an expired trial changes none of that, it only frees
-its place.
+back, to PROBATION at zero clean trials, or the operator's reseed, which keeps the state; an
+expired trial changes none of that, it only frees its place.
+
+**Reseed.** `POST /v2/runs/{run_id}/admin/join/{admission_id}/reseed` (admin bearer only;
+`scripts/ops/live_operator.py reseed --admission-id ID` inside the challenge container) gives an
+identity whose window lapsed a new one: it writes `seed_beacon = now + 1` and nothing else, so the
+state, clean trials, strikes and screen stay and no second identity exists. It answers 409
+`RESEED_STATE` unless the admission is `APPLIED`, `PROBATION` or `ACTIVE` with no pending dispute,
+`RESEED_TRIAL_OPEN` while its trial is open (live, or proven and waiting for its finalization), and
+`RESEED_NOT_NEEDED` unless `now > seed_beacon + challenge_rounds`; one lapse buys one reseed, and each
+use leaves an audit row. The owner then asks for its challenge with its own signed
+`ChallengeRequest` as before; the round before the new seed answers 409 `SEED_NOT_READY`, and the
+new trial has a new nonce and a fresh 100-round window. This is the operator's step, not the miner's
+right: ADR 0010 decision 2 point 5.
 
 `manifest_v2 example` writes 6000 (about 5 h). In a serial 40-trial campaign
 (3 × 12 ACTIVE + 4 PROBATION), each trial spans at most about `challenge_rounds` + 1

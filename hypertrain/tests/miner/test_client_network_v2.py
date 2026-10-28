@@ -894,3 +894,152 @@ def test_fetch_inputs_falls_back_to_full_download_on_bad_theta_ref(tmp_path: Pat
     assert full["start_state"] in gets
     assert sorted(p.name for p in directory.iterdir()) == ["start_state"]
 
+
+# --- RELAY-03: a lapsed trial window is asked again until the operator reseeds it ---------------
+
+
+def _challenge_server(miner, answers: list[tuple[int, dict]]):
+    """The run (a rising now_round) and a challenge route that answers `answers` in order, the last
+    one for ever. Returns the requests the miner made and the challenge requests it signed."""
+    seen: list[tuple[str, str]] = []
+    asked: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        assert len(seen) < 300, "challenge asked without bound"
+        if request.method == "GET":
+            return httpx.Response(200, json={"now_round": 1000 + 10 * len(asked)})
+        asked.append(json.loads(request.content))
+        status, body = answers[min(len(asked), len(answers)) - 1]
+        return httpx.Response(status, json=body)
+
+    miner.api.c._transport.handler = handler
+    return seen, asked
+
+
+EXPIRED = (409, {"detail": "CHALLENGE_EXPIRED"})
+NOT_READY = (409, {"detail": "SEED_NOT_READY"})
+ISSUED = (200, {"type": "JoinChallenge", "body": {"nonce": "cd" * 32, "seed_beacon": 1227}})
+
+
+def _lapsed_record(miner, challenge: dict | None = None) -> dict:
+    old = {"nonce": "ab" * 32, "seed_beacon": 1000}
+    return {
+        "admission_id": "ee" * 32,
+        "clean_count": 4,
+        "challenge_json": json.dumps(challenge or old),
+    }
+
+
+def test_a_lapsed_trial_is_asked_again_by_the_same_hotkey_until_the_operator_reseeds(
+    tmp_path: Path, monkeypatch
+):
+    import hypertrain.miner.core as core
+    from hypertrain.protocol import envelope_v2
+    from hypertrain.protocol.envelope import body_digest
+
+    # Given: the window lapsed (409 twice), the operator reseeds, and the round before the seed
+    # answers 409 SEED_NOT_READY once
+    monkeypatch.setattr(core, "RESUME_POLLS", 5)
+    monkeypatch.setattr(core, "RESUME_POLL_SECONDS", 7.0)
+    slept: list[float] = []
+    monkeypatch.setattr(core.time, "sleep", slept.append)
+    miner, _, _ = _parts_miner(tmp_path)
+    seen, asked = _challenge_server(miner, [EXPIRED, EXPIRED, NOT_READY, ISSUED])
+    record = _lapsed_record(miner)
+    url = f"{miner.url}/join/{record['admission_id']}"
+    # When
+    envelope, now = miner._ask_challenge(url, record, 1000)
+    # Then: the new challenge is returned with the round of the request that got it
+    assert envelope == ISSUED[1] and now == 1000 + 10 * 3 and len(asked) == 4
+    assert slept == [7.0, 7.0, miner.manifest.training.beacon.period]
+    # And: every ask is a fresh ChallengeRequest signed by the same hotkey for the same admission,
+    # and nothing else is called: no join, so no second identity
+    assert {(r["type"], r["signer"], r["run_id"]) for r in asked} == {
+        ("ChallengeRequest", miner.kp.ss58, miner.run_id)
+    }
+    assert all(r["body"] == {"admission_id": record["admission_id"]} for r in asked)
+    assert all(envelope_v2.verify_envelope(r) for r in asked)
+    assert len({r["sig"] for r in asked}) == 4
+    assert {path for _, path in seen} == {miner.url, url + "/challenge"}
+    # And: one journal line says which challenge the resume replaced
+    [line] = _journaled(miner, "resume")
+    assert line["admission_id"] == record["admission_id"] and line["trial"] == 5
+    assert line["old_challenge"] == body_digest(json.loads(record["challenge_json"]))
+    assert line["new_challenge"] == body_digest(ISSUED[1]["body"]) != line["old_challenge"]
+    assert line["asks"] == 4 and line["utc"].endswith("Z")
+
+
+def _journaled(miner, kind: str) -> list[dict]:
+    return [r for r in _journaled_retries(miner) if r["kind"] == kind]
+
+
+def test_a_window_that_stays_lapsed_ends_in_an_error_that_names_the_operator_step(
+    tmp_path: Path, monkeypatch
+):
+    import hypertrain.miner.core as core
+    from hypertrain.miner.core import ChallengeExpired, MinerError
+
+    monkeypatch.setattr(core, "RESUME_POLLS", 3)
+    slept: list[float] = []
+    monkeypatch.setattr(core.time, "sleep", slept.append)
+    miner, _, _ = _parts_miner(tmp_path)
+    seen, asked = _challenge_server(miner, [EXPIRED])
+    record = _lapsed_record(miner)
+    url = f"{miner.url}/join/{record['admission_id']}"
+    # When / Then: the bound is the number of asks, then a distinct error, no loop
+    with pytest.raises(ChallengeExpired) as ended:
+        miner._ask_challenge(url, record, 1000)
+    assert isinstance(ended.value, MinerError) and len(asked) == 4 and len(slept) == 3
+    message = str(ended.value)
+    assert record["admission_id"] in message
+    assert f"{miner.url}/admin/join/{record['admission_id']}/reseed" in message
+    assert "ChallengeHTTPError" not in message  # the s100 driver must not take it for a transient
+    assert _journaled(miner, "resume") == []
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        [(409, {"detail": "CHALLENGE_STATE"})],
+        [NOT_READY],  # nothing lapsed: the driver's own handling of SEED_NOT_READY stays
+        [(409, {"detail": "REFERENCE_TRIAL_CLOSED"})],
+        [(403, {"detail": "hotkey is not current accepted identity"})],
+        [EXPIRED, (503, {"detail": "beacon infrastructure paused"})],
+    ],
+    ids=["state", "not-ready-first", "trial-closed", "forbidden", "pause-while-waiting"],
+)
+def test_only_a_lapsed_window_and_the_round_after_its_reseed_are_waited_for(
+    tmp_path: Path, monkeypatch, answers
+):
+    import hypertrain.miner.core as core
+    from hypertrain.miner.core import ChallengeHTTPError
+
+    monkeypatch.setattr(core, "RESUME_POLLS", 5)
+    slept: list[float] = []
+    monkeypatch.setattr(core.time, "sleep", slept.append)
+    miner, _, _ = _parts_miner(tmp_path)
+    _, asked = _challenge_server(miner, answers)
+    record = _lapsed_record(miner)
+    with pytest.raises(ChallengeHTTPError) as raised:
+        miner._ask_challenge(f"{miner.url}/join/{record['admission_id']}", record, 1000)
+    assert (raised.value.status, raised.value.detail) == (
+        answers[-1][0],
+        answers[-1][1]["detail"],
+    )
+    assert len(asked) == len(answers) and len(slept) == len(answers) - 1
+    assert _journaled(miner, "resume") == []
+
+
+def test_a_resume_the_journal_cannot_record_still_returns_the_challenge(
+    tmp_path: Path, monkeypatch
+):
+    import hypertrain.miner.core as core
+
+    monkeypatch.setattr(core.time, "sleep", lambda _: None)
+    miner, _, _ = _parts_miner(tmp_path)
+    _challenge_server(miner, [EXPIRED, ISSUED])
+    _break_the_journal(miner)
+    record = _lapsed_record(miner)
+    envelope, _ = miner._ask_challenge(f"{miner.url}/join/{record['admission_id']}", record, 1000)
+    assert envelope == ISSUED[1]

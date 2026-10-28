@@ -12,7 +12,9 @@ Each stage is timed into DIR/stages.tsv; seeds stay 0600 in DIR/m<i>/ and are ne
 A trial is retried only on the transient refusals the challenge documents (503, SEED_NOT_READY,
 TRIAL_CAPACITY) and on the one 404 the miner reports once its own retries of a trial input are
 spent (RELAY-02: a read miss on an intact object); any other failure stops the plan, since a
-missed trial strands the identity (409 CHALLENGE_EXPIRED).
+missed trial strands the identity (409 CHALLENGE_EXPIRED): probe-v2 then waits 10 minutes for the
+operator's reseed (live_operator.py reseed, docs/s100-test-stack.md section 5) and exits with
+status 3, which stops the plan too.
 
 ATEN_CPU_CAPABILITY must name the challenge host's ATen CPU capability (avx2 for s100, a Zen 3).
 Trials and audits score only on bitwise equality with the challenge's own CPU replay, and the

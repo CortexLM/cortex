@@ -209,3 +209,19 @@ def test_finalize_lists_the_members_the_aggregate_step_left_out(
 
     assert [path for path, _ in sent] == ["/admin/rounds/0/aggregate", "/admin/rounds/0/finalize"]
     assert sent[1][1]["body"]["included"] == sorted(key.ss58 for key in keys[:2])
+
+
+def test_reseed_posts_the_admin_route_of_that_admission_and_nothing_else(
+    master_args: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """RELAY-03: the operator step a stranded miner is told to ask for."""
+    calls: list[tuple[str, str, object, bool]] = []
+
+    def call(self: Any, method: str, path: str, body: object = None, admin: bool = False) -> Any:
+        calls.append((method, path, body, admin))
+        return {"seed_beacon": 1226}
+
+    monkeypatch.setattr(live_operator.Master, "call", call)
+    assert live_operator.main([*master_args, "reseed", "--admission-id", "ab" * 32]) == 0
+    assert calls == [("POST", "/admin/join/" + "ab" * 32 + "/reseed", None, True)]
+    assert json.loads(capsys.readouterr().out) == {"seed_beacon": 1226}

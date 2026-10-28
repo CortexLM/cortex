@@ -144,6 +144,13 @@
   stays, and append one `kind: retry` line per object GET retry to `journal.jsonl` of the miner
   directory. The s100 TEST driver gives the exhausted `trial input object unavailable` 404 another
   pass. See `docs/network-v2.md`.
+- A miner whose trial window lapsed (409 `CHALLENGE_EXPIRED`, state kept) can be given a new one:
+  `POST /v2/runs/{run_id}/admin/join/{admission_id}/reseed` (admin bearer; `live_operator.py
+  reseed`) writes `seed_beacon = now + 1` and nothing else, refused while its trial is open, while
+  the window lives, or for a suspended, banned or disputed admission. `probe-v2` waits for it, asking
+  again with the same hotkey every 10 s for 10 minutes, journals the `resume`, and exits with
+  status 3 naming the route if nobody reseeds. No constant, policy field or message changes.
+  See ADR 0010 decision 2 point 5 at the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

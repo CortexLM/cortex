@@ -192,6 +192,87 @@ def test_probe_v2_refuses_job_or_challenge_alone(miner, caplog, tmp_path, given)
     assert not any(r.url.path.endswith(("/challenge", "/job")) for r in requests)
 
 
+def s100_driver(monkeypatch):
+    """scripts/ops/s100_test/cpu_miners.py, loaded in its CPU mode."""
+    monkeypatch.delenv("HT_MINER_DEVICE", raising=False)
+    spec = importlib.util.spec_from_file_location(
+        "cpu_miners_probe_contract",
+        Path(__file__).parents[2] / "scripts/ops/s100_test/cpu_miners.py",
+    )
+    assert spec is not None and spec.loader is not None
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+    return driver
+
+
+def lapse(n, identity):
+    """The trial window of `identity` passes unproven: its challenge is refused for good."""
+    assert n.challenge(identity).status_code == 200
+    n.push(n.now + 150)
+    refused = n.challenge(identity)
+    assert (refused.status_code, refused.json()) == (409, {"detail": "CHALLENGE_EXPIRED"})
+
+
+def test_probe_v2_resumes_the_same_identity_once_the_operator_reseeds_it(
+    miner, monkeypatch, capsys
+):
+    import hypertrain.miner.core as core
+
+    # Given: RELAY-03, an identity whose trial window lapsed while its driver was down
+    n, identity, config, folder, requests, _ = miner
+    lapse(n, identity)
+    reseeds: list[dict] = []
+
+    def operator(seconds: float) -> None:
+        """The wait of the miner is the operator's turn: reseed once, then the round passes."""
+        if not reseeds:
+            done = n.client.post(n.url + f"/admin/join/{identity}/reseed", headers=service.admin())
+            assert done.status_code == 200, done.text
+            reseeds.append(done.json())
+            n.push(n.now + 1)
+
+    monkeypatch.setattr(core, "RESUME_POLL_SECONDS", 0.0)
+    monkeypatch.setattr(core.time, "sleep", operator)
+    # When
+    assert cli.main(["probe-v2", "--config", str(config)]) == 0
+    signed = json.loads(capsys.readouterr().out)
+    # Then: the same identity proves its trial: accepted, one more clean trial, no second identity
+    response = n.client.post(n.url + "/join/proof", json=signed)
+    assert response.status_code == 200, response.text
+    assert response.json()["admission_id"] == identity and response.json()["clean_count"] == 1
+    assert n.store._db.execute("SELECT COUNT(*) FROM admissions_v2").fetchone()[0] == 1
+    assert not any(r.method == "POST" and r.url.path.endswith("/join") for r in requests)
+    # And: the journal says which challenge the reseed replaced
+    lines = [json.loads(x) for x in (folder / "journal.jsonl").read_text().splitlines()]
+    [resume] = [x for x in lines if x["kind"] == "resume"]
+    assert resume["admission_id"] == identity and resume["trial"] == 1
+    assert resume["old_challenge"] and resume["new_challenge"] != resume["old_challenge"]
+    assert reseeds and reseeds[0]["admission_id"] == identity
+
+
+def test_probe_v2_without_an_operator_ends_with_status_3_and_the_step_to_take(
+    miner, monkeypatch, caplog
+):
+    import hypertrain.miner.core as core
+
+    n, identity, config, folder, requests, _ = miner
+    lapse(n, identity)
+    monkeypatch.setattr(core, "RESUME_POLLS", 2)
+    monkeypatch.setattr(core.time, "sleep", lambda _: None)
+    # When: nobody reseeds
+    assert cli.main(["probe-v2", "--config", str(config)]) == 3
+    # Then: three asks, a last line that names the operator step, nothing probed or uploaded,
+    # and the line is not one the s100 driver would take for a transient
+    asks = [r for r in requests if r.url.path.endswith(f"/join/{identity}/challenge")]
+    assert len(asks) == 3
+    last = caplog.records[-1].getMessage()
+    assert last.startswith("ChallengeExpired: CHALLENGE_EXPIRED: admission " + identity)
+    assert f"/admin/join/{identity}/reseed" in last
+    assert not s100_driver(monkeypatch).transient("", f"ERROR {last}")
+    assert not any(r.method == "PUT" for r in requests)
+    assert list(folder.iterdir()) == []
+
+
 def test_probe_v2_completes_when_each_trial_input_misses_once(miner, monkeypatch, capsys):
     import hypertrain.miner.core as core
 
@@ -231,12 +312,4 @@ def test_probe_v2_ends_on_the_line_the_s100_driver_retries_when_an_input_stays_m
     assert not any(r.method == "PUT" for r in requests)
     assert {p.name for p in folder.iterdir()} <= {"journal.jsonl", "journal.lock"}
     # And: the driver takes that final stderr line, as the CLI wrote it, for a transient
-    monkeypatch.delenv("HT_MINER_DEVICE", raising=False)
-    spec = importlib.util.spec_from_file_location(
-        "cpu_miners_probe_contract",
-        Path(__file__).parents[2] / "scripts/ops/s100_test/cpu_miners.py",
-    )
-    assert spec is not None and spec.loader is not None
-    driver = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(driver)
-    assert driver.transient("", f"{last.levelname} {last.getMessage()}")
+    assert s100_driver(monkeypatch).transient("", f"{last.levelname} {last.getMessage()}")

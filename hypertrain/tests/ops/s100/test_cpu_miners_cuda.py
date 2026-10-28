@@ -238,3 +238,20 @@ def test_admit_waits_for_the_gpu_before_a_join_starts_the_challenge_window(monke
     monkeypatch.setattr(m, "status", lambda root, i: {"record": {"clean_count": 4, "state": "x"}})
     assert m.admit([str(tmp_path), "1:4,0:4"]) == 0
     assert order == ["wait", "join1", "wait", "join0"]
+
+
+def test_a_lapsed_window_stops_the_driver_at_once_and_shows_the_operator_step(
+    monkeypatch, tmp_path
+):
+    # probe-v2 waited for the operator's reseed and exited with status 3 (RELAY-03): asking again
+    # from here would only start another wait.
+    m = load(monkeypatch, None)
+    (tmp_path / "m0").mkdir()
+    line = (
+        "ERROR ChallengeExpired: CHALLENGE_EXPIRED: admission ab has no window left after 61 asks "
+        "over 600 s; an operator must reseed it: POST /v2/runs/r/admin/join/ab/reseed"
+    )
+    stages = scripted_cli(m, monkeypatch, [(3, "", line)])
+    with pytest.raises(SystemExit, match="must reseed it: POST /v2/runs/r/admin/join/ab/reseed"):
+        m.trial(tmp_path, 0, 5)
+    assert stages == ["probe-v2"]

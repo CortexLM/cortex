@@ -1182,6 +1182,50 @@ class Admission:
                 (now + 1, r.admission_id),
             )
 
+    def reseed(self, admission_id: str, *, now: int) -> dict[str, JsonValue]:
+        """Give an identity whose trial window is dead a new one: write `seed_beacon = now + 1`.
+
+        `challenge()` refuses for ever once `now > seed_beacon + challenge_rounds`, and only join,
+        finalize_trial and resume write the seed, so a miner that lost its window to an eviction
+        or a beacon pause is stranded with its state intact (ADR 0010 decision 2). This is the
+        operator's way back for it, behind the admin bearer. Nothing else moves: state,
+        clean_count, strikes, screen and the closed trial stay, so no second identity and no strike.
+        One lapse buys one reseed (the new window must itself be dead before the next), and each
+        use leaves a reservation row.
+        """
+        self._beacon(now)
+        with self.escrow.tx():
+            r = self.store.by_id(admission_id)
+            if r.state not in ("APPLIED", "PROBATION", "ACTIVE") or r.pending_dispute:
+                raise AdmissionError("RESEED_STATE")
+            self.reap_expired_trials(now=now)
+            row = self.store.db.execute(
+                "SELECT a.seed_beacon, t.outcome FROM admissions_v2 a "
+                "LEFT JOIN admission_trial_results t ON t.epoch=a.trial_epoch "
+                "WHERE a.admission_id=?",
+                (admission_id,),
+            ).fetchone()
+            if row["outcome"] == "OPEN":  # live, or proven and waiting for its finalization
+                raise AdmissionError("RESEED_TRIAL_OPEN")
+            if now <= row["seed_beacon"] + self.policy.challenge_rounds:
+                raise AdmissionError("RESEED_NOT_NEEDED")
+            body: dict[str, JsonValue] = {
+                "admission_id": admission_id,
+                "state": r.state,
+                "previous_seed_beacon": row["seed_beacon"],
+                "seed_beacon": now + 1,
+                "reseeded_beacon": now,
+            }
+            self.store.db.execute(
+                "UPDATE admissions_v2 SET seed_beacon=? WHERE admission_id=?",
+                (now + 1, admission_id),
+            )
+            raw = canonicalize(body)
+            self.store.reserve(
+                f"reseed|{admission_id}|{row['seed_beacon']}", sha256_hex(raw), raw.decode()
+            )
+            return body
+
     def resolve_pending(self, hotkey: str, reference: str, *, now: int) -> None:
         """Resume only from L5's authenticated nonfraud settlement, preserving strikes."""
         self._beacon(now)

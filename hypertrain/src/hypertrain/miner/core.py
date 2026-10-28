@@ -59,8 +59,17 @@ RETRY_DELAYS: tuple[float, ...] = (1, 2, 4, 8, 16)
 # likely a lost read than an answer (s100 TEST replay, 2026-10-27, RELAY-02; cause not established).
 OBJECT_MISS = frozenset({404})
 OWNER_REQUEST_ROUNDS = 20  # a signed owner request lives about a minute at 3 s rounds
+# A trial request that answers 409 CHALLENGE_EXPIRED is asked again this many times, this many
+# seconds apart (10 minutes in all): the identity is stranded until the operator reseeds it
+# (Admission.reseed, ADR 0010); the poll is short so that little of the new 300 s window is lost.
+RESUME_POLLS = 60
+RESUME_POLL_SECONDS = 10.0
 FETCH_WORKERS = 16  # concurrent 1 MiB part GETs per job input (bounded window, ordered sink)
 UPLOAD_WORKERS = 16  # concurrent 1 MiB part PUTs per artifact (bounded window, index last)
+
+
+def _utc() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _retrying[T](
@@ -170,6 +179,10 @@ class StartStateMismatch(MinerError):
 
 class HardwareMismatch(MinerError):
     pass
+
+
+class ChallengeExpired(MinerError):
+    """The trial window of this identity lapsed and no operator reseeded it while we waited."""
 
 
 class ChallengeHTTPError(MinerError):
@@ -817,7 +830,7 @@ class NetworkMiner:
         """One journal line per object GET retry, so a replay can count them."""
         Journal(self.directory).append(
             "retry",
-            utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            utc=_utc(),
             route=route,
             status=status,
             attempt=attempt,
@@ -946,21 +959,14 @@ class NetworkMiner:
         from hypertrain.protocol import envelope_v2
         from hypertrain.protocol.messages_v2 import Hex64, IslandJobV1, JoinChallenge
 
-        admission_id = self.status()["record"]["admission_id"]
+        record = self.status()["record"]
+        admission_id = record["admission_id"]
         url = self.url + f"/join/{admission_id}"
         now = self.api.call("GET", self.url)["now_round"]
-
-        def asked(message: str) -> dict[str, Any]:
-            return envelope_v2.seal(
-                self.kp,
-                message,
-                self.run_id,
-                {"admission_id": admission_id},
-                now + OWNER_REQUEST_ROUNDS,
-            )
-
-        envelope = self.api.call("POST", url + "/challenge", json=asked("ChallengeRequest"))
-        data = self.api.call("POST", url + "/job", json=asked("JobRequest"))
+        envelope, now = self._ask_challenge(url, record, now)
+        data = self.api.call(
+            "POST", url + "/job", json=self._owner_request("JobRequest", record, now)
+        )
         try:
             job = IslandJobV1.model_validate(data["job"])
             challenge = JoinChallenge.model_validate(data["challenge"])
@@ -1008,6 +1014,78 @@ class NetworkMiner:
         (root / "job.json").write_bytes(canonicalize(job.body()))
         (root / "challenge.json").write_bytes(canonicalize(envelope))
         return root / "job.json", root / "challenge.json"
+
+    def _owner_request(self, message: str, record: Mapping[str, Any], now: int) -> dict[str, Any]:
+        """A body signed by this hotkey, the only credential of the owner routes (ADR 0010)."""
+        from hypertrain.protocol import envelope_v2
+
+        return envelope_v2.seal(
+            self.kp,
+            message,
+            self.run_id,
+            {"admission_id": record["admission_id"]},
+            now + OWNER_REQUEST_ROUNDS,
+        )
+
+    def _ask_challenge(
+        self, url: str, record: Mapping[str, Any], now: int
+    ) -> tuple[dict[str, Any], int]:
+        """The signed trial challenge, and the round of the request that got it.
+
+        An identity whose trial window lapsed is refused 409 CHALLENGE_EXPIRED until the operator
+        reseeds it (Admission.reseed), and the round before the new seed answers 409
+        SEED_NOT_READY. Both are waited for, up to RESUME_POLLS asks, and nothing else is: the same
+        hotkey signs a fresh request each time, so no second identity is created and nothing is
+        struck (the reaper that closed the trial suspends nobody). Then ChallengeExpired."""
+        lapsed = 0
+        for poll in range(RESUME_POLLS + 1):
+            if poll:
+                now = self.api.call("GET", self.url)["now_round"]
+            request = self._owner_request("ChallengeRequest", record, now)
+            try:
+                envelope: dict[str, Any] = self.api.call("POST", url + "/challenge", json=request)
+            except ChallengeHTTPError as error:
+                expired = (error.status, error.detail) == (409, "CHALLENGE_EXPIRED")
+                reseeded = lapsed and (error.status, error.detail) == (409, "SEED_NOT_READY")
+                if not (expired or reseeded):
+                    raise
+                if poll == RESUME_POLLS:
+                    raise ChallengeExpired(
+                        f"CHALLENGE_EXPIRED: admission {record['admission_id']} has no window "
+                        f"left after {poll + 1} asks over {poll * RESUME_POLL_SECONDS:.0f} s; an "
+                        f"operator must reseed it: POST {self.url}/admin/join/"
+                        f"{record['admission_id']}/reseed (live_operator.py reseed --admission-id)"
+                    ) from error
+                lapsed += expired
+                log.warning("admission %s: %s; asking again", record["admission_id"], error.detail)
+                time.sleep(RESUME_POLL_SECONDS if expired else self.manifest.training.beacon.period)
+                continue
+            if lapsed:
+                self._journal_resume(record, envelope, poll + 1)
+            return envelope, now
+        raise AssertionError("unreachable")
+
+    def _journal_resume(
+        self, record: Mapping[str, Any], envelope: Mapping[str, Any], asks: int
+    ) -> None:
+        """One line per resume: which challenge the reseed replaced. A diagnostic, so a failure to
+        write it is logged and the miner goes on with the challenge it was just given."""
+        try:
+            Journal(self.directory).append(
+                "resume",
+                utc=_utc(),
+                admission_id=record["admission_id"],
+                trial=record["clean_count"] + 1,
+                old_challenge=(
+                    body_digest(json.loads(record["challenge_json"]))
+                    if record.get("challenge_json")
+                    else None
+                ),
+                new_challenge=body_digest(envelope["body"]),
+                asks=asks,
+            )
+        except Exception as failure:
+            log.warning("resume not journaled (%s: %s)", type(failure).__name__, failure)
 
     def _get_whole(self, digest: str, target: Path) -> None:
         """Stream one whole plain object to `target` and verify it: the trial export stores each
