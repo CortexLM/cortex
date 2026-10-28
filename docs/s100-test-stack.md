@@ -113,11 +113,14 @@ of a state directory lives in the root store, where `GET /v1/beacon/latest` and
 (S13's) lives in a child store with a lock of its own: the root still answers `latest` and keeps the
 round a POST brings, but the POST then waits for the child, so the pusher times out all the same and
 the child, whose table the gate and the seeds read, gets no round. The pusher gets 10 s timeouts (a
-failure each), and when the lock ends it refills the missing rounds oldest first at one round per
-2.4 s while the clock adds one per 3 s. Two things can go wrong, and the cadence decides which:
+failure each), and when the lock ends it pushes the latest round first, so the gate reopens, then one
+older missing round per tick, the oldest. (The pusher before ADR 0012 D68 refilled oldest first at one
+round per 2.4 s while the clock adds one per 3 s, which kept the gate closed for about four times the
+lock.) Two things can go wrong, and the cadence decides which:
 
-- `--catch-up N` pushes at most the last N rounds after the highest one the service holds. Rounds
-  older than that are skipped for good, because the service reports only its highest round. The
+- `--catch-up N` pushes at most the last N rounds after the highest one the service holds; with head
+  first the window also slides while the list of older rounds drains. Rounds older than that are
+  skipped for good, because the service reports only its highest round. The
   challenge reads exact rounds: after a trial is finalized in round `n` (and after a join or a
   resume), the identity's seed is round `n + 1`. A seed in a skipped round answers 500
   `BeaconUnavailable: round N not pushed` until the window is over (100 rounds), then 409
@@ -129,24 +132,28 @@ failure each), and when the lock ends it refills the missing rounds oldest first
   refused connection (the challenge restarting) one per 1.4 s.
 
 `beacon` therefore sets `--interval 0.2 --catch-up 60 --max-failures 100`. Sizing, from the model of
-the real pusher: the catch-up must cover `lock / 3 + 10` rounds (60 covers a lock of 150 s; the old
-`3` skipped rounds after any lock over about 9 s, 20 after one over about 50 s), and the budget must
+the real pusher: the catch-up must cover `lock / 3 + 10` rounds for the ascending pusher (60 covers a
+lock of 150 s; the old `3` skipped rounds after any lock over about 9 s, 20 after one over about 50 s);
+head first drains slower than the clock slides, so there 60 covers about 100 s and 100 covers 150 s (ADR
+0012 section 3; this script still writes 60). The budget must
 cover `lock / 11.4` failures for a lock and `outage / 1.4` for a refused connection (100: 140 s). The
 script takes the stock cadence and the one the previous version left on this stack (`0.2 / 3`), raises
 a budget below 100 and keeps a higher one, and refuses (exit 5, nothing changed) any compose file
 where the result is not exactly that. Never start a second pusher, and never backfill a range of
 rounds by hand during trials: S13 lost two identities that way.
 
-The price is time. The model (`tests/ops/s100/test_beacon_lock_tolerance.py`, both store layouts,
-checked against two S13 observations) says the gate stays closed after the lock for up to about
-`4 x lock + 10` s with the run in the root store, about `3 x lock` in a child: 30-40 s after a 13 s
-reference, 1 minute after 19 s, **3 to 4 minutes after a 60 s reference**. That figure is very
-sensitive to the cost of one round: at 2.6 s it doubles, at 2.8 s it is five times larger, and at
-2.9 s the pusher never catches up. Measure the idle lag with a child run present before trusting it.
-Expect 503s in that window and retry them. Hence two rules: keep the CUDA cache (the executor does
-by default), and run the first reference after a new image (43-64 s, cold) alone, before a second
-driver starts. Releasing the lock during the reference (ADR 0012 section 2) or a pusher that pushes
-the newest round first (same ADR, a proposal) is what removes the wait.
+The price of the ascending pusher was time. The model (`tests/ops/s100/test_beacon_lock_tolerance.py`,
+both store layouts, checked against two S13 observations) says the gate stayed closed after the lock
+for up to about `4 x lock + 10` s with the run in the root store, about `3 x lock` in a child: 30-40 s
+after a 13 s reference, 1 minute after 19 s, **3 to 4 minutes after a 60 s reference**. That figure is
+very sensitive to the cost of one round: at 2.6 s it doubles, at 2.8 s it is five times larger, and at
+2.9 s the pusher never catches up. With head first the model says the gate reopens within 7 s of a lock
+of 13 to 60 s, in either layout, and holds up to 2.6 s a round. Head first is in the code (ADR 0012
+section 3) but has not run on s100: the stack runs the older pusher until Forge swaps it. Until then keep
+the two rules: keep the CUDA cache (the executor does by default), and run the first reference after a
+new image (43-64 s, cold) alone, before a second driver starts. Expect 503s in that window and retry
+them. Measure the idle lag with a child run present before trusting any of these numbers.
+Releasing the lock during the reference (ADR 0012 section 2) removes the wait at its source.
 
 Proving it instead of inferring it: `beacon_gaps.py` lists rounds missing from the `beacon` table
 of the store that hosts the run, the identities whose seed is one of them, and whether the pusher

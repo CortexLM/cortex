@@ -6,6 +6,9 @@ after the one it was finalized in, and the challenge reads that exact round), an
 not give up while the lock lasts. Which numbers the script writes is read from the compose file it
 leaves behind, so an edit of the script moves these tests. Both layouts of the challenge are run:
 the run in the root store, and the run in a child store with a lock of its own.
+
+The production `Pusher` pushes the head first. `AscendingPusher` (model only) is the one it
+replaced: the tests that explain the old cadence, or reproduce S13, run against it.
 """
 
 from __future__ import annotations
@@ -18,8 +21,8 @@ import hypertrain.beacon.push as push
 from .beacon_model import (
     MEASURED,
     TIMEOUT,
+    AscendingPusher,
     Costs,
-    HeadFirstPusher,
     Relays,
     World,
     simulate,
@@ -46,11 +49,11 @@ def shipped(box, backup) -> dict[str, float]:
 
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("lock", [13, 19, 43, 60, 150])
-def test_a_lock_of_up_to_two_and_a_half_minutes_skips_no_round_and_the_gate_reopens(
+def test_the_ascending_pusher_skips_no_round_in_a_lock_of_up_to_two_and_a_half_minutes(
     shipped, lock, layout
 ):
     for offset in OFFSETS:
-        got = simulate(lock, offset=offset, layout=layout, **shipped)
+        got = simulate(lock, offset=offset, layout=layout, pusher=AscendingPusher, **shipped)
         assert (got.exit_code, got.holes) == (0, 0), (lock, offset, got)
         assert got.final_lag <= 2, (lock, offset, got)  # the gate is open again at the end
         # The price of never skipping: the pusher refills oldest first and the gate stays closed
@@ -67,47 +70,72 @@ def test_the_pusher_outlasts_a_lock_of_five_minutes(shipped, layout):
 
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_the_model_sees_what_was_wrong_with_the_old_cadence(layout):
+    old = {"pusher": AscendingPusher}
     lock = {"root": 13, "child": 60}[layout]
-    skipped = [simulate(lock, offset=o, layout=layout, **OLD).holes for o in OFFSETS]
+    skipped = [simulate(lock, offset=o, layout=layout, **old, **OLD).holes for o in OFFSETS]
     assert max(skipped) >= 1  # catch-up 3: the pusher never refills what the lock hid
     # each of the two numbers matters on its own
-    assert simulate(120, layout="root", **OLD).exit_code == 1  # 10 failures: gone after ~110 s
-    assert simulate(60, interval=0.2, catch_up=60, max_failures=5).exit_code == 1
-    assert simulate(120, interval=0.2, catch_up=20, max_failures=100, layout="root").holes > 0
+    assert simulate(120, layout="root", **old, **OLD).exit_code == 1  # 10 failures: gone at ~110 s
+    assert simulate(60, interval=0.2, catch_up=60, max_failures=5, **old).exit_code == 1
+    twenty = simulate(120, interval=0.2, catch_up=20, max_failures=100, layout="root", **old)
+    assert twenty.holes > 0
 
 
 def test_the_model_reproduces_two_measurements_of_s13(shipped):
+    old = {"pusher": AscendingPusher}  # the pusher S13 ran
     # "5 of its 10 allowed failures per 60 s of lock"
-    assert {simulate(60, offset=o, layout="root", **shipped).timeouts for o in OFFSETS} == {5}
+    timeouts = {simulate(60, offset=o, layout="root", **old, **shipped).timeouts for o in OFFSETS}
+    assert timeouts == {5}
     # catch-up 3 after a 13 s lock (cache kept): the first answer came 20 s after the reference
     for layout in LAYOUTS:
         closed = [
-            simulate(13, offset=o, layout=layout, **OLD).gate_closed_after_lock for o in OFFSETS
+            simulate(13, offset=o, layout=layout, **old, **OLD).gate_closed_after_lock
+            for o in OFFSETS
         ]
         assert 8 <= sum(closed) / len(closed) <= 28, layout
 
 
+@pytest.mark.parametrize("pusher", [push.Pusher, AscendingPusher], ids=["head-first", "ascending"])
 def test_the_shipped_cadence_keeps_no_hole_when_a_round_costs_more_but_not_when_it_costs_the_period(
-    shipped,
+    shipped, pusher
 ):
     """The cadence assumes the pusher keeps up: 2.4 s a round against the 3 s period. The gate
-    stays closed much longer at 2.6 s and the pusher never catches up at 2.9 s (ADR 0012)."""
+    stays closed much longer at 2.6 s (ascending); neither pusher keeps up at 2.9 s (ADR 0012)."""
     for cost in (1.0, 1.3):  # 2.0 s and 2.6 s a round
-        got = simulate(60, costs=Costs(cost, cost), **shipped)
+        got = simulate(60, costs=Costs(cost, cost), pusher=pusher, **shipped)
         assert (got.exit_code, got.holes, got.final_lag <= 2) == (0, 0, True), cost
-    assert simulate(60, costs=Costs(1.45, 1.45), **shipped).final_lag > 2
+    got = simulate(60, costs=Costs(1.45, 1.45), pusher=pusher, **shipped)
+    assert got.final_lag > 2 or got.holes > 0  # behind the clock for good, or rounds dropped
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("lock", [13, 19, 43, 60])
-def test_a_pusher_that_pushes_the_head_first_would_reopen_the_gate_within_seconds(
+def test_the_production_pusher_reopens_the_gate_within_seconds_and_skips_no_round(
     shipped, lock, layout
 ):
-    """PROPOSAL, not shipped: the evidence for the pusher change ADR 0012 asks for."""
+    """The head goes first, then one older round per tick (ADR 0012 section 3)."""
     for offset in OFFSETS:
-        got = simulate(lock, offset=offset, layout=layout, pusher=HeadFirstPusher, **shipped)
+        got = simulate(lock, offset=offset, layout=layout, **shipped)
         assert (got.exit_code, got.holes) == (0, 0), (lock, offset, got)
         assert got.final_lag <= 2 and got.gate_closed_after_lock <= 10, (lock, offset, got)
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_the_production_pusher_refills_one_round_per_tick_so_catch_up_must_cover_the_backlog(
+    shipped, layout
+):
+    """A tick that pushes the head and one older round takes about 5 s while the clock adds 1.7
+    rounds: the backlog shrinks by a third of a round per tick, and a round older than the last
+    `--catch-up` rounds is dropped. The shipped 60 reaches a lock of 100 s, not 150 s (which needs
+    100, the trial window). The ascending pusher refilled faster but kept the gate closed longer."""
+
+    def holes(lock: int, catch_up: int) -> int:
+        cadence = {**shipped, "catch_up": catch_up}
+        return max(simulate(lock, offset=o, layout=layout, **cadence).holes for o in OFFSETS)
+
+    assert holes(100, 60) == 0
+    assert holes(150, 100) == 0
+    assert holes(150, 60) > 0
 
 
 POST = "/v1/admin/beacon"
@@ -138,7 +166,7 @@ def test_the_pusher_is_charged_for_each_relay_fetch_and_the_service_for_each_pos
     # GET is nearly free and every POST costs the service's verify
     world = World(None, Costs(pusher=5.0, service=2.0), 1e9, "root")
     world.now = 30.0
-    done = push.Pusher(world, Relays(world), "token", 3).tick()  # type: ignore[arg-type]
+    done = AscendingPusher(world, Relays(world), "token", 3).tick()  # type: ignore[arg-type]
     assert len(done["pushed"]) == 3
     assert world.now == pytest.approx(30.0 + 5.0 + 0.01 + 2 * 5.0 + 3 * (2.0 + 0.01))
     assert world.known(world.now) == done["latest"]  # the last POST is applied when answered
@@ -158,12 +186,12 @@ def test_in_a_child_store_the_root_keeps_the_round_at_once_and_the_child_gets_it
     assert world.now == pytest.approx(20.01)
 
 
-def test_a_head_first_tick_pushes_the_head_then_the_oldest_skipped_round_and_nothing_else():
+def test_a_tick_pushes_the_head_then_the_oldest_skipped_round_and_nothing_else():
     # the clock at 24 s is in drand round 9 and the service holds round 1: 7, 8 and 9 are due. An
     # unsorted set of {7, 8, 9} iterates 8 first, so only a sorted refill picks 7.
     world = World(None, Costs(pusher=0.1, service=0.1), 1e9, "root")
     world.now = 24.0
-    pusher = HeadFirstPusher(world, Relays(world), "token", 3)  # type: ignore[arg-type]
+    pusher = push.Pusher(world, Relays(world), "token", 3)  # type: ignore[arg-type]
     first = pusher.tick()
     assert (first["latest"], first["known"], first["pushed"]) == (9, 1, [9, 7])
     second = pusher.tick()  # still inside round 9, which the service now holds

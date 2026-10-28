@@ -7,13 +7,13 @@
 #                        metagraph.json and inspect JSON (env names only), with SHA256SUMS
 #   swap NEW_REF BACKUP  gate, pin NEW_REF on the challenge service, up -d --no-deps challenge
 #   beacon BACKUP        gate, set the pusher to --interval 0.2 --catch-up 60 --max-failures 100.
-#                        A store lock (a remote reference) hides rounds from the pusher and it
-#                        pushes oldest first, at most catch-up of them: 60 skips none up to a lock
-#                        of 150 s (a skipped round can be a trial's seed), 100 failures outlast
-#                        140 s of refused connections. The gate then stays closed for a few times
-#                        the lock. Takes the stock cadence (3 / 20) and the one the previous
+#                        A store lock hides rounds from the pusher; it then pushes the latest round
+#                        first and refills the older ones, one per tick, at most catch-up of them
+#                        (a skipped round can be a trial's seed): 60 skips none up to a lock of
+#                        about 100 s, 100 up to 150 s. 100 failures outlast 140 s of refused
+#                        connections. Takes the stock cadence (3 / 20) and the one the previous
 #                        version of this script left behind (0.2 / 3); a budget of 100 or more
-#                        is kept. docs/adr/0012
+#                        is kept. docs/adr/0012 section 3
 #   paper BACKUP         dry rollback: the backed-up compose file must parse and resolve the old image
 #   rollback BACKUP      restore the compose file, recreate challenge and beacon as they were, and
 #                        put back relay.json / metagraph.json (restarting relay / stub) if changed

@@ -1,7 +1,9 @@
 """`python -m hypertrain.beacon push`: keep a challenge service fed with verified quicknet rounds.
 
 Every round comes from >= 2 agreeing relays and is BLS-verified (DrandQuicknet) before it is
-posted to `/v1/admin/beacon`; the service verifies it again on ingest. Per tick:
+posted to `/v1/admin/beacon`; the service verifies it again on ingest. Per tick it posts the latest
+round first, then at most one older missing round, the oldest. A missing round stays in memory until
+the service answers 2xx. Per post:
 - service 2xx: next round;
 - service 401/403: exit 2 (token);
 - service 408/429/5xx, network error, relays unavailable or failing verification: one failure,
@@ -71,6 +73,9 @@ class Pusher:
         self.relays = relays
         self.catch_up = catch_up
         self._token = token
+        # Rounds still to push, ascending. Kept across ticks: the service reports only its highest
+        # round, so once the head is in nothing else says an older round is missing.
+        self.pending: list[int] = []
 
     def _body(self, r: httpx.Response) -> str:
         # Untrusted text: a proxy echoing request headers must not leak the token. Redact, then cut.
@@ -94,9 +99,20 @@ class Pusher:
     def tick(self) -> dict[str, Any]:
         latest = self.relays.latest()
         known = self._known()
+        # A pending round older than the last `--catch-up` rounds is dropped: the bound `plan`
+        # documents, not a new skip.
+        window = latest.round - self.catch_up + 1
+        due = {*self.pending, *plan(known, latest.round, self.catch_up)}
+        self.pending = sorted(rnd for rnd in due if rnd >= window)
+        # Head first: the freshness gate reads the newest round, so it reopens as soon as that one
+        # is in. Then the oldest pending round, one per tick, so refilling a backlog (after a store
+        # lock) does not close the gate again. The service reports only its highest round, so a
+        # pusher restarted during a backfill loses `pending` and a hole can remain:
+        # scripts/ops/s100_test/beacon_gaps.py finds it.
+        order = [latest.round] if latest.round in self.pending else []
+        order += [rnd for rnd in self.pending if rnd != latest.round][:1]
         pushed: list[int] = []
-        # Ascending: the service reports only its highest round, so a gap would never be filled.
-        for rnd in plan(known, latest.round, self.catch_up):
+        for rnd in order:
             br = latest if rnd == latest.round else self.relays.get(rnd)
             r = self.service.post(
                 "/v1/admin/beacon",
@@ -104,6 +120,7 @@ class Pusher:
                 headers={"Authorization": f"Bearer {self._token}"},
             )
             self._check(r, f"round {rnd}")
+            self.pending.remove(rnd)
             pushed.append(rnd)
         return {"pushed": pushed, "latest": latest.round, "known": known}
 

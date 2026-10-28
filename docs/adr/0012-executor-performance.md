@@ -182,9 +182,11 @@ Hash consequences of Part B: `trial_reference_v2` and `Admission.prepare_referen
 move unless the work edits an owned function [V by reading]. `sources()` and the bundle hash move (they hash
 every `src/hypertrain/**/*.py`).
 
-### 3. Beacon cadence (Part A, implemented as settings) and the pusher proposal
+### 3. Beacon cadence (Part A: settings; D68: the head-first pusher)
 
-Part A may not change `challenge/store.py` or the pusher's code, so it ships settings, a model and a report tool.
+Part A could not change `challenge/store.py` or the pusher's code, so it shipped settings, a model and a report tool. The
+pusher change (D68, last bullets) is on top of them; the settings, their sizing and the first four columns of the table
+describe the ascending pusher of Part A, which the model keeps as `AscendingPusher`.
 
 - `challenge_image.sh beacon` now writes `--interval 0.2 --catch-up 60 --max-failures 100`. It takes the stock
   compose (`3 / 20`) and the cadence the previous version of the script wrote (`0.2 / 3`), which is what the TEST
@@ -192,7 +194,8 @@ Part A may not change `challenge/store.py` or the pusher's code, so it ships set
   changed, a compose file where the result is not exactly that. Sizing rules, from the model:
   - `--catch-up` must cover every round a lock can hide: about `lock / 3 + 10`. 60 covers 150 s; the old `3`
     skipped rounds after any lock over about 9 s, the stock `20` after one over about 50 s. A challenge
-    restart of the same length is covered the same way.
+    restart of the same length is covered the same way. (For the ascending pusher. With head first the same 60
+    reaches about 100 s: see "Reach" below.)
   - `--max-failures` must outlast the failures of the longest outage: one per 11.4 s for a lock (10 s timeout
     plus the relay fetch), one per 1.4 s for a refused connection. 100 covers 140 s of refusals and over 1,100
     s of lock timeouts. At the budget S13 reported (10) the pusher exits in a lock over about 110 s; the
@@ -203,8 +206,8 @@ Part A may not change `challenge/store.py` or the pusher's code, so it ships set
 - `scripts/ops/s100_test/beacon_gaps.py` (read-only, run inside the TEST challenge, takes the run id) lists
   rounds missing from the `beacon` table of the store that hosts the run, the lag and the gate, a dead pusher,
   and any identity in a state that asks for a challenge whose `seed_beacon` is one of the missing rounds.
-- **Model** [H]: a virtual clock around the real, unmodified `Pusher.run`
-  (`tests/ops/s100/beacon_model.py`): a lock held for T seconds, both layouts of the context, 10 s client
+- **Model** [H]: a virtual clock around the real, unmodified `Pusher.run` (Part A: the ascending pusher, now
+  `AscendingPusher`; D68: the production `Pusher`; `tests/ops/s100/beacon_model.py`): a lock held for T seconds, both layouts of the context, 10 s client
   timeout, 1.2 s pusher verify, 1.2 s service verify before the lock, a timed-out POST still applied (checked by
   a reviewer with uvicorn and a thread pool), the gate at `now >= emitted - 2`. Eight lock start phases per cell
   (offsets 0, 0.7, 1.4, 2.1, 2.8, 3.5, 5, 7 s into a drand period). Two checks against S13 [V]: a 60 s lock
@@ -212,31 +215,47 @@ Part A may not change `challenge/store.py` or the pusher's code, so it ships set
   closes the gate for 11-16 s (measured: first answer 20 s after the reference). Run as
   `tests/ops/s100/test_beacon_lock_tolerance.py` against the values the script writes.
 
-| Lock T | `--catch-up 3`, budget 10 (previous): holes avg / max, gate closed after the lock (root) | `--catch-up 60` (shipped): holes, gate closed avg / max (root) | same, run in a child store | head-first proposal (root / child) |
+| Lock T | `--catch-up 3`, budget 10 (previous): holes avg / max, gate closed after the lock (root) | `--catch-up 60` (shipped): holes, gate closed avg / max (root) | same, run in a child store | head first (D68, same cadence): holes, gate closed avg / max, root / child |
 | --- | --- | --- | --- | --- |
-| 13 s (cache) | 1.1 / 2, 16 s | 0, 32 s / 39 s | 0, 16 s / 18 s | 0, 2 s / 1 s |
-| 19 s (cache) | 3.0 / 4, 18 s | 0, 58 s / 66 s | 0, 37 s / 42 s | 0, 6 s / 5 s |
-| 43 s (first run) | 11.0 / 12, 18 s | 0, 160 s / 167 s | 0, 114 s / 120 s | 0, 7 s / 5 s |
-| 60 s (no cache) | 16.6 / 17, 19 s | 0, 231 s / 238 s | 0, 175 s / 185 s | 0, 2 s / 1 s |
+| 13 s (cache) | 1.1 / 2, 16 s | 0, 32 s / 39 s | 0, 16 s / 18 s | 0, 2.0 s / 3.5 s; 0.6 s / 1.3 s |
+| 19 s (cache) | 3.0 / 4, 18 s | 0, 58 s / 66 s | 0, 37 s / 42 s | 0, 6.2 s / 6.4 s; 4.7 s / 5.3 s |
+| 43 s (first run) | 11.0 / 12, 18 s | 0, 160 s / 167 s | 0, 114 s / 120 s | 0, 6.5 s / 6.6 s; 5.4 s / 5.6 s |
+| 60 s (no cache) | 16.6 / 17, 19 s | 0, 231 s / 238 s | 0, 175 s / 185 s | 0, 2.4 s / 3.5 s; 0.6 s / 0.9 s |
 
-  So the shipped profile trades speed for safety: never a hole, but the gate stays closed after a lock for up to
-  about `4T + 10` seconds (run in the root store; about `3T` in a child). **That figure is very sensitive to the
+  So the ascending pusher with the shipped profile trades speed for safety: never a hole, but the gate stays closed
+  after a lock for up to about `4T + 10` seconds (run in the root store; about `3T` in a child). **That figure is very sensitive to the
   cost of one round.** With the shipped cadence and a 19 s lock the gate stays closed for 58 s at 2.4 s a round,
   103 s at 2.6 s, 266 s at 2.8 s, and at 2.9 s the pusher never catches up (a test pins the 2.6 s and 2.9 s
   cases). 2.4 s is one S7 measurement; the idle lag with a child run present has not been measured [?]. The head-first
-  column does not depend on it. With the cache (T <= 19 s) the window is about a minute; **without it a 60 s
+  column does not depend on it up to 2.6 s a round (gate closed 9-14 s); at 2.9 s neither pusher keeps up and head first
+  leaves holes. With the cache (T <= 19 s) the window of the ascending pusher is about a minute; **without it a 60 s
   reference closes the gate for about four minutes (three in a child), close to the 100-round (300 s) trial
-  window.** The cache is therefore a precondition of the shipped profile, and the first (cold, 43-64 s)
-  reference of a new image must run alone, before any second driver starts.
-- **Proposal, not implemented (needs `beacon/push.py`, outside Part A, and approval because the production twin
-  runs the same code):** push the head first, then at most one older pending round per tick, the pending list
-  kept in memory (`HeadFirstPusher` in the model). Result in the last column: 0 holes and a gate that reopens
-  1-7 s after the lock, whatever the round cost. A naive "newest first, then all the backlog" is worse than
-  shipped (the gate closes again during the backfill). A pusher restarted during an outage loses its list;
-  the follow-up would add the missing rounds to `GET /v1/beacon/latest` (a `store.py` change) or keep the list
-  in a file.
+  window.** The cache was therefore a precondition of the shipped profile, and the first (cold, 43-64 s)
+  reference of a new image had to run alone, before any second driver started; with Part B and head first neither
+  rule is needed for the gate any more (the replay must show it [?]).
+- **Head first, implemented by D68 (`beacon/push.py`; the production twin runs the same code, so the promotion
+  carries it).** `Pusher.tick` keeps a sorted list of the rounds still to push and posts the latest round first,
+  then at most one older pending round, the oldest, per tick. A round leaves the list only on a 2xx; a failed tick
+  keeps the rest. Verification is unchanged: `DrandQuicknet` verifies every round before it is posted, the service
+  verifies it again on ingest. `plan()` still says which rounds are due, after the highest the service holds and at
+  most the last `--catch-up`; a pending round that falls out of that window while the backlog drains is dropped, the
+  same bound, now sliding. A naive "newest first, then the whole backlog" closes the gate again during the backfill;
+  one older round per tick does not. Last column of the table: no hole in any cell and a gate that reopens within
+  a few seconds of the lock (model [H], the costs of the other columns).
+  - **Reach of `--catch-up`.** A tick costs about 5 s and the clock adds 1.7 rounds, so the backlog drains at about a
+    third of a round per tick and the window slides faster than the oldest rounds leave it. Model [H], root layout,
+    shipped cadence: `--catch-up 60` leaves no hole in a lock of up to 100 s, 1 at 110 s, 4 at 120 s, 14 at 150 s
+    (11 in a child store); 80 holds to 130 s; **100 holds to 150 s**. The ascending pusher kept 150 s at 60 but
+    closed the gate for about `4T + 10` s. `challenge_image.sh beacon` still writes 60: it is the gated TEST
+    profile and its test file pins it, so this change leaves it alone; raising it to 100 restores the 150 s cover and
+    is Forge's to decide. With Part B no reference holds the lock; what is left is a challenge restart and a stuck
+    request.
+  - **Restart.** A pusher restarted before it has refilled the list loses the list; the rounds still missing stay
+    missing, and `beacon_gaps.py` finds them. The oldest missing round, `known + 1` of the moment the lock began, is
+    refilled first, and a seed set just before the lock points at it [H]. A fix would add the missing rounds to
+    `GET /v1/beacon/latest` (a `store.py` change) or keep the list in a file.
 - **Freshness bound:** the bound of 2 rounds is hard-coded in the store (`store.py:2185,2207,2238`). A TEST-only
-  larger bound needs a `store.py` edit and is not proposed: it would only hide the lock. Part B removes the cause.
+  larger bound needs a `store.py` edit and is not proposed: it would only hide the lock. Part B removes the cause for references.
 
 ## Hash consequences
 

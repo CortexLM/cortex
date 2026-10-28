@@ -112,6 +112,13 @@
   `qualification_sm_profile_unqualified`; the challenge refuses both at bootstrap. A
   `result.json` written before capabilities were recorded still qualifies 170-SM devices only.
   See `docs/adr/0007-sm-counts-per-arch.md` at the monorepo root.
+- The beacon pusher (`python -m hypertrain.beacon push`) posts the latest round first and then at
+  most one older missing round per tick, the oldest, from a list it keeps in memory, instead of
+  refilling every missing round oldest first. After a long store lock or a challenge restart the
+  freshness gate reopens within seconds instead of after about four times the outage. Rounds older
+  than the last `--catch-up` are still never pushed, and a pusher restarted before its list is empty
+  leaves those rounds missing (`scripts/ops/s100_test/beacon_gaps.py` finds them). The verification
+  of every round is unchanged. See `docs/adr/0012` at the monorepo root.
 
 ### Fixed
 - The dispute long poll can no longer deadlock the store. `DisputesV2` has one lock order, the
