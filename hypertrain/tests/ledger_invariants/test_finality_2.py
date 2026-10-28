@@ -281,15 +281,7 @@ def test_a_member_sanctioned_after_the_aggregation_is_paid_for_the_round_it_was_
     assert escrow.balances().conserved()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="FIN-18+D59: finalize pays every input of the applied tape, so the coldkey of a miner "
-    "convicted of training fraud between the aggregation and the finalize is paid for that round, "
-    "and so is every other admission it runs, instead of the Finalize listing only the "
-    "unconvicted inputs and the ledger refusing BANNED_WORK for the rest "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 D59 decision 23]",
-)
+# Closed by audit-integrity-2 (6d935814, D59): a Finalize lists the unconvicted inputs only.
 def test_a_miner_convicted_after_its_round_was_audited_is_never_credited_by_a_finalize(
     stage: Stage,
 ) -> None:
@@ -339,14 +331,7 @@ def test_a_miner_convicted_after_its_round_was_audited_is_never_credited_by_a_fi
     assert admission_of(stage, sibling)["record"]["state"] == "ACTIVE"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="FIN-18+D59: when every input of the applied tape belongs to a convicted coldkey the "
-    "Finalize that lists nobody is refused 422 and the one that lists them pays them, so the round "
-    "can neither settle without a reward nor be passed over by the next one "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 D59 decision 23 D64-1]",
-)
+# Closed by audit-integrity-2 (6d935814, D59, D64-1): a Finalize that lists nobody settles.
 def test_a_round_whose_inputs_are_all_convicted_settles_without_a_reward(stage: Stage) -> None:
     for key in stage.honest:
         sanction(stage, key, "TRAINING_FRAUD")
@@ -412,12 +397,8 @@ def test_a_finalize_that_builds_its_services_inside_its_transaction_still_leaves
     nothing_was_finalized(stage)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=sqlite3.OperationalError,
-    reason="FIN-04+D-FIN-09: finalize settles even as the first service-touching request "
-    "after a restart [fix-lot: none (no design yet)]",
-)
+# Closed by aggregate-lock-release (6d623b0d): the replay job reads the escrow policy through
+# _services before the transaction opens, so a restarted store builds its services outside it.
 def test_finalize_settles_as_the_first_request_after_a_restart(stage: Stage) -> None:
     assert stage.finalize()["status"] == "SETTLED"  # control: services already built
     stage.reset()

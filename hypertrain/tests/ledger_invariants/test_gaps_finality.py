@@ -44,6 +44,7 @@ from .support_gaps_finality import (
     delta_post,
     finalize_post,
     leaves_post,
+    record_deltas,
     resealed,
 )
 
@@ -408,15 +409,7 @@ def test_a_finalize_for_a_round_whose_audits_are_not_done_is_refused_for_its_mis
 # --- T-FIN-26 (FIN-22) [D70]: a round with a member that never committed can be left behind ------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="FIN-22: a roster member that accepted and never committed leaves the round without a "
-    "job for anybody (three survivors cannot carry a round), nothing retires a round whose members "
-    "all left it, and the opening of the next round reads the applied state of this one, which "
-    "never exists: 409 'missing accepted applied: 0' "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 D70 exit reaper]",
-)
+# Closed by audit-integrity-2 (e06cb795, D70): the exit reaper retires the round at the beacon.
 def test_a_round_with_a_member_that_never_committed_can_be_left_behind(tmp_path: Path) -> None:
     with X.activated_network(tmp_path) as network:
         rnd = X.open_round(network, 0, [0, 1, 2, 3])
@@ -467,6 +460,7 @@ def test_a_round_wider_than_one_lease_is_refused_at_opening_or_stays_auditable(
             assert world.count("records_v2", "kind IN ('round','finality')") == 0
             return
         E.commit_all(rnd)
+        record_deltas(rnd)  # the members delivered: only the width of the round is under test
         world.network.push(rnd.d_audit)
         scheduled = E.audits_request(world)
         E.control(scheduled.status_code == 200, f"audits: {scheduled.text}")

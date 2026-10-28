@@ -219,16 +219,7 @@ def test_a_signed_lease_ask_grants_at_most_one_lease(queue: X.Round) -> None:
 # A round with no member left has no exit (FIN-22)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="FIN-22: a round whose every audit job ran out of both windows has no exit on this "
-    "tree: aggregate_v2 answers 409 ROUND_INFEASIBLE, the opening of the next round reads the "
-    "applied state of this one, which never exists, so the master answers 409 'missing accepted "
-    "applied: 0', no code of this tree retires, voids or skips such a round, and no later round is "
-    "ever credited; the exit reaper retires it at the beacon "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 D70 exit reaper]",
-)
+# Closed by audit-integrity-2 (e06cb795, D70): the exit reaper retires the round at the beacon.
 def test_a_round_after_a_round_nobody_audited_is_opened_and_credited(queue: X.Round) -> None:
     rnd = queue
     X.run_out_audit_windows(rnd)
@@ -386,13 +377,15 @@ def test_no_applied_round_is_closed_by_exclusion_without_a_rollback_record(
 ) -> None:
     """FIN-09 (closed by AUD-01 decision 9): a member that leaves a round at the horizon is an
     exclusion of that member, never a disposition of the round: the applied round stays PENDING
-    and open for its settlement instead of counting as closed with no rollback record."""
+    and open for its settlement instead of counting as closed with no rollback record. The
+    quiet member published no leaves, so its job is dropped at the first horizon as a NO_SHOW
+    (ADR 0011 Part 8, decision 3)."""
     rnd, _ = applied0
     status = rnd.finality()
     X.control(
         status["applied"]
         and status["unresolved_audits"] == 0
-        and rnd.excluded() == {rnd.hotkey(rnd.quiet): "INFRASTRUCTURE"}
+        and rnd.excluded() == {rnd.hotkey(rnd.quiet): "NO_SHOW"}
         and not rnd.has_record("rollback", "0"),
         "applied, nothing outstanding, one member excluded by the horizon, no rollback",
     )
