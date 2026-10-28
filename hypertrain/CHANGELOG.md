@@ -287,6 +287,12 @@
   more; the admin routes remain. `ChallengeStore.release_due_v2` is one pass.
 
 ### Fixed
+- The anonymous object read `GET /v2/runs/{run_id}/objects/{sha256}` streams the stored file in
+  blocks of 1 MiB instead of reading the whole object into memory and hashing it again for every
+  caller (a 0.8 GB trial input at the 101M profile, 300 MiB measured +300 MiB of RAM per reader). It
+  refuses an object above 8 GiB with 413 before reading a byte, answers a key that is not 64
+  lowercase hex with 400 and an object the master does not hold with 404; both were 500. The server
+  no longer re-hashes the file per request: the clients verify the sha256 they asked for (IMP-8).
 - A member convicted of training fraud between the aggregate and the finalize of a round is no
   longer paid for it, nor is any other admission of its coldkey (D64): `finalize` leaves out an
   input whose coldkey has a `BANNED` admission (read through the admission's hotkey history, a

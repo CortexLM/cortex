@@ -239,6 +239,14 @@ bytes that do not hash to the sha256, 422. The old `PUT` with `X-Hotkey` and
 `X-Object-Signature` headers is removed (405). Uploads are content-addressed,
 so repeating one is harmless; the miner retries transport errors and 5xx.
 
+Every object is read, by anyone, with `GET /v2/runs/{run_id}/objects/{sha256}`. The master sends
+the stored file in blocks of 1 MiB with its `Content-Length`; it never holds the object in memory,
+and it does not hash it again per request: the key names the file, and the party that receives the
+bytes checks their sha256 (the miner does). Refusals: a key that is not 64 lowercase hex 400, an
+unknown run or an object the master does not hold 404, an object above 8 GiB (`MAX_PARTS` parts of
+1 MiB, the largest a client takes whole) 413, checked on the opened file before the first byte is
+read. The route answers neither `HEAD` nor `Range`.
+
 Current admission policy fixes E=4 and requires 12 clean finalized participations
 plus canary blocks 1,2,3. The first four are shadow-only. Later PROBATION influence
 also requires funded eligibility; ACTIVE requires current screening, sufficient
