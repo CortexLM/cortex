@@ -349,11 +349,11 @@ MUTANTS += [
         "shadow-reservation-commit",
         STORE,
         "            commit = envelope_v2.Intake("
-        'run_id, {"CommitV2": row["hotkey"].__eq__}'
+        'run_id, {"CommitV2": worker.__eq__}'
         ").accept(\n"
         '                request.commit.model_dump(mode="json"), now\n',
         "            commit = envelope_v2.Intake(\n"
-        '                request.commit.run_id, {"CommitV2": row["hotkey"].__eq__}\n'
+        '                request.commit.run_id, {"CommitV2": worker.__eq__}\n'
         "            ).accept(\n"
         '                request.commit.model_dump(mode="json"), now\n',
         [REMAINING],

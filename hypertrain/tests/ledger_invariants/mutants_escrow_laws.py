@@ -146,8 +146,12 @@ MUTANTS = [
         "id": "el-transfer-draws-reward-pending",
         "invariants": ["ESC-07"],
         "path": ESCROW,
-        "old": 'self._move(op, "available", "available", recipient=op.recipient)',
-        "new": 'self._move(op, "reward_pending", "available", recipient=op.recipient)',
+        "old": (
+            'self._move(op, "available", "available", recipient=op.recipient, skip_empty=True)'
+        ),
+        "new": (
+            'self._move(op, "reward_pending", "available", recipient=op.recipient, skip_empty=True)'
+        ),
         "tests": [CLOSED_EXIT],
         "why": "a transfer spends units that are still pending, skipping the maturity gate.",
     },
