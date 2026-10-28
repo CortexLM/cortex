@@ -224,7 +224,7 @@ def program(args):  # `exec [-i] CHALLENGE python -I -c PROGRAM MODE ARGS`, the 
     if args[:4] != ["hypertrain-test-challenge", "python", "-I", "-c"] or len(args) < 6:
         return None
     mode, rest = args[5], args[6:]
-    shapes = {("pre", True, 1), ("post", False, 2), ("roundtrip", False, 1)}
+    shapes = {("pre", True, 1), ("post", False, 2)} | {("roundtrip", False, n) for n in (1, 3)}
     if (mode, stdin_flag, len(rest)) not in shapes:
         return None
     return args[4], mode, rest, sys.stdin.read() if stdin_flag else ""

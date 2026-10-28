@@ -88,3 +88,63 @@ def test_a_challenge_that_is_not_running_is_exit_8(box):
     state["containers"][CHALLENGE]["State"]["Status"] = "exited"
     box._write("docker.json", state)
     assert "(the challenge program exited 1)" in check(box, rc=8).out
+
+
+DIGEST = "sha256:" + "0f" * 32
+
+
+def test_r2_check_asks_one_executor_host_with_the_image_digest_it_was_given(box):
+    box.token()
+    check(box, "--node", "gpu-a", DIGEST)
+    (call,) = box.exec_calls()
+    assert call["args"] == ["-", "gpu-a", DIGEST]  # the config is the one in the challenge's env
+
+
+def test_a_host_can_be_asked_with_a_token_that_is_not_yet_the_configured_one(box):
+    box.token()
+    check(box, "--node", "gpu-a", DIGEST, "--file", TOKEN_PATH)
+    (call,) = box.exec_calls()
+    assert call["args"] == [TOKEN_PATH, "gpu-a", DIGEST]
+
+
+def test_what_the_host_made_of_the_check_is_what_the_program_printed(box):
+    both = (
+        ROUNDTRIP_LINE + "\nr2-check node gpu-a python=3.12.4 head=200 head_bytes=1048576 get=206"
+    )
+    box.exec_out("roundtrip", 0, both)
+    out = check(box, "--node", "gpu-a", DIGEST).out
+    assert both in out
+
+
+def test_a_host_that_failed_the_check_is_exit_8(box):
+    both = (
+        ROUNDTRIP_LINE
+        + "\nr2-check node gpu-a head=SSLCertVerificationError head_verify=unknown_issuer"
+    )
+    box.exec_out("roundtrip", 1, both)
+    out = check(box, "--node", "gpu-a", DIGEST, rc=8).out
+    assert both in out and "r2-check did not complete" in out
+
+
+BAD_NODE = {
+    "label-only": ["--node", "gpu-a"],
+    "no-value": ["--node"],
+    "twice": ["--node", "gpu-a", DIGEST, "--node", "gpu-b", DIGEST],
+    "upper-case-label": ["--node", "GPU-A", DIGEST],
+    "label-with-a-space": ["--node", "gpu a", DIGEST],
+    "label-starting-with-a-dash": ["--node", "-gpu", DIGEST],
+    "label-too-long": ["--node", "a" * 33, DIGEST],
+    "label-with-a-command": ["--node", "gpu;touch pwned", DIGEST],
+    "tag-instead-of-a-digest": ["--node", "gpu-a", "latest"],
+    "short-digest": ["--node", "gpu-a", "sha256:" + "0f" * 31],
+    "upper-case-digest": ["--node", "gpu-a", "sha256:" + "0F" * 32],
+    "digest-with-a-command": ["--node", "gpu-a", "sha256:$(touch pwned)" + "0f" * 32],
+    "digest-with-a-newline": ["--node", "gpu-a", DIGEST + "\nprivileged"],
+}
+
+
+@pytest.mark.parametrize("args", BAD_NODE.values(), ids=BAD_NODE)
+def test_a_label_or_digest_that_is_not_plain_never_reaches_the_challenge(box, args):
+    box.token()
+    check(box, *args, rc=2)
+    assert box.docker()["calls"] == [] and box.exec_calls() == []

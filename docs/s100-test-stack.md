@@ -549,6 +549,35 @@ or the token does not load, 4 when the script refuses `--file`. One mebibyte mea
 (about 0.36 s from a node) and not the bulk rate: the rate from s100 to R2 with several parts at once is
 still to be measured before the run, and `put_s` says nothing about it.
 
+`--node LABEL sha256:<image digest>` adds the look from an executor host (`LABEL` as in
+`cuda-executor.json`, the digest the `$GPU` above), between the read and the delete:
+
+```bash
+ssh root@s100 "bash -s -- r2-check --node x $GPU" < $T/challenge_image.sh
+```
+
+The challenge hands two presigned URLs of that object (HEAD and GET, 120 s) to a `--rm` container
+of the GPU image that the executor's own ssh transport starts on the host (its key, its pinned
+`known_hosts`, its `docker` words), with the URLs on the container's stdin: they are in no argument,
+no file and no log. The container prints the paths Python's `ssl` looks for CA certificates in, then
+makes a HEAD and a one-byte ranged GET to the endpoint with the default TLS context, the one the
+runner uses. The image must already be on the host: the command passes `--pull never`, and exit 125
+(`r2-check node x exit_125`) means docker refused, usually because it is not there
+(`cuda_executor_check.py` reports `image_present`). A host is a rented machine and may print
+anything: only fields of a fixed shape are shown, rebuilt by the challenge, and never its stderr.
+
+```
+r2-check node x python=3.12.4 openssl=OpenSSL_3.0.13_30_Jan_2024 cafile=1 openssl_cafile=0 capath_entries=146 ssl_env=0 head=200 head_bytes=1048576 head_s=0.41 get=206 get_bytes=1 get_s=0.38
+r2-check node x … head=SSLCertVerificationError head_verify=unknown_issuer get=SSLCertVerificationError …
+```
+
+The two statuses are the verdict; `cafile`, `openssl_cafile` and `capath_entries` say where the
+interpreter looked. A `head_verify` of `unknown_issuer` or `self_signed` is the open question of
+ADR 0013 (does the image carry a CA bundle that its Python can see): the cure is in the image, never
+in turning verification off. HEAD is only checked here: the runner itself sends GET and PUT, and R2's
+answer to a presigned HEAD has not been seen, so a 403 on `head` with a `get` of 206 is not a
+network problem. None of this has run on a node.
+
 Exit codes: 2 usage (and `readyz`), 3 seal window, 4 refusal, 5 unexpected compose change, 6 database,
 7 the challenge is not up, or not configured as asked, after a change, 8 `r2-check` did not complete.
 

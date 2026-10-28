@@ -31,10 +31,13 @@
 #                        and recreates nothing, prints variable names only.
 #   executor-off BACKUP  drop the override (and the settings file this script wrote) and recreate the
 #                        challenge without the variables
-#   r2-check [--file FILE]
+#   r2-check [--file FILE] [--node LABEL sha256:DIGEST]
 #                        not gated, changes nothing in the stack: put, get and delete a 1 MiB object
 #                        in the bucket through the token the challenge is configured with (or FILE,
-#                        which is checked like --r2's). Prints HTTP statuses, byte counts and seconds.
+#                        which is checked like --r2's). With --node, between get and delete, also a
+#                        HEAD and a ranged GET of it from that executor host, by presigned URLs on
+#                        the stdin of a --rm container of the GPU image DIGEST that checks its CA
+#                        paths and TLS. Prints HTTP statuses, byte counts and seconds, no URL.
 # rollback and restore-db are not gated: they are the way back from a bad change.
 # swap, beacon, paper, rollback, executor and executor-off refuse (exit 4) a compose file with a
 # service whose container_name is missing or is not one of the six TEST names; executor checks the
@@ -142,8 +145,13 @@ sys.exit(0 if flags and (e[9],e[11])==("0.2","60") and int(e[13])>=100 else 5)' 
 #   pre CONFIG           settings JSON on stdin, as ArtifactExecutor would load them
 #   post CONFIG SETTINGS the environment of this process names exactly these files ("-": unset) and
 #                        the files, read as this user, load
-#   roundtrip FILE       put, get and delete 1 MiB in the bucket with the token FILE, or with the one
-#                        the settings of this process name ("-"), through the client the transfer uses
+#   roundtrip FILE [LABEL DIGEST]
+#                        put, get and delete 1 MiB in the bucket with the token FILE, or with the one
+#                        the settings of this process name ("-"), through the client the transfer uses;
+#                        with LABEL and DIGEST also, between get and delete, a HEAD and a ranged GET of
+#                        that object from the executor host LABEL, by presigned URLs on its stdin, in a
+#                        --rm container of the GPU image DIGEST (the host is a rented machine: only
+#                        what it answers in a closed shape is printed, never its stderr)
 CHALLENGE_PY=$(cat <<'PY_CHALLENGE'
 import os
 import re
@@ -164,12 +172,8 @@ KNOWN = (
 )
 
 
-class Unset(Exception):
-    pass
-
-
-class Missing(Exception):
-    pass
+class Said(Exception):
+    """Its message is a sentence written in this program."""
 
 
 def why(error):
@@ -178,10 +182,8 @@ def why(error):
     except ImportError:
         ValidationError = ()
     text = str(error)
-    if isinstance(error, Unset):
-        return text + " is not set as the script wrote it"
-    if isinstance(error, Missing):
-        return text + " is not set"
+    if isinstance(error, Said):
+        return text
     if isinstance(error, ValidationError):
         found = error.errors(include_url=False, include_context=False, include_input=False)
         return "; ".join(".".join(map(str, e["loc"])) + ": " + e["msg"] for e in found)
@@ -221,7 +223,141 @@ def status(error):
     return (found[1] or found[2]) if found else type(error).__name__
 
 
-def roundtrip(file):
+# One answer, in the image the runner will use, with the default TLS context the runner uses.
+NODE_PY = r"""
+import http.client, json, os, ssl, sys, time, urllib.parse
+
+out = {}
+try:
+    paths = ssl.get_default_verify_paths()
+    out.update(
+        python=".".join(map(str, sys.version_info[:3])),
+        openssl=ssl.OPENSSL_VERSION,
+        cafile=bool(paths.cafile),
+        openssl_cafile=os.path.exists(paths.openssl_cafile or ""),
+        capath_entries=len(os.listdir(paths.capath)) if paths.capath else 0,
+        ssl_env=bool(os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR")),
+    )
+    context = ssl.create_default_context()
+    urls = sys.stdin.read().split()
+    for name, method, headers, url in zip(("head", "get"), ("HEAD", "GET"), ({}, {"Range": "bytes=0-0"}), urls):
+        start, answer = time.monotonic(), {}
+        try:
+            parts = urllib.parse.urlsplit(url)
+            if parts.scheme != "https":
+                raise ValueError
+            conn = http.client.HTTPSConnection(parts.hostname, parts.port, timeout=20, context=context)
+            conn.request(method, parts.path + "?" + parts.query, headers=headers)
+            reply = conn.getresponse()
+            reply.read()
+            answer.update(status=reply.status, bytes=int(reply.getheader("content-length") or 0))
+            conn.close()
+        except ssl.SSLCertVerificationError as error:
+            answer.update(error="SSLCertVerificationError", verify_code=error.verify_code)
+        except BaseException as error:
+            answer["error"] = type(error).__name__
+        answer["elapsed_s"] = round(time.monotonic() - start, 3)
+        out[name] = answer
+except BaseException as error:
+    out["error"] = type(error).__name__
+print(json.dumps(out, sort_keys=True))
+"""
+VERIFY = {9: "not_yet_valid", 10: "expired", 18: "self_signed", 19: "self_signed_in_chain",
+          20: "unknown_issuer", 21: "unknown_issuer", 62: "hostname_mismatch", 64: "ip_mismatch"}
+WORD = re.compile(r"[A-Za-z]{1,40}")
+
+
+def small(value, low, high):
+    return isinstance(value, int | float) and not isinstance(value, bool) and low <= value <= high
+
+
+def shown(reply):
+    """What a rented host said, rebuilt in a closed shape: a host can print anything, including the
+    URL it was handed, so nothing it wrote is passed on as it is."""
+    words = []
+    for key, pattern in (("python", r"\d+\.\d+\.\d+"), ("openssl", r"[A-Za-z0-9 .-]{1,40}")):
+        if isinstance(reply.get(key), str) and re.fullmatch(pattern, reply[key]):
+            words.append(f"{key}={reply[key].replace(' ', '_')}")
+    for key in ("cafile", "openssl_cafile", "ssl_env"):
+        if isinstance(reply.get(key), bool):
+            words.append(f"{key}={int(reply[key])}")
+    if small(reply.get("capath_entries"), 0, 10**6):
+        words.append(f"capath_entries={reply['capath_entries']}")
+    if isinstance(reply.get("error"), str) and WORD.fullmatch(reply["error"]):
+        words.append(f"error={reply['error']}")
+    for name in ("head", "get"):
+        answer = reply.get(name)
+        if not isinstance(answer, dict):
+            continue
+        if small(answer.get("status"), 100, 599):
+            words.append(f"{name}={answer['status']}")
+        elif isinstance(answer.get("error"), str) and WORD.fullmatch(answer["error"]):
+            words.append(f"{name}={answer['error']}")
+            if small(answer.get("verify_code"), 0, 100):
+                words.append(f"{name}_verify={VERIFY.get(answer['verify_code'], answer['verify_code'])}")
+        if small(answer.get("bytes"), 0, 1 << 40):
+            words.append(f"{name}_bytes={int(answer['bytes'])}")
+        if small(answer.get("elapsed_s"), 0, 1000):
+            words.append(f"{name}_s={answer['elapsed_s']:.3f}")
+    return " ".join(words)
+
+
+def probe(client, key, label, digest):
+    """HEAD and a ranged GET of `key` from executor host `label`: (what to print, whether it worked)."""
+    import json
+    import shlex
+    import tempfile
+    import time
+
+    from hypertrain.gpu_ops import cuda_executor as ce
+
+    if CONFIG_ENV not in os.environ:
+        raise Said(f"{CONFIG_ENV} is not set")
+    config = ce.ExecutorConfig.model_validate_json(Path(os.environ[CONFIG_ENV]).read_bytes())
+    host = next((h for h in config.hosts if h.label == label), None)
+    if host is None or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise Said("no executor host has this label, or the image digest is not sha256:<64 hex>")
+    command = shlex.join(
+        [*host.docker, "run", "--rm", "-i", "--pull", "never", "--entrypoint", ce.IMAGE_PYTHON]
+        + [f"{config.image_repository}@{digest}", "-I", "-c", NODE_PY]
+    )
+    urls = "".join(client.presign(m, key, expires=120) + "\n" for m in ("HEAD", "GET"))
+    fd = os.memfd_create("r2-check")  # the URLs are the remote stdin and live in no file
+    try:
+        os.write(fd, urls.encode())
+        with tempfile.TemporaryDirectory(prefix="r2-check-") as work:
+            ssh = shutil.which("ssh") or "ssh"
+            code = ce.SshTransport(host, config, ssh).run(
+                command,
+                stdin=Path(f"/proc/self/fd/{fd}"),
+                stdout=Path(work, "out"),
+                stderr=Path(work, "err"),
+                deadline=time.time() + 90,
+                cancel=None,
+                max_stdout_bytes=4096,
+            )
+            raw = Path(work, "out").read_text(errors="replace")
+    except Exception as error:
+        return f"{label} {type(error).__name__}", False
+    finally:
+        os.close(fd)
+    if code:  # 125: docker refused (with --pull never, usually: the image is not on the host)
+        return f"{label} exit_{code}", False
+    try:
+        reply = json.loads(raw)
+    except ValueError:
+        reply = None
+    if not isinstance(reply, dict):
+        return f"{label} no_reply", False
+    head, get = reply.get("head"), reply.get("get")
+    ok = (
+        isinstance(head, dict) and head.get("status") == 200 and head.get("bytes") == SIZE
+        and isinstance(get, dict) and get.get("status") in (200, 206)
+    )
+    return f"{label} {shown(reply)}", ok
+
+
+def roundtrip(file, node):
     import hashlib
     import secrets
     import time
@@ -233,7 +369,7 @@ def roundtrip(file):
 
     if file == "-":
         if SETTINGS_ENV not in os.environ:
-            raise Missing(SETTINGS_ENV)
+            raise Said(f"{SETTINGS_ENV} is not set")
         raw = Path(os.environ[SETTINGS_ENV]).read_bytes()
         file = at.ArtifactSettings.model_validate_json(raw).credentials_file
     credentials = at.load_credentials(Path(file))
@@ -253,18 +389,23 @@ def roundtrip(file):
         row[name] = [shown, time.monotonic() - start, ok]
         return value
 
+    far, far_ok = "", True
     try:
         step("put", lambda: client.put_object(key, data))
         if row["put"][2]:
             got = step("get", lambda: client.get_object(key))
             if row["get"][2] and hashlib.sha256(got).digest() != hashlib.sha256(data).digest():
                 row["get"][0], row["get"][2] = "mismatch", False
+            if node and row["get"][2]:  # the object is there for the host to look at
+                far, far_ok = probe(client, key, *node)
+                far = f"\nr2-check node {far}"
     finally:
         step("delete", lambda: client.delete_object(key))
         http.close()
     said = " ".join(f"{n}={row[n][0] if n in row else 'skipped'}" for n in ("put", "get", "delete"))
     took = " ".join(f"{n}_s={row[n][1]:.3f}" for n in ("put", "get", "delete") if n in row)
-    return f"challenge {said} bytes={SIZE} {took}", len(row) == 3 and all(r[2] for r in row.values())
+    complete = len(row) == 3 and all(r[2] for r in row.values()) and far_ok and (far or not node)
+    return f"challenge {said} bytes={SIZE} {took}{far}", bool(complete)
 
 
 def run(mode, args):
@@ -272,13 +413,13 @@ def run(mode, args):
         load(args[0], sys.stdin.buffer.read())
         return "ok", True
     if mode == "roundtrip":
-        return roundtrip(args[0])
+        return roundtrip(args[0], args[1:])
     if mode != "post":
         raise KeyError(mode)
     for name, want in ((CONFIG_ENV, args[0]), (SETTINGS_ENV, args[1])):
         have = os.environ.get(name)
         if have != (None if want == "-" else want):
-            raise Unset(name)
+            raise Said(f"{name} is not set as the script wrote it")
     if args[1] != "-":
         load(args[0], Path(args[1]).read_bytes())
     return "ok", True
@@ -512,14 +653,18 @@ executor-off)
   fi
   sleep 6; check;;
 r2-check)
-  shift; file=
+  shift; file=; node=()
   while [ $# -gt 0 ]; do
     case $1 in
     --file) [ $# -ge 2 ] && [ -z "$file" ] || usage "--file FILE, once"; file=$2; shift 2;;
-    *) usage "r2-check [--file FILE]";;
+    --node) [ $# -ge 3 ] && [ ${#node[@]} -eq 0 ] || usage "--node LABEL sha256:DIGEST, once"
+      [[ $2 =~ ^[a-z0-9][a-z0-9-]{0,31}$ && $3 =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || usage "--node LABEL sha256:<64 hex>"
+      node=("$2" "$3"); shift 3;;
+    *) usage "r2-check [--file FILE] [--node LABEL sha256:DIGEST]";;
     esac
   done
   [ -z "$file" ] || r2_file "$file"
-  run_py roundtrip "${file:--}" || { echo "r2-check did not complete"; exit 8; };;
+  run_py roundtrip "${file:--}" ${node[@]+"${node[@]}"} || { echo "r2-check did not complete"; exit 8; };;
 *) echo "unknown $cmd"; exit 2;;
 esac
