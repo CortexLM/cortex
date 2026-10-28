@@ -476,6 +476,17 @@ breaker bounds the attempt-based one).
     `IslandFailure`. `launch` refuses a manifest whose GPU class is `none` before any ssh
     call: it describes a CPU run, and judging it against every GPU host would quarantine them all
     for the manifest's fault. [V: fake host]
+19. Qualification. `network_qualification.run` launched the island with `{**os.environ, PYTHONPATH}`,
+    not the launcher's builder, so a pinned seed job failed closed in the worker. [V by reading] It
+    now uses `child_environment(cfg, job)`, `island_env(job, trace=True, base=...)`: the island starts
+    under exactly the pin whatever the host's ambient. `capture` needs nothing added, because it
+    begins with `validate_artifacts`, which refuses a rank summary whose `env` differs from the pin.
+    The owner-reviewed bootstrap (`_bootstrap_backend_v2`) reads the rescued summaries and not their
+    tensors, so it checks the declaration itself: a summary whose `env` is missing or differs from the
+    manifest's pin answers 403 and installs nothing, and evidence from an unpinned run cannot install
+    a backend. No `Result` or `Environment` field is added: `reference_hash` (the hash of the whole
+    `reference_spec`, pin included) and the summary hashes in the owner-signed evidence already bind
+    the pin. QUAL-01's attestation is untouched. [V: fake torch and a recording torchrun parent]
 
 ### Consequences
 
@@ -512,6 +523,9 @@ breaker bounds the attempt-based one).
   reaches the manifest's CPU class: one that does not is quarantined at its first container run
   instead of being retried, and an operator reads "container refused the environment" in the
   journal. No throughput was measured for the CUDA path under the pin.
+- A pinned CUDA manifest can be qualified (decision 19). `network_qualification.sources()` hashes every
+  `*.py` of the package, so this change, like any source edit, invalidates a stored qualification
+  config (`qualification_source_or_profile_changed`): configs and reviewed bundles are recomputed.
 - `implementation_hash` changes; runs holding a `service-admission` record then fail
   `SERVICE_PROFILE_AUTHORITY` (`store.py:4631`) and cannot be re-bootstrapped after a round opened.
   The runs are recreated anyway.
@@ -599,6 +613,8 @@ breaker bounds the attempt-based one).
   clamping of the capability to the host CPU; the real probe source ran only against a fake torch.
   No AVX2-less or ARM GPU host was available, so the quarantine of such a host is tested against a
   modelled CPU.
+- A CUDA qualification under a pinned manifest (decision 14): `run` was exercised with a fake torch
+  and a torchrun parent that only records its environment; no two-host qualification ran.
 
 ## Part 4: host and image binding of the CUDA qualification (QUAL-01, QUAL-02)
 

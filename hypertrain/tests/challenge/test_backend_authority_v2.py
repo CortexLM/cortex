@@ -172,11 +172,12 @@ def authority(tmp_path, monkeypatch, request):
     original.seed_job.write_text(job.model_dump_json())
     results = gpu.results(tmp_path / "rescued")
     configs = []
+    declared = honest_observation(manifest.training.reference_spec.env.pin())
     for index, path in enumerate(results):
         for round_index in range(2):
             for rank in range(2):
                 summary = path.parent / f"round-{round_index}/published/rank-{rank}/summary.json"
-                summary.write_text(json.dumps({"backend": "cuda"}))
+                summary.write_text(json.dumps({"backend": "cuda", "env": declared}))
         receipts = seed_dir / f"receipt-{index}.json"
         data = json.loads(original.lifecycle_receipts.read_bytes())
         data.update(instance_id=index + 1, machine_id=index + 10, role=f"h{index}")
@@ -416,7 +417,26 @@ def test_existing_cpu_contract_cannot_promote_after_services(network, authority)
         store._bootstrap_backend_v2(manifest, configs, results, raw)
 
 
-@pytest.mark.parametrize("fault", ["owner", "runtime", "artifact", "config", "cpu_summary"])
+# What the rescued rank summaries declare about the island's environment, edited one way each:
+# (field of the declaration, how to change it); no field: the declaration is missing.
+PIN_FAULTS = {
+    "pin_another_name": (
+        "env",
+        lambda env: {
+            **env,
+            "HT_ATTN_BACKEND": "math" if env["HT_ATTN_BACKEND"] != "math" else "sdpa-flash",
+        },
+    ),
+    "pin_name_still_set": ("env", lambda env: {**env, "HT_FP8": "1"}),
+    "pin_capability": ("cpu_capability", lambda _: "DEFAULT"),
+    "pin_gpu_class": ("gpu", lambda gpu: "none" if gpu != "none" else "sm_103"),
+    "pin_no_declaration": (None, None),
+}
+
+
+@pytest.mark.parametrize(
+    "fault", ["owner", "runtime", "artifact", "config", "cpu_summary", *PIN_FAULTS]
+)
 def test_invalid_reviewed_authority_rejects_without_install(authority, fault):
     store, manifest, configs, results, raw = authority
     if fault == "owner":
@@ -434,9 +454,18 @@ def test_invalid_reviewed_authority_rejects_without_install(authority, fault):
         (results[0].parent / "round-0/published/rank-0/summary.json").write_text(
             json.dumps({"backend": "cpu"})
         )
+    elif fault in PIN_FAULTS:
+        field, change = PIN_FAULTS[fault]
+        path = results[0].parent / "round-0/published/rank-0/summary.json"
+        summary = json.loads(path.read_bytes())
+        if field is None:
+            del summary["env"]
+        else:
+            summary["env"][field] = change(summary["env"][field])
+        path.write_text(json.dumps(summary))
     else:
         configs[0].write_bytes(b"{}")
-    if fault in ("runtime", "cpu_summary", "config"):
+    if fault in ("runtime", "cpu_summary", "config", *PIN_FAULTS):
         # Even owner-reviewed bytes must pass runtime/config validation.
         evidence = {
             "run_id": manifest.run_id(),
@@ -458,7 +487,9 @@ def test_invalid_reviewed_authority_rejects_without_install(authority, fault):
         raw = canonicalize(
             envelope_v2.seal(service.OWNER, "Receipt", manifest.run_id(), receipt, 100)
         )
-    with pytest.raises((ChallengeError, ValueError, Reject)):
+    # Owner-reviewed bytes that show another environment than the pin are refused for that reason.
+    why = "another environment than the pin" if fault in PIN_FAULTS else None
+    with pytest.raises((ChallengeError, ValueError, Reject), match=why):
         store._bootstrap_backend_v2(manifest, configs, results, raw)
     assert (
         store._db.execute("SELECT COUNT(*) FROM records_v2 WHERE kind='qualification'").fetchone()[

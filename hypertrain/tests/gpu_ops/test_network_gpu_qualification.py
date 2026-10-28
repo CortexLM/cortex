@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from env_pin_fixtures import HOSTILE, ambient
 from hypertrain.gpu_ops import network_qualification as driver
 from hypertrain.gpu_ops.journal import fsha
 from hypertrain.gpu_ops.launcher import Reject
@@ -691,3 +692,86 @@ print("PACKAGED_QUALIFICATION_STRICT_SCHEMA_AND_STORE_IMPORT_PASS")
     # Then: real package/store seam imports without a sibling scripts tree.
     assert result.returncode == 0, result.stderr
     assert "PACKAGED_QUALIFICATION_STRICT_SCHEMA_AND_STORE_IMPORT_PASS" in result.stdout
+
+
+class Island:
+    """Stands in for the torchrun parent: records how it was started, then fails at once."""
+
+    started: list[dict[str, object]] = []
+
+    def __init__(self, argv: list[str], **kwargs: object) -> None:
+        self.started.append({"argv": argv, **kwargs})
+
+    def __enter__(self) -> Island:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 1
+
+    def poll(self) -> int:
+        return 1
+
+
+class Instant:
+    """The `time` module of the engine, held inside the staging window of the seed config."""
+
+    @staticmethod
+    def time() -> float:
+        return 150.0
+
+    @staticmethod
+    def monotonic() -> float:
+        return 0.0
+
+
+def test_the_island_of_a_qualification_starts_under_the_manifest_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a host whose ambient says everything the pin forbids, a seed with a real genesis
+    # state, and a torchrun parent that only records how it was started.
+    from hypertrain.auditor.replay import AnchorCache, pack_state
+    from hypertrain.trainer.model import init_params
+
+    cfg = seed_config(tmp_path, TREE / "experiments/gpu_network_v2/profile.json")
+    job = driver.check_inputs(cfg)
+    theta = init_params(TrainConfig.from_manifest_v2(job.manifest).model)
+    anchor = AnchorCache().genesis(job.manifest, cfg.hotkey, theta)
+    (tmp_path / "start").write_bytes(pack_state(theta, anchor.state))
+    (tmp_path / "ef").write_bytes(pack_state(anchor.ef))
+    for name in ("v0", "samples", "proofs"):
+        (tmp_path / name).write_bytes(b"x")
+    config = tmp_path / "config.json"
+    config.write_text(cfg.model_dump_json())
+
+    ambient(monkeypatch, **HOSTILE, HT_COMPILE="1")
+    for key in ("CUBLAS_WORKSPACE_CONFIG", "CUDA_DISABLE_PTX_JIT", "OMP_NUM_THREADS"):
+        monkeypatch.setenv(key, "restored-after-the-test")  # run() writes these to os.environ
+    for key in ("MKL_NUM_THREADS", "PYTHONHASHSEED", "NVIDIA_TF32_OVERRIDE", "HT_ISLAND_TRACE"):
+        monkeypatch.setenv(key, "restored-after-the-test")
+    monkeypatch.setenv("HT_IMAGE_DIGEST", cfg.image_digest)
+    fake_cuda_host(monkeypatch, [(RTX_5090, 170)] * 2)
+    monkeypatch.setattr(driver, "time", Instant)
+    monkeypatch.setattr(driver.subprocess, "Popen", Island)
+    Island.started = []
+
+    assert all(
+        os.environ.get(name) for name in job.manifest.training.reference_spec.env.pin().absent
+    )
+    # When
+    with pytest.raises(Reject, match="qualification_cuda_runner_failed"):
+        driver.run(config)
+
+    # Then: the island got the pin, not the ambient, and the fixed keys of the launcher.
+    (island,) = Island.started
+    env = island["env"]
+    assert isinstance(env, dict)
+    pin = job.manifest.training.reference_spec.env.pin()
+    names = sorted({*dict(pin.present), *pin.absent})
+    assert {name: env.get(name) for name in names} == {
+        name: dict(pin.present).get(name) for name in names
+    }
+    assert env["PYTHONPATH"] == str(cfg.tree / "src") and env["HT_ISLAND_TRACE"] == "1"
+    assert env["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8" and env["OMP_NUM_THREADS"] == "1"

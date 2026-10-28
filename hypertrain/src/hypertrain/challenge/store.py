@@ -2533,9 +2533,11 @@ class ChallengeStore:
         """Internal owner-reviewed CUDA evidence; install before run/service creation."""
         from hypertrain.gpu_ops import network_qualification as engine
         from hypertrain.gpu_ops.journal import fsha
+        from hypertrain.protocol.env_pins import observation_divergence
         from hypertrain.protocol.messages import Receipt
 
         ref = manifest.training.reference_spec
+        pin = ref.env.pin()
         config_bytes = tuple(p.read_bytes() for p in configs)
         result_bytes = tuple(p.read_bytes() for p in results)
         evidence: dict[str, JsonValue] = {
@@ -2578,6 +2580,11 @@ class ChallengeStore:
                     )
                     if summary.get("backend") != "cuda":
                         raise ChallengeError(403, "CPU artifacts cannot qualify CUDA execution")
+                    declared = summary.get("env")
+                    if not isinstance(declared, dict) or observation_divergence(pin, declared):
+                        raise ChallengeError(
+                            403, "CUDA qualification ran under another environment than the pin"
+                        )
             if (
                 job.manifest != manifest
                 or result.config_sha256 != fsha(config_path)

@@ -85,6 +85,8 @@
   class, and the executor judges the same report (`pinned_env`, `cpu_capability` in
   `environment.json` and `role-dispatch.json`) and quarantines that host. See
   `docs/cuda-executor.md`.
+  The CUDA network qualification starts its island under the pin (`child_environment`), and the
+  owner-reviewed backend bootstrap answers 403 when a rescued rank summary does not declare it.
   Breaking: every `run_id`, `reference_hash` and `training_hash` changes; existing runs are
   recreated. `kimi_tiny.train_config` and `qualify` take the `EnvPin` the caller's process honors.
   The miner declares its probed environment in bodies it signs: `JoinRequest.env` and

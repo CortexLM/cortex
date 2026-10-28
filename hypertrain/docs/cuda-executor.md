@@ -144,6 +144,11 @@ call (it describes a CPU run; judging it per host would quarantine them all).
 
 `role-dispatch.json` records `pinned_env` and `cpu_capability` in `environment`. Nothing here ran on a GPU: the fake host replaces the island and the device probe.
 
+The qualification record a CUDA run needs before its run is created follows the same rule:
+`network_qualification run` starts its island through the launcher's `island_env`, so it runs
+under the manifest's pin whatever the host exports, and `_bootstrap_backend_v2` refuses (403)
+reviewed evidence whose rank summaries do not declare that pin in `env`.
+
 ## What a job produces
 
 Next to the usual `published/` directory the executor writes `role-dispatch.json`, which
