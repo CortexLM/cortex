@@ -524,7 +524,7 @@ def test_a_repeated_audit_completion_neither_decrements_the_counter_again_nor_ch
         def counter() -> int:
             return int(store._record_v2(run, "finality", "0")["unresolved_audits"])
 
-        honest = sa.running(store)[cast.hot[3].ss58]
+        honest = next(r for h, r in sa.running(store).items() if h != cast.forger.ss58)
         key = cast.keys[honest["auditor"]]
         stored = store._record_v2(run, "executed-verdict", honest["id"])
         assert stored["result"] == "MATCH" and counter() == 5  # control: five open, ours executed
@@ -532,7 +532,7 @@ def test_a_repeated_audit_completion_neither_decrements_the_counter_again_nor_ch
         first = sa.complete(n, key, honest["id"], stored)
 
         assert (first.status_code, first.json()) == (200, {"result": "MATCH"})
-        assert counter() == 4 and sa.lease_rows(store)[cast.hot[3].ss58]["state"] == "completed"
+        assert counter() == 4 and sa.lease_rows(store)[honest["hotkey"]]["state"] == "completed"
         completed = (settled_state(store), sa.digest_of(store))
         repeated = sa.complete(n, key, honest["id"], stored)
         assert (repeated.status_code, repeated.json()) == (200, {"result": "MATCH"})
