@@ -497,16 +497,16 @@ def main(argv: Sequence[str] | None = None, project: Project | None = None) -> i
     args = parser.parse_args(argv)
 
     mutants, problems = load_tables(project)
-    problems += check_project(project, mutants)
-    if problems:
-        print("\n".join(problems), file=sys.stderr)
-        return 2
     if args.only:
         unknown = sorted(set(args.only) - {m.id for m in mutants})
         if unknown:
             print(f"unknown mutant ids: {', '.join(unknown)}", file=sys.stderr)
             return 2
         mutants = [m for m in mutants if m.id in args.only]
+    problems += check_project(project, mutants)
+    if problems:
+        print("\n".join(problems), file=sys.stderr)
+        return 2
     if args.list:
         print_list(mutants, print)
         return 0
