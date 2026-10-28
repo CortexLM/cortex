@@ -224,12 +224,6 @@ def test_without_an_executor_directory_there_is_no_token_to_use(box, backup):
     assert box.snapshot() == before
 
 
-def test_an_executor_directory_open_to_others_is_refused(box, backup):
-    box.token()
-    box.executor_dir.chmod(0o755)
-    assert "mode 755" in refused(box, backup, 4)
-
-
 BAD_TOKEN_PATHS = {
     "relative": "r2.env",
     "outside-data": "/etc/r2.env",

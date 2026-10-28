@@ -605,7 +605,7 @@ executor)
   r2=; ops=audit,referee; opsset=0; dry=0
   while [ $# -gt 0 ]; do
     case $1 in
-    --r2) [ $# -ge 2 ] && [ -z "$r2" ] || usage "--r2 FILE, once"; r2=$2; shift 2;;
+    --r2) [ $# -ge 2 ] && [ -n "$2" ] && [ -z "$r2" ] || usage "--r2 FILE, once"; r2=$2; shift 2;;
     --operations) [ $# -ge 2 ] && [ $opsset = 0 ] || usage "--operations LIST, once"
       ops=$2; opsset=1; shift 2;;
     --dry-run) [ $dry = 0 ] || usage "--dry-run, once"; dry=1; shift;;
@@ -707,7 +707,7 @@ r2-check)
   shift; file=; node=()
   while [ $# -gt 0 ]; do
     case $1 in
-    --file) [ $# -ge 2 ] && [ -z "$file" ] || usage "--file FILE, once"; file=$2; shift 2;;
+    --file) [ $# -ge 2 ] && [ -n "$2" ] && [ -z "$file" ] || usage "--file FILE, once"; file=$2; shift 2;;
     --node) [ $# -ge 3 ] && [ ${#node[@]} -eq 0 ] || usage "--node LABEL sha256:DIGEST, once"
       [[ $2 =~ ^[a-z0-9][a-z0-9-]{0,31}$ && $3 =~ ^sha256:[0-9a-f]{64}$ ]] \
         || usage "--node LABEL sha256:<64 hex>"

@@ -551,7 +551,7 @@ class Host:
             {"command": command, "stdin": Path(stdin).read_text(), "deadline": deadline,
              "cancel": cancel, "max_stdout_bytes": max_stdout_bytes}
         )  # fmt: skip
-        Path(stdout).write_text(self.out)
+        Path(stdout).write_bytes(self.out if isinstance(self.out, bytes) else self.out.encode())
         Path(stderr).write_text(self.err)
         if self.raises is not None:
             raise self.raises

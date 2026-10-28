@@ -19,8 +19,9 @@ on s100. The sandbox runs a COPY with only those path prefixes rewritten into a 
   A container is found by its name, where compose finds it by project and service labels.
 - `curl`: a URL map (urls.json) for the master gate and the challenge API; unknown URLs fail.
 - `python3`: the real interpreter, with `datetime.now` frozen for the seal-window code.
-- `sleep` (no-op), `install` (without -o/-g, which need root; every call is logged in install.log),
-  and tripwires for exactly these
+- `sleep` (no-op), `stat` (the real one, but the executor directory can be given another owner),
+  `install` (without -o/-g, which need root; every call is logged in install.log), and tripwires
+  for exactly these
   commands: ssh scp rsync sudo systemctl podman wget nvidia-smi. A call to one is logged and exits
   99. Any other command that could reach out (nc, git, gh, /dev/tcp, python urllib) is NOT
   intercepted: the script uses none of them, and a new one must be reviewed, not assumed caught.
@@ -265,7 +266,7 @@ def run_program(args):
     if c["State"]["Status"] != "running":
         done(1, "Error response from daemon: container is not running")
     ok = {"pre": "preflight ok", "post": "postflight ok", "roundtrip": ROUNDTRIP}[mode]
-    rc, out = st["exec_out"].get(mode, [0, ok])
+    rc, out, *where = st["exec_out"].get(mode, [0, ok])
     if mode == "post":  # the part of the program that only reads this process's environment
         env = dict(e.split("=", 1) for e in c["Config"]["Env"])
         names = ("HYPERTRAIN_CUDA_EXECUTOR", "HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS")
@@ -273,7 +274,7 @@ def run_program(args):
             if env.get(name) != (None if want == "-" else want):
                 rc, out = 1, "postflight refused: %s is not set as the script wrote it" % name
                 break
-    print(out)
+    print(out, file=sys.stderr if where else sys.stdout)  # a traceback is on stderr
     done(rc)
 
 
@@ -392,6 +393,13 @@ SHIMS = {
     "curl": FAKE_CURL,
     "python3": FAKE_PYTHON3,
     "sleep": "#!/bin/sh\nexit 0\n",
+    # stat with FAKE_DIR_UID as the owner of the executor directory: a sandbox that is not root
+    # cannot chown, and this is the only way to give the directory another owner than the token
+    "stat": (
+        f'#!/bin/bash\nout=$({shutil.which("stat")} "$@") || exit $?\n'
+        'if [ -n "${FAKE_DIR_UID:-}" ] && [[ ${*: -1} == */state/executor ]]; then\n'
+        '  out="${out% *} $FAKE_DIR_UID"; fi\necho "$out"\n'
+    ),
     # install -o/-g need root: drop them, keep every other option for the real install
     "install": (
         '#!/bin/bash\necho "$*" >>"$FAKE_DIR/install.log"\nargs=()\n'
@@ -633,9 +641,11 @@ class Box:
         calls = self.docker()["execs"]
         return [c for c in calls if mode in (None, c["mode"])]
 
-    def exec_out(self, mode: str, rc: int, out: str) -> None:
-        """What the challenge program answers to `mode`, when the fake does not compute it."""
-        self.docker(exec_out={**self.docker()["exec_out"], mode: [rc, out]})
+    def exec_out(self, mode: str, rc: int, out: str, *, stderr: bool = False) -> None:
+        """What the challenge program answers to `mode` (on stderr, as a traceback is), when the
+        fake does not compute it."""
+        answer = [rc, out, *(["stderr"] if stderr else [])]
+        self.docker(exec_out={**self.docker()["exec_out"], mode: answer})
 
     def b(self, ts: str = "T1") -> Path:
         return self.t.parent / f"hypertrain-test-s7-{ts}"
