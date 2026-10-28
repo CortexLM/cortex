@@ -81,6 +81,7 @@ RESERVATION_QUERY = (
     "                    (run_id,),\n"
     "                ).fetchone()"
 )
+CONVICTION = '                            admission.settle_fraud(result["dispute_id"], now=now)\n'
 ELIGIBILITY_REFUSAL = (
     '                raise ChallengeError(403, "current admission funding/identity no longer '
     'eligible")\n'
@@ -273,6 +274,25 @@ MUTANTS = [
         "why": "A reward origin stays pending for ever once its miner filed any contest at all.",
     },
     {
+        "id": "gap-a-lost-contest-keeps-the-unvested-reward",
+        "invariants": ["DIB-07", "DIB-17"],
+        "path": ADMISSION,
+        "old": '                    burn_pending=reason == "TRAINING_FRAUD",\n',
+        "new": "                    burn_pending=False,\n",
+        "tests": [ORIGIN_HELD + "[lost]"],
+        "why": "The seizure after a lost contest burns the bond only, so the convicted miner's "
+        "origin vests and is paid.",
+    },
+    {
+        "id": "gap-the-resolution-route-never-convicts-the-miner",
+        "invariants": ["DIB-07", "DIB-17"],
+        "path": STORE,
+        "old": CONVICTION,
+        "new": "",
+        "tests": [ORIGIN_HELD + "[lost]"],
+        "why": "A referee ruling of fraud against the miner seizes nothing, so its origin is paid.",
+    },
+    {
         "id": "gap-a-completed-reservation-holds-the-gate",
         "invariants": ["DIB-22", "DIB-19"],
         "path": STORE,
@@ -343,7 +363,7 @@ MUTANTS = [
         "path": STORE,
         "old": SETTLEMENT_LOOKUP,
         "new": ORIGIN_FOLLOWS_DISPUTE,
-        "tests": [ORIGIN_HELD],
+        "tests": [ORIGIN_HELD + "[open]"],
         "why": "FIX PROOF: a live reward origin is held while its miner's dispute of it runs.",
     },
     {

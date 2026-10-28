@@ -26,7 +26,6 @@ from hypertrain.ledger.escrow_v2 import (
     RewardWork,
     authority_message,
     digest,
-    reward_origin_id,
 )
 from hypertrain.protocol.envelope_v2 import EnvelopeV2, seal
 from hypertrain.protocol.hashing import sha256_hex
@@ -46,7 +45,7 @@ from . import support_exit_disputes as X
 from . import support_exit_roster as R
 from .support import H, World
 from .support_disputes import Rig as DisputeRig
-from .support_disputes import refusal
+from .support_disputes import refusal, reward_origin_of
 from .support_locks import Lab, Miner, Rig, settled_status
 from .support_opids import DefenceMissing, fresh_id, self_transfer
 
@@ -127,6 +126,12 @@ def verdict_of_member(rnd: R.Round, index: int) -> str:
     ).fetchone()
     R.control(row is not None, f"the audit left no contest record for member {index}")
     return str(row[0])
+
+
+def dispute_id_of_member(rnd: R.Round, index: int) -> str:
+    """Id of the dispute that member `index` opens against its own verdict."""
+    verdict = verdict_of_member(rnd, index)
+    return sha256_hex(canonicalize([rnd.run_id, verdict, rnd.hotkey(index)]))
 
 
 def contest_request(rnd: R.Round, index: int, verdict: str) -> Any:
@@ -244,7 +249,7 @@ def signed_round(
         20,
     )
     origin = OriginAllocation(
-        origin_id=reward_origin_id(run, w, hot.ss58, digest(final)),
+        origin_id=reward_origin_of(escrow, run, w, hot.ss58, digest(final)),
         owner=cold.ss58,
         units=escrow.policy.round_reward_units,
         mature_at=20,
@@ -275,6 +280,8 @@ def replayable_ledger(world: World, monkeypatch: pytest.MonkeyPatch) -> EscrowV2
     monkeypatch.setattr(escrow, "replay_finality", lambda _evidence: THETA)
     monkeypatch.setattr(escrow, "owner_of", lambda _hotkey: X.service().COLD[0].ss58)
     monkeypatch.setattr(escrow, "assignment_of", lambda _w, _hotkey: samples)
+    if hasattr(escrow, "accepted_at"):  # the evidence is judged at its acceptance, round 1 here
+        monkeypatch.setattr(escrow, "accepted_at", lambda _envelope: 1)
     return escrow
 
 

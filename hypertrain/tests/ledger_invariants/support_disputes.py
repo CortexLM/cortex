@@ -8,6 +8,7 @@ record) on a `service_world` and go through the real routes for everything else.
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import sys
 from collections.abc import Callable
@@ -25,20 +26,25 @@ from hypertrain.challenge.disputes_v2 import (
     Turn,
     signed_message,
 )
-from hypertrain.protocol.envelope_v2 import seal
+from hypertrain.ledger.escrow_v2 import FinalityEvidence, digest, reward_origin_id
+from hypertrain.protocol import messages_v2
+from hypertrain.protocol.envelope_v2 import EnvelopeV2, seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
+from hypertrain.protocol.messages import Finalize
 from hypertrain.protocol.messages_v2 import (
     BisectV2,
     DisputePolicyV2,
     DisputeV2,
     EscrowLock,
+    OriginAllocation,
     ResolutionV2,
+    RewardFinalize,
     RunManifestV2,
 )
 
-from .support import World, bare_escrow, load_fixture_module
+from .support import Real, World, bare_escrow, load_fixture_module, resign_reward
 
 VERDICT = "11" * 32
 AGREE = ["11" * 32] * 3
@@ -85,6 +91,59 @@ def table_digest(db: sqlite3.Connection, tables: tuple[str, ...] = TABLES) -> st
         rows = sorted(repr(tuple(row)) for row in db.execute(f'SELECT * FROM "{name}"'))
         hasher.update(repr((name, rows)).encode())
     return hasher.hexdigest()
+
+
+def settlement_events(db: sqlite3.Connection, lock_id: str) -> list[str]:
+    """Kinds (RELEASE or SLASH) of the escrow events that dispose of the bond `lock_id`, in order.
+
+    The operation id of such an event is derived by the service, and how it is derived is not a
+    property of the bond, so the events are found by the lock they name."""
+    kinds = []
+    for kind, request in db.execute(
+        "SELECT kind,request FROM escrow_events WHERE kind IN ('RELEASE','SLASH') ORDER BY seq"
+    ):
+        body = json.loads(request)
+        operation = body[0] if isinstance(body, list) else body  # a slash wraps its release
+        if operation["lock_id"] == lock_id:
+            kinds.append(str(kind))
+    return kinds
+
+
+def reward_origin_of(escrow: Any, run: str, w: int, hotkey: str, finalize_hash: str) -> str:
+    """The origin id `escrow` issues for this reward: its own derivation where the ledger keys
+    the ids it derives, the plain function of the run, the round, the hotkey and the finalize
+    hash else. A test reads the id from here and never computes it."""
+    if hasattr(escrow, "reward_origin"):
+        return str(escrow.reward_origin(w, hotkey, finalize_hash))
+    derive: Callable[..., str] = reward_origin_id
+    return derive(run, w, hotkey, finalize_hash)
+
+
+def signed_variant_on(
+    escrow: Any, fixture: ModuleType, real: Real, **final_changes: Any
+) -> tuple[RewardFinalize, FinalityEvidence]:
+    """A COORD-signed Finalize/RewardFinalize pair differing from the fixture's Finalize, whose
+    origin is the one `escrow` would issue: the single audited worker's split is recomputed, so a
+    refused variant is refused for its Finalize content and not for a malformed allocation."""
+    setup, evidence, reward = real
+    run_id = setup.manifest.run_id()
+    final = Finalize.model_validate({**evidence.finalize.body, **final_changes})
+    envelope = EnvelopeV2.model_validate(seal(fixture.COORD, "Finalize", run_id, final, 200))
+    work = evidence.works[0]
+    origin = OriginAllocation(
+        origin_id=reward_origin_of(escrow, run_id, reward.w, work.commit.signer, digest(final)),
+        owner=work.owner,
+        units=reward.budget_units,
+        mature_at=reward.mature_at,
+    )
+    changed = resign_reward(
+        fixture,
+        reward,
+        finalize_hash=digest(final),
+        origin_ids=[origin.origin_id],
+        allocation_hash=sha256_hex(canonicalize([origin.body()])),
+    )
+    return changed, replace(evidence, finalize=envelope)
 
 
 @dataclass
@@ -527,6 +586,33 @@ def rollback_raw(world: World, excluded: list[str], cause_hashes: list[str]) -> 
         cause_hashes=cause_hashes,
     )
     return canonicalize(seal(service.COORD, "Rollback", world.run_id, body, 10_000))
+
+
+# The refusal of a watch request that the party did not sign, by where the service asks for it.
+WATCH_NEEDS_SIGNATURE = (
+    "party event access requires its signed request"
+    if hasattr(messages_v2, "WatchRequest")
+    else "party event access requires signature"
+)
+
+
+def watch_feed(world: World, party: Keypair, signer: Keypair | None) -> Any:
+    """The dispute events of `party`, asked for with the signature of `signer` (none: unsigned).
+
+    The signature rides in the X-Dispute-Signature header of a GET where the service reads it
+    there, and in the body of a signed WatchRequest where the service reads it there."""
+    net = world.network
+    if hasattr(messages_v2, "WatchRequest"):
+        if signer is None:
+            return world.client.post(net.url + "/disputes", json={})
+        asked = messages_v2.WatchRequest(party=party.ss58, cursor=0, wait_seconds=0)
+        signed = net.signed(signer, "WatchRequest", asked, expiry=net.now + 20)
+        return world.client.post(net.url + "/disputes", json=signed)
+    feed = net.url + "/disputes?party=" + party.ss58
+    if signer is None:
+        return world.client.get(feed)
+    message = f"hypertrain/watch/2|{world.run_id}|{party.ss58}".encode()
+    return world.client.get(feed, headers={"X-Dispute-Signature": signer.sign(message).hex()})
 
 
 def witnesses(

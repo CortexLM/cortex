@@ -20,12 +20,11 @@ from hypertrain.challenge.disputes_v2 import DisputeError
 from hypertrain.ledger.escrow_v2 import EscrowError
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.envelope import UnauthorizedSigner
-from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import ReplayVerdict
 from hypertrain.protocol.messages_v2 import EscrowRelease
 
-from .support import Real, bare_escrow, error_code, signed_variant
+from .support import Real, bare_escrow, error_code
 from .support_disputes import (
     AGREE,
     AUDITOR_SAYS,
@@ -36,6 +35,8 @@ from .support_disputes import (
     make_rig,
     raised,
     refusal,
+    settlement_events,
+    signed_variant_on,
 )
 
 V1 = "12" * 32
@@ -425,21 +426,16 @@ def test_the_bond_is_burned_only_when_the_contesting_miner_loses_by_fraud(
     # When the referee decides and the decision and the bond settle together
     rig.close(turn, reason, who)
     # Then: the whole bond is burned for a miner FRAUD, returned in every other case
-    status = rig.d.settlement(turn.lock_id)
+    status = rig.d.settlement(turn.dispute_id)
     assert status.outcome == ("FRAUD" if burned else "MATCH")
     balances = rig.escrow.balances()
     assert (balances.burned, balances.dispute_locked) == (burned, 0)
     assert rig.escrow.balances(cold).available == 20000 - burned
     assert balances.conserved()
-    # The disposal is one event under a deterministic operation id, so a replay cannot repeat it
-    settle = sha256_hex(canonicalize([turn.dispute_id, "settle"]))
-    kinds = [
-        row[0]
-        for row in rig.db.execute("SELECT kind FROM escrow_events WHERE operation_id=?", (settle,))
-    ]
-    assert kinds == ["SLASH" if burned else "RELEASE"]
+    # The disposal is one event, and settling again, even at a later round, repeats nothing
+    assert settlement_events(rig.db, turn.lock_id) == ["SLASH" if burned else "RELEASE"]
     state = rig.state()
-    rig.d.settle_lock(turn.dispute_id, now=3)
+    rig.d.settle_lock(turn.dispute_id, now=4)
     assert rig.state() == state
 
 
@@ -450,10 +446,8 @@ def test_an_unresolved_contest_releases_nothing_whatever_the_clock_says(
     # Given: an open contest; its settlement is unresolved and points at the absolute horizon
     rig = make_rig(li_escrow)
     turn, _ = rig.open(VERDICT)
-    status = rig.d.settlement(turn.lock_id)
+    status = rig.d.settlement(turn.dispute_id)
     assert (status.unresolved, status.release_beacon) == (True, turn.absolute_deadline)
-    lock = rig.d.settlement(turn.dispute_id)
-    assert lock == status
     stub = EscrowRelease(
         operation_id="77" * 32,
         owner=rig.f.COLD.ss58,
@@ -892,7 +886,7 @@ def test_a_timeout_needs_the_acknowledged_turn_and_two_distinct_healthy_permitte
         "PARTY_TIMEOUT" if silent == "miner" else "AUDITOR_FAULT",
         quiet.ss58,
     )
-    assert rig.d.settlement(turn.lock_id).outcome == "MATCH"
+    assert rig.d.settlement(turn.dispute_id).outcome == "MATCH"
     balances = rig.escrow.balances()
     assert (balances.burned, balances.dispute_locked, balances.conserved()) == (0, 0, True)
 
@@ -1050,7 +1044,10 @@ def fail_release(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
     def release(*args, **kwargs):
         raise SettleFails
 
-    monkeypatch.setattr(rig.escrow, "release", release)
+    # settle_lock releases through the ledger's service entry point where there is one
+    for name in ("release", "release_settlement"):
+        if hasattr(rig.escrow, name):
+            monkeypatch.setattr(rig.escrow, name, release)
 
 
 def test_a_failing_settlement_leaves_the_dispute_unresolved_when_both_share_one_transaction(
@@ -1141,8 +1138,8 @@ def test_a_reward_cannot_be_minted_for_a_hotkey_without_verified_work(
     # Given: a coordinator-signed Finalize that also lists a hotkey with no verified work
     setup, evidence, _ = real_reward
     extra = [li_escrow.HOT.ss58, li_escrow.OTHER.ss58]
-    reward, listed = signed_variant(li_escrow, real_reward, included=extra)
     escrow = bare_escrow(li_escrow, setup)
+    reward, listed = signed_variant_on(escrow, li_escrow, real_reward, included=extra)
     # When / Then: the included set must equal the verified set exactly
     assert error_code(lambda: escrow.reward_finalize(reward, listed)) == (
         "NO_VERIFIED_WORK_OR_EXCLUSIONS"
@@ -1207,9 +1204,6 @@ def test_a_timeout_racing_a_resolution_has_one_winner_and_the_loser_is_refused(
     assert seen == {"timeout": "TIMEOUT_NOT_DUE"}
     decided = rig.d.get(turn.dispute_id).resolution
     assert decided is not None and decided.reason == "MATCH"
-    settles = rig.db.execute(
-        "SELECT COUNT(*) FROM escrow_events WHERE operation_id=?",
-        (sha256_hex(canonicalize([turn.dispute_id, "settle"])),),
-    ).fetchone()[0]
+    settles = settlement_events(rig.db, turn.lock_id)
     balances = rig.escrow.balances()
-    assert (settles, balances.burned, balances.dispute_locked) == (1, 0, 0)
+    assert (settles, balances.burned, balances.dispute_locked) == (["RELEASE"], 0, 0)

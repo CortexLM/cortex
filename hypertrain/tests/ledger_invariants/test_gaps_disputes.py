@@ -24,9 +24,6 @@ from fastapi.testclient import TestClient
 
 from hypertrain.challenge.disputes_v2 import EXCLUSION_ABANDONED, Turn
 from hypertrain.challenge.finality_v2 import exclude, require_open
-from hypertrain.challenge.store import ChallengeError
-from hypertrain.protocol.hashing import sha256_hex
-from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Receipt
 from hypertrain.protocol.messages_v2 import BisectV2, ResolutionV2
 
@@ -46,6 +43,7 @@ from .support_gaps_disputes import (
     closing_round,
     contest_request,
     defence,
+    dispute_id_of_member,
     evidence_tag,
     fund_extra_bond,
     lock_of,
@@ -63,9 +61,11 @@ from .support_gaps_disputes import (
     two_windows,
     verdict_of_member,
 )
-from .support_locks import Lab
+from .support_locks import STAKE, Lab
 from .support_locks import Rig as ServiceRig
 from .support_opids import DefenceMissing, StepRefused, service_step
+
+MISMATCH_EVIDENCE = "cd" * 32  # the evidence a confirmed audit mismatch seizes the bond under
 
 # --- T-DSP-12 (DIB-02): a final op reached from an op interval longer than one op --------------
 
@@ -99,9 +99,10 @@ def final_op_answers(rig: Rig, turn: Turn) -> list[BisectV2]:
     strict=True,
     raises=DefenceMissing,
     reason="DIB-02: bisect() pauses on the narrowed one-op interval while the two last signed "
-    "answers still carry the previous, longer one, so referee_v2 (store.py:8928-8936) can never "
+    "answers still carry the previous, longer one, so referee_v2 of the store can never "
     "see both claimants' outputs of that op; reproduced at the engine level, whether the shipped "
-    "trace layout has an op level of more than one op is not determined",
+    "trace layout has an op level of more than one op is not determined "
+    "[fix-lot: none (no design yet)]",
 )
 @pytest.mark.parametrize("op_span", [2, 5])
 def test_a_dispute_paused_on_a_final_op_holds_both_parties_signed_claims_about_that_op(
@@ -147,7 +148,7 @@ def world(tmp_path: Path) -> Iterator[World]:
     raises=DefenceMissing,
     reason="CL-59: DisputesV2.resolution() reads env.body['dispute_id'] before it looks at the "
     "envelope type, so a signed envelope of another type ends as an unhandled KeyError, HTTP 500 "
-    "(the handlers of app.py cover DisputeError, not KeyError)",
+    "(the handlers of app.py cover DisputeError, not KeyError) [fix-lot: none (no design yet)]",
 )
 def test_a_resolution_route_refuses_a_signed_envelope_that_names_no_dispute(world: World) -> None:
     """CL-59 / T-DSP-30: whatever a registered key signs and posts to /resolution, the answer is
@@ -214,7 +215,8 @@ def stalled_outcome(world: World, *, squat: bool) -> tuple[Any, ...]:
     raises=DefenceMissing,
     reason="ESC-04: settle_lock() releases the bond under sha256([dispute_id, 'settle']), an id "
     "any funded coldkey can take with its own escrow event; the beacon's closure then raises "
-    "OPERATION_CONFLICT, rolls back, is journaled and repeats at every later beacon",
+    "OPERATION_CONFLICT, rolls back, is journaled and repeats at every later beacon "
+    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
 )
 def test_a_client_event_cannot_stop_the_beacon_from_closing_a_stuck_contest(
     tmp_path: Path,
@@ -249,7 +251,8 @@ def audited(tmp_path: Path) -> Iterator[R.Round]:
     raises=DefenceMissing,
     reason="DIB-04: a contest on a MATCH verdict suspends its opener, and verified_inputs_v2 then "
     "raises 403 'current admission funding/identity no longer eligible' for the whole round, so "
-    "POST /admin/rounds/0/aggregate refuses the four members nobody contested",
+    "POST /admin/rounds/0/aggregate refuses the four members nobody contested "
+    "[fix-lot: audit-integrity-2 ADR0011-P8 DSP-04]",
 )
 def test_a_member_contesting_its_own_matching_verdict_does_not_stop_the_round_of_the_others(
     audited: R.Round,
@@ -282,9 +285,7 @@ def test_a_member_contesting_its_own_matching_verdict_does_not_stop_the_round_of
             rnd.hotkey(i) for i in others
         )
     # ... the contest is decided and the four others are settled and paid for it.
-    dispute_id = sha256_hex(
-        canonicalize([rnd.run_id, verdict_of_member(rnd, contester), rnd.hotkey(contester)])
-    )
+    dispute_id = dispute_id_of_member(rnd, contester)
     X.resolve(R.world_of(rnd.network), dispute_id, reason="MATCH", loser=None)
     finalized = rnd.network.client.post(
         **R.finalize_request(rnd, others, response.json()["theta_hash"])
@@ -300,42 +301,50 @@ def test_a_member_contesting_its_own_matching_verdict_does_not_stop_the_round_of
     strict=True,
     raises=DefenceMissing,
     reason="DIB-04: once the contest of a roster member is closed and the member is back on "
-    "probation, verified_inputs_v2 still raises 403 for the round, because the member has no "
-    "exclusion record and is not eligible; the bounded exit puts every closed contest there",
+    "probation, the aggregation of the round answers 403 for the four members nobody contested, "
+    "because the member is not eligible and has no exclusion record "
+    "[fix-lot: audit-integrity-2 ADR0011-P8 DSP-04]",
 )
 def test_a_member_back_from_a_closed_contest_does_not_stop_the_round_of_the_others(
-    world: World,
+    audited: R.Round,
 ) -> None:
-    """DIB-04 / T-DSP-04, second stage: the contest of a roster member on its MATCH verdict is
-    decided by the referee and the member recovers (probation, no clean round). The round of the
-    others is still readable by the aggregation: no 403 for the whole roster."""
-    # Given: an active funded member on the roster of round 0, whose records are consistent.
-    X.activate(world, 0)
-    X.seed_open_round(world, 0, [0])
-    hot = X.service().HOT[0]
-    with pytest.raises(ChallengeError) as reached:
-        world.store.verified_inputs_v2(world.run_id, 0)
-    assert (reached.value.status, "missing accepted commit" in reached.value.detail) == (409, True)
-    # When: it contests its MATCH verdict, the referee confirms the audit, and it recovers.
-    dispute_id = X.seed_contest(world, 0, mismatch=False)
-    X.fund_contest(world, 0)
-    assert X.post_dispute(world, 0).status_code == 200
-    X.resolve(world, dispute_id, reason="MATCH", loser=None)
-    net = world.network
+    """DIB-04 / T-DSP-04, second stage: one roster member contests its own MATCH verdict, the
+    referee confirms the audit and the member recovers (probation, no clean round). Either the
+    contest was refused and the miner is untouched, or the operator still aggregates the round
+    with that member left out: no 403 for the whole roster."""
+    rnd, contester = audited, 2
+    others = [i for i in rnd.members if i != contester]
+    R.control(state_of_member(rnd, contester)[:2] == ("ACTIVE", 0), "the contester is active")
+    # When: the member contests its own MATCH verdict.
+    contest = contest_request(rnd, contester, verdict_of_member(rnd, contester))
+    if contest.status_code != 200:
+        # Then (refused): a client error, the member untouched.
+        with defence():
+            assert 400 <= contest.status_code < 500, contest.text
+            assert state_of_member(rnd, contester)[:2] == ("ACTIVE", 0)
+        return
+    # When: the referee confirms the audit, and the member recovers.
+    dispute_id = dispute_id_of_member(rnd, contester)
+    X.resolve(R.world_of(rnd.network), dispute_id, reason="MATCH", loser=None)
+    net = rnd.network
     recovered = net.client.post(
         net.url + "/admission/recover",
         json=net.signed(
-            hot, "Receipt", {"w": 0, "commit_hash": dispute_id, "received_round": net.now}
+            R.hot(contester),
+            "Receipt",
+            {"w": 0, "commit_hash": dispute_id, "received_round": net.now},
         ),
     )
-    assert recovered.status_code == 200, recovered.text
-    assert X.miner_state(world, 0)[:2] == ("PROBATION", 0)
-    # Then: the round is not refused for everybody because of it.
+    R.control(recovered.status_code == 200, recovered.text)
+    R.control(state_of_member(rnd, contester)[:2] == ("PROBATION", 0), "it is back on probation")
+    # Then (admitted): the operator's aggregation answers 200 for the four others.
+    response = R.aggregate(rnd)
     with defence():
-        try:
-            world.store.verified_inputs_v2(world.run_id, 0)
-        except ChallengeError as error:
-            assert error.status != 403, error.detail
+        assert response.status_code == 200, response.text
+        tape = response.json()["tape"]["body"]["inputs"]
+        assert sorted(item["roster"]["hotkey"] for item in tape) == sorted(
+            rnd.hotkey(i) for i in others
+        )
 
 
 # --- T-DSP-06 (DIB-21): the round after an accepted rollback can still be paid -----------------
@@ -345,9 +354,9 @@ def test_a_member_back_from_a_closed_contest_does_not_stop_the_round_of_the_othe
     strict=True,
     raises=StepRefused,
     reason="DIB-21+CRD-04: reward_finalize credits round w only when w-1 is the last credited "
-    "round (escrow_v2.py:706-712), and the two rounds a rollback repaired are never credited, so "
-    "the coordinator's valid Finalize for round 2 is refused FINALIZE_ORDER and no later round "
-    "can ever be paid",
+    "round, and the two rounds a rollback repaired are never credited, so the coordinator's "
+    "valid Finalize for round 2 is refused FINALIZE_ORDER and no later round can ever be paid "
+    "[fix-lot: audit-integrity-2 ADR0011-P8 R-D]",
 )
 def test_a_round_opened_after_a_two_round_rollback_is_credited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -480,26 +489,60 @@ def test_a_reward_origin_vests_at_its_maturity_once_its_miners_contest_is_closed
     assert service_rig.escrow.balances().conserved()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DefenceMissing,
-    reason="DIB-07+DIB-17: the settlement of a live reward origin is the record written at "
-    "finalize, which no dispute of the miner touches, so the origin of a miner whose contest of "
-    "that round is open (or lost) vests at its maturity like any other and is paid",
+@pytest.mark.parametrize(
+    "ruling",
+    [
+        pytest.param(
+            "open",
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=DefenceMissing,
+                reason="DIB-07+DIB-17: the settlement of a live reward origin is the record "
+                "written at finalize, which no dispute of the miner touches, so the origin of a "
+                "miner whose contest of that round is open vests at its maturity like any other "
+                "and is paid [fix-lot: none (no design yet)]",
+            ),
+        ),
+        pytest.param("lost", id="lost"),
+        pytest.param(
+            "lost-after-a-bond-only-seizure",
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=DefenceMissing,
+                reason="DIB-07+DIB-17: the burn of the unvested reward is part of slashing an "
+                "admission lock (ADR 0010 Decisions for Forge 4), so a conviction that follows a "
+                "bond-only seizure finds no lock, bans the miner and leaves its origin to vest "
+                "and be paid [fix-lot: decision (product choice pending)]",
+            ),
+        ),
+    ],
 )
-@pytest.mark.parametrize("ruling", ["open", "lost"])
 def test_only_the_origin_of_the_disputed_miner_is_held_and_nothing_is_paid_for_it(
     service_rig: ServiceRig, ruling: str
 ) -> None:
-    """DIB-07 / DIB-17 / T-DSP-16: two miners earned an origin in round 0; one of them contests
-    that round and the contest is open or lost. At the maturity round the other miner's origin
-    vests and is paid; the disputed miner's origin does not vest, is not payable and earns the
-    miner no weight, whether the ledger burns it or keeps it frozen."""
+    """DIB-07 / DIB-17 / T-DSP-16: two funded miners earned an origin in round 0; one of them
+    contests that round and the contest is open or lost. At the maturity round the other miner's
+    origin vests and is paid; the disputed miner's origin does not vest, is not payable and earns
+    the miner no weight, whether the ledger burns it or keeps it frozen. A lost contest burns it
+    with the admission bond (admission-hardening, ADR 0010 Part 6), also when a confirmed audit
+    mismatch had already burned that bond (the flow of D47)."""
     # Given: two origins of round 0 maturing at round 5, one miner with a funded contest.
     miners = [service_rig.join(0), service_rig.join(1)]
+    for miner in miners:
+        service_rig.lock_stake(miner)
     origins = seed_round_origins(service_rig, miners)
+    if ruling == "lost-after-a-bond-only-seizure":
+        with service_rig.world.store._tx():
+            service_rig.admission.seize_bond(
+                miners[0].admission_id,
+                reason="AUDIT_MISMATCH",
+                evidence_hash=MISMATCH_EVIDENCE,
+                now=service_rig.net.now,
+            )
+        seized = service_rig.escrow.balances(miners[0].coldkey)
+        assert (seized.admission_locked, seized.burned) == (0, STAKE)
     contest = service_rig.open_contest(miners[0])
-    if ruling == "lost":
+    if ruling.startswith("lost"):
         assert (
             service_rig.refereed(contest.dispute_id, "FRAUD", miners[0].hotkey).status_code == 200
         )
@@ -528,7 +571,7 @@ def test_only_the_origin_of_the_disputed_miner_is_held_and_nothing_is_paid_for_i
     raises=DefenceMissing,
     reason="DIA-25: a LOCK_CONTEST whose dispute never opened has no settlement (the store's "
     "lookup finds no dispute row and no record: UNACCEPTED_SETTLEMENT), so the units stay in "
-    "dispute_locked and the owner has no path back",
+    "dispute_locked and the owner has no path back [fix-lot: none (no design yet)]",
 )
 @pytest.mark.parametrize("opened", [True, False], ids=["refused-second-contest", "never-opened"])
 def test_a_bond_beside_an_open_dispute_that_never_became_one_is_taken_back_alone(
@@ -584,7 +627,7 @@ def test_a_bond_beside_an_open_dispute_that_never_became_one_is_taken_back_alone
                 "runs, whatever its age or its window: the committed reservation of a rollback of "
                 "rounds 0 and 1 that crashed in its repair work blocks the rollback of rounds 1 "
                 "and 2 for ever; reproduced with the reservation such a crash leaves, written by "
-                "the test",
+                "the test [fix-lot: none (no design yet)]",
             ),
         ),
     ],

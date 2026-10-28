@@ -91,6 +91,7 @@ ROLLBACK_CAUSE = (
 REVISION = (
     HTTP + "test_any_change_of_a_dispute_changes_the_revision_a_rollback_repair_must_still_match"
 )
+PUSH_SNAPSHOT = HTTP + "test_a_beacon_push_survives_a_referee_call_registering_a_guard_meanwhile"
 FORGED = HTTP + "test_a_forged_commit_is_never_decided_by_the_referee_and_earns_no_reward"
 DECISION_TABLE = FORGED
 
@@ -604,6 +605,15 @@ MUTANTS = [
         "new": "                    for rows in (records, admissions, intake, origins)",
         "tests": [REVISION],
         "why": "A dispute opened during a repair no longer changes the revision the repair must match.",
+    },
+    {
+        "id": "dsp-beacon-push-walks-the-live-guard-registry",
+        "invariants": ["DIB-24", "DIB-D12"],
+        "path": S,
+        "old": "        for guard in tuple(self._lease_guards_v2.values()):\n            guard.advance(br.round)\n",
+        "new": "        for guard in self._lease_guards_v2.values():\n            guard.advance(br.round)\n",
+        "tests": [PUSH_SNAPSHOT],
+        "why": "The beacon push iterates the live guard registry, so a lease execution that registers its guard meanwhile breaks the push (RuntimeError).",
     },
     {
         "id": "dsp-referee-route-without-the-operator-bearer",

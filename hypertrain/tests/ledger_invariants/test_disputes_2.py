@@ -32,11 +32,13 @@ from .support import service_world
 from .support_disputes import (
     AGREE,
     BOND,
+    WATCH_NEEDS_SIGNATURE,
     Contested,
     contested,
     heavy_modules,
     rollback_raw,
     seed_rounds,
+    watch_feed,
     witnesses,
 )
 
@@ -227,20 +229,12 @@ def test_each_dispute_route_accepts_only_its_intended_principal(tmp_path: Path) 
             "/admin/rollback-preview": 409,
         }
         # The watch feed needs the party's own signature
-        feed = base + "/disputes?party=" + miner.hot.ss58
-
-        def sign_for(key, party):
-            message = f"hypertrain/watch/2|{world.run_id}|{party.ss58}".encode()
-            return {"X-Dispute-Signature": key.sign(message).hex()}
-
-        assert verdict_of(world.client.get(feed)) == (403, "party event access requires signature")
-        refused = world.client.get(feed, headers=sign_for(other.hot, miner.hot))
-        assert verdict_of(refused) == (403, "party event access requires signature")
-        own = world.client.get(feed, headers=sign_for(miner.hot, miner.hot))
+        needs_signature = (403, WATCH_NEEDS_SIGNATURE)
+        assert verdict_of(watch_feed(world, miner.hot, None)) == needs_signature
+        assert verdict_of(watch_feed(world, miner.hot, other.hot)) == needs_signature
+        own = watch_feed(world, miner.hot, miner.hot)
         assert own.status_code == 200 and {e["party"] for e in own.json()} == {miner.hot.ss58}
-        off_subnet = world.client.get(
-            base + "/disputes?party=" + outsider.ss58, headers=sign_for(outsider, outsider)
-        )
+        off_subnet = watch_feed(world, outsider, outsider)
         assert verdict_of(off_subnet) == (403, "the hotkey is not registered on the subnet")
 
 
@@ -493,7 +487,8 @@ def test_the_referee_route_is_closed_to_a_resolved_dispute_and_to_the_absolute_h
     raises=ChallengeError,
     reason=(
         "DIB-15: a dispute closed by timeout leaves the signed 'resolution' record that a "
-        "referee resolution leaves, so rollback and the ADR can use it"
+        "referee resolution leaves, so rollback and the ADR can use it "
+        "[fix-lot: decision (product choice pending)]"
     ),
 )
 def test_a_timeout_leaves_the_same_durable_resolution_record_as_a_referee_resolution(
@@ -692,18 +687,12 @@ def test_any_change_of_a_dispute_changes_the_revision_a_rollback_repair_must_sti
         assert store._rollback_snapshot_v2(run_id) not in (opened, paused)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=RuntimeError,
-    reason=(
-        "DIB-24+DIB-D12: the beacon push iterates the lease-guard registry that a referee call "
-        "registers into from another thread, without a copy or the store lock [candidate]"
-    ),
-)
 def test_a_beacon_push_survives_a_referee_call_registering_a_guard_meanwhile(
     tmp_path: Path,
     # Covers DIB-24, DIB-D12.
 ) -> None:
+    # A push walks a snapshot of the lease-guard registry (d030605f, ADR 0011 Part 2): a call that
+    # registers its guard while the push runs neither breaks the push nor is lost.
     with service_world(tmp_path) as world:
         store, net = world.store, world.network
         registered = threading.Event()
@@ -734,8 +723,7 @@ def test_a_beacon_push_survives_a_referee_call_registering_a_guard_meanwhile(
         store._lease_guards_v2["racing"] = Racing()
         # When the registry changes size while the push walks it
         net.push(net.now + 1)
-        # Then (desired): the beacon is accepted, whatever another call registers, and the
-        # registration lands
+        # Then: the beacon is accepted, whatever another call registers, and the registration lands
         assert registered.wait(10)
         racer.join(10)
         assert not racer.is_alive()
