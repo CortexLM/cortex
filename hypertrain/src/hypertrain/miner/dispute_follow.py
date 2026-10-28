@@ -195,20 +195,20 @@ def network_watch(
         party or replay_party,
     )
 
-    def now_round() -> int:
+    def beacon() -> int:
         return int(miner.api.call("GET", miner.url)["now_round"])
 
     return DisputeWatch(
         miner.directory / "watch",
         miner.kp,
         HttpDisputeTransport(
-            miner.api.c, miner.api.base + miner.url, miner.kp, miner.run_id, now_round
+            miner.api.c, miner.api.base + miner.url, miner.kp, miner.run_id, beacon
         ),
         run_id=miner.run_id,
         coordinator=miner.manifest.training.coord_pubkey,
         party=pubs.party,
         state_serve=pubs.serve,
-        beacon=now_round,
+        beacon=beacon,
         jobs=pubs.job,
     )
 

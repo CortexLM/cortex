@@ -1898,7 +1898,13 @@ def _public_watch_fastapi_tls(network, monkeypatch):
     from hypertrain.protocol import envelope_v2
     from hypertrain.protocol.hashing import sha256_hex
     from hypertrain.protocol.jcs import canonicalize
-    from hypertrain.protocol.messages_v2 import BisectV2, DisputeV2, EscrowLock, IslandJobV1
+    from hypertrain.protocol.messages_v2 import (
+        REQUEST_HORIZON,
+        BisectV2,
+        DisputeV2,
+        EscrowLock,
+        IslandJobV1,
+    )
 
     hot, run_id = fixtures.HOT[0], network.manifest.run_id()
     escrow, _, disputes = network.store._services(run_id)
@@ -2055,12 +2061,11 @@ def _public_watch_fastapi_tls(network, monkeypatch):
             )
             assert opened.status_code == 200, opened.text
             before = escrow.balances()
-
-            def asked(key, expires=network.now + 20, **fields):
-                body = {"party": hot.ss58, "cursor": 0, "wait_seconds": 0, **fields}
-                return network.signed(key, "WatchRequest", body, expires)
-
-            events = client.post("/disputes", json=asked(hot))
+            poll = {"party": hot.ss58, "cursor": 0, "wait": 0}
+            expiry = network.now + REQUEST_HORIZON
+            events = client.post(
+                "/disputes/watch", json=network.signed(hot, "DisputeWatchRequest", poll, expiry)
+            )
             assert events.status_code == 200, events.text
             event = WatchEvent.model_validate(events.json()[0])
             ack = EventAck(
@@ -2076,10 +2081,9 @@ def _public_watch_fastapi_tls(network, monkeypatch):
                 t: [tuple(r) for r in network.store._db.execute(f'SELECT * FROM "{t}"')]
                 for t in tables
             }
-            assert client.get("/disputes", params={"party": hot.ss58}).status_code == 405
-            assert client.post("/disputes", json=asked(fixtures.COORD)).status_code == 403
-            wrong_run = {**asked(hot), "run_id": "ff" * 32}
-            assert client.post("/disputes", json=wrong_run).status_code == 403
+            assert client.post("/disputes/watch").status_code == 403
+            wrong = envelope_v2.seal(hot, "DisputeWatchRequest", "ff" * 32, poll, expiry)
+            assert client.post("/disputes/watch", json=wrong).status_code == 403
             assert client.post("/disputes/ack", json=ack.body()).status_code == 409
             assert {
                 t: [tuple(r) for r in network.store._db.execute(f'SELECT * FROM "{t}"')]

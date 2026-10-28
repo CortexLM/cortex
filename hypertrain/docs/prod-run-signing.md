@@ -159,7 +159,7 @@ Record the printed `run_id`: S3-S7 all bind it.
 3. Stage `<out>/policy-*.json` **and** `<out>/relay-registry.json` in the challenge object store,
    then POST `<out>/manifest-envelope.json` to `/v2/admin/runs` with the operator bearer.
    `launch_cuda_run.sh` copies only `policy-*.json` and would miss the registry. [V]
-   `challenge/store.py:2276-2289`, `scripts/launch_cuda_run.sh:219-223`
+   `challenge/store.py:2276-2289`, `scripts/launch_cuda_run.sh:222-226`
 
 Check: `GET /challenge/hypertrain/v2/runs/<run_id>` returns the envelope; the run's
 `execution-backend` record says `cuda`; `hypertrain-miner status-v2` with `run_id` and
@@ -197,7 +197,11 @@ eligible. [V] `challenge/store.py:4159-4194`, `:2618-2627`
 K_coord envelopes for that run: the `RelayRegistryV1` (S1's `relay-registry.json`) and a
 `RelayNetworkManifest {run_id, base_manifest_hash, registry_hash, specs_hash,
 assignment_policy "master-observed-median3-v1"}`. Plus `relay_id`, `region`, `active_key`,
-`signing_files`, `observer_public_keys` and the backing store. [V] `relay/app.py:49-65`,
+`signing_files`, `observer_public_keys` and the backing store, and optionally `max_uploads`
+(positive integer, default absent: the count of held uploads is unbounded and only the journal
+budget of 12 MiB limits a relay; `docs/network-v2.md`). `master_url` must be reachable from the relay over
+credential-free HTTPS for `/v2/relay-receipts` and for the public, read-only
+`GET /v2/runs/<run_id>/relay-settlements/<grant_hash>` that a release is checked against. [V] `relay/app.py:49-67`,
 `protocol/relay_messages.py:88-93`
 
 `base_manifest_hash` must be `training_hash()` of the manifest, **not** the run_id: the master
@@ -208,7 +212,8 @@ the run_id and is not usable for production. The tools used for the TEST relays
 
 Check: the relay starts only if both envelopes are signed by `master_public` for `run_id`, the
 registry digest and specs hash match, and neither envelope has expired. Then
-`curl -fsS https://<relay host>/readyz` returns 200. [V] `relay/app.py:201-231`
+`curl -fsS https://<relay host>/readyz` returns 200; its body reports `journal_fill` and
+`alarm` (`docs/network-v2.md`). [V] `relay/app.py:201-231`
 
 ## S7 `dispatch.json` (runbook step 6)
 

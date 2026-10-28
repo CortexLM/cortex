@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
+import logging
 import os
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
@@ -41,7 +44,7 @@ from hypertrain.protocol.envelope_v2 import load_json
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import KeyError_, Keypair, decode_hotkey
 from hypertrain.protocol.messages import QUICKNET_GENESIS
-from hypertrain.protocol.messages_v2 import ChallengeRequest, JobRequest, WatchRequest
+from hypertrain.protocol.messages_v2 import ChallengeRequest, JobRequest
 from hypertrain.protocol.server_keys import SignedGrant, SignedRevoke
 from hypertrain.public_api import create_public_app
 
@@ -52,6 +55,19 @@ OWNER_REQUEST_MAX_ROUNDS = 100  # a captured owner request replays for at most 5
 HEX64 = r"^[0-9a-f]{64}$"
 SS58 = r"^[1-9A-HJ-NP-Za-km-z]{46,50}$"
 Auth = Annotated[str | None, Header()]
+# Dispute watchers pin a worker thread for up to 30 s: they get their own pool, never the shared
+# one. Per party: 2, so a restarted watcher overlaps the last poll of its predecessor (an
+# abandoned poll keeps its thread until it times out). Total: above max_roster (32) plus the
+# pinned auditors, referees and coordinator, one poll each. Any hotkey registered on the subnet
+# may poll too: 64 of them with two parked polls each would fill the pool, and the pinned roles
+# the disputes wait for would be refused until a poll timed out, for as long as the attacker kept
+# re-parking. So the polls held by parties that are not pinned roles share WATCH_MINERS, half the
+# pool; the roles are bounded by the pool alone and always keep the other half.
+WATCH_PER_PARTY = 2
+WATCH_TOTAL = 128
+WATCH_MINERS = 64
+# The signed request that heads an object upload is a few hundred bytes; refuse a longer one.
+UPLOAD_HEAD_MAX = 4096
 
 
 class _Strict(BaseModel):
@@ -143,6 +159,9 @@ class Config:
     netuid: int = 100
     role_dispatch_file: Path | None = None
     cuda_executor_file: Path | None = None
+    # Seconds between two passes that release the relay custody the master owes and extend the
+    # custody an open dispute pins (ADR 0014 Part 6.3, 6.4); 0 runs none. from_env turns it on.
+    relay_lifecycle_interval: float = 0.0
 
     @classmethod
     def from_env(cls) -> Config:
@@ -170,6 +189,7 @@ class Config:
             netuid=int(env("CHALLENGE_NETUID", "100")),
             role_dispatch_file=path("HYPERTRAIN_ROLE_DISPATCH"),
             cuda_executor_file=path("HYPERTRAIN_CUDA_EXECUTOR"),
+            relay_lifecycle_interval=float(env("HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL", "120")),
         )
 
 
@@ -324,6 +344,17 @@ def _dispatcher(config: Config) -> role_dispatch.RoleLaunch | None:
     return None
 
 
+async def relay_lifecycle_forever(store: ChallengeStore, interval: float) -> None:
+    """The master's side of unattended relay custody; a failed pass is logged and tried again."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with httpx.AsyncClient(follow_redirects=False, timeout=30) as client:
+                await store.release_due_v2(client)
+        except Exception:
+            logging.getLogger(__name__).exception("relay lifecycle pass failed")
+
+
 def create_app(
     config: Config,
     *,
@@ -372,6 +403,32 @@ def create_app(
     app.state.metagraph = metagraph
     server_keys = ServerKeys(config.state_dir / "server_keys.db")
     app.state.server_keys = server_keys
+    watch_pool = ThreadPoolExecutor(WATCH_TOTAL, thread_name_prefix="dispute-watch")
+    watching: dict[str, int] = {}
+    watching_miners = 0  # the polls of `watching` held by parties that are not pinned roles
+    watching_lock = threading.Lock()
+
+    def claim_watch(party: str, pinned: bool) -> None:
+        nonlocal watching_miners
+        with watching_lock:
+            if (
+                sum(watching.values()) >= WATCH_TOTAL
+                or watching.get(party, 0) >= WATCH_PER_PARTY
+                or (not pinned and watching_miners >= WATCH_MINERS)
+            ):
+                raise ChallengeError(429, "too many concurrent dispute polls")
+            watching[party] = watching.get(party, 0) + 1
+            if not pinned:
+                watching_miners += 1
+
+    def release_watch(party: str, pinned: bool) -> None:
+        nonlocal watching_miners
+        with watching_lock:
+            watching[party] -= 1
+            if not watching[party]:
+                del watching[party]
+            if not pinned:
+                watching_miners -= 1
 
     async def not_revoked(hotkey: str) -> None:
         if await run(server_keys.is_revoked, hotkey):
@@ -388,16 +445,22 @@ def create_app(
         from hypertrain.protocol.messages_v2 import DisputePolicyV2
 
         hosted = store.for_run(run_id)
-        manifest = hosted._run_v2(run_id)
+        with hosted._lock:  # one shared connection: an unlocked read races the writers
+            manifest = hosted._run_v2(run_id)
         policy = DisputePolicyV2.model_validate_json(
             hosted.objects.get(manifest.network.dispute_policy_hash)
         )
         return {*manifest.training.auditors, manifest.training.coord_pubkey, *policy.referees}
 
-    async def party_member(run_id: str, party: str) -> None:
-        """Shared dispute routes: pinned auditors/referees/coordinator, else subnet miners."""
-        if party not in await run(protocol_roles, run_id):
-            await subnet_member(party)
+    async def party_member(run_id: str, party: str) -> bool:
+        """Shared dispute routes: pinned auditors/referees/coordinator, else subnet miners.
+
+        True for a pinned role: a caller that needs to know does not look the roles up again.
+        """
+        if party in await run(protocol_roles, run_id):
+            return True
+        await subnet_member(party)
+        return False
 
     def locked_now() -> int:
         with store._lock:
@@ -408,8 +471,23 @@ def create_app(
 
         return parse_envelope(raw).signer
 
+    @app.on_event("startup")
+    async def start_relay_lifecycle() -> None:
+        if config.relay_lifecycle_interval > 0:
+            app.state.relay_lifecycle = asyncio.create_task(
+                relay_lifecycle_forever(store, config.relay_lifecycle_interval)
+            )
+
+    @app.on_event("shutdown")
+    async def stop_relay_lifecycle() -> None:
+        if task := getattr(app.state, "relay_lifecycle", None):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
     @app.on_event("shutdown")
     def close_notifications() -> None:
+        watch_pool.shutdown(wait=False, cancel_futures=True)
         store.close_v2_notifications()
 
     async def v2_raw(request: Request) -> bytes:
@@ -674,38 +752,68 @@ def create_app(
         admin(authorization)
         return await run(store.for_run(run_id).open_round_v2, run_id, await v2_raw(request))
 
-    @app.put("/v2/runs/{run_id}/objects/{sha256}")
-    async def put_object_v2(
-        run_id: str,
-        sha256: str,
-        request: Request,
-        x_hotkey: Annotated[str, Header()],
-        x_object_signature: Annotated[str, Header()],
-    ) -> Any:
-        from hypertrain.protocol.keys import verify
+    @app.post("/v2/runs/{run_id}/objects/{sha256}")
+    async def put_object_v2(run_id: str, sha256: str, request: Request) -> Any:
+        from hypertrain.protocol import envelope_v2
+        from hypertrain.protocol.messages_v2 import REQUEST_HORIZON, ObjectUploadRequest
 
-        await subnet_member(x_hotkey)
+        # The body is a frame: 4 bytes (big endian) giving the length of the uploader's signed
+        # ObjectUploadRequest, that envelope, then the object. A signature cannot travel in a
+        # header (the master proxy drops them), and the envelope binds uploader, sha256 and
+        # length, so everything is decided before a byte of the object is read.
+        stream = request.stream()
+        buffer, length = bytearray(), -1
+        async for chunk in stream:
+            buffer.extend(chunk)
+            if len(buffer) >= 4:
+                length = int.from_bytes(buffer[:4], "big")
+                if length > UPLOAD_HEAD_MAX or len(buffer) >= 4 + length:
+                    break
+        signed, rest = bytes(buffer[4 : 4 + length]), buffer[4 + length :]
+        # Nothing in the store is needed to check a signature: a forged one never waits for the
+        # store lock, and a registered hotkey is only a public string.
+        valid = 0 <= length <= UPLOAD_HEAD_MAX and len(buffer) >= 4 + length
+        if valid:
+            try:
+                envelope = envelope_v2.parse_envelope(signed)
+                upload = ObjectUploadRequest.model_validate(envelope.body)
+                valid = upload.sha256 == sha256 and envelope_v2.verify_envelope(signed)
+            except (EnvelopeError, ValidationError):
+                valid = False
+        if not valid:
+            raise ChallengeError(403, "object signature mismatch")
+        await subnet_member(envelope.signer)
         hosted = store.for_run(run_id)
-        with hosted._lock:
-            hosted._run_v2(run_id)
-            hosted._owner_v2(run_id, x_hotkey)
+
+        def admitted() -> tuple[int, int]:
+            with hosted._lock:
+                hosted._run_v2(run_id)
+                hosted._owner_v2(run_id, envelope.signer)
+                now = hosted._now(hosted._db)
+            return now, hosted._services(run_id)[1].policy.artifact_limits.max_object_bytes
+
+        # Admission objects are separately bounded by the pinned policy.
+        now, limit = await run(admitted)
         try:
-            valid = verify(
-                decode_hotkey(x_hotkey),
-                f"hypertrain/object/2|{run_id}|{sha256}".encode(),
-                bytes.fromhex(x_object_signature),
-            )
-        except (ValueError, KeyError_):
+            envelope_v2.Intake(run_id).accept(signed, now)
+            valid = envelope.exp_drand <= now + REQUEST_HORIZON
+        except EnvelopeError:
             valid = False
         if not valid:
             raise ChallengeError(403, "object signature mismatch")
-        # Admission objects are separately bounded by the pinned policy.
-        raw = bytearray()
-        limit = hosted._services(run_id)[1].policy.artifact_limits.max_object_bytes
-        async for chunk in request.stream():
-            raw.extend(chunk)
-            if len(raw) > limit:
-                raise ChallengeError(413, "object exceeds pinned admission limit")
+        if upload.size > limit:
+            raise ChallengeError(413, "object exceeds pinned admission limit")
+        raw = bytearray(rest)
+        # The signed length is the cap: past it, do not wait for the rest of the body.
+        while len(raw) <= upload.size:
+            try:
+                raw.extend(await anext(stream))
+            except StopAsyncIteration:
+                break
+        if len(raw) > upload.size:
+            raise ChallengeError(413, "object longer than its signed size")
+        if len(raw) < upload.size:
+            raise ChallengeError(422, "object length differs")
         if hashlib.sha256(raw).hexdigest() != sha256:
             raise ChallengeError(422, "object hash differs")
         key = await run(hosted.objects.put, bytes(raw))
@@ -722,11 +830,14 @@ def create_app(
     @app.get("/v2/runs/{run_id}/objects/{sha256}")
     async def object_v2(run_id: str, sha256: str) -> Response:
         hosted = store.for_run(run_id)
-        hosted._run_v2(run_id)
+
+        def read() -> bytes:
+            with hosted._lock:  # one shared connection: only the run lookup needs the lock
+                hosted._run_v2(run_id)
+            return hosted.objects.get(sha256)
+
         # Published run datasets/state are public, content identity still verifies.
-        return Response(
-            await run(hosted.objects.get, sha256), media_type="application/octet-stream"
-        )
+        return Response(await run(read), media_type="application/octet-stream")
 
     for action in ("accept", "commit", "delta"):
 
@@ -798,6 +909,10 @@ def create_app(
             raw = await v2_raw(request)
             hosted = store.for_run(relay_envelope.parse_envelope(raw).run_id)
             return await hosted.relay_receipt_v2(raw, transport)
+
+    @app.get("/v2/runs/{run_id}/relay-settlements/{grant_hash}")
+    async def relay_settlement_view_v2(run_id: str, grant_hash: str) -> Any:
+        return await run(store.for_run(run_id).relay_settlement_view_v2, run_id, grant_hash)
 
     @app.get("/v2/runs/{run_id}/admin/relay-settlement/{grant_hash}")
     async def relay_settlement_v2(run_id: str, grant_hash: str, authorization: Auth = None) -> Any:
@@ -892,30 +1007,59 @@ def create_app(
         admin(authorization)
         return await run(store.for_run(run_id).relay_drain_v2, run_id, relay_id)
 
-    @app.post("/v2/runs/{run_id}/disputes")
-    async def events_v2(run_id: str, request: Request) -> Any:
-        """The party's events. The request is the party's own signed envelope in the BODY (the
-        master proxy forwards no signature header): its expiry is bounded like an owner request
-        and the signed body names the party, the cursor and the wait."""
-        from hypertrain.protocol import envelope_v2
+    @app.api_route(
+        "/v2/runs/{run_id}/disputes",
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    )
+    async def retired_dispute_watch() -> JSONResponse:
+        # The header-signed watch, retired for POST .../disputes/watch (a header does not cross
+        # the master proxy). 405 like every retired route, whatever the method; no credential is
+        # read, the store is not touched. Allow is empty on purpose: the replacement is on another
+        # path, so this one has no method left to allow.
+        return JSONResponse(
+            {"detail": "retired: POST /v2/runs/{run_id}/disputes/watch with a signed body"},
+            status_code=405,
+            headers={"Allow": ""},
+        )
 
+    @app.post("/v2/runs/{run_id}/disputes/watch")
+    async def events_v2(run_id: str, request: Request) -> Any:
+        from hypertrain.protocol.envelope_v2 import Intake, parse_envelope
+        from hypertrain.protocol.messages_v2 import REQUEST_HORIZON, DisputeWatchRequest
+
+        hosted = store.for_run(run_id)
+
+        def beacon_now() -> int:
+            with hosted._lock:
+                return hosted._now(hosted._db)
+
+        now = await run(beacon_now)
+        if now < 1:
+            raise ChallengeError(503, "no verified beacon")
+        # The poll is authenticated by its signed body, not by a header the master proxy would
+        # drop. Nothing is reserved (a poll repeats): the expiry alone ends a captured request,
+        # and the master refuses one signed further ahead than the horizon.
         try:
             raw = await v2_raw(request)
-            now = await run(locked_now)
-            if envelope_v2.parse_envelope(raw).exp_drand > now + OWNER_REQUEST_MAX_ROUNDS:
-                raise ExpiredError("expiry too far ahead")
-            asked = envelope_v2.Intake(run_id, {"WatchRequest": lambda _: True}).accept(raw, now)
-            valid = isinstance(asked, WatchRequest) and asked.party == signer(raw)
-        except EnvelopeError:
+            envelope = parse_envelope(raw)
+            poll = DisputeWatchRequest.model_validate(envelope.body)
+            Intake(run_id, {"DisputeWatchRequest": poll.party.__eq__}).accept(raw, now)
+            valid = envelope.exp_drand <= now + REQUEST_HORIZON
+        except (EnvelopeError, ValidationError):
             valid = False
         if not valid:
-            raise ChallengeError(403, "party event access requires its signed request")
-        assert isinstance(asked, WatchRequest)
-        await party_member(run_id, asked.party)
-        _, _, disputes = await run(store.for_run(run_id)._services, run_id)
-        events = await run(
-            lambda: disputes.events(asked.party, asked.cursor, timeout=asked.wait_seconds)
-        )
+            raise ChallengeError(403, "party event access requires signature")
+        pinned = await party_member(run_id, poll.party)
+        _, _, disputes = await run(hosted._services, run_id)
+        claim_watch(poll.party, pinned)
+        try:
+            future = watch_pool.submit(disputes.events, poll.party, poll.cursor, timeout=poll.wait)
+        except BaseException:
+            release_watch(poll.party, pinned)
+            raise
+        # The slot lasts as long as the thread: a client that disconnects does not stop the wait.
+        future.add_done_callback(lambda _: release_watch(poll.party, pinned))
+        events = await asyncio.wrap_future(future)
         return [e.model_dump(mode="json") for e in events]
 
     @app.post("/v2/runs/{run_id}/disputes/ack")

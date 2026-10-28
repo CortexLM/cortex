@@ -517,18 +517,26 @@ def test_relay_custody_of_a_retired_round_can_be_settled(network, state, pinned)
         status = {**store._record_v2(run, "finality", "0"), "unresolved_disputes": 1}
         with store._tx():
             store._put_record_v2(run, "finality", "0", status)
+    horizon = 900
     with store._tx():
         store._put_record_v2(run, "grant", grant_hash, {"body": {"w": 0}})
+        store._put_record_v2(
+            run,
+            "relay-receipt",
+            grant_hash,
+            {"body": {"grant_hash": grant_hash, "retain_until": horizon}},
+        )
 
-    # When / Then: the closure of the retirement is the finality of the custody, and an open
-    # dispute or an unfinished round still pins it
+    # When / Then: the closure of the retirement is the finality of the custody, the custody
+    # horizon stands in for the beacons (nothing vests), and an open dispute or an unfinished round
+    # still pins it
     if pinned:
         with pytest.raises(ChallengeError, match="pinned by unresolved finality") as refused:
             store.relay_settlement_v2(run, grant_hash)
         assert refused.value.status == 409
     else:
-        beacon = done["retired_beacon"]
-        vesting = beacon + network.manifest.training.verify.E_vest_rounds
         assert store.relay_settlement_v2(run, grant_hash) == asdict(
-            Settlement(done["evidence_hash"], beacon, sha256_hex(canonicalize([])), beacon, vesting)
+            Settlement(
+                done["evidence_hash"], horizon, sha256_hex(canonicalize([])), horizon, horizon
+            )
         )

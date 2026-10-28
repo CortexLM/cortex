@@ -82,7 +82,7 @@ def rotate_hotkey(n) -> None:
     assert response.status_code == 200, response.text
 
 
-@pytest.mark.parametrize("fault", ["rotated_hotkey", "object_missing", "after_credit", "coded"])
+@pytest.mark.parametrize("fault", ["object_missing", "after_credit", "coded"])
 def test_a_stuck_origin_does_not_stop_the_beacon_route(
     shadow_acceptance,  # noqa: F811
     monkeypatch,
@@ -100,10 +100,7 @@ def test_a_stuck_origin_does_not_stop_the_beacon_route(
     running_lease(n, run_id, expires=maturity)
     mature_id = sha256_hex(f"ht-mature/2|{run_id}|{shadow}".encode())
     real_event, real_mature = EscrowV2._event, EscrowV2.mature
-    if fault == "rotated_hotkey":
-        rotate_hotkey(n)  # the original commit is no longer signed by the admission's hotkey
-        expected = "UnauthorizedSigner"
-    elif fault == "object_missing":
+    if fault == "object_missing":
         n.store.objects._path(body["auditor_receipt"]["body"]["job_hash"]).unlink()
         expected = "ObjectNotFound"
     elif fault == "after_credit":
@@ -212,3 +209,36 @@ def test_an_origin_waiting_on_a_dispute_is_not_a_failure(
     n.push(accepted["mature_at"])
     # Then: it stays pending without a failure record.
     assert failure(n, run_id, accepted["origin_ids"][0]) is None
+
+
+@pytest.mark.parametrize("rotated", ["before_the_reward", "after_the_reward"])
+def test_a_rotated_hotkey_does_not_freeze_a_shadow_reward(
+    shadow_acceptance,  # noqa: F811
+    rotated: str,
+):
+    # Given: a shadow reward for HOT[0], and the coldkey moves the admission to another hotkey
+    # either before the operator accepts the reward or after. The reward follows the coldkey: its
+    # custody was signed by a hotkey of the same admission.
+    n, identity, body = shadow_acceptance
+    run_id = n.manifest.run_id()
+    escrow = n.store._services(run_id)[0]
+    if rotated == "before_the_reward":
+        rotate_hotkey(n)
+    accepted = accept(n, identity, body)
+    maturity, shadow = accepted["mature_at"], accepted["origin_ids"][0]
+    if rotated == "after_the_reward":
+        rotate_hotkey(n)
+    before = escrow.balances(fixtures.COLD[0].ss58)
+    # When: the beacon reaches the maturity round.
+    at_round(n, maturity)
+    response = n.client.post(
+        "/v1/admin/beacon", json=fixtures.fixture_beacon(maturity), headers=fixtures.admin()
+    )
+    # Then: the units vested into the coldkey's free balance; nothing is stuck or journaled.
+    assert response.status_code == 200, response.text
+    after = escrow.balances(fixtures.COLD[0].ss58)
+    assert after.available - before.available == escrow.policy.round_reward_units
+    assert after.reward_pending == before.reward_pending - escrow.policy.round_reward_units
+    assert failure(n, run_id, shadow) is None
+    escrow.verify()
+    assert escrow.balances().conserved()

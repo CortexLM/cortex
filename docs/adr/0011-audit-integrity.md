@@ -1087,8 +1087,9 @@ the table as covering them.
     refuses an anchor for a retired round, so a late MATCH cannot replace a carried one; completed
     verdicts stay as evidence. A dispute is not waited for: an open one leaves the round retired but not closed until Part 1 closes it.
     `relay_settlement_v2` answers for the grants of a retired round (its finality hash is the evidence
-    hash, its finality beacon `retired_beacon`, its vesting `retired_beacon + E_vest_rounds`; an open
-    dispute still pins it). The honest bonds are released by
+    hash; no finality was written and nothing vests, so the custody horizon stands in for the beacons,
+    ADR 0014 Part 6.4; an open dispute still pins it, and a grant with no receipt has no custody to
+    release). The honest bonds are released by
     `lock_settlement` as soon as the round is closed.
 11. **The next round.** The operator opens `w + 1` with `prev_final_hash = retired[w].evidence_hash`
     (`live_operator open` reads it when round `w` has no `finalize`). It needs four eligible members that

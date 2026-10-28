@@ -188,11 +188,12 @@ decision 2, and a caller identity the service cannot verify); accepting the admi
 
 The same rule covers the two other routes that sign in a header and that are not part of
 admission. `PUT /v2/runs/{run_id}/objects/{sha256}` (`X-Hotkey` and `X-Object-Signature`,
-`miner/core.py:1042`) was assigned to the lot `escrow-relay-fixes` and is not converted in this
-tree: it does not work through the proxy until that lot lands. `GET /v2/runs/{run_id}/disputes`
-(`x-dispute-signature`) was assigned to the lot `audit-integrity-2` and is converted there: it
-is now `POST /v2/runs/{run_id}/disputes` with a `WatchRequest` signed in the body (the `GET` answers
-405), the same pattern as the challenge and job requests of this series.
+`miner/core.py:1042`) was assigned to the lot `escrow-relay-fixes` and is converted there: a `POST`
+whose body is a signed `ObjectUploadRequest` (ADR 0014 Part 8). `GET /v2/runs/{run_id}/disputes`
+(`x-dispute-signature`) was assigned to the lot `audit-integrity-2`, which converted it; the lot
+`escrow-relay-fixes` converted it as well (ADR 0014 Part 8) and its version is the one kept: it is
+now `POST /v2/runs/{run_id}/disputes/watch` with a `DisputeWatchRequest` signed in the body (the
+`GET` answers 405 whatever the method), like the challenge and job requests of this series.
 
 ### 4. Dead unfunded joins release their places; an optional per-prefix cap (RTA-02)
 

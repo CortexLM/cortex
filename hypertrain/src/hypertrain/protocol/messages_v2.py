@@ -588,16 +588,6 @@ class JobRequest(WireModel):
     admission_id: Hex64
 
 
-class WatchRequest(WireModel):
-    """A dispute party polls its events, signed by that party in the body of the request: the
-    master proxy forwards no signature header. The envelope expiry bounds a replay of a capture;
-    the wait is whole seconds so that the canonical body carries no float."""
-
-    party: SS58
-    cursor: Annotated[StrictInt, Field(ge=0, le=2**53 - 1)]
-    wait_seconds: Annotated[StrictInt, Field(ge=0, le=30)]
-
-
 class WorkProof(WireModel):
     admission_id: Hex64
     challenge_hash: Hex64
@@ -1007,6 +997,27 @@ class ResolutionV2(WireModel):
         return self
 
 
+# A request signed in the body of an HTTP request (never in a header: the master proxy drops
+# those) is a bearer until it expires, so the master refuses one signed further ahead than this
+# many rounds of its own (about a minute): a captured request cannot be replayed for longer.
+REQUEST_HORIZON = 20
+
+
+class DisputeWatchRequest(WireModel):
+    """One long poll of a party's dispute events, signed by that party."""
+
+    party: SS58
+    cursor: U64
+    wait: Annotated[StrictInt, Field(ge=0, le=30)]
+
+
+class ObjectUploadRequest(WireModel):
+    """An admitted miner's upload of one object: binds the uploader, the sha256 and the length."""
+
+    sha256: Hex64
+    size: U64
+
+
 MESSAGE_TYPES_V2: dict[str, type[BaseModel]] = {
     cls.__name__: cls
     for cls in (
@@ -1023,7 +1034,6 @@ MESSAGE_TYPES_V2: dict[str, type[BaseModel]] = {
         JoinChallenge,
         ChallengeRequest,
         JobRequest,
-        WatchRequest,
         WorkProof,
         RotateRequest,
         AdmissionPolicyV2,
@@ -1045,6 +1055,8 @@ MESSAGE_TYPES_V2: dict[str, type[BaseModel]] = {
         DisputeV2,
         BisectV2,
         ResolutionV2,
+        DisputeWatchRequest,
+        ObjectUploadRequest,
         Receipt,
         StateServe,
         ReplayVerdict,

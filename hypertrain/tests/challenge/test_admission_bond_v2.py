@@ -713,7 +713,7 @@ def test_seize_bond_refuses_an_unknown_reason_and_malformed_evidence(world: Worl
 
 
 def test_seizure_cannot_be_blocked_by_registering_its_operation_id(world: World) -> None:
-    # Given: the owner registers, as a self-transfer, the id a predictable derivation would use
+    # Given: the owner registers, as a transfer, the id a predictable derivation would use
     lock = world.bond()
     squat = EscrowTransfer(
         operation_id=sha256_hex(canonicalize([lock.operation_id, "settle"])),
@@ -722,7 +722,7 @@ def test_seizure_cannot_be_blocked_by_registering_its_operation_id(world: World)
         origin_ids=[world.origin],
         admission_id=None,
         dispute_id=None,
-        recipient=COLD.ss58,
+        recipient=HOT.ss58,
     )
     world.a.escrow.transfer(squat, signer=COLD.ss58)
     # When / Then: the seizure still goes through

@@ -19,6 +19,7 @@ import pytest
 
 from hypertrain.auditor.island_bisect import RefereeEvidence
 from hypertrain.beacon.core import BeaconRound
+from hypertrain.challenge.admission_store import AdmissionStore
 from hypertrain.challenge.store import ESCROW_ID_NAMESPACE_META, ChallengeError, ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.ledger import Params
@@ -106,6 +107,7 @@ def hosted(tmp_path, actual_reward, monkeypatch):
         (s.manifest.run_id(), s.manifest.model_dump_json(), "{}"),
     )
     monkeypatch.setattr(store, "_services", lambda run_id: (escrow, None, None))
+    AdmissionStore(escrow)  # the tables the real services create; the pay path reads them
     store._services_v2[s.manifest.run_id()] = (escrow, Admissions(), Notified())
     shadow = E.sign_actual_shadow(reward, E.reserve_actual_shadow(escrow, evidence))
     escrow.reward_finalize(shadow, replace(evidence, shadow=True))

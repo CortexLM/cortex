@@ -6,6 +6,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import logging
 import os
 import tempfile
 import time
@@ -17,7 +18,7 @@ import anyio
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from hypertrain.beacon.core import BeaconError, BeaconRound, round_at_or_after
 from hypertrain.beacon.drand import QUICKNET_GENESIS, QUICKNET_PERIOD, DrandQuicknet
@@ -34,8 +35,13 @@ from hypertrain.protocol.relay_messages import (
     UploadChunkManifest,
     UploadGrant,
 )
-from hypertrain.relay.client import forward_receipt, http_client
+from hypertrain.relay.client import forward_receipt, http_client, settlement_from_master
 from hypertrain.relay.core import Relay, RelayError
+
+# Seconds between two passes that delete released or lapsed custody and prune its records.
+COLLECT_INTERVAL = 300
+# Storage faults only: disk I/O or timeout, store refusal, S3 transport, an unparseable journal.
+_STORAGE_DOWN = (OSError, StoreError, httpx.HTTPError, ValidationError)
 
 
 class AcceptRequest(BaseModel):
@@ -63,6 +69,8 @@ class RelayConfig(BaseModel):
     s3_prefix: str = "relay/"
     s3_region: str = "auto"
     local_backing: str | None = None
+    # Omitted when unset, so a relay.json that does not use it still loads in an older image.
+    max_uploads: int | None = Field(None, ge=1, exclude_if=lambda v: v is None)
 
 
 class _Fetch:
@@ -182,11 +190,31 @@ def create_app(relay: Relay, drain_token: str) -> FastAPI:
 
     @app.get("/readyz")
     async def ready() -> JSONResponse:
+        log = logging.getLogger(__name__)
         try:
             value = await relay.ready()
         except RelayError:
             value = False
-        return JSONResponse({"ready": value}, status_code=200 if value else 503)
+        except _STORAGE_DOWN as error:
+            log.warning("relay readiness probe failed: %s", type(error).__name__)
+            value = False
+        # The fill fields stay in the answer, null when the journal cannot be read, so a client
+        # that parses them sees one shape whether or not storage is up.
+        fill: dict[str, object]
+        try:
+            report = await relay.journal_fill()
+        except _STORAGE_DOWN as error:
+            log.warning("relay journal fill unreadable: %s", type(error).__name__)
+            value = False
+            fill = dict.fromkeys(("journal_bytes", "journal_budget", "journal_fill", "alarm"))
+        else:
+            fill = {
+                "journal_bytes": report.used,
+                "journal_budget": report.budget,
+                "journal_fill": round(report.ratio, 4),
+                "alarm": report.alarm,
+            }
+        return JSONResponse({"ready": value, **fill}, status_code=200 if value else 503)
 
     @app.get("/probe")
     async def probe() -> JSONResponse:
@@ -272,6 +300,16 @@ def create_app(relay: Relay, drain_token: str) -> FastAPI:
     return app
 
 
+async def collect_forever(relay: Relay) -> None:
+    """Rotate custody out of the journal without an operator; one failed pass ends nothing."""
+    while True:
+        await anyio.sleep(COLLECT_INTERVAL)
+        try:
+            await relay.collect()
+        except (RelayError, StoreError, httpx.HTTPError, OSError) as error:
+            logging.getLogger(__name__).warning("relay collect deferred: %s", type(error).__name__)
+
+
 @asynccontextmanager
 async def runtime(app: FastAPI) -> AsyncIterator[None]:
     config_bytes = await anyio.to_thread.run_sync(
@@ -346,14 +384,19 @@ async def runtime(app: FastAPI) -> AsyncIterator[None]:
             backing=StreamStore(store, client),
             now=now,
             forward=forward,
+            max_uploads=config.max_uploads,
         )
+        relay.settlement = settlement_from_master(relay, client, config.master_url)
         if min(config.registry.exp_drand, config.network_manifest.exp_drand) < await now():
             raise RelayError("pinned registry/network manifest expired")
         live_app = create_app(relay, drain_token)
         app.mount("/", live_app)
         # Recovery is real and fail-closed; missing L0 receipt route cannot become MASTER_ACCEPTED.
         await relay.recover()
-        yield
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(collect_forever, relay)
+            yield
+            tasks.cancel_scope.cancel()
         relay.draining = True
 
 

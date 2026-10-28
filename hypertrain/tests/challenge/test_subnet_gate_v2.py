@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -111,13 +112,9 @@ def test_registered_hotkey_reaches_active_without_admin(gated, subnet_master, tm
             proof.artifact_refs,
             strict=True,
         ):
-            signature = HOT[0].sign(f"hypertrain/object/2|{run_id}|{ref.sha256}".encode()).hex()
-            response = n.client.put(
-                n.url + "/objects/" + ref.sha256,
-                content=(work / "published/rank-0" / name).read_bytes(),
-                headers={"x-hotkey": HOT[0].ss58, "x-object-signature": signature},
-            )
+            response = n.put_object(HOT[0], (work / "published/rank-0" / name).read_bytes())
             assert response.status_code == 200, response.text
+            assert response.json() == {"sha256": ref.sha256}
         response = n.client.post(
             n.url + "/join/proof",
             json={
@@ -236,9 +233,6 @@ def _routes(n, hot, cold):
         "operation_id": H,
         "new_hot_sig": consent.new_hot_sig,
     }
-    poll = {"party": hot.ss58, "cursor": 0, "wait_seconds": 0}
-    watch_expiry = n.store._now(n.store._db) + 20  # a poll lives about a minute
-    obj = hot.sign(f"hypertrain/object/2|{run_id}|{H}".encode()).hex()
     c, u = n.client, n.url
     dispute = {"hotkey": hot.ss58, "verdict_hash": H, "action": "accept", "bond_lock": None}
     return {
@@ -252,11 +246,7 @@ def _routes(n, hot, cold):
             u + "/admission/recover",
             json=n.signed(hot, "Receipt", {"w": 0, "commit_hash": H, "received_round": 1}),
         ),
-        "objects": lambda: c.put(
-            u + "/objects/" + H,
-            content=b"x",
-            headers={"x-hotkey": hot.ss58, "x-object-signature": obj},
-        ),
+        "objects": lambda: n.put_object(hot, b"x", sha=H),
         "accept": lambda: c.post(u + "/accept", json=n.signed(hot, "AcceptV2", accept)),
         "commit": lambda: c.post(u + "/commit", json=n.signed(hot, "CommitV2", commit)),
         "delta": lambda: c.post(u + "/delta", json=n.signed(hot, "DeltaManifestV2", delta)),
@@ -268,9 +258,7 @@ def _routes(n, hot, cold):
         "dispute": lambda: c.post(u + "/dispute", json=n.signed(hot, "DisputeV2", dispute)),
         "bisect": lambda: c.post(u + "/bisect", json=n.signed(hot, "BisectV2", bisect)),
         "state-serve": lambda: c.post(u + "/state-serve", json=n.signed(hot, "StateServe", serve)),
-        "disputes": lambda: c.post(
-            u + "/disputes", json=n.signed(hot, "WatchRequest", poll, watch_expiry)
-        ),
+        "disputes/watch": lambda: n.watch(hot),
         "disputes/ack": lambda: c.post(u + "/disputes/ack", json=ack),
     }
 
@@ -422,7 +410,6 @@ def test_signed_object_route_over_real_http_chunked(gated, subnet_master):
     import uvicorn
 
     n = gated
-    run_id = n.manifest.run_id()
     subnet_master.registered.add(HOT[0].ss58)
     assert n.join(0).status_code == 200
     refresh(n)
@@ -435,14 +422,19 @@ def test_signed_object_route_over_real_http_chunked(gated, subnet_master):
     thread.start()
     base = f"http://127.0.0.1:{sock.getsockname()[1]}{n.url}"
 
-    def put(body: bytes, key=HOT[0], sha=None, signer=None, chunk=65536):
+    def put(body: bytes, key=HOT[0], sha=None, tamper=False, size=None, chunk=65536):
         sha = sha or hashlib.sha256(body).hexdigest()
-        sig = (signer or key).sign(f"hypertrain/object/2|{run_id}|{sha}".encode()).hex()
-        parts = (body[i : i + chunk] for i in range(0, len(body), chunk))
-        return httpx.put(
+        frame = n.object_frame(key, body, sha=sha, size=size)
+        if tamper:  # one digit of the signature
+            head = int.from_bytes(frame[:4], "big")
+            envelope = json.loads(frame[4 : 4 + head])
+            envelope["sig"] = ("0" if envelope["sig"][0] != "0" else "1") + envelope["sig"][1:]
+            signed = canonicalize(envelope)
+            frame = len(signed).to_bytes(4, "big") + signed + body
+        parts = (frame[i : i + chunk] for i in range(0, len(frame), chunk))
+        return httpx.post(
             base + "/objects/" + sha,
             content=parts,  # generator body: Transfer-Encoding: chunked on the wire
-            headers={"x-hotkey": key.ss58, "x-object-signature": sig},
             timeout=30,
         )
 
@@ -451,16 +443,23 @@ def test_signed_object_route_over_real_http_chunked(gated, subnet_master):
         response = put(exact)
         assert response.status_code == 200, response.text
         assert n.store.objects.get(response.json()["sha256"]) == exact
-        assert put(exact + b"y").status_code == 413
+        assert put(exact + b"y").status_code == 413  # signed size over the pinned limit
+        # A body longer than the length it signed is cut off at that length, not read to the end.
+        assert (
+            put(exact + b"y", sha=hashlib.sha256(exact).hexdigest(), size=limit).status_code == 413
+        )
+        assert put(b"short", size=10).status_code == 422
         assert put(b"tampered", sha=hashlib.sha256(b"other").hexdigest()).status_code == 422
-        assert put(b"forged", signer=HOT[1]).status_code == 403
+        assert put(b"forged", tamper=True).status_code == 403
         assert put(b"unregistered", key=HOT[1]).status_code == 403
         subnet_master.registered.add(HOT[1].ss58)
         refresh(n)
         assert put(b"not-admitted", key=HOT[1]).status_code == 403
         sha = hashlib.sha256(b"x").hexdigest()
-        missing = httpx.put(base + "/objects/" + sha, content=b"x", timeout=30)
-        assert missing.status_code == 422  # absent x-hotkey/x-object-signature headers
+        unframed = httpx.post(base + "/objects/" + sha, content=b"x", timeout=30)
+        assert unframed.status_code == 403  # no signed request in front of the object
+        old_put = httpx.put(base + "/objects/" + sha, content=b"x", timeout=30)
+        assert old_put.status_code == 405  # the header route is gone
     finally:
         server.should_exit = True
         thread.join(timeout=30)

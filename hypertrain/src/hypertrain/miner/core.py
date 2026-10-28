@@ -67,6 +67,7 @@ RESUME_POLLS = 60
 RESUME_POLL_SECONDS = 10.0
 FETCH_WORKERS = 16  # concurrent 1 MiB part GETs per job input (bounded window, ordered sink)
 UPLOAD_WORKERS = 16  # concurrent 1 MiB part PUTs per artifact (bounded window, index last)
+ROUND_TTL = 15  # seconds a read of the master's round signs upload requests (5 rounds)
 
 
 def _utc() -> str:
@@ -803,6 +804,8 @@ def canonical(obj: Any) -> bytes:
 class NetworkMiner:
     """Explicit ht/2 client; shared API, keyfile, launcher, admission and watch primitives."""
 
+    _round_seen: tuple[int, float] | None = None  # (master round, monotonic time it was read)
+
     def __init__(self, cfg: MinerConfig, client: httpx.Client) -> None:
         from hypertrain.protocol import envelope_v2
         from hypertrain.protocol.messages_v2 import RunManifestV2
@@ -1147,27 +1150,44 @@ class NetworkMiner:
 
         return put
 
-    def _put_object(self, data: bytes) -> str:
-        """One signed v2 object PUT (plain object, part or part index; each <= 1 MiB).
+    def _round(self) -> int:
+        """The master's current round, re-read at most every ROUND_TTL seconds."""
+        seen = self._round_seen
+        if seen is None or time.monotonic() - seen[1] > ROUND_TTL:
+            seen = (int(self.api.call("GET", self.url)["now_round"]), time.monotonic())
+            self._round_seen = seen
+        return seen[0]
 
-        Bytes body, so httpx sends Content-Length (proxies reject chunked uploads); the PUT is
-        content-addressed, so transport errors and 5xx are retried."""
+    def _put_object(self, data: bytes) -> str:
+        """One signed v2 object upload (plain object, part or part index; each <= 1 MiB).
+
+        The body is the master's frame: the length of this hotkey's signed ObjectUploadRequest
+        (4 bytes, big endian), that envelope, then the object. Bytes body, so httpx sends
+        Content-Length (proxies reject chunked uploads); the upload is content-addressed, so
+        transport errors and 5xx are retried, each attempt with a freshly signed request."""
+        from hypertrain.protocol import envelope_v2
+        from hypertrain.protocol.messages_v2 import REQUEST_HORIZON
+
         digest = sha256_hex(data)
-        headers = {
-            "X-Hotkey": self.kp.ss58,
-            "X-Object-Signature": self.kp.sign(
-                f"hypertrain/object/2|{self.run_id}|{digest}".encode()
-            ).hex(),
-        }
 
         def put() -> str:
-            response = self.api.c.put(
-                self.api.base + self.url + "/objects/" + digest, content=data, headers=headers
+            request = canonicalize(
+                envelope_v2.seal(
+                    self.kp,
+                    "ObjectUploadRequest",
+                    self.run_id,
+                    {"sha256": digest, "size": len(data)},
+                    self._round() + REQUEST_HORIZON,
+                )
+            )
+            response = self.api.c.post(
+                self.api.base + self.url + "/objects/" + digest,
+                content=len(request).to_bytes(4, "big") + request + data,
             )
             response.raise_for_status()
             return digest
 
-        return _retrying("PUT object " + digest, put)
+        return _retrying("POST object " + digest, put)
 
     def _fetch_inputs(
         self,
@@ -1505,20 +1525,20 @@ class NetworkMiner:
         states = PublishedStates(job, published, LocalFSStore(self.directory / "state-objects"))
         party = IslandParty.published(self.kp.ss58, job, published)
 
-        def now_round() -> int:
+        def beacon() -> int:
             return int(self.api.call("GET", self.url)["now_round"])
 
         watcher = DisputeWatch(
             self.directory / "watch",
             self.kp,
             HttpDisputeTransport(
-                self.api.c, self.api.base + self.url, self.kp, self.run_id, now_round
+                self.api.c, self.api.base + self.url, self.kp, self.run_id, beacon
             ),
             run_id=self.run_id,
             coordinator=self.manifest.training.coord_pubkey,
             party=lambda _: party,
             state_serve=states.serve,
-            beacon=now_round,
+            beacon=beacon,
             job=job,
         )
         try:

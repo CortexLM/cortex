@@ -186,14 +186,8 @@ def open_contest(net: Any, miner: NetworkMiner) -> str:
 def auditor_turn(net: Any, cursor: int) -> WatchEvent:
     assert ANSWERED.wait(60), "miner follower did not answer within 60s"
     ANSWERED.clear()
-    request = net.signed(
-        AUDITOR,
-        "WatchRequest",
-        {"party": AUDITOR.ss58, "cursor": cursor, "wait_seconds": 0},
-        net.now + 20,
-    )
     with SERIAL:
-        response = net.client.post(net.url + "/disputes", json=request)
+        response = net.watch(AUDITOR, cursor)
     assert response.status_code == 200, response.text
     events = [WatchEvent.model_validate(e) for e in response.json()]
     assert len(events) == 1

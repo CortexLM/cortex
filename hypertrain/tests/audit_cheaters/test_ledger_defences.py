@@ -24,6 +24,7 @@ from ac_precondition import precondition
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
+from hypertrain.challenge.admission_store import AdmissionStore
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.ledger import FULL_SHARE_MASS, Params
@@ -111,6 +112,9 @@ def hosting(
         (run_id, s.manifest.model_dump_json(), "{}"),
     )
     store._services = lambda _: (escrow, None, None)
+    AdmissionStore(
+        escrow
+    )  # the tables the real services create: get_weights reads the payee in them
     try:
         yield Hosted(store, escrow, reward, evidence, run_id)
     finally:

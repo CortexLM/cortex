@@ -194,6 +194,34 @@
   (the Q/4 caps need four), so five tolerate one and six tolerate two. `--tolerate 0` opens four
   on purpose, as the TEST runbook does. The store keeps the protocol minimum of four. A script
   that opens fewer than five hotkeys must pass `--tolerate 0`. ADR 0011 Part 8, decision 27.
+- Relay upload quota (ADR 0014 Part 6, TRN-02): a relay counts the uploads it still holds
+  (a live reservation, or custody with a pin neither released nor past its horizon) instead of
+  every record it ever accepted, and has no default count cap (it was 64 for the life of the
+  run, after which every miner assigned to it was refused and `/readyz` turned false).
+  `relay.json` gains an optional `max_uploads`, omitted from the file when unset. `accept`
+  refuses with `relay journal capacity exhausted` before the journal passes 12 MiB (the
+  metadata limit is 16 MiB), and `/readyz` no longer depends on the count. `/readyz` also reports
+  `journal_bytes`, `journal_budget`, `journal_fill` and `alarm` (above 80 % of the budget, with a
+  warning in the log); the alarm never makes a replica unready.
+- Relay release path (ADR 0014 Part 6, TRN-02): the master serves a public, read-only,
+  coordinator-signed `RelaySettlementView` at `GET /v2/runs/{run_id}/relay-settlements/{grant_hash}`
+  (new relay message type; exactly the grant hash, finality hash and beacon, closed dispute root and
+  beacon, and vesting beacon), and a relay answers `CustodyRelease` from it. Until now `runtime()` never
+  configured a settlement source, so a production relay refused every release. No credential enters the
+  relay.
+- Relay custody rotation (ADR 0014 Part 6, TRN-02, D53/D54): `collect()` also prunes the records
+  whose custody is spent (released and past the deletion bound, or lapsed) with their nonces,
+  never while a live record, an upload of the same bytes in flight or a deletion reservation
+  still needs the object, and a task of the relay runs it every 5 minutes. A pin whose signed
+  horizon plus the epoch grace is past, with no release and no dispute referencing it, is lapsed
+  and deleted like a released one if its upload never reached a receipt; a receipted upload stays
+  until the master releases it, however old, because a master that is away past the horizon cannot
+  extend or release (D54, D72). Until now nothing removed a record and `collect()` had no caller.
+- Unattended relay custody on the master (ADR 0014 Part 6, TRN-02, D53/D54): a task of the challenge
+  app (`HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL`, default 120 s, `0` off) releases every grant that is
+  settled or closed without a reward and past the epoch grace, and extends the custody of a grant
+  whose round has an unresolved dispute before its horizon, repeatedly, through `relay_control_v2`. No operator call is needed any
+  more; the admin routes remain. `ChallengeStore.release_due_v2` is one pass.
 
 ### Fixed
 - A member convicted of training fraud between the aggregate and the finalize of a round is no
@@ -209,11 +237,6 @@
   `scripts/ops/live_operator.py finalize` lists the same set. A member that is only suspended or
   has a burned bond is still paid for the round it was verified in. See
   `docs/adr/0011-audit-integrity.md` (Part 8, decision 23).
-- The dispute event poll is a request signed in its body, as the other owner routes: `POST
-  /v2/runs/{run_id}/disputes` takes the party's `WatchRequest{party, cursor, wait_seconds}` envelope
-  and `GET` with `X-Dispute-Signature` answers 405 (D51: the master proxy forwards no signature
-  header). The miner's watch and follow clients sign it; a client built before this change gets 405.
-  See `docs/network-v2.md`.
 - Escrow: the events the service writes (reward finalize, maturity, the payment of `get_weights`,
   the settlement of a dispute) live in a key space of their own, `srv:` plus an HMAC under a key
   derived from the coordinator secret, so a signed client event can no longer occupy an id the
@@ -247,6 +270,13 @@
   make every v2 operation answer 503 once the beacon lagged 6 s. It now reads the owner's open locks
   through a partial index (the same value, bit for bit). New admission locks must hold a tenth of the
   funding floor and are capped at 2,048 per coldkey and 4,096 in the ledger (Lens F7a).
+- Escrow: an event hashed and stored the whole ledger state through the pure-Python canonical encoder,
+  one interpreter step per character, twice, and `verify()` did it again for every stored snapshot:
+  124 ms per event and 909 ms to verify 21 events at 5,000 unit rows (restart cost grew with the square
+  of the ledger). They use the standard encoder, whose bytes are the same (a test compares them on
+  arbitrary strings, and every stored event hash still verifies): 17 ms and 59 ms. A transfer to oneself
+  is refused (`SELF_TRANSFER`, an old one replays) and a transfer adds a recipient row only for the
+  origins it spends (Lens F7b).
 - The beacon route no longer stops at one escrow origin that cannot mature. A shadow reward whose
   hotkey rotated after acceptance (`signer is not authorized for message role`) or whose job object
   went missing (`ObjectNotFound`) rolled back the whole round's maturity and lease expiry and made
@@ -254,6 +284,12 @@
   savepoint; one that fails for another reason than vesting or an open dispute stays `reward_pending`,
   is journaled as `records_v2 kind='maturity-failed'` and is retried at every round. A conservation
   failure or a SQLite error still aborts the call (Lens F6, SHD-D3).
+- A reward follows its coldkey through a hotkey rotation (D66). The shadow reward of an admission that
+  rotated no longer sticks: its custody is revalidated against the hotkey that signed it, which the
+  admission held then, and the ledger resolves a retired hotkey of an admission to its coldkey when it
+  validates stored evidence (the intake gate stays strict). `get_weights` pays a live reward to the
+  admission's current hotkey, and pays nothing to a banned coldkey (its units stay free and the
+  epoch mass burns).
 - The dispute long poll can no longer deadlock the store. `DisputesV2` has one lock order, the
   store lock then a leaf condition: `events()` reads the event table outside the condition and parks
   on a counter, so a mutator that notifies inside its transaction never waits for a poller that
@@ -387,11 +423,11 @@
   `CLOSED_UNPAID`), retired, or excluded and repaired by a rollback. The settlement answered 409
   "pinned by unresolved finality" for ever for the last three, or "missing accepted
   replayed-finality" for the second. One writer, `ChallengeStore._close_round_v2`, stores the
-  finality row and the closure record next to it (the hash that closed the round and the beacon),
-  every closing path calls it, and `relay_settlement_v2` reads `RoundStatus.closed` and that
-  record for all of them. The finality hash of a retired round is the evidence hash of the
-  retirement and its vesting ends `E_vest_rounds` after the retirement beacon; an open audit or
-  dispute still pins the custody.
+  finality row and the closure record next to it (the hash that closed the round and the beacon)
+  and every closing path calls it. A round settled with a reward or with nobody paid is released
+  from that record; a round retired or excluded and repaired is released as ADR 0014 Part 6.4
+  says (its finality hash is the hash that closed it, and the custody horizon stands in for the
+  beacons, since nothing vests); an open audit or dispute still pins the custody.
 - A job whose member has no leaves record (the miner never posted them, or the master lost them)
   is dropped at the first `absolute` as `excluded` `NO_SHOW` (stage `leaves`) instead of being
   re-armed for a second audit window nobody could use. The blame is infrastructure's: its
@@ -418,6 +454,60 @@
   longer a bare 500; nothing is recorded and the nonce stays free. `training_v2` is in the owned
   set of `implementation_hash`, which changes (same consequence as the entry above). See
   `docs/network-v2.md`.
+- `GET /v2/runs/{run}/relay-observers/{grant}/{observer}` hands back the pending challenge until
+  the observer answers it or it lapses (it used to replace it on every call, so any caller
+  could invalidate the observer's response), and no longer reads the accepted reference bytes
+  to do so. Its beacon pin carries the round: an exchange that straddled a beacon round used to
+  end in HTTP 500 for ever (`docs/adr/0014`, Part 8).
+- `PUT /v2/runs/{run}/objects/{sha256}` checks the object signature before it touches the store,
+  and the store work of that route, of `GET .../objects/{sha256}` and of `POST /v2/relay-receipts`
+  runs in the worker pool instead of on the event loop. A request that waits for the store lock
+  (a long operation, or a stranger who only knows a registered hotkey, or an anonymous receipt)
+  used to stop the whole process, `/version` included. A bad signature now answers 403 before
+  404 (unknown run) or 403 (hotkey not admitted); nothing else changes (`docs/adr/0014`, Part 8).
+- The dispute watch poll is `POST /v2/runs/{run}/disputes/watch` with a signed ht/2 body
+  (`DisputeWatchRequest {party, cursor, wait}`, expiry at most 20 rounds ahead of the master's
+  round) instead of `GET .../disputes` with an `X-Dispute-Signature` header. The header route is
+  removed with no shim: the master proxy drops custom headers, the signature never expired, and
+  nothing outside this repository runs on it. `HttpDisputeTransport` takes the party's key, the
+  run id and a beacon reader; the miner no longer puts the static signature on its HTTP client.
+  Every refused poll answers 403, as the header route did (`docs/adr/0014`, Part 8).
+- Dispute watch polls run on their own thread pool and are bounded: two at a time per party and
+  128 in all, a further poll answers 429 at once (`watch --follow` already backs off on 429). A
+  wait used to occupy a thread of the pool every other route shares, so 32 waiting watchers
+  stopped the master from answering anything else. The role lookup of the watch and ack routes
+  now holds the store lock like every other use of the shared connection (`docs/adr/0014`,
+  Part 8).
+- The miner's trial job read is `POST /v2/runs/{run}/join/{admission}/job` with a signed ht/2
+  body (`TrialJobRequest {admission_id}`, signed by the admission's hotkey, expiry at most 20
+  rounds ahead of the master's round) instead of a `GET` with `X-Hotkey` and `X-Trial-Signature`
+  headers. The header route is removed (405) with no shim, for the reasons of the dispute watch
+  above; a refused request answers 403 as before (`docs/adr/0014`, Part 8).
+- Object uploads are `POST /v2/runs/{run}/objects/{sha256}` instead of `PUT` with `X-Hotkey` and
+  `X-Object-Signature` headers (removed, 405, no shim, for the reasons above). The body is the
+  uploader's signed `ObjectUploadRequest {sha256, size}` envelope behind a 4-byte length, then the
+  object: one stateless request, no multipart dependency, and the signed length gives the pinned
+  per-object limit an early 413. The envelope expires at most 20 rounds past the master's round;
+  the miner reads that round at most every 15 seconds and signs again for each retry. The master
+  verifies the signature, then the uploader's admission, before it reads the object
+  (`docs/adr/0014`, Part 8).
+- The relay keeps an upload that reached a receipt until the master releases it, however old, and
+  the master releases a round closed without a reward as well as a settled one (ADR 0014 Part 6.4,
+  D54, D72): a master that is away past the custody horizon can neither extend nor release, and a
+  dispute may have opened after the last extension. An upload the master holds no receipt for (a
+  partial upload, or a receipt it refused with a 4xx, recorded as `ForwardRefused`) still lapses.
+- `GET /readyz` of the relay answers 503 `{"ready": false, ...}` when its storage fails (it was a
+  bare 500, or 503/400 with another body), with the journal fill fields `null` when the journal
+  cannot be read.
+- The dispute watch holds at most 64 of its 128 slots for parties that are not pinned roles, so that
+  registered hotkeys cannot lock the auditors, referees and coordinator out; the retired
+  `GET /v2/runs/{run}/disputes` answers 405 (it was 404).
+- Escrow `STATE_RANGE` covers every numeric column of the state (`mature_at`, `reward_round`,
+  `escrow_finalized.w`, `ordinal`, `trial_epoch`), not only `units` and `issued`; `-2**63` no
+  longer escapes as an SQLite overflow.
+- `scripts/launch_cuda_run.sh` accepts the object-upload retry of the signed POST (`_retrying("POST
+  object`) as well as the older PUT in the miner bundle, through one check used twice; its bundle
+  checks are tested against `miner/core.py`.
 - A miner no longer dies on one lost read of a trial or job input. `probe-v2` and
   `run-v2` retry an object GET that meets a 404 like one that meets a 5xx (five retries, 1 to
   16 s, each wait jittered, as every retry of the miner now is), fail with the same error when it
