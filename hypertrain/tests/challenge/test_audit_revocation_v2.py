@@ -56,7 +56,8 @@ def test_an_unsigned_verdict_is_revoked_when_the_sign_window_ends_and_goes_to_th
     network.push(stored + cooldown.SIGN_WINDOW_ROUNDS)
     revoked = stored + cooldown.SIGN_WINDOW_ROUNDS
     row = lease_row(network, job["job_id"])
-    assert (row["state"], row["attempts"], json.loads(row["tried"])) == ("queued", 1, [A.ss58])
+    # the revocation of a stored MISMATCH opens the re-audit window: a fresh set of attempts
+    assert (row["state"], row["attempts"], json.loads(row["tried"])) == ("queued", 0, [A.ss58])
     key = f"{job['job_id']}:{job['lease_nonce']}"
     failure = network.store._record_v2(network.manifest.run_id(), "audit-attempt-failure", key)
     assert (failure["cause"], failure["withheld"], failure["at"]) == (
@@ -70,7 +71,7 @@ def test_an_unsigned_verdict_is_revoked_when_the_sign_window_ends_and_goes_to_th
     leased = lease(network, B, 2)
     assert leased.status_code == 200, leased.text
     body = leased.json()["body"]
-    assert (body["job_id"], body["attempt"], body["auditor_id"]) == (job["job_id"], 2, B.ss58)
+    assert (body["job_id"], body["attempt"], body["auditor_id"]) == (job["job_id"], 1, B.ss58)
     assert body["lease_expires"] == body["absolute_deadline"] == D_AUDIT + 100
 
 
@@ -101,14 +102,18 @@ def test_the_sign_window_counts_from_the_stored_verdict_and_never_revokes_a_repl
     assert not records(network, "audit-attempt-failure").keys() & {
         f"{replaying['job_id']}:{replaying['lease_nonce']}"
     }
-    network.push(D_AUDIT + 100)  # the commit ends with the round: no window is left for anyone
+    network.push(D_AUDIT + 100)  # the commit ends with the round, and with every window
     assert records(network, "exit-sanction") == {}
-    for job in (replayed, replaying):
-        miner = lease_row(network, job["job_id"])["hotkey"]
-        assert records(network, "excluded")[f"0:{miner}"] == {
-            "reason": "INFRASTRUCTURE",
-            "evidence_hash": sha256_hex(job["job_id"].encode()),
-        }
+    # the revoked job had its window and it ended with the commit: it fails, nobody is blamed
+    miner = lease_row(network, replayed["job_id"])["hotkey"]
+    assert lease_row(network, replayed["job_id"])["result"] == "REAUDIT_FAILED"
+    assert f"0:{miner}" not in records(network, "excluded")
+    # the replay in progress was never revoked and ends as an ordinary lapse
+    miner = lease_row(network, replaying["job_id"])["hotkey"]
+    assert records(network, "excluded")[f"0:{miner}"] == {
+        "reason": "INFRASTRUCTURE",
+        "evidence_hash": sha256_hex(replaying["job_id"].encode()),
+    }
 
 
 @pytest.mark.parametrize("result", ["MATCH", "MISMATCH"])
@@ -188,7 +193,7 @@ def test_a_signature_inside_the_sign_window_is_untouched_and_a_later_one_is_refu
         assert answer.status_code == 409, answer.text
         assert records(network, "replay") == {}
         row = lease_row(network, job["job_id"])
-        assert (row["state"], row["attempts"], json.loads(row["tried"])) == ("queued", 1, [A.ss58])
+        assert (row["state"], row["attempts"], json.loads(row["tried"])) == ("queued", 0, [A.ss58])
         again = lease(network, B, 2)
         assert again.status_code == 200, again.text
-        assert again.json()["body"]["attempt"] == 2
+        assert again.json()["body"]["attempt"] == 1

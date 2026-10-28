@@ -236,7 +236,9 @@ def test_a_lapsed_lease_cannot_be_executed_or_completed_by_its_old_holder(
         stored = store._record_v2(run, "executed-verdict", row["id"])
         n.push(row["expires"])
         lapsed = sa.lease_rows(store)[cast.forger.ss58]
-        assert (lapsed["state"], lapsed["attempts"]) == ("queued", 1)
+        # the master's MISMATCH was left unsigned: the job opens its re-audit window (ADR 0011
+        # Part 9), whose attempts start again
+        assert (lapsed["state"], lapsed["attempts"]) == ("queued", 0)
         kind, silence, refusal = sa.silence_of(store, run, row)
         assert store._record_v2(run, kind, holder.ss58) == silence
         before = sa.digest_of(store)
@@ -254,15 +256,13 @@ def test_a_lapsed_lease_cannot_be_executed_or_completed_by_its_old_holder(
 
 # What the sweep does with a lapsed lease: the first attempt of a window is retried, the second
 # ends the window. A tree that re-arms an exhausted job opens one more window then and drops the
-# miner at the end of the second; an older tree drops it at once. The lease of the forger is
-# executed: its lapse leaves the master's MISMATCH unsigned, so on a tree that re-audits (ADR
-# 0011 Part 9) the job keeps its holder in `tried` and may open a third window.
+# miner at the end of the second; an older tree drops it at once. The holder of the forger's lease
+# never asked for the execution (the test removes the marker the world wrote): an ordinary
+# silence. A lapse that leaves the master's MISMATCH unsigned opens the re-audit window instead,
+# which tests/challenge/test_audit_reaudit_window_v2.py pins.
 LAPSES = [
     pytest.param(1, 1, "retried", id="first-attempt"),
     pytest.param(2, 1, "rearmed" if sa.REARMS else "dropped", id="second-attempt-of-the-window"),
-    pytest.param(
-        2, 2, "rearmed" if sa.REAUDITS else "dropped", id="second-attempt-of-the-second-window"
-    ),
     pytest.param(2, sa.WINDOWS, "dropped", id="second-attempt-of-the-last-window"),
 ]
 
@@ -280,6 +280,10 @@ def test_a_lapsed_job_is_retried_once_then_given_one_more_window_then_dropped(
         with store._tx():
             store._db.execute(
                 "UPDATE audit_leases_v2 SET attempts=? WHERE id=?", (attempts, row["id"])
+            )
+            store._db.execute(
+                "DELETE FROM records_v2 WHERE run_id=? AND kind='audit-execution' AND id=?",
+                (run, f"{row['id']}:{row['nonce']}"),
             )
             if windows > 1:
                 body = {"windows": windows, "at": n.now, "absolute": row["absolute"]}
@@ -313,12 +317,7 @@ def test_a_lapsed_job_is_retried_once_then_given_one_more_window_then_dropped(
                 "at": row["expires"],
                 "absolute": after["absolute"],
             }
-            withholders = [row["auditor"]] if sa.REAUDITS else []
-            assert (after["attempts"], json.loads(after["tried"]), after["auditor"]) == (
-                0,
-                withholders,
-                None,
-            )
+            assert (after["attempts"], after["tried"], after["auditor"]) == (0, "[]", None)
             # The fresh window starts at the lapse and ends with the miner's sealed commit at
             # the latest.
             sealed = envelope_v2.parse_envelope(store._record_v2(run, "commit", identity))
@@ -342,7 +341,8 @@ def test_a_job_leased_again_cannot_be_settled_with_the_first_attempts_verdict(
         assert leased.status_code == 200
         job = leased.json()["body"]
         again = sa.lease_rows(store)[cast.forger.ss58]
-        assert (job["job_id"], again["auditor"], again["attempts"]) == (row["id"], second.ss58, 2)
+        # the lapse of an executed MISMATCH opens the re-audit window: the attempts start again
+        assert (job["job_id"], again["auditor"], again["attempts"]) == (row["id"], second.ss58, 1)
         assert job["lease_nonce"] != row["nonce"]
         before = sa.digest_of(store)
         # When / Then: the first holder can neither run nor settle the job any more.

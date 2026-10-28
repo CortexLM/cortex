@@ -481,6 +481,45 @@ def test_a_round_nobody_audited_is_retired_when_its_audit_window_is_gone(
         assert snapshot(store, run) == before
 
 
+def test_a_round_is_retired_for_a_failed_reaudit_only_when_a_job_of_it_failed(network):
+    # Given: five members that all committed and delivered, audits scheduled, none failed
+    store, run = network.store, network.manifest.run_id()
+    keys = seeded(network, 5)
+    survivors = [k.ss58 for k in keys]
+    jobs = schedule(network)
+    before = snapshot(store, run)
+
+    # When / Then: the master re-derives the cause and finds no failed re-audit
+    with pytest.raises(
+        ChallengeError, match="ROUND_RETIRE_REFUSED: no re-audit of the round has failed"
+    ) as refused:
+        retire(network, survivors, cause="REAUDIT_FAILED")
+    assert refused.value.status == 409
+    assert snapshot(store, run) == before
+
+    # When: one job ended with no verdict because its re-audit failed
+    with store._tx():
+        store._db.execute(
+            "UPDATE audit_leases_v2 SET state='exhausted',result='REAUDIT_FAILED' WHERE id=?",
+            (jobs[0],),
+        )
+    network.push(D_AUDIT + 1)
+    done = retire(network, survivors, cause="REAUDIT_FAILED")
+
+    # Then: the round is closed as a null round, nobody is blamed and the open audits stop
+    assert (done["cause"], done["survivors"]) == ("REAUDIT_FAILED", sorted(survivors))
+    status = store._record_v2(run, "finality", "0")
+    assert (status["disposition"], status["unresolved_audits"]) == ("RETIRED", 0)
+    states = {
+        r["id"]: (r["state"], r["result"])
+        for r in store._db.execute("SELECT id,state,result FROM audit_leases_v2")
+    }
+    assert states.pop(jobs[0]) == ("exhausted", "REAUDIT_FAILED")  # the evidence stays as it was
+    assert set(states.values()) == {("exhausted", "ROUND_RETIRED")}
+    assert store._round_ids_v2(run, "excluded", 0) == set()
+    assert store._round_ids_v2(run, "exit-sanction", 0) == set()
+
+
 def test_the_round_after_a_retired_one_is_reward_finalized(network, ledger):
     # Given: round 0 retired by the store, round 1 applied and offered to the ledger
     store, run = network.store, network.manifest.run_id()

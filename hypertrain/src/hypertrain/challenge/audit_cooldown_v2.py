@@ -21,8 +21,6 @@ from pydantic import JsonValue
 WITHHELD_STRIKES = 3
 # Strictly longer than that cap, or a bar would add nothing to a second ordinary silence.
 STRIKE_BAR_ABSOLUTE_WINDOWS = 2
-# A job whose MISMATCH was withheld may open one window beyond the pinned `max_attempts`.
-WITHHELD_EXTRA_WINDOWS = 1
 # What the holder of a lease owes once the master has stored its verdict is a signature, which the
 # auditor client posts in the same breath: its post timeout is 60 s, 20 rounds of 3 s.
 SIGN_WINDOW_ROUNDS = 20

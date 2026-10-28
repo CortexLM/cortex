@@ -18,7 +18,7 @@ from hypertrain.protocol.hashing import sha256_hex
 
 Blame = Literal["MINER", "INFRASTRUCTURE"]
 Stage = Literal["commit", "leaves", "delta"]
-Retire = Literal["INFEASIBLE", "AUDIT_WINDOW_MISSED"]
+Retire = Literal["INFEASIBLE", "AUDIT_WINDOW_MISSED", "REAUDIT_FAILED"]
 
 # The master refuses its callers once the wall clock is more than this many rounds ahead of the
 # last round it holds: the beacon is paused, and a pause is never a miner's silence.
@@ -56,6 +56,7 @@ class Wait(StrEnum):
     DELTA = "delta"
     AUDIT_LEASE = "audit-lease"
     AUDIT_WINDOW = "audit-window"
+    REAUDIT = "reaudit"
     INFEASIBLE = "infeasible"
     ROTATION = "rotation"
     OWN_CONTEST = "own-contest"
@@ -71,6 +72,7 @@ class Schedule:
     d_upload: int
     d_final: int
     lease_rounds: int
+    reaudit_rounds: int  # AuditPolicyV2.reaudit_window(): no default, a caller must name it
 
     @property
     def absolute(self) -> int:
@@ -81,16 +83,23 @@ class Schedule:
         """Where the second audit window ends at the latest: past it no job waits on anybody."""
         return self.d_audit + 4 * self.lease_rounds
 
+    @property
+    def reaudit_end(self) -> int:
+        """Where a re-audit window ends at the latest: it opens at a detection, which the second
+        audit window bounds, and lasts `reaudit_rounds` (`reaudit_until` never goes past that)."""
+        return self.audits_end + self.reaudit_rounds
+
 
 # The first push at or after the returned round has the exit due. "At the door" is refused when
 # asked, so its bound is the round of the question.
 BOUNDS: Mapping[Wait, Callable[[Schedule], int]] = {
-    Wait.DISPUTE: lambda s: s.audits_end + 1,
+    Wait.DISPUTE: lambda s: s.reaudit_end + 1,
     Wait.COMMIT: lambda s: s.d_commit,
     Wait.LEAVES: lambda s: s.absolute,
     Wait.DELTA: lambda s: s.d_upload,
     Wait.AUDIT_LEASE: lambda s: s.audits_end,
     Wait.AUDIT_WINDOW: lambda s: s.absolute - 1,
+    Wait.REAUDIT: lambda s: s.reaudit_end,
     Wait.INFEASIBLE: lambda s: s.now,
     Wait.ROTATION: lambda s: s.now,
     Wait.OWN_CONTEST: lambda s: s.now,
@@ -146,6 +155,15 @@ class RoundSnapshot:
     served_upload: bool
     has_leases: bool
     carries: Callable[[Collection[str]], bool]
+    reaudit_failed: bool = False  # a withheld MISMATCH's re-audit ended with no verdict, on record
+
+
+def reaudit_until(detected: int, *, absolute: int, commit_exp: int, reaudit_rounds: int) -> int:
+    """Where the re-audit window of a withheld MISMATCH ends: `reaudit_rounds` after the detection,
+    never sooner than the window the job already had, never past the commit's expiry (an
+    `AuditJobV2` embeds the commit live). A result less than two rounds past the round that
+    notices the detection is no window: a second auditor could neither be leased nor sign in it."""
+    return min(commit_exp, max(detected + reaudit_rounds, absolute))
 
 
 def classify(
@@ -239,6 +257,8 @@ def plan_round(s: RoundSnapshot) -> RoundPlan:
     retire: Retire | None = None
     if now >= s.schedule.d_commit and len(survivors) < len(roster) and not s.carries(survivors):
         retire = "INFEASIBLE"
+    elif s.reaudit_failed:
+        retire = "REAUDIT_FAILED"  # the second auditor failed too: nobody is blamed
     elif not s.has_leases and now >= s.schedule.absolute - 1:
         retire = "AUDIT_WINDOW_MISSED"  # schedule_audits_v2 answers 503 from here on
     if retire:  # a round that cannot go on keeps its membership facts: only the blame is booked

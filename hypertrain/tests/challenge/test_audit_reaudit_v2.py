@@ -158,11 +158,16 @@ def test_a_mismatch_withheld_in_the_last_window_is_decided_by_the_other_auditor(
     assert (failure["cause"], failure.get("withheld")) == ("AUDITOR_SILENT", "MISMATCH")
     assert (records(network, "excluded"), records(network, "exit-sanction")) == ({}, {})
     assert records(network, "exit-failed") == {}
+    # the window began when the sign window ended the lease (round 290), 30 rounds before the push
+    # that noticed it, and lasts one lease: its own, not a third ordinary window from the push
+    window = records(network, "reaudit")[f"0:{key.ss58}"]
+    assert window == {"job_id": first["job_id"], "detected": D_AUDIT + 270, "until": D_AUDIT + 370}
     assert lease(network, A, 2).status_code == 403  # A is cooling, and the job is not A's to retake
     leased = lease(network, B, 3)
     assert leased.status_code == 200, leased.text
     second = leased.json()["body"]
     assert (second["job_id"], second["attempt"]) == (first["job_id"], 1)
+    assert second["absolute_deadline"] == D_AUDIT + 370
     verdict = execute(network, B, second)
     assert verdict["result"] == reaudit
     assert complete(network, B, second, verdict) == reaudit

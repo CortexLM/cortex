@@ -32,14 +32,23 @@ SURVIVORS = A2 + "test_a_second_exclusion_leaves_too_few_members_to_aggregate"
 NO_RECORD = A2 + "test_finalize_refuses_a_member_without_an_audit_record"
 UNRESOLVED = A2 + "test_a_round_cannot_settle_while_an_audit_is_counted_unresolved"
 ABSENT = A2 + "test_an_excluded_member_is_absent_from_the_tape_the_included_set_and_the_origins"
-DROPPED = (
-    'finality["unresolved_audits"] = max(0, int(str(finality["unresolved_audits"])) - 1)\n'
-    '        self._put_record_v2(run_id, "finality", str(row["w"]), finality)'
+FAILED_REAUDIT = (
+    "        self._db.execute(\n"
+    "            \"UPDATE audit_leases_v2 SET state='exhausted',"
+    "result='REAUDIT_FAILED' WHERE id=?\",\n"
+    '            (row["id"],),\n'
+    "        )\n"
 )
 STRIKE = (
-    "\n        self._db.execute("
-    '\n            "UPDATE admissions_v2 SET strikes=strikes+1 WHERE hotkey=?", (row["hotkey"],)'
-    "\n        )"
+    "        self._db.execute(\n"
+    '            "UPDATE admissions_v2 SET strikes=strikes+1 WHERE hotkey=?", (row["hotkey"],)\n'
+    "        )\n"
+)
+UNVERIFIED_DROP = (
+    "        self._drop_audit_job_v2(\n"
+    '            row["run_id"], row, "UNVERIFIED", "AUDIT_INFRASTRUCTURE",\n'
+    '            sha256_hex(row["id"].encode()),\n'
+    "        )\n"
 )
 NOBODY_SIGNS = (
     A2 + "test_a_mismatch_the_master_replayed_and_no_auditor_signed_costs_its_miner_the_round_only"
@@ -626,7 +635,7 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-rearm-without-limit",
         "invariants": ["A2W-12", "A2W-13"],
         "path": STORE,
-        "old": "if windows >= policy.max_attempts + extra:",
+        "old": "if windows >= policy.max_attempts:",
         "new": "if False:",
         "tests": [ATTEMPTS, HORIZON],
         "why": "a job nobody audits is given a new window for ever, so its audit stays counted as "
@@ -677,10 +686,8 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-an-unsigned-mismatch-is-excluded-as-unverified",
         "invariants": ["A2W-23"],
         "path": STORE,
-        "old": '                "INFRASTRUCTURE",\n                "AUDIT_INFRASTRUCTURE",\n'
-        '                sha256_hex(row["id"].encode()),\n',
-        "new": '                "UNVERIFIED",\n                "AUDIT_INFRASTRUCTURE",\n'
-        '                sha256_hex(row["id"].encode()),\n',
+        "old": FAILED_REAUDIT,
+        "new": UNVERIFIED_DROP,
         "tests": [NOBODY_SIGNS],
         "why": "a mismatch the master replayed and no auditor signed is held against its miner "
         "as the fraud exclusion.",
@@ -689,8 +696,8 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-an-unsigned-mismatch-strikes-its-miner",
         "invariants": ["A2W-23", "NSH-04"],
         "path": STORE,
-        "old": DROPPED,
-        "new": DROPPED + STRIKE,
+        "old": FAILED_REAUDIT,
+        "new": FAILED_REAUDIT + STRIKE,
         "tests": [NOBODY_SIGNS],
         "why": "a job nobody signed ends in a strike for its miner, as if the silence were the "
         "miner's.",

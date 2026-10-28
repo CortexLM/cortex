@@ -403,10 +403,12 @@ def test_after_the_last_window_nothing_late_can_change_the_dropped_round(
         stored = {h: store._record_v2(run, "executed-verdict", r["id"]) for h, r in held.items()}
         sa.run_out_the_windows(n, store)
         # Then: every job is exhausted with no audit open, and the round is no more settled than
-        # before (a tree that voided the round for everybody says so in its disposition).
+        # before (a tree that voided the round for everybody says so in its disposition). The
+        # forger's job is not dropped: nobody signed the master's MISMATCH, so its re-audit failed
+        # (ADR 0011 Part 9) and it stays counted until the reaper retires the round.
         assert {r["state"] for r in sa.lease_rows(store).values()} == {"exhausted"}
         status = store._record_v2(run, "finality", "0")
-        assert (status["disposition"], status["unresolved_audits"]) == (sa.DROP_DISPOSITION, 0)
+        assert (status["disposition"], status["unresolved_audits"]) == (sa.DROP_DISPOSITION, 1)
         before = settled_state(store)
         # When: the holders deliver what they computed, ask again, the sweep runs again and
         # someone tries to schedule the audits once more.
@@ -663,14 +665,14 @@ def test_a_verdict_that_answers_another_challenge_mints_nothing(
 
 
 def test_a_mismatch_the_master_replayed_and_no_auditor_signed_costs_its_miner_the_round_only(
-    world: sa.World, monkeypatch: pytest.MonkeyPatch
+    world: sa.World,
 ) -> None:
     # Given: the master replayed the forger's job and stored a mismatch; the auditor that holds
-    # the lease never signs it. D82 (ADR 0011 Part 9): that is an infrastructure fault, and only
-    # a mismatch an auditor signed is sanctioned.
+    # the lease never signs it. D82 and D84 (ADR 0011 Part 9): that is an infrastructure fault.
+    # The job gets a re-audit window for the other auditor; when nobody signs in it, the round is
+    # retired and nobody is sanctioned, the forger included: only a mismatch an auditor signed is.
     with world.at("s2") as (n, cast):
         store, run = n.store, n.manifest.run_id()
-        sa.without_reaper(monkeypatch, store)
         forger = cast.forger.ss58
         row = running(store)[forger]
         stored = store._record_v2(run, "executed-verdict", row["id"])
@@ -686,14 +688,13 @@ def test_a_mismatch_the_master_replayed_and_no_auditor_signed_costs_its_miner_th
         before = standing()
         # When: the lease runs out and every window of the job passes with nobody signing anything.
         sa.drop_job(n, store, forger)
-        # Control: the job is over.
-        assert sa.lease_rows(store)[forger]["state"] == "exhausted"
-        # Then: the forger leaves the round for the infrastructure, without a contest record, a
-        # sanction row, a strike or a burnt unit.
-        assert store._record_v2(run, "excluded", f"0:{forger}") == {
-            "reason": "INFRASTRUCTURE",
-            "evidence_hash": sha256_hex(row["id"].encode()),
-        }
+        # Control: the job is over, with no verdict.
+        job = sa.lease_rows(store)[forger]
+        assert (job["state"], job["result"]) == ("exhausted", "REAUDIT_FAILED")
+        # Then: the round is retired for it, and the forger has no exclusion, no contest record, no
+        # sanction row, no strike and no burnt unit.
+        assert store._record_v2(run, "retired", "0")["cause"] == "REAUDIT_FAILED"
+        assert ("excluded", f"0:{forger}") not in sa.records(store, "excluded")
         assert ("contest", body_digest(stored)) not in sa.records(store, "contest")
         assert sa.records(store, "exit-sanction") == {}
         assert standing() == before

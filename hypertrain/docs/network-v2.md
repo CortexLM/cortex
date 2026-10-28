@@ -738,28 +738,32 @@ of ADR 0011 Part 3 is not required, only recorded (`WOULD_APPLY`, nothing touche
 verdict answers 409 `SANCTION_APPLIED`.
 
 A `MISMATCH` the master replayed for a lease holder that never signed it (the lease ran out with the
-verdict stored) sanctions nobody and strikes nobody on the miner side (ADR 0011 Part 9). The job goes
-to another auditor: the withholders stay in the job's `tried` list through the re-arm, so none is
-handed it again, and such a job may open a third window (at most three), bounded by the commit's
-expiry. Only that second lease completing as `MISMATCH` takes the sanction path above; a `MATCH`
-clears the miner. When no other auditor, no time or no live commit is left, the job ends as an
-`INFRASTRUCTURE` exclusion, as before. A lease whose verdict the master stored and its holder
-did not sign within 20 rounds (`SIGN_WINDOW_ROUNDS`, 60 s) of the storing is taken back at that
-round, not at its expiry, so that the other auditor has the rest of the window; a holder whose
-replay is still running is never taken back. Whether the second auditor has time depends on the
-gap and on the replay: the job must be leased, replayed and signed again before `d_final`, so a
-gap of 100 rounds fits a replay of 38 rounds (114 s) at best and a gap of 200 a replay of 88
-rounds (264 s) (ADR 0011 Part 9). The auditor
+verdict stored) sanctions nobody and strikes nobody on the miner side (ADR 0011 Part 9). The job gets a
+re-audit window of its own for the other auditors, which starts at the round the lease ended at (not the
+round that noticed it) and lasts the audit policy's `reaudit_rounds` (one lease when the key is absent),
+never past the miner's sealed commit: the withholders stay in the job's `tried` list, so none is handed it
+again, and the window is bounded by the exit of ADR 0011 Part 8. Only that second lease completing as
+`MISMATCH` takes the sanction path above; a `MATCH` clears the miner. When no other auditor, no time or no
+live commit is left, or the second auditor fails too, the round is retired (`REAUDIT_FAILED`, below) and
+nobody is sanctioned; a service-admitted run has no window and drops the job as an `INFRASTRUCTURE`
+exclusion. A lease whose verdict the master stored and its holder did not sign within 20 rounds
+(`SIGN_WINDOW_ROUNDS`, 60 s) of the storing is taken back at that round, not at its expiry, so that the
+other auditor has the rest of the window; a holder whose replay is still running is never taken back.
+Whether the second auditor has time depends on the gap and on the replay: the job must be leased,
+replayed and signed again before `d_final`. At a gap of 200 rounds (the 101 M TEST run) that holds for a
+replay of 144 s with 83 rounds of delay to spare, for 200 s with 45 and for 256 s with 13; a gap of 100
+fits none of them (ADR 0011 Part 9, decision 12). The auditor
 that withheld the signature of a `MISMATCH` for the third time in a run (and each time after) is
 refused new leases, and as a relay observer, for two absolute audit windows (`4 * lease_rounds`; 20
 minutes at H <= 30), unless it is the last configured auditor outside a cooldown. A withheld
 `MATCH`, or a lease that never asked for its execution, costs the ordinary cooldown only.
 
 A round that cannot reach a tape can be retired (ADR 0011 part 8, decisions 7 to 11) instead of
-blocking the run for good. Two causes, each re-derived by the master from the facts: the members
+blocking the run for good. Three causes, each re-derived by the master from the facts: the members
 that can still deliver (committed, not left out, and with their delta once `d_upload` has passed)
-cannot carry one complete update (`INFEASIBLE`, from `d_commit`), or nobody scheduled audits and
-`audits` answers 503 from `absolute` minus one round (`AUDIT_WINDOW_MISSED`). It also waits until
+cannot carry one complete update (`INFEASIBLE`, from `d_commit`), nobody scheduled audits and
+`audits` answers 503 from `absolute` minus one round (`AUDIT_WINDOW_MISSED`), or the re-audit of a
+withheld `MISMATCH` ended with no verdict (`REAUDIT_FAILED`). It also waits until
 every earlier round is closed and is refused for a service-admitted run (`ROUND_RETIRE_REFUSED:
 <reason>`, nothing written). The beacon push that sees the round cannot go on asks for it (after
 booking the exclusions and the blame of the round, in a savepoint of its own: a refusal is recorded

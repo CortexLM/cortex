@@ -10,7 +10,10 @@ import pytest
 from hypertrain.challenge import exit_v2 as x
 from hypertrain.challenge.admission import SeizureReason
 
-S = x.Schedule(now=5, d_commit=30, d_audit=31, d_upload=150, d_final=231, lease_rounds=100)
+S = x.Schedule(
+    now=5, d_commit=30, d_audit=31, d_upload=150, d_final=231, lease_rounds=100, reaudit_rounds=100
+)
+WIDE = replace(S, reaudit_rounds=171)  # 2 x a 256 s replay at 3 s a round (ADR 0011 Part 9)
 LONG = replace(S, d_upload=400, d_final=1000)  # a gap wider than two lease windows
 ROSTER = tuple(x.Member(f"h{i}", f"a{i}") for i in range(6))
 
@@ -34,14 +37,20 @@ def snap(*, at: int = 5, roster=ROSTER, **kw) -> x.RoundSnapshot:
         served_upload=True,
         has_leases=True,
         carries=lambda hotkeys: len(hotkeys) >= 4,
+        reaudit_failed=False,
     )
     return x.RoundSnapshot(**{**base, **kw})
 
 
-def test_every_wait_has_a_bound_no_later_than_the_second_audit_window():
+@pytest.mark.parametrize("schedule", [S, WIDE], ids=["one-lease-window", "measured-window"])
+def test_every_wait_has_a_bound_no_later_than_the_second_audit_window_and_the_reaudit_window(
+    schedule,
+):
     assert set(x.BOUNDS) == set(x.Wait)
     for wait, bound in x.BOUNDS.items():
-        assert S.now <= bound(S) <= S.d_audit + 4 * S.lease_rounds + 1, wait
+        # a re-audit opens at a detection inside the second audit window and lasts its own rounds
+        latest = schedule.d_audit + 4 * schedule.lease_rounds + schedule.reaudit_rounds + 1
+        assert schedule.now <= bound(schedule) <= latest, wait
 
 
 def test_each_bound_is_a_round_schedule_value():
@@ -51,7 +60,8 @@ def test_each_bound_is_a_round_schedule_value():
     assert due[x.Wait.LEAVES] == min(1000, 31 + 2 * 100)
     assert due[x.Wait.AUDIT_WINDOW] == min(1000, 31 + 2 * 100) - 1
     assert due[x.Wait.AUDIT_LEASE] == 31 + 4 * 100
-    assert due[x.Wait.DISPUTE] == 31 + 4 * 100 + 1
+    assert due[x.Wait.REAUDIT] == 31 + 4 * 100 + 100
+    assert due[x.Wait.DISPUTE] == 31 + 4 * 100 + 100 + 1
     assert due[x.Wait.MEMBER_STATE] == 1000
     at_the_door = (x.Wait.INFEASIBLE, x.Wait.ROTATION, x.Wait.OWN_CONTEST, x.Wait.FINALIZE_ORDER)
     assert [due[wait] for wait in at_the_door] == [LONG.now] * 4
@@ -269,3 +279,58 @@ def test_the_survivors_of_a_round_shrink_with_each_bound_and_are_what_the_plan_h
     # and the planner hands on the very same list
     snapshot = snap(at=150, audited=keys(1, 2, 3, 4), **facts)
     assert list(x.plan_round(snapshot).survivors) == left(150)
+
+
+def test_the_reaudit_wait_ends_one_window_of_its_rounds_after_the_second_audit_window():
+    assert x.BOUNDS[x.Wait.REAUDIT](WIDE) == S.d_audit + 4 * S.lease_rounds + 171
+    assert x.BOUNDS[x.Wait.DISPUTE](WIDE) == x.BOUNDS[x.Wait.REAUDIT](WIDE) + 1
+    assert x.BOUNDS[x.Wait.AUDIT_LEASE](WIDE) == S.d_audit + 4 * S.lease_rounds
+
+
+def test_a_reaudit_window_never_outlives_its_wait_or_the_commit():
+    bound = x.BOUNDS[x.Wait.REAUDIT](WIDE)
+    for detected in range(WIDE.d_audit, WIDE.audits_end + 1):
+        for commit_exp in (detected, detected + 1, WIDE.d_final, 10**9):
+            until = x.reaudit_until(
+                detected,
+                absolute=min(WIDE.audits_end, detected + 2 * WIDE.lease_rounds),
+                commit_exp=commit_exp,
+                reaudit_rounds=WIDE.reaudit_rounds,
+            )
+            assert until <= min(bound, commit_exp)
+
+
+@pytest.mark.parametrize(
+    ("detected", "absolute", "commit_exp", "until"),
+    [
+        (80, 231, 10_000, 251),  # the window is T after the detection, not after the lease
+        (80, 400, 10_000, 400),  # never sooner than the window the job already had
+        (80, 231, 231, 231),  # an honest commit ends with the round: the window is what is left
+        (230, 231, 231, 231),  # ... which may be no window at all: `until <= detected + 1`
+    ],
+)
+def test_the_window_of_a_withheld_mismatch(detected, absolute, commit_exp, until):
+    got = x.reaudit_until(detected, absolute=absolute, commit_exp=commit_exp, reaudit_rounds=171)
+    assert got == until
+
+
+def test_a_failed_reaudit_retires_a_round_that_can_still_carry_and_blames_nobody():
+    failed = snap(at=40, committed=keys(*range(6)), reaudit_failed=True)
+    plan = x.plan_round(failed)
+    assert (plan.retire, plan.exclusions) == ("REAUDIT_FAILED", ())
+    assert list(plan.survivors) == [m.hotkey for m in ROSTER]
+    assert x.plan_round(replace(failed, reaudit_failed=False)).retire is None
+    assert x.plan_round(replace(failed, applied=True)).retire is None
+    cannot_carry = replace(failed, committed=keys(0, 1, 2), carries=lambda hotkeys: False)
+    assert x.plan_round(cannot_carry).retire == "INFEASIBLE"
+
+
+def test_a_failed_reaudit_outranks_a_missed_audit_window_and_books_the_blame_without_facts():
+    five = keys(0, 1, 2, 3, 4)
+    plan = x.plan_round(
+        snap(
+            at=S.absolute - 1, has_leases=False, committed=five, delivered=five, reaudit_failed=True
+        )
+    )
+    assert plan.retire == "REAUDIT_FAILED"
+    assert [(e.hotkey, e.record) for e in plan.exclusions] == [("h5", False)]

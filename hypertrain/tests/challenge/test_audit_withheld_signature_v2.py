@@ -18,13 +18,13 @@ from hypertrain.challenge import audit_cooldown_v2 as cooldown
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.messages import ReplayEnv, ReplayVerdict
 
+from . import test_service_network_v2 as fixtures
 from .audit_lease_fixture_v2 import (
     AUDITOR_A,
     AUDITOR_B,
     D_AUDIT,
     lease,
     lease_rounds,
-    miners,
     network,  # noqa: F401  (pytest fixture import)
     schedule,
     seed_round,
@@ -126,29 +126,6 @@ def withheld_in_the_last_window(network):
     return job
 
 
-def test_the_auditor_that_withheld_a_mismatch_is_not_handed_the_job_again_after_the_rearm(network):
-    store, run = network.store, network.manifest.run_id()
-    seed_round(network, n=1, gap=100)
-    schedule(network)
-    network.push(D_AUDIT + 1)
-    job = lease(network, A, 1).json()["body"]
-    assert job["lease_expires"] == job["absolute_deadline"] == D_AUDIT + 100
-    withhold(network, job)
-    network.push(D_AUDIT + 100)  # the only window ends with A holding the lease: a second opens
-    failure = store._record_v2(
-        run, "audit-attempt-failure", f"{job['job_id']}:{job['lease_nonce']}"
-    )
-    assert (failure["cause"], failure.get("withheld")) == ("AUDITOR_SILENT", "MISMATCH")
-    assert records(network, "excluded") == {}
-    ends = refused_until(lease(network, A, 2))
-    network.push(ends)  # A may lease again, but not this job
-    assert lease(network, A, 3).status_code == 204
-    second = lease(network, B, 4)
-    assert second.status_code == 200, second.text
-    body = second.json()["body"]
-    assert (body["job_id"], body["attempt"], body["auditor_id"]) == (job["job_id"], 1, B.ss58)
-
-
 def test_a_mismatch_withheld_in_the_last_window_still_gets_a_lease_for_the_other_auditor(network):
     job = withheld_in_the_last_window(network)
     row = lease_row(network, job["job_id"])
@@ -160,12 +137,18 @@ def test_a_mismatch_withheld_in_the_last_window_still_gets_a_lease_for_the_other
     assert second.status_code == 200, second.text
     body = second.json()["body"]
     assert (body["job_id"], body["attempt"]) == (job["job_id"], 1)
-    assert body["absolute_deadline"] == D_AUDIT + 300 + 2 * lease_rounds(
-        network
-    )  # the third window
+    # the window of the job began when A's lease ended (round 320) and lasts one lease
+    assert body["absolute_deadline"] == D_AUDIT + 300 + lease_rounds(network)
 
 
-def test_a_third_window_ends_the_job_as_soon_as_no_auditor_is_left_to_try(network):
+@pytest.fixture
+def wide_window(monkeypatch):
+    """The run is signed over a policy that pins the window of a 256 s replay: 171 rounds, which
+    is longer than one lease."""
+    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "reaudit_rounds", 171)
+
+
+def test_a_reaudit_window_fails_the_job_as_soon_as_no_auditor_is_left_to_try(wide_window, network):
     store, run = network.store, network.manifest.run_id()
     job = withheld_in_the_last_window(network)
     leased = lease(network, B, 2)
@@ -173,46 +156,15 @@ def test_a_third_window_ends_the_job_as_soon_as_no_auditor_is_left_to_try(networ
     second = leased.json()["body"]
     network.push(second["lease_expires"])  # B lapses too: A and B have both had the job
     row = lease_row(network, job["job_id"])
-    assert (row["state"], row["result"]) == ("exhausted", "AUDIT_INFRASTRUCTURE")
+    assert (row["state"], row["result"]) == ("exhausted", "REAUDIT_FAILED")
     assert row["absolute"] > second["lease_expires"]  # not left idle to the end of the window
-    assert records(network, "excluded") == {
-        f"0:{miners(1)[0].ss58}": {
-            "reason": "INFRASTRUCTURE",
-            "evidence_hash": sha256_hex(job["job_id"].encode()),
-        }
-    }
-    assert records(network, "exit-sanction") == {}
-    assert records(network, "audit-rearm")[job["job_id"]]["windows"] == 3  # and no fourth
-    assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 0
-
-
-def test_when_both_auditors_withhold_the_miner_is_dropped_once_and_never_sanctioned(network):
-    store, run = network.store, network.manifest.run_id()
-    seed_round(network, n=1, gap=200)
-    schedule(network)
-    with store._tx():  # two more jobs this test does not model: a double drop would be visible
-        finality = store._record_v2(run, "finality", "0")
-        finality["unresolved_audits"] = 3
-        store._put_record_v2(run, "finality", "0", finality)
-    first = lease(network, A, 1).json()["body"]
-    withhold(network, first)
-    network.push(first["lease_expires"])
-    second = lease(network, B, 2).json()["body"]
-    assert (second["job_id"], second["attempt"]) == (first["job_id"], 2)
-    withhold(network, second)
-    network.push(second["lease_expires"])  # attempt 2 is over: A and B both withheld
-    row = lease_row(network, first["job_id"])
-    assert (row["state"], row["result"]) == ("exhausted", "AUDIT_INFRASTRUCTURE")
-    assert records(network, "audit-rearm") == {}  # nobody is left to try in a second window
-    assert records(network, "excluded") == {
-        f"0:{miners(1)[0].ss58}": {
-            "reason": "INFRASTRUCTURE",
-            "evidence_hash": sha256_hex(first["job_id"].encode()),
-        }
-    }
-    assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 2
-    network.push(second["lease_expires"] + 1)
-    assert records(network, "exit-sanction") == {}
+    # the miner is not blamed: no exclusion, no sanction; the job stays counted and the reaper asks
+    # for the retirement of the round (the seeded round has no anchors to carry: it is refused
+    # there, and test_audit_reaudit_window_v2.py retires a round whose anchors exist)
+    assert (records(network, "excluded"), records(network, "exit-sanction")) == ({}, {})
+    assert records(network, "audit-rearm")[job["job_id"]]["windows"] == 2  # and no third
+    assert records(network, "round-exit")["0"]["state"] == "REAUDIT_FAILED"
+    assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 1
 
 
 @pytest.mark.parametrize("bars", [False, True])
@@ -241,6 +193,7 @@ def test_only_a_withheld_mismatch_counts_toward_the_bar(network, silence):
     if silence == "withheld-match":
         withhold(network, first, "MATCH")
     network.push(first["lease_expires"])
+    assert records(network, "reaudit") == {}  # only a withheld MISMATCH opens a re-audit window
     assert refused_until(lease(network, A, 2)) == first["lease_expires"] + lease_rounds(network)
     network.push(D_AUDIT + 200)  # the cooldown is over and the second window is open
     second = lease(network, A, 3).json()["body"]

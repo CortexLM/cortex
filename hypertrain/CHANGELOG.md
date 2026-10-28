@@ -287,13 +287,16 @@
   more; the admin routes remain. `ChallengeStore.release_due_v2` is one pass.
 - A `MISMATCH` the master replayed whose auditor signature is withheld (the lease ran out with the
   verdict stored) is re-audited by another auditor instead of ending as an `INFRASTRUCTURE` exclusion
-  with nobody else asked (A2W-23, D82). The re-arm kept `tried` empty, so the withholder was handed its
-  own job again: it now keeps the withholders, a job with a withheld `MISMATCH` may open a third window,
-  and a job with nobody left to try is exhausted at once. The miner is sanctioned only if the second
-  lease completes as `MISMATCH` (the existing D47 path); a `MATCH` clears it. The auditor that withholds
-  the signature of a `MISMATCH` for the third time in a run is refused new leases for two absolute
-  windows (`WITHHELD_STRIKES`, `STRIKE_BAR_ABSOLUTE_WINDOWS`, `WITHHELD_EXTRA_WINDOWS` in
-  `challenge/audit_cooldown_v2.py`). No wire message changes; `implementation_hash` does not change. See
+  with nobody else asked (A2W-23, D82, D84). The job gets a re-audit window of its own that starts at
+  the detection (the round the lease ended at, never the round that noticed it), lasts the audit
+  policy's `reaudit_rounds` and never outlasts the miner's commit; the withholders stay in `tried`. The
+  miner is sanctioned only if the second lease completes as `MISMATCH` (the existing D47 path); a `MATCH`
+  clears it; if the second auditor fails too, or nobody can serve the window, the round is retired
+  (`REAUDIT_FAILED`) and nobody is sanctioned. A service-admitted run has no window. The auditor that
+  withholds the signature of a `MISMATCH` for the third time in a run is refused new leases for two
+  absolute windows (`WITHHELD_STRIKES`, `STRIKE_BAR_ABSOLUTE_WINDOWS` in
+  `challenge/audit_cooldown_v2.py`). `exit_v2` gains `Wait.REAUDIT`, `reaudit_until` and the retirement
+  cause. No wire message changes; `implementation_hash` does not change. See
   `docs/adr/0011-audit-integrity.md` (Part 9) at the monorepo root.
 - A lease whose verdict the master stored and whose holder did not sign it within
   `SIGN_WINDOW_ROUNDS` (20, 60 s) of the storing is taken back at that round instead of at its

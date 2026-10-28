@@ -578,6 +578,10 @@ def fixture_beacon(number):
     return {"round": b.round, "signature": b.signature, "randomness": b.randomness}
 
 
+# Fields a test adds to the audit policy of the `network` fixture (monkeypatch.setitem).
+AUDIT_POLICY_EXTRA: dict[str, int] = {}
+
+
 @pytest.fixture
 def network(tmp_path: Path, request):
     from hypertrain.beacon.core import BeaconRound
@@ -666,6 +670,7 @@ def network(tmp_path: Path, request):
         max_queued_jobs=32,
         max_anchor_age_rounds=1,
         max_steps_per_attempt=2 * s.manifest.training.inner.H,
+        **AUDIT_POLICY_EXTRA,
     )
     dispute = DisputePolicyV2(
         referees=[REFEREE.ss58],

@@ -367,6 +367,7 @@ L="docker exec -i hypertrain-test-challenge python -I - --master http://127.0.0.
 O=hypertrain/scripts/ops/live_operator.py
 ssh root@s100 "$L open --w 0 --hotkey H0 --hotkey H1 --hotkey H2 --hotkey H3 --tolerate 0 \
   --offsets 3,6,80,82,150,180" < $O     # gap 98: one lease window; end with 282 (gap 200) to fit a replacement lease
+# the 101 M run: gap 200, e.g. --offsets 150,300,900,1000,1020,1200 (the launcher's default is gap 100)
 ATEN_CPU_CAPABILITY=avx2 $PY -I $T/cpu_miners.py round DIR 0 0 1 2 3   # one miner at a time
 ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID 0" < $T/round_status.py
 ssh root@s100 "$L audits --w 0" < $O     # once now >= d_audit
@@ -384,6 +385,17 @@ live, so no window can start after that round; the miner is left out of the roun
 `INFRASTRUCTURE`, no sanction). With a gap of 101 to 200 rounds a second auditor can take the job
 inside the same window, and a job whose attempts fail early gets a second window that ends at
 `d_final` (`audit-rearm`).
+
+**A withheld `MISMATCH` needs room for a second replay.** An auditor that does not sign the verdict the
+master stored (20 rounds after the storing, or at the lease's end) makes the job open a re-audit window of
+its own for the other auditor, from that round to the policy's `reaudit_rounds` later, never past the
+miner's commit (`d_final`). The second auditor must be leased, replay and sign before `d_final`: with R the
+replay in rounds (3 s each) that needs `gap >= 1 + x + min(100, R + 20) + p + R + m`, x being the rounds from
+`d_audit` to the first lease, p the second auditor's wait after the detection and m about 4. At gap 200 the
+slack for x + p is 83 rounds for a 144 s replay, 45 for 200 s and 13 for 256 s; with the auditors' poll of
+20 s (`scripts/ops/auditors.sh`, up to 7 rounds each for x and p) 256 s does not fit, so run `audits` at
+`d_audit` exactly and poll every 5 s at most. At gap 100 nothing fits (144 s needs 117). When the second
+auditor does not come in time the round is retired without a sanction (ADR 0011 Part 9, decision 12).
 `live_operator.py open` accepts any gap from 2 to 200 rounds for every H; 200 is the service
 horizon (`store.py:5109`). A round with a wider gap closes later: 100 more rounds (5 minutes) per
 extra 100.

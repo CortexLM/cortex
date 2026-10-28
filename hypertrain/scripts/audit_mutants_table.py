@@ -14,20 +14,14 @@ WORKER = "src/hypertrain/auditor/worker.py"
 STORE = "src/hypertrain/challenge/store.py"
 MESSAGES = "src/hypertrain/protocol/messages_v2.py"
 COOLDOWN = "src/hypertrain/challenge/audit_cooldown_v2.py"
+EXIT = "src/hypertrain/challenge/exit_v2.py"
 CHEATS = "tests/audit_cheaters/test_cheats_audit.py::test_cheat_is_mismatch_at_the_expected_leaf"
 WITHHELD = "tests/challenge/test_audit_withheld_signature_v2.py::"
-NOT_HANDED_AGAIN = (
-    WITHHELD
-    + "test_the_auditor_that_withheld_a_mismatch_is_not_handed_the_job_again_after_the_rearm"
-)
 LAST_WINDOW = (
     WITHHELD
     + "test_a_mismatch_withheld_in_the_last_window_still_gets_a_lease_for_the_other_auditor"
 )
-NOBODY_LEFT = WITHHELD + "test_a_third_window_ends_the_job_as_soon_as_no_auditor_is_left_to_try"
-BOTH_WITHHOLD = (
-    WITHHELD + "test_when_both_auditors_withhold_the_miner_is_dropped_once_and_never_sanctioned"
-)
+NOBODY_LEFT = WITHHELD + "test_a_reaudit_window_fails_the_job_as_soon_as_no_auditor_is_left_to_try"
 NTH_BARS = WITHHELD + "test_the_nth_withheld_mismatch_bars_the_auditor_and_the_one_before_does_not"
 ONLY_MISMATCH = WITHHELD + "test_only_a_withheld_mismatch_counts_toward_the_bar"
 BAR_LENGTHS = (
@@ -79,8 +73,47 @@ WINDOW_RANGE = (
 WINDOW_FORMULA = (
     POLICY + "test_the_published_reaudit_window_is_twice_the_measured_replay_in_beacon_rounds"
 )
+REAUDIT = "tests/challenge/test_audit_reaudit_window_v2.py::"
+WINDOW_AT_DETECTION = (
+    REAUDIT + "test_the_window_starts_at_the_detection_not_at_the_lease_and_ends_with_the_commit"
+)
+SECOND_FAILS = (
+    REAUDIT + "test_the_second_auditor_withholding_too_retires_the_round_and_blames_nobody"
+)
+UNUSED_WINDOW = (
+    REAUDIT + "test_a_window_nobody_uses_ends_in_a_retirement_at_its_bound_and_not_before"
+)
+COMMIT_ENDS = (
+    REAUDIT
+    + "test_a_commit_that_ends_before_the_window_can_open_retires_the_round_at_the_detection"
+)
+LATE_OBSERVATION = REAUDIT + "test_a_late_observation_leaves_the_window_where_the_detection_put_it"
+NOTICED_AFTER = (
+    REAUDIT + "test_a_detection_noticed_after_its_window_is_over_fails_the_job_without_leasing_it"
+)
+MINER_IS_AUDITOR = (
+    REAUDIT
+    + "test_a_miner_that_is_the_only_other_auditor_cannot_be_re_audited_and_the_round_is_retired"
+)
+SERVICE_RUN = (
+    REAUDIT + "test_a_service_admitted_run_opens_no_window_and_keeps_the_infrastructure_drop"
+)
+PLAN = "tests/challenge/test_exit_plan_v2.py::"
+PLAN_FAILED = PLAN + "test_a_failed_reaudit_retires_a_round_that_can_still_carry_and_blames_nobody"
+PLAN_BOUND = (
+    PLAN + "test_the_reaudit_wait_ends_one_window_of_its_rounds_after_the_second_audit_window"
+)
+PLAN_COMMIT = PLAN + "test_a_reaudit_window_never_outlives_its_wait_or_the_commit"
+RETIRE = (
+    "tests/challenge/test_retire_round_v2.py::"
+    "test_a_round_is_retired_for_a_failed_reaudit_only_when_a_job_of_it_failed"
+)
 SERVICE_ACCEPTS = "tests/ops/test_manifest_v2.py::test_build_then_service_accepts"
 BUILD_REFUSES = "tests/ops/test_manifest_v2.py::test_build_refuses_invalid_inputs"
+FAIL_REAUDIT = (
+    "            self._fail_reaudit_v2(row)  "
+    "# the second auditor failed too: the round, not the miner\n"
+)
 REAUDIT_FIELD = (
     "    reaudit_rounds: Annotated[StrictInt, Field(ge=2, le=2**53 - 1)] | None = Field(\n"
     "        default=None, exclude_if=lambda v: v is None\n    )\n"
@@ -123,25 +156,35 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         (f"{CHEATS}[commit-lie-ef-out-hash]",),
     ),
     (
-        "re-audit skipped: the re-arm ignores the auditors that withheld",
+        "re-audit skipped: a withheld MISMATCH is retired as an ordinary lapse",
+        STORE,
+        '        if failure.get("withheld") == "MISMATCH" and '
+        "self._reaudit_wanted_v2(run_id, row):\n"
+        "            self._open_reaudit_v2(run_id, row, now)\n"
+        "            return\n",
+        "",
+        (WINDOW_AT_DETECTION, SECOND_FAILS),
+    ),
+    (
+        "withholders forgotten when the window opens: nobody is excluded from the job",
         STORE,
         '        withholders = self._withholders_v2(run_id, row["id"])\n',
         "        withholders: set[str] = set()\n",
-        (NOT_HANDED_AGAIN, LAST_WINDOW, NOBODY_LEFT),
+        (NOT_AGAIN, LAST_WINDOW, NOBODY_LEFT),
     ),
     (
-        "same auditor allowed: the re-arm forgets who withheld",
+        "same auditor allowed: the window forgets who withheld",
         STORE,
-        '(_dumps(sorted(withholders)), now, absolute, _dumps(signed), row["id"])',
-        '("[]", now, absolute, _dumps(signed), row["id"])',
-        (NOT_HANDED_AGAIN, LAST_WINDOW),
+        '(_dumps(sorted(withholders)), until, _dumps(signed), row["id"])',
+        '("[]", until, _dumps(signed), row["id"])',
+        (NOT_AGAIN, LAST_WINDOW),
     ),
     (
         "the withheld MISMATCH is not recorded on the failure row",
         STORE,
         '                failure["withheld"] = stored\n',
         "                pass\n",
-        (NOT_HANDED_AGAIN, LAST_WINDOW, NTH_BARS + "[True]"),
+        (WINDOW_AT_DETECTION, LAST_WINDOW, NTH_BARS + "[True]"),
     ),
     (
         "sanction on first detection: the lapse books the miner",
@@ -154,7 +197,7 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         "                    f\"{row['w']}:{row['hotkey']}\",\n"
         '                    {"state": "PENDING", "blame": "MINER", "auditor": row["auditor"]},\n'
         "                )\n",
-        (LAST_WINDOW, BOTH_WITHHOLD),
+        (LAST_WINDOW, WINDOW_AT_DETECTION),
     ),
     (
         "strike counter off by one: the bar starts after the third",
@@ -199,26 +242,19 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         (NTH_BARS + "[False]",),
     ),
     (
-        "extra window removed: a withheld MISMATCH in the last window is dropped",
-        STORE,
-        "extra = audit_cooldown_v2.WITHHELD_EXTRA_WINDOWS if withholders else 0",
-        "extra = 0",
-        (LAST_WINDOW,),
-    ),
-    (
         "nobody-left rule removed: the job idles in a window nobody can serve",
         STORE,
         '            or not self._auditors_left_v2(run_id, row, json.loads(row["tried"]))\n',
         "",
-        (NOBODY_LEFT,),
+        (NOBODY_LEFT, SECOND_FAILS),
     ),
     (
-        "re-arm with nobody left to try the job",
+        "window opened for nobody: the miner is the only other auditor",
         STORE,
-        "        if withholders and not self._auditors_left_v2(run_id, row, withholders):\n"
-        "            return False\n",
-        "",
-        (BOTH_WITHHOLD,),
+        "        if until <= max(detected, now) + 1 or "
+        "not self._auditors_left_v2(run_id, row, withholders):\n",
+        "        if until <= max(detected, now) + 1:\n",
+        (MINER_IS_AUDITOR,),
     ),
     (
         "sign window counted from the claim, not from the stored verdict",
@@ -321,5 +357,105 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         "return max(lease_rounds, -(-2 * replay_seconds // BEACON_PERIOD_SECONDS))",
         "return max(lease_rounds, 2 * replay_seconds // BEACON_PERIOD_SECONDS)",
         (WINDOW_FORMULA + "[200-134]", WINDOW_FORMULA + "[256-171]"),
+    ),
+    (
+        "window from the lease open: the detection is the claim plus one lease",
+        STORE,
+        "        detected = self._lease_end_v2(run_id, row)\n",
+        '        detected = int(row["expires"]) - policy.lease_rounds\n',
+        (WINDOW_AT_DETECTION, LATE_OBSERVATION),
+    ),
+    (
+        "window opened at the observation: the detection is the round that noticed it",
+        STORE,
+        "        detected = self._lease_end_v2(run_id, row)\n",
+        "        detected = now\n",
+        (LATE_OBSERVATION, NOTICED_AFTER),
+    ),
+    (
+        "no bound: the window of a re-audit never ends",
+        STORE,
+        '(_dumps(sorted(withholders)), until, _dumps(signed), row["id"])',
+        '(_dumps(sorted(withholders)), 10**9, _dumps(signed), row["id"])',
+        (UNUSED_WINDOW, WINDOW_AT_DETECTION),
+    ),
+    (
+        "window ignores the commit: it outlasts the expiry of what it audits",
+        EXIT,
+        "    return min(commit_exp, max(detected + reaudit_rounds, absolute))\n",
+        "    return max(detected + reaudit_rounds, absolute)\n",
+        (WINDOW_AT_DETECTION + "[clipped-by-the-commit]", COMMIT_ENDS, PLAN_COMMIT),
+    ),
+    (
+        "window refused when the detection plus the window is past the commit",
+        STORE,
+        "        if until <= max(detected, now) + 1 or "
+        "not self._auditors_left_v2(run_id, row, withholders):\n",
+        "        if until <= max(detected, now) + 1 or detected + policy.reaudit_window() > "
+        "sealed.exp_drand or not self._auditors_left_v2(run_id, row, withholders):\n",
+        (WINDOW_AT_DETECTION + "[clipped-by-the-commit]",),
+    ),
+    (
+        "a window with no rounds left is leased: the guard on the round that notices it is gone",
+        STORE,
+        "        if until <= max(detected, now) + 1 or "
+        "not self._auditors_left_v2(run_id, row, withholders):\n",
+        "        if until <= detected + 1 or "
+        "not self._auditors_left_v2(run_id, row, withholders):\n",
+        (NOTICED_AFTER,),
+    ),
+    (
+        "sanction on the second failure: the failed re-audit books the miner",
+        STORE,
+        FAIL_REAUDIT,
+        "            self._fail_reaudit_v2(row)\n"
+        "            self._put_record_v2(\n"
+        '                run_id,\n                "exit-sanction",\n'
+        "                f\"{row['w']}:{row['hotkey']}\",\n"
+        '                {"state": "PENDING", "blame": "MINER", "auditor": row["auditor"]},\n'
+        "            )\n",
+        (SECOND_FAILS, UNUSED_WINDOW),
+    ),
+    (
+        "funnel removed: the second failure re-arms the job instead of failing it",
+        STORE,
+        "        if self._reaudit_v2(run_id, row) is not None:\n"
+        + FAIL_REAUDIT
+        + "            return\n",
+        "",
+        (SECOND_FAILS, UNUSED_WINDOW),
+    ),
+    (
+        "planner ignores a failed re-audit",
+        EXIT,
+        "    elif s.reaudit_failed:\n",
+        "    elif False:\n",
+        (PLAN_FAILED, SECOND_FAILS),
+    ),
+    (
+        "retirement does not re-derive a failed re-audit from the rows",
+        STORE,
+        "            if not self._failed_reaudits_v2(run_id, w):\n"
+        '                raise refuse("no re-audit of the round has failed")\n',
+        "            pass\n",
+        (RETIRE,),
+    ),
+    (
+        "the wait for a re-audit ends with the second audit window",
+        EXIT,
+        "        return self.audits_end + self.reaudit_rounds\n",
+        "        return self.audits_end\n",
+        (PLAN_BOUND,),
+    ),
+    (
+        "a service-admitted run opens a window it could not retire a round for",
+        STORE,
+        "            and not self._db.execute(\n"
+        '                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='
+        "'service-admission' AND id='run'\",\n"
+        "                (run_id,),\n"
+        "            ).fetchone()\n",
+        "",
+        (SERVICE_RUN,),
     ),
 )
