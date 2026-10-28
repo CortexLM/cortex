@@ -142,7 +142,7 @@ def build_template(tmp_path_factory: pytest.TempPathFactory) -> Template:
 class Restored:
     """A bare root ChallengeStore on a private copy of the template, with a TimedRLock."""
 
-    def __init__(self, template: Template, directory: Path) -> None:
+    def __init__(self, template: Template, directory: Path, *, warm_services: bool = True) -> None:
         shutil.copytree(template.snapshot, directory)
         self.manifest = template.manifest
         self.run: str = template.manifest.run_id()
@@ -162,8 +162,9 @@ class Restored:
         self.set_clock(self.now)
         # A cold store builds its services lazily and its first call opens a transaction of its
         # own, which fails inside aggregate_v2's: build them outside any transaction, as the
-        # requests of a running process always have.
-        self.store._services(self.run)
+        # requests of a running process always have. A test of the cold store passes False.
+        if warm_services:
+            self.store._services(self.run)
 
     def set_clock(self, number: int) -> None:
         """The wall clock as if drand round `number` had just been emitted (see Network.push)."""
