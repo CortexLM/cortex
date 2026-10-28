@@ -5,14 +5,17 @@ with this venv's python (no uv, no network) and can fail on the Nth call, so a f
 first stage is injected without touching the builder; it also keeps the training body that the
 manifest stage is given. HT_D20_GEOMETRY=tiny-cpu keeps a full build to a few seconds; the relay key
 is a throwaway public address made here. The dense-1b geometry is built only up to its first stage:
-its manifest stage would initialise 889M parameters.
+its manifest stage would initialise 889M parameters. The dense-0.1b geometry (100,676,352 params)
+is built in full and read back the way the master's run creation reads it.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import secrets
+import shutil
 import signal
 import stat
 import subprocess
@@ -22,14 +25,38 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
+from hypertrain.data.store import LocalFSStore
+from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.env_pins import EnvPin
+from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.keys import Keypair
+from hypertrain.protocol.messages import f32hex
+from hypertrain.protocol.messages_v2 import AuditPolicyV2, EconomicsPolicyV2, RunManifestV2
+from hypertrain.trainer.config import ModelConfig
+from hypertrain.trainer.model import param_shapes
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER = ROOT / "scripts/b300/d20/build_test_manifest.sh"
 DIGEST = "sha256:" + "cd" * 32
+
+# The training.json model fields the dense-0.1b build takes from its registry row.
+ROW_FIELDS = (
+    "arch",
+    "n_layers",
+    "d_model",
+    "n_heads",
+    "n_kv_heads",
+    "d_ff",
+    "n_experts",
+    "top_k_experts",
+    "vocab",
+    "seq_len",
+    "compute_dtype",
+    "param_count",
+)
 
 # `uv run --no-sync python ARGS` is the only call the builder makes; the Nth can be made to fail.
 FAKE_UV = r"""#!/usr/bin/env bash
@@ -97,10 +124,11 @@ def build(
     sm_count: str = "170",
     exp_round: str | None = None,
     env: dict[str, str] | None = None,
+    builder: Path = BUILDER,
 ) -> subprocess.CompletedProcess[str]:
     args = [image, driver, sm_count, str(out), *([exp_round] if exp_round is not None else [])]
     return subprocess.run(
-        [str(BUILDER), *args],
+        [str(builder), *args],
         env={**host, **(env or {})},
         capture_output=True,
         text=True,
@@ -256,6 +284,9 @@ def test_a_good_build_keeps_private_seeds_and_the_outputs_and_prints_no_seed(hos
         out / "out/manifest-envelope.json"
     ).is_file()
     assert (out / "state").is_dir()
+    policies = json.loads((out / "inputs/policies.json").read_text())
+    assert policies["admission"]["work_screen_epoch_rounds"] == 6000  # only dense-0.1b widens it
+    assert not {"reaudit_rounds", "gap_cap_rounds"} & policies["audit"].keys()  # nor sets these
     written = [
         p.read_bytes()
         for d in ("inputs", "out", "state")
@@ -349,6 +380,317 @@ def test_a_cpu_build_pins_gpu_none_and_the_dry_run_reports_the_pin(host, tmp_pat
         True,
         True,
     ]
+
+
+def accepted_manifest(out: Path) -> tuple[RunManifestV2, AuditPolicyV2]:
+    """The built run as `POST /v2/admin/runs` takes it (store._create_run_v2 minus the database):
+    the owner-signed envelope through the intake, the run id it names, and the audit policy object
+    it pins, validated against the training."""
+    owner = json.loads((out / "inputs/public-keys.json").read_bytes())["owner"]
+    raw = (out / "out/manifest-envelope.json").read_bytes()
+    env = envelope_v2.parse_envelope(raw)
+    manifest = envelope_v2.Intake(env.run_id, {"RunManifestV2": owner.__eq__}).accept(raw, 1)
+    assert isinstance(manifest, RunManifestV2)
+    assert (
+        manifest.run_id()
+        == env.run_id
+        == json.loads((out / "out/index.json").read_bytes())["run_id"]
+    )
+    objects = LocalFSStore(out / "state/objects")
+    economics = EconomicsPolicyV2.model_validate_json(
+        objects.get(manifest.network.economics_policy_hash)
+    )
+    audit = AuditPolicyV2.model_validate_json(objects.get(manifest.network.audit_policy_hash))
+    assert audit.digest() == manifest.network.audit_policy_hash
+    audit.validate_training(manifest.training, ledger_mode=economics.ledger_mode)
+    return manifest, audit
+
+
+def production_build(out: Path, scratch: Path) -> subprocess.CompletedProcess[str]:
+    """The build's own inputs given to its manifest stage (`ops/manifest_v2.py build`) again, with
+    the economics policy turned into a production one (which pins no genesis allocation)."""
+    policies = json.loads((out / "inputs/policies.json").read_bytes())
+    policies["economics"].update(ledger_mode="production", genesis_allocation_hash=None)
+    (scratch / "policies.json").write_text(json.dumps(policies))
+    inputs = out / "inputs"
+    return subprocess.run(
+        [
+            *(sys.executable, "-I", "-m", "hypertrain.ops.manifest_v2", "build"),
+            *("--training", str(inputs / "training.json")),
+            *("--policies", str(scratch / "policies.json")),
+            *("--relays", str(inputs / "relays.json")),
+            *("--owner-seed", str(out / "secrets/owner.seed")),
+            *("--exp-round", (inputs / "exp-round.txt").read_text().strip()),
+            *("--out", str(scratch / "out")),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+
+@pytest.mark.parametrize(
+    ("replay", "reaudit", "gap_needed", "cap"),
+    [(144, 100, 175, None), (256, 171, 276, 276)],
+    ids=["replay_144s_fits_the_default_cap", "replay_256s_raises_the_cap"],
+)
+def test_a_dense_0_1b_build_writes_the_registry_row_and_a_wide_screen_window(
+    host, tmp_path, replay, reaudit, gap_needed, cap
+):
+    out = tmp_path / "out"
+
+    run = build(
+        host,
+        out,
+        driver="595.91.07",
+        sm_count="148",
+        env={"HT_D20_GEOMETRY": "dense-0.1b", "HT_D20_REPLAY_SECONDS": str(replay)},
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert uv_calls(host) == 3
+    training = json.loads((out / "inputs/training.json").read_text())
+    assert {k: v for k, v in training["model"].items() if k in ROW_FIELDS} == {
+        "arch": "decoder",
+        "n_layers": 8,
+        "d_model": 768,
+        "n_heads": 12,
+        "n_kv_heads": 4,
+        "d_ff": 2048,
+        "n_experts": 1,
+        "top_k_experts": 1,
+        "vocab": 32768,
+        "seq_len": 2048,
+        "compute_dtype": "bf16",
+        "param_count": 100_676_352,
+    }
+    inner = training["inner"]
+    assert {k: inner[k] for k in ("H", "J", "micro_batch", "grad_accum", "opt")} == {
+        "H": 4,
+        "J": 4,
+        "micro_batch": 2,
+        "grad_accum": 1,
+        "opt": "adamw",
+    }
+    assert (inner["state_policy"], inner["rewarmup_steps"]) == ("reset", 0)  # the 8 P job inputs
+    assert inner["lr_schedule"] == {
+        "type": "wsd",
+        "peak_lr": f32hex(3e-3),
+        "warmup": 2,
+        "stable": 100000,
+        "decay": 0,
+    }
+    outer = training["outer"]  # dense-int8 at full density: the 1.016 P delta of the budget
+    assert (outer["opt"], outer["bits"], outer["topk_frac"], outer["ef_beta"]) == (
+        "nesterov",
+        8,
+        f32hex(1.0),
+        f32hex(0.0),
+    )
+    dataset = training["dataset"]
+    samples = (out / "inputs/samples.u32").read_bytes()
+    rows = np.frombuffer(samples, dtype="<u4").reshape(4096, 2049)
+    assert dataset["n_samples"] == 4096 and dataset["depth"] == 12
+    assert rows.max() < 32768  # every id is inside the vocab
+    assert dataset["merkle_root"] == MerkleTree([r.tobytes() for r in rows]).root.hex()
+    assert (
+        dataset["shard_sha256_root"] == MerkleTree([bytes.fromhex(sha256_hex(samples))]).root.hex()
+    )
+    assert training["reference_spec"]["layout"]["n_gpus"] == 1
+    assert training["reference_spec"]["driver_allowlist"] == ["595.91.07"]
+    policies = json.loads((out / "inputs/policies.json").read_text())
+    assert policies["admission"]["work_screen_epoch_rounds"] == 20000
+    assert (
+        policies["audit"]["lease_rounds"] == 100 and policies["audit"]["max_steps_per_attempt"] == 8
+    )
+    assert '"param_count": 100676352' in run.stdout
+    # ADR 0011 Part 9 decision 12 (D84, D88): twice the measured replay at 3 s a round, floored at
+    # the lease; the cap is raised to the gap that window needs only when 200 rounds cannot hold it.
+    manifest, audit = accepted_manifest(out)
+    assert (audit.lease_rounds, audit.reaudit_rounds, audit.gap_cap_rounds) == (100, reaudit, cap)
+    pin = manifest.training.reference_spec.env.pinned
+    assert pin is not None and (pin.cpu, pin.gpu) == ("avx2", "sm_103")  # 148 SM: the B300 class
+    report = json.loads(run.stdout[run.stdout.rindex("\n{\n") + 1 :])
+    assert report["audit"] == {
+        "lease_rounds": 100,
+        "reaudit_rounds": reaudit,
+        "gap_needed": gap_needed,
+        "gap_cap": cap or 200,
+    }
+    assert all(report["checks"].values()) and "gap_cap_holds_the_reaudit_window" in report["checks"]
+    # D88: the same inputs over a production ledger publish only while the cap stays at 200.
+    scratch = tmp_path / "production"
+    scratch.mkdir()
+    production = production_build(out, scratch)
+    if cap is None:
+        assert production.returncode == 0, production.stderr
+    else:
+        assert production.returncode == 2 and not (scratch / "out").exists()
+        assert "gap_cap_rounds above 200 is for a TEST manifest only" in production.stderr
+
+
+def test_the_rebuild_with_the_measured_replay_changes_only_the_audit_window(host, tmp_path):
+    # The runbook's two builds: a throw-away warm-up run at the 300 s ceiling, then the real run
+    # from the measured replay, over the same seeds, image and expiry. Only the audit policy (and so
+    # the run id) may differ, or the warm-up would not have measured the run that is published.
+    dense = {"HT_D20_GEOMETRY": "dense-0.1b"}
+    warmup, real = tmp_path / "warmup", tmp_path / "real"
+    args = {"driver": "595.91.07", "sm_count": "148", "exp_round": "34310319"}
+
+    first = build(host, warmup, env={**dense, "HT_D20_REPLAY_SECONDS": "300"}, **args)
+    assert first.returncode == 0, first.stderr
+    (real / "secrets").mkdir(parents=True, mode=0o700)
+    for seed in seed_files(warmup / "secrets"):
+        shutil.copy(seed, real / "secrets" / seed.name)
+    second = build(host, real, env={**dense, "HT_D20_REPLAY_SECONDS": "144"}, **args)
+    assert second.returncode == 0, second.stderr
+
+    def read(out: Path, name: str) -> dict[str, Any]:
+        body = json.loads((out / name).read_bytes())
+        assert isinstance(body, dict)
+        return body
+
+    assert (warmup / "inputs/training.json").read_bytes() == (
+        real / "inputs/training.json"
+    ).read_bytes()
+    policies = [read(out, "inputs/policies.json") for out in (warmup, real)]
+    windows = [
+        {k: p["audit"].pop(k, None) for k in ("reaudit_rounds", "gap_cap_rounds")} for p in policies
+    ]
+    assert windows == [
+        {"reaudit_rounds": 200, "gap_cap_rounds": 305},
+        {"reaudit_rounds": 100, "gap_cap_rounds": None},
+    ]
+    assert policies[0] == policies[1]
+    manifests = [read(out, "out/manifest.json") for out in (warmup, real)]
+    assert manifests[0]["training"] == manifests[1]["training"]  # image, model and init state
+    networks = [
+        {k: v for k, v in m["network"].items() if k != "audit_policy_hash"} for m in manifests
+    ]
+    assert networks[0] == networks[1]
+    assert (
+        manifests[0]["network"]["audit_policy_hash"] != manifests[1]["network"]["audit_policy_hash"]
+    )
+
+
+def test_a_replay_above_the_300_s_ceiling_is_refused_by_the_manifest_stage(host, tmp_path):
+    # 301 s asks a re-audit window of 201 rounds, past two leases: validate_training refuses it in
+    # the manifest stage and the build removes what it made (the runbook's STOP).
+    out = tmp_path / "out"
+
+    run = build(
+        host,
+        out,
+        driver="595.91.07",
+        sm_count="148",
+        env={"HT_D20_GEOMETRY": "dense-0.1b", "HT_D20_REPLAY_SECONDS": "301"},
+    )
+
+    assert run.returncode != 0 and uv_calls(host) == 2
+    assert "re-audit window must be between one and two leases" in run.stderr
+    assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    ("env", "named"),
+    [
+        ({"HT_D20_GEOMETRY": "dense-0.1b"}, "HT_D20_REPLAY_SECONDS: dense-0.1b has no default"),
+        (
+            {"HT_D20_GEOMETRY": "dense-0.1b", "HT_D20_REPLAY_SECONDS": "0"},
+            "HT_D20_REPLAY_SECONDS: dense-0.1b has no default",
+        ),
+        (
+            {"HT_D20_GEOMETRY": "dense-0.1b", "HT_D20_REPLAY_SECONDS": "144.5"},
+            "HT_D20_REPLAY_SECONDS: dense-0.1b has no default",
+        ),
+        (
+            {"HT_D20_GEOMETRY": "dense-1b", "HT_D20_REPLAY_SECONDS": "144"},
+            "HT_D20_REPLAY_SECONDS is read by dense-0.1b only",
+        ),
+    ],
+    ids=["missing", "zero", "not_whole_seconds", "another_geometry"],
+)
+def test_a_dense_0_1b_build_without_a_measured_replay_is_refused_before_anything_runs(
+    host, tmp_path, env, named
+):
+    # The replay enters the run id through reaudit_rounds: no default is ever signed in its place.
+    out = tmp_path / "out"
+
+    run = build(host, out, driver="595.91.07", sm_count="148", env=env)
+
+    assert run.returncode == 2 and named in run.stderr
+    assert not out.exists() and uv_calls(host) == 0
+
+
+def row_with_count(count: int) -> dict[str, object]:
+    """A one-layer decoder row, two wide, whose shape-only parameter count is exactly `count`.
+
+    It has 4 * vocab + 22 + 6 * d_ff parameters, so d_ff 1..4 settles the residue of the vocab."""
+    for d_ff in range(1, 5):
+        rest = count - 22 - 6 * d_ff
+        if rest % 4 == 0:
+            row: dict[str, object] = {
+                "n_layers": 1,
+                "d_model": 2,
+                "n_heads": 1,
+                "n_kv_heads": 1,
+                "d_ff": d_ff,
+                "n_experts": 1,
+                "top_k_experts": 1,
+                "seq_len": 2,
+                "vocab": rest // 4,
+                "compute_dtype": "bf16",
+            }
+            shapes = param_shapes(ModelConfig(**row))  # type: ignore[arg-type]
+            assert sum(math.prod(shape) for shape in shapes.values()) == count
+            return row
+    raise AssertionError(f"no row with {count} parameters")
+
+
+@pytest.mark.parametrize(
+    ("count", "accepted"),
+    [
+        (99_999_998, False),
+        (100_000_000, True),
+        (300_000_000, True),
+        (300_000_002, False),
+    ],
+    ids=["just_below", "lower_bound", "upper_bound", "just_above"],
+)
+def test_the_dense_0_1b_row_must_stay_inside_the_inclusive_100_to_300_million_band(
+    host, tmp_path, count, accepted
+):
+    # The row is read from the checkout the builder sits in, so the builder runs from a copy
+    # whose scripts/mfu_profiles.json holds the row under test. Call 2 of uv (the manifest build,
+    # which would initialise the model) is made to fail: reaching it means the band let the row in.
+    root = tmp_path / "checkout"
+    builder = root / "scripts/b300/d20/build_test_manifest.sh"
+    builder.parent.mkdir(parents=True)
+    shutil.copy(BUILDER, builder)
+    row = row_with_count(count)
+    (root / "scripts/mfu_profiles.json").write_text(
+        json.dumps({"profiles": {"mfu-dense-0.1b": {"model": row}}})
+    )
+    out = tmp_path / "out"
+
+    env = {"HT_D20_GEOMETRY": "dense-0.1b", "HT_D20_REPLAY_SECONDS": "144", "FAKE_UV_FAIL_ON": "2"}
+    run = build(host, out, env=env, builder=builder)
+
+    if accepted:
+        assert run.returncode == 9 and uv_calls(host) == 2, run.stderr
+    else:
+        assert run.returncode not in (0, 9) and uv_calls(host) == 1
+        assert f"has {count} parameters, outside the band 100000000..300000000" in run.stderr
+        assert not out.exists()
+
+
+def test_an_unknown_geometry_is_refused_and_the_known_ones_are_named(host, tmp_path):
+    out = tmp_path / "out"
+
+    run = build(host, out, env={"HT_D20_GEOMETRY": "dense-0.2b"})
+
+    assert run.returncode == 2 and "dense-1b, dense-0.1b or tiny-cpu" in run.stderr
+    assert not out.exists() and uv_calls(host) == 0
 
 
 def fake_output(out: Path, layout: str = "full") -> list[str]:

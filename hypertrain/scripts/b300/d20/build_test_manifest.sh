@@ -27,15 +27,27 @@
 # HT_D20_GEOMETRY=dense-1b (default): the dense-1b-bf16 qualification geometry
 # (scripts/mfu_profiles.json mfu-dense-1b, H=8 J=4 micro_batch=2 warmup=2 lr=3e-3, dense-int8),
 # layout pp=1 ep=1 dp=2 n_gpus=2, a synthetic 4096-sample u32 fixture (no quality claim).
+# HT_D20_GEOMETRY=dense-0.1b: the intermediate TEST model of D68 (ADR 0015), 100,676,352 parameters,
+# read from the row mfu-dense-0.1b of scripts/mfu_profiles.json (8 layers, d_model 768, seq 2048,
+# bf16), layout n_gpus=1, H=J=4 micro_batch=2 (two checkpoints per result), the dense-1b fixture
+# of 4096 samples and work_screen_epoch_rounds 20000 (the other geometries keep 6000). The build
+# refuses a row whose shape-only parameter count leaves the band 100,000,000..300,000,000.
+# HT_D20_REPLAY_SECONDS (required for dense-0.1b, refused for the others): the MEASURED warm audit
+# replay of that model in whole seconds, the max of at least 3 warm replays on the B300 that audits
+# it (docs/runbooks/intermediate-model-replay.md), never an estimate: it enters the run id. The
+# audit policy signs reaudit_rounds = reaudit_rounds_for(replay, 100) and, when the re-audit window
+# needs a d_final - d_audit above the default cap of 200 rounds (a replay above 174 s), sets
+# gap_cap_rounds to that gap (ADR 0011 Part 9, D84/D88; the ledger of these runs is test). The dry
+# run prints the window, the gap it needs and the cap.
 # HT_D20_GEOMETRY=tiny-cpu: the CPU mechanism model of tests/ledger/test_escrow_v2.py setup()
 # (1 layer, d_model 8, vocab 16, seq 4, H=1 J=1, 16 samples), layout n_gpus=1, for a cpu-backend
 # TEST run whose references and audits the challenge replays on CPU.
 # The manifest pins its environment (reference_spec.env.pinned, ADR 0011 part 3): CPU class avx2
-# and a GPU class. dense-1b runs on GPUs, so its class is the one measured on SM_COUNT in
-# hypertrain.protocol.env_pins (148: sm_103, 170: sm_120); any other count stops the first stage,
-# which removes what it created. tiny-cpu is a CPU-backend run and says gpu none; its SM_COUNT is
-# only carried. HT_D20_ATTN_BACKEND (default math, or sdpa-flash on a GPU class) is the pin's
-# HT_ATTN_BACKEND. The dry run reports the pin and checks it against SM_COUNT.
+# and a GPU class. dense-1b and dense-0.1b run on GPUs, so their class is the one measured on
+# SM_COUNT in hypertrain.protocol.env_pins (148: sm_103, 170: sm_120); any other count stops the
+# first stage, which removes what it created. tiny-cpu is a CPU-backend run and says gpu none; its
+# SM_COUNT is only carried. HT_D20_ATTN_BACKEND (default math, or sdpa-flash on a GPU class) is the
+# pin's HT_ATTN_BACKEND. The dry run reports the pin and checks it against SM_COUNT.
 # HT_D20_COLDKEYS=N (default 2) seeds cold-0..cold-N-1, each with 20000 genesis units.
 # HT_D20_RELAY_PUBKEY (required): SS58 of the relay key k1 that relay-joinbase signs with; the
 # current value is the `pubkey` of /data/relay/config/relay.json on s100 (k1).
@@ -102,10 +114,16 @@ RELAY_PUBKEY=${HT_D20_RELAY_PUBKEY:?set HT_D20_RELAY_PUBKEY to the SS58 of the T
 GEOMETRY=${HT_D20_GEOMETRY:-dense-1b}
 ATTENTION=${HT_D20_ATTN_BACKEND:-math}
 COLDKEYS=${HT_D20_COLDKEYS:-2}
+REPLAY=${HT_D20_REPLAY_SECONDS:-}
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
-case $GEOMETRY in dense-1b|tiny-cpu) ;; *) echo "HT_D20_GEOMETRY: dense-1b or tiny-cpu" >&2; exit 2 ;; esac
+case $GEOMETRY in dense-1b|dense-0.1b|tiny-cpu) ;; *) echo "HT_D20_GEOMETRY: dense-1b, dense-0.1b or tiny-cpu" >&2; exit 2 ;; esac
 case $COLDKEYS in [1-9]) ;; *) echo "HT_D20_COLDKEYS must be 1..9" >&2; exit 2 ;; esac
+if [ "$GEOMETRY" = dense-0.1b ]; then
+    [[ $REPLAY =~ ^[1-9][0-9]*$ ]] || { echo "HT_D20_REPLAY_SECONDS: dense-0.1b has no default; give the measured warm audit replay in whole seconds (max of >= 3 warm replays on the auditing B300)" >&2; exit 2; }
+elif [ -n "$REPLAY" ]; then
+    echo "HT_D20_REPLAY_SECONDS is read by dense-0.1b only" >&2; exit 2
+fi
 [[ $IMAGE =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "IMAGE_DIGEST must be sha256:<64 lowercase hex>" >&2; exit 2; }
 [[ $DRIVER =~ ^([0-9][0-9.]*|cpu-test)$ ]] || { echo "DRIVER must be digits and dots (or cpu-test)" >&2; exit 2; }
 [[ $SM_COUNT =~ ^[0-9]+$ ]] || { echo "SM_COUNT must be digits" >&2; exit 2; }
@@ -164,8 +182,9 @@ mkdir "$OUT/inputs"
 
 cd "$HT"
 uv run --no-sync python -I - "$IMAGE" "$DRIVER" "$SM_COUNT" "$OUT" "$EXP_ROUND" \
-    "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" "$ATTENTION" <<'PY'
+    "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" "$ATTENTION" "$HT" "$REPLAY" <<'PY'
 import json
+import math
 import os
 import secrets
 import sys
@@ -174,6 +193,7 @@ from pathlib import Path
 
 import numpy as np
 
+from hypertrain.challenge.audit_cooldown_v2 import reaudit_gap_needed
 from hypertrain.ledger.escrow_v2 import genesis_allocation_hash
 from hypertrain.miner.core import load_keyfile
 from hypertrain.protocol.env_pins import GPU_CLASSES, class_pin
@@ -182,10 +202,11 @@ from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import f32hex
 from hypertrain.protocol.messages import drand_round_at
+from hypertrain.protocol.messages_v2 import DEFAULT_GAP_CAP_ROUNDS, reaudit_rounds_for
 from hypertrain.trainer.rng import rng_ctr, uniform_f64
 
 (image, driver, sm_count, out, exp_round, relay_url, relay_pubkey, geometry, coldkeys,
- attention) = sys.argv[1:]
+ attention, ht_root, replay) = sys.argv[1:]
 # The pin first: a count or a backend no GPU class was measured with stops the build before
 # anything is written. A tiny-cpu run uses no GPU (its sm_count is only carried).
 gpu = "none" if geometry == "tiny-cpu" else next(
@@ -254,6 +275,56 @@ if geometry == "dense-1b":
         holdout_commit=sha256_hex(b"D20 synthetic B300 test fixture: no quality holdout"),
     )
     layout = {"pp": 1, "n_gpus": 2, "dp_size": 2, "ep_size": 1, "zero1": False}
+elif geometry == "dense-0.1b":
+    from hypertrain.trainer.config import TrainConfig
+    from hypertrain.trainer.model import param_shapes
+
+    # ADR 0015: the model block is the registry row; the fixture, the inner loop and the band are here.
+    profiles = json.loads((Path(ht_root) / "scripts/mfu_profiles.json").read_bytes())["profiles"]
+    row = profiles["mfu-dense-0.1b"]["model"]
+    SEQ, VOCAB, N = row["seq_len"], row["vocab"], 4096
+    BAND = (100_000_000, 300_000_000)
+    body["model"].update(arch="decoder", **row)
+    count = sum(math.prod(s) for s in param_shapes(TrainConfig.from_manifest(body).model).values())
+    if not BAND[0] <= count <= BAND[1]:
+        sys.exit(f"mfu-dense-0.1b has {count} parameters, outside the band {BAND[0]}..{BAND[1]}")
+    rows = np.empty((N, SEQ + 1), dtype="<u4")
+    for i in range(N):
+        u = uniform_f64(SEQ + 1, rng_ctr("d20-dense-test-data", 0, i, 0))
+        rows[i] = np.floor(u * VOCAB).astype("<u4")
+    tree = MerkleTree([r.tobytes() for r in rows])
+    reference = canonicalize(
+        {
+            "purpose": "S100_TEST_CUDA_RUN_NOT_PUBLIC_QUALITY",
+            "qualification_profile": "dense-0.1b-bf16",
+            "geometry_source": "scripts/mfu_profiles.json mfu-dense-0.1b; ADR 0015",
+            "image_digest": image,
+            "driver_allowlist": [driver],
+            "sm_count": int(sm_count),
+            "dataset": f"synthetic philox u32 ids, label d20-dense-test-data, {N} x {SEQ + 1}",
+        }
+    )
+    body["model"]["param_count"] = count
+    # J = H: the executor result keeps two checkpoints (12 P bytes each), the fewest the artifact
+    # validation accepts; H = 4 stays under the 30 steps of the 100-round audit lease.
+    body["inner"].update(
+        H=4, J=4, micro_batch=2, grad_accum=1, state_policy="reset", rewarmup_steps=0
+    )
+    body["inner"]["lr_schedule"].update(peak_lr=f32hex(3e-3), warmup=2, stable=100000, decay=0)
+    body["tokenizer"] = {
+        "name": f"ht-synthetic-ids-{VOCAB}",
+        "sha256": sha256_hex(f"d20 synthetic token ids: no tokenizer, vocab {VOCAB}".encode()),
+    }
+    body["dataset"].update(
+        merkle_root=tree.root.hex(),
+        depth=(N - 1).bit_length(),
+        n_samples=N,
+        sample_format="u32[seq_len+1] token ids",
+        shard_uri_template="samples.u32",
+        shard_sha256_root=MerkleTree([bytes.fromhex(sha256_hex(rows.tobytes()))]).root.hex(),
+        holdout_commit=sha256_hex(b"D20 synthetic B300 test fixture: no quality holdout"),
+    )
+    layout = {"pp": 1, "n_gpus": 1, "dp_size": 1, "ep_size": 1, "zero1": False}
 else:
     from hypertrain.trainer.config import TrainConfig
     from hypertrain.trainer.model import param_shapes
@@ -304,10 +375,14 @@ del body["init_state_hash"]
 outer = body["outer"]
 allocation = [(ss58[c], 20000, 1) for c in COLD]
 (inputs / "genesis-allocation.json").write_bytes(canonicalize(allocation))
+# docs/network-v2.md (admission): the first screen must cover the whole serial campaign. For the
+# 100 M model that is 52 trials of 83..130 rounds (250..390 s) plus about 470 rounds to the
+# d_final of round 0, i.e. 4800..7200 rounds: 6000 holds only on the fastest link.
+screen_rounds = 20000 if geometry == "dense-0.1b" else 6000
 policies = {
     "admission": {
         "q_base": "0000803e", "E": 4, "clean_finalizations": 12,
-        "work_screen_epoch_rounds": 6000, "max_pending": 32, "max_trial_replays": 2,
+        "work_screen_epoch_rounds": screen_rounds, "max_pending": 32, "max_trial_replays": 2,
         "max_trials_per_beacon": 2, "join_per_beacon": 2, "join_burst": 4,
         "ip_prefix_per_beacon": 32, "ip_prefix_burst": 64, "challenge_rounds": 100,
         "artifact_limits": {
@@ -342,6 +417,14 @@ policies = {
         "max_referee_cost_units": 100,
     },
 }
+if geometry == "dense-0.1b":
+    # ADR 0011 Part 9 decision 12 (D84, D88): the re-audit window is twice the measured replay, and
+    # a window that does not fit the default cap of d_final - d_audit raises it.
+    audit = policies["audit"]
+    audit["reaudit_rounds"] = reaudit_rounds_for(int(replay), audit["lease_rounds"])
+    needed = reaudit_gap_needed(audit["lease_rounds"], audit["reaudit_rounds"])
+    if needed > DEFAULT_GAP_CAP_ROUNDS:
+        audit["gap_cap_rounds"] = needed
 (inputs / "policies.json").write_bytes(canonicalize(policies, allow_float=False))
 relays = {
     "registry_version": 1, "epoch": 0, "previous_registry_hash": None,
@@ -368,25 +451,27 @@ uv run --no-sync python -I -m hypertrain.ops.manifest_v2 build \
     --relays "$OUT/inputs/relays.json" --owner-seed "$OUT/secrets/owner.seed" \
     --exp-round "$(cat "$OUT/inputs/exp-round.txt")" --state-dir "$OUT/state" --out "$OUT/out"
 
-uv run --no-sync python -I - "$OUT" "$IMAGE" "$DRIVER" "$SM_COUNT" "$GEOMETRY" "$ATTENTION" <<'PY'
+uv run --no-sync python -I - "$OUT" "$IMAGE" "$DRIVER" "$SM_COUNT" "$GEOMETRY" "$ATTENTION" \
+    "$REPLAY" <<'PY'
 """Dry-run: the checks POST /v2/admin/runs (store._create_run_v2) runs, minus the database."""
 import json
 import sys
 from pathlib import Path
 
+from hypertrain.challenge.audit_cooldown_v2 import reaudit_gap_needed
 from hypertrain.data.store import LocalFSStore
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.env_pins import GPU_CLASSES
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.messages_v2 import (
-    AdmissionPolicyV2, AggregationPolicyV2, AuditPolicyV2, DisputePolicyV2,
-    EconomicsPolicyV2, RunManifestV2,
+    DEFAULT_GAP_CAP_ROUNDS, AdmissionPolicyV2, AggregationPolicyV2, AuditPolicyV2, DisputePolicyV2,
+    EconomicsPolicyV2, RunManifestV2, reaudit_rounds_for,
 )
 from hypertrain.protocol.relay_messages import RelayRegistryV1
 
 out, image, driver, sm_count = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
 n_gpus = 2 if sys.argv[5] == "dense-1b" else 1
-attention = sys.argv[6]
+attention, replay = sys.argv[6], sys.argv[7]
 # What the builder meant, from the table: a GPU class measured on sm_count, or none for a CPU run.
 gpu = "none" if sys.argv[5] == "tiny-cpu" else next(
     (n for n, c in GPU_CLASSES.items() if sm_count in c.sm_counts), None
@@ -400,6 +485,7 @@ assert isinstance(model, RunManifestV2)
 model.validate_run_id(env.run_id)
 store = LocalFSStore(out / "state/objects")
 checks = {}
+ledger_mode = None
 for name, cls in (
     ("admission_policy_hash", AdmissionPolicyV2),
     ("economics_policy_hash", EconomicsPolicyV2),
@@ -409,13 +495,29 @@ for name, cls in (
 ):
     policy = cls.model_validate_json(store.get(getattr(model.network, name)))
     checks[name] = policy.digest() == getattr(model.network, name)
+    if isinstance(policy, EconomicsPolicyV2):
+        ledger_mode = policy.ledger_mode
     if isinstance(policy, AuditPolicyV2):
-        policy.validate_training(model.training)
+        policy.validate_training(model.training, ledger_mode=ledger_mode)
 registry = RelayRegistryV1.model_validate_json(store.get(model.network.relay_registry_hash))
 checks["relay_registry_hash"] = registry.digest() == model.network.relay_registry_hash
 t, ref = model.training, model.training.reference_spec
 admission = AdmissionPolicyV2.model_validate_json(store.get(model.network.admission_policy_hash))
 economics = EconomicsPolicyV2.model_validate_json(store.get(model.network.economics_policy_hash))
+audit = AuditPolicyV2.model_validate_json(store.get(model.network.audit_policy_hash))
+needed = (
+    None if audit.reaudit_rounds is None
+    else reaudit_gap_needed(audit.lease_rounds, audit.reaudit_rounds)
+)
+if sys.argv[5] == "dense-0.1b":
+    checks["reaudit_rounds_of_the_replay"] = (
+        audit.reaudit_rounds == reaudit_rounds_for(int(replay), audit.lease_rounds)
+    )
+    checks["gap_cap_holds_the_reaudit_window"] = (
+        needed is not None and audit.gap_cap() == max(DEFAULT_GAP_CAP_ROUNDS, needed)
+    )
+else:
+    checks["no_reaudit_window_or_cap"] = audit.reaudit_rounds is None and audit.gap_cap_rounds is None
 spec = registry.specs[0]
 checks.update(
     envelope_signature=envelope_v2.verify_envelope(raw),
@@ -435,7 +537,8 @@ checks.update(
     pin_cpu_class_avx2=ref.env.pinned.cpu == "avx2",
     pin_attention_backend=ref.env.pinned.present["HT_ATTN_BACKEND"] == attention,
     ledger_mode_test=economics.ledger_mode == "test",
-    work_screen_epoch_rounds_6000=admission.work_screen_epoch_rounds == 6000,
+    work_screen_epoch_rounds=admission.work_screen_epoch_rounds
+    == (20000 if sys.argv[5] == "dense-0.1b" else 6000),
     relay=len(registry.specs) == 1 and spec.mode == "transport"
     and str(spec.https_url).rstrip("/") == "https://relay.joinbase.ai",
     coord_is_reward_authority=economics.reward_authority == t.coord_pubkey == keys["coord"],
@@ -448,6 +551,12 @@ print(json.dumps({
     "exp_drand": env.exp_drand,
     "param_count": t.model.param_count,
     "init_state_hash": t.init_state_hash,
+    "audit": {
+        "lease_rounds": audit.lease_rounds,
+        "reaudit_rounds": audit.reaudit_rounds,
+        "gap_needed": needed,
+        "gap_cap": audit.gap_cap(),
+    },
     "pin": {
         "cpu": ref.env.pinned.cpu,
         "gpu": ref.env.pinned.gpu,

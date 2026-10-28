@@ -41,6 +41,18 @@
   block and the whole sha256 before the unchanged checks. The host holds URLs only. See
   `docs/adr/0013` at the monorepo root and `docs/cuda-executor.md`. `R2ObjectStore.fetch_to` takes
   an optional `check` callback.
+- Intermediate dense TEST model (D68, ADR 0015): the row `mfu-dense-0.1b` of
+  `scripts/mfu_profiles.json` (100,676,352 parameters, `decoder`, 8 layers, d_model 768) and the
+  geometry `HT_D20_GEOMETRY=dense-0.1b` of `scripts/b300/d20/build_test_manifest.sh`, which reads
+  that row, refuses a count outside 100,000,000..300,000,000 and widens the work-screen window to
+  20000 rounds. It also requires `HT_D20_REPLAY_SECONDS`, the measured warm audit replay, with no
+  default (Forge, 2026-10-28): the audit policy signs `reaudit_rounds = reaudit_rounds_for(replay,
+  100)` and, when that re-audit window needs a `d_final - d_audit` above the default cap of 200
+  rounds (a replay above 174 s), `gap_cap_rounds` equal to that gap (ADR 0011 Part 9, D84/D88; the
+  builder's ledger is test). The other geometries build with the same run ids and byte-identical
+  inputs, policies and manifest. A TEST run of it is predicted not to pass on the current
+  challenge code (ADR 0015 estimates, unmeasured, with the prerequisites); the plan is
+  `docs/runbooks/intermediate-model-replay.md` at the monorepo root.
 - Docs, CI, image and release workflows, Dockerfiles.
 - Eviction-tolerant core `hypertrain.elastic` (v3, not wired into the v2 challenge): leases with
   fencing tokens, saved before they are granted so that a restart never reissues one, and a

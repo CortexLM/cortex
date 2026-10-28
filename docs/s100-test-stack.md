@@ -512,8 +512,12 @@ $PY -I $T/cuda_qualification.py build $OUT/out $OUT/secrets/owner.seed
 
 Use the `tiny-cpu` geometry (824 parameters, `n_gpus=1`, H=1) for the first CUDA run, the model S5
 already ran on a B300: its publication is a few kilobytes, so a reference or audit fits in its lease
-whatever the link to X. The `dense-1b` geometry (889M parameters, `n_gpus=2`) returns every
-checkpoint, final state and error-feedback tensor of both ranks through ssh: by arithmetic from the
+whatever the link to X. The `dense-0.1b` geometry (100,676,352 parameters, `n_gpus=1`, the first dense
+model of this size on the TEST stack) is the second step. It is predicted not to pass on the current
+challenge code (estimates, unmeasured): see
+[the intermediate model replay](runbooks/intermediate-model-replay.md). The `dense-1b` geometry (889M
+parameters, `n_gpus=2`) returns every checkpoint, final state and error-feedback tensor of both ranks
+through ssh: by arithmetic from the
 tensor sizes about 60 GB per job [H, not measured], which a 100-round (5 min) audit lease cannot
 carry over an ordinary link. Do not start there.
 
