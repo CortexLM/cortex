@@ -29,11 +29,15 @@ STRIKE = (
 EXIT = "src/hypertrain/challenge/exit_v2.py"
 PARK = "raise self._park_lost_leaves_v2(run_id, candidate, leaves_record, now) from None\n"
 HANDLER = "                except ObjectNotFound:\n                    "
+UNREADABLE = (
+    "            except StoreError:\n"
+    "                pass  # unreadable, not lost: the next ask for the job meets the error\n"
+)
 FRESH_READ = (
     "            try:\n"
     '                self.objects.get(str(record["object"]))\n'
     "            except ObjectNotFound:\n"
-    '                lost.append(identity.split(":", 1)[1])\n'
+    '                lost.append(identity.split(":", 1)[1])\n' + UNREADABLE
 )
 REQUEUE = "            self._requeue_restored_leaves_v2(run_id, w, lost)\n"
 LOST_FAULT = "        return CommittedRefusal(503,"
@@ -72,6 +76,7 @@ RETIRED = T2 + "test_a_lost_leaf_object_retires_the_round_at_the_next_push"
 NOBODY = T2 + "test_the_retirement_for_a_lost_leaf_object_sanctions_nobody_and_moves_no_unit"
 NEXT = T2 + "test_the_round_after_one_with_a_lost_leaf_object_opens_and_its_audits_lease"
 RESTORED = T2 + "test_a_restored_leaf_object_puts_its_job_back_and_the_round_goes_on"
+UNREAD = T2 + "test_a_leaf_object_that_reads_back_corrupt_is_not_a_loss_and_pins_no_round"
 REVIVED = T2 + "test_a_restored_leaf_object_does_not_revive_a_job_of_a_retired_round"
 WAITS = (
     T2 + "test_a_lost_leaf_object_waits_for_the_round_before_it_and_is_retired_when_that_one_closes"
@@ -278,6 +283,16 @@ MUTANTS = [
         "new": '            lost.append(identity.split(":", 1)[1])\n',
         "tests": [RESTORED, PRIMITIVE],
         "why": "A record of a loss outlives it: an object that reads again retires the round.",
+    },
+    {
+        "id": "nsh03-lost-leaf-unreadable-object-pins-the-round",
+        "invariants": ["NSH-03"],
+        "path": STORE,
+        "old": UNREADABLE,
+        "new": "",
+        "tests": [UNREAD],
+        "why": "An object that is there and unreadable fails the reaper's turn: the job stays "
+        "parked and the round pending for good.",
     },
     {
         "id": "nsh03-lost-leaf-restored-job-is-not-queued-again",

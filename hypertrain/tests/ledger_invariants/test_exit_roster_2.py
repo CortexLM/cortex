@@ -338,6 +338,34 @@ def test_a_restored_leaf_object_puts_its_job_back_and_the_round_goes_on(queue: X
     assert again.json()["body"]["start_state"]["hotkey"] == rnd.hotkey(head)
 
 
+def test_a_leaf_object_that_reads_back_corrupt_is_not_a_loss_and_pins_no_round(
+    queue: X.Round,
+) -> None:
+    """NSH-03 (D83): only a missing object is the loss. If bytes that do not hash to the key sit
+    where the object was, the reaper reads that as no loss, puts the parked job back and does not
+    fail its turn; the round then goes the way it would have gone without the park (here its
+    audit windows end and it is retired for them), instead of staying pending behind a job
+    nothing will ever serve."""
+    rnd = queue
+    head = rnd.queue_order()[0]
+    key = rnd.record("leaves", rnd.identity(head))["object"]
+    X.lose_leaves(rnd, head)
+    X.control(ask_a_lease(rnd, 1).status_code == 503, "the first ask finds the loss")
+    rnd.store.objects._path(key).write_bytes(b"not the object")
+
+    X.walk(rnd, rnd.network.now + 1)
+
+    assert X.books(rnd)["exit-failed"] == []
+    assert rnd.finality()["disposition"] == "PENDING"
+    assert jobs(rnd)[rnd.hotkey(head)] == ("queued", None)
+
+    X.run_out_audit_windows(rnd)
+    X.walk(rnd, rnd.network.now + 1)
+
+    assert (rnd.finality()["disposition"], rnd.finality()["unresolved_audits"]) == ("RETIRED", 0)
+    assert rnd.record("retired", str(rnd.w))["cause"] != LOST
+
+
 def test_a_restored_leaf_object_does_not_revive_a_job_of_a_retired_round(queue: X.Round) -> None:
     """NSH-03 (D83): a retired round that an open dispute keeps in the reaper's sight takes no
     job back: nothing of it may be leased any more."""

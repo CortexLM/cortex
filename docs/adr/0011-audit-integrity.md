@@ -1574,6 +1574,12 @@ so it has no `Wait` and no entry in `BOUNDS` (`test_every_wait_has_a_bound` is u
       of `execute_audit_v2` (an exception there is booked as a failed attempt and, after two windows, ends
       as the exclusion of that member, never a retirement). A service-admitted run reads the leaves another
       way (`bounded_bytes`) and its retirement is refused (decision 8): that path is not changed.
+    - **Only a missing object is a loss.** Any `StoreError` other than `ObjectNotFound` on the reaper's fresh
+      read (an object that is there and no longer hashes to its key, an error of a remote store) is no loss:
+      a job parked while the object was missing goes back to the queue, the reaper's turn does not fail, and
+      the round goes the way it went before the park (its audit windows end). Were that read allowed to
+      raise, the turn would fail (`exit-failed`, `<w>:reap`) at every push and the round would stay pending
+      behind a parked job that nothing serves or expires.
 
 ### The tests: one per waiting state, each proves the run continues
 
@@ -1590,7 +1596,7 @@ so it has no `Wait` and no entry in `BOUNDS` (`test_every_wait_has_a_bound` is u
 | finalize order | `tests/challenge/test_round_withdrawal_v2.py` | accepted rollback then a paid round: `FINALIZE_ORDER` before, 200 after, `escrow.verify()` passes | the callback |
 | no finality record | `tests/challenge/test_member_state_v2.py` | a round without a finality record keeps the rotation refused and the bond held (pinned, with the rotation case red) | `rounds_listing` returns closed |
 | sanction | `tests/challenge/test_sanction_v2.py`, the cheaters suite | confirmed MISMATCH sanctioned after the window; auditor/host failures never reach the hook | grade, gate, cancel |
-| leaf object lost | `tests/ledger_invariants/test_exit_roster_2.py`, `tests/challenge/test_retire_round_v2.py`, `tests/challenge/test_exit_plan_v2.py` | the head job's object is gone: 503 `LEAF_OBJECT_LOST` and the next ask is served; the next push retires the round with every member as survivor; nobody's standing, bond or unit moves; round 1 opens and leases; a restored object puts the job back; a retired round takes none back; the retirement waits for an earlier round and happens when it closes | the 13 `nsh03-*` rows of `mutants_exit_roster.py` (bare 500, silent skip, rolled-back journal, job not parked, member excluded, struck or booked, round not retired, cause refused, no fresh read, no requeue, retired round revived, retirement forgotten) |
+| leaf object lost | `tests/ledger_invariants/test_exit_roster_2.py`, `tests/challenge/test_retire_round_v2.py`, `tests/challenge/test_exit_plan_v2.py` | the head job's object is gone: 503 `LEAF_OBJECT_LOST` and the next ask is served; the next push retires the round with every member as survivor; nobody's standing, bond or unit moves; round 1 opens and leases; a restored object puts the job back; an unreadable one is no loss and pins no round; a retired round takes none back; the retirement waits for an earlier round and happens when it closes | the 14 `nsh03-*` rows of `mutants_exit_roster.py` (bare 500, silent skip, rolled-back journal, job not parked, member excluded, struck or booked, round not retired, cause refused, no fresh read, an unreadable object, no requeue, retired round revived, retirement forgotten) |
 
 ### P1 to P8 of ADR 0009 section 4 (D47)
 
@@ -1661,9 +1667,9 @@ the tree of decision 28 (same tool, same pins) [V]:
 | `avx2/sm_103/sdpa-flash` | `2969e4a7…f07ea6` | `9bcf9bdd…2c2dd5` |
 | `avx2/sm_120/sdpa-flash` | `f3c351b3…af21f2` | `c8af2ae7…68891f` |
 | `avx512/none` | `cbbb0465…59af17` | `c509dfd1…83a920` |
-| `challenge/store.py` sha256 | `5cd7d7f5…4c318b` | `6d2a25df…321cb3` |
-| `sources()` map, 158 files, canonical sha256 | `1cb3027a…bc7fe3` | `f80d0053…a0cb03` |
-| `bundle()`, 2,734,080 bytes | `aa5f3f2f…df3bf3` | `6c437336…9a7a6e` |
+| `challenge/store.py` sha256 | `5cd7d7f5…4c318b` | `c2d527b5…23e123` |
+| `sources()` map, 158 files, canonical sha256 | `1cb3027a…bc7fe3` | `9e8b240b…126785` |
+| `bundle()`, 2,734,080 bytes | `aa5f3f2f…df3bf3` | `1146fb7c…523cec` |
 
 A run that holds a `service-admission` record made on the parent therefore fails `SERVICE_PROFILE_AUTHORITY`
 and is created again, as after every edit of an owned name in this ADR. New persisted shapes, with no
@@ -1758,7 +1764,8 @@ the round as retired and does not know the cause).
     window; it is a product decision and is not implemented.
 14. Whether a leaf object that is present and no longer hashes to its key (`CorruptObjectError`) is
     treated like a lost one: it is the same fault of the master's store, on the same line, and still a bare
-    500 (one more exception class in the handler and in `_lost_leaf_hotkeys_v2`).
+    500 (one more exception class in the handler and in `_lost_leaf_hotkeys_v2`, which reads it as no loss
+    today).
 
 ### Not verified
 
@@ -1768,7 +1775,9 @@ the round as retired and does not know the cause).
 - `AUDIT_MISMATCH` against a CUDA host class; a hostile host that returns well-formed false leaves.
 - Concurrency of the reaper with a long poll (read: it takes the store lock only).
 - Decision 28 on a real object store: the loss is simulated by unlinking the file of a `LocalFSStore`; a
-  remote store that answers 404 for a moment is read as a loss for one push. Not covered, still a bare 500:
+  remote store that answers 404 for a moment is read as a loss for one push, and one that answers another
+  error on the reaper's read is read as no loss (the job is queued again; the next ask parks it if the
+  object is still missing). Not covered, still a bare 500:
   `CorruptObjectError` on the leaf object, the `ef` and policy objects read after the loop, the reads of
   `execute_audit_v2`, and a service-admitted run. The real auditor CLI against a 503 was not run: it ends
   with exit code 2 like on any HTTP error (read, `auditor/__main__.py`).

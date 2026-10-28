@@ -8338,8 +8338,8 @@ class ChallengeStore:
 
     def _lost_leaf_hotkeys_v2(self, run_id: str, w: int) -> list[str]:
         """The members of round `w` whose leaf object a lease found lost and the store still cannot
-        read: the record names the object the member published, and a fresh read of it fails (any
-        other outcome is not a loss)."""
+        read: the record names the object the member published, and a fresh read of it raises
+        `ObjectNotFound` (bytes, or any other store error, is not a loss)."""
         lost = []
         for identity in sorted(self._round_ids_v2(run_id, "leaf-object-lost", w)):
             record = self._record_v2(run_id, "leaf-object-lost", identity)
@@ -8349,6 +8349,8 @@ class ChallengeStore:
                 self.objects.get(str(record["object"]))
             except ObjectNotFound:
                 lost.append(identity.split(":", 1)[1])
+            except StoreError:
+                pass  # unreadable, not lost: the next ask for the job meets the error
         return lost
 
     def _requeue_restored_leaves_v2(self, run_id: str, w: int, lost: Collection[str]) -> None:
