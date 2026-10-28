@@ -6373,10 +6373,10 @@ class ChallengeStore:
         """The one writer of a round's closure, whatever state closes it (D70).
 
         It stores the finality row and, next to it, the closure record `replayed-finality`: the
-        hash that closed the round and the beacon it closed at, which the ledger's replay reads
-        for a paid round and `relay_settlement_v2` reads for every round, so that the relay
-        custody of an upload is never pinned by a round that has no reward to show for it
-        (SETTLED with a reward, SETTLED with nobody paid, RETIRED, EXCLUDED by a rollback)."""
+        hash that closed the round and the beacon it closed at. The ledger's replay reads it for a
+        paid round and `relay_settlement_v2` for a round settled with a reward or with nobody
+        paid; a round retired or excluded by a rollback is released from the custody horizon of
+        its receipt instead (`_round_closure_v2`, ADR 0014 Part 6.4)."""
         self._put_record_v2(run_id, "finality", str(w), asdict(status))
         self._put_record_v2(
             run_id,

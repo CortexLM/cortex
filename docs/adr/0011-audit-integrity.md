@@ -52,7 +52,7 @@
     verdict (`:8860,8902-8905`). It also refuses at `now >= absolute_deadline` (`:8539`).
   - `timeout()` needs a delivered, acknowledged turn and two witnesses at `now`
     (`disputes_v2.py:716-758`). The only `BisectV2` constructor in `src` is the miner's
-    (`miner/dispute_watch.py:226`); no auditor-side responder exists, so the turn waits unanswered.
+    (`miner/dispute_watch.py:242`); no auditor-side responder exists, so the turn waits unanswered.
   - `DisputesV2.exclude` (`:782-815`) is the only server-side `INFRASTRUCTURE` resolution and has no
     caller in `src`.
 - Reproduced on the base tree: the Lens S2 test (honest leaves, forged `delta_hash`) passes in 163 s:
