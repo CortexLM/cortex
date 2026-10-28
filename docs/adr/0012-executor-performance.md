@@ -533,7 +533,8 @@ The digest rows of this table hold for `389c45b4` and every commit up to it. `v3
 (`8ff83ee2…532a2a`) is the hash of the listing without its trailing newline; `sha256sum` of the CLI output is
 `084c2381…124a2a` on `389c45b4`. On the d82 tip (`v3-d82-burn-pending-reaudit`) `lease_v2` moves, so
 `implementation_hash` becomes `7af135ca…70be62`, `challenge/store.py` `22fb5dcd…c56676`, `sources()` `97e3c592…5f1be3`
-and the bundle 2,775,040 bytes `2c064435…0b8196` (ADR 0011 Part 3 has the table).
+and the bundle 2,775,040 bytes `2c064435…0b8196` (ADR 0011 Part 3 has the table). The `v3-last-merges` tip (D89)
+changes nothing under `hypertrain/src`: re-measured there, every one of these values holds (same place).
 
 ## Consequences
 

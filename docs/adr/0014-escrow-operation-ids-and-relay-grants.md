@@ -409,7 +409,8 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
   edits `store.py`, `admission.py`, `app.py` and the wire (`BondRequest`) without touching an owned name or
   one of the 12 files: `implementation_hash` stays `d61bd2b8…71bdc4`; `store.py`, `sources()` and the bundle
   move (ADR 0011 Part 3). On the d82 tip the lost-leaf fix edits `lease_v2`, an owned name, and
-  `implementation_hash` becomes `7af135ca…70be62` (same place).
+  `implementation_hash` becomes `7af135ca…70be62` (same place). The `v3-last-merges` tip (D89) changes nothing
+  under `hypertrain/src`: re-measured there, the values of the d82 tip hold (same place).
 - Schema: no table, column or key changes. One partial index is created if absent.
 - Compatibility: new server events carry a new key and new hashes, new origins new ids; old chains verify
   unchanged and are forward-only for the first new server event (an older image then fails closed with an
