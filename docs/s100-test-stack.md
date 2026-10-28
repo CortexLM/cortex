@@ -513,8 +513,12 @@ $PY -I $T/cuda_qualification.py build $OUT/out $OUT/secrets/owner.seed
 Use the `tiny-cpu` geometry (824 parameters, `n_gpus=1`, H=1) for the first CUDA run, the model S5
 already ran on a B300: its publication is a few kilobytes, so a reference or audit fits in its lease
 whatever the link to X. The `dense-0.1b` geometry (100,676,352 parameters, `n_gpus=1`, the first dense
-model of this size on the TEST stack) is the second step. It is predicted not to pass on the current
-challenge code (estimates, unmeasured): see
+model of this size on the TEST stack) is the second step. Its real build also needs
+`HT_D20_REPLAY_SECONDS`, the measured warm audit replay (no default; exit 2 without it), which a
+throw-away warm-up build at the 300 s ceiling measures first. ADR 0015 predicted (estimates, unmeasured) that it could not pass on the
+challenge code of `2cfc2a2b`. Its prerequisites a and b (the lock-free reference and aggregate) are
+merged since; with one executor host it is still not expected to pass, since the second executor host
+and the result path (ssh or R2) are open: see
 [the intermediate model replay](runbooks/intermediate-model-replay.md). The `dense-1b` geometry (889M
 parameters, `n_gpus=2`) returns every checkpoint, final state and error-feedback tensor of both ranks
 through ssh: by arithmetic from the

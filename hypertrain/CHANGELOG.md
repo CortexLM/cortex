@@ -50,9 +50,16 @@
   100)` and, when that re-audit window needs a `d_final - d_audit` above the default cap of 200
   rounds (a replay above 174 s), `gap_cap_rounds` equal to that gap (ADR 0011 Part 9, D84/D88; the
   builder's ledger is test). The other geometries build with the same run ids and byte-identical
-  inputs, policies and manifest. A TEST run of it is predicted not to pass on the current
-  challenge code (ADR 0015 estimates, unmeasured, with the prerequisites); the plan is
-  `docs/runbooks/intermediate-model-replay.md` at the monorepo root.
+  inputs, policies and manifest. ADR 0015 predicted (estimates, unmeasured) that a TEST run of it
+  could not pass on the challenge code of `2cfc2a2b`. Of its prerequisites, (a) the lock-free
+  reference and (b) `copy_flags` out of the store lock are merged since; with one executor host it
+  is still not expected to pass, since the second executor host and the result path (ssh or R2) are
+  open. The plan (a throw-away warm-up run built at 300 s, then the real run rebuilt at the max of
+  at least three measured warm replays, stopping above 298 s) is
+  `docs/runbooks/intermediate-model-replay.md` at the monorepo root. Given the warm-up's OUT_DIR in
+  `HT_D20_WARMUP_OUT`, the builder refuses (exit 2) a real build whose manifest is the warm-up's (a
+  replay of 299 or 300 s signs the warm-up's window, so its run id) and its dry run checks that only
+  the audit policy differs.
 - Docs, CI, image and release workflows, Dockerfiles.
 - Eviction-tolerant core `hypertrain.elastic` (v3, not wired into the v2 challenge): leases with
   fencing tokens, saved before they are granted so that a restart never reissues one, and a
