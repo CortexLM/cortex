@@ -232,6 +232,11 @@ which windows. Nothing here has run against a GPU host or the real R2 service.
 | `request_timeout_seconds`, `retry_attempts`, `retry_base_ms` | Per request and backoff, on both sides. |
 | `fallback` | `classic` (default): if R2 is unreachable when an attempt starts, that attempt uses the SSH way; `fail`: it fails. |
 
+The challenge builds the executor, settings and token included, on the first CUDA job, and once it
+has loaded it keeps it for the life of the process: a changed file is read again only by a restarted
+challenge. A token or settings file it cannot load is a 503 `ROLE_DISPATCH_UNAVAILABLE` for that job,
+and the next job tries again.
+
 Requirements: `network` must be `default` (the container reaches R2 over HTTPS; the image needs a CA
 bundle). The attempt's objects live under the bucket prefix `exec/<run>/<job>/<nonce>/`; give the
 bucket the rules "abort incomplete uploads after one day" and "expire after one day" on the literal
@@ -261,7 +266,10 @@ Mount the config, the key and the `known_hosts` files read-only, readable by uid
 `HYPERTRAIN_CUDA_EXECUTOR` to the `challenge` service of `compose.test.yml`, back the file up
 first, and run `up -d challenge` like [the role dispatch install](role-dispatch.md). Rollback:
 restore the compose backup and run the same `up -d challenge`. Never touch
-`cortex-challenge-hypertrain` or `/data/role-dispatch/dispatch.json`.
+`cortex-challenge-hypertrain` or `/data/role-dispatch/dispatch.json`. On the s100 TEST stack
+`challenge_image.sh executor` does this through a compose override, and with `--r2` also writes the
+settings of the previous section and sets `HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS`
+([the s100 runbook](../../docs/s100-test-stack.md), 6.4 and 6.4a).
 
 ## Limits
 

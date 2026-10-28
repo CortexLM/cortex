@@ -503,7 +503,8 @@ Copy the public outputs to `/data/hypertrain-test/state/<stage>/` as in section 
 
 Back up first (section 1: `snap.sh pre`, `challenge_image.sh backup $TS`). The new variable goes
 in through a compose override, gated like the image swap (master `readyz`, a young sealed seal,
-the TEST container names, and the resolved compose config must differ only in that variable):
+the TEST container names, and the resolved compose config must differ only in the variables the
+command sets):
 
 ```bash
 ssh root@s100 "bash -s -- executor $B /data/executor/cuda-executor.json" < $T/challenge_image.sh
@@ -512,7 +513,145 @@ ssh root@s100 "bash -s -- executor $B /data/executor/cuda-executor.json" < $T/ch
 The challenge must run an image that contains the executor (`$NEW`, section 1). Setting it together with
 `HYPERTRAIN_ROLE_DISPATCH` stops the challenge at start. A later
 `swap` or `rollback` uses `compose.test.yml` alone and drops the variable: rerun `executor`. Undo
-with `bash -s -- executor-off $B`.
+with `bash -s -- executor-off $B`. The challenge loads the executor on the first CUDA job, not at
+start: a configuration it cannot load is a 503 `ROLE_DISPATCH_UNAVAILABLE` there, and `live` and
+`check` do not see it. Plain `executor` therefore looks into the recreated challenge only for its
+two variables; with `--r2` the challenge's own loader is asked before and after (6.4a).
+
+### 6.4a Results through R2 instead of ssh
+
+The rates are measured (`livrables/forge/2026-10-28_transfer-measure`, from nodes): ssh between s100
+and a node carried 7 MB/s, R2 20 MB/s on one stream and 100-144 MB/s on eight. That the 4.13 GB
+result of the 101 M profile [H] does not fit a lease over ssh and does over R2 is an estimate from
+those rates until the rate from s100 to R2 is measured (`r2-check` below does not measure it). Nothing below has been run
+on s100, on a node or against R2 yet. The mechanism, its limits and the settings are in
+[ADR 0013](adr/0013-executor-artifacts-via-r2.md) and
+[cuda-executor.md](../hypertrain/docs/cuda-executor.md#results-through-r2-opt-in); this section is
+the commands.
+
+Before the first run:
+- the challenge image must contain ADR 0013's code (`hypertrain.gpu_ops.artifact_transfer`): an older
+  one answers `preflight refused: ModuleNotFoundError` and nothing is written;
+- the bucket is a `cortex-v3-*` bucket with the rules of cuda-executor.md (abort incomplete uploads and
+  expire after a day, on the prefix `exec/`): `r2-check` leaves an object there if its delete fails;
+- the token is the bucket-scoped file of the Forge, 0600 and outside the repository, with these names
+  and no other: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, and
+  `R2_ENDPOINT` if the account's default endpoint is not the one to use. Never the Cloudflare account
+  token. It goes to s100 the way the key did in 6.1, on stdin, so that its value is neither on a
+  command line nor in a history, and it is never shown, `cat`-ed or passed as an argument:
+
+```bash
+ssh root@s100 "umask 077; cat > $X/r2.env; chown 65532:65532 $X/r2.env" < ./r2.env   # mode 0600
+```
+
+It is owned by uid 65532, not by root: the challenge's loader refuses a token file of any other
+user, and the script refuses it before the loader can. `$X` is already `0700` and owned by 65532
+(6.1). The order of the commands, the first four inside the seal window (its first half, as for
+`swap`):
+
+```bash
+ssh root@s100 "bash -s -- r2-check --file /data/executor/r2.env" < $T/challenge_image.sh
+ssh root@s100 "bash -s -- executor $B /data/executor/cuda-executor.json --r2 /data/executor/r2.env --dry-run" < $T/challenge_image.sh
+ssh root@s100 "bash -s -- executor $B /data/executor/cuda-executor.json --r2 /data/executor/r2.env" < $T/challenge_image.sh
+ssh root@s100 "bash -s -- r2-check" < $T/challenge_image.sh
+ssh root@s100 "bash -s -- r2-check --node x $GPU" < $T/challenge_image.sh
+```
+
+The path of the token is the one the container sees. `--operations` is a comma list of `audit`,
+`referee` (the default) and `reference`; keep `reference` out until the reference no longer holds the
+store lock for its whole launch (ADR 0013, decision 1). Every other setting keeps the loader's
+default; `fallback` is `classic`, so a broken R2 setup is not an error but the 7 MB/s path again:
+look for `exec_artifact_unavailable` and `exec_artifact_skipped` in the journal
+(`$X/state/journal.jsonl`) after the first job.
+
+What `executor --r2` does and what stops it. The checks come in this order, except that the TEST
+container names are checked once the compose config has been resolved:
+
+| Step | Refusal |
+| --- | --- |
+| usage; backup; seal window | exit 2 (usage), 3 (window) or 4 |
+| the token: one plain name in `/data/executor`, a plain file (not a link), mode exactly 0600, uid 65532, in a directory `0700` of 65532 | exit 4, with the mode or uid that was found |
+| `r2-artifacts.json` is absent or one this script wrote (only the keys `credentials_file` and `operations`) | exit 4 |
+| the TEST container names, of the compose file and of the file with the override | exit 4 |
+| the running challenge is on the image `compose.test.yml` resolves, and its own loader accepts the settings (on stdin, nothing is written yet): the settings model, the token file, `network` `default`, `max_artifact_bytes` at most `max_result_bytes`, an R2 client, an `ssh` client | exit 4, with the loader's reason |
+| `compose config` of the file and of the file with the override differ in the two variables and in nothing else | exit 5 |
+| writes `r2-artifacts.json` (0600, 65532), then the override; `up` recreates the challenge, with `--force-recreate` when the settings changed but the variables did not | exit 7, with the `executor-off` command |
+| `live`: the challenge answers and runs the image | exit 7, with the `executor-off` command |
+| the recreated challenge's own look at its environment and at the files as its user | exit 7, with the `executor-off` command |
+
+What the challenge's loader is not asked: the `state_dir` of the executor config and its journal. The
+challenge creates the first when it first loads the executor and 6.1 has made `$X/state`; a wrong
+owner there is a 503 `ROLE_DISPATCH_UNAVAILABLE` at the first CUDA job, not something this command
+sees.
+
+`--dry-run` takes every step but the writes and the `up`, in a temporary directory, and prints
+variable and key names only. It reports a closed seal window instead of stopping at it and exits
+with the window's code, so a dry run that exits 0 means the real run would be accepted now.
+Running the command again with the same arguments recreates nothing. The challenge reads the settings
+and the token once it has loaded them, and keeps them for the life of the process (a load that failed
+is tried again by the next job): new settings are picked up by the recreate the script forces, a
+rotated token at the same path is not. To rotate a token run `executor-off`, replace the file, run
+`executor --r2` again.
+
+`executor` without `--r2` goes back to the ssh path and removes `r2-artifacts.json`; `executor-off`
+removes both variables and that file (only a file with the keys the script writes), after the
+recreate, and leaves the token where it is: delete it and revoke the token yourself when the run is
+over. `swap` and `rollback` drop both variables like the executor one: rerun the same `executor`
+command. A failed `up`, `live` or look prints the `executor-off` command and leaves the files for it.
+
+`r2-check` looks at the bucket from the challenge, with the token the challenge is configured with
+(or, before `executor --r2`, with `--file`, which is checked like `--r2`'s). It is not gated, takes no
+backup and changes nothing in the stack. It puts 1 MiB of random bytes under
+`exec/_r2-check/<random>`, reads it back, compares and deletes it, then asks for that key, which is
+now absent, the way the transfer does before every attempt; all through the same client settings the
+transfer uses (no proxy or CA variable from the environment). It prints one line:
+
+```
+r2-check challenge put=200 get=200 delete=204 absent=404 bytes=1048576 put_s=… get_s=… delete_s=…
+```
+
+A step that failed shows its HTTP status or the class name of the error instead (`put=403`,
+`put=ConnectError`), a read that returns other bytes `get=mismatch`, a step that did not run
+`get=skipped`; an object still there after the delete `absent=present`. `absent=403` is the case to
+fear: a store that does not answer 404 for a key that is not there makes the transfer fall back to
+ssh without a word. Never a URL, a key, the bucket or any value of the token. Exit 8 when a step
+failed or the token does not load, 4 when the script refuses `--file`. One mebibyte measures the first
+byte (about 0.36 s from a node) and not the bulk rate: the rate from s100 to R2 with several parts at
+once is still to be measured before the run, and `put_s` says nothing about it. A green `r2-check` does
+not exercise the multipart calls (create, upload part, list, abort) or a PUT from a node.
+
+`--node LABEL sha256:<image digest>` adds the look from an executor host (`LABEL` as in
+`cuda-executor.json`, the digest the `$GPU` above), between the read and the delete. The challenge
+hands three presigned URLs (HEAD and a one-byte ranged GET of that object, and a GET of a key nobody
+wrote, 120 s) to a `--rm` container of the GPU image that the executor's own ssh transport starts on
+the host (its key, its pinned `known_hosts`, its `docker` words), with the URLs on the container's
+stdin: they are in no argument, no file and no log. The container holds them on a rented machine, so
+it runs with `--cap-drop=ALL --read-only --pids-limit=64 --memory=256m
+--security-opt=no-new-privileges`, no mount and no environment variable, and the default network (it
+has to reach the endpoint). It reports whether Python's `ssl` finds a CA file and a CA directory
+(and how many entries the directory has), then makes the three requests with the default TLS context,
+the one the runner uses. The image must already be on the host: the command passes `--pull never`, and
+exit 125 (`r2-check node x exit_125`) means docker refused, usually because it is not there
+(`cuda_executor_check.py` reports `image_present`). A host is a rented machine and may print
+anything: only fields of a fixed shape are shown, rebuilt by the challenge, and never its stderr.
+Its line looks like this (an illustration of the shape; nothing has been observed yet):
+
+```
+r2-check node x python=3.12.4 openssl=OpenSSL_3.0.13_30_Jan_2024 cafile=0 openssl_cafile=0 ssl_env=0 capath_entries=146 head=200 head_bytes=1048576 head_s=0.41 get=206 get_bytes=1 get_s=0.38 absent=404 absent_bytes=0 absent_s=0.35
+r2-check node x … head=SSLCertVerificationError head_verify=unknown_issuer get=SSLCertVerificationError … absent=SSLCertVerificationError …
+```
+
+The three statuses are the verdict; the CA fields say where the interpreter looked (`cafile=0` is
+normal when only the directory is populated). A `head_verify` of `unknown_issuer` or `self_signed` is
+the open question of ADR 0013 (does the image carry a CA bundle that its Python can see): the cure is
+in the image, never in turning verification off. HEAD is only checked here: the runner itself sends
+GET and PUT, and R2's answer to a presigned HEAD has not been seen, so a 403 on `head` with a `get` of
+206 is not a network problem; the command still exits 8 for it, as for a `get` that is not 200 or 206,
+an `absent` that is not 404, and a host that did not answer in the closed shape (`HostLost`,
+`no_reply`, `exit_N`).
+
+Exit codes: 2 usage (and `readyz`), 3 seal window, 4 refusal, 5 unexpected compose change, 6 database,
+7 the challenge is not up, or not configured as asked, after a change, 8 `r2-check` did not complete.
 
 ### 6.5 Publish the run with the backend record in place, then run it
 
