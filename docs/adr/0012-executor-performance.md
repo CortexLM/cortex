@@ -3,7 +3,9 @@
 - Status: draft for branch `v3-executor-perf`, 2026-10-27 (Principal SN100 D40, split in two by D42).
   **Part A** (sections 1 and 3) was implemented on that branch. **Part B** (section 2) and the head-first
   pusher of section 3 are implemented on branch `v3-executor-lock-release`, 2026-10-28 (D68), on top of
-  `v3-audit-integrity`, which Part B waited for; sections 2 and 3 are rewritten for it. Forge decides
+  `v3-audit-integrity`, which Part B waited for; sections 2 and 3 are rewritten for it. A follow-up of the same day
+  (Forge: the claim still held the lock for seconds at 100 M parameters) moves the O(model) staging of the trial's
+  inputs out of the lock, for the reference and for the export route (section 2, point 4 (h)). Forge decides
   promotion to `v3`. No protocol constant, manifest field, wire format, production host or pin changes.
 - Order: brief `v3-executor-perf`, then `v3-executor-lock-release` (D68, from the s15 replay of
   2026-10-27). Evidence: the S13 REPORT (branch `v3-d34-s100-gpu`) and the s15 replay (run `fea7e44f`,
@@ -158,12 +160,17 @@ numbers: the line numbers of the Context are those of the Part A tree.
      (`retain_shadow_custody`, test mode only) has a flight of its own, so one trial can launch twice then and
      the executor answers the second from the first publication;
    - none: this call is the leader. It reads the open trial, the stored commitment (returned as it is when
-     there is one), `trial_samples`, `stage_trial_v2`, the challenge receipt and the hotkey of the executor's
-     context into plain values (`ReferenceClaim`, and the `trusted` closure), makes a
+     there is one), `trial_samples`, the challenge receipt and the hotkey of the executor's context into plain
+     values (`ReferenceClaim`, and the `trusted` closure), and **plans the staging** of the job's inputs
+     (`plan_trial_v2`: the manifest, the dataset record, and the admission's hotkey when the start state is
+     carried, so a few reads and no computation; the staging itself is O(model), see 4 (h)). It makes a
      `concurrent.futures.Future` and, with a role launch, a `LeaseGuard`, and registers both before it lets
      go of the lock.
-2. **Run, without the lock.** `run_reference`: `screen_work` with the launch, then the four `put_large` of
-   the artifacts. It reads no database row (a test swaps the connection for one that fails on use). The two
+2. **Run, without the lock.** `run_reference`: the planned staging of the inputs (the claim's `stage`, checked
+   against the claimed samples and trial epoch: `REFERENCE_ASSIGNMENT`), `screen_work` with the launch, then
+   the four `put_large` of the artifacts. It reads no database row (a test swaps the connection for one that
+   fails on use; another runs a whole call with a connection that notes every statement made without the
+   store lock). The two
    reads the old code did here moved: the challenge receipt into the claim, and `qualified(screen)` into the
    settlement (it needs the screen, hence the run, and reads `records_v2`; an unqualified reference only leaves
    content-addressed objects behind). The guard is registered in `_lease_guards_v2` as
@@ -222,9 +229,43 @@ numbers: the line numbers of the Context are those of the Part A tree.
    `the_deadline_round_cancels_a_launch_that_is_still_running`, `…ends_one_round_before_the_deadline_is_committed`,
    `…ends_after_the_window_commits_nothing_and_sanctions_nobody` (through `POST /join/proof`), and the
    settlement boundary in `test_reference_settle_v2.py`.
+   (h) **The staging of the inputs is outside the lock** (Forge, 2026-10-28: the claim still held the lock for
+   seconds at 100 M parameters). `stage_trial_v2` initialises the parameters (a Philox stream per tensor), packs
+   the state twice (`start_state`, `ef_in`), hashes both and writes both, and the carried start state does it
+   again through `AnchorCache.genesis`. It is now `plan_trial_v2` (under the lock: `_run_v2`, the dataset record,
+   the admission's hotkey if the start state is carried; the same reads as before) returning a staging that reads
+   no database (`_stage_inputs_v2`); `stage_trial_v2` is their composition, for every caller that holds no lock.
+   `trial_reference_v2` hands `plan_trial_v2` to `claim_reference` and the staging runs at the head of
+   `run_reference`, inside the lease guard, so a deadline reached while the inputs are written cancels the launch
+   before it starts (`screen_work` checks the event first). `export_trial_v2` (`POST /join/<id>/job`, called by the
+   miner before every trial and by the admin export) had the same hold, plus five `objects.put` of the staged
+   files, 800 MB of states at 100 M parameters: it now reads and plans under the lock and stages, writes
+   `job.json` and puts after it. Three things keep that safe. (1) The lock used to make the stagings of a store
+   run one at a time, which bounded the memory they take to one model per store (1.5 to 1.7 GB at 101 M, 2.1 to
+   2.7 GB at 162 M, measured below); `_staging`, a plain lock, keeps a bound, and no code takes the store lock while
+   it holds `_staging`, so there is no order to invert. It is stricter than what it replaces: the root and its child
+   stores share one, as they share the waiter budget and the thread pool, so the stagings of two runs wait for
+   each other where each store's lock used to let them overlap; the requests parked on it are bounded by the pool
+   only. The bound covers the stagings. The puts of an export (five objects, up to 400 MB each at 101 M, 1.2 GB for
+   a carried start state) hold one object each and are not limited in number, as the four puts of a reference
+   already were; each export stages first, and a staging costs more than the puts that follow it, so puts do not
+   pile up behind one another in practice [H, not measured under a burst]. (2) Concurrent
+   stagings of one trial (a reference and an export, or the two custody flights) write the same bytes through
+   the atomic once-only writes of 4 (e). (3) A staging that fails (`ChallengeError` 422 for the dataset, 409 for
+   changed inputs) now fails inside the flight: the waiters get the same error, the flight and the guard are
+   dropped in the `finally`, a retry stages again. What the change does not do: the inputs of a run are the
+   same for every trial of a run that resets its optimiser state (`start_state`, `ef_in`, `v0` depend on the
+   manifest alone), yet each reference and each export recomputes them; a per-run content-addressed cache would
+   cut that CPU, and is not done here because it needs a place in the state directory with its own lifetime.
+   `retain_trial_publication`, which a reference with `retain_shadow_custody` runs at the settlement and which
+   validates the published artifacts under the lock, is test mode on the CPU backend only and not changed.
 
 | Hazard | Handled by | Test (`test_reference_lock_v2.py`, both layouts, unless noted) |
 | --- | --- | --- |
+| the staging of a large model holds the lock | `plan_trial_v2` under the lock, the staging after it; the export too | `a_reference_of_a_large_model_holds_the_store_lock_for_less_than_a_second` (66 M, 101 M, 162 M), `exporting_a_trial_of_a_large_model_holds_the_store_lock_for_less_than_a_second` |
+| stagings in parallel | `_staging`, one stager at a time, shared by the root and its children | `two_references_of_a_large_model_stage_one_at_a_time_and_leave_the_lock_free`, `a_staging_in_the_root_holds_back_one_in_a_child_store` |
+| the unlocked staging reads the shared connection | the reads are planned under the lock | `a_planned_staging_reads_no_database` (`test_trial_export.py`; a carried variant ends `test_carry_genesis_v2.py`), `a_trial_call_reads_the_store_connection_only_under_the_store_lock` |
+| a staging fails | it runs inside the flight: waiters get the error, flight and guard are dropped, a retry stages again | `a_failed_staging_fails_its_waiters_alike_frees_the_flight_and_a_retry_stages_again` |
 | the launch holds the lock | claim / run / settle | `latest_beacon`, `push_beacon`, another trial's export, status and reference are served meanwhile; `a_five_second_reference_holds_the_store_lock_for_less_than_a_second` |
 | double launch | flight keyed (admission, nonce, custody), looked up before anything is staged | `two_calls_for_one_trial_launch_once…` (one launch, one staging), `…refused_past_the_waiter_budget`, `a_waiter_gives_up…` |
 | crash between claim and settle | the claim commits nothing to the admission tables (the gate's pins and the staged inputs stay, and a retry reuses them); flight and guard dropped in `finally` | `a_launch_that_dies_between_claim_and_settle…` (the property held on the parent too; the test reads the new flight table and kills the mutant that keeps it) |
@@ -248,19 +289,51 @@ layout). (A scratch script took these numbers and is not in the tree; the tree p
 `a_five_second_reference_holds_the_store_lock_for_less_than_a_second`.) This is the lock, not the gate: the pusher
 also needs its rounds verified (2.4 s of BLS in all) and the replay must show the gate staying open [?].
 
+**Measured against model size, after the staging left the lock** [V, 2026-10-28, this host (128 CPUs, load average
+90 to 350 from other sessions), `TrainConfig.from_manifest_v2` patched to the real geometry of 66.3 M (8 layers,
+d=512), 100,676,352 (the 101 M profile Forge chose for D68, branch `v3-model-intermediate`: 8 layers, d=768, 12/4 heads,
+d_ff 2048, vocab 32768) and 162.4 M
+(12 layers, d=768) parameters, so that staging really initialises, packs, hashes and writes the model; three
+runs per size, each on a fresh fixture; a scratch script, `measure_size_v2.py`, kept with the evidence, not in the
+tree]. "Before" is the parent of the follow-up (`a3aa9b27`), "after" its code (`f2fdf603`). *Hold* is the longest
+time the calling thread kept the store lock in one acquisition; *waited* is the longest wait of a second thread
+that asked for the lock every 20 ms during the call. The reference call ends at the screening (the start-state
+hash is not the challenge's, which the patched model cannot match), so what is timed is the claim, the staging and
+the cleanup, not the launch or the settlement, whose holds do not depend on the model (a few reads and writes,
+5.9 ms and 7 ms above); the export runs whole, five puts included.
+
+| call | parameters | hold before (3 runs) | hold after (3 runs) | other thread waited after |
+| --- | --- | --- | --- | --- |
+| reference | 66,331,136 | 2.2 / 2.3 / 2.5 s | 6 / 15 / 33 ms | 0 / 3 / 18 ms |
+| reference | 100,676,352 | 4.6 / 5.1 / 5.1 s | 3 / 8 / 9 ms | 0 / 0 / 0 ms |
+| reference | 162,417,408 | 5.4 / 5.9 / 7.6 s | 5 / 6 / 10 ms | 0 / 0 / 0 ms |
+| export | 66,331,136 | 2.4 / 2.5 / 2.7 s | 1 / 1 / 2 ms | 0 / 0 / 0 ms |
+| export | 100,676,352 | 3.9 / 4.7 / 5.0 s | 1 / 2 / 5 ms | 0 / 0 / 0 ms |
+| export | 162,417,408 | 6.7 / 7.3 / 7.3 s | 1 / 1 / 2 ms | 0 / 0 / 0 ms |
+
+The staging itself did not get cheaper (2.0 to 7.6 s, host load dependent, both before and after); it runs beside the
+lock now. The resident set of the process peaked 1.0 to 1.3 GB above its starting point for one staging at 66 M,
+1.5 to 1.7 GB at 101 M and 2.1 to 2.7 GB at 162 M (the export 0.5, 1.1 and 1.8 GB), which is what `_staging` bounds to
+one model at a time. At 101 M the hold of the claim is therefore below 10 ms against the 4.6 to 5.1 s it was, so
+the claim no longer uses up the margin the gate leaves (6 s minus an idle lag of 3 to 6 s) [V]; whether a trial
+then stops seeing 503 on s100 depends on the pusher and is for the replay [?].
+
 **Limits found by the review** (2026-10-28), not removed here:
-- The claim stages the job under the lock, and staging is O(model). Measured here [V, 2026-10-28, a timing
-  proxy on the store lock, `TrainConfig.from_manifest_v2` patched to a larger model, the call then fails fast
-  at the screening so only the claim is timed; a scratch script, not in the tree, run twice at different host
-  loads]: the longest hold of the lock by the call was 7 and 13 ms at the 824-parameter fixture, 10 and 133 ms
-  at 24.7 k parameters, **2.1 and 5.7 s at 66.3 M (8 layers, d=512), 13.4 s at 124.7 M (8 layers, d=768) and 4.9
-  and 6.0 s at 162.4 M (12 layers, d=768)**. A reviewer measured 0.9 s and 3.3 s at the 66 M and 162 M shapes on a
-  less loaded host. The time is the CPU initialisation of the parameters and moves with the load of the host.
-  So "milliseconds" holds for the admitted tiny shape only. For a model of the 100 M class the claim is the lock
-  hold that is left (the launch itself, 57 s cold, is out of the lock either way): longer than the 6 s freshness
-  bound of the gate and than the pusher's 10 s timeout at the high end. The fix is to read the database under
-  the lock and stage without it, which is not done here. `export_trial_v2` costs the same, and a waiter no
-  longer pays it.
+- *Resolved by the follow-up of 2026-10-28.* The claim staged the job under the lock, and staging is O(model).
+  Measured on the code of this section as first written [V, 2026-10-28, a timing proxy on the store lock,
+  `TrainConfig.from_manifest_v2` patched to a larger model, run twice at different host loads]: the longest hold
+  of the lock by the call was 7 and 13 ms at the 824-parameter fixture, 10 and 133 ms at 24.7 k parameters, **2.1
+  and 5.7 s at 66.3 M, 13.4 s at 124.7 M and 4.9 and 6.0 s at 162.4 M**. The gate closes when the newest round
+  the master holds is more than 2 rounds (6 s) behind the emitted one and the idle lag is 1 to 2 rounds, so a
+  hold of 3 s can close it and one of 6 s or more always does; the pusher's 10 s timeout is passed at 13.4 s. A run
+  of the 101 M profile (4.6 to 5.1 s measured below) would very likely have closed the gate again at the claim step
+  [H: the replay will tell]. The staging now runs beside the lock (point 4 (h)); the table above has the hold at 101 M, three runs,
+  before and after. `export_trial_v2` had the same hold and plus five puts; it is fixed with it. What is left of
+  the cost is CPU and memory, not lock: every reference and every export recomputes inputs that are the same for
+  every trial of a `reset` run, one model at a time.
+- A lease that is cancelled while its reference waits for `_staging` still stages its inputs before `screen_work`
+  sees the event and drops the call, as it did under the lock before; with at most two open trials per run
+  (`max_trial_replays`) the queue is short. Checking the event after the gate would save that work and is not done.
 - A resume, a suspension or a new challenge does not cancel a stale launch: audit leases revoke their guard
   when they are retired, this guard is cancelled only at the deadline round or the wall cutoff. The stale result
   is dropped at the settlement, but the launch keeps its host until then.
@@ -275,7 +348,7 @@ a short lock (the run would touch the database after all); a waiter that claims 
 (each would relaunch, one after the other); a `threading.Lock` per key instead of the `Future` (no way to hand
 the failure to the waiters, and each waiter would still hold a worker without a bound).
 
-Hash consequences of Part B: see "Hash consequences of Part B" below.
+Hash consequences of Part B and of the lock-free staging: see "Part B, the head-first pusher and the lock-free staging (D68)" below.
 
 ### 3. Beacon cadence (Part A: settings; D68: the head-first pusher)
 
@@ -391,32 +464,34 @@ unchanged [H, not run]. The server image digest changes with any build. `v3-audi
 module (EXE-01) and will move the same hashes: the two batches' values are not additive, only the merged
 tree's are.
 
-### Part B and the head-first pusher (D68)
+### Part B, the head-first pusher and the lock-free staging (D68)
 
-Measured the same way (`measure.py` over an export of the tree, 2026-10-28) [V]: `origin/v3` at `4234e8ff`
-(the base after the merge) and this branch's tip.
+Measured the same way (`measure.py` over a `git archive` of each tree, 2026-10-28) [V]: `origin/v3` at `a6f9884a`
+(the last `v3` merged into this branch) and the code of this branch at `f2fdf603` (the staging outside the lock;
+the docs and tests committed since do not move a hash).
 
-| Value | `v3` `4234e8ff` | This branch |
+| Value | `v3` `a6f9884a` | This branch |
 | --- | --- | --- |
 | `implementation_hash` | `fc9e87b0…e4c8fe` | unchanged |
 | the 35 owned functions of `store.py` and the ten named files | | none changed |
-| `store.py` sha256 | `0ef3d258…93ff42` | `fccf87b7…cff123` |
-| `admission.py` sha256 | `d9f158aa…b6b3c7` | `985b2e0a…5cb2ce` |
+| `store.py` sha256 | `7fb1c56b…38688c` | `83dbf95c…2e92cf` |
+| `admission.py` sha256 | `d9f158aa…b6b3c7` | `d9abbdcd…563a07` |
 | `beacon/push.py` sha256 | `1e40246d…dfbb45` | `7153c2a4…1634c9` |
 | `network_qualification.py`, `cuda_executor.py`, `cuda_executor_runner.py` sha256 | `dab7a6ab…7bda15`, `f342234d…7db619`, `5930be17…4dff90` | unchanged |
-| `sources()` map: files, canonical sha256 | 155, `2443f974…30feea` | 155, `7ca59f58…9f607d` |
-| `bundle()` | 2,560,000 bytes, `cd4e5285…5d0ee2` | 2,570,240 bytes, `c94141f0…58a083` |
+| `sources()` map: files, canonical sha256 | 155, `ea84fff1…a9bfe4` | 155, `7d7198bb…94234a` |
+| `bundle()` | 2,600,960 bytes, `fb3cca4a…01f438` | 2,611,200 bytes, `4b5e8925…ae74b7` |
 
-Reading: the work edits `trial_reference_v2`, two new private methods and two module constants, `push_beacon`,
-`stage_trial_v2`, `_open_child` and `__init__` in `store.py`. None of them is among the 35 `owned` functions of
-`_service_implementation_v2`, `Admission.prepare_reference` is not owned either, and neither `admission.py`,
-`beacon/push.py` nor `data/store.py` (the `put` fix) is one of its ten named files, so `implementation_hash`
-does not move: the prediction of Part A holds by measurement, not only by reading. (Its value is `fc9e87b0…`,
-not the `02e208a3…` printed above: `v3-admission-hardening`, `v3-audit-integrity` and the later `v3` batches added
-owned definitions before this work.) `sources()` and `bundle()` hash every `src/hypertrain/**/*.py`, so they
-move, with the consequences described above for qualification configs and dispatch source pins; the server image
-digest changes with any build. The GPU image is not read by anything here; a rebuilt one has a new digest, as
-before. The ADR text is not hashed.
+Reading: the work edits `trial_reference_v2`, `stage_trial_v2` (now `plan_trial_v2` and `_stage_inputs_v2`),
+`export_trial_v2`, two new private methods and two module constants, `push_beacon`, `_open_child` and `__init__`
+in `store.py`, and `claim_reference`, `run_reference`, `settle_reference` in `admission.py`. None of them is among the
+35 `owned` functions of `_service_implementation_v2`, and neither `admission.py`, `beacon/push.py` nor `data/store.py`
+(the `put` fix) is one of its ten named files, so `implementation_hash` does not move: the prediction of Part A
+holds by measurement, at the merged tip, not only by reading. (Its value is `fc9e87b0…`, not the `02e208a3…`
+printed above: `v3-admission-hardening`, `v3-audit-integrity` and the later `v3` batches added owned definitions
+before this work.) `sources()` and `bundle()` hash every `src/hypertrain/**/*.py`, so they move, with the
+consequences described above for qualification configs and dispatch source pins; the server image digest changes
+with any build. The GPU image is not read by anything here; a rebuilt one has a new digest, as before. The ADR text
+is not hashed.
 
 ## Consequences
 
@@ -474,6 +549,9 @@ image. The reference still takes 43-64 s (`exec_attempt` to `exec_published`), b
 answer 503 meanwhile (s15: 100-150 s of them per trial), the idle `lag` stays 1-2 rounds during the reference,
 `beacon_gaps.py` prints nothing missing, and a second request for the same trial returns the same commitment
 without a second `exec_attempt`. A 503 storm, a hole or two `exec_attempt` lines for one trial stops the run.
+(7) With the 101 M profile of D68 also watch `POST /join/{id}/job` and `POST /join/proof`: neither may answer 503
+while the other stages its inputs (2.0 to 7.6 s of CPU on this host per staging, one at a time), and `latest` must
+stay under a second meanwhile.
 
 ## Sources
 
@@ -503,3 +581,7 @@ same database (two challenge processes would each launch once; the settlement th
 equal or refused, but that path is only unit-tested). The unlocked reads of `execute_audit_v2` (`_record_v2`
 between claim and settle) were found by the review and are not changed here. The measured lock hold is the lock's,
 not the gate's. Head first is a model plus unit tests of the real `Pusher`; it was not run against a live relay.
+The lock-free staging was measured with a model patched into `TrainConfig` on the fixture's dataset, on the CPU of a
+loaded host, through the root layout; a real 101 M run on s100 (disk, R2 puts of 400 MB states in `export_trial_v2`,
+many miners at once) is not covered, nor is the carried (`state_policy="carry"`) staging at real size (its planning is
+tested at the fixture's size). The settlement's hold at real size was not timed; it reads no model.

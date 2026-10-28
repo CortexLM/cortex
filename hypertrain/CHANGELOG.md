@@ -153,6 +153,20 @@
   challenge that was replaced, expired or closed while the launch ran is dropped; `reference_beacon` is
   the round of the commitment. No wire format, manifest field or constant changes. See `docs/adr/0012` at
   the monorepo root.
+- Staging a trial's inputs no longer holds the challenge's store lock, for a reference and for
+  `POST /v2/runs/{run_id}/join/{admission_id}/job` (and the admin export) alike. Staging is O(model):
+  it initialises the parameters, packs the start state and the error feedback, hashes and writes them,
+  and the export then puts five objects; on the claim of a reference it held the lock 2.2 to 2.5 s at
+  66 M parameters, 4.6 to 5.1 s at 101 M and 5.4 to 7.6 s at 162 M (the export 2.4 to 7.3 s). The freshness
+  gate closes when the pusher is more than 2 rounds (6 s) behind and the idle lag is 1 to 2 rounds, so a hold
+  of that size can bring the 503 "beacon infrastructure paused" storm back at the claim (not replayed). The
+  lock now covers the database reads (`ChallengeStore.plan_trial_v2`): 3 to 33 ms for a reference and
+  1 to 5 ms for an export at those sizes, measured on a loaded host. Stagings run one at a time, across the
+  root and its child stores (about 1.7 GB of resident set at 101 M); the puts of an export are not limited.
+  `stage_trial_v2` keeps its signature; `ReferenceClaim` carries the staging instead of a staged job and
+  `ReferenceResult` carries the job. A staging that fails (422 dataset dimensions, 409 changed inputs) now
+  fails inside the reference's single flight, so a repeated request gets the same error. No wire format,
+  manifest field or constant changes. See `docs/adr/0012` at the monorepo root.
 - Relay upload quota (ADR 0014 Part 6, TRN-02): a relay counts the uploads it still holds
   (a live reservation, or custody with a pin neither released nor past its horizon) instead of
   every record it ever accepted, and has no default count cap (it was 64 for the life of the

@@ -124,7 +124,11 @@ is 1-2 rounds when idle (measured 2026-10-26).
 **A store lock stops the beacon.** Until ADR 0012 Part B a remote or in-process reference held the lock
 of the store that hosts the run for its whole duration (13-19 s with the CUDA cache, 43-64 s without),
 and a challenge image from before Part B still does. Since Part B a reference holds it for its claim and
-its settlement only (a few milliseconds, measured with a fake executor); any other long lock, a challenge
+its settlement only (a few milliseconds, measured with a fake executor); the claim and `POST /join/<id>/job`
+staged the trial's inputs under the lock until the follow-up of ADR 0012 point 4 (h) and held it 2 to 8 s at 66 M to
+162 M parameters (5 s at the 101 M profile), which is enough to close the gate (it closes at a lag of more than 2
+rounds, the idle lag is 1-2), so an image from before that follow-up can still bring the 503 storm back for a model of
+that size; any other long lock, a challenge
 restart or a stuck request, stops the beacon the same way. The first run
 of a state directory lives in the root store, where `GET /v1/beacon/latest` and
 `POST /v1/admin/beacon` both wait for that lock. A run created while the root already hosts one
