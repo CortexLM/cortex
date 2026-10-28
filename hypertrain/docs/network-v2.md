@@ -652,7 +652,8 @@ four therefore cannot lose a member. Similarity alone is not fraud evidence.
 Audits replay each miner's own assignment.
 
 A miner whose audit could not run (no auditor finished it in two windows of two
-leases each; three windows when the master's replay was a `MISMATCH` that nobody signed) is left out of that round (`excluded`, reason `INFRASTRUCTURE`) and
+leases each; three windows when the master's replay was a `MISMATCH` that nobody
+signed) is left out of that round (`excluded`, reason `INFRASTRUCTURE`) and
 the round is not excluded: the other miners aggregate and settle as after an
 UNVERIFIED verdict. The round cannot be applied with fewer than four verified
 inputs, and an excluded miner has no anchor for the round, so it cannot be on the

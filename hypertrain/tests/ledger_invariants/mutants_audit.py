@@ -33,21 +33,17 @@ NO_RECORD = A2 + "test_finalize_refuses_a_member_without_an_audit_record"
 UNRESOLVED = A2 + "test_a_round_cannot_settle_while_an_audit_is_counted_unresolved"
 ABSENT = A2 + "test_an_excluded_member_is_absent_from_the_tape_the_included_set_and_the_origins"
 FAILED_REAUDIT = (
-    "        self._db.execute(\n"
-    "            \"UPDATE audit_leases_v2 SET state='exhausted',"
-    "result='REAUDIT_FAILED' WHERE id=?\",\n"
-    '            (row["id"],),\n'
+    "        self._drop_audit_job_v2(\n"
+    "            run_id,\n"
+    "            row,\n"
+    '            "INFRASTRUCTURE",\n'
+    '            "REAUDIT_FAILED",\n'
+    "            sha256_hex(f\"ht-reaudit-failed/1|{row['id']}\".encode()),\n"
     "        )\n"
 )
 STRIKE = (
     "        self._db.execute(\n"
     '            "UPDATE admissions_v2 SET strikes=strikes+1 WHERE hotkey=?", (row["hotkey"],)\n'
-    "        )\n"
-)
-UNVERIFIED_DROP = (
-    "        self._drop_audit_job_v2(\n"
-    '            row["run_id"], row, "UNVERIFIED", "AUDIT_INFRASTRUCTURE",\n'
-    '            sha256_hex(row["id"].encode()),\n'
     "        )\n"
 )
 NOBODY_SIGNS = (
@@ -687,7 +683,7 @@ MUTANTS: list[dict[str, object]] = [
         "invariants": ["A2W-23"],
         "path": STORE,
         "old": FAILED_REAUDIT,
-        "new": UNVERIFIED_DROP,
+        "new": FAILED_REAUDIT.replace('"INFRASTRUCTURE"', '"UNVERIFIED"'),
         "tests": [NOBODY_SIGNS],
         "why": "a mismatch the master replayed and no auditor signed is held against its miner "
         "as the fraud exclusion.",

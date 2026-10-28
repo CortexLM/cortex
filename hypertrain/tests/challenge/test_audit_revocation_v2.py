@@ -166,6 +166,46 @@ def test_the_holder_of_a_revoked_lease_is_not_handed_the_job_again_when_its_cool
     assert lease_row(network, job["job_id"])["state"] == "queued"
 
 
+def test_a_service_admitted_run_revokes_an_unsigned_verdict_and_drops_the_job_without_a_sanction(
+    network,
+):
+    # The reaper is shared with the generic path, so the revocation applies to a service-admitted
+    # run too; such a run never re-arms, so a revoked second attempt ends the job as the drop of
+    # ADR 0011 Part 2 and not in a second window.
+    store, run = network.store, network.manifest.run_id()
+    seed_round(network, n=1, gap=200)
+    schedule(network)
+    job = lease(network, A, 1).json()["body"]
+    network.push(D_AUDIT + 10)
+    with store._tx():  # test-owned stand-ins: the lease is a second attempt of an admitted run
+        store._db.execute("UPDATE audit_leases_v2 SET attempts=2 WHERE id=?", (job["job_id"],))
+        store._put_record_v2(run, "service-admission", "run", {})
+    store_verdict(network, job)
+    revoked = network.now + cooldown.SIGN_WINDOW_ROUNDS
+    network.push(revoked - 1)
+    assert lease_row(network, job["job_id"])["state"] == "running"
+    network.push(revoked)
+    row = lease_row(network, job["job_id"])
+    assert (row["state"], row["result"]) == ("exhausted", "AUDIT_INFRASTRUCTURE")
+    assert records(network, "audit-rearm") == {}
+    assert records(network, "excluded") == {
+        f"0:{miners(1)[0].ss58}": {
+            "reason": "INFRASTRUCTURE",
+            "evidence_hash": sha256_hex(job["job_id"].encode()),
+        }
+    }
+    assert records(network, "exit-sanction") == {}
+    failure = store._record_v2(
+        run, "audit-attempt-failure", f"{job['job_id']}:{job['lease_nonce']}"
+    )
+    assert (failure["cause"], failure["withheld"], failure["at"]) == (
+        "AUDITOR_SILENT",
+        "MISMATCH",
+        revoked,
+    )
+    assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 0
+
+
 @pytest.mark.parametrize("signs", ["inside-the-window", "after-the-window"])
 def test_a_signature_inside_the_sign_window_is_untouched_and_a_later_one_is_refused(
     one_identity, signs

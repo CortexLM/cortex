@@ -23,6 +23,18 @@ LAST_WINDOW = (
     + "test_a_mismatch_withheld_in_the_last_window_still_gets_a_lease_for_the_other_auditor"
 )
 NOBODY_LEFT = WITHHELD + "test_a_reaudit_window_fails_the_job_as_soon_as_no_auditor_is_left_to_try"
+BOTH_WITHHOLD = (
+    WITHHELD + "test_when_both_auditors_withhold_the_miner_is_dropped_once_and_never_sanctioned"
+)
+MATCH_HOLDER = (
+    WITHHELD + "test_a_match_the_first_holder_withheld_does_not_keep_it_from_the_reaudit_of_the_job"
+)
+OTHER_JOB = (
+    WITHHELD + "test_a_withhold_on_another_job_does_not_make_its_auditor_a_withholder_of_this_one"
+)
+MINER_AUDITOR = (
+    WITHHELD + "test_a_job_whose_only_other_auditor_is_its_miner_is_re_armed_when_the_first_lapses"
+)
 NTH_BARS = WITHHELD + "test_the_nth_withheld_mismatch_bars_the_auditor_and_the_one_before_does_not"
 ONLY_MISMATCH = WITHHELD + "test_only_a_withheld_mismatch_counts_toward_the_bar"
 BAR_LENGTHS = (
@@ -41,6 +53,10 @@ FROM_STORED = (
 COOLS_FROM = REVOKING + "test_a_revocation_cools_the_auditor_down_from_the_revocation_round"
 LATE_POLL = (
     REVOKING + "test_a_poll_that_notices_the_revocation_late_does_not_push_the_cooldown_further"
+)
+ADMITTED = (
+    REVOKING
+    + "test_a_service_admitted_run_revokes_an_unsigned_verdict_and_drops_the_job_without_a_sanction"
 )
 NOT_AGAIN = (
     REVOKING
@@ -272,12 +288,54 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         (NOBODY_LEFT, SECOND_FAILS),
     ),
     (
+        "a stale verdict is attributed to a holder that never asked for the execution",
+        STORE,
+        '        if marker is None or marker["state"] != "EXECUTED" or stored is None:\n',
+        "        if stored is None:\n",
+        (NOBODY_LEFT,),
+    ),
+    (
+        "a withheld MATCH makes its holder a withholder of the job",
+        STORE,
+        "='MISMATCH'\",\n                (run_id, f\"{job_id}",
+        ' IS NOT NULL",\n                (run_id, f"{job_id}',
+        (MATCH_HOLDER,),
+    ),
+    (
+        "the withholders of a job include those of the jobs that sort after it",
+        STORE,
+        '(run_id, f"{job_id}:", f"{job_id};"),',
+        '(run_id, f"{job_id}:", "\\U0010ffff"),',
+        (OTHER_JOB + "[above]",),
+    ),
+    (
+        "the withholders of a job include those of the jobs that sort before it",
+        STORE,
+        '(run_id, f"{job_id}:", f"{job_id};"),',
+        '(run_id, "", f"{job_id};"),',
+        (OTHER_JOB + "[below]",),
+    ),
+    (
+        "the miner counts as an auditor left to try its own job",
+        STORE,
+        'return any(a not in taken and a != row["hotkey"] for a in auditors)',
+        "return any(a not in taken for a in auditors)",
+        (MINER_AUDITOR,),
+    ),
+    (
         "window opened for nobody: the miner is the only other auditor",
         STORE,
         "        if until <= max(detected, now) + 1 or "
         "not self._auditors_left_v2(run_id, row, withholders):\n",
         "        if until <= max(detected, now) + 1:\n",
         (MINER_IS_AUDITOR,),
+    ),
+    (
+        "revocation removed: an executed lease runs to its expiry whoever holds it",
+        STORE,
+        "signed_by = audit_cooldown_v2.sign_deadline(self._execution_marker_v2(run_id, row))",
+        "signed_by = None",
+        (REVOKED, ADMITTED),
     ),
     (
         "sign window counted from the claim, not from the stored verdict",

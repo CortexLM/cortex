@@ -383,7 +383,10 @@ by the round it starts in (`created_beacon = now`), so a lease validates at any 
 gap of 100 rounds or less the first lease runs to `d_final`: if its auditor goes silent the job is
 not replaced, because an honest miner seals its commit until `d_final` and an audit job embeds it
 live, so no window can start after that round; the miner is left out of the round (`excluded`,
-`INFRASTRUCTURE`, no sanction). With a gap of 101 to 200 rounds a second auditor can take the job
+`INFRASTRUCTURE`, no sanction). The exception is a lease whose verdict the master stored and its
+auditor did not sign: it is taken back 20 rounds after the storing and the job goes to the other
+auditor if a replay still fits before `d_final` (ADR 0011 Part 9, decision 8).
+With a gap of 101 to 200 rounds a second auditor can take the job
 inside the same window, and a job whose attempts fail early gets a second window that ends at
 `d_final` (`audit-rearm`).
 

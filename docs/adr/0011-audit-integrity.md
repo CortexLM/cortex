@@ -1,7 +1,7 @@
 # ADR 0011: audit integrity (settlement of blockages, numerics pin, host and image binding)
 
 - Status: draft for branch `v3-audit-integrity`, 2026-10-27 (Principal SN100 D35, D36 bis, D38, D38 ter,
-  D38 quater, D40, D43, D44, D46, D47, D49, D51; Lens red team B findings DSP-01, AUD-01, AUD-06, DET-01,
+  D38 quater, D40, D43, D44, D46, D47, D49, D51, D82; Lens red team B findings DSP-01, AUD-01, AUD-06, DET-01,
   DET-01b, QUAL-01, QUAL-02, EXE-01; Lens C1/C2 and final synthesis F2 R-C2/R-D, F5, DSP-04). Part 8 is
   the one rule ("general exclusion exit") of which Parts 1, 2 and 5 are rows. Forge decides promotion to `v3`. This file grows one part per finding; each part is
   committed before the code it justifies. Parts present so far are listed under "Parts".
@@ -203,6 +203,8 @@
    `expires` of the lease that lapsed, not at the round that observes the lapse: `lease_v2` and `relay_observer_v2`
    refuse by raising, which rolls back their own lazy expiry, so anchoring on the observing round would let a polling
    auditor push its own release date forward at every poll.
+   Amended by Part 9 decision 8: for an executed lease whose verdict is not signed it starts at
+   `min(expires, at + 20)`, `at` being the round the verdict was stored.
 2. Cause per attempt: `AUDITOR_SILENT` (cooldown), `EXECUTOR_INTERRUPTED`, `EXECUTOR_FAILED` (no cooldown). The auditor is
    silent only if it never asked for the execution: `audit-execution` is committed `REQUESTED` before the preparation can refuse.
 3. One retire path; today's exhaustion block moves verbatim into `_exhaust_audit_job_v2`, the only place Decision 8 touches.
@@ -229,7 +231,8 @@
 
 ### Consequences
 
-- One failing host or auditor costs one lease of one auditor; after a second failed window it costs one miner one round.
+- One failing host or auditor costs one lease of one auditor; after a second failed window it costs one miner one round
+  (a job that holds a MISMATCH nobody signed gets a re-audit window of its own instead: Part 9).
   It no longer silences the auditors for good or voids the round for everybody.
 - Total audit time per job doubles: a job nobody audits holds its round (verified inputs, w+2 opening, rollback, relay
   settlement) for up to `2 * lease_rounds` more beacon rounds (H <= 30: 200 rounds, 10 min; policy lease at H = 512: 2932
@@ -240,7 +243,8 @@
 - The public view labels a dropped miner `EXCLUDED_V2`, a fault (`public_api/views.py:15,118`), as MISMATCH drops already are (open question for the frontend owner).
 - A 4-miner roster cannot absorb any drop (>= 4 inputs); a service-admitted run cannot lease today (heavy gate) and needs its complete roster.
 - The auditor process exits 2 on the cooldown 403 and on a 500; its supervisor should restart it with a delay.
-- The first lease of an operator-built round with a gap of 100 is still the only lease of that window; gap 101-200 gives a
+- The first lease of an operator-built round with a gap of 100 is still the only lease of that window, unless its verdict
+  is stored and not signed (Part 9 decision 8 takes it back 20 rounds later); gap 101-200 gives a
   replacement inside the window. Decision 8 gives a second window only to a job that is exhausted before the
   miner's commit expires (attempts that fail early, window shorter than the round). In the operated shape, where the first
   window ends at `d_final`, a job nobody finished costs its miner the round at once, as `INFRASTRUCTURE`. Making that
@@ -1804,7 +1808,6 @@ the round as retired and does not know the cause).
 2026-10-27. Lens C1 report (F2: R-C2, R-D; Lens m2), Lens synthesis (DSP-04), ADR 0009 section 4, ADR 0010
 Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not Git.
 
-
 ## Part 9: a withheld auditor signature (A2W-23, D82)
 
 - Principal SN100 D82 (option A) and D84, and the decisions Forge took through the relay question tool on
@@ -1946,6 +1949,14 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
    - The revocation never sanctions the miner, writes no `excluded` and no sanction row, and only a withheld
      MISMATCH feeds the strike; a revoked `MATCH` is a cooldown. A late signature of the holder after the
      revocation is refused (409) and writes no verdict.
+   - That refusal is the reaper's. `complete_audit_v2` is an owned function and is not edited: it checks the
+     lease's expiry only. The signature is refused from the round `_expire_leases_v2` has retired the lease, which
+     every beacon push does for each run and every lease poll does too. A master on which no push reaped since
+     `at + 20` still accepts it: a probe that kept the push from reaping got a signature at `at + 25` accepted
+     with 200 and the lease `completed` [V by a probe on a real verdict, 2026-10-28].
+   - The reaper is shared by every run, so the revocation applies to a service-admitted run too. Such a run
+     never re-arms (decision 11): a revoked first attempt is requeued inside its window and a revoked second
+     attempt drops the job as `INFRASTRUCTURE`, without a sanction.
 9. **The length of the re-audit is a policy field, not a derived value (D84, Principal SN100 relayed by
    Forge).** `AuditPolicyV2.reaudit_rounds` is an optional integer, in beacon rounds (`BEACON_PERIOD_SECONDS`
    = 3 s each, like `lease_rounds`), at least 2, and is omitted from the canonical body when absent, as
@@ -2151,9 +2162,13 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
   `AUDITOR_SILENT`, no marker, one ordinary cooldown) or by asking late (the `REQUESTED` marker is committed
   before any check and excuses the holder: `EXECUTOR_INTERRUPTED`, no cooldown). One accomplice that wins the
   lease race sinks one forger's job per cooldown, saving that forger's bond. Not closed here.
-- A holder that asks for the execution again before its window ends renews the marker's `at`: the window
-  slides, each time at the price of a full replay on the master, and the lease expiry still bounds it, as
-  before this part.
+- A holder cannot ask for the execution again to renew the marker's `at`, and so cannot slide its window. The
+  same signed request again reaches the lease's working directory, whose inputs the first execution wrote
+  (`durable_write` raises `FileExistsError` before any replay and before the guard is registered, HTTP 500), and
+  a request signed again is refused as a conflicting operation nonce (409); the marker and the lease do not move
+  [V by a probe on a real replay, 2026-10-28]. The price is that a holder that lost its verdict (a client that
+  crashed after `/execute`) cannot ask for it again: it loses the lease at `at + 20`, and a `MISMATCH` counts as
+  one withhold.
 - Both live auditors colluding withhold, `tried` holds both, the job fails and its member is dropped as an
   `INFRASTRUCTURE` fault; the second record is zero-length because of `others_free`.
 - One pinned auditor plus one forger drop the forger out of a round per withheld MISMATCH until the third
@@ -2236,7 +2251,9 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
   no real auditor process (its exit 2 on a 403 and the supervisor's restart were read, not run).
 - The Nth occurrence of the strike is tested with N - 1 failure rows written by the test: one run reaches two
   withholds per auditor per round on the test network.
-- Service-admitted runs: neither the re-arm nor the lease path is exercised (skipped by construction).
+- Service-admitted runs: neither the re-arm nor the lease path is exercised (skipped by construction). The
+  revocation of an executed lease in such a run is tested with a `service-admission` record and a second
+  attempt written by the test: it drops the job as `INFRASTRUCTURE`, with no re-arm and no sanction.
 - The probabilities and the replay durations are [A], not measured; the numbers of decision 12 are arithmetic
   over the quantities of the code and assumed durations, executed on CPU replays of the seeded round with the
   fake clock of the tests, and no replay of the operated shape was timed. No GPU, no 101 M model, no auditor
