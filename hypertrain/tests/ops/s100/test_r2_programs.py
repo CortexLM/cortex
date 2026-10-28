@@ -226,6 +226,12 @@ def test_pre_does_not_echo_a_settings_document_it_cannot_parse(world):
     assert "sentinel" not in refusal(done)
 
 
+def test_pre_does_not_listen_to_the_proxy_variables_the_transfer_ignores(world):
+    # the transfer's client has trust_env=False; one that read a proxy variable would refuse this
+    done = world.pre(env={"HTTPS_PROXY": "ftp://proxy", "ALL_PROXY": "ftp://proxy"})
+    assert (done.returncode, done.stdout) == (0, "preflight ok\n")
+
+
 def test_pre_refuses_a_challenge_without_an_ssh_client(world):
     done = world.run("pre", str(world.config_path), stdin=world.raw, env={"PATH": "/nonexistent"})
     assert refusal(done) == "FileNotFoundError"
@@ -696,10 +702,12 @@ def tls(tmp_path_factory):
             self.end_headers()
 
         def do_GET(self):
-            self.send_response(206)
-            self.send_header("content-length", "1")
+            ranged = self.headers.get("range") == "bytes=0-0"  # a server that honours the range
+            self.send_response(206 if ranged else 200)
+            body = b"x" if ranged else b"x" * (1 << 20)
+            self.send_header("content-length", str(len(body)))
             self.end_headers()
-            self.wfile.write(b"x")
+            self.wfile.write(body)
 
         def log_message(self, *args):
             return

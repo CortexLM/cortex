@@ -352,7 +352,7 @@ def test_a_container_that_compose_did_not_recreate_is_caught_by_the_second_look(
 def test_a_failed_up_says_how_to_go_back_and_leaves_the_files_for_executor_off(box, backup):
     box.docker(fail_up=True)
     out = r2(box, backup, rc=7, mutates={CHALLENGE}).out
-    assert f"executor-off {backup}" in out
+    assert "up failed after the files were written" in out and f"executor-off {backup}" in out
     assert box.override.exists() and box.settings.exists()
     box.docker(fail_up=False)
     box.run("executor-off", backup, mutates={CHALLENGE})
@@ -389,7 +389,21 @@ def test_a_dry_run_leaves_no_file_of_its_own_behind(box, backup):
     assert sorted(p.name for p in box.t.iterdir()) == ["compose.relay.yml", "compose.test.yml"]
 
 
+def test_a_dry_run_does_not_touch_the_file_a_real_run_is_writing(box, backup):
+    # a real run that is between its writes owns compose.executor.yml.new; the dry run has its own
+    pending = box.override.with_name("compose.executor.yml.new")
+    pending.write_text("a real run's override, not yet moved")
+    box.token()
+    before = box.snapshot()
+    r2(box, backup, "--dry-run")
+    assert pending.read_text() == "a real run's override, not yet moved"
+    assert box.snapshot() == before
+
+
 def test_a_dry_run_says_whether_the_challenge_would_be_recreated(box, backup):
+    box.token()
+    # no settings file yet: the variable is new, compose has its reason and needs no push
+    assert "recreate: only if the resolved config changes" in r2(box, backup, "--dry-run").out
     r2(box, backup, mutates={CHALLENGE})
     same = r2(box, backup, "--dry-run").out
     other = r2(box, backup, "--operations", "audit", "--dry-run").out
@@ -482,3 +496,11 @@ def test_a_plain_executor_keeps_a_settings_file_it_did_not_write(box, backup):
     box.settings.write_text(foreign)
     box.run("executor", backup, EXECUTOR_PATH, mutates={CHALLENGE})
     assert box.settings.read_text() == foreign
+
+
+def test_every_python_the_script_runs_is_isolated_from_the_directory_it_runs_in(box, backup):
+    # ssh gives the script a working directory of its own: a file there must not shadow the stdlib
+    (box.root / "json.py").write_text("raise SystemExit('json.py of the working directory')\n")
+    r2(box, backup, mutates={CHALLENGE})  # the settings, the image, the compose diff
+    r2(box, backup, "--operations", "audit", mutates={CHALLENGE})  # the file that is already there
+    box.run("executor-off", backup, mutates={CHALLENGE})

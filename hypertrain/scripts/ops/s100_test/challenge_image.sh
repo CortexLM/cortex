@@ -185,11 +185,9 @@ def why(error):
     if isinstance(error, Said):
         return text
     if isinstance(error, ValidationError):
-        found = error.errors(include_url=False, include_context=False, include_input=False)
+        found = error.errors()  # where and why; its "input" is never read
         return "; ".join(".".join(map(str, e["loc"])) + ": " + e["msg"] for e in found)
-    if type(error) is ValueError and (
-        text in KNOWN or re.fullmatch(r"missing R2 settings: [A-Z0-9_, ]+", text)
-    ):
+    if text in KNOWN or re.fullmatch(r"missing R2 settings: [A-Z0-9_, ]+", text):
         return text
     return type(error).__name__
 
