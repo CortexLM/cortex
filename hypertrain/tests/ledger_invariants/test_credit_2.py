@@ -20,6 +20,7 @@ import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+from env_pin_fixtures import honest_env
 from hypertrain.aggregator.core import FinalityError
 from hypertrain.challenge.finality_v2 import RoundStatus, settle
 from hypertrain.challenge.store import ChallengeError
@@ -649,6 +650,7 @@ def join_request(world: Any, hot: Any, cold: Any, tag: str) -> Any:
         expires_beacon=10000,
         policy_hash=network.manifest.network.admission_policy_hash,
         hardware_hint=HardwareHint(device_name="cpu", device_count=999, driver="advisory"),
+        env=honest_env(),
     )
     return network.client.post(network.url + "/join", content=canonicalize(request.body()))
 

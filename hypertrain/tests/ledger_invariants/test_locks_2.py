@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from env_pin_fixtures import honest_env
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.ledger.escrow_v2 import digest
 from hypertrain.miner.admission import sign_join
@@ -339,6 +340,7 @@ def test_a_join_signed_for_another_policy_is_refused_and_writes_nothing(tmp_path
         expires_beacon=10000,
         policy_hash="55" * 32,
         hardware_hint=HardwareHint(device_name="advisory", device_count=1, driver="cpu-test"),
+        env=honest_env(),
     )
     before = snapshot(lab)
     # When / Then

@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import hypertrain
+from env_pin_fixtures import honest_env
 from hypertrain.challenge.app import Config, create_app
 from hypertrain.challenge.store import ChallengeError
 from hypertrain.ledger import Params
@@ -552,6 +553,7 @@ def test_every_signature_preimage_opens_with_exactly_its_own_domain() -> None:
         expires_beacon=10,
         policy_hash=HASH,
         hardware_hint=HardwareHint(device_name="cpu", device_count=1, driver="advisory"),
+        env=honest_env(),
     )
     genesis = Genesis(
         run_id=run,

@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from env_pin_fixtures import honest_env
 from hypertrain.aggregator.core import FinalityError
 from hypertrain.auditor.island_bisect import RefereeEvidence
 from hypertrain.challenge.disputes_v2 import (
@@ -140,6 +141,7 @@ def activate(world: World, index: int) -> str:
     )
     assert response.status_code == 200, response.text
     screen = WorkScreenV2(
+        env=honest_env(),
         evidence_kind="work-proof-v1",
         admission_id=admission_id,
         nonce=sha256_hex(b"nonce"),

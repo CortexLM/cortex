@@ -28,6 +28,7 @@ from typing import Any
 import httpx
 import pytest
 
+from env_pin_fixtures import honest_env
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.ledger.escrow_v2 import reward_origin_id
 from hypertrain.protocol import envelope_v2
@@ -227,6 +228,7 @@ def activate_identities(network: Any, cast: Cast) -> None:
         )
         assert response.status_code == 200, response.text
         screen = WorkScreenV2(
+            env=honest_env(),
             evidence_kind="work-proof-v1",
             admission_id=identity,
             nonce=sha256_hex(b"nonce"),

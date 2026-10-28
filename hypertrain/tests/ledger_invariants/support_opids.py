@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from env_pin_fixtures import honest_env
 from hypertrain.auditor.island_bisect import RefereeEvidence
 from hypertrain.beacon.core import FixtureBeacon
 from hypertrain.challenge.admission import Admission
@@ -203,6 +204,7 @@ class DisputeWorld:
             expires_beacon=10000,
             policy_hash=digest(policy),
             hardware_hint=HardwareHint(device_name="advisory", device_count=1, driver="cpu-test"),
+            env=honest_env(),
         )
         record = self.admission.join(canonicalize(request.body()), now=1, ip_prefix="loopback")
         return record.admission_id

@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from env_pin_fixtures import honest_env
 from hypertrain.miner import admission as miner_admission
 from hypertrain.miner.island_launch import launch_island
 from hypertrain.protocol import relay_envelope
@@ -166,6 +167,7 @@ def activate(network: Any, index: int) -> str:
     control(response.status_code == 200, response.text)
     spec = network.manifest.training.reference_spec
     screen = WorkScreenV2(
+        env=honest_env(),
         evidence_kind="work-proof-v1",
         admission_id=identity,
         nonce=sha256_hex(b"nonce"),
