@@ -62,6 +62,15 @@ def test_a_mismatch_completes_as_an_exclusion_and_leaves_no_successor_state(
         assert {work.replay.result for work in inputs} == {"MATCH"}
 
 
+GATE_PINS = ("beacon_pins_v2",)
+
+
+def gate_pins(store: Any) -> set[str]:
+    """The operations the freshness gate holds a pinned beacon round for."""
+    with store._lock:
+        return {r[0] for r in store._db.execute("SELECT operation_id FROM beacon_pins_v2")}
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -81,12 +90,16 @@ def test_the_tape_refuses_an_input_whose_replay_is_not_a_full_match_of_its_commi
         record = store._record_v2(run, "replay", identity)
         with store._tx():
             store._put_record_v2(run, "replay", identity, {**record, field: value})
-        before = sa.digest_of(store)
+        before, pinned = sa.digest_of(store, without=GATE_PINS), gate_pins(store)
         # When / Then: the tape is not built, whatever the store let through.
         with pytest.raises(TapeError, match="own-assignment full replay not VERIFIED"):
             store.aggregate_v2(run, 0)
-        assert sa.digest_of(store) == before
+        assert sa.digest_of(store, without=GATE_PINS) == before
         assert ("applied", "0") not in sa.records(store)
+        # The claim commits before the tape is computed, and with it the pin of the freshness gate
+        # (`_aggregate_claim_v2`, CHANGELOG: aggregate without the store lock): the one row the
+        # refused attempt keeps.
+        assert gate_pins(store) - pinned == {f"aggregate:0:{n.now}"}
 
 
 # --- A2W-10: a partly audited round does not aggregate or finalize -----------------------------
