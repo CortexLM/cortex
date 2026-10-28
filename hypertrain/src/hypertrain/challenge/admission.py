@@ -124,6 +124,29 @@ class AdmissionStatus:
     shadow_only: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ReferenceClaim:
+    """What a reference run needs from the database, read once under the authority lock.
+
+    `state` and `pending_dispute` are the row's standing at claim time: the settlement refuses a
+    row that moved while the reference ran.
+    """
+
+    admission_id: str
+    challenge: JoinChallenge
+    trial_epoch: int
+    state: str
+    pending_dispute: bool
+    job: IslandJobV1
+    directory: Path
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceResult:
+    screen: WorkScreenV2
+    proof: WorkProof
+
+
 class Admission:
     """Trusted service API, not routes. L0 supplies current verified beacons and jobs.
 
@@ -405,7 +428,25 @@ class Admission:
         cancel: threading.Event | None = None,
         retain_shadow_custody: bool = False,
     ) -> str:
-        """Execute independently from trusted start; commit before accepting newcomer proof."""
+        """Execute independently from trusted start; commit before accepting newcomer proof.
+
+        The three steps below are what `ChallengeStore.trial_reference_v2` runs with the authority
+        lock held only around the first and the last, so a remote launch never holds it.
+        """
+        claim = self.claim_reference(admission_id, now=now)
+        if isinstance(claim, str):
+            return claim
+        result = self.run_reference(claim, now=now, trusted_launch=trusted_launch, cancel=cancel)
+        return self.settle_reference(
+            claim, result, now=now, retain_shadow_custody=retain_shadow_custody
+        )
+
+    def claim_reference(self, admission_id: str, *, now: int) -> ReferenceClaim | str:
+        """First step, under the authority lock: everything the run reads from the database.
+
+        Returns the commitment already stored for the open trial, when there is one: nothing is
+        left to run. Otherwise the job is staged here, so that the run touches no database.
+        """
         self._beacon(now)
         row = self.store.db.execute(
             "SELECT * FROM admissions_v2 WHERE admission_id=?", (admission_id,)
@@ -426,6 +467,29 @@ class Admission:
         job, directory = self.stage_reference(c, samples, row["trial_epoch"])
         if tuple(job.sample_ids) != samples or job.w != row["trial_epoch"]:
             raise AdmissionError("REFERENCE_ASSIGNMENT")
+        return ReferenceClaim(
+            admission_id,
+            c,
+            row["trial_epoch"],
+            row["state"],
+            bool(row["pending_dispute"]),
+            job,
+            directory,
+        )
+
+    def run_reference(
+        self,
+        claim: ReferenceClaim,
+        *,
+        now: int,
+        trusted_launch: Callable[[IslandJobV1, Path, JoinChallenge, int], IslandLaunch]
+        | None = None,
+        cancel: threading.Event | None = None,
+    ) -> ReferenceResult:
+        """Second step, no lock: the launch and the object puts. It reads no database row: the
+        authority connection is shared and a read from here could see another thread's
+        uncommitted rows. What needs the database waits for `settle_reference`."""
+        job, directory, c = claim.job, claim.directory, claim.challenge
         if trusted_launch is None:
             screen, proof = screen_work(job, directory, c, now_beacon=now, backend=self.backend)
         else:
@@ -435,11 +499,9 @@ class Admission:
                 c,
                 now_beacon=now,
                 backend=self.backend,
-                launch=trusted_launch(job, directory, c, row["trial_epoch"]),
+                launch=trusted_launch(job, directory, c, claim.trial_epoch),
                 cancel=cancel,
             )
-        if not self.qualified(screen):
-            raise AdmissionError("UNQUALIFIED_REFERENCE")
         for name, ref in zip(
             ("state.safetensors", "ef.safetensors", "delta.bin", "leaves.json"),
             proof.artifact_refs,
@@ -452,25 +514,71 @@ class Admission:
                 or logical != _logical(self.objects, ref, "REFERENCE_OBJECT_HASH")[:2]
             ):
                 raise AdmissionError("REFERENCE_OBJECT_HASH")
+        return ReferenceResult(screen, proof)
+
+    def settle_reference(
+        self,
+        claim: ReferenceClaim,
+        result: ReferenceResult,
+        *,
+        now: int,
+        retain_shadow_custody: bool = False,
+    ) -> str:
+        """Last step, under the authority lock: commit only into the state the claim was made in.
+
+        The row may have moved while the launch ran (a new challenge, a resume, a suspension, a
+        reaped or expired trial); a result for a claim that no longer holds is dropped, and
+        nothing is written. `now` is the round the commitment is made at, not the claim's.
+        """
+        self._beacon(now)
+        c, proof, screen = claim.challenge, result.proof, result.screen
+        if (
+            proof.admission_id != claim.admission_id
+            or proof.challenge_hash != c.digest()
+            or screen.admission_id != claim.admission_id
+            or screen.challenge_hash != c.digest()
+            or screen.nonce != c.nonce
+        ):
+            raise AdmissionError("REFERENCE_RESULT_BINDING")
         with self.escrow.tx():
             current = self.store.db.execute(
-                "SELECT * FROM admissions_v2 WHERE admission_id=?", (admission_id,)
+                "SELECT * FROM admissions_v2 WHERE admission_id=?", (claim.admission_id,)
             ).fetchone()
-            if current["challenge"] != c.model_dump_json() or current["proof_digest"] is not None:
+            if (
+                current is None
+                or current["challenge"] != c.model_dump_json()
+                or current["trial_epoch"] != claim.trial_epoch
+                or current["proof_digest"] is not None
+                or current["state"] != claim.state
+                or bool(current["pending_dispute"]) != claim.pending_dispute
+            ):
                 raise AdmissionError("REFERENCE_STATE_CHANGED")
+            trial = self.store.db.execute(
+                "SELECT outcome FROM admission_trial_results WHERE epoch=?", (claim.trial_epoch,)
+            ).fetchone()
+            if trial is None or trial["outcome"] != "OPEN" or now > c.deadline_beacon:
+                raise AdmissionError("REFERENCE_TRIAL_CLOSED")
+            if not self.qualified(screen):
+                raise AdmissionError("UNQUALIFIED_REFERENCE")
             commitment = digest(proof)
+            if current["reference_commitment"] is not None:
+                if current["reference_commitment"] != commitment:
+                    raise AdmissionError("REFERENCE_STATE_CHANGED")
+                return commitment
             self.store.db.execute(
                 "UPDATE admissions_v2 SET "
                 "reference_commitment=?,reference_json=?,reference_beacon=? WHERE "
                 "admission_id=?",
-                (commitment, proof.model_dump_json(), now, admission_id),
+                (commitment, proof.model_dump_json(), now, claim.admission_id),
             )
             self.store.db.execute(
                 "UPDATE admission_trial_results SET reference=? WHERE epoch=?",
-                (proof.model_dump_json(), current["trial_epoch"]),
+                (proof.model_dump_json(), claim.trial_epoch),
             )
             if retain_shadow_custody:
-                self.retain_trial_publication("reference", job, directory, screen, proof, now)
+                self.retain_trial_publication(
+                    "reference", claim.job, claim.directory, screen, proof, now
+                )
             return commitment
 
     def retain_runtime_custody(
