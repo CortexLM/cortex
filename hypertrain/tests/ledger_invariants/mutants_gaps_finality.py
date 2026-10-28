@@ -227,8 +227,10 @@ MUTANTS = [
         "gf-commit-takes-any-token-count",
         ["A2W-01", "FIN-17"],
         STORE,
-        "                model.validate_assignment("
-        "manifest, len(self._assignment_v2(run_id, w, env.signer)))\n",
+        "                try:\n"
+        "                    model.validate_assignment(manifest, samples)\n"
+        "                except ValueError as exc:\n"
+        "                    raise ChallengeError(422, str(exc)) from exc\n",
         "",
         [TOKENS],
         "A commit is stored with the token count the miner chose instead of the server's.",
