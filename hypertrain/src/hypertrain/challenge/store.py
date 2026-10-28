@@ -449,7 +449,7 @@ class ChallengeStore:
         self._services_v2: dict[str, tuple[Any, Any, Any]] = {}
         self.beacon_arrived = threading.Condition()
         self._lease_guards_v2: dict[str, Any] = {}
-        self._reference_flights_v2: dict[tuple[str, str], Future[str]] = {}
+        self._reference_flights_v2: dict[tuple[str, str, bool], Future[str]] = {}
         self._reference_waiters = threading.BoundedSemaphore(REFERENCE_WAITERS)
         self._ipc_v2: socket.socket | None = None
         self._ipc_path_v2: Path | None = None
@@ -2991,11 +2991,12 @@ class ChallengeStore:
         """The trusted reference of an open trial, in three steps (docs/adr/0012 section 2).
 
         Claim, under the lock: the freshness gate, everything the launch reads from the database,
-        and a flight keyed (admission, challenge nonce). A second call for the same key waits for
-        the flight and gets its commitment, or its failure; it never starts a second launch.
-        Run, without the lock: the launch and the object puts, under a lease guard the verified
-        beacon cancels. Settle, under the lock again: the commitment is written only into the row
-        state the claim read. The lock is therefore free while a remote executor works.
+        and a flight keyed (admission, challenge nonce, custody flag). A second call for the same
+        key waits for the flight and gets its commitment, or its failure, without staging the job
+        again; it never starts a second launch. Run, without the lock: the launch and the object
+        puts, under a lease guard the verified beacon cancels. Settle, under the lock again: the
+        commitment is written only into the row state the claim read. The lock is therefore free
+        while a remote executor works.
         """
         from hypertrain.auditor.worker import LeaseGuard
 
@@ -3005,24 +3006,30 @@ class ChallengeStore:
         guard: LeaseGuard | None = None
         guard_key = ""
         trusted: Callable[[IslandJobV1, Path, JoinChallenge, int], IslandLaunch] | None = None
+        value: str | None = None
+        failure: BaseException | None = None
+        key = (admission_id, "", retain_shadow_custody)
         with self._lock:
             manifest = self._run_v2(run_id)
             now = self._fresh_v2(manifest, f"reference:{admission_id}:{self._now(self._db)}")
             launch = self._role_launch
-            if launch is not None:
-                current = admission.store.db.execute(
-                    "SELECT * FROM admissions_v2 WHERE admission_id=?", (admission_id,)
-                ).fetchone()
-                if current is None or current["challenge"] is None:
-                    raise ChallengeError(409, "reference lacks accepted challenge")
-            claim = admission.claim_reference(admission_id, now=now)
-            if isinstance(claim, str):
-                return {"reference_commitment": claim}
-            nonce = claim.challenge.nonce
-            key = (admission_id, nonce)
-            flight = self._reference_flights_v2.get(key)
+            current = admission.store.db.execute(
+                "SELECT * FROM admissions_v2 WHERE admission_id=?", (admission_id,)
+            ).fetchone()
+            if launch is not None and (current is None or current["challenge"] is None):
+                raise ChallengeError(409, "reference lacks accepted challenge")
+            flight = None
+            if current is not None and current["challenge"] is not None:
+                nonce = JoinChallenge.model_validate_json(current["challenge"]).nonce
+                key = (admission_id, nonce, retain_shadow_custody)
+                flight = self._reference_flights_v2.get(key)
             leader = flight is None
             if leader:
+                claim = admission.claim_reference(admission_id, now=now)
+                if isinstance(claim, str):
+                    return {"reference_commitment": claim}
+                nonce = claim.challenge.nonce
+                key = (admission_id, nonce, retain_shadow_custody)
                 if launch is not None:
                     deadline = claim.challenge.deadline_beacon
                     cutoff = manifest.training.beacon.genesis_time + (deadline - 1) * 3
@@ -3060,17 +3067,8 @@ class ChallengeStore:
                 flight = self._reference_flights_v2[key] = Future()
         assert flight is not None
         if not leader:
-            if not self._reference_waiters.acquire(blocking=False):
-                raise ChallengeError(503, "reference already running for this trial; retry")
-            try:
-                finished, _ = wait([flight], timeout=REFERENCE_WAIT_SECONDS)
-            finally:
-                self._reference_waiters.release()
-            if not finished:
-                raise ChallengeError(503, "reference still running for this trial; retry")
-            return {"reference_commitment": flight.result()}
-        value: str | None = None
-        failure: BaseException | None = None
+            return self._follow_reference_v2(flight)
+        assert not isinstance(claim, str)
         try:
             with guard if guard is not None else nullcontext():
                 if guard is not None:
@@ -3085,35 +3083,51 @@ class ChallengeStore:
                 if guard is not None:
                     guard.check()
             with self._lock:
-                settled = self._fresh_v2(
-                    manifest, f"reference-settle:{admission_id}:{self._now(self._db)}"
-                )
+                # The gate was passed at the claim; the settlement only re-validates (a closed
+                # gate here would throw a finished reference away for no protection).
                 if guard is not None:
                     guard.check()
                 value = admission.settle_reference(
-                    claim, result, now=settled, retain_shadow_custody=retain_shadow_custody
+                    claim,
+                    result,
+                    now=self._now(self._db),
+                    retain_shadow_custody=retain_shadow_custody,
                 )
         except BaseException as error:
             failure = error
             raise
         finally:
-            self._end_reference_v2(key, flight, guard_key, value=value, error=failure)
+            self._end_reference_v2(key, flight, guard_key, guard, value=value, error=failure)
         return {"reference_commitment": value}
+
+    def _follow_reference_v2(self, flight: Future[str]) -> dict[str, str]:
+        """A repeated request waits for the running reference, on one of a few places."""
+        if not self._reference_waiters.acquire(blocking=False):
+            raise ChallengeError(503, "reference already running for this trial; retry")
+        try:
+            finished, _ = wait([flight], timeout=REFERENCE_WAIT_SECONDS)
+        finally:
+            self._reference_waiters.release()
+        if not finished:
+            raise ChallengeError(503, "reference still running for this trial; retry")
+        return {"reference_commitment": flight.result()}
 
     def _end_reference_v2(
         self,
-        key: tuple[str, str],
+        key: tuple[str, str, bool],
         flight: Future[str],
         guard_key: str,
+        guard: Any,
         *,
         value: str | None = None,
         error: BaseException | None = None,
     ) -> None:
-        """Forget the flight and its guard, then tell the waiters how it ended."""
+        """Forget the flight and its guard, each by identity, then tell the waiters how it ended."""
         with self._lock:
             if self._reference_flights_v2.get(key) is flight:
                 del self._reference_flights_v2[key]
-            self._lease_guards_v2.pop(guard_key, None)
+            if guard is not None and self._lease_guards_v2.get(guard_key) is guard:
+                del self._lease_guards_v2[guard_key]
         if error is not None:
             flight.set_exception(error)
         else:

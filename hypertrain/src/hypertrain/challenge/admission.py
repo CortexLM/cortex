@@ -564,17 +564,17 @@ class Admission:
             if current["reference_commitment"] is not None:
                 if current["reference_commitment"] != commitment:
                     raise AdmissionError("REFERENCE_STATE_CHANGED")
-                return commitment
-            self.store.db.execute(
-                "UPDATE admissions_v2 SET "
-                "reference_commitment=?,reference_json=?,reference_beacon=? WHERE "
-                "admission_id=?",
-                (commitment, proof.model_dump_json(), now, claim.admission_id),
-            )
-            self.store.db.execute(
-                "UPDATE admission_trial_results SET reference=? WHERE epoch=?",
-                (proof.model_dump_json(), claim.trial_epoch),
-            )
+            else:
+                self.store.db.execute(
+                    "UPDATE admissions_v2 SET "
+                    "reference_commitment=?,reference_json=?,reference_beacon=? WHERE "
+                    "admission_id=?",
+                    (commitment, proof.model_dump_json(), now, claim.admission_id),
+                )
+                self.store.db.execute(
+                    "UPDATE admission_trial_results SET reference=? WHERE epoch=?",
+                    (proof.model_dump_json(), claim.trial_epoch),
+                )
             if retain_shadow_custody:
                 self.retain_trial_publication(
                     "reference", claim.job, claim.directory, screen, proof, now

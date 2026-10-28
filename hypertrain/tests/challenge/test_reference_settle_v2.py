@@ -109,6 +109,18 @@ def test_a_settlement_commits_at_its_own_round_and_a_repeat_changes_nothing(with
     assert written(within) == stored  # the round of the first commitment stays
 
 
+def test_a_settlement_that_finds_its_own_commitment_still_retains_the_custody_it_is_asked_for(
+    within: Any,
+) -> None:
+    db = within.a.store.db
+    shadow = "SELECT COUNT(*) FROM records_v2 WHERE kind='shadow-execution'"
+    within.a.settle_reference(within.claim, within.result, now=5, retain_shadow_custody=True)
+    assert db.execute(shadow).fetchone()[0] == 1
+    db.execute("DELETE FROM records_v2 WHERE kind='shadow-execution'")
+    within.a.settle_reference(within.claim, within.result, now=6, retain_shadow_custody=True)
+    assert db.execute(shadow).fetchone()[0] == 1  # the same trial, a second flight asked for it
+
+
 @pytest.mark.parametrize(
     "tamper",
     [
@@ -146,8 +158,9 @@ def update(sql: str) -> Any:
         update("UPDATE admissions_v2 SET proof_digest='aa' WHERE admission_id=?"),
         update("UPDATE admissions_v2 SET trial_epoch=trial_epoch+1 WHERE admission_id=?"),
         update("UPDATE admissions_v2 SET reference_commitment='ff' WHERE admission_id=?"),
+        update("UPDATE admissions_v2 SET challenge=NULL WHERE admission_id=?"),
     ],
-    ids=["new-challenge", "suspended", "dispute", "proof", "epoch", "other-commitment"],
+    ids=["new-challenge", "suspended", "dispute", "proof", "epoch", "other-commitment", "cleared"],
 )
 def test_a_result_for_a_row_that_moved_while_the_launch_ran_is_dropped(
     within: Any, move: Any

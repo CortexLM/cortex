@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -26,7 +27,7 @@ from hypertrain.challenge import store as store_module
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.store import ChallengeError
 from hypertrain.data.trial_assignment import trial_samples
-from hypertrain.gpu_ops.work_screen import WorkScreenError
+from hypertrain.gpu_ops.work_screen import WorkScreenError, screen_work
 from hypertrain.miner.island_launch import IslandFailure, launch_island
 from hypertrain.protocol.messages_v2 import JoinChallenge
 
@@ -284,6 +285,8 @@ def test_two_calls_for_one_trial_launch_once_and_return_one_commitment(hosted):
     run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor()
     store._role_launch = executor
     admission_id = pending_reference(hosted)
+    stage, staged = store.stage_trial_v2, []
+    store.stage_trial_v2 = lambda *args: (staged.append(1), stage(*args))[1]  # type: ignore[method-assign]
     first = Call(store, run_id, admission_id)
     try:
         assert executor.reached.wait(WAIT)
@@ -293,6 +296,7 @@ def test_two_calls_for_one_trial_launch_once_and_return_one_commitment(hosted):
         assert not second.done and len(executor.launches) == 1
     finally:
         executor.release.set()
+    assert len(staged) == 1  # the waiter did not stage the job again under the store lock
     assert first.result() == second.result()
     assert (
         first.result()["reference_commitment"]
@@ -448,15 +452,24 @@ def test_a_lease_cancelled_while_the_result_waits_for_the_lock_is_not_committed(
     store._role_launch = executor
     admission_id = pending_reference(hosted)
     key = f"reference:{admission_id}:{challenge_of(hosted, admission_id).nonce}"
-    fresh = store._fresh_v2
+    _, admission, _ = store._services(run_id)
+    run = admission.run_reference
 
-    def cancels_at_the_settlement(manifest: Any, operation: str, rnd: int | None = None) -> int:
-        now = fresh(manifest, operation, rnd)
-        if operation.startswith("reference-settle:"):
-            store._lease_guards_v2[key].revoke()  # the lease ends after the result is in
-        return now
+    def run_then_arm(*args: Any, **options: Any) -> Any:
+        result = run(*args, **options)
+        guard = store._lease_guards_v2[key]
+        check, seen = guard.check, []
 
-    monkeypatch.setattr(store, "_fresh_v2", cancels_at_the_settlement)
+        def check_twice() -> None:
+            seen.append(1)
+            if len(seen) == 2:  # the first check follows the run, the second precedes the write
+                guard.revoke()  # the lease ends between the two: the result is already in
+            check()
+
+        guard.check = check_twice
+        return result
+
+    monkeypatch.setattr(admission, "run_reference", run_then_arm)
     with pytest.raises(AuditInputError, match="expired or revoked"):
         store.trial_reference_v2(run_id, admission_id)
     assert not committed(hosted, admission_id)
@@ -572,6 +585,147 @@ def test_staging_survives_a_write_that_died_halfway(hosted, monkeypatch):
     # the half-written file is not left under the name of an input: the next staging works
     job, directory = store.stage_trial_v2(run_id, challenge, samples, epoch)
     assert (directory / "start_state").read_bytes() and job.sample_ids == list(samples)
+
+
+def miner_submission(hosted: Any, admission_id: str, workdir: Path) -> dict[str, Any]:
+    """What an honest miner posts to /join/proof: the real CPU reference of a private copy of the
+    staged inputs, signed by the admission's hotkey."""
+    store, row = hosted.store, row_of(hosted, admission_id)
+    challenge = challenge_of(hosted, admission_id)
+    beacon = store._beacon_v2(challenge.seed_beacon)
+    samples = trial_samples(hosted.manifest, admission_id, challenge.nonce, beacon)
+    job, staged = store.stage_trial_v2(
+        hosted.manifest.run_id(), challenge, samples, row["trial_epoch"]
+    )
+    shutil.copytree(staged, workdir)
+    screen, proof = screen_work(job, workdir, challenge, now_beacon=hosted.now, backend="cpu")
+    key = backend.service.HOT[0]
+    return {
+        "proof": hosted.signed(key, "WorkProof", proof),
+        "screen": hosted.signed(key, "WorkScreenV2", screen),
+    }
+
+
+class Post:
+    """A request of the miner on its own thread, as a client with an open connection would hold."""
+
+    def __init__(self, hosted: Any, path: str, body: Any) -> None:
+        self.outcome: list[Any] = []
+        self.thread = threading.Thread(target=self._run, args=(hosted, path, body), daemon=True)
+        self.thread.start()
+
+    def _run(self, hosted: Any, path: str, body: Any) -> None:
+        try:
+            self.outcome.append(hosted.client.post(hosted.url + path, json=body))
+        except BaseException as error:  # noqa: BLE001 - the test client re-raises server errors
+            self.outcome.append(error)
+
+    def result(self, timeout: float = WAIT) -> Any:
+        self.thread.join(timeout)
+        assert not self.thread.is_alive(), "the request is stuck"
+        return self.outcome[0]
+
+
+def test_the_proof_route_runs_the_reference_while_the_beacon_goes_on_and_accepts_the_proof(
+    hosted, tmp_path
+):
+    # Given: an honest miner's signed proof and a remote executor still at work
+    store, executor = hosted.store, Executor()
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    signed = miner_submission(hosted, admission_id, tmp_path / "miner")
+    claimed = hosted.now
+    # When: the proof is posted; the service must compute the trusted reference first
+    post = Post(hosted, "/join/proof", signed)
+    try:
+        assert executor.reached.wait(WAIT)
+        # Then: the pusher's own route answers at once while the executor works ...
+        began = time.perf_counter()
+        hosted.push(claimed + 3)
+        assert time.perf_counter() - began < 1.0
+        assert not committed(hosted, admission_id)
+    finally:
+        executor.release.set()
+    # ... and the proof is accepted against the reference committed at the later round
+    response = post.result()
+    assert response.status_code == 200, response.text
+    assert response.json()["clean_count"] == 1
+    row = row_of(hosted, admission_id)
+    assert row["reference_beacon"] == claimed + 3 and len(executor.launches) == 1
+
+
+def test_the_deadline_round_cancels_a_launch_that_is_still_running(hosted, tmp_path):
+    # The window of a reference is the trial's: the lease guard cancels the launch when the
+    # verified beacon reaches the deadline round, as the wall-clock timer did before (the round is
+    # emitted at that very second). A proof may still arrive in the deadline round; a reference
+    # that is not done by then is not committed, whoever was slow.
+    store, executor = hosted.store, Executor()
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    signed = miner_submission(hosted, admission_id, tmp_path / "miner")
+    post = Post(hosted, "/join/proof", signed)
+    try:
+        assert executor.reached.wait(WAIT)
+        cancel = executor.cancels[0]
+        hosted.push(challenge_of(hosted, admission_id).deadline_beacon - 1)
+        assert cancel is not None and not cancel.is_set()
+        hosted.push(challenge_of(hosted, admission_id).deadline_beacon)
+        assert cancel.is_set()
+    finally:
+        executor.release.set()
+    with pytest.raises((IslandFailure, WorkScreenError, AuditInputError)):
+        raise post.result()
+    assert not committed(hosted, admission_id)
+
+
+def test_a_slow_reference_that_ends_one_round_before_the_deadline_is_committed(hosted, tmp_path):
+    store, executor = hosted.store, Executor()
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    signed = miner_submission(hosted, admission_id, tmp_path / "miner")
+    last = challenge_of(hosted, admission_id).deadline_beacon - 1
+    post = Post(hosted, "/join/proof", signed)
+    try:
+        assert executor.reached.wait(WAIT)
+        hosted.push(last)  # 98 of the 100 rounds went while the executor worked
+    finally:
+        executor.release.set()
+    response = post.result()
+    assert response.status_code == 200, response.text
+    assert response.json()["clean_count"] == 1
+    assert row_of(hosted, admission_id)["reference_beacon"] == last
+
+
+def test_a_reference_that_ends_after_the_window_commits_nothing_and_sanctions_nobody(
+    hosted, tmp_path
+):
+    # The window closes while the executor works: the result is dropped, the trial is closed as
+    # bookkeeping (EXPIRED), and the miner's standing is not touched (no strike, no suspension).
+    store, executor = hosted.store, Executor(honour_cancel=False)
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    signed = miner_submission(hosted, admission_id, tmp_path / "miner")
+    before = row_of(hosted, admission_id)
+    post = Post(hosted, "/join/proof", signed)
+    try:
+        assert executor.reached.wait(WAIT)
+        hosted.push(challenge_of(hosted, admission_id).deadline_beacon + 1)
+    finally:
+        executor.release.set()
+    with pytest.raises((IslandFailure, WorkScreenError, AuditInputError)):
+        raise post.result()
+    after = row_of(hosted, admission_id)
+    assert not committed(hosted, admission_id)
+    assert (after["state"], after["strikes"], after["pending_dispute"], after["clean_count"]) == (
+        before["state"],
+        before["strikes"],
+        before["pending_dispute"],
+        before["clean_count"],
+    )
+    outcome = store._db.execute(
+        "SELECT outcome FROM admission_trial_results WHERE epoch=?", (after["trial_epoch"],)
+    ).fetchone()[0]
+    assert outcome == "EXPIRED"
 
 
 def test_a_probe_that_does_not_need_the_lock_is_reported_served(network, monkeypatch):

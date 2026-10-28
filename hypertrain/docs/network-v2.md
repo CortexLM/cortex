@@ -179,6 +179,22 @@ stdout contains the signed proof/screen pair. The operator independently prepare
 and finalizes references through authenticated admin routes; miners cannot
 self-finalize or turn a successful probe into ACTIVE status.
 
+The service computes the reference itself when the signed proof arrives
+(`POST /v2/runs/{run_id}/join/proof`; `.../admin/join/{admission_id}/reference` is the override).
+On a remote executor it takes 13 to 64 s. The service holds its store lock only to read what the
+launch needs and to commit the result, not while the executor works (ADR 0012), so every other
+request, the beacon pusher included, is served meanwhile. A second request for the same trial that
+arrives while the reference runs (a retry after a client timeout) waits for it and gets the same
+answer, or the same failure. At most two such requests wait in the process: the next answers 503
+`reference already running for this trial; retry`, and a waiter that has waited 330 s answers 503
+`reference still running for this trial; retry`. Both are transient: retry. A reference whose trial
+was closed, expired or replaced while it ran is dropped and nothing is committed: 409
+`REFERENCE_STATE_CHANGED` or `REFERENCE_TRIAL_CLOSED`. A reference that is
+not done by the deadline round of the trial is not committed either (the launch is cancelled there, or
+the answer is a 500 from the cancelled launch); the trial is closed `EXPIRED` and the miner's state,
+strikes and dispute flag are untouched. A lapsed trial still gets no new challenge from the same
+seed (ADR 0010).
+
 Current admission policy fixes E=4 and requires 12 clean finalized participations
 plus canary blocks 1,2,3. The first four are shadow-only. Later PROBATION influence
 also requires funded eligibility; ACTIVE requires current screening, sufficient
