@@ -57,10 +57,22 @@ JOURNAL_BUDGET = 12 << 20
 ACK_BYTES = 1280
 # /readyz and the log report the journal fill and raise an alarm above this share of the budget.
 ALARM_FILL = 0.8
+# forward_error of a receipt the master answered with a 4xx (late, conflicting, unknown): it will
+# never hold a release for it. A transport error, a 5xx, 408 and 429 may be answered later.
+FORWARD_REFUSED = "ForwardRefused"
 
 
 class RelayError(ValueError):
     """Authenticated contract, authorization, quota or lifecycle rejection."""
+
+
+def _forward_failure(error: httpx.HTTPError) -> str:
+    """What `forward_error` records for a failed forward: FORWARD_REFUSED or the exception name."""
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        if 400 <= status < 500 and status not in (408, 429):
+            return FORWARD_REFUSED
+    return type(error).__name__
 
 
 class AssemblyMismatch(RelayError):
@@ -237,7 +249,8 @@ class Relay:
 
     @staticmethod
     def held(record: UploadRecord, now: int) -> bool:
-        """Still owed by this relay: a live reservation, or custody neither released nor lapsed."""
+        """Still owed by this relay: a live reservation, or custody neither released nor past its
+        horizon. Past it the promise has ended, but a receipted upload is kept until released."""
         if record.pins:
             return any(p.delete_after is None and p.horizon >= now for p in record.pins.values())
         return AcceptedUploadAck.model_validate(record.opportunity.body).service_deadline >= now
@@ -507,7 +520,7 @@ class Relay:
             try:
                 acceptance_raw = await self.forward(record.receipt)
             except httpx.HTTPError as error:
-                failure_name = type(error).__name__
+                failure_name = _forward_failure(error)
 
                 def pending(state: Journal) -> None:
                     self._record(state, grant_hash).forward_error = failure_name
@@ -542,7 +555,7 @@ class Relay:
                 and record.master_acceptance is None
                 # Deterministic failures: retrying the same held bytes cannot succeed.
                 and record.forward_error
-                not in (AssemblyMismatch.__name__, CorruptObjectError.__name__)
+                not in (AssemblyMismatch.__name__, CorruptObjectError.__name__, FORWARD_REFUSED)
             ):
                 try:
                     await self.complete(grant_hash)
@@ -857,18 +870,28 @@ class Relay:
             entries.append((receipt.digest(), receipt.delta_hash))
         return entries
 
-    def _lapsed(self, pin: Pin, now: int) -> bool:
-        """The signed promise has ended: nothing released it, the horizon and the epoch grace are
-        past, and no dispute references it. An open dispute suspends the expiry until the master
-        releases the grant at its close (ADR 0014 Part 6.4, D54)."""
+    def _lapsed(self, record: UploadRecord, pin: Pin, now: int) -> bool:
+        """The signed promise has ended and the master cannot need the bytes: nothing released
+        them, the horizon and the epoch grace are past, no dispute references them, and the master
+        holds no receipt for the upload (it never reached one, or the master refused it).
+
+        An upload with a receipt the master may have accepted is held until the master releases
+        it, whatever its age: a dispute can open after the last extension and the relay cannot see
+        that, and a master that is away past the horizon cannot extend. The release comes once
+        finality is written or the round is closed without a reward (ADR 0014 Part 6.4, D54, D72).
+        A forward that failed in transport or with a 5xx may still have been accepted, so it is
+        held too; only a 4xx answer says the master has nothing to release."""
         return (
-            pin.delete_after is None and not pin.disputes and now >= pin.horizon + self.epoch_rounds
+            (record.receipt is None or record.forward_error == FORWARD_REFUSED)
+            and pin.delete_after is None
+            and not pin.disputes
+            and now >= pin.horizon + self.epoch_rounds
         )
 
-    def _unneeded(self, pin: Pin, now: int) -> bool:
+    def _unneeded(self, record: UploadRecord, pin: Pin, now: int) -> bool:
         """Released and past its deletion bound, or lapsed: the relay owes this custody nothing."""
         released = pin.delete_after is not None and now >= pin.delete_after and not pin.disputes
-        return released or self._lapsed(pin, now)
+        return released or self._lapsed(record, pin, now)
 
     def _eligible_deletions(self, state: Journal, now: int) -> list[str]:
         """An object goes when every pin on it is unneeded; one live pin protects it."""
@@ -876,7 +899,7 @@ class Relay:
         protected: set[str] = set()
         for record in state.uploads.values():
             for digest, sha in self._custody(record):
-                if self._unneeded(record.pins[digest], now):
+                if self._unneeded(record, record.pins[digest], now):
                     candidates.add(sha)
                 else:
                     protected.add(sha)
@@ -886,7 +909,7 @@ class Relay:
         """Nothing left to serve or protect. A reservation that never produced custody ends with
         the horizon its acknowledgment was signed for."""
         if record.pins:
-            return all(self._unneeded(pin, now) for pin in record.pins.values())
+            return all(self._unneeded(record, pin, now) for pin in record.pins.values())
         return now >= UploadGrant.model_validate(record.grant.body).retain_until + self.epoch_rounds
 
     def _prune(self, state: Journal, now: int, deleted: set[str]) -> None:

@@ -24,6 +24,7 @@ from hypertrain.protocol import relay_envelope
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.relay_envelope import RelayEnvelope
 from hypertrain.protocol.relay_messages import (
+    CustodyRelease,
     RelayAssignment,
     RelayNetworkManifest,
     RelayReceipt,
@@ -31,6 +32,7 @@ from hypertrain.protocol.relay_messages import (
 )
 from hypertrain.relay import app as relay_app
 from hypertrain.relay.app import AcceptRequest, RelayConfig, create_app
+from hypertrain.relay.core import Settlement
 
 STALE = "verified beacon stale; eligibility/deadlines frozen"
 # With d the seconds since drand genesis the expected round is ceil(d / 3), so a round starts
@@ -371,8 +373,12 @@ def test_relay_json_refuses_a_max_uploads_that_admits_nothing(
     anyio.run(scenario)
 
 
-async def hold_a_receipted_upload(tmp_path: Path) -> tuple[UploadGrant, str]:
-    """A complete upload in the journal the served relay reads; returns the grant, receipt pin."""
+async def hold_a_receipted_upload(
+    tmp_path: Path, bound: int | None = None
+) -> tuple[UploadGrant, str]:
+    """A complete upload in the journal the served relay reads; returns the grant, receipt pin.
+
+    With `bound` the master has released it, and it can be deleted from beacon `bound` on."""
     async with httpx.AsyncClient() as client:
         rig = Rig(tmp_path / "store", client)
         data = b"round-1"
@@ -381,6 +387,27 @@ async def hold_a_receipted_upload(tmp_path: Path) -> tuple[UploadGrant, str]:
         await rig.put(grant, data)
         record = (await rig.relay.state()).uploads[grant.digest()]
         assert record.receipt is not None
+        if bound is not None:
+
+            async def settlement(grant_hash: str) -> Settlement:
+                return Settlement(H, 100, H, 100, 100)
+
+            rig.relay.settlement, rig.clock = settlement, bound
+            for digest, pin in record.pins.items():
+                await rig.relay.release(
+                    rig.seal(
+                        CustodyRelease(
+                            grant_hash=grant.digest(),
+                            custody_hashes=[digest],
+                            retention_hash=pin.retention_hash,
+                            finality_hash=H,
+                            vesting_beacon=100,
+                            closed_dispute_root=H,
+                            release_beacon=bound,
+                        ),
+                        exp=bound + 10,
+                    )
+                )
         return grant, RelayReceipt.model_validate(record.receipt.body).digest()
 
 
@@ -403,16 +430,16 @@ async def collected(tmp_path: Path, grant_hash: str) -> None:
     raise AssertionError("the grant was never collected")
 
 
-def test_runtime_collects_lapsed_custody_on_its_own_at_the_end_of_the_grace(
+def test_runtime_collects_released_custody_on_its_own_at_its_deletion_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The upload was granted to beacon 200; the relay's epoch grace is 100. Nothing calls collect:
+    # The master released the upload with a deletion bound of beacon 300. Nothing calls collect:
     # the runtime's own task deletes the object and prunes the record once beacon 300 is reached.
     async def scenario() -> None:
-        grant, _ = await hold_a_receipted_upload(tmp_path)
+        grant, _ = await hold_a_receipted_upload(tmp_path, 300)
         monkeypatch.setattr(relay_app, "COLLECT_INTERVAL", 0.05)
         async with serving(tmp_path, monkeypatch, wall_of(298)) as (_, _, clock):
-            await anyio.sleep(1.0)  # about twenty passes at beacon 299, one short of the grace
+            await anyio.sleep(1.0)  # about twenty passes at beacon 299, one short of the bound
             assert grant.digest() in await custody_of(tmp_path)
             assert any((tmp_path / "store").rglob(grant.delta_hash))
             clock.advance(2 * QUICKNET_PERIOD)
@@ -426,7 +453,7 @@ def test_runtime_collect_task_survives_a_failing_delete_and_logs_only_its_type(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def scenario() -> None:
-        grant, _ = await hold_a_receipted_upload(tmp_path)
+        grant, _ = await hold_a_receipted_upload(tmp_path, 300)
         monkeypatch.setattr(relay_app, "COLLECT_INTERVAL", 0.05)
         real_delete, refused = StreamStore.delete, []
 
