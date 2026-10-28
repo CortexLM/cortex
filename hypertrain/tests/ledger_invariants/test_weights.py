@@ -14,7 +14,6 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 from collections.abc import Iterator
-from contextlib import suppress
 from pathlib import Path
 from types import ModuleType
 
@@ -27,7 +26,6 @@ from hypertrain.ledger import FULL_SHARE_MASS
 from hypertrain.ledger.escrow_v2 import EscrowError, Settlement
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
-from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import (
     EscrowLock,
     EscrowOperation,
@@ -36,6 +34,7 @@ from hypertrain.protocol.messages_v2 import (
 )
 
 from .support import Hosted, Real, at, error_code, hosted_reward, mature, pays
+from .support_opids import SINK
 from .support_weights import (
     assert_answer_shape,
     events,
@@ -655,10 +654,8 @@ def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
     host = finalized
     mature(host.escrow, host.reward)
     origin, cold, other = host.reward.origin_ids[0], li_escrow.COLD.ss58, li_escrow.OTHER.ss58
-    third = Keypair(b"\x0a" * 32).ss58
 
-    def transfer(operation: str, owner: str, units: int) -> EscrowTransfer:
-        # A transfer to oneself is refused (SELF_TRANSFER), so the other owner sends to a third.
+    def transfer(operation: str, owner: str, units: int, recipient: str) -> EscrowTransfer:
         return EscrowTransfer(
             operation_id=operation,
             owner=owner,
@@ -666,22 +663,33 @@ def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
             origin_ids=[origin],
             admission_id=None,
             dispute_id=None,
-            recipient=third if owner == other else other,
+            recipient=recipient,
         )
 
-    # Given: another owner holds two free units (one per event it signs below), received by an
-    # ordinary owner-signed transfer.
-    host.escrow.transfer(transfer("66" * 32, cold, 2), signer=cold)
+    # Given: another owner holds two free units, received by an ordinary owner-signed transfer:
+    # one to sign a control with, one to sign the squat with.
+    host.escrow.transfer(transfer("66" * 32, cold, 2, other), signer=cold)
     # When: that owner signs an event whose id is the one the service derives for the payout of
     # epoch 0 (the control signs nothing).
     if preempt:
-        # The same event under an ordinary id is accepted, so a refusal below is about its id.
-        host.escrow.transfer(transfer("67" * 32, other, 1), signer=other)
-        # A ledger may refuse this event or keep it apart from the key of the payout.
-        with suppress(EscrowError):
-            host.escrow.transfer(
-                transfer(pay_id(host.run_id, 0, origin, cold), other, 1), signer=other
-            )
+        # The same event under an ordinary id is accepted, so a refusal below is about its id. It
+        # goes to the sink: the ledger refuses a transfer to oneself whatever its id.
+        host.escrow.transfer(transfer("67" * 32, other, 1, SINK), signer=other)
+        assert host.escrow.balances(other).available == 1  # funded: only the id can refuse it
+        squat = pay_id(host.run_id, 0, origin, cold)
+        # The event model takes the id, so only the ledger can rule on it. It may refuse the event
+        # or keep it apart from the key of the payout, but it must have seen it.
+        event = transfer(squat, other, 1, SINK)
+        try:
+            host.escrow.transfer(event, signer=other)
+            accepted = 1
+        except EscrowError:
+            accepted = 0
+        named = host.escrow.db.execute(
+            "SELECT COUNT(*) FROM escrow_events WHERE json_extract(receipt, '$.operation_id') = ?",
+            (squat,),
+        ).fetchone()[0]
+        assert named == accepted
     # Then: either way the epoch pays the earner its free units, in one PAY event.
     answer = ask(host, 0)
     assert answer["weights"] == {li_escrow.HOT.ss58: float(ISSUED - 2)}
@@ -773,9 +781,9 @@ def bytes_stored_by_one_payout(li_escrow: ModuleType, origins: int) -> int:
     strict=True,
     raises=AssertionError,
     reason="WGT-21+WGT-D4: the bytes one payout adds to the store do not grow with the number of "
-    "origins the escrow holds (every escrow event stores a full snapshot; ADR 0014 part 4.6 "
-    "landed without the digest-in-preimage cure, which needs a maintainer decision) "
-    "[fix-lot: decision (product choice pending)]",
+    "origins the escrow holds (every escrow event stores a full snapshot; the lot encodes it "
+    "faster but ADR 0014 part 4.6, a digest in the event hash with checkpoints, awaits a "
+    "maintainer decision) [fix-lot: decision (product choice pending)]",
 )
 def test_the_storage_cost_of_one_payout_does_not_grow_with_the_number_of_origins(
     li_escrow: ModuleType,

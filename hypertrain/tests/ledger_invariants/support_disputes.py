@@ -27,16 +27,17 @@ from hypertrain.challenge.disputes_v2 import (
     signed_message,
 )
 from hypertrain.ledger.escrow_v2 import FinalityEvidence, digest, reward_origin_id
-from hypertrain.protocol import messages_v2
 from hypertrain.protocol.envelope_v2 import EnvelopeV2, seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import Finalize
 from hypertrain.protocol.messages_v2 import (
+    REQUEST_HORIZON,
     BisectV2,
     DisputePolicyV2,
     DisputeV2,
+    DisputeWatchRequest,
     EscrowLock,
     OriginAllocation,
     ResolutionV2,
@@ -593,23 +594,26 @@ WATCH_NEEDS_SIGNATURE = "party event access requires signature"
 
 
 def watch_feed(world: World, party: Keypair, signer: Keypair | None) -> Any:
-    """The dispute events of `party`, asked for with the signature of `signer` (none: unsigned).
+    """The dispute events of `party`, asked for with the signature of `signer` (none: no request).
 
-    The signature rides in the X-Dispute-Signature header of a GET where the service reads it
-    there, and in the body of a signed DisputeWatchRequest where the service reads it there."""
+    The one form the service reads is a signed DisputeWatchRequest in the body of a POST."""
     net = world.network
-    if hasattr(messages_v2, "DisputeWatchRequest"):
-        url = net.url + "/disputes/watch"
-        if signer is None:
-            return world.client.post(url, json={})
-        asked = {"party": party.ss58, "cursor": 0, "wait": 0}
-        signed = net.signed(signer, "DisputeWatchRequest", asked, expiry=net.now + 20)
-        return world.client.post(url, json=signed)
-    feed = net.url + "/disputes?party=" + party.ss58
+    url = net.url + "/disputes/watch"
     if signer is None:
-        return world.client.get(feed)
+        return world.client.post(url, json={})
+    asked = DisputeWatchRequest(party=party.ss58, cursor=0, wait=0)
+    signed = net.signed(signer, "DisputeWatchRequest", asked, expiry=net.now + REQUEST_HORIZON)
+    return world.client.post(url, json=signed)
+
+
+def header_signed_watch_feed(world: World, party: Keypair, signer: Keypair) -> Any:
+    """The retired form of the same ask: a GET whose only proof is `signer`'s signature in the
+    X-Dispute-Signature header, over a message that names no expiry."""
     message = f"hypertrain/watch/2|{world.run_id}|{party.ss58}".encode()
-    return world.client.get(feed, headers={"X-Dispute-Signature": signer.sign(message).hex()})
+    return world.client.get(
+        world.network.url + "/disputes?party=" + party.ss58,
+        headers={"X-Dispute-Signature": signer.sign(message).hex()},
+    )
 
 
 def witnesses(

@@ -4,7 +4,8 @@ A client may sign any 64-hex id, and every id the service derives for itself (re
 shadow finalize, maturity, payout, dispute settlement) is a function of values that are public or
 shared with the miner. The escrow stores such a service event under a key no client id can name,
 so each test takes the id from the receipt of the control run of the service step, lets a funded
-bystander sign an event with exactly that id, and requires the step to succeed with the effect it
+bystander sign an event with exactly that id (the ledger must have decided on it: stored it or
+refused it, never left it to the event model), and requires the step to succeed with the effect it
 has without the bystander. The same module pins the lookups that must not confuse a lock id, a
 dispute id and a reward origin id, and the escrow engine's own id, atomicity and replay laws.
 """
@@ -13,8 +14,8 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-import json
 import sqlite3
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 
@@ -46,7 +47,7 @@ from .support import (
     memory_db,
 )
 from .support_opids import (
-    RECIPIENT,
+    SINK,
     DefenceMissing,
     client_event,
     collateral_escrow,
@@ -54,10 +55,11 @@ from .support_opids import (
     dispute_world,
     fresh_id,
     must_refuse,
-    refused,
+    receipt_ids,
     seed_reward_origin,
     service_step,
-    transfer_to_recipient,
+    sink_transfer,
+    squat_id,
 )
 
 
@@ -80,9 +82,9 @@ def test_a_client_event_never_blocks_the_reward_finalize_id(
 
     # When: a funded bystander signs an event with exactly that id before the round is finalized.
     escrow, origin = collateral_escrow(li_escrow, setup)
-    key = li_escrow.OTHER
-    client_event(escrow, kind, key, fresh_id("neutral"), origin)  # control: the bystander can sign
-    refused(lambda: client_event(escrow, kind, key, finalize_id, origin))
+    send = partial(client_event, escrow, kind, li_escrow.OTHER, origin=origin)
+    send(fresh_id("neutral"))  # control: the bystander can sign
+    squat_id(escrow, kind, finalize_id, send)
 
     # Then: the finalize of the round still succeeds, with the same effect and the same id.
     receipt = service_step(lambda: escrow.reward_finalize(reward, evidence))
@@ -111,29 +113,14 @@ def test_a_client_event_never_blocks_the_shadow_finalize_id(
 
     # When: a funded bystander signs an event with that id after the reservation.
     escrow, origin, signed = shadow_ledger()
-    client_event(escrow, kind, li_escrow.OTHER, fresh_id("neutral"), origin)
-    refused(lambda: client_event(escrow, kind, li_escrow.OTHER, finalize_id, origin))
+    send = partial(client_event, escrow, kind, li_escrow.OTHER, origin=origin)
+    send(fresh_id("neutral"))
+    squat_id(escrow, kind, finalize_id, send)
 
     # Then: the reservation is finalized as without the bystander.
     receipt = service_step(lambda: escrow.reward_finalize(signed, shadow_evidence))
     assert receipt.operation_id == finalize_id
     assert reward_effect(escrow) == effect
-
-
-def named_ids(escrow, kind: str) -> list[str]:
-    """The ids the service named for its events of `kind`, as their receipts carry them. The key
-    an event is stored under is a keyed derivative that no client can sign, so it is not the id a
-    bystander would take."""
-    rows = escrow.db.execute("SELECT receipt FROM escrow_events WHERE kind=? ORDER BY seq", (kind,))
-    return [json.loads(row[0])["operation_id"] for row in rows]
-
-
-def pay_ids(escrow) -> list[str]:
-    return named_ids(escrow, "PAY")
-
-
-def release_ids(escrow) -> list[str]:
-    return named_ids(escrow, "RELEASE")
 
 
 def resolved_and_settled(world, turn, settle=lambda step: step()):
@@ -175,22 +162,23 @@ def test_a_client_event_never_blocks_the_weights_payout_id(
     with hosted_reward(tmp_path / "control", li_escrow, real_reward, real_settlement=True) as run:
         matured_with_a_bystander(run, li_escrow)
         served = run.answer(0)
-        payout_ids = pay_ids(run.escrow)
+        payout_ids = receipt_ids(run.escrow, "PAY")
     assert served["weights"] == {li_escrow.HOT.ss58: 999_998.0} and len(payout_ids) == 1
 
     # When: a funded bystander signs an event with exactly that id before the epoch is asked.
     with hosted_reward(tmp_path / "contended", li_escrow, real_reward, real_settlement=True) as run:
         origin = matured_with_a_bystander(run, li_escrow)
         key = li_escrow.OTHER
-        client_event(run.escrow, kind, key, fresh_id("neutral"), origin)
+        send = partial(client_event, run.escrow, kind, key, origin=origin)
+        send(fresh_id("neutral"))
         assert run.escrow.balances(key.ss58).available >= 1  # a unit is left to sign with
-        refused(lambda: client_event(run.escrow, kind, key, payout_ids[0], origin))
+        squat_id(run.escrow, kind, payout_ids[0], send)
 
         # Then: the epoch is answered with the same payment, once.
         answer = service_step(lambda: run.answer(0))
         assert answer["weights"] == served["weights"]
         assert answer["metadata"]["units_paid"] == served["metadata"]["units_paid"]
-        assert pay_ids(run.escrow) == payout_ids
+        assert receipt_ids(run.escrow, "PAY") == payout_ids
 
 
 @pytest.mark.parametrize("kind", ["transfer", "lock"])
@@ -207,26 +195,28 @@ def test_a_client_event_never_blocks_the_dispute_settlement_id(
     # Given: the control run settles a resolved dispute and shows the id of its release.
     with dispute_world(tmp_path / "control", li_escrow) as world:
         resolved_and_settled(world, opened(world))
-        settle_ids = release_ids(world.escrow)
+        settle_ids = receipt_ids(world.escrow, "RELEASE")
         effect = world.escrow.balances(li_escrow.COLD.ss58)
     assert len(settle_ids) == 1 and effect.dispute_locked == 0 and effect.available == 20000
 
     # When: a funded bystander signs an event with that id while the dispute is open.
     with dispute_world(tmp_path / "contended", li_escrow) as world:
         turn = opened(world)
-        key, origin = li_escrow.OTHER, world.origins[1]
-        client_event(world.escrow, kind, key, fresh_id("neutral"), origin)
-        refused(lambda: client_event(world.escrow, kind, key, settle_ids[0], origin))
+        send = partial(client_event, world.escrow, kind, li_escrow.OTHER, origin=world.origins[1])
+        send(fresh_id("neutral"))
+        squat_id(world.escrow, kind, settle_ids[0], send)
 
         # Then: the referee's resolution and the release of the bond go through together, as
         # without the bystander.
         resolved_and_settled(world, turn, settle=service_step)
         assert world.disputes.get(turn.dispute_id).resolution is not None
         assert world.escrow.balances(li_escrow.COLD.ss58) == effect
-        assert release_ids(world.escrow) == settle_ids
+        assert receipt_ids(world.escrow, "RELEASE") == settle_ids
 
 
 FIRST_VERDICT, SECOND_VERDICT, THIRD_VERDICT = "11" * 32, "55" * 32, "66" * 32
+# What DisputesV2.open answers a bond whose lock id is already a dispute id or a reward origin id.
+ID_COLLISION = "CONTEST_LOCK_ID_COLLISION"
 
 
 def borrowing_dispute(world, li_escrow):
@@ -234,7 +224,8 @@ def borrowing_dispute(world, li_escrow):
     miner) whose bond lock carries the dispute id of the first one.
 
     Returns (the closed first turn, the second dispute id, the second bond lock, the opened second
-    turn). The lock and the turn are None when the id was refused before the dispute opened."""
+    turn, the refusal the borrowed id met). The lock and the turn are None when the id was refused
+    before the dispute opened, and the refusal is then the error that stopped it."""
     first_id = world.add_contest(FIRST_VERDICT, li_escrow.HOT)
     first_bond = world.bond(li_escrow.COLD, "44" * 32, first_id, world.origins[0])
     first = world.resolve_match(
@@ -252,21 +243,29 @@ def borrowing_dispute(world, li_escrow):
     assert world.escrow.balances(li_escrow.OTHER.ss58).dispute_locked == 0
 
     second_id = world.add_contest(SECOND_VERDICT, world.miner_two)
-    bond = second = None
+    bond = second = refusal = None
     try:
         bond = world.bond(li_escrow.OTHER, first_id, second_id, world.origins[1])
         second = world.open(world.miner_two, SECOND_VERDICT, first_id, now=4)
-    except (EscrowError, DisputeError):
-        pass  # the id is refused at creation, so no bond borrows it
-    return first, second_id, bond, second
+    except (EscrowError, DisputeError) as error:
+        refusal = error
+    return first, second_id, bond, second, refusal
+
+
+def refused_at_creation(refusal: Exception | None) -> None:
+    """The bond that borrows the id of a dispute or of a reward origin is refused when its dispute
+    is created, by the name collision and by nothing else: a refusal of any other kind, or none,
+    leaves the borrowed id unguarded."""
+    assert isinstance(refusal, DisputeError) and refusal.code == ID_COLLISION, refusal
 
 
 def test_a_bond_borrowing_a_closed_disputes_id_cannot_be_released_while_its_dispute_is_open(
     li_escrow: ModuleType, tmp_path: Path
 ) -> None:
     with dispute_world(tmp_path, li_escrow) as world:
-        first, _, bond, opened = borrowing_dispute(world, li_escrow)
+        first, _, bond, opened, refusal = borrowing_dispute(world, li_escrow)
         if opened is None:
+            refused_at_creation(refusal)
             return
         other = li_escrow.OTHER
         release = world.release_of(other, bond, first, fresh_id("early-release"), world.origins[1])
@@ -299,8 +298,8 @@ def test_a_bystander_event_under_a_plain_id_of_the_lock_does_not_keep_the_owner_
             canonicalize(seal(other, "EscrowLock", world.run_id, lock, 500)), now=2
         )
 
-        def event_of(operation_id: str) -> EscrowTransfer:
-            return EscrowTransfer(
+        def send(operation_id: str) -> EscrowReceipt:
+            event = EscrowTransfer(
                 operation_id=operation_id,
                 owner=bystander.ss58,
                 recipient=other.ss58,
@@ -309,15 +308,15 @@ def test_a_bystander_event_under_a_plain_id_of_the_lock_does_not_keep_the_owner_
                 admission_id=None,
                 dispute_id=None,
             )
+            return world.escrow.transfer(event, signer=bystander.ss58)
 
         # Given: a funded bystander can sign an event (control).
-        world.escrow.transfer(event_of(fresh_id("neutral")), signer=bystander.ss58)
+        send(fresh_id("neutral"))
 
         # When: it signs events under the ids a plain derivation from the lock id would give.
         for word in ("settle", "release"):
-            plain = sha256_hex(canonicalize([lock.operation_id, word]))
-            refused(
-                lambda plain=plain: world.escrow.transfer(event_of(plain), signer=bystander.ss58)
+            squat_id(
+                world.escrow, "transfer", sha256_hex(canonicalize([lock.operation_id, word])), send
             )
 
         # Then: the owner still takes its bond back, once.
@@ -331,8 +330,9 @@ def test_a_dispute_whose_bond_borrows_a_closed_disputes_id_can_still_be_settled(
     li_escrow: ModuleType, tmp_path: Path
 ) -> None:
     with dispute_world(tmp_path, li_escrow) as world:
-        _, second_id, _, opened = borrowing_dispute(world, li_escrow)
+        _, second_id, _, opened, refusal = borrowing_dispute(world, li_escrow)
         if opened is None:
+            refused_at_creation(refusal)
             return
         world.resolve_match(opened, now=6)
 
@@ -356,7 +356,7 @@ def test_a_bond_borrowing_a_reward_origins_id_cannot_keep_that_origin_from_vesti
     assert (effect.available, effect.reward_pending) == (20500, 0)
 
     # When: OTHER's miner opens a dispute whose bond lock carries the origin id, once the origin
-    # exists (the dispute is then refused) or before it exists (the name is then free).
+    # exists (the dispute is then refused at creation) or before it exists (the name is then free).
     with dispute_world(tmp_path / "contended", li_escrow) as world:
         dispute_id = world.add_contest(SECOND_VERDICT, world.miner_two)
 
@@ -369,7 +369,7 @@ def test_a_bond_borrowing_a_reward_origins_id_cannot_keep_that_origin_from_vesti
             seed_reward_origin(world, reward_origin, cold, 500, 5, finalize_hash)
         else:
             seed_reward_origin(world, reward_origin, cold, 500, 5, finalize_hash)
-            refused(borrow)
+            assert dispute_code(borrow) == ID_COLLISION
 
         # Then: the origin vests at round 5 as in the control.
         service_step(lambda: world.escrow.mature(fresh_id("mature"), (reward_origin,), 5))
@@ -447,7 +447,7 @@ def test_an_operation_that_fails_before_its_event_commits_changes_nothing(
     origin, _ = li_escrow.fund(escrow)
     cold, other = li_escrow.COLD.ss58, li_escrow.OTHER.ss58
     lock = li_escrow.lock(origin, fresh_id("lock"), 1000)
-    send = transfer_to_recipient(cold, fresh_id("send"), origin, 40)
+    send = sink_transfer(cold, fresh_id("send"), origin, 40)
     before = ledger_state(escrow)
 
     # Given: the storage fails at the end of every operation.
@@ -470,7 +470,7 @@ def test_an_operation_that_fails_before_its_event_commits_changes_nothing(
     reopened = li_escrow.ledger(setup, path)
     assert reopened.balances(cold).admission_locked == 1000
     assert reopened.balances(cold).available == 20000 - 1000 - 40
-    assert reopened.balances(RECIPIENT.ss58).available == 40
+    assert reopened.balances(SINK).available == 40
     assert reopened.balances(other).available == 10000
     assert len(ledger_state(reopened)[1]) == len(before[1]) + 2
 

@@ -1,13 +1,21 @@
 """Mutants that re-open the hole F1/D52 closed (a client event takes an id the service derives for
-its own event, ADR 0014 part 1, fixes fe5ce134 and 5c6e02ee): each one brings back, in one place,
-the shared key space of the client ids and the ids the service derives.
+its own event, ADR 0014 part 1, fix fe5ce134 and the part of 5c6e02ee that makes every lookup and
+every write name its key space): each one brings back, in one place, the shared key space of the
+client ids and the ids the service derives.
 
 The pins were strict expected failures until the fix landed and now hold the fix. These mutants
 prove it on the merged tree: reverting one behaviour of the fix in a private copy of src must fail
-them. Two mutants revert the shared mechanism (the key function and the legacy-chain fallback of
-the lookup); the others revert one operation family at a time, either its lookup or the key its
-event is written under, because a service event written under a bare id lets a client event of that
-id occupy it, and a lookup under a bare id finds that client event and refuses the service.
+them. Three mutants revert the shared mechanism (the key function, its prefix and the legacy-chain
+fallback of the lookup); the others revert one operation family at a time, either its lookup or the
+key its event is written under, because a service event written under a bare id lets a client
+event of that id occupy it, and a lookup under a bare id finds that client event and refuses the
+service.
+
+The keyed origin ids of 5c6e02ee (the genesis, bootstrap, reward and shadow origin ids, derived
+under the id key) have no mutant here. The nearest are the domain checks of the genesis and
+bootstrap origin ids, mutated in mutants_credit.py (credit-genesis-origin-id-unbound) and
+mutants_gaps_bootstrap.py; no mutant of the lot reverts the keyed derivation of the reward and
+shadow origin ids.
 
 Run from hypertrain/: .venv/bin/python scripts/check_ledger_invariant_mutants.py --only <ids>
 """
@@ -41,6 +49,9 @@ SQUATTED_MATURITY = (
 STUCK_CONTEST = (
     DISPUTE_GAPS + "test_a_client_event_cannot_stop_the_beacon_from_closing_a_stuck_contest"
 )
+# CONVICTED has two variants. The legacy fallback mutant fails both, the slash lookup mutant fails
+# [resolution] only. The runner stops at the first failing test, so each mutant lists first the
+# variant it is to prove.
 
 MUTANTS = [
     {
@@ -72,7 +83,7 @@ MUTANTS = [
             '                "SELECT request,receipt FROM escrow_events WHERE operation_id=?",\n'
             "                (operation_id,),\n"
         ),
-        "tests": [BEACON_CLOSE, CONVICTED],
+        "tests": [CONVICTED + "[timeout]", BEACON_CLOSE],
         "why": (
             "the lookup that reads chains written before the key space accepts any event under the"
             " bare id, so a client event on the id the service derived is taken for the service's"
@@ -269,7 +280,7 @@ MUTANTS = [
         "path": LEDGER,
         "old": "            old = self._existing(op.operation_id, request, server=True)\n",
         "new": "            old = self._existing(op.operation_id, request, server=False)\n",
-        "tests": [SLASH_ID, CONVICTED],
+        "tests": [CONVICTED + "[resolution]", SLASH_ID],
         "why": (
             "the slash of a convicted miner looks its event up under the bare public id, finds the"
             " client event signed under it and the conviction cannot burn the bond."

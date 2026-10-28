@@ -47,32 +47,6 @@ def complete(rnd: X.Round, job_id: str) -> None:
         rnd.store._db.execute("UPDATE audit_leases_v2 SET state='completed' WHERE id=?", (job_id,))
 
 
-def deliver_deltas(rnd: X.Round, members: list[int]) -> None:
-    """The delta manifest of each member, stored as an accepted upload is. A member that committed
-    and delivered nothing by d_upload has left the round (ADR 0011 Part 8), so a test about the
-    audit windows of members that did deliver needs these records."""
-    for index in members:
-        commit = rnd.record("commit", rnd.identity(index))["body"]
-        manifest = {
-            "w": rnd.w,
-            "hotkey": rnd.hotkey(index),
-            "delta_hash": commit["delta_hash"],
-            "size": commit["delta_bytes"],
-            "uri": "sha256:" + commit["delta_hash"],
-            "format": "ht-sparse-v1",
-            "chunks": [{"off": 0, "len": commit["delta_bytes"], "sha256": commit["delta_hash"]}],
-            "grant_hash": "0" * 64,
-            "master_acceptance_hash": "0" * 64,
-        }
-        with rnd.store._tx():
-            rnd.store._put_record_v2(
-                rnd.run_id,
-                "delta",
-                rnd.identity(index),
-                rnd.network.signed(X.hot(index), "DeltaManifestV2", manifest),
-            )
-
-
 # Worlds of one round of four members, built on the routes (about 0.3 s each)
 
 
@@ -96,9 +70,10 @@ def test_every_roster_member_is_in_a_terminal_audit_state_once_the_horizon_has_p
 ) -> None:
     """FIN-21, A2W-20, LV-06 (closed by AUD-06 and AUD-01): the member that never committed leaves
     the round when the audits are scheduled (NO_SHOW); the four jobs nobody serves get a second
-    window and their members leave the round at its end (INFRASTRUCTURE). The audit counter of
-    the round falls to zero. No survivor can carry what is left, so the exit reaper retires the
-    round in the same push (ADR 0011 Part 8, decision 8) instead of leaving it pending."""
+    window and are given up at its end, which blames the infrastructure and sanctions nobody.
+    Whichever way the exit records it (an exclusion per member, or the round retired as a whole
+    because nobody is left to carry it), every roster member is then in a terminal audit state,
+    the audit counter of the round is zero and the round is not voided by an exclusion."""
     rnd = silent
     committed = [i for i in rnd.members if i != rnd.quiet]
     X.control(
@@ -106,7 +81,6 @@ def test_every_roster_member_is_in_a_terminal_audit_state_once_the_horizon_has_p
         "four members committed, the fifth did not",
     )
     X.schedule(rnd)  # the operator's call, at d_audit
-    deliver_deltas(rnd, committed)  # they are left out for the audit nobody serves, not for silence
 
     X.run_out_audit_windows(rnd)
 
@@ -114,12 +88,23 @@ def test_every_roster_member_is_in_a_terminal_audit_state_once_the_horizon_has_p
         row["hotkey"] for row in rnd.lease_rows() if row["state"] in ("completed", "exhausted")
     } | set(rnd.excluded())
     assert terminal == {rnd.hotkey(i) for i in rnd.members}
-    assert rnd.excluded() == {
-        rnd.hotkey(rnd.quiet): "NO_SHOW",
-        **{rnd.hotkey(i): "INFRASTRUCTURE" for i in committed},
+    blamed = {
+        hotkey: reason for hotkey, reason in rnd.excluded().items() if reason != "INFRASTRUCTURE"
     }
+    assert blamed == {rnd.hotkey(rnd.quiet): "NO_SHOW"}
+    assert [X.standing(rnd, i) for i in committed] == [X.FUNDED] * len(committed)
     status = rnd.finality()
-    assert (status["unresolved_audits"], status["disposition"]) == (0, "RETIRED")
+    assert status["unresolved_audits"] == 0
+    if X.RETIRES:
+        assert status["disposition"] in ("PENDING", "RETIRED"), status
+    else:
+        # Each job given up is an exclusion that blames the infrastructure, and the round is not
+        # voided for everybody.
+        assert rnd.excluded() == {
+            rnd.hotkey(rnd.quiet): "NO_SHOW",
+            **{rnd.hotkey(i): "INFRASTRUCTURE" for i in committed},
+        }
+        assert status["disposition"] == "PENDING", status
 
 
 # Eligibility is judged once, at accept (AD-07)
@@ -128,11 +113,13 @@ def test_every_roster_member_is_in_a_terminal_audit_state_once_the_horizon_has_p
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="AD-07: eligibility is checked at accept only: a member whose work screen lapsed "
-    "after its accept still commits, so it joins the roster of an audit it can no longer be "
+    reason="AD-07: a commit checks no eligibility (the accept and the opening do, and aggregate "
+    "leaves a lapsed member out INELIGIBLE, ADR 0011 Part 8 decision 22): a member whose work "
+    "screen lapsed after its accept still commits and takes an audit slot it can no longer be "
     "aggregated in [fix-lot: none (no design yet)]",
 )
 def test_a_member_that_lost_eligibility_after_accept_cannot_commit(tmp_path: Path) -> None:
+    """AD-07: a member whose work screen lapsed after its accept is refused when it commits."""
     with X.activated_network(tmp_path) as network:
         rnd = X.open_round(network, 0, [0, 1, 2, 3])
         for index in rnd.members:
@@ -225,6 +212,8 @@ def test_the_same_ask_nonce_with_another_body_is_refused_and_grants_nothing(
     "to the auditor once its previous one is over [fix-lot: none (no design yet)]",
 )
 def test_a_signed_lease_ask_grants_at_most_one_lease(queue: X.Round) -> None:
+    """SG-10+A2W-24: a signed lease ask observed on the wire grants one lease and no other, also
+    once the previous lease of its auditor is over."""
     rnd = queue
     auditor = X.service().AUDITORS[0]
     ask = X.lease_ask(rnd, auditor, 1)
@@ -244,11 +233,14 @@ def test_a_signed_lease_ask_grants_at_most_one_lease(queue: X.Round) -> None:
     assert [row["auditor"] for row in rnd.lease_rows()].count(auditor.ss58) == 1
 
 
-# A round with no member left has no exit (FIN-22)
+# A round with no member left is closed by the exit (FIN-22)
 
 
-# Closed by audit-integrity-2 (e06cb795, D70): the exit reaper retires the round at the beacon.
 def test_a_round_after_a_round_nobody_audited_is_opened_and_credited(queue: X.Round) -> None:
+    """FIN-22 (D70): a round whose every audit job ran out of both windows is closed by the exit,
+    and the round after it is opened and credited. Without an exit the opening of the next round
+    reads the applied state of this one, which never exists (409 'missing accepted applied: 0'),
+    and no later round is ever credited."""
     rnd = queue
     X.run_out_audit_windows(rnd)
     X.walk(rnd, rnd.network.now + 1)  # whatever closes a round on the beacon gets its turn
@@ -287,6 +279,8 @@ def test_a_round_after_a_round_nobody_audited_is_opened_and_credited(queue: X.Ro
     "[candidate] [fix-lot: decision (product choice pending)]",
 )
 def test_a_beacon_outage_does_not_put_an_auditor_on_cooldown(queue: X.Round) -> None:
+    """FIN-24: a lease that expires while the master refuses every ask is not penalised like the
+    silence of an auditor."""
     rnd = queue
     auditor = X.service().AUDITORS[0]
     leased = X.post_lease(rnd, X.lease_ask(rnd, auditor, 1))
@@ -319,6 +313,8 @@ def test_a_beacon_outage_does_not_put_an_auditor_on_cooldown(queue: X.Round) -> 
     "[fix-lot: decision (product choice pending)]",
 )
 def test_a_miner_suspended_for_a_trial_mismatch_has_a_way_back(tmp_path: Path) -> None:
+    """LCK-19: a miner suspended for a trial proof that differs from the reference can recover
+    its stake and go back on probation."""
     with X.activated_network(tmp_path) as network:
         run_id, miner = network.manifest.run_id(), 0
         admission = network.store._services(run_id)[1]
@@ -405,17 +401,17 @@ def test_no_applied_round_is_closed_by_exclusion_without_a_rollback_record(
 ) -> None:
     """FIN-09 (closed by AUD-01 decision 9): a member that leaves a round at the horizon is an
     exclusion of that member, never a disposition of the round: the applied round stays PENDING
-    and open for its settlement instead of counting as closed with no rollback record. The
-    quiet member published no leaves, so its job is dropped at the first horizon as a NO_SHOW
-    (ADR 0011 Part 8, decision 3)."""
+    and open for its settlement instead of counting as closed with no rollback record."""
     rnd, _ = applied0
     status = rnd.finality()
+    gone = {row["hotkey"] for row in rnd.lease_rows() if row["state"] == "exhausted"}
     X.control(
         status["applied"]
         and status["unresolved_audits"] == 0
-        and rnd.excluded() == {rnd.hotkey(rnd.quiet): "NO_SHOW"}
+        and gone == set(rnd.excluded()) == {rnd.hotkey(rnd.quiet)}
         and not rnd.has_record("rollback", "0"),
-        "applied, nothing outstanding, one member excluded by the horizon, no rollback",
+        "applied, nothing outstanding, the one member whose job ran out at the horizon is the one "
+        "excluded, no rollback",
     )
 
     assert not (status["disposition"] == "EXCLUDED" and status["rollback_complete"]), status

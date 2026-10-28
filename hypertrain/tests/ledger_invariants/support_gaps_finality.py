@@ -28,7 +28,6 @@ from hypertrain.protocol.messages_v2 import CommitV2, WorkProof
 from hypertrain.protocol.relay_messages import MasterAcceptanceV2
 
 from . import support_exit_roster as X
-from . import support_expiry as E
 from .support import Real, load_fixture_module
 
 WEIGHTED_FIXTURE = ("li_weighted", "aggregator/test_weighted_v2.py")
@@ -181,8 +180,9 @@ def leaves_post(
 
 def delta_post(rnd: X.Round, index: int, delta: bytes) -> httpx.Response:
     """POST /delta of a delta the member committed to; the master's acceptance record that the
-    relay receipt route would write is written with the same sealed type, and next to it the
-    receipt it names, reduced to the fields a delta is checked against (as X.deliver_delta)."""
+    relay receipt route would write is written with the same sealed type (as X.deliver_delta), and
+    next to it the receipt it names, reduced to the fields a delta is checked against (round,
+    hotkey, grant)."""
     net, store = rnd.network, rnd.store
     delta_hash = sha256_hex(delta)
     grant_hash = sha256_hex(b"gaps-finality-grant|" + rnd.identity(index).encode())
@@ -225,35 +225,6 @@ def commit_with_delta(rnd: X.Round, index: int, delta: bytes) -> CommitV2:
 
 
 # -- T-FIN-21 / T-FIN-26: the audit queue of a cheap world --------------------------------------
-
-
-def record_deltas(rnd: E.Round) -> None:
-    """The delta manifest of every member of `rnd`, stored as a delivered upload is. The expiry
-    world commits to a delta nobody can serve, and a member that committed and delivered nothing
-    by d_upload has left the round (ADR 0011 Part 8), so a round that has to stay open past
-    d_upload needs these records, written as tests/challenge/audit_lease_fixture_v2 writes them."""
-    network, store = rnd.world.network, rnd.world.store
-    for index in rnd.members:
-        key = E.hot(index)
-        commit = rnd.commits[key.ss58]
-        manifest = {
-            "w": rnd.w,
-            "hotkey": key.ss58,
-            "delta_hash": commit.delta_hash,
-            "size": commit.delta_bytes,
-            "uri": "sha256:" + commit.delta_hash,
-            "format": "ht-sparse-v1",
-            "chunks": [{"off": 0, "len": commit.delta_bytes, "sha256": commit.delta_hash}],
-            "grant_hash": ZERO,
-            "master_acceptance_hash": ZERO,
-        }
-        with store._tx():
-            store._put_record_v2(
-                rnd.world.run_id,
-                "delta",
-                f"{rnd.w}:{key.ss58}",
-                network.signed(key, "DeltaManifestV2", manifest),
-            )
 
 
 def complete_job(rnd: X.Round, job_id: str) -> None:

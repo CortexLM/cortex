@@ -4,7 +4,9 @@ the dispute world whose settlement lookup is the store's own. Not collected: no 
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Iterator, Mapping
+import json
+import re
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
@@ -12,7 +14,6 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from env_pin_fixtures import honest_env
 from hypertrain.auditor.island_bisect import RefereeEvidence
 from hypertrain.beacon.core import FixtureBeacon
 from hypertrain.challenge.admission import Admission
@@ -38,10 +39,20 @@ from hypertrain.protocol.messages_v2 import (
     RunManifestV2,
 )
 
-from .support import H, bare_escrow
+from .support import H, World, bare_escrow
 
 PREFIX_SEED = b"li-opids-prefix-key"
-RECIPIENT = Keypair(b"\x0d" * 32)  # receives the units of a client transfer; no fixture funds it
+HEX64 = re.compile(r"[0-9a-f]{64}")
+LEDGER_CODE = re.compile(r"[A-Z][A-Z0-9_]*")
+# The kind under which the ledger stores each client event `client_event` can sign.
+CLIENT_KINDS = {"transfer": "TRANSFER", "lock": "LOCK_CONTEST"}
+# Where a bystander's transfer lands: a real key that nobody signs for, funds or reads. The ledger
+# refuses a transfer to oneself (SELF_TRANSFER), so the bystander's event has to move units; a test
+# compares the owners the service step pays, never this key.
+SINK = Keypair(bytes.fromhex(sha256_hex(b"li-opids-sink"))).ss58
+# The refusals that say nothing about the operation id. `squat_id` fails on them: a squat refused
+# for one of these never reached the question of its id, and the step that follows proves nothing.
+NOT_ABOUT_THE_ID = frozenset({"SELF_TRANSFER", "UNFUNDED_OR_UNKNOWN_ORIGIN", "OWNER_AUTHORITY"})
 
 
 def fresh_id(label: str) -> str:
@@ -85,15 +96,16 @@ class ModelRefused(Exception):
     """The client event model refused the operation id before any ledger saw the event.
 
     The ids a server derives may live in a key space no client id can name (ADR 0014, part 1: the
-    prefix `srv:` is not a Hex64), so signing one is refused by validation: still a refusal."""
+    prefix `srv:` is not a Hex64), so signing one is refused by validation. That is not a refusal
+    by the ledger and proves nothing about it: `squat_id` fails on it."""
 
 
 def refused(call: Callable[[], object]) -> bool:
-    """True when the ledger, the dispute or admission service or the event model refuses `call`,
-    False when it is accepted."""
+    """True when the ledger, the dispute or admission service refuses `call`, False when it is
+    accepted."""
     try:
         call()
-    except (EscrowError, DisputeError, AdmissionError, ModelRefused):
+    except (EscrowError, DisputeError, AdmissionError):
         return True
     return False
 
@@ -114,29 +126,12 @@ def must_refuse(call: Callable[[], object], what: str) -> None:
         raise DefenceMissing(what)
 
 
-def self_transfer(owner: str, operation_id: str, origin: str, units: int = 1) -> EscrowTransfer:
-    """A net-zero client event: the owner sends `units` of `origin` to itself."""
+def sink_transfer(owner: str, operation_id: str, origin: str, units: int = 1) -> EscrowTransfer:
+    """A client event any funded key can sign: the owner sends `units` of `origin` to the sink."""
     return EscrowTransfer(
         operation_id=operation_id,
         owner=owner,
-        recipient=owner,
-        units=units,
-        origin_ids=[origin],
-        admission_id=None,
-        dispute_id=None,
-    )
-
-
-def transfer_to_recipient(
-    owner: str, operation_id: str, origin: str, units: int = 1
-) -> EscrowTransfer:
-    """A client event any funded key can sign: the owner sends `units` of `origin` to a key that
-    holds nothing. The ledger refuses a transfer to oneself (SELF_TRANSFER), so the cheapest event
-    a bystander can sign moves a unit away."""
-    return EscrowTransfer(
-        operation_id=operation_id,
-        owner=owner,
-        recipient=RECIPIENT.ss58,
+        recipient=SINK,
         units=units,
         origin_ids=[origin],
         admission_id=None,
@@ -164,12 +159,124 @@ def client_event(
 ) -> EscrowReceipt:
     """What a funded key can sign on the escrow routes, under an id of its choice."""
     if kind == "transfer":
-        event = client_model(lambda: transfer_to_recipient(key.ss58, operation_id, origin))
+        event = client_model(lambda: sink_transfer(key.ss58, operation_id, origin))
         return escrow.transfer(event, signer=key.ss58)
     assert kind == "lock"
     return escrow.lock(
         client_model(lambda: contest_lock(key.ss58, operation_id, origin)), signer=key.ss58
     )
+
+
+def client_event_over_http(
+    world: World, kind: str, key: Keypair, operation_id: str, origin: str
+) -> Any:
+    """What a funded coldkey sends to the public escrow routes, under an id of its choice: the
+    response, unchecked. `ModelRefused` when the event model does not take the id."""
+    if kind == "transfer":
+        route, message = "transfer", "EscrowTransfer"
+        event: Any = client_model(lambda: sink_transfer(key.ss58, operation_id, origin))
+    else:
+        route, message = "lock", "EscrowLock"
+        event = client_model(lambda: contest_lock(key.ss58, operation_id, origin))
+    return world.client.post(
+        world.network.url + "/escrow/" + route, json=world.network.signed(key, message, event)
+    )
+
+
+def ledger_answer(response: Any) -> Any:
+    """The answer of an escrow route as the ledger's own: the receipt of an accepted event, or the
+    `EscrowError` of a refusal (409 and the upper-case code the ledger gives). Any other answer is
+    not a decision of the ledger and fails the test."""
+    if response.status_code == 200:
+        return response.json()
+    body = response.json()
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if response.status_code == 409 and isinstance(detail, str) and LEDGER_CODE.fullmatch(detail):
+        raise EscrowError(detail)
+    raise AssertionError(
+        f"the route did not answer for the ledger: {response.status_code} {response.text}"
+    )
+
+
+def sender_over_http(world: World, kind: str, key: Keypair, origin: str) -> Callable[[str], Any]:
+    """`client_event_over_http` with everything fixed but the id, answered as the ledger answers:
+    the receipt of an accepted event, an `EscrowError` for a refusal of the ledger."""
+    return lambda operation_id: ledger_answer(
+        client_event_over_http(world, kind, key, operation_id, origin)
+    )
+
+
+def events_of(escrow: EscrowV2, kinds: Sequence[str], request: str | None) -> list[tuple[str, str]]:
+    """(key, id of the receipt) of each event of `kinds`, oldest first; only the events whose
+    request is `request` when it is given."""
+    with escrow.mutex:
+        rows = escrow.db.execute(
+            "SELECT operation_id, receipt FROM escrow_events "
+            "WHERE kind IN (SELECT value FROM json_each(:kinds)) "
+            "AND (:request IS NULL OR request = :request) ORDER BY seq",
+            {"kinds": json.dumps(list(kinds)), "request": request},
+        ).fetchall()
+    return [(row[0], json.loads(row[1])["operation_id"]) for row in rows]
+
+
+def receipt_ids(escrow: EscrowV2, *kinds: str, request: str | None = None) -> list[str]:
+    """The operation id each event of `kinds` carries in its receipt, oldest first: the plain 64-hex
+    id the service named for it, which any client can sign. The key the event is stored under is a
+    keyed derivative outside the client's key space (ADR 0014, part 1), so it is not what a
+    bystander takes; `stored_keys` reads that one."""
+    return [named for _, named in events_of(escrow, kinds, request)]
+
+
+def stored_keys(escrow: EscrowV2, *kinds: str) -> list[str]:
+    """The key each event of `kinds` is stored under, oldest first: the id itself on a ledger with
+    no key space of its own, `srv:` and a keyed digest on one that has it."""
+    return [key for key, _ in events_of(escrow, kinds, None)]
+
+
+def squat_id(escrow: EscrowV2, kind: str, operation_id: str, send: Callable[[str], object]) -> str:
+    """A bystander's event of `kind` under `operation_id`, an id the service derives for a step it
+    takes for its own account, and what the LEDGER made of it: "stored" when it holds the event
+    now, the code of its EscrowError when it refused it. Either leaves the step free to run (a
+    fix may refuse the id or keep it apart); `send` signs and sends the event under the id.
+
+    Anything else fails the test, because the squat never reached the ledger and the step that
+    follows would prove nothing: the event model refused the id (a 64-hex id never is, so the
+    caller took an id no client can sign, such as the stored `srv:` key), or the ledger holds no
+    event that the answer claims it took."""
+    try:
+        send(operation_id)
+    except ModelRefused as error:
+        raise AssertionError(
+            f"the event model refused the id {operation_id!r}, the ledger never saw the squat"
+        ) from error
+    except EscrowError as error:
+        if error.code in NOT_ABOUT_THE_ID:
+            raise AssertionError(
+                f"the ledger refused the squat under {operation_id!r} as {error.code}, which is "
+                "not a decision on the id"
+            ) from error
+        return error.code
+    with escrow.mutex:
+        held = escrow.db.execute(
+            "SELECT 1 FROM escrow_events "
+            "WHERE kind=? AND json_extract(receipt, '$.operation_id')=?",
+            (CLIENT_KINDS[kind], operation_id),
+        ).fetchone()
+    if held is None:
+        raise AssertionError(f"the answer to the event under {operation_id!r} is not in the ledger")
+    return "stored"
+
+
+def squat_stored_keys(
+    escrow: EscrowV2, kind: str, keys: Sequence[str], send: Callable[[str], object]
+) -> None:
+    """The keys the service events are stored under, signed as ids. A key that is a plain 64-hex
+    digest is an id any client can name (a ledger with no key space of its own, or one that lost
+    the prefix of it) and is held to `squat_id`; a key outside that space names nothing a client
+    can sign and is not tried."""
+    for key in keys:
+        if HEX64.fullmatch(key):
+            squat_id(escrow, kind, key, send)
 
 
 def seed_available(escrow: EscrowV2, origin: str, owner: str, units: int) -> None:
@@ -222,7 +329,6 @@ class DisputeWorld:
             expires_beacon=10000,
             policy_hash=digest(policy),
             hardware_hint=HardwareHint(device_name="advisory", device_count=1, driver="cpu-test"),
-            env=honest_env(),
         )
         record = self.admission.join(canonicalize(request.body()), now=1, ip_prefix="loopback")
         return record.admission_id

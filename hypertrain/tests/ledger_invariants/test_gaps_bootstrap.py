@@ -57,11 +57,10 @@ from .support_bounds import (
 from .support_credit import credited
 from .support_gaps_bootstrap import (
     SmallAuditedRound,
-    as_attested_cuda,
     build_small_audited_round,
     challenge_refusal,
-    client_event_over_http,
     escrow_of,
+    install_production_qualification,
     maturity_id_of,
     open_overdue_trial,
     production_economics,
@@ -72,9 +71,15 @@ from .support_gaps_bootstrap import (
     world_economics,
 )
 from .support_locks import Rig
-from .support_opids import fresh_id
+from .support_opids import (
+    client_event_over_http,
+    fresh_id,
+    sender_over_http,
+    squat_id,
+    squat_stored_keys,
+)
 
-# --- T-BOOTSTRAP-02: a squatted maturity id stalls the beacon route -------------------------------
+# --- T-BOOTSTRAP-02: a squatted maturity id never stalls the beacon route ------------------------
 
 
 def derived_maturity_id_of(world: World, origin: str) -> str:
@@ -109,15 +114,16 @@ def test_a_squatted_maturity_id_never_blocks_another_owners_origin_or_the_next_p
         assert trial_outcome(world) == "OPEN"
         world.network.push(5)
         assert trial_outcome(world) == "EXPIRED"
-        squatted_id = maturity_id_of(world, squatted)
-        assert maturity_id_of(world, other) != squatted_id
-        squats = [squatted_id, derived_maturity_id_of(world, squatted)]
+        stored_key = maturity_id_of(world, squatted)
+        assert maturity_id_of(world, other) != stored_key
+        named_id = derived_maturity_id_of(world, squatted)
         matured = escrow_of(world).balances(cold[2].ss58)
         first = escrow_of(world).balances(cold[0].ss58)
     assert (matured.available, matured.reward_pending) == (before.available + 700, 0)
     assert (first.available, first.reward_pending) == (before_first.available + 500, 0)
 
-    # When: a third funded coldkey signs an event under the id of the first origin's maturity.
+    # When: a third funded coldkey signs an event under the id of the first origin's maturity: the
+    # id the service named for it and, where a client can name it, the key it is stored under.
     with service_world(tmp_path / "contended") as world:
         world.network.push(2)
         seed_pending_origin(world, squatted, cold[0].ss58, 500, mature_at=5)
@@ -126,8 +132,13 @@ def test_a_squatted_maturity_id_never_blocks_another_owners_origin_or_the_next_p
         origin = world.network.origin_ids[1]
         neutral = client_event_over_http(world, kind, cold[1], fresh_id("neutral"), origin)
         assert neutral.status_code == 200, neutral.text  # control: the route takes its events
-        for operation_id in dict.fromkeys(squats):
-            client_event_over_http(world, kind, cold[1], operation_id, origin)
+        # Control: the ledger decided on each squat, by storing the event or refusing it with its
+        # own code. An id the event model refuses never reached it, and the push below would then
+        # prove nothing about the squat.
+        escrow = escrow_of(world)
+        send = sender_over_http(world, kind, cold[1], origin)
+        squat_id(escrow, kind, named_id, send)
+        squat_stored_keys(escrow, kind, [stored_key], send)
 
         # Then: the beacon route answers at round 5 and after it, the other owner's origin vests
         # as in the control, the overdue trial is closed by the same push, and no unit is created
@@ -137,7 +148,6 @@ def test_a_squatted_maturity_id_never_blocks_another_owners_origin_or_the_next_p
         push_round(world, 5)
         push_round(world, 6)
         assert trial_outcome(world) == "EXPIRED"
-        escrow = escrow_of(world)
         vested = escrow.balances(cold[2].ss58)
         assert (vested.available, vested.reward_pending) == (before.available + 700, 0)
         assert escrow.balances(cold[0].ss58) == first
@@ -391,24 +401,24 @@ def test_a_policy_amount_may_reach_two_to_the_53_minus_one_and_not_one_unit_more
     "is created, burns its run id and is refused first at the economic-bound route, possibly "
     "after units were issued [fix-lot: none (no design yet)]",
 )
-def test_a_production_policy_that_fails_the_economic_bound_creates_no_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_production_policy_that_fails_the_economic_bound_creates_no_run(tmp_path: Path) -> None:
     shape = {"R_collectible_units": 100, "S_min_units": 1000, "s_lower_ppm": PPM, "beta_ppm": PPM}
     with service_world(tmp_path / "world") as world:
-        # Control: the capacity is 100 + 1000 = 1100 units, and a goal of exactly 1100 creates.
+        # Control: the capacity is 100 + 1000 = 1100 units, and a goal of exactly 1100 creates once
+        # the owner-signed qualification a production run stands on is stored, so a refusal of the
+        # larger goal below cannot be about the qualification.
         holds = production_economics(world, G_max_units=1100, **shape)
         assert economic_bound(holds) and not economic_bound(
             production_economics(world, G_max_units=1101, **shape)
         )
         with creation(world, tmp_path / "holds", holds) as ok:
-            as_attested_cuda(ok, monkeypatch)
+            install_production_qualification(ok)
             assert ok.store.create_run_v2(ok.raw)["status"] == "created"
             assert ok.run_rows() == 1
         # One more unit of goal cannot be collateralised: no run, and the bound is the reason.
         fails = production_economics(world, G_max_units=1101, **shape)
         with creation(world, tmp_path / "fails", fails) as bad:
-            as_attested_cuda(bad, monkeypatch)
+            install_production_qualification(bad)
             refusal = challenge_refusal(lambda: bad.store.create_run_v2(bad.raw))
             assert refusal is not None, "the run was created"
             assert (refusal.status, "economic bound" in refusal.detail) == (409, True)

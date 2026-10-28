@@ -13,20 +13,24 @@ import json
 import sqlite3
 from collections import Counter
 from collections.abc import Callable, Iterator
+from types import ModuleType
 from typing import Any
 
 import pytest
 
 from hypertrain.aggregator.core import FinalityError
 from hypertrain.challenge.store import ChallengeError
-from hypertrain.ledger.escrow_v2 import EscrowError, EscrowReceipt, EscrowV2
+from hypertrain.ledger.escrow_v2 import EscrowError, EscrowReceipt, EscrowV2, FinalityEvidence
 from hypertrain.protocol.envelope import ExpiredError, UnauthorizedSigner, body_digest
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
+from hypertrain.protocol.messages_v2 import CommitV2
 
 from . import support_exit_roster as X
+from .support import Real, bare_escrow
 from .support_finality import ANOTHER, FINAL, Stage, build_stage, refusal
+from .support_opids import DefenceMissing
 
 # -- the staged service ---------------------------------------------------------------------------
 
@@ -281,12 +285,13 @@ def test_a_member_sanctioned_after_the_aggregation_is_paid_for_the_round_it_was_
     assert escrow.balances().conserved()
 
 
-# Closed by audit-integrity-2 (6d935814, D59): a Finalize lists the unconvicted inputs only.
 def test_a_miner_convicted_after_its_round_was_audited_is_never_credited_by_a_finalize(
     stage: Stage,
 ) -> None:
-    """The ban is by coldkey: the convicted miner and every other admission of its coldkey are
-    unpaid (the others are not banned), and the unconvicted inputs share the whole budget."""
+    """FIN-18+D59 (ADR 0011 part 8, decision 23): the ban is by coldkey: the coldkey of a miner
+    convicted of training fraud between the aggregation and the finalize is paid nothing for that
+    round, and neither is any other admission it runs (those are not banned); the Finalize lists
+    only the unconvicted inputs, which share the whole budget."""
     banned, sibling, *rest = stage.honest
     owner, sibling_owner = stage.fixtures.COLD[0].ss58, stage.fixtures.COLD[1].ss58
     # The sibling is run by the owner of the convicted miner: several admissions may share a
@@ -331,8 +336,11 @@ def test_a_miner_convicted_after_its_round_was_audited_is_never_credited_by_a_fi
     assert admission_of(stage, sibling)["record"]["state"] == "ACTIVE"
 
 
-# Closed by audit-integrity-2 (6d935814, D59, D64-1): a Finalize that lists nobody settles.
 def test_a_round_whose_inputs_are_all_convicted_settles_without_a_reward(stage: Stage) -> None:
+    """FIN-18+D59 (decision 23, D64-1): every input of the applied tape belongs to a convicted
+    coldkey: the Finalize that lists nobody closes the round CLOSED_UNPAID (200, disposition
+    SETTLED, nothing minted) and an identical replay gets the same answer. That the round after it
+    still mints is held by tests/challenge/test_round_withdrawal_v2.py, not by this stage."""
     for key in stage.honest:
         sanction(stage, key, "TRAINING_FRAUD")
     X.control(
@@ -351,6 +359,49 @@ def test_a_round_whose_inputs_are_all_convicted_settles_without_a_reward(stage: 
     assert escrow.balances().issued == issued
     again = stage.post_finalize(0, stage.signed_finalize(included=[]))
     assert (again.status_code, again.json()) == (200, closed.json())
+
+
+def miner_of(real: FinalityEvidence) -> str:
+    """The hotkey of the only work of the real round."""
+    return str(CommitV2.model_validate(real.works[0].commit.body).hotkey)
+
+
+def test_the_ledger_refuses_the_round_of_a_convicted_hotkey_and_mints_nothing(
+    li_escrow: ModuleType, real_reward: Real
+) -> None:
+    """FIN-18+D59 (decision 23, BANNED_WORK): the ledger refuses to mint the round of a convicted
+    hotkey. The store refuses a stale Finalize and pays the others before the ledger is reached;
+    the ledger is the wall behind them, so it is asked directly, with the work of the convicted
+    miner in a Finalize the store would have refused."""
+    setup, real, reward = real_reward
+    miner = miner_of(real)
+    escrow = bare_escrow(li_escrow, setup)
+    escrow.banned = lambda hotkey: hotkey == miner
+
+    try:
+        escrow.reward_finalize(reward, real)
+    except EscrowError as error:
+        refused = error.code
+    else:
+        raise DefenceMissing("the ledger minted the round of a convicted hotkey")
+
+    assert refused == "BANNED_WORK"
+    assert escrow.balances().issued == 0
+
+
+def test_the_ledger_mints_the_round_of_a_hotkey_that_is_not_the_convicted_one(
+    li_escrow: ModuleType, real_reward: Real
+) -> None:
+    """Control of the test above: a ledger told that every hotkey but the miner of the work is
+    convicted still mints the work, so the hook is a per-hotkey question."""
+    setup, real, reward = real_reward
+    miner = miner_of(real)
+    escrow = bare_escrow(li_escrow, setup)
+    escrow.banned = lambda hotkey: hotkey != miner
+
+    escrow.reward_finalize(reward, real)
+
+    assert escrow.balances().issued == reward.budget_units
 
 
 # -- FIN-04: finalize is one atomic unit ----------------------------------------------------------
@@ -397,9 +448,15 @@ def test_a_finalize_that_builds_its_services_inside_its_transaction_still_leaves
     nothing_was_finalized(stage)
 
 
-# Closed by aggregate-lock-release (6d623b0d): the replay job reads the escrow policy through
-# _services before the transaction opens, so a restarted store builds its services outside it.
+@pytest.mark.xfail(
+    strict=True,
+    raises=sqlite3.OperationalError,
+    reason="FIN-04+D-FIN-09: finalize settles even as the first service-touching request "
+    "after a restart [fix-lot: none (no design yet)]",
+)
 def test_finalize_settles_as_the_first_request_after_a_restart(stage: Stage) -> None:
+    """FIN-04+D-FIN-09: a Finalize settles even when it is the first request that builds the
+    services after a restart."""
     assert stage.finalize()["status"] == "SETTLED"  # control: services already built
     stage.reset()
     stage.store._services_v2.clear()

@@ -28,7 +28,6 @@ from typing import Any
 import httpx
 import pytest
 
-from env_pin_fixtures import honest_env
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.ledger.escrow_v2 import reward_origin_id
 from hypertrain.protocol import envelope_v2
@@ -52,14 +51,26 @@ REQUESTS = itertools.count(1)
 # What ADR 0011 (audit-integrity) changed in the store, detected on the tree under test so that
 # the module still reads an older tree: a lapse cools the auditor down instead of banning it, a
 # job that ran out of attempts gets a second window before its miner is dropped, and an
-# aggregation whose survivors cannot carry the round is refused by name.
+# aggregation whose survivors cannot carry the round is refused by name. The exit reaper of Part 8
+# retires a round that nobody left can carry (a null round, closed without reward) instead of
+# leaving it PENDING for ever, and answers 409 ROUND_RETIRED to new work on it.
 COOLS_DOWN = hasattr(ChallengeStore, "_cooling_until_v2")
 REARMS = hasattr(ChallengeStore, "_rearm_audit_job_v2")
 CHECKS_SURVIVORS = hasattr(ChallengeStore, "_require_survivors_v2")
+RETIRES = hasattr(ChallengeStore, "_retire_round_v2")
 WINDOWS = 2 if REARMS else 1
 # A job nobody audited leaves the round without being a verdict on the round: the disposition of
 # a round whose job was dropped is untouched, where an older tree voided the round for everybody.
 DROP_DISPOSITION = "PENDING" if REARMS else "EXCLUDED"
+# When every job of the round is dropped nobody can carry it, and a tree with the reaper closes it
+# as RETIRED: still no reward and no void.
+EMPTIED_DISPOSITION = "RETIRED" if RETIRES else DROP_DISPOSITION
+# What a request to schedule the audits of a round with no audit window left is answered: the
+# horizon check, or on a tree with the reaper the retirement that the missing window caused.
+HORIZON_REFUSAL = (503, "audit absolute horizon exhausted")
+NO_WINDOW_REFUSALS = {HORIZON_REFUSAL} | (
+    {(409, "ROUND_RETIRED: round 0 reached no tape and takes no work")} if RETIRES else set()
+)
 
 
 class Halt(BaseException):
@@ -228,7 +239,6 @@ def activate_identities(network: Any, cast: Cast) -> None:
         )
         assert response.status_code == 200, response.text
         screen = WorkScreenV2(
-            env=honest_env(),
             evidence_kind="work-proof-v1",
             admission_id=identity,
             nonce=sha256_hex(b"nonce"),
@@ -341,15 +351,12 @@ def records(store: ChallengeStore, *kinds: str) -> dict[tuple[str, str], str]:
     return {(r[0], r[1]): r[2] for r in rows if not kinds or r[0] in kinds}
 
 
-def digest_of(store: ChallengeStore, *, without: tuple[str, ...] = ()) -> str:
-    """Hash of every row of every table of the store and its run sub-stores, less the tables
-    named in `without`."""
+def digest_of(store: ChallengeStore) -> str:
+    """Hash of every row of every table of the store and its run sub-stores."""
     hasher = hashlib.sha256()
     for part in store.stores():
         with part._lock:
             for name in table_names(part._db):
-                if name in without:
-                    continue
                 rows = sorted(
                     repr(tuple(row)) for row in part._db.execute(f'SELECT * FROM "{name}"')
                 )
@@ -572,29 +579,9 @@ def running(store: ChallengeStore) -> dict[str, dict[str, Any]]:
     return {h: r for h, r in lease_rows(store).items() if r["state"] == "running"}
 
 
-def honest_lease(store: ChallengeStore, cast: Cast) -> dict[str, Any]:
-    """The executed lease of stage s2 that is not the forger's. The queue is ordered by job id, a
-    hash of the run id, so which honest miner it belongs to changes with the manifest: a test
-    reads the row and takes the miner from its hotkey."""
-    (row,) = (r for h, r in running(store).items() if h != cast.forger.ss58)
-    return row
-
-
 def open_rows(store: ChallengeStore) -> list[dict[str, Any]]:
     """The jobs that are neither completed nor exhausted."""
     return [r for r in lease_rows(store).values() if r["state"] in ("queued", "running")]
-
-
-def without_reaper(patch: pytest.MonkeyPatch, store: ChallengeStore) -> None:
-    """Let the beacon route of `store` pass the exit reaper by. On the push that passes its bound
-    the reaper retires a round that its survivors cannot carry, or whose audits nobody scheduled
-    (ADR 0011 part 8), and the jobs of such a round close as ROUND_RETIRED instead of running out.
-    A test of the audit layer beneath it, which is all a round has when its retirement is refused
-    (an earlier round is still open) or fails, calls this once it is inside its world. It is not
-    a fixture: a stage is built on the first use of the world, and the snapshot every other test
-    restores must be built with the reaper on. The reaper has its own tests
-    (tests/challenge/test_exit_reaper_v2.py, tests/challenge/test_retire_round_v2.py)."""
-    patch.setattr(store, "_reap_exits_v2", lambda *args, **kwargs: None)
 
 
 def run_out_the_windows(network: Any, store: ChallengeStore) -> int:
@@ -617,6 +604,33 @@ def drop_job(network: Any, store: ChallengeStore, hotkey: str) -> None:
             return
         network.push(row["absolute"])
     assert lease_rows(store)[hotkey]["state"] == "exhausted"
+
+
+def drop_job_alone(network: Any, store: ChallengeStore, hotkey: str, within: int = 5) -> None:
+    """Exhaust one job through every window it has while the other jobs keep theirs. The jobs of a
+    round share one deadline, so this test-owned stand-in ends each window of the job `within`
+    rounds after the beacon: the counter can then be read between two exhaustions, and the beacon
+    stays before the lapse of the leases that are held."""
+    for _ in range(WINDOWS):
+        row = lease_rows(store)[hotkey]
+        if row["state"] == "exhausted":
+            return
+        target = network.now + within
+        with store._tx():
+            store._db.execute(
+                "UPDATE audit_leases_v2 SET absolute=? WHERE id=?", (target, row["id"])
+            )
+        network.push(target)
+    assert lease_rows(store)[hotkey]["state"] == "exhausted"
+
+
+def audit_horizon(store: ChallengeStore, run_id: str, w: int = 0) -> int:
+    """The `absolute` of the audit jobs of round w. The last round at which the audits can still
+    be scheduled is this minus two; from this minus one there is no audit window left."""
+    body = store._record_v2(run_id, "round", str(w))["body"]
+    return int(
+        min(body["d_final"], body["d_audit"] + audit_policy(store, run_id).absolute_rounds())
+    )
 
 
 def audit_policy(store: ChallengeStore, run_id: str) -> AuditPolicyV2:

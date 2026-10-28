@@ -769,7 +769,7 @@ def test_a_test_ledger_reservation_binds_the_policy_digest_not_an_operator_recor
     assert reservation["economic_admission_hash"] == escrow_of(n).policy.digest()
 
 
-# --- SHD-19, SHD-21, SHD-20: candidates of the Lens report ------------------------------------
+# --- SHD-19, SHD-21, SHD-20: a poisoned origin, a hotkey rotation, a next trial ---------------
 
 
 def rotate(n: Any) -> httpx.Response:
@@ -826,15 +826,12 @@ def test_an_origin_with_unvalidatable_custody_does_not_stop_the_other_due_origin
     assert after.conserved()
 
 
-# SHD-21+SHD-D4 closed by escrow-relay-fixes (3d6129d3, D66): a reward follows its coldkey
-# through a rotation, and the evidence is judged against the hotkey that signed the work.
-ROTATION = [False, True]
-
-
-@pytest.mark.parametrize("rotated", ROTATION)
+@pytest.mark.parametrize("rotated", [False, True])
 def test_a_reservation_made_before_a_hotkey_rotation_can_still_be_credited(
     shadow_acceptance: Any, rotated: bool
 ) -> None:
+    """SHD-21 + SHD-D4: rotating an admission's hotkey never strands the evidence frozen under
+    its old hotkey, so a reservation made before the rotation is still credited."""
     # Given: a reservation, and the owner rotating the admission to another registered hotkey
     n, identity, body = shadow_acceptance
     if rotated:
@@ -849,10 +846,12 @@ def test_a_reservation_made_before_a_hotkey_rotation_can_still_be_credited(
     assert escrow_of(n).balances().issued == before.issued + UNIT
 
 
-@pytest.mark.parametrize("rotated", ROTATION)
+@pytest.mark.parametrize("rotated", [False, True])
 def test_a_lost_response_is_recovered_after_a_hotkey_rotation(
     shadow_acceptance: Any, rotated: bool
 ) -> None:
+    """SHD-21 + SHD-D4: rotating an admission's hotkey never strands the evidence frozen under
+    its old hotkey, so the identical retry of an accepted credit is still answered."""
     # Given: an accepted credit, a lost reply, and a rotation of the admission's hotkey
     n, identity, body = shadow_acceptance
     first = credit(n, identity, body)
@@ -868,10 +867,12 @@ def test_a_lost_response_is_recovered_after_a_hotkey_rotation(
     assert retry.json() == first.json()
 
 
-@pytest.mark.parametrize("rotated", ROTATION)
+@pytest.mark.parametrize("rotated", [False, True])
 def test_a_credit_still_matures_after_a_hotkey_rotation(
     shadow_acceptance: Any, rotated: bool
 ) -> None:
+    """SHD-21 + SHD-D4: rotating an admission's hotkey never strands the evidence frozen under
+    its old hotkey, so a credit accepted before the rotation still matures."""
     # Given: an accepted credit and a rotation of the admission's hotkey
     n, identity, body = shadow_acceptance
     accepted = credit(n, identity, body).json()

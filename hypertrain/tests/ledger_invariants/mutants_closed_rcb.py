@@ -45,6 +45,10 @@ LAPSED_AT_FINALIZE = (
     + "test_a_member_whose_screen_lapsed_after_the_aggregation_does_not_freeze_the_finalize"
 )
 STAKE_FELL = LOCK + "test_a_finalize_after_the_aggregation_pays_a_member_whose_stake_fell"
+SANCTIONED_AT_FINALIZE = (
+    "tests/ledger_invariants/test_finality_2.py::"
+    "test_a_member_sanctioned_after_the_aggregation_is_paid_for_the_round_it_was_verified_in"
+)
 
 MUTANTS = [
     {
@@ -76,7 +80,7 @@ MUTANTS = [
     },
     {
         "id": "closed-rcb-aggregate-does-not-leave-out-members-that-lost-their-standing",
-        "invariants": ["AD-07", "A2W-21", "LCK-18", "DIB-04"],
+        "invariants": ["AD-07", "A2W-21", "LCK-18", "DIB-04", "DIB-05"],
         "path": STORE,
         "old": "            self._exclude_unfit_members_v2(run_id, w)\n",
         "new": "",
@@ -115,7 +119,7 @@ MUTANTS = [
     },
     {
         "id": "closed-rcb-a-member-back-on-probation-is-no-cause-to-leave-the-round",
-        "invariants": ["DSP-04", "DIB-04"],
+        "invariants": ["DSP-04", "DIB-04", "DIB-05"],
         "path": STORE,
         "old": '            return "NOT_LIVE"\n',
         "new": "            return None\n",
@@ -127,7 +131,16 @@ MUTANTS = [
     },
     {
         "id": "closed-rcb-finalize-pays-the-live-verified-set-not-the-applied-tape",
-        "invariants": ["A2W-21", "AD-07", "CL-06", "LCK-18"],
+        "invariants": [
+            "A2W-21",
+            "AD-07",
+            "CL-06",
+            "LCK-18",
+            "LCK-01",
+            "T-LOCK-04",
+            "FIN-03",
+            "FIN-18",
+        ],
         "path": STORE,
         "old": (
             "            # The applied tape is the commitment: pay exactly its inputs, however they"
@@ -141,7 +154,7 @@ MUTANTS = [
             "            included = sorted("
             "x.roster.hotkey for x in self.verified_inputs_v2(run_id, w))\n"
         ),
-        "tests": [LAPSED_AT_FINALIZE, STAKE_FELL],
+        "tests": [LAPSED_AT_FINALIZE, STAKE_FELL, SANCTIONED_AT_FINALIZE],
         "why": (
             "Finalize re-derives the paid set from the live admissions, so a member that lost its"
             " place after the round was applied makes it answer 403 for ever and the round never"

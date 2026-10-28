@@ -318,13 +318,12 @@ def hosted_reward(
             settlement=(lambda ref: store._settlement_v2(run_id, ref)) if real_settlement else stub,
         )
         escrow.mutex = store._lock
-        AdmissionStore(escrow)  # the tables the real services create; weights() reads them
         store._db.execute(
             "INSERT INTO runs VALUES(?,?,?,'created',NULL)",
             (run_id, setup.manifest.model_dump_json(), "{}"),
         )
+        AdmissionStore(escrow)  # the tables a payout reads: admission_history
         store._services = lambda _run_id: (escrow, None, None)
-        AdmissionStore(escrow)  # the tables the real services create; _payee_v2 reads them
         yield Hosted(store, escrow, reward, evidence, run_id, fraud, real_settlement)
     finally:
         store.close()

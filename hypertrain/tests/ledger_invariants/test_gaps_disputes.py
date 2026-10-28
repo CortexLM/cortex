@@ -3,11 +3,12 @@
 Each test states a defence the protocol must hold: "the system refuses X and its state is
 unchanged", "the contest is closed without a loser", "the next round is paid". A hole is a strict
 xfail that first runs a control proving the scenario reaches the point under test, then asserts
-the desired defence inside `defence()`, so that only a missing defence (`DefenceMissing`, or
-`StepRefused` for a step the service takes for itself) is the expected failure and a broken
-control fails the test. Its reason starts with the finding id and says [candidate] only when the
-failure was not reproduced. The heavy world (`audited`) is a real five-member round on the tiny
-CPU model, about 25 s; every other test runs in-process in a second or two.
+the desired defence inside `defence()`, so that only a missing defence (`DefenceMissing`) is the
+expected failure and a broken control fails the test. Its reason starts with the finding id and
+says [candidate] only when the failure was not reproduced. A step the service takes for its own
+account runs under `service_step`, which reports a refusal with its code. The heavy world
+(`audited`) is a real five-member round on the tiny CPU model, about 25 s; every other test runs
+in-process in a second or two.
 """
 
 from __future__ import annotations
@@ -39,7 +40,6 @@ from .support_gaps_disputes import (
     applied_round,
     audited_round,
     available_of,
-    client_transfer,
     closing_round,
     contest_request,
     defence,
@@ -63,7 +63,7 @@ from .support_gaps_disputes import (
 )
 from .support_locks import STAKE, Lab
 from .support_locks import Rig as ServiceRig
-from .support_opids import DefenceMissing
+from .support_opids import DefenceMissing, receipt_ids, sender_over_http, service_step, squat_id
 
 MISMATCH_EVIDENCE = "cd" * 32  # the evidence a confirmed audit mismatch seizes the bond under
 
@@ -198,14 +198,12 @@ def stalled_outcome(world: World, *, squat: bool) -> tuple[Any, ...]:
     dispute_id = X.open_contest(world, 0)
     if squat:
         bystander = X.service().COLD[3]
-        client_transfer(world, bystander, settlement_id(dispute_id), world.network.origin_ids[3])
+        send = sender_over_http(world, "transfer", bystander, world.network.origin_ids[3])
+        squat_id(escrow, "transfer", settlement_id(dispute_id), send)
     world.network.push(closing_round(world, dispute_id))
     if not squat:
         # Control of the squat: it takes exactly the id the service releases the bond under.
-        released = escrow.db.execute("SELECT receipt FROM escrow_events WHERE kind='RELEASE'")
-        assert [json.loads(row[0])["operation_id"] for row in released] == [
-            settlement_id(dispute_id)
-        ]
+        assert receipt_ids(escrow, "RELEASE") == [settlement_id(dispute_id)]
     closed = X.disputes(world).get(dispute_id).resolution
     balances = escrow.balances()
     return (
@@ -353,7 +351,7 @@ def test_a_round_opened_after_a_two_round_rollback_is_credited(
         _, reward, evidence = signed_round(world, escrow, 2)
         before = escrow.balances().issued
         # When: the coordinator's Finalize of round 2 reaches the ledger.
-        escrow.reward_finalize(reward, evidence)
+        service_step(lambda: escrow.reward_finalize(reward, evidence))
         # Then: round 2 is paid.
         assert escrow.balances().issued - before == escrow.policy.round_reward_units
         assert escrow.balances().conserved()

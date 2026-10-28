@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from env_pin_fixtures import honest_env
 from hypertrain.aggregator.core import FinalityError
 from hypertrain.auditor.island_bisect import RefereeEvidence
 from hypertrain.challenge.disputes_v2 import (
@@ -25,7 +24,6 @@ from hypertrain.challenge.disputes_v2 import (
 )
 from hypertrain.challenge.finality_v2 import RoundStatus, require_open, settle
 from hypertrain.challenge.store import ChallengeError
-from hypertrain.protocol import messages_v2
 from hypertrain.protocol.envelope import body_digest
 from hypertrain.protocol.envelope_v2 import parse_envelope, seal
 from hypertrain.protocol.hashing import sha256_hex
@@ -33,8 +31,10 @@ from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import Finalize, Rollback
 from hypertrain.protocol.messages_v2 import (
+    REQUEST_HORIZON,
     BisectV2,
     DisputeV2,
+    DisputeWatchRequest,
     EscrowLock,
     EscrowRelease,
     PolicyHashes,
@@ -141,7 +141,6 @@ def activate(world: World, index: int) -> str:
     )
     assert response.status_code == 200, response.text
     screen = WorkScreenV2(
-        env=honest_env(),
         evidence_kind="work-proof-v1",
         admission_id=admission_id,
         nonce=sha256_hex(b"nonce"),
@@ -353,14 +352,12 @@ def resolve(world: World, dispute_id: str, *, reason: str, loser: str | None) ->
 def watch_poll(client: Any, world: World, party: Keypair, *, timeout: int) -> Any:
     """One long poll of the dispute watch as `party`, returned unchecked.
 
-    The one place that knows how the watch authenticates: a signed `DisputeWatchRequest` in the
-    body of a POST (ADR 0014 part 8); the header-signed GET is retired and answers 405."""
+    The one place that knows how the watch authenticates: a DisputeWatchRequest signed by the
+    party in the body of a POST (ADR 0014 part 8), waiting up to `timeout` seconds."""
     net = world.network
-    asked = messages_v2.DisputeWatchRequest(party=party.ss58, cursor=0, wait=timeout)
-    return client.post(
-        net.url + "/disputes/watch",
-        json=net.signed(party, "DisputeWatchRequest", asked, net.now + messages_v2.REQUEST_HORIZON),
-    )
+    asked = DisputeWatchRequest(party=party.ss58, cursor=0, wait=timeout)
+    signed = net.signed(party, "DisputeWatchRequest", asked, net.now + REQUEST_HORIZON)
+    return client.post(net.url + "/disputes/watch", json=signed)
 
 
 def post_release(world: World, index: int, lock: EscrowLock) -> Any:

@@ -44,7 +44,6 @@ from .support_gaps_finality import (
     delta_post,
     finalize_post,
     leaves_post,
-    record_deltas,
     resealed,
 )
 
@@ -274,8 +273,9 @@ def test_a_commit_that_declares_another_entitlement_than_the_servers_is_refused_
         world = X.world_of(network)
         before = world.db_digest()
 
-        # Today a plain ValueError reaches the caller (the same family as CL-48); a mapped 4xx
-        # would be as good a refusal.
+        # The store is called directly: the app has no handler for the plain ValueError the
+        # entitlement check raises, so a store that lets it through answers 500 over HTTP, and one
+        # that maps it answers a ChallengeError 422. Either refuses the commit and keeps nothing.
         with pytest.raises((ValueError, ChallengeError), match="tokens differ from server-derived"):
             rnd.store.training_v2(
                 rnd.run_id, "commit", canonicalize(network.signed(X.hot(0), "CommitV2", wrong))
@@ -409,8 +409,11 @@ def test_a_finalize_for_a_round_whose_audits_are_not_done_is_refused_for_its_mis
 # --- T-FIN-26 (FIN-22) [D70]: a round with a member that never committed can be left behind ------
 
 
-# Closed by audit-integrity-2 (e06cb795, D70): the exit reaper retires the round at the beacon.
 def test_a_round_with_a_member_that_never_committed_can_be_left_behind(tmp_path: Path) -> None:
+    """FIN-22 (D70): a round with a member that never committed leaves the round without a job for
+    anybody (three survivors cannot carry it); the exit retires it, and the opening of the next
+    round is not blocked by the applied state of this one, which never exists (409 'missing
+    accepted applied: 0')."""
     with X.activated_network(tmp_path) as network:
         rnd = X.open_round(network, 0, [0, 1, 2, 3])
         rnd.quiet = 3
@@ -460,7 +463,7 @@ def test_a_round_wider_than_one_lease_is_refused_at_opening_or_stays_auditable(
             assert world.count("records_v2", "kind IN ('round','finality')") == 0
             return
         E.commit_all(rnd)
-        record_deltas(rnd)  # the members delivered: only the width of the round is under test
+        E.deliver_deltas(rnd)
         world.network.push(rnd.d_audit)
         scheduled = E.audits_request(world)
         E.control(scheduled.status_code == 200, f"audits: {scheduled.text}")
@@ -529,6 +532,8 @@ def test_the_survivors_of_a_round_with_an_exhausted_member_are_paid_their_whole_
 def test_an_auditor_poll_that_leases_nothing_does_not_change_the_revision_a_repair_rests_on(
     queue: X.Round,
 ) -> None:
+    """FIN-17+DIB-22: an auditor poll that answers 204 and leases nothing leaves the revision the
+    two checks of a repair compare unchanged."""
     rnd = queue
     auditor = X.service().AUDITORS[0]
     for job in rnd.lease_rows():

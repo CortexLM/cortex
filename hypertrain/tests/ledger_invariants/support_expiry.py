@@ -2,7 +2,8 @@
 
 Nothing here trains a model. A commit carries the hashes of a leaf set the test builds itself:
 the store verifies those at publication and at audit, and the intake and scheduling paths the
-expiry tests exercise never open the delta. Not collected: no test_ prefix.
+expiry tests exercise never open the delta; the one that delivers it (deliver_delta) hands the
+store the small payload every commit names. Not collected: no test_ prefix.
 """
 
 from __future__ import annotations
@@ -14,8 +15,8 @@ from dataclasses import dataclass, field
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
-from env_pin_fixtures import honest_env
 from hypertrain.auditor.replay import AnchorCache, optimizer_hash, pack_state
+from hypertrain.protocol import relay_envelope
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
@@ -32,6 +33,7 @@ from hypertrain.protocol.messages_v2 import (
     WorkProof,
     WorkScreenV2,
 )
+from hypertrain.protocol.relay_messages import MasterAcceptanceV2
 from hypertrain.trainer.compress import state_hash
 from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.model import init_params
@@ -39,6 +41,7 @@ from hypertrain.trainer.model import init_params
 from .support import World, load_fixture_module
 
 SERVICE = ("li_service_fixture", "challenge/test_service_network_v2.py")
+DELTA = b"delta"  # what every commit of commit_body names as its delta: small and deliverable
 
 
 class ControlFailed(Exception):
@@ -181,7 +184,6 @@ def activate(world: World, count: int) -> None:
         )
         control(response.status_code == 200, f"lock {i}: {response.text}")
         screen = WorkScreenV2(
-            env=honest_env(),
             evidence_kind="work-proof-v1",
             admission_id=identity,
             nonce=sha256_hex(b"nonce"),
@@ -374,8 +376,8 @@ def commit_body(rnd: Round, index: int) -> CommitV2:
         final_theta_hash=sha256_hex(b"theta"),
         ef_in_hash=rnd.starts[hot(index).ss58].ef_hash,
         ef_out_hash=sha256_hex(b"ef-out"),
-        delta_hash=sha256_hex(b"delta"),
-        delta_bytes=1,
+        delta_hash=sha256_hex(DELTA),
+        delta_bytes=len(DELTA),
         tokens=manifest.training.batch_samples() * manifest.training.model.seq_len,
     )
 
@@ -419,6 +421,60 @@ def publish_leaves(rnd: Round, index: int) -> Any:
     return network.client.post(
         network.url + "/leaves", json=network.signed(hot(index), "WorkProof", proof)
     )
+
+
+def deliver_delta(rnd: Round, index: int) -> Any:
+    """POST /delta of the delta the member's commit names. The relay upload is not under test: the
+    master's acceptance, which the relay receipt route would write, is written here with the same
+    sealed type, and next to it the receipt it names, reduced to the fields a delta is checked
+    against (round, hotkey, grant)."""
+    network, store, run_id = rnd.world.network, rnd.world.store, rnd.world.run_id
+    hotkey, identity = hot(index).ss58, f"{rnd.w}:{hot(index).ss58}"
+    delta_hash = sha256_hex(DELTA)
+    grant_hash = sha256_hex(b"expiry-grant|" + identity.encode())
+    acceptance = MasterAcceptanceV2(
+        w=rnd.w,
+        hotkey=hotkey,
+        delta_hash=delta_hash,
+        receipt_hash=sha256_hex(b"expiry-receipt|" + identity.encode()),
+        received_drand=network.now,
+    )
+    signed = relay_envelope.seal(store._coord(), "MasterAcceptanceV2", run_id, acceptance, 10_000)
+    with store._tx():
+        store.objects.put(DELTA)
+        store._put_record_v2(run_id, "master-acceptance", acceptance.digest(), signed)
+        store._put_record_v2(
+            run_id,
+            "relay-receipt",
+            acceptance.receipt_hash,
+            {"body": {"w": rnd.w, "hotkey": hotkey, "grant_hash": grant_hash}},
+        )
+    body = {
+        "w": rnd.w,
+        "hotkey": hotkey,
+        "delta_hash": delta_hash,
+        "size": len(DELTA),
+        "uri": "sha256:" + delta_hash,
+        "format": "ht-sparse-v1",
+        "chunks": [{"off": 0, "len": len(DELTA), "sha256": delta_hash}],
+        "grant_hash": grant_hash,
+        "master_acceptance_hash": acceptance.digest(),
+    }
+    return network.client.post(
+        network.url + "/delta", json=network.signed(hot(index), "DeltaManifestV2", body)
+    )
+
+
+def deliver_deltas(rnd: Round) -> None:
+    """Every member delivers its delta inside the upload window, as a member that trained does.
+
+    A scenario that reads the audit queue past d_upload needs it: with the exit reaper (ADR 0011
+    part 8) a member that committed and delivered nothing is out of the round once the window
+    closes, and a round left without members that can carry it is retired, its jobs exhausted
+    and its lease answered 204."""
+    for index in rnd.members:
+        delivered = deliver_delta(rnd, index)
+        control(delivered.status_code == 200, f"delta {index}: {delivered.text}")
 
 
 # --- one signed request per route type ---------------------------------------------------------

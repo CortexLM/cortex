@@ -15,7 +15,6 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from env_pin_fixtures import honest_env
 from hypertrain.beacon.core import FixtureBeacon
 from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.admission_store import AdmissionError
@@ -285,7 +284,6 @@ def test_ad05_sg06_identity_rules_hold_for_any_sequence_of_joins(
             expires_beacon=10000,
             policy_hash=policy_hash,
             hardware_hint=HardwareHint(device_name="cpu", device_count=1, driver="cpu"),
-            env=honest_env(),
         )
         raw = canonicalize(request.body())
         before = table_rows(admission.store.db)

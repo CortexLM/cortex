@@ -246,7 +246,6 @@ def test_a_late_contest_never_reopens_a_settled_round(world: World) -> None:
 # --- a contest never wedges the round of its opener (DIB-04, DS-02) ---------------------------
 
 
-# Closed by audit-integrity-2 ADR0011-P8 DSP-04 (b0ac0ab5): a contest on a MATCH is refused.
 def test_a_contest_on_a_matching_verdict_never_wedges_the_aggregation_of_its_round(
     world: World,
 ) -> None:
@@ -338,7 +337,6 @@ def test_a_contest_bond_whose_dispute_never_opened_can_be_taken_back(world: Worl
     assert escrow.balances() == before, released.text
 
 
-# Closed by audit-integrity-2 ADR0011-P8 DSP-04 (b0ac0ab5): the audit lease says MATCH.
 def test_a_contest_on_a_matching_verdict_is_refused_before_it_suspends_anyone(
     world: World,
 ) -> None:
@@ -479,7 +477,6 @@ def shared_loop(world: World, workers: int) -> Iterator[TestClient]:
         yield client
 
 
-# Closed by escrow-relay-fixes ADR0014-P8 (6f6e9c90): the polls wait on a pool of their own.
 def test_waiting_dispute_polls_never_starve_the_other_routes(world: World) -> None:
     """DS-08: a watcher that polls for events does not keep the service from answering others.
     POOL polls of one party wait on an empty feed while a plain status request is made."""

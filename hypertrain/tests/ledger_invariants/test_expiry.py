@@ -64,6 +64,7 @@ from .support_expiry import (
     activate,
     audited,
     control,
+    deliver_deltas,
     files,
     hot,
     keyed_id,
@@ -81,10 +82,8 @@ from .support_expiry import (
 )
 
 ISSUED = 1_000_000
-# d_upload is d_final: no member delivers a delta here, and from d_upload on the exit reaper
-# retires a round whose members have none (ADR 0011 part 8), which would end the audits early.
-NARROW = (1, 2, 10, 11, 111, 111)  # d_final - d_audit = 100, one lease of a tiny model (H <= 30)
-WIDE = (1, 2, 10, 11, 150, 150)  # d_final - d_audit = 139
+NARROW = (1, 2, 10, 11, 12, 111)  # d_final - d_audit = 100, one lease of a tiny model (H <= 30)
+WIDE = (1, 2, 10, 11, 12, 150)  # d_final - d_audit = 139
 
 
 # --- CRD-15, A2W-17: an expiry a signer chose after admission -----------------------------------
@@ -204,6 +203,7 @@ def test_a_round_whose_window_fits_one_lease_is_auditable_up_to_its_last_beacon(
 ) -> None:
     with service_world(tmp_path) as world:
         rnd = audited(world, NARROW)
+        deliver_deltas(rnd)
         last = last_audit_beacon(world)
         world.network.push(last)
         leased = lease_request(world, service().AUDITORS[0])
@@ -213,7 +213,8 @@ def test_a_round_whose_window_fits_one_lease_is_auditable_up_to_its_last_beacon(
 
 def test_a_round_wider_than_one_lease_is_not_left_unauditable(tmp_path: Path) -> None:
     with service_world(tmp_path) as world:
-        audited(world, WIDE)  # control: the narrow twin above leases at its last beacon
+        rnd = audited(world, WIDE)  # control: the narrow twin above leases at its last beacon
+        deliver_deltas(rnd)
         last = last_audit_beacon(world)
         world.network.push(last)
         leased = lease_request(world, service().AUDITORS[0])

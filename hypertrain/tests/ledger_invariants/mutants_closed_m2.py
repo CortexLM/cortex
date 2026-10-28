@@ -61,11 +61,11 @@ MUTANTS = [
     },
     {
         "id": "closed-m2-ledger-challenge-judged-at-finalize",
-        "invariants": ["A2W-17", "CRD-15"],
+        "invariants": ["A2W-17", "CRD-15", "CL-10"],
         "path": ESCROW,
         "old": ('item.challenge.model_dump(mode="json"), self._accepted(item.challenge, evidence)'),
         "new": 'item.challenge.model_dump(mode="json"), evidence.finalized_beacon',
-        "tests": [CHALLENGE_LAPSED],
+        "tests": [CHALLENGE_LAPSED, LATE_FINALIZE],
         "why": (
             "the ledger judges the coordinator's audit challenge at the finalize beacon again, so "
             "a challenge that lapsed after the audit it opened blocks the reward of the round."

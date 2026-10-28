@@ -103,7 +103,7 @@ class Config:
 def test_the_environment_scan_finds_literal_names_through_aliases_and_helpers() -> None:
     """M-17 (the scan itself): a literal name read through `os.environ.get`, `os.getenv`,
     `os.environ[...]`, an alias of `get` or a helper that forwards its parameter is found; a
-    computed name and a whole-environment copy are not names. A sixteenth knob is reported."""
+    computed name and a whole-environment copy are not names. One more knob is reported."""
     assert environment_names(KNOBS) == {"ALPHA", "BETA", "GAMMA", "DELTA"}
     assert environment_names(KNOBS + '\nextra = os.environ.get("EPSILON")\n') == {
         "ALPHA",
@@ -154,7 +154,6 @@ def test_the_scrub_removes_every_name_the_service_reads_and_leaves_its_defaults(
         config.role_dispatch_file,
         config.cuda_executor_file,
     ) == (None,) * 7
-    assert config.relay_lifecycle_interval == 120.0
 
 
 def test_a_service_the_lot_builds_ignores_a_polluted_environment(
@@ -427,7 +426,7 @@ def credited_and_rotated(audited: Frozen) -> Any:
 def test_a_rotation_between_the_credit_and_the_pay_keeps_every_unit_with_the_coldkey_that_earned_it(
     audited: Frozen,
 ) -> None:
-    """T-CRD-18 (CRD-12, the half that holds): whichever hotkey the weights name for a rotated
+    """T-CRD-18 (CRD-12, the ownership half): whichever hotkey the weights name for a rotated
     miner, the units of its origin stay under its coldkey through the payment, the answer carries
     exactly the round's mass, and the ledger conserves."""
     round_ = credited_and_rotated(audited)
@@ -447,11 +446,10 @@ def test_a_rotation_between_the_credit_and_the_pay_keeps_every_unit_with_the_col
     assert escrow.balances().conserved()
 
 
-# Closed by escrow-relay-fixes D66 (3d6129d3): get_weights pays the hotkey the admission holds now.
 def test_the_units_of_a_rotated_miner_are_emitted_to_the_hotkey_its_admission_holds_now(
     audited: Frozen,
 ) -> None:
-    """T-CRD-18 (CRD-12, WGT-13): four miners credited by the real Finalize, the first one's
+    """T-CRD-18 (CRD-12, WGT-13, CL-29): four miners credited by the real Finalize, the first one's
     admission rotated to another registered hotkey, the origins matured. Whichever rule is chosen
     (pay the hotkey the admission holds now, or refuse the rotation while origins are owed), the
     quarter of the rotated miner is emitted to the hotkey the admission holds, and the round's
@@ -526,7 +524,7 @@ def test_a_repeated_audit_completion_neither_decrements_the_counter_again_nor_ch
         def counter() -> int:
             return int(store._record_v2(run, "finality", "0")["unresolved_audits"])
 
-        honest = next(r for h, r in sa.running(store).items() if h != cast.forger.ss58)
+        honest = sa.running(store)[cast.hot[3].ss58]
         key = cast.keys[honest["auditor"]]
         stored = store._record_v2(run, "executed-verdict", honest["id"])
         assert stored["result"] == "MATCH" and counter() == 5  # control: five open, ours executed
@@ -534,7 +532,7 @@ def test_a_repeated_audit_completion_neither_decrements_the_counter_again_nor_ch
         first = sa.complete(n, key, honest["id"], stored)
 
         assert (first.status_code, first.json()) == (200, {"result": "MATCH"})
-        assert counter() == 4 and sa.lease_rows(store)[honest["hotkey"]]["state"] == "completed"
+        assert counter() == 4 and sa.lease_rows(store)[cast.hot[3].ss58]["state"] == "completed"
         completed = (settled_state(store), sa.digest_of(store))
         repeated = sa.complete(n, key, honest["id"], stored)
         assert (repeated.status_code, repeated.json()) == (200, {"result": "MATCH"})

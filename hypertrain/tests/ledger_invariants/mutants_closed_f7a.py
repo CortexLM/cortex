@@ -5,6 +5,14 @@ The pin was a strict expected failure until the fix landed and now holds the fix
 prove it on the merged tree: reverting one behaviour of the fix in a private copy of src must fail
 it.
 
+The table covers the indexed read only. The caps and the minimum that 8320f71e added to new
+admission locks (LOCK_BELOW_MINIMUM, OPEN_LOCK_CAP and LEDGER_LOCK_CAP, all raised by
+require_lock_capacity) are held by tests/ledger/test_escrow_lock_cost_v2.py only: that file fails
+when any of the three is removed, and the lock files of the lot stay green when all three are
+(measured on test_opids_2, test_locks, test_locks_2, test_escrow_laws, test_escrow_laws_2,
+test_admission_http, test_admission_http_2, test_gaps_admission_lock, test_gaps_admission_lock_2,
+test_gaps_escrow, test_gaps_escrow_2, test_gaps_http, test_credit and test_credit_2).
+
 Run from hypertrain/: .venv/bin/python scripts/check_ledger_invariant_mutants.py --only <ids>
 """
 

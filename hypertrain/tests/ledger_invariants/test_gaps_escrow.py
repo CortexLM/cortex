@@ -11,7 +11,6 @@ reaches the point under test.
 from __future__ import annotations
 
 import contextlib
-import json
 import threading
 from collections.abc import Iterator, Sequence
 from functools import partial
@@ -20,11 +19,9 @@ from types import ModuleType
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
 from hypertrain.challenge.disputes_v2 import Turn
-from hypertrain.challenge.store import ChallengeError
-from hypertrain.ledger.escrow_v2 import EscrowV2
+from hypertrain.challenge.store import ChallengeError, ChallengeStore
 from hypertrain.protocol.keys import Keypair
 
 from . import support_exit_disputes as X
@@ -37,8 +34,7 @@ from .support import (
 from .support_gaps_escrow import (
     ask_for_the_challenge,
     at_epoch_four,
-    callers,
-    client_event_over_http,
+    callers_of,
     funded_cohort,
     keys_selecting,
     live_world,
@@ -50,9 +46,7 @@ from .support_gaps_escrow import (
     rotate,
     seed_pending_origin,
     seed_round_origin,
-    settlement_ids,
     sql_writers,
-    squat_refused,
     units_in,
 )
 from .support_locks import Miner, Rig, units_of, vested
@@ -61,9 +55,15 @@ from .support_opids import (
     DisputeWorld,
     StepRefused,
     client_event,
+    client_event_over_http,
     dispute_world,
     fresh_id,
+    receipt_ids,
+    sender_over_http,
     service_step,
+    squat_id,
+    squat_stored_keys,
+    stored_keys,
 )
 
 # --- GAP-06: the credit tables are insert-only and each record kind has one writer (static) ----
@@ -97,8 +97,13 @@ CREDIT_WRITERS = {
     ("challenge/store.py", "weights", "INSERT INTO", "weights_runs"),
     ("challenge/app.py", "registered_weights", "INSERT INTO", "weights_registered"),
 }
-CLOSURE_KIND = "replayed-finality"
-FINALIZATION_KINDS = frozenset({"finalize", CLOSURE_KIND, "settlement", "finalize-result"})
+FINALIZATION_KINDS = frozenset({"finalize", "replayed-finality", "settlement", "finalize-result"})
+STORE = "challenge/store.py"
+# Where one function closes a round whichever state closes it, that function writes the closure
+# record `replayed-finality` for all of them: the finalize path and the exits that close a round
+# without a reward (a retirement, a rollback) are its only callers.
+CLOSURE_WRITER = "_close_round_v2"
+CLOSURE_CALLERS = {(STORE, "finalize_v2"), (STORE, "_retire_round_v2"), (STORE, "rollback_v2")}
 # records_v2 is a general table (INSERT OR REPLACE in _put_record_v2, CL-38 is a decision); the
 # direct statements below write other kinds: shadow reservations, custody and the child copy of
 # the qualification records.
@@ -126,29 +131,25 @@ def test_the_credit_tables_are_written_only_by_the_statements_the_ledger_relies_
 def test_each_finalization_record_kind_is_stored_only_by_finalize() -> None:
     # Given: the callers of the record store and the direct statements on records_v2.
     literal, dynamic = record_writers(FINALIZATION_KINDS)
-    # Then: finalize, settlement and finalize-result are written by finalize_v2 alone and
-    # replayed-finality by the one closure writer (D70), which only the three functions that
-    # close a round call; no other caller picks its kind at run time than training_v2, which is
-    # limited to a closed set of actions, none of them a finalization kind, and _put_changed_v2,
-    # which forwards the literal kind of each of its callers, none of them a finalization kind.
-    assert literal == {
-        ("challenge/store.py", "finalize_v2", kind) for kind in FINALIZATION_KINDS - {CLOSURE_KIND}
-    } | {("challenge/store.py", "_close_round_v2", CLOSURE_KIND)}
-    assert callers("challenge/store.py", "_close_round_v2") == {
-        "finalize_v2",
-        "_retire_round_v2",
-        "rollback_v2",
+    finalizing = FINALIZATION_KINDS - {"replayed-finality"}
+    # Then: finalize, settlement and finalize-result are written by finalize_v2 alone,
+    assert {w for w in literal if w[2] in finalizing} == {
+        (STORE, "finalize_v2", k) for k in finalizing
     }
-    assert dynamic == {
-        ("challenge/store.py", "training_v2"),
-        ("challenge/store.py", "_put_changed_v2"),
-    }
-    assert record_writers(FINALIZATION_KINDS, "_put_changed_v2") == (set(), set())
-    assert keys_selecting("training_v2", "challenge/store.py", "action") == {
-        "accept",
-        "commit",
-        "delta",
-    }
+    # the closure record by finalize_v2 itself, or on a tree where one function closes a round
+    # whichever state closes it, by that one writer, which no intake, read route or other function
+    # calls but the finalize path and the two exits,
+    closure = {w[:2] for w in literal if w[2] == "replayed-finality"}
+    if hasattr(ChallengeStore, CLOSURE_WRITER):
+        assert closure == {(STORE, CLOSURE_WRITER)}
+        assert callers_of(CLOSURE_WRITER) <= CLOSURE_CALLERS
+    else:
+        assert closure == {(STORE, "finalize_v2")}
+    # no other caller picks its kind at run time than training_v2, and that one is limited to a
+    # closed set of actions, none of them a finalization kind (the store of a changed fact only
+    # passes its kind on: its callers are scanned above).
+    assert dynamic - {(STORE, "_put_changed_v2")} == {(STORE, "training_v2")}
+    assert keys_selecting("training_v2", STORE, "action") == {"accept", "commit", "delta"}
     # and the statements that write records_v2 directly are the known ones (other kinds).
     assert sql_writers(frozenset({"records_v2"})) == RECORD_STATEMENTS
 
@@ -221,7 +222,7 @@ def paid_after(world: World) -> dict[str, float]:
 def test_matured_units_are_emitted_to_the_hotkey_that_earned_them_while_it_is_the_current_one(
     tmp_path: Path,
 ) -> None:
-    # Control of the rotation test below: the origin of the first hotkey pays that hotkey, once.
+    # Control of the hole below: the origin of the first hotkey pays that hotkey, once.
     service = load_fixture_module(*SERVICE_FIXTURE)
     hot, cold = service.HOT[0].ss58, service.COLD[0]
     origins = [(fresh_id("cl-29"), hot, cold.ss58, PAID)]
@@ -231,10 +232,12 @@ def test_matured_units_are_emitted_to_the_hotkey_that_earned_them_while_it_is_th
         assert paid_after(world) == {hot: float(PAID)}
 
 
-# CRD-12+WGT-13+CL-29 closed by escrow-relay-fixes (3d6129d3): _payee_v2 pays the current hotkey.
 def test_matured_units_of_a_rotated_admission_are_emitted_to_its_current_hotkey(
     tmp_path: Path,
 ) -> None:
+    """CRD-12+WGT-13+CL-29: the units a rotated admission earned are emitted to the hotkey the
+    admission holds now (or the rotation is refused while origins are owed), never to the key that
+    was given up. D66 holds it by paying the current hotkey: the payout reads admission_history."""
     service = load_fixture_module(*SERVICE_FIXTURE)
     hot, spare, cold = service.HOT[0].ss58, service.REFEREE, service.COLD[0]
     new = spare.ss58
@@ -256,22 +259,6 @@ def test_matured_units_of_a_rotated_admission_are_emitted_to_its_current_hotkey(
 # --- T-ESC-04: no client event takes the id of a dispute's settlement (slash, beacon, timeout) -
 
 
-def squatted_ids(escrow: EscrowV2) -> list[str]:
-    """Every id a client could sign to take the release or slash of a lock: the key the event is
-    stored under, and the id the service derived before the ledger placed it in its own key space.
-    The second is a plain 64-hex id any client can sign; where the service has no key space of its
-    own the two are one id."""
-    rows = escrow.db.execute(
-        "SELECT operation_id,receipt FROM escrow_events WHERE kind IN ('RELEASE','SLASH') "
-        "ORDER BY seq"
-    )
-    return list(
-        dict.fromkeys(
-            i for key, receipt in rows for i in (key, json.loads(receipt)["operation_id"])
-        )
-    )
-
-
 @pytest.mark.parametrize("kind", ["transfer", "lock"])
 def test_a_client_event_never_blocks_the_dispute_slash_id(
     li_escrow: ModuleType, tmp_path: Path, kind: str
@@ -283,38 +270,45 @@ def test_a_client_event_never_blocks_the_dispute_slash_id(
         world.bond(li_escrow.COLD, bond, dispute_id, world.origins[0])
         return world.open(li_escrow.HOT, verdict, bond, now=1)
 
-    # Given: the control run settles a lost FRAUD contest and shows the id of the slash.
+    # Given: the control run settles a lost FRAUD contest and shows the id of the slash: the id
+    # its receipt carries, which a client can sign, and the key it is stored under.
     with dispute_world(tmp_path / "control", li_escrow) as world:
         resolved_and_settled(world, opened(world), resolve_fraud)
-        settle_ids = settlement_ids(world.escrow)
-        squats = squatted_ids(world.escrow)
+        settle_ids = receipt_ids(world.escrow, "RELEASE", "SLASH")
+        settle_keys = stored_keys(world.escrow, "RELEASE", "SLASH")
         effect = world.escrow.balances(li_escrow.COLD.ss58)
         burned = world.escrow.balances().burned
     assert len(settle_ids) == 1 and effect.dispute_locked == 0 and effect.available == 19900
     assert burned == 100
 
-    # When: a funded bystander signs an event with that id while the dispute is open.
+    # When: a funded bystander signs an event under each of them while the dispute is open.
     with dispute_world(tmp_path / "contended", li_escrow) as world:
         turn = opened(world)
-        key, origin = li_escrow.OTHER, world.origins[1]
-        client_event(world.escrow, kind, key, fresh_id("neutral"), origin)
-        for operation_id in squats:
-            squat_refused(partial(client_event, world.escrow, kind, key, operation_id, origin))
+        send = partial(client_event, world.escrow, kind, li_escrow.OTHER, origin=world.origins[1])
+        send(fresh_id("neutral"))
+        for operation_id in settle_ids:
+            squat_id(world.escrow, kind, operation_id, send)
+        squat_stored_keys(world.escrow, kind, settle_keys, send)
 
         # Then: the referee's FRAUD resolution and the slash go through together, as without it.
         resolved_and_settled(world, turn, resolve_fraud, settle=service_step)
         assert world.disputes.get(turn.dispute_id).resolution is not None
         assert world.escrow.balances(li_escrow.COLD.ss58) == effect
         assert world.escrow.balances().burned == burned
-        assert len(settlement_ids(world.escrow)) == 1
+        assert receipt_ids(world.escrow, "RELEASE", "SLASH") == settle_ids
 
 
 def settled_world(world: World, dispute_id: str) -> tuple[list[str], dict[str, int], int]:
-    """(settlement ids, the miner's coldkey buckets, units burned) after a dispute was closed."""
+    """(ids of the settlement, the miner's coldkey buckets, units burned) after a dispute was
+    closed; the ids are those its receipts carry, the ones a client can sign."""
     escrow = world.store._services(world.run_id)[0]
     cold = load_fixture_module(*SERVICE_FIXTURE).COLD[0].ss58
     assert X.disputes(world).get(dispute_id).resolution is not None
-    return settlement_ids(escrow), units_of(escrow, cold), escrow.balances().burned
+    return (
+        receipt_ids(escrow, "RELEASE", "SLASH"),
+        units_of(escrow, cold),
+        escrow.balances().burned,
+    )
 
 
 def exit_failures(world: World) -> int:
@@ -322,19 +316,19 @@ def exit_failures(world: World) -> int:
     return world.count("records_v2", "kind='dispute-exit-failed'")
 
 
-def squat_over_http(world: World, kind: str, operation_ids: Sequence[str]) -> None:
-    """COLD[1], a funded bystander, signs an event under each of `operation_ids` on the public
-    route; its first event under a neutral id proves the route takes its events."""
+def squat_over_http(world: World, kind: str, ids: Sequence[str], keys: Sequence[str]) -> None:
+    """COLD[1], a funded bystander, signs an event on the public route under each of `ids` (the
+    ids the service named for its events) and of `keys` (the keys it stored them under, where a
+    client can name one); its first event under a neutral id proves the route takes its events."""
     bystander = load_fixture_module(*SERVICE_FIXTURE).COLD[1]
     origin = world.network.origin_ids[1]
     neutral = client_event_over_http(world, kind, bystander, fresh_id("neutral"), origin)
     assert neutral.status_code == 200, neutral.text
-    for operation_id in operation_ids:
-        try:
-            client_event_over_http(world, kind, bystander, operation_id, origin)
-        except ValidationError as error:
-            # An id outside the client's own 64-hex space cannot be signed at all: nothing to post.
-            assert "operation_id" in str(error)
+    escrow = world.store._services(world.run_id)[0]
+    send = sender_over_http(world, kind, bystander, origin)
+    for operation_id in ids:
+        squat_id(escrow, kind, operation_id, send)
+    squat_stored_keys(escrow, kind, keys, send)
 
 
 @pytest.mark.parametrize("kind", ["transfer", "lock"])
@@ -348,13 +342,13 @@ def test_a_client_event_never_stops_the_beacon_from_closing_a_blocked_dispute(
         close_at = X.disputes(world).get(dispute_id).absolute_deadline + 1
         world.network.push(close_at)
         settle_ids, held, burned = settled_world(world, dispute_id)
-        squats = squatted_ids(world.store._services(world.run_id)[0])
+        settle_keys = stored_keys(world.store._services(world.run_id)[0], "RELEASE", "SLASH")
     assert len(settle_ids) == 1 and held["dispute_locked"] == 0 and burned == 0
 
-    # When: a funded bystander signs an event with that id while the contest is open.
+    # When: a funded bystander signs an event under each of those ids while the contest is open.
     with service_world(tmp_path / "contended") as world:
         dispute_id = X.open_contest(world, 0)
-        squat_over_http(world, kind, squats)
+        squat_over_http(world, kind, settle_ids, settle_keys)
         world.network.push(close_at)
 
         # Then: the beacon closed the contest and returned the bond; nothing was journaled as a
@@ -366,7 +360,8 @@ def test_a_client_event_never_stops_the_beacon_from_closing_a_blocked_dispute(
         assert state == (True, 0, 0), (
             f"closed={state[0]}, dispute_locked={state[1]}, dispute-exit-failed={state[2]}"
         )
-        assert len(settlement_ids(escrow)) == 1 and escrow.balances().conserved()
+        assert receipt_ids(escrow, "RELEASE", "SLASH") == settle_ids
+        assert escrow.balances().conserved()
 
 
 def lose_by_referee(world: World, dispute_id: str) -> None:
@@ -414,21 +409,21 @@ def test_a_client_event_never_blocks_the_settlement_of_a_convicted_miner_over_ht
         prepare(world, dispute_id)
         route(world, dispute_id)
         settle_ids, held, burned = settled_world(world, dispute_id)
-        squats = squatted_ids(world.store._services(world.run_id)[0])
+        settle_keys = stored_keys(world.store._services(world.run_id)[0], "RELEASE", "SLASH")
         resolution = X.disputes(world).get(dispute_id).resolution
     assert resolution is not None and (resolution.reason, resolution.loser) == (decide, hot)
     assert len(settle_ids) == 1 and held["dispute_locked"] == 0 and burned == burns
 
-    # When: a funded bystander signs an event with that id while the contest is open.
+    # When: a funded bystander signs an event under each of those ids while the contest is open.
     with service_world(tmp_path / "contended") as world:
         dispute_id = X.open_contest(world, 0)
-        squat_over_http(world, "transfer", squats)
+        squat_over_http(world, "transfer", settle_ids, settle_keys)
         prepare(world, dispute_id)
 
         # Then: the conviction is applied and the bond settled, as without the bystander.
         route(world, dispute_id)
         again, locked, burnt = settled_world(world, dispute_id)
-        assert (len(again), locked["dispute_locked"], burnt) == (1, 0, burns)
+        assert (again, locked["dispute_locked"], burnt) == (settle_ids, 0, burns)
 
 
 @pytest.fixture

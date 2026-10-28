@@ -35,6 +35,7 @@ from .support_disputes import (
     WATCH_NEEDS_SIGNATURE,
     Contested,
     contested,
+    header_signed_watch_feed,
     heavy_modules,
     rollback_raw,
     seed_rounds,
@@ -228,7 +229,7 @@ def test_each_dispute_route_accepts_only_its_intended_principal(tmp_path: Path) 
             "/admin/rollback": 409,
             "/admin/rollback-preview": 409,
         }
-        # The watch feed needs the party's own signature
+        # The watch feed needs the party's own signature, in the body of its request
         needs_signature = (403, WATCH_NEEDS_SIGNATURE)
         assert verdict_of(watch_feed(world, miner.hot, None)) == needs_signature
         assert verdict_of(watch_feed(world, miner.hot, other.hot)) == needs_signature
@@ -236,6 +237,11 @@ def test_each_dispute_route_accepts_only_its_intended_principal(tmp_path: Path) 
         assert own.status_code == 200 and {e["party"] for e in own.json()} == {miner.hot.ss58}
         off_subnet = watch_feed(world, outsider, outsider)
         assert verdict_of(off_subnet) == (403, "the hotkey is not registered on the subnet")
+        # ... and a signature in a header opens nothing: the party's own is refused as retired
+        polled = world.db_digest()
+        status, detail = verdict_of(header_signed_watch_feed(world, miner.hot, miner.hot))
+        assert status == 405 and detail.startswith("retired: POST"), (status, detail)
+        assert world.db_digest() == polled
 
 
 def ack_of(miner: Contested, key: Keypair, **override) -> EventAck:

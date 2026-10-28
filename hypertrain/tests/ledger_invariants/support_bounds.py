@@ -21,7 +21,6 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from env_pin_fixtures import honest_env
 from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.admission_store import AdmissionStore
 from hypertrain.challenge.store import ChallengeStore
@@ -37,7 +36,6 @@ from hypertrain.ledger.escrow_v2 import (
     genesis_allocation_hash,
 )
 from hypertrain.protocol import envelope_v2
-from hypertrain.protocol.env_pins import GPU_CLASSES, class_pin
 from hypertrain.protocol.envelope_v2 import EnvelopeV2, seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -473,6 +471,18 @@ class Floors:
         return floor.influence_allowed, floor.required_locked_units
 
 
+def host_attestation() -> dict[str, list[str]]:
+    """The block strict qualification evidence carries (`_qualification_evidence_v2`), which a
+    production run needs in its qualification record before it builds services: the fingerprints of
+    the two pinned host keys and the digests of the statements and signatures they made. No host
+    exists in these tests, so every value is the digest of a label."""
+    return {
+        "host_keys": [f"SHA256:{sha256_hex(f'host-{i}'.encode())[:43]}" for i in range(2)],
+        "statements": [sha256_hex(f"statement-{i}".encode()) for i in range(2)],
+        "signatures": [sha256_hex(f"signature-{i}".encode()) for i in range(2)],
+    }
+
+
 ECONOMICS_FIXTURE = ("li_economics_fixture", "challenge/test_production_economics_v2.py")
 CAPACITY_FIXTURE = ("li_capacity_fixture", "challenge/test_service_capacity_v2.py")
 
@@ -526,8 +536,8 @@ def hosting(
             "INSERT INTO runs VALUES(?,?,?,'created',NULL)",
             (run_id, setup.manifest.model_dump_json(), "{}"),
         )
+        AdmissionStore(escrow)  # the tables a payout reads: admission_history
         store._services = lambda _run_id: (escrow, None, None)  # type: ignore[method-assign,assignment]
-        AdmissionStore(escrow)  # the tables the real services create; _payee_v2 reads them
         yield Hosting(store, escrow, run_id)
     finally:
         store.close()
@@ -606,31 +616,10 @@ class Production:
         self.escrow.lock(lock, signer=E.COLD.ss58)
 
 
-def gpu_manifest(setup_of: Callable[[str], Any], gpu: str) -> Callable[[str], Any]:
-    """`setup_of` with the manifest pinned to the GPU class `gpu`: a run on the CUDA backend names
-    the device it runs on, and the store refuses one of class none (ENV_CLASS_BACKEND)."""
-
-    def setup(mode: str = "test") -> Any:
-        built = setup_of(mode)
-        body = built.manifest.body()
-        reference = body["training"]["reference_spec"]
-        reference["env"]["pinned"] = class_pin(reference["env"]["pinned"]["cpu"], gpu)
-        reference["sm_count"] = min(GPU_CLASSES[gpu].sm_counts)
-        return replace(built, manifest=RunManifestV2.model_validate(body))
-
-    return setup
-
-
 @contextmanager
-def production_run(
-    root: Path, *, cuda: bool = True, gpu: str = "none", **economics: Any
-) -> Iterator[Production]:
-    """`cuda=False` leaves the backend to the store's own choice; a run that installs a CUDA
-    qualification then names a device class with `gpu`."""
+def production_run(root: Path, *, cuda: bool = True, **economics: Any) -> Iterator[Production]:
     eco = load_fixture_module(*ECONOMICS_FIXTURE)
     patch = pytest.MonkeyPatch()
-    if gpu != "none":
-        patch.setattr(eco.E, "setup", gpu_manifest(eco.E.setup, gpu))
     store, run_id = eco.hosted(root, patch, cuda=cuda, **economics)
     try:
         yield Production(eco, store, run_id)
@@ -754,7 +743,6 @@ def activate_identity(world: Any, index: int = 0) -> str:
     assert locked.status_code == 200, locked.text
     reference = network.manifest.training.reference_spec
     screen = WorkScreenV2(
-        env=honest_env(),
         evidence_kind="work-proof-v1",
         admission_id=identity,
         nonce=sha256_hex(b"nonce"),

@@ -41,6 +41,7 @@ from .support_bounds import (
     capacity_run,
     creation,
     genesis_request,
+    host_attestation,
     hosting,
     pinned_bootstrap,
     production_run,
@@ -110,6 +111,8 @@ def test_a_test_mode_run_has_no_economic_bound_record_to_write(tmp_path: Path) -
     "[fix-lot: none (no design yet)]",
 )
 def test_a_forged_economic_bound_row_does_not_open_production_influence(tmp_path: Path) -> None:
+    """BND-03+BND-D06: the economic-bound gate rejects a record bound to another policy or without
+    a coordinator receipt, so a forged row of that kind does not make a funded identity eligible."""
     with production_run(tmp_path, G_max_units=1100) as run:
         run.bootstrap()
         run.admit_and_lock(1100)
@@ -283,6 +286,7 @@ def test_a_policy_object_edited_in_the_object_store_cannot_become_the_policy_of_
     "[fix-lot: decision (product choice pending)]",
 )
 def test_the_dataset_linkage_cannot_be_replaced_once_a_round_exists(tmp_path: Path) -> None:
+    """BND-04+BND-D07: once a round exists the dataset linkage of the run is fixed."""
     with service_world(tmp_path) as world:
         route = f"/v2/runs/{world.run_id}/admin/dataset"
         linkage = world.store._record_v2(world.run_id, "dataset", "inputs")
@@ -423,6 +427,8 @@ def test_test_genesis_units_are_collateral_and_never_payable(li_escrow: ModuleTy
 def test_a_test_ledger_reward_never_reaches_the_epoch_weights(
     li_escrow: ModuleType, tmp_path: Path
 ) -> None:
+    """BND-15+BND-D02: a test-ledger run never emits real weight through get_weights, whatever
+    its matured live reward."""
     hot, cold = worker(0)
     setup = li_escrow.setup("test")
     live = synthetic_round(li_escrow, setup, 0, [(hot, cold)])
@@ -475,6 +481,8 @@ def test_a_manifest_whose_economics_policy_object_is_missing_creates_no_run(
 def test_a_production_run_without_a_cuda_qualification_is_refused_and_leaves_no_run_row(
     tmp_path: Path,
 ) -> None:
+    """BND-25+BND-D05: a refused run creation leaves no run row, so the same envelope can be
+    posted again once the cause is fixed."""
     with service_world(tmp_path / "world") as world:
         with creation(world, tmp_path / "prod", production_policy(world)) as prod:
             with pytest.raises(ChallengeError) as refused:
@@ -497,8 +505,8 @@ def test_a_production_run_without_a_cuda_qualification_is_refused_and_leaves_no_
 
 def install_qualification(run: Any, signer: Any, **evidence_changes: Any) -> dict[str, Any]:
     """Write the record `_bootstrap_backend_v2` would write for GPU evidence this test does not
-    have: the exact-evidence object and a Receipt over its hash signed by `signer`. The hosts are
-    attested, as a production run demands; the lists are empty because no host signed anything."""
+    have: the exact-evidence object and a Receipt over its hash signed by `signer`. The evidence is
+    the strict kind, with its host attestation: a production run builds services on no other."""
     store = run.store
     manifest = store._run_v2(run.run_id)
     reference = manifest.training.reference_spec
@@ -507,7 +515,7 @@ def install_qualification(run: Any, signer: Any, **evidence_changes: Any) -> dic
         "backend": "cuda",
         "reference_hash": sha256_hex(canonicalize(reference.model_dump(mode="json"))),
         "layout_hash": reference.layout.model_dump_json(),
-        "host_attestation": {"host_keys": [], "statements": [], "signatures": []},
+        "host_attestation": host_attestation(),
         **evidence_changes,
     }
     authority = store.objects.put(canonicalize(evidence))
@@ -525,7 +533,7 @@ def install_qualification(run: Any, signer: Any, **evidence_changes: Any) -> dic
 def test_production_services_exist_only_behind_an_owner_signed_cuda_qualification(
     tmp_path: Path,
 ) -> None:
-    with production_run(tmp_path, cuda=False, gpu="sm_103") as run:
+    with production_run(tmp_path, cuda=False) as run:
         service = load_fixture_module(*SERVICE_FIXTURE)
         owner = service.OWNER
         with pytest.raises(ChallengeError, match="production CUDA qualification required"):
@@ -549,7 +557,7 @@ def test_production_services_exist_only_behind_an_owner_signed_cuda_qualificatio
 
 
 def test_the_execution_backend_of_a_run_is_frozen_once_chosen(tmp_path: Path) -> None:
-    with production_run(tmp_path, cuda=False, gpu="sm_103") as run:
+    with production_run(tmp_path, cuda=False) as run:
         service = load_fixture_module(*SERVICE_FIXTURE)
         run.store.owner_hotkey = service.OWNER.ss58
         first = install_qualification(run, service.OWNER)
@@ -712,7 +720,7 @@ def test_a_changed_capacity_implementation_voids_the_admitted_profile_and_cannot
         monkeypatch.setattr(
             ChallengeStore,
             "_service_implementation_v2",
-            staticmethod(lambda source, paths, pin: "ef" * 32),
+            staticmethod(lambda source, paths: "ef" * 32),
         )
         with pytest.raises(ChallengeError, match="SERVICE_PROFILE_AUTHORITY"):
             store.require_roster_v2(run_id, roster=roster)

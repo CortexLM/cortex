@@ -1,7 +1,9 @@
 """Builders of the bootstrap gap tests (D39, group bootstrap). Not collected: no test_ prefix.
 
-The service helpers repeat the small ones of `test_opids_2.py` on purpose: a test module is not a
-support module, and the gap tests must keep working when a sibling test file is reorganised.
+The small service helpers repeat those of `test_opids_2.py` on purpose: a test module is not a
+support module, and the gap tests must keep working when a sibling test file is reorganised. The
+senders of client events and the control that a squat reached the ledger are the shared ones of
+`support_opids.py`.
 """
 
 from __future__ import annotations
@@ -13,80 +15,32 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
-from env_pin_fixtures import honest_env
 from hypertrain.challenge.store import ChallengeError
 from hypertrain.ledger.escrow_v2 import EscrowError
+from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
+from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
+from hypertrain.protocol.messages import Receipt
 from hypertrain.protocol.messages_v2 import (
     EconomicsPolicyV2,
     EscrowLock,
-    EscrowTransfer,
     RankWorkResult,
     RunManifestV2,
     WorkScreenV2,
 )
 
 from .support import SERVICE_FIXTURE, World, load_fixture_module
+from .support_bounds import Creation, host_attestation
 from .support_credit import ROLLBACK_FIXTURE, AuditedRound
-from .support_opids import StepRefused, contest_lock
+from .support_opids import StepRefused
 
 # --- the beacon route and the ids the service derives (T-BOOTSTRAP-02) --------------------------
 
 
 def escrow_of(world: World) -> Any:
     return world.store._services(world.run_id)[0]
-
-
-def client_event_over_http(
-    world: World, kind: str, key: Keypair, operation_id: str, origin: str
-) -> Any:
-    """What a funded coldkey sends to the public escrow routes, under an id of its choice. A
-    transfer moves one unit to the fourth coldkey of the fixture, which no test reads: the ledger
-    refuses a transfer to oneself (SELF_TRANSFER).
-
-    The ids a server derives may live in a key space no client id can name (ADR 0014 part 1: the
-    prefix `srv:` is not a Hex64). The event model then refuses the id before anything is signed
-    or sent, which is a refusal of the client event: it is answered like the route answers a
-    body that fails validation (422)."""
-    try:
-        if kind == "transfer":
-            route, name = "transfer", "EscrowTransfer"
-            body: Any = EscrowTransfer(
-                operation_id=operation_id,
-                owner=key.ss58,
-                recipient=load_fixture_module(*SERVICE_FIXTURE).COLD[3].ss58,
-                units=1,
-                origin_ids=[origin],
-                admission_id=None,
-                dispute_id=None,
-            )
-        else:
-            route, name = "lock", "EscrowLock"
-            body = contest_lock(key.ss58, operation_id, origin)
-    except ValidationError as error:
-        if {issue["loc"] for issue in error.errors()} != {("operation_id",)}:
-            raise
-        return SimpleNamespace(status_code=422, text=str(error))
-    return world.client.post(
-        world.network.url + "/escrow/" + route, json=world.network.signed(key, name, body)
-    )
-
-
-def as_attested_cuda(created: Any, patch: pytest.MonkeyPatch) -> None:
-    """Make the run of `created` a production CUDA run: its backend is cuda and the store holds a
-    qualification with a host attestation, the only record a production run builds its services
-    on (D60: a label-only qualification is not a way into production)."""
-    patch.setattr(created.store, "_backend_v2", lambda manifest: "cuda")
-    attested = {"host_keys": [], "statements": [], "signatures": []}
-    created.store._put_record_v2(
-        created.manifest.run_id(),
-        "qualification",
-        created.manifest.training.reference_spec.image_digest,
-        {"host_attestation": attested},
-    )
 
 
 def seed_pending_origin(world: World, origin: str, owner: str, units: int, mature_at: int) -> None:
@@ -223,7 +177,6 @@ def build_small_audited_round(
             )
             assert locked.status_code == 200, locked.text
             screen = WorkScreenV2(
-                env=honest_env(),
                 evidence_kind="work-proof-v1",
                 admission_id=identity,
                 nonce=sha256_hex(b"nonce"),
@@ -276,6 +229,34 @@ def production_economics(world: World, **fields: Any) -> EconomicsPolicyV2:
     return world_economics(
         world, **{"ledger_mode": "production", "genesis_allocation_hash": None, **fields}
     )
+
+
+def install_production_qualification(created: Creation) -> None:
+    """The owner-signed CUDA qualification a production run stands on, stored for the run
+    `created` would make, so that its creation is refused for what is under test and not for the
+    missing record. No GPU result exists here: the record is what `_bootstrap_backend_v2` writes,
+    assembled from the manifest. It carries the host attestation block of strict evidence, which a
+    base that demands attested hosts refuses a production run without and one that does not
+    ignores. The row is written before the run row: `records_v2` is keyed by run id alone."""
+    owner = load_fixture_module(*SERVICE_FIXTURE).OWNER
+    store, run_id = created.store, created.manifest.run_id()
+    reference = created.manifest.training.reference_spec
+    evidence = {
+        "run_id": run_id,
+        "backend": "cuda",
+        "reference_hash": sha256_hex(canonicalize(reference.model_dump(mode="json"))),
+        "layout_hash": reference.layout.model_dump_json(),
+        "host_attestation": host_attestation(),
+    }
+    authority = store.objects.put(canonicalize(evidence))
+    receipt = Receipt(w=0, commit_hash=authority, received_round=1)
+    record = {
+        **evidence,
+        "authority_hash": authority,
+        "receipt": seal(owner, "Receipt", run_id, receipt, 10_000),
+    }
+    with store._tx():
+        store._put_record_v2(run_id, "qualification", reference.image_digest, record)
 
 
 def challenge_refusal(call: Callable[[], object]) -> ChallengeError | None:
