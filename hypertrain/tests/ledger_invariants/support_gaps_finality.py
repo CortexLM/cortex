@@ -180,9 +180,12 @@ def leaves_post(
 
 def delta_post(rnd: X.Round, index: int, delta: bytes) -> httpx.Response:
     """POST /delta of a delta the member committed to; the master's acceptance record that the
-    relay receipt route would write is written with the same sealed type (as X.deliver_delta)."""
+    relay receipt route would write is written with the same sealed type (as X.deliver_delta), and
+    next to it the receipt it names, reduced to the fields a delta is checked against (round,
+    hotkey, grant)."""
     net, store = rnd.network, rnd.store
     delta_hash = sha256_hex(delta)
+    grant_hash = sha256_hex(b"gaps-finality-grant|" + rnd.identity(index).encode())
     acceptance = MasterAcceptanceV2(
         w=rnd.w,
         hotkey=rnd.hotkey(index),
@@ -196,6 +199,12 @@ def delta_post(rnd: X.Round, index: int, delta: bytes) -> httpx.Response:
     with store._tx():
         store.objects.put(delta)
         store._put_record_v2(rnd.run_id, "master-acceptance", acceptance.digest(), signed)
+        store._put_record_v2(
+            rnd.run_id,
+            "relay-receipt",
+            acceptance.receipt_hash,
+            {"body": {"w": rnd.w, "hotkey": rnd.hotkey(index), "grant_hash": grant_hash}},
+        )
     body = {
         "w": rnd.w,
         "hotkey": rnd.hotkey(index),
@@ -204,7 +213,7 @@ def delta_post(rnd: X.Round, index: int, delta: bytes) -> httpx.Response:
         "uri": "sha256:" + delta_hash,
         "format": "ht-sparse-v1",
         "chunks": [{"off": 0, "len": len(delta), "sha256": delta_hash}],
-        "grant_hash": sha256_hex(b"gaps-finality-grant|" + rnd.identity(index).encode()),
+        "grant_hash": grant_hash,
         "master_acceptance_hash": acceptance.digest(),
     }
     return rnd.post("/delta", net.signed(X.hot(index), "DeltaManifestV2", body))

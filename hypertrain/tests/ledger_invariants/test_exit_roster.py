@@ -70,8 +70,10 @@ def test_every_roster_member_is_in_a_terminal_audit_state_once_the_horizon_has_p
 ) -> None:
     """FIN-21, A2W-20, LV-06 (closed by AUD-06 and AUD-01): the member that never committed leaves
     the round when the audits are scheduled (NO_SHOW); the four jobs nobody serves get a second
-    window and their members leave the round at its end (INFRASTRUCTURE). The audit counter of
-    the round falls to zero and the round itself is not voided."""
+    window and are given up at its end, which blames the infrastructure and sanctions nobody.
+    Whichever way the exit records it (an exclusion per member, or the round retired as a whole
+    because nobody is left to carry it), every roster member is then in a terminal audit state,
+    the audit counter of the round is zero and the round is not voided by an exclusion."""
     rnd = silent
     committed = [i for i in rnd.members if i != rnd.quiet]
     X.control(
@@ -86,12 +88,23 @@ def test_every_roster_member_is_in_a_terminal_audit_state_once_the_horizon_has_p
         row["hotkey"] for row in rnd.lease_rows() if row["state"] in ("completed", "exhausted")
     } | set(rnd.excluded())
     assert terminal == {rnd.hotkey(i) for i in rnd.members}
-    assert rnd.excluded() == {
-        rnd.hotkey(rnd.quiet): "NO_SHOW",
-        **{rnd.hotkey(i): "INFRASTRUCTURE" for i in committed},
+    blamed = {
+        hotkey: reason for hotkey, reason in rnd.excluded().items() if reason != "INFRASTRUCTURE"
     }
+    assert blamed == {rnd.hotkey(rnd.quiet): "NO_SHOW"}
+    assert [X.standing(rnd, i) for i in committed] == [X.FUNDED] * len(committed)
     status = rnd.finality()
-    assert (status["unresolved_audits"], status["disposition"]) == (0, "PENDING")
+    assert status["unresolved_audits"] == 0
+    if X.RETIRES:
+        assert status["disposition"] in ("PENDING", "RETIRED"), status
+    else:
+        # Each job given up is an exclusion that blames the infrastructure, and the round is not
+        # voided for everybody.
+        assert rnd.excluded() == {
+            rnd.hotkey(rnd.quiet): "NO_SHOW",
+            **{rnd.hotkey(i): "INFRASTRUCTURE" for i in committed},
+        }
+        assert status["disposition"] == "PENDING", status
 
 
 # Eligibility is judged once, at accept (AD-07)
@@ -230,6 +243,8 @@ def test_a_signed_lease_ask_grants_at_most_one_lease(queue: X.Round) -> None:
     "[fix-lot: audit-integrity-2 ADR0011-P8 D70 exit reaper]",
 )
 def test_a_round_after_a_round_nobody_audited_is_opened_and_credited(queue: X.Round) -> None:
+    """FIN-22: a round whose every audit job ran out of both windows is closed by the exit, and the
+    round after it is opened and credited."""
     rnd = queue
     X.run_out_audit_windows(rnd)
     X.walk(rnd, rnd.network.now + 1)  # whatever closes a round on the beacon gets its turn
@@ -389,12 +404,14 @@ def test_no_applied_round_is_closed_by_exclusion_without_a_rollback_record(
     and open for its settlement instead of counting as closed with no rollback record."""
     rnd, _ = applied0
     status = rnd.finality()
+    gone = {row["hotkey"] for row in rnd.lease_rows() if row["state"] == "exhausted"}
     X.control(
         status["applied"]
         and status["unresolved_audits"] == 0
-        and rnd.excluded() == {rnd.hotkey(rnd.quiet): "INFRASTRUCTURE"}
+        and gone == set(rnd.excluded()) == {rnd.hotkey(rnd.quiet)}
         and not rnd.has_record("rollback", "0"),
-        "applied, nothing outstanding, one member excluded by the horizon, no rollback",
+        "applied, nothing outstanding, the one member whose job ran out at the horizon is the one "
+        "excluded, no rollback",
     )
 
     assert not (status["disposition"] == "EXCLUDED" and status["rollback_complete"]), status

@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from hypertrain.challenge.store import ChallengeStore
 from hypertrain.miner import admission as miner_admission
 from hypertrain.miner.island_launch import launch_island
 from hypertrain.protocol import relay_envelope
@@ -62,6 +63,10 @@ LAUNCH_SECONDS = 300  # a bound on a tiny CPU launch, never a threshold of a tes
 MINERS = 6  # five real members and one that goes quiet
 SPARE = MINERS  # a registered hotkey that never joined: the only legal rotation target
 UNROSTERED = MINERS - 1  # funded and ACTIVE, and listed by none of the rounds the scenarios open
+# A tree with the exit reaper closes a round that nobody can carry by retiring it as a whole; an
+# older one excludes each member that left it.
+RETIRES = hasattr(ChallengeStore, "_retire_round_v2")
+FUNDED = ("ACTIVE", 0, 1000, 0)  # the standing of an untouched member: see `standing`
 
 
 class ScenarioError(Exception):
@@ -807,6 +812,33 @@ def standing(rnd: Round, index: int) -> tuple[str, int, int, int]:
     )
 
 
+def faults_booked(rnd: Round) -> list[str]:
+    """Every fault the books of the run hold against a member of round `rnd.w`: an exclusion whose
+    reason is not the infrastructure's, an exit sanction that blames a miner (a base without an
+    exit reaper has no such row), and a sanction the admission service applied. Empty when nobody
+    is at fault, whichever way the exit records the members it gives up."""
+    found = [
+        f"excluded {hotkey}: {reason}"
+        for hotkey, reason in rnd.excluded().items()
+        if reason != "INFRASTRUCTURE"
+    ]
+    found += [
+        f"exit-sanction {row['id']}"
+        for row in rnd.store._db.execute(
+            "SELECT id,data FROM records_v2 WHERE run_id=? AND kind='exit-sanction'",
+            (rnd.run_id,),
+        )
+        if json.loads(row["data"])["blame"] == "MINER"
+    ]
+    found += [
+        f"sanction {reason} {admission_id}"
+        for admission_id, reason in admission_service(rnd).store.db.execute(
+            "SELECT admission_id,reason FROM admission_sanctions"
+        )
+    ]
+    return found
+
+
 def seize(rnd: Round, index: int, reason: str, evidence: bytes) -> int:
     """What the audit side asks of the admission side when it has a fault to book: sanction the
     admission of member `index` and burn its bond. Returns the units burned."""
@@ -819,8 +851,9 @@ def seize(rnd: Round, index: int, reason: str, evidence: bytes) -> int:
 
 
 def back_on_a_roster(rnd: Round, index: int) -> None:
-    """Member `index` is ACTIVE again, as the trials of a probation would make it (the 12-trial
-    ladder has its own e2e). Its bond and its counters stay as the sanction left them."""
+    """Member `index` can be listed in a round again: its state is set to ACTIVE and nothing else
+    changes. Its bond, its strikes and its trial counters stay as the sanction left them, so this
+    is not a state the trials of a probation reach (the 12-trial ladder has its own e2e)."""
     with rnd.store._tx():
         rnd.store._db.execute(
             "UPDATE admissions_v2 SET state='ACTIVE' WHERE hotkey=?", (rnd.hotkey(index),)

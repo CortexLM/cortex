@@ -277,38 +277,43 @@ def test_each_job_decrements_the_counter_once_whether_it_completes_or_is_exhaust
             return int(store._record_v2(run, "finality", "0")["unresolved_audits"])
 
         held = running(store)
-        # When: both complete.
-        for row in held.values():
-            stored = store._record_v2(run, "executed-verdict", row["id"])
-            assert sa.complete(n, cast.keys[row["auditor"]], row["id"], stored).status_code == 200
-            assert counter() == open_audits(store)
-        assert counter() == 3
-        # And one of the three runs out of windows first (a test-owned stand-in: the jobs of a
-        # round share one deadline, so the counter could not be read between two exhaustions).
+        assert counter() == open_audits(store) == 5
+        # When: one of the three queued jobs runs out of windows first (a test-owned stand-in: the
+        # jobs of a round share one deadline, so the counter could not be read between two
+        # exhaustions). It goes first: with a second member out, the three left cannot carry one
+        # update and a tree with the exit reaper retires the round, which ends every open job.
         first = next(r for h, r in sa.lease_rows(store).items() if h not in held)
-        with store._tx():
-            store._db.execute(
-                "UPDATE audit_leases_v2 SET absolute=? WHERE id=?", (n.now + 5, first["id"])
-            )
-        sa.drop_job(n, store, first["hotkey"])
-        assert (counter(), open_audits(store)) == (2, 2)
+        sa.drop_job_alone(n, store, first["hotkey"])
+        # Then: it is exhausted and excluded for the infrastructure, and it took one unit off the
+        # counter, not two.
+        assert sa.lease_rows(store)[first["hotkey"]]["state"] == "exhausted"
         assert store._record_v2(run, "excluded", f"0:{first['hotkey']}") == {
             "reason": "INFRASTRUCTURE",
             "evidence_hash": sha256_hex(first["id"].encode()),
         }
-        # And the windows of the two that were never leased run out.
+        assert (counter(), open_audits(store)) == (4, 4)
+        # When: both executed leases complete, one after the other.
+        for done, row in enumerate(held.values(), start=1):
+            stored = store._record_v2(run, "executed-verdict", row["id"])
+            assert sa.complete(n, cast.keys[row["auditor"]], row["id"], stored).status_code == 200
+            # Then: each took one unit off the counter.
+            assert (counter(), open_audits(store)) == (4 - done, 4 - done)
+        # When: the windows of the two that were never leased run out.
         sa.run_out_the_windows(n, store)
         assert (counter(), open_audits(store)) == (0, 0)
         after = settled_state(store)
-        # Then: they are exhausted and excluded for the infrastructure, and a second sweep (or a
-        # late one) decrements nothing again.
+        # Then: they are exhausted, and a second sweep (or a late one) decrements nothing again.
         queued = [r for h, r in sa.lease_rows(store).items() if h not in held]
         assert {r["state"] for r in queued} == {"exhausted"}
-        for row in queued:
-            assert store._record_v2(run, "excluded", f"0:{row['hotkey']}") == {
-                "reason": "INFRASTRUCTURE",
-                "evidence_hash": sha256_hex(row["id"].encode()),
-            }
+        if sa.RETIRES:
+            # The members left cannot carry the round: it is retired with the jobs still open.
+            assert store._record_v2(run, "finality", "0")["disposition"] == "RETIRED"
+        else:
+            for row in queued:
+                assert store._record_v2(run, "excluded", f"0:{row['hotkey']}") == {
+                    "reason": "INFRASTRUCTURE",
+                    "evidence_hash": sha256_hex(row["id"].encode()),
+                }
         n.push(n.now + 7)
         assert settled_state(store) == after
 
@@ -320,14 +325,18 @@ def test_without_scheduled_audits_the_counter_stays_at_the_roster_and_the_round_
     with world.at("committed") as (n, cast):
         store, run = n.store, n.manifest.run_id()
         assert not sa.lease_rows(store)
-        # When: time passes; there is no job to exhaust.
-        n.push(n.now + 1000)
+        # When: time passes; there is no job to exhaust. A tree with the exit reaper retires a
+        # round once no audit window is left (test_exit_roster.py pins that exit), so there the
+        # clock stops at the last round at which an audit can still be scheduled.
+        n.push(sa.audit_horizon(store, run) - 2 if sa.RETIRES else n.now + 1000)
         # Then: the counter is still the whole roster, and no member can be aggregated.
         assert store._record_v2(run, "finality", "0")["unresolved_audits"] == len(cast.hot)
         response = n.client.post(n.url + "/admin/rounds/0/aggregate", headers=sa.admin())
         assert response.status_code == 409
         assert detail(response)[1].startswith("missing accepted ")
         assert ("applied", "0") not in sa.records(store)
+        if sa.RETIRES:  # control: the round was waiting for an audit that could still come
+            assert sa.schedule(n).status_code == 200
 
 
 # --- A2W-13: late events cannot change a settled or excluded round ----------------------------
@@ -385,10 +394,11 @@ def test_after_the_last_window_nothing_late_can_change_the_dropped_round(world: 
         stored = {h: store._record_v2(run, "executed-verdict", r["id"]) for h, r in held.items()}
         sa.run_out_the_windows(n, store)
         # Then: every job is exhausted with no audit open, and the round is no more settled than
-        # before (a tree that voided the round for everybody says so in its disposition).
+        # before (a tree with the exit reaper closes a round that nobody can carry as retired, with
+        # no reward; a tree that voided the round for everybody says so in its disposition).
         assert {r["state"] for r in sa.lease_rows(store).values()} == {"exhausted"}
         status = store._record_v2(run, "finality", "0")
-        assert (status["disposition"], status["unresolved_audits"]) == (sa.DROP_DISPOSITION, 0)
+        assert (status["disposition"], status["unresolved_audits"]) == (sa.EMPTIED_DISPOSITION, 0)
         before = settled_state(store)
         # When: the holders deliver what they computed, ask again, the sweep runs again and
         # someone tries to schedule the audits once more.
@@ -399,7 +409,7 @@ def test_after_the_last_window_nothing_late_can_change_the_dropped_round(world: 
             job = {"job_id": row["id"], "lease_nonce": row["nonce"]}
             assert detail(sa.execute(n, key, job)) == (403, "audit request lacks owned live lease")
         assert all(sa.lease(n, key).status_code == 204 for key in cast.auditors[2:])
-        assert detail(sa.schedule(n)) == (503, "audit absolute horizon exhausted")
+        assert detail(sa.schedule(n)) in sa.NO_WINDOW_REFUSALS
         n.push(n.now + 30)
         # Then: nothing changed.
         assert settled_state(store) == before
@@ -431,17 +441,29 @@ def test_a_rollback_waits_for_every_audit_of_both_rounds(world: sa.World) -> Non
         assert detail(later) == (409, "missing accepted applied: 1")
 
 
-def test_audits_cannot_be_scheduled_once_the_horizon_is_one_round_away(world: sa.World) -> None:
-    # Given: a committed round whose audits were never scheduled, one round before the horizon.
-    with world.at("committed") as (n, cast):
+@pytest.mark.parametrize(
+    ("stage", "scheduled", "refusals"),
+    [
+        pytest.param("committed", 0, sa.NO_WINDOW_REFUSALS, id="never-scheduled"),
+        pytest.param("s1", 5, {sa.HORIZON_REFUSAL}, id="scheduled"),
+    ],
+)
+def test_audits_cannot_be_scheduled_once_the_horizon_is_one_round_away(
+    world: sa.World, stage: str, scheduled: int, refusals: set[tuple[int, str]]
+) -> None:
+    # Given: a committed round one round before the horizon, whose audits were never scheduled or
+    # were scheduled before it (the jobs of the second case keep the horizon refusal on every
+    # tree; without a job, a tree with the exit reaper has retired the round by now).
+    with world.at(stage) as (n, cast):
         store = n.store
         horizon = store._record_v2(n.manifest.run_id(), "round", "0")["body"]["d_final"]
         n.push(horizon - 1)
-        before = sa.digest_of(store)
+        before, jobs = sa.digest_of(store), sa.lease_rows(store)
+        assert len(jobs) == scheduled
         # When / Then: a job created now could not be replayed in time; none is created.
-        assert detail(sa.schedule(n)) == (503, "audit absolute horizon exhausted")
+        assert detail(sa.schedule(n)) in refusals
         assert sa.digest_of(store) == before
-        assert not sa.lease_rows(store)
+        assert sa.lease_rows(store) == jobs
 
 
 # --- A2W-14: nothing a miner signs is a free parameter -----------------------------------------
@@ -646,11 +668,12 @@ def test_a_verdict_that_answers_another_challenge_mints_nothing(
     raises=AssertionError,
     reason="A2W-23: a mismatch the master replayed itself ends as an UNVERIFIED exclusion with a "
     "contest record even when no auditor ever signs it in any window, not as an "
-    "INFRASTRUCTURE one; today it ends as INFRASTRUCTURE because ADR 0011 decisions 9 and 15 "
-    "sanction only a COMPLETED mismatch lease: a master-detected MISMATCH whose auditor "
-    "signature is withheld is an INFRASTRUCTURE exclusion with no strike, which is the opposite "
-    "default, and whether the master's own replay may sanction is a founder / Principal call "
-    "[fix-lot: decision (product choice pending)]",
+    "INFRASTRUCTURE one; today it ends as INFRASTRUCTURE because ADR 0011 part 2 decision 9 "
+    "adds no sanction, strike or suspension for an infrastructure failure and part 8 decision "
+    "15 lets only an UNVERIFIED exclusion backed by a COMPLETED mismatch lease reach the "
+    "sanction hook: a master-detected MISMATCH whose auditor signature is withheld is an "
+    "INFRASTRUCTURE exclusion with no strike, and whether the master's own replay may sanction "
+    "is a founder / Principal call [fix-lot: decision (product choice pending)]",
 )
 def test_a_mismatch_the_master_replayed_is_not_turned_into_an_infrastructure_exclusion(
     world: sa.World,

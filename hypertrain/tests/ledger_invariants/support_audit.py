@@ -51,14 +51,26 @@ REQUESTS = itertools.count(1)
 # What ADR 0011 (audit-integrity) changed in the store, detected on the tree under test so that
 # the module still reads an older tree: a lapse cools the auditor down instead of banning it, a
 # job that ran out of attempts gets a second window before its miner is dropped, and an
-# aggregation whose survivors cannot carry the round is refused by name.
+# aggregation whose survivors cannot carry the round is refused by name. The exit reaper of Part 8
+# retires a round that nobody left can carry (a null round, closed without reward) instead of
+# leaving it PENDING for ever, and answers 409 ROUND_RETIRED to new work on it.
 COOLS_DOWN = hasattr(ChallengeStore, "_cooling_until_v2")
 REARMS = hasattr(ChallengeStore, "_rearm_audit_job_v2")
 CHECKS_SURVIVORS = hasattr(ChallengeStore, "_require_survivors_v2")
+RETIRES = hasattr(ChallengeStore, "_retire_round_v2")
 WINDOWS = 2 if REARMS else 1
 # A job nobody audited leaves the round without being a verdict on the round: the disposition of
 # a round whose job was dropped is untouched, where an older tree voided the round for everybody.
 DROP_DISPOSITION = "PENDING" if REARMS else "EXCLUDED"
+# When every job of the round is dropped nobody can carry it, and a tree with the reaper closes it
+# as RETIRED: still no reward and no void.
+EMPTIED_DISPOSITION = "RETIRED" if RETIRES else DROP_DISPOSITION
+# What a request to schedule the audits of a round with no audit window left is answered: the
+# horizon check, or on a tree with the reaper the retirement that the missing window caused.
+HORIZON_REFUSAL = (503, "audit absolute horizon exhausted")
+NO_WINDOW_REFUSALS = {HORIZON_REFUSAL} | (
+    {(409, "ROUND_RETIRED: round 0 reached no tape and takes no work")} if RETIRES else set()
+)
 
 
 class Halt(BaseException):
@@ -592,6 +604,33 @@ def drop_job(network: Any, store: ChallengeStore, hotkey: str) -> None:
             return
         network.push(row["absolute"])
     assert lease_rows(store)[hotkey]["state"] == "exhausted"
+
+
+def drop_job_alone(network: Any, store: ChallengeStore, hotkey: str, within: int = 5) -> None:
+    """Exhaust one job through every window it has while the other jobs keep theirs. The jobs of a
+    round share one deadline, so this test-owned stand-in ends each window of the job `within`
+    rounds after the beacon: the counter can then be read between two exhaustions, and the beacon
+    stays before the lapse of the leases that are held."""
+    for _ in range(WINDOWS):
+        row = lease_rows(store)[hotkey]
+        if row["state"] == "exhausted":
+            return
+        target = network.now + within
+        with store._tx():
+            store._db.execute(
+                "UPDATE audit_leases_v2 SET absolute=? WHERE id=?", (target, row["id"])
+            )
+        network.push(target)
+    assert lease_rows(store)[hotkey]["state"] == "exhausted"
+
+
+def audit_horizon(store: ChallengeStore, run_id: str, w: int = 0) -> int:
+    """The `absolute` of the audit jobs of round w. The last round at which the audits can still
+    be scheduled is this minus two; from this minus one there is no audit window left."""
+    body = store._record_v2(run_id, "round", str(w))["body"]
+    return int(
+        min(body["d_final"], body["d_audit"] + audit_policy(store, run_id).absolute_rounds())
+    )
 
 
 def audit_policy(store: ChallengeStore, run_id: str) -> AuditPolicyV2:

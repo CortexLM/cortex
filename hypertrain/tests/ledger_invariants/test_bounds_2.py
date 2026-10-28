@@ -41,6 +41,7 @@ from .support_bounds import (
     capacity_run,
     creation,
     genesis_request,
+    host_attestation,
     hosting,
     pinned_bootstrap,
     production_run,
@@ -497,7 +498,8 @@ def test_a_production_run_without_a_cuda_qualification_is_refused_and_leaves_no_
 
 def install_qualification(run: Any, signer: Any, **evidence_changes: Any) -> dict[str, Any]:
     """Write the record `_bootstrap_backend_v2` would write for GPU evidence this test does not
-    have: the exact-evidence object and a Receipt over its hash signed by `signer`."""
+    have: the exact-evidence object and a Receipt over its hash signed by `signer`. The evidence is
+    the strict kind, with its host attestation: a production run builds services on no other."""
     store = run.store
     manifest = store._run_v2(run.run_id)
     reference = manifest.training.reference_spec
@@ -506,6 +508,7 @@ def install_qualification(run: Any, signer: Any, **evidence_changes: Any) -> dic
         "backend": "cuda",
         "reference_hash": sha256_hex(canonicalize(reference.model_dump(mode="json"))),
         "layout_hash": reference.layout.model_dump_json(),
+        "host_attestation": host_attestation(),
         **evidence_changes,
     }
     authority = store.objects.put(canonicalize(evidence))

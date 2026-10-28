@@ -273,8 +273,9 @@ def test_a_commit_that_declares_another_entitlement_than_the_servers_is_refused_
         world = X.world_of(network)
         before = world.db_digest()
 
-        # Today a plain ValueError reaches the caller (the same family as CL-48); a mapped 4xx
-        # would be as good a refusal.
+        # The store is called directly: the app has no handler for the plain ValueError the
+        # entitlement check raises, so a store that lets it through answers 500 over HTTP, and one
+        # that maps it answers a ChallengeError 422. Either refuses the commit and keeps nothing.
         with pytest.raises((ValueError, ChallengeError), match="tokens differ from server-derived"):
             rnd.store.training_v2(
                 rnd.run_id, "commit", canonicalize(network.signed(X.hot(0), "CommitV2", wrong))
@@ -418,6 +419,8 @@ def test_a_finalize_for_a_round_whose_audits_are_not_done_is_refused_for_its_mis
     "[fix-lot: audit-integrity-2 ADR0011-P8 D70 exit reaper]",
 )
 def test_a_round_with_a_member_that_never_committed_can_be_left_behind(tmp_path: Path) -> None:
+    """FIN-22: a round with a member that never committed is left behind by the exit, and the
+    opening of the next round is not blocked by it."""
     with X.activated_network(tmp_path) as network:
         rnd = X.open_round(network, 0, [0, 1, 2, 3])
         rnd.quiet = 3
@@ -467,6 +470,7 @@ def test_a_round_wider_than_one_lease_is_refused_at_opening_or_stays_auditable(
             assert world.count("records_v2", "kind IN ('round','finality')") == 0
             return
         E.commit_all(rnd)
+        E.deliver_deltas(rnd)
         world.network.push(rnd.d_audit)
         scheduled = E.audits_request(world)
         E.control(scheduled.status_code == 200, f"audits: {scheduled.text}")

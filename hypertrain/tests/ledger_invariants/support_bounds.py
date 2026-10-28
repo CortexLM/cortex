@@ -470,6 +470,18 @@ class Floors:
         return floor.influence_allowed, floor.required_locked_units
 
 
+def host_attestation() -> dict[str, list[str]]:
+    """The block strict qualification evidence carries (`_qualification_evidence_v2`), which a
+    production run needs in its qualification record before it builds services: the fingerprints of
+    the two pinned host keys and the digests of the statements and signatures they made. No host
+    exists in these tests, so every value is the digest of a label."""
+    return {
+        "host_keys": [f"SHA256:{sha256_hex(f'host-{i}'.encode())[:43]}" for i in range(2)],
+        "statements": [sha256_hex(f"statement-{i}".encode()) for i in range(2)],
+        "signatures": [sha256_hex(f"signature-{i}".encode()) for i in range(2)],
+    }
+
+
 ECONOMICS_FIXTURE = ("li_economics_fixture", "challenge/test_production_economics_v2.py")
 CAPACITY_FIXTURE = ("li_capacity_fixture", "challenge/test_service_capacity_v2.py")
 

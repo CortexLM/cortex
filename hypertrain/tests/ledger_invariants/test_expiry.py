@@ -64,6 +64,7 @@ from .support_expiry import (
     activate,
     audited,
     control,
+    deliver_deltas,
     files,
     hot,
     keyed_id,
@@ -202,6 +203,7 @@ def test_a_round_whose_window_fits_one_lease_is_auditable_up_to_its_last_beacon(
 ) -> None:
     with service_world(tmp_path) as world:
         rnd = audited(world, NARROW)
+        deliver_deltas(rnd)
         last = last_audit_beacon(world)
         world.network.push(last)
         leased = lease_request(world, service().AUDITORS[0])
@@ -211,7 +213,8 @@ def test_a_round_whose_window_fits_one_lease_is_auditable_up_to_its_last_beacon(
 
 def test_a_round_wider_than_one_lease_is_not_left_unauditable(tmp_path: Path) -> None:
     with service_world(tmp_path) as world:
-        audited(world, WIDE)  # control: the narrow twin above leases at its last beacon
+        rnd = audited(world, WIDE)  # control: the narrow twin above leases at its last beacon
+        deliver_deltas(rnd)
         last = last_audit_beacon(world)
         world.network.push(last)
         leased = lease_request(world, service().AUDITORS[0])
