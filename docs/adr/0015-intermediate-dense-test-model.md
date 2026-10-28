@@ -4,7 +4,8 @@
   promotion to `v3`. Nothing here changes a production run, master, profile, pin or emission, and no
   file under `hypertrain/src/` changes. Nothing in this batch ran on a GPU host, on s100, against R2
   or on-chain.
-- Order: brief `v3-model-intermediate`. The founder fixed the size on 2026-10-28 (see "Decision").
+- Order: brief `v3-model-intermediate`. Forge (CTO) chose the size on 2026-10-28, within the D68
+  band (see "Decision").
   The number 0015 may collide with another open batch; rename at merge.
 - Labels: **[V]** verified in code or by a command on the date above, **[A]** reported by a cited
   document or session, **[H]** hypothesis or arithmetic, **[?]** unknown.
@@ -39,9 +40,11 @@ builder already takes `dense-1b` from it.
 
 ## Decision
 
-The founder answered the size question on 2026-10-28: freeze **100,676,352 parameters** as the single
-profile, not the 209 M target, because a run that fails for code reasons proves nothing. The budget
-below shows that even this size fails today and passes only once prerequisites (a), (b) and (e) land.
+D68 (Principal SN100) gave the 100-300 M band and "intermediate first", not the exact size. Forge
+(CTO) chose the size on 2026-10-28, within that band, in answer to the question this batch asked
+through the relay tool: freeze **100,676,352 parameters** as the single profile, not the 209 M
+target, because a run that fails for code reasons proves nothing. The budget below shows that even
+this size fails today and passes only once prerequisites (a), (b) and (e) land.
 
 1. **Profile row `mfu-dense-0.1b`** in `hypertrain/scripts/mfu_profiles.json`: arch `decoder`, 8
    layers, d_model 768, 12 heads, 4 kv heads (head dim 64), d_ff 2048, one expert, vocab 32768,
