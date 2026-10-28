@@ -59,6 +59,7 @@ from hypertrain.challenge.exit_v2 import (
     no_show_evidence,
     pause_span,
     plan_round,
+    reaudit_until,
     served,
     survivors_of,
 )
@@ -7210,6 +7211,7 @@ class ChallengeStore:
                     d_upload=body.d_upload,
                     d_final=body.d_final,
                     lease_rounds=audit.lease_rounds,
+                    reaudit_rounds=audit.reaudit_window(),
                 ),
                 roster=tuple(Member(e.hotkey, e.admission_id) for e in body.roster),
                 committed=hotkeys_of("commit"),
@@ -8399,7 +8401,7 @@ class ChallengeStore:
             (run_id,),
         ).fetchall()
         for row in rows:
-            if row["state"] == "running" and now >= row["expires"]:
+            if row["state"] == "running" and now >= self._lease_end_v2(run_id, row):
                 self._retire_audit_attempt_v2(run_id, row, now, self._expiry_cause_v2(run_id, row))
             elif row["state"] == "queued" and now >= row["absolute"]:
                 self._db.execute(
@@ -8408,6 +8410,20 @@ class ChallengeStore:
                     (row["id"],),
                 )
                 self._exhaust_audit_job_v2(run_id, row, now)
+
+    def _execution_marker_v2(self, run_id: str, row: sqlite3.Row) -> dict[str, Any] | None:
+        stored = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='audit-execution' AND id=?",
+            (run_id, f"{row['id']}:{row['nonce']}"),
+        ).fetchone()
+        return None if stored is None else json.loads(stored[0])
+
+    def _lease_end_v2(self, run_id: str, row: sqlite3.Row) -> int:
+        """The round a running lease ends at: its expiry, or `SIGN_WINDOW_ROUNDS` after the master
+        stored the verdict it replayed for the holder if that comes first. The window counts from
+        the storing, never from the claim: an attempt that is still replaying has no date."""
+        signed_by = audit_cooldown_v2.sign_deadline(self._execution_marker_v2(run_id, row))
+        return int(row["expires"]) if signed_by is None else min(int(row["expires"]), signed_by)
 
     def _expiry_cause_v2(self, run_id: str, row: sqlite3.Row) -> str:
         """An auditor that asked for the execution is not silent: the master owed the verdict."""
@@ -8423,8 +8439,16 @@ class ChallengeStore:
         self, run_id: str, row: sqlite3.Row, now: int, cause: str, error: str | None = None
     ) -> None:
         """End the running attempt of a lease: requeue it for the other auditor or exhaust it.
-        Only an AUDITOR_SILENT attempt costs its auditor a cooldown."""
-        state = "exhausted" if row["attempts"] >= 2 or now >= row["absolute"] else "queued"
+        Only an AUDITOR_SILENT attempt costs its auditor a cooldown. The job is exhausted, not
+        left idle to the end of its window, when no configured auditor is left to take it. A
+        withheld MISMATCH opens the re-audit window of its job instead (`_open_reaudit_v2`)."""
+        state = (
+            "exhausted"
+            if row["attempts"] >= 2
+            or now >= row["absolute"]
+            or not self._auditors_left_v2(run_id, row, json.loads(row["tried"]))
+            else "queued"
+        )
         self._db.execute(
             "UPDATE audit_leases_v2 SET state=?,result='AUDIT_INFRASTRUCTURE' WHERE id=?",
             (state, row["id"]),
@@ -8442,11 +8466,123 @@ class ChallengeStore:
         }
         if error is not None:
             failure["error"] = error
+        if cause == "AUDITOR_SILENT":
+            stored = self._withheld_verdict_v2(run_id, row)
+            if stored is not None:
+                failure["withheld"] = stored
         self._put_record_v2(run_id, "audit-attempt-failure", f"{row['id']}:{row['nonce']}", failure)
         if cause == "AUDITOR_SILENT":
-            self._cool_down_auditor_v2(run_id, row)
+            self._cool_down_auditor_v2(run_id, row, withheld=failure.get("withheld") == "MISMATCH")
+        if failure.get("withheld") == "MISMATCH" and self._reaudit_wanted_v2(run_id, row):
+            self._open_reaudit_v2(run_id, row, now)
+            return
         if state == "exhausted":
             self._exhaust_audit_job_v2(run_id, row, now)
+
+    def _withheld_verdict_v2(self, run_id: str, row: sqlite3.Row) -> str | None:
+        """The result the master stored for an attempt whose auditor never signed it, or None. The
+        verdict is replaced by the next attempt's execution, so it is frozen on the failure row.
+        A marker without a verdict (a lease that was never executed) is not a withheld one."""
+        marker = self._execution_marker_v2(run_id, row)
+        stored = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='executed-verdict' AND id=?",
+            (run_id, row["id"]),
+        ).fetchone()
+        if marker is None or marker["state"] != "EXECUTED" or stored is None:
+            return None
+        return str(json.loads(stored[0])["result"])
+
+    def _withholders_v2(self, run_id: str, job_id: str) -> set[str]:
+        """The auditors that left a MISMATCH of this job unsigned, from the failure rows."""
+        return {
+            r[0]
+            for r in self._db.execute(
+                "SELECT json_extract(data,'$.auditor') FROM records_v2 WHERE run_id=? "
+                "AND kind='audit-attempt-failure' AND id>=? AND id<? "
+                "AND json_extract(data,'$.withheld')='MISMATCH'",
+                (run_id, f"{job_id}:", f"{job_id};"),
+            )
+        }
+
+    def _auditors_left_v2(self, run_id: str, row: sqlite3.Row, taken: Collection[str]) -> bool:
+        """Whether some configured auditor outside `taken` could still audit the miner of `row`."""
+        auditors = self._run_v2(run_id).training.auditors
+        return any(a not in taken and a != row["hotkey"] for a in auditors)
+
+    def _reaudit_v2(self, run_id: str, row: sqlite3.Row) -> dict[str, Any] | None:
+        stored = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='reaudit' AND id=?",
+            (run_id, f"{row['w']}:{row['hotkey']}"),
+        ).fetchone()
+        return None if stored is None else json.loads(stored[0])
+
+    def _reaudit_wanted_v2(self, run_id: str, row: sqlite3.Row) -> bool:
+        """A withheld MISMATCH opens the window of its job once. A service-admitted run has none:
+        it keeps its resource deadline and its complete roster, and its failed job keeps the
+        INFRASTRUCTURE drop of any exhausted job (D87)."""
+        return (
+            self._reaudit_v2(run_id, row) is None
+            and not self._db.execute(
+                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission' AND id='run'",
+                (run_id,),
+            ).fetchone()
+        )
+
+    def _open_reaudit_v2(self, run_id: str, row: sqlite3.Row, now: int) -> None:
+        """The master replayed a MISMATCH and its holder never signed it (ADR 0011 Part 9, D84):
+        the job gets a window of its own for the other auditors. It starts at the detection, the
+        round the lease ended at (derived, so the observer cannot move it), lasts the policy's
+        `reaudit_window()` rounds and never outlasts the miner's commit. A window of fewer than
+        two rounds, or with no auditor left to serve it, fails the job at once (a commit sealed
+        too short for the window is nobody's fault, D87)."""
+        from hypertrain.protocol.messages_v2 import AuditChallengeV2
+
+        manifest = self._run_v2(run_id)
+        policy = AuditPolicyV2.model_validate_json(
+            self.objects.get(manifest.network.audit_policy_hash)
+        )
+        detected = self._lease_end_v2(run_id, row)
+        sealed = envelope_v2.parse_envelope(
+            self._record_v2(run_id, "commit", f"{row['w']}:{row['hotkey']}")
+        )
+        until = reaudit_until(
+            detected,
+            absolute=row["absolute"],
+            commit_exp=sealed.exp_drand,
+            reaudit_rounds=policy.reaudit_window(),
+        )
+        withholders = self._withholders_v2(run_id, row["id"])
+        self._put_record_v2(
+            run_id,
+            "reaudit",
+            f"{row['w']}:{row['hotkey']}",
+            {"job_id": row["id"], "detected": detected, "until": until},
+        )
+        if until <= max(detected, now) + 1 or not self._auditors_left_v2(run_id, row, withholders):
+            self._fail_reaudit_v2(run_id, row)
+            return
+        challenge = AuditChallengeV2.model_validate(
+            envelope_v2.parse_envelope(json.loads(row["challenge"])).body
+        ).model_copy(update={"serve_deadline": until})
+        signed = envelope_v2.seal(self._coord(), "AuditChallengeV2", run_id, challenge, until)
+        self._db.execute(
+            "UPDATE audit_leases_v2 SET state='queued',attempts=0,auditor=NULL,nonce=NULL,"
+            "expires=NULL,tried=?,absolute=?,challenge=? WHERE id=?",
+            (_dumps(sorted(withholders)), until, _dumps(signed), row["id"]),
+        )
+
+    def _fail_reaudit_v2(self, run_id: str, row: sqlite3.Row) -> None:
+        """No verdict will come for this job (ADR 0011 Part 9, D87). Its member, and only it, leaves
+        the round as an INFRASTRUCTURE fault: an `excluded` record with evidence of its own, no
+        sanction, no strike, no bond effect. The honest members keep their round and are paid, and
+        a MISMATCH signed later in the round is sanctioned as usual."""
+        self._drop_audit_job_v2(
+            run_id,
+            row,
+            "INFRASTRUCTURE",
+            "REAUDIT_FAILED",
+            sha256_hex(f"ht-reaudit-failed/1|{row['id']}".encode()),
+        )
 
     def _cooling_until_v2(self, run_id: str, auditor: str, now: int) -> int | None:
         record = self._db.execute(
@@ -8455,10 +8591,14 @@ class ChallengeStore:
         ).fetchone()
         return audit_cooldown_v2.cooling_until(json.loads(record[0]) if record else None, now)
 
-    def _cool_down_auditor_v2(self, run_id: str, row: sqlite3.Row) -> None:
-        """The silence began when the lease ran out, not when somebody noticed: a refusing call
-        rolls its own expiry back (`_tx`), so the round that observes it must not move `until`."""
-        silent_since = row["expires"]
+    def _cool_down_auditor_v2(
+        self, run_id: str, row: sqlite3.Row, *, withheld: bool = False
+    ) -> None:
+        """The silence began when the lease ended, not when somebody noticed: a refusing call
+        rolls its own expiry back (`_tx`), so the round that observes it must not move `until`.
+        `withheld`: this lapse left a MISMATCH unsigned; only then are the auditor's earlier
+        ones counted, the row just written included, so an ordinary silence is never a bar."""
+        silent_since = self._lease_end_v2(run_id, row)
         manifest = self._run_v2(run_id)
         policy = AuditPolicyV2.model_validate_json(
             self.objects.get(manifest.network.audit_policy_hash)
@@ -8470,6 +8610,14 @@ class ChallengeStore:
                 (run_id,),
             )
         }
+        count = 0
+        if withheld:
+            count = self._db.execute(
+                "SELECT COUNT(*) FROM records_v2 WHERE run_id=? AND kind='audit-attempt-failure' "
+                "AND json_extract(data,'$.auditor')=? "
+                "AND json_extract(data,'$.withheld')='MISMATCH'",
+                (run_id, row["auditor"]),
+            ).fetchone()[0]
         self._put_record_v2(
             run_id,
             "auditor-cooldown",
@@ -8484,6 +8632,7 @@ class ChallengeStore:
                 free=audit_cooldown_v2.others_free(
                     manifest.training.auditors, row["auditor"], records, silent_since
                 ),
+                withheld=count,
             ),
         )
 
@@ -8507,6 +8656,9 @@ class ChallengeStore:
                 no_show_evidence(run_id, row["w"], row["hotkey"], "leaves"),
                 stage="leaves",
             )
+            return
+        if self._reaudit_v2(run_id, row) is not None:
+            self._fail_reaudit_v2(run_id, row)  # the second auditor failed too: the member leaves
             return
         if not self._rearm_audit_job_v2(run_id, row, now):
             self._drop_audit_job_v2(

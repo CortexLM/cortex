@@ -708,6 +708,15 @@ def audit_lease_rounds(h: int, step_seconds_bound: float) -> int:
     return math.ceil(2 * h * step_seconds_bound / BEACON_PERIOD_SECONDS) + 100
 
 
+def reaudit_rounds_for(replay_seconds: int, lease_rounds: int) -> int:
+    """The `AuditPolicyV2.reaudit_rounds` to publish for a replay of `replay_seconds`: the second
+    auditor replays the same model, so twice the replay, converted at `BEACON_PERIOD_SECONDS` a
+    round and rounded up, and never below one lease. `replay_seconds` is the largest of N replays
+    of the run's model size measured on the host that will audit it. With a lease of 100 rounds:
+    144 s -> 100, 200 s -> 134, 256 s -> 171, 300 s -> 200."""
+    return max(lease_rounds, -(-2 * replay_seconds // BEACON_PERIOD_SECONDS))
+
+
 class AuditPolicyV2(WireModel):
     lease_rounds: Positive
     step_seconds_bound: F32 = "00008040"  # f32 4.0 s per untraced replay step
@@ -717,12 +726,20 @@ class AuditPolicyV2(WireModel):
     max_queued_jobs: Literal[32]
     max_anchor_age_rounds: Literal[1]
     max_steps_per_attempt: Positive
+    # Beacon rounds, like `lease_rounds`. Omitted when absent so every policy digest (and run ID)
+    # predating it is unchanged. At least 2: a window of fewer rounds could lease nobody.
+    reaudit_rounds: Annotated[StrictInt, Field(ge=2, le=2**53 - 1)] | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
 
     def validate_training(self, training: TrainingManifestV2) -> None:
         if self.max_steps_per_attempt != 2 * training.inner.H:
             raise ValueError("audit policy budget must equal 2H")
         if self.lease_rounds != audit_lease_rounds(training.inner.H, self.step_bound()):
             raise ValueError("audit lease must equal the H/step-bound derived lease")
+        # Below one lease a full lease would be truncated; above two AuditJobV2 refuses the job.
+        if not self.lease_rounds <= self.reaudit_window() <= self.absolute_rounds():
+            raise ValueError("audit re-audit window must be between one and two leases")
 
     def step_bound(self) -> float:
         bound = f32val(self.step_seconds_bound)
@@ -732,6 +749,11 @@ class AuditPolicyV2(WireModel):
 
     def absolute_rounds(self) -> int:
         return 2 * self.lease_rounds
+
+    def reaudit_window(self) -> int:
+        """Rounds a re-audit may last from the detection of a withheld signature: one lease unless
+        the manifest pins the measured value."""
+        return self.lease_rounds if self.reaudit_rounds is None else self.reaudit_rounds
 
 
 class IslandJobV1(WireModel):

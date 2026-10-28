@@ -47,11 +47,13 @@ def build_args(tmp_path: Path) -> list[str]:
     ]
 
 
+@pytest.mark.parametrize("reaudit", [None, 171])
 def test_build_then_service_accepts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     build_args: list[str],
     capsys: pytest.CaptureFixture[str],
+    reaudit: int | None,
 ) -> None:
     output = tmp_path / "output"
     state = tmp_path / "state"
@@ -63,8 +65,13 @@ def test_build_then_service_accepts(
     policies_path = tmp_path / "inputs" / "policies.json"
     policies = json.loads(policies_path.read_text())
     policies["economics"]["reward_authority"] = training["coord_pubkey"]
+    if reaudit is not None:
+        policies["audit"]["reaudit_rounds"] = reaudit
     policies_path.write_text(json.dumps(policies))
     assert main(build_args) == 0
+    assert ("reaudit_rounds" in json.loads((output / "policy-audit.json").read_text())) is (
+        reaudit is not None
+    )
     index = json.loads((output / "index.json").read_text())
     manifest = RunManifestV2.model_validate_json((output / "manifest.json").read_bytes())
     captured = capsys.readouterr()
@@ -140,6 +147,7 @@ def test_build_then_service_accepts(
     "fault,message",
     [
         ("audit", "audit policy budget must equal 2H"),
+        ("reaudit", "audit re-audit window must be between one and two leases"),
         ("auditors", "two distinct audit reference identities required"),
         ("derived", "v2 derived-state influence requires authenticated v0 integration"),
         ("permissions", "keyfile must be mode 0600 and owned by uid"),
@@ -163,11 +171,20 @@ def test_build_refuses_invalid_inputs(
     inputs = tmp_path / "inputs"
     training_path = inputs / "training.json"
     training = json.loads(training_path.read_text())
-    if fault in {"audit", "policy_schema", "authority", "reward_budget", "multiline_field"}:
+    if fault in {
+        "audit",
+        "reaudit",
+        "policy_schema",
+        "authority",
+        "reward_budget",
+        "multiline_field",
+    }:
         path = inputs / "policies.json"
         policies = json.loads(path.read_text())
         if fault == "audit":
             policies["audit"]["max_steps_per_attempt"] = 3
+        elif fault == "reaudit":
+            policies["audit"]["reaudit_rounds"] = 2 * policies["audit"]["lease_rounds"] + 1
         elif fault == "authority":
             policies["economics"]["reward_authority"] = training["auditors"][0]
         elif fault == "reward_budget":

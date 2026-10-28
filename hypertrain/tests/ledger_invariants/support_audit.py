@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import json
 import shutil
 import sqlite3
 from collections.abc import Callable, Iterator
@@ -29,6 +30,7 @@ import httpx
 import pytest
 
 from env_pin_fixtures import honest_env
+from hypertrain.challenge import audit_cooldown_v2
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.ledger.escrow_v2 import reward_origin_id
 from hypertrain.protocol import envelope_v2
@@ -65,6 +67,7 @@ COOLS_DOWN = hasattr(ChallengeStore, "_cooling_until_v2")
 REARMS = hasattr(ChallengeStore, "_rearm_audit_job_v2")
 CHECKS_SURVIVORS = hasattr(ChallengeStore, "_require_survivors_v2")
 RETIRES = hasattr(ChallengeStore, "_retire_round_v2")
+SIGN_WINDOW = getattr(audit_cooldown_v2, "SIGN_WINDOW_ROUNDS", None)
 WINDOWS = 2 if REARMS else 1
 # A job nobody audited leaves the round without being a verdict on the round: the disposition of
 # a round whose job was dropped is untouched, where an older tree voided the round for everybody.
@@ -663,19 +666,27 @@ def silence_of(
 ) -> tuple[str, dict[str, Any], tuple[int, str]]:
     """What a lease that lapsed unanswered leaves against its holder, as (the kind of the record
     kept under the holder's hotkey, that record, the refusal the holder meets when it asks again).
-    A tree that cools the auditor down releases it `lease_rounds` after the lapse."""
+    A tree that cools the auditor down releases it `lease_rounds` after the lapse, which is the
+    expiry of the lease, or on a tree that revokes (ADR 0011 Part 9) the end of the sign window
+    of a verdict the master stored, if that comes first."""
     if not COOLS_DOWN:
         return (
             "auditor-disabled",
             {"job_id": row["id"], "reason": "LEASE_EXPIRED"},
             (403, "silent auditor disabled pending review"),
         )
-    until = row["expires"] + audit_policy(store, run_id).lease_rounds
+    since = row["expires"]
+    marker = records(store, "audit-execution").get(
+        ("audit-execution", f"{row['id']}:{row['nonce']}")
+    )
+    if SIGN_WINDOW is not None and marker is not None and json.loads(marker)["state"] == "EXECUTED":
+        since = min(since, json.loads(marker)["at"] + SIGN_WINDOW)
+    until = since + audit_policy(store, run_id).lease_rounds
     record = {
         "job_id": row["id"],
         "reason": "AUDITOR_SILENT",
         "strikes": 1,
-        "since": row["expires"],
+        "since": since,
         "until": until,
     }
     return "auditor-cooldown", record, (403, f"auditor cooldown until round {until}")

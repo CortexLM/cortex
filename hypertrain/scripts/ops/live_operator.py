@@ -18,6 +18,7 @@ import httpx
 import hypertrain.trainer  # noqa: F401
 from hypertrain.aggregator.core import load_state
 from hypertrain.auditor.replay import AnchorCache, optimizer_hash, pack_state
+from hypertrain.challenge.audit_cooldown_v2 import reaudit_gap_needed
 from hypertrain.data.store import LocalFSStore, put_large
 from hypertrain.miner.core import load_keyfile
 from hypertrain.protocol import envelope_v2
@@ -25,6 +26,7 @@ from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize, f32hex
 from hypertrain.protocol.messages_v2 import (
+    AuditPolicyV2,
     PolicyHashes,
     RosterEntryV2,
     RoundOpenV2,
@@ -136,6 +138,23 @@ def check_open_shape(w: int, hotkeys: list[str], offsets: list[int]) -> None:
         raise SystemExit("offsets: need 2 <= d_final-d_audit <= 200 and d_upload > d_commit")
 
 
+def check_reaudit_gap(audit: AuditPolicyV2, gap: int) -> None:
+    """A policy that pins `reaudit_rounds` is sized for a replay of half that many rounds. Refuse a
+    gap in which a second auditor could not replay it after a first one withheld its signature:
+    the round would be retired (ADR 0011 Part 9, decision 12). A policy that pins nothing (the
+    tiny-cpu shape) is not asked."""
+    if audit.reaudit_rounds is None:
+        return
+    needed = reaudit_gap_needed(audit.lease_rounds, audit.reaudit_rounds)
+    if gap < needed:
+        raise SystemExit(
+            f"gap {gap} (d_final-d_audit) is too short for reaudit_rounds {audit.reaudit_rounds} "
+            f"of the audit policy: a withheld MISMATCH needs {needed} rounds to be re-audited "
+            "before d_final, so it would retire the round"
+            + (" (above the cap of 200: no gap holds it)" if needed > 200 else "")
+        )
+
+
 def previous_final_hash(m: Master, w: int) -> str:
     """What the opening of round w + 1 chains to: the finalize of round w, or the evidence of
     its retirement when the round reached no tape (ADR 0011 Part 8, decision 11)."""
@@ -153,6 +172,8 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
     refuse_service_run(m)
     manifest = m.manifest()
     check_open_shape(w, hotkeys, offsets)
+    audit = AuditPolicyV2.model_validate_json(m.objects.get(manifest.network.audit_policy_hash))
+    check_reaudit_gap(audit, offsets[5] - offsets[3])
     cfg = TrainConfig.from_manifest_v2(manifest)
     now = m.call("GET", "")["now_round"]
     d = [now + o for o in offsets]

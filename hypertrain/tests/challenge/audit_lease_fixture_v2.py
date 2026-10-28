@@ -41,7 +41,17 @@ def lease_rounds(net) -> int:
 
 
 def seed_round(
-    net, n=4, *, executable=False, gap=200, commit_exp=None, nan_leaf=None, silent=(), deltas=True
+    net,
+    n=4,
+    *,
+    executable=False,
+    gap=200,
+    commit_exp=None,
+    nan_leaf=None,
+    silent=(),
+    deltas=True,
+    admission_ids=None,
+    opened=False,
 ):
     """Write round 0 (opening, starts, commits, leaves, deltas, finality) into `records_v2`.
 
@@ -52,11 +62,21 @@ def seed_round(
     value}) set or poison what a miner sealed: an honest miner seals `d_final`. `silent`: indexes
     of roster members that get a start record and nothing else (opened, started, no commit).
     `deltas`: every member that committed also delivered its delta manifest; a round nobody
-    delivered to reads, to the exit reaper, as an upload path that failed for everybody."""
+    delivered to reads, to the exit reaper, as an upload path that failed for everybody.
+    `admission_ids`: {miner index: the real admission id} of a member the test activated, so that a
+    sanction of that member reaches its bond; the others carry a synthetic id.
+    `opened`: round 0 was opened through the route (`live_operator.open_round`), so its opening,
+    starts and finality are the store's own and only what the miners deliver is seeded; an honest
+    commit seals the d_final of that opening."""
     nan_leaf = nan_leaf or {}
     expiry = commit_exp if isinstance(commit_exp, dict) else dict.fromkeys(range(n), commit_exp)
     store, manifest = net.store, net.manifest
     run = manifest.run_id()
+    sealed_until = 10000
+    if opened:
+        sealed_until = RoundOpenV2.model_validate(
+            store._record_v2(run, "round", "0")["body"]
+        ).d_final
     cfg = TrainConfig.from_manifest_v2(manifest)
     t = manifest.training
     theta = init_params(cfg.model)
@@ -93,7 +113,8 @@ def seed_round(
                 "hotkey": key.ss58,
                 "slot": slot,
                 "q_i": "0000803f",
-                "admission_id": sha256_hex(f"adm-{slot}".encode()),
+                "admission_id": (admission_ids or {}).get(slot)
+                or sha256_hex(f"adm-{slot}".encode()),
                 "coldkey_group": (fixtures.COLD + EXTRA)[slot].ss58,
                 "state": "ACTIVE",
                 "eligible_weight": 4194304,
@@ -123,11 +144,15 @@ def seed_round(
         roster=roster,
     )
     with store._tx():
-        store._put_record_v2(run, "round", "0", net.signed(fixtures.COORD, "RoundOpenV2", opening))
+        if not opened:
+            store._put_record_v2(
+                run, "round", "0", net.signed(fixtures.COORD, "RoundOpenV2", opening)
+            )
         for index, (key, anchor, start) in enumerate(per):
             ident = f"0:{key.ss58}"
             if index in silent:
-                store._put_record_v2(run, "start", ident, start.body())
+                if not opened:
+                    store._put_record_v2(run, "start", ident, start.body())
                 continue
             if executable:
                 store._persist_anchor_v2(manifest, anchor, cache)
@@ -192,12 +217,13 @@ def seed_round(
                 delta_bytes=10,
                 tokens=batch * t.model.seq_len,
             )
-            store._put_record_v2(run, "start", ident, start.body())
+            if not opened:
+                store._put_record_v2(run, "start", ident, start.body())
             store._put_record_v2(
                 run,
                 "commit",
                 ident,
-                net.signed(key, "CommitV2", commit, expiry=expiry.get(index) or 10000),
+                net.signed(key, "CommitV2", commit, expiry=expiry.get(index) or sealed_until),
             )
             store._put_record_v2(
                 run, "assignment", ident, {"samples": sample_ids, "assignment_hash": "12" * 32}
@@ -226,22 +252,23 @@ def seed_round(
                     "master_acceptance_hash": "00" * 32,
                 }
                 store._put_record_v2(run, "delta", ident, net.signed(key, "DeltaManifestV2", delta))
-        store._put_record_v2(
-            run,
-            "finality",
-            "0",
-            {
-                "run_id": run,
-                "w": 0,
-                "applied": False,
-                "disposition": "PENDING",
-                "unresolved_disputes": 0,
-                "unresolved_audits": n,
-                "rollback_complete": False,
-                "state_hash": state_hash(theta),
-                "resolution_hash": None,
-            },
-        )
+        if not opened:
+            store._put_record_v2(
+                run,
+                "finality",
+                "0",
+                {
+                    "run_id": run,
+                    "w": 0,
+                    "applied": False,
+                    "disposition": "PENDING",
+                    "unresolved_disputes": 0,
+                    "unresolved_audits": n,
+                    "rollback_complete": False,
+                    "state_hash": state_hash(theta),
+                    "resolution_hash": None,
+                },
+            )
     return keys
 
 

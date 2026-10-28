@@ -236,7 +236,9 @@ def test_a_lapsed_lease_cannot_be_executed_or_completed_by_its_old_holder(
         stored = store._record_v2(run, "executed-verdict", row["id"])
         n.push(row["expires"])
         lapsed = sa.lease_rows(store)[cast.forger.ss58]
-        assert (lapsed["state"], lapsed["attempts"]) == ("queued", 1)
+        # the master's MISMATCH was left unsigned: the job opens its re-audit window (ADR 0011
+        # Part 9), whose attempts start again
+        assert (lapsed["state"], lapsed["attempts"]) == ("queued", 0)
         kind, silence, refusal = sa.silence_of(store, run, row)
         assert store._record_v2(run, kind, holder.ss58) == silence
         before = sa.digest_of(store)
@@ -254,11 +256,14 @@ def test_a_lapsed_lease_cannot_be_executed_or_completed_by_its_old_holder(
 
 # What the sweep does with a lapsed lease: the first attempt of a window is retried, the second
 # ends the window. A tree that re-arms an exhausted job opens one more window then and drops the
-# miner at the end of the second; an older tree drops it at once.
+# miner at the end of the second; an older tree drops it at once. The holder of the forger's lease
+# never asked for the execution (the test removes the marker the world wrote): an ordinary
+# silence. A lapse that leaves the master's MISMATCH unsigned opens the re-audit window instead,
+# which tests/challenge/test_audit_reaudit_window_v2.py pins.
 LAPSES = [
     pytest.param(1, 1, "retried", id="first-attempt"),
     pytest.param(2, 1, "rearmed" if sa.REARMS else "dropped", id="second-attempt-of-the-window"),
-    pytest.param(2, 2, "dropped", id="second-attempt-of-the-last-window"),
+    pytest.param(2, sa.WINDOWS, "dropped", id="second-attempt-of-the-last-window"),
 ]
 
 
@@ -276,8 +281,12 @@ def test_a_lapsed_job_is_retried_once_then_given_one_more_window_then_dropped(
             store._db.execute(
                 "UPDATE audit_leases_v2 SET attempts=? WHERE id=?", (attempts, row["id"])
             )
-            if windows == 2:
-                body = {"windows": 2, "at": n.now, "absolute": row["absolute"]}
+            store._db.execute(
+                "DELETE FROM records_v2 WHERE run_id=? AND kind='audit-execution' AND id=?",
+                (run, f"{row['id']}:{row['nonce']}"),
+            )
+            if windows > 1:
+                body = {"windows": windows, "at": n.now, "absolute": row["absolute"]}
                 store._put_record_v2(run, "audit-rearm", row["id"], body)
         open_before = int(store._record_v2(run, "finality", "0")["unresolved_audits"])
         # When: the lease runs out.
@@ -303,7 +312,11 @@ def test_a_lapsed_job_is_retried_once_then_given_one_more_window_then_dropped(
             assert (after["attempts"], after["absolute"]) == (attempts, row["absolute"])
         if outcome == "rearmed":
             rearm = store._record_v2(run, "audit-rearm", row["id"])
-            assert rearm == {"windows": 2, "at": row["expires"], "absolute": after["absolute"]}
+            assert rearm == {
+                "windows": windows + 1,
+                "at": row["expires"],
+                "absolute": after["absolute"],
+            }
             assert (after["attempts"], after["tried"], after["auditor"]) == (0, "[]", None)
             # The fresh window starts at the lapse and ends with the miner's sealed commit at
             # the latest.
@@ -328,7 +341,8 @@ def test_a_job_leased_again_cannot_be_settled_with_the_first_attempts_verdict(
         assert leased.status_code == 200
         job = leased.json()["body"]
         again = sa.lease_rows(store)[cast.forger.ss58]
-        assert (job["job_id"], again["auditor"], again["attempts"]) == (row["id"], second.ss58, 2)
+        # the lapse of an executed MISMATCH opens the re-audit window: the attempts start again
+        assert (job["job_id"], again["auditor"], again["attempts"]) == (row["id"], second.ss58, 1)
         assert job["lease_nonce"] != row["nonce"]
         before = sa.digest_of(store)
         # When / Then: the first holder can neither run nor settle the job any more.
@@ -394,6 +408,13 @@ def test_a_result_at_the_lease_expiry_round_is_refused_even_before_the_sweep(
         forger, honest = rows[cast.forger.ss58], sa.honest_lease(store, cast)
         assert forger["expires"] == honest["expires"]
         stored = {h: store._record_v2(run, "executed-verdict", r["id"]) for h, r in rows.items()}
+        # The master stored both verdicts in the last round before the expiry (a test-owned
+        # stand-in): the sign window of a tree that revokes (ADR 0011 Part 9) cannot end the
+        # leases first, and this test is about the expiry round.
+        with store._tx():
+            for r in rows.values():
+                marker = {"state": "EXECUTED", "at": r["expires"] - 1}
+                store._put_record_v2(run, "audit-execution", f"{r['id']}:{r['nonce']}", marker)
         # When: one round before expiry the honest holder completes.
         n.push(honest["expires"] - 1)
         done = sa.complete(n, cast.keys[honest["auditor"]], honest["id"], stored[honest["hotkey"]])

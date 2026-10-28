@@ -45,9 +45,9 @@ class Reached(Exception):
     """Raised by the stubbed master call: the open path got as far as the network."""
 
 
-@pytest.fixture
-def master_args(tmp_path: Path) -> list[str]:
-    """CLI global arguments for a state dir holding a real H=1 manifest and no live master."""
+def build_master_args(tmp_path: Path, reaudit_rounds: int | None = None) -> list[str]:
+    """CLI global arguments for a state dir holding a real H=1 manifest and no live master; the
+    audit policy pins `reaudit_rounds` when it is given."""
     coord_seed = bytes(range(32))
     inputs = tmp_path / "inputs"
     assert manifest_main(["example", "--out", str(inputs)]) == 0
@@ -57,6 +57,8 @@ def master_args(tmp_path: Path) -> list[str]:
     training_path.write_text(json.dumps(training))
     policies = json.loads(policies_path.read_text())
     policies["economics"]["reward_authority"] = training["coord_pubkey"]
+    if reaudit_rounds is not None:
+        policies["audit"]["reaudit_rounds"] = reaudit_rounds
     policies_path.write_text(json.dumps(policies))
     owner_seed = tmp_path / "owner.seed"
     owner_seed.write_bytes(b"\x77" * 32)
@@ -77,7 +79,7 @@ def master_args(tmp_path: Path) -> list[str]:
                 "--exp-round",
                 "1000000",
                 "--state-dir",
-                str(tmp_path / "build-state"),
+                str(tmp_path / "state"),
                 "--out",
                 str(built),
             ]
@@ -87,7 +89,6 @@ def master_args(tmp_path: Path) -> list[str]:
     manifest = RunManifestV2.model_validate_json((built / "manifest.json").read_bytes())
     assert manifest.training.inner.H == 1
     state = tmp_path / "state"
-    (state / "objects").mkdir(parents=True)
     with closing(sqlite3.connect(state / "challenge.db")) as db, db:
         db.execute("CREATE TABLE runs(run_id TEXT, manifest TEXT)")
         db.execute("CREATE TABLE records_v2(run_id TEXT, kind TEXT, id TEXT, data TEXT)")
@@ -109,6 +110,17 @@ def master_args(tmp_path: Path) -> list[str]:
         "--admin-token-file",
         str(token),
     ]
+
+
+@pytest.fixture
+def master_args(tmp_path: Path) -> list[str]:
+    return build_master_args(tmp_path)
+
+
+@pytest.fixture
+def pinned_master_args(tmp_path: Path) -> list[str]:
+    """The policy of a 256 s replay: `reaudit_rounds` 171 (ADR 0011 Part 9)."""
+    return build_master_args(tmp_path, 171)
 
 
 @pytest.fixture
@@ -139,6 +151,26 @@ def test_cli_open_with_an_auditable_window_reaches_the_master(
     with pytest.raises(Reached):
         live_operator.main(open_args(master_args, gap))
     assert master_calls == [("GET", "")]
+
+
+# The gap a second replay needs after a withheld one: 1 + min(L, R + W) + R + margin with the replay
+# R read from the policy's window (R = T / 2); 171 rounds is the 256 s replay of the 101 M run.
+@pytest.mark.parametrize(("gap", "refused"), [(100, True), (190, True), (191, False), (200, False)])
+def test_open_refuses_a_gap_in_which_a_pinned_reaudit_window_cannot_decide_a_miner(
+    pinned_master_args: list[str], master_calls: list[tuple[str, str]], gap: int, refused: bool
+) -> None:
+    args = open_args(pinned_master_args, gap)
+    if not refused:
+        with pytest.raises(Reached):
+            live_operator.main(args)
+        assert master_calls == [("GET", "")]
+        return
+    with pytest.raises(SystemExit) as raised:
+        live_operator.main(args)
+    message = str(raised.value)
+    assert f"gap {gap} (d_final-d_audit)" in message and "needs 191 rounds" in message
+    assert "withheld MISMATCH" in message and "retire the round" in message
+    assert master_calls == []
 
 
 @pytest.mark.parametrize(("margin", "refused"), [(-1, True), (0, False)], ids=["short", "exact"])

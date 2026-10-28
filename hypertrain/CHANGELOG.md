@@ -285,6 +285,39 @@
   settled or closed without a reward and past the epoch grace, and extends the custody of a grant
   whose round has an unresolved dispute before its horizon, repeatedly, through `relay_control_v2`. No operator call is needed any
   more; the admin routes remain. `ChallengeStore.release_due_v2` is one pass.
+- A `MISMATCH` the master replayed whose auditor signature is withheld (the lease ran out with the
+  verdict stored) is re-audited by another auditor instead of ending as an `INFRASTRUCTURE` exclusion
+  with nobody else asked (A2W-23, D82, D84). The job gets a re-audit window of its own that starts at
+  the detection (the round the lease ended at, never the round that noticed it), lasts the audit
+  policy's `reaudit_rounds` and never outlasts the miner's commit; the withholders stay in `tried`. The
+  miner is sanctioned only if the second lease completes as `MISMATCH` (the existing D47 path); a `MATCH`
+  clears it; if the second auditor fails too, or nobody can serve the window, the round is retired
+  (`REAUDIT_FAILED`) and nobody is sanctioned. A service-admitted run has no window. The auditor that
+  withholds the signature of a `MISMATCH` for the third time in a run is refused new leases for two
+  absolute windows (`WITHHELD_STRIKES`, `STRIKE_BAR_ABSOLUTE_WINDOWS` in
+  `challenge/audit_cooldown_v2.py`). `exit_v2` gains `Wait.REAUDIT`, `reaudit_until` and the retirement
+  cause. No wire message changes; `implementation_hash` does not change. See
+  `docs/adr/0011-audit-integrity.md` (Part 9) at the monorepo root.
+- A lease whose verdict the master stored and whose holder did not sign it within
+  `SIGN_WINDOW_ROUNDS` (20, 60 s) of the storing is taken back at that round instead of at its
+  expiry, so that the second auditor has the rest of the window (D82, Forge). The window counts from
+  the storing, never from the claim: a holder whose replay is still running is not taken back, and a
+  signature at the 19th round after the storing is still accepted. The cooldown of the holder starts
+  at the round the lease was taken back. The miner is never blamed for it. A separate commit, so it
+  can be reverted alone; `implementation_hash` does not change. See
+  `docs/adr/0011-audit-integrity.md` (Part 9, decision 8) at the monorepo root.
+- `AuditPolicyV2.reaudit_rounds` (D84): the length, in beacon rounds, of the window in which a withheld
+  `MISMATCH` is re-audited, pinned by the manifest. Optional and omitted from the canonical body when
+  absent, so every audit policy digest, `run_id` and in-flight run is unchanged (pinned by test); then
+  the window is one lease. The verifier requires one to two leases; the publisher computes it with
+  `reaudit_rounds_for(replay_seconds, lease_rounds)` = `max(lease_rounds, ceil(2 * replay_seconds / 3))`.
+  An older image refuses a policy that sets it: ship the image first. `implementation_hash` does not
+  change. See `docs/adr/0011-audit-integrity.md` (Part 9, decision 9) at the monorepo root.
+- `scripts/ops/live_operator.py open` refuses a `d_final - d_audit` below
+  `audit_cooldown_v2.reaudit_gap_needed(lease_rounds, reaudit_rounds)` when the audit policy pins
+  `reaudit_rounds` (191 rounds for 171, the 256 s replay of the 101 M run): in a shorter round a
+  withheld `MISMATCH` could not be re-audited before `d_final` and would retire the round. A policy
+  without the key is not asked. See `docs/adr/0011-audit-integrity.md` (Part 9, decision 12).
 
 ### Fixed
 - A member convicted of training fraud between the aggregate and the finalize of a round is no
