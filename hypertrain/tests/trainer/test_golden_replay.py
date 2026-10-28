@@ -22,6 +22,11 @@ from trainer_fixtures import assignment, make_cfg, sample  # noqa: E402
 
 # Per-platform leaf roots: this AMD dev host (captured at acc49a3) and the GitHub ubuntu-24.04
 # runner (from CI run on ff33e57). Each config must equal one of its platform roots.
+# The last root of each island config is that of a process which honors the manifest's
+# environment pin (DET-01, tests/process_pin.py: the ambient OMP/MKL/oneDNN variables are replaced
+# by the pin's). It is the same on the AMD EPYC 9575F dev host and on the Blacksmith runner (AMD
+# EPYC, CI run 40659367870), measured on the integrated tree; the roots above were taken in an
+# ambient environment.
 GOLDEN: dict[str, set[str]] = {
     "loop-dense-adamw-fp32": {
         "a617ad7e95065a4e862da75640347df8fa268c171f3e5c2c166f9c028fda6ed2",
@@ -56,34 +61,42 @@ GOLDEN: dict[str, set[str]] = {
     "island-moe-dp2-ep2-z1": {
         "8dbc123f50821e4176e2bb9e103b620515880158218dd824172dc9b0bc68c7a1",
         "fb9dccd79702f7e45e29107949f3305b4ee5306138a660aae15e53844bc7c081",
+        "6d8ed36ff53eceaafbbb9acd41f1b774a91cd349bb1b177b8197ad7bcec08d18",
     },
     "island-moe-dp1-ep4-bf16": {
         "07f99c89f6a361b1187102555391192e5533f99906029bf80f5cc94f3968790b",
         "264271770eca744fa67e3b9680234a2243b131347dbdbdefcb803d8d585250c5",
+        "8ee15b332e4770ad0e70e2128565215c4895d43ba6e7dde97587d88802c57427",
     },
     "island-dense-dp4-z1-muon": {
         "31f377e998130cbbca682601fc53ef108e64ed1ae51af477209bc9fa68fd6482",
         "047e988525dd52e070ae881fbfc347cb584168934d0af5560af6bafa464fecb2",
+        "4bdddbec1ab5dfe7df78d43c26344f3a3d36e122ea8189ecaf6e864bd3bcbf48",
     },
     "island-moe-dp1-ep2-z1": {
         "953417dd98d44487da595359a37e03a3d231fce73eeaaef612458e1ea7d205a3",
         "7f124b9bb2767d6a1eb92e9239778d30a3d00d2bb87ed089ab65817021a48e20",
+        "248b9e8d16c26d30e1153a2b02322695e7b365fd54f42f4a9c9eea6824f4dc48",
     },
     "island-moe-dp2-ep1": {
         "ebe848502a955cb4ff4f48701015bf7a7b8d75f603c8cb376d061af5dfed4367",
         "db4bb4829583d2d5f51a01aa10798863782362bfa0b9984bfbe88909b7724ab9",
+        "000ae6fbb39e8b4605ea8207e4415f6df240c660b65385eee5a63c9108ce8543",
     },
     "island-dense-dp2": {
         "188228f30d4e802e18aef1191e3b74ca351a20a423f0ca722ae24bbc0a193cfa",
         "2eac33a93ec6982a2b0183c4e7ae4389cf0bef73ffd689da2801c878aa7deffe",
+        "311c02986b03a0a7a95430919a491e9e1f3290311c4fb1fdd36c52105b00d7b6",
     },
     "island-single-moe": {
         "d65cfa84881dbf9d8aae6351986efe1ca047040f686d4a62b9334ca83b14f3ac",
         "1dc3c00ac0f8116537417787ca2afd284a71d94a5021bb98360f8e13100490dd",
+        "2ac0b2574f752e4afb4d2bf7cdd6326bd4d98042a6a5458c3347c08f5a94cac6",
     },
     "island-single-dense": {
         "0802ed0f74637e5cc6ad2fdac5ecca383ea93d42855551cf02d95ec03a4c2e4a",
         "2240a20cd9884e6f8fc85edd37be2e9ff523e137e189bfd12d2776a589638c75",
+        "630438b0fea3eb90d55f3ad624f98accd78209f2cd9dbb8e3512c87928dd9eaf",
     },
 }
 
