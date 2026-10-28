@@ -326,15 +326,29 @@ def test_a_lapsed_job_is_retried_once_then_given_one_more_window_then_dropped(
             assert after["absolute"] == min(row["expires"] + window, sealed.exp_drand)
 
 
+@pytest.mark.parametrize(
+    ("stored_result", "attempts"),
+    [("MISMATCH", 1), ("MATCH", 2)],
+    ids=["reaudit-window", "ordinary-requeue"],
+)
 def test_a_job_leased_again_cannot_be_settled_with_the_first_attempts_verdict(
-    world: sa.World,
+    world: sa.World, stored_result: str, attempts: int
 ) -> None:
     # Given: the first auditor executed the forger's job and let the lease run out; the allowlisted
-    # miner of another job is then leased it as the second attempt.
+    # miner of another job is then leased it as the second attempt. A lapsed MISMATCH opens the
+    # re-audit window, which clears the row; a lapsed MATCH only requeues it, and the second lease
+    # must still not inherit the nonce or the holder of the first.
     with world.at("s2") as (n, cast):
         store, run = n.store, n.manifest.run_id()
         row = running(store)[cast.forger.ss58]
         first, second = cast.keys[row["auditor"]], cast.auditors[2]
+        if stored_result == "MATCH":  # a test-owned stand-in for the master's verdict
+            with store._tx():
+                store._db.execute(
+                    "UPDATE records_v2 SET data=json_set(data,'$.result','MATCH') "
+                    "WHERE run_id=? AND kind='executed-verdict' AND id=?",
+                    (run, row["id"]),
+                )
         stale = store._record_v2(run, "executed-verdict", row["id"])
         n.push(row["expires"])
         leased = sa.lease(n, second)
@@ -342,7 +356,11 @@ def test_a_job_leased_again_cannot_be_settled_with_the_first_attempts_verdict(
         job = leased.json()["body"]
         again = sa.lease_rows(store)[cast.forger.ss58]
         # the lapse of an executed MISMATCH opens the re-audit window: the attempts start again
-        assert (job["job_id"], again["auditor"], again["attempts"]) == (row["id"], second.ss58, 1)
+        assert (job["job_id"], again["auditor"], again["attempts"]) == (
+            row["id"],
+            second.ss58,
+            attempts,
+        )
         assert job["lease_nonce"] != row["nonce"]
         before = sa.digest_of(store)
         # When / Then: the first holder can neither run nor settle the job any more.
