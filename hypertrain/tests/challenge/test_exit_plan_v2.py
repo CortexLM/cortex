@@ -37,7 +37,6 @@ def snap(*, at: int = 5, roster=ROSTER, **kw) -> x.RoundSnapshot:
         served_upload=True,
         has_leases=True,
         carries=lambda hotkeys: len(hotkeys) >= 4,
-        reaudit_failed=False,
     )
     return x.RoundSnapshot(**{**base, **kw})
 

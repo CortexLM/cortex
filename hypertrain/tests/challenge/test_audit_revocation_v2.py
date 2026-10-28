@@ -104,10 +104,14 @@ def test_the_sign_window_counts_from_the_stored_verdict_and_never_revokes_a_repl
     }
     network.push(D_AUDIT + 100)  # the commit ends with the round, and with every window
     assert records(network, "exit-sanction") == {}
-    # the revoked job had its window and it ended with the commit: it fails, nobody is blamed
+    # the revoked job had its window and it ended with the commit: it fails, and its member is
+    # dropped as an infrastructure fault with the evidence of a failed re-audit (D87), unsanctioned
     miner = lease_row(network, replayed["job_id"])["hotkey"]
     assert lease_row(network, replayed["job_id"])["result"] == "REAUDIT_FAILED"
-    assert f"0:{miner}" not in records(network, "excluded")
+    assert records(network, "excluded")[f"0:{miner}"] == {
+        "reason": "INFRASTRUCTURE",
+        "evidence_hash": sha256_hex(f"ht-reaudit-failed/1|{replayed['job_id']}".encode()),
+    }
     # the replay in progress was never revoked and ends as an ordinary lapse
     miner = lease_row(network, replaying["job_id"])["hotkey"]
     assert records(network, "excluded")[f"0:{miner}"] == {

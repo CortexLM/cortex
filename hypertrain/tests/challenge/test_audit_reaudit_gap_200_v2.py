@@ -7,7 +7,7 @@ one by one as the pusher does, before it returns the outcome, so every round cou
 store's own, not an assumption of the test. The boundaries are the ones of ADR 0011 Part 9
 decision 12: a second auditor decides the miner iff `x + p` (the rounds before the first lease and
 before the second auditor asks) stays inside the slack of the replay (83, 45 and 13 rounds), and
-otherwise the round is retired without a sanction.
+otherwise its member is dropped as an infrastructure fault without a sanction (D87).
 """
 # ruff: noqa: F811  (the `network` fixture parameter shadows the imported fixture, as in test_multirun.py)
 
@@ -23,6 +23,7 @@ from hypertrain.auditor import worker
 from hypertrain.auditor.replay import AuditInputError, Outcome
 from hypertrain.challenge import audit_cooldown_v2 as cooldown
 from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.messages_v2 import CommitV2, RoundOpenV2, reaudit_rounds_for
 
 from . import test_service_network_v2 as fixtures
@@ -233,17 +234,20 @@ def finish(network, t, result, miner, before, busy):
     store, run = network.store, network.manifest.run_id()
     if result is None:
         walk(network, t["d_final"] + 1)
-        # the window failed: its job has no verdict, the round is retired, the member is not
-        # blamed and nobody is sanctioned
+        # the window failed (D87): its job has no verdict, and its member alone is dropped as an
+        # infrastructure fault with the evidence of a failed re-audit; nobody is sanctioned and
+        # the standings and the bond are untouched
         assert lease_row(network, t["job"])["result"] == "REAUDIT_FAILED"
-        assert store._record_v2(run, "finality", "0")["disposition"] == "RETIRED"
-        assert f"0:{miner}" not in records(network, "excluded")
+        assert records(network, "excluded")[f"0:{miner}"] == {
+            "reason": "INFRASTRUCTURE",
+            "evidence_hash": sha256_hex(f"ht-reaudit-failed/1|{t['job']}".encode()),
+        }
         assert records(network, "exit-sanction") == {}
         assert (standings(network), store._services(run)[0].balances().burned) == before
-        if not busy:  # the other three members were audited: the failed re-audit is the cause
-            assert records(network, "retired")["0"]["cause"] == "REAUDIT_FAILED"
-            assert records(network, "excluded") == {}
-        t["outcome"] = "retired"
+        # a roster of four cannot absorb an exclusion, so the planner may retire the round as
+        # INFEASIBLE, as it always did; the failed re-audit is never the cause of a retirement
+        assert {r["cause"] for r in records(network, "retired").values()} <= {"INFEASIBLE"}
+        t["outcome"] = "dropped"
         return t
     if busy:  # the miner is genuine: the second replay clears it
         assert result == "MATCH"
@@ -267,16 +271,16 @@ CASES = [
     # the last rounds of slack of each replay (83, 45 and 13 rounds of x + p) and the one past it;
     # for 256 s the slack is spent by the 20 s poll of scripts/ops/auditors.sh (up to 7 rounds each)
     pytest.param(144, 83, 0, "decided", id="144s-last-round-of-slack"),
-    pytest.param(144, 84, 0, "retired", id="144s-one-past"),
+    pytest.param(144, 84, 0, "dropped", id="144s-one-past"),
     pytest.param(200, 45, 0, "decided", id="200s-last-round-of-slack"),
-    pytest.param(200, 46, 0, "retired", id="200s-one-past"),
+    pytest.param(200, 46, 0, "dropped", id="200s-one-past"),
     pytest.param(256, 6, 7, "decided", id="256s-last-round-of-slack"),
-    pytest.param(256, 7, 7, "retired", id="256s-a-20-second-poll"),
+    pytest.param(256, 7, 7, "dropped", id="256s-a-20-second-poll"),
 ]
 
 
 @pytest.mark.parametrize(("replay_s", "x", "poll", "outcome"), CASES)
-def test_the_reaudit_at_gap_200_is_decided_inside_the_slack_and_retires_the_round_past_it(
+def test_the_reaudit_at_gap_200_is_decided_inside_the_slack_and_drops_the_member_past_it(
     four_identities, tmp_path, monkeypatch, replay_s, x, poll, outcome
 ):
     t = reaudit(four_identities, tmp_path, monkeypatch, replay_s=replay_s, x=x, poll=poll)
@@ -285,7 +289,7 @@ def test_the_reaudit_at_gap_200_is_decided_inside_the_slack_and_retires_the_roun
 
 @pytest.mark.parametrize(
     ("replay_s", "outcome"),
-    [pytest.param(144, "decided", id="144s"), pytest.param(256, "retired", id="256s")],
+    [pytest.param(144, "decided", id="144s"), pytest.param(256, "dropped", id="256s")],
 )
 def test_the_other_auditor_is_busy_with_the_job_behind(
     four_identities, tmp_path, monkeypatch, replay_s, outcome

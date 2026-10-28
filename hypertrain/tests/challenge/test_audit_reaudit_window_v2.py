@@ -1,13 +1,17 @@
-"""The re-audit window of a withheld MISMATCH opens at the detection; its failure retires the round.
+"""The re-audit window of a withheld MISMATCH opens at the detection; its failure drops its member.
 
 The master replays, the holder of the lease never signs (ADR 0011 Part 9, D84). The job then gets a
 window of its own for the other auditors, which starts at the round the lease ended at (derived from
 what the master stored, never from the round that noticed it), lasts the policy's `reaudit_rounds`
 and never outlasts the miner's commit. A second auditor that completes decides the miner (MATCH
-clears it, MISMATCH reaches D47); one that does not, or nobody, is an infrastructure fault: the
-round is retired and no member is sanctioned. The tests write the facts the master leaves behind
-(stored verdict, EXECUTED marker) and drive the fake clock with `network.push`; the verdicts of the
-second auditor on real replays are in `test_audit_reaudit_v2.py`.
+clears it, MISMATCH reaches D47); one that does not, or nobody, is an infrastructure fault (D87):
+its member, and no other, is excluded as `INFRASTRUCTURE` with evidence of its own and nobody is
+sanctioned. The one-member round of this harness can carry nothing once its member is gone, so the
+reaper retires it as `INFEASIBLE`, as it always did; that the honest siblings of a larger round keep
+their round and are paid is in `tests/ledger_invariants/test_exit_roster_2.py`. The tests write the
+facts the master leaves behind (stored verdict, EXECUTED marker) and drive the fake clock with
+`network.push`; the verdicts of the second auditor on real replays are in
+`test_audit_reaudit_v2.py`.
 """
 # ruff: noqa: F811  (the `network` fixture parameter shadows the imported fixture, as in test_multirun.py)
 
@@ -86,9 +90,23 @@ def retired(network):
     return records(network, "retired")
 
 
-def nobody_is_blamed(network, hook):
-    assert (records(network, "excluded"), records(network, "exit-sanction")) == ({}, {})
+def reaudit_evidence(job_id):
+    return sha256_hex(f"ht-reaudit-failed/1|{job_id}".encode())
+
+
+def only_the_member_is_dropped(network, hook, job_id):
+    """The member left the round as an infrastructure fault with the evidence of a failed re-audit,
+    and no sanction, strike, seizure or failure was booked. The one-member round may then be retired
+    by the planner for want of survivors (INFEASIBLE), never for the re-audit."""
+    assert records(network, "excluded") == {
+        f"0:{miners(1)[0].ss58}": {
+            "reason": "INFRASTRUCTURE",
+            "evidence_hash": reaudit_evidence(job_id),
+        }
+    }
+    assert records(network, "exit-sanction") == {}
     assert (records(network, "exit-failed"), hook.calls) == ({}, [])
+    assert {r["cause"] for r in retired(network).values()} <= {"INFEASIBLE"}
 
 
 @pytest.mark.parametrize(
@@ -123,7 +141,7 @@ def test_the_window_starts_at_the_detection_not_at_the_lease_and_ends_with_the_c
     assert unresolved["unresolved_audits"] == 1
 
 
-def test_the_second_auditor_withholding_too_retires_the_round_and_blames_nobody(one_identity, hook):
+def test_the_second_auditor_withholding_too_drops_its_member_and_blames_nobody(one_identity, hook):
     network = one_identity
     store, run = network.store, network.manifest.run_id()
     key = miners(1)[0]
@@ -138,29 +156,27 @@ def test_the_second_auditor_withholding_too_retires_the_round_and_blames_nobody(
     network.push(network.now + cooldown.SIGN_WINDOW_ROUNDS)
     row = lease_row(network, job["job_id"])
     assert (row["state"], row["result"]) == ("exhausted", "REAUDIT_FAILED")
-    done = retired(network)["0"]
-    assert (done["cause"], done["survivors"]) == ("REAUDIT_FAILED", [key.ss58])
     status = store._record_v2(run, "finality", "0")
-    assert (status["disposition"], status["unresolved_audits"]) == ("RETIRED", 0)
-    nobody_is_blamed(network, hook)
+    assert status["unresolved_audits"] == 0  # the one decrement of the drop
+    only_the_member_is_dropped(network, hook, job["job_id"])
     assert records(network, "audit-rearm") == {}  # no ordinary window follows the re-audit
     network.push(network.now + network.manifest.training.verify.T.dispute_per_level + 1)
     assert standing(network, key.ss58) == ("ACTIVE", "JOIN_ACCEPTED", 0)
     assert store._services(run)[0].balances().burned == burned
 
 
-def test_a_window_nobody_uses_ends_in_a_retirement_at_its_bound_and_not_before(network, hook):
+def test_a_window_nobody_uses_ends_in_a_drop_at_its_bound_and_not_before(network, hook):
     job, _ = withheld_by_a(network, commit_exp=10_000)
     until = window_of(network)["until"]
     network.push(until - 1)
-    assert lease_row(network, job["job_id"])["state"] == "queued" and retired(network) == {}
-    network.push(until)  # the bound: the job fails and the same push retires the round
+    assert lease_row(network, job["job_id"])["state"] == "queued"
+    assert records(network, "excluded") == {}
+    network.push(until)  # the bound: the job fails and its member leaves in the same push
     assert lease_row(network, job["job_id"])["result"] == "REAUDIT_FAILED"
-    assert (list(retired(network)), retired(network)["0"]["cause"]) == (["0"], "REAUDIT_FAILED")
-    nobody_is_blamed(network, hook)
+    only_the_member_is_dropped(network, hook, job["job_id"])
 
 
-def test_a_commit_that_ends_before_the_window_can_open_retires_the_round_at_the_detection(
+def test_a_commit_that_ends_before_the_window_can_open_drops_the_member_at_the_detection(
     network, hook
 ):
     # an honest commit seals d_final = round 120; the verdict is stored in round 99, so the lease
@@ -168,8 +184,8 @@ def test_a_commit_that_ends_before_the_window_can_open_retires_the_round_at_the_
     job, detected = withheld_by_a(network, commit_exp=D_AUDIT + 100, gap=100, stored_after=78)
     assert (detected, window_of(network)["until"]) == (D_AUDIT + 99, D_AUDIT + 100)
     assert lease_row(network, job["job_id"])["result"] == "REAUDIT_FAILED"
-    assert retired(network)["0"]["cause"] == "REAUDIT_FAILED"
-    nobody_is_blamed(network, hook)
+    # D87 m2: a commit sealed too short for the window is nobody's fault (not `MINER_INPUT_REFUSED`)
+    only_the_member_is_dropped(network, hook, job["job_id"])
 
 
 def test_a_late_observation_leaves_the_window_where_the_detection_put_it(network):
@@ -210,10 +226,10 @@ def test_a_detection_noticed_after_its_window_is_over_fails_the_job_without_leas
     assert answer.status_code == 204, answer.text
     assert lease_row(network, job["job_id"])["result"] == "REAUDIT_FAILED"
     assert window_of(network)["detected"] == detected
-    nobody_is_blamed(network, hook)
+    only_the_member_is_dropped(network, hook, job["job_id"])
 
 
-def test_a_miner_that_is_the_only_other_auditor_cannot_be_re_audited_and_the_round_is_retired(
+def test_a_miner_that_is_the_only_other_auditor_cannot_be_re_audited_and_is_dropped(
     network, hook, monkeypatch
 ):
     # B is configured as an auditor and is also the miner: it cannot audit itself, so once A has
@@ -227,13 +243,18 @@ def test_a_miner_that_is_the_only_other_auditor_cannot_be_re_audited_and_the_rou
     store_verdict(network, job)
     network.push(network.now + cooldown.SIGN_WINDOW_ROUNDS)
     assert lease_row(network, job["job_id"])["result"] == "REAUDIT_FAILED"
-    assert retired(network)["0"]["cause"] == "REAUDIT_FAILED"
-    nobody_is_blamed(network, hook)
+    assert records(network, "excluded") == {
+        f"0:{B.ss58}": {
+            "reason": "INFRASTRUCTURE",
+            "evidence_hash": reaudit_evidence(job["job_id"]),
+        }
+    }
+    assert (records(network, "exit-sanction"), hook.calls) == ({}, [])
 
 
 def test_a_service_admitted_run_opens_no_window_and_keeps_the_infrastructure_drop(network, hook):
-    # The run cannot retire a round (a service-admitted run keeps its roster complete), so a window
-    # that could fail would wedge it: the exception to D84 is stated in ADR 0011 Part 9.
+    # A service-admitted run keeps its resource deadline and its roster: no window (D87 m3, ADR 0011
+    # Part 9 decision 11); it keeps the INFRASTRUCTURE drop of an exhausted job.
     seed_round(network, n=1, executable=True, gap=200, commit_exp=D_FINAL)
     schedule(network)
     network.push(D_AUDIT + 1)

@@ -158,13 +158,18 @@ def test_a_reaudit_window_fails_the_job_as_soon_as_no_auditor_is_left_to_try(wid
     row = lease_row(network, job["job_id"])
     assert (row["state"], row["result"]) == ("exhausted", "REAUDIT_FAILED")
     assert row["absolute"] > second["lease_expires"]  # not left idle to the end of the window
-    # the miner is not blamed: no exclusion, no sanction; the job stays counted and the reaper asks
-    # for the retirement of the round (the seeded round has no anchors to carry: it is refused
-    # there, and test_audit_reaudit_window_v2.py retires a round whose anchors exist)
-    assert (records(network, "excluded"), records(network, "exit-sanction")) == ({}, {})
+    # D87: the member alone leaves the round as an infrastructure fault, with the evidence of a
+    # failed re-audit; no sanction, and the job's count falls once (the drop is the one writer)
+    miner = row["hotkey"]
+    assert records(network, "excluded") == {
+        f"0:{miner}": {
+            "reason": "INFRASTRUCTURE",
+            "evidence_hash": sha256_hex(f"ht-reaudit-failed/1|{job['job_id']}".encode()),
+        }
+    }
+    assert records(network, "exit-sanction") == {}
     assert records(network, "audit-rearm")[job["job_id"]]["windows"] == 2  # and no third
-    assert records(network, "round-exit")["0"]["state"] == "REAUDIT_FAILED"
-    assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 1
+    assert store._record_v2(run, "finality", "0")["unresolved_audits"] == 0
 
 
 @pytest.mark.parametrize("bars", [False, True])
