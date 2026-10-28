@@ -51,11 +51,8 @@ MUTANTS = [
         "id": "opids-admission-lock-settled-by-the-generic-callback",
         "invariants": ["LCK-08", "DIB-17"],
         "path": LEDGER,
-        "old": (
-            '        if row is not None and row["kind"] == "LOCK_ADMISSION"'
-            " and self.admission_settlement:\n"
-        ),
-        "new": "        if False:\n",
+        "old": "            return self.admission_settlement(lock_id)\n",
+        "new": "            return self.settlement(lock_id)\n",
         "tests": [BORROWED_DISPUTE_ID],
         "why": (
             "an admission lock is settled by the generic callback, which finds a closed dispute"
@@ -66,11 +63,8 @@ MUTANTS = [
         "id": "opids-admission-lock-borrows-a-reward-origins-settlement",
         "invariants": ["LCK-08", "DIB-17"],
         "path": LEDGER,
-        "old": (
-            '        if row is not None and row["kind"] == "LOCK_ADMISSION"'
-            " and self.admission_settlement:\n"
-        ),
-        "new": "        if False:\n",
+        "old": "            return self.admission_settlement(lock_id)\n",
+        "new": "            return self.settlement(lock_id)\n",
         "tests": [BORROWED_ORIGIN_ID],
         "why": (
             "an admission lock named like a settled reward origin is released with that origin's"
@@ -78,38 +72,53 @@ MUTANTS = [
         ),
     },
     {
-        "id": "opids-bond-operation-id-is-predictable",
+        "id": "opids-bond-seizure-is-recorded-under-the-public-id-of-its-lock",
         "invariants": ["ESC-04"],
-        "path": ADMISSION,
+        "path": LEDGER,
         "old": (
-            '        return hmac.digest(self.ip_secret, f"ht-bond-{label}-v1|{lock_id}".encode(),'
-            ' "sha256").hex()\n'
+            '            return self._event(op.operation_id, "SLASH", request, op.owner,'
+            " server=True)\n"
         ),
-        "new": '        return sha256_hex(canonicalize([lock_id, "settle"]))\n',
+        "new": (
+            "            return self._event(\n"
+            '                sha256_hex(canonicalize([op.lock_id, "settle"])),\n'
+            '                "SLASH",\n'
+            "                request,\n"
+            "                op.owner,\n"
+            "                server=False,\n"
+            "            )\n"
+        ),
         "tests": [SEIZURE_ID],
         "why": (
-            "the id of a bond seizure is a public function of the lock, so its owner registers"
-            " it first and the seizure is refused."
+            "a bond seizure is recorded under a public function of its lock in the key space of"
+            " the owners, so the owner registers that id first and the seizure fails on it."
         ),
     },
     {
-        "id": "opids-bond-release-id-is-predictable",
+        "id": "opids-bond-release-is-recorded-under-the-public-id-of-its-lock",
         "invariants": ["ESC-04"],
-        "path": ADMISSION,
+        "path": LEDGER,
         "old": (
-            '        return hmac.digest(self.ip_secret, f"ht-bond-{label}-v1|{lock_id}".encode(),'
-            ' "sha256").hex()\n'
+            "            return self._event(\n"
+            '                op.operation_id, "RELEASE", op.model_dump_json(), op.owner,'
+            " server=server\n"
+            "            )\n"
         ),
         "new": (
-            '        if label == "release":\n'
-            '            return sha256_hex(canonicalize([lock_id, "settle"]))\n'
-            '        return hmac.digest(self.ip_secret, f"ht-bond-{label}-v1|{lock_id}".encode(),'
-            ' "sha256").hex()\n'
+            "            return self._event(\n"
+            "                op.operation_id\n"
+            "                if not server\n"
+            '                else sha256_hex(canonicalize([op.lock_id, "settle"])),\n'
+            '                "RELEASE",\n'
+            "                op.model_dump_json(),\n"
+            "                op.owner,\n"
+            "                server=False,\n"
+            "            )\n"
         ),
         "tests": [BOND_RELEASE_ID],
         "why": (
-            "the id of a bond release is a public function of the lock, so any funded key registers"
-            " it first and the owner cannot take its bond back."
+            "the service's bond release is recorded under a public function of its lock in the key"
+            " space of the owners, so any funded key registers that id first and the release fails."
         ),
     },
     {
@@ -127,7 +136,9 @@ MUTANTS = [
         "id": "opids-owner-operation-forgets-replays",
         "invariants": ["ESC-03"],
         "path": LEDGER,
-        "old": "        return self._existing(op.operation_id, op.model_dump_json())\n",
+        "old": (
+            "        return self._existing(op.operation_id, op.model_dump_json(), server=server)\n"
+        ),
         "new": "        return None\n",
         "tests": [PROPERTY],
         "why": "an owner operation never looks for its own earlier event, so a replay moves again.",
@@ -137,8 +148,7 @@ MUTANTS = [
         "invariants": ["ESC-03"],
         "path": LEDGER,
         "old": (
-            '        self.db.execute("INSERT INTO'
-            ' escrow_snapshots VALUES(?,?)", (operation_id, state))\n'
+            '        self.db.execute("INSERT INTO escrow_snapshots VALUES(?,?)", (key, state))\n'
         ),
         "new": "        pass\n",
         "tests": [PROPERTY, FAILS],
@@ -201,16 +211,24 @@ MUTANTS = [
     {
         "id": "opids-outbox-accepts-another-body",
         "invariants": ["LCK-12", "SG-09"],
-        "path": OUTBOX,
+        "path": ADMISSION,
         "old": (
-            '            if row and (row["request"] !='
-            ' operation.model_dump_json() or row["signer"] != signer):\n'
+            "            self.escrow.require_lock_capacity(op)  # before an outbox row nobody can"
+            " apply\n"
+            "            self.store.enqueue_lock(op, env.signer)\n"
         ),
-        "new": '            if row and row["signer"] != signer:\n',
+        "new": (
+            "            self.store.db.execute(\n"
+            '                "INSERT OR IGNORE INTO admission_outbox(operation_id,request,signer)'
+            ' VALUES(?,?,?)",\n'
+            "                (op.operation_id, op.model_dump_json(), env.signer),\n"
+            "            )\n"
+        ),
         "tests": [LOCK_ONCE],
         "why": (
-            "a second lock body under a queued operation"
-            " id is answered with the first lock's receipt."
+            "the lock route queues a lock without comparing its body, neither with the applied"
+            " lock nor with the queued one, so a second body under the id is answered with the"
+            " first lock's receipt."
         ),
     },
     {

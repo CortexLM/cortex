@@ -77,14 +77,18 @@ MUTANTS = [
         "invariants": ["GAP-06"],
         "path": LEDGER,
         "old": (
-            '            return self._event(op.operation_id, "RELEASE",'
-            " op.model_dump_json(), op.owner)\n"
+            "            return self._event(\n"
+            '                op.operation_id, "RELEASE", op.model_dump_json(), op.owner,'
+            " server=server\n"
+            "            )\n"
         ),
         "new": (
             '            self.db.execute("DELETE FROM escrow_snapshots WHERE operation_id=?",'
             " (op.lock_id,))\n"
-            '            return self._event(op.operation_id, "RELEASE", op.model_dump_json('
-            "), op.owner)\n"
+            "            return self._event(\n"
+            '                op.operation_id, "RELEASE", op.model_dump_json(), op.owner,'
+            " server=server\n"
+            "            )\n"
         ),
         "tests": [WRITERS],
         "why": (
@@ -160,11 +164,13 @@ MUTANTS = [
         "id": "gaps-escrow-maturity-writes-a-finalization-record",
         "invariants": ["GAP-06"],
         "path": LEDGER,
-        "old": '            return self._event(operation_id, "MATURE", request, owner)\n',
+        "old": (
+            '            return self._event(operation_id, "MATURE", request, owner, server=True)\n'
+        ),
         "new": (
             "            self.db.execute("
             "\"UPDATE records_v2 SET data=data WHERE kind='finalize-result'\")\n"
-            '            return self._event(operation_id, "MATURE", request, owner)\n'
+            '            return self._event(operation_id, "MATURE", request, owner, server=True)\n'
         ),
         "tests": [KINDS],
         "why": (
@@ -300,17 +306,17 @@ MUTANTS = [
         "invariants": ["ESC-03", "ESC-04"],
         "path": LEDGER,
         "old": (
-            "            old = self._owner_operation(op, signer)\n"
+            "            old = self._owner_operation(op, signer, server=server)\n"
             "            if old is not None:\n"
             "                return old\n"
-            "            status = self._lock_status(op.lock_id)\n"
+            "            status = self.lock_status(op.lock_id)\n"
             "            if (\n"
             "                status.unresolved\n"
             '                or status.outcome == "FRAUD"\n'
         ),
         "new": (
-            "            status = self._lock_status(op.lock_id)\n"
-            "            old = self._owner_operation(op, signer)\n"
+            "            status = self.lock_status(op.lock_id)\n"
+            "            old = self._owner_operation(op, signer, server=server)\n"
             "            if old is not None:\n"
             "                return old\n"
             "            if (\n"
@@ -328,17 +334,17 @@ MUTANTS = [
         "invariants": ["ESC-03", "ESC-14"],
         "path": LEDGER,
         "old": (
-            "            old = self._existing(op.operation_id, request)\n"
+            "            old = self._existing(op.operation_id, request, server=True)\n"
             "            if old is not None:\n"
             "                return old\n"
-            "            status = self._lock_status(op.lock_id)\n"
+            "            status = self.lock_status(op.lock_id)\n"
             "            if (\n"
             "                status.unresolved\n"
             '                or status.outcome != "FRAUD"\n'
         ),
         "new": (
-            "            status = self._lock_status(op.lock_id)\n"
-            "            old = self._existing(op.operation_id, request)\n"
+            "            status = self.lock_status(op.lock_id)\n"
+            "            old = self._existing(op.operation_id, request, server=True)\n"
             "            if old is not None:\n"
             "                return old\n"
             "            if (\n"
@@ -389,20 +395,20 @@ MUTANTS = [
         "path": LEDGER,
         "old": (
             "        with self.tx():\n"
-            "            old = self._owner_operation(op, signer)\n"
+            "            old = self._owner_operation(op, signer, server=server)\n"
             "            if old is not None:\n"
             "                return old\n"
-            "            status = self._lock_status(op.lock_id)\n"
+            "            status = self.lock_status(op.lock_id)\n"
             "            if (\n"
             "                status.unresolved\n"
             '                or status.outcome == "FRAUD"\n'
         ),
         "new": (
             "        if True:\n"
-            "            old = self._owner_operation(op, signer)\n"
+            "            old = self._owner_operation(op, signer, server=server)\n"
             "            if old is not None:\n"
             "                return old\n"
-            "            status = self._lock_status(op.lock_id)\n"
+            "            status = self.lock_status(op.lock_id)\n"
             "            if (\n"
             "                status.unresolved\n"
             '                or status.outcome == "FRAUD"\n'

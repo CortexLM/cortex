@@ -71,6 +71,11 @@ SEIZURE_AUTHORITY = (
 CONTEST_LOCK_GATE = (
     '                            self._authenticated_v2(run_id, raw, "EscrowLock", {})'
 )
+# The gate that runs first: release and slash both ask lock_status before they read the lock row
+# themselves, so their own kind test is never reached with an event that is not a lock.
+KIND_GATE = (
+    '        if row["kind"] != "LOCK_CONTEST":\n            raise EscrowError("UNKNOWN_LOCK")\n'
+)
 ADMISSION_LOCK_GATE = 'Intake(self.escrow.run_id, {{"EscrowLock": lambda s: {}}}).accept(raw, now)'
 
 MUTANTS = [
@@ -90,12 +95,12 @@ MUTANTS = [
         "old": (
             "    def transfer(self, op: EscrowTransfer, *, signer: str) -> EscrowReceipt:\n"
             "        with self.tx():\n"
-            "            old = self._owner_operation(op, signer)"
+            "            old = self._owner_operation(op, signer, server=False)"
         ),
         "new": (
             "    def transfer(self, op: EscrowTransfer, *, signer: str) -> EscrowReceipt:\n"
             "        with self.tx():\n"
-            "            old = self._existing(op.operation_id, op.model_dump_json())"
+            "            old = self._existing(op.operation_id, op.model_dump_json(), server=False)"
         ),
         "tests": [OWNER_MATRIX, OWNER_HTTP],
         "why": "transfer looks up its replay without asking who signed: any key moves any units.",
@@ -106,10 +111,10 @@ MUTANTS = [
         "path": ESCROW,
         "old": (
             '        if signer != op.owner:\n            raise EscrowError("OWNER_AUTHORITY")\n'
-            "        return self._existing(op.operation_id, op.model_dump_json())"
+            "        return self._existing(op.operation_id, op.model_dump_json(), server=server)"
         ),
         "new": (
-            "        old = self._existing(op.operation_id, op.model_dump_json())\n"
+            "        old = self._existing(op.operation_id, op.model_dump_json(), server=server)\n"
             "        if old is None and signer != op.owner:\n"
             '            raise EscrowError("OWNER_AUTHORITY")\n'
             "        return old"
@@ -193,12 +198,11 @@ MUTANTS = [
         "id": "el-release-lock-kind-unchecked",
         "invariants": ["ESC-09"],
         "path": ESCROW,
-        "old": (
-            '            if lock is None or lock["kind"] not in ("LOCK_ADMISSION", "LOCK_CONTEST"):'
-        ),
-        "new": "            if lock is None:",
+        "old": KIND_GATE,
+        "new": "",
         "tests": [RELEASE_LAWS],
-        "why": "any recorded event, a transfer for one, is accepted as the lock to release.",
+        "why": "lock_status answers for any recorded event, a transfer for one, so a release can "
+        "name it as the lock (the kind test inside release is shadowed by this gate).",
     },
     {
         "id": "el-release-dispute-reference-ignored",
@@ -241,12 +245,11 @@ MUTANTS = [
         "id": "el-slash-lock-kind-unchecked",
         "invariants": ["ESC-14"],
         "path": ESCROW,
-        "old": (
-            '            if row is None or row["kind"] not in ("LOCK_ADMISSION", "LOCK_CONTEST"):'
-        ),
-        "new": "            if row is None:",
+        "old": KIND_GATE,
+        "new": "",
         "tests": [SLASH_REFERENCES],
-        "why": "any recorded event, a transfer for one, is accepted as the lock to slash.",
+        "why": "lock_status answers for any recorded event, a transfer for one, so a slash can "
+        "name it as the lock (the kind test inside slash is shadowed by this gate).",
     },
     {
         "id": "el-slash-authority-unchecked",
@@ -406,7 +409,7 @@ MUTANTS = [
         "id": "el-finalize-order-unchecked",
         "invariants": ["ESC-20"],
         "path": ESCROW,
-        "old": "            if number != (last + 1 if last is not None else 0):",
+        "old": "            if number != expected:",
         "new": "            if False:",
         "tests": [ROUND_ORDER],
         "why": "a reward round can be issued before the rounds that precede it.",
@@ -457,7 +460,10 @@ MUTANTS = [
         "id": "el-verify-receipt-operation-unchecked",
         "invariants": ["ESC-22"],
         "path": ESCROW,
-        "old": '                or receipt.operation_id != row["operation_id"]\n',
+        "old": (
+            '                or not self._binds(row["operation_id"], row["kind"], '
+            "receipt.operation_id)\n"
+        ),
         "new": "",
         "tests": [REOPEN],
         "why": "reopening no longer checks that a stored receipt belongs to its event.",
@@ -488,14 +494,11 @@ MUTANTS = [
         "invariants": ["ESC-06"],
         "path": ESCROW,
         "old": (
-            "    def _event(self, operation_id: str, kind: str, request: str, owner: str)"
-            " -> EscrowReceipt:\n"
+            "        key = self._key(operation_id, server)\n"
             "        self._conservation()\n"
+            "        last = self.db.execute(\n"
         ),
-        "new": (
-            "    def _event(self, operation_id: str, kind: str, request: str, owner: str)"
-            " -> EscrowReceipt:\n"
-        ),
+        "new": "        key = self._key(operation_id, server)\n        last = self.db.execute(\n",
         "tests": [STRAY_UNIT],
         "why": "an event no longer re-checks conservation before it is recorded.",
     },
@@ -512,8 +515,12 @@ MUTANTS = [
         "id": "el-stake-ignores-admission",
         "invariants": ["LCK-10", "LCK-11"],
         "path": ESCROW,
-        "old": "            if op.admission_id == admission_id and op.owner == owner:",
-        "new": "            if op.owner == owner:",
+        "old": (
+            "            \"AND json_extract(e.request,'$.admission_id')=? \"\n"
+            '            "GROUP BY e.seq ORDER BY e.seq",\n'
+            "            (owner, admission_id),\n"
+        ),
+        "new": '            "GROUP BY e.seq ORDER BY e.seq",\n            (owner,),\n',
         "tests": [STAKE_COUNT, ONE_BACKING],
         "why": "the stake of one admission counts the locks of every admission of the coldkey.",
     },
@@ -522,18 +529,18 @@ MUTANTS = [
         "invariants": ["LCK-10"],
         "path": ESCROW,
         "old": (
-            "            if op.admission_id == admission_id and op.owner == owner:\n"
-            "                amount = self.db.execute(\n"
-            '                    "SELECT COALESCE(SUM(units),0) FROM escrow_units WHERE "\n'
-            "                    \"bucket='admission_locked' AND ref=? AND owner=?\",\n"
-            "                    (op.operation_id, owner),\n"
+            "            \"WHERE u.bucket='admission_locked' AND u.units>0 AND u.owner=? \"\n"
+            "            \"AND json_extract(e.request,'$.owner')=u.owner \"\n"
+            "            \"AND json_extract(e.request,'$.admission_id')=? \"\n"
+            '            "GROUP BY e.seq ORDER BY e.seq",\n'
+            "            (owner, admission_id),\n"
         ),
         "new": (
-            "            if op.admission_id == admission_id:\n"
-            "                amount = self.db.execute(\n"
-            '                    "SELECT COALESCE(SUM(units),0) FROM escrow_units WHERE "\n'
-            "                    \"bucket='admission_locked' AND ref=?\",\n"
-            "                    (op.operation_id,),\n"
+            "            \"WHERE u.bucket='admission_locked' AND u.units>0 \"\n"
+            "            \"AND json_extract(e.request,'$.owner')=u.owner \"\n"
+            "            \"AND json_extract(e.request,'$.admission_id')=? \"\n"
+            '            "GROUP BY e.seq ORDER BY e.seq",\n'
+            "            (admission_id,),\n"
         ),
         "tests": [STAKE_COUNT],
         "why": "the stake of an admission counts locks that another owner placed on it.",

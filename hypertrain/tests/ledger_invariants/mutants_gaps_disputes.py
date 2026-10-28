@@ -82,35 +82,17 @@ RESERVATION_QUERY = (
     "                ).fetchone()"
 )
 CONVICTION = '                            admission.settle_fraud(result["dispute_id"], now=now)\n'
-ELIGIBILITY_REFUSAL = (
-    '                raise ChallengeError(403, "current admission funding/identity no longer '
-    'eligible")\n'
+UNFIT_CALL = "            self._exclude_unfit_members_v2(run_id, w)\n"
+UNFIT_SUSPENDED = "            return record.state\n"
+UNFIT_SUSPENDED_IS_FIT = (
+    '            return None if record.state == "SUSPENDED" else record.state\n'
 )
-SKIP_SAME_IDENTITY = (
-    "                if status.record.admission_id == entry.admission_id:\n"
-    "                    continue\n"
+UNFIT_NOT_LIVE = '            return "NOT_LIVE"\n'
+UNFIT_NOT_LIVE_IS_FIT = "            return None\n"
+CLOSED_ROUND_WITHDRAWN = (
+    "            closure = self.round_closure(w) if self.round_closure and w < below else None\n"
 )
-FINALIZE_ORDER = (
-    "            if number != (last + 1 if last is not None else 0):\n"
-    '                raise EscrowError("FINALIZE_ORDER")'
-)
-SKIP_RETIRED_ROUNDS = (
-    "            expected = last + 1 if last is not None else 0\n"
-    "            if isinstance(reward, RewardFinalize):\n"
-    "                retired = {\n"
-    "                    int(row[0])\n"
-    "                    for row in self.db.execute(\n"
-    "                        \"SELECT id FROM records_v2 WHERE run_id=? AND kind='finality' \"\n"
-    "                        \"AND json_extract(data,'$.disposition')='EXCLUDED' \"\n"
-    "                        \"AND json_extract(data,'$.rollback_complete')=1\",\n"
-    "                        (self.run_id,),\n"
-    "                    )\n"
-    "                }\n"
-    "                while expected in retired:\n"
-    "                    expected += 1\n"
-    "            if number != expected:\n"
-    '                raise EscrowError("FINALIZE_ORDER")'
-)
+CLOSED_ROUND_NEVER_WITHDRAWN = "            closure = None\n"
 ORIGIN_FOLLOWS_DISPUTE = (
     "        if row is None:\n"
     '            raise EscrowError("UNACCEPTED_SETTLEMENT")\n'
@@ -145,22 +127,21 @@ ANY_DISPUTE_HOLDS_ORIGIN = (
     '            return settled.model_copy(update={"unresolved": True})\n'
     "        return settled\n"
 )
-NEUTRAL_UNBOUND_BOND = (
-    "        if row is None:\n"
-    "            event = self._db.execute(\n"
-    '                "SELECT kind FROM escrow_events WHERE operation_id=?", (reference,)\n'
-    "            ).fetchone()\n"
-    '            if event is not None and event[0] == "LOCK_CONTEST":\n'
-    '                zero = "00" * 32\n'
-    "                return Settlement(\n"
-    "                    finality_hash=zero,\n"
-    "                    closed_dispute_root=zero,\n"
-    "                    release_beacon=0,\n"
-    "                    unresolved=False,\n"
-    '                    outcome="MATCH",\n'
-    "                )\n"
+UNBOUND_CONTEST_BOND = (
+    "        if row is None or Turn.model_validate_json(row[0]).lock_id != lock.operation_id:\n"
     '            raise EscrowError("UNACCEPTED_SETTLEMENT")\n'
-    "        return Settlement.model_validate_json(row[0])\n"
+)
+NEUTRAL_UNBOUND_BOND = (
+    "        if row is None or Turn.model_validate_json(row[0]).lock_id != lock.operation_id:\n"
+    '            zero = "00" * 32\n'
+    "            return Settlement(\n"
+    "                finality_hash=zero,\n"
+    "                closed_dispute_root=zero,\n"
+    "                release_beacon=0,\n"
+    "                unresolved=False,\n"
+    '                outcome="MATCH",\n'
+    "                dispute_id=lock.dispute_id,\n"
+    "            )\n"
 )
 ANY_RESERVATION_HOLDS = (
     '                    "SELECT 1 FROM records_v2 WHERE run_id=? '
@@ -301,6 +282,46 @@ MUTANTS = [
         "tests": [WINDOWS + "[completed-attempt-of-another-window]"],
         "why": "A finished rollback of one window turns away the rollback of the next one.",
     },
+    {
+        "id": "gap-the-aggregate-keeps-a-member-that-is-not-eligible-any-more",
+        "invariants": ["DIB-04", "DIB-05"],
+        "path": STORE,
+        "old": UNFIT_CALL,
+        "new": "",
+        "tests": [OWN_MATCH, BACK_FROM_CONTEST],
+        "why": "The aggregate no longer leaves out an audited member whose admission stopped "
+        "qualifying it, so that one member answers 403 for the whole roster.",
+    },
+    {
+        "id": "gap-a-suspended-contester-is-taken-for-fit-by-the-aggregate",
+        "invariants": ["DIB-04", "DIB-05"],
+        "path": STORE,
+        "old": UNFIT_SUSPENDED,
+        "new": UNFIT_SUSPENDED_IS_FIT,
+        "tests": [OWN_MATCH],
+        "why": "A member suspended by its own contest is not named unfit, so the real round of "
+        "the four others is refused for it.",
+    },
+    {
+        "id": "gap-a-member-back-on-probation-is-taken-for-fit-by-the-aggregate",
+        "invariants": ["DIB-04", "DIB-05"],
+        "path": STORE,
+        "old": UNFIT_NOT_LIVE,
+        "new": UNFIT_NOT_LIVE_IS_FIT,
+        "tests": [BACK_FROM_CONTEST],
+        "why": "A member back from a closed contest, on probation without a clean round, is not "
+        "named unfit, so the round of the four others is refused for it.",
+    },
+    {
+        "id": "gap-a-round-closed-by-a-rollback-blocks-the-credit-order",
+        "invariants": ["DIB-21", "CRD-04"],
+        "path": ESCROW,
+        "old": CLOSED_ROUND_WITHDRAWN,
+        "new": CLOSED_ROUND_NEVER_WITHDRAWN,
+        "tests": [ROLLBACK_PAID],
+        "why": "The ledger never withdraws a round that finality closed without a reward, so "
+        "the round after a rollback is refused FINALIZE_ORDER for ever.",
+    },
     # --- fix proofs: each closes a hole recorded by a strict xfail of the wave -----------------
     {
         "id": "fixproof-final-op-is-answered-on-the-op",
@@ -331,33 +352,6 @@ MUTANTS = [
         "why": "FIX PROOF: the release of a dispute bond is keyed by a secret no bystander has.",
     },
     {
-        "id": "fixproof-an-ineligible-member-is-left-out-of-a-recovered-round",
-        "invariants": ["DIB-04", "DIB-05"],
-        "path": STORE,
-        "old": ELIGIBILITY_REFUSAL,
-        "new": SKIP_SAME_IDENTITY + ELIGIBILITY_REFUSAL,
-        "tests": [BACK_FROM_CONTEST],
-        "why": "FIX PROOF: a roster member that is not eligible now is skipped, not fatal for all.",
-    },
-    {
-        "id": "fixproof-an-ineligible-member-is-left-out-of-the-real-round",
-        "invariants": ["DIB-04", "DIB-05"],
-        "path": STORE,
-        "old": ELIGIBILITY_REFUSAL,
-        "new": SKIP_SAME_IDENTITY + ELIGIBILITY_REFUSAL,
-        "tests": [OWN_MATCH],
-        "why": "FIX PROOF: the real five-member round is aggregated and paid without the opener.",
-    },
-    {
-        "id": "fixproof-rounds-closed-by-a-rollback-are-skipped-in-the-credit-order",
-        "invariants": ["DIB-21", "CRD-04"],
-        "path": ESCROW,
-        "old": FINALIZE_ORDER,
-        "new": SKIP_RETIRED_ROUNDS,
-        "tests": [ROLLBACK_PAID],
-        "why": "FIX PROOF: a round a rollback closed without reward no longer blocks the next.",
-    },
-    {
         "id": "fixproof-a-reward-origin-follows-its-miners-dispute",
         "invariants": ["DIB-07", "DIB-17"],
         "path": STORE,
@@ -369,8 +363,8 @@ MUTANTS = [
     {
         "id": "fixproof-an-unbound-contest-bond-is-releasable",
         "invariants": ["DIA-25", "CL-15"],
-        "path": STORE,
-        "old": SETTLEMENT_LOOKUP,
+        "path": DISPUTES,
+        "old": UNBOUND_CONTEST_BOND,
         "new": NEUTRAL_UNBOUND_BOND,
         "tests": [BOND_BACK],
         "why": "FIX PROOF: a contest bond no dispute is bound to is settled as a neutral MATCH.",

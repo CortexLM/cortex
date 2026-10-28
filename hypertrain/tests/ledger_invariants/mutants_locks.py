@@ -332,10 +332,8 @@ SLASH_ON_FRAUD = """\
 SLASH_NEVER = """\
                 and status.loser == turn.contest.auditor
 """
-LOCK_KIND_RESOLVER = (
-    '        if row is not None and row["kind"] == "LOCK_ADMISSION"'
-    " and self.admission_settlement:\n"
-)
+LOCK_KIND_RESOLVER = "            return self.admission_settlement(lock_id)\n"
+LOCK_GENERIC_RESOLVER = "            return self.settlement(lock_id)\n"
 LIVE_HOLD = "            release = max(release, r.screen_until + 1)\n"
 OPEN_ROUND_HOLD = "            unresolved = unresolved or status is None or not status.closed\n"
 OPEN_ROUND_IGNORED = "            unresolved = unresolved or status is None\n"
@@ -805,7 +803,7 @@ MUTANTS = [
         "invariants": ["ESC-10", "ES-05", "LCK-04"],
         "path": LEDGER,
         "old": LOCK_KIND_RESOLVER,
-        "new": "        if False:\n",
+        "new": LOCK_GENERIC_RESOLVER,
         "tests": [NAMED_AFTER + "[a settled reward origin]", BORROWED_SETTLEMENT],
         "why": "an admission lock is settled by the callback that answers by id for every object.",
     },
@@ -814,7 +812,7 @@ MUTANTS = [
         "invariants": ["ES-05", "LCK-04"],
         "path": LEDGER,
         "old": LOCK_KIND_RESOLVER,
-        "new": "        if False:\n",
+        "new": LOCK_GENERIC_RESOLVER,
         "tests": [NAMED_AFTER + "[a closed dispute]"],
         "why": "a live admission's stake named like a closed dispute is released by that dispute.",
     },

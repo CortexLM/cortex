@@ -129,8 +129,8 @@ MUTANTS = [
         "id": "exit-roster-ledger-demands-a-round-nobody-finalized",
         "invariants": ["CRD-04", "FIN-08", "A2W-22"],
         "path": "src/hypertrain/ledger/escrow_v2.py",
-        "old": "if number != (last + 1 if last is not None else 0):",
-        "new": "if number != (last + 2 if last is not None else 0):",
+        "old": "            while w in accounted:\n                w += 1\n",
+        "new": "            while w in accounted:\n                w += 2\n",
         "tests": [T + "test_a_round_after_a_round_with_a_lost_member_is_credited"],
         "why": "The ledger waits for a round that no finalize will ever credit, so the round after "
         "a settled one is refused FINALIZE_ORDER.",
@@ -152,8 +152,10 @@ MUTANTS = [
         "id": "exit-roster-delta-stage-not-wired",
         "invariants": ["A2W-21"],
         "path": STORE,
-        "old": "            self._exclude_missing_deltas_v2(run_id, w)\n            inputs =",
-        "new": "            inputs =",
+        "old": "            self._exclude_missing_deltas_v2(run_id, w)\n"
+        "            self._exclude_unfit_members_v2(run_id, w)\n"
+        "            inputs =",
+        "new": "            self._exclude_unfit_members_v2(run_id, w)\n            inputs =",
         "tests": [NO_SHOW_E2E + "test_a_member_that_commits_but_never_uploads_a_delta_is_left_out"],
         "why": "An audited member whose delta never arrives stops the aggregation of the round.",
     },

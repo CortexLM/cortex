@@ -182,6 +182,18 @@ MUTANTS: list[dict[str, Any]] = [
         "tests": [VESTING],
         "why": "The vesting span is one beacon shorter than the manifest says.",
     },
+    # --- T-CRD-16: a Finalize after d_final ----------------------------------------------------
+    {
+        "id": "gapledger-the-ledger-judges-the-audit-challenge-at-the-finalize-beacon",
+        "invariants": ["CRD-15", "CL-10"],
+        "path": ESCROW,
+        "old": 'item.challenge.model_dump(mode="json"), self._accepted(item.challenge, evidence)',
+        "new": 'item.challenge.model_dump(mode="json"), evidence.finalized_beacon',
+        "tests": [AFTER_D_FINAL],
+        "why": "The ledger judges the signed audit challenge at the beacon of the Finalize again, "
+        "so a Finalize one beacon after d_final finds the challenge expired and the round "
+        "stays PENDING with every retry refused.",
+    },
     # --- T-CRD-18: ownership through a rotation ------------------------------------------------
     {
         "id": "gapledger-a-payment-rewrites-the-owner-of-the-units-to-the-hotkey",
@@ -198,18 +210,6 @@ MUTANTS: list[dict[str, Any]] = [
         "hotkey the weights name, the shape of a naive fix for the rotated payee.",
     },
     # --- fix proofs: each closes a hole recorded by a strict xfail of the wave -----------------
-    {
-        "id": "fixproof-an-audit-challenge-outlives-d-final",
-        "invariants": ["CRD-15", "CL-10"],
-        "path": STORE,
-        "old": '                    self._coord(), "AuditChallengeV2", run_id, challenge, '
-        "absolute\n",
-        "new": '                    self._coord(), "AuditChallengeV2", run_id, challenge, '
-        "absolute + 100_000\n",
-        "tests": [AFTER_D_FINAL],
-        "why": "FIX PROOF: the signed challenge stays valid long after d_final, so a late Finalize "
-        "is re-accepted by the ledger and the round settles.",
-    },
     {
         "id": "fixproof-the-units-of-a-rotated-miner-follow-its-admission",
         "invariants": ["CRD-12", "WGT-13", "CL-29"],
@@ -267,29 +267,15 @@ MUTANTS: list[dict[str, Any]] = [
     },
     # --- T-CRD-13: the credit order after a rollback ---------------------------------------------
     {
-        "id": "fixproof-the-first-round-after-a-rollback-is-credited-on-the-service",
+        "id": "gapledger-the-service-gives-the-ledger-no-closed-round",
         "invariants": ["CRD-04", "CL-04"],
-        "path": ESCROW,
-        "old": """            if number != (last + 1 if last is not None else 0):
-                raise EscrowError("FINALIZE_ORDER")""",
-        "new": """            expected = last + 1 if last is not None else 0
-            if isinstance(reward, RewardFinalize):
-                retired = {
-                    int(row[0])
-                    for row in self.db.execute(
-                        "SELECT id FROM records_v2 WHERE run_id=? AND kind='finality' "
-                        "AND json_extract(data,'$.disposition')='EXCLUDED' "
-                        "AND json_extract(data,'$.rollback_complete')=1",
-                        (self.run_id,),
-                    )
-                }
-                while expected in retired:
-                    expected += 1
-            if number != expected:
-                raise EscrowError("FINALIZE_ORDER")""",
+        "path": STORE,
+        "old": "                round_closure=lambda w: self._round_closure_v2(run_id, w),\n",
+        "new": "",
         "tests": [FIRST_AFTER_ROLLBACK],
-        "why": "FIX PROOF: a round a rollback closed without reward no longer blocks the next "
-        "one, on the real service (the same change as the disputes wave's ledger-level proof).",
+        "why": "The service builds its ledger without the closure of a round, so a round that a "
+        "rollback closed without reward is never withdrawn and the first round after it is "
+        "refused FINALIZE_ORDER for ever.",
     },
     # --- M-02: a repaired round ------------------------------------------------------------------
     {

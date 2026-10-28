@@ -591,8 +591,8 @@ MUTANTS = [
         "path": ADMISSION,
         "old": """            if r.state == "BANNED":
                 raise AdmissionError("TERMINAL_BANNED")
-            self.store.quota(""",
-        "new": """            self.store.quota(""",
+            if self.open_rounds(r.admission_id):""",
+        "new": """            if self.open_rounds(r.admission_id):""",
         "tests": [BANNED_ROTATION],
         "why": "a banned admission moves to a fresh hotkey and keeps operating under it.",
     },

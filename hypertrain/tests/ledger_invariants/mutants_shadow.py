@@ -88,13 +88,14 @@ MUTANTS = [
         "invariants": ["SHD-01", "SHD-13"],
         "path": LEDGER,
         "old": (
-            "            old = self._existing(operation, request)\n"
+            "            old = self._existing(operation, request, server=True)\n"
             "            if old is not None:\n"
             "                return old\n"
             "            if origins is None:"
         ),
         "new": (
-            "            old = self._existing(operation, request)\n            if origins is None:"
+            "            old = self._existing(operation, request, server=True)\n"
+            "            if origins is None:"
         ),
         "tests": [ledger(CREDITED_ONCE), ledger(REOPENED_RETURNS)],
         "why": (

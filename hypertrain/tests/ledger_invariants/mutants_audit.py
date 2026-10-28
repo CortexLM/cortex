@@ -299,8 +299,11 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-finalize-trusts-the-requested-included-set",
         "invariants": ["A2W-10", "A2W-11"],
         "path": STORE,
-        "old": "included = sorted(x.roster.hotkey for x in self.verified_inputs_v2(run_id, w))",
-        "new": "included = sorted(model.included)",
+        "old": "            included = sorted(\n"
+        '                item["roster"]["hotkey"]\n'
+        '                for item in self._record_v2(run_id, "tape-inputs", str(w))["inputs"]\n'
+        "            )\n",
+        "new": "            included = sorted(model.included)\n",
         "tests": [ABSENT],
         "why": "the coordinator's included set replaces the audited one.",
     },

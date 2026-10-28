@@ -15,9 +15,9 @@ LEDGER = "src/hypertrain/ledger/escrow_v2.py"
 GAPS = "tests/ledger_invariants/test_gaps_admission_lock.py::"
 ONE_STAKE_ONE_ADMISSION = GAPS + "test_one_stake_backs_exactly_one_admission_of_a_coldkey"
 ACCEPT_STAKE = GAPS + "test_an_accept_is_refused_when_the_stake_of_the_miner_fell_after_the_opening"
-INPUT_STAKE_AFTER_AGGREGATION = (
+PAID_AFTER_AGGREGATION = (
     "tests/ledger_invariants/test_gaps_admission_lock_2.py::"
-    "test_a_finalize_after_the_aggregation_mints_nothing_for_a_member_whose_stake_fell"
+    "test_a_finalize_after_the_aggregation_pays_a_member_whose_stake_fell"
 )
 DISPUTE_WON = GAPS + "test_a_reward_origin_vests_after_a_dispute_the_miner_won"
 ROTATION_LAB = GAPS + "test_a_hotkey_without_an_admission_history_cannot_be_rotated"
@@ -27,22 +27,22 @@ ROTATION_ROUTE = (
 RESERVATION = GAPS + "test_a_reservation_names_the_accepted_execution_it_cannot_find"
 BEACON_WORK = GAPS + "test_one_poisoned_shadow_origin_never_stops_the_work_of_a_beacon[none]"
 
-STAKE_OF_ONE_ADMISSION = "            if op.admission_id == admission_id and op.owner == owner:"
-STAKE_OF_THE_COLDKEY = "            if op.owner == owner:"
+STAKE_OF_ONE_ADMISSION = "            \"AND json_extract(e.request,'$.admission_id')=? \"\n"
+STAKE_OF_THE_COLDKEY = '            "AND ? IS NOT NULL "\n'
 ACCEPT_CHECK = """\
                     not status.eligible
                     or model.work_screen_hash"""
 ACCEPT_BLIND_TO_THE_STAKE = """\
                     not (status.eligible or status.funding.locked_units > 0)
                     or model.work_screen_hash"""
-INPUT_CHECK = """\
-            if not status.eligible or status.record.admission_id != entry.admission_id:
+FINALIZE_PAYS_THE_TAPE = """\
+            included = sorted(
+                item["roster"]["hotkey"]
+                for item in self._record_v2(run_id, "tape-inputs", str(w))["inputs"]
+            )
 """
-INPUT_BLIND_TO_THE_STAKE = """\
-            if (
-                not (status.eligible or status.funding.locked_units > 0)
-                or status.record.admission_id != entry.admission_id
-            ):
+FINALIZE_ASKS_THE_ADMISSIONS_AGAIN = """\
+            included = sorted(x.roster.hotkey for x in self.verified_inputs_v2(run_id, w))
 """
 SETTLEMENT_OF_AN_ORIGIN = "        return Settlement.model_validate_json(row[0])\n"
 SETTLEMENT_HELD_BY_ANY_DISPUTE = """\
@@ -109,13 +109,14 @@ MUTANTS = [
         "why": "an accept is served to a member holding part of the required stake.",
     },
     {
-        "id": "gal-finalize-input-is-blind-to-the-stake",
+        "id": "gal-finalize-asks-the-admissions-again-after-the-aggregation",
         "invariants": ["LCK-01", "T-LOCK-04"],
         "path": STORE,
-        "old": INPUT_CHECK,
-        "new": INPUT_BLIND_TO_THE_STAKE,
-        "tests": [INPUT_STAKE_AFTER_AGGREGATION],
-        "why": "the reward inputs are built for a member holding part of the required stake.",
+        "old": FINALIZE_PAYS_THE_TAPE,
+        "new": FINALIZE_ASKS_THE_ADMISSIONS_AGAIN,
+        "tests": [PAID_AFTER_AGGREGATION],
+        "why": "the finalize of an applied round re-derives its members from the live admissions, "
+        "so one member whose stake fell after the aggregation freezes the round for all.",
     },
     {
         "id": "gal-a-settled-dispute-holds-the-origin-for-ever",

@@ -70,8 +70,8 @@ MUTANTS = [
         "credit-finalize-order-allows-gaps",
         ["CRD-03"],
         ESCROW,
-        "if number != (last + 1 if last is not None else 0):",
-        "if number < (last + 1 if last is not None else 0):",
+        "if number != expected:",
+        "if number < expected:",
         [C1 + "test_finalize_order_is_strict_and_a_replay_is_answered_before_the_order_test"],
         "round 1 or a round that skips one is credited before its predecessor.",
     ),
@@ -369,7 +369,9 @@ MUTANTS = [
         "credit-genesis-origin-id-unbound",
         ["CRD-16"],
         ESCROW,
-        "if o.origin_id != genesis_origin_id(self.run_id, genesis.allocation_hash, i):",
+        "if o.origin_id != genesis_origin_id(\n"
+        "                    self.run_id, genesis.allocation_hash, i, self._origin_key()\n"
+        "                ):",
         "if False:",
         [
             C2 + "test_a_genesis_that_is_not_the_pinned_one_is_refused_with_its_code"
@@ -559,12 +561,15 @@ MUTANTS = [
     mutant(
         "credit-services-build-commits-the-open-transaction",
         ["CRD-05"],
-        ESCROW,
-        '        self.db.execute("PRAGMA synchronous=FULL")\n',
-        "",
+        STORE,
+        "        namespace = sha256_hex(key)\n        with self._tx() as db:\n",
+        "        namespace = sha256_hex(key)\n"
+        "        if self._db.in_transaction:\n"
+        '            self._db.execute("COMMIT")\n'
+        "        with self._tx() as db:\n",
         [C2 + "test_building_the_services_inside_a_transaction_never_commits_it_half_way"],
-        "the service constructors commit an open store transaction on the first call after a "
-        "restart.",
+        "the service builder commits the open store transaction to make room for its own key "
+        "transaction, so the rollback of a failed finalize no longer undoes what it wrote.",
     ),
     mutant(
         "credit-finalize-takes-any-included-set",
@@ -693,9 +698,8 @@ MUTANTS = [
         "credit-service-ledger-runs-a-quorum",
         ["CRD-07"],
         STORE,
-        SHADOW_SETTLEMENT_ARGUMENT + "            )\n            escrow.mutex",
-        SHADOW_SETTLEMENT_ARGUMENT + "                auditor_quorum=(1, 1),\n"
-        "            )\n            escrow.mutex",
+        SHADOW_SETTLEMENT_ARGUMENT,
+        SHADOW_SETTLEMENT_ARGUMENT + "                auditor_quorum=(1, 1),\n",
         [QUORUM],
         "the service switches the auditor quorum on without supplying the extra verdicts.",
     ),
