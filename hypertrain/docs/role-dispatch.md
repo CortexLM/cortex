@@ -30,7 +30,7 @@ dispatched result (`role_dispatch.py:55-79`) and checked by CUDA audits (`store.
   same-host harness (`serve_challenge.py`, dispatch unset) instead.
 - **Any od-base run** (`training.model.arch` `od-encoder`), TEST or production: needs the file
   **and** the issue #25 fix (workload promotion for od-encoder, a host field). The file alone
-  is not enough. `roles` already maps several hotkeys; only `launch_cuda_run.sh:248` rewrites it
+  is not enough. `roles` already maps several hotkeys; only `launch_cuda_run.sh:273` rewrites it
   to one.
 
 ## The TEST run file
