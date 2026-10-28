@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from env_pin_fixtures import honest_env
 from hypertrain.challenge.store import ChallengeError
 from hypertrain.ledger.escrow_v2 import EscrowError
 from hypertrain.protocol.envelope_v2 import seal
@@ -177,6 +178,7 @@ def build_small_audited_round(
             )
             assert locked.status_code == 200, locked.text
             screen = WorkScreenV2(
+                env=honest_env(),
                 evidence_kind="work-proof-v1",
                 admission_id=identity,
                 nonce=sha256_hex(b"nonce"),

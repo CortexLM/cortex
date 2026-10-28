@@ -23,6 +23,7 @@ from typing import Any, NamedTuple
 import httpx
 from fastapi.testclient import TestClient
 
+from env_pin_fixtures import honest_env
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import REQUEST_HORIZON
 from hypertrain.protocol.server_keys import (
@@ -589,6 +590,7 @@ def open_round(world: World, count: int = 4) -> list[Keypair]:
         )
         assert locked.status_code == 200, locked.text
         screen = WorkScreenV2(
+            env=honest_env(),
             evidence_kind="work-proof-v1",
             admission_id=identity,
             nonce=sha256_hex(b"nonce"),

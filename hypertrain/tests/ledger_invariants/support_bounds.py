@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from env_pin_fixtures import honest_env
 from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.admission_store import AdmissionStore
 from hypertrain.challenge.store import ChallengeStore
@@ -743,6 +744,7 @@ def activate_identity(world: Any, index: int = 0) -> str:
     assert locked.status_code == 200, locked.text
     reference = network.manifest.training.reference_spec
     screen = WorkScreenV2(
+        env=honest_env(),
         evidence_kind="work-proof-v1",
         admission_id=identity,
         nonce=sha256_hex(b"nonce"),

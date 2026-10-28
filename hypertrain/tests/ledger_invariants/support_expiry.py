@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
+from env_pin_fixtures import honest_env
 from hypertrain.auditor.replay import AnchorCache, optimizer_hash, pack_state
 from hypertrain.protocol import relay_envelope
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
@@ -184,6 +185,7 @@ def activate(world: World, count: int) -> None:
         )
         control(response.status_code == 200, f"lock {i}: {response.text}")
         screen = WorkScreenV2(
+            env=honest_env(),
             evidence_kind="work-proof-v1",
             admission_id=identity,
             nonce=sha256_hex(b"nonce"),

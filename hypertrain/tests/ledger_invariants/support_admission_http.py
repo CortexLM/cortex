@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 from fastapi.testclient import TestClient
 
+from env_pin_fixtures import honest_env
 from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.miner import admission as miner_admission
@@ -149,6 +150,7 @@ class Gate:
             expires_beacon=expires,
             policy_hash=policy_hash or self.network.manifest.network.admission_policy_hash,
             hardware_hint=HardwareHint(device_name="cpu", device_count=1, driver="cpu"),
+            env=honest_env(),
         )
 
     def post_join(self, request: JoinRequest | dict[str, Any]) -> httpx.Response:
