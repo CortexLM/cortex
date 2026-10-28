@@ -9,6 +9,7 @@ its claim read: whatever moved while the launch ran, the result is dropped and n
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -87,12 +88,17 @@ def test_the_run_reads_no_database_and_asks_for_no_qualification(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
-    "update",
-    [{"sample_ids": [0]}, {"w": 99}],
+    "other",
+    [
+        # derived from the real job: the samples of a trial follow a random nonce, and a fixed
+        # "other" list was the real one in about one run of eight
+        lambda job: {"sample_ids": [sample + 1 for sample in job.sample_ids]},
+        lambda job: {"w": job.w + 99},
+    ],
     ids=["other samples", "other trial epoch"],
 )
 def test_a_staging_for_another_assignment_never_reaches_the_launch(
-    tmp_path: Path, update: dict[str, Any]
+    tmp_path: Path, other: Callable[[Any], dict[str, Any]]
 ) -> None:
     s = fx.setup()
     a = fx.service(s, tmp_path)
@@ -101,7 +107,8 @@ def test_a_staging_for_another_assignment_never_reaches_the_launch(
     claim = a.claim_reference(admission, now=2)
     assert isinstance(claim, ReferenceClaim)
     job, directory = claim.stage()
-    assert job.sample_ids != update.get("sample_ids")
+    update = other(job)
+    assert all(getattr(job, name) != value for name, value in update.items())
     wrong = replace(claim, stage=lambda: (job.model_copy(update=update), directory))
 
     def launched(*args: Any) -> Any:
