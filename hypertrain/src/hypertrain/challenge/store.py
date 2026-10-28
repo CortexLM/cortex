@@ -7387,11 +7387,14 @@ class ChallengeStore:
         0011 Part 8, D86): the action of `no_show_action` and, for COVERED, the contest that
         sanctioned the member.
 
-        A contest the member lost counts when it ended after the round opened: the member was
-        eligible when the roster was drawn, so an older one cannot have kept it from the round. An
-        open contest counts whenever it was opened, for the same reason."""
+        Only a contest opened before the bound of the stage the member missed counts: from the
+        bound on the Accept window is over and the member is already absent, so a contest opened
+        later explains nothing. A contest the member lost counts besides when it ended after the
+        round opened (the member was eligible when the roster was drawn, so an older loss kept it
+        from nothing). The wait ends at the dispute bound, `BOUNDS[Wait.DISPUTE]`, even if the
+        dispute reaper is out: a round cannot close while a contest of its own round is open, so
+        the closing of the round needs no clause of its own."""
         from hypertrain.challenge.disputes_v2 import Turn
-        from hypertrain.challenge.finality_v2 import RoundStatus
         from hypertrain.protocol.messages_v2 import RoundOpenV2
 
         text, hotkey = identity.split(":", 1)
@@ -7410,13 +7413,6 @@ class ChallengeStore:
         audit = AuditPolicyV2.model_validate_json(
             self.objects.get(manifest.network.audit_policy_hash)
         )
-        lost = [
-            turn.dispute_id
-            for turn in turns
-            if turn.resolution is not None
-            and turn.resolution.loser == turn.contest.miner
-            and (turn.resolved_beacon or 0) >= body.d_open
-        ]
         schedule = Schedule(
             now=now,
             d_commit=body.d_commit,
@@ -7425,13 +7421,35 @@ class ChallengeStore:
             d_final=body.d_final,
             lease_rounds=audit.lease_rounds,
         )
-        status = RoundStatus(**self._record_v2(run_id, "finality", text))
+        stage = {"commit": Wait.COMMIT, "leaves": Wait.LEAVES, "delta": Wait.DELTA}[record["stage"]]
+        counted = [
+            turn
+            for turn in turns
+            if self._dispute_opened_v2(turn.dispute_id) < BOUNDS[stage](schedule)
+        ]
+        lost = [
+            turn.dispute_id
+            for turn in counted
+            if turn.resolution is not None
+            and turn.resolution.loser == turn.contest.miner
+            and (turn.resolved_beacon or 0) >= body.d_open
+        ]
         action = no_show_action(
-            contest_open=any(turn.resolution is None for turn in turns),
+            contest_open=any(turn.resolution is None for turn in counted),
             contest_lost=bool(lost),
-            bound_reached=status.closed or now >= BOUNDS[Wait.DISPUTE](schedule),
+            bound_reached=now >= BOUNDS[Wait.DISPUTE](schedule),
         )
         return action, lost[0] if action == "COVERED" else None
+
+    def _dispute_opened_v2(self, dispute_id: str) -> int:
+        """The beacon round a dispute was opened at: the issue of its first event. A dispute
+        without an event, which `DisputesV2.open` never leaves, counts as opened at the start."""
+        row = self._db.execute(
+            "SELECT json_extract(event,'$.issued_beacon') FROM dispute_events_v2 "
+            "WHERE json_extract(event,'$.turn.dispute_id')=? ORDER BY cursor LIMIT 1",
+            (dispute_id,),
+        ).fetchone()
+        return 0 if row is None else int(row[0])
 
     def _mismatch_decision_v2(self, run_id: str, record: dict[str, Any], now: int) -> str | None:
         """What a pending mismatch sanction does at this push (ADR 0011 Part 8, decisions 16-18):

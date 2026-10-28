@@ -8,8 +8,10 @@ silence as a NO_SHOW. The NO_SHOW sanction then waits for the contest to end:
 - the member lost it (a referee finding against it, a lapsed turn): the contest sanctioned it
   already and its absence is covered, no second bond is burned and no second strike is added;
 - it won it, a closure ended it without a loser, or it never had one: NO_SHOW applies as D63 says;
-- the contest is still open at the bound of the wait, or the round is closed: the hold is dropped
-  and the exclusion stays the infrastructure's.
+- the contest is still open at the dispute bound (the reaper is out in the test): the hold is
+  dropped and the exclusion stays the infrastructure's, whatever the contest becomes afterwards;
+- only a contest opened before the bound of the stage the member missed counts: after it the
+  member is already absent.
 
 The contest is the real one: funded and opened through the routes, answered at step level, closed
 by the beacon or by the referee's resolution. Only the audit's verdict records are seeded.
@@ -25,6 +27,7 @@ import pytest
 
 from hypertrain.challenge import exit_v2
 from hypertrain.challenge.exit_v2 import Wait
+from hypertrain.challenge.finality_v2 import RoundStatus
 from hypertrain.challenge.store import ChallengeStore
 from ledger_invariants import support_exit_disputes as X
 
@@ -40,7 +43,7 @@ class Round:
     """Round 0 opened for real on six ACTIVE identities, four of which commit; the contestant and
     one plain member stay silent. The contestant opens its own contest before the commit bound."""
 
-    def __init__(self, n, monkeypatch) -> None:
+    def __init__(self, n, monkeypatch, committed: int = 4) -> None:
         monkeypatch.setattr(X, "service", lambda: fixtures)  # six identities, not the lot's four
         self.n = n
         self.run = n.manifest.run_id()
@@ -49,12 +52,13 @@ class Round:
         self.hot = fixtures.HOT[CONTESTANT]
         self.opening = round_zero(n, fixtures.HOT)
         assert open_round(n, self.opening, n.client).status_code == 200
-        commit_records(n, fixtures.HOT[:4])
+        commit_records(n, fixtures.HOT[:committed])
 
-    def contest(self) -> str:
-        """The contestant's own contest of its audit verdict, funded and opened (SUSPENDED)."""
+    def contest(self, at: int | None = None) -> str:
+        """The contestant's own contest of its audit verdict, funded and opened (SUSPENDED), two
+        rounds before the commit bound unless `at` says when."""
         w, index = self.world, CONTESTANT
-        push_through(self.n, self.opening.d_commit - 2)
+        push_through(self.n, self.opening.d_commit - 2 if at is None else at)
         dispute_id = X.seed_contest(w, index, w=0)
         with self.n.store._tx():  # round 0 is also the round it is silent in: no audit exclusion
             self.n.store._db.execute(
@@ -228,28 +232,20 @@ def test_a_contest_lost_before_the_round_opened_covers_no_absence_of_this_round(
     assert case.sanctions() == ["TRAINING_FRAUD", "NO_SHOW"]
 
 
-@pytest.mark.parametrize("ends", ["the-dispute-bound", "the-round-closes"])
-def test_a_hold_is_dropped_at_the_bound_of_the_wait_and_sanctions_nobody(case, monkeypatch, ends):
-    # Given: a contest nobody ever resolves (the dispute reaper is out), and its sanction held
-    case.contest()
-    monkeypatch.setattr(ChallengeStore, "_close_blocked_disputes_v2", lambda *a, **k: None)
-    case.reach_commit_bound()
+def test_a_hold_is_dropped_at_the_dispute_bound_and_nobody_is_sanctioned(case, monkeypatch):
+    # Given: a contest nobody resolves because the dispute reaper is out, and its sanction held
+    dispute_id = case.contest()
     bound = case.opening.d_commit + 5
-    far = 10**6
-    monkeypatch.setitem(
-        exit_v2.BOUNDS, Wait.DISPUTE, lambda schedule: bound if ends == "the-dispute-bound" else far
-    )
-    before = case.burned()
-    push_through(case.n, bound - 1)
-    assert case.row()["state"] == "PENDING"
+    with monkeypatch.context() as broken:
+        broken.setattr(ChallengeStore, "_close_blocked_disputes_v2", lambda *a, **k: None)
+        broken.setitem(exit_v2.BOUNDS, Wait.DISPUTE, lambda schedule: bound)
+        case.reach_commit_bound()
+        before = case.burned()
+        push_through(case.n, bound - 1)
+        assert case.row()["state"] == "PENDING"
 
-    # When: the bound is reached, or the round is closed by other means
-    if ends == "the-round-closes":
-        with case.n.store._tx():
-            status = case.n.store._record_v2(case.run, "finality", "0")
-            closed = {"disposition": "RETIRED", "unresolved_disputes": 0, "unresolved_audits": 0}
-            case.n.store._put_record_v2(case.run, "finality", "0", {**status, **closed})
-    push_through(case.n, bound)
+        # When: the bound is reached
+        push_through(case.n, bound)
 
     # Then: the exclusion stays, as the infrastructure's, with no sanction and no strike
     row = case.row()
@@ -257,3 +253,80 @@ def test_a_hold_is_dropped_at_the_bound_of_the_wait_and_sanctions_nobody(case, m
     assert case.sanctions() == []
     assert standing(case.n, case.hot.ss58) == ("SUSPENDED", "PENDING_DISPUTE", 0)
     assert case.burned() == before
+
+    # And a contest that ends afterwards, closed without a loser, finds nothing to apply: the
+    # accepted case of the bound (ADR 0011 decision 12), the member is not struck later
+    X.pause_at_step(case.world, dispute_id)
+    push_through(case.n, case.n.now + 2)
+    assert X.disputes(case.world).get(dispute_id).resolution is not None
+    assert case.row()["state"] == "WAIVED"
+    assert case.sanctions() == [] and case.burned() == before
+
+
+def test_a_round_retired_with_the_contest_open_does_not_release_the_hold(six_network, monkeypatch):
+    # Given: only three of six commit, so the reaper retires round 0 for real at the bound, while
+    # the contestant's contest about that round is open: a round with an open contest is not closed
+    case = Round(six_network, monkeypatch, committed=3)
+    case.contest()
+
+    # When
+    case.reach_commit_bound()
+
+    # Then: retired, not closed; the contestant's sanction still waits, the other silent members
+    # are sanctioned
+    n = case.n
+    assert (
+        json.loads(
+            n.store._db.execute(
+                "SELECT data FROM records_v2 WHERE kind='finality' AND id='0'"
+            ).fetchone()[0]
+        )["disposition"]
+        == "RETIRED"
+    )
+    assert not RoundStatus(**n.store._record_v2(case.run, "finality", "0")).closed
+    assert case.row()["state"] == "PENDING"
+    assert case.row(3)["state"] == "APPLIED" and case.row(SILENT)["state"] == "APPLIED"
+    assert case.sanctions() == []
+
+
+@pytest.mark.parametrize("then", ["still-open", "lost"])
+def test_a_contest_opened_after_the_commit_bound_explains_no_absence(case, then):
+    # Given: the sanction of the silent contestant could not be applied at the bound (the hook
+    # failed once), so its row is still pending when the contestant opens its contest
+    real = case.n.store._services(case.run)[1]
+    flaky = Flaky(real)
+    case.n.store.sanction_hook = flaky
+    case.reach_commit_bound()
+    assert case.row()["state"] == "PENDING"
+    dispute_id = case.contest(at=case.opening.d_commit)
+    if then == "lost":
+        case.lose(dispute_id)
+    flaky.failing = False
+    before = case.burned()
+
+    # When: the next push retries the sanction
+    push_through(case.n, case.n.now + 1)
+
+    # Then: the contest came after the absence; the NO_SHOW is its own sanction and is applied,
+    # neither held nor covered
+    row = case.row()
+    assert row["state"] == "APPLIED" and "covered_by" not in row
+    assert case.sanctions() == (
+        ["NO_SHOW"] if then == "still-open" else ["TRAINING_FRAUD", "NO_SHOW"]
+    )
+    # the plain member's bond, and the contestant's too unless the conviction burnt it already
+    assert case.burned() - before == (2000 if then == "still-open" else 1000)
+
+
+class Flaky:
+    """The admission as the sanction hook, failing until told not to."""
+
+    def __init__(self, real) -> None:
+        self.real, self.failing = real, True
+
+    def seize_bond(self, admission_id, *, reason, evidence_hash, now) -> int:
+        if self.failing:
+            raise RuntimeError("poisoned")
+        return self.real.seize_bond(
+            admission_id, reason=reason, evidence_hash=evidence_hash, now=now
+        )

@@ -327,7 +327,11 @@ Decision.
    strike too, but the first one puts the admission back on a fresh probation and only a second
    one inside `NO_SHOW_STRIKE_WINDOW_SCREENS` work screens suspends it, as ADR 0011 Part 8
    decision 12 (D63) amends it (it first burned the bond and left the admission as it was,
-   ineligible until funded again). A (reason, evidence)
+   ineligible until funded again). *Amended 2026-10-28 (D86, IMP-4):* a `NO_SHOW` of a member kept out of
+   its round by its own open contest is not handed to this hook at once: the sweeper holds it while the
+   contest is open, waives it when the contest is lost (the conviction is the one sanction) and applies it
+   as above when the contest is won, closed without a loser or was never opened (ADR 0011 Part 8
+   decision 12). A (reason, evidence)
    pair is applied once, recorded in `admission_sanctions`: a retry adds no strike. The ledger
    keeps its existing meaning of a slash; the new keyword defaults to it, so no earlier event
    changes. The caller decides whose fault it is: a verdict against the auditor reaches
@@ -423,6 +427,10 @@ withdrawing the bond just before a round opens does not arise); hooks in `comple
 `finalize_v2` or `referee_v2` (they change `implementation_hash`).
 
 ## Hash consequences
+
+*After `v3-tree-verdict-fixes` (2026-10-28):* `implementation_hash` is unchanged; `challenge/store.py`,
+`challenge/admission.py`, `sources()` and the bundle move. The values are in ADR 0011 Part 3, which
+carries the table for every later lot.
 
 Measured with `ChallengeStore._service_implementation_v2`, `network_qualification.sources()` and
 `bundle()`, and `manifest_v2 example` followed by `manifest_v2 build`, on the merge commit
@@ -520,7 +528,18 @@ exists.
    referee verdict). Closing it needs a ledger operation that burns a coldkey's `reward_pending`
    without a lock (a new event kind under an HMAC operation id, with its conservation test),
    which this series does not add. Decide whether to add it, or to accept that the reward
-   survives.
+   survives. *Narrowed 2026-10-28 (D86):* for a contest the member opens itself, the `NO_SHOW` half no
+   longer empties the lock first, because the sweeper holds that `NO_SHOW` until the contest ends; the
+   `AUDIT_MISMATCH` half of the flow is as before.
+5. **Who reads the terms of a bond (D51, D52 I2, D86).** The public `GET .../admission/{hotkey}` shows
+   a bond by `units`, `outcome`, `releasable` and `release_beacon` only. The lock id, the origin ids
+   and the `finality_hash` and `closed_dispute_root` a release signs are read by the holder, through a
+   `BondRequest` signed in the body by the admission's coldkey (`POST .../join/{admission_id}/bond`,
+   expiry within `REQUEST_HORIZON`, `GET` is 405, no subnet gate: the coldkey owns the lock, so a hotkey
+   that left the subnet does not strand it), or by the operator with the admin bearer
+   (`GET .../admin/join/{admission_id}/bond`). The coldkey rather than the hotkey of `ChallengeRequest`
+   and `JobRequest` is this ADR's choice for the Principal to confirm; the other is one line in
+   `bond_terms_v2` away. ADR 0014 point 9 carries the correction of its grep.
 
 ## Not verified
 

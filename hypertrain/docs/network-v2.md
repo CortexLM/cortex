@@ -245,7 +245,8 @@ and it does not hash it again per request: the key names the file, and the party
 bytes checks their sha256 (the miner does). Refusals: a key that is not 64 lowercase hex 400, an
 unknown run or an object the master does not hold 404, an object above 8 GiB (`MAX_PARTS` parts of
 1 MiB, the largest a client takes whole) 413, checked on the opened file before the first byte is
-read. The route answers neither `HEAD` nor `Range`.
+read. An object store that is not on the master's local disk answers 503 (none is configured today).
+The route answers neither `HEAD` nor `Range`.
 
 Current admission policy fixes E=4 and requires 12 clean finalized participations
 plus canary blocks 1,2,3. The first four are shadow-only. Later PROBATION influence
@@ -442,9 +443,10 @@ on a fresh probation (new trials, no suspension) and a second one inside four wo
 it like a mismatch. A roster member whose own contest is open is left out of the round all the
 same, but its NO_SHOW waits for the contest (D86): a contest it loses already sanctioned it and the
 absence is covered, with no second row, strike or burn; one it wins, a closure without a loser, a
-contest refused at the door or no contest at all leaves the NO_SHOW to apply; a contest still open
-when the round closes or at the dispute bound drops the hold and the exclusion stays the
-infrastructure's, unsanctioned. An uncontested `MISMATCH`, an infrastructure
+contest refused at the door or no contest at all leaves the NO_SHOW to apply. Only a contest opened
+before the bound of the missed stage counts. A contest still open at the dispute bound (the end of the
+second audit window of the round) drops the hold: the exclusion stays the infrastructure's, unsanctioned, and a
+contest that ends afterwards does not bring the NO_SHOW back. An uncontested `MISMATCH`, an infrastructure
 closure and a verdict against the auditor leave the bond intact. The status route reads the run's
 rounds once per call for an admission that holds a bond.
 

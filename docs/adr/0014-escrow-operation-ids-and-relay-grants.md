@@ -402,7 +402,10 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
   `finalize_v2` and of the owned helpers that came with them. On the integrated tree of `v3-integration-final`
   (this lot, audit-integrity-2, DET-01 and the two lock releases; `3ce5b031`) it is `d61bd2b8…71bdc4` for the
   example pin (ADR 0011 Part 3 has the full table), `challenge/store.py` is `9379bdb4…cf31c1`, `sources()` 158 files
-  `1de8e396…74c8cc`, `bundle()` 2,734,080 bytes `88918dd5…795525`.
+  `1de8e396…74c8cc`, `bundle()` 2,734,080 bytes `88918dd5…795525`. `v3-tree-verdict-fixes` (IMP-3 and others)
+  edits `store.py`, `admission.py`, `app.py` and the wire (`BondRequest`) without touching an owned name or
+  one of the 12 files: `implementation_hash` stays `d61bd2b8…71bdc4`; `store.py`, `sources()` and the bundle
+  move (ADR 0011 Part 3).
 - Schema: no table, column or key changes. One partial index is created if absent.
 - Compatibility: new server events carry a new key and new hashes, new origins new ids; old chains verify
   unchanged and are forward-only for the first new server event (an older image then fails closed with an

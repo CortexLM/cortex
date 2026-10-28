@@ -37,6 +37,7 @@ STREAMED = READ + "test_a_large_object_is_streamed_in_bounded_blocks_with_bounde
 BAD_KEY = READ + "test_a_key_that_is_not_64_lowercase_hex_is_a_400"
 ABSENT = READ + "test_an_object_nobody_stored_is_a_404"
 CAP = READ + "test_an_object_above_the_read_cap_is_refused_before_a_byte_is_read"
+OFF_LOOP = READ + "test_a_block_of_the_object_is_read_off_the_event_loop"
 HELD = CONTEST + "test_a_silent_member_with_a_contest_open_is_left_out_but_not_sanctioned_yet"
 LOST_AFTER = (
     CONTEST
@@ -45,7 +46,9 @@ LOST_AFTER = (
 LOST_BEFORE = CONTEST + "test_a_contest_lost_before_the_bound_covers_the_absence_from_the_start"
 NO_LOSER = CONTEST + "test_a_contest_a_closure_ended_without_a_loser_leaves_the_no_show_to_apply"
 OLD_LOSS = CONTEST + "test_a_contest_lost_before_the_round_opened_covers_no_absence_of_this_round"
-BOUND = CONTEST + "test_a_hold_is_dropped_at_the_bound_of_the_wait_and_sanctions_nobody"
+BOUND = CONTEST + "test_a_hold_is_dropped_at_the_dispute_bound_and_nobody_is_sanctioned"
+RETIRED = CONTEST + "test_a_round_retired_with_the_contest_open_does_not_release_the_hold"
+LATE = CONTEST + "test_a_contest_opened_after_the_commit_bound_explains_no_absence"
 ACTIONS = (
     PLAN + "test_a_no_show_with_a_contest_of_its_own_waits_for_it_is_covered_by_a_loss_or_applies"
 )
@@ -209,6 +212,17 @@ MUTANTS = [
         "why": "the route holds the whole object in memory again.",
     },
     {
+        "id": "imp8-object-block-read-on-the-event-loop",
+        "invariants": ["IMP-8"],
+        "path": APP,
+        "old": """                while block := await run(file.read, OBJECT_READ_BLOCK):
+""",
+        "new": """                while block := file.read(OBJECT_READ_BLOCK):
+""",
+        "tests": [OFF_LOOP],
+        "why": "a cold-disk read of a block stalls every request of the master.",
+    },
+    {
         "id": "imp8-object-read-cap-never-refuses",
         "invariants": ["IMP-8"],
         "path": APP,
@@ -268,7 +282,7 @@ MUTANTS = [
         "id": "imp4-every-contest-holds-the-no-show",
         "invariants": ["IMP-4", "D86"],
         "path": STORE,
-        "old": """            contest_open=any(turn.resolution is None for turn in turns),
+        "old": """            contest_open=any(turn.resolution is None for turn in counted),
 """,
         "new": """            contest_open=True,
 """,
@@ -290,7 +304,7 @@ MUTANTS = [
         "id": "imp4-the-hold-is-never-released",
         "invariants": ["IMP-4", "D86"],
         "path": STORE,
-        "old": """            bound_reached=status.closed or now >= BOUNDS[Wait.DISPUTE](schedule),
+        "old": """            bound_reached=now >= BOUNDS[Wait.DISPUTE](schedule),
 """,
         "new": """            bound_reached=False,
 """,
@@ -298,15 +312,51 @@ MUTANTS = [
         "why": "a contest nobody resolves holds the sanction for ever.",
     },
     {
-        "id": "imp4-a-closed-round-keeps-the-hold",
+        "id": "imp4-a-retirement-releases-the-hold",
         "invariants": ["IMP-4", "D86"],
         "path": STORE,
-        "old": """            bound_reached=status.closed or now >= BOUNDS[Wait.DISPUTE](schedule),
+        "old": """            bound_reached=now >= BOUNDS[Wait.DISPUTE](schedule),
 """,
-        "new": """            bound_reached=now >= BOUNDS[Wait.DISPUTE](schedule),
+        "new": (
+            "            bound_reached=now >= BOUNDS[Wait.DISPUTE](schedule)\n"
+            "            or self._db.execute(\n"
+            "                \"SELECT 1 FROM records_v2 WHERE kind='retired' AND id=?\", (text,)\n"
+            "            ).fetchone()\n"
+            "            is not None,\n"
+        ),
+        "tests": [RETIRED],
+        "why": "the retirement of a round whose contest is open drops the sanction of the member.",
+    },
+    {
+        "id": "imp4-a-contest-opened-after-the-bound-counts",
+        "invariants": ["IMP-4", "D86"],
+        "path": STORE,
+        "old": "self._dispute_opened_v2(turn.dispute_id) < BOUNDS[stage](schedule)",
+        "new": "self._dispute_opened_v2(turn.dispute_id) < 10**9",
+        "tests": [LATE],
+        "why": "a contest opened after the absence holds, or covers, the NO_SHOW it did not cause.",
+    },
+    {
+        "id": "imp4-a-loss-after-the-absence-covers-it",
+        "invariants": ["IMP-4", "D86"],
+        "path": STORE,
+        "old": """            for turn in counted
+            if turn.resolution is not None
 """,
-        "tests": [BOUND],
-        "why": "the sanction of a round that is closed still waits for a contest.",
+        "new": """            for turn in turns
+            if turn.resolution is not None
+""",
+        "tests": [LATE],
+        "why": "a contest opened after the absence, then lost, covers an absence it did not cause.",
+    },
+    {
+        "id": "imp4-the-opening-is-read-from-the-last-event",
+        "invariants": ["IMP-4", "D86"],
+        "path": STORE,
+        "old": """ORDER BY cursor LIMIT 1",""",
+        "new": """ORDER BY cursor DESC LIMIT 1",""",
+        "tests": [LOST_AFTER],
+        "why": "a contest answered after the bound is read as opened after it.",
     },
     {
         "id": "imp4-covering-erases-the-contest-sanction",

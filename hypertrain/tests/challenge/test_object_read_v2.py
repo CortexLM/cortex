@@ -149,3 +149,39 @@ def test_an_object_above_the_read_cap_is_refused_before_a_byte_is_read(network, 
     monkeypatch.setattr(challenge_app, "OBJECT_READ_MAX", 1025)
     served = network.client.get(f"{network.url}/objects/{big}")
     assert (served.status_code, served.content) == (200, b"x" * 1025)  # the cap itself is served
+
+
+def test_a_block_of_the_object_is_read_off_the_event_loop(network, monkeypatch):
+    # Given: the file of an object, wrapped so that each read notes whether the event loop runs
+    store = network.store.for_run(network.manifest.run_id()).objects
+    sha = store.put(b"x" * (2 * challenge_app.OBJECT_READ_BLOCK + 1))
+    on_loop: list[bool] = []
+    real = type(store).open_read
+
+    class Spy:
+        def __init__(self, handle: Any) -> None:
+            self.handle = handle
+
+        def read(self, size: int) -> bytes:
+            try:
+                asyncio.get_running_loop()
+                on_loop.append(True)
+            except RuntimeError:
+                on_loop.append(False)
+            return self.handle.read(size)  # type: ignore[no-any-return]
+
+        def close(self) -> None:
+            self.handle.close()
+
+    def spied(self: Any, key: str) -> Any:
+        handle, size = real(self, key)
+        return Spy(handle), size
+
+    monkeypatch.setattr(type(store), "open_read", spied)
+
+    # When
+    seen = drive(network.client.app, f"{network.url}/objects/{sha}")
+
+    # Then: the blocks (and the final empty read) all ran in a worker thread
+    assert seen.status == 200 and sum(seen.sizes) == 2 * challenge_app.OBJECT_READ_BLOCK + 1
+    assert on_loop and not any(on_loop)
