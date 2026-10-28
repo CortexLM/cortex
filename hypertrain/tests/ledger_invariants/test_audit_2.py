@@ -20,6 +20,7 @@ from hypertrain.aggregator.weighted_v2 import (
     InsufficientEligibleWeight,
     allocate_weights,
 )
+from hypertrain.challenge.store import ChallengeError
 from hypertrain.protocol.envelope import ExpiredError, UnauthorizedSigner, body_digest
 from hypertrain.protocol.envelope_v2 import EnvelopeV2, seal
 from hypertrain.protocol.hashing import sha256_hex
@@ -115,13 +116,15 @@ def seed_finalize(n: Any, cast: sa.Cast, included: list[str]) -> dict[str, Any]:
 
 
 def test_finalize_refuses_a_member_without_an_audit_record(world: sa.World) -> None:
-    # Given: an aggregated round in which one matched member lost its replay record.
+    # Given: an aggregated round in which one matched member lost the audit verdict its reward is
+    # judged on (the replay record is not the one deleted: a tree that pays the inputs of the
+    # applied tape no longer reads it at finalize, while every tree still needs the verdict).
     with world.at("s4") as (n, cast):
         store, run = n.store, n.manifest.run_id()
         lost = cast.honest[1].ss58
         with store._tx():
             store._db.execute(
-                "DELETE FROM records_v2 WHERE run_id=? AND kind='replay' AND id=?",
+                "DELETE FROM records_v2 WHERE run_id=? AND kind='verdict' AND id=?",
                 (run, f"0:{lost}"),
             )
         request = seed_finalize(n, cast, [h.ss58 for h in cast.honest])
@@ -132,7 +135,7 @@ def test_finalize_refuses_a_member_without_an_audit_record(world: sa.World) -> N
             n.url + "/admin/rounds/0/finalize", json=request, headers=sa.admin()
         )
         # Then: refused, no round is settled and nothing is minted.
-        assert detail(response) == (409, f"missing accepted replay: 0:{lost}")
+        assert detail(response) == (409, f"missing accepted verdict: 0:{lost}")
         assert sa.digest_of(store) == before
         assert escrow.balances() == balances
         assert ("finalize", "0") not in sa.records(store)
@@ -166,9 +169,16 @@ def test_a_second_exclusion_leaves_too_few_members_to_aggregate(world: sa.World)
                 run, "excluded", f"0:{second}", {"reason": "UNVERIFIED", "evidence_hash": "ab" * 32}
             )
         before = sa.digest_of(store)
-        # When / Then: three miners cannot carry one whole update, so nothing is aggregated.
-        with pytest.raises(InsufficientEligibleWeight, match="INSUFFICIENT_ELIGIBLE_WEIGHT"):
-            store.aggregate_v2(run, 0)
+        # When / Then: three miners cannot carry one whole update, so nothing is aggregated; a tree
+        # that checks the survivors says so by name before any weight is allocated.
+        if sa.CHECKS_SURVIVORS:
+            with pytest.raises(ChallengeError, match="ROUND_INFEASIBLE") as refused:
+                store.aggregate_v2(run, 0)
+            assert refused.value.status == 409
+            assert isinstance(refused.value.__cause__, InsufficientEligibleWeight)
+        else:
+            with pytest.raises(InsufficientEligibleWeight, match="INSUFFICIENT_ELIGIBLE_WEIGHT"):
+                store.aggregate_v2(run, 0)
         assert sa.digest_of(store) == before
         assert ("applied", "0") not in sa.records(store)
 
@@ -224,11 +234,11 @@ def test_a_finalized_round_pays_the_matched_members_and_not_the_excluded_one(
         }
         share = escrow.policy.round_reward_units // len(cast.honest)
         owners = {
-            sa.reward_origin(run, h.ss58, final_hash): (n_owner(cast, h), share)
+            sa.reward_origin(run, h.ss58, final_hash, escrow=escrow): (n_owner(cast, h), share)
             for h in cast.honest
         }
         assert origins == owners
-        forger_origin = sa.reward_origin(run, cast.forger.ss58, final_hash)
+        forger_origin = sa.reward_origin(run, cast.forger.ss58, final_hash, escrow=escrow)
         assert forger_origin not in origins
         assert escrow.balances().reward_pending == escrow.policy.round_reward_units
         assert escrow.balances().conserved()
@@ -267,25 +277,27 @@ def test_each_job_decrements_the_counter_once_whether_it_completes_or_is_exhaust
             return int(store._record_v2(run, "finality", "0")["unresolved_audits"])
 
         held = running(store)
-        horizon = next(iter(held.values()))["absolute"]
         # When: both complete.
         for row in held.values():
             stored = store._record_v2(run, "executed-verdict", row["id"])
             assert sa.complete(n, cast.keys[row["auditor"]], row["id"], stored).status_code == 200
             assert counter() == open_audits(store)
         assert counter() == 3
-        # And one of the three reaches its own deadline first (a test-owned stand-in: the jobs of a
+        # And one of the three runs out of windows first (a test-owned stand-in: the jobs of a
         # round share one deadline, so the counter could not be read between two exhaustions).
         first = next(r for h, r in sa.lease_rows(store).items() if h not in held)
         with store._tx():
             store._db.execute(
                 "UPDATE audit_leases_v2 SET absolute=? WHERE id=?", (n.now + 5, first["id"])
             )
-        n.push(n.now + 5)
-        assert sa.lease_rows(store)[first["hotkey"]]["state"] == "exhausted"
+        sa.drop_job(n, store, first["hotkey"])
         assert (counter(), open_audits(store)) == (2, 2)
-        # And the horizon passes over the two that were never leased.
-        n.push(horizon)
+        assert store._record_v2(run, "excluded", f"0:{first['hotkey']}") == {
+            "reason": "INFRASTRUCTURE",
+            "evidence_hash": sha256_hex(first["id"].encode()),
+        }
+        # And the windows of the two that were never leased run out.
+        sa.run_out_the_windows(n, store)
         assert (counter(), open_audits(store)) == (0, 0)
         after = settled_state(store)
         # Then: they are exhausted and excluded for the infrastructure, and a second sweep (or a
@@ -297,7 +309,7 @@ def test_each_job_decrements_the_counter_once_whether_it_completes_or_is_exhaust
                 "reason": "INFRASTRUCTURE",
                 "evidence_hash": sha256_hex(row["id"].encode()),
             }
-        n.push(horizon + 7)
+        n.push(n.now + 7)
         assert settled_state(store) == after
 
 
@@ -365,18 +377,18 @@ def test_a_settled_round_is_untouched_by_late_audit_events(world: sa.World) -> N
         assert (settled_state(store), sa.records(store, *keep), minted()) == before
 
 
-def test_after_the_horizon_nothing_late_can_change_an_excluded_round(world: sa.World) -> None:
-    # Given: two executed leases and three queued jobs when the audit horizon passes.
+def test_after_the_last_window_nothing_late_can_change_the_dropped_round(world: sa.World) -> None:
+    # Given: two executed leases and three queued jobs when the last audit window passes.
     with world.at("s2") as (n, cast):
         store, run = n.store, n.manifest.run_id()
         held = running(store)
-        horizon = next(iter(held.values()))["absolute"]
         stored = {h: store._record_v2(run, "executed-verdict", r["id"]) for h, r in held.items()}
-        n.push(horizon)
-        # Then: every job is exhausted and the round is excluded for good, with no audit open.
+        sa.run_out_the_windows(n, store)
+        # Then: every job is exhausted with no audit open, and the round is no more settled than
+        # before (a tree that voided the round for everybody says so in its disposition).
         assert {r["state"] for r in sa.lease_rows(store).values()} == {"exhausted"}
         status = store._record_v2(run, "finality", "0")
-        assert (status["disposition"], status["unresolved_audits"]) == ("EXCLUDED", 0)
+        assert (status["disposition"], status["unresolved_audits"]) == (sa.DROP_DISPOSITION, 0)
         before = settled_state(store)
         # When: the holders deliver what they computed, ask again, the sweep runs again and
         # someone tries to schedule the audits once more.
@@ -388,7 +400,7 @@ def test_after_the_horizon_nothing_late_can_change_an_excluded_round(world: sa.W
             assert detail(sa.execute(n, key, job)) == (403, "audit request lacks owned live lease")
         assert all(sa.lease(n, key).status_code == 204 for key in cast.auditors[2:])
         assert detail(sa.schedule(n)) == (503, "audit absolute horizon exhausted")
-        n.push(horizon + 30)
+        n.push(n.now + 30)
         # Then: nothing changed.
         assert settled_state(store) == before
 
@@ -584,7 +596,9 @@ def test_a_verdict_of_a_key_outside_the_auditor_set_or_an_expired_one_mints_noth
 ) -> None:
     setup, _, reward = real_reward
     outsider = with_verdict(li_escrow, real_reward, li_escrow.OTHER)
-    expired = with_verdict(li_escrow, real_reward, li_escrow.AUDITOR, exp=9)
+    # Expired before the earliest beacon a ledger judges stored evidence at: the acceptance
+    # beacon of the evidence (a ledger that keeps one) or the finalize beacon.
+    expired = with_verdict(li_escrow, real_reward, li_escrow.AUDITOR, exp=1)
     for evidence, error, text in (
         (outsider, UnauthorizedSigner, "signer is not authorized for message role"),
         (expired, ExpiredError, "envelope expired"),
@@ -631,7 +645,8 @@ def test_a_verdict_that_answers_another_challenge_mints_nothing(
     strict=True,
     raises=AssertionError,
     reason="A2W-23: a mismatch the master replayed itself ends as an UNVERIFIED exclusion with a "
-    "contest record even when no auditor ever signs it, not as an INFRASTRUCTURE one",
+    "contest record even when no auditor ever signs it in any window, not as an "
+    "INFRASTRUCTURE one [fix-lot: none (no design yet)]",
 )
 def test_a_mismatch_the_master_replayed_is_not_turned_into_an_infrastructure_exclusion(
     world: sa.World,
@@ -643,8 +658,8 @@ def test_a_mismatch_the_master_replayed_is_not_turned_into_an_infrastructure_exc
         row = running(store)[cast.forger.ss58]
         stored = store._record_v2(run, "executed-verdict", row["id"])
         assert stored["result"] == "MISMATCH"
-        # When: the lease runs out and the audit horizon passes with nobody signing anything.
-        n.push(row["absolute"])
+        # When: the lease runs out and every window of the job passes with nobody signing anything.
+        sa.drop_job(n, store, cast.forger.ss58)
         # Control: the job is over and the forger is excluded either way.
         assert sa.lease_rows(store)[cast.forger.ss58]["state"] == "exhausted"
         excluded = store._record_v2(run, "excluded", f"0:{cast.forger.ss58}")
@@ -762,7 +777,7 @@ def posted_work_proof(store: Any, hotkey: str) -> dict[str, Any]:
     raises=AssertionError,
     reason="A2W-15: the leaves record an audit job was built from is write-once; publishing the "
     "same leaves as another object after the lease is refused even under another admission id "
-    "(T-A2W-17)",
+    "(T-A2W-17) [fix-lot: none (no design yet)]",
 )
 def test_the_leaves_an_audit_was_built_from_cannot_be_republished_as_another_object(
     world: sa.World,

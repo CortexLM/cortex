@@ -17,7 +17,8 @@ FORGED = A1 + "test_the_executed_verdict_of_a_forged_commit_is_the_masters_misma
 FLIPS = A1 + "test_an_auditor_cannot_sign_a_verdict_other_than_the_masters"
 LAPSED = A1 + "test_a_lapsed_lease_cannot_be_executed_or_completed_by_its_old_holder"
 TAKEN_BACK = A1 + "test_a_lease_that_was_taken_back_cannot_be_completed_before_it_expires"
-ATTEMPTS = A1 + "test_a_lapsed_job_is_offered_again_once_and_then_exhausted"
+ATTEMPTS = A1 + "test_a_lapsed_job_is_retried_once_then_given_one_more_window_then_dropped"
+RELEASED = A1 + "test_a_job_leased_again_cannot_be_settled_with_the_first_attempts_verdict"
 NONCE = A1 + "test_an_execute_request_must_carry_the_nonce_of_the_live_lease"
 BOUNDARY = A1 + "test_a_result_at_the_lease_expiry_round_is_refused_even_before_the_sweep"
 FINAL = A1 + "test_a_completed_job_is_final_and_a_repeated_completion_changes_nothing"
@@ -27,13 +28,14 @@ SAMPLED = A1 + "test_a_round_cannot_be_opened_with_a_sampled_audit_probability"
 EXCLUSION = A2 + "test_a_mismatch_completes_as_an_exclusion_and_leaves_no_successor_state"
 TAPE_GATE = A2 + "test_the_tape_refuses_an_input_whose_replay_is_not_a_full_match_of_its_commit"
 UNAUDITED = A2 + "test_a_round_with_an_unaudited_member_cannot_be_aggregated"
+SURVIVORS = A2 + "test_a_second_exclusion_leaves_too_few_members_to_aggregate"
 NO_RECORD = A2 + "test_finalize_refuses_a_member_without_an_audit_record"
 UNRESOLVED = A2 + "test_a_round_cannot_settle_while_an_audit_is_counted_unresolved"
 ABSENT = A2 + "test_an_excluded_member_is_absent_from_the_tape_the_included_set_and_the_origins"
 COUNTER = A2 + "test_the_audit_counter_equals_the_jobs_not_yet_terminal"
 DECREMENTS = A2 + "test_each_job_decrements_the_counter_once_whether_it_completes_or_is_exhausted"
 SETTLED = A2 + "test_a_settled_round_is_untouched_by_late_audit_events"
-HORIZON = A2 + "test_after_the_horizon_nothing_late_can_change_an_excluded_round"
+HORIZON = A2 + "test_after_the_last_window_nothing_late_can_change_the_dropped_round"
 SCHEDULE_HORIZON = A2 + "test_audits_cannot_be_scheduled_once_the_horizon_is_one_round_away"
 ROLLBACK = A2 + "test_a_rollback_waits_for_every_audit_of_both_rounds"
 ALLOCATION = A2 + "test_the_allocation_depends_only_on_the_roster_never_on_what_a_miner_signed"
@@ -59,7 +61,7 @@ PRODUCTION_CPU = (
 COMPARATOR = A2 + "test_the_audit_decision_is_bound_to_every_committed_hash"
 ANOTHER_AUDITOR = A1 + "test_a_verdict_signed_by_another_allowlisted_auditor_is_refused"
 PAYS = A2 + "test_a_finalized_round_pays_the_matched_members_and_not_the_excluded_one"
-HORIZON_EXHAUSTS = A2 + "test_after_the_horizon_nothing_late_can_change_an_excluded_round"
+HORIZON_EXHAUSTS = HORIZON
 UNSCHEDULED = (
     A2 + "test_without_scheduled_audits_the_counter_stays_at_the_roster_and_the_round_waits"
 )
@@ -80,8 +82,9 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-lease-own-job-served-to-its-miner",
         "invariants": ["A2W-02", "A2W-03"],
         "path": STORE,
-        "old": 'if env.signer not in json.loads(r["tried"]) and env.signer != r["hotkey"]',
-        "new": 'if env.signer not in json.loads(r["tried"])',
+        "old": 'or env.signer == candidate["hotkey"]\n'
+        "                ):\n                    continue",
+        "new": "or False\n                ):\n                    continue",
         "tests": [OWN_JOB],
         "why": "an allowlisted miner is leased its own job and judges itself.",
     },
@@ -89,8 +92,9 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-lease-tried-auditor-served-again",
         "invariants": ["A2W-02"],
         "path": STORE,
-        "old": 'if env.signer not in json.loads(r["tried"]) and env.signer != r["hotkey"]',
-        "new": 'if env.signer != r["hotkey"]',
+        "old": 'env.signer in json.loads(candidate["tried"])\n'
+        "                    or env.signer == ",
+        "new": "False\n                    or env.signer == ",
         "tests": [TRIED],
         "why": "an auditor that already tried a job is offered it again.",
     },
@@ -113,10 +117,10 @@ MUTANTS: list[dict[str, object]] = [
         "why": "an auditor holds several leases at once.",
     },
     {
-        "id": "aud-lease-silent-auditor-not-disabled",
+        "id": "aud-lease-silent-auditor-not-cooled-down",
         "invariants": ["A2W-05"],
         "path": STORE,
-        "old": 'raise ChallengeError(403, "silent auditor disabled pending review")',
+        "old": 'raise ChallengeError(403, f"auditor cooldown until round {until}")',
         "new": "pass",
         "tests": [LAPSED],
         "why": "an auditor whose lease lapsed asks for work again as if nothing happened.",
@@ -217,8 +221,8 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-sweep-counter-not-decremented",
         "invariants": ["A2W-12"],
         "path": STORE,
-        "old": '(finality["unresolved_audits"])) - 1)\n                self._put_record_v2(',
-        "new": '(finality["unresolved_audits"])))\n                self._put_record_v2(',
+        "old": '(finality["unresolved_audits"])) - 1)\n        self._put_record_v2(',
+        "new": '(finality["unresolved_audits"])))\n        self._put_record_v2(',
         "tests": [DECREMENTS],
         "why": "an exhausted audit stays counted as open.",
     },
@@ -235,8 +239,22 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-sweep-rescans-finished-jobs",
         "invariants": ["A2W-06", "A2W-13", "A2W-15"],
         "path": STORE,
-        "old": "AND state IN ('running','queued')\",",
-        "new": "AND state IN ('running','queued','completed')\",",
+        "old": "AND state IN ('running','queued')\",\n"
+        "            (run_id,),\n"
+        "        ).fetchall()\n"
+        "        for row in rows:\n"
+        '            if row["state"] == "running" and now >= row["expires"]:\n'
+        "                self._retire_audit_attempt_v2(run_id, row, now, "
+        "self._expiry_cause_v2(run_id, row))\n"
+        '            elif row["state"] == "queued" and now >= row["absolute"]:',
+        "new": "AND state IN ('running','queued','completed')\",\n"
+        "            (run_id,),\n"
+        "        ).fetchall()\n"
+        "        for row in rows:\n"
+        '            if row["state"] == "running" and now >= row["expires"]:\n'
+        "                self._retire_audit_attempt_v2(run_id, row, now, "
+        "self._expiry_cause_v2(run_id, row))\n"
+        '            elif row["state"] != "running" and now >= row["absolute"]:',
         "tests": [FINAL, SETTLED],
         "why": "the expiry sweep exhausts and excludes members of rounds that were audited.",
     },
@@ -271,8 +289,9 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-aggregate-skips-the-audit-gate",
         "invariants": ["A2W-10"],
         "path": STORE,
-        "old": "inputs = self.verified_inputs_v2(run_id, w)\n            policy = Aggr",
-        "new": "inputs = []\n            policy = Aggr",
+        "old": "inputs = self.verified_inputs_v2(run_id, w)\n"
+        "            self._require_survivors_v2(",
+        "new": "inputs = []\n            self._require_survivors_v2(",
         "tests": [UNAUDITED],
         "why": "aggregation no longer requires every member to have an audit outcome.",
     },
@@ -282,8 +301,28 @@ MUTANTS: list[dict[str, object]] = [
         "path": STORE,
         "old": "included = sorted(x.roster.hotkey for x in self.verified_inputs_v2(run_id, w))",
         "new": "included = sorted(model.included)",
-        "tests": [NO_RECORD, ABSENT],
+        "tests": [ABSENT],
         "why": "the coordinator's included set replaces the audited one.",
+    },
+    {
+        "id": "aud-finalize-pays-around-a-missing-verdict",
+        "invariants": ["A2W-10"],
+        "path": STORE,
+        "old": "            works = []\n            for hotkey in included:",
+        "new": "            works = []\n"
+        "            included = [\n"
+        "                h\n"
+        "                for h in included\n"
+        "                if self._db.execute(\n"
+        '                    "SELECT 1 FROM records_v2 "\n'
+        "                    \"WHERE run_id=? AND kind='verdict' AND id=?\",\n"
+        '                    (run_id, f"{w}:{h}"),\n'
+        "                ).fetchone()\n"
+        "            ]\n"
+        "            for hotkey in included:",
+        "tests": [NO_RECORD],
+        "why": "a member whose audit verdict is missing is left out and the others are paid, "
+        "instead of the finalize being refused.",
     },
     {
         "id": "aud-verified-inputs-keeps-excluded-members",
@@ -514,8 +553,8 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-sweep-decrements-twice",
         "invariants": ["A2W-12"],
         "path": STORE,
-        "old": '(finality["unresolved_audits"])) - 1)\n                self._put_record_v2(',
-        "new": '(finality["unresolved_audits"])) - 2)\n                self._put_record_v2(',
+        "old": '(finality["unresolved_audits"])) - 1)\n        self._put_record_v2(',
+        "new": '(finality["unresolved_audits"])) - 2)\n        self._put_record_v2(',
         "tests": [DECREMENTS],
         "why": "an exhausted job takes two units off the open-audit counter, which the clamp at "
         "zero hides when every job is exhausted at once.",
@@ -553,7 +592,7 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-horizon-leaves-queued-jobs",
         "invariants": ["A2W-12", "A2W-13"],
         "path": STORE,
-        "old": 'elif now >= row["absolute"]:',
+        "old": 'elif row["state"] == "queued" and now >= row["absolute"]:',
         "new": "elif False:",
         "tests": [HORIZON_EXHAUSTS],
         "why": "a job that never found an auditor is still queued after the audit horizon.",
@@ -567,5 +606,56 @@ MUTANTS: list[dict[str, object]] = [
         "tests": [UNSCHEDULED],
         "why": "a round opens with no audit counted as open, so the settle guard on open audits "
         "has nothing to refuse.",
+    },
+    {
+        "id": "aud-rearm-without-limit",
+        "invariants": ["A2W-12", "A2W-13"],
+        "path": STORE,
+        "old": "if windows >= policy.max_attempts:",
+        "new": "if False:",
+        "tests": [ATTEMPTS, HORIZON],
+        "why": "a job nobody audits is given a new window for ever, so its audit stays counted as "
+        "open and the round never resolves.",
+    },
+    {
+        "id": "aud-dropped-job-voids-the-round",
+        "invariants": ["A2W-13"],
+        "path": STORE,
+        "old": '(finality["unresolved_audits"])) - 1)\n'
+        '        self._put_record_v2(run_id, "finality", str(row["w"]), finality)',
+        "new": '(finality["unresolved_audits"])) - 1)\n'
+        '        finality["disposition"] = "EXCLUDED"\n'
+        '        self._put_record_v2(run_id, "finality", str(row["w"]), finality)',
+        "tests": [ATTEMPTS, HORIZON],
+        "why": "the infrastructure failure of one audit voids the round of every miner.",
+    },
+    {
+        "id": "aud-aggregate-skips-the-survivor-check",
+        "invariants": ["A2W-11"],
+        "path": STORE,
+        "old": "            self._require_survivors_v2(manifest, [x.roster for x in inputs])\n",
+        "new": "",
+        "tests": [SURVIVORS],
+        "why": "a round whose remaining members cannot carry it reaches the allocator instead of "
+        "being refused by name.",
+    },
+    {
+        "id": "aud-lease-reuses-the-nonce-of-the-first-attempt",
+        "invariants": ["A2W-05"],
+        "path": STORE,
+        "old": "nonce = secrets.token_hex(32)",
+        "new": 'nonce = row["nonce"] or secrets.token_hex(32)',
+        "tests": [RELEASED],
+        "why": "the second attempt of a job runs under the nonce of the first, so the stale "
+        "geometry and verdict of the first attempt settle it.",
+    },
+    {
+        "id": "aud-lease-keeps-the-first-holder",
+        "invariants": ["A2W-05"],
+        "path": STORE,
+        "old": '"auditor=?,nonce=?,expires=?,tried=? WHERE id=?",',
+        "new": '"auditor=COALESCE(auditor,?),nonce=?,expires=?,tried=? WHERE id=?",',
+        "tests": [RELEASED],
+        "why": "a job leased again still names its first holder as the owner of the lease.",
     },
 ]

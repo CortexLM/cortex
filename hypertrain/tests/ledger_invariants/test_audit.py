@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import f32hex
@@ -234,38 +235,117 @@ def test_a_lapsed_lease_cannot_be_executed_or_completed_by_its_old_holder(
         n.push(row["expires"])
         lapsed = sa.lease_rows(store)[cast.forger.ss58]
         assert (lapsed["state"], lapsed["attempts"]) == ("queued", 1)
-        assert store._record_v2(run, "auditor-disabled", holder.ss58) == {
-            "job_id": row["id"],
-            "reason": "LEASE_EXPIRED",
-        }
+        kind, silence, refusal = sa.silence_of(store, run, row)
+        assert store._record_v2(run, kind, holder.ss58) == silence
         before = sa.digest_of(store)
-        # When / Then: it can neither run the job again nor settle the verdict it computed.
+        # When / Then: it can neither run the job again nor settle the verdict it computed, and
+        # it is not leased anything while it is held against for the silence.
         job = {"job_id": row["id"], "lease_nonce": row["nonce"]}
         assert detail(sa.execute(n, holder, job)) == (403, "audit request lacks owned live lease")
         assert detail(sa.complete(n, holder, row["id"], stored)) == (
             409,
             "audit result outside owned immutable lease",
         )
-        assert detail(sa.lease(n, holder)) == (403, "silent auditor disabled pending review")
+        assert detail(sa.lease(n, holder)) == refusal
         assert sa.digest_of(store) == before
 
 
-@pytest.mark.parametrize(("attempts", "state"), [(1, "queued"), (2, "exhausted")])
-def test_a_lapsed_job_is_offered_again_once_and_then_exhausted(
-    world: sa.World, attempts: int, state: str
+# What the sweep does with a lapsed lease: the first attempt of a window is retried, the second
+# ends the window. A tree that re-arms an exhausted job opens one more window then and drops the
+# miner at the end of the second; an older tree drops it at once.
+LAPSES = [
+    pytest.param(1, 1, "retried", id="first-attempt"),
+    pytest.param(2, 1, "rearmed" if sa.REARMS else "dropped", id="second-attempt-of-the-window"),
+    pytest.param(2, 2, "dropped", id="second-attempt-of-the-last-window"),
+]
+
+
+@pytest.mark.parametrize(("attempts", "windows", "outcome"), LAPSES)
+def test_a_lapsed_job_is_retried_once_then_given_one_more_window_then_dropped(
+    world: sa.World, attempts: int, windows: int, outcome: str
 ) -> None:
-    # Given: the forger's executed lease, recorded as the first or as the second attempt.
+    # Given: the forger's executed lease, recorded as the first or the second attempt of its first
+    # or of its last window (a test-owned stand-in, as no run reaches a late window quickly).
     with world.at("s2") as (n, cast):
-        store = n.store
+        store, run = n.store, n.manifest.run_id()
         row = running(store)[cast.forger.ss58]
+        identity = f"0:{cast.forger.ss58}"
         with store._tx():
             store._db.execute(
                 "UPDATE audit_leases_v2 SET attempts=? WHERE id=?", (attempts, row["id"])
             )
+            if windows == 2:
+                body = {"windows": 2, "at": n.now, "absolute": row["absolute"]}
+                store._put_record_v2(run, "audit-rearm", row["id"], body)
+        open_before = int(store._record_v2(run, "finality", "0")["unresolved_audits"])
         # When: the lease runs out.
         n.push(row["expires"])
-        # Then: a first attempt may be retried; a second is the last.
-        assert sa.lease_rows(store)[cast.forger.ss58]["state"] == state
+        # Then: the job is retried, given a fresh window, or dropped with its miner.
+        after = sa.lease_rows(store)[cast.forger.ss58]
+        status = store._record_v2(run, "finality", "0")
+        excluded = sa.records(store, "excluded").get(("excluded", identity))
+        if outcome == "dropped":
+            assert after["state"] == "exhausted"
+            assert json.loads(excluded or "null") == {
+                "reason": "INFRASTRUCTURE",
+                "evidence_hash": sha256_hex(row["id"].encode()),
+            }
+            assert (status["unresolved_audits"], status["disposition"]) == (
+                open_before - 1,
+                sa.DROP_DISPOSITION,
+            )
+        else:
+            assert after["state"] == "queued" and excluded is None
+            assert (status["unresolved_audits"], status["disposition"]) == (open_before, "PENDING")
+        if outcome == "retried":
+            assert (after["attempts"], after["absolute"]) == (attempts, row["absolute"])
+        if outcome == "rearmed":
+            rearm = store._record_v2(run, "audit-rearm", row["id"])
+            assert rearm == {"windows": 2, "at": row["expires"], "absolute": after["absolute"]}
+            assert (after["attempts"], after["tried"], after["auditor"]) == (0, "[]", None)
+            # The fresh window starts at the lapse and ends with the miner's sealed commit at
+            # the latest.
+            sealed = envelope_v2.parse_envelope(store._record_v2(run, "commit", identity))
+            window = sa.audit_policy(store, run).absolute_rounds()
+            assert after["created"] == row["expires"]
+            assert after["absolute"] == min(row["expires"] + window, sealed.exp_drand)
+
+
+def test_a_job_leased_again_cannot_be_settled_with_the_first_attempts_verdict(
+    world: sa.World,
+) -> None:
+    # Given: the first auditor executed the forger's job and let the lease run out; the allowlisted
+    # miner of another job is then leased it as the second attempt.
+    with world.at("s2") as (n, cast):
+        store, run = n.store, n.manifest.run_id()
+        row = running(store)[cast.forger.ss58]
+        first, second = cast.keys[row["auditor"]], cast.auditors[2]
+        stale = store._record_v2(run, "executed-verdict", row["id"])
+        n.push(row["expires"])
+        leased = sa.lease(n, second)
+        assert leased.status_code == 200
+        job = leased.json()["body"]
+        again = sa.lease_rows(store)[cast.forger.ss58]
+        assert (job["job_id"], again["auditor"], again["attempts"]) == (row["id"], second.ss58, 2)
+        assert job["lease_nonce"] != row["nonce"]
+        before = sa.digest_of(store)
+        # When / Then: the first holder can neither run nor settle the job any more.
+        old = {"job_id": row["id"], "lease_nonce": row["nonce"]}
+        assert detail(sa.execute(n, first, old)) == (403, "audit request lacks owned live lease")
+        assert detail(sa.complete(n, first, row["id"], stale)) == (
+            409,
+            "signer is not authorized for message role",
+        )
+        # And the new holder cannot settle the first attempt's verdict without a replay of its own.
+        refused = sa.complete(n, second, row["id"], stale)
+        assert detail(refused) == (
+            409,
+            f"missing accepted audit-geometry: {row['id']}:{job['lease_nonce']}",
+        )
+        assert sa.digest_of(store) == before
+        # Control: the new holder replays and settles the job under its own lease.
+        verdict = sa.execute(n, second, job).json()["verdict"]
+        assert sa.complete(n, second, row["id"], verdict).json() == {"result": verdict["result"]}
 
 
 def test_a_lease_that_was_taken_back_cannot_be_completed_before_it_expires(

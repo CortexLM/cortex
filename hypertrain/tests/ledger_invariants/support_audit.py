@@ -35,7 +35,12 @@ from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import Finalize
-from hypertrain.protocol.messages_v2 import EscrowLock, RunManifestV2, WorkScreenV2
+from hypertrain.protocol.messages_v2 import (
+    AuditPolicyV2,
+    EscrowLock,
+    RunManifestV2,
+    WorkScreenV2,
+)
 from hypertrain.protocol.messages_v2 import RankWorkResult as Rank
 
 from .support import FROZEN_UNIX, frozen_time, load_fixture_module, table_names
@@ -43,6 +48,17 @@ from .support import FROZEN_UNIX, frozen_time, load_fixture_module, table_names
 ROLLBACK = ("li_audit_rollback_fixture", "e2e/test_rollback_service_v2.py")
 LIVE_ONLY = ("challenge.db", "challenge.db-wal", "challenge.db-shm")
 REQUESTS = itertools.count(1)
+# What ADR 0011 (audit-integrity) changed in the store, detected on the tree under test so that
+# the module still reads an older tree: a lapse cools the auditor down instead of banning it, a
+# job that ran out of attempts gets a second window before its miner is dropped, and an
+# aggregation whose survivors cannot carry the round is refused by name.
+COOLS_DOWN = hasattr(ChallengeStore, "_cooling_until_v2")
+REARMS = hasattr(ChallengeStore, "_rearm_audit_job_v2")
+CHECKS_SURVIVORS = hasattr(ChallengeStore, "_require_survivors_v2")
+WINDOWS = 2 if REARMS else 1
+# A job nobody audited leaves the round without being a verdict on the round: the disposition of
+# a round whose job was dropped is untouched, where an older tree voided the round for everybody.
+DROP_DISPOSITION = "PENDING" if REARMS else "EXCLUDED"
 
 
 class Halt(BaseException):
@@ -189,6 +205,8 @@ def restore(network: Any, snapshot: Snapshot) -> None:
 def activate_identities(network: Any, cast: Cast) -> None:
     """Join, fund and mark ACTIVE (12 clean trials) the five miners without running a trial."""
     spec = network.manifest.training.reference_spec
+    # The size of a lock is the policy's: the ledger refuses an admission lock below a tenth of it.
+    lock_units = network.store._services(network.manifest.run_id())[0].policy.S_min_units
     for i in range(5):
         if i:
             network.push(network.now + 101)
@@ -198,7 +216,7 @@ def activate_identities(network: Any, cast: Cast) -> None:
         lock = EscrowLock(
             operation_id=f"{i + 1:064x}",
             owner=cast.cold[i].ss58,
-            units=1000,
+            units=lock_units,
             origin_ids=[network.origin_ids[i]],
             admission_id=identity,
             dispute_id=None,
@@ -338,7 +356,14 @@ def canonical(body: dict[str, Any]) -> bytes:
     return canonicalize(body)
 
 
-def reward_origin(run_id: str, hotkey: str, finalize_hash: str, w: int = 0) -> str:
+def reward_origin(
+    run_id: str, hotkey: str, finalize_hash: str, w: int = 0, *, escrow: Any = None
+) -> str:
+    """The origin id of a live reward as `escrow` issues it: the ledger derives it (under its own
+    key when it has one), the module function is the derivation of a ledger that has none."""
+    if escrow is not None and hasattr(escrow, "reward_origin"):
+        derived: str = escrow.reward_origin(w, hotkey, finalize_hash)
+        return derived
     return reward_origin_id(run_id, w, hotkey, finalize_hash)
 
 
@@ -530,12 +555,71 @@ def audit_kinds(store: ChallengeStore) -> dict[tuple[str, str], str]:
         "finality",
         "audit-job",
         "audit-geometry",
+        "audit-execution",
+        "audit-attempt-failure",
+        "audit-rearm",
         "auditor-disabled",
+        "auditor-cooldown",
     )
 
 
 def running(store: ChallengeStore) -> dict[str, dict[str, Any]]:
     return {h: r for h, r in lease_rows(store).items() if r["state"] == "running"}
+
+
+def open_rows(store: ChallengeStore) -> list[dict[str, Any]]:
+    """The jobs that are neither completed nor exhausted."""
+    return [r for r in lease_rows(store).values() if r["state"] in ("queued", "running")]
+
+
+def run_out_the_windows(network: Any, store: ChallengeStore) -> int:
+    """Push the beacon to the end of the window of the open jobs until none is open; returns how
+    many windows that took (one, or two on a tree that re-arms an exhausted job once)."""
+    windows = 0
+    while open_rows(store):
+        assert windows < WINDOWS, "an audit job is still open after its last window"
+        network.push(max(r["absolute"] for r in open_rows(store)))
+        windows += 1
+    return windows
+
+
+def drop_job(network: Any, store: ChallengeStore, hotkey: str) -> None:
+    """Push the beacon to the end of every window of one job, whatever the others do, until it
+    is exhausted."""
+    for _ in range(WINDOWS):
+        row = lease_rows(store)[hotkey]
+        if row["state"] == "exhausted":
+            return
+        network.push(row["absolute"])
+    assert lease_rows(store)[hotkey]["state"] == "exhausted"
+
+
+def audit_policy(store: ChallengeStore, run_id: str) -> AuditPolicyV2:
+    manifest = store._run_v2(run_id)
+    return AuditPolicyV2.model_validate_json(store.objects.get(manifest.network.audit_policy_hash))
+
+
+def silence_of(
+    store: ChallengeStore, run_id: str, row: dict[str, Any]
+) -> tuple[str, dict[str, Any], tuple[int, str]]:
+    """What a lease that lapsed unanswered leaves against its holder, as (the kind of the record
+    kept under the holder's hotkey, that record, the refusal the holder meets when it asks again).
+    A tree that cools the auditor down releases it `lease_rounds` after the lapse."""
+    if not COOLS_DOWN:
+        return (
+            "auditor-disabled",
+            {"job_id": row["id"], "reason": "LEASE_EXPIRED"},
+            (403, "silent auditor disabled pending review"),
+        )
+    until = row["expires"] + audit_policy(store, run_id).lease_rounds
+    record = {
+        "job_id": row["id"],
+        "reason": "AUDITOR_SILENT",
+        "strikes": 1,
+        "since": row["expires"],
+        "until": until,
+    }
+    return "auditor-cooldown", record, (403, f"auditor cooldown until round {until}")
 
 
 def settled_state(store: ChallengeStore) -> tuple[list[dict[str, Any]], dict[tuple[str, str], str]]:
