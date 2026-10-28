@@ -220,7 +220,9 @@ def signed_variant(
     envelope = EnvelopeV2.model_validate(seal(fixture.COORD, "Finalize", run_id, final, 200))
     work = evidence.works[0]
     origin = OriginAllocation(
-        origin_id=reward_origin_id(run_id, reward.w, work.commit.signer, digest(final)),
+        origin_id=reward_origin_id(
+            run_id, reward.w, work.commit.signer, digest(final), fixture.ID_KEY
+        ),
         owner=work.owner,
         units=reward.budget_units,
         mature_at=reward.mature_at,
