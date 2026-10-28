@@ -3089,6 +3089,7 @@ class ChallengeStore:
         value: str | None = None
         failure: BaseException | None = None
         key = (admission_id, "", retain_shadow_custody)
+        cutoff = 0.0
         with self._lock:
             manifest = self._run_v2(run_id)
             now = self._fresh_v2(manifest, f"reference:{admission_id}:{self._now(self._db)}")
@@ -3176,6 +3177,16 @@ class ChallengeStore:
                 )
         except BaseException as error:
             failure = error
+            if (
+                guard is not None
+                and isinstance(error, Exception)
+                and not isinstance(error, ChallengeError | AdmissionError)
+                and (guard.cancelled.is_set() or time.time() >= cutoff)
+            ):
+                # The lease is over: whatever the launch or the guard raised, the answer is the
+                # window's (a client must not retry a 500 for a trial that is closed).
+                failure = ChallengeError(409, "REFERENCE_TRIAL_CLOSED")
+                raise failure from error
             raise
         finally:
             self._end_reference_v2(key, flight, guard_key, guard, value=value, error=failure)

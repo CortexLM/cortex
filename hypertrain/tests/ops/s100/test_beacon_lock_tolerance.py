@@ -1,4 +1,4 @@
-"""The cadence `challenge_image.sh beacon` writes, against a store lock held by a remote reference.
+"""The cadence `challenge_image.sh beacon` writes, against a store lock held for a long time.
 
 `beacon_model` drives the real `Pusher.run` through the outage (docs/adr/0012). What it must show:
 no round between the first and the last one the store holds is skipped (a trial's seed is the round

@@ -209,8 +209,8 @@ answer, or the same failure. At most two such requests wait in the process: the 
 `reference still running for this trial; retry`. Both are transient: retry. A reference whose trial
 was closed, expired or replaced while it ran is dropped and nothing is committed: 409
 `REFERENCE_STATE_CHANGED` or `REFERENCE_TRIAL_CLOSED`. A reference that is
-not done by the deadline round of the trial is not committed either (the launch is cancelled there, or
-the answer is a 500 from the cancelled launch); the trial is closed `EXPIRED` and the miner's state,
+not done by the deadline round of the trial is not committed either: the launch is cancelled there and the
+answer is 409 `REFERENCE_TRIAL_CLOSED`, whatever the launch raised; the trial is closed `EXPIRED` and the miner's state,
 strikes and dispute flag are untouched. Its next challenge request is refused as 409
 `CHALLENGE_EXPIRED` until the operator reseeds the identity (below); the reseed refuses a trial that is
 still open, so it never meets a reference that is running.

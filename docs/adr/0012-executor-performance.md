@@ -206,7 +206,9 @@ numbers: the line numbers of the Context are those of the Part A tree.
    reference ends late). The window is the trial's. The lease guard cancels the launch when the verified beacon
    reaches `deadline_beacon`, as the wall-clock timer did before (that round is emitted at the second of the
    guard's wall cutoff); a proof may still arrive in the deadline round, a reference that is not done by then is
-   not committed. `settle_reference` adds the backstop `now > deadline_beacon` (refused as
+   not committed, and a launch the lease cancelled (the guard, or the wall past the cutoff) answers 409
+   `REFERENCE_TRIAL_CLOSED` whatever the launch or the screening raised (`IslandFailure`, `WorkScreenError`,
+   `AuditInputError`), so that a client does not retry a server error for a closed trial. `settle_reference` adds the backstop `now > deadline_beacon` (refused as
    `REFERENCE_TRIAL_CLOSED`, nothing written); it matters where no guard exists (the CPU path) or in the instant
    between a pushed round and the guard's `advance`, and it accepts the deadline round itself. A reference that
    ends late is therefore dropped, the reaper closes the trial `EXPIRED` as bookkeeping, and the miner's standing
@@ -225,7 +227,7 @@ numbers: the line numbers of the Context are those of the Part A tree.
 | --- | --- | --- |
 | the launch holds the lock | claim / run / settle | `latest_beacon`, `push_beacon`, another trial's export, status and reference are served meanwhile; `a_five_second_reference_holds_the_store_lock_for_less_than_a_second` |
 | double launch | flight keyed (admission, nonce, custody), looked up before anything is staged | `two_calls_for_one_trial_launch_once…` (one launch, one staging), `…refused_past_the_waiter_budget`, `a_waiter_gives_up…` |
-| crash between claim and settle | the claim commits nothing to the admission tables (the gate's pins and the staged inputs stay, and a retry reuses them); flight and guard dropped in `finally` | `a_launch_that_dies_between_claim_and_settle…` (also true on the parent; it kills the mutant that keeps the flight) |
+| crash between claim and settle | the claim commits nothing to the admission tables (the gate's pins and the staged inputs stay, and a retry reuses them); flight and guard dropped in `finally` | `a_launch_that_dies_between_claim_and_settle…` (the property held on the parent too; the test reads the new flight table and kills the mutant that keeps it) |
 | reaper or expiry during the run | guard cancel, then the settlement's re-validation | `the_beacon_passing_the_deadline…` (executor stops / ignores the event), `a_lease_cancelled_while_the_result_waits_for_the_lock…`; `test_reference_settle_v2.py` for each refusal |
 | executor error, then retry | flight dropped, waiters get the failure, a retry launches | `a_failed_launch_fails_its_waiters_alike…` |
 | result for a stale claim | row compared at settlement, nonce in the key | `a_result_for_a_stale_claim_is_dropped…`, `test_reference_settle_v2.py` |

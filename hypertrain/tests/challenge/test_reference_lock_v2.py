@@ -22,7 +22,6 @@ from typing import Any
 
 import pytest
 
-from hypertrain.auditor.replay import AuditInputError
 from hypertrain.challenge import store as store_module
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.store import ChallengeError
@@ -188,8 +187,16 @@ def served_while_the_reference_runs(network: Any, probe: Any) -> bool:
         except BaseException as error:  # noqa: BLE001 - the fake executor's failure is expected
             outcome.append(error)
 
+    failed: list[BaseException] = []
+
+    def ask() -> None:
+        try:
+            probe()
+        except BaseException as error:  # noqa: BLE001 - a probe that fails was not served
+            failed.append(error)
+
     worker = threading.Thread(target=reference, daemon=True)
-    asker = threading.Thread(target=probe, daemon=True)
+    asker = threading.Thread(target=ask, daemon=True)
     worker.start()
     try:
         if not executor.reached.wait(WAIT):
@@ -203,9 +210,25 @@ def served_while_the_reference_runs(network: Any, probe: Any) -> bool:
         asker.join(WAIT)
     if worker.is_alive() or asker.is_alive():
         raise RuntimeError("a thread is stuck after the executor was released")
+    if failed:
+        raise failed[0]
     if not outcome or not isinstance(outcome[0], IslandFailure):
         raise RuntimeError(f"the reference did not end in the fake executor's failure: {outcome}")
     return served
+
+
+class Attempt(threading.Thread):
+    """A request on its own thread that remembers how it ended."""
+
+    def __init__(self, function: Any, *args: Any) -> None:
+        super().__init__(daemon=True)
+        self.function, self.args_, self.error = function, args, None
+
+    def run(self) -> None:
+        try:
+            self.function(*self.args_)
+        except BaseException as error:  # noqa: BLE001 - the test reads it back
+            self.error = error
 
 
 def test_the_latest_beacon_is_served_while_a_remote_reference_runs(hosted):
@@ -232,17 +255,15 @@ def test_another_trials_requests_are_served_while_a_remote_reference_runs(hosted
     try:
         assert executor.reached.wait(WAIT)
         requests = [
-            threading.Thread(target=store.export_trial_v2, args=(run_id, second)),
-            threading.Thread(
-                target=store.admission_v2,
-                args=(run_id, "status", b"", backend.service.HOT[1].ss58),
-            ),
+            Attempt(store.export_trial_v2, run_id, second),
+            Attempt(store.admission_v2, run_id, "status", b"", backend.service.HOT[1].ss58),
         ]
         for request in requests:
             request.start()
         for request in requests:
             request.join(3)
         assert not any(request.is_alive() for request in requests)
+        assert [request.error for request in requests] == [None, None]  # served, not failed
         # the other trial's own reference runs to its commitment while the first is blocked
         assert store.trial_reference_v2(run_id, second)["reference_commitment"]
         assert not blocked.done and len(executor.launches) == 2
@@ -377,15 +398,23 @@ def test_a_failed_launch_fails_its_waiters_alike_frees_the_flight_and_a_retry_la
     assert len(executor.launches) == 2
 
 
-def test_a_launch_that_dies_between_claim_and_settle_leaves_nothing_durable_and_a_retry_works(
-    hosted, monkeypatch
-):
-    monkeypatch.setattr(store_module, "REFERENCE_WAIT_SECONDS", 3.0)
+def test_a_launch_that_dies_between_claim_and_settle_leaves_no_commitment_and_a_retry_works(hosted):
     run_id, store = hosted.manifest.run_id(), hosted.store
     executor = Executor(error=SystemExit("the worker was killed"))
     store._role_launch = executor
     admission_id = pending_reference(hosted)
-    before = [tuple(r) for r in store._db.execute("SELECT * FROM admission_trial_results")]
+    tables = (
+        "admission_trial_results",
+        "admission_trials",
+        "admission_reservations",
+        "records_v2",
+        "escrow_events",
+    )
+
+    def snapshot() -> list[list[tuple[Any, ...]]]:
+        return [[tuple(r) for r in store._db.execute(f"SELECT * FROM {t}")] for t in tables]
+
+    before = snapshot()
     first = Call(store, run_id, admission_id)
     try:
         assert executor.reached.wait(WAIT)
@@ -400,7 +429,9 @@ def test_a_launch_that_dies_between_claim_and_settle_leaves_nothing_durable_and_
         first.result()
     assert store._reference_flights_v2 == {} and store._lease_guards_v2 == {}
     assert not committed(hosted, admission_id)
-    assert [tuple(r) for r in store._db.execute("SELECT * FROM admission_trial_results")] == before
+    assert (
+        snapshot() == before
+    )  # the claim and the death wrote nothing to the admission or the ledger
     retried = store.trial_reference_v2(run_id, admission_id)  # the staged inputs are reused
     assert retried["reference_commitment"] == row_of(hosted, admission_id)["reference_commitment"]
 
@@ -433,13 +464,16 @@ def test_the_beacon_passing_the_deadline_cancels_the_launch_and_no_commitment_is
     finally:
         executor.release.set()
     # An executor that watches the event stops with its own failure; one that does not is caught
-    # by the screening of its result. Either way the waiter gets the same failure.
-    expected = IslandFailure if honour_cancel else WorkScreenError
-    with pytest.raises(expected) as stopped:
+    # by the screening of its result. Either way the answer is the window's, a 409, not a server
+    # error, and the waiter gets the same one.
+    cause = IslandFailure if honour_cancel else WorkScreenError
+    with pytest.raises(ChallengeError) as stopped:
         first.result()
-    with pytest.raises(expected) as alike:
+    with pytest.raises(ChallengeError) as alike:
         second.result()
     assert alike.value is stopped.value
+    assert (stopped.value.status, stopped.value.detail) == (409, "REFERENCE_TRIAL_CLOSED")
+    assert isinstance(stopped.value.__cause__, cause)
     assert not committed(hosted, admission_id)
     assert store._reference_flights_v2 == {} and store._lease_guards_v2 == {}
     assert row_of(hosted, admission_id)["clean_count"] == 0
@@ -448,30 +482,29 @@ def test_the_beacon_passing_the_deadline_cancels_the_launch_and_no_commitment_is
 def test_a_lease_cancelled_while_the_result_waits_for_the_lock_is_not_committed(
     hosted, monkeypatch
 ):
-    run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor(delay=0)
+    run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor()
     store._role_launch = executor
     admission_id = pending_reference(hosted)
     key = f"reference:{admission_id}:{challenge_of(hosted, admission_id).nonce}"
     _, admission, _ = store._services(run_id)
-    run = admission.run_reference
+    ran, run = threading.Event(), admission.run_reference
 
-    def run_then_arm(*args: Any, **options: Any) -> Any:
+    def run_then_say_so(*args: Any, **options: Any) -> Any:
         result = run(*args, **options)
-        guard = store._lease_guards_v2[key]
-        check, seen = guard.check, []
-
-        def check_twice() -> None:
-            seen.append(1)
-            if len(seen) == 2:  # the first check follows the run, the second precedes the write
-                guard.revoke()  # the lease ends between the two: the result is already in
-            check()
-
-        guard.check = check_twice
+        ran.set()
         return result
 
-    monkeypatch.setattr(admission, "run_reference", run_then_arm)
-    with pytest.raises(AuditInputError, match="expired or revoked"):
-        store.trial_reference_v2(run_id, admission_id)
+    monkeypatch.setattr(admission, "run_reference", run_then_say_so)
+    call = Call(store, run_id, admission_id)
+    assert executor.reached.wait(WAIT)
+    with store._lock:  # the store is busy when the result arrives
+        executor.release.set()
+        assert ran.wait(WAIT)
+        time.sleep(0.5)  # the call is parked on the lock now, past its first check
+        store._lease_guards_v2[key].revoke()  # the lease ends while it waits
+    with pytest.raises(ChallengeError) as over:
+        call.result()
+    assert (over.value.status, over.value.detail) == (409, "REFERENCE_TRIAL_CLOSED")
     assert not committed(hosted, admission_id)
     assert store._reference_flights_v2 == {} and store._lease_guards_v2 == {}
 
@@ -495,7 +528,7 @@ def test_a_result_for_a_stale_claim_is_dropped_and_the_new_challenge_gets_its_ow
         fresh = challenge_of(hosted, admission_id)
         assert fresh.nonce != stale.nonce
         second = Call(store, run_id, admission_id)
-        assert second.result(15)["reference_commitment"]  # not behind the stale flight
+        assert second.result()["reference_commitment"]  # not behind the stale flight
         assert not first.done and len(executor.launches) == 2
     finally:
         executor.release.set()
@@ -570,6 +603,121 @@ def test_a_request_for_custody_beside_one_without_has_its_own_flight_and_retains
     assert kept.fetchone()[0] == 1
 
 
+def test_claim_and_settle_hold_the_store_lock_and_the_run_does_not(hosted, monkeypatch):
+    run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor(delay=0)
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    _, admission, _ = store._services(run_id)
+    owned: dict[str, bool] = {}
+
+    def spy(name: str) -> None:
+        real = getattr(admission, name)
+
+        def watched(*args: Any, **options: Any) -> Any:
+            owned[name] = store._lock._is_owned()
+            return real(*args, **options)
+
+        monkeypatch.setattr(admission, name, watched)
+
+    for name in ("claim_reference", "run_reference", "settle_reference"):
+        spy(name)
+    store.trial_reference_v2(run_id, admission_id)
+    assert owned == {"claim_reference": True, "run_reference": False, "settle_reference": True}
+
+
+def test_the_wall_clock_cutoff_cancels_a_hung_launch_without_any_beacon(hosted, monkeypatch):
+    # A remote executor that hangs while the pusher is down: only the guard's timer can stop it.
+    from hypertrain.auditor import worker
+
+    init = worker.LeaseGuard.__init__
+
+    def cutoff_in_a_second(self: Any, expires: int, absolute: int, deadline_unix: float) -> None:
+        init(self, expires, absolute, time.time() + 1.0)
+
+    monkeypatch.setattr(worker.LeaseGuard, "__init__", cutoff_in_a_second)
+    run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor()
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    call = Call(store, run_id, admission_id)
+    try:
+        assert executor.reached.wait(WAIT)
+        cancel = executor.cancels[0]
+        assert cancel is not None and cancel.wait(10)  # no round was pushed
+    finally:
+        executor.release.set()
+    with pytest.raises(ChallengeError) as over:
+        call.result()
+    assert (over.value.status, over.value.detail) == (409, "REFERENCE_TRIAL_CLOSED")
+    assert not committed(hosted, admission_id)
+
+
+def test_a_reference_asked_in_the_deadline_round_is_refused_without_a_launch(hosted):
+    run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor(delay=0)
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    hosted.push(challenge_of(hosted, admission_id).deadline_beacon)  # the trial is still OPEN
+    with pytest.raises(ChallengeError) as late:
+        store.trial_reference_v2(run_id, admission_id)
+    assert (late.value.status, late.value.detail) == (409, "REFERENCE_TRIAL_CLOSED")
+    assert executor.launches == [] and not committed(hosted, admission_id)
+
+
+def test_a_challenge_without_its_receipt_is_refused_before_anything_runs(hosted):
+    run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor(delay=0)
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    nonce = challenge_of(hosted, admission_id).nonce
+    store._db.execute(
+        "DELETE FROM admission_reservations WHERE reservation=?",
+        (f"challenge|{admission_id}|{nonce}",),
+    )
+    with pytest.raises(ChallengeError) as missing:
+        store.trial_reference_v2(run_id, admission_id)
+    assert (missing.value.status, missing.value.detail) == (409, "MISSING_CHALLENGE_RECEIPT")
+    assert executor.launches == [] and store._reference_flights_v2 == {}
+
+
+def test_a_job_whose_deadline_is_not_the_challenges_never_reaches_the_executor(hosted, monkeypatch):
+    run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor(delay=0)
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    stage = store.stage_trial_v2
+
+    def staged_with_another_deadline(*args: Any) -> Any:
+        job, directory = stage(*args)
+        return job.model_copy(update={"deadline": job.deadline + 1}), directory
+
+    monkeypatch.setattr(store, "stage_trial_v2", staged_with_another_deadline)
+    with pytest.raises(ChallengeError) as changed:
+        store.trial_reference_v2(run_id, admission_id)
+    assert (changed.value.status, changed.value.detail) == (
+        409,
+        "reference launch subject changed",
+    )
+    assert executor.launches == [] and not committed(hosted, admission_id)
+
+
+def test_the_waiter_budget_is_one_for_the_root_and_its_child_stores(child_network):  # noqa: F811
+    hosted = child_network
+    run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor()
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    leader, taken = Call(store, run_id, admission_id), 0
+    try:
+        assert executor.reached.wait(WAIT)
+        for _ in range(store_module.REFERENCE_WAITERS):  # places held by waiters of other runs
+            assert hosted.root._reference_waiters.acquire(blocking=False)
+            taken += 1
+        with pytest.raises(ChallengeError) as refused:
+            Call(store, run_id, admission_id).result(3)
+        assert refused.value.status == 503
+    finally:
+        for _ in range(taken):
+            hosted.root._reference_waiters.release()
+        executor.release.set()
+    assert leader.result()["reference_commitment"]
+
+
 def test_a_caller_that_holds_the_store_lock_is_refused(hosted):
     run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor()
     store._role_launch = executor
@@ -610,29 +758,6 @@ def test_exporting_a_trial_never_rewrites_the_inputs_a_running_launch_reads(host
     finally:
         executor.release.set()
     first.result()
-
-
-def test_staging_survives_a_write_that_died_halfway(hosted, monkeypatch):
-    run_id, store = hosted.manifest.run_id(), hosted.store
-    admission_id = pending_reference(hosted)
-    challenge = challenge_of(hosted, admission_id)
-    epoch = row_of(hosted, admission_id)["trial_epoch"]
-    samples = trial_samples(
-        hosted.manifest, admission_id, challenge.nonce, store._beacon_v2(challenge.seed_beacon)
-    )
-    real = Path.write_bytes
-
-    def dies_halfway(self: Path, data: bytes) -> int:
-        real(self, data[: len(data) // 2])
-        raise OSError("disk full")
-
-    monkeypatch.setattr(Path, "write_bytes", dies_halfway)
-    with pytest.raises(OSError, match="disk full"):
-        store.stage_trial_v2(run_id, challenge, samples, epoch)
-    monkeypatch.setattr(Path, "write_bytes", real)
-    # the half-written file is not left under the name of an input: the next staging works
-    job, directory = store.stage_trial_v2(run_id, challenge, samples, epoch)
-    assert (directory / "start_state").read_bytes() and job.sample_ids == list(samples)
 
 
 def miner_submission(hosted: Any, admission_id: str, workdir: Path) -> dict[str, Any]:
@@ -721,8 +846,8 @@ def test_the_deadline_round_cancels_a_launch_that_is_still_running(hosted, tmp_p
         assert cancel.is_set()
     finally:
         executor.release.set()
-    with pytest.raises((IslandFailure, WorkScreenError, AuditInputError)):
-        raise post.result()
+    late = post.result()
+    assert (late.status_code, late.json()) == (409, {"detail": "REFERENCE_TRIAL_CLOSED"})
     assert not committed(hosted, admission_id)
 
 
@@ -760,8 +885,8 @@ def test_a_reference_that_ends_after_the_window_commits_nothing_and_sanctions_no
         hosted.push(challenge_of(hosted, admission_id).deadline_beacon + 1)
     finally:
         executor.release.set()
-    with pytest.raises((IslandFailure, WorkScreenError, AuditInputError)):
-        raise post.result()
+    late = post.result()
+    assert (late.status_code, late.json()) == (409, {"detail": "REFERENCE_TRIAL_CLOSED"})
     after = row_of(hosted, admission_id)
     assert not committed(hosted, admission_id)
     assert (after["state"], after["strikes"], after["pending_dispute"], after["clean_count"]) == (

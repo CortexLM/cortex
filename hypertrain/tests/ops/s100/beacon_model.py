@@ -1,7 +1,8 @@
 """Virtual-time model of the real `hypertrain.beacon.push.Pusher` against a held store lock.
 
-A remote reference holds the lock of the challenge store that hosts the run
-(`challenge/store.py` `trial_reference_v2`). This drives the unmodified `Pusher.run` through such an
+A store lock that is held for a long time (a challenge restart, a stuck request, and until ADR 0012
+Part B a remote reference in `challenge/store.py` `trial_reference_v2`) keeps the pusher from
+delivering. This drives the unmodified `Pusher.run` through such an
 outage on a clock that only moves when the pusher or the model says so, so a lock of minutes runs
 in milliseconds and the result does not depend on the machine. `simulate` runs the production
 `Pusher` (head first) unless told otherwise; `AscendingPusher` is the one it replaced.
