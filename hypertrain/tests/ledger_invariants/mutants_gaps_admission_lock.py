@@ -71,7 +71,7 @@ RUNTIME_CUSTODY_FALLBACK = """\
             raise ChallengeError(409, f"missing accepted {kind}: {identity}")
 """
 LEASE_EXPIRY = "                self._expire_leases_v2(run_id, br.round)\n"
-DISPUTE_EXIT = "            self._close_blocked_disputes_v2(run_id)\n"
+DISPUTE_EXIT = '            self._reap_v2(run_id, "dispute", self._close_blocked_disputes_v2)\n'
 TRIAL_REAPER = "                admission.reap_expired_trials(now=self._now(self._db))\n"
 NOTHING_16 = "                pass\n"
 NOTHING_12 = "            pass\n"

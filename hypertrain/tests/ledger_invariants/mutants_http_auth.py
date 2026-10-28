@@ -204,9 +204,8 @@ MUTANTS: list[dict[str, Any]] = [
         "http-auth-dispute-party-gate-open",
         ["AU-05"],
         APP,
-        "        if party not in await run(protocol_roles, run_id):\n"
-        "            await subnet_member(party)",
-        "        if party not in await run(protocol_roles, run_id):\n            return",
+        "            return True\n        await subnet_member(party)\n        return False\n",
+        "            return True\n        return False\n",
         [UNREGISTERED],
         "a party that is neither a pinned role nor a subnet miner is admitted to dispute routes.",
     ),
@@ -600,11 +599,11 @@ MUTANTS: list[dict[str, Any]] = [
         "http-auth-dispute-watch-without-party-gate",
         ["AU-05"],
         APP,
-        "        await party_member(run_id, party)\n"
-        "        _, _, disputes = await run(store.for_run(run_id)._services, run_id)",
-        "        _, _, disputes = await run(store.for_run(run_id)._services, run_id)",
+        "        pinned = await party_member(run_id, poll.party)\n",
+        "        pinned = poll.party in await run(protocol_roles, run_id)\n",
         [UNREGISTERED],
-        "the dispute watch GET forgets its membership gate; its static header is the only check.",
+        "the dispute watch only asks whether its party is a pinned role, so a signed poll from a "
+        "hotkey off the subnet is served.",
     ),
     mutant(
         "http-auth-admission-lock-accepts-any-signer",
