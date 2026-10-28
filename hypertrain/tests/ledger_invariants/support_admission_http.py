@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.store import ChallengeStore
+from hypertrain.miner import admission as miner_admission
 from hypertrain.miner.admission import sign_join, sign_rotation
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -81,10 +82,9 @@ class Subnet:
 
 
 def trial_challenge_headers(run_id: str, admission_id: str, owner: Keypair) -> dict[str, str]:
-    """The owner's signed header pair, in the scheme of the /job route.
-
-    ADR 0010 Part 3 reuses it for the challenge route under its own domain; until that route
-    reads the headers they are ignored, so an owner request is valid before and after the fix.
+    """The header pair of the owner's challenge GET on a base that has not moved the request
+    into a signed body (ADR 0010 Part 3 as first merged, domain `trial-challenge/2`). Only
+    `Gate.challenge` uses it, and only when the service network has no `owner_request`.
     """
     message = f"hypertrain/trial-challenge/2|{run_id}|{admission_id}".encode()
     return {"x-hotkey": owner.ss58, "x-trial-signature": owner.sign(message).hex()}
@@ -169,26 +169,46 @@ class Gate:
     def challenge(
         self, admission_id: str, owner: Keypair | None = None, *, as_hotkey: Keypair | None = None
     ) -> httpx.Response:
-        """GET the admission's challenge; `owner` adds the owner's signed header pair."""
-        headers = {}
-        signer = as_hotkey or owner
-        if signer is not None:
-            headers = trial_challenge_headers(self.run_id, admission_id, signer)
+        """Ask for the admission's trial as `owner` (or `as_hotkey`); without a key, as a
+        registered stranger. A base whose owner requests are signed bodies takes a POST of the
+        owner's ChallengeRequest (`Network.challenge`); an earlier one takes the GET with the
+        owner's signed header pair.
+        """
+        signer = as_hotkey or owner or STRANGER
+        if hasattr(self.network, "owner_request"):
+            response: httpx.Response = self.network.challenge(admission_id, signer)
+            return response
+        headers = trial_challenge_headers(self.run_id, admission_id, signer)
         return self.client.get(f"{self.url}/join/{admission_id}/challenge", headers=headers)
 
     def rotation_request(
         self, cold: Keypair, old_hot: Keypair, new_hot: Keypair | str, label: str = "rotation"
     ) -> dict[str, Any]:
-        """The signed rotation body. `new_hot` is a Keypair when its holder takes part in the
-        rotation and a bare address when the coldkey names a hotkey whose key it does not hold.
-        Part 1 of ADR 0010 adds the new hotkey's consent here, signed for a Keypair only, so that
-        a test of an unconsented rotation stays unconsented after the fix.
+        """The signed rotation as its owner sends it. `new_hot` is a Keypair when its holder takes
+        part in the rotation and a bare address when the coldkey names a hotkey whose key it does
+        not hold. A base whose request carries the new hotkey's consent (ADR 0010 Part 1) gets it
+        signed by the Keypair; for a bare address it gets a well-formed consent of a key that is
+        not that hotkey, so an unconsented rotation stays unconsented. A base without the field
+        takes the three-field body.
         """
         address = new_hot if isinstance(new_hot, str) else new_hot.ss58
-        request = RotateRequest(
-            hotkey=old_hot.ss58, new_hotkey=address, operation_id=sha256_hex(label.encode())
+        expires = 10000
+        operation_id = sha256_hex(label.encode())
+        if "new_hot_sig" not in RotateRequest.model_fields:
+            request = RotateRequest.model_validate(
+                {"hotkey": old_hot.ss58, "new_hotkey": address, "operation_id": operation_id}
+            )
+            return sign_rotation(cold, self.run_id, request, expires)
+        consent = miner_admission.sign_rotation_consent(
+            new_hot if isinstance(new_hot, Keypair) else STRANGER,
+            run_id=self.run_id,
+            coldkey=cold.ss58,
+            hotkey=old_hot.ss58,
+            operation_id=operation_id,
+            expires_beacon=expires,
         )
-        return sign_rotation(cold, self.run_id, request, 10000)
+        request = RotateRequest.model_validate({**consent.body(), "new_hotkey": address})
+        return sign_rotation(cold, self.run_id, request, expires)
 
     def rotate(
         self, cold: Keypair, old_hot: Keypair, new_hot: Keypair | str, label: str = "rotation"

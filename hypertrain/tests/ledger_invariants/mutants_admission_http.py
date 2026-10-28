@@ -3,10 +3,12 @@
 ADMISSION = "src/hypertrain/challenge/admission.py"
 ENVELOPE = "src/hypertrain/protocol/envelope_v2.py"
 STORE = "src/hypertrain/challenge/store.py"
+APP = "src/hypertrain/challenge/app.py"
 HTTP = "tests/ledger_invariants/test_admission_http.py"
 INPROCESS = "tests/ledger_invariants/test_admission_http_2.py"
 EXISTING = "tests/challenge/test_admission_v2.py"
 HARDENING = "tests/challenge/test_admission_hardening_v2.py"
+TRIAL_EXPORT = "tests/challenge/test_trial_export.py"
 
 JOIN_FAULT = HTTP + "::test_sg06_a_join_with_one_defect_is_refused_and_leaves_no_trace"
 REPLAY = HTTP + "::test_sg06_repeating_a_join_returns_the_same_admission_and_spends_no_quota"
@@ -30,9 +32,25 @@ STRANGER_POLL = (
     HTTP + "::test_gt01_a_poll_after_the_deadline_by_anyone_expires_or_suspends_nobody[APPLIED]"
 )
 STRANGER_POLL_ACTIVE = STRANGER_POLL.replace("[APPLIED]", "[ACTIVE]")
+NEWCOMER_SERVED = (
+    INPROCESS + "::test_gt03_a_newcomer_is_served_past_the_deadline_of_unproven_trials"
+)
 CLOCK_CLOSES = HTTP + "::test_gt03_the_clock_closes_the_trial_of_a_suspended_or_banned_holder"
 PENDING_BOUND = HTTP + "::test_ad01_the_pending_places_are_bounded_and_a_refusal_changes_nothing"
 ROTATE_OWNER = HTTP + "::test_sg08_only_the_coldkey_of_the_admission_can_rotate_it"
+CURRENT_OWNER = HTTP + "::test_gt01_after_a_rotation_only_the_current_hotkey_can_ask_for_the_trial"
+ROTATE_CONSENT = HTTP + "::test_lck17_a_rotation_onto_a_hotkey_that_never_agreed_is_refused"
+# What ADR 0010 closed and tests/challenge pins more strongly than a copy over HTTP would
+# (PIN_EXISTING): the runner proves below that each of them fails under its mutant.
+BANNED_ROTATION = EXISTING + "::test_banned_admission_cannot_rotate"
+ROTATION_WINDOW = EXISTING + "::test_rotation_chain_is_bounded_per_coldkey_and_window"
+DEAD_PLACES = EXISTING + "::test_unfunded_applied_rows_release_their_places_once_the_window_is_dead"
+FUNDED_KEPT = EXISTING + "::test_funded_or_outbox_pending_applied_row_is_never_reaped"
+OWNER_ONLY = TRIAL_EXPORT + "::test_challenge_route_refuses_everyone_but_the_owner"
+CAPTURE_BOUND = (
+    TRIAL_EXPORT
+    + "::test_an_owner_request_may_expire_only_so_far_ahead[challenge-ChallengeRequest]"
+)
 
 MUTANTS = [
     {
@@ -139,12 +157,14 @@ MUTANTS = [
         "invariants": ["SG-06"],
         "path": ADMISSION,
         "old": """            if old:
-                self.store.reserve(key, request_hash, old["receipt"])""",
+                self.store.reserve(key, request_hash, old["receipt"])
+                return self.store.by_id(old["receipt"])""",
         "new": """            if old:
                 self.store.quota(
                     request.coldkey, now, self.policy.join_per_beacon, self.policy.join_burst
                 )
-                self.store.reserve(key, request_hash, old["receipt"])""",
+                self.store.reserve(key, request_hash, old["receipt"])
+                return self.store.by_id(old["receipt"])""",
         "tests": [REPLAY, PROPERTY],
         "why": "every retry of an accepted join spends the coldkey's join quota.",
     },
@@ -280,9 +300,7 @@ MUTANTS = [
         "old": """            self.reap_expired_trials(now=now)
             if row["challenge"]:""",
         "new": """            if row["challenge"]:""",
-        "tests": [
-            EXISTING + "::test_challenge_issued_when_two_unproven_trials_are_past_their_deadline"
-        ],
+        "tests": [NEWCOMER_SERVED],
         "why": "a newcomer's challenge is refused TRIAL_CAPACITY by trials past their deadline.",
     },
     {
@@ -543,5 +561,180 @@ MUTANTS = [
                 return r""",
         "tests": [REPLAYED_OVER_HTTP],
         "why": "re-posting the accepted proof credits a clean participation again.",
+    },
+    {
+        "id": "rotation-consent-not-verified",
+        "invariants": ["LCK-17", "SG-08"],
+        "path": ADMISSION,
+        "old": (
+            'not verify_rotate(op, history["coldkey"], self.escrow.run_id, env.exp_drand):\n'
+            '                raise AdmissionError("ROTATION_CONSENT")'
+        ),
+        "new": 'False:\n                raise AdmissionError("ROTATION_CONSENT")',
+        "tests": [ROTATE_CONSENT],
+        "why": "the coldkey alone rebinds an admission to a registered hotkey that never agreed.",
+    },
+    {
+        "id": "rotation-consent-checked-against-the-old-hotkey",
+        "invariants": ["LCK-17", "SG-08"],
+        "path": ENVELOPE,
+        "old": """            decode_hotkey(request.new_hotkey),
+            rotate_signing_message(""",
+        "new": """            decode_hotkey(request.hotkey),
+            rotate_signing_message(""",
+        "tests": [ROTATE_CONSENT],
+        "why": "the consent is verified against the hotkey being replaced, not the one it binds.",
+    },
+    {
+        "id": "rotation-of-a-banned-admission-allowed",
+        "invariants": ["SG-08"],
+        "path": ADMISSION,
+        "old": """            if r.state == "BANNED":
+                raise AdmissionError("TERMINAL_BANNED")
+            self.store.quota(""",
+        "new": """            self.store.quota(""",
+        "tests": [BANNED_ROTATION],
+        "why": "a banned admission moves to a fresh hotkey and keeps operating under it.",
+    },
+    {
+        "id": "rotation-quota-removed",
+        "invariants": ["SG-08"],
+        "path": ADMISSION,
+        "old": """            self.store.quota(
+                f"rotate:{r.coldkey}:{now // self.policy.work_screen_epoch_rounds}",
+                now,
+                0,
+                self.policy.join_burst,
+                code="ROTATION_QUOTA",
+            )""",
+        "new": """            pass""",
+        "tests": [ROTATION_WINDOW],
+        "why": "one coldkey chains rotations without limit inside a window.",
+    },
+    {
+        "id": "rotation-quota-off-by-one",
+        "invariants": ["SG-08"],
+        "path": ADMISSION,
+        "old": """                0,
+                self.policy.join_burst,
+                code="ROTATION_QUOTA",""",
+        "new": """                0,
+                self.policy.join_burst + 1,
+                code="ROTATION_QUOTA",""",
+        "tests": [ROTATION_WINDOW],
+        "why": "a coldkey gets one rotation more per window than the policy burst.",
+    },
+    {
+        "id": "join-does-not-retire-dead-applications",
+        "invariants": ["AD-01", "LCK-21"],
+        "path": ADMISSION,
+        "old": """            self.reap_dead_applications(now=now)
+""",
+        "new": """            pass
+""",
+        "tests": [DEAD_PLACES],
+        "why": "unfunded applications past their challenge window keep their pending places.",
+    },
+    {
+        "id": "dead-applications-retired-while-the-window-is-open",
+        "invariants": ["AD-01", "LCK-21"],
+        "path": ADMISSION,
+        "old": """"WHERE state='APPLIED' AND seed_beacon+?<? ORDER BY admission_id",""",
+        "new": """"WHERE state='APPLIED' AND seed_beacon+?<=? ORDER BY admission_id",""",
+        "tests": [DEAD_PLACES],
+        "why": "an application is retired on the last round it can still ask for its challenge.",
+    },
+    {
+        "id": "dead-applications-retired-even-when-funded",
+        "invariants": ["AD-01", "LCK-21"],
+        "path": ADMISSION,
+        "old": """                if self._unfunded(row["admission_id"], row["coldkey"]):
+                    self.store.transition(""",
+        "new": """                if True:
+                    self.store.transition(""",
+        "tests": [FUNDED_KEPT],
+        "why": "an application that locked a bond is suspended by the clock while it holds stake.",
+    },
+    {
+        "id": "challenge-route-owner-check-removed",
+        "invariants": ["GT-01", "LCK-20"],
+        "path": APP,
+        "old": """        await owner_request(run_id, admission_id, request, ChallengeRequest)""",
+        "new": """        pass""",
+        "tests": [OWNER_ONLY],
+        "why": "anyone opens a rival's trial and takes one of the run's trial places.",
+    },
+    {
+        "id": "owner-request-signer-not-the-admissions-hotkey",
+        "invariants": ["GT-01", "LCK-20"],
+        "path": APP,
+        "old": """{message.__name__: hotkey.__eq__}""",
+        "new": """{message.__name__: lambda signer: True}""",
+        "tests": [OWNER_ONLY],
+        "why": "a registered rival signing the request as itself opens the owner's trial.",
+    },
+    {
+        "id": "owner-request-not-bound-to-the-admission",
+        "invariants": ["GT-01", "LCK-20"],
+        "path": APP,
+        "old": """asked.admission_id == admission_id""",
+        "new": """True""",
+        "tests": [OWNER_ONLY],
+        "why": "the owner's request for one admission opens the trial of another of its own.",
+    },
+    {
+        "id": "owner-request-accepted-for-the-other-route",
+        "invariants": ["GT-01", "LCK-20"],
+        "path": APP,
+        "old": (
+            "            asked = envelope_v2.Intake(run_id, {message.__name__: hotkey.__eq__})"
+            ".accept(raw, now)\n"
+            "            valid = isinstance(asked, message) and asked.admission_id == admission_id"
+        ),
+        "new": """            asked = envelope_v2.Intake(
+                run_id, {"ChallengeRequest": hotkey.__eq__, "JobRequest": hotkey.__eq__}
+            ).accept(raw, now)
+            valid = asked.admission_id == admission_id""",
+        "tests": [OWNER_ONLY],
+        "why": "a captured job request of the owner opens its trial.",
+    },
+    {
+        "id": "owner-is-the-hotkey-the-admission-started-with",
+        "invariants": ["GT-01", "LCK-20"],
+        "path": APP,
+        "old": """        hotkey = (await run(admission.store.by_id, admission_id)).hotkey""",
+        "new": """        hotkey = await run(
+            lambda: admission.store.db.execute(
+                "SELECT hotkey FROM admission_history WHERE admission_id=? ORDER BY rowid",
+                (admission_id,),
+            ).fetchone()[0]
+        )""",
+        "tests": [CURRENT_OWNER],
+        "why": "the hotkey an admission left still asks for its trial, its current one cannot.",
+    },
+    {
+        "id": "owner-request-expiry-unbounded",
+        "invariants": ["GT-01", "LCK-20"],
+        "path": APP,
+        "old": (
+            "            if envelope_v2.parse_envelope(raw).exp_drand"
+            " > now + OWNER_REQUEST_MAX_ROUNDS:\n"
+            '                raise ExpiredError("expiry too far ahead")'
+        ),
+        "new": """            pass""",
+        "tests": [CAPTURE_BOUND],
+        "why": "an owner request signed to expire far ahead stays good for a replay of a capture.",
+    },
+    {
+        "id": "late-challenge-suspends-the-owner",
+        "invariants": ["GT-01", "LCK-20"],
+        "path": ADMISSION,
+        "old": """            if now > seed + self.policy.challenge_rounds:
+                raise AdmissionError("CHALLENGE_EXPIRED")""",
+        "new": """            if now > seed + self.policy.challenge_rounds:
+                self.store.transition(admission_id, "SUSPENDED", "CHALLENGE_EXPIRED", now)
+                return {}""",
+        "tests": [STRANGER_POLL, STRANGER_POLL_ACTIVE],
+        "why": "an owner asking for its challenge after the window is suspended for good.",
     },
 ]

@@ -9,8 +9,10 @@ PreconditionError, which is not an AssertionError, so a broken scenario fails lo
 hiding behind the expected failure.
 
 Rotation and challenge requests are built in one place (`Gate.rotation_request`,
-`trial_challenge_headers`): when ADR 0010 Parts 1 and 3 land, that is where the new hotkey's
-consent and the owner's challenge signature are added.
+`Gate.challenge`): the new hotkey's consent (ADR 0010 Part 1) and the owner's signed challenge
+request (Part 3, a POST body on this base) are added there, so a test states who asks and what
+the service owes them. What ADR 0010 closed is pinned by the tests below or, where
+tests/challenge pins it more strongly, by those: see the mutant table.
 """
 
 from __future__ import annotations
@@ -128,10 +130,7 @@ def test_sg06_repeating_a_join_returns_the_same_admission_and_spends_no_quota(ga
     assert first.status_code == 200, first.text
     gate.push(5)
     held = gate.snapshot()
-    precondition(
-        len(held["admission_quota"]) == 3,
-        f"quota rows of the hotkey, the coldkey and the prefix: {held['admission_quota']}",
-    )
+    precondition(bool(held["admission_quota"]), "the first join charged no quota")
     # When: the exact request arrives again, as many times as the client retries
     repeats = [gate.join(hot, cold) for _ in range(3)]
     # Then: the stored answer, one identity, nothing charged and no admission row touched
@@ -206,17 +205,19 @@ def test_or01_recover_refuses_alike_whatever_the_admission_holds(
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="SG-07+SIG-13: a join whose hotkey and coldkey are the same key is accepted [candidate]",
+    reason="SG-07+SIG-13: a join whose hotkey and coldkey are the same key is accepted "
+    "[candidate] [fix-lot: decision (product choice pending)]",
 )
 def test_sg07_a_join_cannot_use_one_key_as_hotkey_and_coldkey(gate: Gate) -> None:
     # Given: the route admits an ordinary application
     ordinary = gate.join(HOTS[1], COLDS[1])
     precondition(ordinary.status_code == 200, f"control join refused: {ordinary.text}")
+    before = gate.world.db_digest()
     # When
     same = gate.join(HOTS[0], HOTS[0], "one key")
-    # Then
+    # Then: refused, and the key is not spent
     assert same.status_code in (403, 409), same.text
-    assert gate.count("admission_history", "hotkey=?", (HOTS[0].ss58,)) == 0
+    assert gate.world.db_digest() == before
 
 
 # SG-08, LCK-15, LCK-17: who may rotate an admission, and onto which hotkey.
@@ -246,12 +247,6 @@ def test_sg08_only_the_coldkey_of_the_admission_can_rotate_it(gate: Gate) -> Non
     assert moved.json()["hotkey"] == HOTS[0].ss58
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="LCK-17+SG-08+RTA-01: a rotation signed by the coldkey alone binds an admission to a "
-    "registered hotkey that never agreed and spends that hotkey for good",
-)
 def test_lck17_a_rotation_onto_a_hotkey_that_never_agreed_is_refused(gate: Gate) -> None:
     # Given: an admission that rotates once onto a hotkey of its owner (the control), and a
     # registered hotkey of another participant that never applied
@@ -260,11 +255,13 @@ def test_lck17_a_rotation_onto_a_hotkey_that_never_agreed_is_refused(gate: Gate)
     own = gate.rotate(owner, service.HOT[0], mine, "own hotkey")
     precondition(own.status_code == 200, f"the owner's own rotation was refused: {own.text}")
     precondition(other.ss58 in gate.subnet.registered, "the other hotkey is on the subnet")
+    before = gate.world.db_digest()
     # When: the coldkey alone names that hotkey, whose key it does not hold
     taken = gate.rotate(owner, mine, other.ss58, "without consent")
-    # Then: refused by the admission rules, not by routing, and its holder can still apply
-    assert taken.status_code in (403, 409), taken.text
-    assert "not registered on the subnet" not in taken.text
+    # Then: refused for the missing consent, not by routing, and nothing is written
+    assert (taken.status_code, detail(taken)) == (409, "ROTATION_CONSENT")
+    assert gate.world.db_digest() == before
+    # And: the hotkey's holder can still apply
     assert gate.count("admission_history", "hotkey=?", (other.ss58,)) == 0
     applied = gate.join(other, other_cold, "holder applies")
     assert applied.status_code == 200, applied.text
@@ -280,8 +277,8 @@ ROLE_KEYS = {
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="LCK-15+SG-08+RTA-01: a rotation can move a miner admission onto a pinned auditor, "
-    "referee or coordinator hotkey [candidate]",
+    reason="LCK-15+SG-08: a rotation can move a miner admission onto a pinned auditor, referee "
+    "or coordinator hotkey [candidate] [fix-lot: none (no design yet)]",
 )
 @pytest.mark.parametrize("role", sorted(ROLE_KEYS))
 def test_lck15_a_rotation_onto_a_pinned_protocol_role_hotkey_is_refused(
@@ -293,18 +290,19 @@ def test_lck15_a_rotation_onto_a_pinned_protocol_role_hotkey_is_refused(
     own = gate.rotate(owner, service.HOT[0], mine, "own hotkey")
     precondition(own.status_code == 200, f"the owner's own rotation was refused: {own.text}")
     precondition(pinned.ss58 in gate.subnet.registered, "the role key is on the subnet")
-    # When / Then
+    before = gate.world.db_digest()
+    # When / Then: refused by the admission rules, not by routing, and nothing is written
     moved = gate.rotate(owner, mine, pinned, "to the role key")
     assert moved.status_code in (403, 409), moved.text
     assert "not registered on the subnet" not in moved.text
-    assert gate.count("admission_history", "hotkey=?", (pinned.ss58,)) == 0
+    assert gate.world.db_digest() == before
 
 
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
     reason="LCK-15: a pinned auditor, referee or coordinator hotkey can join as a miner identity "
-    "[candidate]",
+    "[candidate] [fix-lot: none (no design yet)]",
 )
 @pytest.mark.parametrize("role", sorted(ROLE_KEYS))
 def test_lck15_a_pinned_protocol_role_hotkey_cannot_join_as_a_miner(gate: Gate, role: str) -> None:
@@ -313,84 +311,15 @@ def test_lck15_a_pinned_protocol_role_hotkey_cannot_join_as_a_miner(gate: Gate, 
     precondition(ordinary.status_code == 200, f"control join refused: {ordinary.text}")
     pinned = ROLE_KEYS[role]
     precondition(pinned.ss58 in gate.subnet.registered, "the role key is on the subnet")
+    before = gate.world.db_digest()
     # When: the role key signs an application as hotkey
     joined = gate.join(pinned, COLDS[0], "role key")
-    # Then
+    # Then: refused, and the key is not spent
     assert joined.status_code in (403, 409), joined.text
-    assert gate.count("admission_history", "hotkey=?", (pinned.ss58,)) == 0
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="SG-08+RTA-01: a BANNED admission can still rotate onto a new hotkey",
-)
-def test_sg08_a_banned_admission_cannot_rotate(gate: Gate) -> None:
-    # Given: an admission that rotated once (the control), then was banned
-    owner, mine = service.COLD[0], HOTS[0]
-    admission_id = gate.admission_id(service.HOT[0], owner)
-    own = gate.rotate(owner, service.HOT[0], mine, "before the ban")
-    precondition(own.status_code == 200, f"the owner's own rotation was refused: {own.text}")
-    gate.admission.store.transition(admission_id, "BANNED", "TEST", gate.network.now)
-    before = gate.world.db_digest()
-    # When / Then
-    moved = gate.rotate(owner, mine, HOTS[1], "after the ban")
-    assert moved.status_code in (403, 409), moved.text
     assert gate.world.db_digest() == before
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="SG-08+RTA-01: the rotations of one admission have no bound per window",
-)
-def test_sg08_rotations_of_one_admission_are_bounded_per_window(gate: Gate) -> None:
-    # Given: the bound the policy gives identity-creating requests
-    burst = gate.policy.join_burst
-    owner = service.COLD[0]
-    precondition(gate.join(service.HOT[0], owner).status_code == 200, "setup join")
-    chain = [service.HOT[0], *HOTS[: burst + 1]]
-    # When: the owner rotates on and on within one beacon
-    answers = [
-        gate.rotate(owner, old, new, f"hop-{i}")
-        for i, (old, new) in enumerate(zip(chain[:-1], chain[1:], strict=True))
-    ]
-    # Then: the first `burst` are served, the next one is not
-    precondition(
-        [r.status_code for r in answers[:burst]] == [200] * burst,
-        f"the first {burst} rotations were not all served: {[r.status_code for r in answers]}",
-    )
-    assert answers[burst].status_code in (403, 409, 429), answers[burst].text
 
 
 # GT-01, LCK-20: only the owner can open, expire or suspend its own trial.
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="GT-01+LCK-20+RTA-04: a challenge request that does not prove ownership of the "
-    "admission still opens a trial for it",
-)
-def test_gt01_only_the_owner_can_open_the_trial_of_an_admission(gate: Gate) -> None:
-    # Given: two applicants; the first one asks for its own trial with its own signed headers
-    mine, rival = service.HOT[1], service.HOT[2]
-    mine_id = gate.admission_id(mine, service.COLD[1])
-    rival_id = gate.admission_id(rival, service.COLD[2])
-    gate.push(2)
-    own = gate.challenge(mine_id, mine)
-    precondition(own.status_code == 200, f"the owner's own request failed: {own.text}")
-    before = gate.world.db_digest()
-    # When: someone who is not the rival asks for the rival's challenge, unsigned or signed
-    # with the wrong registered hotkey
-    anonymous = gate.challenge(rival_id)
-    wrong_key = gate.challenge(rival_id, as_hotkey=service.HOT[3])
-    # Then: refused, and no trial exists for the rival
-    assert anonymous.status_code in (401, 403), anonymous.text
-    assert wrong_key.status_code in (401, 403), wrong_key.text
-    assert gate.row(rival)["challenge"] is None
-    assert gate.count("admission_trials", "admission_id=?", (rival_id,)) == 0
-    assert gate.world.db_digest() == before
 
 
 @pytest.mark.parametrize("state", ["APPLIED", "ACTIVE"])
@@ -406,15 +335,19 @@ def test_gt01_a_poll_after_the_deadline_by_anyone_expires_or_suspends_nobody(
     precondition(own.status_code == 200, f"the owner's own request failed: {own.text}")
     if state == "ACTIVE":
         gate.admission.store.transition(admission_id, "ACTIVE", "TEST", 2)
-    deadline = json.loads(gate.row(hot)["challenge"])["deadline_beacon"]
+    deadline = own.json()["body"]["deadline_beacon"]
     gate.push(deadline + 1)
-    outcome = gate.snapshot()["admission_trial_results"][0][-1]
-    precondition(outcome == "EXPIRED", f"the clock did not close the trial: {outcome}")
+    precondition(
+        gate.count("admission_trial_results", "outcome='EXPIRED'") == 1,
+        "the clock did not close the trial",
+    )
     before = gate.world.db_digest()
-    # When: a caller that is not the owner polls
+    # When: a caller that is not the owner polls, and the owner itself polls late
     stranger = gate.challenge(admission_id)
+    late = gate.challenge(admission_id, hot)
     # Then: nothing is written, nobody is suspended, struck or credited
     assert stranger.status_code in (401, 403, 409), stranger.text
+    assert (late.status_code, detail(late)) == (409, "CHALLENGE_EXPIRED")
     assert gate.world.db_digest() == before
     row = gate.row(hot)
     assert (row["state"], row["strikes"], row["clean_count"], row["pending_dispute"]) == (
@@ -423,6 +356,24 @@ def test_gt01_a_poll_after_the_deadline_by_anyone_expires_or_suspends_nobody(
         0,
         0,
     )
+
+
+def test_gt01_after_a_rotation_only_the_current_hotkey_can_ask_for_the_trial(gate: Gate) -> None:
+    # Given: an admission that moved from HOT[1] to a hotkey of its owner
+    retired, current, cold = service.HOT[1], HOTS[0], service.COLD[1]
+    admission_id = gate.admission_id(retired, cold)
+    moved = gate.rotate(cold, retired, current, "move")
+    precondition(moved.status_code == 200, f"the owner's own rotation was refused: {moved.text}")
+    gate.push(2)
+    before = gate.world.db_digest()
+    # When / Then: the hotkey it left is refused like any stranger, and nothing is issued
+    refused = gate.challenge(admission_id, retired)
+    assert refused.status_code == 403, refused.text
+    assert gate.world.db_digest() == before
+    # And: the hotkey it holds now is served its trial
+    served = gate.challenge(admission_id, current)
+    assert served.status_code == 200, served.text
+    assert served.json()["type"] == "JoinChallenge"
 
 
 @pytest.mark.parametrize("state", ["SUSPENDED", "BANNED"])
@@ -438,7 +389,7 @@ def test_gt03_the_clock_closes_the_trial_of_a_suspended_or_banned_holder(
     precondition(own.status_code == 200, f"the owner's own request failed: {own.text}")
     gate.admission.store.transition(admission_id, state, "TEST", 2)
     precondition(gate.count("admission_trial_results", "outcome='OPEN'") == 1, "no open trial")
-    deadline = json.loads(gate.row(hot)["challenge"])["deadline_beacon"]
+    deadline = own.json()["body"]["deadline_beacon"]
     # When: the beacon passes the deadline
     gate.push(deadline + 1)
     # Then: the trial is closed on the clock and the holder's standing is untouched
@@ -459,28 +410,6 @@ def test_ad01_the_pending_places_are_bounded_and_a_refusal_changes_nothing(gate:
     refused = gate.join(service.HOT[0], service.COLD[0])
     assert (refused.status_code, detail(refused)) == (409, "PENDING_CAPACITY")
     assert gate.world.db_digest() == before
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="AD-01+LCK-21+RTA-02: unfunded applications that can no longer open a trial keep "
-    "their pending places for good",
-)
-def test_ad01_idle_unfunded_applications_do_not_hold_the_pending_places_for_ever(
-    gate: Gate,
-) -> None:
-    # Given: every pending place taken by applications that hold no unit and never ask for a trial
-    fill_pending_places(gate)
-    full = gate.join(service.HOT[0], service.COLD[0])
-    precondition(
-        (full.status_code, detail(full)) == (409, "PENDING_CAPACITY"), "the places are not full"
-    )
-    # When: the challenge window of every one of them is long gone
-    gate.push(gate.network.now + 2 * gate.policy.challenge_rounds)
-    # Then: an honest application is admitted
-    honest = gate.join(service.HOT[0], service.COLD[0], "honest")
-    assert honest.status_code == 200, honest.text
 
 
 def test_ad05_a_hotkey_is_admitted_once_ever_even_after_it_moved_to_another_key(
@@ -543,17 +472,17 @@ def test_ad05_a_coldkey_has_one_non_active_admission_and_an_active_one_may_apply
     strict=True,
     raises=AssertionError,
     reason="RL-01+ESC-02: one key can add ledger events through the escrow routes without any "
-    "bound per beacon [candidate]",
+    "bound per beacon [candidate] [fix-lot: escrow-relay-fixes ADR0014-P5]",
 )
 def test_rl01_the_escrow_transfers_of_one_key_are_bounded_in_one_beacon(
     gate: Gate,
 ) -> None:
     # Given: the largest burst the policy gives any identity-creating request (the repository
-    # states no bound for the escrow routes), and a funded key
+    # states no bound for the escrow routes), a funded key and another owner the ledger knows
     bound = gate.policy.ip_prefix_burst
-    owner, origin = service.COLD[0], gate.network.origin_ids[0]
+    owner, origin, recipient = service.COLD[0], gate.network.origin_ids[0], service.COLD[1]
 
-    def self_transfer(index: int):
+    def transfer(index: int):
         operation = EscrowTransfer(
             operation_id=sha256_hex(f"bounded-{index}".encode()),
             owner=owner.ss58,
@@ -561,19 +490,19 @@ def test_rl01_the_escrow_transfers_of_one_key_are_bounded_in_one_beacon(
             origin_ids=[origin],
             admission_id=None,
             dispute_id=None,
-            recipient=owner.ss58,
+            recipient=recipient.ss58,
         )
         return gate.client.post(
             gate.url + "/escrow/transfer",
             json=gate.network.signed(owner, "EscrowTransfer", operation),
         )
 
-    first = self_transfer(0)
+    first = transfer(0)
     precondition(first.status_code == 200, f"the first transfer was refused: {first.text}")
     # When: it sends distinct operations until the first refusal, or one more than that burst
     served = 1
     for index in range(1, bound + 1):
-        if self_transfer(index).status_code != 200:
+        if transfer(index).status_code != 200:
             break
         served += 1
     # Then: the service refused before serving more than the burst
@@ -637,7 +566,7 @@ def test_ad02_a_finalized_trial_credits_one_participation_however_often_it_is_re
     strict=True,
     raises=AssertionError,
     reason="SHD-04+RTA-02: a shadow reservation is issued to an admission that holds no funded "
-    "admission lock [candidate]",
+    "admission lock [candidate] [fix-lot: decision (product choice pending)]",
 )
 def test_shd04_a_shadow_reservation_needs_a_funded_admission_lock(reserved_trial) -> None:
     n, identity, body = reserved_trial

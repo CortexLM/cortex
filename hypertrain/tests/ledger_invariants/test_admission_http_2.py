@@ -1,5 +1,5 @@
-"""In-process admission rules: the credit chain of a trial (AD-02, AD-03) and the identity rules
-of the application queue under any sequence of joins (AD-05, SG-06).
+"""In-process admission rules: the credit chain of a trial (AD-02, AD-03), the trial places
+(GT-03) and the identity rules of the application queue under any sequence of joins (AD-05, SG-06).
 
 One genuine shadow trial is computed per module (`TrialRig`) and cloned for each test, so every
 test starts from a real challenge, a real committed reference and the miner's real work, and
@@ -193,6 +193,34 @@ def test_ad02_a_finalized_trial_is_credited_once_at_any_later_beacon(
         # Then: it is answered with the standing and writes nothing
         assert again.record.clean_count == 1
         assert table_rows(proved.store.db) == credited
+
+
+# GT-03: the places of unproven trials are freed by the clock, not by whoever asks next.
+
+
+def test_gt03_a_newcomer_is_served_past_the_deadline_of_unproven_trials(
+    tmp_path: Path,
+) -> None:
+    # Given: two applicants open a trial at round 2 (deadline 102) and never prove it; a newcomer
+    # applied at round 5, before either deadline, so its join had nothing to close
+    module = load_fixture_module(*ADMISSION_FIXTURE)
+    setup = module.setup()
+    admission = module.service(setup, tmp_path)
+    holders = [module.applied(admission, setup, i, 1) for i in range(2)]
+    for holder in holders:
+        admission.challenge(holder, now=2)
+    newcomer = module.applied(admission, setup, 2, 5)
+    # When: the newcomer asks at round 104, with no beacon push and no join since the deadline
+    served = admission.challenge(newcomer, now=104)
+    # Then: it gets its trial, and the holders lost their places without losing their standing
+    assert served["type"] == "JoinChallenge"
+    assert [
+        row[0]
+        for row in admission.store.db.execute(
+            "SELECT outcome FROM admission_trial_results ORDER BY epoch"
+        )
+    ] == ["EXPIRED", "EXPIRED", "OPEN"]
+    assert [admission.store.by_id(holder).state for holder in holders] == ["APPLIED"] * 2
 
 
 # AD-05 and SG-06 for any sequence of joins.
