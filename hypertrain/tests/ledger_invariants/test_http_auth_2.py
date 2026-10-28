@@ -24,7 +24,6 @@ from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Receipt
 from hypertrain.protocol.messages_v2 import WorkProof
 from hypertrain.protocol.relay_messages import (
-    ChunkCustodyAck,
     CustodyRelease,
     UploadGrant,
 )
@@ -300,12 +299,12 @@ def test_the_shipped_relay_does_not_refuse_a_release_for_want_of_a_settlement_jo
     assert "settlement journal not configured" not in answer, answer
 
 
-def sealed_release(rig: Any, grant: UploadGrant, custody: ChunkCustodyAck) -> Any:
+def sealed_release(rig: Any, grant: UploadGrant, digest: str, pin: Any) -> Any:
     return rig.seal(
         CustodyRelease(
             grant_hash=grant.digest(),
-            custody_hashes=[custody.digest()],
-            retention_hash=custody.digest(),
+            custody_hashes=[digest],
+            retention_hash=pin.retention_hash,
             finality_hash=HASH,
             vesting_beacon=1,
             closed_dispute_root=HASH,
@@ -314,14 +313,7 @@ def sealed_release(rig: Any, grant: UploadGrant, custody: ChunkCustodyAck) -> An
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "LV-03+TRN-02: a released upload frees its slot in the retained-upload cap "
-        "[fix-lot: escrow-relay-fixes ADR0014-P6]"
-    ),
-)
+# Closed by escrow-relay-fixes ADR0014-P6 (4c32f0b1): the cap counts the custody still owed.
 def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: Path) -> None:
     fixture = load_fixture_module(*RELAY_FIXTURE)
     capacity = 2  # the cap is a constant; the property is that finished uploads leave it
@@ -340,16 +332,16 @@ def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: P
                 data = f"round {w}".encode()
                 grant, manifest, raw, assignment, opened = rig.upload(data, nonce=f"{w:064x}", w=w)
                 await rig.relay.accept(raw, manifest, assignment, opened)
-                served.append(
-                    (grant, ChunkCustodyAck.model_validate((await rig.put(grant, data)).body))
-                )
+                await rig.put(grant, data)
+                served.append(grant)
             # Control: the cap is what stops the next round's grant while nothing is released.
             grant, manifest, raw, assignment, opened = rig.upload(b"next", nonce="ee" * 32, w=9)
             with pytest.raises(RelayError, match="retained upload quota exhausted"):
                 await rig.relay.accept(raw, manifest, assignment, opened)
-            # Finality releases custody of both served rounds.
-            for earlier, custody in served:
-                await rig.relay.release(sealed_release(rig, earlier, custody))
+            # Finality releases custody of both served rounds: the receipt and each chunk.
+            for earlier in served:
+                for digest, pin in (await rig.relay.state()).uploads[earlier.digest()].pins.items():
+                    await rig.relay.release(sealed_release(rig, earlier, digest, pin))
             try:
                 await rig.relay.accept(raw, manifest, assignment, opened)
             except RelayError as error:
