@@ -6,7 +6,7 @@ import shutil
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -15,6 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "trainer"))
 
 import common  # noqa: E402,F401  (determinism before torch)
 import harness  # noqa: E402
+
+if TYPE_CHECKING:
+    from aggregate_lock_fixture_v2 import Template
 
 # Set HT_E2E_EVIDENCE to keep the per-scenario evidence; by default it goes to a tmp dir.
 _EVIDENCE_ENV = os.environ.get("HT_E2E_EVIDENCE")
@@ -74,3 +77,16 @@ def world(tmp_path: Path, scenario_dir: Path, record: dict[str, Any]) -> Iterato
             default=str,
         )
     )
+
+
+@pytest.fixture(scope="session")
+def template(tmp_path_factory: pytest.TempPathFactory) -> Template:
+    """Round 0 of five members past its audits, shared by the aggregate and finalize lock tests.
+
+    Building it runs the real flow (40 to 70 s), so it is built once per session. The fixture
+    module imports torch through the trainer, so it is imported here, after `common` has set
+    determinism up, and not at collection.
+    """
+    from aggregate_lock_fixture_v2 import build_template
+
+    return build_template(tmp_path_factory)
