@@ -63,13 +63,15 @@ EPOCH = "        epoch: Annotated[int, Query(ge=0, lt=2**63)],\n"
 EPOCH_AT = "        epoch_at: Annotated[int | None, Query(ge=0, lt=2**63)] = None,\n"
 
 
-def settle_clause(name: str, clause: str, case: str, why: str) -> dict[str, object]:
+def settle_clause(
+    name: str, clause: str, case: str, why: str, replacement: str = ""
+) -> dict[str, object]:
     return mutant(
         f"gw-settle-ignores-{name}",
         ["FIN-02", "WGT-02"],
         FINALITY,
         clause,
-        "",
+        replacement,
         [REFUSED + f"[{case}]"],
         why,
     )
@@ -211,9 +213,10 @@ MUTANTS = [
     ),
     settle_clause(
         "an-excluded-round",
-        '        or status.disposition == "EXCLUDED"\n',
+        '        or status.disposition in ("EXCLUDED", "RETIRED")\n',
         "the round is excluded",
         "an excluded round settles and issues a reward.",
+        '        or status.disposition == "RETIRED"\n',
     ),
     settle_clause(
         "a-missing-tape",
