@@ -15,9 +15,14 @@ reference, **(b)** `copy_flags`, **(e)** lease/offsets with a second executor ho
 H >= 31, are merged and in the images, and **(f)** is decided from section 2. (c) is not needed for the driver.
 The sacrificial trials of section 4 settle whether the rest holds; they do not replace the prerequisites.
 
-Server and miner come from one commit: since `e0969448` the owner routes `/challenge` and `/job` are signed
-`POST`s, so a HEAD miner cannot talk to the S15 server image `a513821d` [V by reading]. A new commit gives new
-image digests, hence a new run id and a cold compute cache.
+Server, miner and `publish_run.py` come from one commit. After `e0969448` (`13ec158c`, ADR 0010) the owner routes
+`/challenge` and `/job` became signed `POST`s (they were `GET` with headers there), so a HEAD miner cannot talk to
+the S15 server image `a513821d` [V by reading], and the S15 GPU image `331cec82`, whose miner CLI the CUDA driver
+runs, cannot talk to a HEAD server. Since `5c6e02ee` and `fe5ce134` (merged from origin/v3 `2cfc2a2b`) the genesis
+origin ids are keyed with `escrow_id_key`: the HEAD `publish_run.py` runs inside the server container and imports
+it, so it cannot run in an image built from `e0969448`, and a HEAD server refuses an unkeyed genesis
+(`GENESIS_ORIGIN_DOMAIN`) [V by reading; the S15 build commit is [A]]. A new commit gives new image digests, hence
+a new run id and a cold compute cache.
 
 Guards (S15, unchanged): TEST stack only; never touch `cortex-challenge-hypertrain`, `cortex-master-*`,
 `hypertrain-beacon`, `hypertrain-auditor-go-*`, `hypertrain-auditor-0/1`, `/data/role-dispatch`, the host
@@ -45,8 +50,11 @@ UV_OFFLINE=1 HT_D20_GEOMETRY=dense-0.1b HT_D20_COLDKEYS=6 HT_D20_RELAY_PUBKEY=<r
 
 About 11 s [V]. It prints `"param_count": 100676352` and `"init_state_hash": "be9b7bd6…28f8"`; anything else means
 the row or the init changed. Then, as in S15: `cuda_qualification.py build`, `relay_config.py` (check the as-found
-`relay.json` hash first), `mk_exec_config.sh` on the run id of `$OUT/out/index.json`, `mk_origins.py`, the flat
-stage directory. Executor config: S15 values (one host, `sudo -n docker`, `sweeps` 20, pause 15 s);
+`relay.json` hash first), `mk_exec_config.sh` on the run id of `$OUT/out/index.json`, `mk_origins.py` (the S15
+copy calls `genesis_origin_id` with three arguments and raises `TypeError` at HEAD, where it takes a fourth,
+`id_key`: make it pass `escrow_id_key(<coordinator key>._secret)` as `publish_run.py genesis` does with
+`coord.key`, so that the list equals the origin ids the genesis step submits [V by reading]), the flat stage
+directory. Executor config: S15 values (one host, `sudo -n docker`, `sweeps` 20, pause 15 s);
 `max_result_bytes` stays 16 GiB (the result is 4.13 GB). Validate it the way the challenge loads it
 (`ExecutorConfig.model_validate_json`, `docs/cuda-executor.md`): a bad file is a silent 503.
 4. R2 only if (f) says so: settings = `hypertrain/docs/examples/cuda-executor-artifacts.example.json` with
@@ -110,14 +118,25 @@ costs the identity (S15 D1). The 101 M kernels may not be in the tiny model's ca
   [H]: client build about 10 s a hotkey (54 s); the server open holds the lock about 14 s a roster entry (77 s),
   so the gate stays closed about 7.3 times that (about 560 s) and accept, commit and assignment wait for it;
   then five sequential `run-v2` of about 90 s; `d_audit` = `d_commit` + 2; `d_upload` after the last relay receipt;
-  `d_final` = `d_audit` + the audit batches + the aggregate and its gate closure + finalize. In rounds of 3 s:
-  `d_open >= ceil(build/3) + 30`, `d_assign >= d_open + ceil(8.3 x open_lock/3) + 10`, `d_commit >= d_assign +
-  ceil(5 x T_run/3) + 20`. `d_final - d_audit` must be at most 200 (`live_operator` cap) and hold
-  `ceil((batches x T_audit + aggregate + closure + finalize)/3)`, which at H = 4 exceeds both 200 and the lease;
-  that is prerequisite (e). Open only with a vector that `check_open_shape` accepts and the measurements support.
+  `d_final` >= `d_audit` + the audit batches: an audit has to complete before `absolute` = `min(d_final,
+  d_audit + 2 x lease_rounds)`. The aggregate, its gate closure and the finalize may follow `d_final` (since
+  `5bc7524d`), but call the aggregate before it: it reads each audited member's admission at the call and leaves out
+  one whose screen has ended (`SCREEN_LAPSED`), or answers 409 `ROUND_INFEASIBLE` if too few remain. In rounds of 3
+  s: `d_open >= ceil(build/3) + 30`, `d_assign >= d_open + ceil(8.3 x open_lock/3) + 10`, `d_commit >= d_assign +
+  ceil(5 x T_run/3) + 20`. `d_final - d_audit` must be at most 200 (`live_operator` cap) and hold `ceil(batches x
+  T_audit/3)`, which at H = 4 on one executor host (718-1279 s, 240-427 rounds [H]) exceeds 200; that is
+  prerequisite (e). `open` also refuses a roster hotkey whose `screen_until` is before `d_final` (`open_round_v2`,
+  `live_operator.open_round`); the 20000-round screen covers the 4,800-7,200 rounds of the campaign (ADR 0015,
+  Decision 2). Open only with a vector that `check_open_shape` accepts and the measurements support.
 - Before `audits`: `round_status.py` shows commit, leaves, accept, assignment and start equal to 5, no lease, and
   the rounds `d_assign` and `d_audit` present in `beacon_gaps.py`. Then `audits` once between `d_audit` and
-  absolute - 2; `finalize` immediately after the last MATCH (verdicts expire with their lease); wait 60 s for
+  absolute - 2; start `finalize` once the last MATCH is in and before `d_final`: it calls the aggregate first,
+  which leaves out a member whose admission no longer qualifies at that call, and the Finalize itself may follow
+  `d_final` (it still settles for the members that qualify then, because the ledger judges the stored commit and
+  verdicts at the beacon of their `accepted_v2` row, the audit challenge at the `created` beacon of its lease, and
+  `live_operator finalize` seals its Finalize until `max(d_final, now) + 1000`). The aggregate closes the gate for
+  about 7.3 times its duration [H], so the Finalize posted right after it can be refused: run `finalize` again once
+  the gate is open (the aggregate returns the saved tape, a fresh Finalize is sealed) [V by reading]; wait 60 s for
   vesting; `weights_once.py` once. Expected: 200, five hotkeys equal (4 x 250000 if one miner was excluded).
 
 ## 6. Expected timings (101 M, [H] unless marked; replace with the section 2 and 4 measurements)
@@ -142,9 +161,11 @@ challenge). Added for this size:
 1. **Lock** over 150 s (the `beacon` command writes only catch-up 60) or any `missing`/`stranded` gap: stop.
 2. **Window**: two consecutive trials over 270 s, or any `409 envelope expired`: stop.
 3. **Audits and tail**: a go/no-go at `open`, not at `audits`: the vector must satisfy `d_final - d_audit >=
-   ceil((batches x T_audit + aggregate + closure + finalize)/3)` in rounds, and `batches x T_audit + aggregate +
-   finalize <= lease_rounds x 3` seconds from the first lease, with `T_audit` from the sacrificial trials scaled
-   by section 6. With two auditors on one executor host a lease sees about `2 x T_audit`.
+   ceil(batches x T_audit / 3)` in rounds (at most 200, the `live_operator` cap), with `T_audit` from the
+   sacrificial trials scaled by section 6. The aggregate and the finalize have no lease or `d_final` bound
+   (`5bc7524d`) and may run after `d_final`; the aggregate leaves out a member whose admission does not qualify at
+   the call and answers 409 `ROUND_INFEASIBLE` if too few remain. With two auditors on one executor host a
+   lease sees about `2 x T_audit`, which must stay under `lease_rounds x 3` seconds.
 4. **R2** (if used): `exec_artifact_unavailable`, `_skipped`, a 403 on a part, or an upload rate under the plan;
    leftover objects under `exec/` after clean-up.
 5. **Disk**: free space on s100 under 60 GB or growth of `trials-v2/` over 10 GB per trial; node A docker root

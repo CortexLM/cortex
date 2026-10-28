@@ -3,15 +3,18 @@
 - Status: draft for branch `v3-model-intermediate`, 2026-10-28 (Principal SN100 D68). Forge decides
   promotion to `v3`. Nothing here changes a production run, master, profile, pin or emission, and no
   file under `hypertrain/src/` changes. Nothing in this batch ran on a GPU host, on s100, against R2
-  or on-chain.
+  or on-chain. Merged with origin/v3 `2cfc2a2b` (merge `350e50b1`, 2026-10-28): the code anchors and the
+  statements about the verdict lease below are those of that tip; the hash table gives the values
+  before and after the merge.
 - Order: brief `v3-model-intermediate`. Forge (CTO) chose the size on 2026-10-28, within the D68
   band (see "Decision").
   The number 0015 may collide with another open batch; rename at merge.
 - Labels: **[V]** verified in code or by a command on the date above, **[A]** reported by a cited
   document or session, **[H]** hypothesis or arithmetic, **[?]** unknown.
 - Related: ADR 0006 (kimi-tiny, per-arch registry), 0007 (SM counts, hash tables), 0008 (generic
-  CUDA executor), 0010 (signed owner routes), 0012 (executor performance, Part B lock-free
-  reference), 0013 (executor results through R2).
+  CUDA executor), 0010 (signed owner routes), 0011 (audit integrity, environment pins), 0012
+  (executor performance, Part B lock-free reference), 0013 (executor results through R2), 0014
+  (escrow operation ids, keyed origin ids).
 
 ## Context
 
@@ -20,7 +23,7 @@ audits and `get_weights` on the s100 TEST stack. D68 asks for the next proof to 
 100-300 M parameters (target about 200 M), with its artifacts through the R2 TEST bucket, and the
 1 B model only if the audit window holds.
 
-What exists at `8c2b24e8`:
+What exists at `2cfc2a2b` (unchanged since `8c2b24e8`):
 
 | Model | Parameters | Where | Used for |
 | --- | --- | --- | --- |
@@ -142,7 +145,7 @@ Formulas ([H], `k = P / 100,676,352`, link `r`, `S` and the inputs `I = 8 P` in 
 
 The constants carry two known errors in opposite directions: the audit path has six
 `validate_artifacts` passes at HEAD (call sites in `cuda_executor.py:949,970`, `auditor/worker.py:191`,
-`island_bisect.py:182`, `store.py:7610,7958`), ADR 0013 counted four (up to 25 s more per audit); and
+`island_bisect.py:182`, `store.py:7781,8129`), ADR 0013 counted four (up to 25 s more per audit); and
 the 125-133 ns per parameter was measured on a result of 70 bytes per parameter, so a result of 41
 bytes per parameter validates faster (7.7 s instead of 13 s a pass).
 
@@ -174,16 +177,25 @@ Reading [H]:
   125 MiB/s. 101 M is the largest row of the band whose best-link, lower-bound case fits at all
   (233-277 s); 126 M has 283-338 s and 209 M fails everywhere. The size is a hypothesis to confirm
   with the first warm trials.
-- **Audits.** Five in series need 718 s at best against 600 s, and a verdict expires with its 300 s
-  lease. A second executor host or a roster of four relieves only the 600 s cap and the 2 x T_audit
-  use of a lease on a shared host: audits plus aggregate must also end within the lease (about 285 s
-  at H <= 30), and only a longer lease, derived from H, moves that horizon.
+- **Audits.** Five in series need 718 s at best against 600 s, and a verdict must be accepted inside
+  its own 300 s lease. A second executor host relieves the 600 s cap and the 2 x T_audit use of a
+  lease on a shared host; a roster of four relieves only the 600 s cap, and only on a fast link
+  (4 x 144 s = 576 s at 105 MiB/s, 4 x 193 s = 772 s at 50 MiB/s). The lease no longer bounds the
+  rest of the chain on an ordinary run (no `service-admission` record, the only kind `live_operator`
+  serves): since `5bc7524d` the ledger judges the stored commit and verdicts at the beacon of their
+  `accepted_v2` row and the coordinator's audit challenge at the `created` beacon of its audit
+  lease, and `live_operator finalize` seals the Finalize until `max(d_final, now) + 1000`, so the
+  aggregate and the finalize may follow the last verdict [V by reading, `escrow_v2.py:486-500`,
+  `store.py:2353`, `live_operator.py:253-259`]. At `8c2b24e8` they had to end inside the lease (about
+  285 s at H <= 30).
 - **Aggregation holds the lock too.** `aggregate_v2` and `finalize_v2` take the store lock, so the
   7.3 T rule applies to them: a 372-454 s aggregate (two passes) closes the gate for 2,700-3,300 s,
   one pass of 186-227 s for 1,360-1,660 s, and the finalize is a 503 meanwhile. (b) must take
   `copy_flags` out of the lock or make it about six times faster, not only compute it once. The
-  aggregate call stays under `live_operator`'s 600 s client timeout, but not under the verdict
-  horizon.
+  aggregate call stays under `live_operator`'s 600 s client timeout (`live_operator.py:59`), and no
+  verdict horizon bounds it or the finalize on an ordinary run (previous bullet); a late aggregate
+  adds one exclusion to the missing-delta one: a member whose admission no longer qualifies at the
+  call (`_exclude_unfit_members_v2`, `store.py:6583`).
 - **R2.** For an audit result the transfer legs take 334 s at 18.8/36.7 MB/s, 90 s at 100/88, 18 s at
   500/500, against 131 s over ssh at 30 MiB/s. R2 beats ssh above 231 / 107 / 64 / 21 MB/s each way
   against ssh at 105 / 50 / 30 / 10 MiB/s. Fitting the 297 s window at 30 MiB/s ssh needs 102-221
@@ -209,12 +221,22 @@ and the hash passes with the checkpoints [H]:
 | 32, 8 | math | 7.75 GB | 219 | 385 | 255 | 1273 | 1687 | 1326 |
 | 32, 8 | flash | 7.75 GB | 188 | 323 | 224 | 1118 | 1532 | 1326 |
 
-H >= 31 alone does not fit: the chain of five audits and the aggregate needs 1,360-1,687 s against
-1,326 s, and math attention pushes the trial to 288-385 s, over the window. It needs H >= 31 **and** a
-second executor host (five audits become three serial batches: 570-660 s plus the aggregate, about
-1,000-1,100 s) **and** the flash entry of (d) to keep the trial under 297 s. Without (d) the profile
-only works at H = 4, where the lease cannot hold the chain. This is the honest state of the profile:
-it is the band floor and it sits at the edge of the pipeline.
+The "+ aggregate" column no longer decides anything, and the lease column bounds one lease only: at
+`8c2b24e8` the aggregate and the finalize had to end inside the first verdict's lease, and the chain
+of five audits and the aggregate (1,360-1,687 s) did not fit 1,326 s; since `5bc7524d` (see "Audits"
+above) only the audits must end, each inside its own lease and all before `absolute` =
+`min(d_final, d_audit + 2 x lease_rounds)`, which is 884 rounds (2,652 s) at H = 32 [V by reading,
+`messages_v2.py` `audit_lease_rounds`, `store.py` `schedule_audits_v2`]. Five audits in series need
+946-1,273 s on one executor host against those 2,652 s, and one lease sees about 2 x T_audit
+(378-510 s) against 1,326 s [H]; the aggregate (about 414 s) and the finalize are bound by neither.
+Until (e) lands, `live_operator` caps `d_final - d_audit` at 200 rounds (600 s). Math attention still
+pushes the trial to 288-385 s, over the 270 s go/no-go everywhere and over the 297 s window at J = 16
+and 8, so (d) is still needed at H >= 31. Whether a second executor host is still needed at H >= 31
+is no longer shown by the lease arithmetic, which was the only reason given here; Principal decides
+it, see (e). Without (d) the profile can only be run at H = 4 for the trial window, and there it
+needs a second executor host (or the roster of four at 105 MiB/s), because the 600 s `absolute`
+cannot hold five audits on one host. This is the honest state of the profile: it is the band floor
+and it sits at the edge of the pipeline.
 
 ## Prerequisites
 
@@ -223,11 +245,11 @@ size estimate [H] and whether it is needed at 101 M. None is in this lot (no `sr
 
 | # | What | Where | Owner / size | Needed at 101 M |
 | --- | --- | --- | --- | --- |
-| a | Lock-free remote reference (ADR 0012 Part B): release `store._lock` during the executor job | `challenge/store.py:2970-3040`, `admission.py` | Forge, session `v3-executor-lock-release` (in progress); M | **Yes.** T_ref 123-235 s of lock close the gate for 900-1700 s; a trial tolerates about 33 s. |
-| b | `copy_flags` three times under the lock in aggregation and finalize | `aggregator/core.py:341-365` (called at `weighted_v2.py:225` through `tape_v2.compute_body`), `store.py:8590,8603`, `ledger/escrow_v2.py:454` | aggregator session; M (60-100 lines plus a bitwise-equivalence test); moves `implementation_hash` | **Yes.** 9.3-11.3 min under the lock against a gate that closes 7.3 times as long and a 285 s verdict horizon. The fix must keep the replay a recomputation (the tape stores `copy_suspicion` and `replay_tape` compares), so "exactly faster" or out of the lock, not a cached result. |
-| c | Miner HTTP client timeout 120 s while the proof POST holds the whole reference | `miner/core.py:308`, `miner/cli.py:237,406,460` | miner session; S (about 10 lines plus a test) | **No for this run**: `cpu_miners.py` treats `ReadTimeout` as transient and re-posts (`:47-54`), costing one or two wasted POSTs per trial (T_ref + 17 s = 140-250 s against 120 s; the re-post waits behind the first). Yes for the CLI that a real miner uses. |
-| d | Attention backend table: no `(10, 3)` entry, so B300 replays in `math` | `trainer/attention.py:42-46`; the executor forwards no `HT_ATTN_BACKEND` | Forge decision, needs a B300 qualification at hd 64; moves `sources()` | **No at H = 4** (about 4 s per island, 3 % of an audit). **Yes if (e) takes H >= 31**: math attention adds 30 s at H = 32 and puts the trial over the window. Do not set the variable on the miner side only: math and flash are different replay domains. |
-| e | Lease and offsets for H >= 31: `lease_rounds` derived from H and `step_seconds_bound`, a round opener whose `d_final - d_audit` exceeds 200, **and a second executor host** | `build_test_manifest.sh` (literal 100, about 10 lines), `scripts/ops/live_operator.py:108-118` (cap 200, about 5 lines); the second host is config only | Forge; S | **Yes.** At H <= 30, five audits take 718-1279 s against 600 s and a 300 s lease; at H >= 31 the chain still does not fit on one host (previous section). A second host or four miners alone leave the verdict horizon at 285 s. |
+| a | Lock-free remote reference (ADR 0012 Part B): release `store._lock` during the executor job | `challenge/store.py:3046-3116`, `admission.py` | Forge, session `v3-executor-lock-release` (in progress); M | **Yes.** T_ref 123-235 s of lock close the gate for 900-1700 s; a trial tolerates about 33 s. |
+| b | `copy_flags` three times under the lock in aggregation and finalize | `aggregator/core.py:341-365` (called at `weighted_v2.py:225` through `tape_v2.compute_body`), `store.py:8762,8775`, `ledger/escrow_v2.py:542` | aggregator session; M (60-100 lines plus a bitwise-equivalence test); moves `implementation_hash` | **Yes.** 9.3-11.3 min under the lock against a gate that closes 7.3 times as long. The fix must keep the replay a recomputation (the tape stores `copy_suspicion` and `replay_tape` compares), so "exactly faster" or out of the lock, not a cached result. |
+| c | Miner HTTP client timeout 120 s while the proof POST holds the whole reference | `miner/core.py:309`, `miner/cli.py:237,406,460` | miner session; S (about 10 lines plus a test) | **No for this run**: `cpu_miners.py` treats `ReadTimeout` as transient and re-posts (`:47-54`), costing one or two wasted POSTs per trial (T_ref + 17 s = 140-250 s against 120 s; the re-post waits behind the first). Yes for the CLI that a real miner uses. |
+| d | Attention backend table: no `(10, 3)` entry, so B300 replays in `math` | `trainer/attention.py:42-46`; the executor forwards no `HT_ATTN_BACKEND` | Forge decision, needs a B300 qualification at hd 64; moves `sources()` | **No at H = 4** (about 4 s per island, 3 % of an audit). **Yes if (e) takes H >= 31**: math attention adds 30 s at H = 32 and puts the trial over the 270 s go/no-go (288-385 s) and, at J = 16 and 8, over the 297 s window. Do not set the variable on the miner side only: math and flash are different replay domains. |
+| e | Lease and offsets for H >= 31: `lease_rounds` derived from H and `step_seconds_bound`, a round opener whose `d_final - d_audit` exceeds 200, **and a second executor host** | `build_test_manifest.sh` (literal 100, about 10 lines), `scripts/ops/live_operator.py:108-118` (cap 200, about 5 lines); the second host is config only | Forge; S | **Yes.** At H <= 30, five audits take 718-1279 s against 600 s and a 300 s lease; a second host relieves the 600 s cap and the shared-host lease, four miners only the 600 s cap and only on a fast link. At H >= 31 the lease arithmetic no longer shows that a second host is needed (previous section): Principal decides it. |
 | f | Result transfer path, ssh or R2, and the tooling to switch | `challenge_image.sh executor` can set only `HYPERTRAIN_CUDA_EXECUTOR`, not `HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS` (`:204-232`); R2 never measured from a GPU host | Forge decides after the measurement below; S script extension plus its test | **Depends on the measured link.** ssh is enough at 105 MiB/s; at 30 MiB/s the reference does not fit and R2 would need Part B plus `reference` in `operations` and 100-220 MB/s each way. |
 
 Other gaps found, not on the list above: other holders of the store lock close the gate for about
@@ -284,36 +306,71 @@ ledger line, at most 50 USD).
 ## Hash consequences
 
 Measured with `network_qualification.sources()` and `bundle()` and `ChallengeStore._service_implementation_v2`
-on `git archive` of each commit, before = `8c2b24e8` (origin/v3), after = the code commit of this
-branch, 2026-10-28 [V]. `sources()` is given in the canonical JCS form of ADRs 0007, 0008, 0010 and
-0012; ADR 0013 used `json.dumps(sort_keys)`, whose value for `8c2b24e8` is `84b17675…c285f4`.
+on `git archive` of each commit (Python 3.12 of the project venv), 2026-10-28 [V]: `8c2b24e8` (the
+origin/v3 this lot was built on), `3036f8e7` (its code commit), `2cfc2a2b` (origin/v3 now) and `350e50b1`
+(the merge of the two). The values at `3036f8e7` equal those at `8c2b24e8`, and those at `350e50b1` equal
+those at `2cfc2a2b`: this lot moves none of them, and every move below comes from the 31 origin/v3
+commits (`git log 8c2b24e8..2cfc2a2b`). `sources()` is given in the canonical JCS form of ADRs 0007,
+0008, 0010 and 0012; ADR 0013 used `json.dumps(sort_keys)`, whose value is `84b17675…c285f4` at
+`8c2b24e8` and `3623f281…dce0a4` at `350e50b1`.
 
-| Value | Before | After |
+| Value | At `8c2b24e8` and `3036f8e7` | At `2cfc2a2b` and `350e50b1` |
 | --- | --- | --- |
-| `implementation_hash` | `941247f8…a688d1` | unchanged |
-| `challenge/store.py` sha256 | `6eadf5bb…1e3972` | unchanged |
+| `implementation_hash` | `941247f8…a688d1` | **moved**: `fc9e87b0…e4c8fe` |
+| `challenge/store.py` sha256 | `6eadf5bb…1e3972` | **moved**: `e9c9fb36…58acde` |
 | `network_qualification.py` sha256 | `dab7a6ab…7bda15` | unchanged |
 | `cuda_executor.py` sha256 | `f342234d…7db619` | unchanged |
 | `cuda_executor_runner.py` sha256 (`runner_sha256`) | `5930be17…4dff90` | unchanged |
-| `sources()` canonical sha256 | `0d989cd1…987bf9`, 153 files, 2,391,442 B | unchanged |
-| `bundle-hash` | 2,519,040 B, `0fbf1c09…280721` | unchanged |
-| run id of `tiny-cpu` / `dense-1b`, fixed seeds (`0x1001`..`0x1007` for owner, coord, auditor-0, auditor-1, referee, cold-0, cold-1), image `sha256:` + `cd` x 32, driver 595.91.07, 148 SM, 2 coldkeys, exp round 34310319, relay key of `bytes(range(1, 33))` (`baseline/run_baseline.sh` in the evidence folder) | `a55da95e…4ab8e` / `ef0fc003…ebfe` | unchanged |
-| new for `dense-0.1b` | | `param_count` 100,676,352; `init_state_hash` `be9b7bd6…28f8`; run id `1cf7d790…3fb` on the same inputs |
+| `sources()` canonical sha256 | `0d989cd1…987bf9`, 153 files, 2,391,442 B | **moved**: `82d9a332…e2081b`, 155 files, 2,427,686 B |
+| `bundle-hash` | 2,519,040 B, `0fbf1c09…280721` | **moved**: 2,549,760 B, `50e26ecd…96345e` |
+| run id of `tiny-cpu` / `dense-1b`, fixed seeds (`0x1001`..`0x1007` for owner, coord, auditor-0, auditor-1, referee, cold-0, cold-1), image `sha256:` + `cd` x 32, driver 595.91.07, 148 SM, 2 coldkeys, exp round 34310319, relay key of `bytes(range(1, 33))` (`baseline/run_baseline.sh` in the evidence folder) | `a55da95e…74ab8e` / `ef0fc003…83ebfe` | unchanged |
+| `dense-0.1b`, added by `3036f8e7` (absent at `8c2b24e8` and `2cfc2a2b`) | at `3036f8e7`: `param_count` 100,676,352; `init_state_hash` `be9b7bd6…ee28f8`; run id `1cf7d790…71a3fb` on the same inputs | at `350e50b1`: the same three values |
 
-The change touches `scripts/mfu_profiles.json`, `scripts/b300/d20/build_test_manifest.sh`, tests and
+What moved and why [V]: `implementation_hash` covers ten files and 35 owned names of `store.py`; three
+of the files (`aggregator/rollback_v2.py`, `miner/island_launch.py`, `trainer/config.py`) and seven
+of the names changed (`open_round_v2`, `aggregate_v2`, `finalize_v2`, `bootstrap_service_capacity_v2`,
+`_service_implementation_v2`, and the two new `_unfit_cause_v2` and `_exclude_unfit_members_v2`).
+`sources()` and the bundle moved because 16 `src/hypertrain` files changed and two were added
+(`protocol/env_pins.py`, `trainer/env_probe.py`); the seven fixed files (`Dockerfile.gpu`,
+`pyproject.toml`, `uv.lock`, `experiments/gpu_network_v2/*`, `scripts/network_gpu_qualification.py`)
+did not. The run ids and the policy, manifest and registry files of the three geometries were rebuilt
+at `350e50b1` (and, for `tiny-cpu` and `dense-1b`, with the builder of `2cfc2a2b`): the manifest bytes
+are identical, so v3's `reference_spec.env.pinned` (opt-in, omitted when absent) changes no run id.
+
+This lot touches `scripts/mfu_profiles.json`, `scripts/b300/d20/build_test_manifest.sh`, tests and
 docs only, none of which feeds `sources()`, the bundle or `implementation_hash`. The envelope and
 `index.json` differ between two builds of the same inputs (the signature is randomised), and the
 builder's printed dry-run JSON renames its check `work_screen_epoch_rounds_6000` to
 `work_screen_epoch_rounds` for every geometry; nothing reads it. Consequences:
 
-- No qualification config, dispatch source pin or reviewed bundle is invalidated by this lot.
+- This lot invalidates no qualification config, dispatch source pin or reviewed bundle. The merged
+  origin/v3 commits do: a record, pin or review made against the `8c2b24e8` values above does not match
+  `2cfc2a2b`.
 - The images of S15 (server `a513821d`, GPU `331cec82`, built from `e0969448` [A, S15 report]) are
-  not the code of HEAD: ten `src` files changed since, and the owner routes `/challenge` and `/job`
-  went from `GET` with headers to `POST` with a signed body (ADR 0010), so a HEAD miner cannot talk to
-  the S15 server image [V by reading]. A replay must run server and miner from the same side of that
-  change. The GPU container path is unaffected (its import closure meets only two additive protocol
-  edits), so a manifest may pin `331cec82`; any rebuild gives new digests (the build label carries the
-  commit), hence a new run id and a cold compute cache (S15 D1).
+  not the code of HEAD: 25 `src` files changed since (10 at `8c2b24e8`; `git diff --name-only
+  e0969448 350e50b1 -- hypertrain/src`), the owner routes `/challenge` and `/job` went from `GET` with
+  headers to `POST` with a signed body after it (`13ec158c`, ADR 0010), so a HEAD miner cannot talk to
+  the S15 server image [V by reading], and the genesis origin ids are now keyed (ADR 0014:
+  `genesis_origin_id` takes `escrow_id_key` of the coordinator secret as a fourth argument;
+  `publish_run.py genesis` runs inside the server container and imports it, so it cannot run in the
+  S15 server image) [V by reading]. A replay must run server, miner and operator tools from the same
+  side of both changes.
+- The GPU container path is unaffected for a manifest without `reference_spec.env.pinned`. Its import
+  closure (a static walk from `hypertrain.miner.island_worker`, the hand-off of
+  `gpu_ops/cuda_executor_runner.py:206`) meets ten of those 25 files (under `src/hypertrain/`): in
+  `protocol/` `env_pins`, `envelope_v2`, `messages` and `messages_v2`; in `trainer/` `config`,
+  `determinism`, `island` and `loop`; in `miner/` `island_launch` and `island_worker`. Two
+  (`envelope_v2`, `messages_v2`) are the additive request types of ADR 0010; the other eight are the
+  env-pin edits of ADR 0011, which do nothing when the pin is `None`, so the manifest bytes, the run
+  id and the rank summary stay the same [V by reading]. `trainer/env_probe.py` is outside the
+  closure. The S15 image refuses a manifest with `env.pinned` (its `ReferenceEnv` has three fields and
+  forbids extras). So the island worker inside `331cec82` would run an unpinned manifest; but the
+  miners run their CLI from the manifest's image (`docs/s100-test-stack.md` section 6, `cpu_miners.py`
+  with `HT_MINER_DEVICE=cuda`), and the CLI of an image built from `e0969448` sends `GET` with
+  headers to `/challenge` and `/job` (`miner/core.py` at that commit), which a HEAD server refuses
+  (`challenge/app.py` registers `POST` only): against a HEAD server a manifest cannot pin `331cec82`
+  [V by reading; the build commit of the image is [A]]. Any rebuild gives new digests (the build
+  label carries the commit), hence a new run id and a cold compute cache (S15 D1).
 - A new run id per build and per image digest, as always.
 
 ## Tests and mutants
@@ -372,7 +429,10 @@ dry run (the real validators of `POST /v2/admin/runs`) plus the round test above
 - That the server keeps working on a proof POST after the client gave up at 120 s (assumed by (c)),
   and whether the GPU image carries a CA bundle for https (ADR 0013 [?]).
 - The provenance of the S15 images (`a513821d`, `331cec82`, built from `e0969448`) comes from the S15
-  report only; the import-closure claim was checked by reading.
+  report only; the import-closure claim was checked by reading against `e0969448`. At `8c2b24e8` the
+  closure met two files (`protocol/envelope_v2.py`, `protocol/messages_v2.py`); at `350e50b1` it meets
+  ten, eight of them env-pin edits read as inert for a manifest without `reference_spec.env.pinned`.
+  The case with `pinned` was not examined.
 - The prerequisites' sizes and owners are estimates; (a) is in progress in another session and was
   not read here.
 - Whether the sacrificial-identity warm-up of the runbook populates the cache entries the island
