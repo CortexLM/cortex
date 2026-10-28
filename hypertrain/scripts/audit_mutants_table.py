@@ -55,6 +55,10 @@ COOLS_FROM = REVOKING + "test_a_revocation_cools_the_auditor_down_from_the_revoc
 LATE_POLL = (
     REVOKING + "test_a_poll_that_notices_the_revocation_late_does_not_push_the_cooldown_further"
 )
+ADMITTED = (
+    REVOKING
+    + "test_a_service_admitted_run_revokes_an_unsigned_verdict_and_drops_the_job_without_a_sanction"
+)
 NOT_AGAIN = (
     REVOKING
     + "test_the_holder_of_a_revoked_lease_is_not_handed_the_job_again_when_its_cooldown_ends"
@@ -248,6 +252,13 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         "            return False\n",
         "",
         (BOTH_WITHHOLD,),
+    ),
+    (
+        "revocation removed: an executed lease runs to its expiry whoever holds it",
+        STORE,
+        "signed_by = audit_cooldown_v2.sign_deadline(self._execution_marker_v2(run_id, row))",
+        "signed_by = None",
+        (REVOKED, ADMITTED),
     ),
     (
         "sign window counted from the claim, not from the stored verdict",
