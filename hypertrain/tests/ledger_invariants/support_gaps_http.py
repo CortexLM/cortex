@@ -46,6 +46,7 @@ SCRUB = (
     "HYPERTRAIN_VEST_ROUNDS",
     "HYPERTRAIN_ROLE_DISPATCH",
     "HYPERTRAIN_CUDA_EXECUTOR",
+    "HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL",
 )
 
 # A value for each name that is valid for its type and differs from its default.
@@ -65,6 +66,7 @@ POLLUTION = {
     "HYPERTRAIN_VEST_ROUNDS": "77",
     "HYPERTRAIN_ROLE_DISPATCH": "{polluted}/dispatch",
     "HYPERTRAIN_CUDA_EXECUTOR": "{polluted}/cuda",
+    "HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL": "7",
 }
 
 
