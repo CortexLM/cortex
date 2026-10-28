@@ -369,6 +369,7 @@ class Rounds:
         self.budget = policy.round_reward_units
         self._built: dict[tuple[int, int, int, str | None], Round] = {}
         self._theta: dict[str, str] = {}
+        self._deriver: EscrowV2 | None = None
 
     def escrow(self) -> EscrowV2:
         """A private ledger whose replay stand-in knows exactly the tapes built here."""
@@ -379,6 +380,19 @@ class Rounds:
             return self._theta[evidence.tape_hash]
 
         return bare_escrow(self.fixture, self.setup, replay=replay)
+
+    def origin(self, w: int, hotkey: str, finalize_hash: str) -> str:
+        """The id of the reward origin the ledger issues for (round, miner, finalize).
+
+        Read from the ledger when it derives its own ids (keyed on a base that has an id key),
+        from the plain function of the base that does not.
+        """
+        if self._deriver is None:
+            self._deriver = bare_escrow(self.fixture, self.setup)
+        derive = getattr(self._deriver, "reward_origin", None)
+        if derive is not None:
+            return str(derive(w, hotkey, finalize_hash))
+        return reward_origin_id(self.run_id, w, hotkey, finalize_hash)
 
     def build(self, w: int, variant: int = 0, miners: int = 1, tamper: str | None = None) -> Round:
         key = (w, variant, miners, tamper)
@@ -441,7 +455,7 @@ class Rounds:
             units[h] += 1
         origins = [
             {
-                "origin_id": reward_origin_id(run_id, w, h, digest(final)),
+                "origin_id": self.origin(w, h, digest(final)),
                 "owner": owners[h],
                 "units": units[h],
                 "mature_at": 20,

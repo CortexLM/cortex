@@ -612,7 +612,8 @@ def test_a_transaction_rolls_back_whatever_ends_it_and_is_closed(
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="FIN-25+D-FIN-11: a failing COMMIT rolls the transaction back and frees the connection",
+    reason="FIN-25+D-FIN-11: a failing COMMIT rolls the transaction back and frees the "
+    "connection [fix-lot: none (no design yet)]",
 )
 def test_a_transaction_whose_commit_fails_is_rolled_back_and_closed(plain: Any) -> None:
     real = plain._db
@@ -701,7 +702,8 @@ def test_legacy_finalize_is_journaled_and_recorded_together_and_only_once(legacy
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="FIN-27+D-FIN-12: a legacy finalize interrupted after its journal append can be retried",
+    reason="FIN-27+D-FIN-12: a legacy finalize interrupted after its journal append can be "
+    "retried [fix-lot: none (no design yet)]",
 )
 def test_a_legacy_finalize_interrupted_after_the_journal_append_can_be_retried(
     legacy: Legacy,
