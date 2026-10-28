@@ -1,4 +1,4 @@
-"""Authentication of the HTTP routes, part 2: header signatures, GET side effects, liveness.
+"""Authentication of the HTTP routes, part 2: replayed requests, GET side effects, liveness.
 
 Package http_auth of the ledger-invariants lot. The tests marked xfail state a defence the
 service does not hold on this tree; each carries a control that reaches the point under test.
@@ -58,14 +58,6 @@ RELAY_FIXTURE = ("li_relay_fixture", "relay/test_transport_v2.py")
 # SG-05 ------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "SG-05+HTP-03: a dispute watch signed in an earlier round is refused later "
-        "[fix-lot: audit-integrity-2 ADR0010-P3 (b018d425)]"
-    ),
-)
 def test_a_dispute_watch_captured_in_an_earlier_round_is_refused_later(tmp_path: Path) -> None:
     """SG-05+HTP-03: a dispute watch signed in an earlier round is refused later."""
     party = sibling_service().HOT[0]
@@ -239,17 +231,11 @@ def test_a_repeated_anonymous_round_view_rewrites_no_stored_record(tmp_path: Pat
 # LV-02 ------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "LV-02+ADM-04: a signed object upload never takes the store lock on the event loop "
-        "[fix-lot: escrow-relay-fixes ADR0014-P8]"
-    ),
-)
 def test_a_signed_object_upload_never_takes_the_store_lock_on_the_event_loop(
     tmp_path: Path,
 ) -> None:
+    """LV-02+ADM-04: the admission check of a signed upload waits for the store lock on a worker
+    thread, so a busy store never freezes the event loop that serves every other route."""
     service = sibling_service()
     miner = service.HOT[0]
     with service_world(tmp_path) as world:
@@ -271,17 +257,11 @@ def test_a_signed_object_upload_never_takes_the_store_lock_on_the_event_loop(
 # LV-03 ------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "LV-03+TRN-02: the shipped relay can act on a master release of a retained upload "
-        "[fix-lot: escrow-relay-fixes ADR0014-P6]"
-    ),
-)
 def test_the_shipped_relay_does_not_refuse_a_release_for_want_of_a_settlement_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """LV-03+TRN-02: the relay the entry point builds learns what the master settled from the
+    master itself, so it can act on a master release of a retained upload."""
     runtime = sibling_runtime()
     built: list[Any] = []
     create = relay_app.create_app
@@ -382,15 +362,9 @@ def released_rounds_leave_the_cap(
     asyncio.run(scenario())
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "LV-03+TRN-02: a released upload frees its slot in the retained-upload cap "
-        "[fix-lot: escrow-relay-fixes ADR0014-P6]"
-    ),
-)
 def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: Path) -> None:
+    """LV-03+TRN-02: custody the master released no longer counts against the cap, so finished
+    rounds never keep the relay from granting the next upload."""
     released_rounds_leave_the_cap(
         tmp_path, lambda chunk, receipt: [chunk.digest(), receipt.digest()]
     )

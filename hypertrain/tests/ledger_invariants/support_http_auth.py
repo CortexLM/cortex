@@ -23,8 +23,8 @@ from typing import Any, NamedTuple
 import httpx
 from fastapi.testclient import TestClient
 
-from hypertrain.protocol import messages_v2
 from hypertrain.protocol.keys import Keypair
+from hypertrain.protocol.messages_v2 import REQUEST_HORIZON
 from hypertrain.protocol.server_keys import (
     ServerKeyGrant,
     ServerKeyRevoke,
@@ -63,11 +63,12 @@ SUBNET, PARTY, OWNER = "subnet", "party", "owner-subnet"
 Key = tuple[str, str]
 V2 = "/v2/runs/{run_id}"
 ADMIN_V2 = V2 + "/admin"
-# A party polls its dispute events with a signed `WatchRequest` in a POST body on a tree that
-# carries that message (the master proxy forwards no signature header), and with an
-# `x-dispute-signature` header on a GET before it.
-WATCH_IN_BODY = hasattr(messages_v2, "WatchRequest")
-WATCH_KEY: Key = ("POST" if WATCH_IN_BODY else "GET", V2 + "/disputes")
+# No signature rides in an HTTP header (the master proxy forwards none): a party polls its dispute
+# events with a signed `DisputeWatchRequest` in a POST body, and the old header-signed `/disputes`
+# answers 405 "retired" to every method (ADR 0014 part 8).
+WATCH_KEY: Key = ("POST", V2 + "/disputes/watch")
+RETIRED_WATCH = V2 + "/disputes"
+RETIRED_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 
 CHALLENGE_ROUTES: dict[Key, Auth] = {
     # Operator bearer: every v1 admin and aggregator route, every v2 /admin route.
@@ -137,13 +138,19 @@ CHALLENGE_ROUTES: dict[Key, Auth] = {
     ("GET", V2 + "/rounds/{w}/job/{hotkey}"): Auth(NONE),
     ("GET", V2 + "/rounds/{w}/relay/{hotkey}"): Auth(NONE),
     ("GET", V2 + "/relay-observers/{grant_hash}/{observer}"): Auth(NONE),
+    # The master's signed view of a settlement: a relay checks a release against it, so it is
+    # public and the coordinator's seal is what authenticates it.
+    ("GET", V2 + "/relay-settlements/{grant_hash}"): Auth(NONE),
     ("GET", "/public/v1/runs"): Auth(NONE),
     ("GET", "/public/v1/snapshot"): Auth(NONE),
     ("GET", "/public/v1/runs/{run_id}"): Auth(NONE),
     ("GET", "/public/v1/runs/{run_id}/model"): Auth(NONE),
-    # A hotkey signature in headers (the dispute watch: in the body where the tree takes it there).
-    WATCH_KEY: Auth(ENVELOPE if WATCH_IN_BODY else HEADER, PARTY),
-    ("PUT", V2 + "/objects/{sha256}"): Auth(HEADER, SUBNET),
+    # The retired header-signed watch: it reads no credential and does no work, whatever the method.
+    **{(method, RETIRED_WATCH): Auth(NONE) for method in RETIRED_METHODS},
+    # A request signed in the body: the party's poll, and the frame of an object upload (the length
+    # of the signed ObjectUploadRequest, that envelope, then the object).
+    WATCH_KEY: Auth(ENVELOPE, PARTY),
+    ("POST", V2 + "/objects/{sha256}"): Auth(ENVELOPE, SUBNET),
     # A signed v2 envelope whose signer the route checks against the subnet.
     ("POST", V2 + "/join"): Auth(DUAL, SUBNET),
     # The owner's own request (ADR 0010 decision 3): signed by the admission's hotkey, in the body.
@@ -442,7 +449,7 @@ GATE_NAMES: dict[str, Key] = {
     "join/proof": ("POST", V2 + "/join/proof"),
     "rotate": ("POST", V2 + "/admission/{hotkey}/rotate"),
     "recover": ("POST", V2 + "/admission/recover"),
-    "objects": ("PUT", V2 + "/objects/{sha256}"),
+    "objects": ("POST", V2 + "/objects/{sha256}"),
     "accept": ("POST", V2 + "/accept"),
     "commit": ("POST", V2 + "/commit"),
     "delta": ("POST", V2 + "/delta"),
@@ -451,7 +458,7 @@ GATE_NAMES: dict[str, Key] = {
     "dispute": ("POST", V2 + "/dispute"),
     "bisect": ("POST", V2 + "/bisect"),
     "state-serve": ("POST", V2 + "/state-serve"),
-    "disputes": WATCH_KEY,
+    "disputes/watch": WATCH_KEY,
     "disputes/ack": ("POST", V2 + "/disputes/ack"),
 }
 
@@ -513,33 +520,20 @@ def owner_post(
 
 
 def put_object(network: Any, miner: Keypair, data: bytes) -> httpx.Response:
-    """The signed upload of `data` by `miner`, in the shape the route has on this tree: the
-    miner's object signature in headers (one place to change if the signature moves)."""
-    sha = hashlib.sha256(data).hexdigest()
-    message = f"hypertrain/object/2|{network.manifest.run_id()}|{sha}".encode()
-    response: httpx.Response = network.client.put(
-        network.url + "/objects/" + sha,
-        content=data,
-        headers={"x-hotkey": miner.ss58, "x-object-signature": miner.sign(message).hex()},
-    )
+    """The upload of `data` by `miner`, in the shape the route has: a POST whose body is the frame
+    of the miner's signed ObjectUploadRequest and the object (ADR 0014 part 8). The one place that
+    knows the wire shape of the upload."""
+    response: httpx.Response = network.put_object(miner, data)
     return response
 
 
 def watch_capture(network: Any, party: Keypair) -> Callable[[], httpx.Response]:
     """The poll of `party`'s dispute events, signed once and now: each call of the result replays
-    that capture, byte for byte. The request has the shape the route has on this tree."""
-    url = network.url + "/disputes"
-    if WATCH_IN_BODY:
-        from hypertrain.miner.core import OWNER_REQUEST_ROUNDS
-
-        poll = {"party": party.ss58, "cursor": 0, "wait_seconds": 0}
-        expires = network.store._now(network.store._db) + OWNER_REQUEST_ROUNDS
-        request = network.signed(party, "WatchRequest", poll, expires)
-        return lambda: network.client.post(url, json=request)
-    message = f"hypertrain/watch/2|{network.manifest.run_id()}|{party.ss58}".encode()
-    headers = {"x-dispute-signature": party.sign(message).hex()}
-    params = {"party": party.ss58}
-    return lambda: network.client.get(url, params=params, headers=headers)
+    that capture, byte for byte. The request is a signed DisputeWatchRequest in a POST body."""
+    poll = {"party": party.ss58, "cursor": 0, "wait": 0}
+    request = network.signed(party, "DisputeWatchRequest", poll, network.now + REQUEST_HORIZON)
+    url = network.url + "/disputes/watch"
+    return lambda: network.client.post(url, json=request)
 
 
 def relay_receipt(scenario: RelayScenario, signer: Keypair, *, key_id: str = "k1") -> Any:

@@ -246,13 +246,6 @@ def test_a_late_contest_never_reopens_a_settled_round(world: World) -> None:
 # --- a contest never wedges the round of its opener (DIB-04, DS-02) ---------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="DIB-04+DS-02: a contest on a verdict that matched suspends its opener, and "
-    "verified_inputs_v2 then raises 403 for the whole round; audit-integrity-2 refuses that "
-    "contest [fix-lot: audit-integrity-2 ADR0011-P8 DSP-04]",
-)
 def test_a_contest_on_a_matching_verdict_never_wedges_the_aggregation_of_its_round(
     world: World,
 ) -> None:
@@ -344,13 +337,6 @@ def test_a_contest_bond_whose_dispute_never_opened_can_be_taken_back(world: Worl
     assert escrow.balances() == before, released.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="DIA-06: open() takes a contest on a MATCH verdict (the contest record carries no "
-    "verdict result) and suspends the miner; audit-integrity-2 refuses it from the audit lease "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 DSP-04]",
-)
 def test_a_contest_on_a_matching_verdict_is_refused_before_it_suspends_anyone(
     world: World,
 ) -> None:
@@ -491,13 +477,6 @@ def shared_loop(world: World, workers: int) -> Iterator[TestClient]:
         yield client
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="DS-08: GET /disputes runs each long-poll (up to 30 s) on a thread of the shared "
-    "request pool with no bound per party, so a few polls stall every other route [candidate] "
-    "[fix-lot: escrow-relay-fixes ADR0014-P8]",
-)
 def test_waiting_dispute_polls_never_starve_the_other_routes(world: World) -> None:
     """DS-08: a watcher that polls for events does not keep the service from answering others.
     POOL polls of one party wait on an empty feed while a plain status request is made."""

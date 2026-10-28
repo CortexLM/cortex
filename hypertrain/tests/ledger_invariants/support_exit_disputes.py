@@ -24,7 +24,6 @@ from hypertrain.challenge.disputes_v2 import (
 )
 from hypertrain.challenge.finality_v2 import RoundStatus, require_open, settle
 from hypertrain.challenge.store import ChallengeError
-from hypertrain.protocol import messages_v2
 from hypertrain.protocol.envelope import body_digest
 from hypertrain.protocol.envelope_v2 import parse_envelope, seal
 from hypertrain.protocol.hashing import sha256_hex
@@ -32,8 +31,10 @@ from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import Finalize, Rollback
 from hypertrain.protocol.messages_v2 import (
+    REQUEST_HORIZON,
     BisectV2,
     DisputeV2,
+    DisputeWatchRequest,
     EscrowLock,
     EscrowRelease,
     PolicyHashes,
@@ -351,21 +352,12 @@ def resolve(world: World, dispute_id: str, *, reason: str, loser: str | None) ->
 def watch_poll(client: Any, world: World, party: Keypair, *, timeout: int) -> Any:
     """One long poll of the dispute watch as `party`, returned unchecked.
 
-    The one place that knows how the watch authenticates: a signature over run and party in an
-    HTTP header of a GET where the service reads it there (SIG-01), and a signed `WatchRequest`
-    in the body of a POST where it reads it there (ADR 0014 part 8, audit-integrity-2)."""
+    The one place that knows how the watch authenticates: a DisputeWatchRequest signed by the
+    party in the body of a POST (ADR 0014 part 8), waiting up to `timeout` seconds."""
     net = world.network
-    if hasattr(messages_v2, "WatchRequest"):
-        asked = messages_v2.WatchRequest(party=party.ss58, cursor=0, wait_seconds=timeout)
-        return client.post(
-            net.url + "/disputes", json=net.signed(party, "WatchRequest", asked, net.now + 20)
-        )
-    signature = party.sign(f"hypertrain/watch/2|{world.run_id}|{party.ss58}".encode()).hex()
-    return client.get(
-        net.url + "/disputes",
-        params={"party": party.ss58, "timeout": timeout},
-        headers={"x-dispute-signature": signature},
-    )
+    asked = DisputeWatchRequest(party=party.ss58, cursor=0, wait=timeout)
+    signed = net.signed(party, "DisputeWatchRequest", asked, net.now + REQUEST_HORIZON)
+    return client.post(net.url + "/disputes/watch", json=signed)
 
 
 def post_release(world: World, index: int, lock: EscrowLock) -> Any:

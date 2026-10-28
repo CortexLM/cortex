@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import re
 from contextlib import ExitStack
 from pathlib import Path
@@ -22,6 +23,7 @@ from fastapi.testclient import TestClient
 import hypertrain
 from hypertrain.challenge.app import Config, create_app
 from hypertrain.challenge.store import ChallengeError
+from hypertrain.data.store import ObjectNotFound
 from hypertrain.ledger import Params
 from hypertrain.protocol import envelope_v2, relay_envelope
 from hypertrain.protocol.envelope import SignatureError, UnauthorizedSigner
@@ -47,7 +49,6 @@ from .support_http_auth import (
     OP,
     RELAY_ROUTES,
     REVOKED_TEXT,
-    WATCH_IN_BODY,
     WATCH_KEY,
     WK,
     bearer,
@@ -59,6 +60,7 @@ from .support_http_auth import (
     gated_v1_calls,
     gated_v2_calls,
     owner_post,
+    put_object,
     quiet_client,
     relay_receipt,
     seed_audit_lease,
@@ -484,7 +486,13 @@ def test_a_forged_signer_is_refused_on_the_signed_routes_that_have_no_membership
 
 # SG-02 ------------------------------------------------------------------------------------
 
-DOMAIN_LITERAL = re.compile(r"^hypertrain/(?:[a-z-]+/)*(?:[0-9]+|v[0-9]+)[|\n]")
+# A domain, and any further `<name>/<version><separator>` group glued to it: a literal that opens
+# one domain and continues into another namespace is read whole, so that it is seen as a longer
+# domain that the first one is a prefix of.
+DOMAIN_LITERAL = re.compile(r"^hypertrain/(?:(?:[a-z-]+/)*(?:[0-9]+|v[0-9]+)[|\n])+")
+# The header-signed `hypertrain/object/2|` and `hypertrain/watch/2|` are retired (ADR 0014 part 8):
+# both routes are signed ht/2 envelopes now. A literal of either coming back below src/ is a header
+# signature coming back, and fails the set comparison of the test below.
 SIGNING_DOMAINS = frozenset(
     {
         "hypertrain/1|",
@@ -493,7 +501,6 @@ SIGNING_DOMAINS = frozenset(
         "hypertrain/dispute/2|",
         "hypertrain/elastic-leave/1|",
         "hypertrain/join/2|",
-        "hypertrain/object/2|",
         "hypertrain/origin/2|",
         "hypertrain/relay/1|",
         "hypertrain/release-manifest/v1\n",
@@ -503,7 +510,6 @@ SIGNING_DOMAINS = frozenset(
         "hypertrain/server-key/1|",
         "hypertrain/rotate/2|",
         "hypertrain/tape/2|",
-        *([] if WATCH_IN_BODY else ["hypertrain/watch/2|"]),
     }
 )
 
@@ -639,18 +645,76 @@ def unpinned_sites(
     return problems
 
 
+# The one production Intake that takes no predicate: the object upload names its signer to the
+# store first (`_owner_v2`, under the lock, refuses a hotkey with no admission), and the Intake then
+# only verifies the same bytes and their expiry. The scan accepts it while that pin precedes it in
+# the same function; the upload test of a hotkey with no admission holds the pin at the HTTP
+# boundary.
+SIGNER_PINNED_FIRST = {
+    ("challenge/app.py", "put_object_v2"): "hosted._owner_v2(run_id, envelope.signer)"
+}
+
+
+def signer_pinned_first(site: tuple[str, int, str, ast.Call]) -> tuple[str, str] | None:
+    """(file, function) of a predicate-free site whose function pins the signer before the Intake,
+    else None."""
+    file, line, _, _ = site
+    text = (SOURCE / file).read_text()
+    functions = [
+        node
+        for node in ast.walk(ast.parse(text))
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and node.lineno <= line <= (node.end_lineno or node.lineno)
+    ]
+    if not functions:
+        return None
+    function = max(functions, key=lambda node: node.lineno)  # the innermost
+    key = (file, function.name)
+    before = "\n".join(text.splitlines()[function.lineno - 1 : line - 1])
+    return key if key in SIGNER_PINNED_FIRST and SIGNER_PINNED_FIRST[key] in before else None
+
+
 def test_every_production_intake_names_a_signer_predicate_for_a_real_message_type() -> None:
     """SG-03 (condition satisfied). The default of an `Intake` is to accept any valid signer, so
     each call site must pass a predicate, and under a type its own message table has, or the
-    predicate never fires."""
+    predicate never fires. The one exception pins its signer in the store before the Intake."""
     known = {
         "v1": set(MESSAGE_TYPES),
         "v2": set(MESSAGE_TYPES_V2),
         "relay": set(RELAY_MESSAGE_TYPES),
     }
     sites = intake_sites()
-    assert len(sites) >= 50  # the scan finds the sites: 66 on this tree
-    assert unpinned_sites(sites, known) == []
+    assert len(sites) >= 50  # the scan finds the sites: 69 on this tree
+    pinned = [site for site in sites if signer_pinned_first(site)]
+    assert [signer_pinned_first(site) for site in pinned] == list(SIGNER_PINNED_FIRST)
+    assert unpinned_sites([site for site in sites if site not in pinned], known) == []
+
+
+def test_a_signed_upload_of_a_hotkey_with_no_admission_is_refused_and_stores_nothing(
+    tmp_path: Path,
+) -> None:
+    """SG-03+AU-05. The upload route builds its Intake without a signer predicate, so the store's
+    admission check is the only thing that binds the signer: a hotkey on the subnet whose
+    signature is valid but which holds no admission stores nothing."""
+    service = sibling_service()
+    data = b"an object nobody admitted"
+    sha = hashlib.sha256(data).hexdigest()
+    with service_world(tmp_path) as world:
+        n = world.network
+        assert n.join(0).status_code == 200
+        objects = world.store.for_run(world.run_id).objects
+        before = durable_state(world)
+        refused = detail(put_object(n, service.HOT[1], data))
+        after = durable_state(world)
+        with pytest.raises(ObjectNotFound):
+            objects.get(sha)
+        # Control: the same bytes from the admitted miner are stored, so the refusal above is the
+        # admission check's and not a malformed request.
+        stored = put_object(n, service.HOT[0], data)
+        assert (stored.status_code, stored.json()) == (200, {"sha256": sha})
+        assert objects.get(sha) == data
+    assert refused == (403, "hotkey is not current accepted identity")
+    assert changed(before, after) == set()
 
 
 def test_the_site_scan_flags_an_intake_that_would_accept_any_signer() -> None:
