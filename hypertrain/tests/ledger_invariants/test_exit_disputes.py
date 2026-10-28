@@ -246,13 +246,7 @@ def test_a_late_contest_never_reopens_a_settled_round(world: World) -> None:
 # --- a contest never wedges the round of its opener (DIB-04, DS-02) ---------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="DIB-04+DS-02: a contest on a verdict that matched suspends its opener, and "
-    "verified_inputs_v2 then raises 403 for the whole round; audit-integrity-2 refuses that "
-    "contest [fix-lot: audit-integrity-2 ADR0011-P8 DSP-04]",
-)
+# Closed by audit-integrity-2 ADR0011-P8 DSP-04 (b0ac0ab5): a contest on a MATCH is refused.
 def test_a_contest_on_a_matching_verdict_never_wedges_the_aggregation_of_its_round(
     world: World,
 ) -> None:
@@ -344,13 +338,7 @@ def test_a_contest_bond_whose_dispute_never_opened_can_be_taken_back(world: Worl
     assert escrow.balances() == before, released.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="DIA-06: open() takes a contest on a MATCH verdict (the contest record carries no "
-    "verdict result) and suspends the miner; audit-integrity-2 refuses it from the audit lease "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 DSP-04]",
-)
+# Closed by audit-integrity-2 ADR0011-P8 DSP-04 (b0ac0ab5): the audit lease says MATCH.
 def test_a_contest_on_a_matching_verdict_is_refused_before_it_suspends_anyone(
     world: World,
 ) -> None:
