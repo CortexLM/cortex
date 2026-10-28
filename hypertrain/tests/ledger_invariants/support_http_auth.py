@@ -60,6 +60,7 @@ ENVELOPE, HEADER, BODY_KEY, BODY_SIG, DUAL, KEY_GRANT = (
     "KEY_GRANT",
 )
 SUBNET, PARTY, OWNER = "subnet", "party", "owner-subnet"
+HOLDER = "holder-coldkey"  # the admission's coldkey signs; no subnet gate (D86)
 
 Key = tuple[str, str]
 V2 = "/v2/runs/{run_id}"
@@ -97,6 +98,7 @@ CHALLENGE_ROUTES: dict[Key, Auth] = {
     ("POST", ADMIN_V2 + "/rounds/{w}/finalize"): Auth(OP),
     ("POST", ADMIN_V2 + "/join/{admission_id}/reference"): Auth(OP),
     ("POST", ADMIN_V2 + "/join/{admission_id}/reseed"): Auth(OP),
+    ("GET", ADMIN_V2 + "/join/{admission_id}/bond"): Auth(OP),
     ("POST", ADMIN_V2 + "/join/{admission_id}/finalize"): Auth(OP),
     ("POST", ADMIN_V2 + "/join/{admission_id}/shadow-reservation"): Auth(OP),
     ("POST", ADMIN_V2 + "/join/{admission_id}/shadow-reward"): Auth(OP),
@@ -157,6 +159,7 @@ CHALLENGE_ROUTES: dict[Key, Auth] = {
     # The owner's own request (ADR 0010 decision 3): signed by the admission's hotkey, in the body.
     ("POST", V2 + "/join/{admission_id}/challenge"): Auth(ENVELOPE, OWNER),
     ("POST", V2 + "/join/{admission_id}/job"): Auth(ENVELOPE, OWNER),
+    ("POST", V2 + "/join/{admission_id}/bond"): Auth(ENVELOPE, HOLDER),
     ("POST", V2 + "/join/proof"): Auth(ENVELOPE, SUBNET),
     ("POST", V2 + "/admission/{hotkey}/rotate"): Auth(ENVELOPE, SUBNET),
     ("POST", V2 + "/admission/recover"): Auth(ENVELOPE, SUBNET),

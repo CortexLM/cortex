@@ -10,7 +10,9 @@ import pytest
 
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.protocol import relay_envelope
+from hypertrain.protocol.envelope import body_digest
 from hypertrain.protocol.hashing import sha256_hex
+from hypertrain.protocol.messages import ReplayEnv, ReplayVerdict
 from hypertrain.protocol.messages_v2 import AuditPolicyV2
 from hypertrain.protocol.relay_messages import MasterAcceptanceV2, RelayReceipt
 
@@ -579,3 +581,67 @@ def test_an_unverified_exclusion_that_no_mismatch_verdict_backs_is_waived(networ
         "NONE",
     )
     assert hook.calls == []
+
+
+@pytest.mark.parametrize(
+    ("names_the_verdict", "row", "applied"),
+    [
+        (True, ("MINER", "PENDING", "LOCATED"), True),
+        (False, ("INFRASTRUCTURE", "WAIVED", "NONE"), False),
+    ],
+    ids=["the-exclusion-names-the-verdict", "the-exclusion-names-another-verdict"],
+)
+def test_a_stored_mismatch_verdict_backs_only_the_exclusion_that_names_it(
+    network, hook, names_the_verdict, row, applied
+):
+    # Given: a member excluded as UNVERIFIED, a completed MISMATCH lease for it and a stored
+    # verdict that locates a leaf; the exclusion's evidence is the digest of that verdict or of
+    # something else
+    store, run = network.store, network.manifest.run_id()
+    keys = seed_round(network, n=5)
+    identity = f"0:{keys[0].ss58}"
+    reference = network.manifest.training.reference_spec
+    verdict = network.signed(
+        fixtures.AUDITORS[0],
+        "ReplayVerdict",
+        ReplayVerdict(
+            challenge_hash="ee" * 32,
+            first_bad_leaf=1,
+            result="MISMATCH",
+            recomputed_leaves_root="dd" * 32,
+            replay_env=ReplayEnv(
+                image_digest=reference.image_digest,
+                driver=reference.driver_allowlist[0],
+                gpu_uuid_sha256="aa" * 32,
+                sm_count=1,
+            ),
+        ),
+    )
+    evidence = body_digest(verdict["body"]) if names_the_verdict else "ab" * 32
+    with store._tx():
+        store._put_record_v2(run, "verdict", identity, verdict)
+        store._put_record_v2(
+            run, "excluded", identity, {"reason": "UNVERIFIED", "evidence_hash": evidence}
+        )
+        store._db.execute(
+            "INSERT INTO audit_leases_v2(id,run_id,w,hotkey,challenge,created,absolute,state,"
+            "auditor,result) VALUES(?,?,0,?,'{}',?,?,'completed',?,'MISMATCH')",
+            (
+                sha256_hex(b"lease"),
+                run,
+                keys[0].ss58,
+                D_AUDIT,
+                D_AUDIT + 100,
+                fixtures.AUDITORS[0].ss58,
+            ),
+        )
+
+    # When: the beacon books the exclusion, and goes on past the contest window
+    push_through(network, D_AUDIT)
+    push_through(network, D_AUDIT + 2)
+    booked = records(network, "exit-sanction")[identity]
+    assert (booked["blame"], booked["state"], booked["grade"]) == row
+    push_through(network, D_AUDIT + 2 + network.manifest.training.verify.T.dispute_per_level)
+
+    # Then: only the verdict the exclusion names reaches the hook
+    assert hook.calls == ([(admission_id(0), "AUDIT_MISMATCH", evidence)] if applied else [])

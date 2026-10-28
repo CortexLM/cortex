@@ -118,10 +118,14 @@ def balances(network):
 
 
 def test_owner_takes_the_bond_back_through_the_routes(network):
-    # Given: a funded application. The status route tells the owner what to sign.
+    # Given: a funded application. The holder's signed request tells the owner what to sign; the
+    # public status shows the amounts only.
     identity, lock = lock_bond(network)
     status = network.client.get(network.url + f"/admission/{service.HOT[0].ss58}").json()
-    (entry,) = status["bond"]["locks"]
+    assert [e["units"] for e in status["bond"]["locks"]] == [1000]
+    terms = network.bond(identity)
+    assert terms.status_code == 200, terms.text
+    (entry,) = terms.json()["locks"]
     assert (entry["lock_id"], entry["units"], entry["releasable"]) == (
         lock.operation_id,
         1000,
@@ -140,6 +144,7 @@ def test_owner_takes_the_bond_back_through_the_routes(network):
     assert balances(network).admission_locked == 0 and balances(network).conserved()
     status = network.client.get(network.url + f"/admission/{service.HOT[0].ss58}").json()
     assert status["bond"] == {"locks": []}
+    assert network.bond(identity).json() == {"locks": []}
 
 
 def convict_through_the_routes(network, identity, loser):

@@ -326,7 +326,11 @@ Decision.
    strike too, but the first one puts the admission back on a fresh probation and only a second
    one inside `NO_SHOW_STRIKE_WINDOW_SCREENS` work screens suspends it, as ADR 0011 Part 8
    decision 12 (D63) amends it (it first burned the bond and left the admission as it was,
-   ineligible until funded again). A (reason, evidence)
+   ineligible until funded again). *Amended 2026-10-28 (D86, IMP-4):* a `NO_SHOW` of a member kept out of
+   its round by its own open contest is not handed to this hook at once: the sweeper holds it while the
+   contest is open, waives it when the contest is lost (the conviction is the one sanction) and applies it
+   as above when the contest is won, closed without a loser or was never opened (ADR 0011 Part 8
+   decision 12). A (reason, evidence)
    pair is applied once, recorded in `admission_sanctions`: a retry adds no strike. The ledger
    keeps its existing meaning of a slash; the new keyword defaults to it, so no earlier event
    changes. The caller decides whose fault it is: a verdict against the auditor reaches
@@ -408,7 +412,10 @@ Decision.
    failure of the hook rolls back the resolution (fail closed).
 5. **Release.** The owner signs the existing `EscrowRelease`; the route is unchanged.
    `GET .../admission/{hotkey}` gains a response-only `bond` key listing the residual locks with
-   `releasable`, `release_beacon` and the `finality_hash` and `closed_dispute_root` to sign.
+   `units`, `outcome`, `releasable` and `release_beacon`. *Amended 2026-10-28 (D86, ADR 0014 point 9):*
+   the `finality_hash` and `closed_dispute_root` to sign, with the lock id and the origin ids, are no
+   longer in this anonymous answer: the coldkey of the admission asks for them with a signed
+   `BondRequest` (`POST .../join/{admission_id}/bond`), the operator with the admin bearer.
    `Admission.release_bond(admission_id, *, now)` is the internal equivalent for an authenticated
    request of the owner: all residual locks or none (`BOND_NOT_RELEASABLE`).
 6. **Not sanctioned.** An uncontested `MISMATCH`, an `INFRASTRUCTURE` close (ADR 0011),
@@ -460,6 +467,10 @@ withdrawing the bond just before a round opens does not arise); hooks in `comple
 
 ## Hash consequences
 
+*After `v3-tree-verdict-fixes` (2026-10-28):* `implementation_hash` is unchanged; `challenge/store.py`,
+`challenge/admission.py`, `sources()` and the bundle move. The values are in ADR 0011 Part 3, which
+carries the table for every later lot.
+
 Measured with `ChallengeStore._service_implementation_v2`, `network_qualification.sources()` and
 `bundle()`, and `manifest_v2 example` followed by `manifest_v2 build`, on the merge commit
 `7a4c0a87`, where the lot meets v3. The `33b50656` column (the base of the lot) is the first
@@ -507,7 +518,7 @@ exists.
 - The server image gets a new digest at rebuild. A manifest that enables the optional cap pins
   nothing else.
 - Wire: `RotateRequest` gains `new_hot_sig`; `LeaveNotice` gains `epoch`; two new message types
-  `ChallengeRequest` and `JobRequest`; the export payload gains `challenge_envelope`; the unsigned
+  `ChallengeRequest` and `JobRequest` (and, from D86, `BondRequest`); the export payload gains `challenge_envelope`; the unsigned
   `GET .../challenge` and the header-signed `GET .../job` become `POST` with a signed body;
   `GET .../admission/{hotkey}` gains `bond` in Part 6. None is a manifest or SCALE wire message;
   `docs/BUNDLE_SPEC.md` and the frozen vectors are untouched.
@@ -556,6 +567,18 @@ exists.
    rewards through the lockless `EscrowV2.burn_pending` (Part 6 point 3, "Unvested rewards of a
    conviction without a residual lock"), so contesting is as costly in the D47 flow as the text
    of Part 6 says.
+   Narrowed 2026-10-28 (D86): for a contest the member opens itself, the `NO_SHOW` half no
+   longer empties the lock first, because the sweeper holds that `NO_SHOW` until the contest ends;
+   the `AUDIT_MISMATCH` half of the flow is as before.
+5. **Who reads the terms of a bond (D51, D52 I2, D86).** The public `GET .../admission/{hotkey}` shows
+   a bond by `units`, `outcome`, `releasable` and `release_beacon` only. The lock id, the origin ids
+   and the `finality_hash` and `closed_dispute_root` a release signs are read by the holder, through a
+   `BondRequest` signed in the body by the admission's coldkey (`POST .../join/{admission_id}/bond`,
+   expiry within `REQUEST_HORIZON`, `GET` is 405, no subnet gate: the coldkey owns the lock, so a hotkey
+   that left the subnet does not strand it), or by the operator with the admin bearer
+   (`GET .../admin/join/{admission_id}/bond`). The coldkey rather than the hotkey of `ChallengeRequest`
+   and `JobRequest` is this ADR's choice for the Principal to confirm; the other is one line in
+   `bond_terms_v2` away. ADR 0014 point 9 carries the correction of its grep.
 
 ## Not verified
 

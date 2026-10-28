@@ -19,6 +19,7 @@ from hypertrain.protocol.hashing import sha256_hex
 Blame = Literal["MINER", "INFRASTRUCTURE"]
 Stage = Literal["commit", "leaves", "delta"]
 Retire = Literal["INFEASIBLE", "AUDIT_WINDOW_MISSED", "LEAF_OBJECT_LOST"]
+NoShowAction = Literal["APPLY", "WAIT", "COVERED", "DROP"]
 
 # The master refuses its callers once the wall clock is more than this many rounds ahead of the
 # last round it holds: the beacon is paused, and a pause is never a miner's silence.
@@ -185,6 +186,22 @@ def classify(
     # leaves: only the master lacks them, and it cannot prove that the miner never posted them
     # (a post that failed on the master or storage side leaves no record)
     return "INFRASTRUCTURE"
+
+
+def no_show_action(*, contest_open: bool, contest_lost: bool, bound_reached: bool) -> NoShowAction:
+    """What the sweeper does with a PENDING NO_SHOW sanction of a member that has a contest of its
+    own (ADR 0011 Part 8, D86): one fault is one sanction.
+
+    The member is out of the round either way. While its contest is open it cannot Accept, so the
+    sanction waits (WAIT) for the contest to end, up to the bound of the wait (`bound_reached`:
+    the round is closed or the dispute bound has passed), where the hold is dropped (DROP) and the
+    exclusion stays the infrastructure's, never an unbounded wait. A contest the member lost
+    already sanctioned it, and its absence is covered (COVERED), not sanctioned a second time. A
+    contest it won, one a closure ended without a loser, or no contest at all leaves the NO_SHOW
+    to apply as D63 says (APPLY)."""
+    if contest_open:
+        return "DROP" if bound_reached else "WAIT"
+    return "COVERED" if contest_lost else "APPLY"
 
 
 def survivors_of(

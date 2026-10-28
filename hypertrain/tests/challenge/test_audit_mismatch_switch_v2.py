@@ -14,8 +14,9 @@ import pytest
 
 from hypertrain.challenge.app import create_app
 from hypertrain.challenge.store import ChallengeStore
+from hypertrain.data.store import LocalFSStore
 
-from .conftest import make_config, verify_fixture
+from .conftest import PARAMS, make_config, verify_fixture
 
 
 def store_of(tmp_path: Path, **changes: bool) -> ChallengeStore:
@@ -28,6 +29,17 @@ def store_of(tmp_path: Path, **changes: bool) -> ChallengeStore:
 
 def test_the_app_enforces_a_confirmed_mismatch_by_default(tmp_path: Path) -> None:
     store = store_of(tmp_path)
+    try:
+        assert store.enforce_audit_mismatch is True
+    finally:
+        store.close()
+
+
+def test_a_store_built_without_the_keyword_enforces_a_confirmed_mismatch(tmp_path: Path) -> None:
+    # the bootstrap scripts build the store directly, with no Config in between
+    store = ChallengeStore(
+        tmp_path / "state", PARAMS, None, None, verify_fixture, LocalFSStore(tmp_path / "objects")
+    )
     try:
         assert store.enforce_audit_mismatch is True
     finally:

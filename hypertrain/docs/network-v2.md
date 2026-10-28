@@ -239,6 +239,15 @@ bytes that do not hash to the sha256, 422. The old `PUT` with `X-Hotkey` and
 `X-Object-Signature` headers is removed (405). Uploads are content-addressed,
 so repeating one is harmless; the miner retries transport errors and 5xx.
 
+Every object is read, by anyone, with `GET /v2/runs/{run_id}/objects/{sha256}`. The master sends
+the stored file in blocks of 1 MiB with its `Content-Length`; it never holds the object in memory,
+and it does not hash it again per request: the key names the file, and the party that receives the
+bytes checks their sha256 (the miner does). Refusals: a key that is not 64 lowercase hex 400, an
+unknown run or an object the master does not hold 404, an object above 8 GiB (`MAX_PARTS` parts of
+1 MiB, the largest a client takes whole) 413, checked on the opened file before the first byte is
+read. An object store that is not on the master's local disk answers 503 (none is configured today).
+The route answers neither `HEAD` nor `Range`.
+
 Current admission policy fixes E=4 and requires 12 clean finalized participations
 plus canary blocks 1,2,3. The first four are shadow-only. Later PROBATION influence
 also requires funded eligibility; ACTIVE requires current screening, sufficient
@@ -408,10 +417,19 @@ identical request. See `docs/adr/0014` at the monorepo root.
 
 The bond is the `LOCK_ADMISSION` of the admission. It has its own settlement, derived from
 the admission's records on every call (ADR 0010, Part 6), and `GET /v2/runs/{run_id}/admission/{hotkey}`
-lists it under `bond`: per residual lock its units, whether it is `releasable`, its
-`release_beacon` and the `finality_hash` and `closed_dispute_root` to sign. The owner takes it
-back with the existing signed `EscrowRelease` (`POST .../escrow/release`) carrying those two
-hashes. It is released only when the admission is not `BANNED` and has no pending dispute or
+lists it under `bond`: per residual lock its `units`, `outcome`, whether it is `releasable` and its
+`release_beacon`, and nothing that names the lock. The lock id, the `origin_ids` and the
+`finality_hash` and `closed_dispute_root` that a release signs are the holder's: the coldkey of the
+admission asks for them with `POST /v2/runs/{run_id}/join/{admission_id}/bond`, whose body is a
+signed ht/2 envelope of type `BondRequest {admission_id}` (no header carries a signature; a GET is
+405). The coldkey owns the lock and signs its release, and the route has no subnet gate, so a hotkey
+that left the subnet does not strand its bond. The expiry is at most 20 rounds past the master's
+current round; the admission's hotkey, another coldkey, another admission or run, another message
+type, an expired or too distant envelope all answer 403, an unknown admission 409. The operator
+reads the same answer with `GET /v2/runs/{run_id}/admin/join/{admission_id}/bond` (admin bearer),
+and `hypertrain-miner escrow-bond` signs and posts the request from the operator machine. The owner
+takes the bond back with the existing signed `EscrowRelease` (`POST .../escrow/release`) carrying
+the two hashes. It is released only when the admission is not `BANNED` and has no pending dispute or
 lock in the outbox, every round whose roster lists it is closed, none of its hotkeys has
 unvested rewards, it is not live (`ACTIVE`, or `PROBATION` with four clean trials, until its
 screen ends), and the last reward origin of its hotkeys has matured. The bond is burned by the
@@ -424,7 +442,13 @@ member excluded for its silence (`reason="NO_SHOW"`). In the last two the bond a
 unvested rewards survive, one strike is added and the coldkey stays bound as in probation; an
 audit mismatch suspends the admission, a first no-show puts it back
 on a fresh probation (new trials, no suspension) and a second one inside four work screens suspends
-it like a mismatch. An uncontested `MISMATCH`, an infrastructure
+it like a mismatch. A roster member whose own contest is open is left out of the round all the
+same, but its NO_SHOW waits for the contest (D86): a contest it loses already sanctioned it and the
+absence is covered, with no second row, strike or burn; one it wins, a closure without a loser, a
+contest refused at the door or no contest at all leaves the NO_SHOW to apply. Only a contest opened
+before the bound of the missed stage counts. A contest still open at the dispute bound (the end of the
+second audit window of the round) drops the hold: the exclusion stays the infrastructure's, unsanctioned, and a
+contest that ends afterwards does not bring the NO_SHOW back. An uncontested `MISMATCH`, an infrastructure
 closure and a verdict against the auditor leave the bond intact. The status route reads the run's
 rounds once per call for an admission that holds a bond.
 

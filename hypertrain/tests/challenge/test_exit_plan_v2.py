@@ -322,3 +322,32 @@ def test_a_reaudit_window_never_outlives_its_wait_or_the_commit():
 def test_the_window_of_a_withheld_mismatch(detected, absolute, commit_exp, until):
     got = x.reaudit_until(detected, absolute=absolute, commit_exp=commit_exp, reaudit_rounds=171)
     assert got == until
+
+
+@pytest.mark.parametrize(
+    ("contest_open", "contest_lost", "bound_reached", "action"),
+    [
+        (False, False, False, "APPLY"),  # no contest, a contest won, a closure without a loser
+        (False, False, True, "APPLY"),
+        (
+            False,
+            True,
+            False,
+            "COVERED",
+        ),  # the contest sanctioned the member: one fault, one sanction
+        (False, True, True, "COVERED"),
+        (True, False, False, "WAIT"),  # out of the round now, sanctioned when the contest ends
+        (True, True, False, "WAIT"),  # an open contest is never read as lost before it ends
+        (True, False, True, "DROP"),  # never an unbounded wait: the exclusion stays, unsanctioned
+        (True, True, True, "DROP"),
+    ],
+)
+def test_a_no_show_with_a_contest_of_its_own_waits_for_it_is_covered_by_a_loss_or_applies(
+    contest_open, contest_lost, bound_reached, action
+):
+    assert (
+        x.no_show_action(
+            contest_open=contest_open, contest_lost=contest_lost, bound_reached=bound_reached
+        )
+        == action
+    )

@@ -79,6 +79,11 @@ def no_show_strike_window(work_screen_epoch_rounds: int) -> int:
     return NO_SHOW_STRIKE_WINDOW_SCREENS * work_screen_epoch_rounds
 
 
+# The fields of a bond lock the anonymous status keeps (D51, D86); the others name the lock, its
+# origins and the settlement a release is bound to, and are read by the holder or the operator.
+PUBLIC_BOND_FIELDS = ("units", "outcome", "releasable", "release_beacon")
+
+
 @dataclass(frozen=True)
 class _Standing:
     """What a MATCH settlement of any lock of one admission depends on, apart from the lock."""
@@ -1587,8 +1592,22 @@ class Admission:
         )
 
     def bond(self, admission_id: str, *, now: int) -> dict[str, JsonValue]:
-        """The admission's locked bond and what the owner must sign to take it back (status)."""
-        locks: list[JsonValue] = []
+        """The admission's locked bond and what the owner must sign to take it back: the terms the
+        holder reads through a signed request, or the operator through the admin bearer."""
+        return {"locks": [lock for lock in self._bond_terms(admission_id, now=now)]}
+
+    def public_bond(self, admission_id: str, *, now: int) -> dict[str, JsonValue]:
+        """What the anonymous status says of the bond: amounts and the state of the settlement.
+        The lock id, the origin ids and the two hashes a release names are the holder's (D51)."""
+        return {
+            "locks": [
+                {name: lock[name] for name in PUBLIC_BOND_FIELDS}
+                for lock in self._bond_terms(admission_id, now=now)
+            ]
+        }
+
+    def _bond_terms(self, admission_id: str, *, now: int) -> list[dict[str, JsonValue]]:
+        locks: list[dict[str, JsonValue]] = []
         standing = None
         for lock in self._bond_locks(admission_id):
             origins, units = self._residual(lock)
@@ -1610,7 +1629,7 @@ class Admission:
                     "closed_dispute_root": s.closed_dispute_root,
                 }
             )
-        return {"locks": locks}
+        return locks
 
     def release_bond(self, admission_id: str, *, now: int) -> list[EscrowReceipt]:
         """Release every residual lock of the admission to its owner, or none.

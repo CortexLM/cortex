@@ -105,7 +105,14 @@ All findings were reproduced in-process on `33b50656` by at least one design ana
    values, so it can be neither enumerated nor pre-computed from a finalize hash. It is readable by the
    holder (the miner receives its origins from the operator that signs the reward, as today: the CLI takes
    `--origin`) and by the admin; no unauthenticated route returns an origin id [V grep of `challenge/app.py`
-   and the store's responses: origin ids appear only in the admin finalize result and in records]. Typed
+   and the store's responses: origin ids appear only in the admin finalize result and in records].
+   *Correction, 2026-10-28 (Lens' merged-tree verdict on `389c45b4`, IMP-3; D86):* that grep missed
+   `GET .../admission/{hotkey}`, whose `bond` listing returned `lock_id`, `origin_ids` and
+   `finality_hash` to anyone. Now it keeps `units`, `outcome`, `releasable` and `release_beacon`; the
+   terms a release signs come from `POST .../join/{admission_id}/bond` (a `BondRequest` signed in the
+   body by the admission's coldkey, expiry within `REQUEST_HORIZON`, GET 405) or
+   `GET .../admin/join/{admission_id}/bond` (admin bearer). The crawl of every GET route in
+   `test_no_anonymous_route_returns_an_escrow_identifier` makes the sentence checkable. Typed
    references (Part 2) and the disjoint space remove what a learned id could be used for; keying is the
    depth D51 3 requires. `finalize_v2` builds the reward's origin list itself (`store.py:8354`), so this
    edit changes `implementation_hash` (see Consequences).
@@ -398,7 +405,10 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
   `finalize_v2` and of the owned helpers that came with them. On the integrated tree of `v3-integration-final`
   (this lot, audit-integrity-2, DET-01 and the two lock releases; `3ce5b031`) it is `d61bd2b8…71bdc4` for the
   example pin (ADR 0011 Part 3 has the full table), `challenge/store.py` is `9379bdb4…cf31c1`, `sources()` 158 files
-  `1de8e396…74c8cc`, `bundle()` 2,734,080 bytes `88918dd5…795525`.
+  `1de8e396…74c8cc`, `bundle()` 2,734,080 bytes `88918dd5…795525`. `v3-tree-verdict-fixes` (IMP-3 and others)
+  edits `store.py`, `admission.py`, `app.py` and the wire (`BondRequest`) without touching an owned name or
+  one of the 12 files: `implementation_hash` stays `d61bd2b8…71bdc4`; `store.py`, `sources()` and the bundle
+  move (ADR 0011 Part 3).
 - Schema: no table, column or key changes. One partial index is created if absent.
 - Compatibility: new server events carry a new key and new hashes, new origins new ids; old chains verify
   unchanged and are forward-only for the first new server event (an older image then fails closed with an

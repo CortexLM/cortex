@@ -635,6 +635,34 @@ breaker bounds the attempt-based one).
   replay helpers and the integration the verdict-age helper). The 12 files are the ones of this part;
   `executor-lock-release` and `aggregate-lock-release` change none of them.
 
+  **After `v3-tree-verdict-fixes`** (IMP-1 to IMP-4 of Lens' verdict on `389c45b4` and IMP-8; the
+  first commit after `389c45b4` that edits `hypertrain/src` is `27f778f9`; measured 2026-10-28 with
+  `hash_consequences.py` on a `git archive` of the lot's tip and of `389c45b4`, the commands above; valid
+  for every later commit that touches nothing under `hypertrain/src`) [V]. The lot edits `challenge/{store,admission,app,exit_v2}.py`, `data/store.py`,
+  `protocol/{messages_v2,envelope_v2}.py` and `miner/{cli,coldkey_ops}.py`; none of them is among the 12
+  hashed files, and the store edits are in `admission_v2`, `_sweep_sanctions_v2` and the new
+  `_contest_hold_v2` and `_dispute_opened_v2`, which are not owned names. So `implementation_hash` and the 48 owned ASTs do not move,
+  and neither does any run id; the digests of the files and the qualification inputs do:
+
+  | Value | `389c45b4` | After the lot |
+  | --- | --- | --- |
+  | `implementation_hash`, example pin (`avx2`/`none`) | `d61bd2b8…71bdc4` | `d61bd2b8…71bdc4` (unchanged) |
+  | owned names / hashed files of `implementation_hash` | 48 / 12 | 48 / 12 |
+  | `challenge/store.py` sha256 | `9379bdb4…cf31c1` | `a07d99fa…e0a661` |
+  | `challenge/admission.py` sha256 | `8b812e46…25b51b` | `49318eb1…970ebd` |
+  | `gpu_ops/network_qualification.py` sha256 | `2206486f…319688` | `2206486f…319688` (unchanged) |
+  | `sources()` map: files, canonical sha256 | 158, `1de8e396…74c8cc` | 158, `12109c14…85feea` |
+  | `sources` listing, `sha256sum` of the CLI output | `084c2381…124a2a` | `040fef74…87a0ee` |
+  | `bundle()` | 2,734,080 bytes, `88918dd5…795525` | 2,744,320 bytes, `a5ccb6e0…813ff4` |
+  | example `run_id` / `reference_hash` | `aa39197d…ec8abd` / `2dd4eadc…d6cc5d` | unchanged |
+
+  A correction to the table above and to ADR 0012 Part C, which print `8ff83ee2…532a2a` as the `sha256sum`
+  of the CLI output: that is the sha256 of `json.dumps(map, sort_keys=True)` without the trailing newline.
+  `sha256sum` of what `network_gpu_qualification.py sources` prints, newline included, is `084c2381…124a2a`
+  on `389c45b4`. The older qualification configs stop validating against this tree
+  (`qualification_source_or_profile_changed`), as after every edit of `src/hypertrain`; a GPU image rebuilt
+  from this tree has a new digest.
+
 ### Rejected alternatives
 
 1. `reference_spec.env.numerics`, 8 required keys: cannot say "unset"; scrubs whole prefix families
@@ -1272,7 +1300,7 @@ in this order and without the peer:
 | 5 | audit job, lease (Part 2, done) | an auditor, an executor host, a miner whose sealed input cannot be leased | attempt `L`; two windows of `A`; the second ends where the sealed commit ends | cooldown, requeue, re-arm once, drop only the miner (`INFRASTRUCTURE`); `MINER_INPUT_REFUSED` dropped at once | infrastructure; miner only for an input it sealed short | none | `test_audit_liveness_v2` |
 | 6 | audit window missed | the operator who never calls `audits` | `absolute - 1` | the round is retired (`AUDIT_WINDOW_MISSED`) | infrastructure | none | `test_exit_audit_window` |
 | 7 | round infeasible (AC-CLIFF) | nobody in particular: the Q/4 caps after any exclusion above | the push that first sees the survivors cannot carry | blame booked per member; the round is retired (`INFEASIBLE`); the next opening answers 409 until four anchored members are eligible | per member (rows 2 to 4) | per member | `test_exit_infeasible` |
-| 8 | roster member changes state (R-C2, DSP-04) | the member: rotation, contest of its own MATCH, a lapsing screen; our own sanction | refused at the door (rotation, MATCH contest, screen at open); judged at `aggregate`; if too few remain, retired at `d_final` | `ROTATION_ROUND_OPEN` / `NOTHING_TO_CONTEST` 409; `excluded INELIGIBLE` with its cause; `finalize` pays the applied tape | the member's own state; never a second sanction | none | `test_member_state` |
+| 8 | roster member changes state (R-C2, DSP-04) | the member: rotation, contest of its own MATCH, a lapsing screen; our own sanction | refused at the door (rotation, MATCH contest, screen at open); judged at `aggregate`; if too few remain, retired at `d_final` | `ROTATION_ROUND_OPEN` / `NOTHING_TO_CONTEST` 409; `excluded INELIGIBLE` with its cause; `finalize` pays the applied tape | the member's own state; never a second sanction (a NO_SHOW waits for the member's own contest, decision 12) | none | `test_member_state`, `test_exit_contest_v2` |
 | 9 | `FINALIZE_ORDER` without a withdrawal record (R-D) | nobody: a round closed without reward has no ledger row | the next reward finalize | `ROUND_WITHDRAWN` event for every closed-unpaid round below it | none | none | `test_round_withdrawal` |
 | 10 | a round with no finality record (Lens m2) | nobody: both writers write the `round` and `finality` records in one transaction and nothing deletes either | n/a | fail closed: `rounds_listing` is `None`, so the bond stays held and the rotation refused; the real pin, a round that never closes, is removed by retirement | none | none | `test_member_state` (pinned) |
 | 11 | a leaf object the master lost (NSH-03, D83) | the master's own store: the record of the member's leaves stands and the object it names is gone | the first lease that reads it (503 `LEAF_OBJECT_LOST`); the first push after it (retirement) | the job is parked (`exhausted/LEAF_OBJECT_LOST`), the round is retired (`LEAF_OBJECT_LOST`) | infrastructure: the master's | none, for any member | `test_exit_roster_2` (the tests of decision 28), `test_retire_round_v2`, `test_exit_plan_v2` |
@@ -1409,6 +1437,49 @@ so it has no `Wait` and no entry in `BOUNDS` (`test_every_wait_has_a_bound` is u
     strike (a mismatch is not turned into a probation by a later silence). It resolves by the admission id of
     the roster entry, so a rotation cannot dodge it, and is idempotent per (reason, evidence). Tests: one per
     tier, plus the boundary of the window and a suspension that a no-show follows.
+
+    *Amended 2026-10-28 (Lens' verdict on the merged tree `389c45b4`, IMP-4; decided by the Principal
+    SN100, D86, scoped by Lens): one fault, one sanction.* A member whose own contest is open is suspended
+    (`PENDING_DISPUTE`) and cannot Accept, so a NO_SHOW on top of the contest burned the whole bond of a
+    possibly honest miner (it could win the contest afterwards) or, after a loss, sanctioned the same fault
+    twice. The member is excluded at the bound as for any silence and the planner is unchanged; what moves
+    is the sanction row, which the sweeper of `push_beacon` now holds `PENDING` while a `disputes_v2` row of
+    the same miner or admission is open, as it does for the contest window of a mismatch. When the contest
+    ends: **lost** (the resolution's loser is the member, whatever the reason, and it ended after the
+    round opened: the member was eligible when the roster was drawn, so an older loss kept it from
+    nothing) the row is `WAIVED` with `covered_by` the dispute, and the contest's own sanction (a conviction:
+    ban, bond, unvested rewards, contest bond) stands untouched, with no second row, strike or unit burnt;
+    **won, closed without a loser, refused at the door, or never opened**, the NO_SHOW applies as above.
+    Only a contest **opened before the bound of the stage the member missed** counts (the commit bound for a
+    missed commit, the upload bound for a missed delta; the opening is the issue of the first event of the
+    dispute): from the bound on the Accept window is over and the member is already absent, so a contest
+    opened later neither holds the row nor covers it (a row is still pending after its bound when the
+    sanction hook failed once, or a lazy writer booked it late).
+
+    *The end of the wait, and an accepted case.* The hold ends at `BOUNDS[Wait.DISPUTE]`, the outer bound of
+    every dispute, the end of the longest re-audit window of the round plus one (the second audit window plus
+    `reaudit_rounds`, Part 9; `blocked_cause` closes a
+    dispute at its own horizon at the latest, but a dispute opened late in a long policy can outlive this
+    bound, and so can one the reaper is failing to close, which `test_a_hold_is_dropped_at_the_dispute_bound_and_nobody_is_sanctioned`
+    poisons): the row is `WAIVED` with blame `INFRASTRUCTURE`, no sanction (D59-2). **Accepted:** a contest
+    that ends after the drop, won or closed without a loser, does not bring the NO_SHOW back; the member
+    keeps its bond and takes no strike for an absence the dispute machinery let pass, rather than being sanctioned long
+    after the fact on a contest it was not given the chance to lose. The first version also ended the
+    wait when the round closed. That clause is gone: a round cannot be closed while a contest of its own
+    round is open (`closed` needs `unresolved_disputes == 0`), nor retired while an earlier round holds an
+    open contest (`ROUND_RETIRE_REFUSED`, a retirement waits for every earlier round), so the dispute bound
+    is the only end that can come first; a round retired by the reaper with the member's contest still
+    open is not closed and keeps the hold (`test_a_round_retired_with_the_contest_open_does_not_release_the_hold`).
+    *Residual, for Forge:* `training_v2` checks the member's standing only on `accept`, so a member that
+    had accepted before it opened its contest can still commit and upload; the hold does not look at the
+    `accept` record, and covers such a member's silence as it covers one that never could accept.
+
+    The check is a pure function of three facts, `no_show_action` (`exit_v2.py`), fed by the store;
+    `implementation_hash` does not move, neither the sweeper nor `exit_v2.py` is among its inputs. Tests:
+    `test_exit_contest_v2.py` on the real contest (pending then lost, lost before the bound, closed
+    without a loser, refused, an old loss, the dispute bound and the contest that ends after it, a round
+    retired with the contest open, a contest opened after the bound, open or lost) and
+    `test_exit_plan_v2.py`; 14 mutants in `tests/ledger_invariants/mutants_tree_verdict.py`.
 13. **No gate: `finalize` pays the applied tape (decision 23).** An earlier design made the sweeper wait
     for the member's earlier unclosed rounds, because a sanction makes the member ineligible and `finalize`
     of an applied round re-checks eligibility. A gate cannot hold `settle_fraud` (it runs inside a referee's
@@ -1671,7 +1742,8 @@ On the integrated tree of `v3-integration-final` (DET-01, the lock-free referenc
 merged; measured on `3ce5b031`, see Part 3 for the full table) `implementation_hash` is `d61bd2b8…71bdc4` for the
 example pin, `challenge/store.py` is `9379bdb4…cf31c1`, `sources()` is 158 files with canonical sha256
 `1de8e396…74c8cc` and `bundle()` is 2,734,080 bytes, `88918dd5…795525`. The tables above stay as the values of
-the parents.
+the parents. Part 3 has the values after `v3-tree-verdict-fixes`, which move `store.py`, `admission.py`,
+`sources()` and the bundle but not `implementation_hash`.
 
 Decision 28 (D83) edits one owned name, `lease_v2` (the transaction it runs in and the handler of
 `ObjectNotFound`); the owned AST of `lease_v2` goes from `918a114a…a2ff3b` to `76ec5141…231c08` and no other

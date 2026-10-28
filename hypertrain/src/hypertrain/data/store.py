@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import islice
 from pathlib import Path
-from typing import Protocol
+from typing import BinaryIO, Protocol
 from urllib.parse import parse_qsl, quote, urlsplit
 
 import httpx
@@ -95,6 +95,23 @@ class LocalFSStore:
         if not p.is_file():
             raise ObjectNotFound(sha)
         return _verified(sha, p.read_bytes())
+
+    def open_read(self, sha: str) -> tuple[BinaryIO, int]:
+        """The stored file, open for reading, and its size; nothing is read.
+
+        put() names a file by the sha256 of its bytes and publishes it with an atomic replace, so
+        the file a key names is the object. Unlike get() this does not hash it again: a reader
+        that streams the bytes leaves that check to the party that receives them. ValueError for
+        a malformed key, ObjectNotFound for an absent one."""
+        try:
+            handle = self._path(sha).open("rb")
+        except (FileNotFoundError, IsADirectoryError):
+            raise ObjectNotFound(sha) from None
+        status = os.fstat(handle.fileno())
+        if not stat.S_ISREG(status.st_mode):
+            handle.close()
+            raise ObjectNotFound(sha)
+        return handle, status.st_size
 
     def presign(self, sha: str, method: str = "GET", expires: int = 3600) -> str:
         return self._path(sha).resolve().as_uri()

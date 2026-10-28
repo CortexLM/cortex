@@ -526,6 +526,13 @@ nor any parent's. `cuda_executor_runner.py` changed (the pin check, the image me
 of Part A that the existing GPU image works unchanged no longer holds for a run qualified on this tree
 (`qualification_tree_is_not_the_image` compares the image's sources with the tree's).
 
+The digest rows of this table hold for `389c45b4` and every commit up to it. `v3-tree-verdict-fixes` edits
+`hypertrain/src` again: `implementation_hash` stays `d61bd2b8…71bdc4`, `challenge/store.py` becomes
+`a07d99fa…e0a661`, `challenge/admission.py` `49318eb1…970ebd`, `sources()` `12109c14…85feea` and the bundle
+2,744,320 bytes `a5ccb6e0…813ff4` (ADR 0011 Part 3 has the table). The `sha256sum` row above
+(`8ff83ee2…532a2a`) is the hash of the listing without its trailing newline; `sha256sum` of the CLI output is
+`084c2381…124a2a` on `389c45b4`.
+
 ## Consequences
 
 - A warm reference should take 12-19 s instead of 57-64 s [A, S13, through a wrapper]. S13's trials went from about

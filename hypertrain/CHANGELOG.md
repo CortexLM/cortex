@@ -328,6 +328,27 @@
   `docs/adr/0011-audit-integrity.md` (Part 9, decision 12) at the monorepo root.
 
 ### Fixed
+- A roster member kept out of a round by its own contest is sanctioned once, not twice (IMP-4, D86,
+  ADR 0011 decision 12): it is excluded at the commit bound as before, but its NO_SHOW sanction waits
+  while the contest is open. A contest it loses covers the absence (no second sanction row, strike or
+  burn: the conviction stands); a contest it wins, one a closure ended without a loser, or none leaves
+  the NO_SHOW to apply as D63 says. Only a contest opened before the bound of the missed stage counts.
+  A contest still open at the dispute bound (the end of the second audit window) drops the hold, and one that ends
+  after the drop does not bring the NO_SHOW back (accepted). Before, the NO_SHOW burnt the whole bond
+  of a member that opened a contest it could still win.
+- `GET /v2/runs/{run_id}/admission/{hotkey}` no longer tells anyone the lock id, the origin ids or
+  the `finality_hash`/`closed_dispute_root` of an admission bond (D51, D52 I2, ADR 0014 point 9,
+  which was untrue for this route); it keeps `units`, `outcome`, `releasable` and
+  `release_beacon`. The holder reads the terms with `POST /v2/runs/{run_id}/join/{admission_id}/bond`
+  (a `BondRequest` signed by the admission's coldkey in the body, GET is 405, expiry within 20
+  rounds, no subnet gate) or, as the operator, `GET .../admin/join/{admission_id}/bond` with the
+  admin bearer; `hypertrain-miner escrow-bond` signs and posts the request (IMP-3, D86).
+- The anonymous object read `GET /v2/runs/{run_id}/objects/{sha256}` streams the stored file in
+  blocks of 1 MiB instead of reading the whole object into memory and hashing it again for every
+  caller (a 0.8 GB trial input at the 101M profile; a 256 MiB object measured +256 MiB of RAM per reader). It
+  refuses an object above 8 GiB with 413 before reading a byte, answers a key that is not 64
+  lowercase hex with 400 and an object the master does not hold with 404; both were 500. The server
+  no longer re-hashes the file per request: the clients verify the sha256 they asked for (IMP-8).
 - A member convicted of training fraud between the aggregate and the finalize of a round is no
   longer paid for it, nor is any other admission of its coldkey (D64): `finalize` leaves out an
   input whose coldkey has a `BANNED` admission (read through the admission's hotkey history, a

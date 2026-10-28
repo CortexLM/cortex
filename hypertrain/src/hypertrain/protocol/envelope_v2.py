@@ -288,6 +288,7 @@ def replay_key(msg_type: str, run_id: str, signer: str, model: BaseModel) -> tup
         "JoinChallenge": ("admission_id", "nonce"),
         "ChallengeRequest": ("admission_id",),
         "JobRequest": ("admission_id",),
+        "BondRequest": ("admission_id",),
         "StateServe": ("challenge_hash", "t"),
         "EscrowLock": ("operation_id",),
         "EscrowRelease": ("operation_id",),

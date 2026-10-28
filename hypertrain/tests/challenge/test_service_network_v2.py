@@ -102,6 +102,23 @@ class Network:
         expires = expires or self.store._now(self.store._db) + OWNER_REQUEST_ROUNDS
         return self.signed(key, message, {"admission_id": identity}, expires)
 
+    def bond_request(self, identity, key=None, *, expires=None):
+        """The envelope only the admission's coldkey (or `key`) can sign to read the terms of its
+        bond, expiring `REQUEST_HORIZON` rounds after the service's current round unless
+        `expires`."""
+        row = self.store._db.execute(
+            "SELECT coldkey FROM admissions_v2 WHERE admission_id=?", (identity,)
+        ).fetchone()
+        key = key or next((k for k in COLD if row and k.ss58 == row[0]), COLD[0])
+        if expires is None:
+            expires = self.store._now(self.store._db) + REQUEST_HORIZON
+        return self.signed(key, "BondRequest", {"admission_id": identity}, expires)
+
+    def bond(self, identity, key=None, *, expires=None):
+        """The terms of the admission's bond, asked as its coldkey (or as `key`)."""
+        request = self.bond_request(identity, key, expires=expires)
+        return self.client.post(self.url + f"/join/{identity}/bond", json=request)
+
     def challenge(self, identity, key=None, *, expires=None):
         """Ask for the admission's trial as its own hotkey (or as `key`): only the owner may ask,
         by a signed envelope in the body."""

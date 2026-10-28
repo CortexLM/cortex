@@ -48,14 +48,18 @@ from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import EXCLUSION_ABANDONED, Contest, DisputesV2
 from hypertrain.challenge.exit_v2 import (
+    BOUNDS,
     MAX_LAG_ROUNDS,
     SANCTION,
     Exclusion,
     Member,
+    NoShowAction,
     Retire,
     RoundSnapshot,
     Schedule,
+    Wait,
     classify,
+    no_show_action,
     no_show_evidence,
     pause_span,
     plan_round,
@@ -3405,7 +3409,9 @@ class ChallengeStore:
                         result = admission.reseed(identity, now=now)
                     case "status":
                         result = asdict(admission.status(identity, now=now))
-                        result["bond"] = admission.bond(result["record"]["admission_id"], now=now)
+                        result["bond"] = admission.public_bond(
+                            result["record"]["admission_id"], now=now
+                        )
                         screen = self._db.execute(
                             "SELECT screen_json FROM admissions_v2 WHERE hotkey=?", (identity,)
                         ).fetchone()
@@ -3414,6 +3420,8 @@ class ChallengeStore:
                             if screen and screen[0]
                             else None
                         )
+                    case "bond":
+                        result = admission.bond(identity, now=now)
                     case "rotate":
                         result = asdict(admission.rotate(raw, now=now))
                     case "recover":
@@ -7378,6 +7386,19 @@ class ChallengeStore:
                                     run_id, "exit-sanction", row["id"], {**record, "state": later}
                                 )
                             continue
+                    elif record["reason"] == "NO_SHOW":
+                        action, covered_by = self._contest_hold_v2(run_id, row["id"], record, now)
+                        if action != "APPLY":
+                            if action != "WAIT":
+                                self._put_record_v2(
+                                    run_id,
+                                    "exit-sanction",
+                                    row["id"],
+                                    {**record, "state": "WAIVED"}
+                                    | ({"covered_by": covered_by} if covered_by else {})
+                                    | ({"blame": "INFRASTRUCTURE"} if action == "DROP" else {}),
+                                )
+                            continue
                     hook.seize_bond(
                         record["admission_id"],
                         reason=SANCTION[(record["reason"], record["stage"])],
@@ -7389,6 +7410,78 @@ class ChallengeStore:
                     )
             except Exception as error:
                 self._journal_exit_v2(run_id, row["id"], "sanction", error)
+
+    def _contest_hold_v2(
+        self, run_id: str, identity: str, record: dict[str, Any], now: int
+    ) -> tuple[NoShowAction, str | None]:
+        """What a pending NO_SHOW does at this push when its member has a contest of its own (ADR
+        0011 Part 8, D86): the action of `no_show_action` and, for COVERED, the contest that
+        sanctioned the member.
+
+        Only a contest opened before the bound of the stage the member missed counts: from the
+        bound on the Accept window is over and the member is already absent, so a contest opened
+        later explains nothing. A contest the member lost counts besides when it ended after the
+        round opened (the member was eligible when the roster was drawn, so an older loss kept it
+        from nothing). The wait ends at the dispute bound, `BOUNDS[Wait.DISPUTE]`, even if the
+        dispute reaper is out: a round cannot close while a contest of its own round is open, so
+        the closing of the round needs no clause of its own."""
+        from hypertrain.challenge.disputes_v2 import Turn
+        from hypertrain.protocol.messages_v2 import RoundOpenV2
+
+        text, hotkey = identity.split(":", 1)
+        turns = [
+            Turn.model_validate_json(row[0])
+            for row in self._db.execute(
+                "SELECT turn FROM disputes_v2 WHERE miner=? "
+                "OR json_extract(turn,'$.contest.admission_id')=?",
+                (hotkey, record["admission_id"]),
+            )
+        ]
+        if not turns:
+            return "APPLY", None
+        manifest = self._run_v2(run_id)
+        body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", text)["body"])
+        audit = AuditPolicyV2.model_validate_json(
+            self.objects.get(manifest.network.audit_policy_hash)
+        )
+        schedule = Schedule(
+            now=now,
+            d_commit=body.d_commit,
+            d_audit=body.d_audit,
+            d_upload=body.d_upload,
+            d_final=body.d_final,
+            lease_rounds=audit.lease_rounds,
+            reaudit_rounds=audit.reaudit_window(),
+        )
+        stage = {"commit": Wait.COMMIT, "leaves": Wait.LEAVES, "delta": Wait.DELTA}[record["stage"]]
+        counted = [
+            turn
+            for turn in turns
+            if self._dispute_opened_v2(turn.dispute_id) < BOUNDS[stage](schedule)
+        ]
+        lost = [
+            turn.dispute_id
+            for turn in counted
+            if turn.resolution is not None
+            and turn.resolution.loser == turn.contest.miner
+            and (turn.resolved_beacon or 0) >= body.d_open
+        ]
+        action = no_show_action(
+            contest_open=any(turn.resolution is None for turn in counted),
+            contest_lost=bool(lost),
+            bound_reached=now >= BOUNDS[Wait.DISPUTE](schedule),
+        )
+        return action, lost[0] if action == "COVERED" else None
+
+    def _dispute_opened_v2(self, dispute_id: str) -> int:
+        """The beacon round a dispute was opened at: the issue of its first event. A dispute
+        without an event, which `DisputesV2.open` never leaves, counts as opened at the start."""
+        row = self._db.execute(
+            "SELECT json_extract(event,'$.issued_beacon') FROM dispute_events_v2 "
+            "WHERE json_extract(event,'$.turn.dispute_id')=? ORDER BY cursor LIMIT 1",
+            (dispute_id,),
+        ).fetchone()
+        return 0 if row is None else int(row[0])
 
     def _mismatch_decision_v2(self, run_id: str, record: dict[str, Any], now: int) -> str | None:
         """What a pending mismatch sanction does at this push (ADR 0011 Part 8, decisions 16-18):

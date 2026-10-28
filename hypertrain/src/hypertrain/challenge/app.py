@@ -11,15 +11,15 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, BinaryIO
 
 import httpx
 from fastapi import FastAPI, Header, Query, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -34,7 +34,7 @@ from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import DisputeError, EventAck
 from hypertrain.challenge.server_keys import ServerKeys
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
-from hypertrain.data.store import LocalFSStore
+from hypertrain.data.store import LocalFSStore, ObjectNotFound
 from hypertrain.data.store import Store as ObjectStore
 from hypertrain.gpu_ops import role_dispatch
 from hypertrain.ledger import Params, vest_rounds_for_q
@@ -44,7 +44,7 @@ from hypertrain.protocol.envelope_v2 import load_json
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import KeyError_, Keypair, decode_hotkey
 from hypertrain.protocol.messages import QUICKNET_GENESIS
-from hypertrain.protocol.messages_v2 import ChallengeRequest, JobRequest
+from hypertrain.protocol.messages_v2 import MAX_PARTS, PART_BYTES, ChallengeRequest, JobRequest
 from hypertrain.protocol.server_keys import SignedGrant, SignedRevoke
 from hypertrain.public_api import create_public_app
 
@@ -68,6 +68,11 @@ WATCH_TOTAL = 128
 WATCH_MINERS = 64
 # The signed request that heads an object upload is a few hundred bytes; refuse a longer one.
 UPLOAD_HEAD_MAX = 4096
+# The anonymous object read sends the stored file in blocks of this size, never the whole object.
+OBJECT_READ_BLOCK = 1 << 20
+# It refuses a larger object before it reads a byte: the largest one a client takes (the miner's
+# whole-object bound, which is also what a part index can describe).
+OBJECT_READ_MAX = MAX_PARTS * PART_BYTES
 
 
 class _Strict(BaseModel):
@@ -618,6 +623,42 @@ def create_app(
         await owner_request(run_id, admission_id, request, JobRequest)
         return await run(store.for_run(run_id).export_trial_v2, run_id, admission_id)
 
+    @app.post("/v2/runs/{run_id}/join/{admission_id}/bond")
+    async def bond_terms_v2(run_id: str, admission_id: str, request: Request) -> Any:
+        """The terms of an admission's bond (lock ids, origin ids, settlement hashes) for its
+        holder: the coldkey of the admission signs a `BondRequest` in the BODY, since the master
+        proxy forwards no signature header. The coldkey owns the lock and signs its release, and
+        no subnet gate applies to it, so a hotkey that left the subnet does not strand its bond.
+        The expiry is bounded like a dispute poll's: the answer is the key to a release."""
+        from hypertrain.protocol.envelope_v2 import Intake, parse_envelope
+        from hypertrain.protocol.messages_v2 import REQUEST_HORIZON, BondRequest
+
+        hosted = store.for_run(run_id)
+        _, admissions, _ = await run(hosted._services, run_id)
+        holder = (await run(admissions.store.by_id, admission_id)).coldkey
+        now = await run(locked_now)
+        try:
+            raw = await v2_raw(request)
+            envelope = parse_envelope(raw)
+            asked = Intake(run_id, {"BondRequest": holder.__eq__}).accept(raw, now)
+            valid = (
+                isinstance(asked, BondRequest)
+                and admission_id == asked.admission_id
+                and envelope.exp_drand <= now + REQUEST_HORIZON
+            )
+        except (EnvelopeError, ValidationError):
+            valid = False
+        if not valid:
+            raise ChallengeError(403, "the bond terms are the holder's: sign a BondRequest")
+        return await run(hosted.admission_v2, run_id, "bond", b"", admission_id)
+
+    @app.get("/v2/runs/{run_id}/admin/join/{admission_id}/bond")
+    async def bond_terms_admin_v2(
+        run_id: str, admission_id: str, authorization: Auth = None
+    ) -> Any:
+        admin(authorization)
+        return await run(store.for_run(run_id).admission_v2, run_id, "bond", b"", admission_id)
+
     @app.get("/v2/runs/{run_id}/admission/{hotkey}")
     async def admission_status_v2(run_id: str, hotkey: str) -> Any:
         return await run(store.for_run(run_id).admission_v2, run_id, "status", b"", hotkey)
@@ -835,16 +876,40 @@ def create_app(
         return await run(store.for_run(run_id).island_job_v2, run_id, w, hotkey)
 
     @app.get("/v2/runs/{run_id}/objects/{sha256}")
-    async def object_v2(run_id: str, sha256: str) -> Response:
+    async def object_v2(run_id: str, sha256: str) -> StreamingResponse:
         hosted = store.for_run(run_id)
 
-        def read() -> bytes:
+        def opened() -> tuple[BinaryIO, int]:
             with hosted._lock:  # one shared connection: only the run lookup needs the lock
                 hosted._run_v2(run_id)
-            return hosted.objects.get(sha256)
+            if not isinstance(hosted.objects, LocalFSStore):
+                raise ChallengeError(503, "this object store cannot be streamed")
+            try:
+                return hosted.objects.open_read(sha256)
+            except ValueError:
+                raise ChallengeError(400, "object key must be 64 lowercase hex chars") from None
+            except ObjectNotFound:
+                raise ChallengeError(404, "unknown object") from None
 
-        # Published run datasets/state are public, content identity still verifies.
-        return Response(await run(read), media_type="application/octet-stream")
+        file, size = await run(opened)
+        if size > OBJECT_READ_MAX:
+            file.close()
+            raise ChallengeError(413, f"the object exceeds {OBJECT_READ_MAX} bytes")
+
+        async def blocks() -> AsyncIterator[bytes]:
+            try:
+                while block := await run(file.read, OBJECT_READ_BLOCK):
+                    yield block
+            finally:
+                file.close()
+
+        # Published run datasets/state are public. The key names the file; whoever receives the
+        # bytes checks their sha256 (the miner does), the server does not hash them per request.
+        return StreamingResponse(
+            blocks(),
+            media_type="application/octet-stream",
+            headers={"Content-Length": str(size)},
+        )
 
     for action in ("accept", "commit", "delta"):
 
