@@ -148,7 +148,7 @@ def test_an_answer_that_lands_between_the_two_phases_is_replayed_not_failed_or_p
     raises=DefenceMissing,
     reason="WGT-15+CL-58: a merged answer never carries reason out_of_order while it lists "
     "weight (the reason and the non-additive metadata are the first store's; a fresh child "
-    "answers ok and pays) [candidate]",
+    "answers ok and pays) [candidate] [fix-lot: none (no design yet)]",
 )
 def test_a_merged_answer_never_pays_weight_under_the_reason_out_of_order(
     li_escrow: ModuleType,
@@ -282,7 +282,7 @@ def test_an_omitted_epoch_at_is_the_end_of_the_epoch_and_the_clock_that_vests_v2
     raises=DefenceMissing,
     reason="WGT-07+CL-57: the retry of a journaled epoch with another epoch_at is refused, or "
     "answered and paid by the epoch_at its answer carries (the journal replays the first "
-    "epoch_at while the v2 units vest by the retry's) [candidate]",
+    "epoch_at while the v2 units vest by the retry's) [candidate] [fix-lot: none (no design yet)]",
 )
 def test_a_retry_of_a_journaled_epoch_with_another_epoch_at_pays_nothing_its_answer_omits(
     finalized: Hosted,
@@ -371,7 +371,7 @@ FROZEN_FAR_EPOCH_AT = pytest.mark.xfail(
     raises=DefenceMissing,
     reason="WGT-09+CL-24: an epoch_at beyond the present is refused and changes nothing (it vests "
     "an unvested v1 entitlement early, and its watermark answers every later honest epoch "
-    "out_of_order) [candidate]",
+    "out_of_order) [candidate] [fix-lot: none (no design yet)]",
 )
 
 
@@ -422,7 +422,7 @@ FROZEN_FAR_EPOCH = pytest.mark.xfail(
     reason="WGT-09+CL-24: an epoch index beyond the present (a timestamp sent as the epoch, or a "
     "value whose default epoch_at overflows) is refused with 422 and changes nothing (today the "
     "first is answered and freezes every honest epoch, the second is an unmapped LedgerError, "
-    "HTTP 500) [candidate]",
+    "HTTP 500) [candidate] [fix-lot: none (no design yet)]",
 )
 
 
@@ -462,7 +462,8 @@ FROZEN_UNDELIVERED = pytest.mark.xfail(
     raises=DefenceMissing,
     reason="WGT-16+CL-25: units that no registered hotkey received stay owed and pay in a later "
     "epoch (they are booked paid before the metagraph is asked; docs/findings/v2-weights-bridge.md "
-    "documents the burn as a deliberate ponytail, so the decision is the maintainers') [candidate]",
+    "documents the burn as a deliberate ponytail, so the decision is the maintainers') [candidate] "
+    "[fix-lot: decision (product choice pending)]",
 )
 
 

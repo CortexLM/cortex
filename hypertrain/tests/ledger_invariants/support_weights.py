@@ -46,15 +46,17 @@ def parse(text: bytes | str) -> dict[str, Any]:
 
 
 def pay_events(escrow: EscrowV2) -> list[dict[str, Any]]:
-    """Every PAY event, oldest first: its operation id, origin, owner and units."""
+    """Every PAY event, oldest first: the operation id the service named, origin, owner, units.
+
+    The id is read from the stored request, which carries the id the caller named. The key the
+    event is stored under may be a keyed derivative of it, so it is not the id.
+    """
     found = []
-    for row in escrow.db.execute(
-        "SELECT operation_id,request FROM escrow_events WHERE kind='PAY' ORDER BY seq"
-    ):
+    for row in escrow.db.execute("SELECT request FROM escrow_events WHERE kind='PAY' ORDER BY seq"):
         request = json.loads(row["request"])
         found.append(
             {
-                "id": row["operation_id"],
+                "id": request["operation_id"],
                 "origin": request["origin_ids"][0],
                 "owner": request["owner"],
                 "units": int(request["units"]),

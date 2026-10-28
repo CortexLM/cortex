@@ -210,9 +210,11 @@ FROZEN_SUSPENDED = pytest.mark.xfail(
     raises=DefenceMissing,
     reason="WGT-05+CL-16: an earner whose admission is suspended with a pending dispute is not "
     "paid, and its matured units stay owed, neither paid nor burned (payable() reads no "
-    "admission state). Decision needed: docs/network-v2.md:271 and docs/mechanism.md:73 promise "
-    "it; if earned audited units are irrevocable, delete this test and correct those two lines "
-    "[candidate]",
+    "admission state). Decision needed: docs/network-v2.md (rewards mature after vesting and "
+    "dispute conditions) and docs/mechanism.md (unvested reward is the collateral) promise it, "
+    "while ADR 0011 decision 23 (audit-integrity-2) pays a suspended, unbanned member for the "
+    "round it was verified in; if earned audited units are irrevocable, delete this test and "
+    "correct those two passages [candidate] [fix-lot: decision (product choice pending)]",
 )
 
 

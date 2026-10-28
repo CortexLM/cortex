@@ -102,7 +102,7 @@ def test_an_epoch_of_a_run_without_rewards_is_a_defined_full_burn_and_final(
     raises=AssertionError,
     reason="WGT-09+RTA-09+AU-07: one request with an epoch or epoch_at far ahead of the clock "
     "never turns every later honest epoch into an out_of_order burn (both are bounded only by "
-    "2**63 and raise the append-only watermarks for good)",
+    "2**63 and raise the append-only watermarks for good) [fix-lot: none (no design yet)]",
 )
 def test_one_far_ahead_request_never_freezes_the_later_honest_epochs(
     tmp_path: Path, li_escrow: ModuleType, far: str
@@ -134,7 +134,8 @@ def test_one_far_ahead_request_never_freezes_the_later_honest_epochs(
     strict=True,
     raises=AssertionError,
     reason="WGT-16+WGT-D2: units of a hotkey the master does not list, or whose answer could not "
-    "be filtered, stay owed (they are marked paid before the metagraph is asked)",
+    "be filtered, stay owed (they are marked paid before the metagraph is asked) "
+    "[fix-lot: decision (product choice pending)]",
 )
 def test_units_that_were_not_delivered_to_a_registered_hotkey_stay_owed(
     tmp_path: Path, li_escrow: ModuleType, failure: str
@@ -323,7 +324,7 @@ FROZEN_CHILD_LOSS = pytest.mark.xfail(
     raises=AssertionError,
     reason="WGT-15+WGT-D6: units a child marked paid while the root failed to persist the merged "
     "answer are in a delivered answer, or were never marked paid (children commit in their own "
-    "database before the root persists) [candidate]",
+    "database before the root persists) [candidate] [fix-lot: none (no design yet)]",
 )
 
 

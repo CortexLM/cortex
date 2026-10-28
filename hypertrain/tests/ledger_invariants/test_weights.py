@@ -228,14 +228,15 @@ FROZEN_FRAUD = pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
     reason="WGT-05+WGT-D3: units whose origin settlement became FRAUD after vesting are not "
-    "emitted (payable() consults no settlement; the vesting window is not a usable stake) "
-    "[candidate]",
+    "emitted (payable() consults no settlement; ADR 0010 part 6 burns unvested rewards only) "
+    "[candidate] [fix-lot: decision (product choice pending)]",
 )
 FROZEN_DISPUTE = pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
     reason="WGT-05+WGT-D3: units whose origin settlement is disputed again after vesting are "
-    "not emitted (network-v2.md:281 lists disputed units among those never paid) [candidate]",
+    "not emitted (docs/network-v2.md lists disputed units among those never paid) [candidate] "
+    "[fix-lot: decision (product choice pending)]",
 )
 
 
@@ -319,33 +320,6 @@ def test_a_failed_persist_pays_nothing_and_the_retry_of_the_same_epoch_pays_once
     assert host.store.weights(0, at(host.escrow, HOLD_AT), 9) == host.store.weights(
         0, at(host.escrow, HOLD_AT + 3), 10
     )
-
-
-FROZEN_RETRY = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="WGT-07+WGT-D6: the retry of a journaled but unpersisted epoch pays only what matured "
-    "by the epoch_at the journal holds for that epoch, not by the retry's own epoch_at [candidate]",
-)
-
-
-@FROZEN_RETRY
-def test_a_retry_with_another_epoch_at_pays_by_the_epoch_at_the_journal_holds(
-    finalized: Hosted,
-) -> None:
-    """WGT-07 (condition broken): the caller retries epoch 0 at a later chain time."""
-    host = finalized
-    mature(host.escrow, host.reward)
-    fail_persist(host.store._db)
-    with pytest.raises(sqlite3.IntegrityError):
-        host.store.weights(0, at(host.escrow, HOLD_AT - 1), 1)
-    recover_persist(host.store._db)
-    # When: the retry arrives with an epoch_at at the maturity round.
-    retry = ask(host, 0, HOLD_AT, computed_at=2)
-    # Then: control, the answer carries the epoch_at journaled by the failed first attempt.
-    assert retry["metadata"]["epoch_at"] == at(host.escrow, HOLD_AT - 1)
-    # And the unit that matures a round after that time is not in it.
-    assert retry["weights"] == {}
 
 
 # --- WGT-08: an out-of-order epoch is answered empty and final ----------------------------------
@@ -642,7 +616,7 @@ def test_pay_ids_depend_only_on_run_epoch_origin_and_owner(li_escrow: ModuleType
             host.answer(1, rnd + 1, computed_at)
             seen.append([e["id"] for e in pay_events(host.escrow)])
     assert seen[0] == seen[1] and len(seen[0]) == 3
-    assert len(set(seen[0])) == 3 and all(len(i) == 64 for i in seen[0])
+    assert len(set(seen[0])) == 3
 
 
 def test_each_stored_answer_is_the_sum_of_the_pay_events_that_carry_its_epoch(
@@ -677,7 +651,8 @@ FROZEN_PREEMPTED = pytest.mark.xfail(
     strict=True,
     raises=EscrowError,
     reason="WGT-13+ESC-04: a client escrow event that carries the service pay id never makes "
-    "get_weights fail (one operation_id namespace: the payout raises OPERATION_CONFLICT)",
+    "get_weights fail (one operation_id namespace: the payout raises OPERATION_CONFLICT) "
+    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
 )
 
 
@@ -803,7 +778,8 @@ def bytes_stored_by_one_payout(li_escrow: ModuleType, origins: int) -> int:
     strict=True,
     raises=AssertionError,
     reason="WGT-21+WGT-D4: the bytes one payout adds to the store do not grow with the number of "
-    "origins the escrow holds (every escrow event stores a full snapshot; storage proxy, no clock)",
+    "origins the escrow holds (every escrow event stores a full snapshot; ADR 0014 part 4.6 "
+    "defers the cure to a maintainer decision) [fix-lot: escrow-relay-fixes ADR0014-P4]",
 )
 def test_the_storage_cost_of_one_payout_does_not_grow_with_the_number_of_origins(
     li_escrow: ModuleType,
