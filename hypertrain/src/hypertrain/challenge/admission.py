@@ -1654,7 +1654,7 @@ class Admission:
 
         Internal, authenticated service hook (the coordinator is the ledger's reward authority);
         no route calls it. `evidence_hash` (64 hex) names what justifies it, and the pair
-        (reason, evidence) is applied once: a retry burns nothing more and adds no strike. Every
+        (reason, evidence) is applied once: a retry slashes nothing more and adds no strike. Every
         residual lock is recorded as seized, so its derived settlement is FRAUD (never
         releasable), and the burn goes through `EscrowV2.slash` under an HMAC operation id.
         Resolve the admission by id, never by hotkey, which a rotation changes.
@@ -1667,7 +1667,8 @@ class Admission:
         rewards and bans the admission (terminal; `lock` then answers LOCK_BANNED). The rewards
         burn with the residual lock when there is one, else (after an earlier bond-only
         seizure, or with no bond ever funded) one `burn_pending` per pending origin of the
-        coldkey. Vested units stay.
+        coldkey. Vested units stay. A retry still burns the origins the coldkey holds unvested
+        at that moment, so posting a resolution again is retroactive.
         AUDIT_MISMATCH (a round-stage audit mismatch the caller has confirmed as the miner's)
         suspends the admission with the seizure reason as the state reason, adds one strike and
         burns the bond alone. NO_SHOW (a roster member excluded for its silence, ADR 0011 Part 8,

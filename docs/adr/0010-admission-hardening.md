@@ -356,17 +356,23 @@ Decision.
    resolution back, and an id from the owner alone would swallow an origin that appears later.
    The cost is one chain event and one snapshot per pending origin, bounded by the hotkeys of the
    coldkey times the rounds of the vesting window; an origin with nothing pending writes none.
+   Each event re-checks conservation and rebuilds the snapshot of the whole ledger, inside the
+   resolution's transaction: on a host at load about 100 it took 24 ms per pending origin on a
+   ledger of 2000 origins and 41 ms on 5000 (50 pending origins: 1.2 s and 2.1 s). It is a known
+   limit, with no cap.
    The scope is the coldkey, as for the slash of a lock (ADR 0011 Part 8 decision 23: the ban is
    by coldkey): every `reward_pending` row of the coldkey burns, whatever its hotkey, including
    shadow, genesis and bootstrap collateral that has not vested, and including the unvested
    rewards of an honest sibling admission of the same coldkey. Another coldkey's origins and every
    vested unit stay: a conviction after an origin vested leaves its `available` units in place
    (unpaid, as on the lock path). A reward origin whose miner has a dispute still open is not
-   held by this change (the `[open]` case of DIB-07 stays a separate gap). The effect is
+   held by this change (it still vests at its maturity: DIB-07 stays a separate gap, a strict
+   xfail of `tests/ledger_invariants` with no fix lot). The effect is
    retroactive: posting again an identical resolution of an admission convicted before this
-   change burns the rewards that survived. No function of the `implementation_hash` owned set
+   change burns the rewards that survived, and posting it again after the ban burns any origin
+   the coldkey has gained unvested since. No function of the `implementation_hash` owned set
    changes, so that hash and the run ids do not move (measured); the `sources()` map and the
-   bundle do, as for any edit under `src/`. Decided by Forge on 2026-10-28 within D82 (option A).
+   bundle do, as for any edit under `src/`. Decided by Forge on 2026-10-28 within D82.
 
    **Strike window of a no-show (D63, D70).** The window is `no_show_strike_window(epoch) =
    NO_SHOW_STRIKE_WINDOW_SCREENS (4) * work_screen_epoch_rounds`, measured in beacon rounds from the
@@ -514,8 +520,9 @@ exists.
    fresh probation the first time and suspends it the second time inside four work screens (ADR 0011
    Part 8 decision 12, D63; the alternative was bond-only). ADR 0002 "Penalties" makes any slash for a failed audit
    founder-only: the order of D36 bis and Forge's request of 2026-10-27 are taken as that
-   decision for these two cases. To withhold the burn, `seize_bond` keeps recording the seizure
-   and the ban and only the `slash` call goes.
+   decision for these two cases. To withhold the burn of the bond, `seize_bond` keeps recording
+   the seizure and the ban and only the `slash` call goes. The unvested rewards no longer depend
+   on that call (decision 4): withholding them as well removes the `burn_pending` fallback too.
 2. **Uncontested MISMATCH.** The brief says "a miner convicted by a MISMATCH audit is slashed".
    Part 6 convicts only through a contest and a referee verdict. Convicting an uncontested
    `MISMATCH` needs a window W that no manifest field provides (`E_vest_rounds` is 10 beacon
@@ -543,11 +550,12 @@ exists.
      bond, inside the store's write transaction (about 30 ms at 1000 rounds of 32, 150 ms at 4000
      in the review's measure); an admission-to-round table or a rate limit at the proxy removes
      it.
-4. **Unvested rewards after an earlier seizure.** Decided by Forge on 2026-10-28 within D82
-   (option A): added. A conviction that follows a `NO_SHOW` or `AUDIT_MISMATCH` seizure burns the
-   coldkey's unvested rewards through the lockless `EscrowV2.burn_pending` (Part 6 point 3,
-   "Unvested rewards of a conviction without a residual lock"), so contesting is as costly in the
-   D47 flow as the text of Part 6 says.
+4. **Unvested rewards after an earlier seizure.** Decided by Forge on 2026-10-28 within D82:
+   the lockless burn is added (the alternative was to accept that the reward survives). A
+   conviction that follows a `NO_SHOW` or `AUDIT_MISMATCH` seizure burns the coldkey's unvested
+   rewards through the lockless `EscrowV2.burn_pending` (Part 6 point 3, "Unvested rewards of a
+   conviction without a residual lock"), so contesting is as costly in the D47 flow as the text
+   of Part 6 says.
 
 ## Not verified
 

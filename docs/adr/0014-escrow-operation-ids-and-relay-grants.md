@@ -70,7 +70,7 @@ All findings were reproduced in-process on `33b50656` by at least one design ana
    and the `JOIN` of `verified_inputs_v2` (`store.py:7788`, hashed) keep reading bare ids.
 4. **The server API is separate by type (I4).** `lock`, `transfer` and `release` are the client
    operations and can only write the client key space. The server operations are `test_genesis`,
-   `production_bootstrap`, `reward_finalize`, `mature`, `slash`, `pay` and a new
+   `production_bootstrap`, `reward_finalize`, `mature`, `slash`, `burn_pending`, `pay` and a new
    `release_settlement` (the service's release of a lock, called by `DisputesV2.settle_lock`;
    `release` and `release_settlement` share one private implementation that takes the key space as a
    mandatory argument). There is no default and no flag a caller can forget. `Admission.release_bond`

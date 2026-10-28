@@ -416,8 +416,9 @@ lock in the outbox, every round whose roster lists it is closed, none of its hot
 unvested rewards, it is not live (`ACTIVE`, or `PROBATION` with four clean trials, until its
 screen ends), and the last reward origin of its hotkeys has matured. The bond is burned by the
 service and never through a route, in three cases: a referee verdict of fraud against the miner
-(it bans the admission, `LOCK_BANNED` follows, and burns the coldkey's unvested rewards: with the
-lock while one is left, else one `BURN_PENDING` ledger event per unvested origin), a round-stage
+(it bans the admission, `LOCK_BANNED` follows, and burns the coldkey's unvested rewards, those of
+every admission of the coldkey and not the units that already vested: with the lock while one is
+left, else one `BURN_PENDING` ledger event per unvested origin), a round-stage
 audit mismatch that the caller confirmed as the miner's (`reason="AUDIT_MISMATCH"`), and a roster
 member excluded for its silence (`reason="NO_SHOW"`). In the last two the bond alone burns, the
 unvested rewards survive, one strike is added and the coldkey stays bound as in probation; an
