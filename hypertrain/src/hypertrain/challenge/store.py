@@ -349,7 +349,10 @@ class _FinalityReplay:
 
 
 # Replay verdicts kept for the transactions that will ask for them; a verdict is 64 hex characters.
+# One is trusted for FINALITY_VERDICT_SECONDS only: the objects the replay read are not read again,
+# so a finalize refused (a stale gate, say) and retried later must replay again.
 FINALITY_VERDICTS = 8
+FINALITY_VERDICT_SECONDS = 120.0
 
 
 # The meta row that pins which coordinator secret the escrow ids were derived from.
@@ -558,7 +561,7 @@ class ChallengeStore:
         self._staging = threading.RLock()  # a staging asked from a staging must not wait
         self._aggregate_flights_v2: dict[tuple[str, int], Future[dict[str, Any]]] = {}
         self._aggregate_waiters = threading.BoundedSemaphore(AGGREGATE_WAITERS)
-        self._finality_verdicts_v2: dict[str, str] = {}
+        self._finality_verdicts_v2: dict[str, tuple[str, float]] = {}
         self._finality_prime_v2 = threading.Lock()
         self._ipc_v2: socket.socket | None = None
         self._ipc_path_v2: Path | None = None
@@ -2590,9 +2593,9 @@ class ChallengeStore:
         job = self._finality_replay_job_v2(
             run_id, int(str(evidence.finalize.body["w"])), evidence.tape_hash
         )
-        # A verdict kept under this key is that of a replay, made before the transaction, of these
-        # very values; without one the replay is made here, as it always was.
-        theta_hash = self._finality_verdicts_v2.get(job.key) or self._run_finality_replay_v2(job)
+        # A verdict kept under this key is that of a replay, made a moment ago and before the
+        # transaction, of these very values; without one the replay is made here, as it always was.
+        theta_hash = self._kept_finality_verdict_v2(job.key) or self._run_finality_replay_v2(job)
         if theta_hash != record["theta_hash"]:
             raise EscrowError("FINALITY_TAPE_REPLAY_MISMATCH")
         return str(record["theta_hash"])
@@ -2630,6 +2633,11 @@ class ChallengeStore:
             signer,
         )
 
+    def _kept_finality_verdict_v2(self, key: str) -> str | None:
+        """The verdict kept under `key` if it is still young enough to be trusted."""
+        kept = self._finality_verdicts_v2.get(key)
+        return kept[0] if kept is not None and time.monotonic() < kept[1] else None
+
     def _run_finality_replay_v2(self, job: _FinalityReplay) -> str:
         """Replay the tape of the job from its original objects; no lock, no database row."""
         from hypertrain.aggregator.core import th
@@ -2655,13 +2663,16 @@ class ChallengeStore:
 
         Nothing is written. It runs only for a finalize that will reach the replay: a stored
         Finalize result, a repair, a missing record or a request that is not the coordinator's
-        signed list of the tape's own inputs is left to the transaction, which refuses it as it
+        signed list of the tape's own inputs, or a round that is not settleable (open audit or
+        dispute, excluded, another state) is left to the transaction, which refuses it as it
         always did. So is anything that fails here, a record or the tape object that cannot be
         read, or the replay itself: the transaction reads and replays the same way and raises
         where it always raised, after the checks that come before it. One replay at a time, as
         the store lock used to allow; a finalize that waits longer than a waiter of an
         aggregate does replays under the lock, as before.
         """
+        from hypertrain.challenge.finality_v2 import RoundStatus, settle
+
         if self._lock._is_owned():  # type: ignore[attr-defined]
             return
         with self._lock:
@@ -2688,6 +2699,10 @@ class ChallengeStore:
                     or applied.get("kind") == "repair"
                 ):
                     return
+                # the round must be one the transaction can settle (applied, no open audit or
+                # dispute, not excluded, the state this Finalize names)
+                status = RoundStatus(**self._record_v2(run_id, "finality", str(w)))
+                settle(status, request, body_digest(request.model_dump(mode="json")))
                 job = self._finality_replay_job_v2(run_id, w, str(applied["tape_hash"]))
             except Exception:  # deferred, not dropped: the transaction reads the same rows
                 return
@@ -2695,14 +2710,17 @@ class ChallengeStore:
             return
         try:
             with self._lock:
-                if job.key in self._finality_verdicts_v2:
+                if self._kept_finality_verdict_v2(job.key) is not None:
                     return
             try:
                 theta_hash = self._run_finality_replay_v2(job)
             except Exception:  # deferred, not dropped: the transaction replays and raises it
                 return
             with self._lock:
-                self._finality_verdicts_v2[job.key] = theta_hash
+                expires = time.monotonic() + FINALITY_VERDICT_SECONDS
+                # a refreshed verdict goes last: assigning to a key keeps its old place in line
+                self._finality_verdicts_v2.pop(job.key, None)
+                self._finality_verdicts_v2[job.key] = (theta_hash, expires)
                 while len(self._finality_verdicts_v2) > FINALITY_VERDICTS:
                     del self._finality_verdicts_v2[next(iter(self._finality_verdicts_v2))]
         finally:
@@ -4943,6 +4961,7 @@ class ChallengeStore:
             "_aggregate_settle_v2",
             "_FinalityReplay",
             "_finality_replay_job_v2",
+            "_kept_finality_verdict_v2",
             "_run_finality_replay_v2",
             "_prime_finality_replay_v2",
             "_capacity_env_v2",
@@ -7858,9 +7877,10 @@ class ChallengeStore:
 
         The wait is on the member, not on the round: aggregate refused for everybody until the
         member recovered, and a lapsed screen never does. The cause is judged here, as late as
-        possible, inside the transaction that aggregates, so a member that is fit at the call
-        is kept and the ROUND_INFEASIBLE of the survivors check rolls the exclusions back. No
-        sanction: the cause is the member's own state or the effect of one already applied.
+        possible, in the transaction that aggregates and at beacon round `now` (by default the
+        latest), so a member that is fit at the call is kept and the ROUND_INFEASIBLE of the
+        survivors check rolls the exclusions back. No sanction: the cause is the member's own
+        state or the effect of one already applied.
         """
         from hypertrain.protocol.messages_v2 import RoundOpenV2
 

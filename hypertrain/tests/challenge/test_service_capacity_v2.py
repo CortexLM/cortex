@@ -596,6 +596,7 @@ def test_source_binding_ignores_unrelated_methods_but_rejects_capacity_changes(t
         "_aggregate_settle_v2",
         "_FinalityReplay",
         "_finality_replay_job_v2",
+        "_kept_finality_verdict_v2",
         "_run_finality_replay_v2",
         "_prime_finality_replay_v2",
     ],

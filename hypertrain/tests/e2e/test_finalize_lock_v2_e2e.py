@@ -25,10 +25,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from aggregate_lock_fixture_v2 import Restored, Template, build_template, fixtures
+from aggregate_lock_fixture_v2 import Call, Restored, Template, fixtures
 
 from hypertrain.aggregator import tape_v2
-from hypertrain.aggregator.core import TapeError, TapeIntegrityError
+from hypertrain.aggregator.core import FinalityError, TapeError, TapeIntegrityError
+from hypertrain.challenge import store as store_module
 from hypertrain.challenge.store import FINALITY_VERDICTS, ChallengeStore
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize
@@ -40,11 +41,6 @@ MAX_HOLD_SECONDS = 1.0
 PARKED_FOR = 1.0  # seconds a second finalize is watched for while the first one replays
 
 Hook = Callable[[int, bool], None]  # (number of the call, did the caller own the store lock)
-
-
-@pytest.fixture(scope="module")
-def template(tmp_path_factory: pytest.TempPathFactory) -> Template:
-    return build_template(tmp_path_factory)
 
 
 @pytest.fixture
@@ -64,27 +60,6 @@ def restore(template: Template, tmp_path: Path) -> Iterator[Callable[..., Restor
 @pytest.fixture
 def restored(restore: Callable[..., Restored]) -> Restored:
     return restore()
-
-
-class Call:
-    """`call()` on a thread of its own: when it ended, how, and what it returned."""
-
-    def __init__(self, name: str, call: Callable[[], Any]) -> None:
-        self.name = name
-        self.ended = threading.Event()
-        self.result: Any = None
-        self.error: BaseException | None = None
-        self._call = call
-        self.thread = threading.Thread(target=self._run, name=name, daemon=True)
-        self.thread.start()
-
-    def _run(self) -> None:
-        try:
-            self.result = self._call()
-        except BaseException as error:  # handed to the test, which reports it
-            self.error = error
-        finally:
-            self.ended.set()
 
 
 class ReplaySpy:
@@ -398,7 +373,7 @@ def test_a_replay_that_always_fails_is_the_transactions_error_and_is_not_remembe
     assert [owned for owned, _ in spy.calls] == [False]
 
 
-def test_a_finalize_retried_after_the_stale_gate_does_not_replay_again(
+def test_a_finalize_retried_after_the_stale_gate_within_the_age_does_not_replay_again(
     restored: Restored, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     applied, raw = aggregated(restored)
@@ -413,6 +388,27 @@ def test_a_finalize_retried_after_the_stale_gate_does_not_replay_again(
     restored.set_clock(restored.now)
     assert finalize(restored, restored.finalize_raw(applied))["status"] == "SETTLED"
     assert [owned for owned, _ in spy.calls] == [False]
+
+
+def test_a_finalize_retried_after_the_stale_gate_past_the_age_replays_again(
+    restored: Restored, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a verdict that is born past its age, so nothing that was read for it is trusted
+    applied, raw = aggregated(restored)
+    spy = ReplaySpy(monkeypatch, restored)
+    monkeypatch.setattr(store_module, "FINALITY_VERDICT_SECONDS", 0.0)
+    stall_gate(restored)
+
+    error = refusal(lambda: finalize(restored, raw))
+
+    assert error[1:] == (503, "beacon infrastructure paused")
+    assert [owned for owned, _ in spy.calls] == [False]
+    # When: the gate is open again and the round is finalized with a newly signed Finalize
+    restored.set_clock(restored.now)
+    answer = finalize(restored, restored.finalize_raw(applied))
+    # Then: the pre-step replays once more, and so does the transaction, which owns the lock
+    assert answer["status"] == "SETTLED"
+    assert [owned for owned, _ in spy.calls] == [False, False, True]
 
 
 def test_two_finalizes_of_one_round_share_one_unlocked_replay(
@@ -457,6 +453,48 @@ def test_two_finalizes_of_one_round_share_one_unlocked_replay(
     assert second.result == first.result
 
 
+def test_a_finalize_that_waits_too_long_for_the_unlocked_replay_in_progress_replays_itself(
+    restored: Restored, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(store_module, "AGGREGATE_WAIT_SECONDS", 0.3)
+    _, raw = aggregated(restored)
+    reached, release = threading.Event(), threading.Event()
+
+    def block_the_first(number: int, owned: bool) -> None:
+        if number == 0:
+            reached.set()
+            release.wait(WAIT)
+
+    spy = ReplaySpy(monkeypatch, restored, after=block_the_first)
+    first = Call("finalize-first", lambda: finalize(restored, raw))
+    calls = [first]
+    try:
+        if not reached.wait(WAIT):
+            raise RuntimeError(f"the finalize never reached the replay: {first.error!r}")
+        second = Call("finalize-second", lambda: finalize(restored, raw))
+        calls.append(second)
+        gave_up = second.ended.wait(SERVED_WITHIN)
+        first_still_replaying = not first.ended.is_set()
+    finally:
+        release.set()
+        for call in calls:
+            call.thread.join(WAIT)
+
+    assert gave_up, (
+        f"the second finalize did not return within {SERVED_WITHIN:.0f} s of a replay that the "
+        "first one kept running: it does not stop waiting for it after AGGREGATE_WAIT_SECONDS"
+    )
+    if any(call.thread.is_alive() for call in calls):
+        raise RuntimeError("a thread is still stuck after the replay was released")
+    assert first_still_replaying, "the first finalize ended before it was released"
+    assert first.error is None and second.error is None, (first.error, second.error)
+    assert second.result["status"] == "SETTLED"
+    assert first.result == second.result
+    # The second one replayed in its own transaction, owning the lock, while the first one replayed
+    # without it.
+    assert spy.calls == [(False, first.name), (True, second.name)]
+
+
 def test_a_finalize_repeated_after_it_settled_replays_nothing(
     restored: Restored, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -487,11 +525,36 @@ def refused_finalize(case: str, r: Restored, applied: dict[str, Any]) -> bytes:
         case "repair":
             rewrite_record(r, "applied", lambda record: record.update(kind="repair"))
             return r.finalize_raw(applied)
+        case "other-theta":
+            return sealed_finalize(r, applied, final_theta_hash_w1="11" * 32)
+        case "open-audit":
+            rewrite_record(r, "finality", lambda record: record.update(unresolved_audits=1))
+            return r.finalize_raw(applied)
+        case "open-dispute":
+            rewrite_record(r, "finality", lambda record: record.update(unresolved_disputes=1))
+            return r.finalize_raw(applied)
+        case "excluded":
+            rewrite_record(r, "finality", lambda record: record.update(disposition="EXCLUDED"))
+            return r.finalize_raw(applied)
     raise AssertionError(case)
 
 
+UNSETTLEABLE = {"other-theta", "open-audit", "open-dispute", "excluded"}
+
+
 @pytest.mark.parametrize(
-    "case", ["other-members", "other-round", "foreign-signer", "expired", "repair"]
+    "case",
+    [
+        "other-members",
+        "other-round",
+        "foreign-signer",
+        "expired",
+        "repair",
+        "other-theta",
+        "open-audit",
+        "open-dispute",
+        "excluded",
+    ],
 )
 def test_a_finalize_the_transaction_refuses_is_refused_without_an_unlocked_replay(
     restore: Callable[..., Restored], monkeypatch: pytest.MonkeyPatch, case: str
@@ -508,6 +571,8 @@ def test_a_finalize_the_transaction_refuses_is_refused_without_an_unlocked_repla
 
     assert error == parent_error
     assert unlocked_replays == [], "a finalize the transaction refuses was replayed first"
+    if case in UNSETTLEABLE:  # the state of the round alone refuses it: 409 ROUND_BLOCKED over HTTP
+        assert (error[0], error[2]) == (FinalityError, "round cannot settle")
 
 
 def damage_tape(r: Restored, applied: dict[str, Any], how: str) -> None:
@@ -584,21 +649,66 @@ def test_a_caller_that_owns_the_store_lock_does_not_wait_for_an_unlocked_replay(
     assert spy.calls == [(False, first.name), (True, owner.name)]
 
 
-def test_the_remembered_verdicts_are_bounded(
+def refused_for(r: Restored, raw: bytes, probe: int) -> None:
+    """An attempt on the rows `probe` names: a replay of its own, ended unsettled by the stale gate.
+
+    The gate must be stalled. Rewriting the applied record changes what the verdict is keyed on.
+    """
+    rewrite_record(r, "applied", lambda record: record.update(probe=probe))
+    assert refusal(lambda: finalize(r, raw))[1] == 503
+
+
+def test_the_remembered_verdicts_are_the_newest_ones_and_bounded(
     restored: Restored, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _, raw = aggregated(restored)
+    applied, raw = aggregated(restored)
     spy = ReplaySpy(monkeypatch, restored)
     stall_gate(restored)
     rounds = FINALITY_VERDICTS + 2
 
     # Each attempt names other rows, so it is another replay; the stale gate ends it unsettled.
     for probe in range(rounds):
-        rewrite_record(restored, "applied", lambda record, probe=probe: record.update(probe=probe))
-        assert refusal(lambda: finalize(restored, raw))[1] == 503
+        refused_for(restored, raw, probe)
 
     assert len(spy.calls) == rounds
     assert len(restored.store._finality_verdicts_v2) == FINALITY_VERDICTS
+    # The newest verdict is kept: the rows of the last attempt are not replayed again ...
+    refused_for(restored, raw, rounds - 1)
+    assert len(spy.calls) == rounds, "the verdict of the newest attempt was not kept"
+    # ... and the oldest is the one that went: the rows of the first attempt are.
+    refused_for(restored, raw, 0)
+    assert len(spy.calls) == rounds + 1, "the verdict of the oldest attempt was still kept"
+    # The transaction takes the kept verdict as well: with the gate open, a newly signed Finalize
+    # of the last attempt's rows settles without a replay.
+    rewrite_record(restored, "applied", lambda record: record.update(probe=rounds - 1))
+    restored.set_clock(restored.now)
+    assert finalize(restored, restored.finalize_raw(applied))["status"] == "SETTLED"
+    assert len(spy.calls) == rounds + 1
+
+
+def test_a_verdict_stored_afresh_is_the_newest_and_not_the_next_to_go(
+    restored: Restored, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, raw = aggregated(restored)
+    spy = ReplaySpy(monkeypatch, restored)
+    stall_gate(restored)
+    memo = restored.store._finality_verdicts_v2
+    for probe in range(FINALITY_VERDICTS):
+        refused_for(restored, raw, probe)
+    # Given: the verdict of the first attempt aged out and its rows are attempted again, which
+    # replays them and stores the verdict afresh.
+    first = next(iter(memo))
+    memo[first] = (memo[first][0], 0.0)
+    refused_for(restored, raw, 0)
+    assert len(spy.calls) == FINALITY_VERDICTS + 1
+    # When: rows of one more attempt overflow the memo
+    refused_for(restored, raw, FINALITY_VERDICTS)
+    assert len(spy.calls) == FINALITY_VERDICTS + 2
+    # Then: the verdict that went is the oldest one, probe 1's, not the one stored a moment ago
+    refused_for(restored, raw, 0)
+    assert len(spy.calls) == FINALITY_VERDICTS + 2, "the verdict stored afresh was evicted first"
+    refused_for(restored, raw, 1)
+    assert len(spy.calls) == FINALITY_VERDICTS + 3, "the oldest verdict was kept"
 
 
 def snapshot_of(r: Restored, template: Template, directory: Path) -> Template:

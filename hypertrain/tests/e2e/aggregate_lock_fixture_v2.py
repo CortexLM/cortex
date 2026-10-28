@@ -17,6 +17,7 @@ import sqlite3
 import sys
 import threading
 import time
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,7 +115,7 @@ class Template:
 
 
 def build_template(tmp_path_factory: pytest.TempPathFactory) -> Template:
-    """Body of a module-scoped fixture: round 0 of five members, past its audits, not aggregated."""
+    """Body of the `template` fixture (conftest.py): round 0 of five members, not aggregated."""
     generator = five_identity_network(tmp_path_factory, fixtures)
     network = next(generator)
     try:
@@ -190,3 +191,24 @@ class Restored:
 
     def close(self) -> None:
         self.store.close()
+
+
+class Call:
+    """`call()` on a thread of its own: when it ended, how, and what it returned."""
+
+    def __init__(self, name: str, call: Callable[[], Any]) -> None:
+        self.name = name
+        self.ended = threading.Event()
+        self.result: Any = None
+        self.error: BaseException | None = None
+        self._call = call
+        self.thread = threading.Thread(target=self._run, name=name, daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        try:
+            self.result = self._call()
+        except BaseException as error:  # handed to the test, which reports it
+            self.error = error
+        finally:
+            self.ended.set()

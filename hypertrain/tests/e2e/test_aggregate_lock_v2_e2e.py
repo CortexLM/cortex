@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from aggregate_lock_fixture_v2 import Restored, Template, build_template, fixtures
+from aggregate_lock_fixture_v2 import Call, Restored, Template, fixtures
 
 from hypertrain.aggregator import tape_v2, weighted_v2
 from hypertrain.aggregator.core import OuterState, TapeError
@@ -43,37 +43,11 @@ COMPUTE_SECONDS = 2.0  # seconds the slow compute takes in the lock-hold test
 MAX_HOLD_SECONDS = 1.0
 
 
-@pytest.fixture(scope="module")
-def template(tmp_path_factory: pytest.TempPathFactory) -> Template:
-    return build_template(tmp_path_factory)
-
-
 @pytest.fixture
 def restored(template: Template, tmp_path: Path) -> Iterator[Restored]:
     r = Restored(template, tmp_path / "state")
     yield r
     r.close()
-
-
-class Call:
-    """`call()` on a thread of its own: when it ended, how, and what it returned."""
-
-    def __init__(self, name: str, call: Callable[[], Any]) -> None:
-        self.name = name
-        self.ended = threading.Event()
-        self.result: Any = None
-        self.error: BaseException | None = None
-        self._call = call
-        self.thread = threading.Thread(target=self._run, name=name, daemon=True)
-        self.thread.start()
-
-    def _run(self) -> None:
-        try:
-            self.result = self._call()
-        except BaseException as error:  # handed to the test, which reports it
-            self.error = error
-        finally:
-            self.ended.set()
 
 
 def slow_copy_flags(monkeypatch: pytest.MonkeyPatch, pause: Callable[[], None]) -> None:
@@ -843,9 +817,12 @@ def test_a_round_aggregated_meanwhile_by_another_process_is_answered_and_not_ove
     assert store._record_v2(restored.run, "applied", "0")["tape_hash"] == theirs["tape_hash"]
 
 
-def test_the_root_serves_the_beacon_while_a_hosted_run_computes_its_aggregate(
+def test_the_root_accepts_a_beacon_round_while_a_hosted_run_computes_its_aggregate(
     template: Template, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The root's push_beacon is what measures the child's lock: it ends by pushing the round into
+    # every child store, under that store's lock. The root's latest_beacon reads the root's own
+    # database and cannot see the child's lock; it only shows that the root answers.
     # Given: the production layout, a root store whose run lives in a child store of its own
     run = template.manifest.run_id()
     shutil.copytree(template.snapshot, tmp_path / "root" / "runs" / run)
@@ -886,4 +863,5 @@ def test_the_root_serves_the_beacon_while_a_hosted_run_computes_its_aggregate(
     assert not stuck
     assert not blocked, f"{blocked} waited for the hosted run's aggregate to end"
     assert push.error is None and child_has_round
+    assert latest.error is None and latest.result["round"] in (0, number)
     assert aggregate.error is None, f"the aggregate failed: {aggregate.error!r}"
