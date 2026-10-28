@@ -269,3 +269,32 @@ def test_the_survivors_of_a_round_shrink_with_each_bound_and_are_what_the_plan_h
     # and the planner hands on the very same list
     snapshot = snap(at=150, audited=keys(1, 2, 3, 4), **facts)
     assert list(x.plan_round(snapshot).survivors) == left(150)
+
+
+@pytest.mark.parametrize(
+    ("contest_open", "contest_lost", "bound_reached", "action"),
+    [
+        (False, False, False, "APPLY"),  # no contest, a contest won, a closure without a loser
+        (False, False, True, "APPLY"),
+        (
+            False,
+            True,
+            False,
+            "COVERED",
+        ),  # the contest sanctioned the member: one fault, one sanction
+        (False, True, True, "COVERED"),
+        (True, False, False, "WAIT"),  # out of the round now, sanctioned when the contest ends
+        (True, True, False, "WAIT"),  # an open contest is never read as lost before it ends
+        (True, False, True, "DROP"),  # never an unbounded wait: the exclusion stays, unsanctioned
+        (True, True, True, "DROP"),
+    ],
+)
+def test_a_no_show_with_a_contest_of_its_own_waits_for_it_is_covered_by_a_loss_or_applies(
+    contest_open, contest_lost, bound_reached, action
+):
+    assert (
+        x.no_show_action(
+            contest_open=contest_open, contest_lost=contest_lost, bound_reached=bound_reached
+        )
+        == action
+    )

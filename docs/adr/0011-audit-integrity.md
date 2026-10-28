@@ -1262,7 +1262,7 @@ in this order and without the peer:
 | 5 | audit job, lease (Part 2, done) | an auditor, an executor host, a miner whose sealed input cannot be leased | attempt `L`; two windows of `A`; the second ends where the sealed commit ends | cooldown, requeue, re-arm once, drop only the miner (`INFRASTRUCTURE`); `MINER_INPUT_REFUSED` dropped at once | infrastructure; miner only for an input it sealed short | none | `test_audit_liveness_v2` |
 | 6 | audit window missed | the operator who never calls `audits` | `absolute - 1` | the round is retired (`AUDIT_WINDOW_MISSED`) | infrastructure | none | `test_exit_audit_window` |
 | 7 | round infeasible (AC-CLIFF) | nobody in particular: the Q/4 caps after any exclusion above | the push that first sees the survivors cannot carry | blame booked per member; the round is retired (`INFEASIBLE`); the next opening answers 409 until four anchored members are eligible | per member (rows 2 to 4) | per member | `test_exit_infeasible` |
-| 8 | roster member changes state (R-C2, DSP-04) | the member: rotation, contest of its own MATCH, a lapsing screen; our own sanction | refused at the door (rotation, MATCH contest, screen at open); judged at `aggregate`; if too few remain, retired at `d_final` | `ROTATION_ROUND_OPEN` / `NOTHING_TO_CONTEST` 409; `excluded INELIGIBLE` with its cause; `finalize` pays the applied tape | the member's own state; never a second sanction | none | `test_member_state` |
+| 8 | roster member changes state (R-C2, DSP-04) | the member: rotation, contest of its own MATCH, a lapsing screen; our own sanction | refused at the door (rotation, MATCH contest, screen at open); judged at `aggregate`; if too few remain, retired at `d_final` | `ROTATION_ROUND_OPEN` / `NOTHING_TO_CONTEST` 409; `excluded INELIGIBLE` with its cause; `finalize` pays the applied tape | the member's own state; never a second sanction (a NO_SHOW waits for the member's own contest, decision 12) | none | `test_member_state`, `test_exit_contest_v2` |
 | 9 | `FINALIZE_ORDER` without a withdrawal record (R-D) | nobody: a round closed without reward has no ledger row | the next reward finalize | `ROUND_WITHDRAWN` event for every closed-unpaid round below it | none | none | `test_round_withdrawal` |
 | 10 | a round with no finality record (Lens m2) | nobody: both writers write the `round` and `finality` records in one transaction and nothing deletes either | n/a | fail closed: `rounds_listing` is `None`, so the bond stays held and the rotation refused; the real pin, a round that never closes, is removed by retirement | none | none | `test_member_state` (pinned) |
 
@@ -1393,6 +1393,26 @@ the table as covering them.
     strike (a mismatch is not turned into a probation by a later silence). It resolves by the admission id of
     the roster entry, so a rotation cannot dodge it, and is idempotent per (reason, evidence). Tests: one per
     tier, plus the boundary of the window and a suspension that a no-show follows.
+
+    *Amended 2026-10-28 (Lens' verdict on the merged tree `389c45b4`, IMP-4; decided by the Principal
+    SN100, D86, scoped by Lens): one fault, one sanction.* A member whose own contest is open is suspended
+    (`PENDING_DISPUTE`) and cannot Accept, so a NO_SHOW on top of the contest burned the whole bond of a
+    possibly honest miner (it could win the contest afterwards) or, after a loss, sanctioned the same fault
+    twice. The member is excluded at the bound as for any silence and the planner is unchanged; what moves
+    is the sanction row, which the sweeper of `push_beacon` now holds `PENDING` while a `disputes_v2` row of
+    the same miner or admission is open, as it does for the contest window of a mismatch. When the contest
+    ends: **lost** (the resolution's loser is the member, whatever the reason, and it ended after the
+    round opened: the member was eligible when the roster was drawn, so an older loss kept it from
+    nothing) the row is `WAIVED` with `covered_by` the dispute, and the contest's own sanction (a conviction:
+    ban, bond, unvested rewards, contest bond) stands untouched, with no second row, strike or unit burnt;
+    **won, closed without a loser, refused at the door, or never opened**, the NO_SHOW applies as above. A
+    hold that is not released by the bound of the wait (the round is closed, or `BOUNDS[Wait.DISPUTE]`, the
+    outer bound of every dispute) is dropped: the row is `WAIVED` with blame `INFRASTRUCTURE`, no sanction
+    (D59-2). The check is a pure function of three facts, `no_show_action` (`exit_v2.py`), fed by the store;
+    `implementation_hash` does not move, neither the sweeper nor `exit_v2.py` is among its inputs. Tests:
+    `test_exit_contest_v2.py` on the real contest (pending then lost, lost before the bound, closed
+    without a loser, refused, an old loss, both ways of reaching the bound) and `test_exit_plan_v2.py`;
+    11 mutants in `tests/ledger_invariants/mutants_tree_verdict.py`.
 13. **No gate: `finalize` pays the applied tape (decision 23).** An earlier design made the sweeper wait
     for the member's earlier unclosed rounds, because a sanction makes the member ineligible and `finalize`
     of an applied round re-checks eligibility. A gate cannot hold `settle_fraud` (it runs inside a referee's

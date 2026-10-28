@@ -439,7 +439,12 @@ confirmed as the miner's (`reason="AUDIT_MISMATCH"`), and a roster member exclud
 (`reason="NO_SHOW"`). In the last two the bond alone burns, one strike is added and the coldkey
 stays bound as in probation; an audit mismatch suspends the admission, a first no-show puts it back
 on a fresh probation (new trials, no suspension) and a second one inside four work screens suspends
-it like a mismatch. An uncontested `MISMATCH`, an infrastructure
+it like a mismatch. A roster member whose own contest is open is left out of the round all the
+same, but its NO_SHOW waits for the contest (D86): a contest it loses already sanctioned it and the
+absence is covered, with no second row, strike or burn; one it wins, a closure without a loser, a
+contest refused at the door or no contest at all leaves the NO_SHOW to apply; a contest still open
+when the round closes or at the dispute bound drops the hold and the exclusion stays the
+infrastructure's, unsanctioned. An uncontested `MISMATCH`, an infrastructure
 closure and a verdict against the auditor leave the bond intact. The status route reads the run's
 rounds once per call for an admission that holds a bond.
 

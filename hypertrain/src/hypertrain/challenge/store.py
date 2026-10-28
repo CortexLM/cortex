@@ -48,14 +48,18 @@ from hypertrain.challenge.admission import Admission
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import EXCLUSION_ABANDONED, Contest, DisputesV2
 from hypertrain.challenge.exit_v2 import (
+    BOUNDS,
     MAX_LAG_ROUNDS,
     SANCTION,
     Exclusion,
     Member,
+    NoShowAction,
     Retire,
     RoundSnapshot,
     Schedule,
+    Wait,
     classify,
+    no_show_action,
     no_show_evidence,
     pause_span,
     plan_round,
@@ -7351,6 +7355,19 @@ class ChallengeStore:
                                     run_id, "exit-sanction", row["id"], {**record, "state": later}
                                 )
                             continue
+                    elif record["reason"] == "NO_SHOW":
+                        action, covered_by = self._contest_hold_v2(run_id, row["id"], record, now)
+                        if action != "APPLY":
+                            if action != "WAIT":
+                                self._put_record_v2(
+                                    run_id,
+                                    "exit-sanction",
+                                    row["id"],
+                                    {**record, "state": "WAIVED"}
+                                    | ({"covered_by": covered_by} if covered_by else {})
+                                    | ({"blame": "INFRASTRUCTURE"} if action == "DROP" else {}),
+                                )
+                            continue
                     hook.seize_bond(
                         record["admission_id"],
                         reason=SANCTION[(record["reason"], record["stage"])],
@@ -7362,6 +7379,59 @@ class ChallengeStore:
                     )
             except Exception as error:
                 self._journal_exit_v2(run_id, row["id"], "sanction", error)
+
+    def _contest_hold_v2(
+        self, run_id: str, identity: str, record: dict[str, Any], now: int
+    ) -> tuple[NoShowAction, str | None]:
+        """What a pending NO_SHOW does at this push when its member has a contest of its own (ADR
+        0011 Part 8, D86): the action of `no_show_action` and, for COVERED, the contest that
+        sanctioned the member.
+
+        A contest the member lost counts when it ended after the round opened: the member was
+        eligible when the roster was drawn, so an older one cannot have kept it from the round. An
+        open contest counts whenever it was opened, for the same reason."""
+        from hypertrain.challenge.disputes_v2 import Turn
+        from hypertrain.challenge.finality_v2 import RoundStatus
+        from hypertrain.protocol.messages_v2 import RoundOpenV2
+
+        text, hotkey = identity.split(":", 1)
+        turns = [
+            Turn.model_validate_json(row[0])
+            for row in self._db.execute(
+                "SELECT turn FROM disputes_v2 WHERE miner=? "
+                "OR json_extract(turn,'$.contest.admission_id')=?",
+                (hotkey, record["admission_id"]),
+            )
+        ]
+        if not turns:
+            return "APPLY", None
+        manifest = self._run_v2(run_id)
+        body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", text)["body"])
+        audit = AuditPolicyV2.model_validate_json(
+            self.objects.get(manifest.network.audit_policy_hash)
+        )
+        lost = [
+            turn.dispute_id
+            for turn in turns
+            if turn.resolution is not None
+            and turn.resolution.loser == turn.contest.miner
+            and (turn.resolved_beacon or 0) >= body.d_open
+        ]
+        schedule = Schedule(
+            now=now,
+            d_commit=body.d_commit,
+            d_audit=body.d_audit,
+            d_upload=body.d_upload,
+            d_final=body.d_final,
+            lease_rounds=audit.lease_rounds,
+        )
+        status = RoundStatus(**self._record_v2(run_id, "finality", text))
+        action = no_show_action(
+            contest_open=any(turn.resolution is None for turn in turns),
+            contest_lost=bool(lost),
+            bound_reached=status.closed or now >= BOUNDS[Wait.DISPUTE](schedule),
+        )
+        return action, lost[0] if action == "COVERED" else None
 
     def _mismatch_decision_v2(self, run_id: str, record: dict[str, Any], now: int) -> str | None:
         """What a pending mismatch sanction does at this push (ADR 0011 Part 8, decisions 16-18):

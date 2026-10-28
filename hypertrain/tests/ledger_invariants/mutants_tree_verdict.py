@@ -9,6 +9,7 @@ from __future__ import annotations
 APP = "src/hypertrain/challenge/app.py"
 STORE = "src/hypertrain/challenge/store.py"
 ADMISSION = "src/hypertrain/challenge/admission.py"
+EXIT = "src/hypertrain/challenge/exit_v2.py"
 COLDKEY_OPS = "src/hypertrain/miner/coldkey_ops.py"
 
 SWITCH = "tests/challenge/test_audit_mismatch_switch_v2.py::"
@@ -17,6 +18,8 @@ BOND = "tests/challenge/test_bond_terms_v2.py::"
 IDS = "tests/challenge/test_escrow_server_ids_v2.py::"
 READ = "tests/challenge/test_object_read_v2.py::"
 OPS = "tests/miner/test_coldkey_ops.py::"
+CONTEST = "tests/challenge/test_exit_contest_v2.py::"
+PLAN = "tests/challenge/test_exit_plan_v2.py::"
 
 STORE_DEFAULT = SWITCH + "test_a_store_built_without_the_keyword_enforces_a_confirmed_mismatch"
 EVIDENCE_BINDING = REAPER + "test_a_stored_mismatch_verdict_backs_only_the_exclusion_that_names_it"
@@ -34,6 +37,18 @@ STREAMED = READ + "test_a_large_object_is_streamed_in_bounded_blocks_with_bounde
 BAD_KEY = READ + "test_a_key_that_is_not_64_lowercase_hex_is_a_400"
 ABSENT = READ + "test_an_object_nobody_stored_is_a_404"
 CAP = READ + "test_an_object_above_the_read_cap_is_refused_before_a_byte_is_read"
+HELD = CONTEST + "test_a_silent_member_with_a_contest_open_is_left_out_but_not_sanctioned_yet"
+LOST_AFTER = (
+    CONTEST
+    + "test_a_contest_lost_after_the_exclusion_covers_the_absence_and_nothing_more_is_burned"
+)
+LOST_BEFORE = CONTEST + "test_a_contest_lost_before_the_bound_covers_the_absence_from_the_start"
+NO_LOSER = CONTEST + "test_a_contest_a_closure_ended_without_a_loser_leaves_the_no_show_to_apply"
+OLD_LOSS = CONTEST + "test_a_contest_lost_before_the_round_opened_covers_no_absence_of_this_round"
+BOUND = CONTEST + "test_a_hold_is_dropped_at_the_bound_of_the_wait_and_sanctions_nobody"
+ACTIONS = (
+    PLAN + "test_a_no_show_with_a_contest_of_its_own_waits_for_it_is_covered_by_a_loss_or_applies"
+)
 
 MUTANTS = [
     {
@@ -236,5 +251,134 @@ MUTANTS = [
 """,
         "tests": [STREAMED],
         "why": "a client cannot tell a streamed object from a cut one.",
+    },
+    {
+        "id": "imp4-no-show-never-waits-for-the-contest",
+        "invariants": ["IMP-4", "D86"],
+        "path": STORE,
+        "old": """                    elif record["reason"] == "NO_SHOW":
+""",
+        "new": """                    elif record["reason"] == "NEVER":
+""",
+        "tests": [HELD, LOST_AFTER, LOST_BEFORE, BOUND],
+        "why": "a member kept out by its own contest is sanctioned for the contest and again for "
+        "the absence it caused.",
+    },
+    {
+        "id": "imp4-every-contest-holds-the-no-show",
+        "invariants": ["IMP-4", "D86"],
+        "path": STORE,
+        "old": """            contest_open=any(turn.resolution is None for turn in turns),
+""",
+        "new": """            contest_open=True,
+""",
+        "tests": [NO_LOSER],
+        "why": "a contest it won, or a closure without a loser, spares the member its NO_SHOW.",
+    },
+    {
+        "id": "imp4-every-member-waits-for-any-contest",
+        "invariants": ["IMP-4", "D86"],
+        "path": STORE,
+        "old": """                "OR json_extract(turn,'$.contest.admission_id')=?",
+""",
+        "new": """                "OR 1 OR json_extract(turn,'$.contest.admission_id')=?",
+""",
+        "tests": [HELD],
+        "why": "a plain silent member is never punished while anyone else has a contest.",
+    },
+    {
+        "id": "imp4-the-hold-is-never-released",
+        "invariants": ["IMP-4", "D86"],
+        "path": STORE,
+        "old": """            bound_reached=status.closed or now >= BOUNDS[Wait.DISPUTE](schedule),
+""",
+        "new": """            bound_reached=False,
+""",
+        "tests": [BOUND],
+        "why": "a contest nobody resolves holds the sanction for ever.",
+    },
+    {
+        "id": "imp4-a-closed-round-keeps-the-hold",
+        "invariants": ["IMP-4", "D86"],
+        "path": STORE,
+        "old": """            bound_reached=status.closed or now >= BOUNDS[Wait.DISPUTE](schedule),
+""",
+        "new": """            bound_reached=now >= BOUNDS[Wait.DISPUTE](schedule),
+""",
+        "tests": [BOUND],
+        "why": "the sanction of a round that is closed still waits for a contest.",
+    },
+    {
+        "id": "imp4-covering-erases-the-contest-sanction",
+        "invariants": ["IMP-4", "D86"],
+        "path": STORE,
+        "old": """                        if action != "APPLY":
+                            if action != "WAIT":
+""",
+        "new": """                        if action != "APPLY":
+                            self._db.execute(
+                                "DELETE FROM admission_sanctions WHERE admission_id=?",
+                                (record["admission_id"],),
+                            )
+                            if action != "WAIT":
+""",
+        "tests": [LOST_AFTER, LOST_BEFORE],
+        "why": "waiving the absence takes the sanction of the contest with it.",
+    },
+    {
+        "id": "imp4-an-old-loss-covers-this-round",
+        "invariants": ["IMP-4", "D86"],
+        "path": STORE,
+        "old": """            and (turn.resolved_beacon or 0) >= body.d_open
+""",
+        "new": """            and (turn.resolved_beacon or 0) >= 0
+""",
+        "tests": [OLD_LOSS],
+        "why": "a contest lost before the round opened excuses an absence it did not cause.",
+    },
+    {
+        "id": "imp4-a-win-over-the-auditor-covers-the-absence",
+        "invariants": ["IMP-4", "D86"],
+        "path": STORE,
+        "old": """            and turn.resolution.loser == turn.contest.miner
+""",
+        "new": """            and turn.resolution.loser == turn.contest.auditor
+""",
+        "tests": [LOST_AFTER],
+        "why": "the member's loss is read as the auditor's: the absence is sanctioned twice.",
+    },
+    {
+        "id": "imp4-a-dropped-hold-stays-the-miners-blame",
+        "invariants": ["IMP-4", "D86"],
+        "path": STORE,
+        "old": (
+            "                                    "
+            '| ({"blame": "INFRASTRUCTURE"} if action == "DROP" else {}),\n'
+        ),
+        "new": "                                    | {},\n",
+        "tests": [BOUND],
+        "why": "an exclusion the sanction gave up on is still booked as the miner's fault.",
+    },
+    {
+        "id": "imp4-a-lost-contest-does-not-cover",
+        "invariants": ["IMP-4", "D86"],
+        "path": EXIT,
+        "old": """    return "COVERED" if contest_lost else "APPLY"
+""",
+        "new": """    return "APPLY"
+""",
+        "tests": [ACTIONS, LOST_AFTER],
+        "why": "the absence of a member that lost its contest is sanctioned a second time.",
+    },
+    {
+        "id": "imp4-an-open-contest-holds-for-ever",
+        "invariants": ["IMP-4", "D86"],
+        "path": EXIT,
+        "old": """        return "DROP" if bound_reached else "WAIT"
+""",
+        "new": """        return "WAIT"
+""",
+        "tests": [ACTIONS, BOUND],
+        "why": "the wait for a contest has no bound.",
     },
 ]
