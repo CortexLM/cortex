@@ -39,6 +39,8 @@ from hypertrain.protocol.messages_v2 import (
 
 from .support import H, bare_escrow
 
+PREFIX_SEED = b"li-opids-prefix-key"
+
 
 def fresh_id(label: str) -> str:
     """An operation id nobody derives: it cannot collide with a service-derived one."""
@@ -335,7 +337,7 @@ def dispute_world(
                 beacon=FixtureBeacon(current=100000).get,
                 stage_reference=no_trial_staged,
                 objects=LocalFSStore(root / "admission-objects"),
-                ip_secret=b"li-opids-prefix-key",
+                ip_secret=PREFIX_SEED,
                 qualified=lambda _: True,
                 conservative_bound=lambda: True,
                 backend="cpu",

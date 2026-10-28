@@ -53,8 +53,8 @@ SERVICE_FIXTURE = ("li_service_fixture", "challenge/test_service_network_v2.py")
 
 H = "11" * 32  # the fixture's own constant; test_infra_guards pins the equality
 FROZEN_UNIX = 1_900_000_000
-INTERNAL_TOKEN = "integration-internal"
-WORKER_TOKEN = "integration-worker"
+INTERNAL_BEARER = "integration-internal"
+WORKER_BEARER = "integration-worker"
 SLUG = "hypertrain"
 
 Real = tuple[Any, FinalityEvidence, RewardFinalize]
@@ -444,7 +444,7 @@ def service_world(root: Path, *, now: int = FROZEN_UNIX) -> Iterator[World]:
             network = next(generator)
         store = network.store
         genesis = network.manifest.training.beacon.genesis_time
-        for name, token in (("internal", INTERNAL_TOKEN), ("worker", WORKER_TOKEN)):
+        for name, token in (("internal", INTERNAL_BEARER), ("worker", WORKER_BEARER)):
             (root / name).write_text(token)
         app = create_app(
             Config(
@@ -470,10 +470,10 @@ def service_world(root: Path, *, now: int = FROZEN_UNIX) -> Iterator[World]:
             TestClient(app),
             service.admin(),
             {
-                "Authorization": f"Bearer {INTERNAL_TOKEN}",
+                "Authorization": f"Bearer {INTERNAL_BEARER}",
                 "x-platform-challenge-slug": SLUG,
             },
-            {"Authorization": f"Bearer {WORKER_TOKEN}"},
+            {"Authorization": f"Bearer {WORKER_BEARER}"},
         )
     finally:
         generator.close()

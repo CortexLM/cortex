@@ -783,7 +783,7 @@ def test_building_the_services_inside_a_transaction_never_commits_it_half_way(
             store._db.execute("INSERT OR REPLACE INTO meta VALUES('credit-marker','1')")
             store._services(world.run_id)
             raise Crash
-        marker = store._db.execute("SELECT COUNT(*) FROM meta WHERE key='credit-marker'")
+        marker = store._db.execute("SELECT COUNT(*) FROM meta WHERE key=?", ("credit-marker",))
         assert marker.fetchone()[0] == 0
         assert not store._db.in_transaction
 

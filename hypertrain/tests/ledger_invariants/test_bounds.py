@@ -381,7 +381,7 @@ BOOTSTRAP_FAULTS = {
     "the pinned hash over a different list": "BOOTSTRAP_ALLOCATION",
     "an origin id of the genesis domain": "BOOTSTRAP_ORIGIN_DOMAIN",
     "an origin id of another run": "BOOTSTRAP_ORIGIN_DOMAIN",
-    "an authority signature by another key": "ORIGIN_AUTHORITY",
+    "an authority signature by another signer": "ORIGIN_AUTHORITY",
     "a body for another run": "ORIGIN_AUTHORITY",
 }
 
@@ -416,7 +416,7 @@ def test_a_bootstrap_other_than_the_owner_pinned_allocation_is_refused_and_issue
             allocation,
             origin_ids=[origin_id_of(escrow, "bootstrap", "ab" * 32, pin, i) for i in range(2)],
         ),
-        "an authority signature by another key": lambda: pinned_bootstrap(
+        "an authority signature by another signer": lambda: pinned_bootstrap(
             fixture, run, allocation, signer=fixture.OTHER
         ),
         "a body for another run": lambda: pinned_bootstrap(fixture, "ab" * 32, allocation),

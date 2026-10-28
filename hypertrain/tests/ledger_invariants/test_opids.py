@@ -607,11 +607,11 @@ POOL = [fresh_id(f"pool-{index}") for index in range(3)]
 KINDS = ("lock", "transfer", "pay")
 # A ledger that takes an id key keeps the ids a server derives (`pay` is one) in a key space no
 # client id can name (ADR 0014, part 1); before it, every operation shares one space.
-SERVER_KEY_SPACE = "id_key" in inspect.signature(EscrowV2).parameters
+SERVER_IDS_ARE_KEYED = "id_key" in inspect.signature(EscrowV2).parameters
 
 
 def id_space(kind: str) -> str:
-    return "server" if SERVER_KEY_SPACE and kind == "pay" else "client"
+    return "server" if SERVER_IDS_ARE_KEYED and kind == "pay" else "client"
 
 
 def operation_of(fixture: ModuleType, kind: str, operation_id: str, units: int, origin: str):

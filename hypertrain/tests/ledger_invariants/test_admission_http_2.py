@@ -28,6 +28,8 @@ from hypertrain.protocol.messages_v2 import HardwareHint, WorkProof
 from .support import load_fixture_module, memory_db
 from .support_admission_http import ADMISSION_FIXTURE, COLDS, HOTS, TrialRig, build_rig, table_rows
 
+PREFIX_SEED = b"private-prefix-key"
+
 H = "ab" * 32
 MINER = load_fixture_module(*ADMISSION_FIXTURE).HOT
 
@@ -261,7 +263,7 @@ def test_ad05_sg06_identity_rules_hold_for_any_sequence_of_joins(
         beacon=FixtureBeacon(current=100000).get,
         stage_reference=no_trial,
         objects=objects,
-        ip_secret=b"private-prefix-key",
+        ip_secret=PREFIX_SEED,
         qualified=lambda _: True,
         conservative_bound=lambda: True,
         backend="cpu",

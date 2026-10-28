@@ -69,6 +69,8 @@ from .support import (
     memory_db,
 )
 
+PREFIX_SEED = b"private-prefix-key"
+
 MATURE_AT = 20
 FINALIZED_BEACON = 10
 PPM = 10**6
@@ -408,7 +410,7 @@ class Floors:
             beacon=lambda now: SimpleNamespace(round=now, bls_verified=False),
             stage_reference=lambda *_: (_ for _ in ()).throw(AssertionError("no trial here")),
             objects=objects,
-            ip_secret=b"private-prefix-key",
+            ip_secret=PREFIX_SEED,
             qualified=lambda _: True,
             conservative_bound=lambda: True,
             backend="cpu",

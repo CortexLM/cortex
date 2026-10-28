@@ -70,7 +70,7 @@ from .support_http_auth import (
 )
 
 RELAY_FIXTURE = ("li_relay_fixture", "relay/test_transport_v2.py")
-DRAIN_CREDENTIAL = "drain-credential-" + "x" * 16
+DRAIN_BEARER = "drain-credential-" + "x" * 16
 OTHER = "22" * 32
 
 
@@ -175,21 +175,21 @@ def test_the_relay_drain_route_refuses_wrong_credentials_and_drains_on_the_exact
         async with httpx.AsyncClient() as backing:
             rig = fixture.Rig(tmp_path, backing)
             relay = rig.relay
-            async with relay_wire(create_relay_app(relay, DRAIN_CREDENTIAL)) as wire:
+            async with relay_wire(create_relay_app(relay, DRAIN_BEARER)) as wire:
                 refused = {}
-                for name, headers in wrong_drain_credentials(DRAIN_CREDENTIAL).items():
+                for name, headers in wrong_drain_credentials(DRAIN_BEARER).items():
                     response = await wire.post("/internal/drain", headers=headers)
                     refused[name] = (response.status_code, response.json(), relay.draining)
                 assert refused == {
                     name: (403, {"detail": "drain denied"}, False)
-                    for name in wrong_drain_credentials(DRAIN_CREDENTIAL)
+                    for name in wrong_drain_credentials(DRAIN_BEARER)
                 }
                 # Control: nothing above drained the relay, so a first upload is still accepted.
                 _, manifest, raw, assignment, opened = rig.upload(b"abc", nonce="01" * 32, w=1)
                 await relay.accept(raw, manifest, assignment, opened)
 
                 drained = await wire.post(
-                    "/internal/drain", headers={"Authorization": f"Bearer {DRAIN_CREDENTIAL}"}
+                    "/internal/drain", headers={"Authorization": f"Bearer {DRAIN_BEARER}"}
                 )
                 assert (drained.status_code, drained.json(), relay.draining) == (
                     200,
@@ -239,7 +239,7 @@ def test_a_drain_credential_with_a_non_ascii_byte_is_a_403_not_a_crash(
     async def scenario() -> None:
         async with httpx.AsyncClient() as backing:
             rig = fixture.Rig(tmp_path, backing)
-            async with relay_wire(create_relay_app(rig.relay, DRAIN_CREDENTIAL)) as wire:
+            async with relay_wire(create_relay_app(rig.relay, DRAIN_BEARER)) as wire:
                 ascii_only = await wire.post(
                     "/internal/drain", headers={"Authorization": "Bearer wrong"}
                 )
@@ -272,7 +272,7 @@ def test_an_upload_capability_with_a_non_ascii_byte_is_a_400_not_a_crash(
             grant, manifest, raw, assignment, opened = rig.upload(b"abc")
             await rig.relay.accept(raw, manifest, assignment, opened)
             url = f"/v1/uploads/{grant.digest()}/chunks/0"
-            async with relay_wire(create_relay_app(rig.relay, DRAIN_CREDENTIAL)) as wire:
+            async with relay_wire(create_relay_app(rig.relay, DRAIN_BEARER)) as wire:
                 ascii_only = await wire.put(url, content=b"abc", headers={"X-Upload-Grant": "!!"})
                 expect(ascii_only.status_code == 400, "an ASCII malformed capability is not a 400")
                 non_ascii: dict[str, Any] = {"X-Upload-Grant": b"caf\xe9"}

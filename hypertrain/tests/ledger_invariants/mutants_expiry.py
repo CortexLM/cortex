@@ -104,10 +104,10 @@ MUTANTS = [
         "id": "exp-store-judges-expiry-on-the-wall-clock",
         "invariants": ["CK-01"],
         "path": STORE,
-        "old": 'raw, self._now(self._db)\n        )\n        key = "auth:"',
+        "old": "raw, self._now(self._db)\n        )\n        key = \x22auth:\x22",
         "new": (
             "raw, (int(self.clock()) - self._run_v2(run_id).training.beacon.genesis_time)"
-            ' // 3 + 1\n        )\n        key = "auth:"'
+            " // 3 + 1\n        )\n        key = \x22auth:\x22"
         ),
         "tests": [TWO + "test_expiry_is_judged_on_the_stored_beacon_whatever_the_wall_clock_says"],
         "why": "expiry is read off the wall clock instead of the verified beacon in the database.",
