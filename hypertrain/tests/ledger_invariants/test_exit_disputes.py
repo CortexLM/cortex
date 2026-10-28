@@ -491,13 +491,7 @@ def shared_loop(world: World, workers: int) -> Iterator[TestClient]:
         yield client
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="DS-08: GET /disputes runs each long-poll (up to 30 s) on a thread of the shared "
-    "request pool with no bound per party, so a few polls stall every other route [candidate] "
-    "[fix-lot: escrow-relay-fixes ADR0014-P8]",
-)
+# Closed by escrow-relay-fixes ADR0014-P8 (6f6e9c90): the polls wait on a pool of their own.
 def test_waiting_dispute_polls_never_starve_the_other_routes(world: World) -> None:
     """DS-08: a watcher that polls for events does not keep the service from answering others.
     POOL polls of one party wait on an empty feed while a plain status request is made."""
