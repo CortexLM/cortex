@@ -80,8 +80,11 @@ def sql_writers(tables: frozenset[str]) -> set[Site]:
     return found
 
 
-def record_writers(kinds: frozenset[str]) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]]]:
-    """Who stores a record of one of `kinds` through `_put_record_v2`.
+def record_writers(
+    kinds: frozenset[str], writer: str = "_put_record_v2"
+) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]]]:
+    """Who stores a record of one of `kinds` through `writer`, the record store or a function that
+    forwards its caller's kind to it.
 
     Returns the (module, function, kind) of every call whose kind is a literal in `kinds`, and
     the (module, function) of every call whose kind is not a literal at all.
@@ -96,7 +99,7 @@ def record_writers(kinds: frozenset[str]) -> tuple[set[tuple[str, str, str]], se
             for call in ast.walk(function):
                 if not (
                     isinstance(call, ast.Call)
-                    and getattr(call.func, "attr", getattr(call.func, "id", "")) == "_put_record_v2"
+                    and getattr(call.func, "attr", getattr(call.func, "id", "")) == writer
                     and len(call.args) >= 2
                 ):
                     continue
@@ -106,6 +109,19 @@ def record_writers(kinds: frozenset[str]) -> tuple[set[tuple[str, str, str]], se
                 elif kind.value in kinds:
                     literal.add((module, function.name, kind.value))
     return literal, dynamic
+
+
+def callers(module: str, callee: str) -> set[str]:
+    """The names of the functions of `module` that call `callee`, as a method or a plain name."""
+    tree = ast.parse((SOURCE / module).read_text())
+    return {
+        function.name
+        for function in ast.walk(tree)
+        if isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef)
+        for call in ast.walk(function)
+        if isinstance(call, ast.Call)
+        and getattr(call.func, "attr", getattr(call.func, "id", "")) == callee
+    }
 
 
 def keys_selecting(function: str, module: str, variable: str) -> set[str]:

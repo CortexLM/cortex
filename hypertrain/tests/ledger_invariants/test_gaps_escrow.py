@@ -37,6 +37,7 @@ from .support import (
 from .support_gaps_escrow import (
     ask_for_the_challenge,
     at_epoch_four,
+    callers,
     client_event_over_http,
     funded_cohort,
     keys_selecting,
@@ -96,7 +97,8 @@ CREDIT_WRITERS = {
     ("challenge/store.py", "weights", "INSERT INTO", "weights_runs"),
     ("challenge/app.py", "registered_weights", "INSERT INTO", "weights_registered"),
 }
-FINALIZATION_KINDS = frozenset({"finalize", "replayed-finality", "settlement", "finalize-result"})
+CLOSURE_KIND = "replayed-finality"
+FINALIZATION_KINDS = frozenset({"finalize", CLOSURE_KIND, "settlement", "finalize-result"})
 # records_v2 is a general table (INSERT OR REPLACE in _put_record_v2, CL-38 is a decision); the
 # direct statements below write other kinds: shadow reservations, custody and the child copy of
 # the qualification records.
@@ -124,11 +126,24 @@ def test_the_credit_tables_are_written_only_by_the_statements_the_ledger_relies_
 def test_each_finalization_record_kind_is_stored_only_by_finalize() -> None:
     # Given: the callers of the record store and the direct statements on records_v2.
     literal, dynamic = record_writers(FINALIZATION_KINDS)
-    # Then: finalize, replayed-finality, settlement and finalize-result are written by
-    # finalize_v2 alone, no other caller picks its kind at run time than training_v2, and that
-    # one is limited to a closed set of actions, none of them a finalization kind.
-    assert literal == {("challenge/store.py", "finalize_v2", kind) for kind in FINALIZATION_KINDS}
-    assert dynamic == {("challenge/store.py", "training_v2")}
+    # Then: finalize, settlement and finalize-result are written by finalize_v2 alone and
+    # replayed-finality by the one closure writer (D70), which only the three functions that
+    # close a round call; no other caller picks its kind at run time than training_v2, which is
+    # limited to a closed set of actions, none of them a finalization kind, and _put_changed_v2,
+    # which forwards the literal kind of each of its callers, none of them a finalization kind.
+    assert literal == {
+        ("challenge/store.py", "finalize_v2", kind) for kind in FINALIZATION_KINDS - {CLOSURE_KIND}
+    } | {("challenge/store.py", "_close_round_v2", CLOSURE_KIND)}
+    assert callers("challenge/store.py", "_close_round_v2") == {
+        "finalize_v2",
+        "_retire_round_v2",
+        "rollback_v2",
+    }
+    assert dynamic == {
+        ("challenge/store.py", "training_v2"),
+        ("challenge/store.py", "_put_changed_v2"),
+    }
+    assert record_writers(FINALIZATION_KINDS, "_put_changed_v2") == (set(), set())
     assert keys_selecting("training_v2", "challenge/store.py", "action") == {
         "accept",
         "commit",
