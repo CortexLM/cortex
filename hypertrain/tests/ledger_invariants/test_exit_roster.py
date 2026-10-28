@@ -377,13 +377,15 @@ def test_no_applied_round_is_closed_by_exclusion_without_a_rollback_record(
 ) -> None:
     """FIN-09 (closed by AUD-01 decision 9): a member that leaves a round at the horizon is an
     exclusion of that member, never a disposition of the round: the applied round stays PENDING
-    and open for its settlement instead of counting as closed with no rollback record."""
+    and open for its settlement instead of counting as closed with no rollback record. The
+    quiet member published no leaves, so its job is dropped at the first horizon as a NO_SHOW
+    (ADR 0011 Part 8, decision 3)."""
     rnd, _ = applied0
     status = rnd.finality()
     X.control(
         status["applied"]
         and status["unresolved_audits"] == 0
-        and rnd.excluded() == {rnd.hotkey(rnd.quiet): "INFRASTRUCTURE"}
+        and rnd.excluded() == {rnd.hotkey(rnd.quiet): "NO_SHOW"}
         and not rnd.has_record("rollback", "0"),
         "applied, nothing outstanding, one member excluded by the horizon, no rollback",
     )
