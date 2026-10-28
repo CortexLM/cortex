@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 from starlette.routing import BaseRoute, Mount
 
 from hypertrain.beacon.core import BeaconRound
+from hypertrain.challenge.admission_store import AdmissionStore
 from hypertrain.challenge.app import Config, create_app
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
 from hypertrain.data.store import LocalFSStore
@@ -322,6 +323,7 @@ def hosted_reward(
             (run_id, setup.manifest.model_dump_json(), "{}"),
         )
         store._services = lambda _run_id: (escrow, None, None)
+        AdmissionStore(escrow)  # the tables the real services create; _payee_v2 reads them
         yield Hosted(store, escrow, reward, evidence, run_id, fraud, real_settlement)
     finally:
         store.close()
