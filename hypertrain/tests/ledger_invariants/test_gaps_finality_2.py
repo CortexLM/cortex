@@ -271,6 +271,8 @@ def test_a_detected_cheat_that_is_not_contested_has_a_consequence_beyond_the_rou
 
     assert honest[0][:2] == ("ACTIVE", 0)  # nobody else is touched
     assert forged != honest[0], f"the cheat left no trace in its standing: {forged}"
+    # D81: suspended, one strike, and the bond is gone (the sanction burned it)
+    assert forged == ("SUSPENDED", 1, 0)
 
 
 # --- T-FIN-18 (CRD-04, FIN-08, DIB-21): the round after two repaired rounds is minted -----------
