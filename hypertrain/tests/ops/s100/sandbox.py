@@ -6,6 +6,11 @@ on s100. The sandbox runs a COPY with only those path prefixes rewritten into a 
 - `docker`: a stateful fake (docker.json: containers, images, flags) of exactly the shapes the
   script uses; any other shape fails. Every mutating call (up, stop, start, restart) is recorded
   with the container name it hit: the tests compare that set with the one the command may touch.
+  `up` recreates a container only when its resolved service changed or `--force-recreate` is given,
+  as compose does. `exec` takes exactly the shapes of the challenge program (the TEST challenge
+  only; `-i` only for the one mode that reads stdin) and records argv, stdin and the files that
+  existed at that moment; its answers are canned, except that `post` really compares the variables
+  of the fake container with its arguments. The program itself runs for real in test_r2_programs.
   `compose -f A -f B ...` merges the files as compose does for the one override file the script
   writes: `environment` (a list or a mapping) key by key, a mapping recursively, any other value
   replaced by the later file; a service is valid once merged. A recreated container gets the
@@ -14,7 +19,8 @@ on s100. The sandbox runs a COPY with only those path prefixes rewritten into a 
   A container is found by its name, where compose finds it by project and service labels.
 - `curl`: a URL map (urls.json) for the master gate and the challenge API; unknown URLs fail.
 - `python3`: the real interpreter, with `datetime.now` frozen for the seal-window code.
-- `sleep` (no-op), `install` (without -o/-g, which need root), and tripwires for exactly these
+- `sleep` (no-op), `install` (without -o/-g, which need root; every call is logged in install.log),
+  and tripwires for exactly these
   commands: ssh scp rsync sudo systemctl podman wget nvidia-smi. A call to one is logged and exits
   99. Any other command that could reach out (nc, git, gh, /dev/tcp, python urllib) is NOT
   intercepted: the script uses none of them, and a new one must be reviewed, not assumed caught.
@@ -26,9 +32,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -55,6 +63,17 @@ REPO = "ghcr.io/cortexlm/cortex/hypertrain"
 OLD_ID, NEW_ID, OTHER_ID, BEACON_ID = (f"sha256:{c * 32}" for c in ("0a", "1b", "0c", "2d"))
 OLD_REF, NEW_REF = f"{REPO}@{OLD_ID}", f"{REPO}@{NEW_ID}"
 EXECUTOR_PATH, EXECUTOR_VAR = "/data/executor/cuda-executor.json", "HYPERTRAIN_CUDA_EXECUTOR"
+ARTIFACTS_VAR = "HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS"
+SETTINGS_PATH, TOKEN_PATH = "/data/executor/r2-artifacts.json", "/data/executor/r2.env"
+# What the token file holds. None of it may reach an output, a docker call, an argument or a file
+# other than the token file itself: Box.run looks for every value after every command.
+R2_VALUES = {
+    "R2_ACCOUNT_ID": "sentinel-account-id",
+    "R2_ACCESS_KEY_ID": "sentinel-access-key-id",
+    "R2_SECRET_ACCESS_KEY": "sentinel-secret-access-key",
+    "R2_BUCKET": "cortex-v3-test-sentinel",
+    "R2_ENDPOINT": "https://sentinel-endpoint.example.test",
+}
 NOW, EPOCH = "2026-10-27T12:00:00+00:00", 1000
 SECRET = "env-value-that-must-never-reach-a-backup"
 IMAGE_ENV = [f"HYPERTRAIN_ADMIN_TOKEN={SECRET}", "TZ=UTC"]  # what every container starts with
@@ -156,7 +175,7 @@ def services(paths):
     return svcs
 
 
-def up(paths, names):
+def up(paths, names, force):
     svcs = services(paths)
     for s in names:
         if s not in svcs:
@@ -172,14 +191,58 @@ def up(paths, names):
             old["State"] = {"Status": "exited", "StartedAt": "-"}
             st["containers"][name] = old
             done(1, "Error response from daemon: cannot start " + name)
+        spec = json.dumps(svcs[s], sort_keys=True)
+        if old.get("Spec") == spec and not force:  # compose leaves a container that is as asked
+            print(" Container %s  Running" % name, file=sys.stderr)
+            continue
         if not st["stale_up"]:  # compose recreated nothing: the old container keeps running
             started = "2026-10-27T12:00:%02dZ" % st["counter"]
             env = dict(e.split("=", 1) for e in st["image_env"]) | svcs[s].get("environment", {})
             st["containers"][name] = {
-                "Name": "/" + name, "Image": st["images"][ref],
+                "Name": "/" + name, "Image": st["images"][ref], "Spec": spec,
                 "Config": {"Image": ref, "Env": ["%s=%s" % kv for kv in env.items()]},
                 "State": {"Status": "running", "StartedAt": started}, "RestartCount": 0}
         print(" Container %s  Started" % name, file=sys.stderr)
+
+
+def seen(name):  # a file the script may have written, as it is at this moment
+    path = name if os.path.isabs(name) else st["watch"] + "/executor/" + name
+    return hashlib.sha256(open(path, "rb").read()).hexdigest() if os.path.exists(path) else None
+
+
+def program(args):  # `exec [-i] CHALLENGE python -I -c PROGRAM MODE ARGS`, the one shape the script
+    # uses: -i only for `pre`, which reads the settings on stdin; the TEST challenge only
+    stdin_flag = args[:1] == ["-i"]
+    args = args[1:] if stdin_flag else args
+    if args[:4] != ["hypertrain-test-challenge", "python", "-I", "-c"] or len(args) < 6:
+        return None
+    mode, rest = args[5], args[6:]
+    if (mode, stdin_flag, len(rest)) not in {("pre", True, 1), ("post", False, 2)}:
+        return None
+    return args[4], mode, rest, sys.stdin.read() if stdin_flag else ""
+
+
+def run_program(args):
+    shape = program(args)
+    if shape is None:
+        open(D + "/tripwire.log", "a").write("docker exec " + " ".join(a[1:]) + "\n")
+        done(125, "fake docker: unexpected invocation: " + " ".join(a))
+    text, mode, rest, stdin = shape
+    c = st["containers"]["hypertrain-test-challenge"]
+    st["execs"].append({"mode": mode, "args": rest, "program": text, "stdin": stdin,
+                        "settings": seen("r2-artifacts.json"), "override": seen(st["override"])})
+    if c["State"]["Status"] != "running":
+        done(1, "Error response from daemon: container is not running")
+    rc, out = st["exec_out"].get(mode, [0, {"pre": "preflight ok", "post": "postflight ok"}[mode]])
+    if mode == "post":  # the part of the program that only reads this process's environment
+        env = dict(e.split("=", 1) for e in c["Config"]["Env"])
+        names = ("HYPERTRAIN_CUDA_EXECUTOR", "HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS")
+        for name, want in zip(names, rest):
+            if env.get(name) != (None if want == "-" else want):
+                rc, out = 1, "postflight refused: %s is not set as the script wrote it" % name
+                break
+    print(out)
+    done(rc)
 
 
 def render(fmt, c):
@@ -199,7 +262,10 @@ if files and rest == ["config", "--format", "json"]:
     active = {n: v for n, v in services(files).items() if "profiles" not in v}
     print(json.dumps({"name": "hypertrain-test", "services": active}))
 elif files and rest[:3] == ["up", "-d", "--no-deps"] and len(rest) > 3:
-    up(files, rest[3:])
+    force = rest[3:4] == ["--force-recreate"]
+    up(files, rest[3 + force:], force)
+elif a[0] == "exec":
+    run_program(a[1:])
 elif a[0] == "inspect" and len(a) == 4 and a[2] == "--format" and a[3] in FORMATS:
     if a[1] not in st["containers"]:
         done(1, "Error: No such object: " + a[1])
@@ -295,7 +361,7 @@ SHIMS = {
     "sleep": "#!/bin/sh\nexit 0\n",
     # install -o/-g need root: drop them, keep every other option for the real install
     "install": (
-        "#!/bin/bash\nargs=()\n"
+        '#!/bin/bash\necho "$*" >>"$FAKE_DIR/install.log"\nargs=()\n'
         'while [ $# -gt 0 ]; do case $1 in -o|-g) shift 2;; *) args+=("$1"); shift;; esac; done\n'
         f'exec {shutil.which("install")} "${{args[@]}}"\n'
     ),
@@ -306,28 +372,52 @@ SHIMS = {
 }
 
 
-def sandboxed(text: str, root: Path) -> str:
+def sandboxed(text: str, root: Path, uid: int | None = None) -> str:
     """The script with its host paths moved under root; a path it no longer covers fails loudly,
-    and so does an API or MASTER address other than the pinned ones."""
+    and so does an API or MASTER address other than the pinned ones. The challenge's uid (CUID) is
+    pinned the same way and becomes the uid of the test, so that the files the tests create pass the
+    owner check; `uid` asks for another one, to prove that a file of someone else is refused."""
     for name, pinned in (("API", API), ("MASTER", MASTER)):
         found = re.search(rf"\b{name}=(http://[^\s;]+)", text)
         assert found and found[1] == pinned, (
             f"the script assigns {name}={found and found[1]}, the sandbox pins {pinned}: "
             "if the address changed on purpose, update API/MASTER in sandbox.py deliberately"
         )
+    assert re.findall(r"^CUID=(\S+)$", text, re.M) == ["65532"], (
+        "the challenge uid moved: update CUID"
+    )
+    text = re.sub(r"^CUID=65532$", f"CUID={os.getuid() if uid is None else uid}", text, flags=re.M)
     for prefix in ("/root/backups", "/data/hypertrain-test", "/data/relay"):
         assert prefix in text, f"{prefix} is gone from the script: update the sandbox rewrite"
         text = text.replace(prefix, f"{root}{prefix}")
     # the `executor` command validates a path INSIDE the challenge container (`/data/....json`): a
     # pattern and its message, not a host path, so the sandbox must not rewrite them
     in_container = {r"/data/[A-Za-z0-9._/-]+\.json$", "/data/....json"}
+    # the container's volume is one line of its own (every other container path is $CDATA/...), and
+    # a comment line runs nothing
+    assert text.count("\nCDATA=/data\n") == 1, "CDATA=/data must be a line of its own, once"
+    code = "\n".join(
+        line
+        for line in text.replace("\nCDATA=/data\n", "\n").splitlines()
+        if not line.lstrip().startswith("#")
+    )
     stray = [
         p
-        for p in re.findall(r"(?<!@)/(?:root|data)\b\S*", text.replace(str(root), "@"))
+        for p in re.findall(r"(?<!@)/(?:root|data)\b\S*", code.replace(str(root), "@"))
         if p not in in_container
     ]
     assert not stray, f"host paths the sandbox does not rewrite: {stray}"
     return text
+
+
+def program(name: str) -> str:
+    """The Python program the script keeps in the variable `name` (`NAME=$(cat <<'PY_NAME' ... )`),
+    as the shell hands it to `docker exec`: without the newline before the closing delimiter."""
+    found = re.findall(
+        rf"^{name}=\$\(cat <<'PY_{name[:-3]}'\n(.*?)\nPY_{name[:-3]}\n\)$", SCRIPT_TEXT, re.M | re.S
+    )
+    assert len(found) == 1, f"{name} is not a heredoc variable of the script, once"
+    return found[0]
 
 
 def call(cmd: str, backup: Path) -> tuple[str, ...]:
@@ -373,8 +463,11 @@ class Run:
 class Box:
     """One sandbox: live files, shims and fake state. `run` executes the script copy."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, challenge_uid: int | None = None) -> None:
         self.root, self.fake = root, root / "fake"
+        self.tokens: set[Path] = (
+            set()
+        )  # the operator's token files: the only place R2_VALUES may be
         self.t = root / "root/backups/hypertrain-test"
         self.f = self.t / "compose.test.yml"
         self.new = self.t / "compose.test.yml.new"
@@ -390,7 +483,7 @@ class Box:
             shim.write_text(body.replace("@PY@", sys.executable))
             shim.chmod(0o755)
         self.script = root / "challenge_image.sh"
-        self.script.write_text(sandboxed(SCRIPT_TEXT, root))
+        self.script.write_text(sandboxed(SCRIPT_TEXT, root, challenge_uid))
         self.f.write_text(COMPOSE)
         (self.t / "compose.relay.yml").write_text(RELAY_COMPOSE)
         make_db(self.state_dir / "challenge.db", ("original",))
@@ -413,6 +506,9 @@ class Box:
                 "merge_patch": {},
                 "mutations": [],
                 "calls": [],
+                "execs": [],
+                "exec_out": {},
+                "override": str(self.override),
                 "logs": "beacon: pushed round 1",
                 "images": {OLD_REF: OLD_ID},
                 "containers": {n: container(n, image_id) for n, image_id in up.items()},
@@ -469,6 +565,33 @@ class Box:
         body = weights if isinstance(weights, str) else json.dumps(seal)
         self.url(f"{MASTER}/v1/weights/latest", body=body, down=weights is False)
 
+    @property
+    def executor_dir(self) -> Path:
+        return self.state_dir / "executor"
+
+    @property
+    def settings(self) -> Path:
+        return self.executor_dir / "r2-artifacts.json"
+
+    def token(self, name: str = "r2.env", mode: int = 0o600, values: dict | None = None) -> Path:
+        """The operator's R2 token file in the executor directory (made 0700 on first use), as the
+        runbook leaves it: a file of the challenge's user. Returns its container path."""
+        self.executor_dir.mkdir(exist_ok=True)
+        self.executor_dir.chmod(0o700)
+        path = self.executor_dir / name
+        path.write_text("".join(f"{k}={v}\n" for k, v in (values or R2_VALUES).items()))
+        path.chmod(mode)
+        self.tokens.add(path)
+        return Path(f"/data/executor/{name}")
+
+    def exec_calls(self, mode: str | None = None) -> list[dict]:
+        calls = self.docker()["execs"]
+        return [c for c in calls if mode in (None, c["mode"])]
+
+    def exec_out(self, mode: str, rc: int, out: str) -> None:
+        """What the challenge program answers to `mode`, when the fake does not compute it."""
+        self.docker(exec_out={**self.docker()["exec_out"], mode: [rc, out]})
+
     def b(self, ts: str = "T1") -> Path:
         return self.t.parent / f"hypertrain-test-s7-{ts}"
 
@@ -502,10 +625,23 @@ class Box:
         executor override with its .new (None: no such file)."""
         files = [self.f, self.relay_json, self.stub_json, *self.state_dir.glob("*.db")]
         pending = self.override.with_name(self.override.name + ".new")
+        dry = self.override.with_name(self.override.name + ".dry")
+        executor = self.executor_dir
         return {p.name: digest_of(p) for p in files} | {
             "compose.new": self.new.exists(),
             "override": digest_of(self.override) if self.override.exists() else None,
             "override.new": pending.exists(),
+            "override.dry": dry.exists(),
+            "dry dirs": sorted(p.name for p in self.t.glob("dry.*")),
+            # every file of the executor directory: name, content, mode (None: no such directory)
+            "executor": executor.exists()
+            and {
+                str(p.relative_to(executor)): (
+                    "link" if p.is_symlink() else digest_of(p) if p.is_file() else "dir",
+                    stat.S_IMODE(p.lstat().st_mode),
+                )
+                for p in sorted(executor.rglob("*"))
+            },
         }
 
     def run(
@@ -546,10 +682,25 @@ class Box:
         report = f"\n{' '.join(map(str, args))}\n{out}\ndocker calls: {st['calls']}"
         for log in ("tripwire.log", "unknown-url.log"):
             assert not (self.fake / log).exists(), f"{log} is not empty{report}"
+        self.no_token_values(out, st)
         assert hit <= TEST_NAMES, f"outside the TEST stack: {hit - TEST_NAMES}{report}"
         assert p.returncode == rc, f"exit {p.returncode}, wanted {rc}{report}"
         assert hit == set(mutates), f"mutated {sorted(hit)}, wanted {sorted(mutates)}{report}"
         return Run(out, st["mutations"])
+
+    def no_token_values(self, out: str, st: dict) -> None:
+        """No value of the token file in the output, in what docker was asked or given, or in any
+        file of the sandbox other than the token file itself."""
+        where = {"output": out, "docker": json.dumps(st["calls"]) + json.dumps(st["execs"])}
+        for path in sorted(self.root.rglob("*")):
+            if path.is_file() and not path.is_symlink() and path not in self.tokens:
+                text = path.read_bytes().decode("latin-1")
+                if path == self.fake / "docker.json":  # what a test made the fake answer is its own
+                    text = json.dumps({k: v for k, v in st.items() if k != "exec_out"})
+                where[str(path.relative_to(self.root))] = text
+        for name, text in where.items():
+            leaked = [k for k, v in R2_VALUES.items() if v in text]
+            assert not leaked, f"{leaked} (a value of the token file) reached {name}"
 
     def polls(self, url: str) -> int:
         log = self.fake / "curl.log"

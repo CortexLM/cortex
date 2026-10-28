@@ -453,7 +453,8 @@ Copy the public outputs to `/data/hypertrain-test/state/<stage>/` as in section 
 
 Back up first (section 1: `snap.sh pre`, `challenge_image.sh backup $TS`). The new variable goes
 in through a compose override, gated like the image swap (master `readyz`, a young sealed seal,
-the TEST container names, and the resolved compose config must differ only in that variable):
+the TEST container names, and the resolved compose config must differ only in the variables the
+command sets):
 
 ```bash
 ssh root@s100 "bash -s -- executor $B /data/executor/cuda-executor.json" < $T/challenge_image.sh
@@ -462,7 +463,75 @@ ssh root@s100 "bash -s -- executor $B /data/executor/cuda-executor.json" < $T/ch
 The challenge must run an image that contains the executor (`$NEW`, section 1). Setting it together with
 `HYPERTRAIN_ROLE_DISPATCH` stops the challenge at start. A later
 `swap` or `rollback` uses `compose.test.yml` alone and drops the variable: rerun `executor`. Undo
-with `bash -s -- executor-off $B`.
+with `bash -s -- executor-off $B`. The challenge loads the executor on the first CUDA job, not at
+start: a configuration it cannot load is a 503 `ROLE_DISPATCH_UNAVAILABLE` there, and `live` and
+`check` do not see it. `executor` therefore asks the challenge itself, before and after (6.4a).
+
+### 6.4a Results through R2 instead of ssh
+
+Measured on 2026-10-28 (`livrables/forge/2026-10-28_transfer-measure`): ssh between s100 and a node
+carried 7 MB/s, R2 from a node 20 MB/s on one stream and 100-144 MB/s on eight, so the 4.13 GB result
+of the 101 M profile does not fit a lease over ssh and does over R2. Nothing below has been run on
+s100 or on a node yet. The mechanism, its limits and the settings are in
+[ADR 0013](adr/0013-executor-artifacts-via-r2.md) and
+[cuda-executor.md](../hypertrain/docs/cuda-executor.md#results-through-r2-opt-in); this section is
+the command.
+
+The token is a file of the challenge's user in the executor directory, named like any other file
+there, written the way the key was in 6.1 (stdin, so that the value is neither on s100's command line
+nor in a shell history) and never shown, `cat`-ed or passed as an argument. It must be a bucket-scoped
+token for a `cortex-v3-*` bucket (never the Cloudflare account token) with these names and no other:
+`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, and `R2_ENDPOINT` if the
+account's default endpoint is not the one to use.
+
+```bash
+ssh root@s100 "umask 077; cat > $X/r2.env; chown 65532:65532 $X/r2.env" < ./r2.env   # mode 0600
+```
+
+It is owned by uid 65532, not by root: the challenge's loader refuses a token file of any other
+user, and the script refuses it before the loader can. `$X` is already `0700` and owned by 65532
+(6.1). Then, inside the seal window (the first half, as for `swap`):
+
+```bash
+ssh root@s100 "bash -s -- executor $B /data/executor/cuda-executor.json --r2 /data/executor/r2.env --dry-run" < $T/challenge_image.sh
+ssh root@s100 "bash -s -- executor $B /data/executor/cuda-executor.json --r2 /data/executor/r2.env" < $T/challenge_image.sh
+```
+
+The path of the token is the one the container sees. `--operations` is a comma list of `audit`,
+`referee` (the default) and `reference`; keep `reference` out until the reference no longer holds the
+store lock for its whole launch (ADR 0013, decision 1). Every other setting keeps the loader's
+default; `fallback` is `classic`, so a broken R2 setup is not an error but the 7 MB/s path again:
+look for `exec_artifact_unavailable` and `exec_artifact_skipped` in the journal
+(`$X/state/journal.jsonl`) after the first job.
+
+What the command does, in this order, and what stops it:
+
+| Step | Refusal |
+| --- | --- |
+| backup, seal window, TEST container names | exit 3 (window), 4 |
+| the token: one plain name in `/data/executor`, a plain file (not a link), mode exactly 0600, uid 65532, in a directory `0700` of 65532 | exit 4, with the mode or uid that was found |
+| `r2-artifacts.json` is absent or one this script wrote (only the keys `credentials_file` and `operations`) | exit 4 |
+| the running challenge is on the image `compose.test.yml` resolves, and its own loader accepts the settings (on stdin, nothing is written yet): the settings model, the token file, `network` `default`, `max_artifact_bytes` at most `max_result_bytes`, an R2 client, an `ssh` client | exit 4, with the loader's reason |
+| `compose config` of the file and of the file with the override differ in the two variables and in nothing else | exit 5 |
+| writes `r2-artifacts.json` (0600, 65532), then the override; `up` recreates the challenge, with `--force-recreate` when the settings changed but the variables did not | exit 7 |
+| `live`, then the recreated challenge's own look at its environment and at the files as its user | exit 7, with the `executor-off` command |
+
+`--dry-run` takes every step but the writes and the `up`, in a temporary directory, and prints
+variable and key names only. It reports a closed seal window instead of stopping at it and exits
+with the window's code, so a dry run that exits 0 means the real run would be accepted now.
+Running the command again with the same arguments recreates nothing. The challenge reads the settings
+and the token once per process: new settings are picked up by the recreate the script forces, a
+rotated token at the same path is not. To rotate a token run `executor-off`, replace the file, run
+`executor --r2` again.
+
+`executor` without `--r2` goes back to the ssh path and removes `r2-artifacts.json`; `executor-off`
+removes both variables and that file (only a file with the keys the script writes), after the
+recreate, and leaves the token where it is: delete it and revoke the token yourself when the run is
+over. `swap` and `rollback` drop both variables like the executor one: rerun the same `executor`
+command. A failed `up` or look prints the `executor-off` command and leaves the files for it.
+
+Exit codes: 2 usage (and `readyz`), 3 seal window, 4 refusal, 5 unexpected compose change, 6 database,
+7 the challenge is not up, or not configured as asked, after a change.
 
 ### 6.5 Publish the run with the backend record in place, then run it
 
