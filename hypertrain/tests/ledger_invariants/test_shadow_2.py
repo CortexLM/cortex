@@ -66,14 +66,6 @@ LOST_RESERVATION_STRANDED = pytest.mark.xfail(
         "whatever expiry the miner chose for its commit [fix-lot: none (no design yet)]"
     ),
 )
-ROTATION_STRANDS = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "SHD-21+SHD-D4: rotating an admission's hotkey never strands the evidence frozen "
-        "under its old hotkey [fix-lot: none (no design yet)]"
-    ),
-)
 # The Lens property is "credited or released". No release operation exists to assert, so the
 # test pins the credited half; a fix that releases the reservation instead must rewrite it.
 NEXT_TRIAL_STRANDS = pytest.mark.xfail(
@@ -834,7 +826,9 @@ def test_an_origin_with_unvalidatable_custody_does_not_stop_the_other_due_origin
     assert after.conserved()
 
 
-ROTATION = [False, pytest.param(True, marks=ROTATION_STRANDS)]
+# SHD-21+SHD-D4 closed by escrow-relay-fixes (3d6129d3, D66): a reward follows its coldkey
+# through a rotation, and the evidence is judged against the hotkey that signed the work.
+ROTATION = [False, True]
 
 
 @pytest.mark.parametrize("rotated", ROTATION)
