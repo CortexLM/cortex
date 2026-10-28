@@ -627,7 +627,9 @@ def create_app(
         _, admission, _ = await run(store.for_run(run_id)._services, run_id)
         # No operator in the loop: the service runs the trusted reference itself (committed
         # before the proof is compared), then signs trial finality through the same checks
-        # as the admin routes, which remain available as overrides.
+        # as the admin routes, which remain available as overrides. A screen whose declared
+        # environment differs from the manifest's pin is refused first: the reference is not paid.
+        await run(lambda: admission.refuse_screen_environment(screen))
         due = await run(lambda: admission.reference_due(proof, now=locked_now()))
         if due is not None:
             await run(store.for_run(run_id).trial_reference_v2, run_id, due)

@@ -119,6 +119,10 @@ Applications/proofs are bound to the exact signed manifest, admission, nonce,
 image, layout and epoch. A decoder/reset/other-objective admission cache cannot
 authorize a carry run. Hardware hints are advisory; a fresh full-round work screen
 and independent same-layout replay establish work, not physical GPU ownership.
+The environment is not advisory: `JoinRequest.env` and `WorkScreenV2.env` declare the
+CPU instruction set, pinned variables and device class the party's process saw, and the
+server answers 409 `ENV_PIN_DIVERGES: NAME, NAME` before any write when they differ from
+the manifest's `reference_spec.env.pinned` (protocol.md section 7, item 4a).
 Trial `WorkProof.challenge_hash` is the canonical `JoinChallenge` body digest,
 which includes its nonce; `WorkScreenV2` is reserved by admission and nonce.
 `WorkProof` reservations include admission and `challenge_hash`, not delta bytes
@@ -168,7 +172,8 @@ unknown run 404, unknown admission 409 `UNKNOWN_ADMISSION`, a deregistered or
 revoked owner 403 like the challenge route, any body that is not the owner's unexpired
 `JobRequest` (a `ChallengeRequest` is not one) 403 (the admin token is no substitute), then the
 export's own refusals (409 `NO_CHALLENGE`, 409 `REFERENCE_TRIAL_CLOSED` once the trial is
-finalized, 503 on a beacon pause). The miner checks the job, objects and signed challenge as
+finalized, 503 on a beacon pause). The route holds the store lock to read, not to stage the inputs or
+to put the objects. The miner checks the job, objects and signed challenge as
 `trial_export` does, streams each input (one uncompressed, sha256-verified
 object; about 4 bytes per parameter for a `reset` start state, more under
 `carry`) into a private temporary folder under its workdir, probes, and deletes
@@ -197,6 +202,24 @@ operator's route; every other 409 keeps its answer.
 stdout contains the signed proof/screen pair. The operator independently prepares
 and finalizes references through authenticated admin routes; miners cannot
 self-finalize or turn a successful probe into ACTIVE status.
+
+The service computes the reference itself when the signed proof arrives
+(`POST /v2/runs/{run_id}/join/proof`; `.../admin/join/{admission_id}/reference` is the override).
+On a remote executor it takes 13 to 64 s. The service holds its store lock only to read what the
+staging and the launch need and to commit the result, not while the trial's inputs are written
+(seconds for a model of 100 M parameters) nor while the executor works (ADR 0012), so every other
+request, the beacon pusher included, is served meanwhile. A second request for the same trial that
+arrives while the reference runs (a retry after a client timeout) waits for it and gets the same
+answer, or the same failure. At most two such requests wait in the process: the next answers 503
+`reference already running for this trial; retry`, and a waiter that has waited 330 s answers 503
+`reference still running for this trial; retry`. Both are transient: retry. A reference whose trial
+was closed, expired or replaced while it ran is dropped and nothing is committed: 409
+`REFERENCE_STATE_CHANGED` or `REFERENCE_TRIAL_CLOSED`. A reference that is
+not done by the deadline round of the trial is not committed either: the launch is cancelled there and the
+answer is 409 `REFERENCE_TRIAL_CLOSED`, whatever the launch raised; the trial is closed `EXPIRED` and the miner's state,
+strikes and dispute flag are untouched. Its next challenge request is refused as 409
+`CHALLENGE_EXPIRED` until the operator reseeds the identity (below); the reseed refuses a trial that is
+still open, so it never meets a reference that is running.
 
 Every object a miner uploads (an artifact, a part, a part index) is
 `POST /v2/runs/{run_id}/objects/{sha256}`. No header carries a signature; the
@@ -777,12 +800,27 @@ An audited member whose admission no longer qualifies it when the round is aggre
 out of the round too: `excluded`, reason `INELIGIBLE`, stage `aggregate`, with a `cause`
 (`ROTATED`: its hotkey no longer names an admission; `BANNED`; `SUSPENDED`, also while a contest
 is pending; `NOT_LIVE`: back on a fresh probation; `SCREEN_LAPSED`; `UNFUNDED`: its bond is gone,
-burned for instance). The admission is read at the `aggregate` call, so a member that is fit
-then is kept. Nobody is sanctioned for it: the cause is the member's own state or the effect of
+burned for instance). The admission is read at the beacon round the `aggregate` call passes the
+freshness gate at, so a member that is fit then is kept, even if its screen ends while the tape
+computes. Nobody is sanctioned for it: the cause is the member's own state or the effect of
 a sanction already applied. The remaining members must still carry the allocation; with four
 rostered, one unfit member makes `aggregate` answer 409 `ROUND_INFEASIBLE` and writes nothing,
 and the round aggregates as soon as the member is eligible again. Call `aggregate` before
 `d_final`: the later the call, the more screens have ended.
+
+`aggregate` computes the tape without holding the challenge's store lock, so beacon rounds,
+joins and audits are served while it runs (minutes at 100 M parameters). It writes the round only
+if what it read when it started still holds when it ends; otherwise it answers 409
+`AGGREGATE_STALE` and writes nothing, and the same call made again reads the round as it is. A
+second `aggregate` of a round that is computing waits for it and gets its answer or its error. At
+most two such calls wait per process: a third answers 503 `aggregate already running for this
+round; retry`, and a waiter gives up after 600 s with 503 `aggregate still running for this
+round; retry`. `finalize` replays the applied tape before it takes the lock, and uses that replay
+only if the records it replayed are unchanged when it runs and it is at most 120 s old: a
+`finalize` refused and retried later replays again. The expiry of the `Finalize` envelope is judged
+when the transaction runs, after the replay, so sign it with a margin of the replay time
+(`scripts/ops/live_operator.py` signs 1000 rounds). A `finalize` made while the `aggregate` of its
+round is still computing answers 409 `missing accepted applied` at once.
 
 A round opens only with members whose screen covers it. `open` answers 403 "roster screen ends
 before the round's audit window" for an entry whose `screen_until` is before the round's

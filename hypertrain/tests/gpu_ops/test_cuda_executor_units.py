@@ -26,9 +26,13 @@ from pydantic import ValidationError
 import hypertrain.trainer  # noqa: F401 - pins determinism before any test imports torch
 from hypertrain.gpu_ops import cuda_executor as ce
 from hypertrain.gpu_ops import cuda_executor_runner as runner
+from hypertrain.protocol.env_pins import class_pin
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.jcs import canonicalize
+from hypertrain.protocol.messages import EnvPins
 from hypertrain.protocol.messages_v2 import IslandJobV1, RunManifestV2
+
+from .pin_wire import PIN, honest_report
 
 REPOSITORY = "registry.test/hypertrain-gpu"
 DIGEST = "sha256:" + "ab" * 32
@@ -36,6 +40,8 @@ IMAGE = f"{REPOSITORY}@{DIGEST}"
 DRIVER = "580.95.05"
 B300 = (10, 3)
 SM_B300 = 148
+# The GPU class a manifest of that SM count pins (docs/adr/0007), written down on purpose.
+CLASS_OF_SM = {148: "sm_103", 170: "sm_120"}
 NAME = "ht-exec-0123456789abcdef"
 
 
@@ -571,15 +577,25 @@ def test_a_gpu_in_two_labels_refuses_the_second_label(executor: ce.Executor) -> 
 # -- selection ---------------------------------------------------------------------------------
 
 
-def spec(*, n: int = 1, sm: int = SM_B300, drivers: tuple[str, ...] = (DRIVER,)) -> Any:
+def spec(
+    *,
+    n: int = 1,
+    sm: int = SM_B300,
+    drivers: tuple[str, ...] = (DRIVER,),
+    gpu_class: str | None = None,
+) -> Any:
+    """The example reference for a CUDA host; `gpu_class` overrides the class its SM count names
+    (model_copy does not validate, so a test can pair a class with a count it never admits)."""
     base = example_manifest().reference_spec
     layout = base.layout.model_copy(update={"n_gpus": n, "dp_size": n})
+    pinned = EnvPins.model_validate(class_pin("avx2", gpu_class or CLASS_OF_SM[sm]))
     return base.model_copy(
         update={
             "sm_count": sm,
             "driver_allowlist": list(drivers),
             "layout": layout,
             "image_digest": DIGEST,
+            "env": base.env.model_copy(update={"pinned": pinned}),
         }
     )
 
@@ -658,6 +674,8 @@ def observed(n: int = 1, **over: Any) -> ce.ObservedEnvironment:
         "sm_counts": [SM_B300] * n,
         "capabilities": [list(B300)] * n,
         "drivers": [DRIVER] * n,
+        "pinned_env": honest_report()["pinned_env"],
+        "cpu_capability": PIN.capability,
         **over,
     }
     return ce.ObservedEnvironment.model_validate(data)
@@ -705,30 +723,31 @@ def test_check_environment_forwards_the_reported_image_sources(executor: ce.Exec
     assert record["image_sources_sha256"] == "ab" * 32
 
 
-PIN = "ab" * 32
+IMAGE_SOURCES_PIN = "ab" * 32
 
 
 @pytest.mark.parametrize(
     "reported,accepted",
-    [(PIN, True), ("cd" * 32, False), (None, False)],
+    [(IMAGE_SOURCES_PIN, True), ("cd" * 32, False), (None, False)],
     ids=["the-pinned-image", "another-image", "no-measurement"],
 )
 def test_container_image_sources_must_equal_the_pin_when_one_is_set(
     tmp_path: Path, pinned: tuple[Path, Path], reported: str | None, accepted: bool
 ) -> None:
     pinned_executor = ce.Executor(
-        load_config(config_data(tmp_path, pinned, image_sources_sha256=PIN)), transports={}
+        load_config(config_data(tmp_path, pinned, image_sources_sha256=IMAGE_SOURCES_PIN)),
+        transports={},
     )
     environment = observed(image_sources_sha256=reported)
     if accepted:
         record = pinned_executor._check_environment(environment, spec(), [gpu(0)])
-        assert record["image_sources_sha256"] == PIN
+        assert record["image_sources_sha256"] == IMAGE_SOURCES_PIN
         return
     with pytest.raises(ce.HostRefused, match="image sources differ from the pinned image"):
         pinned_executor._check_environment(environment, spec(), [gpu(0)])
 
 
-@pytest.mark.parametrize("reported", [PIN, None])
+@pytest.mark.parametrize("reported", [IMAGE_SOURCES_PIN, None])
 def test_an_unset_pin_accepts_any_reported_image_sources(
     executor: ce.Executor, reported: str | None
 ) -> None:
@@ -815,6 +834,97 @@ def test_check_environment_refuses_a_driver_the_manifest_does_not_list(
 ) -> None:
     with pytest.raises(ce.HostRefused):
         executor._check_environment(observed(), spec(drivers=("575.64.03",)), [gpu(0)])
+
+
+HONEST_ENV = honest_report()["pinned_env"]
+PIN_CONTRADICTIONS = [
+    pytest.param(
+        dict(pinned_env={**HONEST_ENV, "HT_ATTN_BACKEND": "sdpa-flash"}),
+        "HT_ATTN_BACKEND",
+        id="another-attention-backend",
+    ),
+    pytest.param(dict(pinned_env={**HONEST_ENV, "HT_FP8": "1"}), "HT_FP8", id="fp8-switched-on"),
+    pytest.param(
+        dict(pinned_env={**HONEST_ENV, "OMP_THREAD_LIMIT": "2"}),
+        "OMP_THREAD_LIMIT",
+        id="a-removed-name-is-still-set",
+    ),
+    pytest.param(
+        dict(pinned_env={**HONEST_ENV, "MKL_CBWR": None}), "MKL_CBWR", id="a-set-name-is-missing"
+    ),
+    pytest.param(
+        dict(pinned_env={**HONEST_ENV, "OMP_DYNAMIC": "TRUE"}),
+        "OMP_DYNAMIC",
+        id="a-set-name-has-another-value",
+    ),
+    pytest.param(
+        dict(pinned_env={**HONEST_ENV, "LD_PRELOAD": "/tmp/x"}),
+        "LD_PRELOAD",
+        id="a-name-outside-the-tables-is-set",
+    ),
+    pytest.param(
+        dict(cpu_capability="DEFAULT"), "cpu_capability", id="the-cpu-cannot-honor-the-isa"
+    ),
+    pytest.param(
+        dict(cpu_capability="AVX512"), "cpu_capability", id="the-cpu-resolves-another-isa"
+    ),
+]
+
+
+@pytest.mark.parametrize(("override", "culprit"), PIN_CONTRADICTIONS)
+def test_check_environment_refuses_a_container_that_does_not_show_the_manifest_pin(
+    executor: ce.Executor, override: dict[str, Any], culprit: str
+) -> None:
+    chosen = [gpu(0), gpu(1)]
+    executor._check_environment(observed(2), spec(n=2), chosen)  # the unedited twin is accepted
+    with pytest.raises(ce.HostRefused, match=culprit):
+        executor._check_environment(observed(2, **override), spec(n=2), chosen)
+
+
+def test_check_environment_judges_the_gpu_class_apart_from_the_sm_table(
+    executor: ce.Executor,
+) -> None:
+    # A 170-SM count on a (12, 0) device agrees with the host probe and with the SM table; the
+    # manifest pins another class, which only the class comparison can see.
+    environment = observed(capabilities=[[12, 0]], sm_counts=[170])
+    executor._check_environment(environment, spec(sm=170), [gpu(0, cap=(12, 0))])
+    with pytest.raises(ce.HostRefused, match="'gpu'"):
+        executor._check_environment(
+            environment, spec(sm=170, gpu_class="sm_103"), [gpu(0, cap=(12, 0))]
+        )
+
+
+def test_check_environment_shows_a_name_the_host_chose_through_a_short_repr(
+    executor: ce.Executor,
+) -> None:
+    name = "N" * 200 + "\nforged line"
+    environment = observed(pinned_env={**HONEST_ENV, name: "1"})
+    with pytest.raises(ce.HostRefused) as refused:
+        executor._check_environment(environment, spec(), [gpu(0)])
+    assert "forged line" not in str(refused.value) and "\n" not in str(refused.value)
+    assert len(str(refused.value)) < 200
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        pytest.param({"pinned_env": None}, id="pinned-env-missing"),
+        pytest.param({"cpu_capability": None}, id="cpu-capability-missing"),
+        pytest.param({"pinned_env": {f"HT_NAME_{i}": None for i in range(17)}}, id="17-names"),
+        pytest.param({"pinned_env": {**HONEST_ENV, "HT_FP8": 1}}, id="a-value-that-is-a-number"),
+        pytest.param({"pinned_env": {**HONEST_ENV, "HT_FP8": "x" * 257}}, id="a-value-too-long"),
+        pytest.param({"pinned_env": list(HONEST_ENV)}, id="not-an-object"),
+        pytest.param({"cpu_capability": ["AVX2"]}, id="capability-not-a-string"),
+    ],
+)
+def test_a_report_of_the_wrong_shape_is_a_malformed_result_and_not_a_refused_host(
+    executor: ce.Executor, tmp_path: Path, broken: dict[str, Any]
+) -> None:
+    document = {**observed(2).model_dump(), **broken}
+    document = {k: v for k, v in document.items() if v is not None}
+    entries = result_entries(environment=json.dumps(document).encode())
+    with pytest.raises(ce.AttemptFailed, match="result metadata is malformed"):
+        read(executor, tmp_path, tar_of(entries))
 
 
 # -- result tar --------------------------------------------------------------------------------
@@ -1464,13 +1574,18 @@ class FakeHost:
         return 0
 
 
-def island_job(directory: Path) -> IslandJobV1:
+def island_job(
+    directory: Path, *, cpu: str = "avx2", gpu: str = "sm_103", attention: str = "math"
+) -> IslandJobV1:
     from tests.miner.test_island_launch_v2 import tiny_manifest
 
     body = tiny_manifest(1).body()
     body["training"]["reference_spec"].update(
-        sm_count=SM_B300, driver_allowlist=[DRIVER], image_digest=DIGEST
+        sm_count=SM_B300 if gpu in ("sm_103", "none") else 170,
+        driver_allowlist=[DRIVER],
+        image_digest=DIGEST,
     )
+    body["training"]["reference_spec"]["env"]["pinned"] = class_pin(cpu, gpu, attention)
     manifest = RunManifestV2.model_validate(body)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "start_state").write_bytes(b"state")
@@ -1901,6 +2016,48 @@ def test_request_budget_is_what_is_left_of_the_job_minus_the_margin(
     else:
         request = executor._request(job, tmp_path / "job", [gpu(0)], False, tar)
         assert json.loads(request)["budget_seconds"] == budget
+
+
+PINS = [
+    ("avx2", "sm_103", "math"),
+    ("avx2", "sm_103", "sdpa-flash"),
+    ("avx512", "sm_103", "math"),
+    ("avx2", "sm_120", "sdpa-flash"),
+    ("avx512", "sm_120", "math"),
+]
+
+
+@pytest.mark.parametrize(("cpu", "klass", "attention"), PINS)
+def test_request_carries_the_manifest_pin_in_the_form_the_runner_admits(
+    tmp_path: Path, pinned: tuple[Path, Path], cpu: str, klass: str, attention: str
+) -> None:
+    job = island_job(tmp_path / "job", cpu=cpu, gpu=klass, attention=attention)
+    executor = probe_for(tmp_path, pinned, Reply())
+    tar = tmp_path / "input.tar"
+    raw = executor._request(job, tmp_path / "job", [gpu(0)], False, tar)
+
+    body = class_pin(cpu, klass, attention)
+    request = json.loads(raw)
+    assert {name: request["env"][name] for name in body["present"]} == body["present"]
+    assert request["unset"] == body["absent"] and request["gpu"] == klass
+    (tmp_path / "admit").mkdir()
+    with open(tar, "rb") as stream:  # what the container program reads from stdin
+        admitted, received = runner.read_inputs(stream, tmp_path / "admit")
+    assert (admitted, received) == (request, raw)
+
+
+def test_launch_refuses_a_manifest_that_names_no_gpu_class_before_it_touches_a_host(
+    tmp_path: Path, pinned: tuple[Path, Path]
+) -> None:
+    # Every GPU host would show a class and the manifest says none: that is the manifest's fault,
+    # and re-judging it per host would quarantine them all.
+    job = island_job(tmp_path / "job", gpu="none")
+    order: list[str] = []
+    executor = executor_with(tmp_path, pinned, {"h1": Down("h1", order)}, sweeps=1)
+    with pytest.raises(ce.IslandFailure, match="no GPU class") as refused:
+        executor.launch("audit", "b" * 64, job, tmp_path / "job", trace=False, cancel=None)
+    assert order == [] and type(refused.value) is ce.IslandFailure
+    assert not executor.journal.path.exists()
 
 
 @pytest.mark.parametrize(("lead", "reaches_a_host"), [(9.0, False), (9.99, False), (10.0, True)])

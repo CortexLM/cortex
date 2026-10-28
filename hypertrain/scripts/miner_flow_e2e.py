@@ -22,6 +22,15 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 
+from hypertrain.protocol.env_pins import EnvPin, class_pin, pinned_environ  # noqa: E402
+
+# ATen, MKL and oneDNN read their variables at first use, and every manifest pins them: a plain
+# container exports none, so this process takes the pin of the config it trains before torch loads.
+PIN = EnvPin.from_body(class_pin("avx2", "none"))
+_pinned = pinned_environ(os.environ, PIN)
+os.environ.clear()
+os.environ.update(_pinned)
+
 import hypertrain.trainer  # noqa: E402, F401, I001  # isort: skip  (determinism must precede torch)
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
@@ -137,6 +146,7 @@ def tiny_cfg() -> TrainConfig:
         ),
         inner=InnerConfig(lr=0.003, H=2, J=1, micro_batch=1, state_policy="reset"),
         compress=CompressConfig("dense-int8", ef_beta=0),
+        env_pin=PIN,
         n_stages=1,
     )
 

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from env_pin_fixtures import honest_env
 from hypertrain.challenge.admission import AdmissionStatus
 from hypertrain.challenge.admission_store import AdmissionRecord
 from hypertrain.challenge.trust_v2 import FundedStatus
@@ -127,7 +128,7 @@ def operator(tmp_path, monkeypatch):
                 "image_digest": manifest.training.reference_spec.image_digest,
                 "run_id": manifest.run_id(),
                 "owner_hotkey": coord.ss58,
-                "device": "cuda",
+                "device": "cpu",
             }.items()
         )
     )
@@ -247,7 +248,8 @@ def _single_join(op):
         request_id=REQUEST_ID,
         expires_beacon=EXPIRY,
         policy_hash=op.manifest.network.admission_policy_hash,
-        hardware_hint=HardwareHint(device_name="cuda", device_count=2, driver="advisory"),
+        hardware_hint=HardwareHint(device_name="cpu", device_count=2, driver="advisory"),
+        env=honest_env(op.manifest.training.reference_spec.env.pin()),
     )
 
 

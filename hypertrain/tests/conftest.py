@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import process_pin  # noqa: F401  (pins this process before any test imports torch)
 from notify_cleanup import remove_new_empty_notify_dirs
 from systemd_probe import classify_systemd_probe
 

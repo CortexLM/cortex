@@ -129,10 +129,11 @@ def generate(out: Path, prelim: Path) -> Path:
         genesis_origin_id,
     )
     from hypertrain.miner.admission import sign_join
+    from hypertrain.protocol.env_pins import require_honorable
     from hypertrain.protocol.envelope_v2 import seal
     from hypertrain.protocol.hashing import sha256_hex
     from hypertrain.protocol.jcs import canonicalize
-    from hypertrain.protocol.messages_v2 import EscrowLock, HardwareHint
+    from hypertrain.protocol.messages_v2 import EnvObservation, EscrowLock, HardwareHint
 
     s = gi.service()
     e2e = gi.load("genuine_e2e_flows", "tests/e2e/test_service_network_v2_e2e.py")
@@ -141,6 +142,9 @@ def generate(out: Path, prelim: Path) -> Path:
     context = s.genuine_network(prelim, work, accepted=False)
     network, *_ = next(context)
     run_id = network.manifest.run_id()
+    # This script runs on the CUDA host: the referee's join declares what a child started under
+    # the manifest's pin observes here, and a host that cannot honor it stops before any CUDA work.
+    observed = require_honorable(network.manifest.training.reference_spec.env.pin(), "cuda")
     alloc = [(k.ss58, 10000, 1) for k in s.COLD]
     network.origin_ids = [
         genesis_origin_id(run_id, genesis_allocation_hash(alloc), i, escrow_id_key(s.COORD._secret))
@@ -181,6 +185,7 @@ def generate(out: Path, prelim: Path) -> Path:
         expires_beacon=beacon + 5000,
         policy_hash=network.manifest.network.admission_policy_hash,
         hardware_hint=HardwareHint(device_name="cuda", device_count=2, driver="advisory"),
+        env=EnvObservation.model_validate(observed),
     )
     join_raw = canonicalize(join.body())
     admission_id = sha256_hex(f"join|{run_id}|{s.COLD[3].ss58}|{join.request_id}".encode())

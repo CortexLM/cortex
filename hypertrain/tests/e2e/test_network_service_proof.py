@@ -20,6 +20,8 @@ import certifi
 import pytest
 from pydantic import Field, ValidationError, create_model
 
+from hypertrain.protocol.env_pins import class_pin
+
 SCRIPTS = Path(__file__).parents[2] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 spec = importlib.util.spec_from_file_location(
@@ -230,7 +232,9 @@ def test_decoder_count_rejects_reduced_work(section, field, value):
         driver.decoder_execution_count(profile)
 
 
-def test_exact_decoder_four_identity_legacy_bootstrap_without_capacity_receipt(tmp_path):
+def test_exact_decoder_four_identity_legacy_bootstrap_without_capacity_receipt(
+    tmp_path, monkeypatch
+):
     """Real signed registration/genesis/joins/locks, no screen/training/CUDA claim."""
     from fastapi.testclient import TestClient
 
@@ -249,6 +253,11 @@ def test_exact_decoder_four_identity_legacy_bootstrap_without_capacity_receipt(t
     seed = importlib.util.module_from_spec(seed_spec)
     sys.modules[seed_spec.name] = seed
     seed_spec.loader.exec_module(seed)
+    # This run is served by the CPU service profile, so its manifest names the CPU class: the
+    # seed's own RTX 5090 pin is refused at creation (ENV_CLASS_BACKEND), not by the geometry.
+    monkeypatch.setattr(
+        seed, "class_pin", lambda cpu, gpu, attention="math": class_pin(cpu, "none")
+    )
     public, private = tmp_path / "seed", tmp_path / "secrets"
     digest = seed.generate(
         public, private, "sha256:" + "ab" * 32, ["candidate-not-observed"], 1000, 2000

@@ -11,7 +11,7 @@ import hypertrain.trainer  # noqa: F401  (determinism before torch)
 # isort: split
 import torch
 from test_golden_replay import _expect_golden
-from trainer_fixtures import assignment, make_cfg, sample
+from trainer_fixtures import assignment, make_cfg, sample, without_pin_check
 
 from hypertrain.trainer.codec_v2 import decode_v2
 from hypertrain.trainer.compress import decompress, validate_payload
@@ -51,6 +51,7 @@ def test_fp8_off_by_default(
 
 
 def test_fp8_flag_repeatable(monkeypatch: pytest.MonkeyPatch) -> None:
+    without_pin_check(monkeypatch)
     monkeypatch.setenv("HT_FP8", "1")
     cfg = make_cfg(dtype="bf16")
     try:
@@ -61,6 +62,7 @@ def test_fp8_flag_repeatable(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_compile_flag_repeatable(monkeypatch: pytest.MonkeyPatch) -> None:
+    without_pin_check(monkeypatch)
     monkeypatch.setenv("HT_COMPILE", "1")
     cfg = make_cfg(dtype="fp32")
     roots = {_run(cfg).leaves_root for _ in range(2)}

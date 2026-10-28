@@ -11,8 +11,8 @@ import pytest
 
 import hypertrain.beacon.__main__ as beacon_cli
 import hypertrain.beacon.push as push
-from hypertrain.beacon import DrandQuicknet
-from hypertrain.beacon.push import plan
+from hypertrain.beacon import BeaconRound, BeaconUnavailable, DrandQuicknet
+from hypertrain.beacon.push import Pusher, plan
 
 VECTORS = json.loads((Path(__file__).parent / "vectors.json").read_text())["rounds"]
 V0 = VECTORS[0]
@@ -130,17 +130,17 @@ def test_plan_pushes_after_known_bounded_by_catch_up() -> None:
     assert plan(105, 105, 3) == []
 
 
-def test_tick_pushes_missing_rounds_in_order_with_bearer(wire: Any, cli: Any) -> None:
+def test_tick_pushes_the_head_then_the_older_round_with_bearer(wire: Any, cli: Any) -> None:
     svc = Service(gets=[0])
     slept = wire(svc)
     rc, out, _ = cli("--catch-up", "2", "--once")
     assert (rc, slept) == (0, [])
     assert svc.posts == [
-        (payload(V0), f"Bearer {ADMIN_TOKEN}"),
         (payload(R1), f"Bearer {ADMIN_TOKEN}"),
+        (payload(V0), f"Bearer {ADMIN_TOKEN}"),
     ]
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"pushed": [V0["round"], R1["round"]], "latest": R1["round"], "known": 0}
+        {"pushed": [R1["round"], V0["round"]], "latest": R1["round"], "known": 0, "pending": 0}
     ]
 
 
@@ -154,8 +154,8 @@ def test_rejected_push_exits_at_once_without_further_posts(
     slept = wire(svc)
     got, out, err = cli("--catch-up", "2", "--max-failures", "3")
     assert (got, out, slept) == (rc, "", [])
-    assert [p["round"] for p, _ in svc.posts] == [V0["round"]]
-    assert f"round {V0['round']}: HTTP {status}: " in err and "echo Bearer ***" in err
+    assert [p["round"] for p, _ in svc.posts] == [R1["round"]]
+    assert f"round {R1['round']}: HTTP {status}: " in err and "echo Bearer ***" in err
 
 
 @pytest.mark.parametrize("status", [408, 429, 503])
@@ -164,8 +164,8 @@ def test_transient_push_status_is_retried(wire: Any, cli: Any, status: int) -> N
     slept = wire(svc)
     rc, out, err = cli("--catch-up", "2", "--max-failures", "2", "--interval", "0.25")
     assert (rc, out, slept) == (1, "", [0.25])
-    assert [p["round"] for p, _ in svc.posts] == [V0["round"], V0["round"]]
-    assert f"failure 2/2: ServiceError: round {V0['round']}: HTTP {status}" in err
+    assert [p["round"] for p, _ in svc.posts] == [R1["round"], R1["round"]]
+    assert f"failure 2/2: ServiceError: round {R1['round']}: HTTP {status}" in err
 
 
 def test_only_consecutive_failures_count(wire: Any, cli: Any) -> None:
@@ -176,7 +176,7 @@ def test_only_consecutive_failures_count(wire: Any, cli: Any) -> None:
     assert (rc, slept) == (1, [0.25] * 5)
     assert svc.seen == ["GET /v1/beacon/latest"] * 6
     assert [json.loads(line) for line in out.splitlines()] == [
-        {"pushed": [], "latest": R1["round"], "known": R1["round"]}
+        {"pushed": [], "latest": R1["round"], "known": R1["round"], "pending": 0}
     ]
     assert "failure 3/3" in err
 
@@ -310,3 +310,166 @@ def test_redact_urls_keeps_short_segments_and_plain_text() -> None:
     )
     host = "https://a-relay-hostname-of-24-chars.test/x"
     assert push.redact_urls(host) == host
+
+
+class Ledger:
+    """Fake challenge service that keeps the rounds it accepts and reports the highest one."""
+
+    def __init__(self, held: tuple[int, ...] = ()) -> None:
+        self.held = set(held)
+        self.posted: list[int] = []  # every POST received, answered or not
+        self.refuse: dict[int, int | Exception] = {}  # round -> answer to its next POST only
+        # round -> failure the client sees after the service has applied the round
+        self.applied_then_lost: dict[int, Exception] = {}
+
+    def handler(self, req: httpx.Request) -> httpx.Response:
+        if req.method == "GET":
+            return httpx.Response(200, json={"round": max(self.held, default=0)})
+        number = json.loads(req.content)["round"]
+        self.posted.append(number)
+        refused = self.refuse.pop(number, None)
+        if isinstance(refused, Exception):
+            raise refused
+        if refused is not None:
+            return httpx.Response(refused, text="busy")
+        self.held.add(number)
+        lost = self.applied_then_lost.pop(number, None)
+        if lost is not None:
+            raise lost
+        return httpx.Response(200, json={"round": number})
+
+
+class Chain(DrandQuicknet):
+    """Relays that know every round up to `head`; `down` lists rounds they fail to serve."""
+
+    def __init__(self, head: int) -> None:
+        super().__init__(("https://a.test", "https://b.test"))
+        self.head = head
+        self.down: set[int] = set()
+
+    def _round(self, number: int) -> BeaconRound:
+        return BeaconRound(number, f"sig{number}", f"rnd{number}", True)
+
+    def latest(self) -> BeaconRound:
+        return self._round(self.head)
+
+    def get(self, round: int) -> BeaconRound:
+        if round in self.down:
+            raise BeaconUnavailable(f"round {round} not served")
+        return self._round(round)
+
+
+def pusher_for(ledger: Ledger, chain: Chain, catch_up: int) -> Pusher:
+    client = httpx.Client(transport=httpx.MockTransport(ledger.handler), base_url="http://svc.test")
+    return Pusher(client, chain, ADMIN_TOKEN, catch_up)
+
+
+def test_head_goes_first_and_each_tick_adds_only_the_oldest_older_round() -> None:
+    ledger, chain = Ledger(), Chain(20)
+    pusher = pusher_for(ledger, chain, 6)
+    assert pusher.tick() == {"pushed": [20, 15], "latest": 20, "known": 0, "pending": 4}
+    chain.head = 21  # a new head goes before the backlog, which keeps its own order
+    assert pusher.tick() == {"pushed": [21, 16], "latest": 21, "known": 20, "pending": 3}
+    chain.head = 22
+    assert pusher.tick()["pushed"] == [22, 17]
+    assert ledger.posted == [20, 15, 21, 16, 22, 17]
+
+
+def test_a_backlog_is_refilled_one_round_per_tick_and_every_round_once() -> None:
+    ledger = Ledger()
+    pusher = pusher_for(ledger, Chain(20), 6)
+    ticks = [pusher.tick()["pushed"] for _ in range(7)]
+    assert ticks == [[20, 15], [16], [17], [18], [19], [], []]
+    assert sorted(ledger.posted) == list(range(15, 21))  # none skipped, none pushed twice
+
+
+def test_a_round_that_was_due_is_never_dropped_while_the_window_slides() -> None:
+    ledger, chain = Ledger(), Chain(20)
+    pusher = pusher_for(ledger, chain, 3)
+    assert pusher.tick()["pushed"] == [20, 18]  # 19 is left pending
+    chain.head = 23  # the window of the last 3 rounds is now 21..23, and 19 is outside it
+    assert pusher.tick()["pushed"] == [23, 19]
+    assert [pusher.tick()["pushed"] for _ in range(3)] == [[21], [22], []]
+    assert sorted(ledger.posted) == list(range(18, 24))  # none skipped, none pushed twice
+
+
+def test_a_round_older_than_the_first_plan_is_not_pushed() -> None:
+    # `--catch-up` bounds what the first plan finds: the last 3 rounds, not the ones before them
+    ledger = Ledger()
+    pusher = pusher_for(ledger, Chain(20), 3)
+    assert [pusher.tick()["pushed"] for _ in range(3)] == [[20, 18], [19], []]
+    assert min(ledger.posted) == 18
+
+
+def test_once_pushes_every_round_that_is_due_because_it_has_no_next_tick(capsys: Any) -> None:
+    ledger = Ledger()
+    code = pusher_for(ledger, Chain(20), 6).run(0.2, True, 3)
+    assert code == 0
+    assert ledger.posted == [20, 15, 16, 17, 18, 19]  # the head first, then oldest first
+    assert json.loads(capsys.readouterr().out)["pending"] == 0
+
+
+def test_cron_runs_with_a_fresh_pusher_each_leave_no_round_missing() -> None:
+    # a new process per run keeps no list: every run must push what it found in one tick
+    ledger, chain = Ledger(), Chain(20)
+    for head in (20, 40, 60):
+        chain.head = head
+        assert pusher_for(ledger, chain, 20).run(0.2, True, 3) == 0
+    assert ledger.held == set(range(1, 61))
+
+
+def test_a_post_the_service_applied_but_the_client_gave_up_on_is_posted_again_harmlessly() -> None:
+    ledger = Ledger()
+    ledger.applied_then_lost[9] = httpx.ReadTimeout("store lock held")
+    pusher = pusher_for(ledger, Chain(9), 3)
+    with pytest.raises(httpx.ReadTimeout):
+        pusher.tick()
+    assert ledger.held == {9}  # the service has the head although the pusher never saw the answer
+    assert [pusher.tick()["pushed"] for _ in range(3)] == [[9, 7], [8], []]
+    assert ledger.posted.count(9) == 2 and ledger.held == {7, 8, 9}
+
+
+def post_503(chain: Chain, ledger: Ledger) -> None:
+    ledger.refuse[7] = 503
+
+
+def post_timeout(chain: Chain, ledger: Ledger) -> None:
+    ledger.refuse[7] = httpx.ReadTimeout("store lock held")
+
+
+def relay_down(chain: Chain, ledger: Ledger) -> None:
+    chain.down.add(7)
+
+
+@pytest.mark.parametrize(
+    ("break_it", "error"),
+    [
+        (post_503, push.ServiceError),
+        (post_timeout, httpx.ReadTimeout),
+        (relay_down, BeaconUnavailable),
+    ],
+    ids=["post-503", "post-timeout", "relay-down"],
+)
+def test_a_failed_older_round_stays_pending_and_is_pushed_by_a_later_tick(
+    break_it: Callable[[Chain, Ledger], None], error: type[Exception]
+) -> None:
+    ledger, chain = Ledger(), Chain(9)
+    pusher = pusher_for(ledger, chain, 3)
+    break_it(chain, ledger)
+    with pytest.raises(error):
+        pusher.tick()
+    assert ledger.held == {9}  # the head went in before the older round failed
+    chain.down.clear()
+    # The service now reports 9: only the pending list still knows that 7 and 8 are missing.
+    assert [pusher.tick()["pushed"] for _ in range(3)] == [[7], [8], []]
+    assert ledger.held == {7, 8, 9}
+
+
+def test_a_failed_head_is_retried_before_any_older_round() -> None:
+    ledger = Ledger()
+    ledger.refuse[9] = 503
+    pusher = pusher_for(ledger, Chain(9), 3)
+    with pytest.raises(push.ServiceError, match="round 9: HTTP 503"):
+        pusher.tick()
+    assert ledger.posted == [9]  # nothing older goes in while the head is refused
+    assert pusher.tick()["pushed"] == [9, 7]

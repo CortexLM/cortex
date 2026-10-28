@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import gzip
 import importlib.util
 import json
@@ -13,6 +14,8 @@ import pytest
 
 from hypertrain.miner import cli
 from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.envelope_v2 import seal
+from hypertrain.protocol.messages_v2 import WorkScreenV2
 
 _spec = importlib.util.spec_from_file_location(
     "probe_trial_service_fixture",
@@ -313,3 +316,48 @@ def test_probe_v2_ends_on_the_line_the_s100_driver_retries_when_an_input_stays_m
     assert {p.name for p in folder.iterdir()} <= {"journal.jsonl", "journal.lock"}
     # And: the driver takes that final stderr line, as the CLI wrote it, for a transient
     assert s100_driver(monkeypatch).transient("", f"{last.levelname} {last.getMessage()}")
+
+
+# ADR 0011 part 3: the route refuses a work screen that declares another environment than the
+# manifest's pin before the reference run is paid, convicts nothing, and accepts the genuine pair
+# afterwards.
+EDITS = {
+    "mkl": (lambda env: env["env"].__setitem__("MKL_CBWR", "COMPATIBLE"), "MKL_CBWR"),
+    "isa": (lambda env: env.__setitem__("cpu_capability", "AVX512"), "cpu_capability"),
+    "sm": (lambda env: env.__setitem__("gpu", "sm_103"), "gpu"),
+    "attention": (
+        lambda env: env["env"].__setitem__("HT_ATTN_BACKEND", "sdpa-flash"),
+        "HT_ATTN_BACKEND",
+    ),
+    "fp8": (lambda env: env["env"].__setitem__("HT_FP8", "1"), "HT_FP8"),
+}
+
+
+@pytest.mark.parametrize("fault", sorted(EDITS))
+def test_the_route_refuses_a_diverging_screen_before_the_reference_is_paid(
+    miner, capsys, fault: str
+) -> None:
+    n, _, config, _, _, _ = miner
+    assert cli.main(["probe-v2", "--config", str(config)]) == 0
+    signed = json.loads(capsys.readouterr().out)
+    body = copy.deepcopy(signed["screen"]["body"])
+    edit, names = EDITS[fault]
+    edit(body["env"])
+    screen = WorkScreenV2.model_validate(body)
+    resigned = seal(HOT, "WorkScreenV2", n.manifest.run_id(), screen, signed["screen"]["exp_drand"])
+    refused = n.client.post(
+        n.url + "/join/proof", json={"proof": signed["proof"], "screen": resigned}
+    )
+    assert refused.status_code == 409
+    assert refused.json() == {"detail": f"ENV_PIN_DIVERGES: {names}"}
+    # The reference run (which commits a reference) was not started, nothing was convicted ...
+    row = n.store._db.execute(
+        "SELECT reference_commitment,state,strikes,pending_dispute FROM admissions_v2 "
+        "WHERE hotkey=?",
+        (HOT.ss58,),
+    ).fetchone()
+    assert tuple(row) == (None, "APPLIED", 0, 0)
+    # ... and the genuine pair is accepted afterwards.
+    accepted = n.client.post(n.url + "/join/proof", json=signed)
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["clean_count"] == 1

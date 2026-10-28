@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
+import functools
 import importlib.util
 import resource
 import struct
@@ -11,11 +13,17 @@ from pathlib import Path
 
 import pytest
 
-from env_pin_fixtures import CPU_FP32
+from env_pin_fixtures import CPU_AVX2, CPU_AVX512, TEST_PIN, honest_observation
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.protocol import envelope_v2
-from hypertrain.protocol.env_pins import EnvPinUnhonorable
+from hypertrain.protocol.env_pins import (
+    CPU_CLASSES,
+    GPU_CLASSES,
+    EnvPin,
+    EnvPinUnhonorable,
+    class_pin,
+)
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
@@ -175,14 +183,14 @@ def test_owner_admission_accepts_real32_metadata_when_profile_exact(tiny, monkey
     assert store.bootstrap_service_capacity_v2(manifest.run_id(), body, raw) == digest
 
 
-@pytest.mark.parametrize("tiny", [CPU_FP32], indirect=True)
+@pytest.mark.parametrize("tiny", [CPU_AVX2], indirect=True)
 def test_bootstrap_refuses_a_pin_the_host_cannot_honor(tiny, monkeypatch):
     # The probe is a child process of up to two minutes: it must not run inside the transaction.
     store, manifest = tiny
     body, raw = signed_profile(store, manifest)
 
-    def refuse(pin):
-        assert not store._db.in_transaction
+    def refuse(pin, backend):
+        assert backend == "cpu" and not store._db.in_transaction
         raise EnvPinUnhonorable("ATen CPU capability: manifest 'AVX2', live 'DEFAULT'")
 
     monkeypatch.setattr("hypertrain.protocol.env_pins.require_honorable", refuse)
@@ -191,19 +199,26 @@ def test_bootstrap_refuses_a_pin_the_host_cannot_honor(tiny, monkeypatch):
     assert not store._db.execute(
         "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission'", (manifest.run_id(),)
     ).fetchone()
-    monkeypatch.setattr("hypertrain.protocol.env_pins.require_honorable", lambda pin: "AVX2")
+    monkeypatch.setattr(
+        "hypertrain.protocol.env_pins.require_honorable",
+        lambda pin, backend: honest_observation(pin),
+    )
     assert store.bootstrap_service_capacity_v2(manifest.run_id(), body, raw) == sha256_hex(body)
 
 
-def test_unpinned_bootstrap_never_probes_the_host(tiny, monkeypatch):
+def test_every_bootstrap_asks_the_host_whether_it_can_honor_the_pin(tiny, monkeypatch):
+    # No manifest escapes the probe: there is no "unpinned run" to skip it for.
     store, manifest = tiny
     body, raw = signed_profile(store, manifest)
+    asked = []
 
-    def forbidden(pin):
-        raise AssertionError("an unpinned run must never probe the host")
+    def honorable(pin, backend):
+        asked.append((pin, backend))
+        return honest_observation(pin)
 
-    monkeypatch.setattr("hypertrain.protocol.env_pins.require_honorable", forbidden)
+    monkeypatch.setattr("hypertrain.protocol.env_pins.require_honorable", honorable)
     assert store.bootstrap_service_capacity_v2(manifest.run_id(), body, raw) == sha256_hex(body)
+    assert asked == [(manifest.training.reference_spec.env.pin(), "cpu")]
 
 
 @pytest.mark.parametrize("signer", [service.COORD, service.HOT[0]])
@@ -541,7 +556,7 @@ def test_source_binding_ignores_unrelated_methods_but_rejects_capacity_changes(t
         "aggregator/rollback_v2.py",
         "trainer/compress.py",
     )
-    original = ChallengeStore._service_implementation_v2(source, paths)
+    original = ChallengeStore._service_implementation_v2(source, paths, TEST_PIN)
     tree = ast.parse((source / "challenge/store.py").read_text())
     # Inspect AST selection directly, without rewriting production/source fixtures.
     import unittest.mock
@@ -554,7 +569,7 @@ def test_source_binding_ignores_unrelated_methods_but_rejects_capacity_changes(t
     )
     tree.body.append(unrelated)
     with unittest.mock.patch("hypertrain.challenge.store.ast.parse", return_value=tree):
-        assert ChallengeStore._service_implementation_v2(source, paths) == original
+        assert ChallengeStore._service_implementation_v2(source, paths, TEST_PIN) == original
     node = next(
         n
         for n in ast.walk(tree)
@@ -566,7 +581,44 @@ def test_source_binding_ignores_unrelated_methods_but_rejects_capacity_changes(t
         )
     )
     with unittest.mock.patch("hypertrain.challenge.store.ast.parse", return_value=tree):
-        assert ChallengeStore._service_implementation_v2(source, paths) != original
+        assert ChallengeStore._service_implementation_v2(source, paths, TEST_PIN) != original
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "_AggregatePlan",
+        "_aggregate_flight_v2",
+        "_aggregate_answer_v2",
+        "_aggregate_claim_v2",
+        "_aggregate_plan_v2",
+        "_aggregate_compute_v2",
+        "_aggregate_settle_v2",
+        "_FinalityReplay",
+        "_finality_replay_job_v2",
+        "_kept_finality_verdict_v2",
+        "_run_finality_replay_v2",
+        "_prime_finality_replay_v2",
+    ],
+)
+def test_the_aggregate_and_finality_replay_helpers_are_bound_to_the_implementation(name):
+    # aggregate_v2 and the replay of finalize_v2 live in these helpers since the store lock is no
+    # longer held while they compute; a run that holds a service-admission record must see the
+    # implementation change when one of them does (the owned set of `_service_implementation_v2`).
+    source = TREE / "src/hypertrain"
+    paths = ("aggregator/core.py", "aggregator/tape_v2.py")
+    original = ChallengeStore._service_implementation_v2(source, paths, TEST_PIN)
+    tree = ast.parse((source / "challenge/store.py").read_text())
+    node = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name == name
+    )
+    node.body.append(ast.Pass())
+    import unittest.mock
+
+    with unittest.mock.patch("hypertrain.challenge.store.ast.parse", return_value=tree):
+        assert ChallengeStore._service_implementation_v2(source, paths, TEST_PIN) != original
 
 
 def test_capacity_profile_binds_the_arch_registry(tiny, monkeypatch):
@@ -583,6 +635,141 @@ def test_capacity_profile_binds_the_arch_registry(tiny, monkeypatch):
     monkeypatch.setattr(Path, "read_bytes", edited)
     # Then: the bound implementation changes.
     assert store._service_profile_v2(manifest.run_id()).implementation_hash != before
+
+
+SOURCE = TREE / "src/hypertrain"
+# The list of hashed files is written three times: in the store (the profile), in the worker (the
+# genesis check) and in the fixture that pins a reviewed bundle. `literal_names` reads each one.
+STORE = SOURCE / "challenge/store.py"
+WORKER = SOURCE / "aggregator/capacity_worker.py"
+PIN_FILES = ("protocol/env_pins.py", "trainer/determinism.py")
+
+
+def literal_names(source: Path, function: str, target: str) -> list[str]:
+    """The tuple of names assigned to ``target`` in ``function``, or iterated by its dict-comp."""
+    tree = ast.parse(source.read_text())
+    body = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == function)
+    assign = next(
+        n
+        for n in ast.walk(body)
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == target for t in n.targets)
+    )
+    value = assign.value
+    return list(
+        ast.literal_eval(value.generators[0].iter if isinstance(value, ast.DictComp) else value)
+    )
+
+
+@functools.cache
+def store_paths() -> tuple[str, ...]:
+    return tuple(literal_names(STORE, "_service_profile_v2", "paths"))
+
+
+def hash_under(pin: EnvPin) -> str:
+    return ChallengeStore._service_implementation_v2(SOURCE, store_paths(), pin)
+
+
+def test_source_binding_covers_the_environment_the_capacity_worker_runs_under():
+    # Given: the hash of the capacity implementation, and the AST of the store.
+    import unittest.mock
+
+    original = hash_under(TEST_PIN)
+    tree = ast.parse(STORE.read_text())
+    node = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_capacity_env_v2"
+    )
+    # When: the function that builds that environment changes.
+    node.body.append(ast.Pass())
+    # Then: the bound implementation changes.
+    with unittest.mock.patch("hypertrain.challenge.store.ast.parse", return_value=tree):
+        assert hash_under(TEST_PIN) != original
+
+
+def test_implementation_hash_differs_for_every_class_pin():
+    # Given: every CPU class, GPU class and attention backend the tables admit.
+    by_combination = {
+        (cpu, gpu, attention): hash_under(EnvPin.from_body(class_pin(cpu, gpu, attention)))
+        for cpu in CPU_CLASSES
+        for gpu in GPU_CLASSES
+        for attention in sorted(GPU_CLASSES[gpu].attention)
+    }
+    # Then: no two share an implementation. `none` and `sm_103` with the same attention have equal
+    # present and absent, so the class names themselves must be hashed too.
+    combinations: dict[str, list[tuple[str, str, str]]] = {}
+    for combination, digest in by_combination.items():
+        combinations.setdefault(digest, []).append(combination)
+    assert [c for c in combinations.values() if len(c) > 1] == []
+
+
+def test_implementation_hash_binds_each_field_of_the_pin_not_only_its_class():
+    # Given: pins that agree with TEST_PIN everywhere but one field. They are built directly, so
+    # they need not be rows of the tables: the hash covers the body the manifest carries.
+    present = dict(TEST_PIN.present)
+    variants = {
+        "one present value": dataclasses.replace(
+            TEST_PIN,
+            present=tuple(sorted({**present, "OMP_DYNAMIC": "TRUE"}.items())),
+        ),
+        "one absent name": dataclasses.replace(TEST_PIN, absent=TEST_PIN.absent[:-1]),
+        "cpu label": dataclasses.replace(TEST_PIN, cpu="avx512"),
+        "gpu label": dataclasses.replace(TEST_PIN, gpu="sm_103"),
+    }
+    # When / Then: each one moves the hash, and no two land on the same value.
+    digests = {name: hash_under(pin) for name, pin in variants.items()}
+    assert hash_under(TEST_PIN) not in digests.values()
+    assert len(set(digests.values())) == len(variants)
+
+
+@pytest.mark.parametrize("name", PIN_FILES)
+def test_capacity_profile_binds_the_files_that_give_the_pin_meaning(tiny, monkeypatch, name):
+    # Given: the profile of a real owner-signed run.
+    store, manifest = tiny
+    before = store._service_profile_v2(manifest.run_id()).implementation_hash
+    real = Path.read_bytes
+
+    def edited(path: Path) -> bytes:
+        data = real(path)
+        return data + b"\n" if path.parts[-2:] == tuple(name.split("/")) else data
+
+    # When: one byte of the table or of the code that enforces it changes.
+    monkeypatch.setattr(Path, "read_bytes", edited)
+    # Then: the bound implementation changes.
+    assert store._service_profile_v2(manifest.run_id()).implementation_hash != before
+
+
+@pytest.mark.parametrize("tiny", [CPU_AVX2, CPU_AVX512], indirect=True)
+def test_profile_hash_is_computed_under_the_pin_of_its_manifest(tiny):
+    # Given: a run whose manifest names one class, and the other class.
+    store, manifest = tiny
+    pin = manifest.training.reference_spec.env.pin()
+    other = EnvPin.from_body(CPU_AVX512 if pin.cpu == "avx2" else CPU_AVX2)
+    # When
+    bound = store._service_profile_v2(manifest.run_id()).implementation_hash
+    # Then: the profile carries the hash under its own pin, not under any other.
+    assert bound == hash_under(pin)
+    assert bound != hash_under(other)
+
+
+def test_the_three_lists_of_hashed_files_agree_and_name_the_pin_files():
+    # Given: the store, the capacity worker and the reviewed-bundle fixture each list the files.
+    lists = {
+        "store.py": list(store_paths()),
+        "capacity_worker.py": literal_names(WORKER, "validate_authority", "paths"),
+        "protected_opening_fixture_static.py": literal_names(
+            TREE / "tests/challenge/protected_opening_fixture_static.py",
+            "preadmission_collector_regression",
+            "modules",
+        ),
+    }
+    # Then: each is duplicate-free, names the pin's files, and the three are the same set (the
+    # fixture sorts them, the others do not). A file in one list only makes the genesis check of
+    # the worker disagree with the profile, or the reviewed bundle with the code it reviewed.
+    for name, paths in lists.items():
+        assert len(paths) == len(set(paths)), name
+        assert set(PIN_FILES) <= set(paths), name
+    assert sorted(lists["capacity_worker.py"]) == sorted(lists["store.py"])
+    assert sorted(lists["protected_opening_fixture_static.py"]) == sorted(lists["store.py"])
 
 
 def test_finalization_cannot_reset_charges_and_nested_failure_cannot_erase_debit(tiny):

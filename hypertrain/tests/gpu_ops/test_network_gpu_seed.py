@@ -70,6 +70,15 @@ def test_real_seed_exact_profile_genesis_and_tokenizer(generated):
     assert not list(public.rglob("*.seed"))
 
 
+def test_seed_manifest_pins_the_rtx_5090_class(generated):
+    public, _, digest = generated
+    ref = seed.validate(public, digest).manifest.training.reference_spec
+    pin = ref.env.pin()
+    assert ref.sm_count == 170
+    assert (pin.cpu, pin.gpu) == ("avx2", "sm_120")
+    assert dict(pin.present)["HT_ATTN_BACKEND"] == "sdpa-flash"
+
+
 def test_seed_screen_epoch_is_the_manifest_example_value(generated, tmp_path):
     public, _, digest = generated
     pinned = seed.validate(public, digest).manifest.network.admission_policy_hash

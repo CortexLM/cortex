@@ -7,9 +7,16 @@ member, then the job inputs), the island runs under torchrun, and a tar of the r
 observed environment and a closing `COMPLETE` member leaves on stdout. Nothing is written outside
 a private temporary directory of the container.
 
-Exit codes: 0 done, 2 bad request or input, 3 island failed, 4 visible devices differ from the
-request, 5 unsafe output, 6 budget exhausted, 7 terminated, 8 reader gone, 9 device probe or image
-measurement could not run, 10 artifact transfer failed, 11 artifact store unreachable.
+Exit codes: 0 done, 2 bad request or input, 3 island failed, 4 visible devices or environment
+differ from the request, 5 unsafe output, 6 budget exhausted, 7 terminated, 8 reader gone, 9 device
+probe or image measurement could not run, 10 artifact transfer failed, 11 artifact store
+unreachable.
+
+The request carries the manifest's environment pin whole: `env` holds the fixed names and every
+name the pin sets, `unset` the names it removes, `gpu` its device class. The container program sets
+the first, removes the second, probes, and refuses with exit 4 before the island starts when the
+probe shows another environment, another CPU capability or another device class, so that a host
+that cannot honor the pin is refused (and quarantined by the executor) rather than retried.
 
 With an `artifact` block in request.json (docs/adr/0013-executor-artifacts-via-r2.md) the result
 tar does not leave on stdout: it is hashed in place, declared in R2 and uploaded to presigned URLs
@@ -45,6 +52,19 @@ from types import FrameType
 from typing import IO, Any
 
 VERSION = 1
+# The names a manifest pin sets and removes, and the GPU classes it names: the closed tables of
+# hypertrain.protocol.env_pins, copied because nothing here may import the image's hypertrain
+# (tests/gpu_ops/test_cuda_executor_pin.py keeps every copy equal to the tables).
+PIN_PRESENT = (
+    "ATEN_CPU_CAPABILITY",
+    "HT_ATTN_BACKEND",
+    "MKL_CBWR",
+    "OMP_DYNAMIC",
+    "ONEDNN_MAX_CPU_ISA",
+)
+PIN_ABSENT = ("HT_COMPILE", "HT_FP8", "HT_MOE_GROUPED", "OMP_THREAD_LIMIT")
+PIN_NAMES = tuple(sorted({*PIN_PRESENT, *PIN_ABSENT}))
+GPU_CLASSES = ("none", "sm_103", "sm_120")
 ENV_KEYS = frozenset(
     {
         "CUBLAS_WORKSPACE_CONFIG",
@@ -57,6 +77,7 @@ ENV_KEYS = frozenset(
         "HT_ISLAND_TRACE",
         "HT_GPU_UUIDS",
         "CUDA_VISIBLE_DEVICES",
+        *PIN_PRESENT,
     }
 )
 TAIL = 4000
@@ -76,7 +97,7 @@ RETRY_CAP = 16.0
 EXPIRY_SLACK = 2  # seconds taken off the lifetime the challenge announced for its URLs
 
 PROBE = """
-import json, subprocess, sys
+import json, os, subprocess, sys
 from pathlib import Path
 import torch
 n = torch.cuda.device_count()
@@ -100,6 +121,8 @@ print(json.dumps({
     "sm_counts": [p.multi_processor_count for p in props],
     "capabilities": [[p.major, p.minor] for p in props],
     "drivers": drivers,
+    "pinned_env": {name: os.environ.get(name) for name in sys.argv[1:]},
+    "cpu_capability": torch.backends.cpu.get_cpu_capability(),
 }))
 """
 
@@ -190,8 +213,11 @@ def read_inputs(stdin: IO[bytes], work: Path) -> tuple[dict[str, Any], bytes]:
         or request.get("version") != VERSION
         or request.get("inputs") != seen
         or not isinstance(env, dict)
-        or not set(env) <= ENV_KEYS
+        or not set(PIN_PRESENT) <= set(env) <= ENV_KEYS
         or not all(isinstance(v, str) for v in env.values())
+        # the pin travels whole: every name it sets above, exactly the names it removes, one class
+        or request.get("unset") != list(PIN_ABSENT)
+        or request.get("gpu") not in GPU_CLASSES
         or not isinstance(request.get("budget_seconds"), int)
         or not isinstance(request.get("n_gpus"), int)
     ):
@@ -203,7 +229,7 @@ def probe_environment(request: dict[str, Any]) -> dict[str, Any]:
     """Observe the devices in a throwaway process so no CUDA context outlives the probe."""
     try:
         proc = subprocess.run(  # noqa: S603 - the interpreter running this file, fixed source
-            [sys.executable, "-c", PROBE],
+            [sys.executable, "-c", PROBE, *PIN_NAMES],
             capture_output=True,
             text=True,
             timeout=300,
@@ -258,6 +284,53 @@ def sources_digest(files: Mapping[str, str]) -> str:
     """sha256 of the map as compact JSON with sorted keys, which is the canonical (JCS) form the
     challenge computes from `sources()` for the ASCII names `IMAGE_SOURCES` allows."""
     return _sha(json.dumps(dict(files), sort_keys=True, separators=(",", ":")).encode())
+
+
+def device_class(capability: Sequence[object]) -> str:
+    """The GPU class of a (major, minor) compute capability: protocol.env_pins.gpu_label."""
+    major, minor = capability
+    if type(major) is not int or type(minor) is not int:
+        raise TypeError("a compute capability is two integers")
+    return f"sm_{major}{minor}"
+
+
+def device_classes(capabilities: Any) -> list[str] | None:
+    """The distinct classes of the reported devices, sorted; None when the report is malformed."""
+    try:
+        return sorted({device_class(c) for c in capabilities})
+    except (TypeError, ValueError):
+        return None
+
+
+def _shown(value: object) -> str:
+    return repr(value)[:60]  # a value the host chose: short, and escaped by repr
+
+
+def pin_mismatch(request: dict[str, Any], environment: dict[str, Any]) -> str:
+    """Why the probe contradicts the pin the request carries; "" when the container honors it.
+
+    The pin is what the request sets (`env`, the names of PIN_PRESENT), removes (`unset`) and the
+    GPU class it names. A process that did not get it, or a CPU whose ATen cannot resolve the
+    pinned capability, would train other bytes and the island would refuse it after a cold start:
+    say so before it starts, with the exit that quarantines the host instead of retrying it.
+    """
+    seen = environment.get("pinned_env")
+    seen = seen if isinstance(seen, dict) else {}
+    wanted: dict[str, str | None] = {name: request["env"][name] for name in PIN_PRESENT}
+    wanted.update(dict.fromkeys(request["unset"]))
+    bad = [
+        f"{name}: want {want!r}, saw {_shown(seen.get(name))}"
+        for name, want in sorted(wanted.items())
+        if seen.get(name) != want
+    ]
+    capability = request["env"]["ATEN_CPU_CAPABILITY"].upper()
+    if environment.get("cpu_capability") != capability:
+        resolved = _shown(environment.get("cpu_capability"))
+        bad.append(f"ATen CPU capability: want {capability!r}, saw {resolved}")
+    if device_classes(environment.get("capabilities")) != [request["gpu"]]:
+        seen_devices = _shown(environment.get("capabilities"))
+        bad.append(f"device class: want {request['gpu']!r}, saw {seen_devices}")
+    return "; ".join(bad)
 
 
 def torchrun(request: dict[str, Any], attempt: Path, budget: float, log: Path) -> int:
@@ -819,6 +892,7 @@ def serve(
     probe: Callable[[dict[str, Any]], dict[str, Any]] = probe_environment,
     launch: Callable[[dict[str, Any], Path, float, Path], int] = torchrun,
     measure: Callable[[], dict[str, str]] = measure_image_sources,
+    check_pin: Callable[[dict[str, Any], dict[str, Any]], str] = pin_mismatch,
 ) -> int:
     started = _monotonic()
     signal.signal(signal.SIGTERM, _terminated)
@@ -832,6 +906,8 @@ def serve(
             if artifact is not None:
                 preflight(artifact)
             os.environ.update(request["env"])
+            for name in request["unset"]:
+                os.environ.pop(name, None)
             environment = probe(request)
             wanted = request.get("uuids")
             if (
@@ -840,6 +916,8 @@ def serve(
                 or len(wanted) != request["n_gpus"]
             ):
                 raise Refused(4, "visible GPUs differ from the requested devices")
+            if mismatch := check_pin(request, environment):
+                raise Refused(4, f"environment contradicts the pin: {mismatch}")
             environment = {**environment, "image_sources_sha256": sources_digest(measure())}
             reserve = 0 if artifact is None else artifact["reserve_seconds"]
             code = launch(

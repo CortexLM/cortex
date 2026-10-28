@@ -121,18 +121,28 @@ verifies each round with py_ecc BLS (about 1.2 s) and the challenge verifies it 
 With the original `--interval 3 --catch-up 20` the lag held at 8-9 rounds; with `--interval 0.2` it
 is 1-2 rounds when idle (measured 2026-10-26).
 
-**A store lock stops the beacon.** A remote or in-process reference holds the lock of the store that
-hosts the run for its whole duration (13-19 s with the CUDA cache, 43-64 s without). The first run
+**A store lock stops the beacon.** Until ADR 0012 Part B a remote or in-process reference held the lock
+of the store that hosts the run for its whole duration (13-19 s with the CUDA cache, 43-64 s without),
+and a challenge image from before Part B still does. Since Part B a reference holds it for its claim and
+its settlement only (a few milliseconds, measured with a fake executor); the claim and `POST /join/<id>/job`
+staged the trial's inputs under the lock until the follow-up of ADR 0012 point 4 (h) and held it 2 to 8 s at 66 M to
+162 M parameters (5 s at the 101 M profile), which is enough to close the gate (it closes at a lag of more than 2
+rounds, the idle lag is 1-2), so an image from before that follow-up can still bring the 503 storm back for a model of
+that size; any other long lock, a challenge
+restart or a stuck request, stops the beacon the same way. The first run
 of a state directory lives in the root store, where `GET /v1/beacon/latest` and
 `POST /v1/admin/beacon` both wait for that lock. A run created while the root already hosts one
 (S13's) lives in a child store with a lock of its own: the root still answers `latest` and keeps the
 round a POST brings, but the POST then waits for the child, so the pusher times out all the same and
 the child, whose table the gate and the seeds read, gets no round. The pusher gets 10 s timeouts (a
-failure each), and when the lock ends it refills the missing rounds oldest first at one round per
-2.4 s while the clock adds one per 3 s. Two things can go wrong, and the cadence decides which:
+failure each), and when the lock ends it pushes the latest round first, so the gate reopens, then one
+older missing round per tick, the oldest. (The pusher before ADR 0012 D68 refilled oldest first at one
+round per 2.4 s while the clock adds one per 3 s, which kept the gate closed for about four times the
+lock.) Two things can go wrong, and the cadence decides which:
 
-- `--catch-up N` pushes at most the last N rounds after the highest one the service holds. Rounds
-  older than that are skipped for good, because the service reports only its highest round. The
+- `--catch-up N` pushes at most the last N rounds after the highest one the service holds; with head
+  first the window also slides while the list of older rounds drains. Rounds older than that are
+  skipped for good, because the service reports only its highest round. The
   challenge reads exact rounds: after a trial is finalized in round `n` (and after a join or a
   resume), the identity's seed is round `n + 1`. A seed in a skipped round answers 500
   `BeaconUnavailable: round N not pushed` until the window is over (100 rounds), then 409
@@ -145,24 +155,28 @@ failure each), and when the lock ends it refills the missing rounds oldest first
   refused connection (the challenge restarting) one per 1.4 s.
 
 `beacon` therefore sets `--interval 0.2 --catch-up 60 --max-failures 100`. Sizing, from the model of
-the real pusher: the catch-up must cover `lock / 3 + 10` rounds (60 covers a lock of 150 s; the old
-`3` skipped rounds after any lock over about 9 s, 20 after one over about 50 s), and the budget must
+the real pusher: the catch-up must cover `lock / 3 + 10` rounds for the ascending pusher (60 covers a
+lock of 150 s; the old `3` skipped rounds after any lock over about 9 s, 20 after one over about 50 s);
+head first keeps that cover, though the older rounds then arrive one per tick, about 15 s each (ADR 0012
+section 3). The budget must
 cover `lock / 11.4` failures for a lock and `outage / 1.4` for a refused connection (100: 140 s). The
 script takes the stock cadence and the one the previous version left on this stack (`0.2 / 3`), raises
 a budget below 100 and keeps a higher one, and refuses (exit 5, nothing changed) any compose file
 where the result is not exactly that. Never start a second pusher, and never backfill a range of
 rounds by hand during trials: S13 lost two identities that way.
 
-The price is time. The model (`tests/ops/s100/test_beacon_lock_tolerance.py`, both store layouts,
-checked against two S13 observations) says the gate stays closed after the lock for up to about
-`4 x lock + 10` s with the run in the root store, about `3 x lock` in a child: 30-40 s after a 13 s
-reference, 1 minute after 19 s, **3 to 4 minutes after a 60 s reference**. That figure is very
-sensitive to the cost of one round: at 2.6 s it doubles, at 2.8 s it is five times larger, and at
-2.9 s the pusher never catches up. Measure the idle lag with a child run present before trusting it.
-Expect 503s in that window and retry them. Hence two rules: keep the CUDA cache (the executor does
-by default), and run the first reference after a new image (43-64 s, cold) alone, before a second
-driver starts. Releasing the lock during the reference (ADR 0012 section 2) or a pusher that pushes
-the newest round first (same ADR, a proposal) is what removes the wait.
+The price of the ascending pusher was time. The model (`tests/ops/s100/test_beacon_lock_tolerance.py`,
+both store layouts, checked against two S13 observations) says the gate stayed closed after the lock
+for up to about `4 x lock + 10` s with the run in the root store, about `3 x lock` in a child: 30-40 s
+after a 13 s reference, 1 minute after 19 s, **3 to 4 minutes after a 60 s reference**. That figure is
+very sensitive to the cost of one round: at 2.6 s it doubles, at 2.8 s it is five times larger, and at
+2.9 s the pusher never catches up. With head first the model says the gate reopens within 7 s of a lock
+of 13 to 60 s, in either layout, and holds up to 2.6 s a round. Both fixes are in the code (ADR 0012
+section 2, the lock released during the reference, and section 3, head first) but have not run on s100:
+the stack runs the older challenge image and pusher until Forge swaps them. Until then keep the two
+rules: keep the CUDA cache (the executor does by default), and run the first reference after a new image
+(43-64 s, cold) alone, before a second driver starts. Expect 503s in that window and retry them. Measure
+the idle lag with a child run present before trusting any of these numbers.
 
 Proving it instead of inferring it: `beacon_gaps.py` lists rounds missing from the `beacon` table
 of the store that hosts the run, the identities whose seed is one of them, and whether the pusher
@@ -173,7 +187,9 @@ ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - 1800 $RID" <
 ```
 
 Exit 0: nothing missing in the last 30 minutes. 3: a hole (`missing`, and `stranded` names who waits
-for it: stop the run and report it) or a table that is dead (`stale`). 4: bad arguments or a run the
+for it) or a table that is dead (`stale`). A hole the live head-first pusher still has in its list
+closes by itself, about 15 s per missing round: look again after that before you stop the run; one
+that stays, or a `stranded` name, is a real loss and is reported. 4: bad arguments or a run the
 stack does not host. A pusher that is only behind exits 0: read `lag` and `gate_open` in the JSON.
 Take a baseline before the retune (without `$RID` until the run is published: the tool reads the
 store that hosts the run and refuses an id it cannot find) and run it again after every ten trials.
@@ -295,12 +311,13 @@ the miner's state is bitwise equal to the challenge's own CPU replay.
 - The same job matched under `ATEN_CPU_CAPABILITY=avx2`.
 - `cpu_parity_probe.py` compares one exported job on both hosts.
 
-A manifest that sets `reference_spec.env.pinned` (`hypertrain/docs/protocol.md` section 7, item 4a)
-makes the hand-set `ATEN_CPU_CAPABILITY=avx2` below unnecessary: the launcher gives every rank the
-pins, and `bootstrap_service_capacity_v2` answers 409 `SERVICE_PROFILE_ENV_PIN` when the challenge
-host cannot honor them. Unpinned runs keep the manual pin (`cpu_miners.py` is unchanged). The pin
-removes ambient-induced divergence only; `docs/adr/0011-audit-integrity.md` part 3 says what was
-and was not measured.
+Every manifest pins its environment (`reference_spec.env.pinned`, `hypertrain/docs/protocol.md`
+section 7, item 4a), so the hand-set `ATEN_CPU_CAPABILITY=avx2` below is unnecessary for the
+miners: the launcher gives every rank the pin, and `bootstrap_service_capacity_v2` always asks
+whether the challenge host can honor it (409 `SERVICE_PROFILE_ENV_PIN`). A TEST run made before
+the pin was required no longer parses: it answers 409 `RUN_MANIFEST_RETIRED` and is recreated.
+The pin removes ambient-induced divergence only; `docs/adr/0011-audit-integrity.md` part 3 says
+what was and was not measured.
 
 `setup` reads `SEEDS_DIR/miner<i>-hot.seed` and `miner<i>-cold.seed`. `miner<i>-cold` must be the
 builder's `cold-<i>`: origin i belongs to allocation entry i.
@@ -486,7 +503,8 @@ Copy the public outputs to `/data/hypertrain-test/state/<stage>/` as in section 
 
 Back up first (section 1: `snap.sh pre`, `challenge_image.sh backup $TS`). The new variable goes
 in through a compose override, gated like the image swap (master `readyz`, a young sealed seal,
-the TEST container names, and the resolved compose config must differ only in that variable):
+the TEST container names, and the resolved compose config must differ only in the variables the
+command sets):
 
 ```bash
 ssh root@s100 "bash -s -- executor $B /data/executor/cuda-executor.json" < $T/challenge_image.sh
@@ -495,7 +513,145 @@ ssh root@s100 "bash -s -- executor $B /data/executor/cuda-executor.json" < $T/ch
 The challenge must run an image that contains the executor (`$NEW`, section 1). Setting it together with
 `HYPERTRAIN_ROLE_DISPATCH` stops the challenge at start. A later
 `swap` or `rollback` uses `compose.test.yml` alone and drops the variable: rerun `executor`. Undo
-with `bash -s -- executor-off $B`.
+with `bash -s -- executor-off $B`. The challenge loads the executor on the first CUDA job, not at
+start: a configuration it cannot load is a 503 `ROLE_DISPATCH_UNAVAILABLE` there, and `live` and
+`check` do not see it. Plain `executor` therefore looks into the recreated challenge only for its
+two variables; with `--r2` the challenge's own loader is asked before and after (6.4a).
+
+### 6.4a Results through R2 instead of ssh
+
+The rates are measured (`livrables/forge/2026-10-28_transfer-measure`, from nodes): ssh between s100
+and a node carried 7 MB/s, R2 20 MB/s on one stream and 100-144 MB/s on eight. That the 4.13 GB
+result of the 101 M profile [H] does not fit a lease over ssh and does over R2 is an estimate from
+those rates until the rate from s100 to R2 is measured (`r2-check` below does not measure it). Nothing below has been run
+on s100, on a node or against R2 yet. The mechanism, its limits and the settings are in
+[ADR 0013](adr/0013-executor-artifacts-via-r2.md) and
+[cuda-executor.md](../hypertrain/docs/cuda-executor.md#results-through-r2-opt-in); this section is
+the commands.
+
+Before the first run:
+- the challenge image must contain ADR 0013's code (`hypertrain.gpu_ops.artifact_transfer`): an older
+  one answers `preflight refused: ModuleNotFoundError` and nothing is written;
+- the bucket is a `cortex-v3-*` bucket with the rules of cuda-executor.md (abort incomplete uploads and
+  expire after a day, on the prefix `exec/`): `r2-check` leaves an object there if its delete fails;
+- the token is the bucket-scoped file of the Forge, 0600 and outside the repository, with these names
+  and no other: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, and
+  `R2_ENDPOINT` if the account's default endpoint is not the one to use. Never the Cloudflare account
+  token. It goes to s100 the way the key did in 6.1, on stdin, so that its value is neither on a
+  command line nor in a history, and it is never shown, `cat`-ed or passed as an argument:
+
+```bash
+ssh root@s100 "umask 077; cat > $X/r2.env; chown 65532:65532 $X/r2.env" < ./r2.env   # mode 0600
+```
+
+It is owned by uid 65532, not by root: the challenge's loader refuses a token file of any other
+user, and the script refuses it before the loader can. `$X` is already `0700` and owned by 65532
+(6.1). The order of the commands, the first four inside the seal window (its first half, as for
+`swap`):
+
+```bash
+ssh root@s100 "bash -s -- r2-check --file /data/executor/r2.env" < $T/challenge_image.sh
+ssh root@s100 "bash -s -- executor $B /data/executor/cuda-executor.json --r2 /data/executor/r2.env --dry-run" < $T/challenge_image.sh
+ssh root@s100 "bash -s -- executor $B /data/executor/cuda-executor.json --r2 /data/executor/r2.env" < $T/challenge_image.sh
+ssh root@s100 "bash -s -- r2-check" < $T/challenge_image.sh
+ssh root@s100 "bash -s -- r2-check --node x $GPU" < $T/challenge_image.sh
+```
+
+The path of the token is the one the container sees. `--operations` is a comma list of `audit`,
+`referee` (the default) and `reference`; keep `reference` out until the reference no longer holds the
+store lock for its whole launch (ADR 0013, decision 1). Every other setting keeps the loader's
+default; `fallback` is `classic`, so a broken R2 setup is not an error but the 7 MB/s path again:
+look for `exec_artifact_unavailable` and `exec_artifact_skipped` in the journal
+(`$X/state/journal.jsonl`) after the first job.
+
+What `executor --r2` does and what stops it. The checks come in this order, except that the TEST
+container names are checked once the compose config has been resolved:
+
+| Step | Refusal |
+| --- | --- |
+| usage; backup; seal window | exit 2 (usage), 3 (window) or 4 |
+| the token: one plain name in `/data/executor`, a plain file (not a link), mode exactly 0600, uid 65532, in a directory `0700` of 65532 | exit 4, with the mode or uid that was found |
+| `r2-artifacts.json` is absent or one this script wrote (only the keys `credentials_file` and `operations`) | exit 4 |
+| the TEST container names, of the compose file and of the file with the override | exit 4 |
+| the running challenge is on the image `compose.test.yml` resolves, and its own loader accepts the settings (on stdin, nothing is written yet): the settings model, the token file, `network` `default`, `max_artifact_bytes` at most `max_result_bytes`, an R2 client, an `ssh` client | exit 4, with the loader's reason |
+| `compose config` of the file and of the file with the override differ in the two variables and in nothing else | exit 5 |
+| writes `r2-artifacts.json` (0600, 65532), then the override; `up` recreates the challenge, with `--force-recreate` when the settings changed but the variables did not | exit 7, with the `executor-off` command |
+| `live`: the challenge answers and runs the image | exit 7, with the `executor-off` command |
+| the recreated challenge's own look at its environment and at the files as its user | exit 7, with the `executor-off` command |
+
+What the challenge's loader is not asked: the `state_dir` of the executor config and its journal. The
+challenge creates the first when it first loads the executor and 6.1 has made `$X/state`; a wrong
+owner there is a 503 `ROLE_DISPATCH_UNAVAILABLE` at the first CUDA job, not something this command
+sees.
+
+`--dry-run` takes every step but the writes and the `up`, in a temporary directory, and prints
+variable and key names only. It reports a closed seal window instead of stopping at it and exits
+with the window's code, so a dry run that exits 0 means the real run would be accepted now.
+Running the command again with the same arguments recreates nothing. The challenge reads the settings
+and the token once it has loaded them, and keeps them for the life of the process (a load that failed
+is tried again by the next job): new settings are picked up by the recreate the script forces, a
+rotated token at the same path is not. To rotate a token run `executor-off`, replace the file, run
+`executor --r2` again.
+
+`executor` without `--r2` goes back to the ssh path and removes `r2-artifacts.json`; `executor-off`
+removes both variables and that file (only a file with the keys the script writes), after the
+recreate, and leaves the token where it is: delete it and revoke the token yourself when the run is
+over. `swap` and `rollback` drop both variables like the executor one: rerun the same `executor`
+command. A failed `up`, `live` or look prints the `executor-off` command and leaves the files for it.
+
+`r2-check` looks at the bucket from the challenge, with the token the challenge is configured with
+(or, before `executor --r2`, with `--file`, which is checked like `--r2`'s). It is not gated, takes no
+backup and changes nothing in the stack. It puts 1 MiB of random bytes under
+`exec/_r2-check/<random>`, reads it back, compares and deletes it, then asks for that key, which is
+now absent, the way the transfer does before every attempt; all through the same client settings the
+transfer uses (no proxy or CA variable from the environment). It prints one line:
+
+```
+r2-check challenge put=200 get=200 delete=204 absent=404 bytes=1048576 put_s=… get_s=… delete_s=…
+```
+
+A step that failed shows its HTTP status or the class name of the error instead (`put=403`,
+`put=ConnectError`), a read that returns other bytes `get=mismatch`, a step that did not run
+`get=skipped`; an object still there after the delete `absent=present`. `absent=403` is the case to
+fear: a store that does not answer 404 for a key that is not there makes the transfer fall back to
+ssh without a word. Never a URL, a key, the bucket or any value of the token. Exit 8 when a step
+failed or the token does not load, 4 when the script refuses `--file`. One mebibyte measures the first
+byte (about 0.36 s from a node) and not the bulk rate: the rate from s100 to R2 with several parts at
+once is still to be measured before the run, and `put_s` says nothing about it. A green `r2-check` does
+not exercise the multipart calls (create, upload part, list, abort) or a PUT from a node.
+
+`--node LABEL sha256:<image digest>` adds the look from an executor host (`LABEL` as in
+`cuda-executor.json`, the digest the `$GPU` above), between the read and the delete. The challenge
+hands three presigned URLs (HEAD and a one-byte ranged GET of that object, and a GET of a key nobody
+wrote, 120 s) to a `--rm` container of the GPU image that the executor's own ssh transport starts on
+the host (its key, its pinned `known_hosts`, its `docker` words), with the URLs on the container's
+stdin: they are in no argument, no file and no log. The container holds them on a rented machine, so
+it runs with `--cap-drop=ALL --read-only --pids-limit=64 --memory=256m
+--security-opt=no-new-privileges`, no mount and no environment variable, and the default network (it
+has to reach the endpoint). It reports whether Python's `ssl` finds a CA file and a CA directory
+(and how many entries the directory has), then makes the three requests with the default TLS context,
+the one the runner uses. The image must already be on the host: the command passes `--pull never`, and
+exit 125 (`r2-check node x exit_125`) means docker refused, usually because it is not there
+(`cuda_executor_check.py` reports `image_present`). A host is a rented machine and may print
+anything: only fields of a fixed shape are shown, rebuilt by the challenge, and never its stderr.
+Its line looks like this (an illustration of the shape; nothing has been observed yet):
+
+```
+r2-check node x python=3.12.4 openssl=OpenSSL_3.0.13_30_Jan_2024 cafile=0 openssl_cafile=0 ssl_env=0 capath_entries=146 head=200 head_bytes=1048576 head_s=0.41 get=206 get_bytes=1 get_s=0.38 absent=404 absent_bytes=0 absent_s=0.35
+r2-check node x … head=SSLCertVerificationError head_verify=unknown_issuer get=SSLCertVerificationError … absent=SSLCertVerificationError …
+```
+
+The three statuses are the verdict; the CA fields say where the interpreter looked (`cafile=0` is
+normal when only the directory is populated). A `head_verify` of `unknown_issuer` or `self_signed` is
+the open question of ADR 0013 (does the image carry a CA bundle that its Python can see): the cure is
+in the image, never in turning verification off. HEAD is only checked here: the runner itself sends
+GET and PUT, and R2's answer to a presigned HEAD has not been seen, so a 403 on `head` with a `get` of
+206 is not a network problem; the command still exits 8 for it, as for a `get` that is not 200 or 206,
+an `absent` that is not 404, and a host that did not answer in the closed shape (`HostLost`,
+`no_reply`, `exit_N`).
+
+Exit codes: 2 usage (and `readyz`), 3 seal window, 4 refusal, 5 unexpected compose change, 6 database,
+7 the challenge is not up, or not configured as asked, after a change, 8 `r2-check` did not complete.
 
 ### 6.5 Publish the run with the backend record in place, then run it
 
@@ -550,8 +706,9 @@ sudo -n docker run --rm --init --gpus device=5 --ipc=host --ulimit memlock=-1 --
 ```
 
 `setup` takes no `--gpus`; `$D` holds `scripts/cpu_miners.py`, `seeds/` and the miner directories. Two
-drivers on different GPUs with disjoint plans overlap one miner's probe with the other's reference, but
-the challenge computes references one at a time under its store lock. Gate the node with
+drivers on different GPUs with disjoint plans overlap one miner's probe with the other's reference;
+before ADR 0012 Part B the challenge computed references one at a time under its store lock, since then
+two references may overlap, each on an executor host (one job per host). Gate the node with
 `hypertrain/scripts/b300/cycle_gate.sh --gpus 5` before each driver.
 
 ### 6.8 Measured on 2026-10-27 (S13, one executor host, tiny-cpu)
@@ -581,7 +738,10 @@ reach a round: no `run-v2`, no audit, no `get_weights`.
 - **The reference holds the store lock**, so the beacon pusher times out meanwhile and every trial
   waits for it to catch up (503 "beacon infrastructure paused" for 10-70 s). A second driver or a
   second executor host does not shorten the references; two drivers only overlap the miner side.
-- **Do not push beacon rounds out of order.** The challenge reads exact rounds (a trial's seed round,
+  (ADR 0012 Part B releases the lock during the reference; this measurement predates it.)
+- **Never add a second pusher, and never backfill by hand.** (The pusher itself now pushes the latest
+  round first and the older ones after, from its own list: ADR 0012 section 3. What S13 broke was a
+  second writer.) The challenge reads exact rounds (a trial's seed round,
   `d_audit`). A second pusher with `--catch-up 1` moved `known` past rounds the first one would have
   filled; the challenge request (then an unsigned `GET /join/<id>/challenge`, an owner-signed
   `POST` since ADR 0010) answered 500 `BeaconUnavailable: round N not pushed` and

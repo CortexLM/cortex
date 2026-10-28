@@ -5,12 +5,16 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import json
+import os
 import re
+import subprocess
 import sys
 import types
 from pathlib import Path
 
 import pytest
+
+from env_pin_fixtures import HOSTILE, TEST_PIN, ambient, needs_avx2
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("gpu_probe", ROOT / "scripts/b300/gpu_probe.py")
@@ -18,11 +22,47 @@ assert spec is not None and spec.loader is not None
 gpu_probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gpu_probe)  # imports hypertrain.trainer before torch
 torch = gpu_probe.torch
-import hypertrain.models  # noqa: E402  (after gpu_probe: determinism before torch)
-import hypertrain.models.kimi_tiny as kt  # noqa: E402
+import hypertrain.models.kimi_tiny as kt  # noqa: E402  (after gpu_probe: determinism before torch)
 import hypertrain.trainer.attention as attn  # noqa: E402
 
+KIMI_ROOTS = ("leaves_root", "delta_hash", "state_root")
 
+
+@pytest.fixture
+def no_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The kimi round is a child process; a test of the other smokes does not start one."""
+    monkeypatch.setattr(gpu_probe, "kimi_round", lambda device: dict.fromkeys(KIMI_ROOTS, "e" * 64))
+
+
+class Child:
+    """A stand-in for the process kimi_round starts: it records how it was started and answers."""
+
+    def __init__(
+        self, monkeypatch: pytest.MonkeyPatch, stdout: str = "", stderr: str = "", rc: int = 0
+    ) -> None:
+        self.started: list[tuple[list[str], dict[str, str]]] = []
+        self.reply = (stdout, stderr, rc)
+        monkeypatch.setattr(gpu_probe.subprocess, "run", self.run)
+
+    def run(
+        self, argv: list[str], *, env: dict[str, str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        self.started.append((argv, env))
+        stdout, stderr, rc = self.reply
+        return subprocess.CompletedProcess(argv, rc, stdout, stderr)
+
+    @property
+    def device(self) -> str:
+        return self.started[-1][0][self.started[-1][0].index(gpu_probe.KIMI_ROUND_FLAG) + 1]
+
+    @property
+    def pin(self) -> dict[str, object]:
+        body = json.loads(self.started[-1][0][-1])
+        assert isinstance(body, dict)
+        return body
+
+
+@pytest.mark.usefixtures("no_child")
 def test_cpu_smoke_is_bitwise_stable_and_one_flipped_digest_fails():
     runs = {"cpu": [gpu_probe.workload(torch.device("cpu")) for _ in range(2)]}
     assert gpu_probe.evaluate(runs)["ok"], runs
@@ -71,6 +111,7 @@ def test_any_failure_replaces_a_stale_ok_json_and_still_propagates(
     assert doc["error"] == f"{type(exc).__name__}: {exc}"
 
 
+@pytest.mark.usefixtures("no_child")
 @pytest.mark.parametrize(
     ("forced", "backend"), [(None, "math"), ("sdpa-flash", "sdpa-flash")], ids=["default", "forced"]
 )
@@ -87,6 +128,7 @@ def test_the_attention_smoke_runs_the_backend_select_backend_picks(
     assert keys == sorted(f"{backend}_{s}" for s in ("out", "dq", "dk", "dv"))
 
 
+@pytest.mark.usefixtures("no_child")
 def test_a_kernel_error_is_recorded_under_the_selected_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -100,14 +142,12 @@ def test_a_kernel_error_is_recorded_under_the_selected_backend(
     assert not any(k.startswith(("math", "sdpa-flash_")) for k in out)
 
 
-KIMI_ROOTS = ("leaves_root", "delta_hash", "state_root")
-
-
+@needs_avx2
 def test_the_kimi_micro_roots_join_the_digests_and_a_flipped_one_is_a_mismatch() -> None:
     cpu = torch.device("cpu")
     first, second = gpu_probe.workload(cpu), gpu_probe.workload(cpu)
     doc = kt.run_manifest(dataclasses.replace(kt.MICRO, compute_dtype="bf16"))  # as production
-    (res,) = kt.qualify(doc, "cpu", 1)
+    (res,) = kt.qualify(doc, "cpu", 1, TEST_PIN)
     for root in KIMI_ROOTS:
         assert re.fullmatch("[0-9a-f]{64}", first[f"kimi_micro_{root}"])
         assert first[f"kimi_micro_{root}"] == res[root]
@@ -117,14 +157,91 @@ def test_the_kimi_micro_roots_join_the_digests_and_a_flipped_one_is_a_mismatch()
     assert not verdict["ok"] and verdict["mismatches"] == ["cuda:3 repeat 0"]
 
 
-def test_a_kimi_runtime_error_is_recorded_as_a_digest_error(
+@needs_avx2
+def test_the_kimi_round_runs_under_its_pin_whatever_this_process_exports(
     monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The attention smoke needs this process unpinned, and the trainer refuses a process that does
+    # not honor the pin: the round runs in a child that gets the pinned environment. Under a hostile
+    # export it yields the roots of the same round run in a process pinned from its start.
+    doc = kt.run_manifest(dataclasses.replace(kt.MICRO, compute_dtype="bf16"))
+    (pinned,) = kt.qualify(doc, "cpu", 1, TEST_PIN)
+    ambient(monkeypatch, **HOSTILE)
+    assert gpu_probe.kimi_round(torch.device("cpu")) == pinned
+
+
+@pytest.mark.parametrize(
+    ("device", "capability", "gpu"),
+    [
+        (torch.device("cpu"), None, "none"),
+        (torch.device("meta"), None, "none"),
+        (torch.device("cuda", 1), (10, 3), "sm_103"),
+        (torch.device("cuda", 7), (12, 0), "sm_120"),
+    ],
+    ids=["cpu", "meta", "sm_103", "sm_120"],
+)
+def test_the_kimi_round_starts_on_its_device_under_the_pin_of_the_devices_class(
+    device: torch.device,
+    capability: tuple[int, int] | None,
+    gpu: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ambient(monkeypatch, HT_ATTN_BACKEND="sdpa-flash", HT_FP8="1", OMP_THREAD_LIMIT="2")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda d: capability)
+    child = Child(monkeypatch, stdout=json.dumps({"round": dict.fromkeys(KIMI_ROOTS, "e" * 64)}))
+
+    assert gpu_probe.kimi_round(device) == dict.fromkeys(KIMI_ROOTS, "e" * 64)
+
+    assert child.device == str(device)
+    assert (child.pin["cpu"], child.pin["gpu"]) == ("avx2", gpu)
+    env = child.started[-1][1]
+    assert env["HT_ATTN_BACKEND"] == "math" and env["ATEN_CPU_CAPABILITY"] == "avx2"
+    assert "HT_FP8" not in env and "OMP_THREAD_LIMIT" not in env
+
+
+def test_a_device_class_without_a_pin_row_is_refused_before_any_child_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda d: (9, 0))
+    child = Child(monkeypatch)
+
+    with pytest.raises(ValueError, match="sm_90"):
+        gpu_probe.kimi_round(torch.device("cuda", 0))
+
+    assert child.started == []
+
+
+def test_a_programming_error_of_the_round_ends_the_child_instead_of_answering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*_args: object, **_kwargs: object) -> None:
+        raise TypeError("not a kernel error")
+
+    monkeypatch.setattr(kt, "qualify", broken)
+    with pytest.raises(TypeError, match="not a kernel error"):
+        gpu_probe.kimi_child("cpu", json.dumps(TEST_PIN.body()))
+
+
+def test_a_child_that_dies_fails_the_probe_with_what_it_said(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Child(monkeypatch, stderr="Traceback\nImportError: cannot import name 'kimi_tiny'", rc=1)
+
+    with pytest.raises(ChildProcessError, match=r"(?s)exited 1: .*cannot import name 'kimi_tiny'"):
+        gpu_probe.workload(torch.device("cpu"))
+
+
+def test_a_kimi_runtime_error_is_recorded_as_a_digest_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     def no_kernel(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("no kernel image is available")
 
-    monkeypatch.delenv("HT_ATTN_BACKEND", raising=False)  # the CPU default backend is math
+    # What the child prints for a RuntimeError of the round is what the parent reads.
     monkeypatch.setattr(kt, "qualify", no_kernel)
+    assert gpu_probe.kimi_child("cpu", json.dumps(TEST_PIN.body())) == 0
+    Child(monkeypatch, stdout=capsys.readouterr().out)
+    monkeypatch.delenv("HT_ATTN_BACKEND", raising=False)  # the CPU default backend is math
     out = gpu_probe.workload(torch.device("cpu"))
     assert out["kimi_micro"] == "error: no kernel image is available"
     assert not any(k.startswith("kimi_micro_") for k in out)
@@ -133,26 +250,25 @@ def test_a_kimi_runtime_error_is_recorded_as_a_digest_error(
     assert errors == ["cuda:0: kimi_micro: error: no kernel image is available"]
 
 
+@needs_avx2
 def test_an_image_without_kimi_still_leaves_a_failed_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The pinned image installs hypertrain at build time; one built before kimi-k3-pro-tiny has no
     # such module. That must fail the probe through the JSON: an import error while the script
-    # loads would end it before main() and leave an earlier run's ok:true in place.
+    # loads would end it before main() and leave an earlier run's ok:true in place. The module is
+    # missing in the child only: its sitecustomize is found first on the child's path.
+    block = tmp_path / "block"
+    block.mkdir()
+    (block / "sitecustomize.py").write_text(
+        'import sys\nsys.modules["hypertrain.models.kimi_tiny"] = None\n'
+    )
+    path = [str(block), *filter(None, [os.environ.get("PYTHONPATH")])]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(path))
     out = tmp_path / "gpu_probe.json"
     out.write_text(json.dumps({"ok": True, "stale": True}))
-    monkeypatch.setitem(sys.modules, "hypertrain.models.kimi_tiny", None)
-    monkeypatch.delattr(hypertrain.models, "kimi_tiny")  # `from hypertrain.models import` reads it
-    fresh_spec = importlib.util.spec_from_file_location(
-        "gpu_probe_without_kimi", ROOT / "scripts/b300/gpu_probe.py"
-    )
-    assert fresh_spec is not None and fresh_spec.loader is not None
-    fresh = importlib.util.module_from_spec(fresh_spec)
-    fresh_spec.loader.exec_module(fresh)
-    argv = ["gpu_probe.py", "--out", str(out), "--device", "cpu", "--expect-gpus", "0"]
-    monkeypatch.setattr(sys, "argv", [*argv, "--expect-cc", "any", "--repeats", "1"])
-    with pytest.raises(ImportError):
-        fresh.main()
+    with pytest.raises(ChildProcessError, match="kimi_tiny"):
+        run_main(monkeypatch, out)
     doc = json.loads(out.read_text())
     assert doc["ok"] is False and "stale" not in doc and "kimi_tiny" in doc["error"]
 
@@ -217,24 +333,20 @@ def test_the_smoke_runs_on_the_device_under_test(monkeypatch: pytest.MonkeyPatch
     # device is. (select_backend answers for any non-CUDA device with "math", so only a stand-in
     # that checks its argument can tell a wrong device from the right one.)
     meta = torch.device("meta")
-    started: list[str] = []
 
     def pick(device: torch.device) -> str:
         assert device == meta, f"select_backend asked about {device}"
         return "math"
 
-    def qualify(doc: dict[str, object], device: str, rounds: int) -> list[dict[str, str]]:
-        started.append(device)
-        return [{k: "e" * 64 for k in KIMI_ROOTS}]
-
+    child = Child(monkeypatch, stdout=json.dumps({"round": dict.fromkeys(KIMI_ROOTS, "e" * 64)}))
     monkeypatch.setattr(gpu_probe, "select_backend", pick)
     monkeypatch.setattr(gpu_probe, "digest", lambda t: "d" * 64)
-    monkeypatch.setattr(kt, "qualify", qualify)
     out = gpu_probe.workload(meta)
-    assert started == ["meta"]
+    assert len(child.started) == 1 and child.device == "meta"
     assert out["math_out"] == "d" * 64 and out["kimi_micro_state_root"] == "e" * 64
 
 
+@needs_avx2
 def test_every_repeat_runs_the_whole_smoke() -> None:
     ev = gpu_probe.probe(2, "cpu")
     runs = ev["runs"]["cpu"]
@@ -301,6 +413,7 @@ def test_a_probe_that_ran_nothing_does_not_pass(runs: dict[str, list[dict[str, s
     assert verdict["ok"] is False and verdict["mismatches"] == ["no run"]
 
 
+@pytest.mark.usefixtures("no_child")
 def test_the_smoke_computes_in_the_miners_dtypes(monkeypatch: pytest.MonkeyPatch) -> None:
     dtypes: list[torch.dtype] = []
     real_digest, real_attention = gpu_probe.digest, gpu_probe.attention

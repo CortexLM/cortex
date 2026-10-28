@@ -8,6 +8,7 @@ import os
 import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -47,7 +48,7 @@ def active_network(tmp_path_factory):
     fixtures.HOT = [Keypair(bytes([80 + i]) * 32) for i in range(5)]
     fixtures.COLD = [Keypair(bytes([90 + i]) * 32) for i in range(5)]
     original = fixtures.fixture.setup
-    cache = Path("/tmp/hypertrain-rollback-active-carry")
+    cache = Path(tempfile.gettempdir()) / "hypertrain-rollback-active-carry"
     baseline_time = int(time.time())
     if (cache / "challenge.db").exists():
         with sqlite3.connect(cache / "challenge.db") as db:
@@ -183,6 +184,7 @@ def active_network(tmp_path_factory):
                         challenge_hash=challenge.digest(),
                         rank_results=list(artifacts.ranks),
                         artifact_hashes=[r.sha256 for r in proof.artifact_refs],
+                        env=artifacts.env,
                     )
                     response = network.client.post(
                         network.url + "/join/proof",
@@ -750,24 +752,26 @@ def test_real_service_two_round_rollback_and_checkpoint(active_network, monkeypa
     assert response.status_code == 200, response.text
     repaired = response.json()
     assert repaired["status"] == "REPAIRED" and repaired["reward_units"] == 0
-    # Both repaired rounds are closed without a reward, and their relay custody settles (D70): the
-    # finality is the hash that closed the round, the custody horizon stands in for the beacons.
+    # Both repaired rounds are closed without a reward, and the relay custody of every upload the
+    # master accepted in them settles on the closure, at the custody horizon (D70, D72). The grants
+    # are those of the uploads above: a closed round answers 409 for a grant with no receipt.
+    run_id = n.manifest.run_id()
     for w in (0, 1):
-        grant = sha256_hex(f"grant:{w}".encode())
-        horizon = 1000 + w
-        with n.store._tx():
-            n.store._put_record_v2(n.manifest.run_id(), "grant", grant, {"body": {"w": w}})
-            n.store._put_record_v2(
-                n.manifest.run_id(),
-                "relay-receipt",
-                grant,
-                {"body": {"grant_hash": grant, "retain_until": horizon}},
-            )
-        closed = n.store._record_v2(n.manifest.run_id(), "finality", str(w))
+        closed = n.store._record_v2(run_id, "finality", str(w))
         assert closed["disposition"] == "EXCLUDED" and closed["rollback_complete"]
-        settled = n.store.relay_settlement_v2(n.manifest.run_id(), grant)
-        assert settled["finality_hash"] == closed["resolution_hash"]
-        assert (settled["finality_beacon"], settled["vesting_beacon"]) == (horizon, horizon)
+        receipted = n.store._db.execute(
+            "SELECT json_extract(r.data,'$.body.grant_hash'),"
+            " json_extract(r.data,'$.body.retain_until') FROM records_v2 r"
+            " JOIN records_v2 g ON g.run_id=r.run_id AND g.kind='grant'"
+            " AND g.id=json_extract(r.data,'$.body.grant_hash')"
+            " WHERE r.run_id=? AND r.kind='relay-receipt' AND json_extract(g.data,'$.body.w')=?",
+            (run_id, w),
+        ).fetchall()
+        assert len(receipted) == len(fixtures.HOT)
+        for grant, retain_until in receipted:
+            settled = n.store.relay_settlement_v2(run_id, grant)
+            assert settled["finality_hash"] == closed["resolution_hash"]
+            assert settled["finality_beacon"] == settled["vesting_beacon"] == retain_until
     assert escrow.balances() == before
     assert original == [
         tuple(row)

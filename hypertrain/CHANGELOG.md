@@ -55,26 +55,54 @@
   8-GPU hosts on a fake clock under seeded notice, hard-kill, host-loss, partition,
   store-partition, regional-loss and drought schedules; every run must end in the uninterrupted
   run's state hash.
-- Opt-in `reference_spec.env.pinned` (`{present: {NAME: VALUE}, absent: [NAME]}`) over the closed,
-  append-only table of `hypertrain.protocol.env_pins`: process-environment variables that change
-  CPU round bytes (`ATEN_CPU_CAPABILITY`, `MKL_CBWR`, `ONEDNN_MAX_CPU_ISA`, `HT_ATTN_BACKEND`,
-  `OMP_DYNAMIC`, and `HT_COMPILE`, `HT_FP8`, `HT_MOE_GROUPED`, `OMP_THREAD_LIMIT` pinned unset).
-  A manifest without the field keeps its bytes and `run_id`; the table is in `docs/protocol.md`
-  section 7 and the decision in `docs/adr/0011` (part 3) at the monorepo root. The island and
-  repair workers and the in-process entry points (`train_round`, `train_island`,
+- Required `reference_spec.env.pinned` (`{cpu, gpu, present, absent}`): every manifest names a CPU
+  class (`avx2`, `avx512`) and a GPU class (`none`, `sm_103`, `sm_120`) from the closed, append-only
+  tables of `hypertrain.protocol.env_pins` and carries the process environment they imply
+  (`ATEN_CPU_CAPABILITY`, `MKL_CBWR`, `ONEDNN_MAX_CPU_ISA`, `OMP_DYNAMIC`, `HT_ATTN_BACKEND`, and
+  `HT_COMPILE`, `HT_FP8`, `HT_MOE_GROUPED`, `OMP_THREAD_LIMIT` pinned unset). A CPU-only run says
+  `"gpu": "none"`. A manifest without the field, with `null`, or with only one of the two parts is
+  refused wherever it is parsed (`create_run` and `create_run_v2` answer 422 naming the field;
+  a stored run that no longer parses answers 409 `RUN_MANIFEST_RETIRED`). The tables are in
+  `docs/protocol.md` section 7 and the decision in `docs/adr/0011` (part 3) at the monorepo root.
+  The island and repair workers and the in-process entry points (`train_round`, `train_island`,
   `train_unit_order`) refuse a process whose environment, or ATen capability, diverges from the
-  pin, naming the variable; a pinned rank records `env_pin` in `summary.json`.
+  pin, naming the variable; the island worker also refuses a device outside the GPU class and
+  records what it observed in `summary.json["env"]`. `TrainConfig.env_pin` is required.
   `python -m hypertrain.trainer.env_probe --manifest FILE` reports the environment a manifest pins
   and checks that this host can honor it (`protocol.env_pins.require_honorable`: a child started
-  under the pinned environment, cached per process).
-  `launch_island`, `launch_window` and `_launch_unbounded` start island ranks under the pins and
+  under the pinned environment, cached per process and backend).
+  `launch_island`, `launch_window` and `_launch_unbounded` start island ranks under the pin and
   raise `EnvPinRefused` (an `IslandFailure`) before charging capacity when this host cannot honor
-  them. The rollback repair and history workers get the same pins.
+  it. The rollback repair and history workers get the same pin.
   `NetworkMiner.join` and `probe_trial` refuse a host that cannot honor the pin before any request,
-  and `bootstrap_service_capacity_v2` answers 409 `SERVICE_PROFILE_ENV_PIN` when the challenge host
-  cannot.
-  The miner's dispute follower answers a pinned CPU publication from its published trace instead
-  of replaying it in the daemon (behavior change for pinned manifests only).
+  and `bootstrap_service_capacity_v2` always asks whether the challenge host can (409
+  `SERVICE_PROFILE_ENV_PIN`).
+  The miner's dispute follower answers every publication from its published trace instead of
+  replaying it in the daemon (the in-process replay of an unpinned CPU publication is gone).
+  The generic CUDA executor sends the pin to the container (`request.json` gains `unset` and
+  `gpu`, `env` the names the pin sets); the container program applies it and refuses with exit 4,
+  before the island starts, a host whose probe shows another environment, ATen capability or device
+  class, and the executor judges the same report (`pinned_env`, `cpu_capability` in
+  `environment.json` and `role-dispatch.json`) and quarantines that host. See
+  `docs/cuda-executor.md`.
+  The CUDA network qualification starts its island under the pin (`child_environment`), and the
+  owner-reviewed backend bootstrap answers 403 when a rescued rank summary does not declare it.
+  `ChallengeStore._backend_v2` answers 409 `ENV_CLASS_BACKEND: gpu class none` for a manifest that
+  names no device on the CUDA backend: CUDA manifest builders must name `sm_103` or `sm_120`.
+  Breaking: every `run_id`, `reference_hash` and `training_hash` changes; existing runs are
+  recreated. `kimi_tiny.train_config` and `qualify` take the `EnvPin` the caller's process honors.
+  The miner declares its probed environment in bodies it signs: `JoinRequest.env` and
+  `WorkScreenV2.env` (`EnvObservation`: pinned variables as seen, ATen's resolved capability,
+  device class) are required, and the server answers 409 `ENV_PIN_DIVERGES: NAME, NAME` at join,
+  in the proof route before the reference is paid and in `Admission.proof`, before anything is
+  written (no strike, no suspension, the trial stays open). `sign_join` takes `env=`;
+  `IslandArtifacts.env` is what the ranks observed; the worker writes `summary.json["env"]`.
+  The CPU service profile's `implementation_hash` covers the manifest's whole pin body and the files
+  `protocol/env_pins.py` and `trainer/determinism.py` (twelve files; `_service_implementation_v2`
+  takes the `EnvPin`), so it differs per pin and an installed profile no longer matches.
+  The capacity workers (genesis and outer step) are started under the manifest's pin
+  (`ChallengeStore._capacity_env_v2`), the genesis attestation must show that same environment, and
+  `python -m hypertrain.aggregator.capacity_worker` refuses a process that does not honor the pin.
 
 ### Changed
 - A production run no longer stands on a CUDA qualification without host attestation.
@@ -194,6 +222,41 @@
   (the Q/4 caps need four), so five tolerate one and six tolerate two. `--tolerate 0` opens four
   on purpose, as the TEST runbook does. The store keeps the protocol minimum of four. A script
   that opens fewer than five hotkeys must pass `--tolerate 0`. ADR 0011 Part 8, decision 27.
+- The beacon pusher (`python -m hypertrain.beacon push`) posts the latest round first and then
+  one older missing round per tick, the oldest (`--once`: all of them), from a list it keeps in
+  memory, instead of refilling every missing round oldest first. After a long store lock or a
+  challenge restart the freshness gate of the test ledger should reopen within seconds instead of
+  after about four times the outage (a model result, not yet run against a relay or s100; the
+  production gate also needs the exact round `emitted - 2`). The older rounds then arrive one per
+  tick, about 15 s each, and a pusher restarted before its list is empty leaves the rest missing
+  (`scripts/ops/s100_test/beacon_gaps.py` finds them). Rounds older than the last `--catch-up` when
+  the gap is first seen are still never pushed; no round of that window is dropped later. The tick's
+  JSON line gains `pending`. The verification of every round is unchanged. See `docs/adr/0012` at
+  the monorepo root.
+- A remote reference no longer holds the challenge's store lock while the executor works
+  (`ChallengeStore.trial_reference_v2`: claim under the lock, launch without it under a lease guard,
+  settle under it again; `Admission.prepare_reference` is now `claim_reference`, `run_reference` and
+  `settle_reference`). The beacon pusher, `latest` and every other request are served during the launch,
+  so a cold 57 s reference should no longer close the freshness gate and cause the 503 "beacon
+  infrastructure paused" storm after it (tested with a fake executor; not yet replayed on s100). A repeated request for the same trial waits for the running reference
+  (at most two waiters in the process, then 503) instead of launching a second one; a result for a
+  challenge that was replaced, expired or closed while the launch ran is dropped; `reference_beacon` is
+  the round of the commitment. No wire format, manifest field or constant changes. See `docs/adr/0012` at
+  the monorepo root.
+- Staging a trial's inputs no longer holds the challenge's store lock, for a reference and for
+  `POST /v2/runs/{run_id}/join/{admission_id}/job` (and the admin export) alike. Staging is O(model):
+  it initialises the parameters, packs the start state and the error feedback, hashes and writes them,
+  and the export then puts five objects; on the claim of a reference it held the lock 2.2 to 2.5 s at
+  66 M parameters, 4.6 to 5.1 s at 101 M and 5.4 to 7.6 s at 162 M (the export 2.4 to 7.3 s). The freshness
+  gate closes when the pusher is more than 2 rounds (6 s) behind and the idle lag is 1 to 2 rounds, so a hold
+  of that size can bring the 503 "beacon infrastructure paused" storm back at the claim (not replayed). The
+  lock now covers the database reads (`ChallengeStore.plan_trial_v2`): 3 to 33 ms for a reference and
+  1 to 5 ms for an export at those sizes, measured on a loaded host. Stagings run one at a time, across the
+  root and its child stores (about 1.7 GB of resident set at 101 M); the puts of an export are not limited.
+  `stage_trial_v2` keeps its signature; `ReferenceClaim` carries the staging instead of a staged job and
+  `ReferenceResult` carries the job. A staging that fails (422 dataset dimensions, 409 changed inputs) now
+  fails inside the reference's single flight, so a repeated request gets the same error. No wire format,
+  manifest field or constant changes. See `docs/adr/0012` at the monorepo root.
 - Relay upload quota (ADR 0014 Part 6, TRN-02): a relay counts the uploads it still holds
   (a live reservation, or custody with a pin neither released nor past its horizon) instead of
   every record it ever accepted, and has no default count cap (it was 64 for the life of the
@@ -322,6 +385,9 @@
   service run, and a failure of it, or of the dispute reaper, is journaled as `exit-failed` and
   stops neither the beacon push nor the other reaper. No one is sanctioned yet. See
   `docs/adr/0011-audit-integrity.md` (Part 8) at the monorepo root.
+- A trial's inputs are staged once and renamed into place: a launch that reads `start_state` no
+  longer sees it rewritten in place by an export, and a write that died halfway no longer leaves a
+  torn file that every later call refused as "immutable trial inputs changed".
 - A round the caps or the finality rules refuse is a 409, no longer a bare 500: opening a round
   with a roster the Q/4 caps cannot carry (fewer than four eligible members) or round w+2 without
   round w+1 answered `Internal Server Error`. `InsufficientEligibleWeight` now answers 409
@@ -521,6 +587,20 @@
   again with the same hotkey every 10 s for 10 minutes, journals the `resume`, and exits with
   status 3 naming the route if nobody reseeds. No constant, policy field or message changes.
   See ADR 0010 decision 2 point 5 at the monorepo root.
+- `aggregate` and `finalize` no longer hold the challenge's store lock while they compute. The
+  tape (`make_tape`, then `replay_tape`) and the third replay of `finalize` took 327-423 s and
+  177-223 s of one lock hold at the 100.7 M profile (five deltas of 102,253,376 bytes), during
+  which `push_beacon` and `latest_beacon` waited and the TEST freshness gate closed. `aggregate`
+  is now a claim, a computation without the lock and a settlement that writes only if the round
+  is still what the claim read (else 409 `AGGREGATE_STALE`, nothing written); the claim and
+  every time-dependent decision of the plan are made at the beacon round the freshness gate
+  passed at. A second `aggregate` of a round that is computing waits for it (two waiters per
+  process, 600 s, then 503). `finalize` replays the applied tape before its transaction and the
+  transaction uses that verdict only if the records it replayed are unchanged and it is at most
+  120 s old. The bytes written
+  are those of the single transaction. The new helpers join the owned set of
+  `implementation_hash`, which changes (as for any edit of `aggregate_v2` or `finalize_v2`); the
+  freshness gate is not asked again at the settlement. See `docs/network-v2.md`.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

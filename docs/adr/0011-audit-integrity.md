@@ -273,11 +273,15 @@ breaker bounds the attempt-based one).
 
 ## Part 3: process-environment pin of island workers (DET-01, DET-01b)
 
-- Lens red team B findings DET-01 and DET-01b (IMPORTANT) with Principal D36 bis and D38. Opt-in: a
-  manifest without the new field keeps today's bytes, run_id, goldens and behaviour. No wire message,
-  protocol constant or economic parameter changes. `implementation_hash` changes (the lot-level hash
-  table lists when). Host of every measurement: AMD EPYC 9575F (Zen 5, avx2 + avx512), torch 2.14.0+cpu,
-  MKL 2024.2, oneDNN 3.12, no GPU.
+- Lens red team B findings DET-01 and DET-01b (IMPORTANT) with Principal D36 bis and D38, made
+  **required** by Principal D58-1 on 2026-10-27 after the Lens verdict "not lifted" on the opt-in
+  series (optional field, ISA avx2 only, no GPU pin, client-side and CPU-service checks only, not in
+  `implementation_hash`). The pin is a required manifest field naming a CPU class and a GPU class from
+  closed tables; a manifest without it is refused wherever it is parsed; there is no "omitted =
+  ambient" branch. Every `run_id` and `reference_hash` changes: the TEST runs are recreated. No wire
+  signature domain, protocol constant or economic parameter changes. `implementation_hash` changes
+  (the lot-level hash table lists when). Host of every measurement: AMD EPYC 9575F (Zen 5, avx2 +
+  avx512), torch 2.14.0+cpu, MKL 2024.2, oneDNN 3.12, no GPU.
 
 ### Context
 
@@ -314,70 +318,297 @@ breaker bounds the attempt-based one).
 - `compress`/`decompress` bytes are equal under ATen AVX2 and AVX512 and differ under
   `ATEN_CPU_CAPABILITY=default`; the capacity worker (genesis, outer) runs in a fresh environment. [V]
 
+- The opt-in series pinned the island and repair workers only, in `avx2`. The capacity worker (genesis
+  and outer), the CUDA executor and the CUDA qualification ran unpinned, and `dispute_follow` kept an
+  in-process replay for unpinned manifests. [V by reading]
+- The avx512 class gives, under a hostile ambient, one root triple per dtype that differs from the avx2
+  class: fp32 leaves root `ef95c128...`, bf16 `b4465e3c...` (avx2: `7f01e9f9...`, `684efad6...`, the
+  deployed goldens). A bf16 matmul at K=4096 shows `ONEDNN_MAX_CPU_ISA` in both classes; kimi MICRO's
+  K is too small to show it on avx512. [V, `tests/trainer/test_env_pin_classes.py`]
+
 ### Decision
 
-1. Optional `reference_spec.env.pinned = {present: {NAME: VALUE}, absent: [NAME]}` over a closed,
-   append-only, measured-values-only table in the torch-free module `protocol/env_pins.py`: present
-   `ATEN_CPU_CAPABILITY=avx2`, `HT_ATTN_BACKEND` math|sdpa-flash, `MKL_CBWR=AVX2`, `OMP_DYNAMIC=FALSE`,
-   `ONEDNN_MAX_CPU_ISA=AVX2`; absent `HT_COMPILE`, `HT_FP8`, `HT_MOE_GROUPED`, `OMP_THREAD_LIMIT`. A
-   manifest constrains exactly what it names; no required set, no version. Appending never invalidates
-   a signed manifest; removing or narrowing is forbidden (snapshot test) and every `HT_*` read of the
-   trainer must be in the table or in a reasoned "unpinned on purpose" map. The table is documented
-   in `docs/protocol.md` because the JSON schema cannot express it.
-2. Presets by compute dtype, kept outside `src`: `CPU_FP32` = ATEN avx2, MKL_CBWR AVX2, math attention,
-   OMP_DYNAMIC FALSE, the four absent names; `CPU_BF16` = `CPU_FP32` + `ONEDNN_MAX_CPU_ISA=AVX2`.
-3. Enforcement: `TrainConfig` carries the pin; `require_reference_env(cfg)` (threads + pin) replaces
-   `require_threads` at the three train entry points, `apply_reference_env` checks it before
-   `init_process_group`. The check reads the pinned names and ATen's effective capability. v1
-   manifests carrying the field are enforced, not rejected (rejection breaks v2 training bodies
-   converted through the v1 model, `trainer/config.py:145`).
-4. Launch: one builder `island_env` for `launch_island` and `launch_window`; `_launch_unbounded`
-   re-applies the pin itself so direct callers (the GPU operation script, tests) cannot forget it;
-   the rollback workers use the same function.
-5. Dispute follower: a pinned publication is answered from the actual-path trace, not from an
-   in-process replay in a daemon whose environment need not honor the pin; the referee side is
-   actual-path too.
-6. Preflight: a cached child probe under the pinned environment answers "can this host honor the
-   pin". The parent raises `EnvPinRefused` before any capacity is charged or rank started, at miner
-   `join` and `probe`, at the CPU service bootstrap (`SERVICE_PROFILE_ENV_PIN`), and from a CLI.
-7. A refusal is an executor fault, never evidence about the miner's work; it relies on AUD-01
+1. `reference_spec.env.pinned` is **required**: `EnvPins` has no default, `null` is refused, and the
+   field is always in the manifest bytes. A manifest without it is a validation error at every parse
+   site (v1 `RunManifest`, v2 `TrainingManifestV2` and `RunManifestV2`, `TrainConfig`, the miner
+   client, `env_probe --manifest`); `create_run` and `create_run_v2` answer 422 naming
+   `reference_spec.env.pinned`. A stored run whose manifest no longer parses answers 409
+   `RUN_MANIFEST_RETIRED` instead of a 500. Existing runs are recreated, not migrated.
+2. The pin is `{cpu, gpu, present, absent}`. `cpu` names a row of `CPU_CLASSES` (`avx2`, `avx512`) and
+   `gpu` a row of `GPU_CLASSES` (`none`, `sm_103`, `sm_120`) in the torch-free `protocol/env_pins.py`;
+   `present` and `absent` must equal the environment those two rows imply, plus the chosen
+   `HT_ATTN_BACKEND`. A pin with only a CPU part or only a GPU part is refused; a CPU-only run says
+   `"gpu": "none"`, which is a class (no GPU, attention `math`), never an omission.
+3. CPU rows: `avx2` = `ATEN_CPU_CAPABILITY=avx2`, `MKL_CBWR=AVX2`, `ONEDNN_MAX_CPU_ISA=AVX2`,
+   `OMP_DYNAMIC=FALSE`; `avx512` = `avx512`, `AVX512`, `AVX512_CORE`, `FALSE`; both leave
+   `OMP_THREAD_LIMIT` unset. `ONEDNN_MAX_CPU_ISA` is pinned in every row because fp32 ignores it and
+   it costs fp32 nothing, so a class does not depend on the compute dtype; a bf16 manifest picks its
+   class for its throughput (`avx2` is about 350 times slower than the ambient on a bf16 matmul,
+   `avx512` about 5.6 times).
+4. GPU rows: `none` (the CPU backend, `HT_ATTN_BACKEND=math`), `sm_103` (compute capability 10.3,
+   148 SMs, B300) and `sm_120` (12.0, 170 SMs, RTX 5090), the last two with attention `math` or
+   `sdpa-flash` chosen by the manifest, so the code default no longer decides the replay domain.
+   Every row leaves `HT_COMPILE`, `HT_FP8` and `HT_MOE_GROUPED` unset. `ReferenceSpec` refuses an
+   `sm_count` the GPU class was not measured on, and the island worker refuses a device whose
+   compute capability is not the class's. A GPU row enters with a recorded two-host measurement of its
+   device; `sm_103` and `sm_120` carry the ADR 0007 measurements, nothing newer.
+5. Enforcement: `TrainConfig.env_pin` is required; `require_reference_env(cfg)` (threads + pin)
+   replaces `require_threads` at the three train entry points, `apply_reference_env` checks it before
+   `init_process_group`. The check reads the pinned names and ATen's effective capability. The island
+   worker also takes `env_observation` after training and writes it to `summary.json["env"]`
+   (names as seen, ATen capability, GPU class), replacing the old `env_pin` block.
+6. Launch: one builder `island_env` for `launch_island` and `launch_window`; `_launch_unbounded`
+   re-applies the pin itself so direct callers cannot forget it; the rollback workers use the same
+   function.
+7. Dispute follower: every publication is answered from the actual-path trace, never from an
+   in-process replay in a daemon whose environment need not honor the pin (the unpinned in-process
+   branch is gone with the unpinned manifest).
+8. Preflight: a cached child probe under the pinned environment (`require_honorable(pin, backend)`)
+   answers "can this host honor the pin" and returns what the child observed. The parent raises
+   `EnvPinRefused` before any capacity is charged or rank started, at miner `join` and `probe`, and
+   at the CPU service bootstrap (`SERVICE_PROFILE_ENV_PIN`), which is now unconditional.
+9. A refusal is an executor fault, never evidence about the miner's work; it relies on AUD-01
    decision 3 (fail fast, `EXECUTOR_FAILURE`, no quarantine). Honor system: a miner running modified
-   code (still caught by its roots), `LD_PRELOAD`, `sitecustomize`, anything outside the table.
-8. CUDA: nothing verified. The pin reaches the executor path through `_launch_unbounded`; the field
-   must not be used on a CUDA production manifest before the qualification run carries it.
+   code (still caught by its roots), `LD_PRELOAD`, `sitecustomize`, anything outside the tables.
+10. The test process is pinned once, before torch loads (`tests/process_pin.py`, imported by
+    `tests/conftest.py`): the suite's manifests name `avx2`/`none`, and the deployed AVX2 goldens
+    stay the goldens of the suite.
+11. **The miner declares its probed environment in bodies it signs.** `EnvObservation` (`env`: every
+    name the pin speaks about with the value its process saw, `None` for unset; `cpu_capability`:
+    what ATen resolved; `gpu`: the class of its device) is a required field of `JoinRequest`
+    (filled by `NetworkMiner.join` and `coldkey_ops.prepare_join` from `require_honorable`, the
+    child probe under the pinned environment) and of `WorkScreenV2` (copied by `screen_work` from
+    the rank summaries). The join is signed by hot and cold key and the screen by the hot key, so the
+    declaration travels inside signatures the party already makes; nothing is added to a header.
+    `validate_artifacts` refuses a publication in which any rank declares another environment than the
+    pin (`EnvPinRefused`, an executor fault) before the screen is built.
+12. **The server refuses a difference with a typed error, before anything is written.**
+    `Admission.refuse_environment` compares the declaration with the manifest's pin
+    (`env_pins.observation_divergence`) and raises `AdmissionError("ENV_PIN_DIVERGES: NAME, NAME")`
+    (409; the names that differ, sorted: pinned variables first, then `cpu_capability`, `gpu`). It runs
+    (a) at `join`, after the signatures and the policy check and before the first write, (b) in the
+    proof route before `reference_due`, so the trusted reference is not paid for a refused screen, and
+    (c) in `Admission.proof` after the screen's bindings and before the comparison with the
+    reference, for the admin paths. A refusal consumes no quota, creates no admission, adds no
+    strike, suspends nothing, leaves the trial OPEN and burns no nonce: the same party fixes its host
+    and posts again. Tests cover ISA (resolved and named), MKL, oneDNN, device class, attention
+    backend and FP8 at both points.
+13. **What the declaration is.** Self-declared by the party being checked and compared with the manifest's
+    class; it is not attested by hardware or by the server. It refuses early and cheaply
+    what its process could see (environment strings, ATen's resolved capability, the device class),
+    never what it cannot (MKL's branch and oneDNN's ISA after init, `LD_PRELOAD`). It is not authority:
+    the verdict stays bit equality with the server's reference and with every audit, and a MISMATCH
+    under a conforming declaration is still a MISMATCH.
+14. **`implementation_hash` binds the pin and the code that gives it meaning.**
+    `ChallengeStore._service_implementation_v2(source, paths, pin)` takes the manifest's `EnvPin` as a
+    required argument and adds `env_pin = sha256(canonicalize(pin.body()))` to the hashed map. The
+    whole body is covered, not the class names: `cpu`, `gpu`, every `present` value and every
+    `absent` name, so two pins with equal `present` and `absent` but another GPU class hash
+    differently. Both call sites pass `manifest.training.reference_spec.env.pin()`:
+    `_service_profile_v2` and `GenesisRequest.validate_authority` (the worker recomputes the hash
+    under the pin of the manifest it is given). `protocol/env_pins.py` (which pin can exist and what
+    environment it implies: tables, `check`, `pinned_environ`) and `trainer/determinism.py` (what a
+    worker does about it: `require_env_pin`, `apply_reference_env`, `require_gpu_class`) join the
+    ten hashed files, which makes twelve. Not hashed, on purpose: `trainer/env_probe.py` (answers
+    whether a host can honor a pin, at `join`, `probe` and bootstrap; nothing it computes is signed),
+    `protocol/messages.py` and `messages_v2.py` (the manifest models call `env_pins.check` and refuse
+    at parse time; what a manifest says is hashed through its `run_id`, which the profile binds), and
+    `gpu_ops/cuda_executor.py` with its runner (the profile admits the `cpu` backend only,
+    `SERVICE_PROFILE_BACKEND`; the executor is bound by its own image and source pins, part 4 and ADR
+    0008). Hashing whole `protocol/` and `trainer/` instead would move the hash, and refuse every
+    installed `service-admission` record, for edits that decide nothing about the pin. The file list
+    is written three times: `challenge/store.py` (`_service_profile_v2`),
+    `aggregator/capacity_worker.py` (`GenesisRequest.validate_authority`) and
+    `tests/challenge/protected_opening_fixture_static.py` (the reviewed bundle pins). A genesis
+    validates only if the first two agree, and
+    `test_the_three_lists_of_hashed_files_agree_and_name_the_pin_files` reads all three by AST and
+    fails on any difference. The fixture's pin is a digest of reviewed code computed without a
+    manifest, so it carries the file list but not the `env_pin` term. [V]
+15. **The capacity workers run under the pin.** `ChallengeStore._capacity_env_v2(manifest, base)` builds
+    the one environment of the genesis and the outer worker: `base` (genesis: `PATH` only; outer: the
+    server's `os.environ`), the fixed `OMP_NUM_THREADS`, `MKL_NUM_THREADS` and `CUBLAS_WORKSPACE_CONFIG`,
+    then the manifest's pin (`pinned_environ`: present set, absent removed). `_prepare_capacity_genesis_v2`
+    and `_capacity_outer_v2` hand it to `run_capacity_argv`, and `open_round_v2` compares the `env` of
+    the execution record with the same function, so a genesis attested under another environment is
+    refused (`SERVICE_PROTECTED_OPEN_RUNTIME`). The worker's entry point calls `apply_reference_env` on
+    the manifest of its request, genesis and outer alike, before any tensor operation, so a worker
+    started without the pin exits non-zero naming the variables. Before, the master's own computation
+    (`decompress`, the outer step) ran under whatever capability the host resolved, while the island
+    ranks it replays were pinned; `compress`/`decompress` bytes differ under
+    `ATEN_CPU_CAPABILITY=default` (Context). `_capacity_env_v2` is an owned name of
+    `implementation_hash`. The hermetic tests cover the three environments handed over and compared
+    and the refusal of a bare worker; the `systemd_manager` tests were not run (the host denies
+    transient units) and still build their own environment from `os.environ`, which the test process
+    pins. [V by those tests; the transient-unit path is not run]
+16. CUDA executor, request. The executor ran the island in a container whose environment it built
+    from ten fixed names; the container program refused any other name (exit 2) and the island
+    worker, which checks the pin, would have refused the missing ones, so a pinned manifest could
+    not be served at all. [V by reading `cuda_executor.py` `_request`, `cuda_executor_runner.py`
+    `ENV_KEYS`] `Executor._request` now puts the pin in `request.json`: the names the pin sets join
+    the fixed ones in `env`, `unset` is the pin's sorted `absent` list and `gpu` its GPU class, all
+    under the `request_sha256` that `COMPLETE` binds. The container program is stdlib only (it
+    cannot import the image's hypertrain) and keeps a copy of the table's names, which
+    `tests/gpu_ops/test_cuda_executor_pin.py` holds equal to the tables; it refuses (exit 2) a
+    request that does not carry the pin whole (a pinned name missing, a name outside the tables,
+    `unset` other than the table's list, an unknown class), then sets `env`, removes `unset`,
+    probes and launches, so the image's own `ENV` or a daemon cannot leave a name the pin removes.
+    [V: fake host with a hostile `container_env`]
+17. CUDA executor, host honesty before the island. The probe reports the table's names as its
+    process sees them (`pinned_env`), the capability ATen resolved
+    (`torch.backends.cpu.get_cpu_capability()`) and the devices' capabilities. The container
+    program compares them with the request and exits 4 before the island starts when a name differs,
+    the capability is not the pinned one or the devices are not of the pinned class; the executor
+    already maps exit 4 to `HostRefused` (EXE-01 quarantine). Without this an honest host that
+    cannot honor the pin (a CPU below the class, an ARM host that reports 10.3 and 148 SMs like a
+    B300) would make the island refuse after a cold start, exit 3, and the executor would retry the
+    same host as a failed attempt. [V: fake host; the real probe source against a fake torch] [H:
+    the cu130 build exposes `torch.backends.cpu.get_cpu_capability()` as the CPU build does; ATen
+    on a GPU host clamps `ATEN_CPU_CAPABILITY` to the CPU as it does here] [?: the base image's own
+    `ENV`, `docker image inspect --format '{{json .Config.Env}}'`]
+18. CUDA executor, the executor judges again. The container program is the host's code, so
+    `_check_environment` compares the report (`pinned_env`, `cpu_capability`, the class of the
+    reported capabilities) with the manifest's pin using `observation_divergence`, the comparison
+    the server applies to a rank summary, and raises `HostRefused`: a program that does not check
+    is caught, once, with the island run. A report without those fields, or of the wrong shape, is
+    a malformed result (a failed attempt, not a quarantine); a name the host chose is shown through
+    `repr` cut at 40 characters (EXE-01). The rank summaries' `env` observation is checked by
+    `validate_artifacts` (`EnvPinRefused`): on publication it runs inside `_publish`'s `except`,
+    so a summary that differs is an `AttemptFailed`, nothing is published and the host is not
+    quarantined for what a file says; on resume (`published()`) the refusal is a plain
+    `IslandFailure`. `launch` refuses a manifest whose GPU class is `none` before any ssh
+    call: it describes a CPU run, and judging it against every GPU host would quarantine them all
+    for the manifest's fault. [V: fake host]
+19. Qualification. `network_qualification.run` launched the island with `{**os.environ, PYTHONPATH}`,
+    not the launcher's builder, so a pinned seed job failed closed in the worker. [V by reading] It
+    now uses `child_environment(cfg, job)`, `island_env(job, trace=True, base=...)`: the island starts
+    under exactly the pin whatever the host's ambient. `capture` needs nothing added, because it
+    begins with `validate_artifacts`, which refuses a rank summary whose `env` differs from the pin.
+    The owner-reviewed bootstrap (`_bootstrap_backend_v2`) reads the rescued summaries and not their
+    tensors, so it checks the declaration itself: a summary whose `env` is missing or differs from the
+    manifest's pin answers 403 and installs nothing, and evidence from an unpinned run cannot install
+    a backend. No `Result` or `Environment` field is added: `reference_hash` (the hash of the whole
+    `reference_spec`, pin included) and the summary hashes in the owner-signed evidence already bind
+    the pin. QUAL-01's attestation is untouched. [V: fake torch and a recording torchrun parent]
+20. The GPU class and the backend. `ChallengeStore._backend_v2` resolves the backend (a stored CUDA
+    qualification, or the TEST ledger's CPU default) and then answers 409
+    `ENV_CLASS_BACKEND: gpu class none` for a manifest that names no device on the CUDA backend:
+    nothing says which device it runs on. Nothing is frozen for a refused manifest. The reverse is
+    not refused: a run of a device class may exist in a CPU test state (the conserved genesis store
+    of `scripts/network_gpu_prepare.py`, the order of the S5 runbook), and no CPU party can join it,
+    because each declares `gpu: none` and the join and the trial refuse the difference (decision
+    12). The executor's own refusal of a `none` manifest (decision 18) is the same rule one layer
+    down. [V]
 
 ### Consequences
 
 - Removes ambient-induced divergence: the reproducers go from 6/3/6 distinct root triples to 1/1/1 and
   from MISMATCH to MATCH. It does NOT remove hardware-class divergence: the Intel 8573C case would still
-  be convicted, with no refusal, because the check only catches pins the host cannot honor. Measured
-  here: Zen 5 pinned equals the goldens attributed to the GitHub runner [A]; no other class was run.
-  Cross-vendor equality is not claimed.
+  be convicted by its roots, because the pin only holds a host to an instruction set it can reach.
+  Measured here: Zen 5 under `avx2` equals the goldens attributed to the GitHub runner [A] and under
+  `avx512` gives its own roots; no other CPU was run. Cross-vendor equality is not claimed.
+- Every `run_id`, `reference_hash` and `training_hash` changes (a new required object in the
+  manifest bytes); every existing run is recreated; `docs/schemas/RunManifest.json` and
+  `example-run-manifest.json` are regenerated; the example manifest and the golden run ids change.
+  The leaf-root goldens do not: the pinned suite reproduces them.
 - Throughput. `ONEDNN_MAX_CPU_ISA=AVX2` alone (1 thread): bf16 1024^3 matmul 575 -> 1.4 GFLOPS (x358),
   `F.linear` 581 -> 32 (x18), attention-shaped bmm x74; at n=64..512 linear x11..27, matmul x15..181,
   bmm x39..79; fp32 unchanged (129 vs 126, linear 134 vs 125). `ATEN_CPU_CAPABILITY=avx2` and
   `MKL_CBWR=AVX2` cost nothing on this host. The kimi MICRO round does not notice (1.8 s vs 1.7 s). A
-  bf16 CPU manifest above toy size pays one to two orders of magnitude; fp32 CPU manifests, which
-  include the only CPU service profile, pay nothing. Hence two presets.
+  bf16 CPU manifest above toy size pays one to two orders of magnitude on `avx2` and about 5.6 times
+  on `avx512` (`AVX512_CORE`); fp32 manifests pay nothing in either class. That is the reason to
+  choose `avx512` for a bf16 CPU run.
 - An honest default miner stays honest: its children are pinned, its dispute answers do not depend on
   its daemon environment, and a host that cannot honor the pin is told at `join`, not after paying for
   admission. Until AUD-01 (lease expiry -> `auditor-disabled`, miner `excluded/INFRASTRUCTURE`) and D40
   (trial expiry -> `SUSPENDED CHALLENGE_EXPIRED`) land, a host that cannot honor the pin still
   penalizes the party that ran into it; the preflight is the control. In-process users (honeypot, v1
-  flows) must run under the pin or refuse.
-- A pinned CUDA manifest cannot be qualified until the qualification run carries the pin (fails closed).
+  flows, the tests) must run under the pin or refuse.
+- `JoinRequest` and `WorkScreenV2` gain a required field: the v2 JSON wire changes (no signature
+  domain changes; the join signing message and the `work_screen_hash` of an accepted screen change,
+  runs are recreated). A refused honest miner keeps the existing clocks: the trial's 100 beacons and
+  the admission's window; the client preflight stays the first control.
+- A host above the class is capped by the pinned variables; a host below it (an AVX2-only CPU under
+  `avx512`) is refused by the probe because ATen clamps the capability silently and the probe reads
+  what ATen resolved [H: inferred from the clamping, no AVX2-only host here].
+- The executor serves a pinned manifest (decisions 16 to 18). A GPU host must offer a CPU that
+  reaches the manifest's CPU class: one that does not is quarantined at its first container run
+  instead of being retried, and an operator reads "container refused the environment" in the
+  journal. No throughput was measured for the CUDA path under the pin.
+- A pinned CUDA manifest can be qualified (decision 19). `network_qualification.sources()` hashes every
+  `*.py` of the package, so this change, like any source edit, invalidates a stored qualification
+  config (`qualification_source_or_profile_changed`): configs and reviewed bundles are recomputed.
+- `_backend_v2` is one of the names whose AST `implementation_hash` binds
+  (`_service_implementation_v2`), so decision 20 moves that hash. Every manifest builder for CUDA
+  hardware names its GPU class (`sm_103` or `sm_120` by SM count; the CPU TEST manifests say
+  `none`), because the store answers 409 `ENV_CLASS_BACKEND` for a CUDA host and a manifest that
+  says `none`. [V by tests]
 - `implementation_hash` changes; runs holding a `service-admission` record then fail
   `SERVICE_PROFILE_AUTHORITY` (`store.py:4631`) and cannot be re-bootstrapped after a round opened.
+  The runs are recreated anyway.
 - `MKL_CBWR=AVX2` falls back to AUTO off Intel [A: oneMKL "Specifying Code Branches"]; `COMPATIBLE` is
-  the documented portable branch at the cost of SSE2-only GEMM. It is not in the table yet: it enters
+  the documented portable branch at the cost of SSE2-only GEMM. It is not in the tables yet: it enters
   with a measurement on a second CPU class.
+- Hash consequences (decision 14). `implementation_hash` is a function of the manifest's pin and of the
+  twelve files: there is no longer one value per tree. It moves with the pin term, the two new files
+  and the edited owned names (`_service_profile_v2`, `_service_implementation_v2`). The digests of
+  `challenge/store.py` and `aggregator/capacity_worker.py` move, and so do `sources()` of
+  `network_qualification` (it hashes every `src/hypertrain/**/*.py`) and the reviewed `bundle`. Older
+  qualification configs then stop validating against a tree at this commit
+  (`qualification_source_or_profile_changed`) and the dispatch source pins are recomputed, as after
+  ADRs 0007 and 0008. The required pin had already moved every example `run_id`, `reference_hash` and
+  `training_hash`. Measured with these commands, run with `PYTHONPATH=TREE/src:TREE` in the
+  virtual environment of `hypertrain/`, where `TREE` is the `hypertrain/` directory of an unpacked
+  `git archive` of the commit under measure (the last one prints `implementation_hash` under the
+  pin of the example manifest, then its `run_id`):
+
+  ```
+  python TREE/scripts/network_gpu_qualification.py sources TREE | sha256sum
+  python TREE/scripts/network_gpu_qualification.py bundle-hash TREE
+  sha256sum TREE/src/hypertrain/challenge/store.py
+  python - <<'EOF'
+  import ast, pathlib
+  from hypertrain.challenge.store import ChallengeStore
+  from hypertrain.protocol.example import example_manifest
+  src = pathlib.Path("TREE/src/hypertrain")
+  fn = next(n for n in ast.walk(ast.parse((src / "challenge/store.py").read_text()))
+            if isinstance(n, ast.FunctionDef) and n.name == "_service_profile_v2")
+  paths = next(ast.literal_eval(n.value) for n in ast.walk(fn)
+               if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "paths")
+  m = example_manifest()
+  print(ChallengeStore._service_implementation_v2(src, paths, m.reference_spec.env.pin()), m.run_id())
+  EOF
+  ```
+
+  Values [V, run on 2026-10-28; `v3` is `8c2b24e8` before the opt-in series and `a6f9884a` after it,
+  and this part is rebased on `a6f9884a`]:
+
+  | Value | `v3` `8c2b24e8` | `v3` `a6f9884a` (opt-in series) | this part |
+  | --- | --- | --- | --- |
+  | `sources` listing, `sha256sum` | `a8e7b88e...dc6f15` | `45d7e777...2e7a27` | `d8c0f22e...f3a24d` |
+  | `bundle-hash` bytes, sha256 | 2,519,040 `0fbf1c09...80721` | 2,600,960 `fb3cca4a...01f438` | 2,611,200 `11e55174...e36830` |
+  | `challenge/store.py` sha256 | `6eadf5bb...e3972` | `7fb1c56b...38688c` | `b7b000d0...edf80d` |
+  | `implementation_hash`, example pin (`avx2`/`none`) | `941247f8...688d1` | `fc9e87b0...e4c8fe` | `608aa10b...ce002f` |
+  | example `run_id` | `ad8beb30...2ba2ff` | `ad8beb30...2ba2ff` | `aa39197d...ec8abd` |
+  | example `reference_hash` | `3a2862ca...72f323` | `3a2862ca...72f323` | `2dd4eadc...d6cc5d` |
+  | hashed files of `implementation_hash` | 10 | 10 | 12 |
+
+  The same code under another pin hashes differently, which is what D69 asks for (a change of an
+  ISA table row or of the attention backend makes the bit-exact audit opposable): `implementation_hash`
+  at this commit is `608aa10b...ce002f` for `avx2`/`none`, `22ad3164...a5047e` for `avx512`/`none`,
+  `4eb59f4c...3a74d0` for `avx2`/`sm_103`/`math`, `bba1cc6a...7f0104` for `avx2`/`sm_103`/`sdpa-flash` and
+  `cf9bd69e...6c3022` for `avx2`/`sm_120`/`sdpa-flash`. No wire vector, `docs/BUNDLE_SPEC.md` or leaf
+  root golden moves: the kimi and trainer goldens pass unchanged under the pinned test process, and
+  only the golden run ids and training hashes were regenerated (`tests/protocol/test_model_arch.py`,
+  `test_od_fields.py`, `test_network_v2.py`, `tests/trainer/test_config_v2.py`).
 
 ### Rejected alternatives
 
-1. `reference_spec.env.numerics`, 8 required keys: a new required key invalidates signed manifests;
-   cannot say "unset"; scrubs whole prefix families (`MKL_NUM_THREADS` is set by `Dockerfile.gpu`).
-2. Always-on pins: changes every CPU root and every golden; the two root sets in `GOLDEN` are deployed.
-3. Named profile `Literal`: the manifest bytes bind a name, not the values.
+1. `reference_spec.env.numerics`, 8 required keys: cannot say "unset"; scrubs whole prefix families
+   (`MKL_NUM_THREADS` is set by `Dockerfile.gpu`).
+2. An optional pin ("omitted = ambient", the first version of this part): the Lens verdict, and
+   Principal D58-1. No default, no `exclude_if`, no "required" rejection branch survives.
+3. The class name alone: the bytes would bind a name and the values would live only in the code; the
+   manifest carries both so that a table edit fails loudly, and the tables are append-only.
 4. Worker re-exec from `job.json` before importing torch: silently corrects instead of refusing, cannot
    cover `rollback_v2._context_worker`, and hides a launcher change from `implementation_hash`.
 5. Setting the variables inside `apply_reference_env`: ATen, MKL and oneDNN read them at first use.
@@ -385,18 +616,43 @@ breaker bounds the attempt-based one).
 7. Replaying the dispute in a pinned child (new module, a second torch process per round): same bytes
    as the referee's actual-path re-run for more machinery; the fallback.
 8. `IslandFailure` subclass classified by stderr substring: brittle (torchrun exits 1) and echoing.
-9. Presets as constants in the protocol module: unused by production code and bakes in MKL_CBWR.
-10. Attestation of the miner environment at admission: self-reported by the party being checked.
+9. One class per compute dtype: fp32 ignores `ONEDNN_MAX_CPU_ISA` and pinning it is free, so the dtype
+   would only choose which names are omitted.
+10. A third CPU class `avx512` with `ONEDNN_MAX_CPU_ISA=AVX512_CORE_BF16` (hardware bf16 dot product):
+    no model-level golden separates it from `avx512`; it is appended when a bf16 CPU run needs it.
+11. `MKL_CBWR=COMPATIBLE` as a portable class: enters with a measurement on a second vendor.
+12. `None` for the GPU part of a CPU run: the Principal's rule is that "no GPU" is stated, so the
+    class `none` exists and the explicit value cannot be mistaken for an omission.
+13. Attestation of the miner environment as authority (the first version of this part, alternative
+    10): still rejected. The declaration is signed by the party being checked and is used only as an
+    early, unpunished refusal; the verdict stays bit equality.
+14. A canary digest in the declaration (ten ISA-sensitive operations whose digest the server's own
+    reference run would produce, to see MKL's branch and oneDNN's ISA after init): designed and
+    prototyped, not required by D58-1, and it adds a stored reference observation and a second
+    refusal point. Deferred; revisit if two hosts of one class that declare the same names ever
+    disagree on bytes.
+15. Refusing at the challenge request: the miner has run nothing yet, so it has nothing to declare.
+16. A numerical tolerance on the declaration or the roots: breaks the bit-exact audit.
 
 ### Not verified
 
-- A second CPU class (no Intel, no older AMD, no ARM here); Intel vs AMD under `MKL_CBWR=AVX2`.
-- Everything CUDA (executor, `HT_ATTN_BACKEND` on sm_103, NCCL, TF32 override effects).
+- A second CPU class on other hardware (no Intel, no older AMD, no ARM here); Intel vs AMD under
+  `MKL_CBWR=AVX2`; the refusal of `avx512` on an AVX2-only host.
+- Everything CUDA (executor, `HT_ATTN_BACKEND` on sm_103, NCCL, TF32 override effects): the `sm_103`
+  and `sm_120` rows are the ADR 0007 devices and were never run with the pin.
 - `HT_COMPILE=1` (no C++ compiler here); `HT_MOE_GROUPED=1` showed no effect on the CPU configs.
 - MKL CNR and oneDNN ISA state is not observable: the check proves the environment string and ATen's
   capability; an environment mutated after library initialisation is not detected.
-- The repair/history torchrun path with pins, the capacity worker's outer path on a DEFAULT-class host,
-  and the challenge path end to end with AUD-01 (read, not run).
+- The repair/history torchrun path with pins and the challenge path end to end with AUD-01 (read,
+  not run).
+- A divergence the process cannot see (decision 13) ends as a MISMATCH, as before this part.
+- The CUDA executor under the pin (decisions 16 to 18): nothing ran on a GPU. The fake host
+  (`tests/gpu_ops/fake_cuda_host.py`) replaces the island and the device probe, and models ATen's
+  clamping of the capability to the host CPU; the real probe source ran only against a fake torch.
+  No AVX2-less or ARM GPU host was available, so the quarantine of such a host is tested against a
+  modelled CPU.
+- A CUDA qualification under a pinned manifest (decision 14): `run` was exercised with a fake torch
+  and a torchrun parent that only records its environment; no two-host qualification ran.
 
 ## Part 4: host and image binding of the CUDA qualification (QUAL-01, QUAL-02)
 

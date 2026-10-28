@@ -134,6 +134,7 @@ def screen_work(
         challenge_hash=challenge.digest(),
         rank_results=list(artifacts.ranks),
         artifact_hashes=[r.sha256 for r in refs],
+        env=artifacts.env,
     )
     proof = WorkProof(
         admission_id=challenge.admission_id,

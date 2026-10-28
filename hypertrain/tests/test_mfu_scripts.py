@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from env_pin_fixtures import clean_env
+
 TREE = Path(__file__).resolve().parents[1]
 
 
@@ -17,9 +19,7 @@ def _check(path: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True, check=False)  # noqa: S603
 
 
-@pytest.fixture(scope="module")
-def evidence(tmp_path_factory: pytest.TempPathFactory) -> dict:
-    out = tmp_path_factory.mktemp("mfu") / "tiny.json"
+def _run_mfu(out: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     cmd = [
         sys.executable,
         str(TREE / "scripts/run_mfu.py"),
@@ -34,9 +34,35 @@ def evidence(tmp_path_factory: pytest.TempPathFactory) -> dict:
         "--out",
         str(out),
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True, check=False, cwd=TREE)  # noqa: S603
+    return subprocess.run(cmd, capture_output=True, text=True, check=False, cwd=TREE, env=env)  # noqa: S603
+
+
+@pytest.fixture(scope="module")
+def evidence(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    out = tmp_path_factory.mktemp("mfu") / "tiny.json"
+    # A shell exports none of the pinned variables: the script restarts itself under its pin.
+    r = _run_mfu(out, clean_env())
     assert r.returncode == 0, r.stderr
     return json.loads(out.read_text())
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("HT_COMPILE", "1"),
+        ("HT_FP8", "1"),
+        ("OMP_THREAD_LIMIT", "2"),
+        ("ATEN_CPU_CAPABILITY", "default"),
+        ("HT_ATTN_BACKEND", "sdpa-flash"),
+    ],
+)
+def test_a_caller_that_contradicts_the_pin_is_refused_not_overridden(
+    tmp_path: Path, name: str, value: str
+) -> None:
+    out = tmp_path / "refused.json"
+    r = _run_mfu(out, {**clean_env(), name: value})
+    assert r.returncode != 0 and name in r.stderr and "Traceback" not in r.stderr, r.stderr
+    assert not out.exists()
 
 
 def test_cpu_run_is_schema_valid_and_replays(evidence: dict, tmp_path: Path) -> None:

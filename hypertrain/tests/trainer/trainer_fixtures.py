@@ -6,7 +6,9 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
+import pytest
 
+from hypertrain.protocol.env_pins import EnvPin, class_pin
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.messages import f32hex
 from hypertrain.trainer.config import CompressConfig, InnerConfig, ModelConfig, TrainConfig
@@ -55,7 +57,13 @@ def make_cfg(
         if codec == "sparseloco"
         else CompressConfig()
     )
-    return TrainConfig(model=model, inner=inner, compress=comp, n_stages=n_stages)
+    return TrainConfig(
+        model=model,
+        inner=inner,
+        compress=comp,
+        env_pin=EnvPin.from_body(class_pin("avx2", "none")),
+        n_stages=n_stages,
+    )
 
 
 def make_kimi_cfg(dtype: str = "fp32", codec: str = "dense-int8") -> TrainConfig:
@@ -104,3 +112,14 @@ def small_manifest_body(moe: bool = False, opt: str = "adamw", codec: str = "den
         body["outer"].update(opt="sparseloco", topk_frac=f32hex(0.05), bits=2, ef_beta=f32hex(0.9))
     body["reference_spec"]["layout"]["pp"] = 2
     return body
+
+
+def without_pin_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a test exercise a switch that the environment pin forbids.
+
+    Every manifest pins HT_COMPILE, HT_FP8 and HT_MOE_GROUPED unset (docs/protocol.md section 7,
+    item 4a), so a pinned run can never enable them; the experiments behind them stay testable
+    here with the pin check off."""
+    import hypertrain.trainer.determinism as determinism
+
+    monkeypatch.setattr(determinism, "require_env_pin", lambda pin: None)

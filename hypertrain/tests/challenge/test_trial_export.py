@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -506,3 +509,100 @@ def test_cli_refuses_nonempty_output(cli, capsys):
     assert "empty" in output.err.lower()
     assert existing.read_bytes() == b"existing data"
     assert requests == []
+
+
+def staged_inputs(n, identity):
+    """The arguments `stage_trial_v2` takes for the open trial of `identity`."""
+    store = n.store
+    row = store._db.execute(
+        "SELECT challenge,trial_epoch FROM admissions_v2 WHERE admission_id=?", (identity,)
+    ).fetchone()
+    challenge = JoinChallenge.model_validate_json(row["challenge"])
+    beacon = store._beacon_v2(challenge.seed_beacon)
+    samples = trial_samples(n.manifest, identity, challenge.nonce, beacon)
+    return n.manifest.run_id(), challenge, samples, row["trial_epoch"]
+
+
+def test_a_planned_staging_reads_no_database(trial):
+    # Given: the staging planned under the store lock, with the database gone afterwards
+    n, identity, _ = trial
+    arguments = staged_inputs(n, identity)
+    staging = n.store.plan_trial_v2(*arguments)
+
+    class NoDatabase:
+        def execute(self, *args, **kwargs):
+            raise AssertionError(f"the staging read the database: {args[:1]}")
+
+    real = n.store._db
+    n.store._db = NoDatabase()
+    try:
+        # When: it runs, as it does once the lock is let go
+        job, directory = staging()
+    finally:
+        n.store._db = real
+    # Then: it wrote the inputs its job names
+    assert sha256_hex((directory / "start_state").read_bytes()) == job.start_state_sha256
+
+
+def test_a_staging_asked_from_inside_a_staging_does_not_wait_for_itself(trial, monkeypatch):
+    # Given: a staging that, in the middle of its work, asks for another one in the same thread
+    n, identity, _ = trial
+    arguments = staged_inputs(n, identity)
+    real = n.store._stage_inputs_v2
+    asked: list[int] = []
+
+    def staging_that_stages(*args):
+        if not asked:
+            asked.append(1)
+            n.store.stage_trial_v2(*arguments)
+        return real(*args)
+
+    monkeypatch.setattr(n.store, "_stage_inputs_v2", staging_that_stages)
+    outcome: list[object] = []
+    thread = threading.Thread(
+        target=lambda: outcome.append(n.store.stage_trial_v2(*arguments)), daemon=True
+    )
+    # When
+    thread.start()
+    thread.join(30)
+    # Then: it came back with the job of the inputs, instead of waiting for the lock it holds
+    assert not thread.is_alive(), "the staging is waiting for the staging it was asked from"
+    job, directory = outcome[0]  # type: ignore[misc]
+    assert sha256_hex((directory / "start_state").read_bytes()) == job.start_state_sha256
+
+
+def test_staging_survives_a_write_that_died_halfway(trial, monkeypatch):
+    # Given: the disk fills while the first input is written
+    n, identity, _ = trial
+    arguments = staged_inputs(n, identity)
+    real = Path.write_bytes
+
+    def dies_halfway(self, data):
+        real(self, data[: len(data) // 2])
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_bytes", dies_halfway)
+    with pytest.raises(OSError, match="disk full"):
+        n.store.stage_trial_v2(*arguments)
+    monkeypatch.setattr(Path, "write_bytes", real)
+    # When / Then: the half-written file is not left under the name of an input, so the next
+    # staging works instead of refusing the torn bytes as "immutable trial inputs changed"
+    job, directory = n.store.stage_trial_v2(*arguments)
+    assert [p.name for p in directory.iterdir()].count("start_state") == 1
+    assert sha256_hex((directory / "start_state").read_bytes()) == job.start_state_sha256
+
+
+def test_staging_again_does_not_rewrite_an_input_a_launch_may_be_reading(trial):
+    # Given: the inputs were staged once and a launch reads them
+    n, identity, _ = trial
+    arguments = staged_inputs(n, identity)
+    _, directory = n.store.stage_trial_v2(*arguments)
+    names = ("start_state", "ef_in", "v0", "samples", "sample_proofs")
+    seen = {name: os.stat(directory / name) for name in names}
+    time.sleep(0.05)
+    # When: the same trial is staged again (every export and every reference stages it)
+    n.store.stage_trial_v2(*arguments)
+    # Then: not one input was opened for writing again
+    for name in names:
+        now = os.stat(directory / name)
+        assert (now.st_ino, now.st_mtime_ns) == (seen[name].st_ino, seen[name].st_mtime_ns), name

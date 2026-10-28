@@ -6,12 +6,22 @@ import importlib.util
 import json
 import os
 import struct
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
 
+from env_pin_fixtures import (
+    CPU_AVX2,
+    CPU_AVX512,
+    HOSTILE,
+    ambient,
+    clean_env,
+    needs_avx2,
+    needs_avx512,
+)
 from hypertrain.aggregator.capacity_worker import (
     OuterInput,
     OuterRequest,
@@ -19,6 +29,7 @@ from hypertrain.aggregator.capacity_worker import (
 )
 from hypertrain.data.store import LocalFSStore
 from hypertrain.gpu_ops.journal import durable_write
+from hypertrain.protocol.env_pins import pinned_environ
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 
@@ -639,6 +650,185 @@ def genesis_opening(manifest, *, final=40):
     )
 
 
+def genesis_request(manifest, profile: bytes, receipt: bytes):
+    """The worker's request for a profile and the Receipt the owner signed over it."""
+    from hypertrain.aggregator.capacity_worker import GenesisRequest
+    from hypertrain.protocol import envelope_v2
+
+    return GenesisRequest(
+        manifest=manifest,
+        profile=json.loads(profile),
+        manifest_envelope=envelope_v2.seal(
+            fixture.service.OWNER, "RunManifestV2", manifest.run_id(), manifest, 100
+        ),
+        receipt=json.loads(receipt),
+        opening=json.loads(genesis_opening(manifest)),
+        accepted=1,
+    )
+
+
+@pytest.mark.parametrize("tiny", [CPU_AVX2, CPU_AVX512], indirect=True)
+def test_genesis_request_binds_the_implementation_to_the_pin_of_its_manifest(tiny):
+    from hypertrain.protocol import envelope_v2
+    from hypertrain.protocol.env_pins import EnvPin
+    from hypertrain.protocol.messages import Receipt
+
+    store, manifest = tiny
+    run = manifest.run_id()
+    own = manifest.training.reference_spec.env.pin()
+    other = EnvPin.from_body(CPU_AVX512 if own.cpu == "avx2" else CPU_AVX2)
+    profile, receipt = fixture.signed_profile(store, manifest)
+    # Given: the worker's own check of the profile the owner signed.
+    assert len(genesis_request(manifest, profile, receipt).validate_authority()) == 4
+    # When: the owner signs a profile whose implementation was bound under the other class.
+    forged = json.loads(profile)
+    forged["implementation_hash"] = fixture.hash_under(other)
+    body = canonicalize(forged)
+    signed = canonicalize(
+        envelope_v2.seal(
+            fixture.service.OWNER,
+            "Receipt",
+            run,
+            Receipt(w=0, commit_hash=sha256_hex(body), received_round=1),
+            100,
+        )
+    )
+    # Then: the worker refuses it, because it recomputes the hash under the manifest's pin.
+    with pytest.raises(ValueError, match="capacity genesis authority differs"):
+        genesis_request(manifest, body, signed).validate_authority()
+
+
+def stop_at_launch(seen: dict[str, str]):
+    """A capacity runner that reads the environment it is given and goes no further."""
+    from hypertrain.miner.island_launch import IslandFailure
+
+    def stop(argv, runtime, deadline, capacity, **kwargs):
+        seen.update(kwargs["env"])
+        raise IslandFailure("stopped after reading the environment")
+
+    return stop
+
+
+@pytest.mark.parametrize(
+    "tiny", [CPU_AVX2, pytest.param(CPU_AVX512, marks=needs_avx512)], indirect=True
+)
+def test_genesis_worker_is_launched_under_the_pin_of_its_manifest(genesis_tiny, monkeypatch):
+    from hypertrain.miner.island_launch import IslandFailure
+
+    store, manifest = genesis_tiny
+    pin = manifest.training.reference_spec.env.pin()
+    seen: dict[str, str] = {}
+    monkeypatch.setattr("hypertrain.miner.island_launch.run_capacity_argv", stop_at_launch(seen))
+    with pytest.raises(IslandFailure, match="stopped after reading"):
+        store._prepare_capacity_genesis_v2(manifest.run_id(), genesis_opening(manifest))
+    assert seen == {
+        "PATH": os.defpath,
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+        **dict(pin.present),
+    }
+
+
+@pytest.mark.parametrize("tiny", [CPU_AVX2, CPU_AVX512], indirect=True)
+def test_outer_worker_is_launched_under_the_pin_of_its_manifest(tiny, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from hypertrain.miner.island_launch import IslandFailure
+
+    # Given: a round with verified inputs and open gates, under a hostile ambient.
+    store, manifest = tiny
+    pin = manifest.training.reference_spec.env.pin()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    request = request_fixture(tiny, staging)
+    for key in request.objects:
+        store.objects.put((staging / "objects" / key[:2] / key).read_bytes())
+    original = store._record_v2
+    records = {
+        "round": {"body": {"roster": [x.body() for x in request.original_roster]}},
+        "round-resource": {"deadline": 40},
+    }
+    ambient(monkeypatch, **HOSTILE)
+    monkeypatch.setattr(store, "_service_boundary_v2", lambda *a, **k: {"outer_work_units": 728})
+    monkeypatch.setattr(store, "_service_admission_v2", lambda run: (None, "ab" * 32))
+    monkeypatch.setattr(store, "_fresh_v2", lambda *a, **k: 1)
+    monkeypatch.setattr(
+        store, "verified_inputs_v2", lambda run, w: [x.work() for x in request.inputs]
+    )
+    monkeypatch.setattr(
+        store,
+        "_services",
+        lambda run: (SimpleNamespace(policy=SimpleNamespace(R_collectible_units=100)), None),
+    )
+    monkeypatch.setattr(
+        store,
+        "_record_v2",
+        lambda run, kind, ident: records.get(kind) or original(run, kind, ident),
+    )
+    monkeypatch.setattr("hypertrain.challenge.finality_v2.require_apply", lambda *a: None)
+    seen: dict[str, str] = {}
+    monkeypatch.setattr("hypertrain.miner.island_launch.run_capacity_argv", stop_at_launch(seen))
+    # When
+    with pytest.raises(IslandFailure, match="stopped after reading"):
+        store._capacity_outer_v2(manifest.run_id(), 0)
+    # Then: the manifest's pin is applied over the server's ambient, and what is not pinned stays.
+    named = [*dict(pin.present), *pin.absent]
+    assert {name: seen.get(name) for name in named} == {
+        **dict(pin.present),
+        **dict.fromkeys(pin.absent),
+    }
+    assert set(HOSTILE) <= set(named)
+    assert seen["PATH"] == os.environ["PATH"] and seen["OMP_NUM_THREADS"] == "1"
+
+
+def run_worker(directory: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """The entry point the master starts, as ``python -m`` (pydantic resolves types in __main__)."""
+    return subprocess.run(
+        [sys.executable, "-m", "hypertrain.aggregator.capacity_worker", str(directory)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+
+
+@needs_avx2
+@pytest.mark.parametrize("operation", ["genesis", "outer"])
+def test_capacity_worker_started_without_the_pin_refuses_before_computing(
+    tiny, tmp_path, operation
+):
+    store, manifest = tiny
+    directory = tmp_path / operation
+    directory.mkdir()
+    if operation == "genesis":
+        profile, receipt = fixture.signed_profile(store, manifest)
+        request = genesis_request(manifest, profile, receipt)
+        finished = "CAPACITY_GENESIS_COMPLETE"
+    else:
+        request = request_fixture(tiny, directory)
+        finished = "CAPACITY_OUTER_REPLAY_COMPLETE"
+    durable_write(directory / "request.json", canonicalize(request.body()))
+    pin = request.manifest.training.reference_spec.env.pin()
+    base = {
+        **clean_env(),
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+    }
+    # When: the master starts the worker without the pin.
+    bare = run_worker(directory, base)
+    # Then: it exits non-zero, names every variable it was not given, and computes nothing.
+    assert bare.returncode != 0
+    assert all(name in bare.stderr for name, _ in pin.present), bare.stderr[-2000:]
+    assert not (directory / "result.json").exists()
+    # And the same request under the pin completes: the refusal was the pin and nothing else.
+    pinned = run_worker(directory, pinned_environ(base, pin))
+    assert pinned.returncode == 0, pinned.stderr[-2000:]
+    assert finished in pinned.stdout and (directory / "result.json").exists()
+
+
 @pytest.mark.parametrize("attack", ["run", "profile", "source", "cancel", "expired"])
 def test_genesis_authority_rejects_before_kernel(genesis_tiny, monkeypatch, attack):
     import threading
@@ -932,6 +1122,8 @@ def test_metadata_genesis_original_collector_rejects_tampering(metadata_genesis,
         "final-honest",
         "final-signed",
         "protected-stale-runtime",
+        "protected-runtime-unpinned",
+        "protected-runtime-pinned",
     ],
 )
 def test_prepared_profile_opening_metadata_without_tensor_calls(
@@ -942,6 +1134,7 @@ def test_prepared_profile_opening_metadata_without_tensor_calls(
     import hypertrain.auditor.worker  # noqa: F401
     from hypertrain.aggregator.core import OuterState
     from hypertrain.auditor.replay import AnchorCache
+    from hypertrain.challenge.admission import AdmissionError
     from hypertrain.challenge.store import ChallengeError, ChallengeStore
     from hypertrain.protocol import envelope_v2
     from hypertrain.protocol.messages_v2 import RoundOpenV2
@@ -1075,6 +1268,30 @@ def test_prepared_profile_opening_metadata_without_tensor_calls(
                 store.open_round_v2(manifest.run_id(), signed)
             assert store._db.total_changes == before
             assert not (store.state_dir / "anchors-v2").exists()
+        elif attack.startswith("protected-runtime-"):
+            # A clean attempt in every respect but the environment the worker was started with.
+            pin = manifest.training.reference_spec.env.pin()
+            ordinary = {
+                "PATH": os.defpath,
+                "OMP_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+                "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+            }
+            attested = pinned_environ(ordinary, pin) if attack.endswith("-pinned") else ordinary
+            write_genesis_runtime(directory, manifest, prepared, reservation, attested)
+            monkeypatch.setattr(
+                "hypertrain.challenge.store.time.time",
+                lambda: manifest.training.beacon.genesis_time + 3,
+            )
+            if attack.endswith("-unpinned"):
+                before = store._db.total_changes
+                with pytest.raises(ChallengeError, match="SERVICE_PROTECTED_OPEN_RUNTIME"):
+                    store.open_round_v2(manifest.run_id(), signed)
+                assert store._db.total_changes == before
+            else:
+                # The attestation holds; the roster gate stops it (no admissions here).
+                with pytest.raises(AdmissionError, match="UNKNOWN_HOTKEY"):
+                    store.open_round_v2(manifest.run_id(), signed)
         elif attack.startswith(("input-", "aggregate-", "final-")):
             integrity_preflight_control(
                 store, manifest, opening, starts[0], old_result, tiny, tmp_path, attack, monkeypatch
@@ -1195,6 +1412,61 @@ def test_prepared_profile_opening_metadata_without_tensor_calls(
     finally:
         store.close_v2_notifications()
         store._db.close()
+
+
+def write_genesis_runtime(directory, manifest, prepared, reservation, env):
+    """The runtime record of a clean, successful genesis attempt; only ``env`` is a parameter."""
+    run_id = manifest.run_id()
+    unit = "ht-cap-" + "ab" * 16 + ".service"
+    stem = unit.removesuffix(".service")
+    timer, timer_service = stem + "-deadline.timer", stem + "-deadline.service"
+    deadline = manifest.training.beacon.genesis_time + (reservation["deadline"] - 1) * 3
+    observed = {
+        "memory.max": str(1 << 30),
+        "memory.swap.max": "0",
+        "cpu.max": "50000 100000",
+        "memory.oom.group": "1",
+        "affinity": [0, 1, 2, 3],
+        "nice": 19,
+        "cgroup": "/system.slice/" + unit,
+        "pid": 1,
+    }
+    records = {
+        "attempt": {
+            "identity": sha256_hex(
+                canonicalize({"run_id": run_id, "w": -1, "operation": "genesis", "attempt": 1})
+            ),
+            "profile_hash": prepared["profile_hash"],
+            "cpu_quota": "50%",
+            "deadline": deadline,
+            "unit": unit,
+            "timer": timer,
+            "timer_service": timer_service,
+        },
+        "observed": observed,
+        "exec": {
+            "socket": "/run/ready.sock",
+            "argv": [
+                sys.executable,
+                "-m",
+                "hypertrain.aggregator.capacity_worker",
+                str(directory.absolute()),
+            ],
+            "env": env,
+            "deadline": deadline,
+            "cpu_quota": "50%",
+        },
+        "result": {
+            "observed": observed,
+            "status": "Result=success\nExecMainStatus=0\noom 0\noom_kill 0",
+        },
+        "cleaned": {"units": [unit, timer, timer_service]},
+    }
+    runtime = directory / "runtime"
+    runtime.mkdir()
+    for name, record in records.items():
+        durable_write(runtime / f"capacity-{name}.json", canonicalize(record))
+    durable_write(runtime / "capacity-stdout.log", b"CAPACITY_GENESIS_COMPLETE\n")
 
 
 def audit_preflight_control(store, manifest, opening, start, signed, attack, monkeypatch):

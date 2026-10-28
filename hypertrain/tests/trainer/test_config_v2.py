@@ -10,7 +10,7 @@ from hypertrain.trainer.island import island_from_manifest
 
 def test_v1_conversion_and_golden_unchanged() -> None:
     m = example_manifest()
-    assert m.run_id() == "ad8beb30084a2e53f817c45f1cbfdf1491162575f10f2c3d190645081b2ba2ff"
+    assert m.run_id() == "aa39197d5816cd041826d1d967215901b0fe74ccf14d238f319892095aec8abd"
     cfg, _, run = island_from_manifest(m.body())
     assert cfg == TrainConfig.from_manifest(m.body())
     assert run == m.run_id()

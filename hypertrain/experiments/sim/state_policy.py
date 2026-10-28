@@ -281,6 +281,9 @@ def main() -> int:
     ap.add_argument("--cap-hours", type=float, default=6.0)
     ap.add_argument("--out-dir", type=Path, default=ROOT / "experiments" / "results")
     args = ap.parse_args()
+    from sim_pin import pin_process
+
+    pin_process()  # this process and the workers it starts, before torch loads
     if args.sabotage_outer_lr is not None and not (args.sabotage_outer_lr > 0):
         ap.error("--sabotage-outer-lr must be > 0")
     if args.full:

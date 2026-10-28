@@ -11,7 +11,7 @@ import sys
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from hypertrain.protocol.env_pins import EnvPin, divergence
+from hypertrain.protocol.env_pins import EnvPin, divergence, gpu_label, observed_environ
 
 if TYPE_CHECKING:
     from hypertrain.trainer.config import TrainConfig
@@ -31,7 +31,9 @@ def apply_reference_env(env: Mapping[str, Any]) -> dict[str, Any]:
     if type(threads) is not int or threads < 1:
         raise RuntimeError("manifest reference_spec.env.cpu_threads must be an int >= 1")
     pinned = env.get("pinned")
-    require_env_pin(None if pinned is None else EnvPin.from_body(pinned))
+    if not isinstance(pinned, Mapping):
+        raise RuntimeError("manifest reference_spec.env.pinned is required")
+    require_env_pin(EnvPin.from_body(pinned))
     return setup_determinism(threads)
 
 
@@ -45,7 +47,7 @@ def require_threads(expected: int) -> None:
         )
 
 
-def require_env_pin(pin: EnvPin | None) -> None:
+def require_env_pin(pin: EnvPin) -> None:
     """Refuse to train/replay when this process does not honor the manifest's environment pin.
 
     ATen, MKL and oneDNN read their variables at first use, so only the launcher can set them;
@@ -53,15 +55,12 @@ def require_env_pin(pin: EnvPin | None) -> None:
     silently ignores a bogus value or one set after its first op. MKL's CNR branch and oneDNN's
     ISA have no public getter: for those, only the environment string is checked.
     """
-    if pin is None:
-        return
     import torch
 
     bad = divergence(os.environ, pin)
-    want = dict(pin.present).get("ATEN_CPU_CAPABILITY")
     live = torch.backends.cpu.get_cpu_capability()
-    if want is not None and live != want.upper():
-        bad["ATen CPU capability"] = (want.upper(), live)
+    if live != pin.capability:
+        bad["ATen CPU capability"] = (pin.capability, live)
     if bad:
         raise EnvPinMismatch(
             "environment pin mismatch: "
@@ -72,13 +71,26 @@ def require_env_pin(pin: EnvPin | None) -> None:
         )
 
 
-def env_pin_evidence(pin: EnvPin | None) -> dict[str, Any]:
-    """Run evidence for ``summary.json``: self-reported by the process, never authority."""
-    if pin is None:
-        return {}
+def require_gpu_class(pin: EnvPin, device: tuple[int, int] | None) -> None:
+    """Refuse a device (compute capability, None for a CPU run) outside the pin's GPU class."""
+    if gpu_label(device) != pin.gpu:
+        raise EnvPinMismatch(
+            f"environment pin mismatch: GPU class: manifest {pin.gpu!r}, live {gpu_label(device)!r}"
+        )
+
+
+def env_observation(pin: EnvPin, device: tuple[int, int] | None) -> dict[str, Any]:
+    """What this process declares about its environment: self-reported, never authority.
+
+    Taken after the run, so a change after init shows; the server compares it with the pin.
+    """
     import torch
 
-    return {"env_pin": {**pin.body(), "cpu_capability": torch.backends.cpu.get_cpu_capability()}}
+    return {
+        "env": observed_environ(os.environ, pin),
+        "cpu_capability": torch.backends.cpu.get_cpu_capability(),
+        "gpu": gpu_label(device),
+    }
 
 
 def require_reference_env(cfg: TrainConfig) -> None:

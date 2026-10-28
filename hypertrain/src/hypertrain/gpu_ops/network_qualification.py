@@ -33,6 +33,7 @@ from hypertrain.miner.island_launch import (
     IslandFailure,
     confined,
     gpu_uuid,
+    island_env,
     launch_argv,
     validate_artifacts,
 )
@@ -406,6 +407,16 @@ def inspect_environment(cfg: Qualification, n_gpus: int, sm_count: int) -> Envir
     )
 
 
+def child_environment(cfg: Qualification, job: IslandJobV1) -> dict[str, str]:
+    """The environment of a qualification island: this process's, under the manifest's pin.
+
+    The island worker refuses a process that does not honor the pin, and `capture` refuses a rank
+    whose summary does not show it (`validate_artifacts`), so a pinned manifest is qualified
+    under exactly its pin whatever the host's own environment says.
+    """
+    return island_env(job, trace=True, base={**os.environ, "PYTHONPATH": str(cfg.tree / "src")})
+
+
 def capture(directory: Path, job: IslandJobV1) -> dict[str, str]:
     validate_artifacts(job, directory)
     n_gpus = job.manifest.training.reference_spec.layout.n_gpus
@@ -496,7 +507,7 @@ def run(config_path: Path) -> Result:
                     stdout=out,
                     stderr=err,
                     start_new_session=True,
-                    env={**os.environ, "PYTHONPATH": str(cfg.tree / "src")},
+                    env=child_environment(cfg, current),
                 ) as proc:
                     try:
                         code = proc.wait(timeout=left)

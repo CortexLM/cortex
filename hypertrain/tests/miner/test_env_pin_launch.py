@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from test_island_launch_v2 import staged_job
 
-from env_pin_fixtures import CPU_FP32, HOSTILE, ambient, needs_avx2
+from env_pin_fixtures import CPU_AVX2, HOSTILE, ambient, honest_observation, needs_avx2
 from hypertrain.miner import island_launch
 from hypertrain.miner.island_launch import (
     CapacityAttempt,
@@ -50,26 +50,22 @@ def launch_under(
 def test_pinned_roots_do_not_depend_on_the_ambient(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    unpinned = {
-        name: roots(launch_under(monkeypatch, tmp_path / f"unpinned-{name}", values))
+    # A launcher that forgot the pin would run the worker under the hostile ambient, which the
+    # worker refuses: this is red if the launcher stops applying it.
+    runs = {
+        name: launch_under(monkeypatch, tmp_path / name, values)
         for name, values in (("clean", {}), ("hostile", HOSTILE))
     }
-    if len(set(unpinned.values())) == 1:
-        pytest.skip("fixture insensitive to the ambient on this host: nothing to pin")
-    pinned = {
-        name: launch_under(monkeypatch, tmp_path / f"pinned-{name}", values, pinned=CPU_FP32)
-        for name, values in (("clean", {}), ("hostile", HOSTILE))
-    }
-    assert len({roots(d) for d in pinned.values()}) == 1, "2 distinct commitment tuples"
-    for directory in pinned.values():
-        assert published_summary(directory)["env_pin"] == {**CPU_FP32, "cpu_capability": "AVX2"}
+    assert len({roots(d) for d in runs.values()}) == 1, "2 distinct commitment tuples"
+    for directory in runs.values():
+        assert published_summary(directory)["env"] == honest_observation(CPU_AVX2)
 
 
 @pytest.mark.parametrize("entry", ["launch_island", "launch_window", "launch_unbounded"])
 def test_a_host_that_cannot_honor_the_pin_is_refused_before_anything_starts(
     entry: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def refuse(pin: EnvPin) -> str:
+    def refuse(pin: EnvPin, backend: str) -> dict[str, Any]:
         raise EnvPinUnhonorable("ATen CPU capability: manifest 'AVX2', live 'DEFAULT'")
 
     def forbidden(*args: object, **kwargs: object) -> None:
@@ -81,7 +77,7 @@ def test_a_host_that_cannot_honor_the_pin_is_refused_before_anything_starts(
     monkeypatch.setattr(island_launch, "require_honorable", refuse)
     monkeypatch.setattr(island_launch, "run_capacity_argv", forbidden)
     monkeypatch.setattr(subprocess, "Popen", forbidden)
-    job = staged_job(tmp_path, pinned=CPU_FP32)
+    job = staged_job(tmp_path, pinned=CPU_AVX2)
     capacity = CapacityAttempt("77" * 32, "66" * 32, tmp_path / "runtime.lock", charge)
     rerun = tmp_path / "rerun/published"
     (rerun / "rank-0").mkdir(parents=True)
@@ -110,10 +106,12 @@ def test_capacity_runner_receives_the_pinned_environment(
         raise IslandFailure("stopped after reading the environment")
 
     ambient(monkeypatch, **HOSTILE)
-    monkeypatch.setattr(island_launch, "require_honorable", lambda pin: "AVX2")
+    monkeypatch.setattr(
+        island_launch, "require_honorable", lambda pin, backend: honest_observation(pin)
+    )
     monkeypatch.setattr(island_launch, "run_capacity_argv", stop)
     capacity = CapacityAttempt("77" * 32, "66" * 32, tmp_path / "runtime.lock", lambda: True)
-    job = staged_job(tmp_path, pinned=CPU_FP32)
+    job = staged_job(tmp_path, pinned=CPU_AVX2)
     with pytest.raises(IslandFailure, match="stopped after reading"):
         launch_island(job, tmp_path, backend="cpu", capacity=capacity)
     assert {name: seen.get(name) for name in HOSTILE} == {
@@ -121,7 +119,7 @@ def test_capacity_runner_receives_the_pinned_environment(
         "HT_ATTN_BACKEND": "math",
         "MKL_CBWR": "AVX2",
         "OMP_DYNAMIC": "FALSE",
-        "ONEDNN_MAX_CPU_ISA": "ALL",  # CPU_FP32 does not name it: the ambient stays
+        "ONEDNN_MAX_CPU_ISA": "AVX2",
         "HT_FP8": None,
         "HT_MOE_GROUPED": None,
         "OMP_THREAD_LIMIT": None,
@@ -135,7 +133,7 @@ def test_worker_refuses_a_spawn_that_skipped_the_pins(
     ambient(monkeypatch, **HOSTILE)
     monkeypatch.setattr(island_launch, "island_env", lambda job, **kwargs: dict(os.environ))
     monkeypatch.setattr(island_launch, "pinned_environ", lambda base, pin: dict(base))
-    job = staged_job(tmp_path, pinned=CPU_FP32)
+    job = staged_job(tmp_path, pinned=CPU_AVX2)
     with pytest.raises(
         IslandFailure, match="environment pin mismatch: .*MKL_CBWR: manifest 'AVX2'"
     ):
@@ -149,7 +147,7 @@ def test_direct_unbounded_caller_gets_the_pin(
 ) -> None:
     # The call pattern of scripts/network_gpu_operation.py: the caller's own environment.
     ambient(monkeypatch, **HOSTILE)
-    job = staged_job(tmp_path, pinned=CPU_FP32)
+    job = staged_job(tmp_path, pinned=CPU_AVX2)
     publication = tmp_path / "published"
     publication.mkdir()
     for relative in job.object_paths.values():
@@ -157,13 +155,13 @@ def test_direct_unbounded_caller_gets_the_pin(
     (publication / "job.json").write_bytes(job.model_dump_json().encode())
     _launch_unbounded(job, publication, "cpu", dict(os.environ, HT_ISLAND_TRACE="1"), None)
     validate_artifacts(job, publication)
-    assert published_summary(publication)["env_pin"]["cpu_capability"] == "AVX2"
+    assert published_summary(publication)["env"] == honest_observation(CPU_AVX2)
 
 
 @needs_avx2
 def test_window_rerun_keeps_the_pin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A carry job: re-running a window of a reset job refuses in the worker, pinned or not.
-    job = staged_job(tmp_path, pinned=CPU_FP32, state_policy="carry")
+    job = staged_job(tmp_path, pinned=CPU_AVX2, state_policy="carry")
     ambient(monkeypatch)
     published = launch_island(job, tmp_path, backend="cpu").directory
     ambient(monkeypatch, **HOSTILE)
@@ -171,30 +169,14 @@ def test_window_rerun_keeps_the_pin(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert all((published / f"rank-{rank}/windows/1.json").is_file() for rank in (0, 1))
 
 
-def test_island_env_without_pins_is_the_launcher_environment_and_the_fixed_keys(
-    tmp_path: Path,
-) -> None:
-    job = staged_job(tmp_path)
-    base = {"PATH": "/usr/bin", "MKL_CBWR": "COMPATIBLE", "HT_FP8": "1"}
-    snapshot = dict(base)
-    assert island_env(job, trace=False, base=base) == {
-        **base,
-        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-        "OMP_NUM_THREADS": "1",
-        "CUDA_DISABLE_PTX_JIT": "1",
-        "HT_ISLAND_TRACE": "0",
-    }
-    assert base == snapshot
-
-
-def test_island_env_with_pins_replaces_drops_and_keeps(tmp_path: Path) -> None:
-    job = staged_job(tmp_path, pinned=CPU_FP32)
+def test_island_env_replaces_drops_and_keeps(tmp_path: Path) -> None:
+    job = staged_job(tmp_path, pinned=CPU_AVX2)
     base = {"PATH": "/usr/bin", "MKL_CBWR": "COMPATIBLE", "HT_FP8": "1", "OMP_THREAD_LIMIT": "2"}
     snapshot = dict(base)
     env = island_env(job, trace=True, window=3, base=base)
     assert env == {
         "PATH": "/usr/bin",
-        **CPU_FP32["present"],
+        **CPU_AVX2["present"],
         "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
         "OMP_NUM_THREADS": "1",
         "CUDA_DISABLE_PTX_JIT": "1",

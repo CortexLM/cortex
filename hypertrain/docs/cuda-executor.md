@@ -20,6 +20,12 @@ other option; the two are mutually exclusive.
   `docker run --rm`. Inputs go in on the SSH standard input and the rank artifacts come back on
   the standard output; no job file is written on the host. What stays on the host is that image
   and one compute cache directory per image digest ([below](#compute-cache)).
+- An x86-64 CPU that reaches the manifest's CPU class (`reference_spec.env.pinned.cpu`, `avx2`
+  or `avx512`; [the pin](#the-environment-pin)). ATen clamps the capability to what the CPU
+  supports (inferred from the clamping seen on a CPU host; no AVX2-less or ARM GPU host was
+  available), so a CPU without AVX2, or an ARM host such as a Grace machine that reports 10.3 and
+  148 SMs like a B300, cannot honor the pin: the container program sees it and the host is refused
+  and quarantined before any island starts.
 - On shared hosts (Lium) never use the `executor-*` containers; the executor only touches
   containers named `ht-exec-<16 hex>`. It takes the `n_gpus` idle GPUs with the lowest UUIDs (no
   compute app on them and at most `idle_gpu_memory_mib` used) and treats the host as busy
@@ -107,11 +113,59 @@ has not run on a GPU host: the tests model the mount and the warm/cold differenc
   where it is not, a container root can leave root-owned files, including setuid ones, in the cache
   directory.
 
+## The environment pin
+
+Every manifest pins its process environment ([protocol.md](protocol.md), section 7, item 4a;
+ADR 0011, part 3), so the container must run the island under exactly that environment whatever
+the image's `ENV` or the host's daemon add. The pin travels in `request.json`, under the
+`request_sha256` that `COMPLETE` binds:
+
+| Field | Content |
+| --- | --- |
+| `env` | The fixed names (`PYTHONHASHSEED`, `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `CUBLAS_WORKSPACE_CONFIG`, `CUDA_DISABLE_PTX_JIT`, `NVIDIA_TF32_OVERRIDE`, `HT_IMAGE_DIGEST`, `HT_ISLAND_TRACE`, `HT_GPU_UUIDS`, `CUDA_VISIBLE_DEVICES`) and every name the pin sets (`ATEN_CPU_CAPABILITY`, `MKL_CBWR`, `OMP_DYNAMIC`, `ONEDNN_MAX_CPU_ISA`, `HT_ATTN_BACKEND`). |
+| `unset` | The names the pin leaves unset, as the sorted list of the table (`HT_COMPILE`, `HT_FP8`, `HT_MOE_GROUPED`, `OMP_THREAD_LIMIT`). |
+| `gpu` | The pin's GPU class (`sm_103` or `sm_120`). |
+
+The container program (stdlib only; it keeps its own copy of the names, which a test holds equal
+to the tables) refuses with exit 2 a request that does not carry the pin whole: a pinned name
+missing from `env`, a name outside the tables, an `unset` other than the table's list, an unknown
+class. Then, in this order, it sets `env`, removes `unset`, probes and launches. The probe, a
+child started under that environment, adds to what it reports `pinned_env` (the value, or null,
+of every name of the tables as the child sees it), `cpu_capability` (what
+`torch.backends.cpu.get_cpu_capability()` resolved) and the devices' `capabilities`.
+
+Before it starts the island the program compares the report with the request and exits 4 ("container
+refused the environment") when a name has another value or is still set, when ATen did not resolve
+the capability the pin names (`ATEN_CPU_CAPABILITY` upper-cased), or when the devices are not of the
+request's class. The executor maps exit 4 to a refused host, so an honest host that cannot honor
+the pin is quarantined at once and not retried, after a cold start, as a failed attempt.
+
+The executor does not take the program's word for it: `_check_environment` judges the same report
+against the manifest's pin with the comparison the island worker uses, and quarantines the host
+when it diverges (`container environment diverges from the manifest pin: 'HT_FP8', ...`; names the
+host chose are shown through `repr`, cut at 40 characters). A report that lacks the two fields or
+has the wrong shape is a malformed result, a failed attempt and not a quarantine. Every rank
+summary a host returns must show the pin in its `env` observation (`validate_artifacts`): a
+summary that does not is a failed attempt, nothing is published, and the host is not quarantined
+for what a file says. A manifest whose GPU class is `none` is refused by `launch` before any ssh
+call (it describes a CPU run; judging it per host would quarantine them all).
+
+`role-dispatch.json` records `pinned_env` and `cpu_capability` in `environment`. Nothing here ran on a GPU: the fake host replaces the island and the device probe.
+
+The qualification record a CUDA run needs before its run is created follows the same rule:
+`network_qualification run` starts its island through the launcher's `island_env`, so it runs
+under the manifest's pin whatever the host exports, and `_bootstrap_backend_v2` refuses (403)
+reviewed evidence whose rank summaries do not declare that pin in `env`. The challenge also
+answers 409 `ENV_CLASS_BACKEND: gpu class none` when a manifest that names no device resolves to
+the CUDA backend: a CUDA run needs a manifest of class `sm_103` or `sm_120` (a manifest built from
+the example, class `none`, is a CPU run).
+
 ## What a job produces
 
 Next to the usual `published/` directory the executor writes `role-dispatch.json`, which
 `ChallengeStore._dispatch_env_v2` reads for a CUDA audit. Besides `environment` (backend, image
-digest, drivers, SM counts, capabilities, GPU UUIDs and names, and `image_sources_sha256`, the
+digest, drivers, SM counts, capabilities, GPU UUIDs and names, the manifest's environment pin as
+the container's probe saw it (`pinned_env`, `cpu_capability`), and `image_sources_sha256`, the
 digest of the `src/hypertrain/**/*.py` files the container's own image holds, listed by the runner
 with `python -I` before the island starts: a measurement failure is exit 9) it records the host label, a
 `machine_id` derived from every GPU UUID of the host and an `instance_id` derived from the pinned
@@ -169,7 +223,7 @@ which windows. Nothing here has run against a GPU host or the real R2 service.
 | Field | Meaning |
 | --- | --- |
 | `credentials_file` | The R2 token: a regular file of the challenge's user, mode 0600, holding only `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (must start `cortex-v3-`) and optionally `R2_ENDPOINT` (https; plain http only to a literal loopback address). The process environment is ignored. Use a bucket-scoped token, never the Cloudflare account token. |
-| `operations` | Which of `reference`, `audit`, `referee` use R2 (default `audit`, `referee`: a reference holds the store lock for the whole launch). Others run the SSH way. |
+| `operations` | Which of `reference`, `audit`, `referee` use R2 (default `audit`, `referee`: the default was chosen while a reference held the store lock for the whole launch, which it no longer does since ADR 0012 Part B, and has not been revisited). Others run the SSH way. |
 | `part_bytes`, `max_artifact_bytes` | Part size (a multiple of 4 MiB, 8 to 64 MiB; the challenge chooses, the host cannot) and the largest result accepted (at most 10,000 parts). Default 16 MiB and 16 GiB. Raise `max_artifact_bytes` per profile **together with `max_result_bytes`** of the executor config, which still bounds the tar after the download: the executor refuses to load with `max_artifact_bytes` above it. |
 | `workers` | Parallel parts: uploads in the container, ranged downloads on the challenge. |
 | `reserve_seconds` | Taken from the island's time budget so the transfer has time left (default 60). A lease with less than this plus 30 s left does not use R2 (`exec_artifact_skipped`). |
@@ -177,6 +231,11 @@ which windows. Nothing here has run against a GPU host or the real R2 service.
 | `poll_ms`, `offer_wait_seconds`, `store_blip_seconds` | How often each side looks for the other's mailbox object, how long the container waits for the offer, and how long the challenge waits out a store that fails while the island runs (default 30 s) before it ends the attempt. |
 | `request_timeout_seconds`, `retry_attempts`, `retry_base_ms` | Per request and backoff, on both sides. |
 | `fallback` | `classic` (default): if R2 is unreachable when an attempt starts, that attempt uses the SSH way; `fail`: it fails. |
+
+The challenge builds the executor, settings and token included, on the first CUDA job, and once it
+has loaded it keeps it for the life of the process: a changed file is read again only by a restarted
+challenge. A token or settings file it cannot load is a 503 `ROLE_DISPATCH_UNAVAILABLE` for that job,
+and the next job tries again.
 
 Requirements: `network` must be `default` (the container reaches R2 over HTTPS; the image needs a CA
 bundle). The attempt's objects live under the bucket prefix `exec/<run>/<job>/<nonce>/`; give the
@@ -207,7 +266,10 @@ Mount the config, the key and the `known_hosts` files read-only, readable by uid
 `HYPERTRAIN_CUDA_EXECUTOR` to the `challenge` service of `compose.test.yml`, back the file up
 first, and run `up -d challenge` like [the role dispatch install](role-dispatch.md). Rollback:
 restore the compose backup and run the same `up -d challenge`. Never touch
-`cortex-challenge-hypertrain` or `/data/role-dispatch/dispatch.json`.
+`cortex-challenge-hypertrain` or `/data/role-dispatch/dispatch.json`. On the s100 TEST stack
+`challenge_image.sh executor` does this through a compose override, and with `--r2` also writes the
+settings of the previous section and sets `HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS`
+([the s100 runbook](../../docs/s100-test-stack.md), 6.4 and 6.4a).
 
 ## Limits
 

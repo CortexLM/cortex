@@ -10,12 +10,14 @@ from pydantic import TypeAdapter
 
 from hypertrain.miner.core import MinerConfig, MinerError, canonical, load_keyfile
 from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.env_pins import EnvPinUnhonorable, require_honorable
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.keys import decode_hotkey, verify
 from hypertrain.protocol.messages import Hex64
 from hypertrain.protocol.messages_v2 import (
     U64,
     EconomicsPolicyV2,
+    EnvObservation,
     EscrowLock,
     HardwareHint,
     JoinRequest,
@@ -71,6 +73,14 @@ def prepare_join(
     summary = _request(client, cfg.api, "GET", f"/v2/runs/{cfg.run_id}").json()
     manifest = _manifest(summary, cfg.run_id, cfg.owner_hotkey)
     hotkey = load_keyfile(cfg.keyfile)
+    pin = manifest.training.reference_spec.env.pin()
+    backend = "cpu" if cfg.device == "cpu" else "cuda"
+    try:
+        observed = require_honorable(pin, backend)
+    except EnvPinUnhonorable as error:
+        raise MinerError(
+            f"this host cannot honor the manifest's environment pin: {error}"
+        ) from error
     request = JoinRequest(
         run_id=cfg.run_id,
         request_id=request_id,
@@ -83,6 +93,7 @@ def prepare_join(
             device_count=manifest.training.reference_spec.layout.n_gpus,
             driver="advisory",
         ),
+        env=EnvObservation.model_validate(observed),
         hot_sig="0" * 128,
         cold_sig="0" * 128,
     )

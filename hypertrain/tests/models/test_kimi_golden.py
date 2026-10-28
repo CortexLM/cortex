@@ -17,6 +17,7 @@ import pytest
 import torch
 
 import hypertrain.models.kimi_tiny as kt
+from env_pin_fixtures import TEST_PIN
 from hypertrain.trainer.model import Params, init_params
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "trainer"))
@@ -82,7 +83,7 @@ def test_init_params_digest_is_pinned_per_seed_and_std(seed: int, std: float) ->
 @pytest.mark.parametrize("dtype", ["fp32", "bf16"])
 def test_micro_round_roots_unchanged(dtype: str, request: pytest.FixtureRequest) -> None:
     doc = kt.run_manifest(dataclasses.replace(kt.MICRO, compute_dtype=dtype))
-    (res,) = kt.qualify(doc, "cpu", 1)
+    (res,) = kt.qualify(doc, "cpu", 1, TEST_PIN)
     roots = {k: res[k] for k in ("leaves_root", "delta_hash", "state_root")}
     if roots not in GOLDEN[dtype]:
         pytest.xfail(f"{XFAIL_REASON}; test={request.node.nodeid} roots={roots} cpu={_cpu()}")

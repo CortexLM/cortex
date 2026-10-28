@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from hypertrain.trainer.config import TrainConfig
+from hypertrain.trainer.determinism import require_reference_env
 from hypertrain.trainer.loop import Assignment, SampleFn, _load_batch
 from hypertrain.trainer.model import _apply_rope, _rope, embed
 from hypertrain.trainer.optim import OptState, lr_at, newton_schulz, uses_muon
@@ -99,6 +100,7 @@ def train_many(
     carries: Sequence[OptState],
 ) -> list[tuple[Params, OptState, float]]:
     """H inner steps for R replicas at once -> per replica (theta, carried state, last loss)."""
+    require_reference_env(cfg)
     c = cfg.inner
     if c.state_policy != "carry" or c.grad_accum != 1 or c.rewarmup_steps:
         raise ValueError("batched path supports carry, grad_accum 1, no re-warmup only")

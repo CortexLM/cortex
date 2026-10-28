@@ -42,7 +42,8 @@ def tensor_on(data: Any, *args: Any, **kwargs: Any) -> torch.Tensor:
 def rank(comm: Any) -> dict[str, Any]:
     with FakeDeviceMode(default_on_device=True):
         assert torch.zeros(1).device == PROXY
-        return dict(rb.run_round(spec, comm, to_device, get, n_rows))
+        # The leaves bind the manifest: the gloo run it is compared with declares the CPU class.
+        return dict(rb.run_round(spec, comm, to_device, get, n_rows, "cpu"))
 
 
 torch.tensor = tensor_on  # type: ignore[assignment]

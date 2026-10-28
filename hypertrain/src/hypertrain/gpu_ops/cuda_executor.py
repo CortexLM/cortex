@@ -55,6 +55,7 @@ from hypertrain.miner.island_launch import (
     validate_artifacts,
 )
 from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.env_pins import gpu_label, observation_divergence
 from hypertrain.protocol.envelope import body_digest
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Hex64
@@ -77,6 +78,7 @@ OPERATIONS = ("reference", "audit", "referee")
 SSH_EXIT = 255
 RANK = re.compile(r"rank-(0|[1-9][0-9]{0,2})")
 MAX_GPUS = 8
+MAX_PIN_NAMES = 16  # the closed tables of protocol.env_pins hold 9 names
 TRANSPORT_NAMES = ("job.json", "request.json")
 FIELD = 256  # longest host-reported string the provenance record keeps
 RUNNER_PROBE_FAILED = 9
@@ -588,6 +590,10 @@ class ObservedEnvironment(Boundary):
     sm_counts: Annotated[list[StrictInt], Field(max_length=MAX_GPUS)]
     capabilities: Annotated[list[tuple[StrictInt, StrictInt]], Field(max_length=MAX_GPUS)]
     drivers: Annotated[list[Text], Field(max_length=MAX_GPUS)]
+    # The names of the manifest's environment pin as the container's probe process saw them (None:
+    # not set) and the CPU capability ATen resolved there: checked against the pin, never trusted.
+    pinned_env: Annotated[dict[Text, Text | None], Field(max_length=MAX_PIN_NAMES)]
+    cpu_capability: Text
     # sha256 of the package files the image holds, measured by the runner in isolated mode. None
     # only from a runner that predates the measurement; the pin and the store treat it as unknown.
     image_sources_sha256: Hex64 | None = None
@@ -816,6 +822,7 @@ class Executor:
         extra: Mapping[str, Any] | None = None,
     ) -> bytes:
         ref = job.manifest.training.reference_spec
+        pin = ref.env.pin()
         uuids = [g.uuid for g in chosen]
         files = {"job.json": canonicalize(job.model_dump(mode="json"))}
         for relative, source in _objects(job, directory):
@@ -831,7 +838,10 @@ class Executor:
                 "job_sha256": sha256(files["job.json"]),
                 "budget_seconds": budget,
                 "inputs": {name: sha256(raw) for name, raw in files.items()},
+                # the manifest's environment pin: the names it sets, those it removes, its device
+                # class; the container program applies and checks them (docs/cuda-executor.md)
                 "env": {
+                    **dict(pin.present),
                     **ENV_BASE,
                     "CUBLAS_WORKSPACE_CONFIG": ref.env.CUBLAS_WORKSPACE_CONFIG,
                     "CUDA_DISABLE_PTX_JIT": ref.env.CUDA_DISABLE_PTX_JIT,
@@ -841,6 +851,8 @@ class Executor:
                     "HT_GPU_UUIDS": ",".join(uuids),
                     "CUDA_VISIBLE_DEVICES": ",".join(uuids),
                 },
+                "unset": list(pin.absent),
+                "gpu": pin.gpu,
                 **(extra or {}),
             }
         )
@@ -962,9 +974,23 @@ class Executor:
             or environment.drivers[0] not in ref.driver_allowlist
         ):
             raise HostRefused(reason or "container environment contradicts the host probe")
-        pin = self.config.image_sources_sha256
-        if pin is not None and environment.image_sources_sha256 != pin:
+        image_pin = self.config.image_sources_sha256  # the host pin of the image, not the env pin
+        if image_pin is not None and environment.image_sources_sha256 != image_pin:
             raise HostRefused("container image sources differ from the pinned image")
+        # The container program checked this before the island started; a host's word for it is
+        # not enough, so the report is judged again here. Names are the host's to choose: repr, cut.
+        classes = {gpu_label(capability) for capability in capabilities}
+        diverging = observation_divergence(
+            ref.env.pin(),
+            {
+                "env": environment.pinned_env,
+                "cpu_capability": environment.cpu_capability,
+                "gpu": classes.pop() if len(classes) == 1 else None,
+            },
+        )
+        if diverging:
+            shown = ", ".join(repr(name[:40]) for name in diverging)
+            raise HostRefused(f"container environment diverges from the manifest pin: {shown}")
         return {**environment.model_dump(mode="json"), "image_digest": ref.image_digest}
 
     def _publish(
@@ -1076,7 +1102,7 @@ class Executor:
             if code:
                 self._cache_dirs.pop((label, ref.image_digest), None)  # it may be what failed
             if code == RUNNER_REFUSED_ENVIRONMENT:
-                raise HostRefused(f"container refused the devices: {_tail(log)}")
+                raise HostRefused(f"container refused the environment: {_tail(log)}")
             if code == RUNNER_PROBE_FAILED:
                 raise AttemptFailed(
                     f"the device probe in the container could not run: {_tail(log)}"
@@ -1176,6 +1202,10 @@ class Executor:
     ) -> IslandArtifacts:
         if job.manifest.training.reference_spec.layout.n_gpus > MAX_GPUS:
             raise IslandFailure(f"the executor carries layouts of at most {MAX_GPUS} GPUs")
+        if job.manifest.training.reference_spec.env.pin().gpu == "none":
+            # every GPU host would show a class: re-judging that against the manifest would
+            # quarantine them all for a fault that is the manifest's
+            raise IslandFailure("the manifest pins no GPU class, and the executor runs GPUs only")
         directory = directory.resolve()
         directory.mkdir(parents=True, exist_ok=True)
         with flock(directory / "launch.lock"):

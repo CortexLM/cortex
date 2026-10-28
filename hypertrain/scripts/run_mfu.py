@@ -4,6 +4,8 @@ Drives hypertrain.trainer.island.train_island (production path, determinism ON) 
 scripts/mfu_profiles.json and writes raw per-step timings, FLOPs/token, MFU vs the vendor peak
 (and vs --measured-peak when given), and the leaf root of both the run and the replay.
 check_gpu_evidence.py --kind mfu recomputes MFU from the raw timings.
+The run's manifest pins its environment (honor_pin): the script restarts itself under it, and
+refuses a caller that sets HT_COMPILE, HT_FP8, HT_MOE_GROUPED or a contradicting variable.
 Usage: python scripts/run_mfu.py --profile mfu-dense-1b --device cuda --out OUT.json
        [--warmup 10] [--measured-peak FLOPS]
 """
@@ -26,6 +28,7 @@ from hypertrain.trainer import DETERMINISM  # must precede torch
 import numpy as np
 import torch
 
+from hypertrain.protocol.env_pins import EnvPin, class_pin, divergence, gpu_label, pinned_environ
 from hypertrain.protocol.example import example_manifest
 from hypertrain.trainer.attention import select_backend
 from hypertrain.trainer.island import emulate, island_from_manifest, train_island
@@ -34,10 +37,50 @@ from hypertrain.trainer.model import init_params, param_shapes
 from hypertrain.trainer.perf import MFU_PEAK_RTX5090_BF16, flops_per_token
 
 PROFILES = Path(__file__).resolve().parent / "mfu_profiles.json"
+CPU_CLASS = "avx2"  # every host this harness runs on has AVX2
 
 
-def manifest_body(spec: dict[str, Any]) -> dict[str, Any]:
+def honor_pin(device: torch.device) -> EnvPin:
+    """The pin of this run's manifest, with this process made to honor it.
+
+    The pin names the CPU class, the GPU class of ``device`` and the attention backend the run
+    uses: ``HT_ATTN_BACKEND`` when forced, else the one ``select_backend`` picks. ATen, MKL and
+    oneDNN read their variables at first use, so a process that lacks them restarts under the pin.
+    One that sets a pinned name to another value (an engine flag such as ``HT_COMPILE``, or a
+    careless export) is refused: no class holds an A/B flag, and a silent override would measure
+    something other than what was asked.
+    """
+    program = Path(sys.argv[0]).name
+    capability = torch.cuda.get_device_capability(device) if device.type == "cuda" else None
+    try:
+        pin = EnvPin.from_body(class_pin(CPU_CLASS, gpu_label(capability), select_backend(device)))
+    except ValueError as error:
+        raise SystemExit(f"{program}: {error}") from error
+    bad = divergence(os.environ, pin)
+    clash = {name: seen for name, seen in bad.items() if seen[1] is not None}
+    if clash:
+        raise SystemExit(
+            f"{program}: the environment contradicts the pin of this run: "
+            + "; ".join(
+                f"{name}: pin {'absent' if want is None else repr(want)}, live {live!r}"
+                for name, (want, live) in sorted(clash.items())
+            )
+            + ". Unset them: a pinned run never inherits the caller's engine flags."
+        )
+    if bad:
+        os.execve(  # noqa: S606 - this interpreter, this script, the pinned environment
+            sys.executable, [sys.executable, *sys.argv], pinned_environ(os.environ, pin)
+        )
+    return pin
+
+
+def manifest_body(spec: dict[str, Any], pin: EnvPin, device: torch.device) -> dict[str, Any]:
     body: dict[str, Any] = json.loads(json.dumps(example_manifest().body()))
+    body["reference_spec"]["env"]["pinned"] = pin.body()
+    if device.type == "cuda":  # the GPU class holds the SM counts measured on its device
+        body["reference_spec"]["sm_count"] = torch.cuda.get_device_properties(
+            device
+        ).multi_processor_count
     for k in ("model", "inner", "outer"):
         body[k].update(spec[k])
     body["reference_spec"]["layout"] = dict(spec["layout"])
@@ -112,7 +155,7 @@ def main() -> int:
     a = ap.parse_args()
     spec = json.loads(PROFILES.read_text())["profiles"][a.profile]
     device = torch.device("cuda", 0) if a.device == "cuda" else torch.device("cpu")
-    body = manifest_body(spec)
+    body = manifest_body(spec, honor_pin(device), device)
     run = one_round(body, device)
     replay = one_round(body, device)
     sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False)  # noqa: S603, S607

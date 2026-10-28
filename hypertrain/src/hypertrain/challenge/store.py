@@ -21,14 +21,15 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from dataclasses import asdict
+from concurrent.futures import Future, wait
+from contextlib import contextmanager, nullcontext
+from dataclasses import asdict, dataclass
 from fractions import Fraction
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, JsonValue, StrictInt
+from pydantic import BaseModel, ConfigDict, JsonValue, StrictInt, ValidationError
 
 if TYPE_CHECKING:
     from experiments.gpu_network_v2.orchestrate import NetworkRuntime
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from hypertrain.gpu_ops.host_attest import Attestation
     from hypertrain.gpu_ops.network_qualification import HostPin
     from hypertrain.gpu_ops.work_screen import IslandLaunch
+    from hypertrain.protocol.env_pins import EnvPin
     from hypertrain.protocol.messages import ReplayEnv
 
 from hypertrain.beacon import BeaconError, BeaconRound
@@ -298,6 +300,60 @@ class _ServiceCapacityV1(BaseModel):
 # Signed-profile roster cap ceiling (plan 4.3); RoundOpenV2.roster max_length is the same bound.
 MAX_ROSTER_CEILING = 1024
 
+# A repeated request for a reference that is already running waits for it, on a worker of the
+# asyncio.to_thread pool (min(32, cpu + 4)). Past this many waiters in the process the request is
+# refused with 503 at once; a waiter gives up after REFERENCE_WAIT_SECONDS (the 100-round trial
+# window is 300 s).
+REFERENCE_WAITERS = 2
+REFERENCE_WAIT_SECONDS = 330.0
+
+# A repeated aggregate for a round that is already computing waits for it, on a worker of the
+# asyncio.to_thread pool (min(32, cpu + 4)). Past AGGREGATE_WAITERS waiters in the process it is
+# refused with 503 at once; a waiter gives up after AGGREGATE_WAIT_SECONDS, which is the client
+# timeout of scripts/ops/live_operator.py.
+AGGREGATE_WAITERS = 2
+AGGREGATE_WAIT_SECONDS = 600.0
+
+
+@dataclass(frozen=True, slots=True)
+class _AggregatePlan:
+    """Everything one aggregation computes from. The claim reads it under the lock, the settlement
+    reads it again and writes only when it is equal."""
+
+    now: int
+    manifest: RunManifestV2
+    policy: AggregationPolicyV2
+    economics: bytes
+    inputs: list[Any]
+    prev_state: str | None  # None at w == 0: the computation builds the genesis state
+    predecessor: str
+    reference_reward_units: int
+
+
+@dataclass(frozen=True, slots=True)
+class _FinalityReplay:
+    """Everything the replay of a finalized round computes from. `key` names exactly these values,
+    so a verdict kept under it is the verdict of a replay of them and of no other."""
+
+    key: str
+    manifest: RunManifestV2
+    policy: AggregationPolicyV2
+    economics: bytes
+    tape: Any
+    w: int
+    prev_state: str
+    predecessor: str
+    inputs: list[Any]
+    reference_reward_units: int
+    signer: str
+
+
+# Replay verdicts kept for the transactions that will ask for them; a verdict is 64 hex characters.
+# One is trusted for FINALITY_VERDICT_SECONDS only: the objects the replay read are not read again,
+# so a finalize refused (a stale gate, say) and retried later must replay again.
+FINALITY_VERDICTS = 8
+FINALITY_VERDICT_SECONDS = 120.0
+
 
 # The meta row that pins which coordinator secret the escrow ids were derived from.
 ESCROW_ID_NAMESPACE_META = "escrow-id-namespace-v2"
@@ -308,6 +364,28 @@ class ChallengeError(Exception):
         super().__init__(detail)
         self.status = status
         self.detail = detail
+
+
+class RunRetired(ChallengeError):
+    """The stored manifest is one the current model refuses: the run answers 409 and stays idle."""
+
+
+def _unprocessable(error: EnvelopeError) -> ChallengeError | None:
+    """A manifest body the model refuses is unprocessable (422), and says where."""
+    cause = error.__cause__
+    if not isinstance(cause, ValidationError):
+        return None
+    first = cause.errors()[0]
+    where = ".".join(str(p) for p in first.get("loc", ()))
+    return ChallengeError(422, f"{where}: {first.get('msg', 'invalid')}")
+
+
+def _retired(error: ValidationError) -> RunRetired:
+    """A stored run whose manifest the model now refuses (ADR 0011 part 3: the pin is required)."""
+    where = sorted({".".join(map(str, e["loc"])) for e in error.errors()})
+    return RunRetired(
+        409, "RUN_MANIFEST_RETIRED: the stored manifest is refused at " + ", ".join(where)
+    )
 
 
 _ENVELOPE_STATUS: list[tuple[type[EnvelopeError], int]] = [
@@ -478,6 +556,13 @@ class ChallengeStore:
         self._services_v2: dict[str, tuple[Any, Any, Any]] = {}
         self.beacon_arrived = threading.Condition()
         self._lease_guards_v2: dict[str, Any] = {}
+        self._reference_flights_v2: dict[tuple[str, str, bool], Future[str]] = {}
+        self._reference_waiters = threading.BoundedSemaphore(REFERENCE_WAITERS)
+        self._staging = threading.RLock()  # a staging asked from a staging must not wait
+        self._aggregate_flights_v2: dict[tuple[str, int], Future[dict[str, Any]]] = {}
+        self._aggregate_waiters = threading.BoundedSemaphore(AGGREGATE_WAITERS)
+        self._finality_verdicts_v2: dict[str, tuple[str, float]] = {}
+        self._finality_prime_v2 = threading.Lock()
         self._ipc_v2: socket.socket | None = None
         self._ipc_path_v2: Path | None = None
         self._ipc_thread_v2: threading.Thread | None = None
@@ -588,6 +673,9 @@ class ChallengeStore:
             _role_launch=self._role_launch,
         )
         child.clock = lambda: self.clock()
+        child._reference_waiters = self._reference_waiters  # one budget for the one thread pool
+        child._staging = self._staging  # one model in memory at a time, whichever store hosts it
+        child._aggregate_waiters = self._aggregate_waiters  # one budget for the one thread pool
         lock = directory / "capacity-runtime.lock"
         if not lock.is_symlink():  # one host-wide capacity lock across all hosted runs
             lock.unlink(missing_ok=True)
@@ -667,7 +755,10 @@ class ChallengeStore:
             raise ChallengeError(404, "unknown run")
         if json.loads(row["manifest"]).get("manifest_version") == 2:
             raise ChallengeError(409, "route and stored contract version differ")
-        return row, RunManifest.model_validate_json(row["manifest"])
+        try:
+            return row, RunManifest.model_validate_json(row["manifest"])
+        except ValidationError as error:
+            raise _retired(error) from error
 
     def _round(self, db: sqlite3.Connection, run_id: str, w: int) -> tuple[sqlite3.Row, RoundOpen]:
         row = db.execute("SELECT * FROM rounds WHERE run_id=? AND w=?", (run_id, w)).fetchone()
@@ -761,7 +852,9 @@ class ChallengeStore:
             result = {"round": br.round, "latest": self._now(db)}
         with self.beacon_arrived:
             self.beacon_arrived.notify_all()
-        for guard in tuple(self._lease_guards_v2.values()):
+        with self._lock:  # a reference registers and drops its guard from another thread
+            guards = tuple(self._lease_guards_v2.values())
+        for guard in guards:
             guard.advance(br.round)
         for run_id, (escrow, admission, _) in self._services_v2.items():
             with self._tx():
@@ -848,6 +941,8 @@ class ChallengeStore:
             try:
                 manifest = intake.accept(env, self._now(db))
             except EnvelopeError as error:
+                if (unprocessable := _unprocessable(error)) is not None:
+                    raise unprocessable from None
                 status = next(s for cls, s in _ENVELOPE_STATUS if isinstance(error, cls))
                 raise ChallengeError(status, str(error)) from None
             assert isinstance(manifest, RunManifest)
@@ -1135,7 +1230,10 @@ class ChallengeStore:
             ).fetchone()
             if sig is None:
                 continue
-            self._select(db, row, body, bytes.fromhex(sig["signature"]))
+            try:
+                self._select(db, row, body, bytes.fromhex(sig["signature"]))
+            except RunRetired:
+                continue  # its draw stays pending; it must not stop the beacon of the other runs
 
     def _select(
         self, db: sqlite3.Connection, row: sqlite3.Row, body: RoundOpen, sig: bytes
@@ -1549,6 +1647,10 @@ class ChallengeStore:
         return job
 
     def _replayable(self, db: sqlite3.Connection, job: sqlite3.Row) -> bool:
+        try:
+            self._run(db, job["run_id"])
+        except RunRetired:
+            return False  # its jobs wait; they must not starve the auditors of the other runs
         round_row, _ = self._round(db, job["run_id"], job["w"])
         miner = self._miner(db, job["run_id"], job["w"], job["target"])
         return round_row["theta_start"] is not None and miner["preimages"] is not None
@@ -2239,7 +2341,10 @@ class ChallengeStore:
         data = envelope_v2.load_json(row[0])
         if not isinstance(data, dict) or data.get("manifest_version") != 2:
             raise ChallengeError(409, "route and stored contract version differ")
-        return RunManifestV2.model_validate(data)
+        try:
+            return RunManifestV2.model_validate(data)
+        except ValidationError as error:
+            raise _retired(error) from error
 
     def _record_v2(self, run_id: str, kind: str, identity: str) -> dict[str, Any]:
         row = self._db.execute(
@@ -2343,7 +2448,12 @@ class ChallengeStore:
     def _create_run_v2(self, raw: bytes) -> dict[str, JsonValue]:
         if self.owner_hotkey is None:
             raise ChallengeError(503, "owner hotkey is not configured")
-        env = envelope_v2.parse_envelope(raw)
+        try:
+            env = envelope_v2.parse_envelope(raw)
+        except EnvelopeError as error:
+            if (unprocessable := _unprocessable(error)) is not None:
+                raise unprocessable from None
+            raise
         if env.type != "RunManifestV2":
             raise ChallengeError(400, "expected RunManifestV2")
         hosted = False
@@ -2480,35 +2590,141 @@ class ChallengeStore:
             or record["shadow"] != evidence.shadow
         ):
             raise EscrowError("FINALITY_ACCEPTANCE_LINKAGE")
+        job = self._finality_replay_job_v2(
+            run_id, int(str(evidence.finalize.body["w"])), evidence.tape_hash
+        )
+        # A verdict kept under this key is that of a replay, made a moment ago and before the
+        # transaction, of these very values; without one the replay is made here, as it always was.
+        theta_hash = self._kept_finality_verdict_v2(job.key) or self._run_finality_replay_v2(job)
+        if theta_hash != record["theta_hash"]:
+            raise EscrowError("FINALITY_TAPE_REPLAY_MISMATCH")
+        return str(record["theta_hash"])
+
+    def _finality_replay_job_v2(self, run_id: str, w: int, tape_hash: str) -> _FinalityReplay:
+        """The values the replay of round w computes from, read in a transaction."""
         from hypertrain.aggregator.checkpoint import network_inputs
-        from hypertrain.aggregator.tape_v2 import TapeV2, replay_tape
+        from hypertrain.aggregator.tape_v2 import TapeV2
 
         manifest = self._run_v2(run_id)
-        w = int(str(evidence.finalize.body["w"]))
         self.require_roster_v2(run_id, w)
         applied = self._record_v2(run_id, "applied", str(w))
-        inputs = network_inputs(self._record_v2(run_id, "tape-inputs", str(w))["inputs"])
-        tape = TapeV2.from_bytes(self.objects.get(evidence.tape_hash))
-        replayed = replay_tape(
-            self.objects,
-            tape,
+        stored = self._record_v2(run_id, "tape-inputs", str(w))
+        inputs = network_inputs(stored["inputs"])
+        tape = TapeV2.from_bytes(self.objects.get(tape_hash))
+        signer = self._coord().ss58
+        reference_reward_units = self._services(run_id)[0].policy.R_collectible_units
+        return _FinalityReplay(
+            sha256_hex(
+                canonicalize(
+                    [run_id, w, tape_hash, applied, stored, signer, reference_reward_units]
+                )
+            ),
             manifest,
             AggregationPolicyV2.model_validate_json(
                 self.objects.get(manifest.network.aggregation_policy_hash)
             ),
             self.objects.get(manifest.network.economics_policy_hash),
-            signer=self._coord().ss58,
-            w=w,
-            prev_state=str(applied["prev_state"]),
-            predecessor_tape_hash=str(applied["predecessor_tape_hash"]),
-            inputs=inputs,
-            reference_reward_units=self._services_v2[run_id][0].policy.R_collectible_units,
+            tape,
+            w,
+            str(applied["prev_state"]),
+            str(applied["predecessor_tape_hash"]),
+            inputs,
+            reference_reward_units,
+            signer,
         )
-        from hypertrain.aggregator.core import th
 
-        if th(replayed.theta) != record["theta_hash"]:
-            raise EscrowError("FINALITY_TAPE_REPLAY_MISMATCH")
-        return str(record["theta_hash"])
+    def _kept_finality_verdict_v2(self, key: str) -> str | None:
+        """The verdict kept under `key` if it is still young enough to be trusted."""
+        kept = self._finality_verdicts_v2.get(key)
+        return kept[0] if kept is not None and time.monotonic() < kept[1] else None
+
+    def _run_finality_replay_v2(self, job: _FinalityReplay) -> str:
+        """Replay the tape of the job from its original objects; no lock, no database row."""
+        from hypertrain.aggregator.core import th
+        from hypertrain.aggregator.tape_v2 import replay_tape
+
+        replayed = replay_tape(
+            self.objects,
+            job.tape,
+            job.manifest,
+            job.policy,
+            job.economics,
+            signer=job.signer,
+            w=job.w,
+            prev_state=job.prev_state,
+            predecessor_tape_hash=job.predecessor,
+            inputs=job.inputs,
+            reference_reward_units=job.reference_reward_units,
+        )
+        return th(replayed.theta)
+
+    def _prime_finality_replay_v2(self, run_id: str, w: int, raw: bytes) -> None:
+        """Replay the applied tape of round w before finalize_v2's transaction, without the lock.
+
+        Nothing is written. It runs only for a finalize that will reach the replay: a stored
+        Finalize result, a repair, a missing record or a request that is not the coordinator's
+        signed list of the tape's own inputs, or a round that is not settleable (open audit or
+        dispute, excluded, another state) is left to the transaction, which refuses it as it
+        always did. So is anything that fails here, a record or the tape object that cannot be
+        read, or the replay itself: the transaction reads and replays the same way and raises
+        where it always raised, after the checks that come before it. One replay at a time, as
+        the store lock used to allow; a finalize that waits longer than a waiter of an
+        aggregate does replays under the lock, as before.
+        """
+        from hypertrain.challenge.finality_v2 import RoundStatus, settle
+
+        if self._lock._is_owned():  # type: ignore[attr-defined]
+            return
+        with self._lock:
+            try:
+                manifest = self._run_v2(run_id)
+                if (
+                    self._service_boundary_v2(run_id, w) is not None
+                    or self._db.execute(
+                        "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='finalize' AND id=?",
+                        (run_id, str(w)),
+                    ).fetchone()
+                ):
+                    return
+                request = envelope_v2.Intake(
+                    run_id, {"Finalize": manifest.training.coord_pubkey.__eq__}
+                ).accept(raw, self._now(self._db))
+                applied = self._record_v2(run_id, "applied", str(w))
+                stored = self._record_v2(run_id, "tape-inputs", str(w))
+                if (
+                    not isinstance(request, Finalize)
+                    or request.w != w
+                    or request.included
+                    != sorted(item["roster"]["hotkey"] for item in stored["inputs"])
+                    or applied.get("kind") == "repair"
+                ):
+                    return
+                # the round must be one the transaction can settle (applied, no open audit or
+                # dispute, not excluded, the state this Finalize names)
+                status = RoundStatus(**self._record_v2(run_id, "finality", str(w)))
+                settle(status, request, body_digest(request.model_dump(mode="json")))
+                job = self._finality_replay_job_v2(run_id, w, str(applied["tape_hash"]))
+            except Exception:  # deferred, not dropped: the transaction reads the same rows
+                return
+        if not self._finality_prime_v2.acquire(timeout=AGGREGATE_WAIT_SECONDS):
+            return
+        try:
+            with self._lock:
+                if self._kept_finality_verdict_v2(job.key) is not None:
+                    return
+            try:
+                theta_hash = self._run_finality_replay_v2(job)
+            except Exception:  # deferred, not dropped: the transaction replays and raises it
+                return
+            with self._lock:
+                expires = time.monotonic() + FINALITY_VERDICT_SECONDS
+                # a refreshed verdict goes last: assigning to a key keeps its old place in line
+                self._finality_verdicts_v2.pop(job.key, None)
+                self._finality_verdicts_v2[job.key] = (theta_hash, expires)
+                while len(self._finality_verdicts_v2) > FINALITY_VERDICTS:
+                    del self._finality_verdicts_v2[next(iter(self._finality_verdicts_v2))]
+        finally:
+            self._finality_prime_v2.release()
 
     @staticmethod
     def _qualification_evidence_v2(
@@ -2590,9 +2806,11 @@ class ChallengeStore:
         from hypertrain.gpu_ops import host_attest
         from hypertrain.gpu_ops import network_qualification as engine
         from hypertrain.gpu_ops.journal import fsha
+        from hypertrain.protocol.env_pins import observation_divergence
         from hypertrain.protocol.messages import Receipt
 
         ref = manifest.training.reference_spec
+        env_pin = ref.env.pin()  # the environment class; `pins` are the hosts' SSH keys
         config_bytes = tuple(p.read_bytes() for p in configs)
         result_bytes = tuple(p.read_bytes() for p in results)
         if pins is None:
@@ -2646,6 +2864,11 @@ class ChallengeStore:
                     )
                     if summary.get("backend") != "cuda":
                         raise ChallengeError(403, "CPU artifacts cannot qualify CUDA execution")
+                    declared = summary.get("env")
+                    if not isinstance(declared, dict) or observation_divergence(env_pin, declared):
+                        raise ChallengeError(
+                            403, "CUDA qualification ran under another environment than the pin"
+                        )
             if (
                 job.manifest != manifest
                 or result.config_sha256 != fsha(config_path)
@@ -2742,6 +2965,11 @@ class ChallengeStore:
                 if econ.ledger_mode != "test":
                     raise ChallengeError(409, "production CUDA qualification required")
                 backend = "cpu"
+            # A manifest that names no device cannot run on the CUDA backend. The reverse is not
+            # refused: a CUDA-class run may exist in a CPU test state (the conserved genesis store
+            # of the GPU prepare tool); no CPU party can join it, since each declares gpu "none".
+            if backend == "cuda" and ref.env.pin().gpu == "none":
+                raise ChallengeError(409, "ENV_CLASS_BACKEND: gpu class none")
             selection: dict[str, JsonValue] = {"backend": backend, "authority_hash": authority}
             frozen = self._db.execute(
                 "SELECT data FROM records_v2 WHERE run_id=? "
@@ -2938,6 +3166,46 @@ class ChallengeStore:
     def stage_trial_v2(
         self, run_id: str, challenge: JoinChallenge, samples: tuple[int, ...], epoch: int
     ) -> tuple[IslandJobV1, Path]:
+        return self.plan_trial_v2(run_id, challenge, samples, epoch)()
+
+    def plan_trial_v2(
+        self, run_id: str, challenge: JoinChallenge, samples: tuple[int, ...], epoch: int
+    ) -> Callable[[], tuple[IslandJobV1, Path]]:
+        """Read what staging needs from the database now; the staging it returns reads none.
+
+        Staging is O(model): the parameters are initialised, serialised twice, hashed and written,
+        seconds at 100 M parameters, more than the freshness gate lets the beacon pusher wait. A
+        caller that holds the store lock plans under it, which costs a few reads, and stages
+        after it let go. Stagings run one at a time (`_staging`), as the lock made them, so the
+        memory is that of one model.
+        """
+        from hypertrain.trainer.config import TrainConfig
+
+        manifest = self._run_v2(run_id)
+        hotkey = None  # only a carried start state is keyed by the admission's hotkey
+        if TrainConfig.from_manifest_v2(manifest).inner.state_policy == "carry":
+            hotkey = self._services(run_id)[1].store.by_id(challenge.admission_id).hotkey
+        dataset = self._record_v2(run_id, "dataset", "inputs")
+        stage = partial(
+            self._stage_inputs_v2, run_id, manifest, hotkey, dataset, challenge, samples, epoch
+        )
+
+        def staged() -> tuple[IslandJobV1, Path]:
+            with self._staging:
+                return stage()
+
+        return staged
+
+    def _stage_inputs_v2(
+        self,
+        run_id: str,
+        manifest: RunManifestV2,
+        hotkey: str | None,
+        dataset: Mapping[str, JsonValue],
+        challenge: JoinChallenge,
+        samples: tuple[int, ...],
+        epoch: int,
+    ) -> tuple[IslandJobV1, Path]:
         import torch
 
         import hypertrain.trainer  # noqa: F401
@@ -2945,19 +3213,16 @@ class ChallengeStore:
         from hypertrain.trainer.config import TrainConfig
         from hypertrain.trainer.model import init_params
 
-        manifest = self._run_v2(run_id)
         cfg = TrainConfig.from_manifest_v2(manifest)
         theta = init_params(cfg.model)
         start_state = pack_state(theta)
         ef_in = pack_state({k: torch.zeros_like(v) for k, v in theta.items()})
-        if cfg.inner.state_policy == "carry":
-            admission = self._services(run_id)[1].store.by_id(challenge.admission_id)
-            genesis = AnchorCache().genesis(manifest, admission.hotkey, theta)
+        if hotkey is not None:
+            genesis = AnchorCache().genesis(manifest, hotkey, theta)
             start_state = pack_state(genesis.theta, genesis.state)
             ef_in = pack_state(genesis.ef)
         directory = self.state_dir / "trials-v2" / challenge.nonce
         directory.mkdir(parents=True, exist_ok=True)
-        dataset = self._record_v2(run_id, "dataset", "inputs")
         raw = self.objects.get(str(dataset["samples_hash"]))
         proofs = json.loads(self.objects.get(str(dataset["proofs_hash"])))
         assert isinstance(proofs, list)
@@ -2978,9 +3243,14 @@ class ChallengeStore:
         }
         for name, value in inputs.items():
             path = directory / name
-            if path.exists() and path.read_bytes() != value:
-                raise ChallengeError(409, "immutable trial inputs changed")
-            path.write_bytes(value)
+            if path.exists():
+                if path.read_bytes() != value:
+                    raise ChallengeError(409, "immutable trial inputs changed")
+                continue  # a launch may be reading it: staged once, never rewritten in place
+            with tempfile.TemporaryDirectory(dir=directory) as temporary:
+                staged = Path(temporary) / name
+                staged.write_bytes(value)
+                staged.replace(path)
         deadline = manifest.training.beacon.genesis_time + (challenge.deadline_beacon - 1) * 3
         return IslandJobV1(
             job_version=1,
@@ -2997,6 +3267,8 @@ class ChallengeStore:
         ), directory
 
     def export_trial_v2(self, run_id: str, admission_id: str) -> dict[str, Any]:
+        """The trial's job and its objects. The store lock covers the reads and the planning of
+        the staging; the staging and the puts, O(model) both, run after it let go."""
         from hypertrain.data.trial_assignment import trial_samples
 
         self._services(run_id)
@@ -3020,34 +3292,36 @@ class ChallengeStore:
             except BeaconError:
                 raise ChallengeError(503, "beacon infrastructure paused") from None
             samples = trial_samples(manifest, admission_id, challenge.nonce, beacon)
-            job, directory = self.stage_trial_v2(run_id, challenge, samples, row["trial_epoch"])
-            path = directory / "job.json"
-            raw = job.model_dump_json().encode()
-            if path.exists():
-                if path.read_bytes() != raw:
-                    raise ChallengeError(409, "immutable trial job changed")
-            else:
-                with tempfile.TemporaryDirectory(dir=directory) as temporary:
-                    staged = Path(temporary) / "job.json"
-                    staged.write_bytes(raw)
-                    staged.replace(path)
-            objects = {
-                name: self.objects.put((directory / relative).read_bytes())
-                for name, relative in job.object_paths.items()
-            }
+            stage = self.plan_trial_v2(run_id, challenge, samples, row["trial_epoch"])
             receipt = self._db.execute(
                 "SELECT receipt FROM admission_reservations WHERE reservation=?",
                 (f"challenge|{admission_id}|{challenge.nonce}",),
             ).fetchone()
             if receipt is None:
                 raise ChallengeError(409, "MISSING_CHALLENGE_RECEIPT")
-            return {
-                "job": job.body(),
-                "objects": objects,
-                "challenge": challenge.body(),
-                "challenge_envelope": envelope_v2.load_json(receipt["receipt"]),
-                "nonce": challenge.nonce,
-            }
+            envelope = envelope_v2.load_json(receipt["receipt"])
+        job, directory = stage()
+        path = directory / "job.json"
+        raw = job.model_dump_json().encode()
+        if path.exists():
+            if path.read_bytes() != raw:
+                raise ChallengeError(409, "immutable trial job changed")
+        else:
+            with tempfile.TemporaryDirectory(dir=directory) as temporary:
+                staged = Path(temporary) / "job.json"
+                staged.write_bytes(raw)
+                staged.replace(path)
+        objects = {
+            name: self.objects.put((directory / relative).read_bytes())
+            for name, relative in job.object_paths.items()
+        }
+        return {
+            "job": job.body(),
+            "objects": objects,
+            "challenge": challenge.body(),
+            "challenge_envelope": envelope,
+            "nonce": challenge.nonce,
+        }
 
     def _contest_v2(self, run_id: str, verdict_hash: str) -> Contest:
         """The accepted contest record. A verdict that upholds the work has nothing to contest.
@@ -3239,74 +3513,170 @@ class ChallengeStore:
     def trial_reference_v2(
         self, run_id: str, admission_id: str, *, retain_shadow_custody: bool = False
     ) -> dict[str, str]:
+        """The trusted reference of an open trial, in three steps (docs/adr/0012 section 2).
+
+        Claim, under the lock: the freshness gate, everything the launch and the staging of its
+        inputs read from the database, and a flight keyed (admission, challenge nonce, custody
+        flag). A second call for the same key waits for the flight and gets its commitment, or its
+        failure, without staging the job again or launching again. A call with the other custody
+        flag (test mode only) has a flight of its own: the same trial can then launch twice, and
+        the executor, which finds the first publication, answers the second without a host. Run,
+        without the lock: the staging (O(model)), the launch and the object puts, under a lease
+        guard the verified beacon cancels. Settle, under the lock again, after the freshness gate:
+        the commitment is written only into the row state the claim read. The lock is therefore
+        free while the inputs of a large model are written and while a remote executor works.
+        """
         from hypertrain.auditor.worker import LeaseGuard
 
+        if self._lock._is_owned():  # type: ignore[attr-defined]
+            raise RuntimeError("trial_reference_v2 would keep the store lock through the launch")
         _, admission, _ = self._services(run_id)
+        guard: LeaseGuard | None = None
+        guard_key = ""
+        trusted: Callable[[IslandJobV1, Path, JoinChallenge, int], IslandLaunch] | None = None
+        value: str | None = None
+        failure: BaseException | None = None
+        key = (admission_id, "", retain_shadow_custody)
+        cutoff = 0.0
         with self._lock:
-            now = self._fresh_v2(
-                self._run_v2(run_id), f"reference:{admission_id}:{self._now(self._db)}"
-            )
-            if self._role_launch is None:
-                value = admission.prepare_reference(
-                    admission_id, now=now, retain_shadow_custody=retain_shadow_custody
+            manifest = self._run_v2(run_id)
+            now = self._fresh_v2(manifest, f"reference:{admission_id}:{self._now(self._db)}")
+            launch = self._role_launch
+            current = admission.store.db.execute(
+                "SELECT * FROM admissions_v2 WHERE admission_id=?", (admission_id,)
+            ).fetchone()
+            if launch is not None and (current is None or current["challenge"] is None):
+                raise ChallengeError(409, "reference lacks accepted challenge")
+            flight = None
+            if current is not None and current["challenge"] is not None:
+                nonce = JoinChallenge.model_validate_json(current["challenge"]).nonce
+                key = (admission_id, nonce, retain_shadow_custody)
+                flight = self._reference_flights_v2.get(key)
+            leader = flight is None
+            if leader:
+                claim = admission.claim_reference(
+                    admission_id,
+                    now=now,
+                    plan=lambda c, samples, epoch: self.plan_trial_v2(run_id, c, samples, epoch),
                 )
-            else:
-                current = admission.store.db.execute(
-                    "SELECT * FROM admissions_v2 WHERE admission_id=?", (admission_id,)
-                ).fetchone()
-                if current is None or current["challenge"] is None:
-                    raise ChallengeError(409, "reference lacks accepted challenge")
-                challenge = JoinChallenge.model_validate_json(current["challenge"])
-                cutoff = (
-                    self._run_v2(run_id).training.beacon.genesis_time
-                    + (challenge.deadline_beacon - 1) * 3
-                )
-                guard = LeaseGuard(challenge.deadline_beacon, challenge.deadline_beacon, cutoff)
-                key = f"reference:{admission_id}:{challenge.nonce}"
+                if isinstance(claim, str):
+                    return {"reference_commitment": claim}
+                nonce = claim.challenge.nonce
+                key = (admission_id, nonce, retain_shadow_custody)
+                if launch is not None:
+                    deadline = claim.challenge.deadline_beacon
+                    cutoff = manifest.training.beacon.genesis_time + (deadline - 1) * 3
+                    receipt = admission.store.db.execute(
+                        "SELECT receipt FROM admission_reservations WHERE reservation=?",
+                        (f"challenge|{admission_id}|{nonce}",),
+                    ).fetchone()
+                    if receipt is None:
+                        raise ChallengeError(409, "MISSING_CHALLENGE_RECEIPT")
+                    envelope, hotkey = json.loads(receipt[0]), current["hotkey"]
 
-                def trusted(
-                    job: IslandJobV1, directory: Path, c: JoinChallenge, epoch: int
-                ) -> IslandLaunch:
-                    assert self._role_launch is not None
-                    if c != challenge or job.deadline != cutoff:
-                        raise ChallengeError(409, "reference launch subject changed")
-                    return self._role_launch(
-                        "reference",
-                        job,
-                        directory,
-                        {
-                            "run_id": run_id,
-                            "admission_id": admission_id,
-                            "epoch": epoch,
-                            "challenge": c.body(),
-                            "challenge_hash": c.digest(),
-                            "challenge_envelope": json.loads(
-                                admission.store.db.execute(
-                                    "SELECT receipt FROM admission_reservations "
-                                    "WHERE reservation=?",
-                                    (f"challenge|{admission_id}|{c.nonce}",),
-                                ).fetchone()[0]
-                            ),
-                            "hotkey": current["hotkey"],
-                        },
-                    )
-
-                self._lease_guards_v2[key] = guard
-                try:
-                    with guard:
-                        guard.advance(now)
-                        guard.check()
-                        value = admission.prepare_reference(
-                            admission_id,
-                            now=now,
-                            trusted_launch=trusted,
-                            cancel=guard.cancelled,
-                            retain_shadow_custody=retain_shadow_custody,
+                    def trusted(
+                        job: IslandJobV1, directory: Path, c: JoinChallenge, epoch: int
+                    ) -> IslandLaunch:
+                        if job.deadline != cutoff:
+                            raise ChallengeError(409, "reference launch subject changed")
+                        return launch(
+                            "reference",
+                            job,
+                            directory,
+                            {
+                                "run_id": run_id,
+                                "admission_id": admission_id,
+                                "epoch": epoch,
+                                "challenge": c.body(),
+                                "challenge_hash": c.digest(),
+                                "challenge_envelope": envelope,
+                                "hotkey": hotkey,
+                            },
                         )
-                        guard.check()
-                finally:
-                    self._lease_guards_v2.pop(key, None)
+
+                    guard = LeaseGuard(deadline, deadline, cutoff)
+                    guard_key = f"reference:{admission_id}:{nonce}"
+                    self._lease_guards_v2[guard_key] = guard
+                flight = self._reference_flights_v2[key] = Future()
+        assert flight is not None
+        if not leader:
+            return self._follow_reference_v2(flight)
+        assert not isinstance(claim, str)
+        try:
+            with guard if guard is not None else nullcontext():
+                if guard is not None:
+                    guard.advance(now)
+                    guard.check()
+                result = admission.run_reference(
+                    claim,
+                    now=now,
+                    trusted_launch=trusted,
+                    cancel=None if guard is None else guard.cancelled,
+                )
+                if guard is not None:
+                    guard.check()
+            with self._lock:
+                # The gate again, outside a `_tx`: a beacon that went stale during the launch must
+                # not carry the commitment (its round and the deadline test would be stale too). The
+                # finished result is lost on a 503, but the retry finds the published directory.
+                settled = self._fresh_v2(
+                    manifest, f"reference-settle:{admission_id}:{self._now(self._db)}"
+                )
+                if guard is not None:
+                    guard.check()
+                value = admission.settle_reference(
+                    claim, result, now=settled, retain_shadow_custody=retain_shadow_custody
+                )
+        except BaseException as error:
+            failure = error
+            if (
+                guard is not None
+                and isinstance(error, Exception)
+                and not isinstance(error, ChallengeError | AdmissionError)
+                and (guard.cancelled.is_set() or time.time() >= cutoff)
+            ):
+                # The lease is over: whatever the launch or the guard raised, the answer is the
+                # window's (a client must not retry a 500 for a trial that is closed).
+                failure = ChallengeError(409, "REFERENCE_TRIAL_CLOSED")
+                raise failure from error
+            raise
+        finally:
+            self._end_reference_v2(key, flight, guard_key, guard, value=value, error=failure)
         return {"reference_commitment": value}
+
+    def _follow_reference_v2(self, flight: Future[str]) -> dict[str, str]:
+        """A repeated request waits for the running reference, on one of a few places."""
+        if not self._reference_waiters.acquire(blocking=False):
+            raise ChallengeError(503, "reference already running for this trial; retry")
+        try:
+            finished, _ = wait([flight], timeout=REFERENCE_WAIT_SECONDS)
+        finally:
+            self._reference_waiters.release()
+        if not finished:
+            raise ChallengeError(503, "reference still running for this trial; retry")
+        return {"reference_commitment": flight.result()}
+
+    def _end_reference_v2(
+        self,
+        key: tuple[str, str, bool],
+        flight: Future[str],
+        guard_key: str,
+        guard: Any,
+        *,
+        value: str | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        """Forget the flight and its guard, each by identity, then tell the waiters how it ended."""
+        with self._lock:
+            if self._reference_flights_v2.get(key) is flight:
+                del self._reference_flights_v2[key]
+            if guard is not None and self._lease_guards_v2.get(guard_key) is guard:
+                del self._lease_guards_v2[guard_key]
+        if error is not None:
+            flight.set_exception(error)
+        else:
+            assert value is not None
+            flight.set_result(value)
 
     def trial_finalize_v2(self, run_id: str, admission_id: str, raw: bytes) -> dict[str, Any]:
         with self._tx():
@@ -4534,9 +4904,13 @@ class ChallengeStore:
             "miner/island_launch.py",
             "aggregator/capacity_worker.py",
             "auditor/replay.py",
+            "protocol/env_pins.py",
+            "trainer/determinism.py",
         )
         source = Path(__file__).resolve().parents[1]
-        implementation = self._service_implementation_v2(source, paths)
+        implementation = self._service_implementation_v2(
+            source, paths, manifest.training.reference_spec.env.pin()
+        )
         backend = self._record_v2(run_id, "execution-backend", "run")
         return _ServiceCapacityV1(
             version=1,
@@ -4554,8 +4928,12 @@ class ChallengeStore:
         )
 
     @staticmethod
-    def _service_implementation_v2(source: Path, paths: tuple[str, ...]) -> str:
-        """Bind capacity semantics, not unrelated shared-store methods or line numbers."""
+    def _service_implementation_v2(source: Path, paths: tuple[str, ...], pin: EnvPin) -> str:
+        """Bind capacity semantics, not unrelated shared-store methods or line numbers.
+
+        The manifest's environment pin is part of the implementation: the same code under another
+        pin computes other bytes, and the files that give the pin its meaning are in ``paths``.
+        """
         tree = ast.parse((source / "challenge/store.py").read_text())
         owned = {
             "_ServiceCapacityV1",
@@ -4574,6 +4952,19 @@ class ChallengeStore:
             "training_v2",
             "verified_inputs_v2",
             "aggregate_v2",
+            "_AggregatePlan",
+            "_aggregate_flight_v2",
+            "_aggregate_answer_v2",
+            "_aggregate_claim_v2",
+            "_aggregate_plan_v2",
+            "_aggregate_compute_v2",
+            "_aggregate_settle_v2",
+            "_FinalityReplay",
+            "_finality_replay_job_v2",
+            "_kept_finality_verdict_v2",
+            "_run_finality_replay_v2",
+            "_prime_finality_replay_v2",
+            "_capacity_env_v2",
             "_capacity_outer_v2",
             "_prepare_capacity_genesis_v2",
             "island_job_v2",
@@ -4603,6 +4994,7 @@ class ChallengeStore:
         if set(code) != owned:
             raise ChallengeError(409, "SERVICE_CAPACITY_IMPLEMENTATION")
         code.update({path: sha256_hex((source / path).read_bytes()) for path in paths})
+        code["env_pin"] = sha256_hex(canonicalize(pin.body()))
         return sha256_hex(canonicalize(code))
 
     def _service_boundary_v2(
@@ -4716,11 +5108,10 @@ class ChallengeStore:
 
         with self._lock:
             pin = self._run_v2(run_id).training.reference_spec.env.pin()
-        if pin is not None:  # a child process of up to two minutes: never inside the transaction
-            try:
-                require_honorable(pin)
-            except EnvPinUnhonorable as error:
-                raise ChallengeError(409, f"SERVICE_PROFILE_ENV_PIN: {error}") from error
+        try:  # a child process of up to two minutes: never inside the transaction
+            require_honorable(pin, "cpu")
+        except EnvPinUnhonorable as error:
+            raise ChallengeError(409, f"SERVICE_PROFILE_ENV_PIN: {error}") from error
         with self._tx():
             try:
                 profile = _ServiceCapacityV1.model_validate(
@@ -4870,12 +5261,7 @@ class ChallengeStore:
             directory / "runtime",
             deadline,
             capacity,
-            env=dict(
-                PATH=os.defpath,
-                OMP_NUM_THREADS="1",
-                MKL_NUM_THREADS="1",
-                CUBLAS_WORKSPACE_CONFIG=":4096:8",
-            ),
+            env=self._capacity_env_v2(manifest, {"PATH": os.defpath}),
             cancel=cancel,
         )
         result, objects = collect_genesis(directory, request)
@@ -5217,13 +5603,7 @@ class ChallengeStore:
                         "hypertrain.aggregator.capacity_worker",
                         str(directory.absolute()),
                     ]
-                    or execution["env"]
-                    != {
-                        "PATH": os.defpath,
-                        "OMP_NUM_THREADS": "1",
-                        "MKL_NUM_THREADS": "1",
-                        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-                    }
+                    or execution["env"] != self._capacity_env_v2(manifest, {"PATH": os.defpath})
                     or kernel["memory.max"] != str(1 << 30)
                     or kernel["memory.swap.max"] != "0"
                     or kernel["cpu.max"] != "50000 100000"
@@ -7440,16 +7820,17 @@ class ChallengeStore:
         finality["unresolved_audits"] = max(0, int(finality["unresolved_audits"]) - len(absent))
         self._put_record_v2(run_id, "finality", str(w), finality)
 
-    def _exclude_missing_deltas_v2(self, run_id: str, w: int) -> None:
+    def _exclude_missing_deltas_v2(self, run_id: str, w: int, now: int | None = None) -> None:
         """Leave out an audited member whose delta never arrived.
 
         Delta intake closes at d_upload (training_v2). The member's audit already resolved and
-        decremented unresolved_audits, so only the record is written.
+        decremented unresolved_audits, so only the record is written. `now` is the beacon round
+        the decision is made at; by default the latest one.
         """
         from hypertrain.protocol.messages_v2 import RoundOpenV2
 
         body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", str(w))["body"])
-        if self._now(self._db) < body.d_upload:
+        if (self._now(self._db) if now is None else now) < body.d_upload:
             return
         audited = {
             row[0]
@@ -7491,20 +7872,21 @@ class ChallengeStore:
         # collectible bound) is not a fault of the member: name nothing rather than mislabel it.
         raise ChallengeError(500, f"UNMODELLED_ELIGIBILITY_TERM: {hotkey}")
 
-    def _exclude_unfit_members_v2(self, run_id: str, w: int) -> None:
+    def _exclude_unfit_members_v2(self, run_id: str, w: int, now: int | None = None) -> None:
         """Leave out an audited member whose admission no longer qualifies it for this round.
 
         The wait is on the member, not on the round: aggregate refused for everybody until the
         member recovered, and a lapsed screen never does. The cause is judged here, as late as
-        possible, inside the transaction that aggregates, so a member that is fit at the call
-        is kept and the ROUND_INFEASIBLE of the survivors check rolls the exclusions back. No
-        sanction: the cause is the member's own state or the effect of one already applied.
+        possible, in the transaction that aggregates and at beacon round `now` (by default the
+        latest), so a member that is fit at the call is kept and the ROUND_INFEASIBLE of the
+        survivors check rolls the exclusions back. No sanction: the cause is the member's own
+        state or the effect of one already applied.
         """
         from hypertrain.protocol.messages_v2 import RoundOpenV2
 
         admission = self._services(run_id)[1]
         body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", str(w))["body"])
-        now = self._now(self._db)
+        now = self._now(self._db) if now is None else now
         audited = {
             row[0]
             for row in self._db.execute(
@@ -9143,7 +9525,7 @@ class ChallengeStore:
             self._put_record_v2(run_id, "finality", str(row["w"]), finality)
             return {"result": verdict.result}
 
-    def verified_inputs_v2(self, run_id: str, w: int) -> list[Any]:
+    def verified_inputs_v2(self, run_id: str, w: int, now: int | None = None) -> list[Any]:
         resource = self._service_boundary_v2(run_id, w)
         if resource is not None:
             from hypertrain.aggregator.capacity_worker import bounded_bytes
@@ -9159,7 +9541,7 @@ class ChallengeStore:
             )
 
             manifest = self._run_v2(run_id)
-            now = self._now(self._db)
+            now = self._now(self._db) if now is None else now
             opening = envelope_v2.Intake(
                 run_id, {"RoundOpenV2": manifest.training.coord_pubkey.__eq__}
             ).accept(canonicalize(self._record_v2(run_id, "round", str(w))), now)
@@ -9403,7 +9785,7 @@ class ChallengeStore:
         self.require_roster_v2(run_id, w)
         _, admission, disputes = self._services(run_id)
         body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", str(w))["body"])
-        now = self._now(self._db)
+        now = self._now(self._db) if now is None else now
         works = []
         for entry in body.roster:
             identity = f"{w}:{entry.hotkey}"
@@ -9447,6 +9829,23 @@ class ChallengeStore:
                 )
             )
         return works
+
+    @staticmethod
+    def _capacity_env_v2(manifest: RunManifestV2, base: Mapping[str, str]) -> dict[str, str]:
+        """The one environment a capacity worker runs under and its attestation must show.
+
+        ATen, MKL and oneDNN read their variables at first use, so the worker has them from its
+        first instruction or refuses (``apply_reference_env``): the manifest's pin is applied
+        over ``base`` and the fixed thread and cuBLAS keys.
+        """
+        from hypertrain.protocol.env_pins import pinned_environ
+
+        fixed = {
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+        }
+        return pinned_environ({**base, **fixed}, manifest.training.reference_spec.env.pin())
 
     def _capacity_outer_v2(self, run_id: str, w: int) -> dict[str, Any]:
         """Internal bounded adapter; public heavy gate remains independently closed."""
@@ -9535,9 +9934,7 @@ class ChallengeStore:
                 run_id, w, "outer", 1, kind="outer", units=int(resource["outer_work_units"])
             ),
         )
-        env = dict(
-            os.environ, OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", CUBLAS_WORKSPACE_CONFIG=":4096:8"
-        )
+        env = self._capacity_env_v2(manifest, os.environ)
         run_capacity_argv(
             [
                 sys.executable,
@@ -9596,7 +9993,8 @@ class ChallengeStore:
             return {"tape": tape.body_json(), **applied}
 
     def aggregate_v2(self, run_id: str, w: int) -> dict[str, Any]:
-        preflight_resource = self._service_boundary_v2(run_id, w)
+        with self._lock:  # a read of the shared connection is never made outside the lock
+            preflight_resource = self._service_boundary_v2(run_id, w)
         if preflight_resource is not None:
             from hypertrain.aggregator.capacity_worker import bounded_bytes
             from hypertrain.aggregator.tape_v2 import TapeV2
@@ -9670,90 +10068,185 @@ class ChallengeStore:
                     raise ChallengeError(409, "SERVICE_AGGREGATE_TAPE_LINEAGE")
             self._service_boundary_v2(run_id, w, heavy=True)
             self.verified_inputs_v2(run_id, w)
-        resource = self._service_boundary_v2(run_id, w, heavy=True)
+        with self._lock:
+            resource = self._service_boundary_v2(run_id, w, heavy=True)
         if resource is not None:
             return self._capacity_outer_v2(run_id, w)
-        import hypertrain.trainer  # noqa: F401
-        from hypertrain.aggregator.core import OuterState
-        from hypertrain.aggregator.tape_v2 import make_tape, replay_tape
-        from hypertrain.challenge.finality_v2 import require_apply
-        from hypertrain.trainer.config import TrainConfig
-        from hypertrain.trainer.model import init_params
+        return self._aggregate_flight_v2(run_id, w)
 
+    def _aggregate_flight_v2(self, run_id: str, w: int) -> dict[str, Any]:
+        """Claim under the lock, compute without it, settle under it (docs/adr/0012 section 2).
+
+        The claim reads what the round is aggregated from and registers a flight keyed (run, w): a
+        second call waits for it and gets its answer or its failure, and never starts a second
+        computation. The computation reads no database row, so the lock is free while it runs and a
+        beacon round can land. The settlement reads the claim again in the transaction that writes
+        and writes only when nothing it was computed from has changed.
+        """
+        if self._lock._is_owned():  # type: ignore[attr-defined]
+            raise RuntimeError("aggregate_v2 would keep the store lock through the computation")
+        self._services(run_id)  # first use builds them, and their schema script commits
+        key = (run_id, w)
+        with self._lock:
+            flight = self._aggregate_flights_v2.get(key)
+            leader = flight is None
+            if leader:
+                claim = self._aggregate_claim_v2(run_id, w)
+                if isinstance(claim, dict):
+                    return claim
+                flight = self._aggregate_flights_v2[key] = Future()
+        assert flight is not None
+        # A failure travels with its traceback, whose frames keep their locals. None of them may
+        # keep the flight, which keeps the failure: that cycle would hold the arrays of the failed
+        # computation (gigabytes) until a collection finds it.
+        if not leader:
+            try:
+                return self._follow_aggregate_v2(flight)
+            finally:
+                del flight
+        assert isinstance(claim, _AggregatePlan)
+        try:
+            tape, prev_state, tape_hash = self._aggregate_compute_v2(claim, w)
+            value = self._aggregate_settle_v2(run_id, w, claim, tape, prev_state, tape_hash)
+        except BaseException as error:
+            self._end_aggregate_v2(key, flight, error=error)
+            del flight
+            raise
+        self._end_aggregate_v2(key, flight, value=value)
+        return value
+
+    def _aggregate_answer_v2(self, run_id: str, w: int) -> dict[str, Any] | None:
+        """The stored answer of a round that is already aggregated, else None."""
+        existing = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='applied' AND id=?",
+            (run_id, str(w)),
+        ).fetchone()
+        if existing is None:
+            return None
+        from hypertrain.aggregator.tape_v2 import TapeV2
+
+        saved = json.loads(existing[0])
+        if saved.get("kind") == "repair":
+            from hypertrain.aggregator.rollback_v2 import RepairTape
+
+            repair = RepairTape.from_bytes(self.objects.get(saved["tape_hash"]))
+            return {"repair": repair.model_dump(mode="json"), **saved}
+        tape = TapeV2.from_bytes(self.objects.get(saved["tape_hash"]))
+        return {"tape": tape.body_json(), **saved}
+
+    def _aggregate_claim_v2(self, run_id: str, w: int) -> dict[str, Any] | _AggregatePlan:
+        """The answer of an aggregated round, else the plan to aggregate it from.
+
+        The freshness gate and its pin commit with this transaction, as they did with the whole
+        aggregation, and the round it passes at is the one every time-dependent decision is made at.
+        What the plan derives, the exclusion records, is rolled back to a savepoint: only the
+        settlement writes it, together with the tape.
+        """
         with self._tx():
             manifest = self._run_v2(run_id)
             self.require_roster_v2(run_id, w)
             self._require_unretired_v2(run_id, w)
-            self._fresh_v2(manifest, f"aggregate:{w}:{self._now(self._db)}")
-            existing = self._db.execute(
-                "SELECT data FROM records_v2 WHERE run_id=? AND kind='applied' AND id=?",
-                (run_id, str(w)),
-            ).fetchone()
-            if existing is not None:
-                from hypertrain.aggregator.tape_v2 import TapeV2
+            now = self._fresh_v2(manifest, f"aggregate:{w}:{self._now(self._db)}")
+            answer = self._aggregate_answer_v2(run_id, w)
+            if answer is not None:
+                return answer
+            self._db.execute("SAVEPOINT aggregate_claim")
+            try:
+                return self._aggregate_plan_v2(run_id, w, now)
+            finally:
+                self._db.execute("ROLLBACK TO aggregate_claim")
+                self._db.execute("RELEASE aggregate_claim")
 
-                saved = json.loads(existing[0])
-                if saved.get("kind") == "repair":
-                    from hypertrain.aggregator.rollback_v2 import RepairTape
+    def _aggregate_plan_v2(self, run_id: str, w: int, now: int) -> _AggregatePlan:
+        """What the round is aggregated from at beacon round `now`; in a transaction."""
+        from hypertrain.challenge.finality_v2 import require_apply
 
-                    repair = RepairTape.from_bytes(self.objects.get(saved["tape_hash"]))
-                    return {"repair": repair.model_dump(mode="json"), **saved}
-                tape = TapeV2.from_bytes(self.objects.get(saved["tape_hash"]))
-                return {"tape": tape.body_json(), **saved}
-            history = [s for s in self._history_v2(run_id) if s.w < w]
-            require_apply(run_id, w, history)
-            self._exclude_missing_deltas_v2(run_id, w)
-            self._exclude_unfit_members_v2(run_id, w)
-            inputs = self.verified_inputs_v2(run_id, w)
-            self._require_survivors_v2(manifest, [x.roster for x in inputs])
-            policy = AggregationPolicyV2.model_validate_json(
+        manifest = self._run_v2(run_id)
+        history = [s for s in self._history_v2(run_id) if s.w < w]
+        require_apply(run_id, w, history)
+        self._exclude_missing_deltas_v2(run_id, w, now)
+        self._exclude_unfit_members_v2(run_id, w, now)
+        inputs = self.verified_inputs_v2(run_id, w, now)
+        self._require_survivors_v2(manifest, [x.roster for x in inputs])
+        previous = self._record_v2(run_id, "applied", str(w - 1)) if w else None
+        return _AggregatePlan(
+            now,
+            manifest,
+            AggregationPolicyV2.model_validate_json(
                 self.objects.get(manifest.network.aggregation_policy_hash)
+            ),
+            self.objects.get(manifest.network.economics_policy_hash),
+            inputs,
+            str(previous["out_state"]) if previous else None,
+            str(previous["tape_hash"]) if previous else "0" * 64,
+            self._services(run_id)[0].policy.R_collectible_units,
+        )
+
+    def _aggregate_compute_v2(self, plan: _AggregatePlan, w: int) -> tuple[Any, str, str]:
+        """The tape of the plan, made and replayed. No lock and no database row, only objects."""
+        import hypertrain.trainer  # noqa: F401
+        from hypertrain.aggregator.core import OuterState
+        from hypertrain.aggregator.tape_v2 import make_tape, replay_tape
+        from hypertrain.trainer.config import TrainConfig
+        from hypertrain.trainer.model import init_params
+
+        prev_state = plan.prev_state
+        if prev_state is None:
+            theta = init_params(TrainConfig.from_manifest_v2(plan.manifest).model)
+            prev_state = self.objects.put(
+                OuterState.init({k: v.detach().cpu().numpy() for k, v in theta.items()}).to_bytes()
             )
-            economics = self.objects.get(manifest.network.economics_policy_hash)
-            if w:
-                previous = self._record_v2(run_id, "applied", str(w - 1))
-                prev_state, predecessor = str(previous["out_state"]), str(previous["tape_hash"])
-            else:
-                theta = init_params(TrainConfig.from_manifest_v2(manifest).model)
-                prev_state = self.objects.put(
-                    OuterState.init(
-                        {k: v.detach().cpu().numpy() for k, v in theta.items()}
-                    ).to_bytes()
-                )
-                predecessor = "0" * 64
-            tape = make_tape(
-                self.objects,
-                manifest,
-                policy,
-                economics,
-                self._coord(),
-                w=w,
-                prev_state=prev_state,
-                predecessor_tape_hash=predecessor,
-                inputs=inputs,
-                reference_reward_units=self._services(run_id)[0].policy.R_collectible_units,
-            )
+        tape = make_tape(
+            self.objects,
+            plan.manifest,
+            plan.policy,
+            plan.economics,
+            self._coord(),
+            w=w,
+            prev_state=prev_state,
+            predecessor_tape_hash=plan.predecessor,
+            inputs=plan.inputs,
+            reference_reward_units=plan.reference_reward_units,
+        )
+        replay_tape(
+            self.objects,
+            tape,
+            plan.manifest,
+            plan.policy,
+            plan.economics,
+            signer=self._coord().ss58,
+            w=w,
+            prev_state=prev_state,
+            predecessor_tape_hash=plan.predecessor,
+            inputs=plan.inputs,
+            reference_reward_units=plan.reference_reward_units,
+        )
+        return tape, prev_state, self.objects.put(tape.to_bytes())
+
+    def _aggregate_settle_v2(
+        self, run_id: str, w: int, plan: _AggregatePlan, tape: Any, prev_state: str, tape_hash: str
+    ) -> dict[str, Any]:
+        """Write the tape of the plan if the round is still what the plan was made from.
+
+        The plan is derived again at the claim's beacon round, so a member whose screen ended while
+        the tape computed is still in, as it was for a call made at that round. The freshness gate
+        is not asked again: it passed at the claim, and refusing here would throw the tape away.
+        """
+        with self._tx():
             self.require_roster_v2(run_id, w)
-            replay_tape(
-                self.objects,
-                tape,
-                manifest,
-                policy,
-                economics,
-                signer=self._coord().ss58,
-                w=w,
-                prev_state=prev_state,
-                predecessor_tape_hash=predecessor,
-                inputs=inputs,
-                reference_reward_units=self._services(run_id)[0].policy.R_collectible_units,
-            )
-            tape_hash = self.objects.put(tape.to_bytes())
+            self._require_unretired_v2(run_id, w)  # retired meanwhile: its null tape is final
+            answer = self._aggregate_answer_v2(run_id, w)
+            if answer is not None:
+                return answer  # aggregated meanwhile, by another process: answer, write nothing
+            current = self._aggregate_plan_v2(run_id, w, plan.now)
+            if current != plan:
+                raise ChallengeError(409, "AGGREGATE_STALE: the round changed while it computed")
             applied = {
                 "tape_hash": tape_hash,
                 "out_state": tape.body.out_state,
                 "theta_hash": tape.body.out_hashes["theta_hash"],
                 "prev_state": prev_state,
-                "predecessor_tape_hash": predecessor,
+                "predecessor_tape_hash": plan.predecessor,
             }
             self._put_record_v2(run_id, "applied", str(w), applied)
             # Persist historical authority facts, never replace with future released locks.
@@ -9761,12 +10254,45 @@ class ChallengeStore:
                 run_id,
                 "tape-inputs",
                 str(w),
-                {"inputs": [self._serialize_input_v2(x) for x in inputs]},
+                {"inputs": [self._serialize_input_v2(x) for x in current.inputs]},
             )
             finality = self._record_v2(run_id, "finality", str(w))
             finality["applied"], finality["state_hash"] = True, applied["theta_hash"]
             self._put_record_v2(run_id, "finality", str(w), finality)
             return {"tape": tape.body_json(), **applied}
+
+    def _follow_aggregate_v2(self, flight: Future[dict[str, Any]]) -> dict[str, Any]:
+        """A repeated request waits for the running aggregation, on one of a few places."""
+        if not self._aggregate_waiters.acquire(blocking=False):
+            raise ChallengeError(503, "aggregate already running for this round; retry")
+        try:
+            finished, _ = wait([flight], timeout=AGGREGATE_WAIT_SECONDS)
+        finally:
+            self._aggregate_waiters.release()
+        if not finished:
+            raise ChallengeError(503, "aggregate still running for this round; retry")
+        try:
+            return flight.result()
+        finally:
+            del flight, finished
+
+    def _end_aggregate_v2(
+        self,
+        key: tuple[str, int],
+        flight: Future[dict[str, Any]],
+        *,
+        value: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        """Forget the flight by identity, then tell the waiters how it ended."""
+        with self._lock:
+            if self._aggregate_flights_v2.get(key) is flight:
+                del self._aggregate_flights_v2[key]
+        if error is not None:
+            flight.set_exception(error)
+        else:
+            assert value is not None
+            flight.set_result(value)
 
     @staticmethod
     def _serialize_input_v2(work: Any) -> dict[str, Any]:
@@ -9786,6 +10312,7 @@ class ChallengeStore:
         from hypertrain.ledger.escrow_v2 import RewardWork, authority_message
         from hypertrain.protocol.messages_v2 import RewardFinalize
 
+        self._prime_finality_replay_v2(run_id, w, raw)
         with self._tx():
             manifest = self._run_v2(run_id)
             if self._service_boundary_v2(run_id, w) is not None:

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from env_pin_fixtures import honest_env
 from hypertrain.ledger.ledger import Ledger
 from hypertrain.protocol import relay_envelope
 from hypertrain.protocol.jcs import canonicalize
@@ -216,6 +217,7 @@ def _routes(n, hot, cold):
         expires_beacon=10000,
         policy_hash=n.manifest.network.admission_policy_hash,
         hardware_hint=HardwareHint(device_name="cpu", device_count=1, driver="advisory"),
+        env=honest_env(n.manifest.training.reference_spec.env.pin()),
     ).body()
     from hypertrain.miner.admission import sign_rotation_consent
 

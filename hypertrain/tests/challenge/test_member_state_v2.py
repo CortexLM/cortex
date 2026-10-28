@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from env_pin_fixtures import TEST_PIN
 from hypertrain.beacon import BeaconRound
 from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.store import ChallengeStore
@@ -159,12 +160,12 @@ def test_the_exit_helpers_are_bound_to_the_service_implementation(name):
     # implementation change when it does (the owned set of `_service_implementation_v2`).
     source = TREE / "src/hypertrain"
     paths = ("aggregator/core.py", "aggregator/tape_v2.py")
-    original = ChallengeStore._service_implementation_v2(source, paths)
+    original = ChallengeStore._service_implementation_v2(source, paths, TEST_PIN)
     tree = ast.parse((source / "challenge/store.py").read_text())
     node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
     node.body.append(ast.Pass())
     with unittest.mock.patch("hypertrain.challenge.store.ast.parse", return_value=tree):
-        assert ChallengeStore._service_implementation_v2(source, paths) != original
+        assert ChallengeStore._service_implementation_v2(source, paths, TEST_PIN) != original
 
 
 def test_a_beacon_fault_is_not_a_cause_to_leave_a_member_out(network, monkeypatch):

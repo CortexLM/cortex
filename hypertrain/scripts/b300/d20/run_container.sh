@@ -18,6 +18,9 @@
 #                         [--driver 595.91.07] [--sm-count 148] [--no-gate] [--gate-timeout SECONDS]
 # MODE: smoke | multi (dense fixture model) or smoke-kimi | multi-kimi | job-kimi (kimi-k3-pro-tiny;
 # HT_D20_KIMI_DTYPE=bf16|fp32 selects its compute dtype, default bf16).
+# Every manifest the harness builds pins its environment: CPU class avx2 and the GPU class of
+# --sm-count (148: sm_103, 170: sm_120; the harness refuses any other count at start).
+# HT_D20_ATTN_BACKEND=math|sdpa-flash is the HT_ATTN_BACKEND of that pin, default math.
 # Exit codes: the container's, 2 usage, 3 the gate did not clear, 143 interrupted.
 set -euo pipefail
 
@@ -86,6 +89,7 @@ dk run --rm --init --name "$name" --gpus "device=$gpu" --ipc=host \
   -e "HT_D20_DRIVER=$driver" -e "HT_D20_SM_COUNT=$sm_count" -e HT_D20_EVENTS=/out/events.jsonl \
   -e MINE_SMOKE_V2_EVIDENCE=/out/mine-smoke-v2.json -e MINE_MULTI_ROUND_V2_EVIDENCE=/out/multi.json \
   -e HT_D20_EVIDENCE=/out/job-kimi.json -e "HT_D20_KIMI_DTYPE=${HT_D20_KIMI_DTYPE:-bf16}" \
+  -e "HT_D20_ATTN_BACKEND=${HT_D20_ATTN_BACKEND:-math}" \
   -v "$HT:/opt/ht:ro" -v "$out:/out" -w /opt/ht/scripts --entrypoint bash "$image" -c \
   'uv-pinned pip install --quiet --target /tmp/pyextra pytest==9.1.1 &&
    exec python b300/d20/gpu_run_v2.py "$1"' run "$mode" \
