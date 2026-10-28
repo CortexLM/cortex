@@ -155,7 +155,7 @@ which windows. Nothing here has run against a GPU host or the real R2 service.
 | Field | Meaning |
 | --- | --- |
 | `credentials_file` | The R2 token: a regular file of the challenge's user, mode 0600, holding only `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (must start `cortex-v3-`) and optionally `R2_ENDPOINT` (https; plain http only to a literal loopback address). The process environment is ignored. Use a bucket-scoped token, never the Cloudflare account token. |
-| `operations` | Which of `reference`, `audit`, `referee` use R2 (default `audit`, `referee`: a reference holds the store lock for the whole launch). Others run the SSH way. |
+| `operations` | Which of `reference`, `audit`, `referee` use R2 (default `audit`, `referee`: the default was chosen while a reference held the store lock for the whole launch, which it no longer does since ADR 0012 Part B, and has not been revisited). Others run the SSH way. |
 | `part_bytes`, `max_artifact_bytes` | Part size (a multiple of 4 MiB, 8 to 64 MiB; the challenge chooses, the host cannot) and the largest result accepted (at most 10,000 parts). Default 16 MiB and 16 GiB. Raise `max_artifact_bytes` per profile **together with `max_result_bytes`** of the executor config, which still bounds the tar after the download: the executor refuses to load with `max_artifact_bytes` above it. |
 | `workers` | Parallel parts: uploads in the container, ranged downloads on the challenge. |
 | `reserve_seconds` | Taken from the island's time budget so the transfer has time left (default 60). A lease with less than this plus 30 s left does not use R2 (`exec_artifact_skipped`). |

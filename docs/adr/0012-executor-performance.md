@@ -1,13 +1,21 @@
 # ADR 0012: executor performance: CUDA compute cache, beacon cadence, lock-free remote reference
 
 - Status: draft for branch `v3-executor-perf`, 2026-10-27 (Principal SN100 D40, split in two by D42).
-  **Part A** (sections 1 and 3) is implemented on this branch. **Part B** (section 2) is designed here
-  and its code waits for `v3-audit-integrity` to be merged. Forge decides promotion to `v3`. No
-  protocol constant, manifest field, wire format, production host or pin changes.
-- Order: brief `v3-executor-perf`. Evidence: the S13 REPORT (branch `v3-d34-s100-gpu`, 2026-10-27).
-- Acceptance: the brief asks that a 13-60 s lock "never causes 503 storms". **Part A does not meet
-  that.** It makes the lock safe (no skipped round, no dead pusher) and shortens the lock; the 503
-  window after each lock is longer than before until Part B or the pusher change of section 3 lands.
+  **Part A** (sections 1 and 3) was implemented on that branch. **Part B** (section 2) and the head-first
+  pusher of section 3 are implemented on branch `v3-executor-lock-release`, 2026-10-28 (D68), on top of
+  `v3-audit-integrity`, which Part B waited for; sections 2 and 3 are rewritten for it. Forge decides
+  promotion to `v3`. No protocol constant, manifest field, wire format, production host or pin changes.
+- Order: brief `v3-executor-perf`, then `v3-executor-lock-release` (D68, from the s15 replay of
+  2026-10-27). Evidence: the S13 REPORT (branch `v3-d34-s100-gpu`) and the s15 replay (run `fea7e44f`,
+  branch `v3-replay-s100-gpu`).
+- Acceptance: the brief asks that a 13-60 s lock "never causes 503 storms". **Part A did not meet that.**
+  It made the lock safe (no skipped round, no dead pusher) and shorter, and the 503 window after each lock
+  was longer than before. The s15 replay measured it [A]: a cold 57 s reference held the lock, the pusher
+  fell more than 2 rounds behind, `POST /join/proof` answered 503 "beacon infrastructure paused" for
+  100-150 s per trial, the first trial lost its 100-round window and the 52-trial admission took 2 h 14 min.
+  Part B removes the cause: the lock is held for the claim and for the settlement of a reference, not for
+  the launch (section 2, measured below). The head-first pusher shortens what any other long lock leaves
+  behind (section 3). Neither has run on a GPU host or on s100; the replay with this change is a later run.
 - Labels: **[V]** verified in code or by a command on the date above, **[A]** reported by a cited
   document or session, **[H]** hypothesis or model output, **[?]** unknown.
 - This record was reviewed by three independent agents (2026-10-27); their confirmed findings are in it.
@@ -34,7 +42,8 @@ Three separate costs follow, each with its own cause:
    [A, S13, 4 runs]. Why a driver compute cache helps while the image pins `CUDA_DISABLE_PTX_JIT=1`
    (`hypertrain/docker/Dockerfile.gpu:46`, "only precompiled SASS runs", `hypertrain/docs/protocol.md:136`)
    is **not established** [?]: S13 measured the effect, not the mechanism.
-2. **The remote reference holds a store lock.** `ChallengeStore.trial_reference_v2` takes `self._lock`
+2. **The remote reference held a store lock** (the tree of Part A; section 2 removes it).
+   `ChallengeStore.trial_reference_v2` took `self._lock`
    at `challenge/store.py:2972` and keeps it through the gate, the launch (`_role_launch`, :3000),
    `prepare_reference` and the commit (to :3035) [V]. Which store's lock depends on where the run lives
    (`ChallengeStore._children`, :516-518) [V]:
@@ -124,63 +133,84 @@ ran 28 locks with the single `--catch-up 3` pusher and reported no stranded seed
 - An old wrapper in `hosts[].docker` that adds `-v ...:/root/.nv` (S13) gives two mounts on one target, which
   docker is expected to refuse [A, from memory, not run]: it must be removed (runbook 6.8, executor docs).
 
-### 2. The remote reference must not hold the store lock (Part B, designed, not implemented)
+### 2. The remote reference does not hold the store lock (Part B, implemented)
 
-Template: `execute_audit_v2` (`store.py:6897-7336`) already does it for audits: claim under the lock
-(`_tx`, :6907-7172), run unlocked with a `LeaseGuard` registered in `_lease_guards_v2` (:7148-7149, :7173-7274),
-then settle in a second `_tx()` that re-validates (:7275-7334). `trial_reference_v2` follows the same three
-phases. The review of this section found the hazards below; the design is not complete until each has a test.
+`ChallengeStore.trial_reference_v2` now follows the three phases `execute_audit_v2` has for audits, and
+`Admission.prepare_reference` is split to match: `claim_reference`, `run_reference`, `settle_reference`.
+`prepare_reference` stays as their composition with one `now`, for every caller that has no lock to
+release. The review of the design (2026-10-27) found the hazards below; each has a test. Names, not line
+numbers: the line numbers of the Context are those of the Part A tree.
 
-1. **Claim (locked).** Today's gate and reads: `_fresh_v2`, the admission row and its challenge, return the stored
-   `reference_commitment` when there is one. Otherwise register a single-flight entry keyed
-   `(admission_id, challenge.nonce)`. A second concurrent call for the same key **waits for the first and returns
-   the same result** (it does not start a second launch and does not answer a new 409: `cpu_miners.py` treats an
-   unknown 409 as a lost window and stops). The waiters hold `asyncio.to_thread` workers (`app.py:898-899`, about
-   `min(32, cpu + 4)`): bound them, or retries and timed-out POSTs can exhaust the pool.
-2. **Run (unlocked).** `stage_reference`, the launch, `screen_work`, the object puts. The object store is
-   file-based and is not the problem; the shared SQLite connection is. These calls read it today, under the
-   lock: `_beacon` -> `_beacon_v2` (`admission.py:300,314-316`), `qualified` -> `_record_v2` (:332,
-   `store.py:2594`), the `trusted` closure (`store.py:3010`, `admission.store.db`), and `stage_trial_v2`
-   (`store.py:2701,2713`). An unlocked read on that connection can see another thread's uncommitted
-   `BEGIN IMMEDIATE` rows; `execute_audit_v2` itself calls `_record_v2` unlocked (:7253). Phase 2 therefore
-   starts with a locked staging step that reads everything it needs into plain values, then touches no
-   database. Staging also races `export_trial_v2` (`store.py:2756-2775`, `GET .../job`): it holds the lock and
-   calls the same `stage_trial_v2`, which compares then rewrites `trials-v2/<nonce>/*` (:2732-2736), so a miner
-   fetching the job during a reference could read a half-written file and get a spurious 409 "immutable trial
-   inputs changed"; single-flight on `(admission_id, nonce)` does not cover that route, so staging writes
-   atomically or under its own lock.
-3. **Commit (locked, `_tx`).** Re-validate against the state read in phase 1: challenge unchanged, `proof_digest
-   is None`, the trial still `OPEN`, the admission still in a state that asks for a reference, no commitment
-   yet, and `_fresh_v2` again. Today's commit (`admission.py:346-351`) checks only the challenge and
-   `proof_digest`, and `guard.check()` runs after it (`store.py:3033-3034`): phase 3 needs both checks **before**
-   the write, which means splitting `prepare_reference` in `admission.py` (a file this ADR now says is edited).
-   The flight entry is always released in `finally`. `_fresh_v2` under `_tx` rolls back its own pause and pin
-   writes on a 503 (`FreshnessGate` expects the caller to commit them): keep it outside the write.
-4. **Other points to settle with the code.** (a) `self._lock` and `escrow.mutex` are one `RLock`
-   (`store.py:2584`): a caller that already holds it silently keeps the lock through phase 2, so assert
-   `_is_owned()` is false and test it. (b) `push_beacon` iterates `self._lease_guards_v2.values()` with no lock
-   (:725) and phase 3's unlocked `finally` pops from it: snapshot it under the lock, as the IPC path does
-   (:2669). (c) The lock now freezes `MAX(round)` for a whole reference, so `now` is constant in `screen_work`,
-   `reference_beacon` and the window check of `retain_trial_publication` (:526): say which `now` phase 3 uses.
-   (d) A child store's guard only gets `advance` through `child.push_beacon` (:753-754).
+1. **Claim, under `self._lock`.** The gate (`_fresh_v2`, called outside a `_tx`, so its pins and pauses are
+   written as before), the admission row and its challenge, the open trial, the stored commitment (returned
+   as it is when there is one), `trial_samples`, `stage_trial_v2`, the challenge receipt and the hotkey of the
+   executor's context: all read into plain values (`ReferenceClaim`, and the `trusted` closure). The claim
+   then looks up the flight keyed `(admission_id, challenge.nonce)` in `_reference_flights_v2`:
+   - none: this call is the leader. It makes a `concurrent.futures.Future` and, with a role launch, a
+     `LeaseGuard`, and registers both before it lets go of the lock;
+   - one: this call is a waiter. It takes one of the `REFERENCE_WAITERS` (2) places of a semaphore the root
+     shares with its child stores (one `asyncio.to_thread` pool serves them all), waits at most
+     `REFERENCE_WAIT_SECONDS` (330 s; a trial window is 300 s) and returns the leader's commitment **or
+     raises the leader's exception** (the same object, as `Future.result` does). Past the budget the call
+     answers 503 at once and holds no worker; a waiter that gives up answers 503. `cpu_miners.py` retries a
+     503 and stops on an unknown 409, which is why neither case is a 409. A waiter never relaunches: N
+     retries of a failing reference would otherwise cost N launches.
+2. **Run, without the lock.** `run_reference`: `screen_work` with the launch, then the four `put_large` of
+   the artifacts. It reads no database row (a test swaps the connection for one that fails on use). The two
+   reads the old code did here moved: the challenge receipt into the claim, and `qualified(screen)` into the
+   settlement (it needs the screen, hence the run, and reads `records_v2`; an unqualified reference only leaves
+   content-addressed objects behind). The guard is registered in `_lease_guards_v2` as
+   `reference:<admission>:<nonce>`, `advance`d by every pushed round, and cancels the launch at the deadline
+   round or at the wall cutoff. A reference without a role launch (the CPU path) registers none and cannot be
+   cancelled, as before.
+3. **Settle, under `self._lock`.** `_fresh_v2` again (outside a `_tx`, so a 503 keeps its pause), then the
+   guard is checked **before** the write, then `settle_reference` in one `escrow.tx()`: the result is bound to
+   the claimed challenge (proof and screen name the admission, the challenge hash and the nonce); the row is
+   what the claim read (challenge, trial epoch, admission state, dispute flag, no proof); the trial is still
+   OPEN and `now <= deadline_beacon`; `qualified(screen)`; then the write. A stored commitment equal to ours is
+   returned, a different one refused. Whatever else happened (`REFERENCE_STATE_CHANGED`,
+   `REFERENCE_TRIAL_CLOSED`, `REFERENCE_RESULT_BINDING`, `UNQUALIFIED_REFERENCE`) nothing is written. The
+   flight and the guard are dropped in a `finally`, by identity, and the waiters are told.
+4. **The points the review asked to settle.** (a) `self._lock` and `escrow.mutex` are one `RLock`: a caller that
+   already holds it would keep it through the launch, so `trial_reference_v2` raises `RuntimeError` when
+   `_is_owned()`. (b) `push_beacon` snapshots `_lease_guards_v2` under the lock, as the IPC thread does.
+   (c) `now`: the claim's `now` serves the gate, the guard and `screen_work`'s window check; the
+   settlement's own `now` is `reference_beacon` (the round the commitment is made at, which `proof()` compares
+   with), the window check and `retain_trial_publication`. The lock no longer freezes `MAX(round)`, so they
+   differ by the rounds that passed during the launch. (d) A child store's guard gets its rounds through
+   `root.push_beacon` then `child.push_beacon`; the tests run both layouts (`child_network` hosts the run in a
+   child store). (e) `stage_trial_v2` raced `export_trial_v2` (`GET .../job`): it rewrote the inputs in place, so
+   a launch reading `start_state` could read it truncated, and a write that died halfway left a torn file that
+   every later call refused as "immutable trial inputs changed". It now writes an input once, in a
+   temporary directory beside it, and renames it; an existing file is not touched.
 
-Required tests (fake slow executor, no GPU), for both layouts of section 2 of the context: (a) while a
-reference blocks, `latest_beacon`, `push_beacon` and a different trial's request complete; (b) two concurrent
-calls for one trial launch once and return one commitment; (c) a trial that closes or expires during the run gets
-no commitment and the admission is not credited twice; (d) a launch that raises releases the flight and a retry
-works; (e) a cancelled guard stops the launch; (f) `export_trial_v2` during a reference never reads a partial
-file. Part A adds two strict xfails of (a) for the root layout (`latest_beacon`, `push_beacon`); the child layout
-needs a fixture with two runs, and (b) and (c) pass on today's code because the lock serialises them, so they are
-written with the code.
+| Hazard | Handled by | Test (`test_reference_lock_v2.py`, both layouts, unless noted) |
+| --- | --- | --- |
+| the launch holds the lock | claim / run / settle | `latest_beacon`, `push_beacon`, another trial's export, status and reference are served meanwhile; `a_five_second_reference_holds_the_store_lock_for_less_than_a_second` |
+| double launch | flight keyed (admission, nonce) | `two_calls_for_one_trial_launch_once…`, `…refused_past_the_waiter_budget`, `a_waiter_gives_up…` |
+| crash between claim and settle | the claim writes nothing durable; flight and guard dropped in `finally` | `a_launch_that_dies_between_claim_and_settle…` (also true on the parent; it kills the mutant that keeps the flight) |
+| reaper or expiry during the run | guard cancel, then the settlement's re-validation | `the_beacon_passing_the_deadline…` (executor stops / ignores the event), `a_lease_cancelled_while_the_result_waits_for_the_lock…`; `test_reference_settle_v2.py` for each refusal |
+| executor error, then retry | flight dropped, waiters get the failure, a retry launches | `a_failed_launch_fails_its_waiters_alike…` |
+| result for a stale claim | row compared at settlement, nonce in the key | `a_result_for_a_stale_claim_is_dropped…`, `test_reference_settle_v2.py` |
+| `now` frozen by the lock | settlement's own round | `the_commitment_is_made_at_the_round_of_the_settlement…` |
+| lock already held by the caller; guards read unlocked; inputs rewritten | `_is_owned` check; snapshot under the lock; atomic staging | `a_caller_that_holds_the_store_lock_is_refused`, `a_beacon_push_reads_the_registered_guards…`, `exporting_a_trial_never_rewrites…`, `test_trial_export.py` |
+
+**Measured** [V, 2026-10-28, this host, fake executor that sleeps 5 s and then runs the real reference on the
+CPU, 4.5 s; the whole call takes about 11 s]. On the parent a thread asking for the store lock got it after
+11.05 s (run in the root store) and 10.31 s (child store), and `push_beacon` returned after 9.57 s and 8.83 s.
+With Part B, 537 and 534 requests for the lock, one every 20 ms, never waited as much as a millisecond, the
+longest hold taken by the reference was 5.9 ms (root) and 4.1 ms (child) and `push_beacon` returned in
+0.7 ms and 1.2 ms. This is the lock, not the gate: the pusher also needs its rounds verified (2.4 s of BLS in
+all) and the replay must show the gate staying open [?].
 
 Alternatives not taken: a lock per trial instead of per store (a wider change to every `with self._lock`
 user); answering 202 and polling (an API change the miner tools do not expect); doing nothing and relying on
-section 3 (the cadence only limits the damage).
+section 3 (the cadence only limits the damage). Rejected inside Part B: `qualified()` called from the run under
+a short lock (the run would touch the database after all); a waiter that claims again when the leader fails
+(each would relaunch, one after the other); a `threading.Lock` per key instead of the `Future` (no way to hand
+the failure to the waiters, and each waiter would still hold a worker without a bound).
 
-Hash consequences of Part B: `trial_reference_v2` and `Admission.prepare_reference` are not in the `owned` set of
-`ChallengeStore._service_implementation_v2` (:4283-4312) nor in its `paths`, so `implementation_hash` does not
-move unless the work edits an owned function [V by reading]. `sources()` and the bundle hash move (they hash
-every `src/hypertrain/**/*.py`).
+Hash consequences of Part B: see "Hash consequences of Part B" below.
 
 ### 3. Beacon cadence (Part A: settings; D68: the head-first pusher)
 
@@ -284,16 +314,47 @@ unchanged [H, not run]. The server image digest changes with any build. `v3-audi
 module (EXE-01) and will move the same hashes: the two batches' values are not additive, only the merged
 tree's are.
 
+### Part B and the head-first pusher (D68)
+
+Measured the same way (`measure.py` over an export of the tree, 2026-10-28) [V]: parent `8c2b24e8` (`v3`
+with `v3-audit-integrity` and `v3-admission-hardening` merged) and this branch's tip.
+
+| Value | Parent `8c2b24e8` | This branch |
+| --- | --- | --- |
+| `implementation_hash` | `941247f8…a688d1` | unchanged |
+| the 33 owned functions of `store.py` and the ten named files | | none changed |
+| `store.py` sha256 | `6eadf5bb…1e3972` | `3672e8ed…910416` |
+| `admission.py` sha256 | `ced66e8f…147e7c` | `c98dbd18…29f7b6` |
+| `beacon/push.py` sha256 | `1e40246d…dfbb45` | `dce3cb91…e14443` |
+| `network_qualification.py`, `cuda_executor.py`, `cuda_executor_runner.py` sha256 | `dab7a6ab…7bda15`, `f342234d…7db619`, `5930be17…4dff90` | unchanged |
+| `sources()` map: files, canonical sha256 | 153, `0d989cd1…987bf9` | 153, `fb24c8d8…eaf9c7` |
+| `bundle()` | 2,519,040 bytes, `0fbf1c09…280721` | 2,529,280 bytes, `1b23014a…660452` |
+
+Reading: the work edits `trial_reference_v2`, a new private method and two module constants, `push_beacon`,
+`stage_trial_v2`, `_open_child` and `__init__` in `store.py`. None of them is among the 33 `owned` functions of
+`_service_implementation_v2`, `Admission.prepare_reference` is not owned either, and neither `admission.py` nor
+`beacon/push.py` is one of its ten named files, so `implementation_hash` does not move: the prediction of Part A
+holds by measurement, not only by reading. (The value is `941247f8…`, not the `02e208a3…` printed above:
+`v3-admission-hardening` and `v3-audit-integrity` added owned definitions before this work.) `sources()` and
+`bundle()` hash every `src/hypertrain/**/*.py`, so they move, with the consequences described above for
+qualification configs and dispatch source pins; the server image digest changes with any build. The GPU image is
+not read by anything here; a rebuilt one has a new digest, as before. The ADR text is not hashed.
+
 ## Consequences
 
 - A warm reference should take 12-19 s instead of 57-64 s [A, S13, through a wrapper]. S13's trials went from about
-  125 s to 70-90 s with one driver and 40-50 s with two, **measured with `--catch-up 3`**: the shipped cadence
-  adds the gate-closed time of the table to every reference until Part B or the head-first pusher lands, so
-  expect more than 50 s per trial.
+  125 s to 70-90 s with one driver and 40-50 s with two, **measured with `--catch-up 3`**, and s15's took 145 s
+  with a gate that stayed closed 100-150 s after each reference [A]. With Part B no reference closes the gate
+  (the lock is held for milliseconds), so most of that wait should go; how much a trial then takes is for the
+  replay to measure [?].
+- Several requests share one reference: a repeated `POST /join/proof` waits for the running one (at most two
+  waiters in the process, then 503) and gets its commitment or its failure; a launch that failed is launched
+  again by the next request, not by the waiters.
 - A host gains one persistent directory per image digest; the executor creates it and nothing else; a host that
   cannot make it runs uncached and says so in the journal.
-- Within the model, the TEST beacon skips no round in a lock of up to 150 s and the pusher survives 140 s of
-  refused connections. The model has a one-round-wide edge at its limit and is not a measurement on the stack;
+- Within the model, the TEST beacon (head first, `--catch-up 60`) skips no round in a lock of up to about 100 s
+  (150 s at `--catch-up 100`) and reopens the gate within 7 s of it, and the pusher survives 140 s of refused
+  connections. The model has a one-round-wide edge at its limit and is not a measurement on the stack;
   `beacon_gaps.py` can show a hole afterwards, not prove there will be none.
 - ADR 0008's "Container" and "Data in and out" rows carry the one exception, the compute cache directory.
 
@@ -329,15 +390,23 @@ false` and once warm, compare `publication_sha256` in `role-dispatch.json`. (4) 
 round and no stranded seed) and the `lag` line, and the idle lag with the child run present. (5) Trials with two
 drivers, recording the gate-closed time per reference against the table above. A hole, a stranded seed, an
 unexplained `MISMATCH` or an idle lag that does not hold stops the run and is reported, not worked around.
+(6) For D68: swap in the server image and the pusher of this change, then one trial with one driver on a cold
+image. The reference still takes 43-64 s (`exec_attempt` to `exec_published`), but `POST /join/proof` must not
+answer 503 meanwhile (s15: 100-150 s of them per trial), the idle `lag` stays 1-2 rounds during the reference,
+`beacon_gaps.py` prints nothing missing, and a second request for the same trial returns the same commitment
+without a second `exec_attempt`. A 503 storm, a hole or two `exec_attempt` lines for one trial stops the run.
 
 ## Sources
 
 `hypertrain/src/hypertrain/gpu_ops/cuda_executor.py`, `beacon/push.py`, `beacon/__main__.py`,
 `beacon/drand.py:47`, `challenge/store.py:516-518,707-712,753-754,757-758,2179-2244,2584,2669,2701-2775,
-2966-3036,4280-4312,6897-7336`, `challenge/admission.py:197,222-224,236-241,289-365,895,1047`,
+2966-3036,4280-4312,6897-7336` (the tree of Part A; for Part B read `trial_reference_v2`, `_end_reference_v2`,
+`stage_trial_v2`, `push_beacon`), `challenge/admission.py:197,222-224,236-241,289-365,895,1047` (and
+`claim_reference`, `run_reference`, `settle_reference`), `tests/challenge/test_reference_lock_v2.py`,
+`test_reference_settle_v2.py`, `child_run_fixture_v2.py`, `tests/ops/s100/beacon_model.py`,
 `hypertrain/docker/Dockerfile.gpu:28-52`, `scripts/ops/s100_test/challenge_image.sh`,
 `docs/s100-test-stack.md` (sections 1 and 6.8), `docs/adr/0008-generic-cuda-executor.md`, the S13 REPORT, all
-read 2026-10-27.
+read 2026-10-27; Part B and D68 read and measured 2026-10-28.
 
 ## Not verified
 
@@ -348,4 +417,10 @@ A challenge restart while a child store is locked can leave rounds in the root t
 pusher reads the root's highest round and cannot refill them, and a seed in one of them is stranded. Reasoned
 from the code, not reproduced; `beacon_gaps.py` with the run id on the child store would show it.
 The beacon numbers are a model validated on two S13 observations, not a measurement on the s100 stack, and they
-depend on a round costing 2.4 s. Part B is a design: its unlocked phase has the hazards listed and is untested.
+depend on a round costing 2.4 s.
+Part B ran only against a fake executor (the real reference on the CPU behind a gate the test controls), in the root
+and in a child store: no GPU host, no s100, no real `asyncio.to_thread` pool under load, no second process on the
+same database (two challenge processes would each launch once; the settlement then finds the other's commitment,
+equal or refused, but that path is only unit-tested). The unlocked reads of `execute_audit_v2` (`_record_v2`
+between claim and settle) were found by the review and are not changed here. The measured lock hold is the lock's,
+not the gate's. Head first is a model plus unit tests of the real `Pusher`; it was not run against a live relay.

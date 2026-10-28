@@ -119,6 +119,16 @@
   than the last `--catch-up` are still never pushed, and a pusher restarted before its list is empty
   leaves those rounds missing (`scripts/ops/s100_test/beacon_gaps.py` finds them). The verification
   of every round is unchanged. See `docs/adr/0012` at the monorepo root.
+- A remote reference no longer holds the challenge's store lock while the executor works
+  (`ChallengeStore.trial_reference_v2`: claim under the lock, launch without it under a lease guard,
+  settle under it again; `Admission.prepare_reference` is now `claim_reference`, `run_reference` and
+  `settle_reference`). The beacon pusher, `latest` and every other request are served during the launch,
+  so a cold 57 s reference should no longer close the freshness gate and cause the 503 "beacon
+  infrastructure paused" storm after it (tested with a fake executor; not yet replayed on s100). A repeated request for the same trial waits for the running reference
+  (at most two waiters in the process, then 503) instead of launching a second one; a result for a
+  challenge that was replaced, expired or closed while the launch ran is dropped; `reference_beacon` is
+  the round of the commitment. No wire format, manifest field or constant changes. See `docs/adr/0012` at
+  the monorepo root.
 
 ### Fixed
 - The dispute long poll can no longer deadlock the store. `DisputesV2` has one lock order, the
@@ -145,6 +155,9 @@
   the remaining members cannot carry is refused with 409 `ROUND_INFEASIBLE`. The new helpers
   join the owned set of `implementation_hash`, which changes. See
   `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- A trial's inputs are staged once and renamed into place: a launch that reads `start_state` no
+  longer sees it rewritten in place by an export, and a write that died halfway no longer leaves a
+  torn file that every later call refused as "immutable trial inputs changed".
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

@@ -106,8 +106,11 @@ verifies each round with py_ecc BLS (about 1.2 s) and the challenge verifies it 
 With the original `--interval 3 --catch-up 20` the lag held at 8-9 rounds; with `--interval 0.2` it
 is 1-2 rounds when idle (measured 2026-10-26).
 
-**A store lock stops the beacon.** A remote or in-process reference holds the lock of the store that
-hosts the run for its whole duration (13-19 s with the CUDA cache, 43-64 s without). The first run
+**A store lock stops the beacon.** Until ADR 0012 Part B a remote or in-process reference held the lock
+of the store that hosts the run for its whole duration (13-19 s with the CUDA cache, 43-64 s without),
+and a challenge image from before Part B still does. Since Part B a reference holds it for its claim and
+its settlement only (a few milliseconds, measured with a fake executor); any other long lock, a challenge
+restart or a stuck request, stops the beacon the same way. The first run
 of a state directory lives in the root store, where `GET /v1/beacon/latest` and
 `POST /v1/admin/beacon` both wait for that lock. A run created while the root already hosts one
 (S13's) lives in a child store with a lock of its own: the root still answers `latest` and keeps the
@@ -148,12 +151,12 @@ for up to about `4 x lock + 10` s with the run in the root store, about `3 x loc
 after a 13 s reference, 1 minute after 19 s, **3 to 4 minutes after a 60 s reference**. That figure is
 very sensitive to the cost of one round: at 2.6 s it doubles, at 2.8 s it is five times larger, and at
 2.9 s the pusher never catches up. With head first the model says the gate reopens within 7 s of a lock
-of 13 to 60 s, in either layout, and holds up to 2.6 s a round. Head first is in the code (ADR 0012
-section 3) but has not run on s100: the stack runs the older pusher until Forge swaps it. Until then keep
-the two rules: keep the CUDA cache (the executor does by default), and run the first reference after a
-new image (43-64 s, cold) alone, before a second driver starts. Expect 503s in that window and retry
-them. Measure the idle lag with a child run present before trusting any of these numbers.
-Releasing the lock during the reference (ADR 0012 section 2) removes the wait at its source.
+of 13 to 60 s, in either layout, and holds up to 2.6 s a round. Both fixes are in the code (ADR 0012
+section 2, the lock released during the reference, and section 3, head first) but have not run on s100:
+the stack runs the older challenge image and pusher until Forge swaps them. Until then keep the two
+rules: keep the CUDA cache (the executor does by default), and run the first reference after a new image
+(43-64 s, cold) alone, before a second driver starts. Expect 503s in that window and retry them. Measure
+the idle lag with a child run present before trusting any of these numbers.
 
 Proving it instead of inferring it: `beacon_gaps.py` lists rounds missing from the `beacon` table
 of the store that hosts the run, the identities whose seed is one of them, and whether the pusher
@@ -509,8 +512,9 @@ sudo -n docker run --rm --init --gpus device=5 --ipc=host --ulimit memlock=-1 --
 ```
 
 `setup` takes no `--gpus`; `$D` holds `scripts/cpu_miners.py`, `seeds/` and the miner directories. Two
-drivers on different GPUs with disjoint plans overlap one miner's probe with the other's reference, but
-the challenge computes references one at a time under its store lock. Gate the node with
+drivers on different GPUs with disjoint plans overlap one miner's probe with the other's reference;
+before ADR 0012 Part B the challenge computed references one at a time under its store lock, since then
+two references may overlap, each on an executor host (one job per host). Gate the node with
 `hypertrain/scripts/b300/cycle_gate.sh --gpus 5` before each driver.
 
 ### 6.8 Measured on 2026-10-27 (S13, one executor host, tiny-cpu)
@@ -540,6 +544,7 @@ reach a round: no `run-v2`, no audit, no `get_weights`.
 - **The reference holds the store lock**, so the beacon pusher times out meanwhile and every trial
   waits for it to catch up (503 "beacon infrastructure paused" for 10-70 s). A second driver or a
   second executor host does not shorten the references; two drivers only overlap the miner side.
+  (ADR 0012 Part B releases the lock during the reference; this measurement predates it.)
 - **Do not push beacon rounds out of order.** The challenge reads exact rounds (a trial's seed round,
   `d_audit`). A second pusher with `--catch-up 1` moved `known` past rounds the first one would have
   filled; the challenge request (then an unsigned `GET /join/<id>/challenge`, an owner-signed
