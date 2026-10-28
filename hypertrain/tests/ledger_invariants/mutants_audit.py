@@ -289,9 +289,9 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-aggregate-skips-the-audit-gate",
         "invariants": ["A2W-10"],
         "path": STORE,
-        "old": "inputs = self.verified_inputs_v2(run_id, w)\n"
-        "            self._require_survivors_v2(",
-        "new": "inputs = []\n            self._require_survivors_v2(",
+        "old": "inputs = self.verified_inputs_v2(run_id, w, now)\n"
+        "        self._require_survivors_v2(",
+        "new": "inputs = []\n        self._require_survivors_v2(",
         "tests": [UNAUDITED],
         "why": "aggregation no longer requires every member to have an audit outcome.",
     },
@@ -299,7 +299,7 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-finalize-trusts-the-requested-included-set",
         "invariants": ["A2W-10", "A2W-11"],
         "path": STORE,
-        "old": "            included = sorted(\n"
+        "old": "            included = self._unconvicted_v2(\n"
         '                item["roster"]["hotkey"]\n'
         '                for item in self._record_v2(run_id, "tape-inputs", str(w))["inputs"]\n'
         "            )\n",
@@ -636,7 +636,7 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-aggregate-skips-the-survivor-check",
         "invariants": ["A2W-11"],
         "path": STORE,
-        "old": "            self._require_survivors_v2(manifest, [x.roster for x in inputs])\n",
+        "old": "        self._require_survivors_v2(manifest, [x.roster for x in inputs])\n",
         "new": "",
         "tests": [SURVIVORS],
         "why": "a round whose remaining members cannot carry it reaches the allocator instead of "
