@@ -2735,9 +2735,14 @@ class ChallengeStore:
         }
         for name, value in inputs.items():
             path = directory / name
-            if path.exists() and path.read_bytes() != value:
-                raise ChallengeError(409, "immutable trial inputs changed")
-            path.write_bytes(value)
+            if path.exists():
+                if path.read_bytes() != value:
+                    raise ChallengeError(409, "immutable trial inputs changed")
+                continue  # a launch may be reading it: staged once, never rewritten in place
+            with tempfile.TemporaryDirectory(dir=directory) as temporary:
+                staged = Path(temporary) / name
+                staged.write_bytes(value)
+                staged.replace(path)
         deadline = manifest.training.beacon.genesis_time + (challenge.deadline_beacon - 1) * 3
         return IslandJobV1(
             job_version=1,
