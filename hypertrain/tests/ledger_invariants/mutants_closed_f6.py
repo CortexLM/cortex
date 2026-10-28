@@ -1,9 +1,20 @@
-"""Mutants that re-open the closed hole F6: one origin that cannot mature stops the beacon.
+"""Mutants of the closed hole F6: one origin that cannot mature stops the beacon.
 
 The fix (escrow lot, 4a7a1bea, ADR 0014 part 7) lets `ChallengeStore.push_beacon` catch the failure
-of one origin, journal it and go on. The two pins below were strict xfails until it landed; each
-entry reverts one behaviour of the fix in a private copy of src, so that the runner proves the
-pins fail without it.
+of one origin, journal it and go on. The two pins below were strict xfails until it landed. The ten
+entries are not all reverts of the fix.
+
+Seven undo a behaviour of the fix or the guarantee it adds, in a private copy of src, so that the
+runner proves the pins fail without it: the old handler, the handler narrowed to EscrowError or to
+an allowlist of classes (the alternative the commit rejected), the custody refusals treated as a
+broken ledger, the failure re-raised after its journal, the journal that cannot record a first
+failure, and the loop that ends at the first stuck origin.
+
+Three are regressions the pin must survive and are not part of 4a7a1bea: they model a stuck origin
+that makes the push skip a later step (the lease expiry, the closing of blocked disputes, the
+reaping of trials) while a maturity failure is on record. The pin kills them through the Calls
+spies on those steps, which record that each step ran and not what it did, so a mutant that still
+calls a step and turns it into a no-op would pass.
 
 Run from hypertrain/: .venv/bin/python scripts/check_ledger_invariant_mutants.py --only <ids>
 """
@@ -12,8 +23,10 @@ from __future__ import annotations
 
 STORE = "src/hypertrain/challenge/store.py"
 
-# Lines of the per-origin handler of push_beacon, at their indentation in the source.
-HANDLER = " " * 20 + "except Exception as error:  # one stuck origin must not stop the beacon\n"
+# Lines of the per-origin handler of push_beacon, at their indentation in the source. HANDLER stops
+# before the comment that ends its line, so that rewording the comment breaks no snippet; a
+# replacement that ends the line must therefore accept a trailing comment.
+HANDLER = " " * 20 + "except Exception as error:"
 BROKEN_LEDGER = " " * 24 + "if isinstance(error, sqlite3.Error) or code in (\n"
 JOURNAL = " " * 24 + "self._journal_maturity_failure_v2(run_id, origin[0], error)\n"
 # The three steps of the push that follow the loop over the due origins.
@@ -55,33 +68,7 @@ MUTANTS = [
         "id": "closed-f6-old-handler-restored",
         "invariants": ["SHD-19", "SHD-D3", "CL-14"],
         "path": STORE,
-        "old": (
-            HANDLER
-            + " " * 24
-            + "code = error.code if isinstance(error, EscrowError) else None\n"
-            + " " * 24
-            + "if code in (\n"
-            + " " * 28
-            + '"DISPUTED_OR_UNVESTED",\n'
-            + " " * 28
-            + '"IMMATURE_OR_UNKNOWN_ORIGIN",\n'
-            + " " * 28
-            + '"ALREADY_MATURED",\n'
-            + " " * 24
-            + "):\n"
-            + " " * 28
-            + "continue\n"
-            + BROKEN_LEDGER
-            + " " * 28
-            + '"CONSERVATION",\n'
-            + " " * 28
-            + '"ORIGIN_CONSERVATION",\n'
-            + " " * 24
-            + "):\n"
-            + " " * 28
-            + "raise  # the ledger or its store is broken: stop, never skip\n"
-            + JOURNAL
-        ),
+        "old": HANDLER,
         "new": (
             " " * 20
             + "except EscrowError as error:\n"
@@ -96,7 +83,7 @@ MUTANTS = [
             + " " * 24
             + "):\n"
             + " " * 28
-            + "raise\n"
+            + "raise"
         ),
         "tests": [
             PUSH_MISSING,
@@ -108,8 +95,9 @@ MUTANTS = [
         ],
         "why": (
             "The per-origin handler is the old one again, which re-raises every failure but the "
-            "three waiting codes, so an origin whose custody no longer revalidates rolls back "
-            "the maturity of the others and the beacon answers an error."
+            "three waiting codes (the new body stays behind that guard and only meets a waiting "
+            "code), so an origin whose custody no longer revalidates rolls back the maturity of "
+            "the others and the beacon answers an error."
         ),
     },
     {

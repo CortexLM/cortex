@@ -1,5 +1,13 @@
 """Mutants of the opids package: one small regression of src/hypertrain per pinned defence.
 
+`opids-outbox-accepts-another-body` removes two defences at once: the body comparison of the outbox
+(`enqueue_lock`) and the early call of `require_lock_capacity` in the lock route, which refuses
+another body under an applied lock (OPERATION_CONFLICT) before the outbox is asked and which
+`EscrowV2.lock` calls again when the lock is applied (ADR 0014 part 4). The comparison alone
+survives test_opids_2.py, test_locks.py, test_locks_2.py and test_gaps_escrow_2.py, and the early
+call alone survives test_opids_2.py (measured), so the outbox comparison of a lock that is queued
+and not yet applied is pinned by none of these files.
+
 Run from hypertrain/: .venv/bin/python scripts/check_ledger_invariant_mutants.py --only <ids>
 """
 

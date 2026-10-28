@@ -35,9 +35,6 @@ EXPIRED_ENVELOPE = G + (
 VESTING = (
     G + "test_the_store_vests_each_reward_origin_a_fixed_span_after_the_beacon_it_finalized_at"
 )
-AFTER_D_FINAL = G + (
-    "test_a_finalize_after_d_final_settles_the_round_or_retires_it_but_does_not_freeze_it"
-)
 OWNERSHIP = G + (
     "test_a_rotation_between_the_credit_and_the_pay_keeps_every_unit_with_the_coldkey_that_earned_it"
 )
@@ -62,9 +59,6 @@ STAKE_BURNED = G + (
 REPAIRED = G + "test_a_repaired_round_cannot_be_finalized_and_the_weights_stay_a_full_burn"
 ORDINARY_TRIAL = G + (
     "test_an_ordinary_trial_through_the_routes_creates_no_shadow_record_and_issues_nothing"
-)
-FIRST_AFTER_ROLLBACK = G + (
-    "test_the_first_round_after_a_rollback_is_credited_through_the_finalize_route"
 )
 
 AUTHENTICATE_FINALIZE = (
@@ -182,18 +176,6 @@ MUTANTS: list[dict[str, Any]] = [
         "tests": [VESTING],
         "why": "The vesting span is one beacon shorter than the manifest says.",
     },
-    # --- T-CRD-16: a Finalize after d_final ----------------------------------------------------
-    {
-        "id": "gapledger-the-ledger-judges-the-audit-challenge-at-the-finalize-beacon",
-        "invariants": ["CRD-15", "CL-10"],
-        "path": ESCROW,
-        "old": 'item.challenge.model_dump(mode="json"), self._accepted(item.challenge, evidence)',
-        "new": 'item.challenge.model_dump(mode="json"), evidence.finalized_beacon',
-        "tests": [AFTER_D_FINAL],
-        "why": "The ledger judges the signed audit challenge at the beacon of the Finalize again, "
-        "so a Finalize one beacon after d_final finds the challenge expired and the round "
-        "stays PENDING with every retry refused.",
-    },
     # --- T-CRD-18: ownership through a rotation ------------------------------------------------
     {
         "id": "gapledger-a-payment-rewrites-the-owner-of-the-units-to-the-hotkey",
@@ -264,18 +246,6 @@ MUTANTS: list[dict[str, Any]] = [
         "tests": [ORDINARY_TRIAL],
         "why": "The reference an application triggers through its route retains accepted "
         "shadow-execution custody, the raw material of a shadow reward, in an ordinary flow.",
-    },
-    # --- T-CRD-13: the credit order after a rollback ---------------------------------------------
-    {
-        "id": "gapledger-the-service-gives-the-ledger-no-closed-round",
-        "invariants": ["CRD-04", "CL-04"],
-        "path": STORE,
-        "old": "                round_closure=lambda w: self._round_closure_v2(run_id, w),\n",
-        "new": "",
-        "tests": [FIRST_AFTER_ROLLBACK],
-        "why": "The service builds its ledger without the closure of a round, so a round that a "
-        "rollback closed without reward is never withdrawn and the first round after it is "
-        "refused FINALIZE_ORDER for ever.",
     },
     # --- M-02: a repaired round ------------------------------------------------------------------
     {

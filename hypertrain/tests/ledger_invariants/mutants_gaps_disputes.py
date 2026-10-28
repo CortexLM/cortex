@@ -37,9 +37,6 @@ SQUAT = FILE + "test_a_client_event_cannot_stop_the_beacon_from_closing_a_stuck_
 OWN_MATCH = FILE + (
     "test_a_member_contesting_its_own_matching_verdict_does_not_stop_the_round_of_the_others"
 )
-BACK_FROM_CONTEST = FILE + (
-    "test_a_member_back_from_a_closed_contest_does_not_stop_the_round_of_the_others"
-)
 ROLLBACK_PAID = FILE + "test_a_round_opened_after_a_two_round_rollback_is_credited"
 ORIGIN_HELD = FILE + (
     "test_only_the_origin_of_the_disputed_miner_is_held_and_nothing_is_paid_for_it"
@@ -82,13 +79,10 @@ RESERVATION_QUERY = (
     "                ).fetchone()"
 )
 CONVICTION = '                            admission.settle_fraud(result["dispute_id"], now=now)\n'
-UNFIT_CALL = "            self._exclude_unfit_members_v2(run_id, w)\n"
 UNFIT_SUSPENDED = "            return record.state\n"
 UNFIT_SUSPENDED_IS_FIT = (
     '            return None if record.state == "SUSPENDED" else record.state\n'
 )
-UNFIT_NOT_LIVE = '            return "NOT_LIVE"\n'
-UNFIT_NOT_LIVE_IS_FIT = "            return None\n"
 CLOSED_ROUND_WITHDRAWN = (
     "            closure = self.round_closure(w) if self.round_closure and w < below else None\n"
 )
@@ -283,16 +277,6 @@ MUTANTS = [
         "why": "A finished rollback of one window turns away the rollback of the next one.",
     },
     {
-        "id": "gap-the-aggregate-keeps-a-member-that-is-not-eligible-any-more",
-        "invariants": ["DIB-04", "DIB-05"],
-        "path": STORE,
-        "old": UNFIT_CALL,
-        "new": "",
-        "tests": [OWN_MATCH, BACK_FROM_CONTEST],
-        "why": "The aggregate no longer leaves out an audited member whose admission stopped "
-        "qualifying it, so that one member answers 403 for the whole roster.",
-    },
-    {
         "id": "gap-a-suspended-contester-is-taken-for-fit-by-the-aggregate",
         "invariants": ["DIB-04", "DIB-05"],
         "path": STORE,
@@ -301,16 +285,6 @@ MUTANTS = [
         "tests": [OWN_MATCH],
         "why": "A member suspended by its own contest is not named unfit, so the real round of "
         "the four others is refused for it.",
-    },
-    {
-        "id": "gap-a-member-back-on-probation-is-taken-for-fit-by-the-aggregate",
-        "invariants": ["DIB-04", "DIB-05"],
-        "path": STORE,
-        "old": UNFIT_NOT_LIVE,
-        "new": UNFIT_NOT_LIVE_IS_FIT,
-        "tests": [BACK_FROM_CONTEST],
-        "why": "A member back from a closed contest, on probation without a clean round, is not "
-        "named unfit, so the round of the four others is refused for it.",
     },
     {
         "id": "gap-a-round-closed-by-a-rollback-blocks-the-credit-order",

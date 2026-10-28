@@ -8,23 +8,33 @@ them. The fix is a defence in depth, which limits what one mutant can show.
 
 POST /dispute refuses a bond named like a dispute or a reward origin (CONTEST_LOCK_ID_COLLISION),
 and behind that refusal the typed lookups settle a bond only through the dispute that took it. The
-two closed-dispute pins and the origin-first variant of the origin pin stop at the collision check,
-so they reach a typed lookup only when the check is reverted too. No single-file mutant does both:
-the check and the lookups sit in different files or far apart in one, and a third guard (the dispute
-id of the lock event, compared in lock_status) stands behind the lookup of the closed-dispute pins.
-Measured on the merged tree: the collision check alone, or the dispute-side lookup alone, leaves all
-four pins green; the store lookup alone fails only the bond-first variant, which opens the dispute
-while the name is free; the store lookup and the check together fail both variants; the check and
-the dispute-side lookup together fail only the settlement pin, and the guard too both closed-dispute
-pins.
+pins of test_opids.py hold when either layer holds: a dispute refused at creation must be refused
+by that collision, and a dispute that opens must still not take the settlement of the id it
+borrowed. Reverting the check alone therefore leaves the two closed-dispute pins green, as does
+reverting one lookup alone.
 
-`closed-p2-contest-bond-settled-by-its-name` is the one single-file mutant that fails the two
-closed-dispute pins, and it does so through the control step of their helper (a first dispute and
-bond that must settle: "its own life works"), not through the borrowed id: asked by its own name,
-the bond of an ordinary dispute finds no settlement. It shows that those pins exercise the typed
-lookup of contest bonds; it does not show a re-opened borrow. The borrow itself is shown by
-`closed-p2-contest-bond-not-bound-to-the-dispute-that-took-it`, killed by the test of the fix that
-releases a bond named like a closed dispute.
+Measured on the merged tree, each mutant of this table applied alone against the two closed-dispute
+pins, [origin-first] and [bond-first] of the origin pin, all run without -x:
+- the collision check (closed-p2-open-accepts-a-bond-named-like-a-dispute-or-an-origin) fails
+  [origin-first] only, because the dispute then opens and the lookups behind the check hold, so
+  closed-p2-open-accepts-a-bond-named-like-a-reward-origin, which reverts its origin half and
+  fails that variant only, is the mutant of that pin;
+- the store lookup fails [bond-first] only, which opens the dispute while the name is free;
+- the store lookup and the check together fail both origin variants and neither closed-dispute pin;
+- every other mutant leaves all four green, except the one below.
+
+`closed-p2-contest-bond-settled-by-its-name` fails the two closed-dispute pins, and does so through
+the control step of their helper (settle the first dispute's own bond: "its own life works"), not
+through the borrowed id: asked by its own name, the bond of an ordinary dispute finds no settlement.
+It shows that those pins exercise the typed lookup of contest bonds; it does not show a re-opened
+borrow. They reach the borrowed id only when five snippets of three files are reverted together,
+which the runner (one snippet per mutant) cannot express: the store lookup, the by-name settlement
+of contest bonds, the dispute-side lookup, the collision check and the reference check of
+lock_status. With the first four, only the settlement one of the two pins fails; with the fifth
+too, both do, at the release of the borrowed bond and at the settlement of the second dispute. The
+borrow itself is shown by `closed-p2-contest-bond-not-bound-to-the-dispute-that-took-it`, killed by
+the typing test of a contest lock that no dispute took and that a dispute named like it must not
+release.
 
 The other mutants are killed by the tests of the fix (tests/challenge/test_settlement_typing_v2.py).
 The escrow, dispute and lock test files of the lot (test_escrow_laws*, test_gaps_disputes,
@@ -208,6 +218,25 @@ MUTANTS = [
         "why": (
             "a dispute opens with a bond whose name is already a dispute or a reward origin, so"
             " one string again carries two meanings."
+        ),
+    },
+    {
+        "id": "closed-p2-open-accepts-a-bond-named-like-a-reward-origin",
+        "invariants": ["LCK-08", "DIB-17", "DIA-11"],
+        "path": DISPUTES,
+        "old": (
+            '                "SELECT 1 FROM disputes_v2 WHERE id=? UNION ALL "\n'
+            '                "SELECT 1 FROM escrow_origins WHERE origin=?",\n'
+            "                (model.bond_lock, model.bond_lock),\n"
+        ),
+        "new": (
+            '                "SELECT 1 FROM disputes_v2 WHERE id=?",\n'
+            "                (model.bond_lock,),\n"
+        ),
+        "tests": [ORIGIN_VESTS + "[origin-first]"],
+        "why": (
+            "the collision check looks only at disputes, so a bond named like a reward origin that"
+            " already exists is accepted and the dispute opens with it."
         ),
     },
     {

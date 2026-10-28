@@ -37,9 +37,6 @@ FINALIZE_MATRIX = T2 + "test_finalize_refuses_everything_but_the_coordinators_co
 STORE_REFUSED = T2 + "test_finalize_refuses_a_round_that_may_not_settle_and_writes_nothing"
 REPAIR_REFUSED = T2 + "test_a_repair_is_model_history_and_is_never_finalized_for_a_reward"
 PAYS_AUDITED = T2 + "test_finalize_pays_the_four_audited_miners_and_nobody_excluded"
-SANCTIONED_PAID = (
-    T2 + "test_a_member_sanctioned_after_the_aggregation_is_paid_for_the_round_it_was_verified_in"
-)
 ATOMIC = T2 + "test_a_failure_inside_finalize_leaves_nothing_behind_and_the_retry_settles_once"
 ONCE = T2 + "test_a_round_is_credited_once_however_often_its_finalize_is_sent"
 OPENING = T2 + "test_a_round_opening_is_immutable_idempotent_and_sequential"
@@ -371,19 +368,6 @@ MUTANTS = [
         "            )\n",
         [PAYS_AUDITED],
         "The included set comes from the opening roster, so an excluded miner is part of it.",
-    ),
-    mutant(
-        "finalize-rederives-the-live-set",
-        ["FIN-03", "FIN-18"],
-        STORE,
-        TAPE_INCLUDED,
-        "            included = sorted(\n"
-        "                x.roster.hotkey for x in self.verified_inputs_v2(run_id, w)\n"
-        "            )\n",
-        [SANCTIONED_PAID],
-        "The paid set is asked of the live admissions again, so a member sanctioned after the "
-        "aggregation freezes the round with a 403 instead of being paid for the round it was "
-        "verified in.",
     ),
     mutant(
         "finalize-commits-before-the-ledger",

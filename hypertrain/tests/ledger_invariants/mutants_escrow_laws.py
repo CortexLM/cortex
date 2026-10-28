@@ -72,7 +72,9 @@ CONTEST_LOCK_GATE = (
     '                            self._authenticated_v2(run_id, raw, "EscrowLock", {})'
 )
 # The gate that runs first: release and slash both ask lock_status before they read the lock row
-# themselves, so their own kind test is never reached with an event that is not a lock.
+# themselves, so their own kind test is never reached with an event that is not a lock. Without
+# the gate a transfer is still not released: the EscrowLock model refuses its request, so the pins
+# see an unmapped ValidationError where a typed UNKNOWN_LOCK is required.
 KIND_GATE = (
     '        if row["kind"] != "LOCK_CONTEST":\n            raise EscrowError("UNKNOWN_LOCK")\n'
 )
@@ -201,8 +203,8 @@ MUTANTS = [
         "old": KIND_GATE,
         "new": "",
         "tests": [RELEASE_LAWS],
-        "why": "lock_status answers for any recorded event, a transfer for one, so a release can "
-        "name it as the lock (the kind test inside release is shadowed by this gate).",
+        "why": "lock_status no longer refuses an event that is not a lock, so a release naming a "
+        "transfer dies with an unhandled ValidationError instead of the typed UNKNOWN_LOCK.",
     },
     {
         "id": "el-release-dispute-reference-ignored",
@@ -248,8 +250,8 @@ MUTANTS = [
         "old": KIND_GATE,
         "new": "",
         "tests": [SLASH_REFERENCES],
-        "why": "lock_status answers for any recorded event, a transfer for one, so a slash can "
-        "name it as the lock (the kind test inside slash is shadowed by this gate).",
+        "why": "lock_status no longer refuses an event that is not a lock, so a slash naming a "
+        "transfer dies with an unhandled ValidationError instead of the typed UNKNOWN_LOCK.",
     },
     {
         "id": "el-slash-authority-unchecked",

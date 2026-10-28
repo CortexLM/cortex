@@ -5,6 +5,13 @@ finality closed without a reward is recorded and never paid; 81a1903c: a refused
 409). Each mutant reverts one behaviour of a fix in a private copy of src/hypertrain, so that a
 pin is proven to fail on the code the fix replaced and not only to pass on the merged tree.
 
+The InsufficientEligibleWeight to 409 ROUND_INFEASIBLE mapping of 81a1903c (a roster of three at
+the opening of a round) has no pin in the lot and no mutant here: the refused opening of the
+finality pin is the FinalityError path (round w+2 blocked). Leaving the class out of the handler of
+app.py survives test_gaps_finality, test_gaps_finality_2, test_gaps_http, test_audit_2,
+test_exit_roster and test_exit_roster_2 (measured); tests/challenge/test_round_refusals_v2.py fails
+on it.
+
 Run from hypertrain/: .venv/bin/python scripts/check_ledger_invariant_mutants.py --only <ids>
 """
 
