@@ -553,3 +553,29 @@ def test_a_retirement_that_fails_keeps_the_blame_and_is_journaled(network, hook,
     assert records(network, "exit-failed") == {"0:retire": {"error": "OSError", "stage": "retire"}}
     assert rows_of(network) == {f"0:{keys[i].ss58}": ("MINER", "APPLIED") for i in (3, 4)}
     assert len(hook.calls) == 2
+
+
+def test_an_unverified_exclusion_that_no_mismatch_verdict_backs_is_waived(network, hook):
+    # Given: a member excluded as UNVERIFIED with no completed MISMATCH audit behind it (a dropped
+    # job, an executor fault): nothing the auditor or its host did may reach the hook
+    store, run = network.store, network.manifest.run_id()
+    keys = seed_round(network, n=5)
+    identity = f"0:{keys[0].ss58}"
+    with store._tx():
+        store._put_record_v2(
+            run, "excluded", identity, {"reason": "UNVERIFIED", "evidence_hash": "ab" * 32}
+        )
+
+    # When: the beacon goes on
+    push_through(network, D_AUDIT)
+    push_through(network, D_AUDIT + 2)
+
+    # Then: the exclusion is booked once, as the infrastructure's, and never applied
+    row = records(network, "exit-sanction")[identity]
+    assert (row["reason"], row["blame"], row["state"], row["grade"]) == (
+        "AUDIT_MISMATCH",
+        "INFRASTRUCTURE",
+        "WAIVED",
+        "NONE",
+    )
+    assert hook.calls == []

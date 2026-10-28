@@ -1145,7 +1145,12 @@ the table as covering them.
     auditor-side responder exists, so the Part 1 closure ends it `INFRASTRUCTURE` and the verdict stands.
 18. **Order.** The `AUDIT_MISMATCH` rows are enforced only after Part 3 is in the code. Until then they run in
     `record` mode (the sweeper journals `WOULD_APPLY` and calls no hook; a constructor keyword, not a
-    manifest field). `NO_SHOW` rows have no such dependency. The reason is a case the code proves
+    manifest field: `ChallengeStore(enforce_audit_mismatch=...)`, default off, and the switch the
+    environment-pin lot flips). `NO_SHOW` rows have no such dependency. The sweeper is wired: the beacon
+    push books the row of every `excluded UNVERIFIED` (a graded `MISMATCH` lease: `PENDING` with `first_seen`
+    and the lease's auditor; anything else `WAIVED`), applies `decide` to the pending ones (WAIT, CANCELLED
+    by a referee finding against the auditor, WOULD_APPLY in record mode, else the hook), and a contest of a
+    verdict whose sanction is `APPLIED` answers 409 `SANCTION_APPLIED`. The reason is a case the code proves
     (`tests/auditor/test_auditor.py`): a signed `delta_hash` that alone differs from the replay is a
     `MISMATCH` with no leaf and the committed root, hence `COMMIT_CONTRADICTS_LEAVES`, and the delta
     codec depends on the ATen capability of the host (Part 3), so an honest miner on another ISA is

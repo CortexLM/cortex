@@ -59,7 +59,7 @@ from hypertrain.challenge.exit_v2 import (
     served,
     survivors_of,
 )
-from hypertrain.challenge.sanction_v2 import SanctionHook
+from hypertrain.challenge.sanction_v2 import DisputeView, SanctionHook, decide, due_beacon, grade
 from hypertrain.data.assignment import assign_round
 from hypertrain.data.store import (
     CorruptObjectError,
@@ -436,6 +436,7 @@ class ChallengeStore:
             Callable[[str, IslandJobV1, Path, Mapping[str, Any]], IslandLaunch] | None
         ) = None,
         max_roster: int = 32,
+        enforce_audit_mismatch: bool = False,
     ) -> None:
         if type(max_roster) is not int or not 32 <= max_roster <= MAX_ROSTER_CEILING:
             raise ValueError(f"max_roster must be an int in [32, {MAX_ROSTER_CEILING}]")
@@ -461,6 +462,9 @@ class ChallengeStore:
         self.clock: Callable[[], float] = time.time
         # What applies an exit sanction; None is the run's own `Admission`. A test binds a fake.
         self.sanction_hook: SanctionHook | None = None
+        # ADR 0011 Part 8 decision 18: until the environment pin is required (ADR Part 3), a
+        # confirmed audit mismatch is journaled as WOULD_APPLY and the hook is not called.
+        self.enforce_audit_mismatch = enforce_audit_mismatch
         self._services_v2: dict[str, tuple[Any, Any, Any]] = {}
         self.beacon_arrived = threading.Condition()
         self._lease_guards_v2: dict[str, Any] = {}
@@ -2941,6 +2945,14 @@ class ChallengeStore:
         ).fetchone()
         if row is not None and row[0] == "MATCH":
             raise ChallengeError(409, "NOTHING_TO_CONTEST: the verdict upholds the work")
+        applied = self._db.execute(
+            "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='exit-sanction' AND id=? "
+            "AND json_extract(data,'$.reason')='AUDIT_MISMATCH' "
+            "AND json_extract(data,'$.state')='APPLIED'",
+            (run_id, f"{contest.w}:{contest.miner}"),
+        ).fetchone()
+        if applied is not None:
+            raise ChallengeError(409, "SANCTION_APPLIED: the sanction of this verdict is applied")
         return contest
 
     def _dispute_span_v2(
@@ -6595,7 +6607,9 @@ class ChallengeStore:
                         self._reap_round_v2(run_id, status, now, pauses)
                 except Exception as error:
                     self._journal_exit_v2(run_id, str(status.w), "reap", error)
-            self._adopt_exclusions_v2(run_id, pauses, {status.w for status in unclosed})
+            open_rounds = {status.w for status in unclosed}
+            self._adopt_exclusions_v2(run_id, pauses, open_rounds)
+            self._book_mismatches_v2(run_id, open_rounds, now)
             self._sweep_sanctions_v2(run_id, now)
 
     def _witness_pause_v2(self, run_id: str, previous: int) -> None:
@@ -6826,6 +6840,14 @@ class ChallengeStore:
             record = json.loads(row["data"])
             try:
                 with escrow.tx():
+                    if record["reason"] == "AUDIT_MISMATCH":
+                        later = self._mismatch_decision_v2(run_id, record, now)
+                        if later is not None:
+                            if later != "WAIT":
+                                self._put_record_v2(
+                                    run_id, "exit-sanction", row["id"], {**record, "state": later}
+                                )
+                            continue
                     hook.seize_bond(
                         record["admission_id"],
                         reason=SANCTION[(record["reason"], record["stage"])],
@@ -6837,6 +6859,120 @@ class ChallengeStore:
                     )
             except Exception as error:
                 self._journal_exit_v2(run_id, row["id"], "sanction", error)
+
+    def _mismatch_decision_v2(self, run_id: str, record: dict[str, Any], now: int) -> str | None:
+        """What a pending mismatch sanction does at this push (ADR 0011 Part 8, decisions 16-18):
+        None when it applies (the hook is called), else the state it takes: WAIT inside the
+        contest window and while a contest is open, CANCELLED once a referee clears the miner,
+        WOULD_APPLY while the sanction is only recorded."""
+        per_level = self._run_v2(run_id).training.verify.T.dispute_per_level
+        action = decide(
+            now=now,
+            due=due_beacon(int(record["first_seen"]), per_level),
+            dispute=self._contest_view_v2(record["evidence_hash"]),
+            auditor=record["auditor"],
+        )
+        if action == "WAIT":
+            return "WAIT"
+        if action == "CANCEL":
+            return "CANCELLED"
+        return None if self.enforce_audit_mismatch else "WOULD_APPLY"
+
+    def _contest_view_v2(self, verdict_hash: str) -> DisputeView | None:
+        """What the contest of one verdict says, for `decide`: unresolved, or how it ended."""
+        from hypertrain.challenge.disputes_v2 import Turn
+
+        row = self._db.execute(
+            "SELECT turn FROM disputes_v2 WHERE json_extract(turn,'$.contest.verdict_hash')=? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (verdict_hash,),
+        ).fetchone()
+        if row is None:
+            return None
+        turn = Turn.model_validate_json(row[0])
+        if turn.resolution is None:
+            return DisputeView(resolved=False)
+        return DisputeView(True, turn.resolution.reason, turn.resolution.loser)
+
+    def _book_mismatches_v2(self, run_id: str, unclosed: set[int], now: int) -> None:
+        """Book, once, the sanction row of every audit verdict that excluded a member as
+        UNVERIFIED (ADR 0011 Part 8, decisions 15 and 16). Only a verdict that a completed audit
+        lease says is a MISMATCH and whose digest is the exclusion's own evidence can be graded;
+        a dropped job, an executor fault or a verdict without a located leaf is waived: nothing the
+        auditor or its host did reaches the hook. A closed round is history."""
+        escrow = self._services_v2[run_id][0]
+        for row in self._db.execute(
+            "SELECT e.id,e.data FROM records_v2 e WHERE e.run_id=? AND e.kind='excluded' "
+            "AND json_extract(e.data,'$.reason')='UNVERIFIED' AND NOT EXISTS ("
+            "SELECT 1 FROM records_v2 s WHERE s.run_id=e.run_id AND s.kind='exit-sanction' "
+            "AND s.id=e.id) ORDER BY e.id",
+            (run_id,),
+        ).fetchall():
+            if int(row["id"].split(":", 1)[0]) not in unclosed:
+                continue
+            try:
+                with escrow.tx():
+                    self._book_mismatch_v2(run_id, row["id"], json.loads(row["data"]), now)
+            except Exception as error:
+                self._journal_exit_v2(run_id, row["id"], "mismatch", error)
+
+    def _graded_verdict_v2(self, run_id: str, identity: str, evidence_hash: str) -> str | None:
+        """What the stored verdict of `identity` proves about the miner (`sanction_v2.grade`), or
+        None when it is not the verdict the exclusion names or proves nothing."""
+        from hypertrain.protocol.messages import ReplayVerdict
+        from hypertrain.protocol.messages_v2 import CommitV2
+
+        try:
+            signed = envelope_v2.parse_envelope(self._record_v2(run_id, "verdict", identity))
+            committed = envelope_v2.parse_envelope(self._record_v2(run_id, "commit", identity))
+        except ChallengeError:
+            return None
+        if body_digest(signed.body) != evidence_hash:
+            return None
+        verdict = ReplayVerdict.model_validate(signed.body)
+        commit = CommitV2.model_validate(committed.body)
+        return grade(
+            verdict.result,
+            verdict.first_bad_leaf,
+            verdict.recomputed_leaves_root,
+            commit.leaves_root,
+        )
+
+    def _book_mismatch_v2(
+        self, run_id: str, identity: str, record: dict[str, Any], now: int
+    ) -> None:
+        from hypertrain.protocol.messages_v2 import RoundOpenV2
+
+        text, hotkey = identity.split(":", 1)
+        w = int(text)
+        body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", text)["body"])
+        entry = next((e for e in body.roster if e.hotkey == hotkey), None)
+        if entry is None:
+            return
+        lease = self._db.execute(
+            "SELECT auditor,result FROM audit_leases_v2 WHERE run_id=? AND w=? AND hotkey=? "
+            "AND state='completed'",
+            (run_id, w, hotkey),
+        ).fetchone()
+        confirmed = None
+        if lease is not None and lease["result"] == "MISMATCH":
+            confirmed = self._graded_verdict_v2(run_id, identity, record["evidence_hash"])
+        self._put_record_v2(
+            run_id,
+            "exit-sanction",
+            identity,
+            {
+                "admission_id": entry.admission_id,
+                "reason": "AUDIT_MISMATCH",
+                "stage": "audit",
+                "blame": "MINER" if confirmed else "INFRASTRUCTURE",
+                "evidence_hash": record["evidence_hash"],
+                "state": "PENDING" if confirmed else "WAIVED",
+                "first_seen": now,
+                "auditor": "" if lease is None else lease["auditor"],
+                "grade": confirmed or "NONE",
+            },
+        )
 
     def _journal_exit_v2(self, run_id: str, key: str, stage: str, error: Exception) -> None:
         """The last failure of one step of the exit reaper, rewritten only when it changes."""

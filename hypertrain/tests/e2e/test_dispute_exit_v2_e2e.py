@@ -128,8 +128,9 @@ def test_round_continues_after_forged_delta_contest(activated_network):
         "json": n.signed(fixtures.COORD, "Finalize", finalize),
         "headers": fixtures.admin(),
     }
-    with pytest.raises(FinalityError, match="cannot settle"):
-        n.client.post(**finalize_request)
+    blocked = n.client.post(**finalize_request)
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json() == {"detail": "ROUND_BLOCKED: round cannot settle"}
     # When: the next verified beacon round arrives.
     n.push(n.now + 1)
     # Then: the dispute is closed without a loser and the audit's exclusion stands.

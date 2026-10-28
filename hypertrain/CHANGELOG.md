@@ -324,6 +324,15 @@
   so a caller cannot retire a viable round by naming fewer of them. A member that joined after round
   `w - 1` has no anchor for it and cannot be on the roster of `w` (409 `missing accepted anchor` at
   the opening), so a retirement never carries a missing anchor. ADR 0011 Part 8 decisions 8 and 11.
+- A confirmed audit mismatch sanctions the miner, once, a contest window later (the caller
+  `sanction_v2` lacked): the beacon push books a row for every verdict that excluded a member as
+  `UNVERIFIED` (`exit-sanction`, `stage: audit`), graded by `grade` (a located leaf, or leaves that
+  equal the replay under a commit that does not; anything else is waived), applies `decide` after
+  `verify.T.dispute_per_level` rounds and while no contest is open, cancels it when a referee finds
+  against the lease's auditor, and calls `Admission.seize_bond(AUDIT_MISMATCH)` (suspended, one
+  strike, the bond burned). Until the environment pin is required it is only recorded
+  (`WOULD_APPLY`): `ChallengeStore(enforce_audit_mismatch=True)` enforces it. A contest of a verdict
+  whose sanction is applied answers 409 `SANCTION_APPLIED`. ADR 0011 Part 8, decisions 14 to 18.
 - A production run refuses a qualification record without `image_sources_sha256` when an audit is
   dispatched (409 `QUALIFICATION_IMAGE_SOURCES_MISSING`): before, a record without the digest meant
   no check, so a production audit could stand on code nobody measured. A TEST run keeps accepting

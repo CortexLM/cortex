@@ -546,8 +546,9 @@ cannot prove that the miner never posted them.
 
 A member left out for its silence is sanctioned in the same push, unless the master cannot
 show that it could have been heard. The push books the blame (`exit-sanction`, id
-`<w>:<hotkey>`) and applies it: the admission is suspended (reason `NO_SHOW`) with one
-strike and its bond is burned, as for a confirmed audit mismatch. That holds for a round the
+`<w>:<hotkey>`) and applies it: the bond is burned and the admission takes one strike (D63): the
+first one puts it back on a fresh probation (reason `NO_SHOW`), a second one for other evidence
+inside the strike window suspends it, as a confirmed audit mismatch does. That holds for a round the
 rest cannot carry too: its silent members are sanctioned although none is left out. The
 blame is the miner's only if the window it missed was served and somebody used it. It is the
 infrastructure's, the row is `WAIVED` and nothing happens to the admission, when the master
@@ -556,9 +557,23 @@ than two rounds ahead of the last round the master held), when nobody committed 
 stage), when nobody delivered a delta, or when the master holds a relay receipt or its own
 acceptance of the member's upload (delta stage: the relay or the storage lost it). A
 sanction that fails is journaled (`exit-failed`) and retried on the next push; the member is
-out of its round all the same. There is no route back from this suspension: a miner whose
-host is evicted before `d_commit` loses its identity like a free identity does (ADR 0011
-Part 8, decision 12 and Decisions for Forge 1).
+out of its round all the same. The way back from a probation is its trials; there is no route
+back from a suspension (ADR 0011 Part 8, decision 12 and Decisions for Forge 1).
+
+A member whose audit verdict is a `MISMATCH` is sanctioned once, a contest window later (ADR 0011
+Part 8, decisions 15 to 18). At the first push after the verdict the master grades it: a mismatch
+that names a leaf (`LOCATED`), or whose leaves all equal the replay under a signed commit that
+does not (`COMMIT_CONTRADICTS_LEAVES`), is the miner's and books the row `exit-sanction`
+(`stage: audit`, `PENDING`, `first_seen`); anything else (a dropped job, an executor fault, a
+verdict without a located leaf) is waived and nothing reaches the admission. The row waits
+`verify.T.dispute_per_level` rounds from `first_seen`, and as long as the miner's contest of that
+verdict is open. A referee finding of `FRAUD` or `AUDITOR_FAULT` against the lease's auditor
+cancels it (`CANCELLED`); a contest that ends without one (`INFRASTRUCTURE`, a lapsed turn) clears
+nobody. At the end of the window the sanction is applied through the same hook as a no-show
+(suspended, reason `AUDIT_MISMATCH`, one strike, the bond burned), or, while the environment pin
+of ADR 0011 Part 3 is not required, only recorded (`WOULD_APPLY`, nothing touched):
+`ChallengeStore(enforce_audit_mismatch=True)` is the switch. Once it is applied, a contest of the
+verdict answers 409 `SANCTION_APPLIED`.
 
 A round that cannot reach a tape can be retired (ADR 0011 part 8, decisions 7 to 11) instead of
 blocking the run for good. Two causes, each re-derived by the master from the facts: the members
@@ -566,7 +581,11 @@ that can still deliver (committed, not left out, and with their delta once `d_up
 cannot carry one complete update (`INFEASIBLE`, from `d_commit`), or nobody scheduled audits and
 `audits` answers 503 from `absolute` minus one round (`AUDIT_WINDOW_MISSED`). It also waits until
 every earlier round is closed and is refused for a service-admitted run (`ROUND_RETIRE_REFUSED:
-<reason>`, nothing written; no route asks for it). The master closes the
+<reason>`, nothing written). The beacon push that sees the round cannot go on asks for it (after
+booking the exclusions and the blame of the round, in a savepoint of its own: a refusal is recorded
+in `round-exit` and asked again at the next push, a failing retirement is journaled and leaves
+the round as it was); no route asks for it. The survivors it is given must be the ones the records
+of the round give (`exit_v2.survivors_of`). The master closes the
 round as a null round: `applied` is a record of kind `null` whose output state is its input state
 (the model, the outer momentum and the centre do not move, the data window is consumed), `finality`
 is `RETIRED` (closed), and `retired` holds the evidence `{v: ht-round-retired-v1, run_id, w,

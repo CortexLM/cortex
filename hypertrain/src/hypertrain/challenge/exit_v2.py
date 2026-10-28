@@ -103,6 +103,7 @@ SANCTION: Mapping[tuple[str, str], SanctionReason] = {
     ("NO_SHOW", "commit"): "NO_SHOW",
     ("NO_SHOW", "leaves"): "NO_SHOW",
     ("NO_SHOW", "delta"): "NO_SHOW",
+    ("AUDIT_MISMATCH", "audit"): "AUDIT_MISMATCH",
 }
 
 
