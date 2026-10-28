@@ -668,7 +668,7 @@ def probe_metadata(tmp_path, monkeypatch):
     miner.api = SimpleNamespace(
         call=lambda *args: {"now_round": 2},
         base="",
-        c=SimpleNamespace(put=lambda *a, **k: uploads.append(a)),
+        c=SimpleNamespace(post=lambda *a, **k: uploads.append(a)),
     )
     import hypertrain.auditor.replay as replay
     import hypertrain.trainer.compress as compress

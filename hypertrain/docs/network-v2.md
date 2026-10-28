@@ -215,6 +215,24 @@ strikes and dispute flag are untouched. Its next challenge request is refused as
 `CHALLENGE_EXPIRED` until the operator reseeds the identity (below); the reseed refuses a trial that is
 still open, so it never meets a reference that is running.
 
+Every object a miner uploads (an artifact, a part, a part index) is
+`POST /v2/runs/{run_id}/objects/{sha256}`. No header carries a signature; the
+body is a frame: 4 bytes (big endian) giving the length of a signed ht/2
+envelope of type `ObjectUploadRequest {sha256, size}`, that envelope, then
+exactly `size` bytes of the object. The envelope is signed by the admitted
+hotkey and binds the uploader, the sha256 and the length, so the master checks
+the signature, the uploader's admission and the pinned object limit before it
+reads the object. Its expiry is at most 20 rounds (about a minute) past the
+master's current round: the miner signs the round it read (reused for at most
+15 seconds) plus 20, and signs again for every retry. Refusals: an envelope
+longer than 4096 bytes or cut short, a bad signature, another run, another
+sha256 than the path's, an expired or too distant envelope, an unregistered
+hotkey, or a hotkey that is not admitted answer 403; a signed size above the
+pinned object limit, or more bytes than the signed size, 413; fewer bytes, or
+bytes that do not hash to the sha256, 422. The old `PUT` with `X-Hotkey` and
+`X-Object-Signature` headers is removed (405). Uploads are content-addressed,
+so repeating one is harmless; the miner retries transport errors and 5xx.
+
 Current admission policy fixes E=4 and requires 12 clean finalized participations
 plus canary blocks 1,2,3. The first four are shadow-only. Later PROBATION influence
 also requires funded eligibility; ACTIVE requires current screening, sufficient
@@ -263,6 +281,12 @@ dispute pending, and finalized, or excluded with its rollback complete; a round 
 finality record counts as open), because the roster names the hotkey and the old one is
 refused at intake the moment the admission moves: rotate between rounds. A retry of a rotation that was applied is still
 answered. There is no emergency rotation of a hotkey that a round lists.
+
+A reward follows its coldkey, not the hotkey that signed the work. A reward earned before a
+rotation (live, or a shadow reward whose original custody was signed by an earlier hotkey of the
+admission) is still validated, matured and paid: `get_weights` credits the admission's current
+hotkey, never the retired one. A banned coldkey is not paid whatever hotkey it holds: its
+matured units stay in its free balance and the epoch mass burns as unpaid.
 
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
 rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
@@ -340,7 +364,19 @@ twice the roster ceiling of 1,024) and the ledger at most 4,096 (`LEDGER_LOCK_CA
 refuses a new lock only, so replaying an accepted lock returns its receipt, and closing a lock
 makes room. The funding status of an admission (`GET .../admission/{hotkey}`, public) reads
 the owner's open locks through a partial index, so its cost grows with those locks and not
-with the ledger (it was quadratic in the number of locks: 96 s at 40,000). Test genesis has pinned nonfinancial origins; production mode
+with the ledger (it was quadratic in the number of locks: 96 s at 40,000).
+
+Every ledger event hashes the whole state, and a transfer cannot make that state grow for
+nothing. The state and the event preimage are encoded with the standard JSON encoder, which gives
+the bytes of the canonical encoder for these values (a test compares them), 7 to 20 times faster:
+an event at 5,000 unit rows costs 17 ms instead of 124 ms and `verify()` of 21 events 59 ms
+instead of 909 ms. A value beyond 2^53-1 in the state, or a number that is not an integer
+(SQLite lets an INTEGER column hold a REAL), refuses the event (`STATE_RANGE`) for every numeric
+column the state serialises, not only the units and the issued amount, because the standard
+encoder would write where the canonical one raises. A transfer to oneself is refused (`SELF_TRANSFER`; a transfer that was recorded earlier
+still replays), and a transfer writes a row at the recipient only for the origins it takes
+units from; a lock still writes one for every origin it lists, because its release lists them
+again. Test genesis has pinned nonfinancial origins; production mode
 has separate reward authority/issuance bounds and no test-genesis conversion.
 
 The ledger keeps two key spaces for its events. A client event (`escrow/lock`,
@@ -426,8 +462,7 @@ not influence global theta; authorized production bootstrap issuance is a
 separate policy, not proof of market-backed collateral.
 
 Each due origin matures in its own savepoint when a beacon round is pushed. An origin that cannot
-(a shadow reward whose original custody no longer revalidates, because its hotkey rotated or a job
-object is missing) stays `reward_pending` and is retried at every round; it does not stop the
+(a shadow reward whose original custody no longer revalidates, because a job object is missing) stays `reward_pending` and is retried at every round; it does not stop the
 round's other origins, the lease expiry or the beacon route. The last such failure is journaled in
 `records_v2` with `kind='maturity-failed'` (`{error, detail}`, rewritten only when it changes, never
 deleted). List the origins still stuck, on `challenge.db`:
@@ -504,6 +539,26 @@ uv run --frozen hypertrain-miner watch --config miner.toml \
 
 This command performs one bounded long-poll pass, then exits with a processed
 count; repeat under an operator supervisor. Timeout range is 0..30 seconds.
+Each poll is `POST /v2/runs/{run}/disputes/watch` and its body is a signed ht/2 envelope of
+type `DisputeWatchRequest {party, cursor, wait}`, signed by the party itself; `wait` is whole
+seconds, so a fractional `--timeout` is rounded up. The old `GET .../disputes` with an
+`X-Dispute-Signature` header is removed: a header does not cross the master proxy, and that
+signature never expired. The master accepts a poll whose `exp_drand` is at most 20 rounds
+(about a minute) past its current round, and the miner signs the current round plus 20, so a
+captured request is replayable for that long and no longer. A poll reserves nothing: the
+identical bytes may be sent again until they expire. A body that is not an unexpired
+`DisputeWatchRequest` of this run signed by its own party (empty, not JSON, another message,
+run or signer, a bad signature, an expired envelope, a request signed further ahead than 20
+rounds) answers 403, as does a party that is neither a pinned role nor on the subnet; a master
+that has verified no beacon round yet answers 503.
+The master allows each party two polls at a time and 128 in all, and the polls held by parties
+that are not pinned roles (an auditor, a referee or the coordinator of the manifest; any other
+registered hotkey may poll) share 64 of those 128, so that registered hotkeys cannot keep the
+roles out; a further poll is refused at once with 429, and `watch --follow` retries it with its
+normal backoff. The retired `GET .../disputes` answers 405. A wait runs on its own
+threads, so parked polls do not slow `/health` or any other route. A poll whose client has left
+still holds its slot until its wait ends (30 seconds at most), so a restarted watcher may
+overlap the last poll of the one it replaces.
 STEP/LAYER/OP answers and requested `StateServe` proofs come from validated
 published traces/checkpoints. The coordinator signature covers the event's
 `Turn.contest.w`; the watcher requires that round to match the original validated
@@ -682,10 +737,113 @@ A relay whose granted chunks do not assemble to `delta_hash` answers 400
 Retention release waits for finality, disputes and vesting; signed extensions,
 overlapping old/new keys and drain preserve existing retrieval authority.
 
+A relay counts the uploads it still holds, not every record it ever accepted. An
+upload is held while it is a reservation (no receipt, service deadline not passed)
+or while one of its custody pins is neither released nor past its signed horizon.
+A released or lapsed upload stops counting. Custody ends at the master-signed
+release, or once its signed horizon plus the epoch grace (100 beacons) is past with no
+dispute referencing it (ADR 0014 Part 6); the relay then owes nothing and rotates it out,
+as described below. There is no count cap by default (it was 64
+for the life of the run). `max_uploads` in `relay.json` is an optional operator limit,
+`R x ceil(retention window / round length)` for `R` miners per round, and an `accept`
+past it answers 400 `retained upload quota exhausted`. `/readyz` does not depend on
+the count: the chunk PUTs, retention and release that free a place use the same Service.
+The physical limit is the journal, one JSON blob of at most 16 MiB that every mutation
+rewrites. `accept` answers 400 `relay journal capacity exhausted` when the new record
+plus 1,280 B per chunk acknowledgment would take it above 12 MiB, which leaves 4 MiB for
+acknowledgments, receipts, retrievals, extensions and releases of uploads already held.
+A record leaves the journal when its custody is spent (below). It carries the signed
+`RoundOpenV2`, so its size grows with the roster: a
+completed one-chunk upload adds about 10 KB to the journal at 16 miners (a 9.8 KB record
+plus its index and nonce entry) and 13.8 KB at 32 miners, plus about 1.1 KB per further
+chunk. The 12 MiB budget then holds about 1,200 such uploads, i.e. 75 rounds of 16 miners,
+and about 900, i.e. 28 rounds, at 32 miners, if none left.
+`tests/relay/test_lifecycle_v2.py::test_journal_budget_when_rounds_carry_a_roster`
+measures the growth of one upload and checks the 1,200 and 900 figures against the real guard.
+
+The journal fill is reported, not only enforced. `/readyz` answers
+`{"ready", "journal_bytes", "journal_budget", "journal_fill", "alarm"}` (503 with `"ready": false`
+when the replica is not ready, the four fill fields `null` when the journal cannot be read, a
+storage failure logged as `relay readiness probe failed: <ExceptionName>`) and `alarm` turns
+true above 80 % of the budget (9.6 MiB); while it is true each probe also writes a warning
+`relay journal fill NN% (B of BUDGET bytes)`. The alarm never makes the replica unready and
+never refuses a request: only `accept` past the budget does. Custody lives to its horizon,
+about 10 hours or 36 rounds of 335 beacons (16.75 minutes), so 36 rounds of 16 miners hold
+16 x 36 x 10 KB = 5.8 MB, 46 % of the budget, and 36 rounds of 32 miners hold 15.9 MB,
+126 % (`test_readyz_when_custody_horizon_of_rounds_has_no_early_release` measures both).
+Because records rotate out when the master releases them, about at their horizon, that is the
+steady state and not a figure that keeps growing; a run of 32 miners exceeds the budget unless
+custody is released well before its horizon, which is what the master's lifecycle task does:
+released one or two rounds after finality, three rounds of 32 miners are about 1.3 MB
+(3 x 32 x 13.8 KB, derived from the measured record size). A master that is away stops the
+releases and the records pile up to the budget, which then refuses new reservations: that is the
+alarm above, not a reason to delete a proof.
+Runbook for the alarm: first check that the master's lifecycle task runs, i.e. that
+`relay-release` records appear one or two rounds after finality, and that the relay's log shows
+no `relay collect deferred` lines. If they do and the fill still rises, the run is larger than
+this relay's journal. Add a relay to the signed registry; the registry must hold more than one
+relay before any run of 16 miners or more (D51 5). Do not raise the 12 MiB budget: above
+16 MiB every journal write fails, a release included.
+
+Custody is freed by the master's release, without an operator. Every 5 minutes a task of the
+relay runs `collect()`. An upload that reached a receipt stays until the master has released
+it, however old: the master writes the release when finality is written for the round or the
+round is closed without a reward, and a master that is away past the horizon can neither
+extend nor release, while a dispute may have opened after the last extension (ADR 0014
+Part 6.4, D54, D72). Past the horizon such a pin serves no signed retrieval and takes no
+extension; the relay keeps its bytes for the operator's rescue. An upload the master holds no
+receipt for (the chunks of a partial upload, or a receipt the master refused with a 4xx when it
+came after `d_upload` or conflicted: the relay records that as `forward_error` `ForwardRefused`
+and does not forward it again) is lapsed once its signed horizon is past by the epoch grace
+with nothing released and no dispute referencing it. A forward that failed in transport or with
+a 5xx, 408 or 429 may still have been accepted, so its upload is kept and `recover()` forwards
+it again. A pin whose last extension names dispute ids does not lapse until the master
+releases the grant. An
+object is deleted when every pin on it is released and past its deletion bound or lapsed, and
+no live pin, in-flight upload of the same bytes or deletion reservation needs it. A record is pruned, with its grant and retrieval
+nonces, once all its pins are in that state and none of its objects still waits to be deleted;
+a reservation that never produced custody is pruned at the horizon of its acknowledgment plus
+the grace. A pass that fails is logged as `relay collect deferred: <ExceptionName>` and
+retried at the next interval; an object whose delete raised keeps its deletion reservation
+until it is fenced, as before. Spent records that
+age used to prune (a receipted upload nobody released) now wait for the release.
+
+A relay learns what the master settled from a public, read-only, coordinator-signed view,
+not from the release message and not with a credential. `GET /v2/runs/{run_id}/relay-settlements/{grant_hash}`
+needs no bearer and writes nothing. It answers a relay envelope of type `RelaySettlementView`
+that expires 10 beacons after the master's newest beacon and carries exactly `grant_hash`,
+`finality_hash`, `finality_beacon`, `closed_dispute_root`, `closed_beacon` and
+`vesting_beacon`: no hotkey, coldkey, origin id or roster. It answers 409 until the round is
+settled and every dispute of the round is resolved, and for a grant the master never issued.
+A relay answering `POST /v1/uploads/{grant_hash}/release` fetches the view with a bare GET,
+verifies the pinned master key, run, type and expiry, checks that it names the same grant,
+and refuses a release whose finality, dispute and vesting facts differ from it. The relay
+therefore needs `master_url` in `relay.json` to reach the master over credential-free HTTPS
+for this route as for `/v2/relay-receipts`. A relay built before this route exists still
+refuses every release, as it did; a master without the route makes a new relay refuse too
+(HTTP 503), so release never succeeds on facts the master did not sign.
+
+The master sends the release and the extensions itself, without an operator. Every 120 seconds
+(`HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL`, `0` turns it off; it is on whenever the app is built from
+the environment) a task of the challenge app makes one pass over every run, outside any store
+transaction. For each grant that has a durable relay receipt and no `relay-release` record:
+once the round is settled and `now >= max(finality, vesting, closed) + 100`, it calls the same
+path as `POST /v2/runs/{run_id}/admin/relay/{grant_hash}/release`; while a dispute of the round
+is unresolved and the signed horizon is less than 720 beacons ahead (about 36 minutes), it calls
+`.../extend`, again before each new horizon, until the dispute closes; any other grant is left
+alone. A relay that cannot be reached is skipped until the next pass, and an answer of 409 (not
+due after all) is not an error. Any other failure is raised after the rest of the pass, so one
+bad grant starves none and nothing goes unseen: the task logs `relay lifecycle pass failed` with
+the traceback and tries again. The operator routes stay for a manual release or extension. A
+dispute that nobody can decide is not closed by this task (ADR 0011's exit does that), and a
+dispute opened after the horizon has passed finds custody that can no longer be extended.
+
 Relay configuration is `RelayConfig` in `src/hypertrain/relay/app.py`:
 `run_id`, `master_public`, `master_url`, signed `registry`/`network_manifest`,
 `relay_id`, `region`, `active_key`, `signing_files`, `observer_public_keys`, plus
-`s3_endpoint`/`s3_bucket`/`s3_prefix`/`s3_region` or `local_backing`.
+`s3_endpoint`/`s3_bucket`/`s3_prefix`/`s3_region` or `local_backing`, and optionally
+`max_uploads` (a positive integer, omitted from the file when unset so that an older
+relay image still loads it).
 `RELAY_CONFIG` selects its JSON; `RELAY_SECRETS` selects mounted signing files,
 `drain.token` and S3 `object.json`. Do not mount coordinator/admin keys into relays.
 Authoritative external backing is separate from disposable pod cache.

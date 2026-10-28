@@ -88,6 +88,7 @@ The server is a FastAPI app, `hypertrain.challenge.app:app`. It reads its settin
 | `HYPERTRAIN_EPOCHS_PER_ROUND` | `1` | must equal the manifest `budget.epochs_per_round` |
 | `HYPERTRAIN_VEST_ROUNDS` | `10` (`ceil(1/q)` for q = 0.1) | must equal the manifest `verify.E_vest_rounds` |
 | `HYPERTRAIN_GENESIS_UNIX` | drand quicknet genesis | clock origin |
+| `HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL` | `120` | seconds between the passes that release relay custody and extend it under an open dispute; `0` turns them off |
 
 Tokens are read per request, so a missing file just means 401 or 503 on the routes that need it. `/health` is 200 only when the database is writable, the internal token is readable and K_coord loads.
 

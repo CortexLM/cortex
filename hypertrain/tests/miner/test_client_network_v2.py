@@ -254,7 +254,8 @@ def _parts_miner(tmp_path: Path):
     import sys
 
     from hypertrain.data.store import LocalFSStore
-    from hypertrain.protocol.keys import verify
+    from hypertrain.protocol.envelope_v2 import Intake, parse_envelope
+    from hypertrain.protocol.hashing import sha256_hex
 
     spec = importlib.util.spec_from_file_location(
         "parts_fixture", Path(__file__).parents[1] / "ledger/test_escrow_v2.py"
@@ -281,15 +282,20 @@ def _parts_miner(tmp_path: Path):
 
     def route(request: httpx.Request) -> httpx.Response:
         if "/objects/" not in request.url.path:
-            return httpx.Response(200, json={"manifest_envelope": envelope})
+            return httpx.Response(200, json={"manifest_envelope": envelope, "now_round": 5})
         sha = request.url.path.rsplit("/", 1)[1]
-        if request.method == "PUT":
-            message = f"hypertrain/object/2|{manifest.run_id()}|{sha}".encode()
-            signature = bytes.fromhex(request.headers["X-Object-Signature"])
-            assert request.headers["X-Hotkey"] == hotkey.ss58
-            assert verify(hotkey.public, message, signature) and len(request.content) <= 1 << 20
-            puts.append(request.content)
-            return httpx.Response(200, json={"sha256": store.put(request.content)})
+        if request.method == "POST":
+            # The body is the signed request, then the object; no header carries a signature.
+            assert not [h for h in request.headers if h.lower().startswith("x-")]
+            head = int.from_bytes(request.content[:4], "big")
+            signed, data = request.content[4 : 4 + head], request.content[4 + head :]
+            upload = Intake(manifest.run_id(), {"ObjectUploadRequest": hotkey.ss58.__eq__}).accept(
+                signed, 5
+            )
+            assert (upload.sha256, upload.size) == (sha, len(data)) == (sha256_hex(data), len(data))
+            assert parse_envelope(signed).exp_drand == 5 + 20 and len(data) <= 1 << 20
+            puts.append(data)
+            return httpx.Response(200, json={"sha256": store.put(data)})
         path = store._path(sha)
         return (
             httpx.Response(200, content=path.read_bytes())
@@ -455,25 +461,78 @@ def test_object_get_rejects_compressed_response_before_decoding(tmp_path: Path):
 def test_object_put_sends_content_length_and_retries_5xx_and_transport(tmp_path: Path, monkeypatch):
     import hypertrain.miner.core as core
 
-    # Given: a proxy that drops the first PUT, answers 503 to the second, then stores.
+    # Given: a proxy that drops the first upload, answers 503 to the second, then stores.
     monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0, 0))
     miner, store, puts = _parts_miner(tmp_path)
+    miner._round()  # the round is read once and reused: the failures below hit the upload itself
     route, seen = miner.api.c._transport.handler, []
 
     def flaky(request: httpx.Request) -> httpx.Response:
         seen.append(
-            (request.headers.get("Content-Length"), request.headers.get("Transfer-Encoding"))
+            (
+                request.headers.get("Content-Length"),
+                request.headers.get("Transfer-Encoding"),
+                len(request.content),
+            )
         )
         if len(seen) == 1:
             raise httpx.ConnectError("reset", request=request)
         return httpx.Response(503) if len(seen) == 2 else route(request)
 
     miner.api.c._transport.handler = flaky
-    # When: one object PUT.
+    # When: one object upload.
     digest = miner._put_object(b"payload")
     # Then: stored after two retries, every attempt a sized (non-chunked) body.
     assert store.get(digest) == b"payload" and len(puts) == 1
-    assert seen == [("7", None)] * 3
+    assert len(seen) == 3
+    assert all(length == str(size) and encoding is None for length, encoding, size in seen)
+
+
+def test_the_round_is_read_once_for_many_uploads(tmp_path: Path):
+    # Given: a miner whose master counts the reads of its current round.
+    miner, _, puts = _parts_miner(tmp_path)
+    route, reads = miner.api.c._transport.handler, []
+
+    def counting(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and "/objects/" not in request.url.path:
+            reads.append(request.url.path)
+        return route(request)
+
+    miner.api.c._transport.handler = counting
+    # When: five uploads within the time a read is reused.
+    for number in range(5):
+        miner._put_object(b"part %d" % number)
+    # Then: one read signed all of them.
+    assert len(puts) == 5 and len(reads) == 1
+
+
+def test_each_upload_attempt_is_signed_with_the_round_it_is_sent_in(tmp_path: Path, monkeypatch):
+    import hypertrain.miner.core as core
+    from hypertrain.protocol.envelope_v2 import parse_envelope
+
+    # Given: a master whose round moves between the attempts (a read is never reused here),
+    # and that answers 503 to the first two uploads.
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0))
+    monkeypatch.setattr(core, "ROUND_TTL", -1)
+    miner, _, _ = _parts_miner(tmp_path)
+    route, rounds, expiries = miner.api.c._transport.handler, iter([5, 9, 12]), []
+
+    def moving(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and "/objects/" not in request.url.path:
+            return httpx.Response(200, json={**route(request).json(), "now_round": next(rounds)})
+        head = int.from_bytes(request.content[:4], "big")
+        expiries.append(parse_envelope(request.content[4 : 4 + head]).exp_drand)
+        digest = request.url.path.rsplit("/", 1)[1]
+        return (
+            httpx.Response(503)
+            if len(expiries) < 3
+            else httpx.Response(200, json={"sha256": digest})
+        )
+
+    miner.api.c._transport.handler = moving
+    # When / Then: a retry after a long backoff carries a request good for its own round.
+    miner._put_object(b"payload")
+    assert expiries == [5 + 20, 9 + 20, 12 + 20]
 
 
 def test_object_put_does_not_retry_4xx_and_gives_up_after_bounded_5xx(tmp_path: Path, monkeypatch):
@@ -481,6 +540,7 @@ def test_object_put_does_not_retry_4xx_and_gives_up_after_bounded_5xx(tmp_path: 
 
     monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0))
     miner, _, _ = _parts_miner(tmp_path)
+    miner._round()  # the round is read once and reused: the answers below are for the upload
     calls = []
 
     def answer(status: int):
@@ -682,7 +742,7 @@ def test_a_404_is_retried_only_by_object_gets_and_no_other_4xx_is(tmp_path: Path
     with pytest.raises(ChallengeHTTPError, match="^404: unknown admission$"):
         miner.api.call("GET", "/v2/runs/x/admission/y")
     assert len(calls) == 1
-    # An object read refused for any other 4xx is not retried either, and an object PUT that
+    # An object read refused for any other 4xx is not retried either, and an object upload that
     # meets a 404 is not a read miss.
     for status in (s for s in range(400, 500) if s != 404):
         gets = _answer_object_gets(miner, status, None)
@@ -692,16 +752,18 @@ def test_a_404_is_retried_only_by_object_gets_and_no_other_4xx_is(tmp_path: Path
             miner._get_object(sha)
         assert len(gets) == 2, status
     assert _journaled_retries(miner) == []
-    puts: list[int] = []
+    uploads: list[str] = []
 
     def no_such_route(request: httpx.Request) -> httpx.Response:
-        puts.append(1)
+        if request.method == "GET":  # the round the signed upload request is stamped with
+            return httpx.Response(200, json={"now_round": 7})
+        uploads.append(request.method)
         return httpx.Response(404)
 
     miner.api.c._transport.handler = no_such_route
     with pytest.raises(httpx.HTTPStatusError):
         miner._put_object(b"x")
-    assert puts == [1]
+    assert uploads == ["POST"]
 
 
 class _CutBody(httpx.SyncByteStream):

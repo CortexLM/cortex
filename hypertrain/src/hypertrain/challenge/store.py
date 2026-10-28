@@ -11,6 +11,7 @@ import ast
 import hashlib
 import hmac
 import json
+import logging
 import math
 import secrets
 import socket
@@ -122,6 +123,10 @@ from hypertrain.protocol.messages_v2 import (
 )
 
 NEVER = 2**53 - 1  # exp_drand of container-signed records
+# Beacons a relay waits after finality, vesting and dispute closure before it honours a release.
+RELAY_EPOCH_GRACE = 100
+# Beacons before the signed horizon at which custody an open dispute pins is extended again.
+RELAY_EXTEND_WITHIN = 720
 LEASE_ROUNDS = 600  # 30 min of 3 s drand rounds
 ZERO_STATE = sha256_hex(b"ht-zero-outer-state")
 NO_HONEYPOT = sha256_hex(b"ht-no-honeypot")
@@ -2163,7 +2168,10 @@ class ChallengeStore:
             for row in escrow.payable(now):
                 if budget == 0:
                     break
-                if row["hotkey"] not in weights and len(weights) >= MAX_ENTRIES:
+                payee = self._payee_v2(escrow.run_id, row["hotkey"])
+                if payee is None:
+                    continue  # a banned coldkey is not paid; the epoch mass burns as unpaid
+                if payee not in weights and len(weights) >= MAX_ENTRIES:
                     continue  # ponytail: no ranking across the cap; the units pay later
                 take = min(budget, row["units"])
                 op = EscrowOperation(
@@ -2177,7 +2185,7 @@ class ChallengeStore:
                     dispute_id=None,
                 )
                 escrow.pay(op, signer=row["owner"])
-                weights[row["hotkey"]] = weights.get(row["hotkey"], 0.0) + take
+                weights[payee] = weights.get(payee, 0.0) + take
                 budget -= take
         paid = meta["units_burned_this_epoch"] - budget
         if not paid:
@@ -2186,6 +2194,26 @@ class ChallengeStore:
         meta["units_burned_this_epoch"] = budget
         answer["weights"] = {h: weights[h] for h in sorted(weights)}
         return canonical(answer)
+
+    def _payee_v2(self, run_id: str, hotkey: str) -> str | None:
+        """Hotkey that is paid for a reward `hotkey` earned; None if its coldkey is banned.
+
+        A reward follows its coldkey, the economic identity, not the hotkey that signed the work:
+        after a rotation the admission's current hotkey is paid, so the coldkey's pending rewards
+        are neither lost nor sent to a hotkey it no longer runs. A ban is the coldkey's, so a
+        rotation does not lift it. An origin whose hotkey no admission knows (it never joined
+        through the admission service) is paid to that hotkey, as before.
+        """
+        row = self._db.execute(
+            "SELECT a.hotkey, EXISTS(SELECT 1 FROM admissions_v2 b WHERE b.run_id=a.run_id "
+            "AND b.coldkey=a.coldkey AND b.state='BANNED') AS banned "
+            "FROM admission_history h JOIN admissions_v2 a ON a.admission_id=h.admission_id "
+            "WHERE h.hotkey=? AND a.run_id=?",
+            (hotkey, run_id),
+        ).fetchone()
+        if row is None:
+            return hotkey
+        return None if row["banned"] else str(row["hotkey"])
 
     def _run_v2(self, run_id: str) -> RunManifestV2:
         row = self._db.execute("SELECT manifest FROM runs WHERE run_id=?", (run_id,)).fetchone()
@@ -2354,6 +2382,22 @@ class ChallengeStore:
         ).fetchone()
         if row is None:
             raise ChallengeError(403, "hotkey is not current accepted identity")
+        return str(row[0])
+
+    def _reward_owner_v2(self, run_id: str, hotkey: str) -> str:
+        """Coldkey that earned work signed by `hotkey`, even if its admission has moved on.
+
+        The ledger asks this of stored evidence (a reward, a shadow reservation), which was signed
+        when `hotkey` was the admission's hotkey: a reward follows its coldkey through a rotation.
+        It is not an intake gate; `_owner_v2` stays strict for everything a hotkey signs now.
+        """
+        row = self._db.execute(
+            "SELECT a.coldkey FROM admission_history h JOIN admissions_v2 a "
+            "ON a.admission_id=h.admission_id WHERE a.run_id=? AND h.hotkey=?",
+            (run_id, hotkey),
+        ).fetchone()
+        if row is None:
+            return self._owner_v2(run_id, hotkey)  # not an admission hotkey: refuse as before
         return str(row[0])
 
     def _assignment_v2(self, run_id: str, w: int, hotkey: str) -> tuple[int, ...]:
@@ -2666,7 +2710,7 @@ class ChallengeStore:
                 auditors=frozenset(manifest.training.auditors),
                 replay_finality=lambda e: self._finality_replay_v2(run_id, e),
                 settlement=lambda ref: self._settlement_v2(run_id, ref),
-                owner_of=lambda hot: self._owner_v2(run_id, hot),
+                owner_of=lambda hot: self._reward_owner_v2(run_id, hot),
                 assignment_of=lambda w, hot: self._assignment_v2(run_id, w, hot),
                 shadow_assignment_of=lambda binding: self._shadow_assignment_v2(run_id, binding),
                 shadow_settlement=lambda origin: self._shadow_settlement_v2(run_id, origin),
@@ -2728,7 +2772,7 @@ class ChallengeStore:
                 dispute_policy,
                 self._coord(),
                 contest_of=lambda h: Contest.model_validate(self._record_v2(run_id, "contest", h)),
-                owner_of=lambda hot: self._owner_v2(run_id, hot),
+                owner_of=lambda hot: self._reward_owner_v2(run_id, hot),
                 span=lambda contest, level, ctx: self._dispute_span_v2(run_id, contest, level, ctx),
             )
             self._services_v2[run_id] = (escrow, admission, disputes)
@@ -3251,10 +3295,14 @@ class ChallengeStore:
             ).fetchone()
             if row is None:
                 raise ChallengeError(409, "shadow admission missing")
+            # The original work was signed by the hotkey the admission held then, not necessarily
+            # the one it holds now: a reward follows its coldkey through a rotation. The stored
+            # work proof and screen are signed by that same hotkey, which binds it to the admission.
+            worker = request.commit.signer
             final = envelope_v2.Intake(run_id, {"Finalize": self._coord().ss58.__eq__}).accept(
                 request.finalize.model_dump(mode="json"), now
             )
-            commit = envelope_v2.Intake(run_id, {"CommitV2": row["hotkey"].__eq__}).accept(
+            commit = envelope_v2.Intake(run_id, {"CommitV2": worker.__eq__}).accept(
                 request.commit.model_dump(mode="json"), now
             )
             if not isinstance(final, Finalize) or not isinstance(commit, CommitV2):
@@ -3296,11 +3344,11 @@ class ChallengeStore:
                 raise ChallengeError(409, "shadow original signed challenge differs")
             reference = WorkProof.model_validate_json(result["reference"])
             proof_env = envelope_v2.parse_envelope(result["proof"])
-            proof = envelope_v2.Intake(run_id, {"WorkProof": row["hotkey"].__eq__}).accept(
+            proof = envelope_v2.Intake(run_id, {"WorkProof": worker.__eq__}).accept(
                 proof_env.model_dump(mode="json"), trial["finalized_beacon"]
             )
             screen = WorkScreenV2.model_validate(
-                envelope_v2.Intake(run_id, {"WorkScreenV2": row["hotkey"].__eq__})
+                envelope_v2.Intake(run_id, {"WorkScreenV2": worker.__eq__})
                 .accept(result["screen"], trial["finalized_beacon"])
                 .model_dump(mode="json")
             )
@@ -3324,9 +3372,9 @@ class ChallengeStore:
                 or not admission.qualified(screen)
                 or challenge.assignment_hash
                 != trial_assignment_hash(job.manifest, job.w, tuple(job.sample_ids))
-                or commit.hotkey != row["hotkey"]
+                or commit.hotkey != worker
                 or commit.w != final.w
-                or final.included != [row["hotkey"]]
+                or final.included != [worker]
                 or final.entitlements_root != reference.digest()
                 or commit.leaves_root != reference.leaves_root
                 or commit.delta_hash != reference.delta_hash
@@ -3386,7 +3434,7 @@ class ChallengeStore:
                     raise ChallengeError(409, "shadow retained qualified screen differs")
                 if operation == "probe":
                     original_commit = envelope_v2.Intake(
-                        run_id, {"CommitV2": row["hotkey"].__eq__}
+                        run_id, {"CommitV2": worker.__eq__}
                     ).accept(
                         canonicalize(original_result["commit_envelope"]), trial["finalized_beacon"]
                     )
@@ -3462,7 +3510,7 @@ class ChallengeStore:
                     (
                         i
                         for i in identities
-                        if (i["hotkey"], i["coldkey"]) == (row["hotkey"], row["coldkey"])
+                        if (i["hotkey"], i["coldkey"]) == (worker, row["coldkey"])
                     ),
                     None,
                 )
@@ -3482,7 +3530,7 @@ class ChallengeStore:
             binding = ShadowReservationRequestV1(
                 run_id=run_id,
                 admission_id=admission_id,
-                hotkey=row["hotkey"],
+                hotkey=worker,
                 coldkey=row["coldkey"],
                 trial_epoch=final.w,
                 commit_hash=body_digest(commit.model_dump(mode="json")),
@@ -5597,15 +5645,7 @@ class ChallengeStore:
             if action == "extend" and now >= lineage["horizon"]:
                 raise ChallengeError(409, "custody horizon already expired; rescue required")
             if action == "extend":
-                unresolved = [
-                    r[0]
-                    for r in self._db.execute(
-                        "SELECT id FROM disputes_v2 "
-                        "WHERE json_extract(turn,'$.contest.w')=? "
-                        "AND json_extract(turn,'$.resolution') IS NULL",
-                        (grant.w,),
-                    )
-                ]
+                unresolved = self._unresolved_disputes_v2(grant.w)
                 horizon = max(
                     lineage["horizon"] + 100, now + manifest.training.verify.E_vest_rounds + 1440
                 )
@@ -5629,7 +5669,7 @@ class ChallengeStore:
                         settled["vesting_beacon"],
                         settled["closed_beacon"],
                     )
-                    + 100
+                    + RELAY_EPOCH_GRACE
                 )
                 if now < grace:
                     raise ChallengeError(409, "relay settlement epoch grace has not elapsed")
@@ -9171,20 +9211,36 @@ class ChallengeStore:
             }
 
     def relay_settlement_v2(self, run_id: str, grant_hash: str) -> dict[str, Any]:
-        """Authenticated control-plane adapter for L4 retention release, not client facts."""
+        """Authenticated control-plane adapter for L4 retention release, not client facts.
+
+        A relay holds a receipted upload until the master writes finality for its round or closes
+        the round without a reward (ADR 0014 Part 6.4, D72); any other state is a 409."""
         from hypertrain.relay.core import Settlement as RelaySettlement
 
         with self._lock:
             grant = self._record_v2(run_id, "grant", grant_hash)["body"]
             w = int(grant["w"])
             status = self._record_v2(run_id, "finality", str(w))
+            vesting: int
             if (
-                status["disposition"] != "SETTLED"
-                or status["unresolved_audits"]
-                or status["unresolved_disputes"]
+                status["disposition"] == "SETTLED"
+                and not status["unresolved_audits"]
+                and not status["unresolved_disputes"]
             ):
+                accepted = self._record_v2(run_id, "replayed-finality", str(w))
+                finality_hash = str(accepted["finalize_hash"])
+                finalized = int(accepted["finalized_beacon"])
+                vesting = finalized + self._run_v2(run_id).training.verify.E_vest_rounds
+            elif (closure := self._round_closure_v2(run_id, w)) is not None:
+                # No finality was written and nothing vests. The custody horizon stands in for both
+                # beacons, so the release comes where age used to free the bytes (horizon plus the
+                # epoch grace), and now only because the master says the round is closed.
+                horizon = self._custody_horizon_v2(run_id, grant_hash)
+                if horizon is None:
+                    raise ChallengeError(409, "no accepted durable receipt custody to release")
+                finality_hash, finalized, vesting = closure, horizon, horizon
+            else:
                 raise ChallengeError(409, "relay custody remains pinned by unresolved finality")
-            accepted = self._record_v2(run_id, "replayed-finality", str(w))
             turns = [
                 json.loads(r[0])
                 for r in self._db.execute(
@@ -9195,14 +9251,130 @@ class ChallengeStore:
                 raise ChallengeError(409, "relay custody remains dispute pinned")
             closed = [t["resolution"] for t in turns]
             settled = RelaySettlement(
-                str(accepted["finalize_hash"]),
-                int(accepted["finalized_beacon"]),
+                finality_hash,
+                finalized,
                 sha256_hex(canonicalize(closed)),
-                max([int(accepted["finalized_beacon"]), *[t["resolved_beacon"] for t in turns]]),
-                int(accepted["finalized_beacon"])
-                + self._run_v2(run_id).training.verify.E_vest_rounds,
+                max([finalized, *[t["resolved_beacon"] for t in turns]]),
+                vesting,
             )
             return asdict(settled)
+
+    def relay_settlement_view_v2(self, run_id: str, grant_hash: str) -> dict[str, Any]:
+        """Coordinator-signed copy of relay_settlement_v2 for a relay; read-only, no credential."""
+        from hypertrain.protocol import relay_envelope
+        from hypertrain.protocol.relay_messages import RelaySettlementView
+
+        with self._lock:
+            view = RelaySettlementView(
+                grant_hash=grant_hash, **self.relay_settlement_v2(run_id, grant_hash)
+            )
+            return relay_envelope.seal(
+                self._coord(), "RelaySettlementView", run_id, view, self._now(self._db) + 10
+            )
+
+    def _unresolved_disputes_v2(self, w: int) -> list[str]:
+        return [
+            r[0]
+            for r in self._db.execute(
+                "SELECT id FROM disputes_v2 "
+                "WHERE json_extract(turn,'$.contest.w')=? "
+                "AND json_extract(turn,'$.resolution') IS NULL",
+                (w,),
+            )
+        ]
+
+    def _unreleased_grants_v2(self) -> list[tuple[str, str]]:
+        with self._lock:
+            return [
+                (r[0], r[1])
+                for r in self._db.execute(
+                    "SELECT run_id, json_extract(data,'$.body.grant_hash') FROM records_v2 r "
+                    "WHERE kind='relay-receipt' AND NOT EXISTS (SELECT 1 FROM records_v2 x "
+                    "WHERE x.run_id=r.run_id AND x.kind='relay-release' "
+                    "AND x.id=json_extract(r.data,'$.body.grant_hash'))"
+                )
+            ]
+
+    def _custody_horizon_v2(self, run_id: str, grant_hash: str) -> int | None:
+        """The beacon the relay's custody of a grant is signed to: the last retention extension,
+        else the receipt. None while the master holds no receipt for it."""
+        receipt = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='relay-receipt' "
+            "AND json_extract(data,'$.body.grant_hash')=?",
+            (run_id, grant_hash),
+        ).fetchone()
+        if receipt is None:
+            return None
+        current = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='retention' AND id=?",
+            (run_id, grant_hash),
+        ).fetchone()
+        if current:
+            return int(json.loads(current[0])["horizon"])
+        return int(json.loads(receipt[0])["body"]["retain_until"])
+
+    def _relay_due_v2(self, run_id: str, grant_hash: str) -> Literal["release", "extend"] | None:
+        """What the master owes one relay grant now, from read-only records.
+
+        Release once the round settled and the epoch grace passed. Extend while a dispute of the
+        round is open and the horizon is near; relay_control_v2 re-checks both under its own
+        transaction, this only keeps a pass from opening one per grant that is not due."""
+        with self._lock:
+            now = self._now(self._db)
+            try:
+                settled = self.relay_settlement_v2(run_id, grant_hash)
+            except ChallengeError as error:
+                if error.status != 409:
+                    raise
+            else:
+                grace = (
+                    max(
+                        settled["finality_beacon"],
+                        settled["vesting_beacon"],
+                        settled["closed_beacon"],
+                    )
+                    + RELAY_EPOCH_GRACE
+                )
+                return "release" if now >= grace else None
+            w = int(self._record_v2(run_id, "grant", grant_hash)["body"]["w"])
+            horizon = self._custody_horizon_v2(run_id, grant_hash)
+            if horizon is None or not self._unresolved_disputes_v2(w):
+                return None
+            return "extend" if now < horizon <= now + RELAY_EXTEND_WITHIN else None
+
+    async def release_due_v2(self, client: Any) -> dict[str, list[str]]:
+        """One unattended pass over every run (ADR 0014 Part 6.3, 6.4).
+
+        A grant with a durable relay receipt and no relay-release record is released when
+        settled and past the epoch grace, and extended while a dispute of its round is open and
+        its horizon is near. A grant that is not due is left alone; a relay that cannot be
+        reached is skipped until the next pass. Any other failure is raised after the rest of the
+        pass, so that one bad grant neither starves the others nor goes unseen."""
+        import asyncio
+
+        import httpx
+
+        done: dict[str, list[str]] = {"released": [], "extended": []}
+        failure: Exception | None = None
+        for hosted in self.stores():
+            for run_id, grant_hash in await asyncio.to_thread(hosted._unreleased_grants_v2):
+                try:
+                    action = await asyncio.to_thread(hosted._relay_due_v2, run_id, grant_hash)
+                    if action is not None:
+                        await hosted.relay_control_v2(run_id, grant_hash, action, client)
+                        done["released" if action == "release" else "extended"].append(grant_hash)
+                except ChallengeError as error:
+                    if error.status != 409:  # 409: not due after all, a later pass decides
+                        failure = failure or error
+                except httpx.HTTPError as error:
+                    logging.getLogger(__name__).warning(
+                        "relay lifecycle deferred: %s", type(error).__name__
+                    )
+                except Exception as error:
+                    failure = failure or error
+        if failure is not None:
+            raise failure
+        return done
 
     def dispute_state_v2(self, run_id: str, dispute_id: str, checkpoint: int) -> dict[str, Any]:
         _, _, disputes = self._services(run_id)
@@ -10693,6 +10865,7 @@ class ChallengeStore:
         return None
 
     async def relay_receipt_v2(self, raw: bytes, client: Any) -> dict[str, Any]:
+        import asyncio
         import base64
 
         from hypertrain.data.stream_store import spool
@@ -10703,61 +10876,72 @@ class ChallengeStore:
         env = relay_envelope.parse_envelope(raw)
         run_id = env.run_id
         receipt = RelayReceipt.model_validate(env.body)
-        with self._tx():
-            manifest = self._run_v2(run_id)
-            grant = UploadGrant.model_validate(
-                self._record_v2(run_id, "grant", receipt.grant_hash)["body"]
-            )
-            registry = self._registry_v2(manifest)
-            body = self._record_v2(run_id, "round", str(grant.w))["body"]
-            now = self._fresh_v2(
-                manifest, f"relay-receipt:{receipt.digest()}:{self._now(self._db)}"
-            )
-            deadline = int(str(body["d_upload"]))
-            receipt_verified(
-                env,
-                registry=registry,
-                relay_id=grant.relay_id,
-                run_id=run_id,
-                grant=grant,
-                received_before=deadline,
-            )
-            # A rerun must not challenge the relay again: it refuses a second live
-            # retrieval of the same object, and the first acceptance is authoritative.
-            if (
-                stored := self._accepted_receipt_v2(run_id, grant.w, grant.hotkey, receipt.digest())
-            ) is not None:
-                return stored
-            assignment = self._record_v2(run_id, "relay-assignment", f"{grant.w}:{grant.hotkey}")[
-                "body"
-            ]
-            request = RetrievalRequest(
-                request_id=secrets.token_hex(32),
-                nonce=secrets.token_hex(32),
-                relay_id=grant.relay_id,
-                key_id=receipt.key_id,
-                assignment_hash=body_digest(assignment),
-                grant_hash=grant.digest(),
-                custody_ack_hashes=[],
-                receipt_hash=receipt.digest(),
-                retention_hash=receipt.digest(),
-                object_or_chunk_hash=grant.delta_hash,
-                size=grant.size,
-                requested_beacon=now,
-                deadline_beacon=min(now + 10, receipt.retain_until),
-            )
-            request_raw = relay_envelope.parse_envelope(
-                relay_envelope.seal(
-                    self._coord(), "RetrievalRequest", run_id, request, request.deadline_beacon
+
+        def prepare() -> tuple[dict[str, Any] | None, Any]:
+            """Store work only: it runs in a worker thread, never on the event loop."""
+            with self._tx():
+                manifest = self._run_v2(run_id)
+                grant = UploadGrant.model_validate(
+                    self._record_v2(run_id, "grant", receipt.grant_hash)["body"]
                 )
-            )
-            self._put_record_v2(
-                run_id, "retrieval", request.digest(), request_raw.model_dump(mode="json")
-            )
+                registry = self._registry_v2(manifest)
+                body = self._record_v2(run_id, "round", str(grant.w))["body"]
+                now = self._fresh_v2(
+                    manifest, f"relay-receipt:{receipt.digest()}:{self._now(self._db)}"
+                )
+                deadline = int(str(body["d_upload"]))
+                receipt_verified(
+                    env,
+                    registry=registry,
+                    relay_id=grant.relay_id,
+                    run_id=run_id,
+                    grant=grant,
+                    received_before=deadline,
+                )
+                # A rerun must not challenge the relay again: it refuses a second live
+                # retrieval of the same object, and the first acceptance is authoritative.
+                if (
+                    stored := self._accepted_receipt_v2(
+                        run_id, grant.w, grant.hotkey, receipt.digest()
+                    )
+                ) is not None:
+                    return stored, None
+                assignment = self._record_v2(
+                    run_id, "relay-assignment", f"{grant.w}:{grant.hotkey}"
+                )["body"]
+                request = RetrievalRequest(
+                    request_id=secrets.token_hex(32),
+                    nonce=secrets.token_hex(32),
+                    relay_id=grant.relay_id,
+                    key_id=receipt.key_id,
+                    assignment_hash=body_digest(assignment),
+                    grant_hash=grant.digest(),
+                    custody_ack_hashes=[],
+                    receipt_hash=receipt.digest(),
+                    retention_hash=receipt.digest(),
+                    object_or_chunk_hash=grant.delta_hash,
+                    size=grant.size,
+                    requested_beacon=now,
+                    deadline_beacon=min(now + 10, receipt.retain_until),
+                )
+                request_raw = relay_envelope.parse_envelope(
+                    relay_envelope.seal(
+                        self._coord(), "RetrievalRequest", run_id, request, request.deadline_beacon
+                    )
+                )
+                self._put_record_v2(
+                    run_id, "retrieval", request.digest(), request_raw.model_dump(mode="json")
+                )
+                capability = base64.b64encode(
+                    canonicalize(self._record_v2(run_id, "grant", grant.digest()))
+                ).decode()
+                return None, (manifest, grant, registry, deadline, request, request_raw, capability)
+
+        stored, prepared = await asyncio.to_thread(prepare)
+        if stored is not None:
+            return stored
+        manifest, grant, registry, deadline, request, request_raw, capability = prepared
         spec = next(s for s in registry.specs if s.id == grant.relay_id)
-        capability = base64.b64encode(
-            canonicalize(self._record_v2(run_id, "grant", grant.digest()))
-        ).decode()
         import httpx
 
         try:
@@ -10776,42 +10960,48 @@ class ChallengeStore:
             raise ChallengeError(
                 502, f"relay refused master retrieval: HTTP {exc.response.status_code}"
             ) from exc
-        with self._tx():
-            # A concurrent submission may have been accepted while this one awaited the relay.
-            if (
-                stored := self._accepted_receipt_v2(run_id, grant.w, grant.hotkey, receipt.digest())
-            ) is not None:
-                return stored
-            current = self._fresh_v2(
-                manifest, f"relay-accept:{receipt.digest()}:{self._now(self._db)}"
-            )
-            if (
-                current >= deadline
-                or sha256_hex(original) != grant.delta_hash
-                or len(original) != grant.size
-            ):
-                raise ChallengeError(
-                    422, "master independently retrieved mismatched or late payload"
-                )
-            self.objects.put(original)
-            from hypertrain.protocol.relay_messages import MasterAcceptanceV2
 
-            acceptance = MasterAcceptanceV2(
-                w=grant.w,
-                hotkey=grant.hotkey,
-                delta_hash=grant.delta_hash,
-                receipt_hash=receipt.digest(),
-                received_drand=current,
-            )
-            signed = relay_envelope.seal(
-                self._coord(), "MasterAcceptanceV2", run_id, acceptance, grant.retain_until
-            )
-            self._put_record_v2(
-                run_id, "relay-receipt", receipt.digest(), env.model_dump(mode="json")
-            )
-            self._put_record_v2(run_id, "relay-custody", grant.digest(), {"artifacts": custody})
-            self._put_record_v2(
-                run_id, "retrieval-response", request.digest(), response.model_dump(mode="json")
-            )
-            self._put_record_v2(run_id, "master-acceptance", acceptance.digest(), signed)
-            return signed
+        def accept() -> dict[str, Any]:
+            with self._tx():
+                # A concurrent submission may have been accepted while this one awaited the relay.
+                if (
+                    stored := self._accepted_receipt_v2(
+                        run_id, grant.w, grant.hotkey, receipt.digest()
+                    )
+                ) is not None:
+                    return stored
+                current = self._fresh_v2(
+                    manifest, f"relay-accept:{receipt.digest()}:{self._now(self._db)}"
+                )
+                if (
+                    current >= deadline
+                    or sha256_hex(original) != grant.delta_hash
+                    or len(original) != grant.size
+                ):
+                    raise ChallengeError(
+                        422, "master independently retrieved mismatched or late payload"
+                    )
+                self.objects.put(original)
+                from hypertrain.protocol.relay_messages import MasterAcceptanceV2
+
+                acceptance = MasterAcceptanceV2(
+                    w=grant.w,
+                    hotkey=grant.hotkey,
+                    delta_hash=grant.delta_hash,
+                    receipt_hash=receipt.digest(),
+                    received_drand=current,
+                )
+                signed = relay_envelope.seal(
+                    self._coord(), "MasterAcceptanceV2", run_id, acceptance, grant.retain_until
+                )
+                self._put_record_v2(
+                    run_id, "relay-receipt", receipt.digest(), env.model_dump(mode="json")
+                )
+                self._put_record_v2(run_id, "relay-custody", grant.digest(), {"artifacts": custody})
+                self._put_record_v2(
+                    run_id, "retrieval-response", request.digest(), response.model_dump(mode="json")
+                )
+                self._put_record_v2(run_id, "master-acceptance", acceptance.digest(), signed)
+                return signed
+
+        return await asyncio.to_thread(accept)

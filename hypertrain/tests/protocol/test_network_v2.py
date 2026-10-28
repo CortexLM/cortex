@@ -62,6 +62,7 @@ from hypertrain.protocol.relay_messages import (
     ChunkCustodyAck,
     CustodyRelease,
     RelayReceipt,
+    RelaySettlementView,
     RetentionExtension,
     RetentionExtensionAck,
     RetrievalRequest,
@@ -631,6 +632,36 @@ def test_full_custody_when_complete_receipt() -> None:
     assert relay_envelope.verify_envelope(env)
     assert relay_envelope.Intake(RUN).accept(env, 50) == receipt
     assert not envelope_v2.verify_envelope(env)
+
+
+def test_settlement_view_when_public_exposes_only_the_six_settlement_facts() -> None:
+    # The view is served without a credential (ADR 0014 Part 6, D51 3): nothing that identifies a
+    # miner, a coldkey, an origin or the roster may ever be added to it.
+    assert set(RelaySettlementView.model_fields) == {
+        "grant_hash",
+        "finality_hash",
+        "finality_beacon",
+        "closed_dispute_root",
+        "closed_beacon",
+        "vesting_beacon",
+    }
+    facts = dict(
+        grant_hash=H,
+        finality_hash=H,
+        finality_beacon=30,
+        closed_dispute_root=H,
+        closed_beacon=45,
+        vesting_beacon=40,
+    )
+    view = RelaySettlementView(**facts)
+    with pytest.raises(ValidationError):
+        RelaySettlementView(**facts, hotkey=MINER.ss58)
+    # Registered as a relay message: it signs and verifies, and is not another domain's type.
+    env = relay_envelope.seal(MINER, "RelaySettlementView", RUN, view, 100)
+    assert relay_envelope.verify_envelope(env)
+    assert relay_envelope.Intake(RUN).accept(env, 50) == view
+    assert not envelope_v2.verify_envelope(env)
+    assert "RelaySettlementView.json" in render()
 
 
 def retrieval(requested: int = 101, deadline: int = 111) -> RetrievalRequest:

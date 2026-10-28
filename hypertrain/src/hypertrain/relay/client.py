@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import BinaryIO
 from urllib.parse import urlsplit
@@ -24,13 +24,14 @@ from hypertrain.protocol.relay_messages import (
     MasterAcceptanceV2,
     RelayReceipt,
     RelayRegistryV1,
+    RelaySettlementView,
     RetrievalRequest,
     RetrievalResponse,
     UploadChunk,
     UploadChunkManifest,
     UploadGrant,
 )
-from hypertrain.relay.core import RelayError
+from hypertrain.relay.core import Relay, RelayError, Settlement
 
 
 def http_client() -> httpx.AsyncClient:
@@ -276,15 +277,52 @@ class RelayClient:
         )
 
 
+def _master_endpoint(master_url: str) -> str:
+    parsed = urlsplit(master_url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise RelayError("master endpoint must be pinned credential-free HTTPS")
+    return master_url.rstrip("/")
+
+
 async def forward_receipt(
     client: httpx.AsyncClient, master_url: str, raw: RelayEnvelope
 ) -> RelayEnvelope:
     """Public relay receipt route; relay holds no coordinator/admin credential."""
-    parsed = urlsplit(master_url)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise RelayError("master endpoint must be pinned credential-free HTTPS")
     response = await client.post(
-        master_url.rstrip("/") + "/v2/relay-receipts", content=raw.model_dump_json()
+        _master_endpoint(master_url) + "/v2/relay-receipts", content=raw.model_dump_json()
     )
     response.raise_for_status()
     return relay_envelope.parse_envelope(response.content)
+
+
+async def fetch_settlement_view(
+    client: httpx.AsyncClient, master_url: str, run_id: str, grant_hash: str
+) -> RelayEnvelope:
+    """Public read-only settlement route; the caller verifies the signature and the binding."""
+    response = await client.get(
+        f"{_master_endpoint(master_url)}/v2/runs/{run_id}/relay-settlements/{grant_hash}"
+    )
+    response.raise_for_status()
+    return relay_envelope.parse_envelope(response.content)
+
+
+def settlement_from_master(
+    relay: Relay, client: httpx.AsyncClient, master_url: str
+) -> Callable[[str], Awaitable[Settlement]]:
+    """Release facts come from the master's signed public view, never from the release message
+    itself and never with a credential."""
+
+    async def settlement(grant_hash: str) -> Settlement:
+        raw = await fetch_settlement_view(client, master_url, relay.run_id, grant_hash)
+        view = relay.master_message(raw, RelaySettlementView, await relay.now())
+        if view.grant_hash != grant_hash:
+            raise RelayError("settlement view names another grant")
+        return Settlement(
+            view.finality_hash,
+            view.finality_beacon,
+            view.closed_dispute_root,
+            view.closed_beacon,
+            view.vesting_beacon,
+        )
+
+    return settlement
