@@ -458,8 +458,9 @@ def sandboxed(text: str, root: Path, uid: int | None = None) -> str:
     ]
     assert not stray, f"host paths the sandbox does not rewrite: {stray}"
     # a temporary file is made under $TMPDIR, which Box.run puts in the sandbox, where it is looked
-    # at: a literal /tmp would be written outside it
-    shared = re.findall(r"/(?:var/)?tmp\b|/dev/shm", code)
+    # at: a literal /tmp would be written outside it. The sandbox itself may be under /tmp (pytest's
+    # basetemp is, on a runner), so its own path is not part of what the script names.
+    shared = re.findall(r"/(?:var/)?tmp\b|/dev/shm", code.replace(str(root), "@"))
     assert not shared, f"the script names a shared temporary directory: {shared}"
     return text
 
