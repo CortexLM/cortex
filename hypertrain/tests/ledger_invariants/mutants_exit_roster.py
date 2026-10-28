@@ -11,6 +11,7 @@ LIVENESS = "tests/challenge/test_audit_liveness_v2.py::"
 NO_SHOW = "tests/challenge/test_no_show_v2.py::"
 NO_SHOW_E2E = "tests/e2e/test_no_show_resume_v2.py::"
 STORE = "src/hypertrain/challenge/store.py"
+EXIT = "src/hypertrain/challenge/exit_v2.py"
 COOLDOWN = "src/hypertrain/challenge/audit_cooldown_v2.py"
 
 DROPPED = (
@@ -151,13 +152,12 @@ MUTANTS = [
     {
         "id": "exit-roster-delta-stage-not-wired",
         "invariants": ["A2W-21"],
-        "path": STORE,
-        "old": "            self._exclude_missing_deltas_v2(run_id, w)\n"
-        "            self._exclude_unfit_members_v2(run_id, w)\n"
-        "            inputs =",
-        "new": "            self._exclude_unfit_members_v2(run_id, w)\n            inputs =",
+        "path": EXIT,
+        "old": "    if now >= s.schedule.d_upload:\n        out += [",
+        "new": "    if False:\n        out += [",
         "tests": [NO_SHOW_E2E + "test_a_member_that_commits_but_never_uploads_a_delta_is_left_out"],
-        "why": "An audited member whose delta never arrives stops the aggregation of the round.",
+        "why": "The push that closes delta intake no longer leaves out an audited member whose "
+        "delta never arrived.",
     },
     {
         "id": "exit-roster-job-without-leaves-blocks-the-queue",
