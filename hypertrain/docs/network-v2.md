@@ -750,11 +750,11 @@ round, not at its expiry, so that the other auditor has the rest of the window; 
 replay is still running is never taken back. Whether the second auditor has time depends on the
 gap and on the replay: the job must be leased, replayed and signed again before `d_final`, so a
 gap of 100 rounds fits a replay of 38 rounds (114 s) at best and a gap of 200 a replay of 88
-rounds (264 s) (ADR 0011 Part 9). The auditor
-that withheld the signature of a `MISMATCH` for the third time in a run (and each time after) is
-refused new leases, and as a relay observer, for two absolute audit windows (`4 * lease_rounds`; 20
-minutes at H <= 30), unless it is the last configured auditor outside a cooldown. A withheld
-`MATCH`, or a lease that never asked for its execution, costs the ordinary cooldown only.
+rounds (264 s) (ADR 0011 Part 9). The auditor that withheld the signature of a `MISMATCH` for the
+third time in a run (and each time after) is refused new leases, and as a relay observer, for two
+absolute audit windows (`4 * lease_rounds`; 20 minutes at H <= 30), unless it is the last configured
+auditor outside a cooldown. A withheld `MATCH`, or a lease that never asked for its execution, costs
+the ordinary cooldown only.
 
 A round that cannot reach a tape can be retired (ADR 0011 part 8, decisions 7 to 11) instead of
 blocking the run for good. Two causes, each re-derived by the master from the facts: the members

@@ -203,6 +203,8 @@
    `expires` of the lease that lapsed, not at the round that observes the lapse: `lease_v2` and `relay_observer_v2`
    refuse by raising, which rolls back their own lazy expiry, so anchoring on the observing round would let a polling
    auditor push its own release date forward at every poll.
+   Amended by Part 9 decision 8: for an executed lease whose verdict is not signed it starts at
+   `min(expires, at + 20)`, `at` being the round the verdict was stored.
 2. Cause per attempt: `AUDITOR_SILENT` (cooldown), `EXECUTOR_INTERRUPTED`, `EXECUTOR_FAILED` (no cooldown). The auditor is
    silent only if it never asked for the execution: `audit-execution` is committed `REQUESTED` before the preparation can refuse.
 3. One retire path; today's exhaustion block moves verbatim into `_exhaust_audit_job_v2`, the only place Decision 8 touches.
@@ -242,7 +244,8 @@
 - The public view labels a dropped miner `EXCLUDED_V2`, a fault (`public_api/views.py:15,118`), as MISMATCH drops already are (open question for the frontend owner).
 - A 4-miner roster cannot absorb any drop (>= 4 inputs); a service-admitted run cannot lease today (heavy gate) and needs its complete roster.
 - The auditor process exits 2 on the cooldown 403 and on a 500; its supervisor should restart it with a delay.
-- The first lease of an operator-built round with a gap of 100 is still the only lease of that window; gap 101-200 gives a
+- The first lease of an operator-built round with a gap of 100 is still the only lease of that window, unless its verdict
+  is stored and not signed (Part 9 decision 8 takes it back 20 rounds later); gap 101-200 gives a
   replacement inside the window. Decision 8 gives a second window only to a job that is exhausted before the
   miner's commit expires (attempts that fail early, window shorter than the round). In the operated shape, where the first
   window ends at `d_final`, a job nobody finished costs its miner the round at once, as `INFRASTRUCTURE`. Making that
@@ -1772,6 +1775,13 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
    - The revocation never sanctions the miner, writes no `excluded` and no sanction row, and only a withheld
      MISMATCH feeds the strike; a revoked `MATCH` is a cooldown. A late signature of the holder after the
      revocation is refused (409) and writes no verdict.
+   - That refusal is the reaper's. `complete_audit_v2` is an owned function and is not edited: it checks the
+     lease's expiry only. The signature is refused from the round `_expire_leases_v2` has retired the lease, which
+     every beacon push does for each run and every lease poll does too. A master on which no push reaped since
+     `at + 20` still accepts it: a probe that kept the push from reaping got a signature at `at + 25` accepted
+     with 200 and the lease `completed` [V by a probe on a real verdict, 2026-10-28].
+   - The reaper is shared by every run, so the revocation applies to a service-admitted run too. Such a run never
+     re-arms: a revoked second attempt drops the job as `INFRASTRUCTURE`, without a sanction.
 
 | Event | Rule |
 | --- | --- |
@@ -1845,9 +1855,13 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
   `AUDITOR_SILENT`, no marker, one ordinary cooldown) or by asking late (the `REQUESTED` marker is committed
   before any check and excuses the holder: `EXECUTOR_INTERRUPTED`, no cooldown). One accomplice that wins the
   lease race sinks one forger's job per cooldown, saving that forger's bond. Not closed here.
-- A holder that asks for the execution again before its window ends renews the marker's `at`: the window
-  slides, each time at the price of a full replay on the master, and the lease expiry still bounds it, as
-  before this part.
+- A holder cannot ask for the execution again to renew the marker's `at`, and so cannot slide its window. The
+  same signed request again reaches the lease's working directory, whose inputs the first execution wrote
+  (`durable_write` raises `FileExistsError` before any replay and before the guard is registered, HTTP 500), and
+  a request signed again is refused as a conflicting operation nonce (409); the marker and the lease do not move
+  [V by a probe on a real replay, 2026-10-28]. The price is that a holder that lost its verdict (a client that
+  crashed after `/execute`) cannot ask for it again: it loses the lease at `at + 20`, and a `MISMATCH` counts as
+  one withhold.
 - Both live auditors colluding withhold, `tried` holds both, the job is dropped; the second record is
   zero-length because of `others_free`.
 - A ghost auditor defeats `others_free`: the manifest allows up to 128 auditors and requires two distinct
@@ -1876,9 +1890,9 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
 7. A modulo count.
 8. Counting every executed-and-unsigned verdict (decision 7).
 9. Liveness tracking of the auditors to defeat the ghost: not in this lot.
-   10. Counting the sign window from the claim: an honest slow replay would be revoked while it computes.
-   11. Revoking a lease whose marker is `REQUESTED`. 12. A window shorter than the client's post timeout (an
-   honest signature in flight would be refused).
+10. Counting the sign window from the claim: an honest slow replay would be revoked while it computes.
+11. Revoking a lease whose marker is `REQUESTED`.
+12. A window shorter than the client's post timeout (an honest signature in flight would be refused).
 
 ### Decisions for Forge
 
@@ -1899,7 +1913,9 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
   supervisor's restart were read, not run).
 - The Nth occurrence of the strike is tested with N - 1 failure rows written by the test: one run reaches two
   withholds per auditor per round on the test network.
-- Service-admitted runs: neither the re-arm nor the lease path is exercised (skipped by construction).
+- Service-admitted runs: neither the re-arm nor the lease path is exercised (skipped by construction). The
+  revocation of an executed lease in such a run is tested with a `service-admission` record and a second
+  attempt written by the test: it drops the job as `INFRASTRUCTURE`, with no re-arm and no sanction.
 - The probabilities and the replay durations are [A], not measured; the feasibility inequality is arithmetic over
   assumed durations, and no replay of the operated shape was timed.
 - The revocation was exercised with verdicts written by the test and with real CPU replays of the seeded round;
