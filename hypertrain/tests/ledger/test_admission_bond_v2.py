@@ -75,13 +75,11 @@ def test_admission_lock_is_slashed_on_its_own_resolver_not_the_generic_one(tmp_p
     assert e.balances().burned == 1000 and e.balances().admission_locked == 0
 
 
-def test_contest_lock_keeps_the_generic_resolver(tmp_path: Path) -> None:
-    # Given: both resolvers installed, the admission one refusing everything
-    seen = []
-
+def test_contest_lock_is_settled_by_the_dispute_that_took_it(tmp_path: Path) -> None:
+    # Given: a generic callback and an admission resolver that must not be asked about a contest
+    # lock, and the contest resolver the disputes service installs.
     def generic(reference: str) -> Settlement:
-        seen.append(reference)
-        return verdict("MATCH")
+        raise AssertionError("the generic callback must not be asked about a lock")
 
     e = f.ledger(f.setup(), tmp_path / "ledger.db", settlement=generic)
     origin, _ = f.fund(e)
@@ -96,7 +94,14 @@ def test_contest_lock_keeps_the_generic_resolver(tmp_path: Path) -> None:
         kind="LOCK_CONTEST",
     )
     e.lock(contest, signer=f.COLD.ss58)
-    # When / Then: a contest lock is settled by the generic callback, as before
+    seen: list[str] = []
+
+    def contest_settlement(lock: EscrowLock) -> Settlement:
+        seen.append(lock.operation_id)
+        return verdict("MATCH").model_copy(update={"dispute_id": lock.dispute_id})
+
+    e.contest_settlement = contest_settlement
+    # When / Then: the contest resolver settles it, by the lock itself
     e.release(release_of(contest, origin), signer=f.COLD.ss58, now_beacon=10)
     assert seen == [contest.operation_id] and e.balances().dispute_locked == 0
 

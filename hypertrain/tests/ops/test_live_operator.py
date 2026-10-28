@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 from scripts.ops import live_operator
-from scripts.ops.live_operator import check_open_shape
+from scripts.ops.live_operator import check_open_shape, finalize_expiry
 
 from hypertrain.ops.manifest_v2 import main as manifest_main
 from hypertrain.protocol import envelope_v2
@@ -131,6 +131,45 @@ def test_cli_open_with_an_auditable_window_reaches_the_master(
     assert master_calls == [("GET", "")]
 
 
+@pytest.mark.parametrize(("margin", "refused"), [(-1, True), (0, False)], ids=["short", "exact"])
+def test_open_refuses_a_hotkey_whose_screen_ends_before_the_round_does(
+    master_args: list[str], monkeypatch: pytest.MonkeyPatch, margin: int, refused: bool
+) -> None:
+    # Given: one eligible hotkey whose screen ends `margin` rounds from the d_final of the opening.
+    now, offsets, hotkey = 1000, window(98), Keypair(b"\x01" * 32).ss58
+    d_final = now + offsets[5]
+    state = Path(master_args[5])
+    relays = json.loads((state.parent / "inputs" / "relays.json").read_text())
+    with closing(sqlite3.connect(state / "challenge.db")) as db, db:
+        db.execute(
+            "INSERT INTO records_v2 VALUES(?,?,?,?)",
+            (master_args[3], "registry", "current", json.dumps({"body": relays})),
+        )
+
+    def call(self: Any, method: str, path: str, body: object = None, admin: bool = False) -> Any:
+        if (method, path) == ("GET", ""):
+            return {"now_round": now}
+        if (method, path) == ("GET", "/admission/" + hotkey):
+            record = {
+                "admission_id": sha256_hex(b"admission"),
+                "coldkey": "cold0",
+                "state": "ACTIVE",
+                "screen_until": d_final + margin,
+            }
+            return {"eligible": True, "record": record}
+        raise Reached
+
+    monkeypatch.setattr(live_operator.Master, "call", call)
+    args = [*open_args(master_args, 98)]
+    args[args.index("--hotkey") + 1] = hotkey
+    # When / Then: the short screen is refused by name; the exact one gets as far as the master.
+    with pytest.raises(SystemExit if refused else Reached) as raised:
+        live_operator.main(args)
+    if refused:
+        message = f"screen of {hotkey} ends at round {d_final - 1}, before d_final {d_final}"
+        assert message in str(raised.value)
+
+
 def test_finalize_lists_the_members_the_aggregate_step_left_out(
     master_args: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -196,7 +235,11 @@ def test_finalize_lists_the_members_the_aggregate_step_left_out(
         put("commit", f"0:{key.ss58}", {"body": {}})
     sent: list[tuple[str, dict]] = []
 
+    late = 700  # the master is far past d_final (9) when the operator finalizes
+
     def call(self: Any, method: str, path: str, body: Any = None, admin: bool = False) -> Any:
+        if method == "GET":
+            return {"now_round": late}
         sent.append((path, body))
         if path.endswith("/aggregate"):
             put("excluded", f"0:{keys[2].ss58}", {"reason": "NO_SHOW", "stage": "delta"})
@@ -209,6 +252,17 @@ def test_finalize_lists_the_members_the_aggregate_step_left_out(
 
     assert [path for path, _ in sent] == ["/admin/rounds/0/aggregate", "/admin/rounds/0/finalize"]
     assert sent[1][1]["body"]["included"] == sorted(key.ss58 for key in keys[:2])
+    # The Finalize is a fresh request: it must still be live when it reaches the master.
+    assert sent[1][1]["exp_drand"] == finalize_expiry(9, late) > late
+
+
+@pytest.mark.parametrize(("d_final", "now", "expected"), [(500, 100, 1500), (500, 900, 1900)])
+def test_finalize_envelope_outlives_a_finalize_posted_after_d_final(
+    d_final: int, now: int, expected: int
+) -> None:
+    # The operator may finalize at d_final + N; the envelope must not expire before the post.
+    assert finalize_expiry(d_final, now) == expected
+    assert finalize_expiry(d_final, now) > now
 
 
 def test_reseed_posts_the_admin_route_of_that_admission_and_nothing_else(

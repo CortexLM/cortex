@@ -295,6 +295,13 @@ the miner's state is bitwise equal to the challenge's own CPU replay.
 - The same job matched under `ATEN_CPU_CAPABILITY=avx2`.
 - `cpu_parity_probe.py` compares one exported job on both hosts.
 
+A manifest that sets `reference_spec.env.pinned` (`hypertrain/docs/protocol.md` section 7, item 4a)
+makes the hand-set `ATEN_CPU_CAPABILITY=avx2` below unnecessary: the launcher gives every rank the
+pins, and `bootstrap_service_capacity_v2` answers 409 `SERVICE_PROFILE_ENV_PIN` when the challenge
+host cannot honor them. Unpinned runs keep the manual pin (`cpu_miners.py` is unchanged). The pin
+removes ambient-induced divergence only; `docs/adr/0011-audit-integrity.md` part 3 says what was
+and was not measured.
+
 `setup` reads `SEEDS_DIR/miner<i>-hot.seed` and `miner<i>-cold.seed`. `miner<i>-cold` must be the
 builder's `cold-<i>`: origin i belongs to allocation entry i.
 
@@ -323,8 +330,9 @@ That gives 3 ACTIVE and 1 PROBATION. Rules that decide how identities are spent:
   asks again every 10 s for 10 minutes, then exits with status 3 and the route to call; run
   `$L reseed --admission-id <id>` (below) and start the driver again (ADR 0010 decision 2 point 5).
 
-A round opens on a roster of four funded, eligible miners with at most one in PROBATION. The
-operator opens it, the miners upload, and the operator settles it. Open it with five when an
+A round opens on a roster of four funded, eligible miners with at most one in PROBATION, each with
+a screen that lasts to the round's `d_final` (`open` refuses a hotkey whose screen ends earlier and
+names the round). The operator opens it, the miners upload, and the operator settles it. Open it with five when an
 eviction is plausible: a miner that never commits is left out (`excluded`, reason `NO_SHOW`) and
 the others are audited and paid, while four miners cannot lose anyone (`audits` answers 409
 `ROUND_INFEASIBLE`). `finalize` lists the roster minus the `excluded` records, read after the
@@ -340,7 +348,7 @@ ssh root@s100 "$L open --w 0 --hotkey H0 --hotkey H1 --hotkey H2 --hotkey H3 \
 ATEN_CPU_CAPABILITY=avx2 $PY -I $T/cpu_miners.py round DIR 0 0 1 2 3   # one miner at a time
 ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID 0" < $T/round_status.py
 ssh root@s100 "$L audits --w 0" < $O     # once now >= d_audit
-ssh root@s100 "$L finalize --w 0" < $O   # once every audit lease is complete with MATCH
+ssh root@s100 "$L finalize --w 0" < $O   # once every audit lease is complete with MATCH (a late one settles too)
 ssh root@s100 "$L reseed --admission-id <id>" < $O   # a lapsed miner (probe-v2 exit 3): new window
 ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID" < $T/weights_once.py
 ```
@@ -361,6 +369,13 @@ extra 100.
 Run `audits` as soon as `now >= d_audit`: it must be called before beacon round `absolute - 1`
 (`absolute = min(d_final, d_audit + 2 * lease_rounds)`), and a call after that answers 503 for every
 roster.
+
+Run `finalize` (it aggregates first) before `d_final`. The aggregate reads every audited member's
+admission at the call and leaves out one that no longer qualifies (`excluded`, reason
+`INELIGIBLE`, with its `cause`: rotated away, banned, suspended, back on probation, screen
+ended, bond burned); nobody is sanctioned for it and the others are paid. A roster of four then
+answers 409 `ROUND_INFEASIBLE` and writes nothing: repair the member's standing, or open the
+next round with five.
 
 **Upload one miner at a time.** A relay image built before `BeaconCache` (`relay/app.py`)
 BLS-verifies drand in `now()` on every capability and chunk call; later images share one verified

@@ -25,7 +25,7 @@ from hypertrain.models.registry import check_reduction_order
 from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.trainer.compress import compress, payload_hash, state_hash
 from hypertrain.trainer.config import TrainConfig
-from hypertrain.trainer.determinism import require_threads
+from hypertrain.trainer.determinism import require_reference_env
 from hypertrain.trainer.island import Comm, DistComm, forbid_reductions
 from hypertrain.trainer.leaf_v2 import leaf_digest
 from hypertrain.trainer.loop import Assignment, SampleFn, _load_batch, _norm, batch_hash
@@ -91,7 +91,7 @@ def train_unit_order(
 ) -> UnitOrderResult:
     """One H-step round; every rank returns the same result for any world dividing ``units``."""
     check_reduction_order(cfg.model.arch, "unit")
-    require_threads(cfg.cpu_threads)
+    require_reference_env(cfg)
     if units < 1 or units % comm.world:
         raise ValueError(f"units={units} must be a positive multiple of world {comm.world}")
     if cfg.inner.grad_accum != 1:

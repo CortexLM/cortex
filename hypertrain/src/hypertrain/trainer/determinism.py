@@ -9,9 +9,18 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from hypertrain.protocol.env_pins import EnvPin, divergence
+
+if TYPE_CHECKING:
+    from hypertrain.trainer.config import TrainConfig
 
 CUBLAS_WORKSPACE_CONFIG = ":4096:8"
+
+
+class EnvPinMismatch(RuntimeError):
+    """The live process environment differs from the manifest's ``reference_spec.env.pinned``."""
 
 
 def apply_reference_env(env: Mapping[str, Any]) -> dict[str, Any]:
@@ -21,6 +30,8 @@ def apply_reference_env(env: Mapping[str, Any]) -> dict[str, Any]:
     threads = env.get("cpu_threads")
     if type(threads) is not int or threads < 1:
         raise RuntimeError("manifest reference_spec.env.cpu_threads must be an int >= 1")
+    pinned = env.get("pinned")
+    require_env_pin(None if pinned is None else EnvPin.from_body(pinned))
     return setup_determinism(threads)
 
 
@@ -32,6 +43,48 @@ def require_threads(expected: int) -> None:
         raise RuntimeError(
             f"cpu thread pin mismatch: torch uses {torch.get_num_threads()}, manifest {expected}"
         )
+
+
+def require_env_pin(pin: EnvPin | None) -> None:
+    """Refuse to train/replay when this process does not honor the manifest's environment pin.
+
+    ATen, MKL and oneDNN read their variables at first use, so only the launcher can set them;
+    this check proves the process got them. The ATen capability is read from torch, which
+    silently ignores a bogus value or one set after its first op. MKL's CNR branch and oneDNN's
+    ISA have no public getter: for those, only the environment string is checked.
+    """
+    if pin is None:
+        return
+    import torch
+
+    bad = divergence(os.environ, pin)
+    want = dict(pin.present).get("ATEN_CPU_CAPABILITY")
+    live = torch.backends.cpu.get_cpu_capability()
+    if want is not None and live != want.upper():
+        bad["ATen CPU capability"] = (want.upper(), live)
+    if bad:
+        raise EnvPinMismatch(
+            "environment pin mismatch: "
+            + "; ".join(
+                f"{name}: manifest {'absent' if pinned is None else repr(pinned)}, live {got!r}"
+                for name, (pinned, got) in sorted(bad.items())
+            )
+        )
+
+
+def env_pin_evidence(pin: EnvPin | None) -> dict[str, Any]:
+    """Run evidence for ``summary.json``: self-reported by the process, never authority."""
+    if pin is None:
+        return {}
+    import torch
+
+    return {"env_pin": {**pin.body(), "cpu_capability": torch.backends.cpu.get_cpu_capability()}}
+
+
+def require_reference_env(cfg: TrainConfig) -> None:
+    """The check every train/replay entry point runs: threads and environment pin."""
+    require_threads(cfg.cpu_threads)
+    require_env_pin(cfg.env_pin)
 
 
 def setup_determinism(num_threads: int = 1) -> dict[str, Any]:

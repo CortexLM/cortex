@@ -157,7 +157,10 @@ Check: `GET /challenge/hypertrain/v2/runs/<run_id>` returns the envelope; the ru
 
 `ProductionBootstrap {run_id, operation_id, allocation_hash, total_units, origins[], authority_sig}`
 with `allocation_hash` = S0's `bootstrap_allocation_hash` and origins that conserve
-`total_units`. Two signatures by K_coord:
+`total_units`. Each `origin_id` is `bootstrap_origin_id(run_id, allocation_hash, i, id_key)` with
+`id_key = escrow_id_key(K_coord secret)` (an HMAC; the ledger refuses an unkeyed id with
+`BOOTSTRAP_ORIGIN_DOMAIN`), so the tool that builds the body needs the coordinator key it already
+signs with. Two signatures by K_coord:
 
 - `authority_sig` = K_coord signature over
   `b"hypertrain/origin/2|ProductionBootstrap|" + run_id + b"|" + body_digest(body without authority_sig)`;

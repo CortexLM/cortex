@@ -288,7 +288,7 @@ def test_release_bond_is_refused_while_something_the_bond_covers_is_open(
             queued = EscrowLock(
                 operation_id="77" * 32,
                 owner=COLD.ss58,
-                units=10,
+                units=100,  # a tenth of the funding floor, the least a new lock may hold
                 origin_ids=[world.origin],
                 admission_id=world.admission,
                 dispute_id=None,

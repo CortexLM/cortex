@@ -29,7 +29,7 @@ from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages_v2 import IslandJobV1, RankWorkResult
 from hypertrain.trainer.compress import state_hash
-from hypertrain.trainer.determinism import apply_reference_env
+from hypertrain.trainer.determinism import apply_reference_env, env_pin_evidence
 from hypertrain.trainer.island import DistComm, TraceContext, island_from_manifest, train_island
 from hypertrain.trainer.loop import Assignment
 from hypertrain.trainer.optim import OptState
@@ -78,6 +78,7 @@ def execute(directory: Path, backend: str) -> None:
         case _:
             raise IslandFailure("unsupported execution backend")
     apply_reference_env(job.manifest.training.reference_spec.env.model_dump())
+    evidence = env_pin_evidence(job.manifest.training.reference_spec.env.pin())
     dist.init_process_group(engine, timeout=timedelta(minutes=5))
     try:
 
@@ -256,6 +257,7 @@ def execute(directory: Path, backend: str) -> None:
                     "backend": backend,
                     "work": work.model_dump(mode="json"),
                     "optimizer_step": result.final_state.step,
+                    **evidence,
                     "commitments": {
                         "leaves_root": result.leaves_root,
                         "final_theta_hash": result.final_theta_hash,

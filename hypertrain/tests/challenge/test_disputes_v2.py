@@ -237,7 +237,12 @@ def test_settlement_preserves_only_accepted_recovery_linkage(tmp_path: Path) -> 
     d.resolution(canonicalize(seal(ref, "ResolutionV2", d.run_id, resolution, 100000)), now=3)
     # When / Then: incident evidence is not replaced by resolution evidence or a caller flag.
     status = d.settlement(turn.dispute_id)
-    assert status == d.settlement(turn.lock_id)
+    bond = EscrowLock.model_validate_json(
+        d.db.execute(
+            "SELECT request FROM escrow_events WHERE operation_id=?", (turn.lock_id,)
+        ).fetchone()[0]
+    )
+    assert status == d.contest_settlement(bond)
     assert (
         status.run_id,
         status.admission_id,
