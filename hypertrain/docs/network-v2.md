@@ -228,6 +228,12 @@ finality record counts as open), because the roster names the hotkey and the old
 refused at intake the moment the admission moves: rotate between rounds. A retry of a rotation that was applied is still
 answered. There is no emergency rotation of a hotkey that a round lists.
 
+A reward follows its coldkey, not the hotkey that signed the work. A reward earned before a
+rotation (live, or a shadow reward whose original custody was signed by an earlier hotkey of the
+admission) is still validated, matured and paid: `get_weights` credits the admission's current
+hotkey, never the retired one. A banned coldkey is not paid whatever hotkey it holds: its
+matured units stay in its free balance and the epoch mass burns as unpaid.
+
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
 rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
 refused (`CHALLENGE_EXPIRED`) once more than `challenge_rounds` rounds have passed since
@@ -377,8 +383,7 @@ not influence global theta; authorized production bootstrap issuance is a
 separate policy, not proof of market-backed collateral.
 
 Each due origin matures in its own savepoint when a beacon round is pushed. An origin that cannot
-(a shadow reward whose original custody no longer revalidates, because its hotkey rotated or a job
-object is missing) stays `reward_pending` and is retried at every round; it does not stop the
+(a shadow reward whose original custody no longer revalidates, because a job object is missing) stays `reward_pending` and is retried at every round; it does not stop the
 round's other origins, the lease expiry or the beacon route. The last such failure is journaled in
 `records_v2` with `kind='maturity-failed'` (`{error, detail}`, rewritten only when it changes, never
 deleted). List the origins still stuck, on `challenge.db`:

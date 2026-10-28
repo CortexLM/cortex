@@ -2150,7 +2150,10 @@ class ChallengeStore:
             for row in escrow.payable(now):
                 if budget == 0:
                     break
-                if row["hotkey"] not in weights and len(weights) >= MAX_ENTRIES:
+                payee = self._payee_v2(escrow.run_id, row["hotkey"])
+                if payee is None:
+                    continue  # a banned coldkey is not paid; the epoch mass burns as unpaid
+                if payee not in weights and len(weights) >= MAX_ENTRIES:
                     continue  # ponytail: no ranking across the cap; the units pay later
                 take = min(budget, row["units"])
                 op = EscrowOperation(
@@ -2164,7 +2167,7 @@ class ChallengeStore:
                     dispute_id=None,
                 )
                 escrow.pay(op, signer=row["owner"])
-                weights[row["hotkey"]] = weights.get(row["hotkey"], 0.0) + take
+                weights[payee] = weights.get(payee, 0.0) + take
                 budget -= take
         paid = meta["units_burned_this_epoch"] - budget
         if not paid:
@@ -2173,6 +2176,26 @@ class ChallengeStore:
         meta["units_burned_this_epoch"] = budget
         answer["weights"] = {h: weights[h] for h in sorted(weights)}
         return canonical(answer)
+
+    def _payee_v2(self, run_id: str, hotkey: str) -> str | None:
+        """Hotkey that is paid for a reward `hotkey` earned; None if its coldkey is banned.
+
+        A reward follows its coldkey, the economic identity, not the hotkey that signed the work:
+        after a rotation the admission's current hotkey is paid, so the coldkey's pending rewards
+        are neither lost nor sent to a hotkey it no longer runs. A ban is the coldkey's, so a
+        rotation does not lift it. An origin whose hotkey no admission knows (it never joined
+        through the admission service) is paid to that hotkey, as before.
+        """
+        row = self._db.execute(
+            "SELECT a.hotkey, EXISTS(SELECT 1 FROM admissions_v2 b WHERE b.run_id=a.run_id "
+            "AND b.coldkey=a.coldkey AND b.state='BANNED') AS banned "
+            "FROM admission_history h JOIN admissions_v2 a ON a.admission_id=h.admission_id "
+            "WHERE h.hotkey=? AND a.run_id=?",
+            (hotkey, run_id),
+        ).fetchone()
+        if row is None:
+            return hotkey
+        return None if row["banned"] else str(row["hotkey"])
 
     def _run_v2(self, run_id: str) -> RunManifestV2:
         row = self._db.execute("SELECT manifest FROM runs WHERE run_id=?", (run_id,)).fetchone()
@@ -2341,6 +2364,22 @@ class ChallengeStore:
         ).fetchone()
         if row is None:
             raise ChallengeError(403, "hotkey is not current accepted identity")
+        return str(row[0])
+
+    def _reward_owner_v2(self, run_id: str, hotkey: str) -> str:
+        """Coldkey that earned work signed by `hotkey`, even if its admission has moved on.
+
+        The ledger asks this of stored evidence (a reward, a shadow reservation), which was signed
+        when `hotkey` was the admission's hotkey: a reward follows its coldkey through a rotation.
+        It is not an intake gate; `_owner_v2` stays strict for everything a hotkey signs now.
+        """
+        row = self._db.execute(
+            "SELECT a.coldkey FROM admission_history h JOIN admissions_v2 a "
+            "ON a.admission_id=h.admission_id WHERE a.run_id=? AND h.hotkey=?",
+            (run_id, hotkey),
+        ).fetchone()
+        if row is None:
+            return self._owner_v2(run_id, hotkey)  # not an admission hotkey: refuse as before
         return str(row[0])
 
     def _assignment_v2(self, run_id: str, w: int, hotkey: str) -> tuple[int, ...]:
@@ -2653,7 +2692,7 @@ class ChallengeStore:
                 auditors=frozenset(manifest.training.auditors),
                 replay_finality=lambda e: self._finality_replay_v2(run_id, e),
                 settlement=lambda ref: self._settlement_v2(run_id, ref),
-                owner_of=lambda hot: self._owner_v2(run_id, hot),
+                owner_of=lambda hot: self._reward_owner_v2(run_id, hot),
                 assignment_of=lambda w, hot: self._assignment_v2(run_id, w, hot),
                 shadow_assignment_of=lambda binding: self._shadow_assignment_v2(run_id, binding),
                 shadow_settlement=lambda origin: self._shadow_settlement_v2(run_id, origin),
@@ -2715,7 +2754,7 @@ class ChallengeStore:
                 dispute_policy,
                 self._coord(),
                 contest_of=lambda h: Contest.model_validate(self._record_v2(run_id, "contest", h)),
-                owner_of=lambda hot: self._owner_v2(run_id, hot),
+                owner_of=lambda hot: self._reward_owner_v2(run_id, hot),
                 span=lambda contest, level, ctx: self._dispute_span_v2(run_id, contest, level, ctx),
             )
             self._services_v2[run_id] = (escrow, admission, disputes)
@@ -3140,10 +3179,14 @@ class ChallengeStore:
             ).fetchone()
             if row is None:
                 raise ChallengeError(409, "shadow admission missing")
+            # The original work was signed by the hotkey the admission held then, not necessarily
+            # the one it holds now: a reward follows its coldkey through a rotation. The stored
+            # work proof and screen are signed by that same hotkey, which binds it to the admission.
+            worker = request.commit.signer
             final = envelope_v2.Intake(run_id, {"Finalize": self._coord().ss58.__eq__}).accept(
                 request.finalize.model_dump(mode="json"), now
             )
-            commit = envelope_v2.Intake(run_id, {"CommitV2": row["hotkey"].__eq__}).accept(
+            commit = envelope_v2.Intake(run_id, {"CommitV2": worker.__eq__}).accept(
                 request.commit.model_dump(mode="json"), now
             )
             if not isinstance(final, Finalize) or not isinstance(commit, CommitV2):
@@ -3185,11 +3228,11 @@ class ChallengeStore:
                 raise ChallengeError(409, "shadow original signed challenge differs")
             reference = WorkProof.model_validate_json(result["reference"])
             proof_env = envelope_v2.parse_envelope(result["proof"])
-            proof = envelope_v2.Intake(run_id, {"WorkProof": row["hotkey"].__eq__}).accept(
+            proof = envelope_v2.Intake(run_id, {"WorkProof": worker.__eq__}).accept(
                 proof_env.model_dump(mode="json"), trial["finalized_beacon"]
             )
             screen = WorkScreenV2.model_validate(
-                envelope_v2.Intake(run_id, {"WorkScreenV2": row["hotkey"].__eq__})
+                envelope_v2.Intake(run_id, {"WorkScreenV2": worker.__eq__})
                 .accept(result["screen"], trial["finalized_beacon"])
                 .model_dump(mode="json")
             )
@@ -3213,9 +3256,9 @@ class ChallengeStore:
                 or not admission.qualified(screen)
                 or challenge.assignment_hash
                 != trial_assignment_hash(job.manifest, job.w, tuple(job.sample_ids))
-                or commit.hotkey != row["hotkey"]
+                or commit.hotkey != worker
                 or commit.w != final.w
-                or final.included != [row["hotkey"]]
+                or final.included != [worker]
                 or final.entitlements_root != reference.digest()
                 or commit.leaves_root != reference.leaves_root
                 or commit.delta_hash != reference.delta_hash
@@ -3275,7 +3318,7 @@ class ChallengeStore:
                     raise ChallengeError(409, "shadow retained qualified screen differs")
                 if operation == "probe":
                     original_commit = envelope_v2.Intake(
-                        run_id, {"CommitV2": row["hotkey"].__eq__}
+                        run_id, {"CommitV2": worker.__eq__}
                     ).accept(
                         canonicalize(original_result["commit_envelope"]), trial["finalized_beacon"]
                     )
@@ -3351,7 +3394,7 @@ class ChallengeStore:
                     (
                         i
                         for i in identities
-                        if (i["hotkey"], i["coldkey"]) == (row["hotkey"], row["coldkey"])
+                        if (i["hotkey"], i["coldkey"]) == (worker, row["coldkey"])
                     ),
                     None,
                 )
@@ -3371,7 +3414,7 @@ class ChallengeStore:
             binding = ShadowReservationRequestV1(
                 run_id=run_id,
                 admission_id=admission_id,
-                hotkey=row["hotkey"],
+                hotkey=worker,
                 coldkey=row["coldkey"],
                 trial_epoch=final.w,
                 commit_hash=body_digest(commit.model_dump(mode="json")),

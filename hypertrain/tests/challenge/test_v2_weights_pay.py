@@ -11,10 +11,12 @@ from pathlib import Path
 
 import pytest
 
+from hypertrain.challenge.admission_store import AdmissionStore
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.ledger import FULL_SHARE_MASS, Params
 from hypertrain.ledger.escrow_v2 import Settlement
+from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import EscrowLock, EscrowRelease, EscrowTransfer
 
 spec = importlib.util.spec_from_file_location(
@@ -59,6 +61,7 @@ def paying(tmp_path, actual_reward, monkeypatch):
         (s.manifest.run_id(), s.manifest.model_dump_json(), "{}"),
     )
     monkeypatch.setattr(store, "_services", lambda run_id: (escrow, None, None))
+    AdmissionStore(escrow)  # the tables the real services create; the tests below fill them
     escrow.reward_finalize(reward, evidence)
     yield store, escrow, reward, evidence, fraud
     store.close()
@@ -335,3 +338,72 @@ def test_out_of_order_epoch_not_completed_with_v2(paying) -> None:
     # Then: v1 refuses it as out_of_order and v2 does not fill its burned mass.
     assert late["metadata"]["reason"] == "out_of_order" and late["weights"] == {}
     assert pays(escrow) == 0 and escrow.balances().available == 1_000_000
+
+
+NEW_HOT = Keypair(b"\x0b" * 32)
+
+
+def admit(escrow, hotkeys: list[Keypair], state: str = "ACTIVE") -> str:
+    """One admission of E.COLD that held `hotkeys` in order; the last one is the current hotkey."""
+    admission = "ad" * 32
+    escrow.db.execute(
+        "INSERT INTO admissions_v2(admission_id, run_id, hotkey, coldkey, state) VALUES(?,?,?,?,?)",
+        (admission, escrow.run_id, hotkeys[-1].ss58, E.COLD.ss58, state),
+    )
+    for key in hotkeys:
+        escrow.db.execute(
+            "INSERT INTO admission_history VALUES(?,?,?)", (key.ss58, admission, E.COLD.ss58)
+        )
+    return admission
+
+
+def test_a_reward_follows_its_coldkey_to_the_current_hotkey(paying) -> None:
+    # Given: the reward was earned by HOT, then the coldkey moved the admission to NEW_HOT.
+    store, escrow, reward, _, _ = paying
+    admit(escrow, [E.HOT, NEW_HOT])
+    mature(escrow, reward)
+    # When
+    answer = json.loads(store.weights(0, at(escrow, 20), 1))
+    # Then: the mass goes to the hotkey the coldkey has now, none to the retired one, once.
+    assert answer["weights"] == {NEW_HOT.ss58: 1_000_000.0}
+    assert answer["metadata"]["units_paid"] == 1_000_000 and mass(answer) == FULL_SHARE_MASS
+    assert escrow.balances().paid == 1_000_000 and escrow.balances().conserved()
+    assert pays(escrow) == 1
+
+
+def test_a_reward_of_a_hotkey_that_never_rotated_is_paid_to_it(paying) -> None:
+    store, escrow, reward, _, _ = paying
+    admit(escrow, [E.HOT])
+    mature(escrow, reward)
+    answer = json.loads(store.weights(0, at(escrow, 20), 1))
+    assert answer["weights"] == {E.HOT.ss58: 1_000_000.0}
+
+
+@pytest.mark.parametrize("rotated", [False, True])
+def test_a_banned_coldkey_is_not_paid_whatever_hotkey_it_holds(paying, rotated: bool) -> None:
+    # Given: the admission was banned for fraud; its coldkey may or may not have rotated since.
+    store, escrow, reward, _, _ = paying
+    admit(escrow, [E.HOT, NEW_HOT] if rotated else [E.HOT], state="BANNED")
+    mature(escrow, reward)
+    # When
+    answer = json.loads(store.weights(0, at(escrow, 20), 1))
+    # Then: nothing is paid, the epoch mass burns, the units stay where they are.
+    assert answer["weights"] == {}
+    assert answer["metadata"]["units_paid"] == 0
+    assert answer["metadata"]["units_burned_this_epoch"] == 1_000_000
+    assert (escrow.balances().paid, escrow.balances().available) == (0, 1_000_000)
+    assert pays(escrow) == 0 and escrow.balances().conserved()
+
+
+def test_a_coldkey_banned_through_another_admission_is_not_paid(paying) -> None:
+    # Given: the earning admission is live, but the same coldkey was banned through another one.
+    store, escrow, reward, _, _ = paying
+    admit(escrow, [E.HOT])
+    escrow.db.execute(
+        "INSERT INTO admissions_v2(admission_id, run_id, hotkey, coldkey, state) VALUES(?,?,?,?,?)",
+        ("ae" * 32, escrow.run_id, NEW_HOT.ss58, E.COLD.ss58, "BANNED"),
+    )
+    mature(escrow, reward)
+    # When / Then: the ban is the coldkey's.
+    answer = json.loads(store.weights(0, at(escrow, 20), 1))
+    assert answer["weights"] == {} and escrow.balances().paid == 0

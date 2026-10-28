@@ -174,6 +174,12 @@
   savepoint; one that fails for another reason than vesting or an open dispute stays `reward_pending`,
   is journaled as `records_v2 kind='maturity-failed'` and is retried at every round. A conservation
   failure or a SQLite error still aborts the call (Lens F6, SHD-D3).
+- A reward follows its coldkey through a hotkey rotation (D66). The shadow reward of an admission that
+  rotated no longer sticks: its custody is revalidated against the hotkey that signed it, which the
+  admission held then, and the ledger resolves a retired hotkey of an admission to its coldkey when it
+  validates stored evidence (the intake gate stays strict). `get_weights` pays a live reward to the
+  admission's current hotkey, and pays nothing to a banned coldkey (its units stay free and the
+  epoch mass burns).
 - The dispute long poll can no longer deadlock the store. `DisputesV2` has one lock order, the
   store lock then a leaf condition: `events()` reads the event table outside the condition and parks
   on a counter, so a mutator that notifies inside its transaction never waits for a poller that
