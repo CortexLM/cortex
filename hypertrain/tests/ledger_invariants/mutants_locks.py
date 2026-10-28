@@ -93,7 +93,7 @@ SCREEN_TERM = """\
 GOAL_TERM = """\
             (p.G_max_units * 10**18 + denominator - 1) // denominator
             if denominator
-            else p.G_max_units + units + 1,
+            else p.G_max_units + locked + 1,
 """
 COLLECTIBLE_TERM = (
     "            self.escrow.manifest.training.verify.s_min_units(p.R_collectible_units),\n"
