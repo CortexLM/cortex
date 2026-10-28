@@ -559,6 +559,19 @@
   again with the same hotkey every 10 s for 10 minutes, journals the `resume`, and exits with
   status 3 naming the route if nobody reseeds. No constant, policy field or message changes.
   See ADR 0010 decision 2 point 5 at the monorepo root.
+- `aggregate` and `finalize` no longer hold the challenge's store lock while they compute. The
+  tape (`make_tape`, then `replay_tape`) and the third replay of `finalize` took 327-423 s and
+  177-223 s of one lock hold at the 100.7 M profile (five deltas of 102,253,376 bytes), during
+  which `push_beacon` and `latest_beacon` waited and the TEST freshness gate closed. `aggregate`
+  is now a claim, a computation without the lock and a settlement that writes only if the round
+  is still what the claim read (else 409 `AGGREGATE_STALE`, nothing written); the claim and
+  every time-dependent decision of the plan are made at the beacon round the freshness gate
+  passed at. A second `aggregate` of a round that is computing waits for it (two waiters per
+  process, 600 s, then 503). `finalize` replays the applied tape before its transaction and the
+  transaction uses that verdict only if the records it replayed are unchanged. The bytes written
+  are those of the single transaction. The new helpers join the owned set of
+  `implementation_hash`, which changes (as for any edit of `aggregate_v2` or `finalize_v2`); the
+  freshness gate is not asked again at the settlement. See `docs/network-v2.md`.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

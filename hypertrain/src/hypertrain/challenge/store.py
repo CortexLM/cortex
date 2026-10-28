@@ -23,7 +23,7 @@ import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, wait
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from fractions import Fraction
 from functools import partial
 from pathlib import Path
@@ -306,6 +306,50 @@ MAX_ROSTER_CEILING = 1024
 REFERENCE_WAITERS = 2
 REFERENCE_WAIT_SECONDS = 330.0
 
+# A repeated aggregate for a round that is already computing waits for it, on a worker of the
+# asyncio.to_thread pool (min(32, cpu + 4)). Past AGGREGATE_WAITERS waiters in the process it is
+# refused with 503 at once; a waiter gives up after AGGREGATE_WAIT_SECONDS, which is the client
+# timeout of scripts/ops/live_operator.py.
+AGGREGATE_WAITERS = 2
+AGGREGATE_WAIT_SECONDS = 600.0
+
+
+@dataclass(frozen=True, slots=True)
+class _AggregatePlan:
+    """Everything one aggregation computes from. The claim reads it under the lock, the settlement
+    reads it again and writes only when it is equal."""
+
+    now: int
+    manifest: RunManifestV2
+    policy: AggregationPolicyV2
+    economics: bytes
+    inputs: list[Any]
+    prev_state: str | None  # None at w == 0: the computation builds the genesis state
+    predecessor: str
+    reference_reward_units: int
+
+
+@dataclass(frozen=True, slots=True)
+class _FinalityReplay:
+    """Everything the replay of a finalized round computes from. `key` names exactly these values,
+    so a verdict kept under it is the verdict of a replay of them and of no other."""
+
+    key: str
+    manifest: RunManifestV2
+    policy: AggregationPolicyV2
+    economics: bytes
+    tape: Any
+    w: int
+    prev_state: str
+    predecessor: str
+    inputs: list[Any]
+    reference_reward_units: int
+    signer: str
+
+
+# Replay verdicts kept for the transactions that will ask for them; a verdict is 64 hex characters.
+FINALITY_VERDICTS = 8
+
 
 # The meta row that pins which coordinator secret the escrow ids were derived from.
 ESCROW_ID_NAMESPACE_META = "escrow-id-namespace-v2"
@@ -489,6 +533,10 @@ class ChallengeStore:
         self._reference_flights_v2: dict[tuple[str, str, bool], Future[str]] = {}
         self._reference_waiters = threading.BoundedSemaphore(REFERENCE_WAITERS)
         self._staging = threading.Lock()
+        self._aggregate_flights_v2: dict[tuple[str, int], Future[dict[str, Any]]] = {}
+        self._aggregate_waiters = threading.BoundedSemaphore(AGGREGATE_WAITERS)
+        self._finality_verdicts_v2: dict[str, str] = {}
+        self._finality_prime_v2 = threading.Lock()
         self._ipc_v2: socket.socket | None = None
         self._ipc_path_v2: Path | None = None
         self._ipc_thread_v2: threading.Thread | None = None
@@ -601,6 +649,7 @@ class ChallengeStore:
         child.clock = lambda: self.clock()
         child._reference_waiters = self._reference_waiters  # one budget for the one thread pool
         child._staging = self._staging  # one model in memory at a time, whichever store hosts it
+        child._aggregate_waiters = self._aggregate_waiters  # one budget for the one thread pool
         lock = directory / "capacity-runtime.lock"
         if not lock.is_symlink():  # one host-wide capacity lock across all hosted runs
             lock.unlink(missing_ok=True)
@@ -2495,35 +2544,121 @@ class ChallengeStore:
             or record["shadow"] != evidence.shadow
         ):
             raise EscrowError("FINALITY_ACCEPTANCE_LINKAGE")
+        job = self._finality_replay_job_v2(
+            run_id, int(str(evidence.finalize.body["w"])), evidence.tape_hash
+        )
+        # A verdict kept under this key is that of a replay, made before the transaction, of these
+        # very values; without one the replay is made here, as it always was.
+        theta_hash = self._finality_verdicts_v2.get(job.key) or self._run_finality_replay_v2(job)
+        if theta_hash != record["theta_hash"]:
+            raise EscrowError("FINALITY_TAPE_REPLAY_MISMATCH")
+        return str(record["theta_hash"])
+
+    def _finality_replay_job_v2(self, run_id: str, w: int, tape_hash: str) -> _FinalityReplay:
+        """The values the replay of round w computes from, read in a transaction."""
         from hypertrain.aggregator.checkpoint import network_inputs
-        from hypertrain.aggregator.tape_v2 import TapeV2, replay_tape
+        from hypertrain.aggregator.tape_v2 import TapeV2
 
         manifest = self._run_v2(run_id)
-        w = int(str(evidence.finalize.body["w"]))
         self.require_roster_v2(run_id, w)
         applied = self._record_v2(run_id, "applied", str(w))
-        inputs = network_inputs(self._record_v2(run_id, "tape-inputs", str(w))["inputs"])
-        tape = TapeV2.from_bytes(self.objects.get(evidence.tape_hash))
-        replayed = replay_tape(
-            self.objects,
-            tape,
+        stored = self._record_v2(run_id, "tape-inputs", str(w))
+        inputs = network_inputs(stored["inputs"])
+        tape = TapeV2.from_bytes(self.objects.get(tape_hash))
+        signer = self._coord().ss58
+        return _FinalityReplay(
+            sha256_hex(canonicalize([run_id, w, tape_hash, applied, stored, signer])),
             manifest,
             AggregationPolicyV2.model_validate_json(
                 self.objects.get(manifest.network.aggregation_policy_hash)
             ),
             self.objects.get(manifest.network.economics_policy_hash),
-            signer=self._coord().ss58,
-            w=w,
-            prev_state=str(applied["prev_state"]),
-            predecessor_tape_hash=str(applied["predecessor_tape_hash"]),
-            inputs=inputs,
-            reference_reward_units=self._services_v2[run_id][0].policy.R_collectible_units,
+            tape,
+            w,
+            str(applied["prev_state"]),
+            str(applied["predecessor_tape_hash"]),
+            inputs,
+            self._services(run_id)[0].policy.R_collectible_units,
+            signer,
         )
-        from hypertrain.aggregator.core import th
 
-        if th(replayed.theta) != record["theta_hash"]:
-            raise EscrowError("FINALITY_TAPE_REPLAY_MISMATCH")
-        return str(record["theta_hash"])
+    def _run_finality_replay_v2(self, job: _FinalityReplay) -> str:
+        """Replay the tape of the job from its original objects; no lock, no database row."""
+        from hypertrain.aggregator.core import th
+        from hypertrain.aggregator.tape_v2 import replay_tape
+
+        replayed = replay_tape(
+            self.objects,
+            job.tape,
+            job.manifest,
+            job.policy,
+            job.economics,
+            signer=job.signer,
+            w=job.w,
+            prev_state=job.prev_state,
+            predecessor_tape_hash=job.predecessor,
+            inputs=job.inputs,
+            reference_reward_units=job.reference_reward_units,
+        )
+        return th(replayed.theta)
+
+    def _prime_finality_replay_v2(self, run_id: str, w: int, raw: bytes) -> None:
+        """Replay the applied tape of round w before finalize_v2's transaction, without the lock.
+
+        Nothing is written. It runs only for a finalize that will reach the replay: a stored
+        Finalize result, a repair, a missing record or a request that is not the coordinator's
+        signed list of the tape's own inputs is left to the transaction, which refuses it as it
+        always did. So is anything that fails here, a record or the tape object that cannot be
+        read, or the replay itself: the transaction reads and replays the same way and raises
+        where it always raised, after the checks that come before it. One replay at a time, as
+        the store lock used to allow; a finalize that waits longer than a waiter of an
+        aggregate does replays under the lock, as before.
+        """
+        if self._lock._is_owned():  # type: ignore[attr-defined]
+            return
+        with self._lock:
+            try:
+                manifest = self._run_v2(run_id)
+                if (
+                    self._service_boundary_v2(run_id, w) is not None
+                    or self._db.execute(
+                        "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='finalize' AND id=?",
+                        (run_id, str(w)),
+                    ).fetchone()
+                ):
+                    return
+                request = envelope_v2.Intake(
+                    run_id, {"Finalize": manifest.training.coord_pubkey.__eq__}
+                ).accept(raw, self._now(self._db))
+                applied = self._record_v2(run_id, "applied", str(w))
+                stored = self._record_v2(run_id, "tape-inputs", str(w))
+                if (
+                    not isinstance(request, Finalize)
+                    or request.w != w
+                    or request.included
+                    != sorted(item["roster"]["hotkey"] for item in stored["inputs"])
+                    or applied.get("kind") == "repair"
+                ):
+                    return
+                job = self._finality_replay_job_v2(run_id, w, str(applied["tape_hash"]))
+            except Exception:  # deferred, not dropped: the transaction reads the same rows
+                return
+        if not self._finality_prime_v2.acquire(timeout=AGGREGATE_WAIT_SECONDS):
+            return
+        try:
+            with self._lock:
+                if job.key in self._finality_verdicts_v2:
+                    return
+            try:
+                theta_hash = self._run_finality_replay_v2(job)
+            except Exception:  # deferred, not dropped: the transaction replays and raises it
+                return
+            with self._lock:
+                self._finality_verdicts_v2[job.key] = theta_hash
+                while len(self._finality_verdicts_v2) > FINALITY_VERDICTS:
+                    del self._finality_verdicts_v2[next(iter(self._finality_verdicts_v2))]
+        finally:
+            self._finality_prime_v2.release()
 
     @staticmethod
     def _qualification_evidence_v2(
@@ -4731,6 +4866,14 @@ class ChallengeStore:
             "training_v2",
             "verified_inputs_v2",
             "aggregate_v2",
+            "_AggregatePlan",
+            "_aggregate_flight_v2",
+            "_aggregate_answer_v2",
+            "_aggregate_claim_v2",
+            "_aggregate_plan_v2",
+            "_aggregate_compute_v2",
+            "_aggregate_settle_v2",
+            "_prime_finality_replay_v2",
             "_capacity_outer_v2",
             "_prepare_capacity_genesis_v2",
             "island_job_v2",
@@ -7597,16 +7740,17 @@ class ChallengeStore:
         finality["unresolved_audits"] = max(0, int(finality["unresolved_audits"]) - len(absent))
         self._put_record_v2(run_id, "finality", str(w), finality)
 
-    def _exclude_missing_deltas_v2(self, run_id: str, w: int) -> None:
+    def _exclude_missing_deltas_v2(self, run_id: str, w: int, now: int | None = None) -> None:
         """Leave out an audited member whose delta never arrived.
 
         Delta intake closes at d_upload (training_v2). The member's audit already resolved and
-        decremented unresolved_audits, so only the record is written.
+        decremented unresolved_audits, so only the record is written. `now` is the beacon round
+        the decision is made at; by default the latest one.
         """
         from hypertrain.protocol.messages_v2 import RoundOpenV2
 
         body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", str(w))["body"])
-        if self._now(self._db) < body.d_upload:
+        if (self._now(self._db) if now is None else now) < body.d_upload:
             return
         audited = {
             row[0]
@@ -7648,7 +7792,7 @@ class ChallengeStore:
         # collectible bound) is not a fault of the member: name nothing rather than mislabel it.
         raise ChallengeError(500, f"UNMODELLED_ELIGIBILITY_TERM: {hotkey}")
 
-    def _exclude_unfit_members_v2(self, run_id: str, w: int) -> None:
+    def _exclude_unfit_members_v2(self, run_id: str, w: int, now: int | None = None) -> None:
         """Leave out an audited member whose admission no longer qualifies it for this round.
 
         The wait is on the member, not on the round: aggregate refused for everybody until the
@@ -7661,7 +7805,7 @@ class ChallengeStore:
 
         admission = self._services(run_id)[1]
         body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", str(w))["body"])
-        now = self._now(self._db)
+        now = self._now(self._db) if now is None else now
         audited = {
             row[0]
             for row in self._db.execute(
@@ -9300,7 +9444,7 @@ class ChallengeStore:
             self._put_record_v2(run_id, "finality", str(row["w"]), finality)
             return {"result": verdict.result}
 
-    def verified_inputs_v2(self, run_id: str, w: int) -> list[Any]:
+    def verified_inputs_v2(self, run_id: str, w: int, now: int | None = None) -> list[Any]:
         resource = self._service_boundary_v2(run_id, w)
         if resource is not None:
             from hypertrain.aggregator.capacity_worker import bounded_bytes
@@ -9316,7 +9460,7 @@ class ChallengeStore:
             )
 
             manifest = self._run_v2(run_id)
-            now = self._now(self._db)
+            now = self._now(self._db) if now is None else now
             opening = envelope_v2.Intake(
                 run_id, {"RoundOpenV2": manifest.training.coord_pubkey.__eq__}
             ).accept(canonicalize(self._record_v2(run_id, "round", str(w))), now)
@@ -9560,7 +9704,7 @@ class ChallengeStore:
         self.require_roster_v2(run_id, w)
         _, admission, disputes = self._services(run_id)
         body = RoundOpenV2.model_validate(self._record_v2(run_id, "round", str(w))["body"])
-        now = self._now(self._db)
+        now = self._now(self._db) if now is None else now
         works = []
         for entry in body.roster:
             identity = f"{w}:{entry.hotkey}"
@@ -9753,7 +9897,8 @@ class ChallengeStore:
             return {"tape": tape.body_json(), **applied}
 
     def aggregate_v2(self, run_id: str, w: int) -> dict[str, Any]:
-        preflight_resource = self._service_boundary_v2(run_id, w)
+        with self._lock:  # a read of the shared connection is never made outside the lock
+            preflight_resource = self._service_boundary_v2(run_id, w)
         if preflight_resource is not None:
             from hypertrain.aggregator.capacity_worker import bounded_bytes
             from hypertrain.aggregator.tape_v2 import TapeV2
@@ -9827,90 +9972,184 @@ class ChallengeStore:
                     raise ChallengeError(409, "SERVICE_AGGREGATE_TAPE_LINEAGE")
             self._service_boundary_v2(run_id, w, heavy=True)
             self.verified_inputs_v2(run_id, w)
-        resource = self._service_boundary_v2(run_id, w, heavy=True)
+        with self._lock:
+            resource = self._service_boundary_v2(run_id, w, heavy=True)
         if resource is not None:
             return self._capacity_outer_v2(run_id, w)
-        import hypertrain.trainer  # noqa: F401
-        from hypertrain.aggregator.core import OuterState
-        from hypertrain.aggregator.tape_v2 import make_tape, replay_tape
-        from hypertrain.challenge.finality_v2 import require_apply
-        from hypertrain.trainer.config import TrainConfig
-        from hypertrain.trainer.model import init_params
+        return self._aggregate_flight_v2(run_id, w)
 
+    def _aggregate_flight_v2(self, run_id: str, w: int) -> dict[str, Any]:
+        """Claim under the lock, compute without it, settle under it (docs/adr/0012 section 2).
+
+        The claim reads what the round is aggregated from and registers a flight keyed (run, w): a
+        second call waits for it and gets its answer or its failure, and never starts a second
+        computation. The computation reads no database row, so the lock is free while it runs and a
+        beacon round can land. The settlement reads the claim again in the transaction that writes
+        and writes only when nothing it was computed from has changed.
+        """
+        if self._lock._is_owned():  # type: ignore[attr-defined]
+            raise RuntimeError("aggregate_v2 would keep the store lock through the computation")
+        self._services(run_id)  # first use builds them, and their schema script commits
+        key = (run_id, w)
+        with self._lock:
+            flight = self._aggregate_flights_v2.get(key)
+            leader = flight is None
+            if leader:
+                claim = self._aggregate_claim_v2(run_id, w)
+                if isinstance(claim, dict):
+                    return claim
+                flight = self._aggregate_flights_v2[key] = Future()
+        assert flight is not None
+        # A failure travels with its traceback, whose frames keep their locals. None of them may
+        # keep the flight, which keeps the failure: that cycle would hold the arrays of the failed
+        # computation (gigabytes) until a collection finds it.
+        if not leader:
+            try:
+                return self._follow_aggregate_v2(flight)
+            finally:
+                del flight
+        assert isinstance(claim, _AggregatePlan)
+        try:
+            tape, prev_state, tape_hash = self._aggregate_compute_v2(claim, w)
+            value = self._aggregate_settle_v2(run_id, w, claim, tape, prev_state, tape_hash)
+        except BaseException as error:
+            self._end_aggregate_v2(key, flight, error=error)
+            del flight
+            raise
+        self._end_aggregate_v2(key, flight, value=value)
+        return value
+
+    def _aggregate_answer_v2(self, run_id: str, w: int) -> dict[str, Any] | None:
+        """The stored answer of a round that is already aggregated, else None."""
+        existing = self._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='applied' AND id=?",
+            (run_id, str(w)),
+        ).fetchone()
+        if existing is None:
+            return None
+        from hypertrain.aggregator.tape_v2 import TapeV2
+
+        saved = json.loads(existing[0])
+        if saved.get("kind") == "repair":
+            from hypertrain.aggregator.rollback_v2 import RepairTape
+
+            repair = RepairTape.from_bytes(self.objects.get(saved["tape_hash"]))
+            return {"repair": repair.model_dump(mode="json"), **saved}
+        tape = TapeV2.from_bytes(self.objects.get(saved["tape_hash"]))
+        return {"tape": tape.body_json(), **saved}
+
+    def _aggregate_claim_v2(self, run_id: str, w: int) -> dict[str, Any] | _AggregatePlan:
+        """The answer of an aggregated round, else the plan to aggregate it from.
+
+        The freshness gate and its pin commit with this transaction, as they did with the whole
+        aggregation, and the round it passes at is the one every time-dependent decision is made at.
+        What the plan derives, the exclusion records, is rolled back to a savepoint: only the
+        settlement writes it, together with the tape.
+        """
         with self._tx():
             manifest = self._run_v2(run_id)
             self.require_roster_v2(run_id, w)
             self._require_unretired_v2(run_id, w)
-            self._fresh_v2(manifest, f"aggregate:{w}:{self._now(self._db)}")
-            existing = self._db.execute(
-                "SELECT data FROM records_v2 WHERE run_id=? AND kind='applied' AND id=?",
-                (run_id, str(w)),
-            ).fetchone()
-            if existing is not None:
-                from hypertrain.aggregator.tape_v2 import TapeV2
+            now = self._fresh_v2(manifest, f"aggregate:{w}:{self._now(self._db)}")
+            answer = self._aggregate_answer_v2(run_id, w)
+            if answer is not None:
+                return answer
+            self._db.execute("SAVEPOINT aggregate_claim")
+            try:
+                return self._aggregate_plan_v2(run_id, w, now)
+            finally:
+                self._db.execute("ROLLBACK TO aggregate_claim")
+                self._db.execute("RELEASE aggregate_claim")
 
-                saved = json.loads(existing[0])
-                if saved.get("kind") == "repair":
-                    from hypertrain.aggregator.rollback_v2 import RepairTape
+    def _aggregate_plan_v2(self, run_id: str, w: int, now: int) -> _AggregatePlan:
+        """What the round is aggregated from at beacon round `now`; in a transaction."""
+        from hypertrain.challenge.finality_v2 import require_apply
 
-                    repair = RepairTape.from_bytes(self.objects.get(saved["tape_hash"]))
-                    return {"repair": repair.model_dump(mode="json"), **saved}
-                tape = TapeV2.from_bytes(self.objects.get(saved["tape_hash"]))
-                return {"tape": tape.body_json(), **saved}
-            history = [s for s in self._history_v2(run_id) if s.w < w]
-            require_apply(run_id, w, history)
-            self._exclude_missing_deltas_v2(run_id, w)
-            self._exclude_unfit_members_v2(run_id, w)
-            inputs = self.verified_inputs_v2(run_id, w)
-            self._require_survivors_v2(manifest, [x.roster for x in inputs])
-            policy = AggregationPolicyV2.model_validate_json(
+        manifest = self._run_v2(run_id)
+        history = [s for s in self._history_v2(run_id) if s.w < w]
+        require_apply(run_id, w, history)
+        self._exclude_missing_deltas_v2(run_id, w, now)
+        self._exclude_unfit_members_v2(run_id, w, now)
+        inputs = self.verified_inputs_v2(run_id, w, now)
+        self._require_survivors_v2(manifest, [x.roster for x in inputs])
+        previous = self._record_v2(run_id, "applied", str(w - 1)) if w else None
+        return _AggregatePlan(
+            now,
+            manifest,
+            AggregationPolicyV2.model_validate_json(
                 self.objects.get(manifest.network.aggregation_policy_hash)
+            ),
+            self.objects.get(manifest.network.economics_policy_hash),
+            inputs,
+            str(previous["out_state"]) if previous else None,
+            str(previous["tape_hash"]) if previous else "0" * 64,
+            self._services(run_id)[0].policy.R_collectible_units,
+        )
+
+    def _aggregate_compute_v2(self, plan: _AggregatePlan, w: int) -> tuple[Any, str, str]:
+        """The tape of the plan, made and replayed. No lock and no database row, only objects."""
+        import hypertrain.trainer  # noqa: F401
+        from hypertrain.aggregator.core import OuterState
+        from hypertrain.aggregator.tape_v2 import make_tape, replay_tape
+        from hypertrain.trainer.config import TrainConfig
+        from hypertrain.trainer.model import init_params
+
+        prev_state = plan.prev_state
+        if prev_state is None:
+            theta = init_params(TrainConfig.from_manifest_v2(plan.manifest).model)
+            prev_state = self.objects.put(
+                OuterState.init({k: v.detach().cpu().numpy() for k, v in theta.items()}).to_bytes()
             )
-            economics = self.objects.get(manifest.network.economics_policy_hash)
-            if w:
-                previous = self._record_v2(run_id, "applied", str(w - 1))
-                prev_state, predecessor = str(previous["out_state"]), str(previous["tape_hash"])
-            else:
-                theta = init_params(TrainConfig.from_manifest_v2(manifest).model)
-                prev_state = self.objects.put(
-                    OuterState.init(
-                        {k: v.detach().cpu().numpy() for k, v in theta.items()}
-                    ).to_bytes()
-                )
-                predecessor = "0" * 64
-            tape = make_tape(
-                self.objects,
-                manifest,
-                policy,
-                economics,
-                self._coord(),
-                w=w,
-                prev_state=prev_state,
-                predecessor_tape_hash=predecessor,
-                inputs=inputs,
-                reference_reward_units=self._services(run_id)[0].policy.R_collectible_units,
-            )
+        tape = make_tape(
+            self.objects,
+            plan.manifest,
+            plan.policy,
+            plan.economics,
+            self._coord(),
+            w=w,
+            prev_state=prev_state,
+            predecessor_tape_hash=plan.predecessor,
+            inputs=plan.inputs,
+            reference_reward_units=plan.reference_reward_units,
+        )
+        replay_tape(
+            self.objects,
+            tape,
+            plan.manifest,
+            plan.policy,
+            plan.economics,
+            signer=self._coord().ss58,
+            w=w,
+            prev_state=prev_state,
+            predecessor_tape_hash=plan.predecessor,
+            inputs=plan.inputs,
+            reference_reward_units=plan.reference_reward_units,
+        )
+        return tape, prev_state, self.objects.put(tape.to_bytes())
+
+    def _aggregate_settle_v2(
+        self, run_id: str, w: int, plan: _AggregatePlan, tape: Any, prev_state: str, tape_hash: str
+    ) -> dict[str, Any]:
+        """Write the tape of the plan if the round is still what the plan was made from.
+
+        The plan is derived again at the claim's beacon round, so a member whose screen ended while
+        the tape computed is still in, as it was for a call made at that round. The freshness gate
+        is not asked again: it passed at the claim, and refusing here would throw the tape away.
+        """
+        with self._tx():
             self.require_roster_v2(run_id, w)
-            replay_tape(
-                self.objects,
-                tape,
-                manifest,
-                policy,
-                economics,
-                signer=self._coord().ss58,
-                w=w,
-                prev_state=prev_state,
-                predecessor_tape_hash=predecessor,
-                inputs=inputs,
-                reference_reward_units=self._services(run_id)[0].policy.R_collectible_units,
-            )
-            tape_hash = self.objects.put(tape.to_bytes())
+            answer = self._aggregate_answer_v2(run_id, w)
+            if answer is not None:
+                return answer  # aggregated meanwhile, by another process: answer, write nothing
+            current = self._aggregate_plan_v2(run_id, w, plan.now)
+            if current != plan:
+                raise ChallengeError(409, "AGGREGATE_STALE: the round changed while it computed")
             applied = {
                 "tape_hash": tape_hash,
                 "out_state": tape.body.out_state,
                 "theta_hash": tape.body.out_hashes["theta_hash"],
                 "prev_state": prev_state,
-                "predecessor_tape_hash": predecessor,
+                "predecessor_tape_hash": plan.predecessor,
             }
             self._put_record_v2(run_id, "applied", str(w), applied)
             # Persist historical authority facts, never replace with future released locks.
@@ -9918,12 +10157,45 @@ class ChallengeStore:
                 run_id,
                 "tape-inputs",
                 str(w),
-                {"inputs": [self._serialize_input_v2(x) for x in inputs]},
+                {"inputs": [self._serialize_input_v2(x) for x in current.inputs]},
             )
             finality = self._record_v2(run_id, "finality", str(w))
             finality["applied"], finality["state_hash"] = True, applied["theta_hash"]
             self._put_record_v2(run_id, "finality", str(w), finality)
             return {"tape": tape.body_json(), **applied}
+
+    def _follow_aggregate_v2(self, flight: Future[dict[str, Any]]) -> dict[str, Any]:
+        """A repeated request waits for the running aggregation, on one of a few places."""
+        if not self._aggregate_waiters.acquire(blocking=False):
+            raise ChallengeError(503, "aggregate already running for this round; retry")
+        try:
+            finished, _ = wait([flight], timeout=AGGREGATE_WAIT_SECONDS)
+        finally:
+            self._aggregate_waiters.release()
+        if not finished:
+            raise ChallengeError(503, "aggregate still running for this round; retry")
+        try:
+            return flight.result()
+        finally:
+            del flight, finished
+
+    def _end_aggregate_v2(
+        self,
+        key: tuple[str, int],
+        flight: Future[dict[str, Any]],
+        *,
+        value: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        """Forget the flight by identity, then tell the waiters how it ended."""
+        with self._lock:
+            if self._aggregate_flights_v2.get(key) is flight:
+                del self._aggregate_flights_v2[key]
+        if error is not None:
+            flight.set_exception(error)
+        else:
+            assert value is not None
+            flight.set_result(value)
 
     @staticmethod
     def _serialize_input_v2(work: Any) -> dict[str, Any]:
@@ -9943,6 +10215,7 @@ class ChallengeStore:
         from hypertrain.ledger.escrow_v2 import RewardWork, authority_message
         from hypertrain.protocol.messages_v2 import RewardFinalize
 
+        self._prime_finality_replay_v2(run_id, w, raw)
         with self._tx():
             manifest = self._run_v2(run_id)
             if self._service_boundary_v2(run_id, w) is not None:
