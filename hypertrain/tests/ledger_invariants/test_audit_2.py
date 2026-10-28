@@ -770,11 +770,11 @@ def test_a_delta_manifest_must_carry_the_hash_and_size_of_the_commit(world: sa.W
 
 
 def test_the_audit_decision_is_bound_to_every_committed_hash(world: sa.World) -> None:
-    # Given: the honest allowlisted miner's audit, replayed by the master (a MATCH), and the same
-    # audit re-run by the comparator with one committed hash altered at a time.
+    # Given: an honest miner's audit, replayed by the master (a MATCH), and the same audit
+    # re-run by the comparator with one committed hash altered at a time.
     with world.at("s2") as (n, cast):
-        row = running(n.store)[cast.hot[3].ss58]
-        comparator = sa.Comparator(n, cast.hot[3], row)
+        row = sa.honest_lease(n.store, cast)
+        comparator = sa.Comparator(n, cast.keys[row["hotkey"]], row)
         control = comparator.outcome()
         assert (control.result, control.first_bad_leaf) == ("MATCH", None)
         assert control.recomputed_leaves_root == comparator.commit["leaves_root"]
