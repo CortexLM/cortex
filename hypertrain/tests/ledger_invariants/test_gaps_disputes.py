@@ -63,7 +63,7 @@ from .support_gaps_disputes import (
 )
 from .support_locks import STAKE, Lab
 from .support_locks import Rig as ServiceRig
-from .support_opids import DefenceMissing, StepRefused, service_step
+from .support_opids import DefenceMissing
 
 MISMATCH_EVIDENCE = "cd" * 32  # the evidence a confirmed audit mismatch seizes the bond under
 
@@ -200,6 +200,12 @@ def stalled_outcome(world: World, *, squat: bool) -> tuple[Any, ...]:
         bystander = X.service().COLD[3]
         client_transfer(world, bystander, settlement_id(dispute_id), world.network.origin_ids[3])
     world.network.push(closing_round(world, dispute_id))
+    if not squat:
+        # Control of the squat: it takes exactly the id the service releases the bond under.
+        released = escrow.db.execute("SELECT receipt FROM escrow_events WHERE kind='RELEASE'")
+        assert [json.loads(row[0])["operation_id"] for row in released] == [
+            settlement_id(dispute_id)
+        ]
     closed = X.disputes(world).get(dispute_id).resolution
     balances = escrow.balances()
     return (
@@ -210,14 +216,6 @@ def stalled_outcome(world: World, *, squat: bool) -> tuple[Any, ...]:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DefenceMissing,
-    reason="ESC-04: settle_lock() releases the bond under sha256([dispute_id, 'settle']), an id "
-    "any funded coldkey can take with its own escrow event; the beacon's closure then raises "
-    "OPERATION_CONFLICT, rolls back, is journaled and repeats at every later beacon "
-    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
-)
 def test_a_client_event_cannot_stop_the_beacon_from_closing_a_stuck_contest(
     tmp_path: Path,
 ) -> None:
@@ -233,8 +231,7 @@ def test_a_client_event_cannot_stop_the_beacon_from_closing_a_stuck_contest(
     with service_world(tmp_path / "contended") as world:
         contended = stalled_outcome(world, squat=True)
     # Then: the closure happened all the same.
-    with defence():
-        assert contended == closed
+    assert contended == closed
 
 
 # --- T-DSP-04 (DIB-04): a member contesting its own MATCH verdict does not wedge its round -----
@@ -246,14 +243,6 @@ def audited(tmp_path: Path) -> Iterator[R.Round]:
         yield rnd
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DefenceMissing,
-    reason="DIB-04: a contest on a MATCH verdict suspends its opener, and verified_inputs_v2 then "
-    "raises 403 'current admission funding/identity no longer eligible' for the whole round, so "
-    "POST /admin/rounds/0/aggregate refuses the four members nobody contested "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 DSP-04]",
-)
 def test_a_member_contesting_its_own_matching_verdict_does_not_stop_the_round_of_the_others(
     audited: R.Round,
 ) -> None:
@@ -270,20 +259,17 @@ def test_a_member_contesting_its_own_matching_verdict_does_not_stop_the_round_of
     contest = contest_request(rnd, contester, verdict_of_member(rnd, contester))
     if contest.status_code != 200:
         # Then (refused): a client error, the member untouched.
-        with defence():
-            assert 400 <= contest.status_code < 500, contest.text
-            assert state_of_member(rnd, contester)[:2] == ("ACTIVE", 0)
+        assert 400 <= contest.status_code < 500, contest.text
+        assert state_of_member(rnd, contester)[:2] == ("ACTIVE", 0)
         return
     R.control(state_of_member(rnd, contester)[:2] == ("SUSPENDED", 1), "the contest suspends it")
     # Then (admitted): the operator's aggregation of the round answers 200 ...
     response = R.aggregate(rnd)
-    with defence():
-        assert response.status_code == 200, response.text
+    assert response.status_code == 200, response.text
     tape = response.json()["tape"]["body"]["inputs"]
-    with defence():
-        assert sorted(item["roster"]["hotkey"] for item in tape) == sorted(
-            rnd.hotkey(i) for i in others
-        )
+    assert sorted(item["roster"]["hotkey"] for item in tape) == sorted(
+        rnd.hotkey(i) for i in others
+    )
     # ... the contest is decided and the four others are settled and paid for it.
     dispute_id = dispute_id_of_member(rnd, contester)
     X.resolve(R.world_of(rnd.network), dispute_id, reason="MATCH", loser=None)
@@ -291,20 +277,11 @@ def test_a_member_contesting_its_own_matching_verdict_does_not_stop_the_round_of
         **R.finalize_request(rnd, others, response.json()["theta_hash"])
     )
     paid = rnd.store._db.execute("SELECT hotkey FROM escrow_origins WHERE reward_round=0")
-    with defence():
-        assert finalized.status_code == 200, finalized.text
-        assert finalized.json()["status"] == "SETTLED"
-        assert sorted(row[0] for row in paid) == sorted(rnd.hotkey(i) for i in others)
+    assert finalized.status_code == 200, finalized.text
+    assert finalized.json()["status"] == "SETTLED"
+    assert sorted(row[0] for row in paid) == sorted(rnd.hotkey(i) for i in others)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DefenceMissing,
-    reason="DIB-04: once the contest of a roster member is closed and the member is back on "
-    "probation, the aggregation of the round answers 403 for the four members nobody contested, "
-    "because the member is not eligible and has no exclusion record "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 DSP-04]",
-)
 def test_a_member_back_from_a_closed_contest_does_not_stop_the_round_of_the_others(
     audited: R.Round,
 ) -> None:
@@ -319,9 +296,8 @@ def test_a_member_back_from_a_closed_contest_does_not_stop_the_round_of_the_othe
     contest = contest_request(rnd, contester, verdict_of_member(rnd, contester))
     if contest.status_code != 200:
         # Then (refused): a client error, the member untouched.
-        with defence():
-            assert 400 <= contest.status_code < 500, contest.text
-            assert state_of_member(rnd, contester)[:2] == ("ACTIVE", 0)
+        assert 400 <= contest.status_code < 500, contest.text
+        assert state_of_member(rnd, contester)[:2] == ("ACTIVE", 0)
         return
     # When: the referee confirms the audit, and the member recovers.
     dispute_id = dispute_id_of_member(rnd, contester)
@@ -339,25 +315,16 @@ def test_a_member_back_from_a_closed_contest_does_not_stop_the_round_of_the_othe
     R.control(state_of_member(rnd, contester)[:2] == ("PROBATION", 0), "it is back on probation")
     # Then (admitted): the operator's aggregation answers 200 for the four others.
     response = R.aggregate(rnd)
-    with defence():
-        assert response.status_code == 200, response.text
-        tape = response.json()["tape"]["body"]["inputs"]
-        assert sorted(item["roster"]["hotkey"] for item in tape) == sorted(
-            rnd.hotkey(i) for i in others
-        )
+    assert response.status_code == 200, response.text
+    tape = response.json()["tape"]["body"]["inputs"]
+    assert sorted(item["roster"]["hotkey"] for item in tape) == sorted(
+        rnd.hotkey(i) for i in others
+    )
 
 
 # --- T-DSP-06 (DIB-21): the round after an accepted rollback can still be paid -----------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=StepRefused,
-    reason="DIB-21+CRD-04: reward_finalize credits round w only when w-1 is the last credited "
-    "round, and the two rounds a rollback repaired are never credited, so the coordinator's "
-    "valid Finalize for round 2 is refused FINALIZE_ORDER and no later round can ever be paid "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 R-D]",
-)
 def test_a_round_opened_after_a_two_round_rollback_is_credited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -386,7 +353,7 @@ def test_a_round_opened_after_a_two_round_rollback_is_credited(
         _, reward, evidence = signed_round(world, escrow, 2)
         before = escrow.balances().issued
         # When: the coordinator's Finalize of round 2 reaches the ledger.
-        service_step(lambda: escrow.reward_finalize(reward, evidence))
+        escrow.reward_finalize(reward, evidence)
         # Then: round 2 is paid.
         assert escrow.balances().issued - before == escrow.policy.round_reward_units
         assert escrow.balances().conserved()
@@ -509,10 +476,12 @@ def test_a_reward_origin_vests_at_its_maturity_once_its_miners_contest_is_closed
             marks=pytest.mark.xfail(
                 strict=True,
                 raises=DefenceMissing,
-                reason="DIB-07+DIB-17: the burn of the unvested reward is part of slashing an "
-                "admission lock (ADR 0010 Decisions for Forge 4), so a conviction that follows a "
-                "bond-only seizure finds no lock, bans the miner and leaves its origin to vest "
-                "and be paid [fix-lot: decision (product choice pending)]",
+                reason="DIB-07+DIB-17: a conviction that follows a bond-only seizure "
+                "(AUDIT_MISMATCH or NO_SHOW burned the stake) finds no admission lock to slash, "
+                "and the burn of the unvested reward is part of slashing a lock (ADR 0010 "
+                "Decisions for Forge 4), so the convicted miner's origin vests and is paid; "
+                "closing it needs a ledger operation that burns reward_pending without a lock, "
+                "a founder / Principal call [fix-lot: decision (product choice pending)]",
             ),
         ),
     ],

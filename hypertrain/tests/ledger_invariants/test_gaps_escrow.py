@@ -11,8 +11,10 @@ reaches the point under test.
 from __future__ import annotations
 
 import contextlib
+import json
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -22,6 +24,7 @@ from pydantic import ValidationError
 
 from hypertrain.challenge.disputes_v2 import Turn
 from hypertrain.challenge.store import ChallengeError
+from hypertrain.ledger.escrow_v2 import EscrowV2
 from hypertrain.protocol.keys import Keypair
 
 from . import support_exit_disputes as X
@@ -247,16 +250,23 @@ def test_matured_units_of_a_rotated_admission_are_emitted_to_its_current_hotkey(
 # --- T-ESC-04: no client event takes the id of a dispute's settlement (slash, beacon, timeout) -
 
 
+def squatted_ids(escrow: EscrowV2) -> list[str]:
+    """Every id a client could sign to take the release or slash of a lock: the key the event is
+    stored under, and the id the service derived before the ledger placed it in its own key space.
+    The second is a plain 64-hex id any client can sign; where the service has no key space of its
+    own the two are one id."""
+    rows = escrow.db.execute(
+        "SELECT operation_id,receipt FROM escrow_events WHERE kind IN ('RELEASE','SLASH') "
+        "ORDER BY seq"
+    )
+    return list(
+        dict.fromkeys(
+            i for key, receipt in rows for i in (key, json.loads(receipt)["operation_id"])
+        )
+    )
+
+
 @pytest.mark.parametrize("kind", ["transfer", "lock"])
-@pytest.mark.xfail(
-    strict=True,
-    raises=StepRefused,
-    reason=(
-        "ESC-04+BND-24+SG-11: a client event cannot take the id the service derives for the slash "
-        "of a bond whose miner lost a FRAUD contest, so the proven fraud is always burned "
-        "[fix-lot: escrow-relay-fixes ADR0014-P1]"
-    ),
-)
 def test_a_client_event_never_blocks_the_dispute_slash_id(
     li_escrow: ModuleType, tmp_path: Path, kind: str
 ) -> None:
@@ -271,6 +281,7 @@ def test_a_client_event_never_blocks_the_dispute_slash_id(
     with dispute_world(tmp_path / "control", li_escrow) as world:
         resolved_and_settled(world, opened(world), resolve_fraud)
         settle_ids = settlement_ids(world.escrow)
+        squats = squatted_ids(world.escrow)
         effect = world.escrow.balances(li_escrow.COLD.ss58)
         burned = world.escrow.balances().burned
     assert len(settle_ids) == 1 and effect.dispute_locked == 0 and effect.available == 19900
@@ -281,7 +292,8 @@ def test_a_client_event_never_blocks_the_dispute_slash_id(
         turn = opened(world)
         key, origin = li_escrow.OTHER, world.origins[1]
         client_event(world.escrow, kind, key, fresh_id("neutral"), origin)
-        squat_refused(lambda: client_event(world.escrow, kind, key, settle_ids[0], origin))
+        for operation_id in squats:
+            squat_refused(partial(client_event, world.escrow, kind, key, operation_id, origin))
 
         # Then: the referee's FRAUD resolution and the slash go through together, as without it.
         resolved_and_settled(world, turn, resolve_fraud, settle=service_step)
@@ -304,30 +316,22 @@ def exit_failures(world: World) -> int:
     return world.count("records_v2", "kind='dispute-exit-failed'")
 
 
-def squat_over_http(world: World, kind: str, operation_id: str) -> None:
-    """COLD[1], a funded bystander, signs an event under `operation_id` on the public route; its
-    first event under a neutral id proves the route takes its events."""
+def squat_over_http(world: World, kind: str, operation_ids: Sequence[str]) -> None:
+    """COLD[1], a funded bystander, signs an event under each of `operation_ids` on the public
+    route; its first event under a neutral id proves the route takes its events."""
     bystander = load_fixture_module(*SERVICE_FIXTURE).COLD[1]
     origin = world.network.origin_ids[1]
     neutral = client_event_over_http(world, kind, bystander, fresh_id("neutral"), origin)
     assert neutral.status_code == 200, neutral.text
-    try:
-        client_event_over_http(world, kind, bystander, operation_id, origin)
-    except ValidationError as error:
-        # An id outside the client's own 64-hex space cannot be signed at all: nothing to post.
-        assert "operation_id" in str(error)
+    for operation_id in operation_ids:
+        try:
+            client_event_over_http(world, kind, bystander, operation_id, origin)
+        except ValidationError as error:
+            # An id outside the client's own 64-hex space cannot be signed at all: nothing to post.
+            assert "operation_id" in str(error)
 
 
 @pytest.mark.parametrize("kind", ["transfer", "lock"])
-@pytest.mark.xfail(
-    strict=True,
-    raises=StepRefused,
-    reason=(
-        "ESC-04+DIA-14+SG-11: a client event cannot take the id the service derives for the "
-        "settlement of a contest the beacon closes, so a blocked dispute always leaves the round "
-        "and its bond comes back [fix-lot: escrow-relay-fixes ADR0014-P1]"
-    ),
-)
 def test_a_client_event_never_stops_the_beacon_from_closing_a_blocked_dispute(
     tmp_path: Path, kind: str
 ) -> None:
@@ -338,12 +342,13 @@ def test_a_client_event_never_stops_the_beacon_from_closing_a_blocked_dispute(
         close_at = X.disputes(world).get(dispute_id).absolute_deadline + 1
         world.network.push(close_at)
         settle_ids, held, burned = settled_world(world, dispute_id)
+        squats = squatted_ids(world.store._services(world.run_id)[0])
     assert len(settle_ids) == 1 and held["dispute_locked"] == 0 and burned == 0
 
     # When: a funded bystander signs an event with that id while the contest is open.
     with service_world(tmp_path / "contended") as world:
         dispute_id = X.open_contest(world, 0)
-        squat_over_http(world, kind, settle_ids[0])
+        squat_over_http(world, kind, squats)
         world.network.push(close_at)
 
         # Then: the beacon closed the contest and returned the bond; nothing was journaled as a
@@ -352,10 +357,9 @@ def test_a_client_event_never_stops_the_beacon_from_closing_a_blocked_dispute(
         escrow = world.store._services(world.run_id)[0]
         locked = units_of(escrow, load_fixture_module(*SERVICE_FIXTURE).COLD[0].ss58)
         state = (resolution is not None, locked["dispute_locked"], exit_failures(world))
-        if state != (True, 0, 0):
-            raise StepRefused(
-                f"closed={state[0]}, dispute_locked={state[1]}, dispute-exit-failed={state[2]}"
-            )
+        assert state == (True, 0, 0), (
+            f"closed={state[0]}, dispute_locked={state[1]}, dispute-exit-failed={state[2]}"
+        )
         assert len(settlement_ids(escrow)) == 1 and escrow.balances().conserved()
 
 
@@ -393,16 +397,6 @@ def prepare_timeout(world: World, dispute_id: str) -> None:
         pytest.param(lose_by_timeout, "PARTY_TIMEOUT", 0, prepare_timeout, id="timeout"),
     ],
 )
-@pytest.mark.xfail(
-    strict=True,
-    raises=StepRefused,
-    reason=(
-        "ESC-04+DIA-14+SG-11: a client event cannot take the id the service derives for the "
-        "settlement of a miner convicted by the referee or by the operator's timeout, so a "
-        "conviction is always applied and its bond settled (burned for FRAUD, released for a "
-        "timeout) [fix-lot: escrow-relay-fixes ADR0014-P1]"
-    ),
-)
 def test_a_client_event_never_blocks_the_settlement_of_a_convicted_miner_over_http(
     tmp_path: Path, route: Any, decide: str, burns: int, prepare: Any
 ) -> None:
@@ -414,6 +408,7 @@ def test_a_client_event_never_blocks_the_settlement_of_a_convicted_miner_over_ht
         prepare(world, dispute_id)
         route(world, dispute_id)
         settle_ids, held, burned = settled_world(world, dispute_id)
+        squats = squatted_ids(world.store._services(world.run_id)[0])
         resolution = X.disputes(world).get(dispute_id).resolution
     assert resolution is not None and (resolution.reason, resolution.loser) == (decide, hot)
     assert len(settle_ids) == 1 and held["dispute_locked"] == 0 and burned == burns
@@ -421,7 +416,7 @@ def test_a_client_event_never_blocks_the_settlement_of_a_convicted_miner_over_ht
     # When: a funded bystander signs an event with that id while the contest is open.
     with service_world(tmp_path / "contended") as world:
         dispute_id = X.open_contest(world, 0)
-        squat_over_http(world, "transfer", settle_ids[0])
+        squat_over_http(world, "transfer", squats)
         prepare(world, dispute_id)
 
         # Then: the conviction is applied and the bond settled, as without the bystander.

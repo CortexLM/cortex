@@ -10,6 +10,7 @@ whose body asserts the defence; a control line proves the scenario reaches the p
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
@@ -28,6 +29,7 @@ from hypertrain.protocol.messages_v2 import EconomicsPolicyV2
 from .support import (
     SERVICE_FIXTURE,
     H,
+    World,
     error_code,
     load_fixture_module,
     memory_db,
@@ -69,19 +71,26 @@ from .support_gaps_bootstrap import (
     world_economics,
 )
 from .support_locks import Rig
-from .support_opids import StepRefused, fresh_id
+from .support_opids import fresh_id
 
 # --- T-BOOTSTRAP-02: a squatted maturity id stalls the beacon route -------------------------------
 
 
+def derived_maturity_id_of(world: World, origin: str) -> str:
+    """The id the service derived for the MATURE event of `origin`, as its receipt states it: the
+    id before the ledger places the event in its own key space. It is a plain 64-hex id, so any
+    client can sign it, where the key the event is stored under (`maturity_id_of`) may not be."""
+    request = '["' + origin + '"]'
+    db = escrow_of(world).db
+    with world.store._lock:
+        rows = db.execute(
+            "SELECT receipt FROM escrow_events WHERE kind='MATURE' AND request=?", (request,)
+        ).fetchall()
+    assert len(rows) == 1, f"no single MATURE event for {origin}: {len(rows)}"
+    return str(json.loads(rows[0][0])["operation_id"])
+
+
 @pytest.mark.parametrize("kind", ["transfer", "lock"])
-@pytest.mark.xfail(
-    strict=True,
-    raises=StepRefused,
-    reason="BND-24+T-BOOTSTRAP-02+CL-01: a client event under the maturity id of one origin must "
-    "not stop another owner's origin due at the same round, nor the next beacon push "
-    "[fix-lot: escrow-relay-fixes ADR0014-P1]",
-)
 def test_a_squatted_maturity_id_never_blocks_another_owners_origin_or_the_next_push(
     tmp_path: Path, kind: str
 ) -> None:
@@ -95,13 +104,17 @@ def test_a_squatted_maturity_id_never_blocks_another_owners_origin_or_the_next_p
         seed_pending_origin(world, other, cold[2].ss58, 700, mature_at=5)
         open_overdue_trial(world)
         before = escrow_of(world).balances(cold[2].ss58)
+        before_first = escrow_of(world).balances(cold[0].ss58)
         assert trial_outcome(world) == "OPEN"
         world.network.push(5)
         assert trial_outcome(world) == "EXPIRED"
         squatted_id = maturity_id_of(world, squatted)
         assert maturity_id_of(world, other) != squatted_id
+        squats = [squatted_id, derived_maturity_id_of(world, squatted)]
         matured = escrow_of(world).balances(cold[2].ss58)
+        first = escrow_of(world).balances(cold[0].ss58)
     assert (matured.available, matured.reward_pending) == (before.available + 700, 0)
+    assert (first.available, first.reward_pending) == (before_first.available + 500, 0)
 
     # When: a third funded coldkey signs an event under the id of the first origin's maturity.
     with service_world(tmp_path / "contended") as world:
@@ -112,18 +125,21 @@ def test_a_squatted_maturity_id_never_blocks_another_owners_origin_or_the_next_p
         origin = world.network.origin_ids[1]
         neutral = client_event_over_http(world, kind, cold[1], fresh_id("neutral"), origin)
         assert neutral.status_code == 200, neutral.text  # control: the route takes its events
-        client_event_over_http(world, kind, cold[1], squatted_id, origin)
+        for operation_id in dict.fromkeys(squats):
+            client_event_over_http(world, kind, cold[1], operation_id, origin)
 
         # Then: the beacon route answers at round 5 and after it, the other owner's origin vests
         # as in the control, the overdue trial is closed by the same push, and no unit is created
-        # or lost. Whether the squatted origin itself vests is not asserted: only that it cannot
-        # block anybody else.
+        # or lost. The squatted origin vests as well: the squat does not occupy the id the
+        # service vests it under, and a push that only isolated the conflict would leave it
+        # pending.
         push_round(world, 5)
         push_round(world, 6)
         assert trial_outcome(world) == "EXPIRED"
         escrow = escrow_of(world)
         vested = escrow.balances(cold[2].ss58)
         assert (vested.available, vested.reward_pending) == (before.available + 700, 0)
+        assert escrow.balances(cold[0].ss58) == first
         assert escrow.balances().conserved()
 
 

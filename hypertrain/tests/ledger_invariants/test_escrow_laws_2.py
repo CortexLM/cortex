@@ -877,15 +877,6 @@ def lookup_ticks(li_escrow: ModuleType, foreign_locks: int, *, same_owner: bool)
     return ticks[0]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "ESC-23: the database work of a stake lookup does not grow with the locks other owners "
-        "hold (locked() reads every LOCK_ADMISSION event of the ledger) "
-        "[fix-lot: escrow-relay-fixes ADR0014-P4]"
-    ),
-)
 def test_the_database_work_of_a_stake_lookup_does_not_grow_with_the_locks_of_other_owners(
     li_escrow: ModuleType,
 ) -> None:
