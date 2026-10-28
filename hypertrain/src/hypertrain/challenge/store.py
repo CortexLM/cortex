@@ -2678,6 +2678,11 @@ class ChallengeStore:
                 if econ.ledger_mode != "test":
                     raise ChallengeError(409, "production CUDA qualification required")
                 backend = "cpu"
+            # A manifest that names no device cannot run on the CUDA backend. The reverse is not
+            # refused: a CUDA-class run may exist in a CPU test state (the conserved genesis store
+            # of the GPU prepare tool); no CPU party can join it, since each declares gpu "none".
+            if backend == "cuda" and ref.env.pin().gpu == "none":
+                raise ChallengeError(409, "ENV_CLASS_BACKEND: gpu class none")
             selection: dict[str, JsonValue] = {"backend": backend, "authority_hash": authority}
             frozen = self._db.execute(
                 "SELECT data FROM records_v2 WHERE run_id=? "

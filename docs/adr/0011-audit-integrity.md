@@ -487,6 +487,15 @@ breaker bounds the attempt-based one).
     a backend. No `Result` or `Environment` field is added: `reference_hash` (the hash of the whole
     `reference_spec`, pin included) and the summary hashes in the owner-signed evidence already bind
     the pin. QUAL-01's attestation is untouched. [V: fake torch and a recording torchrun parent]
+20. The GPU class and the backend. `ChallengeStore._backend_v2` resolves the backend (a stored CUDA
+    qualification, or the TEST ledger's CPU default) and then answers 409
+    `ENV_CLASS_BACKEND: gpu class none` for a manifest that names no device on the CUDA backend:
+    nothing says which device it runs on. Nothing is frozen for a refused manifest. The reverse is
+    not refused: a run of a device class may exist in a CPU test state (the conserved genesis store
+    of `scripts/network_gpu_prepare.py`, the order of the S5 runbook), and no CPU party can join it,
+    because each declares `gpu: none` and the join and the trial refuse the difference (decision
+    12). The executor's own refusal of a `none` manifest (decision 18) is the same rule one layer
+    down. [V]
 
 ### Consequences
 
@@ -526,6 +535,11 @@ breaker bounds the attempt-based one).
 - A pinned CUDA manifest can be qualified (decision 19). `network_qualification.sources()` hashes every
   `*.py` of the package, so this change, like any source edit, invalidates a stored qualification
   config (`qualification_source_or_profile_changed`): configs and reviewed bundles are recomputed.
+- `_backend_v2` is one of the names whose AST `implementation_hash` binds
+  (`_service_implementation_v2`), so decision 20 moves that hash. Every manifest builder for CUDA
+  hardware names its GPU class (`sm_103` or `sm_120` by SM count; the CPU TEST manifests say
+  `none`), because the store answers 409 `ENV_CLASS_BACKEND` for a CUDA host and a manifest that
+  says `none`. [V by tests]
 - `implementation_hash` changes; runs holding a `service-admission` record then fail
   `SERVICE_PROFILE_AUTHORITY` (`store.py:4631`) and cannot be re-bootstrapped after a round opened.
   The runs are recreated anyway.
@@ -540,10 +554,10 @@ breaker bounds the attempt-based one).
   qualification configs then stop validating against a tree at this commit
   (`qualification_source_or_profile_changed`) and the dispatch source pins are recomputed, as after
   ADRs 0007 and 0008. The required pin had already moved every example `run_id`, `reference_hash` and
-  `training_hash`. The measured values are recorded at the integration tip with these commands, run
-  with `PYTHONPATH=TREE/src:TREE` in the virtual environment of `hypertrain/`, where `TREE` is the
-  `hypertrain/` directory of an unpacked `git archive` of the commit under measure (the last one
-  prints `implementation_hash` under the pin of the example manifest, then its `run_id`):
+  `training_hash`. Measured with these commands, run with `PYTHONPATH=TREE/src:TREE` in the
+  virtual environment of `hypertrain/`, where `TREE` is the `hypertrain/` directory of an unpacked
+  `git archive` of the commit under measure (the last one prints `implementation_hash` under the
+  pin of the example manifest, then its `run_id`):
 
   ```
   python TREE/scripts/network_gpu_qualification.py sources TREE | sha256sum
@@ -562,6 +576,28 @@ breaker bounds the attempt-based one).
   print(ChallengeStore._service_implementation_v2(src, paths, m.reference_spec.env.pin()), m.run_id())
   EOF
   ```
+
+  Values [V, run on 2026-10-28; `v3` is `8c2b24e8` before the opt-in series and `a6f9884a` after it,
+  and this part is rebased on `a6f9884a`]:
+
+  | Value | `v3` `8c2b24e8` | `v3` `a6f9884a` (opt-in series) | this part |
+  | --- | --- | --- | --- |
+  | `sources` listing, `sha256sum` | `a8e7b88e...dc6f15` | `45d7e777...2e7a27` | `d8c0f22e...f3a24d` |
+  | `bundle-hash` bytes, sha256 | 2,519,040 `0fbf1c09...80721` | 2,600,960 `fb3cca4a...01f438` | 2,611,200 `11e55174...e36830` |
+  | `challenge/store.py` sha256 | `6eadf5bb...e3972` | `7fb1c56b...38688c` | `b7b000d0...edf80d` |
+  | `implementation_hash`, example pin (`avx2`/`none`) | `941247f8...688d1` | `fc9e87b0...e4c8fe` | `608aa10b...ce002f` |
+  | example `run_id` | `ad8beb30...2ba2ff` | `ad8beb30...2ba2ff` | `aa39197d...ec8abd` |
+  | example `reference_hash` | `3a2862ca...72f323` | `3a2862ca...72f323` | `2dd4eadc...d6cc5d` |
+  | hashed files of `implementation_hash` | 10 | 10 | 12 |
+
+  The same code under another pin hashes differently, which is what D69 asks for (a change of an
+  ISA table row or of the attention backend makes the bit-exact audit opposable): `implementation_hash`
+  at this commit is `608aa10b...ce002f` for `avx2`/`none`, `22ad3164...a5047e` for `avx512`/`none`,
+  `4eb59f4c...3a74d0` for `avx2`/`sm_103`/`math`, `bba1cc6a...7f0104` for `avx2`/`sm_103`/`sdpa-flash` and
+  `cf9bd69e...6c3022` for `avx2`/`sm_120`/`sdpa-flash`. No wire vector, `docs/BUNDLE_SPEC.md` or leaf
+  root golden moves: the kimi and trainer goldens pass unchanged under the pinned test process, and
+  only the golden run ids and training hashes were regenerated (`tests/protocol/test_model_arch.py`,
+  `test_od_fields.py`, `test_network_v2.py`, `tests/trainer/test_config_v2.py`).
 
 ### Rejected alternatives
 

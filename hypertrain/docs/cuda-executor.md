@@ -147,7 +147,10 @@ call (it describes a CPU run; judging it per host would quarantine them all).
 The qualification record a CUDA run needs before its run is created follows the same rule:
 `network_qualification run` starts its island through the launcher's `island_env`, so it runs
 under the manifest's pin whatever the host exports, and `_bootstrap_backend_v2` refuses (403)
-reviewed evidence whose rank summaries do not declare that pin in `env`.
+reviewed evidence whose rank summaries do not declare that pin in `env`. The challenge also
+answers 409 `ENV_CLASS_BACKEND: gpu class none` when a manifest that names no device resolves to
+the CUDA backend: a CUDA run needs a manifest of class `sm_103` or `sm_120` (a manifest built from
+the example, class `none`, is a CPU run).
 
 ## What a job produces
 

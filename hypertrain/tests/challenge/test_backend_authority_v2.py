@@ -160,13 +160,9 @@ def authority(tmp_path, monkeypatch, request):
     body["training"]["auditors"] = [key.ss58 for key in service.AUDITORS]
     host = getattr(request, "param", None)  # Default: the seed's RTX 5090 reference and devices.
     if host is not None:
-        body["training"]["reference_spec"].update(
-            sm_count=host["sm_count"], driver_allowlist=[host["driver"]]
-        )
-        device = GPU_CLASS_OF_SM.get(host["sm_count"], "none")  # the manifest pins its own device
-        body["training"]["reference_spec"]["env"]["pinned"] = class_pin(
-            "avx2", device, "sdpa-flash" if device == "sm_120" else "math"
-        )
+        reference = body["training"]["reference_spec"]
+        reference.update(sm_count=host["sm_count"], driver_allowlist=[host["driver"]])
+        reference["env"]["pinned"] = class_pin(reference["env"]["pinned"]["cpu"], host["gpu"])
     manifest = RunManifestV2.model_validate(body)
     job = job.model_copy(update={"manifest": manifest, "run_id": manifest.run_id()})
     original.seed_job.write_text(job.model_dump_json())
@@ -394,6 +390,24 @@ def saved_geometry(manifest, hotkey, directory, *, published=False):
     return job
 
 
+# Manifest reference (sm_count, driver, GPU class) and the host devices' recorded (capability, SM
+# count).
+RTX_5090 = {
+    "sm_count": 170,
+    "driver": "595.84",
+    "gpu": "sm_120",
+    "capability": [12, 0],
+    "devices": 170,
+}
+B300 = {
+    "sm_count": 148,
+    "driver": "595.91.07",
+    "gpu": "sm_103",
+    "capability": [10, 3],
+    "devices": 148,
+}
+
+
 def test_reviewed_cuda_overrides_test_economics_and_freezes(authority):
     store, manifest, configs, results, raw = authority
     store._bootstrap_backend_v2(manifest, configs, results, raw)
@@ -407,6 +421,7 @@ def test_reviewed_cuda_overrides_test_economics_and_freezes(authority):
     assert store._services(manifest.run_id())[1].backend == "cuda"
 
 
+@pytest.mark.parametrize("authority", [{**RTX_5090, "gpu": "none"}], indirect=True, ids=["none"])
 def test_existing_cpu_contract_cannot_promote_after_services(network, authority):
     assert network.store._services(network.manifest.run_id())[1].backend == "cpu"
     store, manifest, configs, results, raw = authority
@@ -499,12 +514,6 @@ def test_invalid_reviewed_authority_rejects_without_install(authority, fault):
     )
 
 
-# Manifest reference (sm_count, driver) and the host devices' recorded (capability, SM count).
-RTX_5090 = {"sm_count": 170, "driver": "595.84", "capability": [12, 0], "devices": 170}
-B300 = {"sm_count": 148, "driver": "595.91.07", "capability": [10, 3], "devices": 148}
-GPU_CLASS_OF_SM = {170: "sm_120", 148: "sm_103"}  # any other count is no measured device
-
-
 @pytest.mark.parametrize(
     "authority",
     [RTX_5090, {**RTX_5090, "capability": None}, B300],
@@ -522,9 +531,15 @@ def test_qualified_device_class_installs_cuda_backend(authority):
     "authority,error",
     [
         ({**B300, "capability": [12, 0]}, r"capability 12\.0 qualifies \[170\] SMs, not 148"),
-        ({**B300, "sm_count": 132, "capability": [9, 0], "devices": 132}, r"capability 9\.0"),
+        (
+            {**B300, "gpu": "none", "sm_count": 132, "capability": [9, 0], "devices": 132},
+            r"capability 9\.0",
+        ),
         ({**B300, "capability": None}, "without capabilities qualifies 170-SM"),
-        ({**B300, "sm_count": 170}, "reviewed CUDA runtime/reference binding differs"),
+        (
+            {**B300, "gpu": "sm_120", "sm_count": 170},
+            "reviewed CUDA runtime/reference binding differs",
+        ),
     ],
     indirect=["authority"],
     ids=[
@@ -544,6 +559,19 @@ def test_unqualified_or_off_reference_device_installs_nothing(authority, error):
         ]
         == 0
     )
+
+
+@pytest.mark.parametrize("authority", [{**RTX_5090, "gpu": "none"}], indirect=True, ids=["none"])
+def test_cuda_backend_refuses_a_manifest_that_names_no_gpu_class(authority):
+    store, manifest, configs, results, raw = authority
+    store._bootstrap_backend_v2(manifest, configs, results, raw)  # the evidence shows class none
+    register(store, manifest)
+    with pytest.raises(ChallengeError, match="ENV_CLASS_BACKEND: gpu class none") as refused:
+        store._backend_v2(manifest)
+    assert refused.value.status == 409
+    assert not store._db.execute(
+        "SELECT 1 FROM records_v2 WHERE kind='execution-backend'"
+    ).fetchone()  # nothing is frozen for a run that cannot execute
 
 
 def test_conflicting_reviewed_record_rejects(authority):

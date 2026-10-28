@@ -520,7 +520,7 @@ def seed_config(tmp_path: Path, profile_path: Path) -> driver.Qualification:
     registry.write_bytes(b'{"schemaVersion":2,"layers":[{"size":42}]}')
     image = "sha256:" + fsha(registry)
     body["reference_spec"].update(image_digest=image, driver_allowlist=["595.84"], sm_count=170)
-    body["reference_spec"]["env"]["pinned"] = RTX_5090_PIN
+    body["reference_spec"]["env"]["pinned"] = RTX_5090_PIN  # the 170-SM RTX 5090
     body["reference_spec"]["layout"].update(profile["layout"])
     wrapper = RunManifestV2.model_validate(
         {
