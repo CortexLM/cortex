@@ -26,6 +26,8 @@
 7. DSP-03: one lock order for the dispute long poll.
 8. The general exclusion exit: every wait on a peer is bounded; exclusion, sanction, retired round,
    withdrawal record, roster member state (D43, D44, D46, D47, D51, AC-CLIFF, R-C2, R-D, DSP-04).
+9. A2W-23 (D82): a withheld auditor signature is re-audited by another auditor, and its withholder takes
+   a strike.
 
 ## Part 1: disputes that nobody can decide (DSP-01)
 
@@ -221,7 +223,8 @@
    2026-10-27 16:05Z). `AuditJobV2` embeds the commit live (`validate_embedded`) and an honest miner
    seals it until `d_final` (`miner/core.py:1274`), so a window opened at `d_final` could only end in
    `COMMIT_EXPIRED`, a drop booked as the miner's fault (`UNVERIFIED`) for the silence of the auditors.
-9. INFRASTRUCTURE is never a round disposition. No sanction, strike or suspension is added.
+9. INFRASTRUCTURE is never a round disposition. No sanction, strike or suspension is added. (Part 9 adds
+   a strike of the AUDITOR that withheld a signature; the miner is still never struck for it.)
 
 ### Consequences
 
@@ -1663,3 +1666,207 @@ the parents.
 `aggregator/{weighted_v2,tape_v2}.py`, `protocol/messages_v2.py`, `scripts/ops/live_operator.py`,
 2026-10-27. Lens C1 report (F2: R-C2, R-D; Lens m2), Lens synthesis (DSP-04), ADR 0009 section 4, ADR 0010
 Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not Git.
+
+
+## Part 9: a withheld auditor signature (A2W-23, D82)
+
+- Principal SN100 D82 (option A) and the decisions Forge took through the relay question tool on
+  2026-10-28; the Lens finding A2W-23 and the ledger-invariants lot's strict xfail of that name. A MISMATCH
+  the master detected and whose auditor signature is withheld stays an INFRASTRUCTURE exclusion without a
+  strike on the miner (decisions 9 and 15 above); this part adds the mandatory re-audit of that miner by
+  another auditor and a strike for the auditor that withholds.
+- No manifest, policy value, wire message or run id changes. `implementation_hash` does not change: every
+  function edited is outside the owned set. New persisted shapes without a migration: an optional `withheld`
+  key on `audit-attempt-failure` rows, the cooldown reason `AUDITOR_WITHHELD`, and a `tried` list that is not
+  empty after a re-arm. An older binary ignores the key and the reason, and reads the same `until`.
+
+### Context
+
+- The master replays, the auditor signs. `execute_audit_v2` runs the island audit on the master for the lease
+  holder and, in one transaction, stores `executed-verdict/<job>` and commits `audit-execution/<job>:<nonce>`
+  as `EXECUTED`. The holder's only remaining duty is to sign that exact verdict and post it
+  (`complete_audit_v2`). A holder that does not leaves a lease that runs out with the marker `EXECUTED`, which
+  `_expiry_cause_v2` calls `AUDITOR_SILENT`. [V]
+- Within one window the other auditor already takes the job: the lapse requeues it with `tried = [holder]` and
+  `lease_v2` refuses a signer in `tried`. Four things were missing. [V by reading and by probes at the base]
+  (a) The re-arm of Part 2 decision 8 reset `tried`, so the holder was handed its own job in the next window.
+  (b) A withhold in the last attempt of the last window ended as an `excluded INFRASTRUCTURE`, with nobody
+  else asked. (c) Nothing counted how often an auditor did it. (d) `executed-verdict` is replaced by the next
+  attempt's execution (`INSERT OR REPLACE`), so "the master stored a MISMATCH and nobody signed it" was lost
+  as soon as the job was leased again, and `auditor-cooldown.strikes` cannot count it: it forgets one strike
+  after a quiet lease.
+- Honest commits seal `exp_drand = d_final` (`miner/core.py`), and a window never outlives the commit it
+  audits (`absolute = min(now + 2 * lease_rounds, exp_drand)`, Part 2 decision 8). In the operated shape
+  (`d_final - d_audit = 100`, the lease runs to `d_final`) the first lease of a job is also its last
+  chance: no window exists after it. A gap of 200 leaves room for a replacement only when the first lease
+  was early (`docs/s100-test-stack.md`: "end with 282 (gap 200) to fit a replacement lease"). [V]
+
+### Decision
+
+1. **Withheld.** An attempt ends by lease expiry with cause `AUDITOR_SILENT`, the marker `EXECUTED` and a
+   stored `executed-verdict`: its signature is withheld. The stored result is frozen on the attempt's own
+   `audit-attempt-failure` row as `"withheld": "<result>"` at the moment it is retired (the key is absent
+   otherwise, and a marker without a stored verdict is not a withheld one). Only `"MISMATCH"` has consequences
+   beyond today's cooldown: the other results are never sanctionable (`sanction_v2.grade`), so a withheld
+   `MATCH` costs the cooldown and nothing else. The cause stays `AUDITOR_SILENT`.
+2. **Another auditor, never the same one.** The re-arm keeps the withholders of the job, derived from its
+   failure rows, in `tried`; `lease_v2` checks `tried` after the cooldown gate at every poll, so no window can
+   hand the job back, not even at the round the cooldown ends. When no configured auditor outside the
+   withholders and the miner remains, the job is not re-armed (it would idle to its `absolute`). A job is
+   exhausted at once, not left queued to the end of its window, when no configured auditor is left outside
+   `tried` and the miner. Both end in the existing drop: `excluded INFRASTRUCTURE`, `unresolved_audits - 1`
+   exactly once, no sanction row, no strike on the miner.
+3. **Mandatory means one window more.** A job with a withheld MISMATCH may open a third window
+   (`WITHHELD_EXTRA_WINDOWS = 1`). `max_attempts` stays the pinned `Literal[2]`: the extra window is a re-arm,
+   not a third attempt, and it keeps every other bound of the re-arm (the commit's expiry, fewer than two rounds
+   left, a service-admitted run). At most three windows exist.
+4. **The sanction does not move.** Only the second lease completing as MISMATCH reaches it, through the
+   existing path: `excluded UNVERIFIED`, `_book_mismatch_v2` (the lease's auditor is the second one), the
+   sweeper, and `seize_bond(AUDIT_MISMATCH)` when `enforce_audit_mismatch`. A `MATCH` of the second auditor
+   leaves the miner a verified input with no strike. No code books an exclusion or a sanction row, or calls the
+   hook, from the lapse.
+5. **Auditor strike.** The third withheld MISMATCH of one auditor in a run (`WITHHELD_STRIKES = 3`) and each
+   later one bar it from new leases for `STRIKE_BAR_ABSOLUTE_WINDOWS = 2` absolute windows from the lapse (K =
+   `2 * absolute_rounds`), reason `AUDITOR_WITHHELD`. It is the same `auditor-cooldown/<auditor>` record, so
+   `lease_v2` and `relay_observer_v2` are unchanged and `others_free` keeps its guarantee: the last configured
+   auditor outside a cooldown is never barred (its strike is recorded with a zero-length refusal). The count is
+   taken from the failure rows, the one just written included, and only when the lapse being retired is itself
+   a withheld MISMATCH, so an ordinary silence after the threshold stays an ordinary cooldown. The test is
+   `>=`, not a modulo: a modulo would give every auditor N - 1 free withholds per cycle for ever.
+6. **The numbers.**
+
+   | Value | H <= 30 (lease 100 rounds, 3 s each) | H = 512, step bound 4.0 s | H = 512, step bound 16 s |
+   | --- | --- | --- | --- |
+   | `lease_rounds` L | 100 | 1,466 | 5,562 |
+   | ordinary cooldown cap, `2L` | 200 rounds, 10 min | 2,932 rounds, 2.4 h | 11,124 rounds, 9.3 h |
+   | bar K, `4L` | 400 rounds, 20 min | 5,864 rounds, 4.9 h | 22,248 rounds, 18.5 h |
+   | extra round hold of a job with a withheld MISMATCH, `2L` | 200 rounds, 10 min | 2,932 rounds, 2.4 h | 11,124 rounds, 9.3 h |
+
+   N = 3: the ordinary schedule answers a first silence with L and a second with `2L`, then caps; the third
+   withheld MISMATCH is the first it cannot lengthen, so the strike is the escalation beyond the cap. K is
+   strictly longer than that cap (`2 * absolute_rounds = 4L`), or a bar would add nothing to a second ordinary
+   silence, and it spans two audit windows, so the struck auditor also misses the next round's audit. An honest
+   accident needs a real MISMATCH and a lost signing window; with p = 1e-2 per executed MISMATCH [A] and five
+   MISMATCHes per run [A], three in one run is C(5,3) p^3 = 1e-5 per auditor and run, two would be 1e-3.
+   N, K and the extra window are Forge's defaults; the Principal gave the band, not the numbers.
+7. **Only a withheld MISMATCH counts.** Counting every executed-and-unsigned verdict would make every job, not
+   only a forgery, a place where a client crash or a beacon lag counts: the false positives would scale with the
+   jobs per round, N would have to rise to about five and the accomplice's free withholds with it. A withheld
+   `MATCH` stays on the cooldown of Part 2. The price is stated below.
+
+| Event | Rule |
+| --- | --- |
+| a running attempt expires, marker `EXECUTED`, stored result `MISMATCH` | failure row `withheld: MISMATCH`; the holder is cooled down as before and counted (decision 5); no `excluded`, no sanction row, no finality change |
+| any attempt is retired | `exhausted` iff `attempts >= 2`, or `now >= absolute`, or no configured auditor outside `tried` and the miner; else `queued` |
+| a job is `exhausted` | unchanged: no leaves, `NO_SHOW`; else a re-arm; else the `INFRASTRUCTURE` drop |
+| re-arm | refused for a service-admitted run; refused when the job has a withholder and nobody else is left; refused after two windows (three with a withholder); the window ends at `min(now + 2L, exp_drand)` and is refused when that is `<= now + 1`; `tried` becomes the withholders |
+| `lease_v2` | unchanged |
+| the second auditor signs `MATCH` / `MISMATCH` | the existing `complete_audit_v2` path: verified input / decision 4 |
+
+### Hash consequences
+
+- `implementation_hash` is unchanged by this part: the AST digest of each of the 48 owned names is identical
+  before and after, for the five environment pins of the example manifest (`d61bd2b8…71bdc4` for
+  `avx2/none`). The functions edited are `_retire_audit_attempt_v2`, `_cool_down_auditor_v2` and
+  `_rearm_audit_job_v2`; added are `_withheld_verdict_v2`, `_withholders_v2` and `_auditors_left_v2`; none is
+  owned, and `audit_cooldown_v2.py` is not in the hashed paths. Runs holding a `service-admission` record are
+  therefore not affected by this part.
+- `run_id`, manifest, policy hashes, `wire_v2.json`, `rust_wire.json`: unchanged. `sources()` and `bundle()` move
+  with every edit of `src/hypertrain`. Measured with `network_qualification.sources()`/`bundle()` and
+  `ChallengeStore._service_implementation_v2` over a `git archive` of each tree [V]:
+
+  | Value | Before (`1b8e7a5b`) | After this part |
+  | --- | --- | --- |
+  | `challenge/store.py` sha256 | `5cd7d7f5…4c318b` | `cd79080e…1d9566` |
+  | `sources()` map, 158 files, canonical sha256 | `1cb3027a…bc7fe3` | `d31fbfd4…e726b1` |
+  | `sources()` map, default separators | `0c58a13e…c902e6` | `842839b3…598d80` |
+  | `bundle()`, 2,734,080 bytes | `aa5f3f2f…df3bf3` | `4537c70f…d4f15d` |
+
+  A qualification record made on the parent tree no longer validates against this one; the values are measured
+  again on the tree that is released.
+
+### Consequences
+
+- A job whose MISMATCH was withheld holds its round longer: a third window adds at most `2L` rounds (table
+  above) to the terminal round, only when the commit's expiry allows a window past the second one. The `BOUNDS`
+  of Part 8 decision 1 (`exit_v2.py`) name the end of the second audit window as the outer bound of a wait on an
+  auditor; a job with a withheld MISMATCH is the one exception, by one window. The reaper acts on facts, not on
+  that table, so nothing in code changes.
+- The re-audit is obligatory only while time, an eligible auditor and a live commit remain. In the operated
+  shape (gap 100, commit sealed until `d_final`) the withholder's lease runs to `d_final` and no window is
+  left: the job is dropped as an `INFRASTRUCTURE` exclusion exactly as before this part, no strike on the
+  miner. The re-audit is real for a gap of 200 with an early first lease, and for a commit sealed past the
+  second window.
+- The re-audit is the master's own executor run again: the independence is that of the signature and of the
+  attempt, not of the replay. A transient host fault is cleared by it; a systematic one is reproduced for the
+  second auditor, which signs the same false MISMATCH. An honest signing auditor is never helped or hurt by
+  this part.
+- A withhold is indistinguishable from other reasons for a signature that did not arrive: the auditor client
+  exits 2 on any HTTP error and does not retry, a master restart between the commit and the signature, a beacon
+  lag above `MAX_LAG_ROUNDS` that makes `complete_audit_v2` answer 503, and a master-side refusal of a valid
+  post (`independent referee unavailable`). Each costs the auditor one count; N bounds the damage.
+- A withheld MISMATCH that the second auditor refutes with a `MATCH` was counted at the first one's expiry,
+  before the second result existed. The over-count is accepted: the bar is a cooldown, not a ban.
+- A struck auditor is also refused as a relay observer (`relay_observer_v2` reads the same record) and, with
+  two configured auditors, `relay_failure_v2` cannot confirm a failure for K (it needs two healthy pinned
+  observers). The run keeps its other auditor: a job is served one at a time by it (`max_concurrent_per_auditor`).
+- A lease with a few rounds left cools down the second auditor, which cannot replay in the time left
+  (pre-existing; the re-audit makes it more frequent).
+
+### Residuals, stated frankly
+
+- An accomplice avoids the count for nothing: by staying silent before it asks for the execution (cause
+  `AUDITOR_SILENT`, no marker, one ordinary cooldown) or by asking late (the `REQUESTED` marker is committed
+  before any check and excuses the holder: `EXECUTOR_INTERRUPTED`, no cooldown). One accomplice that wins the
+  lease race sinks one forger's job per cooldown, saving that forger's bond. Not closed here.
+- Both live auditors colluding withhold, `tried` holds both, the job is dropped; the second record is
+  zero-length because of `others_free`.
+- A ghost auditor defeats `others_free`: the manifest allows up to 128 auditors and requires two distinct
+  keys, and a configured key that never polls counts as free, so both live auditors can be barred at once and
+  nobody audits for K; the honest miners are then dropped and, per Part 2, stranded. The trust assumption is
+  at least one live honest auditor per run and an auditor list of live keys.
+- A job dropped as `MINER_INPUT_REFUSED` (an expiry sealed below the lease round) is `UNVERIFIED` but waived
+  from the sanction, because no completed MISMATCH lease backs it: a forger that chooses `exp_drand` avoids
+  D47. Open, out of this part.
+- The over-count and the honest false positives above.
+
+### Rejected alternatives
+
+1. Sanctioning on the master's own first replay (the opposite default of the xfail this part replaces): the
+   master's host is not an auditor, and a host fault would sanction an honest miner (decisions 9 and 15).
+2. A second record kind for the strike: `_cooling_until_v2` would read two records on the hot path,
+   `others_free` would need a merged map, and an older binary would ignore the new kind and lift every bar,
+   where it still honours `until` in the same record. 3. A counter stored in the cooldown record: it forgets a
+   strike after a quiet lease. 4. Writing the result into the `EXECUTED` marker or the verdict: that edits
+   `execute_audit_v2`, an owned function, and moves `implementation_hash`. 5. A third attempt in a window: a
+   wire change (`AuditJobV2.attempt` is bounded to 2 and `max_attempts` is `Literal[2]`). 6. A strike on the
+   first withheld MISMATCH: it adds only `K - L` to a cooldown that already applies and punishes an honest
+   accident. 7. A modulo count.
+   8. Counting every executed-and-unsigned verdict (decision 7). 9. Liveness tracking of the auditors to defeat
+   the ghost: not in this lot.
+
+### Decisions for Forge
+
+1. N = 3, K = two absolute windows and the single extra window are defaults (the Principal gave the band):
+   decision 6 gives the numbers and the arithmetic to change them.
+2. Whether a withheld MATCH should count too (decision 7): it would deter an auditor that withholds a MATCH to
+   push an honest miner out, at the price of N near five.
+3. Whether the cheaper evasions of the residuals should be closed (a late `REQUESTED` marker, a lease that
+   never asks for its execution), which would change decisions 1 and 2 of Part 2.
+
+### Not verified
+
+- The re-audit ran on CPU replays of a seeded one-miner round on the test network: the first lease's outcome
+  `MATCH` of the genuine miner is turned into a `MISMATCH` by wrapping the executor, to simulate the master's
+  one-off glitch. No GPU, no CUDA executor host, no real auditor process (its exit 2 on a 403 and the
+  supervisor's restart were read, not run).
+- The Nth occurrence of the strike is tested with N - 1 failure rows written by the test: one run reaches two
+  withholds per auditor per round on the test network.
+- Service-admitted runs: neither the re-arm nor the lease path is exercised (skipped by construction).
+- The probabilities and the replay durations are [A], not measured.
+
+### Sources
+
+`hypertrain/src/hypertrain/challenge/{store,audit_cooldown_v2,sanction_v2,exit_v2}.py`, `miner/core.py`,
+`auditor/__main__.py`, `docs/s100-test-stack.md`, 2026-10-28. The design packages of the lead session
+(liveness, records, adversary and test critics) and their prototypes are scratch, not Git.

@@ -41,7 +41,16 @@ def lease_rounds(net) -> int:
 
 
 def seed_round(
-    net, n=4, *, executable=False, gap=200, commit_exp=None, nan_leaf=None, silent=(), deltas=True
+    net,
+    n=4,
+    *,
+    executable=False,
+    gap=200,
+    commit_exp=None,
+    nan_leaf=None,
+    silent=(),
+    deltas=True,
+    admission_ids=None,
 ):
     """Write round 0 (opening, starts, commits, leaves, deltas, finality) into `records_v2`.
 
@@ -52,7 +61,9 @@ def seed_round(
     value}) set or poison what a miner sealed: an honest miner seals `d_final`. `silent`: indexes
     of roster members that get a start record and nothing else (opened, started, no commit).
     `deltas`: every member that committed also delivered its delta manifest; a round nobody
-    delivered to reads, to the exit reaper, as an upload path that failed for everybody."""
+    delivered to reads, to the exit reaper, as an upload path that failed for everybody.
+    `admission_ids`: {miner index: the real admission id} of a member the test activated, so that a
+    sanction of that member reaches its bond; the others carry a synthetic id."""
     nan_leaf = nan_leaf or {}
     expiry = commit_exp if isinstance(commit_exp, dict) else dict.fromkeys(range(n), commit_exp)
     store, manifest = net.store, net.manifest
@@ -93,7 +104,8 @@ def seed_round(
                 "hotkey": key.ss58,
                 "slot": slot,
                 "q_i": "0000803f",
-                "admission_id": sha256_hex(f"adm-{slot}".encode()),
+                "admission_id": (admission_ids or {}).get(slot)
+                or sha256_hex(f"adm-{slot}".encode()),
                 "coldkey_group": (fixtures.COLD + EXTRA)[slot].ss58,
                 "state": "ACTIVE",
                 "eligible_weight": 4194304,

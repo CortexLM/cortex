@@ -3,14 +3,40 @@
 `path` is relative to hypertrain/, `old` must occur exactly once in it, and `tests` are pytest node
 ids relative to hypertrain/ that must fail once `old` is replaced by `new`. This first table covers
 the comparison of the production audit (auditor/worker.py:196-210), the one check that catches
-every cheat accepted at intake; the intake, sanction and ledger defences were mutation-proved by
-hand in private copies (see ADR 0009) and are the next rows to add.
+every cheat accepted at intake; the re-audit of a withheld signature (ADR 0011 Part 9) follows it.
+The intake, sanction and ledger defences were mutation-proved by hand in private copies (see ADR
+0009) and are the next rows to add.
 """
 
 from __future__ import annotations
 
 WORKER = "src/hypertrain/auditor/worker.py"
+STORE = "src/hypertrain/challenge/store.py"
+COOLDOWN = "src/hypertrain/challenge/audit_cooldown_v2.py"
 CHEATS = "tests/audit_cheaters/test_cheats_audit.py::test_cheat_is_mismatch_at_the_expected_leaf"
+WITHHELD = "tests/challenge/test_audit_withheld_signature_v2.py::"
+NOT_HANDED_AGAIN = (
+    WITHHELD
+    + "test_the_auditor_that_withheld_a_mismatch_is_not_handed_the_job_again_after_the_rearm"
+)
+LAST_WINDOW = (
+    WITHHELD
+    + "test_a_mismatch_withheld_in_the_last_window_still_gets_a_lease_for_the_other_auditor"
+)
+NOBODY_LEFT = WITHHELD + "test_a_third_window_ends_the_job_as_soon_as_no_auditor_is_left_to_try"
+BOTH_WITHHOLD = (
+    WITHHELD + "test_when_both_auditors_withhold_the_miner_is_dropped_once_and_never_sanctioned"
+)
+NTH_BARS = WITHHELD + "test_the_nth_withheld_mismatch_bars_the_auditor_and_the_one_before_does_not"
+ONLY_MISMATCH = WITHHELD + "test_only_a_withheld_mismatch_counts_toward_the_bar"
+BAR_LENGTHS = (
+    "tests/challenge/test_audit_cooldown_v2.py::"
+    "test_the_third_withheld_mismatch_bars_for_two_absolute_windows"
+)
+LAST_FREE = (
+    "tests/challenge/test_audit_cooldown_v2.py::"
+    "test_the_last_free_auditor_is_not_barred_whatever_it_withheld"
+)
 
 TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
     (
@@ -47,5 +73,103 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         '        and summary["ef_out_hash"] == commit.ef_out_hash\n',
         "",
         (f"{CHEATS}[commit-lie-ef-out-hash]",),
+    ),
+    (
+        "re-audit skipped: the re-arm ignores the auditors that withheld",
+        STORE,
+        '        withholders = self._withholders_v2(run_id, row["id"])\n',
+        "        withholders: set[str] = set()\n",
+        (NOT_HANDED_AGAIN, LAST_WINDOW, NOBODY_LEFT),
+    ),
+    (
+        "same auditor allowed: the re-arm forgets who withheld",
+        STORE,
+        '(_dumps(sorted(withholders)), now, absolute, _dumps(signed), row["id"])',
+        '("[]", now, absolute, _dumps(signed), row["id"])',
+        (NOT_HANDED_AGAIN, LAST_WINDOW),
+    ),
+    (
+        "the withheld MISMATCH is not recorded on the failure row",
+        STORE,
+        '                failure["withheld"] = stored\n',
+        "                pass\n",
+        (NOT_HANDED_AGAIN, LAST_WINDOW, NTH_BARS + "[True]"),
+    ),
+    (
+        "sanction on first detection: the lapse books the miner",
+        STORE,
+        '                failure["withheld"] = stored\n',
+        '                failure["withheld"] = stored\n'
+        '            if stored == "MISMATCH":\n'
+        "                self._put_record_v2(\n"
+        '                    run_id,\n                    "exit-sanction",\n'
+        "                    f\"{row['w']}:{row['hotkey']}\",\n"
+        '                    {"state": "PENDING", "blame": "MINER", "auditor": row["auditor"]},\n'
+        "                )\n",
+        (LAST_WINDOW, BOTH_WITHHOLD),
+    ),
+    (
+        "strike counter off by one: the bar starts after the third",
+        COOLDOWN,
+        "barred = withheld >= WITHHELD_STRIKES\n",
+        "barred = withheld > WITHHELD_STRIKES\n",
+        (BAR_LENGTHS, NTH_BARS + "[True]"),
+    ),
+    (
+        "strike counter off by one: the bar starts at the second",
+        COOLDOWN,
+        "barred = withheld >= WITHHELD_STRIKES\n",
+        "barred = withheld >= WITHHELD_STRIKES - 1\n",
+        (BAR_LENGTHS, NTH_BARS + "[False]"),
+    ),
+    (
+        "the last free auditor is barred too",
+        COOLDOWN,
+        '"until": now + length if free else now,',
+        '"until": now + length,',
+        (LAST_FREE,),
+    ),
+    (
+        "a withheld MATCH counts toward the bar",
+        STORE,
+        'withheld=failure.get("withheld") == "MISMATCH")',
+        'withheld=failure.get("withheld") is not None)',
+        (ONLY_MISMATCH + "[withheld-match]",),
+    ),
+    (
+        "an ordinary silence is barred once the count is past the threshold",
+        STORE,
+        "        count = 0\n        if withheld:\n",
+        "        count = 0\n        if True:\n",
+        (ONLY_MISMATCH + "[without-execution]",),
+    ),
+    (
+        "the withholds of every auditor count against each one",
+        STORE,
+        "\"AND json_extract(data,'$.auditor')=? \"\n",
+        "\"AND ?<>'' \"\n",
+        (NTH_BARS + "[False]",),
+    ),
+    (
+        "extra window removed: a withheld MISMATCH in the last window is dropped",
+        STORE,
+        "extra = audit_cooldown_v2.WITHHELD_EXTRA_WINDOWS if withholders else 0",
+        "extra = 0",
+        (LAST_WINDOW,),
+    ),
+    (
+        "nobody-left rule removed: the job idles in a window nobody can serve",
+        STORE,
+        '            or not self._auditors_left_v2(run_id, row, json.loads(row["tried"]))\n',
+        "",
+        (NOBODY_LEFT,),
+    ),
+    (
+        "re-arm with nobody left to try the job",
+        STORE,
+        "        if withholders and not self._auditors_left_v2(run_id, row, withholders):\n"
+        "            return False\n",
+        "",
+        (BOTH_WITHHOLD,),
     ),
 )

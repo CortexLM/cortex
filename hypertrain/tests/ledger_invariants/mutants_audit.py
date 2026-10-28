@@ -32,6 +32,18 @@ SURVIVORS = A2 + "test_a_second_exclusion_leaves_too_few_members_to_aggregate"
 NO_RECORD = A2 + "test_finalize_refuses_a_member_without_an_audit_record"
 UNRESOLVED = A2 + "test_a_round_cannot_settle_while_an_audit_is_counted_unresolved"
 ABSENT = A2 + "test_an_excluded_member_is_absent_from_the_tape_the_included_set_and_the_origins"
+DROPPED = (
+    'finality["unresolved_audits"] = max(0, int(str(finality["unresolved_audits"])) - 1)\n'
+    '        self._put_record_v2(run_id, "finality", str(row["w"]), finality)'
+)
+STRIKE = (
+    "\n        self._db.execute("
+    '\n            "UPDATE admissions_v2 SET strikes=strikes+1 WHERE hotkey=?", (row["hotkey"],)'
+    "\n        )"
+)
+NOBODY_SIGNS = (
+    A2 + "test_a_mismatch_the_master_replayed_and_no_auditor_signed_costs_its_miner_the_round_only"
+)
 COUNTER = A2 + "test_the_audit_counter_equals_the_jobs_not_yet_terminal"
 DECREMENTS = A2 + "test_each_job_decrements_the_counter_once_whether_it_completes_or_is_exhausted"
 SETTLED = A2 + "test_a_settled_round_is_untouched_by_late_audit_events"
@@ -129,8 +141,8 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-lease-third-attempt",
         "invariants": ["A2W-02", "A2W-12"],
         "path": STORE,
-        "old": 'state = "exhausted" if row["attempts"] >= 2 or now',
-        "new": 'state = "exhausted" if row["attempts"] >= 3 or now',
+        "old": 'if row["attempts"] >= 2\n            or now >= row["absolute"]',
+        "new": 'if row["attempts"] >= 3\n            or now >= row["absolute"]',
         "tests": [ATTEMPTS],
         "why": "a job whose second attempt lapses is queued for a third one.",
     },
@@ -614,7 +626,7 @@ MUTANTS: list[dict[str, object]] = [
         "id": "aud-rearm-without-limit",
         "invariants": ["A2W-12", "A2W-13"],
         "path": STORE,
-        "old": "if windows >= policy.max_attempts:",
+        "old": "if windows >= policy.max_attempts + extra:",
         "new": "if False:",
         "tests": [ATTEMPTS, HORIZON],
         "why": "a job nobody audits is given a new window for ever, so its audit stays counted as "
@@ -660,5 +672,27 @@ MUTANTS: list[dict[str, object]] = [
         "new": '"auditor=COALESCE(auditor,?),nonce=?,expires=?,tried=? WHERE id=?",',
         "tests": [RELEASED],
         "why": "a job leased again still names its first holder as the owner of the lease.",
+    },
+    {
+        "id": "aud-an-unsigned-mismatch-is-excluded-as-unverified",
+        "invariants": ["A2W-23"],
+        "path": STORE,
+        "old": '                "INFRASTRUCTURE",\n                "AUDIT_INFRASTRUCTURE",\n'
+        '                sha256_hex(row["id"].encode()),\n',
+        "new": '                "UNVERIFIED",\n                "AUDIT_INFRASTRUCTURE",\n'
+        '                sha256_hex(row["id"].encode()),\n',
+        "tests": [NOBODY_SIGNS],
+        "why": "a mismatch the master replayed and no auditor signed is held against its miner "
+        "as the fraud exclusion.",
+    },
+    {
+        "id": "aud-an-unsigned-mismatch-strikes-its-miner",
+        "invariants": ["A2W-23", "NSH-04"],
+        "path": STORE,
+        "old": DROPPED,
+        "new": DROPPED + STRIKE,
+        "tests": [NOBODY_SIGNS],
+        "why": "a job nobody signed ends in a strike for its miner, as if the silence were the "
+        "miner's.",
     },
 ]

@@ -254,11 +254,16 @@ def test_a_lapsed_lease_cannot_be_executed_or_completed_by_its_old_holder(
 
 # What the sweep does with a lapsed lease: the first attempt of a window is retried, the second
 # ends the window. A tree that re-arms an exhausted job opens one more window then and drops the
-# miner at the end of the second; an older tree drops it at once.
+# miner at the end of the second; an older tree drops it at once. The lease of the forger is
+# executed: its lapse leaves the master's MISMATCH unsigned, so on a tree that re-audits (ADR
+# 0011 Part 9) the job keeps its holder in `tried` and may open a third window.
 LAPSES = [
     pytest.param(1, 1, "retried", id="first-attempt"),
     pytest.param(2, 1, "rearmed" if sa.REARMS else "dropped", id="second-attempt-of-the-window"),
-    pytest.param(2, 2, "dropped", id="second-attempt-of-the-last-window"),
+    pytest.param(
+        2, 2, "rearmed" if sa.REAUDITS else "dropped", id="second-attempt-of-the-second-window"
+    ),
+    pytest.param(2, sa.WINDOWS, "dropped", id="second-attempt-of-the-last-window"),
 ]
 
 
@@ -276,8 +281,8 @@ def test_a_lapsed_job_is_retried_once_then_given_one_more_window_then_dropped(
             store._db.execute(
                 "UPDATE audit_leases_v2 SET attempts=? WHERE id=?", (attempts, row["id"])
             )
-            if windows == 2:
-                body = {"windows": 2, "at": n.now, "absolute": row["absolute"]}
+            if windows > 1:
+                body = {"windows": windows, "at": n.now, "absolute": row["absolute"]}
                 store._put_record_v2(run, "audit-rearm", row["id"], body)
         open_before = int(store._record_v2(run, "finality", "0")["unresolved_audits"])
         # When: the lease runs out.
@@ -303,8 +308,17 @@ def test_a_lapsed_job_is_retried_once_then_given_one_more_window_then_dropped(
             assert (after["attempts"], after["absolute"]) == (attempts, row["absolute"])
         if outcome == "rearmed":
             rearm = store._record_v2(run, "audit-rearm", row["id"])
-            assert rearm == {"windows": 2, "at": row["expires"], "absolute": after["absolute"]}
-            assert (after["attempts"], after["tried"], after["auditor"]) == (0, "[]", None)
+            assert rearm == {
+                "windows": windows + 1,
+                "at": row["expires"],
+                "absolute": after["absolute"],
+            }
+            withholders = [row["auditor"]] if sa.REAUDITS else []
+            assert (after["attempts"], json.loads(after["tried"]), after["auditor"]) == (
+                0,
+                withholders,
+                None,
+            )
             # The fresh window starts at the lapse and ends with the miner's sealed commit at
             # the latest.
             sealed = envelope_v2.parse_envelope(store._record_v2(run, "commit", identity))

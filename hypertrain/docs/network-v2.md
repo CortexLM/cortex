@@ -650,7 +650,7 @@ four therefore cannot lose a member. Similarity alone is not fraud evidence.
 Audits replay each miner's own assignment.
 
 A miner whose audit could not run (no auditor finished it in two windows of two
-leases each) is left out of that round (`excluded`, reason `INFRASTRUCTURE`) and
+leases each; three windows when the master's replay was a `MISMATCH` that nobody signed) is left out of that round (`excluded`, reason `INFRASTRUCTURE`) and
 the round is not excluded: the other miners aggregate and settle as after an
 UNVERIFIED verdict. The round cannot be applied with fewer than four verified
 inputs, and an excluded miner has no anchor for the round, so it cannot be on the
@@ -736,6 +736,19 @@ nobody. At the end of the window the sanction is applied through the same hook a
 of ADR 0011 Part 3 is not required, only recorded (`WOULD_APPLY`, nothing touched):
 `ChallengeStore(enforce_audit_mismatch=True)` is the switch. Once it is applied, a contest of the
 verdict answers 409 `SANCTION_APPLIED`.
+
+A `MISMATCH` the master replayed for a lease holder that never signed it (the lease ran out with the
+verdict stored) sanctions nobody and strikes nobody on the miner side (ADR 0011 Part 9). The job goes
+to another auditor: the withholders stay in the job's `tried` list through the re-arm, so none is
+handed it again, and such a job may open a third window (at most three), bounded by the commit's
+expiry. Only that second lease completing as `MISMATCH` takes the sanction path above; a `MATCH`
+clears the miner. When no other auditor, no time or no live commit is left, the job ends as an
+`INFRASTRUCTURE` exclusion, as before; in the operated shape (a gap of 100 rounds, commit sealed
+until `d_final`) the first lease runs to `d_final` and leaves no room for a second. The auditor
+that withheld the signature of a `MISMATCH` for the third time in a run (and each time after) is
+refused new leases, and as a relay observer, for two absolute audit windows (`4 * lease_rounds`; 20
+minutes at H <= 30), unless it is the last configured auditor outside a cooldown. A withheld
+`MATCH`, or a lease that never asked for its execution, costs the ordinary cooldown only.
 
 A round that cannot reach a tape can be retired (ADR 0011 part 8, decisions 7 to 11) instead of
 blocking the run for good. Two causes, each re-derived by the master from the facts: the members

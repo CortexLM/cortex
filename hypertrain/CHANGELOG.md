@@ -285,6 +285,16 @@
   settled or closed without a reward and past the epoch grace, and extends the custody of a grant
   whose round has an unresolved dispute before its horizon, repeatedly, through `relay_control_v2`. No operator call is needed any
   more; the admin routes remain. `ChallengeStore.release_due_v2` is one pass.
+- A `MISMATCH` the master replayed whose auditor signature is withheld (the lease ran out with the
+  verdict stored) is re-audited by another auditor instead of ending as an `INFRASTRUCTURE` exclusion
+  with nobody else asked (A2W-23, D82). The re-arm kept `tried` empty, so the withholder was handed its
+  own job again: it now keeps the withholders, a job with a withheld `MISMATCH` may open a third window,
+  and a job with nobody left to try is exhausted at once. The miner is sanctioned only if the second
+  lease completes as `MISMATCH` (the existing D47 path); a `MATCH` clears it. The auditor that withholds
+  the signature of a `MISMATCH` for the third time in a run is refused new leases for two absolute
+  windows (`WITHHELD_STRIKES`, `STRIKE_BAR_ABSOLUTE_WINDOWS`, `WITHHELD_EXTRA_WINDOWS` in
+  `challenge/audit_cooldown_v2.py`). No wire message changes; `implementation_hash` does not change. See
+  `docs/adr/0011-audit-integrity.md` (Part 9) at the monorepo root.
 
 ### Fixed
 - A member convicted of training fraud between the aggregate and the finalize of a round is no

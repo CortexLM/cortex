@@ -659,39 +659,44 @@ def test_a_verdict_that_answers_another_challenge_mints_nothing(
     assert escrow.balances().issued == 0
 
 
-# --- A2W-23, AU-04: what withholding a signature must not achieve ------------------------------
+# --- A2W-23, AU-04: what withholding a signature achieves --------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="A2W-23: a mismatch the master replayed itself ends as an UNVERIFIED exclusion with a "
-    "contest record even when no auditor ever signs it in any window, not as an "
-    "INFRASTRUCTURE one; today it ends as INFRASTRUCTURE because ADR 0011 decisions 9 and 15 "
-    "sanction only a COMPLETED mismatch lease: a master-detected MISMATCH whose auditor "
-    "signature is withheld is an INFRASTRUCTURE exclusion with no strike, which is the opposite "
-    "default, and whether the master's own replay may sanction is a founder / Principal call "
-    "[fix-lot: decision (product choice pending)]",
-)
-def test_a_mismatch_the_master_replayed_is_not_turned_into_an_infrastructure_exclusion(
-    world: sa.World,
+def test_a_mismatch_the_master_replayed_and_no_auditor_signed_costs_its_miner_the_round_only(
+    world: sa.World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Given: the master replayed the forger's job and stored a mismatch; the auditor that holds
-    # the lease never signs it.
+    # the lease never signs it. D82 (ADR 0011 Part 9): that is an infrastructure fault, and only
+    # a mismatch an auditor signed is sanctioned.
     with world.at("s2") as (n, cast):
         store, run = n.store, n.manifest.run_id()
-        row = running(store)[cast.forger.ss58]
+        sa.without_reaper(monkeypatch, store)
+        forger = cast.forger.ss58
+        row = running(store)[forger]
         stored = store._record_v2(run, "executed-verdict", row["id"])
         assert stored["result"] == "MISMATCH"
+
+        def standing() -> tuple[Any, ...]:
+            with store._lock:
+                admission = store._db.execute(
+                    "SELECT state,reason,strikes FROM admissions_v2 WHERE hotkey=?", (forger,)
+                ).fetchone()
+            return (*admission, store._services(run)[0].balances().burned)
+
+        before = standing()
         # When: the lease runs out and every window of the job passes with nobody signing anything.
-        sa.drop_job(n, store, cast.forger.ss58)
-        # Control: the job is over and the forger is excluded either way.
-        assert sa.lease_rows(store)[cast.forger.ss58]["state"] == "exhausted"
-        excluded = store._record_v2(run, "excluded", f"0:{cast.forger.ss58}")
-        # Then: the exclusion is the fraud one, backed by the master's verdict, and the forger can
-        # be held to it: its contest record exists.
-        assert excluded == {"reason": "UNVERIFIED", "evidence_hash": body_digest(stored)}
-        assert ("contest", body_digest(stored)) in sa.records(store, "contest")
+        sa.drop_job(n, store, forger)
+        # Control: the job is over.
+        assert sa.lease_rows(store)[forger]["state"] == "exhausted"
+        # Then: the forger leaves the round for the infrastructure, without a contest record, a
+        # sanction row, a strike or a burnt unit.
+        assert store._record_v2(run, "excluded", f"0:{forger}") == {
+            "reason": "INFRASTRUCTURE",
+            "evidence_hash": sha256_hex(row["id"].encode()),
+        }
+        assert ("contest", body_digest(stored)) not in sa.records(store, "contest")
+        assert sa.records(store, "exit-sanction") == {}
+        assert standing() == before
 
 
 def test_a_completion_is_refused_for_a_lease_that_has_no_owner(world: sa.World) -> None:
