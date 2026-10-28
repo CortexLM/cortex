@@ -123,6 +123,59 @@ def test_a_value_outside_the_safe_integer_range_refuses_the_event(funded) -> Non
     assert e.db.execute("SELECT COUNT(*) FROM escrow_events").fetchone()[0] == before
 
 
+LIMIT = esc.STATE_INT_LIMIT
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "bad", "edge"),
+    [
+        ("escrow_origins", "mature_at", LIMIT + 1, LIMIT),
+        # `abs()` of the smallest 64-bit integer is an SQLite error, not a number to compare.
+        ("escrow_origins", "mature_at", -(2**63), -LIMIT),
+        ("escrow_origins", "mature_at", 1.5, 1),
+        ("escrow_origins", "reward_round", 1.5, 1),
+        ("escrow_origins", "reward_round", 2**60, LIMIT),
+        ("escrow_origins", "reward_round", -(LIMIT + 1), -LIMIT),
+        ("escrow_finalized", "w", LIMIT + 1, LIMIT),
+        ("escrow_finalized", "w", -(LIMIT + 1), -LIMIT),
+        ("escrow_shadow_finalized", "ordinal", LIMIT + 1, LIMIT),
+        ("escrow_shadow_finalized", "ordinal", -(LIMIT + 1), -LIMIT),
+        ("escrow_shadow_finalized", "trial_epoch", 1.5, 1),
+        ("escrow_shadow_finalized", "trial_epoch", 2**60, LIMIT),
+        ("escrow_shadow_finalized", "trial_epoch", -(LIMIT + 1), -LIMIT),
+    ],
+)
+def test_every_number_the_state_serialises_is_kept_in_the_safe_range(
+    funded, table: str, column: str, bad: float, edge: int
+) -> None:
+    # `json.dumps` writes 1.5 or 2**60 without complaint where `canonicalize()` raises, so the state
+    # hash of a ledger holding one would differ from the one an independent verifier computes.
+    e, cold, other = funded
+    e.db.execute("INSERT INTO escrow_finalized VALUES(0, NULL)")
+    e.db.execute("INSERT INTO escrow_shadow_finalized(ordinal) VALUES(0)")
+    where, args = ("WHERE origin=?", (other,)) if table == "escrow_origins" else ("", ())
+
+    def put(value: float) -> None:
+        e.db.execute(f"UPDATE {table} SET {column}=? {where}", (value, *args))
+
+    put(edge)
+    e.transfer(transfer(E.COLD, STRANGER, [cold], 1, 10), signer=E.COLD.ss58)
+    put(bad)
+    before = e.db.execute("SELECT COUNT(*) FROM escrow_events").fetchone()[0]
+    with pytest.raises(EscrowError, match="STATE_RANGE"):
+        e.transfer(transfer(E.COLD, STRANGER, [cold], 1, 11), signer=E.COLD.ss58)
+    assert e.db.execute("SELECT COUNT(*) FROM escrow_events").fetchone()[0] == before
+
+
+def test_verify_refuses_the_smallest_64_bit_integer_as_out_of_range(funded) -> None:
+    # `verify()` takes the snapshot before it checks conservation, and `abs(-2**63)` is an SQLite
+    # error: the restart check must answer STATE_RANGE like every other value it refuses.
+    e, cold, other = funded
+    e.db.execute("UPDATE escrow_origins SET issued=? WHERE origin=?", (-(2**63), other))
+    with pytest.raises(EscrowError, match="STATE_RANGE"):
+        e.verify()
+
+
 def test_a_transfer_listing_origins_it_does_not_spend_adds_one_row(funded) -> None:
     e, cold, other = funded
     e.transfer(transfer(E.OTHER, E.COLD, [other], 4000, 3), signer=E.OTHER.ss58)

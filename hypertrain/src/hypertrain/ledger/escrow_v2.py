@@ -1448,11 +1448,24 @@ class EscrowV2:
             list(r)
             for r in self.db.execute("SELECT * FROM escrow_shadow_finalized ORDER BY ordinal")
         ]
+        # Every column serialised above that is not TEXT; a TEXT column stores a number as text.
+        # SQLite lets an INTEGER column hold a REAL or any 64-bit value, which `json.dumps` writes
+        # where `canonicalize()` raises. `NOT BETWEEN` rather than `abs()`, which raises on -2**63;
+        # a NULL passes it, so a nullable column only needs its `typeof` test to admit 'null'. `w`
+        # and `ordinal` are rowid aliases, which SQLite only lets hold an integer: no `typeof`.
         if self.db.execute(
-            "SELECT 1 FROM escrow_units WHERE typeof(units)<>'integer' OR units>? "
+            "SELECT 1 FROM escrow_units WHERE typeof(units)<>'integer' "
+            "OR units NOT BETWEEN :low AND :high "
             "UNION ALL SELECT 1 FROM escrow_origins WHERE typeof(issued)<>'integer' "
-            "OR abs(issued)>? LIMIT 1",
-            (STATE_INT_LIMIT, STATE_INT_LIMIT),
+            "OR typeof(mature_at)<>'integer' OR typeof(reward_round) NOT IN ('integer','null') "
+            "OR issued NOT BETWEEN :low AND :high OR mature_at NOT BETWEEN :low AND :high "
+            "OR reward_round NOT BETWEEN :low AND :high "
+            "UNION ALL SELECT 1 FROM escrow_finalized WHERE w NOT BETWEEN :low AND :high "
+            "UNION ALL SELECT 1 FROM escrow_shadow_finalized "
+            "WHERE typeof(trial_epoch) NOT IN ('integer','null') "
+            "OR ordinal NOT BETWEEN :low AND :high OR trial_epoch NOT BETWEEN :low AND :high "
+            "LIMIT 1",
+            {"low": -STATE_INT_LIMIT, "high": STATE_INT_LIMIT},
         ).fetchone():
             raise EscrowError("STATE_RANGE")
         if shadow:
