@@ -285,7 +285,7 @@ needs an operator. Four mechanisms, each in its own commit, in this order.
    so about 10 KB at 16 miners and 13 KB at 32 miners with one-chunk deltas; a round is 335 beacons, about
    16.75 minutes; custody lives to its horizon, about 10 hours or 36 rounds. **With the rotation of point 4
    (records leave at their horizon) the steady state is 16 miners × 36 rounds × 10 KB = 5.8 MB, 46 % of the
-   12 MiB budget; at 32 miners it is 15 MB, 119 %, so a run of 32 miners needs the early release of point 3.** A
+   12 MiB budget; at 32 miners it is 1,152 records of 13.8 KB, 16 MB, 126 %, so a run of 32 miners needs the early release of point 3.** A
    2 GiB delta (512 chunks) is about 580 KB per record.
 3. **Release is automatic (B, D).** The relay learns what the master settled from a public, read-only,
    coordinator-signed `RelaySettlementView` (B) and feeds the existing `settlement` callback; no admin
@@ -326,6 +326,14 @@ needs an operator. Four mechanisms, each in its own commit, in this order.
 
 ### Part 7. Shadow maturity is failure-isolated (F6, CL-14)
 
+A reward follows its coldkey, not the hotkey that signed the work (D66). A shadow reward whose admission
+rotated is revalidated against the hotkey that signed the original commit (the stored proof and screen bind
+it to the admission), the ledger resolves any hotkey of an admission's history to its coldkey when it
+validates stored evidence (the intake gate `_owner_v2` stays strict), and `get_weights` pays the
+admission's current hotkey and nothing to a banned coldkey. A rotation is refused while a round lists the
+admission (ADR 0011 Part 8), so a live round never meets a rotated hotkey; the reachable cases are a
+reward that vests after a rotation and a shadow reward.
+
 `push_beacon` isolates each origin: the three "waiting" codes stay silent, ledger conservation and
 `sqlite3.Error` stay fatal, anything else is journaled as `records_v2 kind='maturity-failed'` (id =
 origin, rewritten only on change and without a beacon field, because `_rollback_snapshot_v2` hashes
@@ -341,14 +349,17 @@ signature carried in an HTTP header. Whatever must be signed is signed in the **
 envelope with an expiry that the server bounds. Four header signatures exist; all four leave:
 the dispute watch (`X-Dispute-Signature`, SIG-01/DSP-09), the trial job (`X-Trial-Signature`), the object
 upload (`X-Object-Signature`, `PUT /v2/runs/{run}/objects/{sha}`) and the challenge GET that ADR 0010
-decision 3 adds. This lot converts the first three. The fourth is owned by `v3-admission-hardening`
-(RTA-04), whose code is not in this base. ADR 0010 decision 3 and its open proxy question (0010 lines
-121, 137-145 and 373) are **amended by their own lot, on instruction**: the challenge request is a `POST`
-whose body is a signed envelope, not a `GET` with two headers. This ADR keeps only the rule and this
+decision 3 adds. The trial job and the challenge are converted by `v3-admission-hardening` (RTA-04, a
+`POST` whose body is a signed `ChallengeRequest` or `JobRequest` envelope, merged here); this lot converts
+the dispute watch (`POST .../disputes/watch`, `DisputeWatchRequest`) and the object upload
+(`POST .../objects/{sha}`, a frame: a 4-byte length, the signed `ObjectUploadRequest`, then the object),
+and removes the header routes with no shim (405). ADR 0010 decision 3 and its open proxy question are
+amended by their own lot. This ADR keeps only the rule and this
 cross-reference. The dispute watch also gets a per-party and a total bound on concurrent long polls, on its own
 thread pool. Other IMPORTANT items follow in their own commits and are recorded in the report with their sibling
-status: HTP-07 (the observer challenge is handed back until answered; the pin id carries the round), ADM-04
-(no store lock on the event loop before the signature check; the anonymous relay-receipt route too),
+status: HTP-07 (the observer challenge is handed back until answered; the pin id carries the round; written,
+not integrated, D58), ADM-04 (no store lock on the event loop before the signature check; the anonymous
+relay-receipt route too; integrated, the object and watch tests import its fixtures),
 ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 Part B); ADM-02 waits for
 `v3-audit-integrity` because it edits `lease_v2`.
 
