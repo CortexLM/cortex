@@ -7,10 +7,13 @@ from __future__ import annotations
 
 FILE = "tests/ledger_invariants/test_exit_disputes.py::"
 CLOSE = FILE + "test_a_contest_nobody_can_decide_is_closed_by_the_beacon_and_frees_every_hold"
-TIMEOUT = FILE + "test_the_timeout_route_needs_the_contesters_receipt_but_the_beacon_exit_does_not"
 HOLD = FILE + "test_the_hold_of_a_round_is_the_count_of_its_open_disputes_after_every_closing_route"
 QUEUE = FILE + "test_contests_nobody_answers_free_the_32_slot_queue_for_the_next_honest_contest"
+# Tests of the base that already pin an invariant of this package: the mutants below name them.
 LIFT = "tests/challenge/test_dispute_exit_v2.py::test_closed_contest_lifts_the_suspension"
+GRACE = "tests/challenge/test_dispute_exit_v2.py::test_blocked_cause_table[in-grace]"
+TIMEOUT = "tests/challenge/test_disputes_v2.py::test_timeout_when_authenticated_delivery_healthy"
+ORDER = "tests/challenge/test_dispute_lock_order_v2.py::"
 
 DISPUTES = "src/hypertrain/challenge/disputes_v2.py"
 STORE = "src/hypertrain/challenge/store.py"
@@ -114,7 +117,7 @@ MUTANTS = [
         "path": DISPUTES,
         "old": "            if not delivered:\n",
         "new": "            if False:\n",
-        "tests": [TIMEOUT],
+        "tests": [TIMEOUT + "[False]", TIMEOUT + "[True]"],
         "why": "The witnessed timeout convicts a party whose receipt of the turn was never signed.",
     },
     {
@@ -185,15 +188,6 @@ MUTANTS = [
         "new": "len(active) >= self.policy.max_open",
         "tests": [QUEUE],
         "why": "Closed disputes keep their slot, so 32 stalled contests fill the queue for good.",
-    },
-    {
-        "id": "exit-grace-dropped-closes-the-timeout-window",
-        "invariants": ["DIA-15"],
-        "path": DISPUTES,
-        "old": "        return EXCLUSION_ABANDONED if now > turn.turn_deadline + grace else None",
-        "new": "        return EXCLUSION_ABANDONED if now > turn.turn_deadline else None",
-        "tests": [TIMEOUT],
-        "why": "The beacon closes the contest before the operator's witnessed timeout window ends.",
     },
     {
         "id": "exit-leaves-the-miner-suspended-existing-pin",
@@ -275,7 +269,7 @@ MUTANTS = [
         "path": DISPUTES,
         "old": "        return EXCLUSION_ABANDONED if now > turn.turn_deadline + grace else None",
         "new": "        return EXCLUSION_ABANDONED if now >= turn.turn_deadline + grace else None",
-        "tests": [TIMEOUT],
+        "tests": [CLOSE + "[never-answered-round-pending]", GRACE],
         "why": "The last round of the operator's timeout window already belongs to the beacon.",
     },
     {
@@ -337,5 +331,89 @@ MUTANTS = [
         ),
         "tests": [HOLD],
         "why": "A resolution lowers the hold by one, not a recount: a replay subtracts twice.",
+    },
+    {
+        "id": "poll-holds-the-condition-while-it-reads",
+        "invariants": ["DIA-22", "DS-04"],
+        "path": DISPUTES,
+        "old": "            found = available()\n",
+        "new": "            with self.condition:\n                found = available()\n",
+        "tests": [
+            ORDER
+            + "test_a_mutator_that_notifies_under_the_store_lock_does_not_deadlock_a_parked_poller"
+        ],
+        "why": "The long poll asks for the store lock inside the condition again (ADR 0011 pt 7).",
+    },
+    {
+        "id": "poll-reads-the-table-inside-the-leaf",
+        "invariants": ["DIA-22", "DS-04"],
+        "path": DISPUTES,
+        "old": "            found = available()\n",
+        "new": "            with self._leaf():\n                found = available()\n",
+        "tests": [
+            ORDER
+            + "test_a_poller_parked_on_the_condition_is_woken_by_a_mutator_holding_the_store_lock"
+        ],
+        "why": "The long poll reads the event table in the leaf: the order check fires, no event.",
+    },
+    {
+        "id": "notify-does-not-wake-the-poll",
+        "invariants": ["DIA-22", "DS-04"],
+        "path": DISPUTES,
+        "old": "            self._beats += 1\n",
+        "new": "            pass\n",
+        "tests": [
+            ORDER
+            + "test_a_poller_parked_on_the_condition_is_woken_by_a_mutator_holding_the_store_lock"
+        ],
+        "why": "A dispute write wakes nobody: a parked long poll sleeps until its own timeout.",
+    },
+    {
+        "id": "exit-seizes-the-bond-of-a-stalled-contester",
+        "invariants": ["DIA-14", "DS-03"],
+        "path": STORE,
+        "old": (
+            "                            admission.resolve_pending("
+            "turn.contest.miner, turn.dispute_id, now=now)\n"
+        ),
+        "new": (
+            "                            admission.resolve_pending("
+            "turn.contest.miner, turn.dispute_id, now=now)\n"
+            "                            record = admission.store.record(turn.contest.miner)\n"
+            "                            admission.seize_bond(\n"
+            "                                record.admission_id,\n"
+            '                                reason="AUDIT_MISMATCH",\n'
+            "                                evidence_hash=turn.dispute_id,\n"
+            "                                now=now,\n"
+            "                            )\n"
+        ),
+        "tests": [
+            FILE + "test_the_beacon_exit_never_sanctions_the_bonded_miner_who_opened_the_contest"
+        ],
+        "why": "The exit treats a stalled contest as a confirmed audit mismatch: its bond burns.",
+    },
+    {
+        "id": "exit-burns-the-admission-bond-of-a-stalled-contester",
+        "invariants": ["DIA-14", "DS-03"],
+        "path": STORE,
+        "old": (
+            "                            admission.resolve_pending("
+            "turn.contest.miner, turn.dispute_id, now=now)\n"
+        ),
+        "new": (
+            "                            admission.resolve_pending("
+            "turn.contest.miner, turn.dispute_id, now=now)\n"
+            "                            record = admission.store.record(turn.contest.miner)\n"
+            "                            admission.seize_bond(\n"
+            "                                record.admission_id,\n"
+            '                                reason="NO_SHOW",\n'
+            "                                evidence_hash=turn.dispute_id,\n"
+            "                                now=now,\n"
+            "                            )\n"
+        ),
+        "tests": [
+            FILE + "test_the_beacon_exit_never_sanctions_the_bonded_miner_who_opened_the_contest"
+        ],
+        "why": "The exit burns the admission bond alone, with no strike and no state change.",
     },
 ]

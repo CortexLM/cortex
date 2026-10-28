@@ -24,6 +24,7 @@ from hypertrain.challenge.disputes_v2 import (
 )
 from hypertrain.challenge.finality_v2 import RoundStatus, require_open, settle
 from hypertrain.challenge.store import ChallengeError
+from hypertrain.protocol import messages_v2
 from hypertrain.protocol.envelope import body_digest
 from hypertrain.protocol.envelope_v2 import parse_envelope, seal
 from hypertrain.protocol.hashing import sha256_hex
@@ -114,6 +115,11 @@ def join(world: World, index: int) -> str:
     return str(response.json()["admission_id"])
 
 
+def funding_units(world: World) -> int:
+    """The admission bond a funded miner holds here: the funding floor of the economics policy."""
+    return int(world.store._services(world.run_id)[0].policy.S_min_units)
+
+
 def activate(world: World, index: int) -> str:
     """Join miner `index` and make it ACTIVE and funded by SQL, as the e2e `activated_network`
     does: the 12-trial ladder costs about 35 s per identity and is not what is under test."""
@@ -123,7 +129,7 @@ def activate(world: World, index: int) -> str:
     lock = EscrowLock(
         operation_id=f"{index + 1:064x}",
         owner=fixture.COLD[index].ss58,
-        units=1000,
+        units=funding_units(world),
         origin_ids=[net.origin_ids[index]],
         admission_id=admission_id,
         dispute_id=None,
@@ -168,14 +174,31 @@ def seed_contest(
 ) -> str:
     """The records the audit of round `w` leaves for miner `index`; returns the dispute id.
 
-    mismatch=True is a verdict that is not MATCH (contest and exclusion); False is a MATCH
-    verdict (contest only). The finality record of the round is created if it is missing.
+    mismatch=True is a verdict that is not MATCH (completed MISMATCH lease, contest and
+    exclusion); False is a MATCH verdict (completed MATCH lease and contest). The finality record
+    of the round is created if it is missing.
     """
     net, fixture = world.network, service()
     hot, cold = fixture.HOT[index], fixture.COLD[index]
     row = world.store._db.execute(
         "SELECT admission_id FROM admissions_v2 WHERE hotkey=?", (hot.ss58,)
     ).fetchone()
+    # The lease row is what a service that refuses to contest a verdict that upholds the work
+    # reads (audit-integrity-2); complete_audit_v2 always leaves it, with the result of the verdict.
+    with world.store._tx():
+        world.store._db.execute(
+            "INSERT INTO audit_leases_v2(id,run_id,w,hotkey,created,absolute,state,result) "
+            "VALUES(?,?,?,?,?,?,'completed',?)",
+            (
+                sha256_hex(f"exit-disputes-lease-{w}-{index}".encode()),
+                world.run_id,
+                w,
+                hot.ss58,
+                net.now,
+                net.now + 1,
+                "MISMATCH" if mismatch else "MATCH",
+            ),
+        )
     contest = {
         "verdict_hash": verdict_of(index),
         "challenge_hash": sha256_hex(b"exit-disputes-challenge"),
@@ -325,6 +348,26 @@ def resolve(world: World, dispute_id: str, *, reason: str, loser: str | None) ->
     return resolution
 
 
+def watch_poll(client: Any, world: World, party: Keypair, *, timeout: int) -> Any:
+    """One long poll of the dispute watch as `party`, returned unchecked.
+
+    The one place that knows how the watch authenticates: a signature over run and party in an
+    HTTP header of a GET where the service reads it there (SIG-01), and a signed `WatchRequest`
+    in the body of a POST where it reads it there (ADR 0014 part 8, audit-integrity-2)."""
+    net = world.network
+    if hasattr(messages_v2, "WatchRequest"):
+        asked = messages_v2.WatchRequest(party=party.ss58, cursor=0, wait_seconds=timeout)
+        return client.post(
+            net.url + "/disputes", json=net.signed(party, "WatchRequest", asked, net.now + 20)
+        )
+    signature = party.sign(f"hypertrain/watch/2|{world.run_id}|{party.ss58}".encode()).hex()
+    return client.get(
+        net.url + "/disputes",
+        params={"party": party.ss58, "timeout": timeout},
+        headers={"x-dispute-signature": signature},
+    )
+
+
 def post_release(world: World, index: int, lock: EscrowLock) -> Any:
     """POST /escrow/release signed by the lock's owner, with neutral settlement hashes."""
     net, cold = world.network, service().COLD[index]
@@ -353,6 +396,16 @@ def open_disputes_of(world: World, w: int = 0) -> int:
             "AND json_extract(turn,'$.resolution') IS NULL",
             (w,),
         ).fetchone()[0]
+    )
+
+
+def sanction_rows(world: World) -> int:
+    """Rows that record a seizure or a sanction of an admission bond (ADR 0010 part 6); a tree
+    without that part has neither table, so there is nothing to find."""
+    return sum(
+        world.count(table)
+        for table in ("admission_seizures", "admission_sanctions")
+        if world.store._db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone()
     )
 
 

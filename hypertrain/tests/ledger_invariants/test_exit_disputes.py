@@ -9,6 +9,12 @@ the v2 service of `support.service_world`; the audit's records are seeded the wa
 Holes are strict xfails that assert the desired defence after a control that reaches the point
 under test. Lens ids are candidates until a test below says otherwise; a hole that rests on a
 stand-in for the service, or on a policy the maintainers have not decided, says [candidate].
+Every reason ends with `[fix-lot: <tag>]`, the lot that will flip it (or why none will yet).
+
+Not repeated here because the base already pins it, which `mutants_exit_disputes.py` proves by
+mutants that only those tests kill: the lock order of the dispute long-poll (DIA-22, DS-04, fixed
+by ADR 0011 part 7: tests/challenge/test_dispute_lock_order_v2.py) and the receipt that the
+operator's timeout needs (DIA-15: tests/challenge/test_disputes_v2.py).
 """
 
 from __future__ import annotations
@@ -33,8 +39,6 @@ from hypertrain.challenge.disputes_v2 import (
     EXCLUSION_HORIZON,
 )
 from hypertrain.challenge.store import ChallengeError
-from hypertrain.protocol.jcs import canonicalize
-from hypertrain.protocol.messages_v2 import DisputeV2
 
 from . import support_exit_disputes as X
 from .support import World, service_world
@@ -142,36 +146,33 @@ def test_a_contest_nobody_can_decide_is_closed_by_the_beacon_and_frees_every_hol
     assert world.count("dispute_acks_v2") == (1 if shape == "acked-then-silent" else 0)
 
 
-def test_the_timeout_route_needs_the_contesters_receipt_but_the_beacon_exit_does_not(
+def test_the_beacon_exit_never_sanctions_the_bonded_miner_who_opened_the_contest(
     world: World,
 ) -> None:
-    """DIA-15: PARTY_TIMEOUT is a conviction and keeps requiring the party's own signed receipt
-    (NO_AUTHENTICATED_TURN_DELIVERY), but the exit of a contest whose party never acked does not:
-    the operator's window ends at turn_deadline + T and the beacon closes the contest after it."""
-    # Given: a funded contest whose contester never answers and never acknowledges.
-    dispute_id = X.open_contest(world, 0)
-    first, grace_end, _ = horizon_of(world, dispute_id)
-    world.network.push(first + 1)
-    before = world.db_digest()
-    # When: the operator tries the witnessed timeout inside its window.
-    refused = world.client.post(
-        world.network.url + f"/admin/disputes/{dispute_id}/timeout",
-        json=X.timeout_request(world, dispute_id),
-        headers=world.admin,
-    )
-    # Then: refused for the missing receipt, state unchanged, no loser named.
-    assert refused.status_code == 409 and "NO_AUTHENTICATED_TURN_DELIVERY" in refused.text
-    assert world.db_digest() == before
-    assert X.disputes(world).get(dispute_id).resolution is None
-    # When: the last round of the operator's window passes, then the first one after it.
-    world.network.push(grace_end)
-    assert X.disputes(world).get(dispute_id).resolution is None
-    world.network.push(grace_end + 1)
-    # Then: the exit happened without a receipt, the contester is not convicted.
+    """DIA-14 / DS-03 with ADR 0010 part 6: closing a contest nobody can decide is no conviction.
+    The opener keeps its whole admission bond, its strikes and a fresh probation; the ledger burns
+    nothing and no seizure or sanction is recorded for it."""
+    # Given: an ACTIVE miner with a funded admission bond, whose contest nobody answers.
+    escrow, admission, _ = world.store._services(world.run_id)
+    X.activate(world, 0)
+    X.seed_contest(world, 0)
+    X.fund_contest(world, 0)
+    assert X.post_dispute(world, 0).status_code == 200
+    dispute_id, hot = X.dispute_id_of(world, 0), X.service().HOT[0].ss58
+    opened, strikes = escrow.balances(), admission.store.record(hot).strikes
+    assert opened.admission_locked == X.funding_units(world)
+    assert X.miner_state(world, 0)[:2] == ("SUSPENDED", 1)
+    # When: the beacon closes it after its window.
+    world.network.push(horizon_of(world, dispute_id)[1] + 1)
+    # Then: closed with no loser, the contest bond is back, the admission bond is untouched.
     closed = X.disputes(world).get(dispute_id)
     assert closed.resolution is not None and closed.resolution.loser is None
-    assert world.count("dispute_acks_v2") == 0
-    assert X.unresolved_of(world) == 0
+    assert escrow.balances() == replace(
+        opened, available=opened.available + X.BOND, dispute_locked=0
+    )
+    assert admission.store.record(hot).strikes == strikes
+    assert X.miner_state(world, 0)[:2] == ("PROBATION", 0)
+    assert X.sanction_rows(world) == 0
 
 
 def test_the_hold_of_a_round_is_the_count_of_its_open_disputes_after_every_closing_route(
@@ -224,7 +225,8 @@ def test_the_hold_of_a_round_is_the_count_of_its_open_disputes_after_every_closi
     raises=AssertionError,
     reason="FIN-11: _recount_disputes_v2 rewrites finality[w] of a SETTLED round on a late "
     "contest (unresolved_disputes 0 -> 1), which blocks require_open(w+2) until it closes; "
-    "ADR 0011 accepts this residual until contests are priced [candidate]",
+    "ADR 0011 accepts this residual until contests are priced [candidate] "
+    "[fix-lot: decision (product choice pending)]",
 )
 def test_a_late_contest_never_reopens_a_settled_round(world: World) -> None:
     """FIN-11: a round that finality settled keeps its row; a contest filed on it afterwards is
@@ -248,7 +250,8 @@ def test_a_late_contest_never_reopens_a_settled_round(world: World) -> None:
     strict=True,
     raises=AssertionError,
     reason="DIB-04+DS-02: a contest on a verdict that matched suspends its opener, and "
-    "verified_inputs_v2 then raises 403 for the whole round",
+    "verified_inputs_v2 then raises 403 for the whole round; audit-integrity-2 refuses that "
+    "contest [fix-lot: audit-integrity-2 ADR0011-P8 DSP-04]",
 )
 def test_a_contest_on_a_matching_verdict_never_wedges_the_aggregation_of_its_round(
     world: World,
@@ -282,107 +285,8 @@ def test_a_contest_on_a_matching_verdict_never_wedges_the_aggregation_of_its_rou
         assert error.status != 403, error.detail
 
 
-# --- the event long-poll and the dispute writes never wait for each other (DIA-22, DS-04) -----
-
 PATIENCE = 4.0  # seconds a thread may wait for a lock before the test declares it stuck
 START = 30.0  # seconds a started thread may take to reach the service on a loaded host
-
-
-class PollerGate:
-    """Test-owned stand-in for `EscrowV2.mutex`: the store's own lock, plus a signal when the
-    poller asks for it and a bounded wait for the poller only, so a stuck pair can be released."""
-
-    def __init__(self, inner: Any, attempted: threading.Event) -> None:
-        self.inner, self.attempted = inner, attempted
-
-    def __enter__(self) -> PollerGate:
-        if threading.current_thread().name != "poller":
-            self.inner.acquire()
-            return self
-        self.attempted.set()
-        if not self.inner.acquire(timeout=PATIENCE):
-            raise TimeoutError("the poller waited for the store lock while holding the condition")
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.inner.release()
-
-
-def in_thread(name: str, work) -> tuple[threading.Thread, dict[str, object]]:
-    box: dict[str, object] = {}
-
-    def run() -> None:
-        try:
-            box["result"] = work()
-        except BaseException as error:  # reported to the test, never swallowed
-            box["error"] = error
-
-    thread = threading.Thread(target=run, name=name, daemon=True)
-    thread.start()
-    return thread, box
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="DIA-22+DS-04: events() holds the dispute condition and asks for the store lock while "
-    "a writer holds the store lock and notify()s: the pair waits for each other",
-)
-@pytest.mark.parametrize("write", ["open", "beacon-exit"])
-def test_a_dispute_poll_and_a_dispute_write_never_wait_for_each_other(
-    world: World, write: str
-) -> None:
-    """DIA-22 / DS-04: a long-poll that starts while a dispute write holds the store lock, and a
-    write that notifies the pollers before it commits, both finish. The writes are the miner's
-    contest and the beacon's own closure of a stalled one."""
-    # Given: the write is ready (a funded contest, or a stalled one one round from its closure).
-    store, hot = world.store, X.service().HOT[0]
-    if write == "open":
-        X.join(world, 0)
-        X.seed_contest(world, 0)
-        X.fund_contest(world, 0)
-        dispute_id, method = X.dispute_id_of(world, 0), "open"
-        request = canonicalize(
-            world.network.signed(
-                hot,
-                "DisputeV2",
-                DisputeV2(
-                    hotkey=hot.ss58,
-                    verdict_hash=X.verdict_of(0),
-                    action="contest",
-                    bond_lock=X.lock_id_of(0),
-                ),
-            )
-        )
-        act = lambda: store.admission_v2(world.run_id, "dispute", request)  # noqa: E731
-    else:
-        dispute_id, method = X.open_contest(world, 0), "exclude"
-        grace_end = horizon_of(world, dispute_id)[1]
-        world.network.push(grace_end)
-        act = lambda: world.network.push(grace_end + 1)  # noqa: E731
-    d = X.disputes(world)
-    attempted, inside = threading.Event(), threading.Event()
-    d.escrow.mutex = PollerGate(store._lock, attempted)
-    real = getattr(d, method)
-
-    def once_the_poll_is_waiting(*args: Any, **kwargs: Any) -> Any:
-        inside.set()  # the store lock is held by the writer from here to its commit
-        assert attempted.wait(START)  # the poller holds the condition and asks for the lock
-        return real(*args, **kwargs)
-
-    setattr(d, method, once_the_poll_is_waiting)
-    # When: the write starts, and the poll starts inside its transaction.
-    writer, written = in_thread("writer", act)
-    assert inside.wait(START)
-    poller, polled = in_thread("poller", lambda: d.events(hot.ss58, 0, timeout=5))
-    writer.join(3 * PATIENCE)
-    poller.join(3 * PATIENCE)
-    # Then: neither is stuck, the write took effect and the poll saw the contest's event.
-    assert not writer.is_alive() and not poller.is_alive()
-    assert "error" not in polled, polled.get("error")
-    assert "error" not in written, written.get("error")
-    assert [event.turn.dispute_id for event in polled["result"]] == [dispute_id]
-    assert (d.get(dispute_id).resolution is not None) == (write == "beacon-exit")
 
 
 # --- what a contest settles for the contester (DIA-24, DIB-11, DIA-25, DIA-06, DIB-05) --------
@@ -393,7 +297,8 @@ def test_a_dispute_poll_and_a_dispute_write_never_wait_for_each_other(
     raises=AssertionError,
     reason="DIA-24+DIB-11: a contest closed with the auditor as loser refunds the bond but never "
     "lifts the excluded/UNVERIFIED record the wrong verdict wrote (no deletion exists); the Lens "
-    "calls the remedy a product decision [candidate]",
+    "calls the remedy a product decision [candidate] "
+    "[fix-lot: decision (product choice pending)]",
 )
 def test_a_contest_won_against_the_auditor_lifts_the_exclusion_it_proved_wrong(
     world: World,
@@ -418,7 +323,8 @@ def test_a_contest_won_against_the_auditor_lifts_the_exclusion_it_proved_wrong(
     strict=True,
     raises=AssertionError,
     reason="DIA-25: a LOCK_CONTEST whose dispute never opened is not releasable: the settlement "
-    "lookup finds neither a dispute nor a record (UNACCEPTED_SETTLEMENT), units stay locked",
+    "lookup finds neither a dispute nor a record (UNACCEPTED_SETTLEMENT), units stay locked; "
+    "ADR 0014 part 2 keeps it fail closed [fix-lot: none (no design yet)]",
 )
 def test_a_contest_bond_whose_dispute_never_opened_can_be_taken_back(world: World) -> None:
     """DIA-25: an owner who locked a bond for a contest that was refused (here: the verdict is
@@ -441,15 +347,15 @@ def test_a_contest_bond_whose_dispute_never_opened_can_be_taken_back(world: Worl
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="DIA-06+DIB-05: open() takes a contest on a MATCH verdict (the contest record carries "
-    "no verdict result) and suspends the miner; the e2e watch flow pins the permissive rule "
-    "[candidate]",
+    reason="DIA-06: open() takes a contest on a MATCH verdict (the contest record carries no "
+    "verdict result) and suspends the miner; audit-integrity-2 refuses it from the audit lease "
+    "[fix-lot: audit-integrity-2 ADR0011-P8 DSP-04]",
 )
 def test_a_contest_on_a_matching_verdict_is_refused_before_it_suspends_anyone(
     world: World,
 ) -> None:
-    """DIA-06 / DIB-05: a contest is admissible where it can be adverse to the audit (the verdict
-    is not MATCH). A MATCH verdict's contest is refused and leaves the state as it was."""
+    """DIA-06: a contest is admissible where it can be adverse to the audit (the verdict is not
+    MATCH). A MATCH verdict's contest is refused and leaves the state as it was."""
     # Control: the same route admits the contest of a verdict that is not MATCH.
     X.open_contest(world, 1, mismatch=True)
     assert X.miner_state(world, 1)[:2] == ("SUSPENDED", 1)
@@ -468,16 +374,17 @@ def test_a_contest_on_a_matching_verdict_is_refused_before_it_suspends_anyone(
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="DIB-05+DIA-06: a contest the referee closes MATCH (audit confirmed) returns the whole "
-    "bond (settle_lock slashes only FRAUD against the miner), so a baseless contest is free; "
-    "ADR 0011 leaves the pricing to a later decision [candidate]",
+    reason="DIB-05: a contest the referee closes MATCH (no fraud found) returns the whole bond "
+    "(settle_lock slashes only FRAUD against the miner), so a baseless contest is free; ADR 0011 "
+    "decision 17 keeps the bond refundable and leaves the price to the founder [candidate] "
+    "[fix-lot: decision (product choice pending)]",
 )
 def test_a_baseless_contest_costs_the_contester_part_of_its_bond(world: World) -> None:
-    """DIB-05 / DIA-06: the referee's replay confirms the audit; the contester ends with fewer
-    units than it began with, whether the forfeited part is burned or paid to someone else.
-    A service that refuses the contest of a MATCH verdict has no such contest to price, so the
-    test ends there (DIA-06 above is then fixed and this marker has to go)."""
-    # Given: a contest of a MATCH verdict, if the service takes it.
+    """DIB-05: the referee finds no fraud in a contest of a verdict that blames the miner; the
+    contester ends with fewer units than it began with, whether the forfeited part is burned or
+    paid to someone else. The verdict is not MATCH, so the contest stays admissible when the
+    service refuses to contest a verdict that upholds the work (DIA-06 above)."""
+    # Given: a funded contest of a MISMATCH verdict.
     escrow = world.store._services(world.run_id)[0]
     owner = X.service().COLD[0].ss58
 
@@ -493,13 +400,10 @@ def test_a_baseless_contest_costs_the_contester_part_of_its_bond(world: World) -
 
     X.join(world, 0)
     before = owned()
-    dispute_id = X.seed_contest(world, 0, mismatch=False)
+    dispute_id = X.seed_contest(world, 0)
     X.fund_contest(world, 0)
-    opened = X.post_dispute(world, 0)
-    if opened.status_code != 200:
-        assert 400 <= opened.status_code < 500, opened.text
-        return
-    # When: the referee confirms the verdict.
+    assert X.post_dispute(world, 0).status_code == 200
+    # When: the referee finds nothing to blame on either party.
     X.resolve(world, dispute_id, reason="MATCH", loser=None)
     # Control: the bond was settled (nothing is locked any more).
     assert escrow.balances().dispute_locked == 0 and X.unresolved_of(world) == 0
@@ -544,7 +448,8 @@ def test_contests_nobody_answers_free_the_32_slot_queue_for_the_next_honest_cont
     strict=True,
     raises=AssertionError,
     reason="DIB-22+FIN-17+LV-04: a RUNNING repair reservation never leaves RUNNING (only "
-    "COMPLETE writes it): once it is old, or the state moved, no rollback can start [candidate]",
+    "COMPLETE writes it): once it is old, or the state moved, no rollback can start [candidate] "
+    "[fix-lot: none (no design yet)]",
 )
 @pytest.mark.parametrize("case", ["window-over", "state-moved"])
 def test_a_failed_rollback_attempt_never_disables_the_next_one(world: World, case: str) -> None:
@@ -590,20 +495,16 @@ def shared_loop(world: World, workers: int) -> Iterator[TestClient]:
     strict=True,
     raises=AssertionError,
     reason="DS-08: GET /disputes runs each long-poll (up to 30 s) on a thread of the shared "
-    "request pool with no bound per party, so a few polls stall every other route [candidate]",
+    "request pool with no bound per party, so a few polls stall every other route [candidate] "
+    "[fix-lot: escrow-relay-fixes ADR0014-P8]",
 )
 def test_waiting_dispute_polls_never_starve_the_other_routes(world: World) -> None:
     """DS-08: a watcher that polls for events does not keep the service from answering others.
     POOL polls of one party wait on an empty feed while a plain status request is made."""
     # Given: a registered miner whose feed is empty, and a pool that answers the status route.
-    fixture, d = X.service(), X.disputes(world)
+    d = X.disputes(world)
     X.join(world, 0)
-    hot, url = fixture.HOT[0], world.network.url
-    watch = {
-        "x-dispute-signature": hot.sign(
-            f"hypertrain/watch/2|{world.run_id}|{hot.ss58}".encode()
-        ).hex()
-    }
+    hot, url = X.service().HOT[0], world.network.url
     waiting, answered = threading.Condition(), {}
     real_events = d.events
 
@@ -618,9 +519,7 @@ def test_waiting_dispute_polls_never_starve_the_other_routes(world: World) -> No
         assert client.get(url).status_code == 200  # control: the route answers on an idle pool
 
         def poll(index: int) -> None:
-            reply = client.get(
-                url + "/disputes", params={"party": hot.ss58, "timeout": 25}, headers=watch
-            )
+            reply = X.watch_poll(client, world, hot, timeout=25)
             with waiting:
                 answered[index] = reply.status_code
                 waiting.notify_all()
