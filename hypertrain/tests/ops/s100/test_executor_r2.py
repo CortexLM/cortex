@@ -277,7 +277,7 @@ def test_a_usage_error_stops_before_the_gate_and_before_any_call(box, backup, ar
 # the script without --r2 too (it ignores the option and the gate refuses): they are regression
 # guards, the only ones that fail if --r2 steps around the gate.
 @pytest.mark.parametrize(
-    ("seal", "rc"), [({"age": 1800}, 3), ({"ready": 503}, 2)], ids=["window-closed", "readyz-503"]
+    ("seal", "rc"), [({"age": 4500}, 3), ({"ready": 503}, 2)], ids=["window-closed", "readyz-503"]
 )
 def test_a_closed_window_refuses_executor_r2_before_the_challenge_is_asked(box, backup, seal, rc):
     box.seal(**seal)
@@ -415,7 +415,7 @@ def test_a_dry_run_says_whether_the_challenge_would_be_recreated(box, backup):
 
 def test_a_dry_run_with_a_closed_window_reports_the_rest_and_exits_with_the_gate(box, backup):
     box.token()
-    box.seal(age=1800)
+    box.seal(age=4500)
     out = refused(box, backup, 3, "--dry-run", calls=1)
     assert "gate: closed, a real run would exit 3" in out and "preflight ok" in out
 
