@@ -250,22 +250,22 @@ MUTANTS = [
         "invariants": ["WGT-10"],
         "path": STORE,
         "old": (
-            "        escrows = [\n"
-            "            self._services(r[0])[0]\n"
-            "            for r in self._db.execute("
+            "            escrows = [\n"
+            "                self._services(r[0])[0]\n"
+            "                for r in self._db.execute("
             '"SELECT run_id, manifest FROM runs ORDER BY run_id")\n'
-            '            if live and json.loads(r[1]).get("manifest_version") == 2\n'
-            "        ]\n"
+            '                if live and json.loads(r[1]).get("manifest_version") == 2\n'
+            "            ]\n"
         ),
         "new": (
-            "        escrows = []\n"
-            "        for r in self._db.execute("
+            "            escrows = []\n"
+            "            for r in self._db.execute("
             '"SELECT run_id, manifest FROM runs ORDER BY run_id"):\n'
-            '            if live and json.loads(r[1]).get("manifest_version") == 2:\n'
-            "                try:\n"
-            "                    escrows.append(self._services(r[0])[0])\n"
-            "                except ChallengeError:\n"
-            "                    continue\n"
+            '                if live and json.loads(r[1]).get("manifest_version") == 2:\n'
+            "                    try:\n"
+            "                        escrows.append(self._services(r[0])[0])\n"
+            "                    except ChallengeError:\n"
+            "                        continue\n"
         ),
         "tests": [
             W1 + "test_a_failing_service_build_refuses_the_new_epoch_before_anything_is_journaled"
@@ -306,8 +306,8 @@ MUTANTS = [
         "id": "wgt-origins-of-one-hotkey-overwrite-each-other",
         "invariants": ["WGT-14"],
         "path": STORE,
-        "old": '                weights[row["hotkey"]] = weights.get(row["hotkey"], 0.0) + take\n',
-        "new": '                weights[row["hotkey"]] = take\n',
+        "old": "                weights[payee] = weights.get(payee, 0.0) + take\n",
+        "new": "                weights[payee] = take\n",
         "tests": [
             W1 + "test_origins_of_one_hotkey_are_summed_into_one_entry_whatever_their_owner",
             PAY + "test_oldest_maturity_paid_first_and_same_hotkey_accumulates",
@@ -366,7 +366,7 @@ MUTANTS = [
         "id": "wgt-entry-cap-is-ignored",
         "invariants": ["WGT-22"],
         "path": STORE,
-        "old": '                if row["hotkey"] not in weights and len(weights) >= MAX_ENTRIES:',
+        "old": "                if payee not in weights and len(weights) >= MAX_ENTRIES:",
         "new": "                if False:",
         "tests": [PAY + "test_hotkey_past_entry_cap_keeps_units_for_later"],
         "why": "a new hotkey past the entry cap is paid anyway.",
