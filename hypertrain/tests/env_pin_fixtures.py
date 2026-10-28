@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from hypertrain.protocol.env_pins import EnvPin, class_pin, observed_environ, pinned_environ
+from hypertrain.protocol.messages_v2 import EnvObservation
 
 CPU_AVX2: dict[str, Any] = class_pin("avx2", "none")
 CPU_AVX512: dict[str, Any] = class_pin("avx512", "none")
@@ -32,6 +33,11 @@ def honest_observation(pin: dict[str, Any] | EnvPin) -> dict[str, Any]:
         "cpu_capability": p.capability,
         "gpu": p.gpu,
     }
+
+
+def honest_env(pin: dict[str, Any] | EnvPin = CPU_AVX2) -> EnvObservation:
+    """``honest_observation`` as the wire model a join request or a work screen carries."""
+    return EnvObservation.model_validate(honest_observation(pin))
 
 
 # Every pinned name set to the value that changes bytes, the way a careless host might export them.

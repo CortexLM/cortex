@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from env_pin_fixtures import honest_env
 from hypertrain.protocol.envelope_v2 import signing_message
 from hypertrain.protocol.messages_v2 import (
     DisputeV2,
@@ -67,6 +68,7 @@ def test_unfunded_join_past_its_window_does_not_block_its_coldkey(network):
         expires_beacon=10000,
         policy_hash=network.manifest.network.admission_policy_hash,
         hardware_hint=service.HardwareHint(device_name="cpu", device_count=1, driver="advisory"),
+        env=honest_env(network.manifest.training.reference_spec.env.pin()),
     )
     second = network.client.post(
         network.url + "/join", content=service.canonicalize(request.body())

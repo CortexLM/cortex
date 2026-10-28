@@ -15,8 +15,10 @@ import pytest
 import torch
 
 import hypertrain.trainer  # noqa: F401
+from env_pin_fixtures import TEST_PIN, honest_env
 from hypertrain.auditor.replay import AnchorCache, pack_state, unpack_state
 from hypertrain.miner.island_launch import IslandFailure, launch_argv, launch_island
+from hypertrain.protocol.env_pins import require_honorable
 from hypertrain.protocol.example import example_manifest
 from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.protocol.keys import Keypair
@@ -84,6 +86,13 @@ def tiny_manifest(
             },
         }
     )
+
+
+@pytest.fixture
+def probed_host() -> None:
+    """Run the host's pin probe now: launch_island probes once per process, in a child of its
+    own, which a test that patches ``subprocess.Popen`` must not see in place of the rank child."""
+    require_honorable(TEST_PIN, "cpu")
 
 
 def staged_job(
@@ -191,6 +200,7 @@ def test_wrong_input_and_symlink_leave_no_publication(tmp_path: Path) -> None:
         launch_island(job, tmp_path, backend="cpu")
 
 
+@pytest.mark.usefixtures("probed_host")
 def test_rank_death_and_live_cancel_teardown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -214,6 +224,7 @@ def test_rank_death_and_live_cancel_teardown(
     assert not (tmp_path / "published").exists()
 
 
+@pytest.mark.usefixtures("probed_host")
 def test_blocked_child_cancels_on_registered_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -250,6 +261,7 @@ def test_blocked_child_cancels_on_registered_event(
     assert not (tmp_path / "published").exists()
 
 
+@pytest.mark.usefixtures("probed_host")
 def test_noisy_child_streams_logs_and_joins_success_watcher(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -282,6 +294,7 @@ def test_noisy_child_streams_logs_and_joins_success_watcher(
             directory / "delta",
             directory / "leaves",
             (),
+            honest_env(job.manifest.training.reference_spec.env.pin()),
         )
 
     def forbidden_communicate(*args, **kwargs):

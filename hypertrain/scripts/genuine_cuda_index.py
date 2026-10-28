@@ -24,6 +24,7 @@ IMAGE = "sha256:c16a28dd29df300eca0cfb5c5aeacb8947681708634e3cbc8639b530321fe2e2
 
 
 def load(name: str, rel: str):
+    sys.path.insert(0, str(TREE / "tests"))  # the test modules import env_pin_fixtures
     spec = importlib.util.spec_from_file_location(name, TREE / rel)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)

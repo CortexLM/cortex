@@ -18,6 +18,7 @@ from typing import Literal
 import pytest
 
 import hypertrain
+from env_pin_fixtures import honest_env
 from hypertrain.gpu_ops.journal import Journal, fsha, sha256
 from hypertrain.gpu_ops.launcher import Reject
 from hypertrain.protocol import envelope_v2
@@ -957,6 +958,7 @@ def contract(tmp_path: Path):
         expires_beacon=20,
         policy_hash=wrapper.network.admission_policy_hash,
         hardware_hint=HardwareHint(device_name="test", device_count=2, driver="595.84"),
+        env=honest_env(wrapper.training.reference_spec.env.pin()),
     )
     put("join", join.model_dump(mode="json"))
     put(
@@ -1074,6 +1076,7 @@ def test_approved_generated_seed_consumed_without_provider(contract, tmp_path, m
         hardware_hint=HardwareHint(
             device_name="synthetic-functional", device_count=2, driver="595.84"
         ),
+        env=honest_env(job.manifest.training.reference_spec.env.pin()),
     )
     join_path = tmp_path / "generated-join.json"
     join_path.write_bytes(canonicalize(join.body()))
@@ -2268,6 +2271,7 @@ def test_continue_reviewed_launch_authentic_store_private_identity(
             expires_beacon=20,
             policy_hash=manifest.network.admission_policy_hash,
             hardware_hint=HardwareHint(device_name="test", device_count=2, driver="595.84"),
+            env=honest_env(manifest.training.reference_spec.env.pin()),
         )
         join_path = put("join-" + role, join.model_dump(mode="json"))
         context_name = "seed-context-" + role

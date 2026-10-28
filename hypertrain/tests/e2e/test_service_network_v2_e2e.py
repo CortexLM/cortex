@@ -113,6 +113,7 @@ def test_actual_shadow_trial_does_not_mutate_production(network):
         challenge_hash=challenge_body.digest(),
         rank_results=list(artifacts.ranks),
         artifact_hashes=[ref.sha256 for ref in proof.artifact_refs],
+        env=artifacts.env,
     )
     response = network.client.post(
         network.url + "/join/proof",
@@ -1337,6 +1338,7 @@ def _graduate_four(network):
                 challenge_hash=challenge.digest(),
                 rank_results=list(artifacts.ranks),
                 artifact_hashes=[r.sha256 for r in proof.artifact_refs],
+                env=artifacts.env,
             )
             response = network.client.post(
                 network.url + "/join/proof",

@@ -81,6 +81,12 @@
   replaying it in the daemon (the in-process replay of an unpinned CPU publication is gone).
   Breaking: every `run_id`, `reference_hash` and `training_hash` changes; existing runs are
   recreated. `kimi_tiny.train_config` and `qualify` take the `EnvPin` the caller's process honors.
+  The miner declares its probed environment in bodies it signs: `JoinRequest.env` and
+  `WorkScreenV2.env` (`EnvObservation`: pinned variables as seen, ATen's resolved capability,
+  device class) are required, and the server answers 409 `ENV_PIN_DIVERGES: NAME, NAME` at join,
+  in the proof route before the reference is paid and in `Admission.proof`, before anything is
+  written (no strike, no suspension, the trial stays open). `sign_join` takes `env=`;
+  `IslandArtifacts.env` is what the ranks observed; the worker writes `summary.json["env"]`.
 
 ### Changed
 - A challenge poll after the deadline no longer suspends a miner whose proof was accepted

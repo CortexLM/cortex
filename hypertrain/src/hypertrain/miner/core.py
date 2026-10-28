@@ -844,23 +844,24 @@ class NetworkMiner:
     def _retry[T](self, what: str, fn: Callable[[], T], *, also: frozenset[int] = frozenset()) -> T:
         return _retrying(what, fn, also=also, noted=self._note_retry)
 
-    def preflight_env_pin(self) -> None:
-        """Tell this host, before any request, that it cannot honor the manifest's environment pin.
+    def preflight_env_pin(self) -> dict[str, Any]:
+        """Probe this host's environment under the manifest's pin, before any request.
 
-        Later the island workers would refuse the round, and a trial left to expire suspends the
-        identity: nothing worth paying admission for."""
+        A host that cannot honor the pin is told now: later the island workers would refuse the
+        round, and a trial left to expire suspends the identity. Returns what the probe observed,
+        which `join` declares and the server compares with the pin."""
         pin = self.manifest.training.reference_spec.env.pin()
         try:
-            require_honorable(pin, "cpu" if self.cfg.device == "cpu" else "cuda")
+            return dict(require_honorable(pin, "cpu" if self.cfg.device == "cpu" else "cuda"))
         except EnvPinUnhonorable as error:
             raise MinerError(
                 f"this host cannot honor the manifest's environment pin: {error}"
             ) from error
 
     def join(self, coldfile: Path, request_id: str, expiry: int) -> dict[str, Any]:
-        self.preflight_env_pin()
+        observed = self.preflight_env_pin()
         from hypertrain.miner.admission import sign_join
-        from hypertrain.protocol.messages_v2 import HardwareHint
+        from hypertrain.protocol.messages_v2 import EnvObservation, HardwareHint
 
         request = sign_join(
             self.kp,
@@ -874,6 +875,7 @@ class NetworkMiner:
                 device_count=self.manifest.training.reference_spec.layout.n_gpus,
                 driver="advisory",
             ),
+            env=EnvObservation.model_validate(observed),
         )
         return self.api.call("POST", self.url + "/join", content=canonical(request.body()))
 

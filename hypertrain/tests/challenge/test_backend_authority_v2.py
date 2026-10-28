@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from env_pin_fixtures import honest_env, honest_observation
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.gpu_ops.journal import fsha
@@ -384,6 +385,7 @@ def saved_geometry(manifest, hotkey, directory, *, published=False):
                             "reserved_bytes": 0,
                             "total_bytes": 1,
                         },
+                        "env": honest_observation(manifest.training.reference_spec.env.pin()),
                     }
                 )
             )
@@ -706,6 +708,7 @@ def test_cuda_dispatch_at_admission_audit_and_geometry(authority, monkeypatch, l
                 hardware_hint=HardwareHint(
                     device_name="advisory", device_count=2, driver="advisory"
                 ),
+                env=honest_env(manifest.training.reference_spec.env.pin()),
             ).body()
         ),
         now=1,

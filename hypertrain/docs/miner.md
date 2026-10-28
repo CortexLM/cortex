@@ -119,6 +119,14 @@ Replay is bitwise, so any of these will turn an honest run into a MISMATCH:
 - Don't change batch size, accumulation, threads or anything else the manifest fixes.
 - Every manifest pins its process environment (`reference_spec.env.pinned`, protocol.md section 7, item 4a): a CPU class (`avx2` or `avx512`) and a GPU class (`none`, `sm_103` or `sm_120`). Check this host before you join. `python -m hypertrain.trainer.env_probe --manifest manifest.json` (a v1 or v2 manifest, or a training body) prints `{"honorable": true, "cpu": "avx2", "gpu": "none", "cpu_capability": "AVX2", "env": {...}, "unset": [...]}`: the variables to export and to leave unset. It exits 1 with the reason when a process started that way is refused, for example `ATen CPU capability: manifest 'AVX2', live 'DEFAULT'` on a CPU without AVX2, or `GPU class: manifest 'sm_103', live 'none'` when no such device is visible. The island workers you start through the launcher get the pin whatever your own environment is, and a host that cannot honor it is refused before capacity is charged (`EnvPinRefused`). `join` and the trial probe tell you the same, before any request, with `this host cannot honor the manifest's environment pin: ...`. A process that runs training code in-process (the v1 miner and auditor, the honeypot) must be started with exactly that environment and refuses otherwise.
 
+The server compares the environment you declare with the manifest's pin and refuses a difference before it spends anything, at `join` and at the trial, with 409 `ENV_PIN_DIVERGES: NAME, NAME`. Nothing is consumed: no admission, strike or suspension is recorded and the trial stays open until its deadline, so fix the host and post the same proof again.
+
+| 409 detail | Meaning | What to do |
+| --- | --- | --- |
+| `ENV_PIN_DIVERGES: MKL_CBWR` (or any pinned variable) | the process that ran your round saw another value | start the miner under the variables `env_probe --manifest` prints |
+| `ENV_PIN_DIVERGES: cpu_capability` | ATen resolved another instruction set than the manifest's CPU class | run on a CPU that reaches the class, or on another run |
+| `ENV_PIN_DIVERGES: gpu` | your device is not the manifest's GPU class (`none` means no GPU) | use the device class the manifest names |
+
 Check the pins in your environment:
 
 ```bash doctest

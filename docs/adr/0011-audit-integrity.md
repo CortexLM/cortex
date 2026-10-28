@@ -371,6 +371,32 @@ breaker bounds the attempt-based one).
 10. The test process is pinned once, before torch loads (`tests/process_pin.py`, imported by
     `tests/conftest.py`): the suite's manifests name `avx2`/`none`, and the deployed AVX2 goldens
     stay the goldens of the suite.
+11. **The miner declares its probed environment in bodies it signs.** `EnvObservation` (`env`: every
+    name the pin speaks about with the value its process saw, `None` for unset; `cpu_capability`:
+    what ATen resolved; `gpu`: the class of its device) is a required field of `JoinRequest`
+    (filled by `NetworkMiner.join` and `coldkey_ops.prepare_join` from `require_honorable`, the
+    child probe under the pinned environment) and of `WorkScreenV2` (copied by `screen_work` from
+    the rank summaries). The join is signed by hot and cold key and the screen by the hot key, so the
+    declaration travels inside signatures the party already makes; nothing is added to a header.
+    `validate_artifacts` refuses a publication in which any rank declares another environment than the
+    pin (`EnvPinRefused`, an executor fault) before the screen is built.
+12. **The server refuses a difference with a typed error, before anything is written.**
+    `Admission.refuse_environment` compares the declaration with the manifest's pin
+    (`env_pins.observation_divergence`) and raises `AdmissionError("ENV_PIN_DIVERGES: NAME, NAME")`
+    (409; the names that differ, sorted: pinned variables first, then `cpu_capability`, `gpu`). It runs
+    (a) at `join`, after the signatures and the policy check and before the first write, (b) in the
+    proof route before `reference_due`, so the trusted reference is not paid for a refused screen, and
+    (c) in `Admission.proof` after the screen's bindings and before the comparison with the
+    reference, for the admin paths. A refusal consumes no quota, creates no admission, adds no
+    strike, suspends nothing, leaves the trial OPEN and burns no nonce: the same party fixes its host
+    and posts again. Tests cover ISA (resolved and named), MKL, oneDNN, device class, attention
+    backend and FP8 at both points.
+13. **What the declaration is.** Self-declared by the party being checked and compared with the manifest's
+    class; it is not attested by hardware or by the server. It refuses early and cheaply
+    what its process could see (environment strings, ATen's resolved capability, the device class),
+    never what it cannot (MKL's branch and oneDNN's ISA after init, `LD_PRELOAD`). It is not authority:
+    the verdict stays bit equality with the server's reference and with every audit, and a MISMATCH
+    under a conforming declaration is still a MISMATCH.
 
 ### Consequences
 
@@ -396,6 +422,10 @@ breaker bounds the attempt-based one).
   (trial expiry -> `SUSPENDED CHALLENGE_EXPIRED`) land, a host that cannot honor the pin still
   penalizes the party that ran into it; the preflight is the control. In-process users (honeypot, v1
   flows, the tests) must run under the pin or refuse.
+- `JoinRequest` and `WorkScreenV2` gain a required field: the v2 JSON wire changes (no signature
+  domain changes; the join signing message and the `work_screen_hash` of an accepted screen change,
+  runs are recreated). A refused honest miner keeps the existing clocks: the trial's 100 beacons and
+  the admission's window; the client preflight stays the first control.
 - A host above the class is capped by the pinned variables; a host below it (an AVX2-only CPU under
   `avx512`) is refused by the probe because ATen clamps the capability silently and the probe reads
   what ATen resolved [H: inferred from the clamping, no AVX2-only host here].
@@ -430,6 +460,16 @@ breaker bounds the attempt-based one).
 11. `MKL_CBWR=COMPATIBLE` as a portable class: enters with a measurement on a second vendor.
 12. `None` for the GPU part of a CPU run: the Principal's rule is that "no GPU" is stated, so the
     class `none` exists and the explicit value cannot be mistaken for an omission.
+13. Attestation of the miner environment as authority (the first version of this part, alternative
+    10): still rejected. The declaration is signed by the party being checked and is used only as an
+    early, unpunished refusal; the verdict stays bit equality.
+14. A canary digest in the declaration (ten ISA-sensitive operations whose digest the server's own
+    reference run would produce, to see MKL's branch and oneDNN's ISA after init): designed and
+    prototyped, not required by D58-1, and it adds a stored reference observation and a second
+    refusal point. Deferred; revisit if two hosts of one class that declare the same names ever
+    disagree on bytes.
+15. Refusing at the challenge request: the miner has run nothing yet, so it has nothing to declare.
+16. A numerical tolerance on the declaration or the roots: breaks the bit-exact audit.
 
 ### Not verified
 
@@ -442,6 +482,7 @@ breaker bounds the attempt-based one).
   capability; an environment mutated after library initialisation is not detected.
 - The repair/history torchrun path with pins and the challenge path end to end with AUD-01 (read,
   not run).
+- A divergence the process cannot see (decision 13) ends as a MISMATCH, as before this part.
 
 ## Part 4: host and image binding of the CUDA qualification (QUAL-01, QUAL-02)
 

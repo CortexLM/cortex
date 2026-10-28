@@ -11,6 +11,7 @@ import pytest
 from pydantic import JsonValue, ValidationError
 from test_od_fields import od_body
 
+from env_pin_fixtures import honest_env
 from hypertrain.aggregator.core import (
     replay_tape,
     tape_bytes,
@@ -529,6 +530,7 @@ def test_join_when_both_keys_sign_and_identity_changes() -> None:
         expires_beacon=100,
         policy_hash=H,
         hardware_hint={"device_name": "5090", "device_count": 8, "driver": "580"},
+        env=honest_env(),
         hot_sig="0" * 128,
         cold_sig="0" * 128,
     )

@@ -77,6 +77,7 @@ from hypertrain.miner.island_launch import launch_island, validate_artifacts
 from hypertrain.protocol.env_pins import class_pin, gpu_label
 from hypertrain.protocol.messages_v2 import RunManifestV2
 
+sys.path.insert(0, str(root / "tests"))  # the fixtures module imports env_pin_fixtures
 spec = importlib.util.spec_from_file_location("svc", root / "tests/challenge/test_service_network_v2.py")
 svc = importlib.util.module_from_spec(spec); sys.modules["svc"] = spec.loader and svc
 spec.loader.exec_module(svc)

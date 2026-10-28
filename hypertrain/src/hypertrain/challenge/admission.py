@@ -32,6 +32,7 @@ from hypertrain.data.store import (
 from hypertrain.data.trial_assignment import trial_assignment_hash, trial_samples
 from hypertrain.gpu_ops.work_screen import IslandLaunch, screen_work
 from hypertrain.ledger.escrow_v2 import EscrowError, EscrowV2, Settlement, digest
+from hypertrain.protocol.env_pins import observation_divergence
 from hypertrain.protocol.envelope import body_digest
 from hypertrain.protocol.envelope_v2 import (
     Intake,
@@ -49,6 +50,7 @@ from hypertrain.protocol.messages_v2 import (
     PART_BYTES,
     AdmissionPolicyV2,
     ArtifactRef,
+    EnvObservation,
     EscrowLock,
     EscrowReceipt,
     EscrowRelease,
@@ -166,6 +168,26 @@ class Admission:
             raise AdmissionError("UNVERIFIED_BEACON")
         return b
 
+    def refuse_environment(self, observed: EnvObservation) -> None:
+        """Refuse an environment that differs from the manifest's pin, before anything is written.
+
+        The party declares it in a body it signed; the server compares it with the pin. Raised
+        ahead of every write, so no admission, strike, suspension or trial is consumed and the
+        same party can fix its host and ask again. Self-reported: it refuses early, the
+        bit-exact comparison with the reference remains the verdict.
+        """
+        pin = self.escrow.manifest.training.reference_spec.env.pin()
+        names = observation_divergence(pin, observed.model_dump())
+        if names:
+            raise AdmissionError("ENV_PIN_DIVERGES: " + ", ".join(names))
+
+    def refuse_screen_environment(self, screen_raw: bytes) -> None:
+        """The cheap half of the proof check, for the route to run before the reference is paid."""
+        env = parse_envelope(screen_raw)
+        if env.type != "WorkScreenV2":
+            raise AdmissionError("PROOF_TYPE")
+        self.refuse_environment(WorkScreenV2.model_validate(env.body).env)
+
     def join(self, raw: bytes, *, now: int, ip_prefix: str) -> AdmissionRecord:
         self._beacon(now)
         request = JoinRequest.model_validate(load_json(raw, max_bytes=65536))
@@ -173,6 +195,7 @@ class Admission:
             raise AdmissionError("DUAL_SIGNATURE_RUN_OR_EXPIRY")
         if request.policy_hash != digest(self.policy):
             raise AdmissionError("POLICY_CHANGED")
+        self.refuse_environment(request.env)
         key = f"join|{self.escrow.run_id}|{request.coldkey}|{request.request_id}"
         request_hash = body_digest(request.model_dump(mode="json", exclude={"hot_sig", "cold_sig"}))
         with self.escrow.tx():
@@ -823,6 +846,7 @@ class Admission:
                 or not self.qualified(screen)
             ):
                 raise AdmissionError("WORK_SCREEN_BINDING")
+            self.refuse_environment(screen.env)
             if row["proof_digest"] is not None:
                 if (
                     row["proof_digest"] != digest(proof)

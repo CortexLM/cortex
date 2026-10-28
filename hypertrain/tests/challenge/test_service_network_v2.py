@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 import hypertrain
+from env_pin_fixtures import honest_env
 from hypertrain.challenge.app import Config, create_app
 from hypertrain.ledger import Params
 from hypertrain.ledger.escrow_v2 import (
@@ -144,6 +145,7 @@ class Network:
             expires_beacon=10000,
             policy_hash=self.manifest.network.admission_policy_hash,
             hardware_hint=HardwareHint(device_name="cpu", device_count=999, driver="advisory"),
+            env=honest_env(self.manifest.training.reference_spec.env.pin()),
         )
         return self.client.post(self.url + "/join", content=canonicalize(request.body()))
 
@@ -1057,6 +1059,7 @@ def accepted_runtime_store(runtime_store_work, tmp_path, monkeypatch):
                 expires_beacon=10000,
                 policy_hash=setup.admission_policy.digest(),
                 hardware_hint=HardwareHint(device_name="cpu", device_count=1, driver="cpu"),
+                env=honest_env(setup.manifest.training.reference_spec.env.pin()),
             ).body()
         ),
         now=1,
@@ -2418,6 +2421,7 @@ def test_forged_coldkey_cannot_join(network):
         expires_beacon=100,
         policy_hash=network.manifest.network.admission_policy_hash,
         hardware_hint=HardwareHint(device_name="cpu", device_count=1, driver="cpu"),
+        env=honest_env(network.manifest.training.reference_spec.env.pin()),
     )
     raw = request.body()
     raw["cold_sig"] = "0" * 128
@@ -2507,6 +2511,7 @@ def test_public_hotkey_churn_after_reopen_preserves_origin_and_quota(network, tm
         expires_beacon=100,
         policy_hash=network.manifest.network.admission_policy_hash,
         hardware_hint=HardwareHint(device_name="metadata", device_count=999, driver="advisory"),
+        env=honest_env(network.manifest.training.reference_spec.env.pin()),
     )
     try:
         # When: valid dual signatures change hotkey and source prefix after actual reopen.
@@ -2584,6 +2589,7 @@ def test_prefix_quota_stable_after_store_restart(network, monkeypatch):
             expires_beacon=network.now + 100,
             policy_hash=network.manifest.network.admission_policy_hash,
             hardware_hint=HardwareHint(device_name="metadata", device_count=1, driver="cpu"),
+            env=honest_env(network.manifest.training.reference_spec.env.pin()),
         )
         with pytest.raises(AdmissionError, match="JOIN_QUOTA"):
             reopened.admission_v2(
@@ -2781,6 +2787,7 @@ def test_expired_join_cannot_reserve_nonce(network):
         expires_beacon=9,
         policy_hash=network.manifest.network.admission_policy_hash,
         hardware_hint=HardwareHint(device_name="cpu", device_count=1, driver="cpu"),
+        env=honest_env(network.manifest.training.reference_spec.env.pin()),
     )
     # When
     response = network.client.post(network.url + "/join", json=request.body())

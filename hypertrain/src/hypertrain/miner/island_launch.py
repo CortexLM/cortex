@@ -22,12 +22,17 @@ from pathlib import Path
 from typing import Literal
 
 from hypertrain.gpu_ops.journal import durable_write, flock
-from hypertrain.protocol.env_pins import EnvPinUnhonorable, pinned_environ, require_honorable
+from hypertrain.protocol.env_pins import (
+    EnvPinUnhonorable,
+    observation_divergence,
+    pinned_environ,
+    require_honorable,
+)
 from hypertrain.protocol.envelope_v2 import load_json
 from hypertrain.protocol.hashing import MerkleTree
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import LeafPreimage
-from hypertrain.protocol.messages_v2 import IslandJobV1, RankWorkResult
+from hypertrain.protocol.messages_v2 import EnvObservation, IslandJobV1, RankWorkResult
 
 
 class IslandFailure(RuntimeError):
@@ -50,6 +55,7 @@ class IslandArtifacts:
     delta: Path
     leaves: Path
     ranks: tuple[RankWorkResult, ...]
+    env: EnvObservation
 
 
 @dataclass(frozen=True, slots=True)
@@ -439,8 +445,10 @@ def validate_artifacts(job: IslandJobV1, directory: Path) -> IslandArtifacts:
     cfg = TrainConfig.from_manifest_v2(job.manifest)
     n = job.manifest.training.reference_spec.layout.n_gpus
     identity = hashlib.sha256(canonicalize(job.model_dump(mode="json"))).hexdigest()
+    pin = job.manifest.training.reference_spec.env.pin()
     baseline = None
     backend = None
+    observed: EnvObservation | None = None
     ranks = []
     for rank in range(n):
         d = confined(directory, f"rank-{rank}/summary.json").parent
@@ -456,6 +464,11 @@ def validate_artifacts(job: IslandJobV1, directory: Path) -> IslandArtifacts:
         if work.rank != rank:
             raise IslandFailure("rank identity mismatch")
         ranks.append(work)
+        seen = EnvObservation.model_validate(raw.get("env"))
+        bad = observation_divergence(pin, seen.model_dump())
+        if bad:
+            raise EnvPinRefused(f"rank {rank} observed an environment that differs: {bad}")
+        observed = seen
         th, st = unpack_state(confined(directory, f"rank-{rank}/state.safetensors").read_bytes())
         ef, ef_st = unpack_state(confined(directory, f"rank-{rank}/ef.safetensors").read_bytes())
         delta = confined(directory, f"rank-{rank}/delta.bin").read_bytes()
@@ -556,6 +569,7 @@ def validate_artifacts(job: IslandJobV1, directory: Path) -> IslandArtifacts:
         if raw["commitments"] != actual or baseline is not None and baseline != actual:
             raise IslandFailure("rank artifact disagreement or corruption")
         baseline = actual
+    assert observed is not None  # layout.n_gpus >= 1
     d = directory / "rank-0"
     return IslandArtifacts(
         directory,
@@ -564,6 +578,7 @@ def validate_artifacts(job: IslandJobV1, directory: Path) -> IslandArtifacts:
         d / "delta.bin",
         d / "leaves.json",
         tuple(ranks),
+        observed,
     )
 
 

@@ -8,6 +8,7 @@ import os
 import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -47,7 +48,7 @@ def active_network(tmp_path_factory):
     fixtures.HOT = [Keypair(bytes([80 + i]) * 32) for i in range(5)]
     fixtures.COLD = [Keypair(bytes([90 + i]) * 32) for i in range(5)]
     original = fixtures.fixture.setup
-    cache = Path("/tmp/hypertrain-rollback-active-carry")
+    cache = Path(tempfile.gettempdir()) / "hypertrain-rollback-active-carry"
     baseline_time = int(time.time())
     if (cache / "challenge.db").exists():
         with sqlite3.connect(cache / "challenge.db") as db:
@@ -183,6 +184,7 @@ def active_network(tmp_path_factory):
                         challenge_hash=challenge.digest(),
                         rank_results=list(artifacts.ranks),
                         artifact_hashes=[r.sha256 for r in proof.artifact_refs],
+                        env=artifacts.env,
                     )
                     response = network.client.post(
                         network.url + "/join/proof",
