@@ -49,7 +49,9 @@ def pinned(s, alloc=ALLOC, **update):
     return replace(s, policy=policy, manifest=RunManifestV2.model_validate(body))
 
 
-def bootstrap(run_id, alloc=ALLOC, operation=OP, signer=E.COORD) -> ProductionBootstrap:
+def bootstrap(
+    run_id, alloc=ALLOC, operation=OP, signer=E.COORD, id_key=E.ID_KEY
+) -> ProductionBootstrap:
     ah = genesis_allocation_hash(alloc)
     unsigned = ProductionBootstrap(
         run_id=run_id,
@@ -58,7 +60,10 @@ def bootstrap(run_id, alloc=ALLOC, operation=OP, signer=E.COORD) -> ProductionBo
         total_units=sum(u for _, u, _ in alloc),
         origins=[
             OriginAllocation(
-                origin_id=bootstrap_origin_id(run_id, ah, i), owner=h, units=u, mature_at=m
+                origin_id=bootstrap_origin_id(run_id, ah, i, id_key),
+                owner=h,
+                units=u,
+                mature_at=m,
             )
             for i, (h, u, m) in enumerate(alloc)
         ],

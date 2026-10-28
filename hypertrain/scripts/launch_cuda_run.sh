@@ -122,11 +122,14 @@ BUNDLE=$STATE/bundle
 rm -rf "$BUNDLE" && mkdir -p "$BUNDLE" && cp -a "$MINER_SRC" "$BUNDLE/hypertrain"
 find "$BUNDLE" -name __pycache__ -prune -exec rm -rf {} +
 # Diff FIX_BASE against the working tree (not HEAD): uncommitted miner changes ship too.
-if ! grep -q '_retrying("PUT object' "$BUNDLE/hypertrain/miner/core.py"; then
+# The object upload is a PUT in this tree and a signed POST once the body-signed upload lands; either
+# call site is the retry. Both the "patch or not" decision and the final check ask this one function.
+has_upload_retry() { grep -q -e '_retrying("POST object' -e '_retrying("PUT object' "$BUNDLE/hypertrain/miner/core.py"; }
+if ! has_upload_retry; then
   git -C "$REPO" diff "$FIX_BASE" -- src/hypertrain/miner/core.py src/hypertrain/data/store.py \
     | patch -p3 --forward --quiet -d "$BUNDLE/hypertrain" || die "transport fixes do not apply onto $MINER_SRC"
 fi
-grep -q '_retrying("PUT object' "$BUNDLE/hypertrain/miner/core.py" || die "bundle lacks the PUT retry fix"
+has_upload_retry || die "bundle lacks the upload retry fix"
 grep -q 'def _parts' "$BUNDLE/hypertrain/data/store.py" || die "bundle lacks the parallel part fetch"
 grep -q '^UPLOAD_WORKERS = ' "$BUNDLE/hypertrain/miner/core.py" || die "bundle lacks the parallel part PUT"
 grep -q 'def _local_input' "$BUNDLE/hypertrain/miner/core.py" || die "bundle lacks the theta-only input reuse"

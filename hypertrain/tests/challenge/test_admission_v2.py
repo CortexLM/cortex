@@ -1263,3 +1263,152 @@ def test_zero_origins_cannot_graduate_even_after_calendar_age(tmp_path: Path) ->
     assert (
         not status.eligible and status.record.clean_count == 0 and status.record.state == "APPLIED"
     )
+
+
+# --- reseed: the operator gives a lapsed identity a new trial (RELAY-03, ADR 0010 decision 2) ----
+
+
+def lapsed(a: Admission, s: Setup, state: str, *, issued: bool = True) -> str:
+    """An identity of `state` with 4 clean trials whose seed is round 1000 and, when `issued`, whose
+    trial 0 was asked for at round 1001 (deadline 1100) and never proved."""
+    holder = applied(a, s, 0, 1)
+    if state != "APPLIED":
+        a.store.transition(holder, state, "TEST", 2)  # type: ignore[arg-type]
+    a.store.db.execute(
+        "UPDATE admissions_v2 SET clean_count=4, seed_beacon=1000 WHERE admission_id=?", (holder,)
+    )
+    if issued:
+        a.challenge(holder, now=1001)
+    return holder
+
+
+def row_of(a: Admission, holder: str) -> dict:
+    row = a.store.db.execute(
+        "SELECT * FROM admissions_v2 WHERE admission_id=?", (holder,)
+    ).fetchone()
+    return {} if row is None else dict(row)
+
+
+def reservations(a: Admission) -> list[tuple]:
+    return [
+        tuple(r)
+        for r in a.store.db.execute("SELECT * FROM admission_reservations ORDER BY reservation")
+    ]
+
+
+@pytest.mark.parametrize("state", ["APPLIED", "PROBATION", "ACTIVE"])
+def test_reseed_gives_a_lapsed_identity_a_new_trial_and_changes_nothing_else(
+    tmp_path: Path, state: str
+) -> None:
+    # Given: RELAY-03, a driver back 224 rounds after its trial's deadline
+    s = setup()
+    a = service(s, tmp_path)
+    holder = lapsed(a, s, state)
+    first = a.challenge(holder, now=1001)
+    a.reap_expired_trials(now=1225)  # what the beacon push does
+    with pytest.raises(AdmissionError, match="CHALLENGE_EXPIRED"):
+        a.challenge(holder, now=1225)
+    before = row_of(a, holder)
+    # When: the operator reseeds it
+    out = a.reseed(holder, now=1225)
+    # Then: the seed is the only column that moved, the same identity asks again, and the new
+    # draw is a new trial with a new nonce and a fresh 100-round window
+    after = row_of(a, holder)
+    assert (out["previous_seed_beacon"], out["seed_beacon"]) == (1000, 1226)
+    assert after["seed_beacon"] == 1226
+    assert {k: v for k, v in after.items() if k != "seed_beacon"} == {
+        k: v for k, v in before.items() if k != "seed_beacon"
+    }
+    with pytest.raises(AdmissionError, match="SEED_NOT_READY"):
+        a.challenge(holder, now=1225)
+    second = a.challenge(holder, now=1226)
+    assert second["body"]["admission_id"] == holder
+    assert second["body"]["nonce"] != first["body"]["nonce"]
+    assert second["body"]["deadline_beacon"] == 1326
+    record = a.store.by_id(holder)
+    assert (record.state, record.strikes, record.clean_count) == (state, 0, 4)
+    assert a.store.db.execute("SELECT COUNT(*) FROM admissions_v2").fetchone()[0] == 1
+    outcomes = a.store.db.execute("SELECT epoch, outcome FROM admission_trial_results ORDER BY 1")
+    assert [tuple(x) for x in outcomes] == [(0, "EXPIRED"), (1, "OPEN")]
+
+
+def test_reseed_serves_an_identity_whose_first_window_passed_unasked(tmp_path: Path) -> None:
+    # An APPLIED row that never fetched its challenge is stranded the same way.
+    s = setup()
+    a = service(s, tmp_path)
+    holder = lapsed(a, s, "APPLIED", issued=False)
+    with pytest.raises(AdmissionError, match="CHALLENGE_EXPIRED"):
+        a.challenge(holder, now=1500)
+    a.reseed(holder, now=1500)
+    assert a.challenge(holder, now=1501)["body"]["deadline_beacon"] == 1601
+
+
+def refused(a: Admission, s: Setup, case: str) -> tuple[str, int, str]:
+    """(admission, round of the reseed, error) for each way the operator is told no."""
+    match case:
+        case "trial open":
+            return lapsed(a, s, "PROBATION"), 1050, "RESEED_TRIAL_OPEN"
+        case "trial open on its deadline round":
+            return lapsed(a, s, "PROBATION"), 1100, "RESEED_TRIAL_OPEN"
+        case "window alive, nothing asked":
+            return lapsed(a, s, "PROBATION", issued=False), 1100, "RESEED_NOT_NEEDED"
+        case "proven but not finalized":
+            holder = lapsed(a, s, "PROBATION")
+            a.store.db.execute(
+                "UPDATE admissions_v2 SET proof_digest=? WHERE admission_id=?", ("aa" * 32, holder)
+            )
+            return holder, 1500, "RESEED_TRIAL_OPEN"
+        case "pending dispute":
+            holder = lapsed(a, s, "PROBATION")
+            a.store.db.execute(
+                "UPDATE admissions_v2 SET pending_dispute=1 WHERE admission_id=?", (holder,)
+            )
+            return holder, 1500, "RESEED_STATE"
+        case "suspended" | "banned":
+            holder = lapsed(a, s, "PROBATION")
+            a.store.transition(holder, case.upper(), "TEST", 1400)  # type: ignore[arg-type]
+            return holder, 1500, "RESEED_STATE"
+        case _:
+            return "ab" * 32, 1500, "UNKNOWN_ADMISSION"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "trial open",
+        "trial open on its deadline round",
+        "window alive, nothing asked",
+        "proven but not finalized",
+        "pending dispute",
+        "suspended",
+        "banned",
+        "unknown",
+    ],
+)
+def test_reseed_refuses_and_writes_nothing_unless_the_window_is_dead(
+    tmp_path: Path, case: str
+) -> None:
+    s = setup()
+    a = service(s, tmp_path)
+    holder, now, error = refused(a, s, case)
+    rows, kept = row_of(a, holder), reservations(a)
+    with pytest.raises(AdmissionError, match=f"^{error}$"):
+        a.reseed(holder, now=now)
+    assert row_of(a, holder) == rows
+    assert reservations(a) == kept
+
+
+def test_reseed_is_once_per_lapse_and_leaves_one_audit_row_each(tmp_path: Path) -> None:
+    s = setup()
+    a = service(s, tmp_path)
+    holder = lapsed(a, s, "PROBATION")
+    out = a.reseed(holder, now=1225)  # no beacon push closed the lapsed trial first
+    # A second reseed while the new window lives, asked or not, is told it is not needed.
+    for now in (1225, 1226, 1300, 1326):
+        with pytest.raises(AdmissionError, match="^RESEED_NOT_NEEDED$"):
+            a.reseed(holder, now=now)
+    a.challenge(holder, now=1226)  # the new trial lapses too
+    again = a.reseed(holder, now=1400)
+    assert (again["previous_seed_beacon"], again["seed_beacon"]) == (1226, 1401)
+    audit = [r for r in reservations(a) if str(r[0]).startswith("reseed|")]
+    assert [json.loads(r[2]) for r in audit] == [out, again]

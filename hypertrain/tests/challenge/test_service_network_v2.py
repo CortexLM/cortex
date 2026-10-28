@@ -20,6 +20,7 @@ from hypertrain.challenge.app import Config, create_app
 from hypertrain.ledger import Params
 from hypertrain.ledger.escrow_v2 import (
     authority_message,
+    escrow_id_key,
     genesis_allocation_hash,
     genesis_origin_id,
 )
@@ -716,7 +717,9 @@ def network(tmp_path: Path, request):
         assert response.status_code == 200, response.text
         origins = [
             OriginAllocation(
-                origin_id=genesis_origin_id(manifest.run_id(), econ.genesis_allocation_hash, i),
+                origin_id=genesis_origin_id(
+                    manifest.run_id(), econ.genesis_allocation_hash, i, escrow_id_key(COORD._secret)
+                ),
                 owner=k.ss58,
                 units=10000,
                 mature_at=1,
@@ -1889,7 +1892,7 @@ def shadow_acceptance(reserved_trial):
     )
     signed_receipt = n.signed(AUDITORS[0], "ShadowReplayReceiptV1", receipt)
     origin = OriginAllocation(
-        origin_id=shadow_origin_id(binding),
+        origin_id=shadow_origin_id(binding, n.store._services(n.manifest.run_id())[0].id_key),
         owner=binding.coldkey,
         units=escrow.policy.round_reward_units,
         mature_at=binding.mature_at,
@@ -4501,3 +4504,45 @@ def test_admin_pause_flips_only_an_opened_v2_run_without_touching_its_state(netw
     assert tuple(network.store._db.execute("SELECT manifest, envelope FROM runs").fetchone()) == (
         tuple(before)
     )
+
+
+def test_admin_reseed_gives_a_lapsed_identity_a_new_trial_through_the_routes(network):
+    """RELAY-03: the owner's request keeps answering 409 CHALLENGE_EXPIRED until the operator
+    reseeds the admission; then the same signed request opens a new trial for the same identity."""
+    n = network
+    joined = n.join()
+    assert joined.status_code == 200, joined.text
+    identity = joined.json()["admission_id"]
+    n.push(n.now + 1)
+    first = n.challenge(identity)
+    assert first.status_code == 200, first.text
+    url = n.url + f"/admin/join/{identity}/reseed"
+    # The admin bearer is the only credential: neither nothing nor the owner's signed request.
+    assert n.client.post(url).status_code in (401, 403)
+    owner = n.owner_request("ChallengeRequest", identity)
+    assert n.client.post(url, json=owner).status_code in (401, 403)
+    # A live trial is not re-drawn.
+    live = n.client.post(url, headers=admin())
+    assert (live.status_code, live.json()) == (409, {"detail": "RESEED_TRIAL_OPEN"})
+    # The window passes: the beacon push closes the trial and the owner is refused.
+    n.push(n.now + 150)
+    expired = n.challenge(identity)
+    assert (expired.status_code, expired.json()) == (409, {"detail": "CHALLENGE_EXPIRED"})
+    status_url = n.url + f"/admission/{HOT[0].ss58}"
+    before = n.client.get(status_url).json()["record"]
+    # When: the operator reseeds it
+    reseeded = n.client.post(url, headers=admin())
+    assert reseeded.status_code == 200, reseeded.text
+    assert reseeded.json()["admission_id"] == identity
+    assert reseeded.json()["seed_beacon"] == n.now + 1
+    n.push(n.now + 1)
+    # Then: the owner's own signed request opens a new trial, and nothing else changed
+    second = n.challenge(identity)
+    assert second.status_code == 200, second.text
+    assert second.json()["body"]["nonce"] != first.json()["body"]["nonce"]
+    after = n.client.get(status_url).json()["record"]
+    assert after["challenge_json"] != before["challenge_json"]
+    drop = {"challenge_json"}
+    assert {k: v for k, v in after.items() if k not in drop} == {
+        k: v for k, v in before.items() if k not in drop
+    }

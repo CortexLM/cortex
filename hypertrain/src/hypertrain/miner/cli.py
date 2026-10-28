@@ -31,7 +31,14 @@ from hypertrain.datasets.shards16 import (
     verify_shards16,
 )
 from hypertrain.miner.coldkey_ops import cosign_join, escrow_lock, prepare_join
-from hypertrain.miner.core import Miner, MinerConfig, MinerError, NetworkMiner, canonical
+from hypertrain.miner.core import (
+    ChallengeExpired,
+    Miner,
+    MinerConfig,
+    MinerError,
+    NetworkMiner,
+    canonical,
+)
 from hypertrain.miner.dispute_watch import add_watch_args, run_follow
 from hypertrain.miner.keys import create_key, list_keys, revoke_key
 from hypertrain.miner.update import Updater, UpdateRejected
@@ -504,6 +511,11 @@ def main(argv: list[str] | None = None) -> int:
             results = _run_updating(miner, args.rounds, args.start, url, base)
         else:
             results = miner.run(args.rounds, args.start)
+    except ChallengeExpired as error:
+        # Stranded until the operator reseeds the admission: a status of its own, not a failure
+        # to retry.
+        logging.error("%s: %s", type(error).__name__, error)
+        return 3
     except (MinerError, UpdateRejected) as error:
         logging.error("%s: %s", type(error).__name__, error)
         return 2

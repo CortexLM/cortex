@@ -768,7 +768,31 @@ def test_real_service_two_round_rollback_and_checkpoint(active_network, monkeypa
     )
     assert repeated.status_code == 200 and repeated.json() == repaired
     assert escrow.balances() == before
-    assert execute_round(n, 2, open_only=True).status_code == 200
+    # Round 2 (the four honest members) is reward-finalized after the accepted rollback.
+    from hypertrain.protocol.messages import Finalize
+
+    survivors = fixtures.HOT[:4]
+    third = execute_round(n, 2)
+    final = Finalize(
+        w=2,
+        final_theta_hash_w1=third["theta_hash"],
+        included=sorted(k.ss58 for k in survivors),
+        entitlements_root="0" * 64,
+    )
+    finalized = n.client.post(
+        n.url + "/admin/rounds/2/finalize",
+        json=n.signed(fixtures.COORD, "Finalize", final),
+        headers=fixtures.admin(),
+    )
+    assert finalized.status_code == 200, finalized.text
+    withdrawn = [
+        json.loads(r[0])["w"]
+        for r in n.store._db.execute(
+            "SELECT request FROM escrow_events WHERE kind='ROUND_WITHDRAWN' ORDER BY seq"
+        )
+    ]
+    assert withdrawn == [0, 1]
+    escrow.verify()
     rounds = []
     for w in (0, 1):
         applied = n.store._record_v2(n.manifest.run_id(), "applied", str(w))

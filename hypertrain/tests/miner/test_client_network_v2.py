@@ -8,10 +8,20 @@ from pathlib import Path
 import httpx
 import pytest
 
+import hypertrain.miner.core as core
 from hypertrain.miner.core import MinerConfig, MinerError, NetworkMiner
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import RunManifestV2
+
+SHIPPED_RETRY_DELAYS = core.RETRY_DELAYS
+
+
+@pytest.fixture(autouse=True)
+def no_real_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An object GET that meets a 404 now sleeps through the retry schedule (about 31 s): the
+    tests of an object that is simply absent must not."""
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0))
 
 
 def test_client_requires_owner_authority_when_manifest_signed_by_other(tmp_path: Path):
@@ -522,6 +532,243 @@ def test_object_get_and_api_get_retry_5xx_but_signed_post_is_never_replayed(
     assert hits == ["POST"]
 
 
+def _answer_object_gets(miner, status: int, times: int | None):
+    """Answer the first `times` object GETs (every one when None) with `status`; count them.
+
+    The route is the miner's real one, so an object GET past that point is served as stored. An
+    unbounded retry loop fails the test instead of hanging it."""
+    route, gets = miner.api.c._transport.handler, []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method != "GET" or "/objects/" not in request.url.path:
+            return route(request)
+        gets.append(request.url.path)
+        assert len(gets) < 60, "object GET retried without bound"
+        if times is not None and len(gets) > times:
+            return route(request)
+        return httpx.Response(status, json={"detail": "object not found"})
+
+    miner.api.c._transport.handler = handler
+    return gets
+
+
+def _journaled_retries(miner) -> list[dict]:
+    path = miner.directory / "journal.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_trial_input_get_retries_a_transient_404_and_journals_each_retry(
+    tmp_path: Path, monkeypatch
+):
+    import hypertrain.miner.core as core
+
+    # Given: a trial input that answers 404 twice before it is served (RELAY-02: one read miss,
+    # the object intact on the server).
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0, 0))
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"trial input")
+    gets = _answer_object_gets(miner, 404, 2)
+    # When
+    miner._get_whole(sha, tmp_path / "input")
+    # Then: the verified object is on disk and each retry is one journal line a replay can count.
+    assert (tmp_path / "input").read_bytes() == b"trial input" and len(gets) == 3
+    retries = _journaled_retries(miner)
+    assert [(r["kind"], r["route"], r["status"], r["attempt"]) for r in retries] == [
+        ("retry", f"GET object {sha}", 404, 1),
+        ("retry", f"GET object {sha}", 404, 2),
+    ]
+    assert all(set(r) >= {"utc", "route", "status", "attempt", "delay"} for r in retries)
+    assert all(r["utc"].endswith("Z") for r in retries)
+
+
+def test_trial_input_get_gives_up_on_a_404_that_stays_after_bounded_jittered_retries(
+    tmp_path: Path, monkeypatch
+):
+    import hypertrain.miner.core as core
+    from hypertrain.miner.core import ChallengeHTTPError
+
+    # Given: an object that is never there and a retry budget of 20 waits of one second.
+    monkeypatch.setattr(core, "RETRY_DELAYS", (1.0,) * 20)
+    slept: list[float] = []
+    monkeypatch.setattr(core.time, "sleep", slept.append)
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"trial input")
+    gets = _answer_object_gets(miner, 404, None)
+    # When / Then: the same typed error as before, after exactly the budget, and no file.
+    with pytest.raises(ChallengeHTTPError, match="^404: trial input object unavailable$"):
+        miner._get_whole(sha, tmp_path / "input")
+    assert len(gets) == 21 and not (tmp_path / "input").exists()
+    # And: the waits are what the journal says, within 50% of the schedule and not all equal,
+    # so miners that failed together do not retry together.
+    delays = [r["delay"] for r in _journaled_retries(miner)]
+    assert delays == slept and [r["attempt"] for r in _journaled_retries(miner)] == list(
+        range(1, 21)
+    )
+    assert all(0.5 <= d <= 1.5 for d in delays) and len(set(delays)) > 1
+
+
+def _break_the_journal(miner) -> None:
+    """journal.jsonl is a directory, so the next Journal.append fails with a real OSError."""
+    (miner.directory / "journal.jsonl").mkdir()
+
+
+def test_a_journal_failure_never_replaces_the_http_error(tmp_path: Path, monkeypatch, caplog):
+    import hypertrain.miner.core as core
+    from hypertrain.miner.core import ChallengeHTTPError
+
+    # Given: a trial input that never arrives and a journal that cannot be written (m1: the
+    # append runs inside the handler of the HTTP error).
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0))
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"trial input")
+    _break_the_journal(miner)
+    gets = _answer_object_gets(miner, 404, None)
+    # When / Then: the caller still sees the 404 it would have seen, after every retry, and the
+    # lost journal line is logged.
+    with pytest.raises(ChallengeHTTPError, match="^404: trial input object unavailable$"):
+        miner._get_whole(sha, tmp_path / "input")
+    assert len(gets) == 3
+    assert caplog.text.count("retry not journaled") == 2
+
+
+def test_a_journal_failure_does_not_stop_a_retry_that_succeeds(tmp_path: Path, monkeypatch):
+    import hypertrain.miner.core as core
+
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0))
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"trial input")
+    _break_the_journal(miner)
+    gets = _answer_object_gets(miner, 404, 1)
+    miner._get_whole(sha, tmp_path / "input")
+    assert (tmp_path / "input").read_bytes() == b"trial input" and len(gets) == 2
+
+
+def test_part_get_retries_a_transient_404_and_fails_with_the_http_error_when_it_stays(
+    tmp_path: Path, monkeypatch
+):
+    import hypertrain.miner.core as core
+
+    # Given: a part that answers 404 once, then forever.
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0))
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"part")
+    gets = _answer_object_gets(miner, 404, 1)
+    # When / Then: served on the second try, with one journaled retry.
+    assert miner._get_object(sha) == b"part" and len(gets) == 2
+    assert [(r["status"], r["attempt"]) for r in _journaled_retries(miner)] == [(404, 1)]
+    # And: a part that stays missing ends in the error it ended in before.
+    miner.api.c._transport.handler = lambda request: httpx.Response(404)
+    with pytest.raises(httpx.HTTPStatusError) as stays:
+        miner._get_object(sha)
+    assert stays.value.response.status_code == 404
+    assert len(_journaled_retries(miner)) == 1 + 2
+
+
+def test_a_404_is_retried_only_by_object_gets_and_no_other_4xx_is(tmp_path: Path, monkeypatch):
+    import hypertrain.miner.core as core
+    from hypertrain.miner.core import ChallengeHTTPError
+
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0, 0))
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"x")
+    # An API read keeps its answer: an unknown run, admission or round is a real 404.
+    calls: list[str] = []
+
+    def not_found(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(404, json={"detail": "unknown admission"})
+
+    miner.api.c._transport.handler = not_found
+    with pytest.raises(ChallengeHTTPError, match="^404: unknown admission$"):
+        miner.api.call("GET", "/v2/runs/x/admission/y")
+    assert len(calls) == 1
+    # An object read refused for any other 4xx is not retried either, and an object PUT that
+    # meets a 404 is not a read miss.
+    for status in (s for s in range(400, 500) if s != 404):
+        gets = _answer_object_gets(miner, status, None)
+        with pytest.raises(ChallengeHTTPError, match=f"^{status}:"):
+            miner._get_whole(sha, tmp_path / "input")
+        with pytest.raises(httpx.HTTPStatusError):
+            miner._get_object(sha)
+        assert len(gets) == 2, status
+    assert _journaled_retries(miner) == []
+    puts: list[int] = []
+
+    def no_such_route(request: httpx.Request) -> httpx.Response:
+        puts.append(1)
+        return httpx.Response(404)
+
+    miner.api.c._transport.handler = no_such_route
+    with pytest.raises(httpx.HTTPStatusError):
+        miner._put_object(b"x")
+    assert puts == [1]
+
+
+class _CutBody(httpx.SyncByteStream):
+    def __init__(self, head: bytes) -> None:
+        self.head = head
+
+    def __iter__(self):
+        yield self.head
+        raise httpx.ReadError("connection reset")
+
+
+def test_a_trial_input_cut_mid_stream_is_fetched_again_from_the_start(tmp_path: Path):
+    import hashlib
+
+    # Given: 128 KiB of which the connection delivers the first 64 KiB, once
+    miner, _, _ = _parts_miner(tmp_path)
+    body = bytes(range(256)) * 512
+    gets: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        gets.append(1)
+        if len(gets) == 1:
+            return httpx.Response(200, stream=_CutBody(body[: 64 << 10]))
+        return httpx.Response(200, content=body)
+
+    miner.api.c._transport.handler = handler
+    # When / Then: the file holds the whole object, not the cut one followed by more
+    miner._get_whole(hashlib.sha256(body).hexdigest(), tmp_path / "input")
+    assert (tmp_path / "input").read_bytes() == body and len(gets) == 2
+
+
+def test_the_shipped_schedule_is_five_retries_from_1_to_16_seconds(tmp_path: Path, monkeypatch):
+    # Given: the schedule the docs state, with the jitter pinned to none
+    monkeypatch.setattr(core, "RETRY_DELAYS", SHIPPED_RETRY_DELAYS)
+    slept: list[float] = []
+    monkeypatch.setattr(core.time, "sleep", slept.append)
+    monkeypatch.setattr(core.random, "uniform", lambda low, high: 1.0)
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"x")
+    _answer_object_gets(miner, 404, None)
+    # When / Then: a 404 that stays waits 1, 2, 4, 8, 16 s, then ends in the error it met
+    with pytest.raises(core.ChallengeHTTPError):
+        miner._get_whole(sha, tmp_path / "input")
+    assert slept == [1, 2, 4, 8, 16]
+
+
+def test_trial_input_that_is_served_after_a_retry_is_still_verified(tmp_path: Path, monkeypatch):
+    import hypertrain.miner.core as core
+    from hypertrain.miner.core import MinerError
+
+    # Given: a 404, then bytes that do not hash to the pinned digest.
+    monkeypatch.setattr(core, "RETRY_DELAYS", (0, 0, 0))
+    miner, store, _ = _parts_miner(tmp_path)
+    sha = store.put(b"trial input")
+    gets: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        gets.append(request.url.path)
+        return httpx.Response(404) if len(gets) == 1 else httpx.Response(200, content=b"forged")
+
+    miner.api.c._transport.handler = handler
+    # When / Then: refused, and a digest mismatch is a verdict, not a transient: no third GET.
+    with pytest.raises(MinerError, match="sha256 mismatch"):
+        miner._get_whole(sha, tmp_path / "input")
+    assert len(gets) == 2
+
+
 def test_fetch_inputs_reuses_own_carry_and_downloads_only_theta(tmp_path: Path):
     import hashlib
     from types import SimpleNamespace
@@ -646,3 +893,153 @@ def test_fetch_inputs_falls_back_to_full_download_on_bad_theta_ref(tmp_path: Pat
     assert (directory / "start_state").read_bytes() == start
     assert full["start_state"] in gets
     assert sorted(p.name for p in directory.iterdir()) == ["start_state"]
+
+
+# --- RELAY-03: a lapsed trial window is asked again until the operator reseeds it ---------------
+
+
+def _challenge_server(miner, answers: list[tuple[int, dict]]):
+    """The run (a rising now_round) and a challenge route that answers `answers` in order, the last
+    one for ever. Returns the requests the miner made and the challenge requests it signed."""
+    seen: list[tuple[str, str]] = []
+    asked: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        assert len(seen) < 300, "challenge asked without bound"
+        if request.method == "GET":
+            return httpx.Response(200, json={"now_round": 1000 + 10 * len(asked)})
+        asked.append(json.loads(request.content))
+        status, body = answers[min(len(asked), len(answers)) - 1]
+        return httpx.Response(status, json=body)
+
+    miner.api.c._transport.handler = handler
+    return seen, asked
+
+
+EXPIRED = (409, {"detail": "CHALLENGE_EXPIRED"})
+NOT_READY = (409, {"detail": "SEED_NOT_READY"})
+ISSUED = (200, {"type": "JoinChallenge", "body": {"nonce": "cd" * 32, "seed_beacon": 1227}})
+
+
+def _lapsed_record(miner, challenge: dict | None = None) -> dict:
+    old = {"nonce": "ab" * 32, "seed_beacon": 1000}
+    return {
+        "admission_id": "ee" * 32,
+        "clean_count": 4,
+        "challenge_json": json.dumps(challenge or old),
+    }
+
+
+def test_a_lapsed_trial_is_asked_again_by_the_same_hotkey_until_the_operator_reseeds(
+    tmp_path: Path, monkeypatch
+):
+    import hypertrain.miner.core as core
+    from hypertrain.protocol import envelope_v2
+    from hypertrain.protocol.envelope import body_digest
+
+    # Given: the window lapsed (409 twice), the operator reseeds, and the round before the seed
+    # answers 409 SEED_NOT_READY once
+    monkeypatch.setattr(core, "RESUME_POLLS", 5)
+    monkeypatch.setattr(core, "RESUME_POLL_SECONDS", 7.0)
+    slept: list[float] = []
+    monkeypatch.setattr(core.time, "sleep", slept.append)
+    miner, _, _ = _parts_miner(tmp_path)
+    seen, asked = _challenge_server(miner, [EXPIRED, EXPIRED, NOT_READY, ISSUED])
+    record = _lapsed_record(miner)
+    url = f"{miner.url}/join/{record['admission_id']}"
+    # When
+    envelope, now = miner._ask_challenge(url, record, 1000)
+    # Then: the new challenge is returned with the round of the request that got it
+    assert envelope == ISSUED[1] and now == 1000 + 10 * 3 and len(asked) == 4
+    assert slept == [7.0, 7.0, miner.manifest.training.beacon.period]
+    # And: every ask is a fresh ChallengeRequest signed by the same hotkey for the same admission,
+    # and nothing else is called: no join, so no second identity
+    assert {(r["type"], r["signer"], r["run_id"]) for r in asked} == {
+        ("ChallengeRequest", miner.kp.ss58, miner.run_id)
+    }
+    assert all(r["body"] == {"admission_id": record["admission_id"]} for r in asked)
+    assert all(envelope_v2.verify_envelope(r) for r in asked)
+    assert len({r["sig"] for r in asked}) == 4
+    assert {path for _, path in seen} == {miner.url, url + "/challenge"}
+    # And: one journal line says which challenge the resume replaced
+    [line] = _journaled(miner, "resume")
+    assert line["admission_id"] == record["admission_id"] and line["trial"] == 5
+    assert line["old_challenge"] == body_digest(json.loads(record["challenge_json"]))
+    assert line["new_challenge"] == body_digest(ISSUED[1]["body"]) != line["old_challenge"]
+    assert line["asks"] == 4 and line["utc"].endswith("Z")
+
+
+def _journaled(miner, kind: str) -> list[dict]:
+    return [r for r in _journaled_retries(miner) if r["kind"] == kind]
+
+
+def test_a_window_that_stays_lapsed_ends_in_an_error_that_names_the_operator_step(
+    tmp_path: Path, monkeypatch
+):
+    import hypertrain.miner.core as core
+    from hypertrain.miner.core import ChallengeExpired, MinerError
+
+    monkeypatch.setattr(core, "RESUME_POLLS", 3)
+    slept: list[float] = []
+    monkeypatch.setattr(core.time, "sleep", slept.append)
+    miner, _, _ = _parts_miner(tmp_path)
+    seen, asked = _challenge_server(miner, [EXPIRED])
+    record = _lapsed_record(miner)
+    url = f"{miner.url}/join/{record['admission_id']}"
+    # When / Then: the bound is the number of asks, then a distinct error, no loop
+    with pytest.raises(ChallengeExpired) as ended:
+        miner._ask_challenge(url, record, 1000)
+    assert isinstance(ended.value, MinerError) and len(asked) == 4 and len(slept) == 3
+    message = str(ended.value)
+    assert record["admission_id"] in message
+    assert f"{miner.url}/admin/join/{record['admission_id']}/reseed" in message
+    assert "ChallengeHTTPError" not in message  # the s100 driver must not take it for a transient
+    assert _journaled(miner, "resume") == []
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        [(409, {"detail": "CHALLENGE_STATE"})],
+        [NOT_READY],  # nothing lapsed: the driver's own handling of SEED_NOT_READY stays
+        [(409, {"detail": "REFERENCE_TRIAL_CLOSED"})],
+        [(403, {"detail": "hotkey is not current accepted identity"})],
+        [EXPIRED, (503, {"detail": "beacon infrastructure paused"})],
+    ],
+    ids=["state", "not-ready-first", "trial-closed", "forbidden", "pause-while-waiting"],
+)
+def test_only_a_lapsed_window_and_the_round_after_its_reseed_are_waited_for(
+    tmp_path: Path, monkeypatch, answers
+):
+    import hypertrain.miner.core as core
+    from hypertrain.miner.core import ChallengeHTTPError
+
+    monkeypatch.setattr(core, "RESUME_POLLS", 5)
+    slept: list[float] = []
+    monkeypatch.setattr(core.time, "sleep", slept.append)
+    miner, _, _ = _parts_miner(tmp_path)
+    _, asked = _challenge_server(miner, answers)
+    record = _lapsed_record(miner)
+    with pytest.raises(ChallengeHTTPError) as raised:
+        miner._ask_challenge(f"{miner.url}/join/{record['admission_id']}", record, 1000)
+    assert (raised.value.status, raised.value.detail) == (
+        answers[-1][0],
+        answers[-1][1]["detail"],
+    )
+    assert len(asked) == len(answers) and len(slept) == len(answers) - 1
+    assert _journaled(miner, "resume") == []
+
+
+def test_a_resume_the_journal_cannot_record_still_returns_the_challenge(
+    tmp_path: Path, monkeypatch
+):
+    import hypertrain.miner.core as core
+
+    monkeypatch.setattr(core.time, "sleep", lambda _: None)
+    miner, _, _ = _parts_miner(tmp_path)
+    _challenge_server(miner, [EXPIRED, ISSUED])
+    _break_the_journal(miner)
+    record = _lapsed_record(miner)
+    envelope, _ = miner._ask_challenge(f"{miner.url}/join/{record['admission_id']}", record, 1000)
+    assert envelope == ISSUED[1]

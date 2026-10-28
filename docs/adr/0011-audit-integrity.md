@@ -1,8 +1,9 @@
 # ADR 0011: audit integrity (settlement of blockages, numerics pin, host and image binding)
 
 - Status: draft for branch `v3-audit-integrity`, 2026-10-27 (Principal SN100 D35, D36 bis, D38, D38 ter,
-  D38 quater, D40; Lens red team B findings DSP-01, AUD-01, AUD-06, DET-01, DET-01b, QUAL-01, QUAL-02,
-  EXE-01). Forge decides promotion to `v3`. This file grows one part per finding; each part is
+  D38 quater, D40, D43, D44, D46, D47, D49, D51; Lens red team B findings DSP-01, AUD-01, AUD-06, DET-01,
+  DET-01b, QUAL-01, QUAL-02, EXE-01; Lens C1/C2 and final synthesis F2 R-C2/R-D, F5, DSP-04). Part 8 is
+  the one rule ("general exclusion exit") of which Parts 1, 2 and 5 are rows. Forge decides promotion to `v3`. This file grows one part per finding; each part is
   committed before the code it justifies. Parts present so far are listed under "Parts".
 - Order: Forge briefs `v3-audit-integrity` and `v3-admission-hardening` (same rules: ADR first, no
   protocol constant change without the ADR, manifest-covered changes opt-in, hash consequences
@@ -23,6 +24,8 @@
 5. AUD-06: a roster member that never commits.
 6. EXE-01: host-controlled bytes cannot crash the CUDA executor.
 7. DSP-03: one lock order for the dispute long poll.
+8. The general exclusion exit: every wait on a peer is bounded; exclusion, sanction, retired round,
+   withdrawal record, roster member state (D43, D44, D46, D47, D51, AC-CLIFF, R-C2, R-D, DSP-04).
 
 ## Part 1: disputes that nobody can decide (DSP-01)
 
@@ -859,3 +862,386 @@ X1-X3 (5 passed in 2.55 s: they assert the bug), 2026-10-27 [A].
   fixture's locks were exercised. [?]
 - F4 (a lock id named like a dispute id) is the escrow-relay lot's and was not touched. Both lots
   edit `disputes_v2.py`; this change keeps to the constructor, `notify`, `events` and one class.
+
+## Part 8: the general exclusion exit (D43, D44, D46, D47, D51, AC-CLIFF, DSP-04, R-C2, R-D)
+
+- Principal D43 (every wait on a peer has a bounded exit: one table, one helper, one test per state), D44
+  (two free identities must never freeze a run), D46 (one rule: exclude and sanction the faulty peer,
+  recompose or close the round, record the withdrawal), D47 (sanction rules), D51 (one extended ADR),
+  Forge's AC-CLIFF, Lens F2 (roots R-C2 and R-D), Lens DSP-04 and Lens m2. This part is the rule; Parts 1,
+  2 and 5 are three of its rows and keep their text, amended where this part says so.
+- Amends Part 5: decision 2 (lazy trigger) and its rejected alternative 6 (an eager trigger), decision 6
+  (sanction S0: none) and decision 9 (survivors that cannot carry: the run stays blocked). Supersedes
+  Part 5 rejected alternative 8 (a void round needs a lineage design: it is designed below).
+- Nothing here changes a manifest, a policy, a wire message, a protocol constant or a run id. One new
+  disposition (`RETIRED`), one new escrow event kind (`ROUND_WITHDRAWN`) and a few record kinds, all
+  inside the stores. `implementation_hash` changes through the owned names listed under "Hash
+  consequences". Rules that are the founder's to change are marked **[sign-off]** and collected under
+  "Decisions for Forge".
+- Written before the code, from seven read-only design packages with private prototypes
+  (exit core, retired round, ledger withdrawal, roster member state, sanctions). Facts are labelled
+  [V] (verified by a command on a private copy of `f3d51478`), [V by reading], [A], [H], [?]. The
+  code that follows this text may refine a mechanism and will correct this text in the same commit.
+
+### The rule
+
+Every wait on a peer has a bound that is a value of the round schedule the operator already chose
+(`d_commit`, `d_upload`, `absolute`, `d_final`, a dispute deadline); no constant is added. At the bound,
+in this order and without the peer:
+
+1. the peer that holds the round is **excluded by a record** (`excluded`, with its reason, stage and
+   evidence), or, when nobody left can carry the round, the round is **retired**;
+2. its **blame** is booked once: the miner's, or infrastructure's. Blame is a witnessed fact, never a
+   guess;
+3. a miner's blame becomes a **sanction** (strike, suspension, bond burned) through one hook, applied by
+   a separate retried step so that a failing sanction never keeps the peer in the round;
+4. the round is **recomposed** (the others are audited, aggregated and paid) or **closed without
+   reward** (retired), and a round closed without reward is **withdrawn from the reward order** of the
+   ledger by a recorded event, so `FINALIZE_ORDER` goes on;
+5. a wait that no peer holds (too few anchored members for the next round) answers a **defined 409**,
+   never a 500, and idles with nothing locked.
+
+### Context
+
+- Time is the beacon table and `push_beacon` is its only writer (Part 1). The lazy exclusion of Part 5
+  needs somebody to call `audits` inside `[d_audit, absolute - 2]`, although commit intake closed at
+  `d_commit`; a missed audit window has no exit at all (503 for ever from `absolute - 1`). [V]
+- The caps are in the protocol: `miner_cap_units` is `Literal[4194304]` (Q/4) and `TapeBodyV2.inputs` has
+  `min_length=4`. `allocate_weights` over a roster passes with 4 ACTIVE members, raises with 3, passes with
+  3 ACTIVE + 1 PROBATION. A roster of R tolerates at most R - 4 exclusions. [V: `quorum.py` of the exit
+  prototype] D44's sentence "2 silent out of 5: next round open, 3 honest paid" cannot hold (three members
+  carry 3Q/4); "2 silent out of 6: 4 honest paid, round 1 opens" does, and is the test.
+- A member needs the anchor of round w - 1 to be rostered at w. A silent member has none, and a
+  never-rostered ACTIVE identity has none either (409 `missing accepted anchor`): a mid-run joiner is
+  Q3, not solved. So "a new draw among the ACTIVE miners" can only draw from the survivors of the
+  previous round. [V]
+- A round the survivors cannot carry wedges the run for good: `open_round_v2(w + 1)` reads `applied[w]`,
+  which only a tape of at least four inputs writes; an opening is immutable (`conflicting round
+  opening`), so the roster cannot be amended. It also pins the bond of every honest roster member
+  (`lock_settlement` keeps a lock while a round that lists the admission is not closed). [V]
+- The ledger refuses to skip an ordinal: `reward_finalize` raises `FINALIZE_ORDER` unless the round is
+  `MAX(escrow_finalized.w) + 1`, and nothing writes the row of a round that finality closed without
+  reward (an accepted rollback today, the exits of this part tomorrow). Real HTTP: after an accepted
+  two-round rollback and a fully audited round 2, `finalize` answers 409 `FINALIZE_ORDER`. [V]
+- A roster member's admission can stop matching its roster entry after the round opened: a rotation (the
+  old hotkey is refused at intake, `aggregate` answers 409 `UNKNOWN_HOTKEY` for ever), a contest of its
+  own MATCH verdict (DSP-04: it suspends the contestant, DSP-01 closes the dispute, the contestant is
+  `PROBATION` with `clean_count 0`, not live, and `aggregate` still answers 403), a screen that lapses.
+  `verified_inputs_v2` raises for the whole round instead of leaving the member out. [V]
+- Our own sanction can wedge the run. Round 0 applied and not finalized, member M MATCH in it and silent in
+  round 1: the sanction makes M ineligible and `finalize(0)` answers 403 for ever
+  (`verified_inputs_v2` re-checks eligibility). 403 without a gate, 200 with it. [V, six identities]
+- `Admission.seize_bond` (ADR 0010 Part 6) exists and has no caller. `NO_SHOW` burns the bond and leaves
+  the admission as it is; `AUDIT_MISMATCH` suspends, adds a strike and burns. `strikes` is read by
+  nothing; `SUSPENDED` without a pending dispute has no route back. [V by reading]
+- Unmapped refusals. `app.py` maps `AdmissionError`, `DisputeError`, `EscrowError`, `EnvelopeError` and
+  `ValidationError`; `InsufficientEligibleWeight` (a `ValueError`), `FinalityError` and `TapeError` (a
+  `RuntimeError`) are not: `POST /admin/rounds` with a 3-member roster and `w = 2` without round 1 answer
+  500. The aggregate path is already 409 `ROUND_INFEASIBLE` (Part 5). [V]
+- The numerics pin of Part 3 is decided and not yet in the sanctions' tree: enforcing `AUDIT_MISMATCH`
+  before it is in code would burn honest miners of another CPU class. [V]
+
+### The table
+
+`L` = `AuditPolicyV2.lease_rounds` (100 for H <= 30), `A = 2L`, `absolute = min(d_final, d_audit + A)`,
+`T` = `dispute_per_level`. A "push" is one `push_beacon`; every bound reads "the first push at or after".
+
+| # | Waiting state | Who can block it | Bound | Exit action | Blame | Sanction | Test |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | dispute (Part 1, done) | a funded contestant that cannot win; a silent auditor or referee | dead end: next push; abandoned: `turn_deadline + T + 1`; paused final op: `absolute_deadline + 1` | pause, `exclude` (loser None), `settle_lock`, `resolve_pending` | infrastructure | none; a referee `FRAUD` goes through `settle_fraud` | `test_dispute_exit_v2` |
+| 2 | roster commit (Part 5) | a roster member that never commits | `d_commit` (was: the first `audits` call) | `excluded NO_SHOW/commit`, `unresolved_audits - 1`; if the rest cannot carry: row 7 | miner, unless the assignment window was paused or nobody committed | D44 (decision 12) | `test_exit_commit` |
+| 3 | leaves never posted | a member that committed and never posts `/leaves` | `absolute` (<= `d_final`) | the queued job is dropped as `NO_SHOW/leaves`, no re-arm | miner (no auditor ever touched the job) | as 2 | `test_exit_leaves` |
+| 4 | delta never uploaded | an audited member, or the relay | `d_upload` | `excluded NO_SHOW/delta` | miner, unless nobody delivered or the upload window was paused | as 2 | `test_exit_delta` |
+| 5 | audit job, lease (Part 2, done) | an auditor, an executor host, a miner whose sealed input cannot be leased | attempt `L`; two windows of `A`; the second ends where the sealed commit ends | cooldown, requeue, re-arm once, drop only the miner (`INFRASTRUCTURE`); `MINER_INPUT_REFUSED` dropped at once | infrastructure; miner only for an input it sealed short | none | `test_audit_liveness_v2` |
+| 6 | audit window missed | the operator who never calls `audits` | `absolute - 1` | the round is retired (`AUDIT_WINDOW_MISSED`) | infrastructure | none | `test_exit_audit_window` |
+| 7 | round infeasible (AC-CLIFF) | nobody in particular: the Q/4 caps after any exclusion above | the push that first sees the survivors cannot carry | blame booked per member; the round is retired (`INFEASIBLE`); the next opening answers 409 until four anchored members are eligible | per member (rows 2 to 4) | per member | `test_exit_infeasible` |
+| 8 | roster member changes state (R-C2, DSP-04) | the member: rotation, contest of its own MATCH, a lapsing screen; our own sanction | refused at the door (rotation, MATCH contest, screen at open); judged at `aggregate`; if too few remain, retired at `d_final` | `ROTATION_ROUND_OPEN` / `NOTHING_TO_CONTEST` 409; `excluded INELIGIBLE` with its cause; `finalize` pays the applied tape | the member's own state; never a second sanction | none | `test_member_state` |
+| 9 | `FINALIZE_ORDER` without a withdrawal record (R-D) | nobody: a round closed without reward has no ledger row | the next reward finalize | `ROUND_WITHDRAWN` event for every closed-unpaid round below it | none | none | `test_round_withdrawal` |
+| 10 | a round with no finality record (Lens m2) | nobody: both writers write the `round` and `finality` records in one transaction and nothing deletes either | n/a | fail closed: `rounds_listing` is `None`, so the bond stays held and the rotation refused; the real pin, a round that never closes, is removed by retirement | none | none | `test_member_state` (pinned) |
+
+Not rows: a run that lacks four anchored ACTIVE members for the next round (capacity, answered by a 409 at
+open), and an operator that stops calling `aggregate`, `finalize` or `open`. Both are named so nobody reads
+the table as covering them.
+
+### Decision
+
+**A. The mechanism**
+
+1. **The table is data.** `challenge/exit_v2.py` holds `Wait` (an enum of the states), `Row`
+   (blocker, bound, exit, blame, sanction, driver, test) and `TABLE`. A bound is an anchor of the round
+   schedule plus one symbolic term. A test asserts that every `Wait` has a row, every bound is no later
+   than the round's horizon, and every named test exists.
+2. **One reaper on `push_beacon`**, after the dispute reaper and before the trial reaper: its own
+   transaction, one savepoint per unclosed round, a run-level guard so that nothing reaches the beacon
+   route after the beacon committed, failures journaled as `exit-failed` and rewritten only when they
+   change (so `_rollback_snapshot_v2` is stable under a persistent failure). It reads a snapshot of each
+   round, asks the pure planner and applies the answer through `_exclude_v2`, the single function that
+   records an exclusion and books its blame. It skips a run with a `service-admission` record (its roster
+   must stay complete).
+3. **Eager exits.** The first push with `now >= d_commit` excludes every member with no commit, the first
+   with `now >= d_upload` every audited member with no delta. The records are byte-identical to the lazy
+   writers' (`_exclude_no_shows_v2`, `_exclude_missing_deltas_v2`), which stay as a backstop. A queued job
+   whose miner never posted leaves is dropped at `absolute` as `NO_SHOW/leaves`, with the miner's blame
+   and no re-arm: only the master lacks the leaves, no auditor ever touched the job, and a second window
+   cannot help. This amends Part 2 decisions 8 and 9 for this one case.
+4. **Liveness before accountability.** The exit is committed first and never depends on the sanction. The
+   sanction is a row of its own (`records_v2 exit-sanction`, id `{w}:{hotkey}`: PENDING, APPLIED, WAIVED
+   or CANCELLED) applied by a sweeper that retries on every push. ADR 0010 and Part 5 asked for one
+   transaction; a sanction that raises would keep the member in the round for ever, which is the freeze
+   this part removes.
+5. **Blame is a witnessed fact.** `NO_SHOW` is the miner's only if the window it missed was served and
+   somebody used it: the reaper records `beacon-pause` when the wall clock was more than two rounds ahead
+   of the last round it had (the predicate `_fresh_v2` refuses on); a commit-stage absence in a round
+   where nobody committed is infrastructure; a delta-stage absence is infrastructure when nobody
+   delivered a delta or the upload window was paused. No waiver is one a miner can pick (an `accept` or
+   an upload grant costs a free identity nothing). The wall clock never decides when an exit happens, only
+   whether the miner is blamed.
+6. **Not automated.** The master does not open the next round, draw its roster or lower the quorum: a
+   `RoundOpenV2` is the operator's signed schedule and the caps are pinned by the schema.
+
+**B. A round that cannot reach a tape is retired**
+
+7. **A retired round is a record, not a tape.** `applied[w] = {kind: "null", out_state = prev_state, ...}`,
+   `finality[w]` has the new closed disposition `RETIRED`, `retired[w]` holds the evidence
+   `{v: "ht-round-retired-v1", run_id, w, cause, roster_hash, survivors, theta_hash}` whose sha256 is the
+   evidence hash. `open_round_v2` is unchanged: it reads `applied[w]` and the anchors of round `w`.
+8. **Causes, each re-derived by the primitive** (`_retire_round_v2`, called by the reaper's per-round
+   savepoint and by nothing else; idempotent, it cannot void a healthy round): `INFEASIBLE` (`now >= d_commit`
+   and `allocate_weights` over the survivors raises; every term only shrinks) and `AUDIT_WINDOW_MISSED` (no
+   lease row and `now >= absolute - 1`). Both require every earlier round closed (so no rollback window
+   contains a retired round; an open predecessor delays the retirement and the state is recorded in
+   `round-exit`), an unapplied `PENDING` status and no `service-admission` record. The one definition of
+   "survivors" is the planner's: the roster minus the excluded, minus the members with no commit from
+   `d_commit`, minus the committed members with no delta from `d_upload`. A round whose audited members
+   became ineligible (decision 22) is retired at `d_final` if too few remain.
+9. **Anchors carried, nothing recomputed.** Every roster member's anchor `w` is its anchor `w - 1` under new
+   hashes (`ht-carried-proof/1`, `ht-carried-anchor/1`): the tensor files are linked and only the metadata
+   is rewritten, `state_root` and `ef_hash` are unchanged. Survivors restart `w + 1` from the optimizer
+   state and error feedback they held at the start of `w`. Training: theta, outer momentum and centre are
+   unchanged (an identity, not a zero-update step, which would move theta by momentum); the data window of
+   `w` is consumed. A miner needs no action: its start state is pinned by hash (`IslandJobV1`) and a
+   commit with another `ef_in_hash` is refused.
+10. **Audits, disputes, locks, grants.** Open leases become `exhausted/ROUND_RETIRED` and their guards are
+    revoked; new work on the round answers 409 `ROUND_RETIRED` (`schedule_audits_v2`, `aggregate_v2`,
+    `finalize_v2`, `rollback_v2`; owned names); completed verdicts stay as evidence. A dispute is not
+    waited for: an open one leaves the round retired but not closed until Part 1 closes it.
+    `relay_settlement_v2` answers for the grants of a retired round. The honest bonds are released by
+    `lock_settlement` as soon as the round is closed.
+11. **The next round.** The operator opens `w + 1` with `prev_final_hash = retired[w].evidence_hash`
+    (`live_operator` reads it). It needs four eligible members that hold an anchor for `w`; fewer answers
+    409 `ROUND_INFEASIBLE` and the run idles with nothing locked. A new member cannot join: Q3.
+
+**C. The sanction (D44, D47)**
+
+12. **`NO_SHOW` sanctions as `AUDIT_MISMATCH` does [sign-off].** `seize_bond(NO_SHOW)` suspends, adds one
+    strike and burns the bond (unvested rewards spared, the coldkey stays bound by the one-non-ACTIVE-row
+    rule); a one-tuple change in `admission.py`. It resolves by the admission id of the roster entry, so a
+    rotation cannot dodge it, and is idempotent per (reason, evidence).
+13. **No gate: `finalize` pays the applied tape (decision 23).** An earlier design made the sweeper wait
+    for the member's earlier unclosed rounds, because a sanction makes the member ineligible and `finalize`
+    of an applied round re-checks eligibility. A gate cannot hold `settle_fraud` (it runs inside a referee's
+    resolution), a lapse or a rotation; decision 23 cures every path and lands before the first caller of
+    the hook. The gate (about 25 lines: a PENDING row until no earlier unclosed round lists the member) is
+    the documented fallback if decision 23 is refused.
+14. **`SanctionHook`.** The sweeper calls the hook through a Protocol of one method
+    (`seize_bond(admission_id, *, reason, evidence_hash, now)`), bound to `Admission` in production and to a
+    fake in tests. It never calls `TRAINING_FRAUD`: that stays `settle_fraud`'s. The evidence hash is the
+    exclusion's own, re-derived by the reaper before use; a record whose evidence does not re-derive is
+    never sanctioned.
+15. **What reaches the hook.** Two shapes only: an `excluded NO_SHOW`, and an `excluded UNVERIFIED` backed
+    by a completed `MISMATCH` lease, the stored executed verdict whose digest is the excluded evidence and a
+    graded verdict. Nothing the auditor or the host did reaches it: executor exceptions, quarantines, lease
+    lapses, cooldowns, exhaustion and dropped jobs (`MINER_INPUT_REFUSED`) leave no verdict. A host that
+    returns well-formed false leaves is not detectable by the master; the window, the numerics pin and an
+    operator-run executor list are the controls, and the limit is stated.
+16. **Confirmed (D47a).** `LOCATED` (`first_bad_leaf` named) or `COMMIT_CONTRADICTS_LEAVES` (no leaf named
+    and the replay's leaves root equals the committed root: the miner's signed commit contradicts its own
+    published leaves, the Lens S2 shape and the least numerics-prone one). Anything else is an audit anomaly
+    and is never sanctioned. A dispute closed against the miner is a resolution `FRAUD` or `PARTY_TIMEOUT`
+    with the miner as loser; a closure `INFRASTRUCTURE` of any cause leaves the verdict standing and an
+    abandoned turn never exonerates (otherwise every contest would be an escape).
+17. **Window and one free contest (D47b) [sign-off].** `due = first_seen + verify.T.dispute_per_level`, a value
+    the manifest already gives a party to make one move. The contest bond is refundable (returned on every
+    closure but a `FRAUD` ruling against the miner) and is funded from available units, never from the
+    admission bond; one dispute per verdict. A resolution `FRAUD` or `AUDITOR_FAULT` against the lease's
+    auditor cancels the sanction; an open contest postpones it. Once the sanction is applied a new contest
+    of that verdict answers 409 `SANCTION_APPLIED`. The verdict hash is published to the miner in the audit
+    result it can read (D51: it needs it to contest). What a contest buys today is postponement: no
+    auditor-side responder exists, so the Part 1 closure ends it `INFRASTRUCTURE` and the verdict stands.
+18. **Order.** The `AUDIT_MISMATCH` rows are enforced only after Part 3 is in the code. Until then they run in
+    `record` mode (the sweeper journals `WOULD_APPLY` and calls no hook; a constructor keyword, not a
+    manifest field). `NO_SHOW` rows have no such dependency.
+19. **No route back [sign-off].** A round-stage sanction binds no pending reference; the only exoneration is
+    decision 17. The re-seed of ADR 0002 (P5) and any amnesty belong to the admission lot and need policy
+    fields.
+
+**D. A roster member that changes after the round opened (R-C2, DSP-04)**
+
+20. **A roster is a contract.** From the opening to the closure of its round the admission behind an entry
+    keeps its hotkey and either keeps its standing or is left out by a record.
+21. `Admission.rotate` refuses with 409 `ROTATION_ROUND_OPEN` while a round that lists the admission is not
+    closed (a round without a finality record counts as open). A contest of a verdict whose audit result
+    is MATCH is refused with 409 `NOTHING_TO_CONTEST` by the store's `contest_of` callback, so
+    `disputes_v2.py` is not touched; a MISMATCH can still be contested. `open_round_v2` refuses an entry whose
+    `screen_until` is before `d_final` (403; equal is accepted), and `live_operator open` refuses it by name.
+22. `aggregate_v2` first leaves out, with `excluded {reason: INELIGIBLE, stage: aggregate, cause}`, every
+    audited member whose admission no longer qualifies (`ROTATED`, `BANNED`, `SUSPENDED`, `NOT_LIVE`,
+    `SCREEN_LAPSED`, `UNFUNDED`; a member is rotated when its hotkey no longer names an admission, and a
+    hotkey names one admission for good, since `join` and `rotate` both refuse a hotkey in
+    `admission_history`, so no `REASSIGNED` cause exists). The survivors check that follows answers 409
+    `ROUND_INFEASIBLE` and persists nothing when the rest cannot carry Q (then the reaper retires).
+23. `finalize_v2` pays exactly the inputs recorded with the applied tape and no longer re-derives the live
+    set. This is a prerequisite of every sanction: it must land before the first commit that calls the hook.
+24. No sanction for `INELIGIBLE`: its cause is the member's own state or the effect of a sanction already
+    applied. A sanction is not booked for an absent member whose admission is already unfit.
+
+**E. The ledger (R-D)**
+
+25. **A closed round is recorded as an event.** `ROUND_WITHDRAWN`, request `{"closure_hash", "w"}`,
+    appended to the existing hash chain: no table, no snapshot element, no issuance. The order rule becomes
+    "the first round that is neither reward-finalized nor withdrawn". `EscrowV2` takes an optional
+    `round_closure(w)`; the store answers with the round's resolution hash iff its finality record is
+    closed and was closed without reward (`EXCLUDED` after its rollback, or `RETIRED`).
+26. **Written at the point of need**, inside the reward finalize that needs it, after its checks (a refused
+    finalize records nothing). The id is `sha256("ht-round-withdraw-v2|run|w|<head of the chain>")`, a
+    server-derived id in its own domain, never client-chosen (F1 compatible). A round finality closed
+    without reward is never paid (`ROUND_CLOSED_UNPAID`).
+
+**F. AC-CLIFF**
+
+27. `InsufficientEligibleWeight` maps to 409 `ROUND_INFEASIBLE`, `FinalityError` and `TapeError` to 409
+    `ROUND_BLOCKED`, on every route (three handlers in `app.py`); the store keeps raising the bare
+    exceptions. The roster floor is documented as the arithmetic (R tolerates R - 4 exclusions: five
+    tolerate one, D44's two need six) and enforced in `scripts/ops/live_operator.py open` (`--tolerate`,
+    default 1; `--tolerate 0` opens four, explicitly), not in `open_round_v2`: the store keeps the protocol
+    minimum of four, the protected-service open stays at exactly four, and a store floor of five would be a
+    new constant that breaks every four-member fixture and the TEST runbook. The detail is
+    `<CODE>: <message of the exception>`; the two rollback routes mapped a `TapeError` to a bare 409
+    before the handlers existed and keep that message.
+
+### The tests: one per waiting state, each proves the run continues
+
+| State | Test (file) | Scenario | Mutant |
+| --- | --- | --- | --- |
+| dispute | `tests/challenge/test_dispute_exit_v2.py` (exists) + the e2e | forged delta + contest: the run restarts, `w + 2` opens | the closure removed |
+| commit | `tests/challenge/test_exit_v2.py::commit` | 6 rostered, 2 silent: both excluded at `d_commit`, sanctioned, 4 audited and paid, round 1 opens | eager exit removed; sanction gate removed |
+| leaves | same file | a member commits and never posts leaves: dropped at `absolute` as `NO_SHOW/leaves`, the others settle | stage naming |
+| delta | same file | an audited member never uploads: excluded at `d_upload`, the round settles | the delta exit |
+| audit job | `test_audit_liveness_v2.py` (exists) | one poisoned job costs its miner, not the round | exhaustion drop |
+| audit window | same file | nobody calls `audits`: retired at `absolute - 1`, round 1 opens | the cause |
+| infeasible (AC-CLIFF) | `tests/e2e/test_retired_round_v2.py` | 4 rostered, 1 silent: 409 `ROUND_INFEASIBLE` (not 500), retired, honest bonds released; round 1 opens with four anchored eligible members; 5 rostered, 1 silent: settles with four | retire on any exclusion |
+| member state | `tests/challenge/test_member_state_v2.py` | rotation refused while rostered; MATCH contest refused; lapsed screen excluded `INELIGIBLE`; sanctioned member of an applied round is paid by `finalize` | each guard |
+| finalize order | `tests/challenge/test_round_withdrawal_v2.py` | accepted rollback then a paid round: `FINALIZE_ORDER` before, 200 after, `escrow.verify()` passes | the callback |
+| no finality record | `tests/challenge/test_member_state_v2.py` | a round without a finality record keeps the rotation refused and the bond held (pinned, with the rotation case red) | `rounds_listing` returns closed |
+| sanction | `tests/challenge/test_sanction_v2.py`, the cheaters suite | confirmed MISMATCH sanctioned after the window; auditor/host failures never reach the hook | grade, gate, cancel |
+
+### P1 to P8 of ADR 0009 section 4 (D47)
+
+| Id | Verdict |
+| --- | --- |
+| P1 sanction of a round MISMATCH, coldkey, ban | implemented here (decisions 12 to 19); ban on FRAUD is `settle_fraud` (ADR 0010); the proposal of a synthetic pending reference is rejected (PRB-01 shape) |
+| P2 AC-CLIFF | decisions 7 to 11 and 27 |
+| P3 wedges | done in Part 2 (`lease_v2` skips a job it cannot lease); refusing `exp_drand < d_audit` at `/commit` is optional; refusing a non-finite leaf at `/leaves` is **deferred: harmful** (it turns a fast `UNVERIFIED` drop into a commit without leaves that exits after two audit windows) |
+| P4 liveness | decisions 2 to 5 |
+| P5 trial route back | (a) done by ADR 0010; (b) re-seed and (c) route back after a trial mismatch **deferred to the admission lot**: policy fields, a new policy digest |
+| P6 lease cap, refuse at open | (a) done (Part 2); (b) refuse `d_final` beyond the audit horizon at open **deferred**: fixtures and scripts open rounds with gap 269 and must move first |
+| P7 store lock before shared-connection reads | implemented: `require_roster_v2` (owned) and `weights` take the lock |
+| P8 acceptance binding, commit 500, metrics_root | acceptance binding and commit 500 implemented in `training_v2`; `metrics_root` **deferred**: a comparator clause in the code the 22-cheat / 552-audit evidence pins; inert, bound through the leaves root; `RELAY-01` belongs to the escrow-relay lot |
+
+### Hash consequences
+
+- `implementation_hash` changes (it already changed in Parts 2, 3, 5): owned names edited are
+  `schedule_audits_v2`, `aggregate_v2`, `finalize_v2`, `rollback_v2`, `open_round_v2`, `training_v2`,
+  `require_roster_v2`; owned names added are `_exclude_unfit_members_v2`, `_unfit_cause_v2`. The reaper,
+  the sweeper, the retirement, the withdrawal, the hook and the HTTP mapping are outside it. One final
+  value for the lot is in the report. Runs holding a `service-admission` record then fail
+  `SERVICE_PROFILE_AUTHORITY` and cannot be re-bootstrapped after a round opened (as in Parts 2, 3, 5).
+- `run_id`, manifest, policy hashes, `wire_v2.json`, `rust_wire.json`, goldens: unchanged. New persisted
+  shapes without a migration: record kinds `retired`, `exit-sanction`, `exit-failed`, `beacon-pause`,
+  `round-exit`; `applied.kind = "null"`; `finality.disposition = "RETIRED"`; `anchor` records with
+  `carried_from`; one escrow event kind. An older binary treats an unknown disposition as not closed (fails
+  closed) and verifies a chain that holds withdrawals.
+
+### Consequences
+
+- The longest stall a peer can cause, in rounds after the event: commit, one push after `d_commit`; delta,
+  one push after `d_upload`; leaves, until `absolute` (at most `d_final`); audit window, until `absolute - 1`;
+  lease, Part 2; dispute, Part 1. After it the round is excluded-and-settled or retired and closed, the
+  honest bonds are releasable and the next round can open. Before: for ever.
+- Two silent members of six: both sanctioned at `d_commit`, 2000 units burned, four members audited and paid
+  250,000 each, round 1 opens with the four. Two of five: both sanctioned, no 500, the round retired, round
+  1 answers 409 `ROUND_INFEASIBLE` until four anchored members are eligible. A void round pays nobody and
+  mints nothing, and a free identity in a roster of four can void every round it is in until it is
+  sanctioned: the operator's default roster is five or six.
+- An honest evicted miner is sanctioned like a free identity (ADR 0002 I5 and D40 say the opposite; v2 has
+  no leave message to tell them apart). The pause witness and the zero-commit rule are the only
+  exculpation, and there is no route back from `SUSPENDED` **[sign-off]**.
+- Owners rotate between rounds only. ADR 0010 decision 1.3 (rotation of a `SUSPENDED` row with a
+  pending dispute stays legal) is narrowed: a contest pins its round, so such a row is refused
+  while that round is unclosed. A rollback across a retired round and a checkpoint that spans one are
+  refused (fail closed). A rollback whose history holds an exit exclusion fails closed, as after
+  `UNVERIFIED`.
+- Existing tests that change deliberately: `test_seize_bond_burns_the_bond_of_a_no_show_and_nothing_else`
+  (the state becomes `SUSPENDED`), the e2e no-show test that expects 409 `ROUND_INFEASIBLE` after the push
+  (it expects `ROUND_RETIRED`), and every test that opens a funded dispute against an honest MATCH (the
+  helper marks the lease row MISMATCH first). Each is updated in the commit that changes the behaviour.
+
+### Rejected alternatives
+
+1. A new `RoundOpenV2` without the silent members: `roster_hash`, slots and start states change, an opening
+   is immutable. 2. The master opens the next round at the push: it needs the operator's schedule and a
+   roster draw. 3. Sanction inside the exclusion transaction (decision 4). 4. A tape with no input
+   (`min_length=4`: a wire change) or a zero-update outer step (it moves theta by momentum). 5. `exclude()`
+   on an unapplied round (closes it, writes no `applied[w]`, so `w + 1` cannot open). 6. Carry-forward of the
+   real post-round anchors (absent for unaudited members, unsound for error feedback). 7. A `ROUND_WITHDRAWN`
+   table and a fifth snapshot element (old code then refuses the database), a sentinel row in
+   `escrow_finalized` (turns on the live-reward gate), a signed withdrawal message (a new wire model), writing
+   in the closing transaction (an owned function; leaves a frozen run frozen). 8. Writing the exclusion inside
+   `verified_inputs_v2` (a read function used by two callers). 9. Tiering the sanction by an `accept` record or
+   waiving a member that asked for an upload grant (a free identity signs an `accept`). 10. Detecting a paused
+   window by gaps in the beacon table (the pusher fills gaps, the harness jumps). 11. A wall-clock deadline for
+   any exit (Part 1). 12. Enforcing five at open (a new constant). 13. A grace period for a lapsed screen
+   (renewal does not exist). 14. Treating a missing finality record as closed in `lock_settlement` (a corrupt
+   record would release a bond).
+
+### Decisions for Forge
+
+1. `NO_SHOW` suspends and strikes (decision 12), as D44 says, against ADR 0002 I5 and D40; the alternative is
+   bond-only (one keyword).
+2. The window of decision 17 (`dispute_per_level` rounds from the first push that sees the verdict) and the
+   grades of decision 16.
+3. Whether `AUDIT_MISMATCH` rows are enforced in production before the auditor-side responder exists
+   (decision 18).
+4. A route back from `SUSPENDED` (decision 19): an operator amnesty route is the smallest honest step.
+5. The operator's default roster floor (`--tolerate 1`).
+6. The late-join anchor (Q3), which would make "a fifth miner becomes ACTIVE" literal.
+7. D51 (2): the merged `GET .../challenge` of ADR 0010 is signed in headers; the `GET /disputes` route too.
+   Both are converted to a signed body envelope in separate commits (D52).
+8. A `TRAINING_FRAUD` ban that lands between the aggregate and the finalize of a round leaves that round's
+   reward with the convicted coldkey (decision 23); the clean rule ("a banned coldkey's later origins
+   mint into `burned`") belongs to the ledger lot.
+9. The contest window counts beacon rounds, so a beacon outage consumes it; extend `due` by the pause
+   length before production.
+10. A retirement costs every roster member a round of work and reward, and a free identity in a roster of
+    exactly four can void each round it is in until it is sanctioned: the bond prices it; document it in
+    the operator guide.
+11. A correlated honest outage (a region loss silencing several honest miners while the master is up) is
+    sanctioned for all; no threshold is proposed, a majority attacker would use it.
+12. Order with F1 (`v3-escrow-relay-fixes`): F1 first, as the Principal ordered. Whoever lands second
+    resolves one-line conflicts in `escrow_v2.py`; with F1 present the withdrawal id uses the server key
+    space and the chain-head term is redundant.
+
+### Not verified
+
+- A real pusher with real lag and the production freshness gate (only the test-mode predicate was read);
+  CUDA; service-admitted runs (skipped by design); a retirement with an open dispute (follows from `closed`,
+  not run); the real relay `release` after a retired round; a checkpoint that starts after one.
+- `AUDIT_MISMATCH` against a CUDA host class; a hostile host that returns well-formed false leaves.
+- Concurrency of the reaper with a long poll (read: it takes the store lock only).
+
+### Sources
+
+`hypertrain/src/hypertrain/challenge/{store,finality_v2,admission,disputes_v2,app}.py`, `ledger/escrow_v2.py`,
+`aggregator/{weighted_v2,tape_v2}.py`, `protocol/messages_v2.py`, `scripts/ops/live_operator.py`,
+2026-10-27. Lens C1 report (F2: R-C2, R-D; Lens m2), Lens synthesis (DSP-04), ADR 0009 section 4, ADR 0010
+Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not Git.

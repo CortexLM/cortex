@@ -10,7 +10,9 @@
   challenge GET no longer exists, a dead unfunded `APPLIED` row is suspended `APPLIED_EXPIRED` at
   the next `join`, and a signed leave names the coordinator epoch. The rows of "What happens
   today" and of "P1 and the v2 admission rules" that describe the earlier behaviour are kept as
-  the record of the review.
+  the record of the review. Amended 2026-10-28 by ADR 0010 decision 2 point 5: what is built of the
+  re-seed is an operator route for every run (`Admission.reseed`, admin bearer); the owner-signed
+  form with a budget described below is NOT built and waits for founder decisions 5 and 6.
 - Order: founder, 2026-10-26: the network runs mostly on Spot 8x B300 hosts that can be evicted
   at any time, with no lost work and no reinstall by hand (programme §2.3-2.4). Design
   checklist: lot brief `B-eviction-tolerant-core.md`.
@@ -353,6 +355,10 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
      `APPLIED`, `PROBATION` and `ACTIVE` rows, so for P1 runs it is the code-change option of the
      choice that `hypertrain/docs/network-v2.md` leaves open before a production admission
      policy is signed (a larger screen value or a code change; the idle-miner paragraph).
+     Built since 2026-10-28, for every run and without a budget: the operator's reseed (ADR 0010
+     decision 2 point 5), which writes the same `seed_beacon = now + 1` on the same three states
+     behind the admin bearer. The signed request, its budget and the dormancy delay are still
+     proposals.
    - An `APPLIED` row whose seed window has passed is dormant, not expired: "expires with that
      window" is withdrawn. `join` refuses any coldkey with a non-`ACTIVE` row
      (`COLDKEY_PROBATION_EXISTS`, `admission.py:162-166`), and nothing in v2 expires a row by
@@ -406,7 +412,7 @@ window minus one trial's duration (about 36 rounds, 108 s, with joinbase-6's 64 
 | `screen_until` is written only at proof acceptance (`:745-754`) and reset by `resume` (`:1045`); eligible needs `now <= screen_until` (`:936-945`); W = 6000 in the example (`ops/manifest_v2.py:189`) | `INTERRUPTED` does not extend it: a screen is hardware evidence and an interrupted trial adds none. An evicted `ACTIVE` miner stays eligible until `screen_until`; after it, one re-seed and one `MATCH` trial restore it without leaving `ACTIVE`, since acceptance rewrites `screen_until` | proposal |
 | `clean_count` +1 at finalization (`:891-893`), reset only by `resume` | `INTERRUPTED` neither adds nor resets; a `PROBATION` miner evicted for longer than W keeps its count | proposal |
 | The renewal window after a finalization is `challenge_rounds` minus a trial; only suspend and `resume` reopen it, at zero (`hypertrain/docs/network-v2.md`, idle-miner paragraphs) | The re-seed is the code-change option of that note, for P1 runs. v2 runs keep today's rule; fixing them is a separate admission change | founder |
-| The seed has three writers (`:197`, `:891-895`, `:1043-1048`) | A fourth, the re-seed, never inside the unsigned GET: any caller could otherwise spend a miner's budget and the 2 trial places | proposal |
+| The seed has three writers (`:197`, `:891-895`, `:1043-1048`) | A fourth, the re-seed, never inside the unsigned GET: any caller could otherwise spend a miner's budget and the 2 trial places. Built 2026-10-28 as the operator's `Admission.reseed` (admin route, ADR 0010 point 5); the owner-signed form stays a proposal | built (operator form); proposal (signed form) |
 | `TRIAL_CAPACITY` counts `OPEN` rows, at most 2 (`:242-246`); a vanished holder keeps one until someone requests the challenge (`:216-228`) | The place is freed when the lease or the progress deadline ends. The outcome `INTERRUPTED` is free text in `admission_trial_results`, no schema change | proposal |
 | `max_pending` 32 counts `APPLIED` and `PROBATION` rows (`:167-171`); the hotkey stays spent (`:158-161`) | `dormant_rounds` covers `APPLIED` only; a dormant `PROBATION` row keeps its place and its count. The locked units of a dormant or `APPLIED_EXPIRED` row are not released by `suspend` (`:1012`); what releases them is open | founder; `PROBATION` and lock [?] |
 | Lapses are not sanctioned, so a miner that takes a trial and vanishes dodges the v2 suspension for the cost of one TTL or progress deadline, and leaves a trial's inputs staged (`challenge/store.py:2752-2796`) | A re-seed budget per coldkey and epoch (`now // work_screen_epoch_rounds`), read through `admission_history.coldkey` so a new hotkey does not reset it. Every trial that closes without `MATCH` or `MISMATCH` counts, because lapses and honest evictions cannot be told apart. Exhausted: re-seed refused until the next epoch, nobody suspended. A flat value is wrong for a regional loss, which hits every host of a coldkey at once. This is a cost on an honest departure (I5) | founder |

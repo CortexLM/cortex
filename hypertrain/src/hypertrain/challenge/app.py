@@ -433,6 +433,19 @@ def create_app(
     ):
         app.add_exception_handler(cls, v2_error)
 
+    from hypertrain.aggregator.core import FinalityError, TapeError
+    from hypertrain.aggregator.weighted_v2 import InsufficientEligibleWeight
+
+    async def round_refused(_: Request, error: Exception) -> JSONResponse:
+        """A round the caps or the finality rules refuse is a conflict, never a crash."""
+        code = (
+            "ROUND_INFEASIBLE" if isinstance(error, InsufficientEligibleWeight) else "ROUND_BLOCKED"
+        )
+        return JSONResponse({"detail": f"{code}: {error}"}, status_code=409)
+
+    for refusal in (InsufficientEligibleWeight, FinalityError, TapeError):
+        app.add_exception_handler(refusal, round_refused)
+
     @app.post("/v2/server-keys", status_code=201)
     async def grant_server_key(request: Request) -> Any:
         return await run(server_keys.grant, await read_model(request, SignedGrant))
@@ -549,6 +562,12 @@ def create_app(
     async def reference_v2(run_id: str, admission_id: str, authorization: Auth = None) -> Any:
         admin(authorization)
         return await run(store.for_run(run_id).trial_reference_v2, run_id, admission_id)
+
+    @app.post("/v2/runs/{run_id}/admin/join/{admission_id}/reseed")
+    async def reseed_v2(run_id: str, admission_id: str, authorization: Auth = None) -> Any:
+        """The operator's way back for an identity whose trial window lapsed (ADR 0010)."""
+        admin(authorization)
+        return await run(store.for_run(run_id).admission_v2, run_id, "reseed", b"", admission_id)
 
     @app.post("/v2/runs/{run_id}/admin/join/{admission_id}/finalize")
     async def trial_final_v2(

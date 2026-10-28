@@ -74,7 +74,7 @@ Exact rounds are read, so a hole is a defect, not a cosmetic gap. `Admission.cha
 trial is finalized (:895) and after a resume (:1047) [V]. A seed that falls in a hole answers 500
 `BeaconUnavailable: round N not pushed` until the window (100 rounds) is over, then 409
 `CHALLENGE_EXPIRED` with the identity still in its state and no way to a new seed (nothing but join,
-finalize and resume moves `seed_beacon`) [V by a reviewer's reading]. That is not the S13 suspension:
+finalize and resume moves `seed_beacon`; since 2026-10-28 the operator's reseed does too, ADR 0010 point 5) [V by a reviewer's reading]. That is not the S13 suspension:
 `SUSPENDED / CHALLENGE_EXPIRED` is written only for a trial already OPEN whose deadline passed
 (`admission.py:222-224`), which is what the five-minute backfill pause did to miner 3. The two S13 losses
 had two causes, both traced to the beacon. That a hole strands an identity without a second pusher is
@@ -212,9 +212,11 @@ numbers: the line numbers of the Context are those of the Part A tree.
    ends late is therefore dropped, the reaper closes the trial `EXPIRED` as bookkeeping, and the miner's standing
    (state, strikes, dispute flag) is untouched. That is the outcome of the old code, which cancelled at the same
    cutoff; what changed is that the window is no longer eaten by the lock: a 57 s reference costs 19 rounds of
-   the 100, not the whole window. Not changed here and not solved: an identity whose trial lapsed has no route
-   to a new challenge (`challenge()` refuses after `seed + challenge_rounds`; nothing but join, finalize and resume
-   moves the seed), so "not stranded" holds for its standing, not for its next trial [known, ADR 0010]. Tests:
+   the 100, not the whole window. After the merge of `v3` (2026-10-28) an identity whose trial lapsed has a way back:
+   the operator's `reseed` (`Admission.reseed`, ADR 0010 decision 2 point 5) writes a new seed once the trial is
+   closed, and refuses while it is OPEN, so it cannot meet a running reference; without it `challenge()` refuses
+   after `seed + challenge_rounds`, so "not stranded" holds for the standing and, with the operator, for the
+   next trial. Tests:
    `the_deadline_round_cancels_a_launch_that_is_still_running`, `…ends_one_round_before_the_deadline_is_committed`,
    `…ends_after_the_window_commits_nothing_and_sanctions_nobody` (through `POST /join/proof`), and the
    settlement boundary in `test_reference_settle_v2.py`.

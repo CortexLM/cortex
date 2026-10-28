@@ -1131,6 +1131,7 @@ class Admission:
                 raise AdmissionError("LOCK_OWNER_OR_KIND")
             if r.state == "BANNED":
                 raise AdmissionError("LOCK_BANNED")
+            self.escrow.require_lock_capacity(op)  # before an outbox row nobody can apply
             self.store.enqueue_lock(op, env.signer)
         return self.store.reconcile_lock(op.operation_id).event_hash
 
@@ -1224,6 +1225,8 @@ class Admission:
                 raise AdmissionError("NEW_HOTKEY_HISTORY")
             if r.state == "BANNED":
                 raise AdmissionError("TERMINAL_BANNED")
+            if self.open_rounds(r.admission_id):
+                raise AdmissionError("ROTATION_ROUND_OPEN")
             self.store.quota(
                 f"rotate:{r.coldkey}:{now // self.policy.work_screen_epoch_rounds}",
                 now,
@@ -1290,6 +1293,50 @@ class Admission:
                 (now + 1, r.admission_id),
             )
 
+    def reseed(self, admission_id: str, *, now: int) -> dict[str, JsonValue]:
+        """Give an identity whose trial window is dead a new one: write `seed_beacon = now + 1`.
+
+        `challenge()` refuses for ever once `now > seed_beacon + challenge_rounds`, and only join,
+        finalize_trial and resume write the seed, so a miner that lost its window to an eviction
+        or a beacon pause is stranded with its state intact (ADR 0010 decision 2). This is the
+        operator's way back for it, behind the admin bearer. Nothing else moves: state,
+        clean_count, strikes, screen and the closed trial stay, so no second identity and no strike.
+        One lapse buys one reseed (the new window must itself be dead before the next), and each
+        use leaves a reservation row.
+        """
+        self._beacon(now)
+        with self.escrow.tx():
+            r = self.store.by_id(admission_id)
+            if r.state not in ("APPLIED", "PROBATION", "ACTIVE") or r.pending_dispute:
+                raise AdmissionError("RESEED_STATE")
+            self.reap_expired_trials(now=now)
+            row = self.store.db.execute(
+                "SELECT a.seed_beacon, t.outcome FROM admissions_v2 a "
+                "LEFT JOIN admission_trial_results t ON t.epoch=a.trial_epoch "
+                "WHERE a.admission_id=?",
+                (admission_id,),
+            ).fetchone()
+            if row["outcome"] == "OPEN":  # live, or proven and waiting for its finalization
+                raise AdmissionError("RESEED_TRIAL_OPEN")
+            if now <= row["seed_beacon"] + self.policy.challenge_rounds:
+                raise AdmissionError("RESEED_NOT_NEEDED")
+            body: dict[str, JsonValue] = {
+                "admission_id": admission_id,
+                "state": r.state,
+                "previous_seed_beacon": row["seed_beacon"],
+                "seed_beacon": now + 1,
+                "reseeded_beacon": now,
+            }
+            self.store.db.execute(
+                "UPDATE admissions_v2 SET seed_beacon=? WHERE admission_id=?",
+                (now + 1, admission_id),
+            )
+            raw = canonicalize(body)
+            self.store.reserve(
+                f"reseed|{admission_id}|{row['seed_beacon']}", sha256_hex(raw), raw.decode()
+            )
+            return body
+
     def resolve_pending(self, hotkey: str, reference: str, *, now: int) -> None:
         """Resume only from L5's authenticated nonfraud settlement, preserving strikes."""
         self._beacon(now)
@@ -1339,15 +1386,11 @@ class Admission:
     # settlement of a dispute or of a reward origin.
 
     def _bond_locks(self, admission_id: str) -> list[EscrowLock]:
+        """The admission's locks that still hold units, oldest first, through the ledger's index."""
         coldkey = self.store.by_id(admission_id).coldkey
-        locks = (
-            EscrowLock.model_validate_json(row["request"])
-            for row in self.store.db.execute(
-                "SELECT request FROM escrow_events WHERE kind='LOCK_ADMISSION' ORDER BY seq"
-            )
-        )
         return [
-            lock for lock in locks if lock.admission_id == admission_id and lock.owner == coldkey
+            EscrowLock.model_validate_json(row["request"])
+            for row in self.escrow.open_locks(admission_id, coldkey)
         ]
 
     def _residual(self, lock: EscrowLock) -> tuple[list[str], int]:
@@ -1361,6 +1404,31 @@ class Admission:
     def _bond_operation(self, label: str, lock_id: str) -> str:
         """Deterministic for retries, unguessable for an owner who would register it first."""
         return hmac.digest(self.ip_secret, f"ht-bond-{label}-v1|{lock_id}".encode(), "sha256").hex()
+
+    def rounds_listing(self, admission_id: str) -> list[tuple[int, RoundStatus | None]]:
+        """Every round whose opening lists the admission, with its finality record or None."""
+        listing = []
+        for rostered in self.store.db.execute(
+            "SELECT r.id FROM records_v2 r, json_each(json_extract(r.data,'$.body.roster')) j "
+            "WHERE r.run_id=? AND r.kind='round' AND json_extract(j.value,'$.admission_id')=? "
+            "ORDER BY CAST(r.id AS INTEGER)",
+            (self.escrow.run_id, admission_id),
+        ).fetchall():
+            record = self.store.db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='finality' AND id=?",
+                (self.escrow.run_id, rostered["id"]),
+            ).fetchone()
+            status = RoundStatus(**json.loads(record["data"])) if record else None
+            listing.append((int(rostered["id"]), status))
+        return listing
+
+    def open_rounds(self, admission_id: str) -> list[int]:
+        """Rounds that list the admission and are not closed. One without a record counts."""
+        return [
+            w
+            for w, status in self.rounds_listing(admission_id)
+            if status is None or not status.closed
+        ]
 
     def lock_settlement(self, lock_id: str, standing: _Standing | None = None) -> Settlement:
         """What may happen to one admission lock. Derived, never stored.
@@ -1425,17 +1493,7 @@ class Admission:
         ).fetchall()
         unresolved = unresolved or any(not p["resolved"] for p in pending)
         rounds: list[list[object]] = []
-        for rostered in self.store.db.execute(
-            "SELECT r.id FROM records_v2 r, json_each(json_extract(r.data,'$.body.roster')) j "
-            "WHERE r.run_id=? AND r.kind='round' AND json_extract(j.value,'$.admission_id')=? "
-            "ORDER BY CAST(r.id AS INTEGER)",
-            (self.escrow.run_id, admission_id),
-        ).fetchall():
-            record = self.store.db.execute(
-                "SELECT data FROM records_v2 WHERE run_id=? AND kind='finality' AND id=?",
-                (self.escrow.run_id, rostered["id"]),
-            ).fetchone()
-            status = RoundStatus(**json.loads(record["data"])) if record else None
+        for _, status in self.rounds_listing(admission_id):
             unresolved = unresolved or status is None or not status.closed
             if status is not None:
                 rounds.append([status.w, status.disposition, status.resolution_hash])
@@ -1445,7 +1503,9 @@ class Admission:
             (admission_id,),
         ).fetchall()
         unvested = self.store.db.execute(
-            "SELECT 1 FROM escrow_units u JOIN escrow_origins o ON o.origin=u.origin "
+            # Fixed order: the admission's origins, then their rows by primary key. The planner
+            # would otherwise scan every unit row of the ledger.
+            "SELECT 1 FROM escrow_origins o CROSS JOIN escrow_units u ON u.origin=o.origin "
             "WHERE u.bucket='reward_pending' AND u.units>0 AND o.hotkey IN "
             "(SELECT hotkey FROM admission_history WHERE admission_id=?) LIMIT 1",
             (admission_id,),
@@ -1517,7 +1577,9 @@ class Admission:
                     finality_hash=s.finality_hash,
                     closed_dispute_root=s.closed_dispute_root,
                 )
-                receipts.append(self.escrow.release(op, signer=lock.owner, now_beacon=now))
+                receipts.append(
+                    self.escrow.release_settlement(op, signer=lock.owner, now_beacon=now)
+                )
         return receipts
 
     def seize_bond(
@@ -1560,6 +1622,7 @@ class Admission:
                 ).rowcount
                 == 1
             )
+            standing: _Standing | None = None
             for lock in self._bond_locks(admission_id):
                 origins, units = self._residual(lock)
                 if not units:
@@ -1568,7 +1631,8 @@ class Admission:
                     "INSERT OR IGNORE INTO admission_seizures VALUES(?,?,?,?,?)",
                     (lock.operation_id, admission_id, reason, evidence_hash, now),
                 )
-                s = self.lock_settlement(lock.operation_id)
+                standing = standing or self._standing(admission_id)
+                s = self.lock_settlement(lock.operation_id, standing)
                 op = EscrowRelease(
                     operation_id=self._bond_operation("slash", lock.operation_id),
                     owner=lock.owner,

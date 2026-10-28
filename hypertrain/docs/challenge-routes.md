@@ -97,7 +97,7 @@ Returns:
 
 | Route | Body | Result |
 | --- | --- | --- |
-| `POST /v1/admin/beacon` | drand JSON `{round, signature, randomness}` | Verified (quicknet BLS in production) and stored. Conflicting payload for the same round: 409. Returns `{round, latest}`. Audit selection runs when the `d_audit` round arrives |
+| `POST /v1/admin/beacon` | drand JSON `{round, signature, randomness}` | Verified (quicknet BLS in production) and stored. Conflicting payload for the same round: 409. Returns `{round, latest}`. Audit selection runs when the `d_audit` round arrives. Due escrow origins mature in the same call, one savepoint each; an origin that fails for another reason than vesting or an open dispute stays pending and is journaled (`records_v2 kind='maturity-failed'`), and the call still answers 200. A conservation failure or a SQLite error aborts the call |
 | `POST /v1/admin/runs` | RunManifest envelope signed by K_owner | 201 `{run_id, status:"created"}`. Requires `coord_pubkey` to be this container's K_coord, and `budget.epochs_per_round`, `verify.E_vest_rounds` and `forgive_per_epoch` to equal the ledger Params. One run per state dir (409) |
 | `PUT /v1/admin/runs/{run_id}/config` | `{train_rounds: int>=1, final_after_upload: int>=1}` in drand rounds | `d_commit = d_assign + train_rounds`, `d_final = max(d_audit, d_upload) + final_after_upload`. 409 while running |
 | `PUT /v1/admin/runs/{run_id}/paused` | `{paused: bool}` | Unpausing needs a config, at least one rostered miner and a pushed beacon. The first unpause opens round 0 at `d_open = D+1` |

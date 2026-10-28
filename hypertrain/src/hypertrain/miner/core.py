@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import shutil
 import stat
 import tempfile
@@ -37,6 +38,7 @@ from hypertrain.auditor.bisect import Executor
 from hypertrain.auditor.replay import challenge_hash, pack_state, tensor_root, unpack_state
 from hypertrain.challenge.store import assignment_hash, rerun_message
 from hypertrain.gpu_ops.journal import Journal
+from hypertrain.protocol.env_pins import EnvPinUnhonorable, require_honorable
 from hypertrain.protocol.envelope import body_digest, seal, verify_envelope
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -51,27 +53,59 @@ from hypertrain.trainer.optim import OptState, init_state
 log = logging.getLogger("hypertrain.miner")
 EXP_ROUNDS = 2**40  # envelope expiry far beyond any round; replay protection is per (w, type)
 # Backoff between attempts of an idempotent request (object PUT/GET, API GET) that hit a
-# transport error or a 5xx; the last failure propagates. ~31 s worst case per request.
+# transport error or a 5xx; the last failure propagates. ~31 s nominal per request, each wait
+# jittered by +-50% (up to ~46 s).
 RETRY_DELAYS: tuple[float, ...] = (1, 2, 4, 8, 16)
+# An object GET also retries a 404: the digest was just listed by the server, so a miss is more
+# likely a lost read than an answer (s100 TEST replay, 2026-10-27, RELAY-02; cause not established).
+OBJECT_MISS = frozenset({404})
 OWNER_REQUEST_ROUNDS = 20  # a signed owner request lives about a minute at 3 s rounds
+# A trial request that answers 409 CHALLENGE_EXPIRED is asked again this many times, this many
+# seconds apart (10 minutes in all): the identity is stranded until the operator reseeds it
+# (Admission.reseed, ADR 0010); the poll is short so that little of the new 300 s window is lost.
+RESUME_POLLS = 60
+RESUME_POLL_SECONDS = 10.0
 FETCH_WORKERS = 16  # concurrent 1 MiB part GETs per job input (bounded window, ordered sink)
 UPLOAD_WORKERS = 16  # concurrent 1 MiB part PUTs per artifact (bounded window, index last)
 
 
-def _retrying[T](what: str, fn: Callable[[], T]) -> T:
-    """Run an idempotent request, retrying transport errors and 5xx responses only."""
-    for delay in (*RETRY_DELAYS, None):
+def _utc() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _retrying[T](
+    what: str,
+    fn: Callable[[], T],
+    *,
+    also: frozenset[int] = frozenset(),
+    noted: Callable[[str, int | None, int, float], None] | None = None,
+) -> T:
+    """Run an idempotent request, retrying transport errors, 5xx responses and the `also` statuses.
+
+    `noted(what, status, attempt, delay)` sees each retry before its wait; status is None for a
+    transport error. It may fail without effect on the request."""
+    for attempt, delay in enumerate((*RETRY_DELAYS, None), 1):
         try:
             return fn()
         except (httpx.TransportError, httpx.HTTPStatusError, ChallengeHTTPError) as error:
             status = getattr(getattr(error, "response", None), "status_code", None)
             status = getattr(error, "status", status)
-            if delay is None or (status is not None and status < 500):
+            if delay is None or (status is not None and status < 500 and status not in also):
                 raise
+            delay *= random.uniform(0.5, 1.5)
             # Type + status only: request URLs can carry the proxy token.
             log.warning(
-                "%s failed (%s %s); retry in %ss", what, type(error).__name__, status, delay
+                "%s failed (%s %s); retry in %.1fs", what, type(error).__name__, status, delay
             )
+            if noted is not None:
+                # A diagnostic line must not decide the request: if it cannot be written, say so
+                # and let the request go on as the HTTP error alone dictates.
+                try:
+                    noted(what, status, attempt, delay)
+                except Exception as failure:
+                    log.warning(
+                        "%s: retry not journaled (%s: %s)", what, type(failure).__name__, failure
+                    )
             time.sleep(delay)
     raise AssertionError("unreachable")
 
@@ -146,6 +180,10 @@ class StartStateMismatch(MinerError):
 
 class HardwareMismatch(MinerError):
     pass
+
+
+class ChallengeExpired(MinerError):
+    """The trial window of this identity lapsed and no operator reseeded it while we waited."""
 
 
 class ChallengeHTTPError(MinerError):
@@ -789,7 +827,37 @@ class NetworkMiner:
     def status(self) -> dict[str, Any]:
         return self.api.call("GET", self.url + "/admission/" + self.kp.ss58)
 
+    def _note_retry(self, route: str, status: int | None, attempt: int, delay: float) -> None:
+        """One journal line per object GET retry, so a replay can count them."""
+        Journal(self.directory).append(
+            "retry",
+            utc=_utc(),
+            route=route,
+            status=status,
+            attempt=attempt,
+            delay=delay,
+        )
+
+    def _retry[T](self, what: str, fn: Callable[[], T], *, also: frozenset[int] = frozenset()) -> T:
+        return _retrying(what, fn, also=also, noted=self._note_retry)
+
+    def preflight_env_pin(self) -> None:
+        """Tell this host, before any request, that it cannot honor the manifest's environment pin.
+
+        Later the island workers would refuse the round, and a trial left to expire suspends the
+        identity: nothing worth paying admission for."""
+        pin = self.manifest.training.reference_spec.env.pin()
+        if pin is None:
+            return
+        try:
+            require_honorable(pin)
+        except EnvPinUnhonorable as error:
+            raise MinerError(
+                f"this host cannot honor the manifest's environment pin: {error}"
+            ) from error
+
     def join(self, coldfile: Path, request_id: str, expiry: int) -> dict[str, Any]:
+        self.preflight_env_pin()
         from hypertrain.miner.admission import sign_join
         from hypertrain.protocol.messages_v2 import HardwareHint
 
@@ -893,6 +961,7 @@ class NetworkMiner:
 
     def probe_trial(self) -> dict[str, Any]:
         """probe-v2 without --job: this hotkey's open trial, fetched into a private temp folder."""
+        self.preflight_env_pin()
         with tempfile.TemporaryDirectory(prefix="trial-", dir=self.directory) as folder:
             job, challenge = self._fetch_trial(Path(folder).resolve())
             return self.probe(job, challenge)
@@ -908,21 +977,14 @@ class NetworkMiner:
         from hypertrain.protocol import envelope_v2
         from hypertrain.protocol.messages_v2 import Hex64, IslandJobV1, JoinChallenge
 
-        admission_id = self.status()["record"]["admission_id"]
+        record = self.status()["record"]
+        admission_id = record["admission_id"]
         url = self.url + f"/join/{admission_id}"
         now = self.api.call("GET", self.url)["now_round"]
-
-        def asked(message: str) -> dict[str, Any]:
-            return envelope_v2.seal(
-                self.kp,
-                message,
-                self.run_id,
-                {"admission_id": admission_id},
-                now + OWNER_REQUEST_ROUNDS,
-            )
-
-        envelope = self.api.call("POST", url + "/challenge", json=asked("ChallengeRequest"))
-        data = self.api.call("POST", url + "/job", json=asked("JobRequest"))
+        envelope, now = self._ask_challenge(url, record, now)
+        data = self.api.call(
+            "POST", url + "/job", json=self._owner_request("JobRequest", record, now)
+        )
         try:
             job = IslandJobV1.model_validate(data["job"])
             challenge = JoinChallenge.model_validate(data["challenge"])
@@ -971,6 +1033,78 @@ class NetworkMiner:
         (root / "challenge.json").write_bytes(canonicalize(envelope))
         return root / "job.json", root / "challenge.json"
 
+    def _owner_request(self, message: str, record: Mapping[str, Any], now: int) -> dict[str, Any]:
+        """A body signed by this hotkey, the only credential of the owner routes (ADR 0010)."""
+        from hypertrain.protocol import envelope_v2
+
+        return envelope_v2.seal(
+            self.kp,
+            message,
+            self.run_id,
+            {"admission_id": record["admission_id"]},
+            now + OWNER_REQUEST_ROUNDS,
+        )
+
+    def _ask_challenge(
+        self, url: str, record: Mapping[str, Any], now: int
+    ) -> tuple[dict[str, Any], int]:
+        """The signed trial challenge, and the round of the request that got it.
+
+        An identity whose trial window lapsed is refused 409 CHALLENGE_EXPIRED until the operator
+        reseeds it (Admission.reseed), and the round before the new seed answers 409
+        SEED_NOT_READY. Both are waited for, up to RESUME_POLLS asks, and nothing else is: the same
+        hotkey signs a fresh request each time, so no second identity is created and nothing is
+        struck (the reaper that closed the trial suspends nobody). Then ChallengeExpired."""
+        lapsed = 0
+        for poll in range(RESUME_POLLS + 1):
+            if poll:
+                now = self.api.call("GET", self.url)["now_round"]
+            request = self._owner_request("ChallengeRequest", record, now)
+            try:
+                envelope: dict[str, Any] = self.api.call("POST", url + "/challenge", json=request)
+            except ChallengeHTTPError as error:
+                expired = (error.status, error.detail) == (409, "CHALLENGE_EXPIRED")
+                reseeded = lapsed and (error.status, error.detail) == (409, "SEED_NOT_READY")
+                if not (expired or reseeded):
+                    raise
+                if poll == RESUME_POLLS:
+                    raise ChallengeExpired(
+                        f"CHALLENGE_EXPIRED: admission {record['admission_id']} has no window "
+                        f"left after {poll + 1} asks over {poll * RESUME_POLL_SECONDS:.0f} s; an "
+                        f"operator must reseed it: POST {self.url}/admin/join/"
+                        f"{record['admission_id']}/reseed (live_operator.py reseed --admission-id)"
+                    ) from error
+                lapsed += expired
+                log.warning("admission %s: %s; asking again", record["admission_id"], error.detail)
+                time.sleep(RESUME_POLL_SECONDS if expired else self.manifest.training.beacon.period)
+                continue
+            if lapsed:
+                self._journal_resume(record, envelope, poll + 1)
+            return envelope, now
+        raise AssertionError("unreachable")
+
+    def _journal_resume(
+        self, record: Mapping[str, Any], envelope: Mapping[str, Any], asks: int
+    ) -> None:
+        """One line per resume: which challenge the reseed replaced. A diagnostic, so a failure to
+        write it is logged and the miner goes on with the challenge it was just given."""
+        try:
+            Journal(self.directory).append(
+                "resume",
+                utc=_utc(),
+                admission_id=record["admission_id"],
+                trial=record["clean_count"] + 1,
+                old_challenge=(
+                    body_digest(json.loads(record["challenge_json"]))
+                    if record.get("challenge_json")
+                    else None
+                ),
+                new_challenge=body_digest(envelope["body"]),
+                asks=asks,
+            )
+        except Exception as failure:
+            log.warning("resume not journaled (%s: %s)", type(failure).__name__, failure)
+
     def _get_whole(self, digest: str, target: Path) -> None:
         """Stream one whole plain object to `target` and verify it: the trial export stores each
         input as a single object, so the 1 MiB part bound of _get_object does not apply; the
@@ -999,7 +1133,7 @@ class NetworkMiner:
             if hasher.hexdigest() != digest:
                 raise MinerError(f"trial input {target.name} sha256 mismatch")
 
-        _retrying("GET object " + digest, get)
+        self._retry("GET object " + digest, get, also=OBJECT_MISS)
 
     def _bounded_put(
         self, deadline: float, cancel: threading.Event | None
@@ -1137,7 +1271,7 @@ class NetworkMiner:
                     body.extend(chunk)
                 return bytes(body)
 
-        return _retrying("GET object " + digest, get)
+        return self._retry("GET object " + digest, get, also=OBJECT_MISS)
 
     def proof(self, document: Path) -> dict[str, Any]:
         from hypertrain.protocol.envelope_v2 import load_json

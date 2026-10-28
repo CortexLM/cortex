@@ -188,6 +188,32 @@
       "title": "DatasetSpec",
       "type": "object"
     },
+    "EnvPins": {
+      "additionalProperties": false,
+      "description": "Process-environment pins over the closed table of ``protocol/env_pins.py``.",
+      "properties": {
+        "absent": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Absent",
+          "type": "array"
+        },
+        "present": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Present",
+          "type": "object"
+        }
+      },
+      "required": [
+        "present",
+        "absent"
+      ],
+      "title": "EnvPins",
+      "type": "object"
+    },
     "HoneypotBudget": {
       "additionalProperties": false,
       "properties": {
@@ -856,6 +882,17 @@
           "minimum": 1,
           "title": "Cpu Threads",
           "type": "integer"
+        },
+        "pinned": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvPins"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [

@@ -37,6 +37,7 @@ from hypertrain.auditor.replay import (
     pack_state,
 )
 from hypertrain.data.store import Store, get_large
+from hypertrain.protocol.env_pins import pinned_environ
 from hypertrain.protocol.envelope_v2 import load_json, parse_envelope, tape_signing_message
 from hypertrain.protocol.envelope_v2 import verify_envelope as verify_source
 from hypertrain.protocol.hashing import sha256_hex
@@ -55,6 +56,14 @@ from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.island import Comm, IslandAssignment, train_island
 from hypertrain.trainer.loop import SampleFn
 from hypertrain.trainer.optim import OptState
+
+
+def _worker_env(manifest: RunManifestV2) -> dict[str, str]:
+    """Environment of the torchrun repair and history workers: ours under the manifest's pins."""
+    env = pinned_environ(os.environ, manifest.training.reference_spec.env.pin())
+    env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    env["OMP_NUM_THREADS"] = "1"
+    return env
 
 
 def execute_repair_context(
@@ -154,9 +163,7 @@ def execute_repair_context(
         raise TapeError("repair candidate signature mismatch")
     context_hash = store.put(raw)
     with tempfile.TemporaryDirectory(prefix="hypertrain-repair-") as tmp:
-        env = os.environ.copy()
-        env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-        env["OMP_NUM_THREADS"] = "1"
+        env = _worker_env(manifest)
         argv = [
             sys.executable,
             "-m",
@@ -287,9 +294,7 @@ def replay_history_context(
         raise TapeError("predecessor history authority differs")
     context_hash = store.put(canonicalize(context))
     with tempfile.TemporaryDirectory(prefix="hypertrain-history-") as tmp:
-        env = os.environ.copy()
-        env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-        env["OMP_NUM_THREADS"] = "1"
+        env = _worker_env(manifest)
         process = subprocess.run(  # noqa: S603 - fixed interpreter, authenticated context
             [
                 sys.executable,
