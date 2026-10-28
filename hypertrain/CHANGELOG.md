@@ -313,6 +313,12 @@
   and `rollback_v2` are owned functions: `implementation_hash` changes. See
   `docs/adr/0011-audit-integrity.md` (Part 8, decisions 7 to 11) at the monorepo root and
   `docs/network-v2.md`.
+- A production run refuses a qualification record without `image_sources_sha256` when an audit is
+  dispatched (409 `QUALIFICATION_IMAGE_SOURCES_MISSING`): before, a record without the digest meant
+  no check, so a production audit could stand on code nobody measured. A TEST run keeps accepting
+  it. The two runner tests that listed the installed package against this tree now list the
+  installed package itself, and the comparison with the tree is skipped when another tree is
+  installed.
 - `scripts/ops/live_operator.py open` opens the round that follows a retired one: when round
   `w - 1` has no `finalize`, `prev_final_hash` is the evidence hash of its `retired` record instead
   of the tool stopping with "missing accepted finalize" (a round that is neither is still refused).

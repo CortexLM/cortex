@@ -534,6 +534,58 @@ def test_dispatch_binds_the_image_sources_the_qualification_recorded(
 
 
 @pytest.mark.parametrize(
+    "recorded", [QUALIFIED_SOURCES, None], ids=["recorded", "record-without-the-digest"]
+)
+def test_a_production_dispatch_needs_the_image_sources_the_qualification_recorded(
+    network, tmp_path, recorded
+):
+    """QUAL-02 fails closed (D71): a production run does not stand on a record that measured
+    nothing, as a TEST run does."""
+    from hypertrain.protocol.messages_v2 import EconomicsPolicyV2
+
+    manifest = _dispatch_manifest(network.manifest, 2)
+    ref = manifest.training.reference_spec
+    policy = EconomicsPolicyV2.model_validate_json(
+        network.store.objects.get(manifest.network.economics_policy_hash)
+    ).model_copy(update={"ledger_mode": "production", "genesis_allocation_hash": None})
+    production = manifest.model_copy(
+        update={
+            "network": manifest.network.model_copy(
+                update={
+                    "economics_policy_hash": network.store.objects.put(
+                        policy.model_dump_json().encode()
+                    )
+                }
+            )
+        }
+    )
+    held = {} if recorded is None else {"image_sources_sha256": recorded}
+    with network.store._tx():
+        for run in (manifest, production):  # the same record under both runs
+            network.store._put_record_v2(run.run_id(), "qualification", ref.image_digest, held)
+    env = {
+        "backend": "cuda",
+        "image_digest": ref.image_digest,
+        "drivers": ["595.71.05"] * 2,
+        "sm_counts": [170] * 2,
+        "gpu_uuids": [_uuid(i) for i in range(2)],
+        "image_sources_sha256": QUALIFIED_SOURCES,
+    }
+    (tmp_path / "role-dispatch.json").write_bytes(
+        canonicalize({"name": "op-x", "environment": env})
+    )
+    if recorded is not None:
+        replay, _ = network.store._dispatch_env_v2(production, tmp_path)
+        assert replay.image_digest == ref.image_digest
+        return
+    with pytest.raises(ChallengeError) as error:
+        network.store._dispatch_env_v2(production, tmp_path)
+    assert (error.value.status, str(error.value)) == (409, "QUALIFICATION_IMAGE_SOURCES_MISSING")
+    # the same record on a TEST run is accepted, as before
+    network.store._dispatch_env_v2(manifest, tmp_path)
+
+
+@pytest.mark.parametrize(
     "fault",
     [
         None,

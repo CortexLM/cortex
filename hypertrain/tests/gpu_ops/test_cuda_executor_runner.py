@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+import hypertrain
 import hypertrain.trainer  # noqa: F401 - pins determinism before any test imports torch
 from hypertrain.gpu_ops import cuda_executor as ce
 from hypertrain.gpu_ops import cuda_executor_runner as runner
@@ -758,6 +759,9 @@ def test_probe_takes_its_answer_from_the_last_line_whatever_torch_printed_before
 # -- the sources of the installed image -----------------------------------------------------------
 
 
+INSTALLED = Path(hypertrain.__file__).resolve().parent
+
+
 def package_files_of_the_tree() -> dict[str, str]:
     """The `src/hypertrain/**/*.py` entries of the qualification's own map of a tree."""
     return {
@@ -767,14 +771,35 @@ def package_files_of_the_tree() -> dict[str, str]:
     }
 
 
-def test_image_sources_digest_is_the_jcs_digest_of_the_package_files_of_sources() -> None:
-    # Given: the installed package (an editable install of this tree) and the tree's own map.
-    expected = package_files_of_the_tree()
+def package_files_of_the_install() -> dict[str, str]:
+    """The same entries, listed from the package the interpreter imports, wherever it is installed
+    (an editable install of this tree, or of another tree in a shared environment)."""
+    return {
+        "src/hypertrain/" + path.relative_to(INSTALLED).as_posix(): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in sorted(INSTALLED.rglob("*.py"))
+    }
+
+
+def test_image_sources_digest_is_the_jcs_digest_of_the_package_files_of_the_install() -> None:
+    # Given: the installed package, listed here by the test itself.
+    expected = package_files_of_the_install()
     # When
     measured = runner.measure_image_sources()
-    # Then: one map, and one digest that the challenge side can compute from `sources()` alone.
+    # Then: the in-image program names the same files, and its digest is the JCS one.
     assert measured == expected
     assert runner.sources_digest(measured) == sha(canonicalize(expected))
+
+
+@pytest.mark.skipif(
+    INSTALLED != (TREE / "src/hypertrain").resolve(),
+    reason="the installed hypertrain is not an editable install of this tree",
+)
+def test_the_install_is_named_as_sources_of_the_qualification_names_this_tree() -> None:
+    # The challenge side computes the digest from `sources()` of a tree alone: for an install of
+    # this very tree the two maps are one.
+    assert package_files_of_the_install() == package_files_of_the_tree()
 
 
 def test_measure_ignores_pythonpath_and_the_working_directory(
@@ -790,7 +815,7 @@ def test_measure_ignores_pythonpath_and_the_working_directory(
     # When
     measured = runner.measure_image_sources()
     # Then: the installed package was measured, not the one a caller put in front of it.
-    assert measured == package_files_of_the_tree()
+    assert measured == package_files_of_the_install()
     assert "src/hypertrain/stolen.py" not in measured
 
 

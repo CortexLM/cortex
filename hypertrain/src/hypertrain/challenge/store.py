@@ -8588,15 +8588,22 @@ class ChallengeStore:
             or len(set(uuids)) != n
         ):
             raise ChallengeError(409, "ROLE_DISPATCH_PROVENANCE_MISMATCH")
-        # The container ran the package files the qualification measured in its image. A record
-        # without the digest (a stand-in, or one signed before it existed) adds no check.
+        # The container ran the package files the qualification measured in its image. A TEST run
+        # whose record lacks the digest (a stand-in, or one signed before it existed) adds no
+        # check; a production run refuses it: the audit would stand on code nobody measured.
         with self._lock:
             held = self._db.execute(
                 "SELECT data FROM records_v2 WHERE run_id=? AND kind='qualification' AND id=?",
                 (manifest.run_id(), ref.image_digest),
             ).fetchone()
         qualified = None if held is None else json.loads(held[0]).get("image_sources_sha256")
-        if qualified is not None:
+        if qualified is None:
+            economics = EconomicsPolicyV2.model_validate_json(
+                self.objects.get(manifest.network.economics_policy_hash)
+            )
+            if economics.ledger_mode == "production":
+                raise ChallengeError(409, "QUALIFICATION_IMAGE_SOURCES_MISSING")
+        else:
             reported = env.get("image_sources_sha256")
             if not isinstance(reported, str):
                 raise ChallengeError(503, "ROLE_DISPATCH_PROVENANCE_UNAVAILABLE")
