@@ -32,7 +32,7 @@ from hypertrain.protocol.messages_v2 import EscrowLock, EscrowRelease, Resolutio
 from .support import World, service_world
 from .support_escrow_laws import Funded, funded, lock_op, release_op
 from .support_locks import Lab, Miner, Rig, ident, settled_status
-from .support_opids import DisputeWorld, fresh_id, self_transfer
+from .support_opids import DisputeWorld, fresh_id, sink_transfer
 from .support_weights import Metagraph, add_origin, live_gate
 
 SOURCE = Path(hypertrain.__file__).parent
@@ -167,8 +167,8 @@ def seed_pending_origin(world: World, origin: str, owner: str, units: int, matur
     """A bootstrap-like origin that vests at `mature_at`: the genesis origins of the fixture all
     vest at the first beacon, so a later maturity needs one more origin.
 
-    A net-zero self-transfer of the owner follows, so that the snapshot of the event chain holds
-    the new rows and the ledger still verifies when a restarted store builds it again."""
+    One unit of the owner goes to the sink next, so that the snapshot of the event chain holds the
+    new rows and the ledger still verifies when a restarted store builds it again."""
     escrow = world.store._services(world.run_id)[0]
     with world.store._lock:
         escrow.db.execute(
@@ -178,7 +178,7 @@ def seed_pending_origin(world: World, origin: str, owner: str, units: int, matur
             "INSERT INTO escrow_units VALUES(?,?,'reward_pending','',?)", (origin, owner, units)
         )
         escrow.transfer(
-            self_transfer(owner, fresh_id("snapshot-" + origin), world.network.origin_ids[0]),
+            sink_transfer(owner, fresh_id("snapshot-" + origin), world.network.origin_ids[0]),
             signer=owner,
         )
 

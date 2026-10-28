@@ -46,6 +46,13 @@ HEX64 = re.compile(r"[0-9a-f]{64}")
 LEDGER_CODE = re.compile(r"[A-Z][A-Z0-9_]*")
 # The kind under which the ledger stores each client event `client_event` can sign.
 CLIENT_KINDS = {"transfer": "TRANSFER", "lock": "LOCK_CONTEST"}
+# Where a bystander's transfer lands: a real key that nobody signs for, funds or reads. The ledger
+# refuses a transfer to oneself (SELF_TRANSFER), so the bystander's event has to move units; a test
+# compares the owners the service step pays, never this key.
+SINK = Keypair(bytes.fromhex(sha256_hex(b"li-opids-sink"))).ss58
+# The refusals that say nothing about the operation id. `squat_id` fails on them: a squat refused
+# for one of these never reached the question of its id, and the step that follows proves nothing.
+NOT_ABOUT_THE_ID = frozenset({"SELF_TRANSFER", "UNFUNDED_OR_UNKNOWN_ORIGIN", "OWNER_AUTHORITY"})
 
 
 def fresh_id(label: str) -> str:
@@ -119,12 +126,12 @@ def must_refuse(call: Callable[[], object], what: str) -> None:
         raise DefenceMissing(what)
 
 
-def self_transfer(owner: str, operation_id: str, origin: str, units: int = 1) -> EscrowTransfer:
-    """A net-zero client event: the owner sends `units` of `origin` to itself."""
+def sink_transfer(owner: str, operation_id: str, origin: str, units: int = 1) -> EscrowTransfer:
+    """A client event any funded key can sign: the owner sends `units` of `origin` to the sink."""
     return EscrowTransfer(
         operation_id=operation_id,
         owner=owner,
-        recipient=owner,
+        recipient=SINK,
         units=units,
         origin_ids=[origin],
         admission_id=None,
@@ -152,7 +159,7 @@ def client_event(
 ) -> EscrowReceipt:
     """What a funded key can sign on the escrow routes, under an id of its choice."""
     if kind == "transfer":
-        event = client_model(lambda: self_transfer(key.ss58, operation_id, origin))
+        event = client_model(lambda: sink_transfer(key.ss58, operation_id, origin))
         return escrow.transfer(event, signer=key.ss58)
     assert kind == "lock"
     return escrow.lock(
@@ -167,7 +174,7 @@ def client_event_over_http(
     response, unchecked. `ModelRefused` when the event model does not take the id."""
     if kind == "transfer":
         route, message = "transfer", "EscrowTransfer"
-        event: Any = client_model(lambda: self_transfer(key.ss58, operation_id, origin))
+        event: Any = client_model(lambda: sink_transfer(key.ss58, operation_id, origin))
     else:
         route, message = "lock", "EscrowLock"
         event = client_model(lambda: contest_lock(key.ss58, operation_id, origin))
@@ -243,6 +250,11 @@ def squat_id(escrow: EscrowV2, kind: str, operation_id: str, send: Callable[[str
             f"the event model refused the id {operation_id!r}, the ledger never saw the squat"
         ) from error
     except EscrowError as error:
+        if error.code in NOT_ABOUT_THE_ID:
+            raise AssertionError(
+                f"the ledger refused the squat under {operation_id!r} as {error.code}, which is "
+                "not a decision on the id"
+            ) from error
         return error.code
     with escrow.mutex:
         held = escrow.db.execute(

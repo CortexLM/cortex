@@ -27,8 +27,8 @@ from .support_opids import (
     contest_lock,
     fresh_id,
     receipt_ids,
-    self_transfer,
     sender_over_http,
+    sink_transfer,
     squat_id,
 )
 
@@ -378,7 +378,7 @@ def test_the_ledger_waits_for_a_store_transaction_only_while_they_share_the_lock
         escrow, store = escrow_of(world), world.store
         if not shared:
             escrow.mutex = threading.RLock()  # stand-in: a user of the connection outside the lock
-        operation = self_transfer(cold[1].ss58, fresh_id("mutex"), world.network.origin_ids[1])
+        operation = sink_transfer(cold[1].ss58, fresh_id("mutex"), world.network.origin_ids[1])
         holding, release, applied = threading.Event(), threading.Event(), threading.Event()
 
         def holder() -> None:

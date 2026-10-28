@@ -232,19 +232,12 @@ def test_matured_units_are_emitted_to_the_hotkey_that_earned_them_while_it_is_th
         assert paid_after(world) == {hot: float(PAID)}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DefenceMissing,
-    reason=(
-        "CRD-12+WGT-13+CL-29: the units a rotated admission earned are emitted to the hotkey the "
-        "admission holds now (or the rotation is refused while origins are owed), but payable() "
-        "answers the hotkey recorded at issuance, so the weight goes to the key that was given up "
-        "[fix-lot: decision (product choice pending)]"
-    ),
-)
 def test_matured_units_of_a_rotated_admission_are_emitted_to_its_current_hotkey(
     tmp_path: Path,
 ) -> None:
+    """CRD-12+WGT-13+CL-29: the units a rotated admission earned are emitted to the hotkey the
+    admission holds now (or the rotation is refused while origins are owed), never to the key that
+    was given up. D66 holds it by paying the current hotkey: the payout reads admission_history."""
     service = load_fixture_module(*SERVICE_FIXTURE)
     hot, spare, cold = service.HOT[0].ss58, service.REFEREE, service.COLD[0]
     new = spare.ss58

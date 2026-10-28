@@ -810,7 +810,7 @@ def test_random_operation_sequences_conserve_units_and_follow_a_bucket_model(
 def test_the_storage_one_event_adds_does_not_grow_with_the_ledger(li_escrow: ModuleType) -> None:
     transfers = 20
 
-    def added_by_self_transfers(extra_rows: int) -> tuple[int, int]:
+    def added_by_transfers(extra_rows: int) -> tuple[int, int]:
         fx = funded(li_escrow)
         escrow, cold = fx.escrow, li_escrow.COLD.ss58
         for index in range(extra_rows):  # every one-unit lock is one more unit row
@@ -834,7 +834,7 @@ def test_the_storage_one_event_adds_does_not_grow_with_the_ledger(li_escrow: Mod
         rows = escrow.db.execute("SELECT COUNT(*) FROM escrow_units").fetchone()[0]
         return stored() - before, int(rows)
 
-    (small, few), (large, many) = added_by_self_transfers(2), added_by_self_transfers(80)
+    (small, few), (large, many) = added_by_transfers(2), added_by_transfers(80)
     assert many > few
     assert large <= 2 * small, (
         f"{transfers} events stored {small} bytes at {few} rows, {large} at {many}"

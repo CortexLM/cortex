@@ -34,6 +34,7 @@ from hypertrain.protocol.messages_v2 import (
 )
 
 from .support import Hosted, Real, at, error_code, hosted_reward, mature, pays
+from .support_opids import SINK
 from .support_weights import (
     assert_answer_shape,
     events,
@@ -654,7 +655,7 @@ def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
     mature(host.escrow, host.reward)
     origin, cold, other = host.reward.origin_ids[0], li_escrow.COLD.ss58, li_escrow.OTHER.ss58
 
-    def transfer(operation: str, owner: str, units: int) -> EscrowTransfer:
+    def transfer(operation: str, owner: str, units: int, recipient: str) -> EscrowTransfer:
         return EscrowTransfer(
             operation_id=operation,
             owner=owner,
@@ -662,20 +663,23 @@ def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
             origin_ids=[origin],
             admission_id=None,
             dispute_id=None,
-            recipient=other,
+            recipient=recipient,
         )
 
-    # Given: another owner holds one free unit, received by an ordinary owner-signed transfer.
-    host.escrow.transfer(transfer("66" * 32, cold, 1), signer=cold)
+    # Given: another owner holds two free units, received by an ordinary owner-signed transfer:
+    # one to sign a control with, one to sign the squat with.
+    host.escrow.transfer(transfer("66" * 32, cold, 2, other), signer=cold)
     # When: that owner signs an event whose id is the one the service derives for the payout of
     # epoch 0 (the control signs nothing).
     if preempt:
-        # The same event under an ordinary id is accepted, so a refusal below is about its id.
-        host.escrow.transfer(transfer("67" * 32, other, 1), signer=other)
+        # The same event under an ordinary id is accepted, so a refusal below is about its id. It
+        # goes to the sink: the ledger refuses a transfer to oneself whatever its id.
+        host.escrow.transfer(transfer("67" * 32, other, 1, SINK), signer=other)
+        assert host.escrow.balances(other).available == 1  # funded: only the id can refuse it
         squat = pay_id(host.run_id, 0, origin, cold)
         # The event model takes the id, so only the ledger can rule on it. It may refuse the event
         # or keep it apart from the key of the payout, but it must have seen it.
-        event = transfer(squat, other, 1)
+        event = transfer(squat, other, 1, SINK)
         try:
             host.escrow.transfer(event, signer=other)
             accepted = 1
@@ -688,7 +692,7 @@ def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
         assert named == accepted
     # Then: either way the epoch pays the earner its free units, in one PAY event.
     answer = ask(host, 0)
-    assert answer["weights"] == {li_escrow.HOT.ss58: float(ISSUED - 1)}
+    assert answer["weights"] == {li_escrow.HOT.ss58: float(ISSUED - 2)}
     assert pays(host.escrow) == 1
 
 
