@@ -488,26 +488,18 @@ def test_a_reservation_names_the_accepted_execution_it_cannot_find(
 
 # --- T-LOCK-27: one poisoned shadow origin never stops the work of a beacon --------------------
 
-POISONED = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="SHD-19+SHD-21+CL-14+CL-36: a beacon push matures every due origin, expires the leases, "
-    "closes the blocked disputes and reaps the trials whatever one shadow origin's custody or "
-    "identity has become, but its re-validation raises out of the run's maturity transaction, "
-    "the push answers 409 at every later beacon and nothing after that transaction runs "
-    "[fix-lot: escrow-relay-fixes ADR0014-P7]",
-)
-POISONS = {
-    "none": None,
-    "the shadow-custody record is missing": POISONED,
-    "a retained publication changed": POISONED,
-    "the admission was rotated to a spare hotkey": POISONED,
-}
+# SHD-19+SHD-21+CL-14+CL-36 (F6): a beacon push matures every due origin, expires the leases,
+# closes the blocked disputes and reaps the trials whatever one shadow origin's custody or
+# identity has become; the origin whose re-validation raises is journaled and retried.
+POISONS = [
+    "none",
+    "the shadow-custody record is missing",
+    "a retained publication changed",
+    "the admission was rotated to a spare hotkey",
+]
 
 
-@pytest.mark.parametrize(
-    "fault", [pytest.param(name, marks=mark) if mark else name for name, mark in POISONS.items()]
-)
+@pytest.mark.parametrize("fault", POISONS)
 def test_one_poisoned_shadow_origin_never_stops_the_work_of_a_beacon(
     shadow_acceptance: Any, fault: str
 ) -> None:

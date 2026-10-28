@@ -58,15 +58,6 @@ BINDING = "shadow authenticated evidence binding differs"
 # Findings of the Lens report that the code still has: strict xfails, each with the passing
 # control beside it. The reason ends with the fix lot that closes it, so that the lot flips the
 # marker mechanically: remove the marker of every test the lot makes XPASS.
-CUSTODY_DRIFT = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "SHD-19+SHD-D3: one origin whose original custody no longer validates never rolls "
-        "back the maturity of the run's other origins "
-        "[fix-lot: escrow-relay-fixes ADR0014-P7]"
-    ),
-)
 LOST_RESERVATION_STRANDED = pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
@@ -793,12 +784,14 @@ def rotate(n: Any) -> httpx.Response:
     return rotate_admission(n, COLD[0], HOT[0], REFEREE)
 
 
-DRIFT = {
-    "none": None,
-    "the shadow-custody record is missing": CUSTODY_DRIFT,
-    "a retained publication changed": CUSTODY_DRIFT,
-    "the admission's hotkey was rotated": CUSTODY_DRIFT,
-}
+# SHD-19+SHD-D3 (F6): one origin whose original custody no longer validates never rolls back the
+# maturity of the run's other origins.
+DRIFT = [
+    "none",
+    "the shadow-custody record is missing",
+    "a retained publication changed",
+    "the admission's hotkey was rotated",
+]
 
 
 def drift_custody(n: Any, body: dict[str, Any], fault: str) -> None:
@@ -815,10 +808,7 @@ def drift_custody(n: Any, body: dict[str, Any], fault: str) -> None:
         rotate(n)
 
 
-@pytest.mark.parametrize(
-    "fault",
-    [pytest.param(name, marks=mark) if mark else name for name, mark in DRIFT.items()],
-)
+@pytest.mark.parametrize("fault", DRIFT)
 def test_an_origin_with_unvalidatable_custody_does_not_stop_the_other_due_origins(
     shadow_acceptance: Any, fault: str
 ) -> None:
