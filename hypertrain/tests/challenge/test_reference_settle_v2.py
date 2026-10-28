@@ -86,6 +86,31 @@ def test_the_run_reads_no_database_and_asks_for_no_qualification(tmp_path: Path)
     assert a.settle_reference(claim, result, now=2) == digest(result.proof)
 
 
+@pytest.mark.parametrize(
+    "update",
+    [{"sample_ids": [0]}, {"w": 99}],
+    ids=["other samples", "other trial epoch"],
+)
+def test_a_staging_for_another_assignment_never_reaches_the_launch(
+    tmp_path: Path, update: dict[str, Any]
+) -> None:
+    s = fx.setup()
+    a = fx.service(s, tmp_path)
+    admission = fx.apply(a, s)
+    a.challenge(admission, now=2)
+    claim = a.claim_reference(admission, now=2)
+    assert isinstance(claim, ReferenceClaim)
+    job, directory = claim.stage()
+    assert job.sample_ids != update.get("sample_ids")
+    wrong = replace(claim, stage=lambda: (job.model_copy(update=update), directory))
+
+    def launched(*args: Any) -> Any:
+        raise AssertionError("the job reached the launch")
+
+    with pytest.raises(AdmissionError, match="REFERENCE_ASSIGNMENT"):
+        a.run_reference(wrong, now=2, trusted_launch=launched)
+
+
 def test_the_claim_of_an_open_trial_that_has_its_commitment_runs_nothing(tmp_path: Path) -> None:
     s = fx.setup()
     a = fx.service(s, tmp_path)

@@ -273,41 +273,184 @@ def test_another_trials_requests_are_served_while_a_remote_reference_runs(hosted
     assert committed(hosted, first) and committed(hosted, second)
 
 
+class LockWatch:
+    """Asks for the store lock every 20 ms on a thread of its own and times each ask."""
+
+    def __init__(self, store: Any) -> None:
+        self.waits: list[float] = []
+        self._store, self._stop = store, threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            started = time.perf_counter()
+            assert self._store._lock.acquire(timeout=WAIT)
+            self._store._lock.release()
+            self.waits.append(time.perf_counter() - started)
+            time.sleep(0.02)
+
+    def __enter__(self) -> LockWatch:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *error: object) -> None:
+        self._stop.set()
+        self._thread.join(WAIT)
+
+
 def test_a_five_second_reference_holds_the_store_lock_for_less_than_a_second(hosted):
     run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor(delay=5.0)
     store._role_launch = executor
     admission_id = pending_reference(hosted)
-    waits: list[float] = []
-    stop = threading.Event()
-
-    def contender() -> None:
-        while not stop.is_set():
-            started = time.perf_counter()
-            assert store._lock.acquire(timeout=WAIT)
-            store._lock.release()
-            waits.append(time.perf_counter() - started)
-            time.sleep(0.02)
-
-    watcher = threading.Thread(target=contender, daemon=True)
-    watcher.start()
     began = time.perf_counter()
-    try:
+    with LockWatch(store) as watch:
         value = store.trial_reference_v2(run_id, admission_id)
-    finally:
-        stop.set()
-        watcher.join(WAIT)
     assert time.perf_counter() - began >= 5.0  # the fake executor really took its five seconds
-    assert len(waits) > 100  # the lock was asked for all along, not only at the ends
-    assert max(waits) < 1.0, f"the lock was unavailable for {max(waits):.2f} s"
+    assert len(watch.waits) > 100  # the lock was asked for all along, not only at the ends
+    assert max(watch.waits) < 1.0, f"the lock was unavailable for {max(watch.waits):.2f} s"
     assert value["reference_commitment"] == row_of(hosted, admission_id)["reference_commitment"]
+
+
+# Parameters of the models the CPU staging of a trial has to carry: 8 layers d=512, the 101 M
+# profile of D68 (docs/adr/0015), 12 layers d=768.
+MODELS = {"66M": 66_331_136, "101M": 100_676_352, "162M": 162_417_408}
+SECONDS_PER_PARAMETER = 2e-8  # staging on the CPU: about one second per 50 M parameters
+
+
+class SizedStaging:
+    """What staging costs for a model of `parameters`, on the fixture's tiny model.
+
+    The real `init_params` and `pack_state` still run (the job, its hashes and the reference stay
+    the fixture's own); each then takes the time a model of that size takes: half the total in the
+    parameter initialisation, a quarter in each of the two state serialisations. `peak` is the most
+    stagings seen running at once."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, parameters: int) -> None:
+        from hypertrain.auditor import replay
+        from hypertrain.trainer import model
+
+        self.seconds = parameters * SECONDS_PER_PARAMETER
+        self.peak, self._active, self._mutex = 0, 0, threading.Lock()
+        init, pack = model.init_params, replay.pack_state
+
+        def slow_init(cfg: Any) -> Any:
+            with self._mutex:
+                self._active += 1
+                self.peak = max(self.peak, self._active)
+            try:
+                out = init(cfg)
+                time.sleep(self.seconds / 2)
+                return out
+            finally:
+                with self._mutex:
+                    self._active -= 1
+
+        def slow_pack(theta: Any, st: Any = None) -> bytes:
+            out = pack(theta, st)
+            if theta:  # the empty v0 costs nothing
+                time.sleep(self.seconds / 4)
+            return out
+
+        monkeypatch.setattr(model, "init_params", slow_init)
+        monkeypatch.setattr(replay, "pack_state", slow_pack)
+
+
+@pytest.mark.parametrize("parameters", MODELS.values(), ids=MODELS)
+def test_a_reference_of_a_large_model_holds_the_store_lock_for_less_than_a_second(
+    hosted, monkeypatch, parameters
+):
+    run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor(delay=0)
+    store._role_launch = executor
+    admission_id = pending_reference(hosted)
+    staging = SizedStaging(monkeypatch, parameters)
+    began = time.perf_counter()
+    with LockWatch(store) as watch:
+        value = store.trial_reference_v2(run_id, admission_id)
+    assert time.perf_counter() - began >= staging.seconds  # the model's work ran inside the call
+    assert len(watch.waits) > staging.seconds * 5  # the lock was asked for all along
+    assert max(watch.waits) < 1.0, f"the lock was unavailable for {max(watch.waits):.2f} s"
+    assert value["reference_commitment"] == row_of(hosted, admission_id)["reference_commitment"]
+
+
+def test_two_references_of_a_large_model_stage_one_at_a_time_and_leave_the_lock_free(
+    hosted, monkeypatch
+):
+    run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor(delay=0)
+    store._role_launch = executor
+    first, second = pending_reference(hosted, 0), pending_reference(hosted, 1)
+    staging = SizedStaging(monkeypatch, MODELS["66M"])
+    with LockWatch(store) as watch:
+        calls = [Call(store, run_id, first), Call(store, run_id, second)]
+        values = [call.result() for call in calls]
+    assert staging.peak == 1  # as the store lock made it: one model in memory at a time
+    assert max(watch.waits) < 1.0, f"the lock was unavailable for {max(watch.waits):.2f} s"
+    assert [v["reference_commitment"] for v in values] == [
+        row_of(hosted, first)["reference_commitment"],
+        row_of(hosted, second)["reference_commitment"],
+    ]
+
+
+class GuardedDb:
+    """The store's connection, which notes every statement a thread runs without the store lock."""
+
+    def __init__(self, real: Any, lock: Any) -> None:
+        self.real, self.unlocked, self._lock = real, [], lock
+
+    def execute(self, sql: str, *args: Any) -> Any:
+        if not self._lock._is_owned():
+            self.unlocked.append(" ".join(sql.split())[:80])
+        return self.real.execute(sql, *args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.real, name)
+
+
+def test_a_reference_reads_the_store_connection_only_under_the_store_lock(hosted):
+    # The connection is shared: a read from the unlocked staging, launch or puts could see another
+    # thread's uncommitted rows, so what they need is read before the lock is let go.
+    run_id, store = hosted.manifest.run_id(), hosted.store
+    store._role_launch = Executor(delay=0)
+    admission_id = pending_reference(hosted)
+    guarded = GuardedDb(store._db, store._lock)
+    store._db = guarded
+    try:
+        store.trial_reference_v2(run_id, admission_id)
+    finally:
+        store._db = guarded.real
+    assert guarded.unlocked == []
+
+
+def test_a_staging_in_the_root_holds_back_one_in_a_child_store(child_network):  # noqa: F811
+    hosted = child_network
+    run_id, store = hosted.manifest.run_id(), hosted.store
+    admission_id = pending_reference(hosted)
+    challenge = challenge_of(hosted, admission_id)
+    samples = trial_samples(
+        hosted.manifest, admission_id, challenge.nonce, store._beacon_v2(challenge.seed_beacon)
+    )
+    staging = store.plan_trial_v2(
+        run_id, challenge, samples, row_of(hosted, admission_id)["trial_epoch"]
+    )
+    with hosted.root._staging:  # a model of the occupant run is in memory
+        waiting_for_it = Attempt(staging)
+        waiting_for_it.start()
+        waiting_for_it.join(0.5)
+        assert waiting_for_it.is_alive()
+    waiting_for_it.join(WAIT)
+    assert not waiting_for_it.is_alive() and waiting_for_it.error is None
 
 
 def test_two_calls_for_one_trial_launch_once_and_return_one_commitment(hosted):
     run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor()
     store._role_launch = executor
     admission_id = pending_reference(hosted)
-    stage, staged = store.stage_trial_v2, []
-    store.stage_trial_v2 = lambda *args: (staged.append(1), stage(*args))[1]  # type: ignore[method-assign]
+    plan, staged = store.plan_trial_v2, []
+
+    def counting(*args: Any) -> Any:
+        staging = plan(*args)
+        return lambda: (staged.append(1), staging())[1]
+
+    store.plan_trial_v2 = counting  # type: ignore[method-assign]
     first = Call(store, run_id, admission_id)
     try:
         assert executor.reached.wait(WAIT)
@@ -317,7 +460,7 @@ def test_two_calls_for_one_trial_launch_once_and_return_one_commitment(hosted):
         assert not second.done and len(executor.launches) == 1
     finally:
         executor.release.set()
-    assert len(staged) == 1  # the waiter did not stage the job again under the store lock
+    assert len(staged) == 1  # the waiter did not stage the job again
     assert first.result() == second.result()
     assert (
         first.result()["reference_commitment"]
@@ -681,13 +824,18 @@ def test_a_job_whose_deadline_is_not_the_challenges_never_reaches_the_executor(h
     run_id, store, executor = hosted.manifest.run_id(), hosted.store, Executor(delay=0)
     store._role_launch = executor
     admission_id = pending_reference(hosted)
-    stage = store.stage_trial_v2
+    plan = store.plan_trial_v2
 
     def staged_with_another_deadline(*args: Any) -> Any:
-        job, directory = stage(*args)
-        return job.model_copy(update={"deadline": job.deadline + 1}), directory
+        staging = plan(*args)
 
-    monkeypatch.setattr(store, "stage_trial_v2", staged_with_another_deadline)
+        def staged() -> Any:
+            job, directory = staging()
+            return job.model_copy(update={"deadline": job.deadline + 1}), directory
+
+        return staged
+
+    monkeypatch.setattr(store, "plan_trial_v2", staged_with_another_deadline)
     with pytest.raises(ChallengeError) as changed:
         store.trial_reference_v2(run_id, admission_id)
     assert (changed.value.status, changed.value.detail) == (

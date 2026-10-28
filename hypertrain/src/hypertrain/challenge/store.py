@@ -25,6 +25,7 @@ from concurrent.futures import Future, wait
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from fractions import Fraction
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -462,6 +463,7 @@ class ChallengeStore:
         self._lease_guards_v2: dict[str, Any] = {}
         self._reference_flights_v2: dict[tuple[str, str, bool], Future[str]] = {}
         self._reference_waiters = threading.BoundedSemaphore(REFERENCE_WAITERS)
+        self._staging = threading.Lock()
         self._ipc_v2: socket.socket | None = None
         self._ipc_path_v2: Path | None = None
         self._ipc_thread_v2: threading.Thread | None = None
@@ -573,6 +575,7 @@ class ChallengeStore:
         )
         child.clock = lambda: self.clock()
         child._reference_waiters = self._reference_waiters  # one budget for the one thread pool
+        child._staging = self._staging  # one model in memory at a time, whichever store hosts it
         lock = directory / "capacity-runtime.lock"
         if not lock.is_symlink():  # one host-wide capacity lock across all hosted runs
             lock.unlink(missing_ok=True)
@@ -2828,6 +2831,46 @@ class ChallengeStore:
     def stage_trial_v2(
         self, run_id: str, challenge: JoinChallenge, samples: tuple[int, ...], epoch: int
     ) -> tuple[IslandJobV1, Path]:
+        return self.plan_trial_v2(run_id, challenge, samples, epoch)()
+
+    def plan_trial_v2(
+        self, run_id: str, challenge: JoinChallenge, samples: tuple[int, ...], epoch: int
+    ) -> Callable[[], tuple[IslandJobV1, Path]]:
+        """Read what staging needs from the database now; the staging it returns reads none.
+
+        Staging is O(model): the parameters are initialised, serialised twice, hashed and written,
+        seconds at 100 M parameters, more than the freshness gate lets the beacon pusher wait. A
+        caller that holds the store lock plans under it, which costs a few reads, and stages
+        after it let go. Stagings run one at a time (`_staging`), as the lock made them, so the
+        memory is that of one model.
+        """
+        from hypertrain.trainer.config import TrainConfig
+
+        manifest = self._run_v2(run_id)
+        hotkey = None  # only a carried start state is keyed by the admission's hotkey
+        if TrainConfig.from_manifest_v2(manifest).inner.state_policy == "carry":
+            hotkey = self._services(run_id)[1].store.by_id(challenge.admission_id).hotkey
+        dataset = self._record_v2(run_id, "dataset", "inputs")
+        stage = partial(
+            self._stage_inputs_v2, run_id, manifest, hotkey, dataset, challenge, samples, epoch
+        )
+
+        def staged() -> tuple[IslandJobV1, Path]:
+            with self._staging:
+                return stage()
+
+        return staged
+
+    def _stage_inputs_v2(
+        self,
+        run_id: str,
+        manifest: RunManifestV2,
+        hotkey: str | None,
+        dataset: Mapping[str, JsonValue],
+        challenge: JoinChallenge,
+        samples: tuple[int, ...],
+        epoch: int,
+    ) -> tuple[IslandJobV1, Path]:
         import torch
 
         import hypertrain.trainer  # noqa: F401
@@ -2835,19 +2878,16 @@ class ChallengeStore:
         from hypertrain.trainer.config import TrainConfig
         from hypertrain.trainer.model import init_params
 
-        manifest = self._run_v2(run_id)
         cfg = TrainConfig.from_manifest_v2(manifest)
         theta = init_params(cfg.model)
         start_state = pack_state(theta)
         ef_in = pack_state({k: torch.zeros_like(v) for k, v in theta.items()})
-        if cfg.inner.state_policy == "carry":
-            admission = self._services(run_id)[1].store.by_id(challenge.admission_id)
-            genesis = AnchorCache().genesis(manifest, admission.hotkey, theta)
+        if hotkey is not None:
+            genesis = AnchorCache().genesis(manifest, hotkey, theta)
             start_state = pack_state(genesis.theta, genesis.state)
             ef_in = pack_state(genesis.ef)
         directory = self.state_dir / "trials-v2" / challenge.nonce
         directory.mkdir(parents=True, exist_ok=True)
-        dataset = self._record_v2(run_id, "dataset", "inputs")
         raw = self.objects.get(str(dataset["samples_hash"]))
         proofs = json.loads(self.objects.get(str(dataset["proofs_hash"])))
         assert isinstance(proofs, list)
@@ -3112,15 +3152,16 @@ class ChallengeStore:
     ) -> dict[str, str]:
         """The trusted reference of an open trial, in three steps (docs/adr/0012 section 2).
 
-        Claim, under the lock: the freshness gate, everything the launch reads from the database,
-        and a flight keyed (admission, challenge nonce, custody flag). A second call for the same
-        key waits for the flight and gets its commitment, or its failure, without staging the job
-        again or launching again. A call with the other custody flag (test mode only) has a flight
-        of its own: the same trial can then launch twice, and the executor, which finds the
-        first publication, answers the second without a host. Run, without the lock: the launch
-        and the object puts, under a lease guard the verified beacon cancels. Settle, under the
-        lock again, after the freshness gate: the commitment is written only into the row state the
-        claim read. The lock is therefore free while a remote executor works.
+        Claim, under the lock: the freshness gate, everything the launch and the staging of its
+        inputs read from the database, and a flight keyed (admission, challenge nonce, custody
+        flag). A second call for the same key waits for the flight and gets its commitment, or its
+        failure, without staging the job again or launching again. A call with the other custody
+        flag (test mode only) has a flight of its own: the same trial can then launch twice, and
+        the executor, which finds the first publication, answers the second without a host. Run,
+        without the lock: the staging (O(model)), the launch and the object puts, under a lease
+        guard the verified beacon cancels. Settle, under the lock again, after the freshness gate:
+        the commitment is written only into the row state the claim read. The lock is therefore
+        free while the inputs of a large model are written and while a remote executor works.
         """
         from hypertrain.auditor.worker import LeaseGuard
 
@@ -3150,7 +3191,11 @@ class ChallengeStore:
                 flight = self._reference_flights_v2.get(key)
             leader = flight is None
             if leader:
-                claim = admission.claim_reference(admission_id, now=now)
+                claim = admission.claim_reference(
+                    admission_id,
+                    now=now,
+                    plan=lambda c, samples, epoch: self.plan_trial_v2(run_id, c, samples, epoch),
+                )
                 if isinstance(claim, str):
                     return {"reference_commitment": claim}
                 nonce = claim.challenge.nonce

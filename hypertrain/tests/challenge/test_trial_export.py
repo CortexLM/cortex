@@ -522,6 +522,28 @@ def staged_inputs(n, identity):
     return n.manifest.run_id(), challenge, samples, row["trial_epoch"]
 
 
+def test_a_planned_staging_reads_no_database(trial):
+    # Given: the staging planned under the store lock, with the database gone afterwards
+    n, identity, _ = trial
+    arguments = staged_inputs(n, identity)
+    staging = n.store.plan_trial_v2(*arguments)
+
+    class NoDatabase:
+        def execute(self, *args, **kwargs):
+            raise AssertionError(f"the staging read the database: {args[:1]}")
+
+    real = n.store._db
+    n.store._db = NoDatabase()
+    try:
+        # When: it runs, as it does once the lock is let go
+        job, directory = staging()
+    finally:
+        n.store._db = real
+    # Then: it staged the same job the unsplit call stages
+    assert n.store.stage_trial_v2(*arguments) == (job, directory)
+    assert sha256_hex((directory / "start_state").read_bytes()) == job.start_state_sha256
+
+
 def test_staging_survives_a_write_that_died_halfway(trial, monkeypatch):
     # Given: the disk fills while the first input is written
     n, identity, _ = trial

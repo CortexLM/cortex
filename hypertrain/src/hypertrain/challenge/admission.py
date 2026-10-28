@@ -8,6 +8,7 @@ import secrets
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -124,12 +125,18 @@ class AdmissionStatus:
     shadow_only: bool
 
 
+# Writes a trial's inputs and returns its job. Staging is O(model), so a caller that holds the
+# authority lock plans it there (the database reads) and runs it after letting go.
+Staging = Callable[[], tuple[IslandJobV1, Path]]
+
+
 @dataclass(frozen=True, slots=True)
 class ReferenceClaim:
     """What a reference run needs from the database, read once under the authority lock.
 
     `state` and `pending_dispute` are the row's standing at claim time: the settlement refuses a
-    row that moved while the reference ran.
+    row that moved while the reference ran. `stage` writes the job's inputs: the claim only
+    plans it, because the inputs of a large model take seconds to compute and write.
     """
 
     admission_id: str
@@ -137,14 +144,16 @@ class ReferenceClaim:
     trial_epoch: int
     state: str
     pending_dispute: bool
-    job: IslandJobV1
-    directory: Path
+    samples: tuple[int, ...]
+    stage: Staging
 
 
 @dataclass(frozen=True, slots=True)
 class ReferenceResult:
     screen: WorkScreenV2
     proof: WorkProof
+    job: IslandJobV1
+    directory: Path
 
 
 class Admission:
@@ -441,11 +450,20 @@ class Admission:
             claim, result, now=now, retain_shadow_custody=retain_shadow_custody
         )
 
-    def claim_reference(self, admission_id: str, *, now: int) -> ReferenceClaim | str:
+    def claim_reference(
+        self,
+        admission_id: str,
+        *,
+        now: int,
+        plan: Callable[[JoinChallenge, tuple[int, ...], int], Staging] | None = None,
+    ) -> ReferenceClaim | str:
         """First step, under the authority lock: everything the run reads from the database.
 
         Returns the commitment already stored for the open trial, when there is one: nothing is
-        left to run. Otherwise the job is staged here, so that the run touches no database.
+        left to run. Otherwise the job's staging is planned here and carried by the claim; the
+        run executes it. `plan` reads what staging needs from the database now and returns the
+        staging that needs none; without it `stage_reference` is called at the run, which is for
+        a caller that holds no lock to release.
         """
         self._beacon(now)
         row = self.store.db.execute(
@@ -464,17 +482,14 @@ class Admission:
         samples = trial_samples(
             self.escrow.manifest, admission_id, c.nonce, self._beacon(c.seed_beacon)
         )
-        job, directory = self.stage_reference(c, samples, row["trial_epoch"])
-        if tuple(job.sample_ids) != samples or job.w != row["trial_epoch"]:
-            raise AdmissionError("REFERENCE_ASSIGNMENT")
+        epoch = row["trial_epoch"]
+        stage = (
+            plan(c, samples, epoch)
+            if plan is not None
+            else partial(self.stage_reference, c, samples, epoch)
+        )
         return ReferenceClaim(
-            admission_id,
-            c,
-            row["trial_epoch"],
-            row["state"],
-            bool(row["pending_dispute"]),
-            job,
-            directory,
+            admission_id, c, epoch, row["state"], bool(row["pending_dispute"]), samples, stage
         )
 
     def run_reference(
@@ -486,10 +501,14 @@ class Admission:
         | None = None,
         cancel: threading.Event | None = None,
     ) -> ReferenceResult:
-        """Second step, no lock: the launch and the object puts. It reads no database row: the
-        authority connection is shared and a read from here could see another thread's
-        uncommitted rows. What needs the database waits for `settle_reference`."""
-        job, directory, c = claim.job, claim.directory, claim.challenge
+        """Second step, no lock: the staging, the launch and the object puts. It reads no
+        database row: the authority connection is shared and a read from here could see another
+        thread's uncommitted rows (the staging a claim plans has read what it needs already).
+        What needs the database waits for `settle_reference`."""
+        c = claim.challenge
+        job, directory = claim.stage()
+        if tuple(job.sample_ids) != claim.samples or job.w != claim.trial_epoch:
+            raise AdmissionError("REFERENCE_ASSIGNMENT")
         if trusted_launch is None:
             screen, proof = screen_work(job, directory, c, now_beacon=now, backend=self.backend)
         else:
@@ -514,7 +533,7 @@ class Admission:
                 or logical != _logical(self.objects, ref, "REFERENCE_OBJECT_HASH")[:2]
             ):
                 raise AdmissionError("REFERENCE_OBJECT_HASH")
-        return ReferenceResult(screen, proof)
+        return ReferenceResult(screen, proof, job, directory)
 
     def settle_reference(
         self,
@@ -577,7 +596,7 @@ class Admission:
                 )
             if retain_shadow_custody:
                 self.retain_trial_publication(
-                    "reference", claim.job, claim.directory, screen, proof, now
+                    "reference", result.job, result.directory, screen, proof, now
                 )
             return commitment
 

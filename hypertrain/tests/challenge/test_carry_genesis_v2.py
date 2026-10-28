@@ -97,3 +97,17 @@ def test_trial_stages_pinned_complete_carry_genesis(od_carry_network):
         )
     repeated, _ = network.store.stage_trial_v2(network.manifest.run_id(), challenge, samples, epoch)
     assert repeated == job
+    # the hotkey that keys the genesis is read when the staging is planned, not when it runs
+    staging = network.store.plan_trial_v2(network.manifest.run_id(), challenge, samples, epoch)
+    admission = network.store._services(network.manifest.run_id())[1]
+    real = network.store._db, admission.store.db
+
+    class NoDatabase:
+        def execute(self, *args, **kwargs):
+            raise AssertionError(f"the staging read the database: {args[:1]}")
+
+    network.store._db = admission.store.db = NoDatabase()
+    try:
+        assert staging() == (job, directory)
+    finally:
+        network.store._db, admission.store.db = real
