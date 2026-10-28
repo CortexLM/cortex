@@ -34,7 +34,12 @@ from hypertrain.protocol.env_pins import EnvPin
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import f32hex
-from hypertrain.protocol.messages_v2 import AuditPolicyV2, EconomicsPolicyV2, RunManifestV2
+from hypertrain.protocol.messages_v2 import (
+    AuditPolicyV2,
+    EconomicsPolicyV2,
+    RunManifestV2,
+    reaudit_rounds_for,
+)
 from hypertrain.trainer.config import ModelConfig
 from hypertrain.trainer.model import param_shapes
 
@@ -516,7 +521,11 @@ def test_a_dense_0_1b_build_writes_the_registry_row_and_a_wide_screen_window(
         "reaudit_rounds": reaudit,
         "gap_needed": gap_needed,
         "gap_cap": cap or 200,
+        "replay_seconds": replay,
+        "warmup_replay_seconds": 300,
+        "stop_above_seconds": 298,
     }
+    assert report["warmup_run_id"] is None
     assert all(report["checks"].values()) and "gap_cap_holds_the_reaudit_window" in report["checks"]
     # D88: the same inputs over a production ledger publish only while the cap stays at 200.
     scratch = tmp_path / "production"
@@ -529,20 +538,28 @@ def test_a_dense_0_1b_build_writes_the_registry_row_and_a_wide_screen_window(
         assert "gap_cap_rounds above 200 is for a TEST manifest only" in production.stderr
 
 
-def test_the_rebuild_with_the_measured_replay_changes_only_the_audit_window(host, tmp_path):
-    # The runbook's two builds: a throw-away warm-up run at the 300 s ceiling, then the real run
-    # from the measured replay, over the same seeds, image and expiry. Only the audit policy (and so
-    # the run id) may differ, or the warm-up would not have measured the run that is published.
+def two_builds(
+    host: dict[str, str], tmp_path: Path, replay: str
+) -> tuple[Path, Path, subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
+    """The runbook's two builds over the same seeds, image and expiry: the throw-away warm-up run at
+    the 300 s ceiling, then the real run from the measured `replay`, told the warm-up's OUT_DIR."""
     dense = {"HT_D20_GEOMETRY": "dense-0.1b"}
     warmup, real = tmp_path / "warmup", tmp_path / "real"
     args = {"driver": "595.91.07", "sm_count": "148", "exp_round": "34310319"}
-
     first = build(host, warmup, env={**dense, "HT_D20_REPLAY_SECONDS": "300"}, **args)
     assert first.returncode == 0, first.stderr
     (real / "secrets").mkdir(parents=True, mode=0o700)
     for seed in seed_files(warmup / "secrets"):
         shutil.copy(seed, real / "secrets" / seed.name)
-    second = build(host, real, env={**dense, "HT_D20_REPLAY_SECONDS": "144"}, **args)
+    env = {**dense, "HT_D20_REPLAY_SECONDS": replay, "HT_D20_WARMUP_OUT": str(warmup)}
+    return warmup, real, first, build(host, real, env=env, **args)
+
+
+def test_the_rebuild_with_the_measured_replay_changes_only_the_audit_window(host, tmp_path):
+    # 298 s, the last replay whose window (199 rounds) is not the warm-up's (200). Only the audit
+    # policy, and so the run id, may differ, or the warm-up would not have measured the run that is
+    # published.
+    warmup, real, first, second = two_builds(host, tmp_path, "298")
     assert second.returncode == 0, second.stderr
 
     def read(out: Path, name: str) -> dict[str, Any]:
@@ -559,7 +576,7 @@ def test_the_rebuild_with_the_measured_replay_changes_only_the_audit_window(host
     ]
     assert windows == [
         {"reaudit_rounds": 200, "gap_cap_rounds": 305},
-        {"reaudit_rounds": 100, "gap_cap_rounds": None},
+        {"reaudit_rounds": 199, "gap_cap_rounds": 304},
     ]
     assert policies[0] == policies[1]
     manifests = [read(out, "out/manifest.json") for out in (warmup, real)]
@@ -571,6 +588,30 @@ def test_the_rebuild_with_the_measured_replay_changes_only_the_audit_window(host
     assert (
         manifests[0]["network"]["audit_policy_hash"] != manifests[1]["network"]["audit_policy_hash"]
     )
+    reports = [json.loads(r.stdout[r.stdout.rindex("\n{\n") + 1 :]) for r in (first, second)]
+    assert reports[1]["warmup_run_id"] == reports[0]["run_id"] != reports[1]["run_id"]
+    assert reports[1]["checks"]["warmup_same_training"]
+    assert reports[1]["checks"]["warmup_differs_only_by_the_audit_policy"]
+
+
+@pytest.mark.parametrize("replay", ["299", "300"])
+def test_a_real_build_that_would_be_the_warm_up_is_refused(host, tmp_path, replay):
+    # 299 and 300 s ask the warm-up's own window: the real manifest would be the warm-up's, and so
+    # would its run id. The build stops (exit 2) and removes what it made; the staged seeds stay.
+    _, real, _, second = two_builds(host, tmp_path, replay)
+
+    assert second.returncode == 2
+    assert "the manifest is the warm-up build's" in second.stderr
+    assert not any((real / d).exists() for d in ("inputs", "out", "state"))
+    assert len(seed_files(real / "secrets")) == 7
+
+
+def test_every_replay_up_to_298_s_asks_another_window_than_the_warm_up():
+    # The audit policy is the only input the replay moves, through reaudit_rounds_for: a window
+    # other than the warm-up's is another policy digest, and so another run id.
+    warmup = reaudit_rounds_for(300, 100)
+    assert all(reaudit_rounds_for(r, 100) < warmup for r in range(1, 299))
+    assert reaudit_rounds_for(299, 100) == warmup
 
 
 def test_a_replay_above_the_300_s_ceiling_is_refused_by_the_manifest_stage(host, tmp_path):
@@ -591,6 +632,9 @@ def test_a_replay_above_the_300_s_ceiling_is_refused_by_the_manifest_stage(host,
     assert not out.exists()
 
 
+DENSE_144 = {"HT_D20_GEOMETRY": "dense-0.1b", "HT_D20_REPLAY_SECONDS": "144"}
+
+
 @pytest.mark.parametrize(
     ("env", "named"),
     [
@@ -607,8 +651,28 @@ def test_a_replay_above_the_300_s_ceiling_is_refused_by_the_manifest_stage(host,
             {"HT_D20_GEOMETRY": "dense-1b", "HT_D20_REPLAY_SECONDS": "144"},
             "HT_D20_REPLAY_SECONDS is read by dense-0.1b only",
         ),
+        (
+            {"HT_D20_GEOMETRY": "dense-1b", "HT_D20_WARMUP_OUT": "/nonexistent"},
+            "HT_D20_WARMUP_OUT is read by dense-0.1b only",
+        ),
+        (
+            {**DENSE_144, "HT_D20_WARMUP_OUT": "warmup"},
+            "HT_D20_WARMUP_OUT must be an absolute path",
+        ),
+        (
+            {**DENSE_144, "HT_D20_WARMUP_OUT": "/nonexistent/warmup"},
+            "HT_D20_WARMUP_OUT: no out/manifest.json under /nonexistent/warmup",
+        ),
     ],
-    ids=["missing", "zero", "not_whole_seconds", "another_geometry"],
+    ids=[
+        "missing",
+        "zero",
+        "not_whole_seconds",
+        "another_geometry",
+        "warmup_for_another_geometry",
+        "warmup_relative",
+        "warmup_without_a_manifest",
+    ],
 )
 def test_a_dense_0_1b_build_without_a_measured_replay_is_refused_before_anything_runs(
     host, tmp_path, env, named

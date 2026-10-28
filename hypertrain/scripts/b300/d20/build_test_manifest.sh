@@ -39,6 +39,11 @@
 # needs a d_final - d_audit above the default cap of 200 rounds (a replay above 174 s), sets
 # gap_cap_rounds to that gap (ADR 0011 Part 9, D84/D88; the ledger of these runs is test). The dry
 # run prints the window, the gap it needs and the cap.
+# HT_D20_WARMUP_OUT (dense-0.1b only, optional): the OUT_DIR of the throw-away warm-up build of the
+# same model, built at the 300 s ceiling (the runbook's two builds). The real build is refused (exit
+# 2) when its manifest is the warm-up's, which a replay of 299 or 300 s gives (same window, so the
+# same run id, and a warm-up run is never reused): stop above 298 s. Otherwise the dry run checks
+# that only the audit policy differs and prints the warm-up run id; it also prints the stop.
 # HT_D20_GEOMETRY=tiny-cpu: the CPU mechanism model of tests/ledger/test_escrow_v2.py setup()
 # (1 layer, d_model 8, vocab 16, seq 4, H=1 J=1, 16 samples), layout n_gpus=1, for a cpu-backend
 # TEST run whose references and audits the challenge replays on CPU.
@@ -115,14 +120,21 @@ GEOMETRY=${HT_D20_GEOMETRY:-dense-1b}
 ATTENTION=${HT_D20_ATTN_BACKEND:-math}
 COLDKEYS=${HT_D20_COLDKEYS:-2}
 REPLAY=${HT_D20_REPLAY_SECONDS:-}
+WARMUP=${HT_D20_WARMUP_OUT:-}
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
 case $GEOMETRY in dense-1b|dense-0.1b|tiny-cpu) ;; *) echo "HT_D20_GEOMETRY: dense-1b, dense-0.1b or tiny-cpu" >&2; exit 2 ;; esac
 case $COLDKEYS in [1-9]) ;; *) echo "HT_D20_COLDKEYS must be 1..9" >&2; exit 2 ;; esac
 if [ "$GEOMETRY" = dense-0.1b ]; then
     [[ $REPLAY =~ ^[1-9][0-9]*$ ]] || { echo "HT_D20_REPLAY_SECONDS: dense-0.1b has no default; give the measured warm audit replay in whole seconds (max of >= 3 warm replays on the auditing B300)" >&2; exit 2; }
+    if [ -n "$WARMUP" ]; then
+        case $WARMUP in /*) ;; *) echo "HT_D20_WARMUP_OUT must be an absolute path" >&2; exit 2 ;; esac
+        [ -f "$WARMUP/out/manifest.json" ] || { echo "HT_D20_WARMUP_OUT: no out/manifest.json under $WARMUP (the warm-up build's OUT_DIR)" >&2; exit 2; }
+    fi
 elif [ -n "$REPLAY" ]; then
     echo "HT_D20_REPLAY_SECONDS is read by dense-0.1b only" >&2; exit 2
+elif [ -n "$WARMUP" ]; then
+    echo "HT_D20_WARMUP_OUT is read by dense-0.1b only" >&2; exit 2
 fi
 [[ $IMAGE =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "IMAGE_DIGEST must be sha256:<64 lowercase hex>" >&2; exit 2; }
 [[ $DRIVER =~ ^([0-9][0-9.]*|cpu-test)$ ]] || { echo "DRIVER must be digits and dots (or cpu-test)" >&2; exit 2; }
@@ -451,8 +463,13 @@ uv run --no-sync python -I -m hypertrain.ops.manifest_v2 build \
     --relays "$OUT/inputs/relays.json" --owner-seed "$OUT/secrets/owner.seed" \
     --exp-round "$(cat "$OUT/inputs/exp-round.txt")" --state-dir "$OUT/state" --out "$OUT/out"
 
+if [ -n "$WARMUP" ] && cmp -s "$OUT/out/manifest.json" "$WARMUP/out/manifest.json"; then
+    echo "the manifest is the warm-up build's ($WARMUP): same run id, and a warm-up run is never reused; a replay above 298 s gives the warm-up's window: stop and report" >&2
+    exit 2
+fi
+
 uv run --no-sync python -I - "$OUT" "$IMAGE" "$DRIVER" "$SM_COUNT" "$GEOMETRY" "$ATTENTION" \
-    "$REPLAY" <<'PY'
+    "$REPLAY" "$WARMUP" <<'PY'
 """Dry-run: the checks POST /v2/admin/runs (store._create_run_v2) runs, minus the database."""
 import json
 import sys
@@ -471,7 +488,7 @@ from hypertrain.protocol.relay_messages import RelayRegistryV1
 
 out, image, driver, sm_count = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
 n_gpus = 2 if sys.argv[5] == "dense-1b" else 1
-attention, replay = sys.argv[6], sys.argv[7]
+attention, replay, warmup = sys.argv[6], sys.argv[7], sys.argv[8]
 # What the builder meant, from the table: a GPU class measured on sm_count, or none for a CPU run.
 gpu = "none" if sys.argv[5] == "tiny-cpu" else next(
     (n for n, c in GPU_CLASSES.items() if sm_count in c.sm_counts), None
@@ -518,6 +535,20 @@ if sys.argv[5] == "dense-0.1b":
     )
 else:
     checks["no_reaudit_window_or_cap"] = audit.reaudit_rounds is None and audit.gap_cap_rounds is None
+# The two builds of the runbook: the warm-up at the largest replay validate_training accepts (two
+# leases of window), the real one below the last replay whose window is still the warm-up's.
+window = lambda seconds: reaudit_rounds_for(seconds, audit.lease_rounds)  # noqa: E731
+ceiling = max(r for r in range(1, 10_000) if window(r) <= 2 * audit.lease_rounds)
+stop_above = max(r for r in range(1, ceiling) if window(r) < window(ceiling))
+if warmup:
+    other = RunManifestV2.model_validate_json((Path(warmup) / "out/manifest.json").read_bytes())
+    mine, theirs = model.network.model_dump(), other.network.model_dump()
+    checks["warmup_same_training"] = other.training.model_dump() == t.model_dump()
+    checks["warmup_differs_only_by_the_audit_policy"] = mine["audit_policy_hash"] != theirs[
+        "audit_policy_hash"
+    ] and {k: v for k, v in mine.items() if k != "audit_policy_hash"} == {
+        k: v for k, v in theirs.items() if k != "audit_policy_hash"
+    }
 spec = registry.specs[0]
 checks.update(
     envelope_signature=envelope_v2.verify_envelope(raw),
@@ -556,7 +587,11 @@ print(json.dumps({
         "reaudit_rounds": audit.reaudit_rounds,
         "gap_needed": needed,
         "gap_cap": audit.gap_cap(),
+        "replay_seconds": int(replay) if replay else None,
+        "warmup_replay_seconds": ceiling if sys.argv[5] == "dense-0.1b" else None,
+        "stop_above_seconds": stop_above if sys.argv[5] == "dense-0.1b" else None,
     },
+    "warmup_run_id": other.run_id() if warmup else None,
     "pin": {
         "cpu": ref.env.pinned.cpu,
         "gpu": ref.env.pinned.gpu,
