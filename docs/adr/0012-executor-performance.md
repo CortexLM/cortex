@@ -251,13 +251,16 @@ also needs its rounds verified (2.4 s of BLS in all) and the replay must show th
 **Limits found by the review** (2026-10-28), not removed here:
 - The claim stages the job under the lock, and staging is O(model). Measured here [V, 2026-10-28, a timing
   proxy on the store lock, `TrainConfig.from_manifest_v2` patched to a larger model, the call then fails fast
-  at the screening so only the claim is timed; a scratch script, not in the tree]: the longest hold of the lock
-  by the call was 7 ms at the 824-parameter fixture, 10 ms at 24.7 k parameters, **2.1 s at 66.3 M (8 layers,
-  d=512) and 4.9 s at 162.4 M (12 layers, d=768)**; a reviewer measured 0.9 s and 3.3 s on a less loaded host.
-  So "milliseconds" holds for the admitted tiny shape only. For a larger model the claim is the lock hold that
-  is left (the launch itself, 57 s cold, is out of the lock either way), and the pusher's 10 s timeout and the
-  6 s freshness bound survive it only up to a few seconds: the fix is to read the database under the lock and
-  stage without it, which is not done here. `export_trial_v2` costs the same, and a waiter no longer pays it.
+  at the screening so only the claim is timed; a scratch script, not in the tree, run twice at different host
+  loads]: the longest hold of the lock by the call was 7 and 13 ms at the 824-parameter fixture, 10 and 133 ms
+  at 24.7 k parameters, **2.1 and 5.7 s at 66.3 M (8 layers, d=512), 13.4 s at 124.7 M (8 layers, d=768) and 4.9
+  and 6.0 s at 162.4 M (12 layers, d=768)**. A reviewer measured 0.9 s and 3.3 s at the 66 M and 162 M shapes on a
+  less loaded host. The time is the CPU initialisation of the parameters and moves with the load of the host.
+  So "milliseconds" holds for the admitted tiny shape only. For a model of the 100 M class the claim is the lock
+  hold that is left (the launch itself, 57 s cold, is out of the lock either way): longer than the 6 s freshness
+  bound of the gate and than the pusher's 10 s timeout at the high end. The fix is to read the database under
+  the lock and stage without it, which is not done here. `export_trial_v2` costs the same, and a waiter no
+  longer pays it.
 - A resume, a suspension or a new challenge does not cancel a stale launch: audit leases revoke their guard
   when they are retired, this guard is cancelled only at the deadline round or the wall cutoff. The stale result
   is dropped at the settlement, but the launch keeps its host until then.
