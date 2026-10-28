@@ -55,14 +55,26 @@ def test_a_signed_poll_is_answered_again_and_again_and_the_header_route_is_gone(
         again = network.client.post(network.url + "/disputes/watch", json=envelope)
         assert again.status_code == 200, again.text
     assert network.store._db.total_changes == before
-    # The replayable static header signature no longer opens anything.
+    # The replayable static header signature no longer opens anything: the route is retired (405,
+    # as every retired route), names its replacement, and allows no method.
     static = HOT[0].sign(f"hypertrain/watch/2|{network.manifest.run_id()}|{HOT[0].ss58}".encode())
     legacy = network.client.get(
         network.url + "/disputes",
         params={"party": HOT[0].ss58},
         headers={"X-Dispute-Signature": static.hex()},
     )
-    assert legacy.status_code == 404, legacy.text
+    assert legacy.status_code == 405, legacy.text
+    assert legacy.headers["allow"] == ""
+    assert "POST" in legacy.json()["detail"] and "/disputes/watch" in legacy.json()["detail"]
+    # It does no work: no credential, and a run the service never heard of, answer the same.
+    unknown = network.client.get("/v2/runs/" + "ff" * 32 + "/disputes")
+    assert unknown.status_code == 405, unknown.text
+    assert unknown.headers["allow"] == "" and unknown.json() == legacy.json()
+    # Whatever the method: an Allow that listed GET would send the client to another 405.
+    for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"):
+        other = network.client.request(method, network.url + "/disputes")
+        assert other.status_code == 405 and other.headers["allow"] == "", (method, other.headers)
+    assert network.store._db.total_changes == before
 
 
 def forged_wait(n):

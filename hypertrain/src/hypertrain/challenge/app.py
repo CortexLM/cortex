@@ -995,6 +995,21 @@ def create_app(
         admin(authorization)
         return await run(store.for_run(run_id).relay_drain_v2, run_id, relay_id)
 
+    @app.api_route(
+        "/v2/runs/{run_id}/disputes",
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    )
+    async def retired_dispute_watch() -> JSONResponse:
+        # The header-signed watch, retired for POST .../disputes/watch (a header does not cross
+        # the master proxy). 405 like every retired route, whatever the method; no credential is
+        # read, the store is not touched. Allow is empty on purpose: the replacement is on another
+        # path, so this one has no method left to allow.
+        return JSONResponse(
+            {"detail": "retired: POST /v2/runs/{run_id}/disputes/watch with a signed body"},
+            status_code=405,
+            headers={"Allow": ""},
+        )
+
     @app.post("/v2/runs/{run_id}/disputes/watch")
     async def events_v2(run_id: str, request: Request) -> Any:
         from hypertrain.protocol.envelope_v2 import Intake, parse_envelope
