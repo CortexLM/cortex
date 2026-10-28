@@ -8,7 +8,7 @@ FINALITY = "src/hypertrain/challenge/finality_v2.py"
 ESCROW = "src/hypertrain/ledger/escrow_v2.py"
 STORE = "src/hypertrain/challenge/store.py"
 TAPE_INCLUDED = (
-    "            included = sorted(\n"
+    "            included = self._unconvicted_v2(\n"
     '                item["roster"]["hotkey"]\n'
     '                for item in self._record_v2(run_id, "tape-inputs", str(w))["inputs"]\n'
     "            )\n"
@@ -105,8 +105,8 @@ MUTANTS = [
         "settle-accepts-an-excluded-round",
         ["FIN-02", "FIN-10"],
         FINALITY,
-        '        or status.disposition == "EXCLUDED"\n',
-        "",
+        '        or status.disposition in ("EXCLUDED", "RETIRED")\n',
+        '        or status.disposition == "RETIRED"\n',
         [SETTLE, NEVER_BACK],
         "An excluded round moves to SETTLED and is paid.",
     ),
@@ -133,9 +133,10 @@ MUTANTS = [
         "exclude-rewrites-a-settled-round",
         ["FIN-15", "FIN-10"],
         FINALITY,
-        '    if status.disposition == "SETTLED":\n'
+        '    if status.disposition in ("SETTLED", "RETIRED"):\n'
         '        raise FinalityError("finalized late fraud cannot rewrite model history")\n',
-        "",
+        '    if status.disposition == "RETIRED":\n'
+        '        raise FinalityError("finalized late fraud cannot rewrite model history")\n',
         [EXCLUDE, NEVER_BACK],
         "Late fraud turns a settled round into an excluded one.",
     ),
@@ -362,7 +363,7 @@ MUTANTS = [
         ["FIN-03", "FIN-18"],
         STORE,
         TAPE_INCLUDED,
-        "            included = sorted(\n"
+        "            included = self._unconvicted_v2(\n"
         '                e["hotkey"]\n'
         '                for e in self._record_v2(run_id, "round", str(w))["body"]["roster"]\n'
         "            )\n",
@@ -373,8 +374,14 @@ MUTANTS = [
         "finalize-commits-before-the-ledger",
         ["FIN-04"],
         STORE,
-        '            self._put_record_v2(run_id, "finality", str(w), asdict(settled))\n',
-        '            self._put_record_v2(run_id, "finality", str(w), asdict(settled))\n'
+        "            self._put_record_v2(\n"
+        '                run_id, "finalize", str(w), '
+        'envelope_v2.parse_envelope(raw).model_dump(mode="json")\n'
+        "            )\n",
+        "            self._put_record_v2(\n"
+        '                run_id, "finalize", str(w), '
+        'envelope_v2.parse_envelope(raw).model_dump(mode="json")\n'
+        "            )\n"
         '            self._db.execute("COMMIT")\n'
         '            self._db.execute("BEGIN IMMEDIATE")\n',
         [ATOMIC],

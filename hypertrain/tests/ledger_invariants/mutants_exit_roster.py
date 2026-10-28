@@ -18,11 +18,24 @@ DROPPED = (
     '        self._put_record_v2(run_id, "finality", str(row["w"]), finality)'
 )
 
-STRIKE = (
-    "\n        self._db.execute("
-    '\n            "UPDATE admissions_v2 SET strikes=strikes+1 WHERE hotkey=?", (row["hotkey"],)'
-    "\n        )"
+# The retirement of a round that nobody can carry is where the jobs of a round nobody served end
+# (the exit reaper closes the round before its audit horizon is reached).
+RETIRED_JOBS = (
+    "        self._db.execute(\n"
+    "            \"UPDATE audit_leases_v2 SET state='exhausted',result='ROUND_RETIRED' \"\n"
+    "            \"WHERE run_id=? AND w=? AND state IN ('queued','running')\",\n"
+    "            (run_id, w),\n"
+    "        )\n"
 )
+RETIRED_JOBS_STRIKE = RETIRED_JOBS + (
+    "        self._db.execute(\n"
+    '            "UPDATE admissions_v2 SET strikes=strikes+1 WHERE hotkey IN "\n'
+    '            "(SELECT hotkey FROM audit_leases_v2 "\n'
+    "            \"WHERE run_id=? AND w=? AND result='ROUND_RETIRED')\",\n"
+    "            (run_id, w),\n"
+    "        )\n"
+)
+NO_SHOW_EVIDENCE = '        evidence = f"ht-no-show/1|{run_id}|{w}|{hotkey}|{stage}"\n'
 
 MUTANTS = [
     {
@@ -119,11 +132,11 @@ MUTANTS = [
         "id": "exit-roster-dropped-job-strikes-its-miner",
         "invariants": ["NSH-04"],
         "path": STORE,
-        "old": DROPPED,
-        "new": DROPPED + STRIKE,
+        "old": RETIRED_JOBS,
+        "new": RETIRED_JOBS_STRIKE,
         "tests": [T2 + "test_a_loss_of_leaves_on_the_master_sanctions_nobody"],
-        "why": "A job the master could not serve ends in a strike for its miner, as if the silence "
-        "were the miner's.",
+        "why": "A job the master could not serve ends in a strike for its miner when its round is "
+        "retired, as if the silence were the miner's.",
     },
     {
         "id": "exit-roster-ledger-demands-a-round-nobody-finalized",
@@ -139,8 +152,8 @@ MUTANTS = [
         "id": "exit-roster-no-show-not-left-out",
         "invariants": ["FIN-21", "A2W-20", "LV-06"],
         "path": STORE,
-        "old": "            self._exclude_no_shows_v2(run_id, manifest, w, body.roster)\n",
-        "new": "            pass\n",
+        "old": NO_SHOW_EVIDENCE,
+        "new": '        if stage == "commit":\n            return\n' + NO_SHOW_EVIDENCE,
         "tests": [
             T + "test_every_roster_member_is_in_a_terminal_audit_state_once_the_horizon_has_passed",
             NO_SHOW + "test_a_member_that_never_commits_no_longer_stalls_the_round",
@@ -152,10 +165,8 @@ MUTANTS = [
         "id": "exit-roster-delta-stage-not-wired",
         "invariants": ["A2W-21"],
         "path": STORE,
-        "old": "            self._exclude_missing_deltas_v2(run_id, w)\n"
-        "            self._exclude_unfit_members_v2(run_id, w)\n"
-        "            inputs =",
-        "new": "            self._exclude_unfit_members_v2(run_id, w)\n            inputs =",
+        "old": NO_SHOW_EVIDENCE,
+        "new": '        if stage == "delta":\n            return\n' + NO_SHOW_EVIDENCE,
         "tests": [NO_SHOW_E2E + "test_a_member_that_commits_but_never_uploads_a_delta_is_left_out"],
         "why": "An audited member whose delta never arrives stops the aggregation of the round.",
     },

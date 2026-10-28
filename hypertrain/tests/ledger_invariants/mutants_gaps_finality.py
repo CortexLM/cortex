@@ -50,7 +50,6 @@ G2 = "tests/ledger_invariants/test_gaps_finality_2.py::"
 STALE = G2 + "test_a_finalize_under_a_stale_beacon_is_paused_with_nothing_written_and_settles_later"
 BURN = G2 + "test_an_epoch_after_a_refused_finalize_burns_the_whole_share_and_pays_nobody"
 BESIDE = G2 + "test_a_refused_round_adds_no_weight_to_the_epoch_answer_of_a_settled_one"
-ESCROW = "src/hypertrain/ledger/escrow_v2.py"
 LEAVES_COMPARE = (
     "            if (model.leaves_root, model.delta_hash) != "
     "(commit.leaves_root, commit.delta_hash):\n"
@@ -227,9 +226,8 @@ MUTANTS = [
         "gf-commit-takes-any-token-count",
         ["A2W-01", "FIN-17"],
         STORE,
-        "                model.validate_assignment("
-        "manifest, len(self._assignment_v2(run_id, w, env.signer)))\n",
-        "",
+        "                    model.validate_assignment(manifest, samples)\n",
+        "                    pass\n",
         [TOKENS],
         "A commit is stored with the token count the miner chose instead of the server's.",
     ),
@@ -316,19 +314,21 @@ MUTANTS = [
         "gf-schedule-keeps-the-round-for-a-member-that-never-committed",
         ["A2W-20", "FIN-21"],
         STORE,
-        "            self._exclude_no_shows_v2(run_id, manifest, w, body.roster)\n",
-        "",
+        "                if identity in excluded:\n"
+        "                    continue\n"
+        '                commit_env = self._record_v2(run_id, "commit", identity)\n',
+        '                commit_env = self._record_v2(run_id, "commit", identity)\n',
         [BASE_NO_SHOW],
-        "The first roster member without a commit refuses the whole scheduling, so the members "
-        "that committed are never audited.",
+        "The scheduling no longer skips a member left out of the round, so the first roster "
+        "member without a commit refuses it and the members that committed are never audited.",
     ),
     mutant(
         "gf-no-show-keeps-its-audit-open",
         ["A2W-20", "FIN-21"],
         STORE,
-        '        finality["unresolved_audits"] = '
-        'max(0, int(finality["unresolved_audits"]) - len(absent))\n',
-        '        finality["unresolved_audits"] = int(finality["unresolved_audits"])\n',
+        '                finality["unresolved_audits"] = '
+        'max(0, int(finality["unresolved_audits"]) - 1)\n',
+        '                finality["unresolved_audits"] = int(finality["unresolved_audits"])\n',
         [BASE_NO_SHOW],
         "A member left out for never committing keeps one audit open, so its round can be neither "
         "aggregated nor settled.",
@@ -359,14 +359,33 @@ MUTANTS = [
         [STALE],
         "A Finalize is settled and minted while the beacon feed is paused.",
     ),
+    # Three guards keep the collateral of the genesis out of the epoch answer: the hotkey test and
+    # the pending-reward test of EscrowV2.payable, and the skip in _pay_v2 of a payee that
+    # _payee_v2 cannot name (a NULL hotkey). The pin sees no single revert of them, so this one
+    # answers the epoch from every available unit of the ledger, which bypasses the three.
     mutant(
         "gf-payable-includes-collateral-origins",
         ["WGT-10", "FIN-02"],
-        ESCROW,
-        '            "AND u.units>0 AND o.hotkey IS NOT NULL AND o.mature_at<=? "\n',
-        '            "AND u.units>0 AND o.mature_at<=? "\n',
+        STORE,
+        "            for row in escrow.payable(now):\n"
+        "                if budget == 0:\n"
+        "                    break\n"
+        '                payee = self._payee_v2(escrow.run_id, row["hotkey"])\n'
+        "                if payee is None:\n",
+        "            for row in escrow.db.execute(\n"
+        '                "SELECT u.origin,u.owner,COALESCE(o.hotkey,u.owner) AS hotkey,u.units "\n'
+        '                "FROM escrow_units u JOIN escrow_origins o ON o.origin=u.origin "\n'
+        "                \"WHERE u.bucket='available' AND u.units>0 AND o.mature_at<=? \"\n"
+        '                "ORDER BY o.mature_at,u.origin,u.owner",\n'
+        "                (now,),\n"
+        "            ).fetchall():\n"
+        "                if budget == 0:\n"
+        "                    break\n"
+        '                payee = row["hotkey"]\n'
+        "                if False:\n",
         [BESIDE],
-        "The collateral origins of the genesis are emitted as weight beside the settled round.",
+        "The epoch answer is filled from every available unit, so the collateral origins of the "
+        "genesis are emitted as weight beside the settled round.",
     ),
     mutant(
         "gf-settle-refusal-is-swallowed",

@@ -200,7 +200,7 @@ MUTANTS = [
         "id": "gaps-escrow-weights-keyed-by-the-owner",
         "invariants": ["CRD-12", "WGT-13"],
         "path": STORE,
-        "old": '                weights[row["hotkey"]] = weights.get(row["hotkey"], 0.0) + take\n',
+        "old": "                weights[payee] = weights.get(payee, 0.0) + take\n",
         "new": '                weights[row["owner"]] = weights.get(row["owner"], 0.0) + take\n',
         "tests": [ROTATION_CONTROL],
         "why": (

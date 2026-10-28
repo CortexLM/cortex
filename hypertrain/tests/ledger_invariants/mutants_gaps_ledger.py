@@ -38,9 +38,6 @@ VESTING = (
 OWNERSHIP = G + (
     "test_a_rotation_between_the_credit_and_the_pay_keeps_every_unit_with_the_coldkey_that_earned_it"
 )
-ROTATED = G + (
-    "test_the_units_of_a_rotated_miner_are_emitted_to_the_hotkey_its_admission_holds_now"
-)
 
 REPEATED_COMPLETION = G + (
     "test_a_repeated_audit_completion_neither_decrements_the_counter_again_nor_changes_anything"
@@ -190,23 +187,6 @@ MUTANTS: list[dict[str, Any]] = [
         "tests": [OWNERSHIP],
         "why": "Paying an origin re-keys its units from the coldkey that earned them to the "
         "hotkey the weights name, the shape of a naive fix for the rotated payee.",
-    },
-    # --- fix proofs: each closes a hole recorded by a strict xfail of the wave -----------------
-    {
-        "id": "fixproof-the-units-of-a-rotated-miner-follow-its-admission",
-        "invariants": ["CRD-12", "WGT-13", "CL-29"],
-        "path": STORE,
-        "old": '                weights[row["hotkey"]] = weights.get(row["hotkey"], 0.0) + take\n',
-        "new": "                held = escrow.db.execute(\n"
-        '                    "SELECT a.hotkey FROM admission_history h JOIN admissions_v2 a "\n'
-        '                    "ON a.admission_id=h.admission_id WHERE h.hotkey=?",\n'
-        '                    (row["hotkey"],),\n'
-        "                ).fetchone()\n"
-        '                payee = held[0] if held else row["hotkey"]\n'
-        "                weights[payee] = weights.get(payee, 0.0) + take\n",
-        "tests": [ROTATED],
-        "why": "FIX PROOF: the weight of a matured origin goes to the hotkey the admission holds "
-        "now.",
     },
     # --- T-CRD-04 and T-CRD-12 -----------------------------------------------------------------
     {

@@ -130,7 +130,7 @@ MUTANTS = [
         "id": "exp-freshness-lag-of-one",
         "invariants": ["FIN-23", "CK-01"],
         "path": STORE,
-        "old": "if now < emitted - 2:\n                self._db.execute(",
+        "old": "if now < emitted - MAX_LAG_ROUNDS:\n                self._db.execute(",
         "new": "if now < emitted - 1:\n                self._db.execute(",
         "tests": [LAG],
         "why": "a beacon two rounds behind the clock is already stale.",
@@ -139,7 +139,7 @@ MUTANTS = [
         "id": "exp-freshness-lag-of-three",
         "invariants": ["FIN-23", "CK-01"],
         "path": STORE,
-        "old": "if now < emitted - 2:\n                self._db.execute(",
+        "old": "if now < emitted - MAX_LAG_ROUNDS:\n                self._db.execute(",
         "new": "if now < emitted - 3:\n                self._db.execute(",
         "tests": [LAG],
         "why": "a beacon three rounds behind the clock is still current.",
@@ -188,11 +188,9 @@ MUTANTS = [
         "invariants": ["FIN-23"],
         "path": STORE,
         "old": (
-            "            self.require_roster_v2(run_id, w)\n"
-            '            self._fresh_v2(manifest, f"aggregate:{w}:{self._now(self._db)}")\n'
-            "            existing"
+            '            now = self._fresh_v2(manifest, f"aggregate:{w}:{self._now(self._db)}")\n'
         ),
-        "new": "            self.require_roster_v2(run_id, w)\n            existing",
+        "new": "            now = self._now(self._db)\n",
         "tests": [WRITE + "[aggregate]"],
         "why": "a round is aggregated while the beacon is stale.",
     },
