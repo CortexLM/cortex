@@ -313,6 +313,11 @@
   `reaudit_rounds_for(replay_seconds, lease_rounds)` = `max(lease_rounds, ceil(2 * replay_seconds / 3))`.
   An older image refuses a policy that sets it: ship the image first. `implementation_hash` does not
   change. See `docs/adr/0011-audit-integrity.md` (Part 9, decision 9) at the monorepo root.
+- `scripts/ops/live_operator.py open` refuses a `d_final - d_audit` below
+  `audit_cooldown_v2.reaudit_gap_needed(lease_rounds, reaudit_rounds)` when the audit policy pins
+  `reaudit_rounds` (191 rounds for 171, the 256 s replay of the 101 M run): in a shorter round a
+  withheld `MISMATCH` could not be re-audited before `d_final` and would retire the round. A policy
+  without the key is not asked. See `docs/adr/0011-audit-integrity.md` (Part 9, decision 12).
 
 ### Fixed
 - A member convicted of training fraud between the aggregate and the finalize of a round is no

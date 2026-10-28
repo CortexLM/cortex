@@ -6,6 +6,7 @@ from hypertrain.challenge.audit_cooldown_v2 import (
     cooling_until,
     next_record,
     others_free,
+    reaudit_gap_needed,
     sign_deadline,
 )
 
@@ -77,3 +78,11 @@ def test_a_stored_verdict_is_due_twenty_rounds_after_it_was_stored_and_a_replay_
     assert sign_deadline({"state": "EXECUTED", "at": 50}) == 70
     assert sign_deadline({"state": "REQUESTED", "at": 50}) is None  # the master is still replaying
     assert sign_deadline(None) is None  # the lease was never executed
+
+
+def test_a_second_replay_needs_the_first_lease_to_end_and_its_own_replay_before_d_final():
+    # the replay is half the window (twice the replay is the window); 100 rounds is one lease
+    assert reaudit_gap_needed(100, 171) == 191  # 256 s: the lease (100) ends before 86 + 20
+    assert reaudit_gap_needed(100, 134) == 159  # 200 s: 67 + 20 = 87 ends the first lease
+    assert reaudit_gap_needed(100, 100) == 125  # 144 s: a window floored at one lease
+    assert reaudit_gap_needed(1466, 1500) == 1525  # a long lease: 750 + 20 rounds, not 1466

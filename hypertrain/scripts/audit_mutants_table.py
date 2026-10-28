@@ -15,6 +15,7 @@ STORE = "src/hypertrain/challenge/store.py"
 MESSAGES = "src/hypertrain/protocol/messages_v2.py"
 COOLDOWN = "src/hypertrain/challenge/audit_cooldown_v2.py"
 EXIT = "src/hypertrain/challenge/exit_v2.py"
+LIVE = "scripts/ops/live_operator.py"
 CHEATS = "tests/audit_cheaters/test_cheats_audit.py::test_cheat_is_mismatch_at_the_expected_leaf"
 WITHHELD = "tests/challenge/test_audit_withheld_signature_v2.py::"
 LAST_WINDOW = (
@@ -97,6 +98,21 @@ MINER_IS_AUDITOR = (
 )
 SERVICE_RUN = (
     REAUDIT + "test_a_service_admitted_run_opens_no_window_and_keeps_the_infrastructure_drop"
+)
+GUARD = (
+    "tests/ops/test_live_operator.py::"
+    "test_open_refuses_a_gap_in_which_a_pinned_reaudit_window_cannot_decide_a_miner"
+)
+SHAPES = (
+    "tests/ops/test_live_operator.py::test_cli_open_with_an_auditable_window_reaches_the_master"
+)
+GAP_FN = (
+    "tests/challenge/test_audit_cooldown_v2.py::"
+    "test_a_second_replay_needs_the_first_lease_to_end_and_its_own_replay_before_d_final"
+)
+GAP200 = (
+    "tests/challenge/test_audit_reaudit_gap_200_v2.py::"
+    "test_the_reaudit_at_gap_200_is_decided_inside_the_slack_and_retires_the_round_past_it"
 )
 PLAN = "tests/challenge/test_exit_plan_v2.py::"
 PLAN_FAILED = PLAN + "test_a_failed_reaudit_retires_a_round_that_can_still_carry_and_blames_nobody"
@@ -457,5 +473,50 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         "            ).fetchone()\n",
         "",
         (SERVICE_RUN,),
+    ),
+    (
+        "gap guard asked of a policy that pins no window: the tiny-cpu shapes are refused",
+        LIVE,
+        "    if audit.reaudit_rounds is None:\n"
+        "        return\n"
+        "    needed = reaudit_gap_needed(audit.lease_rounds, audit.reaudit_rounds)\n",
+        "    needed = reaudit_gap_needed(audit.lease_rounds, audit.reaudit_rounds or "
+        "audit.lease_rounds)\n",
+        (SHAPES + "[98]",),
+    ),
+    (
+        "gap guard off by one: the exact gap is refused",
+        LIVE,
+        "    if gap < needed:\n",
+        "    if gap <= needed:\n",
+        (GUARD + "[191-False]",),
+    ),
+    (
+        "gap guard lets a gap that cannot decide a miner through",
+        LIVE,
+        "    if gap < needed:\n",
+        "    if gap < needed - 10:\n",
+        (GUARD + "[190-True]",),
+    ),
+    (
+        "gap needed ignores that the first lease is capped at one lease",
+        COOLDOWN,
+        "1 + min(lease_rounds, replay + SIGN_WINDOW_ROUNDS) + replay + SIGN_MARGIN_ROUNDS",
+        "1 + (replay + SIGN_WINDOW_ROUNDS) + replay + SIGN_MARGIN_ROUNDS",
+        (GAP_FN,),
+    ),
+    (
+        "gap needed leaves out the margin of the signature",
+        COOLDOWN,
+        "1 + min(lease_rounds, replay + SIGN_WINDOW_ROUNDS) + replay + SIGN_MARGIN_ROUNDS",
+        "1 + min(lease_rounds, replay + SIGN_WINDOW_ROUNDS) + replay",
+        (GAP_FN, GUARD + "[190-True]"),
+    ),
+    (
+        "sign window of 21 rounds: the slack of the 144 s replay is one round short",
+        COOLDOWN,
+        "SIGN_WINDOW_ROUNDS = 20\n",
+        "SIGN_WINDOW_ROUNDS = 21\n",
+        (GAP200 + "[144s-last-round-of-slack]",),
     ),
 )

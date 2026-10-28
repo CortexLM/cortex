@@ -1871,8 +1871,10 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
     accepted residual"; this is the one case the code cannot honour, and it is stated rather than hidden.
 12. **The numbers: the 101 M TEST run opens its rounds with gap 200 (Principal D84 addendum, relayed by
     Forge).** The gap is an argument of `live_operator.py open` (`d_final - d_audit`, accepted up to the cap of
-    200 rounds), not a protocol constant. [V by arithmetic over the quantities of the code; the replays of
-    144 to 256 s are Forge's [A].] Quantities: 3 s a round; L = `lease_rounds` = 100; W = `SIGN_WINDOW_ROUNDS`
+    200 rounds), not a protocol constant. [V: arithmetic over the quantities of the code, and the
+    boundaries below executed by `tests/challenge/test_audit_reaudit_gap_200_v2.py` (the round is opened by
+    `live_operator.open_round` at gap 200 over the in-process service, the master's replay is modelled by pushing
+    its rounds inside the executor boundary); the replays of 144 to 256 s are Forge's [A].] Quantities: 3 s a round; L = `lease_rounds` = 100; W = `SIGN_WINDOW_ROUNDS`
     = 20; an honest commit seals `exp_drand = d_final`, so `absolute = d_final` for every gap up to 200; R =
     ceil(replay seconds / 3) rounds; x = the rounds between `d_audit` and the first lease; p = the rounds the
     second auditor takes to ask after the detection; m = the margin of the signature (`MAX_LAG_ROUNDS` = 2
@@ -1885,6 +1887,12 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
     | 200 s | 67 | 134 | 87 | 221 | 155 | 45 | 173 | 163 |
     | 256 s | 86 | 171 | 100 (the lease ends first) | 271 | 187 | 13 | 205 | 195 |
 
+    - **Executed boundaries** (decided at the last round of slack, retired one round past it): 144 s at x + p =
+      83 and 84, 200 s at 45 and 46, 256 s at 13 and 14 (a first lease 7 rounds late and a second auditor 7 rounds
+      late, the 20 s poll, spend 14). In the first the second auditor's verdict is MISMATCH or MATCH as the
+      miner is a forger or genuine (D47 or cleared); in the second the job fails, the round is retired with the
+      cause `REAUDIT_FAILED`, and no exclusion, sanction row, strike or burnt unit exists. With four miners and
+      two auditors, the other auditor replaying the job behind: 144 s is decided, 256 s retires the round.
     - **The window "detection + `T_reaudit` <= `d_final`" does not hold at gap 200, except for a replay of
       144 s.** It needs a gap of 168, 221 and 271 (plus x): no gap up to the cap of 200 satisfies it for 200 s
       or 256 s. The commit therefore cuts the window (decision 3), and `T_reaudit` itself only binds for a
@@ -1906,6 +1914,16 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
     - **The default launcher opens gap 100** (`scripts/launch_cuda_run.sh`: `OFFSETS=150,300,900,1000,1020,
       1100`), where nothing fits (144 s needs 117 at best): the 101 M launch must override `OFFSETS` to a gap of
       200.
+    - **Gap guard.** `scripts/ops/live_operator.py open` refuses a gap below
+      `audit_cooldown_v2.reaudit_gap_needed(lease_rounds, reaudit_rounds)` = `1 + min(L, R + W) + R + 4`, with
+      R = ceil(`reaudit_rounds` / 2) the replay the window is sized for and 4 the margin of the signature
+      (`SIGN_MARGIN_ROUNDS`): 191 for 171 rounds, 159 for 134, 125 for 100. It asks only a policy that pins
+      `reaudit_rounds`, so the tiny-cpu and gap-98 shapes are unchanged, and it says in plain words that a
+      withheld MISMATCH would retire the round. It is the best case (no delay of the auditors counted): it
+      refuses the shapes in which not even an immediate second replay could finish, and leaves the delays to the
+      operational measures above. The check is in the operator's script and not in `open_round_v2`, which is an
+      owned name and would refuse today's shapes. A window that no gap up to the cap holds (`reaudit_rounds`
+      above 190) is refused for every gap, which is the truth.
 
 | Event | Rule |
 | --- | --- |
@@ -1936,12 +1954,12 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
   `network_qualification.sources()`/`bundle()` and `ChallengeStore._service_implementation_v2` over a
   `git archive` of each tree [V]:
 
-  | Value | Before (`1b8e7a5b`) | After decisions 1 to 7 | After decision 8 (`ffca9ce4`) | After the policy field | After the window |
-  | --- | --- | --- | --- | --- | --- |
-  | `challenge/store.py` sha256 | `5cd7d7f5…4c318b` | `cd79080e…1d9566` | `8541ed73…6038da` | `8541ed73…6038da` | `55f34595…51da09` |
-  | `sources()` map, 158 files, canonical sha256 | `1cb3027a…bc7fe3` | `d31fbfd4…e726b1` | `bba7383b…2ab6b2` | `da678c76…1241ca` | `351ab33a…97e3c9` |
-  | `sources()` map, default separators | `0c58a13e…c902e6` | `842839b3…598d80` | `cda80dbe…80491e` | `73655d50…22c8f3` | `e228cad0…0f0b7c` |
-  | `bundle()` | 2,734,080 bytes, `aa5f3f2f…df3bf3` | 2,734,080 bytes, `4537c70f…d4f15d` | 2,744,320 bytes, `bb32f965…cb4781` | 2,744,320 bytes, `df70326c…9d3400` | 2,744,320 bytes, `c6d4cabb…40c410` |
+  | Value | Before (`1b8e7a5b`) | After decisions 1 to 7 | After decision 8 (`ffca9ce4`) | After the policy field | After the window | After the gap guard |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | `challenge/store.py` sha256 | `5cd7d7f5…4c318b` | `cd79080e…1d9566` | `8541ed73…6038da` | `8541ed73…6038da` | `55f34595…51da09` | `55f34595…51da09` |
+  | `sources()` map, 158 files, canonical sha256 | `1cb3027a…bc7fe3` | `d31fbfd4…e726b1` | `bba7383b…2ab6b2` | `da678c76…1241ca` | `351ab33a…97e3c9` | `cb598a67…1e7616` |
+  | `sources()` map, default separators | `0c58a13e…c902e6` | `842839b3…598d80` | `cda80dbe…80491e` | `73655d50…22c8f3` | `e228cad0…0f0b7c` | `4ae8978b…b7933c` |
+  | `bundle()` | 2,734,080 bytes, `aa5f3f2f…df3bf3` | 2,734,080 bytes, `4537c70f…d4f15d` | 2,744,320 bytes, `bb32f965…cb4781` | 2,744,320 bytes, `df70326c…9d3400` | 2,744,320 bytes, `c6d4cabb…40c410` | 2,744,320 bytes, `f3db007e…a16466` |
 
   A qualification record made on the parent tree no longer validates against this one; the values are measured
   again on the tree that is released.
@@ -2065,7 +2083,9 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
   withholds per auditor per round on the test network.
 - Service-admitted runs: neither the re-arm nor the lease path is exercised (skipped by construction).
 - The probabilities and the replay durations are [A], not measured; the numbers of decision 12 are arithmetic
-  over the quantities of the code and assumed durations, and no replay of the operated shape was timed.
+  over the quantities of the code and assumed durations, executed on CPU replays of the seeded round with the
+  fake clock of the tests, and no replay of the operated shape was timed. No GPU, no 101 M model, no auditor
+  polling every 20 s ran.
 - The revocation was exercised with verdicts written by the test and with real CPU replays of the seeded round;
   an honest signature at `at + 19` and its refusal at `at + 20` are tested on a real verdict.
 

@@ -24,6 +24,9 @@ STRIKE_BAR_ABSOLUTE_WINDOWS = 2
 # What the holder of a lease owes once the master has stored its verdict is a signature, which the
 # auditor client posts in the same breath: its post timeout is 60 s, 20 rounds of 3 s.
 SIGN_WINDOW_ROUNDS = 20
+# What a signature needs after the second replay: the lag the master tolerates (`MAX_LAG_ROUNDS`,
+# 2), the one round of the executor's wall-clock guard and the round the signature is posted in.
+SIGN_MARGIN_ROUNDS = 4
 
 
 def cooling_until(record: Mapping[str, Any] | None, now: int) -> int | None:
@@ -40,6 +43,18 @@ def sign_deadline(marker: Mapping[str, Any] | None) -> int | None:
     if marker is None or marker["state"] != "EXECUTED":
         return None
     return int(marker["at"]) + SIGN_WINDOW_ROUNDS
+
+
+def reaudit_gap_needed(lease_rounds: int, reaudit_rounds: int) -> int:
+    """The smallest `d_final - d_audit` in which a second auditor can still decide a miner whose
+    first auditor withheld the signature, for a policy that pins `reaudit_rounds` (twice the
+    replay it is sized for, so a replay of half that many rounds). The first lease ends
+    `min(lease_rounds, replay + SIGN_WINDOW_ROUNDS)` rounds after it began, and the second
+    auditor must then be leased, replay and sign before `d_final` (ADR 0011 Part 9, decision
+    12). No delay of the auditors' poll is counted: a smaller gap cannot decide, a larger one
+    decides only if the delays fit what is left."""
+    replay = -(-reaudit_rounds // 2)
+    return 1 + min(lease_rounds, replay + SIGN_WINDOW_ROUNDS) + replay + SIGN_MARGIN_ROUNDS
 
 
 def others_free(

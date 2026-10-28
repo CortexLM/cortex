@@ -395,7 +395,7 @@ replay in rounds (3 s each) that needs `gap >= 1 + x + min(100, R + 20) + p + R 
 slack for x + p is 83 rounds for a 144 s replay, 45 for 200 s and 13 for 256 s; with the auditors' poll of
 20 s (`scripts/ops/auditors.sh`, up to 7 rounds each for x and p) 256 s does not fit, so run `audits` at
 `d_audit` exactly and poll every 5 s at most. At gap 100 nothing fits (144 s needs 117). When the second
-auditor does not come in time the round is retired without a sanction (ADR 0011 Part 9, decision 12).
+auditor does not come in time the round is retired without a sanction (ADR 0011 Part 9, decision 12). `live_operator.py open` refuses a gap below the best case when the audit policy pins `reaudit_rounds` (191 rounds for 171, the 256 s replay), and says so.
 `live_operator.py open` accepts any gap from 2 to 200 rounds for every H; 200 is the service
 horizon (`store.py:5109`). A round with a wider gap closes later: 100 more rounds (5 minutes) per
 extra 100.
