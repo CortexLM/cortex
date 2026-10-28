@@ -1293,6 +1293,22 @@ def test_the_gap_cap_is_a_policy_parameter_omitted_when_absent_and_bounded_by_th
         )
 
 
+def test_a_production_manifest_cannot_raise_the_gap_cap_above_the_default() -> None:
+    """D88: only a TEST manifest lifts the cap of 200 rounds; the ledger mode is the economics
+    policy's, so the caller that holds both passes it."""
+    training = wrapper().training
+    steps = 2 * training.inner.H
+    raised = example_audit_policy(steps, reaudit_rounds=171, gap_cap_rounds=300)
+    raised.validate_training(training, ledger_mode="test")
+    with pytest.raises(ValueError, match="gap_cap_rounds above 200 is for a TEST manifest"):
+        raised.validate_training(training, ledger_mode="production")
+    for kept in (
+        example_audit_policy(steps, reaudit_rounds=171),
+        example_audit_policy(steps, reaudit_rounds=171, gap_cap_rounds=200),
+    ):
+        kept.validate_training(training, ledger_mode="production")
+
+
 @pytest.mark.parametrize(
     ("replay_seconds", "rounds"), [(144, 100), (200, 134), (256, 171), (300, 200), (301, 201)]
 )

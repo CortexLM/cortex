@@ -324,7 +324,8 @@
   replay of 144, 200 and 256 s, and `scripts/ops/live_operator.py open` refuses a shorter gap, with the
   number, when the audit policy pins `reaudit_rounds`. The cap of 200 rounds is the audit policy's optional
   `gap_cap_rounds` (omitted when absent: no digest or run id moves); a TEST manifest raises it, up to
-  `4 * lease_rounds + reaudit_rounds`, and a production manifest that does is refused at publication. See
+  `4 * lease_rounds + reaudit_rounds`, and a production manifest that does is refused by the builder and by
+  the master when the run is created (`AuditPolicyV2.validate_training(..., ledger_mode=)`). See
   `docs/adr/0011-audit-integrity.md` (Part 9, decision 12) at the monorepo root.
 
 ### Fixed

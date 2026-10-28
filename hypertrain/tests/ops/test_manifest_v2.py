@@ -337,3 +337,107 @@ def test_example_admission_policy_digest_is_pinned_in_both_ledger_modes(
     assert "max_unfunded_per_prefix" not in raw
     policy = AdmissionPolicyV2.model_validate(raw)
     assert policy.digest() == "c3fd6d4d47c406fa6add423091f2ae22b38bd9ed8ebe92df472f589672b3e3e3"
+
+
+@pytest.mark.parametrize(("mode", "exit_code"), [("test", 0), ("production", 2)])
+def test_the_builder_refuses_a_production_manifest_that_lifts_the_gap_cap(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], mode: str, exit_code: int
+) -> None:
+    """D88: the cap of 200 rounds on `d_final - d_audit` is lifted by a TEST manifest only."""
+    inputs = tmp_path / "inputs"
+    assert main(["example", "--ledger-mode", mode, "--out", str(inputs)]) == 0
+    policies = json.loads((inputs / "policies.json").read_text())
+    policies["audit"]["gap_cap_rounds"] = 300
+    (inputs / "policies.json").write_text(json.dumps(policies))
+    owner_seed = tmp_path / "owner.seed"
+    owner_seed.write_bytes(b"\x77" * 32)
+    owner_seed.chmod(0o600)
+    capsys.readouterr()
+    code = main(
+        [
+            "build",
+            "--training",
+            str(inputs / "training.json"),
+            "--policies",
+            str(inputs / "policies.json"),
+            "--relays",
+            str(inputs / "relays.json"),
+            "--owner-seed",
+            str(owner_seed),
+            "--exp-round",
+            "1000000",
+            "--out",
+            str(tmp_path / "output"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == exit_code, captured.err
+    if exit_code:
+        assert "gap_cap_rounds" in captured.err and "TEST manifest" in captured.err
+        assert not (tmp_path / "output").exists()
+
+
+def test_the_service_refuses_a_production_manifest_that_lifts_the_gap_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, build_args: list[str]
+) -> None:
+    """The builder is not the gate: a manifest signed by hand over a production economics policy and
+    a raised cap is refused when the run is created, and the same manifest over the TEST policy
+    is accepted."""
+    from hypertrain.data.store import LocalFSStore
+    from hypertrain.protocol.envelope_v2 import seal
+    from hypertrain.protocol.jcs import canonicalize
+
+    output, state = tmp_path / "output", tmp_path / "state"
+    coord_seed = bytes(range(32))
+    training_path = tmp_path / "inputs" / "training.json"
+    training = json.loads(training_path.read_text())
+    training["coord_pubkey"] = Keypair(coord_seed).ss58
+    training_path.write_text(json.dumps(training))
+    policies_path = tmp_path / "inputs" / "policies.json"
+    policies = json.loads(policies_path.read_text())
+    policies["economics"]["reward_authority"] = training["coord_pubkey"]
+    policies["audit"]["gap_cap_rounds"] = 300
+    policies_path.write_text(json.dumps(policies))
+    assert main(build_args) == 0
+    owner = Keypair(b"\x77" * 32)
+    manifest = RunManifestV2.model_validate_json((output / "manifest.json").read_bytes())
+    production = {
+        **policies["economics"],
+        "ledger_mode": "production",
+        "genesis_allocation_hash": None,
+    }
+    body = manifest.body()
+    body["network"]["economics_policy_hash"] = LocalFSStore(state / "objects").put(
+        canonicalize(production, allow_float=False)
+    )
+    lifted = RunManifestV2.model_validate(body)
+    refused = canonicalize(seal(owner, "RunManifestV2", lifted.run_id(), lifted, 1000000))
+    admin_file, coord_file = tmp_path / "admin.token", tmp_path / "coord.key"
+    admin_file.write_text(ADMIN)
+    coord_file.write_bytes(coord_seed)
+    for name, value in {
+        "CHALLENGE_STATE_DIR": str(state),
+        "CHALLENGE_ADMIN_TOKEN_FILE": str(admin_file),
+        "HYPERTRAIN_COORD_KEY_FILE": str(coord_file),
+        "HYPERTRAIN_OWNER_HOTKEY": owner.ss58,
+    }.items():
+        monkeypatch.setenv(name, value)
+    app = create_app(
+        Config.from_env(),
+        clock=lambda: float(manifest.training.beacon.genesis_time),
+        transport=httpx.MockTransport(Master().handler),
+        verify_beacon=verify_fixture,
+    )
+    headers = {**bearer(ADMIN), "content-type": "application/json"}
+    with TestClient(app) as client:
+        assert client.post(
+            "/v1/admin/beacon", json=beacon_payload(1), headers=bearer(ADMIN)
+        ).is_success
+        response = client.post("/v2/admin/runs", content=refused, headers=headers)
+        assert response.status_code == 422 and "gap_cap_rounds" in response.text, response.text
+        accepted = client.post(
+            "/v2/admin/runs",
+            content=(output / "manifest-envelope.json").read_bytes(),
+            headers=headers,
+        )
+        assert accepted.status_code == 201, accepted.text

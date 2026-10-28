@@ -144,6 +144,16 @@ PLAN_BOUND = (
 PLAN_COMMIT = PLAN + "test_a_reaudit_window_never_outlives_its_wait_or_the_commit"
 SERVICE_ACCEPTS = "tests/ops/test_manifest_v2.py::test_build_then_service_accepts"
 BUILD_REFUSES = "tests/ops/test_manifest_v2.py::test_build_refuses_invalid_inputs"
+MANIFEST_TOOL = "src/hypertrain/ops/manifest_v2.py"
+PRODUCTION_CAP = POLICY + "test_a_production_manifest_cannot_raise_the_gap_cap_above_the_default"
+BUILDER_CAP = (
+    "tests/ops/test_manifest_v2.py::"
+    "test_the_builder_refuses_a_production_manifest_that_lifts_the_gap_cap[production-2]"
+)
+SERVICE_CAP = (
+    "tests/ops/test_manifest_v2.py::"
+    "test_the_service_refuses_a_production_manifest_that_lifts_the_gap_cap"
+)
 FAIL_REAUDIT = (
     "            self._fail_reaudit_v2(run_id, row)  "
     "# the second auditor failed too: the member leaves\n"
@@ -651,6 +661,29 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         '    if audit.gap_cap() > DEFAULT_GAP_CAP_ROUNDS and ledger_mode != "test":\n',
         "    if False:\n",
         (TEST_ONLY,),
+    ),
+    (
+        "a production ledger mode may raise the cap of the audit policy",
+        MESSAGES,
+        "        if self.gap_cap() > DEFAULT_GAP_CAP_ROUNDS and ledger_mode not in "
+        '(None, "test"):\n',
+        "        if False:\n",
+        (PRODUCTION_CAP, BUILDER_CAP, SERVICE_CAP),
+    ),
+    (
+        "the manifest builder does not tell the audit policy its ledger mode",
+        MANIFEST_TOOL,
+        "    audit.validate_training(validated, ledger_mode=economics.ledger_mode)\n",
+        "    audit.validate_training(validated)\n",
+        (BUILDER_CAP,),
+    ),
+    (
+        "the service does not tell the audit policy its ledger mode when it creates a run",
+        STORE,
+        "                        policy.validate_training(model.training, "
+        "ledger_mode=ledger_mode)\n",
+        "                        policy.validate_training(model.training)\n",
+        (SERVICE_CAP,),
     ),
     (
         "the cap of the policy is ignored: the tool keeps the literal 200",
