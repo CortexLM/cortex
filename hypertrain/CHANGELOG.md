@@ -117,6 +117,8 @@
   `python -m hypertrain.aggregator.capacity_worker` refuses a process that does not honor the pin.
 
 ### Changed
+- ADR 0012 hash re-measure of v3-executor-perf-a abandoned: superseded by the rewrite of ADR 0012
+  in the integrated tip (commit `8478340f`, not brought into v3-last-merges, D89).
 - A production run no longer stands on a CUDA qualification without host attestation.
   `network_qualification.compare` takes its trust mode as a required keyword (`host_keys`: the two
   pinned SSH host keys, or `None` for label-only) and, with keys, requires each host's signed
