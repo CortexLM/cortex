@@ -103,7 +103,7 @@ class Config:
 def test_the_environment_scan_finds_literal_names_through_aliases_and_helpers() -> None:
     """M-17 (the scan itself): a literal name read through `os.environ.get`, `os.getenv`,
     `os.environ[...]`, an alias of `get` or a helper that forwards its parameter is found; a
-    computed name and a whole-environment copy are not names. A sixteenth knob is reported."""
+    computed name and a whole-environment copy are not names. One more knob is reported."""
     assert environment_names(KNOBS) == {"ALPHA", "BETA", "GAMMA", "DELTA"}
     assert environment_names(KNOBS + '\nextra = os.environ.get("EPSILON")\n') == {
         "ALPHA",
@@ -426,7 +426,7 @@ def credited_and_rotated(audited: Frozen) -> Any:
 def test_a_rotation_between_the_credit_and_the_pay_keeps_every_unit_with_the_coldkey_that_earned_it(
     audited: Frozen,
 ) -> None:
-    """T-CRD-18 (CRD-12, the half that holds): whichever hotkey the weights name for a rotated
+    """T-CRD-18 (CRD-12, the ownership half): whichever hotkey the weights name for a rotated
     miner, the units of its origin stay under its coldkey through the payment, the answer carries
     exactly the round's mass, and the ledger conserves."""
     round_ = credited_and_rotated(audited)
@@ -446,19 +446,10 @@ def test_a_rotation_between_the_credit_and_the_pay_keeps_every_unit_with_the_col
     assert escrow.balances().conserved()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="CRD-12+WGT-13+CL-29: the units a rotated admission earned are emitted to the hotkey "
-    "recorded at issuance, not to the hotkey the admission holds now (nor is the rotation refused "
-    "while origins are owed); on the real finalize path of four miners the rotated miner's "
-    "quarter goes to the key it gave up. Rule to confirm: pay the current hotkey, or refuse "
-    "[fix-lot: decision (product choice pending)]",
-)
 def test_the_units_of_a_rotated_miner_are_emitted_to_the_hotkey_its_admission_holds_now(
     audited: Frozen,
 ) -> None:
-    """T-CRD-18 (CRD-12, WGT-13): four miners credited by the real Finalize, the first one's
+    """T-CRD-18 (CRD-12, WGT-13, CL-29): four miners credited by the real Finalize, the first one's
     admission rotated to another registered hotkey, the origins matured. Whichever rule is chosen
     (pay the hotkey the admission holds now, or refuse the rotation while origins are owed), the
     quarter of the rotated miner is emitted to the hotkey the admission holds, and the round's

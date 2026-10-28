@@ -45,6 +45,7 @@ ENV_SCRUB = (
     "HYPERTRAIN_VEST_ROUNDS",
     "HYPERTRAIN_ROLE_DISPATCH",
     "HYPERTRAIN_CUDA_EXECUTOR",
+    "HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL",
 )
 
 
@@ -156,6 +157,7 @@ def polluted_environment(poison: Path) -> dict[str, str]:
         "HYPERTRAIN_VEST_ROUNDS": "9",
         "HYPERTRAIN_ROLE_DISPATCH": str(files["dispatch"]),
         "HYPERTRAIN_CUDA_EXECUTOR": str(files["cuda"]),
+        "HYPERTRAIN_RELAY_LIFECYCLE_INTERVAL": "7",
     }
 
 
