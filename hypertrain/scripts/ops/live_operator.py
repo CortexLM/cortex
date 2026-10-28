@@ -26,7 +26,9 @@ from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize, f32hex
 from hypertrain.protocol.messages_v2 import (
+    DEFAULT_GAP_CAP_ROUNDS,
     AuditPolicyV2,
+    EconomicsPolicyV2,
     PolicyHashes,
     RosterEntryV2,
     RoundOpenV2,
@@ -125,7 +127,11 @@ def check_roster_floor(hotkeys: list[str], tolerate: int) -> None:
         )
 
 
-def check_open_shape(w: int, hotkeys: list[str], offsets: list[int]) -> None:
+def check_open_shape(
+    w: int, hotkeys: list[str], offsets: list[int], cap: int | None = DEFAULT_GAP_CAP_ROUNDS
+) -> None:
+    """The shape of the six offsets. `cap` bounds `d_final - d_audit`; None leaves the gap to the
+    caller that knows the audit policy (the command line checks the shape before it reads one)."""
     if w < 0 or not hotkeys or len(set(hotkeys)) != len(hotkeys):
         raise SystemExit("need w >= 0 and unique hotkeys")
     if (
@@ -134,24 +140,52 @@ def check_open_shape(w: int, hotkeys: list[str], offsets: list[int]) -> None:
         or any(a >= b for a, b in zip(offsets, offsets[1:], strict=False))
     ):
         raise SystemExit("offsets: six strictly increasing positive beacon offsets")
-    if not 2 <= offsets[5] - offsets[3] <= 200 or offsets[4] <= offsets[2]:
-        raise SystemExit("offsets: need 2 <= d_final-d_audit <= 200 and d_upload > d_commit")
+    gap = offsets[5] - offsets[3]
+    if cap is None:
+        if gap < 2 or offsets[4] <= offsets[2]:
+            raise SystemExit("offsets: need 2 <= d_final-d_audit and d_upload > d_commit")
+    elif not 2 <= gap <= cap or offsets[4] <= offsets[2]:
+        raise SystemExit(
+            f"offsets: need 2 <= d_final-d_audit <= {cap} and d_upload > d_commit"
+            + (
+                ""
+                if cap > DEFAULT_GAP_CAP_ROUNDS
+                else " (the audit policy's gap_cap_rounds raises the cap of a TEST manifest)"
+            )
+        )
+
+
+def check_gap_cap(audit: AuditPolicyV2, ledger_mode: str) -> None:
+    """A cap above the default is for a TEST manifest: a production manifest that raises it is
+    refused at publication (ADR 0011 Part 9, D88)."""
+    if audit.gap_cap() > DEFAULT_GAP_CAP_ROUNDS and ledger_mode != "test":
+        raise SystemExit(
+            f"the audit policy raises gap_cap_rounds to {audit.gap_cap()}, above the default "
+            f"{DEFAULT_GAP_CAP_ROUNDS}, and the ledger mode is {ledger_mode!r}: only a TEST "
+            "manifest may lift the cap"
+        )
 
 
 def check_reaudit_gap(audit: AuditPolicyV2, gap: int) -> None:
     """A policy that pins `reaudit_rounds` is sized for a replay of half that many rounds. Refuse a
-    gap in which a second auditor could not replay it after a first one withheld its signature:
-    the round would be retired (ADR 0011 Part 9, decision 12). A policy that pins nothing (the
-    tiny-cpu shape) is not asked."""
+    gap in which its whole re-audit window does not fit before `d_final`: a withheld MISMATCH would
+    then drop its member as an infrastructure fault instead of being re-audited (ADR 0011 Part 9,
+    D88). The message gives the minimum gap, and says when the cap of the policy is below it. A
+    policy that pins nothing (the tiny-cpu shape) is not asked."""
     if audit.reaudit_rounds is None:
         return
     needed = reaudit_gap_needed(audit.lease_rounds, audit.reaudit_rounds)
     if gap < needed:
         raise SystemExit(
             f"gap {gap} (d_final-d_audit) is too short for reaudit_rounds {audit.reaudit_rounds} "
-            f"of the audit policy: a withheld MISMATCH needs {needed} rounds to be re-audited "
-            "before d_final, so it would retire the round"
-            + (" (above the cap of 200: no gap holds it)" if needed > 200 else "")
+            f"of the audit policy: the re-audit window of a withheld MISMATCH needs {needed} "
+            "rounds before d_final, or the member would be dropped instead of re-audited"
+            + (
+                f"; the policy's gap_cap_rounds ({audit.gap_cap()}) is below it, raise it in the "
+                "TEST manifest"
+                if needed > audit.gap_cap()
+                else ""
+            )
         )
 
 
@@ -171,8 +205,12 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
     """RoundOpenV2 rebuilt the way open_round_v2 recomputes it (store.py:4892-4939)."""
     refuse_service_run(m)
     manifest = m.manifest()
-    check_open_shape(w, hotkeys, offsets)
     audit = AuditPolicyV2.model_validate_json(m.objects.get(manifest.network.audit_policy_hash))
+    economics = EconomicsPolicyV2.model_validate_json(
+        m.objects.get(manifest.network.economics_policy_hash)
+    )
+    check_gap_cap(audit, economics.ledger_mode)
+    check_open_shape(w, hotkeys, offsets, audit.gap_cap())
     check_reaudit_gap(audit, offsets[5] - offsets[3])
     cfg = TrainConfig.from_manifest_v2(manifest)
     now = m.call("GET", "")["now_round"]
@@ -357,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
             offsets = [int(x) for x in args.offsets.split(",")]
         except ValueError:
             raise SystemExit("offsets must be integers") from None
-        check_open_shape(args.w, args.hotkey, offsets)
+        check_open_shape(args.w, args.hotkey, offsets, None)  # the cap is the policy's: open_round
         check_roster_floor(args.hotkey, args.tolerate)
     m = Master(args)
     if args.command == "open":

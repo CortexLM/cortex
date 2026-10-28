@@ -1,13 +1,16 @@
-"""The re-audit in the round the 101 M TEST run opens: gap 200, with the replay durations of 101 M.
+"""The re-audit in the round the 101 M TEST run opens, at the minimum gap its window needs (D88).
 
 The round is opened by `live_operator.open_round`, the code the operator runs, against the
 in-process service; what the miners deliver is seeded. The master's replay of a 101 M model lasts
 144 to 256 s (48 to 86 rounds [A], ADR 0015): the executor boundary pushes that many beacon rounds,
 one by one as the pusher does, before it returns the outcome, so every round count below is the
-store's own, not an assumption of the test. The boundaries are the ones of ADR 0011 Part 9
-decision 12: a second auditor decides the miner iff `x + p` (the rounds before the first lease and
-before the second auditor asks) stays inside the slack of the replay (83, 45 and 13 rounds), and
-otherwise its member is dropped as an infrastructure fault without a sanction (D87).
+store's own, not an assumption of the test. The gap is the one `reaudit_gap_needed` of
+`audit_cooldown_v2` asks for the window the policy pins (175, 226 and 276 rounds for 144, 200 and
+256 s; a TEST manifest raises the cap of 200 for the last two): the whole window fits before
+`d_final`. A second auditor then decides the miner iff `x + p` (the rounds before the first lease
+and before the second auditor asks) stays inside the slack of the replay, and otherwise the member
+is dropped as an infrastructure fault without a sanction (D87). The boundaries are the ones of
+ADR 0011 Part 9 decision 12.
 """
 # ruff: noqa: F811  (the `network` fixture parameter shadows the imported fixture, as in test_multirun.py)
 
@@ -22,6 +25,7 @@ from scripts.ops import live_operator
 from hypertrain.auditor import worker
 from hypertrain.auditor.replay import AuditInputError, Outcome
 from hypertrain.challenge import audit_cooldown_v2 as cooldown
+from hypertrain.challenge.audit_cooldown_v2 import reaudit_gap_needed
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.messages_v2 import CommitV2, RoundOpenV2, reaudit_rounds_for
@@ -41,20 +45,29 @@ from .test_audit_reaudit_v2 import genuine, receipt, standing
 from .test_audit_withheld_signature_v2 import lease_row, records
 
 A, B = AUDITOR_A, AUDITOR_B
-GAP = 200  # d_final - d_audit of the 101 M TEST run: live_operator's cap
 BEACON_SECONDS = 3
+LEASE = 100  # the lease of an H <= 30 run
 
 
 def rounds_of(seconds: int) -> int:
     return math.ceil(seconds / BEACON_SECONDS)
 
 
+def minimum_gap(seconds: int) -> int:
+    """The gap the policy of a replay of `seconds` asks for: 175, 226, 276 for 144, 200, 256 s."""
+    return reaudit_gap_needed(LEASE, reaudit_rounds_for(seconds, LEASE))
+
+
 @pytest.fixture(autouse=True)
 def reaudit_policy(monkeypatch, request):
-    """The run is signed over the window `reaudit_rounds_for` publishes for the replay."""
+    """The run is signed over the window `reaudit_rounds_for` publishes for the replay, and over the
+    cap of 200 rounds lifted to the gap the window needs when that is wider (a TEST manifest)."""
     seconds = request.node.callspec.params["replay_s"]
-    window = reaudit_rounds_for(seconds, 100)
-    monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "reaudit_rounds", window)
+    monkeypatch.setitem(
+        fixtures.AUDIT_POLICY_EXTRA, "reaudit_rounds", reaudit_rounds_for(seconds, LEASE)
+    )
+    if minimum_gap(seconds) > 200:
+        monkeypatch.setitem(fixtures.AUDIT_POLICY_EXTRA, "gap_cap_rounds", minimum_gap(seconds))
 
 
 def walk(network, to):
@@ -83,7 +96,6 @@ def open_with_live_operator(network, tmp_path, gap):
     master.client = network.client  # the same routes, in process
     hotkeys = [key.ss58 for key in miners(4)]
     offsets = [3, 6, 8, 10, 12, 10 + gap]
-    live_operator.check_open_shape(0, hotkeys, offsets)
     live_operator.check_roster_floor(hotkeys, 0)
     live_operator.open_round(master, 0, hotkeys, offsets)
     body = network.store._record_v2(network.manifest.run_id(), "round", "0")["body"]
@@ -152,12 +164,13 @@ def standings(network):
 
 
 def reaudit(network, tmp_path, monkeypatch, *, replay_s, x, poll, busy=False):
+    gap = minimum_gap(replay_s)
     """A leases `x` rounds after d_audit, the master replays for `replay_s` seconds, A never signs;
     B polls `poll` rounds after the detection (`busy`: B first replays the job behind A's, on its
     own host, as the auditor client does) and replays for as long. Returns the timeline."""
     store, run = network.store, network.manifest.run_id()
-    opening = open_with_live_operator(network, tmp_path, GAP)
-    assert opening.d_final - opening.d_audit == GAP
+    opening = open_with_live_operator(network, tmp_path, gap)
+    assert opening.d_final - opening.d_audit == gap
     seed_round(network, n=4, executable=True, opened=True)  # an honest commit seals d_final
     if busy:
         honest(network, opening.d_final)  # nobody is excluded by a MISMATCH of its own
@@ -204,7 +217,13 @@ def reaudit(network, tmp_path, monkeypatch, *, replay_s, x, poll, busy=False):
     # the window opens at the lease's end: 20 rounds after the storing, or its expiry if sooner
     ends_at = t["r0"] + min(lease_rounds(network), replay + cooldown.SIGN_WINDOW_ROUNDS)
     assert window["detected"] == ends_at
-    assert window["until"] == opening.d_final  # the commit ends the window: T would end later
+    # the window is T after the detection, never sooner than the window the job already had
+    # (`absolute`, which an honest commit makes d_final up to two leases), and the commit ends it
+    window_rounds = reaudit_rounds_for(replay_s, LEASE)
+    absolute = min(opening.d_final, opening.d_audit + 2 * LEASE)
+    assert window["until"] == min(
+        opening.d_final, max(window["detected"] + window_rounds, absolute)
+    )
     t["detected"] = window["detected"]
     walk(network, max(network.now, t["detected"] + poll))
     taken = lease(network, B, 4)
@@ -268,19 +287,22 @@ def finish(network, t, result, miner, before, busy):
 
 CASES = [
     # (replay seconds, x = A's lease after d_audit, poll = B's wait after the detection, outcome):
-    # the last rounds of slack of each replay (83, 45 and 13 rounds of x + p) and the one past it;
-    # for 256 s the slack is spent by the 20 s poll of scripts/ops/auditors.sh (up to 7 rounds each)
-    pytest.param(144, 83, 0, "decided", id="144s-last-round-of-slack"),
-    pytest.param(144, 84, 0, "dropped", id="144s-one-past"),
-    pytest.param(200, 45, 0, "decided", id="200s-last-round-of-slack"),
-    pytest.param(200, 46, 0, "dropped", id="200s-one-past"),
-    pytest.param(256, 6, 7, "decided", id="256s-last-round-of-slack"),
-    pytest.param(256, 7, 7, "dropped", id="256s-a-20-second-poll"),
+    # the last round of slack of each replay and the one past it. The slack at the minimum gap is
+    # `gap - 1 - min(L, R + W) - R`: 175 - 1 - 68 - 48 = 58, 226 - 1 - 87 - 67 = 71 and
+    # 276 - 1 - 100 - 86 = 89 rounds of x + p; the 20 s poll of scripts/ops/auditors.sh spends up to
+    # 7 rounds for each of x and p, which the 256 s gap holds with 75 rounds to spare
+    pytest.param(144, 58, 0, "decided", id="144s-last-round-of-slack"),
+    pytest.param(144, 59, 0, "dropped", id="144s-one-past"),
+    pytest.param(200, 71, 0, "decided", id="200s-last-round-of-slack"),
+    pytest.param(200, 72, 0, "dropped", id="200s-one-past"),
+    pytest.param(256, 82, 7, "decided", id="256s-last-round-of-slack"),
+    pytest.param(256, 83, 7, "dropped", id="256s-one-past"),
+    pytest.param(256, 7, 7, "decided", id="256s-a-20-second-poll"),
 ]
 
 
 @pytest.mark.parametrize(("replay_s", "x", "poll", "outcome"), CASES)
-def test_the_reaudit_at_gap_200_is_decided_inside_the_slack_and_drops_the_member_past_it(
+def test_the_reaudit_at_the_minimum_gap_is_decided_inside_the_slack_and_drops_the_member_past_it(
     four_identities, tmp_path, monkeypatch, replay_s, x, poll, outcome
 ):
     t = reaudit(four_identities, tmp_path, monkeypatch, replay_s=replay_s, x=x, poll=poll)
@@ -289,10 +311,13 @@ def test_the_reaudit_at_gap_200_is_decided_inside_the_slack_and_drops_the_member
 
 @pytest.mark.parametrize(
     ("replay_s", "outcome"),
-    [pytest.param(144, "decided", id="144s"), pytest.param(256, "dropped", id="256s")],
+    [pytest.param(144, "decided", id="144s"), pytest.param(256, "decided", id="256s")],
 )
 def test_the_other_auditor_is_busy_with_the_job_behind(
     four_identities, tmp_path, monkeypatch, replay_s, outcome
 ):
+    # four miners, two auditors: the other auditor replays the job behind first, so the re-audit
+    # needs (waves + 1) * R = 3 * R rounds after the detection's start; 144 s (3R = 144) and 256 s
+    # (258) both fit the minimum gap of their window (174 and 275 rounds after the first round)
     t = reaudit(four_identities, tmp_path, monkeypatch, replay_s=replay_s, x=0, poll=0, busy=True)
     assert t["outcome"] == outcome, t

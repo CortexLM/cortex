@@ -2015,61 +2015,63 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
     ordinary window, dropped as `INFRASTRUCTURE` at its end, no strike on the miner. D87 m3 confirms this
     exception to D84's "no accepted residual": the drop is the same `INFRASTRUCTURE` exclusion a failed
     re-audit now ends in for every other run.
-12. **The numbers: the 101 M TEST run opens its rounds with gap 200 (Principal D84 addendum, relayed by
-    Forge).** The gap is an argument of `live_operator.py open` (`d_final - d_audit`, accepted up to the cap of
-    200 rounds), not a protocol constant. [V: arithmetic over the quantities of the code, and the
-    boundaries below executed by `tests/challenge/test_audit_reaudit_gap_200_v2.py` (the round is opened by
-    `live_operator.open_round` at gap 200 over the in-process service, the master's replay is modelled by pushing
-    its rounds inside the executor boundary); the replays of 144 to 256 s are Forge's [A].] Quantities: 3 s a round; L = `lease_rounds` = 100; W = `SIGN_WINDOW_ROUNDS`
-    = 20; an honest commit seals `exp_drand = d_final`, so `absolute = d_final` for every gap up to 200; R =
-    ceil(replay seconds / 3) rounds; x = the rounds between `d_audit` and the first lease; p = the rounds the
-    second auditor takes to ask after the detection; m = the margin of the signature (`MAX_LAG_ROUNDS` = 2
-    and the one-round wall-clock guard of the executor), about 4. The first lease ends at D = x + min(L, R +
-    W); the window is `[D, min(D + T_reaudit, d_final)]`; the commit is the hard limit.
+12. **The numbers and the publication guard (Principal D84 addendum, then D88; relayed by Forge).** The gap
+    `d_final - d_audit` is an argument of `live_operator.py open` (the operator's parameter), and its cap is a
+    parameter of the manifest, not a protocol constant. Quantities [V: the code and `audit_lease_rounds`; the
+    replays of 144 to 256 s are Forge's [A]]: 3 s a round; L = `lease_rounds` = 100; W = `SIGN_WINDOW_ROUNDS` =
+    20; m = `SIGN_MARGIN_ROUNDS` = 4 (the lag the master tolerates, the one-round wall-clock guard of the
+    executor and the round of the post); an honest commit seals `exp_drand = d_final`; R = ceil(replay seconds /
+    3) rounds; x = the rounds between `d_audit` and the first lease; p = the rounds the second auditor takes to
+    ask after the detection. The first lease ends, and the window starts, at D = x + min(L, R + W); the window is
+    `[D, min(D + T_reaudit, d_final)]`, `T_reaudit = reaudit_rounds_for(replay)`.
+    - **The window is sized, not hoped for (D88).** `audit_cooldown_v2.reaudit_gap_needed(L, T)` = `1 + min(L,
+      T/2 + W) + T + m` is the smallest gap in which the whole window fits before `d_final` (the replay the
+      window is sized for is read as T / 2; a floored window asks a round or two more than its replay needs).
+      `live_operator.py open` REFUSES, with the number in the message, a gap below it for a policy that pins
+      `reaudit_rounds`, and refuses a gap above the cap of the policy. A policy that pins nothing (the tiny-cpu
+      shapes, gap 98 and 100) is not asked. The refusal is in the operator's script and not in `open_round_v2`,
+      which is an owned name that checks only `>= 2`.
+    - **The cap is a manifest parameter.** `AuditPolicyV2.gap_cap_rounds` (rounds, default
+      `DEFAULT_GAP_CAP_ROUNDS` = 200, omitted from the canonical body when absent like `reaudit_rounds`, so no
+      digest or run id moves unless a run sets it). A TEST run lifts the cap by setting it in the `audit` object of
+      its `policies.json` (the builder of the 101 M run sets `reaudit_rounds` and `gap_cap_rounds` together).
+      Bounds that remain: `validate_training` refuses a cap above `4 * lease_rounds + reaudit_window()` (571 for
+      the 256 s policy), the end of the last audit wait of the exit table, so that `d_final`, the bound of
+      `Wait.MEMBER_STATE`, never lies past the bound every other wait of Part 8 has; and `live_operator` accepts a
+      cap above 200 only when the economics policy of the manifest has `ledger_mode == "test"` (a production
+      manifest that sets it is refused at publication, naming the parameter). The general exclusion exit is what
+      bounds every wait of the round whatever the gap, as before.
 
-    | Replay | R | `T_reaudit` | min(L, R + W) | gap needed for `D + T_reaudit <= d_final` (x = 0) | gap needed for the re-audit to be decided, `1 + x + min(L, R + W) + p + R + m` (x = p = m = 0) | slack at gap 200, rounds of x + p | gap needed with a 20 s auditor poll (x = p = 7, m = 4) | with a 5 s poll (x = p = 2, m = 4) |
-    | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-    | 144 s | 48 | 100 | 68 | 168 | 117 | 83 | 135 | 125 |
-    | 200 s | 67 | 134 | 87 | 221 | 155 | 45 | 173 | 163 |
-    | 256 s | 86 | 171 | 100 (the lease ends first) | 271 | 187 | 13 | 205 | 195 |
+    | Replay | R | `T_reaudit` | D at x = 0 | gap needed (guard) | slack of x + p at that gap | gap with a 20 s poll (x = p = 7) |
+    | --- | --- | --- | --- | --- | --- | --- |
+    | 144 s | 48 | 100 (the lease floors the 96 the formula gives) | 68 | 175 | 58 | 135 |
+    | 200 s | 67 | 134 | 87 | 226 (cap raised) | 71 | 173 |
+    | 256 s | 86 | 171 | 100 (the lease ends first) | 276 (cap raised) | 89 | 205 |
 
-    - **Executed boundaries** (decided at the last round of slack, retired one round past it): 144 s at x + p =
-      83 and 84, 200 s at 45 and 46, 256 s at 13 and 14 (a first lease 7 rounds late and a second auditor 7 rounds
-      late, the 20 s poll, spend 14). In the first the second auditor's verdict is MISMATCH or MATCH as the
-      miner is a forger or genuine (D47 or cleared); in the second the job fails and its member alone is dropped as
-      `INFRASTRUCTURE` (decision 10), the round goes on, and no sanction row, strike or burnt unit exists. With four
-      miners and two auditors, the other auditor replaying the job behind: 144 s is decided, 256 s drops the member.
-    - **The window "detection + `T_reaudit` <= `d_final`" does not hold at gap 200, except for a replay of
-      144 s.** It needs a gap of 168, 221 and 271 (plus x): no gap up to the cap of 200 satisfies it for 200 s
-      or 256 s. The commit therefore cuts the window (decision 3), and `T_reaudit` itself only binds for a
-      commit sealed past `d_final`, which is a forger's choice. The formula is not claimed to hold by
-      construction. What holds is the condition of the sixth column: the second auditor is asked, replays and
-      signs before `d_final`, if the delays x + p + m stay inside the slack of the seventh.
-    - **At gap 200 the 144 s class is safe, the 200 s class has 45 rounds (135 s) of slack, and the 256 s class
-      has 13 (39 s):** with the 20 s poll of `scripts/ops/auditors.sh` (up to 7 rounds each for x and p) 256 s
-      needs a gap of 205 and does not fit the cap. It fits only with the operational measures: `audits` run at
-      `d_audit`, and a poll sleep of 5 s at most (195 rounds, 5 rounds of slack). Without them the re-audit
-      fails and decision 10 applies: the member is dropped, nobody is sanctioned. Lifting the cap of 200 would be the only way to
-      make the window itself fit at 256 s (a gap of 271 to 279): a Principal decision, not taken here.
-    - **Lanes.** The store runs at most two leases (`max_running_jobs`) and one per auditor. With N miners
-      and two auditors the re-audit of a first-wave job also waits for a lane: `(waves + 1) * R + x + p + m
-      <= g - 1`, waves = ceil(N / 2). Four miners fit at 144 s (3R = 144) and not at 200 s (201) or 256 s
-      (258). With one executor host two concurrent leases need 2R <= L, which fails above 150 s. The 101 M
-      TEST run at gap 200 audits at most four miners at 256 s even with no withhold: that is a property of
+    The slack is `gap - 1 - min(L, R + W) - R`; the last column is the gap the second auditor needs to be
+    DECIDED (`1 + x + min(L, R + W) + p + R + m`), which the guard's gap holds with room: the delays of a 20 s
+    poll (up to 7 rounds each for x and p) fit all three. The previous version of this decision sized only
+    that one replay and found 191 for 256 s; D84's literal form (`D + T_reaudit <= d_final`) needs 168, 221 and
+    271 rounds at x = 0, which no gap up to the old cap of 200 satisfied for 200 s and 256 s: D88's answer is the
+    raised cap, not a residual.
+    - **Executed boundaries** (`tests/challenge/test_audit_reaudit_gap_v2.py`: the round is opened by
+      `live_operator.open_round` over the in-process service at the minimum gap, the master's replay is the
+      executor boundary pushing R beacon rounds one by one): decided at x + p = 58, 71 and 82 + 7 for 144, 200 and
+      256 s, and the member dropped (decision 10) one round past; the 20 s poll (x = p = 7) is decided for 256 s;
+      with four miners and two auditors, the other auditor busy with the job behind, 144 s and 256 s are both
+      decided at their minimum gap (3R = 144 and 258 rounds fit 174 and 275). `tests/ops/test_live_operator.py`
+      pins the publication: a gap one round short of 175 and of 276 is refused with the number, the minimum gap
+      opens when the manifest raises the cap, the 256 s minimum is refused for the cap when the manifest leaves
+      it at 200, and a production manifest cannot lift it.
+    - **Operating discipline.** The guard counts neither x nor p. Run `audits` at `d_audit`; poll the auditors
+      at most every 5 s (`scripts/ops/auditors.sh`, 20 s by default); open with `--offsets` whose last two
+      entries differ by the minimum gap. The default launcher `scripts/launch_cuda_run.sh` opens gap 100
+      (`OFFSETS=150,300,900,1000,1020,1100`), where not even 144 s fits (175): the 101 M launch must override it.
+    - **Lanes.** The store runs at most two leases (`max_running_jobs`) and one per auditor. With N miners and
+      two auditors the re-audit of a first-wave job also waits for a lane: `(waves + 1) * R + x + p + m <= g -
+      1`, waves = ceil(N / 2). With one executor host two concurrent leases need 2R <= L, which fails above
+      150 s. The 101 M TEST run audits at most four miners at 256 s even with no withhold: that is a property of
       the lane model, not of this part.
-    - **The default launcher opens gap 100** (`scripts/launch_cuda_run.sh`: `OFFSETS=150,300,900,1000,1020,
-      1100`), where nothing fits (144 s needs 117 at best): the 101 M launch must override `OFFSETS` to a gap of
-      200.
-    - **Gap guard.** `scripts/ops/live_operator.py open` refuses a gap below
-      `audit_cooldown_v2.reaudit_gap_needed(lease_rounds, reaudit_rounds)` = `1 + min(L, R + W) + R + 4`, with
-      R = ceil(`reaudit_rounds` / 2) the replay the window is sized for and 4 the margin of the signature
-      (`SIGN_MARGIN_ROUNDS`): 191 for 171 rounds, 159 for 134, 125 for 100. It asks only a policy that pins
-      `reaudit_rounds`, so the tiny-cpu and gap-98 shapes are unchanged, and it says in plain words that a
-      withheld MISMATCH would retire the round. It is the best case (no delay of the auditors counted): it
-      refuses the shapes in which not even an immediate second replay could finish, and leaves the delays to the
-      operational measures above. The check is in the operator's script and not in `open_round_v2`, which is an
-      owned name and would refuse today's shapes. A window that no gap up to the cap holds (`reaudit_rounds`
-      above 190) is refused for every gap, which is the truth.
 
 | Event | Rule |
 | --- | --- |
@@ -2192,8 +2194,9 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
    14. A window anchored at the opening of the first lease (a late first lease ends the window before the second
    auditor can replay) or at the round that observed the detection (a late poll shifts it): the detection is
    derived from stored facts.
-   15. Refusing the window when `detection + T_reaudit` is past the commit: at gap 200 it would refuse every
-   replay of 200 s or more (decision 12). The commit cuts the window instead.
+   15. Refusing the window when `detection + T_reaudit` is past the commit: the commit cuts the window instead
+   (decision 3), and the publication guard of decision 12 sizes the gap so that, for a punctual auditor, it
+   does not have to.
    16. Dropping the miner as `INFRASTRUCTURE` with the generic evidence when the second auditor fails (the first
    version): a silent per-member drop, which D84 did not accept; D87 keeps the member-only exclusion but gives
    it a window of its own and evidence of its own (decision 10). 16b. Retiring the whole round on a failed
@@ -2202,8 +2205,9 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
    17. A protocol constant for the length of the window: it depends on the model size (decision 9). A field of
    the run manifest instead of the audit policy: the policy hash already enters `run_id`, and
    `validate_training` is the existing gate.
-   18. Lifting the cap of 200 rounds of `live_operator.py open`: it is the only way to make the whole window fit
-   at 256 s, and a Principal decision.
+   18. Keeping the cap of 200 rounds of `live_operator.py open` as a constant and accepting the residual (D84's
+   first answer): D88 replaces it by `AuditPolicyV2.gap_cap_rounds` and a guard that refuses a run whose window
+   does not fit (decision 12).
 
 ### Decisions for Forge
 
@@ -2217,9 +2221,10 @@ Part 6, ADR 0002 [A]. The design packages and their prototypes are scratch, not 
    never asks for its execution), which would change decisions 1 and 2 of Part 2.
 5. The service-admitted exception (decision 11): D84 says "no accepted residual" and the code cannot retire a
    service-admitted round. Confirm the exception, or ask for a retirement path for that profile.
-6. The 101 M TEST run at gap 200 (decision 12): the 144 s class is safe; the 256 s class needs `audits` at
-   `d_audit` and an auditor poll of 5 s, and the window itself fits only with a gap above the cap of 200.
-   Whether to lift the cap is the Principal's.
+6. The 101 M TEST run (decision 12): the guard asks for gaps of 175 (144 s), 226 (200 s) and 276 (256 s)
+   rounds, the last two above the default cap, which the TEST manifest lifts with `gap_cap_rounds`; the run
+   still needs `audits` at `d_audit` and an auditor poll of 5 s or less. The Principal decided the cap is a
+   manifest parameter (D88); the value for the 101 M run is the builder's to set from the measured replay.
 7. Whether N should be lower for a withheld MISMATCH whose round was retired (the amplification residual).
 
 ### Not verified

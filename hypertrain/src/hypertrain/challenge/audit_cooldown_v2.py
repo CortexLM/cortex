@@ -46,15 +46,17 @@ def sign_deadline(marker: Mapping[str, Any] | None) -> int | None:
 
 
 def reaudit_gap_needed(lease_rounds: int, reaudit_rounds: int) -> int:
-    """The smallest `d_final - d_audit` in which a second auditor can still decide a miner whose
-    first auditor withheld the signature, for a policy that pins `reaudit_rounds` (twice the
-    replay it is sized for, so a replay of half that many rounds). The first lease ends
-    `min(lease_rounds, replay + SIGN_WINDOW_ROUNDS)` rounds after it began, and the second
-    auditor must then be leased, replay and sign before `d_final` (ADR 0011 Part 9, decision
-    12). No delay of the auditors' poll is counted: a smaller gap cannot decide, a larger one
-    decides only if the delays fit what is left."""
+    """The smallest `d_final - d_audit` in which the whole re-audit window of a policy that pins
+    `reaudit_rounds` fits before `d_final` (ADR 0011 Part 9, D88). The window is twice the replay it
+    is sized for, so the replay is half of it. The first lease ends `min(lease_rounds, replay +
+    SIGN_WINDOW_ROUNDS)` rounds after it began, which is when the window starts, and the window and
+    the margin of the signature must then end before `d_final`: `1 + min(L, replay + W) + T + m`.
+    The auditors' own delays (when the first lease is taken, when the second auditor asks) are not
+    counted: they are the operator's discipline, and a larger gap holds them. A floored window (a
+    replay shorter than half a lease) is sized as if the replay were half of it, which asks a round
+    or two more than the replay needs."""
     replay = -(-reaudit_rounds // 2)
-    return 1 + min(lease_rounds, replay + SIGN_WINDOW_ROUNDS) + replay + SIGN_MARGIN_ROUNDS
+    return 1 + min(lease_rounds, replay + SIGN_WINDOW_ROUNDS) + reaudit_rounds + SIGN_MARGIN_ROUNDS
 
 
 def others_free(

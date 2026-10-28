@@ -80,9 +80,10 @@ def test_a_stored_verdict_is_due_twenty_rounds_after_it_was_stored_and_a_replay_
     assert sign_deadline(None) is None  # the lease was never executed
 
 
-def test_a_second_replay_needs_the_first_lease_to_end_and_its_own_replay_before_d_final():
-    # the replay is half the window (twice the replay is the window); 100 rounds is one lease
-    assert reaudit_gap_needed(100, 171) == 191  # 256 s: the lease (100) ends before 86 + 20
-    assert reaudit_gap_needed(100, 134) == 159  # 200 s: 67 + 20 = 87 ends the first lease
-    assert reaudit_gap_needed(100, 100) == 125  # 144 s: a window floored at one lease
-    assert reaudit_gap_needed(1466, 1500) == 1525  # a long lease: 750 + 20 rounds, not 1466
+def test_the_whole_reaudit_window_must_fit_after_the_end_of_the_first_lease_before_d_final():
+    # D88: 1 + min(L, replay + W) + T + margin, the replay being half the window (twice the replay
+    # is the window); 100 rounds is one lease
+    assert reaudit_gap_needed(100, 171) == 276  # 256 s: the lease (100) ends before 86 + 20
+    assert reaudit_gap_needed(100, 134) == 226  # 200 s: 67 + 20 = 87 ends the first lease
+    assert reaudit_gap_needed(100, 100) == 175  # 144 s: a window floored at one lease
+    assert reaudit_gap_needed(1466, 1500) == 2275  # a long lease: 750 + 20 rounds, not 1466

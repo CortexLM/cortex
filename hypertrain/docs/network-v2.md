@@ -767,10 +767,12 @@ another member is sanctioned as usual. A service-admitted run has no window and 
 `INFRASTRUCTURE` exclusion, as before. A lease whose verdict the master stored and its holder did not sign within 20 rounds
 (`SIGN_WINDOW_ROUNDS`, 60 s) of the storing is taken back at that round, not at its expiry, so that the
 other auditor has the rest of the window; a holder whose replay is still running is never taken back.
-Whether the second auditor has time depends on the gap and on the replay: the job must be leased,
-replayed and signed again before `d_final`. At a gap of 200 rounds (the 101 M TEST run) that holds for a
-replay of 144 s with 83 rounds of delay to spare, for 200 s with 45 and for 256 s with 13; a gap of 100
-fits none of them (ADR 0011 Part 9, decision 12). The auditor
+The window must fit before `d_final` (D88): `live_operator.py open` refuses a gap shorter than
+`1 + min(lease_rounds, T/2 + 20) + T + 4` for a policy that pins `reaudit_rounds` T, which is 175, 226 and
+276 rounds for a 101 M replay of 144, 200 and 256 s, and the cap of 200 rounds is the audit policy's
+`gap_cap_rounds` (a TEST manifest lifts it; a production manifest that does is refused). With the minimum
+gap the second auditor decides the miner when the first lease and its own wait together take no more than
+58, 71 and 89 rounds (ADR 0011 Part 9, decision 12). The auditor
 that withheld the signature of a `MISMATCH` for the third time in a run (and each time after) is
 refused new leases, and as a relay observer, for two absolute audit windows (`4 * lease_rounds`; 20
 minutes at H <= 30), unless it is the last configured auditor outside a cooldown. A withheld

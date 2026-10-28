@@ -1,4 +1,5 @@
-"""live_operator `open` accepts any window up to the 200-round cap: two audit leases fit in it."""
+"""live_operator `open` accepts any window up to the cap of the audit policy (200 rounds unless a
+TEST manifest raises it): two audit leases fit in it, and a pinned re-audit window must fit too."""
 
 from __future__ import annotations
 
@@ -11,17 +12,29 @@ from typing import Any
 
 import pytest
 from scripts.ops import live_operator
-from scripts.ops.live_operator import check_open_shape, finalize_expiry
+from scripts.ops.live_operator import (
+    check_gap_cap,
+    check_open_shape,
+    check_reaudit_gap,
+    finalize_expiry,
+)
 
 from hypertrain.aggregator.core import OuterState
 from hypertrain.auditor.replay import AnchorCache, tensor_root
+from hypertrain.challenge.audit_cooldown_v2 import reaudit_gap_needed
 from hypertrain.ops.manifest_v2 import main as manifest_main
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import f32hex
-from hypertrain.protocol.messages_v2 import PolicyHashes, RoundOpenV2, RunManifestV2
+from hypertrain.protocol.messages_v2 import (
+    AuditPolicyV2,
+    PolicyHashes,
+    RoundOpenV2,
+    RunManifestV2,
+    reaudit_rounds_for,
+)
 from hypertrain.trainer.compress import state_hash
 from hypertrain.trainer.config import TrainConfig
 from hypertrain.trainer.model import init_params
@@ -45,9 +58,11 @@ class Reached(Exception):
     """Raised by the stubbed master call: the open path got as far as the network."""
 
 
-def build_master_args(tmp_path: Path, reaudit_rounds: int | None = None) -> list[str]:
+def build_master_args(
+    tmp_path: Path, reaudit_rounds: int | None = None, gap_cap_rounds: int | None = None
+) -> list[str]:
     """CLI global arguments for a state dir holding a real H=1 manifest and no live master; the
-    audit policy pins `reaudit_rounds` when it is given."""
+    audit policy pins `reaudit_rounds` and raises `gap_cap_rounds` when they are given."""
     coord_seed = bytes(range(32))
     inputs = tmp_path / "inputs"
     assert manifest_main(["example", "--out", str(inputs)]) == 0
@@ -59,6 +74,8 @@ def build_master_args(tmp_path: Path, reaudit_rounds: int | None = None) -> list
     policies["economics"]["reward_authority"] = training["coord_pubkey"]
     if reaudit_rounds is not None:
         policies["audit"]["reaudit_rounds"] = reaudit_rounds
+    if gap_cap_rounds is not None:
+        policies["audit"]["gap_cap_rounds"] = gap_cap_rounds
     policies_path.write_text(json.dumps(policies))
     owner_seed = tmp_path / "owner.seed"
     owner_seed.write_bytes(b"\x77" * 32)
@@ -118,12 +135,6 @@ def master_args(tmp_path: Path) -> list[str]:
 
 
 @pytest.fixture
-def pinned_master_args(tmp_path: Path) -> list[str]:
-    """The policy of a 256 s replay: `reaudit_rounds` 171 (ADR 0011 Part 9)."""
-    return build_master_args(tmp_path, 171)
-
-
-@pytest.fixture
 def master_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     calls: list[tuple[str, str]] = []
 
@@ -153,24 +164,99 @@ def test_cli_open_with_an_auditable_window_reaches_the_master(
     assert master_calls == [("GET", "")]
 
 
-# The gap a second replay needs after a withheld one: 1 + min(L, R + W) + R + margin with the replay
-# R read from the policy's window (R = T / 2); 171 rounds is the 256 s replay of the 101 M run.
-@pytest.mark.parametrize(("gap", "refused"), [(100, True), (190, True), (191, False), (200, False)])
-def test_open_refuses_a_gap_in_which_a_pinned_reaudit_window_cannot_decide_a_miner(
-    pinned_master_args: list[str], master_calls: list[tuple[str, str]], gap: int, refused: bool
+# D88: the whole re-audit window of a policy that pins `reaudit_rounds` must fit before d_final. The
+# 101 M replays of 144 s and 256 s (3 s a round, a lease of 100 rounds, a sign window of 20 and a
+# margin of 4): 100 rounds of window for 144 s (the lease floors the 96 the formula gives) and 171
+# for 256 s; the minimum gap is `1 + min(L, replay + W) + T + m` with the replay read as T / 2.
+REPLAYS = [
+    pytest.param(144, 100, 175, id="144s"),  # 1 + min(100, 50 + 20) + 100 + 4
+    pytest.param(256, 171, 276, id="256s"),  # 1 + min(100, 86 + 20) + 171 + 4
+]
+
+
+@pytest.mark.parametrize(("replay_s", "window", "needed"), REPLAYS)
+def test_the_minimum_gap_is_the_one_whose_window_fits_before_d_final(
+    replay_s: int, window: int, needed: int
 ) -> None:
-    args = open_args(pinned_master_args, gap)
-    if not refused:
-        with pytest.raises(Reached):
-            live_operator.main(args)
-        assert master_calls == [("GET", "")]
-        return
+    assert reaudit_rounds_for(replay_s, 100) == window
+    assert reaudit_gap_needed(100, window) == needed
+
+
+@pytest.mark.parametrize(("replay_s", "window", "needed"), REPLAYS)
+def test_open_refuses_a_gap_one_round_short_of_the_minimum_and_names_it(
+    tmp_path: Path,
+    master_calls: list[tuple[str, str]],
+    replay_s: int,
+    window: int,
+    needed: int,
+) -> None:
+    master_args = build_master_args(tmp_path, window, gap_cap_rounds=max(200, needed))
     with pytest.raises(SystemExit) as raised:
-        live_operator.main(args)
+        live_operator.main(open_args(master_args, needed - 1))
     message = str(raised.value)
-    assert f"gap {gap} (d_final-d_audit)" in message and "needs 191 rounds" in message
-    assert "withheld MISMATCH" in message and "retire the round" in message
+    assert f"gap {needed - 1} (d_final-d_audit)" in message and f"needs {needed} rounds" in message
+    assert "withheld MISMATCH" in message and "dropped instead of re-audited" in message
     assert master_calls == []
+
+
+@pytest.mark.parametrize(("replay_s", "window", "needed"), REPLAYS)
+def test_open_accepts_the_minimum_gap_when_the_manifest_raises_the_cap(
+    tmp_path: Path,
+    master_calls: list[tuple[str, str]],
+    replay_s: int,
+    window: int,
+    needed: int,
+) -> None:
+    master_args = build_master_args(tmp_path, window, gap_cap_rounds=max(200, needed))
+    with pytest.raises(Reached):
+        live_operator.main(open_args(master_args, needed))
+    assert master_calls == [("GET", "")]
+
+
+def test_open_refuses_the_256_s_minimum_when_the_manifest_leaves_the_cap_at_200(
+    tmp_path: Path, master_calls: list[tuple[str, str]]
+) -> None:
+    # the minimum gap of a 256 s replay is above the default cap: the cap is what refuses, and the
+    # message says which parameter lifts it (the same gap passes in the test above)
+    master_args = build_master_args(tmp_path, 171)
+    with pytest.raises(SystemExit, match="need 2 <= d_final-d_audit <= 200"):
+        live_operator.main(open_args(master_args, 276))
+    with pytest.raises(SystemExit, match="gap_cap_rounds"):
+        live_operator.main(open_args(master_args, 276))
+    assert master_calls == []
+    # and the guard itself says the policy's cap is below the minimum
+    audit = AuditPolicyV2(
+        lease_rounds=100,
+        max_attempts=2,
+        max_concurrent_per_auditor=1,
+        max_running_jobs=2,
+        max_queued_jobs=32,
+        max_anchor_age_rounds=1,
+        max_steps_per_attempt=2,
+        reaudit_rounds=171,
+    )
+    with pytest.raises(SystemExit, match=r"gap_cap_rounds \(200\) is below it"):
+        check_reaudit_gap(audit, 200)
+
+
+def test_a_cap_above_the_default_is_for_a_test_manifest_only() -> None:
+    audit = AuditPolicyV2(
+        lease_rounds=100,
+        max_attempts=2,
+        max_concurrent_per_auditor=1,
+        max_running_jobs=2,
+        max_queued_jobs=32,
+        max_anchor_age_rounds=1,
+        max_steps_per_attempt=2,
+        reaudit_rounds=171,
+        gap_cap_rounds=300,
+    )
+    check_gap_cap(audit, "test")
+    with pytest.raises(SystemExit, match="only a TEST manifest may lift the cap"):
+        check_gap_cap(audit, "production")
+    check_open_shape(0, HOTKEYS, window(276), cap=300)
+    with pytest.raises(SystemExit, match="<= 300"):
+        check_open_shape(0, HOTKEYS, window(301), cap=300)
 
 
 @pytest.mark.parametrize(("margin", "refused"), [(-1, True), (0, False)], ids=["short", "exact"])

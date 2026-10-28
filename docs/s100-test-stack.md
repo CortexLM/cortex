@@ -367,7 +367,8 @@ L="docker exec -i hypertrain-test-challenge python -I - --master http://127.0.0.
 O=hypertrain/scripts/ops/live_operator.py
 ssh root@s100 "$L open --w 0 --hotkey H0 --hotkey H1 --hotkey H2 --hotkey H3 --tolerate 0 \
   --offsets 3,6,80,82,150,180" < $O     # gap 98: one lease window; end with 282 (gap 200) to fit a replacement lease
-# the 101 M run: gap 200, e.g. --offsets 150,300,900,1000,1020,1200 (the launcher's default is gap 100)
+# the 101 M run: the minimum gap of its re-audit window (175 / 226 / 276 rounds for a 144 / 200 / 256 s
+# replay, below), e.g. 256 s: --offsets 150,300,900,1000,1020,1276 (the launcher's default is gap 100)
 ATEN_CPU_CAPABILITY=avx2 $PY -I $T/cpu_miners.py round DIR 0 0 1 2 3   # one miner at a time
 ssh root@s100 "docker exec -i hypertrain-test-challenge python -I - $RID 0" < $T/round_status.py
 ssh root@s100 "$L audits --w 0" < $O     # once now >= d_audit
@@ -386,19 +387,24 @@ live, so no window can start after that round; the miner is left out of the roun
 inside the same window, and a job whose attempts fail early gets a second window that ends at
 `d_final` (`audit-rearm`).
 
-**A withheld `MISMATCH` needs room for a second replay.** An auditor that does not sign the verdict the
-master stored (20 rounds after the storing, or at the lease's end) makes the job open a re-audit window of
-its own for the other auditor, from that round to the policy's `reaudit_rounds` later, never past the
-miner's commit (`d_final`). The second auditor must be leased, replay and sign before `d_final`: with R the
-replay in rounds (3 s each) that needs `gap >= 1 + x + min(100, R + 20) + p + R + m`, x being the rounds from
-`d_audit` to the first lease, p the second auditor's wait after the detection and m about 4. At gap 200 the
-slack for x + p is 83 rounds for a 144 s replay, 45 for 200 s and 13 for 256 s; with the auditors' poll of
-20 s (`scripts/ops/auditors.sh`, up to 7 rounds each for x and p) 256 s does not fit, so run `audits` at
-`d_audit` exactly and poll every 5 s at most. At gap 100 nothing fits (144 s needs 117). When the second
-auditor does not come in time the round is retired without a sanction (ADR 0011 Part 9, decision 12). `live_operator.py open` refuses a gap below the best case when the audit policy pins `reaudit_rounds` (191 rounds for 171, the 256 s replay), and says so.
-`live_operator.py open` accepts any gap from 2 to 200 rounds for every H; 200 is the service
-horizon (`store.py:5109`). A round with a wider gap closes later: 100 more rounds (5 minutes) per
-extra 100.
+**A withheld `MISMATCH` needs room for its whole re-audit window (D88).** An auditor that does not sign the
+verdict the master stored (20 rounds after the storing, or at the lease's end) makes the job open a re-audit
+window of its own for the other auditor, from that round to the policy's `reaudit_rounds` later, never past
+the miner's commit (`d_final`). The window is `reaudit_rounds_for(replay)` = `max(lease_rounds, ceil(2 x replay
+seconds / 3))`: 100 rounds for a 144 s replay of the 101 M model, 134 for 200 s, 171 for 256 s. The run is
+published with the MINIMUM gap that holds it, `audit_cooldown_v2.reaudit_gap_needed` = `1 + min(100, T/2 + 20) +
+T + 4`: **175 rounds for 144 s, 226 for 200 s, 276 for 256 s**; `live_operator.py open` refuses a shorter gap
+for a policy that pins `reaudit_rounds` and says the number. The cap of `live_operator.py open` is 200 rounds
+unless the audit policy raises it (`gap_cap_rounds`, a TEST manifest only; at most `4 * lease_rounds +
+reaudit_rounds`), so the 200 s and 256 s runs set `audit.gap_cap_rounds` next to `audit.reaudit_rounds` in
+their `policies.json`. The guard does not count x (rounds from `d_audit` to the first lease) or p (the second
+auditor's wait after the detection): run `audits` at `d_audit` exactly and poll every 5 s at most
+(`scripts/ops/auditors.sh`); the slack of x + p at the minimum gap is 58 rounds for 144 s, 71 for 200 s and 89
+for 256 s, and the 20 s poll (7 + 7) fits. At gap 100 nothing fits. When the second auditor does not decide
+in time, its member alone is left out of the round as an `INFRASTRUCTURE` exclusion without a sanction (ADR
+0011 Part 9, decisions 10 and 12).
+`live_operator.py open` accepts any gap from 2 to the cap of the policy (200 by default) for every H. A round
+with a wider gap closes later: 100 more rounds (5 minutes) per extra 100.
 
 Run `audits` as soon as `now >= d_audit`: it must be called before beacon round `absolute - 1`
 (`absolute = min(d_final, d_audit + 2 * lease_rounds)`), and a call after that answers 503 for every

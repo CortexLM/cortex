@@ -1268,6 +1268,31 @@ def test_the_reaudit_window_defaults_to_one_lease_and_stays_inside_the_absolute_
             example_audit_policy(steps, reaudit_rounds=window).validate_training(training)
 
 
+def test_the_gap_cap_is_a_policy_parameter_omitted_when_absent_and_bounded_by_the_exit() -> None:
+    """D88: the operator tool's cap of 200 rounds is a default a TEST manifest may raise, not a
+    protocol constant. Absent, the body, digest and run id are the pinned ones."""
+    training = wrapper().training
+    steps = 2 * training.inner.H
+    default = example_audit_policy(steps)
+    assert default.gap_cap() == 200 and "gap_cap_rounds" not in default.body()
+    assert example_audit_policy().digest() == EXAMPLE_AUDIT_DIGEST  # the pinned H = 1 policy
+    raised = example_audit_policy(steps, reaudit_rounds=171, gap_cap_rounds=300)
+    raised.validate_training(training)
+    assert raised.gap_cap() == 300 and raised.body()["gap_cap_rounds"] == 300
+    assert raised.digest() != example_audit_policy(steps, reaudit_rounds=171).digest()
+    assert AuditPolicyV2.model_validate(raised.body()) == raised
+    # never below the default; never past the last audit wait (4 x 100 + the window 171 = 571),
+    # where the exclusion exit and not the round's own bound would end the waits
+    for bad in (199, 0, -1, True, 2.5):
+        with pytest.raises(ValidationError):
+            example_audit_policy(steps, gap_cap_rounds=bad)
+    example_audit_policy(steps, reaudit_rounds=171, gap_cap_rounds=571).validate_training(training)
+    with pytest.raises(ValueError, match="gap cap"):
+        example_audit_policy(steps, reaudit_rounds=171, gap_cap_rounds=572).validate_training(
+            training
+        )
+
+
 @pytest.mark.parametrize(
     ("replay_seconds", "rounds"), [(144, 100), (200, 134), (256, 171), (300, 200), (301, 201)]
 )

@@ -708,6 +708,11 @@ def audit_lease_rounds(h: int, step_seconds_bound: float) -> int:
     return math.ceil(2 * h * step_seconds_bound / BEACON_PERIOD_SECONDS) + 100
 
 
+# The widest `d_final - d_audit` the operator tool opens a round with unless the audit policy of
+# the manifest raises it (`AuditPolicyV2.gap_cap_rounds`): a default, not a protocol constant.
+DEFAULT_GAP_CAP_ROUNDS = 200
+
+
 def reaudit_rounds_for(replay_seconds: int, lease_rounds: int) -> int:
     """The `AuditPolicyV2.reaudit_rounds` to publish for a replay of `replay_seconds`: the second
     auditor replays the same model, so twice the replay, converted at `BEACON_PERIOD_SECONDS` a
@@ -731,6 +736,12 @@ class AuditPolicyV2(WireModel):
     reaudit_rounds: Annotated[StrictInt, Field(ge=2, le=2**53 - 1)] | None = Field(
         default=None, exclude_if=lambda v: v is None
     )
+    # The widest `d_final - d_audit` the operator tool opens a round with (rounds); the default is
+    # `DEFAULT_GAP_CAP_ROUNDS`. A TEST manifest raises it when `reaudit_rounds` needs a wider round
+    # (ADR 0011 Part 9, D88); omitted when absent for the same reason as `reaudit_rounds`.
+    gap_cap_rounds: Annotated[StrictInt, Field(ge=DEFAULT_GAP_CAP_ROUNDS, le=2**53 - 1)] | None = (
+        Field(default=None, exclude_if=lambda v: v is None)
+    )
 
     def validate_training(self, training: TrainingManifestV2) -> None:
         if self.max_steps_per_attempt != 2 * training.inner.H:
@@ -740,6 +751,11 @@ class AuditPolicyV2(WireModel):
         # Below one lease a full lease would be truncated; above two AuditJobV2 refuses the job.
         if not self.lease_rounds <= self.reaudit_window() <= self.absolute_rounds():
             raise ValueError("audit re-audit window must be between one and two leases")
+        # `d_final` is the bound of the wait for a member's standing (`Wait.MEMBER_STATE`, Part 8):
+        # it must not lie past the last audit wait (`4 * lease_rounds` and the re-audit window), the
+        # latest bound the exit table has.
+        if self.gap_cap() > 2 * self.absolute_rounds() + self.reaudit_window():
+            raise ValueError("audit gap cap must not pass the end of the last audit wait")
 
     def step_bound(self) -> float:
         bound = f32val(self.step_seconds_bound)
@@ -749,6 +765,10 @@ class AuditPolicyV2(WireModel):
 
     def absolute_rounds(self) -> int:
         return 2 * self.lease_rounds
+
+    def gap_cap(self) -> int:
+        """Rounds `d_final - d_audit` may span when the operator tool opens a round."""
+        return DEFAULT_GAP_CAP_ROUNDS if self.gap_cap_rounds is None else self.gap_cap_rounds
 
     def reaudit_window(self) -> int:
         """Rounds a re-audit may last from the detection of a withheld signature: one lease unless

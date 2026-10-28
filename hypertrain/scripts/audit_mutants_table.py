@@ -79,56 +79,63 @@ WINDOW_AT_DETECTION = (
     REAUDIT + "test_the_window_starts_at_the_detection_not_at_the_lease_and_ends_with_the_commit"
 )
 SECOND_FAILS = (
-    REAUDIT + "test_the_second_auditor_withholding_too_retires_the_round_and_blames_nobody"
+    REAUDIT + "test_the_second_auditor_withholding_too_drops_its_member_and_blames_nobody"
 )
-UNUSED_WINDOW = (
-    REAUDIT + "test_a_window_nobody_uses_ends_in_a_retirement_at_its_bound_and_not_before"
-)
+UNUSED_WINDOW = REAUDIT + "test_a_window_nobody_uses_ends_in_a_drop_at_its_bound_and_not_before"
 COMMIT_ENDS = (
-    REAUDIT
-    + "test_a_commit_that_ends_before_the_window_can_open_retires_the_round_at_the_detection"
+    REAUDIT + "test_a_commit_that_ends_before_the_window_can_open_drops_the_member_at_the_detection"
 )
 LATE_OBSERVATION = REAUDIT + "test_a_late_observation_leaves_the_window_where_the_detection_put_it"
 NOTICED_AFTER = (
     REAUDIT + "test_a_detection_noticed_after_its_window_is_over_fails_the_job_without_leasing_it"
 )
 MINER_IS_AUDITOR = (
-    REAUDIT
-    + "test_a_miner_that_is_the_only_other_auditor_cannot_be_re_audited_and_the_round_is_retired"
+    REAUDIT + "test_a_miner_that_is_the_only_other_auditor_cannot_be_re_audited_and_is_dropped"
 )
 SERVICE_RUN = (
     REAUDIT + "test_a_service_admitted_run_opens_no_window_and_keeps_the_infrastructure_drop"
 )
-GUARD = (
-    "tests/ops/test_live_operator.py::"
-    "test_open_refuses_a_gap_in_which_a_pinned_reaudit_window_cannot_decide_a_miner"
+LIVE_TESTS = "tests/ops/test_live_operator.py::"
+SHORT_GAP = LIVE_TESTS + "test_open_refuses_a_gap_one_round_short_of_the_minimum_and_names_it"
+MINIMUM_GAP = LIVE_TESTS + "test_open_accepts_the_minimum_gap_when_the_manifest_raises_the_cap"
+CAP_LEFT_AT_200 = (
+    LIVE_TESTS + "test_open_refuses_the_256_s_minimum_when_the_manifest_leaves_the_cap_at_200"
+)
+TEST_ONLY = LIVE_TESTS + "test_a_cap_above_the_default_is_for_a_test_manifest_only"
+GAP_CAP = (
+    POLICY + "test_the_gap_cap_is_a_policy_parameter_omitted_when_absent_and_bounded_by_the_exit"
 )
 SHAPES = (
     "tests/ops/test_live_operator.py::test_cli_open_with_an_auditable_window_reaches_the_master"
 )
 GAP_FN = (
     "tests/challenge/test_audit_cooldown_v2.py::"
-    "test_a_second_replay_needs_the_first_lease_to_end_and_its_own_replay_before_d_final"
+    "test_the_whole_reaudit_window_must_fit_after_the_end_of_the_first_lease_before_d_final"
 )
-GAP200 = (
-    "tests/challenge/test_audit_reaudit_gap_200_v2.py::"
-    "test_the_reaudit_at_gap_200_is_decided_inside_the_slack_and_retires_the_round_past_it"
+GAP_TESTS = "tests/challenge/test_audit_reaudit_gap_v2.py::"
+AT_THE_MINIMUM = (
+    GAP_TESTS
+    + "test_the_reaudit_at_the_minimum_gap_is_decided_inside_the_slack_and_drops_the_member_past_it"
+)
+D87_E2E = (
+    "tests/e2e/test_reaudit_failed_v2_e2e.py::"
+    "test_a_failed_reaudit_drops_its_member_pays_the_honest_and_sanctions_the_next_forger"
 )
 PLAN = "tests/challenge/test_exit_plan_v2.py::"
-PLAN_FAILED = PLAN + "test_a_failed_reaudit_retires_a_round_that_can_still_carry_and_blames_nobody"
 PLAN_BOUND = (
     PLAN + "test_the_reaudit_wait_ends_one_window_of_its_rounds_after_the_second_audit_window"
 )
 PLAN_COMMIT = PLAN + "test_a_reaudit_window_never_outlives_its_wait_or_the_commit"
-RETIRE = (
-    "tests/challenge/test_retire_round_v2.py::"
-    "test_a_round_is_retired_for_a_failed_reaudit_only_when_a_job_of_it_failed"
-)
 SERVICE_ACCEPTS = "tests/ops/test_manifest_v2.py::test_build_then_service_accepts"
 BUILD_REFUSES = "tests/ops/test_manifest_v2.py::test_build_refuses_invalid_inputs"
 FAIL_REAUDIT = (
-    "            self._fail_reaudit_v2(row)  "
-    "# the second auditor failed too: the round, not the miner\n"
+    "            self._fail_reaudit_v2(run_id, row)  "
+    "# the second auditor failed too: the member leaves\n"
+)
+GAP_CAP_FIELD = (
+    "    gap_cap_rounds: Annotated[StrictInt, Field(ge=DEFAULT_GAP_CAP_ROUNDS, le=2**53 - 1)]"
+    " | None = (\n"
+    "        Field(default=None, exclude_if=lambda v: v is None)\n    )\n"
 )
 REAUDIT_FIELD = (
     "    reaudit_rounds: Annotated[StrictInt, Field(ge=2, le=2**53 - 1)] | None = Field(\n"
@@ -424,7 +431,7 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         "sanction on the second failure: the failed re-audit books the miner",
         STORE,
         FAIL_REAUDIT,
-        "            self._fail_reaudit_v2(row)\n"
+        "            self._fail_reaudit_v2(run_id, row)\n"
         "            self._put_record_v2(\n"
         '                run_id,\n                "exit-sanction",\n'
         "                f\"{row['w']}:{row['hotkey']}\",\n"
@@ -440,21 +447,6 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         + "            return\n",
         "",
         (SECOND_FAILS, UNUSED_WINDOW),
-    ),
-    (
-        "planner ignores a failed re-audit",
-        EXIT,
-        "    elif s.reaudit_failed:\n",
-        "    elif False:\n",
-        (PLAN_FAILED, SECOND_FAILS),
-    ),
-    (
-        "retirement does not re-derive a failed re-audit from the rows",
-        STORE,
-        "            if not self._failed_reaudits_v2(run_id, w):\n"
-        '                raise refuse("no re-audit of the round has failed")\n',
-        "            pass\n",
-        (RETIRE,),
     ),
     (
         "the wait for a re-audit ends with the second audit window",
@@ -489,34 +481,131 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         LIVE,
         "    if gap < needed:\n",
         "    if gap <= needed:\n",
-        (GUARD + "[191-False]",),
+        (MINIMUM_GAP + "[144s]", MINIMUM_GAP + "[256s]"),
     ),
     (
         "gap guard lets a gap that cannot decide a miner through",
         LIVE,
         "    if gap < needed:\n",
         "    if gap < needed - 10:\n",
-        (GUARD + "[190-True]",),
+        (SHORT_GAP + "[144s]", SHORT_GAP + "[256s]"),
     ),
     (
         "gap needed ignores that the first lease is capped at one lease",
         COOLDOWN,
-        "1 + min(lease_rounds, replay + SIGN_WINDOW_ROUNDS) + replay + SIGN_MARGIN_ROUNDS",
-        "1 + (replay + SIGN_WINDOW_ROUNDS) + replay + SIGN_MARGIN_ROUNDS",
+        "1 + min(lease_rounds, replay + SIGN_WINDOW_ROUNDS) + reaudit_rounds + SIGN_MARGIN_ROUNDS",
+        "1 + (replay + SIGN_WINDOW_ROUNDS) + reaudit_rounds + SIGN_MARGIN_ROUNDS",
         (GAP_FN,),
     ),
     (
         "gap needed leaves out the margin of the signature",
         COOLDOWN,
-        "1 + min(lease_rounds, replay + SIGN_WINDOW_ROUNDS) + replay + SIGN_MARGIN_ROUNDS",
-        "1 + min(lease_rounds, replay + SIGN_WINDOW_ROUNDS) + replay",
-        (GAP_FN, GUARD + "[190-True]"),
+        "1 + min(lease_rounds, replay + SIGN_WINDOW_ROUNDS) + reaudit_rounds + SIGN_MARGIN_ROUNDS",
+        "1 + min(lease_rounds, replay + SIGN_WINDOW_ROUNDS) + reaudit_rounds",
+        (GAP_FN, SHORT_GAP + "[256s]"),
     ),
     (
-        "sign window of 21 rounds: the slack of the 144 s replay is one round short",
+        "sign window of 21 rounds: a stored verdict is revoked a round late",
         COOLDOWN,
         "SIGN_WINDOW_ROUNDS = 20\n",
         "SIGN_WINDOW_ROUNDS = 21\n",
-        (GAP200 + "[144s-last-round-of-slack]",),
+        (SIGN_DEADLINE, REVOKED),
+    ),
+    (
+        "whole round retired by one failed re-audit (D84, replaced by D87): the round is voided",
+        STORE,
+        "        self._drop_audit_job_v2(\n"
+        "            run_id,\n"
+        "            row,\n"
+        '            "INFRASTRUCTURE",\n'
+        '            "REAUDIT_FAILED",\n'
+        "            sha256_hex(f\"ht-reaudit-failed/1|{row['id']}\".encode()),\n"
+        "        )\n",
+        "        self._drop_audit_job_v2(\n"
+        "            run_id,\n"
+        "            row,\n"
+        '            "INFRASTRUCTURE",\n'
+        '            "REAUDIT_FAILED",\n'
+        "            sha256_hex(f\"ht-reaudit-failed/1|{row['id']}\".encode()),\n"
+        "        )\n"
+        "        self._put_record_v2(\n"
+        '            run_id, "retired", str(row["w"]), {"cause": "REAUDIT_FAILED"}\n'
+        "        )\n",
+        (D87_E2E,),
+    ),
+    (
+        "sibling unpaid: a failed re-audit cancels the other audits of its round",
+        STORE,
+        "            sha256_hex(f\"ht-reaudit-failed/1|{row['id']}\".encode()),\n        )\n",
+        "            sha256_hex(f\"ht-reaudit-failed/1|{row['id']}\".encode()),\n        )\n"
+        "        self._db.execute(\n"
+        "            \"UPDATE audit_leases_v2 SET state='exhausted',result='ROUND_RETIRED' \"\n"
+        "            \"WHERE run_id=? AND w=? AND state IN ('queued','running')\",\n"
+        '            (run_id, row["w"]),\n'
+        "        )\n",
+        (D87_E2E,),
+    ),
+    (
+        "a later MISMATCH is not sanctioned: a failed re-audit closes its round to the sanction",
+        STORE,
+        '            if int(row["id"].split(":", 1)[0]) not in unclosed:\n'
+        "                continue\n"
+        "            try:\n"
+        "                with escrow.tx():\n"
+        "                    self._book_mismatch_v2(",
+        '            if int(row["id"].split(":", 1)[0]) not in unclosed or self._db.execute(\n'
+        '                "SELECT 1 FROM audit_leases_v2 WHERE run_id=? AND w=? "\n'
+        "                \"AND result='REAUDIT_FAILED'\",\n"
+        '                (run_id, int(row["id"].split(":", 1)[0])),\n'
+        "            ).fetchone():\n"
+        "                continue\n"
+        "            try:\n"
+        "                with escrow.tx():\n"
+        "                    self._book_mismatch_v2(",
+        (D87_E2E,),
+    ),
+    (
+        "a failed re-audit drops its member with the evidence of an ordinary exhaustion",
+        STORE,
+        "            sha256_hex(f\"ht-reaudit-failed/1|{row['id']}\".encode()),\n",
+        '            sha256_hex(row["id"].encode()),\n',
+        (SECOND_FAILS, D87_E2E),
+    ),
+    (
+        "gap_cap_rounds always serialised: the exclusion is dropped and every run id moves",
+        MESSAGES,
+        GAP_CAP_FIELD,
+        GAP_CAP_FIELD.replace(
+            "Field(default=None, exclude_if=lambda v: v is None)", "Field(default=None)"
+        ),
+        (GAP_CAP,),
+    ),
+    (
+        "gap cap ceiling removed: a round may outlast the last audit wait",
+        MESSAGES,
+        "        if self.gap_cap() > 2 * self.absolute_rounds() + self.reaudit_window():\n",
+        "        if False:\n",
+        (GAP_CAP,),
+    ),
+    (
+        "gap cap raised by a production manifest is accepted",
+        LIVE,
+        '    if audit.gap_cap() > DEFAULT_GAP_CAP_ROUNDS and ledger_mode != "test":\n',
+        "    if False:\n",
+        (TEST_ONLY,),
+    ),
+    (
+        "the cap of the policy is ignored: the tool keeps the literal 200",
+        LIVE,
+        "    elif not 2 <= gap <= cap or offsets[4] <= offsets[2]:\n",
+        "    elif not 2 <= gap <= DEFAULT_GAP_CAP_ROUNDS or offsets[4] <= offsets[2]:\n",
+        (MINIMUM_GAP + "[256s]", TEST_ONLY),
+    ),
+    (
+        "the cap is not named when the minimum gap is above it",
+        LIVE,
+        "                if needed > audit.gap_cap()\n",
+        "                if False\n",
+        (CAP_LEFT_AT_200,),
     ),
 )

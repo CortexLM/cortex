@@ -313,11 +313,19 @@
   `reaudit_rounds_for(replay_seconds, lease_rounds)` = `max(lease_rounds, ceil(2 * replay_seconds / 3))`.
   An older image refuses a policy that sets it: ship the image first. `implementation_hash` does not
   change. See `docs/adr/0011-audit-integrity.md` (Part 9, decision 9) at the monorepo root.
-- `scripts/ops/live_operator.py open` refuses a `d_final - d_audit` below
-  `audit_cooldown_v2.reaudit_gap_needed(lease_rounds, reaudit_rounds)` when the audit policy pins
-  `reaudit_rounds` (191 rounds for 171, the 256 s replay of the 101 M run): in a shorter round a
-  withheld `MISMATCH` could not be re-audited before `d_final` and would retire the round. A policy
-  without the key is not asked. See `docs/adr/0011-audit-integrity.md` (Part 9, decision 12).
+- A failed re-audit drops its member alone (D87): when the second auditor does not decide a withheld
+  `MISMATCH` (no auditor left, the window ends, the commit leaves no window, a second withhold), the member
+  leaves the round as an `INFRASTRUCTURE` exclusion whose evidence is `sha256("ht-reaudit-failed/1|" + job id)`;
+  nobody is sanctioned or struck, the honest members keep their round and are paid, and a `MISMATCH` signed
+  later for another member is sanctioned as usual. D84's retirement of the whole round for this case is
+  not taken. See `docs/adr/0011-audit-integrity.md` (Part 9, decision 10) at the monorepo root.
+- The re-audit window must fit before `d_final` (D88): `audit_cooldown_v2.reaudit_gap_needed(lease_rounds,
+  reaudit_rounds)` = `1 + min(L, T/2 + 20) + T + 4` is the smallest gap, 175, 226 and 276 rounds for a 101 M
+  replay of 144, 200 and 256 s, and `scripts/ops/live_operator.py open` refuses a shorter gap, with the
+  number, when the audit policy pins `reaudit_rounds`. The cap of 200 rounds is the audit policy's optional
+  `gap_cap_rounds` (omitted when absent: no digest or run id moves); a TEST manifest raises it, up to
+  `4 * lease_rounds + reaudit_rounds`, and a production manifest that does is refused at publication. See
+  `docs/adr/0011-audit-integrity.md` (Part 9, decision 12) at the monorepo root.
 
 ### Fixed
 - A member convicted of training fraud between the aggregate and the finalize of a round is no
