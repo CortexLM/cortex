@@ -37,6 +37,7 @@ from hypertrain.ledger.escrow_v2 import (
     genesis_allocation_hash,
 )
 from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.env_pins import GPU_CLASSES, class_pin
 from hypertrain.protocol.envelope_v2 import EnvelopeV2, seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -605,10 +606,31 @@ class Production:
         self.escrow.lock(lock, signer=E.COLD.ss58)
 
 
+def gpu_manifest(setup_of: Callable[[str], Any], gpu: str) -> Callable[[str], Any]:
+    """`setup_of` with the manifest pinned to the GPU class `gpu`: a run on the CUDA backend names
+    the device it runs on, and the store refuses one of class none (ENV_CLASS_BACKEND)."""
+
+    def setup(mode: str = "test") -> Any:
+        built = setup_of(mode)
+        body = built.manifest.body()
+        reference = body["training"]["reference_spec"]
+        reference["env"]["pinned"] = class_pin(reference["env"]["pinned"]["cpu"], gpu)
+        reference["sm_count"] = min(GPU_CLASSES[gpu].sm_counts)
+        return replace(built, manifest=RunManifestV2.model_validate(body))
+
+    return setup
+
+
 @contextmanager
-def production_run(root: Path, *, cuda: bool = True, **economics: Any) -> Iterator[Production]:
+def production_run(
+    root: Path, *, cuda: bool = True, gpu: str = "none", **economics: Any
+) -> Iterator[Production]:
+    """`cuda=False` leaves the backend to the store's own choice; a run that installs a CUDA
+    qualification then names a device class with `gpu`."""
     eco = load_fixture_module(*ECONOMICS_FIXTURE)
     patch = pytest.MonkeyPatch()
+    if gpu != "none":
+        patch.setattr(eco.E, "setup", gpu_manifest(eco.E.setup, gpu))
     store, run_id = eco.hosted(root, patch, cuda=cuda, **economics)
     try:
         yield Production(eco, store, run_id)
