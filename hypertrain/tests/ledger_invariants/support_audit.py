@@ -572,6 +572,14 @@ def running(store: ChallengeStore) -> dict[str, dict[str, Any]]:
 def open_rows(store: ChallengeStore) -> list[dict[str, Any]]:
     """The jobs that are neither completed nor exhausted."""
     return [r for r in lease_rows(store).values() if r["state"] in ("queued", "running")]
+def honest_lease(store: ChallengeStore, cast: Cast) -> dict[str, Any]:
+    """The executed lease of stage s2 that is not the forger's. The queue is ordered by job id, a
+    hash of the run id, so which honest miner it belongs to changes with the manifest: a test
+    reads the row and takes the miner from its hotkey."""
+    (row,) = (r for h, r in running(store).items() if h != cast.forger.ss58)
+    return row
+
+
 
 
 def run_out_the_windows(network: Any, store: ChallengeStore) -> int:

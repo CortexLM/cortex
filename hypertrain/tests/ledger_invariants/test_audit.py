@@ -152,12 +152,11 @@ def test_only_the_pinned_auditor_may_execute_or_complete_a_live_lease(world: sa.
 
 def test_the_executed_verdict_of_a_forged_commit_is_the_masters_mismatch(world: sa.World) -> None:
     # Given: the forger signed a commit whose delta hash is not the one its training produced;
-    # the honest job is the allowlisted miner's own.
+    # the honest job is the other executed lease.
     with world.at("s2") as (n, cast):
         store, run = n.store, n.manifest.run_id()
-        rows = running(store)
-        forged = store._record_v2(run, "executed-verdict", rows[cast.forger.ss58]["id"])
-        honest = store._record_v2(run, "executed-verdict", rows[cast.hot[3].ss58]["id"])
+        forged = store._record_v2(run, "executed-verdict", running(store)[cast.forger.ss58]["id"])
+        honest = store._record_v2(run, "executed-verdict", sa.honest_lease(store, cast)["id"])
         commit = store._record_v2(run, "commit", f"0:{cast.forger.ss58}")["body"]
         # Then: the master replayed it and found a mismatch no auditor chose; the leaves are
         # honest, so no leaf is bad and the recomputed root is the committed one.
@@ -191,8 +190,11 @@ def test_an_auditor_cannot_sign_a_verdict_other_than_the_masters(
     # Given: the holder of an executed lease; the master stored the verdict it computed.
     with world.at("s2") as (n, cast):
         store, run = n.store, n.manifest.run_id()
-        target = cast.forger if holder_of == "forger" else cast.hot[3]
-        row = running(store)[target.ss58]
+        row = (
+            running(store)[cast.forger.ss58]
+            if holder_of == "forger"
+            else sa.honest_lease(store, cast)
+        )
         holder = cast.keys[row["auditor"]]
         stored = store._record_v2(run, "executed-verdict", row["id"])
         before = sa.digest_of(store)
@@ -201,7 +203,7 @@ def test_an_auditor_cannot_sign_a_verdict_other_than_the_masters(
         # Then: refused for its value, the lease is untouched and nothing is recorded.
         assert detail(response) == (422, "signed verdict differs from independent real replay")
         assert sa.digest_of(store) == before
-        assert sa.lease_rows(store)[target.ss58]["state"] == "running"
+        assert sa.lease_rows(store)[row["hotkey"]]["state"] == "running"
         # Control: the verdict the master computed completes the same lease.
         assert sa.complete(n, holder, row["id"], stored).json() == {"result": stored["result"]}
 
@@ -389,12 +391,12 @@ def test_a_result_at_the_lease_expiry_round_is_refused_even_before_the_sweep(
     with world.at("s2") as (n, cast):
         store, run = n.store, n.manifest.run_id()
         rows = running(store)
-        forger, honest = rows[cast.forger.ss58], rows[cast.hot[3].ss58]
+        forger, honest = rows[cast.forger.ss58], sa.honest_lease(store, cast)
         assert forger["expires"] == honest["expires"]
         stored = {h: store._record_v2(run, "executed-verdict", r["id"]) for h, r in rows.items()}
         # When: one round before expiry the honest holder completes.
         n.push(honest["expires"] - 1)
-        done = sa.complete(n, cast.keys[honest["auditor"]], honest["id"], stored[cast.hot[3].ss58])
+        done = sa.complete(n, cast.keys[honest["auditor"]], honest["id"], stored[honest["hotkey"]])
         assert done.status_code == 200
         # And at the expiry round, with the expiry sweep switched off, the other holder does not.
         monkeypatch.setattr(store, "_expire_leases_v2", lambda *_: None)
