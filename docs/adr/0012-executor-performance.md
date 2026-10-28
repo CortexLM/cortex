@@ -390,29 +390,30 @@ tree's are.
 
 ### Part B and the head-first pusher (D68)
 
-Measured the same way (`measure.py` over an export of the tree, 2026-10-28) [V]: parent `8c2b24e8` (`v3`
-with `v3-audit-integrity` and `v3-admission-hardening` merged) and this branch's tip.
+Measured the same way (`measure.py` over an export of the tree, 2026-10-28) [V]: `origin/v3` at `4234e8ff`
+(the base after the merge) and this branch's tip.
 
-| Value | Parent `8c2b24e8` | This branch |
+| Value | `v3` `4234e8ff` | This branch |
 | --- | --- | --- |
-| `implementation_hash` | `941247f8…a688d1` | unchanged |
-| the 33 owned functions of `store.py` and the ten named files | | none changed |
-| `store.py` sha256 | `6eadf5bb…1e3972` | `6c3024fa…281780` |
-| `admission.py` sha256 | `ced66e8f…147e7c` | `f56f6ebe…3d1c01` |
+| `implementation_hash` | `fc9e87b0…e4c8fe` | unchanged |
+| the 35 owned functions of `store.py` and the ten named files | | none changed |
+| `store.py` sha256 | `0ef3d258…93ff42` | `fccf87b7…cff123` |
+| `admission.py` sha256 | `d9f158aa…b6b3c7` | `985b2e0a…5cb2ce` |
 | `beacon/push.py` sha256 | `1e40246d…dfbb45` | `7153c2a4…1634c9` |
 | `network_qualification.py`, `cuda_executor.py`, `cuda_executor_runner.py` sha256 | `dab7a6ab…7bda15`, `f342234d…7db619`, `5930be17…4dff90` | unchanged |
-| `sources()` map: files, canonical sha256 | 153, `0d989cd1…987bf9` | 153, `c2142d1a…d0dc6e` |
-| `bundle()` | 2,519,040 bytes, `0fbf1c09…280721` | 2,529,280 bytes, `8f6f96ff…9a90fd` |
+| `sources()` map: files, canonical sha256 | 155, `2443f974…30feea` | 155, `7ca59f58…9f607d` |
+| `bundle()` | 2,560,000 bytes, `cd4e5285…5d0ee2` | 2,570,240 bytes, `c94141f0…58a083` |
 
-Reading: the work edits `trial_reference_v2`, a new private method and two module constants, `push_beacon`,
-`stage_trial_v2`, `_open_child` and `__init__` in `store.py`. None of them is among the 33 `owned` functions of
+Reading: the work edits `trial_reference_v2`, two new private methods and two module constants, `push_beacon`,
+`stage_trial_v2`, `_open_child` and `__init__` in `store.py`. None of them is among the 35 `owned` functions of
 `_service_implementation_v2`, `Admission.prepare_reference` is not owned either, and neither `admission.py`,
-`beacon/push.py` nor `data/store.py` (the `put` fix) is one of its ten named files, so `implementation_hash` does not move: the prediction of Part A
-holds by measurement, not only by reading. (The value is `941247f8…`, not the `02e208a3…` printed above:
-`v3-admission-hardening` and `v3-audit-integrity` added owned definitions before this work.) `sources()` and
-`bundle()` hash every `src/hypertrain/**/*.py`, so they move, with the consequences described above for
-qualification configs and dispatch source pins; the server image digest changes with any build. The GPU image is
-not read by anything here; a rebuilt one has a new digest, as before. The ADR text is not hashed.
+`beacon/push.py` nor `data/store.py` (the `put` fix) is one of its ten named files, so `implementation_hash`
+does not move: the prediction of Part A holds by measurement, not only by reading. (Its value is `fc9e87b0…`,
+not the `02e208a3…` printed above: `v3-admission-hardening`, `v3-audit-integrity` and the later `v3` batches added
+owned definitions before this work.) `sources()` and `bundle()` hash every `src/hypertrain/**/*.py`, so they
+move, with the consequences described above for qualification configs and dispatch source pins; the server image
+digest changes with any build. The GPU image is not read by anything here; a rebuilt one has a new digest, as
+before. The ADR text is not hashed.
 
 ## Consequences
 
