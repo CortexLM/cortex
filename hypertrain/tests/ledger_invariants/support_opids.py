@@ -41,6 +41,7 @@ from hypertrain.protocol.messages_v2 import (
 from .support import H, bare_escrow
 
 PREFIX_SEED = b"li-opids-prefix-key"
+RECIPIENT = Keypair(b"\x0d" * 32)  # receives the units of a client transfer; no fixture funds it
 
 
 def fresh_id(label: str) -> str:
@@ -126,6 +127,23 @@ def self_transfer(owner: str, operation_id: str, origin: str, units: int = 1) ->
     )
 
 
+def transfer_to_recipient(
+    owner: str, operation_id: str, origin: str, units: int = 1
+) -> EscrowTransfer:
+    """A client event any funded key can sign: the owner sends `units` of `origin` to a key that
+    holds nothing. The ledger refuses a transfer to oneself (SELF_TRANSFER), so the cheapest event
+    a bystander can sign moves a unit away."""
+    return EscrowTransfer(
+        operation_id=operation_id,
+        owner=owner,
+        recipient=RECIPIENT.ss58,
+        units=units,
+        origin_ids=[origin],
+        admission_id=None,
+        dispute_id=None,
+    )
+
+
 def contest_lock(
     owner: str, operation_id: str, origin: str, dispute_id: str = H, units: int = 1
 ) -> EscrowLock:
@@ -146,7 +164,7 @@ def client_event(
 ) -> EscrowReceipt:
     """What a funded key can sign on the escrow routes, under an id of its choice."""
     if kind == "transfer":
-        event = client_model(lambda: self_transfer(key.ss58, operation_id, origin))
+        event = client_model(lambda: transfer_to_recipient(key.ss58, operation_id, origin))
         return escrow.transfer(event, signer=key.ss58)
     assert kind == "lock"
     return escrow.lock(

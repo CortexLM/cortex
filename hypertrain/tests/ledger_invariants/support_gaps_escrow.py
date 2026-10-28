@@ -33,7 +33,7 @@ from hypertrain.protocol.messages_v2 import EscrowLock, EscrowRelease, Resolutio
 from .support import World, service_world
 from .support_escrow_laws import Funded, funded, lock_op, release_op
 from .support_locks import Lab, Miner, Rig, ident, settled_status
-from .support_opids import DisputeWorld, contest_lock, fresh_id, refused, self_transfer
+from .support_opids import DisputeWorld, contest_lock, fresh_id, refused, transfer_to_recipient
 from .support_weights import Metagraph, add_origin, live_gate
 
 SOURCE = Path(hypertrain.__file__).parent
@@ -80,8 +80,11 @@ def sql_writers(tables: frozenset[str]) -> set[Site]:
     return found
 
 
-def record_writers(kinds: frozenset[str]) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]]]:
-    """Who stores a record of one of `kinds` through `_put_record_v2`.
+def record_writers(
+    kinds: frozenset[str], writer: str = "_put_record_v2"
+) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]]]:
+    """Who stores a record of one of `kinds` through `writer`, the record store or a function that
+    forwards its caller's kind to it.
 
     Returns the (module, function, kind) of every call whose kind is a literal in `kinds`, and
     the (module, function) of every call whose kind is not a literal at all.
@@ -96,7 +99,7 @@ def record_writers(kinds: frozenset[str]) -> tuple[set[tuple[str, str, str]], se
             for call in ast.walk(function):
                 if not (
                     isinstance(call, ast.Call)
-                    and getattr(call.func, "attr", getattr(call.func, "id", "")) == "_put_record_v2"
+                    and getattr(call.func, "attr", getattr(call.func, "id", "")) == writer
                     and len(call.args) >= 2
                 ):
                     continue
@@ -106,6 +109,19 @@ def record_writers(kinds: frozenset[str]) -> tuple[set[tuple[str, str, str]], se
                 elif kind.value in kinds:
                     literal.add((module, function.name, kind.value))
     return literal, dynamic
+
+
+def callers(module: str, callee: str) -> set[str]:
+    """The names of the functions of `module` that call `callee`, as a method or a plain name."""
+    tree = ast.parse((SOURCE / module).read_text())
+    return {
+        function.name
+        for function in ast.walk(tree)
+        if isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef)
+        for call in ast.walk(function)
+        if isinstance(call, ast.Call)
+        and getattr(call.func, "attr", getattr(call.func, "id", "")) == callee
+    }
 
 
 def keys_selecting(function: str, module: str, variable: str) -> set[str]:
@@ -135,8 +151,8 @@ def seed_pending_origin(world: World, origin: str, owner: str, units: int, matur
     """A bootstrap-like origin that vests at `mature_at`: the genesis origins of the fixture all
     vest at the first beacon, so a later maturity needs one more origin.
 
-    A net-zero self-transfer of the owner follows, so that the snapshot of the event chain holds
-    the new rows and the ledger still verifies when a restarted store builds it again."""
+    A one-unit transfer of the owner follows, so that the snapshot of the event chain holds the
+    new rows and the ledger still verifies when a restarted store builds it again."""
     escrow = world.store._services(world.run_id)[0]
     with world.store._lock:
         escrow.db.execute(
@@ -146,7 +162,9 @@ def seed_pending_origin(world: World, origin: str, owner: str, units: int, matur
             "INSERT INTO escrow_units VALUES(?,?,'reward_pending','',?)", (origin, owner, units)
         )
         escrow.transfer(
-            self_transfer(owner, fresh_id("snapshot-" + origin), world.network.origin_ids[0]),
+            transfer_to_recipient(
+                owner, fresh_id("snapshot-" + origin), world.network.origin_ids[0]
+            ),
             signer=owner,
         )
 
@@ -252,7 +270,11 @@ def client_event_over_http(
     """What a funded coldkey sends to the public escrow routes, under an id of its choice."""
     if kind == "transfer":
         return signed_post(
-            world, "transfer", key, "EscrowTransfer", self_transfer(key.ss58, operation_id, origin)
+            world,
+            "transfer",
+            key,
+            "EscrowTransfer",
+            transfer_to_recipient(key.ss58, operation_id, origin),
         )
     return signed_post(
         world, "lock", key, "EscrowLock", contest_lock(key.ss58, operation_id, origin)

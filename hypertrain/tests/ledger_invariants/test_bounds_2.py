@@ -497,7 +497,8 @@ def test_a_production_run_without_a_cuda_qualification_is_refused_and_leaves_no_
 
 def install_qualification(run: Any, signer: Any, **evidence_changes: Any) -> dict[str, Any]:
     """Write the record `_bootstrap_backend_v2` would write for GPU evidence this test does not
-    have: the exact-evidence object and a Receipt over its hash signed by `signer`."""
+    have: the exact-evidence object and a Receipt over its hash signed by `signer`. The hosts are
+    attested, as a production run demands; the lists are empty because no host signed anything."""
     store = run.store
     manifest = store._run_v2(run.run_id)
     reference = manifest.training.reference_spec
@@ -506,6 +507,7 @@ def install_qualification(run: Any, signer: Any, **evidence_changes: Any) -> dic
         "backend": "cuda",
         "reference_hash": sha256_hex(canonicalize(reference.model_dump(mode="json"))),
         "layout_hash": reference.layout.model_dump_json(),
+        "host_attestation": {"host_keys": [], "statements": [], "signatures": []},
         **evidence_changes,
     }
     authority = store.objects.put(canonicalize(evidence))
@@ -523,7 +525,7 @@ def install_qualification(run: Any, signer: Any, **evidence_changes: Any) -> dic
 def test_production_services_exist_only_behind_an_owner_signed_cuda_qualification(
     tmp_path: Path,
 ) -> None:
-    with production_run(tmp_path, cuda=False) as run:
+    with production_run(tmp_path, cuda=False, gpu="sm_103") as run:
         service = load_fixture_module(*SERVICE_FIXTURE)
         owner = service.OWNER
         with pytest.raises(ChallengeError, match="production CUDA qualification required"):
@@ -547,7 +549,7 @@ def test_production_services_exist_only_behind_an_owner_signed_cuda_qualificatio
 
 
 def test_the_execution_backend_of_a_run_is_frozen_once_chosen(tmp_path: Path) -> None:
-    with production_run(tmp_path, cuda=False) as run:
+    with production_run(tmp_path, cuda=False, gpu="sm_103") as run:
         service = load_fixture_module(*SERVICE_FIXTURE)
         run.store.owner_hotkey = service.OWNER.ss58
         first = install_qualification(run, service.OWNER)
@@ -710,7 +712,7 @@ def test_a_changed_capacity_implementation_voids_the_admitted_profile_and_cannot
         monkeypatch.setattr(
             ChallengeStore,
             "_service_implementation_v2",
-            staticmethod(lambda source, paths: "ef" * 32),
+            staticmethod(lambda source, paths, pin: "ef" * 32),
         )
         with pytest.raises(ChallengeError, match="SERVICE_PROFILE_AUTHORITY"):
             store.require_roster_v2(run_id, roster=roster)

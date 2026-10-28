@@ -37,6 +37,7 @@ from .support import (
 from .support_gaps_escrow import (
     ask_for_the_challenge,
     at_epoch_four,
+    callers,
     client_event_over_http,
     funded_cohort,
     keys_selecting,
@@ -96,7 +97,8 @@ CREDIT_WRITERS = {
     ("challenge/store.py", "weights", "INSERT INTO", "weights_runs"),
     ("challenge/app.py", "registered_weights", "INSERT INTO", "weights_registered"),
 }
-FINALIZATION_KINDS = frozenset({"finalize", "replayed-finality", "settlement", "finalize-result"})
+CLOSURE_KIND = "replayed-finality"
+FINALIZATION_KINDS = frozenset({"finalize", CLOSURE_KIND, "settlement", "finalize-result"})
 # records_v2 is a general table (INSERT OR REPLACE in _put_record_v2, CL-38 is a decision); the
 # direct statements below write other kinds: shadow reservations, custody and the child copy of
 # the qualification records.
@@ -124,11 +126,24 @@ def test_the_credit_tables_are_written_only_by_the_statements_the_ledger_relies_
 def test_each_finalization_record_kind_is_stored_only_by_finalize() -> None:
     # Given: the callers of the record store and the direct statements on records_v2.
     literal, dynamic = record_writers(FINALIZATION_KINDS)
-    # Then: finalize, replayed-finality, settlement and finalize-result are written by
-    # finalize_v2 alone, no other caller picks its kind at run time than training_v2, and that
-    # one is limited to a closed set of actions, none of them a finalization kind.
-    assert literal == {("challenge/store.py", "finalize_v2", kind) for kind in FINALIZATION_KINDS}
-    assert dynamic == {("challenge/store.py", "training_v2")}
+    # Then: finalize, settlement and finalize-result are written by finalize_v2 alone and
+    # replayed-finality by the one closure writer (D70), which only the three functions that
+    # close a round call; no other caller picks its kind at run time than training_v2, which is
+    # limited to a closed set of actions, none of them a finalization kind, and _put_changed_v2,
+    # which forwards the literal kind of each of its callers, none of them a finalization kind.
+    assert literal == {
+        ("challenge/store.py", "finalize_v2", kind) for kind in FINALIZATION_KINDS - {CLOSURE_KIND}
+    } | {("challenge/store.py", "_close_round_v2", CLOSURE_KIND)}
+    assert callers("challenge/store.py", "_close_round_v2") == {
+        "finalize_v2",
+        "_retire_round_v2",
+        "rollback_v2",
+    }
+    assert dynamic == {
+        ("challenge/store.py", "training_v2"),
+        ("challenge/store.py", "_put_changed_v2"),
+    }
+    assert record_writers(FINALIZATION_KINDS, "_put_changed_v2") == (set(), set())
     assert keys_selecting("training_v2", "challenge/store.py", "action") == {
         "accept",
         "commit",
@@ -206,7 +221,7 @@ def paid_after(world: World) -> dict[str, float]:
 def test_matured_units_are_emitted_to_the_hotkey_that_earned_them_while_it_is_the_current_one(
     tmp_path: Path,
 ) -> None:
-    # Control of the hole below: the origin of the first hotkey pays that hotkey, once.
+    # Control of the rotation test below: the origin of the first hotkey pays that hotkey, once.
     service = load_fixture_module(*SERVICE_FIXTURE)
     hot, cold = service.HOT[0].ss58, service.COLD[0]
     origins = [(fresh_id("cl-29"), hot, cold.ss58, PAID)]
@@ -216,16 +231,7 @@ def test_matured_units_are_emitted_to_the_hotkey_that_earned_them_while_it_is_th
         assert paid_after(world) == {hot: float(PAID)}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DefenceMissing,
-    reason=(
-        "CRD-12+WGT-13+CL-29: the units a rotated admission earned are emitted to the hotkey the "
-        "admission holds now (or the rotation is refused while origins are owed), but payable() "
-        "answers the hotkey recorded at issuance, so the weight goes to the key that was given up "
-        "[fix-lot: decision (product choice pending)]"
-    ),
-)
+# CRD-12+WGT-13+CL-29 closed by escrow-relay-fixes (3d6129d3): _payee_v2 pays the current hotkey.
 def test_matured_units_of_a_rotated_admission_are_emitted_to_its_current_hotkey(
     tmp_path: Path,
 ) -> None:
