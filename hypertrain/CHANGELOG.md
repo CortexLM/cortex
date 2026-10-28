@@ -263,7 +263,8 @@
   every time-dependent decision of the plan are made at the beacon round the freshness gate
   passed at. A second `aggregate` of a round that is computing waits for it (two waiters per
   process, 600 s, then 503). `finalize` replays the applied tape before its transaction and the
-  transaction uses that verdict only if the records it replayed are unchanged. The bytes written
+  transaction uses that verdict only if the records it replayed are unchanged and it is at most
+  120 s old. The bytes written
   are those of the single transaction. The new helpers join the owned set of
   `implementation_hash`, which changes (as for any edit of `aggregate_v2` or `finalize_v2`); the
   freshness gate is not asked again at the settlement. See `docs/network-v2.md`.

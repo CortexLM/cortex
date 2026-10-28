@@ -634,8 +634,11 @@ second `aggregate` of a round that is computing waits for it and gets its answer
 most two such calls wait per process: a third answers 503 `aggregate already running for this
 round; retry`, and a waiter gives up after 600 s with 503 `aggregate still running for this
 round; retry`. `finalize` replays the applied tape before it takes the lock, and uses that replay
-only if the records it replayed are unchanged when it runs. A `finalize` made while the
-`aggregate` of its round is still computing answers 409 `missing accepted applied` at once.
+only if the records it replayed are unchanged when it runs and it is at most 120 s old: a
+`finalize` refused and retried later replays again. The expiry of the `Finalize` envelope is judged
+when the transaction runs, after the replay, so sign it with a margin of the replay time
+(`scripts/ops/live_operator.py` signs 1000 rounds). A `finalize` made while the `aggregate` of its
+round is still computing answers 409 `missing accepted applied` at once.
 
 A round opens only with members whose screen covers it. `open` answers 403 "roster screen ends
 before the round's audit window" for an entry whose `screen_until` is before the round's
