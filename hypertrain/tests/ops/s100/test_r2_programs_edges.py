@@ -123,6 +123,12 @@ def test_pre_names_every_missing_setting_and_joins_every_validation_error(world)
     assert refusal(world.pre()) == "missing R2 settings: R2_ACCOUNT_ID, R2_BUCKET"
 
 
+def test_a_validation_error_of_the_whole_model_has_no_place_to_name(world):
+    world.settings["max_artifact_bytes"] = 10_000 * (16 << 20) + 1  # more parts than a store takes
+    reason = refusal(world.pre())
+    assert reason.startswith("Value error, max_artifact_bytes needs more than 10,000 parts")
+
+
 def test_a_validation_error_in_a_list_names_the_item(world):
     world.settings["operations"] = ["bogus"]
     assert refusal(world.pre()).startswith("operations.0: ")
@@ -148,6 +154,27 @@ def test_the_seconds_printed_are_the_seconds_it_took(tmp_path):
         front.close()
     seconds = [float(x) for x in re.findall(r"_s=(\d+\.\d{3})", done.stdout)]
     assert len(seconds) == 3 and all(0.3 <= s < 20 for s in seconds), done.stdout
+
+
+class Lossy(TimedFakeR2):
+    """A store that deletes, and then answers that the delete failed."""
+
+    def __call__(self, req):
+        response = super().__call__(req)
+        return httpx.Response(500) if req.method == "DELETE" else response
+
+
+def test_a_delete_that_is_reported_failed_fails_the_check_though_the_object_is_gone(tmp_path):
+    fake = Lossy()
+    front = serve_http(fake)
+    try:
+        world = World(tmp_path / "executor")
+        world.token = credentials_file(world.root, front.base)
+        done = world.run("roundtrip", str(world.token))
+    finally:
+        front.close()
+    assert done.returncode == 1 and "delete=500 absent=404" in done.stdout
+    assert fake.objects == {}
 
 
 def test_the_check_object_has_a_name_that_cannot_collide(store):
