@@ -65,6 +65,10 @@ OLD_REF, NEW_REF = f"{REPO}@{OLD_ID}", f"{REPO}@{NEW_ID}"
 EXECUTOR_PATH, EXECUTOR_VAR = "/data/executor/cuda-executor.json", "HYPERTRAIN_CUDA_EXECUTOR"
 ARTIFACTS_VAR = "HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS"
 SETTINGS_PATH, TOKEN_PATH = "/data/executor/r2-artifacts.json", "/data/executor/r2.env"
+# what the fake answers to a round trip (a line in the grammar of the real program)
+ROUNDTRIP_LINE = (
+    "r2-check challenge put=200 get=200 delete=204 bytes=1048576 put_s=0.1 get_s=0.1 delete_s=0.1"
+)
 # What the token file holds. None of it may reach an output, a docker call, an argument or a file
 # other than the token file itself: Box.run looks for every value after every command.
 R2_VALUES = {
@@ -210,6 +214,9 @@ def seen(name):  # a file the script may have written, as it is at this moment
     return hashlib.sha256(open(path, "rb").read()).hexdigest() if os.path.exists(path) else None
 
 
+ROUNDTRIP = "@ROUNDTRIP@"
+
+
 def program(args):  # `exec [-i] CHALLENGE python -I -c PROGRAM MODE ARGS`, the one shape the script
     # uses: -i only for `pre`, which reads the settings on stdin; the TEST challenge only
     stdin_flag = args[:1] == ["-i"]
@@ -217,7 +224,8 @@ def program(args):  # `exec [-i] CHALLENGE python -I -c PROGRAM MODE ARGS`, the 
     if args[:4] != ["hypertrain-test-challenge", "python", "-I", "-c"] or len(args) < 6:
         return None
     mode, rest = args[5], args[6:]
-    if (mode, stdin_flag, len(rest)) not in {("pre", True, 1), ("post", False, 2)}:
+    shapes = {("pre", True, 1), ("post", False, 2), ("roundtrip", False, 1)}
+    if (mode, stdin_flag, len(rest)) not in shapes:
         return None
     return args[4], mode, rest, sys.stdin.read() if stdin_flag else ""
 
@@ -233,7 +241,8 @@ def run_program(args):
                         "settings": seen("r2-artifacts.json"), "override": seen(st["override"])})
     if c["State"]["Status"] != "running":
         done(1, "Error response from daemon: container is not running")
-    rc, out = st["exec_out"].get(mode, [0, {"pre": "preflight ok", "post": "postflight ok"}[mode]])
+    ok = {"pre": "preflight ok", "post": "postflight ok", "roundtrip": ROUNDTRIP}[mode]
+    rc, out = st["exec_out"].get(mode, [0, ok])
     if mode == "post":  # the part of the program that only reads this process's environment
         env = dict(e.split("=", 1) for e in c["Config"]["Env"])
         names = ("HYPERTRAIN_CUDA_EXECUTOR", "HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS")
@@ -480,7 +489,9 @@ class Box:
             d.mkdir(parents=True)
         for name, body in SHIMS.items():
             shim = self.fake / "bin" / name
-            shim.write_text(body.replace("@PY@", sys.executable))
+            shim.write_text(
+                body.replace("@PY@", sys.executable).replace("@ROUNDTRIP@", ROUNDTRIP_LINE)
+            )
             shim.chmod(0o755)
         self.script = root / "challenge_image.sh"
         self.script.write_text(sandboxed(SCRIPT_TEXT, root, challenge_uid))

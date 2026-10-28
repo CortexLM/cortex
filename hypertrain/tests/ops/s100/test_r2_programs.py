@@ -8,13 +8,15 @@ operator's screen: no value of the token file, no byte of it, no path of a URL.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
-from tests.gpu_ops.artifact_fakes import BUCKET, credentials_file
+from tests.gpu_ops.artifact_fakes import BUCKET, TimedFakeR2, credentials_file, serve_http
 from tests.storage.fakes import CFG, SECRET
 
 from hypertrain.gpu_ops import artifact_transfer as at
@@ -99,7 +101,7 @@ def world(tmp_path: Path) -> World:
 def refusal(done: subprocess.CompletedProcess[str]) -> str:
     assert done.returncode == 1 and done.stderr == "", done
     (line,) = done.stdout.splitlines()
-    assert line.startswith(("preflight refused: ", "postflight refused: ")), line
+    assert line.startswith(("preflight refused: ", "postflight refused: ", "r2-check refused: "))
     return line.split("refused: ", 1)[1]
 
 
@@ -332,3 +334,116 @@ def test_an_unknown_mode_is_a_refusal_not_a_traceback(world):
     done = world.run("bogus")
     assert done.returncode == 1 and done.stderr == ""
     assert done.stdout == "program refused: KeyError\n"
+
+
+# --- roundtrip ----------------------------------------------------------------------------------
+
+LINE = (
+    r"r2-check challenge put=200 get=200 delete=204 bytes=1048576"
+    r" put_s=\d+\.\d{3} get_s=\d+\.\d{3} delete_s=\d+\.\d{3}"
+)
+PROXIES = {name: "http://127.0.0.1:9" for name in ("HTTP_PROXY", "http_proxy", "ALL_PROXY")}
+
+
+class Flipping(TimedFakeR2):
+    """A store that answers a read of the check object with other bytes."""
+
+    def __call__(self, req: httpx.Request) -> httpx.Response:
+        response = super().__call__(req)
+        if req.method == "GET" and "_r2-check" in req.url.path and response.status_code == 200:
+            return httpx.Response(200, content=b"\0" * len(response.content))
+        return response
+
+
+@pytest.fixture
+def store(world):
+    fake = TimedFakeR2()
+    front = serve_http(fake)
+    world.token = credentials_file(world.root, front.base)
+    world.settings["credentials_file"] = str(world.token)
+    (world.root / "r2-artifacts.json").write_bytes(world.raw)
+    yield fake, front, world
+    front.close()
+
+
+def configured(world: World) -> dict[str, str]:
+    return {ARTIFACTS_VAR: str(world.root / "r2-artifacts.json")}
+
+
+def test_a_round_trip_puts_reads_and_deletes_one_mebibyte_and_prints_only_statuses(store):
+    fake, front, world = store
+    done = world.run("roundtrip", str(world.token))
+    assert done.returncode == 0 and done.stderr == ""
+    assert re.fullmatch(LINE + "\n", done.stdout), done.stdout
+    assert [row[0] for row in fake.ledger] == ["PutObject", "GetObject", "DeleteObject"]
+    keys = {row[1] for row in fake.ledger}
+    assert len(keys) == 1 and next(iter(keys)).startswith("exec/_r2-check/")
+    assert (fake.ledger[0][3], fake.ledger[1][4]) == (1 << 20, 1 << 20)
+    assert fake.objects == {}  # nothing is left in the bucket
+    for text in (next(iter(keys)), "exec/", "127.0.0.1", front.base):
+        assert text not in done.stdout
+
+
+def test_a_round_trip_without_a_file_uses_the_token_the_settings_of_the_process_name(store):
+    fake, _, world = store
+    done = world.run("roundtrip", "-", env=configured(world))
+    assert done.returncode == 0 and "put=200 get=200 delete=204" in done.stdout
+    assert len(fake.ledger) == 3
+
+
+def test_a_round_trip_with_nothing_configured_says_what_is_missing(store):
+    _, _, world = store
+    assert refusal(world.run("roundtrip", "-")) == f"{ARTIFACTS_VAR} is not set"
+
+
+def test_a_round_trip_does_not_listen_to_the_proxy_variables_the_transfer_ignores(store):
+    _, _, world = store
+    done = world.run("roundtrip", str(world.token), env=PROXIES)
+    assert done.returncode == 0 and "put=200 get=200 delete=204" in done.stdout
+
+
+def test_a_store_that_is_down_is_a_class_name_and_a_skipped_read(store):
+    _, front, world = store
+    front.close()
+    done = world.run("roundtrip", str(world.token))
+    assert done.returncode == 1 and done.stderr == ""
+    assert re.fullmatch(
+        r"r2-check challenge put=ConnectError get=skipped delete=ConnectError bytes=1048576"
+        r" put_s=\d+\.\d{3} delete_s=\d+\.\d{3}\n",
+        done.stdout,
+    ), done.stdout
+
+
+@pytest.mark.parametrize("status", [403, 500])
+def test_a_refused_put_is_its_http_status_and_the_key_stays_out_of_the_line(store, status):
+    fake, _, world = store
+    fake.fault_key("PutObject", "", status)
+    done = world.run("roundtrip", str(world.token))
+    assert done.returncode == 1
+    assert f"put={status} get=skipped delete=204" in done.stdout and "exec/" not in done.stdout
+
+
+def test_a_read_that_returns_other_bytes_is_a_mismatch_and_the_object_is_still_deleted(tmp_path):
+    fake = Flipping()
+    front = serve_http(fake)
+    try:
+        world = World(tmp_path / "executor")
+        world.token = credentials_file(world.root, front.base)
+        done = world.run("roundtrip", str(world.token))
+    finally:
+        front.close()
+    assert done.returncode == 1 and "put=200 get=mismatch delete=204" in done.stdout
+    assert fake.objects == {}
+
+
+def test_a_delete_that_fails_is_reported_and_fails_the_check(store):
+    fake, _, world = store
+    fake.fault_key("DeleteObject", "", 403)
+    done = world.run("roundtrip", str(world.token))
+    assert done.returncode == 1 and "put=200 get=200 delete=403" in done.stdout
+
+
+def test_a_round_trip_refuses_the_token_the_loader_refuses(store):
+    _, _, world = store
+    world.token.chmod(0o644)
+    assert refusal(world.run("roundtrip", str(world.token))) == LOADER

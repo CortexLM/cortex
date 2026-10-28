@@ -31,19 +31,23 @@
 #                        and recreates nothing, prints variable names only.
 #   executor-off BACKUP  drop the override (and the settings file this script wrote) and recreate the
 #                        challenge without the variables
+#   r2-check [--file FILE]
+#                        not gated, changes nothing in the stack: put, get and delete a 1 MiB object
+#                        in the bucket through the token the challenge is configured with (or FILE,
+#                        which is checked like --r2's). Prints HTTP statuses, byte counts and seconds.
 # rollback and restore-db are not gated: they are the way back from a bad change.
 # swap, beacon, paper, rollback, executor and executor-off refuse (exit 4) a compose file with a
 # service whose container_name is missing or is not one of the six TEST names; executor checks the
 # live file and the live file merged with its override. restore-db runs no compose.
 # Exit codes: 2 usage (and master readyz), 3 seal gate, 4 refusal, 5 unexpected compose change, 6 DB,
-# 7 the challenge is not up, or not configured as asked, after a change.
+# 7 the challenge is not up, or not configured as asked, after a change, 8 r2-check did not complete.
 set -euo pipefail
 T=/root/backups/hypertrain-test; F=$T/compose.test.yml; C=hypertrain-test-challenge
 STATE=/data/hypertrain-test/state; API=http://127.0.0.1:18996; MASTER=http://10.177.245.39:8080
 CDATA=/data
 CUID=65532
 XD=$STATE/executor; R2S=$CDATA/executor/r2-artifacts.json; R2F=$XD/r2-artifacts.json
-cmd=${1:?backup|swap|paper|rollback|restore-db|executor|executor-off}
+cmd=${1:?backup|swap|paper|rollback|restore-db|executor|executor-off|r2-check}
 compose() { (cd "$T" && docker compose -f "$1" "${@:2}"); }
 images() { # service -> image as compose resolves it
   compose "$1" config --format json | python3 -I -c '
@@ -138,6 +142,8 @@ sys.exit(0 if flags and (e[9],e[11])==("0.2","60") and int(e[13])>=100 else 5)' 
 #   pre CONFIG           settings JSON on stdin, as ArtifactExecutor would load them
 #   post CONFIG SETTINGS the environment of this process names exactly these files ("-": unset) and
 #                        the files, read as this user, load
+#   roundtrip FILE       put, get and delete 1 MiB in the bucket with the token FILE, or with the one
+#                        the settings of this process name ("-"), through the client the transfer uses
 CHALLENGE_PY=$(cat <<'PY_CHALLENGE'
 import os
 import re
@@ -146,7 +152,8 @@ import sys
 from pathlib import Path
 
 CONFIG_ENV, SETTINGS_ENV = "HYPERTRAIN_CUDA_EXECUTOR", "HYPERTRAIN_CUDA_EXECUTOR_ARTIFACTS"
-KIND = {"pre": "preflight", "post": "postflight"}
+KIND = {"pre": "preflight", "post": "postflight", "roundtrip": "r2-check"}
+SIZE = 1 << 20
 KNOWN = (
     "credentials_file must be a regular file of this user with mode 0600",
     "credentials_file holds names other than the R2 settings",
@@ -161,6 +168,10 @@ class Unset(Exception):
     pass
 
 
+class Missing(Exception):
+    pass
+
+
 def why(error):
     try:
         from pydantic import ValidationError
@@ -169,6 +180,8 @@ def why(error):
     text = str(error)
     if isinstance(error, Unset):
         return text + " is not set as the script wrote it"
+    if isinstance(error, Missing):
+        return text + " is not set"
     if isinstance(error, ValidationError):
         found = error.errors(include_url=False, include_context=False, include_input=False)
         return "; ".join(".".join(map(str, e["loc"])) + ": " + e["msg"] for e in found)
@@ -201,25 +214,84 @@ def load(config_path, raw):
     return settings
 
 
+def status(error):
+    # an R2Error carries the object key in its text: only the HTTP status or a class name leaves
+    tail = str(error).rsplit(": ", 1)[-1] if type(error).__name__ == "R2Error" else ""
+    found = re.fullmatch(r"HTTP (\d{3})|(\w+)", tail)
+    return (found[1] or found[2]) if found else type(error).__name__
+
+
+def roundtrip(file):
+    import hashlib
+    import secrets
+    import time
+
+    import httpx
+
+    from hypertrain.gpu_ops import artifact_transfer as at
+    from hypertrain.storage.r2 import R2Client
+
+    if file == "-":
+        if SETTINGS_ENV not in os.environ:
+            raise Missing(SETTINGS_ENV)
+        raw = Path(os.environ[SETTINGS_ENV]).read_bytes()
+        file = at.ArtifactSettings.model_validate_json(raw).credentials_file
+    credentials = at.load_credentials(Path(file))
+    seen, row, data = [], {}, os.urandom(SIZE)
+    # the client of the transfer: no proxy variable, no CA path from the environment
+    hook = {"response": [lambda response: seen.append(response.status_code)]}
+    http = httpx.Client(timeout=30, trust_env=False, event_hooks=hook)
+    client = R2Client(credentials, client=http)
+    key = f"exec/_r2-check/{secrets.token_hex(16)}"
+
+    def step(name, call):
+        start = time.monotonic()
+        try:
+            value, shown, ok = call(), str(seen[-1]), True
+        except Exception as error:
+            value, shown, ok = None, status(error), False
+        row[name] = [shown, time.monotonic() - start, ok]
+        return value
+
+    try:
+        step("put", lambda: client.put_object(key, data))
+        if row["put"][2]:
+            got = step("get", lambda: client.get_object(key))
+            if row["get"][2] and hashlib.sha256(got).digest() != hashlib.sha256(data).digest():
+                row["get"][0], row["get"][2] = "mismatch", False
+    finally:
+        step("delete", lambda: client.delete_object(key))
+        http.close()
+    said = " ".join(f"{n}={row[n][0] if n in row else 'skipped'}" for n in ("put", "get", "delete"))
+    took = " ".join(f"{n}_s={row[n][1]:.3f}" for n in ("put", "get", "delete") if n in row)
+    return f"challenge {said} bytes={SIZE} {took}", len(row) == 3 and all(r[2] for r in row.values())
+
+
 def run(mode, args):
     if mode == "pre":
         load(args[0], sys.stdin.buffer.read())
-        return "ok"
+        return "ok", True
+    if mode == "roundtrip":
+        return roundtrip(args[0])
+    if mode != "post":
+        raise KeyError(mode)
     for name, want in ((CONFIG_ENV, args[0]), (SETTINGS_ENV, args[1])):
         have = os.environ.get(name)
         if have != (None if want == "-" else want):
             raise Unset(name)
     if args[1] != "-":
         load(args[0], Path(args[1]).read_bytes())
-    return "ok"
+    return "ok", True
 
 
 mode = sys.argv[1]
 try:
-    print(KIND[mode], run(mode, sys.argv[2:]))
+    text, complete = run(mode, sys.argv[2:])
 except BaseException as error:
     print(KIND.get(mode, "program"), "refused:", why(error))
     sys.exit(1)
+print(KIND[mode], text)
+sys.exit(0 if complete else 1)
 PY_CHALLENGE
 )
 backup_dir() { local f listed; for f in compose.test.yml challenge.db server_keys.db SHA256SUMS; do
@@ -238,7 +310,7 @@ run_py() { # run_py [-i] MODE ARGS..: CHALLENGE_PY in the running challenge; onl
   local i=() out rc=0
   if [ "${1:-}" = -i ]; then i=(-i); shift; fi
   out=$(docker exec ${i[@]+"${i[@]}"} "$C" python -I -c "$CHALLENGE_PY" "$@" 2>&1) || rc=$?
-  printf '%s\n' "$out" | grep -E '^(preflight|postflight) [ -~]{1,300}$' || true
+  printf '%s\n' "$out" | grep -E '^(preflight|postflight|r2-check) [ -~]{1,300}$' || true
   [ "$rc" -eq 0 ] || echo "(the challenge program exited $rc)"
   return "$rc"
 }
@@ -439,5 +511,15 @@ executor-off)
     if ours "$R2F"; then rm -f "$R2F" "$R2F.new"; echo "removed $R2S"; else echo "kept $R2S: not written by this script"; fi
   fi
   sleep 6; check;;
+r2-check)
+  shift; file=
+  while [ $# -gt 0 ]; do
+    case $1 in
+    --file) [ $# -ge 2 ] && [ -z "$file" ] || usage "--file FILE, once"; file=$2; shift 2;;
+    *) usage "r2-check [--file FILE]";;
+    esac
+  done
+  [ -z "$file" ] || r2_file "$file"
+  run_py roundtrip "${file:--}" || { echo "r2-check did not complete"; exit 8; };;
 *) echo "unknown $cmd"; exit 2;;
 esac

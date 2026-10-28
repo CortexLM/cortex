@@ -530,8 +530,27 @@ recreate, and leaves the token where it is: delete it and revoke the token yours
 over. `swap` and `rollback` drop both variables like the executor one: rerun the same `executor`
 command. A failed `up` or look prints the `executor-off` command and leaves the files for it.
 
+`r2-check` looks at the bucket from the challenge, with the token the challenge is configured with
+(or, before `executor --r2`, with `--file`, which is checked like `--r2`'s). It is not gated, takes no
+backup and changes nothing in the stack:
+
+```bash
+ssh root@s100 "bash -s -- r2-check" < $T/challenge_image.sh
+ssh root@s100 "bash -s -- r2-check --file /data/executor/r2.env" < $T/challenge_image.sh
+```
+
+It puts 1 MiB of random bytes under `exec/_r2-check/<random>`, reads it back, compares and deletes it,
+through the same client settings the transfer uses (no proxy or CA variable from the environment),
+and prints one line: `r2-check challenge put=200 get=200 delete=204 bytes=1048576 put_s=… get_s=…
+delete_s=…`. A step that failed shows its HTTP status or the class name of the error instead
+(`put=403`, `put=ConnectError`), a read that returns other bytes `get=mismatch`, a read that did not
+run `get=skipped`. Never a URL, a key, the bucket or any value of the token. Exit 8 when a step failed
+or the token does not load, 4 when the script refuses `--file`. One mebibyte measures the first byte
+(about 0.36 s from a node) and not the bulk rate: the rate from s100 to R2 with several parts at once is
+still to be measured before the run, and `put_s` says nothing about it.
+
 Exit codes: 2 usage (and `readyz`), 3 seal window, 4 refusal, 5 unexpected compose change, 6 database,
-7 the challenge is not up, or not configured as asked, after a change.
+7 the challenge is not up, or not configured as asked, after a change, 8 `r2-check` did not complete.
 
 ### 6.5 Publish the run with the backend record in place, then run it
 
