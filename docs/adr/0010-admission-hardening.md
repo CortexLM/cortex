@@ -386,19 +386,21 @@ Decision.
    `clean_finalizations` = 12 clean trials (the policy field is a literal); the TEST replay ran
    twelve clean trials in about 29 minutes [A: D70]; a production training round takes about
    10 minutes [A: D70]; `work_screen_epoch_rounds` is 6000 in the TEST and production builders
-   (`build_test_manifest.sh`, `ops/manifest_v2.py`, `od_large_manifest.py`, `network_gpu_seed.py`).
-   Formula: `ladder = trials * seconds per trial / 3 s`, `window = 4 * 6000`, and the rule is
-   `window >= 2 * ladder`.
+   (`build_test_manifest.sh`, `ops/manifest_v2.py`, `od_large_manifest.py`, `network_gpu_seed.py`),
+   except the `dense-0.1b` geometry of `build_test_manifest.sh`, which pins 20000 (ADR 0015: its
+   first screen must cover 52 serial trials of 250-390 s [H]). Formula: `ladder = trials * seconds
+   per trial / 3 s`, `window = 4 * screen`, and the rule is `window >= 2 * ladder`.
 
    | Policy | Ladder | Two ladders | Window | Margin |
    | --- | --- | --- | --- | --- |
    | TEST | 29 min = 1740 s = 580 rounds | 1160 rounds = 58 min | 24000 rounds = 20 h | 20.7x |
+   | TEST `dense-0.1b` | at most 12 * 390 s = 4680 s = 1560 rounds [H] | 3120 rounds = 2.6 h | 80000 rounds = 66.7 h | 25.6x |
    | production | 12 * 10 min = 120 min = 2400 rounds | 4800 rounds = 4 h | 24000 rounds = 20 h | 5x |
 
    Four screens is therefore not the minimum (one screen, 6000 rounds, would pass too); it keeps a
    miner that rests between trials inside the window. `tests/challenge/test_strike_window_v2.py`
-   asserts `window >= 2 * ladder` for both policies from the builders' own literals, and pins the
-   numbers above. A policy with a shorter screen must restate the calculation.
+   asserts `window >= 2 * ladder` for the three policies from the builders' own literals, and pins
+   the numbers above. A policy with a shorter screen must restate the calculation.
 4. **Conviction.** `Admission.settle_fraud(dispute_id, *, now)` replaces the old function (no
    caller, no test). The `resolution` branch of `admission_v2` calls it in the transaction of
    `DisputesV2.settle_lock`. Only an accepted, resolved dispute settlement with outcome `FRAUD`
