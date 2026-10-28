@@ -44,7 +44,9 @@ WAIT = 60.0  # seconds anything may take after the release before the test calls
 REACH = 10.0  # seconds each long phase is given to get to the point where it is held
 HELD = 2.5  # seconds both phases are held, at once, while the pusher runs against them
 PACE = 0.1  # seconds between two iterations of the pusher
-ROUNDS = 60  # beacon rounds the pusher delivers; far below the trial's 100-round window
+ROUNDS_BEFORE = 20  # rounds delivered while the phases are claimed and brought to their work
+ROUNDS_HELD = 40  # rounds more once both are held: the pusher never runs dry before the window
+ROUNDS = ROUNDS_BEFORE + ROUNDS_HELD  # far below the trial's 100-round window
 MAX_SECONDS = 1.0  # the longest the pusher may wait for a call, the longest the lock may be held
 MIN_PUSHES = 10  # rounds the pusher must have delivered while both phases were held
 
@@ -221,6 +223,7 @@ class Pusher:
         self.accepted: list[tuple[int, float]] = []  # round, when the store answered
         self.error: BaseException | None = None
         self.stopped = threading.Event()
+        self.held = threading.Event()  # both long phases are at their work
         self.thread = threading.Thread(target=self._run, name="pusher", daemon=True)
 
     def _timed(self, name: str, call: Callable[[], Any]) -> Any:
@@ -233,7 +236,7 @@ class Pusher:
     def _run(self) -> None:
         try:
             while not self.stopped.is_set():
-                if len(self.accepted) < ROUNDS:
+                if len(self.accepted) < ROUNDS_BEFORE + (ROUNDS_HELD if self.held.is_set() else 0):
                     number = self.first + len(self.accepted) + 1
                     answer = self._timed("push_beacon", partial(self.restored.push, number))
                     assert answer["round"] == number, f"round {number} was answered {answer}"
@@ -347,6 +350,7 @@ def test_the_pusher_is_served_while_an_aggregate_and_a_remote_reference_both_wor
         max(compose.tape.reached_at, compose.executor.reached_at) if both else time.perf_counter()
     )
     if both:
+        compose.pusher.held.set()
         time.sleep(HELD)
     still_running = [call.name for call in started if not call.ended.is_set()]
     pushed_during = compose.pusher.pushed_between(since, time.perf_counter())
