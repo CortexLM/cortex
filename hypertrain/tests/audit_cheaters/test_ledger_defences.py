@@ -549,6 +549,23 @@ def test_a_maturity_landing_during_get_weights_waits_for_it_and_pays_once(
     h.store._services = gated
     result: list[bytes] = []
     failures: list[BaseException] = []
+    landed = threading.Event()
+    transactions: list[int] = []
+    transaction = h.store._tx
+
+    @contextmanager
+    def window(**options: Any) -> Iterator[Any]:
+        # The lock is free between the two regions of the call and which thread takes it is the
+        # scheduler's choice: hold the call's second transaction back until the maturity has
+        # landed, so the order the defence is about is the order that runs.
+        if threading.current_thread() is caller:
+            transactions.append(1)
+            if len(transactions) == 2:
+                assert landed.wait(timeout=10)
+        with transaction(**options) as db:
+            yield db
+
+    h.store._tx = window
 
     def call() -> None:
         try:
@@ -556,11 +573,17 @@ def test_a_maturity_landing_during_get_weights_waits_for_it_and_pays_once(
         except BaseException as error:  # reported to the test thread, never swallowed
             failures.append(error)
 
+    def land() -> None:
+        try:
+            mature(h)
+        finally:
+            landed.set()
+
     caller = threading.Thread(target=call)
     caller.start()
     assert parked.wait(timeout=10)
     # When: the maturity tries to land meanwhile, then the call resumes.
-    lander = threading.Thread(target=mature, args=(h,))
+    lander = threading.Thread(target=land)
     lander.start()
     lander.join(timeout=1)
     assert lander.is_alive()  # it cannot: the call holds the store lock
