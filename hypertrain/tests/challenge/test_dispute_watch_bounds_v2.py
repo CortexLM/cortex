@@ -90,6 +90,17 @@ def long_poll(root, n, party, results, name):
     return thread
 
 
+def settled(parked, results, attempts, seconds=60):
+    """True once each of `attempts` polls has reached `events` or been answered (refused)."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        with parked.guard:
+            if parked.entered + len(results) >= attempts:
+                return True
+        time.sleep(0.01)
+    return False
+
+
 def test_one_party_is_bounded_and_every_slot_comes_back(watched, monkeypatch):
     n, parties, root, parked, disputes = watched
     monkeypatch.setattr(app_module, "WATCH_PER_PARTY", 2, raising=False)
@@ -130,6 +141,97 @@ def test_total_waits_are_bounded_across_parties(watched, monkeypatch):
         holder.join(30)
     assert Counter(results.values()) == {200: 3}
     assert poll(root, n, parties[3]) == 200
+
+
+def test_subnet_miners_cannot_park_the_polls_the_protocol_roles_need(watched, subnet_master):
+    """Registering 64 hotkeys and parking two polls with each used to take all 128 threads: the
+    pinned auditors and referee were then refused until a poll timed out, as often as it paid."""
+    n, _, root, parked, _ = watched
+    miners = [Keypair(bytes([200, i]) * 16) for i in range(app_module.WATCH_MINERS + 1)]
+    subnet_master.registered.update(m.ss58 for m in miners)
+    refresh(n)
+    results: dict[str, int] = {}
+    holders = [
+        long_poll(root, n, miner, results, f"miner{i}-{j}")
+        for i, miner in enumerate(miners[:-1])
+        for j in range(app_module.WATCH_PER_PARTY)
+    ]
+    assert len(holders) == app_module.WATCH_TOTAL  # the whole pool, had nothing capped them
+    assert settled(parked, results, len(holders))
+    pinned = [service.AUDITORS[0], service.AUDITORS[0], service.AUDITORS[1], service.REFEREE]
+    holders += [long_poll(root, n, key, results, f"role{i}") for i, key in enumerate(pinned)]
+    assert settled(parked, results, len(holders))
+    refused = sorted(name for name in results if name.startswith("role"))
+    assert not refused, f"pinned roles refused while miners held the pool: {refused}"
+    assert parked.entered == app_module.WATCH_MINERS + len(pinned)
+    assert poll(root, n, miners[-1]) == 429  # the next miner is over the miners' share
+    parked.release.set()
+    for holder in holders:
+        holder.join(30)
+    total, miners_only = app_module.WATCH_TOTAL, app_module.WATCH_MINERS
+    assert Counter(results.values()) == {200: miners_only + len(pinned), 429: total - miners_only}
+    assert poll(root, n, miners[-1]) == 200  # and every share came back
+
+
+def test_roles_are_bounded_by_the_pool_alone_and_each_release_frees_its_own_counter(
+    watched, monkeypatch
+):
+    n, parties, root, miners_parked, disputes = watched
+    monkeypatch.setattr(app_module, "WATCH_TOTAL", 5)
+    monkeypatch.setattr(app_module, "WATCH_MINERS", 2)
+    roles_parked = Parked(miners_parked.real)
+    pinned = {key.ss58 for key in (*service.AUDITORS, service.REFEREE)}
+
+    def events(party, cursor, *, timeout):
+        parked = roles_parked if party in pinned else miners_parked
+        return parked(party, cursor, timeout=timeout)
+
+    monkeypatch.setattr(disputes, "events", events)
+    results: dict[str, int] = {}
+    try:
+        miners = [long_poll(root, n, parties[i], results, f"miner{i}") for i in range(2)]
+        assert miners_parked.reached(2)
+        assert poll(root, n, parties[2]) == 429  # the miners' share is spent, the pool is not
+        # Roles are not held to that share: three polls, one more than WATCH_MINERS.
+        keys = [service.AUDITORS[0], service.AUDITORS[0], service.AUDITORS[1]]
+        roles = [long_poll(root, n, key, results, f"role{i}") for i, key in enumerate(keys)]
+        assert roles_parked.reached(3)
+        assert poll(root, n, service.REFEREE) == 429  # the whole pool (5) is theirs to fill
+        roles_parked.release.set()
+        for holder in roles:
+            holder.join(30)
+        assert poll(root, n, parties[2]) == 429  # a role's release gave nothing to the miners
+        miners_parked.release.set()
+        for holder in miners:
+            holder.join(30)
+        assert poll(root, n, parties[2]) == 200  # a miner's release did
+    finally:
+        roles_parked.release.set()
+    assert Counter(results.values()) == {200: 5}
+
+
+def test_a_miner_poll_that_ends_early_gives_its_share_back(watched, monkeypatch):
+    n, parties, root, parked, disputes = watched
+    monkeypatch.setattr(app_module, "WATCH_MINERS", 2)
+
+    def failing(party, cursor, *, timeout):
+        raise DisputeError("BOOM")
+
+    monkeypatch.setattr(disputes, "events", failing)
+    assert [poll(root, n, parties[i]) for i in range(2)] == [409, 409]
+    # Two distinct miners fill the share exactly if the failed polls gave theirs back.
+    monkeypatch.setattr(disputes, "events", parked)
+    results: dict[str, int] = {}
+    holders = [long_poll(root, n, parties[i], results, f"miner{i}") for i in (2, 3)]
+    assert parked.reached(2), "a failed poll kept its share of the pool"
+    assert poll(root, n, parties[4]) == 429
+    parked.release.set()
+    for holder in holders:
+        holder.join(30)
+    for hook in n.client.app.router.on_shutdown:  # the pool is closed, as at shutdown
+        hook()
+    # Three distinct miners: a share kept by the first two would make the third a 429.
+    assert [poll(root, n, parties[i]) for i in range(4, 7)] == [500, 500, 500]
 
 
 def test_a_stranger_cannot_take_a_slot(watched, monkeypatch):

@@ -58,9 +58,14 @@ Auth = Annotated[str | None, Header()]
 # Dispute watchers pin a worker thread for up to 30 s: they get their own pool, never the shared
 # one. Per party: 2, so a restarted watcher overlaps the last poll of its predecessor (an
 # abandoned poll keeps its thread until it times out). Total: above max_roster (32) plus the
-# pinned auditors, referees and coordinator, one poll each.
+# pinned auditors, referees and coordinator, one poll each. Any hotkey registered on the subnet
+# may poll too: 64 of them with two parked polls each would fill the pool, and the pinned roles
+# the disputes wait for would be refused until a poll timed out, for as long as the attacker kept
+# re-parking. So the polls held by parties that are not pinned roles share WATCH_MINERS, half the
+# pool; the roles are bounded by the pool alone and always keep the other half.
 WATCH_PER_PARTY = 2
 WATCH_TOTAL = 128
+WATCH_MINERS = 64
 # The signed request that heads an object upload is a few hundred bytes; refuse a longer one.
 UPLOAD_HEAD_MAX = 4096
 
@@ -400,19 +405,30 @@ def create_app(
     app.state.server_keys = server_keys
     watch_pool = ThreadPoolExecutor(WATCH_TOTAL, thread_name_prefix="dispute-watch")
     watching: dict[str, int] = {}
+    watching_miners = 0  # the polls of `watching` held by parties that are not pinned roles
     watching_lock = threading.Lock()
 
-    def claim_watch(party: str) -> None:
+    def claim_watch(party: str, pinned: bool) -> None:
+        nonlocal watching_miners
         with watching_lock:
-            if sum(watching.values()) >= WATCH_TOTAL or watching.get(party, 0) >= WATCH_PER_PARTY:
+            if (
+                sum(watching.values()) >= WATCH_TOTAL
+                or watching.get(party, 0) >= WATCH_PER_PARTY
+                or (not pinned and watching_miners >= WATCH_MINERS)
+            ):
                 raise ChallengeError(429, "too many concurrent dispute polls")
             watching[party] = watching.get(party, 0) + 1
+            if not pinned:
+                watching_miners += 1
 
-    def release_watch(party: str) -> None:
+    def release_watch(party: str, pinned: bool) -> None:
+        nonlocal watching_miners
         with watching_lock:
             watching[party] -= 1
             if not watching[party]:
                 del watching[party]
+            if not pinned:
+                watching_miners -= 1
 
     async def not_revoked(hotkey: str) -> None:
         if await run(server_keys.is_revoked, hotkey):
@@ -436,10 +452,15 @@ def create_app(
         )
         return {*manifest.training.auditors, manifest.training.coord_pubkey, *policy.referees}
 
-    async def party_member(run_id: str, party: str) -> None:
-        """Shared dispute routes: pinned auditors/referees/coordinator, else subnet miners."""
-        if party not in await run(protocol_roles, run_id):
-            await subnet_member(party)
+    async def party_member(run_id: str, party: str) -> bool:
+        """Shared dispute routes: pinned auditors/referees/coordinator, else subnet miners.
+
+        True for a pinned role: a caller that needs to know does not look the roles up again.
+        """
+        if party in await run(protocol_roles, run_id):
+            return True
+        await subnet_member(party)
+        return False
 
     def locked_now() -> int:
         with store._lock:
@@ -1001,16 +1022,16 @@ def create_app(
             valid = False
         if not valid:
             raise ChallengeError(403, "party event access requires signature")
-        await party_member(run_id, poll.party)
+        pinned = await party_member(run_id, poll.party)
         _, _, disputes = await run(hosted._services, run_id)
-        claim_watch(poll.party)
+        claim_watch(poll.party, pinned)
         try:
             future = watch_pool.submit(disputes.events, poll.party, poll.cursor, timeout=poll.wait)
         except BaseException:
-            release_watch(poll.party)
+            release_watch(poll.party, pinned)
             raise
         # The slot lasts as long as the thread: a client that disconnects does not stop the wait.
-        future.add_done_callback(lambda _: release_watch(poll.party))
+        future.add_done_callback(lambda _: release_watch(poll.party, pinned))
         events = await asyncio.wrap_future(future)
         return [e.model_dump(mode="json") for e in events]
 
