@@ -339,6 +339,10 @@ def test_the_li_profile_is_not_left_loaded_for_the_rest_of_the_session() -> None
 
 
 FINDING_ID = re.compile(r"[A-Z][A-Z0-9]{1,3}(-[A-Z]?[0-9A-Za-z]+)+")
+FIX_LOT = re.compile(
+    r"\[fix-lot: (escrow-relay-fixes|audit-integrity-2|admission-hardening|executor-perf"
+    r"|none|decision)\b[^\[\]]*\]\s*$"
+)
 FORBIDDEN_MARKS = frozenset({"skip", "skipif", "od", "gpu", "cloudflare"})
 FORBIDDEN_CALLS = frozenset({"skip", "importorskip", "xfail"})
 CLOCKS = frozenset({"perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns", "process_time"})
@@ -365,6 +369,8 @@ def xfail_findings(call: ast.Call) -> list[str]:
         and FINDING_ID.match(reason.value)
     ):
         found.append(f"line {call.lineno}: xfail reason must start with a finding id")
+    elif not FIX_LOT.search(reason.value):
+        found.append(f"line {call.lineno}: xfail reason must end with a [fix-lot: ...] tag")
     return found
 
 
@@ -457,9 +463,11 @@ def lines(*rows: str) -> str:
         (
             lines(
                 "import pytest",
-                "@pytest.mark.xfail(strict=True, raises=EscrowError, reason='ESC-12: a hole')",
+                "@pytest.mark.xfail(strict=True, raises=EscrowError,",
+                "reason='ESC-12: x [fix-lot: none]')",
                 "def test_a(): ...",
-                "@pytest.mark.xfail(strict=True, raises=ValueError, reason='AUD-7a: a hole')",
+                "@pytest.mark.xfail(strict=True, raises=ValueError,",
+                "reason='AUD-7a: x [fix-lot: decision]')",
                 "def test_b(): ...",
             ),
             [],
@@ -482,7 +490,7 @@ def lines(*rows: str) -> str:
         (
             lines(
                 "import pytest",
-                "@pytest.mark.xfail(raises=ValueError, reason='ESC-1: a hole')",
+                "@pytest.mark.xfail(raises=ValueError, reason='ESC-1: a hole [fix-lot: none]')",
                 "def test_a(): ...",
             ),
             ["line 2: xfail needs strict=True"],
@@ -490,7 +498,7 @@ def lines(*rows: str) -> str:
         (
             lines(
                 "import pytest",
-                "@pytest.mark.xfail(strict=True, reason='ESC-1: a hole')",
+                "@pytest.mark.xfail(strict=True, reason='ESC-1: a hole [fix-lot: none]')",
                 "def test_a(): ...",
             ),
             ["line 2: xfail needs raises="],
@@ -510,6 +518,37 @@ def lines(*rows: str) -> str:
                 "def test_a(): ...",
             ),
             ["line 2: xfail reason must start with a finding id"],
+        ),
+        (
+            lines(
+                "import pytest",
+                "@pytest.mark.xfail(strict=True, raises=ValueError, reason='ESC-1: a hole')",
+                "def test_a(): ...",
+            ),
+            ["line 2: xfail reason must end with a [fix-lot: ...] tag"],
+        ),
+        (
+            lines(
+                "import pytest",
+                "@pytest.mark.xfail(",
+                "    strict=True, raises=ValueError, reason='ESC-1: a hole [fix-lot: nobody]'",
+                ")",
+                "def test_a(): ...",
+            ),
+            ["line 2: xfail reason must end with a [fix-lot: ...] tag"],
+        ),
+        (
+            lines(
+                "import pytest",
+                "@pytest.mark.xfail(",
+                "    strict=True,",
+                "    raises=ValueError,",
+                "    reason='ESC-1: a hole '",
+                "    '[fix-lot: escrow-relay-fixes ADR0014-P1]',",
+                ")",
+                "def test_a(): ...",
+            ),
+            [],
         ),
         (
             lines("import pytest", "pytestmark = pytest.mark.od", "pytest.importorskip('torch')"),
