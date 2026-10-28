@@ -10138,6 +10138,7 @@ class ChallengeStore:
         """
         with self._tx():
             self.require_roster_v2(run_id, w)
+            self._require_unretired_v2(run_id, w)  # retired meanwhile: its null tape is final
             answer = self._aggregate_answer_v2(run_id, w)
             if answer is not None:
                 return answer  # aggregated meanwhile, by another process: answer, write nothing

@@ -594,6 +594,28 @@ def test_a_round_that_changes_while_its_tape_computes_is_refused_and_writes_noth
         assert inputs[member] == clean + 1
 
 
+def test_a_round_retired_while_its_tape_computes_gets_no_tape(
+    restored: Restored, scene: Scene
+) -> None:
+    # Given: an aggregate whose tape is computing, and a round that is retired meanwhile (the
+    # unlocked computation lets a retirement land that the lock held out). A retired round carries
+    # a null tape and carried anchors that are final: it takes no work (_require_unretired_v2).
+    store = restored.store
+    computation = scene.compute(hold=True)
+    leader = scene.aggregate("leader")
+    computation.wait_reached(leader)
+    with store._tx():
+        store._put_record_v2(restored.run, "retired", "0", {"v": "ht-round-retired-v1", "w": 0})
+    after_retirement = records(store)
+    computation.go.set()
+    finished(leader)
+    # Then: the settlement refuses, as the claim of a call made now would, and writes nothing
+    assert isinstance(leader.error, ChallengeError), f"expected a refusal: {leader.error!r}"
+    assert (leader.error.status, "ROUND_RETIRED" in leader.error.detail) == (409, True)
+    assert records(store) == after_retirement
+    assert store._aggregate_flights_v2 == {}
+
+
 def test_nothing_a_claim_derives_is_written_before_the_tape_is(
     restored: Restored, scene: Scene
 ) -> None:
