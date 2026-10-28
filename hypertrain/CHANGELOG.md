@@ -55,6 +55,26 @@
   8-GPU hosts on a fake clock under seeded notice, hard-kill, host-loss, partition,
   store-partition, regional-loss and drought schedules; every run must end in the uninterrupted
   run's state hash.
+- Opt-in `reference_spec.env.pinned` (`{present: {NAME: VALUE}, absent: [NAME]}`) over the closed,
+  append-only table of `hypertrain.protocol.env_pins`: process-environment variables that change
+  CPU round bytes (`ATEN_CPU_CAPABILITY`, `MKL_CBWR`, `ONEDNN_MAX_CPU_ISA`, `HT_ATTN_BACKEND`,
+  `OMP_DYNAMIC`, and `HT_COMPILE`, `HT_FP8`, `HT_MOE_GROUPED`, `OMP_THREAD_LIMIT` pinned unset).
+  A manifest without the field keeps its bytes and `run_id`; the table is in `docs/protocol.md`
+  section 7 and the decision in `docs/adr/0011` (part 3) at the monorepo root. The island and
+  repair workers and the in-process entry points (`train_round`, `train_island`,
+  `train_unit_order`) refuse a process whose environment, or ATen capability, diverges from the
+  pin, naming the variable; a pinned rank records `env_pin` in `summary.json`.
+  `python -m hypertrain.trainer.env_probe --manifest FILE` reports the environment a manifest pins
+  and checks that this host can honor it (`protocol.env_pins.require_honorable`: a child started
+  under the pinned environment, cached per process).
+  `launch_island`, `launch_window` and `_launch_unbounded` start island ranks under the pins and
+  raise `EnvPinRefused` (an `IslandFailure`) before charging capacity when this host cannot honor
+  them. The rollback repair and history workers get the same pins.
+  `NetworkMiner.join` and `probe_trial` refuse a host that cannot honor the pin before any request,
+  and `bootstrap_service_capacity_v2` answers 409 `SERVICE_PROFILE_ENV_PIN` when the challenge host
+  cannot.
+  The miner's dispute follower answers a pinned CPU publication from its published trace instead
+  of replaying it in the daemon (behavior change for pinned manifests only).
 
 ### Changed
 - A challenge poll after the deadline no longer suspends a miner whose proof was accepted
@@ -114,6 +134,46 @@
   See `docs/adr/0007-sm-counts-per-arch.md` at the monorepo root.
 
 ### Fixed
+- Escrow: the events the service writes (reward finalize, maturity, the payment of `get_weights`,
+  the settlement of a dispute) live in a key space of their own, `srv:` plus an HMAC under a key
+  derived from the coordinator secret, so a signed client event can no longer occupy an id the
+  service needs and freeze finalize, the beacon route, the weights answer or a dispute (Lens F1).
+  `EscrowV2.release_settlement` is the service's release; `release` is the owner's. A ledger built
+  without the key is a read-only verifier. See `docs/adr/0014` at the monorepo root.
+- Escrow: genesis, bootstrap, reward and shadow-reward origin ids are the HMAC of their preimage under
+  the same id key instead of a sha256 of public values, so a third party who knows the run, the round,
+  the hotkey and the finalize hash cannot compute one. Origins issued earlier keep their ids. Operator
+  tools that build a genesis or bootstrap pass `escrow_id_key(coordinator secret)`. `finalize_v2` builds
+  the reward's origin list through the ledger, so `implementation_hash` changes (service-admission
+  records must be re-bootstrapped).
+- Reward finalize judges the stored commit, verdicts and audit challenge at the beacon where this
+  master accepted each of them, not at the finalize beacon. Honest envelopes expire at or before
+  `d_final`, so any delayed finalize (an open contest, a beacon pause, an operator that waited) used
+  to fail for ever with `envelope expired` and freeze the next rounds (Lens F3, mechanism M2). A
+  ledger without the acceptance callback refuses to finalize. `live_operator finalize` seals its
+  `Finalize` until `max(d_final, now) + 1000`.
+- Disputes: a contest bond is settled by the dispute that took it, found through the lock's own
+  signed dispute id, and a dispute or reward origin is found by its own id. A bond whose name was an
+  older dispute's id made the new dispute unresolvable (its settlement resolved on the other row) and a
+  lock named like a reward origin got that origin's settlement. `POST /dispute` refuses a bond named
+  like an existing dispute or origin (`CONTEST_LOCK_ID_COLLISION`) (Lens F4).
+- Admission locks are typed too: a lock named like a closed dispute or a settled reward origin was
+  released with that object's settlement over `POST /escrow/release`. `EscrowV2.lock_status` asks a
+  resolver of admission locks, or nothing (`UNACCEPTED_SETTLEMENT`), and never the dispute or origin
+  tables (Lens F4 iii). The bond release of `Admission.release_bond` is a server event.
+- Escrow: the funding status of an admission (`EscrowV2.locked`, behind the unauthenticated
+  `GET .../admission/{hotkey}`) read every lock of the ledger and ran one unindexed sum per lock under the
+  store lock: 1.08 s at 5,000 open locks, 5.4 s at 10,000, 96 s at 40,000 on the real code, enough to
+  make every v2 operation answer 503 once the beacon lagged 6 s. It now reads the owner's open locks
+  through a partial index (the same value, bit for bit). New admission locks must hold a tenth of the
+  funding floor and are capped at 2,048 per coldkey and 4,096 in the ledger (Lens F7a).
+- The beacon route no longer stops at one escrow origin that cannot mature. A shadow reward whose
+  hotkey rotated after acceptance (`signer is not authorized for message role`) or whose job object
+  went missing (`ObjectNotFound`) rolled back the whole round's maturity and lease expiry and made
+  `POST /v1/admin/beacon` answer 409 or 500 at every later round. Each origin now matures in its own
+  savepoint; one that fails for another reason than vesting or an open dispute stays `reward_pending`,
+  is journaled as `records_v2 kind='maturity-failed'` and is retried at every round. A conservation
+  failure or a SQLite error still aborts the call (Lens F6, SHD-D3).
 - The dispute long poll can no longer deadlock the store. `DisputesV2` has one lock order, the
   store lock then a leaf condition: `events()` reads the event table outside the condition and parks
   on a counter, so a mutator that notifies inside its transaction never waits for a poller that
@@ -138,6 +198,49 @@
   the remaining members cannot carry is refused with 409 `ROUND_INFEASIBLE`. The new helpers
   join the owned set of `implementation_hash`, which changes. See
   `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- A round the caps or the finality rules refuse is a 409, no longer a bare 500: opening a round
+  with a roster the Q/4 caps cannot carry (fewer than four eligible members) or round w+2 without
+  round w+1 answered `Internal Server Error`. `InsufficientEligibleWeight` now answers 409
+  `ROUND_INFEASIBLE: <reason>` and `FinalityError` and `TapeError` 409 `ROUND_BLOCKED: <reason>`
+  on every route of the challenge app (the two rollback routes keep their bare message for a
+  `TapeError`). The store still raises the bare exceptions; nothing is written by a refused call.
+  See `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- After a round that finality closed without a reward (an accepted rollback, or an exclusion
+  before the round was applied) no later round could be reward-finalized: the ledger accepted
+  only the round after the last one it had paid, nothing wrote the row of a closed round, and
+  `finalize` answered 409 `FINALIZE_ORDER` for ever (real HTTP, two-round rollback then a fully
+  audited round 2). The next reward `finalize` now records each such round once, as a
+  `ROUND_WITHDRAWN` event of the escrow journal in its own transaction, then pays: no table, no
+  snapshot change, nothing minted or moved, and a run already stuck this way is released by its
+  next `finalize`. A round that is pending, settled, awaiting its rollback or has an open audit
+  or dispute still blocks. See `docs/adr/0011-audit-integrity.md` at the monorepo root.
+- The ledger no longer pays a round that finality closed without a reward: its reward evidence is
+  refused with `ROUND_CLOSED_UNPAID` (409), before and after the round was recorded as withdrawn.
+  `finalize` already stopped a repaired or an unapplied round upstream; this is the ledger's own
+  rule, so a future caller cannot mint it.
+- `finalize` pays the inputs recorded with the applied tape instead of re-deriving the live set,
+  so a sanction that lands between the aggregate and the finalize (a suspension, a burned bond)
+  no longer answers 403 for ever. `finalize_v2` is an owned function: `implementation_hash`
+  changes. See `docs/adr/0011-audit-integrity.md` (Part 8, decision 23) at the monorepo root.
+- An audited roster member whose admission no longer qualifies it when the round is aggregated
+  (hotkey rotated, banned, suspended, back on probation, screen ended, bond gone) no longer
+  makes `aggregate` answer 403 for the whole round for ever: it is left out (`excluded`, reason
+  `INELIGIBLE`, with a `cause`, no sanction) and the others are paid. A roster that the rest
+  cannot carry answers 409 `ROUND_INFEASIBLE` and writes nothing. The new helpers join the owned
+  set of `implementation_hash`, which changes. See `docs/adr/0011-audit-integrity.md` (Part 8,
+  decision 22) at the monorepo root.
+- A round opens only with roster members whose screen covers it: `open` answers 403 "roster
+  screen ends before the round's audit window" for an entry whose `screen_until` is before the
+  round's `d_final` (equal is accepted), and `scripts/ops/live_operator.py open` refuses the same
+  entry by name. `open_round_v2` is an owned function: `implementation_hash` changes. See
+  `docs/adr/0011-audit-integrity.md` (Part 8, decision 21) at the monorepo root.
+- A rotation is refused with 409 `ROTATION_ROUND_OPEN` while a round that lists the admission is
+  not closed (a round without a finality record counts as open). Rotated after the aggregate, a
+  member made `finalize` answer 403 for ever (the reward looks the owner up by hotkey) and the
+  way back is refused (`NEW_HOTKEY_HISTORY`); rotated before it, the member left the round for
+  free. A retry of an applied rotation is still answered. `Admission.rounds_listing` and `open_rounds` serve `rotate` and
+  `lock_settlement`. Rotate between rounds. See `docs/adr/0011-audit-integrity.md` (Part 8,
+  decision 21) at the monorepo root.
 
 ### Not yet
 - Quality parity with centralized training is not claimed.

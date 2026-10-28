@@ -11,9 +11,11 @@ from pathlib import Path
 
 import pytest
 
+from env_pin_fixtures import CPU_FP32
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.protocol import envelope_v2
+from hypertrain.protocol.env_pins import EnvPinUnhonorable
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
@@ -32,12 +34,16 @@ network = service.network
 
 
 @pytest.fixture
-def tiny(network, tmp_path):
-    """Create another real owner-signed run with exact resource-profile dimensions."""
+def tiny(network, tmp_path, request):
+    """Create another real owner-signed run with exact resource-profile dimensions.
+
+    Indirect parametrization with an environment pin body creates the pinned variant."""
     from hypertrain.protocol.messages_v2 import AggregationPolicyV2, AuditPolicyV2
 
     store = network.store
     body = network.manifest.body()
+    if getattr(request, "param", None) is not None:
+        body["training"]["reference_spec"]["env"]["pinned"] = request.param
     m = body["training"]["model"]
     m.update(
         n_layers=1,
@@ -167,6 +173,37 @@ def test_owner_admission_accepts_real32_metadata_when_profile_exact(tiny, monkey
         f"CAPACITY_EXISTING_FIXTURE_MAX_RSS_KIB={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}"
     )
     assert store.bootstrap_service_capacity_v2(manifest.run_id(), body, raw) == digest
+
+
+@pytest.mark.parametrize("tiny", [CPU_FP32], indirect=True)
+def test_bootstrap_refuses_a_pin_the_host_cannot_honor(tiny, monkeypatch):
+    # The probe is a child process of up to two minutes: it must not run inside the transaction.
+    store, manifest = tiny
+    body, raw = signed_profile(store, manifest)
+
+    def refuse(pin):
+        assert not store._db.in_transaction
+        raise EnvPinUnhonorable("ATen CPU capability: manifest 'AVX2', live 'DEFAULT'")
+
+    monkeypatch.setattr("hypertrain.protocol.env_pins.require_honorable", refuse)
+    with pytest.raises(ChallengeError, match="SERVICE_PROFILE_ENV_PIN: ATen CPU capability"):
+        store.bootstrap_service_capacity_v2(manifest.run_id(), body, raw)
+    assert not store._db.execute(
+        "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission'", (manifest.run_id(),)
+    ).fetchone()
+    monkeypatch.setattr("hypertrain.protocol.env_pins.require_honorable", lambda pin: "AVX2")
+    assert store.bootstrap_service_capacity_v2(manifest.run_id(), body, raw) == sha256_hex(body)
+
+
+def test_unpinned_bootstrap_never_probes_the_host(tiny, monkeypatch):
+    store, manifest = tiny
+    body, raw = signed_profile(store, manifest)
+
+    def forbidden(pin):
+        raise AssertionError("an unpinned run must never probe the host")
+
+    monkeypatch.setattr("hypertrain.protocol.env_pins.require_honorable", forbidden)
+    assert store.bootstrap_service_capacity_v2(manifest.run_id(), body, raw) == sha256_hex(body)
 
 
 @pytest.mark.parametrize("signer", [service.COORD, service.HOT[0]])

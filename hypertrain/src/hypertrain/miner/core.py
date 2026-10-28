@@ -37,6 +37,7 @@ from hypertrain.auditor.bisect import Executor
 from hypertrain.auditor.replay import challenge_hash, pack_state, tensor_root, unpack_state
 from hypertrain.challenge.store import assignment_hash, rerun_message
 from hypertrain.gpu_ops.journal import Journal
+from hypertrain.protocol.env_pins import EnvPinUnhonorable, require_honorable
 from hypertrain.protocol.envelope import body_digest, seal, verify_envelope
 from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -789,7 +790,23 @@ class NetworkMiner:
     def status(self) -> dict[str, Any]:
         return self.api.call("GET", self.url + "/admission/" + self.kp.ss58)
 
+    def preflight_env_pin(self) -> None:
+        """Tell this host, before any request, that it cannot honor the manifest's environment pin.
+
+        Later the island workers would refuse the round, and a trial left to expire suspends the
+        identity: nothing worth paying admission for."""
+        pin = self.manifest.training.reference_spec.env.pin()
+        if pin is None:
+            return
+        try:
+            require_honorable(pin)
+        except EnvPinUnhonorable as error:
+            raise MinerError(
+                f"this host cannot honor the manifest's environment pin: {error}"
+            ) from error
+
     def join(self, coldfile: Path, request_id: str, expiry: int) -> dict[str, Any]:
+        self.preflight_env_pin()
         from hypertrain.miner.admission import sign_join
         from hypertrain.protocol.messages_v2 import HardwareHint
 
@@ -893,6 +910,7 @@ class NetworkMiner:
 
     def probe_trial(self) -> dict[str, Any]:
         """probe-v2 without --job: this hotkey's open trial, fetched into a private temp folder."""
+        self.preflight_env_pin()
         with tempfile.TemporaryDirectory(prefix="trial-", dir=self.directory) as folder:
             job, challenge = self._fetch_trial(Path(folder).resolve())
             return self.probe(job, challenge)

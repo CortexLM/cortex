@@ -125,6 +125,7 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
     check_open_shape(w, hotkeys, offsets)
     cfg = TrainConfig.from_manifest_v2(manifest)
     now = m.call("GET", "")["now_round"]
+    d = [now + o for o in offsets]
     theta, prev_final = init_params(cfg.model), "0" * 64
     if w:
         import torch
@@ -142,6 +143,13 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
         # (owner-solo override skips trial/screen), so `eligible` alone is authoritative.
         if not status["eligible"]:
             raise SystemExit("admission is not eligible: " + hot)
+        # open_round_v2 refuses the same entry: the screen must cover the round up to d_final.
+        screen_until = status["record"]["screen_until"]
+        if screen_until < d[5]:
+            raise SystemExit(
+                f"screen of {hot} ends at round {screen_until}, before d_final {d[5]}: "
+                "renew it with a trial first, or open a shorter round"
+            )
         cache = AnchorCache()
         if w:
             a = m.record("anchor", f"{w - 1}:{hot}")
@@ -196,7 +204,6 @@ def open_round(m: Master, w: int, hotkeys: list[str], offsets: list[int]) -> dic
             m.objects.get(manifest.network.relay_registry_hash)
         )
     )
-    d = [now + o for o in offsets]
     opening = RoundOpenV2(
         w=w,
         prev_final_hash=prev_final,
@@ -240,6 +247,18 @@ def included(m: Master, w: int, opening: RoundOpenV2) -> list[str]:
     return sorted(out)
 
 
+FINALIZE_EXPIRY_MARGIN = 1000  # the margin the trial Finalize of the store already uses
+
+
+def finalize_expiry(d_final: int, now: int) -> int:
+    """Last round of the Finalize envelope: a finalize after d_final must still be accepted.
+
+    The stored commit, verdicts and challenge are judged at their acceptance beacon, so a late
+    finalize can settle; the Finalize itself is a fresh request and has to be unexpired when posted.
+    """
+    return max(d_final, now) + FINALIZE_EXPIRY_MARGIN
+
+
 def finalize(m: Master, w: int) -> dict:
     """One aggregate, then Finalize bound to the applied theta (store.py:7994-7998)."""
     refuse_service_run(m)
@@ -252,7 +271,8 @@ def finalize(m: Master, w: int) -> dict:
         included=keep,
         entitlements_root="0" * 64,
     )
-    signed = envelope_v2.seal(m.coord, "Finalize", m.run_id, final, opening.d_final)
+    expiry = finalize_expiry(opening.d_final, m.call("GET", "")["now_round"])
+    signed = envelope_v2.seal(m.coord, "Finalize", m.run_id, final, expiry)
     return m.call("POST", f"/admin/rounds/{w}/finalize", signed, True)
 
 

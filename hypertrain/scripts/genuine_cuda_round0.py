@@ -123,7 +123,11 @@ def leases(network, s) -> dict:
 
 
 def generate(out: Path, prelim: Path) -> Path:
-    from hypertrain.ledger.escrow_v2 import genesis_allocation_hash, genesis_origin_id
+    from hypertrain.ledger.escrow_v2 import (
+        escrow_id_key,
+        genesis_allocation_hash,
+        genesis_origin_id,
+    )
     from hypertrain.miner.admission import sign_join
     from hypertrain.protocol.envelope_v2 import seal
     from hypertrain.protocol.hashing import sha256_hex
@@ -139,7 +143,8 @@ def generate(out: Path, prelim: Path) -> Path:
     run_id = network.manifest.run_id()
     alloc = [(k.ss58, 10000, 1) for k in s.COLD]
     network.origin_ids = [
-        genesis_origin_id(run_id, genesis_allocation_hash(alloc), i) for i in range(4)
+        genesis_origin_id(run_id, genesis_allocation_hash(alloc), i, escrow_id_key(s.COORD._secret))
+        for i in range(4)
     ]
     e2e._graduate_four(network)
     signed = network.signed

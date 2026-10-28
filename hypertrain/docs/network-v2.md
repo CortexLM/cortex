@@ -221,7 +221,12 @@ for good. A new rotation costs one unit of a budget of `join_burst` per coldkey 
 `work_screen_epoch_rounds` window (`ROTATION_QUOTA`; a retry of the same `operation_id` costs
 nothing and answers the same admission, whatever its fresh signatures); a `BANNED` admission
 cannot rotate (`TERMINAL_BANNED`); the new hotkey must be unspent (`NEW_HOTKEY_HISTORY`).
-Locks, strikes and a pending dispute follow the admission.
+Locks, strikes and a pending dispute follow the admission. A rotation is refused with 409
+`ROTATION_ROUND_OPEN` while a round that lists the admission is not closed (no audit or
+dispute pending, and finalized, or excluded with its rollback complete; a round with no
+finality record counts as open), because the roster names the hotkey and the old one is
+refused at intake the moment the admission moves: rotate between rounds. A retry of a rotation that was applied is still
+answered. There is no emergency rotation of a hotkey that a round lists.
 
 A screen stays current for the signed policy's `work_screen_epoch_rounds` beacon
 rounds after its accepted proof. A newer proof needs a new challenge. A challenge is
@@ -280,8 +285,32 @@ a coordinator namespace mismatch, fails with HTTP 503 without resetting quotas.
 No automatic migration is provided; separate operator resolution is required.
 
 Funding uses signed `EscrowLock` via `POST /v2/runs/{run_id}/escrow/lock`, not a
-CLI `--bond` flag. Test genesis has pinned nonfinancial origins; production mode
+CLI `--bond` flag. A new admission lock must hold at least a tenth of `S_min_units`
+(`LOCK_BELOW_MINIMUM`); a coldkey holds at most 2,048 open admission locks (`OPEN_LOCK_CAP`,
+twice the roster ceiling of 1,024) and the ledger at most 4,096 (`LEDGER_LOCK_CAP`). A cap
+refuses a new lock only, so replaying an accepted lock returns its receipt, and closing a lock
+makes room. The funding status of an admission (`GET .../admission/{hotkey}`, public) reads
+the owner's open locks through a partial index, so its cost grows with those locks and not
+with the ledger (it was quadratic in the number of locks: 96 s at 40,000). Test genesis has pinned nonfinancial origins; production mode
 has separate reward authority/issuance bounds and no test-genesis conversion.
+
+The ledger keeps two key spaces for its events. A client event (`escrow/lock`,
+`escrow/transfer`, `escrow/release`) is stored under the `operation_id` its owner
+signed, a 64-hex string. An event the service writes itself (test genesis,
+production bootstrap, reward and shadow-reward finalize, maturity, the payment of
+`get_weights`, the release or slash that settles a dispute) is stored under
+`srv:` plus the HMAC of its derived id under a key that the master derives from
+the coordinator secret, so a signed owner event can never occupy an id the service
+needs and nobody can compute a server key from public values. Receipts still name
+the derived id. The master pins the key's namespace in its `meta` table
+(`escrow-id-namespace-v2`) and refuses to serve (503 `escrow id namespace differs`)
+if the coordinator secret later yields another key; the key is not rotated in place,
+a new coordinator key is a new run. A ledger opened without the key (the read-only
+authority snapshot) refuses every server operation (`ID_KEY_REQUIRED`); its `verify()`
+checks the hash chain, the shape of each server key and that no client event sits in
+the server space, not the binding of a key to its receipt. A chain written before the
+split keeps its bare server ids and is read through a fallback that accepts only an
+identical request. See `docs/adr/0014` at the monorepo root.
 
 The bond is the `LOCK_ADMISSION` of the admission. It has its own settlement, derived from
 the admission's records on every call (ADR 0010, Part 6), and `GET /v2/runs/{run_id}/admission/{hotkey}`
@@ -309,8 +338,12 @@ Production funding is one coordinator-signed `ProductionBootstrap`, posted as an
 run's `EconomicsPolicyV2.bootstrap_allocation_hash` pins its owner/units/maturity
 list (`genesis_allocation_hash` over `[owner, units, mature_at]`); only
 `ledger_mode="production"` may set it, and an unset field is omitted, so earlier
-policy digests and run IDs are unchanged. Origins are
-`ht-origin-bootstrap-v1|run|allocation_hash|index`. The ledger accepts it once per
+policy digests and run IDs are unchanged. Origin `i` is the HMAC under the escrow id key
+(`escrow_id_key(coordinator secret)`) of `ht-origin-bootstrap-v1|run|allocation_hash|index`
+(`bootstrap_origin_id(run, allocation_hash, i, id_key)`), so nobody without the coordinator
+secret can compute one; test genesis, reward and shadow-reward origins are keyed the same way
+(`ht-origin-genesis-v2|run|allocation_hash|index`, `ht-origin-reward-v2|run|w|hotkey|finalize_hash`,
+`ht-origin-shadow-v1|...`). Origins issued before the key existed keep their unkeyed ids. The ledger accepts it once per
 run: the same `operation_id` and body replay the stored receipt, the same
 `operation_id` with other content answers `OPERATION_CONFLICT`, and any second
 bootstrap answers `PRODUCTION_BOOTSTRAP_FORBIDDEN`. It is refused when the inner
@@ -342,6 +375,26 @@ then mature after vesting/dispute conditions. Transfers preserve origin units;
 fraud burns collectible exposure rather than redistributing it. Shadow work does
 not influence global theta; authorized production bootstrap issuance is a
 separate policy, not proof of market-backed collateral.
+
+Each due origin matures in its own savepoint when a beacon round is pushed. An origin that cannot
+(a shadow reward whose original custody no longer revalidates, because its hotkey rotated or a job
+object is missing) stays `reward_pending` and is retried at every round; it does not stop the
+round's other origins, the lease expiry or the beacon route. The last such failure is journaled in
+`records_v2` with `kind='maturity-failed'` (`{error, detail}`, rewritten only when it changes, never
+deleted). List the origins still stuck, on `challenge.db`:
+`SELECT m.id, m.data FROM records_v2 m JOIN escrow_units u ON u.origin=m.id AND u.bucket='reward_pending' AND u.units>0 WHERE m.kind='maturity-failed';`.
+A conservation failure or a SQLite error is not isolated: the push fails.
+
+When a round is finalized, the stored commit, the verdicts and the audit challenge are
+verified at the beacon at which this master accepted each of them (the `accepted_v2` row of
+the commit and of the verdict, the lease of the challenge), never at the finalize beacon. An
+envelope that was valid when it was accepted therefore stays valid for the finalisation of its
+round: a finalize that comes late (an open contest, a beacon pause, an operator that waited)
+settles. The ledger refuses an acceptance beacon outside `[1, finalize beacon]`, and a ledger
+without the acceptance callback refuses to finalize (`ACCEPTANCE_AUTHORITY_UNAVAILABLE`). The
+operator's `Finalize` is a fresh request and must be unexpired when it is posted;
+`live_operator finalize` seals it until `max(d_final, now) + 1000`. Work screens still bound how
+late a round can be finalized: members whose screen has lapsed are no longer eligible.
 
 Matured live rewards become weight in `GET /internal/v1/get_weights`. Each epoch answer first
 pays v1 entitlements, then fills the rest of its 10^6 mass with `available` units of live
@@ -418,6 +471,17 @@ Independent referees use their own accepted current execution deadline while
 preserving historical publication descriptors. Losing-party checks, funded
 contests and fixed absolute horizons prevent arbitrary transcript resets.
 
+A contest is funded by an `EscrowLock` of kind `LOCK_CONTEST` that names its dispute and
+whose `operation_id` the miner chooses. The name is only a name: the bond is settled by the
+dispute that took it, found through the lock's own signed `dispute_id` and checked against the
+dispute's recorded bond, and a dispute or a reward origin is found by its own id; no lookup
+treats a lock id as a dispute id or the reverse. `POST /dispute` refuses a bond whose name is
+already a dispute or a reward origin (`CONTEST_LOCK_ID_COLLISION`, 409). A contest lock that no
+dispute took as its bond has no settlement and is not released. An admission lock is settled
+by the resolver of admission locks or by nothing: the dispute and origin tables are never
+searched for its name; the admission service installs that resolver (ADR 0010 part 6). See
+`docs/adr/0014` at the monorepo root.
+
 A dispute that nobody can decide is closed by the server on the next verified beacon
 round, not convicted. The resolution is `INFRASTRUCTURE` with no loser: the verdict and
 the audit's own exclusion of the contested miner stand, the contest bond is released in
@@ -474,6 +538,19 @@ or be excluded and repaired. Retain original input objects, signed tapes,
 accepted envelopes, carry anchors and full bounded predecessor history. Reward
 `get_weights` is not a model-checkpoint download endpoint.
 
+A round that finality closes without a reward (excluded, or repaired by an accepted rollback)
+is never reward-finalized and never paid, and it does not stop the rounds after it. Reward
+`finalize` accepts round w only if w is the first round that is neither reward-finalized nor
+withdrawn: when a lower round is closed without a reward, the same `finalize` first records it
+once in the escrow journal (event `ROUND_WITHDRAWN`, with the hash that closed it), in the same
+transaction, then pays w. The record moves no unit and sanctions nobody. The ledger refuses the
+evidence of such a round itself with 409 `ROUND_CLOSED_UNPAID` (`finalize` already refuses a
+repaired or an unapplied round before the ledger is asked). A refused `finalize` records
+nothing, and a run that rolled back before this record existed is not stuck: its next
+`finalize` records the closed rounds. A round that is pending, settled, awaiting its rollback,
+or that has an open audit or dispute is not withdrawn and still answers the next round 409
+`FINALIZE_ORDER`.
+
 A roster member that has not committed when audits are scheduled is left out of its
 round: its `excluded` record gets reason `NO_SHOW` (stage `commit`), the audits of the
 other members are created, and the round is aggregated and finalized without it. A member
@@ -490,6 +567,38 @@ decision; there is no void round. Call `audits` once `d_audit` has passed and be
 `absolute` minus one round, `absolute` being the smaller of `d_final` and `d_audit` plus
 twice `lease_rounds`; a later call answers 503 for every roster and the round cannot be
 audited. Open rounds with five or more members when an eviction is plausible.
+
+A request that the allocation caps or the finality rules refuse is a 409 whose detail starts
+with a code, on every route, and writes nothing. `ROUND_INFEASIBLE: <reason>`: the members
+cannot carry one complete update (opening a round with fewer than four eligible members, a
+rollback that would leave fewer, an aggregation over an input set or delta it cannot weigh).
+`ROUND_BLOCKED: <reason>`: finality or the tape refuses the call (opening round w+2 before
+round w+1 exists or while w is unresolved, applying a round whose predecessor is not applied,
+settling a round that cannot settle, a tape that fails its own checks). The two rollback routes
+answer a tape error with its bare message, as before.
+
+`finalize` pays exactly the inputs recorded with the applied tape, whatever the members'
+standing is when it runs: `Finalize.included` must list them. A member suspended, struck or
+with a burned bond between the aggregate and the finalize is still paid for the round it was
+verified in; the finalize used to re-derive the live set and answer 403 for ever.
+
+An audited member whose admission no longer qualifies it when the round is aggregated is left
+out of the round too: `excluded`, reason `INELIGIBLE`, stage `aggregate`, with a `cause`
+(`ROTATED`: its hotkey no longer names an admission; `BANNED`; `SUSPENDED`, also while a contest
+is pending; `NOT_LIVE`: back on a fresh probation; `SCREEN_LAPSED`; `UNFUNDED`: its bond is gone,
+burned for instance). The admission is read at the `aggregate` call, so a member that is fit
+then is kept. Nobody is sanctioned for it: the cause is the member's own state or the effect of
+a sanction already applied. The remaining members must still carry the allocation; with four
+rostered, one unfit member makes `aggregate` answer 409 `ROUND_INFEASIBLE` and writes nothing,
+and the round aggregates as soon as the member is eligible again. Call `aggregate` before
+`d_final`: the later the call, the more screens have ended.
+
+A round opens only with members whose screen covers it. `open` answers 403 "roster screen ends
+before the round's audit window" for an entry whose `screen_until` is before the round's
+`d_final`; an entry whose screen ends exactly at `d_final` is accepted, since a member is eligible
+while `now <= screen_until`. A screen cannot be renewed by waiting, so a lapse inside the window
+used to be a free way out of a round. `scripts/ops/live_operator.py open` refuses the same entry
+by name before it sends anything.
 
 Regional relays are transport/cache only, not regional arithmetic aggregators.
 An upload opportunity acknowledgment is not custody. Completion failure requires

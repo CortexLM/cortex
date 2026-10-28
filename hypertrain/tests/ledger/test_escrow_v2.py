@@ -26,6 +26,7 @@ from hypertrain.ledger.escrow_v2 import (
     ShadowReservationEvidence,
     authority_message,
     digest,
+    escrow_id_key,
     genesis_allocation_hash,
     genesis_origin_id,
     reward_origin_id,
@@ -64,6 +65,8 @@ from hypertrain.trainer.model import init_params, param_shapes
 torch = importlib.import_module("torch")
 
 COORD = Keypair(bytes(range(32)))
+ID_KEY = escrow_id_key(bytes(range(32)))
+ACCEPTED_BEACON = 5  # the beacon at which the fixtures' stored evidence is taken to be accepted
 AUDITOR = Keypair(bytes(31) + b"\x01")
 HOT = Keypair(b"\x07" * 32)
 COLD = Keypair(b"\x08" * 32)
@@ -195,30 +198,35 @@ def ledger(
     database: Path | sqlite3.Connection,
     settlement: Callable[[str], Settlement] | None = None,
     replay: Callable[[FinalityEvidence], str] | None = None,
+    id_key: bytes | None = ID_KEY,
+    accepted_at: Callable[[EnvelopeV2], int] | None = lambda envelope: ACCEPTED_BEACON,
 ) -> EscrowV2:
     def no_unverified_finality(evidence: FinalityEvidence) -> str:
         raise EscrowError("NO_REPLAY_ACCEPTANCE")
 
+    generic = settlement or (
+        lambda _: Settlement(
+            finality_hash=H,
+            closed_dispute_root=H,
+            release_beacon=10,
+            unresolved=False,
+            outcome="MATCH",
+        )
+    )
     return EscrowV2(
         database,
         s.manifest,
         s.policy,
         auditors=frozenset({AUDITOR.ss58}),
         replay_finality=replay or no_unverified_finality,
-        settlement=settlement
-        or (
-            lambda _: Settlement(
-                finality_hash=H,
-                closed_dispute_root=H,
-                release_beacon=10,
-                unresolved=False,
-                outcome="MATCH",
-            )
-        ),
+        settlement=generic,
+        admission_settlement=generic,
         owner_of=lambda h: COLD.ss58 if h == HOT.ss58 else OTHER.ss58,
         assignment_of=lambda w, h: (0,),
         shadow_assignment_of=lambda binding: (0,),
         shadow_settlement=settlement,
+        id_key=id_key,
+        accepted_at=accepted_at,
     )
 
 
@@ -227,7 +235,7 @@ def fund(e: EscrowV2) -> tuple[str, str]:
     ah = genesis_allocation_hash(alloc)
     origins = [
         OriginAllocation(
-            origin_id=genesis_origin_id(e.run_id, ah, i), owner=h, units=u, mature_at=m
+            origin_id=genesis_origin_id(e.run_id, ah, i, ID_KEY), owner=h, units=u, mature_at=m
         )
         for i, (h, u, m) in enumerate(alloc)
     ]
@@ -366,7 +374,7 @@ def test_immature_origin_cannot_lock(tmp_path: Path) -> None:
     assert ah is not None
     origins = [
         OriginAllocation(
-            origin_id=genesis_origin_id(e.run_id, ah, i), owner=h, units=u, mature_at=m
+            origin_id=genesis_origin_id(e.run_id, ah, i, ID_KEY), owner=h, units=u, mature_at=m
         )
         for i, (h, u, m) in enumerate([(COLD.ss58, 20000, 1), (OTHER.ss58, 10000, 1)])
     ]
@@ -395,7 +403,7 @@ def test_genesis_rejects_when_authority_or_mode_wrong(tmp_path: Path, fault: str
     ah = genesis_allocation_hash([(COLD.ss58, 20000, 1), (OTHER.ss58, 10000, 1)])
     origins = [
         OriginAllocation(
-            origin_id=genesis_origin_id(e.run_id, ah, i), owner=h, units=u, mature_at=m
+            origin_id=genesis_origin_id(e.run_id, ah, i, ID_KEY), owner=h, units=u, mature_at=m
         )
         for i, (h, u, m) in enumerate([(COLD.ss58, 20000, 1), (OTHER.ss58, 10000, 1)])
     ]
@@ -453,9 +461,15 @@ def test_release_rejects_when_disputed_or_unvested(
 def test_contest_cost_and_burn_when_proven_loss(tmp_path: Path) -> None:
     # Given
     status = Settlement(
-        finality_hash=H, closed_dispute_root=H, release_beacon=10, unresolved=False, outcome="FRAUD"
+        finality_hash=H,
+        closed_dispute_root=H,
+        release_beacon=10,
+        unresolved=False,
+        outcome="FRAUD",
+        dispute_id=H,
     )
     e = ledger(setup(), tmp_path / "ledger.db", settlement=lambda _: status)
+    e.contest_settlement = lambda _lock: status
     origin, _ = fund(e)
     op = EscrowLock(
         operation_id="22" * 32,
@@ -541,7 +555,7 @@ def test_second_genesis_rejects_conflicting_allocation(tmp_path: Path) -> None:
     assert ah is not None
     origins = [
         OriginAllocation(
-            origin_id=genesis_origin_id(e.run_id, ah, i), owner=h, units=u, mature_at=m
+            origin_id=genesis_origin_id(e.run_id, ah, i, ID_KEY), owner=h, units=u, mature_at=m
         )
         for i, (h, u, m) in enumerate([(COLD.ss58, 20001, 1), (OTHER.ss58, 9999, 1)])
     ]
@@ -696,7 +710,7 @@ def actual_reward(
     )
     origins = [
         OriginAllocation(
-            origin_id=reward_origin_id(s.manifest.run_id(), 0, HOT.ss58, digest(final)),
+            origin_id=reward_origin_id(s.manifest.run_id(), 0, HOT.ss58, digest(final), ID_KEY),
             owner=COLD.ss58,
             units=1_000_000,
             mature_at=20,
@@ -772,7 +786,7 @@ def sign_actual_shadow(
     reward: RewardFinalize, binding: ShadowReservationV1
 ) -> ShadowRewardFinalizeV1:
     origin = OriginAllocation(
-        origin_id=shadow_origin_id(binding),
+        origin_id=shadow_origin_id(binding, ID_KEY),
         owner=binding.coldkey,
         units=reward.budget_units,
         mature_at=binding.mature_at,
