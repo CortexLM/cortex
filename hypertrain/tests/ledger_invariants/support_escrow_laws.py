@@ -6,8 +6,10 @@ every function takes that module as its first argument, so one loaded copy is us
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 
@@ -45,6 +47,50 @@ COLD_UNITS = 20_000
 OTHER_UNITS = 10_000
 
 
+def keyed_id(fixture: ModuleType, derive: Callable[..., str], *parts: Any) -> str:
+    """The id that `derive` (genesis_origin_id, reward_origin_id...) gives `parts` for the ledgers
+    of `fixture`: with the id key of the fixture on a base whose derivation is keyed, without it
+    on a base whose derivation is a public function of its inputs."""
+    if "id_key" in inspect.signature(derive).parameters:
+        return derive(*parts, fixture.ID_KEY)
+    return derive(*parts)
+
+
+def lock_floor(escrow: EscrowV2) -> int:
+    """The smallest admission lock the ledger takes: a tenth of the funding floor where a floor
+    exists (`require_lock_capacity`), one unit on a base that takes dust."""
+    if hasattr(escrow, "require_lock_capacity"):
+        return max(1, escrow.policy.S_min_units // 10)
+    return 1
+
+
+def resolve_contests_like_the_generic_callback(escrow: EscrowV2) -> EscrowV2:
+    """Where the ledger settles a contest bond through its own typed callback, point that callback
+    at the settlement source the test gave the generic one, naming the bond's own dispute: a
+    test about a release or a slash decides the verdict, and the typed lookup keeps the dispute
+    id the lock carried. A ledger with a single callback is returned as it is."""
+    if hasattr(escrow, "contest_settlement"):
+        generic = escrow.settlement
+        escrow.contest_settlement = lambda lock: generic(lock.operation_id).model_copy(
+            update={"dispute_id": lock.dispute_id}
+        )
+    return escrow
+
+
+def file_ledger(
+    fixture: ModuleType,
+    setup: Any,
+    path: Path,
+    *,
+    settlement: Callable[[str], Settlement] | None = None,
+    **options: Any,
+) -> EscrowV2:
+    """`fixture.ledger(...)` on a file, with the contest callback of the typed-settlement base."""
+    return resolve_contests_like_the_generic_callback(
+        fixture.ledger(setup, path, settlement=settlement, **options)
+    )
+
+
 @dataclass(frozen=True)
 class Funded:
     """A test-mode ledger after genesis: COLD owns `cold`, OTHER owns `other`."""
@@ -66,7 +112,7 @@ def signed_genesis(
     pinned = genesis_allocation_hash(allocation)
     origins = [
         OriginAllocation(
-            origin_id=genesis_origin_id(escrow.run_id, pinned, index),
+            origin_id=keyed_id(fixture, genesis_origin_id, escrow.run_id, pinned, index),
             owner=owner,
             units=units,
             mature_at=at,
@@ -91,7 +137,9 @@ def funded(
     matured: bool = True,
 ) -> Funded:
     """Genesis on a private in-memory ledger; `matured=False` leaves the units reward_pending."""
-    escrow = bare_escrow(fixture, fixture.setup(), settlement=settlement)
+    escrow = resolve_contests_like_the_generic_callback(
+        bare_escrow(fixture, fixture.setup(), settlement=settlement)
+    )
     genesis = signed_genesis(fixture, escrow)
     escrow.test_genesis(genesis)
     cold, other = (origin.origin_id for origin in genesis.origins)
@@ -240,9 +288,10 @@ def signed_by(reward: RewardFinalize, key: Keypair) -> RewardFinalize:
 
 
 def round_variant(
-    fixture: ModuleType, real: Real, w: int
+    fixture: ModuleType, real: Real, w: int, **final_changes: Any
 ) -> tuple[RewardFinalize, FinalityEvidence]:
-    """The fixture's single audited worker finalized for round `w` instead of round 0."""
+    """The fixture's single audited worker finalized for round `w` instead of round 0, with
+    `final_changes` applied to the Finalize (a differently finalized body of the same round)."""
     setup, evidence, reward = real
     run_id = setup.manifest.run_id()
     item = evidence.works[0]
@@ -251,7 +300,7 @@ def round_variant(
     verdict = ReplayVerdict.model_validate(
         {**item.verdict.body, "challenge_hash": digest(challenge)}
     )
-    final = Finalize.model_validate({**evidence.finalize.body, "w": w})
+    final = Finalize.model_validate({**evidence.finalize.body, "w": w, **final_changes})
     work = replace(
         item,
         commit=EnvelopeV2.model_validate(seal(fixture.HOT, "CommitV2", run_id, commit, 200)),
@@ -268,7 +317,7 @@ def round_variant(
         works=(work,),
     )
     origin = OriginAllocation(
-        origin_id=reward_origin_id(run_id, w, fixture.HOT.ss58, digest(final)),
+        origin_id=keyed_id(fixture, reward_origin_id, run_id, w, fixture.HOT.ss58, digest(final)),
         owner=item.owner,
         units=reward.budget_units,
         mature_at=reward.mature_at,

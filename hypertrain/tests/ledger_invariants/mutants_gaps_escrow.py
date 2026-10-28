@@ -253,6 +253,27 @@ MUTANTS = [
         ),
     },
     {
+        "id": "gaps-escrow-conviction-keeps-the-unvested-reward",
+        "invariants": ["CRD-22", "LCK-09"],
+        "path": ADMISSION,
+        "old": '                    burn_pending=reason == "TRAINING_FRAUD",\n',
+        "new": "                    burn_pending=False,\n",
+        "tests": [HOLD_FRAUD],
+        "why": "the seizure of a convicted miner's bond leaves its unvested rewards to vest.",
+    },
+    {
+        "id": "gaps-escrow-referee-fraud-convicts-nobody",
+        "invariants": ["CRD-22", "LCK-09"],
+        "path": ADMISSION,
+        "old": (
+            '            if s.unresolved or s.outcome != "FRAUD" or s.admission_id is None:\n'
+            "                return False\n"
+        ),
+        "new": "            if True:\n                return False\n",
+        "tests": [HOLD_FRAUD],
+        "why": "a referee verdict of fraud against the miner seizes no bond and bans no admission.",
+    },
+    {
         "id": "gaps-escrow-move-ignores-the-named-origin-set",
         "invariants": ["ESC-09", "ESC-11"],
         "path": LEDGER,
@@ -282,13 +303,13 @@ MUTANTS = [
             "            old = self._owner_operation(op, signer)\n"
             "            if old is not None:\n"
             "                return old\n"
-            "            status = self.settlement(op.lock_id)\n"
+            "            status = self._lock_status(op.lock_id)\n"
             "            if (\n"
             "                status.unresolved\n"
             '                or status.outcome == "FRAUD"\n'
         ),
         "new": (
-            "            status = self.settlement(op.lock_id)\n"
+            "            status = self._lock_status(op.lock_id)\n"
             "            old = self._owner_operation(op, signer)\n"
             "            if old is not None:\n"
             "                return old\n"
@@ -310,13 +331,13 @@ MUTANTS = [
             "            old = self._existing(op.operation_id, request)\n"
             "            if old is not None:\n"
             "                return old\n"
-            "            status = self.settlement(op.lock_id)\n"
+            "            status = self._lock_status(op.lock_id)\n"
             "            if (\n"
             "                status.unresolved\n"
             '                or status.outcome != "FRAUD"\n'
         ),
         "new": (
-            "            status = self.settlement(op.lock_id)\n"
+            "            status = self._lock_status(op.lock_id)\n"
             "            old = self._existing(op.operation_id, request)\n"
             "            if old is not None:\n"
             "                return old\n"
@@ -334,10 +355,10 @@ MUTANTS = [
         "invariants": ["ESC-03", "ESC-14"],
         "path": LEDGER,
         "old": (
-            '                [op.model_dump(mode="json"), referee, referee_cost,'
+            '            parts = [op.model_dump(mode="json"), referee, referee_cost,'
             " max_referee_cost]\n"
         ),
-        "new": '                [op.model_dump(mode="json")]\n',
+        "new": '            parts = [op.model_dump(mode="json")]\n',
         "tests": [
             SLASH_TERMS + "[another_referee]",
             SLASH_TERMS + "[another_referee_cost]",
@@ -371,7 +392,7 @@ MUTANTS = [
             "            old = self._owner_operation(op, signer)\n"
             "            if old is not None:\n"
             "                return old\n"
-            "            status = self.settlement(op.lock_id)\n"
+            "            status = self._lock_status(op.lock_id)\n"
             "            if (\n"
             "                status.unresolved\n"
             '                or status.outcome == "FRAUD"\n'
@@ -381,7 +402,7 @@ MUTANTS = [
             "            old = self._owner_operation(op, signer)\n"
             "            if old is not None:\n"
             "                return old\n"
-            "            status = self.settlement(op.lock_id)\n"
+            "            status = self._lock_status(op.lock_id)\n"
             "            if (\n"
             "                status.unresolved\n"
             '                or status.outcome == "FRAUD"\n'
@@ -396,8 +417,8 @@ MUTANTS = [
         "id": "gaps-escrow-slash-is-not-atomic",
         "invariants": ["ESC-18"],
         "path": LEDGER,
-        "old": "        with self.tx():\n            request = canonicalize(\n",
-        "new": "        if True:\n            request = canonicalize(\n",
+        "old": "        with self.tx():\n            parts = [op.model_dump",
+        "new": "        if True:\n            parts = [op.model_dump",
         "tests": [LATE_FAILURE],
         "why": (
             "a slash runs outside a transaction, so a failure after "
@@ -484,9 +505,7 @@ MUTANTS = [
         "id": "gaps-escrow-challenge-route-refuses-the-hotkey",
         "invariants": ["GAP-08"],
         "path": APP,
-        "old": (
-            "        await subnet_member((await run(admission.store.by_id, admission_id)).hotkey)\n"
-        ),
+        "old": "        await subnet_member(hotkey)\n",
         "new": "        await subnet_member(None)\n",
         "tests": [UNCOMMITTED],
         "why": "the challenge route refuses every applicant, so its control never answers 200.",

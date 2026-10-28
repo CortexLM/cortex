@@ -49,7 +49,6 @@ from .support import (
     resign_reward,
     routes,
     service_world,
-    signed_variant,
 )
 from .support_escrow_laws import (
     OTHER_UNITS,
@@ -57,9 +56,11 @@ from .support_escrow_laws import (
     events,
     fingerprint,
     funded,
+    lock_floor,
     lock_op,
     pay_op,
     release_op,
+    resolve_contests_like_the_generic_callback,
     round_variant,
     settled,
     signed_by,
@@ -163,7 +164,7 @@ def test_a_reward_is_issued_once_per_round_and_only_under_the_authority_signatur
     assert escrow.reward_finalize(reward, evidence) == receipt
     assert (escrow.balances().issued, events(escrow)) == (BUDGET, 1)
     # A second, differently finalized body for the same round is a conflict, not a second issue.
-    other, other_evidence = signed_variant(li_escrow, real_reward, entitlements_root="22" * 32)
+    other, other_evidence = round_variant(li_escrow, real_reward, 0, entitlements_root="22" * 32)
     before = fingerprint(escrow)
     assert error_code(lambda: escrow.reward_finalize(other, other_evidence)) == "OPERATION_CONFLICT"
     assert fingerprint(escrow) == before
@@ -221,15 +222,26 @@ def test_a_pay_operation_id_is_spent_once_and_never_for_another_amount(
 
 
 def test_the_only_code_that_slashes_passes_the_coordinator_key_as_authority() -> None:
-    """ESC-13 (the condition): authority is a compared string, so who calls slash is the guard."""
+    """ESC-13 (the condition): authority is a compared string, so who calls slash is the guard.
+
+    Two services slash, each with its own copy of the coordinator key: the dispute settlement
+    (`DisputesV2.settle_lock`) and the admission bond (`Admission.seize_bond`, ADR 0010 Part 6).
+    A service may slash from more places (the sanction of another reason, another lot), but a
+    third module, or any authority other than that key, is a new way to burn units.
+    """
     root = Path(hypertrain.__file__).parent
-    callers = []
+    authorities: dict[str, set[str]] = {}
     for path in sorted(root.rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "slash":
-                authority = [ast.unparse(k.value) for k in node.keywords if k.arg == "authority"]
-                callers.append((path.relative_to(root).as_posix(), authority))
-    assert callers == [("challenge/disputes_v2.py", ["self.key.ss58"])]
+                found = {ast.unparse(k.value) for k in node.keywords if k.arg == "authority"}
+                authorities.setdefault(path.relative_to(root).as_posix(), set()).update(
+                    found or {"<none>"}
+                )
+    assert authorities == {
+        "challenge/admission.py": {"self.coord.ss58"},
+        "challenge/disputes_v2.py": {"self.key.ss58"},
+    }
 
 
 # ------------------------------------------------------------ bond of a dispute (ESC-24, DIA-01)
@@ -605,7 +617,9 @@ class Bank:
     def plan(self, step: Step, operation: str) -> Plan | None:
         who, rival = (self.cold, self.other)[step.pick % 2], (self.other, self.cold)[step.pick % 2]
         fx, escrow, origin = self.fixture, self.escrow, self.origin
-        units = self.amount(step, self.available[who])
+        # A stake under the smallest lock a ledger takes would be refused for its size.
+        smallest = lock_floor(escrow) if step.kind == "lock_admission" else 1
+        units = max(self.amount(step, self.available[who]), smallest)
         short = None if units <= self.available[who] else UNFUNDED
         if step.kind in ("lock_admission", "lock_contest"):
             lock = lock_op(
@@ -717,7 +731,9 @@ def test_random_operation_sequences_conserve_units_and_follow_a_bucket_model(
     setup, evidence, reward = real_reward
     origin = reward.origin_ids[0]
     registry = {origin: match_settlement(reward.finalize_hash, 20)}
-    escrow = bare_escrow(li_escrow, setup, settlement=registry)
+    escrow = resolve_contests_like_the_generic_callback(
+        bare_escrow(li_escrow, setup, settlement=registry)
+    )
     bank = Bank(li_escrow, escrow, origin, registry)
     escrow.reward_finalize(reward, evidence)
     mature(escrow, reward)
@@ -784,7 +800,11 @@ def test_random_operation_sequences_conserve_units_and_follow_a_bucket_model(
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="ESC-23: the storage one escrow event adds does not grow with the ledger's unit rows",
+    reason=(
+        "ESC-23: the storage one escrow event adds does not grow with the ledger's unit rows (ADR "
+        "0014 4.6, an event hash over a digest with checkpoints, awaits Forge's approval) "
+        "[fix-lot: escrow-relay-fixes ADR0014-P4]"
+    ),
 )
 def test_the_storage_one_event_adds_does_not_grow_with_the_ledger(li_escrow: ModuleType) -> None:
     transfers = 20
@@ -793,7 +813,9 @@ def test_the_storage_one_event_adds_does_not_grow_with_the_ledger(li_escrow: Mod
         fx = funded(li_escrow)
         escrow, cold = fx.escrow, li_escrow.COLD.ss58
         for index in range(extra_rows):  # every one-unit lock is one more unit row
-            lock = lock_op(li_escrow, fx.cold, operation=f"{index + 1:064x}", units=1)
+            lock = lock_op(
+                li_escrow, fx.cold, operation=f"{index + 1:064x}", units=lock_floor(escrow)
+            )
             escrow.lock(lock, signer=cold)
 
         def stored() -> int:  # the database in bytes, whichever tables hold the events
@@ -819,41 +841,73 @@ def test_the_storage_one_event_adds_does_not_grow_with_the_ledger(li_escrow: Mod
     )
 
 
+def lookup_ticks(li_escrow: ModuleType, foreign_locks: int, *, same_owner: bool) -> int:
+    """Database work (ticks of 10 SQLite instructions) of the stake lookup of COLD's admission
+    `a1..` once `foreign_locks` locks of another admission exist, held by COLD or by OTHER."""
+    fx = funded(li_escrow)
+    escrow, cold = fx.escrow, li_escrow.COLD.ss58
+    holder, origin = (cold, fx.cold) if same_owner else (li_escrow.OTHER.ss58, fx.other)
+    mine, theirs = "a1" * 32, "b2" * 32
+    unit = lock_floor(escrow)
+    escrow.lock(
+        lock_op(li_escrow, fx.cold, operation="c1" * 32, units=unit, reference=mine), signer=cold
+    )
+    for index in range(foreign_locks):
+        lock = lock_op(
+            li_escrow,
+            origin,
+            operation=f"{index + 2:064x}",
+            units=unit,
+            reference=theirs,
+            owner=holder,
+        )
+        escrow.lock(lock, signer=holder)
+    ticks = [0]
+
+    def tick() -> int:
+        ticks[0] += 1
+        return 0
+
+    escrow.db.set_progress_handler(tick, 10)  # one tick per 10 SQLite VM instructions
+    try:
+        units, _ = escrow.locked(mine, cold)
+    finally:
+        escrow.db.set_progress_handler(None, 0)
+    assert units == unit  # the lookup answers, whatever it costs
+    return ticks[0]
+
+
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="ESC-23: the database work of a stake lookup does not grow with other admissions' locks",
+    reason=(
+        "ESC-23: the database work of a stake lookup does not grow with the locks other owners "
+        "hold (locked() reads every LOCK_ADMISSION event of the ledger) "
+        "[fix-lot: escrow-relay-fixes ADR0014-P4]"
+    ),
+)
+def test_the_database_work_of_a_stake_lookup_does_not_grow_with_the_locks_of_other_owners(
+    li_escrow: ModuleType,
+) -> None:
+    small = lookup_ticks(li_escrow, 2, same_owner=False)
+    large = lookup_ticks(li_escrow, 80, same_owner=False)
+    assert large <= 2 * small + 10, f"one lookup: {small} ticks at 2 foreign locks, {large} at 80"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "ESC-23: the database work of a stake lookup does not grow with the locks the same owner "
+        "holds for other admissions (ADR 0014 4.1 indexes by owner and bounds it by the "
+        "per-coldkey cap) [fix-lot: escrow-relay-fixes ADR0014-P4]"
+    ),
 )
 def test_the_database_work_of_a_stake_lookup_does_not_grow_with_other_admissions_locks(
     li_escrow: ModuleType,
 ) -> None:
-    def work_of_one_lookup(foreign_locks: int) -> int:
-        fx = funded(li_escrow)
-        escrow, cold = fx.escrow, li_escrow.COLD.ss58
-        mine, theirs = "a1" * 32, "b2" * 32
-        escrow.lock(
-            lock_op(li_escrow, fx.cold, operation="c1" * 32, units=1, reference=mine), signer=cold
-        )
-        for index in range(foreign_locks):
-            lock = lock_op(
-                li_escrow, fx.cold, operation=f"{index + 2:064x}", units=1, reference=theirs
-            )
-            escrow.lock(lock, signer=cold)
-        ticks = [0]
-
-        def tick() -> int:
-            ticks[0] += 1
-            return 0
-
-        escrow.db.set_progress_handler(tick, 10)  # one tick per 10 SQLite VM instructions
-        try:
-            units, _ = escrow.locked(mine, cold)
-        finally:
-            escrow.db.set_progress_handler(None, 0)
-        assert units == 1  # the lookup answers, whatever it costs
-        return ticks[0]
-
-    small, large = work_of_one_lookup(2), work_of_one_lookup(120)
+    small = lookup_ticks(li_escrow, 2, same_owner=True)
+    large = lookup_ticks(li_escrow, 120, same_owner=True)
     assert large <= 2 * small + 10, f"one lookup: {small} ticks at 2 foreign locks, {large} at 120"
 
 
@@ -865,7 +919,11 @@ UNDECODABLE = "5" * 48
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="ES-07: a transfer to a well-formed recipient that is no decodable key is refused",
+    reason=(
+        "ES-07: a transfer to a well-formed recipient that is no decodable key is refused (ADR "
+        "0014 5.2 asks for a recipient the ledger already knows) "
+        "[fix-lot: escrow-relay-fixes ADR0014-P5]"
+    ),
 )
 def test_a_transfer_to_a_recipient_that_is_no_decodable_key_is_refused(
     li_escrow: ModuleType,

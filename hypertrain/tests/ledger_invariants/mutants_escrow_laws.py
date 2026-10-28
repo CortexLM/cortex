@@ -62,7 +62,12 @@ PAY_ROLLS_BACK = (
     "tests/challenge/test_v2_weights_pay.py::test_pay_rolls_back_when_answer_not_persisted"
 )
 
-BAN = '            self.store.transition(r.admission_id, "BANNED", "FINALIZED_TRAINING_FRAUD", now)'
+CONVICTION = '            if reason == "TRAINING_FRAUD" and r.state != "BANNED":\n'
+SEIZURE_AUTHORITY = (
+    "                    authority=self.coord.ss58,\n"
+    "                    now_beacon=now,\n"
+    '                    burn_pending=reason == "TRAINING_FRAUD",\n'
+)
 CONTEST_LOCK_GATE = (
     '                            self._authenticated_v2(run_id, raw, "EscrowLock", {})'
 )
@@ -675,14 +680,23 @@ MUTANTS = [
         "id": "el-fraud-settlement-slashes-with-caller-authority",
         "invariants": ["ESC-13"],
         "path": "src/hypertrain/challenge/admission.py",
-        "old": BAN,
+        "old": CONVICTION,
         "new": (
             "            self.escrow.slash(\n"
-            "                EscrowRelease.model_validate({}), authority=hotkey, now_beacon=now\n"
-            "            )\n" + BAN
+            "                EscrowRelease.model_validate({}), authority=reason, now_beacon=now\n"
+            "            )\n" + CONVICTION
         ),
         "tests": [SLASH_CALLERS],
-        "why": "a second slash call site takes its authority from the caller's arguments.",
+        "why": "a third slash call site takes its authority from the caller's arguments.",
+    },
+    {
+        "id": "el-bond-seizure-slashes-with-the-owners-key",
+        "invariants": ["ESC-13"],
+        "path": "src/hypertrain/challenge/admission.py",
+        "old": SEIZURE_AUTHORITY,
+        "new": SEIZURE_AUTHORITY.replace("self.coord.ss58", "lock.owner"),
+        "tests": [SLASH_CALLERS],
+        "why": "the seizure of an admission bond passes the bond owner's key as slash authority.",
     },
     {
         "id": "el-payable-ignores-holder",

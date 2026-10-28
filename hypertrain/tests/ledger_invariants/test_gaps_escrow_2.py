@@ -30,6 +30,7 @@ from .support import (
 from .support_escrow_laws import (
     COLD_UNITS,
     OTHER_UNITS,
+    file_ledger,
     fingerprint,
     funded,
     lock_op,
@@ -59,9 +60,11 @@ UNFUNDED = "UNFUNDED_OR_UNKNOWN_ORIGIN"
 @pytest.mark.xfail(
     strict=True,
     raises=DefenceMissing,
-    reason="ESC-15+ESC-D10: a slash that names an empty referee, or the slashed owner, is refused "
-    "and moves nothing, but both pass the referee funding check and the referee cost flows back "
-    "to the owner",
+    reason=(
+        "ESC-15+ESC-D10: a slash that names an empty referee, or the slashed owner, is refused "
+        "and moves nothing, but both pass the referee funding check and the referee cost flows "
+        "back to the owner [fix-lot: none (no design yet)]"
+    ),
 )
 def test_a_slash_naming_an_empty_or_self_referee_is_refused_and_changes_nothing(
     li_escrow: ModuleType, referee: str
@@ -226,7 +229,7 @@ def test_a_slash_operation_id_names_one_request_and_one_burn_even_after_a_restar
 ) -> None:
     # Given: a bond slashed with a referee share of 100, on a ledger file.
     setup, path = li_escrow.setup(), tmp_path / "ledger.db"
-    escrow = li_escrow.ledger(setup, path, settlement=lambda _reference: settled("FRAUD"))
+    escrow = file_ledger(li_escrow, setup, path, settlement=lambda _reference: settled("FRAUD"))
     origin, _ = li_escrow.fund(escrow)
     cold, other = li_escrow.COLD.ss58, li_escrow.OTHER.ss58
     bond = lock_op(li_escrow, origin, units=CONTEST_UNITS, kind="LOCK_CONTEST", operation="22" * 32)
@@ -246,7 +249,7 @@ def test_a_slash_operation_id_names_one_request_and_one_burn_even_after_a_restar
     assert ledger_state(escrow) == before
     # and the same terms replay the first receipt, on this engine and on a reopened one.
     assert escrow.slash(request, authority=authority, now_beacon=10, **terms) == receipt
-    reopened = li_escrow.ledger(setup, path, settlement=lambda _reference: settled("FRAUD"))
+    reopened = file_ledger(li_escrow, setup, path, settlement=lambda _reference: settled("FRAUD"))
     assert reopened.slash(request, authority=authority, now_beacon=10, **terms) == receipt
     assert ledger_state(reopened) == before
     assert reopened.balances().burned == CONTEST_UNITS - 100
@@ -280,7 +283,7 @@ def test_a_release_and_a_slash_with_a_referee_cost_that_fail_late_change_nothing
     setup, path = li_escrow.setup(), tmp_path / "ledger.db"
     stake_id, bond_id = fresh_id("stake"), fresh_id("bond")
     table = {stake_id: settled("MATCH"), bond_id: settled("FRAUD")}
-    escrow = li_escrow.ledger(setup, path, settlement=registered_settlements(table))
+    escrow = file_ledger(li_escrow, setup, path, settlement=registered_settlements(table))
     origin, _ = li_escrow.fund(escrow)
     cold, other, authority = li_escrow.COLD.ss58, li_escrow.OTHER.ss58, li_escrow.COORD.ss58
     stake = lock_op(li_escrow, origin, operation=stake_id)
@@ -309,7 +312,7 @@ def test_a_release_and_a_slash_with_a_referee_cost_that_fail_late_change_nothing
     slashed = escrow.slash(slash, authority=authority, now_beacon=10, **terms)
     assert escrow.release(release, signer=cold, now_beacon=10) == released
     assert escrow.slash(slash, authority=authority, now_beacon=10, **terms) == slashed
-    reopened = li_escrow.ledger(setup, path, settlement=registered_settlements(table))
+    reopened = file_ledger(li_escrow, setup, path, settlement=registered_settlements(table))
     assert (reopened.balances().admission_locked, reopened.balances().dispute_locked) == (0, 0)
     assert reopened.balances().burned == bond.units - 100
     assert reopened.balances(other).available == OTHER_UNITS + 100

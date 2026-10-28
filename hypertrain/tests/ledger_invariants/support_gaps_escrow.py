@@ -15,6 +15,7 @@ from types import ModuleType
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
 
 import hypertrain
 from hypertrain.auditor.island_bisect import RefereeEvidence
@@ -22,7 +23,7 @@ from hypertrain.challenge.admission_store import AdmissionError
 from hypertrain.challenge.disputes_v2 import Turn
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.ledger.escrow_v2 import EscrowV2, Settlement
-from hypertrain.miner.admission import sign_rotation
+from hypertrain.miner import admission as miner_admission
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -32,7 +33,7 @@ from hypertrain.protocol.messages_v2 import EscrowLock, EscrowRelease, Resolutio
 from .support import World, service_world
 from .support_escrow_laws import Funded, funded, lock_op, release_op
 from .support_locks import Lab, Miner, Rig, ident, settled_status
-from .support_opids import DisputeWorld, contest_lock, fresh_id, self_transfer
+from .support_opids import DisputeWorld, contest_lock, fresh_id, refused, self_transfer
 from .support_weights import Metagraph, add_origin, live_gate
 
 SOURCE = Path(hypertrain.__file__).parent
@@ -201,12 +202,41 @@ def at_epoch_four(world: World) -> int:
     return int(world.store.clock())
 
 
-def rotate(world: World, coldkey: Keypair, hotkey: str, new_hotkey: str) -> httpx.Response:
-    """The signed rotation of the admission of `hotkey` to `new_hotkey`, posted to the route."""
-    request = RotateRequest(hotkey=hotkey, new_hotkey=new_hotkey, operation_id=fresh_id("rotate"))
-    return world.client.post(
-        world.network.url + f"/admission/{hotkey}/rotate",
-        json=sign_rotation(coldkey, world.run_id, request, 1000),
+def rotate(world: World, coldkey: Keypair, hotkey: str, new_hotkey: Keypair) -> httpx.Response:
+    """The signed rotation of the admission of `hotkey` to `new_hotkey`, posted to the route. The
+    one place that knows the shape of the request: where the base asks for the new hotkey's
+    consent (`sign_rotation_consent`, RTA-01) the new hotkey gives it, on an earlier base the
+    three-field body is the whole request."""
+    run_id, operation_id, expires = world.run_id, fresh_id("rotate"), 1000
+    consent = getattr(miner_admission, "sign_rotation_consent", None)
+    if consent is None:
+        request = RotateRequest.model_validate(
+            {"hotkey": hotkey, "new_hotkey": new_hotkey.ss58, "operation_id": operation_id}
+        )
+    else:
+        request = consent(
+            new_hotkey,
+            run_id=run_id,
+            coldkey=coldkey.ss58,
+            hotkey=hotkey,
+            operation_id=operation_id,
+            expires_beacon=expires,
+        )
+    envelope = miner_admission.sign_rotation(coldkey, run_id, request, expires)
+    return world.client.post(world.network.url + f"/admission/{hotkey}/rotate", json=envelope)
+
+
+def ask_for_the_challenge(world: World, key: Keypair, admission_id: str) -> httpx.Response:
+    """The owner of an admission asks for its trial challenge. The one place that knows the shape
+    of the request: a POST whose body is the owner's signed envelope where the base has it
+    (RTA-04, `Network.challenge`), the earlier GET signed in headers where it does not."""
+    ask = getattr(world.network, "challenge", None)
+    if ask is not None:
+        return ask(admission_id, key)
+    message = f"hypertrain/trial-challenge/2|{world.run_id}|{admission_id}".encode()
+    return world.client.get(
+        world.network.url + f"/join/{admission_id}/challenge",
+        headers={"x-hotkey": key.ss58, "x-trial-signature": key.sign(message).hex()},
     )
 
 
@@ -227,6 +257,16 @@ def client_event_over_http(
     return signed_post(
         world, "lock", key, "EscrowLock", contest_lock(key.ss58, operation_id, origin)
     )
+
+
+def squat_refused(call: Callable[[], object]) -> bool:
+    """True when the event a client signs under a service id is refused: by the ledger, the dispute
+    service, or the wire model itself (a base that keeps the service's ids in a key space of their
+    own, outside the 64-hex ids of a client, cannot even build the event)."""
+    try:
+        return refused(call)
+    except ValidationError as error:
+        return "operation_id" in str(error)
 
 
 def settlement_ids(escrow: EscrowV2) -> list[str]:

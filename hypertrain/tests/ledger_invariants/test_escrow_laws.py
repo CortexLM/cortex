@@ -17,7 +17,7 @@ from types import ModuleType
 import pytest
 from pydantic import ValidationError
 
-from hypertrain.ledger.escrow_v2 import Balances, EscrowError, Settlement, authority_message
+from hypertrain.ledger.escrow_v2 import Balances, Settlement, authority_message
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages_v2 import (
     EscrowLock,
@@ -34,6 +34,7 @@ from .support_escrow_laws import (
     events,
     fingerprint,
     funded,
+    lock_floor,
     lock_op,
     pay_op,
     release_op,
@@ -204,7 +205,8 @@ def test_no_operation_draws_on_a_locked_pending_paid_or_burned_bucket(
     assert getattr(escrow.balances(cold), bucket) == COLD_UNITS
     attempts = {
         "lock_admission": lambda: escrow.lock(
-            lock_op(li_escrow, fx.cold, operation="61" * 32, units=1), signer=cold
+            lock_op(li_escrow, fx.cold, operation="61" * 32, units=lock_floor(escrow)),
+            signer=cold,
         ),
         "lock_contest": lambda: escrow.lock(
             lock_op(li_escrow, fx.cold, operation="62" * 32, units=1, kind="LOCK_CONTEST"),
@@ -601,54 +603,6 @@ def test_a_referee_cost_needs_a_funded_referee_and_a_contest_bond(
     assert fingerprint(escrow) == before
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "ESC-15+ESC-D10: a slash never refunds its referee cost to the slashed owner "
-        "(an empty or self referee passes the funding check)"
-    ),
-)
-@pytest.mark.parametrize(
-    "referee", ["", "owner"], ids=["an_empty_referee", "the_slashed_owner_as_referee"]
-)
-def test_a_slash_never_pays_its_referee_cost_back_to_the_slashed_owner(
-    li_escrow: ModuleType, referee: str
-) -> None:
-    # Given: a FRAUD bond of 1000 units and a funded, distinct referee as the control.
-    fx, bond, request = contested(li_escrow, settled("FRAUD"))
-    escrow, cold = fx.escrow, li_escrow.COLD.ss58
-    escrow.slash(
-        request,
-        authority=li_escrow.COORD.ss58,
-        now_beacon=10,
-        referee=li_escrow.OTHER.ss58,
-        referee_cost=100,
-        max_referee_cost=100,
-    )
-    assert escrow.balances(cold).available == COLD_UNITS - CONTEST_UNITS
-    # When: a second bond is slashed naming the owner itself (or the empty string) as referee.
-    second = lock_op(
-        li_escrow, fx.cold, operation="25" * 32, units=CONTEST_UNITS, kind="LOCK_CONTEST"
-    )
-    escrow.lock(second, signer=cold)
-    request = release_op(second, operation="38" * 32)
-    # Then: the call is refused, or at least the cost does not flow back to the slashed owner.
-    available_before = escrow.balances(cold).available
-    try:
-        escrow.slash(
-            request,
-            authority=li_escrow.COORD.ss58,
-            now_beacon=10,
-            referee=cold if referee == "owner" else referee,
-            referee_cost=100,
-            max_referee_cost=100,
-        )
-    except EscrowError:
-        return
-    assert escrow.balances(cold).available == available_before, "the cost came back to the owner"
-
-
 # ------------------------------------------------------------------ issuance (ESC-20)
 
 
@@ -747,7 +701,8 @@ TAMPERED: dict[str, tuple[Callable[[ModuleType], Statements], str]] = {
     "a_receipt_moved_to_another_operation": (
         lambda fx: [
             (
-                "UPDATE escrow_events SET receipt=replace(receipt,operation_id,?) "
+                "UPDATE escrow_events SET receipt=replace(receipt,"
+                "json_extract(receipt,'$.operation_id'),?) "
                 "WHERE seq=(SELECT MAX(seq) FROM escrow_events)",
                 ("f" * 64,),
             )
@@ -932,7 +887,7 @@ def test_stake_counts_only_locks_that_name_its_admission_and_owner(li_escrow: Mo
         lock_op(li_escrow, fx.cold, operation="c1" * 32, units=600, reference=first),
         lock_op(li_escrow, fx.cold, operation="c2" * 32, units=300, reference=first),
         lock_op(li_escrow, fx.cold, operation="c3" * 32, units=100, reference=second),
-        lock_op(li_escrow, fx.other, operation="c4" * 32, units=70, reference=first, owner=other),
+        lock_op(li_escrow, fx.other, operation="c4" * 32, units=170, reference=first, owner=other),
         lock_op(
             li_escrow, fx.cold, operation="c5" * 32, units=50, reference=first, kind="LOCK_CONTEST"
         ),
@@ -948,7 +903,7 @@ def test_stake_counts_only_locks_that_name_its_admission_and_owner(li_escrow: Mo
     assert {pair: units for pair, (units, _) in stakes.items()} == {
         ("first", "COLD"): 900,
         ("second", "COLD"): 100,
-        ("first", "OTHER"): 70,
+        ("first", "OTHER"): 170,
     }
     assert len({receipt for _, receipt in stakes.values()}) == 3
     assert escrow.locked(second, other) == (0, "0" * 64)
@@ -969,7 +924,9 @@ def test_the_same_units_cannot_back_two_locks_or_two_admissions(li_escrow: Modul
     escrow.lock(everything, signer=cold)
     before = fingerprint(escrow)
     # When / Then: one more unit for the second admission, or the same lock id re-pointed, fails.
-    one_more = lock_op(li_escrow, fx.cold, operation="c2" * 32, units=1, reference=second)
+    one_more = lock_op(
+        li_escrow, fx.cold, operation="c2" * 32, units=lock_floor(escrow), reference=second
+    )
     assert error_code(lambda: escrow.lock(one_more, signer=cold)) == UNFUNDED
     repointed = lock_op(li_escrow, fx.cold, operation="c1" * 32, units=COLD_UNITS, reference=second)
     assert error_code(lambda: escrow.lock(repointed, signer=cold)) == "OPERATION_CONFLICT"

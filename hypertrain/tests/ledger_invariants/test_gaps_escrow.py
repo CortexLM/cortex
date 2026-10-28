@@ -18,6 +18,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from hypertrain.challenge.disputes_v2 import Turn
 from hypertrain.challenge.store import ChallengeError
@@ -31,6 +32,7 @@ from .support import (
     service_world,
 )
 from .support_gaps_escrow import (
+    ask_for_the_challenge,
     at_epoch_four,
     client_event_over_http,
     funded_cohort,
@@ -46,6 +48,7 @@ from .support_gaps_escrow import (
     seed_round_origin,
     settlement_ids,
     sql_writers,
+    squat_refused,
     units_in,
 )
 from .support_locks import Miner, Rig, units_of, vested
@@ -56,7 +59,6 @@ from .support_opids import (
     client_event,
     dispute_world,
     fresh_id,
-    refused,
     service_step,
 )
 
@@ -163,9 +165,11 @@ def test_a_due_origin_matures_on_the_first_beacon_when_a_request_built_the_servi
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="GAP-07: units due at the first beacon after a restart become available without "
-    "waiting for an unrelated request to build the per-run services (push_beacon matures only "
-    "the services that exist, and nothing builds them at startup)",
+    reason=(
+        "GAP-07: units due at the first beacon after a restart become available without waiting "
+        "for an unrelated request to build the per-run services (push_beacon matures only the "
+        "services that exist, and nothing builds them at startup) [fix-lot: none (no design yet)]"
+    ),
 )
 def test_a_due_origin_matures_on_the_first_beacon_after_a_restart(tmp_path: Path) -> None:
     with service_world(tmp_path) as world:
@@ -212,20 +216,24 @@ def test_matured_units_are_emitted_to_the_hotkey_that_earned_them_while_it_is_th
 @pytest.mark.xfail(
     strict=True,
     raises=DefenceMissing,
-    reason="CRD-12+WGT-13+CL-29: the units a rotated admission earned are emitted to the hotkey "
-    "the admission holds now (or the rotation is refused while origins are owed), but payable() "
-    "answers the hotkey recorded at issuance, so the weight goes to the key that was given up",
+    reason=(
+        "CRD-12+WGT-13+CL-29: the units a rotated admission earned are emitted to the hotkey the "
+        "admission holds now (or the rotation is refused while origins are owed), but payable() "
+        "answers the hotkey recorded at issuance, so the weight goes to the key that was given up "
+        "[fix-lot: decision (product choice pending)]"
+    ),
 )
 def test_matured_units_of_a_rotated_admission_are_emitted_to_its_current_hotkey(
     tmp_path: Path,
 ) -> None:
     service = load_fixture_module(*SERVICE_FIXTURE)
-    hot, new, cold = service.HOT[0].ss58, service.REFEREE.ss58, service.COLD[0]
+    hot, spare, cold = service.HOT[0].ss58, service.REFEREE, service.COLD[0]
+    new = spare.ss58
     origins = [(fresh_id("cl-29"), hot, cold.ss58, PAID)]
     with live_world(tmp_path, origins, {hot, new}) as (world, _):
         # Given: an admission with matured units, whose coldkey asks to rotate its hotkey.
         assert world.network.join().status_code == 200
-        rotation = rotate(world, cold, hot, new)
+        rotation = rotate(world, cold, hot, spare)
         assert rotation.status_code in (200, 409), rotation.text
         current = current_hotkey(world, hot)
         assert current == (new if rotation.status_code == 200 else hot)
@@ -243,8 +251,11 @@ def test_matured_units_of_a_rotated_admission_are_emitted_to_its_current_hotkey(
 @pytest.mark.xfail(
     strict=True,
     raises=StepRefused,
-    reason="ESC-04+BND-24+SG-11: a client event cannot take the id the service derives for the "
-    "slash of a bond whose miner lost a FRAUD contest, so the proven fraud is always burned",
+    reason=(
+        "ESC-04+BND-24+SG-11: a client event cannot take the id the service derives for the slash "
+        "of a bond whose miner lost a FRAUD contest, so the proven fraud is always burned "
+        "[fix-lot: escrow-relay-fixes ADR0014-P1]"
+    ),
 )
 def test_a_client_event_never_blocks_the_dispute_slash_id(
     li_escrow: ModuleType, tmp_path: Path, kind: str
@@ -270,7 +281,7 @@ def test_a_client_event_never_blocks_the_dispute_slash_id(
         turn = opened(world)
         key, origin = li_escrow.OTHER, world.origins[1]
         client_event(world.escrow, kind, key, fresh_id("neutral"), origin)
-        refused(lambda: client_event(world.escrow, kind, key, settle_ids[0], origin))
+        squat_refused(lambda: client_event(world.escrow, kind, key, settle_ids[0], origin))
 
         # Then: the referee's FRAUD resolution and the slash go through together, as without it.
         resolved_and_settled(world, turn, resolve_fraud, settle=service_step)
@@ -300,16 +311,22 @@ def squat_over_http(world: World, kind: str, operation_id: str) -> None:
     origin = world.network.origin_ids[1]
     neutral = client_event_over_http(world, kind, bystander, fresh_id("neutral"), origin)
     assert neutral.status_code == 200, neutral.text
-    client_event_over_http(world, kind, bystander, operation_id, origin)
+    try:
+        client_event_over_http(world, kind, bystander, operation_id, origin)
+    except ValidationError as error:
+        # An id outside the client's own 64-hex space cannot be signed at all: nothing to post.
+        assert "operation_id" in str(error)
 
 
 @pytest.mark.parametrize("kind", ["transfer", "lock"])
 @pytest.mark.xfail(
     strict=True,
     raises=StepRefused,
-    reason="ESC-04+DIA-14+SG-11: a client event cannot take the id the service derives for the "
-    "settlement of a contest the beacon closes, so a blocked dispute always leaves the round "
-    "and its bond comes back",
+    reason=(
+        "ESC-04+DIA-14+SG-11: a client event cannot take the id the service derives for the "
+        "settlement of a contest the beacon closes, so a blocked dispute always leaves the round "
+        "and its bond comes back [fix-lot: escrow-relay-fixes ADR0014-P1]"
+    ),
 )
 def test_a_client_event_never_stops_the_beacon_from_closing_a_blocked_dispute(
     tmp_path: Path, kind: str
@@ -379,9 +396,12 @@ def prepare_timeout(world: World, dispute_id: str) -> None:
 @pytest.mark.xfail(
     strict=True,
     raises=StepRefused,
-    reason="ESC-04+DIA-14+SG-11: a client event cannot take the id the service derives for the "
-    "settlement of a miner convicted by the referee or by the operator's timeout, so a "
-    "conviction is always applied and its bond settled (burned for FRAUD, released for a timeout)",
+    reason=(
+        "ESC-04+DIA-14+SG-11: a client event cannot take the id the service derives for the "
+        "settlement of a miner convicted by the referee or by the operator's timeout, so a "
+        "conviction is always applied and its bond settled (burned for FRAUD, released for a "
+        "timeout) [fix-lot: escrow-relay-fixes ADR0014-P1]"
+    ),
 )
 def test_a_client_event_never_blocks_the_settlement_of_a_convicted_miner_over_http(
     tmp_path: Path, route: Any, decide: str, burns: int, prepare: Any
@@ -433,10 +453,13 @@ def two_miners_with_a_round_each(rig: Rig) -> tuple[Miner, Miner, str, str]:
 @pytest.mark.xfail(
     strict=True,
     raises=DefenceMissing,
-    reason="LCK-09+DIB-07: a reward origin does not vest while a dispute naming its miner and "
-    "round is open, and vests again once the dispute is resolved for the miner, but the "
-    "origin's settlement is a record written at finalize that no dispute ever touches "
-    "(whether a miner's own contest holds its own reward is a pending product decision)",
+    reason=(
+        "LCK-09+DIB-07: a reward origin does not vest while a dispute naming its miner and round "
+        "is open, and vests again once the dispute is resolved for the miner, but the origin's "
+        "settlement is a record written at finalize that no dispute ever touches (whether a "
+        "miner's own contest holds its own reward is a pending product decision) "
+        "[fix-lot: decision (product choice pending)]"
+    ),
 )
 def test_an_open_dispute_holds_the_origin_of_its_own_miner_only_and_a_match_releases_it(
     rig: Rig,
@@ -461,31 +484,27 @@ def test_an_open_dispute_holds_the_origin_of_its_own_miner_only_and_a_match_rele
     assert rig.escrow.balances().conserved()
 
 
-def emitted_after_conviction(rig: Rig) -> tuple[dict[str, float], Miner, Miner]:
-    """The weights of epoch 0 once the second of two miners lost a FRAUD contest of round 0."""
-    first, second, _, _ = two_miners_with_a_round_each(rig)
-    contest = rig.open_contest(second)
-    assert rig.refereed(contest.dispute_id, "FRAUD", second.hotkey).status_code == 200
-    rig.net.push(5)
-    rig.net.push(6)
-    return paid_after(rig.world), first, second
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=DefenceMissing,
-    reason="CRD-22+LCK-09+DIB-07: fraud proven against a miner after finality leaves the origin "
-    "that miner earned for that round unpaid (held or burned), but the origin's settlement stays "
-    "the MATCH record written at finalize, so it vests and is emitted to the convicted hotkey",
-)
 def test_a_miner_convicted_of_fraud_on_a_round_is_emitted_nothing_for_that_rounds_origin(
     rig: Rig,
 ) -> None:
-    weights, first, second = emitted_after_conviction(rig)
-    # The miner nobody convicted is paid its origin (a fix cannot hold the whole round).
+    # Given: two admitted miners, each holding its bond and a pending origin of round 0; only
+    # the second one contests the round, and the referee finds its fraud.
+    first, second = rig.admit(0), rig.admit(1)
+    seed_round_origin(rig, first, "first")
+    owed = seed_round_origin(rig, second, "second")
+    assert rig.escrow.balances(second.coldkey).admission_locked > 0
+    contest = rig.open_contest(second)
+    assert rig.refereed(contest.dispute_id, "FRAUD", second.hotkey).status_code == 200
+    # When: the beacon passes the vesting round of both origins, and one round beyond.
+    rig.net.push(5)
+    rig.net.push(6)
+    # Then: the miner nobody convicted is paid its origin (a fix cannot hold the whole round),
+    # the convicted one is emitted nothing and its origin did not vest, and units are conserved.
+    weights = paid_after(rig.world)
     assert weights[first.hotkey] == 500.0
-    if second.hotkey in weights:
-        raise DefenceMissing(f"the convicted miner was emitted {weights[second.hotkey]}")
+    assert second.hotkey not in weights
+    assert units_in(rig.world.store, owed, "available") == 0
+    assert rig.escrow.balances(second.coldkey).reward_pending == 0
     assert rig.escrow.balances().conserved()
 
 
@@ -555,19 +574,21 @@ UNREGISTERED = Keypair(b"\x66" * 32).ss58
 @pytest.mark.xfail(
     strict=True,
     raises=DefenceMissing,
-    reason="GAP-08: the challenge route reads the admission's hotkey on the shared connection "
-    "without the store lock, so a transaction another thread has open (and later rolls back) is "
-    "visible to it, and the route refuses a registered hotkey for a state that never existed "
-    "(sqlite reports the transaction connection-wide)",
+    reason=(
+        "GAP-08: the challenge route reads the admission's hotkey on the shared connection "
+        "without the store lock, so a transaction another thread has open (and later rolls back) "
+        "is visible to it, and the route refuses a registered hotkey for a state that never "
+        "existed (sqlite reports the transaction connection-wide) [fix-lot: none (no design yet)]"
+    ),
 )
 def test_a_route_never_decides_on_the_uncommitted_state_of_another_thread(tmp_path: Path) -> None:
     with service_world(tmp_path) as world:
         net = world.network
         admission_id = net.join(0).json()["admission_id"]
         net.push(2)
-        url = net.url + f"/join/{admission_id}/challenge"
+        owner = load_fixture_module(*SERVICE_FIXTURE).HOT[0]
         # Given: the route answers as it should when nothing else is going on.
-        control = world.client.get(url)
+        control = ask_for_the_challenge(world, owner, admission_id)
         assert control.status_code == 200, control.text
         _, admission, _ = world.store._services(world.run_id)
         real = admission.store.by_id
@@ -600,7 +621,7 @@ def test_a_route_never_decides_on_the_uncommitted_state_of_another_thread(tmp_pa
         admission.store.by_id = by_id  # type: ignore[method-assign]
 
         # When: the route is asked while another thread has a transaction open on the connection.
-        answer = world.client.get(url)
+        answer = ask_for_the_challenge(world, owner, admission_id)
         writer.join(timeout=30)
 
         # Then: it answers as in the control, and the admission is exactly as it was.
