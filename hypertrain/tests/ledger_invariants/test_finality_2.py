@@ -302,11 +302,14 @@ def test_a_miner_convicted_after_its_round_was_audited_is_never_credited_by_a_fi
             "UPDATE admissions_v2 SET coldkey=? WHERE hotkey=?", (owner, sibling.ss58)
         )
     burned = sanction(stage, banned, "TRAINING_FRAUD")
-    states = {key.ss58: admission_of(stage, key)["record"]["state"] for key in stage.honest}
+    states = {
+        member.ss58: admission_of(stage, member)["record"]["state"] for member in stage.honest
+    }
     X.control(
         burned > 0
         and states
-        == {banned.ss58: "BANNED", sibling.ss58: "ACTIVE"} | {key.ss58: "ACTIVE" for key in rest},
+        == {banned.ss58: "BANNED", sibling.ss58: "ACTIVE"}
+        | {member.ss58: "ACTIVE" for member in rest},
         "the miner is convicted and its sibling is not banned with it",
     )
     tape = sorted(item["roster"]["hotkey"] for item in stage.record("tape-inputs", "0")["inputs"])
