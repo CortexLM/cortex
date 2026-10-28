@@ -8774,17 +8774,21 @@ class ChallengeStore:
                     return claim
                 flight = self._aggregate_flights_v2[key] = Future()
         assert flight is not None
+        # A failure travels with its traceback, whose frames keep their locals. None of them may
+        # keep the flight, which keeps the failure: that cycle would hold the arrays of the failed
+        # computation (gigabytes) until a collection finds it.
         if not leader:
-            return self._follow_aggregate_v2(flight)
+            try:
+                return self._follow_aggregate_v2(flight)
+            finally:
+                del flight
         assert isinstance(claim, _AggregatePlan)
         try:
             tape, prev_state, tape_hash = self._aggregate_compute_v2(claim, w)
             value = self._aggregate_settle_v2(run_id, w, claim, tape, prev_state, tape_hash)
         except BaseException as error:
             self._end_aggregate_v2(key, flight, error=error)
-            del (
-                flight
-            )  # the traceback would pin it, and its exception the failed computation's arrays
+            del flight
             raise
         self._end_aggregate_v2(key, flight, value=value)
         return value
@@ -8943,7 +8947,10 @@ class ChallengeStore:
             self._aggregate_waiters.release()
         if not finished:
             raise ChallengeError(503, "aggregate still running for this round; retry")
-        return flight.result()
+        try:
+            return flight.result()
+        finally:
+            del flight, finished
 
     def _end_aggregate_v2(
         self,

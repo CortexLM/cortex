@@ -13,10 +13,12 @@ fixture's teardown: a broken implementation fails a test, it never hangs the sui
 
 from __future__ import annotations
 
+import gc
 import json
 import shutil
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -493,6 +495,50 @@ def test_a_computation_that_fails_fails_its_waiter_and_leaves_no_record_behind(
     finished(retry)
     assert retry.error is None, f"the retry failed: {retry.error!r}"
     assert outcome(restored, retry.result) == undisturbed
+
+
+def test_a_failed_computation_is_not_kept_alive_by_the_calls_that_saw_it_fail(
+    restored: Restored, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a computation that fails with an object only its own frame refers to, and a waiter.
+    # A traceback keeps every frame it passed through, and with them the failed computation's
+    # arrays (gigabytes at the 100.7 M profile): they must go with the last call that saw the
+    # failure, not wait for a collection of reference cycles. The collector is off to show it.
+    store = restored.store
+    reached, go = threading.Event(), threading.Event()
+    ballast: list[weakref.ref[object]] = []
+
+    def fails(*args: Any, **kwargs: Any) -> Any:
+        mine = type("Ballast", (), {})()
+        ballast.append(weakref.ref(mine))
+        reached.set()
+        go.wait(WAIT)
+        raise TapeError("injected")
+
+    monkeypatch.setattr(tape_v2, "compute_body", fails)
+    collecting = gc.isenabled()
+    gc.collect()
+    gc.disable()
+    try:
+        # When: the leader fails while a repeated call waits, and both are let go of
+        leader = Call("leader", lambda: store.aggregate_v2(restored.run, 0))
+        if not reached.wait(WAIT):
+            raise RuntimeError(f"the aggregate never reached the computation: {leader.error!r}")
+        follower = Call("follower", lambda: store.aggregate_v2(restored.run, 0))
+        until(lambda: waiting(store) == 1, "the repeated call is parked")
+        go.set()
+        finished(leader, follower)
+        failures = [leader.error, follower.error]
+        leader.error = follower.error = None
+        # Then: both saw it fail, and nothing refers to the frame it failed in
+        assert all(isinstance(error, TapeError) for error in failures)
+        del failures
+        assert len(ballast) == 1
+        assert ballast[0]() is None, "the failed computation is still alive in a reference cycle"
+    finally:
+        go.set()
+        if collecting:
+            gc.enable()
 
 
 def exclude_member(r: Restored, member: str) -> None:
