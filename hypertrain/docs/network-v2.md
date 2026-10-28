@@ -676,12 +676,13 @@ four therefore cannot lose a member. Similarity alone is not fraud evidence.
 Audits replay each miner's own assignment.
 
 A miner whose audit could not run (no auditor finished it in two windows of two
-leases each; a master's replay `MISMATCH` that nobody signed gets a re-audit window
-of its own instead, ADR 0011 Part 9, and a second auditor that does not decide the
-miner in it ends the same way) is left out of that round (`excluded`, reason
-`INFRASTRUCTURE`) and the round is not excluded: the other miners aggregate and
-settle as after an UNVERIFIED verdict. The round cannot be applied with fewer than four verified
-inputs, and an excluded miner has no anchor for the round, so it cannot be on the
+leases each; a master's replay `MISMATCH` that nobody signed gets instead one re-audit
+window of its own, started at the detection and lasting the manifest's `reaudit_rounds`,
+T_reaudit = twice the measured replay (D84, ADR 0011 Part 9), and a re-audit that does
+not decide the miner in it ends `REAUDIT_FAILED`, which drops that member alone, D87)
+is left out of that round (`excluded`, reason `INFRASTRUCTURE`) and the round is not
+excluded: the other miners aggregate and settle as after an UNVERIFIED verdict. The
+round cannot be applied with fewer than four verified inputs, and an excluded miner has no anchor for the round, so it cannot be on the
 next roster. While an audit is pending the round stays `PENDING`: opening w+2,
 aggregation, rollback and relay settlement wait for it.
 
