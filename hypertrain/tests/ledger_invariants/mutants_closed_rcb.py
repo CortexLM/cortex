@@ -82,7 +82,7 @@ MUTANTS = [
         "id": "closed-rcb-aggregate-does-not-leave-out-members-that-lost-their-standing",
         "invariants": ["AD-07", "A2W-21", "LCK-18", "DIB-04", "DIB-05"],
         "path": STORE,
-        "old": "            self._exclude_unfit_members_v2(run_id, w)\n",
+        "old": "        self._exclude_unfit_members_v2(run_id, w, now)\n",
         "new": "",
         "tests": [LAPSE_CASE, LAPSED_AT_AGGREGATE, OWN_CONTEST, CLOSED_CONTEST],
         "why": (
@@ -95,8 +95,8 @@ MUTANTS = [
         "id": "closed-rcb-a-lapsed-screen-is-no-cause-to-leave-the-round",
         "invariants": ["AD-07", "A2W-21", "LCK-18"],
         "path": STORE,
-        "old": '        return "SCREEN_LAPSED" if now > record.screen_until else "UNFUNDED"\n',
-        "new": '        return None if now > record.screen_until else "UNFUNDED"\n',
+        "old": '        if now > record.screen_until:\n            return "SCREEN_LAPSED"\n',
+        "new": "        if now > record.screen_until:\n            return None\n",
         "tests": [LAPSE_CASE, LAPSED_AT_AGGREGATE],
         "why": (
             "A member whose work screen ended after its audit is judged fit, stays in the roster"
@@ -143,16 +143,15 @@ MUTANTS = [
         ],
         "path": STORE,
         "old": (
-            "            # The applied tape is the commitment: pay exactly its inputs, however they"
-            " stand now.\n"
-            "            included = sorted(\n"
+            "            included = self._unconvicted_v2(\n"
             '                item["roster"]["hotkey"]\n'
             '                for item in self._record_v2(run_id, "tape-inputs", str(w))["inputs"]\n'
             "            )\n"
         ),
         "new": (
-            "            included = sorted("
-            "x.roster.hotkey for x in self.verified_inputs_v2(run_id, w))\n"
+            "            included = self._unconvicted_v2(\n"
+            "                x.roster.hotkey for x in self.verified_inputs_v2(run_id, w)\n"
+            "            )\n"
         ),
         "tests": [LAPSED_AT_FINALIZE, STAKE_FELL, SANCTIONED_AT_FINALIZE],
         "why": (
