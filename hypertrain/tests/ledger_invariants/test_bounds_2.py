@@ -111,6 +111,8 @@ def test_a_test_mode_run_has_no_economic_bound_record_to_write(tmp_path: Path) -
     "[fix-lot: none (no design yet)]",
 )
 def test_a_forged_economic_bound_row_does_not_open_production_influence(tmp_path: Path) -> None:
+    """BND-03+BND-D06: the economic-bound gate rejects a record bound to another policy or without
+    a coordinator receipt, so a forged row of that kind does not make a funded identity eligible."""
     with production_run(tmp_path, G_max_units=1100) as run:
         run.bootstrap()
         run.admit_and_lock(1100)
@@ -284,6 +286,7 @@ def test_a_policy_object_edited_in_the_object_store_cannot_become_the_policy_of_
     "[fix-lot: decision (product choice pending)]",
 )
 def test_the_dataset_linkage_cannot_be_replaced_once_a_round_exists(tmp_path: Path) -> None:
+    """BND-04+BND-D07: once a round exists the dataset linkage of the run is fixed."""
     with service_world(tmp_path) as world:
         route = f"/v2/runs/{world.run_id}/admin/dataset"
         linkage = world.store._record_v2(world.run_id, "dataset", "inputs")
@@ -424,6 +427,8 @@ def test_test_genesis_units_are_collateral_and_never_payable(li_escrow: ModuleTy
 def test_a_test_ledger_reward_never_reaches_the_epoch_weights(
     li_escrow: ModuleType, tmp_path: Path
 ) -> None:
+    """BND-15+BND-D02: a test-ledger run never emits real weight through get_weights, whatever
+    its matured live reward."""
     hot, cold = worker(0)
     setup = li_escrow.setup("test")
     live = synthetic_round(li_escrow, setup, 0, [(hot, cold)])
@@ -476,6 +481,8 @@ def test_a_manifest_whose_economics_policy_object_is_missing_creates_no_run(
 def test_a_production_run_without_a_cuda_qualification_is_refused_and_leaves_no_run_row(
     tmp_path: Path,
 ) -> None:
+    """BND-25+BND-D05: a refused run creation leaves no run row, so the same envelope can be
+    posted again once the cause is fixed."""
     with service_world(tmp_path / "world") as world:
         with creation(world, tmp_path / "prod", production_policy(world)) as prod:
             with pytest.raises(ChallengeError) as refused:

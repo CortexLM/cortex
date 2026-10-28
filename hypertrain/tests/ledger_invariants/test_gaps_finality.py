@@ -409,18 +409,11 @@ def test_a_finalize_for_a_round_whose_audits_are_not_done_is_refused_for_its_mis
 # --- T-FIN-26 (FIN-22) [D70]: a round with a member that never committed can be left behind ------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="FIN-22: a roster member that accepted and never committed leaves the round without a "
-    "job for anybody (three survivors cannot carry a round), nothing retires a round whose members "
-    "all left it, and the opening of the next round reads the applied state of this one, which "
-    "never exists: 409 'missing accepted applied: 0' "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 D70 exit reaper]",
-)
 def test_a_round_with_a_member_that_never_committed_can_be_left_behind(tmp_path: Path) -> None:
-    """FIN-22: a round with a member that never committed is left behind by the exit, and the
-    opening of the next round is not blocked by it."""
+    """FIN-22 (D70): a round with a member that never committed leaves the round without a job for
+    anybody (three survivors cannot carry it); the exit retires it, and the opening of the next
+    round is not blocked by the applied state of this one, which never exists (409 'missing
+    accepted applied: 0')."""
     with X.activated_network(tmp_path) as network:
         rnd = X.open_round(network, 0, [0, 1, 2, 3])
         rnd.quiet = 3
@@ -539,6 +532,8 @@ def test_the_survivors_of_a_round_with_an_exhausted_member_are_paid_their_whole_
 def test_an_auditor_poll_that_leases_nothing_does_not_change_the_revision_a_repair_rests_on(
     queue: X.Round,
 ) -> None:
+    """FIN-17+DIB-22: an auditor poll that answers 204 and leases nothing leaves the revision the
+    two checks of a repair compare unchanged."""
     rnd = queue
     auditor = X.service().AUDITORS[0]
     for job in rnd.lease_rows():

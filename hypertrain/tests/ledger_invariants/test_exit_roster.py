@@ -113,11 +113,13 @@ def test_every_roster_member_is_in_a_terminal_audit_state_once_the_horizon_has_p
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="AD-07: eligibility is checked at accept only: a member whose work screen lapsed "
-    "after its accept still commits, so it joins the roster of an audit it can no longer be "
+    reason="AD-07: a commit checks no eligibility (the accept and the opening do, and aggregate "
+    "leaves a lapsed member out INELIGIBLE, ADR 0011 Part 8 decision 22): a member whose work "
+    "screen lapsed after its accept still commits and takes an audit slot it can no longer be "
     "aggregated in [fix-lot: none (no design yet)]",
 )
 def test_a_member_that_lost_eligibility_after_accept_cannot_commit(tmp_path: Path) -> None:
+    """AD-07: a member whose work screen lapsed after its accept is refused when it commits."""
     with X.activated_network(tmp_path) as network:
         rnd = X.open_round(network, 0, [0, 1, 2, 3])
         for index in rnd.members:
@@ -210,6 +212,8 @@ def test_the_same_ask_nonce_with_another_body_is_refused_and_grants_nothing(
     "to the auditor once its previous one is over [fix-lot: none (no design yet)]",
 )
 def test_a_signed_lease_ask_grants_at_most_one_lease(queue: X.Round) -> None:
+    """SG-10+A2W-24: a signed lease ask observed on the wire grants one lease and no other, also
+    once the previous lease of its auditor is over."""
     rnd = queue
     auditor = X.service().AUDITORS[0]
     ask = X.lease_ask(rnd, auditor, 1)
@@ -229,22 +233,14 @@ def test_a_signed_lease_ask_grants_at_most_one_lease(queue: X.Round) -> None:
     assert [row["auditor"] for row in rnd.lease_rows()].count(auditor.ss58) == 1
 
 
-# A round with no member left has no exit (FIN-22)
+# A round with no member left is closed by the exit (FIN-22)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="FIN-22: a round whose every audit job ran out of both windows has no exit on this "
-    "tree: aggregate_v2 answers 409 ROUND_INFEASIBLE, the opening of the next round reads the "
-    "applied state of this one, which never exists, so the master answers 409 'missing accepted "
-    "applied: 0', no code of this tree retires, voids or skips such a round, and no later round is "
-    "ever credited; the exit reaper retires it at the beacon "
-    "[fix-lot: audit-integrity-2 ADR0011-P8 D70 exit reaper]",
-)
 def test_a_round_after_a_round_nobody_audited_is_opened_and_credited(queue: X.Round) -> None:
-    """FIN-22: a round whose every audit job ran out of both windows is closed by the exit, and the
-    round after it is opened and credited."""
+    """FIN-22 (D70): a round whose every audit job ran out of both windows is closed by the exit,
+    and the round after it is opened and credited. Without an exit the opening of the next round
+    reads the applied state of this one, which never exists (409 'missing accepted applied: 0'),
+    and no later round is ever credited."""
     rnd = queue
     X.run_out_audit_windows(rnd)
     X.walk(rnd, rnd.network.now + 1)  # whatever closes a round on the beacon gets its turn
@@ -283,6 +279,8 @@ def test_a_round_after_a_round_nobody_audited_is_opened_and_credited(queue: X.Ro
     "[candidate] [fix-lot: decision (product choice pending)]",
 )
 def test_a_beacon_outage_does_not_put_an_auditor_on_cooldown(queue: X.Round) -> None:
+    """FIN-24: a lease that expires while the master refuses every ask is not penalised like the
+    silence of an auditor."""
     rnd = queue
     auditor = X.service().AUDITORS[0]
     leased = X.post_lease(rnd, X.lease_ask(rnd, auditor, 1))
@@ -315,6 +313,8 @@ def test_a_beacon_outage_does_not_put_an_auditor_on_cooldown(queue: X.Round) -> 
     "[fix-lot: decision (product choice pending)]",
 )
 def test_a_miner_suspended_for_a_trial_mismatch_has_a_way_back(tmp_path: Path) -> None:
+    """LCK-19: a miner suspended for a trial proof that differs from the reference can recover
+    its stake and go back on probation."""
     with X.activated_network(tmp_path) as network:
         run_id, miner = network.manifest.run_id(), 0
         admission = network.store._services(run_id)[1]
