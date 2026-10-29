@@ -184,8 +184,10 @@ transactions found it 3 behind and lost the verdict (503, then 409 "one live lea
 lease expired). The gate now takes the result of a replay (`audit-result`) and its `/complete` up to
 `RESULT_PAUSE_ROUNDS` (50, `challenge/exit_v2.py`) more rounds behind, while the lease is running and
 the wall clock is before its real deadline; the production ledger still verifies the pinned round's
-BLS signature. A lease and the start of a replay (`audit-execute`) still need the 2-round view.
-Tested with the master's CPU replay; not yet run on s100.
+BLS signature. A lease and the start of a replay (`audit-execute`) still need the 2-round view. The
+auditor CLI (`python -m hypertrain.auditor --contract 2`) re-posts a 503 on `/complete` every 3 s until
+that deadline and on `/lease` for up to 300 s; it never re-posts `/execute`. Tested with the master's
+CPU replay and a fake auditor transport; not yet run on s100.
 
 Proving it instead of inferring it: `beacon_gaps.py` lists rounds missing from the `beacon` table
 of the store that hosts the run, the identities whose seed is one of them, and whether the pusher

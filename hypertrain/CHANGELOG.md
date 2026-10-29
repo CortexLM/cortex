@@ -365,6 +365,10 @@
   `RESULT_PAUSE_ROUNDS` (50) more rounds behind, only while the lease is running and before its real
   deadline; the production branch still BLS-verifies the pinned round. A lease and the start of a
   replay keep the 2-round bound. No manifest, run id, policy hash or `implementation_hash` changes.
+- The v2 auditor CLI (`python -m hypertrain.auditor --contract 2`) now waits out a beacon pause: it
+  re-posts a 503 on `/complete` with the same signed verdict every 3 s until the lease's wall deadline,
+  and a 503 on `/lease` (not the empty-queue one) for up to 300 s; it never re-posts `/execute`. Before,
+  any such 503 ended the run with exit 2.
 - A roster member kept out of a round by its own contest is sanctioned once, not twice (IMP-4, D86,
   ADR 0011 decision 12): it is excluded at the commit bound as before, but its NO_SHOW sanction waits
   while the contest is open. A contest it loses covers the absence (no second sanction row, strike or

@@ -80,10 +80,16 @@ def _v2(job: Any, **fault: Any) -> tuple[httpx.Client, list[tuple[str, Any]]]:
     timeouts: list[float] = fault.setdefault("timeouts", [])
     queue = [lease] * fault.get("jobs", 1)
 
+    busy = fault.get("busy", {})  # path suffix -> how many 503 (beacon pause) answers first
+
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix(f"/v2/runs/{run}")
         body = json.loads(request.content or b"null")
         calls.append((path, body))
+        for suffix, left in busy.items():
+            if body is not None and path.endswith(suffix) and left:
+                busy[suffix] = left - 1
+                return httpx.Response(503, json={"detail": "beacon infrastructure paused"})
         if path.endswith(("/execute", "/complete")):
             timeouts.append(request.extensions["timeout"]["read"])
         if path == "":
@@ -199,3 +205,60 @@ def test_v2_cli_exits_2_without_complete_on_stall_malformed_or_live_lease(
     argv = ["--api", "http://m", "--run-id", job.run_id, "--keyfile", str(tmp_path / "k")]
     assert main([*argv, "--contract", "2"]) == 2
     assert not any(p.endswith("/complete") for p in _posts(calls))
+
+
+class Wall:
+    """Fake wall clock; `sleep` moves it."""
+
+    def __init__(self, at: float) -> None:
+        self.at, self.slept = at, []
+
+    def __call__(self) -> float:
+        return self.at
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.at += seconds
+
+
+def _deadline(job: Any) -> float:
+    beacon = job.manifest.training.beacon
+    return beacon.genesis_time + (min(job.lease_expires, job.absolute_deadline) - 1) * beacon.period
+
+
+def test_v2_a_beacon_pause_on_lease_and_complete_is_waited_out(job: Any) -> None:
+    # S17d: the master answered 503 "beacon infrastructure paused" while its pusher lagged.
+    client, calls = _v2(job, busy={"/worker/lease": 2, "/complete": 2})
+    wall = Wall(_deadline(job) - 60)
+    assert audit_v2(client, "http://m", job.run_id, AUDITOR, True, wall, wall.sleep) == 0
+    jid = job.job_id
+    assert _posts(calls) == [
+        *["/worker/lease"] * 3,
+        f"/worker/jobs/{jid}/execute",
+        *[f"/worker/jobs/{jid}/complete"] * 3,
+    ]
+    assert wall.slept == [cli.RETRY_S] * 4
+    completes = [b for p, b in calls if p.endswith("/complete")]
+    assert completes[0] == completes[1] == completes[2]  # the same signed verdict, re-posted
+
+
+def test_v2_complete_stops_retrying_at_the_lease_wall_deadline(job: Any) -> None:
+    client, calls = _v2(job, busy={"/complete": 1000})
+    wall = Wall(_deadline(job) - 10)
+    with pytest.raises(httpx.HTTPStatusError, match="503"):
+        audit_v2(client, "http://m", job.run_id, AUDITOR, True, wall, wall.sleep)
+    assert _posts(calls).count(f"/worker/jobs/{job.job_id}/complete") == 4
+    assert wall() < _deadline(job) and wall.slept == [cli.RETRY_S] * 3
+
+
+def test_v2_execute_is_posted_once_and_a_lease_outage_is_bounded(job: Any) -> None:
+    client, calls = _v2(job, busy={"/execute": 1})
+    wall = Wall(_deadline(job) - 60)
+    with pytest.raises(httpx.HTTPStatusError, match="503"):
+        audit_v2(client, "http://m", job.run_id, AUDITOR, True, wall, wall.sleep)
+    assert _posts(calls).count(f"/worker/jobs/{job.job_id}/execute") == 1 and wall.slept == []
+    client, calls = _v2(job, busy={"/worker/lease": 1000})
+    wall = Wall(0.0)
+    with pytest.raises(httpx.HTTPStatusError, match="503"):
+        audit_v2(client, "http://m", job.run_id, AUDITOR, True, wall, wall.sleep)
+    assert _posts(calls) == ["/worker/lease"] * 100 and wall() < cli.LEASE_RETRY_S

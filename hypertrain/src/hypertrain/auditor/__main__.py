@@ -10,8 +10,10 @@ are refused unexecuted (the lease then expires server-side).
 
 Exit 0: settled (--once) or no lease granted (empty queue, or the global running-lease cap).
 Exit 2: refused job, malformed lease, HTTP error/timeout, or the server's 409 "one live lease
-per auditor" after a restart mid-job (that lease is left to expire server-side). The CLI never
-sleeps or polls: the supervisor re-invokes it on its own audit-scheduling or exit events.
+per auditor" after a restart mid-job (that lease is left to expire server-side). The CLI does
+not poll for work: the supervisor re-invokes it on its own audit-scheduling or exit events. A
+503 (beacon pause) on /lease or /complete is retried every RETRY_S, /complete only until its
+lease's wall deadline; /execute is never re-posted.
 """
 
 from __future__ import annotations
@@ -59,6 +61,8 @@ class RefusedJob(RuntimeError):
 
 
 MARGIN_S = 60.0
+RETRY_S = 3.0  # one beacon round
+LEASE_RETRY_S = 300.0  # a /lease 503 outlasting this is an outage: exit, the supervisor restarts
 
 
 def audit_v2(
@@ -68,13 +72,19 @@ def audit_v2(
     key: Keypair,
     once: bool,
     clock: Callable[[], float] = time.time,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     root = f"{base}/v2/runs/{run_id}"
 
-    def post(path: str, body: dict[str, Any], timeout: float) -> httpx.Response:
-        r = client.post(root + path, json=body, timeout=timeout)
-        r.raise_for_status()
-        return r
+    def post(path: str, body: dict[str, Any], timeout: float, until: float = 0.0) -> httpx.Response:
+        """Post once; while the master answers 503 and `until` (wall) is ahead, post again."""
+        while True:
+            r = client.post(root + path, json=body, timeout=timeout)
+            if r.status_code != 503 or clock() + RETRY_S >= until:
+                r.raise_for_status()
+                return r
+            logging.warning("%s: 503 %s, retry in %.0f s", path, r.text[:200], RETRY_S)
+            sleep(RETRY_S)
 
     def now() -> int:
         r = client.get(root, timeout=60)
@@ -87,17 +97,25 @@ def audit_v2(
     if r.json()["contract"] != 2 or manifest.run_id() != run_id:
         raise RefusedJob("served v2 manifest hashes to another run_id")
     while True:
-        t = now()
-        # Unique Receipt replay ID per lease request; w is not lease-bound server-side.
-        ask = Receipt(w=0, commit_hash=secrets.token_hex(32), received_round=t)
-        r = client.post(
-            root + "/worker/lease",
-            json=envelope_v2.seal(key, "Receipt", run_id, ask, t + 100),
-            timeout=60,
-        )
-        # Empty queue: 204, or 503 from an admitted service run (store.lease_v2).
-        if r.status_code == 204 or (r.status_code == 503 and "no authenticated queued" in r.text):
-            return 0
+        give_up = clock() + LEASE_RETRY_S
+        while True:
+            t = now()
+            # Unique Receipt replay ID per lease request; w is not lease-bound server-side.
+            ask = Receipt(w=0, commit_hash=secrets.token_hex(32), received_round=t)
+            r = client.post(
+                root + "/worker/lease",
+                json=envelope_v2.seal(key, "Receipt", run_id, ask, t + 100),
+                timeout=60,
+            )
+            # Empty queue: 204, or 503 from an admitted service run (store.lease_v2).
+            if r.status_code == 204 or (
+                r.status_code == 503 and "no authenticated queued" in r.text
+            ):
+                return 0
+            if r.status_code != 503 or clock() + RETRY_S >= give_up:
+                break
+            logging.warning("/worker/lease: 503 %s, retry in %.0f s", r.text[:200], RETRY_S)
+            sleep(RETRY_S)
         r.raise_for_status()
         env = envelope_v2.parse_envelope(r.json())
         if (
@@ -128,6 +146,7 @@ def audit_v2(
             f"/worker/jobs/{job.job_id}/complete",
             envelope_v2.seal(key, "ReplayVerdict", run_id, verdict, exp),
             MARGIN_S,
+            until=deadline,
         ).json()
         print(json.dumps({"job": job.job_id, "result": done["result"]}), flush=True)
         if once:
