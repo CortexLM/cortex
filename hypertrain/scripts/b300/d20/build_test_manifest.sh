@@ -32,27 +32,36 @@
 # bf16), layout n_gpus=1, H=J=4 micro_batch=2 (two checkpoints per result), the dense-1b fixture
 # of 4096 samples and work_screen_epoch_rounds 20000 (the other geometries keep 6000). The build
 # refuses a row whose shape-only parameter count leaves the band 100,000,000..300,000,000.
-# HT_D20_REPLAY_SECONDS (required for dense-0.1b, refused for the others): the MEASURED warm audit
-# replay of that model in whole seconds, the max of at least 3 warm replays on the B300 that audits
-# it (docs/runbooks/intermediate-model-replay.md), never an estimate: it enters the run id. The
-# audit policy signs reaudit_rounds = reaudit_rounds_for(replay, 100) and, when the re-audit window
-# needs a d_final - d_audit above the default cap of 200 rounds (a replay above 174 s), sets
-# gap_cap_rounds to that gap (ADR 0011 Part 9, D84/D88; the ledger of these runs is test). The dry
-# run prints the window, the gap it needs and the cap.
-# HT_D20_WARMUP_OUT (dense-0.1b only, optional): the OUT_DIR of the throw-away warm-up build of the
-# same model, built at the 300 s ceiling (the runbook's two builds). The real build is refused (exit
-# 2) when its manifest is the warm-up's, which a replay of 299 or 300 s gives (same window, so the
-# same run id, and a warm-up run is never reused): stop above 298 s. Otherwise the dry run checks
-# that only the audit policy differs and prints the warm-up run id; it also prints the stop.
+# HT_D20_GEOMETRY=dense-0.03b: the D94 run profile (ADR 0016), 31,462,656 parameters, read from
+# the row mfu-dense-0.03b (3 layers, d_model 768, vocab 8192, seq 2048, bf16), sized so that the
+# miner side of a trial plus the trusted reference fits the admission window (T_miner + T_ref
+# <= 250 s); everything else as dense-0.1b, with its own band 25,000,000..40,000,000.
+# HT_D20_GEOMETRY=dense-0.05b: the larger D94 option (ADR 0016), 44,045,568 parameters, read from
+# the row mfu-dense-0.05b (the same with vocab 16384), over 250 s at the measured T_ref(101 M) of
+# 338 s; everything else as dense-0.03b, with its own band 40,000,000..70,000,000.
+# HT_D20_REPLAY_SECONDS (required for dense-0.1b, dense-0.05b and dense-0.03b, refused for the
+# others): the MEASURED warm audit replay of that model in whole seconds, the max of at least 3
+# warm replays on the B300 that audits it (docs/runbooks/intermediate-model-replay.md), never an
+# estimate: it enters the run id. The audit policy signs reaudit_rounds =
+# reaudit_rounds_for(replay, 100) and, when the re-audit window needs a d_final - d_audit above the
+# default cap of 200 rounds (a replay above 174 s), sets gap_cap_rounds to that gap (ADR 0011
+# Part 9, D84/D88; the ledger of these runs is test). The dry run prints the window, the gap it
+# needs and the cap.
+# HT_D20_WARMUP_OUT (dense-0.1b, dense-0.05b and dense-0.03b only, optional): the OUT_DIR of the
+# throw-away warm-up build of the same model, built at the 300 s ceiling (the runbook's two
+# builds). The real build is refused (exit 2) when its manifest is the warm-up's, which a replay
+# of 299 or 300 s gives (same window, so the same run id, and a warm-up run is never reused): stop
+# above 298 s. Otherwise the dry run checks that only the audit policy differs and prints the
+# warm-up run id; it also prints the stop.
 # HT_D20_GEOMETRY=tiny-cpu: the CPU mechanism model of tests/ledger/test_escrow_v2.py setup()
 # (1 layer, d_model 8, vocab 16, seq 4, H=1 J=1, 16 samples), layout n_gpus=1, for a cpu-backend
 # TEST run whose references and audits the challenge replays on CPU.
 # The manifest pins its environment (reference_spec.env.pinned, ADR 0011 part 3): CPU class avx2
-# and a GPU class. dense-1b and dense-0.1b run on GPUs, so their class is the one measured on
-# SM_COUNT in hypertrain.protocol.env_pins (148: sm_103, 170: sm_120); any other count stops the
-# first stage, which removes what it created. tiny-cpu is a CPU-backend run and says gpu none; its
-# SM_COUNT is only carried. HT_D20_ATTN_BACKEND (default math, or sdpa-flash on a GPU class) is the
-# pin's HT_ATTN_BACKEND. The dry run reports the pin and checks it against SM_COUNT.
+# and a GPU class. dense-1b and the measured dense geometries run on GPUs, so their class is the one
+# measured on SM_COUNT in hypertrain.protocol.env_pins (148: sm_103, 170: sm_120); any other count
+# stops the first stage, which removes what it created. tiny-cpu is a CPU-backend run and says gpu
+# none; its SM_COUNT is only carried. HT_D20_ATTN_BACKEND (default math, or sdpa-flash on a GPU
+# class) is the pin's HT_ATTN_BACKEND. The dry run reports the pin and checks it against SM_COUNT.
 # HT_D20_COLDKEYS=N (default 2) seeds cold-0..cold-N-1, each with 20000 genesis units.
 # HT_D20_CHALLENGE_ROUNDS (optional, 100..400, default 100): the admission trial window in beacon
 # rounds (ADR 0016), challenge_rounds_for(T_miner + T_ref) for a measured trial. Unset, the policy
@@ -127,19 +136,19 @@ WARMUP=${HT_D20_WARMUP_OUT:-}
 CHALLENGE=${HT_D20_CHALLENGE_ROUNDS:-100}
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
-case $GEOMETRY in dense-1b|dense-0.1b|tiny-cpu) ;; *) echo "HT_D20_GEOMETRY: dense-1b, dense-0.1b or tiny-cpu" >&2; exit 2 ;; esac
+case $GEOMETRY in dense-1b|dense-0.1b|dense-0.05b|dense-0.03b|tiny-cpu) ;; *) echo "HT_D20_GEOMETRY: dense-1b, dense-0.1b, dense-0.05b, dense-0.03b or tiny-cpu" >&2; exit 2 ;; esac
 case $COLDKEYS in [1-9]) ;; *) echo "HT_D20_COLDKEYS must be 1..9" >&2; exit 2 ;; esac
 [[ $CHALLENGE =~ ^[1-9][0-9]{2}$ ]] && [ "$CHALLENGE" -le 400 ] || { echo "HT_D20_CHALLENGE_ROUNDS must be 100..400 rounds" >&2; exit 2; }
-if [ "$GEOMETRY" = dense-0.1b ]; then
-    [[ $REPLAY =~ ^[1-9][0-9]*$ ]] || { echo "HT_D20_REPLAY_SECONDS: dense-0.1b has no default; give the measured warm audit replay in whole seconds (max of >= 3 warm replays on the auditing B300)" >&2; exit 2; }
+if [[ $GEOMETRY == dense-0.1b || $GEOMETRY == dense-0.05b || $GEOMETRY == dense-0.03b ]]; then
+    [[ $REPLAY =~ ^[1-9][0-9]*$ ]] || { echo "HT_D20_REPLAY_SECONDS: $GEOMETRY has no default; give the measured warm audit replay in whole seconds (max of >= 3 warm replays on the auditing B300)" >&2; exit 2; }
     if [ -n "$WARMUP" ]; then
         case $WARMUP in /*) ;; *) echo "HT_D20_WARMUP_OUT must be an absolute path" >&2; exit 2 ;; esac
         [ -f "$WARMUP/out/manifest.json" ] || { echo "HT_D20_WARMUP_OUT: no out/manifest.json under $WARMUP (the warm-up build's OUT_DIR)" >&2; exit 2; }
     fi
 elif [ -n "$REPLAY" ]; then
-    echo "HT_D20_REPLAY_SECONDS is read by dense-0.1b only" >&2; exit 2
+    echo "HT_D20_REPLAY_SECONDS is read by dense-0.1b, dense-0.05b and dense-0.03b only" >&2; exit 2
 elif [ -n "$WARMUP" ]; then
-    echo "HT_D20_WARMUP_OUT is read by dense-0.1b only" >&2; exit 2
+    echo "HT_D20_WARMUP_OUT is read by dense-0.1b, dense-0.05b and dense-0.03b only" >&2; exit 2
 fi
 [[ $IMAGE =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "IMAGE_DIGEST must be sha256:<64 lowercase hex>" >&2; exit 2; }
 [[ $DRIVER =~ ^([0-9][0-9.]*|cpu-test)$ ]] || { echo "DRIVER must be digits and dots (or cpu-test)" >&2; exit 2; }
@@ -225,6 +234,8 @@ from hypertrain.trainer.rng import rng_ctr, uniform_f64
 
 (image, driver, sm_count, out, exp_round, relay_url, relay_pubkey, geometry, coldkeys,
  attention, ht_root, replay, challenge_rounds) = sys.argv[1:]
+# The dense TEST models whose audit window comes from a measured replay (ADR 0015, ADR 0016).
+MEASURED = ("dense-0.1b", "dense-0.05b", "dense-0.03b")
 # The pin first: a count or a backend no GPU class was measured with stops the build before
 # anything is written. A tiny-cpu run uses no GPU (its sm_count is only carried).
 gpu = "none" if geometry == "tiny-cpu" else next(
@@ -293,19 +304,24 @@ if geometry == "dense-1b":
         holdout_commit=sha256_hex(b"D20 synthetic B300 test fixture: no quality holdout"),
     )
     layout = {"pp": 1, "n_gpus": 2, "dp_size": 2, "ep_size": 1, "zero1": False}
-elif geometry == "dense-0.1b":
+elif geometry in MEASURED:
     from hypertrain.trainer.config import TrainConfig
     from hypertrain.trainer.model import param_shapes
 
     # ADR 0015: the model block is the registry row; the fixture, the inner loop and the band are here.
+    # ADR 0016: the two D94 rows differ from the 101 M one in their row and band only.
+    name, BAND, adr = {
+        "dense-0.1b": ("mfu-dense-0.1b", (100_000_000, 300_000_000), "ADR 0015"),
+        "dense-0.05b": ("mfu-dense-0.05b", (40_000_000, 70_000_000), "ADR 0016"),
+        "dense-0.03b": ("mfu-dense-0.03b", (25_000_000, 40_000_000), "ADR 0016"),
+    }[geometry]
     profiles = json.loads((Path(ht_root) / "scripts/mfu_profiles.json").read_bytes())["profiles"]
-    row = profiles["mfu-dense-0.1b"]["model"]
+    row = profiles[name]["model"]
     SEQ, VOCAB, N = row["seq_len"], row["vocab"], 4096
-    BAND = (100_000_000, 300_000_000)
     body["model"].update(arch="decoder", **row)
     count = sum(math.prod(s) for s in param_shapes(TrainConfig.from_manifest(body).model).values())
     if not BAND[0] <= count <= BAND[1]:
-        sys.exit(f"mfu-dense-0.1b has {count} parameters, outside the band {BAND[0]}..{BAND[1]}")
+        sys.exit(f"{name} has {count} parameters, outside the band {BAND[0]}..{BAND[1]}")
     rows = np.empty((N, SEQ + 1), dtype="<u4")
     for i in range(N):
         u = uniform_f64(SEQ + 1, rng_ctr("d20-dense-test-data", 0, i, 0))
@@ -314,8 +330,8 @@ elif geometry == "dense-0.1b":
     reference = canonicalize(
         {
             "purpose": "S100_TEST_CUDA_RUN_NOT_PUBLIC_QUALITY",
-            "qualification_profile": "dense-0.1b-bf16",
-            "geometry_source": "scripts/mfu_profiles.json mfu-dense-0.1b; ADR 0015",
+            "qualification_profile": f"{geometry}-bf16",
+            "geometry_source": f"scripts/mfu_profiles.json {name}; {adr}",
             "image_digest": image,
             "driver_allowlist": [driver],
             "sm_count": int(sm_count),
@@ -396,7 +412,7 @@ allocation = [(ss58[c], 20000, 1) for c in COLD]
 # docs/network-v2.md (admission): the first screen must cover the whole serial campaign. For the
 # 100 M model that is 52 trials of 83..130 rounds (250..390 s) plus about 470 rounds to the
 # d_final of round 0, i.e. 4800..7200 rounds: 6000 holds only on the fastest link.
-screen_rounds = 20000 if geometry == "dense-0.1b" else 6000
+screen_rounds = 20000 if geometry in MEASURED else 6000
 policies = {
     "admission": {
         "q_base": "0000803e", "E": 4, "clean_finalizations": 12,
@@ -436,7 +452,7 @@ policies = {
         "max_referee_cost_units": 100,
     },
 }
-if geometry == "dense-0.1b":
+if geometry in MEASURED:
     # ADR 0011 Part 9 decision 12 (D84, D88): the re-audit window is twice the measured replay, and
     # a window that does not fit the default cap of d_final - d_audit raises it.
     audit = policies["audit"]
@@ -495,6 +511,7 @@ from hypertrain.protocol.relay_messages import RelayRegistryV1
 
 out, image, driver, sm_count = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
 n_gpus = 2 if sys.argv[5] == "dense-1b" else 1
+measured = sys.argv[5] in ("dense-0.1b", "dense-0.05b", "dense-0.03b")
 attention, replay, warmup, challenge_rounds = sys.argv[6], sys.argv[7], sys.argv[8], sys.argv[9]
 # What the builder meant, from the table: a GPU class measured on sm_count, or none for a CPU run.
 gpu = "none" if sys.argv[5] == "tiny-cpu" else next(
@@ -536,7 +553,7 @@ needed = (
     None if audit.reaudit_rounds is None
     else reaudit_gap_needed(audit.lease_rounds, audit.reaudit_rounds)
 )
-if sys.argv[5] == "dense-0.1b":
+if measured:
     checks["reaudit_rounds_of_the_replay"] = (
         audit.reaudit_rounds == reaudit_rounds_for(int(replay), audit.lease_rounds)
     )
@@ -579,7 +596,7 @@ checks.update(
     pin_attention_backend=ref.env.pinned.present["HT_ATTN_BACKEND"] == attention,
     ledger_mode_test=economics.ledger_mode == "test",
     work_screen_epoch_rounds=admission.work_screen_epoch_rounds
-    == (20000 if sys.argv[5] == "dense-0.1b" else 6000),
+    == (20000 if measured else 6000),
     challenge_rounds=admission.challenge_rounds == int(challenge_rounds),
     relay=len(registry.specs) == 1 and spec.mode == "transport"
     and str(spec.https_url).rstrip("/") == "https://relay.joinbase.ai",
@@ -600,8 +617,8 @@ print(json.dumps({
         "gap_needed": needed,
         "gap_cap": audit.gap_cap(),
         "replay_seconds": int(replay) if replay else None,
-        "warmup_replay_seconds": ceiling if sys.argv[5] == "dense-0.1b" else None,
-        "stop_above_seconds": stop_above if sys.argv[5] == "dense-0.1b" else None,
+        "warmup_replay_seconds": ceiling if measured else None,
+        "stop_above_seconds": stop_above if measured else None,
     },
     "warmup_run_id": other.run_id() if warmup else None,
     "pin": {

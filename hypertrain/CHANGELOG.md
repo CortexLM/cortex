@@ -60,6 +60,14 @@
   `HT_D20_WARMUP_OUT`, the builder refuses (exit 2) a real build whose manifest is the warm-up's (a
   replay of 299 or 300 s signs the warm-up's window, so its run id) and its dry run checks that only
   the audit policy differs.
+- D94 dense TEST models (ADR 0016): rows `mfu-dense-0.03b` (31,462,656 parameters, vocab 8192) and
+  `mfu-dense-0.05b` (44,045,568, vocab 16384), both 3 layers of d_model 768, and the geometries
+  `HT_D20_GEOMETRY=dense-0.03b` and `dense-0.05b` of `scripts/b300/d20/build_test_manifest.sh`. They read
+  their row, refuse a count outside their own band (25,000,000..40,000,000 and 40,000,000..70,000,000) and
+  otherwise build as `dense-0.1b` (loop, fixture, screen window, required `HT_D20_REPLAY_SECONDS`,
+  `HT_D20_WARMUP_OUT` guard). `dense-0.03b` is the run profile: the miner side plus the reference fits
+  250 s of the 297 s admission window by the S17b measurement scaled to its size; `dense-0.05b` does not
+  yet. The other geometries build byte-identical manifests and no hash moves.
 - Docs, CI, image and release workflows, Dockerfiles.
 - Eviction-tolerant core `hypertrain.elastic` (v3, not wired into the v2 challenge): leases with
   fencing tokens, saved before they are granted so that a restart never reissues one, and a

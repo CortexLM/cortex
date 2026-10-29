@@ -6,7 +6,9 @@ first stage is injected without touching the builder; it also keeps the training
 manifest stage is given. HT_D20_GEOMETRY=tiny-cpu keeps a full build to a few seconds; the relay key
 is a throwaway public address made here. The dense-1b geometry is built only up to its first stage:
 its manifest stage would initialise 889M parameters. The dense-0.1b geometry (100,676,352 params)
-is built in full and read back the way the master's run creation reads it.
+is built in full and read back the way the master's run creation reads it, and so are the
+D94 run profile dense-0.03b (31,462,656 params) and its larger option dense-0.05b (44,045,568
+params, ADR 0016).
 """
 
 from __future__ import annotations
@@ -48,7 +50,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILDER = ROOT / "scripts/b300/d20/build_test_manifest.sh"
 DIGEST = "sha256:" + "cd" * 32
 
-# The training.json model fields the dense-0.1b build takes from its registry row.
+# The training.json model fields the measured dense builds take from their registry row.
 ROW_FIELDS = (
     "arch",
     "n_layers",
@@ -291,7 +293,9 @@ def test_a_good_build_keeps_private_seeds_and_the_outputs_and_prints_no_seed(hos
     ).is_file()
     assert (out / "state").is_dir()
     policies = json.loads((out / "inputs/policies.json").read_text())
-    assert policies["admission"]["work_screen_epoch_rounds"] == 6000  # only dense-0.1b widens it
+    assert (
+        policies["admission"]["work_screen_epoch_rounds"] == 6000
+    )  # only the dense TEST models widen it
     assert not {"reaudit_rounds", "gap_cap_rounds"} & policies["audit"].keys()  # nor sets these
     written = [
         p.read_bytes()
@@ -539,12 +543,117 @@ def test_a_dense_0_1b_build_writes_the_registry_row_and_a_wide_screen_window(
         assert "gap_cap_rounds above 200 is for a TEST manifest only" in production.stderr
 
 
+@pytest.mark.parametrize(
+    ("geometry", "vocab", "count", "replay", "reaudit", "gap_needed", "cap"),
+    [
+        ("dense-0.05b", 16384, 44_045_568, 120, 100, 175, None),
+        ("dense-0.05b", 16384, 44_045_568, 200, 134, 226, 226),
+        ("dense-0.03b", 8192, 31_462_656, 144, 100, 175, None),
+    ],
+    ids=["50m_replay_120s_fits_the_default_cap", "50m_replay_200s_raises_the_cap", "run_profile"],
+)
+def test_a_d94_build_writes_its_own_row_with_the_dense_0_1b_loop_and_windows(
+    host, tmp_path, geometry, vocab, count, replay, reaudit, gap_needed, cap
+):
+    out = tmp_path / "out"
+
+    run = build(
+        host,
+        out,
+        driver="595.91.07",
+        sm_count="148",
+        env={"HT_D20_GEOMETRY": geometry, "HT_D20_REPLAY_SECONDS": str(replay)},
+    )
+
+    assert run.returncode == 0, run.stderr
+    training = json.loads((out / "inputs/training.json").read_text())
+    assert {k: v for k, v in training["model"].items() if k in ROW_FIELDS} == {
+        "arch": "decoder",
+        "n_layers": 3,
+        "d_model": 768,
+        "n_heads": 12,
+        "n_kv_heads": 4,
+        "d_ff": 2048,
+        "n_experts": 1,
+        "top_k_experts": 1,
+        "vocab": vocab,
+        "seq_len": 2048,
+        "compute_dtype": "bf16",
+        "param_count": count,
+    }
+    inner = training["inner"]
+    assert {k: inner[k] for k in ("H", "J", "micro_batch", "grad_accum", "opt")} == {
+        "H": 4,
+        "J": 4,
+        "micro_batch": 2,
+        "grad_accum": 1,
+        "opt": "adamw",
+    }
+    assert (inner["state_policy"], inner["rewarmup_steps"]) == ("reset", 0)
+    samples = (out / "inputs/samples.u32").read_bytes()
+    rows = np.frombuffer(samples, dtype="<u4").reshape(4096, 2049)
+    assert training["dataset"]["n_samples"] == 4096 and rows.max() == vocab - 1
+    assert training["dataset"]["merkle_root"] == MerkleTree([r.tobytes() for r in rows]).root.hex()
+    assert training["reference_spec"]["layout"]["n_gpus"] == 1
+    spec = json.loads((out / "inputs/reference-spec.json").read_text())
+    assert spec["qualification_profile"] == f"{geometry}-bf16"
+    assert spec["geometry_source"] == f"scripts/mfu_profiles.json mfu-{geometry}; ADR 0016"
+    policies = json.loads((out / "inputs/policies.json").read_text())
+    assert policies["admission"]["work_screen_epoch_rounds"] == 20000
+    assert f'"param_count": {count}' in run.stdout
+    manifest, audit = accepted_manifest(out)
+    assert (audit.lease_rounds, audit.reaudit_rounds, audit.gap_cap_rounds) == (100, reaudit, cap)
+    pin = manifest.training.reference_spec.env.pinned
+    assert pin is not None and (pin.cpu, pin.gpu) == ("avx2", "sm_103")
+    report = json.loads(run.stdout[run.stdout.rindex("\n{\n") + 1 :])
+    assert report["audit"] == {
+        "lease_rounds": 100,
+        "reaudit_rounds": reaudit,
+        "gap_needed": gap_needed,
+        "gap_cap": cap or 200,
+        "replay_seconds": replay,
+        "warmup_replay_seconds": 300,
+        "stop_above_seconds": 298,
+    }
+    assert all(report["checks"].values()) and "gap_cap_holds_the_reaudit_window" in report["checks"]
+
+
+def test_the_d94_runs_differ_from_the_101m_run_built_from_the_same_seeds_only_by_their_training(
+    host, tmp_path
+):
+    # Same seeds, image, expiry and replay: the policies, the relays and so the network block are
+    # those of dense-0.1b; the model, its init state and its fixture make another run id.
+    args = {"driver": "595.91.07", "sm_count": "148", "exp_round": "34310319"}
+    geometries = ("dense-0.1b", "dense-0.05b", "dense-0.03b")
+    outs = [tmp_path / geometry for geometry in geometries]
+    for i, geometry in enumerate(geometries):
+        if i:
+            (outs[i] / "secrets").mkdir(parents=True, mode=0o700)
+            for seed in seed_files(outs[0] / "secrets"):
+                shutil.copy(seed, outs[i] / "secrets" / seed.name)
+        env = {"HT_D20_GEOMETRY": geometry, "HT_D20_REPLAY_SECONDS": "144"}
+        run = build(host, outs[i], env=env, **args)
+        assert run.returncode == 0, run.stderr
+
+    assert len({(out / "inputs/policies.json").read_bytes() for out in outs}) == 1
+    manifests = [json.loads((out / "out/manifest.json").read_bytes()) for out in outs]
+    assert manifests[0]["network"] == manifests[1]["network"] == manifests[2]["network"]
+    trainings = [m["training"] for m in manifests]
+    assert [t["model"]["param_count"] for t in trainings] == [100_676_352, 44_045_568, 31_462_656]
+    assert [t["init_state_hash"] for t in trainings] == [
+        "be9b7bd63f79e4d7a3e640f51e9cfcc03e445a9de9ab249bcf77d938b8ee28f8",
+        "9cbe3ee93068dbf7cf08791f02bd3bd07e5181fb3bc13efa4396b4ade5eaf897",
+        "e372a68edb6485fce5f3df4efa9d72705fb04bbf7fd130dc3805d84075bf0aa6",
+    ]
+    assert len({accepted_manifest(out)[0].run_id() for out in outs}) == 3
+
+
 def two_builds(
-    host: dict[str, str], tmp_path: Path, replay: str
+    host: dict[str, str], tmp_path: Path, replay: str, geometry: str = "dense-0.1b"
 ) -> tuple[Path, Path, subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
     """The runbook's two builds over the same seeds, image and expiry: the throw-away warm-up run at
     the 300 s ceiling, then the real run from the measured `replay`, told the warm-up's OUT_DIR."""
-    dense = {"HT_D20_GEOMETRY": "dense-0.1b"}
+    dense = {"HT_D20_GEOMETRY": geometry}
     warmup, real = tmp_path / "warmup", tmp_path / "real"
     args = {"driver": "595.91.07", "sm_count": "148", "exp_round": "34310319"}
     first = build(host, warmup, env={**dense, "HT_D20_REPLAY_SECONDS": "300"}, **args)
@@ -595,6 +704,19 @@ def test_the_rebuild_with_the_measured_replay_changes_only_the_audit_window(host
     assert reports[1]["checks"]["warmup_differs_only_by_the_audit_policy"]
 
 
+def test_the_50m_warm_up_guard_lets_298_s_through_and_refuses_the_warm_up_window(host, tmp_path):
+    warmup, real, first, second = two_builds(host, tmp_path / "a", "298", "dense-0.05b")
+    assert second.returncode == 0, second.stderr
+    reports = [json.loads(r.stdout[r.stdout.rindex("\n{\n") + 1 :]) for r in (first, second)]
+    assert reports[1]["warmup_run_id"] == reports[0]["run_id"] != reports[1]["run_id"]
+    assert reports[1]["checks"]["warmup_differs_only_by_the_audit_policy"]
+
+    _, real, _, refused = two_builds(host, tmp_path / "b", "299", "dense-0.05b")
+
+    assert refused.returncode == 2 and "the manifest is the warm-up build's" in refused.stderr
+    assert not any((real / d).exists() for d in ("inputs", "out", "state"))
+
+
 @pytest.mark.parametrize("replay", ["299", "300"])
 def test_a_real_build_that_would_be_the_warm_up_is_refused(host, tmp_path, replay):
     # 299 and 300 s ask the warm-up's own window: the real manifest would be the warm-up's, and so
@@ -640,6 +762,8 @@ DENSE_144 = {"HT_D20_GEOMETRY": "dense-0.1b", "HT_D20_REPLAY_SECONDS": "144"}
     ("env", "named"),
     [
         ({"HT_D20_GEOMETRY": "dense-0.1b"}, "HT_D20_REPLAY_SECONDS: dense-0.1b has no default"),
+        ({"HT_D20_GEOMETRY": "dense-0.05b"}, "HT_D20_REPLAY_SECONDS: dense-0.05b has no default"),
+        ({"HT_D20_GEOMETRY": "dense-0.03b"}, "HT_D20_REPLAY_SECONDS: dense-0.03b has no default"),
         (
             {"HT_D20_GEOMETRY": "dense-0.1b", "HT_D20_REPLAY_SECONDS": "0"},
             "HT_D20_REPLAY_SECONDS: dense-0.1b has no default",
@@ -650,11 +774,11 @@ DENSE_144 = {"HT_D20_GEOMETRY": "dense-0.1b", "HT_D20_REPLAY_SECONDS": "144"}
         ),
         (
             {"HT_D20_GEOMETRY": "dense-1b", "HT_D20_REPLAY_SECONDS": "144"},
-            "HT_D20_REPLAY_SECONDS is read by dense-0.1b only",
+            "HT_D20_REPLAY_SECONDS is read by dense-0.1b, dense-0.05b and dense-0.03b only",
         ),
         (
             {"HT_D20_GEOMETRY": "dense-1b", "HT_D20_WARMUP_OUT": "/nonexistent"},
-            "HT_D20_WARMUP_OUT is read by dense-0.1b only",
+            "HT_D20_WARMUP_OUT is read by dense-0.1b, dense-0.05b and dense-0.03b only",
         ),
         (
             {**DENSE_144, "HT_D20_WARMUP_OUT": "warmup"},
@@ -664,15 +788,26 @@ DENSE_144 = {"HT_D20_GEOMETRY": "dense-0.1b", "HT_D20_REPLAY_SECONDS": "144"}
             {**DENSE_144, "HT_D20_WARMUP_OUT": "/nonexistent/warmup"},
             "HT_D20_WARMUP_OUT: no out/manifest.json under /nonexistent/warmup",
         ),
+        (
+            {
+                "HT_D20_GEOMETRY": "dense-0.05b",
+                "HT_D20_REPLAY_SECONDS": "144",
+                "HT_D20_WARMUP_OUT": "/nonexistent/warmup",
+            },
+            "HT_D20_WARMUP_OUT: no out/manifest.json under /nonexistent/warmup",
+        ),
     ],
     ids=[
         "missing",
+        "missing_for_dense_0_05b",
+        "missing_for_dense_0_03b",
         "zero",
         "not_whole_seconds",
         "another_geometry",
         "warmup_for_another_geometry",
         "warmup_relative",
         "warmup_without_a_manifest",
+        "dense_0_05b_warmup_without_a_manifest",
     ],
 )
 def test_a_dense_0_1b_build_without_a_measured_replay_is_refused_before_anything_runs(
@@ -749,6 +884,45 @@ def test_the_dense_0_1b_row_must_stay_inside_the_inclusive_100_to_300_million_ba
         assert not out.exists()
 
 
+@pytest.mark.parametrize(
+    ("geometry", "low", "high"),
+    [("dense-0.05b", 40_000_000, 70_000_000), ("dense-0.03b", 25_000_000, 40_000_000)],
+    ids=["50m", "run_profile"],
+)
+@pytest.mark.parametrize("edge", ["just_below", "lower_bound", "upper_bound", "just_above"])
+def test_a_d94_row_must_stay_inside_its_own_inclusive_band(
+    host, tmp_path, geometry, low, high, edge
+):
+    # As for dense-0.1b: the builder runs from a copy whose profiles hold the row under test, and
+    # reaching the manifest stage (call 2 of uv, made to fail) means the band let the row in.
+    count, accepted = {
+        "just_below": (low - 2, False),
+        "lower_bound": (low, True),
+        "upper_bound": (high, True),
+        "just_above": (high + 2, False),
+    }[edge]
+    root = tmp_path / "checkout"
+    builder = root / "scripts/b300/d20/build_test_manifest.sh"
+    builder.parent.mkdir(parents=True)
+    shutil.copy(BUILDER, builder)
+    (root / "scripts/mfu_profiles.json").write_text(
+        json.dumps({"profiles": {f"mfu-{geometry}": {"model": row_with_count(count)}}})
+    )
+    out = tmp_path / "out"
+
+    env = {"HT_D20_GEOMETRY": geometry, "HT_D20_REPLAY_SECONDS": "144", "FAKE_UV_FAIL_ON": "2"}
+    run = build(host, out, env=env, builder=builder)
+
+    if accepted:
+        assert run.returncode == 9 and uv_calls(host) == 2, run.stderr
+    else:
+        assert run.returncode not in (0, 9) and uv_calls(host) == 1
+        assert f"mfu-{geometry} has {count} parameters, outside the band {low}..{high}" in (
+            run.stderr
+        )
+        assert not out.exists()
+
+
 @pytest.mark.parametrize("rounds", [None, "200"], ids=["default_100", "opt_in_200"])
 def test_the_trial_window_is_100_rounds_unless_the_operator_asks_for_another(
     host, tmp_path, rounds
@@ -790,7 +964,8 @@ def test_an_unknown_geometry_is_refused_and_the_known_ones_are_named(host, tmp_p
 
     run = build(host, out, env={"HT_D20_GEOMETRY": "dense-0.2b"})
 
-    assert run.returncode == 2 and "dense-1b, dense-0.1b or tiny-cpu" in run.stderr
+    assert run.returncode == 2
+    assert "dense-1b, dense-0.1b, dense-0.05b, dense-0.03b or tiny-cpu" in run.stderr
     assert not out.exists() and uv_calls(host) == 0
 
 

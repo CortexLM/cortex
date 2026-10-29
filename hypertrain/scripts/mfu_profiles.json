@@ -5,6 +5,8 @@
   "mfu-dense-1b-mb2": "0.89B dense, micro_batch 2; est. ~17 GiB with HT_ACT_CKPT=1 (fp32 master+grad+AdamW m,v = 14.2 GiB + bf16 casts + activations); fits 32 GB",
   "mfu-dense-0.35b": "~0.35B dense reference shape for the 33.59% bf16 sdpa-flash run (no ckpt needed)",
   "mfu-dense-0.1b": "100,676,352-parameter intermediate TEST model (D68, ADR 0015): 8 layers, d_model 768, 12 heads / 4 kv, d_ff 2048, vocab 32768; scripts/b300/d20/build_test_manifest.sh HT_D20_GEOMETRY=dense-0.1b reads its model block and sets its own inner loop; no MFU figure is measured for it",
+  "mfu-dense-0.05b": "44,045,568-parameter larger D94 TEST option (ADR 0016): 3 layers, d_model 768, 12 heads / 4 kv heads, d_ff 2048, vocab 16384, seq 2048; allowed only while T_miner + T_ref <= 250 s, which the measured T_ref(101 M) of 338 s does not give; scripts/b300/d20/build_test_manifest.sh HT_D20_GEOMETRY=dense-0.05b reads the model block and sets its own inner loop; no MFU figure is measured on it",
+  "mfu-dense-0.03b": "31,462,656-parameter D94 run profile (ADR 0016): mfu-dense-0.05b with vocab 8192, T_miner + T_ref ~194 s <= 250 s at the measured T_ref(101 M) of 338 s; scripts/b300/d20/build_test_manifest.sh HT_D20_GEOMETRY=dense-0.03b reads the model block and sets its own inner loop; no MFU figure is measured on it",
   "mfu-dense-1b-dp2": "mfu-dense-1b model (889M params) on 2 ranks, dp_size 2, zero1 owners; per rank micro_batch 4. ZeRO-2 est. ~14 GiB/rank with HT_ACT_CKPT=1 (fp32 params 3.3 + full fp32 grads transient 3.3 + owned m,v 3.3 + bf16 casts 1.7 + ckpt activations ~2)",
   "mfu-dense-1b-dp8": "mfu-dense-1b model on 8 ranks, dp_size 8, zero1 owners (per-tensor; largest owner 161.5M params). ZeRO-2 est. ~11 GiB/rank, ZeRO-3 ~8 GiB/rank steady (+3.3 GiB gathered params during fwd/bwd), with HT_ACT_CKPT=1",
   "tiny-cpu-dp2": "CPU torchrun smoke for run_mfu_dist.py only; never used for MFU claims",
@@ -150,6 +152,70 @@
     "top_k_experts": 1,
     "seq_len": 2048,
     "vocab": 32768,
+    "compute_dtype": "bf16"
+   },
+   "inner": {
+    "H": 60,
+    "J": 60,
+    "micro_batch": 4,
+    "grad_accum": 1,
+    "state_policy": "reset",
+    "rewarmup_steps": 0
+   },
+   "outer": {
+    "opt": "nesterov"
+   },
+   "layout": {
+    "pp": 1,
+    "n_gpus": 1,
+    "dp_size": 1,
+    "ep_size": 1,
+    "zero1": false
+   }
+  },
+  "mfu-dense-0.05b": {
+   "model": {
+    "n_layers": 3,
+    "d_model": 768,
+    "n_heads": 12,
+    "n_kv_heads": 4,
+    "d_ff": 2048,
+    "n_experts": 1,
+    "top_k_experts": 1,
+    "seq_len": 2048,
+    "vocab": 16384,
+    "compute_dtype": "bf16"
+   },
+   "inner": {
+    "H": 60,
+    "J": 60,
+    "micro_batch": 4,
+    "grad_accum": 1,
+    "state_policy": "reset",
+    "rewarmup_steps": 0
+   },
+   "outer": {
+    "opt": "nesterov"
+   },
+   "layout": {
+    "pp": 1,
+    "n_gpus": 1,
+    "dp_size": 1,
+    "ep_size": 1,
+    "zero1": false
+   }
+  },
+  "mfu-dense-0.03b": {
+   "model": {
+    "n_layers": 3,
+    "d_model": 768,
+    "n_heads": 12,
+    "n_kv_heads": 4,
+    "d_ff": 2048,
+    "n_experts": 1,
+    "top_k_experts": 1,
+    "seq_len": 2048,
+    "vocab": 8192,
     "compute_dtype": "bf16"
    },
    "inner": {

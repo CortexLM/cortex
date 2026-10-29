@@ -387,8 +387,9 @@ Decision.
    twelve clean trials in about 29 minutes [A: D70]; a production training round takes about
    10 minutes [A: D70]; `work_screen_epoch_rounds` is 6000 in the TEST and production builders
    (`build_test_manifest.sh`, `ops/manifest_v2.py`, `od_large_manifest.py`, `network_gpu_seed.py`),
-   except the `dense-0.1b` geometry of `build_test_manifest.sh`, which pins 20000 (ADR 0015: its
-   first screen must cover 52 serial trials of 250-390 s [H]). Formula: `ladder = trials * seconds
+   except the measured dense geometries of `build_test_manifest.sh` (`dense-0.1b`, ADR 0015, and the
+   D94 rows `dense-0.05b` and `dense-0.03b`, ADR 0016), which pin 20000 (ADR 0015: the first screen
+   must cover 52 serial trials of 250-390 s [H]; the 101 M row bounds the two smaller ones). Formula: `ladder = trials * seconds
    per trial / 3 s`, `window = 4 * screen`, and the rule is `window >= 2 * ladder`.
 
    | Policy | Ladder | Two ladders | Window | Margin |
