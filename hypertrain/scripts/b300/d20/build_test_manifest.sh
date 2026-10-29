@@ -53,6 +53,15 @@
 # of 299 or 300 s gives (same window, so the same run id, and a warm-up run is never reused): stop
 # above 298 s. Otherwise the dry run checks that only the audit policy differs and prints the
 # warm-up run id; it also prints the stop.
+# HT_D20_AUDIT_GAP_ROUNDS=N (dense-0.1b, dense-0.05b and dense-0.03b only, optional; S20, D104):
+# the audit policy signs gap_cap_rounds = N instead of the derived cap, so the operator tool may
+# open rounds whose d_final - d_audit reaches N. N is whole rounds, at least 200 and at least the
+# gap the re-audit window needs (both are refused otherwise, before the manifest stage, which
+# itself refuses N above 2 * absolute_rounds + the window: 500 for a window of 100). The ledger
+# of these runs is test, so a cap above 200 is accepted. A wider gap is not one longer lease: an
+# audit job still expires at min(d_final, d_audit + 2 * lease_rounds) and may be rearmed once
+# for another 2 * lease_rounds, up to d_final. Without the variable nothing changes: same
+# policies, manifest and run id.
 # HT_D20_GEOMETRY=tiny-cpu: the CPU mechanism model of tests/ledger/test_escrow_v2.py setup()
 # (1 layer, d_model 8, vocab 16, seq 4, H=1 J=1, 16 samples), layout n_gpus=1, for a cpu-backend
 # TEST run whose references and audits the challenge replays on CPU.
@@ -130,6 +139,7 @@ ATTENTION=${HT_D20_ATTN_BACKEND:-math}
 COLDKEYS=${HT_D20_COLDKEYS:-2}
 REPLAY=${HT_D20_REPLAY_SECONDS:-}
 WARMUP=${HT_D20_WARMUP_OUT:-}
+GAP=${HT_D20_AUDIT_GAP_ROUNDS:-}
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
 case $GEOMETRY in dense-1b|dense-0.1b|dense-0.05b|dense-0.03b|tiny-cpu) ;; *) echo "HT_D20_GEOMETRY: dense-1b, dense-0.1b, dense-0.05b, dense-0.03b or tiny-cpu" >&2; exit 2 ;; esac
@@ -140,10 +150,13 @@ if [[ $GEOMETRY == dense-0.1b || $GEOMETRY == dense-0.05b || $GEOMETRY == dense-
         case $WARMUP in /*) ;; *) echo "HT_D20_WARMUP_OUT must be an absolute path" >&2; exit 2 ;; esac
         [ -f "$WARMUP/out/manifest.json" ] || { echo "HT_D20_WARMUP_OUT: no out/manifest.json under $WARMUP (the warm-up build's OUT_DIR)" >&2; exit 2; }
     fi
+    [ -z "$GAP" ] || [[ $GAP =~ ^[1-9][0-9]*$ ]] || { echo "HT_D20_AUDIT_GAP_ROUNDS must be whole rounds (digits, no sign or leading zero)" >&2; exit 2; }
 elif [ -n "$REPLAY" ]; then
     echo "HT_D20_REPLAY_SECONDS is read by dense-0.1b, dense-0.05b and dense-0.03b only" >&2; exit 2
 elif [ -n "$WARMUP" ]; then
     echo "HT_D20_WARMUP_OUT is read by dense-0.1b, dense-0.05b and dense-0.03b only" >&2; exit 2
+elif [ -n "$GAP" ]; then
+    echo "HT_D20_AUDIT_GAP_ROUNDS is read by dense-0.1b, dense-0.05b and dense-0.03b only" >&2; exit 2
 fi
 [[ $IMAGE =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "IMAGE_DIGEST must be sha256:<64 lowercase hex>" >&2; exit 2; }
 [[ $DRIVER =~ ^([0-9][0-9.]*|cpu-test)$ ]] || { echo "DRIVER must be digits and dots (or cpu-test)" >&2; exit 2; }
@@ -203,7 +216,7 @@ mkdir "$OUT/inputs"
 
 cd "$HT"
 uv run --no-sync python -I - "$IMAGE" "$DRIVER" "$SM_COUNT" "$OUT" "$EXP_ROUND" \
-    "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" "$ATTENTION" "$HT" "$REPLAY" <<'PY'
+    "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" "$ATTENTION" "$HT" "$REPLAY" "$GAP" <<'PY'
 import json
 import math
 import os
@@ -227,7 +240,7 @@ from hypertrain.protocol.messages_v2 import DEFAULT_GAP_CAP_ROUNDS, reaudit_roun
 from hypertrain.trainer.rng import rng_ctr, uniform_f64
 
 (image, driver, sm_count, out, exp_round, relay_url, relay_pubkey, geometry, coldkeys,
- attention, ht_root, replay) = sys.argv[1:]
+ attention, ht_root, replay, gap) = sys.argv[1:]
 # The dense TEST models whose audit window comes from a measured replay (ADR 0015, ADR 0016).
 MEASURED = ("dense-0.1b", "dense-0.05b", "dense-0.03b")
 # The pin first: a count or a backend no GPU class was measured with stops the build before
@@ -451,7 +464,16 @@ if geometry in MEASURED:
     audit = policies["audit"]
     audit["reaudit_rounds"] = reaudit_rounds_for(int(replay), audit["lease_rounds"])
     needed = reaudit_gap_needed(audit["lease_rounds"], audit["reaudit_rounds"])
-    if needed > DEFAULT_GAP_CAP_ROUNDS:
+    if gap:
+        floor = max(DEFAULT_GAP_CAP_ROUNDS, needed)
+        if int(gap) < floor:
+            sys.exit(
+                f"HT_D20_AUDIT_GAP_ROUNDS={gap} is below {floor}: the default cap is "
+                f"{DEFAULT_GAP_CAP_ROUNDS} and a re-audit window of {audit['reaudit_rounds']} "
+                f"rounds needs a gap of {needed}"
+            )
+        audit["gap_cap_rounds"] = int(gap)
+    elif needed > DEFAULT_GAP_CAP_ROUNDS:
         audit["gap_cap_rounds"] = needed
 (inputs / "policies.json").write_bytes(canonicalize(policies, allow_float=False))
 relays = {
@@ -485,7 +507,7 @@ if [ -n "$WARMUP" ] && cmp -s "$OUT/out/manifest.json" "$WARMUP/out/manifest.jso
 fi
 
 uv run --no-sync python -I - "$OUT" "$IMAGE" "$DRIVER" "$SM_COUNT" "$GEOMETRY" "$ATTENTION" \
-    "$REPLAY" "$WARMUP" <<'PY'
+    "$REPLAY" "$WARMUP" "$GAP" <<'PY'
 """Dry-run: the checks POST /v2/admin/runs (store._create_run_v2) runs, minus the database."""
 import json
 import sys
@@ -505,7 +527,7 @@ from hypertrain.protocol.relay_messages import RelayRegistryV1
 out, image, driver, sm_count = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
 n_gpus = 2 if sys.argv[5] == "dense-1b" else 1
 measured = sys.argv[5] in ("dense-0.1b", "dense-0.05b", "dense-0.03b")
-attention, replay, warmup = sys.argv[6], sys.argv[7], sys.argv[8]
+attention, replay, warmup, gap = sys.argv[6], sys.argv[7], sys.argv[8], sys.argv[9]
 # What the builder meant, from the table: a GPU class measured on sm_count, or none for a CPU run.
 gpu = "none" if sys.argv[5] == "tiny-cpu" else next(
     (n for n, c in GPU_CLASSES.items() if sm_count in c.sm_counts), None
@@ -547,8 +569,8 @@ if measured:
     checks["reaudit_rounds_of_the_replay"] = (
         audit.reaudit_rounds == reaudit_rounds_for(int(replay), audit.lease_rounds)
     )
-    checks["gap_cap_holds_the_reaudit_window"] = (
-        needed is not None and audit.gap_cap() == max(DEFAULT_GAP_CAP_ROUNDS, needed)
+    checks["gap_cap_holds_the_reaudit_window"] = needed is not None and audit.gap_cap() == (
+        int(gap) if gap else max(DEFAULT_GAP_CAP_ROUNDS, needed)
     )
 else:
     checks["no_reaudit_window_or_cap"] = audit.reaudit_rounds is None and audit.gap_cap_rounds is None

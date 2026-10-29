@@ -648,7 +648,11 @@ def test_the_d94_runs_differ_from_the_101m_run_built_from_the_same_seeds_only_by
 
 
 def two_builds(
-    host: dict[str, str], tmp_path: Path, replay: str, geometry: str = "dense-0.1b"
+    host: dict[str, str],
+    tmp_path: Path,
+    replay: str,
+    geometry: str = "dense-0.1b",
+    real_env: dict[str, str] | None = None,
 ) -> tuple[Path, Path, subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
     """The runbook's two builds over the same seeds, image and expiry: the throw-away warm-up run at
     the 300 s ceiling, then the real run from the measured `replay`, told the warm-up's OUT_DIR."""
@@ -661,7 +665,94 @@ def two_builds(
     for seed in seed_files(warmup / "secrets"):
         shutil.copy(seed, real / "secrets" / seed.name)
     env = {**dense, "HT_D20_REPLAY_SECONDS": replay, "HT_D20_WARMUP_OUT": str(warmup)}
-    return warmup, real, first, build(host, real, env=env, **args)
+    return warmup, real, first, build(host, real, env={**env, **(real_env or {})}, **args)
+
+
+def test_the_audit_gap_knob_widens_only_the_cap_of_a_test_run(host, tmp_path):
+    # S20 (D104): the 31 M run at its measured 133 s replay, with the gap of 400 rounds the operator
+    # chose for three audit waves. The re-audit window stays the replay's, the cap is the knob's,
+    # the warm-up guard still holds, and a production ledger refuses the same inputs.
+    warmup, real, first, second = two_builds(
+        host, tmp_path, "133", "dense-0.03b", {"HT_D20_AUDIT_GAP_ROUNDS": "400"}
+    )
+
+    assert second.returncode == 0, second.stderr
+    _, audit = accepted_manifest(real)
+    assert (audit.lease_rounds, audit.reaudit_rounds, audit.gap_cap_rounds) == (100, 100, 400)
+    report = json.loads(second.stdout[second.stdout.rindex("\n{\n") + 1 :])
+    assert (report["audit"]["gap_needed"], report["audit"]["gap_cap"]) == (175, 400)
+    assert all(report["checks"].values()) and "gap_cap_holds_the_reaudit_window" in report["checks"]
+    assert report["checks"]["warmup_differs_only_by_the_audit_policy"]
+    scratch = tmp_path / "production"
+    scratch.mkdir()
+    production = production_build(real, scratch)
+    assert production.returncode == 2 and not (scratch / "out").exists()
+    assert "gap_cap_rounds above 200 is for a TEST manifest only" in production.stderr
+
+
+def test_without_the_audit_gap_knob_the_31m_run_signs_the_audit_policy_of_f3901a09(host, tmp_path):
+    # The audit policy carries no seed: at the same replay, a build without the knob signs the
+    # policy object that the published run f3901a09 (S17d) pins, byte for byte, with no cap.
+    out = tmp_path / "out"
+    env = {"HT_D20_GEOMETRY": "dense-0.03b", "HT_D20_REPLAY_SECONDS": "133"}
+
+    run = build(host, out, driver="595.91.07", sm_count="148", env=env)
+
+    assert run.returncode == 0, run.stderr
+    manifest, audit = accepted_manifest(out)
+    assert manifest.network.audit_policy_hash == (
+        "1dd433fe0192026a8e830f1522b66a3ce88bcc924376e47960bca4df6d9fbe28"
+    )
+    assert audit.gap_cap_rounds is None
+
+
+@pytest.mark.parametrize(
+    ("env", "named", "stages"),
+    [
+        ({"HT_D20_AUDIT_GAP_ROUNDS": "4OO"}, "HT_D20_AUDIT_GAP_ROUNDS must be whole rounds", 0),
+        ({"HT_D20_AUDIT_GAP_ROUNDS": "-400"}, "HT_D20_AUDIT_GAP_ROUNDS must be whole rounds", 0),
+        (
+            {
+                "HT_D20_GEOMETRY": "tiny-cpu",
+                "HT_D20_REPLAY_SECONDS": "",
+                "HT_D20_AUDIT_GAP_ROUNDS": "400",
+            },
+            "HT_D20_AUDIT_GAP_ROUNDS is read by dense-0.1b, dense-0.05b and dense-0.03b only",
+            0,
+        ),
+        ({"HT_D20_AUDIT_GAP_ROUNDS": "199"}, "HT_D20_AUDIT_GAP_ROUNDS=199 is below 200", 1),
+        # 256 s: a window of 171 rounds needs a gap of 276, so 275 is refused although above 200.
+        (
+            {"HT_D20_REPLAY_SECONDS": "256", "HT_D20_AUDIT_GAP_ROUNDS": "275"},
+            "HT_D20_AUDIT_GAP_ROUNDS=275 is below 276",
+            1,
+        ),
+        # The manifest stage's own bound: two absolute horizons and the window, 500 rounds here.
+        (
+            {"HT_D20_AUDIT_GAP_ROUNDS": "501"},
+            "audit gap cap must not pass the end of the last audit wait",
+            2,
+        ),
+    ],
+    ids=[
+        "not_digits",
+        "negative",
+        "another_geometry",
+        "below_200",
+        "below_the_window",
+        "above_500",
+    ],
+)
+def test_an_audit_gap_the_run_cannot_take_is_refused_and_leaves_nothing(
+    host, tmp_path, env, named, stages
+):
+    out = tmp_path / "out"
+    dense = {"HT_D20_GEOMETRY": "dense-0.03b", "HT_D20_REPLAY_SECONDS": "133"}
+
+    run = build(host, out, driver="595.91.07", sm_count="148", env={**dense, **env})
+
+    assert run.returncode != 0 and named in run.stderr
+    assert not out.exists() and uv_calls(host) == stages
 
 
 def test_the_rebuild_with_the_measured_replay_changes_only_the_audit_window(host, tmp_path):

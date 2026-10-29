@@ -84,6 +84,15 @@ that only the audit policy differs (`warmup_same_training`, `warmup_differs_only
 the warm-up's run id (`warmup_run_id`) [V]. The builder refuses an `OUT_DIR` whose `inputs`, `out` or `state`
 already exists [V].
 
+The real build may also take `HT_D20_AUDIT_GAP_ROUNDS=N` (S20, D104; optional, these geometries only): the audit
+policy then signs `gap_cap_rounds = N`, so `live_operator.py open` accepts rounds whose `d_final - d_audit` reaches N.
+N below 200 or below the gap the re-audit window needs (175 for a window of 100) is refused with nothing left, and
+the manifest stage refuses N above `2 * absolute_rounds + reaudit window` (500 for a window of 100) [V]. A wider gap
+is not one longer audit lease: a job still expires at `min(d_final, d_audit + 200)` with a lease of 100 and may be
+rearmed once for another 200 rounds, up to `d_final` [V, code read, not run]. Without the variable the build is
+unchanged: the rebuild of `f3901a09` from its S17d inputs gives the same run id and byte-identical inputs, policies
+and manifest [V].
+
 About 5 s for `dense-0.03b` [V] (11 s for `dense-0.1b` [V], 20 s on a host at load 338 [V]). Each build prints
 `"param_count": 31462656` and `"init_state_hash": "e372a68e…0aa6"` for `dense-0.03b` (44045568 and
 `9cbe3ee9…f897` for `dense-0.05b`, 100676352 and `be9b7bd6…28f8` for `dense-0.1b`); anything else means the row
