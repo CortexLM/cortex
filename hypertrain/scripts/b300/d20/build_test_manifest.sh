@@ -64,7 +64,7 @@
 # class) is the pin's HT_ATTN_BACKEND. The dry run reports the pin and checks it against SM_COUNT.
 # HT_D20_COLDKEYS=N (default 2) seeds cold-0..cold-N-1, each with 20000 genesis units.
 # HT_D20_CHALLENGE_ROUNDS (optional, 100..400, default 100): the admission trial window in beacon
-# rounds (ADR 0016), challenge_rounds_for(T_miner + T_ref) for a measured trial. Unset, the policy
+# rounds (ADR 0017), challenge_rounds_for(T_miner + T_ref) for a measured trial. Unset, the policy
 # and so the run id are the ones a build without the knob signs; the dry run prints the window.
 # HT_D20_RELAY_PUBKEY (required): SS58 of the relay key k1 that relay-joinbase signs with; the
 # current value is the `pubkey` of /data/relay/config/relay.json on s100 (k1).

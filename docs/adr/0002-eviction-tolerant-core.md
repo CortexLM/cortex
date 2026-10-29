@@ -13,7 +13,7 @@
   the record of the review. Amended 2026-10-28 by ADR 0010 decision 2 point 5: what is built of the
   re-seed is an operator route for every run (`Admission.reseed`, admin bearer); the owner-signed
   form with a budget described below is NOT built and waits for founder decisions 5 and 6.
-  Amended 2026-10-29 by ADR 0016 (prepared on `v3-trial-rounds`, not merged): `challenge_rounds` is
+  Amended 2026-10-29 by ADR 0017 (prepared on `v3-trial-rounds`, not merged): `challenge_rounds` is
   no longer `Literal[100]` but a policy integer 100..400, above 100 on a TEST ledger only. The
   `seed + 100` of the rows below is the default window, read `seed + challenge_rounds`. E1 stays the
   default, and E2's lease-driven window is still not built.
@@ -333,7 +333,7 @@ Package `hypertrain.elastic` (`src/hypertrain/elastic/`), integer milliseconds o
    - A trial keeps v2's proof window of 100 rounds (about 300 s from its seed; option E1 below).
      The lease and the progress deadline release a lost holder's trial place at once; they do
      not resume the trial, and a replacement host runs a new one, since this ADR's replacement
-     delay (10 minutes, 200 rounds [H arithmetic]) outlasts the window. ADR 0016 now lets a
+     delay (10 minutes, 200 rounds [H arithmetic]) outlasts the window. ADR 0017 now lets a
      TEST policy sign a wider fixed window (100..400), which is still E1. Replacing the window by
      lease and progress (E2) would edit `challenge_rounds: Literal[100]`, the
      `deadline == seed + 100` validator and every user of `deadline_beacon`, so it needs a new

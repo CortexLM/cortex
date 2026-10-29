@@ -320,7 +320,7 @@ sets the next seed one round later, and the next trial must fit in the `challeng
 rounds after that seed: 100 by default, about 5 min at 3 s rounds. A TEST manifest may sign
 up to `CHALLENGE_ROUNDS_MAX` (400, about 20 min); a production manifest above 100 is refused
 (`manifest_v2 build` exits 2, `POST /v2/admin/runs` answers 422), and a value outside 100..400
-fails the policy schema (ADR 0016). The challenge deadline is seed + `challenge_rounds`
+fails the policy schema (ADR 0017). The challenge deadline is seed + `challenge_rounds`
 whenever the challenge is requested, and the proof must be accepted by then. A challenge left unproven past its deadline is closed
 `EXPIRED` by the master at the next beacon push (or at the next challenge request, which
 frees the place first). Nobody is suspended: the miner keeps its state, its clean trials and
@@ -360,7 +360,7 @@ screen must then cover 36 more trials and round 0 up to its `d_final`: 4106 roun
 the joinbase-6 offsets, 5180 with the `od_large_manifest.py` offsets. The former 1000
 (about 50 min) could not reach round 0. A wider trial window raises the worst case: at
 200 rounds, 36 trials can span up to 7,236 rounds, so a TEST build that widens the window
-re-checks `work_screen_epoch_rounds` (ADR 0016). The cost: one screen now vouches for a miner's
+re-checks `work_screen_epoch_rounds` (ADR 0017). The cost: one screen now vouches for a miner's
 hardware for about 5 h instead of 50 min. The same value is the IP-prefix quota epoch,
 `now // work_screen_epoch_rounds`. The epoch is part of the prefix HMAC, so every prefix
 starts a full bucket each epoch, and joins delete the `ip:%` quota rows of earlier epochs.

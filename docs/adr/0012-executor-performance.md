@@ -152,7 +152,7 @@ numbers: the line numbers of the Context are those of the Part A tree.
    that a repeated request does not stage the job again under the lock:
    - one: this call is a waiter. It takes one of the `REFERENCE_WAITERS` (2) places of a semaphore the root
      shares with its child stores (one `asyncio.to_thread` pool serves them all), waits at most
-     `REFERENCE_WAIT_SECONDS` (330 s; a default trial window is 300 s, and past a wider ADR 0016 window
+     `REFERENCE_WAIT_SECONDS` (330 s; a default trial window is 300 s, and past a wider ADR 0017 window
      the waiter's 503 is retried) and returns the leader's commitment **or
      raises the leader's exception** (the same object, as `Future.result` does). Past the budget the call
      answers 503 at once and holds no worker; a waiter that gives up answers 503. `cpu_miners.py` retries a

@@ -1,11 +1,12 @@
-# ADR 0016: the admission trial window as a policy value (D94 lot C)
+# ADR 0017: the admission trial window as a policy value (D94 lot C)
 
 - Status: **prepared, not merged**, 2026-10-29 (Principal SN100 D94 lot C). The window is a protocol value,
   so the founder decides; Principal SN100 relays that decision, and nothing here is merged before it.
   Branch `v3-trial-rounds` on origin/v3 `667695be`. No production run, master, profile, pin or emission
   changes. Nothing in this lot ran on a GPU host, on s100, against R2 or on-chain.
-- Order: brief `v3-trial-rounds` ("make admission trial window MANIFEST parameter, PREPARE ONLY"). The
-  number 0016 is free on the base: `docs/adr/` stops at 0015 [V].
+- Order: brief `v3-trial-rounds` ("make admission trial window MANIFEST parameter, PREPARE ONLY"). Written
+  as 0016, renumbered 0017 by Forge (CTO), 2026-10-29: `v3-model-50m` (`708414d8`, now on origin/v3) took
+  0016 for `docs/adr/0016-d94-dense-test-model.md` [V].
 - Labels: **[V]** verified in code, by a test or by a command at `667695be` or on this branch,
   2026-10-29; **[A]** reported by a cited document; **[H]** hypothesis or arithmetic; **[?]** unknown.
   Paths are relative to `hypertrain/src/hypertrain/` unless prefixed.

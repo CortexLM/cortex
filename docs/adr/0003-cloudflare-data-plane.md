@@ -38,7 +38,7 @@
   while state and ef are committed by reference (`miner/core.py:1282-1286`) [V]. Trusted
   reference publications take about 13 GB of server disk per trial [A, joinbase-6 report:33].
 - **Window** [V]: the trial deadline is `seed + 100` drand rounds of 3 s (`admission.py:256`,
-  `store.py:2737`), that is 297-300 s. Since ADR 0016 that is the default: a TEST policy may sign
+  `store.py:2737`), that is 297-300 s. Since ADR 0017 that is the default: a TEST policy may sign
   `challenge_rounds` up to 400. Measured 785-913 Mbit/s with 16 parallel 1 MiB PUTs, but
   231.6 Mbit/s in the relay's own pattern of one 4 MiB chunk at a time [A, joinbase-6 run 2].
 - **R2 limits** that shape the design [V, read 2026-10-26]:

@@ -343,7 +343,7 @@ def test_example_admission_policy_digest_is_pinned_in_both_ledger_modes(
 TEST_ONLY_LIFTS = {
     # D88: the cap of 200 rounds on `d_final - d_audit`.
     "gap_cap": ("audit", "gap_cap_rounds", 300, "TEST manifest"),
-    # ADR 0016: a trial window above 100 rounds, until the founder rules on production.
+    # ADR 0017: a trial window above 100 rounds, until the founder rules on production.
     "trial_window": ("admission", "challenge_rounds", 200, "TEST ledger"),
 }
 

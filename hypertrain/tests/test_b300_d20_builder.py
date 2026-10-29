@@ -927,7 +927,7 @@ def test_a_d94_row_must_stay_inside_its_own_inclusive_band(
 def test_the_trial_window_is_100_rounds_unless_the_operator_asks_for_another(
     host, tmp_path, rounds
 ):
-    # ADR 0016: HT_D20_CHALLENGE_ROUNDS opts in to a wider admission trial window; without it the
+    # ADR 0017: HT_D20_CHALLENGE_ROUNDS opts in to a wider admission trial window; without it the
     # policy, and so the run id, is the one every build so far signed.
     out = tmp_path / "out"
     env = {} if rounds is None else {"HT_D20_CHALLENGE_ROUNDS": rounds}

@@ -206,8 +206,8 @@ for r in rows:
    is 297 s, 270 keeps a 27 s margin; estimate 233-277 s at 105 MiB/s [H]). Otherwise **NO-GO**: stop, clean up,
    report. An image built from a commit without Part B is NO-GO too: there a trial survives a lock of only 27-54 s
    at `t_probe` 0 (24-48 s at 30 s), against 123-235 s [H]. The 297 s is the default 100-round window.
-   `HT_D20_CHALLENGE_ROUNDS` can widen it on a TEST build (ADR 0016), but the value, and whether G0 then
-   measures against the wider window, are the founder's decision (ADR 0016 "Decisions for the founder"). Until
+   `HT_D20_CHALLENGE_ROUNDS` can widen it on a TEST build (ADR 0017), but the value, and whether G0 then
+   measures against the wider window, are the founder's decision (ADR 0017 "Decisions for the founder"). Until
    that decision, this step keeps 297 s and 270 s, and the build leaves the knob unset.
 6. **Rebuild.** A new `$OUT` whose `secrets/` (0700) holds a copy of every seed of `$WARM/secrets/` (0600), the
    same image digest, driver, SM count and `HT_D20_COLDKEYS`, `$(cat $WARM/inputs/exp-round.txt)` as the fifth

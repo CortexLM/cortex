@@ -520,7 +520,7 @@ window (S17b), so the second step now runs the D94 geometry `dense-0.03b` (31,46
 `HT_D20_REPLAY_SECONDS`, the measured warm audit replay (no default; exit 2 without it), which a
 throw-away warm-up build at the 300 s ceiling measures first. `HT_D20_CHALLENGE_ROUNDS` (100..400,
 default 100, digits only, else exit 2) widens the admission trial window of a TEST build; the dry run
-prints and checks the signed `challenge_rounds` (ADR 0016). Unset, the build signs the bytes it signed
+prints and checks the signed `challenge_rounds` (ADR 0017). Unset, the build signs the bytes it signed
 before. ADR 0015 predicted (estimates, unmeasured) that it could not pass on the
 challenge code of `2cfc2a2b`. Its prerequisites a and b (the lock-free reference and aggregate) are
 merged since; with one executor host it is still not expected to pass, since the second executor host

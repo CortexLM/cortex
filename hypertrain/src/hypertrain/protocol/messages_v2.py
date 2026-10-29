@@ -569,7 +569,7 @@ class ArtifactLimits(WireModel):
     max_chunk_manifest_bytes: Literal[1048576]
 
 
-# The widest admission trial window `AdmissionPolicyV2.challenge_rounds` may set (ADR 0016): 400
+# The widest admission trial window `AdmissionPolicyV2.challenge_rounds` may set (ADR 0017): 400
 # rounds is 20 minutes at `BEACON_PERIOD_SECONDS`, 3.5 times the 101 M trial (~297 s with its
 # reference, `challenge_rounds_for` 114). A trial holds one of the `max_pending` places and its
 # signed challenge expires at its deadline, so a wider bound would let a stalled application hold
@@ -652,7 +652,7 @@ class AdmissionPolicyV2(WireModel):
     join_burst: Literal[4]
     ip_prefix_per_beacon: Literal[32]
     ip_prefix_burst: Literal[64]
-    # Beacon rounds a trial lasts from its seed (ADR 0016). Still serialised at 100, so every
+    # Beacon rounds a trial lasts from its seed (ADR 0017). Still serialised at 100, so every
     # policy digest (and run ID) predating the bound is unchanged.
     challenge_rounds: Annotated[StrictInt, Field(ge=100, le=CHALLENGE_ROUNDS_MAX)]
     artifact_limits: ArtifactLimits
@@ -663,7 +663,7 @@ class AdmissionPolicyV2(WireModel):
 
     def validate_ledger(self, ledger_mode: str | None) -> None:
         """`ledger_mode` is the economics policy's, for the callers that create or build a run: a
-        window above 100 rounds waits for the founder's ruling on production (ADR 0016)."""
+        window above 100 rounds waits for the founder's ruling on production (ADR 0017)."""
         if self.challenge_rounds > 100 and ledger_mode not in (None, "test"):
             raise ValueError("admission challenge_rounds above 100 is for a TEST ledger only")
 
@@ -754,7 +754,7 @@ def challenge_rounds_for(trial_seconds: int) -> int:
     """The `AdmissionPolicyV2.challenge_rounds` to publish for a trial of `trial_seconds`: the miner
     trains and the master replays the reference within the window, so `trial_seconds` is the
     measured T_miner + T_ref, plus 15 %, converted at `BEACON_PERIOD_SECONDS` a round and rounded
-    up, never below 100 (ADR 0016). 282 s -> 109, 297 s -> 114, 521 s -> 200."""
+    up, never below 100 (ADR 0017). 282 s -> 109, 297 s -> 114, 521 s -> 200."""
     rounds = max(100, -(-trial_seconds * 115 // (100 * BEACON_PERIOD_SECONDS)))
     if rounds > CHALLENGE_ROUNDS_MAX:
         raise ValueError(

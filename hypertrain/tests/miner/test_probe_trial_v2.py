@@ -148,7 +148,7 @@ def test_probe_v2_without_job_fetches_own_trial_and_completes(miner, capsys):
 
 @pytest.fixture
 def wide_miner(monkeypatch, request):
-    """`miner` over an admission policy whose trial window is 200 rounds (ADR 0016)."""
+    """`miner` over an admission policy whose trial window is 200 rounds (ADR 0017)."""
     monkeypatch.setitem(service.ADMISSION_POLICY_EXTRA, "challenge_rounds", 200)
     return request.getfixturevalue("miner")
 

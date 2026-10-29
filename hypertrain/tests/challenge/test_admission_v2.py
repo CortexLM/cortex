@@ -488,7 +488,7 @@ def capped_setup(cap: int) -> Setup:
 
 
 def windowed_setup(rounds: int) -> Setup:
-    """The test setup whose admission policy gives a trial `rounds` beacon rounds (ADR 0016)."""
+    """The test setup whose admission policy gives a trial `rounds` beacon rounds (ADR 0017)."""
     base = setup()
     policy = AdmissionPolicyV2.model_validate(
         {**base.admission_policy.body(), "challenge_rounds": rounds}
