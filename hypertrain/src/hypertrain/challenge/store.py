@@ -50,6 +50,7 @@ from hypertrain.challenge.disputes_v2 import EXCLUSION_ABANDONED, Contest, Dispu
 from hypertrain.challenge.exit_v2 import (
     BOUNDS,
     MAX_LAG_ROUNDS,
+    RESULT_PAUSE_ROUNDS,
     SANCTION,
     Exclusion,
     Member,
@@ -2429,7 +2430,9 @@ class ChallengeStore:
             # Test-only functional CPU evidence; never a production BLS qualification.
             b = self._beacon_v2(pin)
             emitted = (int(self.clock()) - manifest.training.beacon.genesis_time) // 3 + 1
-            if now < emitted - MAX_LAG_ROUNDS:
+            if now < emitted - MAX_LAG_ROUNDS and not self._result_in_lease_v2(
+                manifest, operation, now, emitted
+            ):
                 self._db.execute(
                     "UPDATE beacon_pins_v2 SET paused=1,reason='STALE' "
                     "WHERE run_id=? AND operation_id=?",
@@ -2453,6 +2456,13 @@ class ChallengeStore:
 
                     return round_at_or_after(t, manifest.training.beacon.genesis_time, 3)
 
+            beacon = manifest.training.beacon
+            emitted = (int(self.clock()) - beacon.genesis_time) // beacon.period + 1
+            lag = MAX_LAG_ROUNDS
+            if now < emitted - MAX_LAG_ROUNDS and self._result_in_lease_v2(
+                manifest, operation, now, emitted
+            ):
+                lag = emitted - pin  # health round = the pinned round, still BLS-verified
             try:
                 gate.refresh(
                     operation,
@@ -2460,13 +2470,39 @@ class ChallengeStore:
                     now_seconds=int(self.clock()),
                     genesis_seconds=manifest.training.beacon.genesis_time,
                     period_seconds=manifest.training.beacon.period,
-                    max_lag_rounds=MAX_LAG_ROUNDS,
+                    max_lag_rounds=lag,
                 )
             except BeaconUnavailable:
                 raise ChallengeError(
                     503, "beacon infrastructure paused; pinned seed retained"
                 ) from None
         return now
+
+    def _result_in_lease_v2(
+        self, manifest: RunManifestV2, operation: str, now: int, emitted: int
+    ) -> bool:
+        """A lagging view may still take an audit result or its completion (S17d).
+
+        The replay's own transactions hold the store lock, so the pusher lands late. Allowed only
+        while the lease runs, before its real deadline (LeaseGuard's wall instant) and at most
+        RESULT_PAUSE_ROUNDS further behind; a lease and a replay's inputs need a fresh view.
+        """
+        kind, _, rest = operation.partition(":")
+        if (
+            kind not in ("audit-result", "complete")
+            or now < emitted - MAX_LAG_ROUNDS - RESULT_PAUSE_ROUNDS
+        ):
+            return False
+        row = self._db.execute(
+            "SELECT state,expires,absolute FROM audit_leases_v2 WHERE run_id=? AND id=?",
+            (manifest.run_id(), rest.rpartition(":")[0]),
+        ).fetchone()
+        return (
+            row is not None
+            and row["state"] == "running"
+            and int(self.clock())
+            < manifest.training.beacon.genesis_time + (min(row["expires"], row["absolute"]) - 1) * 3
+        )
 
     def create_run_v2(self, raw: bytes) -> dict[str, JsonValue]:
         with self._lock:  # one authority lock across the hosted check and the insert

@@ -358,6 +358,13 @@
   `docs/adr/0011-audit-integrity.md` (Part 9, decision 12) at the monorepo root.
 
 ### Fixed
+- An audit verdict is no longer lost to the beacon pause its own replay causes (S17d, run f3901a09):
+  the replay's transactions hold the store lock, the pusher lands late, and the result transaction
+  found the beacon 3 rounds behind and answered 503, so the verdict was never stored and the lease
+  expired. The freshness gate now takes the result of a replay and its `/complete` up to
+  `RESULT_PAUSE_ROUNDS` (50) more rounds behind, only while the lease is running and before its real
+  deadline; the production branch still BLS-verifies the pinned round. A lease and the start of a
+  replay keep the 2-round bound. No manifest, run id, policy hash or `implementation_hash` changes.
 - A roster member kept out of a round by its own contest is sanctioned once, not twice (IMP-4, D86,
   ADR 0011 decision 12): it is excluded at the commit bound as before, but its NO_SHOW sanction waits
   while the contest is open. A contest it loses covers the absence (no second sanction row, strike or

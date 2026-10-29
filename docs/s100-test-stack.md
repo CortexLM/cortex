@@ -178,6 +178,15 @@ rules: keep the CUDA cache (the executor does by default), and run the first ref
 (43-64 s, cold) alone, before a second driver starts. Expect 503s in that window and retry them. Measure
 the idle lag with a child run present before trusting any of these numbers.
 
+**An audit result survives the pause it causes** (S17d, run f3901a09). The master's replay of an audit
+holds the lock in its own transactions, so the beacon falls behind while it runs; S17d's result
+transactions found it 3 behind and lost the verdict (503, then 409 "one live lease per auditor", the
+lease expired). The gate now takes the result of a replay (`audit-result`) and its `/complete` up to
+`RESULT_PAUSE_ROUNDS` (50, `challenge/exit_v2.py`) more rounds behind, while the lease is running and
+the wall clock is before its real deadline; the production ledger still verifies the pinned round's
+BLS signature. A lease and the start of a replay (`audit-execute`) still need the 2-round view.
+Tested with the master's CPU replay; not yet run on s100.
+
 Proving it instead of inferring it: `beacon_gaps.py` lists rounds missing from the `beacon` table
 of the store that hosts the run, the identities whose seed is one of them, and whether the pusher
 is behind or dead. It is read-only and takes the run id.

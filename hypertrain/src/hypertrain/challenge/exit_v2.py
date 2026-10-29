@@ -24,6 +24,10 @@ NoShowAction = Literal["APPLY", "WAIT", "COVERED", "DROP"]
 # The master refuses its callers once the wall clock is more than this many rounds ahead of the
 # last round it holds: the beacon is paused, and a pause is never a miner's silence.
 MAX_LAG_ROUNDS = 2
+# The result of an audit replay, or its completion, may land this many rounds more behind while
+# its lease's real deadline is ahead: the TEST pusher catches up a store lock of up to 150 s
+# (scripts/ops/s100_test/challenge_image.sh, S17d paused 32-38 rounds); longer is an outage.
+RESULT_PAUSE_ROUNDS = 50
 
 
 def pause_span(previous: int, emitted: int) -> tuple[int, int] | None:
