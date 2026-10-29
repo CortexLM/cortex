@@ -68,6 +68,15 @@
   `HT_D20_WARMUP_OUT` guard). `dense-0.03b` is the run profile: the miner side plus the reference fits
   250 s of the 297 s admission window by the S17b measurement scaled to its size; `dense-0.05b` does not
   yet. The other geometries build byte-identical manifests and no hash moves.
+- `HT_D20_AUDIT_GAP_ROUNDS=N` of `scripts/b300/d20/build_test_manifest.sh` (S20, D104), optional and read
+  by `dense-0.1b`, `dense-0.05b` and `dense-0.03b` only: the audit policy signs `gap_cap_rounds = N`, so
+  the operator tool opens rounds whose `d_final - d_audit` reaches N. Below 200 or below the gap the
+  re-audit window needs, the build is refused (exit 1, nothing left); the manifest stage refuses N above
+  `2 * absolute_rounds + reaudit window` (500 for a window of 100). A wider gap does not lengthen an
+  audit job: it still expires at `min(d_final, d_audit + 2 * lease_rounds)` and may be rearmed once for
+  another `2 * lease_rounds`, up to `d_final`. Without the variable the build is unchanged: the rebuild
+  of run `f3901a09` from its S17d inputs gives the same run id and byte-identical inputs, policies and
+  manifest.
 - Docs, CI, image and release workflows, Dockerfiles.
 - Eviction-tolerant core `hypertrain.elastic` (v3, not wired into the v2 challenge): leases with
   fencing tokens, saved before they are granted so that a restart never reissues one, and a
