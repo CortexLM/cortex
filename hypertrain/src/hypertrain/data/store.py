@@ -17,8 +17,16 @@ import stat
 import tempfile
 import threading
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    FIRST_EXCEPTION,
+    Future,
+    ThreadPoolExecutor,
+    wait,
+)
+from contextlib import closing
+from functools import partial
 from itertools import islice
 from pathlib import Path
 from typing import BinaryIO, Protocol
@@ -340,47 +348,114 @@ def parse_index(raw: bytes) -> PartIndexV1 | None:
     return index
 
 
-def _publish(chunks: Callable[[], bytes], put: Put, workers: int = 1) -> str:
-    """workers > 1 PUTs parts concurrently (at most 2 * workers parts = 2 * workers MiB in
-    flight, so `put` must be thread-safe); the index is still PUT last, after every part."""
-    buf, nxt = chunks(), chunks()
-    if not nxt:
-        if buf.startswith(INDEX_MAGIC):
-            raise StoreError("plain object must not begin with the part-index magic")
-        return _put(put, buf)
-    whole, size, parts, count = hashlib.sha256(), 0, list[str](), 0
+class _Stopped(StoreError):
+    """A queued PUT that did not start because an earlier one failed."""
+
+
+def _publish_all(
+    sources: Iterable[Callable[[], bytes]], put: Put, workers: int = 1
+) -> list[tuple[str, int]]:
+    """Store each source's chunks; per source, the key and length of the referenced object.
+
+    workers > 1 shares one pool across the sources (so `put` must be thread-safe): at most
+    `workers` PUTs run and at most 2 * workers chunks (2 * workers MiB) are read and not yet
+    stored, so the next source's parts go out while the last parts of the previous one are in
+    flight. A source's index is PUT after its own parts: readers never see an index before its
+    parts. The first PUT to fail, in time, stops the publication: nothing more is queued, PUTs
+    that did not start are dropped, running ones are waited for, and that failure is raised."""
     pool = ThreadPoolExecutor(workers) if workers > 1 else None
-    inflight: deque[Future[str]] = deque()
+    lock, failure = threading.Lock(), list[BaseException]()
+    window: set[Future[str]] = set()
+
+    def task(data: bytes) -> str:
+        if failure:
+            raise _Stopped("publication stopped by an earlier failure")
+        try:
+            return _put(put, data)
+        except Exception as error:
+            with lock:  # recorded before the future completes: failure[0] is the first in time
+                failure.append(error)
+            raise
+
+    def submit(data: bytes) -> Future[str]:
+        if pool is None:
+            done: Future[str] = Future()
+            done.set_result(task(data))
+            return done
+        while failure or len(window) >= 2 * workers:
+            if failure:
+                raise failure[0]
+            window.difference_update(wait(window, return_when=FIRST_COMPLETED).done)
+        future = pool.submit(task, data)
+        window.add(future)
+        return future
+
+    def settle(given: Iterable[Future[str]]) -> list[str]:
+        futures = list(given)
+        wait(futures, return_when=FIRST_EXCEPTION)
+        if failure:
+            raise failure[0]
+        return [f.result() for f in futures]
+
+    finals: list[tuple[Future[str], int]] = []
+    pending: deque[tuple[int, list[Future[str]], str, int]] = deque()
+
+    def index_ready(block: bool) -> None:
+        while pending and (block or all(f.done() for f in pending[0][1])):
+            number, parts, whole, size = pending.popleft()
+            index = PartIndexV1(sha256=whole, size=size, parts=settle(parts)).encode()
+            finals[number] = (submit(index), len(index))
+
     try:
-        while buf:
-            if count >= MAX_PARTS:
-                raise StoreError("object exceeds MAX_PARTS * PART_BYTES")
-            if nxt and len(buf) != PART_BYTES:
-                raise StoreError("short read before end of object")
-            whole.update(buf)
-            size += len(buf)
-            count += 1
-            if pool is None:
-                parts.append(_put(put, buf))
-            else:
-                if len(inflight) >= 2 * workers:
-                    parts.append(inflight.popleft().result())
-                inflight.append(pool.submit(_put, put, buf))
-            buf, nxt = nxt, (chunks() if nxt else b"")
-        while inflight:
-            parts.append(inflight.popleft().result())
+        for chunks in sources:
+            buf, nxt = chunks(), chunks()
+            if not nxt:
+                if buf.startswith(INDEX_MAGIC):
+                    raise StoreError("plain object must not begin with the part-index magic")
+                finals.append((submit(buf), len(buf)))
+                continue
+            finals.append((Future(), 0))  # the index, once its parts are stored
+            whole, size, parts = hashlib.sha256(), 0, list[Future[str]]()
+            while buf:
+                if len(parts) >= MAX_PARTS:
+                    raise StoreError("object exceeds MAX_PARTS * PART_BYTES")
+                if nxt and len(buf) != PART_BYTES:
+                    raise StoreError("short read before end of object")
+                whole.update(buf)
+                size += len(buf)
+                parts.append(submit(buf))
+                index_ready(block=False)
+                buf, nxt = nxt, (chunks() if nxt else b"")
+            pending.append((len(finals) - 1, parts, whole.hexdigest(), size))
+        index_ready(block=True)
+        keys = settle(f for f, _ in finals)
+        return [(key, length) for key, (_, length) in zip(keys, finals, strict=True)]
     finally:  # error/cancel: drop queued PUTs, wait for running ones, never publish the index
         if pool is not None:
             pool.shutdown(wait=True, cancel_futures=True)
-    index = PartIndexV1(sha256=whole.hexdigest(), size=size, parts=parts)
-    return _put(put, index.encode())  # last: readers never see an index before its parts
+
+
+def _publish(chunks: Callable[[], bytes], put: Put, workers: int = 1) -> str:
+    return _publish_all([chunks], put, workers)[0][0]
+
+
+def put_files(paths: Sequence[Path], put: Put, workers: int = 1) -> list[tuple[str, int]]:
+    """put_file of every path through one publication (see _publish_all); per path, the key of
+    its plain object or part index and that object's length (<= MAX_MANIFEST_BYTES)."""
+
+    def sources() -> Generator[Callable[[], bytes]]:
+        for path in paths:  # one file open at a time: a source is read to its end before the next
+            with Path(path).open("rb") as f:
+                yield partial(f.read, PART_BYTES)
+
+    with closing(sources()) as each:  # an error closes the file being read
+        return _publish_all(each, put, workers)
 
 
 def put_file(path: Path, put: Put, workers: int = 1) -> str:
     """Store `path`; returns the key of the plain object (<= PART_BYTES) or of its part index.
     The final put() call's bytes are the referenced object (len <= MAX_MANIFEST_BYTES)."""
-    with Path(path).open("rb") as f:
-        return _publish(lambda: f.read(PART_BYTES), put, workers)
+    return put_files([path], put, workers)[0][0]
 
 
 def put_large(data: bytes, put: Put) -> str:

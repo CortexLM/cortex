@@ -21,6 +21,7 @@ import threading
 import time
 import tomllib
 from collections.abc import Callable, Mapping
+from concurrent.futures import Future
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -66,7 +67,7 @@ OWNER_REQUEST_ROUNDS = 20  # a signed owner request lives about a minute at 3 s 
 RESUME_POLLS = 60
 RESUME_POLL_SECONDS = 10.0
 FETCH_WORKERS = 16  # concurrent 1 MiB part GETs per job input (bounded window, ordered sink)
-UPLOAD_WORKERS = 16  # concurrent 1 MiB part PUTs per artifact (bounded window, index last)
+UPLOAD_WORKERS = 16  # concurrent 1 MiB part PUTs per publication (bounded window, index last)
 ROUND_TTL = 15  # seconds a read of the master's round signs upload requests (5 rounds)
 
 
@@ -111,20 +112,45 @@ def _retrying[T](
     raise AssertionError("unreachable")
 
 
-def _upload_ref(path: Path, put: Callable[[bytes], str]) -> ArtifactRef:
-    """artifact_ref(path, put) with UPLOAD_WORKERS concurrent part PUTs (index still last)."""
-    from hypertrain.data.store import put_file
+class _Once:
+    """put() each distinct object once per publication (a part two files share is POSTed once).
+
+    Content addressed, so a digest the master acknowledged holds those bytes. A caller that asks
+    for a digest in flight waits for that POST and gets its key or its error."""
+
+    def __init__(self, put: Callable[[bytes], str]) -> None:
+        self.send, self.lock, self.futures = put, threading.Lock(), dict[str, Future[str]]()
+
+    def put(self, data: bytes) -> str:
+        digest = sha256_hex(data)
+        with self.lock:
+            future, mine = self.futures.get(digest), False
+            if future is None:
+                future = self.futures[digest] = Future()
+                mine = True
+        if mine:
+            try:
+                future.set_result(self.send(data))
+            except Exception as error:
+                future.set_exception(error)
+        return future.result()
+
+
+def _upload_refs(paths: list[Path], put: Callable[[bytes], str]) -> list[ArtifactRef]:
+    """artifact_ref(path, put) of every path in one publication: UPLOAD_WORKERS concurrent part
+    PUTs across the files, each index after its own parts, the first failure raised."""
+    from hypertrain.data.store import put_files
     from hypertrain.protocol.messages_v2 import ArtifactRef
 
-    last = b""
+    return [
+        ArtifactRef(sha256=sha, size=size)
+        for sha, size in put_files(paths, _Once(put).put, UPLOAD_WORKERS)
+    ]
 
-    def record(data: bytes) -> str:
-        nonlocal last
-        last = data  # the index (or plain object) is put after every part has completed
-        return put(data)
 
-    sha = put_file(path, record, UPLOAD_WORKERS)
-    return ArtifactRef(sha256=sha, size=len(last))
+def _upload_ref(path: Path, put: Callable[[bytes], str]) -> ArtifactRef:
+    """artifact_ref(path, put) with UPLOAD_WORKERS concurrent part PUTs (index still last)."""
+    return _upload_refs([path], put)[0]
 
 
 class MinerError(RuntimeError):
@@ -805,6 +831,7 @@ class NetworkMiner:
     """Explicit ht/2 client; shared API, keyfile, launcher, admission and watch primitives."""
 
     _round_seen: tuple[int, float] | None = None  # (master round, monotonic time it was read)
+    _round_lock = threading.Lock()  # the UPLOAD_WORKERS threads of a publication read it once
 
     def __init__(self, cfg: MinerConfig, client: httpx.Client) -> None:
         from hypertrain.protocol import envelope_v2
@@ -948,16 +975,11 @@ class NetworkMiner:
         }
         put = self._bounded_put(job.deadline, cancel)
         # Eager: admission.proof verifies every proof ref against stored bytes (one-time join).
-        for ref, filename in zip(
-            proof.artifact_refs,
-            ("state.safetensors", "ef.safetensors", "delta.bin", "leaves.json"),
-            strict=True,
-        ):
-            if time.time() >= job.deadline or cancel is not None and cancel.is_set():
-                raise MinerError("probe deadline/cancellation")
-            path = job_path.parent / "published" / "rank-0" / filename
-            if _upload_ref(path, put) != ref:
-                raise MinerError("published artifact differs from screened ref")
+        # One publication: the four files share the upload window, the put stops at the deadline.
+        published = job_path.parent / "published" / "rank-0"
+        names = ("state.safetensors", "ef.safetensors", "delta.bin", "leaves.json")
+        if _upload_refs([published / name for name in names], put) != proof.artifact_refs:
+            raise MinerError("published artifact differs from screened ref")
         if time.time() >= job.deadline or cancel is not None and cancel.is_set():
             raise MinerError("probe deadline/cancellation")
         return result
@@ -1152,11 +1174,12 @@ class NetworkMiner:
 
     def _round(self) -> int:
         """The master's current round, re-read at most every ROUND_TTL seconds."""
-        seen = self._round_seen
-        if seen is None or time.monotonic() - seen[1] > ROUND_TTL:
-            seen = (int(self.api.call("GET", self.url)["now_round"]), time.monotonic())
-            self._round_seen = seen
-        return seen[0]
+        with self._round_lock:
+            seen = self._round_seen
+            if seen is None or time.monotonic() - seen[1] > ROUND_TTL:
+                seen = (int(self.api.call("GET", self.url)["now_round"]), time.monotonic())
+                self._round_seen = seen
+            return seen[0]
 
     def _put_object(self, data: bytes) -> str:
         """One signed v2 object upload (plain object, part or part index; each <= 1 MiB).
