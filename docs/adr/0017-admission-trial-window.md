@@ -225,7 +225,7 @@ seconds]:
 | Row | Parameters | T_miner + T_ref | Window (`challenge_rounds_for`) | 36-trial screen span (36 x (rounds + 1)) |
 | --- | --- | --- | --- | --- |
 | `dense-0.03b`, the run profile (ADR 0016) | 31.5 M | ~194 s est. warm [H, ADR 0016]; 198 s warm, 217 s cold with T_ref scaled from 347 s [H] | **100**: today's window, no merge needed | 3,636 |
-| `dense-0.05b` (ADR 0016, built, not run) | 44 M | ~260 s est. warm [H, ADR 0016]; 265 s warm, 292 s cold scaled from 347 s [H] | **100** at 260 s; 102 warm and 113 cold when scaled | 3,636 to 4,104 |
+| `dense-0.05b` (ADR 0016, built, not run) | 44 M | ~260 s est. warm [H, ADR 0016]; 265 s warm, 293 s cold scaled from 347 s, rounded up to whole seconds [H] | **100** at 260 s; 102 warm and 113 cold when scaled | 3,636 to 4,104 |
 | `dense-0.1b` (ADR 0015) | 101 M | 566 s warm (347 + 219), 629 s cold (347 + 282) [A] | **217** warm (651 s); 242 cold | **7,848** warm; 8,748 cold |
 | `dense-1b` | 889 M | about 4,765 s by the same linear scaling [H] | out of reach: 1,827 rounds, above the 400 ceiling. It cannot complete a trial at any window either (a 10.67 GB state, ADR 0013) | - |
 
