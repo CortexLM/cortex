@@ -1,6 +1,14 @@
-# Replay of the intermediate model (`dense-0.1b`) on the s100 TEST stack
+# Replay of the dense TEST models (`dense-0.03b`, D94; `dense-0.1b`) on the s100 TEST stack
 
-100,676,352 parameters, `decoder`, H = J = 4, one GPU. Decision, budget and prerequisites a-f:
+**D94 (2026-10-29): the run uses `HT_D20_GEOMETRY=dense-0.03b`**, 31,462,656 parameters, the row
+`mfu-dense-0.03b` ([ADR 0016](../adr/0016-d94-dense-test-model.md)): at 100,676,352 parameters the miner side
+of a trial took 217-282 s of the 297 s window and the first full reference 338 s [A, S17b], so no admission
+trial passes at 101 M. `dense-0.05b` (44,045,568) is built and tested but over 250 s by ADR 0016's rule; use
+it only once that rule holds. The geometry changes the model only: every step below (two builds, warm-up,
+measured replay, stop above 298 s, dry-run comparison) is the same for the three geometries. Sizes and times
+below are the 101 M ones unless `dense-0.03b` is named; section 6 gives the scaled ones (about 0.31 of each).
+
+100,676,352 parameters (`dense-0.1b`), `decoder`, H = J = 4, one GPU. Decision, budget and prerequisites a-f:
 [ADR 0015](../adr/0015-intermediate-dense-test-model.md). Base procedure: [the TEST stack](../s100-test-stack.md)
 section 6 and its Rollback section, and the S15 operator tools (`lib.sh`, `mkenv.sh`, `mk_exec_config.sh`,
 `bgpu.sh`, `watchdog.sh`, `mk_origins.py`, `stage_seeds.sh`, `mk_miner_seeds.sh`; not in the repository, they sit in
@@ -59,7 +67,7 @@ a trial or round is open; one driver, never two; never `pkill -f` in an ssh comm
    `warmup`):
 
 ```bash
-UV_OFFLINE=1 HT_D20_GEOMETRY=dense-0.1b HT_D20_COLDKEYS=6 HT_D20_RELAY_PUBKEY=<relay k1 ss58> \
+UV_OFFLINE=1 HT_D20_GEOMETRY=dense-0.03b HT_D20_COLDKEYS=6 HT_D20_RELAY_PUBKEY=<relay k1 ss58> \
   HT_D20_REPLAY_SECONDS=300 \
   hypertrain/scripts/b300/d20/build_test_manifest.sh <GPU image digest> 595.91.07 148 $WARM
 ```
@@ -76,8 +84,10 @@ that only the audit policy differs (`warmup_same_training`, `warmup_differs_only
 the warm-up's run id (`warmup_run_id`) [V]. The builder refuses an `OUT_DIR` whose `inputs`, `out` or `state`
 already exists [V].
 
-About 11 s [V] (20 s on a host at load 338 [V]). Each build prints `"param_count": 100676352` and
-`"init_state_hash": "be9b7bd6…28f8"`; anything else means the row or the init changed. It also prints an `audit`
+About 5 s for `dense-0.03b` [V] (11 s for `dense-0.1b` [V], 20 s on a host at load 338 [V]). Each build prints
+`"param_count": 31462656` and `"init_state_hash": "e372a68e…0aa6"` for `dense-0.03b` (44045568 and
+`9cbe3ee9…f897` for `dense-0.05b`, 100676352 and `be9b7bd6…28f8` for `dense-0.1b`); anything else means the row
+or the init changed. It also prints an `audit`
 block (`lease_rounds` 100, then `reaudit_rounds` / `gap_needed` / `gap_cap`: 200 / 305 / 305 at 300 s, 116 / 199 /
 200 at 174 s, 100 / 175 / 200 at 144 s; `replay_seconds`, `warmup_replay_seconds` 300 and `stop_above_seconds`
 298, the STOP of section 4 step 4), a `pin` block (`cpu` avx2, `gpu` sm_103 for 148 SM, `attention` math)
@@ -313,17 +323,21 @@ replay near `T_cold` means the cache did not carry.
   Finalize is sealed [V by reading]. Wait 60 s for vesting; `weights_once.py` once. Expected: 200, five hotkeys
   equal (4 x 250000 if one miner was excluded).
 
-## 6. Expected timings (101 M, [H] unless marked; replace with the section 2 and 4 measurements)
+## 6. Expected timings ([H] unless marked; replace with the section 2 and 4 measurements)
 
-| Step | Estimate | Tiny, measured |
-| --- | --- | --- |
-| build of the manifest | 11 s [V] | 8 s [V] |
-| cold first reference / warm reference | 123-235 s ssh-bound, plus about 44 s cold | 57 s / 13 s [V] |
-| trial (miner + reference) | 233-389 s | 145 s [V] |
-| `run-v2` per miner | about 90 s | 24 s [V] |
-| audit | 144-256 s each | 14 s [V] |
-| aggregate (two passes) + finalize, five miners | 327-423 s + 177-223 s [A, measured at this profile, `hypertrain/CHANGELOG.md`], no longer under the store lock | seconds |
-| result / inputs / delta | 4.13 GB / 805 MB / 102 MB [V sizes] | kilobytes |
+The `dense-0.03b` column is the 101 M measurement scaled by 0.3125, the ratio of the parameter counts (ADR 0016
+"Sizing").
+
+| Step | `dense-0.03b` (run profile) | 101 M | Tiny, measured |
+| --- | --- | --- | --- |
+| build of the manifest | 5 s [V] | 11 s [V] | 8 s [V] |
+| warm reference | about 106 s | 338 s [A, S17b, first full one] | 13 s [V] |
+| miner side of a trial (warm / cold) | about 88 s / 109 s | 217 s / 282 s [A, S17b] | |
+| trial (miner + reference, D94 limit 250 s) | about 194 s warm, 214 s cold | 555-620 s, over the 297 s window | 145 s [V] |
+| `run-v2` per miner | about 30 s | about 90 s | 24 s [V] |
+| audit | about 106 s each, if near the reference | 144-256 s each | 14 s [V] |
+| aggregate (two passes) + finalize, five miners | about a third of 101 M | 327-423 s + 177-223 s [A, measured at this profile, `hypertrain/CHANGELOG.md`], no longer under the store lock | seconds |
+| result / inputs / delta | 1.29 GB / 252 MB / 32 MB | 4.13 GB / 805 MB / 102 MB [V sizes] | kilobytes |
 
 ## 7. STOP conditions
 
