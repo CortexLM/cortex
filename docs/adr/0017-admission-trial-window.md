@@ -274,4 +274,6 @@ Forge's "~215 rounds" for 565 s is 216.6 before rounding, so the helper returns 
   tested [H].
 - `probe-v2` reading the admission policy object over a real coordinator (s100, R2) has not run; the
   in-process service and the HTTP fixture serve it [V by test].
-- The CI of this branch has not run (the session cannot push).
+- GitHub CI ran on `04518b5c` only: `hypertrain-ci` `test (7)` failed on the publish secret scan of
+  the production-ledger test fixture, which the next commit allowlists. The tip after it has passed
+  the local CI mirror, not GitHub CI.
