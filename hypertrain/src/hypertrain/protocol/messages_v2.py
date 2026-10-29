@@ -570,10 +570,11 @@ class ArtifactLimits(WireModel):
 
 
 # The widest admission trial window `AdmissionPolicyV2.challenge_rounds` may set (ADR 0017): 400
-# rounds is 20 minutes at `BEACON_PERIOD_SECONDS`, 3.5 times the 101 M trial (~297 s with its
-# reference, `challenge_rounds_for` 114). A trial holds one of the `max_pending` places and its
-# signed challenge expires at its deadline, so a wider bound would let a stalled application hold
-# its place, and a captured challenge stay valid, for longer than any trial the network runs needs.
+# rounds is 20 minutes at `BEACON_PERIOD_SECONDS`, 1.8 times the measured warm 101 M trial (566 s
+# with its reference, `challenge_rounds_for` 217). A trial holds one of the `max_pending` places
+# and its signed challenge expires at its deadline, so a wider bound would let a stalled
+# application hold its place, and a captured challenge stay valid, for longer than any trial the
+# network runs needs.
 CHALLENGE_ROUNDS_MAX = 400
 
 
@@ -592,7 +593,8 @@ class JoinChallenge(WireModel):
     @model_validator(mode="after")
     def _deadline(self) -> JoinChallenge:
         # The window is the admission policy's (`challenge_rounds`), which a miner reads only after
-        # it parsed the challenge: the bound here is the one any policy may set.
+        # it parsed the challenge: the bound here is the one any policy may set, and
+        # `validate_policy` ties it to the run's own.
         if not 100 <= self.deadline_beacon - self.seed_beacon <= CHALLENGE_ROUNDS_MAX:
             raise ValueError(f"join deadline must be seed+100..seed+{CHALLENGE_ROUNDS_MAX}")
         return self

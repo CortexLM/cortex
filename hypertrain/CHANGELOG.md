@@ -356,6 +356,14 @@
   `4 * lease_rounds + reaudit_rounds`, and a production manifest that does is refused by the builder and by
   the master when the run is created (`AuditPolicyV2.validate_training(..., ledger_mode=)`). See
   `docs/adr/0011-audit-integrity.md` (Part 9, decision 12) at the monorepo root.
+- The admission trial window is a policy value (D94 lot C, prepared, not merged; the founder decides):
+  `AdmissionPolicyV2.challenge_rounds` takes 100..400 rounds and stays serialised at 100, so no existing
+  digest or run id moves. `challenge_rounds_for(T_miner + T_ref)` derives it (217 for the measured
+  566 s 101 M trial), and the D20 builder takes `HT_D20_CHALLENGE_ROUNDS`. A window above 100 is
+  TEST-ledger only: the builder, run creation and `Admission` refuse it on a production ledger
+  (`CHALLENGE_ROUNDS_TEST_ONLY`). `probe-v2` reads the run's admission policy by its signed digest
+  and refuses a trial challenge that names another policy or another window (`trial challenge
+  refused`, exit 2). See `docs/adr/0017-admission-trial-window.md` at the monorepo root.
 
 ### Fixed
 - A roster member kept out of a round by its own contest is sanctioned once, not twice (IMP-4, D86,

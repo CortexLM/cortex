@@ -319,9 +319,13 @@ The renewal window does not grow with `work_screen_epoch_rounds`. A trial finali
 sets the next seed one round later, and the next trial must fit in the `challenge_rounds`
 rounds after that seed: 100 by default, about 5 min at 3 s rounds. A TEST manifest may sign
 up to `CHALLENGE_ROUNDS_MAX` (400, about 20 min); a production manifest above 100 is refused
-(`manifest_v2 build` exits 2, `POST /v2/admin/runs` answers 422), and a value outside 100..400
-fails the policy schema (ADR 0017). The challenge deadline is seed + `challenge_rounds`
-whenever the challenge is requested, and the proof must be accepted by then. A challenge left unproven past its deadline is closed
+(`manifest_v2 build` exits 2, `POST /v2/admin/runs` answers 422, the admission service refuses
+to start with `CHALLENGE_ROUNDS_TEST_ONLY`), and a value outside 100..400 fails the policy
+schema (ADR 0017). The challenge deadline is seed + `challenge_rounds`
+whenever the challenge is requested, and the proof must be accepted by then. `probe-v2` reads
+the run's admission policy by the digest the manifest signs and refuses, before fetching any
+input, a signed challenge that names another policy or lasts another window (`trial challenge
+refused`, exit 2). A challenge left unproven past its deadline is closed
 `EXPIRED` by the master at the next beacon push (or at the next challenge request, which
 frees the place first). Nobody is suspended: the miner keeps its state, its clean trials and
 its screen, and a later request answers 409 `CHALLENGE_EXPIRED` until the operator reseeds
