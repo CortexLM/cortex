@@ -15,7 +15,7 @@ import pytest
 from hypertrain.miner import cli
 from hypertrain.protocol import envelope_v2
 from hypertrain.protocol.envelope_v2 import seal
-from hypertrain.protocol.messages_v2 import WorkScreenV2
+from hypertrain.protocol.messages_v2 import AdmissionPolicyV2, JoinChallenge, WorkScreenV2
 
 _spec = importlib.util.spec_from_file_location(
     "probe_trial_service_fixture",
@@ -98,9 +98,11 @@ def miner(network, tmp_path, monkeypatch):
             if missed.get(path, 0) < fault.get("miss", 0):
                 missed[path] = missed.get(path, 0) + 1
                 return httpx.Response(404, json={"detail": "object not found"})
-            if name == "corrupt":
+            # The faults reach the trial inputs, not the admission policy read before them.
+            is_policy = path.endswith("/" + n.manifest.network.admission_policy_hash)
+            if name == "corrupt" and not is_policy:
                 return httpx.Response(200, content=b"corrupt object")
-            if name == "gzip":
+            if name == "gzip" and not is_policy:
                 encoded = gzip.compress(response.content)
                 return httpx.Response(200, content=encoded, headers={"Content-Encoding": "gzip"})
         return httpx.Response(response.status_code, content=response.content)
@@ -177,8 +179,8 @@ def test_probe_v2_proves_a_trial_150_rounds_after_its_seed_under_a_200_round_win
 @pytest.mark.parametrize(
     "name,error",
     [
-        ("corrupt", "sha256 mismatch"),
-        ("gzip", "non-identity content encoding"),
+        ("corrupt", "trial input start_state sha256 mismatch"),
+        ("gzip", "trial input object has a non-identity content encoding"),
         ("nonce", "binding differs"),
         ("challenge", "signed challenge differs"),
         ("signature", "signed challenge differs"),
@@ -209,6 +211,51 @@ def test_probe_v2_refuses_another_admissions_genuine_trial(miner, caplog):
     }
     assert cli.main(["probe-v2", "--config", str(config)]) == 2
     assert "binding differs" in caplog.text
+    assert not any(r.method == "PUT" for r in requests)
+    assert list(folder.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "case,error",
+    [
+        ("window", "trial challenge refused: join challenge window differs from the policy's 100"),
+        ("policy", "trial challenge refused: join challenge names another admission policy"),
+        ("swapped", "admission policy sha256 mismatch"),
+    ],
+    ids=["window", "policy", "swapped"],
+)
+def test_probe_v2_refuses_a_signed_trial_that_is_not_its_policys(miner, caplog, case, error):
+    # Given: the coordinator's own signature over a trial that the run's 100-round policy did not
+    # issue: a window stretched to 300 rounds, another policy named, or both together with that
+    # 300-round policy served in place of the run's; the schema takes all three
+    n, identity, config, folder, requests, fault = miner
+    asked = n.challenge(identity)
+    assert asked.status_code == 200, asked.text
+    job = signed_job(n, HOT, identity)
+    assert job.status_code == 200, job.text
+    body = dict(asked.json()["body"])
+    digest = n.manifest.network.admission_policy_hash
+    run_policy = n.client.get(n.url + "/objects/" + digest)
+    assert run_policy.status_code == 200, run_policy.text
+    wide = AdmissionPolicyV2.model_validate({**run_policy.json(), "challenge_rounds": 300})
+    edit = {
+        "window": {"deadline_beacon": body["seed_beacon"] + 300},
+        "policy": {"policy_hash": "cd" * 32},
+        "swapped": {"deadline_beacon": body["seed_beacon"] + 300, "policy_hash": wide.digest()},
+    }[case]
+    challenge = JoinChallenge.model_validate({**body, **edit})
+    envelope = seal(
+        service.COORD, "JoinChallenge", n.manifest.run_id(), challenge, challenge.deadline_beacon
+    )
+    fault["serve"] = {
+        f"/join/{identity}/challenge": envelope,
+        f"/join/{identity}/job": {**job.json(), "challenge": challenge.body()},
+    }
+    if case == "swapped":
+        fault["serve"]["/objects/" + digest] = wide.body()
+    # When / Then: refused before any input is fetched, probed or uploaded
+    assert cli.main(["probe-v2", "--config", str(config)]) == 2
+    assert error in caplog.text
     assert not any(r.method == "PUT" for r in requests)
     assert list(folder.iterdir()) == []
 

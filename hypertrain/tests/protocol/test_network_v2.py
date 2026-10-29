@@ -237,6 +237,25 @@ def test_a_join_challenge_carries_any_window_the_policy_may_sign() -> None:
             join_challenge(50, 50 + rounds)
 
 
+def test_a_join_challenge_must_last_exactly_its_own_policys_window() -> None:
+    # The schema bound is any policy's; the policy a run signs fixes the one window it serves.
+    wide = example_admission_policy(challenge_rounds=200)
+    for policy in (example_admission_policy(), wide):
+        challenge = join_challenge(50, 50 + policy.challenge_rounds).model_copy(
+            update={"policy_hash": policy.digest()}
+        )
+        challenge.validate_policy(policy)
+        for rounds in (100, 200, CHALLENGE_ROUNDS_MAX):
+            if rounds != policy.challenge_rounds:
+                stretched = challenge.model_copy(update={"deadline_beacon": 50 + rounds})
+                with pytest.raises(ValueError, match="window differs from the policy's"):
+                    stretched.validate_policy(policy)
+    with pytest.raises(ValueError, match="names another admission policy"):
+        join_challenge(50, 150).model_copy(update={"policy_hash": wide.digest()}).validate_policy(
+            example_admission_policy()
+        )
+
+
 def commit(tokens: int = 7680) -> CommitV2:
     return CommitV2(
         w=3,

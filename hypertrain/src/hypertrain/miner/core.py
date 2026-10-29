@@ -31,7 +31,7 @@ import httpx
 if TYPE_CHECKING:
     from hypertrain.gpu_ops.work_screen import IslandLaunch
     from hypertrain.miner.island_launch import IslandArtifacts
-    from hypertrain.protocol.messages_v2 import ArtifactRef, IslandJobV1
+    from hypertrain.protocol.messages_v2 import AdmissionPolicyV2, ArtifactRef, IslandJobV1
 
 import hypertrain.trainer  # noqa: F401  (determinism setup before torch)
 from hypertrain.auditor.bisect import Executor
@@ -1016,6 +1016,11 @@ class NetworkMiner:
             or not envelope_v2.verify_envelope(envelope)
         ):
             raise MinerError("signed challenge differs from the trial job")
+        policy = self._admission_policy()
+        try:
+            challenge.validate_policy(policy)
+        except ValueError as error:
+            raise MinerError(f"trial challenge refused: {error}") from None
         destinations = {root / "job.json", root / "challenge.json"}
         paths: dict[str, Path] = {}
         for name, relative in job.object_paths.items():
@@ -1036,6 +1041,22 @@ class NetworkMiner:
         (root / "job.json").write_bytes(canonicalize(job.body()))
         (root / "challenge.json").write_bytes(canonicalize(envelope))
         return root / "job.json", root / "challenge.json"
+
+    def _admission_policy(self) -> AdmissionPolicyV2:
+        """The run's admission policy, read by the digest its manifest signs. A miss fails as a
+        trial input does, so the s100 driver retries it the same way."""
+        from hypertrain.protocol.messages_v2 import AdmissionPolicyV2
+
+        digest = self.manifest.network.admission_policy_hash
+        try:
+            raw = self._get_object(digest)
+        except httpx.HTTPStatusError as error:
+            raise ChallengeHTTPError(
+                error.response.status_code, "trial input object unavailable"
+            ) from None
+        if sha256_hex(raw) != digest:
+            raise MinerError("admission policy sha256 mismatch")
+        return AdmissionPolicyV2.model_validate_json(raw)
 
     def _owner_request(self, message: str, record: Mapping[str, Any], now: int) -> dict[str, Any]:
         """A body signed by this hotkey, the only credential of the owner routes (ADR 0010)."""

@@ -597,6 +597,16 @@ class JoinChallenge(WireModel):
             raise ValueError(f"join deadline must be seed+100..seed+{CHALLENGE_ROUNDS_MAX}")
         return self
 
+    def validate_policy(self, policy: AdmissionPolicyV2) -> None:
+        """The service builds every challenge as seed + its policy's `challenge_rounds`: a
+        challenge read from the network must name that policy and last exactly that window."""
+        if self.policy_hash != policy.digest():
+            raise ValueError("join challenge names another admission policy")
+        if self.deadline_beacon - self.seed_beacon != policy.challenge_rounds:
+            raise ValueError(
+                f"join challenge window differs from the policy's {policy.challenge_rounds} rounds"
+            )
+
 
 class ChallengeRequest(WireModel):
     """The owner of an admission asks for its trial: signed by the admission's hotkey, in the
