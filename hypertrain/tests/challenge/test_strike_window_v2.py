@@ -35,10 +35,12 @@ def pinned_screen_epoch(builder: str, pattern: str, group: int = 1) -> int:
     return int(found.group(group))
 
 
-# The TEST builder pins 20000 for its dense-0.1b geometry (ADR 0015) and 6000 for the others.
+# The TEST builder pins 20000 for its measured dense geometries (dense-0.1b of ADR 0015, dense-0.05b
+# and dense-0.03b of ADR 0016) and 6000 for the others; the 101 M trial is the longest, so it
+# bounds all three.
 TEST_SCREENS = (
     "scripts/b300/d20/build_test_manifest.sh",
-    r'screen_rounds = (\d+) if geometry == "dense-0.1b" else (\d+)\n',
+    r"screen_rounds = (\d+) if geometry in MEASURED else (\d+)\n",
 )
 # policy name -> (screen length pinned by its builder, rounds of one ladder)
 POLICIES = {
