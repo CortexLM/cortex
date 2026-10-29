@@ -198,6 +198,10 @@ class Admission:
     ) -> None:
         if digest(policy) != escrow.manifest.network.admission_policy_hash:
             raise AdmissionError("ADMISSION_POLICY_HASH")
+        try:
+            policy.validate_ledger(escrow.policy.ledger_mode)
+        except ValueError:
+            raise AdmissionError("CHALLENGE_ROUNDS_TEST_ONLY") from None
         if coordinator.ss58 != escrow.manifest.training.coord_pubkey:
             raise AdmissionError("COORDINATOR_AUTHORITY")
         if backend == "cpu" and escrow.policy.ledger_mode != "test":

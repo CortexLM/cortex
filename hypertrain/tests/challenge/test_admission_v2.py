@@ -487,15 +487,40 @@ def capped_setup(cap: int) -> Setup:
     return replace(base, manifest=RunManifestV2.model_validate(body), admission_policy=policy)
 
 
-def windowed_setup(rounds: int) -> Setup:
+def windowed_setup(rounds: int, mode: str = "test") -> Setup:
     """The test setup whose admission policy gives a trial `rounds` beacon rounds (ADR 0017)."""
-    base = setup()
+    base = setup(mode)
     policy = AdmissionPolicyV2.model_validate(
         {**base.admission_policy.body(), "challenge_rounds": rounds}
     )
     body = base.manifest.body()
     body["network"]["admission_policy_hash"] = digest(policy)
     return replace(base, manifest=RunManifestV2.model_validate(body), admission_policy=policy)
+
+
+def test_admission_refuses_a_production_ledger_with_a_window_above_100_rounds(
+    tmp_path: Path,
+) -> None:
+    # Given: a production ledger, its run bound to a 200-round admission policy, which neither
+    # the builder nor run creation lets through: the service is handed it directly
+    def build(rounds: int) -> Admission:
+        s = windowed_setup(rounds, "production")
+        return Admission(
+            ledger(s, tmp_path / f"ledger-{rounds}.db"),
+            s.admission_policy,
+            COORD,
+            beacon=FixtureBeacon(current=100000).get,
+            stage_reference=lambda c, samples, epoch: pytest.fail("no reference is staged"),
+            objects=LocalFSStore(tmp_path / "objects"),
+            ip_secret=b"private-prefix-key",
+            qualified=lambda _: True,
+            conservative_bound=lambda: True,
+        )
+
+    # When / Then: the service refuses it before it serves anything, and takes the 100 twin
+    with pytest.raises(AdmissionError, match="^CHALLENGE_ROUNDS_TEST_ONLY$"):
+        build(200)
+    assert build(100).policy.challenge_rounds == 100
 
 
 def test_a_200_round_policy_serves_reaps_and_expires_on_its_own_window(tmp_path: Path) -> None:
