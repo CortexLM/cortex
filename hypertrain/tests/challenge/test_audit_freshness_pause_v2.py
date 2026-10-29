@@ -24,7 +24,9 @@ from hypertrain.challenge.store import ChallengeStore
 from . import test_service_network_v2 as fixtures
 from .audit_lease_fixture_v2 import (
     AUDITOR_A,
+    AUDITOR_B,
     lease,
+    lease_rounds,
     miners,
     network,  # noqa: F401  (pytest fixture import)
     schedule,
@@ -48,9 +50,9 @@ def wall_at(network, number):
     network.store.clock = lambda: network.manifest.training.beacon.genesis_time + (number - 1) * 3
 
 
-def leased_job(network, monkeypatch, *, lag):
-    """Lease the seeded job to A; its replay ends with the wall clock `lag` rounds past the
-    master's newest verified beacon, as the S17d pusher left it."""
+def queued_job(network, monkeypatch, *, lag):
+    """Schedule the seeded job, not leased; its replay ends with the wall clock `lag` rounds past
+    the master's newest verified beacon, as the S17d pusher left it."""
     from hypertrain.auditor import worker
 
     store = network.store
@@ -69,6 +71,11 @@ def leased_job(network, monkeypatch, *, lag):
 
     monkeypatch.setattr(worker, "execute_island_audit", replay)
     schedule(network)
+
+
+def leased_job(network, monkeypatch, *, lag):
+    """Lease the job of `queued_job` to A on a fresh view."""
+    queued_job(network, monkeypatch, lag=lag)
     leased = lease(network, A, 1)
     assert leased.status_code == 200, leased.text
     return leased.json()["body"]
@@ -183,8 +190,6 @@ def test_a_lease_and_the_replay_inputs_still_need_a_fresh_view(one_identity, mon
         {"detail": "beacon infrastructure paused"},
     )
     assert records(network, "executed-verdict") == {}
-    from .audit_lease_fixture_v2 import AUDITOR_B
-
     asked = lease(network, AUDITOR_B, 2)
     assert (asked.status_code, asked.json()) == (503, {"detail": "beacon infrastructure paused"})
 
@@ -388,3 +393,129 @@ def test_the_same_signed_complete_settles_once_the_pusher_catches_up(one_identit
     network.push(now + 2)
     done = network.client.post(network.url + path, json=signed)
     assert (done.status_code, done.json()) == (200, {"result": "MATCH"}), done.text
+
+
+# --- S19 (hotfix 2): a lease, and the replay it starts, during the same pause ---------------------
+#
+# S19 round 2 (run f3901a09): both auditors settled MATCH at lag 5-10, came straight back to
+# /lease and were refused 503 for 200-273 s (63 and 80 refusals) while the pusher caught up; three
+# audits were lost. A lease or a replay start taken on a lagging view is judged at the round a
+# healthy view could hold (emitted - MAX_LAG_ROUNDS), so it is never longer than a lag-2 grant.
+
+
+def judged(network) -> int:
+    """The round a healthy view could hold now: emitted - MAX_LAG_ROUNDS."""
+    genesis = network.manifest.training.beacon.genesis_time
+    return (int(network.store.clock()) - genesis) // 3 + 1 - MAX_LAG_ROUNDS
+
+
+@pytest.mark.xfail(strict=True, reason="store.py:2441 refuses the lease: 503 paused")
+@pytest.mark.parametrize("lag", [LAG, MAX_LAG_ROUNDS + RESULT_PAUSE_ROUNDS])
+def test_a_lease_during_a_pause_is_granted_no_longer_than_a_healthy_view_grants(
+    one_identity, monkeypatch, lag
+):
+    network = one_identity
+    store = network.store
+    queued_job(network, monkeypatch, lag=0)
+    now = store._now(store._db)
+    wall_at(network, now + lag)
+    asked = lease(network, A, 1)
+    assert asked.status_code == 200, (asked.status_code, asked.text)
+    job = asked.json()["body"]
+    healthy = judged(network)
+    assert healthy == now + lag - MAX_LAG_ROUNDS > now
+    # The lag-2 grant: created at the judged round, expiry counted from it, never from `now`.
+    assert job["created_beacon"] == healthy
+    assert job["lease_expires"] == min(healthy + lease_rounds(network), job["absolute_deadline"])
+    row = store._db.execute(
+        "SELECT state,expires FROM audit_leases_v2 WHERE id=?", (job["job_id"],)
+    ).fetchone()
+    assert tuple(row) == ("running", job["lease_expires"])
+
+
+@pytest.mark.xfail(strict=True, reason="store.py:2441 refuses the replay start: 503 paused")
+def test_a_replay_started_during_a_pause_runs_and_settles(one_identity, monkeypatch):
+    network = one_identity
+    store = network.store
+    job = leased_job(network, monkeypatch, lag=LAG)
+    wall_at(network, store._now(store._db) + LAG)
+    answer = post_execute(network, job)
+    assert answer.status_code == 200, (answer.status_code, answer.text)
+    assert answer.json()["verdict"]["result"] == "MATCH"
+    marker = records(network, "audit-execution")[f"{job['job_id']}:{job['lease_nonce']}"]
+    assert marker == {"state": "EXECUTED", "at": judged(network)}
+
+
+def two_jobs(network, monkeypatch, *, lag):
+    """Two queued jobs of round 0 (the activated identity and a seeded member); each replay
+    leaves the wall clock `lag` rounds past the master's newest verified beacon."""
+    from hypertrain.auditor import worker
+
+    store = network.store
+    keys = miners(2)
+    admission = store._db.execute(
+        "SELECT admission_id FROM admissions_v2 WHERE hotkey=?", (keys[0].ss58,)
+    ).fetchone()[0]
+    seed_round(network, n=2, executable=True, gap=100, admission_ids={0: admission})
+    for key in keys:
+        genuine(network, key)
+    real = worker.execute_island_audit
+
+    def replay(*args, **kwargs):
+        answer = real(*args, **kwargs)
+        wall_at(network, store._now(store._db) + lag)
+        return answer
+
+    monkeypatch.setattr(worker, "execute_island_audit", replay)
+    schedule(network)
+
+
+@pytest.mark.xfail(strict=True, reason="store.py:2441 refuses the second lease: 503 paused")
+def test_the_s19_sequence_an_auditor_settles_and_leases_again_during_the_pause(
+    one_identity, monkeypatch
+):
+    # S19 19:31Z: A settles MATCH at lag 5-10 and asks /lease at once; the pusher is still behind.
+    network = one_identity
+    store = network.store
+    two_jobs(network, monkeypatch, lag=7)
+    first = lease(network, A, 1)
+    assert first.status_code == 200, first.text
+    job = first.json()["body"]
+    answer = post_execute(network, job)
+    assert answer.status_code == 200, answer.text
+    path = f"/worker/jobs/{job['job_id']}/complete"
+    verdict = answer.json()["verdict"]
+    done = network.client.post(network.url + path, json=network.signed(A, "ReplayVerdict", verdict))
+    assert (done.status_code, done.json()) == (200, {"result": "MATCH"}), done.text
+    assert judged(network) > store._now(store._db)  # still paused
+    again = lease(network, A, 2)
+    assert again.status_code == 200, (again.status_code, again.text)
+    second = again.json()["body"]
+    assert second["job_id"] != job["job_id"] and second["created_beacon"] == judged(network)
+
+
+@pytest.mark.xfail(strict=True, reason="store.py:2441 refuses B's lease: 503 paused")
+def test_another_auditor_leasing_during_a_long_pause_does_not_retire_a_signing_holder(
+    one_identity, monkeypatch
+):
+    # A's replay ends 22 rounds behind the wall; B leases during that pause before A signs. A's
+    # sign window is counted from the round its verdict was stored at, so B's lease must not
+    # expire A's lease (AUDITOR_SILENT, cooldown) when A signs the next second.
+    from hypertrain.challenge.audit_cooldown_v2 import SIGN_WINDOW_ROUNDS
+
+    network = one_identity
+    lag = MAX_LAG_ROUNDS + SIGN_WINDOW_ROUNDS
+    two_jobs(network, monkeypatch, lag=lag)
+    first = lease(network, A, 1)
+    assert first.status_code == 200, first.text
+    job = first.json()["body"]
+    answer = post_execute(network, job)
+    assert answer.status_code == 200, answer.text
+    other = lease(network, AUDITOR_B, 2)
+    assert other.status_code == 200, (other.status_code, other.text)
+    path = f"/worker/jobs/{job['job_id']}/complete"
+    verdict = answer.json()["verdict"]
+    done = network.client.post(network.url + path, json=network.signed(A, "ReplayVerdict", verdict))
+    assert (done.status_code, done.json()) == (200, {"result": "MATCH"}), done.text
+    assert records(network, "auditor-cooldown") == {}
+    assert records(network, "audit-attempt-failure") == {}
