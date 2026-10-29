@@ -148,11 +148,12 @@ MANIFEST_TOOL = "src/hypertrain/ops/manifest_v2.py"
 PRODUCTION_CAP = POLICY + "test_a_production_manifest_cannot_raise_the_gap_cap_above_the_default"
 BUILDER_CAP = (
     "tests/ops/test_manifest_v2.py::"
-    "test_the_builder_refuses_a_production_manifest_that_lifts_the_gap_cap[production-2]"
+    "test_the_builder_refuses_a_production_manifest_that_lifts_a_test_only_bound"
+    "[production-2-gap_cap]"
 )
 SERVICE_CAP = (
     "tests/ops/test_manifest_v2.py::"
-    "test_the_service_refuses_a_production_manifest_that_lifts_the_gap_cap"
+    "test_the_service_refuses_a_production_manifest_that_lifts_a_test_only_bound[gap_cap]"
 )
 FAIL_REAUDIT = (
     "            self._fail_reaudit_v2(run_id, row)  "
