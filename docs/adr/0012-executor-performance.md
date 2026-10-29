@@ -152,7 +152,8 @@ numbers: the line numbers of the Context are those of the Part A tree.
    that a repeated request does not stage the job again under the lock:
    - one: this call is a waiter. It takes one of the `REFERENCE_WAITERS` (2) places of a semaphore the root
      shares with its child stores (one `asyncio.to_thread` pool serves them all), waits at most
-     `REFERENCE_WAIT_SECONDS` (330 s; a trial window is 300 s) and returns the leader's commitment **or
+     `REFERENCE_WAIT_SECONDS` (330 s; a default trial window is 300 s, and past a wider ADR 0016 window
+     the waiter's 503 is retried) and returns the leader's commitment **or
      raises the leader's exception** (the same object, as `Future.result` does). Past the budget the call
      answers 503 at once and holds no worker; a waiter that gives up answers 503. `cpu_miners.py` retries a
      503 and stops on an unknown 409, which is why neither case is a 409. A waiter never relaunches: N
@@ -396,7 +397,7 @@ describe the ascending pusher of Part A, which the model keeps as `AscendingPush
   103 s at 2.6 s, 266 s at 2.8 s, and at 2.9 s the pusher never catches up (a test pins the 2.6 s and 2.9 s
   cases). 2.4 s is one S7 measurement; the idle lag with a child run present has not been measured [?]. The head-first
   column moves with it much less (see "Cost of a round" below). With the cache (T <= 19 s) the window of the ascending pusher is about a minute; **without it a 60 s
-  reference closes the gate for about four minutes (three in a child), close to the 100-round (300 s) trial
+  reference closes the gate for about four minutes (three in a child), close to the default 100-round (300 s) trial
   window.** The cache was therefore a precondition of the shipped profile, and the first (cold, 43-64 s)
   reference of a new image had to run alone, before any second driver started; with Part B and head first neither
   rule is needed for the gate any more (the replay must show it [?]).

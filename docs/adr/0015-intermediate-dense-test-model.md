@@ -193,7 +193,8 @@ Formulas ([H], `k = P / 100,676,352`, link `r`, `S` and the inputs `I = 8 P` in 
   which bounds the trial window): `T_ref = stage 10k + I/r + (13 + gpu + 14k) + S/r + 8.9 S[GiB] + 3`, where
   `gpu = H x layers x (mb/4) x 0.245 s` (math attention, 3.9 s here);
 - miner side of a trial: `T_miner = 10 + I/88 MB/s + 15 + gpu + 14k + 2 x 13k + 17.016 P/(29..114 MB/s)`;
-  `T_trial = T_miner + T_ref + 17k` against the fixed 297 s window (`challenge_rounds` 100);
+  `T_trial = T_miner + T_ref + 17k` against the fixed 297 s window (`challenge_rounds` 100; ADR 0016
+  prepares a wider TEST window, `challenge_rounds_for(T_trial)`, for the founder to decide);
 - audit: `T_audit = 12k + I/r + (13 + gpu + 14k + 8k) + S/r + 10.9 S[GiB] + 6k`; five audits in series on
   one executor host against at most 600 s (the first window of every audit ends at
   `absolute = min(d_final, d_audit + 2 x lease_rounds)`, 200 rounds at H <= 30, `challenge/store.py:8155`;

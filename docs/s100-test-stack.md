@@ -145,7 +145,8 @@ lock.) Two things can go wrong, and the cadence decides which:
   skipped for good, because the service reports only its highest round. The
   challenge reads exact rounds: after a trial is finalized in round `n` (and after a join or a
   resume), the identity's seed is round `n + 1`. A seed in a skipped round answers 500
-  `BeaconUnavailable: round N not pushed` until the window is over (100 rounds), then 409
+  `BeaconUnavailable: round N not pushed` until the window is over (`challenge_rounds`, 100 unless the
+  build sets `HT_D20_CHALLENGE_ROUNDS`), then 409
   `CHALLENGE_EXPIRED`; the identity stays in its state and gets no new seed until the operator's
   `reseed` (section 5). Pushing that one round
   before the window closes recovers it; a range does not (S13's backfill of 36 rounds held the lock
@@ -331,7 +332,7 @@ ATEN_CPU_CAPABILITY=avx2 $PY -I $T/cpu_miners.py admit DIR "1:12,2:12,3:12,0:4"
 That gives 3 ACTIVE and 1 PROBATION. Rules that decide how identities are spent:
 - **One non-ACTIVE identity per coldkey** (`COLDKEY_PROBATION_EXISTS`). A coldkey funds a second
   hotkey only after its first one is ACTIVE.
-- **The first challenge is due 100 rounds (5 min) after the join.** An identity that misses it
+- **The first challenge is due `challenge_rounds` rounds (100 by default, 5 min) after the join.** An identity that misses it
   can no longer progress (`admission.py` `challenge`). If it holds no stake, the next `join`
   suspends it as `APPLIED_EXPIRED` and its coldkey may apply again with a new hotkey (ADR 0010);
   a funded one stays APPLIED and blocks its coldkey. This is why `admit` joins a miner only
@@ -341,9 +342,9 @@ That gives 3 ACTIVE and 1 PROBATION. Rules that decide how identities are spent:
   object unavailable` that `probe-v2` reports once its own retries are spent (it retries an input
   GET that meets a 404, a 5xx or a transport error five times, 1 to 16 s apiece, each wait
   jittered, and appends one `kind: retry` line per retry to `journal.jsonl` in `work/<run
-  id>/<hotkey>/`). The driver makes up to 40 passes in all; in practice the trial's 100 rounds end
-  first and the answer becomes 409 `CHALLENGE_EXPIRED`. Any other error stops the plan. A trial that misses its 100
-  rounds strands the identity (409 `CHALLENGE_EXPIRED`) until the operator reseeds it: `probe-v2`
+  id>/<hotkey>/`). The driver makes up to 40 passes in all; in practice the trial's window ends
+  first and the answer becomes 409 `CHALLENGE_EXPIRED`. Any other error stops the plan. A trial that misses its
+  window strands the identity (409 `CHALLENGE_EXPIRED`) until the operator reseeds it: `probe-v2`
   asks again every 10 s for 10 minutes, then exits with status 3 and the route to call; run
   `$L reseed --admission-id <id>` (below) and start the driver again (ADR 0010 decision 2 point 5).
 
@@ -515,7 +516,10 @@ already ran on a B300: its publication is a few kilobytes, so a reference or aud
 whatever the link to X. The `dense-0.1b` geometry (100,676,352 parameters, `n_gpus=1`, the first dense
 model of this size on the TEST stack) is the second step. Its real build also needs
 `HT_D20_REPLAY_SECONDS`, the measured warm audit replay (no default; exit 2 without it), which a
-throw-away warm-up build at the 300 s ceiling measures first. ADR 0015 predicted (estimates, unmeasured) that it could not pass on the
+throw-away warm-up build at the 300 s ceiling measures first. `HT_D20_CHALLENGE_ROUNDS` (100..400,
+default 100, digits only, else exit 2) widens the admission trial window of a TEST build; the dry run
+prints and checks the signed `challenge_rounds` (ADR 0016). Unset, the build signs the bytes it signed
+before. ADR 0015 predicted (estimates, unmeasured) that it could not pass on the
 challenge code of `2cfc2a2b`. Its prerequisites a and b (the lock-free reference and aggregate) are
 merged since; with one executor host it is still not expected to pass, since the second executor host
 and the result path (ssh or R2) are open: see

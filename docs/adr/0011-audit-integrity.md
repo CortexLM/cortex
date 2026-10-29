@@ -1471,7 +1471,7 @@ so it has no `Wait` and no entry in `BOUNDS` (`test_every_wait_has_a_bound` is u
     `seize_bond(NO_SHOW)` adds one strike and burns the bond (unvested rewards spared, the coldkey stays
     bound by the one-non-ACTIVE-row rule). The first one puts the admission back on a fresh probation
     (`PROBATION`, reason `NO_SHOW`, new trials from `clean_count` 0, the open trial void): the way back is
-    the trials, and the operator's reseed (ADR 0010 decision 2 point 5) when the 100-round window the
+    the trials, and the operator's reseed (ADR 0010 decision 2 point 5) when the `challenge_rounds` window (100 unless a TEST policy widens it, ADR 0016) the
     sanction opens has lapsed before the miner is back. A second one for other evidence inside `NO_SHOW_STRIKE_WINDOW_SCREENS` (4) work
     screens of an earlier no-show of the same admission suspends it like an `AUDIT_MISMATCH`. The window is
     the one constant this decision adds (`admission.py`, not a policy field: a policy field changes every

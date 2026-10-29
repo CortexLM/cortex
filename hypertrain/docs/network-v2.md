@@ -317,9 +317,11 @@ until its last proof plus `work_screen_epoch_rounds`, for the rest of the run.
 
 The renewal window does not grow with `work_screen_epoch_rounds`. A trial finalization
 sets the next seed one round later, and the next trial must fit in the `challenge_rounds`
-rounds after that seed: always 100, which the policy schema fixes, about 5 min at 3 s
-rounds. The challenge deadline is seed + 100 whenever the challenge is requested, and the
-proof must be accepted by then. A challenge left unproven past its deadline is closed
+rounds after that seed: 100 by default, about 5 min at 3 s rounds. A TEST manifest may sign
+up to `CHALLENGE_ROUNDS_MAX` (400, about 20 min); a production manifest above 100 is refused
+(`manifest_v2 build` exits 2, `POST /v2/admin/runs` answers 422), and a value outside 100..400
+fails the policy schema (ADR 0016). The challenge deadline is seed + `challenge_rounds`
+whenever the challenge is requested, and the proof must be accepted by then. A challenge left unproven past its deadline is closed
 `EXPIRED` by the master at the next beacon push (or at the next challenge request, which
 frees the place first). Nobody is suspended: the miner keeps its state, its clean trials and
 its screen, and a later request answers 409 `CHALLENGE_EXPIRED` until the operator reseeds
@@ -348,7 +350,7 @@ state, clean trials, strikes and screen stay and no second identity exists. It a
 `RESEED_NOT_NEEDED` unless `now > seed_beacon + challenge_rounds`; one lapse buys one reseed, and each
 use leaves an audit row. The owner then asks for its challenge with its own signed
 `ChallengeRequest` as before; the round before the new seed answers 409 `SEED_NOT_READY`, and the
-new trial has a new nonce and a fresh 100-round window. This is the operator's step, not the miner's
+new trial has a new nonce and a fresh `challenge_rounds` window. This is the operator's step, not the miner's
 right: ADR 0010 decision 2 point 5.
 
 `manifest_v2 example` writes 6000 (about 5 h). In a serial 40-trial campaign
@@ -356,7 +358,9 @@ right: ADR 0010 decision 2 point 5.
 rounds when finalization and joins are prompt; joinbase-6 measured about 64. The first
 screen must then cover 36 more trials and round 0 up to its `d_final`: 4106 rounds with
 the joinbase-6 offsets, 5180 with the `od_large_manifest.py` offsets. The former 1000
-(about 50 min) could not reach round 0. The cost: one screen now vouches for a miner's
+(about 50 min) could not reach round 0. A wider trial window raises the worst case: at
+200 rounds, 36 trials can span up to 7,236 rounds, so a TEST build that widens the window
+re-checks `work_screen_epoch_rounds` (ADR 0016). The cost: one screen now vouches for a miner's
 hardware for about 5 h instead of 50 min. The same value is the IP-prefix quota epoch,
 `now // work_screen_epoch_rounds`. The epoch is part of the prefix HMAC, so every prefix
 starts a full bucket each epoch, and joins delete the `ip:%` quota rows of earlier epochs.
