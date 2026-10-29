@@ -1005,6 +1005,10 @@ class NetworkMiner:
         record = self.status()["record"]
         admission_id = record["admission_id"]
         url = self.url + f"/join/{admission_id}"
+        # Built from the manifest alone while the master issues the challenge and stages the job.
+        pool = ThreadPoolExecutor(1)
+        genesis = pool.submit(self._genesis_inputs)
+        pool.shutdown(wait=False)
         now = self.api.call("GET", self.url)["now_round"]
         envelope, now = self._ask_challenge(url, record, now)
         data = self.api.call(
@@ -1053,10 +1057,43 @@ class NetworkMiner:
             paths[name] = target
         for name in objects:
             paths[name].parent.mkdir(parents=True, exist_ok=True)
-        self._get_all({paths[name]: digest for name, digest in objects.items()})
+        try:
+            built = genesis.result()
+        except Exception as error:  # the GETs below are the path every input can take
+            log.warning(
+                "trial inputs not rebuilt (%s: %s); fetching them", type(error).__name__, error
+            )
+            built = {}
+        wanted = dict(objects)
+        for name, (digest, blob) in built.items():
+            if objects[name] != digest:
+                log.warning("trial %s differs from the local genesis; fetching it", name)
+                continue
+            paths[name].write_bytes(blob)
+            del wanted[name]
+        self._get_all({paths[name]: digest for name, digest in wanted.items()})
         (root / "job.json").write_bytes(canonicalize(job.body()))
         (root / "challenge.json").write_bytes(canonicalize(envelope))
         return root / "job.json", root / "challenge.json"
+
+    def _genesis_inputs(self) -> dict[str, tuple[str, bytes]]:
+        """start_state, ef_in and v0 of this hotkey's admission trial, as the master stages them
+        (ChallengeStore._stage_inputs_v2): from the manifest alone, so before the challenge.
+        name -> (sha256, bytes); _fetch_trial uses one only if the job pins that sha256."""
+        import torch
+
+        from hypertrain.auditor.replay import AnchorCache
+
+        cfg = TrainConfig.from_manifest_v2(self.manifest)
+        theta = init_params(cfg.model)
+        if cfg.inner.state_policy == "carry":
+            anchor = AnchorCache().genesis(self.manifest, self.kp.ss58, theta)
+            start, ef = pack_state(anchor.theta, anchor.state), pack_state(anchor.ef)
+        else:
+            start = pack_state(theta)
+            ef = pack_state({k: torch.zeros_like(v) for k, v in theta.items()})
+        built = {"start_state": start, "ef_in": ef, "v0": pack_state({})}
+        return {name: (sha256_hex(blob), blob) for name, blob in built.items()}
 
     def _owner_request(self, message: str, record: Mapping[str, Any], now: int) -> dict[str, Any]:
         """A body signed by this hotkey, the only credential of the owner routes (ADR 0010)."""

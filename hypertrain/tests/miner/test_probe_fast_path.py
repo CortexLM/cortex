@@ -491,3 +491,123 @@ def test_the_first_trial_input_failure_stops_the_others_and_is_the_one_raised(tm
     assert error.value.status == 403
     assert refused in reads.gets and len(reads.gets) == len(set(reads.gets)) <= 4
     assert chunks[0] < (4 << 20) // (64 << 10)
+
+
+@pytest.fixture(params=["reset", "carry"])
+def policy(request, monkeypatch) -> str:
+    """The start-state policy of the `network` manifest (built after this fixture)."""
+    if request.param == "carry":
+        service, made = probe_v2.service, probe_v2.service.fixture.setup
+
+        def carry():
+            setup = made()
+            body = setup.manifest.body()
+            body["training"]["inner"].update(state_policy="carry", rewarmup_steps=0)
+            manifest = service.RunManifestV2.model_validate(body)
+            return service.fixture.Setup(
+                manifest, setup.policy, setup.admission_policy, setup.rows, setup.tree
+            )
+
+        monkeypatch.setattr(service.fixture, "setup", carry)
+    return request.param
+
+
+def _object_gets(requests) -> list[str]:
+    return [
+        r.url.path.rsplit("/", 1)[1]
+        for r in requests
+        if r.method == "GET" and "/objects/" in r.url.path
+    ]
+
+
+def test_the_genesis_inputs_are_built_locally_and_only_the_samples_are_fetched(
+    policy, miner, capsys
+):
+    import json
+
+    from hypertrain.miner import cli
+    from hypertrain.trainer.config import TrainConfig
+
+    # Given: one open trial, its manifest under each start-state policy.
+    n, _, config, _, requests, _ = miner
+    assert TrainConfig.from_manifest_v2(n.manifest).inner.state_policy == policy
+    # When
+    assert cli.main(["probe-v2", "--config", str(config)]) == 0
+    signed = json.loads(capsys.readouterr().out)
+    # Then: only samples and sample_proofs crossed the wire; the inputs the probe trained from
+    # are the master's own (it accepts the proof).
+    exported = n.store.export_trial_v2(n.manifest.run_id(), miner[1])["objects"]
+    assert sorted(_object_gets(requests)) == sorted(
+        exported[name] for name in ("samples", "sample_proofs")
+    )
+    response = n.client.post(n.url + "/join/proof", json=signed)
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize("fault", ["raises", "differs"])
+def test_a_failed_or_foreign_genesis_build_falls_back_to_the_gets(
+    miner, monkeypatch, capsys, caplog, fault
+):
+    import json
+
+    from hypertrain.miner import cli
+
+    # Given: the local build raises, or builds start_state from other bytes.
+    n, _, config, _, requests, _ = miner
+    built = core.NetworkMiner._genesis_inputs
+
+    def broken(self):
+        if fault == "raises":
+            raise RuntimeError("no memory for the model")
+        out = built(self)
+        return {**out, "start_state": (core.sha256_hex(b"other"), b"other")}
+
+    monkeypatch.setattr(core.NetworkMiner, "_genesis_inputs", broken)
+    # When
+    assert cli.main(["probe-v2", "--config", str(config)]) == 0
+    signed = json.loads(capsys.readouterr().out)
+    # Then: what was not built (all, or the foreign start_state) was fetched, the rest was not;
+    # the proof is accepted.
+    exported = n.store.export_trial_v2(n.manifest.run_id(), miner[1])["objects"]
+    fetched = {"raises": exported, "differs": {"start_state", "samples", "sample_proofs"}}[fault]
+    assert sorted(_object_gets(requests)) == sorted(exported[name] for name in fetched)
+    assert "fetching" in caplog.text
+    response = n.client.post(n.url + "/join/proof", json=signed)
+    assert response.status_code == 200, response.text
+
+
+def test_the_genesis_build_runs_while_the_challenge_is_asked(miner, monkeypatch, capsys):
+    from hypertrain.miner import cli
+
+    # Given: a build that holds until the challenge is asked, and a challenge route that holds
+    # until the build has begun (each for at most 5 s).
+    _, identity, config, _, _, _ = miner
+    begun, asked, seen = threading.Event(), threading.Event(), []
+    built = core.NetworkMiner._genesis_inputs
+
+    def build(self):
+        begun.set()
+        asked.wait(5)
+        return built(self)
+
+    monkeypatch.setattr(core.NetworkMiner, "_genesis_inputs", build)
+    made = cli.httpx.Client
+
+    def watched(**kwargs):
+        c = made(**kwargs)
+        route = c._transport.handler
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith(f"/join/{identity}/challenge"):
+                seen.append(begun.wait(5))
+                asked.set()
+            return route(request)
+
+        c._transport.handler = handler
+        return c
+
+    monkeypatch.setattr(cli.httpx, "Client", watched)
+    # When
+    assert cli.main(["probe-v2", "--config", str(config)]) == 0
+    # Then: the build had begun before the challenge was answered.
+    assert seen == [True]
