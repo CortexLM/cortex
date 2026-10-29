@@ -310,8 +310,13 @@ def test_probe_v2_ends_on_the_line_the_s100_driver_retries_when_an_input_stays_m
     # Then: it fails after its own retries, with nothing probed, uploaded or left in the folder
     last = caplog.records[-1]
     assert last.getMessage() == "ChallengeHTTPError: 404: trial input object unavailable"
+    # (the inputs are fetched side by side: each journals its own retries, in order, and the
+    # first to run out of them stops the others)
     retries = [json.loads(x) for x in (folder / "journal.jsonl").read_text().splitlines()]
-    assert [r["attempt"] for r in retries] == [1, 2]
+    attempts: dict[str, list[int]] = {}
+    for r in retries:
+        attempts.setdefault(r["route"], []).append(r["attempt"])
+    assert [1, 2] in attempts.values() and all(a in ([1], [1, 2]) for a in attempts.values())
     assert not any(r.method == "PUT" for r in requests)
     assert {p.name for p in folder.iterdir()} <= {"journal.jsonl", "journal.lock"}
     # And: the driver takes that final stderr line, as the CLI wrote it, for a transient

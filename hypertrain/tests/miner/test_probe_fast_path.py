@@ -348,33 +348,35 @@ _probe_spec.loader.exec_module(probe_v2)
 network, miner = probe_v2.network, probe_v2.miner
 
 
-def test_probe_v2_posts_its_four_files_concurrently_and_the_proof_is_accepted(
+def test_probe_v2_fetches_and_posts_its_objects_concurrently_and_the_proof_is_accepted(
     miner, monkeypatch, capsys
 ):
     import json
 
     from hypertrain.miner import cli
 
-    # Given: the in-process service behind 50 ms per object POST, counting POSTs in flight.
+    # Given: the in-process service behind 50 ms per object GET or POST, counting each in flight.
     n, _, config, _, requests, _ = miner
-    built, lock, flight = cli.httpx.Client, threading.Lock(), [0, 0]
+    built, lock = cli.httpx.Client, threading.Lock()
+    flight = {"GET": [0, 0], "POST": [0, 0]}
 
     def slow(**kwargs):
         c = built(**kwargs)
         route = c._transport.handler
 
         def handler(request: httpx.Request) -> httpx.Response:
-            if request.method != "POST" or "/objects/" not in request.url.path:
+            if request.method not in flight or "/objects/" not in request.url.path:
                 return route(request)
+            count = flight[request.method]
             with lock:
-                flight[0] += 1
-                flight[1] = max(flight)
+                count[0] += 1
+                count[1] = max(count)
             time.sleep(0.05)
             try:
                 return route(request)
             finally:
                 with lock:
-                    flight[0] -= 1
+                    count[0] -= 1
 
         c._transport.handler = handler
         return c
@@ -383,7 +385,9 @@ def test_probe_v2_posts_its_four_files_concurrently_and_the_proof_is_accepted(
     # When
     assert cli.main(["probe-v2", "--config", str(config)]) == 0
     signed = json.loads(capsys.readouterr().out)
-    # Then: the files' objects were POSTed side by side, each distinct object once ...
+    # Then: the trial inputs were fetched side by side, the files' objects were POSTed side by
+    # side, each distinct object once ...
+    assert 2 <= flight["GET"][1] <= core.FETCH_WORKERS
     posted = [
         r.url.path.rsplit("/", 1)[1]
         for r in requests
@@ -391,7 +395,99 @@ def test_probe_v2_posts_its_four_files_concurrently_and_the_proof_is_accepted(
     ]
     refs = [ref["sha256"] for ref in signed["proof"]["body"]["artifact_refs"]]
     assert set(refs) <= set(posted) and len(posted) == len(set(posted))
-    assert 2 <= flight[1] <= core.UPLOAD_WORKERS
+    assert 2 <= flight["POST"][1] <= core.UPLOAD_WORKERS
     # ... and the master accepts the proof they back.
     response = n.client.post(n.url + "/join/proof", json=signed)
     assert response.status_code == 200, response.text
+
+
+class Reads:
+    """The object GET route of `_parts_miner`, behind a latency and a counter of GETs in flight;
+    `answer` maps a digest to the status it gets instead (each time) and `body` to its bytes."""
+
+    def __init__(self, miner, latency: float = 0.0) -> None:
+        self.route, self.latency = miner.api.c._transport.handler, latency
+        self.lock, self.now, self.peak = threading.Lock(), 0, 0
+        self.gets: list[str] = []
+        self.answer: dict[str, int] = {}
+        self.body: dict[str, bytes] = {}
+        miner.api.c._transport.handler = self
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.method != "GET" or "/objects/" not in request.url.path:
+            return self.route(request)
+        digest = request.url.path.rsplit("/", 1)[1]
+        with self.lock:
+            self.gets.append(digest)
+            self.now += 1
+            self.peak = max(self.peak, self.now)
+        try:
+            time.sleep(self.latency)
+            if digest in self.answer:
+                return httpx.Response(self.answer[digest], json={"detail": "refused"})
+            if digest in self.body:
+                return httpx.Response(200, content=self.body[digest])
+            return self.route(request)
+        finally:
+            with self.lock:
+                self.now -= 1
+
+
+def _inputs(store, tmp_path: Path, count: int, size: int = 4096) -> dict[Path, str]:
+    folder = tmp_path / "trial"
+    folder.mkdir()
+    return {folder / f"input-{n}": store.put(os.urandom(size)) for n in range(count)}
+
+
+def test_trial_inputs_are_fetched_side_by_side_within_fetch_workers(tmp_path: Path):
+    # Given: 40 stored trial inputs behind a 20 ms object route.
+    miner, store, _ = client._parts_miner(tmp_path)
+    wanted = _inputs(store, tmp_path, 40)
+    reads = Reads(miner, latency=0.02)
+    # When
+    miner._get_all(wanted)
+    # Then: each verified on disk, read once, never more than FETCH_WORKERS GETs at once.
+    assert all(path.read_bytes() == store.get(digest) for path, digest in wanted.items())
+    assert sorted(reads.gets) == sorted(wanted.values())
+    assert 1 < reads.peak <= core.FETCH_WORKERS
+
+
+def test_a_corrupt_trial_input_fails_the_fetch_on_the_parallel_path(tmp_path: Path):
+    # Given: five inputs, the fourth served with other bytes.
+    miner, store, _ = client._parts_miner(tmp_path)
+    wanted = _inputs(store, tmp_path, 5)
+    path, digest = list(wanted.items())[3]
+    Reads(miner).body[digest] = b"other bytes"
+    # When / Then
+    with pytest.raises(MinerError, match=f"trial input {path.name} sha256 mismatch"):
+        miner._get_all(wanted)
+
+
+def test_the_first_trial_input_failure_stops_the_others_and_is_the_one_raised(tmp_path: Path):
+    # Given: one input refused at once with a 403 while three others are slow to stream.
+    miner, store, _ = client._parts_miner(tmp_path)
+    wanted = _inputs(store, tmp_path, 4, size=4 << 20)
+    refused = list(wanted.values())[2]
+    reads, chunks = Reads(miner), [0]
+    reads.answer[refused] = 403
+    route = reads.route
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        response = route(request)
+
+        def body():
+            for start in range(0, len(response.content), 64 << 10):
+                chunks[0] += 1
+                time.sleep(0.02)
+                yield response.content[start : start + (64 << 10)]
+
+        return httpx.Response(response.status_code, content=body())
+
+    reads.route = slow
+    # When / Then: the 403 itself, unretried; the other streams ended early (or never began):
+    # all of them together read less than one whole input, and none was retried.
+    with pytest.raises(core.ChallengeHTTPError) as error:
+        miner._get_all(wanted)
+    assert error.value.status == 403
+    assert refused in reads.gets and len(reads.gets) == len(set(reads.gets)) <= 4
+    assert chunks[0] < (4 << 20) // (64 << 10)

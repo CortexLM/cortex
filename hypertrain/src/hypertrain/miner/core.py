@@ -21,7 +21,7 @@ import threading
 import time
 import tomllib
 from collections.abc import Callable, Mapping
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -1051,9 +1051,9 @@ class NetworkMiner:
                 raise MinerError(f"unsafe trial object path: {relative}")
             destinations.add(target)
             paths[name] = target
-        for name, digest in objects.items():
+        for name in objects:
             paths[name].parent.mkdir(parents=True, exist_ok=True)
-            self._get_whole(digest, paths[name])
+        self._get_all({paths[name]: digest for name, digest in objects.items()})
         (root / "job.json").write_bytes(canonicalize(job.body()))
         (root / "challenge.json").write_bytes(canonicalize(envelope))
         return root / "job.json", root / "challenge.json"
@@ -1130,13 +1130,39 @@ class NetworkMiner:
         except Exception as failure:
             log.warning("resume not journaled (%s: %s)", type(failure).__name__, failure)
 
-    def _get_whole(self, digest: str, target: Path) -> None:
+    def _get_all(self, wanted: Mapping[Path, str]) -> None:
+        """_get_whole every target -> digest side by side, at most FETCH_WORKERS streams. The
+        first failure in time is raised once every stream has ended: the others stop at their
+        next chunk and are not retried, so nothing writes into the folder after this returns."""
+        stop, lock, failure = threading.Event(), threading.Lock(), list[BaseException]()
+
+        def get(target: Path, digest: str) -> None:
+            try:
+                self._get_whole(digest, target, stop)
+            except BaseException as error:
+                with lock:
+                    if not stop.is_set():
+                        failure.append(error)
+                    stop.set()
+
+        with ThreadPoolExecutor(max(1, min(FETCH_WORKERS, len(wanted)))) as pool:
+            for target, digest in wanted.items():
+                pool.submit(get, target, digest)
+        if failure:
+            raise failure[0]
+
+    def _get_whole(self, digest: str, target: Path, stop: threading.Event | None = None) -> None:
         """Stream one whole plain object to `target` and verify it: the trial export stores each
         input as a single object, so the 1 MiB part bound of _get_object does not apply; the
-        bound is the largest object a part index can describe."""
+        bound is the largest object a part index can describe. A set `stop` ends it (unretried)."""
         from hypertrain.protocol.messages_v2 import MAX_PARTS, PART_BYTES
 
+        def stopped() -> None:
+            if stop is not None and stop.is_set():
+                raise MinerError("trial input fetch stopped by an earlier failure")
+
         def get() -> None:
+            stopped()
             hasher, size = hashlib.sha256(), 0
             with self.api.c.stream(
                 "GET",
@@ -1150,6 +1176,7 @@ class NetworkMiner:
                     raise MinerError("trial input object has a non-identity content encoding")
                 with target.open("wb") as stream:
                     for chunk in r.iter_bytes(chunk_size=64 << 10):
+                        stopped()
                         size += len(chunk)
                         if size > MAX_PARTS * PART_BYTES:
                             raise MinerError("trial input object exceeds the object size bound")
