@@ -35,6 +35,7 @@ from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import f32hex
 from hypertrain.protocol.messages_v2 import (
+    AdmissionPolicyV2,
     AuditPolicyV2,
     EconomicsPolicyV2,
     RunManifestV2,
@@ -746,6 +747,42 @@ def test_the_dense_0_1b_row_must_stay_inside_the_inclusive_100_to_300_million_ba
         assert run.returncode not in (0, 9) and uv_calls(host) == 1
         assert f"has {count} parameters, outside the band 100000000..300000000" in run.stderr
         assert not out.exists()
+
+
+@pytest.mark.parametrize("rounds", [None, "200"], ids=["default_100", "opt_in_200"])
+def test_the_trial_window_is_100_rounds_unless_the_operator_asks_for_another(
+    host, tmp_path, rounds
+):
+    # ADR 0016: HT_D20_CHALLENGE_ROUNDS opts in to a wider admission trial window; without it the
+    # policy, and so the run id, is the one every build so far signed.
+    out = tmp_path / "out"
+    env = {} if rounds is None else {"HT_D20_CHALLENGE_ROUNDS": rounds}
+
+    run = build(host, out, env=env)
+
+    assert run.returncode == 0, run.stderr
+    written = json.loads((out / "inputs/policies.json").read_bytes())["admission"]
+    expected = 100 if rounds is None else int(rounds)
+    assert written["challenge_rounds"] == expected
+    manifest, _ = accepted_manifest(out)
+    admission = AdmissionPolicyV2.model_validate_json(
+        LocalFSStore(out / "state/objects").get(manifest.network.admission_policy_hash)
+    )
+    assert admission.challenge_rounds == expected
+    report = json.loads(run.stdout[run.stdout.rindex("\n{\n") + 1 :])
+    assert report["challenge_rounds"] == expected and report["checks"]["challenge_rounds"]
+
+
+@pytest.mark.parametrize("rounds", ["99", "401", "0", "2e2", "200 ", "+200", "0200"])
+def test_a_trial_window_outside_100_to_400_rounds_is_refused_before_anything_runs(
+    host, tmp_path, rounds
+):
+    out = tmp_path / "out"
+
+    run = build(host, out, env={"HT_D20_CHALLENGE_ROUNDS": rounds})
+
+    assert run.returncode == 2 and "HT_D20_CHALLENGE_ROUNDS" in run.stderr
+    assert not out.exists() and uv_calls(host) == 0
 
 
 def test_an_unknown_geometry_is_refused_and_the_known_ones_are_named(host, tmp_path):

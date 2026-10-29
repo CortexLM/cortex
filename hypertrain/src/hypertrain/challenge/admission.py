@@ -434,7 +434,7 @@ class Admission:
                 admission_id=admission_id,
                 nonce=nonce,
                 seed_beacon=seed,
-                deadline_beacon=seed + 100,
+                deadline_beacon=seed + self.policy.challenge_rounds,
                 manifest_hash=self.escrow.run_id,
                 theta_hash=self.escrow.manifest.training.init_state_hash,
                 assignment_hash=trial_assignment_hash(self.escrow.manifest, trial_epoch, samples),

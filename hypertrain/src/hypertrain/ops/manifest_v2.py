@@ -88,6 +88,9 @@ def _build(args: argparse.Namespace) -> dict[str, JsonValue]:
     economics = objects["economics"]
     assert isinstance(economics, EconomicsPolicyV2)
     audit.validate_training(validated, ledger_mode=economics.ledger_mode)
+    admission = objects["admission"]
+    assert isinstance(admission, AdmissionPolicyV2)
+    admission.validate_ledger(economics.ledger_mode)
     if len(set(validated.auditors)) < 2:
         raise ValueError("two distinct audit reference identities required")
     if validated.inner.state_policy == "derived":

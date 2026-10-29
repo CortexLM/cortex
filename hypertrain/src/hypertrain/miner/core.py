@@ -62,7 +62,8 @@ OBJECT_MISS = frozenset({404})
 OWNER_REQUEST_ROUNDS = 20  # a signed owner request lives about a minute at 3 s rounds
 # A trial request that answers 409 CHALLENGE_EXPIRED is asked again this many times, this many
 # seconds apart (10 minutes in all): the identity is stranded until the operator reseeds it
-# (Admission.reseed, ADR 0010); the poll is short so that little of the new 300 s window is lost.
+# (Admission.reseed, ADR 0010); the poll is short so that little of the new window (300 s at the
+# default 100 rounds) is lost.
 RESUME_POLLS = 60
 RESUME_POLL_SECONDS = 10.0
 FETCH_WORKERS = 16  # concurrent 1 MiB part GETs per job input (bounded window, ordered sink)

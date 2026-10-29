@@ -146,6 +146,34 @@ def test_probe_v2_without_job_fetches_own_trial_and_completes(miner, capsys):
     assert response.json() == {"detail": "REFERENCE_TRIAL_CLOSED"}
 
 
+@pytest.fixture
+def wide_miner(monkeypatch, request):
+    """`miner` over an admission policy whose trial window is 200 rounds (ADR 0016)."""
+    monkeypatch.setitem(service.ADMISSION_POLICY_EXTRA, "challenge_rounds", 200)
+    return request.getfixturevalue("miner")
+
+
+def test_probe_v2_proves_a_trial_150_rounds_after_its_seed_under_a_200_round_window(
+    wide_miner, capsys
+):
+    # Given: a trial asked on its seed round, and 150 rounds gone when the miner probes it,
+    # which a 100-round window would have refused (see `lapse`)
+    n, identity, config, _, _, _ = wide_miner
+    asked = n.challenge(identity)
+    assert asked.status_code == 200, asked.text
+    seed = asked.json()["body"]["seed_beacon"]
+    assert asked.json()["body"]["deadline_beacon"] == asked.json()["exp_drand"] == seed + 200
+    n.push(seed + 150)
+    # When
+    assert cli.main(["probe-v2", "--config", str(config)]) == 0
+    signed = json.loads(capsys.readouterr().out)
+    # Then: the miner signed its pair to the policy's deadline, and the service accepts it
+    assert {signed[k]["exp_drand"] for k in ("proof", "screen")} == {seed + 200}
+    response = n.client.post(n.url + "/join/proof", json=signed)
+    assert response.status_code == 200, response.text
+    assert response.json()["admission_id"] == identity and response.json()["clean_count"] == 1
+
+
 @pytest.mark.parametrize(
     "name,error",
     [

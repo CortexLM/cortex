@@ -34,6 +34,7 @@ from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import f32hex
 from hypertrain.protocol.messages_v2 import (
     REQUEST_HORIZON,
+    AdmissionPolicyV2,
     AggregationPolicyV2,
     AuditPolicyV2,
     DisputePolicyV2,
@@ -597,6 +598,8 @@ def fixture_beacon(number):
 
 # Fields a test adds to the audit policy of the `network` fixture (monkeypatch.setitem).
 AUDIT_POLICY_EXTRA: dict[str, int] = {}
+# Fields a test sets in the admission policy of the `network` fixture, the same way.
+ADMISSION_POLICY_EXTRA: dict[str, int] = {}
 
 
 @pytest.fixture
@@ -661,6 +664,16 @@ def network(tmp_path: Path, request):
             s.admission_policy.model_copy(update={"artifact_limits": limits}),
             rows,
             tree,
+        )
+    if ADMISSION_POLICY_EXTRA:
+        s = fixture.Setup(
+            s.manifest,
+            s.policy,
+            AdmissionPolicyV2.model_validate(
+                {**s.admission_policy.body(), **ADMISSION_POLICY_EXTRA}
+            ),
+            s.rows,
+            s.tree,
         )
     alloc = [(k.ss58, 10000, 1) for k in COLD]
     econ = EconomicsPolicyV2.model_validate(

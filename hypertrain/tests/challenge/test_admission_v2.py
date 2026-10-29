@@ -487,6 +487,92 @@ def capped_setup(cap: int) -> Setup:
     return replace(base, manifest=RunManifestV2.model_validate(body), admission_policy=policy)
 
 
+def windowed_setup(rounds: int) -> Setup:
+    """The test setup whose admission policy gives a trial `rounds` beacon rounds (ADR 0016)."""
+    base = setup()
+    policy = AdmissionPolicyV2.model_validate(
+        {**base.admission_policy.body(), "challenge_rounds": rounds}
+    )
+    body = base.manifest.body()
+    body["network"]["admission_policy_hash"] = digest(policy)
+    return replace(base, manifest=RunManifestV2.model_validate(body), admission_policy=policy)
+
+
+def test_a_200_round_policy_serves_reaps_and_expires_on_its_own_window(tmp_path: Path) -> None:
+    # Given: a policy whose trial lasts 200 rounds, two identities seeded at round 2
+    s = windowed_setup(200)
+    a = service(s, tmp_path)
+    holders = [applied(a, s, i, 1) for i in range(2)]
+    # When: one asks at once, the other at round 150, which a 100-round window refuses
+    envelopes = [a.challenge(holders[0], now=2), a.challenge(holders[1], now=150)]
+    # Then: both are served a window to seed+200, and the envelope lives as long
+    assert [e["body"]["deadline_beacon"] for e in envelopes] == [202, 202]
+    assert [e["exp_drand"] for e in envelopes] == [202, 202]
+    # The deadline round still accepts a proof, so the reaper closes them at 203, not 103
+    assert a.reap_expired_trials(now=103) == [] and a.reap_expired_trials(now=202) == []
+    assert a.reap_expired_trials(now=203) == [0, 1] and open_trials(a) == 0
+    with pytest.raises(AdmissionError, match="CHALLENGE_EXPIRED"):
+        a.challenge(holders[0], now=203)
+
+
+def test_a_200_round_policy_accepts_a_proof_150_rounds_after_the_seed(tmp_path: Path) -> None:
+    # Given: the 101 M trial, whose miner side alone needs ~282 s (94 rounds) after the
+    # reference: a proof screened and sent at seed+150
+    s = windowed_setup(200)
+    a = service(s, tmp_path)
+    admission = apply(a, s)
+    a.challenge(admission, now=2)
+    a.prepare_reference(admission, now=2)
+    proof, screen = current_proof(a, admission, 152)
+    # When / Then: it is accepted and the trial is finalized clean
+    assert submit(a, proof, screen, now=152).state == "PROBATION"
+    final = a.trial_finality(admission, now=152)
+    assert final is not None
+    status = a.finalize_trial(admission, final, now=152)
+    assert (status.record.state, status.record.clean_count) == ("PROBATION", 1)
+
+
+def test_a_200_round_policy_moves_the_dead_application_round(tmp_path: Path) -> None:
+    from hypertrain.protocol.keys import Keypair
+
+    s = windowed_setup(200)
+    a = service(s, tmp_path)
+    # Given: HOT/COLD applied at round 1 (seed 2) and never asked for its challenge
+    first = apply(a, s)
+    # When / Then: its coldkey is still held at round 202, and released at 203
+    with pytest.raises(AdmissionError, match="COLDKEY_PROBATION_EXISTS"):
+        a.join(
+            canonicalize(request(s, "88" * 32, Keypair(b"\x36" * 32), COLD).body()),
+            now=202,
+            ip_prefix="z",
+        )
+    again = a.join(
+        canonicalize(request(s, "99" * 32, Keypair(b"\x37" * 32), COLD).body()),
+        now=203,
+        ip_prefix="z",
+    )
+    assert again.state == "APPLIED"
+    assert (a.store.by_id(first).state, a.store.by_id(first).reason) == (
+        "SUSPENDED",
+        "APPLIED_EXPIRED",
+    )
+
+
+def test_a_200_round_policy_moves_the_reseed_rounds(tmp_path: Path) -> None:
+    # Given: a PROBATION identity seeded at round 1000 that never asked for its trial
+    s = windowed_setup(200)
+    a = service(s, tmp_path)
+    holder = lapsed(a, s, "PROBATION", issued=False)
+    # When / Then: the window lives to 1200, so the reseed is refused there and served at 1201
+    with pytest.raises(AdmissionError, match="^RESEED_NOT_NEEDED$"):
+        a.reseed(holder, now=1200)
+    assert a.reseed(holder, now=1201)["seed_beacon"] == 1202
+    assert a.challenge(holder, now=1202)["body"]["deadline_beacon"] == 1402
+    # and its trial, still open on round 1350 (seed+148), cannot be reseeded
+    with pytest.raises(AdmissionError, match="^RESEED_TRIAL_OPEN$"):
+        a.reseed(holder, now=1350)
+
+
 def join_from(a: Admission, s: Setup, index: int, now: int, prefix: str, cold=None):
     from hypertrain.protocol.keys import Keypair
 

@@ -339,15 +339,29 @@ def test_example_admission_policy_digest_is_pinned_in_both_ledger_modes(
     assert policy.digest() == "c3fd6d4d47c406fa6add423091f2ae22b38bd9ed8ebe92df472f589672b3e3e3"
 
 
+# The bounds a TEST manifest only may lift: (policy, field, value, words of the refusal).
+TEST_ONLY_LIFTS = {
+    # D88: the cap of 200 rounds on `d_final - d_audit`.
+    "gap_cap": ("audit", "gap_cap_rounds", 300, "TEST manifest"),
+    # ADR 0016: a trial window above 100 rounds, until the founder rules on production.
+    "trial_window": ("admission", "challenge_rounds", 200, "TEST ledger"),
+}
+
+
+@pytest.mark.parametrize("lift", TEST_ONLY_LIFTS.values(), ids=TEST_ONLY_LIFTS)
 @pytest.mark.parametrize(("mode", "exit_code"), [("test", 0), ("production", 2)])
-def test_the_builder_refuses_a_production_manifest_that_lifts_the_gap_cap(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], mode: str, exit_code: int
+def test_the_builder_refuses_a_production_manifest_that_lifts_a_test_only_bound(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    mode: str,
+    exit_code: int,
+    lift: tuple[str, str, int, str],
 ) -> None:
-    """D88: the cap of 200 rounds on `d_final - d_audit` is lifted by a TEST manifest only."""
+    policy, field, value, words = lift
     inputs = tmp_path / "inputs"
     assert main(["example", "--ledger-mode", mode, "--out", str(inputs)]) == 0
     policies = json.loads((inputs / "policies.json").read_text())
-    policies["audit"]["gap_cap_rounds"] = 300
+    policies[policy][field] = value
     (inputs / "policies.json").write_text(json.dumps(policies))
     owner_seed = tmp_path / "owner.seed"
     owner_seed.write_bytes(b"\x77" * 32)
@@ -373,16 +387,21 @@ def test_the_builder_refuses_a_production_manifest_that_lifts_the_gap_cap(
     captured = capsys.readouterr()
     assert code == exit_code, captured.err
     if exit_code:
-        assert "gap_cap_rounds" in captured.err and "TEST manifest" in captured.err
+        assert field in captured.err and words in captured.err
         assert not (tmp_path / "output").exists()
 
 
-def test_the_service_refuses_a_production_manifest_that_lifts_the_gap_cap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, build_args: list[str]
+@pytest.mark.parametrize("lift", TEST_ONLY_LIFTS.values(), ids=TEST_ONLY_LIFTS)
+def test_the_service_refuses_a_production_manifest_that_lifts_a_test_only_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_args: list[str],
+    lift: tuple[str, str, int, str],
 ) -> None:
     """The builder is not the gate: a manifest signed by hand over a production economics policy and
-    a raised cap is refused when the run is created, and the same manifest over the TEST policy
+    a lifted bound is refused when the run is created, and the same manifest over the TEST policy
     is accepted."""
+    policy, field, value, _ = lift
     from hypertrain.data.store import LocalFSStore
     from hypertrain.protocol.envelope_v2 import seal
     from hypertrain.protocol.jcs import canonicalize
@@ -396,7 +415,7 @@ def test_the_service_refuses_a_production_manifest_that_lifts_the_gap_cap(
     policies_path = tmp_path / "inputs" / "policies.json"
     policies = json.loads(policies_path.read_text())
     policies["economics"]["reward_authority"] = training["coord_pubkey"]
-    policies["audit"]["gap_cap_rounds"] = 300
+    policies[policy][field] = value
     policies_path.write_text(json.dumps(policies))
     assert main(build_args) == 0
     owner = Keypair(b"\x77" * 32)
@@ -434,7 +453,7 @@ def test_the_service_refuses_a_production_manifest_that_lifts_the_gap_cap(
             "/v1/admin/beacon", json=beacon_payload(1), headers=bearer(ADMIN)
         ).is_success
         response = client.post("/v2/admin/runs", content=refused, headers=headers)
-        assert response.status_code == 422 and "gap_cap_rounds" in response.text, response.text
+        assert response.status_code == 422 and field in response.text, response.text
         accepted = client.post(
             "/v2/admin/runs",
             content=(output / "manifest-envelope.json").read_bytes(),

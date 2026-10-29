@@ -54,6 +54,9 @@
 # SM_COUNT is only carried. HT_D20_ATTN_BACKEND (default math, or sdpa-flash on a GPU class) is the
 # pin's HT_ATTN_BACKEND. The dry run reports the pin and checks it against SM_COUNT.
 # HT_D20_COLDKEYS=N (default 2) seeds cold-0..cold-N-1, each with 20000 genesis units.
+# HT_D20_CHALLENGE_ROUNDS (optional, 100..400, default 100): the admission trial window in beacon
+# rounds (ADR 0016), challenge_rounds_for(T_miner + T_ref) for a measured trial. Unset, the policy
+# and so the run id are the ones a build without the knob signs; the dry run prints the window.
 # HT_D20_RELAY_PUBKEY (required): SS58 of the relay key k1 that relay-joinbase signs with; the
 # current value is the `pubkey` of /data/relay/config/relay.json on s100 (k1).
 # inputs/genesis-allocation.json and inputs/proofs.json feed the run's genesis and dataset intake.
@@ -121,10 +124,12 @@ ATTENTION=${HT_D20_ATTN_BACKEND:-math}
 COLDKEYS=${HT_D20_COLDKEYS:-2}
 REPLAY=${HT_D20_REPLAY_SECONDS:-}
 WARMUP=${HT_D20_WARMUP_OUT:-}
+CHALLENGE=${HT_D20_CHALLENGE_ROUNDS:-100}
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
 case $GEOMETRY in dense-1b|dense-0.1b|tiny-cpu) ;; *) echo "HT_D20_GEOMETRY: dense-1b, dense-0.1b or tiny-cpu" >&2; exit 2 ;; esac
 case $COLDKEYS in [1-9]) ;; *) echo "HT_D20_COLDKEYS must be 1..9" >&2; exit 2 ;; esac
+[[ $CHALLENGE =~ ^[1-9][0-9]{2}$ ]] && [ "$CHALLENGE" -le 400 ] || { echo "HT_D20_CHALLENGE_ROUNDS must be 100..400 rounds" >&2; exit 2; }
 if [ "$GEOMETRY" = dense-0.1b ]; then
     [[ $REPLAY =~ ^[1-9][0-9]*$ ]] || { echo "HT_D20_REPLAY_SECONDS: dense-0.1b has no default; give the measured warm audit replay in whole seconds (max of >= 3 warm replays on the auditing B300)" >&2; exit 2; }
     if [ -n "$WARMUP" ]; then
@@ -194,7 +199,8 @@ mkdir "$OUT/inputs"
 
 cd "$HT"
 uv run --no-sync python -I - "$IMAGE" "$DRIVER" "$SM_COUNT" "$OUT" "$EXP_ROUND" \
-    "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" "$ATTENTION" "$HT" "$REPLAY" <<'PY'
+    "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" "$ATTENTION" "$HT" "$REPLAY" \
+    "$CHALLENGE" <<'PY'
 import json
 import math
 import os
@@ -218,7 +224,7 @@ from hypertrain.protocol.messages_v2 import DEFAULT_GAP_CAP_ROUNDS, reaudit_roun
 from hypertrain.trainer.rng import rng_ctr, uniform_f64
 
 (image, driver, sm_count, out, exp_round, relay_url, relay_pubkey, geometry, coldkeys,
- attention, ht_root, replay) = sys.argv[1:]
+ attention, ht_root, replay, challenge_rounds) = sys.argv[1:]
 # The pin first: a count or a backend no GPU class was measured with stops the build before
 # anything is written. A tiny-cpu run uses no GPU (its sm_count is only carried).
 gpu = "none" if geometry == "tiny-cpu" else next(
@@ -396,7 +402,8 @@ policies = {
         "q_base": "0000803e", "E": 4, "clean_finalizations": 12,
         "work_screen_epoch_rounds": screen_rounds, "max_pending": 32, "max_trial_replays": 2,
         "max_trials_per_beacon": 2, "join_per_beacon": 2, "join_burst": 4,
-        "ip_prefix_per_beacon": 32, "ip_prefix_burst": 64, "challenge_rounds": 100,
+        "ip_prefix_per_beacon": 32, "ip_prefix_burst": 64,
+        "challenge_rounds": int(challenge_rounds),
         "artifact_limits": {
             "max_object_bytes": 2147483648, "max_body_bytes": 65536,
             "max_chunk_manifest_bytes": 1048576,
@@ -469,7 +476,7 @@ if [ -n "$WARMUP" ] && cmp -s "$OUT/out/manifest.json" "$WARMUP/out/manifest.jso
 fi
 
 uv run --no-sync python -I - "$OUT" "$IMAGE" "$DRIVER" "$SM_COUNT" "$GEOMETRY" "$ATTENTION" \
-    "$REPLAY" "$WARMUP" <<'PY'
+    "$REPLAY" "$WARMUP" "$CHALLENGE" <<'PY'
 """Dry-run: the checks POST /v2/admin/runs (store._create_run_v2) runs, minus the database."""
 import json
 import sys
@@ -488,7 +495,7 @@ from hypertrain.protocol.relay_messages import RelayRegistryV1
 
 out, image, driver, sm_count = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
 n_gpus = 2 if sys.argv[5] == "dense-1b" else 1
-attention, replay, warmup = sys.argv[6], sys.argv[7], sys.argv[8]
+attention, replay, warmup, challenge_rounds = sys.argv[6], sys.argv[7], sys.argv[8], sys.argv[9]
 # What the builder meant, from the table: a GPU class measured on sm_count, or none for a CPU run.
 gpu = "none" if sys.argv[5] == "tiny-cpu" else next(
     (n for n, c in GPU_CLASSES.items() if sm_count in c.sm_counts), None
@@ -512,8 +519,11 @@ for name, cls in (
 ):
     policy = cls.model_validate_json(store.get(getattr(model.network, name)))
     checks[name] = policy.digest() == getattr(model.network, name)
+    if isinstance(policy, AdmissionPolicyV2):
+        admission = policy
     if isinstance(policy, EconomicsPolicyV2):
         ledger_mode = policy.ledger_mode
+        admission.validate_ledger(ledger_mode)
     if isinstance(policy, AuditPolicyV2):
         policy.validate_training(model.training, ledger_mode=ledger_mode)
 registry = RelayRegistryV1.model_validate_json(store.get(model.network.relay_registry_hash))
@@ -570,6 +580,7 @@ checks.update(
     ledger_mode_test=economics.ledger_mode == "test",
     work_screen_epoch_rounds=admission.work_screen_epoch_rounds
     == (20000 if sys.argv[5] == "dense-0.1b" else 6000),
+    challenge_rounds=admission.challenge_rounds == int(challenge_rounds),
     relay=len(registry.specs) == 1 and spec.mode == "transport"
     and str(spec.https_url).rstrip("/") == "https://relay.joinbase.ai",
     coord_is_reward_authority=economics.reward_authority == t.coord_pubkey == keys["coord"],
@@ -582,6 +593,7 @@ print(json.dumps({
     "exp_drand": env.exp_drand,
     "param_count": t.model.param_count,
     "init_state_hash": t.init_state_hash,
+    "challenge_rounds": admission.challenge_rounds,
     "audit": {
         "lease_rounds": audit.lease_rounds,
         "reaudit_rounds": audit.reaudit_rounds,

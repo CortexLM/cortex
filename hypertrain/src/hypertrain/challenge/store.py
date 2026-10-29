@@ -307,8 +307,8 @@ MAX_ROSTER_CEILING = 1024
 
 # A repeated request for a reference that is already running waits for it, on a worker of the
 # asyncio.to_thread pool (min(32, cpu + 4)). Past this many waiters in the process the request is
-# refused with 503 at once; a waiter gives up after REFERENCE_WAIT_SECONDS (the 100-round trial
-# window is 300 s).
+# refused with 503 at once; a waiter gives up after REFERENCE_WAIT_SECONDS (the default 100-round
+# trial window is 300 s; past a wider window's, the 503 asks the waiter to retry).
 REFERENCE_WAITERS = 2
 REFERENCE_WAIT_SECONDS = 330.0
 
@@ -2512,8 +2512,14 @@ class ChallengeStore:
                 ("dispute_policy_hash", DisputePolicyV2),
             ):
                 policy = cls.model_validate_json(self.objects.get(getattr(model.network, name)))
+                if isinstance(policy, AdmissionPolicyV2):
+                    admission = policy
                 if isinstance(policy, EconomicsPolicyV2):
                     ledger_mode = policy.ledger_mode
+                    try:
+                        admission.validate_ledger(ledger_mode)
+                    except ValueError as error:
+                        raise ChallengeError(422, str(error)) from None
                 if name == "audit_policy_hash":
                     assert isinstance(policy, AuditPolicyV2)
                     try:

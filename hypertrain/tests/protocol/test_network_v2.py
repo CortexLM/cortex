@@ -37,6 +37,7 @@ from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import LeafPreimage, Receipt, RunManifest
 from hypertrain.protocol.messages_v2 import (
+    CHALLENGE_ROUNDS_MAX,
     AcceptV2,
     AdmissionPolicyV2,
     AggregationPolicyV2,
@@ -53,12 +54,14 @@ from hypertrain.protocol.messages_v2 import (
     EscrowRelease,
     EscrowTransfer,
     IslandJobV1,
+    JoinChallenge,
     JoinRequest,
     RosterEntryV2,
     RunManifestV2,
     StartStateV2,
     WeightAllocationV2,
     WorkProof,
+    challenge_rounds_for,
 )
 from hypertrain.protocol.relay_messages import (
     AcceptedUploadAck,
@@ -127,11 +130,10 @@ def example_admission_policy(**extra: JsonValue) -> AdmissionPolicyV2:
         join_burst=4,
         ip_prefix_per_beacon=32,
         ip_prefix_burst=64,
-        challenge_rounds=100,
         artifact_limits=ArtifactLimits(
             max_object_bytes=1_000_000, max_body_bytes=65536, max_chunk_manifest_bytes=1048576
         ),
-        **extra,
+        **{"challenge_rounds": 100, **extra},
     )
 
 
@@ -164,6 +166,75 @@ def test_prefix_cap_changes_the_digest_and_run_id_only_when_set() -> None:
     for bad in (0, 33, -1, True, 1.5):
         with pytest.raises(ValidationError):
             example_admission_policy(max_unfunded_per_prefix=bad)
+
+
+@pytest.mark.parametrize("rounds", [101, 200, CHALLENGE_ROUNDS_MAX])
+def test_a_wider_trial_window_round_trips_and_moves_the_digest_and_run_id(rounds: int) -> None:
+    wide = example_admission_policy(challenge_rounds=rounds)
+    assert wide.body()["challenge_rounds"] == rounds
+    assert AdmissionPolicyV2.model_validate(wide.body()) == wide
+    assert wide.digest() != EXAMPLE_ADMISSION_DIGEST
+    assert run_id_of(wide) != EXAMPLE_ADMISSION_RUN_ID
+
+
+@pytest.mark.parametrize("bad", [99, 0, -1, CHALLENGE_ROUNDS_MAX + 1, True, 200.0, 2.5, "200"])
+def test_a_trial_window_outside_100_to_the_ceiling_is_refused(bad: JsonValue) -> None:
+    with pytest.raises(ValidationError, match="challenge_rounds"):
+        example_admission_policy(challenge_rounds=bad)
+
+
+def test_a_trial_window_above_100_rounds_is_for_a_test_ledger_only() -> None:
+    wide = example_admission_policy(challenge_rounds=200)
+    wide.validate_ledger("test")
+    with pytest.raises(ValueError, match="challenge_rounds above 100 is for a TEST ledger only"):
+        wide.validate_ledger("production")
+    example_admission_policy().validate_ledger("production")
+
+
+@pytest.mark.parametrize(
+    ("seconds", "rounds"),
+    [(0, 100), (260, 100), (261, 101), (282, 109), (297, 114), (500, 192), (521, 200), (1043, 400)],
+)
+def test_challenge_rounds_for_covers_the_trial_with_a_margin_and_never_below_100(
+    seconds: int, rounds: int
+) -> None:
+    # 1.15 x the measured trial (T_miner + T_ref) at 3 s a round, rounded up, never below 100
+    assert challenge_rounds_for(seconds) == rounds
+
+
+def test_challenge_rounds_for_refuses_a_trial_the_ceiling_cannot_hold() -> None:
+    with pytest.raises(ValueError, match="above the 400-round ceiling"):
+        challenge_rounds_for(1044)
+
+
+def join_challenge(seed: int, deadline: int) -> JoinChallenge:
+    return JoinChallenge.model_validate(
+        {
+            "admission_id": H,
+            "nonce": H,
+            "seed_beacon": seed,
+            "deadline_beacon": deadline,
+            "manifest_hash": H,
+            "theta_hash": H,
+            "assignment_hash": H,
+            "layout": {"pp": 1, "n_gpus": 1, "dp_size": 1, "ep_size": 1, "zero1": False},
+            "artifact_limits": {
+                "max_object_bytes": 1,
+                "max_body_bytes": 65536,
+                "max_chunk_manifest_bytes": 1048576,
+            },
+            "policy_hash": H,
+        }
+    )
+
+
+def test_a_join_challenge_carries_any_window_the_policy_may_sign() -> None:
+    # A miner parses the challenge before it reads the policy, so the bound is the policy's own.
+    for rounds in (100, 200, CHALLENGE_ROUNDS_MAX):
+        assert join_challenge(50, 50 + rounds).deadline_beacon == 50 + rounds
+    for rounds in (99, 0, CHALLENGE_ROUNDS_MAX + 1):
+        with pytest.raises(ValidationError, match="join deadline must be seed"):
+            join_challenge(50, 50 + rounds)
 
 
 def commit(tokens: int = 7680) -> CommitV2:
