@@ -132,6 +132,17 @@
   `python -m hypertrain.aggregator.capacity_worker` refuses a process that does not honor the pin.
 
 ### Changed
+- Miner fast path of an admission trial (D94 lot B, ADR 0017 at the monorepo root). `probe-v2`
+  publishes its four files through one upload window (`data.store.put_files`, at most
+  `UPLOAD_WORKERS` = 16 POSTs and 32 MiB read ahead, each part index after its own parts, the first
+  failure in time raised and the queued PUTs dropped), each distinct object once per publication; its
+  threads sign their uploads with one read of the round. The trial inputs are fetched side by side
+  (`FETCH_WORKERS` = 16 streams, the first failure stops the others). `start_state`, `ef_in` and `v0`
+  are built locally while the challenge is asked and used only on the job's pinned sha256, otherwise
+  fetched; at 101 M this saves about 805 MB of GETs and costs about 1.9 GiB of peak RSS. No wire
+  format, signed field or byte sent changes; `sources()` and the qualification bundle move, so the
+  images must be rebuilt; `implementation_hash` does not move. The journal lines of different
+  inputs' retries may interleave.
 - ADR 0012 hash re-measure of v3-executor-perf-a abandoned: superseded by the rewrite of ADR 0012
   in the integrated tip (commit `8478340f`, not brought into v3-last-merges, D89).
 - A production run no longer stands on a CUDA qualification without host attestation.

@@ -177,7 +177,12 @@ to put the objects. The miner checks the job, objects and signed challenge as
 `trial_export` does, streams each input (one uncompressed, sha256-verified
 object; about 4 bytes per parameter for a `reset` start state, more under
 `carry`) into a private temporary folder under its workdir, probes, and deletes
-the folder, also on failure: a re-run downloads and probes again. An object GET or PUT of the miner that meets a transport error or a 5xx, and an object GET that
+the folder, also on failure: a re-run downloads and probes again. The inputs are fetched side by
+side (at most 16 streams); the first to fail stops the others at their next chunk and is the error
+raised. `start_state`, `ef_in` and `v0` are first built locally from the manifest while the
+challenge is asked, as the master stages them; each is used only if its sha256 is the one the job
+pins, otherwise (or if the build fails) it is fetched like the others. `samples` and
+`sample_proofs` are always fetched (ADR 0017 at the monorepo root). An object GET or PUT of the miner that meets a transport error or a 5xx, and an object GET that
 meets a 404 (a read miss on an object the server just listed; the cause of the one seen on s100
 is not established), waits and retries up to five times (1, 2, 4, 8, 16 s nominal, each wait
 jittered by 50%, so up to about 46 s in all) before it fails with the error it met; a digest
@@ -198,7 +203,9 @@ new challenge. It creates no identity and sends nothing but that request. The re
 `new_challenge`, `asks`). If nobody reseeds in time it exits with status 3 and an error that names the
 operator's route; every other 409 keeps its answer.
 
-`probe-v2` executes the screen and uploads original rank-0 state/EF/delta/leaves;
+`probe-v2` executes the screen and uploads original rank-0 state/EF/delta/leaves
+through one upload window (at most 16 object POSTs in flight across the four files, each part
+index after its own parts, each distinct object POSTed once, the first failure raised);
 stdout contains the signed proof/screen pair. The operator independently prepares
 and finalizes references through authenticated admin routes; miners cannot
 self-finalize or turn a successful probe into ACTIVE status.
