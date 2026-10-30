@@ -37,10 +37,11 @@ ROUND_REFUSED = (
     ROUND_PAUSE + "test_a_lagging_aggregate_or_finalize_is_refused_without_its_conditions"
 )
 ROUND_BLS = ROUND_PAUSE + "test_production_refuses_a_lagging_audited_round_without_a_verified_pin"
-S21_AGGREGATE = (
-    "tests/e2e/test_finalize_freshness_v2_e2e.py::"
-    "test_s21_an_aggregate_retried_on_a_flicker_answers_its_stored_tape"
-)
+S21 = "tests/e2e/test_finalize_freshness_v2_e2e.py::"
+S21_AGGREGATE = S21 + "test_s21_an_aggregate_retried_on_a_flicker_answers_its_stored_tape"
+# Branch hotfix-finalize-entry-gate: the finalize's gate judged once, before its replay.
+S21_ENTRY = S21 + "test_a_finalize_refused_at_entry_replays_nothing"
+S21_REPLAY = S21 + "test_s21_a_finalize_whose_replay_outlasts_the_cap_settles_at_its_entry_round"
 
 STORE = "src/hypertrain/challenge/store.py"
 ADMISSION_PY = "src/hypertrain/challenge/admission.py"
@@ -328,6 +329,24 @@ MUTANTS = [
             ROUND_BLS + "[finalize-fixture signature]",
         ],
         "why": "production takes a lagging aggregate or finalize on a pinned round never verified.",
+    },
+    {
+        "id": "exp-finalize-skips-the-expiry-at-its-gate",
+        "invariants": ["FIN-23", "FIN-04"],
+        "path": STORE,
+        "old": "                if now > envelope_v2.parse_envelope(raw).exp_drand:\n",
+        "new": "                if False:\n",
+        "tests": [S21_ENTRY],
+        "why": "a Finalize expired at the round it settles at is replayed before it is refused.",
+    },
+    {
+        "id": "exp-finalize-judged-again-after-its-replay",
+        "invariants": ["FIN-23", "FIN-04"],
+        "path": STORE,
+        "old": "assert now is not None  # gated above: a finalize record is never removed\n",
+        "new": 'now = self._fresh_v2(manifest, f"finalize:{w}:{self._now(self._db)}")\n',
+        "tests": [S21_REPLAY],
+        "why": "the gate is judged after the replay, on the lag the call's own replay made (S21).",
     },
     {
         "id": "exp-finalize-replay-compares-nothing",

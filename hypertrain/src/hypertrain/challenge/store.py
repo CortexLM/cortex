@@ -10745,6 +10745,21 @@ class ChallengeStore:
         from hypertrain.ledger.escrow_v2 import RewardWork, authority_message
         from hypertrain.protocol.messages_v2 import RewardFinalize
 
+        # The beacon gate is judged once, here, before the replay: a replay keeps the pusher out
+        # for minutes, and a gate judged after it refused on the lag the call itself made (S21).
+        # The round it passes at is the round the finalize settles at. A round already finalized
+        # is answered from its records, without the gate, as it always was.
+        now: int | None = None
+        with self._tx():
+            manifest = self._run_v2(run_id)
+            self.require_roster_v2(run_id, w)
+            if not self._db.execute(
+                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='finalize' AND id=?",
+                (run_id, str(w)),
+            ).fetchone():
+                now = self._fresh_v2(manifest, f"finalize:{w}:{self._now(self._db)}")
+                if now > envelope_v2.parse_envelope(raw).exp_drand:
+                    raise ExpiredError("envelope expired")  # at the round it settles at
         self._prime_finality_replay_v2(run_id, w, raw)
         with self._tx():
             manifest = self._run_v2(run_id)
@@ -10782,6 +10797,7 @@ class ChallengeStore:
                 if json.loads(previous_final[0])["body"] != model.model_dump(mode="json"):
                     raise ChallengeError(409, "conflicting finalized origin authority")
                 return self._record_v2(run_id, "finalize-result", str(w))
+            assert now is not None  # gated above: a finalize record is never removed
             self.require_roster_v2(run_id, w)
             self._require_unretired_v2(run_id, w)
             applied = self._record_v2(run_id, "applied", str(w))
@@ -10800,7 +10816,6 @@ class ChallengeStore:
                 raise ChallengeError(
                     422, "finalized included set differs from full accepted authority"
                 )
-            now = self._fresh_v2(manifest, f"finalize:{w}:{self._now(self._db)}")
             final_hash = body_digest(model.model_dump(mode="json"))
             settled = settle(status, model, final_hash)
             self._close_round_v2(

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
@@ -49,6 +51,12 @@ def test_the_s20_manifest_keeps_its_run_id_and_audit_policy_hash() -> None:
     assert (policy.lease_rounds, policy.max_running_jobs, policy.gap_cap_rounds) == (100, 2, 400)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="branch hotfix-finalize-entry-gate (not merged, for a future run): finalize_v2 judges "
+    "its beacon gate before its replay, so its owned body, and implementation_hash, change "
+    "(24fbe36d... -> 8235e5f5d3ed56075a86e22d5702c6db15925bf849c2e55979ca83b98184b5a8)",
+)
 def test_the_s20_run_keeps_its_implementation_hash() -> None:
     manifest = RunManifestV2.model_validate_json((RUN / "manifest.json").read_bytes())
     source = Path(__file__).parents[3] / "src/hypertrain"

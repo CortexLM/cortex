@@ -368,10 +368,11 @@
   branch still BLS-verifies the pinned round. A tolerated finalize settles at `emitted -
   MAX_LAG_ROUNDS`, and the ledger still refuses a Finalize expired at that round. A first
   aggregate keeps the 2-round view: it judges its members at the gate's round, whose beacon must
-  have been pushed. Still refused: a finalize whose replay keeps the pusher out longer than the cap
-  (150 s), because its gate comes after the replay and `finalize_v2` is part of the
-  `implementation_hash`. No manifest, run id, policy hash, wire format or `implementation_hash`
-  changes.
+  have been pushed. On branch `hotfix-finalize-entry-gate` (not merged, for a future run) the
+  finalize's gate is judged once, before its replay, with the Finalize's expiry at the round it
+  settles at; a round already finalized is answered without it. That changes `finalize_v2`, so
+  `implementation_hash` moves (24fbe36d... -> 8235e5f5...); no manifest, run id, policy hash or
+  wire format changes.
 - `GET /internal/v1/get_weights` no longer answers 409 `RUN_MANIFEST_RETIRED` for the whole state
   directory when one hosted run has a stored manifest the model now refuses (S21, run 0ef600b4: the
   stale TEST runs 2a7d7702 and fea7e44f lacked the env pin, so the settled round 0 could not be
