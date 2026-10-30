@@ -98,20 +98,20 @@ MUTANTS = [
         "A Finalize of a miner or an auditor is read like the coordinator's until a later lookup "
         "fails, and the single-use reservation of its signed operation is never taken.",
     ),
+    # ADR 0017 T1: finalize_v2 answers the roster guard first in its entry transaction, before the
+    # beacon gate and the replay, so the mutant moves the signer gate in front of that one.
     mutant(
         "gf-finalize-gate-before-the-roster-guard",
         ["FIN-01"],
         STORE,
         "            manifest = self._run_v2(run_id)\n"
-        "            if self._service_boundary_v2(run_id, w) is not None:\n"
-        "                final_request = envelope_v2.Intake(\n"
-        '                    run_id, {"Finalize": manifest.training.coord_pubkey.__eq__}\n',
+        "            self.require_roster_v2(run_id, w)\n"
+        "            if not self._db.execute(\n",
         "            manifest = self._run_v2(run_id)\n"
         '            self._authenticated_v2(run_id, raw, "Finalize", '
         "manifest.training.coord_pubkey)\n"
-        "            if self._service_boundary_v2(run_id, w) is not None:\n"
-        "                final_request = envelope_v2.Intake(\n"
-        '                    run_id, {"Finalize": manifest.training.coord_pubkey.__eq__}\n',
+        "            self.require_roster_v2(run_id, w)\n"
+        "            if not self._db.execute(\n",
         [ROSTER_FIRST],
         "The signer gate moves in front of the roster guard (the order the Lens asked for): the "
         "test that documents the order of today fails, which is how a maintainer is told to "
@@ -354,8 +354,8 @@ MUTANTS = [
         "gf-finalize-skips-the-freshness-gate",
         ["FIN-04", "FIN-23"],
         STORE,
-        '            now = self._fresh_v2(manifest, f"finalize:{w}:{self._now(self._db)}")\n',
-        "            now = self._now(self._db)\n",
+        '                now = self._fresh_v2(manifest, f"finalize:{w}:{self._now(self._db)}")\n',
+        "                now = self._now(self._db)\n",
         [STALE],
         "A Finalize is settled and minted while the beacon feed is paused.",
     ),
