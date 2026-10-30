@@ -358,6 +358,22 @@
   `docs/adr/0011-audit-integrity.md` (Part 9, decision 12) at the monorepo root.
 
 ### Fixed
+- `GET /internal/v1/get_weights` no longer answers 409 `RUN_MANIFEST_RETIRED` for the whole state
+  directory when one hosted run has a stored manifest the model now refuses (S21, run 0ef600b4: the
+  stale TEST runs 2a7d7702 and fea7e44f lacked the env pin, so the settled round 0 could not be
+  served). Such a run, in the root or in a hosted store, is left out of the escrows its store pays
+  for the epoch: its units stay `available` (the run is expected to be recreated, so they may never
+  pay), its share of `full_share_mass` burns like any run with nothing to pay, and `records_v2` kind
+  `weights-skipped` (id = the epoch) holds the run id and the refusal. The other runs are answered;
+  any other failure to build a run's services still refuses the call.
+- An epoch answer is now committed by the root and by every hosted store, or by none of them. Each
+  hosted store used to commit its answer and its `available -> paid` units in its own transaction
+  before the root had a merged answer, so any call that failed after one of them left units counted
+  paid for an answer nobody was served (S21: 1,000,000 units of 0ef600b4), and the master asks an
+  epoch once. The transactions now end together (hosted stores first, the root last). The v1
+  journal files are not part of it, and a COMMIT that fails after another store committed still
+  leaves that store paid: a repeat of the same epoch returns the stored answers and pays nothing
+  twice. No manifest, run id, policy hash, wire format or `implementation_hash` changes.
 - A lease, and the replay it starts, are no longer refused during a beacon pause (S19 round 2, run
   f3901a09: 63 and 80 `/worker/lease` 503s, three audits lost). Within `RESULT_PAUSE_ROUNDS` (50) of
   the bound, on a running run without a service-admission record, the gate takes them as it takes a
