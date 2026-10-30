@@ -1,0 +1,1 @@
+{"gap_cap_rounds":400,"lease_rounds":100,"max_anchor_age_rounds":1,"max_attempts":2,"max_concurrent_per_auditor":1,"max_queued_jobs":32,"max_running_jobs":2,"max_steps_per_attempt":8,"reaudit_rounds":100,"step_seconds_bound":"00008040"}
