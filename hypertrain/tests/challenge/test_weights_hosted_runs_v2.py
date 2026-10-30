@@ -14,6 +14,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -33,6 +34,24 @@ spec.loader.exec_module(E)
 actual_reward = E.actual_reward
 
 UNITS = 1_000_000
+
+
+class CommitFails:
+    """A connection whose COMMIT of the epoch answer fails like a full disk: SQLite rolls back."""
+
+    def __init__(self, db: sqlite3.Connection) -> None:
+        self.db, self.answered = db, False
+
+    def execute(self, sql: str, *args: Any) -> sqlite3.Cursor:
+        if sql.startswith("INSERT INTO weights_runs"):
+            self.answered = True
+        elif sql == "COMMIT" and self.answered:
+            self.db.execute("ROLLBACK")
+            raise sqlite3.OperationalError("disk I/O error")
+        return self.db.execute(sql, *args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.db, name)
 
 
 class Hosted:
@@ -236,3 +255,25 @@ def test_a_child_that_fails_leaves_the_children_asked_before_it_unpaid(hosted) -
     # Then: all three are paid once.
     assert answer["weights"] == {E.HOT.ss58: 3.0 * UNITS}
     assert [hosted.pays(name) for name in "abc"] == [1, 1, 1]
+
+
+def test_a_commit_that_fails_halfway_is_repaired_by_the_replay_and_pays_each_once(hosted) -> None:
+    # Given: three healthy children whose answer commits run c, b, a, then the root; a's fails.
+    for name in "abc":
+        hosted.host(hosted.child(name), name)
+    a = hosted.root._children["a"]
+    real = a._db
+    a._db = CommitFails(real)
+    with pytest.raises(sqlite3.OperationalError):
+        hosted.root.weights(0, hosted.at(20), 1)
+    # Then: c and b hold the epoch they committed, a and the root hold nothing: the root, last,
+    # never answers an epoch a child could not keep.
+    assert [hosted.paid(name) for name in "abc"] == [0, UNITS, UNITS]
+    assert weights_runs(hosted.root) == []
+    # When: the epoch is asked again.
+    a._db = real
+    answer = json.loads(hosted.root.weights(0, hosted.at(20), 2))
+    # Then: the stored answers of b and c are merged with the ones computed now, each unit once.
+    assert answer["weights"] == {E.HOT.ss58: 3.0 * UNITS}
+    assert [hosted.pays(name) for name in "abc"] == [1, 1, 1]
+    assert weights_runs(hosted.root) == [0]
