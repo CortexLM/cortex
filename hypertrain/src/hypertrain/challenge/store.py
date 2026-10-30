@@ -2267,11 +2267,14 @@ class ChallengeStore:
                 ).fetchone()
                 and self._db.execute("SELECT 1 FROM escrow_finalized LIMIT 1").fetchone()
             )
-            escrows = [
-                self._services(r[0])[0]
-                for r in self._db.execute("SELECT run_id, manifest FROM runs ORDER BY run_id")
-                if live and json.loads(r[1]).get("manifest_version") == 2
-            ]
+            escrows: list[EscrowV2] = []
+            retired: list[tuple[str, str]] = []  # runs whose manifest the model now refuses
+            for r in self._db.execute("SELECT run_id, manifest FROM runs ORDER BY run_id"):
+                if live and json.loads(r[1]).get("manifest_version") == 2:
+                    try:
+                        escrows.append(self._services(r[0])[0])
+                    except RunRetired as error:
+                        retired.append((r[0], error.detail))
         with self._tx() as db:
             stored = db.execute(
                 "SELECT answer FROM weights_runs WHERE epoch=?", (epoch,)
@@ -2287,6 +2290,10 @@ class ChallengeStore:
                 answer = self._pay_v2(escrows, epoch, epoch_at, answer)
             last = self._meta(db, "last_answer_at", -1)
             self._set_meta(db, "last_answer_at", max(last, epoch_at))
+            for run_id, reason in retired:  # it owes nothing this epoch; its share burns
+                self._put_record_v2(
+                    run_id, "weights-skipped", str(epoch), {"epoch": epoch, "reason": reason}
+                )
             answers = [answer] + [
                 c.weights(epoch, epoch_at, computed_at) for c in self._children.values()
             ]

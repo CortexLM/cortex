@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from hypertrain.challenge.admission_store import AdmissionStore
-from hypertrain.challenge.store import ChallengeStore, RunRetired
+from hypertrain.challenge.store import ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.ledger import FULL_SHARE_MASS, Params
 from hypertrain.ledger.escrow_v2 import Settlement
@@ -35,9 +35,6 @@ actual_reward = E.actual_reward
 UNITS = 1_000_000
 
 # Red on the S21 base (e5900c3b); the fix commits remove these marks.
-retired_aborts = pytest.mark.xfail(
-    strict=True, raises=RunRetired, reason="a retired hosted run aborts the whole call"
-)
 paid_unserved = pytest.mark.xfail(
     strict=True, raises=AssertionError, reason="a child commits its payment before the root answers"
 )
@@ -131,7 +128,6 @@ def weights_runs(store: ChallengeStore) -> list[int]:
     return [r[0] for r in store._db.execute("SELECT epoch FROM weights_runs ORDER BY epoch")]
 
 
-@retired_aborts
 def test_a_retired_hosted_run_does_not_stop_the_weights_of_the_others(three_children) -> None:
     # Given: two healthy children with 1e6 payable units each and a retired one between them.
     h = three_children
@@ -158,7 +154,6 @@ def test_a_retired_hosted_run_does_not_stop_the_weights_of_the_others(three_chil
     assert skipped["reason"].startswith("RUN_MANIFEST_RETIRED: ")
 
 
-@retired_aborts
 def test_a_retired_run_in_the_root_does_not_stop_the_weights_of_its_children(hosted) -> None:
     # Given: the root hosts a retired run whose reward was finalized, and a healthy child.
     hosted.host(hosted.root, "root", retired=True)
@@ -171,7 +166,6 @@ def test_a_retired_run_in_the_root_does_not_stop_the_weights_of_its_children(hos
     assert answer["full_share_mass"] == 2 * FULL_SHARE_MASS
 
 
-@retired_aborts
 def test_a_second_call_for_the_same_epoch_replays_the_first_answer(three_children) -> None:
     # Given: an epoch served once.
     h = three_children
@@ -186,7 +180,6 @@ def test_a_second_call_for_the_same_epoch_replays_the_first_answer(three_childre
     assert (h.paid("a"), h.paid("b"), h.paid("c")) == (UNITS, 0, UNITS)
 
 
-@retired_aborts
 def test_children_that_already_hold_the_epoch_are_replayed_not_paid_again(three_children) -> None:
     # Given: the S21 state, a call that failed after children a and c committed their epoch
     # answers (each in its own transaction) while the root answer was never served.

@@ -250,23 +250,10 @@ MUTANTS = [
         "invariants": ["WGT-10"],
         "path": STORE,
         "old": (
-            "            escrows = [\n"
-            "                self._services(r[0])[0]\n"
-            "                for r in self._db.execute("
-            '"SELECT run_id, manifest FROM runs ORDER BY run_id")\n'
-            '                if live and json.loads(r[1]).get("manifest_version") == 2\n'
-            "            ]\n"
+            "                    except RunRetired as error:\n"
+            "                        retired.append((r[0], error.detail))\n"
         ),
-        "new": (
-            "            escrows = []\n"
-            "            for r in self._db.execute("
-            '"SELECT run_id, manifest FROM runs ORDER BY run_id"):\n'
-            '                if live and json.loads(r[1]).get("manifest_version") == 2:\n'
-            "                    try:\n"
-            "                        escrows.append(self._services(r[0])[0])\n"
-            "                    except ChallengeError:\n"
-            "                        continue\n"
-        ),
+        "new": ("                    except ChallengeError:\n                        continue\n"),
         "tests": [
             W1 + "test_a_failing_service_build_refuses_the_new_epoch_before_anything_is_journaled"
         ],
