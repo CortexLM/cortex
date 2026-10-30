@@ -358,6 +358,14 @@
   `docs/adr/0011-audit-integrity.md` (Part 9, decision 12) at the monorepo root.
 
 ### Fixed
+- A lease, and the replay it starts, are no longer refused during a beacon pause (S19 round 2, run
+  f3901a09: 63 and 80 `/worker/lease` 503s, three audits lost). Within `RESULT_PAUSE_ROUNDS` (50) of
+  the bound, on a running run without a service-admission record, the gate takes them as it takes a
+  result; a replay start only before its lease's real deadline. D105: no audit seed, auditor
+  selection or assignment depends on the lease round. A tolerated view, a result's included, is now
+  dated at `emitted - MAX_LAG_ROUNDS` instead of the stale verified round, so the lease's wall
+  length and the commit-expiry decision match a healthy view. Service-admitted runs keep the
+  2-round view. No manifest, run id, policy hash or `implementation_hash` changes.
 - An audit verdict is no longer lost to the beacon pause its own replay causes (S17d, run f3901a09):
   the replay's transactions hold the store lock, the pusher lands late, and the result transaction
   found the beacon 3 rounds behind and answered 503, so the verdict was never stored and the lease

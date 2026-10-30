@@ -2483,18 +2483,35 @@ class ChallengeStore:
     def _result_in_lease_v2(
         self, manifest: RunManifestV2, operation: str, now: int, emitted: int
     ) -> bool:
-        """A lagging view may still take an audit result or its completion (S17d).
+        """A lagging view may still take an audit result or its completion (S17d), a lease or the
+        start of its replay (S19, D105).
 
-        The replay's own transactions hold the store lock, so the pusher lands late. Allowed only
-        while the lease runs, before its real deadline (LeaseGuard's wall instant) and at most
-        RESULT_PAUSE_ROUNDS further behind; a lease and a replay's inputs need a fresh view.
+        The replay's own transactions hold the store lock, so the pusher lands late. Allowed at
+        most RESULT_PAUSE_ROUNDS further behind and, but for a new lease, while the lease runs,
+        before its real deadline (LeaseGuard's wall instant). A lease and a replay start also need
+        a running run without a service-admission record: no audit seed, auditor selection or
+        assignment depends on the lease round (D105), and admitted runs keep the fresh view.
         """
         kind, _, rest = operation.partition(":")
         if (
-            kind not in ("audit-result", "complete")
+            kind not in ("audit-result", "complete", "lease", "audit-execute")
             or now < emitted - MAX_LAG_ROUNDS - RESULT_PAUSE_ROUNDS
         ):
             return False
+        if kind in ("lease", "audit-execute") and (
+            self._db.execute(
+                "SELECT status FROM runs WHERE run_id=?", (manifest.run_id(),)
+            ).fetchone()[0]
+            != "running"
+            or self._db.execute(
+                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission' AND id='run'",
+                (manifest.run_id(),),
+            ).fetchone()
+            is not None
+        ):
+            return False
+        if kind == "lease":
+            return True
         row = self._db.execute(
             "SELECT state,expires,absolute FROM audit_leases_v2 WHERE run_id=? AND id=?",
             (manifest.run_id(), rest.rpartition(":")[0]),

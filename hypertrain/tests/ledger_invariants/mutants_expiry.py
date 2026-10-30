@@ -25,6 +25,10 @@ POISONED_HEAD = (
 )
 
 PAIR = TWO + "test_a_trial_pair_with_one_unfit_envelope_is_refused_whichever_one_it_is"
+# Hotfix 2 (S19, D105): a lease and its replay start tolerated through a beacon pause.
+PAUSE = "tests/challenge/test_audit_freshness_pause_v2.py::"
+PAUSE_TAKEN = PAUSE + "test_production_takes_a_lagging_result_on_its_bls_verified_pinned_round"
+PAUSE_REFUSED = PAUSE + "test_production_refuses_a_lagging_result_without_its_conditions"
 
 STORE = "src/hypertrain/challenge/store.py"
 ADMISSION_PY = "src/hypertrain/challenge/admission.py"
@@ -202,6 +206,47 @@ MUTANTS = [
         "new": "now = self._now(self._db)",
         "tests": [WRITE + "[lease]"],
         "why": "an audit lease is granted while the beacon is stale.",
+    },
+    {
+        "id": "exp-lagging-view-judged-at-its-stale-round",
+        "invariants": ["FIN-23", "CK-01"],
+        "path": STORE,
+        "old": "return max(now, emitted - MAX_LAG_ROUNDS)",
+        "new": "return now",
+        "tests": [
+            PAUSE_TAKEN + "[lease]",
+            PAUSE + "test_a_lease_during_a_pause_is_granted_no_longer_than_a_healthy_view_grants",
+        ],
+        "why": "a lease granted on a lagging view is dated at its stale round and ends early.",
+    },
+    {
+        "id": "exp-lease-tolerated-on-an-admitted-run",
+        "invariants": ["FIN-23"],
+        "path": STORE,
+        "old": "            ).fetchone()\n            is not None\n        ):\n"
+        '            return False\n        if kind == "lease":',
+        "new": "            ).fetchone()\n            is False\n        ):\n"
+        '            return False\n        if kind == "lease":',
+        "tests": [PAUSE_REFUSED + "[replay start of an admitted run]"],
+        "why": "a service-admitted run takes a lease or a replay start on a lagging view.",
+    },
+    {
+        "id": "exp-lease-tolerated-on-a-stopped-run",
+        "invariants": ["FIN-23"],
+        "path": STORE,
+        "old": '.fetchone()[0]\n            != "running"',
+        "new": '.fetchone()[0]\n            == "never"',
+        "tests": [PAUSE_REFUSED + "[lease of a paused run]"],
+        "why": "a run that is not running takes a lease on a lagging view.",
+    },
+    {
+        "id": "exp-replay-start-skips-the-lease-deadline",
+        "invariants": ["FIN-23"],
+        "path": STORE,
+        "old": 'if kind == "lease":\n            return True',
+        "new": 'if kind in ("lease", "audit-execute"):\n            return True',
+        "tests": [PAUSE_REFUSED + "[replay start at the deadline]"],
+        "why": "a replay starts on a lagging view at or after its lease's real deadline.",
     },
     {
         "id": "exp-finalize-replay-compares-nothing",

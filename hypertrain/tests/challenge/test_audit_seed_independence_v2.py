@@ -45,7 +45,7 @@ from .audit_lease_fixture_v2 import (
     seed_round,
 )
 from .five_identity_network_v2 import activate_identities
-from .test_audit_freshness_pause_v2 import wall_at
+from .test_audit_freshness_pause_v2 import running, wall_at
 from .test_audit_reaudit_v2 import complete, execute, genuine
 
 # What a lease adds to the scheduled job: its holder, the attempt and its dates.
@@ -152,16 +152,7 @@ VIEW = D_AUDIT + 5  # the master's newest verified round when the lease is asked
 LAG = MAX_LAG_ROUNDS + 1
 
 
-def paused(lag):
-    return pytest.param(
-        lag,
-        marks=pytest.mark.xfail(strict=True, reason="store.py:2441 refuses the lease: 503 paused"),
-    )
-
-
-@pytest.mark.parametrize(
-    "lag", [MAX_LAG_ROUNDS, paused(LAG), paused(MAX_LAG_ROUNDS + RESULT_PAUSE_ROUNDS)]
-)
+@pytest.mark.parametrize("lag", [MAX_LAG_ROUNDS, LAG, MAX_LAG_ROUNDS + RESULT_PAUSE_ROUNDS])
 @pytest.mark.parametrize(
     ("sealed", "status", "state"),
     [(-1, 204, ("exhausted", "MINER_INPUT_REFUSED")), (0, 200, ("running", None))],
@@ -173,6 +164,7 @@ def test_d105_a_commit_expiry_is_judged_at_the_round_a_healthy_view_holds(
     # MAX_LAG_ROUNDS), or at it. Before: the miner's fault, its job dropped and the queue empty.
     # At: served. A lag-2 view judges at its own round; a lagging one exactly there too.
     judged = VIEW + lag - MAX_LAG_ROUNDS
+    running(network)
     seed_round(network, n=1, commit_exp=judged + sealed)
     (job,) = schedule(network)
     network.push(VIEW)

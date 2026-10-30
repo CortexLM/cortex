@@ -26,7 +26,8 @@ NoShowAction = Literal["APPLY", "WAIT", "COVERED", "DROP"]
 MAX_LAG_ROUNDS = 2
 # The result of an audit replay, or its completion, may land this many rounds more behind while
 # its lease's real deadline is ahead: the TEST pusher catches up a store lock of up to 150 s
-# (scripts/ops/s100_test/challenge_image.sh, S17d paused 32-38 rounds); longer is an outage.
+# (scripts/ops/s100_test/challenge_image.sh, S17d paused 32-38 rounds); longer is an outage. A
+# lease and a replay start of a non-admitted run share the bound (S19, D105).
 RESULT_PAUSE_ROUNDS = 50
 
 

@@ -37,6 +37,7 @@ from typing import Any
 
 import pytest
 
+from hypertrain.challenge.exit_v2 import MAX_LAG_ROUNDS, RESULT_PAUSE_ROUNDS
 from hypertrain.ledger.escrow_v2 import (
     FinalityEvidence,
     authority_message,
@@ -233,7 +234,8 @@ def test_a_stale_beacon_refuses_a_round_write_with_503_and_leaves_no_trace(
 ) -> None:
     with service_world(tmp_path) as world:
         send = prepared_write(world, route)
-        stale(world, 3)
+        # A lease is tolerated up to the result's cap (hotfix 2, D105): past it, the same refusal.
+        stale(world, MAX_LAG_ROUNDS + RESULT_PAUSE_ROUNDS + 1 if route == "lease" else 3)
         before, written = tables(world), files(world)
         refused = send()
         assert (refused.status_code, refused.json()["detail"]) == (
