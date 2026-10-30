@@ -2476,7 +2476,9 @@ class ChallengeStore:
                 raise ChallengeError(
                     503, "beacon infrastructure paused; pinned seed retained"
                 ) from None
-        return now
+        # A tolerated lagging view is judged at the round a healthy view holds, never later; a
+        # healthy view (now >= emitted - MAX_LAG_ROUNDS) is judged at its own round as before.
+        return max(now, emitted - MAX_LAG_ROUNDS)
 
     def _result_in_lease_v2(
         self, manifest: RunManifestV2, operation: str, now: int, emitted: int

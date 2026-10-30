@@ -319,10 +319,11 @@ def production_pin(store, operation):
 @pytest.mark.parametrize("kind", ["audit-result", "complete"])
 def test_production_takes_a_lagging_result_on_its_bls_verified_pinned_round(production, kind):
     # (d) Lens (3): the production branch tolerates the same pause, the health round being the
-    # pinned round itself, re-verified against the drand quicknet key.
+    # pinned round itself, re-verified against the drand quicknet key. Hotfix 2: judged at the
+    # round a healthy view holds (emitted - MAX_LAG_ROUNDS), not at the stale pinned round.
     store, manifest, now = production
     production_wall(store, manifest, now + MAX_LAG_ROUNDS + RESULT_PAUSE_ROUNDS)
-    assert store._fresh_v2(manifest, f"{kind}:job:{now}") == now
+    assert store._fresh_v2(manifest, f"{kind}:job:{now}") == now + RESULT_PAUSE_ROUNDS
     assert production_pin(store, f"{kind}:job:{now}") == 0
 
 
