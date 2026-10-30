@@ -1,13 +1,13 @@
-"""The beacon gate of an audited round's aggregate and finalize tolerates a short pause (hotfix 3).
+"""The beacon gate of an audited round's aggregate and finalize tolerates a short pause (S21, D118).
 
-S21 (run 0ef600b4): round 0's finalize answered 503 "beacon infrastructure paused" twice, after
-2 min 14 s and 5 min, and round 1's three times: once at the end of a 4 min 31 s finalize, twice
-on an aggregate refused 7 s after entry. The view was 3 to 11 rounds behind the emitted round: the
-call's own work kept the pusher out (finalize), or the base beacon flickered to 3 (aggregate), and
-`_fresh_v2` held both kinds to MAX_LAG_ROUNDS = 2. An aggregate or finalize of a round whose
-audits are all terminal (and, for finalize, whose aggregate is stored) is now judged like a lease
-or an audit result: up to RESULT_PAUSE_ROUNDS further behind, at the round a healthy view holds.
-Here the gate alone; tests/e2e/test_finalize_freshness_v2_e2e.py drives the routes.
+S21 (run 0ef600b4, lot hotfix-finalize-freshness): round 0's finalize answered 503 "beacon
+infrastructure paused" twice, after 1 min 52 s and 2 min 14 s; round 1's once after 4 min 31 s,
+then its aggregate twice, 7 s after entry. The view was 3 to 11 rounds behind the emitted round:
+the finalize's own replay kept the pusher out until its gate, or the base beacon flickered to 3 at
+the aggregate's entry, and `_fresh_v2` held both kinds to MAX_LAG_ROUNDS = 2. An aggregate or
+finalize of a round whose audits are all resolved and whose tape is stored (its `finality` record,
+which `settle` reads) is now judged like a lease or an audit result: up to RESULT_PAUSE_ROUNDS
+further behind, at the round a healthy view holds. A first aggregate keeps the fresh view.
 """
 # ruff: noqa: F811  (the `network` fixture parameter shadows the imported fixture, as in test_multirun.py)
 
@@ -30,15 +30,29 @@ from .test_audit_freshness_pause_v2 import (
 CAP = MAX_LAG_ROUNDS + RESULT_PAUSE_ROUNDS
 
 
-def audited(store, run: str, *, w: int = 0, aggregated: bool = True) -> None:
-    """Round w audited, every job terminal (a MATCH and an exhausted one), its tape stored."""
-    for i, state in enumerate(("completed", "exhausted")):
-        store._db.execute(
-            "INSERT INTO audit_leases_v2(id,run_id,w,state) VALUES(?,?,?,?)",
-            (f"job-{w}-{i}", run, w, state),
-        )
-    if aggregated:
-        store._put_record_v2(run, "applied", str(w), {"theta_hash": "a" * 64})
+def audited(store, run: str, *, w: int = 0) -> None:
+    """Round w's finality record as the aggregate leaves it: every audit resolved, tape applied."""
+    store._put_record_v2(
+        run,
+        "finality",
+        str(w),
+        {
+            "run_id": run,
+            "w": w,
+            "applied": True,
+            "disposition": "PENDING",
+            "unresolved_disputes": 0,
+            "unresolved_audits": 0,
+            "rollback_complete": False,
+            "state_hash": "a" * 64,
+            "resolution_hash": None,
+        },
+    )
+
+
+def change_finality(store, run: str, **fields) -> None:
+    record = store._record_v2(run, "finality", "0")
+    store._put_record_v2(run, "finality", "0", {**record, **fields})
 
 
 @pytest.fixture
@@ -58,10 +72,10 @@ def pin(store, operation):
     )
 
 
-@pytest.mark.parametrize("lag", [MAX_LAG_ROUNDS + 1, 11, CAP])
+@pytest.mark.parametrize("lag", [MAX_LAG_ROUNDS + 1, 8, 9, 10, 11, CAP])
 @pytest.mark.parametrize("kind", ["aggregate", "finalize"])
 def test_an_audited_round_is_aggregated_and_finalized_on_a_lagging_view(lagging, kind, lag):
-    # The S21 views: a flicker of 3 at an aggregate's entry, 11 at a finalize's end, and the cap.
+    # The S21 views: a flicker of 3 at an aggregate's entry, 8 to 11 at a finalize's gate, the cap.
     store, now = lagging.store, lagging.now
     wall_at(lagging, now + lag)
     operation = f"{kind}:0:{now}"
@@ -78,34 +92,32 @@ def test_an_audited_round_is_aggregated_and_finalized_on_a_lagging_view(lagging,
             for kind in ("aggregate", "finalize")
             for fault in (
                 "past the cap",
-                "an audit running",
-                "an audit queued",
-                "no audit job",
+                "an audit unresolved",
+                "not aggregated",
+                "no finality record",
                 "only another round audited",
                 "an admitted run",
                 "a paused run",
             )
         ),
-        ("finalize", "not aggregated"),
         ("aggregate-result", "not a tolerated kind"),
     ],
 )
 def test_a_lagging_aggregate_or_finalize_is_refused_without_its_conditions(lagging, kind, fault):
     store, run, now = lagging.store, lagging.manifest.run_id(), lagging.now
     lag = CAP + 1 if fault == "past the cap" else MAX_LAG_ROUNDS + 1
-    if fault.startswith("an audit"):
-        state = fault.rpartition(" ")[2]
-        store._db.execute("UPDATE audit_leases_v2 SET state=? WHERE id='job-0-1'", (state,))
-    elif fault == "no audit job":
-        store._db.execute("DELETE FROM audit_leases_v2")
+    if fault == "an audit unresolved":  # a job queued, running or parked: the counter stays
+        change_finality(store, run, unresolved_audits=1)
+    elif fault == "not aggregated":  # a first aggregate, or a finalize before it
+        change_finality(store, run, applied=False)
+    elif fault == "no finality record":
+        store._db.execute("DELETE FROM records_v2 WHERE kind='finality'")
     elif fault == "only another round audited":
-        store._db.execute("UPDATE audit_leases_v2 SET w=1")
+        store._db.execute("UPDATE records_v2 SET id='1' WHERE kind='finality'")
     elif fault == "an admitted run":
         store._put_record_v2(run, "service-admission", "run", {"probe": True})
     elif fault == "a paused run":
         store._db.execute("UPDATE runs SET status='paused'")
-    elif fault == "not aggregated":
-        store._db.execute("DELETE FROM records_v2 WHERE kind='applied'")
     wall_at(lagging, now + lag)
     operation = f"{kind}:0:{now}"
     with pytest.raises(ChallengeError) as refused:
@@ -116,10 +128,9 @@ def test_a_lagging_aggregate_or_finalize_is_refused_without_its_conditions(laggi
 
 @pytest.fixture
 def production_round(production):
-    """The production store of hotfix 2, its one lease now the terminal audit of round 0."""
+    """The production store of hotfix 2, its round 0 audited and aggregated."""
     store, manifest, now = production
-    store._db.execute("UPDATE audit_leases_v2 SET w=0, state='completed'")
-    store._put_record_v2(manifest.run_id(), "applied", "0", {"theta_hash": "a" * 64})
+    audited(store, manifest.run_id())
     return production
 
 
