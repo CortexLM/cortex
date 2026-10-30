@@ -128,8 +128,9 @@ Backups from the first versions of the script list five files and have no `relay
 The test ledger refuses joins, trials and leases with 503 "beacon infrastructure paused" when the
 beacon lags more than 2 rounds (`store.py` `_snapshot_current_v2`).
 
-On s100 each round costs about 2.4 s against the 3 s drand period (S7 measurement [A]): the pusher
-verifies each round with py_ecc BLS (about 1.2 s) and the challenge verifies it again on ingest.
+On s100 each round cost about 2.4 s against the 3 s drand period in S7 (measurement [A]) and 2.7 to
+2.8 s in S17d (median 2.81 s over 40 timed catch-up ticks, 2026-10-29): the pusher verifies each round
+with py_ecc BLS and the challenge verifies it again on ingest.
 With the original `--interval 3 --catch-up 20` the lag held at 8-9 rounds; with `--interval 0.2` it
 is 1-2 rounds when idle (measured 2026-10-26).
 
@@ -183,7 +184,9 @@ for up to about `4 x lock + 10` s with the run in the root store, about `3 x loc
 after a 13 s reference, 1 minute after 19 s, **3 to 4 minutes after a 60 s reference**. That figure is
 very sensitive to the cost of one round: at 2.6 s it doubles, at 2.8 s it is five times larger, and at
 2.9 s the pusher never catches up. With head first the model says the gate reopens within 7 s of a lock
-of 13 to 60 s, in either layout, and holds up to 2.6 s a round. Both fixes are in the code (ADR 0012
+of 13 to 60 s, in either layout, and holds up to 2.6 s a round. At the S17d cost of 2.7 to 2.8 s it
+reopens 3 to 31 s after a 12.6 to 17.5 s lock, where the ascending pusher needs 57 to 263 s, but
+the older rounds then come in one per tick for minutes. Both fixes are in the code (ADR 0012
 section 2, the lock released during the reference, and section 3, head first) but have not run on s100:
 the stack runs the older challenge image and pusher until Forge swaps them. Until then keep the two
 rules: keep the CUDA cache (the executor does by default), and run the first reference after a new image
