@@ -476,10 +476,10 @@ def program(name: str) -> str:
 
 
 def call(cmd: str, backup: Path) -> tuple[str, ...]:
-    """The arguments of `cmd` for a backup directory (swap also takes the new image, executor the
-    path of its config inside the container)."""
-    if cmd == "swap":
-        return ("swap", NEW_REF, str(backup))
+    """The arguments of `cmd` for a backup directory (swap and beacon-image also take the new image,
+    executor the path of its config inside the container)."""
+    if cmd in ("swap", "beacon-image"):
+        return (cmd, NEW_REF, str(backup))
     return (cmd, str(backup), EXECUTOR_PATH) if cmd == "executor" else (cmd, str(backup))
 
 

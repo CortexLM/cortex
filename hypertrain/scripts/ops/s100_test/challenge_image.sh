@@ -6,6 +6,12 @@
 #   backup TS            snapshot compose files, both SQLite DBs (integrity ok), relay.json,
 #                        metagraph.json and inspect JSON (env names only), with SHA256SUMS
 #   swap NEW_REF BACKUP  gate, pin NEW_REF on the challenge service, up -d --no-deps challenge
+#                        then beacon-image NEW_REF: the pusher must not run older code than the
+#                        challenge (S19: it still ran a pusher from before ADR 0012 Part B); exit 4
+#                        if the two containers then run different images
+#   beacon-image NEW_REF BACKUP
+#                        gate, pin NEW_REF on the beacon service alone, up -d --no-deps beacon; its
+#                        command must keep the cadence beacon BACKUP wrote (exit 5 if not)
 #   beacon BACKUP        gate, set the pusher to --interval 0.2 --catch-up 60 --max-failures 100.
 #                        A store lock hides rounds from the pusher; it then pushes the latest round
 #                        first and refills the older ones, one per tick, at most catch-up of them
@@ -40,9 +46,9 @@
 #                        image DIGEST that reports its CA paths and does the TLS handshakes. Prints
 #                        HTTP statuses, byte counts and seconds, no URL.
 # rollback and restore-db are not gated: they are the way back from a bad change.
-# swap, beacon, paper, rollback, executor and executor-off refuse (exit 4) a compose file with a
-# service whose container_name is missing or is not one of the six TEST names; executor checks the
-# live file and the live file merged with its override. restore-db runs no compose.
+# swap, beacon-image, beacon, paper, rollback, executor and executor-off refuse (exit 4) a compose
+# file with a service whose container_name is missing or is not one of the six TEST names; executor
+# checks the live file and the live file merged with its override. restore-db runs no compose.
 # Exit codes: 2 usage (and master readyz), 3 seal gate, 4 refusal, 5 unexpected compose change, 6 DB,
 # 7 the challenge is not up, or not configured as asked, after a change, 8 r2-check did not complete.
 set -euo pipefail
@@ -51,7 +57,7 @@ STATE=/data/hypertrain-test/state; API=http://127.0.0.1:18996; MASTER=http://10.
 CDATA=/data
 CUID=65532
 XD=$STATE/executor; R2S=$CDATA/executor/r2-artifacts.json; R2F=$XD/r2-artifacts.json
-cmd=${1:?backup|swap|paper|rollback|restore-db|executor|executor-off|r2-check}
+cmd=${1:?backup|swap|beacon-image|beacon|paper|rollback|restore-db|executor|executor-off|r2-check}
 compose() { (cd "$T" && docker compose -f "$1" "${@:2}"); }
 images() { # service -> image as compose resolves it
   compose "$1" config --format json | python3 -I -c '
@@ -100,6 +106,22 @@ age=(datetime.datetime.now(datetime.timezone.utc)-c).total_seconds(); now=json.l
 print("gate seal epoch",d["epoch"],"master epoch",now,"sealed",d.get("sealed"),"age_s",int(age))
 sys.exit(0 if d.get("sealed") is True and 0<=age<int(sys.argv[2]) and d["epoch"]==now-1 else 3)' \
     "$ready" "$max" || { echo "GATE seal not sealed, older than ${max}s, or behind"; exit 3; }; }
+wanted() { # wanted REF: a digest of our repository, already pulled
+  [[ $1 =~ ^ghcr\.io/cortexlm/cortex/hypertrain@sha256:[0-9a-f]{64}$ ]] || { echo "bad ref"; exit 4; }
+  [ "$(docker image inspect "$1" --format '{{.Id}}')" = "${1#*@}" ] || { echo "image not pulled"; exit 4; }; }
+anchor() { # anchor CONTAINER_NAME: exactly one service of $F carries that name
+  grep -c "^    container_name: $1\$" "$F" | grep -qx 1 || { echo "anchor"; exit 4; }; }
+pin() { # pin CONTAINER_NAME REF: $F with REF as the image of that one service, on stdout
+  # a second pin finds the image line the first one added: drop it, or the key would be defined twice
+  sed "/^    container_name: $1\$/{n;/^    image: /d}" "$F" | sed "/^    container_name: $1\$/a\\    image: $2"; }
+beacon_on() { # beacon_on IMAGE_ID: the beacon container runs exactly IMAGE_ID
+  [ "$(docker inspect hypertrain-test-beacon --format '{{.Image}}')" = "$1" ] \
+    || { echo "beacon not on $1"; exit 4; }; }
+pushed() { # what the pusher did since it was recreated, and how far behind the service is
+  sleep 20; docker logs --since 25s hypertrain-test-beacon 2>&1 | tail -4 | cut -c1-160
+  curl -s -m 10 "$API/v1/beacon/latest" | python3 -I -c '
+import json,sys,time
+r=json.load(sys.stdin)["round"]; print("lag", (int(time.time())-1692803367)//3+1-r)'; }
 live() { # live IMAGE_ID: the challenge answers /version and runs exactly IMAGE_ID
   local i; for i in $(seq 1 30); do curl -sf -m 5 -o /dev/null "$API/version" && break; sleep 1; done
   curl -sf -m 5 -o /dev/null "$API/version" || { echo "challenge /version not 2xx"; exit 7; }
@@ -133,7 +155,9 @@ required = {p for p in sys.argv[3:] if not p.startswith("+")}
 allowed = required | {p[1:] for p in sys.argv[3:] if p.startswith("+")}
 sys.exit(0 if required <= set(changed) <= allowed and (required or changed) else 5)
 EOF
-  if [ "$step" = beacon ]; then # the cadence the edit was meant to reach, read from the resolved config
+  # the cadence the edit was meant to reach (or, beacon-image alone, kept), read from the resolved
+  # config; swap leaves the command as it was, beacon BACKUP may come after it
+  if [ "$step" = beacon ] || [ "$cmd" = beacon-image ]; then
     python3 -I -c '
 import json,sys
 e=json.load(open(sys.argv[1]))["services"]["beacon"]["entrypoint"]
@@ -142,7 +166,7 @@ sys.exit(0 if flags and (e[9],e[11])==("0.2","60") and int(e[13])>=100 else 5)' 
       || { rm -f "$F.new"; echo "beacon cadence not reached"; exit 5; }
   fi
   cp -p "$F" "$B/compose.test.yml.before-$step"; mv "$F.new" "$F"; date -u +%FT%TZ
-  compose "$F" up -d --no-deps "$step" 2>&1 | tail -3; }
+  compose "$F" up -d --no-deps "${step%-image}" 2>&1 | tail -3; }  # beacon-image: the beacon
 # The challenge's own view of the R2 settings, run in the container as its user (docs/adr/0013). It
 # never builds an Executor: its Journal repairs the live journal file. Everything it prints is a fixed
 # sentence, a variable name or a class name; a loader message is printed only when it is one of the
@@ -559,15 +583,25 @@ json.dump(cs,sys.stdout,indent=1)' > "$B/inspect-before.json"
   (cd "$B" && sha256sum compose.test.yml compose.relay.yml challenge.db server_keys.db \
     relay.json metagraph.json inspect-before.json > SHA256SUMS && cat SHA256SUMS); echo "backup $B";;
 swap)
-  NEW=${2:?NEW_REF}; B=${3:?BACKUP}; backup_dir "$B"; gate
-  [[ $NEW =~ ^ghcr\.io/cortexlm/cortex/hypertrain@sha256:[0-9a-f]{64}$ ]] || { echo "bad ref"; exit 4; }
-  [ "$(docker image inspect "$NEW" --format '{{.Id}}')" = "${NEW#*@}" ] || { echo "image not pulled"; exit 4; }
-  grep -c '^    container_name: hypertrain-test-challenge$' "$F" | grep -qx 1 || { echo "anchor"; exit 4; }
-  # a second swap finds the image line the first one added: drop it, or the key would be defined twice
-  umask 077; sed '/^    container_name: hypertrain-test-challenge$/{n;/^    image: /d}' "$F" \
-    | sed "/^    container_name: hypertrain-test-challenge\$/a\\    image: $NEW" > "$F.new"
+  NEW=${2:?NEW_REF}; B=${3:?BACKUP}; backup_dir "$B"; gate; wanted "$NEW"
+  anchor hypertrain-test-challenge
+  # every name before the first change: a production twin as beacon is refused as such, not as no anchor
+  compose "$F" config --format json | test_names "$F" || exit 4
+  anchor hypertrain-test-beacon
+  umask 077; pin hypertrain-test-challenge "$NEW" > "$F.new"
   apply challenge "$B" services.challenge.image
-  images "$F"; live "${NEW#*@}"; sleep 6; date -u +%FT%TZ; check;;
+  live "${NEW#*@}"
+  # then the beacon: S19 still ran a pusher older than ADR 0012 Part B, as no swap ever moved it
+  if ! images "$F" | grep -qxF "beacon $NEW"; then
+    pin hypertrain-test-beacon "$NEW" > "$F.new"; apply beacon-image "$B" services.beacon.image
+  fi
+  images "$F"; beacon_on "${NEW#*@}"; sleep 6; date -u +%FT%TZ; check;;
+beacon-image)
+  NEW=${2:?NEW_REF}; B=${3:?BACKUP}; backup_dir "$B"; gate; wanted "$NEW"
+  anchor hypertrain-test-beacon
+  umask 077; pin hypertrain-test-beacon "$NEW" > "$F.new"
+  apply beacon-image "$B" services.beacon.image
+  images "$F"; beacon_on "${NEW#*@}"; pushed;;
 beacon)
   B=${2:?BACKUP}; backup_dir "$B"; gate
   umask 077; sed -E -e 's#--interval, "(3|0\.2)",$#--interval, "0.2",#' \
@@ -575,10 +609,7 @@ beacon)
     -e 's#(--max-failures, ")([0-9]|[1-9][0-9])"#\1100"#' "$F" > "$F.new"
   apply beacon "$B" +services.beacon.entrypoint.9 +services.beacon.entrypoint.11 \
     +services.beacon.entrypoint.13
-  sleep 20; docker logs --since 25s hypertrain-test-beacon 2>&1 | tail -4 | cut -c1-160
-  curl -s -m 10 "$API/v1/beacon/latest" | python3 -I -c '
-import json,sys,time
-r=json.load(sys.stdin)["round"]; print("lag", (int(time.time())-1692803367)//3+1-r)';;
+  pushed;;
 paper)
   B=${2:?BACKUP}; backup_dir "$B"; backup_names "$B"; images "$B/compose.test.yml"
   echo "live: $(docker inspect "$C" --format '{{.Config.Image}}')"

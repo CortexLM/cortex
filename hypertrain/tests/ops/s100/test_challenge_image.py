@@ -43,7 +43,17 @@ from .sandbox import (
     tree,
 )
 
-CMDS = ("swap", "beacon", "paper", "rollback", "restore-db", "executor", "executor-off")
+CMDS = (
+    "swap",
+    "beacon-image",
+    "beacon",
+    "paper",
+    "rollback",
+    "restore-db",
+    "executor",
+    "executor-off",
+)
+MOVES = {"swap": {CHALLENGE, BEACON}, "beacon": {BEACON}, "executor": {CHALLENGE}}  # what goes live
 DB_FILES = ("challenge.db", "server_keys.db")
 
 
@@ -121,7 +131,7 @@ GATE = {  # id: (seal arguments, exit code)
 }
 
 
-@pytest.mark.parametrize("cmd", ["swap", "beacon", "executor"])
+@pytest.mark.parametrize("cmd", ["swap", "beacon-image", "beacon", "executor"])
 @pytest.mark.parametrize(("seal", "rc"), GATE.values(), ids=GATE)
 def test_a_closed_gate_refuses_before_any_change(box, backup, cmd, seal, rc):
     box.pull(NEW_REF)
@@ -139,7 +149,7 @@ def test_a_seal_younger_than_75_minutes_for_the_previous_epoch_opens_the_gate(
     # D67: the TEST gate used to close 30 minutes into the 72-minute window (4320 s is one epoch).
     box.pull(NEW_REF)
     box.seal(age=age)
-    box.run(*call(cmd, backup), mutates={CHALLENGE if cmd != "beacon" else BEACON})
+    box.run(*call(cmd, backup), mutates=MOVES[cmd])
 
 
 def test_a_second_swap_replaces_the_image_line_of_the_first_instead_of_adding_one(box, backup):
@@ -147,10 +157,10 @@ def test_a_second_swap_replaces_the_image_line_of_the_first_instead_of_adding_on
     box.pull(NEW_REF)
     box.pull(other)
     box.seal(age=60)
-    box.run(*call("swap", backup), mutates={CHALLENGE})
-    box.run("swap", other, str(backup), mutates={CHALLENGE})
+    box.run(*call("swap", backup), mutates={CHALLENGE, BEACON})
+    box.run("swap", other, str(backup), mutates={CHALLENGE, BEACON})
     lines = [x for x in box.f.read_text().splitlines() if x.startswith("    image: ")]
-    assert lines == [f"    image: {other}"]  # a key defined twice is a compose parse error
+    assert lines == [f"    image: {other}"] * 2  # a key defined twice is a compose parse error
     assert box.container(CHALLENGE)["Config"]["Image"] == other
 
 
@@ -167,14 +177,14 @@ def test_the_age_override_closes_a_gate_that_only_the_age_opened(box, backup, cm
     out = box.run(*call(cmd, backup), rc=3, env=LIMIT).out
     assert box.snapshot() == before
     assert "age limit overridden: HT_GATE_MAX_AGE_S=1800 (default 4500)" in out
-    box.run(*call(cmd, backup), mutates={BEACON if cmd == "beacon" else CHALLENGE})  # no setting
+    box.run(*call(cmd, backup), mutates=MOVES[cmd])  # no setting
 
 
 @pytest.mark.parametrize("cmd", ["swap", "beacon"])
 def test_a_seal_younger_than_the_override_still_opens_the_gate(box, backup, cmd):
     box.pull(NEW_REF)
     box.seal(age=1799.5)
-    out = box.run(*call(cmd, backup), mutates={CHALLENGE if cmd == "swap" else BEACON}, env=LIMIT)
+    out = box.run(*call(cmd, backup), mutates=MOVES[cmd], env=LIMIT)
     assert "age limit overridden: HT_GATE_MAX_AGE_S=1800 (default 4500)" in out.out
 
 
@@ -218,7 +228,9 @@ def test_the_default_gate_does_not_mention_an_override(box, backup, env):
     # 4500 is the default as well as the largest value the variable takes
     box.pull(NEW_REF)
     box.seal(age=4499.5)
-    assert "overridden" not in box.run(*call("swap", backup), mutates={CHALLENGE}, env=env).out
+    assert (
+        "overridden" not in box.run(*call("swap", backup), mutates={CHALLENGE, BEACON}, env=env).out
+    )
 
 
 # --- backup validity ------------------------------------------------------------------------
@@ -302,15 +314,22 @@ def test_backup_fails_when_a_database_copy_fails_its_integrity_check(box: Box) -
 # --- swap -----------------------------------------------------------------------------------
 
 
-def test_swap_pins_the_new_image_and_recreates_only_the_challenge(box, backup):
+def test_swap_pins_the_new_image_on_the_challenge_and_its_beacon_and_recreates_only_those(
+    box, backup
+):
+    # S19: every swap left the beacon on its own image, a pusher from before ADR 0012 Part B
     box.pull(NEW_REF)
     original = tree(backup)
-    out = box.run(*call("swap", backup), mutates={CHALLENGE}).out
-    pin = f"container_name: {CHALLENGE}\n"
-    assert box.f.read_text() == COMPOSE.replace(pin, f"{pin}    image: {NEW_REF}\n")
+    out = box.run(*call("swap", backup), mutates={CHALLENGE, BEACON}).out
+    pinned = COMPOSE
+    for name in (CHALLENGE, BEACON):
+        pin = f"container_name: {name}\n"
+        pinned = pinned.replace(pin, f"{pin}    image: {NEW_REF}\n")
+    assert box.f.read_text() == pinned
     assert box.container(CHALLENGE)["Image"] == NEW_ID
     assert box.container(CHALLENGE)["Config"]["Image"] == NEW_REF
-    assert box.container(BEACON)["Image"] == BEACON_ID
+    assert box.container(BEACON)["Image"] == NEW_ID
+    assert box.container(BEACON)["Config"]["Image"] == NEW_REF
     assert f"challenge {NEW_REF}" in out and "public runs sha" in out
     assert stat.S_IMODE(box.f.stat().st_mode) == 0o600
     assert not box.new.exists()
@@ -382,10 +401,22 @@ def test_swap_fails_unless_the_challenge_answers_and_runs_the_new_image(
     assert message in box.run(*call("swap", backup), rc=7, mutates={CHALLENGE}).out
 
 
+def test_swap_refuses_a_beacon_left_on_another_image_than_the_challenge(box, backup):
+    # the live file already pins the beacon (an edit nobody brought up): nothing recreates it
+    box.pull(NEW_REF)
+    pin = f"container_name: {BEACON}\n"
+    box.f.write_text(COMPOSE.replace(pin, f"{pin}    image: {NEW_REF}\n"))
+    out = box.run(*call("swap", backup), rc=4, mutates={CHALLENGE}).out
+    assert f"beacon not on {NEW_ID}" in out
+    assert (
+        box.container(CHALLENGE)["Image"] == NEW_ID and box.container(BEACON)["Image"] == BEACON_ID
+    )
+
+
 def test_swap_gives_the_challenge_the_whole_30_attempt_loop_to_answer(box, backup):
     box.pull(NEW_REF)
     box.url(f"{API}/version", body="{}", down_first=30)
-    box.run(*call("swap", backup), mutates={CHALLENGE})
+    box.run(*call("swap", backup), mutates={CHALLENGE, BEACON})
     assert box.polls(f"{API}/version") > 30
 
 
@@ -549,12 +580,57 @@ def test_beacon_reads_the_service_answer_with_an_isolated_interpreter(box, backu
     box.run("beacon", backup, mutates={BEACON})
 
 
+# --- beacon-image ---------------------------------------------------------------------------
+
+
+def test_beacon_image_moves_the_retuned_pusher_alone_and_rollback_puts_it_back(box, backup):
+    box.pull(NEW_REF)
+    box.run("beacon", backup, mutates={BEACON})
+    retuned = with_cadence("0.2", "60", '"100"')
+    out = box.run(*call("beacon-image", backup), mutates={BEACON}).out
+    assert "changed ['services.beacon.image']" in out and "lag" in out
+    pin = f"container_name: {BEACON}\n"
+    assert box.f.read_text() == retuned.replace(pin, f"{pin}    image: {NEW_REF}\n")
+    assert cadence(box) == TARGET
+    assert box.container(BEACON)["Image"] == NEW_ID
+    assert box.container(CHALLENGE)["Image"] == OLD_ID
+    assert (backup / "compose.test.yml.before-beacon-image").read_text() == retuned
+    box.run("rollback", backup, mutates={CHALLENGE, BEACON})
+    assert box.f.read_bytes() == (backup / "compose.test.yml").read_bytes()
+    assert box.container(BEACON)["Config"]["Image"] == OLD_REF
+
+
+def test_beacon_image_refuses_a_pusher_without_the_shipped_cadence(box, backup):
+    box.pull(NEW_REF)
+    before = box.snapshot()
+    out = box.run(*call("beacon-image", backup), rc=5).out
+    assert "beacon cadence not reached" in out
+    assert box.snapshot() == before and not box.new.exists()
+
+
+@pytest.mark.parametrize("ref", BAD_REFS.values(), ids=BAD_REFS)
+def test_beacon_image_refuses_a_ref_that_is_not_a_digest_of_our_repository(box, backup, ref):
+    box.f.write_text(with_cadence("0.2", "60", '"100"'))
+    box.pull(ref)
+    before = box.snapshot()
+    assert "bad ref" in box.run("beacon-image", ref, backup, rc=4).out
+    assert box.snapshot() == before
+
+
+def test_beacon_image_refuses_a_beacon_compose_did_not_recreate(box, backup):
+    box.f.write_text(with_cadence("0.2", "60", '"100"'))
+    box.pull(NEW_REF)
+    box.docker(stale_up=True)
+    out = box.run(*call("beacon-image", backup), rc=4, mutates={BEACON}).out
+    assert f"beacon not on {NEW_ID}" in out
+
+
 # --- paper ----------------------------------------------------------------------------------
 
 
 def test_paper_prints_the_backed_up_image_and_changes_nothing(box, backup):
     box.pull(NEW_REF)
-    box.run(*call("swap", backup), mutates={CHALLENGE})
+    box.run(*call("swap", backup), mutates={CHALLENGE, BEACON})
     before = box.snapshot()
     out = box.run("paper", backup).out
     assert f"challenge {OLD_REF}" in out and f"live: {NEW_REF}" in out
@@ -567,7 +643,7 @@ def test_paper_prints_the_backed_up_image_and_changes_nothing(box, backup):
 
 def test_rollback_restores_the_compose_and_both_containers_with_the_gate_closed(box, backup):
     box.pull(NEW_REF)
-    box.run(*call("swap", backup), mutates={CHALLENGE})
+    box.run(*call("swap", backup), mutates={CHALLENGE, BEACON})
     box.run("beacon", backup, mutates={BEACON})
     box.seal(age=7200, ready=503)  # rollback and restore-db are the way back: never gated
     out = box.run("rollback", backup, mutates={CHALLENGE, BEACON}).out
@@ -577,7 +653,7 @@ def test_rollback_restores_the_compose_and_both_containers_with_the_gate_closed(
 
 def test_rollback_puts_the_challenge_back_on_the_image_its_own_entry_recorded(box, backup):
     box.pull(NEW_REF)
-    box.run(*call("swap", backup), mutates={CHALLENGE})
+    box.run(*call("swap", backup), mutates={CHALLENGE, BEACON})
     recorded = {
         c["Name"]: c["Image"] for c in json.loads((backup / "inspect-before.json").read_text())
     }
@@ -625,7 +701,7 @@ def test_rollback_fails_unless_the_challenge_is_back_on_the_old_image(
     box, backup, fault, rc, mutates, message
 ):
     box.pull(NEW_REF)
-    box.run(*call("swap", backup), mutates={CHALLENGE})
+    box.run(*call("swap", backup), mutates={CHALLENGE, BEACON})
     box.docker(**{fault: True})
     assert message in box.run("rollback", backup, rc=rc, mutates=mutates).out
 
@@ -656,7 +732,9 @@ def test_executor_adds_the_variable_to_the_challenge_alone_and_executor_off_drop
 
 def test_executor_and_executor_off_bring_up_the_live_compose_not_the_backed_up_one(box, backup):
     box.pull(NEW_REF)
-    box.run(*call("swap", backup), mutates={CHALLENGE})  # the live file now pins the new image
+    box.run(
+        *call("swap", backup), mutates={CHALLENGE, BEACON}
+    )  # the live file now pins the new image
     box.run(*call("executor", backup), mutates={CHALLENGE})
     assert box.container(CHALLENGE)["Image"] == NEW_ID and EXECUTOR_VAR in box.env(CHALLENGE)
     box.run("executor-off", backup, mutates={CHALLENGE})
@@ -774,7 +852,7 @@ def test_beacon_checks_the_flags_at_the_positions_it_reads_not_only_their_values
 def test_a_swap_to_the_image_the_challenge_already_pins_changes_nothing_and_is_refused(box, backup):
     # the image is the one field a swap must change: a run that changes nothing is not a swap
     box.pull(NEW_REF)
-    box.run(*call("swap", backup), mutates={CHALLENGE})
+    box.run(*call("swap", backup), mutates={CHALLENGE, BEACON})
     before = box.snapshot()
     out = box.run(*call("swap", backup), rc=5).out
     assert "changed []" in out and "unexpected compose change" in out
