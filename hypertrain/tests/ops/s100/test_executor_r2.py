@@ -23,6 +23,7 @@ from hypertrain.gpu_ops.artifact_transfer import ArtifactSettings
 from .sandbox import (
     API,
     ARTIFACTS_VAR,
+    BEACON,
     CHALLENGE,
     COMPOSE,
     EXECUTOR_PATH,
@@ -530,7 +531,9 @@ def test_a_settings_file_that_is_a_link_is_not_the_script_s_to_replace(box, back
 def test_a_swap_drops_the_variables_and_the_same_command_brings_them_back(box, backup):
     box.pull(f"ghcr.io/cortexlm/cortex/hypertrain@{NEW_ID}")
     r2(box, backup, mutates={CHALLENGE})
-    box.run("swap", f"ghcr.io/cortexlm/cortex/hypertrain@{NEW_ID}", backup, mutates={CHALLENGE})
+    box.run(
+        "swap", f"ghcr.io/cortexlm/cortex/hypertrain@{NEW_ID}", backup, mutates={CHALLENGE, BEACON}
+    )
     env = box.env(CHALLENGE)  # compose.test.yml alone: the documented behaviour
     assert EXECUTOR_VAR not in env and ARTIFACTS_VAR not in env
     r2(box, backup, mutates={CHALLENGE})  # the doc says: rerun the same command

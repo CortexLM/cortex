@@ -97,7 +97,7 @@ def test_a_legacy_backup_without_relay_and_stub_files_is_accepted(box, backup):
         "".join(f"{digest_of(backup / n)}  {n}\n" for n in legacy.split())
     )
     box.pull(NEW_REF)
-    box.run(*call("swap", backup), mutates={CHALLENGE})
+    box.run(*call("swap", backup), mutates={CHALLENGE, BEACON})
     box.run("rollback", backup, mutates={CHALLENGE, BEACON})
 
 
@@ -113,7 +113,7 @@ def test_sums_written_in_binary_mode_are_accepted(box, backup):
 
 def test_files_added_by_earlier_commands_are_not_part_of_the_check(box, backup):
     box.pull(NEW_REF)
-    box.run(*call("swap", backup), mutates={CHALLENGE})
+    box.run(*call("swap", backup), mutates={CHALLENGE, BEACON})
     box.run("restore-db", backup, mutates={CHALLENGE})
     names = {p.name for p in backup.iterdir()}
     assert "config-before-challenge.json" in names and "compose.test.yml.before-challenge" in names

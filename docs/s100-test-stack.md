@@ -35,10 +35,16 @@ The TEST auditors are `hypertrain-test-auditor-0/1`. Their disposable seeds are 
 
 ## 1. Swap the TEST challenge image (and tune the TEST beacon)
 
-Only the challenge service changes image. The beacon and relay code is the same in the deployed
-images and in `e435ee8f`, and the store schema did not change.
+`swap` moves the challenge and then the beacon to the new image; the relay keeps its own. Until
+hotfix-lease-pause `swap` moved the challenge alone, so the TEST beacon still ran the image of
+2026-10-27 (`a543239e`), whose pusher refills the oldest round first (before ADR 0012 Part B): S19's
+313 s of lag after 12-17 s locks. `beacon-image NEW BACKUP` moves the beacon alone, for a challenge
+that is already on `NEW`; it keeps the command and refuses (exit 5) one without the cadence `beacon`
+writes, so run `beacon B` first on a stock compose. Both exit 4 when the beacon container then runs
+another image than `NEW`. Recreating the beacon loses the rounds it holds in memory as still to
+push: do not run either while a lock is stalling it (a reference, an audit replay) or during a round.
 
-Do not change anything while a seal is due. `swap`, `beacon` and `executor` refuse to run unless all
+Do not change anything while a seal is due. `swap`, `beacon-image`, `beacon` and `executor` refuse to run unless all
 of these hold:
 - master `readyz` answers 200;
 - the latest seal is sealed and younger than `HT_GATE_MAX_AGE_S` seconds (default 4500, 75 minutes);
@@ -66,7 +72,7 @@ A runbook or tool that mirrors the gate must use the same 4500 (the S13 tools pi
 
 `rollback` and `restore-db` are not gated: they are the way back.
 
-`swap`, `beacon`, `paper`, `rollback`, `executor` and `executor-off` also refuse (exit 4, before any
+`swap`, `beacon-image`, `beacon`, `paper`, `rollback`, `executor` and `executor-off` also refuse (exit 4, before any
 container or live file is touched) a compose file in which any service has no `container_name` or
 one that is not a TEST container (`hypertrain-test-challenge`, `-beacon`, `-master-stub`, `-relay`,
 `-auditor-0`, `-auditor-1`). `docker compose up` acts on the names the file declares, so a file
@@ -86,19 +92,25 @@ ssh root@s100 "bash -s -- backup $TS" < $T/challenge_image.sh
 ssh root@s100 "bash -s -- paper $B" < $T/challenge_image.sh
 ssh root@s100 "bash -s -- swap $NEW $B" < $T/challenge_image.sh
 ssh root@s100 "bash -s -- beacon $B" < $T/challenge_image.sh
+# challenge already on $NEW, beacon behind it (any swap before hotfix-lease-pause):
+ssh root@s100 "bash -s -- beacon-image $NEW $B" < $T/challenge_image.sh
 ssh root@s100 "bash -s -- post" < $T/snap.sh
 ```
 
 Each change is refused unless the resolved compose config differs in exactly the expected fields:
-- `swap`: `services.challenge.image`;
+- `swap`: `services.challenge.image`, then `services.beacon.image` (skipped when the beacon already
+  resolves to the new image);
+- `beacon-image`: `services.beacon.image`, and the cadence below must still be in the command;
 - `beacon`: some of `services.beacon.entrypoint.9`, `.11` and `.13` (interval, catch-up, failure budget), and then exactly the cadence below.
 
-`swap` fails unless `/version` answers and the challenge runs the new image ID.
+`swap` fails unless `/version` answers and the challenge runs the new image ID (exit 7), and then
+unless the beacon runs it too (exit 4).
 
 `backup` refuses to finish unless both SQLite copies pass `integrity_check`. It also keeps
 `relay.json` and `metagraph.json`.
 
-Every command that takes a backup directory (`swap`, `beacon`, `paper`, `rollback`, `restore-db`)
+Every command that takes a backup directory (`swap`, `beacon-image`, `beacon`, `paper`, `rollback`,
+`restore-db`)
 refuses it with exit 4 unless:
 - `compose.test.yml`, `challenge.db`, `server_keys.db` and `SHA256SUMS` exist;
 - `sha256sum -c --strict` passes, so a malformed or cut line fails;
