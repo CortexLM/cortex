@@ -12,6 +12,13 @@ has: the job differs only by holder, attempt and dates, the master's replay stil
 the miner committed, and no route reads a beacon row other than the verified one it pins. One
 admitted member: /complete looks its admission up (store.py:9865), so a job of a seeded member
 without one would 409 UNKNOWN_HOTKEY.
+
+Lens (D105 verdict) asked for two more pins. Three jobs and two auditors leased at rounds of either
+parity: the queue order stays `created,id`. The one decision a lease round takes, the commit
+expiry (COMMIT_EXPIRED), is judged at the round a lag-2 view holds. A lagging view judges there
+too, never at its stale round, which would serve up to RESULT_PAUSE_ROUNDS of expired commits.
+The service-admission branch of `lease_v2` is out of scope: hotfix 2 does not tolerate admitted
+runs.
 """
 # ruff: noqa: F811  (the `network` fixture parameter shadows the imported fixture, as in test_multirun.py)
 
@@ -20,6 +27,9 @@ from __future__ import annotations
 import json
 import re
 
+import pytest
+
+from hypertrain.challenge.exit_v2 import MAX_LAG_ROUNDS, RESULT_PAUSE_ROUNDS
 from hypertrain.protocol.hashing import sha256_hex
 
 from . import test_service_network_v2 as fixtures
@@ -35,6 +45,7 @@ from .audit_lease_fixture_v2 import (
     seed_round,
 )
 from .five_identity_network_v2 import activate_identities
+from .test_audit_freshness_pause_v2 import wall_at
 from .test_audit_reaudit_v2 import complete, execute, genuine
 
 # What a lease adds to the scheduled job: its holder, the attempt and its dates.
@@ -116,3 +127,59 @@ def test_d105_no_audit_seed_selection_or_assignment_depends_on_the_lease_round(n
     assert beacon_rounds(reads) == {second_round}
     assert complete(network, AUDITOR_B, job_b, verdict) == "MATCH"
     assert beacon_rounds(reads) == {second_round}
+
+
+@pytest.mark.parametrize("first_round", [D_AUDIT + 1, D_AUDIT + 2])
+def test_d105_the_queue_order_does_not_depend_on_the_lease_round(network, first_round):
+    # Three jobs, all created at d_audit; A leases at `first_round`, B one round later, so each
+    # parametrization has both an even and an odd lease round. The first to ask takes the head of
+    # `created,id`, the next one the job after it, whatever the round.
+    seed_round(network, n=3)
+    order = sorted(schedule(network))
+    assert len(order) == 3
+    granted = []
+    for number, (auditor, at) in enumerate(
+        ((AUDITOR_A, first_round), (AUDITOR_B, first_round + 1)), 1
+    ):
+        network.push(at)
+        answer = lease(network, auditor, number)
+        assert answer.status_code == 200, answer.text
+        granted.append(answer.json()["body"]["job_id"])
+    assert granted == order[:2]
+
+
+VIEW = D_AUDIT + 5  # the master's newest verified round when the lease is asked
+LAG = MAX_LAG_ROUNDS + 1
+
+
+def paused(lag):
+    return pytest.param(
+        lag,
+        marks=pytest.mark.xfail(strict=True, reason="store.py:2441 refuses the lease: 503 paused"),
+    )
+
+
+@pytest.mark.parametrize(
+    "lag", [MAX_LAG_ROUNDS, paused(LAG), paused(MAX_LAG_ROUNDS + RESULT_PAUSE_ROUNDS)]
+)
+@pytest.mark.parametrize(
+    ("sealed", "status", "state"),
+    [(-1, 204, ("exhausted", "MINER_INPUT_REFUSED")), (0, 200, ("running", None))],
+)
+def test_d105_a_commit_expiry_is_judged_at_the_round_a_healthy_view_holds(
+    network, lag, sealed, status, state
+):
+    # The miner sealed its commit to expire one round before the judged round (emitted -
+    # MAX_LAG_ROUNDS), or at it. Before: the miner's fault, its job dropped and the queue empty.
+    # At: served. A lag-2 view judges at its own round; a lagging one exactly there too.
+    judged = VIEW + lag - MAX_LAG_ROUNDS
+    seed_round(network, n=1, commit_exp=judged + sealed)
+    (job,) = schedule(network)
+    network.push(VIEW)
+    wall_at(network, VIEW + lag)
+    answer = lease(network, AUDITOR_A, 1)
+    assert answer.status_code == status, answer.text
+    row = network.store._db.execute(
+        "SELECT state,result FROM audit_leases_v2 WHERE id=?", (job,)
+    ).fetchone()
+    assert tuple(row) == state
