@@ -358,6 +358,20 @@
   `docs/adr/0011-audit-integrity.md` (Part 9, decision 12) at the monorepo root.
 
 ### Fixed
+- An audited round's aggregate and finalize are no longer refused by a short beacon pause (S21,
+  run 0ef600b4: round 0's finalize answered 503 "beacon infrastructure paused" twice, after 1 min
+  52 s and 2 min 14 s, its gate judged after its own replay had left the view 8 to 11 rounds
+  behind; round 1's retried aggregate answered 503 twice, 7 s in, on a 3-round flicker). The gate
+  now takes `aggregate` and `finalize` up to `RESULT_PAUSE_ROUNDS` (50) more rounds behind, as it
+  takes a lease or a result, only for a round whose `finality` record has its tape applied and
+  every audit resolved, on a running run without a service-admission record; the production
+  branch still BLS-verifies the pinned round. A tolerated finalize settles at `emitted -
+  MAX_LAG_ROUNDS`, and the ledger still refuses a Finalize expired at that round. A first
+  aggregate keeps the 2-round view: it judges its members at the gate's round, whose beacon must
+  have been pushed. Still refused: a finalize whose replay keeps the pusher out longer than the cap
+  (150 s), because its gate comes after the replay and `finalize_v2` is part of the
+  `implementation_hash`. No manifest, run id, policy hash, wire format or `implementation_hash`
+  changes.
 - `GET /internal/v1/get_weights` no longer answers 409 `RUN_MANIFEST_RETIRED` for the whole state
   directory when one hosted run has a stored manifest the model now refuses (S21, run 0ef600b4: the
   stale TEST runs 2a7d7702 and fea7e44f lacked the env pin, so the settled round 0 could not be

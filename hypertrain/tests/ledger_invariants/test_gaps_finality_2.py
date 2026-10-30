@@ -19,6 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hypertrain.aggregator.core import FinalityError
+from hypertrain.challenge.exit_v2 import MAX_LAG_ROUNDS, RESULT_PAUSE_ROUNDS
 from hypertrain.challenge.store import ChallengeError
 from hypertrain.ledger import FULL_SHARE_MASS
 from hypertrain.protocol.envelope import body_digest
@@ -64,7 +65,9 @@ def test_a_finalize_under_a_stale_beacon_is_paused_with_nothing_written_and_sett
     escrow = stage.store._services(stage.run_id)[0]
     issued = escrow.balances().issued
     genesis = stage.network.manifest.training.beacon.genesis_time
-    stage.store.clock = lambda: genesis + (stage.network.now - 1 + 3) * 3
+    # One round past the pause an audited round's finalize tolerates (S21, D118): an outage.
+    lag = MAX_LAG_ROUNDS + RESULT_PAUSE_ROUNDS + 1
+    stage.store.clock = lambda: genesis + (stage.network.now - 1 + lag) * 3
     before = stage.digest()
 
     paused = stage.post_finalize(0, envelope)

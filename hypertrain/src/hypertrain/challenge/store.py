@@ -2520,14 +2520,21 @@ class ChallengeStore:
         before its real deadline (LeaseGuard's wall instant). A lease and a replay start also need
         a running run without a service-admission record: no audit seed, auditor selection or
         assignment depends on the lease round (D105), and admitted runs keep the fresh view.
+
+        So do an aggregate and a finalize (S21, D118), but only of a round whose `finality` record
+        has its tape applied and every audit resolved. The aggregate then answers its stored tape;
+        the finalize settles from stored records at the round returned here, and its replay keeps
+        the pusher out. A first aggregate keeps the fresh view: it judges its members at that
+        round, whose beacon must have been pushed.
         """
         kind, _, rest = operation.partition(":")
         if (
-            kind not in ("audit-result", "complete", "lease", "audit-execute")
+            kind
+            not in ("audit-result", "complete", "lease", "audit-execute", "aggregate", "finalize")
             or now < emitted - MAX_LAG_ROUNDS - RESULT_PAUSE_ROUNDS
         ):
             return False
-        if kind in ("lease", "audit-execute") and (
+        if kind in ("lease", "audit-execute", "aggregate", "finalize") and (
             self._db.execute(
                 "SELECT status FROM runs WHERE run_id=?", (manifest.run_id(),)
             ).fetchone()[0]
@@ -2541,6 +2548,13 @@ class ChallengeStore:
             return False
         if kind == "lease":
             return True
+        if kind in ("aggregate", "finalize"):
+            finality = self._db.execute(
+                "SELECT data FROM records_v2 WHERE run_id=? AND kind='finality' AND id=?",
+                (manifest.run_id(), rest.partition(":")[0]),
+            ).fetchone()
+            status = json.loads(finality[0]) if finality is not None else {}
+            return status.get("applied") is True and status.get("unresolved_audits") == 0
         row = self._db.execute(
             "SELECT state,expires,absolute FROM audit_leases_v2 WHERE run_id=? AND id=?",
             (manifest.run_id(), rest.rpartition(":")[0]),

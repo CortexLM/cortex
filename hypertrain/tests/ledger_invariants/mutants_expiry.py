@@ -29,6 +29,18 @@ PAIR = TWO + "test_a_trial_pair_with_one_unfit_envelope_is_refused_whichever_one
 PAUSE = "tests/challenge/test_audit_freshness_pause_v2.py::"
 PAUSE_TAKEN = PAUSE + "test_production_takes_a_lagging_result_on_its_bls_verified_pinned_round"
 PAUSE_REFUSED = PAUSE + "test_production_refuses_a_lagging_result_without_its_conditions"
+# hotfix-finalize-freshness (S21, D118): an audited round's aggregate and finalize tolerated
+# through a beacon pause.
+ROUND_PAUSE = "tests/challenge/test_finalize_freshness_v2.py::"
+ROUND_TAKEN = ROUND_PAUSE + "test_an_audited_round_is_aggregated_and_finalized_on_a_lagging_view"
+ROUND_REFUSED = (
+    ROUND_PAUSE + "test_a_lagging_aggregate_or_finalize_is_refused_without_its_conditions"
+)
+ROUND_BLS = ROUND_PAUSE + "test_production_refuses_a_lagging_audited_round_without_a_verified_pin"
+S21_AGGREGATE = (
+    "tests/e2e/test_finalize_freshness_v2_e2e.py::"
+    "test_s21_an_aggregate_retried_on_a_flicker_answers_its_stored_tape"
+)
 
 STORE = "src/hypertrain/challenge/store.py"
 ADMISSION_PY = "src/hypertrain/challenge/admission.py"
@@ -227,7 +239,11 @@ MUTANTS = [
         '            return False\n        if kind == "lease":',
         "new": "            ).fetchone()\n            is False\n        ):\n"
         '            return False\n        if kind == "lease":',
-        "tests": [PAUSE_REFUSED + "[replay start of an admitted run]"],
+        "tests": [
+            PAUSE_REFUSED + "[replay start of an admitted run]",
+            ROUND_REFUSED + "[aggregate-an admitted run]",
+            ROUND_REFUSED + "[finalize-an admitted run]",
+        ],
         "why": "a service-admitted run takes a lease or a replay start on a lagging view.",
     },
     {
@@ -236,7 +252,11 @@ MUTANTS = [
         "path": STORE,
         "old": '.fetchone()[0]\n            != "running"',
         "new": '.fetchone()[0]\n            == "never"',
-        "tests": [PAUSE_REFUSED + "[lease of a paused run]"],
+        "tests": [
+            PAUSE_REFUSED + "[lease of a paused run]",
+            ROUND_REFUSED + "[aggregate-a paused run]",
+            ROUND_REFUSED + "[finalize-a paused run]",
+        ],
         "why": "a run that is not running takes a lease on a lagging view.",
     },
     {
@@ -247,6 +267,67 @@ MUTANTS = [
         "new": 'if kind in ("lease", "audit-execute"):\n            return True',
         "tests": [PAUSE_REFUSED + "[replay start at the deadline]"],
         "why": "a replay starts on a lagging view at or after its lease's real deadline.",
+    },
+    {
+        "id": "exp-round-pause-uncapped",
+        "invariants": ["FIN-23"],
+        "path": STORE,
+        "old": "            or now < emitted - MAX_LAG_ROUNDS - RESULT_PAUSE_ROUNDS\n",
+        "new": "            or False\n",
+        "tests": [
+            ROUND_REFUSED + "[aggregate-past the cap]",
+            ROUND_REFUSED + "[finalize-past the cap]",
+        ],
+        "why": "an aggregate or a finalize is taken however long the beacon has been paused.",
+    },
+    {
+        "id": "exp-round-pause-without-a-stored-tape",
+        "invariants": ["FIN-23"],
+        "path": STORE,
+        "old": 'return status.get("applied") is True and status.get("unresolved_audits") == 0',
+        "new": 'return status.get("unresolved_audits") == 0',
+        "tests": [
+            ROUND_REFUSED + "[aggregate-not aggregated]",
+            ROUND_REFUSED + "[finalize-not aggregated]",
+            S21_AGGREGATE,
+        ],
+        "why": "a first aggregate judges its members at a round not pushed yet.",
+    },
+    {
+        "id": "exp-round-pause-with-an-open-audit",
+        "invariants": ["FIN-23"],
+        "path": STORE,
+        "old": 'return status.get("applied") is True and status.get("unresolved_audits") == 0',
+        "new": 'return status.get("applied") is True',
+        "tests": [
+            ROUND_REFUSED + "[aggregate-an audit unresolved]",
+            ROUND_REFUSED + "[finalize-an audit unresolved]",
+        ],
+        "why": "a round with an audit still queued, running or parked is taken on a lagging view.",
+    },
+    {
+        "id": "exp-round-pause-on-a-stopped-or-admitted-run",
+        "invariants": ["FIN-23"],
+        "path": STORE,
+        "old": '        if kind in ("lease", "audit-execute", "aggregate", "finalize") and (\n',
+        "new": '        if kind in ("lease", "audit-execute") and (\n',
+        "tests": [
+            ROUND_REFUSED + "[aggregate-an admitted run]",
+            ROUND_REFUSED + "[finalize-a paused run]",
+        ],
+        "why": "a paused or service-admitted run is aggregated or finalized on a lagging view.",
+    },
+    {
+        "id": "exp-round-pause-skips-the-bls-check",
+        "invariants": ["FIN-23", "CK-01"],
+        "path": STORE,
+        "old": "lag = emitted - pin  # health round = the pinned round, still BLS-verified\n",
+        "new": "return max(now, emitted - MAX_LAG_ROUNDS)\n",
+        "tests": [
+            ROUND_BLS + "[aggregate-forged signature]",
+            ROUND_BLS + "[finalize-fixture signature]",
+        ],
+        "why": "production takes a lagging aggregate or finalize on a pinned round never verified.",
     },
     {
         "id": "exp-finalize-replay-compares-nothing",

@@ -30,6 +30,7 @@ from aggregate_lock_fixture_v2 import Call, Restored, Template, fixtures
 from hypertrain.aggregator import tape_v2
 from hypertrain.aggregator.core import FinalityError, TapeError, TapeIntegrityError
 from hypertrain.challenge import store as store_module
+from hypertrain.challenge.exit_v2 import MAX_LAG_ROUNDS, RESULT_PAUSE_ROUNDS
 from hypertrain.challenge.store import FINALITY_VERDICTS, ChallengeStore
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize
@@ -136,9 +137,10 @@ def rewrite_record(r: Restored, kind: str, change: Callable[[dict[str, Any]], No
 
 
 def stall_gate(r: Restored) -> None:
-    """The wall clock three rounds ahead of the latest beacon: every finalize answers 503."""
+    """The wall clock one round past the pause an audited round's finalize tolerates (S21, D118):
+    every finalize answers 503."""
     genesis = r.manifest.training.beacon.genesis_time
-    r.store.clock = lambda: genesis + (r.now + 3 - 1) * 3
+    r.store.clock = lambda: genesis + (r.now + MAX_LAG_ROUNDS + RESULT_PAUSE_ROUNDS + 1 - 1) * 3
 
 
 def sealed_finalize(
