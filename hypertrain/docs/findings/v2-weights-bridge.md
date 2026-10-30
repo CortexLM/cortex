@@ -24,9 +24,24 @@ the transaction that writes `weights_runs`; the weight goes to the origin's hotk
 - Deregistered hotkey: `registered_weights` (`app.py`) still drops it after the store
   answered. The escrow units are already `paid`, so they burn to UID0 at the master and are
   not owed again (the existing `ponytail`). No freeze was added.
-- Child runs (`runs/<id>/`) pay and commit in their own database before the root commits.
-  If the root then fails, its retry is not legacy (`weights_runs_from`), so it reads the
-  child's stored answer and merges it again: the child's units are emitted once.
+- Hosted runs (`runs/<id>/`) are separate SQLite files. `weights` enters the answer transaction
+  of the root and of every hosted store on one `ExitStack` (`_epoch_answer`): the hosted stores
+  commit first, the root last, and any exception rolls all of them back. A failed call therefore
+  leaves no `available -> paid` move and no stored answer in any store (Cortex does not ask that
+  epoch again after a failure). Two things are not covered. The v1 journal files are appended
+  before the transaction ends and a rollback does not unwrite them; the retry returns those bytes.
+  A COMMIT that fails after another store committed leaves those stores holding the epoch and
+  their paid units, the call fails and the root holds nothing: a repeat of the same epoch is not
+  legacy (`weights_runs_from`), reads their stored answers and merges them again, so their units
+  are emitted once, but only if somebody asks that epoch again.
+- A hosted run whose stored manifest the model now refuses (`RunRetired`, 409
+  `RUN_MANIFEST_RETIRED`, e.g. a manifest without the env pin) is left out of the escrows its store
+  pays: its units stay `available`. Such a run is not expected to be served again (ADR 0011: a run
+  stored before the pin was required is recreated under a new run id), so they may never pay.
+  Its store still answers with its v1 ledger (nothing paid, its `full_share_mass` burned), so the
+  share of the other runs does not grow, and `records_v2` kind `weights-skipped` (id = the epoch)
+  holds the epoch and the reason. The other runs are answered. Any other failure to build a
+  run's services still refuses the whole call, as before.
 
 ## Code path
 - `GET /internal/v1/get_weights` (`src/hypertrain/challenge/app.py:864`) calls `store.weights`

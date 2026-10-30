@@ -119,11 +119,12 @@ MUTANTS = [
         ["WGT-15", "WGT-07"],
         STORE,
         "            answers = [answer] + [\n"
-        "                c.weights(epoch, epoch_at, computed_at) for c in self._children.values()\n"
+        "                c._epoch_answer(stack, epoch, epoch_at, computed_at)\n"
+        "                for c in self._children.values()\n"
         "            ]\n",
         "            def soft(c: ChallengeStore) -> bytes | None:\n"
         "                try:\n"
-        "                    return c.weights(epoch, epoch_at, computed_at)\n"
+        "                    return c._epoch_answer(stack, epoch, epoch_at, computed_at)\n"
         "                except ChallengeError:\n"
         "                    return None\n\n"
         "            answers = [answer] + [\n"

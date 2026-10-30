@@ -22,7 +22,7 @@ import threading
 import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, wait
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from fractions import Fraction
 from functools import partial
@@ -619,6 +619,11 @@ class ChallengeStore:
             self._db.execute("COMMIT")
         if notify:
             self._notify_processes_v2()
+
+    @contextmanager
+    def _tx_until(self, stack: ExitStack) -> Iterator[sqlite3.Connection]:
+        """`_tx` that commits, or rolls back, when `stack` closes, not at the end of the block."""
+        yield stack.enter_context(self._tx())
 
     @contextmanager
     def _tx_booking_refusal(self) -> Iterator[sqlite3.Connection]:
@@ -2244,6 +2249,22 @@ class ChallengeStore:
     def weights(self, epoch: int, epoch_at: int | None, computed_at: int) -> bytes:
         if epoch_at is None:
             epoch_at = self.params.genesis_unix + (epoch + 1) * self.params.epoch_seconds
+        with ExitStack() as stack:
+            return self._epoch_answer(stack, epoch, epoch_at, computed_at)
+
+    def _epoch_answer(self, stack: ExitStack, epoch: int, epoch_at: int, computed_at: int) -> bytes:
+        """The answer of this store and of the runs it hosts, in one SQLite outcome.
+
+        The answer transaction of each store ends with `stack`: the hosted stores commit, last
+        entered first, only when the root has its merged answer, and all roll back together if
+        any step raises. A hosted store that committed alone would book `available -> paid` units
+        for an answer nobody was served, and Cortex does not ask that epoch again. Not covered:
+        the v1 journal files (`ledger.get_weights` appends before the transaction ends and a
+        rollback does not unwrite it; the retry returns those bytes) and a COMMIT that fails
+        after another store committed, which leaves those stores holding the epoch and their
+        paid units: the next call for that epoch returns their stored answers and pays nothing
+        twice, but nobody may ask it.
+        """
         with self._tx() as db:
             stored = db.execute(
                 "SELECT answer FROM weights_runs WHERE epoch=?", (epoch,)
@@ -2275,7 +2296,7 @@ class ChallengeStore:
                         escrows.append(self._services(r[0])[0])
                     except RunRetired as error:
                         retired.append((r[0], error.detail))
-        with self._tx() as db:
+        with self._tx_until(stack) as db:
             stored = db.execute(
                 "SELECT answer FROM weights_runs WHERE epoch=?", (epoch,)
             ).fetchone()
@@ -2295,7 +2316,8 @@ class ChallengeStore:
                     run_id, "weights-skipped", str(epoch), {"epoch": epoch, "reason": reason}
                 )
             answers = [answer] + [
-                c.weights(epoch, epoch_at, computed_at) for c in self._children.values()
+                c._epoch_answer(stack, epoch, epoch_at, computed_at)
+                for c in self._children.values()
             ]
             merged = answer if len(answers) == 1 else _merge_answers(answers)
             db.execute("INSERT INTO weights_runs VALUES(?, ?)", (epoch, merged))

@@ -34,11 +34,6 @@ actual_reward = E.actual_reward
 
 UNITS = 1_000_000
 
-# Red on the S21 base (e5900c3b); the fix commits remove these marks.
-paid_unserved = pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="a child commits its payment before the root answers"
-)
-
 
 class Hosted:
     """A root store and the runs it hosts, each with the real signed live w=0 reward matured."""
@@ -198,7 +193,6 @@ def test_children_that_already_hold_the_epoch_are_replayed_not_paid_again(three_
     assert weights_runs(h.root) == [0]
 
 
-@paid_unserved
 def test_a_failed_call_leaves_no_child_paid_and_the_retry_pays_each_once(hosted) -> None:
     # Given: two healthy children, and persisting the root answer fails (a crash after the
     # children were asked).
@@ -223,7 +217,6 @@ def test_a_failed_call_leaves_no_child_paid_and_the_retry_pays_each_once(hosted)
     assert (hosted.pays("a"), hosted.pays("c")) == (1, 1)
 
 
-@paid_unserved
 def test_a_child_that_fails_leaves_the_children_asked_before_it_unpaid(hosted) -> None:
     # Given: three healthy children, the last one fails to persist its epoch answer.
     for name in "abc":

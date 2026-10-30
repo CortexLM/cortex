@@ -319,23 +319,14 @@ def test_merging_runs_is_sum_preserving_and_independent_of_the_order_of_the_chil
     assert parse(_merge_answers([answer(w) for w in tail_reversed])) == merged
 
 
-FROZEN_CHILD_LOSS = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="WGT-15+WGT-D6: units a child marked paid while the root failed to persist the merged "
-    "answer are in a delivered answer, or were never marked paid (children commit in their own "
-    "database before the root persists) [candidate] [fix-lot: none (no design yet)]",
-)
-
-
-@pytest.mark.parametrize("retried", [True, pytest.param(False, marks=FROZEN_CHILD_LOSS)])
+@pytest.mark.parametrize("retried", [True, False])
 def test_units_a_child_paid_while_the_root_failed_to_persist_reach_a_delivered_answer(
     li_escrow: ModuleType, retried: bool
 ) -> None:
-    """WGT-15: a child commits its payout before the root persists the merged answer.
+    """WGT-15, WGT-D6: a hosted store keeps its payout only together with the root's answer.
 
-    The master retries the same epoch after a failure, which the control exercises; when it asks
-    another epoch instead, the units must still reach an answer it receives.
+    The master does not ask the same epoch again after a failure: the units the failed call
+    would have paid must not be marked paid, so the next epoch it asks still delivers them.
     """
     with two_stores(li_escrow) as (root, child):
         fail_persist(root.store._db)

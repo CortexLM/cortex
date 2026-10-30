@@ -216,23 +216,23 @@ def test_a_child_that_cannot_build_its_services_fails_the_ask_and_the_retry_pays
         assert (pays(root.escrow), pays(child.escrow)) == (1, 1)
 
 
-def test_units_a_child_paid_before_the_root_failed_to_persist_are_emitted_once_by_the_retry(
+def test_units_a_child_would_pay_when_the_root_fails_to_persist_are_emitted_once_by_the_retry(
     li_escrow: ModuleType,
 ) -> None:
     both = [(ORIGIN, "HOT", ISSUED, 5)]
     with root_and_child(li_escrow, both, [("cc" * 32, "HOT", ISSUED, 5)]) as (root, child):
         fail_persist(root.store._db)
-        # When: the root fails to persist the merged answer after the child committed.
+        # When: the root fails to persist the merged answer after the child computed its own.
         with pytest.raises(sqlite3.IntegrityError):
             root.store.weights(0, root.when(HOLD_AT), 1)
-        # Then: the documented intermediate state (docs/findings/v2-weights-bridge.md): the child
-        # paid and stored its own answer, the root rolled back.
+        # Then: the child committed nothing either (docs/findings/v2-weights-bridge.md): no unit is
+        # marked paid for an answer nobody was served.
         assert root.escrow.balances().available == ISSUED and root.escrow.balances().paid == 0
         assert pays(root.escrow) == 0
         assert root.store._db.execute("SELECT COUNT(*) FROM weights_runs").fetchone()[0] == 0
-        assert child.escrow.balances().paid == ISSUED and pays(child.escrow) == 1
-        assert child.store._db.execute("SELECT COUNT(*) FROM weights_runs").fetchone()[0] == 1
-        # And the retry of the same epoch emits both stores' units, the child's once.
+        assert child.escrow.balances().available == ISSUED and pays(child.escrow) == 0
+        assert child.store._db.execute("SELECT COUNT(*) FROM weights_runs").fetchone()[0] == 0
+        # And the retry of the same epoch emits both stores' units, each once.
         recover_persist(root.store._db)
         retry = root.store.weights(0, root.when(HOLD_AT), 2)
         assert parse(retry)["weights"] == {"HOT": 2.0 * ISSUED}

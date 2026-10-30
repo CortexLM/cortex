@@ -96,7 +96,7 @@ CREDIT_WRITERS = {
     (ESCROW, "mature", "UPDATE", "escrow_units"),
     (ESCROW, "slash", "UPDATE", "escrow_units"),
     (ESCROW, "burn_pending", "UPDATE", "escrow_units"),
-    ("challenge/store.py", "weights", "INSERT INTO", "weights_runs"),
+    ("challenge/store.py", "_epoch_answer", "INSERT INTO", "weights_runs"),
     ("challenge/app.py", "registered_weights", "INSERT INTO", "weights_registered"),
 }
 FINALIZATION_KINDS = frozenset({"finalize", "replayed-finality", "settlement", "finalize-result"})
