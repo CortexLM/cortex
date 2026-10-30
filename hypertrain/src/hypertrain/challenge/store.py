@@ -576,6 +576,13 @@ class ChallengeStore:
         self._aggregate_waiters = threading.BoundedSemaphore(AGGREGATE_WAITERS)
         self._finality_verdicts_v2: dict[str, tuple[str, float]] = {}
         self._finality_prime_v2 = threading.Lock()
+        # Rounds the root committed and forwarded while this child's lock was busy; the holder
+        # writes them when its outermost transaction ends (`_publish_beacons_v2`).
+        self._staged_beacons: dict[int, BeaconRound] = {}
+        self._staged_lock = threading.Lock()
+        # The view before staged rounds raised it with nothing run for them: the next free push
+        # takes it as `previous_now`, so its pause witness sees the view callers were held at.
+        self._unwitnessed_view: int | None = None
         self._ipc_v2: socket.socket | None = None
         self._ipc_path_v2: Path | None = None
         self._ipc_thread_v2: threading.Thread | None = None
@@ -605,20 +612,68 @@ class ChallengeStore:
                 continue
             if ids != [db_path.parent.name]:
                 raise ChallengeError(503, f"run sub-store {db_path.parent.name} is inconsistent")
+            # A round still staged in memory when the process stopped is in the root's file.
+            self._copy_beacons(child)
             self._children[ids[0]] = child
 
     @contextmanager
     def _tx(self, *, notify: bool = False) -> Iterator[sqlite3.Connection]:
+        # Staged rounds are written before and after an outermost transaction, never inside one
+        # or under an outer holder: a view only moves between the reads of one lock holder.
+        outermost = not self._lock._is_owned()  # type: ignore[attr-defined]
         with self._lock:
+            if outermost:
+                self._publish_beacons_v2()
             self._db.execute("BEGIN IMMEDIATE")
             try:
                 yield self._db
             except BaseException:
                 self._db.execute("ROLLBACK")
                 raise
-            self._db.execute("COMMIT")
+            else:
+                self._db.execute("COMMIT")
+            finally:
+                if outermost:
+                    self._publish_closed_v2()
         if notify:
             self._notify_processes_v2()
+
+    def _publish_closed_v2(self) -> None:
+        """`_publish_beacons_v2` once the transaction is closed: its outcome is already decided, so
+        a failed write is logged and its rounds stay staged for the next transaction or push."""
+        try:
+            self._publish_beacons_v2()
+        except sqlite3.Error:
+            logging.getLogger(__name__).exception("staged beacon rounds not written")
+
+    def _copy_beacons(self, child: ChallengeStore) -> None:
+        """Every round of this (root) store into `child`; a round the child holds is kept."""
+        child._write_beacons_v2(self._db.execute("SELECT * FROM beacon"))
+
+    def _write_beacons_v2(self, rows: Iterable[Sequence[Any]]) -> None:
+        with self._tx() as db:
+            view = self._now(db)
+            db.executemany("INSERT OR IGNORE INTO beacon VALUES(?, ?, ?, ?)", rows)
+            if self._unwitnessed_view is None and 0 < view < self._now(db):  # 0: a new child
+                self._unwitnessed_view = view
+
+    def _publish_beacons_v2(self) -> None:
+        """Write the staged rounds; the caller holds the lock outside any transaction.
+
+        A round leaves the stage only once its row is committed. A stored round is never
+        overwritten: the root refused a conflicting payload before it forwarded it.
+        """
+        with self._staged_lock:
+            staged = list(self._staged_beacons.values())
+        if not staged:
+            return
+        self._write_beacons_v2(
+            [(b.round, b.signature, b.randomness, int(b.bls_verified)) for b in staged]
+        )
+        with self._staged_lock:
+            for b in staged:
+                if self._staged_beacons.get(b.round) is b:
+                    del self._staged_beacons[b.round]
 
     @contextmanager
     def _tx_until(self, stack: ExitStack) -> Iterator[sqlite3.Connection]:
@@ -729,11 +784,7 @@ class ChallengeStore:
             shutil.rmtree(directory, ignore_errors=True)  # only an aborted, uncommitted create
             child = self._open_child(directory)
             try:
-                with child._tx() as db:
-                    db.executemany(
-                        "INSERT OR IGNORE INTO beacon VALUES(?, ?, ?, ?)",
-                        [tuple(r) for r in self._db.execute("SELECT * FROM beacon")],
-                    )
+                self._copy_beacons(child)
                 qualification = self._db.execute(
                     "SELECT * FROM records_v2 WHERE run_id=? AND kind='qualification'", (run_id,)
                 ).fetchall()
@@ -866,16 +917,47 @@ class ChallengeStore:
                 raise
             return result
 
-    def push_beacon(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def push_beacon(self, payload: Mapping[str, Any], *, wait: bool = True) -> dict[str, Any]:
+        """Store a verified round, run what it makes due, then forward it to every child.
+
+        A child is forwarded the round with `wait=False`, once the root has committed it. If the
+        child's lock is busy (a long admin transaction: open, aggregate, finalize), the round is
+        staged and the push returns: the holder writes it when its transaction ends (`_tx`), and
+        the next push that finds the lock free runs what is due. A restart copies the root's
+        rounds into each child, so a staged round is not lost (S21, finding 4 of ADR 0017).
+        """
         try:
             br = self.verify_beacon(payload)
         except BeaconError as error:
             raise ChallengeError(400, f"beacon round rejected: {error}") from None
+        if not wait:
+            with self._staged_lock:
+                self._staged_beacons[br.round] = br
+            if not self._lock.acquire(blocking=False):
+                return {"round": br.round, "staged": True}
+        try:
+            result = self._store_beacon_v2(br)
+            if not wait:
+                self._publish_beacons_v2()  # what is staged, this round (stored above) included
+        finally:
+            if not wait:
+                self._lock.release()
+        # Woken without the lock, as `_tx(notify=True)` does: a send may wait for its receiver.
+        for _, _, disputes in self._services_v2.values():
+            disputes.notify()
+        self._notify_processes_v2()
+        for child in self._children.values():
+            child.push_beacon(payload, wait=False)
+        return result
+
+    def _store_beacon_v2(self, br: BeaconRound) -> dict[str, Any]:
         with self._tx() as db:
             known = db.execute("SELECT * FROM beacon WHERE round=?", (br.round,)).fetchone()
             if known is not None and known["signature"] != br.signature:
                 raise ChallengeError(409, f"conflicting payload for drand round {br.round}")
             previous_now = self._now(db)
+            if self._unwitnessed_view is not None:
+                previous_now = min(previous_now, self._unwitnessed_view)
             if known is None:
                 db.execute(
                     "INSERT INTO beacon VALUES(?, ?, ?, ?)",
@@ -923,11 +1005,8 @@ class ChallengeStore:
             self._reap_v2(run_id, "exit", partial(self._reap_exits_v2, previous=previous_now))
             with self._tx():  # own transaction: bookkeeping must not undo maturation or leases
                 admission.reap_expired_trials(now=self._now(self._db))
-        for _, _, disputes in self._services_v2.values():
-            disputes.notify()
-        self._notify_processes_v2()
-        for child in self._children.values():
-            child.push_beacon(payload)
+        with self._lock:
+            self._unwitnessed_view = None  # the reapers above ran from it
         return result
 
     def _journal_maturity_failure_v2(self, run_id: str, origin: str, error: Exception) -> None:

@@ -457,7 +457,7 @@ ALLOWED_CALL_SITES: dict[str, set[tuple[str, str]]] = {
     },
     "burn_pending": {("challenge/admission.py", "seize_bond")},
     "pay": {("challenge/store.py", "_pay_v2")},
-    "mature": {("challenge/store.py", "push_beacon"), ("challenge/store.py", "genesis_v2")},
+    "mature": {("challenge/store.py", "_store_beacon_v2"), ("challenge/store.py", "genesis_v2")},
     "reward_finalize": {
         ("challenge/store.py", "finalize_v2"),
         ("challenge/store.py", "shadow_reward_v2"),

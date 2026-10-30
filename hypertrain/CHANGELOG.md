@@ -358,6 +358,18 @@
   `docs/adr/0011-audit-integrity.md` (Part 9, decision 12) at the monorepo root.
 
 ### Fixed
+- A beacon round no longer waits for a long transaction of the child store that hosts a run
+  (S20/S21, run 0ef600b4: during `open`, 73 s, the pusher's POST timed out three times, its
+  `pending` list grew to 11 and the child's view fell up to 15 rounds behind, though the root had
+  committed every round). The root still commits the round first. A child whose lock is busy
+  stages it and the push returns; the lock holder writes the staged rounds before and after its
+  outermost transaction (committed or rolled back), never inside one, so the first holder after
+  a long one already holds them. A stored round is never overwritten, a staged one leaves the
+  stage only once committed, a write that fails once a transaction is closed is retried by the
+  next one, and a restart copies the root's rounds into each child. The pause witness of the next
+  push reads the view from before the staged rounds, so a pause, and the exit blame it waives, is
+  recorded as before. A run hosted by the root store is unchanged: its push still waits for the
+  root's lock.
 - An audited round's aggregate and finalize are no longer refused by a short beacon pause (S21,
   run 0ef600b4: round 0's finalize answered 503 "beacon infrastructure paused" twice, after 1 min
   52 s and 2 min 14 s, its gate judged after its own replay had left the view 8 to 11 rounds
