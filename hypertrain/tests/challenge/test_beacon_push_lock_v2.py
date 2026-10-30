@@ -239,7 +239,7 @@ def test_a_staged_round_whose_write_fails_is_written_by_the_next_transaction(
         monkeypatch.setattr(child, "_db", failing)
     # The holder's own work is committed and it met no error; the staged round's write failed.
     assert "error" not in seen and not failing.armed
-    assert child._db.execute("SELECT value FROM meta WHERE key='long-transaction'").fetchone()
+    assert child._db.execute("SELECT value FROM meta WHERE key = ?", ("long-transaction",)).fetchone()
     assert committed_view(child) == number - 1
     with child._tx() as db:
         assert child._now(db) == number
