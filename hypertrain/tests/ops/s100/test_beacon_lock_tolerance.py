@@ -121,6 +121,25 @@ def test_the_production_pusher_reopens_the_gate_within_seconds_and_skips_no_roun
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("lock", [12.6, 17.5])
+@pytest.mark.parametrize("cost", [1.35, 1.4], ids=["2.7-s-a-round", "2.8-s-a-round"])
+def test_at_the_s17d_cost_of_a_round_only_the_head_first_pusher_reopens_the_gate_in_seconds(
+    shipped, layout, lock, cost
+):
+    """S19: 12.6 s and 17.5 s stalls, 2.7-2.8 s a round measured on s100 (S17d), and 313 s of lag
+    on a TEST beacon that still ran the ascending pusher, as no swap ever moved it. At that cost
+    ascending keeps the gate closed for 57 to 263 s after the lock, head first for 3 to 31 s."""
+    for offset in OFFSETS:
+        cadence = {**shipped, "costs": Costs(cost, cost), "offset": offset, "layout": layout}
+        old = simulate(lock, pusher=AscendingPusher, **cadence)
+        new = simulate(lock, **cadence)
+        assert (old.exit_code, new.exit_code) == (0, 0), (offset, old, new)
+        assert old.gate_closed_after_lock > 50, (offset, old)
+        assert new.gate_closed_after_lock < 35, (offset, new)
+        assert old.gate_closed_after_lock > 3 * new.gate_closed_after_lock, (offset, old, new)
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
 def test_the_production_pusher_covers_the_plan_window_and_no_more(shipped, layout):
     """The plan window is the one cut: a tick that pushes the head and one older round takes about
     5 s while the clock adds 1.7 rounds, so a backlog clears slowly (minutes), but what the first
