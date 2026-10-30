@@ -1,13 +1,12 @@
 """S21 on the real routes: an audited round's aggregate and finalize survive a short beacon pause.
 
-Run 0ef600b4, rounds 0 and 1 (30/10, lot hotfix-finalize-freshness, D118): the 5 audits MATCH
-and the aggregate stored, the finalize answered 503 "beacon infrastructure paused" after 2 to 5
-minutes, its gate judging after the replay the lag that replay had made (8 to 11 rounds); a
-retried aggregate answered 503 seven seconds in, on a flicker of 3 rounds at its entry. Both kinds
-now tolerate up to RESULT_PAUSE_ROUNDS on an audited round whose tape is stored. The finalize's
-gate still comes after its replay (finalize_v2 is part of the implementation hash): a replay that
-keeps the pusher out longer than the cap still answers 503 (the xfail below). One real round of
-five members; the wall clock is moved, the beacon is not pushed.
+Run 0ef600b4, rounds 0 and 1 (30/10, lot hotfix-finalize-freshness, D118; entry gate on branch
+hotfix-finalize-entry-gate): the 5 audits MATCH and the aggregate stored, the finalize answered
+503 "beacon infrastructure paused" after 2 to 5 minutes, its gate judging after the replay the lag
+that replay had made; a retried aggregate answered 503 seven seconds in, on a flicker of 3 rounds
+at its entry. Here the finalize's gate is judged once, before the replay, and both kinds tolerate
+up to RESULT_PAUSE_ROUNDS on an audited round whose tape is stored. One real round of five
+members; the wall clock is moved, the beacon is not pushed.
 """
 
 from __future__ import annotations
@@ -128,33 +127,38 @@ def aggregated(network, view: int):
     return stored.json()
 
 
-def settled_at(network, w: int) -> tuple[int, set[int]]:
-    """The beacon round w closed at and the release beacon of every origin it paid."""
-    store, run = network.store, network.manifest.run_id()
-    closure = store._record_v2(run, "replayed-finality", str(w))
-    releases = {
+def released(network) -> set[int]:
+    """The release beacon of every origin the run has paid."""
+    return {
         json.loads(data)["release_beacon"]
-        for (data,) in store._db.execute(
-            "SELECT data FROM records_v2 WHERE run_id=? AND kind='settlement'", (run,)
+        for (data,) in network.store._db.execute(
+            "SELECT data FROM records_v2 WHERE run_id=? AND kind='settlement'",
+            (network.manifest.run_id(),),
         )
     }
-    return closure["finalized_beacon"], releases
 
 
-def test_a_finalize_past_the_cap_or_expired_where_it_would_settle_is_refused(audited):
+def settled_at(network, w: int) -> tuple[int, set[int]]:
+    """The beacon round w closed at and the release beacon of every origin the run paid."""
+    closure = network.store._record_v2(network.manifest.run_id(), "replayed-finality", str(w))
+    return closure["finalized_beacon"], released(network)
+
+
+def test_a_finalize_refused_at_entry_replays_nothing(audited, monkeypatch):
     network = audited
     view = network.now
     applied = aggregated(network, view)
-    # A real outage: refused, nothing written.
+    replays = slow_replays(network, monkeypatch, to=view + 2 * CAP)
+    # A real outage at entry: refused before any replay, nothing written.
     wall_at(network, view + CAP + 1)
     outage = finalize(network, applied)
     assert (outage.status_code, outage.json()["detail"]) == (503, "beacon infrastructure paused")
-    # Expired at the round it would settle at, though not at the stale view: the ledger accepts
-    # the Finalize again at that round (EscrowV2.reward_finalize) and refuses it.
+    # A Finalize that expired at the round the gate judges, though not at the stale view: refused
+    # at the gate, before its replay.
     wall_at(network, view + 10)
     expired = finalize(network, applied, expiry=view + 4)
     assert (expired.status_code, expired.json()["detail"]) == (409, "envelope expired")
-    assert record(network, "finalize") is None
+    assert replays == [] and record(network, "finalize") is None
 
 
 @pytest.mark.xfail(
@@ -175,41 +179,48 @@ def test_a_finalize_whose_own_replay_outlasts_the_cap_settles(audited, monkeypat
     assert settled.status_code == 200, settled.text  # today: 503 "beacon infrastructure paused"
 
 
-def test_s21_a_finalize_whose_replay_ends_inside_the_cap_settles(audited, monkeypatch):
-    # S21 round 0: fresh at entry, the replay kept the pusher out and the gate after it saw the
-    # view 8 (attempt 2) or 11 (attempt 1) rounds behind.
+def test_s21_a_finalize_whose_replay_outlasts_the_cap_settles_at_its_entry_round(
+    audited, monkeypatch
+):
+    # S21 round 0, attempt 2: a fresh view at entry, then a replay long enough that the view ends
+    # more than the cap behind. The gate judged at the end refused the call on its own duration.
+    # Played on round 1: rounds are finalized in order, so round 0 is settled first, by the test
+    # above or here.
     network = audited
-    view = network.now
-    applied = aggregated(network, view)
-    network.store._finality_verdicts_v2.clear()  # no verdict kept by an earlier test: it replays
-    replays = slow_replays(network, monkeypatch, to=view + 11)
-    settled = finalize(network, applied)
-    assert settled.status_code == 200, settled.text
-    assert settled.json()["status"] == "SETTLED"
-    assert replays == [0]
-    # Settled at the round a healthy view held when the gate was judged, never at the stale one.
-    judged = view + 11 - MAX_LAG_ROUNDS
-    vesting = judged + network.manifest.training.verify.E_vest_rounds
-    assert settled_at(network, 0) == (judged, {vesting})
-    # Retried during a long outage: the stored answer, as before.
-    wall_at(network, view + 10 * CAP)
-    assert finalize(network, applied).json() == settled.json()
-    assert replays == [0]
-
-
-def test_a_finalize_on_a_flicker_settles_at_the_round_a_healthy_view_holds(audited):
-    # Round 1, aggregated on a fresh view, finalized on a view one round past the bound.
-    network = audited
+    assert finalize(network, aggregated(network, network.now)).status_code == 200
     wall_at(network, network.now)
     applied = execute_round(network, 1)
     view = network.now
-    wall_at(network, view + FLICKER)
+    network.store._finality_verdicts_v2.clear()  # no verdict kept by an earlier test: it replays
+    replays = slow_replays(network, monkeypatch, to=view + CAP + 10)
+    paid = released(network)
     settled = finalize_round(network, 1, applied)
+    assert settled.status_code == 200, settled.text
+    assert settled.json()["status"] == "SETTLED"
+    assert replays == [1]
+    # Settled at the round the gate judged on entry.
+    vesting = view + network.manifest.training.verify.E_vest_rounds
+    finalized, releases = settled_at(network, 1)
+    assert (finalized, releases - paid) == (view, {vesting})
+    # Retried during a long outage: the stored answer, as before, without the gate.
+    wall_at(network, view + 10 * CAP)
+    assert finalize_round(network, 1, applied).json() == settled.json()
+    assert replays == [1]
+
+
+def test_a_finalize_on_a_flicker_settles_at_the_round_a_healthy_view_holds(audited):
+    # Round 2, aggregated on a fresh view, finalized on a view one round past the bound.
+    network = audited
+    wall_at(network, network.now)
+    applied = execute_round(network, 2, hotkeys=fixtures.HOT)  # the five that finalize signs
+    view = network.now
+    wall_at(network, view + FLICKER)
+    settled = finalize_round(network, 2, applied)
     assert settled.status_code == 200, settled.text
     assert settled.json()["status"] == "SETTLED"
     # Judged at emitted - MAX_LAG_ROUNDS, a round not pushed yet: never at the stale view.
     judged = view + FLICKER - MAX_LAG_ROUNDS
     assert network.store._now(network.store._db) == view < judged
     vesting = judged + network.manifest.training.verify.E_vest_rounds
-    finalized, releases = settled_at(network, 1)
+    finalized, releases = settled_at(network, 2)
     assert finalized == judged and vesting in releases

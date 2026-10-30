@@ -30,8 +30,7 @@ from aggregate_lock_fixture_v2 import Call, Restored, Template, fixtures
 from hypertrain.aggregator import tape_v2
 from hypertrain.aggregator.core import FinalityError, TapeError, TapeIntegrityError
 from hypertrain.challenge import store as store_module
-from hypertrain.challenge.exit_v2 import MAX_LAG_ROUNDS, RESULT_PAUSE_ROUNDS
-from hypertrain.challenge.store import FINALITY_VERDICTS, ChallengeStore
+from hypertrain.challenge.store import FINALITY_VERDICTS, ChallengeError, ChallengeStore
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Finalize
 
@@ -136,11 +135,24 @@ def rewrite_record(r: Restored, kind: str, change: Callable[[dict[str, Any]], No
         r.store._put_record_v2(r.run, kind, "0", record)
 
 
-def stall_gate(r: Restored) -> None:
-    """The wall clock one round past the pause an audited round's finalize tolerates (S21, D118):
-    every finalize answers 503."""
-    genesis = r.manifest.training.beacon.genesis_time
-    r.store.clock = lambda: genesis + (r.now + MAX_LAG_ROUNDS + RESULT_PAUSE_ROUNDS + 1 - 1) * 3
+REFUSED = "refused after the replay"
+
+
+def refuse_after_replay(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Every finalize ends unsettled after its pre-step replayed, while the switch is on.
+
+    Before hotfix 3 the stale gate did this: it was judged after the replay. It is judged on
+    entry now, so the transaction is stopped where that gate stood, before the round is closed."""
+    switch = [True]
+    close = ChallengeStore._close_round_v2
+
+    def refused(store: ChallengeStore, *args: Any, **kwargs: Any) -> None:
+        if switch[0]:
+            raise ChallengeError(503, REFUSED)
+        close(store, *args, **kwargs)
+
+    monkeypatch.setattr(ChallengeStore, "_close_round_v2", refused)
+    return switch
 
 
 def sealed_finalize(
@@ -380,14 +392,14 @@ def test_a_finalize_retried_after_the_stale_gate_within_the_age_does_not_replay_
 ) -> None:
     applied, raw = aggregated(restored)
     spy = ReplaySpy(monkeypatch, restored)
-    stall_gate(restored)
+    refusing = refuse_after_replay(monkeypatch)
 
     error = refusal(lambda: finalize(restored, raw))
 
-    assert error[1:] == (503, "beacon infrastructure paused")
+    assert error[1:] == (503, REFUSED)
     assert [owned for owned, _ in spy.calls] == [False]
     # The retry is a newly signed Finalize of the same round: the verdict belongs to the rows.
-    restored.set_clock(restored.now)
+    refusing[0] = False
     assert finalize(restored, restored.finalize_raw(applied))["status"] == "SETTLED"
     assert [owned for owned, _ in spy.calls] == [False]
 
@@ -399,14 +411,14 @@ def test_a_finalize_retried_after_the_stale_gate_past_the_age_replays_again(
     applied, raw = aggregated(restored)
     spy = ReplaySpy(monkeypatch, restored)
     monkeypatch.setattr(store_module, "FINALITY_VERDICT_SECONDS", 0.0)
-    stall_gate(restored)
+    refusing = refuse_after_replay(monkeypatch)
 
     error = refusal(lambda: finalize(restored, raw))
 
-    assert error[1:] == (503, "beacon infrastructure paused")
+    assert error[1:] == (503, REFUSED)
     assert [owned for owned, _ in spy.calls] == [False]
-    # When: the gate is open again and the round is finalized with a newly signed Finalize
-    restored.set_clock(restored.now)
+    # When: the refusal is lifted and the round is finalized with a newly signed Finalize
+    refusing[0] = False
     answer = finalize(restored, restored.finalize_raw(applied))
     # Then: the pre-step replays once more, and so does the transaction, which owns the lock
     assert answer["status"] == "SETTLED"
@@ -589,21 +601,21 @@ def damage_tape(r: Restored, applied: dict[str, Any], how: str) -> None:
 def test_a_tape_that_cannot_be_read_is_refused_after_the_checks_that_come_first(
     restore: Callable[..., Restored], monkeypatch: pytest.MonkeyPatch, how: str
 ) -> None:
-    # Given: the tape object of the round is damaged and the beacon gate is stale. The parent
-    # reads the tape only in the replay, after the gate, so it answers the gate's 503.
+    # Given: the tape object of the round is damaged and the transaction is refused before its
+    # replay. The parent reads the tape only in the replay, so it answers that refusal.
     primed, parent = restore(), restore()
     raws = []
+    refuse_after_replay(monkeypatch)
     for r in (primed, parent):
         applied, raw = aggregated(r)
         damage_tape(r, applied, how)
-        stall_gate(r)
         raws.append(raw)
 
     error = refusal(lambda: finalize(primed, raws[0]))
     with parent_finalize(monkeypatch):
         parent_error = refusal(lambda: finalize(parent, raws[1]))
 
-    assert parent_error[1:] == (503, "beacon infrastructure paused")
+    assert parent_error[1:] == (503, REFUSED)
     assert error == parent_error
 
 
@@ -652,9 +664,10 @@ def test_a_caller_that_owns_the_store_lock_does_not_wait_for_an_unlocked_replay(
 
 
 def refused_for(r: Restored, raw: bytes, probe: int) -> None:
-    """An attempt on the rows `probe` names: a replay of its own, ended unsettled by the stale gate.
+    """An attempt on the rows `probe` names: a replay of its own, ended unsettled after it.
 
-    The gate must be stalled. Rewriting the applied record changes what the verdict is keyed on.
+    Finalizes must be refused after the replay (`refuse_after_replay`). Rewriting the applied
+    record changes what the verdict is keyed on.
     """
     rewrite_record(r, "applied", lambda record: record.update(probe=probe))
     assert refusal(lambda: finalize(r, raw))[1] == 503
@@ -665,10 +678,10 @@ def test_the_remembered_verdicts_are_the_newest_ones_and_bounded(
 ) -> None:
     applied, raw = aggregated(restored)
     spy = ReplaySpy(monkeypatch, restored)
-    stall_gate(restored)
+    refusing = refuse_after_replay(monkeypatch)
     rounds = FINALITY_VERDICTS + 2
 
-    # Each attempt names other rows, so it is another replay; the stale gate ends it unsettled.
+    # Each attempt names other rows, so it is another replay; the refusal ends it unsettled.
     for probe in range(rounds):
         refused_for(restored, raw, probe)
 
@@ -680,10 +693,10 @@ def test_the_remembered_verdicts_are_the_newest_ones_and_bounded(
     # ... and the oldest is the one that went: the rows of the first attempt are.
     refused_for(restored, raw, 0)
     assert len(spy.calls) == rounds + 1, "the verdict of the oldest attempt was still kept"
-    # The transaction takes the kept verdict as well: with the gate open, a newly signed Finalize
-    # of the last attempt's rows settles without a replay.
+    # The transaction takes the kept verdict as well: with the refusal lifted, a newly signed
+    # Finalize of the last attempt's rows settles without a replay.
     rewrite_record(restored, "applied", lambda record: record.update(probe=rounds - 1))
-    restored.set_clock(restored.now)
+    refusing[0] = False
     assert finalize(restored, restored.finalize_raw(applied))["status"] == "SETTLED"
     assert len(spy.calls) == rounds + 1
 
@@ -693,7 +706,7 @@ def test_a_verdict_stored_afresh_is_the_newest_and_not_the_next_to_go(
 ) -> None:
     _, raw = aggregated(restored)
     spy = ReplaySpy(monkeypatch, restored)
-    stall_gate(restored)
+    refuse_after_replay(monkeypatch)
     memo = restored.store._finality_verdicts_v2
     for probe in range(FINALITY_VERDICTS):
         refused_for(restored, raw, probe)
