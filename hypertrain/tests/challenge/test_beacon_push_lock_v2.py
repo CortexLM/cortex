@@ -527,3 +527,38 @@ def test_a_run_whose_manifest_cannot_be_read_stops_no_push_and_no_other_witness(
         assert [tuple(row) for row in failed] == (journaled if case == "malformed" else [])
     finally:
         reopened.close()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="each push reads the manifest and opens a witness transaction (Lens m2, d8b2a50)",
+)
+def test_a_restarted_store_pushed_on_time_reads_no_manifest_and_no_record(
+    child_network,  # noqa: F811
+):
+    """The witness of a run without services costs a push on time nothing: the run's beacon is
+    read once, and a push whose view does not lag the clock opens no witness transaction (Lens m2
+    of d8b2a50)."""
+    network = child_network
+    run, view = network.manifest.run_id(), network.store._now(network.store._db)
+    genesis = network.manifest.training.beacon.genesis_time
+    reopened = restarted(network.root)
+    child, me, statements = reopened.for_run(run), threading.get_ident(), []
+    try:
+        # Given a restarted store whose pusher is on time (the clock is at the pushed round),
+        reopened.clock = lambda: genesis + view * 3
+        reopened.push_beacon(fixture_beacon(view + 1))
+        # When the next round is pushed on time,
+        reopened.clock = lambda: genesis + (view + 1) * 3
+        child._db.set_trace_callback(
+            lambda sql: statements.append(sql) if threading.get_ident() == me else None
+        )
+        reopened.push_beacon(fixture_beacon(view + 2))
+        child._db.set_trace_callback(None)
+        # Then the child stored it, and read neither a manifest nor a record of its run.
+        assert any("INSERT INTO beacon" in sql for sql in statements)
+        assert [sql for sql in statements if "manifest" in sql or "records_v2" in sql] == []
+    finally:
+        child._db.set_trace_callback(None)
+        reopened.close()
