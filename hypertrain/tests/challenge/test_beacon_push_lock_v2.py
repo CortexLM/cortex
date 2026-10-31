@@ -434,3 +434,39 @@ def test_a_transaction_with_nothing_staged_opens_one_sqlite_transaction(
             store._db.set_trace_callback(None)
         # Then it is the only SQLite transaction opened.
         assert begins == ["BEGIN IMMEDIATE"]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="push_beacon witnesses a pause only for a run whose services are built",
+)
+def test_a_restarted_master_witnesses_the_pause_its_head_first_catch_up_shows(
+    child_network,  # noqa: F811
+):
+    """TEST, 31/10 (run 0ef600b4, challenge up since 04:43Z): the pusher was paused 26 s, then
+    pushed its head first and the oldest pending round after it, one pair a tick. No store left
+    a `beacon-pause` record: since the restart no request had built the run's services, and
+    `push_beacon` witnessed a pause only for a run whose services this process had built."""
+    network, root = child_network, child_network.root
+    run, view = network.manifest.run_id(), network.store._now(network.store._db)
+    # Given the process that opens the state directory again, as a new image does,
+    reopened = ChallengeStore(
+        root.state_dir, root.params, root.coord, root.owner_hotkey, root.verify_beacon, root.objects
+    )
+    try:
+        child = reopened.for_run(run)
+        assert child is not reopened and child._services_v2 == {}
+        # When the pusher, stopped for 10 rounds, catches up head first,
+        head, pending, seen = view + 11, list(range(view + 1, view + 11)), []
+        while pending:
+            at = network.manifest.training.beacon.genesis_time + (head - 1) * 3
+            reopened.clock = lambda at=at: at  # the child's clock follows its root's
+            for number in (head, pending.pop(0)):
+                reopened.push_beacon(fixture_beacon(number))
+                seen.append(pauses_of(child, run))
+            head += 1
+        # Then its first push witnesses the view callers were held at, and no later push moves it.
+        assert seen == [[(str(view), f'{{"to":{view + 8}}}')]] * 20
+    finally:
+        reopened.close()
