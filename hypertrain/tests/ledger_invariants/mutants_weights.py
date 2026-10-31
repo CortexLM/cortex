@@ -32,6 +32,9 @@ CHILD_PAID = (
 REPLAY = (
     W2 + "test_a_stored_answer_replays_without_the_v2_services_and_not_while_the_metagraph_is_down"
 )
+EVENT_AFTER_ANSWER = (
+    CONTRACT + "test_a_commit_at_a_round_an_answered_epoch_at_reached_is_stamped_after_it"
+)
 
 MUTANTS = [
     {
@@ -547,5 +550,28 @@ MUTANTS = [
         "new": '        "units_burned_this_epoch",\n        "ledger_minted",\n',
         "tests": [MERGE_PROPERTY],
         "why": "the merged answer reports the capped count of the first run alone.",
+    },
+    {
+        "id": "wgt-answer-time-not-kept",
+        "invariants": ["WGT-08"],
+        "path": STORE,
+        "old": (
+            '            last = self._meta(db, "last_answer_at", -1)\n'
+            '            self._set_meta(db, "last_answer_at", max(last, epoch_at))\n'
+        ),
+        "new": "",
+        "tests": [EVENT_AFTER_ANSWER],
+        "why": "a v1 event is stamped at its chain time although an epoch was answered as of a "
+        "later time, so the v1 ledger refuses the commit (Lens L12).",
+    },
+    {
+        "id": "wgt-answer-time-lowered-by-an-out-of-order-epoch",
+        "invariants": ["WGT-08"],
+        "path": STORE,
+        "old": 'self._set_meta(db, "last_answer_at", max(last, epoch_at))',
+        "new": 'self._set_meta(db, "last_answer_at", epoch_at)',
+        "tests": [EVENT_AFTER_ANSWER],
+        "why": "an epoch answered out of order lowers the floor the v1 ledger keeps, so the next "
+        "v1 event is stamped before the newest answer and refused.",
     },
 ]

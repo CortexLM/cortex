@@ -192,3 +192,42 @@ def test_config_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     app = create_app(cfg, transport=httpx.MockTransport(lambda r: httpx.Response(500)))
     with TestClient(app) as c:
         assert c.get("/health").status_code == 503
+
+
+# A v1 ledger event is stamped after every answered epoch_at (Lens L12): the v1 ledger refuses an
+# event timed at or before the newest epoch_at it answered, out-of-order answers included
+# (`_Engine.check_event`); `ChallengeStore._epoch_answer` keeps that time in `last_answer_at` and
+# `_event_at` stamps each event at least one second past it. The master asks an epoch at its own
+# clock, which can reach the chain time of the last drand round pushed to the store.
+
+
+def chain_time(net: Net, rnd: int) -> int:
+    beacon = net.manifest.beacon
+    return beacon.genesis_time + (rnd - 1) * beacon.period
+
+
+def test_a_commit_at_a_round_an_answered_epoch_at_reached_is_stamped_after_it(net: Net) -> None:
+    # Given: round 0 takes commits at drand round d; epoch 10 is answered as of the chain time of
+    # d, then epoch 11 out of order as of an earlier time.
+    net.start()
+    body = net.body(0)
+    net.push(body["d_assign"])
+    miner = net.miners[0]
+    assert net.accept(miner, 0).status_code == 200
+    d = body["d_assign"] + 4
+    net.push(d)
+    answered_at = chain_time(net, d)
+    assert net.weights(10, answered_at).json()["metadata"]["reason"] == "ok"
+    assert net.weights(11, answered_at - 300).json()["metadata"]["reason"] == "out_of_order"
+
+    # When: the miner commits at round d.
+    r = net.commit(miner, 0)
+
+    # Then: the ledger takes the commit one second past the newest answered epoch_at, and the
+    # next epoch in order is answered ok.
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "COMMITTED"
+    store = net.c.app.state.store  # type: ignore[attr-defined]
+    commits = [rec for rec in store.ledger.journal.records if rec["kind"] == "commit"]
+    assert [(rec["hotkey"], rec["at"]) for rec in commits] == [(miner.ss58, answered_at + 1)]
+    assert net.weights(12, answered_at + 300).json()["metadata"]["reason"] == "ok"
