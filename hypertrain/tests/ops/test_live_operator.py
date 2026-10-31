@@ -59,13 +59,16 @@ class Reached(Exception):
 
 
 def build_master_args(
-    tmp_path: Path, reaudit_rounds: int | None = None, gap_cap_rounds: int | None = None
+    tmp_path: Path,
+    reaudit_rounds: int | None = None,
+    gap_cap_rounds: int | None = None,
+    ledger_mode: str = "test",
 ) -> list[str]:
     """CLI global arguments for a state dir holding a real H=1 manifest and no live master; the
     audit policy pins `reaudit_rounds` and raises `gap_cap_rounds` when they are given."""
     coord_seed = bytes(range(32))
     inputs = tmp_path / "inputs"
-    assert manifest_main(["example", "--out", str(inputs)]) == 0
+    assert manifest_main(["example", "--out", str(inputs), "--ledger-mode", ledger_mode]) == 0
     training_path, policies_path = inputs / "training.json", inputs / "policies.json"
     training = json.loads(training_path.read_text())
     training["coord_pubkey"] = Keypair(coord_seed).ss58
@@ -257,6 +260,34 @@ def test_a_cap_above_the_default_is_for_a_test_manifest_only() -> None:
     check_open_shape(0, HOTKEYS, window(276), cap=300)
     with pytest.raises(SystemExit, match="<= 300"):
         check_open_shape(0, HOTKEYS, window(301), cap=300)
+
+
+@pytest.mark.parametrize(
+    ("ledger_mode", "cap", "gap", "opens"),
+    [("production", None, 200, True), ("production", 201, 201, False), ("test", 201, 201, True)],
+    ids=["production-at-the-default", "production-above-it", "test-lifts-it"],
+)
+def test_cli_open_of_a_production_run_stops_at_the_default_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    master_calls: list[tuple[str, str]],
+    ledger_mode: str,
+    cap: int | None,
+    gap: int,
+    opens: bool,
+) -> None:
+    """d88c3: a production run opens at the default cap exactly, and only a TEST ledger lifts it.
+    The builder refuses a raised production cap since D88: a run built before that rule is built
+    here with the builder's checks minus that one."""
+    checks = AuditPolicyV2.validate_training
+    monkeypatch.setattr(
+        AuditPolicyV2, "validate_training", lambda self, training, **_: checks(self, training)
+    )
+    master_args = build_master_args(tmp_path, gap_cap_rounds=cap, ledger_mode=ledger_mode)
+    with pytest.raises(Reached if opens else SystemExit) as raised:
+        live_operator.main(open_args(master_args, gap))
+    assert opens or "only a TEST manifest may lift the cap" in str(raised.value)
+    assert master_calls == ([("GET", "")] if opens else [])
 
 
 @pytest.mark.parametrize(("margin", "refused"), [(-1, True), (0, False)], ids=["short", "exact"])
