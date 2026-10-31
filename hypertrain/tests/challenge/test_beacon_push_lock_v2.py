@@ -12,6 +12,7 @@ thread; the clock follows the pushed rounds, as `Network.push` sets it.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator
@@ -20,6 +21,7 @@ from contextlib import contextmanager
 import pytest
 
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
+from hypertrain.protocol.envelope import MalformedEnvelope
 
 from .child_run_fixture_v2 import child_network  # noqa: F401  (pytest fixture import)
 from .test_service_network_v2 import fixture_beacon
@@ -436,6 +438,13 @@ def test_a_transaction_with_nothing_staged_opens_one_sqlite_transaction(
         assert begins == ["BEGIN IMMEDIATE"]
 
 
+def restarted(root: ChallengeStore) -> ChallengeStore:
+    """The root store as a new process opens its state directory: no run has built services."""
+    return ChallengeStore(
+        root.state_dir, root.params, root.coord, root.owner_hotkey, root.verify_beacon, root.objects
+    )
+
+
 def test_a_restarted_master_witnesses_the_pause_its_head_first_catch_up_shows(
     child_network,  # noqa: F811
 ):
@@ -443,12 +452,10 @@ def test_a_restarted_master_witnesses_the_pause_its_head_first_catch_up_shows(
     pushed its head first and the oldest pending round after it, one pair a tick. No store left
     a `beacon-pause` record: since the restart no request had built the run's services, and
     `push_beacon` witnessed a pause only for a run whose services this process had built."""
-    network, root = child_network, child_network.root
+    network = child_network
     run, view = network.manifest.run_id(), network.store._now(network.store._db)
     # Given the process that opens the state directory again, as a new image does,
-    reopened = ChallengeStore(
-        root.state_dir, root.params, root.coord, root.owner_hotkey, root.verify_beacon, root.objects
-    )
+    reopened = restarted(network.root)
     try:
         child = reopened.for_run(run)
         assert child is not reopened and child._services_v2 == {}
@@ -463,5 +470,68 @@ def test_a_restarted_master_witnesses_the_pause_its_head_first_catch_up_shows(
             head += 1
         # Then its first push witnesses the view callers were held at, and no later push moves it.
         assert seen == [[(str(view), f'{{"to":{view + 8}}}')]] * 20
+    finally:
+        reopened.close()
+
+
+def unreadable(manifest: str, case: str) -> str:
+    """A stored manifest the loader refuses (`MalformedEnvelope`: a duplicate field), or one the
+    model now refuses (`RunRetired`), as the TEST root's run 42f68b45 is."""
+    if case == "malformed":
+        return '{"manifest_version":2,' + manifest[1:]
+    body = json.loads(manifest)
+    del body["training"]["reference_spec"]["env"]["pinned"]
+    return json.dumps(body)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            "malformed",
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=MalformedEnvelope,
+                reason="_unbuilt_runs_v2 loads the manifest outside _reap_v2 (Lens m1, d8b2a50)",
+            ),
+        ),
+        "retired",
+    ],
+)
+def test_a_run_whose_manifest_cannot_be_read_stops_no_push_and_no_other_witness(
+    child_network,  # noqa: F811
+    case,
+):
+    """A restarted root whose own run has a stored manifest the loader or the model refuses still
+    answers the push and forwards it: the child witnesses its pause. A manifest that cannot be
+    read is journaled as a failing reaper is (`exit-failed`, id `run:exit`); a retired run is
+    never reaped and leaves nothing (Lens m1 of d8b2a50)."""
+    network, root = child_network, child_network.root
+    run, occupant = network.manifest.run_id(), network.occupant.run_id()
+    view = network.store._now(network.store._db)
+    # Given the root's own run stored with a manifest that cannot be loaded, and a restart,
+    with root._tx() as db:
+        (stored,) = db.execute("SELECT manifest FROM runs WHERE run_id = ?", (occupant,)).fetchone()
+        db.execute(
+            "UPDATE runs SET manifest = ? WHERE run_id = ?", (unreadable(stored, case), occupant)
+        )
+    reopened = restarted(root)
+    try:
+        # When the pusher's head lands 11 rounds late,
+        head = view + 11
+        reopened.clock = lambda: network.manifest.training.beacon.genesis_time + (head - 1) * 3
+        answer = reopened.push_beacon(fixture_beacon(head))
+        # Then the push answers, the child holds the round and witnesses the pause,
+        child = reopened.for_run(run)
+        assert answer == {"round": head, "latest": head}
+        assert committed_view(child) == head
+        assert pauses_of(child, run) == [(str(view), f'{{"to":{view + 8}}}')]
+        # and the root keeps what a failing reaper leaves, or nothing for a retired run.
+        failed = reopened._db.execute(
+            "SELECT id, data FROM records_v2 WHERE run_id = ? AND kind = ?",
+            (occupant, "exit-failed"),
+        )
+        journaled = [("run:exit", '{"error":"MalformedEnvelope","stage":"exit"}')]
+        assert [tuple(row) for row in failed] == (journaled if case == "malformed" else [])
     finally:
         reopened.close()
