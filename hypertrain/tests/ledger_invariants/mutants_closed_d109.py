@@ -13,9 +13,14 @@ kept 1,000,000 units marked paid for an answer nobody was served. Two behaviours
   patch is one mutant per pin, because the runner stops at the first failing test of a mutant.
 
 The hardening lot (v3-weights-hardening) adds the mutants Lens left alive (L10, L5, L11), a COMMIT
-that raises with the transaction open (N1) and a v1 journal replay that must equal an unfailed
-answer. L10 is equivalent on every store the code can build (one run per store, one run per escrow
-ledger): its pin writes a second run by hand.
+that raises with the transaction open (N1), whose fix also flips the strict xfail FIN-25 + D-FIN-11
+of test_finality.py, and a v1 journal replay that must equal an unfailed answer. L10 is equivalent
+on every store the code can build (one run per store, one run per escrow ledger): its pin writes a
+second run by hand. The charge window of `_service_charge_v2` (a 409 while another thread holds a
+transaction of the store) is a strict xfail of tests/challenge/test_service_charge_window_v2.py:
+its fix is an owned body (hash train). Removing the guard would close that window too (the charge
+then waits on the lock in `_tx`); the mutant here pins what the guard still adds, the mapped 409
+for a charge inside its caller's own transaction.
 
 What no test or mutant covers: the order in which the store locks are taken. Every path that holds
 two of them takes the root first and the children in load order (read in review, not pinned), and
@@ -50,6 +55,10 @@ SKIP_PER_EPOCH = HOSTED + "test_a_skip_is_recorded_once_per_epoch_under_that_epo
 NOTHING_TO_PAY = HOSTED + "test_a_run_with_nothing_to_pay_is_not_built_by_the_weights_call"
 JOURNAL_REPLAY = (
     HOSTED + "test_the_retry_of_a_journaled_epoch_is_the_answer_of_a_call_that_never_failed"
+)
+OWN_TRANSACTION = (
+    "tests/challenge/test_service_charge_window_v2.py::"
+    "test_a_charge_made_inside_its_own_open_transaction_is_still_refused"
 )
 UNRETRIED = (
     "tests/ledger_invariants/test_weights_2.py::"
@@ -191,6 +200,20 @@ MUTANTS = [
         "tests": [JOURNAL_REPLAY],
         "why": "a hosted store's v1 journal forgets a failed epoch, so the retry journals it again "
         "with its own clock and stores an answer an unfailed call never stores.",
+    },
+    {
+        "id": "d109-charge-inside-its-own-transaction-allowed",
+        "invariants": ["WGT-15"],
+        "path": STORE,
+        "old": (
+            "        if self._db.in_transaction:\n"
+            '            raise ChallengeError(409, "SERVICE_CHARGE_'
+            'REQUIRES_COMMITTED_TRANSACTION")\n'
+        ),
+        "new": "",
+        "tests": [OWN_TRANSACTION],
+        "why": "a service charge made inside its caller's own transaction is no longer refused "
+        "with the mapped 409: the nested BEGIN raises a bare sqlite error instead.",
     },
     {
         "id": "d109-failed-commit-left-open",
