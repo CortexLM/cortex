@@ -1196,19 +1196,23 @@ class Admission:
                 raise AdmissionError("LOCK_OWNER_OR_KIND")
             if r.state == "BANNED":
                 raise AdmissionError("LOCK_BANNED")
-            self.meter_escrow(op, now=now)
+            self.meter_escrow(op, signer=env.signer, now=now)
             self.escrow.require_lock_capacity(op)  # before an outbox row nobody can apply
             self.store.enqueue_lock(op, env.signer)
         return self.store.reconcile_lock(op.operation_id).event_hash
 
-    def meter_escrow(self, op: EscrowOperation, *, now: int) -> None:
+    def meter_escrow(self, op: EscrowOperation, *, signer: str, now: int) -> None:
         """Charge a new client escrow event to its owner's budget of the window (ADR 0014 5.1).
 
-        Called once the signature is verified and before any ledger work. A retry of an event the
-        ledger holds costs nothing; a refused event costs nothing either, because the charge is
-        written in the transaction of the request, which the refusal rolls back. Service
-        operations never come here.
+        Called once the signature is verified and before any ledger work. A signer that is not the
+        owner is refused first, as the ledger would, so the answer never tells a third party
+        whether that owner's budget is spent (D137). A retry of an event the ledger holds costs
+        nothing; a refused event costs nothing either, because the charge is written in the
+        transaction of the request, which the refusal rolls back. Service operations never come
+        here.
         """
+        if signer != op.owner:
+            raise EscrowError("OWNER_AUTHORITY")
         if self.escrow.recorded(op):
             return
         window = self.policy.work_screen_epoch_rounds

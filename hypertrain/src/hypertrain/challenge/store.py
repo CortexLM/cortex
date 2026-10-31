@@ -3640,7 +3640,7 @@ class ChallengeStore:
                             result = {"event_hash": admission.lock(raw, now=now)}
                         else:
                             self._authenticated_v2(run_id, raw, "EscrowLock", op.owner)
-                            admission.meter_escrow(op, now=now)
+                            admission.meter_escrow(op, signer=env.signer, now=now)
                             result = escrow.lock(op, signer=env.signer).body()
                     case "transfer" | "release":
                         from hypertrain.protocol.messages_v2 import EscrowRelease, EscrowTransfer
@@ -3649,7 +3649,7 @@ class ChallengeStore:
                         expected = "EscrowTransfer" if action == "transfer" else "EscrowRelease"
                         model = self._authenticated_v2(run_id, raw, expected, env.signer)
                         assert isinstance(model, EscrowTransfer | EscrowRelease)
-                        admission.meter_escrow(model, now=now)
+                        admission.meter_escrow(model, signer=env.signer, now=now)
                         if action == "transfer":
                             assert isinstance(model, EscrowTransfer)
                             result = escrow.transfer(model, signer=env.signer).body()

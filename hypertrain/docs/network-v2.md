@@ -383,7 +383,9 @@ refuses a new lock only, so replaying an accepted lock returns its receipt, and 
 makes room. Every new event of the escrow routes (`escrow/lock`, `escrow/transfer`,
 `escrow/release`) costs its coldkey one unit of a budget of 2,048 per `work_screen_epoch_rounds`
 window, twice the roster ceiling (`ESCROW_QUOTA`, 409); a retry of an event the ledger holds and a
-refused event cost nothing, and a retry still returns its receipt once the budget is spent. The funding status of an admission (`GET .../admission/{hotkey}`, public) reads
+refused event cost nothing, and a retry still returns its receipt once the budget is spent. A
+request signed by anyone but the owner is refused `OWNER_AUTHORITY` before the budget is read, so
+its answer never depends on the owner's budget. The funding status of an admission (`GET .../admission/{hotkey}`, public) reads
 the owner's open locks through a partial index, so its cost grows with those locks and not
 with the ledger (it was quadratic in the number of locks: 96 s at 40,000).
 

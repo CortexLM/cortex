@@ -277,7 +277,9 @@ F7b (IMPORTANT):
    with refusal `ESCROW_QUOTA`. The client routes call it once the signature is verified and before any
    ledger work: `Admission.lock` for an admission lock (after the owner, kind and ban checks, before
    the capacity check and the outbox), `ChallengeStore.admission_v2` for a contest lock, a transfer and
-   a release. An event the ledger already holds, request for request (`EscrowV2.recorded`), is not
+   a release. A signer that is not the owner is refused `OWNER_AUTHORITY` before the bucket is read
+   (D137), as the ledger would refuse it, so no answer tells a third party whether a coldkey's budget
+   is spent. An event the ledger already holds, request for request (`EscrowV2.recorded`), is not
    charged, so a retry returns its receipt even once the bucket is spent; a refused event costs
    nothing because the charge rolls back with the request's transaction, and an `ESCROW_QUOTA`
    refusal leaves the replay nonce free. The server operations (`release_settlement`, `slash`,
@@ -285,9 +287,10 @@ F7b (IMPORTANT):
    deletes the escrow rows of earlier windows with `identity >= 'escrow:' AND identity < 'escrow;'`,
    a range of the primary key, so the table holds one row per coldkey active in the window. Pins: the
    RL-01 test of `tests/ledger_invariants/test_admission_http.py`, a strict xfail with a bound of 64
-   until now, which asks for the 2,048 above, and three RL-01 tests (a retry and a refusal cost nothing; every route draws on
-   the coldkey's budget, another coldkey keeps its own; the next window renews it and drops the old
-   row); mutants: `tests/ledger_invariants/mutants_closed_rl01.py`.
+   until now, which asks for the 2,048 above, and four RL-01 tests (a retry and a refusal cost
+   nothing; every route draws on the coldkey's budget, another coldkey keeps its own; the next window
+   renews it and drops the old row; a third party's request is refused `OWNER_AUTHORITY` whatever the
+   budget); mutants: `tests/ledger_invariants/mutants_closed_rl01.py`.
 2. A transfer must go to a recipient the ledger already knows (`UNKNOWN_RECIPIENT`): the quota alone
    is bypassed by hops to fresh keys (79 signers accepted once each, reproduced over HTTP [V]). No
    in-repo flow transfers to an unknown wallet. This is a product rule; see "Decisions for Forge".

@@ -4,7 +4,7 @@ place, an escrow event that costs nothing or a budget that does not hold.
 
 The pin `test_rl01_the_escrow_transfers_of_one_key_are_bounded_in_one_beacon` was a strict expected
 failure with a bound of 64 until the quota landed; its bound is now the 2,048 of the ADR and it
-holds the quota with the three RL-01 pins written with it. The window in the identity and the
+holds the quota with the four RL-01 pins written with it. The window in the identity and the
 cleanup of earlier windows guard the same thing (a new window starts a new budget): removing one
 alone is caught by the other, so `closed-rl01-one-budget-for-ever` reverts both.
 
@@ -21,6 +21,7 @@ BOUNDED = HTTP + "test_rl01_the_escrow_transfers_of_one_key_are_bounded_in_one_b
 FREE = HTTP + "test_rl01_a_retry_or_a_refused_escrow_event_costs_no_quota"
 ROUTES = HTTP + "test_rl01_every_escrow_route_draws_on_the_budget_of_its_coldkey"
 WINDOW = HTTP + "test_rl01_the_next_window_gives_a_new_budget_and_drops_the_spent_one"
+FOREIGN = HTTP + "test_rl01_a_signer_that_is_not_the_owner_learns_nothing_of_its_budget"
 
 CHARGE = (
     "        self.store.quota(\n"
@@ -65,6 +66,18 @@ MUTANTS = [
         "why": (
             "A burst below 2,048 refuses an honest coldkey that locks and tops up a whole roster "
             "in one window, the sizing D53 2 rejected for the first, smaller bursts."
+        ),
+    },
+    {
+        "id": "closed-rl01-the-quota-answers-a-third-party",
+        "invariants": ["RL-01"],
+        "path": ADMISSION,
+        "old": '        if signer != op.owner:\n            raise EscrowError("OWNER_AUTHORITY")\n',
+        "new": "",
+        "tests": [FOREIGN],
+        "why": (
+            "Charged before the owner check, a request signed by a third party answers "
+            "ESCROW_QUOTA once the owner's budget is spent: anyone reads a coldkey's budget."
         ),
     },
     {
@@ -131,7 +144,7 @@ MUTANTS = [
         "id": "closed-rl01-the-admission-lock-is-free",
         "invariants": ["RL-01", "ESC-02"],
         "path": ADMISSION,
-        "old": "            self.meter_escrow(op, now=now)\n",
+        "old": "            self.meter_escrow(op, signer=env.signer, now=now)\n",
         "new": "",
         "tests": [ROUTES],
         "why": "An admission lock that is not charged adds ledger events past the budget.",
@@ -140,7 +153,9 @@ MUTANTS = [
         "id": "closed-rl01-the-contest-lock-is-free",
         "invariants": ["RL-01", "ESC-02"],
         "path": STORE,
-        "old": "                            admission.meter_escrow(op, now=now)\n",
+        "old": (
+            "                            admission.meter_escrow(op, signer=env.signer, now=now)\n"
+        ),
         "new": "",
         "tests": [ROUTES],
         "why": "A contest lock that is not charged adds ledger events past the budget.",
@@ -149,7 +164,9 @@ MUTANTS = [
         "id": "closed-rl01-transfers-and-releases-are-free",
         "invariants": ["RL-01", "ESC-02"],
         "path": STORE,
-        "old": "                        admission.meter_escrow(model, now=now)\n",
+        "old": (
+            "                        admission.meter_escrow(model, signer=env.signer, now=now)\n"
+        ),
         "new": "",
         "tests": [BOUNDED],
         "why": "Transfers and releases that are not charged add ledger events without any bound.",

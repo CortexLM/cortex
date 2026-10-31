@@ -18,6 +18,7 @@ tests/challenge pins it more strongly, by those: see the mutant table.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -605,6 +606,51 @@ def test_rl01_every_escrow_route_draws_on_the_budget_of_its_coldkey(gate: Gate) 
     # And: another coldkey's events still reach the ledger
     assert detail(release(other)) == "UNKNOWN_LOCK"
     assert escrow_transfer(gate, other, 0, owner.ss58).status_code == 200
+
+
+def test_rl01_a_signer_that_is_not_the_owner_learns_nothing_of_its_budget(gate: Gate) -> None:
+    """RL-01 (D137): OWNER_AUTHORITY comes before ESCROW_QUOTA. A transfer or a release a third
+    party signs for a coldkey is refused for its signer whatever that coldkey's budget, so the
+    answer tells the third party nothing of it, and it costs the budget nothing."""
+    owner, third = service.COLD[0], service.COLD[1]
+    origin = gate.network.origin_ids[0]
+
+    def foreign(kind: str, index: int):
+        common = dict(
+            operation_id=sha256_hex(f"foreign-{kind}-{index}".encode()),
+            owner=owner.ss58,
+            units=1,
+            origin_ids=[origin],
+            admission_id=None,
+        )
+        if kind == "transfer":
+            operation: Any = EscrowTransfer(**common, dispute_id=None, recipient=third.ss58)
+            message = "EscrowTransfer"
+        else:
+            operation = EscrowRelease(
+                **common,
+                dispute_id="ab" * 32,
+                lock_id="cd" * 32,
+                finality_hash="ef" * 32,
+                closed_dispute_root="ef" * 32,
+            )
+            message = "EscrowRelease"
+        return gate.client.post(
+            f"{gate.url}/escrow/{kind}", json=gate.network.signed(third, message, operation)
+        )
+
+    # Given: the third party's transfer and release of the owner's units, on a fresh budget
+    for kind in ("transfer", "release"):
+        answer = foreign(kind, 0)
+        assert (answer.status_code, detail(answer)) == (409, "OWNER_AUTHORITY")
+    # When: the owner spends its whole budget (the refused requests took none of it)
+    spend_the_burst(gate, owner, third.ss58)
+    # Then: the same requests get the same answer, and change nothing
+    before = gate.world.db_digest()
+    for kind in ("transfer", "release"):
+        answer = foreign(kind, 1)
+        assert (answer.status_code, detail(answer)) == (409, "OWNER_AUTHORITY")
+    assert gate.world.db_digest() == before
 
 
 def test_rl01_the_next_window_gives_a_new_budget_and_drops_the_spent_one(gate: Gate) -> None:
