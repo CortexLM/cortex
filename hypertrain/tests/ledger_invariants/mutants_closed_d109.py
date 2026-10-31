@@ -12,6 +12,10 @@ kept 1,000,000 units marked paid for an answer nobody was served. Two behaviours
   the old intermediate state (`test_gaps_weights.py`) asserts that the child keeps nothing. The same
   patch is one mutant per pin, because the runner stops at the first failing test of a mutant.
 
+The hardening lot (v3-weights-hardening) adds the mutants Lens left alive (L10, L5, L11) and a
+COMMIT that raises with the transaction open (N1). L10 is equivalent on every store the code can
+build (one run per store, one run per escrow ledger): its pin writes a second run by hand.
+
 What no test or mutant covers: the order in which the store locks are taken. Every path that holds
 two of them takes the root first and the children in load order (read in review, not pinned), and
 a child lock is now held until the root commits.
@@ -38,6 +42,11 @@ COMMIT_FAILS = (
     "tests/ledger_invariants/test_finality.py::"
     "test_a_transaction_whose_commit_fails_is_rolled_back_and_closed"
 )
+BESIDE_A_LIVE_RUN = (
+    HOSTED + "test_a_retired_run_beside_a_live_one_in_the_same_store_does_not_stop_its_pay"
+)
+SKIP_PER_EPOCH = HOSTED + "test_a_skip_is_recorded_once_per_epoch_under_that_epoch"
+NOTHING_TO_PAY = HOSTED + "test_a_run_with_nothing_to_pay_is_not_built_by_the_weights_call"
 UNRETRIED = (
     "tests/ledger_invariants/test_weights_2.py::"
     "test_units_a_child_paid_while_the_root_failed_to_persist_reach_a_delivered_answer[False]"
@@ -129,6 +138,34 @@ MUTANTS = [
         "tests": [HALF_COMMIT],
         "why": "the root commits before the hosted stores: a hosted commit that fails leaves the "
         "root with an answer that pays units the hosted store never kept.",
+    },
+    {
+        "id": "d109-retired-run-stops-its-store",
+        "invariants": ["WGT-15"],
+        "path": STORE,
+        "old": "            if escrows:\n",
+        "new": "            if escrows and not retired:\n",
+        "tests": [BESIDE_A_LIVE_RUN],
+        "why": "a retired run stops the pay of a live run its store also holds (Lens L10).",
+    },
+    {
+        "id": "d109-skip-keyed-off-its-epoch",
+        "invariants": ["WGT-15"],
+        "path": STORE,
+        "old": '"weights-skipped", str(epoch),',
+        "new": '"weights-skipped", str(epoch + 1),',
+        "tests": [SKIP_PER_EPOCH],
+        "why": "the skip is filed under another epoch's id (Lens L5).",
+    },
+    {
+        "id": "d109-idle-run-built",
+        "invariants": ["WGT-15"],
+        "path": STORE,
+        "old": 'if live and json.loads(r[1]).get("manifest_version") == 2:',
+        "new": 'if json.loads(r[1]).get("manifest_version") == 2:',
+        "tests": [NOTHING_TO_PAY],
+        "why": "the services of a run with nothing to pay are built: a retired one is booked as "
+        "skipped, one that cannot be built refuses the epoch for every run (Lens L11).",
     },
     {
         "id": "d109-failed-commit-left-open",
