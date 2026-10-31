@@ -25,6 +25,13 @@ stand-in and stalls the object puts), and the key and the age of a kept finality
 of another replay would be trusted): tests/e2e/test_aggregate_lock_v2_e2e.py and
 test_finalize_lock_v2_e2e.py hold them.
 
+The beacon lot (a child's round is staged instead of waiting for its lock, 922c61c) adds three
+mutants Lens left alive (B7, B16, B15; tests/challenge/test_beacon_push_lock_v2.py): the view from
+before staged rounds is witnessed by the next free push only, the oldest such view wins over a later
+publication, and an empty stage costs no SQLite transaction. Lens's B12 (the stage entry dropped by
+round instead of by identity) is equivalent: a round re-staged while it is written is already in the
+beacon table, which only grows and is written with INSERT OR IGNORE, so dropping it loses nothing.
+
 Run from hypertrain/: .venv/bin/python scripts/check_ledger_invariant_mutants.py --only <ids>
 """
 
@@ -44,6 +51,14 @@ RESTART = (
 RESTART_HTTP = (
     "tests/ledger_invariants/test_credit.py::test_the_first_finalize_after_a_restart_is_accepted"
 )
+BEACON = "tests/challenge/test_beacon_push_lock_v2.py::"
+WITNESSED_ONCE = (
+    BEACON + "test_the_view_before_staged_rounds_is_witnessed_by_the_next_free_push_only"
+)
+OLDEST_VIEW = (
+    BEACON + "test_two_publications_before_a_free_push_leave_the_pause_from_the_first_view"
+)
+EMPTY_STAGE = BEACON + "test_a_transaction_with_nothing_staged_opens_one_sqlite_transaction"
 
 REPLAY = (
     "                result = admission.run_reference(\n"
@@ -121,6 +136,42 @@ MUTANTS = [
             "The replay job reads the escrow policy from the cache of built services, which a "
             "restarted store has not filled, so the priming gives up and the services are built "
             "inside the transaction of the Finalize."
+        ),
+    },
+    {
+        "id": "closed-lockrel-the-unwitnessed-view-outlives-its-push",
+        "invariants": ["ADR0017-F4", "BPOL-M1"],
+        "path": STORE,
+        "old": "            self._unwitnessed_view = None  # the reapers above ran from it\n",
+        "new": "            pass\n",
+        "tests": [WITNESSED_ONCE],
+        "why": (
+            "The view before staged rounds stays the witness of every later push, so a pause is "
+            "recorded from it although the master served the views after it (Lens B7)."
+        ),
+    },
+    {
+        "id": "closed-lockrel-a-later-publication-replaces-the-unwitnessed-view",
+        "invariants": ["ADR0017-F4", "BPOL-M2"],
+        "path": STORE,
+        "old": "if self._unwitnessed_view is None and 0 < view < self._now(db):",
+        "new": "if 0 < view < self._now(db):",
+        "tests": [OLDEST_VIEW],
+        "why": (
+            "A second publication before a free push replaces the view callers were first held "
+            "at, so the pause that waives their blame is cut short (Lens B16)."
+        ),
+    },
+    {
+        "id": "closed-lockrel-an-empty-stage-is-written",
+        "invariants": ["ADR0017-F4", "BPOL-M4"],
+        "path": STORE,
+        "old": "        if not staged:\n            return\n",
+        "new": "",
+        "tests": [EMPTY_STAGE],
+        "why": (
+            "Every outermost transaction opens two more empty SQLite transactions to publish a "
+            "stage that holds nothing (Lens B15, cost only)."
         ),
     },
 ]

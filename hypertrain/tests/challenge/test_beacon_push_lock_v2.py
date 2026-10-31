@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 
 import pytest
@@ -351,3 +351,86 @@ def test_a_round_staged_while_a_free_push_runs_is_written_before_it_returns(
     network.root.push_beacon(fixture_beacon(number))
     assert answers == [{"round": number + 1, "latest": number + 1}]
     assert committed_view(child) == number + 1
+
+
+def held_across(store: ChallengeStore, network, numbers: Iterable[int]) -> None:
+    """One long transaction of `store` while the pusher delivers `numbers` on time."""
+    numbers, answers = list(numbers), []
+    with long_transaction(store):
+        for number in numbers:
+            wall_at(network, number)
+            pusher = push_in_thread(network, number, answers)
+            pusher.join(WAIT / 2)
+            assert not pusher.is_alive(), "the push waited for the child's transaction"
+    assert answers == [{"round": n, "latest": n} for n in numbers]
+    assert committed_view(store) == numbers[-1]  # written when the transaction ended
+
+
+def pauses_of(store: ChallengeStore, run: str) -> list[tuple[str, str]]:
+    rows = store._db.execute(
+        "SELECT id, data FROM records_v2 WHERE run_id = ? AND kind = ? ORDER BY id",
+        (run, "beacon-pause"),
+    )
+    return [tuple(row) for row in rows]
+
+
+def test_the_view_before_staged_rounds_is_witnessed_by_the_next_free_push_only(
+    child_network,  # noqa: F811
+):
+    """Once a free push witnessed the view staged rounds left, the next push witnesses its own
+    view: an older one would mark views the master served as refused (Lens M-1, mutant B7)."""
+    network, child = child_network, child_network.store
+    run, view = network.manifest.run_id(), child._now(child._db)
+    held_across(child, network, [view + 1])
+    # Given the free push after the publication, on time: it witnesses `view`, no pause.
+    wall_at(network, view + 2)
+    network.root.push_beacon(fixture_beacon(view + 2))
+    assert pauses_of(child, run) == []
+    # When the pusher stops and its next round comes 7 rounds late,
+    wall = view + 9
+    wall_at(network, wall)
+    network.root.push_beacon(fixture_beacon(view + 3))
+    # Then the pause starts at the view the master held, not at the one before the staged round.
+    assert pauses_of(child, run) == [(str(view + 2), f'{{"to":{wall - 3}}}')]
+
+
+def test_two_publications_before_a_free_push_leave_the_pause_from_the_first_view(
+    child_network,  # noqa: F811
+):
+    """Two long transactions in a row (an aggregate claim, then its settle) each publish the
+    rounds staged during it: callers were held at the view before both (Lens M-2, mutant B16)."""
+    network, child = child_network, child_network.store
+    run, view = network.manifest.run_id(), child._now(child._db)
+    # Given two transactions, each held across 3 rounds delivered on time,
+    held_across(child, network, range(view + 1, view + 4))
+    held_across(child, network, range(view + 4, view + 7))
+    # When the next round lands on a free child,
+    wall = view + 7
+    wall_at(network, wall)
+    network.root.push_beacon(fixture_beacon(wall))
+    # Then the pause covers the view the first transaction held its callers at.
+    assert pauses_of(child, run) == [(str(view), f'{{"to":{wall - 3}}}')]
+
+
+def test_a_transaction_with_nothing_staged_opens_one_sqlite_transaction(
+    child_network,  # noqa: F811
+):
+    """The root never stages a round and a child rarely does: the publication around every
+    outermost `_tx` adds no SQLite transaction when nothing is staged (Lens M-4, mutant B15)."""
+    me = threading.get_ident()
+    for store in (child_network.root, child_network.store):
+        begins: list[str] = []
+
+        def trace(sql: str, begins: list[str] = begins) -> None:
+            if threading.get_ident() == me and sql.lstrip().upper().startswith("BEGIN"):
+                begins.append(sql)
+
+        # Given nothing staged, when one outermost transaction runs,
+        store._db.set_trace_callback(trace)
+        try:
+            with store._tx() as db:
+                db.execute("INSERT OR REPLACE INTO meta VALUES('health', '1')")
+        finally:
+            store._db.set_trace_callback(None)
+        # Then it is the only SQLite transaction opened.
+        assert begins == ["BEGIN IMMEDIATE"]
