@@ -659,13 +659,15 @@ def two_builds(
     replay: str,
     geometry: str = "dense-0.1b",
     real_env: dict[str, str] | None = None,
+    warmup_env: dict[str, str] | None = None,
 ) -> tuple[Path, Path, subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
     """The runbook's two builds over the same seeds, image and expiry: the throw-away warm-up run at
     the 300 s ceiling, then the real run from the measured `replay`, told the warm-up's OUT_DIR."""
     dense = {"HT_D20_GEOMETRY": geometry}
     warmup, real = tmp_path / "warmup", tmp_path / "real"
     args = {"driver": "595.91.07", "sm_count": "148", "exp_round": "34310319"}
-    first = build(host, warmup, env={**dense, "HT_D20_REPLAY_SECONDS": "300"}, **args)
+    first_env = {**dense, "HT_D20_REPLAY_SECONDS": "300", **(warmup_env or {})}
+    first = build(host, warmup, env=first_env, **args)
     assert first.returncode == 0, first.stderr
     (real / "secrets").mkdir(parents=True, mode=0o700)
     for seed in seed_files(warmup / "secrets"):
@@ -807,6 +809,8 @@ def test_an_artifact_knob_signs_its_bound_and_moves_only_the_admission_policy(
     assert {k for k in networks[0] if networks[0][k] != networks[1][k]} == {"admission_policy_hash"}
     assert accepted_manifest(plain)[0].run_id() != accepted_manifest(knobbed)[0].run_id()
     report = json.loads(run.stdout[run.stdout.rindex("\n{\n") + 1 :])
+    # The miner and server of a knobbed run must parse the two fields: older code refuses them.
+    assert "built from bc306dc or later" in report["artifact_limits"].pop("requires")
     assert report["artifact_limits"] == {
         "max_refs": None,
         "max_parts": None,
@@ -831,26 +835,27 @@ def test_the_artifact_knobs_take_the_largest_bounds_the_protocol_signs(host, tmp
 
 
 @pytest.mark.parametrize(
-    ("env", "named", "stages"),
+    ("env", "named", "code", "stages"),
     [
-        ({"HT_D20_MAX_REFS": "0"}, "HT_D20_MAX_REFS must be a whole number from 1", 0),
-        ({"HT_D20_MAX_REFS": "08"}, "HT_D20_MAX_REFS must be a whole number from 1", 0),
-        ({"HT_D20_MAX_PARTS": "-512"}, "HT_D20_MAX_PARTS must be a whole number from 1", 0),
-        ({"HT_D20_MAX_PARTS": "512 "}, "HT_D20_MAX_PARTS must be a whole number from 1", 0),
-        ({"HT_D20_MAX_REFS": "513"}, "HT_D20_MAX_REFS=513 is above 512", 1),
-        ({"HT_D20_MAX_PARTS": "8193"}, "HT_D20_MAX_PARTS=8193 is above 8192", 1),
-        ({"HT_D20_MAX_PARTS": "1" + "0" * 30}, "is above 8192", 1),
+        ({"HT_D20_MAX_REFS": "0"}, "HT_D20_MAX_REFS must be a whole number from 1", 2, 0),
+        ({"HT_D20_MAX_REFS": "08"}, "HT_D20_MAX_REFS must be a whole number from 1", 2, 0),
+        ({"HT_D20_MAX_PARTS": "-512"}, "HT_D20_MAX_PARTS must be a whole number from 1", 2, 0),
+        ({"HT_D20_MAX_PARTS": "512 "}, "HT_D20_MAX_PARTS must be a whole number from 1", 2, 0),
+        ({"HT_D20_MAX_REFS": "513"}, "HT_D20_MAX_REFS=513 is above 512", 1, 1),
+        ({"HT_D20_MAX_PARTS": "8193"}, "HT_D20_MAX_PARTS=8193 is above 8192", 1, 1),
+        ({"HT_D20_MAX_PARTS": "1" + "0" * 30}, "is above 8192", 1, 1),
     ],
     ids=["zero", "leading_zero", "negative", "trailing_space", "refs_513", "parts_8193", "huge"],
 )
 def test_an_artifact_bound_the_protocol_cannot_sign_is_refused_and_leaves_nothing(
-    host, tmp_path, env, named, stages
+    host, tmp_path, env, named, code, stages
 ):
+    # Exit 2: refused by the argument checks, before anything is created; 1: by the first stage.
     out = tmp_path / "out"
 
     run = build(host, out, env=env)
 
-    assert run.returncode != 0 and named in run.stderr
+    assert run.returncode == code and named in run.stderr
     assert not out.exists() and uv_calls(host) == stages
 
 
@@ -914,24 +919,37 @@ def test_without_the_artifact_knobs_the_s20_inputs_build_what_they_built_before(
     keys = {"coord_pubkey": manifest.training.coord_pubkey, "auditors": manifest.training.auditors}
     assert manifest.training == s20.training.model_copy(update=keys)
     assert "max_refs" not in (out / "inputs/policies.json").read_text()
+    report = json.loads(run.stdout[run.stdout.rindex("\n{\n") + 1 :])
+    assert report["artifact_limits"] == {
+        "max_refs": None,
+        "max_parts": None,
+        "upload_objects": 512 * 8193,
+        "upload_bytes": 512 * 8193 << 20,
+        "requires": None,
+    }
     assert (manifest.run_id(), sha256_hex((out / "inputs/policies.json").read_bytes())) == (
         S20_SHAPE_RUN_ID,
         S20_SHAPE_POLICIES_SHA256,
     )
 
 
-def trial_objects(parts: tuple[int, ...]) -> list[tuple[str, int]]:
-    """(sha256, size) of every object a trial publishes for references of `parts` full parts each,
-    as data/store.py put_file stores a file: one part is a plain object, more are the parts and
-    then their ht-parts-v1 index."""
+# The files a 31 M trial publishes, in bytes (REPORT-S18.md: 517 objects, 535,404,991 B).
+TRIAL_31M = {"state": 377_560_080, "ef": 125_853_392, "delta": 31_955_846, "leaves": 955}
+
+
+def trial_objects(files: dict[str, int]) -> list[tuple[str, int]]:
+    """(sha256, size) of every object a trial publishes for `files` of these sizes, as
+    data/store.py put_file stores a file: up to PART_BYTES a plain object, else its parts of
+    PART_BYTES (the last one shorter) and then their ht-parts-v1 index."""
     found = []
-    for ref, count in enumerate(parts):
-        shas = [sha256_hex(f"ref {ref} part {i}".encode()) for i in range(count)]
-        found += [(sha, PART_BYTES) for sha in shas]
-        if count > 1:
-            whole = sha256_hex(f"ref {ref}".encode())
-            index = PartIndexV1(sha256=whole, size=count * PART_BYTES, parts=shas).encode()
-            found.append((sha256_hex(index), len(index)))
+    for name, size in files.items():
+        if size <= PART_BYTES:
+            found.append((sha256_hex(name.encode()), size))
+            continue
+        shas = [sha256_hex(f"{name} part {i}".encode()) for i in range(-(-size // PART_BYTES))]
+        found += [(sha, min(PART_BYTES, size - i * PART_BYTES)) for i, sha in enumerate(shas)]
+        index = PartIndexV1(sha256=sha256_hex(name.encode()), size=size, parts=shas).encode()
+        found.append((sha256_hex(index), len(index)))
     return found
 
 
@@ -941,8 +959,8 @@ def test_an_honest_31m_trial_fits_the_s31_upload_budget_and_the_next_object_is_4
     # S31 Part 1: the run's build (the warm-up at 300 s, the real one at 133 s with the gap of 400
     # and both knobs) passes its dry run, warm-up check included, and signs 8 x (512 + 1) objects a
     # hotkey may upload per challenge_rounds window (TRN-05, D137). A 31 M trial publishes four
-    # references, state 362, ef 122 and delta 32 parts with an index each and the leaves as one
-    # plain object: 520 objects, counted by the guard the object route runs.
+    # files: state, ef and delta in 361, 121 and 31 parts with an index each, the leaves as one
+    # plain object, 362 + 122 + 32 + 1 objects, counted by the guard the object route runs.
     knobs = {"HT_D20_AUDIT_GAP_ROUNDS": "400", "HT_D20_MAX_REFS": "8", "HT_D20_MAX_PARTS": "512"}
     _, real, _, second = two_builds(host, tmp_path / "build", "133", "dense-0.03b", knobs)
     assert second.returncode == 0, second.stderr
@@ -951,8 +969,9 @@ def test_an_honest_31m_trial_fits_the_s31_upload_budget_and_the_next_object_is_4
     assert report["checks"]["warmup_differs_only_by_the_audit_policy_and_the_artifact_limits"]
     built = admission_policy(real)
     assert built.artifact_limits.upload_budget() == (4104, 4104 << 20)
-    honest = trial_objects((362, 122, 32, 1))
-    assert len(honest) == 520 and len({sha for sha, _ in honest}) == 520
+    honest = trial_objects(TRIAL_31M)
+    assert (len(honest), sum(size for _, size in honest)) == (517, 535_404_991)  # S18's own count
+    assert len({sha for sha, _ in honest}) == 517
     service = load_fixture_module(*SERVICE_FIXTURE)
     original = service.fixture.setup
 
@@ -964,7 +983,7 @@ def test_an_honest_31m_trial_fits_the_s31_upload_budget_and_the_next_object_is_4
     monkeypatch.setattr(service.fixture, "setup", setup)
     miner = service.HOT[0]
     kept = b"an object the hotkey already uploaded in this window"
-    filler = [(sha256_hex(f"filler {i}".encode()), 1) for i in range(4104 - 520 - 1)]
+    filler = [(sha256_hex(f"filler {i}".encode()), 1) for i in range(4104 - 517 - 1)]
     with service_world(tmp_path / "world") as world:
         n = world.network
         assert n.join(0).status_code == 200
@@ -988,12 +1007,20 @@ def test_an_honest_31m_trial_fits_the_s31_upload_budget_and_the_next_object_is_4
             assert hosted._now(hosted._db) // 100 == now // 100
 
 
-def test_with_the_artifact_knobs_a_replay_of_the_warm_up_window_is_still_refused(host, tmp_path):
-    # 299 s asks the warm-up's window. The knobs make another manifest, so the warm-up guard does
-    # not fire, but the dry run finds the audit policy is the warm-up's and the build stops.
+@pytest.mark.parametrize(
+    ("replay", "warmup_env"),
+    [("299", {}), ("133", {"HT_D20_MAX_REFS": "4"})],
+    ids=["replay_of_the_warm_up_window", "warm_up_built_with_a_knob"],
+)
+def test_with_the_artifact_knobs_the_warm_up_check_refuses_what_the_warm_up_did_not_measure(
+    host, tmp_path, replay, warmup_env
+):
+    # 299 s asks the warm-up's window: the knobs make another manifest, so the warm-up guard does
+    # not fire, but the dry run finds the audit policy is the warm-up's. A warm-up built with a knob
+    # signs another admission policy than the real one without its bounds. Both builds stop.
     knobs = {"HT_D20_MAX_REFS": "8", "HT_D20_MAX_PARTS": "512"}
 
-    _, real, _, second = two_builds(host, tmp_path, "299", "dense-0.03b", knobs)
+    _, real, _, second = two_builds(host, tmp_path, replay, "dense-0.03b", knobs, warmup_env)
 
     assert second.returncode == 1 and "DRY-RUN VALIDATION FAILED" in second.stderr
     report = json.loads(second.stdout[second.stdout.rindex("\n{\n") + 1 :])

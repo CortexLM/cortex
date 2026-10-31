@@ -96,14 +96,23 @@ and manifest [V].
 `HT_D20_MAX_REFS=R` (1..512) and `HT_D20_MAX_PARTS=P` (1..8192) (S31, TRN-05; optional, any geometry) make the
 admission policy sign `ArtifactLimits.max_refs` and `max_parts`: one hotkey may then upload `R x (P + 1)` objects and
 as many MiB per window of `challenge_rounds` (100) beacons, past which the object route answers 413 `OBJECT_QUOTA`.
-A 31 M trial stores 520 objects (four references: state 362, ef 122 and delta 32 parts with an index each, the
-leaves one plain object), so S31's 8 and 512 (4,104 objects) hold it [V, in-process]. A value with a sign or a
-leading zero, or above the protocol bound, is refused with nothing left [V]. Only `admission_policy_hash` moves, so
-the run id; the dry run prints `artifact_limits` and checks them (`artifact_limits_of_the_knobs`), and with the
-warm-up `warmup_differs_only_by_the_audit_policy_and_the_artifact_limits` replaces the warm-up check: a knobbed
-build never equals the warm-up's manifest, so at 299 or 300 s it is the dry run that stops it [V]. Without the
-variables the rebuild of `0ef600b4` from its S20 inputs gives the same run id and byte-identical inputs, policies
-and manifest [V].
+A 31 M trial stores 517 objects and 535,404,991 B (the file sizes S18 measured [A]: state, ef and delta in 361, 121
+and 31 parts of 1 MiB with an index each, the leaves one plain object: 362 + 122 + 32 + 1); the guard admits them
+under S31's 8 and 512 (4,104 objects) and refuses the 4,105th [V, in-process]. A value with a sign or a leading
+zero, or above the protocol bound, is refused with nothing left [V]. Only `admission_policy_hash` moves, so the run
+id; the dry run prints `artifact_limits` and checks them (`artifact_limits_of_the_knobs`) [V].
+
+**Images.** The challenge serves the signed bounds in every `JoinChallenge` (`challenge/admission.py`), and code
+before `bc306dc` refuses the two fields (`extra_forbidden`): a run built with a knob needs its server image and the
+GPU image its miners and references run built from `bc306dc` or later [V on the `667695be` source:
+`extra_forbidden`; GPU `cb52fe37` is built from `667695be` [A], forge journal 2026-10-29 21:13Z].
+`implementation_hash` does not tell those images apart.
+
+**Warm-up.** Build the warm-up without the knobs: they do not change what it measures. With a knob the real build's
+dry run checks `warmup_differs_only_by_the_audit_policy_and_the_artifact_limits`, the admission policy without the
+two fields against the warm-up's; a warm-up built with a knob fails it, and so does a replay of 299 or 300 s, since
+a knobbed manifest is never the warm-up's and the `cmp` guard cannot fire [V]. Without the variables the rebuild of
+`0ef600b4` from its S20 inputs gives the same run id and byte-identical inputs, policies and manifest [V].
 
 About 5 s for `dense-0.03b` [V] (11 s for `dense-0.1b` [V], 20 s on a host at load 338 [V]). Each build prints
 `"param_count": 31462656` and `"init_state_hash": "e372a68e…0aa6"` for `dense-0.03b` (44045568 and
@@ -242,8 +251,9 @@ for r in rows:
    the warm-up used; whether those entries serve the real run is [?] (note at the end of this section).
 7. **Dry-run comparison, before the real run is published.** The real build's dry run already compares the two
    manifests (its `warmup_*` checks and `warmup_run_id`, step 6). The two dry runs print the same `param_count`,
-   `init_state_hash` and `pin`; only `run_id`, `envelope_sha256`, `audit` and `warmup_run_id` differ. Then, on the
-   build host, the same comparison on the input files:
+   `init_state_hash` and `pin`; only `run_id`, `envelope_sha256`, `audit` and `warmup_run_id` differ, and
+   `artifact_limits` when the real build sets `HT_D20_MAX_REFS` or `HT_D20_MAX_PARTS`. Then, on the build host, the
+   same comparison on the input files:
 
 ```bash
 python3 -I - "$WARM" "$OUT" <<'PY'
@@ -254,21 +264,26 @@ read = lambda d, n: json.loads((d / n).read_bytes())
 assert (w / "inputs/training.json").read_bytes() == (r / "inputs/training.json").read_bytes()
 p = [read(d, "inputs/policies.json") for d in (w, r)]
 print([{k: x["audit"].pop(k, None) for k in ("reaudit_rounds", "gap_cap_rounds")} for x in p])
-assert p[0] == p[1], "policies differ outside the audit window"
+limits = p[1]["admission"]["artifact_limits"]  # the knobs sign their bounds in the real run only
+knobs = {k: limits.pop(k) for k in ("max_refs", "max_parts") if k in limits}
+print(knobs)
+assert p[0] == p[1], "policies differ outside the audit window and the artifact bounds"
 m = [read(d, "out/manifest.json") for d in (w, r)]
 assert m[0]["training"] == m[1]["training"], "training differs"
 diff = sorted(k for k in m[0]["network"].keys() | m[1]["network"].keys()
               if m[0]["network"].get(k) != m[1]["network"].get(k))
-assert diff == ["audit_policy_hash"], diff
-print("same training and policies; only the audit window and its hash differ")
+assert diff == (["admission_policy_hash"] if knobs else []) + ["audit_policy_hash"], diff
+print("same training and policies; only the audit window, the bounds printed above and their hashes differ")
 PY
 ```
 
-   It prints the two windows (`reaudit_rounds` 200 and `gap_cap_rounds` 305 for the warm-up) and exits 0 only if
-   `training.json` is the same (image digest, model, init state), the policies differ only in
-   `audit.reaudit_rounds` and `gap_cap_rounds`, and the manifests differ only in `network.audit_policy_hash`: the
-   checks of `test_the_rebuild_with_the_measured_replay_changes_only_the_audit_window` [V]. The command itself was
-   only checked on hand-written files.
+   It prints the two windows (`reaudit_rounds` 200 and `gap_cap_rounds` 305 for the warm-up) and the real run's
+   artifact bounds, and exits 0 only if `training.json` is the same (image digest, model, init state), the policies
+   differ only in `audit.reaudit_rounds` and `gap_cap_rounds` (and the real run's `admission.artifact_limits`
+   `max_refs`/`max_parts`), and the manifests differ only in `network.audit_policy_hash` (and then
+   `network.admission_policy_hash`): the checks of `test_the_rebuild_with_the_measured_replay_changes_only_the_audit_window`
+   [V]. The command was run on the S20 warm-up against the rebuilds of `0ef600b4` with and without the knobs
+   (v3-builder-run-knobs) [V].
 8. **Publish the real run for the 5 real identities.** Its per-run steps of sections 1 and 3, in a gated window
    with no trial open: `cuda_qualification.py`, `relay_config.py`, `mk_exec_config.sh` on its run id,
    `mk_origins.py`; `challenge_image.sh executor $B <new container path> [--r2 /data/executor/r2.env

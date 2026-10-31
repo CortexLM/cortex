@@ -71,7 +71,11 @@
 # run id; without the variables nothing changes. The protocol accepts both fields on a production
 # ledger too: they are TEST knobs because this builder signs a test ledger only (the dry run's
 # ledger_mode_test). With HT_D20_WARMUP_OUT the dry run checks that the admission policy without
-# them is the warm-up's (warmup_differs_only_by_the_audit_policy_and_the_artifact_limits).
+# them is the warm-up's (warmup_differs_only_by_the_audit_policy_and_the_artifact_limits), so the
+# warm-up is built without them. The challenge serves the bounds in every JoinChallenge and code
+# before bc306dc refuses them (extra_forbidden): a knobbed run needs its server image and the GPU
+# image of its miners and references built from bc306dc or later (GPU cb52fe37 is not); the dry
+# run says so in artifact_limits.requires. implementation_hash does not tell those images apart.
 # HT_D20_GEOMETRY=tiny-cpu: the CPU mechanism model of tests/ledger/test_escrow_v2.py setup()
 # (1 layer, d_model 8, vocab 16, seq 4, H=1 J=1, 16 samples), layout n_gpus=1, for a cpu-backend
 # TEST run whose references and audits the challenge replays on CPU.
@@ -677,6 +681,10 @@ print(json.dumps({
         "max_parts": limits.max_parts,
         "upload_objects": upload_objects,
         "upload_bytes": upload_bytes,
+        "requires": (
+            "server and GPU (miner, reference) images built from bc306dc or later: older code "
+            "refuses max_refs and max_parts in its JoinChallenge"
+        ) if refs or parts else None,
     },
     "pin": {
         "cpu": ref.env.pinned.cpu,
