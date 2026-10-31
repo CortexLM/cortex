@@ -64,7 +64,7 @@ class Round:
     evidence: FinalityEvidence
     live: RewardFinalize
     shadow: RewardFinalize
-    origin: str  # the shadow origin: one unit of it is held by OTHER, the rest by COLD
+    origin: str  # the shadow origin, matured and held by COLD
     path: Path
 
 
@@ -83,16 +83,20 @@ def client_transfer(
 
 
 def squat(escrow: EscrowV2, origin: str, operation_id: str) -> None:
-    """OTHER, which earned nothing, signs one ordinary transfer of its single unit under the id."""
-    escrow.transfer(client_transfer(E.OTHER, E.COLD, origin, operation_id), signer=E.OTHER.ss58)
+    """COLD signs one ordinary admission lock of the minimum units under the id.
+
+    COLD is the only key this production round issues units to, and a transfer must go to a key the
+    ledger already knows (ADR 0014 Part 5.2): a lock is the client event left to a squatter here.
+    """
+    escrow.lock(E.lock(origin, operation_id, 100), signer=E.COLD.ss58)
     row = escrow.db.execute(
         "SELECT kind FROM escrow_events WHERE operation_id=?", (operation_id,)
     ).fetchone()
-    assert row is not None and row["kind"] == "TRANSFER"
+    assert row is not None and row["kind"] == "LOCK_ADMISSION"
 
 
 def build_round(tmp_path: Path, actual_reward, *, cls=EscrowV2, id_key=ID_KEY) -> Round:
-    """Shadow round minted and matured, live w=0 reward not issued, OTHER holds one free unit."""
+    """Shadow round minted and matured, live w=0 reward not issued, COLD holds the shadow units."""
     s, evidence, live = actual_reward
     path = tmp_path / "ledger.db"
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -103,8 +107,7 @@ def build_round(tmp_path: Path, actual_reward, *, cls=EscrowV2, id_key=ID_KEY) -
     e.reward_finalize(shadow, replace(evidence, shadow=True))
     e.mature(E.H, tuple(shadow.origin_ids), MATURE_BEACON)
     origin = shadow.origin_ids[0]
-    e.transfer(client_transfer(E.COLD, E.OTHER, origin, "66" * 32), signer=E.COLD.ss58)
-    assert e.balances(E.OTHER.ss58).available == 1
+    assert e.balances(E.COLD.ss58).available == 1_000_000
     return Round(e, evidence, live, shadow, origin, path)
 
 
@@ -266,12 +269,24 @@ def test_every_ledger_operation_writes_its_own_key_space(tmp_path: Path, actual_
     mature_live(r, derived(r)["mature"])
     pay_live(r, derived(r)["pay"])
     r.escrow.lock(E.lock(r.origin, "88" * 32, 100), signer=E.COLD.ss58)
+    # The round issues units to COLD only, so its transfer runs between the two genesis owners.
+    g = E.ledger(E.setup(), tmp_path / "genesis.db")
+    cold, _ = E.fund(g)
+    g.transfer(client_transfer(E.COLD, E.OTHER, cold, "66" * 32), signer=E.COLD.ss58)
     keys = {
         (row["kind"], row["operation_id"])
-        for row in r.escrow.db.execute("SELECT kind, operation_id FROM escrow_events")
+        for ledger in (r.escrow, g)
+        for row in ledger.db.execute("SELECT kind, operation_id FROM escrow_events")
     }
     kinds = {kind for kind, _ in keys}
-    assert {"SHADOW_REWARD_FINALIZE", "REWARD_FINALIZE", "MATURE", "PAY", "LOCK_ADMISSION"} <= kinds
+    assert {
+        "SHADOW_REWARD_FINALIZE",
+        "REWARD_FINALIZE",
+        "MATURE",
+        "PAY",
+        "LOCK_ADMISSION",
+        "TRANSFER",
+    } <= kinds
     for kind, key in keys:
         if kind in {"LOCK_ADMISSION", "LOCK_CONTEST", "TRANSFER"}:
             assert len(key) == 64 and not key.startswith(SERVER_SCOPE)  # the client's own id

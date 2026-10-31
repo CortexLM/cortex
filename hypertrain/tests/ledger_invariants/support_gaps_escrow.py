@@ -32,7 +32,7 @@ from hypertrain.protocol.messages_v2 import EscrowLock, EscrowRelease, Resolutio
 from .support import World, service_world
 from .support_escrow_laws import Funded, funded, lock_op, release_op
 from .support_locks import Lab, Miner, Rig, ident, settled_status
-from .support_opids import DisputeWorld, fresh_id, sink_transfer
+from .support_opids import DisputeWorld, fresh_id, service_sink, sink_transfer
 from .support_weights import Metagraph, add_origin, live_gate
 
 SOURCE = Path(hypertrain.__file__).parent
@@ -177,8 +177,9 @@ def seed_pending_origin(world: World, origin: str, owner: str, units: int, matur
         escrow.db.execute(
             "INSERT INTO escrow_units VALUES(?,?,'reward_pending','',?)", (origin, owner, units)
         )
+        snapshot = fresh_id("snapshot-" + origin)
         escrow.transfer(
-            sink_transfer(owner, fresh_id("snapshot-" + origin), world.network.origin_ids[0]),
+            sink_transfer(owner, snapshot, world.network.origin_ids[0], sink=service_sink(owner)),
             signer=owner,
         )
 

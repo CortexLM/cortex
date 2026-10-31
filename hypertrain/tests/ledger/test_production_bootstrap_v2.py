@@ -216,7 +216,7 @@ def test_bootstrap_units_never_payable(tmp_path: Path) -> None:
         EscrowTransfer(
             operation_id="33" * 32,
             owner=E.COLD.ss58,
-            recipient=E.HOT.ss58,
+            recipient=E.OTHER.ss58,
             units=500,
             origin_ids=[b.origins[0].origin_id],
             admission_id=None,

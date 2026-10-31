@@ -27,6 +27,13 @@ E = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = E
 spec.loader.exec_module(E)
 actual_reward = E.actual_reward
+spec = importlib.util.spec_from_file_location(
+    "v2_weights_pay_bootstrap", Path(__file__).parents[1] / "ledger/test_production_bootstrap_v2.py"
+)
+assert spec is not None and spec.loader is not None
+B = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = B
+spec.loader.exec_module(B)
 
 
 @pytest.fixture
@@ -65,6 +72,28 @@ def paying(tmp_path, actual_reward, monkeypatch):
     escrow.reward_finalize(reward, evidence)
     yield store, escrow, reward, evidence, fraud
     store.close()
+
+
+# A transfer goes to a key the ledger knows (ADR 0014 Part 5.2) and the live reward issues to COLD
+# only, so the run of `paying_beside_other` also pins a bootstrap that makes OTHER an owner.
+OTHER_BOOTSTRAP = [(E.OTHER.ss58, 10_000, 1)]
+
+
+@pytest.fixture(scope="module")
+def bootstrapped_reward(tmp_path_factory):
+    """The real signed live w=0 reward of a run whose policy also pins OTHER_BOOTSTRAP."""
+    original = E.setup
+    try:
+        E.setup = lambda mode="production": B.pinned(original(mode), OTHER_BOOTSTRAP)
+        return E.actual_reward.__wrapped__(tmp_path_factory)
+    finally:
+        E.setup = original
+
+
+@pytest.fixture
+def paying_beside_other(tmp_path, bootstrapped_reward, monkeypatch):
+    """`paying` for the run of `bootstrapped_reward`; its bootstrap is not issued yet."""
+    yield from paying.__wrapped__(tmp_path, bootstrapped_reward, monkeypatch)
 
 
 def at(escrow, rnd: int) -> int:
@@ -204,9 +233,11 @@ def test_pay_rolls_back_when_answer_not_persisted(paying) -> None:
     assert escrow.balances().paid == 1_000_000 and pays(escrow) == 1
 
 
-def test_held_units_never_paid(paying) -> None:
-    # Given: the epoch's round reached mature_at, but the origin has not matured (reward_pending).
-    store, escrow, reward, _, _ = paying
+def test_held_units_never_paid(paying_beside_other) -> None:
+    # Given: the epoch's round reached mature_at, but the origin has not matured (reward_pending),
+    # and OTHER holds the run's bootstrap, unvested: collateral that frees and pays no unit.
+    store, escrow, reward, _, _ = paying_beside_other
+    escrow.production_bootstrap(B.bootstrap(escrow.run_id, OTHER_BOOTSTRAP))
     pending = json.loads(store.weights(0, at(escrow, 20), 1))
     # And then: it matures, 400k is admission-locked and 500k moves to another owner.
     mature(escrow, reward)

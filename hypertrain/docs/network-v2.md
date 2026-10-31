@@ -392,8 +392,10 @@ instead of 909 ms. A value beyond 2^53-1 in the state, or a number that is not a
 (SQLite lets an INTEGER column hold a REAL), refuses the event (`STATE_RANGE`) for every numeric
 column the state serialises, not only the units and the issued amount, because the standard
 encoder would write where the canonical one raises. A transfer to oneself is refused (`SELF_TRANSFER`; a transfer that was recorded earlier
-still replays), and a transfer writes a row at the recipient only for the origins it takes
-units from; a lock still writes one for every origin it lists, because its release lists them
+still replays), so is a transfer to a key the ledger does not know: the recipient must decode as
+an SS58 public key and already hold units or a row of the ledger, which only issuance gives
+(`UNKNOWN_RECIPIENT`, 409; an earlier transfer still replays). A transfer writes a row at the
+recipient only for the origins it takes units from; a lock still writes one for every origin it lists, because its release lists them
 again. Test genesis has pinned nonfinancial origins; production mode
 has separate reward authority/issuance bounds and no test-genesis conversion.
 

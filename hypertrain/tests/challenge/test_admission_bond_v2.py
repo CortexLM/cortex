@@ -740,7 +740,7 @@ def test_seizure_cannot_be_blocked_by_registering_its_operation_id(world: World)
         origin_ids=[world.origin],
         admission_id=None,
         dispute_id=None,
-        recipient=HOT.ss58,
+        recipient=OTHER.ss58,
     )
     world.a.escrow.transfer(squat, signer=COLD.ss58)
     # When / Then: the seizure still goes through

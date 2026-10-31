@@ -2,7 +2,8 @@
 
 The real w=0 reward comes from the lot's session fixture. A refusal pins its code and leaves
 the unit rows and events unchanged; the control of each is the same step made valid. The random
-operation sequences against a bucket model and the two open holes ESC-23 and ES-07 close the file.
+operation sequences against a bucket model, the open holes of ESC-23 and the recipient rule of
+ES-07 close the file.
 """
 
 from __future__ import annotations
@@ -17,17 +18,16 @@ from types import ModuleType
 from typing import Any, NamedTuple
 
 import pytest
-from hypothesis import Phase, given, settings
+from hypothesis import Phase, example, given, settings
 from hypothesis import strategies as st
-from pydantic import ValidationError
 
 import hypertrain
 from hypertrain.auditor.island_bisect import RefereeEvidence
-from hypertrain.ledger.escrow_v2 import EscrowError, EscrowV2, Settlement
+from hypertrain.ledger.escrow_v2 import EscrowV2, Settlement, genesis_allocation_hash
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
-from hypertrain.protocol.keys import KeyError_, decode_hotkey
+from hypertrain.protocol.keys import KeyError_, Keypair, decode_hotkey
 from hypertrain.protocol.messages_v2 import (
     DisputeV2,
     EscrowLock,
@@ -50,8 +50,10 @@ from .support import (
     routes,
     service_world,
 )
+from .support_bounds import genesis_request, repinned
 from .support_escrow_laws import (
     OTHER_UNITS,
+    bootstrapped,
     dispute_code,
     events,
     fingerprint,
@@ -586,8 +588,15 @@ class Step(NamedTuple):
     over: bool  # ask for one unit more than there is
 
 
+STRANGER = Keypair(b"\x0a" * 32).ss58  # a real key that no issuance of the run names
+
+
 class Bank:
-    """The model: where the units of the one reward origin must sit after each accepted step."""
+    """The model: where the units of the one reward origin must sit after each accepted step.
+
+    The owners it holds units for are the keys the ledger knows: COLD earned the reward and OTHER
+    holds the collateral of another origin, which no step names. A transfer goes to them only.
+    """
 
     def __init__(
         self,
@@ -599,6 +608,7 @@ class Bank:
         self.fixture, self.escrow, self.origin, self.registry = fixture, escrow, origin, registry
         self.cold, self.other = fixture.COLD.ss58, fixture.OTHER.ss58
         self.available = {self.cold: BUDGET, self.other: 0}
+        self.collateral = {self.cold: 0, self.other: OTHER_UNITS}
         self.locks: list[OpenLock] = []
         self.paid = self.burned = 0
 
@@ -633,15 +643,22 @@ class Bank:
 
             return Plan(lambda: escrow.lock(lock, signer=who), short, locked)
         if step.kind == "transfer":
+            # A pick of 4 or 5 sends to the stranger: refused before any unit is looked at.
+            recipient = rival if step.pick < 4 else STRANGER
             gift = transfer_op(
-                fx, origin, operation=operation, units=units, owner=who, recipient=rival
+                fx, origin, operation=operation, units=units, owner=who, recipient=recipient
             )
 
             def gifted() -> None:
                 self.available[who] -= units
-                self.available[rival] += units
+                self.available[recipient] += units
 
-            return Plan(lambda: escrow.transfer(gift, signer=who), short, gifted)
+            known = recipient in self.available
+            return Plan(
+                lambda: escrow.transfer(gift, signer=who),
+                short if known else "UNKNOWN_RECIPIENT",
+                gifted,
+            )
         if step.kind == "pay":
             payment = pay_op(fx, origin, operation=operation, units=units, owner=who)
 
@@ -721,31 +738,51 @@ OPERATIONS = st.lists(STEPS, min_size=8, max_size=20)
 
 
 # No shrink phase: a failing sequence is reported as drawn instead of being minimised for minutes.
-@settings(phases=[Phase.generate])
+# The draw follows the source of the test (derandomize), so the explicit sequence pins what an edit
+# of it must not lose: a lock and a transfer one unit too large, a transfer back from OTHER, the
+# slash of OTHER's lock, a replay and a transfer to the stranger.
+@settings(phases=[Phase.explicit, Phase.generate])
 @given(OPERATIONS)
+@example(
+    [
+        Step("lock_contest", 0, 3, True),
+        Step("transfer", 0, 7, True),
+        Step("transfer", 0, 250_000, False),
+        Step("transfer", 1, 1_000, False),
+        Step("lock_contest", 1, 5, False),
+        Step("slash", 1, 2, False),
+        Step("replay", 0, 0, False),
+        Step("transfer", 4, 1, False),
+    ]
+)
 def test_random_operation_sequences_conserve_units_and_follow_a_bucket_model(
     li_escrow: ModuleType, real_reward: Real, sequence: list[Step]
 ) -> None:
-    """ESC-06, ESC-16, LCK-24 (CRD-24): after every event the ledger equals a bucket model."""
-    # Given: a ledger whose only issued origin is the real reward, matured to COLD.
-    setup, evidence, reward = real_reward
+    """ESC-06, ESC-16, LCK-24 (CRD-24), ES-07: after each event the ledger equals a bucket model."""
+    # Given: a ledger that issued the real reward, matured to COLD, and vested collateral to
+    # OTHER: a transfer goes only to a key the ledger knows, and a key enters it by issuance only.
+    (setup, evidence, reward), bootstrap = bootstrapped(
+        li_escrow, real_reward, [(li_escrow.OTHER.ss58, OTHER_UNITS, 1)]
+    )
     origin = reward.origin_ids[0]
     registry = {origin: match_settlement(reward.finalize_hash, 20)}
     escrow = resolve_contests_like_the_generic_callback(
         bare_escrow(li_escrow, setup, settlement=registry)
     )
     bank = Bank(li_escrow, escrow, origin, registry)
+    escrow.production_bootstrap(bootstrap)
+    escrow.mature(H, tuple(o.origin_id for o in bootstrap.origins), 1)
     escrow.reward_finalize(reward, evidence)
     mature(escrow, reward)
 
     def check() -> None:
         balances = escrow.balances()
-        assert balances.conserved() and balances.issued == BUDGET
+        assert balances.conserved() and balances.issued == BUDGET + OTHER_UNITS
         assert balances.paid <= balances.issued
         assert escrow.db.execute("SELECT MIN(units) FROM escrow_units").fetchone()[0] >= 0
         for owner in (bank.cold, bank.other):
             mine = escrow.balances(owner)
-            assert mine.available == bank.available[owner]
+            assert mine.available == bank.available[owner] + bank.collateral[owner]
             assert mine.admission_locked == bank.held(owner, "LOCK_ADMISSION")
             assert mine.dispute_locked == bank.held(owner, "LOCK_CONTEST")
         assert (balances.paid, balances.burned) == (bank.paid, bank.burned)
@@ -909,19 +946,11 @@ def test_the_database_work_of_a_stake_lookup_does_not_grow_with_other_admissions
 UNDECODABLE = "5" * 48
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "ES-07: a transfer to a well-formed recipient that is no decodable key is refused (the lot "
-        "defers ADR 0014 5.2, a recipient the ledger already knows, with the rest of the escrow "
-        "ingress rules of ESC-02: a product rule that awaits Forge) "
-        "[fix-lot: decision (product choice pending)]"
-    ),
-)
 def test_a_transfer_to_a_recipient_that_is_no_decodable_key_is_refused(
     li_escrow: ModuleType,
 ) -> None:
+    """ES-07: a transfer to a well-formed recipient that is no decodable key is refused. The rule
+    comes after the replay lookup: one that a chain recorded before it still replays."""
     # Given: COLD's matured units, and a first transfer to a real key as the control.
     fx = funded(li_escrow)
     escrow, cold = fx.escrow, li_escrow.COLD.ss58
@@ -931,14 +960,60 @@ def test_a_transfer_to_a_recipient_that_is_no_decodable_key_is_refused(
         decode_hotkey(UNDECODABLE)  # matches the SS58 shape, yet no key signs for it
     before = fingerprint(escrow)
     # When
-    try:
-        escrow.transfer(
-            transfer_op(li_escrow, fx.cold, operation="32" * 32, recipient=UNDECODABLE),
-            signer=cold,
-        )
-        refused = False
-    except (ValidationError, EscrowError):
-        refused = True
+    gift = transfer_op(li_escrow, fx.cold, operation="32" * 32, recipient=UNDECODABLE)
+    code = error_code(lambda: escrow.transfer(gift, signer=cold))
     # Then: the units stay with their owner instead of going to an owner nobody can sign for.
-    assert refused, f"{escrow.balances(UNDECODABLE).available} units now belong to {UNDECODABLE}"
+    assert code == "UNKNOWN_RECIPIENT"
+    assert fingerprint(escrow) == before
+    # And: the same transfer written as the ledger wrote it before the rule keeps its receipt.
+    with escrow.tx():
+        escrow._move(gift, "available", "available", recipient=gift.recipient, skip_empty=True)
+        written = escrow._event(
+            gift.operation_id, "TRANSFER", gift.model_dump_json(), gift.owner, server=False
+        )
+    assert escrow.transfer(gift, signer=cold) == written
+    escrow.verify()
+
+
+def test_a_transfer_goes_only_to_a_key_the_ledger_already_holds(li_escrow: ModuleType) -> None:
+    """ES-07 (ADR 0014 5.2): a hop to a key no issuance named is refused, so fresh keys cannot
+    multiply a per-key quota; a key whose rows are all empty is still a key the ledger holds."""
+    # Given: OTHER gave every unit it had to COLD, and STRANGER was never issued anything.
+    fx = funded(li_escrow)
+    escrow, cold, other = fx.escrow, li_escrow.COLD.ss58, li_escrow.OTHER.ss58
+    back = transfer_op(
+        li_escrow, fx.other, operation="33" * 32, units=OTHER_UNITS, owner=other, recipient=cold
+    )
+    escrow.transfer(back, signer=other)
+    assert escrow.balances(other).available == 0
+    before = fingerprint(escrow)
+    # When: COLD hops to the fresh key
+    hop = transfer_op(li_escrow, fx.cold, operation="34" * 32, recipient=STRANGER)
+    # Then: refused, nothing moved; the same units still go to OTHER, which holds empty rows only
+    assert error_code(lambda: escrow.transfer(hop, signer=cold)) == "UNKNOWN_RECIPIENT"
+    assert fingerprint(escrow) == before
+    escrow.transfer(transfer_op(li_escrow, fx.cold, operation="35" * 32), signer=cold)
+    assert escrow.balances(other).available == 500
+
+
+def test_a_row_held_by_a_string_nobody_can_sign_for_does_not_make_it_a_recipient(
+    li_escrow: ModuleType,
+) -> None:
+    """ES-07: the recipient must also decode as a public key, even where an issuance named it."""
+    # Given: a genesis that also issued one unit to the undecodable string
+    cold = li_escrow.COLD.ss58
+    allocation = [(cold, 20000, 1), (li_escrow.OTHER.ss58, OTHER_UNITS, 1), (UNDECODABLE, 1, 1)]
+    setup = repinned(li_escrow.setup(), genesis_allocation_hash=genesis_allocation_hash(allocation))
+    escrow = bare_escrow(li_escrow, setup)
+    genesis = genesis_request(li_escrow, escrow.run_id, allocation)
+    escrow.test_genesis(genesis)
+    escrow.mature(H, tuple(origin.origin_id for origin in genesis.origins), 1)
+    assert escrow.balances(UNDECODABLE).available == 1
+    before = fingerprint(escrow)
+    # When
+    gift = transfer_op(
+        li_escrow, genesis.origins[0].origin_id, operation="36" * 32, recipient=UNDECODABLE
+    )
+    # Then
+    assert error_code(lambda: escrow.transfer(gift, signer=cold)) == "UNKNOWN_RECIPIENT"
     assert fingerprint(escrow) == before

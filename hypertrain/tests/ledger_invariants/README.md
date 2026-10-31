@@ -14,7 +14,7 @@ stranger. They run in process with test keys and a fake metagraph. None of them 
 | `test_gaps_<group>.py` | tests added for the consolidated Lens list of one group |
 | `support_<area>.py` | helpers private to one area |
 | `mutants_<area>.py` | the mutants that prove the tests of the area fail when a defence is removed |
-| `mutants_closed_<finding>.py` | the same for a hole a landed fix closed (`f1`, `p2`, `m2`, `f7a`, `f6`, `rd`, `rcb` for the escrow lot, roster-contract-b and ledger-refusals; `d47`, `d59`, `d63`, `d66`, `d70`, `d109`, `dsp04`, `lockrel`, `p68` for the decisions and lots that landed later): each mutant reverts one behaviour of the fix (or, where the docstring says so, models a regression the pin must survive), and every flipped pin is named by at least one of them, or the docstring says why not |
+| `mutants_closed_<finding>.py` | the same for a hole a landed fix closed (`f1`, `p2`, `m2`, `f7a`, `f6`, `rd`, `rcb` for the escrow lot, roster-contract-b and ledger-refusals; `d47`, `d59`, `d63`, `d66`, `d70`, `d109`, `dsp04`, `es07`, `lockrel`, `p68` for the decisions and lots that landed later): each mutant reverts one behaviour of the fix (or, where the docstring says so, models a regression the pin must survive), and every flipped pin is named by at least one of them, or the docstring says why not |
 | `test_infra_guards.py` | hygiene of the lot itself: strict xfail only, fix-lot tags, no wall-clock thresholds, mutant tables that match the tree |
 
 ## Run

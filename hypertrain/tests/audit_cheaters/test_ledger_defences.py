@@ -40,12 +40,14 @@ from hypertrain.ledger.escrow_v2 import (
 from hypertrain.protocol.envelope_v2 import EnvelopeV2, seal
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
+from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import Finalize
 from hypertrain.protocol.messages_v2 import (
     EscrowLock,
     EscrowRelease,
     EscrowTransfer,
     OriginAllocation,
+    ProductionBootstrap,
     RewardFinalize,
 )
 
@@ -65,6 +67,7 @@ def load(name: str, relative: str) -> Any:
 E = load("ac_ledger_escrow_fixture", "ledger/test_escrow_v2.py")
 C = load("ac_ledger_challenge_conftest", "challenge/conftest.py")
 D = load("ac_ledger_disputes_fixture", "challenge/test_disputes_v2.py")
+B = load("ac_ledger_bootstrap_fixture", "ledger/test_production_bootstrap_v2.py")
 # Module-scoped real signed w=0 reward (two executions of the tiny CPU model), as the escrow tests.
 actual_reward = E.actual_reward
 
@@ -604,11 +607,66 @@ def test_a_maturity_landing_during_get_weights_waits_for_it_and_pays_once(
 
 # --- A (continued). randomized conservation ---------------------------------------------------
 
+COLLATERAL = 10_000  # OTHER's units in the bootstrap allocation of the escrow fixtures
+STRANGER = Keypair(b"\x0a" * 32).ss58  # a real key that no issuance of the run names
+
+
+def with_collateral(
+    real: tuple[Any, FinalityEvidence, RewardFinalize], owner: str, units: int
+) -> tuple[tuple[Any, FinalityEvidence, RewardFinalize], ProductionBootstrap]:
+    """`real` in the run whose policy also pins a production bootstrap of `units` to `owner`, and
+    that bootstrap. The pin moves the run id, so each envelope is sealed again for the new run by
+    the key that signed it: the reward pays the same work, replay and split."""
+    s, evidence, reward = real
+    allocation = [(owner, units, 1)]
+    pinned = B.pinned(s, allocation)
+    run_id = pinned.manifest.run_id()
+    keys = {key.ss58: key for key in (E.HOT, E.AUDITOR, E.COORD)}
+
+    def again(envelope: EnvelopeV2) -> EnvelopeV2:
+        sealed = seal(
+            keys[envelope.signer], envelope.type, run_id, envelope.body, envelope.exp_drand
+        )
+        return EnvelopeV2.model_validate(sealed)
+
+    work = evidence.works[0]
+    moved = replace(
+        evidence,
+        finalize=again(evidence.finalize),
+        works=(
+            replace(
+                work,
+                commit=again(work.commit),
+                verdict=again(work.verdict),
+                challenge=again(work.challenge),
+            ),
+        ),
+    )
+    origin = OriginAllocation(
+        origin_id=reward_origin_id(run_id, reward.w, HOT, reward.finalize_hash, E.ID_KEY),
+        owner=COLD,
+        units=reward.budget_units,
+        mature_at=reward.mature_at,
+    )
+    unsigned = reward.model_copy(
+        update={
+            "run_id": run_id,
+            "origin_ids": [origin.origin_id],
+            "allocation_hash": sha256_hex(canonicalize([origin.body()])),
+        }
+    )
+    signed = unsigned.model_copy(
+        update={"authority_sig": E.COORD.sign(authority_message(unsigned)).hex()}
+    )
+    return (pinned, moved, signed), B.bootstrap(run_id, allocation)
+
+
 OPERATIONS = st.one_of(
     st.just(("mature", 0)),
     st.tuples(st.just("lock"), st.integers(1, 600_000)),
     st.tuples(st.just("send"), st.integers(1, 600_000)),
     st.tuples(st.just("back"), st.integers(1, 600_000)),
+    st.tuples(st.just("stray"), st.integers(1, 600_000)),
     st.just(("release", 0)),
     st.just(("weights", 0)),
     st.just(("again", 0)),
@@ -620,12 +678,14 @@ def op_id(counter: int) -> str:
 
 
 # derandomize: CI explores the same 40 sequences on every run, and the explicit examples pin the
-# orderings the invariants exist for (units sent away or locked before a pay, a release, a replay),
-# so a mutation of those paths is caught by every run and not by the luck of a seed.
+# orderings the invariants exist for (units sent away or locked before a pay, a release, a replay,
+# a funded transfer to a stranger), so a mutation of those paths is caught by every run and not by
+# the luck of a seed.
 @settings(max_examples=40, deadline=None, derandomize=True)
 @example(
     operations=[("mature", 0), ("send", 400_000), ("weights", 0), ("back", 400_000), ("weights", 0)]
 )
+@example(operations=[("mature", 0), ("stray", 400_000), ("weights", 0)])
 @example(
     operations=[
         ("mature", 0),
@@ -645,8 +705,10 @@ def test_random_operations_conserve_units_and_never_pay_a_unit_twice(
     """Defence: whatever the order of maturity, admission locks and releases, transfers away and
     back, and get_weights calls, units are conserved, every unit paid as weight leaves the
     earning owner's free balance exactly once, units held by another owner or locked are never
-    paid, and an answered epoch is final."""
-    _, evidence, reward = actual_reward
+    paid, and an answered epoch is final. ES-07: a transfer goes only to a key the ledger knows,
+    and a key enters it by issuance only, so OTHER holds unvested collateral of the run."""
+    real, bootstrap = with_collateral(actual_reward, OTHER, COLLATERAL)
+    _, evidence, reward = real
     settled = Settlement(
         finality_hash=reward.finalize_hash,
         closed_dispute_root=H,
@@ -654,7 +716,8 @@ def test_random_operations_conserve_units_and_never_pay_a_unit_twice(
         unresolved=False,
         outcome="MATCH",
     )
-    with hosting(tmp_path_factory.mktemp("random"), actual_reward, lambda ref: settled) as h:
+    with hosting(tmp_path_factory.mktemp("random"), real, lambda ref: settled) as h:
+        h.escrow.production_bootstrap(bootstrap)
         h.escrow.reward_finalize(reward, evidence)
         origin = reward.origin_ids[0]
         matured, free, away, locks, paid, epoch = False, 0, 0, [], 0, 0
@@ -709,6 +772,18 @@ def test_random_operations_conserve_units_and_never_pay_a_unit_twice(
                 else:
                     with pytest.raises(EscrowError):
                         h.escrow.transfer(move, signer=sender)
+            elif kind == "stray":
+                stray = EscrowTransfer(
+                    operation_id=op_id(counter),
+                    owner=COLD,
+                    units=units,
+                    origin_ids=[origin],
+                    admission_id=None,
+                    dispute_id=None,
+                    recipient=STRANGER,
+                )
+                with pytest.raises(EscrowError, match="^UNKNOWN_RECIPIENT$"):
+                    h.escrow.transfer(stray, signer=COLD)
             elif kind == "release" and locks:
                 lock_id, units = locks.pop(0)
                 h.escrow.release(
@@ -739,7 +814,7 @@ def test_random_operations_conserve_units_and_never_pay_a_unit_twice(
                 old = min(answers)
                 assert h.store.weights(old, at(h.escrow, 20) + 300 * old, 2) == answers[old]
             b = h.escrow.balances()
-            assert b.conserved() and b.issued == 1_000_000
+            assert b.conserved() and b.issued == 1_000_000 + COLLATERAL
             assert b.paid == paid
             assert b.available == free + away
             assert b.admission_locked == sum(units for _, units in locks)

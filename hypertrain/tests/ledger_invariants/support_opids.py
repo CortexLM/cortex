@@ -23,7 +23,14 @@ from hypertrain.challenge.disputes_v2 import Contest, DisputeError, DisputesV2, 
 from hypertrain.challenge.store import ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.ledger import Params
-from hypertrain.ledger.escrow_v2 import EscrowError, EscrowReceipt, EscrowV2, Settlement, digest
+from hypertrain.ledger.escrow_v2 import (
+    EscrowError,
+    EscrowReceipt,
+    EscrowV2,
+    Settlement,
+    digest,
+    genesis_allocation_hash,
+)
 from hypertrain.miner.admission import sign_join
 from hypertrain.protocol.envelope_v2 import seal
 from hypertrain.protocol.hashing import sha256_hex
@@ -40,20 +47,26 @@ from hypertrain.protocol.messages_v2 import (
     RunManifestV2,
 )
 
-from .support import H, World, bare_escrow
+from .support import SERVICE_FIXTURE, H, World, bare_escrow, load_fixture_module
+from .support_bounds import genesis_request, repinned
 
 PREFIX_SEED = b"li-opids-prefix-key"
 HEX64 = re.compile(r"[0-9a-f]{64}")
 LEDGER_CODE = re.compile(r"[A-Z][A-Z0-9_]*")
 # The kind under which the ledger stores each client event `client_event` can sign.
 CLIENT_KINDS = {"transfer": "TRANSFER", "lock": "LOCK_CONTEST"}
-# Where a bystander's transfer lands: a real key that nobody signs for, funds or reads. The ledger
-# refuses a transfer to oneself (SELF_TRANSFER), so the bystander's event has to move units; a test
-# compares the owners the service step pays, never this key.
+# Where a bystander's transfer lands: a real key that nobody signs for or reads. The ledger refuses
+# a transfer to oneself (SELF_TRANSFER) and to a key it holds no unit of (UNKNOWN_RECIPIENT), so
+# the bystander's event moves units to a key the scenario issued units to: the dispute world's
+# genesis and the production collateral (`production_collateral`) issue one to this key, and a
+# service world sends to a genesis coldkey of its own (`service_sink`). A test compares the owners
+# the service step pays, never the sink.
 SINK = Keypair(bytes.fromhex(sha256_hex(b"li-opids-sink"))).ss58
 # The refusals that say nothing about the operation id. `squat_id` fails on them: a squat refused
 # for one of these never reached the question of its id, and the step that follows proves nothing.
-NOT_ABOUT_THE_ID = frozenset({"SELF_TRANSFER", "UNFUNDED_OR_UNKNOWN_ORIGIN", "OWNER_AUTHORITY"})
+NOT_ABOUT_THE_ID = frozenset(
+    {"SELF_TRANSFER", "UNKNOWN_RECIPIENT", "UNFUNDED_OR_UNKNOWN_ORIGIN", "OWNER_AUTHORITY"}
+)
 
 
 def fresh_id(label: str) -> str:
@@ -127,12 +140,22 @@ def must_refuse(call: Callable[[], object], what: str) -> None:
         raise DefenceMissing(what)
 
 
-def sink_transfer(owner: str, operation_id: str, origin: str, units: int = 1) -> EscrowTransfer:
+def service_sink(sender: str) -> str:
+    """The sink of a service world: the last genesis coldkey of the service fixture that is not
+    `sender` (COLD[3], or COLD[2] when COLD[3] sends). Its genesis makes it a key the ledger
+    holds; no test that sends through these helpers compares its units."""
+    coldkeys = [key.ss58 for key in load_fixture_module(*SERVICE_FIXTURE).COLD]
+    return next(key for key in reversed(coldkeys) if key != sender)
+
+
+def sink_transfer(
+    owner: str, operation_id: str, origin: str, units: int = 1, sink: str = SINK
+) -> EscrowTransfer:
     """A client event any funded key can sign: the owner sends `units` of `origin` to the sink."""
     return EscrowTransfer(
         operation_id=operation_id,
         owner=owner,
-        recipient=SINK,
+        recipient=sink,
         units=units,
         origin_ids=[origin],
         admission_id=None,
@@ -171,11 +194,13 @@ def client_event(
 def client_event_over_http(
     world: World, kind: str, key: Keypair, operation_id: str, origin: str
 ) -> Any:
-    """What a funded coldkey sends to the public escrow routes, under an id of its choice: the
-    response, unchecked. `ModelRefused` when the event model does not take the id."""
+    """What a funded coldkey of a service world sends to the public escrow routes, under an id of
+    its choice (a transfer goes to `service_sink`): the response, unchecked. `ModelRefused` when
+    the event model does not take the id."""
     if kind == "transfer":
         route, message = "transfer", "EscrowTransfer"
-        event: Any = client_model(lambda: sink_transfer(key.ss58, operation_id, origin))
+        sink = service_sink(key.ss58)
+        event: Any = client_model(lambda: sink_transfer(key.ss58, operation_id, origin, sink=sink))
     else:
         route, message = "lock", "EscrowLock"
         event = client_model(lambda: contest_lock(key.ss58, operation_id, origin))
@@ -290,19 +315,30 @@ def seed_available(escrow: EscrowV2, origin: str, owner: str, units: int) -> Non
     )
 
 
-def collateral_escrow(fixture: ModuleType, setup: Any, **options: Any) -> tuple[EscrowV2, str]:
-    """A production ledger on which OTHER holds 1,000 available units: the funded bystander."""
-    escrow = bare_escrow(fixture, setup, **options)
+def production_collateral(escrow: EscrowV2, bystander: str, units: int) -> str:
+    """`units` of bootstrap collateral for `bystander` and one unit for the sink, written by
+    `seed_available`; returns the bystander's origin. A production ledger issues units to a key
+    other than an earner only through its bootstrap, and takes a transfer only to a key it holds
+    units of (UNKNOWN_RECIPIENT)."""
     origin = fresh_id("collateral-origin")
-    seed_available(escrow, origin, fixture.OTHER.ss58, 1000)
-    return escrow, origin
+    seed_available(escrow, origin, bystander, units)
+    seed_available(escrow, fresh_id("sink-collateral-origin"), SINK, 1)
+    return origin
+
+
+def collateral_escrow(fixture: ModuleType, setup: Any, **options: Any) -> tuple[EscrowV2, str]:
+    """A production ledger holding 1,000 units of collateral: 999 for OTHER, the funded bystander,
+    and one for the sink."""
+    escrow = bare_escrow(fixture, setup, **options)
+    return escrow, production_collateral(escrow, fixture.OTHER.ss58, 999)
 
 
 @dataclasses.dataclass
 class DisputeWorld:
     """A test-mode ledger and a DisputesV2 on the connection of one ChallengeStore, so that the
     escrow's settlement callback is `ChallengeStore._settlement_v2` and its dispute-first lookup.
-    COLD (20,000) and OTHER (10,000) hold available units; HOT is owned by COLD, MINER_TWO by OTHER.
+    COLD (20,000), OTHER (10,000) and the sink (1) hold available units; HOT is owned by COLD,
+    MINER_TWO by OTHER.
     """
 
     store: ChallengeStore
@@ -427,7 +463,9 @@ def dispute_world(
         max_referee_reassignments=1,
         max_referee_cost_units=100,
     )
-    setup = fixture.setup()
+    # The fixture's genesis with one unit for the sink: the key a bystander's transfer goes to.
+    allocation = [(fixture.COLD.ss58, 20000, 1), (fixture.OTHER.ss58, 10000, 1), (SINK, 1, 1)]
+    setup = repinned(fixture.setup(), genesis_allocation_hash=genesis_allocation_hash(allocation))
     body = setup.manifest.body()
     body["training"]["inner"].update(H=2, J=1)
     body["network"]["dispute_policy_hash"] = policy.digest()
@@ -456,7 +494,11 @@ def dispute_world(
             "INSERT INTO runs VALUES(?,?,?,'created',NULL)",
             (run_id, setup.manifest.model_dump_json(), "{}"),
         )
-        origins = fixture.fund(escrow)
+        genesis = genesis_request(fixture, run_id, allocation)
+        escrow.test_genesis(genesis)
+        cold_origin, other_origin, sink_origin = (origin.origin_id for origin in genesis.origins)
+        escrow.mature(H, (cold_origin, other_origin, sink_origin), 1)
+        origins = (cold_origin, other_origin)
         service = (
             Admission(
                 escrow,

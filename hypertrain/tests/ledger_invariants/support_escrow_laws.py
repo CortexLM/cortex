@@ -37,11 +37,12 @@ from hypertrain.protocol.messages_v2 import (
     EscrowRelease,
     EscrowTransfer,
     OriginAllocation,
+    ProductionBootstrap,
     RewardFinalize,
     TestGenesis,
 )
 
-from .support import H, Real, bare_escrow
+from .support import H, Real, bare_escrow, load_fixture_module
 
 COLD_UNITS = 20_000
 OTHER_UNITS = 10_000
@@ -334,3 +335,56 @@ def round_variant(
         }
     )
     return signed_by(unsigned, fixture.COORD), changed
+
+
+def bootstrapped(
+    fixture: ModuleType, real: Real, allocation: list[tuple[str, int, int]]
+) -> tuple[Real, ProductionBootstrap]:
+    """`real` in the run whose policy also pins the production bootstrap `allocation`
+    [(owner, units, mature_at)], and that bootstrap, signed by the coordinator.
+
+    The pin moves the run id, so each envelope of the evidence is sealed again for the new run by
+    the key that signed it: the reward pays the same work, replay and split as the one of `real`.
+    """
+    bootstraps = load_fixture_module(
+        "li_bootstrap_fixture", "ledger/test_production_bootstrap_v2.py"
+    )
+    setup = bootstraps.pinned(real[0], allocation)
+    run_id = setup.manifest.run_id()
+    _, evidence, reward = real
+    keys = {key.ss58: key for key in (fixture.HOT, fixture.AUDITOR, fixture.COORD)}
+
+    def again(envelope: EnvelopeV2) -> EnvelopeV2:
+        sealed = seal(
+            keys[envelope.signer], envelope.type, run_id, envelope.body, envelope.exp_drand
+        )
+        return EnvelopeV2.model_validate(sealed)
+
+    item = evidence.works[0]
+    work = replace(
+        item,
+        commit=again(item.commit),
+        verdict=again(item.verdict),
+        challenge=again(item.challenge),
+    )
+    origin = OriginAllocation(
+        origin_id=keyed_id(
+            fixture, reward_origin_id, run_id, reward.w, item.commit.signer, reward.finalize_hash
+        ),
+        owner=item.owner,
+        units=reward.budget_units,
+        mature_at=reward.mature_at,
+    )
+    unsigned = RewardFinalize.model_validate(
+        {
+            **reward.body(),
+            "run_id": run_id,
+            "origin_ids": [origin.origin_id],
+            "allocation_hash": sha256_hex(canonicalize([origin.body()])),
+            "authority_sig": "0" * 128,
+        }
+    )
+    moved = replace(evidence, finalize=again(evidence.finalize), works=(work,))
+    return (setup, moved, signed_by(unsigned, fixture.COORD)), bootstraps.bootstrap(
+        run_id, allocation
+    )

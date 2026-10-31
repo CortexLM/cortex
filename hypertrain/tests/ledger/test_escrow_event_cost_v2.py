@@ -35,7 +35,6 @@ def load(name: str, path: Path):
 
 
 E = load("event_cost_ledger_fixture", Path(__file__).parent / "test_escrow_v2.py")
-STRANGER = Keypair(b"\x0a" * 32)
 
 
 def op_id(i: int) -> str:
@@ -119,7 +118,7 @@ def test_a_value_outside_the_safe_integer_range_refuses_the_event(funded) -> Non
     )
     before = e.db.execute("SELECT COUNT(*) FROM escrow_events").fetchone()[0]
     with pytest.raises(EscrowError, match="STATE_RANGE"):
-        e.transfer(transfer(E.COLD, STRANGER, [cold], 1, 2), signer=E.COLD.ss58)
+        e.transfer(transfer(E.COLD, E.OTHER, [cold], 1, 2), signer=E.COLD.ss58)
     assert e.db.execute("SELECT COUNT(*) FROM escrow_events").fetchone()[0] == before
 
 
@@ -159,11 +158,11 @@ def test_every_number_the_state_serialises_is_kept_in_the_safe_range(
         e.db.execute(f"UPDATE {table} SET {column}=? {where}", (value, *args))
 
     put(edge)
-    e.transfer(transfer(E.COLD, STRANGER, [cold], 1, 10), signer=E.COLD.ss58)
+    e.transfer(transfer(E.COLD, E.OTHER, [cold], 1, 10), signer=E.COLD.ss58)
     put(bad)
     before = e.db.execute("SELECT COUNT(*) FROM escrow_events").fetchone()[0]
     with pytest.raises(EscrowError, match="STATE_RANGE"):
-        e.transfer(transfer(E.COLD, STRANGER, [cold], 1, 11), signer=E.COLD.ss58)
+        e.transfer(transfer(E.COLD, E.OTHER, [cold], 1, 11), signer=E.COLD.ss58)
     assert e.db.execute("SELECT COUNT(*) FROM escrow_events").fetchone()[0] == before
 
 
@@ -176,15 +175,20 @@ def test_verify_refuses_the_smallest_64_bit_integer_as_out_of_range(funded) -> N
         e.verify()
 
 
-def test_a_transfer_listing_origins_it_does_not_spend_adds_one_row(funded) -> None:
+def test_a_transfer_writes_no_row_for_a_listed_origin_it_does_not_spend(funded) -> None:
     e, cold, other = funded
-    e.transfer(transfer(E.OTHER, E.COLD, [other], 4000, 3), signer=E.OTHER.ss58)
-    assert units_of(e, STRANGER) == 0
+    # The recipient must be an owner the ledger knows, so it holds the row of its own origin: COLD's
+    # row of `cold` takes the unit, and COLD holds none of `other`, listed and not spent.
+    e.transfer(transfer(E.COLD, E.OTHER, [cold], 4000, 3), signer=E.COLD.ss58)
+    held = "SELECT COUNT(*) FROM escrow_units WHERE owner=? AND origin=?"
+    assert e.db.execute(held, (E.COLD.ss58, other)).fetchone()[0] == 0
+    rows = units_of(e, E.COLD)
     listed = sorted([cold, other])
-    e.transfer(transfer(E.COLD, STRANGER, listed, 1, 4), signer=E.COLD.ss58)
+    assert listed == [cold, other]  # the lowest id pays first: the unit comes from `cold`
+    e.transfer(transfer(E.OTHER, E.COLD, listed, 1, 4), signer=E.OTHER.ss58)
     # Both origins are listed and must be held; the first covers the unit, the second adds nothing.
-    assert units_of(e, STRANGER) == 1
-    assert e.balances(STRANGER.ss58).available == 1
+    assert units_of(e, E.COLD) == rows
+    assert e.balances(E.COLD.ss58).available == 20000 - 4000 + 1
     e.verify()
 
 

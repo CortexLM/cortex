@@ -274,6 +274,26 @@ F7b (IMPORTANT):
 2. A transfer must go to a recipient the ledger already knows (`UNKNOWN_RECIPIENT`): the quota alone
    is bypassed by hops to fresh keys (79 signers accepted once each, reproduced over HTTP [V]). No
    in-repo flow transfers to an unknown wallet. This is a product rule; see "Decisions for Forge".
+   *Landed by `v3-ledger-small-fixes` (D85, 2026-10-31; invariant ES-07):* `EscrowV2.transfer` refuses
+   with `UNKNOWN_RECIPIENT` (HTTP 409) a recipient that does not decode as an SS58 public key
+   (`decode_hotkey`) or that holds no row of `escrow_units` (any bucket, a row of zero units included).
+   The check comes after the replay lookup and after `SELF_TRANSFER`, so a transfer recorded earlier to
+   a key that was then unknown still returns its receipt, and before any unit moves, so a refusal writes
+   no event and conservation is untouched. A key enters the ledger by issuance only (`test_genesis`,
+   `production_bootstrap`, `reward_finalize`); the referee that `slash` pays must already hold units
+   (`UNFUNDED_REFEREE`). The flows of the repository are unchanged [V]: genesis, bootstrap, reward
+   finalize, `mature`, `pay`, `slash`, `burn_pending`, `release` and `release_settlement`, the admission
+   lock (`Admission.lock` through the outbox) and the miner CLI lock (`miner/coldkey_ops.py`) never call
+   `transfer`, whose one caller is the client route `POST .../escrow/transfer` (`ChallengeStore.admission_v2`).
+   The lookup is `SELECT 1 FROM escrow_units WHERE owner=? LIMIT 1`, a scan of the primary-key index
+   that stops at the first row of the owner [V `EXPLAIN QUERY PLAN`, SQLite 3.53]; no index is added
+   (point 1 of Part 4 forbids a general owner index), and it costs less than the snapshot of the whole
+   state each event already writes. Tests that handed units to a key nobody had issued anything to now
+   send them to an owner of their scenario's issuance (a genesis or bootstrap owner); where a production
+   round issues to its earner only, no transfer between two owners exists, and the client event that
+   squats a server id is the earner's admission lock (`tests/ledger/test_escrow_key_spaces_v2.py`,
+   `tests/challenge/test_escrow_server_ids_v2.py`). Pins: `tests/ledger_invariants/test_escrow_laws_2.py`
+   (ES-07); mutants: `tests/ledger_invariants/mutants_closed_es07.py`.
 
 ### Part 6. Relay grants (TRN-02, D51 5, D53 1)
 
@@ -411,6 +431,24 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
   move (ADR 0011 Part 3). On the d82 tip the lost-leaf fix edits `lease_v2`, an owned name, and
   `implementation_hash` becomes `7af135ca…70be62` (same place). The `v3-last-merges` tip (D89) changes nothing
   under `hypertrain/src`: re-measured there, the values of the d82 tip hold (same place).
+- `v3-ledger-small-fixes` (Part 5, D85): measured 2026-10-31 with `hash_consequences.py` (the tool of
+  ADR 0011 Part 3) on a `git archive` of each tree, base `b3af43f2` (`origin/v3`). No owned name and none
+  of the 12 hashed files is edited, so `implementation_hash` and every run id stay; the edited files,
+  `sources()` and the bundle move, which invalidates older qualification configs against the new tree
+  as after every edit of `src/hypertrain`:
+
+  | Value | base `b3af43f2` | `UNKNOWN_RECIPIENT` |
+  | --- | --- | --- |
+  | `implementation_hash`, example pin (`avx2`/`none`) | `7af135ca…70be62` | unchanged |
+  | owned names / hashed files of `implementation_hash` | 48 / 12 | 48 / 12 |
+  | `ledger/escrow_v2.py` sha256 | `0abf9093…5465d5` | `60f95adc…cecd49` |
+  | `challenge/store.py` sha256 | `ad79e33b…9c1183` | unchanged |
+  | `sources()` map: files, canonical sha256 | 158, `ebc355a5…cbb890` | 158, `43d95edf…68b937` |
+  | `bundle()` | 2,785,280 bytes, `6b57d826…d7cd7b` | 2,785,280 bytes, `4225c90e…78542d` |
+  | example `run_id` / `reference_hash` | `aa39197d…ec8abd` / `2dd4eadc…d6cc5d` | unchanged |
+
+  No escrow event, receipt or snapshot of an existing chain changes: a refused transfer writes nothing,
+  an accepted one has the preimage it had, and `verify()` replays no rule.
 - Schema: no table, column or key changes. One partial index is created if absent.
 - Compatibility: new server events carry a new key and new hashes, new origins new ids; old chains verify
   unchanged and are forward-only for the first new server event (an older image then fails closed with an
@@ -436,6 +474,8 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
 2. **F7b structural.** Approve (or refuse) the digest-in-preimage scheme with 1,000-event checkpoints.
 3. **Caps and quota.** 2,048 open admission locks per coldkey, 4,096 in the ledger, a minimum lock of a
    tenth of the funding floor, escrow burst 2,048 per window; the `UNKNOWN_RECIPIENT` rule.
+   *Decided by the Principal SN100 (D85, 2026-10-28):* the `UNKNOWN_RECIPIENT` rule lands before
+   dense-1B (Part 5.2).
 4. **Early-release chain** (Context): is a repair needed for a chain that already released a bond?
 
 Decided by the Principal SN100 (D52, D53, D72) and applied above, not asked: no header signatures, origin ids not

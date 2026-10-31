@@ -24,7 +24,7 @@ from hypertrain.protocol.envelope import body_digest
 from hypertrain.protocol.envelope_v2 import EnvelopeV2, Intake
 from hypertrain.protocol.hashing import sha256_hex
 from hypertrain.protocol.jcs import canonicalize
-from hypertrain.protocol.keys import decode_hotkey, verify
+from hypertrain.protocol.keys import KeyError_, decode_hotkey, verify
 from hypertrain.protocol.messages import SS58, Finalize, ReplayVerdict
 from hypertrain.protocol.messages_v2 import (
     U64,
@@ -1017,10 +1017,26 @@ class EscrowV2:
                 return old
             if op.recipient == op.owner:
                 raise EscrowError("SELF_TRANSFER")  # moves nothing; one more row and one more event
+            if not self._known_owner(op.recipient):
+                raise EscrowError("UNKNOWN_RECIPIENT")
             self._move(op, "available", "available", recipient=op.recipient, skip_empty=True)
             return self._event(
                 op.operation_id, "TRANSFER", op.model_dump_json(), op.owner, server=False
             )
+
+    def _known_owner(self, key: str) -> bool:
+        """Whether `key` decodes to a public key that already holds a row of the ledger.
+
+        A transfer goes to such a key only (ADR 0014 Part 5.2): a string nobody can sign for would
+        keep the units for ever, and a hop to a fresh key per event would bypass a per-key quota.
+        Owners enter the ledger through issuance, never through a transfer.
+        """
+        try:
+            decode_hotkey(key)
+        except KeyError_:
+            return False
+        row = self.db.execute("SELECT 1 FROM escrow_units WHERE owner=? LIMIT 1", (key,))
+        return row.fetchone() is not None
 
     def mature(
         self, operation_id: str, origin_ids: tuple[str, ...], now_beacon: int

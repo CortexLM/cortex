@@ -1,7 +1,8 @@
 """The store, the beacon route, the weights answer and the dispute settlement survive a squatted id.
 
-ADR 0014 part 1 at the service boundary: a funded coldkey signs an ordinary transfer under exactly
-the id the service derives, and the service operation still commits. The ledger-level chains are in
+ADR 0014 part 1 at the service boundary: a funded coldkey signs an ordinary client event (a
+transfer, or a lock where its ledger knows no other owner to transfer to) under exactly the id the
+service derives, and the service operation still commits. The ledger-level chains are in
 `tests/ledger/test_escrow_key_spaces_v2.py`.
 """
 
@@ -78,9 +79,15 @@ def squat(escrow, owner: Keypair, origin: str, operation_id: str) -> None:
     escrow.transfer(transfer(owner, E.COLD, origin, operation_id), signer=owner.ss58)
 
 
+def squat_with_a_lock(escrow, origin: str, operation_id: str) -> None:
+    """COLD locks the minimum admission bond under the id. The production ledger of `hosted` issued
+    units to COLD only, and a transfer goes to a key the ledger knows (ADR 0014 Part 5.2)."""
+    escrow.lock(E.lock(origin, operation_id, 100), signer=E.COLD.ss58)
+
+
 @pytest.fixture
 def hosted(tmp_path, actual_reward, monkeypatch):
-    """A store hosting a matured shadow origin and the live reward, OTHER holding one free unit."""
+    """A store hosting a matured shadow origin and the live reward, both held by COLD."""
     s, evidence, reward = actual_reward
     store = ChallengeStore(
         tmp_path / "state",
@@ -113,19 +120,17 @@ def hosted(tmp_path, actual_reward, monkeypatch):
     shadow = E.sign_actual_shadow(reward, E.reserve_actual_shadow(escrow, evidence))
     escrow.reward_finalize(shadow, replace(evidence, shadow=True))
     escrow.mature(E.H, tuple(shadow.origin_ids), 20)
-    origin = shadow.origin_ids[0]
-    escrow.transfer(transfer(E.COLD, E.OTHER, origin, "66" * 32), signer=E.COLD.ss58)
     escrow.reward_finalize(reward, evidence)
-    yield store, escrow, reward, origin
+    yield store, escrow, reward, shadow.origin_ids[0]
     store.close()
 
 
 def test_the_beacon_route_matures_a_reward_when_a_client_event_holds_its_maturity_id(
     hosted,
 ) -> None:
-    store, escrow, reward, other_origin = hosted
+    store, escrow, reward, shadow_origin = hosted
     mature_id = sha256_hex(f"ht-mature/2|{escrow.run_id}|{reward.origin_ids[0]}".encode())
-    squat(escrow, E.OTHER, other_origin, mature_id)
+    squat_with_a_lock(escrow, shadow_origin, mature_id)
     store.push_beacon({"round": 20, "signature": "00" * 48, "randomness": "11" * 32})
     assert escrow.balances(E.COLD.ss58).reward_pending == 0
     assert escrow.balances().conserved()
@@ -134,11 +139,11 @@ def test_the_beacon_route_matures_a_reward_when_a_client_event_holds_its_maturit
 
 
 def test_the_weights_answer_is_produced_when_a_client_event_holds_its_pay_id(hosted) -> None:
-    store, escrow, reward, other_origin = hosted
+    store, escrow, reward, shadow_origin = hosted
     origin = reward.origin_ids[0]
     escrow.mature(sha256_hex(b"ht-mature-direct"), tuple(reward.origin_ids), 20)
     pay_id = sha256_hex(f"ht-pay/2|{escrow.run_id}|0|{origin}|{E.COLD.ss58}".encode())
-    squat(escrow, E.OTHER, other_origin, pay_id)
+    squat_with_a_lock(escrow, shadow_origin, pay_id)
     beacon = escrow.manifest.training.beacon
     answer = json.loads(store.weights(0, beacon.genesis_time + 19 * beacon.period, 1))
     assert answer["weights"] == {E.HOT.ss58: 1_000_000.0}

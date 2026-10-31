@@ -47,7 +47,6 @@ from .support import (
     memory_db,
 )
 from .support_opids import (
-    SINK,
     DefenceMissing,
     client_event,
     collateral_escrow,
@@ -55,10 +54,10 @@ from .support_opids import (
     dispute_world,
     fresh_id,
     must_refuse,
+    production_collateral,
     receipt_ids,
     seed_reward_origin,
     service_step,
-    sink_transfer,
     squat_id,
 )
 
@@ -135,9 +134,11 @@ def resolved_and_settled(world, turn, settle=lambda step: step()):
 
 def matured_with_a_bystander(hosted, fixture) -> str:
     """The reward is finalized and matured; its owner has sent two units to OTHER, a funded key
-    that is not the earning owner. Returns the reward origin."""
+    that is not the earning owner (the production collateral makes OTHER and the sink keys the
+    ledger holds, so the transfers reach them). Returns the reward origin."""
     hosted.finalize()
     mature(hosted.escrow, hosted.reward)
+    production_collateral(hosted.escrow, fixture.OTHER.ss58, 1)
     origin = hosted.reward.origin_ids[0]
     hosted.escrow.transfer(
         EscrowTransfer(
@@ -171,7 +172,8 @@ def test_a_client_event_never_blocks_the_weights_payout_id(
         key = li_escrow.OTHER
         send = partial(client_event, run.escrow, kind, key, origin=origin)
         send(fresh_id("neutral"))
-        assert run.escrow.balances(key.ss58).available >= 1  # a unit is left to sign with
+        # a unit of the reward is left to sign with, beside the unit of collateral
+        assert run.escrow.balances(key.ss58).available == 1 + 1
         squat_id(run.escrow, kind, payout_ids[0], send)
 
         # Then: the epoch is answered with the same payment, once.
@@ -447,7 +449,15 @@ def test_an_operation_that_fails_before_its_event_commits_changes_nothing(
     origin, _ = li_escrow.fund(escrow)
     cold, other = li_escrow.COLD.ss58, li_escrow.OTHER.ss58
     lock = li_escrow.lock(origin, fresh_id("lock"), 1000)
-    send = sink_transfer(cold, fresh_id("send"), origin, 40)
+    send = EscrowTransfer(
+        operation_id=fresh_id("send"),
+        owner=cold,
+        recipient=other,
+        units=40,
+        origin_ids=[origin],
+        admission_id=None,
+        dispute_id=None,
+    )
     before = ledger_state(escrow)
 
     # Given: the storage fails at the end of every operation.
@@ -470,8 +480,7 @@ def test_an_operation_that_fails_before_its_event_commits_changes_nothing(
     reopened = li_escrow.ledger(setup, path)
     assert reopened.balances(cold).admission_locked == 1000
     assert reopened.balances(cold).available == 20000 - 1000 - 40
-    assert reopened.balances(SINK).available == 40
-    assert reopened.balances(other).available == 10000
+    assert reopened.balances(other).available == 10000 + 40
     assert len(ledger_state(reopened)[1]) == len(before[1]) + 2
 
 

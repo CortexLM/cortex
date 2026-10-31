@@ -34,7 +34,7 @@ from hypertrain.protocol.messages_v2 import (
 )
 
 from .support import Hosted, Real, at, error_code, hosted_reward, mature, pays
-from .support_opids import SINK
+from .support_opids import SINK, production_collateral
 from .support_weights import (
     assert_answer_shape,
     events,
@@ -667,7 +667,9 @@ def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
         )
 
     # Given: another owner holds two free units, received by an ordinary owner-signed transfer:
-    # one to sign a control with, one to sign the squat with.
+    # one to sign a control with, one to sign the squat with. Its production collateral, like the
+    # sink's, makes it a key the ledger holds, the only kind a transfer reaches.
+    production_collateral(host.escrow, other, 1)
     host.escrow.transfer(transfer("66" * 32, cold, 2, other), signer=cold)
     # When: that owner signs an event whose id is the one the service derives for the payout of
     # epoch 0 (the control signs nothing).
@@ -675,7 +677,9 @@ def test_a_client_event_carrying_the_pay_id_never_blocks_the_payout(
         # The same event under an ordinary id is accepted, so a refusal below is about its id. It
         # goes to the sink: the ledger refuses a transfer to oneself whatever its id.
         host.escrow.transfer(transfer("67" * 32, other, 1, SINK), signer=other)
-        assert host.escrow.balances(other).available == 1  # funded: only the id can refuse it
+        # Funded: one received unit is left beside its unit of collateral, so only the id can
+        # refuse the squat.
+        assert host.escrow.balances(other).available == 1 + 1
         squat = pay_id(host.run_id, 0, origin, cold)
         # The event model takes the id, so only the ledger can rule on it. It may refuse the event
         # or keep it apart from the key of the payout, but it must have seen it.

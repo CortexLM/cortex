@@ -133,7 +133,7 @@ def test_a_lock_is_funded_only_by_the_owners_available_units_of_the_listed_origi
 
 
 def test_no_lock_and_no_transfer_creates_units_on_an_empty_ledger(li_escrow: ModuleType) -> None:
-    """ES-02 (T-ES-04): units exist only after authority-signed issuance."""
+    """ES-02 (T-ES-04), ES-07: units exist only after authority-signed issuance."""
     # Given: a ledger that was never issued anything.
     escrow = bare_escrow(li_escrow, li_escrow.setup())
     cold = li_escrow.COLD.ss58
@@ -145,10 +145,12 @@ def test_no_lock_and_no_transfer_creates_units_on_an_empty_ledger(li_escrow: Mod
         "transfer": lambda: escrow.transfer(transfer_op(li_escrow, H), signer=cold),
         "pay": lambda: escrow.pay(pay_op(li_escrow, H), signer=cold),
     }
-    # When / Then: each finds no unit to move; nothing is issued, nothing is recorded.
-    assert {name: error_code(call) for name, call in attempts.items()} == dict.fromkeys(
-        attempts, UNFUNDED
-    )
+    # When / Then: each finds no unit to move, and the transfer not even a recipient, since a
+    # ledger that issued nothing knows no key; nothing is issued, nothing is recorded.
+    assert {name: error_code(call) for name, call in attempts.items()} == {
+        **dict.fromkeys(attempts, UNFUNDED),
+        "transfer": "UNKNOWN_RECIPIENT",
+    }
     assert (escrow.balances().issued, events(escrow)) == (0, 0)
 
 
