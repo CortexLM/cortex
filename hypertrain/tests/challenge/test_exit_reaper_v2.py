@@ -5,6 +5,7 @@ books whose fault it is, and sanctions the miner."""
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -645,3 +646,55 @@ def test_a_stored_mismatch_verdict_backs_only_the_exclusion_that_names_it(
 
     # Then: only the verdict the exclusion names reaches the hook
     assert hook.calls == ([(admission_id(0), "AUDIT_MISMATCH", evidence)] if applied else [])
+
+
+def push_at(store: ChallengeStore, net, number: int, *, wall: int | None = None) -> None:
+    """Push round `number` straight to `store`, its wall clock at round `wall` (by default the
+    round itself): the route of a store no `TestClient` serves."""
+    at = net.manifest.training.beacon.genesis_time + ((number if wall is None else wall) - 1) * 3
+    store.clock = lambda: at
+    store.push_beacon(fixtures.fixture_beacon(number))
+
+
+def test_a_restarted_master_waives_the_silence_of_a_pause_no_request_saw(six_network):
+    """TEST, 31/10: after the restart of 04:43Z no request built a hosted run's services, so the
+    pauses of 07:11Z and 07:17Z left no `beacon-pause` record. The reaper a later request builds
+    reads the pauses on record: without one, the members held silent are blamed as miners."""
+    n = six_network
+    run = n.manifest.run_id()
+    opening = round_zero(n, fixtures.HOT)
+    assert open_round(n, opening, n.client).status_code == 200
+    commit_records(n, fixtures.HOT[:4])
+    silent = [h.ss58 for h in fixtures.HOT[4:]]
+    push_through(n, opening.d_commit - 20)
+    # Given the master restarted inside the commit window, no request has built its services,
+    reopened = ChallengeStore(
+        n.store.state_dir,
+        n.store.params,
+        n.store.coord,
+        n.store.owner_hotkey,
+        n.store.verify_beacon,
+        n.store.objects,
+    )
+    restarted = SimpleNamespace(store=reopened, manifest=n.manifest)
+    try:
+        assert reopened._services_v2 == {}
+        before = {h: standing(restarted, h) for h in silent}
+        # When its pusher, paused 8 rounds, catches up head first, one pair a tick,
+        head, pending = n.now + 8, list(range(n.now + 1, n.now + 8))
+        while pending:
+            for number in (head, pending.pop(0)):
+                push_at(reopened, n, number, wall=head)
+            head += 1
+        for number in range(head, opening.d_commit):
+            push_at(reopened, n, number)
+        # and a request builds the services before the push that closes the commit window,
+        escrow = reopened._services(run)[0]
+        burned = escrow.balances().burned
+        push_at(reopened, n, opening.d_commit)
+        # Then the silence the master refused is its own: no strike, no bond burned.
+        assert rows_of(restarted) == {f"0:{h}": ("INFRASTRUCTURE", "WAIVED") for h in silent}
+        assert {h: standing(restarted, h) for h in silent} == before
+        assert escrow.balances().burned == burned
+    finally:
+        reopened.close()
