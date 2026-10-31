@@ -220,15 +220,11 @@ MUTANTS: list[dict[str, Any]] = [
         [FORGED],
         "the audit lease route answers any signer, not only the pinned auditors.",
     ),
-    mutant(
-        "http-auth-escrow-owner-not-checked",
-        ["AU-05"],
-        "src/hypertrain/ledger/escrow_v2.py",
-        '        if signer != op.owner:\n            raise EscrowError("OWNER_AUTHORITY")',
-        '        if False:\n            raise EscrowError("OWNER_AUTHORITY")',
-        [FORGED],
-        "a transfer or release signed by someone other than the owner is applied.",
-    ),
+    # The forged transfer and release of FORGED are refused by two guards since D137: the escrow
+    # quota checks the owner before it reads the budget (admission.py `meter_escrow`), then the
+    # ledger does (`_owner_operation`). No single mutant fails FORGED, so the ledger's guard is
+    # held by el-owner-check-dropped (mutants_escrow_laws.py, the same change, killed at the ledger
+    # boundary) and the route's by closed-rl01-the-quota-answers-a-third-party.
     mutant(
         "http-auth-relay-receipt-signer-not-checked",
         ["AU-05"],
