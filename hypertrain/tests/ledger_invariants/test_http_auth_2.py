@@ -11,7 +11,9 @@ import base64
 import hashlib
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import httpx
@@ -23,7 +25,7 @@ from hypertrain.data.stream_store import spool
 from hypertrain.protocol import envelope_v2, relay_envelope
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import Receipt
-from hypertrain.protocol.messages_v2 import WorkProof
+from hypertrain.protocol.messages_v2 import ArtifactLimits
 from hypertrain.protocol.relay_messages import (
     ChunkCustodyAck,
     CustodyRelease,
@@ -34,7 +36,7 @@ from hypertrain.relay import app as relay_app
 from hypertrain.relay.app import create_app as create_relay_app
 from hypertrain.relay.core import RelayError, Settlement
 
-from .support import load_fixture_module, service_world
+from .support import SERVICE_FIXTURE, load_fixture_module, service_world
 from .support_gaps_http import expect
 from .support_http_auth import (
     HASH,
@@ -373,36 +375,93 @@ def test_a_released_upload_frees_its_slot_in_the_retained_upload_cap(tmp_path: P
 # LV-07 ------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "LV-07+TRN-05: one hotkey cannot store more objects than any proof may reference (the lot "
-        "defers TRN-05 with the rest of its open list; Forge decides whether another batch takes "
-        "it) [fix-lot: decision (product choice pending)]"
-    ),
-)
-def test_one_hotkey_cannot_store_more_objects_than_a_proof_can_reference(tmp_path: Path) -> None:
-    limit = next(
-        m.max_length
-        for m in WorkProof.model_fields["artifact_refs"].metadata
-        if hasattr(m, "max_length")
-    )
-    service = sibling_service()
+def with_upload_bounds(monkeypatch: pytest.MonkeyPatch, **bounds: int) -> ModuleType:
+    """The service module of `service_world`, whose next world pins an admission policy with
+    artifact limits that also carry `bounds` (TRN-05: `max_refs`, `max_parts`, and
+    `max_object_bytes` for a large object)."""
+    service = load_fixture_module(*SERVICE_FIXTURE)
+    original = service.fixture.setup
+
+    def setup(*args: Any, **kwargs: Any) -> Any:
+        s = original(*args, **kwargs)
+        limits = ArtifactLimits.model_validate(
+            {**s.admission_policy.artifact_limits.body(), **bounds}
+        )
+        policy = s.admission_policy.model_copy(update={"artifact_limits": limits})
+        return replace(s, admission_policy=policy)
+
+    monkeypatch.setattr(service.fixture, "setup", setup)
+    return service
+
+
+def stored(world: Any, data: bytes) -> bool:
+    try:
+        world.store.objects.get(hashlib.sha256(data).hexdigest())
+    except ObjectNotFound:
+        return False
+    return True
+
+
+def test_one_hotkey_cannot_store_more_objects_than_a_proof_can_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LV-07+TRN-05 (D137): in one `challenge_rounds` window a hotkey uploads at most the objects
+    one proof can reference, `max_refs` references of `max_parts` parts and an index each; a
+    duplicate of its own is free, and the refusal is 413 before the object is written."""
+    service = with_upload_bounds(monkeypatch, max_refs=1, max_parts=1)  # two objects, 2 MiB
     miner = service.HOT[0]
     with service_world(tmp_path) as world:
         n = world.network
         expect(n.join(0).status_code == 200, "the miner did not join")
+        first, second, third = (f"artifact {i}".encode() for i in range(3))
+        for data in (first, second, first):  # the second upload of `first` counts nothing
+            response = put_object(n, miner, data)
+            expect(response.status_code == 200, f"an upload in the budget failed: {response.text}")
+        refused = put_object(n, miner, third)
+        assert (refused.status_code, refused.json()["detail"]) == (413, "OBJECT_QUOTA")
+        assert not stored(world, third)
 
-        def store(i: int) -> int:
-            return put_object(n, miner, f"artifact {i}".encode()).status_code
 
-        statuses = [store(i) for i in range(limit + 1)]
-        expect(statuses[0] == 200, "a signed upload of an admitted miner is not served")
-        accepted = statuses.count(200)
-        assert accepted == limit, (
-            f"{accepted} objects stored for one hotkey; {limit} is the most a proof lists"
-        )
+def test_one_hotkey_cannot_store_more_bytes_than_a_proof_can_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TRN-05 (D137): the bytes of a window are bounded too, at 1 MiB per object a proof can
+    reference; an upload past them is refused before it is written and costs nothing."""
+    service = with_upload_bounds(monkeypatch, max_refs=1, max_parts=1, max_object_bytes=4 << 20)
+    miner = service.HOT[0]
+    mib = 1 << 20
+    large, over, small = (
+        bytes([i]) * size for i, size in enumerate((3 * mib // 2, mib // 2 + 1, mib // 2))
+    )
+    with service_world(tmp_path) as world:
+        n = world.network
+        expect(n.join(0).status_code == 200, "the miner did not join")
+        expect(put_object(n, miner, large).status_code == 200, "1.5 MiB in a 2 MiB budget failed")
+        # When: a second object whose bytes pass the budget, although its count does not
+        refused = put_object(n, miner, over)
+        # Then: refused before the write; a smaller one still fits
+        assert (refused.status_code, refused.json()["detail"]) == (413, "OBJECT_QUOTA")
+        assert not stored(world, over)
+        assert put_object(n, miner, small).status_code == 200
+
+
+def test_the_next_challenge_window_gives_a_hotkey_a_new_upload_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TRN-05 (D137): the budget is per `challenge_rounds` window of the beacon; the counts of the
+    earlier windows are dropped."""
+    service = with_upload_bounds(monkeypatch, max_refs=1, max_parts=1)
+    miner = service.HOT[0]
+    with service_world(tmp_path) as world:
+        n = world.network
+        expect(n.join(0).status_code == 200, "the miner did not join")
+        for i in range(2):
+            expect(put_object(n, miner, f"spent {i}".encode()).status_code == 200, "upload failed")
+        expect(put_object(n, miner, b"one too many").status_code == 413, "the budget was not spent")
+        window = world.store._services(world.run_id)[1].policy.challenge_rounds
+        n.push((n.now // window + 1) * window)
+        assert put_object(n, miner, b"one too many").status_code == 200
+        assert world.count("object_budget") == 1
 
 
 # LV-08 ------------------------------------------------------------------------------------

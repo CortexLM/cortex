@@ -317,6 +317,42 @@ F7b (IMPORTANT):
    squats a server id is the earner's admission lock (`tests/ledger/test_escrow_key_spaces_v2.py`,
    `tests/challenge/test_escrow_server_ids_v2.py`). Pins: `tests/ledger_invariants/test_escrow_laws_2.py`
    (ES-07); mutants: `tests/ledger_invariants/mutants_closed_es07.py`.
+3. **Objects and bytes per hotkey (TRN-05).** *Landed by `v3-ledger-small-fixes` (Principal SN100
+   D137, 2026-10-31).* The first reading of D85, a cap of 512 objects per hotkey (the `max_length` of
+   `WorkProof.artifact_refs`), counted references, not stored objects [V]: a reference is a plain object
+   or an `ht-parts-v1` index of parts of 1 MiB (`PART_BYTES`, at most `MAX_PARTS` = 8,192), and the miner
+   publishes every part through the same `POST /v2/runs/{run}/objects/{sha256}` (`miner/core.py`,
+   `_upload_ref` then `put_file`). One admission trial stores 517 objects at 31.46 M parameters (state
+   362, ef 122, delta 32, leaves 1: the file sizes S18 recorded, cut into parts) and 1,640 at 100.68 M
+   [A, S18 report], about 16,000 at dense-1B [H, scaled]; a cap of 512 would admit no miner at the
+   production size, and no test would see it, because the tiny CPU model publishes one part per
+   artifact. The guard bounds what one proof can reference instead, objects and bytes, per hotkey and
+   per `challenge_rounds` window of the beacon (`now // challenge_rounds`, 100 beacons):
+   `ArtifactLimits.max_refs` R (1..512) and `max_parts` P (1..8,192), optional and omitted when absent,
+   give R × (P + 1) objects and R × (P + 1) MiB (`upload_budget`; a part is `PART_BYTES`, an index at
+   most `MAX_MANIFEST_BYTES`, both 1 MiB). Absent, R = 512 and P = 8,192: 4,194,816 objects and about
+   4 TiB per hotkey and window. `Admission.count_upload` runs in the object route (`challenge/app.py`,
+   not an owned name) twice: it checks the budget, writing nothing, once the signed request, the
+   admission and the object limit are checked and before the object is read, and it counts the upload
+   once the bytes are the signed ones, just before they are written; past either bound the route answers
+   413 `OBJECT_QUOTA`, and a refused upload, for the budget or for its bytes, changes nothing in the
+   store (`test_a_refused_upload_stores_nothing`). An object the hotkey already uploaded in the window
+   is free (`object_uploads`, one row per window, hotkey and sha256); the counts sit in one row per
+   window and hotkey (`object_budget`), so a charge costs O(1) under the store lock, and each charge
+   deletes the rows of earlier windows through the primary key. A trial whose publication straddles
+   two windows has two budgets, so the hard bound over any 100 beacons is 2 × R × (P + 1) objects and as
+   many MiB (8,389,632 objects and about 8 TiB at the defaults). At the defaults this is a ceiling
+   against abuse, not a quota that protects a small disk: a TEST stack sets R = 4 (state, ef, delta,
+   leaves: what a trial publishes; a round adds its leaves) and P just above the parts of its largest
+   artifact, for example P = 512 at 31 M (361 parts of state: 2,052 objects and about 2 GiB per hotkey
+   and window) or P = 2,048 at 101 M (8,196 objects, about 8 GiB). The bounds are omitted when absent,
+   so the admission policy the s100 TEST runs f3901a09 and 0ef600b4 pin (`7a881925…`) and the example
+   policy (`c3fd6d4d…`) keep their bytes and digests, and every manifest and run id stays [V, golden
+   tests]. A challenge that carries a set bound is refused by a miner built before this lot
+   (`WireModel` forbids extra fields): set them only once the miners know them. Pins: the former strict
+   xfail `tests/ledger_invariants/test_http_auth_2.py::test_one_hotkey_cannot_store_more_objects_than_a_proof_can_reference`,
+   restated on a policy with R = P = 1, the byte and window pins beside it, and the golden admission
+   policy of `tests/ops/s100`; mutants: `tests/ledger_invariants/mutants_closed_trn05.py`.
 
 ### Part 6. Relay grants (TRN-02, D51 5, D53 1)
 
@@ -460,27 +496,33 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
   `sources()` and the bundle move, which invalidates older qualification configs against the new tree
   as after every edit of `src/hypertrain`:
 
-  | Value | base `b3af43f2` | `UNKNOWN_RECIPIENT` | `ESCROW_QUOTA` |
-  | --- | --- | --- | --- |
-  | `implementation_hash`, example pin (`avx2`/`none`) | `7af135ca…70be62` | unchanged | unchanged |
-  | owned names / hashed files of `implementation_hash` | 48 / 12 | 48 / 12 | 48 / 12 |
-  | `ledger/escrow_v2.py` sha256 | `0abf9093…5465d5` | `60f95adc…cecd49` | `8cde7408…a39df0` |
-  | `challenge/admission.py` sha256 | `0d7fa656…d67ead` | unchanged | `725b388d…cee9f5` |
-  | `challenge/store.py` sha256 | `ad79e33b…9c1183` | unchanged | `4d8ad965…9f378a` |
-  | `sources()` map: files, canonical sha256 | 158, `ebc355a5…cbb890` | 158, `43d95edf…68b937` | 158, `9a932217…85645f` |
-  | `bundle()` | 2,785,280 bytes, `6b57d826…d7cd7b` | 2,785,280 bytes, `4225c90e…78542d` | 2,785,280 bytes, `e2f8c7f6…07c1b8` |
-  | example `run_id` / `reference_hash` | `aa39197d…ec8abd` / `2dd4eadc…d6cc5d` | unchanged | unchanged |
+  | Value | base `b3af43f2` | `UNKNOWN_RECIPIENT` | `ESCROW_QUOTA` | owner before quota | upload budget |
+  | --- | --- | --- | --- | --- | --- |
+  | `implementation_hash`, example pin (`avx2`/`none`), and under the four other pins | `7af135ca…70be62` | unchanged | unchanged | unchanged | unchanged |
+  | owned names / hashed files of `implementation_hash` (ASTs and file digests) | 48 / 12 | identical | identical | identical | identical |
+  | `ledger/escrow_v2.py` sha256 | `0abf9093…5465d5` | `60f95adc…cecd49` | `8cde7408…a39df0` | unchanged | unchanged |
+  | `challenge/admission.py` sha256 | `0d7fa656…d67ead` | unchanged | `725b388d…cee9f5` | `ab7f38b3…c34554` | `ac267154…94a75a` |
+  | `challenge/admission_store.py` sha256 | `a9d4d3cf…3dafe1` | unchanged | unchanged | unchanged | `b8bd855e…f84f3f` |
+  | `challenge/store.py` sha256 | `ad79e33b…9c1183` | unchanged | `4d8ad965…9f378a` | `e9ec81b9…bb67fa` | unchanged |
+  | `challenge/app.py` sha256 | `0e6ec421…e07d48` | unchanged | unchanged | unchanged | `de307045…037847` |
+  | `protocol/messages_v2.py` sha256 | `8e03a8a0…42bb04` | unchanged | unchanged | unchanged | `5a331b37…1444d1` |
+  | `sources()` map: files, canonical sha256 | 158, `ebc355a5…cbb890` | 158, `43d95edf…68b937` | 158, `9a932217…85645f` | 158, `f25cacfd…eda568` | 158, `3db4bf34…d5c8d4` |
+  | `bundle()` | 2,785,280 bytes, `6b57d826…d7cd7b` | 2,785,280 bytes, `4225c90e…78542d` | 2,785,280 bytes, `e2f8c7f6…07c1b8` | 2,785,280 bytes, `d1dc0d42…1f7abf` | 2,785,280 bytes, `57c5ef6f…af2f81` |
+  | example `run_id` / `reference_hash` | `aa39197d…ec8abd` / `2dd4eadc…d6cc5d` | unchanged | unchanged | unchanged | unchanged |
+  | admission policy of the s100 runs f3901a09 and 0ef600b4 / of `manifest_v2 example` | `7a881925…c2682e1` / `c3fd6d4d…b3e3e3` | unchanged | unchanged | unchanged | unchanged |
 
   No escrow event, receipt or snapshot of an existing chain changes: a refused transfer writes nothing,
   an accepted one has the preimage it had, and `verify()` replays no rule. The quota adds rows to
-  `admission_quota` only (no schema change); `ChallengeStore.admission_v2` and `Admission` are not
-  owned names.
+  `admission_quota` only; the upload budget adds two tables (`object_uploads`, `object_budget`,
+  created if absent) and two optional policy fields that are omitted when absent.
+  `ChallengeStore.admission_v2`, `Admission` and the object route are not owned names.
 - Schema: no table, column or key changes. One partial index is created if absent.
 - Compatibility: new server events carry a new key and new hashes, new origins new ids; old chains verify
   unchanged and are forward-only for the first new server event (an older image then fails closed with an
   `EscrowError` and cannot write: take a database backup before the digest moves, as `deploy/README.md` and
   `docs/OPERATOR_SECURITY.md` already say). HTTP gains `OPEN_LOCK_CAP`, `LEDGER_LOCK_CAP`, `SELF_TRANSFER`,
-  `ESCROW_QUOTA`, `UNKNOWN_RECIPIENT`, `CONTEST_LOCK_ID_COLLISION` (all 409) and 429 on the dispute watch;
+  `ESCROW_QUOTA`, `UNKNOWN_RECIPIENT`, `CONTEST_LOCK_ID_COLLISION` (all 409), 413 `OBJECT_QUOTA` on the
+  object route and 429 on the dispute watch;
   the watch, trial job and object upload change from header-signed requests to body envelopes. The relay
   gains one message type and one public GET, a periodic collect task and a fill report on `/readyz`, which
   answers 503 `{"ready": false}` with null fill fields when its storage fails instead of a bare 500; the

@@ -239,6 +239,18 @@ bytes that do not hash to the sha256, 422. The old `PUT` with `X-Hotkey` and
 `X-Object-Signature` headers is removed (405). Uploads are content-addressed,
 so repeating one is harmless; the miner retries transport errors and 5xx.
 
+Per `challenge_rounds` window of the beacon (`now // challenge_rounds`), one hotkey uploads at most
+what one proof can reference: `max_refs` references of at most `max_parts` parts and an index each,
+so `max_refs × (max_parts + 1)` objects and as many MiB. Both bounds are optional fields of the
+admission policy's `artifact_limits` (1..512 and 1..8192), omitted when absent so that the digest
+of every existing policy and the run id of every existing run stay; absent, they are 512 and 8,192,
+about 4.2 million objects and 4 TiB per hotkey and window: a ceiling against abuse, not a quota
+that protects a small disk, which a TEST stack sets lower. The budget is checked with the signed
+request, before the object is read, and counted once the bytes are the signed ones, just before
+they are written: an upload past it is refused 413 `OBJECT_QUOTA`, and any refused upload changes
+nothing. An object the hotkey already uploaded in the window costs nothing again. A trial whose
+publication straddles two windows has two budgets.
+
 Every object is read, by anyone, with `GET /v2/runs/{run_id}/objects/{sha256}`. The master sends
 the stored file in blocks of 1 MiB with its `Content-Length`; it never holds the object in memory,
 and it does not hash it again per request: the key names the file, and the party that receives the

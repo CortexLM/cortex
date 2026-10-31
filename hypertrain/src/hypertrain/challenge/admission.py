@@ -1226,6 +1226,22 @@ class Admission:
             f"escrow:{op.owner}:{now // window}", now, 0, ESCROW_BURST, code="ESCROW_QUOTA"
         )
 
+    def count_upload(self, hotkey: str, sha256: str, size: int, *, now: int, charge: bool) -> None:
+        """Check, and with `charge` count, an object upload of `hotkey` against its budget of the
+        `challenge_rounds` window (TRN-05, D137): at most what one proof can reference,
+        `ArtifactLimits.upload_budget`. A trial that straddles two windows has two budgets."""
+        objects, total = self.policy.artifact_limits.upload_budget()
+        with self.escrow.tx():
+            self.store.object_quota(
+                hotkey,
+                sha256,
+                size,
+                window=now // self.policy.challenge_rounds,
+                objects=objects,
+                total=total,
+                charge=charge,
+            )
+
     def bond_required(self, locked: int) -> int:
         """The locked units an admission needs to be eligible (`locked` only matters when the
         policy has no collectible bound: then no amount is enough)."""

@@ -57,6 +57,8 @@ MAX_MANIFEST_BYTES = 1 << 20
 INDEX_MAGIC = b"ht-parts-v1\n"
 PART_BYTES = 1 << 20
 MAX_PARTS = 8192
+# The most references a WorkProof lists (`artifact_refs`).
+MAX_ARTIFACT_REFS = 512
 
 
 class WireModel(BaseModel):
@@ -567,6 +569,24 @@ class ArtifactLimits(WireModel):
     max_object_bytes: Annotated[StrictInt, Field(ge=1, le=MAX_OBJECT_BYTES)]
     max_body_bytes: Literal[65536]
     max_chunk_manifest_bytes: Literal[1048576]
+    # What one hotkey may upload through the object route per `challenge_rounds` window (TRN-05,
+    # D137): what one proof can reference, `max_refs` references of at most `max_parts` parts and
+    # an index each. Omitted when absent, so every policy digest (and run id) predating them is
+    # unchanged; absent means the protocol bounds MAX_ARTIFACT_REFS and MAX_PARTS.
+    max_refs: Annotated[StrictInt, Field(ge=1, le=MAX_ARTIFACT_REFS)] | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
+    max_parts: Annotated[StrictInt, Field(ge=1, le=MAX_PARTS)] | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
+
+    def upload_budget(self) -> tuple[int, int]:
+        """Objects and bytes one hotkey may upload per window: refs x (parts + 1) objects, each at
+        most 1 MiB (a part is PART_BYTES, an index MAX_MANIFEST_BYTES)."""
+        refs = MAX_ARTIFACT_REFS if self.max_refs is None else self.max_refs
+        parts = MAX_PARTS if self.max_parts is None else self.max_parts
+        objects = refs * (parts + 1)
+        return objects, objects * max(PART_BYTES, MAX_MANIFEST_BYTES)
 
 
 class JoinChallenge(WireModel):
@@ -618,7 +638,7 @@ class WorkProof(WireModel):
     challenge_hash: Hex64
     leaves_root: Hex64
     delta_hash: Hex64
-    artifact_refs: Annotated[list[ArtifactRef], Field(min_length=1, max_length=512)]
+    artifact_refs: Annotated[list[ArtifactRef], Field(min_length=1, max_length=MAX_ARTIFACT_REFS)]
 
 
 class RotateRequest(WireModel):

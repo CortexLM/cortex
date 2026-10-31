@@ -1,0 +1,1 @@
+{"E":4,"artifact_limits":{"max_body_bytes":65536,"max_chunk_manifest_bytes":1048576,"max_object_bytes":2147483648},"challenge_rounds":100,"clean_finalizations":12,"ip_prefix_burst":64,"ip_prefix_per_beacon":32,"join_burst":4,"join_per_beacon":2,"max_pending":32,"max_trial_replays":2,"max_trials_per_beacon":2,"q_base":"0000803e","work_screen_epoch_rounds":20000}

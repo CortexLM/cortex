@@ -75,6 +75,12 @@ class AdmissionStore:
           CREATE TABLE IF NOT EXISTS admission_seizures(
             lock_id TEXT PRIMARY KEY, admission_id TEXT NOT NULL, reason TEXT NOT NULL,
             evidence_hash TEXT NOT NULL, beacon INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS object_uploads(
+            beacon_window INTEGER, hotkey TEXT, sha256 TEXT,
+            PRIMARY KEY(beacon_window, hotkey, sha256));
+          CREATE TABLE IF NOT EXISTS object_budget(
+            beacon_window INTEGER, hotkey TEXT, objects INTEGER NOT NULL, bytes INTEGER NOT NULL,
+            PRIMARY KEY(beacon_window, hotkey));
         """)
 
     def record(self, hotkey: str) -> AdmissionRecord:
@@ -148,6 +154,45 @@ class AdmissionStore:
             "INSERT INTO admission_quota VALUES(?,?,?) ON CONFLICT(identity) DO "
             "UPDATE SET beacon=excluded.beacon,tokens=excluded.tokens",
             (identity, now, tokens - 1),
+        )
+
+    def object_quota(
+        self,
+        hotkey: str,
+        sha256: str,
+        size: int,
+        *,
+        window: int,
+        objects: int,
+        total: int,
+        charge: bool,
+    ) -> None:
+        """Check the upload of `sha256` by `hotkey` in `window` against `objects` objects and
+        `total` bytes, and count it when `charge`; without it nothing is written. A duplicate of the
+        same hotkey in the window is free; an upload past either bound is refused OBJECT_QUOTA and
+        counts nothing. A charge first drops the rows of earlier windows."""
+        if charge:
+            self.db.execute("DELETE FROM object_uploads WHERE beacon_window < ?", (window,))
+            self.db.execute("DELETE FROM object_budget WHERE beacon_window < ?", (window,))
+        if self.db.execute(
+            "SELECT 1 FROM object_uploads WHERE beacon_window=? AND hotkey=? AND sha256=?",
+            (window, hotkey, sha256),
+        ).fetchone():
+            return
+        row = self.db.execute(
+            "SELECT objects, bytes FROM object_budget WHERE beacon_window=? AND hotkey=?",
+            (window, hotkey),
+        ).fetchone()
+        used, stored = (row["objects"], row["bytes"]) if row else (0, 0)
+        if used + 1 > objects or stored + size > total:
+            raise AdmissionError("OBJECT_QUOTA")
+        if not charge:
+            return
+        self.db.execute("INSERT INTO object_uploads VALUES(?,?,?)", (window, hotkey, sha256))
+        self.db.execute(
+            "INSERT INTO object_budget VALUES(?,?,?,?) ON CONFLICT(beacon_window, hotkey) DO "
+            "UPDATE SET objects=excluded.objects, bytes=excluded.bytes",
+            (window, hotkey, used + 1, stored + size),
         )
 
     def transition(

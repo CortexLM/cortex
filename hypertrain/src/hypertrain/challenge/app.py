@@ -851,6 +851,22 @@ def create_app(
             raise ChallengeError(403, "object signature mismatch")
         if upload.size > limit:
             raise ChallengeError(413, "object exceeds pinned admission limit")
+
+        def counted(charge: bool) -> None:
+            with hosted._lock:
+                hosted._services(run_id)[1].count_upload(
+                    envelope.signer, sha256, upload.size, now=now, charge=charge
+                )
+
+        async def budget(charge: bool) -> None:
+            try:
+                await run(counted, charge)
+            except AdmissionError as error:
+                raise ChallengeError(413, error.code) from None
+
+        # The upload budget of the hotkey (TRN-05): checked before a byte of the object is read,
+        # counted once the bytes are the signed ones, so a refused upload changes nothing.
+        await budget(False)
         raw = bytearray(rest)
         # The signed length is the cap: past it, do not wait for the rest of the body.
         while len(raw) <= upload.size:
@@ -864,6 +880,7 @@ def create_app(
             raise ChallengeError(422, "object length differs")
         if hashlib.sha256(raw).hexdigest() != sha256:
             raise ChallengeError(422, "object hash differs")
+        await budget(True)
         key = await run(hosted.objects.put, bytes(raw))
         return {"sha256": key}
 
