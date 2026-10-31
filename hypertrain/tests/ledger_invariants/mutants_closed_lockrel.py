@@ -31,6 +31,8 @@ before staged rounds is witnessed by the next free push only, the oldest such vi
 publication, and an empty stage costs no SQLite transaction. Lens's B12 (the stage entry dropped by
 round instead of by identity) is equivalent: a round re-staged while it is written is already in the
 beacon table, which only grows and is written with INSERT OR IGNORE, so dropping it loses nothing.
+The pause-witness lot adds one: a push witnesses the pause of a run whose services no request has
+built since a restart (TEST 31/10, no `beacon-pause` record after a 26 s pusher pause).
 
 Run from hypertrain/: .venv/bin/python scripts/check_ledger_invariant_mutants.py --only <ids>
 """
@@ -59,6 +61,11 @@ OLDEST_VIEW = (
     BEACON + "test_two_publications_before_a_free_push_leave_the_pause_from_the_first_view"
 )
 EMPTY_STAGE = BEACON + "test_a_transaction_with_nothing_staged_opens_one_sqlite_transaction"
+RESTARTED = BEACON + "test_a_restarted_master_witnesses_the_pause_its_head_first_catch_up_shows"
+UNBUILT = (
+    "        for run_id in self._unbuilt_runs_v2():\n"
+    '            self._reap_v2(run_id, "exit", partial(self._witness_v2, previous=previous_now))\n'
+)
 
 REPLAY = (
     "                result = admission.run_reference(\n"
@@ -172,6 +179,19 @@ MUTANTS = [
         "why": (
             "Every outermost transaction opens two more empty SQLite transactions to publish a "
             "stage that holds nothing (Lens B15, cost only)."
+        ),
+    },
+    {
+        "id": "closed-lockrel-a-restarted-store-witnesses-no-pause",
+        "invariants": ["ADR0011-P8", "BPWE-1"],
+        "path": STORE,
+        "old": UNBUILT,
+        "new": "",
+        "tests": [RESTARTED],
+        "why": (
+            "A push witnesses pauses only for the runs whose services this process built, so after "
+            "a restart a pause no request saw is never recorded and the reaper built later blames "
+            "the members it held silent on the miners."
         ),
     },
 ]

@@ -436,11 +436,6 @@ def test_a_transaction_with_nothing_staged_opens_one_sqlite_transaction(
         assert begins == ["BEGIN IMMEDIATE"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="push_beacon witnesses a pause only for a run whose services are built",
-)
 def test_a_restarted_master_witnesses_the_pause_its_head_first_catch_up_shows(
     child_network,  # noqa: F811
 ):

@@ -978,6 +978,10 @@ class ChallengeStore:
             guards = tuple(self._lease_guards_v2.values())
         for guard in guards:
             guard.advance(br.round)
+        # No reaper runs for these until a request builds their services (none are after a
+        # restart), and the one that runs then must read the pauses their callers met.
+        for run_id in self._unbuilt_runs_v2():
+            self._reap_v2(run_id, "exit", partial(self._witness_v2, previous=previous_now))
         for run_id, (escrow, admission, _) in self._services_v2.items():
             with self._tx():
                 origins = self._db.execute(
@@ -7291,7 +7295,7 @@ class ChallengeStore:
                 guard.revoke()
         return record
 
-    def _reap_v2(self, run_id: str, stage: str, reap: Callable[[str], None]) -> None:
+    def _reap_v2(self, run_id: str, stage: str, reap: Callable[[str], object]) -> None:
         """Run one reaper after its beacon committed. A failure is journaled (`exit-failed`, id
         `run:<stage>`) and stops neither the beacon route nor the reaper behind it."""
         try:
@@ -7315,13 +7319,8 @@ class ChallengeStore:
         skipped: its roster must stay complete (`verified_inputs_v2`).
         """
         escrow = self._services_v2[run_id][0]
-        with self._tx():
-            if self._db.execute(
-                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission' AND id='run'",
-                (run_id,),
-            ).fetchone():
-                return
-            self._witness_pause_v2(run_id, previous)
+        if not self._witness_v2(run_id, previous):
+            return
         with self._tx():
             now = self._now(self._db)
             pauses = self._pauses_v2(run_id)
@@ -7336,6 +7335,33 @@ class ChallengeStore:
             self._adopt_exclusions_v2(run_id, pauses, open_rounds)
             self._book_mismatches_v2(run_id, open_rounds, now)
             self._sweep_sanctions_v2(run_id, now)
+
+    def _unbuilt_runs_v2(self) -> list[str]:
+        """The v2 runs whose services this process has not built. A v1 run, or one whose manifest
+        the model now refuses, builds none and is never reaped."""
+        unbuilt = []
+        with self._lock:
+            for (run_id,) in self._db.execute("SELECT run_id FROM runs ORDER BY run_id").fetchall():
+                if run_id in self._services_v2:
+                    continue
+                try:
+                    self._run_v2(run_id)
+                except ChallengeError:
+                    continue
+                unbuilt.append(run_id)
+        return unbuilt
+
+    def _witness_v2(self, run_id: str, previous: int) -> bool:
+        """The pause witness of `_reap_exits_v2`, run alone for a run without services (see
+        `_store_beacon_v2`). False for a service run, which is neither witnessed nor reaped."""
+        with self._tx():
+            if self._db.execute(
+                "SELECT 1 FROM records_v2 WHERE run_id=? AND kind='service-admission' AND id='run'",
+                (run_id,),
+            ).fetchone():
+                return False
+            self._witness_pause_v2(run_id, previous)
+        return True
 
     def _witness_pause_v2(self, run_id: str, previous: int) -> None:
         """Record, once per pause, that the master refused its callers (`beacon-pause`, id the
