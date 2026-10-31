@@ -53,6 +53,7 @@ from hypertrain.protocol.messages_v2 import (
     ArtifactRef,
     EnvObservation,
     EscrowLock,
+    EscrowOperation,
     EscrowReceipt,
     EscrowRelease,
     Hex64,
@@ -72,6 +73,10 @@ SeizureReason = Literal["TRAINING_FRAUD", "NO_SHOW", "AUDIT_MISMATCH"]
 # always meet a window that has closed and the suspension tier could never be reached; ADR 0010
 # (Strike window) works the numbers out for the TEST and production policies.
 NO_SHOW_STRIKE_WINDOW_SCREENS = 4
+# New client escrow events (lock, transfer, release) one coldkey may add per
+# `work_screen_epoch_rounds` window (ADR 0014 Part 5.1, D85): twice the roster ceiling
+# (MAX_ROSTER_CEILING of the challenge store), a lock and a top-up for each miner of a whole roster.
+ESCROW_BURST = 2048
 
 
 def no_show_strike_window(work_screen_epoch_rounds: int) -> int:
@@ -1191,9 +1196,31 @@ class Admission:
                 raise AdmissionError("LOCK_OWNER_OR_KIND")
             if r.state == "BANNED":
                 raise AdmissionError("LOCK_BANNED")
+            self.meter_escrow(op, now=now)
             self.escrow.require_lock_capacity(op)  # before an outbox row nobody can apply
             self.store.enqueue_lock(op, env.signer)
         return self.store.reconcile_lock(op.operation_id).event_hash
+
+    def meter_escrow(self, op: EscrowOperation, *, now: int) -> None:
+        """Charge a new client escrow event to its owner's budget of the window (ADR 0014 5.1).
+
+        Called once the signature is verified and before any ledger work. A retry of an event the
+        ledger holds costs nothing; a refused event costs nothing either, because the charge is
+        written in the transaction of the request, which the refusal rolls back. Service
+        operations never come here.
+        """
+        if self.escrow.recorded(op):
+            return
+        window = self.policy.work_screen_epoch_rounds
+        # The rows of earlier windows go, through a range of the primary key (LIKE cannot use it).
+        self.store.db.execute(
+            "DELETE FROM admission_quota WHERE identity >= 'escrow:' AND identity < 'escrow;' "
+            "AND beacon < ?",
+            (now // window * window,),
+        )
+        self.store.quota(
+            f"escrow:{op.owner}:{now // window}", now, 0, ESCROW_BURST, code="ESCROW_QUOTA"
+        )
 
     def bond_required(self, locked: int) -> int:
         """The locked units an admission needs to be eligible (`locked` only matters when the

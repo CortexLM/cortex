@@ -23,7 +23,7 @@ import pytest
 
 from hypertrain.protocol.envelope_v2 import join_signing_message
 from hypertrain.protocol.hashing import sha256_hex
-from hypertrain.protocol.messages_v2 import EscrowTransfer
+from hypertrain.protocol.messages_v2 import EscrowLock, EscrowRelease, EscrowTransfer
 
 from .support import SERVICE_FIXTURE, load_fixture_module, service_world
 from .support_admission_http import (
@@ -465,23 +465,44 @@ def test_ad05_a_coldkey_has_one_non_active_admission_and_an_active_one_may_apply
     assert (third.status_code, detail(third)) == (409, "COLDKEY_PROBATION_EXISTS")
 
 
-# RL-01: a state-creating route other than join has a per-identity bound.
+# RL-01: a state-creating route other than join has a per-identity bound. ADR 0014 Part 5.1 (D85)
+# sizes it: 2,048 new escrow events per coldkey and `work_screen_epoch_rounds` window, twice the
+# roster ceiling, refused ESCROW_QUOTA.
+
+ESCROW_BURST = 2048
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="RL-01+ESC-02: one key can add ledger events through the escrow routes without any "
-    "bound per beacon (the lot designed a quota of 2,048 per coldkey and window, ADR 0014 5.1, "
-    "and did not land it; its size awaits Forge and is above the bound asked here) [candidate] "
-    "[fix-lot: decision (product choice pending)]",
-)
+def escrow_transfer(gate: Gate, owner, index: int, recipient: str, units: int = 1):
+    """The signed transfer number `index` of `owner`: `units` of its genesis origin."""
+    operation = EscrowTransfer(
+        operation_id=sha256_hex(f"{owner.ss58}-{index}".encode()),
+        owner=owner.ss58,
+        units=units,
+        origin_ids=[gate.network.origin_ids[service.COLD.index(owner)]],
+        admission_id=None,
+        dispute_id=None,
+        recipient=recipient,
+    )
+    return gate.client.post(
+        gate.url + "/escrow/transfer", json=gate.network.signed(owner, "EscrowTransfer", operation)
+    )
+
+
+def spend_the_burst(
+    gate: Gate, owner, recipient: str, start: int = 0, count: int = ESCROW_BURST
+) -> None:
+    """`owner` adds `count` new transfers of one unit, numbered from `start`."""
+    for index in range(start, start + count):
+        response = escrow_transfer(gate, owner, index, recipient)
+        precondition(response.status_code == 200, f"transfer {index} refused: {response.text}")
+
+
 def test_rl01_the_escrow_transfers_of_one_key_are_bounded_in_one_beacon(
     gate: Gate,
 ) -> None:
-    # Given: the largest burst the policy gives any identity-creating request (the repository
-    # states no bound for the escrow routes), a funded key and another owner the ledger knows
-    bound = gate.policy.ip_prefix_burst
+    """RL-01+ESC-02: one key adds at most ESCROW_BURST escrow events in one beacon."""
+    # Given: the burst of ADR 0014 Part 5.1, a funded key and another owner the ledger knows
+    bound = ESCROW_BURST
     owner, origin, recipient = service.COLD[0], gate.network.origin_ids[0], service.COLD[1]
 
     def transfer(index: int):
@@ -509,6 +530,100 @@ def test_rl01_the_escrow_transfers_of_one_key_are_bounded_in_one_beacon(
         served += 1
     # Then: the service refused before serving more than the burst
     assert served <= bound, f"{served} transfers were served in one beacon"
+    # And: it served the whole burst, and its refusal names the quota and changes nothing
+    assert served == bound, f"only {served} transfers were served in one beacon"
+    before = gate.world.db_digest()
+    again = transfer(bound + 1)
+    assert (again.status_code, detail(again)) == (409, "ESCROW_QUOTA")
+    assert gate.world.db_digest() == before
+
+
+def test_rl01_a_retry_or_a_refused_escrow_event_costs_no_quota(gate: Gate) -> None:
+    """RL-01: the quota counts new events the ledger accepted: a retry of one it holds and an
+    event it refuses cost nothing, and a retry still returns its receipt once the quota is spent."""
+    owner, recipient = service.COLD[0], service.COLD[1].ss58
+    # Given: one accepted transfer, then a retry of it and two refused ones
+    first = escrow_transfer(gate, owner, 0, recipient)
+    precondition(first.status_code == 200, f"the first transfer was refused: {first.text}")
+    retry = escrow_transfer(gate, owner, 0, recipient)
+    assert (retry.status_code, retry.json()) == (200, first.json())
+    unknown = escrow_transfer(gate, owner, 1, STRANGER.ss58)
+    assert (unknown.status_code, detail(unknown)) == (409, "UNKNOWN_RECIPIENT")
+    unfunded = escrow_transfer(gate, owner, 2, recipient, units=10**6)
+    assert (unfunded.status_code, detail(unfunded)) == (409, "UNFUNDED_OR_UNKNOWN_ORIGIN")
+    # When: the owner adds the rest of the burst
+    spend_the_burst(gate, owner, recipient, start=3, count=ESCROW_BURST - 1)
+    # Then: the burst counted the first transfer and the ones after the refusals, nothing else
+    over = escrow_transfer(gate, owner, 2 + ESCROW_BURST, recipient)
+    assert (over.status_code, detail(over)) == (409, "ESCROW_QUOTA")
+    late = escrow_transfer(gate, owner, 0, recipient)
+    assert (late.status_code, late.json()) == (200, first.json())
+
+
+def test_rl01_every_escrow_route_draws_on_the_budget_of_its_coldkey(gate: Gate) -> None:
+    """RL-01+ESC-02: locks, transfers and releases share one budget per coldkey, refused before
+    the ledger is asked; another coldkey keeps its own."""
+    owner, other, origin = service.COLD[0], service.COLD[1], gate.network.origin_ids[0]
+    admission_id = gate.admission_id(service.HOT[0], owner)
+
+    def lock(kind: str, label: str):
+        operation = EscrowLock(
+            operation_id=sha256_hex(label.encode()),
+            owner=owner.ss58,
+            units=100,
+            origin_ids=[origin],
+            admission_id=admission_id if kind == "LOCK_ADMISSION" else None,
+            dispute_id=None if kind == "LOCK_ADMISSION" else "ab" * 32,
+            kind=kind,
+        )
+        return gate.client.post(
+            gate.url + "/escrow/lock", json=gate.network.signed(owner, "EscrowLock", operation)
+        )
+
+    def release(key):
+        operation = EscrowRelease(
+            operation_id=sha256_hex(f"release-{key.ss58}".encode()),
+            owner=key.ss58,
+            units=1,
+            origin_ids=[gate.network.origin_ids[service.COLD.index(key)]],
+            admission_id=None,
+            dispute_id="ab" * 32,
+            lock_id="cd" * 32,
+            finality_hash="ef" * 32,
+            closed_dispute_root="ef" * 32,
+        )
+        return gate.client.post(
+            gate.url + "/escrow/release", json=gate.network.signed(key, "EscrowRelease", operation)
+        )
+
+    # Given: the owner spent its budget of the window on transfers
+    spend_the_burst(gate, owner, other.ss58)
+    # When / Then: each route of the owner is refused by the quota, the ledger never asked
+    assert detail(lock("LOCK_CONTEST", "contest")) == "ESCROW_QUOTA"
+    assert detail(lock("LOCK_ADMISSION", "admission")) == "ESCROW_QUOTA"
+    assert detail(release(owner)) == "ESCROW_QUOTA"
+    # And: another coldkey's events still reach the ledger
+    assert detail(release(other)) == "UNKNOWN_LOCK"
+    assert escrow_transfer(gate, other, 0, owner.ss58).status_code == 200
+
+
+def test_rl01_the_next_window_gives_a_new_budget_and_drops_the_spent_one(gate: Gate) -> None:
+    """RL-01: the budget is per `work_screen_epoch_rounds` window; a charge in a new window drops
+    the quota rows of the earlier windows, so the table holds one row per coldkey."""
+    owner, recipient = service.COLD[0], service.COLD[1].ss58
+    window = gate.policy.work_screen_epoch_rounds
+    rows = "identity >= ? AND identity < ?", (f"escrow:{owner.ss58}:", f"escrow:{owner.ss58};")
+    # Given: the owner spent its budget in the first window
+    spend_the_burst(gate, owner, recipient)
+    precondition(
+        detail(escrow_transfer(gate, owner, ESCROW_BURST, recipient)) == "ESCROW_QUOTA",
+        "the budget of the first window was not spent",
+    )
+    # When: the beacon reaches the next window
+    gate.push((gate.network.now // window + 1) * window)
+    # Then: a new transfer is served, and only the row of this window is left
+    assert escrow_transfer(gate, owner, ESCROW_BURST + 1, recipient).status_code == 200
+    assert gate.count("admission_quota", *rows) == 1
 
 
 # AD-02: a trial is finalized at most once. A real shadow trial, finalized by the service itself.

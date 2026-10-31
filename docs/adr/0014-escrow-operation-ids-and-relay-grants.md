@@ -271,6 +271,23 @@ F7b (IMPORTANT):
    uses a key-range predicate that can use the primary-key index (a default `LIKE` cannot). With the
    ledger-wide cap of Part 4.2 and this per-coldkey bucket, the events a window can add are bounded
    per coldkey and in total.
+   *Landed by `v3-ledger-small-fixes` (D85, 2026-10-31; invariant RL-01):* `Admission.meter_escrow`
+   charges the bucket `escrow:<owner>:<now // work_screen_epoch_rounds>` (rate 0, burst `ESCROW_BURST`
+   = 2,048, a constant of `challenge/admission.py`) through the quota helper of `join` and the rotation,
+   with refusal `ESCROW_QUOTA`. The client routes call it once the signature is verified and before any
+   ledger work: `Admission.lock` for an admission lock (after the owner, kind and ban checks, before
+   the capacity check and the outbox), `ChallengeStore.admission_v2` for a contest lock, a transfer and
+   a release. An event the ledger already holds, request for request (`EscrowV2.recorded`), is not
+   charged, so a retry returns its receipt even once the bucket is spent; a refused event costs
+   nothing because the charge rolls back with the request's transaction, and an `ESCROW_QUOTA`
+   refusal leaves the replay nonce free. The server operations (`release_settlement`, `slash`,
+   `burn_pending`, `pay`, `mature`, finalize, genesis, bootstrap) never reach it. Each charge first
+   deletes the escrow rows of earlier windows with `identity >= 'escrow:' AND identity < 'escrow;'`,
+   a range of the primary key, so the table holds one row per coldkey active in the window. Pins: the
+   RL-01 test of `tests/ledger_invariants/test_admission_http.py`, a strict xfail with a bound of 64
+   until now, which asks for the 2,048 above, and three RL-01 tests (a retry and a refusal cost nothing; every route draws on
+   the coldkey's budget, another coldkey keeps its own; the next window renews it and drops the old
+   row); mutants: `tests/ledger_invariants/mutants_closed_rl01.py`.
 2. A transfer must go to a recipient the ledger already knows (`UNKNOWN_RECIPIENT`): the quota alone
    is bypassed by hops to fresh keys (79 signers accepted once each, reproduced over HTTP [V]). No
    in-repo flow transfers to an unknown wallet. This is a product rule; see "Decisions for Forge".
@@ -437,18 +454,21 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
   `sources()` and the bundle move, which invalidates older qualification configs against the new tree
   as after every edit of `src/hypertrain`:
 
-  | Value | base `b3af43f2` | `UNKNOWN_RECIPIENT` |
-  | --- | --- | --- |
-  | `implementation_hash`, example pin (`avx2`/`none`) | `7af135ca…70be62` | unchanged |
-  | owned names / hashed files of `implementation_hash` | 48 / 12 | 48 / 12 |
-  | `ledger/escrow_v2.py` sha256 | `0abf9093…5465d5` | `60f95adc…cecd49` |
-  | `challenge/store.py` sha256 | `ad79e33b…9c1183` | unchanged |
-  | `sources()` map: files, canonical sha256 | 158, `ebc355a5…cbb890` | 158, `43d95edf…68b937` |
-  | `bundle()` | 2,785,280 bytes, `6b57d826…d7cd7b` | 2,785,280 bytes, `4225c90e…78542d` |
-  | example `run_id` / `reference_hash` | `aa39197d…ec8abd` / `2dd4eadc…d6cc5d` | unchanged |
+  | Value | base `b3af43f2` | `UNKNOWN_RECIPIENT` | `ESCROW_QUOTA` |
+  | --- | --- | --- | --- |
+  | `implementation_hash`, example pin (`avx2`/`none`) | `7af135ca…70be62` | unchanged | unchanged |
+  | owned names / hashed files of `implementation_hash` | 48 / 12 | 48 / 12 | 48 / 12 |
+  | `ledger/escrow_v2.py` sha256 | `0abf9093…5465d5` | `60f95adc…cecd49` | `8cde7408…a39df0` |
+  | `challenge/admission.py` sha256 | `0d7fa656…d67ead` | unchanged | `725b388d…cee9f5` |
+  | `challenge/store.py` sha256 | `ad79e33b…9c1183` | unchanged | `4d8ad965…9f378a` |
+  | `sources()` map: files, canonical sha256 | 158, `ebc355a5…cbb890` | 158, `43d95edf…68b937` | 158, `9a932217…85645f` |
+  | `bundle()` | 2,785,280 bytes, `6b57d826…d7cd7b` | 2,785,280 bytes, `4225c90e…78542d` | 2,785,280 bytes, `e2f8c7f6…07c1b8` |
+  | example `run_id` / `reference_hash` | `aa39197d…ec8abd` / `2dd4eadc…d6cc5d` | unchanged | unchanged |
 
   No escrow event, receipt or snapshot of an existing chain changes: a refused transfer writes nothing,
-  an accepted one has the preimage it had, and `verify()` replays no rule.
+  an accepted one has the preimage it had, and `verify()` replays no rule. The quota adds rows to
+  `admission_quota` only (no schema change); `ChallengeStore.admission_v2` and `Admission` are not
+  owned names.
 - Schema: no table, column or key changes. One partial index is created if absent.
 - Compatibility: new server events carry a new key and new hashes, new origins new ids; old chains verify
   unchanged and are forward-only for the first new server event (an older image then fails closed with an
@@ -474,8 +494,8 @@ ADM-06, ESC-05, TRN-03, TRN-05. ADM-03 belongs to `v3-executor-perf` (ADR 0012 P
 2. **F7b structural.** Approve (or refuse) the digest-in-preimage scheme with 1,000-event checkpoints.
 3. **Caps and quota.** 2,048 open admission locks per coldkey, 4,096 in the ledger, a minimum lock of a
    tenth of the funding floor, escrow burst 2,048 per window; the `UNKNOWN_RECIPIENT` rule.
-   *Decided by the Principal SN100 (D85, 2026-10-28):* the `UNKNOWN_RECIPIENT` rule lands before
-   dense-1B (Part 5.2).
+   *Decided by the Principal SN100 (D85, 2026-10-28):* the `UNKNOWN_RECIPIENT` rule (Part 5.2) and
+   the escrow burst of 2,048 per coldkey and window (Part 5.1) land before dense-1B.
 4. **Early-release chain** (Context): is a repair needed for a chain that already released a bond?
 
 Decided by the Principal SN100 (D52, D53, D72) and applied above, not asked: no header signatures, origin ids not

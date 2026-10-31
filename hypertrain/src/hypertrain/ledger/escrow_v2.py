@@ -998,6 +998,14 @@ class EscrowV2:
             raise EscrowError("OWNER_AUTHORITY")
         return self._existing(op.operation_id, op.model_dump_json(), server=server)
 
+    def recorded(self, op: EscrowOperation) -> bool:
+        """Whether the ledger holds the client event `op` already, request for request: its
+        retry, which returns the stored receipt."""
+        row = self.db.execute(
+            "SELECT request FROM escrow_events WHERE operation_id=?", (op.operation_id,)
+        ).fetchone()
+        return row is not None and row["request"] == op.model_dump_json()
+
     def lock(self, op: EscrowLock, *, signer: str) -> EscrowReceipt:
         with self.tx():
             old = self._owner_operation(op, signer, server=False)
