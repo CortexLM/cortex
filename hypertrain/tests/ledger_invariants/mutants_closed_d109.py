@@ -12,9 +12,10 @@ kept 1,000,000 units marked paid for an answer nobody was served. Two behaviours
   the old intermediate state (`test_gaps_weights.py`) asserts that the child keeps nothing. The same
   patch is one mutant per pin, because the runner stops at the first failing test of a mutant.
 
-The hardening lot (v3-weights-hardening) adds the mutants Lens left alive (L10, L5, L11) and a
-COMMIT that raises with the transaction open (N1). L10 is equivalent on every store the code can
-build (one run per store, one run per escrow ledger): its pin writes a second run by hand.
+The hardening lot (v3-weights-hardening) adds the mutants Lens left alive (L10, L5, L11), a COMMIT
+that raises with the transaction open (N1) and a v1 journal replay that must equal an unfailed
+answer. L10 is equivalent on every store the code can build (one run per store, one run per escrow
+ledger): its pin writes a second run by hand.
 
 What no test or mutant covers: the order in which the store locks are taken. Every path that holds
 two of them takes the root first and the children in load order (read in review, not pinned), and
@@ -47,6 +48,9 @@ BESIDE_A_LIVE_RUN = (
 )
 SKIP_PER_EPOCH = HOSTED + "test_a_skip_is_recorded_once_per_epoch_under_that_epoch"
 NOTHING_TO_PAY = HOSTED + "test_a_run_with_nothing_to_pay_is_not_built_by_the_weights_call"
+JOURNAL_REPLAY = (
+    HOSTED + "test_the_retry_of_a_journaled_epoch_is_the_answer_of_a_call_that_never_failed"
+)
 UNRETRIED = (
     "tests/ledger_invariants/test_weights_2.py::"
     "test_units_a_child_paid_while_the_root_failed_to_persist_reach_a_delivered_answer[False]"
@@ -166,6 +170,27 @@ MUTANTS = [
         "tests": [NOTHING_TO_PAY],
         "why": "the services of a run with nothing to pay are built: a retired one is booked as "
         "skipped, one that cannot be built refuses the epoch for every run (Lens L11).",
+    },
+    {
+        "id": "d109-hosted-journal-forgets-a-failed-epoch",
+        "invariants": ["WGT-15"],
+        "path": STORE,
+        "old": (
+            "        with ExitStack() as stack:\n"
+            "            return self._epoch_answer(stack, epoch, epoch_at, computed_at)\n"
+        ),
+        "new": (
+            "        try:\n"
+            "            with ExitStack() as stack:\n"
+            "                return self._epoch_answer(stack, epoch, epoch_at, computed_at)\n"
+            "        except BaseException:\n"
+            "            for c in self._children.values():\n"
+            "                c.ledger._engine.answers.pop(epoch, None)\n"
+            "            raise\n"
+        ),
+        "tests": [JOURNAL_REPLAY],
+        "why": "a hosted store's v1 journal forgets a failed epoch, so the retry journals it again "
+        "with its own clock and stores an answer an unfailed call never stores.",
     },
     {
         "id": "d109-failed-commit-left-open",

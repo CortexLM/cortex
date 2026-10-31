@@ -13,6 +13,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from hypertrain.challenge.store import ChallengeStore
 from hypertrain.data.store import LocalFSStore
 from hypertrain.ledger import FULL_SHARE_MASS, Params
 from hypertrain.ledger.escrow_v2 import Settlement
+from hypertrain.ledger.journal import parse_chain
 
 spec = importlib.util.spec_from_file_location(
     "v2_weights_hosted_escrow", Path(__file__).parents[1] / "ledger/test_escrow_v2.py"
@@ -402,3 +404,88 @@ def test_a_store_whose_commit_fails_is_left_outside_its_transaction(hosted) -> N
     assert answer["weights"] == {E.HOT.ss58: 3.0 * UNITS}
     assert [hosted.pays(name) for name in "abc"] == [1, 1, 1]
     assert a.healthy()
+
+
+# The v1 journal a failed epoch answer leaves behind is replayed as the unfailed answer (Lens,
+# "before PROD" (c)). `Ledger.get_weights` appends the epoch to each store's v1 journal file inside
+# the answer transaction: a rollback of SQLite does not unwrite it and the next call returns the
+# journaled bytes. The v1 answer is only the base the v2 pay fills (a store with no v1 event pays 0
+# and burns its 10^6); the escrow v2 PAY events say what was paid, `weights_runs` what was
+# answered. A twin that never failed is the reference.
+
+
+@pytest.fixture
+def twins(tmp_path, actual_reward, monkeypatch) -> Iterator[tuple[Hosted, Hosted]]:
+    """Two identical states: a live run in the root and one in child a, 1e6 matured units each."""
+    pair = []
+    for name in ("served", "failed"):
+        h = Hosted(tmp_path / name, actual_reward, monkeypatch)
+        h.host(h.root, "root")
+        h.host(h.child("a"), "a")
+        pair.append(h)
+    yield pair[0], pair[1]
+    for h in pair:
+        h.root.close()
+
+
+def stores(h: Hosted) -> dict[str, ChallengeStore]:
+    return {"root": h.root, **h.root._children}
+
+
+def journaled(store: ChallengeStore) -> list[int]:
+    """Epochs the store's v1 journal file answers, read back from disk."""
+    records = parse_chain(store.ledger.journal.path.read_bytes())
+    return [r["answer"]["epoch"] for r in records if r["kind"] == "weights"]
+
+
+def journals(h: Hosted) -> dict[str, bytes]:
+    return {name: s.ledger.journal.path.read_bytes() for name, s in stores(h).items()}
+
+
+def answers(h: Hosted) -> dict[str, list[tuple[int, bytes]]]:
+    return {
+        name: [
+            (r[0], bytes(r[1])) for r in s._db.execute("SELECT * FROM weights_runs ORDER BY epoch")
+        ]
+        for name, s in stores(h).items()
+    }
+
+
+def events(h: Hosted) -> dict[str, list[tuple[Any, ...]]]:
+    """Every escrow event, hash chain included: the same moves in the same order."""
+    return {
+        name: [tuple(r) for r in e.db.execute("SELECT * FROM escrow_events ORDER BY seq")]
+        for name, e in h.escrows.items()
+    }
+
+
+def test_the_retry_of_a_journaled_epoch_is_the_answer_of_a_call_that_never_failed(twins) -> None:
+    # Given: two identical hosted states; persisting the merged answer fails in one of them,
+    # after every store has journaled its v1 answer and paid inside the open transaction.
+    served, failed = twins
+    failed.root._db.execute(
+        "CREATE TRIGGER fail_persist BEFORE INSERT ON weights_runs "
+        "BEGIN SELECT RAISE(ABORT, 'crash'); END"
+    )
+    epoch_at = served.at(20)
+    # When: both are asked for the epoch at the same chain time and clock.
+    first = served.root.weights(0, epoch_at, 1)
+    with pytest.raises(sqlite3.IntegrityError):
+        failed.root.weights(0, epoch_at, 1)
+    # Then: the failed state keeps the epoch only in its v1 journals, the same bytes as the
+    # served twin's; SQLite holds no answer for it and no unit was paid.
+    assert {name: journaled(s) for name, s in stores(failed).items()} == {"root": [0], "a": [0]}
+    assert journals(failed) == journals(served)
+    assert answers(failed) == {"root": [], "a": []}
+    assert [(failed.paid(name), failed.pays(name)) for name in ("root", "a")] == [(0, 0)] * 2
+    # When: the cause is gone and the epoch is asked again, with a later clock.
+    failed.root._db.execute("DROP TRIGGER fail_persist")
+    retry = failed.root.weights(0, epoch_at, 2)
+    # Then: the retry serves the twin's bytes, every store holds the twin's answer and journal
+    # (nothing appended twice, nothing recomputed), and each unit is paid once by the same
+    # escrow events.
+    assert retry == first
+    assert answers(failed) == answers(served)
+    assert journals(failed) == journals(served)
+    assert events(failed) == events(served)
+    assert [(failed.paid(name), failed.pays(name)) for name in ("root", "a")] == [(UNITS, 1)] * 2
