@@ -307,9 +307,12 @@ F7b (IMPORTANT):
    `transfer`, whose one caller is the client route `POST .../escrow/transfer` (`ChallengeStore.admission_v2`).
    The lookup is `SELECT 1 FROM escrow_units WHERE owner=? LIMIT 1`, a scan of the primary-key index
    that stops at the first row of the owner [V `EXPLAIN QUERY PLAN`, SQLite 3.53]; no index is added
-   (point 1 of Part 4 forbids a general owner index), and it costs less than the snapshot of the whole
-   state each event already writes. Tests that handed units to a key nobody had issued anything to now
-   send them to an owner of their scenario's issuance (a genesis or bootstrap owner); where a production
+   (point 1 of Part 4 forbids a general owner index). For an accepted transfer it costs less than the
+   snapshot of the whole state the event writes; for a key the ledger does not know it reads the whole
+   index before the refusal, about what the `_move` scan of a refused transfer already read (2.1 against
+   2.6 ms at 100,000 rows, measured by the lot's review), and a refusal costs no quota.
+   Tests that handed units to a key nobody had issued anything to now send them to an owner of their
+   scenario's issuance (a genesis or bootstrap owner); where a production
    round issues to its earner only, no transfer between two owners exists, and the client event that
    squats a server id is the earner's admission lock (`tests/ledger/test_escrow_key_spaces_v2.py`,
    `tests/challenge/test_escrow_server_ids_v2.py`). Pins: `tests/ledger_invariants/test_escrow_laws_2.py`
