@@ -31,8 +31,10 @@ before staged rounds is witnessed by the next free push only, the oldest such vi
 publication, and an empty stage costs no SQLite transaction. Lens's B12 (the stage entry dropped by
 round instead of by identity) is equivalent: a round re-staged while it is written is already in the
 beacon table, which only grows and is written with INSERT OR IGNORE, so dropping it loses nothing.
-The pause-witness lot adds one: a push witnesses the pause of a run whose services no request has
-built since a restart (TEST 31/10, no `beacon-pause` record after a 26 s pusher pause).
+The pause-witness lot adds three: a push witnesses the pause of a run whose services no request has
+built since a restart (TEST 31/10, no `beacon-pause` record after a 26 s pusher pause), a stored
+manifest that cannot be read is journaled instead of failing the push (Lens m1 of d8b2a50), and a
+retired run is skipped without a journal.
 
 Run from hypertrain/: .venv/bin/python scripts/check_ledger_invariant_mutants.py --only <ids>
 """
@@ -62,9 +64,16 @@ OLDEST_VIEW = (
 )
 EMPTY_STAGE = BEACON + "test_a_transaction_with_nothing_staged_opens_one_sqlite_transaction"
 RESTARTED = BEACON + "test_a_restarted_master_witnesses_the_pause_its_head_first_catch_up_shows"
-UNBUILT = (
-    "        for run_id in self._unbuilt_runs_v2():\n"
-    '            self._reap_v2(run_id, "exit", partial(self._witness_v2, previous=previous_now))\n'
+UNREADABLE = BEACON + "test_a_run_whose_manifest_cannot_be_read_stops_no_push_and_no_other_witness"
+UNBUILT_REAP = (
+    '            self._reap_v2(run_id, "exit", partial(self._witness_unbuilt_v2, '
+    "previous=previous_now))\n"
+)
+UNBUILT = "        for run_id in self._unbuilt_runs_v2():\n" + UNBUILT_REAP
+RETIRED_SKIP = (
+    "            except ChallengeError:\n"
+    "                return\n"
+    "        self._witness_v2(run_id, previous)\n"
 )
 
 REPLAY = (
@@ -192,6 +201,31 @@ MUTANTS = [
             "A push witnesses pauses only for the runs whose services this process built, so after "
             "a restart a pause no request saw is never recorded and the reaper built later blames "
             "the members it held silent on the miners."
+        ),
+    },
+    {
+        "id": "closed-lockrel-an-unreadable-manifest-stops-the-push",
+        "invariants": ["ADR0011-P8", "BPWE-2"],
+        "path": STORE,
+        "old": UNBUILT_REAP,
+        "new": "            self._witness_unbuilt_v2(run_id, previous_now)\n",
+        "tests": [UNREADABLE + "[malformed]"],
+        "why": (
+            "The witness of a run without services runs outside `_reap_v2`: a stored manifest the "
+            "loader refuses makes the push answer 500, and the root forwards the round to no "
+            "child (Lens m1 of d8b2a50)."
+        ),
+    },
+    {
+        "id": "closed-lockrel-a-retired-run-is-journaled-on-every-push",
+        "invariants": ["ADR0011-P8", "BPWE-2"],
+        "path": STORE,
+        "old": RETIRED_SKIP,
+        "new": RETIRED_SKIP.replace("return", "raise"),
+        "tests": [UNREADABLE + "[retired]"],
+        "why": (
+            "A run whose manifest the model retired, which can never build services nor be "
+            "reaped, is journaled as a failing reaper (`exit-failed`) by the pushes."
         ),
     },
 ]

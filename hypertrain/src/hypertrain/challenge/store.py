@@ -981,7 +981,7 @@ class ChallengeStore:
         # No reaper runs for these until a request builds their services (none are after a
         # restart), and the one that runs then must read the pauses their callers met.
         for run_id in self._unbuilt_runs_v2():
-            self._reap_v2(run_id, "exit", partial(self._witness_v2, previous=previous_now))
+            self._reap_v2(run_id, "exit", partial(self._witness_unbuilt_v2, previous=previous_now))
         for run_id, (escrow, admission, _) in self._services_v2.items():
             with self._tx():
                 origins = self._db.execute(
@@ -7337,19 +7337,21 @@ class ChallengeStore:
             self._sweep_sanctions_v2(run_id, now)
 
     def _unbuilt_runs_v2(self) -> list[str]:
-        """The v2 runs whose services this process has not built. A v1 run, or one whose manifest
-        the model now refuses, builds none and is never reaped."""
-        unbuilt = []
+        """The runs of this store whose services this process has not built."""
         with self._lock:
-            for (run_id,) in self._db.execute("SELECT run_id FROM runs ORDER BY run_id").fetchall():
-                if run_id in self._services_v2:
-                    continue
-                try:
-                    self._run_v2(run_id)
-                except ChallengeError:
-                    continue
-                unbuilt.append(run_id)
-        return unbuilt
+            rows = self._db.execute("SELECT run_id FROM runs ORDER BY run_id").fetchall()
+            return [row[0] for row in rows if row[0] not in self._services_v2]
+
+    def _witness_unbuilt_v2(self, run_id: str, previous: int) -> None:
+        """`_witness_v2` of a run without services. A v1 run, or one whose manifest the model now
+        refuses, builds none and is never reaped; a manifest that cannot be read raises, and
+        `_reap_v2` journals it."""
+        with self._lock:
+            try:
+                self._run_v2(run_id)
+            except ChallengeError:
+                return
+        self._witness_v2(run_id, previous)
 
     def _witness_v2(self, run_id: str, previous: int) -> bool:
         """The pause witness of `_reap_exits_v2`, run alone for a run without services (see

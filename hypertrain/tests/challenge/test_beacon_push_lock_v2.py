@@ -21,7 +21,6 @@ from contextlib import contextmanager
 import pytest
 
 from hypertrain.challenge.store import ChallengeError, ChallengeStore
-from hypertrain.protocol.envelope import MalformedEnvelope
 
 from .child_run_fixture_v2 import child_network  # noqa: F401  (pytest fixture import)
 from .test_service_network_v2 import fixture_beacon
@@ -487,14 +486,7 @@ def unreadable(manifest: str, case: str) -> str:
 @pytest.mark.parametrize(
     "case",
     [
-        pytest.param(
-            "malformed",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=MalformedEnvelope,
-                reason="_unbuilt_runs_v2 loads the manifest outside _reap_v2 (Lens m1, d8b2a50)",
-            ),
-        ),
+        "malformed",
         "retired",
     ],
 )
