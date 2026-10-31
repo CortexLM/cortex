@@ -567,6 +567,9 @@ class ChallengeStore:
         # and a child store takes its parent's.
         self.enforce_audit_mismatch = enforce_audit_mismatch
         self._services_v2: dict[str, tuple[Any, Any, Any]] = {}
+        # The beacon (genesis, period) of each run witnessed without its services, None for a run
+        # never reaped: read once, since a run id is the digest of its manifest.
+        self._beacon_clocks_v2: dict[str, tuple[int, int] | None] = {}
         self.beacon_arrived = threading.Condition()
         self._lease_guards_v2: dict[str, Any] = {}
         self._reference_flights_v2: dict[tuple[str, str, bool], Future[str]] = {}
@@ -7343,15 +7346,24 @@ class ChallengeStore:
             return [row[0] for row in rows if row[0] not in self._services_v2]
 
     def _witness_unbuilt_v2(self, run_id: str, previous: int) -> None:
-        """`_witness_v2` of a run without services. A v1 run, or one whose manifest the model now
+        """`_witness_v2` of a run without services, once its view lags the clock: a push on time
+        reads no manifest and opens no transaction. A v1 run, or one whose manifest the model now
         refuses, builds none and is never reaped; a manifest that cannot be read raises, and
         `_reap_v2` journals it."""
-        with self._lock:
-            try:
-                self._run_v2(run_id)
-            except ChallengeError:
-                return
-        self._witness_v2(run_id, previous)
+        if run_id not in self._beacon_clocks_v2:
+            with self._lock:
+                try:
+                    beacon = self._run_v2(run_id).training.beacon
+                except ChallengeError:
+                    self._beacon_clocks_v2[run_id] = None
+                else:
+                    self._beacon_clocks_v2[run_id] = (beacon.genesis_time, beacon.period)
+        clock = self._beacon_clocks_v2[run_id]
+        if clock is None:
+            return
+        genesis, period = clock
+        if pause_span(previous, (int(self.clock()) - genesis) // period + 1) is not None:
+            self._witness_v2(run_id, previous)
 
     def _witness_v2(self, run_id: str, previous: int) -> bool:
         """The pause witness of `_reap_exits_v2`, run alone for a run without services (see

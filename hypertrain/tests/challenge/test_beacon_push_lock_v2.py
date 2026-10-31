@@ -529,11 +529,6 @@ def test_a_run_whose_manifest_cannot_be_read_stops_no_push_and_no_other_witness(
         reopened.close()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="each push reads the manifest and opens a witness transaction (Lens m2, d8b2a50)",
-)
 def test_a_restarted_store_pushed_on_time_reads_no_manifest_and_no_record(
     child_network,  # noqa: F811
 ):

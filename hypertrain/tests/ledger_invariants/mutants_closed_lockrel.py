@@ -31,10 +31,11 @@ before staged rounds is witnessed by the next free push only, the oldest such vi
 publication, and an empty stage costs no SQLite transaction. Lens's B12 (the stage entry dropped by
 round instead of by identity) is equivalent: a round re-staged while it is written is already in the
 beacon table, which only grows and is written with INSERT OR IGNORE, so dropping it loses nothing.
-The pause-witness lot adds three: a push witnesses the pause of a run whose services no request has
+The pause-witness lot adds five: a push witnesses the pause of a run whose services no request has
 built since a restart (TEST 31/10, no `beacon-pause` record after a 26 s pusher pause), a stored
-manifest that cannot be read is journaled instead of failing the push (Lens m1 of d8b2a50), and a
-retired run is skipped without a journal.
+manifest that cannot be read is journaled instead of failing the push (Lens m1 of d8b2a50), a
+retired run is skipped without a journal, and, cost only (Lens m2), the run's beacon is read once
+and a push on time opens no witness transaction.
 
 Run from hypertrain/: .venv/bin/python scripts/check_ledger_invariant_mutants.py --only <ids>
 """
@@ -71,10 +72,14 @@ UNBUILT_REAP = (
 )
 UNBUILT = "        for run_id in self._unbuilt_runs_v2():\n" + UNBUILT_REAP
 RETIRED_SKIP = (
-    "            except ChallengeError:\n"
-    "                return\n"
-    "        self._witness_v2(run_id, previous)\n"
+    "                except ChallengeError:\n"
+    "                    self._beacon_clocks_v2[run_id] = None\n"
 )
+CLOCK_READ = "        if run_id not in self._beacon_clocks_v2:\n"
+LAG_GATE = (
+    "        if pause_span(previous, (int(self.clock()) - genesis) // period + 1) is not None:\n"
+)
+ON_TIME = BEACON + "test_a_restarted_store_pushed_on_time_reads_no_manifest_and_no_record"
 
 REPLAY = (
     "                result = admission.run_reference(\n"
@@ -221,11 +226,35 @@ MUTANTS = [
         "invariants": ["ADR0011-P8", "BPWE-2"],
         "path": STORE,
         "old": RETIRED_SKIP,
-        "new": RETIRED_SKIP.replace("return", "raise"),
+        "new": "                except ChallengeError:\n                    raise\n",
         "tests": [UNREADABLE + "[retired]"],
         "why": (
             "A run whose manifest the model retired, which can never build services nor be "
             "reaped, is journaled as a failing reaper (`exit-failed`) by the pushes."
+        ),
+    },
+    {
+        "id": "closed-lockrel-every-push-reads-the-manifest-of-an-unbuilt-run",
+        "invariants": ["ADR0011-P8", "BPWE-3"],
+        "path": STORE,
+        "old": CLOCK_READ,
+        "new": "        if True:\n",
+        "tests": [ON_TIME],
+        "why": (
+            "The beacon of a run without services is read from its manifest on every push, not "
+            "once per process (Lens m2 of d8b2a50, cost only)."
+        ),
+    },
+    {
+        "id": "closed-lockrel-a-push-on-time-opens-the-witness-of-an-unbuilt-run",
+        "invariants": ["ADR0011-P8", "BPWE-3"],
+        "path": STORE,
+        "old": LAG_GATE,
+        "new": "        if True:\n",
+        "tests": [ON_TIME],
+        "why": (
+            "A push whose view does not lag the clock still opens a transaction and reads the "
+            "run's records to witness a pause it cannot show (Lens m2 of d8b2a50, cost only)."
         ),
     },
 ]
