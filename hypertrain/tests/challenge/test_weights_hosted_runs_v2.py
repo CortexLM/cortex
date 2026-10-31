@@ -106,6 +106,34 @@ class Hosted:
         )
         self.escrows[name] = escrow
 
+    def retired_beside(self, store: ChallengeStore) -> str:
+        """A retired run in `store` next to the live run `host` put there. Only a test can write
+        it: a store's first run stays in it, the next one gets a store of its own, and an escrow
+        ledger refuses a second run, so this run has none."""
+        manifest = self.setup.manifest.body()
+        del manifest["training"]["reference_spec"]["env"]["pinned"]
+        run_id = "0" * 64  # sorted before the live run
+        store._db.execute(
+            "INSERT INTO runs VALUES(?,?,?,'created',NULL)", (run_id, json.dumps(manifest), "{}")
+        )
+        live, real = store._services, ChallengeStore._services.__get__(store)
+        self.monkeypatch.setattr(store, "_services", lambda r: real(r) if r == run_id else live(r))
+        return run_id
+
+    def idle(self, store: ChallengeStore, *, retired: bool, ledger: bool) -> None:
+        """A run in `store` that never finalized a reward, so it owes no v2 weight; `ledger`
+        opens its escrow first. Its services cannot be built: a retired manifest is refused,
+        and the store holds no policy object for a current one."""
+        if ledger:
+            E.ledger(self.setup, store._db)
+        manifest = self.setup.manifest.body()
+        if retired:
+            del manifest["training"]["reference_spec"]["env"]["pinned"]
+        store._db.execute(
+            "INSERT INTO runs VALUES(?,?,?,'created',NULL)",
+            (self.setup.manifest.run_id(), json.dumps(manifest), "{}"),
+        )
+
     def child(self, name: str) -> ChallengeStore:
         child = self.root._open_child(self.root.state_dir / "runs" / name)
         self.root._children[name] = child
@@ -277,3 +305,67 @@ def test_a_commit_that_fails_halfway_is_repaired_by_the_replay_and_pays_each_onc
     assert answer["weights"] == {E.HOT.ss58: 3.0 * UNITS}
     assert [hosted.pays(name) for name in "abc"] == [1, 1, 1]
     assert weights_runs(hosted.root) == [0]
+
+
+def skipped(store: ChallengeStore) -> list[tuple[str, str, int]]:
+    """(run, id, epoch) of every `weights-skipped` record of `store`."""
+    rows = store._db.execute(
+        "SELECT run_id, id, data FROM records_v2 WHERE kind = ? ORDER BY run_id, id",
+        ("weights-skipped",),
+    )
+    return [(r[0], r[1], json.loads(r[2])["epoch"]) for r in rows]
+
+
+@pytest.mark.parametrize("where", ["root", "child"])
+def test_a_retired_run_beside_a_live_one_in_the_same_store_does_not_stop_its_pay(
+    hosted, where
+) -> None:
+    # Given: one store holds a live run with 1e6 payable units and a retired run beside it,
+    # and the root hosts a healthy child too.
+    store = hosted.root if where == "root" else hosted.child("b")
+    hosted.host(store, "live")
+    retired = hosted.retired_beside(store)
+    hosted.host(hosted.child("a"), "a")
+    # When
+    answer = json.loads(hosted.root.weights(0, hosted.at(20), 1))
+    # Then: the live run is paid in full beside the child; only the retired run is skipped.
+    assert answer["weights"] == {E.HOT.ss58: 2.0 * UNITS}
+    assert (hosted.paid("live"), hosted.paid("a")) == (UNITS, UNITS)
+    assert skipped(store) == [(retired, "0", 0)]
+
+
+def test_a_skip_is_recorded_once_per_epoch_under_that_epoch(three_children) -> None:
+    # Given: the retired child b between two healthy ones.
+    h = three_children
+    # When: epoch 0 is asked, asked again, then epoch 1 is asked.
+    first = h.root.weights(0, h.at(20), 1)
+    again = h.root.weights(0, h.at(20), 2)
+    h.root.weights(1, h.at(21), 3)
+    # Then: the second ask is served, not refused, and wrote nothing; each epoch has one skip
+    # under its own id, so a later epoch never overwrites an earlier one.
+    assert again == first
+    assert skipped(h.root._children["b"]) == [
+        (h.setup.manifest.run_id(), "0", 0),
+        (h.setup.manifest.run_id(), "1", 1),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("retired", "ledger"),
+    [(True, False), (True, True), (False, False)],
+    ids=["retired-no-ledger", "retired-nothing-finalized", "unbuildable-no-ledger"],
+)
+def test_a_run_with_nothing_to_pay_is_not_built_by_the_weights_call(
+    hosted, retired, ledger
+) -> None:
+    # Given: a child whose run never finalized a reward and whose services cannot be built
+    # (S21: 7b0e20e5, 9981d976 and the root's 42f68b45), and a healthy child.
+    idle = hosted.child("b")
+    hosted.idle(idle, retired=retired, ledger=ledger)
+    hosted.host(hosted.child("a"), "a")
+    # When
+    answer = json.loads(hosted.root.weights(0, hosted.at(20), 1))
+    # Then: the epoch is answered and pays the healthy child; the idle run owes nothing, so it
+    # is neither built nor booked as skipped.
+    assert answer["weights"] == {E.HOT.ss58: 1.0 * UNITS}
+    assert skipped(idle) == []
