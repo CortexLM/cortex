@@ -150,7 +150,11 @@
 
 - No CUDA run; the production `T`, spans and worker count (the manifest is not in Git) [?].
 - The reaper visits only runs instantiated in the process that handles the push; after a restart the
-  first route that calls `_services` re-arms it, as for lease expiry [?].
+  first route that calls `_services` re-arms it, as for lease expiry. TEST 31/10 showed no route did
+  for 6.5 h (pusher, auditor lease polls and relay lifecycle never call it): two pusher pauses left
+  no `beacon-pause` [V]. Since then every push witnesses each v2 run without services; maturation,
+  push-time lease expiry, dispute closing and exit and trial reaping still wait for that first call
+  (`open_round_v2` makes one; `lease_v2` expires leases itself) [V].
 - A DET-01b contest end to end, and a contest with an auditor-side responder (none exists) [H].
 - The `ABANDONMENT_GRACE` multiplier; the e2e in CI (the `test-slow` job is skipped on `v3-*` PRs).
 

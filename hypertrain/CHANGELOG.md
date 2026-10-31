@@ -358,6 +358,17 @@
   `docs/adr/0011-audit-integrity.md` (Part 9, decision 12) at the monorepo root.
 
 ### Fixed
+- A restarted master witnesses the beacon pauses of its runs again (TEST 31/10, runs 0ef600b4 and
+  f3901a09 in child stores: the challenge container was recreated at 04:43Z by an image swap, and
+  pusher pauses of 26 s and 30 s at 07:11Z and 07:17Z left no `beacon-pause` record in any store).
+  `push_beacon` ran the pause witness only for runs whose services the process had built, and the
+  pusher, the auditors' lease polls and the relay lifecycle never build them: the reaper a later
+  request builds read those windows as served and blamed the silent members as miners. Every push
+  now witnesses each v2 run without services when its view lags the clock (the run's beacon is
+  read once, a push on time costs one `SELECT`), inside `_reap_v2`: a stored manifest that cannot
+  be read is journaled (`exit-failed`, `run:exit`) and stops neither the push nor the other runs,
+  and a retired run is skipped. Maturation, push-time lease expiry, dispute closing and exit and
+  trial reaping still wait for the first request that builds the services.
 - A store transaction (`ChallengeStore._tx`) whose COMMIT raises with the transaction still open
   (SQLITE_BUSY, a deferred constraint) is now rolled back before the error is raised (Lens N1,
   HW4-M4; the strict xfail FIN-25 + D-FIN-11 is flipped). The store used to keep the open transaction
