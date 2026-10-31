@@ -358,6 +358,11 @@
   `docs/adr/0011-audit-integrity.md` (Part 9, decision 12) at the monorepo root.
 
 ### Fixed
+- A store transaction (`ChallengeStore._tx`) whose COMMIT raises with the transaction still open
+  (SQLITE_BUSY, a deferred constraint) is now rolled back before the error is raised (Lens N1,
+  HW4-M4; the strict xfail FIN-25 + D-FIN-11 is flipped). The store used to keep the open transaction
+  and refuse every later `BEGIN IMMEDIATE` until a restart, so the replay that repairs an epoch
+  answer committed by some hosted stores only could not run on the one that failed.
 - A beacon round no longer waits for a long transaction of the child store that hosts a run
   (S20/S21, run 0ef600b4: during `open`, 73 s, the pusher's POST timed out three times, its
   `pending` list grew to 11 and the child's view fell up to 15 rounds behind, though the root had

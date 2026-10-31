@@ -384,11 +384,6 @@ def dangling_at_commit(store: ChallengeStore) -> None:
     """)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="_tx: no ROLLBACK after a failed COMMIT (Lens N1, HW4-M4)",
-)
 def test_a_store_whose_commit_fails_is_left_outside_its_transaction(hosted) -> None:
     # Given: three healthy children; a's answer COMMIT fails and SQLite keeps the transaction.
     for name in "abc":

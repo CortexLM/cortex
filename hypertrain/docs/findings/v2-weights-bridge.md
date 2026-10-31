@@ -33,7 +33,8 @@ the transaction that writes `weights_runs`; the weight goes to the origin's hotk
   A COMMIT that fails after another store committed leaves those stores holding the epoch and
   their paid units, the call fails and the root holds nothing: a repeat of the same epoch is not
   legacy (`weights_runs_from`), reads their stored answers and merges them again, so their units
-  are emitted once, but only if somebody asks that epoch again.
+  are emitted once, but only if somebody asks that epoch again. The store whose COMMIT failed
+  rolls back, even when SQLite kept the transaction open (`_tx`), so it can answer that repeat.
 - A hosted run whose stored manifest the model now refuses (`RunRetired`, 409
   `RUN_MANIFEST_RETIRED`, e.g. a manifest without the env pin) is left out of the escrows its store
   pays: its units stay `available`. Such a run is not expected to be served again (ADR 0011: a run

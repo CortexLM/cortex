@@ -631,7 +631,14 @@ class ChallengeStore:
                 self._db.execute("ROLLBACK")
                 raise
             else:
-                self._db.execute("COMMIT")
+                try:
+                    self._db.execute("COMMIT")
+                except BaseException:
+                    # A COMMIT that raised may leave the transaction open (SQLITE_BUSY, a deferred
+                    # constraint): every later BEGIN would be refused until a restart.
+                    if self._db.in_transaction:
+                        self._db.execute("ROLLBACK")
+                    raise
             finally:
                 if outermost:
                     self._publish_closed_v2()

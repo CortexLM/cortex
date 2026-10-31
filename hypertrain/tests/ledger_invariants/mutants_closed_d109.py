@@ -33,6 +33,11 @@ CHILD_FAILS = HOSTED + "test_a_child_that_fails_leaves_the_children_asked_before
 HALF_COMMIT = (
     HOSTED + "test_a_commit_that_fails_halfway_is_repaired_by_the_replay_and_pays_each_once"
 )
+COMMIT_LEFT_OPEN = HOSTED + "test_a_store_whose_commit_fails_is_left_outside_its_transaction"
+COMMIT_FAILS = (
+    "tests/ledger_invariants/test_finality.py::"
+    "test_a_transaction_whose_commit_fails_is_rolled_back_and_closed"
+)
 UNRETRIED = (
     "tests/ledger_invariants/test_weights_2.py::"
     "test_units_a_child_paid_while_the_root_failed_to_persist_reach_a_delivered_answer[False]"
@@ -124,5 +129,31 @@ MUTANTS = [
         "tests": [HALF_COMMIT],
         "why": "the root commits before the hosted stores: a hosted commit that fails leaves the "
         "root with an answer that pays units the hosted store never kept.",
+    },
+    {
+        "id": "d109-failed-commit-left-open",
+        "invariants": ["WGT-15", "FIN-25"],
+        "path": STORE,
+        "old": (
+            "                    if self._db.in_transaction:\n"
+            '                        self._db.execute("ROLLBACK")\n'
+        ),
+        "new": "                    pass\n",
+        "tests": [COMMIT_LEFT_OPEN],
+        "why": "a COMMIT that raised leaves the store inside its transaction: it refuses every "
+        "later BEGIN, so the replay that repairs a half-committed epoch cannot run on it.",
+    },
+    {
+        "id": "d109-failed-commit-left-open-flips-fin25",
+        "invariants": ["WGT-15", "FIN-25"],
+        "path": STORE,
+        "old": (
+            "                    if self._db.in_transaction:\n"
+            '                        self._db.execute("ROLLBACK")\n'
+        ),
+        "new": "                    pass\n",
+        "tests": [COMMIT_FAILS],
+        "why": "the same patch for the FIN-25 + D-FIN-11 pin the fix flipped: the connection is "
+        "left inside a transaction whose COMMIT raised.",
     },
 ]
