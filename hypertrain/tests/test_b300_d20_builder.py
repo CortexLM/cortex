@@ -24,6 +24,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -37,13 +38,18 @@ from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.keys import Keypair
 from hypertrain.protocol.messages import f32hex
 from hypertrain.protocol.messages_v2 import (
+    PART_BYTES,
+    AdmissionPolicyV2,
     AuditPolicyV2,
     EconomicsPolicyV2,
+    PartIndexV1,
     RunManifestV2,
     reaudit_rounds_for,
 )
 from hypertrain.trainer.config import ModelConfig
 from hypertrain.trainer.model import param_shapes
+from ledger_invariants.support import SERVICE_FIXTURE, load_fixture_module, service_world
+from ledger_invariants.support_http_auth import put_object
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER = ROOT / "scripts/b300/d20/build_test_manifest.sh"
@@ -753,6 +759,248 @@ def test_an_audit_gap_the_run_cannot_take_is_refused_and_leaves_nothing(
 
     assert run.returncode != 0 and named in run.stderr
     assert not out.exists() and uv_calls(host) == stages
+
+
+def admission_policy(out: Path) -> AdmissionPolicyV2:
+    """The admission policy object the built run pins, as the master's run creation reads it."""
+    manifest, _ = accepted_manifest(out)
+    raw = LocalFSStore(out / "state/objects").get(manifest.network.admission_policy_hash)
+    policy = AdmissionPolicyV2.model_validate_json(raw)
+    assert policy.digest() == manifest.network.admission_policy_hash
+    return policy
+
+
+@pytest.mark.parametrize(
+    ("knob", "field", "value", "objects"),
+    [
+        ("HT_D20_MAX_REFS", "max_refs", 8, 8 * (8192 + 1)),
+        ("HT_D20_MAX_PARTS", "max_parts", 512, 512 * (512 + 1)),
+    ],
+    ids=["max_refs", "max_parts"],
+)
+def test_an_artifact_knob_signs_its_bound_and_moves_only_the_admission_policy(
+    host, tmp_path, knob, field, value, objects
+):
+    # TRN-05 (D137): the knob sets one optional field of ArtifactLimits, the other keeps the
+    # protocol bound. Against the build without it (same seeds, image and expiry) only the
+    # admission policy moves, and with it the network block, the manifest and so the run id.
+    args = {"exp_round": "34310319"}
+    plain, knobbed = tmp_path / "plain", tmp_path / "knob"
+    first = build(host, plain, **args)
+    assert first.returncode == 0, first.stderr
+    (knobbed / "secrets").mkdir(parents=True, mode=0o700)
+    for seed in seed_files(plain / "secrets"):
+        shutil.copy(seed, knobbed / "secrets" / seed.name)
+
+    run = build(host, knobbed, env={knob: str(value)}, **args)
+
+    assert run.returncode == 0, run.stderr
+    limits = admission_policy(knobbed).artifact_limits
+    assert limits.body() == {**admission_policy(plain).artifact_limits.body(), field: value}
+    assert limits.upload_budget() == (objects, objects << 20)
+    policies = [json.loads((out / "inputs/policies.json").read_bytes()) for out in (plain, knobbed)]
+    assert policies[1]["admission"]["artifact_limits"].pop(field) == value
+    assert policies[0] == policies[1]
+    manifests = [json.loads((out / "out/manifest.json").read_bytes()) for out in (plain, knobbed)]
+    assert manifests[0]["training"] == manifests[1]["training"]
+    networks = [m["network"] for m in manifests]
+    assert {k for k in networks[0] if networks[0][k] != networks[1][k]} == {"admission_policy_hash"}
+    assert accepted_manifest(plain)[0].run_id() != accepted_manifest(knobbed)[0].run_id()
+    report = json.loads(run.stdout[run.stdout.rindex("\n{\n") + 1 :])
+    assert report["artifact_limits"] == {
+        "max_refs": None,
+        "max_parts": None,
+        field: value,
+        "upload_objects": objects,
+        "upload_bytes": objects << 20,
+    }
+    assert all(report["checks"].values()) and "artifact_limits_of_the_knobs" in report["checks"]
+
+
+def test_the_artifact_knobs_take_the_largest_bounds_the_protocol_signs(host, tmp_path):
+    # 512 references of 8,192 parts are the protocol's own bounds: the budget is the default one,
+    # but both fields are signed.
+    out = tmp_path / "out"
+
+    run = build(host, out, env={"HT_D20_MAX_REFS": "512", "HT_D20_MAX_PARTS": "8192"})
+
+    assert run.returncode == 0, run.stderr
+    limits = admission_policy(out).artifact_limits
+    assert (limits.max_refs, limits.max_parts) == (512, 8192)
+    assert limits.upload_budget() == (512 * 8193, 512 * 8193 << 20)
+
+
+@pytest.mark.parametrize(
+    ("env", "named", "stages"),
+    [
+        ({"HT_D20_MAX_REFS": "0"}, "HT_D20_MAX_REFS must be a whole number from 1", 0),
+        ({"HT_D20_MAX_REFS": "08"}, "HT_D20_MAX_REFS must be a whole number from 1", 0),
+        ({"HT_D20_MAX_PARTS": "-512"}, "HT_D20_MAX_PARTS must be a whole number from 1", 0),
+        ({"HT_D20_MAX_PARTS": "512 "}, "HT_D20_MAX_PARTS must be a whole number from 1", 0),
+        ({"HT_D20_MAX_REFS": "513"}, "HT_D20_MAX_REFS=513 is above 512", 1),
+        ({"HT_D20_MAX_PARTS": "8193"}, "HT_D20_MAX_PARTS=8193 is above 8192", 1),
+        ({"HT_D20_MAX_PARTS": "1" + "0" * 30}, "is above 8192", 1),
+    ],
+    ids=["zero", "leading_zero", "negative", "trailing_space", "refs_513", "parts_8193", "huge"],
+)
+def test_an_artifact_bound_the_protocol_cannot_sign_is_refused_and_leaves_nothing(
+    host, tmp_path, env, named, stages
+):
+    out = tmp_path / "out"
+
+    run = build(host, out, env=env)
+
+    assert run.returncode != 0 and named in run.stderr
+    assert not out.exists() and uv_calls(host) == stages
+
+
+# Run 0ef600b4 (S20): its own manifest and policy objects, kept for the s100 golden tests, and
+# the inputs its real build took (REPORT-S20.md: dense-0.03b, 133 s, gap 400, six coldkeys).
+S20 = ROOT / "tests/ops/s100/fixtures/0ef600b4"
+S20_IMAGE = "sha256:cb52fe370a066143260662fc11ca639fca88fa299d38ebe4f49350de0fd429f2"
+S20_ENV = {
+    "HT_D20_GEOMETRY": "dense-0.03b",
+    "HT_D20_REPLAY_SECONDS": "133",
+    "HT_D20_AUDIT_GAP_ROUNDS": "400",
+    "HT_D20_COLDKEYS": "6",
+}
+# What this builder made from those inputs over the seeds below before the artifact knobs existed.
+S20_SHAPE_RUN_ID = "178dc81ee4269496ce988885c0d78c149d74a871cf1107d152149b28c7c97c36"
+S20_SHAPE_POLICIES_SHA256 = "f80af68a9599a96aa23b1fc534477a896950d7e4be24c3dab7c1782f14026afc"
+
+
+def test_without_the_artifact_knobs_the_s20_inputs_build_what_they_built_before(host, tmp_path):
+    # Fixed seeds and relay key stand for the run's own: the admission and audit policies carry no
+    # key, so they are run 0ef600b4's objects byte for byte, its training block differs only by
+    # the keys, and the run id and policies.json are the ones of the builder before the knobs.
+    out = tmp_path / "out"
+    (out / "secrets").mkdir(parents=True, mode=0o700)
+    roles = (
+        "owner",
+        "coord",
+        "auditor-0",
+        "auditor-1",
+        "referee",
+        *(f"cold-{i}" for i in range(6)),
+    )
+    for role in roles:
+        seed = out / "secrets" / f"{role}.seed"
+        seed.write_text(sha256_hex(f"s20 shape {role}".encode()))
+        seed.chmod(0o600)
+    relay = Keypair(bytes.fromhex(sha256_hex(b"s20 shape relay-k1"))).ss58
+    env = {**S20_ENV, "HT_D20_RELAY_PUBKEY": relay}
+
+    run = build(
+        host,
+        out,
+        image=S20_IMAGE,
+        driver="595.91.07",
+        sm_count="148",
+        exp_round="34367210",
+        env=env,
+    )
+
+    assert run.returncode == 0, run.stderr
+    manifest, _ = accepted_manifest(out)
+    s20 = RunManifestV2.model_validate_json((S20 / "manifest.json").read_bytes())
+    objects = LocalFSStore(out / "state/objects")
+    assert (
+        objects.get(manifest.network.admission_policy_hash)
+        == (S20 / "policy-admission.json").read_bytes()
+    )
+    assert (
+        objects.get(manifest.network.audit_policy_hash) == (S20 / "policy-audit.json").read_bytes()
+    )
+    keys = {"coord_pubkey": manifest.training.coord_pubkey, "auditors": manifest.training.auditors}
+    assert manifest.training == s20.training.model_copy(update=keys)
+    assert "max_refs" not in (out / "inputs/policies.json").read_text()
+    assert (manifest.run_id(), sha256_hex((out / "inputs/policies.json").read_bytes())) == (
+        S20_SHAPE_RUN_ID,
+        S20_SHAPE_POLICIES_SHA256,
+    )
+
+
+def trial_objects(parts: tuple[int, ...]) -> list[tuple[str, int]]:
+    """(sha256, size) of every object a trial publishes for references of `parts` full parts each,
+    as data/store.py put_file stores a file: one part is a plain object, more are the parts and
+    then their ht-parts-v1 index."""
+    found = []
+    for ref, count in enumerate(parts):
+        shas = [sha256_hex(f"ref {ref} part {i}".encode()) for i in range(count)]
+        found += [(sha, PART_BYTES) for sha in shas]
+        if count > 1:
+            whole = sha256_hex(f"ref {ref}".encode())
+            index = PartIndexV1(sha256=whole, size=count * PART_BYTES, parts=shas).encode()
+            found.append((sha256_hex(index), len(index)))
+    return found
+
+
+def test_an_honest_31m_trial_fits_the_s31_upload_budget_and_the_next_object_is_413(
+    host, tmp_path, monkeypatch
+):
+    # S31 Part 1: the run's build (the warm-up at 300 s, the real one at 133 s with the gap of 400
+    # and both knobs) passes its dry run, warm-up check included, and signs 8 x (512 + 1) objects a
+    # hotkey may upload per challenge_rounds window (TRN-05, D137). A 31 M trial publishes four
+    # references, state 362, ef 122 and delta 32 parts with an index each and the leaves as one
+    # plain object: 520 objects, counted by the guard the object route runs.
+    knobs = {"HT_D20_AUDIT_GAP_ROUNDS": "400", "HT_D20_MAX_REFS": "8", "HT_D20_MAX_PARTS": "512"}
+    _, real, _, second = two_builds(host, tmp_path / "build", "133", "dense-0.03b", knobs)
+    assert second.returncode == 0, second.stderr
+    report = json.loads(second.stdout[second.stdout.rindex("\n{\n") + 1 :])
+    assert all(report["checks"].values())
+    assert report["checks"]["warmup_differs_only_by_the_audit_policy_and_the_artifact_limits"]
+    built = admission_policy(real)
+    assert built.artifact_limits.upload_budget() == (4104, 4104 << 20)
+    honest = trial_objects((362, 122, 32, 1))
+    assert len(honest) == 520 and len({sha for sha, _ in honest}) == 520
+    service = load_fixture_module(*SERVICE_FIXTURE)
+    original = service.fixture.setup
+
+    def setup(*args: Any, **kwargs: Any) -> Any:
+        s = original(*args, **kwargs)
+        update = {"artifact_limits": built.artifact_limits, "challenge_rounds": 100}
+        return replace(s, admission_policy=s.admission_policy.model_copy(update=update))
+
+    monkeypatch.setattr(service.fixture, "setup", setup)
+    miner = service.HOT[0]
+    kept = b"an object the hotkey already uploaded in this window"
+    filler = [(sha256_hex(f"filler {i}".encode()), 1) for i in range(4104 - 520 - 1)]
+    with service_world(tmp_path / "world") as world:
+        n = world.network
+        assert n.join(0).status_code == 200
+        hosted = world.store.for_run(world.run_id)
+        assert hosted._services(world.run_id)[1].policy.artifact_limits == built.artifact_limits
+        with hosted._lock:
+            now = hosted._now(hosted._db)
+        # The trial, then distinct objects up to the budget, all in one window, as the route
+        # counts an upload (Admission.count_upload under the store lock); none is refused.
+        for sha, size in [*honest, *filler, (sha256_hex(kept), len(kept))]:
+            with hosted._lock:
+                hosted._services(world.run_id)[1].count_upload(
+                    miner.ss58, sha, size, now=now, charge=True
+                )
+        assert world.count("object_uploads") == 4104
+        # Over HTTP: a duplicate of the hotkey's own is free, the 4,105th distinct object is not.
+        assert put_object(n, miner, kept).status_code == 200
+        refused = put_object(n, miner, b"the 4105th distinct object of the window")
+        assert (refused.status_code, refused.json()["detail"]) == (413, "OBJECT_QUOTA")
+        with hosted._lock:
+            assert hosted._now(hosted._db) // 100 == now // 100
+
+
+def test_with_the_artifact_knobs_a_replay_of_the_warm_up_window_is_still_refused(host, tmp_path):
+    # 299 s asks the warm-up's window. The knobs make another manifest, so the warm-up guard does
+    # not fire, but the dry run finds the audit policy is the warm-up's and the build stops.
+    knobs = {"HT_D20_MAX_REFS": "8", "HT_D20_MAX_PARTS": "512"}
+
+    _, real, _, second = two_builds(host, tmp_path, "299", "dense-0.03b", knobs)
+
+    assert second.returncode == 1 and "DRY-RUN VALIDATION FAILED" in second.stderr
+    report = json.loads(second.stdout[second.stdout.rindex("\n{\n") + 1 :])
+    checks = report["checks"]
+    assert checks["artifact_limits_of_the_knobs"] and checks["warmup_same_training"]
+    assert not checks["warmup_differs_only_by_the_audit_policy_and_the_artifact_limits"]
+    assert not any((real / d).exists() for d in ("inputs", "out", "state"))
 
 
 def test_the_rebuild_with_the_measured_replay_changes_only_the_audit_window(host, tmp_path):

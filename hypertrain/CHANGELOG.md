@@ -77,6 +77,18 @@
   another `2 * lease_rounds`, up to `d_final`. Without the variable the build is unchanged: the rebuild
   of run `f3901a09` from its S17d inputs gives the same run id and byte-identical inputs, policies and
   manifest.
+- `HT_D20_MAX_REFS=R` (1..512) and `HT_D20_MAX_PARTS=P` (1..8192) of
+  `scripts/b300/d20/build_test_manifest.sh` (S31, TRN-05, D137), optional and read by every geometry:
+  the admission policy signs `ArtifactLimits.max_refs = R` and `max_parts = P`, so one hotkey uploads
+  at most `R x (P + 1)` objects and as many MiB per `challenge_rounds` window (S31: 8 and 512, 4,104
+  objects and 4,104 MiB; a 31 M trial stores 520). A sign or a leading zero is refused before
+  anything is created (exit 2), a value above the protocol bound by the first stage (exit 1, nothing
+  left). Only `admission_policy_hash` moves, and with it the manifest and the run id; with
+  `HT_D20_WARMUP_OUT` the dry run checks that the admission policy without the two fields is the
+  warm-up's (`warmup_differs_only_by_the_audit_policy_and_the_artifact_limits`). The protocol accepts
+  the fields on a production ledger: they are TEST knobs because the builder signs a test ledger only.
+  Without the variables the build is unchanged: the rebuild of run `0ef600b4` from its S20 inputs
+  gives the same run id and byte-identical inputs, policies and manifest.
 - Docs, CI, image and release workflows, Dockerfiles.
 - Eviction-tolerant core `hypertrain.elastic` (v3, not wired into the v2 challenge): leases with
   fencing tokens, saved before they are granted so that a restart never reissues one, and a

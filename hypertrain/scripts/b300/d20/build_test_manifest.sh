@@ -62,6 +62,16 @@
 # audit job still expires at min(d_final, d_audit + 2 * lease_rounds) and may be rearmed once
 # for another 2 * lease_rounds, up to d_final. Without the variable nothing changes: same
 # policies, manifest and run id.
+# HT_D20_MAX_REFS=R and HT_D20_MAX_PARTS=P (every geometry, optional; S31, TRN-05, D137): the
+# admission policy signs ArtifactLimits.max_refs = R (1..512) and max_parts = P (1..8192), so one
+# hotkey may upload at most R x (P + 1) objects and as many MiB per challenge_rounds window of
+# 100 beacons; an unset one keeps the protocol bound (512 references, 8192 parts). A sign, a space
+# or a leading zero is refused before anything is created, a value above the protocol bound by the
+# first stage, with nothing left. Only the admission policy moves, and with it the manifest and the
+# run id; without the variables nothing changes. The protocol accepts both fields on a production
+# ledger too: they are TEST knobs because this builder signs a test ledger only (the dry run's
+# ledger_mode_test). With HT_D20_WARMUP_OUT the dry run checks that the admission policy without
+# them is the warm-up's (warmup_differs_only_by_the_audit_policy_and_the_artifact_limits).
 # HT_D20_GEOMETRY=tiny-cpu: the CPU mechanism model of tests/ledger/test_escrow_v2.py setup()
 # (1 layer, d_model 8, vocab 16, seq 4, H=1 J=1, 16 samples), layout n_gpus=1, for a cpu-backend
 # TEST run whose references and audits the challenge replays on CPU.
@@ -140,6 +150,8 @@ COLDKEYS=${HT_D20_COLDKEYS:-2}
 REPLAY=${HT_D20_REPLAY_SECONDS:-}
 WARMUP=${HT_D20_WARMUP_OUT:-}
 GAP=${HT_D20_AUDIT_GAP_ROUNDS:-}
+REFS=${HT_D20_MAX_REFS:-}
+PARTS=${HT_D20_MAX_PARTS:-}
 HT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 
 case $GEOMETRY in dense-1b|dense-0.1b|dense-0.05b|dense-0.03b|tiny-cpu) ;; *) echo "HT_D20_GEOMETRY: dense-1b, dense-0.1b, dense-0.05b, dense-0.03b or tiny-cpu" >&2; exit 2 ;; esac
@@ -162,6 +174,8 @@ fi
 [[ $DRIVER =~ ^([0-9][0-9.]*|cpu-test)$ ]] || { echo "DRIVER must be digits and dots (or cpu-test)" >&2; exit 2; }
 [[ $SM_COUNT =~ ^[0-9]+$ ]] || { echo "SM_COUNT must be digits" >&2; exit 2; }
 [ -z "$EXP_ROUND" ] || [[ $EXP_ROUND =~ ^[0-9]+$ ]] || { echo "EXP_ROUND must be digits" >&2; exit 2; }
+[ -z "$REFS" ] || [[ $REFS =~ ^[1-9][0-9]*$ ]] || { echo "HT_D20_MAX_REFS must be a whole number from 1 (digits, no sign or leading zero)" >&2; exit 2; }
+[ -z "$PARTS" ] || [[ $PARTS =~ ^[1-9][0-9]*$ ]] || { echo "HT_D20_MAX_PARTS must be a whole number from 1 (digits, no sign or leading zero)" >&2; exit 2; }
 # The Python stages run from $HT, so a relative OUT_DIR would point somewhere else there.
 case $OUT in /*) ;; *) echo "OUT_DIR must be an absolute path" >&2; exit 2 ;; esac
 while [ "$OUT" != / ] && [ "${OUT%/}" != "$OUT" ]; do OUT=${OUT%/}; done
@@ -216,7 +230,8 @@ mkdir "$OUT/inputs"
 
 cd "$HT"
 uv run --no-sync python -I - "$IMAGE" "$DRIVER" "$SM_COUNT" "$OUT" "$EXP_ROUND" \
-    "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" "$ATTENTION" "$HT" "$REPLAY" "$GAP" <<'PY'
+    "$RELAY_URL" "$RELAY_PUBKEY" "$GEOMETRY" "$COLDKEYS" "$ATTENTION" "$HT" "$REPLAY" "$GAP" \
+    "$REFS" "$PARTS" <<'PY'
 import json
 import math
 import os
@@ -236,11 +251,13 @@ from hypertrain.protocol.hashing import MerkleTree, sha256_hex
 from hypertrain.protocol.jcs import canonicalize
 from hypertrain.protocol.messages import f32hex
 from hypertrain.protocol.messages import drand_round_at
-from hypertrain.protocol.messages_v2 import DEFAULT_GAP_CAP_ROUNDS, reaudit_rounds_for
+from hypertrain.protocol.messages_v2 import (
+    DEFAULT_GAP_CAP_ROUNDS, MAX_ARTIFACT_REFS, MAX_PARTS, reaudit_rounds_for,
+)
 from hypertrain.trainer.rng import rng_ctr, uniform_f64
 
 (image, driver, sm_count, out, exp_round, relay_url, relay_pubkey, geometry, coldkeys,
- attention, ht_root, replay, gap) = sys.argv[1:]
+ attention, ht_root, replay, gap, max_refs, max_parts) = sys.argv[1:]
 # The dense TEST models whose audit window comes from a measured replay (ADR 0015, ADR 0016).
 MEASURED = ("dense-0.1b", "dense-0.05b", "dense-0.03b")
 # The pin first: a count or a backend no GPU class was measured with stops the build before
@@ -255,6 +272,13 @@ try:
     pinned = class_pin("avx2", gpu, attention)
 except ValueError as error:
     sys.exit(f"HT_D20_ATTN_BACKEND={attention}: {error}")
+# An upload bound past the protocol's (TRN-05) stops the build before anything is written too.
+for knob, value, bound in (
+    ("HT_D20_MAX_REFS", max_refs, MAX_ARTIFACT_REFS),
+    ("HT_D20_MAX_PARTS", max_parts, MAX_PARTS),
+):
+    if value and int(value) > bound:
+        sys.exit(f"{knob}={value} is above {bound}, the protocol bound of ArtifactLimits")
 out_dir = Path(out)
 secret_dir, inputs = out_dir / "secrets", out_dir / "inputs"
 COLD = tuple(f"cold-{i}" for i in range(int(coldkeys)))
@@ -475,6 +499,11 @@ if geometry in MEASURED:
         audit["gap_cap_rounds"] = int(gap)
     elif needed > DEFAULT_GAP_CAP_ROUNDS:
         audit["gap_cap_rounds"] = needed
+# Absent, a bound is not written, so the policy, its digest and the run id are the ones without it.
+if max_refs:
+    policies["admission"]["artifact_limits"]["max_refs"] = int(max_refs)
+if max_parts:
+    policies["admission"]["artifact_limits"]["max_parts"] = int(max_parts)
 (inputs / "policies.json").write_bytes(canonicalize(policies, allow_float=False))
 relays = {
     "registry_version": 1, "epoch": 0, "previous_registry_hash": None,
@@ -507,7 +536,7 @@ if [ -n "$WARMUP" ] && cmp -s "$OUT/out/manifest.json" "$WARMUP/out/manifest.jso
 fi
 
 uv run --no-sync python -I - "$OUT" "$IMAGE" "$DRIVER" "$SM_COUNT" "$GEOMETRY" "$ATTENTION" \
-    "$REPLAY" "$WARMUP" "$GAP" <<'PY'
+    "$REPLAY" "$WARMUP" "$GAP" "$REFS" "$PARTS" <<'PY'
 """Dry-run: the checks POST /v2/admin/runs (store._create_run_v2) runs, minus the database."""
 import json
 import sys
@@ -528,6 +557,7 @@ out, image, driver, sm_count = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(
 n_gpus = 2 if sys.argv[5] == "dense-1b" else 1
 measured = sys.argv[5] in ("dense-0.1b", "dense-0.05b", "dense-0.03b")
 attention, replay, warmup, gap = sys.argv[6], sys.argv[7], sys.argv[8], sys.argv[9]
+refs, parts = sys.argv[10], sys.argv[11]
 # What the builder meant, from the table: a GPU class measured on sm_count, or none for a CPU run.
 gpu = "none" if sys.argv[5] == "tiny-cpu" else next(
     (n for n, c in GPU_CLASSES.items() if sm_count in c.sm_counts), None
@@ -565,6 +595,11 @@ needed = (
     None if audit.reaudit_rounds is None
     else reaudit_gap_needed(audit.lease_rounds, audit.reaudit_rounds)
 )
+limits = admission.artifact_limits
+upload_objects, upload_bytes = limits.upload_budget()
+checks["artifact_limits_of_the_knobs"] = (limits.max_refs, limits.max_parts) == (
+    int(refs) if refs else None, int(parts) if parts else None
+)
 if measured:
     checks["reaudit_rounds_of_the_replay"] = (
         audit.reaudit_rounds == reaudit_rounds_for(int(replay), audit.lease_rounds)
@@ -583,11 +618,17 @@ if warmup:
     other = RunManifestV2.model_validate_json((Path(warmup) / "out/manifest.json").read_bytes())
     mine, theirs = model.network.model_dump(), other.network.model_dump()
     checks["warmup_same_training"] = other.training.model_dump() == t.model_dump()
-    checks["warmup_differs_only_by_the_audit_policy"] = mine["audit_policy_hash"] != theirs[
-        "audit_policy_hash"
-    ] and {k: v for k, v in mine.items() if k != "audit_policy_hash"} == {
-        k: v for k, v in theirs.items() if k != "audit_policy_hash"
-    }
+    differs = "warmup_differs_only_by_the_audit_policy"
+    if refs or parts:
+        # The knobs sign their bounds in the admission policy: without them it is the warm-up's.
+        bare = limits.model_copy(update={"max_refs": None, "max_parts": None})
+        mine["admission_policy_hash"] = admission.model_copy(
+            update={"artifact_limits": bare}
+        ).digest()
+        differs += "_and_the_artifact_limits"
+    checks[differs] = mine["audit_policy_hash"] != theirs["audit_policy_hash"] and {
+        k: v for k, v in mine.items() if k != "audit_policy_hash"
+    } == {k: v for k, v in theirs.items() if k != "audit_policy_hash"}
 spec = registry.specs[0]
 checks.update(
     envelope_signature=envelope_v2.verify_envelope(raw),
@@ -631,6 +672,12 @@ print(json.dumps({
         "stop_above_seconds": stop_above if measured else None,
     },
     "warmup_run_id": other.run_id() if warmup else None,
+    "artifact_limits": {
+        "max_refs": limits.max_refs,
+        "max_parts": limits.max_parts,
+        "upload_objects": upload_objects,
+        "upload_bytes": upload_bytes,
+    },
     "pin": {
         "cpu": ref.env.pinned.cpu,
         "gpu": ref.env.pinned.gpu,

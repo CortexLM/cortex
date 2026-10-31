@@ -93,6 +93,18 @@ rearmed once for another 200 rounds, up to `d_final` [V, code read, not run]. Wi
 unchanged: the rebuild of `f3901a09` from its S17d inputs gives the same run id and byte-identical inputs, policies
 and manifest [V].
 
+`HT_D20_MAX_REFS=R` (1..512) and `HT_D20_MAX_PARTS=P` (1..8192) (S31, TRN-05; optional, any geometry) make the
+admission policy sign `ArtifactLimits.max_refs` and `max_parts`: one hotkey may then upload `R x (P + 1)` objects and
+as many MiB per window of `challenge_rounds` (100) beacons, past which the object route answers 413 `OBJECT_QUOTA`.
+A 31 M trial stores 520 objects (four references: state 362, ef 122 and delta 32 parts with an index each, the
+leaves one plain object), so S31's 8 and 512 (4,104 objects) hold it [V, in-process]. A value with a sign or a
+leading zero, or above the protocol bound, is refused with nothing left [V]. Only `admission_policy_hash` moves, so
+the run id; the dry run prints `artifact_limits` and checks them (`artifact_limits_of_the_knobs`), and with the
+warm-up `warmup_differs_only_by_the_audit_policy_and_the_artifact_limits` replaces the warm-up check: a knobbed
+build never equals the warm-up's manifest, so at 299 or 300 s it is the dry run that stops it [V]. Without the
+variables the rebuild of `0ef600b4` from its S20 inputs gives the same run id and byte-identical inputs, policies
+and manifest [V].
+
 About 5 s for `dense-0.03b` [V] (11 s for `dense-0.1b` [V], 20 s on a host at load 338 [V]). Each build prints
 `"param_count": 31462656` and `"init_state_hash": "e372a68e…0aa6"` for `dense-0.03b` (44045568 and
 `9cbe3ee9…f897` for `dense-0.05b`, 100676352 and `be9b7bd6…28f8` for `dense-0.1b`); anything else means the row
