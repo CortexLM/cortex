@@ -369,3 +369,41 @@ def test_a_run_with_nothing_to_pay_is_not_built_by_the_weights_call(
     # is neither built nor booked as skipped.
     assert answer["weights"] == {E.HOT.ss58: 1.0 * UNITS}
     assert skipped(idle) == []
+
+
+def dangling_at_commit(store: ChallengeStore) -> None:
+    """The next epoch answer of `store` fails at COMMIT and SQLite keeps the transaction open,
+    as with SQLITE_BUSY: the answer leaves a deferred foreign key dangling."""
+    store._db.execute("PRAGMA foreign_keys=ON")
+    store._db.executescript("""
+      CREATE TABLE answered(epoch INTEGER PRIMARY KEY);
+      CREATE TABLE answer_ref(
+        epoch INTEGER REFERENCES answered(epoch) DEFERRABLE INITIALLY DEFERRED);
+      CREATE TRIGGER dangling AFTER INSERT ON weights_runs
+        BEGIN INSERT INTO answer_ref VALUES(NEW.epoch); END;
+    """)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="_tx: no ROLLBACK after a failed COMMIT (Lens N1, HW4-M4)",
+)
+def test_a_store_whose_commit_fails_is_left_outside_its_transaction(hosted) -> None:
+    # Given: three healthy children; a's answer COMMIT fails and SQLite keeps the transaction.
+    for name in "abc":
+        hosted.host(hosted.child(name), name)
+    a = hosted.root._children["a"]
+    dangling_at_commit(a)
+    with pytest.raises(sqlite3.IntegrityError):
+        hosted.root.weights(0, hosted.at(20), 1)
+    # Then: a rolled back what its answer wrote and holds no open transaction, ...
+    assert not a._db.in_transaction
+    assert [hosted.paid(name) for name in "abc"] == [0, UNITS, UNITS]
+    assert weights_runs(a) == [] and weights_runs(hosted.root) == []
+    # ... so once the cause is gone the replay pays a, merges b and c, and pays each once.
+    a._db.execute("DROP TRIGGER dangling")
+    answer = json.loads(hosted.root.weights(0, hosted.at(20), 2))
+    assert answer["weights"] == {E.HOT.ss58: 3.0 * UNITS}
+    assert [hosted.pays(name) for name in "abc"] == [1, 1, 1]
+    assert a.healthy()
