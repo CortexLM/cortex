@@ -215,6 +215,7 @@ HOLD_RELAY = (
 )
 PLAN_FIRST = PLAN + "test_a_signed_first_window_moves_every_bound_that_waits_on_the_first_window"
 PLAN_MISSED = PLAN + "test_a_round_whose_audit_window_passed_without_jobs_is_marked"
+WINDOW_GAP = LIVE_TESTS + "test_open_refuses_a_gap_below_the_signed_first_window"
 LANE_TERMS = "            self.max_queued_jobs, len(set(training.auditors))\n"
 WINDOW_RANGE_T3 = (
     "            self.absolute_rounds() <= self.first_window_rounds <= self.gap_cap()\n"
@@ -910,5 +911,19 @@ TABLE: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
         "        return self.d_audit + self.first_window_rounds + 2 * self.lease_rounds\n",
         "        return self.d_audit + 4 * self.lease_rounds\n",
         (PLAN_FIRST, HOLD_RELAY),
+    ),
+    (
+        "the operator tool opens a round narrower than the signed first window",
+        LIVE,
+        "    if audit.first_window_rounds is not None and gap < audit.first_window_rounds:\n",
+        "    if False:\n",
+        (WINDOW_GAP + "[253-False]",),
+    ),
+    (
+        "the operator tool refuses a gap of exactly the signed first window",
+        LIVE,
+        "    if audit.first_window_rounds is not None and gap < audit.first_window_rounds:\n",
+        "    if audit.first_window_rounds is not None and gap <= audit.first_window_rounds:\n",
+        (WINDOW_GAP + "[254-True]",),
     ),
 )
