@@ -10877,10 +10877,10 @@ class ChallengeStore:
 
         # The beacon gate is judged once, here, before the replay: a replay keeps the pusher out
         # for minutes, and a gate judged after it refused on the lag the call itself made (S21).
-        # The round it passes at is the round the finalize settles at. A round already finalized
-        # is answered from its records, without the gate, as it always was. The gate's pin is
-        # rolled back here and written with the round, so a finalize refused after its replay
-        # leaves nothing, as one transaction did (FIN-04).
+        # The round is closed where the replay ends (below), never judged again. A round already
+        # finalized is answered from its records, without the gate, as it always was. The gate's
+        # pin is rolled back here and written with the round, so a finalize refused after its
+        # replay leaves nothing, as one transaction did (FIN-04).
         now: int | None = None
         pins: list[tuple[Any, ...]] = []
         with self._tx():
@@ -10910,7 +10910,7 @@ class ChallengeStore:
                     self._db.execute("ROLLBACK TO finalize_gate")
                     self._db.execute("RELEASE finalize_gate")
                 if now > envelope_v2.parse_envelope(raw).exp_drand:
-                    raise ExpiredError("envelope expired")  # at the round it settles at
+                    raise ExpiredError("envelope expired")  # at the round the gate judges
         self._prime_finality_replay_v2(run_id, w, raw)
         with self._tx():
             manifest = self._run_v2(run_id)
@@ -10969,6 +10969,12 @@ class ChallengeStore:
                 raise ChallengeError(
                     422, "finalized included set differs from full accepted authority"
                 )
+            # Closed, vested and accepted by the ledger at the round the replay ended at, as a
+            # healthy view holds it then, not at the gate's round, the replay's duration earlier
+            # (D157). The lag the replay made is the call's own, so nothing refuses on it.
+            beacon = manifest.training.beacon
+            emitted = (int(self.clock()) - beacon.genesis_time) // beacon.period + 1
+            now = max(now, self._now(self._db), emitted - MAX_LAG_ROUNDS)
             final_hash = body_digest(model.model_dump(mode="json"))
             settled = settle(status, model, final_hash)
             self._close_round_v2(
