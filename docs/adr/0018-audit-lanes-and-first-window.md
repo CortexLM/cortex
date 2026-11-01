@@ -422,8 +422,9 @@ PYTHONPATH=<tree>/hypertrain/src TMPDIR=<scratch>/t PYTHONDONTWRITEBYTECODE=1 <s
   digests and run ids are byte-identical for the two fixtures and the example ("DIGEST-SETS-IDENTICAL"). On the
   `f3901a09` policy dict, the schema alone accepts `max_running_jobs` 3 (digest `83d5c114…`) and
   `first_window_rounds` 400 (digest `5e426ac7…`), both of which the pristine schema refuses. That policy has no
-  gap cap, so `validate_training` would refuse F = 400 on it; the reader's field bound for the lanes was
-  `le=32`, not `Positive`. [V]
+  gap cap, so `validate_training` would refuse F = 400 on it. The reader's bound for the lanes follows the
+  schema, `Positive` (up to 2^53 - 1): the cap of 32 is applied by `validate_training` alone, in TEST-only,
+  as `min(max_queued_jobs = 32, listed auditors)`. [V]
 - `hash_consequences.py --src <tree>` on both trees: the v1 `example_manifest` is equal, and the hash values are
   those of Part 4 [V].
 
@@ -752,3 +753,5 @@ outside lanes / auditors / first window. Two limits are outside T3's scope, and 
   builder knobs, the builder and service refusals, the planner's `AUDIT_WINDOW_MISSED` branch
   (`exit_v2.py:284`) and the `validate_training` rule mutants are designed, not probed.
 - Nothing ran on s100, a node, a GPU, R2 or on-chain.
+
+- Commit hygiene: the `Refs:` footer is missing from `e35e06fb` (Lens m-3); history is not rewritten. The commits after it carry it.
