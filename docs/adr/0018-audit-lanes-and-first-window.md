@@ -31,7 +31,8 @@
 
 T3 reads two values from the signed audit policy, and proposes both as TEST-only for now (open question 7):
 - **Lanes: the existing `max_running_jobs`.** It is widened from `Literal[2]` to `Positive` (1 to 2^53 - 1), with
-  at most 32 checked in `validate_training`, and `lease_v2` reads it in place of its literal `>= 2`.
+  the cap `min(32, listed auditors)` enforced by `validate_training` only (the schema itself accepts up to
+  2^53 - 1, so 33 passes the schema and is refused there), and `lease_v2` reads it in place of its literal `>= 2`.
 - **First window: a new optional field, `first_window_rounds`.** It is omitted from the canonical body when it is
   absent, and absent means today's `absolute_rounds()`. `schedule_audits_v2` reads it, and so does the unowned
   code that copies the window: the exit planner's `Schedule.absolute` (with `audits_end`, which assumes it) and
@@ -552,6 +553,7 @@ service refusals, the `validate_training` rule mutants or the re-anchors: the co
 
 | Behaviour | Test, and the existing file it joins | Fails on `dc014508` because | Mutant it must kill |
 | --- | --- | --- | --- |
+| First window relayed by the reapers (Lens m-1): a store-level test that reaps a round through `_reap_round_v2` and holds a contest through `_contest_hold_v2` with F > 2 leases and a signed F, asserting the `Schedule` they build carries `audit.first_window()` | store level, by the reaper, not a hand-built `Schedule` (the "planner follows" test cannot kill them) | `Schedule.absolute` stays at `absolute_rounds()` | Lens mutants M17 and M18 (drop the relay in `_reap_round_v2` / `_contest_hold_v2`) |
 | Lanes = 3 with four listed auditors: three leases run, the fourth auditor gets 204 (probe) | store level with `hypertrain/tests/challenge/audit_lease_fixture_v2.py`, with fresh auditor keys (a first draft of the probe reused the fixture's referee and relay seeds, `test_service_network_v2.py:62-63`) | `literal_error`: 3 is not 2 | `lease_v2` keeps a literal `>= 2` (killed) |
 | Lanes = 1: the second auditor gets 204 (probe) | same, parametrised | `literal_error` | same (killed) |
 | Lanes = 2, as every current policy signs: the third auditor gets 204 | the existing `hypertrain/tests/ledger_invariants/test_audit.py:99` | passes on both (the control) | `aud-lease-store-cap-of-three` (`mutants_audit.py:119`), re-anchored to `>= policy.max_running_jobs`, still killed by `>= 3` |
