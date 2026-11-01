@@ -596,3 +596,48 @@ Every duration is to estimate unless a file gives it.
   depends on it.
 - The three unmerged lots together (two drafts numbered 0017, two edits of `miner/core.py`): no merge tried.
 - Nothing in this lot ran on s100, a node, a GPU or R2.
+
+## Annex A. Already delivered without the train
+
+Every commit below is an ancestor of `dc014508` [V, `git merge-base --is-ancestor`], and the whole set is on
+TEST since 31/10 12:53Z (server `sha256:3bb5db0f…`, code `f357e61`; `agents/forge.md:45`) [A].
+`implementation_hash` is `24fbe36d…c185ce` under the pins of both s100 runs on twelve trees, `708414d8`,
+`2b3f90bf`, `e5900c3b`, `2774630f`, `ed5a6481`, `922c61c`, `8893863`, `b3af43f`, `a3fc635`, `f357e61`,
+`8e62065` and `dc014508` [V, measured 2026-11-01]. The hotfix numbers are those of
+`livrables/forge/2026-10-30_preuve-hors-chaine.md:17`.
+
+| Delivery | Commits | What it changed | Hash evidence of its own report |
+| --- | --- | --- | --- |
+| hotfix 1 (`v3-audit-freshness-pause`) | `02308845`, `9e610c04`, `2b3f90bf` | an audit result and its completion pass the freshness gate up to `RESULT_PAUSE_ROUNDS` (50) more rounds behind while their lease runs; the auditor CLI re-posts a 503 every 3 s until the lease deadline | REPORT row, read and not recomputed according to Lens (journal-31 `:196`); measured unchanged here |
+| hotfix 2a (`hotfix-lease-pause`) | `e71da1f`, `0efeaa0`, `eb6e8b4`, `870c2fa`, `e5900c3b` | `_fresh_v2` judges a tolerated view at `max(now, emitted - 2)`; the lease and the audit execute are tolerated within the same cap, on a running run without service admission | 48 owned ASTs identical (`livrables/forge/2026-10-30_hotfix-lease-pause/REPORT.md:193-197`); `24fbe36d…` live after the swap (`…/REPORT-S21.md:24`) |
+| beacon ops (`v3-ops-beacon-image`) | `e603224`, `adf745a`, `1198de3`, merged at `2774630` | `challenge_image.sh beacon-image`: the swap also moves the TEST beacon, whose old image refilled the oldest round first | no `src` change (`hotfix-lease-pause/REPORT.md:42-43`) |
+| hotfix 4 (`hotfix-weights-retired-child`) | `b1f6e06`, `6489127`, `b2c05bd`, `dae1510`, `31a0002`, `a6981ce`, merged at `2774630` | `get_weights` skips a retired hosted run (`weights-skipped`) instead of a 409, and commits an epoch answer in every hosted store or in none; `31a00026` adds the 0ef600b4 golden | `24fbe36d…` unchanged (`…/reports/hotfix-weights-retired-child-2-REPORT.md:163`) |
+| hotfix 5, variant A (`hotfix-finalize-freshness`) | `54bbc9c`, `e34d513`, `ed5a648` | finding 4, variant A | `24fbe36d…`, owned set untouched (`…/2026-10-30_hotfix-finalize-freshness/REPORT.md:73-76`) |
+| beacon push outside the lock | `19ae76e`, `922c61c`, then `0faef73`, `8893863` (tests) | finding 7: a busy child stages a verified round instead of waiting for its lock | 48 owned ASTs identical, `24fbe36d…` (`…/2026-10-30_beacon-push-outside-lock/REPORT.md:186-194`) |
+| v3-weights-hardening | `b0182a7`, `04b250c`, `651c64e`, `f3d6711`, `05dbd89`, `fc287a2`, `433effe`, `b3af43f` | `_tx` rolls back a transaction whose COMMIT raised (`store.py:637-644`); pins of hotfix 4 and of the beacon lot; the two strict xfails of finding 5 | owned set and ASTs identical, `24fbe36d…` (`…/2026-10-31_v3-weights-hardening/REPORT.md:414-423`) |
+| pause witness without built services | `fadf237`, `f3eb24e`, `730b5ee`, `130117b`, `7fb4e53`, `f357e61`, `7d63ed1`, `8e62065` | `push_beacon` witnesses the pause of every v2 run, its services built or not; after a restart a pause used to leave no `beacon-pause` record and silent members were booked MINER instead of WAIVED. ADR 0011 Part 1 updated; the rule is Part 8 decision 5 (`0011-audit-integrity.md:152-156,1400-1403`) | `24fbe36d…` at `b3af43f`, `a3fc635`, `8e62065` (`…/2026-10-31_beacon-pause-witness-explain/REPORT.md:160-169`) |
+| v3-ledger-small-fixes | `35a8a22`, `6378ec2`, `ccee05f`, `416318d`, `b3aede9`, `bc306dc`, `a3fc635` | the operator tool's gap cap pinned at the production default; ES-07 `UNKNOWN_RECIPIENT`; RL-01 `ESCROW_QUOTA`, the owner checked first; TRN-05, a budget of objects and bytes per hotkey and window (413 `OBJECT_QUOTA`); ADR 0014 Part 5 | `7af135ca…`, the example pin, unchanged (ADR 0014 `:493-512`); `24fbe36d…` measured at `a3fc635` here. Its REPORT names `b92f3b9`, `8facda7` and `c0bbdfb`, rebuilt before the merge; `a3fc635`'s tree equals `c0bbdfb`'s |
+
+## Annex B. Backlog, not in the train
+
+1. **An unreadable manifest is not cached** (Lens minor on `f357e61`,
+   `livrables/lens/redteam-live/delta-verdicts.md:689`; backlog by D141, journal-01 `:133`).
+   `_witness_unbuilt_v2` caches a run's beacon clock only on success or on a `ChallengeError`, and
+   `MalformedEnvelope` is a `ValueError`, so a permanently malformed manifest is re-read and journaled in a
+   `BEGIN IMMEDIATE` transaction on every push, about every 3 s (`store.py:7301-7308`, `:7353-7360`; commit
+   `130117b`) [V by reading]. The cost is bounded and untested. The names involved are not owned, so the fix
+   is hash-neutral [V]. The brief calls it m-1 and gives the commit as "130fd…": it is `130117b`.
+2. **TRN-05 is only an anti-abuse ceiling on the pinned runs.** Without `max_refs` and `max_parts` the budget
+   is 4,194,816 objects and about 4 TiB per hotkey and window (ADR 0014 `:333-350`; Lens's reserve,
+   `delta-verdicts.md:686`) [A]. The s100 runs pin admission policy `7a881925…` without the bounds [V, the
+   fixtures load with both `None`], and S31 was built without the knobs because the GPU image `cb52fe37`,
+   built before TRN-05, refuses the new fields (`extra="forbid"`; journal-01 `:138`) [A]. A disk quota that
+   bites needs new miner and server images and a new run; it is not an owned body.
+3. **ADR 0015's R2 assumption is to revise.** Its budget takes R2 from a node at 20 MB/s on one stream and
+   100-144 MB/s on eight (`0015-intermediate-dense-test-model.md:188`, prerequisite f at `:346`). The 28/10
+   source gives PUT 101-122 and GET 140-144 MB/s on eight streams and 19.2-26.7 MB/s on one; S31 measured
+   4.2-4.9 and 19-56 MB/s on the unhinted bucket and 21.8-22.7 MB/s on one stream with the APAC hint (finding
+   8) [A]. D147 asks for the revision (journal-01 `:156`); this record does not edit ADR 0015.
+4. **Seen in S31, Forge's backlog**: `beacon-pause` records keep growing by about 10 a minute per store while
+   nothing runs, and the admission route answers 503 "beacon infrastructure paused" now and then while idle
+   (`REPORT-S31.md:295,457`) [A]. Not investigated here.
