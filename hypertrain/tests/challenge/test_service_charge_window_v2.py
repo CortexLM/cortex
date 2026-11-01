@@ -1,20 +1,21 @@
 """A service charge on a hosted store must wait for another thread's transaction, not be refused.
 
-`_service_charge_v2` refuses with 409 SERVICE_CHARGE_REQUIRES_COMMITTED_TRANSACTION when the
-store connection is in a transaction, and reads that without the store lock: a transaction any
-other thread holds on the connection refuses the charge. Since hotfix 4 the root's weights answer
-keeps every hosted (child) store inside its answer transaction until the root commits
-(`ChallengeStore._epoch_answer`), so a capacity outer or genesis charge landing in that window is
-refused, and its attempt 1 is burned: `request.json`, or the genesis-resource record, is written
-before the charge, and the retry is refused as ATTEMPT_RECORDED.
+`_service_charge_v2` refuses with 409 SERVICE_CHARGE_REQUIRES_COMMITTED_TRANSACTION a charge made
+inside its caller's own transaction. Until ADR 0017 T2 it read `in_transaction` without the store
+lock, so a transaction any other thread held on the connection refused the charge too, and burned
+its attempt 1: `request.json`, or the genesis-resource record, is written before the charge, and
+the retry is refused as ATTEMPT_RECORDED. Since hotfix 4 the root's weights answer keeps every
+hosted (child) store inside its answer transaction until the root commits
+(`ChallengeStore._epoch_answer`); a beacon push, or any request, holds one too. The server cannot
+reach the outer charge (`aggregate_v2` answers 503 SERVICE_RUNTIME_NOT_ENFORCED before
+`_capacity_outer_v2`), but the operator continuation `scripts/network_service_proof.py`
+`decoder_continue` runs the genesis charge on a production store it also serves over HTTPS, where
+the pusher's transactions land.
 
-The window is not specific to hotfix 4: any transaction another thread holds on the connection
-(a beacon push, any request) refuses the charge. The server cannot reach the outer charge
-(`aggregate_v2` answers 503 SERVICE_RUNTIME_NOT_ENFORCED before `_capacity_outer_v2`), but the
-operator continuation `scripts/network_service_proof.py` `decoder_continue` runs the genesis
-charge on a production store it also serves over HTTPS, where the pusher's transactions land.
-The fix (read the guard under the store lock, or drop it) is in an owned body of the
-implementation hash, so it belongs to the hash train (founder, 2026-10-31).
+The guard is now read under the lock and released; `_tx` then takes the lock again, outermost for a
+caller that does not hold it, so in a hosted store it writes a round staged while the charge waited
+before its BEGIN, and one staged while the charge ran after its COMMIT (the last two window tests).
+The fix is an owned body: it moves `implementation_hash` (hash train F14, ADR 0017 finding 5).
 """
 
 from __future__ import annotations
@@ -48,14 +49,6 @@ network = fixture.network
 tiny = fixture.tiny
 
 WAIT = 10  # seconds: far above a charge that does not wait, far below a test timeout
-# The window tests stay strict xfails until the hash moves (Principal SN100 D128).
-WINDOW_IS_A_REFUSAL = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="_service_charge_v2 reads in_transaction without the store lock: a transaction of "
-    "another thread refuses the charge and burns attempt 1; the fix is an owned body "
-    "[hash train F14, ADR 0017 finding 5]",
-)
 
 
 @pytest.fixture
@@ -101,7 +94,7 @@ def in_thread(
 def outer_units(store: ChallengeStore, run_id: str) -> int:
     """What `_capacity_outer_v2` charges for round 0: the reservation's outer work units."""
     estimate = store._service_boundary_v2(run_id, 0)
-    if estimate is None:  # not an AssertionError: the strict xfail must not absorb it
+    if estimate is None:
         pytest.fail("round 0 has no service reservation")
     return int(estimate["outer_work_units"])
 
@@ -129,7 +122,6 @@ def outer_charge(store: ChallengeStore, run_id: str, units: int) -> tuple[str, d
     }
 
 
-@WINDOW_IS_A_REFUSAL
 def test_a_charge_in_the_weights_answer_window_of_its_store_waits_and_is_granted(
     hosted, monkeypatch
 ):
@@ -151,7 +143,6 @@ def test_a_charge_in_the_weights_answer_window_of_its_store_waits_and_is_granted
     weights, answered = in_thread(root.weights, 0, beacon.genesis_time + 19 * beacon.period, 1)
     charger: threading.Thread | None = None
     try:
-        # Controls fail as such, not as the expected AssertionError of the strict xfail.
         if not in_window.wait(WAIT):
             pytest.fail(f"the weights answer never reached the merge: {answered!r}")
         if not child._db.in_transaction:
@@ -196,7 +187,6 @@ def genesis(tiny):
     return store, manifest, int(estimate["outer_work_units"])
 
 
-@WINDOW_IS_A_REFUSAL
 def test_a_genesis_charge_during_a_beacon_push_of_its_store_waits_and_is_granted(
     genesis, monkeypatch
 ):
@@ -218,7 +208,6 @@ def test_a_genesis_charge_during_a_beacon_push_of_its_store_waits_and_is_granted
     pusher, pushed = in_thread(store.push_beacon, fixture.service.fixture_beacon(number))
     charger: threading.Thread | None = None
     try:
-        # Controls fail as such, not as the expected AssertionError of the strict xfail.
         if not in_push.wait(WAIT):
             pytest.fail(f"the push never reached its transaction: {pushed!r}")
         if not store._db.in_transaction:
@@ -255,7 +244,6 @@ def test_a_genesis_charge_during_a_beacon_push_of_its_store_waits_and_is_granted
     ]
 
 
-@WINDOW_IS_A_REFUSAL
 def test_a_charge_during_a_forwarded_push_waits_and_the_round_forwarded_meanwhile_is_written(
     hosted, monkeypatch
 ):
@@ -290,7 +278,6 @@ def test_a_charge_during_a_forwarded_push_waits_and_the_round_forwarded_meanwhil
     pusher, pushed = in_thread(root.push_beacon, fixture.service.fixture_beacon(first))
     charger: threading.Thread | None = None
     try:
-        # Controls fail as such, not as the expected AssertionError of the strict xfail.
         if not in_push.wait(WAIT):
             pytest.fail(f"the forwarded push never reached its transaction: {pushed!r}")
         if not child._db.in_transaction:
@@ -326,7 +313,6 @@ def test_a_charge_during_a_forwarded_push_waits_and_the_round_forwarded_meanwhil
     assert child._now(child._db) == second and not child._staged_beacons
 
 
-@WINDOW_IS_A_REFUSAL
 def test_a_charge_behind_a_lock_holder_checks_its_deadline_with_the_round_staged_meanwhile(hosted):
     """A request that holds the store lock around its transaction (`create_run_v2`,
     `_aggregate_flight_v2`) writes no staged round when it ends: its `_tx` is not outermost. A
@@ -348,7 +334,6 @@ def test_a_charge_behind_a_lock_holder_checks_its_deadline_with_the_round_staged
     holder, held = in_thread(hold)
     charger: threading.Thread | None = None
     try:
-        # Controls fail as such, not as the expected AssertionError of the strict xfail.
         if not holding.wait(WAIT):
             pytest.fail(f"the holder never opened its transaction: {held!r}")
         root.push_beacon(fixture.service.fixture_beacon(late))
