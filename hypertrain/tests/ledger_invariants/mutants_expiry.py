@@ -47,6 +47,10 @@ ATOMIC = "tests/ledger_invariants/test_finality_2.py::"
 PIN_REFUSED = ATOMIC + "test_a_finalize_refused_after_its_replay_leaves_no_pin_of_its_gate"
 PIN_SETTLED = ATOMIC + "test_a_settled_finalize_keeps_the_one_pin_of_its_gate"
 CANNOT_SETTLE = ATOMIC + "test_finalize_refuses_a_round_that_may_not_settle_and_writes_nothing"
+BOUNDARY = (
+    "tests/challenge/test_capacity_outer_v2.py::"
+    "test_prepared_profile_opening_metadata_without_tensor_calls[final-honest]"
+)
 FIRST_GATE = (
     "tests/challenge/test_retire_round_v2.py::"
     "test_a_retired_round_answers_409_round_retired_to_new_work[finalize]"
@@ -357,6 +361,15 @@ MUTANTS = [
         "new": 'now = self._fresh_v2(manifest, f"finalize:{w}:{self._now(self._db)}:again")\n',
         "tests": [S21_REPLAY],
         "why": "the gate is judged after the replay, on the lag the call's own replay made (S21).",
+    },
+    {
+        "id": "exp-finalize-gates-a-service-boundary",
+        "invariants": ["FIN-23"],
+        "path": STORE,
+        "old": "                boundary is None\n                and not self._db.execute(\n",
+        "new": "                not self._db.execute(\n",
+        "tests": [BOUNDARY],
+        "why": "a service-admitted finalize meets the beacon gate before its boundary refuses it.",
     },
     {
         "id": "exp-finalize-pins-its-gate-at-entry",
